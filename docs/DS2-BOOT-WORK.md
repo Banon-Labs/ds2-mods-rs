@@ -121,11 +121,88 @@ five are on a storage object nothing else is touching and three are on a network
 else is touching. The lower bound for the same work is
 `max( t(0x05) + t(0x38), t(0x20) + t(0x39) + t(0x44) )`.
 
-**What is not established:** whether either service serialises its own queue internally, and
-whether `0x38 SaveSystemData` depends on the result of `0x05 SteamLoadSystemData` (it plausibly
-writes back what `0x05` read). Both are answerable — the first by reading the two service classes,
-the second by reading what `0x38`'s slot 8 sources its buffer from. Neither has been read yet, and
-the overlap claim above is a *shape*, not a licence to reorder anything.
+Both of the questions that gated that claim have now been read out of the binary. The answers
+narrow it: **within-storage overlap is impossible, cross-chain overlap survives.** See below.
+
+## The storage service is a one-request-at-a-time machine, and the binary enforces it
+
+`[GameManagerImp + 0xb8]` is **`SaveLoadSystem`** (vtable `0x1410da4b8`, constructor `0x1402e5f30`).
+Its own constructor spawns nothing; the asynchrony lives one layer down, in the `SaveLoad2`
+namespace at `0x140a8xxxx`.
+
+`SaveLoadSystem` holds a **`SaveLoad2::SLSessionManager`** at `+0x38`. That manager
+(`0x140a8ba40`) is built with three empty slots and fills them once, in `0x140a8c490`:
+
+| field | what goes in it |
+| --- | --- |
+| `mgr+0x40` | **one thread**, created by `0x14084ba00` with a `0x4000` stack and the literal name **`"SLSession"`** |
+| `mgr+0x48` | **one `SLSessionRunnable`** (constructor `0x140a900c0`) |
+| `mgr+0x50` | a `DLLifecycleAdapter<DLKR::DLPlainLightMutex>` — one mutex |
+
+One runnable, one thread, one mutex. Not a pool.
+
+The interlock is above that, in `SaveLoadSystem` itself. Every start entry point opens with the
+same three lines — `0x1402e72c0` (`0x05 SteamLoadSystemData`'s start) and `0x1402e7170`
+(`0x57 LoadProfile`'s) are the *same function* but for the request kind handed to `0x140a8a250`,
+`0x07` against `0x1d`:
+
+```text
+if ([this+0x38] == 0)                    return false;   // no session manager
+if ([this+0x08] != 0 || [this+0x0c] != 0) return false;   // BUSY -- refuse
+... build the request on [this+0x30], hand it to [this+0x38] via 0x140a89820 ...
+```
+
+And the pollers read that same `+0x08` word, each accepting a different set of values:
+`0x1402e6230` (LoadProfile's) takes `(state-2) & ~2 == 0`, i.e. `{2, 4}`; `0x1402e67f0`
+(SaveSystemData's) tests `bt 0x6a, state`, i.e. `{1, 3, 5, 6}`.
+
+**So a second storage request issued while one is outstanding is not a race — it is refused, and
+returns false.** `0x05` and `0x38` cannot overlap each other, and no hook can make them.
+
+## `0x38` really does consume what `0x05` read
+
+They share more than the service. Both reach the savedata block at
+`[[GameManagerImp + 0xa8] + 0xd8]`:
+
+* `0x05 SteamLoadSystemData`'s update (`0x1400fbdb0`, a 13-case jump table on its phase) reads
+  `[block + 0x1370]` to decide whether there is any system data to load at all, and takes its
+  terminal phase when that byte is zero.
+* `0x38 SaveSystemData`'s enter (`0x1400fc3d0`) writes *from* that block, using `[block + 0x1368]`
+  as the slot index into `0x1f0`-stride records and writing `[block + 0x1360]`.
+
+Read, then write, on one buffer, through a service that accepts one request at a time. **The
+storage chain must stay in order.**
+
+## What survives: the two chains are on different OS threads
+
+The game creates 15 named threads (`0x14084ba00`, 15 call sites). Two of them matter here:
+
+| thread | stack | created in |
+| --- | --- | --- |
+| `SLSession` | `0x4000` | `0x140a8c490` — the storage worker |
+| `NexusRevolution Socket` | `0x10000` | `0x140a69820` — the network worker |
+
+Different objects, different workers, no shared pool. `0x44 Information`'s update (`0x1400ff710`)
+touches `[GameManagerImp + 0x22f0]` and nothing else; `0x39 GameServerLogin`'s start and poll
+(`0x1400f9820` / `0x1400f9940`) likewise. Nothing on the network path was seen reaching
+`SaveLoadSystem` or the savedata block.
+
+So the achievable shape is **not** "five steps at once". It is:
+
+```
+storage:  0x05 SteamLoadSystemData ──► 0x38 SaveSystemData          (ordered, forced)
+network:  0x20 SteamNetworkCheck ──► 0x39 GameServerLogin ──► 0x44 Information
+                                                             (ordered, logically)
+floor = max(storage chain, network chain)   instead of   sum of all five
+```
+
+The network chain is inherently ordered too — you cannot fetch server information before logging
+in — so nothing is lost by leaving it alone. The whole available win is running the two chains
+*against each other* rather than end to end.
+
+**Still not established:** whether the network service has its own single-request interlock (it
+does not matter for the shape above), and whether anything deeper in the network call tree reaches
+storage. Only the three entry points named above were walked, not the service's own call graph.
 
 ## Skippable, real, and what already skips it
 
