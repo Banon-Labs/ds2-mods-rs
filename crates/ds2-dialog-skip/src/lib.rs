@@ -1,73 +1,70 @@
-//! Answer DARK SOULS II's title-flow message boxes the way a button press answers them.
+//! Stop DARK SOULS II's title-flow notice boxes from ever being created.
 //!
-//! `ds2-intro-skip` removes the three boot screens; the flow then stops on message boxes that
-//! wait for input, so the title menu still costs the player several presses. This crate presses
-//! them. `docs/DS2-TITLE-FLOW.md` carries the full trace.
+//! `ds2-intro-skip` removes the three boot screens; the flow then stops on message boxes that wait
+//! for input, so the title menu still costs the player several presses. This crate removes the
+//! boxes. `docs/DS2-TITLE-FLOW.md` carries the full trace.
 //!
-//! # Writing one byte IS the button press
+//! # One `enter`, and the box is simply never created
 //!
-//! Six classes draw these boxes and **all six share one `update`**,
-//! `FeSubStateCommonWindowBase::v3` at [`ds2_rva::FE_DIALOG_UPDATE`]. Reading it settles the whole
-//! design, because on the frame a button is pressed its only effect is a store into the result
-//! byte at `+0x31`:
+//! Six classes draw these boxes and **all six funnel through one `enter`**,
+//! `FeSubStateCommonWindowBase::v1` at [`ds2_rva::FE_DIALOG_ENTER`] -- including the two that
+//! override `v1`, which format their message and then `call 0x140104db0` to do the showing. That
+//! function is the only place a title message box comes into existence, so it is the only place one
+//! can be prevented instead of dismissed.
 //!
-//! ```text
-//! if (input_pressed(ui)) {
-//!     if ((int16)this->options < 0)      this->result = 1;   // one-button box
-//!     else if (highlighted is confirm)   this->result = 2;
-//!     else                               this->result = 1;
-//! } else if (this->timeout > 0 && this->elapsed >= this->timeout) {
-//!     this->result = 1;                                      // shipped auto-close
-//! }
-//! switch (this->result) {                                    // dispatch, reads nothing else
-//!     case 0: return;                                        // still waiting
-//!     case 1: this->vtable[8](this); break;
-//!     case 2: this->vtable[9](this); break;
-//! }
-//! close_window(ui); this->phase = 2;
-//! ```
+//! The detour returns without calling the original, and writes the state the game itself leaves
+//! such a box in once closed: result `1`, phase `3`.
 //!
-//! The dispatch consults the result byte and **nothing else about the press**. So this crate
-//! stores that byte and lets the game's own dispatch run: the close, the animation, the phase
-//! transition and the handler call are all the game's, unmodified. Nothing here reimplements a
-//! transition, and nothing here closes a window it did not open.
+//! # Why skipping `enter` does not leak a window
 //!
-//! # The answer is computed, not chosen
-//!
-//! `+0x12` is a **signed** option count. Negative means a one-button acknowledgement box, where
-//! the game itself will only ever produce `1`; non-negative means a real choice, where a press on
-//! the affirmative produces `2`. So the value to write is a function of the object:
+//! `leave` closes the window **only when the phase is 1**:
 //!
 //! ```text
-//! result = if (int16)this->options < 0 { CANCEL } else { CONFIRM }
+//! if (this->phase == 1) { this->vtable[10](this); close_window(ui); }
+//! this->phase = 0;
 //! ```
 //!
-//! Picking a constant instead would be right for one box and silently wrong for the other kind.
+//! So an `enter` that never ran and never opened anything pairs with a `leave` that never closes
+//! anything. **This is the opposite call from the one `ds2-intro-skip` makes**, and deliberately so:
+//! there `leave` closes unconditionally, which is why that crate lets the original `enter` run and
+//! only rewrites the phase afterwards. The conditional here is what makes suppression sound, and it
+//! was read out of `leave` rather than assumed from the sibling crate's shape.
 //!
-//! # Two locks, because one of these dialogs deletes a save profile
+//! # What the first two versions did, and why this one is different
 //!
-//! `FeSubStateTitleDeleteProfile` shares the same `update`. A mod that answered "every common
-//! window" would answer that one too, and it is reached exactly when a player has deliberately
-//! asked to delete something. Two independent conditions must both hold before this crate writes
-//! anything:
+//! Version one hooked the shared `update` instead and wrote the result byte at `+0x31` -- the byte
+//! a button press writes, and the only thing the press-handling path writes, so the dispatch that
+//! closes the box could not tell the difference. That worked: every box answered itself. But the
+//! box still had to be **drawn** before it could answer itself, so the player watched dialogs flash
+//! past instead of pressing buttons. Auto-advancing is not the same as not appearing.
 //!
-//! 1. **An allowlist of vtables**, so only the three known boot dialogs are candidates.
-//! 2. **A runtime inertness check** on the object's own vtable: slots 8 and 9 must still be
-//!    `FeSubStateCommonWindowBase`'s `ret 0` stubs. If either has a body, answering the box would
-//!    *do* something, and this crate declines.
+//! Version one also got the allowlist wrong, and that is worth keeping written down. It named three
+//! classes chosen from their names -- the two `ServerFailWarn` boxes and the offline notice -- and
+//! the run that followed logged `seen screen=<not-allowlisted> vtable=0x1410bcff8` while all three
+//! named ones never fired. The dialog that actually appears is `FeSubStateCommonWindow`, left out
+//! because "common" sounded like a box used all over the game. It is not: its vtable is referenced
+//! at exactly one site in the whole image, inside `FeStateTitle`'s substate-table builder.
 //!
-//! The second is the one that matters, because it is a property of the bytes in front of it
-//! rather than a belief about a name. `DeleteProfile` overrides slot 8, so it fails that check on
-//! its own merits even if it somehow reached the allowlist. Belt and braces on purpose: the first
-//! lock encodes intent, the second enforces it.
+//! # This mod suppresses notices. It never answers a question.
 //!
-//! # A dialog it does not recognise is reported, never answered
+//! `+0x12` is a **signed** option count. Negative is the game's own marker for a one-button
+//! acknowledgement box: its input path can only ever produce a cancel, and the closed phase it
+//! computes can only ever be 3, so removing the box removes a keypress and nothing else.
+//! Non-negative means a real decision with a real affirmative -- and those are shown and left alone.
 //!
-//! Which boxes actually appear at boot depends on the machine -- whether the network check failed,
-//! whether the information fetch failed. Any common window this crate sees and does not act on is
-//! logged once, by vtable address, with the reason. That way the set of boot dialogs is *measured*
-//! across runs instead of assumed, and the failure mode of an incomplete allowlist is a log line
-//! plus a button press, not a silently auto-answered dialog.
+//! That is the condition that carries the safety argument, because it is a property of the object
+//! rather than a belief about a class name. Two further locks sit around it: an allowlist of
+//! vtables, and a runtime check that slots 8 and 9 are still `FeSubStateCommonWindowBase`'s `ret 0`
+//! stubs. `FeSubStateTitleDeleteProfile` shares this same `enter` and overrides slot 8, so it fails
+//! that check on its own merits whatever the allowlist says.
+//!
+//! # A dialog it does not recognise is shown, and reported
+//!
+//! Which boxes appear depends on the machine -- whether the network check failed, whether the
+//! information fetch failed. Anything this crate sees and does not suppress is logged once with its
+//! vtable, kind, caption and option count, and then shown normally. The failure mode of an
+//! incomplete allowlist is a log line plus a button press, which is exactly how the allowlist came
+//! to be corrected in the first place.
 
 #![cfg_attr(not(windows), allow(unused))]
 

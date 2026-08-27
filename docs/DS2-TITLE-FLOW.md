@@ -312,3 +312,103 @@ is measured across runs instead of assumed.
   `0x1400f9800` picks text `0x67` or `0x65` from category `0x19` depending on `[0x14160de10]+0x56b`.
 
 All three have inert handlers, so answering them closes them and does nothing else.
+
+### First run: the allowlist was wrong, and the log said so
+
+Measured, build 9527516, Proton Experimental 11.0-100, with the three `FailWarn`/`OfflineMode`
+vtables allowlisted:
+
+```
+ds2-dialog-skip: install ok rva=0x00105150 va=0x0000000140105150 dialogs=3
+ds2-dialog-skip: seen screen=<not-allowlisted> vtable=0x00000001410bcff8 rva=0x010bcff8 action=left-alone
+```
+
+The three allowlisted classes never fired. The dialog that actually appears at boot is
+`FeSubStateCommonWindow` -- the one left out precisely because its name sounded generic. That is
+the "report, never answer" branch doing its job: an incomplete allowlist cost one log line and a
+button press, not a silently auto-answered dialog.
+
+**Answering it is safe, and the reason is three measured facts rather than a judgement about the
+name:**
+
+1. **There is exactly one such object in the game.** `scripts/ds2-xrefs.py 0x1410bcff8` finds a
+   single code reference in the entire image -- the `lea r13` at `0x1400f75c1` -- and it sits
+   inside `FeStateTitle::v6` at `0x1400f72e0`. That function is the title's **substate table
+   builder**: an 88-slot array at `[state+8]` with its count at `[state+0x2c8]`, filled once. So
+   this class is not "the generic box used all over the game"; it is one member of the title flow,
+   and no in-game prompt can be an instance of it.
+2. **It is a one-button acknowledgement box by construction.** Its constructor at `0x140104c00`
+   runs `or eax,0xffffffff` then `mov WORD PTR [rcx+0x12],ax`, hardcoding the option count to
+   `-1`. The update's input path can therefore only ever produce result `1` for it.
+3. **Its handlers are inert** -- slots 8 and 9 are the base class's `ret 0`.
+
+Its message is category `0x19` id `0x1adc0`, its caption id is `0x20`, its kind field `6`.
+
+`FeStateTitle::v6` is also the sequencer this document previously listed as the blocking unknown.
+It builds every title substate up front rather than raising them on demand, which is why nothing
+in `FeStateTitle`'s other virtuals looked like a flow.
+
+### Auto-advancing is not the same as not appearing
+
+The first working version hooked the shared `update` and wrote the result byte. Every box answered
+itself, and the log proved it -- but the box still had to be **drawn** before it could answer
+itself, so the player watched dialogs flash past instead of pressing buttons. Measured:
+
+```
+ds2-dialog-skip: answered screen=common-window kind=6  caption=0x20 options=-1 timeout=0.000 result=1 total=1
+ds2-dialog-skip: answered screen=common-window kind=70 caption=0x47 options=-1 timeout=0.000 result=1 total=2
+```
+
+Two useful facts fell out of those two lines. **There are exactly two boot notices**, and **they are
+the same object** -- one reusable one-button box re-parameterised per message. The `kind=6`,
+`caption=0x20` seen in the constructor is its construction default, not a fixed identity.
+
+The runtime values also confirmed the static read of the constructor field for field: `kind=6` from
+`mov edx,0x6`, `caption=0x20` from `lea r8d,[rdx+0x1a]`, `options=-1` from
+`or eax,0xffffffff; mov [rcx+0x12],ax`, `timeout=0.000` from the zeroed `xmm6`.
+
+### Where the cut actually belongs: `enter`
+
+**All six classes funnel through `FeSubStateCommonWindowBase::v1` at `0x140104db0`** -- including
+the two that override `v1`, which format their message and then `call 0x140104db0` (at
+`0x1400fd471` in `OnlineCheckFailWarn`). That is the only place a title message box comes into
+existence, so it is the only place one can be prevented rather than dismissed.
+
+The detour returns **without calling the original** and writes result `1`, phase `3` -- the state
+the game itself leaves such a box in once closed.
+
+**Skipping an `enter` is normally the wrong shape**, and `ds2-intro-skip` deliberately does not do
+it. The difference is in `leave`:
+
+```text
+if (this->phase == 1) { this->vtable[10](this); close_window(ui); }
+this->phase = 0;
+```
+
+`leave` closes the window **only when the phase is 1**. So an `enter` that never ran and never
+opened anything pairs with a `leave` that never closes anything. The boot screens' `leave` closes
+unconditionally, which is why that crate lets the original run and only rewrites the phase
+afterwards. The conditional here is what makes suppression sound, and it was read out of `leave`
+rather than carried over from the sibling crate.
+
+Measured, same two notices, now never created:
+
+```
+ds2-dialog-skip: install ok rva=0x00104db0 va=0x0000000140104db0 dialogs=4
+ds2-dialog-skip: suppressed screen=common-window kind=6  caption=0x20 options=-1 total=1
+ds2-dialog-skip: suppressed screen=common-window kind=70 caption=0x47 options=-1 total=2
+```
+
+### The rule that carries the safety argument
+
+> **This mod suppresses notices. It never answers a question.**
+
+A negative option count is the game's own marker for a one-button acknowledgement box: its input
+path can only ever produce a cancel, and the closed phase it computes can only ever be 3, so
+removing the box removes a keypress and nothing else. A non-negative count means a real decision
+with a real affirmative -- those are **shown** and left for the player, logged
+`reason=has-a-real-choice`. That converts the safety argument from a list of
+class names into a property of the object in front of the code: "auto-confirmed something
+consequential" becomes structurally impossible rather than merely guarded against by an allowlist.
+The cost is that a genuinely two-option boot dialog would go unanswered -- and would show up as a
+line to read and decide on, which is the right way to meet one.

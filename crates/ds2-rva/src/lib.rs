@@ -317,6 +317,31 @@ pub const ARXAN_REDIRECTED_DO_NOT_HOOK: [u32; 2] = [0x0083_2cb0, 0x00c2_c9e0];
 /// case as [`ARXAN_PROBE_HOOK_SITE`], which is already proven to install and fire in this game.
 pub const FE_DIALOG_UPDATE: u32 = 0x0010_5150;
 
+/// `FeSubStateCommonWindowBase::v1` (enter). RVA `0x00104db0`, VA `0x140104db0`.
+///
+/// **The one place a title message box is actually created**, and therefore the only place it can
+/// be prevented rather than dismissed. It picks one of two show calls off the sign of
+/// [`FE_DIALOG_OPTIONS_OFFSET`] -- `0x1404fe2a0` for a one-button box, `0x1404fe1c0` for a choice
+/// -- and ends `mov DWORD PTR [rdi+0x18],0` / `mov WORD PTR [rdi+0x30],1`.
+///
+/// EVERY dialog class reaches it, including the two that override `v1`:
+/// `FeSubStateTitleOnlineCheckFailWarn::v1` formats its message and then `call 0x140104db0` at
+/// `0x1400fd471`, and `FeSubStateTitleInformationFailWarn::v1` does the same. So a single detour
+/// here covers all six, where a detour on each class's own `v1` would need four.
+///
+/// # Why skipping it does not leak a window
+///
+/// `leave` (`0x1401050a0`) closes the window **only when the phase is 1**:
+/// `cmp BYTE PTR [rcx+0x30],1` / `jne`, and the not-taken path merely zeroes the phase. So an
+/// `enter` that never ran and never opened anything pairs with a `leave` that never closes
+/// anything. That conditional is what makes suppression sound here and is exactly what
+/// `ds2-intro-skip` did NOT have available -- its `leave` closes unconditionally, which is why
+/// that crate lets the original `enter` run and only rewrites the phase afterwards.
+///
+/// Not Arxan-redirected; `.pdata` gives it RVA `0x104db0`-`0x104df4`, and its first instruction
+/// `48 89 5c 24 20` is a whole five bytes.
+pub const FE_DIALOG_ENTER: u32 = 0x0010_4db0;
+
 /// Phase byte within a common-window substate. `+0x30`.
 ///
 /// `1` while the box is up and waiting, `2` while it plays its close animation, then `3` or `4`
@@ -359,6 +384,14 @@ pub const FE_DIALOG_RESULT_CANCEL: u8 = 1;
 /// The confirm answer, produced when a press lands on a box with real options.
 pub const FE_DIALOG_RESULT_CONFIRM: u8 = 2;
 
+/// [`FE_DIALOG_PHASE_OFFSET`] once the box has closed on a [`FE_DIALOG_RESULT_CANCEL`].
+///
+/// The update computes the closed phase as `sete al` on `result == 2` then `add al, 3`
+/// (`0x14010518b`), so a cancel closes to `3` and a confirm to `4`. A one-button box can only ever
+/// produce a cancel, which makes `3` **the only terminal phase reachable for one** -- writing it
+/// is reproducing the single outcome the game has, not choosing between two.
+pub const FE_DIALOG_PHASE_CLOSED_CANCEL: u8 = 3;
+
 /// Vtable slot the dispatch calls for [`FE_DIALOG_RESULT_CANCEL`]. `call [rax+0x40]` at
 /// `0x140105212`, and `0x40 / 8 == 8`.
 pub const FE_DIALOG_SLOT_ON_CANCEL: usize = 8;
@@ -398,6 +431,56 @@ pub const FE_DIALOG_VTABLE_INFORMATION_FAIL_WARN: u32 = 0x010b_d848;
 /// getter (`0x1400f9800`) to pick text `0x67` or `0x65` from category `0x19` depending on the flag
 /// at `[0x14160de10]+0x56b`. Handlers inert.
 pub const FE_DIALOG_VTABLE_OFFLINE_MODE_WINDOW: u32 = 0x010b_d388;
+
+/// `FeSubStateCommonWindow`'s vtable. RVA `0x010bcff8`, VA `0x1410bcff8`.
+///
+/// **The dialog that actually appears at boot**, measured: a first run with only the three
+/// `FailWarn`/`OfflineMode` vtables allowlisted logged
+/// `seen screen=<not-allowlisted> vtable=0x00000001410bcff8` and nothing else, while the three
+/// that *were* allowlisted never fired. The generic-sounding name is why it was left out at
+/// first, and reading it is what put it back in.
+///
+/// # Why answering the "generic" window is nonetheless safe here
+///
+/// Three facts, each read from the image rather than assumed:
+///
+/// 1. **There is exactly one of these objects in the game.** `scripts/ds2-xrefs.py 0x1410bcff8`
+///    finds a single code reference in the whole image, the `lea r13` at `0x1400f75c1`, and it is
+///    inside `FeStateTitle::v6` (`0x1400f72e0`) -- the routine that builds the title's substate
+///    table, an 88-slot array at `[state+8]` with its count at `[state+0x2c8]`. So this class is
+///    not "the generic box used all over the game"; it is one member of the title flow, and no
+///    in-game prompt can be an instance of it.
+/// 2. **It is a one-button acknowledgement box, by construction.** Its constructor
+///    `0x140104c00` executes `or eax,0xffffffff` then `mov WORD PTR [rcx+0x12],ax`, so
+///    [`FE_DIALOG_OPTIONS_OFFSET`] is hardcoded to `-1`. The update's input path can therefore
+///    only ever produce [`FE_DIALOG_RESULT_CANCEL`] for it -- there is no second answer to get
+///    wrong, and no choice being made on the player's behalf.
+/// 3. **Its handlers are inert**, like the others: slots 8 and 9 are the base `ret 0` stubs.
+///
+/// Its message comes from category `0x19` id `0x1adc0` (`0x1400f7590`), its caption id is `0x20`
+/// and its kind field at `+0x0c` is `6`.
+pub const FE_DIALOG_VTABLE_COMMON_WINDOW: u32 = 0x010b_cff8;
+
+/// Kind field within a common-window substate. `+0x0c`, set from the constructor's second
+/// argument. Logged as a diagnostic; nothing branches on it here.
+pub const FE_DIALOG_KIND_OFFSET: usize = 0x0c;
+
+/// Caption/message id within a common-window substate. `+0x10`, a WORD, set from the
+/// constructor's third argument and republished by `v5` at `0x140104f69`.
+pub const FE_DIALOG_CAPTION_OFFSET: usize = 0x10;
+
+/// Elapsed-time accumulator within a common-window substate. `+0x18`, a float.
+///
+/// `enter` zeroes it (`mov DWORD PTR [rdi+0x18],0` at `0x140104e85`) and the update accumulates the
+/// frame delta into it (`addss xmm1,[rcx+0x18]`). Only read while the box is open.
+pub const FE_DIALOG_ELAPSED_OFFSET: usize = 0x18;
+
+/// Auto-close timeout within a common-window substate. `+0x14`, a float, `0` meaning none.
+///
+/// Read by the update at `0x1401051e5`. A dialog with a positive value here closes itself with no
+/// press at all, which is what makes "close without a press" a shipped behaviour rather than one
+/// this mod invented. Logged as a diagnostic.
+pub const FE_DIALOG_TIMEOUT_OFFSET: usize = 0x14;
 
 /// **NOT in the allowlist, and recorded to say why.** `FeSubStateTitleDeleteProfile`'s vtable,
 /// RVA `0x010bd6c8`.

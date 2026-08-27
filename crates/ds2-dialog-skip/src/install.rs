@@ -3,7 +3,7 @@
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ds2_game_base::mem::{game_module_base, safe_read_u8, safe_read_u16, safe_read_usize};
+use ds2_game_base::mem::{game_module_base, safe_read_i32, safe_read_u16, safe_read_usize};
 use ds2_hook::{MH_EnableHook, MH_Initialize, MH_STATUS, MhHook};
 
 use crate::LOG_PREFIX;
@@ -29,9 +29,9 @@ fn log(args: std::fmt::Arguments<'_>) {
     }
 }
 
-/// One message box this mod is willing to answer.
+/// One message box this mod is willing to suppress.
 ///
-/// A vtable address rather than a function address, because the hook is on the *shared* update and
+/// A vtable address rather than a function address, because the hook is on the *shared* `enter` and
 /// the only thing that distinguishes one dialog from another at that point is the object's vptr.
 struct Dialog {
     name: &'static str,
@@ -40,12 +40,28 @@ struct Dialog {
 
 /// The boot dialogs, allowlisted by vtable.
 ///
-/// All three are message boxes the title flow raises on its own during startup, and all three have
-/// the inert `ret 0` handlers that [`handlers_are_inert`] re-checks at runtime. Deliberately NOT
-/// here: `FeSubStateCommonWindow`, which is the generic box used all over the game rather than a
-/// boot screen, and `FeSubStateTitleDeleteProfile`, which is
-/// [`ds2_rva::FE_DIALOG_VTABLE_DELETE_PROFILE_DO_NOT_ANSWER`] and has a real slot-8 body.
-const DIALOGS: [Dialog; 3] = [
+/// All four are message boxes the title flow owns, and all four have the inert `ret 0` handlers
+/// that [`handlers_are_inert`] re-checks at runtime.
+///
+/// **`common-window` is first because it is the one that actually appears.** It was left out of
+/// the first version on the strength of its generic-sounding name, and the run that followed
+/// logged `seen screen=<not-allowlisted> vtable=0x00000001410bcff8` while the three named ones
+/// never fired at all. Reading it put it back: its vtable is referenced at exactly one site in the
+/// whole image, inside `FeStateTitle`'s substate-table builder, so there is one instance and it
+/// belongs to the title flow -- no in-game prompt can be an instance of it. See
+/// [`ds2_rva::FE_DIALOG_VTABLE_COMMON_WINDOW`] for the derivation.
+///
+/// The other three are network-failure and offline notices that do not appear on a machine whose
+/// checks succeed. They stay listed because a run where they DO appear costs nothing extra, and a
+/// screen that never occurs costs nothing at all.
+///
+/// Deliberately NOT here: `FeSubStateTitleDeleteProfile`, which shares the same update and has a
+/// real slot-8 body -- [`ds2_rva::FE_DIALOG_VTABLE_DELETE_PROFILE_DO_NOT_ANSWER`].
+const DIALOGS: [Dialog; 4] = [
+    Dialog {
+        name: "common-window",
+        vtable_rva: ds2_rva::FE_DIALOG_VTABLE_COMMON_WINDOW,
+    },
     Dialog {
         name: "online-check-fail-warn",
         vtable_rva: ds2_rva::FE_DIALOG_VTABLE_ONLINE_CHECK_FAIL_WARN,
@@ -60,8 +76,8 @@ const DIALOGS: [Dialog; 3] = [
     },
 ];
 
-/// Trampoline back to the original update, published before the site is patched so a detour that
-/// fires immediately cannot read a zero and drop a frame of the game's own logic.
+/// Trampoline back to the original `enter`, published before the site is patched so a detour that
+/// fires immediately cannot read a zero and fail to show a dialog it meant to leave alone.
 static TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 
 /// The live module base, resolved once at install.
@@ -70,28 +86,26 @@ static TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 /// that path would be a syscall per frame to re-learn something that cannot change.
 static MODULE_BASE: AtomicUsize = AtomicUsize::new(0);
 
-/// How many dialogs have been answered. Reported so a run that answered nothing is
-/// distinguishable from a run where no dialog ever appeared.
-static ANSWERED: AtomicUsize = AtomicUsize::new(0);
+/// How many dialogs have been suppressed. Reported so a run that suppressed nothing is
+/// distinguishable from a run where no dialog ever came up.
+static SUPPRESSED: AtomicUsize = AtomicUsize::new(0);
 
-/// Vtables already named in a "seen, not answered" line.
+/// Vtables already named in a "seen, left alone" line.
 ///
-/// The hook is on an update that runs every frame, so an unrecognised dialog would otherwise write
-/// a log line per frame for as long as it is on screen. Reporting each distinct vptr once keeps
-/// the evidence and drops the flood. Sized generously against the six classes that share this
-/// update; a seventh from a future build simply goes unreported rather than overflowing anything.
+/// `enter` runs once per appearance rather than once per frame, so this matters less than it did
+/// when the hook was on the update -- but the one reusable notice box is entered repeatedly with
+/// different messages, and without this each re-entry would repeat the same declined-dialog line.
+/// Sized generously against the six classes that share this enter; a seventh from a future build
+/// simply goes unreported rather than overflowing anything.
 static REPORTED: [AtomicUsize; 8] = [const { AtomicUsize::new(0) }; 8];
 
-/// `void update(this, float delta)` -- `this` in RCX, the frame delta in XMM1.
+/// `void enter(this)` -- `this` in RCX, no other argument.
 ///
-/// **THE FLOAT IS NOT OPTIONAL.** `FeSubStateCommonWindowBase::v3` opens its phase-1 branch with
-/// `addss xmm1, [rcx+0x18]` against an XMM1 it never initialises, so the register is an incoming
-/// argument and the field at `+0x18` is an elapsed-time accumulator. A detour declared as taking
-/// only `this` would be free to clobber XMM1 before reaching the trampoline, and the dialog's
-/// timer would then accumulate whatever happened to be in that register. `FeSubStateTitleLogo::v3`
-/// does the same thing to its own `+0x28`, which is what establishes this as the family's
-/// signature rather than a quirk of one function.
-type UpdateFn = unsafe extern "system" fn(*mut u8, f32);
+/// Unlike the family's `update`, which takes a frame delta in XMM1, `enter` reads no incoming
+/// float: `0x140104db0` touches RCX and nothing else before its first call. That was checked
+/// rather than assumed, because the update next door does take one and a detour that dropped it
+/// would corrupt a timer with no diagnostic.
+type EnterFn = unsafe extern "system" fn(*mut u8);
 
 /// Are this object's decision handlers still the base class's `ret 0` stubs?
 ///
@@ -129,39 +143,28 @@ fn report_once(vptr: usize, args: std::fmt::Arguments<'_>) {
     }
 }
 
-/// Press the button, if this object is a dialog this mod is willing to press for.
+/// Decide whether this dialog should be prevented from ever appearing.
+///
+/// Returns `true` when the caller must NOT run the original `enter` -- no window is created, and
+/// the object is left in the state the game itself leaves it in once such a box has been closed.
 ///
 /// # Safety
 ///
-/// `this` is the substate the game is about to update. Every read is fault-tolerant; the single
-/// write happens only after the object has been identified by vptr, confirmed to be waiting for
-/// input, and confirmed to have inert handlers.
-unsafe fn answer(this: *mut u8) {
+/// `this` is the substate the game is about to enter. Every read is fault-tolerant; the two writes
+/// happen only after the object has been identified by vptr, confirmed to have inert handlers, and
+/// confirmed to be a one-button box.
+unsafe fn suppress(this: *mut u8) -> bool {
     if this.is_null() {
-        return;
+        return false;
     }
     let base = MODULE_BASE.load(Ordering::Acquire);
     if base == 0 {
-        return;
+        return false;
     }
     let object = this as usize;
 
-    // Only phase 1 waits for input. In every other phase the update returns without dispatching,
-    // so a result written now would be read on some later frame in a state we have not reasoned
-    // about -- and after a real press, it would overwrite the player's own answer.
-    if unsafe { safe_read_u8(object + ds2_rva::FE_DIALOG_PHASE_OFFSET) }
-        != Some(ds2_rva::FE_DIALOG_PHASE_WAITING)
-    {
-        return;
-    }
-    if unsafe { safe_read_u8(object + ds2_rva::FE_DIALOG_RESULT_OFFSET) }
-        != Some(ds2_rva::FE_DIALOG_RESULT_NONE)
-    {
-        return;
-    }
-
     let Some(vptr) = (unsafe { safe_read_usize(object) }) else {
-        return;
+        return false;
     };
     let Some(dialog) = DIALOGS
         .iter()
@@ -170,80 +173,128 @@ unsafe fn answer(this: *mut u8) {
         report_once(
             vptr,
             format_args!(
-                "{LOG_PREFIX} seen screen=<not-allowlisted> vtable=0x{vptr:016x} \
-                 rva=0x{:08x} action=left-alone",
-                vptr.wrapping_sub(base)
+                "{LOG_PREFIX} seen screen=<not-allowlisted> vtable=0x{vptr:016x} rva=0x{:08x} \
+                 kind={} caption=0x{:x} options={} action=shown",
+                vptr.wrapping_sub(base),
+                unsafe { safe_read_i32(object + ds2_rva::FE_DIALOG_KIND_OFFSET) }.unwrap_or(-1),
+                unsafe { safe_read_u16(object + ds2_rva::FE_DIALOG_CAPTION_OFFSET) }.unwrap_or(0),
+                unsafe { safe_read_u16(object + ds2_rva::FE_DIALOG_OPTIONS_OFFSET) }
+                    .map_or(-1, |raw| raw as i16),
             ),
         );
-        return;
+        return false;
     };
     if !unsafe { handlers_are_inert(vptr, base) } {
         report_once(
             vptr,
             format_args!(
-                "{LOG_PREFIX} seen screen={} vtable=0x{vptr:016x} action=left-alone \
+                "{LOG_PREFIX} seen screen={} vtable=0x{vptr:016x} action=shown \
                  reason=handlers-not-inert",
                 dialog.name
             ),
         );
-        return;
+        return false;
     }
 
-    // The answer is a function of the object, not a constant. A negative option count is the
-    // game's own marker for a one-button acknowledgement box, and on those its input path only
-    // ever produces a cancel -- writing a confirm there would call a handler the game never
-    // would.
     let Some(raw_options) = (unsafe { safe_read_u16(object + ds2_rva::FE_DIALOG_OPTIONS_OFFSET) })
     else {
-        return;
+        return false;
     };
     let options = raw_options as i16;
-    let value = if options < 0 {
-        ds2_rva::FE_DIALOG_RESULT_CANCEL
-    } else {
-        ds2_rva::FE_DIALOG_RESULT_CONFIRM
-    };
 
+    // THIS MOD SUPPRESSES NOTICES. IT NEVER ANSWERS A QUESTION.
+    //
+    // A negative option count is the game's own marker for a one-button acknowledgement box: the
+    // update's input path can only ever produce a cancel for one, and the closed phase it computes
+    // can only ever be 3. There is no second outcome, so removing the box removes a keypress and
+    // nothing else. A non-negative count means a real decision with a real affirmative, and this
+    // mod shows it and steps back -- whatever it is asking, the player is the one being asked.
+    //
+    // That turns the safety argument from a list of class names into a property of the object in
+    // front of the code. The allowlist still encodes intent and the inertness check still refuses a
+    // box whose answer would run code, but THIS is the condition that makes "silently decided
+    // something on the player's behalf" structurally impossible rather than merely unlikely. Every
+    // dialog it declines says so in the log, which is how a two-option boot dialog would come to
+    // light -- as a line to read, not as a choice already made.
+    if options >= 0 {
+        report_once(
+            vptr,
+            format_args!(
+                "{LOG_PREFIX} seen screen={} vtable=0x{vptr:016x} options={options} \
+                 action=shown reason=has-a-real-choice",
+                dialog.name
+            ),
+        );
+        return false;
+    }
+
+    // The state the game itself leaves such a box in once it has been closed. `leave` closes the
+    // window ONLY when the phase is 1, so writing the closed phase here is also what keeps a
+    // `leave` that follows from closing a window this never opened.
+    //
     // SAFETY: the object was just read at three of its own offsets through fault-tolerant reads
-    // that all succeeded, so it is mapped and at least as large as the byte the game itself writes
-    // here on every button press.
-    unsafe { this.add(ds2_rva::FE_DIALOG_RESULT_OFFSET).write(value) };
+    // that all succeeded, so it is mapped and at least as large as the fields the game itself
+    // writes here.
+    unsafe {
+        this.add(ds2_rva::FE_DIALOG_RESULT_OFFSET)
+            .write(ds2_rva::FE_DIALOG_RESULT_CANCEL);
+        this.add(ds2_rva::FE_DIALOG_PHASE_OFFSET)
+            .write(ds2_rva::FE_DIALOG_PHASE_CLOSED_CANCEL);
+        // What the original `enter` would have zeroed. Nothing reads it in the closed phase; it is
+        // written so the object is not left carrying a stale timer from a previous appearance.
+        this.add(ds2_rva::FE_DIALOG_ELAPSED_OFFSET)
+            .cast::<u32>()
+            .write(0);
+    }
 
-    let total = ANSWERED.fetch_add(1, Ordering::Relaxed) + 1;
+    let total = SUPPRESSED.fetch_add(1, Ordering::Relaxed) + 1;
+    // `kind` and `caption` are logged per appearance, not once, because the ONE notice object is
+    // re-entered with different messages -- the first suppressed run showed kind=6/caption=0x20 and
+    // then kind=70/caption=0x47 through the same vtable. Logging only the class would have made
+    // two different notices look like one repeated event.
     log(format_args!(
-        "{LOG_PREFIX} answered screen={} options={options} result={value} total={total}",
-        dialog.name
+        "{LOG_PREFIX} suppressed screen={} kind={} caption=0x{:x} options={options} total={total}",
+        dialog.name,
+        unsafe { safe_read_i32(object + ds2_rva::FE_DIALOG_KIND_OFFSET) }.unwrap_or(-1),
+        unsafe { safe_read_u16(object + ds2_rva::FE_DIALOG_CAPTION_OFFSET) }.unwrap_or(0),
     ));
+    true
 }
 
-/// The detour: answer first, then run the game's own update unchanged.
+/// The detour: for a suppressible notice, return without ever creating the window.
 ///
-/// ANSWERING BEFORE THE ORIGINAL IS THE POINT. The update's dispatch reads the result byte on the
-/// same call, so a value written here is consumed on this very frame -- the box closes through the
-/// game's own path without waiting a frame for the next tick. Writing it afterwards would work too
-/// and would simply be one frame slower; nothing else about the ordering matters, because the two
-/// touch no other shared state.
-unsafe extern "system" fn detour_update(this: *mut u8, delta: f32) {
-    unsafe { answer(this) };
+/// THIS IS THE ONE PLACE THE ORIGINAL IS DELIBERATELY NOT CALLED, and it is why the boxes stop
+/// appearing rather than merely closing themselves. An earlier version hooked the shared `update`
+/// instead and wrote the result byte a press writes; that worked -- every box answered itself -- but
+/// the box still had to be drawn first, so the player watched a dialog flash past instead of
+/// pressing a button. Preventing it means not opening it.
+///
+/// Skipping an `enter` is normally the wrong shape, and `ds2-intro-skip` deliberately does not do
+/// it: there `leave` closes what `enter` opened unconditionally, so a skipped open leaves an
+/// unbalanced close. Here `leave` closes only when the phase is 1 (`0x1401050a6`), so a box that
+/// was never opened is never closed, and the pairing stays balanced.
+unsafe extern "system" fn detour_enter(this: *mut u8) {
+    if unsafe { suppress(this) } {
+        return;
+    }
     let trampoline = TRAMPOLINE.load(Ordering::Acquire);
     if trampoline != 0 {
-        // SAFETY: MinHook published this trampoline for exactly this site, and the signature is
-        // the one every substate update implements. `delta` is forwarded rather than reconstructed
-        // so the dialog's own timer keeps accumulating real frame time.
-        let original: UpdateFn = unsafe { std::mem::transmute::<usize, UpdateFn>(trampoline) };
-        unsafe { original(this, delta) };
+        // SAFETY: MinHook published this trampoline for exactly this site, and the signature is the
+        // one every caller of the shared `enter` uses.
+        let original: EnterFn = unsafe { std::mem::transmute::<usize, EnterFn>(trampoline) };
+        unsafe { original(this) };
     }
 }
 
 /// What [`install`] managed to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Outcome {
-    /// Whether the shared update is now detoured. There is exactly one hook, so this is the whole
+    /// Whether the shared `enter` is now detoured. There is exactly one hook, so this is the whole
     /// story -- unlike `ds2-intro-skip`, this feature cannot land partially.
     pub installed: bool,
 }
 
-/// Detour `FeSubStateCommonWindowBase::v3`. Call from the post-Arxan callback, never `DllMain`.
+/// Detour `FeSubStateCommonWindowBase::v1`. Call from the post-Arxan callback, never `DllMain`.
 ///
 /// # Safety
 ///
@@ -274,8 +325,8 @@ pub unsafe fn install() -> Outcome {
         return Outcome { installed: false };
     }
 
-    let site = base + ds2_rva::FE_DIALOG_UPDATE as usize;
-    let hook = match unsafe { MhHook::new(site as *mut c_void, detour_update as *mut c_void) } {
+    let site = base + ds2_rva::FE_DIALOG_ENTER as usize;
+    let hook = match unsafe { MhHook::new(site as *mut c_void, detour_enter as *mut c_void) } {
         Ok(hook) => hook,
         Err(status) => {
             log(format_args!(
@@ -297,7 +348,7 @@ pub unsafe fn install() -> Outcome {
 
     log(format_args!(
         "{LOG_PREFIX} install ok rva=0x{:08x} va=0x{site:016x} dialogs={}",
-        ds2_rva::FE_DIALOG_UPDATE,
+        ds2_rva::FE_DIALOG_ENTER,
         DIALOGS.len()
     ));
     Outcome { installed: true }
