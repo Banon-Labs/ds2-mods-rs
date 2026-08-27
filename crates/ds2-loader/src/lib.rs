@@ -113,6 +113,11 @@ const LOG_FILE_NAME: &str = "ds2-loader.log";
 /// weaker claim than [`ARXAN_LINE_PREFIX`] and is kept separate for exactly that reason: a run
 /// with this line and not the other one loaded fine and dearxan never reported, which is a
 /// completely different failure from "the override did not take and we were never loaded".
+/// Every line this DLL writes opens with this, so a grep of the game directory's logs can tell
+/// our lines from the game's and from any other mod's. `arxan_probe::echo_lines` already carries
+/// it; the lines composed in this file have to add it themselves.
+const LOG_PREFIX: &str = "ds2-loader:";
+
 const ATTACH_LINE_PREFIX: &str = "ds2-loader: attach";
 
 /// Written from dearxan's callback. **This is the runtime test's evidence.**
@@ -221,9 +226,12 @@ unsafe fn attach(module: *mut c_void) {
     // before anything acts on it. A run configured differently from how anyone believed says so in
     // its own opening lines rather than looking like a logger that failed to report.
     for problem in &crash_problems {
-        log_line(format_args!("config unusable: {problem}"));
+        log_line(format_args!("{LOG_PREFIX} config unusable: {problem}"));
     }
-    log_line(format_args!("config resolved {}", crash_config.describe()));
+    log_line(format_args!(
+        "{LOG_PREFIX} config resolved {}",
+        crash_config.describe()
+    ));
 
     // JOB 2 (first half): say we are here. If dearxan's callback never fires, this line is the
     // difference between "loaded, and dearxan went quiet" and "never loaded at all".
@@ -322,7 +330,7 @@ fn install_probe(config: Option<arxan_probe::ProbeConfig>) {
 /// the top-level filter and the minidump tier -- which a first-chance exception cannot reach.
 fn arm_fault(config: crash_logging::CrashConfig) {
     if let Some(line) = crash_logging::arm_deliberate_fault(config) {
-        log_line(format_args!("{line}"));
+        log_line(format_args!("{LOG_PREFIX} {line}"));
     }
 }
 

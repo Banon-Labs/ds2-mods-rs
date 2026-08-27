@@ -1134,9 +1134,41 @@ def await_crash_evidence(fault_after_ms: int, started_iso: str) -> int:
     if record:
         body += ["", "ds2-crash-latest.txt, verbatim:", *[f"  | {ln}" for ln in record.splitlines()]]
 
-    if died and required_ok:
-        header = "===== CRASH LOGGER CAPTURED THE FAULT WE ASKED FOR ====="
+    # DID THE FATAL PATH RUN? This is the distinction the first version of this function missed,
+    # and missing it printed a triumphant header over a run that had only proved half of what
+    # ds2-mods-rs-4tm asks. The vectored handler sees FIRST-CHANCE exceptions and records
+    # `fatal=false`; the top-level filter is what runs when nothing handled the exception, and it
+    # is the only thing that writes a fatal record or a minidump. A run with first-chance records
+    # and no fatal one has exercised the VEH and NOT the filter -- which is a real answer, but it
+    # is not the same answer.
+    fatal_seen = "fatal=true" in record
+    first_chance_seen = "veh-first-chance-exception" in record
+
+    if died and required_ok and fatal_seen:
+        header = "===== CRASH LOGGER CAPTURED THE FAULT, FATAL PATH INCLUDED ====="
         code = EXIT_OK
+    elif died and required_ok and first_chance_seen:
+        header = "===== VECTORED HANDLER CAUGHT IT; THE FATAL PATH DID NOT RUN ====="
+        body += [
+            "",
+            "This is a RESULT, not a failure -- exit 0, the experiment ran. What it establishes:",
+            "the crash logger installs in-game, the vectored handler sees a real 0xc0000005, and",
+            "module+RVA resolution works against the live module table.",
+            "",
+            "What it does NOT establish, and 4tm asks for both: no record with fatal=true was",
+            "written, so SetUnhandledExceptionFilter's callback did not run for this fault, and no",
+            "minidump was attempted -- so which tier survives Proton's dbghelp is STILL UNKNOWN.",
+            "Do not report the minidump question as answered on the strength of this run.",
+        ]
+        code = EXIT_OK
+    elif died and required_ok:
+        header = "===== ARTIFACTS WERE WRITTEN BUT NO EXCEPTION RECORD IS IN THEM ====="
+        body += [
+            "",
+            "The files are fresh, so the logger installed and wrote at startup -- but nothing",
+            "recorded the fault. Check whether the fault fired at all before blaming the handler.",
+        ]
+        code = EXIT_NO_CRASH_EVIDENCE
     elif not died:
         header = "===== THE GAME DID NOT DIE -- the fault never fired ====="
         body += [
