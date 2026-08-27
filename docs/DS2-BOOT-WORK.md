@@ -330,6 +330,79 @@ The run also logs the substate count read live off the flow's own list, which tu
 are constructed in `FeStateTitle::v6`" from a static claim into a measured one and gives a loading
 bar its denominator.
 
+## MEASURED, one run, 2026-08-27
+
+Build 9527516, Proton Experimental 11.0-100, `ds2-run.py --boot-timeline`, with intro-skip,
+dialog-skip and title-skip all **on** -- so this is the flow as the mod currently ships, not
+vanilla. No crash artifacts; the game reached the top menu and stayed up.
+
+| # | id | substate | dwell |
+| --- | --- | --- | --- |
+| 1 | `0x00` | `TitleInitBranch` | — (see the artifact note below) |
+| 2 | `0x01` | `WarningNoCopy` | 4.2 ms |
+| 3 | `0x13` | `TitleLogo` #1 | 4.8 ms |
+| 4 | `0x14` | `TitleLogo` #2 | 8.9 ms |
+| 5 | `0x15` | `TitleLogo` #3 | 9.2 ms |
+| 6 | `0x17` | `TitleMain` | 27.8 ms |
+| 7 | `0x05` | `TitleSteamLoadSystemData` | **1011.0 ms** |
+| 8 | `0x20` | `TitleSteamNetworkCheck` | 9.2 ms |
+| 9 | `0x37` | `TitleUserPolicy` | 8.4 ms |
+| 10 | `0x39` | `TitleGameServerLogin` | **763.8 ms** |
+| 11 | `0x44` | `TitleInformation` | **1026.0 ms** |
+| 12 | `0x46` | its message box | 6.0 ms |
+| 13 | `0x47` | `TitleTopMenu` | reached at **t = 6827.5 ms** |
+
+**The engine, not the title flow, is the larger half.** `DllMain` to the first substate transition
+is **3843.9 ms** — 56% of the whole 6.83 s. Nothing in this document can touch it: it is D3D11 /
+DXVK bring-up, archive mounting and audio, before the title state machine exists. That number is
+the reason the timeline is anchored at `DllMain` and not at the first substate.
+
+**What is left is almost entirely I/O.** The title flow costs 2983.6 ms, and the three slow steps
+account for **2800.8 ms of it — 94%**. Every screen, gate and animation on the chain together comes
+to about 78 ms. There is nothing left to skip; what remains is work.
+
+### Two things this run corrected
+
+* **`0x38 SaveSystemData` never ran.** The chain went `0x37 UserPolicy` straight to
+  `0x39 GameServerLogin`. `UserPolicy`'s `v5` publishes three edges — phase 2 to `0x38`, phase 3 to
+  `0x2a`, phase 4 to `0x39` — and this boot took the phase-4 one. The redundant-write finding above
+  still describes the code correctly, but on this profile the write does not happen at boot at all,
+  so there is nothing there to save. `ds2-mods-rs-cz6` is moot until a profile is found that takes
+  the phase-2 edge.
+* **66 substates are registered, not 64.** The live count read off the flow's own list
+  (`registered=66`) beats the 64 allocation/constructor pairs the static parse of
+  `FeStateTitle::v6` found. The parse missed two. Nothing above depends on the total, but a loading
+  bar would have.
+
+### The integrity check did its job, and once it cried wolf
+
+Every `leave` line reads `mismatch=false` except the first: `seq=0 id=0x00 dwell=3843.907ms
+mismatch=true`. That is the expected artifact and not a missed transition — `0x00 InitBranch` was
+already resident when the hooks went in, so the sampler never saw it arrive and its "dwell" is just
+time-since-origin. Every subsequent transition was caught by both hooks. **The sampler missed
+nothing**, so the second hook at `0x140104b80` is not needed.
+
+### What the numbers say about the two proposals
+
+```
+storage chain   0x05                      = 1011.0 ms
+network chain   0x20 + 0x39 + 0x44        = 1799.0 ms
+                                   serial = 2810.0 ms
+                       max(storage, network) = 1799.0 ms
+```
+
+* **Overlapping the chains (`ds2-mods-rs-7on`) is worth ~1011 ms** — the storage chain hides
+  entirely inside the network chain. Boot to menu would go from 6.83 s to about 5.82 s.
+* **Removing the network chain (`ds2-mods-rs-rk4`) is worth ~1799 ms**, and it is the bigger of the
+  two: 6.83 s to about 5.03 s. Removing work still beats overlapping it.
+* They are not additive. With the network chain gone there is nothing left to overlap the storage
+  chain against.
+
+**Scope, do not overstate.** One run, one profile, one Proton version, online and logged in. The
+two network numbers are a server round-trip and will vary with the network; the storage number is
+an 8 MB `sl2` on this machine's disk through Wine. A second run is the cheapest way to learn how
+much of this is noise, and nothing above should be treated as a constant until there is one.
+
 ## The caveat that governs every address here
 
 These come from the deobfuscated image, which is not the byte stream that runs. Vtables and the
