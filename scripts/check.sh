@@ -33,6 +33,47 @@ cargo xwin clippy --workspace --all-targets --no-deps --target "$TARGET"
 if (( run_host_tests )); then
   echo "== host tests =="
   cargo test --workspace
+
+  echo "== windows-target tests (wine) =="
+  # THE CRATES THAT MATTER MOST WERE THE ONES WITH NO EXECUTABLE TESTS. `ds2-loader` is
+  # `#![cfg(windows)]` at the crate root, so `cargo test --workspace` above compiles NONE of it and
+  # reports `0 passed` -- a green line that means "nothing ran", which reads identically to
+  # "everything passed". `arxan_probe` shipped with zero tests under that cover and nobody could
+  # have noticed from the gate output.
+  #
+  # The fix is not to relax the cfg. These DLLs genuinely are Windows-only. It is to RUN the
+  # Windows test binaries, which wine does perfectly well for pure-logic tests -- config parsing,
+  # classification, formatting -- none of which touch the game.
+  #
+  # Same contract as the opa step below: a missing runner is a HARD FAILURE with the fix printed,
+  # never a silent skip, because a check that quietly does nothing still looks enforced. Opt out
+  # deliberately and visibly with WINE_SKIP=1.
+  if [[ -n "${WINE_SKIP:-}" ]]; then
+    echo "  SKIPPED (WINE_SKIP set)"
+  else
+    command -v wine >/dev/null 2>&1 || {
+      echo "wine not found -- needed to execute the cfg(windows) crates' tests" >&2
+      echo "install it, or re-run with WINE_SKIP=1 to deliberately skip them." >&2
+      exit 1
+    }
+    cargo xwin build --workspace --tests --target "$TARGET" 2>/dev/null
+    ran=0
+    for exe in target/"$TARGET"/debug/deps/*.exe; do
+      # cargo leaves older hashed binaries behind; only run what this build just produced.
+      [[ "$exe" -nt Cargo.toml ]] || continue
+      name=$(basename "$exe")
+      out=$(WINEDEBUG=-all wine "$exe" 2>/dev/null) || {
+        echo "$out" >&2
+        echo "  FAILED: $name" >&2
+        exit 1
+      }
+      result=$(echo "$out" | grep -oE 'test result: ok\. [0-9]+ passed' | head -1)
+      # A binary with no tests prints nothing useful; say so rather than implying it passed.
+      echo "  ${name%%-*}: ${result:-no tests}"
+      ran=$((ran + 1))
+    done
+    (( ran > 0 )) || { echo "  no windows test binaries found -- did the build succeed?" >&2; exit 1; }
+  fi
 fi
 
 echo "== cupcake policies =="

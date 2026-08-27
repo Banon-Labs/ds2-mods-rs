@@ -45,7 +45,14 @@ crate-type = ["cdylib"]
 # comparing its TEXT rather than its mtime -- which is what a Proton prefix's one-second mtime
 # resolution requires. It costs nothing: that crate has no dependencies at all, deliberately, so
 # adding it does not add a TOML parser or anything else to this DLL.
+# `ds2-crash-logging-core` is the crash logger, linked as a LIBRARY rather than loaded as the
+# standalone `ds2_crash_logging.dll` that `crates/ds2-crash-logging` also builds. That DLL has no
+# way into this process: `scripts/ds2-run.py` stages exactly one file, `dinput8.dll`, because that
+# is the name `DarkSoulsII.exe` imports, and the only way to pull in a second one from here would
+# be `LoadLibrary` under the loader lock -- the deadlock this crate refuses to commit elsewhere.
+# The standalone DLL is a `DllMain` wrapper around the same `install` call; see `crash_logging`.
 [target.'cfg(windows)'.dependencies]
+ds2-crash-logging-core.workspace = true
 ds2-game-base.workspace = true
 ds2-hook.workspace = true
 ds2-hotkey-config.workspace = true
