@@ -1,8 +1,42 @@
 # M1: does a MinHook detour survive Arxan in DARK SOULS II?
 
-**Nothing here has been run.** This document describes an experiment that is built, gated and
-dry-run, and whose two arms are waiting for someone to execute them. Until both have run, every
-plan in this repo that involves a hook is unproven.
+## ANSWERED 2026-08-27: yes, with Arxan live
+
+Both arms ran on build 9527516 under Proton Experimental 11.0-100. The detour survived and fired
+in both, with zero divergences at either window.
+
+| arm | Arxan | window | heartbeats | hits | site | trampoline | divergences |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `--probe neuter` | neutered by dearxan first | 121s | 12 | 9 | intact | intact | 0 / 0 |
+| `--probe skip-neuter` | **48 stubs left live** | 120s | 12 | 9 | intact | intact | 0 / 0 |
+
+Install evidence was byte-identical in both:
+
+```
+ds2-probe: install base=0x0000000140000000 rva=0x00832e70 va=0x0000000140832e70
+ds2-probe: install original=[48 89 5c 24 08 57 48 83 ec 20 48 8b d9 e8 ae 01] expected=[48 89 5c 24 08] prologue-match=true
+ds2-probe: install minhook=ok trampoline=0x000000013fff0fc0 patched=[e9 5e e1 7b ff 57 48 83 ec 20 48 8b d9 e8 ae 01] site-jmp=true
+```
+
+**Reading, per "Reading the pair" below: Arxan never threatened this site.** Both arms survived, so
+`dearxan` is *not* demonstrated to be load-bearing for hook-byte survival. The game also did not
+crash in arm B, so nothing responded to the patch by killing the process either.
+
+Two things this does NOT license. It does not retire `dearxan`: `neuter_arxan` still runs before
+the entry point and may matter for reasons other than hook bytes. And it is one site over two
+120-second windows -- it does not prove every Arxan check ran during them, since checks can be
+path-triggered or time-delayed. See "What this will not establish".
+
+The image base was `0x140000000` in both runs, so RVA->VA stays 1:1 with the Ghidra image, and
+`prologue-match=true` confirms the site static analysis picked is the clean MSVC
+`mov [rsp+8], rbx` prologue rather than one of the 286 Arxan-redirected `e9` stubs.
+
+`hits` sat at 9-11 across both runs rather than climbing, so the hooked function is on the init
+path and fires a few more times later -- not a per-frame function.
+
+---
+
+The rest of this document is the experiment as designed, kept as written.
 
 ## The question
 

@@ -82,6 +82,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timezone
+from collections.abc import Sequence
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -267,7 +268,8 @@ def await_testimony(tail: LogTail) -> dict:
     attach_line: str | None = None
     game_seen = False
     while True:
-        for line in tail.new_text().splitlines():
+        chunk = tail.new_text().splitlines()
+        for index, line in enumerate(chunk):
             stripped = line.strip()
             if stripped.startswith(ARXAN_LINE_PREFIX):
                 return {
@@ -275,6 +277,7 @@ def await_testimony(tail: LogTail) -> dict:
                     "line": stripped,
                     "attach_line": attach_line,
                     "waited": TESTIMONY_BUDGET_SECONDS - (deadline - time.monotonic()),
+                    "leftover": chunk[index + 1 :],
                 }
             if stripped.startswith(ATTACH_LINE_PREFIX):
                 attach_line = stripped
@@ -285,7 +288,8 @@ def await_testimony(tail: LogTail) -> dict:
             # The game came up and went away. Waiting longer cannot produce a line, because
             # there is no longer a process to write one. Re-read once first: the exit path and
             # the last write race, and losing that race would report silence over real evidence.
-            for line in tail.new_text().splitlines():
+            chunk = tail.new_text().splitlines()
+            for index, line in enumerate(chunk):
                 stripped = line.strip()
                 if stripped.startswith(ARXAN_LINE_PREFIX):
                     return {
@@ -293,6 +297,7 @@ def await_testimony(tail: LogTail) -> dict:
                         "line": stripped,
                         "attach_line": attach_line,
                         "waited": TESTIMONY_BUDGET_SECONDS - (deadline - time.monotonic()),
+                        "leftover": chunk[index + 1 :],
                     }
                 if stripped.startswith(ATTACH_LINE_PREFIX):
                     attach_line = stripped
@@ -396,9 +401,32 @@ def new_probe_state() -> dict:
     }
 
 
-def watch_probe(tail: LogTail, seconds: float) -> dict:
-    """Read probe lines until the observation window closes or the game goes away."""
+def watch_probe(tail: LogTail, seconds: float, leftover: Sequence[str] = ()) -> dict:
+    """Read probe lines until the observation window closes or the game goes away.
+
+    `leftover` is the tail of the chunk `await_testimony` was reading when it found the Arxan
+    line, and it is not an optimisation -- without it the install lines are LOST.
+
+    MEASURED 2026-08-27, first real M1 run, arm A. The run reported "NO VERDICT -- the probe never
+    installed", while the log on disk plainly contained
+
+        ds2-probe: install arm=neuter-arxan base=0x140000000 rva=0x00832e70 va=0x140832e70
+
+    `LogTail.new_text()` consumes a whole chunk and advances its offset past ALL of it, so a
+    `return` from the middle of the loop that walks that chunk throws away every line after the
+    one it returned on. The probe writes its install lines from the same Arxan callback that
+    writes `ds2-loader: arxan`, milliseconds apart, so both land in one read essentially always.
+    `watch_probe` then started AFTER them, collected eighteen heartbeats, and refused a verdict --
+    correctly, by its own "no install line, no verdict" rule. The guard behaved; the evidence had
+    already been destroyed upstream.
+
+    The comment at the call site anticipated exactly this ("the probe's install lines may already
+    be in the buffer this loop is about to read") and concluded that passing the same `tail` was
+    enough. It is not: the tail object is shared, but the chunk already read out of it is not.
+    """
     state = new_probe_state()
+    for line in leftover:
+        absorb_probe_line(line.strip(), state)
     started = time.monotonic()
     deadline = started + seconds
     game_seen = False
@@ -962,11 +990,13 @@ def launch(probe: str, observe: float) -> int:
     if probe == "off":
         return EXIT_OK
 
-    # The loader has spoken; now wait for the experiment. Note that the SAME tail continues --
-    # the probe's install lines may already be in the buffer this loop is about to read, because
-    # they are written from the same Arxan callback that produced the line above.
+    # The loader has spoken; now wait for the experiment. The probe's install lines are written
+    # from the same Arxan callback that produced the line above, so they are usually ALREADY READ
+    # by the time we get here -- sitting in the chunk `await_testimony` returned out of the middle
+    # of. Sharing the tail object is not enough to recover them; they are handed over explicitly.
+    # See the docstring of `watch_probe` for the run this cost.
     print(f"[probe] observing {observe:.0f}s for {PROBE_LINE_PREFIX!r} lines")
-    probe_state = watch_probe(tail, observe)
+    probe_state = watch_probe(tail, observe, verdict.get("leftover", ()))
     block, code = probe_block(probe, probe_state)
     print(block)
     return code
@@ -1022,6 +1052,32 @@ def selftest() -> int:
             "the completed line arrives whole on the next poll",
         )
         check(tail.new_text() == "", "a line already handed back is not handed back twice")
+
+        # THE HANDOVER. This is the regression test for the bug that cost the first real M1 run:
+        # `await_testimony` returns from the MIDDLE of the chunk it is walking, and everything
+        # after the Arxan line in that chunk is already consumed from the tail. The probe writes
+        # its install lines from the same callback, milliseconds later, so in a real run they are
+        # in that chunk essentially always. Without the handover they are read, dropped, and the
+        # run reports "the probe never installed" over a log that plainly contains the install.
+        with path.open("ab") as handle:
+            handle.write(
+                (
+                    f"{ARXAN_LINE_PREFIX} status=ok detected=true blocking_entrypoint=true\n"
+                    f"{PROBE_LINE_PREFIX} install arm=neuter-arxan rva=0x00832e70\n"
+                    f"{PROBE_LINE_PREFIX} watching arm=neuter-arxan\n"
+                ).encode()
+            )
+        handover = await_testimony(tail)
+        check(handover["status"] == "confirmed", "the arxan line is still what ends the wait")
+        check(
+            any("install" in line for line in handover.get("leftover", ())),
+            "the install line that arrived in the SAME chunk is handed on, not dropped",
+        )
+        state = watch_probe(tail, 0.0, handover.get("leftover", ()))
+        check(
+            state.get("install") is not None,
+            "and watch_probe starts with that install line already absorbed",
+        )
 
     check(
         f'name = "{BUILT_DLL.stem}"' in (REPO_ROOT / "crates/ds2-loader/Cargo.toml").read_text(),

@@ -81,4 +81,14 @@ else
   python3 scripts/test-cupcake-policies.py
 fi
 
+echo "== launcher selftest =="
+# scripts/ds2-run.py decides whether a runtime run is reported as evidence or as silence, and it
+# is the one part of this repo that can turn a HEALTHY run into a reported failure. It did exactly
+# that on 2026-08-27: `await_testimony` returned from the middle of a read chunk and discarded the
+# probe's install lines, so the first real M1 run reported "the probe never installed" over a log
+# that plainly contained the install. The script had a selftest covering that class of bug; the
+# selftest was simply never wired into the gate. It is now.
+python3 scripts/ds2-run.py --selftest >/dev/null
+echo "  ds2-run.py: OK"
+
 echo "== OK =="
