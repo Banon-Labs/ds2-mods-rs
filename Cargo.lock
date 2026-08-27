@@ -148,6 +148,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "ds2-crash-logging"
+version = "0.1.0"
+dependencies = [
+ "ds2-crash-logging-core",
+]
+
+[[package]]
+name = "ds2-crash-logging-core"
+version = "0.1.0"
+dependencies = [
+ "ds2-game-base",
+]
+
+[[package]]
 name = "ds2-game-base"
 version = "0.1.0"
 

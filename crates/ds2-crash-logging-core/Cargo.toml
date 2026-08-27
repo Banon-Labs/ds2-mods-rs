@@ -1,0 +1,25 @@
+# First-chance exception capture, as a library. The loadable DLL shell is `ds2-crash-logging`.
+#
+# Depends on `ds2-game-base` and nothing else: the fault-safe readers and the fresh-per-run file
+# logger come from there, so this crate adds only Win32 exception plumbing on top.
+#
+# It deliberately does NOT depend on `ds2-rva`, and needs nothing from it. Symbolizing a fault
+# here means resolving the faulting module and an offset into it from the LOADED image at
+# runtime -- the PEB module list gives base, span and name -- so there is no address, offset or
+# structure layout in this crate to get wrong when the game updates.
+[package]
+name = "ds2-crash-logging-core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "ds2_crash_logging_core"
+
+[dependencies]
+ds2-game-base.workspace = true
+
+[lints]
+workspace = true
