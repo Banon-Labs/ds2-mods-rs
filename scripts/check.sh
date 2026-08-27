@@ -35,4 +35,50 @@ if (( run_host_tests )); then
   cargo test --workspace
 fi
 
+echo "== cupcake policies =="
+# The .cupcake/ tree is executable enforcement, so it gets a gate like any other code.
+#
+# NOT `command -v opa >/dev/null && opa test ...`. A guard that silently does nothing when its
+# runner is absent is worse than no guard, because it still LOOKS enforced -- which is exactly
+# how `rulebook_security_guardrails` sat configured-but-uncompiled in the sibling repo without
+# anyone noticing (it needs an explicit `enabled: true`; configuring it is not enough in cupcake
+# 0.5.2). So a missing opa is a hard failure with the fix printed, and CUPCAKE_SKIP=1 is the
+# deliberate, visible opt-out.
+if [[ -n "${CUPCAKE_SKIP:-}" ]]; then
+  echo "  SKIPPED (CUPCAKE_SKIP set)"
+else
+  command -v opa >/dev/null 2>&1 || {
+    echo "opa not found -- install from https://github.com/open-policy-agent/opa/releases" >&2
+    echo "or re-run with CUPCAKE_SKIP=1 to deliberately skip the policy gate." >&2
+    exit 1
+  }
+  # Each test runs against ONLY its own policy plus the shared commands.rego helper, never the
+  # whole tree at once: `opa test` over every package together lets one policy's rules satisfy
+  # another's assertions, which turns a red test green for the wrong reason. Tests are discovered
+  # from the filesystem so a new policy needs no edit here -- same reasoning as the members glob
+  # above. `commands_test.rego` tests the helper itself and has no policy of its own.
+  shopt -s nullglob
+  for t in .cupcake/tests/*_test.rego; do
+    name=$(basename "$t" _test.rego)
+    policy=""
+    for candidate in ".cupcake/policies/claude/$name.rego" ".cupcake/policies/claude/builtins/$name.rego"; do
+      [[ -f "$candidate" ]] && policy="$candidate" && break
+    done
+    # shellcheck disable=SC2086  # $policy is one path or deliberately empty (commands_test).
+    result=$(opa test .cupcake/system/commands.rego $policy "$t" 2>&1) || {
+      echo "$result" >&2; exit 1
+    }
+    echo "  $name: $(echo "$result" | grep -oE 'PASS: [0-9]+/[0-9]+' | head -1)"
+  done
+  # `opa test` proves the RULES are right; it does not prove cupcake can LOAD them. Verify
+  # compiles the project tree to WASM, which is what the live PreToolUse hook actually evaluates.
+  cupcake verify --harness claude --log-level error >/dev/null
+  echo "  wasm: compiled"
+  # Third layer: drive the real `cupcake eval` binary with real PreToolUse events. `opa test`
+  # can be green while the deployed pipeline still says something else -- different event shape,
+  # a signal that never fires, a policy that compiles but never routes. This is the only step
+  # that exercises what the live PreToolUse hook actually runs.
+  python3 scripts/test-cupcake-policies.py
+fi
+
 echo "== OK =="
