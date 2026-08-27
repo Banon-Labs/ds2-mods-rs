@@ -113,7 +113,7 @@ Whether DS2's 48 Arxan stubs actually revert a MinHook detour when *left* in pla
 
 ---
 
-# CORRECTION: me3 is not ruled out
+# CORRECTION, then RE-CONFIRMATION: me3 really cannot load DS2
 
 Everything above was written on the premise that me3 cannot load DS2. **That premise was
 wrong**, and it was wrong because of how it was checked: `me3 profile create --game` accepts
@@ -157,3 +157,30 @@ Whether `--disable-arxan` is generic or keyed to a known title is unknown.
 
 The `dinput8` proxy stays regardless — it is built, it is gated on its own testimony, and it is
 the fallback if me3 turns out to be genuinely per-game. It is no longer the only door.
+
+## Settled: all three entry paths refused
+
+The retraction above was right to reject the *reasoning* — one enum is not the whole interface,
+and `--steam-id` / `--exe` genuinely do exist. But tested against this game, all three doors are
+shut. me3 0.11.0, DS2 SOTFS appid 335300:
+
+| path | result |
+| --- | --- |
+| `--game darksouls2` / `darksoulsii` / `ds2` / `sotfs` / `darksouls2sotfs` | rejected by the enum, all five |
+| `--steam-id 335300` | `error=unable to determine game from name or app ID` |
+| `--exe "<...>/Game/DarkSoulsII.exe"` | `error=unable to determine which game to launch` |
+
+`--steam-id` and `--exe` do not bypass the known-games table — they **resolve against** it. Naming
+the executable directly is still not enough to make me3 launch a title it does not know.
+
+So the original conclusion stands, now on evidence that can carry it: **the `dinput8` proxy is
+the way in.** Not because me3 has an enum, but because me3 refuses this game by appid and by
+executable path as well.
+
+Two things from me3 remain worth knowing even though we cannot use it:
+
+- It ships `--disable-arxan`, which is independent corroboration that neutralizing Arxan is
+  standard practice for FromSoftware mod loading and not something this project invented.
+- It ships `--suspend`, the suspended-process launch dearxan's docs call strongly recommended.
+  Our proxy gets a weaker version of the same guarantee for free, because a statically imported
+  DLL's `DllMain` runs before the executable's entry point.

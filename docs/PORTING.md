@@ -7,7 +7,7 @@ was measured against the two checkouts and the shipped binary, not estimated.
 
 | # | Blocker | Evidence |
 |---|---|---|
-| 1 | ~~**me3 cannot load DS2**~~ **RETRACTED** | The `--game` enum is closed (five DS2 spellings rejected), but `me3 launch` also takes `--steam-id`, `--exe` and `--native`, which bypass it — plus `--disable-arxan` and `--suspend`. Whether it *works* on DS2 is untested. See [`LOADING.md`](LOADING.md). |
+| 1 | **me3 cannot load DS2** (re-confirmed) | All three entry paths refused: the `--game` enum rejects five DS2 spellings; `--steam-id 335300` gives `unable to determine game from name or app ID`; `--exe <DarkSoulsII.exe>` gives `unable to determine which game to launch`. `--steam-id`/`--exe` resolve against the known-games table rather than bypassing it. See [`LOADING.md`](LOADING.md). |
 | 2 | **No DS2 bindings exist** | `fromsoftware-rs` members: `shared`, `shared/stl`, `darksouls3`, `eldenring`, `nightreign`, `sekiro`. 21 of 57 er-mods-rs crates depend on `eldenring` + `fromsoftware-shared`. |
 | 3 | **Arxan is live** | 48 stubs, all analysed OK by dearxan. Zero encrypted regions (2969 candidates, all eliminated on the entropy test), but the stubs are real anti-debug and integrity code. |
 
