@@ -1,0 +1,40 @@
+# THE FIRST LOADABLE DLL IN THIS WORKSPACE. Everything else in `crates/` is an rlib.
+#
+# See `docs/LOADING.md` for the import-surface survey this crate is the conclusion of: me3
+# cannot launch DARK SOULS II, so a mod gets in by proxying one of `DarkSoulsII.exe`'s own
+# imports, and `DINPUT8.dll` is the smallest honest one (a single named export,
+# `DirectInput8Create`).
+[package]
+name = "ds2-loader"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+# THE OUTPUT FILE NAME IS THE PRODUCT. `name = "dinput8"` is what makes cargo emit
+# `dinput8.dll`, which is the name the Windows loader looks for when resolving
+# `DarkSoulsII.exe`'s `DINPUT8.dll` import descriptor. Renaming this unbinds the proxy and the
+# DLL is simply never loaded -- there is no error, the game just runs vanilla.
+name = "dinput8"
+crate-type = ["cdylib"]
+
+# EVERY DEPENDENCY IS TARGET-GATED, and so is the whole of `src/lib.rs`.
+#
+# `dearxan`'s `disabler` feature pulls `windows-sys` (see `docs/LOADING.md`), so it builds only
+# for the Windows target. Gating the entire dependency set rather than just that one keeps the
+# rule simple: a host build of this crate produces an empty cdylib instead of a link error, so
+# `scripts/check.sh --host-tests` stays runnable for the crates that are host-testable.
+#
+# `default-features = false` comes from the workspace entry, so `disabler` is named explicitly
+# and `rayon` -- dearxan's other default feature -- stays off: the stub analysis then runs
+# single-threaded. That is a smaller dependency tree for the same result, and the cost is
+# unmeasured startup time rather than correctness. Turn it on if a real run shows the analysis
+# is slow; do not turn it on on a guess.
+[target.'cfg(windows)'.dependencies]
+ds2-game-base.workspace = true
+dearxan = { workspace = true, features = ["disabler"] }
+
+[lints]
+workspace = true
