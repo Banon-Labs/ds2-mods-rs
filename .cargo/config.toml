@@ -1,0 +1,9 @@
+# The game DLLs are cross-compiled from Linux with cargo-xwin. `+crt-static` links the MSVC
+# runtime into each DLL so a player needs no redistributable installed.
+#
+# DO NOT add a blanket `rustflags = ["-Awarnings"]` here or on the host target. See the
+# comment on `[workspace.lints]` in the root Cargo.toml: it silently defeats the rustc half
+# of the lint gate, and cargo-xwin re-propagates target rustflags so an env `RUSTFLAGS` does
+# not override it -- a lint audit run that way reports a false pass.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

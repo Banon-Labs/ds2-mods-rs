@@ -1,0 +1,15 @@
+[package]
+name = "ds2-rva"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "ds2_rva"
+
+[dependencies]
+
+[lints]
+workspace = true

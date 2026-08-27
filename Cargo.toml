@@ -1,0 +1,45 @@
+# DS2 mods workspace.
+#
+# MEMBERS ARE A GLOB ON PURPOSE. This repo is built by parallel agents in separate git
+# worktrees, each adding one crate. An explicit member list turns every one of those into a
+# conflict on the same three lines of this file; a glob means a branch that adds
+# `crates/<name>/` touches nothing another branch touches. Cargo resolves the glob at
+# metadata time, so a new crate needs no edit here at all.
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+# LINT PARITY WITH `../er-mods-rs`, which is itself at parity with `../fromsoftware-rs`:
+# stock lint set, denied. `priority = -1` makes these groups apply BEFORE any single-lint
+# entry, so a crate can allow one specific lint in its own `[lints]` table without
+# abandoning the deny. Every such allow must carry a `# DEBT:` comment.
+#
+# DO NOT add a blanket `-Awarnings` to `.cargo/config.toml`. It defeats
+# `rust.warnings = "deny"` outright (same lint group, applied later) while leaving
+# `clippy.all = "deny"` standing -- so half the gate switches off with no diagnostic saying
+# so. That cost er-mods-rs months of false-green lint runs; see its root Cargo.toml.
+[workspace.lints.rust]
+warnings = { level = "deny", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+repository = "https://github.com/Banon-Labs/ds2-mods-rs"
+
+[workspace.dependencies]
+# Substrate crates reference each other through these so a version bump is one edit.
+ds2-game-base = { path = "crates/ds2-game-base" }
+ds2-hook = { path = "crates/ds2-hook" }
+ds2-hotkey-config = { path = "crates/ds2-hotkey-config" }
+ds2-safe-input = { path = "crates/ds2-safe-input" }
+ds2-crash-logging-core = { path = "crates/ds2-crash-logging-core" }
+
+# Arxan neutering. DS2 SOTFS carries 48 Arxan stubs; every MinHook detour patches a prologue
+# in `.text`, which is what their integrity checks look for. Path dep on the local checkout
+# rather than crates.io so a fix lands without a release.
+dearxan = { path = "../dearxan", default-features = false }
