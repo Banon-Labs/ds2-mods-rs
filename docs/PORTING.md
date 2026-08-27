@@ -89,10 +89,12 @@ stays empty here until DS2 bindings exist.
 
 - **A `darksouls2` crate for `fromsoftware-rs`.** Scale, measured: `darksouls3` is 44,383
   lines, `eldenring` 81,093, `shared` 8,434. Model on **DS3, not ER** — DS3 is one generation
-  from DS2, ER is three — but expect to keep far less of its module layout
-  (`app_menu, cs, dlio, dlkr, dltx, dlui, dlut, fd4, param, rva, sprj, stl, util`), because
-  DS2 predates FD4 and most of the DL\* naming. These bindings come from the disassembly by
-  hand; there is no reflection metadata to generate them from.
+  from DS2, ER is three. **Correction:** this section originally said DS2 predates DLRF and that
+  there is no reflection metadata to generate bindings from. That is wrong — the image carries
+  **587 DLRF-registered runtime classes** and 5271 RTTI type descriptors. FD4 is genuinely
+  absent (one incidental occurrence), but `DLRF`, `DLUT`, `DLKR`, `DLIO` and `DLTX` are all
+  present, so DS3's `dlio/dlkr/dltx/dlut` modules have counterparts here and only `fd4` clearly
+  does not. See [`DS2-ENGINE.md`](DS2-ENGINE.md).
 - **`er-net-effects`** — the original feature of er-mods-rs. DS2 has SpEffects, so the feature
   ports; the plumbing does not. Needs the DS2 player structure, the apply-SpEffect function,
   and the SpEffectParam id space. The smallest possible bet that the bindings are right.
@@ -104,8 +106,9 @@ stays empty here until DS2 bindings exist.
   written from scratch. `hudhook` has a D3D11 backend, so the hudhook-based crates have a path;
   the bespoke compositor does not.
 - **Scaleform.** `er-scaleform-hooks` and `er-gfx` assume the ER menu system is Scaleform GFx.
-  **Unverified for DS2** — check before assuming either way. DS2 shows no Scaleform import, but
-  it could be statically linked.
+  **Now verified: DS2 does not use Scaleform at all** — zero occurrences in the image. Its UI is
+  the `Fe*` front-end framework. Both crates are inapplicable, and no ER menu technique
+  transfers. See [`DS2-ENGINE.md`](DS2-ENGINE.md).
 - **Boot and menu machinery.** `er-quickload`, `er-save-picker-core`/`-picker`,
   `er-quit-menu-core`/`-menu`, `er-title-flow`, `er-profile-summary-core` all sit on ER's
   `InGameStep` / `CSMenuMan` / Scaleform / D3D12 stack.
