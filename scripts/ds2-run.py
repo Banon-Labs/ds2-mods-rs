@@ -138,6 +138,10 @@ KEY_SITE = "site"
 #: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/intro_skip.rs`.
 INTRO_SECTION = "intro_skip"
 KEY_INTRO_ENABLED = "enabled"
+
+#: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/dialog_skip.rs`.
+DIALOG_SECTION = "dialog_skip"
+KEY_DIALOG_ENABLED = "enabled"
 KEY_POLL_INTERVAL_MS = "poll_interval_ms"
 KEY_HEARTBEAT_INTERVAL_MS = "heartbeat_interval_ms"
 
@@ -840,6 +844,7 @@ def config_text(
     fault_after_ms: int = NO_FAULT_MS,
     site: str = "m1",
     intro_skip: bool = True,
+    dialog_skip: bool = True,
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
@@ -896,6 +901,22 @@ def config_text(
 # default that cannot be switched off is a default that cannot be ruled out.
 {KEY_INTRO_ENABLED} = {str(intro_skip).lower()}
 
+[{DIALOG_SECTION}]
+# STARTUP-ONLY. Detours ONE function -- FeSubStateCommonWindowBase::v3, the update every message
+# box in the title flow shares -- and writes the result byte a button press writes. The dispatch
+# that closes the box reads that byte and nothing else about the press, so this is the press
+# rather than an imitation of it; the close, the animation and the phase transition all stay the
+# game's own.
+#
+# It answers three allowlisted boot dialogs and re-checks at runtime that their two decision
+# handlers are still the base class's empty stubs, so a box whose answer would DO something --
+# FeSubStateTitleDeleteProfile shares the same update and overrides one of them -- is left for the
+# player. Anything it declines to answer is named in the log.
+#
+# ON by default; `--no-dialog-skip` writes false. Separate from [{INTRO_SECTION}] on purpose: two
+# switches mean a boot failure can be pinned on one feature without rebuilding either.
+{KEY_DIALOG_ENABLED} = {str(dialog_skip).lower()}
+
 [{CRASH_SECTION}]
 {crash_banner}# STARTUP-ONLY, both of them. The handler is installed in DllMain BEFORE `neuter_arxan`, because
 # that call patches code from static analysis and is the likeliest crash in the whole startup path
@@ -936,10 +957,11 @@ def write_config(
     fault_after_ms: int = NO_FAULT_MS,
     site: str = "m1",
     intro_skip: bool = True,
+    dialog_skip: bool = True,
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
-    text = config_text(probe, fault_after_ms, site, intro_skip)
+    text = config_text(probe, fault_after_ms, site, intro_skip, dialog_skip)
     path.write_text(text, encoding="utf-8")
     return path, text
 
@@ -1005,6 +1027,7 @@ def dry_run(
     fault_after_ms: int = NO_FAULT_MS,
     site: str = "m1",
     intro_skip: bool = True,
+    dialog_skip: bool = True,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
@@ -1026,7 +1049,7 @@ def dry_run(
     config_path = GAME_DIR / CONFIG_NAME
     if config_path.is_file():
         current = config_path.read_text(encoding="utf-8")
-        if current == config_text(probe, fault_after_ms, site, intro_skip):
+        if current == config_text(probe, fault_after_ms, site, intro_skip, dialog_skip):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
         else:
             print("[dry-run] config   present and DIFFERS; a real run would replace it")
@@ -1041,7 +1064,12 @@ def dry_run(
     # THE CONFIGURATION UNDER TEST, VERBATIM. It is the whole variable this run turns on, so a
     # dry-run that did not show it would be hiding the one thing it exists to preview.
     print(f"[dry-run] would write  {config_path}")
-    print(quoted_config(config_text(probe, fault_after_ms, site, intro_skip), indent="[dry-run]   | "))
+    print(
+        quoted_config(
+            config_text(probe, fault_after_ms, site, intro_skip, dialog_skip),
+            indent="[dry-run]   | ",
+        )
+    )
     print(f"[dry-run] would launch env {environment} steam -applaunch {APPID}")
     print(f"[dry-run] would poll   {log_path}")
     # The DLL echoes the config back BEFORE it decides anything, so these are the first lines a
@@ -1082,6 +1110,7 @@ def launch(
     fault_after_ms: int = NO_FAULT_MS,
     site: str = "m1",
     intro_skip: bool = True,
+    dialog_skip: bool = True,
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
@@ -1097,7 +1126,9 @@ def launch(
     # BEFORE LAUNCHING, and after staging: the DLL reads this in `DllMain`, so it has to be on
     # disk before the game starts, and it is rewritten every run so a file left over from the
     # other arm cannot decide this one.
-    config_path, config = write_config(GAME_DIR, probe, fault_after_ms, site, intro_skip)
+    config_path, config = write_config(
+        GAME_DIR, probe, fault_after_ms, site, intro_skip, dialog_skip
+    )
     print(f"[config] {config_path}")
 
     log_path = GAME_DIR / LOG_NAME
@@ -1532,6 +1563,25 @@ def selftest() -> int:
         f"--no-intro-skip writes [{INTRO_SECTION}] {KEY_INTRO_ENABLED} = false",
     )
 
+    # THE DIALOG SKIP IS A SEPARATE SWITCH, and the point of asserting both here is that they are
+    # INDEPENDENT. One flag turning both off would make a boot failure attributable to "the mod"
+    # instead of to a feature, which is the whole thing these switches exist to prevent.
+    values, _ = parse_config(config_text("off"))
+    check(
+        values.get((DIALOG_SECTION, KEY_DIALOG_ENABLED)) == "true",
+        f"[{DIALOG_SECTION}] {KEY_DIALOG_ENABLED} defaults to true",
+    )
+    values, _ = parse_config(config_text("off", dialog_skip=False))
+    check(
+        values.get((DIALOG_SECTION, KEY_DIALOG_ENABLED)) == "false",
+        f"--no-dialog-skip writes [{DIALOG_SECTION}] {KEY_DIALOG_ENABLED} = false",
+    )
+    values, _ = parse_config(config_text("off", intro_skip=False))
+    check(
+        values.get((DIALOG_SECTION, KEY_DIALOG_ENABLED)) == "true",
+        "--no-intro-skip leaves the dialog skip ON -- the two switches are independent",
+    )
+
     # THE ARMS MUST DIFFER, and in exactly one key. If two arms ever generated the same file the
     # A/B comparison would be two runs of the same experiment, and the arm-readback guard would
     # not catch it because the DLL would be reporting truthfully.
@@ -1785,6 +1835,18 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--no-dialog-skip",
+        dest="dialog_skip",
+        action="store_false",
+        default=True,
+        help=(
+            "leave the title-flow message boxes waiting for a button. They are answered by "
+            "default, by writing the same result byte a press writes and letting the game's own "
+            "dispatch close the box. Pass this to rule the feature out when a run fails to boot, "
+            "or to read a dialog this mod would otherwise dismiss."
+        ),
+    )
+    parser.add_argument(
         "--probe-site",
         choices=PROBE_SITES,
         default="m1",
@@ -1839,8 +1901,22 @@ def main() -> int:
     if args.selftest:
         return selftest()
     if args.dry_run:
-        return dry_run(args.probe, args.observe, args.crash_test, args.probe_site, args.intro_skip)
-    return launch(args.probe, args.observe, args.crash_test, args.probe_site, args.intro_skip)
+        return dry_run(
+            args.probe,
+            args.observe,
+            args.crash_test,
+            args.probe_site,
+            args.intro_skip,
+            args.dialog_skip,
+        )
+    return launch(
+        args.probe,
+        args.observe,
+        args.crash_test,
+        args.probe_site,
+        args.intro_skip,
+        args.dialog_skip,
+    )
 
 
 if __name__ == "__main__":

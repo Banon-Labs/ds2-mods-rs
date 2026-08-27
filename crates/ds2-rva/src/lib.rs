@@ -275,3 +275,139 @@ pub const ARXAN_PROBE_REDIRECTED_SITE_PROLOGUE: [u8; 5] = [0xe9, 0x1c, 0x0d, 0x9
 /// fail -- or the game would crash -- for a reason that has nothing to do with the question being
 /// asked, which is whether Arxan reverts an *ordinary* hook.
 pub const ARXAN_REDIRECTED_DO_NOT_HOOK: [u32; 2] = [0x0083_2cb0, 0x00c2_c9e0];
+
+// ============================================================================================
+// THE TITLE-FLOW MESSAGE DIALOGS (`ds2-mods-rs-j3b`)
+//
+// Skipping the three boot screens does not reach the title menu, because the flow then stops on
+// message boxes that wait for a button. Six classes draw them, and ALL SIX SHARE ONE `update`:
+// `FeSubStateCommonWindowBase::v3`. That is the whole reason this is three constants and not
+// eighteen -- there is exactly one place where a dialog decides it is finished.
+//
+// WHAT THE SHARED UPDATE ACTUALLY DOES, read from `0x140105150`. On the frame a button is
+// pressed, its ONLY effect is a store into the result byte at `+0x31`; the dispatch that follows
+// reads that byte and nothing else about the press. So writing `+0x31` is not an approximation of
+// a button press, it IS the button press, minus the polling. Every remaining constant below is a
+// field that store depends on.
+//
+// The layout was read from the two functions that own it -- `v1` (enter) at `0x140104db0` and
+// `v3` (update) at `0x140105150` -- and NOT inferred from the boot screens above. It is a
+// different base class with a different layout: these dialogs keep their phase at `+0x30`, where
+// `FeSubStateWarningNoCopy` keeps its at `+0x10` and `FeSubStateTitleLogo` keeps its at `+0x20`.
+// ============================================================================================
+
+/// `FeSubStateCommonWindowBase::v3` (update). RVA `0x00105150`, VA `0x140105150`.
+///
+/// The one function every message box in the title flow runs each frame, and the only place any
+/// of them transitions. Its phase-1 branch polls for input, stores a result into
+/// [`FE_DIALOG_RESULT_OFFSET`], and then dispatches on that byte through vtable slot 8 or 9.
+///
+/// Shared by all six classes whose `v3` slot holds this address: `FeSubStateCommonWindowBase`,
+/// `FeSubStateCommonWindow`, `FeSubStateOfflineModeWindow`, `FeSubStateTitleOnlineCheckFailWarn`,
+/// `FeSubStateTitleInformationFailWarn` and `FeSubStateTitleDeleteProfile`. Enumerated by scanning
+/// every RTTI-described vtable in the image for that slot value, so the list is exhaustive for
+/// this build rather than the ones that happened to be looked for.
+///
+/// # Why hooking it is sound
+///
+/// `scripts/ds2-arxan-chain.py 0x140105150` terminates at hop 0: **not** Arxan-redirected, its own
+/// prologue is at its own entry. `.pdata` gives it length `0xed`, ample room for a five-byte
+/// `e9`. Its first instruction is `48 89 5c 24 08` (`mov [rsp+8], rbx`) -- exactly five bytes, so
+/// MinHook relocates one whole instruction and never has to split one. That is the same trivial
+/// case as [`ARXAN_PROBE_HOOK_SITE`], which is already proven to install and fire in this game.
+pub const FE_DIALOG_UPDATE: u32 = 0x0010_5150;
+
+/// Phase byte within a common-window substate. `+0x30`.
+///
+/// `1` while the box is up and waiting, `2` while it plays its close animation, then `3` or `4`
+/// once closed. `v1` (enter) ends with `mov WORD PTR [rdi+0x30], 1` -- a **16-bit** store that
+/// sets this byte to 1 and [`FE_DIALOG_RESULT_OFFSET`] to 0 in one instruction, which is what
+/// establishes that the two fields are adjacent and in this order.
+pub const FE_DIALOG_PHASE_OFFSET: usize = 0x30;
+
+/// Result byte within a common-window substate. `+0x31`.
+///
+/// `0` undecided, `1` the back/cancel answer, `2` the confirm answer. **This is the byte a button
+/// press writes**, and the dispatch at `0x140105200` reads it, calls vtable slot 8 for `1` or slot
+/// 9 for `2`, and sets the phase to 2. Writing it is how this mod presses the button.
+pub const FE_DIALOG_RESULT_OFFSET: usize = 0x31;
+
+/// Option-count field within a common-window substate. `+0x12`, and it is **signed**.
+///
+/// Negative means a one-button acknowledgement box: `v1` takes a different show call for it, and
+/// `v3` forces the result to [`FE_DIALOG_RESULT_CANCEL`] on any press without ever consulting
+/// which option is highlighted. Non-negative means a real choice, where the game produces
+/// [`FE_DIALOG_RESULT_CONFIRM`] instead. Read at `0x1400fd3ba` in enter and `0x1401051ba` in
+/// update, both as `cmp WORD PTR [.. +0x12], 0` followed by a signed branch.
+///
+/// This is what makes a synthesised answer match the game's own rather than merely resemble it:
+/// the value to write is a function of this field, not a constant to pick.
+pub const FE_DIALOG_OPTIONS_OFFSET: usize = 0x12;
+
+/// [`FE_DIALOG_PHASE_OFFSET`] while the box is up and waiting for a button.
+///
+/// The only phase in which writing a result does anything: `v3` dispatches from phase 1 and
+/// returns immediately in every other phase.
+pub const FE_DIALOG_PHASE_WAITING: u8 = 1;
+
+/// [`FE_DIALOG_RESULT_OFFSET`] before anything has been decided.
+pub const FE_DIALOG_RESULT_NONE: u8 = 0;
+
+/// The back/cancel answer, and the ONLY answer a one-button box can produce.
+pub const FE_DIALOG_RESULT_CANCEL: u8 = 1;
+
+/// The confirm answer, produced when a press lands on a box with real options.
+pub const FE_DIALOG_RESULT_CONFIRM: u8 = 2;
+
+/// Vtable slot the dispatch calls for [`FE_DIALOG_RESULT_CANCEL`]. `call [rax+0x40]` at
+/// `0x140105212`, and `0x40 / 8 == 8`.
+pub const FE_DIALOG_SLOT_ON_CANCEL: usize = 8;
+
+/// Vtable slot the dispatch calls for [`FE_DIALOG_RESULT_CONFIRM`]. `call [rax+0x48]` at
+/// `0x140105217`.
+pub const FE_DIALOG_SLOT_ON_CONFIRM: usize = 9;
+
+/// `FeSubStateCommonWindowBase`'s own slot-8 handler: `ret 0`, and nothing else. RVA `0x000f89d0`.
+///
+/// Recorded so a dialog's handlers can be checked to be inert **at runtime**, from its own vtable,
+/// before this mod answers it. That check is the difference between "the allowlist below is
+/// believed to be safe" and "this build's bytes say answering does nothing but close the box".
+pub const FE_DIALOG_INERT_ON_CANCEL: u32 = 0x000f_89d0;
+
+/// `FeSubStateCommonWindowBase`'s own slot-9 handler: `ret 0`. RVA `0x000f89c0`.
+pub const FE_DIALOG_INERT_ON_CONFIRM: u32 = 0x000f_89c0;
+
+/// `FeSubStateTitleOnlineCheckFailWarn`'s vtable. RVA `0x010bd7d8`, VA `0x1410bd7d8`.
+///
+/// The network-check failure box. Its `v1` and its slot-11 message getter both live in
+/// `..\..\Source\Frontend\Operator\Title\FeSubStateServerFailWarn.cpp` -- the source path is still
+/// in the image at `0x1410bd8b0` -- and its enter formats that path together with error code
+/// `0x35b62` into the message it shows. Both its slot-8 and slot-9 handlers are the inert `ret 0`
+/// above, so answering it closes it and does nothing else.
+pub const FE_DIALOG_VTABLE_ONLINE_CHECK_FAIL_WARN: u32 = 0x010b_d7d8;
+
+/// `FeSubStateTitleInformationFailWarn`'s vtable. RVA `0x010bd848`, VA `0x1410bd848`.
+///
+/// The sibling of [`FE_DIALOG_VTABLE_ONLINE_CHECK_FAIL_WARN`] from the same source file, formatting
+/// error code `0x33453`. Its handlers are inert in exactly the same way.
+pub const FE_DIALOG_VTABLE_INFORMATION_FAIL_WARN: u32 = 0x010b_d848;
+
+/// `FeSubStateOfflineModeWindow`'s vtable. RVA `0x010bd388`, VA `0x1410bd388`.
+///
+/// The "playing offline" notice. Uses the shared `v1`, and overrides only the slot-11 message
+/// getter (`0x1400f9800`) to pick text `0x67` or `0x65` from category `0x19` depending on the flag
+/// at `[0x14160de10]+0x56b`. Handlers inert.
+pub const FE_DIALOG_VTABLE_OFFLINE_MODE_WINDOW: u32 = 0x010b_d388;
+
+/// **NOT in the allowlist, and recorded to say why.** `FeSubStateTitleDeleteProfile`'s vtable,
+/// RVA `0x010bd6c8`.
+///
+/// It shares [`FE_DIALOG_UPDATE`] with the three above, so a mod that answered "every common
+/// window" would answer this one too. It **overrides slot 8** with a real body at `0x1400fcf30`,
+/// which reaches into the save-data object at `[[0x1416148f0]+0xa8]+0xd8`. Whatever that does, it
+/// is not nothing, and it is reached only when a player deliberately chooses to delete a profile.
+///
+/// The runtime handler check against [`FE_DIALOG_INERT_ON_CANCEL`] rejects it on its own, without
+/// consulting this constant -- which is the point. This entry exists so the exclusion is written
+/// down rather than merely emergent.
+pub const FE_DIALOG_VTABLE_DELETE_PROFILE_DO_NOT_ANSWER: u32 = 0x010b_d6c8;

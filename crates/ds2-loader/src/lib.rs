@@ -83,6 +83,7 @@ use dearxan::disabler::{neuter_arxan, schedule_after_arxan};
 
 pub mod arxan_probe;
 pub mod crash_logging;
+pub mod dialog_skip;
 pub mod intro_skip;
 
 /// `fdwReason` value for the loader's process-attach notification.
@@ -275,6 +276,7 @@ unsafe fn attach(module: *mut c_void) {
                 }
                 install_probe(probe);
                 install_intro_skip();
+                install_dialog_skip();
                 arm_fault(crash_config);
             });
         },
@@ -301,6 +303,7 @@ unsafe fn attach(module: *mut c_void) {
                 ));
                 install_probe(probe);
                 install_intro_skip();
+                install_dialog_skip();
                 arm_fault(crash_config);
             });
         },
@@ -348,6 +351,33 @@ fn install_intro_skip() {
             ds2_intro_skip::LOG_PREFIX,
             outcome.installed,
             outcome.attempted
+        ));
+    }
+}
+
+/// Install the message-box skip, if `<Game>/ds2-mods.toml` asked for it.
+///
+/// Called immediately after [`install_intro_skip`] and from the same post-Arxan position, for the
+/// same reasons. The order between the two is not load-bearing -- they hook different functions
+/// and share no state -- but it matches the order the player meets them in, which is the order
+/// the log then reads in.
+fn install_dialog_skip() {
+    let config = dialog_skip::DialogSkipConfig::load();
+    log_line(format_args!("{}", config.describe()));
+    if !config.enabled {
+        return;
+    }
+    ds2_dialog_skip::set_logger(log_line);
+    // SAFETY: the target is `FeSubStateCommonWindowBase::v3`, a `.pdata` function start recorded
+    // in `ds2-rva` and resolved against the live module base. `scripts/ds2-arxan-chain.py` shows
+    // it is not Arxan-redirected, and its first instruction is a whole five bytes so MinHook never
+    // has to split one. The detour declares the signature every substate update implements:
+    // `void update(this, float delta)`, `this` in RCX and the delta in XMM1.
+    let outcome = unsafe { ds2_dialog_skip::install() };
+    if !outcome.installed {
+        log_line(format_args!(
+            "{} NOT INSTALLED -- the title message boxes will still need a button press",
+            ds2_dialog_skip::LOG_PREFIX
         ));
     }
 }
