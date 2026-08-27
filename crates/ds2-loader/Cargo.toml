@@ -32,8 +32,24 @@ crate-type = ["cdylib"]
 # single-threaded. That is a smaller dependency tree for the same result, and the cost is
 # unmeasured startup time rather than correctness. Turn it on if a real run shows the analysis
 # is slow; do not turn it on on a guess.
+#
+# `ds2-hook` and `ds2-rva` arrived with the M1 Arxan probe (`src/arxan_probe.rs`) and are the
+# reason this crate is no longer game-knowledge-free. `ds2-hook` brings the vendored MinHook C
+# into the DLL -- statically, so this module owns its own MinHook instance, which is the design
+# that crate documents. `ds2-rva` brings exactly one address: the function the probe detours.
+# Both are dead weight in an ordinary run (the probe is off unless `<Game>/ds2-mods.toml` turns
+# it on), and both come out again if the probe is ever removed rather than promoted.
+#
+# `ds2-hotkey-config` is here for its config machinery and NOT for its key names: `kv::KeyValues`
+# reads `key = value` under `[section]` headers, and `reload::HotFile` notices a file changed by
+# comparing its TEXT rather than its mtime -- which is what a Proton prefix's one-second mtime
+# resolution requires. It costs nothing: that crate has no dependencies at all, deliberately, so
+# adding it does not add a TOML parser or anything else to this DLL.
 [target.'cfg(windows)'.dependencies]
 ds2-game-base.workspace = true
+ds2-hook.workspace = true
+ds2-hotkey-config.workspace = true
+ds2-rva.workspace = true
 dearxan = { workspace = true, features = ["disabler"] }
 
 [lints]

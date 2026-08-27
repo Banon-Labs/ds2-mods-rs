@@ -35,6 +35,9 @@ repository = "https://github.com/Banon-Labs/ds2-mods-rs"
 # Substrate crates reference each other through these so a version bump is one edit.
 ds2-game-base = { path = "crates/ds2-game-base" }
 ds2-hook = { path = "crates/ds2-hook" }
+# The address table. Only crates that genuinely claim to know something about DARK SOULS II may
+# depend on this -- `ds2-game-base` deliberately does not, and must not start.
+ds2-rva = { path = "crates/ds2-rva" }
 ds2-hotkey-config = { path = "crates/ds2-hotkey-config" }
 ds2-safe-input = { path = "crates/ds2-safe-input" }
 ds2-crash-logging-core = { path = "crates/ds2-crash-logging-core" }
