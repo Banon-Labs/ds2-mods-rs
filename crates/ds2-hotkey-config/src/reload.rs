@@ -89,6 +89,20 @@ impl HotFile {
         &self.path
     }
 
+    /// Change how long a poll goes without touching the disk.
+    ///
+    /// For the caller whose own loop period is itself configurable, and configured in the file
+    /// this is watching: a watcher throttled faster than the loop re-reads an unchanged file
+    /// several times per iteration for nothing, and one throttled slower makes the loop's own
+    /// period the thing you cannot edit.
+    ///
+    /// The new interval applies from the NEXT read, not retroactively -- a poll already deferred
+    /// under the old interval stays deferred, which keeps a caller that lowers the interval every
+    /// iteration from turning this into an unthrottled read.
+    pub const fn set_interval(&mut self, interval_ms: u64) {
+        self.interval_ms = interval_ms;
+    }
+
     /// The text currently in force, or `None` before the first successful read.
     #[must_use]
     pub fn text(&self) -> Option<&str> {
@@ -296,6 +310,34 @@ mod tests {
         std::fs::remove_file(&path).expect("remove");
         assert_eq!(hot.poll(), Some(FileChange::Missing));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A caller whose loop period lives in the file it is watching can move the throttle with it.
+    #[test]
+    fn the_interval_can_be_changed_and_applies_from_the_next_read() {
+        let mut hot = HotFile::with_interval("ds2-test.toml", 1000);
+        let text = || Some("a = 1".to_owned());
+        assert!(hot.poll_with(0, text).is_some(), "the first read is a load");
+
+        // Still throttled at 1000ms: the read at t=500 must not happen.
+        assert_eq!(
+            hot.poll_with(500, || panic!("read inside the old interval")),
+            None
+        );
+
+        hot.set_interval(100);
+        // The deferral already in flight stands -- t=1000 was set before the interval moved.
+        assert_eq!(
+            hot.poll_with(999, || panic!("read inside the old interval")),
+            None
+        );
+        assert_eq!(hot.poll_with(1000, text), None, "read, and unchanged");
+        // ...and from here the new, shorter interval is the one in force.
+        assert_eq!(
+            hot.poll_with(1100, || Some("a = 2".to_owned())),
+            Some(FileChange::Text("a = 2".to_owned()))
+        );
+        assert_eq!(hot.tallies(), (5, 3, 2));
     }
 
     #[test]

@@ -21,10 +21,30 @@ THE PIPELINE
                     failed, or that "succeeded" without recompiling, leaves the previous DLL in
                     place; a run against that produces evidence for code which is not the code
                     under test. The hash is what makes that visible instead of invisible.
-  4. LAUNCH      -- `steam -applaunch 335300` with WINEDLLOVERRIDES="dinput8=n,b". Without that
+  4. CONFIGURE   -- write `<Game>/ds2-mods.toml` for the requested arm, and print it verbatim.
+                    The DLL reads this itself in `DllMain`; see below.
+  5. LAUNCH      -- `steam -applaunch 335300` with WINEDLLOVERRIDES="dinput8=n,b". Without that
                     override Wine's builtin dinput8 wins the load and our DLL never runs.
-  5. TESTIMONY   -- poll `<Game>/ds2-loader.log` for the DLL's own line. Success block only if
+  6. TESTIMONY   -- poll `<Game>/ds2-loader.log` for the DLL's own line. Success block only if
                     it appears; a FAILED block, and a non-zero exit, otherwise.
+
+WHY THE ARM IS IN A FILE AND NOT IN THE ENVIRONMENT
+---------------------------------------------------
+It was `DS2_ARXAN_PROBE=1` / `DS2_ARXAN_PROBE_SKIP_NEUTER=1`, set here, and it did not work. A
+real run produced, from the DLL's own attach line:
+
+    ds2-loader: attach awaiting-arxan-callback probe=off arm=neuter-arxan
+                DS2_ARXAN_PROBE=<unset> DS2_ARXAN_PROBE_SKIP_NEUTER=<unset>
+
+`steam -applaunch` hands the request to an ALREADY-RUNNING Steam client over IPC, and that client
+starts the game from ITS environment. `WINEDLLOVERRIDES` survives only because it is in the
+per-app Steam launch options -- a different channel, and the one setting that cannot move into the
+config file, because Wine reads it to decide whether to map our DLL at all.
+
+The fixes available for the environment were "quit Steam before every run" and "edit the launch
+options between the two arms". Both are manual steps BETWEEN THE TWO HALVES OF ONE EXPERIMENT, and
+a manual step there is a step that eventually gets skipped. A file beside the DLL travels through
+no IPC, and both arms now run back to back with nothing to do in between.
 
 THE M1 EXPERIMENT
 -----------------
@@ -37,10 +57,11 @@ consistent with "dearxan saved us" and with "Arxan never cared about this page":
     --probe skip-neuter  Arxan's 48 stubs left live. Answers: was Arxan ever a threat here?
 
 The verdict block is assembled from the DLL's own `ds2-probe:` lines and from nothing else. In
-particular the arm is READ BACK out of the log and compared against the one that was requested,
-because these variables reach the game through the same channel as WINEDLLOVERRIDES and can go
-missing the same way -- and an arm that silently flipped would report a result for an experiment
-nobody ran.
+particular the arm is READ BACK out of the log and compared against the one that was requested.
+That guard was written for environment variables that could silently vanish, and moving to a file
+did not retire it: a file can fail to be written, be written to the wrong directory, or be left
+over from a previous run -- and a run against a stale file would report a perfectly well-formed
+verdict for an experiment nobody asked for.
 
 Usage:
     python3 scripts/ds2-run.py --dry-run   # stage nothing, launch nothing, report what it would do
@@ -94,23 +115,44 @@ ATTACH_LINE_PREFIX = "ds2-loader: attach"
 #: about an EXPERIMENT, and a run that only did the first must not be able to read as the second.
 PROBE_LINE_PREFIX = "ds2-probe:"
 
-#: Mirror `ENV_PROBE` / `ENV_SKIP_NEUTER` in that module. The DLL accepts the exact string "1"
-#: and nothing else, so a typo reads as "off" loudly rather than as "on" quietly.
-ENV_PROBE = "DS2_ARXAN_PROBE"
-ENV_SKIP_NEUTER = "DS2_ARXAN_PROBE_SKIP_NEUTER"
+#: Mirrors `CONFIG_LINE_PREFIX` in that module. The DLL echoes the config it read back into the
+#: log under this prefix -- the path, whether the file was there at all, and every key verbatim --
+#: before it acts on any of it. `ds2-loader:` rather than `ds2-probe:` because it is written even
+#: when the probe is off, which is exactly the run where you most need to know what it read.
+CONFIG_LINE_PREFIX = "ds2-loader: config"
 
-#: CLI arm -> (environment to launch with, the `arm=` token the DLL must report back).
+#: Mirrors `CONFIG_FILE_NAME` in `crates/ds2-loader/src/arxan_probe.rs`. The DLL reads this out of
+#: its own game directory -- the directory of the running executable -- so this script writes it
+#: to exactly the directory it stages the DLL into. `--selftest` checks the spelling against the
+#: Rust source, because a rename on one side alone turns every run into a silent "probe off".
+CONFIG_NAME = "ds2-mods.toml"
+
+#: Mirrors `CONFIG_SECTION` and the four `KEY_*` constants in that module.
+CONFIG_SECTION = "arxan_probe"
+KEY_ENABLED = "enabled"
+KEY_SKIP_NEUTER = "skip_neuter"
+KEY_POLL_INTERVAL_MS = "poll_interval_ms"
+KEY_HEARTBEAT_INTERVAL_MS = "heartbeat_interval_ms"
+
+#: Defaults for the two LIVE keys, written into the generated file as commented-out lines so the
+#: file documents them without changing behaviour. Mirrors `DEFAULT_*` in the same module.
+DEFAULT_POLL_INTERVAL_MS = 1000
+DEFAULT_HEARTBEAT_INTERVAL_MS = 10000
+
+#: CLI arm -> (`[arxan_probe]` settings to write, the `arm=` token the DLL must report back).
 #:
-#: THE SECOND HALF OF EACH ENTRY IS A GUARD, not decoration. These variables reach the game the
-#: same way WINEDLLOVERRIDES does and go missing the same way (see `report_environment`). A run
-#: that lost them entirely installs no probe and is caught by the missing install line -- but a
-#: run that lost only the skip variable would quietly execute the OTHER arm and produce a
-#: perfectly well-formed verdict for an experiment nobody asked for. That is the failure this
-#: comparison exists to make impossible.
-PROBE_ARMS: dict[str, tuple[dict[str, str], str | None]] = {
-    "off": ({}, None),
-    "neuter": ({ENV_PROBE: "1"}, "neuter-arxan"),
-    "skip-neuter": ({ENV_PROBE: "1", ENV_SKIP_NEUTER: "1"}, "skip-neuter-arxan"),
+#: THE SECOND HALF OF EACH ENTRY IS A GUARD, not decoration, and it did not stop being one when
+#: these moved out of the environment. A config file has its own ways to be wrong: it can fail to
+#: be written, be written to the wrong directory (a game dir that moved, a second install), or be
+#: left over from a previous run against a DLL that no longer reads it. A run that lost the file
+#: entirely installs no probe and is caught by the missing install line -- but a run against a
+#: STALE file would quietly execute whichever arm that file names and produce a perfectly
+#: well-formed verdict for an experiment nobody asked for. That is the failure this comparison
+#: exists to make impossible, and it is why the arm is read back out of the log.
+PROBE_ARMS: dict[str, tuple[dict[str, bool], str | None]] = {
+    "off": ({KEY_ENABLED: False, KEY_SKIP_NEUTER: False}, None),
+    "neuter": ({KEY_ENABLED: True, KEY_SKIP_NEUTER: False}, "neuter-arxan"),
+    "skip-neuter": ({KEY_ENABLED: True, KEY_SKIP_NEUTER: True}, "skip-neuter-arxan"),
 }
 
 #: How long to keep reading the log after the probe says it is installed. The probe heartbeats
@@ -326,6 +368,12 @@ def absorb_probe_line(line: str, state: dict) -> None:
         state["heartbeats"].append(line)
     elif kind in ("SITE", "TRAMP"):
         state["events"].append(line)
+    elif kind == "config":
+        # The probe re-read its config mid-run and something changed, or someone edited a
+        # startup-only key and was told it does not apply. Either way the run was touched while
+        # it was being measured, and the verdict block must say so rather than quietly average
+        # over it.
+        state["config_events"].append(line)
     elif kind == "detach":
         state["detach"] = line
 
@@ -341,6 +389,7 @@ def new_probe_state() -> dict:
         "arm": None,
         "heartbeats": [],
         "events": [],
+        "config_events": [],
         "detach": None,
         "game_exited": False,
         "observed": 0.0,
@@ -415,9 +464,17 @@ def probe_block(requested: str, state: dict) -> tuple[str, int]:
                 "",
                 f"No `{PROBE_LINE_PREFIX} install ... rva=` line appeared.",
                 "",
-                "Most likely the probe variables did not reach the game. Check the loader's",
-                f"`{ATTACH_LINE_PREFIX}` line: if it says `probe=off`, the environment is the",
-                "problem and not the probe -- see the [env] steam note above.",
+                f"Check the loader's `{CONFIG_LINE_PREFIX}` lines, which say what it read and",
+                "from where:",
+                f"  status=MISSING  -- the DLL looked in a different directory than this script",
+                f"                     wrote to. Compare the path on that line against",
+                f"                     {GAME_DIR / CONFIG_NAME}.",
+                f"  status=found and {KEY_ENABLED}=\"false\"",
+                "                  -- the file that was read is not the one this run wrote.",
+                f"  a REJECTED line -- the file was read and that key could not be used.",
+                "",
+                "If instead there are no config lines at all, the DLL that loaded is an older",
+                "build than the one staged: check the sha256 above.",
             ],
         )
 
@@ -429,8 +486,12 @@ def probe_block(requested: str, state: dict) -> tuple[str, int]:
                 "",
                 "This is the dangerous case, which is why it is a hard failure rather than a",
                 "note: the run is well-formed and its numbers are real, but they answer a",
-                "different question than the one that was asked. Most likely only some of the",
-                "probe variables reached the game.",
+                "different question than the one that was asked.",
+                "",
+                "The config file this run wrote is quoted in the block above. If the DLL read a",
+                "different one, its own `" + CONFIG_LINE_PREFIX + "` line names the path it",
+                "read -- most likely a second game install, or a stale file the DLL reached",
+                "before this script rewrote it.",
             ],
         )
 
@@ -482,6 +543,20 @@ def probe_block(requested: str, state: dict) -> tuple[str, int]:
     if state["events"]:
         lines += ["", "  STATE CHANGES (each with the observed bytes):"]
         lines += [f"    {event}" for event in state["events"]]
+
+    if state["config_events"]:
+        # NOT a footnote. The config file was edited while the measurement was running, so the
+        # window above is not homogeneous, and a reader comparing two arms needs to know that
+        # before comparing anything.
+        lines += [
+            "",
+            "  THE CONFIG FILE WAS TOUCHED DURING THIS WINDOW:",
+        ]
+        lines += [f"    {event}" for event in state["config_events"]]
+        lines += [
+            "    The arm cannot change mid-run and the DLL says so when asked to; a poll or",
+            "    heartbeat interval CAN, and if one did, the cadence above is not uniform.",
+        ]
 
     lines += [
         "",
@@ -557,6 +632,12 @@ def running_block(context: dict) -> str:
         f"  sha256         {context['sha256']}",
         f"  game pids      {context['game_pids'] or '<none right now>'}",
         "",
+        # THE CONFIGURATION UNDER TEST, VERBATIM, in the block that gets copy-pasted. The arm is
+        # the variable the whole experiment turns on and it no longer travels in a command line
+        # anyone can see, so the transcript has to carry the file itself or it carries nothing.
+        f"  config         {context['config_path']}",
+        quoted_config(context["config"], indent="    | "),
+        "",
         "  PROVEN BY      the DLL's own log line, not by the process existing:",
         f"    {context['testimony']}",
     ]
@@ -604,9 +685,75 @@ def preflight(dry_run: bool) -> list[str]:
 
 
 def launch_env(probe: str) -> dict[str, str]:
-    """The environment a run of `probe` needs, over this process's own."""
-    arm_env, _ = PROBE_ARMS[probe]
-    return {"WINEDLLOVERRIDES": DLL_OVERRIDE, **arm_env}
+    """The environment a run needs, over this process's own.
+
+    ONE VARIABLE, and it does not depend on the arm. `WINEDLLOVERRIDES` is the only setting that
+    genuinely has to travel through Steam, because Wine reads it to decide whether to map our DLL
+    at all -- before there is a DLL running to read anything. Everything the DLL itself decides
+    now comes out of the config file; see `config_text`.
+    """
+    del probe  # the arm is in the config file now, not in the environment
+    return {"WINEDLLOVERRIDES": DLL_OVERRIDE}
+
+
+def config_text(probe: str) -> str:
+    """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
+
+    Deterministic: the same arm produces the same file every time, with no timestamp and no
+    hostname, so two runs of the same arm are trivially comparable and `--selftest` can assert on
+    the content rather than around it.
+    """
+    settings, _ = PROBE_ARMS[probe]
+    return f"""\
+# DARK SOULS II mod settings. Read by `dinput8.dll` out of this directory -- the directory of the
+# running executable -- in `DllMain`, before the game's entry point.
+#
+# WRITTEN BY scripts/ds2-run.py ON EVERY LAUNCH. Edits to the two startup-only keys below are
+# overwritten by the next run, deliberately: the arm under test has to be the arm that was asked
+# for, and the launcher reads the arm back out of the log to prove it was.
+#
+# THIS FILE REPLACED TWO ENVIRONMENT VARIABLES, and the reason is measured rather than stylistic.
+# `DS2_ARXAN_PROBE` and `DS2_ARXAN_PROBE_SKIP_NEUTER` were set in the launcher's environment and
+# arrived at the game UNSET: `steam -applaunch` hands the request to an already-running Steam
+# client over IPC, and the game inherits THAT client's environment. A file beside the DLL travels
+# through no IPC at all, and both arms can now be run back to back with nothing to do in between.
+
+[{CONFIG_SECTION}]
+# STARTUP-ONLY. Both are consumed in DllMain, before the game's entry point, because that is the
+# only moment the choice can be made: `skip_neuter` decides whether Arxan's 48 stubs are patched
+# before the Arxan entry stub runs, and there is no un-neutering a live process. Editing either
+# one while the game is running changes nothing and says so in the log.
+{KEY_ENABLED} = {str(settings[KEY_ENABLED]).lower()}
+{KEY_SKIP_NEUTER} = {str(settings[KEY_SKIP_NEUTER]).lower()}
+
+# LIVE. Re-read by the probe's poller thread through `ds2_hotkey_config::reload::HotFile`, which
+# compares the file's TEXT rather than its mtime -- a Proton prefix sits on filesystems that stamp
+# mtime to a whole second, so two edits inside one second would be invisible to an mtime watcher.
+# An edit here takes effect within one poll interval, without restarting the game. Neither changes
+# WHAT is measured: the byte windows and their baselines are fixed when the hook goes in.
+#
+# Defaults shown. Uncomment to change.
+# {KEY_POLL_INTERVAL_MS} = {DEFAULT_POLL_INTERVAL_MS}
+# {KEY_HEARTBEAT_INTERVAL_MS} = {DEFAULT_HEARTBEAT_INTERVAL_MS}
+"""
+
+
+def write_config(directory: Path, probe: str) -> tuple[Path, str]:
+    """Write the config for `probe` into `directory`; return the path and what was written."""
+    path = directory / CONFIG_NAME
+    text = config_text(probe)
+    path.write_text(text, encoding="utf-8")
+    return path, text
+
+
+def quoted_config(text: str, indent: str = "    ") -> str:
+    """The config file's own lines, indented, for a transcript.
+
+    PRINTED IN FULL rather than summarised. The configuration under test is the variable this
+    whole change exists to make visible, and a block that says "wrote the config" is exactly the
+    claim that turned out to be false last time.
+    """
+    return "\n".join(f"{indent}{line}" if line else indent.rstrip() for line in text.splitlines())
 
 
 def report_environment(probe: str) -> None:
@@ -615,26 +762,28 @@ def report_environment(probe: str) -> None:
     print(f"[env] built DLL    {BUILT_DLL}")
     variables = launch_env(probe)
     print("[env] launch with  " + " ".join(f"{k}={v}" for k, v in variables.items()))
+    print(f"[env] config       {GAME_DIR / CONFIG_NAME}")
     if probe != "off":
         _, expected_arm = PROBE_ARMS[probe]
         print(f"[env] probe arm    {probe} -- the DLL must report back arm={expected_arm}")
     if steam_running():
-        # EVERY variable above rides this channel, not just the override. Listing them by name
-        # matters: someone who has internalised "the WINEDLLOVERRIDES caveat" will not
-        # necessarily realise it applies just as much to the two probe variables, and a probe
-        # variable that goes missing produces a run that looks like the DLL simply did nothing.
+        # ONLY the override rides this channel now. The probe settings used to be named here too,
+        # and were the reason this warning existed at all; they are in the config file precisely
+        # so that an already-running Steam client cannot lose them.
         print(
             "[env] steam        ALREADY RUNNING -- `steam -applaunch` hands the request to the\n"
             "                   running client over IPC, and the game then inherits THAT\n"
-            "                   client's environment. Every variable listed above is at risk,\n"
-            "                   including the probe ones. If the run comes back with no\n"
-            "                   testimony, or with the probe reporting probe=off, that is the\n"
-            "                   first thing to rule out: quit Steam and re-run so this\n"
-            "                   invocation starts the client, or set the per-app launch options\n"
-            "                   to\n"
+            "                   client's environment. WINEDLLOVERRIDES is therefore at risk, and\n"
+            "                   it is the one setting that cannot move into the config file:\n"
+            "                   Wine reads it to decide whether to map our DLL at all. If the run\n"
+            "                   comes back with no testimony, that is the first thing to rule\n"
+            "                   out -- quit Steam and re-run so this invocation starts the\n"
+            "                   client, or set the per-app launch options to\n"
             "                     "
             + " ".join(f'{k}="{v}"' for k, v in variables.items())
-            + " %command%"
+            + " %command%\n"
+            "                   The probe settings are NOT at risk: they are in the config file,\n"
+            "                   which the DLL reads off disk itself."
         )
     else:
         print(
@@ -670,26 +819,51 @@ def dry_run(probe: str, observe: float) -> int:
     else:
         print(f"[dry-run] staged   <absent>  {staged}")
 
+    config_path = GAME_DIR / CONFIG_NAME
+    if config_path.is_file():
+        current = config_path.read_text(encoding="utf-8")
+        if current == config_text(probe):
+            print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
+        else:
+            print("[dry-run] config   present and DIFFERS; a real run would replace it")
+            print(f"[dry-run]          {config_path}")
+    else:
+        print(f"[dry-run] config   <absent>  {config_path}")
+
     log_path = GAME_DIR / LOG_NAME
     environment = " ".join(f"{k}={v}" for k, v in launch_env(probe).items())
     print(f"[dry-run] would copy   {BUILT_DLL}")
     print(f"[dry-run]         to   {staged}")
+    # THE CONFIGURATION UNDER TEST, VERBATIM. It is the whole variable this run turns on, so a
+    # dry-run that did not show it would be hiding the one thing it exists to preview.
+    print(f"[dry-run] would write  {config_path}")
+    print(quoted_config(config_text(probe), indent="[dry-run]   | "))
     print(f"[dry-run] would launch env {environment} steam -applaunch {APPID}")
     print(f"[dry-run] would poll   {log_path}")
+    # The DLL echoes the config back BEFORE it decides anything, so these are the first lines a
+    # real run puts in the log. Previewing them in that order is what lets someone reading a real
+    # log compare it line for line.
+    settings, expected_arm = PROBE_ARMS[probe]
+    enabled = str(settings[KEY_ENABLED]).lower()
+    skip = str(settings[KEY_SKIP_NEUTER]).lower()
+    print(f"[dry-run]     expect  {CONFIG_LINE_PREFIX} file=\"{config_path}\" status=found bytes=..")
+    print(f"[dry-run]             {CONFIG_LINE_PREFIX} [{CONFIG_SECTION}] {KEY_ENABLED}=\"{enabled}\" {KEY_SKIP_NEUTER}=\"{skip}\" {KEY_POLL_INTERVAL_MS}=<absent> {KEY_HEARTBEAT_INTERVAL_MS}=<absent>")
+    print(f"[dry-run]             {CONFIG_LINE_PREFIX} resolved probe={'on' if probe != 'off' else 'off'} arm={expected_arm or 'neuter-arxan'} poll={DEFAULT_POLL_INTERVAL_MS}ms heartbeat={DEFAULT_HEARTBEAT_INTERVAL_MS}ms ...")
     print(f"[dry-run]         for  a line starting {ARXAN_LINE_PREFIX!r}")
     print(f"[dry-run]         upto {TESTIMONY_BUDGET_SECONDS:.0f}s, then FAIL with exit {EXIT_NO_TESTIMONY}")
 
     if probe == "off":
         print("[dry-run] probe     off -- no probe lines expected, no verdict block")
     else:
-        _, expected_arm = PROBE_ARMS[probe]
         print(f"[dry-run] probe     {probe}")
         print(f"[dry-run]         then observe {observe:.0f}s for {PROBE_LINE_PREFIX!r} lines:")
         print(f"[dry-run]           {PROBE_LINE_PREFIX} install ... arm={expected_arm} rva=... va=...")
         print(f"[dry-run]           {PROBE_LINE_PREFIX} install original=[..] expected=[..] prologue-match=true")
         print(f"[dry-run]           {PROBE_LINE_PREFIX} install minhook=ok trampoline=0x.. patched=[..] site-jmp=true")
+        print(f"[dry-run]           {PROBE_LINE_PREFIX} watching arm={expected_arm} poll={DEFAULT_POLL_INTERVAL_MS}ms heartbeat={DEFAULT_HEARTBEAT_INTERVAL_MS}ms site-window=.. trampoline-window=..")
         print(f"[dry-run]           {PROBE_LINE_PREFIX} heartbeat uptime=..s arm={expected_arm} hits=.. site=intact tramp=intact site-diverged=0 tramp-diverged=0")
         print(f"[dry-run]           {PROBE_LINE_PREFIX} SITE|TRAMP  ... state=DIVERGED ... expected=[..] observed=[..]   (on any change)")
+        print(f"[dry-run]           {PROBE_LINE_PREFIX} config ... RELOADED|STARTUP-ONLY-IGNORED  (only if the file is edited mid-run)")
         print(f"[dry-run]           {PROBE_LINE_PREFIX} detach ...                                          (orderly exit only)")
         print(f"[dry-run]         and REFUSE a verdict (exit {EXIT_NO_PROBE_VERDICT}) if the log's arm is not {expected_arm!r}")
 
@@ -709,6 +883,12 @@ def launch(probe: str, observe: float) -> int:
     staged, digest = stage()
     print(f"[stage] {staged}")
     print(f"[stage] sha256 {digest}")
+
+    # BEFORE LAUNCHING, and after staging: the DLL reads this in `DllMain`, so it has to be on
+    # disk before the game starts, and it is rewritten every run so a file left over from the
+    # other arm cannot decide this one.
+    config_path, config = write_config(GAME_DIR, probe)
+    print(f"[config] {config_path}")
 
     log_path = GAME_DIR / LOG_NAME
     # Take the tail's mark BEFORE launching. Everything it hands back afterwards is this run's.
@@ -774,6 +954,8 @@ def launch(probe: str, observe: float) -> int:
                 "attach_line": verdict.get("attach_line"),
                 "waited": verdict["waited"],
                 "game_pids": pgrep_exact(GAME_COMM),
+                "config_path": config_path,
+                "config": config,
             }
         )
     )
@@ -855,13 +1037,138 @@ def selftest() -> int:
     # installed" or, worse, a false "wrong arm". This is the only place that failure is cheap.
     probe_src = (REPO_ROOT / "crates/ds2-loader/src/arxan_probe.rs").read_text()
     check(f'"{PROBE_LINE_PREFIX}"' in probe_src, f"the DLL writes the probe prefix ({PROBE_LINE_PREFIX})")
-    check(f'"{ENV_PROBE}"' in probe_src, f"the DLL reads {ENV_PROBE}")
-    check(f'"{ENV_SKIP_NEUTER}"' in probe_src, f"the DLL reads {ENV_SKIP_NEUTER}")
+    check(f'"{CONFIG_LINE_PREFIX}"' in probe_src, f"the DLL echoes what it read ({CONFIG_LINE_PREFIX})")
+    check(f'"{CONFIG_NAME}"' in probe_src, f"the DLL reads the config file this writes ({CONFIG_NAME})")
+    check(f'"{CONFIG_SECTION}"' in probe_src, f"the DLL reads the section this writes ([{CONFIG_SECTION}])")
+    for key in (KEY_ENABLED, KEY_SKIP_NEUTER, KEY_POLL_INTERVAL_MS, KEY_HEARTBEAT_INTERVAL_MS):
+        check(f'"{key}"' in probe_src, f"the DLL reads {CONFIG_SECTION}.{key}")
     for arm, (_, expected_arm) in PROBE_ARMS.items():
         if expected_arm is not None:
             check(f'"{expected_arm}"' in probe_src, f"the DLL can report arm={expected_arm} (--probe {arm})")
     rva_src = (REPO_ROOT / "crates/ds2-rva/src/lib.rs").read_text()
     check("ARXAN_PROBE_HOOK_SITE" in rva_src, "the hook site RVA is recorded in ds2-rva")
+
+    # THE ENVIRONMENT IS NO LONGER A CHANNEL, and this is the check that keeps it that way. The
+    # variables did not merely stop working -- they were measured arriving unset, because
+    # `steam -applaunch` starts the game from an already-running client's environment. Anything
+    # that reads configuration back out of the environment reintroduces that failure silently.
+    check(
+        "std::env::var" not in probe_src and "std::env::var" not in loader_src,
+        "the DLL reads NO configuration from the environment",
+    )
+    check(
+        set(launch_env("neuter")) == {"WINEDLLOVERRIDES"},
+        "the launch environment carries only WINEDLLOVERRIDES",
+    )
+
+    # THE CONFIG FILE ITSELF. It is written by this script and parsed by the DLL, and the two
+    # halves are checked here against a parser that mirrors the DLL's rules: `[section]` headers,
+    # `key = value`, `#` comments, strict `true`/`false`.
+    def parse_config(text: str) -> tuple[dict[tuple[str, str], str], list[str]]:
+        """A mirror of `ds2_hotkey_config::kv::KeyValues`, to the extent this file uses it."""
+        values: dict[tuple[str, str], str] = {}
+        unusable: list[str] = []
+        section = ""
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("["):
+                if not line.endswith("]"):
+                    unusable.append(line)
+                    continue
+                section = line[1:-1].strip()
+                continue
+            key, sep, value = line.partition("=")
+            if not sep or not key.strip():
+                unusable.append(line)
+                continue
+            value = value.strip()
+            if not value.startswith('"') and " #" in value:
+                value = value.split(" #", 1)[0].strip()
+            values[(section, key.strip())] = value.strip('"')
+        return values, unusable
+
+    for arm, (settings, expected_arm) in PROBE_ARMS.items():
+        text = config_text(arm)
+        values, unusable = parse_config(text)
+        check(not unusable, f"--probe {arm} writes a file with no unusable lines")
+        for key, wanted in settings.items():
+            check(
+                values.get((CONFIG_SECTION, key)) == str(wanted).lower(),
+                f"--probe {arm} writes [{CONFIG_SECTION}] {key} = {str(wanted).lower()}",
+            )
+        # The DLL accepts `true` and `false` and nothing else. A generator that emitted Python's
+        # `True` would read as a rejected value and the probe would silently stay off.
+        check(
+            all(
+                values.get((CONFIG_SECTION, key)) in ("true", "false")
+                for key in (KEY_ENABLED, KEY_SKIP_NEUTER)
+            ),
+            f"--probe {arm} writes booleans the DLL's strict parser accepts",
+        )
+        # The two live keys stay commented out, so the DLL's own defaults are what run. Writing
+        # them would silently pin the cadence to whatever this script happened to believe.
+        check(
+            (CONFIG_SECTION, KEY_POLL_INTERVAL_MS) not in values
+            and (CONFIG_SECTION, KEY_HEARTBEAT_INTERVAL_MS) not in values,
+            f"--probe {arm} leaves the live keys at the DLL's defaults",
+        )
+        check(
+            f"# {KEY_POLL_INTERVAL_MS} = {DEFAULT_POLL_INTERVAL_MS}" in text
+            and f"# {KEY_HEARTBEAT_INTERVAL_MS} = {DEFAULT_HEARTBEAT_INTERVAL_MS}" in text,
+            f"--probe {arm} documents the live keys and their defaults in the file",
+        )
+
+    # THE ARMS MUST DIFFER, and in exactly one key. If two arms ever generated the same file the
+    # A/B comparison would be two runs of the same experiment, and the arm-readback guard would
+    # not catch it because the DLL would be reporting truthfully.
+    neuter_values, _ = parse_config(config_text("neuter"))
+    skip_values, _ = parse_config(config_text("skip-neuter"))
+    differing = {key for key in neuter_values | skip_values if neuter_values.get(key) != skip_values.get(key)}
+    check(
+        differing == {(CONFIG_SECTION, KEY_SKIP_NEUTER)},
+        f"the two arms differ in exactly one key ({KEY_SKIP_NEUTER})",
+    )
+    check(
+        config_text("neuter") == config_text("neuter"),
+        "the generated config is deterministic -- same arm, same bytes",
+    )
+
+    # WRITING IT, for real, to a temp directory. `write_config` is the one function here that
+    # touches the game directory before a launch, and a run whose config never landed looks
+    # exactly like a run whose probe never installed.
+    with tempfile.TemporaryDirectory() as tmp:
+        directory = Path(tmp)
+        path, written = write_config(directory, "skip-neuter")
+        check(path == directory / CONFIG_NAME, f"the config is written as {CONFIG_NAME}")
+        check(path.read_text(encoding="utf-8") == written, "what was written is what was returned")
+        check(
+            parse_config(path.read_text(encoding="utf-8"))[0][(CONFIG_SECTION, KEY_SKIP_NEUTER)]
+            == "true",
+            "the file on disk parses back to the arm that was requested",
+        )
+        # REWRITING OVER THE OTHER ARM. Both arms run back to back with no user action between
+        # them, so the second run must fully replace the first run's file rather than merge with
+        # it or append to it.
+        _, rewritten = write_config(directory, "neuter")
+        check(
+            path.read_text(encoding="utf-8") == rewritten == config_text("neuter"),
+            "a second arm's write REPLACES the first arm's file",
+        )
+        check(
+            parse_config(path.read_text(encoding="utf-8"))[0][(CONFIG_SECTION, KEY_SKIP_NEUTER)]
+            == "false",
+            "and the replaced file parses back to the second arm",
+        )
+
+    # The transcript has to carry the file, or the arm under test is invisible to whoever reads
+    # the block later.
+    quoted = quoted_config(config_text("skip-neuter"), indent="    | ")
+    check(
+        f"{KEY_SKIP_NEUTER} = true" in quoted and quoted.startswith("    | "),
+        "the config is quoted into the transcript verbatim and indented",
+    )
 
     # THE VERDICT LOGIC. It is the only code here that turns lines into a conclusion, so it is the
     # only code here that can turn a real finding into the wrong headline. Every branch that a run
@@ -923,6 +1230,32 @@ def selftest() -> int:
 
     block, code = verdict_for(installed)
     check(code == EXIT_NO_PROBE_VERDICT and "never reported a heartbeat" in block, "installed but silent is not a result")
+
+    # A config edited mid-window is not a footnote: the measurement cadence may have changed
+    # underneath the numbers above, and a reader comparing two arms has to be told.
+    touched = [
+        f"{PROBE_LINE_PREFIX} config uptime=30.0s RELOADED poll=1000ms heartbeat=10000ms -> poll=1000ms heartbeat=60000ms",
+    ]
+    block, code = verdict_for(installed + touched + [healthy])
+    check(code == EXIT_OK, "a mid-run config reload is not itself a failure")
+    check("CONFIG FILE WAS TOUCHED" in block, "a mid-run config reload is reported, not swallowed")
+    check("heartbeat=60000ms" in block, "the reload is quoted verbatim")
+
+    ignored = [
+        f"{PROBE_LINE_PREFIX} config uptime=30.0s STARTUP-ONLY-IGNORED enabled=\"true\" skip_neuter=\"true\" -- this run is still arm=neuter-arxan",
+    ]
+    block, code = verdict_for(installed + ignored + [healthy])
+    check(
+        code == EXIT_OK and "STARTUP-ONLY-IGNORED" in block,
+        "an attempt to switch arms mid-run is reported and does NOT change the arm",
+    )
+    check(
+        "arm            neuter-arxan" in block,
+        "and the verdict still reports the arm that actually ran",
+    )
+
+    block, _ = verdict_for(installed + [healthy])
+    check("CONFIG FILE WAS TOUCHED" not in block, "an untouched config says nothing at all")
 
     block, _ = verdict_for(installed + [healthy], detach=f"{PROBE_LINE_PREFIX} detach uptime=612.4s arm=neuter-arxan hits=99 site=intact tramp=intact site-diverged=0 tramp-diverged=0")
     check("detach uptime=612.4s" in block, "an orderly exit is reported as one")

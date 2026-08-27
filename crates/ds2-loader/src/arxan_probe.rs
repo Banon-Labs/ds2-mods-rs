@@ -35,10 +35,10 @@
 //! looks at this page and dearxan was irrelevant here*. One run cannot tell them apart, so the
 //! probe has two arms and both must be run:
 //!
-//! | arm | env | what runs | what a surviving detour means |
+//! | arm | `[arxan_probe]` in `ds2-mods.toml` | what runs | what a surviving detour means |
 //! | --- | --- | --- | --- |
-//! | [`Arm::NeuterArxan`] | `DS2_ARXAN_PROBE=1` | `neuter_arxan` patches the stubs, then the probe installs | hooking works *with dearxan* |
-//! | [`Arm::SkipNeuterArxan`] | `DS2_ARXAN_PROBE=1 DS2_ARXAN_PROBE_SKIP_NEUTER=1` | stubs left intact; the probe installs anyway | Arxan was never a threat to this site |
+//! | [`Arm::NeuterArxan`] | `enabled = true`, `skip_neuter = false` | `neuter_arxan` patches the stubs, then the probe installs | hooking works *with dearxan* |
+//! | [`Arm::SkipNeuterArxan`] | `enabled = true`, `skip_neuter = true` | stubs left intact; the probe installs anyway | Arxan was never a threat to this site |
 //!
 //! The skip arm does **not** simply drop the `neuter_arxan` call and install from `DllMain`.
 //! That would change two variables at once -- the Arxan patching *and* the moment the hook goes
@@ -57,45 +57,30 @@
 //! gone.
 
 use std::ffi::c_void;
+use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use ds2_game_base::mem;
 use ds2_hook::{MH_EnableHook, MH_Initialize, MH_STATUS, MhHook};
+use ds2_hotkey_config::kv::KeyValues;
+use ds2_hotkey_config::reload::{FileChange, HotFile};
 
 #[cfg(not(target_arch = "x86_64"))]
 compile_error!(
     "the probe's detour is hand-written x86-64 assembly and DARK SOULS II ships x86-64 only"
 );
 
-/// `1` in `DS2_ARXAN_PROBE` installs the detour. Anything else -- including unset, `true`, `yes`
-/// and `0` -- leaves this DLL behaving exactly as it does without this module.
-pub const ENV_PROBE: &str = "DS2_ARXAN_PROBE";
-
-/// `1` in `DS2_ARXAN_PROBE_SKIP_NEUTER` selects [`Arm::SkipNeuterArxan`]. Honoured **only** when
-/// [`ENV_PROBE`] is also `1`: skipping the Arxan patch with no probe watching produces no
-/// evidence at all, so a stale variable in a shell cannot quietly turn an ordinary run into an
-/// unprotected one.
-pub const ENV_SKIP_NEUTER: &str = "DS2_ARXAN_PROBE_SKIP_NEUTER";
-
-/// The only value either variable accepts. Strict on purpose: a typo that silently read as "off"
-/// would produce a run that looks like the probe never reported, which is the one failure mode
-/// this experiment must never confuse with a real result. The raw string is logged either way,
-/// so a rejected value is visible rather than inferred.
-const ENV_TRUE: &str = "1";
-
 /// Prefix on every line this module writes. Distinct from `ds2-loader:` so the probe's testimony
 /// and the loader's stay separable, by a reader and by `scripts/ds2-run.py`.
 pub const PROBE_LINE_PREFIX: &str = "ds2-probe:";
 
-/// How often the two pollers re-read their windows.
-const POLL_INTERVAL: Duration = Duration::from_secs(1);
-
-/// How many polls between heartbeats. Every state *change* is logged the instant it is seen; the
-/// heartbeat exists so that a log which says nothing is distinguishable from a log that stopped,
-/// and so a crash has a time of death. Ten seconds keeps a multi-hour session's log small.
-const POLLS_PER_HEARTBEAT: u32 = 10;
+/// Prefix on the lines that echo the config back. `ds2-loader:` rather than `ds2-probe:` because
+/// this is the LOADER saying what it read before it decided anything -- it is written even when
+/// the probe is off, and a probe that never installs must not be the only thing that could have
+/// explained why.
+pub const CONFIG_LINE_PREFIX: &str = "ds2-loader: config";
 
 /// Bytes watched at the hook site. MinHook writes five (`e9 rel32`); this window is wider so a
 /// divergence report shows the surrounding instructions rather than five bytes with no context,
@@ -141,64 +126,432 @@ impl Arm {
     }
 }
 
-/// What the environment asked for, resolved once at `DLL_PROCESS_ATTACH`.
+// ================================================================================================
+// CONFIGURATION: A FILE THIS DLL READS, NOT AN ENVIRONMENT THE LAUNCHER HOPES IT INHERITS
+//
+// This used to be `DS2_ARXAN_PROBE=1` and `DS2_ARXAN_PROBE_SKIP_NEUTER=1`, set in the launcher's
+// own environment. IT DOES NOT WORK, and that is measured rather than suspected -- a real run
+// produced, from this DLL's own attach line:
+//
+//     ds2-loader: attach awaiting-arxan-callback probe=off arm=neuter-arxan
+//                 DS2_ARXAN_PROBE=<unset> DS2_ARXAN_PROBE_SKIP_NEUTER=<unset>
+//
+// `steam -applaunch` hands the request to an ALREADY-RUNNING Steam client over IPC, and that
+// client starts the game from ITS environment -- not from the one `scripts/ds2-run.py` set.
+// `WINEDLLOVERRIDES` survives only because it is in the per-app Steam launch options, which is a
+// different channel and the one channel that does reach the game.
+//
+// The two ways to make the environment work were both rejected, correctly. Quitting Steam before
+// every run, or editing the launch options between arm A and arm B, are manual steps BETWEEN THE
+// TWO HALVES OF ONE EXPERIMENT -- and a manual step there is a step that eventually gets skipped,
+// producing a well-formed verdict for an arm nobody ran.
+//
+// A file beside the DLL has none of this. The launcher writes it, this DLL reads it out of its
+// own game directory, and it travels through no IPC at all. Both arms now run back to back with
+// nothing to do in between. DO NOT REINTRODUCE THE ENVIRONMENT VARIABLES.
+// ================================================================================================
+
+/// The settings file, beside `DarkSoulsII.exe` in the game directory.
+///
+/// Named for the repo and not for this module: it is one file for every mod in this workspace,
+/// each owning a `[section]` in it. `scripts/ds2-run.py` writes it before every launch and
+/// `--selftest` checks this exact spelling against the script's copy, because a rename on one
+/// side alone turns every run into a silent "the probe never installed".
+pub const CONFIG_FILE_NAME: &str = "ds2-mods.toml";
+
+/// This module's section.
+pub const CONFIG_SECTION: &str = "arxan_probe";
+
+/// Install the detour at all. **Startup-only** -- see [`ProbeConfig::load`].
+pub const KEY_ENABLED: &str = "enabled";
+
+/// Select [`Arm::SkipNeuterArxan`]. Honoured **only** when [`KEY_ENABLED`] is also true: skipping
+/// the Arxan patch with no probe watching produces no evidence at all, so a stale line in a file
+/// cannot quietly turn an ordinary run into an unprotected one. **Startup-only.**
+pub const KEY_SKIP_NEUTER: &str = "skip_neuter";
+
+/// How often the two byte pollers re-read their windows. **Live** -- see [`LiveConfig`].
+pub const KEY_POLL_INTERVAL_MS: &str = "poll_interval_ms";
+
+/// How often the heartbeat line is written. **Live** -- see [`LiveConfig`].
+pub const KEY_HEARTBEAT_INTERVAL_MS: &str = "heartbeat_interval_ms";
+
+/// Default for [`KEY_POLL_INTERVAL_MS`]. A second: fast enough that a reversion is dated to
+/// within one, slow enough to be free.
+const DEFAULT_POLL_INTERVAL_MS: u64 = 1_000;
+
+/// Default for [`KEY_HEARTBEAT_INTERVAL_MS`]. Every state *change* is logged the instant it is
+/// seen; the heartbeat exists so that a log which says nothing is distinguishable from a log that
+/// stopped, and so a crash has a time of death. Ten seconds keeps a multi-hour session's log
+/// small.
+const DEFAULT_HEARTBEAT_INTERVAL_MS: u64 = 10_000;
+
+/// Floor on the poll interval. Zero would be a busy loop on a thread that runs for the life of
+/// the process, which is a way to change the thing being measured rather than to measure it
+/// harder.
+const MIN_POLL_INTERVAL_MS: u64 = 100;
+/// Ceiling on the poll interval. Past a minute the poller cannot date a reversion usefully.
+const MAX_POLL_INTERVAL_MS: u64 = 60_000;
+/// Floor on the heartbeat interval. Below a second the heartbeat is the log.
+const MIN_HEARTBEAT_INTERVAL_MS: u64 = 1_000;
+/// Ceiling on the heartbeat interval. An hour.
+const MAX_HEARTBEAT_INTERVAL_MS: u64 = 3_600_000;
+
+/// Whether the file was there at all, which is a DIFFERENT fact from what it said.
+///
+/// A missing file and a file that says `enabled = false` produce the same behaviour and must
+/// never produce the same log line: one means the launcher did not write it, or wrote it
+/// somewhere else, and the other means it wrote it and asked for the probe to be off.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ConfigFileStatus {
+    /// Read, with this many bytes in it.
+    Found {
+        /// Size of the text that was read.
+        bytes: usize,
+    },
+    /// The game directory resolved, and there is no such file in it.
+    Missing,
+    /// The file is there and could not be read. Carries the OS's reason.
+    Unreadable(String),
+    /// `current_exe` failed, so there is no directory to look in and no path to print.
+    NoGameDirectory,
+}
+
+impl ConfigFileStatus {
+    /// The `status=` token. Lowercase for the ordinary case, SHOUTING for the ones that mean the
+    /// run is not configured the way anyone asked.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Found { .. } => "found",
+            Self::Missing => "MISSING",
+            Self::Unreadable(_) => "UNREADABLE",
+            Self::NoGameDirectory => "NO-GAME-DIRECTORY",
+        }
+    }
+}
+
+/// The knobs that can change while the game is running, and do.
+///
+/// Both are read by the poller thread through a [`HotFile`] once per poll, so an edit takes
+/// effect within one interval. Neither changes WHAT is measured -- the byte windows and their
+/// baselines are fixed at install -- only how often it is looked at and how often that is
+/// written down. That is why they are safe to move mid-run, and why the arm is not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LiveConfig {
+    /// How often the two byte pollers re-read their windows.
+    pub poll_interval_ms: u64,
+    /// How often the heartbeat line is written.
+    pub heartbeat_interval_ms: u64,
+}
+
+impl Default for LiveConfig {
+    fn default() -> Self {
+        Self {
+            poll_interval_ms: DEFAULT_POLL_INTERVAL_MS,
+            heartbeat_interval_ms: DEFAULT_HEARTBEAT_INTERVAL_MS,
+        }
+    }
+}
+
+impl LiveConfig {
+    /// The `poll=..ms heartbeat=..ms` tail, shared by the config echo and the watching line so
+    /// the two cannot disagree.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        format!(
+            "poll={}ms heartbeat={}ms",
+            self.poll_interval_ms, self.heartbeat_interval_ms
+        )
+    }
+
+    /// Read both knobs out of an already-parsed file, appending a line to `problems` for anything
+    /// that could not be used. A key the file does not mention keeps the default.
+    fn read(parsed: &KeyValues, problems: &mut Vec<String>) -> Self {
+        let default = Self::default();
+        Self {
+            poll_interval_ms: read_millis(
+                parsed,
+                KEY_POLL_INTERVAL_MS,
+                default.poll_interval_ms,
+                MIN_POLL_INTERVAL_MS,
+                MAX_POLL_INTERVAL_MS,
+                problems,
+            ),
+            heartbeat_interval_ms: read_millis(
+                parsed,
+                KEY_HEARTBEAT_INTERVAL_MS,
+                default.heartbeat_interval_ms,
+                MIN_HEARTBEAT_INTERVAL_MS,
+                MAX_HEARTBEAT_INTERVAL_MS,
+                problems,
+            ),
+        }
+    }
+}
+
+/// What the config file asked for, resolved once at `DLL_PROCESS_ATTACH`.
 pub struct ProbeConfig {
     /// Whether to install the detour at all.
     pub enabled: bool,
     /// Which arm to run. Forced to [`Arm::NeuterArxan`] when `enabled` is false.
     pub arm: Arm,
-    /// The raw strings, kept so the log can show what was actually set rather than what was
-    /// understood. A run that reports `probe=off` next to `DS2_ARXAN_PROBE="true"` diagnoses
-    /// itself; one that reports only `probe=off` sends someone hunting Steam's environment
-    /// propagation for an hour.
-    raw_probe: Option<String>,
-    raw_skip: Option<String>,
+    /// The knobs the poller thread will go on re-reading.
+    pub live: LiveConfig,
+    /// Where the file was looked for. `None` only when the game directory did not resolve.
+    path: Option<PathBuf>,
+    /// Whether it was there.
+    status: ConfigFileStatus,
+    /// The raw text of each key AS WRITTEN, kept so the log can show what was in the file rather
+    /// than what was understood from it. A run that reports `probe=off` next to
+    /// `enabled="ture"` diagnoses itself; one that reports only `probe=off` sends someone
+    /// hunting a launcher bug that is not there.
+    raw: Vec<(&'static str, Option<String>)>,
+    /// Every line and every value that could not be used, already rendered for the log.
+    problems: Vec<String>,
 }
 
 impl ProbeConfig {
-    /// Read [`ENV_PROBE`] and [`ENV_SKIP_NEUTER`].
+    /// Read `<Game>/ds2-mods.toml`.
     ///
-    /// Under Proton these arrive the same way `WINEDLLOVERRIDES` does -- through the environment
-    /// Steam hands the Wine process -- so they share its failure mode: a Steam client that was
-    /// **already running** launches the game from *its* environment, not from the one
-    /// `scripts/ds2-run.py` set. That is why the resolved config is logged rather than assumed,
-    /// and why the script refuses to report a verdict for an arm the log does not confirm.
-    pub fn from_env() -> Self {
-        let raw_probe = std::env::var(ENV_PROBE).ok();
-        let raw_skip = std::env::var(ENV_SKIP_NEUTER).ok();
-        let enabled = raw_probe.as_deref() == Some(ENV_TRUE);
-        let arm = if enabled && raw_skip.as_deref() == Some(ENV_TRUE) {
+    /// # Everything here is STARTUP-ONLY, and that is not a limitation to work around
+    ///
+    /// `enabled` and `skip_neuter` are consumed in `DllMain`, before `DarkSoulsII.exe`'s entry
+    /// point, because that is the only moment at which the choice between them can be made:
+    /// [`Arm::NeuterArxan`] patches Arxan's 48 stubs before the Arxan entry stub runs, and once
+    /// that has happened or not happened, it cannot be undone. There is no un-neutering a live
+    /// process. An edit to either key applies to the NEXT run and the poller says so out loud
+    /// when it sees one -- see [`watch_live_config`].
+    ///
+    /// [`LiveConfig`] is the other half, and it is genuinely live.
+    pub fn load() -> Self {
+        let Some(path) = config_path() else {
+            return Self::with_status(
+                None,
+                ConfigFileStatus::NoGameDirectory,
+                &KeyValues::default(),
+            );
+        };
+        let (status, text) = match std::fs::read_to_string(&path) {
+            Ok(text) => (ConfigFileStatus::Found { bytes: text.len() }, text),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                (ConfigFileStatus::Missing, String::new())
+            }
+            Err(error) => (
+                ConfigFileStatus::Unreadable(error.to_string()),
+                String::new(),
+            ),
+        };
+        Self::with_status(Some(path), status, &KeyValues::parse(&text))
+    }
+
+    fn with_status(path: Option<PathBuf>, status: ConfigFileStatus, parsed: &KeyValues) -> Self {
+        let mut problems: Vec<String> = parsed
+            .rejected()
+            .iter()
+            .map(|rejected| {
+                format!(
+                    "{CONFIG_LINE_PREFIX} REJECTED line={} text={:?} -- {}",
+                    rejected.line,
+                    rejected.text,
+                    rejected.reason.as_str()
+                )
+            })
+            .collect();
+
+        // A MISSPELLED KEY PARSES PERFECTLY. `enbaled = true` is a valid assignment to a key
+        // called `enbaled`, so the reader cannot reject it and only this module knows no such key
+        // exists. Without naming it, the sole evidence of the typo would be `enabled` reading as
+        // absent -- which says what did not happen, but not why.
+        const KNOWN: [&str; 4] = [
+            KEY_ENABLED,
+            KEY_SKIP_NEUTER,
+            KEY_POLL_INTERVAL_MS,
+            KEY_HEARTBEAT_INTERVAL_MS,
+        ];
+        for key in parsed.keys(CONFIG_SECTION) {
+            if !KNOWN.contains(&key) {
+                problems.push(format!(
+                    "{CONFIG_LINE_PREFIX} UNKNOWN [{CONFIG_SECTION}] {key:?} -- not a key this \
+                     DLL reads; it was ignored. Known keys: {}",
+                    KNOWN.join(", ")
+                ));
+            }
+        }
+
+        let enabled = read_bool(parsed, KEY_ENABLED, false, &mut problems);
+        let skip_neuter = read_bool(parsed, KEY_SKIP_NEUTER, false, &mut problems);
+        let live = LiveConfig::read(parsed, &mut problems);
+
+        // `skip_neuter` alone is not an arm. Leaving Arxan's stubs live with nothing watching
+        // produces no evidence and an unprotected process, so the enable is what gates it.
+        let arm = if enabled && skip_neuter {
             Arm::SkipNeuterArxan
         } else {
             Arm::NeuterArxan
         };
+
         Self {
             enabled,
             arm,
-            raw_probe,
-            raw_skip,
+            live,
+            path,
+            status,
+            raw: [
+                KEY_ENABLED,
+                KEY_SKIP_NEUTER,
+                KEY_POLL_INTERVAL_MS,
+                KEY_HEARTBEAT_INTERVAL_MS,
+            ]
+            .into_iter()
+            .map(|key| (key, parsed.get(CONFIG_SECTION, key).map(str::to_owned)))
+            .collect(),
+            problems,
         }
     }
 
-    /// The `probe=... arm=... DS2_ARXAN_PROBE=...` tail appended to the loader's attach line.
+    /// Every line to write before anything is decided: where the file was, whether it was there,
+    /// what it said verbatim, and everything in it that could not be used.
+    ///
+    /// This is the whole of the discipline the environment version had and must not lose. The old
+    /// attach line printed the raw variable values so a typo was visible; these print the raw
+    /// key values, the path they came from, and -- new, because a file can be absent in a way an
+    /// environment variable cannot -- whether the file existed at all.
+    #[must_use]
+    pub fn echo_lines(&self) -> Vec<String> {
+        let mut lines = vec![
+            format!(
+                // The path is quoted with Display and not with Debug: under Proton this is a
+                // Windows path, and Debug would double every backslash into something nobody can
+                // paste back. The quotes are what make a trailing space visible; the VALUES
+                // below still use Debug, where distinguishing "" from " " genuinely matters.
+                "{CONFIG_LINE_PREFIX} file={} status={}{}",
+                match &self.path {
+                    Some(path) => format!("\"{}\"", path.display()),
+                    None => "<unresolved>".to_string(),
+                },
+                self.status.as_str(),
+                match &self.status {
+                    ConfigFileStatus::Found { bytes } => format!(" bytes={bytes}"),
+                    ConfigFileStatus::Unreadable(error) => format!(" error={error:?}"),
+                    ConfigFileStatus::Missing =>
+                        " -- no file, so every key below is its BUILT-IN DEFAULT. That is NOT \
+                         the same as a file that switches the probe off; scripts/ds2-run.py \
+                         writes one before every launch, so this means it did not, or wrote it \
+                         to a different directory than this one"
+                            .to_string(),
+                    ConfigFileStatus::NoGameDirectory =>
+                        " -- current_exe() failed, so there is no directory to look in".to_string(),
+                },
+            ),
+            format!(
+                "{CONFIG_LINE_PREFIX} [{CONFIG_SECTION}] {}",
+                self.raw
+                    .iter()
+                    .map(|(key, value)| format!("{key}={}", quote_value(value.as_deref())))
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            ),
+            format!(
+                "{CONFIG_LINE_PREFIX} resolved probe={} arm={} {} \
+                 (enabled/skip_neuter are STARTUP-ONLY; poll/heartbeat are live)",
+                if self.enabled { "on" } else { "off" },
+                self.arm.as_str(),
+                self.live.describe(),
+            ),
+        ];
+        lines.extend(self.problems.iter().cloned());
+        lines
+    }
+
+    /// The `probe=... arm=...` tail appended to the loader's attach line.
+    ///
+    /// Deliberately still carries `probe=` and `arm=`: `scripts/ds2-run.py` points at this line
+    /// when the probe produces no verdict, and a reader who has learned to check it must not find
+    /// it saying less than it used to.
+    #[must_use]
     pub fn describe(&self) -> String {
         format!(
-            "probe={} arm={} {ENV_PROBE}={} {ENV_SKIP_NEUTER}={}",
+            "probe={} arm={} config={} {}",
             if self.enabled { "on" } else { "off" },
             self.arm.as_str(),
-            quote_env(self.raw_probe.as_deref()),
-            quote_env(self.raw_skip.as_deref()),
+            self.status.as_str(),
+            self.live.describe(),
         )
     }
 }
 
-/// Render an environment value for the log: `<unset>`, or the value in quotes so an empty string
-/// and a stray trailing space are visible instead of invisible.
-fn quote_env(value: Option<&str>) -> String {
+/// `<Game>/ds2-mods.toml`, beside the running executable.
+///
+/// The same directory resolution the log uses, and deliberately the same call: a config the DLL
+/// reads and a log the DLL writes that disagreed about where the game is would be the worst
+/// possible pair of facts to debug from.
+fn config_path() -> Option<PathBuf> {
+    ds2_game_base::log::game_directory_path().map(|dir| dir.join(CONFIG_FILE_NAME))
+}
+
+/// Render a config value for the log: `<absent>`, or the value in quotes so an empty string and a
+/// stray trailing space are visible instead of invisible.
+fn quote_value(value: Option<&str>) -> String {
     match value {
         Some(value) => format!("{value:?}"),
-        None => "<unset>".to_string(),
+        None => "<absent>".to_string(),
     }
+}
+
+/// One boolean, strictly.
+///
+/// `true` and `false` and nothing else -- the spellings TOML uses, so the file stays valid TOML.
+/// Strict on purpose, and for the same reason the environment version accepted only `1`: a value
+/// that silently read as "off" produces a run that looks like the probe never reported, which is
+/// the one failure this experiment must never confuse with a real result. A rejected value keeps
+/// the default AND says so, carrying the text verbatim so it can be found in the file.
+fn read_bool(parsed: &KeyValues, key: &str, default: bool, problems: &mut Vec<String>) -> bool {
+    match parsed.get(CONFIG_SECTION, key) {
+        None => default,
+        Some("true") => true,
+        Some("false") => false,
+        Some(other) => {
+            problems.push(format!(
+                "{CONFIG_LINE_PREFIX} REJECTED [{CONFIG_SECTION}] {key}={other:?} -- expected \
+                 `true` or `false`; using the default {default}"
+            ));
+            default
+        }
+    }
+}
+
+/// One millisecond count, clamped, with both the rejection and the clamp reported.
+///
+/// A clamp is logged rather than applied quietly because the number in the file and the number in
+/// force would otherwise disagree with nothing saying so, and the heartbeat line prints the one
+/// in force.
+fn read_millis(
+    parsed: &KeyValues,
+    key: &str,
+    default: u64,
+    min: u64,
+    max: u64,
+    problems: &mut Vec<String>,
+) -> u64 {
+    let Some(text) = parsed.get(CONFIG_SECTION, key) else {
+        return default;
+    };
+    let Ok(value) = text.parse::<u64>() else {
+        problems.push(format!(
+            "{CONFIG_LINE_PREFIX} REJECTED [{CONFIG_SECTION}] {key}={text:?} -- expected a whole \
+             number of milliseconds; using the default {default}"
+        ));
+        return default;
+    };
+    let clamped = value.clamp(min, max);
+    if clamped != value {
+        problems.push(format!(
+            "{CONFIG_LINE_PREFIX} CLAMPED [{CONFIG_SECTION}] {key}={value} -- outside \
+             {min}..={max}; using {clamped}"
+        ));
+    }
+    clamped
 }
 
 /// One byte window as `48 89 5c 24 08 ...`, for a line a human reads and a script greps.
@@ -303,6 +656,13 @@ struct Watch {
     site_baseline: Vec<u8>,
     trampoline_address: usize,
     trampoline_baseline: Vec<u8>,
+    /// The two intervals as they were at install. The poller re-reads them from the file as it
+    /// goes, so this is a starting point rather than a setting.
+    live: LiveConfig,
+    /// The arm that was in force at install, so the poller can tell a mid-run edit to a
+    /// startup-only key from an edit to a live one and say which it is ignoring.
+    startup_enabled: bool,
+    startup_skip_neuter: bool,
 }
 
 /// Install the detour and start the pollers. Called from the Arxan callback in either arm, on the
@@ -318,7 +678,8 @@ struct Watch {
 /// [`ds2_rva::ARXAN_PROBE_HOOK_SITE`], whose derivation is recorded there; a wrong address means
 /// five bytes of some unrelated function are overwritten and everything the game does afterwards
 /// is undefined.
-pub unsafe fn install(arm: Arm) {
+pub unsafe fn install(config: &ProbeConfig) {
+    let arm = config.arm;
     let base = match mem::game_module_base() {
         Ok(base) => base,
         Err(error) => {
@@ -438,14 +799,16 @@ pub unsafe fn install(arm: Arm) {
         site_baseline,
         trampoline_address,
         trampoline_baseline,
+        live: config.live,
+        startup_enabled: config.enabled,
+        startup_skip_neuter: arm == Arm::SkipNeuterArxan,
     };
 
     log(format_args!(
-        "{PROBE_LINE_PREFIX} watching arm={} poll={:.1}s heartbeat={:.1}s \
+        "{PROBE_LINE_PREFIX} watching arm={} {} \
          site-window={SITE_WINDOW} trampoline-window={TRAMPOLINE_WINDOW}",
         arm.as_str(),
-        POLL_INTERVAL.as_secs_f64(),
-        POLL_INTERVAL.as_secs_f64() * f64::from(POLLS_PER_HEARTBEAT),
+        config.live.describe(),
     ));
 
     // A dedicated thread, not a hook on some game callback: the byte pollers have to keep
@@ -527,14 +890,25 @@ fn check(address: usize, baseline: &[u8], observed: &mut Vec<u8>) -> Integrity {
 /// The watch loop. Never returns; the thread dies with the process.
 fn poll_forever(watch: &Watch) -> ! {
     let started = Instant::now();
-    let mut polls = 0u32;
     let mut observed = Vec::new();
+    let mut live = watch.live;
+    let mut last_heartbeat = Instant::now();
+
+    // Watched by TEXT, not by mtime. `HotFile`'s own docs carry the reasoning and it applies here
+    // exactly: a Proton prefix sits on filesystems that stamp mtime to a whole second, so two
+    // edits inside one second are invisible to an mtime watcher -- which reads as "changing the
+    // file did nothing", the one outcome indistinguishable from broken. Its throttle also means
+    // this costs one small read per second rather than one per poll.
+    let mut hot = config_path().map(|path| HotFile::with_interval(path, live.poll_interval_ms));
 
     loop {
-        std::thread::sleep(POLL_INTERVAL);
-        polls = polls.wrapping_add(1);
+        std::thread::sleep(Duration::from_millis(live.poll_interval_ms));
         let uptime = started.elapsed().as_secs_f64();
         let hits = HIT_COUNT.load(Ordering::Relaxed);
+
+        if let Some(hot) = hot.as_mut() {
+            live = watch_live_config(watch, hot, live, uptime);
+        }
 
         let previous = Integrity::from_u8(SITE_STATE.load(Ordering::Relaxed));
         let now = check(watch.site_address, &watch.site_baseline, &mut observed);
@@ -581,13 +955,84 @@ fn poll_forever(watch: &Watch) -> ! {
         // THE LINE TO READ. All four measurements are on it, so a verdict is the last heartbeat
         // in the file rather than a reconstruction from scattered lines. It is also what makes a
         // crash legible: the log simply stops, and the last `uptime` is when.
-        if polls.is_multiple_of(POLLS_PER_HEARTBEAT) {
+        //
+        // Timed rather than counted, because the poll interval can move underneath this loop: a
+        // "every tenth poll" heartbeat would silently change period with it, and the log would
+        // carry no sign that it had.
+        if last_heartbeat.elapsed() >= Duration::from_millis(live.heartbeat_interval_ms) {
+            last_heartbeat = Instant::now();
             log(format_args!(
                 "{PROBE_LINE_PREFIX} heartbeat uptime={uptime:.1}s {}",
                 summary(hits),
             ));
         }
     }
+}
+
+/// Re-read the config file and apply the two knobs that CAN move mid-run.
+///
+/// Returns the config now in force. Every change is logged, including the ones deliberately not
+/// applied: an edit to `enabled` or `skip_neuter` while the game is running is a reasonable thing
+/// for someone to try, and it must not appear to work.
+fn watch_live_config(
+    watch: &Watch,
+    hot: &mut HotFile,
+    current: LiveConfig,
+    uptime: f64,
+) -> LiveConfig {
+    let text = match hot.poll() {
+        Some(FileChange::Text(text)) => text,
+        // The file was there and is not any more. Nothing to re-read, and the values in force
+        // stay in force -- the same rule `Binding` applies to a value it cannot parse. Deleting
+        // the config mid-run must not silently retune the experiment.
+        Some(FileChange::Missing) => {
+            log(format_args!(
+                "{PROBE_LINE_PREFIX} config uptime={uptime:.1}s VANISHED -- the config file was \
+                 deleted or became unreadable; {} stays in force",
+                current.describe(),
+            ));
+            return current;
+        }
+        None => return current,
+    };
+
+    let parsed = KeyValues::parse(&text);
+    let mut problems = Vec::new();
+    let next = LiveConfig::read(&parsed, &mut problems);
+    for problem in &problems {
+        log(format_args!("{PROBE_LINE_PREFIX} config {problem}"));
+    }
+
+    // THE STARTUP-ONLY KEYS. Saying nothing here would leave someone who edited `skip_neuter`
+    // mid-session believing they had switched arms, and reading the rest of the run as the other
+    // arm's evidence. There is no un-neutering a live process; the edit applies to the next run.
+    let edited_enabled = parsed.get(CONFIG_SECTION, KEY_ENABLED);
+    let edited_skip = parsed.get(CONFIG_SECTION, KEY_SKIP_NEUTER);
+    let enabled_moved = edited_enabled.is_some_and(|v| (v == "true") != watch.startup_enabled);
+    let skip_moved = edited_skip.is_some_and(|v| (v == "true") != watch.startup_skip_neuter);
+    if enabled_moved || skip_moved {
+        log(format_args!(
+            "{PROBE_LINE_PREFIX} config uptime={uptime:.1}s STARTUP-ONLY-IGNORED \
+             {KEY_ENABLED}={} {KEY_SKIP_NEUTER}={} -- this run is still arm={}. Both are read in \
+             DllMain before the game's entry point and cannot change afterwards; there is no \
+             un-neutering a live process. Restart the game to run the other arm.",
+            quote_value(edited_enabled),
+            quote_value(edited_skip),
+            watch.arm.as_str(),
+        ));
+    }
+
+    if next != current {
+        log(format_args!(
+            "{PROBE_LINE_PREFIX} config uptime={uptime:.1}s RELOADED {} -> {}",
+            current.describe(),
+            next.describe(),
+        ));
+        // The read cadence follows the poll interval: a HotFile throttled faster than the loop
+        // would read the same unchanged file several times per poll for nothing.
+        hot.set_interval(next.poll_interval_ms);
+    }
+    next
 }
 
 /// An `UNREADABLE` window has no bytes to show, and printing 16 zeroes there would read as

@@ -46,10 +46,13 @@ python3 scripts/ds2-run.py --probe neuter        # arm A: dearxan neuters Arxan 
 python3 scripts/ds2-run.py --probe skip-neuter   # arm B: Arxan's 48 stubs left live
 ```
 
-| | `DS2_ARXAN_PROBE` | `DS2_ARXAN_PROBE_SKIP_NEUTER` | logs `arm=` |
+**Both arms run back to back with no user action between them.** That is a property of the
+configuration mechanism rather than a nicety -- see [How the probe is configured](#how-the-probe-is-configured).
+
+| | `[arxan_probe] enabled` | `[arxan_probe] skip_neuter` | logs `arm=` |
 | --- | --- | --- | --- |
-| arm A | `1` | unset | `neuter-arxan` |
-| arm B | `1` | `1` | `skip-neuter-arxan` |
+| arm A | `true` | `false` | `neuter-arxan` |
+| arm B | `true` | `true` | `skip-neuter-arxan` |
 
 Arm B does **not** simply drop the `neuter_arxan` call and install from `DllMain`. That would
 change two variables at once -- the Arxan patching *and* the moment the hook goes in. It calls
@@ -67,6 +70,121 @@ Exactly one thing differs.
 | survives | reverted | Arxan reverts hooks and **dearxan is required**. The strongest possible result for the loader design. |
 | reverted | reverted | Something reverts the patch that dearxan does not disable. Investigate before building anything on hooks. |
 | reverted | survives | Incoherent. Suspect the run, not the game -- check the arms were what they claimed. |
+
+## How the probe is configured
+
+`<Game>/ds2-mods.toml`, beside the DLL, written by `scripts/ds2-run.py` before every launch and
+read by the DLL itself in `DllMain`.
+
+```toml
+[arxan_probe]
+enabled = true
+skip_neuter = false
+
+# poll_interval_ms = 1000
+# heartbeat_interval_ms = 10000
+```
+
+### It was two environment variables, and they measurably did not work
+
+This is recorded because it is the kind of thing that gets reintroduced by someone reasoning from
+first principles about how a launcher *should* pass a flag. It was `DS2_ARXAN_PROBE=1` and
+`DS2_ARXAN_PROBE_SKIP_NEUTER=1`, set in the launcher's environment. A real run produced, from the
+DLL's own attach line:
+
+```
+ds2-loader: attach awaiting-arxan-callback probe=off arm=neuter-arxan DS2_ARXAN_PROBE=<unset> DS2_ARXAN_PROBE_SKIP_NEUTER=<unset>
+```
+
+`steam -applaunch` hands the request to an **already-running Steam client** over IPC, and that
+client starts the game from *its* environment -- not from the one the launcher set.
+`WINEDLLOVERRIDES` survives only because it lives in the per-app Steam launch options, which is a
+different channel; it is also the one setting that cannot move into this file, because Wine reads
+it to decide whether to map our DLL at all, before there is a DLL running to read anything.
+
+The two available fixes -- quit Steam before every run, or edit the launch options between the
+arms -- are both manual steps *between the two halves of one experiment*, and a manual step there
+is a step that eventually gets skipped, producing a well-formed verdict for an arm nobody ran. A
+file beside the DLL travels through no IPC. **Do not put the arm back in the environment.**
+
+The file is read with `ds2_hotkey_config::kv`, a `key = value` reader in a strict subset of TOML.
+There is no TOML dependency: `ds2-hotkey-config` has no dependencies at all, deliberately, and the
+whole surface here is four scalars. Anything the reader cannot use is reported with its line
+number rather than skipped.
+
+### What is live, and what is not
+
+**The arm is not live, and cannot be.** `enabled` and `skip_neuter` are consumed in `DllMain`,
+before `DarkSoulsII.exe`'s entry point, because that is the only moment the choice between the
+arms exists: `skip_neuter` decides whether dearxan patches Arxan's 48 stubs *before the Arxan
+entry stub runs*, and once that has happened or not happened there is no undoing it. There is no
+un-neutering a live process. Editing either key while the game is running changes nothing, and the
+probe says so rather than letting it look like it worked:
+
+```
+ds2-probe: config uptime=30.0s STARTUP-ONLY-IGNORED enabled="true" skip_neuter="true" -- this run is still arm=neuter-arxan. Both are read in DllMain before the game's entry point and cannot change afterwards; there is no un-neutering a live process. Restart the game to run the other arm.
+```
+
+**The two cadence knobs are genuinely live.** They go through
+`ds2_hotkey_config::reload::HotFile`, which compares the file's **text** rather than its mtime --
+a Proton prefix sits on filesystems that stamp mtime to a whole second, so two edits inside one
+second are invisible to an mtime watcher, which reads as "changing the file did nothing". An edit
+takes effect within one poll interval and is logged:
+
+```
+ds2-probe: config uptime=42.0s RELOADED poll=1000ms heartbeat=10000ms -> poll=1000ms heartbeat=60000ms
+```
+
+| key | live? | effect |
+| --- | --- | --- |
+| `enabled` | **no** -- `DllMain` | whether the detour is installed at all |
+| `skip_neuter` | **no** -- `DllMain` | which arm; see above |
+| `poll_interval_ms` | yes | how often the two byte windows are re-read (100..=60000) |
+| `heartbeat_interval_ms` | yes | how often the heartbeat line is written (1000..=3600000) |
+
+Neither live knob changes *what* is measured: the byte windows and their baselines are fixed when
+the hook goes in. That is precisely why they are safe to move mid-run and the arm is not. A value
+outside its range is clamped and the clamp is logged; a value that is not a whole number is
+rejected, the default stands, and the rejection is logged with the text verbatim.
+
+`scripts/ds2-run.py` writes the two live keys **commented out**, so the DLL's own defaults are
+what run. It rewrites the whole file on every launch, so an edit to a startup-only key does not
+survive into the next run -- deliberately, because the arm under test has to be the arm that was
+requested.
+
+### The config is echoed back into the log before anything acts on it
+
+A missing file and a file that says `enabled = false` produce identical behaviour and must never
+produce an identical log line: one means the launcher did not write it or wrote it somewhere else,
+the other means it wrote it and asked for the probe to be off. So the DLL prints the path, the
+status, and every key **as written**, before it decides anything:
+
+```
+ds2-loader: config file="/.../Game/ds2-mods.toml" status=found bytes=1487
+ds2-loader: config [arxan_probe] enabled="true" skip_neuter="false" poll_interval_ms=<absent> heartbeat_interval_ms=<absent>
+ds2-loader: config resolved probe=on arm=neuter-arxan poll=1000ms heartbeat=10000ms (enabled/skip_neuter are STARTUP-ONLY; poll/heartbeat are live)
+```
+
+`status` is `found`, `MISSING`, `UNREADABLE` or `NO-GAME-DIRECTORY`. Anything unusable follows on
+its own line, with the text quoted so it can be found in the file:
+
+```
+ds2-loader: config REJECTED line=7 text="enabled = true" -- this key was already set; the FIRST value is the one in force
+ds2-loader: config UNKNOWN [arxan_probe] "enbaled" -- not a key this DLL reads; it was ignored. Known keys: enabled, skip_neuter, poll_interval_ms, heartbeat_interval_ms
+ds2-loader: config REJECTED [arxan_probe] enabled="yes" -- expected `true` or `false`; using the default false
+ds2-loader: config CLAMPED [arxan_probe] poll_interval_ms=5 -- outside 100..=60000; using 100
+ds2-loader: config REJECTED [arxan_probe] heartbeat_interval_ms="abc" -- expected a whole number of milliseconds; using the default 10000
+```
+
+`UNKNOWN` is separate from `REJECTED` because a misspelled key **parses perfectly**: `enbaled =
+true` is a valid assignment to a key called `enbaled`, so the reader cannot reject it and only the
+loader knows no such key exists. Without that line the only evidence of the typo would be
+`enabled` reading as `<absent>` on the echo line, which says what did not happen but not why.
+
+Booleans are `true`/`false` and nothing else. Strict on purpose, and for the same reason the
+environment version accepted only `1`: a value that silently read as "off" produces a run that
+looks like the probe never reported, which is the one failure this experiment must never confuse
+with a real result.
 
 ## The hook site
 
@@ -110,13 +228,16 @@ Everything is written to `<Game>/ds2-loader.log`, one timeline, so a divergence 
 lined up against what the loader said at *t*=3s.
 
 ```
-ds2-loader: attach awaiting-arxan-callback probe=on arm=neuter-arxan DS2_ARXAN_PROBE="1" DS2_ARXAN_PROBE_SKIP_NEUTER=<unset>
+ds2-loader: config file="/.../Game/ds2-mods.toml" status=found bytes=1487
+ds2-loader: config [arxan_probe] enabled="true" skip_neuter="false" poll_interval_ms=<absent> heartbeat_interval_ms=<absent>
+ds2-loader: config resolved probe=on arm=neuter-arxan poll=1000ms heartbeat=10000ms (enabled/skip_neuter are STARTUP-ONLY; poll/heartbeat are live)
+ds2-loader: attach awaiting-arxan-callback probe=on arm=neuter-arxan config=found poll=1000ms heartbeat=10000ms
 ds2-loader: arxan status=ok detected=true blocking_entrypoint=true
 ds2-probe: install arm=neuter-arxan base=0x0000000140000000 rva=0x00832e70 va=0x0000000140832e70
 ds2-probe: install original=[48 89 5c 24 08 ...] expected=[48 89 5c 24 08] prologue-match=true
 ds2-probe: install minhook=ok trampoline=0x... patched=[e9 ...] site-jmp=true
 ds2-probe: install trampoline-baseline=[...]
-ds2-probe: watching arm=neuter-arxan poll=1.0s heartbeat=10.0s site-window=16 trampoline-window=64
+ds2-probe: watching arm=neuter-arxan poll=1000ms heartbeat=10000ms site-window=16 trampoline-window=64
 ds2-probe: heartbeat uptime=10.0s arm=neuter-arxan hits=48213 site=intact tramp=intact site-diverged=0 tramp-diverged=0
 ```
 
@@ -170,13 +291,22 @@ python3 scripts/ds2-run.py --probe neuter
 python3 scripts/ds2-run.py --probe skip-neuter
 ```
 
+Both arms are runnable back to back with nothing to do in between: the launcher rewrites
+`ds2-mods.toml` before each launch and the DLL reads it off disk itself.
+
 The script prints a verdict block assembled from the DLL's own lines and from nothing else, and
-**reads the arm back out of the log** to compare against the one requested. That guard is not
-decoration: the probe variables reach the game through the same channel as `WINEDLLOVERRIDES`,
-which a Steam client that was already running does not propagate. A run that lost them entirely
-installs no probe and is caught by the missing install line -- but a run that lost only the skip
-variable would quietly execute the *other* arm and produce a perfectly well-formed verdict for an
-experiment nobody asked for. Exit code `4` means no verdict, for any of these reasons.
+**reads the arm back out of the log** to compare against the one requested. That guard was written
+for environment variables that could silently vanish, and moving to a file did not retire it -- a
+file has its own ways to be wrong. It can fail to be written, be written to the wrong directory (a
+game directory that moved, a second install), or be left over from a previous run. A run that lost
+it entirely installs no probe and is caught by the missing install line; a run against a **stale**
+file would quietly execute whichever arm that file names and produce a perfectly well-formed
+verdict for an experiment nobody asked for. Exit code `4` means no verdict, for any of these
+reasons.
+
+The verdict block also reprints the config file verbatim, and reports any `ds2-probe: config` line
+seen during the observation window -- a file edited mid-measurement means the window is not
+uniform, and that has to be visible before two arms are compared.
 
 Exit `0` means the experiment **ran**, whether or not the detour survived. A reverted hook is a
 successful experiment with an unwelcome answer, and exiting non-zero on it would train whoever

@@ -5,8 +5,8 @@
 //! hooking, reads no game memory and holds no DS2 address: it exists to answer one question --
 //! *does a proxied import actually get our code into this process, early enough to matter?* --
 //! and to leave a log line on disk that answers it without anyone having to take an agent's
-//! word for it. [`arxan_probe`] is bolted on behind an environment variable and is inert unless
-//! that variable is set.
+//! word for it. [`arxan_probe`] is bolted on behind a config file and is inert unless that file
+//! asks for it.
 //!
 //! # Why a proxy DLL at all
 //!
@@ -40,8 +40,14 @@
 //!
 //! [`arxan_probe`] folds the **M1 experiment** into this DLL: one MinHook detour on one chosen
 //! function, watched byte-for-byte to see whether Arxan reverts it. It does nothing at all
-//! unless `DS2_ARXAN_PROBE=1` is in the environment, so an ordinary run of this loader is
-//! byte-for-byte the loader described above.
+//! unless `<Game>/ds2-mods.toml` says `enabled = true` under `[arxan_probe]`, so an ordinary run
+//! of this loader is byte-for-byte the loader described above.
+//!
+//! It is configured by a FILE and not by the environment, and that is a correction rather than a
+//! preference. `steam -applaunch` hands the request to an already-running Steam client over IPC
+//! and the game inherits *that client's* environment, so the probe's variables arrived unset in a
+//! real run while `WINEDLLOVERRIDES` -- which lives in the per-app Steam launch options, a
+//! different channel -- arrived fine. See the banner comment in [`arxan_probe`].
 //!
 //! It lives HERE rather than in a second DLL on purpose. The proxy is currently the only thing
 //! that gets into this process at all, and inventing a DLL-chaining mechanism to host the probe
@@ -52,10 +58,15 @@
 //!
 //! Dropping this beside the exe is not enough -- Wine prefers its own builtin. The run needs
 //! `WINEDLLOVERRIDES="dinput8=n,b"` ("native first, then builtin"), which is what
-//! `scripts/ds2-run.py` sets. Without it this DLL is never loaded and the log below never
+//! `scripts/ds2-run.py` asks for. Without it this DLL is never loaded and the log below never
 //! appears; the launcher gates on the log line precisely so that case cannot be mistaken for a
-//! successful run. The probe's variables ride the same channel and share the same failure mode
-//! -- see [`arxan_probe::ProbeConfig::from_env`].
+//! successful run.
+//!
+//! `WINEDLLOVERRIDES` is the one setting that genuinely has to travel through Steam, because it
+//! is read by Wine before this DLL exists to read anything. It works because it is set in the
+//! per-app Steam launch options rather than in the launcher's environment. Everything the DLL
+//! itself decides now comes out of `<Game>/ds2-mods.toml` -- see
+//! [`arxan_probe::ProbeConfig::load`].
 
 // The whole crate is Windows-only by construction: it is a PE export surface and a Win32
 // import forward. On a host build this leaves an empty cdylib rather than a link error, which
@@ -180,11 +191,20 @@ unsafe fn attach(module: *mut c_void) {
     // for a log that arrives with a symptom in it.
     ds2_game_base::log::set_identity_line(identity_line(module));
 
-    // Read the environment ONCE, here, and log what it resolved to. Everything below branches on
-    // this value, so a run in which the variables never reached the game says so on its own
-    // second line instead of looking like a probe that failed to report.
-    let config = arxan_probe::ProbeConfig::from_env();
+    // Read the config file ONCE, here, and log what it resolved to. Everything below branches on
+    // this value, so a run that was configured differently from how anyone believed says so in
+    // its own opening lines instead of looking like a probe that failed to report.
+    let config = arxan_probe::ProbeConfig::load();
     arxan_probe::set_probe_logger(log_line);
+
+    // ECHO WHAT WAS READ, BEFORE ACTING ON IT. The path, whether the file was there at all, every
+    // key verbatim as written, and every line that could not be used. The environment version
+    // printed the raw variable values on the attach line so a typo was visible; a file can fail
+    // in one more way than a variable can -- it can be absent, or be somewhere else -- so there
+    // is one more thing to print. See `ProbeConfig::echo_lines`.
+    for line in config.echo_lines() {
+        log_line(format_args!("{line}"));
+    }
 
     // JOB 2 (first half): say we are here. If dearxan's callback never fires, this line is the
     // difference between "loaded, and dearxan went quiet" and "never loaded at all".
@@ -195,8 +215,9 @@ unsafe fn attach(module: *mut c_void) {
 
     // `None` when the probe is off, which is the default and is the whole of the difference
     // between this build and the loader without it.
-    let probe = config.enabled.then_some(config.arm);
-    match config.arm {
+    let arm = config.arm;
+    let probe = config.enabled.then_some(config);
+    match arm {
         // JOB 1, and the default path. SAFETY: dearxan applies code patches derived from static
         // analysis of the loaded image, so a stub misidentified as Arxan would be patched wrongly
         // and the program would be UB. That risk is inherent to the crate and is why the function
@@ -256,13 +277,17 @@ unsafe fn attach(module: *mut c_void) {
 
 /// Install the probe, if this run is one. Called from inside whichever Arxan callback ran, so it
 /// is on the entry-point thread with `DllMain` already returned.
-fn install_probe(arm: Option<arxan_probe::Arm>) {
-    if let Some(arm) = arm {
+///
+/// Takes the whole config rather than just the arm: the poller thread it starts goes on watching
+/// the same file for the two knobs that can move mid-run, and it needs to know what they were at
+/// install to report an edit to the two that cannot.
+fn install_probe(config: Option<arxan_probe::ProbeConfig>) {
+    if let Some(config) = config {
         // SAFETY: the target is a `.pdata` function start recorded in `ds2-rva`, resolved against
         // the live module base, and the probe re-reads the prologue and refuses to patch anything
         // if it is not the five bytes recorded there. The detour is a naked tail-jump, so it
         // imposes no ABI on the function it fronts.
-        unsafe { arxan_probe::install(arm) };
+        unsafe { arxan_probe::install(&config) };
     }
 }
 
