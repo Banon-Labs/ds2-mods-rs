@@ -1252,3 +1252,96 @@ pub const FE_TOP_MENU_BUILD_CELL: u32 = 0x000f_36b0;
 /// The earlier reading of this argument as an absolute timeline position is what made `103.0` look
 /// like the obvious value; it is off by the sequence's own start every time.
 pub const FE_TOP_MENU_SEQUENCE_FADED_SEEK: f32 = 14.0;
+
+// ============================================================================================
+// THE TITLE STATE MACHINE ITSELF -- `FeStateFlow`, its resident substate, and the id space.
+//
+// Everything above this line names a specific substate or a specific screen. These name the
+// MACHINE, which is why they are grouped: they are what `ds2-boot-timeline` needs in order to
+// instrument every step without knowing any step's name, and what a loading bar would be driven
+// from. See `docs/DS2-BOOT-WORK.md` for the trace and the full boot chain.
+// ============================================================================================
+
+/// `FeStateFlow::update` -- the dispatcher that drives the resident substate. RVA `0x00104540`.
+///
+/// # How it was established
+///
+/// `FeOperatorTitle::v4`'s phase-4 branch calls it at `0x1400ef42b` with `RCX = [operator+0x38]`,
+/// and the body is unambiguous about what that object is: it reads the resident substate from
+/// `+0x10`, calls `[[resident]+0x18]` (`update`) with the frame delta, and on a transition calls
+/// `[[resident]+0x30]` (`v6`, drop transitions), `[[resident]+0x10]` (`leave`), then
+/// `[[next]+0x08]` (`enter`) and `[[next]+0x28]` (`v5`, publish transitions). It is not an Arxan
+/// redirect -- `scripts/ds2-arxan-chain.py` terminates at hop 0 with the prologue
+/// `40 53 48 83 ec 30` (`push rbx; sub rsp,0x30`) at the entry.
+///
+/// # Its signature is two arguments, and that is read rather than assumed
+///
+/// `this` in RCX and the frame delta in XMM1. Every other register the body uses it loads from the
+/// object first -- `mov rdx,[rbx+0x28]`, `mov r8,[rbx+0x30]` -- so there is no third argument a
+/// detour could clobber by using the register as scratch. The float rules out `ds2-hook`'s union,
+/// whose shared signature is four integers.
+pub const FE_STATE_FLOW_UPDATE: u32 = 0x0010_4540;
+
+/// `FeSubStateBase::v6` -- "drop the transitions I published". RVA `0x001043a0`.
+///
+/// The flow calls this on the outgoing substate immediately before `leave`, on both of its
+/// transition paths (`0x140104584` and `0x1401046a9`). **Checked against all 36 `FeSubState*`
+/// vtables: not one overrides slot 6.** That is what makes this single address every departure in
+/// the game, and it is the reason `ds2-boot-timeline` can see steps a per-class hook would miss --
+/// the failure `ds2-dialog-skip` already hit once with `FeSubStateTitleInformation`, which shows
+/// its wait window from `update` rather than `enter`.
+///
+/// Not an Arxan redirect: `scripts/ds2-arxan-chain.py` terminates at hop 0 with the prologue
+/// `48 89 6c 24 18 57 41 56` at the entry.
+///
+/// Its arguments are `(this, transitions, context)`, all integer -- taken from the two call sites,
+/// which both set RDX from `[flow+0x28]` and R8 from `[flow+0x30]`.
+pub const FE_SUBSTATE_DROP_TRANSITIONS: u32 = 0x0010_43a0;
+
+/// Offset of the resident substate pointer in `FeStateFlow`.
+///
+/// Read at `0x1401045e3` (`mov rcx,[rbx+0x10]`) before the resident's `update`, and written at
+/// `0x1401046bf` (`mov [rbx+0x10],rdi`) when a transition is taken.
+pub const FE_STATE_FLOW_RESIDENT_SUBSTATE_OFFSET: usize = 0x10;
+
+/// Offset of the substate list in `FeStateFlow` -- the `TMenuStateBaseList<FeSubStateBase, 0x58>`
+/// that `FeStateTitle::v6` fills with 64 substates.
+///
+/// Read at `0x140104658` (`mov rdx,[rbx+0x20]`), immediately before the loop that searches it for
+/// the requested id.
+pub const FE_STATE_FLOW_SUBSTATE_LIST_OFFSET: usize = 0x20;
+
+/// Offset of the pending-request id in `FeStateFlow`: the substate an outside caller has asked the
+/// flow to move to, or `-1` for none.
+///
+/// `FeOperatorTitle::v4` writes `0x17` here at `0x1400ef3e4` to return to the title screen. The
+/// flow compares it against zero as a **signed** value at `0x140104633` and writes `-1` at
+/// `0x140104649` once it has been consumed, which is what fixes the type as `i32`.
+pub const FE_STATE_FLOW_PENDING_ID_OFFSET: usize = 0x48;
+
+/// Offset of the entry count in the substate list. Entries themselves start at `+0x08`.
+///
+/// Read at `0x140104661` (`movsxd r10,[rdx+0x2c8]`) to bound the transition search, and
+/// incremented by `FeStateTitle::v6` once per substate it appends.
+pub const FE_SUBSTATE_LIST_COUNT_OFFSET: usize = 0x2c8;
+
+/// Offset of a substate's own id.
+///
+/// **This is the game's id, not a label this repo invented.** `FeStateFlow`'s transition search
+/// compares this exact field against the requested id at `0x14010467f`
+/// (`cmp [rdi+0xc],esi`), and every substate constructor writes it -- as a literal
+/// (`FeSubStateTitleMain` writes `0x17`) or from `EDX` at the call site (the four
+/// `FeSubStateTitleLogo` instances get `0x13` through `0x16`).
+///
+/// It is the same field `FE_DIALOG_KIND_OFFSET` and `FE_PROCESS_WINDOW_KIND_OFFSET` already name
+/// at `0x0c` for their own classes, and the `kind=57` / `kind=70` those two log on a real boot are
+/// `0x39 FeSubStateTitleGameServerLogin` and the message box built beside
+/// `0x44 FeSubStateTitleInformation` -- which is the runtime evidence that this id space is right.
+pub const FE_SUBSTATE_ID_OFFSET: usize = 0x0c;
+
+/// Id of `FeSubStateTitleTopMenu` -- the end of the boot chain, and the screen "Continue" is on.
+///
+/// Written as the literal `0x47` by its constructor at `0x1400fd65d`
+/// (`mov QWORD PTR [rcx+0xc],0x47`), and corroborated by `FeSubStateTitleOptionGame`'s transition
+/// table, whose phase-4 edge names `0x47` as its destination.
+pub const FE_SUBSTATE_ID_TITLE_TOP_MENU: u32 = 0x47;

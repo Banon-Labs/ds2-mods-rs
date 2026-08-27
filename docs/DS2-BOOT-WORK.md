@@ -304,11 +304,31 @@ and treat an unexpected id as "hold position" rather than "jump".
 cannot say whether `GameServerLogin` costs 40 ms or 4 s, and without that the parallel-overlap idea
 has no measured value and the loading bar has no weights.
 
-One instrumented run answers all of it: a timestamped `enter`/`leave` line per substate id, taken
-at the dispatcher so no per-class hook can miss a step — the same mistake per-class `enter` hooking
-already made once with the wait windows (`docs/DS2-TITLE-FLOW.md`, "hook the drawing, not the
-class"). That single log is simultaneously the parallelism evidence, the loading-bar weight table,
-and the record of which steps are worth attacking.
+One instrumented run answers all of it, and **that instrument is now built**:
+`crates/ds2-boot-timeline`, off by default, on with `ds2-run.py --boot-timeline`.
+
+It hooks machinery rather than screens, for the reason this repo has already paid for once
+(`docs/DS2-TITLE-FLOW.md`, "hook the drawing, not the class"):
+
+* **`FeStateFlow::update`** (RVA `0x00104540`) drives whichever substate is resident. The detour
+  samples the resident pointer at `+0x10` before and after the original, so every arrival is seen.
+* **`FeSubStateBase::v6`** (RVA `0x001043a0`), the slot the flow calls immediately before every
+  `leave`. **Not one of the 36 substate vtables overrides it**, so that single address is every
+  departure in the game.
+
+The two are deliberately redundant, and that redundancy is the integrity check: arrivals and
+departures must interleave, and a `leave` line carrying `mismatch=true` says the sampler missed a
+transition and every duration after it is attributed to the wrong step. A log that is wrong is
+worth much less than a log that says it is wrong.
+
+Timestamps are milliseconds from the loader's `DllMain`, which runs during import resolution and
+therefore **before the game's entry point** — so the gap between `t=0` and the first substate line
+is the engine bringing up D3D11, mounting archives and starting audio. Under Proton that may be
+the largest number in the file, and a timeline anchored at the first substate would have hidden it.
+
+The run also logs the substate count read live off the flow's own list, which turns "64 substates
+are constructed in `FeStateTitle::v6`" from a static claim into a measured one and gives a loading
+bar its denominator.
 
 ## The caveat that governs every address here
 

@@ -152,6 +152,11 @@ KEY_TITLE_ANIMATION = "title_animation"
 KEY_TITLE_SEQUENCE_GATE = "title_sequence_gate"
 KEY_TITLE_SETTLE = "title_settle"
 #: Mirrors `CONFIG_SECTION`/`KEY_SHOW_UNAVAILABLE` in `crates/ds2-loader/src/title_menu.rs`.
+#: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/boot_timeline.rs`.
+#: OFF by default -- the only feature here that is. It is a measuring instrument, not a fix.
+TIMELINE_SECTION = "boot_timeline"
+KEY_TIMELINE_ENABLED = "enabled"
+
 MENU_SECTION = "title_menu"
 KEY_SHOW_UNAVAILABLE = "show_unavailable"
 
@@ -865,6 +870,7 @@ def config_text(
     title_sequence_gate: bool = True,
     title_settle: bool = True,
     show_unavailable: bool = False,
+    boot_timeline: bool = False,
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
@@ -1004,6 +1010,27 @@ def config_text(
 # ON by default; `--no-show-unavailable-menu-rows` writes false.
 {KEY_SHOW_UNAVAILABLE} = {str(show_unavailable).lower()}
 
+[{TIMELINE_SECTION}]
+# STARTUP-ONLY, and THE ONLY FEATURE HERE THAT DEFAULTS OFF. It measures; it does not fix.
+#
+# Detours two pieces of machinery rather than any named screen: FeStateFlow::update, which drives
+# whichever substate is resident, and FeSubStateBase::v6, the "drop my transitions" slot the flow
+# calls immediately before every leave -- checked against all 36 substate vtables, not one
+# overrides it. So every arrival and every departure is seen, including from classes nobody
+# thought to name. That is the point: per-class hooking already missed steps once in this repo.
+#
+# The two hooks are each other's check. A `leave` line whose `mismatch=true` means the arrival
+# sampler missed a transition and the durations after it are attributed to the wrong step.
+#
+# Timestamps are milliseconds from DllMain, which runs during import resolution -- BEFORE the
+# game's entry point. So the gap between t=0 and the first substate is the engine starting up,
+# and under Proton that may be the largest number in the log.
+#
+# OFF by default; `--boot-timeline` writes true. Only an exact `true` turns it on: for an
+# instrument the harmless direction of a typo is "did not measure", never "patched two extra
+# sites in a run that was not meant to be instrumented".
+{KEY_TIMELINE_ENABLED} = {str(boot_timeline).lower()}
+
 [{CRASH_SECTION}]
 {crash_banner}# STARTUP-ONLY, both of them. The handler is installed in DllMain BEFORE `neuter_arxan`, because
 # that call patches code from static analysis and is the likeliest crash in the whole startup path
@@ -1052,6 +1079,7 @@ def write_config(
     title_sequence_gate: bool = True,
     title_settle: bool = True,
     show_unavailable: bool = False,
+    boot_timeline: bool = False,
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
@@ -1068,6 +1096,7 @@ def write_config(
         title_sequence_gate,
         title_settle,
         show_unavailable,
+        boot_timeline,
     )
     path.write_text(text, encoding="utf-8")
     return path, text
@@ -1142,6 +1171,7 @@ def dry_run(
     title_sequence_gate: bool = True,
     title_settle: bool = True,
     show_unavailable: bool = False,
+    boot_timeline: bool = False,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
@@ -1176,6 +1206,7 @@ def dry_run(
             title_sequence_gate,
             title_settle,
             show_unavailable,
+            boot_timeline,
         ):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
         else:
@@ -1206,6 +1237,7 @@ def dry_run(
                 title_sequence_gate,
                 title_settle,
                 show_unavailable,
+                boot_timeline,
             ),
             indent="[dry-run]   | ",
         )
@@ -1258,6 +1290,7 @@ def launch(
     title_sequence_gate: bool = True,
     title_settle: bool = True,
     show_unavailable: bool = False,
+    boot_timeline: bool = False,
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
@@ -1287,6 +1320,7 @@ def launch(
         title_sequence_gate,
         title_settle,
         show_unavailable,
+        boot_timeline,
     )
     print(f"[config] {config_path}")
 
@@ -1716,6 +1750,21 @@ def selftest() -> int:
         values.get((INTRO_SECTION, KEY_INTRO_ENABLED)) == "true",
         f"[{INTRO_SECTION}] {KEY_INTRO_ENABLED} defaults to true",
     )
+    values, _ = parse_config(config_text("off"))
+    check(
+        values.get((TIMELINE_SECTION, KEY_TIMELINE_ENABLED)) == "false",
+        f"[{TIMELINE_SECTION}] {KEY_TIMELINE_ENABLED} defaults to FALSE -- an instrument that "
+        f"turns itself on is one nobody chose to run",
+    )
+    values, _ = parse_config(config_text("off", boot_timeline=True))
+    check(
+        values.get((TIMELINE_SECTION, KEY_TIMELINE_ENABLED)) == "true",
+        f"--boot-timeline writes [{TIMELINE_SECTION}] {KEY_TIMELINE_ENABLED} = true",
+    )
+    check(
+        values.get((INTRO_SECTION, KEY_INTRO_ENABLED)) == "true",
+        "--boot-timeline leaves every other switch alone",
+    )
     values, _ = parse_config(config_text("off", intro_skip=False))
     check(
         values.get((INTRO_SECTION, KEY_INTRO_ENABLED)) == "false",
@@ -2049,6 +2098,15 @@ def main() -> int:
         help="test the log tailer, the DLL/script contract and the verdict logic",
     )
     parser.add_argument(
+        "--boot-timeline",
+        dest="boot_timeline",
+        action="store_true",
+        help=(
+            "instrument the title flow: log every substate entered and left, with milliseconds "
+            "from DllMain. OFF unless asked for -- this is the measurement run, not a fix."
+        ),
+    )
+    parser.add_argument(
         "--no-intro-skip",
         dest="intro_skip",
         action="store_false",
@@ -2221,6 +2279,7 @@ def main() -> int:
             args.title_sequence_gate,
             args.title_settle,
             args.show_unavailable,
+            args.boot_timeline,
         )
     return launch(
         args.probe,
@@ -2236,6 +2295,7 @@ def main() -> int:
         args.title_sequence_gate,
         args.title_settle,
         args.show_unavailable,
+        args.boot_timeline,
     )
 
 

@@ -82,6 +82,7 @@ use dearxan::disabler::result::DearxanResult;
 use dearxan::disabler::{neuter_arxan, schedule_after_arxan};
 
 pub mod arxan_probe;
+pub mod boot_timeline;
 pub mod crash_logging;
 pub mod dialog_skip;
 pub mod intro_skip;
@@ -154,6 +155,14 @@ pub unsafe extern "system" fn DllMain(
         // `DLL_PROCESS_ATTACH` fires once per process, but `neuter_arxan`'s internals panic if
         // their one-shot is re-entered, and a panic unwinding out of `DllMain` would take the
         // game's startup with it. The latch costs one relaxed atomic and removes the question.
+        // BEFORE THE LATCH AND BEFORE `attach`: this is `t = 0` for `ds2-boot-timeline`, and the
+        // earliest instant this DLL can observe. A statically imported DLL's
+        // `DLL_PROCESS_ATTACH` runs during import resolution, so everything the engine does --
+        // D3D11 bring-up, archive mounting, audio -- is still ahead of us and lands inside the
+        // measurement rather than before it. Unconditional, and not gated on the feature's config
+        // switch: reading a performance counter costs nothing, and a config read here would mean
+        // touching the filesystem under the loader lock.
+        ds2_boot_timeline::mark_origin();
         static ATTACHED: Once = Once::new();
         ATTACHED.call_once(|| unsafe { attach(module) });
     }
@@ -280,6 +289,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_intro_skip();
                 install_dialog_skip();
                 install_title_skip();
+                install_boot_timeline();
                 install_title_menu();
                 arm_fault(crash_config);
             });
@@ -309,6 +319,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_intro_skip();
                 install_dialog_skip();
                 install_title_skip();
+                install_boot_timeline();
                 install_title_menu();
                 arm_fault(crash_config);
             });
@@ -680,4 +691,34 @@ fn system_dinput8_path() -> Option<Vec<u16>> {
     buffer.extend("dinput8.dll".encode_utf16());
     buffer.push(0);
     Some(buffer)
+}
+
+/// Install the boot timeline, if `<Game>/ds2-mods.toml` asked for it.
+///
+/// Called last of the post-Arxan installs, and that order is deliberate rather than incidental:
+/// this instrument measures what the other features do to the boot flow, so every hook it might
+/// observe the effect of is already in place when its own two go in. The clock origin is not set
+/// here -- it was taken in `DllMain`, before any of this ran.
+fn install_boot_timeline() {
+    let config = boot_timeline::BootTimelineConfig::load();
+    log_line(format_args!("{}", config.describe()));
+    if !config.enabled {
+        return;
+    }
+    ds2_boot_timeline::set_logger(log_line);
+    // SAFETY: both targets are ordinary function starts recorded in `ds2-rva` and resolved against
+    // the live module base, and both were checked with `scripts/ds2-arxan-chain.py` to be real
+    // prologues rather than Arxan redirects. The detours declare the signatures established from
+    // the functions' own bodies and call sites: `(this, delta)` with the float in XMM1 for the
+    // flow update, and three integer arguments for the shared `v6`.
+    let outcome = unsafe { ds2_boot_timeline::install() };
+    if outcome.installed != outcome.attempted {
+        log_line(format_args!(
+            "{} PARTIAL {}/{} sites hooked -- the timeline will be missing one half of each \
+             transition, and the mismatch= field cannot be trusted",
+            ds2_boot_timeline::LOG_PREFIX,
+            outcome.installed,
+            outcome.attempted
+        ));
+    }
 }
