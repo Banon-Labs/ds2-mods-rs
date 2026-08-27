@@ -67,7 +67,18 @@ The intent still transfers, with the mechanism inverted: deny a *raw* `steam -ap
 issued outside `scripts/ds2-run.py`. The launcher is testimony-gated -- it stages the DLL, records
 both the built and the staged sha256, and prints a success block only after reading the DLL's own
 log line. A raw applaunch skips all of that, which is precisely the shape of a false "it launched
-with our DLL" claim. Tracked as `ds2-mods-rs-yx2`.
+with our DLL" claim. Shipped as `ds2_launch_guard.rego` (`ds2-mods-rs-yx2`).
+
+It denies `steam -applaunch 335300`, the `steam://run/` and `steam://rungameid/` URL forms, and a
+wine/proton invocation naming `DarkSoulsII.exe` -- and fails closed on an unreadable `-c`/`eval`
+payload that names both Steam and the appid. `scripts/ds2-run.py` needs no exemption: it runs its
+applaunch from inside a file on disk, and a file on disk is never an agent Bash command.
+
+Two things it deliberately does *not* touch. A different appid (`1245620` is Elden Ring) is
+somebody else's business -- grabbing every applaunch would reproduce the ER guard's overreach in
+mirror. And `objdump`, `strings`, `xxd` and `sha256sum` all name `DarkSoulsII.exe` without
+launching it; static RE on that binary is the most encouraged activity in this repo, so the wine
+rule is gated on a launcher verb rather than on the exe name.
 
 ## NOT ported: `block_manual_pgrep` (272 lines)
 
@@ -85,7 +96,35 @@ The real hazard here is a different one, measured twice in a single session:
 2. `pkill -f 'ds2-run.py --probe neuter'` matched and killed the agent's own shell (exit 144).
 
 Both are the `-f` flag matching the full command line, the agent's included. So the DS2 guard bans
-`-f` and steers to `-x`, rather than banning the tool. Tracked as `ds2-mods-rs-hst`.
+`-f` and steers to `-x`, rather than banning the tool. Shipped as `block_pgrep_full_match.rego`
+(`ds2-mods-rs-hst`).
+
+It catches the cluster spellings (`-af`, `-fl`), `--full`, and the flag arriving after an option
+that takes an operand (`pgrep -u banon -f ...`). `-F` is left alone on purpose -- that is
+`--pidfile`, a different option that cannot self-match, and denying it would be a false positive.
+`grep -f` and `tail -f` are unrelated tools and stay allowed, which is what the single-simple-command
+bound on the pattern is for.
+
+## What both DS2 guards taught us about `commands.rego`
+
+Both were first written against `commands.executed_texts`, and both were wrong, in a way worth
+recording because it is not obvious from the name.
+
+`executed_texts` blanks *anchors* inside a quoted span -- separators, parens, the quotes themselves
+-- but **not spaces**. So a mid-sentence mention inside a quoted operand still has a space in front
+of it, still satisfies a space-anchored pattern, and still denies. Measured while writing the launch
+guard: a `bd create --description "Deny a raw steam -applaunch 335300 ..."` was denied *by the very
+rule it described*, which would have made the guard impossible to document or file issues about.
+
+The right primitive is `commands.executed_unquoted_texts`, which the helper's own comment labels
+"for substring/flag tests". It deletes quoted spans outright, so the mention disappears while a real
+bare launch -- which is not quoted -- does not. Both guards use it.
+
+The limit, stated rather than papered over: quoting the payload itself
+(`steam -applaunch "335300"`) deletes it from the scanned text and defeats the pattern. That is a
+deliberate-evasion spelling, not an accidental one. A text-scanning guard cannot beat someone trying
+to get past it; these exist to stop the accidental bare launch and the reflexive `-f`, and the
+fail-closed rules are what refuse to guess when the text genuinely cannot be read.
 
 ## Not yet ported: the behavioural Stop guards (Wave 2)
 
