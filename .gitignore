@@ -3,3 +3,9 @@
 .dolt/
 *.db
 .beads-credential-key
+
+# dearxan deobfuscated game image -- copyrighted, never commit
+darksoulsii-deobf.bin
+*-deobf.bin
+dump-exec.bin
+target/

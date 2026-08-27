@@ -22,5 +22,8 @@
         "matcher": ""
       }
     ]
+  },
+  "env": {
+    "BD_REAL_BIN": "/home/banon/.local/bin/bd"
   }
 }
