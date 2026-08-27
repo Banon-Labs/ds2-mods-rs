@@ -1,0 +1,22 @@
+# Standalone crash-logging DLL: the whole crate is a `DllMain` that installs
+# `ds2-crash-logging-core` and then gets out of the way.
+#
+# Ships as `ds2_crash_logging.dll`. `rlib` sits alongside `cdylib` only so the `load_and_crash`
+# example links against it; nothing in this workspace depends on this crate as a library.
+[package]
+name = "ds2-crash-logging"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "ds2_crash_logging"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ds2-crash-logging-core.workspace = true
+
+[lints]
+workspace = true

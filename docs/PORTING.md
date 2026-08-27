@@ -83,7 +83,9 @@ stays empty here until DS2 bindings exist.
   injection. DS2 imports both `DINPUT8` and `XINPUT1_3`, so both backends have a target.
 - **`er-crash-logging-core`** — depends only on `er-game-base`. First-chance exceptions to a
   file. **The right first real mod**: it proves the loader, the Arxan neutering and the log
-  path while needing zero knowledge of DS2 structures.
+  path while needing zero knowledge of DS2 structures. **Ported**, as
+  `ds2-crash-logging-core` + `ds2-crash-logging` (`ds2_crash_logging.dll`). Its second module
+  did not come with it -- see below.
 
 ## Tier 2 — blocked on reverse engineering
 
@@ -142,3 +144,46 @@ called generic. Both were found by reading the constants, not the manifest:
 The second one is the shape of failure to watch for through the whole port: not a compile error,
 not a crash, but a bound that is quietly 60% too large and a validity check that returns `true`
 for garbage. Nothing about it looks wrong on the page.
+
+### Wave 2, `er-crash-logging-core`: an entire module was the game knowledge
+
+The crash logger itself ported almost verbatim -- everything in it is Win32 and PE-format
+mechanics, and a fault is symbolized against the loader's own module table (the PEB
+`InMemoryOrderModuleList`), which is correct for whatever build is running and needs no address
+table at all. `ds2-rva` is untouched and stays empty.
+
+Its sibling module `hang.rs` (1,585 lines, half the crate) **does not port**, and the manifest
+gives no hint of it: the crate's only dependency is `er-game-base`. Read the constants and the
+Elden Ring is everywhere:
+
+- `GAME_FRAME_COUNTER_RVA = 0x3d8_567c` -- the dword `MainUpdate` increments once per frame, on
+  `eldenring.exe` 1.16.2 specifically.
+- `GAME_MODULE_NAME = "eldenring.exe"` -- checked before that RVA is read at all.
+- `CS::LoadingScreenData` field offsets, "verified against live values on 1.16.2" -- a class from
+  a framework that postdates this engine.
+
+All three of its detectors hang off those. Strip them and what is left is a thread-suspension
+harness with nothing to watch. The DS2 equivalent starts in the disassembly, with a per-frame
+counter nobody has found yet, and the address it produced would belong in `ds2-rva` rather than
+in a crash logger. Porting the harness first would have shipped a watchdog whose only possible
+report is that it is disarmed.
+
+Three smaller constants that were quietly wrong rather than obviously so:
+
+- `SELF_DLL_SIZE_FALLBACK = 0x0400_0000` -- 64 MB, printed as the DLL's own span whenever the PE
+  headers could not be read. No mod DLL is 64 MB; that is slack, not a measurement. Now reported
+  as `0x0`, which means unknown and is true.
+- `context_rbp` was written into every record as a hardcoded `0x0` -- the snapshot never read
+  `CONTEXT+0xa0`. A field that always lies is worse than an absent one; it is read now.
+- `build=` came from `er-game-base::build_id::GIT_DESCRIPTION`, and `build_id.rs` did not port.
+  The line is now composed in `install` from what can be read at runtime -- the loaded DLL's own
+  COFF `TimeDateStamp`, where the loader mapped it, and the crate version -- and published
+  through `ds2-game-base::log::set_identity_line`. It is called a *watermark*, not a timestamp:
+  the MSVC linker writes a content hash into that field for reproducible builds.
+
+**Validated without the game**, which was the point of choosing this crate first: the
+`load_and_crash` example loads `ds2_crash_logging.dll` into a throwaway process under Wine and
+raises `0xc0000005`. All five artifacts appeared, addresses resolved as
+`kernelbase.dll+0xd967`, and the rich minidump tier succeeded. That says nothing yet about
+DARK SOULS II, where the loader, the Arxan stubs and the already-installed filters are all
+still ahead.
