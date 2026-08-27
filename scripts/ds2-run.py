@@ -142,6 +142,11 @@ KEY_INTRO_ENABLED = "enabled"
 #: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/dialog_skip.rs`.
 DIALOG_SECTION = "dialog_skip"
 KEY_DIALOG_ENABLED = "enabled"
+
+#: Mirrors `CONFIG_SECTION` and the two `KEY_*` in `crates/ds2-loader/src/title_skip.rs`.
+TITLE_SECTION = "title_skip"
+KEY_PRESS_ANY_BUTTON = "press_any_button"
+KEY_PROCESS_WINDOWS = "process_windows"
 KEY_POLL_INTERVAL_MS = "poll_interval_ms"
 KEY_HEARTBEAT_INTERVAL_MS = "heartbeat_interval_ms"
 
@@ -845,6 +850,8 @@ def config_text(
     site: str = "m1",
     intro_skip: bool = True,
     dialog_skip: bool = True,
+    press_any_button: bool = True,
+    process_windows: bool = True,
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
@@ -917,6 +924,26 @@ def config_text(
 # switches mean a boot failure can be pinned on one feature without rebuilding either.
 {KEY_DIALOG_ENABLED} = {str(dialog_skip).lower()}
 
+[{TITLE_SECTION}]
+# STARTUP-ONLY, both keys. The last two things between boot and a usable menu, and they are NOT
+# the same kind of thing as the notice boxes above -- neither is suppressed.
+#
+# `{KEY_PRESS_ANY_BUTTON}` detours the poll behind the PRESS ANY BUTTON gate so it always reports a
+# press. That poll has exactly ONE caller in the whole image (inside FeSubStateTitleMain::v3), so
+# this reaches one gate rather than input handling. The gate that waits for the title sequence to
+# be up is left alone, and the game's own phase-1 body -- which is what builds the top menu -- runs
+# in full.
+#
+# `{KEY_PROCESS_WINDOWS}` zeroes the minimum display time on the "please wait" windows
+# (network check, server login, system-data save, profile load). Those wrap REAL asynchronous work
+# and are never skipped: the wait on "is it finished yet" is untouched, and only the artificial
+# floor that keeps the window up after the work is already done is removed.
+#
+# ON by default; `--no-press-any-button-skip` and `--no-process-window-skip` write false. Two keys
+# rather than one so a boot failure can be pinned on one hook.
+{KEY_PRESS_ANY_BUTTON} = {str(press_any_button).lower()}
+{KEY_PROCESS_WINDOWS} = {str(process_windows).lower()}
+
 [{CRASH_SECTION}]
 {crash_banner}# STARTUP-ONLY, both of them. The handler is installed in DllMain BEFORE `neuter_arxan`, because
 # that call patches code from static analysis and is the likeliest crash in the whole startup path
@@ -958,10 +985,14 @@ def write_config(
     site: str = "m1",
     intro_skip: bool = True,
     dialog_skip: bool = True,
+    press_any_button: bool = True,
+    process_windows: bool = True,
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
-    text = config_text(probe, fault_after_ms, site, intro_skip, dialog_skip)
+    text = config_text(
+        probe, fault_after_ms, site, intro_skip, dialog_skip, press_any_button, process_windows
+    )
     path.write_text(text, encoding="utf-8")
     return path, text
 
@@ -1028,6 +1059,8 @@ def dry_run(
     site: str = "m1",
     intro_skip: bool = True,
     dialog_skip: bool = True,
+    press_any_button: bool = True,
+    process_windows: bool = True,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
@@ -1049,7 +1082,9 @@ def dry_run(
     config_path = GAME_DIR / CONFIG_NAME
     if config_path.is_file():
         current = config_path.read_text(encoding="utf-8")
-        if current == config_text(probe, fault_after_ms, site, intro_skip, dialog_skip):
+        if current == config_text(
+            probe, fault_after_ms, site, intro_skip, dialog_skip, press_any_button, process_windows
+        ):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
         else:
             print("[dry-run] config   present and DIFFERS; a real run would replace it")
@@ -1066,7 +1101,15 @@ def dry_run(
     print(f"[dry-run] would write  {config_path}")
     print(
         quoted_config(
-            config_text(probe, fault_after_ms, site, intro_skip, dialog_skip),
+            config_text(
+                probe,
+                fault_after_ms,
+                site,
+                intro_skip,
+                dialog_skip,
+                press_any_button,
+                process_windows,
+            ),
             indent="[dry-run]   | ",
         )
     )
@@ -1111,6 +1154,8 @@ def launch(
     site: str = "m1",
     intro_skip: bool = True,
     dialog_skip: bool = True,
+    press_any_button: bool = True,
+    process_windows: bool = True,
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
@@ -1127,7 +1172,14 @@ def launch(
     # disk before the game starts, and it is rewritten every run so a file left over from the
     # other arm cannot decide this one.
     config_path, config = write_config(
-        GAME_DIR, probe, fault_after_ms, site, intro_skip, dialog_skip
+        GAME_DIR,
+        probe,
+        fault_after_ms,
+        site,
+        intro_skip,
+        dialog_skip,
+        press_any_button,
+        process_windows,
     )
     print(f"[config] {config_path}")
 
@@ -1582,6 +1634,28 @@ def selftest() -> int:
         "--no-intro-skip leaves the dialog skip ON -- the two switches are independent",
     )
 
+    # THE TITLE SKIPS ARE TWO MORE INDEPENDENT SWITCHES. Four hooks now patch executable memory at
+    # startup, and the whole value of separate keys is that a run that fails to boot can be pinned
+    # on ONE of them without a rebuild. Asserting the independence is what keeps that true.
+    values, _ = parse_config(config_text("off"))
+    check(
+        values.get((TITLE_SECTION, KEY_PRESS_ANY_BUTTON)) == "true"
+        and values.get((TITLE_SECTION, KEY_PROCESS_WINDOWS)) == "true",
+        f"[{TITLE_SECTION}] both keys default to true",
+    )
+    values, _ = parse_config(config_text("off", press_any_button=False))
+    check(
+        values.get((TITLE_SECTION, KEY_PRESS_ANY_BUTTON)) == "false"
+        and values.get((TITLE_SECTION, KEY_PROCESS_WINDOWS)) == "true",
+        "--no-press-any-button-skip turns off only its own key",
+    )
+    values, _ = parse_config(config_text("off", process_windows=False))
+    check(
+        values.get((TITLE_SECTION, KEY_PROCESS_WINDOWS)) == "false"
+        and values.get((TITLE_SECTION, KEY_PRESS_ANY_BUTTON)) == "true",
+        "--no-process-window-skip turns off only its own key",
+    )
+
     # THE ARMS MUST DIFFER, and in exactly one key. If two arms ever generated the same file the
     # A/B comparison would be two runs of the same experiment, and the arm-readback guard would
     # not catch it because the DLL would be reporting truthfully.
@@ -1847,6 +1921,28 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--no-press-any-button-skip",
+        dest="press_any_button",
+        action="store_false",
+        default=True,
+        help=(
+            "leave the PRESS ANY BUTTON gate waiting for a button. It is forced by default, by "
+            "detouring the poll behind it -- which has exactly one caller in the whole image, so "
+            "the change reaches that gate and not input handling."
+        ),
+    )
+    parser.add_argument(
+        "--no-process-window-skip",
+        dest="process_windows",
+        action="store_false",
+        default=True,
+        help=(
+            "leave the 'please wait' windows their minimum display time. By default that floor is "
+            "zeroed so they close as soon as their work is actually done. The work itself is "
+            "never skipped -- only the time the window lingers after finishing."
+        ),
+    )
+    parser.add_argument(
         "--probe-site",
         choices=PROBE_SITES,
         default="m1",
@@ -1908,6 +2004,8 @@ def main() -> int:
             args.probe_site,
             args.intro_skip,
             args.dialog_skip,
+            args.press_any_button,
+            args.process_windows,
         )
     return launch(
         args.probe,
@@ -1916,6 +2014,8 @@ def main() -> int:
         args.probe_site,
         args.intro_skip,
         args.dialog_skip,
+        args.press_any_button,
+        args.process_windows,
     )
 
 

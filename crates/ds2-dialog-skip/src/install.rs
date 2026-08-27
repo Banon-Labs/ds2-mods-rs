@@ -20,7 +20,7 @@ pub fn set_logger(logger: LogFn) {
     LOGGER.store(logger as usize, Ordering::Release);
 }
 
-fn log(args: std::fmt::Arguments<'_>) {
+pub(crate) fn log(args: std::fmt::Arguments<'_>) {
     let raw = LOGGER.load(Ordering::Acquire);
     if raw != 0 {
         // SAFETY: `raw` is only ever a `LogFn` stored by `set_logger` above.

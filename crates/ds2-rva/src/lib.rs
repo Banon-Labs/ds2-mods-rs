@@ -494,3 +494,107 @@ pub const FE_DIALOG_TIMEOUT_OFFSET: usize = 0x14;
 /// consulting this constant -- which is the point. This entry exists so the exclusion is written
 /// down rather than merely emergent.
 pub const FE_DIALOG_VTABLE_DELETE_PROFILE_DO_NOT_ANSWER: u32 = 0x010b_d6c8;
+
+// ============================================================================================
+// THE TWO REMAINING STOPS BETWEEN BOOT AND THE MENU (`ds2-mods-rs-j3b`)
+//
+// Suppressing the notice boxes still does not hand the player a menu. Two things are left, and
+// they are different in kind from each other and from the notices:
+//
+//   * a PRESS ANY BUTTON gate, which waits on input and is the only one of the three that a
+//     player must actually act on;
+//   * PROCESS WINDOWS -- "please wait" boxes that resolve on their own, but not before a minimum
+//     display time has elapsed. These wrap real asynchronous work and MUST NOT be skipped; only
+//     the artificial minimum is worth removing.
+// ============================================================================================
+
+/// The press-any-button poll. RVA `0x000ff420`, VA `0x1400ff420`.
+///
+/// **It has exactly one caller in the entire image**: `0x1400fee6b`, inside
+/// `FeSubStateTitleMain::v3` (`0x1400fed90`), which is the "PRESS ANY BUTTON" screen's update.
+/// Counted by scanning every `e8 rel32` in the image for this target and attributing each hit to
+/// its `.pdata` owner. That is what makes detouring it narrow: it is a private helper of one gate,
+/// not shared input plumbing, so forcing its result cannot reach anything else in the game.
+///
+/// It ignores its argument entirely and reads globals -- the singleton at `0x1416751f8`, whose
+/// `+0x60` object it passes to `0x140af3f30`, then bit 16 and bit 4 of the returned `+0x10` word,
+/// falling back to `[[+0x60]+8]+0x34 & 1`. That is the same "a button was pressed" state word
+/// `FeSubStateTitleLogo`'s skip path tests; see `docs/DS2-TITLE-FLOW.md`.
+///
+/// # Why forcing it true is the right cut
+///
+/// `FeSubStateTitleMain::v3`'s phase-1 branch runs three things in order: it ticks the title scene,
+/// waits for [`FE_TITLE_MAIN_SEQUENCE_GATE`] to report the title sequence is up, and only then
+/// consults this poll. Forcing this one true leaves the sequence gate intact -- the title screen
+/// still initialises normally -- and then runs the **whole** of the game's own phase-1 body, which
+/// is what prepares the top menu. Forcing the substate's terminal phase instead would skip that
+/// setup, which is why this is hooked and the phase is not.
+///
+/// Not Arxan-redirected. `.pdata` gives it RVA `0x0ff420`-`0x0ff465`; its first two instructions
+/// are `48 83 ec 28` and `48 8b 49 08`, eight relocatable bytes with no branch targeting them.
+pub const FE_TITLE_MAIN_PRESS_ANY_BUTTON: u32 = 0x000f_f420;
+
+/// The gate that must still pass before the press poll is consulted. RVA `0x000f37f0`.
+///
+/// Returns true when the title scene's currently-playing sequence is `0x67`, via
+/// `0x140afdb30(scene, 0x67)` -- which compares the active sequence id against its argument.
+/// Recorded so it is clear that [`FE_TITLE_MAIN_PRESS_ANY_BUTTON`] is NOT the only condition on
+/// that branch, and that this mod deliberately leaves the other one alone.
+pub const FE_TITLE_MAIN_SEQUENCE_GATE: u32 = 0x000f_37f0;
+
+/// `FeSubStateProcessWindowBase::v1` (enter). RVA `0x00104ed0`, VA `0x140104ed0`.
+///
+/// The "please wait" window shared by six classes -- `FeSubStateProcessWindowBase`,
+/// `FeSubStateProcessWindowSimple`, `FeSubStateTitleOnlineCheck`,
+/// `FeSubStateTitleGameServerLogin`, `FeSubStateTitleSaveSystemData` and
+/// `FeSubStateTitleLoadProfile` -- found by scanning every RTTI vtable for this value in slot 1.
+///
+/// ```text
+/// result = this->vtable[8]();          // STARTS THE ASYNCHRONOUS WORK
+/// if (result >= 0) { this->phase = 3; return; }   // nothing to do; no window at all
+/// show_process_window(ui, this->caption, 0, 1);
+/// this->timer = 0;
+/// this->phase = 1;
+/// ```
+///
+/// **THIS ONE MUST NOT BE SUPPRESSED.** Slot 8 starts real work -- a network check, a server
+/// login, a system-data save, a profile load -- and the update then waits on slot 10 for it to
+/// finish. Skipping the substate would skip the wait, not just the window. That is the whole
+/// reason this is treated differently from [`FE_DIALOG_ENTER`], where nothing was pending.
+///
+/// Not Arxan-redirected; `.pdata` RVA `0x104ed0`-`0x104f24`, prologue `40 53 48 83 ec 20`.
+pub const FE_PROCESS_WINDOW_ENTER: u32 = 0x0010_4ed0;
+
+/// Minimum display duration within a process-window substate. `+0x10`, a float, in seconds.
+///
+/// `FeSubStateProcessWindowBase::v3` (`0x140105270`) phase 1 reads it as
+/// `addss xmm1,[rcx+0x14]` / `comiss xmm1,[rcx+0x10]` / `jb` -- so while the timer is BELOW this
+/// value the window stays up no matter what, and only once it is reached does the update consult
+/// slot 10 to ask whether the work is actually done. Set by the constructor at `0x140104c77`
+/// (`movss [rcx+0x10],xmm3`) from its third argument.
+///
+/// **Zeroing it removes the artificial floor and nothing else.** The slot-10 wait is untouched, so
+/// the window still stays up for exactly as long as the operation really takes -- it can no longer
+/// linger after the work is finished, and it cannot outrun it either. That is why this is the cut
+/// rather than anything that touches the phase.
+pub const FE_PROCESS_WINDOW_MIN_DURATION_OFFSET: usize = 0x10;
+
+/// Elapsed timer within a process-window substate. `+0x14`, a float, zeroed by `enter`.
+pub const FE_PROCESS_WINDOW_TIMER_OFFSET: usize = 0x14;
+
+/// Phase field within a process-window substate. `+0x20`, a **DWORD** -- not the byte the
+/// common-window substates use at `+0x30`. Different base class, different layout.
+///
+/// `1` while the window is up, `2` while it closes, `3` once finished. `enter` sets it to `3`
+/// directly when slot 8 reports there was nothing to do, which is the game's own "no window"
+/// path.
+pub const FE_PROCESS_WINDOW_PHASE_OFFSET: usize = 0x20;
+
+/// [`FE_PROCESS_WINDOW_PHASE_OFFSET`] while the window is up and the work is outstanding. The
+/// only phase in which the minimum duration is read, and therefore the only one in which zeroing
+/// it does anything.
+pub const FE_PROCESS_WINDOW_PHASE_SHOWING: i32 = 1;
+
+/// Kind field within a process-window substate. `+0x0c`, set by the constructor at `0x140104c87`.
+/// Logged as a diagnostic so the boot windows can be told apart in a log.
+pub const FE_PROCESS_WINDOW_KIND_OFFSET: usize = 0x0c;

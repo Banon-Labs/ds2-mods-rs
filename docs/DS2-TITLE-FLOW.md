@@ -412,3 +412,103 @@ class names into a property of the object in front of the code: "auto-confirmed 
 consequential" becomes structurally impossible rather than merely guarded against by an allowlist.
 The cost is that a genuinely two-option boot dialog would go unanswered -- and would show up as a
 line to read and decide on, which is the right way to meet one.
+
+## The last two stops: press-any-button, and the "please wait" windows
+
+Suppressing the notice boxes still does not hand the player a menu. Two things remain, and they are
+different in kind from the notices and from each other -- **neither is suppressed.**
+
+### PRESS ANY BUTTON
+
+`FeSubStateTitleMain::v3` (`0x1400fed90`) switches on a phase at `+0x10`. Its phase-1 branch does
+three things in order:
+
+```text
+scene = [[0x14160de10]+0x80];
+scene->vtable[4]();                  // tick the title scene
+if (!0x1400f37f0(scene)) return;     // is the title sequence (0x67) up yet?
+if (!0x1400ff420(this))  goto idle;  // was a button pressed?
+... the whole of the game's own setup for the top menu ...
+```
+
+`0x1400ff420` is the press poll. It **ignores its argument** and reads globals -- the `0x1416751f8`
+singleton, bit 16 then bit 4 of the word at `+0x10` of the object at its `+0x60`, falling back to
+`[[+0x60]+8]+0x34 & 1`. That is the same state word `FeSubStateTitleLogo`'s skip path tests.
+
+**It has exactly one caller in the entire image**: `0x1400fee6b`, inside that very update. Counted
+by scanning every `e8 rel32` for the target and attributing each hit to its `.pdata` owner. That is
+what makes detouring it a change to one gate rather than to input handling, and it is the fact the
+decision rests on -- `docs/DS2-TITLE-FLOW.md` had previously ruled out driving the input poll for
+the logo skip precisely because *that* poll is shared plumbing. This one is not.
+
+So the cut is: **force the poll true, and touch nothing else.** The sequence gate above it still
+holds, so the title screen still initialises normally; and the game's own phase-1 body -- which is
+what builds the top menu -- runs in full. Forcing the substate's terminal phase instead would skip
+that setup, which is why the phase is left alone here even though `ds2-intro-skip` writes phases for
+the boot screens. Different situation, different cut.
+
+### The "please wait" windows
+
+`FeSubStateProcessWindowBase::v1` (`0x140104ed0`) is shared by six classes -- the two
+`ProcessWindow` bases plus `FeSubStateTitleOnlineCheck`, `FeSubStateTitleGameServerLogin`,
+`FeSubStateTitleSaveSystemData` and `FeSubStateTitleLoadProfile`:
+
+```text
+enter:  result = this->vtable[8]();               // STARTS THE ASYNCHRONOUS WORK
+        if (result >= 0) { this->phase = 3; return; }   // nothing to do; no window at all
+        show_process_window(ui, this->caption, 0, 1);
+        this->timer = 0; this->phase = 1;
+
+update: if (phase == 1) {
+            this->timer += delta;
+            if (this->timer < this->min_duration) return;   // +0x10, an ARTIFICIAL FLOOR
+            if (this->vtable[10]()) return;                 // still working -> keep waiting
+            close_window(ui); this->phase = 2;
+        }
+```
+
+Layout (**different from the common windows** -- different base, phase is a DWORD at `+0x20`, not a
+byte at `+0x30`):
+
+| offset | meaning |
+| --- | --- |
+| `+0x0c` | kind |
+| `+0x10` | float, minimum display duration |
+| `+0x14` | float, elapsed |
+| `+0x20` | DWORD phase: 1 showing, 2 closing, 3 done |
+| `+0x24` | result |
+
+**These must not be suppressed.** Slot 8 starts real work -- a network check, a server login, a
+system-data save, a profile load -- and slot 10 is the wait for it. Skipping the substate would skip
+the wait, not just the window. That is the whole reason this is treated differently from the notice
+boxes, where nothing was pending.
+
+The cut is `+0x10 = 0`: remove the floor that keeps the window up *before* the update will even ask
+whether the work is done. The slot-10 wait is untouched, so the window still stays up for exactly as
+long as the operation really takes, and it cannot outrun it.
+
+### Measured, one run, no input at all
+
+```
+ds2-intro-skip:  skipped screen=warning-no-copy
+ds2-intro-skip:  skipped screen=logo (x3)
+ds2-dialog-skip: pressed    screen=title-main gate=press-any-button total=1
+ds2-dialog-skip: suppressed screen=common-window kind=6  caption=0x20 options=-1 total=1
+ds2-intro-skip:  skipped screen=user-policy
+ds2-dialog-skip: shortened  screen=process-window kind=57 min-duration=1.000->0 total=1
+ds2-dialog-skip: suppressed screen=common-window kind=70 caption=0x47 options=-1 total=2
+```
+
+**The floor was a full second.** That is the number that says the change was worth making rather
+than merely correct: one process window, held up for 1.0s after its work was already done. The
+previous value is logged for exactly this reason -- a floor shorter than the work would have shown
+up here as a number explaining why nothing visibly changed.
+
+### Four hooks, four switches
+
+`[intro_skip] enabled`, `[dialog_skip] enabled`, `[title_skip] press_any_button` and
+`[title_skip] process_windows`, with `--no-intro-skip`, `--no-dialog-skip`,
+`--no-press-any-button-skip` and `--no-process-window-skip` on the launcher. Four things now patch
+executable memory during startup, and the entire value of separate keys is that a run which fails to
+boot can be pinned on ONE of them by editing one line. `ds2-run.py --selftest` asserts each switch
+moves only its own key.

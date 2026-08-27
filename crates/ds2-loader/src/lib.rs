@@ -85,6 +85,7 @@ pub mod arxan_probe;
 pub mod crash_logging;
 pub mod dialog_skip;
 pub mod intro_skip;
+pub mod title_skip;
 
 /// `fdwReason` value for the loader's process-attach notification.
 const DLL_PROCESS_ATTACH: u32 = 1;
@@ -277,6 +278,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_probe(probe);
                 install_intro_skip();
                 install_dialog_skip();
+                install_title_skip();
                 arm_fault(crash_config);
             });
         },
@@ -304,6 +306,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_probe(probe);
                 install_intro_skip();
                 install_dialog_skip();
+                install_title_skip();
                 arm_fault(crash_config);
             });
         },
@@ -377,6 +380,38 @@ fn install_dialog_skip() {
     if !outcome.installed {
         log_line(format_args!(
             "{} NOT INSTALLED -- the title message boxes will still need a button press",
+            ds2_dialog_skip::LOG_PREFIX
+        ));
+    }
+}
+
+/// Install the two remaining title-flow skips, if `<Game>/ds2-mods.toml` asked for them.
+///
+/// Called from the same post-Arxan position as its two siblings. Last of the three because it is
+/// the one whose effect the player sees last: the boot screens go, then the notice boxes, then the
+/// press-any-button gate and the "please wait" windows between there and the menu.
+fn install_title_skip() {
+    let config = title_skip::TitleSkipConfig::load();
+    log_line(format_args!("{}", config.describe()));
+    if !config.press_any_button && !config.process_windows {
+        return;
+    }
+    ds2_dialog_skip::set_logger(log_line);
+    // SAFETY: both targets are `.pdata` function starts recorded in `ds2-rva`, resolved against the
+    // live module base, and neither is Arxan-redirected. The press gate is replaced outright and
+    // takes an argument it never reads; the process-window detour fronts `enter` and calls the
+    // original FIRST, because that call is what starts the work the window is covering.
+    let outcome =
+        unsafe { ds2_dialog_skip::install_title(config.press_any_button, config.process_windows) };
+    if config.press_any_button && !outcome.press_any_button {
+        log_line(format_args!(
+            "{} press-any-button NOT INSTALLED -- the title will still wait for a button",
+            ds2_dialog_skip::LOG_PREFIX
+        ));
+    }
+    if config.process_windows && !outcome.process_windows {
+        log_line(format_args!(
+            "{} process-window NOT INSTALLED -- the wait windows keep their minimum display time",
             ds2_dialog_skip::LOG_PREFIX
         ));
     }
