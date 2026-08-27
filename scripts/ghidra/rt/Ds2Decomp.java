@@ -37,7 +37,16 @@ public class Ds2Decomp extends GhidraScript {
                 } else if (!r.decompileCompleted()) {
                     println("(FAILED: " + r.getErrorMessage() + ")");
                 } else {
-                    println(r.getDecompiledFunction().getC());
+                    // ONE println PER LINE, never one println holding newlines. A GhidraScript's
+                    // println goes through log4j as `INFO  Ds2Decomp.java> <text> (GhidraScript)`,
+                    // and only the FIRST line of a multi-line message carries that prefix -- so
+                    // query.sh's extractor keeps line one and silently drops the body. Before this
+                    // split, every decompile printed its `####` banner and nothing else, which
+                    // reads as "this function has no code" rather than as a formatting bug. Same
+                    // trap Ds2Mem's `bytes` mode documents; this script had it too.
+                    for (String line : r.getDecompiledFunction().getC().split("\n", -1)) {
+                        println(line);
+                    }
                 }
             }
         } finally {
