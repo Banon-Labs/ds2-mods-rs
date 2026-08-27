@@ -269,7 +269,14 @@ unsafe fn attach(module: *mut c_void) {
         // `Send + 'static` because dearxan may run it on the entry-point thread or, if it could
         // not synchronise, on one of its own.
         arxan_probe::Arm::NeuterArxan => unsafe {
+            // BRACKETING OUR OWN COST. `neuter_arxan` analyses 48 stubs and patches them, and it
+            // runs inside the 418ms that the timeline charges to the boot before the game's entry
+            // point. Until this is measured, some unknown share of that is THIS MOD taxing the
+            // startup it exists to shorten -- which would be worth knowing before claiming any
+            // saving. The mark costs a performance-counter read.
+            ds2_boot_timeline::mark("neuter-arxan-begin");
             neuter_arxan(move |result: DearxanResult| {
+                ds2_boot_timeline::mark("neuter-arxan-callback");
                 // JOB 2 (second half). Not in `DllMain`: this callback runs at the entry point,
                 // after `DllMain` has returned. The result carries both facts the runtime test
                 // needs -- whether Arxan was there, and whether we got to speak before the entry

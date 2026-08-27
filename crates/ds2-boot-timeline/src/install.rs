@@ -264,6 +264,103 @@ fn on_leave(id: u32) {
     ));
 }
 
+// ============================================================================================
+// WATCHES. The two substates that take ~1.01s reproducibly are waiting on a state word owned by
+// something else. Sampling that word once per frame, and logging only when it CHANGES, says which
+// side of the boundary the second is spent on -- the substate sitting on a result that arrived
+// long ago, or the service genuinely taking a second to produce it.
+//
+// Only-on-change is what makes this affordable: this runs inside a per-frame detour, and the log
+// sink opens, writes and fsyncs per line.
+// ============================================================================================
+
+/// Last value seen for each watch, plus a "never sampled" flag in the high bits.
+static WATCHED: [AtomicU64; 2] = [const { AtomicU64::new(u64::MAX) }; 2];
+const WATCH_SAVE_LOAD: usize = 0;
+const WATCH_INFORMATION: usize = 1;
+
+/// Follow `base_rva -> [+first] -> read u32 at +second`, with a null check at every hop.
+///
+/// # Safety
+///
+/// `base` is the live game module base. Each offset is one the game itself dereferences at the
+/// same point in the flow, so the chain is valid whenever the watched substate is resident.
+unsafe fn read_through(base: usize, base_rva: u32, first: usize, second: usize) -> Option<u32> {
+    unsafe {
+        let global = (base + base_rva as usize) as *const *const u8;
+        let root = global.read();
+        if root.is_null() {
+            return None;
+        }
+        let object = root.add(first).cast::<*const u8>().read();
+        if object.is_null() {
+            return None;
+        }
+        Some(object.add(second).cast::<u32>().read())
+    }
+}
+
+/// Sample whichever state word the resident substate is waiting on, and log a change.
+///
+/// # Safety
+///
+/// `base` must be the live game module base.
+unsafe fn sample_watch(base: usize, resident_id: u32) {
+    let (index, label, value) = match resident_id {
+        // 0x05 SteamLoadSystemData waits on SaveLoadSystem's request state -- the same word the
+        // service's own start path refuses on. Both halves of the interlock are packed into one
+        // sample so a change in either is visible.
+        0x05 => {
+            let state = unsafe {
+                read_through(
+                    base,
+                    ds2_rva::GAME_MANAGER_IMP,
+                    ds2_rva::SAVE_LOAD_SYSTEM_OFFSET,
+                    ds2_rva::SAVE_LOAD_SYSTEM_STATE_OFFSET,
+                )
+            };
+            let sub = unsafe {
+                read_through(
+                    base,
+                    ds2_rva::GAME_MANAGER_IMP,
+                    ds2_rva::SAVE_LOAD_SYSTEM_OFFSET,
+                    ds2_rva::SAVE_LOAD_SYSTEM_SUBSTATE_OFFSET,
+                )
+            };
+            match (state, sub) {
+                (Some(state), Some(sub)) => (
+                    WATCH_SAVE_LOAD,
+                    "saveload-state",
+                    u64::from(state) | (u64::from(sub) << 32),
+                ),
+                _ => return,
+            }
+        }
+        // 0x44 Information waits on the download job's own state, testing it for 5 or 6.
+        0x44 => {
+            let Some(state) = (unsafe {
+                read_through(
+                    base,
+                    ds2_rva::FE_TITLE_CONTEXT,
+                    ds2_rva::FE_TITLE_INFORMATION_JOB_OFFSET,
+                    ds2_rva::FE_INFORMATION_JOB_STATE_OFFSET,
+                )
+            }) else {
+                return;
+            };
+            (WATCH_INFORMATION, "information-job-state", u64::from(state))
+        }
+        _ => return,
+    };
+    if WATCHED[index].swap(value, Ordering::Relaxed) == value {
+        return;
+    }
+    log(format_args!(
+        "{LOG_PREFIX} watch id=0x{resident_id:02x} field={label} value=0x{value:x} t={:.3}ms",
+        now_us() as f64 / 1000.0
+    ));
+}
+
 /// Sample the resident substate around the original, and report a change.
 unsafe extern "system" fn detour_flow_update(flow: *mut u8, delta: f32) {
     let trampoline = FLOW_UPDATE_TRAMPOLINE.load(Ordering::Acquire);
@@ -295,6 +392,16 @@ unsafe extern "system" fn detour_flow_update(flow: *mut u8, delta: f32) {
     unsafe { original(flow, delta) };
 
     let after = resident(flow);
+    // The watch runs every frame the substate is resident, not only on a transition: the whole
+    // question is what the state word does DURING the second, and a transition-only sample would
+    // show only its value at each end.
+    if !after.is_null()
+        && let Ok(base) = ds2_game_base::mem::game_module_base()
+    {
+        // SAFETY: `after` is the substate the flow has just updated, and `base` is the live module
+        // base the RVAs in `ds2-rva` are relative to.
+        unsafe { sample_watch(base, substate_id(after)) };
+    }
     if after != before && !after.is_null() {
         // SAFETY: the flow has just stored this pointer as its resident substate.
         let id = unsafe { substate_id(after) };

@@ -1345,3 +1345,62 @@ pub const FE_SUBSTATE_ID_OFFSET: usize = 0x0c;
 /// (`mov QWORD PTR [rcx+0xc],0x47`), and corroborated by `FeSubStateTitleOptionGame`'s transition
 /// table, whose phase-4 edge names `0x47` as its destination.
 pub const FE_SUBSTATE_ID_TITLE_TOP_MENU: u32 = 0x47;
+
+// ============================================================================================
+// THE TWO STATE WORDS BEHIND THE ONE-SECOND FLOORS (`ds2-mods-rs-wxl`).
+//
+// 0x05 SteamLoadSystemData and 0x44 Information each take ~1.01s, reproducibly to within 2ms
+// across runs, which is a clock rather than work. Their own `update` functions contain no
+// threshold, and no sleep or wait import is called from anywhere in `SaveLoad2`. So the question
+// is which side of the boundary the second is spent on: the substate polling a service that
+// finished long ago, or the service genuinely taking a second.
+//
+// These are the fields that answer it. Both are read once per frame while their substate is
+// resident, and only a CHANGE is logged.
+// ============================================================================================
+
+/// `GameManagerImp`, the root singleton most engine services hang off. RVA `0x016148f0`.
+///
+/// Every process-window substate reaches its backend through this: `[+0xb8]` is the storage
+/// service, `[+0x22f0]` the network service, `[+0x22e0]` the window system, `[+0xa8]` the object
+/// holding the savedata block at its own `+0xd8`.
+pub const GAME_MANAGER_IMP: u32 = 0x0161_48f0;
+
+/// Offset of `SaveLoadSystem` in [`GAME_MANAGER_IMP`].
+///
+/// Read at `0x1400fc3f7` (`mov rbp,[rdx+0xb8]`) in `SaveSystemData`'s enter and at `0x1400fb004`
+/// in `SteamLoadSystemData`'s, among others.
+pub const SAVE_LOAD_SYSTEM_OFFSET: usize = 0xb8;
+
+/// `SaveLoadSystem`'s request state word.
+///
+/// **This is the interlock.** Every start entry point refuses while it is non-zero
+/// (`0x1402e72c0` and `0x1402e7170` both open `if ([this+0x08] != 0 || [this+0x0c] != 0) return
+/// false`), and both pollers gate on it: `0x1402e6230` accepts `{2, 4}`, `0x1402e67f0` tests
+/// `bt 0x6a` for `{1, 3, 5, 6}`. If it flips out of "working" long before
+/// `0x05 SteamLoadSystemData` advances, the floor is in the substate; if it stays put for the full
+/// second, the floor is below, in `SaveLoad2`.
+pub const SAVE_LOAD_SYSTEM_STATE_OFFSET: usize = 0x08;
+
+/// The second half of the same interlock, checked alongside [`SAVE_LOAD_SYSTEM_STATE_OFFSET`].
+pub const SAVE_LOAD_SYSTEM_SUBSTATE_OFFSET: usize = 0x0c;
+
+/// The title context singleton. RVA `0x0160de10`.
+///
+/// `[+0x80]` is `FeSceneTitle`, `[+0xa0]` the information job below, `[+0x568]` the skip flag the
+/// boot screens share, `[+0x54c]`/`[+0x558]`/`[+0x55c]`/`[+0x560]` result codes the substates
+/// publish.
+pub const FE_TITLE_CONTEXT: u32 = 0x0160_de10;
+
+/// Offset of the information-download job in [`FE_TITLE_CONTEXT`].
+///
+/// Read at `0x1400ff787` (`mov rbx,[rax+0xa0]`) in `FeSubStateTitleInformation::v3`'s phase-4
+/// branch, which ticks it through `[[job]+0x20]` and then tests the field below.
+pub const FE_TITLE_INFORMATION_JOB_OFFSET: usize = 0xa0;
+
+/// The information job's own state, the value `0x44 Information` is waiting on.
+///
+/// Read at `0x1400ff797` (`mov eax,[rbx+0x18]`) and compared against `5` then `6`; either sends
+/// the substate to its terminal phase. Watching it says whether the job finishes early and the
+/// substate sits on the result, or the job itself takes the second.
+pub const FE_INFORMATION_JOB_STATE_OFFSET: usize = 0x18;

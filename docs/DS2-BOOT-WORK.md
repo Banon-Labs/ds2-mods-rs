@@ -532,6 +532,69 @@ shape suggests and nothing here proves.
 Fixing it is one line on each side: a wall-clock stamp in the loader's first log line and in the
 sampler's header. Do that before drawing any conclusion that depends on where the boundaries fall.
 
+## The floor on `0x05` is in the substate, and the work is 88 ms of the 978
+
+Static went as far as it could and stopped: no `Sleep`, `WaitForSingleObject`,
+`WaitForMultipleObjects` or `SleepConditionVariable` is called from **anywhere** in `SaveLoad2`
+(`0x140a8xxxx`–`0x140a90xxx`) or `SaveLoadSystem` (`0x1402e5000`–`0x1402e9000`) — every one of
+those imports was located in the IAT and every caller attributed to its owning function. So the
+second is not a sleep on that path, and continuing to read disassembly hoping to spot a constant
+would have been a hunt without a bound.
+
+The bisection instead: sample the state word the substate is actually waiting on, once per frame
+while it is resident, and log only when it changes. `SaveLoadSystem+0x08`/`+0x0c` is the interlock
+every start path refuses on, so watching it says which side of the boundary the second is spent on.
+
+```
+watch id=0x05 saveload-state=0x2_00000004   t=4128.251ms   (before enter)
+enter id=0x05                               t=4134.220ms
+watch id=0x05 saveload-state=0x6_00000004   t=4215.070ms
+watch id=0x05 saveload-state=0x0            t=4222.120ms   <- INTERLOCK CLEAR, work done
+leave id=0x05                               t=5112.659ms   dwell=978.439ms
+```
+
+**`SaveLoadSystem` goes idle 88 ms after the substate is entered, and the substate then sits there
+for another 890 ms.** The storage service is not slow. The load takes 88 ms — which is what an 8 MB
+file out of a warm page cache should cost — and 91% of the substate's second is spent after the
+work it was waiting for has finished.
+
+So the floor is **inside `FeSubStateTitleSteamLoadSystemData`**, not below it. Its `update`
+(`0x1400fbdb0`) is a 13-case jump table on `+0x10`, contains no float comparison, and issues no
+further storage request (the interlock stays `0x0` for the whole 890 ms). That is a small, bounded
+place to look, and it is where `ds2-mods-rs-wxl` now points.
+
+### `0x44` is not the same shape, and the watch was aimed wrong
+
+`FE_INFORMATION_JOB_STATE_OFFSET` reads `0` once and never changes across the whole 1019.8 ms.
+`FeSubStateTitleInformation::v3` only consults that field in its **phase 4** branch, so the
+substate is spending its second in an earlier phase and the watch is pointed at a field nobody is
+waiting on yet. Re-aim it at the phase field first, then at whatever that phase reads.
+
+The destination is a clue the earlier runs already recorded: `0x44` always transitions to `0x46`,
+the "could not retrieve information" message box, never to `0x47` directly. **The information
+fetch fails on every measured boot.** A one-second cost to fail is a timeout, not a floor, and it
+would be removed by a different fix from `0x05`'s.
+
+### This mod costs the boot 285 ms
+
+```
+milestone neuter-arxan-begin     t=26.819ms
+milestone neuter-arxan-callback  t=311.683ms
+```
+
+`neuter_arxan` is **284.9 ms**, 4.2% of the boot, and it is ours. It is the price of being able to
+hook at all, and the features it buys are worth more than it costs — the process-window de-flooring
+alone removes about a second — but it belongs on the bill. Any future claim of a saving should be
+net of this number, and no such claim has been made yet that accounts for it.
+
+### The instrument perturbs, slightly, and by a known amount
+
+The watch line at `4128.251 ms` and the enter line at `4134.220 ms` are emitted from the same
+detour call, microseconds apart in the program and **6 ms apart in the log**. That gap is the log
+sink: it opens, writes and `fsync`s per line, deliberately, so a line survives the process dying.
+At the handful of lines this instrument emits that is a rounding error on a 6.7 s boot, but it is
+not zero, and a future version that logged per frame would measure mostly itself.
+
 ## The caveat that governs every address here
 
 These come from the deobfuscated image, which is not the byte stream that runs. Vtables and the
