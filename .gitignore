@@ -25,3 +25,6 @@ target/
 # Agent worktrees -- linked git worktrees created under the repo by subagents.
 # They are separate checkouts; committing them embeds a repo inside this one.
 .claude/worktrees/
+
+# Python bytecode from the static-analysis helpers in scripts/.
+__pycache__/
