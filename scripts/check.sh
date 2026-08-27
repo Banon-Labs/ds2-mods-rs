@@ -14,7 +14,16 @@ run_host_tests=0
 [[ "${1:-}" == "--host-tests" ]] && run_host_tests=1
 
 echo "== rustfmt =="
-cargo fmt --all -- --check
+# NOT `cargo fmt --all`. `--all` is documented as "format all packages, AND ALSO THEIR LOCAL
+# PATH-BASED DEPENDENCIES", so the moment a crate here depended on `../dearxan` the gate started
+# checking someone else's checkout and failing on their brace style. Same principle as `--no-deps`
+# on the clippy line below: a path dependency outside this workspace does not get a vote on our
+# gate. `cargo metadata --no-deps` lists workspace members only, so this keeps working with the
+# members glob in Cargo.toml -- a new crate needs no edit here.
+members=$(cargo metadata --no-deps --format-version 1 \
+  | python3 -c 'import json,sys; print("\n".join(p["name"] for p in json.load(sys.stdin)["packages"]))')
+# shellcheck disable=SC2086  # deliberate word splitting: one -p per member.
+cargo fmt $(printf -- '-p %s ' $members) -- --check
 
 echo "== clippy ($TARGET) =="
 # `--all-targets` so tests and examples are linted too, `--no-deps` so a warning in a path
