@@ -74,6 +74,87 @@ pub const BUILD_ID: u32 = 9_527_516;
 // ============================================================================================
 // ADDRESSES
 //
-// Empty, deliberately. Nothing has been reverse engineered yet. The first entries will
-// arrive with the first mod that needs one; until then an empty table is an honest one.
+// One entry, and it is not a feature's address -- it is the subject of an EXPERIMENT. The
+// question "does a MinHook detour survive Arxan in this game" gates every hooking feature this
+// repo could ever have, and it cannot be answered without patching some specific function. So
+// the first address here is the one chosen to be patched, and its doc comment carries the whole
+// derivation, because a hook site picked badly makes the experiment fail for the wrong reason.
+//
+// Everything else is still empty and still honest. The next entries arrive with the first mod
+// that needs one.
 // ============================================================================================
+
+/// **M1 hook site**: the function the Arxan-survival probe detours. RVA `0x00832e70`.
+///
+/// # What this address is for
+///
+/// It is not needed by any feature. It exists so that
+/// [`ds2-loader`'s Arxan probe](https://github.com/Banon-Labs/ds2-mods-rs/blob/main/crates/ds2-loader/src/arxan_probe.rs)
+/// can patch *something* and watch whether the patch survives. DS2 carries 48 Arxan stubs and
+/// 286 Arxan-redirected functions; MinHook works by rewriting a function prologue in `.text`,
+/// which is exactly the thing an integrity check looks for. Until a detour has been shown to
+/// survive in this game, every plan in this repo that involves hooking is unproven. This
+/// constant is the subject of that experiment and nothing else.
+///
+/// # How it was established
+///
+/// Measured from `darksoulsii-deobf.bin` (build [`BUILD_ID`]), statically, with no runtime:
+///
+/// * `.pdata` (`RUNTIME_FUNCTION[]` at RVA `0x189a000`, size `0x117978`, 12 bytes each) gives
+///   all **95434** function starts for free. Counting `e8 rel32` call targets that land exactly
+///   on one of those starts resolved **149022** direct calls without disassembling 17 MB.
+/// * This function is the target of **2052** of them -- rank 3 in the whole binary. A detour
+///   here that never fires is a real signal rather than an expected one.
+/// * Its prologue is `48 89 5c 24 08` (`mov [rsp+8], rbx`), then `57`, then `48 83 ec 20`. The
+///   first instruction is **exactly 5 bytes**, so MinHook relocates one whole instruction into
+///   the trampoline and never has to split one -- the trivial case, and the reason this site
+///   was preferred over an equally hot one with a 4-byte first instruction.
+/// * It is `0x47` bytes long, so the 5-byte `e9 rel32` MinHook writes fits with room to spare,
+///   and no branch inside the function targets a byte within those five.
+/// * It is **not** one of the 286 Arxan-redirected functions.
+///
+/// See `docs/ARXAN-PROBE.md` for the experiment this feeds, and `docs/ARXAN-FOOTPRINT.md` for
+/// the survey the counts above come from.
+///
+/// # Resolve it, do not hardcode the VA
+///
+/// The disassembly shows `0x140832e70`, but [`IMAGE_BASE`] is only the *preferred* base and
+/// `DllCharacteristics` is `0x8160` (`DYNAMIC_BASE`). Add this RVA to the base read out of the
+/// loaded module at runtime -- `ds2_game_base::mem::game_rva` does exactly that.
+pub const ARXAN_PROBE_HOOK_SITE: u32 = 0x0083_2e70;
+
+/// The bytes [`ARXAN_PROBE_HOOK_SITE`] is expected to begin with, before anything patches it.
+///
+/// The probe reads the live prologue at install time and compares it against this. A mismatch
+/// means something else reached this function first -- another mod, an Arxan stub that this
+/// build places differently, or the wrong game version -- and the probe declares the run VOID
+/// rather than reporting on a patch it did not make cleanly. Five bytes because that is the
+/// whole first instruction and the whole of what MinHook overwrites.
+pub const ARXAN_PROBE_HOOK_SITE_PROLOGUE: [u8; 5] = [0x48, 0x89, 0x5c, 0x24, 0x08];
+
+/// Length of [`ARXAN_PROBE_HOOK_SITE`], from its `.pdata` `RUNTIME_FUNCTION` entry.
+///
+/// Recorded because "is there room for a 5-byte jump" is the question a hook site has to answer,
+/// and `0x47` answers it without anyone re-reading `.pdata`.
+pub const ARXAN_PROBE_HOOK_SITE_LEN: u32 = 0x47;
+
+/// Backup M1 hook site, if [`ARXAN_PROBE_HOOK_SITE`] turns out to be unusable. RVA `0x008389e0`.
+///
+/// Same derivation, same prologue shape (`48 89 5c 24 08 / 57 / 48 83 ec 20`), **1287** static
+/// call sites, `0x4e` bytes long, also not one of the 286. It is the second choice only because
+/// it is called less often; on every property that decides whether a hook can be installed it is
+/// equivalent.
+pub const ARXAN_PROBE_HOOK_SITE_BACKUP: u32 = 0x0083_89e0;
+
+/// **NEVER HOOK THESE.** The two hottest functions in the binary, and both are Arxan's.
+///
+/// `0x00832cb0` (12401 call sites) begins `e9 c1 50 34 01` -> `0x141b77d76`, and `0x00c2c9e0`
+/// (4866 call sites) begins `e9 ba e7 f3 00` -> `0x141b6b19f`. Both jumps land in `.text` #2
+/// (VA `0x141aaf000`-`0x141d43000`), Arxan's own section. They are recorded here as a named
+/// exclusion rather than left out, because the next person ranking functions by call count will
+/// find exactly these two at the top and needs to know why they are skipped.
+///
+/// Detouring one of them would mean writing over Arxan's own redirect. The experiment would then
+/// fail -- or the game would crash -- for a reason that has nothing to do with the question being
+/// asked, which is whether Arxan reverts an *ordinary* hook.
+pub const ARXAN_REDIRECTED_DO_NOT_HOOK: [u32; 2] = [0x0083_2cb0, 0x00c2_c9e0];
