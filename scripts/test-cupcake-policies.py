@@ -107,6 +107,22 @@ def main() -> int:
         # --- control: an ordinary command must survive the whole policy set -------------------
         PolicyCase("allow-cargo-build", True, "cargo build --workspace"),
         PolicyCase("allow-ds2-run-dry", True, "python3 scripts/ds2-run.py --dry-run"),
+        # --- ds2_launch_guard -------------------------------------------------------------
+        # The bare launch this guard exists to stop, and the sanctioned launcher it must
+        # never touch (`allow-ds2-run-dry` above is the other half of that pair).
+        PolicyCase("deny-bare-steam-applaunch", False, "steam -applaunch 335300"),
+        PolicyCase("deny-steam-run-url", False, "xdg-open steam://run/335300"),
+        # A different appid is somebody else's game, and static RE on our binary is the
+        # most encouraged activity in this repo -- neither may read as a launch.
+        PolicyCase("allow-applaunch-other-appid", True, "steam -applaunch 1245620"),
+        PolicyCase("allow-objdump-on-the-exe", True, "objdump -d Game/DarkSoulsII.exe | head"),
+        # --- block_pgrep_full_match ---------------------------------------------------------
+        # -f matched the agent's own command line twice in one session: once producing a
+        # fabricated ALIVE claim, once killing the agent's own shell. -x cannot self-match.
+        PolicyCase("deny-pgrep-full-match", False, "pgrep -f DarkSoulsII.exe"),
+        PolicyCase("deny-pkill-full-match", False, "pkill -f ds2-run.py"),
+        PolicyCase("allow-pgrep-exact-name", True, "pgrep -x DarkSoulsII.exe"),
+        PolicyCase("allow-unrelated-grep-f", True, "grep -f patterns.txt haystack.txt"),
         # --- git_block_main_commit -------------------------------------------------------------
         PolicyCase(
             "deny-commit-on-main",
