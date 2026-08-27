@@ -56,6 +56,88 @@ fn now_us() -> u64 {
         .map_or(0, |origin| origin.elapsed().as_micros() as u64)
 }
 
+// ============================================================================================
+// MILESTONES. The substate timeline covers the title flow; these cover what happens BEFORE it,
+// which the first two measured runs showed to be 3.86s -- 56% of the whole boot, reproducible to
+// 0.67%, and therefore steady startup work rather than shader compilation.
+//
+// Nothing here hooks anything. Both milestones are positions the loader already occupies: the
+// Arxan callback runs at the game's entry point, and `DirectInput8Create` is our own proxy export.
+// Free instruments come first; the IAT-patching one that would time D3D11 and FMOD is only worth
+// building if these leave a large undifferentiated gap. See `ds2-mods-rs-a8b`.
+// ============================================================================================
+
+/// Milestones recorded before the log sink and the config existed.
+///
+/// `DirectInput8Create` can be called by the game before the Arxan callback has read the config
+/// and installed the logger, so a milestone cannot simply log itself. It records into this buffer
+/// instead, and [`install`] flushes it. A milestone that arrived too early to be logged is still a
+/// milestone; dropping it would silently shorten the very interval it exists to measure.
+static PENDING: [(AtomicUsize, AtomicU64); MAX_PENDING] =
+    [const { (AtomicUsize::new(0), AtomicU64::new(0)) }; MAX_PENDING];
+static PENDING_COUNT: AtomicU32 = AtomicU32::new(0);
+/// Enough for every milestone this crate defines, several times over. Overflow is dropped and
+/// reported rather than growing: this runs on the game's startup thread and must not allocate.
+const MAX_PENDING: usize = 16;
+/// Set once [`install`] has flushed [`PENDING`]; later milestones log immediately.
+static FLUSHED: AtomicU32 = AtomicU32::new(0);
+
+/// Record that a named point in startup has been reached.
+///
+/// Safe to call from `DllMain` and from the proxy export. Allocates nothing, takes no lock, and
+/// before [`install`] has run it does not touch the filesystem either.
+pub fn mark(label: &'static str) {
+    let at_us = now_us();
+    if FLUSHED.load(Ordering::Acquire) != 0 {
+        log(format_args!(
+            "{LOG_PREFIX} milestone label={label} t={:.3}ms",
+            at_us as f64 / 1000.0
+        ));
+        return;
+    }
+    let slot = PENDING_COUNT.fetch_add(1, Ordering::Relaxed) as usize;
+    if slot < MAX_PENDING {
+        // The label is a `&'static str`; only its pointer and length are needed, and every label
+        // this crate is called with is a literal, so storing the pointer is sound for the life of
+        // the process. Length is recovered by the flush from the same literal set.
+        PENDING[slot]
+            .0
+            .store(label.as_ptr() as usize, Ordering::Relaxed);
+        PENDING[slot]
+            .1
+            .store(at_us | ((label.len() as u64) << 48), Ordering::Relaxed);
+    }
+}
+
+/// Emit everything [`mark`] recorded before the logger existed, then switch to immediate logging.
+fn flush_milestones() {
+    let recorded = PENDING_COUNT.load(Ordering::Relaxed) as usize;
+    for slot in PENDING.iter().take(recorded.min(MAX_PENDING)) {
+        let pointer = slot.0.load(Ordering::Relaxed);
+        let packed = slot.1.load(Ordering::Relaxed);
+        if pointer == 0 {
+            continue;
+        }
+        let at_us = packed & 0x0000_ffff_ffff_ffff;
+        let len = (packed >> 48) as usize;
+        // SAFETY: `pointer`/`len` came from a `&'static str` literal passed to `mark`, which lives
+        // for the whole process.
+        let label = unsafe {
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(pointer as *const u8, len))
+        };
+        log(format_args!(
+            "{LOG_PREFIX} milestone label={label} t={:.3}ms",
+            at_us as f64 / 1000.0
+        ));
+    }
+    if recorded > MAX_PENDING {
+        log(format_args!(
+            "{LOG_PREFIX} milestone-overflow recorded={recorded} kept={MAX_PENDING}"
+        ));
+    }
+    FLUSHED.store(1, Ordering::Release);
+}
+
 /// The id of the substate currently resident, or [`NO_SUBSTATE`].
 static CURRENT_ID: AtomicU32 = AtomicU32::new(NO_SUBSTATE);
 /// When [`CURRENT_ID`] was entered, in microseconds since [`ORIGIN`].
@@ -291,6 +373,12 @@ pub unsafe fn install() -> Outcome {
         },
     ];
 
+    // FIRST: everything `mark` recorded before there was a sink to write it to. `install` runs
+    // from the Arxan callback, which is the entry point, so this is also the milestone that says
+    // how much of the boot went by before the game's own code started.
+    mark("entry-point");
+    flush_milestones();
+
     let base = match ds2_game_base::mem::game_module_base() {
         Ok(base) => base,
         Err(error) => {
@@ -355,8 +443,9 @@ pub unsafe fn install() -> Outcome {
     }
 
     log(format_args!(
-        "{LOG_PREFIX} install installed={installed}/{} origin={}",
+        "{LOG_PREFIX} install installed={installed}/{} t={:.3}ms origin={}",
         sites.len(),
+        now_us() as f64 / 1000.0,
         if ORIGIN.get().is_some() {
             "dll-main"
         } else {

@@ -611,10 +611,21 @@ pub unsafe extern "system" fn DirectInput8Create(
     ppv_out: *mut *mut c_void,
     punk_outer: *mut c_void,
 ) -> i32 {
+    // A FREE MILESTONE. The game calls this once, during input initialisation, and it is one of
+    // only two points inside the 3.86s engine block that this DLL already occupies without
+    // hooking anything (the other is the Arxan callback, which is the entry point). Recorded
+    // rather than logged: this can be reached before the config has been read and the log sink
+    // installed, and `mark` buffers until it has. Costs a performance-counter read.
+    ds2_boot_timeline::mark("dinput8-create");
     let Some(real) = real_direct_input8_create() else {
         return E_FAIL;
     };
-    unsafe { real(hinst, version, riidltf, ppv_out, punk_outer) }
+    let result = unsafe { real(hinst, version, riidltf, ppv_out, punk_outer) };
+    // The forward is marked separately because it is not free: `real_direct_input8_create` does a
+    // lazy `LoadLibraryW` of the system DLL on the first call, and a milestone that folded that
+    // into the game's own input init would put our cost on the game's bill.
+    ds2_boot_timeline::mark("dinput8-create-returned");
+    result
 }
 
 type DirectInput8CreateFn = unsafe extern "system" fn(

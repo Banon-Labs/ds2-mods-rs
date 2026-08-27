@@ -58,7 +58,7 @@
 mod install;
 
 #[cfg(windows)]
-pub use install::{LogFn, Outcome, install, mark_origin, set_logger};
+pub use install::{LogFn, Outcome, install, mark, mark_origin, set_logger};
 
 /// Prefix on every line this crate writes to the loader log, so a reader can tell which component
 /// spoke and a filter can select these lines alone.

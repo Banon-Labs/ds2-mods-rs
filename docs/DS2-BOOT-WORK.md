@@ -469,6 +469,69 @@ not, and that reorders everything:
 suggested. Removing the two floors would take boot-to-menu from ~6.8 s to about **4.8 s**, and it
 is the only item on the list whose fix has a proven precedent in this repo.
 
+## Inside the engine block
+
+Two milestones were added that cost no hook at all, because the loader already occupies both
+positions: the Arxan callback runs at the game's entry point, and `DirectInput8Create` is our own
+proxy export, called once during input initialisation. Measured (run 4 of 4):
+
+| phase | span | cost |
+| --- | --- | --- |
+| `DllMain` → entry point | 0 → 418.2 ms | **418.2 ms** |
+| entry point → input init | 438.5 → 855.1 ms | **416.6 ms** |
+| the `DirectInput8Create` forward itself | 855.1 → 862.1 ms | 7.0 ms |
+| **input init → first substate** | 862.1 → 3925.2 ms | **3063.1 ms** |
+| title flow | 3925.2 → 6643.9 ms | 2718.7 ms |
+
+So the engine block is not one lump: about 835 ms of it is before the game's own initialisation
+gets going, and **3.06 s — 46% of the entire boot — sits in one window after input init and before
+the title state machine runs.** That window is where D3D11 device creation, archive mounting, FMOD,
+Steam and param loading all live, and no free milestone falls inside it.
+
+**One of those numbers may be ours.** `neuter_arxan` runs inside the first 418 ms, and nothing has
+measured it. Until a milestone brackets that call, some fraction of the pre-entry-point cost is
+this mod's own overhead being counted against the game.
+
+### The window is neither disk-bound nor CPU-bound
+
+Rather than hook file APIs — a naked thunk around a ten-argument import, in a process carrying 48
+Arxan stubs — the next measurement was taken from **outside** the process.
+`scripts/ds2-io-sample.py` samples `/proc/<pid>/io` and `/proc/<pid>/stat` every 20 ms. It attaches
+to nothing and signals nothing, so the run is the run it would have been anyway.
+
+Over a 9.7 s window covering the whole boot:
+
+```
+rchar (bytes returned by read())        128.0 MB
+read_bytes (fetched from the device)     19.2 MB
+cpu (utime+stime)                         5.08 s over 9.7s  =  52% of ONE core
+```
+
+Two things fall straight out of that:
+
+* **The archives are already in the page cache.** The game reads 128 MB and the disk serves 19 MB
+  of it, 18.5 MB of that in the first 250 ms. Loading is not waiting on the disk on a warm boot,
+  so "make the archive reads faster" is not the lever it looked like.
+* **Nothing is compute-bound.** CPU never exceeds roughly one core, and averages half of one, in a
+  process with many threads.
+
+And the shape matters more than the totals. **Every byte of reading happens in an early ~2 s
+burst**; from about 2 s onward the `rchar` column is flat zero while CPU sits at ~50%. A stretch
+that is neither reading nor computing hard is a stretch that is *waiting* — the same signature the
+two one-second floors already showed in the title flow.
+
+### The alignment is NOT established, and it bounds what the above can claim
+
+The sampler's `t = 0` is the moment it first found the process; the loader's `t = 0` is `DllMain`.
+Nothing has measured the offset between them, so mapping a bucket in the sampler onto a milestone
+in the timeline is an inference, not a reading. The claims that survive without the alignment are
+the ones above — total bytes, cache warmth, CPU ceiling, and the fact that reading stops early.
+The claim that does **not** yet survive is "the 3.06 s window contains ~1.9 s of idle", which the
+shape suggests and nothing here proves.
+
+Fixing it is one line on each side: a wall-clock stamp in the loader's first log line and in the
+sampler's header. Do that before drawing any conclusion that depends on where the boundaries fall.
+
 ## The caveat that governs every address here
 
 These come from the deobfuscated image, which is not the byte stream that runs. Vtables and the
