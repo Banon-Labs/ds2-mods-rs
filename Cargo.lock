@@ -181,6 +181,7 @@ name = "ds2-loader"
 version = "0.1.0"
 dependencies = [
  "dearxan",
+ "ds2-crash-logging-core",
  "ds2-game-base",
  "ds2-hook",
  "ds2-hotkey-config",

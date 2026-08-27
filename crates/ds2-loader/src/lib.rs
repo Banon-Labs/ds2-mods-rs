@@ -82,6 +82,7 @@ use dearxan::disabler::result::DearxanResult;
 use dearxan::disabler::{neuter_arxan, schedule_after_arxan};
 
 pub mod arxan_probe;
+pub mod crash_logging;
 
 /// `fdwReason` value for the loader's process-attach notification.
 const DLL_PROCESS_ATTACH: u32 = 1;
@@ -191,6 +192,17 @@ unsafe fn attach(module: *mut c_void) {
     // for a log that arrives with a symptom in it.
     ds2_game_base::log::set_identity_line(identity_line(module));
 
+    // CRASH LOGGING BEFORE ANYTHING THAT CAN CRASH, and specifically before `neuter_arxan`. That
+    // call applies code patches derived from static analysis, and the SAFETY note on it below says
+    // plainly that a stub misidentified as Arxan would be patched wrongly and the program would be
+    // UB -- the single most likely crash in this whole startup path. A logger installed after it
+    // could not report the crash it most exists to report. It is cheap enough to afford here: two
+    // Win32 calls and a file write, no `LoadLibrary`, no thread. See `crash_logging`.
+    let (crash_config, crash_problems) = crash_logging::CrashConfig::load();
+    if crash_config.enabled {
+        crash_logging::install(module);
+    }
+
     // Read the config file ONCE, here, and log what it resolved to. Everything below branches on
     // this value, so a run that was configured differently from how anyone believed says so in
     // its own opening lines instead of looking like a probe that failed to report.
@@ -205,6 +217,13 @@ unsafe fn attach(module: *mut c_void) {
     for line in config.echo_lines() {
         log_line(format_args!("{line}"));
     }
+    // Same contract as the probe's echo: every unusable line named, then what was resolved --
+    // before anything acts on it. A run configured differently from how anyone believed says so in
+    // its own opening lines rather than looking like a logger that failed to report.
+    for problem in &crash_problems {
+        log_line(format_args!("config unusable: {problem}"));
+    }
+    log_line(format_args!("config resolved {}", crash_config.describe()));
 
     // JOB 2 (first half): say we are here. If dearxan's callback never fires, this line is the
     // difference between "loaded, and dearxan went quiet" and "never loaded at all".
@@ -246,6 +265,7 @@ unsafe fn attach(module: *mut c_void) {
                     )),
                 }
                 install_probe(probe);
+                arm_fault(crash_config);
             });
         },
 
@@ -270,6 +290,7 @@ unsafe fn attach(module: *mut c_void) {
                      blocking_entrypoint={blocking_entrypoint}"
                 ));
                 install_probe(probe);
+                arm_fault(crash_config);
             });
         },
     }
@@ -288,6 +309,20 @@ fn install_probe(config: Option<arxan_probe::ProbeConfig>) {
         // if it is not the five bytes recorded there. The detour is a naked tail-jump, so it
         // imposes no ABI on the function it fronts.
         unsafe { arxan_probe::install(&config) };
+    }
+}
+
+/// Arm the deliberate crash test, if `<Game>/ds2-mods.toml` asked for one.
+///
+/// Called from the post-Arxan callback and NEVER from `DllMain`, for the same reason
+/// [`install_probe`] is: this runs at the entry point after `DllMain` has returned, so spawning a
+/// thread here is not spawning it under the loader lock.
+///
+/// When it fires the game dies, on purpose. That is the only way to exercise the fatal path --
+/// the top-level filter and the minidump tier -- which a first-chance exception cannot reach.
+fn arm_fault(config: crash_logging::CrashConfig) {
+    if let Some(line) = crash_logging::arm_deliberate_fault(config) {
+        log_line(format_args!("{line}"));
     }
 }
 

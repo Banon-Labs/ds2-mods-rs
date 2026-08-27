@@ -140,6 +140,25 @@ KEY_HEARTBEAT_INTERVAL_MS = "heartbeat_interval_ms"
 DEFAULT_POLL_INTERVAL_MS = 1000
 DEFAULT_HEARTBEAT_INTERVAL_MS = 10000
 
+#: `crates/ds2-loader/src/crash_logging.rs`'s section and keys.
+CRASH_SECTION = "crash_logging"
+KEY_CRASH_ENABLED = "enabled"
+KEY_FAULT_AFTER_MS = "fault_after_ms"
+
+#: `fault_after_ms = 0` means "never", and is what every run that is not a crash test writes.
+NO_FAULT_MS = 0
+
+#: The five files `ds2-crash-logging-core` writes next to the executable. Checked by name after a
+#: crash test, because "the game died" is not evidence that the crash LOGGER worked -- a game that
+#: crashed on its own looks identical from outside.
+CRASH_ARTIFACTS = (
+    "ds2-crash-log.txt",
+    "ds2-crash-latest.txt",
+    "ds2-crash-breadcrumb-latest.txt",
+    "ds2-crash-modules.txt",
+    "ds2-crash-minidump.dmp",
+)
+
 #: CLI arm -> (`[arxan_probe]` settings to write, the `arm=` token the DLL must report back).
 #:
 #: THE SECOND HALF OF EACH ENTRY IS A GUARD, not decoration, and it did not stop being one when
@@ -184,6 +203,10 @@ EXIT_ERROR = 3
 #: EXIT_NO_TESTIMONY because the DLL may have loaded and reported perfectly well -- the thing that
 #: did not happen is the EXPERIMENT, and those two send you to different places to look.
 EXIT_NO_PROBE_VERDICT = 4
+
+#: `--crash-test` ran, the game died as asked, and the crash logger did NOT produce its evidence.
+#: Distinct from EXIT_ERROR because the run itself was fine -- the logger is what failed.
+EXIT_NO_CRASH_EVIDENCE = 5
 
 
 def sha256(path: Path) -> str:
@@ -724,7 +747,7 @@ def launch_env(probe: str) -> dict[str, str]:
     return {"WINEDLLOVERRIDES": DLL_OVERRIDE}
 
 
-def config_text(probe: str) -> str:
+def config_text(probe: str, fault_after_ms: int = NO_FAULT_MS) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
     Deterministic: the same arm produces the same file every time, with no timestamp and no
@@ -732,6 +755,17 @@ def config_text(probe: str) -> str:
     the content rather than around it.
     """
     settings, _ = PROBE_ARMS[probe]
+    crash_banner = (
+        ""
+        if fault_after_ms == NO_FAULT_MS
+        else (
+            "#\n"
+            "# *** THIS RUN IS ARMED TO CRASH ON PURPOSE. *** The loader raises 0xc0000005 on a\n"
+            "# dedicated thread after the delay below, to exercise the crash logger's FATAL path --\n"
+            "# the top-level filter and the minidump tier -- which a first-chance exception cannot\n"
+            "# reach. The game dying is the expected result, not a failure.\n"
+        )
+    )
     return f"""\
 # DARK SOULS II mod settings. Read by `dinput8.dll` out of this directory -- the directory of the
 # running executable -- in `DllMain`, before the game's entry point.
@@ -754,6 +788,18 @@ def config_text(probe: str) -> str:
 {KEY_ENABLED} = {str(settings[KEY_ENABLED]).lower()}
 {KEY_SKIP_NEUTER} = {str(settings[KEY_SKIP_NEUTER]).lower()}
 
+[{CRASH_SECTION}]
+{crash_banner}# STARTUP-ONLY, both of them. The handler is installed in DllMain BEFORE `neuter_arxan`, because
+# that call patches code from static analysis and is the likeliest crash in the whole startup path
+# -- a logger installed after it could not report the crash it most exists to report.
+#
+# `{KEY_CRASH_ENABLED}` defaults to true in the DLL and is written explicitly here anyway: a crash logger
+# that has to be switched on is off on the run that needed it, so the file says so out loud.
+{KEY_CRASH_ENABLED} = true
+# `{KEY_FAULT_AFTER_MS} = 0` means never. Anything else DELIBERATELY KILLS THE GAME after that many
+# milliseconds. Armed only by `--crash-test`.
+{KEY_FAULT_AFTER_MS} = {fault_after_ms}
+
 # LIVE. Re-read by the probe's poller thread through `ds2_hotkey_config::reload::HotFile`, which
 # compares the file's TEXT rather than its mtime -- a Proton prefix sits on filesystems that stamp
 # mtime to a whole second, so two edits inside one second would be invisible to an mtime watcher.
@@ -766,10 +812,12 @@ def config_text(probe: str) -> str:
 """
 
 
-def write_config(directory: Path, probe: str) -> tuple[Path, str]:
+def write_config(
+    directory: Path, probe: str, fault_after_ms: int = NO_FAULT_MS
+) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
-    text = config_text(probe)
+    text = config_text(probe, fault_after_ms)
     path.write_text(text, encoding="utf-8")
     return path, text
 
@@ -829,7 +877,7 @@ def stage() -> tuple[Path, str]:
     return staged, sha256(staged)
 
 
-def dry_run(probe: str, observe: float) -> int:
+def dry_run(probe: str, observe: float, fault_after_ms: int = NO_FAULT_MS) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
     problems = preflight(dry_run=True)
@@ -850,7 +898,7 @@ def dry_run(probe: str, observe: float) -> int:
     config_path = GAME_DIR / CONFIG_NAME
     if config_path.is_file():
         current = config_path.read_text(encoding="utf-8")
-        if current == config_text(probe):
+        if current == config_text(probe, fault_after_ms):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
         else:
             print("[dry-run] config   present and DIFFERS; a real run would replace it")
@@ -865,7 +913,7 @@ def dry_run(probe: str, observe: float) -> int:
     # THE CONFIGURATION UNDER TEST, VERBATIM. It is the whole variable this run turns on, so a
     # dry-run that did not show it would be hiding the one thing it exists to preview.
     print(f"[dry-run] would write  {config_path}")
-    print(quoted_config(config_text(probe), indent="[dry-run]   | "))
+    print(quoted_config(config_text(probe, fault_after_ms), indent="[dry-run]   | "))
     print(f"[dry-run] would launch env {environment} steam -applaunch {APPID}")
     print(f"[dry-run] would poll   {log_path}")
     # The DLL echoes the config back BEFORE it decides anything, so these are the first lines a
@@ -900,7 +948,7 @@ def dry_run(probe: str, observe: float) -> int:
     return EXIT_ERROR if problems else EXIT_OK
 
 
-def launch(probe: str, observe: float) -> int:
+def launch(probe: str, observe: float, fault_after_ms: int = NO_FAULT_MS) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
     if problems:
@@ -915,7 +963,7 @@ def launch(probe: str, observe: float) -> int:
     # BEFORE LAUNCHING, and after staging: the DLL reads this in `DllMain`, so it has to be on
     # disk before the game starts, and it is rewritten every run so a file left over from the
     # other arm cannot decide this one.
-    config_path, config = write_config(GAME_DIR, probe)
+    config_path, config = write_config(GAME_DIR, probe, fault_after_ms)
     print(f"[config] {config_path}")
 
     log_path = GAME_DIR / LOG_NAME
@@ -987,6 +1035,9 @@ def launch(probe: str, observe: float) -> int:
             }
         )
     )
+    if fault_after_ms > NO_FAULT_MS:
+        return await_crash_evidence(fault_after_ms, started)
+
     if probe == "off":
         return EXIT_OK
 
@@ -999,6 +1050,116 @@ def launch(probe: str, observe: float) -> int:
     probe_state = watch_probe(tail, observe, verdict.get("leftover", ()))
     block, code = probe_block(probe, probe_state)
     print(block)
+    return code
+
+
+def crash_artifact_report(started_iso: str, now: float) -> tuple[list[str], bool]:
+    """Which crash artifacts exist and are FRESH, and whether that is enough to claim success.
+
+    Freshness is the whole point. `ds2-crash-logging-core` rotates each file to `<name>.prev` and
+    writes a new one per run, so a stale `ds2-crash-log.txt` from an earlier session sitting in the
+    game directory would otherwise read as proof that this run's logger worked. Everything is
+    compared against the moment this run launched.
+
+    The minidump is treated as OPTIONAL, and that is a finding rather than a concession:
+    `ds2-mods-rs-4tm` asks which minidump tier survives Proton's dbghelp, and in `../er-mods-rs`
+    both the rich and normal tiers failed with ERROR_NOACCESS (998). A run whose text artifacts all
+    landed and whose dump did not is a SUCCESSFUL crash-logger test that has just answered that
+    question in the negative -- so it must not be reported as a failure.
+    """
+    lines: list[str] = []
+    required_ok = True
+    for name in CRASH_ARTIFACTS:
+        path = GAME_DIR / name
+        optional = name.endswith(".dmp")
+        if not path.is_file():
+            lines.append(f"  MISSING   {name}")
+            if not optional:
+                required_ok = False
+            continue
+        age = now - path.stat().st_mtime
+        size = path.stat().st_size
+        # Written after this run started, not before it. A file older than the launch is the
+        # PREVIOUS run's evidence and says nothing about this one.
+        fresh = path.stat().st_mtime >= _iso_to_epoch(started_iso)
+        mark = "ok" if fresh else "STALE"
+        if not fresh and not optional:
+            required_ok = False
+        lines.append(f"  {mark:<9} {name}  {size} bytes, written {age:.0f}s ago")
+    return lines, required_ok
+
+
+def _iso_to_epoch(iso: str) -> float:
+    """The launch timestamp as a POSIX float, for comparing against file mtimes."""
+    return datetime.fromisoformat(iso).timestamp()
+
+
+def await_crash_evidence(fault_after_ms: int, started_iso: str) -> int:
+    """Wait for the deliberate fault, then prove the crash LOGGER -- not the crash -- worked.
+
+    THE GAME DYING IS NOT THE RESULT. A game that crashed on its own looks identical from outside,
+    and so does a game someone closed. The result is the five files the logger writes, freshly
+    written, with the fatal record in them. That is why this reads the artifacts rather than the
+    exit of the process.
+    """
+    # The fault fires `fault_after_ms` after the ENTRY POINT, which is already some way after the
+    # testimony line this function is called on the back of. The slack covers the minidump write,
+    # which is the slowest thing in the fatal path and the one most likely to be slow under Proton.
+    budget = fault_after_ms / 1000.0 + 60.0
+    print(f"[crash] armed for {fault_after_ms}ms; waiting up to {budget:.0f}s for the game to die")
+    deadline = time.monotonic() + budget
+    died = False
+    while time.monotonic() < deadline:
+        if not pgrep_exact(GAME_COMM):
+            died = True
+            break
+        time.sleep(POLL_SECONDS)
+
+    # Give the fatal path a moment to finish writing after the process leaves the table.
+    time.sleep(2.0)
+    lines, required_ok = crash_artifact_report(started_iso, time.time())
+
+    latest = GAME_DIR / "ds2-crash-latest.txt"
+    record = ""
+    if latest.is_file():
+        record = latest.read_text(encoding="utf-8", errors="replace").strip()
+
+    body = [
+        f"game exited     {died}",
+        f"fault armed at  {fault_after_ms}ms after the entry point",
+        "",
+        "artifacts in the game directory:",
+        *lines,
+    ]
+    if record:
+        body += ["", "ds2-crash-latest.txt, verbatim:", *[f"  | {ln}" for ln in record.splitlines()]]
+
+    if died and required_ok:
+        header = "===== CRASH LOGGER CAPTURED THE FAULT WE ASKED FOR ====="
+        code = EXIT_OK
+    elif not died:
+        header = "===== THE GAME DID NOT DIE -- the fault never fired ====="
+        body += [
+            "",
+            "The loader armed it (see the log line above) or it did not. Check the log for",
+            "'deliberate fault ARMED'. No arm line means the config never reached the DLL.",
+        ]
+        code = EXIT_NO_CRASH_EVIDENCE
+    else:
+        header = "===== THE GAME DIED BUT THE LOGGER LEFT NO FRESH EVIDENCE ====="
+        body += [
+            "",
+            "This is the interesting failure: the fault fired and the handler did not produce",
+            "its files. Look at whether the vectored handler installed at all -- the loader logs",
+            "'crash logger installed' with the previous_unhandled_filter it chained.",
+        ]
+        code = EXIT_NO_CRASH_EVIDENCE
+
+    width = len(header)
+    print("\n" + header)
+    for line in body:
+        print(line)
+    print("=" * width)
     return code
 
 
@@ -1318,6 +1479,82 @@ def selftest() -> int:
     block, _ = verdict_for(installed + [healthy])
     check("did not wind down through" in block, "a missing detach line is reported as a possible crash")
 
+    # ---- the crash test's config and its evidence check -------------------------------------
+    # These guard the two ways a crash test can lie: writing a config that does not actually arm
+    # the fault, and calling a run successful on artifacts left over from a previous one.
+    off_text = config_text("off")
+    check(
+        f"{KEY_FAULT_AFTER_MS} = {NO_FAULT_MS}" in off_text,
+        "an ordinary run writes fault_after_ms = 0 -- a crash is never a default",
+    )
+    check(
+        "ARMED TO CRASH" not in off_text,
+        "and does not shout about crashing",
+    )
+    armed_text = config_text("off", 15000)
+    check(
+        f"{KEY_FAULT_AFTER_MS} = 15000" in armed_text,
+        "--crash-test 15000 writes fault_after_ms = 15000",
+    )
+    check(
+        "THIS RUN IS ARMED TO CRASH ON PURPOSE" in armed_text,
+        "and the file says so, in the file the user reads",
+    )
+    check(
+        f"[{CRASH_SECTION}]" in off_text and f"{KEY_CRASH_ENABLED} = true" in off_text,
+        "crash logging is written ON for every run, not just crash tests",
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        global GAME_DIR  # noqa -- the check is about GAME_DIR's contents by design
+        real_game_dir = GAME_DIR
+        try:
+            GAME_DIR = Path(tmp)
+            launched = datetime.now(timezone.utc)
+            launched_iso = launched.isoformat(timespec="seconds")
+
+            _, required_ok = crash_artifact_report(launched_iso, time.time())
+            check(not required_ok, "no artifacts at all is not a pass")
+
+            # Stale: written a full hour before this run launched.
+            stale = launched.timestamp() - 3600
+            for name in CRASH_ARTIFACTS:
+                target = GAME_DIR / name
+                target.write_text("from an earlier run\n", encoding="utf-8")
+                os.utime(target, (stale, stale))
+            lines, required_ok = crash_artifact_report(launched_iso, time.time())
+            check(not required_ok, "artifacts older than the launch are STALE, not evidence")
+            check(
+                any("STALE" in line for line in lines),
+                "and the report names them as stale rather than passing them off",
+            )
+
+            # Fresh: written after the launch, as this run's logger would.
+            for name in CRASH_ARTIFACTS:
+                (GAME_DIR / name).write_text("this run\n", encoding="utf-8")
+            _, required_ok = crash_artifact_report(launched_iso, time.time())
+            check(required_ok, "fresh artifacts are a pass")
+
+            # The minidump is optional: er-mods-rs saw every tier rejected by Proton's dbghelp,
+            # so a text-complete run with no dump must still pass and report the absence.
+            (GAME_DIR / "ds2-crash-minidump.dmp").unlink()
+            lines, required_ok = crash_artifact_report(launched_iso, time.time())
+            check(
+                required_ok,
+                "a missing minidump does NOT fail the run -- which tier survives Proton is the question",
+            )
+            check(
+                any("MISSING" in line and "minidump" in line for line in lines),
+                "but the absent dump is still reported",
+            )
+
+            # A missing TEXT artifact is a genuine failure.
+            (GAME_DIR / "ds2-crash-latest.txt").unlink()
+            _, required_ok = crash_artifact_report(launched_iso, time.time())
+            check(not required_ok, "a missing text artifact IS a failure")
+        finally:
+            GAME_DIR = real_game_dir
+
     print("selftest: " + ("OK" if ok else "FAILED"))
     return EXIT_OK if ok else EXIT_ERROR
 
@@ -1357,13 +1594,29 @@ def main() -> int:
             "Ignored when --probe is off. The verdict is explicitly scoped to this window."
         ),
     )
+    parser.add_argument(
+        "--crash-test",
+        type=int,
+        default=NO_FAULT_MS,
+        metavar="MS",
+        help=(
+            "DELIBERATELY CRASH THE GAME this many milliseconds after the entry point, to prove "
+            "the crash logger works. Writes `[crash_logging] fault_after_ms` and the loader "
+            "raises 0xc0000005 on a dedicated thread. The game dying IS the expected result: it "
+            "is the only way to exercise the fatal path -- top-level filter and minidump -- that "
+            "a first-chance exception cannot reach. Default 0, which never faults."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.crash_test < 0:
+        parser.error("--crash-test takes a non-negative number of milliseconds")
 
     if args.selftest:
         return selftest()
     if args.dry_run:
-        return dry_run(args.probe, args.observe)
-    return launch(args.probe, args.observe)
+        return dry_run(args.probe, args.observe, args.crash_test)
+    return launch(args.probe, args.observe, args.crash_test)
 
 
 if __name__ == "__main__":
