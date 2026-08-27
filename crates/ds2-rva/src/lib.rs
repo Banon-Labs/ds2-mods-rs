@@ -146,6 +146,76 @@ pub const ARXAN_PROBE_HOOK_SITE_LEN: u32 = 0x47;
 /// equivalent.
 pub const ARXAN_PROBE_HOOK_SITE_BACKUP: u32 = 0x0083_89e0;
 
+// ============================================================================================
+// THE TITLE BOOT SCREENS (`ds2-mods-rs-3rr`)
+//
+// `FeStateTitle` drives a family of `FeSubState*` objects off a shared 8-slot vtable, whose
+// slots are v0 destructor, v1 enter, v2 leave, v3 update, v4 unused, v5/v6 a debug-registration
+// pair, v7 a bool query. Four of the eight are empty `ret` stubs in `FeSubStateBase`, so any
+// override is that substate's real logic. Full trace: `docs/DS2-TITLE-FLOW.md`.
+//
+// EACH SUBSTATE KEEPS ITS OWN PHASE COUNTER, AND THE OFFSET IS NOT SHARED. Logo's is at `+0x20`;
+// the other two are at `+0x10`. That is measured per class from the field each one's own `v3`
+// switches on, not inferred from a common base -- assuming one offset for all three would write
+// a 4 into an unrelated member of two of them.
+//
+// The terminal value IS 4 in all three, and in each case the game itself has a shipped path where
+// `v1` writes exactly that and returns having done nothing else. That is what makes forcing it a
+// reproduction of the game's own behaviour rather than an invented transition.
+// ============================================================================================
+
+/// `FeSubStateTitleLogo::v1` (enter). RVA `0x000fd980`, VA `0x1400fd980`.
+///
+/// The publisher-logo screen. Its own `v1` sets the phase to [`TITLE_SUBSTATE_PHASE_DONE`] and
+/// returns immediately when the scene reference at `+0x18` is null -- the game's shipped "there
+/// is no logo to show" path, and the one this mod reproduces.
+///
+/// Not Arxan-redirected: `scripts/ds2-arxan-chain.py 0x1400fd980` terminates at hop 0 with the
+/// function's own prologue (`40 53 48 83 ec 20`, 6 relocatable bytes, comfortably over MinHook's
+/// five).
+pub const FE_SUBSTATE_TITLE_LOGO_ENTER: u32 = 0x000f_d980;
+
+/// Phase-counter offset within `FeSubStateTitleLogo`. **`+0x20`, not `+0x10`.**
+///
+/// Read from `FeSubStateTitleLogo::v3` at `0x1400febf0`, which opens
+/// `mov ecx, DWORD PTR [rcx+0x20]` and then a `dec`/`je` chain over phases 1, 2, 3.
+pub const FE_SUBSTATE_TITLE_LOGO_PHASE_OFFSET: usize = 0x20;
+
+/// `FeSubStateWarningNoCopy::v1` (enter). RVA `0x000fded0`.
+///
+/// The unauthorised-copying warning. Its `v1` calls a virtual at `+0x40` on the singleton at
+/// `0x1416751f8` and, when that returns nonzero, writes phase 4 and returns -- so this screen
+/// already skips itself under some condition the game knows about.
+///
+/// Not Arxan-redirected (hop 0, prologue `40 53 48 83 ec 20`).
+pub const FE_SUBSTATE_WARNING_NO_COPY_ENTER: u32 = 0x000f_ded0;
+
+/// `FeSubStateTitleUserPolicy::v1` (enter). RVA `0x000f9040`.
+///
+/// The user-policy screen. Its `v1` has two shipped early-outs, both reading persisted flags out
+/// of the system-data object reached as `[[0x1416148f0]+0xa8]+0xd8`: `+0x136e` set means phase 3,
+/// `+0x136d` set means phase 4. Those are the game's own "already accepted" flags, which is why
+/// 4 is the terminal value here too.
+///
+/// Not Arxan-redirected (hop 0). Its prologue is `48 89 6c 24 20`, exactly five bytes -- MinHook's
+/// minimum, met with nothing to spare.
+pub const FE_SUBSTATE_TITLE_USER_POLICY_ENTER: u32 = 0x000f_9040;
+
+/// Phase-counter offset within `FeSubStateWarningNoCopy` and `FeSubStateTitleUserPolicy`.
+///
+/// Read from each one's own `v3` (`0x1400ff360` and `0x1400f96f0`), both of which open
+/// `mov edx, DWORD PTR [rcx+0x10]` before their `dec`/`je` chain.
+pub const FE_SUBSTATE_PHASE_OFFSET: usize = 0x10;
+
+/// The phase value that means "this substate is finished", for all three boot screens.
+///
+/// Reached by three independent paths in `FeSubStateTitleLogo` alone: normal completion at the end
+/// of phase 3, the player's skip-button path at `0x1400fec6c`, and the null-scene path in `v1`.
+/// A player pressing the skip button lands here every time and the flow advances, which is the
+/// evidence that something consumes it -- the consumer itself has not been located and does not
+/// need to be.
+pub const TITLE_SUBSTATE_PHASE_DONE: u32 = 4;
+
 /// **The redirected probe site**: `applySpEffect`, RVA `0x0014bec0`. Deliberately Arxan's.
 ///
 /// [`ARXAN_PROBE_HOOK_SITE`] is a clean function, and that is exactly its limitation: walking it

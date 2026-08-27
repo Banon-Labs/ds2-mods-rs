@@ -134,6 +134,10 @@ KEY_ENABLED = "enabled"
 KEY_SKIP_NEUTER = "skip_neuter"
 #: Mirrors `KEY_SITE` in `arxan_probe.rs`. Which function the detour goes on.
 KEY_SITE = "site"
+
+#: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/intro_skip.rs`.
+INTRO_SECTION = "intro_skip"
+KEY_INTRO_ENABLED = "enabled"
 KEY_POLL_INTERVAL_MS = "poll_interval_ms"
 KEY_HEARTBEAT_INTERVAL_MS = "heartbeat_interval_ms"
 
@@ -832,7 +836,10 @@ def launch_env(probe: str) -> dict[str, str]:
 
 
 def config_text(
-    probe: str, fault_after_ms: int = NO_FAULT_MS, site: str = "m1"
+    probe: str,
+    fault_after_ms: int = NO_FAULT_MS,
+    site: str = "m1",
+    intro_skip: bool = False,
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
@@ -878,6 +885,15 @@ def config_text(
 # bytes ARE Arxan's redirect -- the only site where survival is evidence about Arxan.
 {KEY_SITE} = "{site}"
 
+[{INTRO_SECTION}]
+# STARTUP-ONLY. Detours the `enter` of the three boot substates -- FeSubStateWarningNoCopy,
+# FeSubStateTitleLogo, FeSubStateTitleUserPolicy -- and writes each one's terminal phase, which
+# is a transition every one of them already performs on itself under some condition the game
+# knows about. OFF by default: it patches executable memory in three places to change what the
+# player sees at boot, and a mod that does that unasked gets blamed for the next unrelated
+# startup problem.
+{KEY_INTRO_ENABLED} = {str(intro_skip).lower()}
+
 [{CRASH_SECTION}]
 {crash_banner}# STARTUP-ONLY, both of them. The handler is installed in DllMain BEFORE `neuter_arxan`, because
 # that call patches code from static analysis and is the likeliest crash in the whole startup path
@@ -913,11 +929,15 @@ def config_text(
 
 
 def write_config(
-    directory: Path, probe: str, fault_after_ms: int = NO_FAULT_MS, site: str = "m1"
+    directory: Path,
+    probe: str,
+    fault_after_ms: int = NO_FAULT_MS,
+    site: str = "m1",
+    intro_skip: bool = False,
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
-    text = config_text(probe, fault_after_ms, site)
+    text = config_text(probe, fault_after_ms, site, intro_skip)
     path.write_text(text, encoding="utf-8")
     return path, text
 
@@ -978,7 +998,11 @@ def stage() -> tuple[Path, str]:
 
 
 def dry_run(
-    probe: str, observe: float, fault_after_ms: int = NO_FAULT_MS, site: str = "m1"
+    probe: str,
+    observe: float,
+    fault_after_ms: int = NO_FAULT_MS,
+    site: str = "m1",
+    intro_skip: bool = False,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
@@ -1000,7 +1024,7 @@ def dry_run(
     config_path = GAME_DIR / CONFIG_NAME
     if config_path.is_file():
         current = config_path.read_text(encoding="utf-8")
-        if current == config_text(probe, fault_after_ms, site):
+        if current == config_text(probe, fault_after_ms, site, intro_skip):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
         else:
             print("[dry-run] config   present and DIFFERS; a real run would replace it")
@@ -1015,7 +1039,7 @@ def dry_run(
     # THE CONFIGURATION UNDER TEST, VERBATIM. It is the whole variable this run turns on, so a
     # dry-run that did not show it would be hiding the one thing it exists to preview.
     print(f"[dry-run] would write  {config_path}")
-    print(quoted_config(config_text(probe, fault_after_ms, site), indent="[dry-run]   | "))
+    print(quoted_config(config_text(probe, fault_after_ms, site, intro_skip), indent="[dry-run]   | "))
     print(f"[dry-run] would launch env {environment} steam -applaunch {APPID}")
     print(f"[dry-run] would poll   {log_path}")
     # The DLL echoes the config back BEFORE it decides anything, so these are the first lines a
@@ -1051,7 +1075,11 @@ def dry_run(
 
 
 def launch(
-    probe: str, observe: float, fault_after_ms: int = NO_FAULT_MS, site: str = "m1"
+    probe: str,
+    observe: float,
+    fault_after_ms: int = NO_FAULT_MS,
+    site: str = "m1",
+    intro_skip: bool = False,
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
@@ -1067,7 +1095,7 @@ def launch(
     # BEFORE LAUNCHING, and after staging: the DLL reads this in `DllMain`, so it has to be on
     # disk before the game starts, and it is rewritten every run so a file left over from the
     # other arm cannot decide this one.
-    config_path, config = write_config(GAME_DIR, probe, fault_after_ms, site)
+    config_path, config = write_config(GAME_DIR, probe, fault_after_ms, site, intro_skip)
     print(f"[config] {config_path}")
 
     log_path = GAME_DIR / LOG_NAME
@@ -1488,6 +1516,20 @@ def selftest() -> int:
         "the site defaults to the control, not to the interesting one",
     )
 
+    # THE INTRO SKIP IS OFF UNLESS ASKED FOR. It changes what the player sees at boot by
+    # patching three places in executable memory; defaulting it on would make every unrelated
+    # startup problem this mod's fault by association.
+    values, _ = parse_config(config_text("off"))
+    check(
+        values.get((INTRO_SECTION, KEY_INTRO_ENABLED)) == "false",
+        f"[{INTRO_SECTION}] {KEY_INTRO_ENABLED} defaults to false",
+    )
+    values, _ = parse_config(config_text("off", intro_skip=True))
+    check(
+        values.get((INTRO_SECTION, KEY_INTRO_ENABLED)) == "true",
+        f"--intro-skip writes [{INTRO_SECTION}] {KEY_INTRO_ENABLED} = true",
+    )
+
     # THE ARMS MUST DIFFER, and in exactly one key. If two arms ever generated the same file the
     # A/B comparison would be two runs of the same experiment, and the arm-readback guard would
     # not catch it because the DLL would be reporting truthfully.
@@ -1729,6 +1771,15 @@ def main() -> int:
         help="test the log tailer, the DLL/script contract and the verdict logic",
     )
     parser.add_argument(
+        "--intro-skip",
+        action="store_true",
+        help=(
+            "skip the boot logo, no-copy warning and user-policy screens by detouring each "
+            "substate's `enter` and writing the terminal phase it already writes itself under "
+            "the game's own skip conditions. Off unless asked for."
+        ),
+    )
+    parser.add_argument(
         "--probe-site",
         choices=PROBE_SITES,
         default="m1",
@@ -1783,8 +1834,8 @@ def main() -> int:
     if args.selftest:
         return selftest()
     if args.dry_run:
-        return dry_run(args.probe, args.observe, args.crash_test, args.probe_site)
-    return launch(args.probe, args.observe, args.crash_test, args.probe_site)
+        return dry_run(args.probe, args.observe, args.crash_test, args.probe_site, args.intro_skip)
+    return launch(args.probe, args.observe, args.crash_test, args.probe_site, args.intro_skip)
 
 
 if __name__ == "__main__":

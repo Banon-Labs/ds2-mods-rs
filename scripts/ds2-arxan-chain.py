@@ -53,11 +53,19 @@ MAX_HOPS = 64
 #: version of this script declared BODY at 0x141cf8f8f because `mov [rsp+0x10],rbx` matched, when
 #: that address is a shattered FRAGMENT inside Arxan that jumps onward four instructions later.
 #: A prologue byte pattern says "real instruction", never "start of a contiguous function".
+#:
+#: The list is INCOMPLETE BY NATURE and an omission shows up as a false UNKNOWN, never as a false
+#: "not redirected" -- which is the safe direction to be wrong in. FeSubStateTitleUserPolicy::v1
+#: at 0x1400f9040 opens `mov [rsp+0x20],rbp` and reported UNKNOWN until that pattern was added.
 BODY_PROLOGUES = (
     b"\x48\x89\x5c\x24",          # mov [rsp+N], rbx
     b"\x48\x89\x4c\x24",          # mov [rsp+N], rcx
     b"\x48\x89\x54\x24",          # mov [rsp+N], rdx
+    b"\x48\x89\x6c\x24",          # mov [rsp+N], rbp
+    b"\x48\x89\x74\x24",          # mov [rsp+N], rsi
+    b"\x48\x89\x7c\x24",          # mov [rsp+N], rdi
     b"\x4c\x89\x44\x24",          # mov [rsp+N], r8
+    b"\x4c\x89\x4c\x24",          # mov [rsp+N], r9
     b"\x40\x53\x48\x83\xec",      # push rbx; sub rsp, N
     b"\x40\x55\x48\x83\xec",      # push rbp; sub rsp, N
     b"\x40\x57\x48\x83\xec",      # push rdi; sub rsp, N

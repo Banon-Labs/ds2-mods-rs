@@ -127,3 +127,59 @@ These addresses come from the deobfuscated image, which is not the byte stream t
 286 Arxan-redirected functions the deobf image shows recovered code where the live process has a
 stub. Vtable slots are data and are trustworthy; the function *at* a slot must be checked against
 the Arxan set before it is detoured. See `docs/ARXAN-FOOTPRINT.md`.
+
+## The skip, as built (`ds2-mods-rs-3rr`)
+
+`crates/ds2-intro-skip`, off unless `[intro_skip] enabled = true` or `ds2-run.py --intro-skip`.
+
+It detours each screen's `enter` (vtable slot 1), lets the original run, then writes that class's
+terminal phase. **Every one of the three already has a shipped path where `enter` does exactly
+that and returns**, so the transition is one the game performs on itself:
+
+| class | `enter` RVA | phase field | terminal | the game's own path to it |
+| --- | --- | --- | --- | --- |
+| `FeSubStateWarningNoCopy` | `0x000fded0` | `+0x10` | 4 | a virtual on the `0x1416751f8` singleton returns nonzero |
+| `FeSubStateTitleLogo` | `0x000fd980` | `+0x20` | 4 | the scene reference at `+0x18` is null |
+| `FeSubStateTitleUserPolicy` | `0x000f9040` | `+0x10` | 4 | the persisted `[sys+0x136d]` flag is set |
+
+**The phase offset is per class and is not a base-class field.** Logo keeps its phase at `+0x20`;
+the other two keep theirs at `+0x10`. Each was read from the field that class's own `update`
+switches on. One offset applied to all three would put a `4` into an unrelated member of two of
+them, and nothing would report that it had.
+
+The consumer of the terminal phase was never located, and does not need to be: a player pressing
+the skip button reaches phase 4 by the game's own path and the flow advances, every time. That is
+the evidence that something reads it.
+
+### Why the original `enter` still runs
+
+Two of the three shipped paths return before touching their scene, so skipping the original
+entirely is tempting and would give a cleaner "nothing at all". It is not done because `leave`
+(slot 2) closes the scene reference `enter` opened, and a close with no matching open is an
+unbalanced lifetime on an object this crate does not own. Letting `enter` run keeps them
+symmetric and costs at most one frame.
+
+### First run, measured
+
+`--intro-skip`, build 9527516, Proton Experimental 11.0-100:
+
+```
+ds2-intro-skip: install installed=3/3
+ds2-intro-skip: skipped screen=warning-no-copy phase-offset=0x10 value=4 count=1
+ds2-intro-skip: skipped screen=logo           phase-offset=0x20 value=4 count=1
+ds2-intro-skip: skipped screen=logo           phase-offset=0x20 value=4 count=2
+ds2-intro-skip: skipped screen=logo           phase-offset=0x20 value=4 count=3
+```
+
+The game reached the title and stayed up, with no crash artifacts written.
+
+**`FeSubStateTitleLogo` is entered three times** -- there are three logo screens in sequence, not
+one, which is why a player pressing skip has to press it once per screen.
+
+`user-policy` never fired: that screen is not reached on a profile that has already accepted the
+policy, because the game's own `[sys+0x136d]` early-out takes it first. The hook is installed
+either way, which is the right shape -- a screen that does not occur costs nothing, and a fresh
+profile that does show it is covered.
+
+The fire counts are logged precisely so "no logo appeared" and "the hook never installed" cannot
+be confused for one another from the outside.
