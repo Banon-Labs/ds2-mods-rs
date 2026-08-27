@@ -403,6 +403,72 @@ two network numbers are a server round-trip and will vary with the network; the 
 an 8 MB `sl2` on this machine's disk through Wine. A second run is the cheapest way to learn how
 much of this is noise, and nothing above should be treated as a constant until there is one.
 
+## SECOND RUN, and it overturns the reading of the first
+
+Same build, same Proton, same profile, back to back. Run 1's log is preserved as
+`<Game>/ds2-loader.log.prev` by the launcher's own rotate, so this is two files rather than two
+recollections.
+
+| step | run 1 | run 2 | spread |
+| --- | --- | --- | --- |
+| engine (`DllMain` → first transition) | 3843.907 ms | 3869.716 ms | 0.67% |
+| `0x01` WarningNoCopy | 4.155 | 4.219 | 1.5% |
+| `0x13` / `0x14` / `0x15` Logo | 4.845 / 8.942 / 9.209 | 4.261 / 8.868 / 9.035 | ≤ 12% |
+| `0x17` TitleMain | 27.816 | 29.813 | 7.2% |
+| **`0x05` SteamLoadSystemData** | **1011.023** | **1008.729** | **0.23%** |
+| `0x20` SteamNetworkCheck | 9.205 | 8.899 | 3.3% |
+| `0x37` UserPolicy | 8.443 | 9.399 | 11.3% |
+| **`0x39` GameServerLogin** | **763.780** | **678.561** | **11.2%** |
+| **`0x44` Information** | **1026.008** | **1027.477** | **0.14%** |
+| `0x46` message box | 5.961 | 6.276 | 5.3% |
+| **total to top menu** | **6827.515** | **6771.052** | 0.83% |
+
+### Two of the three "slow steps" are not doing anything
+
+**`0x05` reproduces to 2.3 ms and `0x44` to 1.5 ms.** A disk read of an 8 MB `sl2` and a server
+fetch do not repeat to within a quarter of one percent. `0x39 GameServerLogin` — the one step known
+to be a real round-trip — moved **85 ms, 11%**, between the same two runs, which is what genuine
+I/O looks like next to them.
+
+So `0x05` and `0x44` are **timers, not work**: roughly 1.009 s and 1.027 s of waiting for a clock.
+Together that is **2.04 s of a 6.8 s boot spent on nothing at all.**
+
+The shape of the bug is already familiar here. `ds2-dialog-skip` removes a 1.0 s
+`min-duration` floor from the process windows, and the log shows it doing so on `0x39`
+(`shortened screen=process-window kind=57 min-duration=1.000->0`) — which is exactly why `0x39` is
+the one of the three that comes in *under* a second. **Neither `0x05 TitleSteamLoadSystemData` nor
+`0x44 TitleInformation` derives `FeSubStateProcessWindowBase`** — both are plain `FeSubStateBase`
+with 8 virtuals — so that de-flooring never reached them.
+
+**Where the floor is has NOT been found.** Both update functions were read in full and neither
+contains a float comparison: `SteamLoadSystemData::v3` (`0x1400fbdb0`, 329 bytes) accumulates
+elapsed into `+0x18` and never tests it, and `Information::v3` (`0x1400ff710`, 189 bytes) is a
+state machine on the object at `[title+0xa0]` with no threshold. So the wait is one level down —
+inside `SaveLoadSystem`/`SaveLoad2` for `0x05`, inside the downloader for `0x44`. That is the hunt,
+and it now has a very specific target: a one-second constant on each of two paths.
+
+### The engine block is not shader compilation
+
+3843.9 ms and 3869.7 ms — **0.67% apart**. A cold DXVK shader cache against a warm one would differ
+by seconds, not by 26 ms. Whatever those 3.86 s are, they are steady-state startup work that
+happens on every launch, and they remain 56% of the boot and completely uninvestigated.
+
+### What this does to the priority order
+
+The earlier ranking was built on the assumption that all three slow steps were I/O. Two of them are
+not, and that reorders everything:
+
+| target | worth | status |
+| --- | --- | --- |
+| the two one-second floors (`0x05`, `0x44`) | **~2.04 s** | mechanism not found; same class of fix already shipped for `0x39` |
+| the engine block | 3.86 s, unknown reducibility | never investigated |
+| `rk4`, remove the network chain | **~0.69 s**, not 1.8 s | `0x44`'s second was a floor, not a fetch |
+| `7on`, overlap storage against network | **~0** | `0x05` is a timer; overlapping a timer buys nothing — delete it instead |
+
+`ds2-mods-rs-7on` is effectively dead as written, and `rk4` is worth a third of what the first run
+suggested. Removing the two floors would take boot-to-menu from ~6.8 s to about **4.8 s**, and it
+is the only item on the list whose fix has a proven precedent in this repo.
+
 ## The caveat that governs every address here
 
 These come from the deobfuscated image, which is not the byte stream that runs. Vtables and the
