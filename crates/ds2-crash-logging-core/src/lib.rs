@@ -650,6 +650,61 @@ fn publish_identity_line() {
     ));
 }
 
+/// Re-assert the top-level unhandled-exception filter, chaining whatever currently holds it.
+///
+/// # Why this exists: being first is the wrong position
+///
+/// [`install`] runs from the host DLL's `DllMain`, which fires during import resolution -- BEFORE
+/// the executable's entry point. That is the right moment for the vectored handler and the wrong
+/// moment for the top-level filter, because the filter is a single global slot rather than a chain,
+/// and whoever sets it last owns it.
+///
+/// Measured in DARK SOULS II (`ds2-mods-rs-w0m`), statically, from the shipped binary: exactly one
+/// call site for `SetUnhandledExceptionFilter`, at `0x140c43293`, inside a function whose address
+/// sits in the CRT initializer table at `0x1410ac2c8` -- so it runs from `_initterm` during CRT
+/// startup, after every `DllMain`. And it ends
+///
+/// ```text
+/// 140c43293  CALL SetUnhandledExceptionFilter
+/// 140c43298  XOR EAX,EAX          <- the returned previous filter is DISCARDED
+/// ```
+///
+/// so the game's CRT does not chain to what it replaced. Installing in `DllMain` therefore
+/// guarantees being overwritten and forgotten: the vectored handler still sees first-chance
+/// exceptions, but nothing fatal ever reaches this crate. That is exactly the symptom
+/// `ds2-mods-rs-4tm` measured -- `fatal=false` records and no minidump.
+///
+/// Call this once startup is over. It returns `(previous, replaced_self)`.
+///
+/// # The self-chain trap
+///
+/// If this crate already owns the slot, `SetUnhandledExceptionFilter` hands our OWN function back
+/// as the previous one. Storing that would make [`chain_previous_unhandled_filter`] call us again,
+/// forever, inside a crash handler. So a returned pointer equal to ours is recognised and NOT
+/// stored, and the caller is told via the second element of the tuple.
+#[cfg(windows)]
+pub fn reinstall_unhandled_filter() -> (usize, bool) {
+    // Through the fn-pointer TYPE, not straight to usize: clippy rejects a direct cast of a
+    // function item, and rightly -- the item is zero-sized and the cast only means anything once
+    // it is a pointer. This is the same value `SetUnhandledExceptionFilter` will hand back.
+    let ours = unhandled_exception_filter as UnhandledExceptionFilter as usize;
+    let previous = unsafe { SetUnhandledExceptionFilter(unhandled_exception_filter) } as usize;
+    let replaced_self = previous == ours;
+    if !replaced_self {
+        PREVIOUS_UNHANDLED_FILTER.store(previous, Ordering::SeqCst);
+    }
+    append_log(format_args!(
+        "crash logger re-asserted unhandled filter previous=0x{previous:x} ours=0x{ours:x} replaced_self={replaced_self}"
+    ));
+    (previous, replaced_self)
+}
+
+/// See the Windows version.
+#[cfg(not(windows))]
+pub fn reinstall_unhandled_filter() -> (usize, bool) {
+    (0, false)
+}
+
 /// Note that the host DLL is detaching.
 ///
 /// A fatal record with no matching detach means the process died where it stood; a detach with no

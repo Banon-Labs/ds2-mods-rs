@@ -144,6 +144,11 @@ DEFAULT_HEARTBEAT_INTERVAL_MS = 10000
 CRASH_SECTION = "crash_logging"
 KEY_CRASH_ENABLED = "enabled"
 KEY_FAULT_AFTER_MS = "fault_after_ms"
+KEY_REINSTALL_FILTER_AFTER_MS = "reinstall_filter_after_ms"
+
+#: The DLL's default, written explicitly so the file shows it. See the config comment below for
+#: why re-asserting the filter is not optional in this game.
+DEFAULT_REINSTALL_FILTER_AFTER_MS = 5000
 
 #: `fault_after_ms = 0` means "never", and is what every run that is not a crash test writes.
 NO_FAULT_MS = 0
@@ -796,6 +801,16 @@ def config_text(probe: str, fault_after_ms: int = NO_FAULT_MS) -> str:
 # `{KEY_CRASH_ENABLED}` defaults to true in the DLL and is written explicitly here anyway: a crash logger
 # that has to be switched on is off on the run that needed it, so the file says so out loud.
 {KEY_CRASH_ENABLED} = true
+# RE-ASSERT THE TOP-LEVEL FILTER, and this is not optional in DARK SOULS II. The unhandled-exception
+# filter is ONE global slot, not a chain, and whoever sets it last owns it. This DLL sets it in
+# DllMain, before the entry point; the game's CRT then sets its own from an initializer and throws
+# ours away. Measured statically from the shipped binary: SetUnhandledExceptionFilter has exactly
+# one call site, 0x140c43293, in a function listed in the CRT initializer table at 0x1410ac2c8, and
+# it ends `CALL SetUnhandledExceptionFilter; XOR EAX,EAX` -- the previous filter is discarded, not
+# chained. Without this re-assert the vectored handler still sees first-chance exceptions and
+# NOTHING FATAL is ever recorded, which is exactly what the first in-game crash test measured.
+# 0 disables it. 5000ms is a loose bound on "CRT startup is over", not a measurement.
+{KEY_REINSTALL_FILTER_AFTER_MS} = {DEFAULT_REINSTALL_FILTER_AFTER_MS}
 # `{KEY_FAULT_AFTER_MS} = 0` means never. Anything else DELIBERATELY KILLS THE GAME after that many
 # milliseconds. Armed only by `--crash-test`.
 {KEY_FAULT_AFTER_MS} = {fault_after_ms}
@@ -1535,6 +1550,10 @@ def selftest() -> int:
     check(
         f"[{CRASH_SECTION}]" in off_text and f"{KEY_CRASH_ENABLED} = true" in off_text,
         "crash logging is written ON for every run, not just crash tests",
+    )
+    check(
+        f"{KEY_REINSTALL_FILTER_AFTER_MS} = {DEFAULT_REINSTALL_FILTER_AFTER_MS}" in off_text,
+        "and the filter re-assert is written ON -- without it no fatal record is ever produced",
     )
 
     with tempfile.TemporaryDirectory() as tmp:

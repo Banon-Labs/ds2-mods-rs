@@ -329,6 +329,11 @@ fn install_probe(config: Option<arxan_probe::ProbeConfig>) {
 /// When it fires the game dies, on purpose. That is the only way to exercise the fatal path --
 /// the top-level filter and the minidump tier -- which a first-chance exception cannot reach.
 fn arm_fault(config: crash_logging::CrashConfig) {
+    // The re-assert first: it is the one that matters on an ordinary run, and on a crash-test run
+    // it has to be scheduled before the fault it exists to make visible.
+    if let Some(line) = crash_logging::schedule_filter_reinstall(config) {
+        log_line(format_args!("{LOG_PREFIX} {line}"));
+    }
     if let Some(line) = crash_logging::arm_deliberate_fault(config) {
         log_line(format_args!("{LOG_PREFIX} {line}"));
     }

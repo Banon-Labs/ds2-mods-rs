@@ -58,6 +58,12 @@ pub const KEY_ENABLED: &str = "enabled";
 /// Milliseconds after the entry point to deliberately fault. `0` means never, and is the default.
 pub const KEY_FAULT_AFTER_MS: &str = "fault_after_ms";
 
+/// Milliseconds after the entry point to RE-ASSERT the top-level unhandled-exception filter.
+///
+/// Default 5000, and it is on by default because without it this crate never sees a fatal
+/// exception in DARK SOULS II at all -- see [`CrashConfig::reinstall_filter_after_ms`].
+pub const KEY_REINSTALL_FILTER_AFTER_MS: &str = "reinstall_filter_after_ms";
+
 /// Raised by the deliberate fault: `EXCEPTION_ACCESS_VIOLATION`.
 const FAULT_CODE: u32 = 0xc000_0005;
 
@@ -72,6 +78,18 @@ pub struct CrashConfig {
     pub enabled: bool,
     /// Deliberately fault this many milliseconds after the entry point; `0` disables it.
     pub fault_after_ms: u64,
+    /// Re-assert the top-level unhandled-exception filter this many ms in; `0` disables it.
+    ///
+    /// ON BY DEFAULT, because the game takes the slot away from us otherwise. Measured statically
+    /// from the shipped binary (`ds2-mods-rs-w0m`): `SetUnhandledExceptionFilter` has exactly one
+    /// call site, `0x140c43293`, inside a function registered in the CRT initializer table at
+    /// `0x1410ac2c8` -- so it runs from `_initterm` at CRT startup, AFTER every `DllMain`. It ends
+    /// `CALL SetUnhandledExceptionFilter; XOR EAX,EAX`, discarding the previous filter rather than
+    /// chaining it. Installing from `DllMain` therefore guarantees being overwritten and forgotten.
+    ///
+    /// 5000ms is a deliberately loose bound on "CRT startup is over", not a measurement. It is far
+    /// past `_initterm` and far short of anything a player would reach.
+    pub reinstall_filter_after_ms: u64,
 }
 
 impl Default for CrashConfig {
@@ -79,6 +97,7 @@ impl Default for CrashConfig {
         Self {
             enabled: true,
             fault_after_ms: 0,
+            reinstall_filter_after_ms: 5_000,
         }
     }
 }
@@ -116,6 +135,12 @@ impl CrashConfig {
                 defaults.fault_after_ms,
                 &mut problems,
             ),
+            reinstall_filter_after_ms: read_u64(
+                &parsed,
+                KEY_REINSTALL_FILTER_AFTER_MS,
+                defaults.reinstall_filter_after_ms,
+                &mut problems,
+            ),
         };
         (config, problems)
     }
@@ -123,8 +148,9 @@ impl CrashConfig {
     /// One line, for the attach log, saying what was resolved before anything acts on it.
     pub fn describe(&self) -> String {
         format!(
-            "crash_logging={} fault_after_ms={}{}",
+            "crash_logging={} reinstall_filter_after_ms={} fault_after_ms={}{}",
             if self.enabled { "on" } else { "off" },
+            self.reinstall_filter_after_ms,
             self.fault_after_ms,
             if self.fault_after_ms > 0 {
                 "  *** THIS RUN WILL DELIBERATELY CRASH ***"
@@ -201,6 +227,32 @@ pub fn install(module: *mut core::ffi::c_void) {
     );
 }
 
+/// Schedule the late re-assert of the top-level unhandled-exception filter.
+///
+/// Call from the post-Arxan callback, never `DllMain` -- both because spawning a thread under the
+/// loader lock is a hazard and because the whole point is to run AFTER the game's CRT startup,
+/// which `DllMain` precedes by construction.
+///
+/// Returns the line to log, or `None` when disabled.
+pub fn schedule_filter_reinstall(config: CrashConfig) -> Option<String> {
+    if !config.enabled || config.reinstall_filter_after_ms == 0 {
+        return None;
+    }
+    let delay = Duration::from_millis(config.reinstall_filter_after_ms);
+    std::thread::spawn(move || {
+        std::thread::sleep(delay);
+        let (previous, replaced_self) = ds2_crash_logging_core::reinstall_unhandled_filter();
+        ds2_crash_logging_core::write_breadcrumb(
+            "filter-reasserted",
+            format_args!("previous=0x{previous:x} replaced_self={replaced_self}"),
+        );
+    });
+    Some(format!(
+        "unhandled-filter re-assert scheduled in {}ms (the game's CRT takes the slot at startup)",
+        config.reinstall_filter_after_ms
+    ))
+}
+
 /// Arm the deliberate fault, if configured. Call from the post-Arxan callback, never `DllMain`.
 ///
 /// Returns the thread's description for the log, or `None` when no fault was armed. The caller
@@ -249,6 +301,12 @@ mod tests {
                 defaults.fault_after_ms,
                 &mut problems,
             ),
+            reinstall_filter_after_ms: read_u64(
+                &parsed,
+                KEY_REINSTALL_FILTER_AFTER_MS,
+                defaults.reinstall_filter_after_ms,
+                &mut problems,
+            ),
         };
         (config, problems)
     }
@@ -289,8 +347,8 @@ mod tests {
         assert!(!quiet.contains("DELIBERATELY"), "{quiet}");
 
         let armed = CrashConfig {
-            enabled: true,
             fault_after_ms: 15_000,
+            ..CrashConfig::default()
         }
         .describe();
         assert!(armed.contains("DELIBERATELY CRASH"), "{armed}");
@@ -298,11 +356,41 @@ mod tests {
     }
 
     #[test]
+    fn the_filter_reassert_is_on_by_default() {
+        let (config, problems) = parse("");
+        assert_eq!(
+            config.reinstall_filter_after_ms, 5_000,
+            "the game's CRT takes the filter slot; not re-asserting means never seeing a fatal"
+        );
+        assert!(problems.is_empty());
+    }
+
+    #[test]
+    fn the_filter_reassert_can_be_turned_off_with_zero() {
+        let (config, _) = parse("[crash_logging]\nreinstall_filter_after_ms = 0\n");
+        assert_eq!(config.reinstall_filter_after_ms, 0);
+        assert_eq!(schedule_filter_reinstall(config), None);
+    }
+
+    #[test]
+    fn disabling_crash_logging_also_stops_the_reassert() {
+        let config = CrashConfig {
+            enabled: false,
+            ..CrashConfig::default()
+        };
+        assert_eq!(
+            schedule_filter_reinstall(config),
+            None,
+            "re-asserting a filter that was never installed would publish a handler with no config"
+        );
+    }
+
+    #[test]
     fn a_zero_delay_arms_nothing() {
         assert_eq!(
             arm_deliberate_fault(CrashConfig {
-                enabled: true,
                 fault_after_ms: 0,
+                ..CrashConfig::default()
             }),
             None
         );
