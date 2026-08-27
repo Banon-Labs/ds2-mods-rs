@@ -803,6 +803,61 @@ future saving smaller than that needs more than one run before it is believed. T
 cleared that bar comfortably; the 55 ms `rayon` saving does not, and is quoted here on the strength
 of the bracketed milestone rather than the boot total.
 
+## What does the 2523 sleeps — and why it does not matter
+
+Totals could not answer this: all the call sites share one import slot. So the `Sleep` detour was
+given a **naked thunk** that loads `[rsp]` — the return address, and therefore the identity of the
+call site — into RDX and *jumps* into the detour, leaving the stack exactly as `Sleep` found it.
+One `mov`, one `jmp`, no frame added, and it is the only assembly in the crate. Nothing in stable
+Rust yields the current function's return address.
+
+| caller RVA | calls | requested ms |
+| --- | --- | --- |
+| `0x009184e1` | **2522** | **0** |
+| `0x00a63053` | 775 | **12605** |
+| `0x009e0296` | 131 | **4454** |
+| `0x008e1a52` | 306 | 306 |
+| `0x00b4c78e` | 160 | 160 |
+| `0x001c1dd3` | 143 | 143 |
+
+**The 2522 is at `0x140918450`, and it costs nothing.** Every one of its sleeps is `Sleep(0)` — a
+yield. The loop is:
+
+```text
+[this+0x28] = budget                        ; set from the caller's argument
+loop:
+    ... pull a chunk through [this+0x78] ...
+    result = 0x140935b30(this+0x10, mode)   ; consume it
+    if (result == -5) break                 ; done
+    if (result != 0)  ...                   ; other outcome
+    0x14084bd70()                           ; YIELD  -> jmp 0x1408782b0
+    if ([this+0x28] > 0) continue           ; while budget remains
+```
+
+A chunked producer/consumer pump that yields after each chunk. The count is fixed because the
+**amount of data is fixed** — and 2522 chunks sits naturally beside the 128 MB the process reads in
+its early burst. It is a marker of a fixed-size workload, not a cost.
+
+This also explains why the static IAT scan never found these callers: they do not call `Sleep`
+directly. They call a yield wrapper at `0x14084bd70`, which tail-jumps to `0x1408782b0`. Every
+address my earlier static attribution produced was a direct `ff 15` site, and **not one of them
+appears in this table** — a scan for direct call sites cannot see a call made through a wrapper.
+
+### The time is somewhere else entirely
+
+`0x140a62e50` asks for **12.6 s** across 775 calls (~16 ms each — one frame at 60 Hz), and
+`0x1409dfef0` for **4.5 s** across 131 (~34 ms each). Together they are 17.1 s of the 17.6 s
+requested. The thing doing the most sleeping is doing almost none of the yielding, and vice versa.
+
+**And 17.6 s of requested sleep inside a 5.8 s boot is only possible across threads**, which is the
+limit of what this instrument can say. A worker sleeping 16 ms between polls costs the boot nothing
+if the boot is not waiting on it. The counter is process-wide and cannot tell a critical-path sleep
+from a background one, so **none of these numbers is yet a saving**.
+
+The next refinement is small and is what turns this table into a target: record
+`GetCurrentThreadId` alongside the return address and compare against the thread that ran `DllMain`.
+Only sleeps on that thread are on the critical path.
+
 ## The caveat that governs every address here
 
 These come from the deobfuscated image, which is not the byte stream that runs. Vtables and the

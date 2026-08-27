@@ -160,6 +160,52 @@ const PAGE_READWRITE: u32 = 0x04;
 /// whole reason this import can be fronted by an ordinary Rust function.
 type SleepFn = unsafe extern "system" fn(u32);
 
+/// What the IAT slot actually points at: a thunk that adds the return address as a second
+/// argument. Declared as the same one-argument type because that is the ABI its CALLERS see.
+type SleepThunkFn = unsafe extern "system" fn(u32);
+
+/// Callers of `Sleep`, by return address, with a count each.
+///
+/// **This is what a total could never give.** All thirteen `Sleep` call sites go through one import
+/// slot, so `sleep0=2523` says a fixed-count yield loop exists and says nothing about where. Static
+/// attribution was tried first and was wrong twice -- the `Sleep(10)` sites never fire, and neither
+/// frame-limiter candidate is called at all -- which is what makes reading the return address worth
+/// the naked thunk.
+static SLEEP_CALLERS: [(AtomicU64, AtomicU64, AtomicU64); SLEEP_CALLER_SLOTS] =
+    [const { (AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)) }; SLEEP_CALLER_SLOTS];
+/// Thirteen call sites in the image, so sixteen slots covers every one with room to notice if a
+/// fourteenth appears from a DLL this counter was not expecting.
+const SLEEP_CALLER_SLOTS: usize = 16;
+static SLEEP_CALLERS_LOST: AtomicU64 = AtomicU64::new(0);
+
+/// Count AND accumulate requested milliseconds per caller.
+///
+/// The count alone names who yields; the milliseconds name who WAITS, and those turned out to be
+/// different callers. 2522 yields of `Sleep(0)` cost almost nothing between them -- they mark a
+/// fixed-size workload rather than a cost -- while a few hundred calls asking for tens of
+/// milliseconds each are where the seventeen seconds of requested sleep actually live.
+fn record_caller(caller: u64, milliseconds: u32) {
+    for slot in &SLEEP_CALLERS {
+        let seen = slot.0.load(Ordering::Relaxed);
+        if seen == caller {
+            slot.1.fetch_add(1, Ordering::Relaxed);
+            slot.2.fetch_add(u64::from(milliseconds), Ordering::Relaxed);
+            return;
+        }
+        if seen == 0
+            && slot
+                .0
+                .compare_exchange(0, caller, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            slot.1.fetch_add(1, Ordering::Relaxed);
+            slot.2.fetch_add(u64::from(milliseconds), Ordering::Relaxed);
+            return;
+        }
+    }
+    SLEEP_CALLERS_LOST.fetch_add(1, Ordering::Relaxed);
+}
+
 static ORIGINAL_SLEEP: AtomicUsize = AtomicUsize::new(0);
 static SLEEP_CALLS: AtomicU64 = AtomicU64::new(0);
 static SLEEP_REQUESTED_MS: AtomicU64 = AtomicU64::new(0);
@@ -185,7 +231,8 @@ fn sleep_bucket(milliseconds: u32) -> usize {
 /// Count, then sleep exactly as asked. **This changes no timing of its own**: the requested
 /// duration is passed through untouched, because the question is where the boot's time goes and an
 /// instrument that shortened the sleeps would be answering a different one.
-unsafe extern "system" fn detour_sleep(milliseconds: u32) {
+unsafe extern "system" fn detour_sleep(milliseconds: u32, caller: u64) {
+    record_caller(caller, milliseconds);
     SLEEP_CALLS.fetch_add(1, Ordering::Relaxed);
     SLEEP_REQUESTED_MS.fetch_add(u64::from(milliseconds), Ordering::Relaxed);
     SLEEP_BUCKETS[sleep_bucket(milliseconds)].fetch_add(1, Ordering::Relaxed);
@@ -198,7 +245,31 @@ unsafe extern "system" fn detour_sleep(milliseconds: u32) {
     }
 }
 
-/// Point the game's `Sleep` import at [`detour_sleep`]. Returns false and logs on any failure.
+/// Hand [`detour_sleep`] the return address as a second argument.
+///
+/// The Win64 ABI puts `Sleep`'s one argument in ECX and leaves RDX free, and on entry `[rsp]` is
+/// the address the caller will be returned to -- which is the instruction after its `call`, and
+/// therefore the identity of the call site. Loading it into RDX and **jumping** rather than calling
+/// leaves the stack exactly as `Sleep` found it, so the detour's own `ret` goes back to the real
+/// caller and no frame is added. Nothing else is touched: RCX carries through untouched, and RDX is
+/// caller-saved and is `Sleep`'s to clobber anyway.
+///
+/// The parameter is declared because it IS this thunk's ABI -- callers put the duration in ECX --
+/// and never read, because a naked function has no Rust body to read it with. It rides ECX
+/// through the jump into the detour's first parameter untouched.
+///
+/// This is the one place in the crate that needs assembly, and it needs it because no stable Rust
+/// expression yields the current function's return address.
+#[unsafe(naked)]
+unsafe extern "system" fn sleep_thunk(_milliseconds: u32) {
+    core::arch::naked_asm!(
+        "mov rdx, [rsp]",
+        "jmp {detour}",
+        detour = sym detour_sleep,
+    )
+}
+
+/// Point the game's `Sleep` import at [`sleep_thunk`]. Returns false and logs on any failure.
 ///
 /// # Safety
 ///
@@ -231,8 +302,8 @@ unsafe fn hook_sleep_import(base: usize) -> bool {
         // Through the fn-pointer type first: a direct `as usize` on a function ITEM is a
         // zero-sized cast that clippy rejects, and rightly -- it reads as an address but is not
         // one until the item has been coerced to a pointer.
-        let detour: SleepFn = detour_sleep;
-        slot.write(detour as usize);
+        let thunk: SleepThunkFn = sleep_thunk;
+        slot.write(thunk as usize);
         let mut restored = 0u32;
         VirtualProtect(
             slot.cast::<c_void>(),
@@ -403,6 +474,28 @@ fn on_enter(id: u32, pending: i32) {
             h[3],
             h[4]
         ));
+        // The attribution, one line per distinct caller, as RVAs so they can be looked up against
+        // the deobfuscated image directly.
+        let base = ds2_game_base::mem::game_module_base().unwrap_or(0);
+        for slot in &SLEEP_CALLERS {
+            let caller = slot.0.load(Ordering::Relaxed);
+            if caller == 0 {
+                continue;
+            }
+            let rva = (caller as usize).wrapping_sub(base);
+            log(format_args!(
+                "{LOG_PREFIX} sleep-caller rva=0x{rva:08x} count={} requested-ms={}",
+                slot.1.load(Ordering::Relaxed),
+                slot.2.load(Ordering::Relaxed)
+            ));
+        }
+        let lost = SLEEP_CALLERS_LOST.load(Ordering::Relaxed);
+        if lost != 0 {
+            log(format_args!(
+                "{LOG_PREFIX} sleep-callers-lost={lost} -- more than {SLEEP_CALLER_SLOTS} distinct \
+                 call sites, so the table above is incomplete"
+            ));
+        }
     }
 }
 
