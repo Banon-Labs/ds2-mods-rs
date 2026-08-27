@@ -142,6 +142,38 @@ test_shell_read_heredoc_body_keeps_its_separators if {
 	regex.match(`(?m)^git push`, single_text(commands.executed_texts(text)))
 }
 
+# The property ds2-mods-rs-1tc turned on: a heredoc body read by something that
+# is NOT a shell must be DELETED from the unquoted view, not merely stripped of
+# its separators. Every substring and flag test in this repo runs over that view,
+# so a body that survives it is a commit message being scanned as a command.
+test_heredoc_body_is_deleted_from_the_unquoted_view if {
+	text := concat("", ["git commit -F - <<'EOF'\nexplaining ", push_main, "\nEOF"])
+	every t in commands.executed_unquoted_texts(text) {
+		not contains(t, "push")
+	}
+}
+
+# ...while a body a SHELL reads is a program, and must still be visible there.
+test_shell_read_heredoc_body_survives_the_unquoted_view if {
+	text := concat("", ["bash <<'EOF'\n", push_main, "\nEOF"])
+	some t in commands.executed_unquoted_texts(text)
+	contains(t, "push")
+}
+
+# An apostrophe in prose used to break quote parity, drop the helper to undefined
+# and hand callers the RAW text. `blanked_anchors` strips quotes from the body
+# before it is re-quoted, so ordinary English cannot unbalance anything.
+test_apostrophes_in_a_heredoc_body_do_not_leak_the_raw_text if {
+	text := concat("", [
+		"git commit -F - <<'EOF'\nthe agent's own shell, somebody else's repo, ",
+		push_main,
+		"\nEOF",
+	])
+	every t in commands.executed_unquoted_texts(text) {
+		not contains(t, "push")
+	}
+}
+
 single_text(texts) := t if {
 	count(texts) == 1
 	some t in texts
