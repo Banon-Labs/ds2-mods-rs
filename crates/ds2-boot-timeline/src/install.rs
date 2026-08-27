@@ -865,3 +865,85 @@ pub unsafe fn install() -> Outcome {
         attempted: sites.len(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bucket edges ARE the binary's own `Sleep` arguments, so getting them wrong does not
+    /// produce an error -- it produces a plausible histogram that attributes a loop to the wrong
+    /// call site. `sleep0=2523` is only evidence of a fixed-count yield loop if `0` is its own
+    /// bucket and nothing else lands in it.
+    #[test]
+    fn sleep_buckets_split_on_the_values_the_image_passes() {
+        assert_eq!(sleep_bucket(0), 0, "yield loops");
+        assert_eq!(sleep_bucket(1), 1, "the PeekMessageW pump");
+        assert_eq!(sleep_bucket(2), 2);
+        assert_eq!(sleep_bucket(9), 2, "2..=9 is one bucket, 9 is its top");
+        assert_eq!(
+            sleep_bucket(10),
+            3,
+            "10 is its own bucket, not the top of 2..=9"
+        );
+        assert_eq!(
+            sleep_bucket(11),
+            4,
+            "11 is the bottom of >10, not the top of 10"
+        );
+        assert_eq!(sleep_bucket(u32::MAX), 4);
+    }
+
+    /// One test for the whole table because the table is a `static`: a second test touching it
+    /// would race this one under the default threaded runner, and the overflow case below fills
+    /// every slot, so there is no way to share it.
+    ///
+    /// Callers are non-zero throughout. Zero is the empty-slot sentinel and cannot collide with a
+    /// real return address, which is the only reason a sentinel is safe here at all.
+    #[test]
+    fn caller_table_accumulates_then_reports_what_it_could_not_hold() {
+        record_caller(0x1000, 5);
+        record_caller(0x1000, 7);
+        record_caller(0x2000, 0);
+
+        let read = |caller: u64| {
+            SLEEP_CALLERS
+                .iter()
+                .find(|slot| slot.0.load(Ordering::Relaxed) == caller)
+                .map(|slot| {
+                    (
+                        slot.1.load(Ordering::Relaxed),
+                        slot.2.load(Ordering::Relaxed),
+                    )
+                })
+        };
+
+        // Count AND milliseconds, separately -- the whole finding was that the caller with the
+        // most calls and the caller with the most milliseconds are different callers.
+        assert_eq!(read(0x1000), Some((2, 12)), "same caller accumulates both");
+        assert_eq!(
+            read(0x2000),
+            Some((1, 0)),
+            "a caller that only ever yields still gets a row: 2522 calls of Sleep(0) is the \
+             single most useful row in the table and it sums to zero milliseconds"
+        );
+
+        // Fill the rest, then overflow it. A silently dropped row would read as "that call site
+        // does not sleep", which is exactly the wrong conclusion.
+        for extra in 0..(SLEEP_CALLER_SLOTS - 2) {
+            record_caller(0x3000 + extra as u64, 1);
+        }
+        let before = SLEEP_CALLERS_LOST.load(Ordering::Relaxed);
+        record_caller(0xdead_beef, 1);
+        assert_eq!(
+            SLEEP_CALLERS_LOST.load(Ordering::Relaxed),
+            before + 1,
+            "the 17th distinct caller is counted as lost, not written over slot 0"
+        );
+        assert_eq!(read(0xdead_beef), None, "and it claims no slot");
+        assert_eq!(
+            read(0x1000),
+            Some((2, 12)),
+            "the first caller's row survives the overflow untouched"
+        );
+    }
+}

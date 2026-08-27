@@ -1406,7 +1406,11 @@ pub const FE_TITLE_INFORMATION_JOB_OFFSET: usize = 0xa0;
 pub const FE_INFORMATION_JOB_STATE_OFFSET: usize = 0x18;
 
 // ============================================================================================
-// THE ONE-SECOND FLOORS, LOCATED (`ds2-mods-rs-wxl`). ~1.86s of a 6.7s boot.
+// THE ONE-SECOND FLOORS, LOCATED (`ds2-mods-rs-wxl`). Predicted ~1.86s; MEASURED 875ms.
+//
+// Lifting both floors moved only `0x05`. `0x44` turned out to be sitting on a download job that
+// always fails, not on this timer -- `ds2-mods-rs-umo` -- and the addresses below are what proved
+// it. They are correct as read; it was the price on them that was wrong.
 //
 // Two substates that are NOT `FeSubStateProcessWindowBase` subclasses -- so `ds2-dialog-skip`'s
 // min-duration zeroing never reached them -- each hold their own elapsed timer and compare it

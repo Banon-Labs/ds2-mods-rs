@@ -400,13 +400,15 @@ pub struct Outcome {
     pub title_settle: bool,
     /// How many of the two floor sites were hooked.
     ///
-    /// A count rather than a bool so a partial install is visible: one floor removed and one left
-    /// turns a 1.86s saving into a 0.88s one, and that should not read as success.
+    /// A count rather than a bool so a partial install is visible. The two are not worth the same
+    /// today -- `0x44`'s floor measured at zero -- so *which* one installed is the question, and
+    /// the `hooked floor=` lines are what answer it.
     pub substate_floors: usize,
 }
 
 // ============================================================================================
-// THE ONE-SECOND FLOORS (`ds2-mods-rs-wxl`). Worth ~1.86s of a 6.7s boot, measured.
+// THE ONE-SECOND FLOORS (`ds2-mods-rs-wxl`). Worth 875ms of a 6.8s boot, measured -- 13%.
+// That is HALF of the ~1.86s this comment first predicted. The missing half is at the bottom.
 //
 // `FeSubStateTitleSteamLoadSystemData` and `FeSubStateTitleInformation` each keep their own
 // elapsed timer, accumulate the frame delta into it, and refuse to advance until it passes
@@ -424,6 +426,13 @@ pub struct Outcome {
 // (`call [r14->vtable+0x28]; test al,al; jne return`), the timer second -- so a satisfied timer
 // cannot outrun an unfinished job. `0x05`'s phase 4 is only reachable once the storage service has
 // already reported idle. Neither skips work; both skip waiting.
+//
+// AND THAT ORDERING IS WHY THE SAVING IS 875ms AND NOT 1.86s. `0x05`'s phase 4 fell from 879ms to
+// 6ms. `0x44`'s fell from 985ms to 981.7ms -- nothing -- because the job, not the timer, was
+// always what held it (`ds2-mods-rs-umo`). ITS ENTRY STAYS ANYWAY, and not out of sentiment: the
+// job takes ~982ms against a 1000ms floor, so the two are within 20ms of each other, and the day
+// `umo` shortens that job this floor is what binds instead. Measured harmless until then --
+// `was=0` on every run, and the original `enter` runs first.
 // ============================================================================================
 
 /// A substate whose `enter` should leave its elapsed timer already past the floor.
