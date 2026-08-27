@@ -62,14 +62,19 @@ public class Ds2Mem extends GhidraScript {
             case "bytes": {
                 byte[] buf = new byte[count];
                 mem.getBytes(toAddr(va), buf);
-                StringBuilder hex = new StringBuilder();
-                for (int i = 0; i < buf.length; i++) {
-                    if (i > 0 && i % 16 == 0) {
-                        hex.append("\n  ");
+                // ONE println PER ROW, never one println containing newlines. A GhidraScript's
+                // println goes through log4j as `INFO  <script>> <text> (GhidraScript)`, and only
+                // the FIRST line of a multi-line message carries that prefix -- so query.sh's
+                // extractor keeps line one and silently drops the rest. A 48-byte dump came back
+                // completely empty because of it, which reads as "unreadable memory" rather than
+                // as a formatting bug.
+                for (int row = 0; row < buf.length; row += 16) {
+                    StringBuilder hex = new StringBuilder();
+                    for (int i = row; i < row + 16 && i < buf.length; i++) {
+                        hex.append(String.format("%02x ", buf[i]));
                     }
-                    hex.append(String.format("%02x ", buf[i]));
+                    println(String.format("  %s  %s", toAddr(va + row), hex.toString().trim()));
                 }
-                println("  " + hex.toString().trim());
                 break;
             }
             case "str": {
