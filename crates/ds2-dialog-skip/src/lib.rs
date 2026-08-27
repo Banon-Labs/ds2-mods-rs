@@ -71,10 +71,14 @@
 #[cfg(windows)]
 mod install;
 #[cfg(windows)]
+mod menu;
+#[cfg(windows)]
 mod title;
 
 #[cfg(windows)]
 pub use install::{LogFn, Outcome, install, set_logger};
+#[cfg(windows)]
+pub use menu::{Outcome as MenuOutcome, install as install_menu};
 #[cfg(windows)]
 pub use title::{Outcome as TitleOutcome, Request as TitleRequest, install as install_title};
 

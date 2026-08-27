@@ -151,6 +151,10 @@ KEY_HIDE_PROCESS_WINDOWS = "hide_process_windows"
 KEY_TITLE_ANIMATION = "title_animation"
 KEY_TITLE_SEQUENCE_GATE = "title_sequence_gate"
 KEY_TITLE_SETTLE = "title_settle"
+#: Mirrors `CONFIG_SECTION`/`KEY_SHOW_UNAVAILABLE` in `crates/ds2-loader/src/title_menu.rs`.
+MENU_SECTION = "title_menu"
+KEY_SHOW_UNAVAILABLE = "show_unavailable"
+
 KEY_POLL_INTERVAL_MS = "poll_interval_ms"
 KEY_HEARTBEAT_INTERVAL_MS = "heartbeat_interval_ms"
 
@@ -860,6 +864,7 @@ def config_text(
     title_animation: bool = True,
     title_sequence_gate: bool = True,
     title_settle: bool = True,
+    show_unavailable: bool = True,
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
@@ -977,6 +982,28 @@ def config_text(
 # each behaviour is gated separately inside.
 {KEY_TITLE_SETTLE} = {str(title_settle).lower()}
 
+[{MENU_SECTION}]
+# STARTUP-ONLY. NOT a skip -- this is the only key here that changes what the title menu DRAWS
+# rather than how long it takes to get there, which is why it is its own section.
+#
+# The top menu is a fixed vector of SIX rows and the game never inserts or removes one; the only
+# per-row variable is one byte, computed from whether a save exists and whether online is
+# available. That byte does two separate things: it sets the cell state that decides whether the
+# cursor can land on the row, and it picks which sequence the row plays. On this layout the
+# unavailable sequence does not grey a row, it takes it off the screen -- which is why LOAD GAME
+# is simply absent until a save exists.
+#
+# `{KEY_SHOW_UNAVAILABLE}` swaps which of the two carries the meaning: the row is styled as
+# available so it is DRAWN, and its cell state is put straight back to the unavailable value so it
+# is STILL NOT SELECTABLE. Both are the game's own values in the game's own fields.
+#
+# The row is drawn in its normal style, not a greyed one: sequence ids index a layout resource
+# inside GameDataEbl.bdt, so which id looks greyed cannot be read out of the executable and is not
+# guessed at here. What this delivers is "visible and inert".
+#
+# ON by default; `--no-show-unavailable-menu-rows` writes false.
+{KEY_SHOW_UNAVAILABLE} = {str(show_unavailable).lower()}
+
 [{CRASH_SECTION}]
 {crash_banner}# STARTUP-ONLY, both of them. The handler is installed in DllMain BEFORE `neuter_arxan`, because
 # that call patches code from static analysis and is the likeliest crash in the whole startup path
@@ -1024,6 +1051,7 @@ def write_config(
     title_animation: bool = True,
     title_sequence_gate: bool = True,
     title_settle: bool = True,
+    show_unavailable: bool = True,
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
@@ -1039,6 +1067,7 @@ def write_config(
         title_animation,
         title_sequence_gate,
         title_settle,
+        show_unavailable,
     )
     path.write_text(text, encoding="utf-8")
     return path, text
@@ -1112,6 +1141,7 @@ def dry_run(
     title_animation: bool = True,
     title_sequence_gate: bool = True,
     title_settle: bool = True,
+    show_unavailable: bool = True,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
@@ -1145,6 +1175,7 @@ def dry_run(
             title_animation,
             title_sequence_gate,
             title_settle,
+            show_unavailable,
         ):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
         else:
@@ -1174,6 +1205,7 @@ def dry_run(
                 title_animation,
                 title_sequence_gate,
                 title_settle,
+                show_unavailable,
             ),
             indent="[dry-run]   | ",
         )
@@ -1225,6 +1257,7 @@ def launch(
     title_animation: bool = True,
     title_sequence_gate: bool = True,
     title_settle: bool = True,
+    show_unavailable: bool = True,
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
@@ -1253,6 +1286,7 @@ def launch(
         title_animation,
         title_sequence_gate,
         title_settle,
+        show_unavailable,
     )
     print(f"[config] {config_path}")
 
@@ -1753,6 +1787,26 @@ def selftest() -> int:
         "--no-title-animation-skip turns off only its own key",
     )
 
+    # THE MENU KEY IS IN A DIFFERENT SECTION, and that is the point worth asserting: it is not a
+    # skip, it patches different functions, and a boot failure has to be attributable to it alone.
+    values, _ = parse_config(config_text("off"))
+    check(
+        values.get((MENU_SECTION, KEY_SHOW_UNAVAILABLE)) == "true",
+        f"[{MENU_SECTION}] {KEY_SHOW_UNAVAILABLE} defaults to true",
+    )
+    values, _ = parse_config(config_text("off", show_unavailable=False))
+    check(
+        values.get((MENU_SECTION, KEY_SHOW_UNAVAILABLE)) == "false"
+        and values.get((TITLE_SECTION, KEY_TITLE_SETTLE)) == "true"
+        and values.get((DIALOG_SECTION, KEY_DIALOG_ENABLED)) == "true",
+        "--no-show-unavailable-menu-rows turns off only its own key, in its own section",
+    )
+    values, _ = parse_config(config_text("off", title_settle=False))
+    check(
+        values.get((MENU_SECTION, KEY_SHOW_UNAVAILABLE)) == "true",
+        "--no-title-settle leaves the menu key ON -- different section, different hooks",
+    )
+
     # THE ARMS MUST DIFFER, and in exactly one key. If two arms ever generated the same file the
     # A/B comparison would be two runs of the same experiment, and the arm-readback guard would
     # not catch it because the DLL would be reporting truthfully.
@@ -2084,6 +2138,17 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--no-show-unavailable-menu-rows",
+        dest="show_unavailable",
+        action="store_false",
+        default=True,
+        help=(
+            "let the title menu hide the rows it cannot offer, as the game does. By default all "
+            "six rows are drawn and the unavailable ones are put back to a cell state the cursor "
+            "cannot reach, so LOAD GAME is visible-but-inert instead of absent."
+        ),
+    )
+    parser.add_argument(
         "--probe-site",
         choices=PROBE_SITES,
         default="m1",
@@ -2151,6 +2216,7 @@ def main() -> int:
             args.title_animation,
             args.title_sequence_gate,
             args.title_settle,
+            args.show_unavailable,
         )
     return launch(
         args.probe,
@@ -2165,6 +2231,7 @@ def main() -> int:
         args.title_animation,
         args.title_sequence_gate,
         args.title_settle,
+        args.show_unavailable,
     )
 
 

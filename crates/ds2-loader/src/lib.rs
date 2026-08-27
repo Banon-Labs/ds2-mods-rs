@@ -85,6 +85,7 @@ pub mod arxan_probe;
 pub mod crash_logging;
 pub mod dialog_skip;
 pub mod intro_skip;
+pub mod title_menu;
 pub mod title_skip;
 
 /// `fdwReason` value for the loader's process-attach notification.
@@ -279,6 +280,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_intro_skip();
                 install_dialog_skip();
                 install_title_skip();
+                install_title_menu();
                 arm_fault(crash_config);
             });
         },
@@ -307,6 +309,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_intro_skip();
                 install_dialog_skip();
                 install_title_skip();
+                install_title_menu();
                 arm_fault(crash_config);
             });
         },
@@ -449,6 +452,29 @@ fn install_title_skip() {
     if config.title_animation && !outcome.title_animation {
         log_line(format_args!(
             "{} title-animation NOT INSTALLED -- the title screen keeps its activation flourish",
+            ds2_dialog_skip::LOG_PREFIX
+        ));
+    }
+}
+
+/// Draw the title menu's unavailable rows instead of letting the game hide them.
+///
+/// Called after [`install_title_skip`] for the same ordering reason that one runs last: this is
+/// the feature whose effect the player sees latest, on the menu the other three exist to reach.
+fn install_title_menu() {
+    let config = title_menu::TitleMenuConfig::load();
+    log_line(format_args!("{}", config.describe()));
+    if !config.show_unavailable {
+        return;
+    }
+    ds2_dialog_skip::set_logger(log_line);
+    // SAFETY: both targets are `.pdata` function starts recorded in `ds2-rva`, resolved against the
+    // live module base, and neither is Arxan-redirected. Both detours call the original -- the
+    // styling one brackets it, and the update one runs after it.
+    let outcome = unsafe { ds2_dialog_skip::install_menu() };
+    if !outcome.show_unavailable {
+        log_line(format_args!(
+            "{} top-menu NOT INSTALLED -- unavailable rows will still be hidden",
             ds2_dialog_skip::LOG_PREFIX
         ));
     }

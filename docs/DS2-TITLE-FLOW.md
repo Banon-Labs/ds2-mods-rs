@@ -792,3 +792,78 @@ and v6 with the same list immediately before its `leave`:
 `FeStateFlow::FUN_140104930` (`0x140104930`) then returns the **first** transition whose predicate
 matches, which is why `_TransitionNewGame` being registered ahead of the plain value-1 transition is
 what makes the full-save-list diversion work.
+
+## Drawing the rows the game hides (`ds2-mods-rs-<menu>`)
+
+The trace above establishes that the menu never inserts or removes a row, and that "unavailable"
+is two independent writes. On this layout the sequence half of that pair does not grey a row --
+**it takes it off the screen**. That is why LOAD GAME is simply absent until a save exists, and it
+is the shipped behaviour `crates/ds2-dialog-skip/src/menu.rs` changes.
+
+### The evidence that the sequence is what hides it
+
+Not a guess, and worth setting out because the layout resource itself was never opened:
+
+1. Every row is always constructed. `0x1400f4250` has no conditional append, the count is 6 on
+   every path, and the cell factory `0x1400f36b0` builds a cell for every row index below that
+   count. **A missing row cannot be a missing row.**
+2. A disabled row differs from an enabled one in exactly two writes: `cell[+8] = 2` instead of
+   `3`/`4`, and sequence `0x7a` instead of `0x67`.
+3. **Nothing in the image reads `cell[+8] == 2` to decide how to draw.** The only readers of that
+   field compare it against `3` (`FeObjectButtonEx::v16`, selectability) and `4`
+   (`FeObjectButtonEx::v1`, cursor), plus two helpers that reset it. So the state cannot be what
+   removes the row.
+
+That leaves the sequence, by elimination. `0x7a` is also the "off" half of a pair elsewhere in the
+same flow -- `0x1400f5720` plays `0x70` on one element in one branch and `0x7a` on it in the other
+-- so it is a layout-wide convention rather than a quirk of this one call.
+
+### The change: swap which write carries the meaning
+
+One detour on `FE_TOP_MENU_APPLY_STATES` (`0x000f5000`) brackets the original:
+
+* **before** -- every descriptor's enable byte is forced to `1`, so the pass styles all six rows as
+  available and every row is drawn;
+* **after** -- the enable bytes are restored, and every row the game had marked unavailable has its
+  cell state written straight back to `2`.
+
+Both halves are the game's own values written to the game's own fields. Nothing here invents a
+notion of "available": the byte the game computed is read, and the same verdict is re-applied
+through the other one of the two mechanisms the game already has.
+
+### Why the state is re-asserted twice
+
+Once **synchronously**, inside that detour, because `FeGroupTitleTopMenu::v25` calls
+`FexGridControl::FUN_140023690` immediately afterwards and that is what settles the cursor. This
+matters more than it looks: **the activate handler `0x1400f4a60` does no enable check of its own.**
+It reads the action id at the cursor and acts. The shipped invariant that stops you firing an
+unavailable row is entirely upstream, in the navigation predicate, so a cursor allowed to rest on a
+row this mod had just made look selectable would be able to fire it.
+
+And once **per frame**, from `FE_TOP_MENU_UPDATE` (`0x000ff300`, `FeSubStateTitleTopMenu::v3`) --
+the only per-frame function specific to this menu. `FexGroupList` v22 (`0x1401081f0`) rewrites
+every cell to `3`/`4` from the cursor, and the input handling that reads the states runs inside the
+scene tick the original performs, so re-asserting after it means navigation on the next frame sees
+the corrected values.
+
+### What this does not do
+
+**The row is drawn in its normal style, not a greyed one.** Sequence ids index a layout resource
+inside `GameDataEbl.bdt`; which id renders as greyed cannot be read out of the executable, and
+`0x67` is used because it is the only id this exact element is *proven* to render -- by the
+available branch of the very function being replaced. Establishing a real greyed-out sequence means
+decrypting the layout archive with `GameDataKeyCode.pem` and reading its animation table. That is a
+separate piece of work and is not guessed at here; what ships is **visible and inert**.
+
+### The line to read on the first run
+
+```
+ds2-dialog-skip: shown screen=top-menu rows=6 unavailable-mask=0b001100 state=2 total=2
+```
+
+The mask is the point. It says which rows the game decided it could not offer on this machine, in
+row order (bit 0 = NEW GAME), and it is the only way to tell a run where this feature changed
+nothing from a run where the hook never fired. It also settles a question this document could not:
+whether the menu is ever built **before** the save data is read. If a machine with a save reports a
+mask with bit 1 set, the top menu was reached ahead of the save-slot read and the enable states are
+a snapshot of a fact that was not yet true.

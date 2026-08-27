@@ -831,3 +831,118 @@ pub const FE_SEQUENCE_PLAYER_PLAY_SLOT: usize = 24;
 /// `docs/DS2-TITLE-FLOW.md`. That is a question about the remaining animation, NOT a reason to drop
 /// this call, whose effect on when the menu becomes usable is real.
 pub const FE_SCENE_TITLE_PLAY_IDLE: u32 = 0x000f_3820;
+
+// --------------------------------------------------------------------------------------------
+// The title top menu. `docs/DS2-TITLE-FLOW.md` carries the trace these came from.
+//
+// The menu is a fixed vector of six rows, rebuilt from scratch on demand. Nothing is ever
+// inserted or removed -- `0x1400f4250` appends the same six descriptors on every path, and the
+// only per-row variable is one byte. That byte decides two independent things, and separating
+// them is what the constants below exist for.
+// --------------------------------------------------------------------------------------------
+
+/// `FeGroupTitleTopMenu`'s enable-and-style pass. RVA `0x000f5000`, VA `0x1400f5000`.
+///
+/// Called from `FeGroupTitleTopMenu::v25` (`0x1400f4df0`) with the group and the freshly built
+/// descriptor list. Read from the disassembly rather than the decompiler, which drops the third
+/// argument on one of the two branches:
+///
+/// ```text
+/// for i in 0 .. list[+0x158]:
+///     cell = FE_TOP_MENU_CELL_FOR_INDEX(group, i)      # null is skipped
+///     desc = list + align + i*FE_TOP_MENU_ROW_STRIDE
+///     tmp  = 0x140026790(group+0x100, &scratch, desc)  # RCX/RDX/R8 set BEFORE the branch
+///     if desc[+0x34] != 0:
+///         tmp[+0x40]->vtable[0](tmp+0x40, 0x67, 0, 0.0)
+///         cell[+8] = 3 + (i == group[+0x28])
+///     else:
+///         cell[+8] = 2
+///         tmp[+0x40]->vtable[0](tmp+0x40, 0x7a, 0, 0.0)
+/// ```
+///
+/// **The two effects of "disabled" are separate writes.** `cell[+8] = 2` is what removes the row
+/// from cursor navigation; the sequence swap is the entire visual difference. Nothing in the image
+/// reads `cell[+8] == 2` to decide how to draw -- the only readers compare against 3 and 4 -- so
+/// the appearance of an unavailable row is decided solely by sequence `0x7a`.
+///
+/// Not Arxan-redirected: `48 8b c4 48 89 58 18` is an ordinary MSVC prologue, seven bytes before
+/// the first instruction boundary past five.
+pub const FE_TOP_MENU_APPLY_STATES: u32 = 0x000f_5000;
+
+/// `FeSubStateTitleTopMenu::v3` (update). RVA `0x000ff300`, VA `0x1400ff300`.
+///
+/// Runs every frame while the top menu is the active substate: it ticks the scene through a
+/// virtual, copies `[scene+0xe8]` into its own phase, and clears a save-data flag on phase 4. It
+/// is the only per-frame function that is specific to this menu, which is what makes it the place
+/// to re-assert per-row state without reaching groups this mod has no business touching.
+///
+/// Takes the frame delta in XMM1 like the rest of the family, even though this member never reads
+/// it. A detour that declares only `this` is free to clobber XMM1.
+///
+/// Not Arxan-redirected; prologue `48 89 5c 24 08`, five bytes exactly.
+pub const FE_TOP_MENU_UPDATE: u32 = 0x000f_f300;
+
+/// `FexGroupList<FeGroupGrid>`'s cell-by-index lookup. RVA `0x00108060`, VA `0x140108060`.
+///
+/// `longlong lookup(group, int index)` -- walks the group's cell list through two of its own
+/// virtuals and returns the cell whose `[+0x10]` equals `index`, or null. Called, never patched,
+/// so its Arxan status does not arise.
+pub const FE_TOP_MENU_CELL_FOR_INDEX: u32 = 0x0010_8060;
+
+/// Offset of `FeGroupTitleTopMenu` within `FeSceneTitle`. `+0xb8`.
+///
+/// Written by the scene's own builder at `0x1400f4950`: `*(longlong **)(param_1 + 0xb8) = plVar3`,
+/// immediately after constructing the group with `0x1400f3250`.
+pub const FE_TOP_MENU_GROUP_OFFSET: usize = 0xb8;
+
+/// Stride of one row descriptor in the top-menu list. `0x38`.
+pub const FE_TOP_MENU_ROW_STRIDE: usize = 0x38;
+
+/// The row's action id, within a descriptor. `+0x30`, a DWORD, values 1 to 6.
+///
+/// Read by the activate handler at `0x1400f4a8d` as `[buffer + align + cursor*0x38]`.
+pub const FE_TOP_MENU_ROW_ACTION_OFFSET: usize = 0x30;
+
+/// The row's enabled flag, within a descriptor. `+0x34`, one byte.
+///
+/// Tested at `0x1400f5063`. Its six values, in row order, are the whole of the menu's variability:
+/// `1`, has-a-save, online-available, `!online-available`, `1`, `1`.
+pub const FE_TOP_MENU_ROW_ENABLED_OFFSET: usize = 0x34;
+
+/// Row count within the descriptor list. `+0x158`.
+///
+/// Written as a QWORD by the builder and read as a DWORD by the styling pass, which is why it is
+/// read as a 32-bit value here.
+pub const FE_TOP_MENU_LIST_COUNT_OFFSET: usize = 0x158;
+
+/// Capacity of the descriptor list. `6`, and also the count on every path.
+///
+/// The builder's own `DLFixedVector` bound: appending a seventh row calls
+/// `DLKR::DLBackAllocator::panic` with `"out of memory."`. Used as a sanity bound on a count read
+/// out of game memory, so a garbage read cannot drive a loop.
+pub const FE_TOP_MENU_ROW_CAPACITY: usize = 6;
+
+/// The cell's state field. `+0x8`, a DWORD, on `FeObjectButtonEx`.
+pub const FE_BUTTON_STATE_OFFSET: usize = 0x8;
+
+/// Cell state meaning "unavailable". `2`.
+///
+/// **This is what removes a row from cursor navigation.** `FeObjectButtonEx::v16` at
+/// `0x14004c5c0` is the predicate the navigation search at `0x140107b40` calls on every candidate
+/// before accepting it, on all six of its direction branches and again at the shared accept point
+/// `0x140107fb0`:
+///
+/// ```text
+/// vtable[3]() == 1 && [rcx+8] == 3
+/// ```
+///
+/// So only state 3 is selectable. The activate handler `0x1400f4a60` does no enable check of its
+/// own, which is exactly why this one has to hold.
+pub const FE_BUTTON_STATE_UNAVAILABLE: i32 = 2;
+
+/// Cell state meaning "available, not under the cursor". `3`.
+pub const FE_BUTTON_STATE_NORMAL: i32 = 3;
+
+/// Cell state meaning "under the cursor". `4`. `FeObjectButtonEx::v1` (`0x14004c5b0`) is
+/// `cmp [rcx+8],4; sete al; ret`.
+pub const FE_BUTTON_STATE_CURSOR: i32 = 4;
