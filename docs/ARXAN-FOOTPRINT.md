@@ -61,3 +61,53 @@ Backup: **RVA `0x008389e0`**, same prologue shape, 1287 call sites, 0x4e bytes.
 95434 starts filters essentially all false positives without disassembling 17 MB. Scripts are in
 the scratchpad; the numbers above are reproducible from the deobfuscated image alone, with no
 runtime and nothing that can be contaminated.
+
+## What a redirected entry actually looks like
+
+Walked statically with `scripts/ds2-arxan-chain.py`, no game running, nothing contaminatable.
+`applySpEffect` (`0x14014bec0`) is the worked example because `ds2-mods-rs-a1g` needs it:
+
+```
+hop 0  0x14014bec0 [game ]  jmp rel            -> 0x141b3cbe1
+hop 1  0x141b3cbe1 [arxan]  stack-swap thunk   -> 0x141be7325
+hop 2  0x141be7325 [arxan]  stack-swap thunk   -> 0x141cf8f8f
+hop 3  0x141cf8f8f [arxan]  fragment (11 insn) -> 0x141b72fc9
+hop 4  0x141b72fc9 [arxan]  fragment  (5 insn) -> 0x14014bed4
+hop 5  0x14014bed4 [game ]  REJOIN = entry+0x14
+```
+
+**Only the entry region is stolen.** Arxan takes the first `0x14` bytes of the function, shatters
+them into basic-block fragments dispersed through its own `.text`
+(`0x141aaf000`–`0x141d42fff`), and leaves a five-byte `jmp` behind. The chain runs 16
+instructions of genuine prologue and then jumps back into the *original* function at
+`entry+0x14`, where the entire remaining body sits untouched and in place.
+
+The fragments are real code padded with obfuscation. Hop 3 is `applySpEffect`'s actual prologue:
+
+```asm
+mov  QWORD PTR [rsp+0x10],rbx     ; real
+push rsp / mov rbx,[rsp] / ...    ; obfuscation: defeats stack-frame analysis
+pop  rsp
+mov  QWORD PTR [rsp],rdi          ; "push rdi", written obliquely
+sub  rsp,0x30                     ; real frame setup
+mov  rdi,rcx                      ; real: first argument
+jmp  0x141b72fc9                  ; on to the next fragment
+```
+
+There is no relocated contiguous copy of the function to detour. There are two hook sites:
+
+1. **The entry, `0x14014bec0`.** Exactly five bytes of `e9 rel32` — MinHook's minimum, and
+   MinHook relocates `rel32`, so the trampoline holds the re-based `jmp` into the chain and
+   preserves original behaviour. Every caller funnels through here. It is also the most direct
+   possible confrontation with Arxan, because those five bytes are Arxan's own.
+2. **The rejoin point, `entry+0x14`.** In game `.text`, past everything Arxan owns. The cost is
+   that the prologue has already run — `rsp` is down `0x30` and argument one is in `rdi`, not
+   `rcx` — so a detour here is not a normal function entry and must know the frame state.
+
+### Why the M1 probe could not have answered the Arxan question
+
+The same walk on M1's site (`0x140832e70`, `ds2-mods-rs-z6m`) terminates at hop 0: the function's
+own prologue is at its own entry. It is **not redirected**, so a detour there never touches
+Arxan's code at all. That is the mechanical reason both arms of M1 survived and why
+`docs/ARXAN-PROBE.md` read the result as "Arxan never threatened this site." It is a null result
+about Arxan by construction, and repeating it on another clean site would produce another one.
