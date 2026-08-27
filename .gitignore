@@ -4,6 +4,18 @@
 *.db
 .beads-credential-key
 
+# The JSONL export is a PASSIVE ARTIFACT, not the source of truth. Issues live in
+# the local Dolt DB under .beads/dolt/ and sync between machines over
+# refs/dolt/data via `bd dolt push/pull` -- a ref namespace of its own, separate
+# from refs/heads/*. Tracking the export means every `bd create`/`bd close`
+# rewrites a file that every concurrent branch also rewrites, so it collides on
+# merge while carrying nothing the Dolt ref does not already have. It conflicted
+# on PR #4 and was a pending collision between PRs #8 and #9 when this was added.
+# The interaction log is the same class of artifact and is ignored for the same
+# reason.
+.beads/issues.jsonl
+.beads/interactions.jsonl
+
 # dearxan deobfuscated game image -- copyrighted, never commit
 darksoulsii-deobf.bin
 *-deobf.bin
