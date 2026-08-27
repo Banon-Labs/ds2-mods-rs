@@ -1,0 +1,18 @@
+# Controller/menu INTENT, not raw input injection. Game-free and host-testable: the whole crate
+# is a whitelist, a frame-bounded validator and a trait, so `cargo test` on Linux reaches all of
+# it. Backends -- which are the only part that touches the game -- live in the DLLs that need one.
+[package]
+name = "ds2-safe-input"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "ds2_safe_input"
+
+[dependencies]
+
+[lints]
+workspace = true
