@@ -946,3 +946,145 @@ pub const FE_BUTTON_STATE_NORMAL: i32 = 3;
 /// Cell state meaning "under the cursor". `4`. `FeObjectButtonEx::v1` (`0x14004c5b0`) is
 /// `cmp [rcx+8],4; sete al; ret`.
 pub const FE_BUTTON_STATE_CURSOR: i32 = 4;
+
+/// Which top-menu rows may be forced visible when the game would hide them. Row 1 only.
+///
+/// **Measured in-game, and the first version got this wrong.** Forcing all six drew two rows on
+/// top of each other on screen. The grid coordinates are NOT the reason -- a later run logged them
+/// as `0:(0,0) 1:(0,1) 2:(0,2) 3:(0,3) 4:(0,4) 5:(0,5)`, six distinct positions -- so the collision
+/// is in the layout resource, which evidently has no designed place for rows the game never shows
+/// together. Rows 2 and 3 are exactly such a pair: row 2 is gated on the online flag at
+/// `0x140513600` and row 3 on its exact inverse, so precisely one of them is ever available.
+///
+/// Row 1 is also the only row where forcing is *meaningful*. The six enable expressions are
+/// `1`, has-a-save, online, `!online`, `1`, `1` -- rows 0, 4 and 5 are literal `1` and can never be
+/// hidden, and rows 2 and 3 are the shared slot. That leaves exactly one row the game hides on its
+/// own and that owns its position: **LOAD GAME**.
+pub const FE_TOP_MENU_FORCE_SHOWN_ROWS: u32 = 1 << 1;
+
+/// `FeObjectButtonEx`'s flags word. `+0x14`, a DWORD.
+///
+/// Read at `0x14010ad62` (`mov eax,[rbx+0x14]`) in the button's own styling method, and tested for
+/// a skip bit at `0x14010ad35` (`test BYTE PTR [rcx+0x14],0x40`) before anything else happens.
+pub const FE_BUTTON_FLAGS_OFFSET: usize = 0x14;
+
+/// The flag bit that makes a button draw its alternate look. `0x400`. **DEAD END, DO NOT USE.**
+///
+/// Setting it on a title-menu row changes nothing, and the reason is one field over. The styling
+/// method opens `test BYTE PTR [rcx+0x14],0x40; jne <exit>` at `0x14010ad35` -- **bit 6 is a skip
+/// bit**, and a live run logged these buttons' flags as `0x00000040`, so the method returns before
+/// it ever reaches the branch this bit selects. `FeObjectButtonEx` draws nothing of its own here;
+/// the row's appearance comes entirely from the menu's own pass through the layout element.
+///
+/// Kept documented rather than deleted so the next attempt does not rediscover it. The mechanics
+/// below are accurate; they are simply unreachable for this menu.
+///
+/// `FeObjectButtonEx`'s styling method branches on `test eax,0x401` at `0x14010ad65`: with neither
+/// bit it plays sequence `0x6c`, with either it plays **`0x7e`** instead. **This is the only
+/// alternate appearance the button class has**, and it is the nearest thing in the image to a
+/// "drawn but not offered" look -- the menu's own styling pass never reaches it, because that pass
+/// removes an unavailable row from the screen rather than restyling it.
+///
+/// Bit `0x400` rather than bit `0x1`, deliberately: both take the same branch, but bit `0x1` also
+/// writes `[this+0x18] = 1` at `0x14010ad70`, which a second method (`0x14010af10`) reads to
+/// suppress a different sequence. `0x400` changes the appearance and nothing else, which is the
+/// smallest change that can produce the effect.
+pub const FE_BUTTON_FLAG_ALTERNATE_LOOK: i32 = 0x400;
+
+/// Bind a row descriptor to a `FrontendEx::SceneObjProxy`. RVA `0x00026790`, VA `0x140026790`.
+///
+/// `proxy* bind(group + 0x100, scratch, descriptor)`. It forwards to `0x140027880`, which installs
+/// `SceneObjProxy::vftable`, stores the group at `+0x58` and copies the descriptor's label object
+/// to `+0x60`. The menu's styling pass builds one per row per pass into a 144-byte stack scratch
+/// and lets it die there.
+pub const FE_BIND_SCENE_OBJ_PROXY: u32 = 0x0002_6790;
+
+/// The `ComponentFrameCtrl` embedded in a `SceneObjProxy`. `+0x40`.
+///
+/// `0x14001e150` initialises the proxy's members in order: `ComponentPositionProperty` at `+0x10`,
+/// `ComponentSizeProperty` at `+0x20`, `ComponentFrameCtrl` at `+0x40`. **There is no colour or
+/// alpha property among them**, which is why dimming a row is not reachable through this object and
+/// has to come from a sequence the layout itself defines.
+///
+/// Vtable slot 0 of the frame control is the sequence play, called as
+/// `play(this, id, 0, 0.0f)` at `0x1400f5087` -- RCX, EDX, R8D, XMM3.
+pub const FE_SCENE_OBJ_PROXY_FRAME_CTRL: usize = 0x40;
+
+/// Build the top menu's six row descriptors. RVA `0x000f4250`, VA `0x1400f4250`.
+///
+/// `list* build(list)` -- fills a caller-supplied 352-byte buffer and returns it. Four call sites,
+/// including the cell factory, so calling it again per state change is a rate the game already
+/// exceeds on its own.
+pub const FE_TOP_MENU_BUILD_ROWS: u32 = 0x000f_4250;
+
+/// Sequence for a row that is available. `0x67`.
+///
+/// The id the menu's own styling pass plays on an available row at `0x1400f5080`.
+pub const FE_TOP_MENU_SEQUENCE_AVAILABLE: i32 = 0x67;
+
+/// Sequence for a row that is drawn but not selectable. `0x6c`. **MEASURED ON SCREEN.**
+///
+/// This one could not be established statically and was not guessed. Sequence ids index a layout
+/// resource inside `GameDataEbl.bdt`, so a run played a different candidate on each menu row at
+/// once -- `0x6c`, `0x7e`, `0x69`, `0x6b`, `0x70`, with row 0 held at
+/// [`FE_TOP_MENU_SEQUENCE_AVAILABLE`] as the control -- and `0x6c` was the one that came back
+/// faded. The candidates were the layout's own vocabulary, taken from the sequences
+/// `FeObjectButtonEx`'s methods play on their elements, rather than a sweep of the id space.
+///
+/// Two cheaper routes were tried first and both are dead, recorded so they are not retried:
+/// [`FE_BUTTON_FLAG_ALTERNATE_LOOK`] is unreachable on these buttons, and the row's proxy carries
+/// position, size and frame-control properties but no colour or alpha.
+pub const FE_TOP_MENU_SEQUENCE_FADED: i32 = 0x6c;
+
+/// `FexGroupList<FeGroupGrid>`'s "nothing here is selectable" pass. RVA `0x00106240`.
+///
+/// Vtable slot 3, and its whole body is a loop writing [`FE_BUTTON_STATE_UNAVAILABLE`] into every
+/// cell in the list. Slot 5 (`0x140106290`) is its inverse, resetting `2 -> 3`.
+///
+/// **This is why the menu is drawn before it can be used**, and it is the reason no separate
+/// "is it ready yet" flag has to be invented: the game already publishes that fact, per cell, in
+/// the field the navigation predicate reads. A row that cannot be selected -- because its own
+/// enable byte was false, or because this pass disabled the whole list while the title scene is
+/// still animating -- is exactly a row in state 2.
+pub const FE_TOP_MENU_DISABLE_ALL: u32 = 0x0010_6240;
+
+/// The `GameManagerImp` pointer. RVA `0x016148f0`, VA `0x1416148f0`.
+///
+/// Read at `0x1400f432d` in the top-menu row builder, among many other places.
+pub const GAME_MANAGER: u32 = 0x0161_48f0;
+
+/// `SaveLoadSystem` within `GameManagerImp`. `+0xb8`.
+///
+/// `FeSubStateTitleLoadProfile`'s work starter reads it at `0x1400fc384`
+/// (`mov rdi,[rax+0xb8]`) before handing it to the loader.
+pub const GAME_MANAGER_SAVE_LOAD_SYSTEM: usize = 0xb8;
+
+/// The `SaveLoadSystem` field that is non-zero while a request is in flight. `+0x8`.
+///
+/// The pump at `0x1402e6230` opens `mov eax,[rcx+8]; sub eax,2; test eax,0xfffffffd; jne <bail>`,
+/// so it only does work when this is `2` or `4`, and every completion path writes `0`. A save or
+/// profile load in progress is therefore a non-zero here, read out of the game's own field rather
+/// than inferred from a clock.
+///
+/// **Why this and not the cell states.** The menu is drawn before it can be used, and the obvious
+/// candidate for that was `FE_TOP_MENU_DISABLE_ALL` -- but a live run showed the cell states never
+/// reading all-unavailable, only the two rows the enable bytes had already ruled out. So whatever
+/// holds input during that window is above the cells, and the window measurably coincides with the
+/// save arriving: the same run logged the row states flipping from `0b000110` to `0b001000` at the
+/// moment the save landed.
+pub const SAVE_LOAD_SYSTEM_REQUEST: usize = 0x8;
+
+/// `FeGroupTitleTopMenu::TitleButtonLayout`'s cell factory. RVA `0x000f36b0`, VA `0x1400f36b0`.
+///
+/// `proxy* build(layout, proxy_out, coords)` -- `coords` is `int[2]`, column then row. It rebuilds
+/// the descriptor list, and for an in-range `(0, row)` binds descriptor `row` into the caller's
+/// proxy through [`FE_BIND_SCENE_OBJ_PROXY`]; anything out of range gets an empty cell from
+/// `0x140027980` instead. The bound proxy is returned in RAX, so a detour has the row's layout
+/// element in hand without rebuilding anything.
+///
+/// **This is the earliest moment a row exists**, which is what makes it the only place able to
+/// decide what a row looks like on its very first frame. Everything else -- the styling pass, the
+/// substate updates -- runs after the rows are already on screen.
+///
+/// Not Arxan-redirected; prologue `48 89 5c 24 08`, five bytes exactly.
+pub const FE_TOP_MENU_BUILD_CELL: u32 = 0x000f_36b0;

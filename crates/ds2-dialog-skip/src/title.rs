@@ -54,6 +54,16 @@ use crate::install::log;
 /// Trampoline back to the original process-window `enter`.
 static PROCESS_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 
+/// Trampoline back to the ORIGINAL title-sequence gate.
+///
+/// The detour replaces that gate outright -- it reports a press-ready scene on the first frame so
+/// the flow does not pace itself to the logo animation. That is the whole point of the feature, and
+/// it is also what puts a menu on screen while the scene is still animating in. Keeping the
+/// trampoline means the honest answer is still *askable*: [`title_sequence_settled`] calls it, and
+/// nothing else does, so forcing the flow and knowing whether the animation has finished stop being
+/// the same question.
+static SEQUENCE_GATE_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
+
 /// Trampoline back to `FeSubStateTitleMain`'s original update.
 static TITLE_MAIN_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 
@@ -111,7 +121,8 @@ type UpdateFn = unsafe extern "system" fn(*mut u8, f32);
 ///
 /// The original is never called: it reads scene state and returns a verdict, so running it and
 /// discarding the answer would be the same as not running it.
-unsafe extern "system" fn detour_sequence_gate(_scene: *mut u8) -> u8 {
+unsafe extern "system" fn detour_sequence_gate(scene: *mut u8) -> u8 {
+    let _ = scene;
     let total = SEQUENCE_GATES.fetch_add(1, Ordering::Relaxed) + 1;
     if total <= 3 {
         log(format_args!(
@@ -444,7 +455,11 @@ pub unsafe fn install(request: Request) -> Outcome {
         let site = base + ds2_rva::FE_TITLE_MAIN_SEQUENCE_GATE as usize;
         // No trampoline: the detour replaces the gate outright rather than fronting it.
         match unsafe { MhHook::new(site as *mut c_void, detour_sequence_gate as *mut c_void) } {
-            Ok(_) => {
+            Ok(hook) => {
+                // Stored even though the detour never calls it: `title_sequence_settled` asks the
+                // original whether the logo has finished, which is a different question from the
+                // one the detour answers.
+                SEQUENCE_GATE_TRAMPOLINE.store(hook.trampoline() as usize, Ordering::Release);
                 let status = unsafe { MH_EnableHook(site as *mut c_void) };
                 if status == MH_STATUS::MH_OK {
                     outcome.title_sequence_gate = true;
@@ -601,4 +616,35 @@ pub unsafe fn install(request: Request) -> Outcome {
     }
 
     outcome
+}
+
+/// `bool is_settled(scene)` -- the gate's real signature, taking the scene its callers pass.
+type SequenceGateFn = unsafe extern "system" fn(*mut u8) -> u8;
+
+/// Has the title scene finished animating in?
+///
+/// `None` when the question cannot be asked -- the gate was not hooked, or the scene is not up yet.
+/// A caller that cannot get an answer must not treat that as "still animating", because the failure
+/// would then be indistinguishable from a permanent one.
+///
+/// # Safety
+///
+/// Calls the game's own predicate with the single argument its own call site passes, through the
+/// trampoline MinHook published for it.
+pub unsafe fn title_sequence_settled() -> Option<bool> {
+    let trampoline = SEQUENCE_GATE_TRAMPOLINE.load(Ordering::Acquire);
+    let base = MODULE_BASE_TITLE.load(Ordering::Acquire);
+    if trampoline == 0 || base == 0 {
+        return None;
+    }
+    let globals = unsafe { safe_read_usize(base + ds2_rva::FE_TITLE_GLOBALS as usize) }?;
+    let scene = unsafe { safe_read_usize(globals + ds2_rva::FE_TITLE_SCENE_OFFSET) }?;
+    if scene == 0 {
+        return None;
+    }
+    // SAFETY: MinHook published this trampoline for this site, and the scene pointer comes from the
+    // field the gate's own caller reads at `0x1400fedc9`.
+    let original: SequenceGateFn =
+        unsafe { std::mem::transmute::<usize, SequenceGateFn>(trampoline) };
+    Some(unsafe { original(scene as *mut u8) } != 0)
 }

@@ -58,7 +58,7 @@
 //! the frame it did it in.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use ds2_game_base::mem::{game_module_base, safe_read_i32, safe_read_u8, safe_read_usize};
 use ds2_hook::{MH_EnableHook, MH_Initialize, MH_STATUS, MhHook};
@@ -88,8 +88,30 @@ static ROW_COUNT: AtomicUsize = AtomicUsize::new(0);
 /// How many rows have been drawn that the game would have hidden.
 static SHOWN: AtomicUsize = AtomicUsize::new(0);
 
-/// Whether the first styling pass has been logged.
-static LOGGED: AtomicUsize = AtomicUsize::new(0);
+/// Which rows currently carry the faded look. [`UNKNOWN_LOOKS`] until the first pass.
+static FADED_LOOKS: AtomicU32 = AtomicU32::new(UNKNOWN_LOOKS);
+
+/// Sentinel for [`FADED_LOOKS`]: nothing has been styled yet, so every row needs its look applied.
+const UNKNOWN_LOOKS: u32 = u32::MAX;
+
+/// Last observed title-scene animation state, logged on change for the same reason.
+static LAST_ANIMATING: AtomicBool = AtomicBool::new(false);
+
+/// The last `unavailable` mask that was logged, plus a bit that marks "nothing logged yet".
+///
+/// The states MOVE while the menu is on screen -- a machine can come online, and a save can finish
+/// loading, after the menu is already up -- so a once-only log reports a snapshot and calls it the
+/// answer. Logging on change instead costs a handful of lines per boot and produces the timeline.
+static LAST_LOGGED: AtomicU32 = AtomicU32::new(NEVER_LOGGED);
+
+/// Sentinel for [`LAST_LOGGED`]: no six-bit mask can collide with it.
+const NEVER_LOGGED: u32 = u32::MAX;
+
+/// Column of a cell within its grid. `+0x1c`, read by the navigation search at `0x140107b40`.
+const CELL_COLUMN_OFFSET: usize = 0x1c;
+
+/// Row of a cell within its grid. `+0x20`, read by the same search.
+const CELL_ROW_OFFSET: usize = 0x20;
 
 /// `void apply_states(group, list)` -- both in registers, no stack arguments.
 type ApplyStatesFn = unsafe extern "system" fn(*mut u8, *mut u8);
@@ -103,6 +125,20 @@ type UpdateFn = unsafe extern "system" fn(*mut u8, f32);
 
 /// `longlong cell_for_index(group, int index)` -- returns the cell whose id matches, or null.
 type CellForIndexFn = unsafe extern "system" fn(*mut u8, i32) -> *mut u8;
+
+/// `SceneObjProxy* bind(group + 0x100, scratch, descriptor)` -- `0x140026790`.
+///
+/// Constructs a `FrontendEx::SceneObjProxy` into the caller's scratch and returns it. The game's
+/// own styling pass builds one per row per pass and lets it die on the stack, which is why doing
+/// the same here is the same lifetime the game already accepts rather than a new one.
+type BindProxyFn = unsafe extern "system" fn(*mut u8, *mut u8, *mut u8) -> *mut u8;
+
+/// `list* build_rows(list)` -- `0x1400f4250`, filling a caller-supplied 352-byte buffer.
+type BuildRowsFn = unsafe extern "system" fn(*mut u8) -> *mut u8;
+
+/// `void play(frame_ctrl, int sequence, int, float)` -- vtable slot 0 of the proxy's
+/// `ComponentFrameCtrl` at `+0x40`. RCX/EDX/R8D/XMM3, exactly as `0x1400f5087` calls it.
+type PlaySequenceFn = unsafe extern "system" fn(*mut u8, i32, i32, f32);
 
 /// Address of a row descriptor within the list, reproducing the game's own alignment fudge.
 ///
@@ -170,6 +206,160 @@ unsafe fn reassert_unavailable(group: *mut u8) -> usize {
     written
 }
 
+/// Which rows are currently not selectable, read from the cells rather than from the descriptors.
+///
+/// **The cell state is the signal, and it is the game's own.** A row is unselectable either because
+/// its enable byte was false, or because [`ds2_rva::FE_TOP_MENU_DISABLE_ALL`] turned the whole list
+/// off while the title scene is still animating in. Both end as
+/// [`ds2_rva::FE_BUTTON_STATE_UNAVAILABLE`] in the field the navigation predicate reads, so one
+/// read covers both and no notion of "ready yet" has to be invented here.
+///
+/// # Safety
+///
+/// `group` must be the live `FeGroupTitleTopMenu`.
+unsafe fn unselectable_rows(group: *mut u8, count: usize) -> u32 {
+    let base = MODULE_BASE.load(Ordering::Acquire);
+    if base == 0 || group.is_null() {
+        return 0;
+    }
+    // SAFETY: resolved from the live module base and called exactly as its own call site does.
+    let cell_for_index: CellForIndexFn = unsafe {
+        std::mem::transmute::<usize, CellForIndexFn>(
+            base + ds2_rva::FE_TOP_MENU_CELL_FOR_INDEX as usize,
+        )
+    };
+    // While the save-load system still has a request in flight the menu is drawn but nothing on it
+    // can be used, so every row reads as unselectable regardless of its own state. This is not a
+    // second mechanism bolted on: it is the same question -- "can the player act on this row" --
+    // asked at the level that actually holds the answer during that window.
+    // TWO WAYS TO BE UNUSABLE, and the second one is this mod's own doing. `title_settle` and the
+    // forced sequence gate put the menu on screen without waiting for the title scene to finish
+    // animating in, which is exactly the behaviour that was wanted -- and it means the menu is
+    // drawn during a stretch where nothing on it can be acted on. Asking the ORIGINAL gate, rather
+    // than the detour that always says yes, is what makes that stretch nameable.
+    let animating = matches!(
+        unsafe { crate::title::title_sequence_settled() },
+        Some(false)
+    );
+    let mut mask = if animating { (1u32 << count) - 1 } else { 0 };
+    if animating != LAST_ANIMATING.swap(animating, Ordering::Relaxed) {
+        log(format_args!(
+            "{LOG_PREFIX} title-scene screen=top-menu animating={animating}"
+        ));
+    }
+    for index in 0..count {
+        let cell = unsafe { cell_for_index(group, index as i32) };
+        if cell.is_null() {
+            continue;
+        }
+        if unsafe { safe_read_i32(cell as usize + ds2_rva::FE_BUTTON_STATE_OFFSET) }
+            == Some(ds2_rva::FE_BUTTON_STATE_UNAVAILABLE)
+        {
+            mask |= 1 << index;
+        }
+    }
+    mask
+}
+
+/// Give every row the look that matches whether it can be used.
+///
+/// Faded for unselectable, normal for the rest, and only for rows whose verdict actually changed --
+/// the cursor moving rewrites cell states between `3` and `4` every frame, and re-playing a
+/// sequence on that would restart the animation continuously.
+///
+/// # Safety
+///
+/// `group` and `list` must be a live pair. The proxy is built by the game's own binder into a
+/// scratch of the size its own callers use, and the play call carries the four registers
+/// `0x1400f5087` sets.
+unsafe fn apply_looks(group: *mut u8, list: *mut u8, count: usize, unselectable: u32) {
+    let base = MODULE_BASE.load(Ordering::Acquire);
+    if base == 0 || group.is_null() || list.is_null() {
+        return;
+    }
+    let previous = FADED_LOOKS.swap(unselectable, Ordering::AcqRel);
+    // Every row on the first pass, only the changed ones after that.
+    let changed = if previous == UNKNOWN_LOOKS {
+        u32::MAX
+    } else {
+        previous ^ unselectable
+    };
+    if changed == 0 {
+        return;
+    }
+    // SAFETY: resolved from the live module base, with the argument shapes read off `0x1400f5071`.
+    let bind: BindProxyFn = unsafe {
+        std::mem::transmute::<usize, BindProxyFn>(base + ds2_rva::FE_BIND_SCENE_OBJ_PROXY as usize)
+    };
+    let list_address = list as usize;
+    for index in 0..count {
+        if changed & (1 << index) == 0 {
+            continue;
+        }
+        let faded = unselectable & (1 << index) != 0;
+        let sequence = if faded {
+            ds2_rva::FE_TOP_MENU_SEQUENCE_FADED
+        } else {
+            ds2_rva::FE_TOP_MENU_SEQUENCE_AVAILABLE
+        };
+        // The game's own callers give this 144 bytes.
+        let mut scratch = [0u64; 18];
+        let descriptor = row_at(list_address, index) as *mut u8;
+        let proxy = unsafe { bind(group.add(0x100), scratch.as_mut_ptr().cast(), descriptor) };
+        if proxy.is_null() {
+            continue;
+        }
+        unsafe { play_sequence(proxy, sequence) };
+    }
+    if previous != unselectable {
+        log(format_args!(
+            "{LOG_PREFIX} looks screen=top-menu unselectable=0b{unselectable:06b} \
+             faded=0x{:02x} normal=0x{:02x}",
+            ds2_rva::FE_TOP_MENU_SEQUENCE_FADED,
+            ds2_rva::FE_TOP_MENU_SEQUENCE_AVAILABLE
+        ));
+    }
+}
+
+/// `row:(column,row)` for every cell the group currently has, for the log line.
+///
+/// Read-only, and every read is fault-tolerant: this runs on a drawing path and a menu that cannot
+/// be described is not a menu worth crashing over. A row whose cell is absent reports `-`.
+///
+/// # Safety
+///
+/// `group` must be the live `FeGroupTitleTopMenu`.
+unsafe fn describe_grid(group: *mut u8, count: usize) -> String {
+    let base = MODULE_BASE.load(Ordering::Acquire);
+    if base == 0 || group.is_null() {
+        return String::from("unknown");
+    }
+    // SAFETY: resolved from the live module base and called exactly as its own call site does.
+    let cell_for_index: CellForIndexFn = unsafe {
+        std::mem::transmute::<usize, CellForIndexFn>(
+            base + ds2_rva::FE_TOP_MENU_CELL_FOR_INDEX as usize,
+        )
+    };
+    let mut out = String::new();
+    for index in 0..count {
+        if index != 0 {
+            out.push(',');
+        }
+        let cell = unsafe { cell_for_index(group, index as i32) };
+        if cell.is_null() {
+            out.push_str(&format!("{index}:-"));
+            continue;
+        }
+        let column = unsafe { safe_read_i32(cell as usize + CELL_COLUMN_OFFSET) };
+        let row = unsafe { safe_read_i32(cell as usize + CELL_ROW_OFFSET) };
+        match (column, row) {
+            (Some(column), Some(row)) => out.push_str(&format!("{index}:({column},{row})")),
+            _ => out.push_str(&format!("{index}:?")),
+        }
+    }
+    out
+}
+
 /// Style every row as available so all six are drawn, then put the unavailable ones back to a state
 /// that cannot be selected.
 ///
@@ -198,9 +388,14 @@ unsafe extern "system" fn detour_apply_states(group: *mut u8, list: *mut u8) {
         return;
     }
 
-    // Read the game's verdict before touching anything, and force every row to the available path
-    // so the styling pass draws all six.
-    let mut mask = 0u32;
+    // Read the game's verdict before touching anything, then force the available path onto the
+    // rows this mod is allowed to draw -- and ONLY those. `unavailable` is what the game decided
+    // and is reported; `forced` is what was acted on. Every row outside
+    // `FE_TOP_MENU_FORCE_SHOWN_ROWS` is left exactly as the game built it, descriptor and cell
+    // both, because a row that shares its screen slot with another is not one this can draw
+    // without drawing two labels in one place.
+    let mut unavailable = 0u32;
+    let mut forced = 0u32;
     let mut saved = [1u8; ds2_rva::FE_TOP_MENU_ROW_CAPACITY];
     for (index, slot) in saved.iter_mut().enumerate().take(count) {
         let enabled = row_at(list_address, index) + ds2_rva::FE_TOP_MENU_ROW_ENABLED_OFFSET;
@@ -209,21 +404,26 @@ unsafe extern "system" fn detour_apply_states(group: *mut u8, list: *mut u8) {
             continue;
         };
         *slot = value;
-        if value == 0 {
-            mask |= 1 << index;
-            // SAFETY: the byte was just read without faulting, and this writes the same field the
-            // builder writes at `0x1400f437b`, with a value that field already takes.
-            unsafe { (enabled as *mut u8).write(1) };
+        if value != 0 {
+            continue;
         }
+        unavailable |= 1 << index;
+        if ds2_rva::FE_TOP_MENU_FORCE_SHOWN_ROWS & (1 << index) == 0 {
+            continue;
+        }
+        forced |= 1 << index;
+        // SAFETY: the byte was just read without faulting, and this writes the same field the
+        // builder writes at `0x1400f437b`, with a value that field already takes.
+        unsafe { (enabled as *mut u8).write(1) };
     }
-    UNAVAILABLE_ROWS.store(mask, Ordering::Release);
+    UNAVAILABLE_ROWS.store(forced, Ordering::Release);
     ROW_COUNT.store(count, Ordering::Release);
 
     unsafe { original(group, list) };
 
     // Put the buffer back the way it was handed over.
     for (index, slot) in saved.iter().enumerate().take(count) {
-        if mask & (1 << index) == 0 {
+        if forced & (1 << index) == 0 {
             continue;
         }
         let enabled = row_at(list_address, index) + ds2_rva::FE_TOP_MENU_ROW_ENABLED_OFFSET;
@@ -237,16 +437,27 @@ unsafe extern "system" fn detour_apply_states(group: *mut u8, list: *mut u8) {
     // a row this mod made look selectable would be able to fire that row's action.
     let written = unsafe { reassert_unavailable(group) };
     let total = SHOWN.fetch_add(written, Ordering::Relaxed) + written;
+    // The states are settled for this pass, so the looks can follow them straight away rather than
+    // waiting a frame -- which would otherwise show one frame of a row styled as offered.
+    let unselectable = unsafe { unselectable_rows(group, count) };
+    unsafe { apply_looks(group, list, count, unselectable) };
 
-    if LOGGED.swap(1, Ordering::Relaxed) == 0 {
+    if LAST_LOGGED.swap(unavailable, Ordering::Relaxed) != unavailable {
         // The mask is the evidence for what the menu actually decided on this machine: which rows
         // the game would have hidden is the whole reason this feature exists, and a run where the
         // mask is 0 means it changed nothing and would otherwise be indistinguishable from a run
         // where the hook never fired.
+        // The grid coordinates are the point of this line as much as the masks are. Two rows that
+        // report the same (column,row) share a screen slot, and a slot the game only ever puts one
+        // label in is one this mod must not put two in. That is a fact about the layout resource,
+        // which is inside `GameDataEbl.bdt` and cannot be read statically -- but the cells carry
+        // their own coordinates, so it can be measured from here instead of guessed.
         log(format_args!(
-            "{LOG_PREFIX} shown screen=top-menu rows={count} unavailable-mask=0b{mask:06b} \
-             state={} total={total}",
-            ds2_rva::FE_BUTTON_STATE_UNAVAILABLE
+            "{LOG_PREFIX} shown screen=top-menu rows={count} unavailable=0b{unavailable:06b} \
+             forced=0b{forced:06b} allowed=0b{:06b} state={} total={total} grid={}",
+            ds2_rva::FE_TOP_MENU_FORCE_SHOWN_ROWS,
+            ds2_rva::FE_BUTTON_STATE_UNAVAILABLE,
+            unsafe { describe_grid(group, count) }
         ));
     }
 }
@@ -263,8 +474,21 @@ unsafe extern "system" fn detour_top_menu_update(this: *mut u8, delta: f32) {
         let original: UpdateFn = unsafe { std::mem::transmute::<usize, UpdateFn>(trampoline) };
         unsafe { original(this, delta) };
     }
+    unsafe { refresh_looks() };
+}
+
+/// Bring the menu's looks back in line with what can actually be used, from any per-frame site.
+///
+/// Split out of the per-frame detour rather than inlined, so the sequence of reads from the module
+/// base down to the group is stated once.
+///
+/// # Safety
+///
+/// Every hop from the module base to the group is a checked read, and the group is only used if all
+/// of them succeed.
+unsafe fn refresh_looks() {
     let base = MODULE_BASE.load(Ordering::Acquire);
-    if base == 0 || UNAVAILABLE_ROWS.load(Ordering::Acquire) == 0 {
+    if base == 0 {
         return;
     }
     let Some(globals) = (unsafe { safe_read_usize(base + ds2_rva::FE_TITLE_GLOBALS as usize) })
@@ -286,10 +510,49 @@ unsafe extern "system" fn detour_top_menu_update(this: *mut u8, delta: f32) {
     }
     // SAFETY: the group pointer came from the field the scene's own builder writes at
     // `0x1400f4950`, through fault-tolerant reads that all succeeded.
-    let written = unsafe { reassert_unavailable(group as *mut u8) };
+    let group = group as *mut u8;
+    let written = unsafe { reassert_unavailable(group) };
     if written != 0 {
         SHOWN.fetch_add(written, Ordering::Relaxed);
     }
+    let count = ROW_COUNT.load(Ordering::Acquire);
+    if count == 0 {
+        return;
+    }
+    let unselectable = unsafe { unselectable_rows(group, count) };
+    if unselectable == FADED_LOOKS.load(Ordering::Acquire) {
+        return;
+    }
+    let mut list = [0u64; 44];
+    // SAFETY: resolved from the live module base and given a 352-byte 8-aligned buffer, which is
+    // what all four of its own callers pass.
+    let build: BuildRowsFn = unsafe {
+        std::mem::transmute::<usize, BuildRowsFn>(base + ds2_rva::FE_TOP_MENU_BUILD_ROWS as usize)
+    };
+    let list = unsafe { build(list.as_mut_ptr().cast()) };
+    if list.is_null() {
+        return;
+    }
+    unsafe { apply_looks(group, list, count, unselectable) };
+}
+
+/// Play a sequence on a bound proxy's frame control.
+///
+/// # Safety
+///
+/// `proxy` must be a `FrontendEx::SceneObjProxy` the game's binder returned. Both vtable hops are
+/// checked reads, and the call carries the four registers `0x1400f5087` sets.
+unsafe fn play_sequence(proxy: *mut u8, sequence: i32) {
+    let frame_ctrl = unsafe { proxy.add(ds2_rva::FE_SCENE_OBJ_PROXY_FRAME_CTRL) };
+    let Some(vtable) = (unsafe { safe_read_usize(frame_ctrl as usize) }) else {
+        return;
+    };
+    let Some(entry) = (unsafe { safe_read_usize(vtable) }) else {
+        return;
+    };
+    // SAFETY: slot 0 of the frame control's own vtable, read out of a live object.
+    let play: PlaySequenceFn = unsafe { std::mem::transmute::<usize, PlaySequenceFn>(entry) };
+    unsafe { play(frame_ctrl, sequence, 0, 0.0) };
 }
 
 /// What [`install`] managed to do.
