@@ -1486,3 +1486,41 @@ pub const FE_SUBSTATE_FLOOR_ELAPSED: f32 = 2.0;
 /// `0x1aade6c` and `Sleep` is the entry that lands here. There are **13** call sites in the image;
 /// two of them are `Sleep(0)` yield loops and one is the `Sleep(1)` pump above.
 pub const SLEEP_IAT_THUNK: u32 = 0x01aa_e314;
+
+/// The frame limiter: "sleep the rest of this frame, or yield if we are already late".
+/// RVA `0x00feb910`.
+///
+/// # What it does, read from its own body
+///
+/// ```text
+/// now       = timeGetTime()
+/// elapsed   = (now - [this+0x17c]) * 10000
+/// [this+0x174] = moving average of elapsed and the previous frame time
+/// [this+0x178] = elapsed
+/// remaining = [this+0x170]
+/// if (remaining <= 0) tail-call Sleep(0)          ; already late -- yield
+/// else                tail-call Sleep(remaining / 1000)
+/// ```
+///
+/// # Why it is worth counting
+///
+/// The 3.04s engine block asks for 9866 ms of sleep across 3631 `Sleep` calls, and 63% of all
+/// `Sleep` calls in the boot pass `0` -- which is this function's late path. If the block is a loop
+/// advancing a fixed number of steps per frame, then **calls to this function are frames**, and the
+/// count will be the same on every run. That is the measurement that decides whether the engine
+/// block can be attacked by pacing at all, and it must exist before anything tries.
+///
+/// Signature is `void(this)`: RCX in, no other argument read, and both exits are tail-jumps to
+/// `Sleep` so nothing is returned. Not an Arxan redirect -- `scripts/ds2-arxan-chain.py` terminates
+/// at hop 0 on its own prologue, `40 53 48 83 ec 20` (`push rbx; sub rsp,0x20`), which also gives
+/// MinHook six clean bytes to relocate.
+pub const FRAME_LIMITER: u32 = 0x00fe_b910;
+
+/// The simpler sibling of [`FRAME_LIMITER`], and **measured never to be called during boot**.
+///
+/// RVA `0x00feb890`. Same tail -- sleep `[this+0x170]/1000`, or `Sleep(0)` when not positive --
+/// but it skips the clock sample and the moving average entirely, writing a fixed `0x4c4b40` into
+/// `[this+0x178]` instead. It was instrumented first on the strength of that shared tail and the
+/// counter read **zero** across a whole boot, which is what moved the instrument to `0x00feb910`.
+/// Recorded so the next person does not spend the same run finding out.
+pub const FRAME_LIMITER_RESET: u32 = 0x00fe_b890;

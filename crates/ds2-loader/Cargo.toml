@@ -27,11 +27,13 @@ crate-type = ["cdylib"]
 # rule simple: a host build of this crate produces an empty cdylib instead of a link error, so
 # `scripts/check.sh --host-tests` stays runnable for the crates that are host-testable.
 #
-# `default-features = false` comes from the workspace entry, so `disabler` is named explicitly
-# and `rayon` -- dearxan's other default feature -- stays off: the stub analysis then runs
-# single-threaded. That is a smaller dependency tree for the same result, and the cost is
-# unmeasured startup time rather than correctness. Turn it on if a real run shows the analysis
-# is slow; do not turn it on on a guess.
+# `default-features = false` comes from the workspace entry, so both features are named
+# explicitly. `rayon` was OFF here for exactly as long as its cost was unmeasured, with a note
+# saying to turn it on if a real run showed the analysis was slow and not to turn it on on a
+# guess. A real run showed it: `ds2-boot-timeline` brackets `neuter_arxan` with milestones and
+# measured it at 284.9ms, 4.2% of a 6.8s boot, single-threaded. That is the condition the note
+# set, so it is on -- and the two milestones stay in place so the next person can see whether it
+# is still earning its dependency tree rather than taking this comment's word for it.
 #
 # `ds2-hook` and `ds2-rva` arrived with the M1 Arxan probe (`src/arxan_probe.rs`) and are the
 # reason this crate is no longer game-knowledge-free. `ds2-hook` brings the vendored MinHook C
@@ -60,7 +62,7 @@ ds2-intro-skip.workspace = true
 ds2-boot-timeline.workspace = true
 ds2-hotkey-config.workspace = true
 ds2-rva.workspace = true
-dearxan = { workspace = true, features = ["disabler"] }
+dearxan = { workspace = true, features = ["disabler", "rayon"] }
 
 [lints]
 workspace = true

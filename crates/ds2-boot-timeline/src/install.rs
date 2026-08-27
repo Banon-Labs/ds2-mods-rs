@@ -91,8 +91,10 @@ pub fn mark(label: &'static str) {
     if FLUSHED.load(Ordering::Acquire) != 0 {
         let (calls, ms) = sleep_totals();
         log(format_args!(
-            "{LOG_PREFIX} milestone label={label} t={:.3}ms sleep-calls={calls} sleep-ms={ms}",
-            at_us as f64 / 1000.0
+            "{LOG_PREFIX} milestone label={label} t={:.3}ms sleep-calls={calls} sleep-ms={ms} \
+             frames={}",
+            at_us as f64 / 1000.0,
+            FRAMES.load(Ordering::Relaxed)
         ));
         return;
     }
@@ -247,6 +249,31 @@ unsafe fn hook_sleep_import(base: usize) -> bool {
     true
 }
 
+// ============================================================================================
+// FRAME COUNTING. If the engine block advances a fixed number of steps per frame, then calls to
+// the frame limiter ARE frames, and the count is the same every run. That is the one measurement
+// standing between "the boot is sleeping" (known) and "the boot is paced, so pacing is the lever"
+// (assumed).
+// ============================================================================================
+
+static FRAMES: AtomicU64 = AtomicU64::new(0);
+static FRAME_LIMITER_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
+
+/// `void(this)` -- RCX in, no other argument read, and both exits tail-jump to `Sleep`.
+type FrameLimiterFn = unsafe extern "system" fn(*mut u8);
+
+unsafe extern "system" fn detour_frame_limiter(this: *mut u8) {
+    FRAMES.fetch_add(1, Ordering::Relaxed);
+    let trampoline = FRAME_LIMITER_TRAMPOLINE.load(Ordering::Acquire);
+    if trampoline != 0 {
+        // SAFETY: MinHook published this trampoline for this site, and the signature is the one the
+        // function's own body establishes.
+        let original: FrameLimiterFn =
+            unsafe { std::mem::transmute::<usize, FrameLimiterFn>(trampoline) };
+        unsafe { original(this) };
+    }
+}
+
 /// `sleep0=..` etc, for the lines that report a breakdown.
 fn sleep_histogram() -> [u64; 5] {
     std::array::from_fn(|i| SLEEP_BUCKETS[i].load(Ordering::Relaxed))
@@ -358,16 +385,18 @@ fn on_enter(id: u32, pending: i32) {
     let (calls, ms) = sleep_totals();
     log(format_args!(
         "{LOG_PREFIX} enter seq={seq} id=0x{id:02x} t={:.3}ms pending={pending} \
-         sleep-calls={calls} sleep-ms={ms}",
-        at_us as f64 / 1000.0
+         sleep-calls={calls} sleep-ms={ms} frames={}",
+        at_us as f64 / 1000.0,
+        FRAMES.load(Ordering::Relaxed)
     ));
     if id == ds2_rva::FE_SUBSTATE_ID_TITLE_TOP_MENU {
         let (calls, ms) = sleep_totals();
         let h = sleep_histogram();
         log(format_args!(
             "{LOG_PREFIX} boot-complete reached=top-menu t={:.3}ms sleep-calls={calls} \
-             sleep-ms={ms} sleep0={} sleep1={} sleep2-9={} sleep10={} sleep-gt10={}",
+             sleep-ms={ms} frames={} sleep0={} sleep1={} sleep2-9={} sleep10={} sleep-gt10={}",
             at_us as f64 / 1000.0,
+            FRAMES.load(Ordering::Relaxed),
             h[0],
             h[1],
             h[2],
@@ -635,12 +664,18 @@ pub struct Outcome {
 /// Arxan callback. Both sites were checked with `scripts/ds2-arxan-chain.py` and are ordinary
 /// prologues, not Arxan redirects.
 pub unsafe fn install() -> Outcome {
-    let sites: [Site; 2] = [
+    let sites: [Site; 3] = [
         Site {
             name: "flow-update",
             rva: ds2_rva::FE_STATE_FLOW_UPDATE,
             detour: detour_flow_update as *mut c_void,
             trampoline: &FLOW_UPDATE_TRAMPOLINE,
+        },
+        Site {
+            name: "frame-limiter",
+            rva: ds2_rva::FRAME_LIMITER,
+            detour: detour_frame_limiter as *mut c_void,
+            trampoline: &FRAME_LIMITER_TRAMPOLINE,
         },
         Site {
             name: "drop-transitions",

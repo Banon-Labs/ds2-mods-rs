@@ -745,6 +745,64 @@ steps per frame during init, or a higher frame cap while the title flow is still
 larger changes than anything in this document so far, and neither should be attempted before the
 frame count is on the table.
 
+## The two small fixes: one landed, one hypothesis died
+
+### `neuter_arxan` with `rayon`: ~55 ms, and the manifest had already called it
+
+`crates/ds2-loader/Cargo.toml` carried a note saying `rayon` was off because its cost was
+unmeasured, and to turn it on *if a real run showed the analysis was slow, not on a guess*. The
+milestones supplied the run.
+
+| | without `rayon` | with |
+| --- | --- | --- |
+| `neuter_arxan` | 284.9 / 290.0 / 288.0 ms | **224.0 / 240.1 ms** |
+
+**~55 ms, about 19% of our own overhead**, for one word in a manifest. The two milestones stay in
+place so the next person can check whether it still earns its dependency tree rather than taking
+this table's word for it.
+
+### The frame-limiter hypothesis is dead
+
+`0x140feb910` really is a frame limiter — it samples `timeGetTime`, keeps a moving average of frame
+time in `[this+0x174]`, and sleeps the remainder or yields. Its sibling `0x140feb890` shares the
+tail without the clock. Both were hooked and counted across a whole boot:
+
+```
+frames=0
+```
+
+**Neither is called during startup.** Whatever produces the 3.6k sleeps in the engine block, it is
+not these, and "the boot is frame-paced, so raise the cap" has no evidence behind it. That idea
+should not be acted on, and the two constants are kept in `ds2-rva` — one of them explicitly marked
+as measured-never-to-fire — so the next attempt does not spend a run rediscovering it.
+
+### What replaced it is a better clue
+
+`Sleep(0)` counts across three consecutive boots:
+
+```
+run A  sleep0=2523   sleep1=626
+run B  sleep0=2523   sleep1=624
+run C  sleep0=2523   sleep1=612
+```
+
+**2523 exactly, three times.** The `Sleep(1)` count drifts with timing the way anything time-driven
+does; the `Sleep(0)` count does not move at all. That is not pacing — a paced loop's iteration count
+follows the clock. It is a **fixed-iteration loop yielding a fixed number of times**, and a fixed
+count is a far better thing to chase than a rate: it is countable, it is attributable, and something
+in the boot does exactly 2523 of something.
+
+The instrument that would name it is the one this measurement now justifies: capture the **return
+address** in the `Sleep` detour and bucket by caller. All thirteen call sites share one IAT slot, so
+totals cannot separate them, but a return address can.
+
+### A note on the noise floor
+
+Boot to top menu across the last three runs: 5765.7, 5803.7 and 6113.4 ms. **±300 ms**, so any
+future saving smaller than that needs more than one run before it is believed. The 875 ms floor lift
+cleared that bar comfortably; the 55 ms `rayon` saving does not, and is quoted here on the strength
+of the bracketed milestone rather than the boot total.
+
 ## The caveat that governs every address here
 
 These come from the deobfuscated image, which is not the byte stream that runs. Vtables and the
