@@ -1,0 +1,15 @@
+[package]
+name = "ds2-boot-timeline"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+ds2-game-base.workspace = true
+ds2-hook.workspace = true
+ds2-rva.workspace = true
+
+[lints]
+workspace = true

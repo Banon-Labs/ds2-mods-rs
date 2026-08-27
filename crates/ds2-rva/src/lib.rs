@@ -1252,3 +1252,279 @@ pub const FE_TOP_MENU_BUILD_CELL: u32 = 0x000f_36b0;
 /// The earlier reading of this argument as an absolute timeline position is what made `103.0` look
 /// like the obvious value; it is off by the sequence's own start every time.
 pub const FE_TOP_MENU_SEQUENCE_FADED_SEEK: f32 = 14.0;
+
+// ============================================================================================
+// THE TITLE STATE MACHINE ITSELF -- `FeStateFlow`, its resident substate, and the id space.
+//
+// Everything above this line names a specific substate or a specific screen. These name the
+// MACHINE, which is why they are grouped: they are what `ds2-boot-timeline` needs in order to
+// instrument every step without knowing any step's name, and what a loading bar would be driven
+// from. See `docs/DS2-BOOT-WORK.md` for the trace and the full boot chain.
+// ============================================================================================
+
+/// `FeStateFlow::update` -- the dispatcher that drives the resident substate. RVA `0x00104540`.
+///
+/// # How it was established
+///
+/// `FeOperatorTitle::v4`'s phase-4 branch calls it at `0x1400ef42b` with `RCX = [operator+0x38]`,
+/// and the body is unambiguous about what that object is: it reads the resident substate from
+/// `+0x10`, calls `[[resident]+0x18]` (`update`) with the frame delta, and on a transition calls
+/// `[[resident]+0x30]` (`v6`, drop transitions), `[[resident]+0x10]` (`leave`), then
+/// `[[next]+0x08]` (`enter`) and `[[next]+0x28]` (`v5`, publish transitions). It is not an Arxan
+/// redirect -- `scripts/ds2-arxan-chain.py` terminates at hop 0 with the prologue
+/// `40 53 48 83 ec 30` (`push rbx; sub rsp,0x30`) at the entry.
+///
+/// # Its signature is two arguments, and that is read rather than assumed
+///
+/// `this` in RCX and the frame delta in XMM1. Every other register the body uses it loads from the
+/// object first -- `mov rdx,[rbx+0x28]`, `mov r8,[rbx+0x30]` -- so there is no third argument a
+/// detour could clobber by using the register as scratch. The float rules out `ds2-hook`'s union,
+/// whose shared signature is four integers.
+pub const FE_STATE_FLOW_UPDATE: u32 = 0x0010_4540;
+
+/// `FeSubStateBase::v6` -- "drop the transitions I published". RVA `0x001043a0`.
+///
+/// The flow calls this on the outgoing substate immediately before `leave`, on both of its
+/// transition paths (`0x140104584` and `0x1401046a9`). **Checked against all 36 `FeSubState*`
+/// vtables: not one overrides slot 6.** That is what makes this single address every departure in
+/// the game, and it is the reason `ds2-boot-timeline` can see steps a per-class hook would miss --
+/// the failure `ds2-dialog-skip` already hit once with `FeSubStateTitleInformation`, which shows
+/// its wait window from `update` rather than `enter`.
+///
+/// Not an Arxan redirect: `scripts/ds2-arxan-chain.py` terminates at hop 0 with the prologue
+/// `48 89 6c 24 18 57 41 56` at the entry.
+///
+/// Its arguments are `(this, transitions, context)`, all integer -- taken from the two call sites,
+/// which both set RDX from `[flow+0x28]` and R8 from `[flow+0x30]`.
+pub const FE_SUBSTATE_DROP_TRANSITIONS: u32 = 0x0010_43a0;
+
+/// Offset of the resident substate pointer in `FeStateFlow`.
+///
+/// Read at `0x1401045e3` (`mov rcx,[rbx+0x10]`) before the resident's `update`, and written at
+/// `0x1401046bf` (`mov [rbx+0x10],rdi`) when a transition is taken.
+pub const FE_STATE_FLOW_RESIDENT_SUBSTATE_OFFSET: usize = 0x10;
+
+/// Offset of the substate list in `FeStateFlow` -- the `TMenuStateBaseList<FeSubStateBase, 0x58>`
+/// that `FeStateTitle::v6` fills with 64 substates.
+///
+/// Read at `0x140104658` (`mov rdx,[rbx+0x20]`), immediately before the loop that searches it for
+/// the requested id.
+pub const FE_STATE_FLOW_SUBSTATE_LIST_OFFSET: usize = 0x20;
+
+/// Offset of the pending-request id in `FeStateFlow`: the substate an outside caller has asked the
+/// flow to move to, or `-1` for none.
+///
+/// `FeOperatorTitle::v4` writes `0x17` here at `0x1400ef3e4` to return to the title screen. The
+/// flow compares it against zero as a **signed** value at `0x140104633` and writes `-1` at
+/// `0x140104649` once it has been consumed, which is what fixes the type as `i32`.
+pub const FE_STATE_FLOW_PENDING_ID_OFFSET: usize = 0x48;
+
+/// Offset of the entry count in the substate list. Entries themselves start at `+0x08`.
+///
+/// Read at `0x140104661` (`movsxd r10,[rdx+0x2c8]`) to bound the transition search, and
+/// incremented by `FeStateTitle::v6` once per substate it appends.
+pub const FE_SUBSTATE_LIST_COUNT_OFFSET: usize = 0x2c8;
+
+/// Offset of a substate's own id.
+///
+/// **This is the game's id, not a label this repo invented.** `FeStateFlow`'s transition search
+/// compares this exact field against the requested id at `0x14010467f`
+/// (`cmp [rdi+0xc],esi`), and every substate constructor writes it -- as a literal
+/// (`FeSubStateTitleMain` writes `0x17`) or from `EDX` at the call site (the four
+/// `FeSubStateTitleLogo` instances get `0x13` through `0x16`).
+///
+/// It is the same field `FE_DIALOG_KIND_OFFSET` and `FE_PROCESS_WINDOW_KIND_OFFSET` already name
+/// at `0x0c` for their own classes, and the `kind=57` / `kind=70` those two log on a real boot are
+/// `0x39 FeSubStateTitleGameServerLogin` and the message box built beside
+/// `0x44 FeSubStateTitleInformation` -- which is the runtime evidence that this id space is right.
+pub const FE_SUBSTATE_ID_OFFSET: usize = 0x0c;
+
+/// Id of `FeSubStateTitleTopMenu` -- the end of the boot chain, and the screen "Continue" is on.
+///
+/// Written as the literal `0x47` by its constructor at `0x1400fd65d`
+/// (`mov QWORD PTR [rcx+0xc],0x47`), and corroborated by `FeSubStateTitleOptionGame`'s transition
+/// table, whose phase-4 edge names `0x47` as its destination.
+pub const FE_SUBSTATE_ID_TITLE_TOP_MENU: u32 = 0x47;
+
+// ============================================================================================
+// THE TWO STATE WORDS BEHIND THE ONE-SECOND FLOORS (`ds2-mods-rs-wxl`).
+//
+// 0x05 SteamLoadSystemData and 0x44 Information each take ~1.01s, reproducibly to within 2ms
+// across runs, which is a clock rather than work. Their own `update` functions contain no
+// threshold, and no sleep or wait import is called from anywhere in `SaveLoad2`. So the question
+// is which side of the boundary the second is spent on: the substate polling a service that
+// finished long ago, or the service genuinely taking a second.
+//
+// These are the fields that answer it. Both are read once per frame while their substate is
+// resident, and only a CHANGE is logged.
+// ============================================================================================
+
+/// `GameManagerImp`, the root singleton most engine services hang off. RVA `0x016148f0`.
+///
+/// Every process-window substate reaches its backend through this: `[+0xb8]` is the storage
+/// service, `[+0x22f0]` the network service, `[+0x22e0]` the window system, `[+0xa8]` the object
+/// holding the savedata block at its own `+0xd8`.
+pub const GAME_MANAGER_IMP: u32 = 0x0161_48f0;
+
+/// Offset of `SaveLoadSystem` in [`GAME_MANAGER_IMP`].
+///
+/// Read at `0x1400fc3f7` (`mov rbp,[rdx+0xb8]`) in `SaveSystemData`'s enter and at `0x1400fb004`
+/// in `SteamLoadSystemData`'s, among others.
+pub const SAVE_LOAD_SYSTEM_OFFSET: usize = 0xb8;
+
+/// `SaveLoadSystem`'s request state word.
+///
+/// **This is the interlock.** Every start entry point refuses while it is non-zero
+/// (`0x1402e72c0` and `0x1402e7170` both open `if ([this+0x08] != 0 || [this+0x0c] != 0) return
+/// false`), and both pollers gate on it: `0x1402e6230` accepts `{2, 4}`, `0x1402e67f0` tests
+/// `bt 0x6a` for `{1, 3, 5, 6}`. If it flips out of "working" long before
+/// `0x05 SteamLoadSystemData` advances, the floor is in the substate; if it stays put for the full
+/// second, the floor is below, in `SaveLoad2`.
+pub const SAVE_LOAD_SYSTEM_STATE_OFFSET: usize = 0x08;
+
+/// The second half of the same interlock, checked alongside [`SAVE_LOAD_SYSTEM_STATE_OFFSET`].
+pub const SAVE_LOAD_SYSTEM_SUBSTATE_OFFSET: usize = 0x0c;
+
+/// The title context singleton. RVA `0x0160de10`.
+///
+/// `[+0x80]` is `FeSceneTitle`, `[+0xa0]` the information job below, `[+0x568]` the skip flag the
+/// boot screens share, `[+0x54c]`/`[+0x558]`/`[+0x55c]`/`[+0x560]` result codes the substates
+/// publish.
+pub const FE_TITLE_CONTEXT: u32 = 0x0160_de10;
+
+/// Offset of the information-download job in [`FE_TITLE_CONTEXT`].
+///
+/// Read at `0x1400ff787` (`mov rbx,[rax+0xa0]`) in `FeSubStateTitleInformation::v3`'s phase-4
+/// branch, which ticks it through `[[job]+0x20]` and then tests the field below.
+pub const FE_TITLE_INFORMATION_JOB_OFFSET: usize = 0xa0;
+
+/// The information job's own state, the value `0x44 Information` is waiting on.
+///
+/// Read at `0x1400ff797` (`mov eax,[rbx+0x18]`) and compared against `5` then `6`; either sends
+/// the substate to its terminal phase. Watching it says whether the job finishes early and the
+/// substate sits on the result, or the job itself takes the second.
+pub const FE_INFORMATION_JOB_STATE_OFFSET: usize = 0x18;
+
+// ============================================================================================
+// THE ONE-SECOND FLOORS, LOCATED (`ds2-mods-rs-wxl`). Predicted ~1.86s; MEASURED 875ms.
+//
+// Lifting both floors moved only `0x05`. `0x44` turned out to be sitting on a download job that
+// always fails, not on this timer -- `ds2-mods-rs-umo` -- and the addresses below are what proved
+// it. They are correct as read; it was the price on them that was wrong.
+//
+// Two substates that are NOT `FeSubStateProcessWindowBase` subclasses -- so `ds2-dialog-skip`'s
+// min-duration zeroing never reached them -- each hold their own elapsed timer and compare it
+// against the SAME float, `0x1410ac698`, which is `1.0f`.
+//
+// Measured, run 6: `0x05` reaches phase 4 at t=4115.9ms and does not leave it until t=4994.9ms --
+// 879ms. `0x44` reaches phase 2 at t=5676.4ms and does not leave until t=6661.4ms -- 985ms. In
+// both cases the work they were waiting for had already finished.
+//
+// DO NOT PATCH THE CONSTANT. `0x1410ac698` has 2042 RIP-relative references from 1548 functions:
+// it is MSVC's pooled `1.0f` literal for the whole image, not a tunable belonging to these two.
+// The fix is to advance each substate's OWN elapsed field so the game's own comparison passes,
+// which is the same shape as the existing min-duration zeroing and leaves both the comparison and
+// the transition the game's.
+// ============================================================================================
+
+/// `FeSubStateTitleSteamLoadSystemData::v1` -- its `enter`. RVA `0x000faff0`.
+///
+/// Starts the system-data load through `SaveLoadSystem` (`0x1402e72c0`), shows a process window,
+/// and sets phase 1. Measured: the storage work is finished 88ms later; the substate then spends
+/// 879ms in phase 4 waiting on the floor below.
+pub const FE_SUBSTATE_STEAM_LOAD_SYSTEM_DATA_ENTER: u32 = 0x000f_aff0;
+
+/// Its elapsed timer, a `f32`.
+///
+/// Zeroed by the constructor at `0x1400fab66`. Accumulated in phases 1 and 2 without ever being
+/// compared, and compared in **phase 4** at `0x1400fc13e`:
+/// `addss xmm6,[rdi+0x18]; comiss xmm6,[0x1410ac698]; jb return`.
+pub const FE_SUBSTATE_STEAM_LOAD_SYSTEM_DATA_ELAPSED_OFFSET: usize = 0x18;
+
+/// `FeSubStateTitleInformation::v1` -- its `enter`. RVA `0x000ff570`.
+pub const FE_SUBSTATE_TITLE_INFORMATION_ENTER: u32 = 0x000f_f570;
+
+/// Its elapsed timer, a `f32`, at `+0x5a24` of a `0x5a30`-byte object.
+///
+/// Compared in **phase 2** at `0x1400ff9b7`, and reset to zero on the way out at `0x1400ff9d7`.
+///
+/// **Phase 2 waits on two things, and only one of them is the floor**:
+/// ```text
+/// elapsed += delta
+/// if ([r14]->vtable[0x28]()) return;         // the job is still running -- REAL work
+/// if (elapsed < 1.0f)        return;         // the floor
+/// close the window; phase = 3
+/// ```
+/// Advancing the timer therefore removes the floor and leaves the job wait entirely intact, which
+/// is the whole reason this is safe to do.
+pub const FE_SUBSTATE_TITLE_INFORMATION_ELAPSED_OFFSET: usize = 0x5a24;
+
+/// What to write into either elapsed field so the game's own `comiss` passes on the first frame.
+///
+/// `1.0f` exactly would leave `comiss` at equality, and the branch is `jb` -- below, not
+/// below-or-equal -- so equality already passes. A slightly larger value is used anyway so that a
+/// frame delta being added before the comparison cannot matter, and so the intent is legible: this
+/// is "the minimum display time has elapsed", not "the timer is exactly at the threshold".
+pub const FE_SUBSTATE_FLOOR_ELAPSED: f32 = 2.0;
+
+/// The import thunk `DarkSoulsII.exe` calls `KERNEL32!Sleep` through. RVA `0x01aae314`.
+///
+/// # Why an IAT slot rather than the function
+///
+/// The engine block -- 3.06s between input initialisation and the title flow -- reproduces to
+/// 0.67%, reads nothing from disk after an early burst, and never exceeds half of one core. That
+/// combination is the signature of sleeping, not of working, and the binary has a candidate: a
+/// `PeekMessageW` / `Sleep(1)` / check-a-flag loop at `0x140fecdd6` that spins until `[rbx+0x11c]`
+/// clears. Three seconds of that is about three thousand iterations.
+///
+/// Counting the game's `Sleep` calls tests it directly, and patching **the IAT slot** rather than
+/// `KERNEL32!Sleep` itself is what keeps the test cheap and honest: it is a pointer write in
+/// `.idata`, so no code is modified, Arxan's `.text` integrity checks have nothing to see, and only
+/// this executable's calls are counted rather than every module in the process.
+///
+/// `Sleep` is `void Sleep(DWORD)` -- one integer argument, no stack arguments, no return value --
+/// which is why this one can be fronted from Rust with an ordinary `extern "system"` function and
+/// needs none of the naked-thunk machinery a ten-argument import like `D3D11CreateDevice` would.
+///
+/// Established by walking the import descriptors: `KERNEL32.dll`'s `FirstThunk` is at RVA
+/// `0x1aade6c` and `Sleep` is the entry that lands here. There are **13** call sites in the image;
+/// two of them are `Sleep(0)` yield loops and one is the `Sleep(1)` pump above.
+pub const SLEEP_IAT_THUNK: u32 = 0x01aa_e314;
+
+/// The frame limiter: "sleep the rest of this frame, or yield if we are already late".
+/// RVA `0x00feb910`.
+///
+/// # What it does, read from its own body
+///
+/// ```text
+/// now       = timeGetTime()
+/// elapsed   = (now - [this+0x17c]) * 10000
+/// [this+0x174] = moving average of elapsed and the previous frame time
+/// [this+0x178] = elapsed
+/// remaining = [this+0x170]
+/// if (remaining <= 0) tail-call Sleep(0)          ; already late -- yield
+/// else                tail-call Sleep(remaining / 1000)
+/// ```
+///
+/// # Why it is worth counting
+///
+/// The 3.04s engine block asks for 9866 ms of sleep across 3631 `Sleep` calls, and 63% of all
+/// `Sleep` calls in the boot pass `0` -- which is this function's late path. If the block is a loop
+/// advancing a fixed number of steps per frame, then **calls to this function are frames**, and the
+/// count will be the same on every run. That is the measurement that decides whether the engine
+/// block can be attacked by pacing at all, and it must exist before anything tries.
+///
+/// Signature is `void(this)`: RCX in, no other argument read, and both exits are tail-jumps to
+/// `Sleep` so nothing is returned. Not an Arxan redirect -- `scripts/ds2-arxan-chain.py` terminates
+/// at hop 0 on its own prologue, `40 53 48 83 ec 20` (`push rbx; sub rsp,0x20`), which also gives
+/// MinHook six clean bytes to relocate.
+pub const FRAME_LIMITER: u32 = 0x00fe_b910;
+
+/// The simpler sibling of [`FRAME_LIMITER`], and **measured never to be called during boot**.
+///
+/// RVA `0x00feb890`. Same tail -- sleep `[this+0x170]/1000`, or `Sleep(0)` when not positive --
+/// but it skips the clock sample and the moving average entirely, writing a fixed `0x4c4b40` into
+/// `[this+0x178]` instead. It was instrumented first on the strength of that shared tail and the
+/// counter read **zero** across a whole boot, which is what moved the instrument to `0x00feb910`.
+/// Recorded so the next person does not spend the same run finding out.
+pub const FRAME_LIMITER_RESET: u32 = 0x00fe_b890;
