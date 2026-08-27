@@ -1,0 +1,30 @@
+# Hotkey bindings that a player can NAME in a DLL's own `.toml`, and that take effect while
+# the game is running.
+#
+# This crate is ported ahead of every mod in this repo on purpose. In the sibling Elden Ring
+# workspace it had to be EXTRACTED, after a DLL that polled a hard-coded `VK_F7` every frame
+# collided with a second mod that had taken the same default and warped a live session on a
+# keypress meant for the other one -- with no config key on either side to move. Landing the
+# vocabulary and the reload decision before the first DS2 mod exists is how that stays a story
+# about a different repo.
+#
+# Host-buildable and game-free on purpose. There is no `windows` dependency and no `cfg(windows)`
+# gate anywhere in this crate: the key table, the parser and the reload decision are the parts
+# worth proving, and `cargo test` on Linux must be able to reach all three.
+[package]
+name = "ds2-hotkey-config"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "ds2_hotkey_config"
+
+[dependencies]
+
+# Lint parity with the root `[workspace.lints]`: stock rustc + clippy lint set, denied. No
+# `# DEBT:` allows -- this crate is plain data and text handling.
+[lints]
+workspace = true
