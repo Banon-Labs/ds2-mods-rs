@@ -1,0 +1,35 @@
+[package]
+name = "ds2-game-base"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "ds2_game_base"
+
+# Tier A (default) is ZERO external deps: fault-safe RAM readers, module base / RVA resolution,
+# FNV-1a fingerprints, one blocking WinHTTP request and a parameterized append-only logger, all
+# implemented over raw `#[link(name = "...")]` externs so the cross-compile stays lean.
+#
+# Tier B (`game-types`) is the seam where typed game bindings would be re-exported, so the heavy
+# consumers share one import surface. IT IS EMPTY AND HAS NO DEPENDENCIES, because there is
+# nothing to re-export: `../fromsoftware-rs` has `shared`, `shared/stl`, `darksouls3`,
+# `eldenring`, `nightreign` and `sekiro` members and no `darksouls2`. The feature exists so the
+# tier split is declared rather than invented later; adding a dep here is what "DS2 bindings
+# exist" will look like.
+[features]
+default = []
+game-types = []
+
+# NOT a dependency of this crate, deliberately, and this is the whole design:
+#
+#   ds2-game-base -/-> ds2-rva
+#
+# `ds2-rva` is the only crate permitted to hold a DS2 address. Because nothing here can reach it,
+# nothing here can grow an offset, a struct layout or a field ordering by accident -- the boundary
+# is enforced by cargo rather than by whoever reviews the next patch. Do not add it.
+
+[lints]
+workspace = true
