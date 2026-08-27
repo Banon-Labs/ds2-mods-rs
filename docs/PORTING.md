@@ -67,7 +67,8 @@ same as "it has no game knowledge."** Read the constants, not just the manifest.
 | `fnv1a.rs` | 82 | Ports — fingerprints. |
 | `rva.rs` | 283 | **Does not port.** ER 1.16.2 singleton table. Replaced by `ds2-rva`, empty. |
 | `filecap.rs` | 305 | **Does not port.** `FD4FileCap` / `DLString<wchar_t>` / DLIO virtual roots — FD4 postdates this engine. |
-| `pgd.rs`, `profile_summary.rs`, `build_id.rs` | 927 | **Does not port.** ER save and profile layouts. |
+| `pgd.rs`, `profile_summary.rs` | 247 | **Does not port.** ER save and profile layouts. |
+| `build_id.rs` | 680 | **Does not port** — though not for the reason first recorded here. It is a *build watermark* (git sha via `build.rs`, PE timestamp, module enumeration), not a save layout. Its first half is genuinely generic; its second half carries ER release-tag and roster specifics, and the whole thing needs a `build.rs`. Revisit if a DS2 watermark is ever wanted. |
 
 Keep er-game-base's tier split: tier A zero-dep, tier B behind a `game-types` feature. Tier B
 stays empty here until DS2 bindings exist.
@@ -119,3 +120,22 @@ stays empty here until DS2 bindings exist.
 Do not port an Elden Ring offset, structure layout, or field ordering into this repo on the
 strength of it being right in Elden Ring. Derive it from the DS2 binary and record where it
 came from. The substrate is shared; the game is not.
+
+## Constants carry game knowledge too
+
+Two of the three wave-0 ports found Elden Ring facts hiding in code that this document had
+called generic. Both were found by reading the constants, not the manifest:
+
+- **`er-hook`** — `PRODUCT_DLL_NAME` / `UNION_REGISTER_EXPORT` were `b"er_quickload.dll\0"` and
+  `b"er_effects_union_register\0"`. A crate with an empty `[dependencies]` still named an
+  Elden Ring product DLL in its code. Now a caller-supplied parameter.
+- **`er-game-base::mem::vtable_in_game_image`** — bounded pointers against a hardcoded
+  `0x3000000` image span. That is an **Elden Ring measurement**. DS2's `SizeOfImage` is
+  `0x01d7_6000` — about 19 MB smaller — so the function ported unchanged would have accepted
+  pointers well past the end of the DS2 image and reported them as in-bounds. It is replaced by
+  `ptr_in_module(ptr, base, size_of_image)` plus `module_image_size()`, which reads the real
+  `SizeOfImage` out of the loaded PE headers. Derived, not assumed.
+
+The second one is the shape of failure to watch for through the whole port: not a compile error,
+not a crash, but a bound that is quietly 60% too large and a validity check that returns `true`
+for garbage. Nothing about it looks wrong on the page.
