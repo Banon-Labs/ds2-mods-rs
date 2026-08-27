@@ -839,7 +839,7 @@ def config_text(
     probe: str,
     fault_after_ms: int = NO_FAULT_MS,
     site: str = "m1",
-    intro_skip: bool = False,
+    intro_skip: bool = True,
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
@@ -889,9 +889,11 @@ def config_text(
 # STARTUP-ONLY. Detours the `enter` of the three boot substates -- FeSubStateWarningNoCopy,
 # FeSubStateTitleLogo, FeSubStateTitleUserPolicy -- and writes each one's terminal phase, which
 # is a transition every one of them already performs on itself under some condition the game
-# knows about. OFF by default: it patches executable memory in three places to change what the
-# player sees at boot, and a mod that does that unasked gets blamed for the next unrelated
-# startup problem.
+# knows about. There are THREE logo screens, not one.
+#
+# ON by default; `--no-intro-skip` writes false. The key exists so that a boot failure can be
+# tested against this feature by editing one line, with no rebuild and nothing to re-stage. A
+# default that cannot be switched off is a default that cannot be ruled out.
 {KEY_INTRO_ENABLED} = {str(intro_skip).lower()}
 
 [{CRASH_SECTION}]
@@ -933,7 +935,7 @@ def write_config(
     probe: str,
     fault_after_ms: int = NO_FAULT_MS,
     site: str = "m1",
-    intro_skip: bool = False,
+    intro_skip: bool = True,
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
@@ -1002,7 +1004,7 @@ def dry_run(
     observe: float,
     fault_after_ms: int = NO_FAULT_MS,
     site: str = "m1",
-    intro_skip: bool = False,
+    intro_skip: bool = True,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
@@ -1079,7 +1081,7 @@ def launch(
     observe: float,
     fault_after_ms: int = NO_FAULT_MS,
     site: str = "m1",
-    intro_skip: bool = False,
+    intro_skip: bool = True,
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
@@ -1516,18 +1518,18 @@ def selftest() -> int:
         "the site defaults to the control, not to the interesting one",
     )
 
-    # THE INTRO SKIP IS OFF UNLESS ASKED FOR. It changes what the player sees at boot by
-    # patching three places in executable memory; defaulting it on would make every unrelated
-    # startup problem this mod's fault by association.
+    # THE INTRO SKIP IS ON BY DEFAULT, AND MUST STILL BE SWITCHABLE. Removing the boot screens is
+    # what the mod is for. The off switch is what keeps it diagnosable: if a run ever fails to
+    # boot, ruling this feature out has to cost one config line, not a rebuild.
     values, _ = parse_config(config_text("off"))
     check(
-        values.get((INTRO_SECTION, KEY_INTRO_ENABLED)) == "false",
-        f"[{INTRO_SECTION}] {KEY_INTRO_ENABLED} defaults to false",
-    )
-    values, _ = parse_config(config_text("off", intro_skip=True))
-    check(
         values.get((INTRO_SECTION, KEY_INTRO_ENABLED)) == "true",
-        f"--intro-skip writes [{INTRO_SECTION}] {KEY_INTRO_ENABLED} = true",
+        f"[{INTRO_SECTION}] {KEY_INTRO_ENABLED} defaults to true",
+    )
+    values, _ = parse_config(config_text("off", intro_skip=False))
+    check(
+        values.get((INTRO_SECTION, KEY_INTRO_ENABLED)) == "false",
+        f"--no-intro-skip writes [{INTRO_SECTION}] {KEY_INTRO_ENABLED} = false",
     )
 
     # THE ARMS MUST DIFFER, and in exactly one key. If two arms ever generated the same file the
@@ -1771,12 +1773,15 @@ def main() -> int:
         help="test the log tailer, the DLL/script contract and the verdict logic",
     )
     parser.add_argument(
-        "--intro-skip",
-        action="store_true",
+        "--no-intro-skip",
+        dest="intro_skip",
+        action="store_false",
+        default=True,
         help=(
-            "skip the boot logo, no-copy warning and user-policy screens by detouring each "
-            "substate's `enter` and writing the terminal phase it already writes itself under "
-            "the game's own skip conditions. Off unless asked for."
+            "leave the boot logo, no-copy warning and user-policy screens in place. They are "
+            "skipped by default, by detouring each substate's `enter` and writing the terminal "
+            "phase it already writes itself under the game's own skip conditions. Pass this to "
+            "rule the feature out when a run fails to boot."
         ),
     )
     parser.add_argument(

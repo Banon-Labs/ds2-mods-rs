@@ -22,11 +22,16 @@ pub struct IntroSkipConfig {
 }
 
 impl Default for IntroSkipConfig {
-    /// **Off.** This patches executable memory in three places to change what the player sees at
-    /// boot, and a mod that does that without being asked is a mod that gets blamed for the next
-    /// unrelated startup problem. `scripts/ds2-run.py` writes the key explicitly on every launch.
+    /// **On.** Removing the boot screens is what this mod is for; making that conditional on a
+    /// flag means the default experience is the one nobody wanted.
+    ///
+    /// It is still a key rather than a constant, and that is the part that matters. This patches
+    /// executable memory in three places during startup, so if a future run fails to boot, the
+    /// first question is whether this is why -- and `enabled = false` answers it by editing one
+    /// line, with no rebuild and no rebuilt DLL to stage. A default that cannot be turned off is
+    /// a default that cannot be ruled out.
     fn default() -> Self {
-        Self { enabled: false }
+        Self { enabled: true }
     }
 }
 
@@ -42,9 +47,10 @@ impl IntroSkipConfig {
         let parsed = KeyValues::parse(&text);
         let enabled = match parsed.get(CONFIG_SECTION, KEY_ENABLED) {
             None => Self::default().enabled,
-            // Strict, and deliberately so: anything that is not exactly `true` or `false` is a
-            // typo, and a typo that reads as `true` would turn the feature on by accident.
-            Some(raw) => matches!(raw.trim().trim_matches('"'), "true"),
+            // Only an exact `false` turns it off. A typo therefore leaves the feature ON, which
+            // is the harmless direction now that on is the default: the failure mode of a
+            // misspelled value is "the mod still works", not "the mod silently stopped".
+            Some(raw) => !matches!(raw.trim().trim_matches('"'), "false"),
         };
         Self { enabled }
     }

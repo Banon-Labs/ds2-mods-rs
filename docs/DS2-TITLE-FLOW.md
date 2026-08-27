@@ -130,7 +130,14 @@ the Arxan set before it is detoured. See `docs/ARXAN-FOOTPRINT.md`.
 
 ## The skip, as built (`ds2-mods-rs-3rr`)
 
-`crates/ds2-intro-skip`, off unless `[intro_skip] enabled = true` or `ds2-run.py --intro-skip`.
+`crates/ds2-intro-skip`, **on by default**. `[intro_skip] enabled = false`, or
+`ds2-run.py --no-intro-skip`, turns it off.
+
+The off switch is the part worth keeping, not the default. This patches executable memory in
+three places during startup, so if a run ever fails to boot, ruling this feature out has to cost
+one edited line rather than a rebuild and a re-stage. A default that cannot be switched off is a
+default that cannot be ruled out. A misspelled value leaves the feature ON, which is the harmless
+direction: only an exact `false` disables it.
 
 It detours each screen's `enter` (vtable slot 1), lets the original run, then writes that class's
 terminal phase. **Every one of the three already has a shipped path where `enter` does exactly
