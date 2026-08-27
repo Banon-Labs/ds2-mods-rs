@@ -398,7 +398,119 @@ pub struct Outcome {
     pub title_sequence_gate: bool,
     /// The title scene is now put into its settled state on the first update.
     pub title_settle: bool,
+    /// How many of the two floor sites were hooked.
+    ///
+    /// A count rather than a bool so a partial install is visible: one floor removed and one left
+    /// turns a 1.86s saving into a 0.88s one, and that should not read as success.
+    pub substate_floors: usize,
 }
+
+// ============================================================================================
+// THE ONE-SECOND FLOORS (`ds2-mods-rs-wxl`). Worth ~1.86s of a 6.7s boot, measured.
+//
+// `FeSubStateTitleSteamLoadSystemData` and `FeSubStateTitleInformation` each keep their own
+// elapsed timer, accumulate the frame delta into it, and refuse to advance until it passes
+// `[0x1410ac698]` -- which is `1.0f`. Run 6 caught both by watching their phase fields: 0x05 sat
+// in phase 4 for 879ms after `SaveLoadSystem` had already gone idle, and 0x44 sat in phase 2 for
+// 985ms.
+//
+// THE CONSTANT IS NOT THE FIX. `0x1410ac698` carries 2042 RIP-relative references from 1548
+// functions -- it is MSVC's pooled `1.0f` for the whole image, not a tunable belonging to these
+// two. What is patched here is each substate's OWN elapsed field, set at `enter` so the game's own
+// `comiss` passes the first time that branch is reached. The comparison and the transition both
+// stay the game's.
+//
+// AND ONLY THE FLOOR GOES. `0x44`'s phase 2 tests two things in order -- the download job first
+// (`call [r14->vtable+0x28]; test al,al; jne return`), the timer second -- so a satisfied timer
+// cannot outrun an unfinished job. `0x05`'s phase 4 is only reachable once the storage service has
+// already reported idle. Neither skips work; both skip waiting.
+// ============================================================================================
+
+/// A substate whose `enter` should leave its elapsed timer already past the floor.
+struct Floor {
+    name: &'static str,
+    enter_rva: u32,
+    /// Offset of the `f32` that class's own branch compares. Travels WITH the address because the
+    /// two are only correct as a pair -- `0x18` on one, `0x5a24` on the other -- and pairing them
+    /// makes a mismatched combination something to construct on purpose rather than fall into.
+    elapsed_offset: usize,
+}
+
+const FLOORS: [Floor; 2] = [
+    Floor {
+        name: "steam-load-system-data",
+        enter_rva: ds2_rva::FE_SUBSTATE_STEAM_LOAD_SYSTEM_DATA_ENTER,
+        elapsed_offset: ds2_rva::FE_SUBSTATE_STEAM_LOAD_SYSTEM_DATA_ELAPSED_OFFSET,
+    },
+    Floor {
+        name: "title-information",
+        enter_rva: ds2_rva::FE_SUBSTATE_TITLE_INFORMATION_ENTER,
+        elapsed_offset: ds2_rva::FE_SUBSTATE_TITLE_INFORMATION_ELAPSED_OFFSET,
+    },
+];
+
+static FLOOR_TRAMPOLINES: [AtomicUsize; FLOORS.len()] =
+    [const { AtomicUsize::new(0) }; FLOORS.len()];
+static FLOOR_FIRED: [AtomicUsize; FLOORS.len()] = [const { AtomicUsize::new(0) }; FLOORS.len()];
+
+/// A substate `enter`: `void enter(this)`, `this` in RCX.
+type FloorEnterFn = unsafe extern "system" fn(*mut u8);
+
+/// Run the original `enter`, then set the elapsed timer past the floor.
+///
+/// AFTER the original, not before. Both classes touch this field around entry -- `0x05`'s
+/// constructor zeroes it and `0x44` resets it to zero on the way out of phase 2 -- so a write
+/// placed first could be overwritten with nothing to say it had been. A floor still in place looks
+/// exactly like a floor that was never hooked, which is the failure this ordering avoids.
+///
+/// # Safety
+///
+/// `this` is the substate being entered; `index` must be a valid index into [`FLOORS`].
+unsafe fn lift_floor(index: usize, this: *mut u8) {
+    let floor = &FLOORS[index];
+    let trampoline = FLOOR_TRAMPOLINES[index].load(Ordering::Acquire);
+    if trampoline != 0 {
+        // SAFETY: MinHook published this trampoline for this site, and the signature is the one
+        // every substate `enter` implements.
+        let original: FloorEnterFn =
+            unsafe { std::mem::transmute::<usize, FloorEnterFn>(trampoline) };
+        unsafe { original(this) };
+    }
+    if this.is_null() {
+        return;
+    }
+    // What the original left, read before it is overwritten. If this is ever not 0 the field is
+    // not what this crate believes it is, and the log is where that shows up -- rather than in a
+    // boot that mysteriously failed to get faster.
+    // SAFETY: the original has just run against this pointer, so the object is live and at least
+    // as large as the field the game itself writes at this offset.
+    let left_by_original = unsafe { this.add(floor.elapsed_offset).cast::<f32>().read() };
+    // SAFETY: same object, same field, read successfully immediately above.
+    unsafe {
+        this.add(floor.elapsed_offset)
+            .cast::<f32>()
+            .write(ds2_rva::FE_SUBSTATE_FLOOR_ELAPSED);
+    }
+    let n = FLOOR_FIRED[index].fetch_add(1, Ordering::Relaxed) + 1;
+    log(format_args!(
+        "{LOG_PREFIX} floor-lifted screen={} elapsed-offset=0x{:x} was={left_by_original} now={} \
+         count={n}",
+        floor.name,
+        floor.elapsed_offset,
+        ds2_rva::FE_SUBSTATE_FLOOR_ELAPSED,
+    ));
+}
+
+// One detour per site: MinHook gives a detour no way to learn which site reached it.
+unsafe extern "system" fn detour_floor_steam_load(this: *mut u8) {
+    unsafe { lift_floor(0, this) }
+}
+unsafe extern "system" fn detour_floor_information(this: *mut u8) {
+    unsafe { lift_floor(1, this) }
+}
+
+const FLOOR_DETOURS: [FloorEnterFn; FLOORS.len()] =
+    [detour_floor_steam_load, detour_floor_information];
 
 /// What the caller asked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -420,6 +532,14 @@ pub struct Request {
     /// other does not touch, and every switch in this repo exists so a boot failure is attributable
     /// to one line.
     pub title_settle: bool,
+    /// Remove the one-second floors on `0x05 SteamLoadSystemData` and `0x44 Information`.
+    ///
+    /// Measured at 879 ms and 985 ms, both spent after the work they were waiting for had already
+    /// finished. Its own key rather than riding [`Self::process_windows`] because it is a
+    /// different mechanism on different classes: neither of those two derives
+    /// `FeSubStateProcessWindowBase`, so neither has a `min_duration` field to zero -- they inline
+    /// the `1.0f` threshold instead, which is why the existing fix never reached them.
+    pub substate_floors: bool,
 }
 
 /// Install whichever of the two title-flow skips were asked for.
@@ -436,6 +556,7 @@ pub unsafe fn install(request: Request) -> Outcome {
         title_settle: false,
         hide_process_windows: false,
         title_sequence_gate: false,
+        substate_floors: 0,
     };
     let base = match game_module_base() {
         Ok(base) => base,
@@ -481,6 +602,42 @@ pub unsafe fn install(request: Request) -> Outcome {
                 "{LOG_PREFIX} hook-failed gate=title-sequence va=0x{site:016x} \
                  stage=MH_CreateHook status={status:?}"
             )),
+        }
+    }
+
+    if request.substate_floors {
+        for (index, floor) in FLOORS.iter().enumerate() {
+            let site = base + floor.enter_rva as usize;
+            let hook = match unsafe {
+                MhHook::new(site as *mut c_void, FLOOR_DETOURS[index] as *mut c_void)
+            } {
+                Ok(hook) => hook,
+                Err(status) => {
+                    log(format_args!(
+                        "{LOG_PREFIX} hook-failed floor={} va=0x{site:016x} stage=MH_CreateHook \
+                         status={status:?}",
+                        floor.name
+                    ));
+                    continue;
+                }
+            };
+            // Published BEFORE the site is patched: a detour that read a zero here would skip the
+            // original, and for an `enter` that means the substate never initialises at all.
+            FLOOR_TRAMPOLINES[index].store(hook.trampoline() as usize, Ordering::Release);
+            let status = unsafe { MH_EnableHook(site as *mut c_void) };
+            if status != MH_STATUS::MH_OK {
+                log(format_args!(
+                    "{LOG_PREFIX} hook-failed floor={} va=0x{site:016x} stage=MH_EnableHook \
+                     status={status:?}",
+                    floor.name
+                ));
+                continue;
+            }
+            outcome.substate_floors += 1;
+            log(format_args!(
+                "{LOG_PREFIX} hooked floor={} rva=0x{:08x} va=0x{site:016x} elapsed-offset=0x{:x}",
+                floor.name, floor.enter_rva, floor.elapsed_offset
+            ));
         }
     }
 

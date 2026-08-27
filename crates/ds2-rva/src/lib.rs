@@ -1404,3 +1404,61 @@ pub const FE_TITLE_INFORMATION_JOB_OFFSET: usize = 0xa0;
 /// the substate to its terminal phase. Watching it says whether the job finishes early and the
 /// substate sits on the result, or the job itself takes the second.
 pub const FE_INFORMATION_JOB_STATE_OFFSET: usize = 0x18;
+
+// ============================================================================================
+// THE ONE-SECOND FLOORS, LOCATED (`ds2-mods-rs-wxl`). ~1.86s of a 6.7s boot.
+//
+// Two substates that are NOT `FeSubStateProcessWindowBase` subclasses -- so `ds2-dialog-skip`'s
+// min-duration zeroing never reached them -- each hold their own elapsed timer and compare it
+// against the SAME float, `0x1410ac698`, which is `1.0f`.
+//
+// Measured, run 6: `0x05` reaches phase 4 at t=4115.9ms and does not leave it until t=4994.9ms --
+// 879ms. `0x44` reaches phase 2 at t=5676.4ms and does not leave until t=6661.4ms -- 985ms. In
+// both cases the work they were waiting for had already finished.
+//
+// DO NOT PATCH THE CONSTANT. `0x1410ac698` has 2042 RIP-relative references from 1548 functions:
+// it is MSVC's pooled `1.0f` literal for the whole image, not a tunable belonging to these two.
+// The fix is to advance each substate's OWN elapsed field so the game's own comparison passes,
+// which is the same shape as the existing min-duration zeroing and leaves both the comparison and
+// the transition the game's.
+// ============================================================================================
+
+/// `FeSubStateTitleSteamLoadSystemData::v1` -- its `enter`. RVA `0x000faff0`.
+///
+/// Starts the system-data load through `SaveLoadSystem` (`0x1402e72c0`), shows a process window,
+/// and sets phase 1. Measured: the storage work is finished 88ms later; the substate then spends
+/// 879ms in phase 4 waiting on the floor below.
+pub const FE_SUBSTATE_STEAM_LOAD_SYSTEM_DATA_ENTER: u32 = 0x000f_aff0;
+
+/// Its elapsed timer, a `f32`.
+///
+/// Zeroed by the constructor at `0x1400fab66`. Accumulated in phases 1 and 2 without ever being
+/// compared, and compared in **phase 4** at `0x1400fc13e`:
+/// `addss xmm6,[rdi+0x18]; comiss xmm6,[0x1410ac698]; jb return`.
+pub const FE_SUBSTATE_STEAM_LOAD_SYSTEM_DATA_ELAPSED_OFFSET: usize = 0x18;
+
+/// `FeSubStateTitleInformation::v1` -- its `enter`. RVA `0x000ff570`.
+pub const FE_SUBSTATE_TITLE_INFORMATION_ENTER: u32 = 0x000f_f570;
+
+/// Its elapsed timer, a `f32`, at `+0x5a24` of a `0x5a30`-byte object.
+///
+/// Compared in **phase 2** at `0x1400ff9b7`, and reset to zero on the way out at `0x1400ff9d7`.
+///
+/// **Phase 2 waits on two things, and only one of them is the floor**:
+/// ```text
+/// elapsed += delta
+/// if ([r14]->vtable[0x28]()) return;         // the job is still running -- REAL work
+/// if (elapsed < 1.0f)        return;         // the floor
+/// close the window; phase = 3
+/// ```
+/// Advancing the timer therefore removes the floor and leaves the job wait entirely intact, which
+/// is the whole reason this is safe to do.
+pub const FE_SUBSTATE_TITLE_INFORMATION_ELAPSED_OFFSET: usize = 0x5a24;
+
+/// What to write into either elapsed field so the game's own `comiss` passes on the first frame.
+///
+/// `1.0f` exactly would leave `comiss` at equality, and the branch is `jb` -- below, not
+/// below-or-equal -- so equality already passes. A slightly larger value is used anyway so that a
+/// frame delta being added before the comparison cannot matter, and so the intent is legible: this
+/// is "the minimum display time has elapsed", not "the timer is exactly at the threshold".
+pub const FE_SUBSTATE_FLOOR_ELAPSED: f32 = 2.0;

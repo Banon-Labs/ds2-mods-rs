@@ -435,8 +435,17 @@ fn install_title_skip() {
             title_animation: config.title_animation,
             title_sequence_gate: config.title_sequence_gate,
             title_settle: config.title_settle,
+            substate_floors: config.substate_floors,
         })
     };
+    if config.substate_floors && outcome.substate_floors != 2 {
+        log_line(format_args!(
+            "{} PARTIAL {}/2 substate floors lifted -- each one left in place is ~0.9s of boot \
+             still spent waiting on a timer",
+            ds2_dialog_skip::LOG_PREFIX,
+            outcome.substate_floors
+        ));
+    }
     if config.press_any_button && !outcome.press_any_button {
         log_line(format_args!(
             "{} press-any-button NOT INSTALLED -- the title will still wait for a button",

@@ -595,6 +595,105 @@ sink: it opens, writes and `fsync`s per line, deliberately, so a line survives t
 At the handful of lines this instrument emits that is a rounding error on a 6.7 s boot, but it is
 not zero, and a future version that logged per frame would measure mostly itself.
 
+## The floors, located exactly
+
+Watching each substate's own phase field — the field that actually decides, which the interlock
+watch was not — pinned both in one run:
+
+```
+0x05  phase 1 t=4032.5   phase 2 t=4103.4   phase 4 t=4115.9   phase 5 t=4994.9   <- 879.0ms in phase 4
+0x44  phase 1 t=5657.9   phase 2 t=5676.4                      phase 3 t=6661.4   <- 985.0ms in phase 2
+```
+
+Those two branches are five instructions each, and they are the same five:
+
+```text
+0x05 phase 4, 0x1400fc139:            0x44 phase 2, 0x1400ff98e:
+  addss  xmm6,[rdi+0x18]                addss  xmm6,[rdi+0x5a24]
+  comiss xmm6,[0x1410ac698]             call   [r14->vtable+0x28]   ; job still running?
+  movss  [rdi+0x18],xmm6                test al,al; jne return      ; yes -> keep waiting
+  jb     return                         comiss xmm0,[0x1410ac698]
+  close window; phase = 5               jb     return
+                                        close window; phase = 3
+```
+
+**`[0x1410ac698]` is `1.0f`.** Both substates hold their own elapsed timer, accumulate the frame
+delta into it, and refuse to advance until one second of wall time has passed — in `0x05`'s case
+763 ms after the storage service already went idle, and in `0x44`'s after its job reported done.
+
+This is the same bug `ds2-dialog-skip` already fixes for the process windows. It missed these two
+for a structural reason: neither derives `FeSubStateProcessWindowBase`, so neither has the
+`min_duration` field at `+0x10` that the existing hook zeroes. They inline the threshold instead.
+
+### The constant must not be patched
+
+`0x1410ac698` has **2042 RIP-relative references from 1548 functions**. It is MSVC's pooled `1.0f`
+literal for the entire image, not a tunable belonging to these two substates. Zeroing it would
+change every one of those call sites. This is exactly the sort of address that looks like a switch
+and is actually the number one.
+
+### The fix that is safe
+
+Advance each substate's **own** elapsed field at `enter`, so the game's own `comiss` passes on the
+first frame it is reached. The comparison stays the game's, the transition stays the game's, and
+nothing shared is touched.
+
+It is also load-bearing that this removes *only* the floor. `0x44`'s phase 2 waits on two separate
+conditions and the job wait is the first of them — `jne return` fires while the download is still
+running regardless of the timer, so a finished floor cannot outrun unfinished work. `0x05`'s phase
+4 is only reachable after the storage service has already gone idle. In neither case is real work
+being skipped.
+
+Worth **~1.86 s** on a 6.7 s boot.
+
+## Fixed, measured: 875 ms off the boot, and the other second was never a floor
+
+`[title_skip] substate_floors`, on by default, `--no-substate-floors` to rule it out. It detours
+each substate's `enter`, lets the original run, then writes `2.0` into that class's own elapsed
+field so the game's own `comiss` passes the first time its branch is reached.
+
+```
+hooked floor=steam-load-system-data rva=0x000faff0 elapsed-offset=0x18
+hooked floor=title-information      rva=0x000ff570 elapsed-offset=0x5a24
+floor-lifted screen=steam-load-system-data was=0 now=2
+floor-lifted screen=title-information      was=0 now=2
+```
+
+`was=0` on both is the check that mattered: the field really was the freshly-zeroed timer this
+crate believed it to be, not some unrelated member.
+
+| | before | after |
+| --- | --- | --- |
+| `0x05` phase 4 | 879.0 ms | **6.0 ms** |
+| `0x05` dwell | 978–990 ms | **114.5 ms** |
+| `0x44` phase 2 | 985.0 ms | 981.7 ms |
+| `0x44` dwell | 1014–1027 ms | 1010.4 ms |
+| **boot to top menu** | 6771–6828 ms | **5875.7 ms** |
+
+**875 ms off the boot, about 13%.** That is the first actual saving in this investigation rather
+than another measurement of one.
+
+### `0x44` was diagnosed wrong, and the fix proves it
+
+Lifting its floor changed nothing — 985 ms became 981.7 ms. Phase 2 tests two conditions and the
+timer is the second of them; with the timer satisfied the branch still returns, which means the
+**first** condition is what holds:
+
+```text
+call [r14->vtable+0x28]   ; is the download job still running?
+test al,al; jne return    ; <- THIS is the ~982ms, every run
+```
+
+So `0x44`'s second is the job itself, not a display floor. It reproduces to 0.14% because it is
+almost certainly a fixed timeout *inside* the job rather than a variable round-trip — and the
+destination confirms the request never succeeds: `0x44` always transitions to `0x46`, the "could
+not retrieve information" box, and never straight to `0x47`. **A one-second wait to fail.**
+
+That is a different fix from this one and it belongs to whatever owns the job's timeout. The
+earlier text in this document calling both of them floors was wrong about half of it, and the
+experiment that would have caught it earlier is exactly the one that caught it now: change the
+thing you believe is responsible and see whether the number moves.
+
 ## The caveat that governs every address here
 
 These come from the deobfuscated image, which is not the byte stream that runs. Vtables and the

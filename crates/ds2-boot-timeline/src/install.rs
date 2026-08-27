@@ -275,9 +275,20 @@ fn on_leave(id: u32) {
 // ============================================================================================
 
 /// Last value seen for each watch, plus a "never sampled" flag in the high bits.
-static WATCHED: [AtomicU64; 2] = [const { AtomicU64::new(u64::MAX) }; 2];
+static WATCHED: [AtomicU64; 3] = [const { AtomicU64::new(u64::MAX) }; 3];
 const WATCH_SAVE_LOAD: usize = 0;
 const WATCH_INFORMATION: usize = 1;
+const WATCH_PHASE: usize = 2;
+
+/// Substates whose own phase field is worth tracing frame by frame.
+///
+/// **This is the field that actually decides**, and aiming at anything else first was a mistake
+/// worth not repeating. The interlock watch showed `SaveLoadSystem` going idle 88 ms in and
+/// concluded no further request was issued — but a watch that logs only on CHANGE, sampled once
+/// per frame, cannot see a request that starts and finishes between two samples, so it could not
+/// support that conclusion. The substate's own phase can: it says which of the thirteen branches
+/// the 890 ms is spent in, and every branch is a few lines of already-read disassembly.
+const PHASE_WATCHED: [u32; 2] = [0x05, 0x44];
 
 /// Follow `base_rva -> [+first] -> read u32 at +second`, with a null check at every hop.
 ///
@@ -352,13 +363,38 @@ unsafe fn sample_watch(base: usize, resident_id: u32) {
         }
         _ => return,
     };
-    if WATCHED[index].swap(value, Ordering::Relaxed) == value {
+    if WATCHED[index].swap(value, Ordering::Relaxed) != value {
+        log(format_args!(
+            "{LOG_PREFIX} watch id=0x{resident_id:02x} field={label} value=0x{value:x} t={:.3}ms",
+            now_us() as f64 / 1000.0
+        ));
+    }
+}
+
+/// Trace the resident substate's own phase field, for the ids in [`PHASE_WATCHED`].
+///
+/// # Safety
+///
+/// `substate` must be the live resident substate.
+unsafe fn sample_phase(substate: *const u8, resident_id: u32) {
+    if !PHASE_WATCHED.contains(&resident_id) {
         return;
     }
-    log(format_args!(
-        "{LOG_PREFIX} watch id=0x{resident_id:02x} field={label} value=0x{value:x} t={:.3}ms",
-        now_us() as f64 / 1000.0
-    ));
+    // SAFETY: `+0x10` is the phase every one of these classes' own `update` switches on, and the
+    // flow has just called that update against this pointer.
+    let phase = unsafe {
+        substate
+            .add(ds2_rva::FE_SUBSTATE_PHASE_OFFSET)
+            .cast::<u32>()
+            .read()
+    };
+    let value = u64::from(phase) | (u64::from(resident_id) << 32);
+    if WATCHED[WATCH_PHASE].swap(value, Ordering::Relaxed) != value {
+        log(format_args!(
+            "{LOG_PREFIX} watch id=0x{resident_id:02x} field=phase value={phase} t={:.3}ms",
+            now_us() as f64 / 1000.0
+        ));
+    }
 }
 
 /// Sample the resident substate around the original, and report a change.
@@ -400,7 +436,9 @@ unsafe extern "system" fn detour_flow_update(flow: *mut u8, delta: f32) {
     {
         // SAFETY: `after` is the substate the flow has just updated, and `base` is the live module
         // base the RVAs in `ds2-rva` are relative to.
-        unsafe { sample_watch(base, substate_id(after)) };
+        let id = unsafe { substate_id(after) };
+        unsafe { sample_watch(base, id) };
+        unsafe { sample_phase(after, id) };
     }
     if after != before && !after.is_null() {
         // SAFETY: the flow has just stored this pointer as its resident substate.

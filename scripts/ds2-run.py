@@ -151,6 +151,7 @@ KEY_HIDE_PROCESS_WINDOWS = "hide_process_windows"
 KEY_TITLE_ANIMATION = "title_animation"
 KEY_TITLE_SEQUENCE_GATE = "title_sequence_gate"
 KEY_TITLE_SETTLE = "title_settle"
+KEY_SUBSTATE_FLOORS = "substate_floors"
 #: Mirrors `CONFIG_SECTION`/`KEY_SHOW_UNAVAILABLE` in `crates/ds2-loader/src/title_menu.rs`.
 #: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/boot_timeline.rs`.
 #: OFF by default -- the only feature here that is. It is a measuring instrument, not a fix.
@@ -869,6 +870,7 @@ def config_text(
     title_animation: bool = True,
     title_sequence_gate: bool = True,
     title_settle: bool = True,
+    substate_floors: bool = True,
     show_unavailable: bool = False,
     boot_timeline: bool = False,
 ) -> str:
@@ -987,6 +989,15 @@ def config_text(
 # FeSubStateTitleMain::v3 detour with `{KEY_TITLE_ANIMATION}`, so either key installs that hook and
 # each behaviour is gated separately inside.
 {KEY_TITLE_SETTLE} = {str(title_settle).lower()}
+# STARTUP-ONLY. `{KEY_SUBSTATE_FLOORS}` lifts the ONE-SECOND FLOORS that
+# FeSubStateTitleSteamLoadSystemData and FeSubStateTitleInformation keep for themselves. Measured
+# at 879ms and 985ms, both spent AFTER the work they were waiting for had finished. They are not
+# process windows, so they have no min_duration field for `{KEY_PROCESS_WINDOWS}` to zero -- each
+# inlines a comparison against the pooled 1.0f literal instead, which is why the existing fix
+# never reached them. This sets each substate's OWN elapsed field at enter so the game's own
+# comparison passes; the shared constant is NOT touched (it has 2042 references). Only the floor
+# goes: Information's branch still returns while its download job is running.
+{KEY_SUBSTATE_FLOORS} = {str(substate_floors).lower()}
 
 [{MENU_SECTION}]
 # STARTUP-ONLY. NOT a skip -- this is the only key here that changes what the title menu DRAWS
@@ -1078,6 +1089,7 @@ def write_config(
     title_animation: bool = True,
     title_sequence_gate: bool = True,
     title_settle: bool = True,
+    substate_floors: bool = True,
     show_unavailable: bool = False,
     boot_timeline: bool = False,
 ) -> tuple[Path, str]:
@@ -1095,6 +1107,7 @@ def write_config(
         title_animation,
         title_sequence_gate,
         title_settle,
+        substate_floors,
         show_unavailable,
         boot_timeline,
     )
@@ -1170,6 +1183,7 @@ def dry_run(
     title_animation: bool = True,
     title_sequence_gate: bool = True,
     title_settle: bool = True,
+    substate_floors: bool = True,
     show_unavailable: bool = False,
     boot_timeline: bool = False,
 ) -> int:
@@ -1205,6 +1219,8 @@ def dry_run(
             title_animation,
             title_sequence_gate,
             title_settle,
+            substate_floors,
+        substate_floors,
             show_unavailable,
             boot_timeline,
         ):
@@ -1236,6 +1252,9 @@ def dry_run(
                 title_animation,
                 title_sequence_gate,
                 title_settle,
+                substate_floors,
+            substate_floors,
+        substate_floors,
                 show_unavailable,
                 boot_timeline,
             ),
@@ -1289,6 +1308,7 @@ def launch(
     title_animation: bool = True,
     title_sequence_gate: bool = True,
     title_settle: bool = True,
+    substate_floors: bool = True,
     show_unavailable: bool = False,
     boot_timeline: bool = False,
 ) -> int:
@@ -1319,6 +1339,7 @@ def launch(
         title_animation,
         title_sequence_gate,
         title_settle,
+        substate_floors,
         show_unavailable,
         boot_timeline,
     )
@@ -1752,6 +1773,21 @@ def selftest() -> int:
     )
     values, _ = parse_config(config_text("off"))
     check(
+        values.get((TITLE_SECTION, KEY_SUBSTATE_FLOORS)) == "true",
+        f"[{TITLE_SECTION}] {KEY_SUBSTATE_FLOORS} defaults to true",
+    )
+    values, _ = parse_config(config_text("off", substate_floors=False))
+    check(
+        values.get((TITLE_SECTION, KEY_SUBSTATE_FLOORS)) == "false",
+        f"--no-substate-floors writes [{TITLE_SECTION}] {KEY_SUBSTATE_FLOORS} = false",
+    )
+    check(
+        values.get((TITLE_SECTION, KEY_PROCESS_WINDOWS)) == "true",
+        "--no-substate-floors leaves the process-window de-flooring ON -- different mechanism, "
+        "different classes, separate switch",
+    )
+    values, _ = parse_config(config_text("off"))
+    check(
         values.get((TIMELINE_SECTION, KEY_TIMELINE_ENABLED)) == "false",
         f"[{TIMELINE_SECTION}] {KEY_TIMELINE_ENABLED} defaults to FALSE -- an instrument that "
         f"turns itself on is one nobody chose to run",
@@ -2098,6 +2134,16 @@ def main() -> int:
         help="test the log tailer, the DLL/script contract and the verdict logic",
     )
     parser.add_argument(
+        "--no-substate-floors",
+        dest="substate_floors",
+        action="store_false",
+        help=(
+            "leave the one-second floors on SteamLoadSystemData and Information in place. They "
+            "are ~1.86s of a 6.7s boot, both spent after the work finished, so this is the switch "
+            "that says whether a boot failure is theirs."
+        ),
+    )
+    parser.add_argument(
         "--boot-timeline",
         dest="boot_timeline",
         action="store_true",
@@ -2278,6 +2324,8 @@ def main() -> int:
             args.title_animation,
             args.title_sequence_gate,
             args.title_settle,
+            args.substate_floors,
+        args.substate_floors,
             args.show_unavailable,
             args.boot_timeline,
         )
@@ -2294,6 +2342,7 @@ def main() -> int:
         args.title_animation,
         args.title_sequence_gate,
         args.title_settle,
+        args.substate_floors,
         args.show_unavailable,
         args.boot_timeline,
     )

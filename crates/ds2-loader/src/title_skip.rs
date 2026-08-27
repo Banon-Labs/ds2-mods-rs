@@ -33,6 +33,9 @@ pub const KEY_TITLE_SEQUENCE_GATE: &str = "title_sequence_gate";
 /// Put the title scene straight into its settled state.
 pub const KEY_TITLE_SETTLE: &str = "title_settle";
 
+/// Remove the one-second floors on `0x05 SteamLoadSystemData` and `0x44 Information`.
+pub const KEY_SUBSTATE_FLOORS: &str = "substate_floors";
+
 /// `[title_skip]`, resolved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TitleSkipConfig {
@@ -56,6 +59,8 @@ pub struct TitleSkipConfig {
     /// by an animation. It shares a detour with [`Self::title_animation`] and is a separate key
     /// anyway, because it mutates scene state the other does not touch.
     pub title_settle: bool,
+    /// Lift the one-second floors the two non-process-window substates keep for themselves.
+    pub substate_floors: bool,
 }
 
 impl Default for TitleSkipConfig {
@@ -70,6 +75,7 @@ impl Default for TitleSkipConfig {
             title_animation: true,
             title_sequence_gate: true,
             title_settle: true,
+            substate_floors: true,
         }
     }
 }
@@ -102,6 +108,7 @@ impl TitleSkipConfig {
             title_animation: read(KEY_TITLE_ANIMATION, defaults.title_animation),
             title_sequence_gate: read(KEY_TITLE_SEQUENCE_GATE, defaults.title_sequence_gate),
             title_settle: read(KEY_TITLE_SETTLE, defaults.title_settle),
+            substate_floors: read(KEY_SUBSTATE_FLOORS, defaults.substate_floors),
         }
     }
 
@@ -110,14 +117,15 @@ impl TitleSkipConfig {
         format!(
             "{} config [{CONFIG_SECTION}] {KEY_PRESS_ANY_BUTTON}={} {KEY_PROCESS_WINDOWS}={} \
              {KEY_HIDE_PROCESS_WINDOWS}={} {KEY_TITLE_ANIMATION}={} \
-             {KEY_TITLE_SEQUENCE_GATE}={} {KEY_TITLE_SETTLE}={}",
+             {KEY_TITLE_SEQUENCE_GATE}={} {KEY_TITLE_SETTLE}={} {KEY_SUBSTATE_FLOORS}={}",
             ds2_dialog_skip::LOG_PREFIX,
             self.press_any_button,
             self.process_windows,
             self.hide_process_windows,
             self.title_animation,
             self.title_sequence_gate,
-            self.title_settle
+            self.title_settle,
+            self.substate_floors
         )
     }
 }
