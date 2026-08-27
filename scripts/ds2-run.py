@@ -138,6 +138,23 @@ KEY_SITE = "site"
 #: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/intro_skip.rs`.
 INTRO_SECTION = "intro_skip"
 KEY_INTRO_ENABLED = "enabled"
+
+#: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/dialog_skip.rs`.
+DIALOG_SECTION = "dialog_skip"
+KEY_DIALOG_ENABLED = "enabled"
+
+#: Mirrors `CONFIG_SECTION` and the two `KEY_*` in `crates/ds2-loader/src/title_skip.rs`.
+TITLE_SECTION = "title_skip"
+KEY_PRESS_ANY_BUTTON = "press_any_button"
+KEY_PROCESS_WINDOWS = "process_windows"
+KEY_HIDE_PROCESS_WINDOWS = "hide_process_windows"
+KEY_TITLE_ANIMATION = "title_animation"
+KEY_TITLE_SEQUENCE_GATE = "title_sequence_gate"
+KEY_TITLE_SETTLE = "title_settle"
+#: Mirrors `CONFIG_SECTION`/`KEY_SHOW_UNAVAILABLE` in `crates/ds2-loader/src/title_menu.rs`.
+MENU_SECTION = "title_menu"
+KEY_SHOW_UNAVAILABLE = "show_unavailable"
+
 KEY_POLL_INTERVAL_MS = "poll_interval_ms"
 KEY_HEARTBEAT_INTERVAL_MS = "heartbeat_interval_ms"
 
@@ -840,6 +857,14 @@ def config_text(
     fault_after_ms: int = NO_FAULT_MS,
     site: str = "m1",
     intro_skip: bool = True,
+    dialog_skip: bool = True,
+    press_any_button: bool = True,
+    process_windows: bool = True,
+    hide_process_windows: bool = True,
+    title_animation: bool = True,
+    title_sequence_gate: bool = True,
+    title_settle: bool = True,
+    show_unavailable: bool = False,
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
@@ -896,6 +921,89 @@ def config_text(
 # default that cannot be switched off is a default that cannot be ruled out.
 {KEY_INTRO_ENABLED} = {str(intro_skip).lower()}
 
+[{DIALOG_SECTION}]
+# STARTUP-ONLY. Detours ONE function -- FeSubStateCommonWindowBase::v3, the update every message
+# box in the title flow shares -- and writes the result byte a button press writes. The dispatch
+# that closes the box reads that byte and nothing else about the press, so this is the press
+# rather than an imitation of it; the close, the animation and the phase transition all stay the
+# game's own.
+#
+# It answers three allowlisted boot dialogs and re-checks at runtime that their two decision
+# handlers are still the base class's empty stubs, so a box whose answer would DO something --
+# FeSubStateTitleDeleteProfile shares the same update and overrides one of them -- is left for the
+# player. Anything it declines to answer is named in the log.
+#
+# ON by default; `--no-dialog-skip` writes false. Separate from [{INTRO_SECTION}] on purpose: two
+# switches mean a boot failure can be pinned on one feature without rebuilding either.
+{KEY_DIALOG_ENABLED} = {str(dialog_skip).lower()}
+
+[{TITLE_SECTION}]
+# STARTUP-ONLY, both keys. The last two things between boot and a usable menu, and they are NOT
+# the same kind of thing as the notice boxes above -- neither is suppressed.
+#
+# `{KEY_PRESS_ANY_BUTTON}` detours the poll behind the PRESS ANY BUTTON gate so it always reports a
+# press. That poll has exactly ONE caller in the whole image (inside FeSubStateTitleMain::v3), so
+# this reaches one gate rather than input handling. The gate that waits for the title sequence to
+# be up is left alone, and the game's own phase-1 body -- which is what builds the top menu -- runs
+# in full.
+#
+# `{KEY_PROCESS_WINDOWS}` zeroes the minimum display time on the "please wait" windows
+# (network check, server login, system-data save, profile load). Those wrap REAL asynchronous work
+# and are never skipped: the wait on "is it finished yet" is untouched, and only the artificial
+# floor that keeps the window up after the work is already done is removed.
+#
+# ON by default; `--no-press-any-button-skip` and `--no-process-window-skip` write false. Two keys
+# rather than one so a boot failure can be pinned on one hook.
+{KEY_PRESS_ANY_BUTTON} = {str(press_any_button).lower()}
+{KEY_PROCESS_WINDOWS} = {str(process_windows).lower()}
+# STARTUP-ONLY. `{KEY_HIDE_PROCESS_WINDOWS}` goes further: it reproduces the wait window's `enter`
+# WITHOUT its one call that draws a window, so the box never appears at all. The call that starts
+# the work is still made and the wait for that work is still honoured -- only the drawing is
+# dropped. It rides on the `{KEY_PROCESS_WINDOWS}` detour, so turning THAT off leaves the wait
+# windows completely alone.
+{KEY_HIDE_PROCESS_WINDOWS} = {str(hide_process_windows).lower()}
+# STARTUP-ONLY. `{KEY_TITLE_ANIMATION}` writes FeSubStateTitleMain's terminal phase once its phase-1
+# body has run, skipping phases 2 and 3 -- the flourish that plays after the press is registered.
+# Phase 1 is where the top-menu setup happens, so observing phase 2 or 3 means that setup is
+# already done and only the animation is left.
+{KEY_TITLE_ANIMATION} = {str(title_animation).lower()}
+# STARTUP-ONLY, and this is the one that removes the title logo animating in. Phase 1 of
+# FeSubStateTitleMain will not even LOOK for a button press until 0x1400f37f0 reports the scene's
+# current sequence is 0x67 -- the idle "press any button" state. That wait is the animation, so
+# `{KEY_PRESS_ANY_BUTTON}` on its own skips nothing visible. Forcing this gate too lets phase 1 run
+# on the first frame; its own body then calls the game's finish-sequence routine, which is how the
+# press path already handles being taken mid-animation.
+{KEY_TITLE_SEQUENCE_GATE} = {str(title_sequence_gate).lower()}
+# STARTUP-ONLY. `{KEY_TITLE_SETTLE}` puts FeSceneTitle straight into its settled state by playing
+# sequence 0x67 -- the state the gate above waits to observe -- rather than letting the 0x66 intro
+# sequence FeSubStateTitleMain::v1 started play out. THIS is what makes the menu usable as soon as
+# its data is available instead of being paced by an animation. It shares the
+# FeSubStateTitleMain::v3 detour with `{KEY_TITLE_ANIMATION}`, so either key installs that hook and
+# each behaviour is gated separately inside.
+{KEY_TITLE_SETTLE} = {str(title_settle).lower()}
+
+[{MENU_SECTION}]
+# STARTUP-ONLY. NOT a skip -- this is the only key here that changes what the title menu DRAWS
+# rather than how long it takes to get there, which is why it is its own section.
+#
+# The top menu is a fixed vector of SIX rows and the game never inserts or removes one; the only
+# per-row variable is one byte, computed from whether a save exists and whether online is
+# available. That byte does two separate things: it sets the cell state that decides whether the
+# cursor can land on the row, and it picks which sequence the row plays. On this layout the
+# unavailable sequence does not grey a row, it takes it off the screen -- which is why LOAD GAME
+# is simply absent until a save exists.
+#
+# `{KEY_SHOW_UNAVAILABLE}` swaps which of the two carries the meaning: the row is styled as
+# available so it is DRAWN, and its cell state is put straight back to the unavailable value so it
+# is STILL NOT SELECTABLE. Both are the game's own values in the game's own fields.
+#
+# The row is drawn in its normal style, not a greyed one: sequence ids index a layout resource
+# inside GameDataEbl.bdt, so which id looks greyed cannot be read out of the executable and is not
+# guessed at here. What this delivers is "visible and inert".
+#
+# ON by default; `--no-show-unavailable-menu-rows` writes false.
+{KEY_SHOW_UNAVAILABLE} = {str(show_unavailable).lower()}
+
 [{CRASH_SECTION}]
 {crash_banner}# STARTUP-ONLY, both of them. The handler is installed in DllMain BEFORE `neuter_arxan`, because
 # that call patches code from static analysis and is the likeliest crash in the whole startup path
@@ -936,10 +1044,31 @@ def write_config(
     fault_after_ms: int = NO_FAULT_MS,
     site: str = "m1",
     intro_skip: bool = True,
+    dialog_skip: bool = True,
+    press_any_button: bool = True,
+    process_windows: bool = True,
+    hide_process_windows: bool = True,
+    title_animation: bool = True,
+    title_sequence_gate: bool = True,
+    title_settle: bool = True,
+    show_unavailable: bool = False,
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
-    text = config_text(probe, fault_after_ms, site, intro_skip)
+    text = config_text(
+        probe,
+        fault_after_ms,
+        site,
+        intro_skip,
+        dialog_skip,
+        press_any_button,
+        process_windows,
+        hide_process_windows,
+        title_animation,
+        title_sequence_gate,
+        title_settle,
+        show_unavailable,
+    )
     path.write_text(text, encoding="utf-8")
     return path, text
 
@@ -1005,6 +1134,14 @@ def dry_run(
     fault_after_ms: int = NO_FAULT_MS,
     site: str = "m1",
     intro_skip: bool = True,
+    dialog_skip: bool = True,
+    press_any_button: bool = True,
+    process_windows: bool = True,
+    hide_process_windows: bool = True,
+    title_animation: bool = True,
+    title_sequence_gate: bool = True,
+    title_settle: bool = True,
+    show_unavailable: bool = False,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
@@ -1026,7 +1163,20 @@ def dry_run(
     config_path = GAME_DIR / CONFIG_NAME
     if config_path.is_file():
         current = config_path.read_text(encoding="utf-8")
-        if current == config_text(probe, fault_after_ms, site, intro_skip):
+        if current == config_text(
+            probe,
+            fault_after_ms,
+            site,
+            intro_skip,
+            dialog_skip,
+            press_any_button,
+            process_windows,
+            hide_process_windows,
+            title_animation,
+            title_sequence_gate,
+            title_settle,
+            show_unavailable,
+        ):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
         else:
             print("[dry-run] config   present and DIFFERS; a real run would replace it")
@@ -1041,7 +1191,25 @@ def dry_run(
     # THE CONFIGURATION UNDER TEST, VERBATIM. It is the whole variable this run turns on, so a
     # dry-run that did not show it would be hiding the one thing it exists to preview.
     print(f"[dry-run] would write  {config_path}")
-    print(quoted_config(config_text(probe, fault_after_ms, site, intro_skip), indent="[dry-run]   | "))
+    print(
+        quoted_config(
+            config_text(
+                probe,
+                fault_after_ms,
+                site,
+                intro_skip,
+                dialog_skip,
+                press_any_button,
+                process_windows,
+                hide_process_windows,
+                title_animation,
+                title_sequence_gate,
+                title_settle,
+                show_unavailable,
+            ),
+            indent="[dry-run]   | ",
+        )
+    )
     print(f"[dry-run] would launch env {environment} steam -applaunch {APPID}")
     print(f"[dry-run] would poll   {log_path}")
     # The DLL echoes the config back BEFORE it decides anything, so these are the first lines a
@@ -1082,6 +1250,14 @@ def launch(
     fault_after_ms: int = NO_FAULT_MS,
     site: str = "m1",
     intro_skip: bool = True,
+    dialog_skip: bool = True,
+    press_any_button: bool = True,
+    process_windows: bool = True,
+    hide_process_windows: bool = True,
+    title_animation: bool = True,
+    title_sequence_gate: bool = True,
+    title_settle: bool = True,
+    show_unavailable: bool = False,
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
@@ -1097,7 +1273,21 @@ def launch(
     # BEFORE LAUNCHING, and after staging: the DLL reads this in `DllMain`, so it has to be on
     # disk before the game starts, and it is rewritten every run so a file left over from the
     # other arm cannot decide this one.
-    config_path, config = write_config(GAME_DIR, probe, fault_after_ms, site, intro_skip)
+    config_path, config = write_config(
+        GAME_DIR,
+        probe,
+        fault_after_ms,
+        site,
+        intro_skip,
+        dialog_skip,
+        press_any_button,
+        process_windows,
+        hide_process_windows,
+        title_animation,
+        title_sequence_gate,
+        title_settle,
+        show_unavailable,
+    )
     print(f"[config] {config_path}")
 
     log_path = GAME_DIR / LOG_NAME
@@ -1532,6 +1722,92 @@ def selftest() -> int:
         f"--no-intro-skip writes [{INTRO_SECTION}] {KEY_INTRO_ENABLED} = false",
     )
 
+    # THE DIALOG SKIP IS A SEPARATE SWITCH, and the point of asserting both here is that they are
+    # INDEPENDENT. One flag turning both off would make a boot failure attributable to "the mod"
+    # instead of to a feature, which is the whole thing these switches exist to prevent.
+    values, _ = parse_config(config_text("off"))
+    check(
+        values.get((DIALOG_SECTION, KEY_DIALOG_ENABLED)) == "true",
+        f"[{DIALOG_SECTION}] {KEY_DIALOG_ENABLED} defaults to true",
+    )
+    values, _ = parse_config(config_text("off", dialog_skip=False))
+    check(
+        values.get((DIALOG_SECTION, KEY_DIALOG_ENABLED)) == "false",
+        f"--no-dialog-skip writes [{DIALOG_SECTION}] {KEY_DIALOG_ENABLED} = false",
+    )
+    values, _ = parse_config(config_text("off", intro_skip=False))
+    check(
+        values.get((DIALOG_SECTION, KEY_DIALOG_ENABLED)) == "true",
+        "--no-intro-skip leaves the dialog skip ON -- the two switches are independent",
+    )
+
+    # THE TITLE SKIPS ARE TWO MORE INDEPENDENT SWITCHES. Four hooks now patch executable memory at
+    # startup, and the whole value of separate keys is that a run that fails to boot can be pinned
+    # on ONE of them without a rebuild. Asserting the independence is what keeps that true.
+    values, _ = parse_config(config_text("off"))
+    check(
+        values.get((TITLE_SECTION, KEY_PRESS_ANY_BUTTON)) == "true"
+        and values.get((TITLE_SECTION, KEY_PROCESS_WINDOWS)) == "true",
+        f"[{TITLE_SECTION}] both keys default to true",
+    )
+    values, _ = parse_config(config_text("off", press_any_button=False))
+    check(
+        values.get((TITLE_SECTION, KEY_PRESS_ANY_BUTTON)) == "false"
+        and values.get((TITLE_SECTION, KEY_PROCESS_WINDOWS)) == "true",
+        "--no-press-any-button-skip turns off only its own key",
+    )
+    values, _ = parse_config(config_text("off", process_windows=False))
+    check(
+        values.get((TITLE_SECTION, KEY_PROCESS_WINDOWS)) == "false"
+        and values.get((TITLE_SECTION, KEY_PRESS_ANY_BUTTON)) == "true",
+        "--no-process-window-skip turns off only its own key",
+    )
+    values, _ = parse_config(config_text("off", hide_process_windows=False))
+    check(
+        values.get((TITLE_SECTION, KEY_HIDE_PROCESS_WINDOWS)) == "false"
+        and values.get((TITLE_SECTION, KEY_PROCESS_WINDOWS)) == "true",
+        "--no-hide-process-windows falls back to shortening rather than leaving them alone",
+    )
+    values, _ = parse_config(config_text("off", title_sequence_gate=False))
+    check(
+        values.get((TITLE_SECTION, KEY_TITLE_SEQUENCE_GATE)) == "false"
+        and values.get((TITLE_SECTION, KEY_PRESS_ANY_BUTTON)) == "true",
+        "--no-title-sequence-skip turns off only its own key",
+    )
+    values, _ = parse_config(config_text("off", title_settle=False))
+    check(
+        values.get((TITLE_SECTION, KEY_TITLE_SETTLE)) == "false"
+        and values.get((TITLE_SECTION, KEY_TITLE_ANIMATION)) == "true",
+        "--no-title-settle turns off only its own key, not the detour it shares",
+    )
+    values, _ = parse_config(config_text("off", title_animation=False))
+    check(
+        values.get((TITLE_SECTION, KEY_TITLE_ANIMATION)) == "false"
+        and values.get((TITLE_SECTION, KEY_PRESS_ANY_BUTTON)) == "true",
+        "--no-title-animation-skip turns off only its own key",
+    )
+
+    # THE MENU KEY IS IN A DIFFERENT SECTION, and that is the point worth asserting: it is not a
+    # skip, it patches different functions, and a boot failure has to be attributable to it alone.
+    values, _ = parse_config(config_text("off"))
+    check(
+        values.get((MENU_SECTION, KEY_SHOW_UNAVAILABLE)) == "false",
+        f"[{MENU_SECTION}] {KEY_SHOW_UNAVAILABLE} defaults to FALSE -- the game's own menu already "
+        "draws every row, dims what it cannot offer, and leaves no gap",
+    )
+    values, _ = parse_config(config_text("off", show_unavailable=True))
+    check(
+        values.get((MENU_SECTION, KEY_SHOW_UNAVAILABLE)) == "true"
+        and values.get((TITLE_SECTION, KEY_TITLE_SETTLE)) == "true"
+        and values.get((DIALOG_SECTION, KEY_DIALOG_ENABLED)) == "true",
+        "--show-unavailable-menu-rows turns on only its own key, in its own section",
+    )
+    values, _ = parse_config(config_text("off", title_settle=False))
+    check(
+        values.get((MENU_SECTION, KEY_SHOW_UNAVAILABLE)) == "false",
+        "--no-title-settle leaves the menu key OFF -- different section, different hooks",
+    )
+
     # THE ARMS MUST DIFFER, and in exactly one key. If two arms ever generated the same file the
     # A/B comparison would be two runs of the same experiment, and the arm-readback guard would
     # not catch it because the DLL would be reporting truthfully.
@@ -1785,6 +2061,98 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--no-dialog-skip",
+        dest="dialog_skip",
+        action="store_false",
+        default=True,
+        help=(
+            "leave the title-flow message boxes waiting for a button. They are answered by "
+            "default, by writing the same result byte a press writes and letting the game's own "
+            "dispatch close the box. Pass this to rule the feature out when a run fails to boot, "
+            "or to read a dialog this mod would otherwise dismiss."
+        ),
+    )
+    parser.add_argument(
+        "--no-press-any-button-skip",
+        dest="press_any_button",
+        action="store_false",
+        default=True,
+        help=(
+            "leave the PRESS ANY BUTTON gate waiting for a button. It is forced by default, by "
+            "detouring the poll behind it -- which has exactly one caller in the whole image, so "
+            "the change reaches that gate and not input handling."
+        ),
+    )
+    parser.add_argument(
+        "--no-process-window-skip",
+        dest="process_windows",
+        action="store_false",
+        default=True,
+        help=(
+            "leave the 'please wait' windows their minimum display time. By default that floor is "
+            "zeroed so they close as soon as their work is actually done. The work itself is "
+            "never skipped -- only the time the window lingers after finishing."
+        ),
+    )
+    parser.add_argument(
+        "--no-hide-process-windows",
+        dest="hide_process_windows",
+        action="store_false",
+        default=True,
+        help=(
+            "draw the 'please wait' windows, shortened rather than hidden. They are hidden by "
+            "default by reproducing their `enter` without its one drawing call -- the work is "
+            "still started and still waited for. This falls back to the milder behaviour."
+        ),
+    )
+    parser.add_argument(
+        "--no-title-animation-skip",
+        dest="title_animation",
+        action="store_false",
+        default=True,
+        help=(
+            "keep the title screen's activation flourish. By default its terminal phase is "
+            "written once the phase-1 body that builds the top menu has run, so only the "
+            "animation is skipped."
+        ),
+    )
+    parser.add_argument(
+        "--no-title-sequence-skip",
+        dest="title_sequence_gate",
+        action="store_false",
+        default=True,
+        help=(
+            "wait for the title logo and prompt to finish animating in before the forced press is "
+            "accepted. That wait is the animation, so leaving it on means --no-press-any-button "
+            "-style behaviour is visible even though the press itself is still forced."
+        ),
+    )
+    parser.add_argument(
+        "--no-title-settle",
+        dest="title_settle",
+        action="store_false",
+        default=True,
+        help=(
+            "let the title scene play its intro sequence out instead of putting it straight into "
+            "its settled state. On by default: settling it is what makes the menu usable as soon "
+            "as its data is available rather than being paced by an animation."
+        ),
+    )
+    parser.add_argument(
+        "--show-unavailable-menu-rows",
+        dest="show_unavailable",
+        action="store_true",
+        default=False,
+        help=(
+            "override the title menu's own look for rows it cannot offer. OFF BY DEFAULT, and the "
+            "default was set by a control run rather than by taste: with this off, the game draws "
+            "every row anyway, dims an unavailable Continue instead of removing it, and swaps "
+            "INFORMATION and GO ONLINE inside one shared slot with no gap. Turning this on forces "
+            "the enable byte and then plays the faded sequence over the result, which is the "
+            "segment that leads into the row being removed -- it poses the row invisible."
+        ),
+    )
+    parser.add_argument(
         "--probe-site",
         choices=PROBE_SITES,
         default="m1",
@@ -1839,8 +2207,36 @@ def main() -> int:
     if args.selftest:
         return selftest()
     if args.dry_run:
-        return dry_run(args.probe, args.observe, args.crash_test, args.probe_site, args.intro_skip)
-    return launch(args.probe, args.observe, args.crash_test, args.probe_site, args.intro_skip)
+        return dry_run(
+            args.probe,
+            args.observe,
+            args.crash_test,
+            args.probe_site,
+            args.intro_skip,
+            args.dialog_skip,
+            args.press_any_button,
+            args.process_windows,
+            args.hide_process_windows,
+            args.title_animation,
+            args.title_sequence_gate,
+            args.title_settle,
+            args.show_unavailable,
+        )
+    return launch(
+        args.probe,
+        args.observe,
+        args.crash_test,
+        args.probe_site,
+        args.intro_skip,
+        args.dialog_skip,
+        args.press_any_button,
+        args.process_windows,
+        args.hide_process_windows,
+        args.title_animation,
+        args.title_sequence_gate,
+        args.title_settle,
+        args.show_unavailable,
+    )
 
 
 if __name__ == "__main__":

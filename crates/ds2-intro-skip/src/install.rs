@@ -39,6 +39,14 @@ struct Screen {
     name: &'static str,
     enter_rva: u32,
     phase_offset: usize,
+    /// Offset of a scene reference to NULL before the original `enter` runs, when that class has
+    /// a shipped "no scene" early-out and a `leave` guarded on the same pointer.
+    ///
+    /// Only `FeSubStateTitleLogo` qualifies, and the other two are `None` for reasons read out of
+    /// their own `leave`: `FeSubStateWarningNoCopy` guards on a global, and
+    /// `FeSubStateTitleUserPolicy` guards on its phase. Nulling a scene for either of those would
+    /// not be matched by their close, so it stays an opt-in per class rather than a shared trick.
+    scene_offset: Option<usize>,
 }
 
 /// The three screens, in the order they appear at boot.
@@ -47,16 +55,19 @@ const SCREENS: [Screen; 3] = [
         name: "warning-no-copy",
         enter_rva: ds2_rva::FE_SUBSTATE_WARNING_NO_COPY_ENTER,
         phase_offset: ds2_rva::FE_SUBSTATE_PHASE_OFFSET,
+        scene_offset: None,
     },
     Screen {
         name: "logo",
         enter_rva: ds2_rva::FE_SUBSTATE_TITLE_LOGO_ENTER,
         phase_offset: ds2_rva::FE_SUBSTATE_TITLE_LOGO_PHASE_OFFSET,
+        scene_offset: Some(ds2_rva::FE_SUBSTATE_TITLE_LOGO_SCENE_OFFSET),
     },
     Screen {
         name: "user-policy",
         enter_rva: ds2_rva::FE_SUBSTATE_TITLE_USER_POLICY_ENTER,
         phase_offset: ds2_rva::FE_SUBSTATE_PHASE_OFFSET,
+        scene_offset: None,
     },
 ];
 
@@ -83,6 +94,29 @@ type EnterFn = unsafe extern "system" fn(*mut u8);
 /// [`TRAMPOLINES`]. The phase field is a `u32` at a class-specific offset that this crate reads out
 /// of `ds2-rva`, and writing it is the whole point.
 unsafe fn skip(index: usize, this: *mut u8) {
+    let screen = &SCREENS[index];
+
+    // NULL THE SCENE BEFORE THE ORIGINAL RUNS, so it takes its own "there is no logo to show"
+    // branch instead of starting a sequence. Writing the terminal phase AFTER the original -- what
+    // this did originally -- advances the flow but leaves the sequence `enter` already began
+    // playing, which is the logo animation that stayed visible.
+    //
+    // It is NOT restored afterwards, and that is the point: `leave` is guarded on this same
+    // pointer, so null at enter and null at leave is exactly the pair the shipped path produces.
+    // Restoring it would give a close with no matching open.
+    let mut suppressed_scene = 0usize;
+    if let Some(offset) = screen.scene_offset
+        && !this.is_null()
+    {
+        // SAFETY: the game itself reads this offset as the first thing `enter` does, so it is
+        // within the object whenever `enter` is being called on it.
+        unsafe {
+            let slot = this.add(offset).cast::<usize>();
+            suppressed_scene = slot.read();
+            slot.write(0);
+        }
+    }
+
     let trampoline = TRAMPOLINES[index].load(Ordering::Acquire);
     if trampoline != 0 {
         // SAFETY: MinHook published this trampoline for exactly this site, and the signature is
@@ -93,17 +127,31 @@ unsafe fn skip(index: usize, this: *mut u8) {
     if this.is_null() {
         return;
     }
-    let screen = &SCREENS[index];
+    // WHAT THE ORIGINAL LEFT BEHIND, read before it is overwritten. This is the instrument that
+    // says which branch `enter` took, and it exists because a report of "the logo still animates"
+    // is otherwise indistinguishable between two very different causes: the scene-null trick not
+    // working, or the animation never having come from this substate at all.
+    //
+    // For the logo: 4 means the shipped no-scene branch ran and NO sequence was started, so an
+    // animation still on screen is coming from somewhere else entirely. 1 or 2 means the play
+    // path ran and the null did not take.
+    //
     // SAFETY: the original has just run against this same pointer, so the object is live and at
     // least as large as the phase field the game itself writes at this offset.
+    let left_by_original = unsafe { this.add(screen.phase_offset).cast::<u32>().read() };
+    // SAFETY: same object, same field, just read successfully above.
     unsafe {
         this.add(screen.phase_offset)
             .cast::<u32>()
             .write(ds2_rva::TITLE_SUBSTATE_PHASE_DONE);
     }
     let n = FIRED[index].fetch_add(1, Ordering::Relaxed) + 1;
+    // The suppressed scene pointer is logged because it is the difference between "the screen was
+    // fast-forwarded" and "the screen never played". A zero here on the logo would mean the scene
+    // was already null and the animation was never this crate's to stop.
     log(format_args!(
-        "{LOG_PREFIX} skipped screen={} phase-offset=0x{:x} value={} count={n}",
+        "{LOG_PREFIX} skipped screen={} phase-offset=0x{:x} value={} scene=0x{suppressed_scene:x} \
+         left-by-original={left_by_original} count={n}",
         screen.name,
         screen.phase_offset,
         ds2_rva::TITLE_SUBSTATE_PHASE_DONE,

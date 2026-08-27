@@ -83,7 +83,10 @@ use dearxan::disabler::{neuter_arxan, schedule_after_arxan};
 
 pub mod arxan_probe;
 pub mod crash_logging;
+pub mod dialog_skip;
 pub mod intro_skip;
+pub mod title_menu;
+pub mod title_skip;
 
 /// `fdwReason` value for the loader's process-attach notification.
 const DLL_PROCESS_ATTACH: u32 = 1;
@@ -275,6 +278,9 @@ unsafe fn attach(module: *mut c_void) {
                 }
                 install_probe(probe);
                 install_intro_skip();
+                install_dialog_skip();
+                install_title_skip();
+                install_title_menu();
                 arm_fault(crash_config);
             });
         },
@@ -301,6 +307,9 @@ unsafe fn attach(module: *mut c_void) {
                 ));
                 install_probe(probe);
                 install_intro_skip();
+                install_dialog_skip();
+                install_title_skip();
+                install_title_menu();
                 arm_fault(crash_config);
             });
         },
@@ -348,6 +357,125 @@ fn install_intro_skip() {
             ds2_intro_skip::LOG_PREFIX,
             outcome.installed,
             outcome.attempted
+        ));
+    }
+}
+
+/// Install the message-box skip, if `<Game>/ds2-mods.toml` asked for it.
+///
+/// Called immediately after [`install_intro_skip`] and from the same post-Arxan position, for the
+/// same reasons. The order between the two is not load-bearing -- they hook different functions
+/// and share no state -- but it matches the order the player meets them in, which is the order
+/// the log then reads in.
+fn install_dialog_skip() {
+    let config = dialog_skip::DialogSkipConfig::load();
+    log_line(format_args!("{}", config.describe()));
+    if !config.enabled {
+        return;
+    }
+    ds2_dialog_skip::set_logger(log_line);
+    // SAFETY: the target is `FeSubStateCommonWindowBase::v3`, a `.pdata` function start recorded
+    // in `ds2-rva` and resolved against the live module base. `scripts/ds2-arxan-chain.py` shows
+    // it is not Arxan-redirected, and its first instruction is a whole five bytes so MinHook never
+    // has to split one. The detour declares the signature every substate update implements:
+    // `void update(this, float delta)`, `this` in RCX and the delta in XMM1.
+    let outcome = unsafe { ds2_dialog_skip::install() };
+    if !outcome.installed {
+        log_line(format_args!(
+            "{} NOT INSTALLED -- the title message boxes will still need a button press",
+            ds2_dialog_skip::LOG_PREFIX
+        ));
+    }
+}
+
+/// Install the two remaining title-flow skips, if `<Game>/ds2-mods.toml` asked for them.
+///
+/// Called from the same post-Arxan position as its two siblings. Last of the three because it is
+/// the one whose effect the player sees last: the boot screens go, then the notice boxes, then the
+/// press-any-button gate and the "please wait" windows between there and the menu.
+fn install_title_skip() {
+    let config = title_skip::TitleSkipConfig::load();
+    log_line(format_args!("{}", config.describe()));
+    if !config.press_any_button
+        && !config.process_windows
+        && !config.title_animation
+        && !config.title_sequence_gate
+        && !config.title_settle
+    {
+        return;
+    }
+    ds2_dialog_skip::set_logger(log_line);
+    // SAFETY: both targets are `.pdata` function starts recorded in `ds2-rva`, resolved against the
+    // live module base, and neither is Arxan-redirected. The press gate is replaced outright and
+    // takes an argument it never reads; the process-window detour fronts `enter` and calls the
+    // original FIRST, because that call is what starts the work the window is covering.
+    let outcome = unsafe {
+        ds2_dialog_skip::install_title(ds2_dialog_skip::TitleRequest {
+            press_any_button: config.press_any_button,
+            process_windows: config.process_windows,
+            hide_process_windows: config.hide_process_windows,
+            title_animation: config.title_animation,
+            title_sequence_gate: config.title_sequence_gate,
+            title_settle: config.title_settle,
+        })
+    };
+    if config.press_any_button && !outcome.press_any_button {
+        log_line(format_args!(
+            "{} press-any-button NOT INSTALLED -- the title will still wait for a button",
+            ds2_dialog_skip::LOG_PREFIX
+        ));
+    }
+    if config.process_windows && !outcome.process_windows {
+        log_line(format_args!(
+            "{} process-window NOT INSTALLED -- the wait windows keep their minimum display time",
+            ds2_dialog_skip::LOG_PREFIX
+        ));
+    }
+    if config.hide_process_windows && !outcome.hide_process_windows {
+        log_line(format_args!(
+            "{} show-process-window NOT INSTALLED -- the wait windows will still be drawn",
+            ds2_dialog_skip::LOG_PREFIX
+        ));
+    }
+    if config.title_sequence_gate && !outcome.title_sequence_gate {
+        log_line(format_args!(
+            "{} title-sequence NOT INSTALLED -- the title logo animation will still be waited out",
+            ds2_dialog_skip::LOG_PREFIX
+        ));
+    }
+    if config.title_settle && !outcome.title_settle {
+        log_line(format_args!(
+            "{} title-settle NOT INSTALLED -- the title scene keeps its intro sequence",
+            ds2_dialog_skip::LOG_PREFIX
+        ));
+    }
+    if config.title_animation && !outcome.title_animation {
+        log_line(format_args!(
+            "{} title-animation NOT INSTALLED -- the title screen keeps its activation flourish",
+            ds2_dialog_skip::LOG_PREFIX
+        ));
+    }
+}
+
+/// Draw the title menu's unavailable rows instead of letting the game hide them.
+///
+/// Called after [`install_title_skip`] for the same ordering reason that one runs last: this is
+/// the feature whose effect the player sees latest, on the menu the other three exist to reach.
+fn install_title_menu() {
+    let config = title_menu::TitleMenuConfig::load();
+    log_line(format_args!("{}", config.describe()));
+    if !config.show_unavailable {
+        return;
+    }
+    ds2_dialog_skip::set_logger(log_line);
+    // SAFETY: both targets are `.pdata` function starts recorded in `ds2-rva`, resolved against the
+    // live module base, and neither is Arxan-redirected. Both detours call the original -- the
+    // styling one brackets it, and the update one runs after it.
+    let outcome = unsafe { ds2_dialog_skip::install_menu() };
+    if !outcome.show_unavailable {
+        log_line(format_args!(
+            "{} top-menu NOT INSTALLED -- unavailable rows will still be hidden",
+            ds2_dialog_skip::LOG_PREFIX
         ));
     }
 }
