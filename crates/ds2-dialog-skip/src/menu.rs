@@ -72,6 +72,49 @@ static APPLY_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 /// Trampoline back to `FeSubStateTitleTopMenu`'s original update.
 static UPDATE_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 
+/// Trampoline back to the original cell factory.
+static BUILD_CELL_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
+
+/// How many times the cell factory has been called.
+static CELLS_BUILT: AtomicUsize = AtomicUsize::new(0);
+
+/// Frames since the title screen started updating.
+///
+/// **There are no timestamps in the loader log**, and the question that matters here is entirely
+/// about ordering in time: the rows are on screen at full brightness for about a second before the
+/// fade takes, and every attempt to place the fade earlier has been applied and then evidently
+/// overwritten. A frame number on each line turns "these things happened" into "this happened 60
+/// frames before that", which is the difference between reading the log and guessing from it.
+static FRAME: AtomicUsize = AtomicUsize::new(0);
+
+/// Set once the per-frame refresh has run, so the first one is stamped.
+static FIRST_REFRESH: AtomicUsize = AtomicUsize::new(0);
+
+/// Set once the styling pass has run, so the first one is stamped.
+static FIRST_STYLE: AtomicUsize = AtomicUsize::new(0);
+
+/// Set once the sequence lengths have been reported.
+static MEASURED: AtomicUsize = AtomicUsize::new(0);
+
+/// Advance the frame counter. Called from the title screen's own per-frame update.
+pub(crate) fn tick_frame() {
+    FRAME.fetch_add(1, Ordering::Relaxed);
+}
+
+/// The current frame number, for stamping a log line.
+fn frame() -> usize {
+    FRAME.load(Ordering::Relaxed)
+}
+
+/// Rows that have already been faded at construction, one bit each.
+///
+/// **This is the whole difference between the working version and the regression.** The factory is
+/// a setup-time provider, not a one-shot builder: a measured run logged it past 256 calls, with row
+/// indices running to 9 -- past the six that exist -- before it stopped. Fading on every call meant
+/// replaying the fade animation from its first frame dozens of times per row, which is what was on
+/// screen. Once per row is the same intent at the rate the intent actually meant.
+static BORN_FADED_ROWS: AtomicU32 = AtomicU32::new(0);
+
 /// Live module base, resolved once at install so neither detour repeats the lookup per frame.
 static MODULE_BASE: AtomicUsize = AtomicUsize::new(0);
 
@@ -133,6 +176,9 @@ type CellForIndexFn = unsafe extern "system" fn(*mut u8, i32) -> *mut u8;
 /// the same here is the same lifetime the game already accepts rather than a new one.
 type BindProxyFn = unsafe extern "system" fn(*mut u8, *mut u8, *mut u8) -> *mut u8;
 
+/// `proxy* build_cell(layout, proxy_out, coords)` -- `0x1400f36b0`. `coords` is `int[2]`.
+type BuildCellFn = unsafe extern "system" fn(*mut u8, *mut u8, *const i32) -> *mut u8;
+
 /// `list* build_rows(list)` -- `0x1400f4250`, filling a caller-supplied 352-byte buffer.
 type BuildRowsFn = unsafe extern "system" fn(*mut u8) -> *mut u8;
 
@@ -186,6 +232,7 @@ unsafe fn reassert_unavailable(group: *mut u8) -> usize {
         if cell.is_null() {
             continue;
         }
+        unsafe { measure_sequences(cell) };
         let state = cell as usize + ds2_rva::FE_BUTTON_STATE_OFFSET;
         // Read before write: a cell the lookup handed back is mapped, and the read also rejects
         // the case where it is already correct, which is the common one on later frames.
@@ -244,7 +291,8 @@ unsafe fn unselectable_rows(group: *mut u8, count: usize) -> u32 {
     let mut mask = if animating { (1u32 << count) - 1 } else { 0 };
     if animating != LAST_ANIMATING.swap(animating, Ordering::Relaxed) {
         log(format_args!(
-            "{LOG_PREFIX} title-scene screen=top-menu animating={animating}"
+            "{LOG_PREFIX} title-scene f={} screen=top-menu animating={animating}",
+            frame()
         ));
     }
     for index in 0..count {
@@ -309,12 +357,21 @@ unsafe fn apply_looks(group: *mut u8, list: *mut u8, count: usize, unselectable:
         if proxy.is_null() {
             continue;
         }
-        unsafe { play_sequence(proxy, sequence) };
+        // The fade starts at its end so the row is faded now rather than after 89 frames of the
+        // bright lead-in. The un-fade is left at the beginning: a row becoming usable is a change
+        // worth seeing happen.
+        let seek = if sequence == ds2_rva::FE_TOP_MENU_SEQUENCE_FADED {
+            ds2_rva::FE_TOP_MENU_SEQUENCE_FADED_SEEK
+        } else {
+            0.0
+        };
+        unsafe { play_sequence(proxy, sequence, seek) };
     }
     if previous != unselectable {
         log(format_args!(
-            "{LOG_PREFIX} looks screen=top-menu unselectable=0b{unselectable:06b} \
+            "{LOG_PREFIX} looks f={} screen=top-menu unselectable=0b{unselectable:06b} \
              faded=0x{:02x} normal=0x{:02x}",
+            frame(),
             ds2_rva::FE_TOP_MENU_SEQUENCE_FADED,
             ds2_rva::FE_TOP_MENU_SEQUENCE_AVAILABLE
         ));
@@ -378,6 +435,12 @@ unsafe extern "system" fn detour_apply_states(group: *mut u8, list: *mut u8) {
     let original: ApplyStatesFn =
         unsafe { std::mem::transmute::<usize, ApplyStatesFn>(trampoline) };
 
+    if FIRST_STYLE.swap(1, Ordering::Relaxed) == 0 {
+        log(format_args!(
+            "{LOG_PREFIX} first f={} screen=top-menu site=styling-pass",
+            frame()
+        ));
+    }
     let list_address = list as usize;
     let count = unsafe { safe_read_i32(list_address + ds2_rva::FE_TOP_MENU_LIST_COUNT_OFFSET) }
         .filter(|count| *count >= 0)
@@ -491,6 +554,12 @@ unsafe fn refresh_looks() {
     if base == 0 {
         return;
     }
+    if FIRST_REFRESH.swap(1, Ordering::Relaxed) == 0 {
+        log(format_args!(
+            "{LOG_PREFIX} first f={} screen=top-menu site=substate-update",
+            frame()
+        ));
+    }
     let Some(globals) = (unsafe { safe_read_usize(base + ds2_rva::FE_TITLE_GLOBALS as usize) })
     else {
         return;
@@ -536,13 +605,88 @@ unsafe fn refresh_looks() {
     unsafe { apply_looks(group, list, count, unselectable) };
 }
 
+/// `float bracket(element, int sequence)` -- the element's slots `0x58` and `0x60`.
+///
+/// `FeObjectButtonEx` calls both with a sequence id and divides one span by another to convert a
+/// position in one sequence into a position in another, which is what identifies them as the start
+/// and end of a sequence in whatever clock the play offset is measured in.
+type SequenceBracketFn = unsafe extern "system" fn(*mut u8, i32) -> f32;
+
+/// `int current_sequence(element)` -- the element's slot `0x50`, compared against `0x85` at
+/// `0x14010ada1`.
+type CurrentSequenceFn = unsafe extern "system" fn(*mut u8) -> i32;
+
+/// MEASUREMENT ONLY. Report how long the fade sequence actually is.
+///
+/// `1000.0` as a play offset produced a row that never dimmed, so the offset is real and a value
+/// past the end leaves the sequence with nothing to play. The end is therefore somewhere between
+/// `0.0` and `1000.0`, and this asks the element rather than bisecting it in front of the person
+/// watching the screen.
+///
+/// # Safety
+///
+/// `cell` must be a live `FeObjectButtonEx`. Both getters are called with the argument shape their
+/// own call sites use, and only after the element pointer has been read without faulting.
+unsafe fn measure_sequences(cell: *mut u8) {
+    if MEASURED.swap(1, Ordering::Relaxed) != 0 {
+        return;
+    }
+    // `FeObjectButtonEx`'s own accessors: slot 21 returns `[this+0x40]`, and slot 19 returns
+    // `[this+0x30]` when that is null.
+    let element = (unsafe { safe_read_usize(cell as usize + 0x40) })
+        .filter(|element| *element != 0)
+        .or_else(|| unsafe { safe_read_usize(cell as usize + 0x30) })
+        .filter(|element| *element != 0);
+    let Some(element) = element else {
+        log(format_args!(
+            "{LOG_PREFIX} measure screen=top-menu element=none"
+        ));
+        return;
+    };
+    let element = element as *mut u8;
+    let Some(vtable) = (unsafe { safe_read_usize(element as usize) }) else {
+        return;
+    };
+    let Some(start_entry) = (unsafe { safe_read_usize(vtable + 0x58) }) else {
+        return;
+    };
+    let Some(end_entry) = (unsafe { safe_read_usize(vtable + 0x60) }) else {
+        return;
+    };
+    let Some(current_entry) = (unsafe { safe_read_usize(vtable + 0x50) }) else {
+        return;
+    };
+    // SAFETY: three slots of the element's own vtable, each called exactly as `0x14010ada1`
+    // onwards calls it.
+    let start: SequenceBracketFn =
+        unsafe { std::mem::transmute::<usize, SequenceBracketFn>(start_entry) };
+    let end: SequenceBracketFn =
+        unsafe { std::mem::transmute::<usize, SequenceBracketFn>(end_entry) };
+    let current: CurrentSequenceFn =
+        unsafe { std::mem::transmute::<usize, CurrentSequenceFn>(current_entry) };
+    for sequence in [
+        ds2_rva::FE_TOP_MENU_SEQUENCE_FADED,
+        ds2_rva::FE_TOP_MENU_SEQUENCE_AVAILABLE,
+    ] {
+        let from = unsafe { start(element, sequence) };
+        let to = unsafe { end(element, sequence) };
+        log(format_args!(
+            "{LOG_PREFIX} measure f={} screen=top-menu sequence=0x{sequence:02x} \
+             start={from:.4} end={to:.4} span={:.4} playing=0x{:02x}",
+            frame(),
+            to - from,
+            unsafe { current(element) }
+        ));
+    }
+}
+
 /// Play a sequence on a bound proxy's frame control.
 ///
 /// # Safety
 ///
 /// `proxy` must be a `FrontendEx::SceneObjProxy` the game's binder returned. Both vtable hops are
 /// checked reads, and the call carries the four registers `0x1400f5087` sets.
-unsafe fn play_sequence(proxy: *mut u8, sequence: i32) {
+unsafe fn play_sequence(proxy: *mut u8, sequence: i32, seek: f32) {
     let frame_ctrl = unsafe { proxy.add(ds2_rva::FE_SCENE_OBJ_PROXY_FRAME_CTRL) };
     let Some(vtable) = (unsafe { safe_read_usize(frame_ctrl as usize) }) else {
         return;
@@ -552,7 +696,66 @@ unsafe fn play_sequence(proxy: *mut u8, sequence: i32) {
     };
     // SAFETY: slot 0 of the frame control's own vtable, read out of a live object.
     let play: PlaySequenceFn = unsafe { std::mem::transmute::<usize, PlaySequenceFn>(entry) };
-    unsafe { play(frame_ctrl, sequence, 0, 0.0) };
+    unsafe { play(frame_ctrl, sequence, 0, seek) };
+}
+
+/// Build the cell as the game does, then fade it once, before anything draws it.
+///
+/// **This is the only point early enough to have no window before it.** Every other pass -- the
+/// styling pass, the substate updates -- runs after the rows are already on screen, which is what
+/// the second of full visibility was.
+///
+/// Faded unconditionally rather than conditionally, because at construction there is nothing to
+/// ask: the cell's state field has not been written and the passes that decide what a row can do
+/// all run later. Starting faded and letting those passes lift it is the ordering with no gap in
+/// it. And faded ONCE per row -- see [`BORN_FADED_ROWS`] for why that qualifier is the difference
+/// between this working and being a regression.
+unsafe extern "system" fn detour_build_cell(
+    layout: *mut u8,
+    proxy_out: *mut u8,
+    coords: *const i32,
+) -> *mut u8 {
+    let trampoline = BUILD_CELL_TRAMPOLINE.load(Ordering::Acquire);
+    if trampoline == 0 {
+        return proxy_out;
+    }
+    // SAFETY: MinHook published this trampoline for this site; all three arguments are forwarded
+    // exactly as received, and the original's return value is passed straight back.
+    let original: BuildCellFn = unsafe { std::mem::transmute::<usize, BuildCellFn>(trampoline) };
+    let proxy = unsafe { original(layout, proxy_out, coords) };
+    CELLS_BUILT.fetch_add(1, Ordering::Relaxed);
+    if proxy.is_null() || coords.is_null() {
+        return proxy;
+    }
+    // Out-of-range coordinates get an empty cell from `0x140027980` rather than a bound proxy, and
+    // an empty cell has no layout element to style. The measured run saw row indices up to 9.
+    let Some(column) = (unsafe { safe_read_i32(coords as usize) }) else {
+        return proxy;
+    };
+    let Some(row) = (unsafe { safe_read_i32(coords as usize + 4) }) else {
+        return proxy;
+    };
+    if column != 0 || row < 0 || row as usize >= ds2_rva::FE_TOP_MENU_ROW_CAPACITY {
+        return proxy;
+    }
+    let bit = 1u32 << row;
+    if BORN_FADED_ROWS.fetch_or(bit, Ordering::Relaxed) & bit != 0 {
+        return proxy;
+    }
+    unsafe {
+        play_sequence(
+            proxy,
+            ds2_rva::FE_TOP_MENU_SEQUENCE_FADED,
+            ds2_rva::FE_TOP_MENU_SEQUENCE_FADED_SEEK,
+        )
+    };
+    log(format_args!(
+        "{LOG_PREFIX} born-faded f={} screen=top-menu row={row} sequence=0x{:02x} calls={}",
+        frame(),
+        ds2_rva::FE_TOP_MENU_SEQUENCE_FADED,
+        CELLS_BUILT.load(Ordering::Relaxed)
+    ));
+    proxy
 }
 
 /// What [`install`] managed to do.
@@ -628,6 +831,26 @@ pub unsafe fn install() -> Outcome {
     };
     if !apply_hook {
         return outcome;
+    }
+
+    let cell_site = base + ds2_rva::FE_TOP_MENU_BUILD_CELL as usize;
+    match unsafe { MhHook::new(cell_site as *mut c_void, detour_build_cell as *mut c_void) } {
+        Ok(hook) => {
+            // Published BEFORE the site is patched: this detour returns the ORIGINAL's proxy, so a
+            // zero here would mean handing back an unbound buffer as if it were a built cell.
+            BUILD_CELL_TRAMPOLINE.store(hook.trampoline() as usize, Ordering::Release);
+            let status = unsafe { MH_EnableHook(cell_site as *mut c_void) };
+            if status != MH_STATUS::MH_OK {
+                log(format_args!(
+                    "{LOG_PREFIX} hook-failed gate=top-menu-cell va=0x{cell_site:016x} \
+                     stage=MH_EnableHook status={status:?}"
+                ));
+            }
+        }
+        Err(status) => log(format_args!(
+            "{LOG_PREFIX} hook-failed gate=top-menu-cell va=0x{cell_site:016x} \
+             stage=MH_CreateHook status={status:?}"
+        )),
     }
 
     let update_site = base + ds2_rva::FE_TOP_MENU_UPDATE as usize;

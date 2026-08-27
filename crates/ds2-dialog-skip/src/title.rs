@@ -337,6 +337,9 @@ unsafe extern "system" fn detour_title_main_update(this: *mut u8, delta: f32) {
         let original: UpdateFn = unsafe { std::mem::transmute::<usize, UpdateFn>(trampoline) };
         unsafe { original(this, delta) };
     }
+    // The title screen updates every frame from well before the menu exists, which makes it the
+    // one clock the menu's own log lines can be stamped against. Nothing else here reads it.
+    crate::menu::tick_frame();
     if this.is_null() {
         return;
     }

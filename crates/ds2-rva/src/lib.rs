@@ -1088,3 +1088,47 @@ pub const SAVE_LOAD_SYSTEM_REQUEST: usize = 0x8;
 ///
 /// Not Arxan-redirected; prologue `48 89 5c 24 08`, five bytes exactly.
 pub const FE_TOP_MENU_BUILD_CELL: u32 = 0x000f_36b0;
+
+/// A seek offset far past the end of any UI sequence. `1000.0` seconds.
+///
+/// **The fourth argument to a sequence play is a start offset, not a flag.** Read from
+/// `FeObjectButtonEx`'s own styling method, which computes one rather than passing zero:
+///
+/// ```text
+/// play(element, 0x68, 0, (now - start_of_85) * (span_of_68 / span_of_85))
+/// ```
+///
+/// -- it starts sequence `0x68` at the point corresponding to how far `0x85` has already run. So a
+/// sequence can be entered part-way, and passing `0.0` everywhere means "always play from the
+/// beginning", which for a fade means watching it fade rather than seeing it faded.
+///
+/// The fourth argument to a sequence play. `0.0`, and **not a seek position.**
+///
+/// This was read as a start offset and it is not one. Four values were tried on screen:
+///
+/// | value | result |
+/// | --- | --- |
+/// | `0.0` | fades, after about a second of bright |
+/// | `100.0` | never fades |
+/// | `103.0` | never fades |
+/// | `1000.0` | never fades |
+///
+/// Any non-zero value stops the fade being seen at all, which is not how a position behaves --
+/// a position inside the range would show the fade part-way through. `FeObjectButtonEx` computes
+/// one as `(end(0x85) - now) * (span(0x68) / span(0x85))`: a REMAINING time, scaled between two
+/// sequences. That reads as a transition duration -- "take this long to get there" -- and a large
+/// duration is indistinguishable on screen from never arriving.
+///
+/// **So the bright second before a row dims is the `0x6c` sequence's own content**, playing from
+/// bright to faded, and no argument to the play call skips it. Making a row dim immediately needs a
+/// different mechanism than this one: either a sequence whose first frame is already faded, or a
+/// setter for the element's playback position. The bracket getters at slots `0x58` and `0x60`, and
+/// the current-time getter at `0x48`, are the place to start looking for the latter.
+///
+/// The measured brackets, kept because they cost a run to get:
+///
+/// ```text
+/// sequence 0x6c   start= 89.0   end=103.0
+/// sequence 0x67   start=  1.0   end=104.0
+/// ```
+pub const FE_TOP_MENU_SEQUENCE_FADED_SEEK: f32 = 0.0;
