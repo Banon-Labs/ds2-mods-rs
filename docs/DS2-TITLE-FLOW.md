@@ -577,3 +577,66 @@ hook could not see, which is the whole argument for moving it.
 
 The `enter` hook stays, doing only the min-duration zeroing: a window that is invisible would
 otherwise still hold its one-second floor before the flow could advance.
+
+## The title-screen wait, and the one thing still not solved
+
+The user's own decomposition is what made this tractable, and it corrected a misattribution: the
+**three splash scenes** are one thing, and the **title screen's own logo and PRESS ANY BUTTON
+prompt** are another. Time spent optimising `FeSubStateTitleLogo` for an animation that belongs to
+`FeSubStateTitleMain` was time spent on the wrong function.
+
+### Forcing the press poll alone does nothing visible
+
+`FeSubStateTitleMain::v3` phase 1 will not even *look* for a press until
+`0x1400f37f0` reports the scene's current sequence is `0x67`:
+
+```text
+scene->vtable[4]();                    // tick
+if (!0x1400f37f0(scene)) return;       // <- THE WAIT IS THE ANIMATION
+if (!0x1400ff420(this)) goto idle;     // the press poll
+```
+
+So the forced press was simply being taken *after* the animation finished on its own. Forcing the
+gate too -- it has the same single caller -- lets phase 1 run on the first frame it is reached, and
+**that removed the PAB prompt entirely** (user-confirmed).
+
+### What the title text actually is
+
+`FeSubStateTitleMain::v1` calls `0x1400f3e30` at `0x1400fda54`, which plays sequence **`0x66`** on
+`[scene+8]`. That is the "DARK SOULS II SCHOLAR OF THE FIRST SIN" text animating in, and nothing in
+the phase machine stops it.
+
+The scene was named by measurement rather than inference: a one-shot probe read the live vptr at
+`[[0x14160de10]+0x80]` and matched it against the RTTI vtable map -- **`FeSceneTitle`**, primary
+vtable RVA `0x010bcab0`, with `0x010bcae0` a secondary (multiple-inheritance) vtable at `+0x18`,
+which is why `[scene+0x28]` points back into the same object.
+
+Sequence ids across the Fe scenes are `0x65`, `0x66`, `0x67`, `0x68`, from the 91 call sites of the
+play forwarder `0x140afdb80`: `0x66`/`0x68` the in and out transitions, `0x67` the settled state.
+
+### Two attempts at making it instant, both recorded as failures
+
+1. **Call `0x140afe8a0` on the `+0x38` handle**, as phase 3 does. Retracted: that function is not a
+   finish. It tail-calls `0x1409d5610`, which compares `[handle]` against a global and on mismatch
+   emits a record tagged `"SMOM"` -- validation or telemetry. It returned success while nothing
+   changed on screen. See `FE_SEQUENCE_NOT_A_FINISH_DO_NOT_USE`.
+2. **Call `0x1400f3820` to play `0x67`**, the settled state the gate waits for. This function *does*
+   do what its name says -- its body is unambiguous -- but the text animated in exactly as before.
+   See `FE_SCENE_TITLE_PLAY_IDLE_INEFFECTIVE`.
+
+Both calls were removed rather than left in on the chance they helped. Neither had a demonstrated
+effect, and a mod carrying calls whose purpose cannot be shown is a mod nobody can reason about
+later.
+
+**The open question**, stated precisely so the next attempt does not start from scratch: playing
+`0x67` does not replace `0x66`, so either the two run in parallel, or `0x67` has its own entry
+animation, or the visible text is not driven by that sequence object at all. The next measurement
+is the one this probe could not take -- `[[scene+0x28]+0x30]` was still null on the first
+`FeSubStateTitleMain` update, so the player object attaches later. Probing it once the title screen
+is settled would name the animation player class and expose whatever seek or rate control it has.
+
+### What shipped
+
+The gate forcing stays, because the outcome it produces is good on its own terms: the flow reaches
+the menu as soon as the data is there, rather than pacing itself to an animation. The title text
+still animates over the top of an already-interactive menu.

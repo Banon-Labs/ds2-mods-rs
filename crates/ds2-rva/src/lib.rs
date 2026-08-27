@@ -759,3 +759,61 @@ pub const FE_TITLE_MAIN_SEQUENCE_HANDLE_OFFSET: usize = 0x38;
 /// phases 1 and 3 will reach the same wrong conclusion from the call sites alone. It was caught by
 /// a live run where it returned success and the title text animated in exactly as before.
 pub const FE_SEQUENCE_NOT_A_FINISH_DO_NOT_USE: u32 = 0x00af_e8a0;
+
+// --------------------------------------------------------------------------------------------
+// NAMING THE UI ANIMATION PLAYER (`ds2-mods-rs-j3b`, still open)
+//
+// The title text animates in and the lever for it is not in the title substate. Both routes into
+// the sequence system are thin forwarders that end in a virtual call, and no `Fe*Sequence` class
+// exists among the 5269 RTTI names to identify the callee from:
+//
+//   0x140afdb80(scene, id, ..)  ->  rcx = [scene+0x28]      ; jmp 0x140b50860
+//   0x140b50860                 ->  rcx = [rcx+0x30]        ; jmp [[rcx] + 0xc0]
+//
+// So the class is resolved the other way round: read the live vptr at the end of that chain and
+// match it against the RTTI vtable map. That is a measurement, and it replaces the inference that
+// produced FE_SEQUENCE_NOT_A_FINISH_DO_NOT_USE above.
+// --------------------------------------------------------------------------------------------
+
+/// The global holding the title-flow object table. RVA `0x0160de10`, VA `0x14160de10`.
+///
+/// Already load-bearing elsewhere in the boot flow: `FeSubStateTitleLogo`'s skip path writes its
+/// `+0x568`, `FeSubStateTitleInitBranch` writes its `+0x564`, and `FeSubStateOfflineModeWindow`
+/// reads its `+0x56b`.
+pub const FE_TITLE_GLOBALS: u32 = 0x0160_de10;
+
+/// Offset of the title scene within [`FE_TITLE_GLOBALS`]. `+0x80`.
+///
+/// `FeSubStateTitleMain::v3` loads it at `0x1400fedc9` (`mov rcx,[rax+0x80]`) and ticks it through
+/// a virtual before consulting either of its gates.
+pub const FE_TITLE_SCENE_OFFSET: usize = 0x80;
+
+/// First hop of the sequence-player chain: `[scene + 0x28]`, read by `0x140afdb80`.
+pub const FE_SEQUENCE_PLAYER_HOP1: usize = 0x28;
+
+/// Second hop: `[hop1 + 0x30]`, read by `0x140b50860`, whose vtable is then dispatched through.
+pub const FE_SEQUENCE_PLAYER_HOP2: usize = 0x30;
+
+/// The vtable slot `0x140b50860` dispatches to: `jmp [rax+0xc0]`, and `0xc0 / 8 == 24`.
+pub const FE_SEQUENCE_PLAYER_PLAY_SLOT: usize = 24;
+
+/// **Plays sequence `0x67` on `FeSceneTitle`, and does NOT stop the text animating.** RVA
+/// `0x000f3820`. Kept as a recorded negative result, not used.
+///
+/// Original reasoning, which was sound as far as it went: `FeSubStateTitleMain::v1` calls
+/// `0x1400f3e30` (`0x1400fda54`), which plays sequence **`0x66`** on `[scene+8]` -- the title text
+/// animating in -- and nothing in the phase machine stops it. `0x1400f3820` plays **`0x67`** on the
+/// same object, the settled state that [`FE_TITLE_MAIN_SEQUENCE_GATE`] waits to observe. Playing it
+/// should therefore have put the text at its final position on the first frame.
+///
+/// **It did not.** Called once on the first `FeSubStateTitleMain` update, in a live run, the text
+/// animated in exactly as before. Unlike
+/// [`FE_SEQUENCE_NOT_A_FINISH_DO_NOT_USE`] the function does do what its name says -- its body is
+/// unambiguous -- so the wrong assumption is elsewhere: either `0x66` continues in parallel rather
+/// than being replaced, or `0x67` carries its own entry animation. That is the open question.
+///
+/// The four sequence ids used across the Fe scenes are `0x65`, `0x66`, `0x67` and `0x68`, read from
+/// the 91 call sites of the sequence-play forwarder `0x140afdb80`, with `0x66`/`0x68` reading as
+/// the in and out transitions and `0x67` as the settled state -- corroborated by
+/// `FeSubStateTitleLogo` using the same set.
+pub const FE_SCENE_TITLE_PLAY_IDLE_INEFFECTIVE: u32 = 0x000f_3820;
