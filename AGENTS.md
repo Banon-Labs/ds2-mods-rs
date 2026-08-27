@@ -94,3 +94,18 @@ bd close <id>         # Complete work
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
 <!-- END BEADS INTEGRATION -->
+
+## Opening a PR from this repo
+
+Two global policy guards apply to `gh` and will block a non-compliant command. Satisfy them up
+front rather than discovering them at the block:
+
+- **`github_pr_draft_guard`** — PRs must be created **as drafts**, and taking one out of draft is
+  blocked. Use `gh pr create --draft`. Note that `--draft` has been observed not to take on
+  creation; check with `gh pr view <n> --json isDraft` and fix with `gh pr ready <n> --undo`.
+- **`github_attribution_guard`** — issue and PR bodies written through `gh` must carry the
+  footer `🤖 Written by <agent>, authorized by @<github-username>`. The guard resolves the body
+  from inline `--body`, `--body-file` contents, and MCP `body` alike, so there is no spelling of
+  the command that avoids it.
+
+Both guards are correct. If a command is blocked, fix the command; do not work around the guard.

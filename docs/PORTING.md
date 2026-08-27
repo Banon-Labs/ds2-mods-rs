@@ -38,9 +38,24 @@ Nothing is testable until this lands.
 | Crate | Source | Size | Notes |
 | --- | --- | --- | --- |
 | `ds2-loader` | new, patterned on `er-ags-stub` | — | `dinput8.dll` proxy; forwards `DirectInput8Create` to the system DLL. Calls the dearxan disabler from `DllMain` before anything else. |
-| `ds2-hook` | `er-hook` | 954 lines, **zero deps** | MinHook FFI + cross-DLL union + pluggable log sink. Ports verbatim; the only ER reference is a comment. |
+| `ds2-hook` | `er-hook` | 954 lines, **zero deps** | MinHook FFI + cross-DLL union + pluggable log sink. Ports almost verbatim -- see the correction below. |
 | `ds2-game-base` | `er-game-base`, partially | 2728 lines in, ~1175 out | See the split below. |
 | `ds2-rva` | new | — | The only crate permitted to hold DS2 addresses. Starts empty. |
+
+### Correction: `er-hook` was not purely generic
+
+The first pass through this table claimed the only Elden Ring reference in `er-hook` was a
+comment. That was wrong, and the port found it: `PRODUCT_DLL_NAME` and `UNION_REGISTER_EXPORT`
+were `b"er_quickload.dll\0"` and `b"er_effects_union_register\0"` -- ER **product identity in
+code**, not in a comment. Nothing in this repo exports `er_effects_union_register`, so carrying
+them over would have left `register_shared_hook` permanently and silently falling through to the
+local union, and renaming them to a DS2 DLL would have invented a fact about a DLL that does not
+exist yet. `ds2-hook` takes the export identity as a caller-supplied parameter instead, which
+makes this document's claim that the product DLL owns the export literally true rather than
+aspirational.
+
+The general lesson, which applies to every remaining row: **"it has no dependencies" is not the
+same as "it has no game knowledge."** Read the constants, not just the manifest.
 
 ### The `er-game-base` split
 
