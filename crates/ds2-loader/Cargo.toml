@@ -32,8 +32,17 @@ crate-type = ["cdylib"]
 # single-threaded. That is a smaller dependency tree for the same result, and the cost is
 # unmeasured startup time rather than correctness. Turn it on if a real run shows the analysis
 # is slow; do not turn it on on a guess.
+#
+# `ds2-hook` and `ds2-rva` arrived with the M1 Arxan probe (`src/arxan_probe.rs`) and are the
+# reason this crate is no longer game-knowledge-free. `ds2-hook` brings the vendored MinHook C
+# into the DLL -- statically, so this module owns its own MinHook instance, which is the design
+# that crate documents. `ds2-rva` brings exactly one address: the function the probe detours.
+# Both are dead weight in an ordinary run (the probe is off unless `DS2_ARXAN_PROBE=1`), and
+# both come out again if the probe is ever removed rather than promoted.
 [target.'cfg(windows)'.dependencies]
 ds2-game-base.workspace = true
+ds2-hook.workspace = true
+ds2-rva.workspace = true
 dearxan = { workspace = true, features = ["disabler"] }
 
 [lints]

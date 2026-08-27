@@ -1,10 +1,12 @@
-//! `dinput8.dll` -- the DARK SOULS II loader shell. Three jobs and nothing else.
+//! `dinput8.dll` -- the DARK SOULS II loader shell. Three jobs, and one experiment that is off
+//! by default.
 //!
-//! This is the smallest thing that can prove the loading path works, so it deliberately does no
-//! hooking, reads no game memory and holds no DS2 address. It exists to answer one question --
+//! This is the smallest thing that can prove the loading path works. On its own it does no
+//! hooking, reads no game memory and holds no DS2 address: it exists to answer one question --
 //! *does a proxied import actually get our code into this process, early enough to matter?* --
 //! and to leave a log line on disk that answers it without anyone having to take an agent's
-//! word for it.
+//! word for it. [`arxan_probe`] is bolted on behind an environment variable and is inert unless
+//! that variable is set.
 //!
 //! # Why a proxy DLL at all
 //!
@@ -34,13 +36,26 @@
 //! the same guarantee without a suspended-process launcher; `LoadLibrary` into a live process
 //! does not, because it arrives after the entry stubs have already run.
 //!
+//! # The fourth job, and it is off unless you ask for it
+//!
+//! [`arxan_probe`] folds the **M1 experiment** into this DLL: one MinHook detour on one chosen
+//! function, watched byte-for-byte to see whether Arxan reverts it. It does nothing at all
+//! unless `DS2_ARXAN_PROBE=1` is in the environment, so an ordinary run of this loader is
+//! byte-for-byte the loader described above.
+//!
+//! It lives HERE rather than in a second DLL on purpose. The proxy is currently the only thing
+//! that gets into this process at all, and inventing a DLL-chaining mechanism to host the probe
+//! would add a second untested variable to an experiment whose entire purpose is to isolate one.
+//! When the probe has reported, the chaining mechanism can be built against a known-good hook.
+//!
 //! # Under Proton
 //!
 //! Dropping this beside the exe is not enough -- Wine prefers its own builtin. The run needs
 //! `WINEDLLOVERRIDES="dinput8=n,b"` ("native first, then builtin"), which is what
 //! `scripts/ds2-run.py` sets. Without it this DLL is never loaded and the log below never
 //! appears; the launcher gates on the log line precisely so that case cannot be mistaken for a
-//! successful run.
+//! successful run. The probe's variables ride the same channel and share the same failure mode
+//! -- see [`arxan_probe::ProbeConfig::from_env`].
 
 // The whole crate is Windows-only by construction: it is a PE export surface and a Win32
 // import forward. On a host build this leaves an empty cdylib rather than a link error, which
@@ -52,11 +67,17 @@ use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::{Once, OnceLock};
 
-use dearxan::disabler::neuter_arxan;
 use dearxan::disabler::result::DearxanResult;
+use dearxan::disabler::{neuter_arxan, schedule_after_arxan};
+
+pub mod arxan_probe;
 
 /// `fdwReason` value for the loader's process-attach notification.
 const DLL_PROCESS_ATTACH: u32 = 1;
+/// `fdwReason` value for the loader's process-detach notification. Fires on an orderly
+/// `ExitProcess`; does NOT fire on `TerminateProcess`. That asymmetry is the whole reason the
+/// probe writes a line here -- see [`arxan_probe::detach_line`].
+const DLL_PROCESS_DETACH: u32 = 0;
 /// `DllMain` returns a Win32 `BOOL`; non-zero means "the DLL initialised successfully".
 /// Returning zero here would fail the *executable's* import resolution and the game would not
 /// start at all, so this path never reports failure -- a loader that could not do its job still
@@ -115,12 +136,43 @@ pub unsafe extern "system" fn DllMain(
         static ATTACHED: Once = Once::new();
         ATTACHED.call_once(|| unsafe { attach(module) });
     }
+    if reason == DLL_PROCESS_DETACH
+        && let Some(line) = arxan_probe::detach_line()
+    {
+        detach_log_line(&line);
+    }
     DLL_MAIN_SUCCESS
+}
+
+/// Write the probe's closing line, **deliberately not through [`log_line`]**.
+///
+/// `ds2_game_base::log::open_fresh_run_append` takes a process-wide mutex on its way to the
+/// rotate bookkeeping. By the time `DLL_PROCESS_DETACH` runs on a terminating process, every
+/// other thread has already been killed wherever it happened to be -- including, with small but
+/// non-zero probability, inside that mutex. Taking it here would hang the game on exit, and a
+/// game that hangs when you quit it is a far worse outcome than a missing final log line.
+///
+/// The file has necessarily been freshened already (the probe wrote its install lines through
+/// the normal path), so a plain append is correct as well as safe.
+fn detach_log_line(line: &str) {
+    let Some(path) = ds2_game_base::log::game_directory_path().map(|dir| dir.join(LOG_FILE_NAME))
+    else {
+        return;
+    };
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let _ = writeln!(file, "{line}");
+        let _ = file.sync_all();
+    }
 }
 
 /// # Safety
 ///
-/// Calls [`neuter_arxan`]. See the safety note on the call itself.
+/// Calls [`neuter_arxan`], or -- in the probe's skip arm -- [`schedule_after_arxan`]. See the
+/// safety notes on the calls themselves.
 unsafe fn attach(module: *mut c_void) {
     // FIRST, before any logging: the identity line is written by the log module's one-shot
     // rotate, so it has to be in place before the first line is appended or the log opens
@@ -128,37 +180,89 @@ unsafe fn attach(module: *mut c_void) {
     // for a log that arrives with a symptom in it.
     ds2_game_base::log::set_identity_line(identity_line(module));
 
+    // Read the environment ONCE, here, and log what it resolved to. Everything below branches on
+    // this value, so a run in which the variables never reached the game says so on its own
+    // second line instead of looking like a probe that failed to report.
+    let config = arxan_probe::ProbeConfig::from_env();
+    arxan_probe::set_probe_logger(log_line);
+
     // JOB 2 (first half): say we are here. If dearxan's callback never fires, this line is the
     // difference between "loaded, and dearxan went quiet" and "never loaded at all".
-    log_line(format_args!("{ATTACH_LINE_PREFIX} awaiting-arxan-callback"));
+    log_line(format_args!(
+        "{ATTACH_LINE_PREFIX} awaiting-arxan-callback {}",
+        config.describe(),
+    ));
 
-    // JOB 1. SAFETY: dearxan applies code patches derived from static analysis of the loaded
-    // image, so a stub misidentified as Arxan would be patched wrongly and the program would be
-    // UB. That risk is inherent to the crate and is why the function is `unsafe`; nothing at
-    // this call site can reduce it. What this call site CAN control is the timing hazard the
-    // docs single out, and it does: this is a statically-imported DLL's `DLL_PROCESS_ATTACH`,
-    // which runs during import resolution, before the executable's entry point -- the position
-    // dearxan asks for, and the reason no suspended-process launcher is needed. It is called
-    // exactly once (the `Once` above), and the callback is `Send + 'static` because dearxan may
-    // run it on the entry-point thread or, if it could not synchronise, on one of its own.
-    unsafe {
-        neuter_arxan(|result: DearxanResult| {
-            // JOB 2 (second half). Not in `DllMain`: this callback runs at the entry point,
-            // after `DllMain` has returned. The result carries both facts the runtime test
-            // needs -- whether Arxan was there, and whether we got to speak before the entry
-            // point ran rather than racing it from a side thread.
-            match result {
-                Ok(status) => log_line(format_args!(
-                    "{ARXAN_LINE_PREFIX} status=ok detected={} blocking_entrypoint={}",
-                    status.is_arxan_detected, status.is_executing_entrypoint,
-                )),
-                // No `Status` on the error path, so `detected`/`blocking_entrypoint` are
-                // genuinely unknown here and are not printed as guesses.
-                Err(error) => log_line(format_args!(
-                    "{ARXAN_LINE_PREFIX} status=error error={error}"
-                )),
-            }
-        });
+    // `None` when the probe is off, which is the default and is the whole of the difference
+    // between this build and the loader without it.
+    let probe = config.enabled.then_some(config.arm);
+    match config.arm {
+        // JOB 1, and the default path. SAFETY: dearxan applies code patches derived from static
+        // analysis of the loaded image, so a stub misidentified as Arxan would be patched wrongly
+        // and the program would be UB. That risk is inherent to the crate and is why the function
+        // is `unsafe`; nothing at this call site can reduce it. What this call site CAN control is
+        // the timing hazard the docs single out, and it does: this is a statically-imported DLL's
+        // `DLL_PROCESS_ATTACH`, which runs during import resolution, before the executable's entry
+        // point -- the position dearxan asks for, and the reason no suspended-process launcher is
+        // needed. It is called exactly once (the `Once` above), and the callback is
+        // `Send + 'static` because dearxan may run it on the entry-point thread or, if it could
+        // not synchronise, on one of its own.
+        arxan_probe::Arm::NeuterArxan => unsafe {
+            neuter_arxan(move |result: DearxanResult| {
+                // JOB 2 (second half). Not in `DllMain`: this callback runs at the entry point,
+                // after `DllMain` has returned. The result carries both facts the runtime test
+                // needs -- whether Arxan was there, and whether we got to speak before the entry
+                // point ran rather than racing it from a side thread.
+                match result {
+                    Ok(status) => log_line(format_args!(
+                        "{ARXAN_LINE_PREFIX} status=ok detected={} blocking_entrypoint={}",
+                        status.is_arxan_detected, status.is_executing_entrypoint,
+                    )),
+                    // No `Status` on the error path, so `detected`/`blocking_entrypoint` are
+                    // genuinely unknown here and are not printed as guesses.
+                    Err(error) => log_line(format_args!(
+                        "{ARXAN_LINE_PREFIX} status=error error={error}"
+                    )),
+                }
+                install_probe(probe);
+            });
+        },
+
+        // THE A/B ARM. `neuter_arxan` is not called, so Arxan's 48 stubs are left running and can
+        // do whatever they do to our detour. What IS called is the scheduling half of it:
+        // `neuter_arxan` is "patch the stubs before the Arxan entry stub" plus "report after it",
+        // and this is the second of those two on its own. That is what keeps the arms comparable
+        // -- same thread, same point in the CRT entry sequence, same SteamStub handling, exactly
+        // one variable changed. Installing from `DllMain` instead would have changed two.
+        //
+        // SAFETY: the same inherent risk as above minus the stub patching. `schedule_after_arxan`
+        // may still patch SteamStub headers, which is the part both arms deliberately share.
+        arxan_probe::Arm::SkipNeuterArxan => unsafe {
+            schedule_after_arxan(move |detected: bool, blocking_entrypoint: bool| {
+                // Deliberately the SAME prefix a neutered run writes. `scripts/ds2-run.py` gates
+                // on it to mean "the loader reached the Arxan decision point and is reporting what
+                // it did there", and `status=skipped` is a truthful answer to that question.
+                // A different prefix would make the skip arm indistinguishable from a run in which
+                // the DLL was never loaded.
+                log_line(format_args!(
+                    "{ARXAN_LINE_PREFIX} status=skipped detected={detected} \
+                     blocking_entrypoint={blocking_entrypoint}"
+                ));
+                install_probe(probe);
+            });
+        },
+    }
+}
+
+/// Install the probe, if this run is one. Called from inside whichever Arxan callback ran, so it
+/// is on the entry-point thread with `DllMain` already returned.
+fn install_probe(arm: Option<arxan_probe::Arm>) {
+    if let Some(arm) = arm {
+        // SAFETY: the target is a `.pdata` function start recorded in `ds2-rva`, resolved against
+        // the live module base, and the probe re-reads the prologue and refuses to patch anything
+        // if it is not the five bytes recorded there. The detour is a naked tail-jump, so it
+        // imposes no ABI on the function it fronts.
+        unsafe { arxan_probe::install(arm) };
     }
 }
 
