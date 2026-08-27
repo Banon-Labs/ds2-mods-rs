@@ -146,6 +146,53 @@ pub const ARXAN_PROBE_HOOK_SITE_LEN: u32 = 0x47;
 /// equivalent.
 pub const ARXAN_PROBE_HOOK_SITE_BACKUP: u32 = 0x0083_89e0;
 
+/// **The redirected probe site**: `applySpEffect`, RVA `0x0014bec0`. Deliberately Arxan's.
+///
+/// [`ARXAN_PROBE_HOOK_SITE`] is a clean function, and that is exactly its limitation: walking it
+/// with `scripts/ds2-arxan-chain.py` terminates at hop 0 because its own prologue is at its own
+/// entry. Arxan has no presence there, so a detour on it can never provoke Arxan, and both arms
+/// of `ds2-mods-rs-z6m` surviving was a null result by construction. This constant exists so the
+/// experiment can be run somewhere Arxan actually is.
+///
+/// # Why this one
+///
+/// It is the only site found so far that is both genuinely redirected and functionally
+/// load-bearing -- `ds2-mods-rs-a1g` needs it -- so one experiment answers both questions.
+///
+/// # Why hooking it is sound, despite [`ARXAN_REDIRECTED_DO_NOT_HOOK`] below
+///
+/// That exclusion says a detour over Arxan's redirect would break control flow. It does not,
+/// and the reason is in MinHook's `trampoline.c`: for a relative `E9` whose destination lies
+/// outside the five bytes being patched, MinHook does not copy the instruction, it emits a
+/// `JMP_ABS` (`FF 25` + an absolute 8-byte address) to that destination and marks the trampoline
+/// complete. So the trampoline jumps to `0x141b3cbe1`, Arxan's chain runs the stolen prologue,
+/// and execution rejoins the original function at entry + `0x14` exactly as it would unhooked.
+/// `oldPos` is 5, which meets MinHook's minimum, so the hook installs.
+///
+/// The two constants below stay excluded for a different reason: they are Arxan's own hot
+/// dispatch functions rather than game functions that happen to be redirected.
+///
+/// # How it was established
+///
+/// `scripts/ds2-arxan-chain.py 0x14014bec0`, statically, no runtime: five hops -- the entry
+/// `jmp`, two obfuscation thunks, then two fragments carrying 16 instructions of genuine stolen
+/// prologue -- rejoining game `.text` at entry + `0x14`. Confirmed separately that no Arxan
+/// encrypted region covers it (2969 regions examined, span `0x140001680`-`0x141cfa783`), so a
+/// stub cannot silently decrypt original bytes back over the detour. See
+/// `docs/ARXAN-FOOTPRINT.md`.
+pub const ARXAN_PROBE_REDIRECTED_SITE: u32 = 0x0014_bec0;
+
+/// The five bytes [`ARXAN_PROBE_REDIRECTED_SITE`] begins with: Arxan's own redirect.
+///
+/// `e9 1c 0d 9f 01` is `jmp 0x141b3cbe1`. The displacement is relative and both ends move
+/// together, so these bytes are identical whatever base the image loads at -- no relocation
+/// applies to them, which is what makes a fixed expectation valid here.
+///
+/// `neuter_arxan` does not rewrite this. Its patch set is a `JmpHook` at each stub's
+/// `test rsp, 0xf` plus `Write`s of decrypted regions, of which DS2 gets zero. So both arms
+/// install over byte-identical bytes and the comparison between them is meaningful.
+pub const ARXAN_PROBE_REDIRECTED_SITE_PROLOGUE: [u8; 5] = [0xe9, 0x1c, 0x0d, 0x9f, 0x01];
+
 /// **NEVER HOOK THESE.** The two hottest functions in the binary, and both are Arxan's.
 ///
 /// `0x00832cb0` (12401 call sites) begins `e9 c1 50 34 01` -> `0x141b77d76`, and `0x00c2c9e0`

@@ -132,6 +132,8 @@ CONFIG_NAME = "ds2-mods.toml"
 CONFIG_SECTION = "arxan_probe"
 KEY_ENABLED = "enabled"
 KEY_SKIP_NEUTER = "skip_neuter"
+#: Mirrors `KEY_SITE` in `arxan_probe.rs`. Which function the detour goes on.
+KEY_SITE = "site"
 KEY_POLL_INTERVAL_MS = "poll_interval_ms"
 KEY_HEARTBEAT_INTERVAL_MS = "heartbeat_interval_ms"
 
@@ -174,6 +176,16 @@ CRASH_ARTIFACTS = (
 #: STALE file would quietly execute whichever arm that file names and produce a perfectly
 #: well-formed verdict for an experiment nobody asked for. That is the failure this comparison
 #: exists to make impossible, and it is why the arm is read back out of the log.
+#: Which site the probe hooks, mirroring `Site` in `arxan_probe.rs`.
+#:
+#: `m1` is the CONTROL and is the default. `scripts/ds2-arxan-chain.py` terminates at hop 0 on
+#: that address -- its own prologue is at its own entry -- so Arxan has no presence there and a
+#: surviving detour says only that hooking works in this game. `redirected` is `applySpEffect`,
+#: whose five entry bytes are Arxan's own redirect; it is the only site where survival is
+#: evidence about Arxan. Keeping the control as the default means an operator who forgets the
+#: flag gets a run that is merely uninformative rather than one that is quietly mislabelled.
+PROBE_SITES: tuple[str, ...] = ("m1", "redirected")
+
 PROBE_ARMS: dict[str, tuple[dict[str, bool], str | None]] = {
     "off": ({KEY_ENABLED: False, KEY_SKIP_NEUTER: False}, None),
     "neuter": ({KEY_ENABLED: True, KEY_SKIP_NEUTER: False}, "neuter-arxan"),
@@ -390,6 +402,9 @@ def absorb_probe_line(line: str, state: dict) -> None:
         if "rva" in parsed:
             state["install"] = state["install"] or line
             state["arm"] = state["arm"] or parsed.get("arm")
+            # A DLL that predates the `site` key reports no site at all, which is precisely the
+            # case that has to be caught rather than defaulted.
+            state["site"] = state["site"] or parsed.get("site")
         elif "minhook" in parsed:
             state["patched"] = state["patched"] or line
         elif "prologue-match" in parsed:
@@ -420,6 +435,7 @@ def new_probe_state() -> dict:
         "install_failed": None,
         "void": None,
         "arm": None,
+        "site": None,
         "heartbeats": [],
         "events": [],
         "config_events": [],
@@ -481,7 +497,9 @@ def watch_probe(tail: LogTail, seconds: float, leftover: Sequence[str] = ()) -> 
     return state
 
 
-def probe_block(requested: str, state: dict) -> tuple[str, int]:
+def probe_block(
+    requested: str, state: dict, expected_site: str | None = None
+) -> tuple[str, int]:
     """Render the verdict for one arm, and the exit code that goes with it.
 
     Returns `EXIT_OK` whenever the experiment RAN, whether or not the detour survived: a detour
@@ -531,6 +549,26 @@ def probe_block(requested: str, state: dict) -> tuple[str, int]:
                 "",
                 "If instead there are no config lines at all, the DLL that loaded is an older",
                 "build than the one staged: check the sha256 above.",
+            ],
+        )
+
+    if expected_site is not None and state.get("site") != expected_site:
+        reported = state.get("site")
+        return refused(
+            f"WRONG SITE -- asked for {expected_site!r}, the DLL hooked {reported or 'an unnamed site'!r}",
+            [
+                "The verdict is withheld because a run that hooks a different function than the",
+                "one requested is not a weaker version of the experiment, it is a DIFFERENT",
+                "experiment wearing its label. `m1` is a clean function Arxan never touched, so",
+                "a detour there surviving says nothing about Arxan; `redirected` overwrites",
+                "Arxan's own five entry bytes.",
+                "",
+                "A DLL reporting NO site predates the `site` key entirely -- rebuild it:",
+                "  cargo xwin build --release --target x86_64-pc-windows-msvc -p ds2-loader",
+                "",
+                "This check exists because it already happened once, on 2026-08-26: a stale",
+                "staged DLL silently ran the control while the launcher reported the arm it was",
+                "asked for, and only an UNKNOWN-key line in the log gave it away.",
             ],
         )
 
@@ -723,6 +761,32 @@ def failed_block(reason: str, detail: list[str]) -> str:
     return "\n".join(lines)
 
 
+#: Files whose modification invalidates a built DLL. Cargo manifests count: a feature or
+#: dependency change alters the binary without any `.rs` being touched.
+SOURCE_GLOBS: tuple[str, ...] = ("crates/**/*.rs", "crates/**/Cargo.toml", "Cargo.toml")
+
+
+def stale_sources() -> list[Path]:
+    """Source files newer than the built DLL.
+
+    Freshness is checked rather than assumed because `stage()` copies whatever happens to sit at
+    `BUILT_DLL`, and a DLL built from older code is the one failure that produces a confident,
+    well-formatted, entirely wrong verdict. `--release` is the profile that gets staged; building
+    `dev` leaves this file untouched and is exactly how the mismatch arises.
+    """
+    if not BUILT_DLL.is_file():
+        return []
+    built = BUILT_DLL.stat().st_mtime
+    newer = []
+    for pattern in SOURCE_GLOBS:
+        for path in REPO_ROOT.glob(pattern):
+            if "target" in path.parts:
+                continue
+            if path.is_file() and path.stat().st_mtime > built:
+                newer.append(path)
+    return newer
+
+
 def preflight(dry_run: bool) -> list[str]:
     """Return the problems that make a real run impossible. Empty list means go."""
     problems: list[str] = []
@@ -731,6 +795,21 @@ def preflight(dry_run: bool) -> list[str]:
             f"built DLL not found: {BUILT_DLL}\n"
             "    build it: cargo xwin build --release --target x86_64-pc-windows-msvc -p ds2-loader"
         )
+    else:
+        stale = stale_sources()
+        if stale:
+            shown = ", ".join(sorted(q.name for q in stale[:4]))
+            more = f" (+{len(stale) - 4} more)" if len(stale) > 4 else ""
+            problems.append(
+                f"the built DLL is OLDER than {len(stale)} source file(s): {shown}{more}\n"
+                f"    {BUILT_DLL}\n"
+                "    A stale DLL does not fail loudly -- it runs the PREVIOUS behaviour under\n"
+                "    the CURRENT config and reports a verdict for an experiment nobody ran.\n"
+                "    That happened on 2026-08-26: a run requested the `redirected` probe site,\n"
+                "    the staged DLL predated that key, and the log shows it quietly hooking the\n"
+                "    m1 CONTROL instead. Only the DLL's own UNKNOWN-key line gave it away.\n"
+                "    rebuild: cargo xwin build --release --target x86_64-pc-windows-msvc -p ds2-loader"
+            )
     if not GAME_DIR.is_dir():
         problems.append(f"game directory not found: {GAME_DIR}")
     elif not os.access(GAME_DIR, os.W_OK):
@@ -752,7 +831,9 @@ def launch_env(probe: str) -> dict[str, str]:
     return {"WINEDLLOVERRIDES": DLL_OVERRIDE}
 
 
-def config_text(probe: str, fault_after_ms: int = NO_FAULT_MS) -> str:
+def config_text(
+    probe: str, fault_after_ms: int = NO_FAULT_MS, site: str = "m1"
+) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
     Deterministic: the same arm produces the same file every time, with no timestamp and no
@@ -792,6 +873,10 @@ def config_text(probe: str, fault_after_ms: int = NO_FAULT_MS) -> str:
 # one while the game is running changes nothing and says so in the log.
 {KEY_ENABLED} = {str(settings[KEY_ENABLED]).lower()}
 {KEY_SKIP_NEUTER} = {str(settings[KEY_SKIP_NEUTER]).lower()}
+# STARTUP-ONLY. "m1" is the control: a clean function Arxan never touched, where a surviving
+# detour says only that hooking works at all. "redirected" is applySpEffect, whose five entry
+# bytes ARE Arxan's redirect -- the only site where survival is evidence about Arxan.
+{KEY_SITE} = "{site}"
 
 [{CRASH_SECTION}]
 {crash_banner}# STARTUP-ONLY, both of them. The handler is installed in DllMain BEFORE `neuter_arxan`, because
@@ -828,11 +913,11 @@ def config_text(probe: str, fault_after_ms: int = NO_FAULT_MS) -> str:
 
 
 def write_config(
-    directory: Path, probe: str, fault_after_ms: int = NO_FAULT_MS
+    directory: Path, probe: str, fault_after_ms: int = NO_FAULT_MS, site: str = "m1"
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
-    text = config_text(probe, fault_after_ms)
+    text = config_text(probe, fault_after_ms, site)
     path.write_text(text, encoding="utf-8")
     return path, text
 
@@ -892,7 +977,9 @@ def stage() -> tuple[Path, str]:
     return staged, sha256(staged)
 
 
-def dry_run(probe: str, observe: float, fault_after_ms: int = NO_FAULT_MS) -> int:
+def dry_run(
+    probe: str, observe: float, fault_after_ms: int = NO_FAULT_MS, site: str = "m1"
+) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
     problems = preflight(dry_run=True)
@@ -913,7 +1000,7 @@ def dry_run(probe: str, observe: float, fault_after_ms: int = NO_FAULT_MS) -> in
     config_path = GAME_DIR / CONFIG_NAME
     if config_path.is_file():
         current = config_path.read_text(encoding="utf-8")
-        if current == config_text(probe, fault_after_ms):
+        if current == config_text(probe, fault_after_ms, site):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
         else:
             print("[dry-run] config   present and DIFFERS; a real run would replace it")
@@ -928,7 +1015,7 @@ def dry_run(probe: str, observe: float, fault_after_ms: int = NO_FAULT_MS) -> in
     # THE CONFIGURATION UNDER TEST, VERBATIM. It is the whole variable this run turns on, so a
     # dry-run that did not show it would be hiding the one thing it exists to preview.
     print(f"[dry-run] would write  {config_path}")
-    print(quoted_config(config_text(probe, fault_after_ms), indent="[dry-run]   | "))
+    print(quoted_config(config_text(probe, fault_after_ms, site), indent="[dry-run]   | "))
     print(f"[dry-run] would launch env {environment} steam -applaunch {APPID}")
     print(f"[dry-run] would poll   {log_path}")
     # The DLL echoes the config back BEFORE it decides anything, so these are the first lines a
@@ -963,7 +1050,9 @@ def dry_run(probe: str, observe: float, fault_after_ms: int = NO_FAULT_MS) -> in
     return EXIT_ERROR if problems else EXIT_OK
 
 
-def launch(probe: str, observe: float, fault_after_ms: int = NO_FAULT_MS) -> int:
+def launch(
+    probe: str, observe: float, fault_after_ms: int = NO_FAULT_MS, site: str = "m1"
+) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
     if problems:
@@ -978,7 +1067,7 @@ def launch(probe: str, observe: float, fault_after_ms: int = NO_FAULT_MS) -> int
     # BEFORE LAUNCHING, and after staging: the DLL reads this in `DllMain`, so it has to be on
     # disk before the game starts, and it is rewritten every run so a file left over from the
     # other arm cannot decide this one.
-    config_path, config = write_config(GAME_DIR, probe, fault_after_ms)
+    config_path, config = write_config(GAME_DIR, probe, fault_after_ms, site)
     print(f"[config] {config_path}")
 
     log_path = GAME_DIR / LOG_NAME
@@ -1063,7 +1152,7 @@ def launch(probe: str, observe: float, fault_after_ms: int = NO_FAULT_MS) -> int
     # See the docstring of `watch_probe` for the run this cost.
     print(f"[probe] observing {observe:.0f}s for {PROBE_LINE_PREFIX!r} lines")
     probe_state = watch_probe(tail, observe, verdict.get("leftover", ()))
-    block, code = probe_block(probe, probe_state)
+    block, code = probe_block(probe, probe_state, site if probe != "off" else None)
     print(block)
     return code
 
@@ -1304,7 +1393,7 @@ def selftest() -> int:
     check(f'"{CONFIG_LINE_PREFIX}"' in probe_src, f"the DLL echoes what it read ({CONFIG_LINE_PREFIX})")
     check(f'"{CONFIG_NAME}"' in probe_src, f"the DLL reads the config file this writes ({CONFIG_NAME})")
     check(f'"{CONFIG_SECTION}"' in probe_src, f"the DLL reads the section this writes ([{CONFIG_SECTION}])")
-    for key in (KEY_ENABLED, KEY_SKIP_NEUTER, KEY_POLL_INTERVAL_MS, KEY_HEARTBEAT_INTERVAL_MS):
+    for key in (KEY_ENABLED, KEY_SKIP_NEUTER, KEY_SITE, KEY_POLL_INTERVAL_MS, KEY_HEARTBEAT_INTERVAL_MS):
         check(f'"{key}"' in probe_src, f"the DLL reads {CONFIG_SECTION}.{key}")
     for arm, (_, expected_arm) in PROBE_ARMS.items():
         if expected_arm is not None:
@@ -1383,6 +1472,21 @@ def selftest() -> int:
             and f"# {KEY_HEARTBEAT_INTERVAL_MS} = {DEFAULT_HEARTBEAT_INTERVAL_MS}" in text,
             f"--probe {arm} documents the live keys and their defaults in the file",
         )
+
+    # THE SITE MUST BE WRITTEN AND MUST DEFAULT TO THE CONTROL. A run that asks for the
+    # redirected site and silently gets the clean one would survive and mean nothing, which is
+    # the precise failure ds2-mods-rs-by0 exists to prevent.
+    for want in PROBE_SITES:
+        values, _ = parse_config(config_text("neuter", site=want))
+        check(
+            values.get((CONFIG_SECTION, KEY_SITE)) == want,
+            f'--probe-site {want} writes [{CONFIG_SECTION}] {KEY_SITE} = "{want}"',
+        )
+    values, _ = parse_config(config_text("neuter"))
+    check(
+        values.get((CONFIG_SECTION, KEY_SITE)) == "m1",
+        "the site defaults to the control, not to the interesting one",
+    )
 
     # THE ARMS MUST DIFFER, and in exactly one key. If two arms ever generated the same file the
     # A/B comparison would be two runs of the same experiment, and the arm-readback guard would
@@ -1625,6 +1729,19 @@ def main() -> int:
         help="test the log tailer, the DLL/script contract and the verdict logic",
     )
     parser.add_argument(
+        "--probe-site",
+        choices=PROBE_SITES,
+        default="m1",
+        help=(
+            "which function the detour goes on. `m1` (default) is the CONTROL -- a clean "
+            "function Arxan never touched, where a surviving detour proves only that hooking "
+            "works in this game. `redirected` is applySpEffect, whose five entry bytes ARE "
+            "Arxan's redirect, and is the only site where survival is evidence about Arxan. "
+            "The control is the default so a forgotten flag yields an uninformative run rather "
+            "than a mislabelled one."
+        ),
+    )
+    parser.add_argument(
         "--probe",
         choices=sorted(PROBE_ARMS),
         default="off",
@@ -1666,8 +1783,8 @@ def main() -> int:
     if args.selftest:
         return selftest()
     if args.dry_run:
-        return dry_run(args.probe, args.observe, args.crash_test)
-    return launch(args.probe, args.observe, args.crash_test)
+        return dry_run(args.probe, args.observe, args.crash_test, args.probe_site)
+    return launch(args.probe, args.observe, args.crash_test, args.probe_site)
 
 
 if __name__ == "__main__":
