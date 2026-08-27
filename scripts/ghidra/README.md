@@ -27,6 +27,9 @@ that is `query.sh`.
 | `rt/Ds2Xrefs.java` | What references this address, and **how many**? The call-site count is how hook sites get picked. |
 | `rt/Ds2Mem.java` | Read memory as pointers (vtables), image-relative offsets, bytes, or a string. |
 | `rt/Ds2ByteScan.java` | Where does this masked byte pattern occur? `?` wildcards a nibble, for ModRM register fields. |
+| `rt/Ds2SymCensus.java` | How MANY symbols match, and give me the whole table. `count` per-pattern totals; `dump` writes every symbol to a TSV so follow-up questions are grep, not another 15s round trip. |
+| `rt/Ds2ArxanStubs.java` | Which functions are Arxan-redirected -- the whole census, or a verdict per VA. **Run this on any address before building on it.** |
+| `sym-namespaces.py` | Namespace histogram over a `Ds2SymCensus dump`. Not a postScript, and deliberately not in `rt/`. |
 
 ## Verified against this repo's existing numbers
 
@@ -48,8 +51,12 @@ So the project's addresses are 1:1 with the RVAs this repo records, and with the
 **One caveat that matters.** This project is the **shipped, Arxan-obfuscated** binary -- it has the
 SteamStub `.bind` section. `darksoulsii-deobf.bin` is the dearxan-*deobfuscated* flat image. They
 agree at every site Arxan did not touch, which is why the M1 site matches exactly. They will
-**not** agree at the 286 Arxan-redirected functions. Check with `Ds2Disasm` before trusting a site:
-a leading `JMP rel32` into the second `.text` block is a redirected stub.
+**not** agree at the Arxan-redirected functions. Check before trusting a site: a leading
+`JMP rel32` into the second `.text` block is a redirected stub. `rt/Ds2ArxanStubs.java` answers it
+for a VA or for the whole image, and reports **311** such entry points over Ghidra's 88374
+functions -- where [`docs/ARXAN-FOOTPRINT.md`](../../docs/ARXAN-FOOTPRINT.md) reports 286 over the
+95434 function starts recovered from `.pdata`. Two different populations; the delta of 25 is not
+reconciled.
 
 ## Why DS2 is unusually good at this
 
@@ -61,7 +68,7 @@ classes mean **identifying a class is reading its name**, not inferring it from 
 is missing is method names -- functions are `FUN_<va>` under a named class. See
 [`docs/DS2-ENGINE.md`](../../docs/DS2-ENGINE.md).
 
-## Three traps, all of which cost a round trip here
+## Four traps, all of which cost a round trip here
 
 **1. `-scriptPath` compiles the whole directory as one OSGi bundle.** One `.java` that fails to
 compile poisons the bundle, and the script you actually asked for fails with `The class could not be
@@ -82,6 +89,14 @@ fix**: `rm -rf ~/.config/ghidra/ghidra_11.3.1_PUBLIC/osgi/{compiled-bundles,feli
 `grep -v '^INFO'` -- deletes the entire output and leaves a run that looks like a silent success.
 `query.sh` extracts script lines itself and always passes `ERROR`/exception lines through to stderr.
 `DS2_GHIDRA_RAW=1` gives the unfiltered log.
+
+**4. And a multi-line `println` loses everything after line one.** Only the FIRST line of a
+log4j record carries the `INFO  <script>> ` prefix that `query.sh` matches, so one `println`
+holding embedded newlines prints its first line and silently drops the rest. This is not
+hypothetical: `rt/Ds2Decomp.java` shipped that way and **every decompile this repo ever ran
+printed its `####` banner and no code**, which reads as "that function has no body". Fixed by
+splitting per line. `rt/Ds2Mem.java` documents the same trap for its `bytes` mode. One `println`
+per output line, always.
 
 ## What was deliberately NOT ported
 
