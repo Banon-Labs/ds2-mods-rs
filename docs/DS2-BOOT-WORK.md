@@ -694,6 +694,57 @@ earlier text in this document calling both of them floors was wrong about half o
 experiment that would have caught it earlier is exactly the one that caught it now: change the
 thing you believe is responsible and see whether the number moves.
 
+## The engine block is sleeping, and it is measured rather than inferred
+
+`/proc` said the window was neither disk-bound nor CPU-bound. The binary offered a candidate: of
+the thirteen `Sleep` call sites, two pass `0`, one passes `1` inside a `PeekMessageW` pump at
+`0x140fecdd6` that spins until `[rbx+0x11c]` clears, and five pass `10`. Counting settles it.
+
+`Sleep` is `void Sleep(DWORD)` — one integer, nothing on the stack — so it needs none of the
+naked-thunk machinery a ten-argument import would. And the patch is the **IAT slot**
+(RVA `0x01aae314`), a pointer write in `.idata`: no instruction is modified, so Arxan's `.text`
+checks have nothing to see, and only this executable's calls are counted rather than every module
+in the process. The detour passes the requested duration through untouched — an instrument that
+shortened the sleeps would be answering a different question.
+
+| point | t | sleep calls | requested |
+| --- | --- | --- | --- |
+| input init (`dinput8-create`) | 951.2 ms | 4 | 4 ms |
+| first substate (`0x01`) | 3992.6 ms | 3635 | 9870 ms |
+| top menu | 5803.7 ms | 4026 | 17160 ms |
+
+**In the 3041 ms engine block the game makes 3631 `Sleep` calls and asks for 9866 ms of sleep.**
+Three times more sleep is requested than the window is long, so several threads are sleeping at
+once — the counter is process-wide and cannot say which, but a process asking for nine seconds of
+sleep inside three seconds of wall time is not a process that is busy.
+
+Broken down by requested duration over the whole boot:
+
+```
+Sleep(0)    2523   63%   yield
+Sleep(1)     626
+Sleep(2-9)   448
+Sleep(10)      0
+Sleep(>10)   429
+```
+
+`Sleep(0)` dominating is the signature of a **frame limiter**, and the binary has one: `0x140feb890`
+computes `[this+0x170] / 1000` and sleeps that many milliseconds, falling through to `Sleep(0)` when
+the value is not positive — "sleep the rest of this frame, or yield if we are already late". So the
+engine block looks like a loop that advances a fixed number of steps per frame and paces itself,
+which would explain everything: reproducible to 0.67%, half a core, no I/O after the early burst.
+
+**That last step is a hypothesis, not a measurement.** Sleeping a lot is measured; *frame-paced with
+a fixed step count* is the explanation that fits, and it is not yet proven. The test is to count
+calls to `0x140feb890` specifically rather than to `Sleep` generally: if the engine block is a fixed
+number of frames, that count is the frame count and it will be the same on every run. That is one
+MinHook detour on a `(this)` signature.
+
+If it holds, the lever is not "make the work faster" — there is barely any work — it is either more
+steps per frame during init, or a higher frame cap while the title flow is still coming up. Both are
+larger changes than anything in this document so far, and neither should be attempted before the
+frame count is on the table.
+
 ## The caveat that governs every address here
 
 These come from the deobfuscated image, which is not the byte stream that runs. Vtables and the

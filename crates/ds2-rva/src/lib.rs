@@ -1462,3 +1462,27 @@ pub const FE_SUBSTATE_TITLE_INFORMATION_ELAPSED_OFFSET: usize = 0x5a24;
 /// frame delta being added before the comparison cannot matter, and so the intent is legible: this
 /// is "the minimum display time has elapsed", not "the timer is exactly at the threshold".
 pub const FE_SUBSTATE_FLOOR_ELAPSED: f32 = 2.0;
+
+/// The import thunk `DarkSoulsII.exe` calls `KERNEL32!Sleep` through. RVA `0x01aae314`.
+///
+/// # Why an IAT slot rather than the function
+///
+/// The engine block -- 3.06s between input initialisation and the title flow -- reproduces to
+/// 0.67%, reads nothing from disk after an early burst, and never exceeds half of one core. That
+/// combination is the signature of sleeping, not of working, and the binary has a candidate: a
+/// `PeekMessageW` / `Sleep(1)` / check-a-flag loop at `0x140fecdd6` that spins until `[rbx+0x11c]`
+/// clears. Three seconds of that is about three thousand iterations.
+///
+/// Counting the game's `Sleep` calls tests it directly, and patching **the IAT slot** rather than
+/// `KERNEL32!Sleep` itself is what keeps the test cheap and honest: it is a pointer write in
+/// `.idata`, so no code is modified, Arxan's `.text` integrity checks have nothing to see, and only
+/// this executable's calls are counted rather than every module in the process.
+///
+/// `Sleep` is `void Sleep(DWORD)` -- one integer argument, no stack arguments, no return value --
+/// which is why this one can be fronted from Rust with an ordinary `extern "system"` function and
+/// needs none of the naked-thunk machinery a ten-argument import like `D3D11CreateDevice` would.
+///
+/// Established by walking the import descriptors: `KERNEL32.dll`'s `FirstThunk` is at RVA
+/// `0x1aade6c` and `Sleep` is the entry that lands here. There are **13** call sites in the image;
+/// two of them are `Sleep(0)` yield loops and one is the `Sleep(1)` pump above.
+pub const SLEEP_IAT_THUNK: u32 = 0x01aa_e314;

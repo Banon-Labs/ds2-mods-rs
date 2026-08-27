@@ -89,8 +89,9 @@ static FLUSHED: AtomicU32 = AtomicU32::new(0);
 pub fn mark(label: &'static str) {
     let at_us = now_us();
     if FLUSHED.load(Ordering::Acquire) != 0 {
+        let (calls, ms) = sleep_totals();
         log(format_args!(
-            "{LOG_PREFIX} milestone label={label} t={:.3}ms",
+            "{LOG_PREFIX} milestone label={label} t={:.3}ms sleep-calls={calls} sleep-ms={ms}",
             at_us as f64 / 1000.0
         ));
         return;
@@ -136,6 +137,127 @@ fn flush_milestones() {
         ));
     }
     FLUSHED.store(1, Ordering::Release);
+}
+
+// ============================================================================================
+// SLEEP ACCOUNTING. Does the boot spend its time asleep? `/proc` says the process is neither
+// disk-bound nor CPU-bound through the engine block, and the binary holds a `PeekMessageW` /
+// `Sleep(1)` / check-a-flag loop at `0x140fecdd6`. Counting is the way to find out.
+//
+// The patch is a POINTER WRITE IN `.idata`, not a code patch: no instruction is modified, so
+// Arxan's `.text` integrity checks have nothing to react to, and only this executable's calls are
+// counted rather than every module in the process.
+// ============================================================================================
+
+unsafe extern "system" {
+    fn VirtualProtect(address: *mut c_void, size: usize, new: u32, old: *mut u32) -> i32;
+}
+const PAGE_READWRITE: u32 = 0x04;
+
+/// `void Sleep(DWORD)` -- one integer argument, none on the stack, no return value. That is the
+/// whole reason this import can be fronted by an ordinary Rust function.
+type SleepFn = unsafe extern "system" fn(u32);
+
+static ORIGINAL_SLEEP: AtomicUsize = AtomicUsize::new(0);
+static SLEEP_CALLS: AtomicU64 = AtomicU64::new(0);
+static SLEEP_REQUESTED_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Calls bucketed by requested duration: `0`, `1`, `2..=9`, `10`, `>10`.
+///
+/// The buckets are the binary's own call sites rather than round numbers. Of the thirteen `Sleep`
+/// sites, two pass `0` (yield loops), one passes `1` (the `PeekMessageW` pump at `0x140fecdd6`),
+/// five pass `10`, and the rest pass a register. Splitting on exactly those values turns a total
+/// into an attribution: 4000 calls means nothing, 4000 calls of `1` names one loop.
+static SLEEP_BUCKETS: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+
+fn sleep_bucket(milliseconds: u32) -> usize {
+    match milliseconds {
+        0 => 0,
+        1 => 1,
+        2..=9 => 2,
+        10 => 3,
+        _ => 4,
+    }
+}
+
+/// Count, then sleep exactly as asked. **This changes no timing of its own**: the requested
+/// duration is passed through untouched, because the question is where the boot's time goes and an
+/// instrument that shortened the sleeps would be answering a different one.
+unsafe extern "system" fn detour_sleep(milliseconds: u32) {
+    SLEEP_CALLS.fetch_add(1, Ordering::Relaxed);
+    SLEEP_REQUESTED_MS.fetch_add(u64::from(milliseconds), Ordering::Relaxed);
+    SLEEP_BUCKETS[sleep_bucket(milliseconds)].fetch_add(1, Ordering::Relaxed);
+    let original = ORIGINAL_SLEEP.load(Ordering::Acquire);
+    if original != 0 {
+        // SAFETY: read out of the import slot before it was overwritten, so it is whatever the
+        // Windows loader resolved `KERNEL32!Sleep` to.
+        let original: SleepFn = unsafe { std::mem::transmute::<usize, SleepFn>(original) };
+        unsafe { original(milliseconds) };
+    }
+}
+
+/// Point the game's `Sleep` import at [`detour_sleep`]. Returns false and logs on any failure.
+///
+/// # Safety
+///
+/// `base` must be the live game module base; the RVA must be the import slot it names.
+unsafe fn hook_sleep_import(base: usize) -> bool {
+    let slot = (base + ds2_rva::SLEEP_IAT_THUNK as usize) as *mut usize;
+    let mut old_protect = 0u32;
+    // SAFETY: one pointer-sized slot inside the image's own `.idata`.
+    let ok = unsafe {
+        VirtualProtect(
+            slot.cast::<c_void>(),
+            std::mem::size_of::<usize>(),
+            PAGE_READWRITE,
+            &raw mut old_protect,
+        )
+    };
+    if ok == 0 {
+        log(format_args!(
+            "{LOG_PREFIX} sleep-hook-failed stage=VirtualProtect slot=0x{:016x}",
+            slot as usize
+        ));
+        return false;
+    }
+    // SAFETY: the slot is now writable, and it holds the resolved import the loader wrote.
+    unsafe {
+        // PUBLISHED BEFORE THE SLOT IS OVERWRITTEN. Another thread can be inside `Sleep` already;
+        // one that entered the detour with a zero here would return without sleeping at all, which
+        // would change the game's behaviour rather than measure it.
+        ORIGINAL_SLEEP.store(slot.read(), Ordering::Release);
+        // Through the fn-pointer type first: a direct `as usize` on a function ITEM is a
+        // zero-sized cast that clippy rejects, and rightly -- it reads as an address but is not
+        // one until the item has been coerced to a pointer.
+        let detour: SleepFn = detour_sleep;
+        slot.write(detour as usize);
+        let mut restored = 0u32;
+        VirtualProtect(
+            slot.cast::<c_void>(),
+            std::mem::size_of::<usize>(),
+            old_protect,
+            &raw mut restored,
+        );
+    }
+    log(format_args!(
+        "{LOG_PREFIX} hooked import=KERNEL32!Sleep slot=0x{:016x} original=0x{:016x}",
+        slot as usize,
+        ORIGINAL_SLEEP.load(Ordering::Acquire)
+    ));
+    true
+}
+
+/// `sleep0=..` etc, for the lines that report a breakdown.
+fn sleep_histogram() -> [u64; 5] {
+    std::array::from_fn(|i| SLEEP_BUCKETS[i].load(Ordering::Relaxed))
+}
+
+/// `calls=N ms=M` for the milestone and boot-complete lines.
+fn sleep_totals() -> (u64, u64) {
+    (
+        SLEEP_CALLS.load(Ordering::Relaxed),
+        SLEEP_REQUESTED_MS.load(Ordering::Relaxed),
+    )
 }
 
 /// The id of the substate currently resident, or [`NO_SUBSTATE`].
@@ -233,14 +355,24 @@ fn on_enter(id: u32, pending: i32) {
     // `pending` is the flow's `+0x48`, the id an outside caller asked for -- `FeOperatorTitle`
     // writes `0x17` there to return to the title. It is logged because a transition driven from
     // outside the substate graph looks identical to one driven by a transition object otherwise.
+    let (calls, ms) = sleep_totals();
     log(format_args!(
-        "{LOG_PREFIX} enter seq={seq} id=0x{id:02x} t={:.3}ms pending={pending}",
+        "{LOG_PREFIX} enter seq={seq} id=0x{id:02x} t={:.3}ms pending={pending} \
+         sleep-calls={calls} sleep-ms={ms}",
         at_us as f64 / 1000.0
     ));
     if id == ds2_rva::FE_SUBSTATE_ID_TITLE_TOP_MENU {
+        let (calls, ms) = sleep_totals();
+        let h = sleep_histogram();
         log(format_args!(
-            "{LOG_PREFIX} boot-complete reached=top-menu t={:.3}ms",
-            at_us as f64 / 1000.0
+            "{LOG_PREFIX} boot-complete reached=top-menu t={:.3}ms sleep-calls={calls} \
+             sleep-ms={ms} sleep0={} sleep1={} sleep2-9={} sleep10={} sleep-gt10={}",
+            at_us as f64 / 1000.0,
+            h[0],
+            h[1],
+            h[2],
+            h[3],
+            h[4]
         ));
     }
 }
@@ -549,6 +681,9 @@ pub unsafe fn install() -> Outcome {
             attempted: sites.len(),
         };
     }
+
+    // SAFETY: `base` is the live module base; the RVA names this image's own `Sleep` import slot.
+    unsafe { hook_sleep_import(base) };
 
     let mut installed = 0;
     for site in &sites {
