@@ -136,6 +136,94 @@ pub(crate) fn path_for(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// The tier-attempt sentinel, beside the dump it guards.
+///
+/// # Why a file, when a return value would be simpler
+///
+/// Because `MiniDumpWriteDump` does not always return. Measured in DARK SOULS II under Proton
+/// (`ds2-mods-rs-bee`): at the rich tier it does not report a failure -- it raises `0xc0000005`
+/// INSIDE `dbghelp` (`dbghelp.dll+0x16f79`), having already written ~209KB, and the process dies
+/// in the middle of the call. Every fallback below is an `if ok == 0` check on a value that is
+/// never produced, so the tier ladder is structurally unable to react to its own worst failure.
+///
+/// A file survives a call that does not return. Written before the attempt and deleted after it,
+/// a sentinel still on disk at the next startup means precisely one thing: the previous run went
+/// into `MiniDumpWriteDump` at the tier it names and never came out.
+///
+/// Windows-only, like everything that touches `dbghelp`: the host build of this crate has a stub
+/// `install` and never writes a dump, so a host-visible sentinel would be dead code pretending to
+/// be a feature.
+#[cfg(windows)]
+pub(crate) fn sentinel_path() -> PathBuf {
+    path_for(&format!("{}.attempt", config().minidump_file_name))
+}
+
+/// The accumulated list of rungs that have killed `dbghelp`, beside the dump.
+///
+/// Separate from the sentinel on purpose. The sentinel answers "what was in flight when we died"
+/// and is overwritten by every attempt; this answers "what has EVER died" and only grows. Keeping
+/// one file for both made the bans oscillate -- measured across three in-game runs: ban rich, retry
+/// normal, die, ban normal (forgetting rich), retry rich, die, forever.
+#[cfg(windows)]
+pub(crate) fn banned_rungs_path() -> PathBuf {
+    path_for(&format!("{}.banned", config().minidump_file_name))
+}
+
+/// The rung a sentinel's contents name.
+///
+/// Split out of [`surviving_sentinel_tier`] so the decision can be tested without a filesystem.
+/// The two properties that matter are both here: a well-formed rung comes back, and ANYTHING else
+/// comes back `None`. That second one is load-bearing -- a corrupt sentinel that resolved to some
+/// default rung would ban it, and a wrongly banned rung is one fewer chance at a dump, forever.
+///
+/// A RUNG INDEX, not the dump flags. Rungs 1 and 2 share `MINIDUMP_NORMAL` and differ only in
+/// whether the exception parameter is passed -- and rung 2 is the one `../er-mods-rs` found was the
+/// ONLY tier Proton would accept. Banning by flags would take rung 2 down with rung 1 and throw
+/// away the tier most likely to work.
+///
+/// `any(windows, test)` rather than plain `windows`: the only production caller is Windows-only,
+/// but the host test build needs it, and a bare `allow(dead_code)` would hide a real dead function
+/// later.
+#[cfg(any(windows, test))]
+pub(crate) fn parse_sentinel_tier(text: &str) -> Option<u32> {
+    let rung = text.trim().parse::<u32>().ok()?;
+    // Bounds-checked against the ladder: a rung index from a corrupt or stale file that named
+    // something outside it would ban nothing real while looking like it had.
+    (rung < DUMP_LADDER_RUNGS).then_some(rung)
+}
+
+/// Rungs in the dump ladder. Kept next to the parser so the bound and the ladder cannot drift.
+///
+/// `any(windows, test)` for the same reason as [`parse_sentinel_tier`]: the only production reader
+/// is Windows-only, and a blanket `allow(dead_code)` would hide a genuinely dead item later.
+#[cfg(any(windows, test))]
+pub(crate) const DUMP_LADDER_RUNGS: u32 = 3;
+
+/// Parse the accumulated ban list: one rung per line, junk ignored rather than fatal.
+#[cfg(any(windows, test))]
+pub(crate) fn parse_banned_rungs(text: &str) -> Vec<u32> {
+    let mut out: Vec<u32> = text.lines().filter_map(parse_sentinel_tier).collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// The tier a leftover sentinel names, if one survived the previous run.
+///
+/// `None` is the ordinary case and means nothing to do.
+#[cfg(windows)]
+pub(crate) fn surviving_sentinel_tier() -> Option<u32> {
+    parse_sentinel_tier(&fs::read_to_string(sentinel_path()).ok()?)
+}
+
+/// Every rung banned by a previous run.
+#[cfg(windows)]
+pub(crate) fn banned_rungs() -> Vec<u32> {
+    fs::read_to_string(banned_rungs_path())
+        .map(|t| parse_banned_rungs(&t))
+        .unwrap_or_default()
+}
+
 pub fn append_log(args: fmt::Arguments<'_>) {
     ds2_game_base::log::append_line(&path_for(config().log_file_name), args);
 }
@@ -406,6 +494,13 @@ static FAULT_RECORDS_WRITTEN: AtomicUsize = AtomicUsize::new(0);
 static RECORD_INDEX: AtomicUsize = AtomicUsize::new(0);
 #[cfg(windows)]
 static PREVIOUS_UNHANDLED_FILTER: AtomicUsize = AtomicUsize::new(0);
+
+/// Ladder rungs that have killed `dbghelp` on some previous run.
+///
+/// Populated by [`install`] from the accumulated ban file. See [`sentinel_path`] for why the
+/// evidence has to be a file rather than a return value.
+#[cfg(windows)]
+static BANNED_RUNGS: OnceLock<Vec<u32>> = OnceLock::new();
 #[cfg(windows)]
 static FATAL_REPORTED: AtomicUsize = AtomicUsize::new(0);
 #[cfg(windows)]
@@ -614,6 +709,36 @@ pub fn install(new_config: CrashLogConfig, self_module_base: usize) {
                 "crash logger AddVectoredExceptionHandler failed"
             ));
         }
+        // A SENTINEL THAT OUTLIVED THE LAST RUN is the only evidence that `MiniDumpWriteDump`
+        // died mid-call rather than returning a failure. Consume it here, before anything can
+        // crash again: ban the tier it names, and delete the partial `.dmp` beside it.
+        //
+        // The partial dump is the dangerous artifact. The 0-byte case is already deleted further
+        // down for exactly this reason -- "indistinguishable from a captured dump until someone
+        // opens it" -- and a 209KB truncated dump is the same trap with a plausible file size on
+        // it, which makes it likelier to be collected and sent, not less.
+        if let Some(rung) = surviving_sentinel_tier() {
+            let mut banned = banned_rungs();
+            if !banned.contains(&rung) {
+                banned.push(rung);
+                banned.sort_unstable();
+            }
+            let list = banned
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            let _ = fs::write(banned_rungs_path(), &list);
+            let dump = path_for(config().minidump_file_name);
+            let removed = fs::remove_file(&dump).is_ok();
+            let _ = fs::remove_file(sentinel_path());
+            append_log(format_args!(
+                "minidump rung {rung} BANNED -- the previous run died inside MiniDumpWriteDump \
+                 there. banned_rungs=[{}] truncated_dump_deleted={removed}",
+                list.replace('\n', ",")
+            ));
+        }
+        let _ = BANNED_RUNGS.set(banned_rungs());
         write_module_inventory("install");
     });
 }
@@ -1279,6 +1404,40 @@ pub(crate) unsafe fn write_minidump_named(file_name: &str, info: *mut ExceptionP
     }
     let write_dump: MiniDumpWriteDumpFn = unsafe { std::mem::transmute(entry) };
 
+    /// One `MiniDumpWriteDump` attempt, with a sentinel around it.
+    ///
+    /// The sentinel names the tier and exists only for the duration of the call. If `dbghelp` faults
+    /// mid-write -- which is what Proton does at the rich tier, measured in `ds2-mods-rs-bee` -- the
+    /// process dies here and the file stays on disk, which is the only signal that survives a call
+    /// that never returns. [`install`] reads it on the next run and bans the tier.
+    ///
+    /// The sentinel is deleted whether the attempt succeeded or failed, because an ordinary failure
+    /// RETURNS and the ladder below already handles that. Only a non-return leaves it behind.
+    fn attempt_dump(
+        write_dump: MiniDumpWriteDumpFn,
+        file: isize,
+        rung: usize,
+        dump_type: u32,
+        exception_param: *const MinidumpExceptionInformation,
+    ) -> i32 {
+        let sentinel = sentinel_path();
+        // The RUNG, not the flags -- rungs 1 and 2 share MINIDUMP_NORMAL and must ban separately.
+        let _ = fs::write(&sentinel, rung.to_string());
+        let ok = unsafe {
+            write_dump(
+                GetCurrentProcess(),
+                GetCurrentProcessId(),
+                file,
+                dump_type,
+                exception_param,
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        };
+        let _ = fs::remove_file(&sentinel);
+        ok
+    }
+
     let path = path_for(file_name);
     let mut wide: Vec<u16> = path.to_string_lossy().encode_utf16().collect();
     wide.push(0);
@@ -1317,58 +1476,58 @@ pub(crate) unsafe fn write_minidump_named(file_name: &str, info: *mut ExceptionP
         | MINIDUMP_WITH_INDIRECTLY_REFERENCED_MEMORY
         | MINIDUMP_WITH_PROCESS_THREAD_DATA
         | MINIDUMP_WITH_THREAD_INFO;
-    let mut dump_type = rich_type;
-    let mut ok = unsafe {
-        write_dump(
-            GetCurrentProcess(),
-            GetCurrentProcessId(),
-            file,
-            dump_type,
-            exception_param,
-            std::ptr::null(),
-            std::ptr::null(),
-        )
-    };
-    let rich_error = unsafe { GetLastError() };
-    if ok == 0 {
-        // The rich flags walk far more of the process than the minimal dump does, and any one of
-        // them can be refused -- by a partial `dbghelp` implementation, or by a process too far
-        // gone to enumerate. A bare thread-and-module dump is worth vastly more than no dump, so
-        // never let the expensive attempt be the only one.
-        dump_type = MINIDUMP_NORMAL;
-        ok = unsafe {
-            write_dump(
-                GetCurrentProcess(),
-                GetCurrentProcessId(),
-                file,
-                dump_type,
-                exception_param,
-                std::ptr::null(),
-                std::ptr::null(),
-            )
-        };
+
+    // THE LADDER, as data. Each rung is (flags, exception-parameter), tried in order until one
+    // succeeds. The third rung repeats the second's flags with a NULL exception parameter: that is
+    // the tier `../er-mods-rs` found was the only one Proton's `dbghelp` would accept, because it
+    // failed the ones above while dereferencing the `MINIDUMP_EXCEPTION_INFORMATION` it was handed.
+    // Dropping that struct loses the faulting thread's registers -- which the text record already
+    // carries -- and keeps every thread's stack, which nothing else does.
+    let ladder: [(u32, *const MinidumpExceptionInformation); 3] = [
+        (rich_type, exception_param),
+        (MINIDUMP_NORMAL, exception_param),
+        (MINIDUMP_NORMAL, std::ptr::null()),
+    ];
+
+    // A RUNG THAT KILLED A PREVIOUS RUN IS SKIPPED. Retrying it is not a slow failure -- `dbghelp`
+    // dies inside the call, so every cheaper rung below never gets its turn and the process never
+    // writes a usable dump again. The list ACCUMULATES across runs; a single remembered rung made
+    // the bans oscillate (ban rich, retry normal, die, ban normal forgetting rich, retry rich...).
+    let banned = BANNED_RUNGS.get().cloned().unwrap_or_default();
+
+    let mut ok = 0;
+    let mut dump_type = MINIDUMP_NORMAL;
+    let mut last_error = 0u32;
+    let mut attempted = 0usize;
+    for (rung, (flags, param)) in ladder.iter().enumerate() {
+        if banned.contains(&(rung as u32)) {
+            append_log(format_args!(
+                "minidump SKIPPING rung {rung} (tier 0x{flags:x}) -- it killed dbghelp before"
+            ));
+            continue;
+        }
+        // Rung 3 only differs from rung 2 by dropping the exception parameter; if there was never
+        // one, it is the same call and nothing is learned by repeating it.
+        if rung == 2 && exception_param.is_null() {
+            continue;
+        }
+        dump_type = *flags;
+        attempted += 1;
+        ok = attempt_dump(write_dump, file, rung, dump_type, *param);
+        last_error = unsafe { GetLastError() };
+        if ok != 0 {
+            break;
+        }
     }
-    let normal_error = unsafe { GetLastError() };
-    if ok == 0 && !exception_param.is_null() {
-        // Last tier: no exception parameter at all. This tier exists because of a measurement in
-        // `../er-mods-rs`: Proton's `dbghelp` failed BOTH tiers above with `ERROR_NOACCESS` (998),
-        // raised while it dereferenced the `MINIDUMP_EXCEPTION_INFORMATION` it was handed -- so
-        // dropping that struct is the one variable left to change. Everything in this workspace
-        // runs under Proton too, so keep it. The dump loses the faulting thread's registers, which
-        // the text record already carries, and keeps every thread's stack, which nothing else does.
-        ok = unsafe {
-            write_dump(
-                GetCurrentProcess(),
-                GetCurrentProcessId(),
-                file,
-                dump_type,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-            )
-        };
+    if attempted == 0 {
+        append_log(format_args!(
+            "minidump NOT ATTEMPTED -- every tier is banned. dbghelp on this system dies inside \
+             MiniDumpWriteDump at all of them; the text records are the only crash evidence."
+        ));
     }
-    let final_error = unsafe { GetLastError() };
+    let rich_error = last_error;
+    let normal_error = last_error;
+    let final_error = last_error;
     unsafe { CloseHandle(file) };
     // `CreateFileW` above already created the file, so a failed dump leaves a 0-byte `.dmp` on
     // disk. That empty file is worse than no file: it is indistinguishable from a captured dump
@@ -1629,6 +1788,77 @@ fn read_module_base_name(entry: usize) -> String {
         }
     }
     String::from_utf16_lossy(&units)
+}
+
+// The sentinel's PATH is Windows-only (the host build has a stub `install` and never writes a
+// dump); its PARSING is not, and is tested everywhere. Deliberately no test writes the real
+// sentinel file: `sentinel_path()` is one process-wide path, so tests touching it would race each
+// other under cargo's parallel runner -- which is exactly what the first version of this module
+// did, and the wine test step caught it.
+#[cfg(test)]
+mod sentinel_tests {
+    use super::*;
+
+    #[test]
+    fn a_well_formed_sentinel_names_its_rung() {
+        assert_eq!(parse_sentinel_tier("0"), Some(0));
+        assert_eq!(
+            parse_sentinel_tier(" 2\n"),
+            Some(2),
+            "trailing newline is normal"
+        );
+    }
+
+    #[test]
+    fn a_corrupt_or_out_of_range_sentinel_bans_nothing() {
+        for junk in ["", "   ", "not a number", "-1", "0 0", "4448", "3", "99"] {
+            assert_eq!(
+                parse_sentinel_tier(junk),
+                None,
+                "{junk:?} must not ban a rung -- a wrongly banned rung is one fewer chance at a dump"
+            );
+        }
+    }
+
+    /// 4448 is 0x1160, the RICH FLAGS. An older build wrote flags into the sentinel; if such a file
+    /// is still on disk it must be ignored rather than read as rung 4448 or clamped to a real rung.
+    #[test]
+    fn a_sentinel_from_the_flags_era_is_ignored() {
+        assert_eq!(parse_sentinel_tier("4448"), None);
+    }
+
+    #[test]
+    fn bans_accumulate_and_deduplicate() {
+        assert_eq!(parse_banned_rungs("0\n1\n0\n"), vec![0, 1]);
+        assert_eq!(parse_banned_rungs(""), Vec::<u32>::new());
+        assert_eq!(
+            parse_banned_rungs("0\njunk\n2\n4448\n"),
+            vec![0, 2],
+            "junk and out-of-range entries are dropped, the real ones survive"
+        );
+    }
+
+    #[test]
+    fn every_rung_can_be_banned_and_nothing_beyond_the_ladder_can() {
+        for rung in 0..DUMP_LADDER_RUNGS {
+            assert_eq!(parse_sentinel_tier(&rung.to_string()), Some(rung));
+        }
+        assert_eq!(parse_sentinel_tier(&DUMP_LADDER_RUNGS.to_string()), None);
+    }
+
+    /// The sentinel must sit BESIDE the dump and be derived from its name, so renaming the dump
+    /// cannot leave a sentinel guarding a file that no longer exists.
+    #[cfg(windows)]
+    #[test]
+    fn the_sentinel_is_named_after_the_dump_it_guards() {
+        let dump = config().minidump_file_name;
+        let sentinel = sentinel_path();
+        assert_eq!(
+            sentinel.file_name().unwrap().to_string_lossy(),
+            format!("{dump}.attempt")
+        );
+        assert_eq!(sentinel.parent(), path_for(dump).parent());
+    }
 }
 
 #[cfg(test)]
