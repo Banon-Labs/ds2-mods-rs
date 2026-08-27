@@ -149,6 +149,7 @@ KEY_PRESS_ANY_BUTTON = "press_any_button"
 KEY_PROCESS_WINDOWS = "process_windows"
 KEY_HIDE_PROCESS_WINDOWS = "hide_process_windows"
 KEY_TITLE_ANIMATION = "title_animation"
+KEY_TITLE_SEQUENCE_GATE = "title_sequence_gate"
 KEY_POLL_INTERVAL_MS = "poll_interval_ms"
 KEY_HEARTBEAT_INTERVAL_MS = "heartbeat_interval_ms"
 
@@ -856,6 +857,7 @@ def config_text(
     process_windows: bool = True,
     hide_process_windows: bool = True,
     title_animation: bool = True,
+    title_sequence_gate: bool = True,
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
@@ -958,6 +960,13 @@ def config_text(
 # Phase 1 is where the top-menu setup happens, so observing phase 2 or 3 means that setup is
 # already done and only the animation is left.
 {KEY_TITLE_ANIMATION} = {str(title_animation).lower()}
+# STARTUP-ONLY, and this is the one that removes the title logo animating in. Phase 1 of
+# FeSubStateTitleMain will not even LOOK for a button press until 0x1400f37f0 reports the scene's
+# current sequence is 0x67 -- the idle "press any button" state. That wait is the animation, so
+# `{KEY_PRESS_ANY_BUTTON}` on its own skips nothing visible. Forcing this gate too lets phase 1 run
+# on the first frame; its own body then calls the game's finish-sequence routine, which is how the
+# press path already handles being taken mid-animation.
+{KEY_TITLE_SEQUENCE_GATE} = {str(title_sequence_gate).lower()}
 
 [{CRASH_SECTION}]
 {crash_banner}# STARTUP-ONLY, both of them. The handler is installed in DllMain BEFORE `neuter_arxan`, because
@@ -1004,6 +1013,7 @@ def write_config(
     process_windows: bool = True,
     hide_process_windows: bool = True,
     title_animation: bool = True,
+    title_sequence_gate: bool = True,
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
@@ -1017,6 +1027,7 @@ def write_config(
         process_windows,
         hide_process_windows,
         title_animation,
+        title_sequence_gate,
     )
     path.write_text(text, encoding="utf-8")
     return path, text
@@ -1088,6 +1099,7 @@ def dry_run(
     process_windows: bool = True,
     hide_process_windows: bool = True,
     title_animation: bool = True,
+    title_sequence_gate: bool = True,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
@@ -1119,6 +1131,7 @@ def dry_run(
             process_windows,
             hide_process_windows,
             title_animation,
+            title_sequence_gate,
         ):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
         else:
@@ -1146,6 +1159,7 @@ def dry_run(
                 process_windows,
                 hide_process_windows,
                 title_animation,
+                title_sequence_gate,
             ),
             indent="[dry-run]   | ",
         )
@@ -1195,6 +1209,7 @@ def launch(
     process_windows: bool = True,
     hide_process_windows: bool = True,
     title_animation: bool = True,
+    title_sequence_gate: bool = True,
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
@@ -1221,6 +1236,7 @@ def launch(
         process_windows,
         hide_process_windows,
         title_animation,
+        title_sequence_gate,
     )
     print(f"[config] {config_path}")
 
@@ -1702,6 +1718,12 @@ def selftest() -> int:
         and values.get((TITLE_SECTION, KEY_PROCESS_WINDOWS)) == "true",
         "--no-hide-process-windows falls back to shortening rather than leaving them alone",
     )
+    values, _ = parse_config(config_text("off", title_sequence_gate=False))
+    check(
+        values.get((TITLE_SECTION, KEY_TITLE_SEQUENCE_GATE)) == "false"
+        and values.get((TITLE_SECTION, KEY_PRESS_ANY_BUTTON)) == "true",
+        "--no-title-sequence-skip turns off only its own key",
+    )
     values, _ = parse_config(config_text("off", title_animation=False))
     check(
         values.get((TITLE_SECTION, KEY_TITLE_ANIMATION)) == "false"
@@ -2018,6 +2040,17 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--no-title-sequence-skip",
+        dest="title_sequence_gate",
+        action="store_false",
+        default=True,
+        help=(
+            "wait for the title logo and prompt to finish animating in before the forced press is "
+            "accepted. That wait is the animation, so leaving it on means --no-press-any-button "
+            "-style behaviour is visible even though the press itself is still forced."
+        ),
+    )
+    parser.add_argument(
         "--probe-site",
         choices=PROBE_SITES,
         default="m1",
@@ -2083,6 +2116,7 @@ def main() -> int:
             args.process_windows,
             args.hide_process_windows,
             args.title_animation,
+            args.title_sequence_gate,
         )
     return launch(
         args.probe,
@@ -2095,6 +2129,7 @@ def main() -> int:
         args.process_windows,
         args.hide_process_windows,
         args.title_animation,
+        args.title_sequence_gate,
     )
 
 

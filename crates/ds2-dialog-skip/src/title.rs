@@ -46,6 +46,9 @@ static ANIMATIONS_SKIPPED: AtomicUsize = AtomicUsize::new(0);
 /// How many process windows were hidden outright.
 static HIDDEN: AtomicUsize = AtomicUsize::new(0);
 
+/// How many times the title-sequence gate has been forced.
+static SEQUENCE_GATES: AtomicUsize = AtomicUsize::new(0);
+
 /// How many times the press gate has been forced. Reported so "the title screen never came up"
 /// and "the skip never fired" cannot be confused.
 static PRESSES: AtomicUsize = AtomicUsize::new(0);
@@ -58,6 +61,36 @@ static SHORTENED: AtomicUsize = AtomicUsize::new(0);
 /// The float is carried for the same reason the dialog update's is: `FeSubStateTitleMain::v3`
 /// accumulates a delta into its idle timer, and a detour that dropped XMM1 would feed it garbage.
 type UpdateFn = unsafe extern "system" fn(*mut u8, f32);
+
+/// Report that the title sequence is up, always.
+///
+/// This is the gate the press poll sits behind: `FeSubStateTitleMain::v3`'s phase 1 will not even
+/// look for a press until `0x1400f37f0` says the scene's currently-playing sequence is `0x67`, the
+/// idle "press any button" state. **That wait IS the title-logo animation and the prompt animating
+/// in** -- forcing the press poll alone skips nothing visible, because the poll is never reached
+/// until the animation has finished on its own.
+///
+/// Like the press poll it has **exactly one caller in the whole image**, at `0x1400fee5b` inside
+/// that same update, so this reaches one gate rather than the sequence system.
+///
+/// # Cutting an animation short is something the press path already does
+///
+/// The body this unblocks opens `lea rcx,[rbx+0x18]; call 0x140afe8a0` -- it finishes the running
+/// sequence before starting the transition. So the game already handles being told to proceed
+/// while a sequence is mid-flight; this just makes that happen on the first frame instead of after
+/// the animation has played out.
+///
+/// The original is never called: it reads scene state and returns a verdict, so running it and
+/// discarding the answer would be the same as not running it.
+unsafe extern "system" fn detour_sequence_gate(_scene: *mut u8) -> u8 {
+    let total = SEQUENCE_GATES.fetch_add(1, Ordering::Relaxed) + 1;
+    if total <= 3 {
+        log(format_args!(
+            "{LOG_PREFIX} forced screen=title-main gate=title-sequence total={total}"
+        ));
+    }
+    1
+}
 
 /// `void enter(this)` -- `this` in RCX. Same shape as the dialog `enter`.
 ///
@@ -227,6 +260,15 @@ unsafe extern "system" fn detour_title_main_update(this: *mut u8, delta: f32) {
     {
         return;
     }
+    // PHASE 3 ALSO CALLS `0x140afe8a0` ON THE `+0x38` HANDLE before writing this phase, and an
+    // earlier version of this detour reproduced that call on the theory that it snaps a running
+    // sequence to its end. IT DOES NOT, and the call was removed rather than left in on the chance
+    // it helped. `0x140afe8a0` tail-calls `0x1409d5610`, whose body compares `[handle]` against a
+    // global and, on mismatch, builds a record tagged `0x4d4f4d53` ("SMOM") and reports it --
+    // handle validation or telemetry, not playback control. In a live run it returned success and
+    // the title text animated in exactly as before, which is what prompted reading the body instead
+    // of inferring the meaning from where it is called.
+    //
     // SAFETY: the phase was just read from this object without faulting, and this writes the same
     // field the original writes at `0x1400fedf7`.
     unsafe {
@@ -253,6 +295,8 @@ pub struct Outcome {
     pub title_animation: bool,
     /// Process windows are now not drawn at all while the title flow is running.
     pub hide_process_windows: bool,
+    /// The wait for the title logo/prompt animation is now bypassed.
+    pub title_sequence_gate: bool,
 }
 
 /// What the caller asked for.
@@ -266,6 +310,8 @@ pub struct Request {
     pub hide_process_windows: bool,
     /// Cut the title screen's activation animation short once its setup has run.
     pub title_animation: bool,
+    /// Force the gate that waits for the title logo/prompt animation before a press is accepted.
+    pub title_sequence_gate: bool,
 }
 
 /// Install whichever of the two title-flow skips were asked for.
@@ -280,6 +326,7 @@ pub unsafe fn install(request: Request) -> Outcome {
         process_windows: false,
         title_animation: false,
         hide_process_windows: false,
+        title_sequence_gate: false,
     };
     let base = match game_module_base() {
         Ok(base) => base,
@@ -296,6 +343,32 @@ pub unsafe fn install(request: Request) -> Outcome {
             "{LOG_PREFIX} title-install-failed stage=MH_Initialize status={status:?}"
         ));
         return outcome;
+    }
+
+    if request.title_sequence_gate {
+        let site = base + ds2_rva::FE_TITLE_MAIN_SEQUENCE_GATE as usize;
+        // No trampoline: the detour replaces the gate outright rather than fronting it.
+        match unsafe { MhHook::new(site as *mut c_void, detour_sequence_gate as *mut c_void) } {
+            Ok(_) => {
+                let status = unsafe { MH_EnableHook(site as *mut c_void) };
+                if status == MH_STATUS::MH_OK {
+                    outcome.title_sequence_gate = true;
+                    log(format_args!(
+                        "{LOG_PREFIX} hooked gate=title-sequence rva=0x{:08x} va=0x{site:016x}",
+                        ds2_rva::FE_TITLE_MAIN_SEQUENCE_GATE
+                    ));
+                } else {
+                    log(format_args!(
+                        "{LOG_PREFIX} hook-failed gate=title-sequence va=0x{site:016x} \
+                         stage=MH_EnableHook status={status:?}"
+                    ));
+                }
+            }
+            Err(status) => log(format_args!(
+                "{LOG_PREFIX} hook-failed gate=title-sequence va=0x{site:016x} \
+                 stage=MH_CreateHook status={status:?}"
+            )),
+        }
     }
 
     if request.press_any_button {

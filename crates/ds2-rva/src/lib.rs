@@ -175,6 +175,37 @@ pub const ARXAN_PROBE_HOOK_SITE_BACKUP: u32 = 0x0083_89e0;
 /// five).
 pub const FE_SUBSTATE_TITLE_LOGO_ENTER: u32 = 0x000f_d980;
 
+/// Scene-reference offset within `FeSubStateTitleLogo`. `+0x18`.
+///
+/// **Nulling this is what stops the logo animating**, and it is the game's own path rather than a
+/// new one. `FeSubStateTitleLogo::v1` opens `mov rcx,[rcx+0x18]; test rcx,rcx; je` and the
+/// not-taken branch at `0x1400fd9fb` is the whole of the shipped "there is no logo to show" case:
+/// write phase 4, return. It plays no sequence and opens nothing.
+///
+/// The previous version of this crate let the original `enter` run and then wrote phase 4 after
+/// it. That advances the flow but the sequence `enter` already started
+/// (`0x140afdb80(scene, 0x66, ...)`, or `0x67` on the skip path) keeps playing, which is exactly
+/// the logo animation that remained visible.
+///
+/// # Why nulling it is balanced at both ends
+///
+/// `FeSubStateTitleLogo::v2` (leave, `0x1400fe830`) is guarded on **this same pointer**:
+/// `mov rcx,[rcx+0x18]; test rcx,rcx; je` and it closes only when non-null. So null at `enter` and
+/// null at `leave` is precisely the pair the shipped path produces -- neither opens nor closes.
+/// Restoring the pointer afterwards would instead produce a close with no matching open, which is
+/// the unbalance this avoids.
+///
+/// **`enter` does not create the scene, it reads one already there**, so nulling the substate's
+/// copy does not orphan an allocation this crate made; it declines to start and stop something
+/// another object owns.
+///
+/// This trick does NOT transfer to the other two boot screens, and their `leave` implementations
+/// are why: `FeSubStateWarningNoCopy::v2` (`0x1400febb0`) guards on a **global** at
+/// `[0x14160de10]+0xf0` rather than on the substate, and `FeSubStateTitleUserPolicy::v2`
+/// (`0x1400f96b0`) guards on **phase == 1**. Three classes, three different guards; each one had
+/// to be read.
+pub const FE_SUBSTATE_TITLE_LOGO_SCENE_OFFSET: usize = 0x18;
+
 /// Phase-counter offset within `FeSubStateTitleLogo`. **`+0x20`, not `+0x10`.**
 ///
 /// Read from `FeSubStateTitleLogo::v3` at `0x1400febf0`, which opens
@@ -707,3 +738,24 @@ pub const FE_SHOW_PROCESS_WINDOW: u32 = 0x004f_e760;
 /// the change to the boot sequence and leaves gameplay alone, without this mod having to invent a
 /// notion of "still booting" or time-box one.
 pub const FE_OPERATOR_TITLE_ACTIVE: u32 = 0x0161_4804;
+
+/// Sequence handle within `FeSubStateTitleMain`. `+0x38`.
+///
+/// Set up by phase 1's press-taken body (`0x1400feec8`, `lea rcx,[rbx+0x38]; call 0x14005a8e0`),
+/// which starts the title-text sequence, and then waited on by phases 2 and 3.
+pub const FE_TITLE_MAIN_SEQUENCE_HANDLE_OFFSET: usize = 0x38;
+
+/// **NOT a "finish sequence" call, despite how its call sites read.** RVA `0x00afe8a0`.
+///
+/// `FeSubStateTitleMain::v3` phase 1 calls it on the substate's `+0x18` handle the moment a press
+/// is taken, and phase 3 calls it on `+0x38` immediately before writing the terminal phase. Both
+/// placements make it look like "stop the animation, we are done" -- and that reading was wrong.
+///
+/// Its body tail-calls `0x1409d5610`, which compares `[handle]` against the global at `0x14166df98`
+/// and, when they differ, builds a record tagged `0x4d4f4d53` ("SMOM") and hands it to
+/// `0x1409ebea0`. That is handle validation or telemetry, not playback control.
+///
+/// Recorded as an exclusion rather than deleted because the mistake is re-derivable: anyone reading
+/// phases 1 and 3 will reach the same wrong conclusion from the call sites alone. It was caught by
+/// a live run where it returned success and the title text animated in exactly as before.
+pub const FE_SEQUENCE_NOT_A_FINISH_DO_NOT_USE: u32 = 0x00af_e8a0;

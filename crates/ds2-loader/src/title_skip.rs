@@ -27,6 +27,9 @@ pub const KEY_HIDE_PROCESS_WINDOWS: &str = "hide_process_windows";
 /// Cut the title screen's activation animation short.
 pub const KEY_TITLE_ANIMATION: &str = "title_animation";
 
+/// Do not wait for the title logo / prompt animation before accepting the forced press.
+pub const KEY_TITLE_SEQUENCE_GATE: &str = "title_sequence_gate";
+
 /// `[title_skip]`, resolved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TitleSkipConfig {
@@ -39,6 +42,11 @@ pub struct TitleSkipConfig {
     pub hide_process_windows: bool,
     /// Write the title screen's terminal phase once its setup has run, skipping the flourish.
     pub title_animation: bool,
+    /// Force the gate that waits for the title logo and prompt to finish animating in.
+    ///
+    /// Without this, [`Self::press_any_button`] skips nothing visible: the press poll is not even
+    /// reached until the animation has played out on its own.
+    pub title_sequence_gate: bool,
 }
 
 impl Default for TitleSkipConfig {
@@ -51,6 +59,7 @@ impl Default for TitleSkipConfig {
             process_windows: true,
             hide_process_windows: true,
             title_animation: true,
+            title_sequence_gate: true,
         }
     }
 }
@@ -81,6 +90,7 @@ impl TitleSkipConfig {
             process_windows: read(KEY_PROCESS_WINDOWS, defaults.process_windows) || hide,
             hide_process_windows: hide,
             title_animation: read(KEY_TITLE_ANIMATION, defaults.title_animation),
+            title_sequence_gate: read(KEY_TITLE_SEQUENCE_GATE, defaults.title_sequence_gate),
         }
     }
 
@@ -88,12 +98,14 @@ impl TitleSkipConfig {
     pub fn describe(&self) -> String {
         format!(
             "{} config [{CONFIG_SECTION}] {KEY_PRESS_ANY_BUTTON}={} {KEY_PROCESS_WINDOWS}={} \
-             {KEY_HIDE_PROCESS_WINDOWS}={} {KEY_TITLE_ANIMATION}={}",
+             {KEY_HIDE_PROCESS_WINDOWS}={} {KEY_TITLE_ANIMATION}={} \
+             {KEY_TITLE_SEQUENCE_GATE}={}",
             ds2_dialog_skip::LOG_PREFIX,
             self.press_any_button,
             self.process_windows,
             self.hide_process_windows,
-            self.title_animation
+            self.title_animation,
+            self.title_sequence_gate
         )
     }
 }

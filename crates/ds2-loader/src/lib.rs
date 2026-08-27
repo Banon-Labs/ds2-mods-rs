@@ -393,7 +393,11 @@ fn install_dialog_skip() {
 fn install_title_skip() {
     let config = title_skip::TitleSkipConfig::load();
     log_line(format_args!("{}", config.describe()));
-    if !config.press_any_button && !config.process_windows && !config.title_animation {
+    if !config.press_any_button
+        && !config.process_windows
+        && !config.title_animation
+        && !config.title_sequence_gate
+    {
         return;
     }
     ds2_dialog_skip::set_logger(log_line);
@@ -407,6 +411,7 @@ fn install_title_skip() {
             process_windows: config.process_windows,
             hide_process_windows: config.hide_process_windows,
             title_animation: config.title_animation,
+            title_sequence_gate: config.title_sequence_gate,
         })
     };
     if config.press_any_button && !outcome.press_any_button {
@@ -424,6 +429,12 @@ fn install_title_skip() {
     if config.hide_process_windows && !outcome.hide_process_windows {
         log_line(format_args!(
             "{} show-process-window NOT INSTALLED -- the wait windows will still be drawn",
+            ds2_dialog_skip::LOG_PREFIX
+        ));
+    }
+    if config.title_sequence_gate && !outcome.title_sequence_gate {
+        log_line(format_args!(
+            "{} title-sequence NOT INSTALLED -- the title logo animation will still be waited out",
             ds2_dialog_skip::LOG_PREFIX
         ));
     }
