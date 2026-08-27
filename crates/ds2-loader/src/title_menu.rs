@@ -23,14 +23,27 @@ pub struct TitleMenuConfig {
 }
 
 impl Default for TitleMenuConfig {
-    /// **On.** The shipped behaviour removes a row from the screen entirely when it is
-    /// unavailable, so the menu's shape changes with the machine's network state and with whether
-    /// a save exists. Drawing all six always is the requested behaviour and is the more legible
-    /// one; it stays a switch for the reason every switch here is one, since it patches executable
-    /// memory during startup.
+    /// **Off, and this default was flipped by a control run rather than by preference.**
+    ///
+    /// The feature was written on the premise that the game removes an unavailable row from the
+    /// screen, so the menu's shape changes with the network state and with whether a save exists.
+    /// A run with this key set to `false` -- the game's own title menu, with none of our writes in
+    /// it -- shows that premise is wrong on this build: every row is present, an unavailable
+    /// Continue is DIMMED rather than absent, and INFORMATION and GO ONLINE swap inside one shared
+    /// screen slot with no gap left behind. The game already does what this was built to do.
+    ///
+    /// With it on, the mod forces the enable byte, lets the game's pass draw the row bright with
+    /// `0x67`, and then stamps [`ds2_rva::FE_TOP_MENU_SEQUENCE_FADED`] over it -- which is the
+    /// segment leading into the row's removal, so the row poses itself invisible. Every visual
+    /// defect this feature was blamed for (a blank INFORMATION row, a gap between rows, both halves
+    /// of the exclusive pair on screen at once) was produced by the feature itself.
+    ///
+    /// Kept as a switch rather than deleted because the hooks and the measurements around them are
+    /// worth having, and because "off" is a claim about THIS build's layout resource that a future
+    /// build could falsify. Turning it on is opting into overriding a look the game gets right.
     fn default() -> Self {
         Self {
-            show_unavailable: true,
+            show_unavailable: false,
         }
     }
 }

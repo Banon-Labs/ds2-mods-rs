@@ -947,20 +947,125 @@ pub const FE_BUTTON_STATE_NORMAL: i32 = 3;
 /// `cmp [rcx+8],4; sete al; ret`.
 pub const FE_BUTTON_STATE_CURSOR: i32 = 4;
 
-/// Which top-menu rows may be forced visible when the game would hide them. Row 1 only.
+/// Which top-menu rows may be forced visible when the game would hide them. **Row 1 only.**
 ///
-/// **Measured in-game, and the first version got this wrong.** Forcing all six drew two rows on
-/// top of each other on screen. The grid coordinates are NOT the reason -- a later run logged them
-/// as `0:(0,0) 1:(0,1) 2:(0,2) 3:(0,3) 4:(0,4) 5:(0,5)`, six distinct positions -- so the collision
-/// is in the layout resource, which evidently has no designed place for rows the game never shows
-/// together. Rows 2 and 3 are exactly such a pair: row 2 is gated on the online flag at
-/// `0x140513600` and row 3 on its exact inverse, so precisely one of them is ever available.
+/// The six enable expressions are `1`, has-a-save, online, `!online`, `1`, `1`. Rows 0, 4 and 5 are
+/// literal `1` and can never be hidden, so forcing them is meaningless. That leaves three rows the
+/// game can delete, and exactly one of them is worth keeping on screen:
 ///
-/// Row 1 is also the only row where forcing is *meaningful*. The six enable expressions are
-/// `1`, has-a-save, online, `!online`, `1`, `1` -- rows 0, 4 and 5 are literal `1` and can never be
-/// hidden, and rows 2 and 3 are the shared slot. That leaves exactly one row the game hides on its
-/// own and that owns its position: **LOAD GAME**.
+/// * **row 1, LOAD GAME** -- deleted until a save exists, and it owns its screen slot outright.
+///
+/// **Rows 2 and 3 -- INFORMATION and GO ONLINE -- are deliberately out, and the reason is not that
+/// they look wrong when forced. It is that the pair needs no help.** Their enable bytes are
+/// `online` and `!online`, computed from one another at `0x1400f4344`, so their XOR is true at
+/// every instant: one of the two is always live, and the slot they share is never empty on its own.
+/// The game swaps which one occupies it when `FeSubStateTitleOnlineCheck` sets the flag. Forcing
+/// either is not "showing a row the game hides", it is putting a second label in an occupied slot,
+/// which is exactly what the all-six run drew on top of itself. The grid coordinates are not the
+/// reason -- a run logged them as `0:(0,0) 1:(0,1) 2:(0,2) 3:(0,3) 4:(0,4) 5:(0,5)`, six distinct
+/// positions -- so the collision is in the layout, which places the mutually-exclusive pair
+/// together.
+///
+/// A forced row 2 also draws WRONG, and the mechanism is worth recording because it governs any
+/// future attempt to restyle a row. A sequence play is vtable slot `0xc0`, and it is not uniform:
+/// `FeComponentObject` (`0x1411ddfa8`, `0x140b6a980`) forwards to every child, `FeComponentSprite`
+/// (`0x1411de318`, `0x140b6c4f0`) is the only leaf class that acts on it, and `FeComponentTextField`
+/// (`0x1411de698`), `FeComponentTextureShape`, `FeComponentMaskShape`, `FeComponentTextureMask` and
+/// `FeComponentLinked` all inherit `FeComponentBase`'s, which is `return;` (`0x140b6a970`). **A text
+/// field never responds to a sequence play at all** -- it follows an ancestor sprite. Inside a
+/// sprite the id is looked up in that sprite's own table (resource at `+0x48`, table at `+0x18` of
+/// that, entries at `+0x00`, `u16` count at `+0x08`, `0x10`-byte entries of `{i32 id, u16 start}`)
+/// and **a miss falls through to `RET`** -- a silent no-op leaving that sprite where `0x7a` parked
+/// it. A row holds more than one sprite, so it can half-move: the plate reaches the faded frame and
+/// the caption's sprite never moves. That is the empty plate, and it is a per-SPRITE fact, not a
+/// per-row one.
+///
+/// Which sprites carry a `0x6c` entry is layout data in `GameDataEbl.bdt` and is NOT established.
+/// The measurement that looks like it settles this does not: `FeComponentObject`'s bracket getters
+/// at slots `0x58`/`0x60` (`0x140b6a4f0`, `0x140b6a490`) tail-jump to the FIRST child only and do
+/// not aggregate, so a `0x6c start=89 end=103` read off a row element describes the first sprite on
+/// its leftmost spine and nothing else in the tree.
+///
+/// No game code writes any of these captions: each row's element id occurs exactly ONCE in the
+/// whole image, in the row builder (row 2's `17010022` at `0x1400f4462`). The content is authored
+/// in the layout and reached by the path the builder assembles.
+///
+/// **Measured, and the first version got this wrong.** Forcing all six drew two rows on top of each
+/// other on screen. The grid coordinates are not the reason -- a run logged them as
+/// `0:(0,0) 1:(0,1) 2:(0,2) 3:(0,3) 4:(0,4) 5:(0,5)`, six distinct positions -- so the collision is
+/// in the layout resource, which evidently has no designed place for rows the game never shows
+/// together.
 pub const FE_TOP_MENU_FORCE_SHOWN_ROWS: u32 = 1 << 1;
+
+/// `FrontendEx::SceneObjProxy`'s vtable slot 0: the proxy's own path-to-element resolver.
+///
+/// **This is the only verified way to get a row's layout element, and guessing cost this project a
+/// round of false conclusions.** A probe read `cell+0x40`, fell back to `cell+0x30`, and called the
+/// result "the row's element". It is not: all six rows came back with the same pointer, the same
+/// sequence table and the same owner, which is one shared object read six times -- and a tree walk
+/// from it ran off into unrelated memory past depth 5.
+///
+/// The real route is the one the game uses. `ComponentPositionProperty::get` (`0x14001e4d0`) does
+/// `RCX=[this+8]` (the proxy back-pointer), `CALL [[RCX]]`, then `TEST RAX,RAX` -- so slot 0 takes
+/// the proxy and returns the element or null. Inside, `0x140027ce0` matches the path copied to
+/// `+0x60` by the binder against the scene at `+0x58` through `0x140afdad0`.
+pub const FE_SCENE_OBJ_PROXY_ELEMENT_SLOT: usize = 0;
+
+/// `FeComponentSprite`'s vtable. RVA `0x011de318`, VA `0x1411de318`. From MSVC RTTI.
+///
+/// The only leaf component class that acts on a sequence play. `FeComponentObject` (`0x011ddfa8`)
+/// forwards to every child; `FeComponentBase`'s slot `0xc0` (`0x140b6a970`) is `return;` and
+/// `FeComponentTextField`, `FeComponentTextureShape`, `FeComponentMaskShape`,
+/// `FeComponentTextureMask` and `FeComponentLinked` all inherit that. So a text field never
+/// responds to a play and follows an ancestor sprite instead.
+pub const FE_COMPONENT_SPRITE_VTABLE: u32 = 0x011d_e318;
+
+/// A component's first child. `+0x38`. Siblings chain through [`FE_COMPONENT_SIBLING_OFFSET`].
+///
+/// Read from `FeComponentObject`'s play at `0x140b6a98f` (`MOV RBX,[RCX+0x38]`).
+pub const FE_COMPONENT_CHILD_OFFSET: usize = 0x38;
+
+/// A component's next sibling. `+0x28`. Read at `0x140b6a9c5` (`MOV RBX,[RBX+0x28]`).
+pub const FE_COMPONENT_SIBLING_OFFSET: usize = 0x28;
+
+/// A `FeComponentSprite`'s animation resource. `+0x48`. Its sequence table is at `+0x18` of that.
+///
+/// From `0x140b6c4fa`: `MOV RAX,[RCX+0x48]; MOV RCX,[RAX+0x18]`. A null table means every play on
+/// this sprite is a no-op.
+pub const FE_SPRITE_RESOURCE_OFFSET: usize = 0x48;
+
+/// The sequence table within a sprite's animation resource. `+0x18`.
+pub const FE_SPRITE_TABLE_OFFSET: usize = 0x18;
+
+/// A sequence table's entry array (`+0x00`) and its `u16` entry count (`+0x08`).
+///
+/// Entries are `0x10` bytes: an `i32` id at `+0` and a `u16` start frame at `+4`. The play scans
+/// them linearly and **falls through to `RET` on a miss** (`0x140b6c50c`, `0x140b6c532`), leaving
+/// the sprite exactly where it was -- which is how half a row ends up posed and the rest blank.
+pub const FE_SPRITE_TABLE_ENTRIES_OFFSET: usize = 0x00;
+/// See [`FE_SPRITE_TABLE_ENTRIES_OFFSET`].
+pub const FE_SPRITE_TABLE_COUNT_OFFSET: usize = 0x08;
+/// See [`FE_SPRITE_TABLE_ENTRIES_OFFSET`].
+pub const FE_SPRITE_TABLE_ENTRY_STRIDE: usize = 0x10;
+/// See [`FE_SPRITE_TABLE_ENTRIES_OFFSET`].
+pub const FE_SPRITE_TABLE_ENTRY_START_OFFSET: usize = 0x04;
+
+/// A `FeComponentSprite`'s current playback position, a `f32`. `+0x40`.
+///
+/// Written by the play at `0x140b6c57b` (`MOVSS [RBX+0x40],XMM6`) as `start(sequence) + offset`.
+/// Reading it back is how "did this sprite actually follow the sequence" is answered without
+/// looking at the screen.
+pub const FE_SPRITE_POSITION_OFFSET: usize = 0x40;
+
+/// Rows 2 and 3, the pair the game guarantees is never shown together.
+///
+/// `0x1400f4344` computes row 3's enable byte as `row2.enabled == 0`, so their XOR is true at every
+/// instant. Adding either to [`FE_TOP_MENU_FORCE_SHOWN_ROWS`] therefore does not reveal a hidden
+/// row -- it forces the dead half of a mutually exclusive pair on screen next to the live half.
+/// That was done, it drew both INFORMATION and GO ONLINE at once, and
+/// `FE_TOP_MENU_PAIR_MUTUALLY_EXCLUSIVE` exists so the next attempt is caught by a log line instead
+/// of by someone looking at the screen.
+pub const FE_TOP_MENU_PAIR_MUTUALLY_EXCLUSIVE: u32 = (1 << 2) | (1 << 3);
 
 /// `FeObjectButtonEx`'s flags word. `+0x14`, a DWORD.
 ///
@@ -1022,6 +1127,24 @@ pub const FE_TOP_MENU_BUILD_ROWS: u32 = 0x000f_4250;
 /// The id the menu's own styling pass plays on an available row at `0x1400f5080`.
 pub const FE_TOP_MENU_SEQUENCE_AVAILABLE: i32 = 0x67;
 
+/// Sequence for a row that is drawn but not selectable. `0x6c`. **DO NOT TRUST THIS NAME.**
+///
+/// A control run -- the game's own title menu, with `show_unavailable` off and none of this mod's
+/// writes in it -- showed that this is not a "faded" look and was never needed. The game draws
+/// every row, dims one it cannot offer, and swaps INFORMATION and GO ONLINE inside one shared slot.
+/// Meanwhile `0x6c` is frames 89..103 of a shared timeline whose next marker is `0x7a` at 104, the
+/// removal: it is the segment leading OUT. Playing it and letting it run walks the row off the
+/// screen; holding its last frame poses the row invisible. Both were reported as "the row is
+/// blank", and both were this constant doing what it actually means.
+///
+/// The measured markers, all six identical across all six rows:
+/// `0x67@1  0x69@9  0x6a@15  0x6b@83  0x6c@89  0x7a@104`.
+///
+/// If a genuine dimmed look is ever wanted, `0x6b@83` and `0x6a@15` are the unexamined neighbours;
+/// which frames render is an alpha curve in `GameDataEbl.bdt` and is not readable from the image.
+///
+/// Original note, kept because its trial method is sound even though its conclusion was not:
+///
 /// Sequence for a row that is drawn but not selectable. `0x6c`. **MEASURED ON SCREEN.**
 ///
 /// This one could not be established statically and was not guessed. Sequence ids index a layout
@@ -1102,33 +1225,30 @@ pub const FE_TOP_MENU_BUILD_CELL: u32 = 0x000f_36b0;
 /// sequence can be entered part-way, and passing `0.0` everywhere means "always play from the
 /// beginning", which for a fade means watching it fade rather than seeing it faded.
 ///
-/// The fourth argument to a sequence play. `0.0`, and **not a seek position.**
+/// How far into the fade to start it. `14.0`, the fade's own span.
 ///
-/// This was read as a start offset and it is not one. Four values were tried on screen:
-///
-/// | value | result |
-/// | --- | --- |
-/// | `0.0` | fades, after about a second of bright |
-/// | `100.0` | never fades |
-/// | `103.0` | never fades |
-/// | `1000.0` | never fades |
-///
-/// Any non-zero value stops the fade being seen at all, which is not how a position behaves --
-/// a position inside the range would show the fade part-way through. `FeObjectButtonEx` computes
-/// one as `(end(0x85) - now) * (span(0x68) / span(0x85))`: a REMAINING time, scaled between two
-/// sequences. That reads as a transition duration -- "take this long to get there" -- and a large
-/// duration is indistinguishable on screen from never arriving.
-///
-/// **So the bright second before a row dims is the `0x6c` sequence's own content**, playing from
-/// bright to faded, and no argument to the play call skips it. Making a row dim immediately needs a
-/// different mechanism than this one: either a sequence whose first frame is already faded, or a
-/// setter for the element's playback position. The bracket getters at slots `0x58` and `0x60`, and
-/// the current-time getter at `0x48`, are the place to start looking for the latter.
-///
-/// The measured brackets, kept because they cost a run to get:
+/// **The fourth argument to a sequence play is an offset from that sequence's START frame**, read
+/// out of `FeComponentSprite::v24` (`0x140b6c4f0`) rather than inferred:
 ///
 /// ```text
-/// sequence 0x6c   start= 89.0   end=103.0
-/// sequence 0x67   start=  1.0   end=104.0
+/// entry     = table_lookup(this, sequence)      # 0x10 bytes per entry, id at +0, start at +4
+/// param_4   = (float)entry.start + param_4      # <- the offset is RELATIVE
+/// [this+0x40] = param_4                         # <- and this is the playback position
 /// ```
-pub const FE_TOP_MENU_SEQUENCE_FADED_SEEK: f32 = 0.0;
+///
+/// The position is a plain float at `+0x40` of the sprite; `v9` is `movss xmm0,[rcx+0x40]; ret`.
+///
+/// With `0x6c` measured at frames 89 to 103, that makes the arithmetic exact, and explains four
+/// on-screen results that looked contradictory:
+///
+/// | passed | lands on | seen |
+/// | --- | --- | --- |
+/// | `0.0` | 89, the fade's FIRST frame | fades, playing all 14 frames |
+/// | `14.0` | 103, its last frame | faded immediately -- what is wanted |
+/// | `100.0` | 189 | nothing: past the end of a 104-frame animation |
+/// | `103.0` | 192 | nothing |
+/// | `1000.0` | 1089 | nothing |
+///
+/// The earlier reading of this argument as an absolute timeline position is what made `103.0` look
+/// like the obvious value; it is off by the sequence's own start every time.
+pub const FE_TOP_MENU_SEQUENCE_FADED_SEEK: f32 = 14.0;

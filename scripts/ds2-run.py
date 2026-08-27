@@ -864,7 +864,7 @@ def config_text(
     title_animation: bool = True,
     title_sequence_gate: bool = True,
     title_settle: bool = True,
-    show_unavailable: bool = True,
+    show_unavailable: bool = False,
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
@@ -1051,7 +1051,7 @@ def write_config(
     title_animation: bool = True,
     title_sequence_gate: bool = True,
     title_settle: bool = True,
-    show_unavailable: bool = True,
+    show_unavailable: bool = False,
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
@@ -1141,7 +1141,7 @@ def dry_run(
     title_animation: bool = True,
     title_sequence_gate: bool = True,
     title_settle: bool = True,
-    show_unavailable: bool = True,
+    show_unavailable: bool = False,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
@@ -1257,7 +1257,7 @@ def launch(
     title_animation: bool = True,
     title_sequence_gate: bool = True,
     title_settle: bool = True,
-    show_unavailable: bool = True,
+    show_unavailable: bool = False,
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
@@ -1791,20 +1791,21 @@ def selftest() -> int:
     # skip, it patches different functions, and a boot failure has to be attributable to it alone.
     values, _ = parse_config(config_text("off"))
     check(
-        values.get((MENU_SECTION, KEY_SHOW_UNAVAILABLE)) == "true",
-        f"[{MENU_SECTION}] {KEY_SHOW_UNAVAILABLE} defaults to true",
+        values.get((MENU_SECTION, KEY_SHOW_UNAVAILABLE)) == "false",
+        f"[{MENU_SECTION}] {KEY_SHOW_UNAVAILABLE} defaults to FALSE -- the game's own menu already "
+        "draws every row, dims what it cannot offer, and leaves no gap",
     )
-    values, _ = parse_config(config_text("off", show_unavailable=False))
+    values, _ = parse_config(config_text("off", show_unavailable=True))
     check(
-        values.get((MENU_SECTION, KEY_SHOW_UNAVAILABLE)) == "false"
+        values.get((MENU_SECTION, KEY_SHOW_UNAVAILABLE)) == "true"
         and values.get((TITLE_SECTION, KEY_TITLE_SETTLE)) == "true"
         and values.get((DIALOG_SECTION, KEY_DIALOG_ENABLED)) == "true",
-        "--no-show-unavailable-menu-rows turns off only its own key, in its own section",
+        "--show-unavailable-menu-rows turns on only its own key, in its own section",
     )
     values, _ = parse_config(config_text("off", title_settle=False))
     check(
-        values.get((MENU_SECTION, KEY_SHOW_UNAVAILABLE)) == "true",
-        "--no-title-settle leaves the menu key ON -- different section, different hooks",
+        values.get((MENU_SECTION, KEY_SHOW_UNAVAILABLE)) == "false",
+        "--no-title-settle leaves the menu key OFF -- different section, different hooks",
     )
 
     # THE ARMS MUST DIFFER, and in exactly one key. If two arms ever generated the same file the
@@ -2138,14 +2139,17 @@ def main() -> int:
         ),
     )
     parser.add_argument(
-        "--no-show-unavailable-menu-rows",
+        "--show-unavailable-menu-rows",
         dest="show_unavailable",
-        action="store_false",
-        default=True,
+        action="store_true",
+        default=False,
         help=(
-            "let the title menu hide the rows it cannot offer, as the game does. By default all "
-            "six rows are drawn and the unavailable ones are put back to a cell state the cursor "
-            "cannot reach, so LOAD GAME is visible-but-inert instead of absent."
+            "override the title menu's own look for rows it cannot offer. OFF BY DEFAULT, and the "
+            "default was set by a control run rather than by taste: with this off, the game draws "
+            "every row anyway, dims an unavailable Continue instead of removing it, and swaps "
+            "INFORMATION and GO ONLINE inside one shared slot with no gap. Turning this on forces "
+            "the enable byte and then plays the faded sequence over the result, which is the "
+            "segment that leads into the row being removed -- it poses the row invisible."
         ),
     )
     parser.add_argument(
