@@ -126,6 +126,48 @@ impl Arm {
     }
 }
 
+/// Which function the detour is installed on. The choice decides what the run can possibly mean.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Site {
+    /// [`ds2_rva::ARXAN_PROBE_HOOK_SITE`]: a clean function Arxan never touched.
+    ///
+    /// Kept because it is the control. A run here that survives says a detour works *in this
+    /// game at all*; it cannot say anything about Arxan, because `scripts/ds2-arxan-chain.py`
+    /// terminates at hop 0 on this address -- the function's own prologue is at its own entry.
+    M1,
+    /// [`ds2_rva::ARXAN_PROBE_REDIRECTED_SITE`]: `applySpEffect`, whose entry is Arxan's redirect.
+    ///
+    /// The five bytes overwritten here are Arxan's own. This is the only site where a surviving
+    /// detour is evidence about Arxan rather than evidence about nothing.
+    Redirected,
+}
+
+impl Site {
+    /// Spelling shared with `scripts/ds2-run.py`; both sides parse it, so it is a contract.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Site::M1 => "m1",
+            Site::Redirected => "redirected",
+        }
+    }
+
+    /// RVA to add to the module base. Never a hardcoded VA -- `DYNAMIC_BASE` is set.
+    pub const fn rva(self) -> u32 {
+        match self {
+            Site::M1 => ds2_rva::ARXAN_PROBE_HOOK_SITE,
+            Site::Redirected => ds2_rva::ARXAN_PROBE_REDIRECTED_SITE,
+        }
+    }
+
+    /// The bytes the site must still begin with, or the run is declared VOID.
+    pub const fn prologue(self) -> [u8; 5] {
+        match self {
+            Site::M1 => ds2_rva::ARXAN_PROBE_HOOK_SITE_PROLOGUE,
+            Site::Redirected => ds2_rva::ARXAN_PROBE_REDIRECTED_SITE_PROLOGUE,
+        }
+    }
+}
+
 // ================================================================================================
 // CONFIGURATION: A FILE THIS DLL READS, NOT AN ENVIRONMENT THE LAUNCHER HOPES IT INHERITS
 //
@@ -169,6 +211,13 @@ pub const KEY_ENABLED: &str = "enabled";
 /// the Arxan patch with no probe watching produces no evidence at all, so a stale line in a file
 /// cannot quietly turn an ordinary run into an unprotected one. **Startup-only.**
 pub const KEY_SKIP_NEUTER: &str = "skip_neuter";
+
+/// Which site to hook: `"m1"` or `"redirected"`. Defaults to `"m1"`, the control.
+///
+/// **Startup-only**, for the same reason as [`KEY_SKIP_NEUTER`]: the detour goes in once, before
+/// the game's entry point, and moving it afterwards would be a different experiment sharing one
+/// log.
+pub const KEY_SITE: &str = "site";
 
 /// How often the two byte pollers re-read their windows. **Live** -- see [`LiveConfig`].
 pub const KEY_POLL_INTERVAL_MS: &str = "poll_interval_ms";
@@ -296,6 +345,8 @@ pub struct ProbeConfig {
     pub enabled: bool,
     /// Which arm to run. Forced to [`Arm::NeuterArxan`] when `enabled` is false.
     pub arm: Arm,
+    /// Which function to detour. See [`Site`]; the default is the control.
+    pub site: Site,
     /// The knobs the poller thread will go on re-reading.
     pub live: LiveConfig,
     /// Where the file was looked for. `None` only when the game directory did not resolve.
@@ -363,9 +414,10 @@ impl ProbeConfig {
         // called `enbaled`, so the reader cannot reject it and only this module knows no such key
         // exists. Without naming it, the sole evidence of the typo would be `enabled` reading as
         // absent -- which says what did not happen, but not why.
-        const KNOWN: [&str; 4] = [
+        const KNOWN: [&str; 5] = [
             KEY_ENABLED,
             KEY_SKIP_NEUTER,
+            KEY_SITE,
             KEY_POLL_INTERVAL_MS,
             KEY_HEARTBEAT_INTERVAL_MS,
         ];
@@ -381,6 +433,25 @@ impl ProbeConfig {
 
         let enabled = read_bool(parsed, KEY_ENABLED, false, &mut problems);
         let skip_neuter = read_bool(parsed, KEY_SKIP_NEUTER, false, &mut problems);
+        // An unrecognised site falls back to the control AND says so. Silently hooking the
+        // clean function while the launcher believes it asked for the redirected one would
+        // produce a survivable run that means nothing, which is the exact failure this whole
+        // issue exists to stop.
+        let site = match parsed.get(CONFIG_SECTION, KEY_SITE) {
+            None => Site::M1,
+            Some(raw) => match raw.trim().trim_matches('"') {
+                "m1" => Site::M1,
+                "redirected" => Site::Redirected,
+                other => {
+                    problems.push(format!(
+                        "{CONFIG_LINE_PREFIX} BAD [{CONFIG_SECTION}] {KEY_SITE}={other:?} -- \
+                         expected \"m1\" or \"redirected\"; fell back to \"m1\", so this run \
+                         is the CONTROL and says nothing about Arxan"
+                    ));
+                    Site::M1
+                }
+            },
+        };
         let live = LiveConfig::read(parsed, &mut problems);
 
         // `skip_neuter` alone is not an arm. Leaving Arxan's stubs live with nothing watching
@@ -394,6 +465,7 @@ impl ProbeConfig {
         Self {
             enabled,
             arm,
+            site,
             live,
             path,
             status,
@@ -690,11 +762,14 @@ pub unsafe fn install(config: &ProbeConfig) {
             return;
         }
     };
-    let site = base + ds2_rva::ARXAN_PROBE_HOOK_SITE as usize;
+    let which = config.site;
+    let site = base + which.rva() as usize;
     log(format_args!(
-        "{PROBE_LINE_PREFIX} install arm={} base=0x{base:016x} rva=0x{:08x} va=0x{site:016x}",
+        "{PROBE_LINE_PREFIX} install arm={} site={} base=0x{base:016x} rva=0x{:08x} \
+         va=0x{site:016x}",
         arm.as_str(),
-        ds2_rva::ARXAN_PROBE_HOOK_SITE,
+        which.as_str(),
+        which.rva(),
     ));
 
     // READ BEFORE WRITING. If these bytes are not the prologue recorded in `ds2-rva`, something
@@ -707,7 +782,7 @@ pub unsafe fn install(config: &ProbeConfig) {
         ));
         return;
     }
-    let expected = ds2_rva::ARXAN_PROBE_HOOK_SITE_PROLOGUE;
+    let expected = which.prologue();
     let prologue_match = original[..expected.len()] == expected;
     log(format_args!(
         "{PROBE_LINE_PREFIX} install original=[{}] expected=[{}] prologue-match={prologue_match}",

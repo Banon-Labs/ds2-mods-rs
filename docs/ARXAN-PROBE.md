@@ -222,17 +222,51 @@ with a real result.
 
 ## The hook site
 
-**RVA `0x00832e70`** (`ds2_rva::ARXAN_PROBE_HOOK_SITE`), resolved as `module_base + RVA` at
+Two sites, chosen with `--probe-site`. The default is the control, so a forgotten flag produces
+an uninformative run rather than a mislabelled one.
+
+### `redirected` -- `applySpEffect`, RVA `0x0014bec0`
+
+The site that answers the question. Its first five bytes **are** Arxan's redirect,
+`e9 1c 0d 9f 01` -> `0x141b3cbe1`, so a detour here overwrites Arxan's own code.
+
+`scripts/ds2-arxan-chain.py` walks it: five hops -- the entry `jmp`, two obfuscation thunks, two
+fragments carrying 16 instructions of stolen prologue -- rejoining the original function at
+entry + `0x14`, where the rest of the body is intact and in place. No Arxan encrypted region
+covers it (2969 examined, span `0x140001680`-`0x141cfa783`), so no stub can decrypt original
+bytes back over the detour. See `docs/ARXAN-FOOTPRINT.md`.
+
+**MinHook handles it correctly, and this was verified in the source before it was run.** For a
+relative `E9` whose destination lies outside the five bytes being patched, `trampoline.c` emits a
+`JMP_ABS` to that destination rather than copying the instruction. So the trampoline routes into
+Arxan's chain and original behaviour survives. The live `trampoline-baseline` reads back as
+`ff 25 00 00 00 00` then `e1 cb b3 41 01 00 00 00` -- `JMP [RIP+0]` -> `0x141b3cbe1` -- which is
+that prediction confirmed byte for byte.
+
+This supersedes the reasoning in `ds2_rva::ARXAN_REDIRECTED_DO_NOT_HOOK`, which said patching
+over Arxan's `e9` would fail for reasons unrelated to the question. It does not. Those two
+constants stay excluded for a different reason: they are Arxan's own dispatch functions rather
+than game functions that happen to be redirected.
+
+### `m1` -- RVA `0x00832e70`, the control
+
+`ds2_rva::ARXAN_PROBE_HOOK_SITE`, resolved as `module_base + RVA` at
 runtime because `DllCharacteristics` is `0x8160` and the loader may relocate the image.
 
 * 2052 static call sites -- rank 3 in the binary, so a detour that never fires is a real signal.
 * Prologue `48 89 5c 24 08`, one 5-byte instruction: MinHook's trivial relocation case.
 * `0x47` bytes long; not one of the 286 Arxan-redirected functions.
 
+**It is the control, and its limitation is structural.** `scripts/ds2-arxan-chain.py` terminates
+at hop 0 on this address: the function's own prologue is at its own entry, so Arxan has no
+presence here at all. A detour that survives says only that hooking works in this game. It cannot
+say anything about Arxan, which is why both arms of `ds2-mods-rs-z6m` surviving was a null result
+by construction rather than evidence.
+
 The top two functions by call count, `0x00832cb0` (12401 sites) and `0x00c2c9e0` (4866), are
-**both Arxan-redirected** and are recorded in `ds2_rva::ARXAN_REDIRECTED_DO_NOT_HOOK` so nobody
-rediscovers them and hooks one. Patching over Arxan's own `e9` would make the experiment fail for
-a reason unrelated to the question.
+recorded in `ds2_rva::ARXAN_REDIRECTED_DO_NOT_HOOK` so nobody rediscovers them and hooks one --
+not because redirected entries are unhookable, but because those two are Arxan's own dispatch
+functions rather than game functions.
 
 The probe reads the prologue before it writes anything. If those five bytes are not the recorded
 ones, it declares the run `VOID` and patches nothing -- a function someone else already patched
@@ -355,3 +389,55 @@ reads this into treating the real finding as a tooling failure.
   result here says nothing about hooking one of those, which is why they are named and excluded.
 * Anything about hooking *several* functions, or about a hook installed later than the entry
   point. The probe installs one hook, once, at the earliest safe moment.
+
+
+## RESULT: both arms, on Arxan's own entry bytes, 2026-08-26
+
+Build 9527516, Proton Experimental 11.0-100, `--probe-site redirected`, 240s windows.
+
+| | arm A `neuter` | arm B `skip-neuter` |
+| --- | --- | --- |
+| Arxan's 48 stubs | patched by dearxan | **live** |
+| observed | 240.2s, 24 heartbeats | 240.4s, 24 heartbeats |
+| detour fired | yes, hits=30 | yes, **hits=49** |
+| hook site | intact, 0 divergences | intact, 0 divergences |
+| trampoline | intact, 0 divergences | intact, 0 divergences |
+| game crashed | no | no |
+
+Both arms read `original=[e9 1c 0d 9f 01 ...]` with `prologue-match=true`. That is the runtime
+confirmation of the static finding that `neuter_arxan` never patches a function entry, and it is
+what makes the two arms comparable rather than comparable-in-principle.
+
+Per the pair matrix above, survives/survives reads as **Arxan never threatened this site, and
+dearxan is not load-bearing for hooking here**. The sentence is identical to M1's, and it means
+something entirely different: M1's site was one Arxan has no presence at, and this one is a
+function Arxan actively obfuscates.
+
+**The detour fired on the real call path**, which M1's never did. `hits` sat at 0 through 40s and
+then climbed, so these are genuine `applySpEffect` calls rather than startup noise -- an
+integrity check that only runs when the guarded function is entered had 49 chances in arm B.
+
+### What this does not claim
+
+One site. Two 240s windows. One Proton version. It does not show that every Arxan check ran
+during them, and it says nothing about the bodies of the **43 inert stubs** -- the ones with no
+encrypted regions, which are now the only remaining mechanism by which Arxan could notice a patch
+here. That static read is still unopened.
+
+### The run that nearly lied, and the two guards that now prevent it
+
+The first attempt at this reported a clean 240s survival of the *control*. `ds2-run.py` stages
+`target/.../release/dinput8.dll`; the build had been `dev`, so the staged DLL predated the `site`
+key entirely and silently hooked `m1` while the launcher reported the arm it was asked for. Only
+the DLL's own `config UNKNOWN [arxan_probe] "site"` line gave it away.
+
+A stale DLL does not fail loudly. It runs the previous behaviour under the current config and
+produces a confident, well-formatted verdict for an experiment nobody ran. So there are now two
+executable guards rather than a note:
+
+* **preflight refuses to launch** when the built DLL is older than any `crates/**/*.rs` or
+  `Cargo.toml`, naming the stale files and the rebuild command.
+* **the verdict is withheld** when the site the DLL reports back does not match the site
+  requested -- including when it reports none, which is exactly what a pre-`site` DLL does.
+
+Both are covered by `--selftest`.

@@ -111,3 +111,62 @@ own prologue is at its own entry. It is **not redirected**, so a detour there ne
 Arxan's code at all. That is the mechanical reason both arms of M1 survived and why
 `docs/ARXAN-PROBE.md` read the result as "Arxan never threatened this site." It is a null result
 about Arxan by construction, and repeating it on another clean site would produce another one.
+
+## What `neuter_arxan` actually does, and what it leaves alone
+
+Read from dearxan's source (`../dearxan`, branch `wip/issue-11-entry-stub-prepatch`, which is the
+path dependency `ds2-loader` links), then measured against `DarkSoulsII.exe`.
+
+`neuter_arxan` → `neuter_arxan_inner` → `ArxanPatch::build_from_stubs` → `apply_patch`. That
+pipeline emits exactly two kinds of patch and nothing else:
+
+- **`JmpHook { target: si.test_rsp_va, .. }`**, one per analyzed stub. It targets the stub's
+  `test rsp, 0xf` — the instruction dearxan scans for, because normal code has better ways to
+  align a stack — and redirects it to the stub's own `context_pop_va`, so the stub restores
+  context and returns without doing its work.
+- **`Write { va, bytes }`**, the decrypted contents of each encrypted region, pre-applied because
+  the stubs that would have decrypted them are no longer running.
+
+**No entry redirect is ever patched.** The commit named `wip: prepatch Arxan entry stubs before
+CRT init` changes *when* patches are applied, not which. So the five-byte `jmp` at a redirected
+function entry is identical with dearxan on and dearxan off.
+
+### Measured on DS2
+
+| | |
+| --- | --- |
+| stubs found | 48 |
+| analyzed OK / errored | 48 / 0 |
+| stubs declaring encrypted regions | 5 |
+| inert stubs (no regions) | 43 |
+| encrypted regions declared | 2969 |
+| regions dearxan actually applies | **0** |
+
+Every one of the 2969 is eliminated by `apply_relocs_and_resolve_conflicts`, which scores
+`entropy` against `base_entropy` and drops a region list whose "decryption" does not look like
+plaintext. So **on DS2 `neuter_arxan` applies zero `Write` patches**; its entire effect is 48
+`JmpHook`s.
+
+Elimination is dearxan declining to pre-apply a decryption it does not trust. It says nothing
+about what a stub does at runtime, so the regions were checked directly, before resolution
+(`../dearxan/examples/region-covers.rs`, untracked there):
+
+```
+regions_examined=2969 span=0x140001680..0x141cfa783
+0x14014bec0: NOT covered by any declared encrypted region   (applySpEffect entry)
+0x14014bed4: NOT covered by any declared encrypted region   (its rejoin point)
+0x140832e70: NOT covered by any declared encrypted region   (the M1 site)
+```
+
+The span brackets all three addresses, so these are genuine gaps rather than a vacuous answer.
+
+### What this settles, and what it leaves
+
+Settled: arm A and arm B of an Arxan probe hook **byte-identical** entries, so the arms are
+directly comparable — this was the open blocker on `ds2-mods-rs-by0`. And no declared decryption
+would silently write original bytes back over a detour at any of the three sites, which was the
+most likely mechanism for a hook to die without any integrity check being involved.
+
+Left open, and now the *only* thing the runtime experiment has to answer: whether any of the 43
+inert stubs reads those bytes and reacts. A stub with no encrypted regions still has a body, and
+nothing here shows what it does.
