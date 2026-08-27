@@ -1,0 +1,20 @@
+[package]
+name = "ds2-hook"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+# Shared MinHook FFI + hook union. A normal rlib on purpose: each dependent cdylib statically
+# links its OWN MinHook instance (required -- the union owns exactly one instance per DLL),
+# while the vendored MinHook C source is cc-compiled ONCE here (build.rs) instead of in every
+# DLL's build script.
+name = "ds2_hook"
+
+[build-dependencies]
+cc = "1.0"
+
+[lints]
+workspace = true
