@@ -640,3 +640,155 @@ is settled would name the animation player class and expose whatever seek or rat
 The gate forcing stays, because the outcome it produces is good on its own terms: the flow reaches
 the menu as soon as the data is there, rather than pacing itself to an animation. The title text
 still animates over the top of an already-interactive menu.
+
+## The top menu: nothing is inserted, nothing is removed, and only one bit differs
+
+Read statically from `darksoulsii-deobf.bin` with `scripts/ds2-rtti.py`, `scripts/ds2-disasm.py`
+and the Ghidra MCP daemon. No game was launched to establish any of it.
+
+**The premise this trace was started on is wrong in a useful way.** The title menu does not have a
+different *set* of buttons online vs offline, or with a save vs without. It always has the **same
+six rows, in the same order**. What changes is one byte per row, and that byte decides both whether
+the cursor can land on the row and which sequence the row plays.
+
+### The list is a fixed vector of six, rebuilt from scratch on demand
+
+`FeGroupTitleTopMenu` derives `FrontendEx::FexGridControl`. Its rows come from
+**`0x1400f4250`** (RVA `0x000f4250`), which fills a caller-supplied 352-byte stack buffer -- a
+`DLFixedVector` of capacity **6**, element stride **0x38**, count at **`+0x158`**:
+
+| offset | meaning | read from |
+| --- | --- | --- |
+| `+0x00` | label object, copied by `0x1400189f0` from `0x14001f090(.., .., text_id)` | the six copies in the builder |
+| `+0x30` | **action id**, 1..6 | `mov r8d,[rax+rdx*1]` at `0x1400f4a8d`, index `cursor*0x38` |
+| `+0x34` | **enabled**, one byte | `cmp BYTE PTR [rcx+rdi*1+0x34],0` at `0x1400f5063` |
+
+Every one of the six rows is appended unconditionally. There is no branch that skips an append, and
+the count is 6 on every path that does not hit the fixed-vector overflow `panic`. **Insertion and
+removal are not mechanisms this menu has.**
+
+### The six rows, and the three facts that gate them
+
+The builder computes three booleans up front, at `0x1400f430a`-`0x1400f4355`:
+
+* `r15b` -- **has a save**: `0x1400f0f60` walks the 10 save slots and appends `{slot, ptr}` for each
+  with `[slot+0x1d9] & 1` set and `& 2` clear; the flag is `(end-begin)>>4 != 0`.
+* `r14b` -- **online available**: `0x140513600(GameManagerImp[+0x22f0])`, which is nothing but
+  `return *(u8*)(this+0x3a)`. This is the game's master online gate: 34 call sites, including
+  `FeSubStateTitleOnlineCheck`'s own slot-8 work starter.
+* `r12b` -- `!r14b`.
+
+| row | action | text id | enabled when | on press, goes to |
+| --- | --- | --- | --- | --- |
+| 0 | 1 | 17010024 | always | `0x48` if **no free save slot**, else `0x4c` |
+| 1 | 2 | 17010023 | a save exists | `0x55` `FeSubStateTitleLoadDataList` |
+| 2 | 3 | 17010022 | online available | `0x66` `FeSubStateTitleInformation` |
+| 3 | 4 | 17010021 | **not** online available | `0x20` `FeSubStateTitleSteamNetworkCheck` |
+| 4 | 5 | 99992554 | always | pushes group **5** on the group stack, in place |
+| 5 | 6 | 99992555 | always | writes `1` to `[[0x1416751f8]+0x13a]` |
+
+Rows 2 and 3 are the pair the "different buttons online vs offline" impression comes from: they are
+**both always present**, and exactly one of them is ever enabled.
+
+### The row names were not read from the text; they were read from where each row goes
+
+The label ids are in the FMG archives (`GameDataEbl.bdt`), which this trace did not open. The
+identification below rests on the destination substate instead, which is stronger evidence than a
+string would have been.
+
+`FeSubStateTitleTopMenu::v5` at **`0x1400fe510`** (RVA `0x000fe510`) registers the transitions.
+Each is a `0x28`-byte `FeTransitionEqualValue<int>`: `+0x08` destination substate id, `+0x18`
+pointer to the watched int, `+0x20` the value to match. Every one of them watches
+`&substate->_x10_unk` -- the substate's phase, which `FeSubStateTitleTopMenu::v3` (`0x1400ff300`)
+sets from `[scene+0xE8]`, which is where the group parks the action id.
+
+* **Row 0 is NEW GAME.** Its first transition is a *subclass*, `_TransitionNewGame` (vtable
+  `0x1410bda40`, predicate `0x1400fdf70`), which matches only when the phase is 1 **and**
+  `0x14019ba90` -- first free save slot, or `-1` when all ten are taken -- returns negative. So a
+  full save list diverts to `0x48`, a message box. Otherwise the plain value-1 transition takes it
+  to `0x4c` `FeSubStateTitleOptionScreen`, whose `enter` (`0x1400fdbf0`) early-outs to its terminal
+  phase when `savedata[+0x136f]` is already set, then hands to `0x4d` `FeSubStateTitleOptionGame`
+  and on to `0x4e` `FeSubStateTitleOnlineCheck`. That is the once-per-profile brightness/options
+  walk in front of a new game, not a settings menu reached from the title.
+* **Row 1 is LOAD GAME** -- `FeSubStateTitleLoadDataList`, gated on a save existing.
+* **Row 2 is the server information screen** -- `FeSubStateTitleInformation`, gated on being online.
+* **Row 3 is "go online"** -- `FeSubStateTitleSteamNetworkCheck`, gated on **not** being online.
+  Its transition is the only one registered conditionally: the builder appends it only when
+  `0x140513600` returns 0, so when you are already online the row is both disabled *and* has no
+  destination.
+* **Row 5 is QUIT GAME.** `[[0x1416751f8]+0x13a] = 1` is written by exactly one other place in the
+  image, `FeSubStateTitleShutdown`'s own `0x1400fde20`, and is read from the main game-state loop.
+
+Two things are **not** established. Row 4 creates group id 5 through the group factory
+(`0x140056b70` then `0x140026e70`) rather than transitioning, and that group was not identified.
+And the transitions on phase 5 (`-> 0x1b`) and phase 6 (`-> 0x35`) name substate ids that no
+constructor in `FeStateTitle::v6` writes as a literal -- but the activate handler returns *before*
+storing the result for actions 5 and 6, so neither can fire from the button press itself. What does
+fire them was not traced.
+
+### Disabled is one function, and it does two separate things
+
+`FeGroupTitleTopMenu::v25` at `0x1400f4df0` clears the stored result, rebuilds the list, calls
+**`0x1400f5000`** (RVA `0x000f5000`), then refreshes the grid. `0x1400f5000` is the whole of the
+disabled-vs-enabled behaviour, and the decompiler drops an argument here, so this is read from the
+disassembly at `0x1400f5000`-`0x1400f50b7`:
+
+```text
+for i in 0 .. list.count:
+    cell = 0x140108060(group, i)          # the cell whose [+0x10] id == i; null is skipped
+    desc = list + align + i*0x38
+    tmp  = 0x140026790(group+0x100, &scratch, desc)   # RCX/RDX/R8 are set BEFORE the branch
+    if desc[+0x34] != 0:                  # enabled
+        tmp[+0x40]->vtable[0](tmp+0x40, 0x67, 0, 0.0)
+        cell[+0x8] = 3 + (i == group[+0x28])          # 3 normal, 4 under the cursor
+    else:                                 # disabled
+        cell[+0x8] = 2
+        tmp[+0x40]->vtable[0](tmp+0x40, 0x7a, 0, 0.0)
+```
+
+**The style and the clickability are two independent writes.** The greyed look is the explicit
+sequence **`0x7a`** in place of the normal **`0x67`** -- the same sequence-id family as the scene
+transitions (`0x65`, `0x66`, `0x67`, `0x68`) documented above. Nothing reads `cell[+0x8] == 2` to
+decide how to draw.
+
+### The cursor cannot land on a disabled row at all
+
+`cell[+0x8]` is the cell's state, and the cell class is **`FeObjectButtonEx`** (vtable
+`0x1410be398`). Two of its virtuals read that field, and both are four instructions long:
+
+| slot | address | body |
+| --- | --- | --- |
+| v1 | `0x14004c5b0` | `cmp DWORD PTR [rcx+8],4; sete al; ret` -- "am I the cursor" |
+| v16 | `0x14004c5c0` | `vtable[3]() == 1 && [rcx+8] == 3` -- **"can I be selected"** |
+
+`FexGroupList<FeGroupGrid>`'s navigation search at `0x140107b40` calls **v16 on every candidate**
+before accepting it, on all six of its direction branches and again at the shared accept point
+`0x140107fb0`. State `2` fails it, so a disabled row is not "present but not clickable" -- it is
+skipped by cursor movement entirely, and the activate handler `0x1400f4a60` never sees it. That
+handler does **no** enable check of its own, which is exactly why the check has to be here.
+
+State `2` is not sticky: `FexGroupList` v4 (`0x140106190`) resets `4 -> 3` and v5 (`0x140106290`)
+resets `2 -> 3`, and v22 (`0x1401081f0`) rewrites every cell to 3, with 4 on the cursor. `0x1400f5000`
+re-applies the 2s on every rebuild, which is what keeps a row disabled across cursor moves.
+
+### The switch that is read once and never written
+
+`0x14160de19` is read at exactly one instruction in the whole image -- `0x1400f431f`, in this
+builder -- and forces the online flag to 0 when set. Ghidra finds no writer. It is the shortest
+path to "make the menu believe it is offline", and it moves row 2 and row 3 together because both
+are computed from that one flag.
+
+### A correction to the vtable table above
+
+`FeSubStateBase` v5 and v6 are **not** debug registration and a debug walk. `FeStateFlow`'s
+dispatcher `0x140104540` calls v5 with the transition list immediately after a substate's `enter`,
+and v6 with the same list immediately before its `leave`:
+
+* **v5 = publish my transitions.** `FeSubStateTitleTopMenu::v5` (`0x1400fe510`) is where the whole
+  top-menu routing table lives.
+* **v6 = drop them.** The base at `0x1401043a0` releases every entry and zeroes the count, so the
+  list is rebuilt from scratch on each substate change. Capacity is `0x2a`.
+
+`FeStateFlow::FUN_140104930` (`0x140104930`) then returns the **first** transition whose predicate
+matches, which is why `_TransitionNewGame` being registered ahead of the plain value-1 transition is
+what makes the full-save-list diversion work.
