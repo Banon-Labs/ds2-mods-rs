@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "ghidra": {
+      "command": "${HOME}/tools/GhidraMCP-13bm/mcp-bridge/mcp_bridge",
+      "args": ["-host", "localhost", "-port", "8766"],
+      "directTools": true
+    }
+  }
+}
