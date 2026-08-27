@@ -41,6 +41,7 @@ ds2-rva = { path = "crates/ds2-rva" }
 ds2-hotkey-config = { path = "crates/ds2-hotkey-config" }
 ds2-safe-input = { path = "crates/ds2-safe-input" }
 ds2-crash-logging-core = { path = "crates/ds2-crash-logging-core" }
+ds2-intro-skip = { path = "crates/ds2-intro-skip" }
 
 # Arxan neutering. DS2 SOTFS carries 48 Arxan stubs; every MinHook detour patches a prologue
 # in `.text`, which is what their integrity checks look for. Path dep on the local checkout

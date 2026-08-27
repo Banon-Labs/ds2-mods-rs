@@ -55,6 +55,7 @@ crate-type = ["cdylib"]
 ds2-crash-logging-core.workspace = true
 ds2-game-base.workspace = true
 ds2-hook.workspace = true
+ds2-intro-skip.workspace = true
 ds2-hotkey-config.workspace = true
 ds2-rva.workspace = true
 dearxan = { workspace = true, features = ["disabler"] }

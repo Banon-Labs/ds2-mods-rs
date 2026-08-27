@@ -162,7 +162,7 @@ impl CrashConfig {
 }
 
 /// `<Game>/ds2-mods.toml`, beside the running executable.
-fn config_file_path() -> Option<PathBuf> {
+pub(crate) fn config_file_path() -> Option<PathBuf> {
     ds2_game_base::log::game_directory_path()
         .map(|dir| dir.join(crate::arxan_probe::CONFIG_FILE_NAME))
 }

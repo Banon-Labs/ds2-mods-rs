@@ -83,6 +83,7 @@ use dearxan::disabler::{neuter_arxan, schedule_after_arxan};
 
 pub mod arxan_probe;
 pub mod crash_logging;
+pub mod intro_skip;
 
 /// `fdwReason` value for the loader's process-attach notification.
 const DLL_PROCESS_ATTACH: u32 = 1;
@@ -273,6 +274,7 @@ unsafe fn attach(module: *mut c_void) {
                     )),
                 }
                 install_probe(probe);
+                install_intro_skip();
                 arm_fault(crash_config);
             });
         },
@@ -298,6 +300,7 @@ unsafe fn attach(module: *mut c_void) {
                      blocking_entrypoint={blocking_entrypoint}"
                 ));
                 install_probe(probe);
+                install_intro_skip();
                 arm_fault(crash_config);
             });
         },
@@ -317,6 +320,35 @@ fn install_probe(config: Option<arxan_probe::ProbeConfig>) {
         // if it is not the five bytes recorded there. The detour is a naked tail-jump, so it
         // imposes no ABI on the function it fronts.
         unsafe { arxan_probe::install(&config) };
+    }
+}
+
+/// Install the boot-screen skip, if `<Game>/ds2-mods.toml` asked for it.
+///
+/// Called from the same post-Arxan position as [`install_probe`], and for the same two reasons:
+/// `DllMain` has returned so patching executable memory is not happening under the loader lock,
+/// and Arxan's entry stubs have already been dealt with one way or the other. It must also be
+/// EARLY enough that the title flow has not reached these substates yet, which the entry-point
+/// callback is -- the game has not drawn a frame at this point.
+fn install_intro_skip() {
+    let config = intro_skip::IntroSkipConfig::load();
+    log_line(format_args!("{}", config.describe()));
+    if !config.enabled {
+        return;
+    }
+    ds2_intro_skip::set_logger(log_line);
+    // SAFETY: the three targets are vtable-slot function starts recorded in `ds2-rva`, resolved
+    // against the live module base, and each was checked with `scripts/ds2-arxan-chain.py` to be
+    // a real prologue rather than an Arxan redirect. The detours declare the signature every
+    // override actually implements: `void enter(this)` with `this` in RCX.
+    let outcome = unsafe { ds2_intro_skip::install() };
+    if outcome.installed != outcome.attempted {
+        log_line(format_args!(
+            "{} PARTIAL {}/{} screens hooked -- the rest will still appear",
+            ds2_intro_skip::LOG_PREFIX,
+            outcome.installed,
+            outcome.attempted
+        ));
     }
 }
 
