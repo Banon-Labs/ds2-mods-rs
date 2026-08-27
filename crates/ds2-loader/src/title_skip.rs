@@ -30,6 +30,9 @@ pub const KEY_TITLE_ANIMATION: &str = "title_animation";
 /// Do not wait for the title logo / prompt animation before accepting the forced press.
 pub const KEY_TITLE_SEQUENCE_GATE: &str = "title_sequence_gate";
 
+/// Put the title scene straight into its settled state.
+pub const KEY_TITLE_SETTLE: &str = "title_settle";
+
 /// `[title_skip]`, resolved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TitleSkipConfig {
@@ -47,6 +50,12 @@ pub struct TitleSkipConfig {
     /// Without this, [`Self::press_any_button`] skips nothing visible: the press poll is not even
     /// reached until the animation has played out on its own.
     pub title_sequence_gate: bool,
+    /// Put the title scene into its settled state rather than letting its intro sequence play out.
+    ///
+    /// This is what makes the menu usable as soon as its data is available instead of being paced
+    /// by an animation. It shares a detour with [`Self::title_animation`] and is a separate key
+    /// anyway, because it mutates scene state the other does not touch.
+    pub title_settle: bool,
 }
 
 impl Default for TitleSkipConfig {
@@ -60,6 +69,7 @@ impl Default for TitleSkipConfig {
             hide_process_windows: true,
             title_animation: true,
             title_sequence_gate: true,
+            title_settle: true,
         }
     }
 }
@@ -91,6 +101,7 @@ impl TitleSkipConfig {
             hide_process_windows: hide,
             title_animation: read(KEY_TITLE_ANIMATION, defaults.title_animation),
             title_sequence_gate: read(KEY_TITLE_SEQUENCE_GATE, defaults.title_sequence_gate),
+            title_settle: read(KEY_TITLE_SETTLE, defaults.title_settle),
         }
     }
 
@@ -99,13 +110,14 @@ impl TitleSkipConfig {
         format!(
             "{} config [{CONFIG_SECTION}] {KEY_PRESS_ANY_BUTTON}={} {KEY_PROCESS_WINDOWS}={} \
              {KEY_HIDE_PROCESS_WINDOWS}={} {KEY_TITLE_ANIMATION}={} \
-             {KEY_TITLE_SEQUENCE_GATE}={}",
+             {KEY_TITLE_SEQUENCE_GATE}={} {KEY_TITLE_SETTLE}={}",
             ds2_dialog_skip::LOG_PREFIX,
             self.press_any_button,
             self.process_windows,
             self.hide_process_windows,
             self.title_animation,
-            self.title_sequence_gate
+            self.title_sequence_gate,
+            self.title_settle
         )
     }
 }

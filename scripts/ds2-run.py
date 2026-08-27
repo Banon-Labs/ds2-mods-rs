@@ -150,6 +150,7 @@ KEY_PROCESS_WINDOWS = "process_windows"
 KEY_HIDE_PROCESS_WINDOWS = "hide_process_windows"
 KEY_TITLE_ANIMATION = "title_animation"
 KEY_TITLE_SEQUENCE_GATE = "title_sequence_gate"
+KEY_TITLE_SETTLE = "title_settle"
 KEY_POLL_INTERVAL_MS = "poll_interval_ms"
 KEY_HEARTBEAT_INTERVAL_MS = "heartbeat_interval_ms"
 
@@ -858,6 +859,7 @@ def config_text(
     hide_process_windows: bool = True,
     title_animation: bool = True,
     title_sequence_gate: bool = True,
+    title_settle: bool = True,
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
@@ -967,6 +969,13 @@ def config_text(
 # on the first frame; its own body then calls the game's finish-sequence routine, which is how the
 # press path already handles being taken mid-animation.
 {KEY_TITLE_SEQUENCE_GATE} = {str(title_sequence_gate).lower()}
+# STARTUP-ONLY. `{KEY_TITLE_SETTLE}` puts FeSceneTitle straight into its settled state by playing
+# sequence 0x67 -- the state the gate above waits to observe -- rather than letting the 0x66 intro
+# sequence FeSubStateTitleMain::v1 started play out. THIS is what makes the menu usable as soon as
+# its data is available instead of being paced by an animation. It shares the
+# FeSubStateTitleMain::v3 detour with `{KEY_TITLE_ANIMATION}`, so either key installs that hook and
+# each behaviour is gated separately inside.
+{KEY_TITLE_SETTLE} = {str(title_settle).lower()}
 
 [{CRASH_SECTION}]
 {crash_banner}# STARTUP-ONLY, both of them. The handler is installed in DllMain BEFORE `neuter_arxan`, because
@@ -1014,6 +1023,7 @@ def write_config(
     hide_process_windows: bool = True,
     title_animation: bool = True,
     title_sequence_gate: bool = True,
+    title_settle: bool = True,
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
@@ -1028,6 +1038,7 @@ def write_config(
         hide_process_windows,
         title_animation,
         title_sequence_gate,
+        title_settle,
     )
     path.write_text(text, encoding="utf-8")
     return path, text
@@ -1100,6 +1111,7 @@ def dry_run(
     hide_process_windows: bool = True,
     title_animation: bool = True,
     title_sequence_gate: bool = True,
+    title_settle: bool = True,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
@@ -1132,6 +1144,7 @@ def dry_run(
             hide_process_windows,
             title_animation,
             title_sequence_gate,
+            title_settle,
         ):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
         else:
@@ -1160,6 +1173,7 @@ def dry_run(
                 hide_process_windows,
                 title_animation,
                 title_sequence_gate,
+                title_settle,
             ),
             indent="[dry-run]   | ",
         )
@@ -1210,6 +1224,7 @@ def launch(
     hide_process_windows: bool = True,
     title_animation: bool = True,
     title_sequence_gate: bool = True,
+    title_settle: bool = True,
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
@@ -1237,6 +1252,7 @@ def launch(
         hide_process_windows,
         title_animation,
         title_sequence_gate,
+        title_settle,
     )
     print(f"[config] {config_path}")
 
@@ -1724,6 +1740,12 @@ def selftest() -> int:
         and values.get((TITLE_SECTION, KEY_PRESS_ANY_BUTTON)) == "true",
         "--no-title-sequence-skip turns off only its own key",
     )
+    values, _ = parse_config(config_text("off", title_settle=False))
+    check(
+        values.get((TITLE_SECTION, KEY_TITLE_SETTLE)) == "false"
+        and values.get((TITLE_SECTION, KEY_TITLE_ANIMATION)) == "true",
+        "--no-title-settle turns off only its own key, not the detour it shares",
+    )
     values, _ = parse_config(config_text("off", title_animation=False))
     check(
         values.get((TITLE_SECTION, KEY_TITLE_ANIMATION)) == "false"
@@ -2051,6 +2073,17 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--no-title-settle",
+        dest="title_settle",
+        action="store_false",
+        default=True,
+        help=(
+            "let the title scene play its intro sequence out instead of putting it straight into "
+            "its settled state. On by default: settling it is what makes the menu usable as soon "
+            "as its data is available rather than being paced by an animation."
+        ),
+    )
+    parser.add_argument(
         "--probe-site",
         choices=PROBE_SITES,
         default="m1",
@@ -2117,6 +2150,7 @@ def main() -> int:
             args.hide_process_windows,
             args.title_animation,
             args.title_sequence_gate,
+            args.title_settle,
         )
     return launch(
         args.probe,
@@ -2130,6 +2164,7 @@ def main() -> int:
         args.hide_process_windows,
         args.title_animation,
         args.title_sequence_gate,
+        args.title_settle,
     )
 
 

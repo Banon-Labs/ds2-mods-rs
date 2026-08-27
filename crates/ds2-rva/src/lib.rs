@@ -797,23 +797,37 @@ pub const FE_SEQUENCE_PLAYER_HOP2: usize = 0x30;
 /// The vtable slot `0x140b50860` dispatches to: `jmp [rax+0xc0]`, and `0xc0 / 8 == 24`.
 pub const FE_SEQUENCE_PLAYER_PLAY_SLOT: usize = 24;
 
-/// **Plays sequence `0x67` on `FeSceneTitle`, and does NOT stop the text animating.** RVA
-/// `0x000f3820`. Kept as a recorded negative result, not used.
+/// Put `FeSceneTitle` into its settled state by playing sequence `0x67`. RVA `0x000f3820`.
 ///
-/// Original reasoning, which was sound as far as it went: `FeSubStateTitleMain::v1` calls
-/// `0x1400f3e30` (`0x1400fda54`), which plays sequence **`0x66`** on `[scene+8]` -- the title text
-/// animating in -- and nothing in the phase machine stops it. `0x1400f3820` plays **`0x67`** on the
-/// same object, the settled state that [`FE_TITLE_MAIN_SEQUENCE_GATE`] waits to observe. Playing it
-/// should therefore have put the text at its final position on the first frame.
+/// `FeSubStateTitleMain::v1` calls `0x1400f3e30` (`0x1400fda54`), which plays sequence **`0x66`**
+/// on `[scene+8]` -- the "DARK SOULS II SCHOLAR OF THE FIRST SIN" text animating in -- and nothing
+/// in the phase machine stops it. `0x1400f3820` plays **`0x67`** on the same object, the settled
+/// state, and it is exactly the sequence [`FE_TITLE_MAIN_SEQUENCE_GATE`] waits to observe before a
+/// press is accepted:
 ///
-/// **It did not.** Called once on the first `FeSubStateTitleMain` update, in a live run, the text
-/// animated in exactly as before. Unlike
-/// [`FE_SEQUENCE_NOT_A_FINISH_DO_NOT_USE`] the function does do what its name says -- its body is
-/// unambiguous -- so the wrong assumption is elsewhere: either `0x66` continues in parallel rather
-/// than being replaced, or `0x67` carries its own entry animation. That is the open question.
+/// ```text
+/// if ([scene+0xf1] != 0) return;
+/// rcx = [scene+8];
+/// if (!rcx) return;
+/// [rcx+0x18]--;
+/// play(rcx, 0x67, 0, 0.0f);
+/// ```
+///
+/// # Why this rather than forcing the gate alone
+///
+/// Forcing [`FE_TITLE_MAIN_SEQUENCE_GATE`] makes the gate report a state the scene is not in: the
+/// press is taken early while `0x66` keeps animating underneath. Playing `0x67` puts the scene in
+/// the state the gate is waiting for, so the flow reaches an interactive menu **as soon as the data
+/// is available rather than pacing itself to an animation** -- which is the behaviour this is kept
+/// for, confirmed in-game.
 ///
 /// The four sequence ids used across the Fe scenes are `0x65`, `0x66`, `0x67` and `0x68`, read from
-/// the 91 call sites of the sequence-play forwarder `0x140afdb80`, with `0x66`/`0x68` reading as
-/// the in and out transitions and `0x67` as the settled state -- corroborated by
-/// `FeSubStateTitleLogo` using the same set.
-pub const FE_SCENE_TITLE_PLAY_IDLE_INEFFECTIVE: u32 = 0x000f_3820;
+/// the 91 call sites of the play forwarder `0x140afdb80`, with `0x66`/`0x68` the in and out
+/// transitions and `0x67` the settled state -- corroborated by `FeSubStateTitleLogo` using the same
+/// set.
+///
+/// **Open:** the title text is still seen animating. Whether that is `0x66` continuing in parallel,
+/// `0x67` carrying its own entry animation, or a different object entirely is unresolved; see
+/// `docs/DS2-TITLE-FLOW.md`. That is a question about the remaining animation, NOT a reason to drop
+/// this call, whose effect on when the menu becomes usable is real.
+pub const FE_SCENE_TITLE_PLAY_IDLE: u32 = 0x000f_3820;

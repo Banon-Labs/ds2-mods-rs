@@ -1,6 +1,21 @@
-//! The two things that still stop the title flow once the notice boxes are gone.
+//! The things that still stop the title flow once the notice boxes are gone.
 //!
 //! They are different in kind, and the difference decides the cut in each case.
+//!
+//! # The title screen
+//!
+//! Three separate stops, and the order they were understood in matters because the first two look
+//! like the same thing and are not:
+//!
+//! 1. **The wait.** Phase 1 of `FeSubStateTitleMain::v3` will not look for a press until the scene
+//!    reports its settled sequence is up, so forcing the press poll alone skips nothing visible.
+//! 2. **The scene's intro sequence.** `enter` starts sequence `0x66` and nothing in the phase
+//!    machine stops it. Putting the scene into its settled state (`0x67`) instead is what makes the
+//!    menu usable **as soon as its data is available rather than paced by an animation**.
+//! 3. **The activation flourish**, phases 2 and 3, which run after the press is taken.
+//!
+//! (2) and (3) share one detour on `FeSubStateTitleMain::v3` and are separately switchable, because
+//! they mutate different state and a boot failure has to be attributable to one of them.
 //!
 //! # Press any button
 //!
@@ -26,9 +41,11 @@
 //! stops lingering; a window whose work is genuinely slow is unaffected.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use ds2_game_base::mem::{game_module_base, safe_read_f32, safe_read_i32, safe_read_u8};
+use ds2_game_base::mem::{
+    game_module_base, safe_read_f32, safe_read_i32, safe_read_u8, safe_read_usize,
+};
 use ds2_hook::{MH_EnableHook, MH_Initialize, MH_STATUS, MhHook};
 
 use crate::LOG_PREFIX;
@@ -39,6 +56,18 @@ static PROCESS_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 
 /// Trampoline back to `FeSubStateTitleMain`'s original update.
 static TITLE_MAIN_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
+
+/// The live module base, resolved at install for the title-scene lookup.
+static MODULE_BASE_TITLE: AtomicUsize = AtomicUsize::new(0);
+
+/// Set once the title scene has been pushed to its settled state.
+static IDLE_FORCED: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether the shared `FeSubStateTitleMain::v3` detour should settle the scene.
+static SETTLE_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Whether that same detour should write the terminal phase over the activation flourish.
+static ANIMATION_ENABLED: AtomicBool = AtomicBool::new(false);
 
 /// How many activation animations were cut short.
 static ANIMATIONS_SKIPPED: AtomicUsize = AtomicUsize::new(0);
@@ -230,6 +259,53 @@ unsafe extern "system" fn detour_show_process_window(
     unsafe { original(ui, caption, arg3, arg4) }
 }
 
+/// `void play_settled(scene)` -- `FeSceneTitle` in RCX, the only argument its own callers pass.
+type PlaySettledFn = unsafe extern "system" fn(*mut u8);
+
+/// Put the title scene straight into its settled state, once.
+///
+/// `FeSubStateTitleMain::v1` starts sequence `0x66` on the scene and nothing in the phase machine
+/// stops it. Forcing the press gate alone makes the gate report a state the scene is not in, so the
+/// flow advances while that sequence keeps running underneath. This plays `0x67` -- the settled
+/// state the gate is actually waiting to observe -- so the scene is *put into* that state rather
+/// than skipped past it.
+///
+/// The effect that matters, and is confirmed in-game: **the menu becomes usable as soon as its data
+/// is available instead of being paced by an animation.** A separate open question is that the
+/// title text is still seen animating; see `docs/DS2-TITLE-FLOW.md`. That is a question about the
+/// remaining animation, not a reason to drop this call.
+///
+/// # Safety
+///
+/// Reads the scene through fault-tolerant reads and calls a game function with the same single
+/// argument its own call sites pass. Runs at most once per process.
+unsafe fn force_title_settled(base: usize) {
+    if IDLE_FORCED.swap(1, Ordering::AcqRel) != 0 {
+        return;
+    }
+    let Some(globals) = (unsafe { safe_read_usize(base + ds2_rva::FE_TITLE_GLOBALS as usize) })
+    else {
+        return;
+    };
+    let Some(scene) = (unsafe { safe_read_usize(globals + ds2_rva::FE_TITLE_SCENE_OFFSET) }) else {
+        return;
+    };
+    if scene == 0 {
+        return;
+    }
+    // SAFETY: resolved from the live module base, called with the scene pointer its own call sites
+    // pass, and guarded to run once.
+    let play_settled: PlaySettledFn = unsafe {
+        std::mem::transmute::<usize, PlaySettledFn>(
+            base + ds2_rva::FE_SCENE_TITLE_PLAY_IDLE as usize,
+        )
+    };
+    unsafe { play_settled(scene as *mut u8) };
+    log(format_args!(
+        "{LOG_PREFIX} settled screen=title-main scene=0x{scene:x} sequence=0x67"
+    ));
+}
+
 /// Run the title screen's update, then cut the activation animation short if that is all that is
 /// left.
 ///
@@ -251,6 +327,15 @@ unsafe extern "system" fn detour_title_main_update(this: *mut u8, delta: f32) {
         unsafe { original(this, delta) };
     }
     if this.is_null() {
+        return;
+    }
+    // The sequence this replaces was started by `enter`, so the earliest update is the first
+    // opportunity to put the scene into its settled state instead.
+    let base = MODULE_BASE_TITLE.load(Ordering::Acquire);
+    if base != 0 && SETTLE_ENABLED.load(Ordering::Acquire) {
+        unsafe { force_title_settled(base) };
+    }
+    if !ANIMATION_ENABLED.load(Ordering::Acquire) {
         return;
     }
     let object = this as usize;
@@ -297,6 +382,8 @@ pub struct Outcome {
     pub hide_process_windows: bool,
     /// The wait for the title logo/prompt animation is now bypassed.
     pub title_sequence_gate: bool,
+    /// The title scene is now put into its settled state on the first update.
+    pub title_settle: bool,
 }
 
 /// What the caller asked for.
@@ -312,6 +399,13 @@ pub struct Request {
     pub title_animation: bool,
     /// Force the gate that waits for the title logo/prompt animation before a press is accepted.
     pub title_sequence_gate: bool,
+    /// Put the title scene into its settled state instead of letting its intro sequence play out.
+    ///
+    /// Shares the `FeSubStateTitleMain::v3` detour with [`Self::title_animation`], so the hook goes
+    /// in when EITHER is asked for. Kept as its own key regardless: it mutates game state that the
+    /// other does not touch, and every switch in this repo exists so a boot failure is attributable
+    /// to one line.
+    pub title_settle: bool,
 }
 
 /// Install whichever of the two title-flow skips were asked for.
@@ -325,6 +419,7 @@ pub unsafe fn install(request: Request) -> Outcome {
         press_any_button: false,
         process_windows: false,
         title_animation: false,
+        title_settle: false,
         hide_process_windows: false,
         title_sequence_gate: false,
     };
@@ -463,7 +558,17 @@ pub unsafe fn install(request: Request) -> Outcome {
             )),
         }
     }
-    if request.title_animation {
+    // ONE HOOK, TWO BEHAVIOURS. `title_animation` writes the terminal phase over the activation
+    // flourish; `title_settle` puts the scene into its settled state. Both live in the same
+    // `FeSubStateTitleMain::v3` detour, so the hook goes in when either is asked for and each
+    // behaviour is gated on its own flag inside -- which is what keeps them independently
+    // switchable without patching the same site twice.
+    if request.title_animation || request.title_settle {
+        MODULE_BASE_TITLE.store(base, Ordering::Release);
+        // Published before the site is patched: a detour that fired first would otherwise read
+        // `false` for both and do nothing on the one frame that matters.
+        SETTLE_ENABLED.store(request.title_settle, Ordering::Release);
+        ANIMATION_ENABLED.store(request.title_animation, Ordering::Release);
         let site = base + ds2_rva::FE_TITLE_MAIN_UPDATE as usize;
         match unsafe { MhHook::new(site as *mut c_void, detour_title_main_update as *mut c_void) } {
             Ok(hook) => {
@@ -472,10 +577,14 @@ pub unsafe fn install(request: Request) -> Outcome {
                 TITLE_MAIN_TRAMPOLINE.store(hook.trampoline() as usize, Ordering::Release);
                 let status = unsafe { MH_EnableHook(site as *mut c_void) };
                 if status == MH_STATUS::MH_OK {
-                    outcome.title_animation = true;
+                    outcome.title_animation = request.title_animation;
+                    outcome.title_settle = request.title_settle;
                     log(format_args!(
-                        "{LOG_PREFIX} hooked gate=title-animation rva=0x{:08x} va=0x{site:016x}",
-                        ds2_rva::FE_TITLE_MAIN_UPDATE
+                        "{LOG_PREFIX} hooked gate=title-main-update rva=0x{:08x} va=0x{site:016x} \
+                         animation={} settle={}",
+                        ds2_rva::FE_TITLE_MAIN_UPDATE,
+                        request.title_animation,
+                        request.title_settle
                     ));
                 } else {
                     log(format_args!(

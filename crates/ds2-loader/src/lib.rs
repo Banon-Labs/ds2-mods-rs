@@ -397,6 +397,7 @@ fn install_title_skip() {
         && !config.process_windows
         && !config.title_animation
         && !config.title_sequence_gate
+        && !config.title_settle
     {
         return;
     }
@@ -412,6 +413,7 @@ fn install_title_skip() {
             hide_process_windows: config.hide_process_windows,
             title_animation: config.title_animation,
             title_sequence_gate: config.title_sequence_gate,
+            title_settle: config.title_settle,
         })
     };
     if config.press_any_button && !outcome.press_any_button {
@@ -435,6 +437,12 @@ fn install_title_skip() {
     if config.title_sequence_gate && !outcome.title_sequence_gate {
         log_line(format_args!(
             "{} title-sequence NOT INSTALLED -- the title logo animation will still be waited out",
+            ds2_dialog_skip::LOG_PREFIX
+        ));
+    }
+    if config.title_settle && !outcome.title_settle {
+        log_line(format_args!(
+            "{} title-settle NOT INSTALLED -- the title scene keeps its intro sequence",
             ds2_dialog_skip::LOG_PREFIX
         ));
     }
