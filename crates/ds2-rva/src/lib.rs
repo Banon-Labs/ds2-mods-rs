@@ -60,7 +60,7 @@ pub const IMAGE_BASE: u64 = 0x1_4000_0000;
 
 /// `OptionalHeader.SizeOfImage` -- the mapped size, and therefore the length of
 /// `darksoulsii-deobf.bin`.
-pub const SIZE_OF_IMAGE: u32 = 0x1d76_000;
+pub const SIZE_OF_IMAGE: u32 = 0x01d7_6000;
 
 /// Steam application id for DARK SOULS II: Scholar of the First Sin.
 pub const STEAM_APP_ID: u32 = 335300;
