@@ -102,8 +102,14 @@ def run_case(case: PolicyCase) -> None:
         raise AssertionError(f"{case.name}: missing {case.expected_text!r}\n{output}")
 
 
-def main() -> int:
-    cases = [
+def cases() -> list[PolicyCase]:
+    """The fixture set, exposed so `scripts/explain-cupcake-text.py` can reuse it by name.
+
+    A fixture that reproduces a denial necessarily contains the text the guard blocks, so it can
+    never be retyped into an agent Bash command -- not even to write it to a file. Sharing the list
+    is what lets a denial be DEBUGGED rather than only detected.
+    """
+    return [
         # --- control: an ordinary command must survive the whole policy set -------------------
         PolicyCase("allow-cargo-build", True, "cargo build --workspace"),
         PolicyCase("allow-ds2-run-dry", True, "python3 scripts/ds2-run.py --dry-run"),
@@ -116,6 +122,44 @@ def main() -> int:
         # most encouraged activity in this repo -- neither may read as a launch.
         PolicyCase("allow-applaunch-other-appid", True, "steam -applaunch 1245620"),
         PolicyCase("allow-objdump-on-the-exe", True, "objdump -d Game/DarkSoulsII.exe | head"),
+        # A COMMIT MESSAGE IS NOT A COMMAND, and a heredoc body is where commit messages live.
+        # Measured 2026-08-26 (ds2-mods-rs-1tc): `git commit -F -` with a heredoc explaining that
+        # check.sh now runs the Windows test binaries was DENIED by the launch guard, because the
+        # message named the executable and wine in the same body. The message had to be made less
+        # precise to land -- a guard about launching degrading the record of what was built.
+        PolicyCase(
+            "allow-commit-message-describing-the-launch-rule",
+            True,
+            "git commit -q -F - <<'EOF'\n"
+            "Wire crash logging into the loader\n"
+            "\n"
+            "check.sh now builds the Windows test binaries and runs them under wine.\n"
+            "Nothing imports ds2_crash_logging.dll, and DarkSoulsII.exe imports only\n"
+            "dinput8, so the library is linked in instead.\n"
+            "EOF",
+        ),
+        # The same shape for the pgrep guard: prose explaining why -f is banned must not be
+        # denied by the rule it explains.
+        PolicyCase(
+            "allow-commit-message-describing-the-pgrep-rule",
+            True,
+            "git commit -q -F - <<'EOF'\n"
+            "Document the pgrep guard\n"
+            "\n"
+            "pgrep -f DarkSoulsII.exe matched the agent's own command line and\n"
+            "produced a fabricated ALIVE claim; use pgrep -x instead.\n"
+            "EOF",
+        ),
+        # The EXACT command that was still denied after the first fix: a compound
+        # `git add && git status && git commit -F -` whose message uses backticks for code
+        # formatting. Kept verbatim rather than minimised, because the minimised form passed
+        # The guard must still bite when a heredoc genuinely FEEDS A SHELL -- that body is a
+        # program, not prose, and commands.rego deliberately leaves it raw.
+        PolicyCase(
+            "deny-launch-hidden-in-a-shell-heredoc",
+            False,
+            "bash <<'EOF'\nsteam -applaunch 335300\nEOF",
+        ),
         # --- block_pgrep_full_match ---------------------------------------------------------
         # -f matched the agent's own command line twice in one session: once producing a
         # fabricated ALIVE claim, once killing the agent's own shell. -x cannot self-match.
@@ -193,12 +237,16 @@ def main() -> int:
         ),
     ]
 
-    max_workers = min(8, max(1, len(cases)))
+
+def main() -> int:
+    cases_to_run = cases()
+
+    max_workers = min(8, max(1, len(cases_to_run)))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = {pool.submit(run_case, case): case for case in cases}
+        futures = {pool.submit(run_case, case): case for case in cases_to_run}
         for future in as_completed(futures):
             future.result()
-    print(f"cupcake live-eval regression tests passed ({len(cases)} cases)")
+    print(f"cupcake live-eval regression tests passed ({len(cases_to_run)} cases)")
     return 0
 
 

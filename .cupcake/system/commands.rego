@@ -229,6 +229,23 @@ shell_payloads_deep(text) := deep if {
 # Heredoc bodies are DATA for the command reading them, so their contents get
 # the same treatment as a quoted operand -- unless a shell is what reads them,
 # in which case the body stays raw (fail closed) and its separators keep working.
+#
+# THE BODY IS RE-QUOTED, not merely anchor-blanked, and that distinction is the
+# whole fix for ds2-mods-rs-1tc. `blanked_anchors` neutralises SEPARATORS and
+# leaves the words, which is right for stopping `; git push` inside a body and
+# wrong for everything else: `quotes_removed` (which every substring and flag
+# test runs over) DELETES quoted spans, so a body that arrived unquoted kept all
+# of its words and a commit message describing a rule was scanned as if it ran
+# one. Measured 2026-08-26: `git commit -F -` with a heredoc explaining the pgrep
+# guard was denied by the pgrep guard, and one explaining the launch rule was
+# denied by the launch guard.
+#
+# Wrapping the blanked body in one pair of double quotes makes it a well-formed
+# quoted span, so both public views handle it without either needing to know a
+# heredoc was involved: `quotes_removed` deletes it, `operands_blanked`
+# neutralises it. `blanked_anchors` has already replaced every `'` and `"` in the
+# body with a space, so the body cannot close the pair early, and exactly one
+# balanced pair is added -- quote parity is preserved for every later phase.
 heredoc_body_blanked(text) := out if {
 	parts := split(text, "<<")
 	count(parts) == 2
@@ -236,7 +253,8 @@ heredoc_body_blanked(text) := out if {
 	tag := heredoc_tag(parts[1])
 	segments := split(parts[1], concat("", ["\n", tag]))
 	count(segments) == 2
-	out := concat("", [parts[0], " ", blanked_anchors(segments[0]), " ", tag, segments[1]])
+	quoted_body := concat("", [`"`, blanked_anchors(segments[0]), `"`])
+	out := concat("", [parts[0], " ", quoted_body, " ", tag, segments[1]])
 }
 
 heredoc_tag(after_marker) := tag if {
