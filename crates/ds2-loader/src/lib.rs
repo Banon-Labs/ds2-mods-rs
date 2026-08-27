@@ -393,7 +393,7 @@ fn install_dialog_skip() {
 fn install_title_skip() {
     let config = title_skip::TitleSkipConfig::load();
     log_line(format_args!("{}", config.describe()));
-    if !config.press_any_button && !config.process_windows {
+    if !config.press_any_button && !config.process_windows && !config.title_animation {
         return;
     }
     ds2_dialog_skip::set_logger(log_line);
@@ -401,8 +401,14 @@ fn install_title_skip() {
     // live module base, and neither is Arxan-redirected. The press gate is replaced outright and
     // takes an argument it never reads; the process-window detour fronts `enter` and calls the
     // original FIRST, because that call is what starts the work the window is covering.
-    let outcome =
-        unsafe { ds2_dialog_skip::install_title(config.press_any_button, config.process_windows) };
+    let outcome = unsafe {
+        ds2_dialog_skip::install_title(ds2_dialog_skip::TitleRequest {
+            press_any_button: config.press_any_button,
+            process_windows: config.process_windows,
+            hide_process_windows: config.hide_process_windows,
+            title_animation: config.title_animation,
+        })
+    };
     if config.press_any_button && !outcome.press_any_button {
         log_line(format_args!(
             "{} press-any-button NOT INSTALLED -- the title will still wait for a button",
@@ -412,6 +418,18 @@ fn install_title_skip() {
     if config.process_windows && !outcome.process_windows {
         log_line(format_args!(
             "{} process-window NOT INSTALLED -- the wait windows keep their minimum display time",
+            ds2_dialog_skip::LOG_PREFIX
+        ));
+    }
+    if config.hide_process_windows && !outcome.hide_process_windows {
+        log_line(format_args!(
+            "{} show-process-window NOT INSTALLED -- the wait windows will still be drawn",
+            ds2_dialog_skip::LOG_PREFIX
+        ));
+    }
+    if config.title_animation && !outcome.title_animation {
+        log_line(format_args!(
+            "{} title-animation NOT INSTALLED -- the title screen keeps its activation flourish",
             ds2_dialog_skip::LOG_PREFIX
         ));
     }

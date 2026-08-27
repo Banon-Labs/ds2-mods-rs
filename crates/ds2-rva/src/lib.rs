@@ -598,3 +598,112 @@ pub const FE_PROCESS_WINDOW_PHASE_SHOWING: i32 = 1;
 /// Kind field within a process-window substate. `+0x0c`, set by the constructor at `0x140104c87`.
 /// Logged as a diagnostic so the boot windows can be told apart in a log.
 pub const FE_PROCESS_WINDOW_KIND_OFFSET: usize = 0x0c;
+
+// --------------------------------------------------------------------------------------------
+// Suppressing the process window outright, and the title screen's activation animation.
+//
+// Both go one step further than the two constants above, and both are recorded separately from
+// them so either can be switched off on its own.
+// --------------------------------------------------------------------------------------------
+
+/// Vtable slot a process window calls from `enter` to START its asynchronous work.
+/// `call [rax+0x40]` at `0x140104edc`, and `0x40 / 8 == 8`.
+///
+/// **This call is the reason a process window cannot simply be suppressed.** It returns a status
+/// into [`FE_PROCESS_WINDOW_RESULT_OFFSET`]; a negative value means work is outstanding and the
+/// window is shown, a non-negative one means there was nothing to do and the substate goes
+/// straight to [`FE_PROCESS_WINDOW_PHASE_DONE`] with no window at all. Any code that hides the
+/// window must still make this call and still honour that branch.
+pub const FE_PROCESS_WINDOW_SLOT_BEGIN: usize = 8;
+
+/// Where a process window stores the status returned by [`FE_PROCESS_WINDOW_SLOT_BEGIN`]. `+0x24`.
+/// Written by `enter` at `0x140104edf` and again by the update at `0x1401052b2`.
+pub const FE_PROCESS_WINDOW_RESULT_OFFSET: usize = 0x24;
+
+/// [`FE_PROCESS_WINDOW_PHASE_OFFSET`] once the substate is finished. `3`.
+///
+/// `enter` writes it directly at `0x140104f17` when there was no work to do -- the game's own
+/// no-window path, and the precedent for reaching this phase without ever showing anything.
+pub const FE_PROCESS_WINDOW_PHASE_DONE: i32 = 3;
+
+/// `FeSubStateTitleMain::v3` (update). RVA `0x000fed90`, VA `0x1400fed90`.
+///
+/// The PRESS ANY BUTTON screen's per-frame logic, switching on a phase at
+/// [`FE_TITLE_MAIN_PHASE_OFFSET`]:
+///
+/// | phase | what it does |
+/// | --- | --- |
+/// | 1 | ticks the scene, waits for [`FE_TITLE_MAIN_SEQUENCE_GATE`], then for a press. On a press it runs the whole top-menu setup and leaves phase 2 (or 3). With no press for long enough it goes to phase **5** -- the attract-mode prologue movie. |
+/// | 2 | pure wait on a sequence handle at `+0x38`; sets phase 3 and does nothing else |
+/// | 3 | waits for the same sequence to finish, calls `0x140afe8a0` on it, sets phase 4 |
+/// | 4 | terminal |
+///
+/// **Phases 2 and 3 are the activation animation** -- the flourish a player sees after pressing.
+/// Phase 1's body is the part that matters, and it has already run by the time either is reached,
+/// which is what makes forcing phase 4 from 2 or 3 a skip of the animation rather than of the
+/// setup. Compare `ds2-intro-skip`, which forces a terminal phase from `enter`; that is not
+/// available here, because from `enter` the setup has not happened yet.
+///
+/// Not Arxan-redirected. Prologue `48 89 5c 24 18` -- five bytes exactly.
+pub const FE_TITLE_MAIN_UPDATE: u32 = 0x000f_ed90;
+
+/// Phase field within `FeSubStateTitleMain`. `+0x10`, a DWORD.
+///
+/// Read as `mov ecx,[rcx+0x10]` at `0x1400fedb2` before its `dec`/`je` chain. Same offset as the
+/// boot screens' phase, and a different one from either window family -- which is why each class's
+/// offset in this file is derived from that class's own code and never shared by analogy.
+pub const FE_TITLE_MAIN_PHASE_OFFSET: usize = 0x10;
+
+/// The first activation-animation phase. Written by phase 1's tail at `0x1400feee8`.
+pub const FE_TITLE_MAIN_PHASE_ANIMATING: i32 = 2;
+
+/// The second activation-animation phase. Phase 1's tail can jump straight here at `0x1400feefa`
+/// when the object it just built reports `[+8] == 0`, so BOTH values mean "the setup is done and
+/// only the flourish is left".
+pub const FE_TITLE_MAIN_PHASE_ANIMATING_LATE: i32 = 3;
+
+/// Terminal phase for `FeSubStateTitleMain`. Written by phase 3 at `0x1400fedf7`.
+pub const FE_TITLE_MAIN_PHASE_DONE: i32 = 4;
+
+/// `show_process_window`. RVA `0x004fe760`, VA `0x1404fe760`.
+///
+/// **The single function that draws a "please wait" box**, and the only place all of them meet.
+/// Hooking it is what makes hiding them general, and the alternative was shown to be a losing
+/// game: the seven call sites are spread across different vtable slots of different classes, and
+/// `FeSubStateTitleInformation` -- the "Retrieving Information" box -- shows its window from its
+/// `update` (`v3`, via the continuation chunk at `0x1400ff98e`) rather than from `enter`, so no
+/// amount of hooking `enter` reaches it.
+///
+/// # Its signature, established rather than assumed
+///
+/// Four register arguments and **no stack arguments**: the body reads nothing above its own frame.
+/// It keeps RCX and forwards RDX, R8 and R9 untouched into `0x1405105f0`, which is why a detour
+/// must carry all four even though the function appears to use only the first. All seven call
+/// sites were checked and set exactly these four -- six do `mov r9b,1; xor r8d,r8d`, and
+/// `0x1401088ae` does the mirror `xor r9d,r9d; mov r8b,1`. None writes a fifth at `[rsp+0x20]`.
+/// Forwarding them as raw 64-bit registers reproduces even the upper bits the callers leave
+/// undefined.
+///
+/// # Returning zero is the function's own no-op answer
+///
+/// It opens with `mov rcx,[rbx+0xf0]; test rcx,rcx; jne`, and the not-taken path is
+/// `xor eax,eax; ret` -- "there is no window manager, so nothing was shown". **No caller uses the
+/// return value**; all seven ignore EAX and immediately write their own phase field. So a detour
+/// that returns 0 without drawing is indistinguishable from the shipped path where there was
+/// nothing to draw on.
+pub const FE_SHOW_PROCESS_WINDOW: u32 = 0x004f_e760;
+
+/// The byte that is nonzero while `FeOperatorTitle` is running. RVA `0x01614804`, VA
+/// `0x141614804`.
+///
+/// Written `1` by `FeOperatorTitle::v2` at `0x1400ef045` and `0` by `FeOperatorTitle::v3` at
+/// `0x1400ef123`, which are the operator's setup and teardown. The game reads it itself at
+/// `0x140342251` (`cmp BYTE PTR [rip+...],0`), so it is a real state flag rather than a
+/// write-only leftover -- `scripts/ds2-xrefs.py` finds no other genuine reference.
+///
+/// **This is what scopes the process-window hiding to the title flow.** Hiding every process
+/// window in the game would take the "Saving..." indicator with it, which is exactly the kind of
+/// thing a player is entitled to see. Gating on the game's own "am I in the title flow" flag keeps
+/// the change to the boot sequence and leaves gameplay alone, without this mod having to invent a
+/// notion of "still booting" or time-box one.
+pub const FE_OPERATOR_TITLE_ACTIVE: u32 = 0x0161_4804;

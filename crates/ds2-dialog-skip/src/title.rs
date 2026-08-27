@@ -28,7 +28,7 @@
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use ds2_game_base::mem::{game_module_base, safe_read_f32, safe_read_i32};
+use ds2_game_base::mem::{game_module_base, safe_read_f32, safe_read_i32, safe_read_u8};
 use ds2_hook::{MH_EnableHook, MH_Initialize, MH_STATUS, MhHook};
 
 use crate::LOG_PREFIX;
@@ -37,12 +37,27 @@ use crate::install::log;
 /// Trampoline back to the original process-window `enter`.
 static PROCESS_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 
+/// Trampoline back to `FeSubStateTitleMain`'s original update.
+static TITLE_MAIN_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
+
+/// How many activation animations were cut short.
+static ANIMATIONS_SKIPPED: AtomicUsize = AtomicUsize::new(0);
+
+/// How many process windows were hidden outright.
+static HIDDEN: AtomicUsize = AtomicUsize::new(0);
+
 /// How many times the press gate has been forced. Reported so "the title screen never came up"
 /// and "the skip never fired" cannot be confused.
 static PRESSES: AtomicUsize = AtomicUsize::new(0);
 
 /// How many process windows have had their minimum duration cleared.
 static SHORTENED: AtomicUsize = AtomicUsize::new(0);
+
+/// `void update(this, float delta)` -- `this` in RCX, the frame delta in XMM1.
+///
+/// The float is carried for the same reason the dialog update's is: `FeSubStateTitleMain::v3`
+/// accumulates a delta into its idle timer, and a detour that dropped XMM1 would feed it garbage.
+type UpdateFn = unsafe extern "system" fn(*mut u8, f32);
 
 /// `void enter(this)` -- `this` in RCX. Same shape as the dialog `enter`.
 ///
@@ -126,6 +141,107 @@ unsafe extern "system" fn detour_process_enter(this: *mut u8) {
     ));
 }
 
+/// The one function that draws a "please wait" box. Four register arguments, no stack arguments.
+///
+/// All four are carried even though the body appears to use only RCX: it keeps RCX and forwards
+/// RDX, R8 and R9 untouched into `0x1405105f0`. They are `u64` rather than narrower types so that
+/// forwarding reproduces even the upper bits the callers leave undefined -- six call sites set only
+/// `r9b` and `r8d`, and one sets only `r8b` and `r9d`.
+type ShowProcessWindowFn = unsafe extern "system" fn(*mut c_void, *mut c_void, u64, u64) -> i32;
+
+/// Trampoline back to the original `show_process_window`.
+static SHOW_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
+
+/// Address of the byte that is nonzero while `FeOperatorTitle` is running. Resolved once at
+/// install so the detour does not repeat the module lookup on a drawing path.
+static TITLE_ACTIVE_FLAG: AtomicUsize = AtomicUsize::new(0);
+
+/// Draw nothing, but only while the title flow is running.
+///
+/// **THE GATE IS THE GAME'S OWN FLAG**, not a timer and not a notion of "still booting" invented
+/// here. `FeOperatorTitle` sets [`ds2_rva::FE_OPERATOR_TITLE_ACTIVE`] on setup and clears it on
+/// teardown, and the game reads it itself. Hiding every process window unconditionally would take
+/// the in-game "Saving..." indicator with it, which a player is entitled to see; gating on this
+/// keeps the change to the boot sequence.
+///
+/// Returning `0` is the function's own answer when there is no window manager to draw on
+/// (`xor eax,eax; ret`), and no caller uses the return value -- all seven ignore EAX and write
+/// their own phase field next.
+unsafe extern "system" fn detour_show_process_window(
+    ui: *mut c_void,
+    caption: *mut c_void,
+    arg3: u64,
+    arg4: u64,
+) -> i32 {
+    let flag = TITLE_ACTIVE_FLAG.load(Ordering::Acquire);
+    let in_title_flow =
+        flag != 0 && unsafe { safe_read_u8(flag) }.is_some_and(|active| active != 0);
+    if in_title_flow {
+        let total = HIDDEN.fetch_add(1, Ordering::Relaxed) + 1;
+        // Only the first few: several of these open during one boot and the count carries the rest.
+        if total <= 8 {
+            log(format_args!(
+                "{LOG_PREFIX} hidden screen=process-window total={total}"
+            ));
+        }
+        return 0;
+    }
+    let trampoline = SHOW_TRAMPOLINE.load(Ordering::Acquire);
+    if trampoline == 0 {
+        return 0;
+    }
+    // SAFETY: MinHook published this trampoline for this site, and all four registers are forwarded
+    // exactly as received.
+    let original: ShowProcessWindowFn =
+        unsafe { std::mem::transmute::<usize, ShowProcessWindowFn>(trampoline) };
+    unsafe { original(ui, caption, arg3, arg4) }
+}
+
+/// Run the title screen's update, then cut the activation animation short if that is all that is
+/// left.
+///
+/// Phase 1 is where every decision lives: it waits for the press and, on one, runs the whole
+/// top-menu setup. Phases 2 and 3 are the flourish afterwards -- phase 2 is a pure wait that does
+/// nothing but advance, and phase 3 waits for the same sequence and then advances. So observing
+/// EITHER of them after the original has run means the setup is already done and only the animation
+/// remains, which is what makes writing the terminal phase here a skip of the animation rather than
+/// of anything load-bearing.
+///
+/// The phase is read AFTER the original rather than before, deliberately: before the call it is
+/// still 1 and says nothing about whether the press was taken this frame.
+unsafe extern "system" fn detour_title_main_update(this: *mut u8, delta: f32) {
+    let trampoline = TITLE_MAIN_TRAMPOLINE.load(Ordering::Acquire);
+    if trampoline != 0 {
+        // SAFETY: MinHook published this trampoline for this site, and `delta` is forwarded so the
+        // idle timer that decides the attract-movie timeout keeps accumulating real frame time.
+        let original: UpdateFn = unsafe { std::mem::transmute::<usize, UpdateFn>(trampoline) };
+        unsafe { original(this, delta) };
+    }
+    if this.is_null() {
+        return;
+    }
+    let object = this as usize;
+    let phase = unsafe { safe_read_i32(object + ds2_rva::FE_TITLE_MAIN_PHASE_OFFSET) };
+    if phase != Some(ds2_rva::FE_TITLE_MAIN_PHASE_ANIMATING)
+        && phase != Some(ds2_rva::FE_TITLE_MAIN_PHASE_ANIMATING_LATE)
+    {
+        return;
+    }
+    // SAFETY: the phase was just read from this object without faulting, and this writes the same
+    // field the original writes at `0x1400fedf7`.
+    unsafe {
+        this.add(ds2_rva::FE_TITLE_MAIN_PHASE_OFFSET)
+            .cast::<i32>()
+            .write(ds2_rva::FE_TITLE_MAIN_PHASE_DONE)
+    };
+    let total = ANIMATIONS_SKIPPED.fetch_add(1, Ordering::Relaxed) + 1;
+    log(format_args!(
+        "{LOG_PREFIX} advanced screen=title-main phase={}->{} total={total}",
+        phase.unwrap_or(-1),
+        ds2_rva::FE_TITLE_MAIN_PHASE_DONE
+    ));
+}
+
 /// What [`install`] managed to do. Each hook is independent; one failing does not stop the other.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Outcome {
@@ -133,6 +249,23 @@ pub struct Outcome {
     pub press_any_button: bool,
     /// Process windows now close as soon as their work is done.
     pub process_windows: bool,
+    /// The title screen's activation animation is now cut short.
+    pub title_animation: bool,
+    /// Process windows are now not drawn at all while the title flow is running.
+    pub hide_process_windows: bool,
+}
+
+/// What the caller asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Request {
+    /// Force the press-any-button poll.
+    pub press_any_button: bool,
+    /// Hook process windows at all.
+    pub process_windows: bool,
+    /// Hide process windows outright rather than only clearing their minimum display time.
+    pub hide_process_windows: bool,
+    /// Cut the title screen's activation animation short once its setup has run.
+    pub title_animation: bool,
 }
 
 /// Install whichever of the two title-flow skips were asked for.
@@ -141,10 +274,12 @@ pub struct Outcome {
 ///
 /// Patches executable memory in the loaded game image. Must run after `neuter_arxan` (or after
 /// `schedule_after_arxan`) and before the title flow reaches these substates.
-pub unsafe fn install(press_any_button: bool, process_windows: bool) -> Outcome {
+pub unsafe fn install(request: Request) -> Outcome {
     let mut outcome = Outcome {
         press_any_button: false,
         process_windows: false,
+        title_animation: false,
+        hide_process_windows: false,
     };
     let base = match game_module_base() {
         Ok(base) => base,
@@ -163,7 +298,7 @@ pub unsafe fn install(press_any_button: bool, process_windows: bool) -> Outcome 
         return outcome;
     }
 
-    if press_any_button {
+    if request.press_any_button {
         let site = base + ds2_rva::FE_TITLE_MAIN_PRESS_ANY_BUTTON as usize;
         // No trampoline is stored: the detour replaces the poll outright rather than fronting it.
         match unsafe { MhHook::new(site as *mut c_void, detour_press_gate as *mut c_void) } {
@@ -189,7 +324,7 @@ pub unsafe fn install(press_any_button: bool, process_windows: bool) -> Outcome 
         }
     }
 
-    if process_windows {
+    if request.process_windows {
         let site = base + ds2_rva::FE_PROCESS_WINDOW_ENTER as usize;
         match unsafe { MhHook::new(site as *mut c_void, detour_process_enter as *mut c_void) } {
             Ok(hook) => {
@@ -212,6 +347,72 @@ pub unsafe fn install(press_any_button: bool, process_windows: bool) -> Outcome 
             }
             Err(status) => log(format_args!(
                 "{LOG_PREFIX} hook-failed gate=process-window va=0x{site:016x} \
+                 stage=MH_CreateHook status={status:?}"
+            )),
+        }
+    }
+
+    if request.hide_process_windows {
+        // Published before the site is patched: a detour that fired with a zero here would read no
+        // flag, conclude it is not in the title flow, and draw the window it was meant to hide.
+        TITLE_ACTIVE_FLAG.store(
+            base + ds2_rva::FE_OPERATOR_TITLE_ACTIVE as usize,
+            Ordering::Release,
+        );
+        let site = base + ds2_rva::FE_SHOW_PROCESS_WINDOW as usize;
+        match unsafe {
+            MhHook::new(
+                site as *mut c_void,
+                detour_show_process_window as *mut c_void,
+            )
+        } {
+            Ok(hook) => {
+                SHOW_TRAMPOLINE.store(hook.trampoline() as usize, Ordering::Release);
+                let status = unsafe { MH_EnableHook(site as *mut c_void) };
+                if status == MH_STATUS::MH_OK {
+                    outcome.hide_process_windows = true;
+                    log(format_args!(
+                        "{LOG_PREFIX} hooked gate=show-process-window rva=0x{:08x} \
+                         va=0x{site:016x} flag-rva=0x{:08x}",
+                        ds2_rva::FE_SHOW_PROCESS_WINDOW,
+                        ds2_rva::FE_OPERATOR_TITLE_ACTIVE
+                    ));
+                } else {
+                    log(format_args!(
+                        "{LOG_PREFIX} hook-failed gate=show-process-window va=0x{site:016x} \
+                         stage=MH_EnableHook status={status:?}"
+                    ));
+                }
+            }
+            Err(status) => log(format_args!(
+                "{LOG_PREFIX} hook-failed gate=show-process-window va=0x{site:016x} \
+                 stage=MH_CreateHook status={status:?}"
+            )),
+        }
+    }
+    if request.title_animation {
+        let site = base + ds2_rva::FE_TITLE_MAIN_UPDATE as usize;
+        match unsafe { MhHook::new(site as *mut c_void, detour_title_main_update as *mut c_void) } {
+            Ok(hook) => {
+                // Published BEFORE the site is patched: this detour's whole job happens AFTER the
+                // original, so a zero trampoline would mean the title screen stopped updating.
+                TITLE_MAIN_TRAMPOLINE.store(hook.trampoline() as usize, Ordering::Release);
+                let status = unsafe { MH_EnableHook(site as *mut c_void) };
+                if status == MH_STATUS::MH_OK {
+                    outcome.title_animation = true;
+                    log(format_args!(
+                        "{LOG_PREFIX} hooked gate=title-animation rva=0x{:08x} va=0x{site:016x}",
+                        ds2_rva::FE_TITLE_MAIN_UPDATE
+                    ));
+                } else {
+                    log(format_args!(
+                        "{LOG_PREFIX} hook-failed gate=title-animation va=0x{site:016x} \
+                         stage=MH_EnableHook status={status:?}"
+                    ));
+                }
+            }
+            Err(status) => log(format_args!(
+                "{LOG_PREFIX} hook-failed gate=title-animation va=0x{site:016x} \
                  stage=MH_CreateHook status={status:?}"
             )),
         }

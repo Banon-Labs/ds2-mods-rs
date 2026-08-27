@@ -512,3 +512,68 @@ up here as a number explaining why nothing visibly changed.
 executable memory during startup, and the entire value of separate keys is that a run which fails to
 boot can be pinned on ONE of them by editing one line. `ds2-run.py --selftest` asserts each switch
 moves only its own key.
+
+## Hiding the wait windows properly: hook the drawing, not the class
+
+The first attempt at the wait windows hooked `FeSubStateProcessWindowBase::v1` and reproduced it
+without its show call. It worked, and it hid **one** window. "Retrieving Information" kept
+appearing.
+
+The reason is structural, and it is why per-class hooking was never going to finish. Mapping every
+call site of the three window-show functions to its owning vtable slot gives:
+
+| shows | from |
+| --- | --- |
+| process window | `FeSubStateTitleSaveFirst::v1` |
+| process window | `FeSubStateTitleSteamLoadSystemData::v1` |
+| process window | `FeSubStateProcessWindowBase::v1` (six classes share it) |
+| process window | a continuation chunk of `FeSubStateTitleInformation::v3` -- **its `update`** |
+| process window | two further chunks, plus `FeAddProcessingMessageJob::v4` |
+
+**`FeSubStateTitleInformation` shows its window from `update`, not `enter`.** No amount of hooking
+`enter` reaches it. The classes differ, the slots differ, and the list is open-ended.
+
+So the hook moved to the one place they all meet: `show_process_window` at `0x1404fe760`.
+
+### Its signature, established rather than assumed
+
+Four register arguments, **no stack arguments** -- the body reads nothing above its own frame. It
+keeps RCX and forwards RDX, R8 and R9 untouched into `0x1405105f0`, which is why a detour must
+carry all four even though the function looks like it uses one. All seven call sites were checked
+and set exactly these four: six do `mov r9b,1; xor r8d,r8d`, and `0x1401088ae` does the mirror
+`xor r9d,r9d; mov r8b,1`. None writes a fifth at `[rsp+0x20]`. They are forwarded as raw `u64` so
+even the upper bits the callers leave undefined are reproduced.
+
+Returning `0` is the function's own answer when there is nothing to draw on -- it opens
+`mov rcx,[rbx+0xf0]; test rcx,rcx; jne` with `xor eax,eax; ret` on the null path -- and **no caller
+uses the return value**; all seven ignore EAX and write their own phase field next. So a detour
+that returns 0 without drawing is indistinguishable from a shipped path.
+
+### The gate is the game's own flag
+
+Hiding every process window in the game would take the in-game "Saving..." indicator with it, which
+a player is entitled to see. So the detour is gated on `0x141614804`, a byte written `1` by
+`FeOperatorTitle::v2` (`0x1400ef045`) and `0` by its `v3` teardown (`0x1400ef123`). The game reads
+it itself at `0x140342251`, so it is real state and not a write-only leftover. That keeps the
+change to the boot sequence without this mod inventing a notion of "still booting" or time-boxing
+one.
+
+### Measured
+
+```
+ds2-dialog-skip: hooked gate=show-process-window rva=0x004fe760 flag-rva=0x01614804
+ds2-dialog-skip: pressed    screen=title-main gate=press-any-button total=1
+ds2-dialog-skip: advanced   screen=title-main phase=2->4 total=1
+ds2-dialog-skip: hidden     screen=process-window total=1
+ds2-dialog-skip: suppressed screen=common-window kind=6  caption=0x20 total=1
+ds2-dialog-skip: hidden     screen=process-window total=2
+ds2-dialog-skip: shortened  screen=process-window kind=57 min-duration=1.000->0 total=1
+ds2-dialog-skip: hidden     screen=process-window total=3
+ds2-dialog-skip: suppressed screen=common-window kind=70 caption=0x47 total=2
+```
+
+**Three** wait windows, where the per-class hook had reached one. The other two came from slots that
+hook could not see, which is the whole argument for moving it.
+
+The `enter` hook stays, doing only the min-duration zeroing: a window that is invisible would
+otherwise still hold its one-second floor before the flow could advance.

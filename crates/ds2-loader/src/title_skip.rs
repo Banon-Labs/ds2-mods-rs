@@ -21,6 +21,12 @@ pub const KEY_PRESS_ANY_BUTTON: &str = "press_any_button";
 /// Clear the "please wait" windows' minimum display time.
 pub const KEY_PROCESS_WINDOWS: &str = "process_windows";
 
+/// Do not draw the "please wait" windows at all.
+pub const KEY_HIDE_PROCESS_WINDOWS: &str = "hide_process_windows";
+
+/// Cut the title screen's activation animation short.
+pub const KEY_TITLE_ANIMATION: &str = "title_animation";
+
 /// `[title_skip]`, resolved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TitleSkipConfig {
@@ -28,6 +34,11 @@ pub struct TitleSkipConfig {
     pub press_any_button: bool,
     /// Zero each process window's minimum display duration as it opens.
     pub process_windows: bool,
+    /// Reproduce the process window's `enter` without its show call, so the window never appears.
+    /// Implies [`Self::process_windows`], which is the hook it rides on.
+    pub hide_process_windows: bool,
+    /// Write the title screen's terminal phase once its setup has run, skipping the flourish.
+    pub title_animation: bool,
 }
 
 impl Default for TitleSkipConfig {
@@ -38,6 +49,8 @@ impl Default for TitleSkipConfig {
         Self {
             press_any_button: true,
             process_windows: true,
+            hide_process_windows: true,
+            title_animation: true,
         }
     }
 }
@@ -59,19 +72,28 @@ impl TitleSkipConfig {
             Some(raw) => !matches!(raw.trim().trim_matches('"'), "false"),
         };
         let defaults = Self::default();
+        let hide = read(KEY_HIDE_PROCESS_WINDOWS, defaults.hide_process_windows);
         Self {
             press_any_button: read(KEY_PRESS_ANY_BUTTON, defaults.press_any_button),
-            process_windows: read(KEY_PROCESS_WINDOWS, defaults.process_windows),
+            // Hiding rides on the same detour that shortens, so asking for the stronger behaviour
+            // without the hook it needs would silently do nothing. Turning `process_windows` off is
+            // therefore the way to leave the wait windows completely alone.
+            process_windows: read(KEY_PROCESS_WINDOWS, defaults.process_windows) || hide,
+            hide_process_windows: hide,
+            title_animation: read(KEY_TITLE_ANIMATION, defaults.title_animation),
         }
     }
 
     /// One line for the attach log, written before anything acts on it.
     pub fn describe(&self) -> String {
         format!(
-            "{} config [{CONFIG_SECTION}] {KEY_PRESS_ANY_BUTTON}={} {KEY_PROCESS_WINDOWS}={}",
+            "{} config [{CONFIG_SECTION}] {KEY_PRESS_ANY_BUTTON}={} {KEY_PROCESS_WINDOWS}={} \
+             {KEY_HIDE_PROCESS_WINDOWS}={} {KEY_TITLE_ANIMATION}={}",
             ds2_dialog_skip::LOG_PREFIX,
             self.press_any_button,
-            self.process_windows
+            self.process_windows,
+            self.hide_process_windows,
+            self.title_animation
         )
     }
 }

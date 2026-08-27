@@ -147,6 +147,8 @@ KEY_DIALOG_ENABLED = "enabled"
 TITLE_SECTION = "title_skip"
 KEY_PRESS_ANY_BUTTON = "press_any_button"
 KEY_PROCESS_WINDOWS = "process_windows"
+KEY_HIDE_PROCESS_WINDOWS = "hide_process_windows"
+KEY_TITLE_ANIMATION = "title_animation"
 KEY_POLL_INTERVAL_MS = "poll_interval_ms"
 KEY_HEARTBEAT_INTERVAL_MS = "heartbeat_interval_ms"
 
@@ -852,6 +854,8 @@ def config_text(
     dialog_skip: bool = True,
     press_any_button: bool = True,
     process_windows: bool = True,
+    hide_process_windows: bool = True,
+    title_animation: bool = True,
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
@@ -943,6 +947,17 @@ def config_text(
 # rather than one so a boot failure can be pinned on one hook.
 {KEY_PRESS_ANY_BUTTON} = {str(press_any_button).lower()}
 {KEY_PROCESS_WINDOWS} = {str(process_windows).lower()}
+# STARTUP-ONLY. `{KEY_HIDE_PROCESS_WINDOWS}` goes further: it reproduces the wait window's `enter`
+# WITHOUT its one call that draws a window, so the box never appears at all. The call that starts
+# the work is still made and the wait for that work is still honoured -- only the drawing is
+# dropped. It rides on the `{KEY_PROCESS_WINDOWS}` detour, so turning THAT off leaves the wait
+# windows completely alone.
+{KEY_HIDE_PROCESS_WINDOWS} = {str(hide_process_windows).lower()}
+# STARTUP-ONLY. `{KEY_TITLE_ANIMATION}` writes FeSubStateTitleMain's terminal phase once its phase-1
+# body has run, skipping phases 2 and 3 -- the flourish that plays after the press is registered.
+# Phase 1 is where the top-menu setup happens, so observing phase 2 or 3 means that setup is
+# already done and only the animation is left.
+{KEY_TITLE_ANIMATION} = {str(title_animation).lower()}
 
 [{CRASH_SECTION}]
 {crash_banner}# STARTUP-ONLY, both of them. The handler is installed in DllMain BEFORE `neuter_arxan`, because
@@ -987,11 +1002,21 @@ def write_config(
     dialog_skip: bool = True,
     press_any_button: bool = True,
     process_windows: bool = True,
+    hide_process_windows: bool = True,
+    title_animation: bool = True,
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
     text = config_text(
-        probe, fault_after_ms, site, intro_skip, dialog_skip, press_any_button, process_windows
+        probe,
+        fault_after_ms,
+        site,
+        intro_skip,
+        dialog_skip,
+        press_any_button,
+        process_windows,
+        hide_process_windows,
+        title_animation,
     )
     path.write_text(text, encoding="utf-8")
     return path, text
@@ -1061,6 +1086,8 @@ def dry_run(
     dialog_skip: bool = True,
     press_any_button: bool = True,
     process_windows: bool = True,
+    hide_process_windows: bool = True,
+    title_animation: bool = True,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
@@ -1083,7 +1110,15 @@ def dry_run(
     if config_path.is_file():
         current = config_path.read_text(encoding="utf-8")
         if current == config_text(
-            probe, fault_after_ms, site, intro_skip, dialog_skip, press_any_button, process_windows
+            probe,
+            fault_after_ms,
+            site,
+            intro_skip,
+            dialog_skip,
+            press_any_button,
+            process_windows,
+            hide_process_windows,
+            title_animation,
         ):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
         else:
@@ -1109,6 +1144,8 @@ def dry_run(
                 dialog_skip,
                 press_any_button,
                 process_windows,
+                hide_process_windows,
+                title_animation,
             ),
             indent="[dry-run]   | ",
         )
@@ -1156,6 +1193,8 @@ def launch(
     dialog_skip: bool = True,
     press_any_button: bool = True,
     process_windows: bool = True,
+    hide_process_windows: bool = True,
+    title_animation: bool = True,
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
@@ -1180,6 +1219,8 @@ def launch(
         dialog_skip,
         press_any_button,
         process_windows,
+        hide_process_windows,
+        title_animation,
     )
     print(f"[config] {config_path}")
 
@@ -1655,6 +1696,18 @@ def selftest() -> int:
         and values.get((TITLE_SECTION, KEY_PRESS_ANY_BUTTON)) == "true",
         "--no-process-window-skip turns off only its own key",
     )
+    values, _ = parse_config(config_text("off", hide_process_windows=False))
+    check(
+        values.get((TITLE_SECTION, KEY_HIDE_PROCESS_WINDOWS)) == "false"
+        and values.get((TITLE_SECTION, KEY_PROCESS_WINDOWS)) == "true",
+        "--no-hide-process-windows falls back to shortening rather than leaving them alone",
+    )
+    values, _ = parse_config(config_text("off", title_animation=False))
+    check(
+        values.get((TITLE_SECTION, KEY_TITLE_ANIMATION)) == "false"
+        and values.get((TITLE_SECTION, KEY_PRESS_ANY_BUTTON)) == "true",
+        "--no-title-animation-skip turns off only its own key",
+    )
 
     # THE ARMS MUST DIFFER, and in exactly one key. If two arms ever generated the same file the
     # A/B comparison would be two runs of the same experiment, and the arm-readback guard would
@@ -1943,6 +1996,28 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--no-hide-process-windows",
+        dest="hide_process_windows",
+        action="store_false",
+        default=True,
+        help=(
+            "draw the 'please wait' windows, shortened rather than hidden. They are hidden by "
+            "default by reproducing their `enter` without its one drawing call -- the work is "
+            "still started and still waited for. This falls back to the milder behaviour."
+        ),
+    )
+    parser.add_argument(
+        "--no-title-animation-skip",
+        dest="title_animation",
+        action="store_false",
+        default=True,
+        help=(
+            "keep the title screen's activation flourish. By default its terminal phase is "
+            "written once the phase-1 body that builds the top menu has run, so only the "
+            "animation is skipped."
+        ),
+    )
+    parser.add_argument(
         "--probe-site",
         choices=PROBE_SITES,
         default="m1",
@@ -2006,6 +2081,8 @@ def main() -> int:
             args.dialog_skip,
             args.press_any_button,
             args.process_windows,
+            args.hide_process_windows,
+            args.title_animation,
         )
     return launch(
         args.probe,
@@ -2016,6 +2093,8 @@ def main() -> int:
         args.dialog_skip,
         args.press_any_button,
         args.process_windows,
+        args.hide_process_windows,
+        args.title_animation,
     )
 
 

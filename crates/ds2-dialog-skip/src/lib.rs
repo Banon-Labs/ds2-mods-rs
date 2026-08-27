@@ -76,7 +76,7 @@ mod title;
 #[cfg(windows)]
 pub use install::{LogFn, Outcome, install, set_logger};
 #[cfg(windows)]
-pub use title::{Outcome as TitleOutcome, install as install_title};
+pub use title::{Outcome as TitleOutcome, Request as TitleRequest, install as install_title};
 
 /// Prefix on every line this crate writes to the loader log. Distinct from `ds2-loader:` and from
 /// `ds2-intro-skip:` so a reader can tell which component spoke, and so a run that boots badly can
