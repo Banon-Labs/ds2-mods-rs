@@ -243,6 +243,44 @@ read in the builder; whether `0x20`/`0x39`/`0x44` consult the same flag has not 
 master online gate they do consult is `0x140513600`, which is `return *(u8*)(this+0x3a)` on the
 network service — a different read. Trace that before assuming one byte removes the whole chain.
 
+## The boot writes back system data it has not changed
+
+`0x38 SaveSystemData`'s enter (`0x1400fc3d0`) has three parts, two of them gated on constructor
+flags at `+0x2c` and `+0x2d`:
+
+```text
+if ([this+0x2c]) { [block+0x1360] = <imported call 0x141aae1e4>; ... }   // stamp
+if ([this+0x2d]) { copy 0x1f0 bytes from block+index*0x1f0; 0x140059940(block, index, buf); }
+0x1402e7f10(SaveLoadSystem, [this+0x2c]);                                // issue the save
+```
+
+**For the boot instance both flags are zero.** It is constructed at `0x1400f7bbb` with
+`xor r9d,r9d` (→ `+0x2c = 0`) and `r12b` (→ `+0x2d`), and `r12d` is written exactly once in the
+whole of `FeStateTitle::v6` — the `xor r12d,r12d` at `0x1400f7363`. Nothing sets it between there
+and the construction site.
+
+So at boot this substate does not stamp a time and does not touch a character slot. It does one
+thing: **issue a save of the system data**. Which `0x05 SteamLoadSystemData` read moments earlier,
+and which nothing between them necessarily modified — on a profile that has already accepted the
+policy, `0x37 UserPolicy` early-outs on `[sys+0x136d]` and changes nothing at all.
+
+That makes `0x38` the first piece of *real work* on the chain with a plausible claim to being
+redundant, and it is the interesting target — far more so than replacing the storage system, which
+would mean owning the format of an 8 MB `DS2SOFS0000.sl2` to save an unmeasured number of
+milliseconds.
+
+**What would have to be true before cutting it**, none of it established:
+
+* That nothing else in the boot dirties the system-data buffer between `0x05` and `0x38` — a
+  play counter, the graphics config, the online flag. Compare the buffer at both points; do not
+  reason about it.
+* That the write is not what *creates* system data on a fresh profile. Gate any skip on `0x05`
+  having found existing data (`[block + 0x1370] != 0`), which is the same byte `0x05`'s own update
+  tests.
+
+The cut itself is the shape `ds2-intro-skip` already uses — hook `enter`, write the terminal phase,
+let the flow advance to `0x39` — and it needs its own config switch like every other patch here.
+
 ## For the loading bar
 
 The bar wants a total and a position. Both are available without inventing anything:
