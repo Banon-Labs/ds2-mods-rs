@@ -1220,7 +1220,6 @@ def dry_run(
             title_sequence_gate,
             title_settle,
             substate_floors,
-        substate_floors,
             show_unavailable,
             boot_timeline,
         ):
@@ -1253,8 +1252,6 @@ def dry_run(
                 title_sequence_gate,
                 title_settle,
                 substate_floors,
-            substate_floors,
-        substate_floors,
                 show_unavailable,
                 boot_timeline,
             ),
@@ -2325,7 +2322,6 @@ def main() -> int:
             args.title_sequence_gate,
             args.title_settle,
             args.substate_floors,
-        args.substate_floors,
             args.show_unavailable,
             args.boot_timeline,
         )
