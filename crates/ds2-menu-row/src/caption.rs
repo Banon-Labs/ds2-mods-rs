@@ -135,10 +135,15 @@ static TITLE_ROW_TEXT: DlString = DlString {
 ///
 /// # Safety
 ///
-/// `base` must be a live scene path for the quit tab's container and `top_select` the group the
+/// `base` must be a scene path for the quit tab's container and `top_select` the group the
 /// original was called with. Both callees are the game's own, called with the buffer sizes the
 /// original gives them.
-unsafe fn write_caption(base: *const u8, top_select: usize, label: u32, text: &'static DlString) {
+unsafe fn write_caption(
+    base: &[u8; PATH_SIZE],
+    top_select: usize,
+    label: u32,
+    text: &'static DlString,
+) {
     let Some(base_module) = ds2_game_base::mem::game_module_base().ok() else {
         return;
     };
@@ -163,7 +168,7 @@ unsafe fn write_caption(base: *const u8, top_select: usize, label: u32, text: &'
     // SAFETY: the three calls are the loop body of `FE_INGAME_TOP_SELECT_CAPTIONS`, transcribed,
     // with our own buffers in place of its stack slots.
     unsafe {
-        append(base, path.as_mut_ptr(), label);
+        append(base.as_ptr(), path.as_mut_ptr(), label);
         bind_proxy(
             (top_select + ds2_rva::FE_INGAME_TOP_SELECT_SCENE_HOLDER_OFFSET) as *mut u8,
             accessor.as_mut_ptr(),
@@ -180,6 +185,31 @@ unsafe fn write_caption(base: *const u8, top_select: usize, label: u32, text: &'
     log(format_args!(
         "{LOG_PREFIX} caption label={label:#x} written={n}"
     ));
+
+    // THE TREE, from the accessor that is already built and already correct. Three stretch factors
+    // on the panel record changed nothing on screen, so what draws the banner is still unknown and
+    // the live tree is the only thing that can name it. Read-only, and once per process.
+    // SAFETY: `accessor` was just filled by the game's own binder, and the ids are the path it was
+    // filled from.
+    unsafe { crate::tree::dump(accessor.as_ptr(), &path_ids(base)) };
+}
+
+/// The quit tab's own path, as the ids the caption binder built it from.
+///
+/// Read out of the captured path rather than written down twice: the capture is the object the
+/// original built, and its ids are at `+0x00` upwards with the length at
+/// [`ds2_rva::FE_SCENE_NAMER_ENTRY_LEN_OFFSET`].
+fn path_ids(base: &[u8; PATH_SIZE]) -> Vec<u32> {
+    let count = u32::from_le_bytes(
+        base[ds2_rva::FE_SCENE_NAMER_ENTRY_LEN_OFFSET..][..4]
+            .try_into()
+            .expect("four bytes"),
+    )
+    .min(5) as usize;
+    (0..count)
+        .map(|i| u32::from_le_bytes(base[i * 4..][..4].try_into().expect("four bytes")))
+        .filter(|id| *id != 0)
+        .collect()
 }
 
 unsafe extern "system" fn append_detour(path: *const u8, out: *mut u8, id: u32) -> *mut u8 {
@@ -248,13 +278,13 @@ unsafe extern "system" fn bind_detour(top_select: *mut u8) {
     // just ran for.
     unsafe {
         write_caption(
-            bytes.as_ptr(),
+            &bytes,
             top,
             ds2_rva::FLO_ADDED_ROW_LABEL_ID,
             &ADDED_ROW_TEXT,
         );
         write_caption(
-            bytes.as_ptr(),
+            &bytes,
             top,
             ds2_rva::FE_QUIT_TAB_ROW_TITLE_LABEL_ID,
             &TITLE_ROW_TEXT,

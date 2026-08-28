@@ -3076,3 +3076,48 @@ pub const FLO_QUIT_TAB_PANEL: usize = 0;
 
 /// `f32` scale-y inside a transform block. `pfVar1[3]` in the builder's identity test.
 pub const FLO_TRANSFORM_SCALE_Y_OFFSET: usize = 0x0c;
+
+// ---------------------------------------------------------------------------------------------
+// The live component tree, for finding an element the file alone will not identify.
+//
+// Three stretch factors were tried on the quit tab's panel record and the third one -- scale 2.0,
+// deliberately unmissable -- changed nothing on screen while the log proved the write landed. So
+// the element being scaled is not the one that draws the banner, and no amount of further
+// arithmetic on the `.flo` fixes that. What is needed is the live tree: what is actually built
+// under this tab, and which of it is big enough to be the background.
+// ---------------------------------------------------------------------------------------------
+
+/// `FeLayoutScene::findByIdPath(scene, ids, count)`. RVA `0x00afdad0`.
+///
+/// `mov rcx,[rcx+0x28]` then a tail-jump into the search; returns the component or null. This is
+/// the lookup every scene path in the frontend bottoms out in, so resolving a path by hand and
+/// resolving it the way the grid does are the same operation.
+pub const FE_SCENE_FIND_BY_ID_PATH: u32 = 0x00af_dad0;
+
+/// Byte offset, inside a `FrontendEx::SceneObjProxy`, of the scene proxy its resolve reads.
+///
+/// `SceneObjProxy::resolve` (`0x140027ce0`) opens `mov rcx,[rcx+0x58]; mov rax,[rcx]; call
+/// [rax+8]`, so the scene comes from slot 1 of whatever lives here.
+pub const FE_SCENE_OBJ_PROXY_SCENE_OFFSET: usize = 0x58;
+/// Vtable slot on that object which returns the scene.
+pub const FE_SCENE_PROXY_GET_SCENE_SLOT: usize = 0x08;
+
+/// Component tree links, read off `FUN_140b77dc0` and `FeComponentObject::findByIdPath`.
+///
+/// ```text
+/// child   = [parent + 0x38]      first child
+/// child   = [child  + 0x28]      next sibling
+/// record  = [child  + 0x48]      the `.flo` record, whose +0x1c is the element id
+/// ```
+pub const FE_COMPONENT_NEXT_SIBLING_OFFSET: usize = 0x28;
+pub const FE_COMPONENT_FIRST_CHILD_OFFSET: usize = 0x38;
+pub const FE_COMPONENT_RECORD_OFFSET: usize = 0x48;
+
+/// Where a component's own transform starts, which is NOT the same for every class.
+///
+/// `FeComponentObject`'s constructor (`0x140b69d10`) writes a 4x3 identity at `+0x60`;
+/// `FeComponentScene`'s (`0x140b6b730`) writes the same identity at `+0x50`. They are siblings
+/// under `FeComponentBase`, not parent and child, which is why the offsets differ -- so a dump
+/// covers both ranges and the vtable says which one to read.
+pub const FE_COMPONENT_TRANSFORM_DUMP_START: usize = 0x50;
+pub const FE_COMPONENT_TRANSFORM_DUMP_END: usize = 0xa0;
