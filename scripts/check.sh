@@ -46,7 +46,8 @@ if (( run_host_tests )); then
   # So the host pass names the crates that are game-free BY CONSTRUCTION and can therefore be
   # exercised without Windows. A crate belongs on this line only if it has no `cfg(windows)` gate;
   # everything else is covered by the wine pass below.
-  cargo test -p ds2-sl2-core -p ds2-hotkey-config -p ds2-safe-input -p ds2-crash-logging-core
+  cargo test -p ds2-sl2-core -p ds2-hotkey-config -p ds2-safe-input -p ds2-crash-logging-core \
+    -p ds2-build-import-core
 
   echo "== windows-target tests (wine) =="
   # THE CRATES THAT MATTER MOST WERE THE ONES WITH NO EXECUTABLE TESTS. `ds2-loader` is

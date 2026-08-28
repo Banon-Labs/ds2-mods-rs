@@ -1,0 +1,21 @@
+# The soulsplanner link, and the build the page carries -- as pure text handling.
+#
+# ZERO dependencies, and no `cfg(windows)` anywhere, so this crate is on `check.sh`'s host test
+# line and its parser can be run against a saved page without a game, a DLL or wine. That is the
+# whole reason it is split from the runtime half: the parsing is the part most likely to be wrong,
+# and it is the part that needs no Dark Souls at all to find out.
+#
+# It deliberately does NOT depend on `ds2-rva`. There is no address here to get wrong.
+[package]
+name = "ds2-build-import-core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "ds2_build_import_core"
+
+[lints]
+workspace = true
