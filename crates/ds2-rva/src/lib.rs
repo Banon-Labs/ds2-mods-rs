@@ -352,7 +352,7 @@ pub const FE_DIALOG_UPDATE: u32 = 0x0010_5150;
 ///
 /// **The one place a title message box is actually created**, and therefore the only place it can
 /// be prevented rather than dismissed. It picks one of two show calls off the sign of
-/// [`FE_DIALOG_OPTIONS_OFFSET`] -- `0x1404fe2a0` for a one-button box, `0x1404fe1c0` for a choice
+/// [`FE_DIALOG_CONFIRM_DEST_OFFSET`] -- `0x1404fe2a0` for a one-button box, `0x1404fe1c0` for a choice
 /// -- and ends `mov DWORD PTR [rdi+0x18],0` / `mov WORD PTR [rdi+0x30],1`.
 ///
 /// EVERY dialog class reaches it, including the two that override `v1`:
@@ -388,17 +388,59 @@ pub const FE_DIALOG_PHASE_OFFSET: usize = 0x30;
 /// 9 for `2`, and sets the phase to 2. Writing it is how this mod presses the button.
 pub const FE_DIALOG_RESULT_OFFSET: usize = 0x31;
 
-/// Option-count field within a common-window substate. `+0x12`, and it is **signed**.
+/// **Destination substate id for the CONFIRM edge**, or `-1` when the box has no confirm edge.
+/// `+0x12`, a signed WORD.
 ///
-/// Negative means a one-button acknowledgement box: `v1` takes a different show call for it, and
-/// `v3` forces the result to [`FE_DIALOG_RESULT_CANCEL`] on any press without ever consulting
-/// which option is highlighted. Non-negative means a real choice, where the game produces
-/// [`FE_DIALOG_RESULT_CONFIRM`] instead. Read at `0x1400fd3ba` in enter and `0x1401051ba` in
-/// update, both as `cmp WORD PTR [.. +0x12], 0` followed by a signed branch.
+/// This was recorded as an "option count" and that was wrong in a way worth spelling out, because
+/// the wrong reading is behaviourally right and therefore does not announce itself. `v5`
+/// (`0x140104f30`) publishes the second transition only when this field is non-negative:
 ///
-/// This is what makes a synthesised answer match the game's own rather than merely resemble it:
-/// the value to write is a function of this field, not a constant to pick.
-pub const FE_DIALOG_OPTIONS_OFFSET: usize = 0x12;
+/// ```text
+/// cmp   WORD PTR [rdi+0x12], 0
+/// jl    done                         ; negative -> NO confirm edge at all
+/// movsx ecx, WORD PTR [rdi+0x12]     ; <- this field
+/// mov   [rax+0x08], ecx              ; destination substate
+/// mov   BYTE PTR [rax+0x20], 4       ; ...when the phase is 4, the confirm-closed phase
+/// ```
+///
+/// So "negative means a one-button acknowledgement box" is a true *consequence* -- a box with no
+/// confirm destination has nothing for a second button to do -- and every sign test the old doc
+/// cited is real. But the magnitude is not a count. The constructor at `0x140104c00` seeds it to
+/// `-1` (`or eax,-1; mov WORD PTR [rcx+0x12], ax`) and whoever raises a box overwrites it.
+///
+/// **The practical consequence:** a log line reading `options=42` never meant forty-two options.
+/// It meant destination `0x2a`, [`FE_SUBSTATE_ID_OFFLINE_MODE_WINDOW`].
+pub const FE_DIALOG_CONFIRM_DEST_OFFSET: usize = 0x12;
+
+/// [`FE_DIALOG_PHASE_OFFSET`] once the box has closed on a [`FE_DIALOG_RESULT_CONFIRM`].
+///
+/// The pair of [`FE_DIALOG_PHASE_CLOSED_CANCEL`]; `v5` watches for this value to take the
+/// [`FE_DIALOG_CONFIRM_DEST_OFFSET`] edge.
+pub const FE_DIALOG_PHASE_CLOSED_CONFIRM: u8 = 4;
+
+/// `FeSubStateOfflineModeWindow`'s substate id: `0x2a`.
+///
+/// **Do not reason about this box from its button labels.** The two-option box the game raises
+/// when the server login fails says, in its own text, `Select "OK" to attempt to log in again` and
+/// `Select "CANCEL" to start the game in offline mode` -- so the obvious move is to write
+/// [`FE_DIALOG_RESULT_CANCEL`]. That is the wrong answer, and it is wrong in the worst possible
+/// direction for a mod whose purpose is playing offline.
+///
+/// Read live out of the object (`kind=0x3e`) on a running game:
+///
+/// ```text
+/// CANCEL_dest = 0x39   FeSubStateTitleGameServerLogin   <- retries the login
+/// CONFIRM_dest = 0x2a  FeSubStateOfflineModeWindow      <- plays offline
+/// ```
+///
+/// So the edge that goes offline is the **confirm** edge. Corroborated twice over: the run that
+/// produced those numbers had `result=2` in the object and logged
+/// `suppressed screen=offline-mode-window kind=42` as the very next line, and eight other boxes in
+/// the same substate table carry `0x2a` as their cancel destination.
+///
+/// Anything answering that box should select its edge by comparing these destination ids against
+/// this constant, never by picking a result value from what the buttons are called.
+pub const FE_SUBSTATE_ID_OFFLINE_MODE_WINDOW: i16 = 0x2a;
 
 /// [`FE_DIALOG_PHASE_OFFSET`] while the box is up and waiting for a button.
 ///
@@ -483,7 +525,7 @@ pub const FE_DIALOG_VTABLE_OFFLINE_MODE_WINDOW: u32 = 0x010b_d388;
 ///    in-game prompt can be an instance of it.
 /// 2. **It is a one-button acknowledgement box, by construction.** Its constructor
 ///    `0x140104c00` executes `or eax,0xffffffff` then `mov WORD PTR [rcx+0x12],ax`, so
-///    [`FE_DIALOG_OPTIONS_OFFSET`] is hardcoded to `-1`. The update's input path can therefore
+///    [`FE_DIALOG_CONFIRM_DEST_OFFSET`] is hardcoded to `-1`. The update's input path can therefore
 ///    only ever produce [`FE_DIALOG_RESULT_CANCEL`] for it -- there is no second answer to get
 ///    wrong, and no choice being made on the player's behalf.
 /// 3. **Its handlers are inert**, like the others: slots 8 and 9 are the base `ret 0` stubs.
@@ -496,9 +538,27 @@ pub const FE_DIALOG_VTABLE_COMMON_WINDOW: u32 = 0x010b_cff8;
 /// argument. Logged as a diagnostic; nothing branches on it here.
 pub const FE_DIALOG_KIND_OFFSET: usize = 0x0c;
 
-/// Caption/message id within a common-window substate. `+0x10`, a WORD, set from the
-/// constructor's third argument and republished by `v5` at `0x140104f69`.
-pub const FE_DIALOG_CAPTION_OFFSET: usize = 0x10;
+/// **Destination substate id for the CANCEL edge.** `+0x10`, a signed WORD.
+///
+/// This was recorded as a "caption/message id" and that was wrong. It is a substate id, and `v5`
+/// (`0x140104f30`) publishes it as the destination of a transition:
+///
+/// ```text
+/// movsx edx, WORD PTR [rdi+0x10]     ; <- this field
+/// mov   [rax+0x18], &this[0x30]      ; watch the PHASE
+/// mov   [rax+0x08], edx              ; destination substate
+/// mov   BYTE PTR [rax+0x20], 3       ; ...when the phase is 3, the cancel-closed phase
+/// ```
+///
+/// The constructor at `0x140104c00` sets it from its third argument (`mov WORD PTR [rcx+0x10],
+/// r8w`). The old reading came from the boot notices, where that argument is `0x20` -- which looks
+/// exactly like a caption id and is in fact substate `0x20`, `FeSubStateTitleSteamNetworkCheck`.
+///
+/// Confirmed against 22 live instances read out of `/proc/<pid>/mem` on a running game: every one
+/// holds a plausible substate id, several of them `0x2a`
+/// ([`FE_SUBSTATE_ID_OFFLINE_MODE_WINDOW`]), and the one that had fired held `0x39`
+/// (`FeSubStateTitleGameServerLogin`).
+pub const FE_DIALOG_CANCEL_DEST_OFFSET: usize = 0x10;
 
 /// Elapsed-time accumulator within a common-window substate. `+0x18`, a float.
 ///
@@ -1528,3 +1588,113 @@ pub const FRAME_LIMITER: u32 = 0x00fe_b910;
 /// counter read **zero** across a whole boot, which is what moved the instrument to `0x00feb910`.
 /// Recorded so the next person does not spend the same run finding out.
 pub const FRAME_LIMITER_RESET: u32 = 0x00fe_b890;
+
+// ---------------------------------------------------------------------------------------------
+// THE NETWORK SERVICE AND ITS ONLINE FLAG
+//
+// One boolean decides whether DARK SOULS II believes it is online, and the whole of `ds2-offline`
+// rests on the four facts below. All four were read out of `darksoulsii-deobf.bin`; no game was
+// launched to establish any of them.
+//
+//   net = [[0x1416148f0] + 0x22f0]      GameManagerImp's network service
+//   net + 0x3a                          the flag, ONE BYTE
+//   0x140513600                         its getter, `movzx eax, byte [rcx+0x3a]; ret`
+//   0x140513820                         its setter, `mov byte [rcx+0x3a], dl; ret`
+//
+// THE FLAG IS BORN ZERO. The service's constructor at `0x140512f30` -- identified by the vtable
+// `0x1410d13e8` it installs at `[this]` -- writes `mov BYTE PTR [rbx+0x3a],0` at `0x140512f5a`,
+// four instructions in. So "offline" is the state this object is CONSTRUCTED in, and every online
+// run is one that left it. That is why the setter can be neutered rather than fought: neutering it
+// does not impose a value, it prevents a departure from the game's own initial one.
+// ---------------------------------------------------------------------------------------------
+
+/// `NetService::isOnline`. RVA `0x00513600`, VA `0x140513600`.
+///
+/// The whole function is `movzx eax, BYTE PTR [rcx+0x3a]; ret` -- five bytes, and `docs/
+/// DS2-TITLE-FLOW.md` already named it "the game's master online gate" from the other end, while
+/// tracing which rows the top menu greys out.
+///
+/// **34 call sites**, found by scanning the image for `e8` displacements that resolve here
+/// (`scripts/ds2-xrefs.py`). Every one of them is immediately followed by `test al,al` and a
+/// branch, which is what makes forcing the return value a complete answer for its readers rather
+/// than a partial one. Three of the 34 were disassembled to check that the polarity is what it
+/// looks like:
+///
+/// * `FeSubStateTitleOnlineCheck::v8` (`0x1400f98c0`), the substate's own work starter: calls this,
+///   and on a zero returns `false` **without starting anything**. So a forced zero does not fake
+///   the online check -- it takes the shipped path where the check never runs.
+/// * The top-menu builder at `0x1400f433b`: the result becomes `r14b`, which enables row 2 (server
+///   information) and disables row 3 (go online), or the reverse.
+/// * `0x1400fe739`, inside the same menu code, gating whether a transition is registered at all.
+///
+/// Not an Arxan redirect: `scripts/ds2-arxan-chain.py` terminates at hop 0 on the real prologue
+/// `0f b6 41 3a c3`, followed by a `90` pad. Five bytes of body and a byte of padding is enough
+/// room for the three-byte stub [`NET_IS_ONLINE_STUB`] writes and nothing has to be relocated.
+pub const NET_IS_ONLINE: u32 = 0x0051_3600;
+
+/// First byte of [`NET_IS_ONLINE`]'s body, `0f` -- the `movzx` opcode.
+///
+/// Passed to `ds2_hook::patch_3byte_stub` as its `expected_first` guard. If a future build moves
+/// the function, this byte almost certainly differs and the patch aborts instead of landing in the
+/// middle of some other function's instruction.
+pub const NET_IS_ONLINE_EXPECTED_FIRST: u8 = 0x0f;
+
+/// `xor eax,eax; ret` -- what [`NET_IS_ONLINE`] is replaced with. Reports offline to all 34 readers.
+pub const NET_IS_ONLINE_STUB: [u8; 3] = [0x31, 0xc0, 0xc3];
+
+/// `NetService::setOnline`. RVA `0x00513820`, VA `0x140513820`.
+///
+/// `mov BYTE PTR [rcx+0x3a], dl; ret` -- the exact write-side pair of [`NET_IS_ONLINE`], on the
+/// same object at the same offset. Found from the other end rather than by searching for a setter:
+/// `NetSvrManager`'s vtable slot `+0x60` (`0x140290040`) opens by calling this with `edx` zeroed,
+/// and **`FeSubStateTitleSetOfflineMode::v1` (`0x1400f8f80`) is nothing but a tail-jump into that
+/// slot**. So this is the write the game's own "play offline" substate performs.
+///
+/// Not an Arxan redirect; its own four-byte body plus `ret` sits at its entry, followed by `cc`
+/// padding.
+pub const NET_SET_ONLINE: u32 = 0x0051_3820;
+
+/// First byte of [`NET_SET_ONLINE`]'s body, `88` -- the `mov r/m8, r8` opcode.
+pub const NET_SET_ONLINE_EXPECTED_FIRST: u8 = 0x88;
+
+/// `ret; nop; nop` -- what [`NET_SET_ONLINE`] is replaced with, making the setter inert.
+///
+/// **Not `xor eax,eax; ret`.** The setter returns nothing, so zeroing `eax` would be a lie about
+/// its signature that happens to be harmless; `ret` says what is meant. The two `nop`s exist only
+/// because `ds2_hook::patch_3byte_stub` writes three bytes, and they are never executed.
+pub const NET_SET_ONLINE_STUB: [u8; 3] = [0xc3, 0x90, 0x90];
+
+/// Byte offset of the online flag inside the network service object. Recorded for diagnostics --
+/// nothing in this repo writes it directly.
+///
+/// Read three ways that agree: the getter's `[rcx+0x3a]`, the setter's `[rcx+0x3a]`, and the
+/// constructor's `mov BYTE PTR [rbx+0x3a],0` at `0x140512f5a`.
+pub const NET_ONLINE_FLAG_OFFSET: usize = 0x3a;
+
+/// Offset of the network service in [`GAME_MANAGER_IMP`] -- the `this` every call to
+/// [`NET_IS_ONLINE`] and [`NET_SET_ONLINE`] is made on.
+///
+/// The sibling of [`SAVE_LOAD_SYSTEM_OFFSET`], and named the same way. `GAME_MANAGER_IMP`'s own
+/// doc comment already recorded `[+0x22f0]` as the network service from the boot-chain trace; this
+/// is that offset given a name so the two call sites in `ds2-offline` do not spell it as a
+/// literal. Every getter call site disassembled for [`NET_IS_ONLINE`] loads it the same way:
+/// `mov rax,[0x1416148f0]; mov rcx,[rax+0x22f0]`.
+pub const NET_SERVICE_OFFSET: usize = 0x22f0;
+
+/// The force-offline byte at VA `0x14160de19`, and **it is not the switch it looks like**.
+/// RVA `0x0160de19`.
+///
+/// `ds2-mods-rs-rk4` asked whether setting this removes the network boot chain. It does not.
+/// It is read at **exactly one instruction in the whole image**, `0x1400f431f` inside the top-menu
+/// builder:
+///
+/// ```text
+/// cmp BYTE PTR [0x14160de19], 0
+/// je  ask_the_gate          ; zero -> fall through to call 0x140513600
+/// xor r14b, r14b            ; non-zero -> force "not online" and skip the call
+/// ```
+///
+/// So it is a local override of one boolean in one function, and the boot chain -- which calls
+/// [`NET_IS_ONLINE`] directly, on its own -- never sees it. Recorded here so the next reader does
+/// not have to re-derive that it is a dead end; [`NET_IS_ONLINE`] is the read it was shadowing.
+pub const NET_FORCE_OFFLINE_MENU_ONLY: u32 = 0x0160_de19;

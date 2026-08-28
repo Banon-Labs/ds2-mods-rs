@@ -161,6 +161,15 @@ KEY_TIMELINE_ENABLED = "enabled"
 MENU_SECTION = "title_menu"
 KEY_SHOW_UNAVAILABLE = "show_unavailable"
 
+#: Mirrors `CONFIG_SECTION` and the four `KEY_*` in `crates/ds2-loader/src/offline.rs`.
+#: ON by default, unlike every other feature's switch here, because this workspace patches
+#: `.text` in a running copy of the game and FromSoftware's servers are what watch for that.
+OFFLINE_SECTION = "offline"
+KEY_OFFLINE_ENABLED = "enabled"
+KEY_PIN_FLAG = "pin_flag"
+KEY_REPORT_OFFLINE = "report_offline"
+KEY_BLOCK_SOCKETS = "block_sockets"
+
 KEY_POLL_INTERVAL_MS = "poll_interval_ms"
 KEY_HEARTBEAT_INTERVAL_MS = "heartbeat_interval_ms"
 
@@ -873,6 +882,8 @@ def config_text(
     substate_floors: bool = True,
     show_unavailable: bool = False,
     boot_timeline: bool = False,
+    offline: bool = True,
+    block_sockets: bool = True,
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
@@ -1042,6 +1053,35 @@ def config_text(
 # sites in a run that was not meant to be instrumented".
 {KEY_TIMELINE_ENABLED} = {str(boot_timeline).lower()}
 
+[{OFFLINE_SECTION}]
+# STARTUP-ONLY, all four. ON BY DEFAULT, and it is the only feature here whose default is on for a
+# reason that is not convenience: everything else in this mod patches `.text` in a running copy of
+# DARK SOULS II, which is exactly what FromSoftware's matchmaking servers watch for. A modded
+# client that logs in is a client that can be soft-banned.
+#
+# `{KEY_PIN_FLAG}` replaces `NetService::setOnline` (0x140513820) with `ret`. The service's own
+# constructor writes 0 into that flag four instructions in, so this does not IMPOSE offline -- it
+# prevents the game leaving the state it is built in.
+#
+# `{KEY_REPORT_OFFLINE}` replaces `NetService::isOnline` (0x140513600) with `xor eax,eax; ret`.
+# 34 call sites, every one followed by `test al,al`; `FeSubStateTitleOnlineCheck`'s own work
+# starter is one of them and returns without starting anything on a zero.
+#
+# `{KEY_BLOCK_SOCKETS}` fronts the game's own WS2_32 imports -- connect, sendto, getaddrinfo,
+# gethostbyname -- and refuses anything that is not loopback with WSAENETUNREACH, the error a
+# machine with no route gives. IT IS NOT REDUNDANT WITH THE OTHER TWO:
+# `FeSubStateTitleGameServerLogin`'s work starter (0x1400f9820) does NOT read the online flag, so
+# without this the login goes out on the wire while the menu says you are offline. Steam's own
+# sockets are untouched -- this patches one executable's import table, not the process.
+#
+# `--no-offline` writes false and PLAYS ONLINE WITH A MODDED CLIENT. `--offline-no-socket-block`
+# keeps the flag patches and drops the socket guard, which is the arm that measures how much
+# traffic the flag layer never reaches.
+{KEY_OFFLINE_ENABLED} = {str(offline).lower()}
+{KEY_PIN_FLAG} = {str(offline).lower()}
+{KEY_REPORT_OFFLINE} = {str(offline).lower()}
+{KEY_BLOCK_SOCKETS} = {str(offline and block_sockets).lower()}
+
 [{CRASH_SECTION}]
 {crash_banner}# STARTUP-ONLY, both of them. The handler is installed in DllMain BEFORE `neuter_arxan`, because
 # that call patches code from static analysis and is the likeliest crash in the whole startup path
@@ -1092,6 +1132,8 @@ def write_config(
     substate_floors: bool = True,
     show_unavailable: bool = False,
     boot_timeline: bool = False,
+    offline: bool = True,
+    block_sockets: bool = True,
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
@@ -1110,6 +1152,8 @@ def write_config(
         substate_floors,
         show_unavailable,
         boot_timeline,
+        offline,
+        block_sockets,
     )
     path.write_text(text, encoding="utf-8")
     return path, text
@@ -1186,6 +1230,8 @@ def dry_run(
     substate_floors: bool = True,
     show_unavailable: bool = False,
     boot_timeline: bool = False,
+    offline: bool = True,
+    block_sockets: bool = True,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
@@ -1220,9 +1266,10 @@ def dry_run(
             title_sequence_gate,
             title_settle,
             substate_floors,
-        substate_floors,
             show_unavailable,
             boot_timeline,
+            offline,
+            block_sockets,
         ):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
         else:
@@ -1253,10 +1300,10 @@ def dry_run(
                 title_sequence_gate,
                 title_settle,
                 substate_floors,
-            substate_floors,
-        substate_floors,
                 show_unavailable,
                 boot_timeline,
+                offline,
+                block_sockets,
             ),
             indent="[dry-run]   | ",
         )
@@ -1311,6 +1358,8 @@ def launch(
     substate_floors: bool = True,
     show_unavailable: bool = False,
     boot_timeline: bool = False,
+    offline: bool = True,
+    block_sockets: bool = True,
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
@@ -1342,6 +1391,8 @@ def launch(
         substate_floors,
         show_unavailable,
         boot_timeline,
+        offline,
+        block_sockets,
     )
     print(f"[config] {config_path}")
 
@@ -1763,6 +1814,49 @@ def selftest() -> int:
         "the site defaults to the control, not to the interesting one",
     )
 
+    # OFFLINE MODE IS ON BY DEFAULT, AND THE DEFAULT IS THE SAFE ONE. Every other feature's
+    # default is a convenience; this one's is an account. A regression that flipped it to false
+    # would show up as a soft-ban long after the commit that caused it, so it is asserted here
+    # rather than trusted to the Rust `Default` impl -- the two are separate sources of the same
+    # decision and this is the check that they agree.
+    values, _ = parse_config(config_text("off"))
+    for key in (KEY_OFFLINE_ENABLED, KEY_PIN_FLAG, KEY_REPORT_OFFLINE, KEY_BLOCK_SOCKETS):
+        check(
+            values.get((OFFLINE_SECTION, key)) == "true",
+            f"[{OFFLINE_SECTION}] {key} defaults to true",
+        )
+
+    # --no-offline HAS TO REACH ALL FOUR KEYS. The master switch alone would leave three true
+    # keys in a file whose header says the run is online, and the next person to read that file
+    # would have to know which key the DLL actually consults to tell what happened.
+    values, _ = parse_config(config_text("off", offline=False))
+    for key in (KEY_OFFLINE_ENABLED, KEY_PIN_FLAG, KEY_REPORT_OFFLINE, KEY_BLOCK_SOCKETS):
+        check(
+            values.get((OFFLINE_SECTION, key)) == "false",
+            f"--no-offline writes [{OFFLINE_SECTION}] {key} = false",
+        )
+
+    # THE MEASUREMENT ARM DROPS ONLY THE SOCKET GUARD. If this ever turned off a flag patch too
+    # it would stop being a measurement of the flag layer and become a measurement of nothing.
+    values, _ = parse_config(config_text("off", block_sockets=False))
+    check(
+        values.get((OFFLINE_SECTION, KEY_BLOCK_SOCKETS)) == "false"
+        and values.get((OFFLINE_SECTION, KEY_PIN_FLAG)) == "true"
+        and values.get((OFFLINE_SECTION, KEY_REPORT_OFFLINE)) == "true",
+        "--offline-no-socket-block drops the socket guard and keeps both flag patches",
+    )
+
+    # THE DLL READS THE SECTION AND THE KEYS THIS WRITES. Same contract the probe section has:
+    # a rename on one side alone turns every run into a silent "offline off", which is the one
+    # failure mode here that costs something real.
+    offline_src = (REPO_ROOT / "crates/ds2-loader/src/offline.rs").read_text(encoding="utf-8")
+    check(
+        f'"{OFFLINE_SECTION}"' in offline_src,
+        f"the DLL reads the section this writes ([{OFFLINE_SECTION}])",
+    )
+    for key in (KEY_OFFLINE_ENABLED, KEY_PIN_FLAG, KEY_REPORT_OFFLINE, KEY_BLOCK_SOCKETS):
+        check(f'"{key}"' in offline_src, f"the DLL reads {OFFLINE_SECTION}.{key}")
+
     # THE INTRO SKIP IS ON BY DEFAULT, AND MUST STILL BE SWITCHABLE. Removing the boot screens is
     # what the mod is for. The off switch is what keeps it diagnosable: if a run ever fails to
     # boot, ruling this feature out has to cost one config line, not a rebuild.
@@ -2144,6 +2238,30 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--no-offline",
+        dest="offline",
+        action="store_false",
+        default=True,
+        help=(
+            "PLAY ONLINE WITH A MODDED CLIENT. Offline mode is on by default and this is the "
+            "switch that turns it off. Everything else this DLL does patches game code in memory, "
+            "which is what FromSoftware's matchmaking servers watch for, so an online run with "
+            "the mod loaded is an account risk you are taking on purpose."
+        ),
+    )
+    parser.add_argument(
+        "--offline-no-socket-block",
+        dest="block_sockets",
+        action="store_false",
+        default=True,
+        help=(
+            "keep offline mode's two flag patches and drop its socket guard. THE MEASUREMENT ARM: "
+            "FeSubStateTitleGameServerLogin's work starter does not read the online flag, so this "
+            "run is the one that shows how much traffic the flag layer never reaches. It talks to "
+            "FromSoftware's servers if the flag layer misses something -- that is the point."
+        ),
+    )
+    parser.add_argument(
         "--boot-timeline",
         dest="boot_timeline",
         action="store_true",
@@ -2325,9 +2443,10 @@ def main() -> int:
             args.title_sequence_gate,
             args.title_settle,
             args.substate_floors,
-        args.substate_floors,
             args.show_unavailable,
             args.boot_timeline,
+            args.offline,
+            args.block_sockets,
         )
     return launch(
         args.probe,
@@ -2345,6 +2464,8 @@ def main() -> int:
         args.substate_floors,
         args.show_unavailable,
         args.boot_timeline,
+        args.offline,
+        args.block_sockets,
     )
 
 
