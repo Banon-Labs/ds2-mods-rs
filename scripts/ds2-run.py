@@ -1378,33 +1378,34 @@ def config_text(
 # builder for one PAUSE menu tab, which the game runs when FeGroupInGameTopSelect is constructed --
 # a game in progress and a press of the pause button away.
 #
-# AN INSTRUMENT, NOT A FEATURE, and off unless this says exactly `true`. The pause menu is six
-# tabs; each tab's contents are a DLFixedVector of (action, gate) entries, capacity five. The tab
-# holding the quit item -- action 9, FeGroupInGameReturnTitleCheck, the dialog that offers to save
-# on the way to the title -- holds three: Game Options, Screen Settings, Quit.
+# OFF unless this says exactly `true`. The pause menu is six tabs; each tab's contents are a
+# DLFixedVector of (action, gate) entries, capacity five. The tab holding the quit item -- action 9,
+# FeGroupInGameReturnTitleCheck, the dialog that offers to save on the way to the title -- holds
+# three: Game Options, Screen Settings, Quit.
 #
-# This appends a fourth, action 0xd. That action already has a case in the dispatch switch, and its
-# factory branch shares a `case` label with kind 4, so the two allocate the same bytes and call the
-# same FeGroupInGameSystemSettingKeyboard constructor. Confirming the new row runs exactly the code
-# the shipped Key Bindings row runs. NO CODE PATH IS ADDED TO THE GAME -- one entry is added to one
-# vector.
+# THIS ADDS A FOURTH THAT QUITS TO DESKTOP WITHOUT ASKING. FeSubStateTitleShutdown::v1 is three
+# instructions -- load the title singleton, write 1 to +0x13a, return -- and GameManagerImp's
+# per-frame master update polls that byte, so the shutdown is the game's own. It does not save and
+# it does not ask; the quit-to-title row offers to save because THAT flow asks.
 #
-# WHAT IT MEASURED, and the answer is already in: the fourth entry does NOT become a fourth visible
-# row. Run 2026-08-28 -- the vector took it (count=3->4), the cursor reaches the new item and it
-# responds, and NOTHING IS DRAWN for it. Not a blank caption: no cell at all. FexGridControl's
-# layout bind (0x1400216d0) takes no extent from anywhere, it probes the layout for the element at
-# each (col,row) and stops at the first null, so the drawable count is a count of AUTHORED elements
-# and the layout authored three. FUN_140021b30 writes only the count the CURSOR is bounded by.
+# FOUR HOOKS, and it is worth knowing which does what when a run disappoints:
+#   0x000a5900  the tab's item builder     appends the item
+#   0x000a6090  the tab's item dispatch    turns action 0x1000 into the shutdown
+#   0x000a5b50  the tab's cell namer       names the fourth cell, id 0x1eaccd
+#   0x00b54740  findDefinition             supplies that cell
 #
-# So turning this on now adds an INVISIBLE fourth entry beside Quit that you can land on by
-# accident. It is kept because it re-establishes all of the above in one run, which is what anyone
-# editing the layout inside GameDataEbl.bdt wants on the other side of that edit. Note the probe
-# order: cell 3 must exist before cell 4 can ever be found.
+# The last two are a pair. A row is drawn only if the grid's layout bind can resolve the cell's
+# scene path, so naming a cell the layout does not have is a measured null -- which is exactly what
+# an earlier run got, and which makes it this arm's control. The layout half substitutes the quit
+# tab's container definition with a copy declaring two more children (a row and its mark) whose
+# records are clones of row 0's, moved down one step. Nothing is written to disk.
 #
-# The detour checks what the original built -- (0x7,0) (0x8,0) (0x9,4) -- and REFUSES to touch the
-# vector if that is not what it finds. Read `{MENU_ROW_LOG_PREFIX} appended ...` in the loader log
-# before believing a screenshot: an append that was refused and a menu that was never opened look
-# identical on screen.
+# EVERY HOOK REFUSES RATHER THAN GUESSES. The builder demands (0x7,0) (0x8,0) (0x9,4); the namer
+# demands the quit tab's own base path; findDefinition demands seven children carrying seven known
+# ids. Read the log before believing a screen -- a refusal and a menu that was never opened look
+# identical there. `{MENU_ROW_LOG_PREFIX} container substituted ...` and `... cell named ...` are
+# the two lines that say the row should exist, and `row-extent` on the tab line is what says it
+# does.
 {KEY_MENU_ROW_ENABLED} = {str(menu_row).lower()}
 
 [{CRASH_SECTION}]
@@ -2842,15 +2843,14 @@ def main() -> int:
         action="store_true",
         default=False,
         help=(
-            "append a fourth entry to the PAUSE menu tab that carries the quit item. OFF BY "
-            "DEFAULT, and the run it existed for has already happened: the entry is accepted and "
-            "SELECTABLE but NOTHING IS DRAWN for it, because a grid's drawable cells are "
-            "discovered by probing the layout and that tab's layout authored three. So this adds "
-            "an invisible item next to Quit. It is kept because it re-establishes that in one run "
-            "-- which is what you want on the other side of editing GameDataEbl.bdt. The appended "
-            "action (0xd) already has a case in the dispatch and shares its factory branch with "
-            "the shipped Key Bindings row, so no code path is added to the game. Look for "
-            f"`{MENU_ROW_LOG_PREFIX} appended ...` in the log before reading the screen."
+            "add a fourth row to the PAUSE menu tab that carries the quit item, which quits to "
+            "DESKTOP without a confirmation and without saving. OFF BY DEFAULT. Four hooks: the "
+            "tab's item builder, its dispatch, its cell namer, and the layout document's "
+            "definition lookup -- the last two being what makes the row visible, since a grid "
+            "draws a row only if it can resolve that cell's scene path. Every one of them checks "
+            "what the game left behind and refuses rather than guessing. Look for "
+            f"`{MENU_ROW_LOG_PREFIX} container substituted ...` and `row-extent=4` in the log "
+            "before reading the screen."
         ),
     )
     parser.add_argument(
