@@ -1960,15 +1960,36 @@ pub const SOUND_MANAGER_MASTER_VOLUME_OFFSET: usize = 0x930;
 /// `xmm1`, and the return is an `FMOD_RESULT` (`0` == `FMOD_OK`).
 pub const FMOD_CHANNEL_GROUP_SET_VOLUME_IAT: u32 = 0x01aa_e9b4;
 
-/// `MOFmodSoundManager::v0`, the per-frame pump. RVA `0x009dfef0`, VA `0x1409dfef0`.
+/// `MOFmodSoundManager::v6`, audio init. RVA `0x009ddbe0`, VA `0x1409ddbe0`.
 ///
-/// Identified as per-frame by what it contains rather than by where it is called from: the sole
-/// call to `FMOD::EventSystem::update` in the image is at `0x1409e0080`, inside this function.
-/// FMOD requires that once per frame, so this runs once per frame.
+/// The function that *creates* [`SOUND_MANAGER_MASTER_GROUP_OFFSET`]: at `0x1409df157` it does
+/// `lea rdx,[r15+0x9f8]` and hands that to `System::getMasterChannelGroup` as the out-parameter.
+/// So on return from this function the master group exists and not one sound has played yet,
+/// which makes it the earliest moment anything can be silenced.
+///
+/// Not an Arxan redirect: clean prologue at the entry.
+pub const SOUND_MANAGER_INIT: u32 = 0x009d_dbe0;
+
+/// `MOFmodSoundManager::v2`, the command-queue drain. RVA `0x009e0910`, VA `0x1409e0910`.
+///
+/// **The only code in the image that can change a channel group's volume.** Its `setVolume` call
+/// at `0x1409e0c96` is the sole `ChannelGroup::setVolume` site, so anything holding the master
+/// group at a chosen level only has to out-run this one function and nothing else.
+///
+/// Not an Arxan redirect: clean prologue at the entry.
+pub const SOUND_MANAGER_COMMAND_DRAIN: u32 = 0x009e_0910;
+
+/// `MOFmodSoundManager::v0`. RVA `0x009dfef0`, VA `0x1409dfef0`.
+///
+/// **NOT a per-frame pump, measured.** It contains the image's only `FMOD::EventSystem::update`
+/// call (`0x1409e0080`), which FMOD documents as a once-a-frame requirement, and that made it look
+/// like the frame pump. A detour on it fired essentially once in a 57-second run, during process
+/// teardown -- so a mute re-asserted here is never asserted, and a restore requested here arrives
+/// 51 seconds late. Kept as a named constant so the next reader does not repeat the inference.
 ///
 /// Not an Arxan redirect. `scripts/ds2-arxan-chain.py` reported `UNKNOWN` until its prologue table
 /// learned `48 8b c4` (`mov rax,rsp`); the entry is ordinary code, not a five-byte `e9` stub.
-pub const SOUND_MANAGER_UPDATE: u32 = 0x009d_fef0;
+pub const SOUND_MANAGER_V0_NOT_A_FRAME_PUMP: u32 = 0x009d_fef0;
 
 /// `FeSubStateTitleStartIngame::v1` (enter). RVA `0x000fde30`, VA `0x1400fde30`.
 ///

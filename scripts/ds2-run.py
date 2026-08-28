@@ -1095,10 +1095,13 @@ def config_text(
 {KEY_CONTINUE_SLOT} = {continue_slot}
 # STARTUP-ONLY. ON by default, and inert unless `slot` above is set.
 #
-# Holds FMOD's master channel group at zero from install until FeSubStateTitleStartIngame, so the
-# title music and the confirm sounds for the two menus nobody pressed do not play. The volume is
-# then restored to the number the game itself last applied -- read out of the sound manager rather
-# than reset to 1.0, so whatever you set in the options menu survives.
+# Holds FMOD's master channel group at zero from audio init until FeSubStateTitleStartIngame, so
+# the title music and the confirm sounds for the two menus nobody pressed do not play. The volume
+# is then restored to the number the game itself last applied -- read out of the sound manager
+# rather than reset to 1.0, so whatever you set in the options menu survives.
+#
+# Measured: armed during engine init, before the title state machine exists, and restored at
+# t=5740ms on the frame the game enters StartIngame. Both calls returned FMOD_OK.
 #
 # The lever is the game's own: [0x14166dfa8] is the MOFmodSoundManager singleton (named by RTTI),
 # +0x9f8 is the master channel group FMOD wrote there through getMasterChannelGroup, and setVolume

@@ -260,34 +260,59 @@ slots in *that* vtable:
 Same class, same vtable, same offset, so the two `0x9f8` are one field. That is the whole
 identification, and none of it rests on a name resembling a concept.
 
-### What ships
+### What ships, after one wrong turn
 
-`crates/ds2-continue/src/silence.rs`, on by default whenever `[continue] slot` is set:
+The first attempt hooked **`MOFmodSoundManager::v0`** (`0x1409dfef0`) and re-asserted zero after it
+every frame. `v0` contains the image's only `EventSystem::update` call, which FMOD documents as a
+once-a-frame requirement, so it looked exactly like the frame pump.
 
-* Detour **`MOFmodSoundManager::v0`** (`0x1409dfef0`, the per-frame pump -- identified by
-  containing the image's only `EventSystem::update` call, which FMOD requires once a frame). After
-  the original, re-assert `setVolume(master, 0.0)`.
-* Detour **`FeSubStateTitleStartIngame::v1`** (`0x1400fde30`, slot 1 of vtable `0x1410bdbf8`) to
-  request the release. The `setVolume` itself is performed by the pump on its next frame, so every
-  call into `fmodex64.dll` happens on the thread that already owns the audio pump.
-* Restore to `mgr[+0x930]` -- the value the game itself last applied -- not to `1.0`, which would
-  silently overwrite the options menu. If that field is not a usable volume (zero because nothing
-  has applied one yet), it falls back to `1.0` and logs which was used.
+**It is not, and the run said so.** Over 57 seconds the detour fired essentially once, at process
+teardown: the mute was never asserted while the game played, and the restore requested at
+`StartIngame` (t=5.68s) landed at t=56.9s, one line above `ds2-offline: detach`. Containing a
+per-frame API call does not make a function per-frame -- the lesson being that "what does this
+function contain" is not an answer to "when is this function called".
 
-The mute itself patches no `.text`: it reads two globals and calls through the game's own import
-slot, the same property `ds2-offline` relies on for WS2_32.
+So `crates/ds2-continue/src/silence.rs` waits for no pump. It hangs on three functions each known
+to run:
 
-A shortcut that dies before `StartIngame` would otherwise stay silent forever, so the list's
-back-out and ownership-refusal phases release it too, as does every path that abandons the
-autoload. Every arm and release is logged with the reason.
+* **`v6`, audio init** (`0x1409ddbe0`) -- it must run or there is no master group, and it is the
+  function that *writes* the master group. On its return the group exists and nothing has played.
+  The mute goes there.
+* **`v2`, the command drain** (`0x1409e0910`) -- the only code in the image that can change a
+  channel group's volume. Re-asserting zero after it means the mute has one function to out-run,
+  not a whole engine.
+* **`FeSubStateTitleStartIngame::v1`** (`0x1400fde30`) -- observed firing at t=5.68s. It restores
+  inline; deferring the restore to a thread that turned out not to be running is what broke the
+  first attempt.
 
-### Not measured
+Restore goes to `mgr[+0x930]` -- the value the game itself last applied -- not to `1.0`, which
+would silently overwrite the options menu. If that field holds no usable volume the fallback is
+`1.0`, logged as `source=default`.
 
-This has not been run. The static identification is as tight as static gets -- FMOD writes the
-field, RTTI names the class, and there is only one volume call site -- but nobody has heard it.
-Run `python3 scripts/ds2-run.py --continue-slot N` and read the log for
-`silence armed` / `silence restored volume=… source=…`; `source=default` means `+0x930` was not
-populated and the fallback fired, which is the one behaviour worth checking by ear.
+The mute patches no `.text`: two global reads and a call through the game's own import slot, the
+same property `ds2-offline` relies on for the WS2_32 slots.
+
+A shortcut that dies before `StartIngame` would otherwise stay silent for the session, so the
+list's back-out and ownership-refusal phases release it too, as does every path that abandons the
+autoload. Every arm and release is logged with its reason and with what FMOD returned.
+
+### Measured, 2026-08-27
+
+```text
+ds2-continue: install installed=6 of 6 preselect=1 silence=true
+ds2-boot-timeline: milestone label=dinput8-create-returned t=933.103ms
+ds2-continue: silence armed applied=fmod_result=0
+ds2-boot-timeline: leave seq=0 id=0x00 t=4142.745ms          <- title flow starts here
+...
+ds2-continue: silence restored by=start-ingame volume=1 source=game fmod_result=0
+ds2-boot-timeline: enter seq=39 id=0x6b t=5746.257ms
+```
+
+The mute lands between `dinput8-create-returned` (t=933ms) and the first substate departure
+(t=4143ms) -- during engine init, before the title state machine exists, so there is no window in
+which anything could have played. It is given back on the frame the game enters `StartIngame`, at
+`source=game`, meaning the player's own configured volume was what came back rather than the
+`1.0` fallback. Both FMOD calls returned `FMOD_OK`.
 
 ### Why not a debugger
 

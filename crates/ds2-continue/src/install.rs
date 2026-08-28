@@ -680,14 +680,13 @@ pub unsafe fn install() -> Outcome {
             site.name, site.rva
         ));
     }
-    // ARM ONLY IF THE PUMP IS ACTUALLY HOOKED. Arming with no detour to enforce it would be
-    // harmless, but arming when the *release* failed to install would mute the game with nothing
-    // able to give it back.
-    if installed == attempted && PRESELECT_SLOT.load(Ordering::Acquire) >= 0 {
-        crate::silence::arm();
-    } else if crate::silence::enabled() {
+    // MUTING IS NOT ARMED HERE. It arms inside the detour on audio init, because that is the
+    // first moment a master channel group exists to mute. What matters at this point is the
+    // opposite check: if any site failed, the mute could end up applied with no detour able to
+    // give the volume back, so say so loudly rather than let a half-installed run go quiet.
+    if crate::silence::enabled() && installed != attempted {
         log(format_args!(
-            "{LOG_PREFIX} silence not-armed installed={installed} of {attempted}"
+            "{LOG_PREFIX} silence sites-incomplete installed={installed} of {attempted} --              audio may not be restored"
         ));
     }
     log(format_args!(
