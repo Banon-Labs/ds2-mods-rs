@@ -1528,3 +1528,113 @@ pub const FRAME_LIMITER: u32 = 0x00fe_b910;
 /// counter read **zero** across a whole boot, which is what moved the instrument to `0x00feb910`.
 /// Recorded so the next person does not spend the same run finding out.
 pub const FRAME_LIMITER_RESET: u32 = 0x00fe_b890;
+
+// ---------------------------------------------------------------------------------------------
+// THE NETWORK SERVICE AND ITS ONLINE FLAG
+//
+// One boolean decides whether DARK SOULS II believes it is online, and the whole of `ds2-offline`
+// rests on the four facts below. All four were read out of `darksoulsii-deobf.bin`; no game was
+// launched to establish any of them.
+//
+//   net = [[0x1416148f0] + 0x22f0]      GameManagerImp's network service
+//   net + 0x3a                          the flag, ONE BYTE
+//   0x140513600                         its getter, `movzx eax, byte [rcx+0x3a]; ret`
+//   0x140513820                         its setter, `mov byte [rcx+0x3a], dl; ret`
+//
+// THE FLAG IS BORN ZERO. The service's constructor at `0x140512f30` -- identified by the vtable
+// `0x1410d13e8` it installs at `[this]` -- writes `mov BYTE PTR [rbx+0x3a],0` at `0x140512f5a`,
+// four instructions in. So "offline" is the state this object is CONSTRUCTED in, and every online
+// run is one that left it. That is why the setter can be neutered rather than fought: neutering it
+// does not impose a value, it prevents a departure from the game's own initial one.
+// ---------------------------------------------------------------------------------------------
+
+/// `NetService::isOnline`. RVA `0x00513600`, VA `0x140513600`.
+///
+/// The whole function is `movzx eax, BYTE PTR [rcx+0x3a]; ret` -- five bytes, and `docs/
+/// DS2-TITLE-FLOW.md` already named it "the game's master online gate" from the other end, while
+/// tracing which rows the top menu greys out.
+///
+/// **34 call sites**, found by scanning the image for `e8` displacements that resolve here
+/// (`scripts/ds2-xrefs.py`). Every one of them is immediately followed by `test al,al` and a
+/// branch, which is what makes forcing the return value a complete answer for its readers rather
+/// than a partial one. Three of the 34 were disassembled to check that the polarity is what it
+/// looks like:
+///
+/// * `FeSubStateTitleOnlineCheck::v8` (`0x1400f98c0`), the substate's own work starter: calls this,
+///   and on a zero returns `false` **without starting anything**. So a forced zero does not fake
+///   the online check -- it takes the shipped path where the check never runs.
+/// * The top-menu builder at `0x1400f433b`: the result becomes `r14b`, which enables row 2 (server
+///   information) and disables row 3 (go online), or the reverse.
+/// * `0x1400fe739`, inside the same menu code, gating whether a transition is registered at all.
+///
+/// Not an Arxan redirect: `scripts/ds2-arxan-chain.py` terminates at hop 0 on the real prologue
+/// `0f b6 41 3a c3`, followed by a `90` pad. Five bytes of body and a byte of padding is enough
+/// room for the three-byte stub [`NET_IS_ONLINE_STUB`] writes and nothing has to be relocated.
+pub const NET_IS_ONLINE: u32 = 0x0051_3600;
+
+/// First byte of [`NET_IS_ONLINE`]'s body, `0f` -- the `movzx` opcode.
+///
+/// Passed to `ds2_hook::patch_3byte_stub` as its `expected_first` guard. If a future build moves
+/// the function, this byte almost certainly differs and the patch aborts instead of landing in the
+/// middle of some other function's instruction.
+pub const NET_IS_ONLINE_EXPECTED_FIRST: u8 = 0x0f;
+
+/// `xor eax,eax; ret` -- what [`NET_IS_ONLINE`] is replaced with. Reports offline to all 34 readers.
+pub const NET_IS_ONLINE_STUB: [u8; 3] = [0x31, 0xc0, 0xc3];
+
+/// `NetService::setOnline`. RVA `0x00513820`, VA `0x140513820`.
+///
+/// `mov BYTE PTR [rcx+0x3a], dl; ret` -- the exact write-side pair of [`NET_IS_ONLINE`], on the
+/// same object at the same offset. Found from the other end rather than by searching for a setter:
+/// `NetSvrManager`'s vtable slot `+0x60` (`0x140290040`) opens by calling this with `edx` zeroed,
+/// and **`FeSubStateTitleSetOfflineMode::v1` (`0x1400f8f80`) is nothing but a tail-jump into that
+/// slot**. So this is the write the game's own "play offline" substate performs.
+///
+/// Not an Arxan redirect; its own four-byte body plus `ret` sits at its entry, followed by `cc`
+/// padding.
+pub const NET_SET_ONLINE: u32 = 0x0051_3820;
+
+/// First byte of [`NET_SET_ONLINE`]'s body, `88` -- the `mov r/m8, r8` opcode.
+pub const NET_SET_ONLINE_EXPECTED_FIRST: u8 = 0x88;
+
+/// `ret; nop; nop` -- what [`NET_SET_ONLINE`] is replaced with, making the setter inert.
+///
+/// **Not `xor eax,eax; ret`.** The setter returns nothing, so zeroing `eax` would be a lie about
+/// its signature that happens to be harmless; `ret` says what is meant. The two `nop`s exist only
+/// because `ds2_hook::patch_3byte_stub` writes three bytes, and they are never executed.
+pub const NET_SET_ONLINE_STUB: [u8; 3] = [0xc3, 0x90, 0x90];
+
+/// Byte offset of the online flag inside the network service object. Recorded for diagnostics --
+/// nothing in this repo writes it directly.
+///
+/// Read three ways that agree: the getter's `[rcx+0x3a]`, the setter's `[rcx+0x3a]`, and the
+/// constructor's `mov BYTE PTR [rbx+0x3a],0` at `0x140512f5a`.
+pub const NET_ONLINE_FLAG_OFFSET: usize = 0x3a;
+
+/// Offset of the network service in [`GAME_MANAGER_IMP`] -- the `this` every call to
+/// [`NET_IS_ONLINE`] and [`NET_SET_ONLINE`] is made on.
+///
+/// The sibling of [`SAVE_LOAD_SYSTEM_OFFSET`], and named the same way. `GAME_MANAGER_IMP`'s own
+/// doc comment already recorded `[+0x22f0]` as the network service from the boot-chain trace; this
+/// is that offset given a name so the two call sites in `ds2-offline` do not spell it as a
+/// literal. Every getter call site disassembled for [`NET_IS_ONLINE`] loads it the same way:
+/// `mov rax,[0x1416148f0]; mov rcx,[rax+0x22f0]`.
+pub const NET_SERVICE_OFFSET: usize = 0x22f0;
+
+/// The force-offline byte at VA `0x14160de19`, and **it is not the switch it looks like**.
+/// RVA `0x0160de19`.
+///
+/// `ds2-mods-rs-rk4` asked whether setting this removes the network boot chain. It does not.
+/// It is read at **exactly one instruction in the whole image**, `0x1400f431f` inside the top-menu
+/// builder:
+///
+/// ```text
+/// cmp BYTE PTR [0x14160de19], 0
+/// je  ask_the_gate          ; zero -> fall through to call 0x140513600
+/// xor r14b, r14b            ; non-zero -> force "not online" and skip the call
+/// ```
+///
+/// So it is a local override of one boolean in one function, and the boot chain -- which calls
+/// [`NET_IS_ONLINE`] directly, on its own -- never sees it. Recorded here so the next reader does
+/// not have to re-derive that it is a dead end; [`NET_IS_ONLINE`] is the read it was shadowing.
+pub const NET_FORCE_OFFLINE_MENU_ONLY: u32 = 0x0160_de19;

@@ -19,6 +19,14 @@ service chains and the substate timers, each entry carrying the disassembly it w
 The boot to the title menu is measured end to end in
 [`docs/DS2-BOOT-WORK.md`](docs/DS2-BOOT-WORK.md), and is 875 ms shorter than it was.
 
+**Runs offline, and by default.** Everything here patches `.text` in a live copy of the game,
+which is what FromSoftware's matchmaking servers watch for, so
+[`ds2-offline`](crates/ds2-offline/src/lib.rs) pins the network service's online flag to the zero
+its own constructor writes and refuses the game's non-loopback sockets. Verified in-game: a boot
+logged `refused api=getaddrinfo host=frpg2-steam64-ope-login.fromsoftware-game.net`. Turn it off
+with `--no-offline` and understand what you are turning off. See
+[`docs/DS2-OFFLINE.md`](docs/DS2-OFFLINE.md).
+
 ## Three facts that shape everything here
 
 1. **me3 cannot load DS2.** `me3 profile create --game` accepts `darksouls3, sekiro, eldenring,

@@ -60,6 +60,7 @@ ds2-hook.workspace = true
 ds2-dialog-skip.workspace = true
 ds2-intro-skip.workspace = true
 ds2-boot-timeline.workspace = true
+ds2-offline.workspace = true
 ds2-hotkey-config.workspace = true
 ds2-rva.workspace = true
 dearxan = { workspace = true, features = ["disabler", "rayon"] }

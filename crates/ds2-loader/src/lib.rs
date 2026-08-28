@@ -86,6 +86,7 @@ pub mod boot_timeline;
 pub mod crash_logging;
 pub mod dialog_skip;
 pub mod intro_skip;
+pub mod offline;
 pub mod title_menu;
 pub mod title_skip;
 
@@ -166,10 +167,13 @@ pub unsafe extern "system" fn DllMain(
         static ATTACHED: Once = Once::new();
         ATTACHED.call_once(|| unsafe { attach(module) });
     }
-    if reason == DLL_PROCESS_DETACH
-        && let Some(line) = arxan_probe::detach_line()
-    {
-        detach_log_line(&line);
+    if reason == DLL_PROCESS_DETACH {
+        if let Some(line) = arxan_probe::detach_line() {
+            detach_log_line(&line);
+        }
+        if let Some(line) = offline_detach_line() {
+            detach_log_line(&line);
+        }
     }
     DLL_MAIN_SUCCESS
 }
@@ -293,6 +297,7 @@ unsafe fn attach(module: *mut c_void) {
                     )),
                 }
                 install_probe(probe);
+                install_offline();
                 install_intro_skip();
                 install_dialog_skip();
                 install_title_skip();
@@ -323,6 +328,7 @@ unsafe fn attach(module: *mut c_void) {
                      blocking_entrypoint={blocking_entrypoint}"
                 ));
                 install_probe(probe);
+                install_offline();
                 install_intro_skip();
                 install_dialog_skip();
                 install_title_skip();
@@ -377,6 +383,72 @@ fn install_intro_skip() {
             outcome.attempted
         ));
     }
+}
+
+/// Install offline mode, if `<Game>/ds2-mods.toml` asked for it.
+///
+/// **Installed before every other feature**, and that ordering is the one thing here that is
+/// load-bearing. The rest of the features race nothing -- they hook substates the title flow has
+/// not reached yet. This one is in a race with the network: the sooner the online flag is pinned
+/// and the sooner the import table is fronted, the smaller the window in which a thread could get
+/// a socket call away. At this position -- the post-Arxan callback, on the entry-point thread,
+/// with no frame drawn -- the game has not created its `NexusRevolution Socket` thread yet, so the
+/// window is empty. Moving this call after the others would start narrowing it for no reason.
+fn install_offline() {
+    let config = offline::OfflineConfig::load();
+    log_line(format_args!("{}", config.describe()));
+    if !config.enabled {
+        return;
+    }
+    ds2_offline::set_logger(log_line);
+    // SAFETY: the two code patches are three-byte stubs over leaf functions recorded in `ds2-rva`,
+    // each of which re-reads the byte it is about to overwrite and aborts if it is not the one
+    // recorded there; both were checked with `scripts/ds2-arxan-chain.py` to sit at their own
+    // prologue rather than behind an Arxan redirect. The socket layer writes pointers into the
+    // image's own `.idata` and modifies no code at all.
+    let outcome = unsafe {
+        ds2_offline::install(ds2_offline::Request {
+            pin_flag: config.pin_flag,
+            report_offline: config.report_offline,
+            block_sockets: config.block_sockets,
+        })
+    };
+    if !outcome.any() {
+        // Worth shouting about. Every other feature failing means a screen still shows; this one
+        // failing means the player believes they are offline and is not.
+        log_line(format_args!(
+            "{} NOTHING INSTALLED -- this run is NOT offline",
+            ds2_offline::LOG_PREFIX
+        ));
+    } else if config.block_sockets && outcome.sockets_patched != outcome.sockets_attempted {
+        log_line(format_args!(
+            "{} PARTIAL {}/{} imports fronted -- the rest can still reach the network",
+            ds2_offline::LOG_PREFIX,
+            outcome.sockets_patched,
+            outcome.sockets_attempted
+        ));
+    }
+}
+
+/// The offline layer's closing line: what the socket guard refused over the whole run.
+///
+/// **This is the number that says whether the flag layer was enough.** All zeros means the game
+/// never reached a socket, so pinning the flag did the entire job; a non-zero `connect` count is
+/// the proof that it did not -- `FeSubStateTitleGameServerLogin`'s work starter never reads the
+/// flag, and this is where that shows up as a measurement rather than as a disassembly argument.
+///
+/// Returns `None` when the socket layer was never installed, so a run with `block_sockets = false`
+/// says nothing here rather than reporting four zeros that would read as "nothing was attempted".
+fn offline_detach_line() -> Option<String> {
+    let counts = ds2_offline::counts()?;
+    Some(format!(
+        "{} detach refused connect={} sendto={} resolve={} allowed-loopback={}",
+        ds2_offline::LOG_PREFIX,
+        counts.connect,
+        counts.sendto,
+        counts.resolve,
+        counts.allowed_loopback
+    ))
 }
 
 /// Install the message-box skip, if `<Game>/ds2-mods.toml` asked for it.
