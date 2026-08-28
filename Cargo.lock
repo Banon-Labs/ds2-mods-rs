@@ -473,6 +473,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ds2-build-import"
+version = "0.1.0"
+dependencies = [
+ "ds2-build-import-core",
+ "ds2-game-base",
+ "ds2-menu-row",
+ "ds2-rva",
+]
+
+[[package]]
 name = "ds2-build-import-core"
 version = "0.1.0"
 
@@ -538,6 +548,7 @@ version = "0.1.0"
 dependencies = [
  "dearxan",
  "ds2-boot-timeline",
+ "ds2-build-import",
  "ds2-continue",
  "ds2-crash-logging-core",
  "ds2-dialog-skip",

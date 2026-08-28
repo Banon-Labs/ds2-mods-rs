@@ -3522,3 +3522,152 @@ pub const FLO_ADDED_PANEL_DEFINITION: u32 = 0xf221;
 pub const FLO_CARET_Y: f32 = 292.65;
 /// What the shipped caret's y reads, checked before anything is written.
 pub const FLO_CARET_SHIPPED_Y: f32 = 244.65;
+
+// =================================================================================================
+// THE SOFTWARE KEYBOARD, AND THE ONE DWORD THAT KEEPS IT SAFE TO BORROW
+//
+// DARK SOULS II already asks Steam for a text field -- `SoftwareKeyboardManagerImpl` wraps
+// `ISteamUtils::ShowGamepadTextInput` and the game uses it for character naming. A mod can call the
+// same API for its own field, and should, because the alternative is drawing and driving a text
+// box by hand. But the game's own dismissal listener does NOT check whether it asked for the
+// keyboard, so a session this mod opens is a session the game will react to.
+//
+// EVERY ADDRESS BELOW WAS BYTE-CHECKED AGAINST `darksoulsii-deobf.bin`, not read out of a report.
+// The four that matter are quoted with their bytes in their own doc comments.
+// =================================================================================================
+
+/// `SoftwareKeyboard::detail::SoftwareKeyboardManagerImpl`'s singleton pointer. RVA `0x01896a08`.
+///
+/// **Null until the first soft-keyboard interaction**, and that null is a fact worth checking
+/// rather than defending against: the game's dismissal listener is registered by the impl's
+/// CONSTRUCTOR, so while this pointer is null there is no listener for `GamepadTextInputDismissed_t`
+/// anywhere in the game and a mod's own keyboard session cannot disturb anything.
+///
+/// Established from the accessor `0x140ff1d20`, which both reads and writes it:
+///
+/// ```text
+/// 0x140ff1d4e: 48 8b 0d b3 4c 8a 00   mov rcx,[rip+0x8a4cb3]   ; -> 0x141896a08
+/// 0x140ff1dbe: 48 89 05 43 4c 8a 00   mov [rip+0x8a4c43],rax   ; the store after construction
+/// ```
+///
+/// Both displacements resolve to the same address, from a scan of the accessor's whole body rather
+/// than from one hit.
+pub const SOFTWARE_KEYBOARD_IMPL_SINGLETON: u32 = 0x0189_6a08;
+
+/// `int32 m_state` inside the impl. `+0x08`.
+///
+/// The constructor at `0x140ff1e28` opens it at idle -- `c7 43 08 ff ff ff ff`,
+/// `mov DWORD PTR [rbx+0x8],0xffffffff` -- and it is the only field any of the three parties
+/// (the game, Steam's callback, this mod) needs to agree on.
+pub const SOFTWARE_KEYBOARD_IMPL_STATE_OFFSET: usize = 0x08;
+
+/// `m_state` when no session is running. `-1`.
+///
+/// **The value [`SOFTWARE_KEYBOARD_IMPL_SHOW`] demands before it will open anything**, and the
+/// value this mod must restore when its own session ends.
+pub const SOFTWARE_KEYBOARD_STATE_IDLE: i32 = -1;
+/// `m_state` while a Steam keyboard is up. `0`. Written by `show` only after
+/// `ShowGamepadTextInput` returned true.
+pub const SOFTWARE_KEYBOARD_STATE_SHOWING: i32 = 0;
+/// `m_state` after a dismissal the player did not submit. `2`.
+pub const SOFTWARE_KEYBOARD_STATE_CANCELLED: i32 = 2;
+/// `m_state` after a dismissal the player submitted. `3`.
+pub const SOFTWARE_KEYBOARD_STATE_SUBMITTED: i32 = 3;
+
+/// `SoftwareKeyboardManagerImpl::show`. RVA `0x00ff22e0`. **Recorded for its gate, not to be
+/// called.**
+///
+/// ```text
+/// 0x140ff2317: 83 79 08 ff   cmp DWORD PTR [rcx+0x8],0xffffffff
+/// 0x140ff231b: 74 07         je  proceed
+/// 0x140ff231d: 32 c0         xor al,al          ; refuse, and never reach Steam
+/// ```
+///
+/// Those bytes are the whole reason [`SOFTWARE_KEYBOARD_STATE_IDLE`] has to be restored. `show`
+/// refuses unless it reads `-1`, and the only writers of `-1` live inside `getResult`, which the
+/// game cannot reach once `show` has started failing -- so a state this mod leaves behind is a
+/// state the game never recovers from on its own. It is not a crash. It is the Steam keyboard
+/// silently never appearing again for the rest of the process.
+pub const SOFTWARE_KEYBOARD_IMPL_SHOW: u32 = 0x00ff_22e0;
+
+/// The game's `GamepadTextInputDismissed_t` listener. RVA `0x00ff2040`. Fourteen bytes, no
+/// branches, and it is the entire collision risk:
+///
+/// ```text
+/// 33 c0        xor  eax,eax
+/// 38 02        cmp  BYTE PTR [rdx],al     ; the callback's m_bSubmitted
+/// 0f 95 c0     setne al
+/// 83 c0 02     add  eax,0x2               ; -> 2 or 3
+/// 89 41 08     mov  DWORD PTR [rcx+0x8],eax
+/// c3           ret
+/// ```
+///
+/// **It reads no text and it cannot fail** -- no allocation, no call, no branch, and the only
+/// pointers it touches are its own `this` and the callback payload. So a session this mod opens can
+/// neither crash the game nor corrupt it.
+///
+/// **What it does not do is ask whether the game wanted this dismissal.** There is no pending-request
+/// flag and no owner check. It is registered exactly once in the image (`0x140ff1e72`, id `714`) and
+/// lives in `steam_api64.dll`'s process-wide table, so it fires for a keyboard THIS MOD opened just
+/// as readily -- which is why not registering a listener of our own buys nothing, and why the
+/// interlock is on `m_state` instead.
+pub const SOFTWARE_KEYBOARD_DISMISSED_HANDLER: u32 = 0x00ff_2040;
+
+/// The `ISteamUtils` version whose `ShowGamepadTextInput` takes a prefill. `"SteamUtils007"`.
+///
+/// DS2's own `steam_api64.dll` carries only `SteamUtils005` and `SteamClient012`, and at
+/// `0x140ff2415` the game loads four arguments and never writes `[rsp+0x28]` -- the
+/// `pchExistingText` slot. **That is the GAME's call site, not a limit of the API.**
+///
+/// Read off Proton Experimental's generated per-version wrappers in
+/// `files/lib/wine/x86_64-unix/lsteamclient.so`, which is the closest thing to the Steamworks
+/// headers available offline. `005` and `006` marshal four arguments; from `007` on there is a
+/// fifth, `mov 0x1d(%rbx),%r9` -- a full 64-bit pointer:
+///
+/// ```text
+/// 005, 006          4 args   slot 0xa0
+/// 007, 008, 009, 010  5 args   slot 0xa0     <- prefill arrives here
+/// 011                 5 args   slot 0x98     <- and the slot moves
+/// ```
+///
+/// `007` is therefore the SMALLEST upgrade that gains the prefill, and the one that keeps
+/// [`STEAM_UTILS_SHOW_GAMEPAD_TEXT_INPUT_SLOT`] where the game's own build already proves it to be.
+/// `~/.local/share/Steam/linux64/steamclient.so` advertises `SteamUtils001` through `011`, so the
+/// client vends it.
+///
+/// **NEVER HAND THE NEWER POINTER TO THE GAME.** `007` keeps the method at the same slot as `005`,
+/// so the game's four-argument call would pass straight through it leaving `r9` holding whatever
+/// was there -- a garbage `pchExistingText`. Two interfaces, two owners.
+pub const STEAM_UTILS_VERSION_WITH_PREFILL: &str = "SteamUtils007";
+
+/// `ISteamClient012::GetISteamUtils(HSteamPipe, const char *pchVersion)`. Vtable slot `+0x48`.
+///
+/// From Proton's `ISteamClient_SteamClient012_GetISteamUtils` thunk, which is
+/// `mov 0x14(%rbx),%rdx` (the version string), `mov 0x10(%rbx),%esi` (the pipe), `call *0x48(%rax)`.
+/// The shim does not validate the version string -- `steamclient64.dll` resolves it -- which is what
+/// makes [`STEAM_UTILS_VERSION_WITH_PREFILL`] reachable from a binary that only knows `005`.
+pub const STEAM_CLIENT_GET_ISTEAM_UTILS_SLOT: usize = 0x48;
+
+/// `ISteamUtils::IsOverlayEnabled()`. Vtable slot `+0x88`.
+///
+/// Read out of DS2 itself: [`SOFTWARE_KEYBOARD_IMPL_SHOW`] gates on it before it will ask for a
+/// keyboard. **It gates this mod's field too, and it is the one thing about this path that no
+/// amount of static reading settles** -- whether the overlay is actually attached is a property of
+/// the running Steam client, not of the executable.
+pub const STEAM_UTILS_IS_OVERLAY_ENABLED_SLOT: usize = 0x88;
+
+/// `ISteamUtils::ShowGamepadTextInput(...)`. Vtable slot `+0xa0`.
+///
+/// Observed twice, independently: DS2 calls `[vtbl+0xa0]` at `0x140ff2424` on its `005` pointer, and
+/// Proton's `007` wrapper calls `*0xa0(%rax)`. Same slot on both sides of the version bump, which is
+/// what makes `007` a drop-in for the game's own layout.
+pub const STEAM_UTILS_SHOW_GAMEPAD_TEXT_INPUT_SLOT: usize = 0xa0;
+
+/// `ISteamUtils::GetEnteredGamepadTextLength()`. Vtable slot `+0xa8`. From
+/// `SoftwareKeyboardManagerImpl::getResult` (`0x00ff2050`), at `0x140ff20b1`.
+pub const STEAM_UTILS_GET_ENTERED_TEXT_LENGTH_SLOT: usize = 0xa8;
+
+/// `ISteamUtils::GetEnteredGamepadTextInput(char *pchText, uint32 cchText)`. Vtable slot `+0xb0`.
+/// Same function, at `0x140ff2101`. **The text comes back UTF-8**, which is why the impl keeps a
+/// `char*` scratch buffer at `+0x10` rather than a wide string.
+pub const STEAM_UTILS_GET_ENTERED_TEXT_SLOT: usize = 0xb0;

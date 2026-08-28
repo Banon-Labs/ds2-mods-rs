@@ -1,0 +1,127 @@
+//! A pause-menu row that loads a DARK SOULS II build from a soulsplanner link.
+//!
+//! Press **Load from URL** on the quit tab and Steam draws a text field, prefilled with
+//! `https://soulsplanner.com/darksouls2/`, that takes the build id after the slash. What comes back
+//! is validated, fetched and read.
+//!
+//! # It borrows the game's Steam keyboard rather than drawing its own
+//!
+//! DARK SOULS II already asks Steam for a text field -- that is how character naming works -- and
+//! this crate asks for the same thing at a newer interface version, because the game's own version
+//! cannot prefill. See [`steam`] for the version bump and, more importantly, for the interlock: the
+//! game's dismissal listener does not check whether the game asked for the keyboard, so a session
+//! opened here is a session the game reacts to.
+//!
+//! The alternative was drawing a box in the `.flo` and collecting `WM_CHAR` from the message
+//! enqueue at `0x140aef890`. That path is real and mapped, and it is what this becomes if the
+//! overlay turns out to be unavailable -- `ds2_build_import_core::field` is its editing model,
+//! already written and tested. It is not the first choice because it needs a second hook for
+//! suppression that nobody has established yet: the message queue is **not** how this game reads
+//! the keyboard (it uses DirectInput8), so refusing to enqueue a key does not stop it reaching the
+//! player's character.
+//!
+//! # What it does not do
+//!
+//! **It does not apply the build.** It reads one and writes it to the log. Putting a build on a
+//! character means writing equipment, inventory and nine stats, and none of those writers exist for
+//! this game yet. Saying so in the log beats a row that looks like it worked.
+//!
+//! # The three failure modes worth knowing before reading the log
+//!
+//! | log line | what happened |
+//! |---|---|
+//! | `no field: the Steam overlay is disabled` | nothing to do with this mod -- no overlay, no field |
+//! | `no field: the game's keyboard is busy` | the game owns a session; refused rather than stolen |
+//! | `rejected "...": Drop the #` | the fragment form, refused before the request went out |
+
+#![cfg_attr(not(windows), allow(unused))]
+
+/// What every line this crate writes begins with.
+pub const LOG_PREFIX: &str = "ds2-build-import:";
+
+#[cfg(windows)]
+mod flow;
+#[cfg(windows)]
+mod steam;
+
+#[cfg(windows)]
+pub use install::{LogFn, register};
+
+#[cfg(windows)]
+mod install {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    use ds2_build_import_core::ROW_CAPTION;
+
+    use crate::LOG_PREFIX;
+
+    /// The loader's log sink. Same shape as `ds2-menu-row`'s.
+    pub type LogFn = fn(std::fmt::Arguments<'_>);
+
+    static LOGGER: AtomicUsize = AtomicUsize::new(0);
+
+    /// A session is open. The row is inert until it finishes.
+    ///
+    /// Not because two fields would crash -- [`crate::steam::KeyboardClaim`] would refuse the
+    /// second one anyway -- but because the refusal would be logged as "the game's keyboard is
+    /// busy", which points at the wrong culprit when the thing holding it is us.
+    static SESSION_OPEN: AtomicBool = AtomicBool::new(false);
+
+    /// Register the row and point this crate's logging at the loader's file.
+    ///
+    /// Call BEFORE `ds2_menu_row::install`, which seals the registry. Returns whatever
+    /// [`ds2_menu_row::add_row`] said, so the caller can log a refusal in its own voice.
+    pub fn register(logger: LogFn) -> Result<ds2_menu_row::RowId, ds2_menu_row::AddRowError> {
+        LOGGER.store(logger as usize, Ordering::Release);
+        ds2_menu_row::add_row(ds2_menu_row::RowSpec {
+            tab: ds2_menu_row::Tab::Quit,
+            caption: ROW_CAPTION,
+            icon: ds2_rva::FLO_QUIT_ICON_DEFINITION,
+            // A different hue from the quit row's, because the two rows sit next to each other
+            // wearing the same glyph -- there are ten icons in this document and all ten already
+            // mean something. The strength is the one the ramp settled on; see
+            // `ds2_rva::FLO_ADDED_ROW_TINT_STRENGTH`.
+            tint: Some(ds2_menu_row::Tint {
+                rgb: [0x64, 0xb4, 0xff],
+                strength: ds2_rva::FLO_ADDED_ROW_TINT_STRENGTH,
+            }),
+            on_confirm: open_field,
+        })
+    }
+
+    /// What pressing the row does. **Runs on the game thread, with the menu still up.**
+    ///
+    /// It starts a worker and returns. Everything else -- the field, the wait, the fetch -- happens
+    /// there; see [`crate::flow`] for why none of it can happen here.
+    fn open_field() {
+        if SESSION_OPEN.swap(true, Ordering::AcqRel) {
+            return log_line(format_args!("{LOG_PREFIX} a field is already open"));
+        }
+        // A failed spawn must clear the flag, or the row is dead for the rest of the process.
+        if std::thread::Builder::new()
+            .name("ds2-build-import".to_owned())
+            .spawn(|| {
+                crate::flow::run_session();
+                SESSION_OPEN.store(false, Ordering::Release);
+            })
+            .is_err()
+        {
+            SESSION_OPEN.store(false, Ordering::Release);
+            log_line(format_args!("{LOG_PREFIX} could not start a worker thread"));
+        }
+    }
+
+    /// Write one line to the loader's log, if a logger was installed.
+    pub(crate) fn log_line(args: std::fmt::Arguments<'_>) {
+        let logger = LOGGER.load(Ordering::Acquire);
+        if logger != 0 {
+            // SAFETY: the only writer is `register`, which stores a `LogFn` cast from a real
+            // function item, and it is stored before any row can be pressed.
+            let logger: LogFn = unsafe { std::mem::transmute(logger) };
+            logger(args);
+        }
+    }
+}
+
+#[cfg(windows)]
+pub(crate) use install::log_line;
