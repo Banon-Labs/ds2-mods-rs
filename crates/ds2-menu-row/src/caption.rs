@@ -186,12 +186,13 @@ unsafe fn write_caption(
         "{LOG_PREFIX} caption label={label:#x} written={n}"
     ));
 
-    // THE TREE, from the accessor that is already built and already correct. Three stretch factors
-    // on the panel record changed nothing on screen, so what draws the banner is still unknown and
-    // the live tree is the only thing that can name it. Read-only, and once per process.
-    // SAFETY: `accessor` was just filled by the game's own binder, and the ids are the path it was
-    // filled from.
-    unsafe { crate::tree::dump(accessor.as_ptr(), &path_ids(base)) };
+    // THE TREE DUMP IS NOT RUN. It found what it was built to find -- that the banner is a
+    // `FeComponentTextureShape` sized by its own quad -- and it costs 117 log lines, each of which
+    // `ds2-loader`'s sink follows with `sync_all()`. That is most of a second of frozen game on the
+    // first pause-menu open, for a measurement that has already been taken and written down.
+    //
+    // `crate::tree::dump` is kept and still compiles; re-arm it here when the next question needs
+    // the live tree rather than the file.
 
     // THE BANNER, once, and only from the pass that resolves the row this crate added -- the other
     // pass targets the shipped row and would do the same work twice.
@@ -211,6 +212,10 @@ unsafe fn write_caption(
 }
 
 /// The quit tab's own path, as the ids the caption binder built it from.
+///
+/// Only the disarmed tree dump wants this; the banner uses [`ds2_rva::FE_QUIT_TAB_BASE_PATH`],
+/// which is the container path by definition rather than by how this caller sealed its own.
+#[allow(dead_code)]
 ///
 /// Read out of the captured path rather than written down twice: the capture is the object the
 /// original built, and its ids are at `+0x00` upwards with the length at

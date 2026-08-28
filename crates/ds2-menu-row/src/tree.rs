@@ -47,15 +47,18 @@ type GetSceneFn = unsafe extern "system" fn(*mut usize) -> *mut u8;
 
 /// How many trees have been dumped. One is the measurement; more is noise in a log that is read by
 /// eye, and the tab is rebuilt every time the pause menu opens.
+#[allow(dead_code)]
 static DUMPS: AtomicUsize = AtomicUsize::new(0);
 
 /// Most components to log, in case a subtree is larger than expected. A cap that is hit is said so
 /// in the log rather than silently truncating, because a truncated dump that looks complete is how
 /// "the banner is not in the tree" gets concluded from a tree that was cut short.
+#[allow(dead_code)]
 const MAX_LINES: usize = 400;
 
 /// Depth to descend. The rows are two levels below the container, so four covers the neighbourhood
 /// without dumping the whole menu.
+#[allow(dead_code)]
 const MAX_DEPTH: usize = 4;
 
 /// The scene the accessor's proxy is rooted at.
@@ -95,6 +98,7 @@ unsafe fn scene_of(accessor: *const u8) -> *mut u8 {
     unsafe { get_scene(proxy) }
 }
 
+#[allow(dead_code)]
 /// The component's transform range as floats, for reading back offline.
 ///
 /// Only ever called on a pointer that has passed [`looks_like_component`], because
@@ -143,6 +147,7 @@ fn looks_like_component(candidate: *const u8, base: usize) -> Option<usize> {
     }
 }
 
+#[allow(dead_code)]
 /// Log one component and, up to `MAX_DEPTH`, its descendants.
 ///
 /// # Safety
@@ -309,6 +314,9 @@ pub unsafe fn resolve_path(accessor: *const u8, ids: &[u32]) -> *mut u8 {
     unsafe { find(scene, path.as_ptr(), ids.len() as u32) }
 }
 
+/// Kept, not deleted: this is the instrument that found the banner, and the next question about the
+/// live tree will want it back. Re-arm by calling [`dump`] from `caption.rs`.
+#[allow(dead_code)]
 /// Dump every prefix of the quit tab's path, once per process.
 ///
 /// # Safety

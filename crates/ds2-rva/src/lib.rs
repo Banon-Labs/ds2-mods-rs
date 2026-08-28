@@ -3245,3 +3245,33 @@ pub const FE_TEXTURE_SHAPE_DISPLAY_KEY: u32 = 0xffff_ffff;
 pub const FE_BANNER_QUAD_Y1: f32 = 390.35;
 /// What the shipped quad's `y1` reads, checked before anything is written.
 pub const FE_BANNER_QUAD_SHIPPED_Y1: f32 = 342.35;
+
+/// The panel definition the quit tab's `0x1eac81` instantiates, and the caret inside it.
+///
+/// `0x0221` holds exactly two children: the banner shape `0x0220` at `(0, 0)`, and `0x004e` at
+/// `(40.85, 244.65)` -- panel-local, which is container y `141.65`, just below the third row's mark
+/// at `114.35`. That second one is the scroll caret.
+///
+/// **It is SHARED.** All three menu tabs' panels instantiate `0x0221`, so moving the caret inside it
+/// moves it on every tab. The quit tab therefore gets its own copy of the definition under an index
+/// nothing else asks for, reached the same way the container is: our record names it, and the
+/// lookup detour answers it.
+pub const FLO_PANEL_DEFINITION: u32 = 0x0221;
+/// Index of the caret among `0x0221`'s two children.
+pub const FLO_PANEL_CARET: usize = 1;
+/// Children `0x0221` declares.
+pub const FLO_PANEL_CHILDREN: usize = 2;
+
+/// The definition index the quit tab's own panel copy is filed under.
+///
+/// Outside the file's own range -- `l02_01_In-Game.flo` declares 342 definitions and the highest
+/// index seen is `0x0272` -- so a lookup for it can only come from the record this crate wrote.
+pub const FLO_ADDED_PANEL_DEFINITION: u32 = 0xf221;
+
+/// Where the caret goes: down by one row pitch, the same `48.00` the added row is spaced at.
+///
+/// `244.65 + 48.00`. It is the caret's own authored y in panel-local coordinates, so the panel's
+/// position does not enter into it.
+pub const FLO_CARET_Y: f32 = 292.65;
+/// What the shipped caret's y reads, checked before anything is written.
+pub const FLO_CARET_SHIPPED_Y: f32 = 244.65;

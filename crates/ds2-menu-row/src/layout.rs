@@ -90,6 +90,20 @@ struct Container {
     row_transform: [u8; ds2_rva::FLO_TRANSFORM_SIZE],
     mark_transform: [u8; ds2_rva::FLO_TRANSFORM_SIZE],
     panel_transform: [u8; ds2_rva::FLO_TRANSFORM_SIZE],
+    /// The shipped records exactly as the game had them, kept only so [`still_current`] has
+    /// something to compare against.
+    ///
+    /// **`records` cannot be that thing, and assuming it could made the cache miss every single
+    /// time.** The copy in `records` has its panel transform repointed at our own block, so it
+    /// differs from the game's array by eight bytes and always will. Every lookup therefore
+    /// rebuilt, leaked another container, and logged two fsynced lines -- which is most of the
+    /// freeze the user saw on opening the menu.
+    shipped: [u8; ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_QUIT_TAB_CHILD_IDS.len()],
+    /// The quit tab's OWN copy of panel definition `0x0221`, so its caret can move without moving
+    /// the other two tabs'.
+    panel_definition: [u8; ds2_rva::FLO_DEFINITION_STRIDE],
+    panel_records: [u8; ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_PANEL_CHILDREN],
+    caret_transform: [u8; ds2_rva::FLO_TRANSFORM_SIZE],
 }
 
 /// Substitutions already built, as `(definition the game returned, definition we return)`.
@@ -101,8 +115,17 @@ struct Container {
 /// **The address is not enough of a key.** A reload can land on the same address with new
 /// contents, and the cached copy would then hand the game records pointing at freed transform
 /// blocks -- a crash whose stack contains nothing of ours. So a hit is only a hit if the seven
-/// copied records still byte-match the seven the game is holding; see [`still_current`].
+/// copied records still byte-match the seven the game is holding -- compared against the pristine
+/// `shipped` snapshot, NOT against `records`, which is edited by construction. See
+/// [`still_current`].
 static BUILT: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
+
+/// The quit tab's own panel definition, answered for [`ds2_rva::FLO_ADDED_PANEL_DEFINITION`].
+///
+/// A plain pointer rather than a cache entry: the index is one nothing in the file uses, so a
+/// lookup for it can only have come from the record this crate wrote, and the newest container is
+/// always the right answer.
+static PANEL: AtomicUsize = AtomicUsize::new(0);
 
 /// Most substitutions to keep. Past this the detour passes through and says so. The bound exists
 /// so that a misunderstanding shows up as a logged refusal rather than as unbounded growth; at
@@ -136,7 +159,7 @@ unsafe fn still_current(original: *const u8, cached: *const Container) -> bool {
     // it holds `CHILDREN` records, of which the first `count` are the copies being compared.
     unsafe {
         std::slice::from_raw_parts(children, shipped)
-            == std::slice::from_raw_parts((*cached).records.as_ptr(), shipped)
+            == std::slice::from_raw_parts((*cached).shipped.as_ptr(), shipped)
     }
 }
 
@@ -184,7 +207,7 @@ fn describe(ids: &[u32]) -> String {
 ///
 /// `original` must be the definition [`ds2_rva::FLO_FIND_DEFINITION`] just returned for
 /// [`ds2_rva::FLO_QUIT_TAB_CONTAINER_DEFINITION`], in a loaded document.
-unsafe fn build(original: *mut u8) -> Option<*mut u8> {
+unsafe fn build(original: *mut u8, panel: *mut u8) -> Option<*mut u8> {
     let refuse = |why: std::fmt::Arguments<'_>| -> Option<*mut u8> {
         let n = REFUSED.fetch_add(1, Ordering::Relaxed) + 1;
         log(format_args!(
@@ -236,6 +259,10 @@ unsafe fn build(original: *mut u8) -> Option<*mut u8> {
         row_transform: [0; ds2_rva::FLO_TRANSFORM_SIZE],
         mark_transform: [0; ds2_rva::FLO_TRANSFORM_SIZE],
         panel_transform: [0; ds2_rva::FLO_TRANSFORM_SIZE],
+        shipped: [0; ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_QUIT_TAB_CHILD_IDS.len()],
+        panel_definition: [0; ds2_rva::FLO_DEFINITION_STRIDE],
+        panel_records: [0; ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_PANEL_CHILDREN],
+        caret_transform: [0; ds2_rva::FLO_TRANSFORM_SIZE],
     });
 
     // COPIED, never assembled field by field. The definition and the records carry fields this
@@ -252,6 +279,11 @@ unsafe fn build(original: *mut u8) -> Option<*mut u8> {
         std::ptr::copy_nonoverlapping(
             children,
             container.records.as_mut_ptr(),
+            count * ds2_rva::FLO_RECORD_STRIDE,
+        );
+        std::ptr::copy_nonoverlapping(
+            children,
+            container.shipped.as_mut_ptr(),
             count * ds2_rva::FLO_RECORD_STRIDE,
         );
     }
@@ -365,6 +397,84 @@ unsafe fn build(original: *mut u8) -> Option<*mut u8> {
             .copy_from_slice(&depth.to_le_bytes());
     }
 
+    // THE CARET. `0x0221` is shared by all three tabs, so the quit tab gets its own copy of it and
+    // our panel record is repointed at that copy -- the same substitution as the container, one
+    // level down, and unambiguous because nothing else ever asks for the index it is filed under.
+    let mut caret_ok = false;
+    if !panel.is_null() {
+        // SAFETY: `panel` is a definition the game's own table just yielded.
+        let (panel_count, panel_children) = unsafe {
+            (
+                panel
+                    .add(ds2_rva::FLO_DEFINITION_CHILD_COUNT_OFFSET)
+                    .cast::<u16>()
+                    .read() as usize,
+                panel
+                    .add(ds2_rva::FLO_DEFINITION_CHILDREN_OFFSET)
+                    .cast::<*const u8>()
+                    .read(),
+            )
+        };
+        if panel_count == ds2_rva::FLO_PANEL_CHILDREN && (panel_children as usize) >= 0x1_0000 {
+            // SAFETY: `panel_count` records are live at `panel_children`, and both destinations are
+            // exactly as large.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    panel,
+                    container.panel_definition.as_mut_ptr(),
+                    ds2_rva::FLO_DEFINITION_STRIDE,
+                );
+                std::ptr::copy_nonoverlapping(
+                    panel_children,
+                    container.panel_records.as_mut_ptr(),
+                    panel_count * ds2_rva::FLO_RECORD_STRIDE,
+                );
+            }
+            let at = ds2_rva::FLO_PANEL_CARET * ds2_rva::FLO_RECORD_STRIDE;
+            // SAFETY: the record was copied from a live one whose transform the game dereferences.
+            let source = unsafe {
+                container
+                    .panel_records
+                    .as_ptr()
+                    .add(at + ds2_rva::FLO_RECORD_TRANSFORM_OFFSET)
+                    .cast::<*const u8>()
+                    .read()
+            };
+            if (source as usize) >= 0x1_0000 {
+                // SAFETY: a live transform block of exactly this size.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        source,
+                        container.caret_transform.as_mut_ptr(),
+                        ds2_rva::FLO_TRANSFORM_SIZE,
+                    );
+                }
+                let y = f32::from_le_bytes(
+                    container.caret_transform[ds2_rva::FLO_TRANSFORM_Y_OFFSET..][..4]
+                        .try_into()
+                        .expect("four bytes"),
+                );
+                if (y - ds2_rva::FLO_CARET_SHIPPED_Y).abs() < 0.5 {
+                    container.caret_transform[ds2_rva::FLO_TRANSFORM_Y_OFFSET..][..4]
+                        .copy_from_slice(&ds2_rva::FLO_CARET_Y.to_le_bytes());
+                    caret_ok = true;
+                } else {
+                    log(format_args!(
+                        "{LOG_PREFIX} caret REFUSED y={y}, expected {} -- the tab keeps the shipped \
+                         caret and the added row has none",
+                        ds2_rva::FLO_CARET_SHIPPED_Y
+                    ));
+                }
+            }
+        }
+    }
+    if caret_ok {
+        // Our panel record names our panel definition instead of the shared one.
+        let at = ds2_rva::FLO_QUIT_TAB_PANEL * ds2_rva::FLO_RECORD_STRIDE;
+        container.records[at + ds2_rva::FLO_RECORD_DEFINITION_OFFSET..][..2]
+            .copy_from_slice(&(ds2_rva::FLO_ADDED_PANEL_DEFINITION as u16).to_le_bytes());
+    }
+
     // LEAKED ON PURPOSE. The game keeps this definition at the built container's `+0x48` for the
     // container's whole life and re-reads the capacity from it on every attach, so it has to
     // outlive anything this crate can observe. It is ~0x210 bytes, once per document load.
@@ -388,6 +498,28 @@ unsafe fn build(original: *mut u8) -> Option<*mut u8> {
         container.records[at..][..8].copy_from_slice(&transform.to_le_bytes());
     }
 
+    if caret_ok {
+        let records = container.panel_records.as_ptr() as usize;
+        container.panel_definition[ds2_rva::FLO_DEFINITION_CHILDREN_OFFSET..][..8]
+            .copy_from_slice(&records.to_le_bytes());
+        container.panel_definition[..2]
+            .copy_from_slice(&(ds2_rva::FLO_ADDED_PANEL_DEFINITION as u16).to_le_bytes());
+        let at = ds2_rva::FLO_PANEL_CARET * ds2_rva::FLO_RECORD_STRIDE
+            + ds2_rva::FLO_RECORD_TRANSFORM_OFFSET;
+        let transform = container.caret_transform.as_ptr() as usize;
+        container.panel_records[at..][..8].copy_from_slice(&transform.to_le_bytes());
+        PANEL.store(
+            container.panel_definition.as_ptr() as usize,
+            Ordering::Release,
+        );
+        log(format_args!(
+            "{LOG_PREFIX} caret moved definition={:#x} y={}->{}",
+            ds2_rva::FLO_ADDED_PANEL_DEFINITION,
+            ds2_rva::FLO_CARET_SHIPPED_Y,
+            ds2_rva::FLO_CARET_Y
+        ));
+    }
+
     let n = SUBSTITUTED.fetch_add(1, Ordering::Relaxed) + 1;
     log(format_args!(
         "{LOG_PREFIX} container substituted original=0x{:016x} replacement=0x{:016x} \
@@ -407,7 +539,7 @@ unsafe fn build(original: *mut u8) -> Option<*mut u8> {
 /// # Safety
 ///
 /// As [`build`].
-unsafe fn substitute(original: *mut u8) -> *mut u8 {
+unsafe fn substitute(original: *mut u8, panel: *mut u8) -> *mut u8 {
     let Ok(mut built) = BUILT.lock() else {
         // A poisoned mutex means a previous call panicked inside the lock. Handing back the
         // original is the one answer that cannot make that worse.
@@ -437,7 +569,7 @@ unsafe fn substitute(original: *mut u8) -> *mut u8 {
         return original;
     }
     // SAFETY: the caller established this is the quit tab's container definition.
-    match unsafe { build(original) } {
+    match unsafe { build(original, panel) } {
         Some(replacement) => {
             built.push((original as usize, replacement as usize));
             replacement
@@ -459,11 +591,18 @@ unsafe extern "system" fn detour(doc: *mut usize, index: u32) -> *mut u8 {
         unsafe { std::mem::transmute::<usize, FindDefinitionFn>(trampoline) };
     // SAFETY: both arguments are the game's own, passed through unchanged.
     let found = unsafe { original(doc, index) };
+    if index == ds2_rva::FLO_ADDED_PANEL_DEFINITION {
+        // Ours, and only ever asked for by our own record.
+        return PANEL.load(Ordering::Acquire) as *mut u8;
+    }
     if index != ds2_rva::FLO_QUIT_TAB_CONTAINER_DEFINITION || found.is_null() {
         return found;
     }
+    // The shared panel definition, fetched through the original so the copy is the game's own.
+    // SAFETY: the trampoline is the game's own lookup, called with its own arguments.
+    let panel = unsafe { original(doc, ds2_rva::FLO_PANEL_DEFINITION) };
     // SAFETY: `found` is a definition the game's own table just yielded.
-    unsafe { substitute(found) }
+    unsafe { substitute(found, panel) }
 }
 
 /// Detour the definition lookup. Returns whether the row's cell will exist.
@@ -575,12 +714,40 @@ mod tests {
     /// and every piece is the size the game reads.
     #[test]
     fn the_container_is_laid_out_the_way_the_game_reads_it() {
+        // The fields, then whatever `align(16)` adds on the end. Asserting the bare sum would fail
+        // on the padding rather than on a field, which is the opposite of what this is for.
+        let fields = ds2_rva::FLO_DEFINITION_STRIDE * 2
+            + ds2_rva::FLO_RECORD_STRIDE * CHILDREN
+            + ds2_rva::FLO_TRANSFORM_SIZE * 4
+            + ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_QUIT_TAB_CHILD_IDS.len()
+            + ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_PANEL_CHILDREN;
         assert_eq!(
             std::mem::size_of::<Container>(),
-            ds2_rva::FLO_DEFINITION_STRIDE
-                + ds2_rva::FLO_RECORD_STRIDE * CHILDREN
-                + ds2_rva::FLO_TRANSFORM_SIZE * 3
+            fields.next_multiple_of(16)
         );
+        assert_eq!(std::mem::align_of::<Container>(), 16);
+    }
+
+    /// The synthetic panel index must be outside the file's own range, or a real definition would
+    /// be shadowed and some other screen would get our caret.
+    #[test]
+    fn the_added_panel_index_is_not_a_file_index() {
+        const { assert!(ds2_rva::FLO_ADDED_PANEL_DEFINITION > 0x0272) };
+        assert_ne!(
+            ds2_rva::FLO_ADDED_PANEL_DEFINITION,
+            ds2_rva::FLO_PANEL_DEFINITION
+        );
+        assert_ne!(
+            ds2_rva::FLO_ADDED_PANEL_DEFINITION,
+            ds2_rva::FLO_QUIT_TAB_CONTAINER_DEFINITION
+        );
+    }
+
+    /// The caret goes DOWN, by the same pitch the added row is spaced at.
+    #[test]
+    fn the_caret_moves_one_row_down() {
+        let moved = ds2_rva::FLO_CARET_Y - ds2_rva::FLO_CARET_SHIPPED_Y;
+        assert!((moved - 48.0).abs() < 0.5, "moved by {moved}");
     }
 
     /// The depths must not collide with a shipped one, since the whole point of choosing them was
