@@ -3035,17 +3035,27 @@ pub const FLO_ADDED_ROW_LABEL_ID: u32 = 0x001e_ac4a;
 ///
 /// **Measured, not chosen.** All three menu tabs share panel definition `0x0221` at scale `(1,1)`;
 /// its shape is `57.80 x 341.25` and its own translate puts it at panel-local `y = -59.90 ..
-/// 281.35`. The three rows sit at panel-local `y = 113.6, 158.9, 206.9` and a row plate is `48.80`
-/// tall, so the bottom row ends at `255.7` and the scroll has `25.65` of slack under it — about
-/// half a row. A fourth row ends at `303.7`, so the panel has to reach that:
+/// 281.35`. The three rows sit at panel-local `y = 113.6, 158.9, 206.9` and a row plate is
+/// `48.80` tall, so the bottom row ends at `255.7` and the scroll's own bottom edge is `25.65`
+/// below that.
+///
+/// **That 25.65 is the scroll's bottom MARGIN, and the first version of this constant spent it.**
+/// It reached `303.7`, where the fourth row ends, which puts the scroll's bottom curl exactly on
+/// the row's bottom edge -- arithmetically "covered" and visibly still short. The target is the
+/// fourth row's end PLUS the margin the shipped rows are drawn with:
 ///
 /// ```text
-/// 303.7 / 281.35 = 1.0794
+/// (303.7 + 25.65) / 281.35 = 1.1706
 /// ```
 ///
-/// Scaling about the record's own origin, which moves the top edge up by 4.8 — under 8%, which the
-/// scroll's decorated ends should survive.
-pub const FLO_PANEL_STRETCH_Y: f32 = 1.0794;
+/// Scaling is about the record's own origin, so the top edge moves up by 10.1 as well and the
+/// header margin stretches by the same 17%. A scroll can absorb that; a nine-slice would be better
+/// and this file does not obviously offer one.
+///
+/// It scales the panel's CURSOR with it -- `0x1eac81`'s definition carries both the scroll and the
+/// highlight. Only the quit tab is affected, because what is scaled is this crate's own copy of
+/// that tab's child record rather than the shared definition all three tabs instantiate.
+pub const FLO_PANEL_STRETCH_Y: f32 = 1.1706;
 
 /// Index into [`FLO_QUIT_TAB_CHILD_IDS`] of the panel the stretch applies to.
 pub const FLO_QUIT_TAB_PANEL: usize = 0;
