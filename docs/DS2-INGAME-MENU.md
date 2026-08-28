@@ -435,3 +435,64 @@ That is available for `.flo` and it is much cheaper than a full format decode: f
 the cell that already exists, clone it, change its id and its position, and let the gate be that our
 encoder reproduces every existing record byte-for-byte before it is allowed to emit a new one. It
 needs record boundaries and the position fields -- not the whole format.
+
+## Measured again, 2026-08-28: the grid is one column by N rows
+
+The first run established that the appended item is selectable and invisible. This one says why,
+with a five-tab control group, because `ds2-menu-row`'s probe reports every tab and touches one.
+
+```
+tab  items  col-extent  row-extent   verdict
+ 0     1        1           1        ok: every item has a cell
+ 1     1        1           1        ok
+ 2     2        1           2        ok
+ 3     3        1           3        ok
+ 5     2        1           2        ok
+ 4     4        1           3        NO CELL -- one item more than there are cells
+```
+
+Every tab is `col-extent = 1`, and every untouched tab has `row-extent == items` **exactly**. The
+layout authors precisely as many cells as the tab has items. Ours has one too few, and it is the
+only one that does.
+
+`scroll = 0x0` on all six, so there is no scrolling anywhere in this control and the "virtualised
+list" reading is dead: nothing was going to scroll the fourth row into view.
+
+**This corrected the probe's own verdict line.** It first compared `items` against the COLUMN
+extent, which reported `NO CELL` for four perfectly healthy tabs. The cells are counted along the
+ROW axis. `FUN_1400222c0` says the same thing from the other side: it special-cases
+`rowExtent == 1` to mean a single row, and these tabs do not take that branch.
+
+So the target is exact: **tab 4's grid needs a cell element at `(col 0, row 3)`.**
+
+## Quitting to desktop is one byte
+
+`FeSubStateTitleShutdown::v1` (`0x1400fde20`) is the game's own quit-to-desktop, in full:
+
+```asm
+mov rax, QWORD PTR [rip+0x15773d1]      ; [0x1416751f8], the title-flow singleton
+mov BYTE PTR [rax+0x13a], 1
+ret
+```
+
+Its `update` (`0x1400ff2e0`) is an empty `ret`, so the substate does not perform the shutdown -- it
+requests one.
+
+Four sites write that byte (`0x1400f4a9a`, `0x1400fbc00`, `0x1400fde23`, `0x1401c2303`) and exactly
+two read it (`0x1401bf97e`, `0x1401c0196`). **Both readers are inside `GameManagerImp`'s per-frame
+master update** -- the function that also drives `mapManUpdate`, `damageManUpdate`,
+`bulletManUpdate`, `demoManager` and `saveRequest`. Being polled by the main loop is what makes the
+write usable from anywhere: it takes effect on the next frame, through the game's own shutdown, and
+the writer is not on the stack when it happens.
+
+It does not save and it does not ask. The quit-to-title flow offers to save because that flow asks;
+this is the "without a confirmation" path and the absent save is the same coin.
+
+`ds2-menu-row` now detours [`ds2_rva::FE_INGAME_MENU_DISPATCH`] and handles one action id of its
+own, [`ds2_rva::FE_INGAME_MENU_ACTION_QUIT_TO_DESKTOP`] (`0x1000`), by writing that byte. The id is
+deliberately outside the game's `0..=9, 0xb, 0xc, 0xd` case range: if the detour is ever absent the
+row falls to the switch's `default` and is INERT, rather than quietly doing whatever the game does
+for some id we borrowed.
+
+**So the action half of the goal is done and the presentation half is not.** The row exists, is
+selectable, and quits to desktop. It cannot be seen, and that is one `.flo` record away.

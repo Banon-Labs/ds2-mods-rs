@@ -2496,6 +2496,21 @@ pub const FEX_GRID_ITEM_COUNT_OFFSET: usize = 0xc8;
 /// an item being visible.
 pub const FEX_GRID_COL_EXTENT_OFFSET: usize = 0xd4;
 
+/// Byte offset of the scroll state a `FexGridControl` drives. RVA-relative to the grid.
+///
+/// `FUN_140021b30` reads it as `grid[0x1c]` and writes the total at `+0x2c`, compares that total
+/// against `+0x28`, and takes one of two branches: total at or below `+0x28` plays sequence `0x7a`
+/// on the object at `[scroll]`, above it plays `0x70` and computes a thumb size from `+0x44`.
+/// That is a scrollbar being hidden or shown, which is what makes "how many cells are VISIBLE"
+/// a different number again from the extent and the item count.
+pub const FEX_GRID_SCROLL_OFFSET: usize = 0xe0;
+
+/// Within the scroll object: the number of cells on screen at once.
+pub const FEX_GRID_SCROLL_VISIBLE_OFFSET: usize = 0x28;
+
+/// Within the scroll object: the total the count above is compared against.
+pub const FEX_GRID_SCROLL_TOTAL_OFFSET: usize = 0x2c;
+
 /// Byte offset of a `FexGridControl`'s ROW extent. Set the same way as
 /// [`FEX_GRID_COL_EXTENT_OFFSET`].
 ///
@@ -2580,3 +2595,72 @@ pub const FE_INGAME_MENU_GATE_ALWAYS: u32 = 0;
 /// the project yet, so what it actually forbids is NOT recorded here -- only that this is the gate
 /// the shipped quit row uses.
 pub const FE_INGAME_MENU_GATE_RETURN_TITLE: u32 = 4;
+
+// ---------------------------------------------------------------------------------------------
+// QUITTING TO DESKTOP
+// ---------------------------------------------------------------------------------------------
+
+/// `FeSubStateTitleShutdown::v1` (enter) -- the game's own quit-to-desktop, in full. RVA
+/// `0x000fde20`.
+///
+/// Three instructions, and there is no fourth:
+///
+/// ```text
+/// mov rax, QWORD PTR [rip+0x15773d1]      ; [FE_SYSTEM_SINGLETON]
+/// mov BYTE PTR [rax+0x13a], 1             ; FE_SYSTEM_SHUTDOWN_REQUEST_OFFSET
+/// ret
+/// ```
+///
+/// Its `update` (`0x1400ff2e0`) is an empty `ret`, so the substate does not run the shutdown -- it
+/// only asks for one. Recorded because it is the whole implementation of "quit to desktop" and it
+/// is a byte, not a call.
+pub const FE_SUBSTATE_TITLE_SHUTDOWN_ENTER: u32 = 0x000f_de20;
+
+/// The `FeSystem`-ish singleton pointer the title flow reads everything off. RVA `0x016751f8`.
+///
+/// Already relied on elsewhere in this repo without being named: `FeSubStateTitleLogo`'s skip
+/// tests a state word reached through it, and `FeSubStateWarningNoCopy`'s shipped early-out calls
+/// one of its virtuals. It holds a POINTER; dereference it before adding an offset.
+pub const FE_SYSTEM_SINGLETON: u32 = 0x0167_51f8;
+
+/// Byte offset of the shutdown request inside [`FE_SYSTEM_SINGLETON`]'s target.
+///
+/// **Setting it to 1 quits the game, and that is the entire mechanism.** Four sites in the image
+/// write it (`0x1400f4a9a`, `0x1400fbc00`, `0x1400fde23`, `0x1401c2303`) and exactly two read it
+/// (`0x1401bf97e`, `0x1401c0196`) -- both inside `GameManagerImp`'s per-frame master update, the
+/// function that also drives `mapManUpdate`, `damageManUpdate`, `bulletManUpdate`, `demoManager`
+/// and `saveRequest`.
+///
+/// Being polled by the main loop is what makes this usable from anywhere: a write takes effect on
+/// the next frame, through the game's own shutdown, with no confirmation dialog and no new code
+/// path. It is the same byte the title screen's own exit row writes.
+///
+/// It is NOT a save. The game's quit-to-title flow offers to save because that flow asks; this
+/// does not, which is what "without a confirmation" costs.
+pub const FE_SYSTEM_SHUTDOWN_REQUEST_OFFSET: usize = 0x13a;
+
+/// The action id this repo uses for "quit to desktop". Deliberately outside the game's own space.
+///
+/// The shipped dispatch has cases `0..=9`, `0xb`, `0xc`, `0xd`. Anything else falls to `default`,
+/// which plays the ordinary confirm sound and does nothing. That is the correct failure mode for
+/// an id whose behaviour lives in a detour: if the detour is ever absent, the row is INERT rather
+/// than quietly doing whatever the game does for some id we borrowed.
+pub const FE_INGAME_MENU_ACTION_QUIT_TO_DESKTOP: u32 = 0x1000;
+
+/// `FrontendEx::FexGridControl` linear-index -> `(col, row)`. RVA `0x000222c0`.
+///
+/// `if (grid->rowExtent == 1) { col = index; row = 0; } else { row = index / cols; col = index % cols; }`.
+/// Measured at runtime, the in-game menu tabs are one COLUMN by N ROWS -- every tab this repo has
+/// looked at reports `col-extent = 1` and `row-extent = itemCount` -- so they take the second
+/// branch and an item's cell is `(0, index)`.
+pub const FEX_GRID_INDEX_TO_CELL: u32 = 0x0002_22c0;
+
+/// `FrontendEx::FexGridControl` `(col, row)` -> element accessor. RVA `0x00022160`.
+///
+/// Asks the namer at `[grid + 0xf0]` through one of five vtable slots, picked by whether the cell
+/// is on an edge: `+0x30` when `row == -1`, `+0x38` when `row == rowExtent`, `+0x40` when
+/// `col == -1`, `+0x48` when `col == colExtent`, and `+0x10` for an ordinary interior cell.
+///
+/// **The `col == colExtent` branch is the one an appended item takes**, which is why its element
+/// resolves to nothing: it is the "one past the end" namer, not the ordinary-cell namer.
+pub const FEX_GRID_CELL_TO_ELEMENT: u32 = 0x0002_2160;

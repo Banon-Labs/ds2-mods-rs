@@ -51,8 +51,13 @@ type BuildItemsFn = unsafe extern "system" fn(*mut u8) -> *mut u8;
 ///
 /// Gate `0` deliberately: the row must be selectable unconditionally, or a run in which it is
 /// greyed cannot be distinguished from a run in which it never appeared.
+///
+/// The action is OURS, not one borrowed from the game -- see
+/// [`ds2_rva::FE_INGAME_MENU_ACTION_QUIT_TO_DESKTOP`]. The shipped dispatch has no case for it, so
+/// with the detour below absent the row plays the ordinary confirm sound and does nothing. An
+/// inert row is the right failure mode; a row that quietly opened Key Bindings would not be.
 const PAYLOAD: (u32, u32) = (
-    ds2_rva::FE_INGAME_MENU_ACTION_KEY_BINDINGS_UNUSED,
+    ds2_rva::FE_INGAME_MENU_ACTION_QUIT_TO_DESKTOP,
     ds2_rva::FE_INGAME_MENU_GATE_ALWAYS,
 );
 
@@ -201,6 +206,254 @@ unsafe extern "system" fn detour(descriptor: *mut u8) -> *mut u8 {
     unsafe { append(descriptor) }
 }
 
+/// Trampoline back to the item dispatch, and how many times we have asked the game to quit.
+static DISPATCH_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
+static QUITS_REQUESTED: AtomicUsize = AtomicUsize::new(0);
+
+/// The dispatch: `void dispatch(topSelect, action)`, `this` in RCX and the action in EDX.
+///
+/// Read off the disassembly: the entry is `48 89 5c 24 18` / `57` / `sub rsp,...`, and the body
+/// switches on the 32-bit second argument.
+type DispatchFn = unsafe extern "system" fn(*mut u8, u32);
+
+/// Ask the game to shut down, by the only mechanism it has.
+///
+/// This is `FeSubStateTitleShutdown::v1` transcribed -- one pointer load and one byte -- and that
+/// substate is what the TITLE screen's own exit row enters. The byte is polled every frame by
+/// `GameManagerImp`'s master update, so the shutdown that follows is the game's own, on the game's
+/// own schedule, and this function is not on the stack when it happens.
+///
+/// **It does not save, and it does not ask.** The quit-to-title flow offers to save because that
+/// flow asks; this one is "without a confirmation" and the absence of a save is the same coin.
+///
+/// # Safety
+///
+/// Reads the singleton pointer and writes one byte inside it. Must run on the game thread with the
+/// title/game systems constructed, which the menu dispatch guarantees -- there is no pause menu
+/// before there is a game.
+unsafe fn request_shutdown(base: usize) -> bool {
+    // SAFETY: the RVA is a data global recorded in `ds2-rva`, resolved against the live base.
+    let singleton = (base + ds2_rva::FE_SYSTEM_SINGLETON as usize) as *const usize;
+    // SAFETY: the RVA is a data global recorded in `ds2-rva`, resolved against the live base.
+    let system = unsafe { singleton.read() };
+    if system == 0 {
+        log(format_args!(
+            "{LOG_PREFIX} quit REFUSED reason=singleton-null -- nothing was written"
+        ));
+        return false;
+    }
+    // SAFETY: non-null, and the game's own shutdown substate writes this exact byte at this exact
+    // offset inside this exact object.
+    unsafe {
+        (system as *mut u8)
+            .add(ds2_rva::FE_SYSTEM_SHUTDOWN_REQUEST_OFFSET)
+            .write(1);
+    }
+    let n = QUITS_REQUESTED.fetch_add(1, Ordering::Relaxed) + 1;
+    log(format_args!(
+        "{LOG_PREFIX} quit-to-desktop requested system=0x{system:016x} \
+         offset={:#x} value=1 requests={n} -- the game exits on its next frame",
+        ds2_rva::FE_SYSTEM_SHUTDOWN_REQUEST_OFFSET
+    ));
+    true
+}
+
+unsafe extern "system" fn dispatch_detour(top_select: *mut u8, action: u32) {
+    if action == ds2_rva::FE_INGAME_MENU_ACTION_QUIT_TO_DESKTOP {
+        // Deliberately NOT calling the original for our own action. The original would play a
+        // sound and fall through its `default`, which is harmless, but every frame between here
+        // and the shutdown is a frame in which the game is still running a menu that is about to
+        // disappear. Fewer moving parts.
+        let base = ds2_game_base::mem::game_module_base().unwrap_or(0);
+        if base != 0 {
+            unsafe { request_shutdown(base) };
+        }
+        return;
+    }
+    let trampoline = DISPATCH_TRAMPOLINE.load(Ordering::Acquire);
+    if trampoline != 0 {
+        // SAFETY: MinHook published this trampoline for exactly this site, and the signature is the
+        // one the disassembled entry implements.
+        let original: DispatchFn = unsafe { std::mem::transmute::<usize, DispatchFn>(trampoline) };
+        unsafe { original(top_select, action) };
+    }
+}
+
+/// Trampoline back to the per-tab init, and how many times the probe has reported.
+static TAB_INIT_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
+static TAB_INIT_REPORTS: AtomicUsize = AtomicUsize::new(0);
+
+/// The per-tab init: `void init(tab)`, `this` in RCX. Prologue `40 53 48 81 ec b0 00 00 00`.
+type TabInitFn = unsafe extern "system" fn(*mut u8);
+
+/// Read the three numbers that decide whether a row is drawn, AFTER the game has set them.
+///
+/// They come from three different places and this is the only way to see them disagree:
+///
+/// * the item count is what `FUN_140021b30` was handed -- the item vector's length, which the
+///   append above moves;
+/// * the column extent is a census of the cell elements the layout bind FOUND, which nothing in
+///   code moves;
+/// * the scroll object's visible count is a third number again, and `FUN_140021b30` compares the
+///   total against it to decide whether to show a scrollbar.
+///
+/// If visible is 3 while the item count is 4, this grid is a VIRTUALISED list and the missing row
+/// is a scroll that did not happen. If the extent is 3 and there is no scroll concept, the row has
+/// no cell and only the layout can supply one. Those two futures cost very different amounts and
+/// nothing short of this tells them apart.
+///
+/// # Safety
+///
+/// `tab` must be a constructed `FeGroupInGameGroupSelect` whose init has already run.
+unsafe fn report_tab(tab: *mut u8) {
+    if tab.is_null() {
+        return;
+    }
+    // SAFETY: the original init has just run against this pointer and wrote every field below.
+    let (items, cols, rows, scroll) = unsafe {
+        (
+            tab.add(ds2_rva::FEX_GRID_ITEM_COUNT_OFFSET)
+                .cast::<u32>()
+                .read(),
+            tab.add(ds2_rva::FEX_GRID_COL_EXTENT_OFFSET)
+                .cast::<u32>()
+                .read(),
+            tab.add(ds2_rva::FEX_GRID_ROW_EXTENT_OFFSET)
+                .cast::<u32>()
+                .read(),
+            tab.add(ds2_rva::FEX_GRID_SCROLL_OFFSET)
+                .cast::<usize>()
+                .read(),
+        )
+    };
+    // The scroll object is a pointer the grid may legitimately not have; a null one is reported as
+    // such rather than dereferenced, because "this grid does not scroll" is itself the answer to
+    // half the question.
+    let (visible, total) = if scroll == 0 {
+        (None, None)
+    } else {
+        // SAFETY: non-null, and `FUN_140021b30` reads and writes these two fields on every call.
+        unsafe {
+            (
+                Some(
+                    (scroll as *const u8)
+                        .add(ds2_rva::FEX_GRID_SCROLL_VISIBLE_OFFSET)
+                        .cast::<u32>()
+                        .read(),
+                ),
+                Some(
+                    (scroll as *const u8)
+                        .add(ds2_rva::FEX_GRID_SCROLL_TOTAL_OFFSET)
+                        .cast::<u32>()
+                        .read(),
+                ),
+            )
+        }
+    };
+    let n = TAB_INIT_REPORTS.fetch_add(1, Ordering::Relaxed) + 1;
+    // THE AXIS MATTERS AND THIS GOT IT WRONG ONCE. These tabs measure one COLUMN by N ROWS -- the
+    // five tabs this crate does not touch all report `col-extent=1` and `row-extent == items` --
+    // so the number of authored cells is the ROW extent. Comparing against the column extent said
+    // "NO CELL" for every tab including the four that are perfectly fine.
+    let cells = rows;
+    let verdict = if items <= cells {
+        "ok: every item has a cell"
+    } else if visible.is_some_and(|v| v < items) {
+        "VIRTUALISED: visible<items, the row needs a SCROLL"
+    } else {
+        "NO CELL: items>cells and there is no scroll to cover it"
+    };
+    log(format_args!(
+        "{LOG_PREFIX} tab tab=0x{:016x} items={items} col-extent={cols} row-extent={rows} \
+         cells={cells} scroll=0x{scroll:x} visible={visible:?} total={total:?} report={n} \
+         -- {verdict}",
+        tab as usize
+    ));
+}
+
+/// `FexGridControl::indexToCell(grid, out_cell, index)` and `cellToElement(grid, out, cell)`.
+///
+/// Called rather than reimplemented, and that is the point: the id an appended cell WOULD have is
+/// whatever the game's own namer produces for it, and asking the namer is the only way to learn it
+/// that cannot be wrong. Reimplementing the naming would be inventing the answer we came for.
+type IndexToCellFn = unsafe extern "system" fn(*mut u8, *mut u8, i32) -> *mut u8;
+type CellToElementFn = unsafe extern "system" fn(*mut u8, *mut u8, *mut u8) -> *mut u8;
+
+/// Hex, because the accessor's shape is not known and a decoded field would be a guess.
+fn hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 3);
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 && i % 8 == 0 {
+            out.push(' ');
+        }
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
+/// Ask the grid for the element accessor of each cell, INCLUDING one past the last.
+///
+/// The one past the last is the whole reason this exists. Cells 0..n-1 are the records that already
+/// live in the `.flo`; cell n is the one that does not, and its accessor still carries the id the
+/// namer would have looked for. That id is what a new record has to be keyed by, and it cannot be
+/// derived from the file -- only from the namer.
+///
+/// # Safety
+///
+/// `tab` must be a bound grid, and `base` the live module base. Both callees are pure accessor
+/// builders that write only into the caller's buffers.
+unsafe fn report_cell_ids(base: usize, tab: *mut u8, cells: u32) {
+    // SAFETY: both RVAs are `.pdata` function starts recorded in `ds2-rva`.
+    let index_to_cell: IndexToCellFn =
+        unsafe { std::mem::transmute(base + ds2_rva::FEX_GRID_INDEX_TO_CELL as usize) };
+    // SAFETY: same.
+    let cell_to_element: CellToElementFn =
+        unsafe { std::mem::transmute(base + ds2_rva::FEX_GRID_CELL_TO_ELEMENT as usize) };
+    // 160 bytes because the game's own callers of these give them 144-byte stack buffers; the
+    // extra 16 is slack, not a guess about the type.
+    for index in 0..(cells + 1).min(8) {
+        let mut coords = [0u8; 160];
+        let mut accessor = [0u8; 160];
+        // SAFETY: the buffers are at least as large as the ones the game gives these functions.
+        unsafe {
+            index_to_cell(tab, coords.as_mut_ptr(), index as i32);
+            cell_to_element(tab, accessor.as_mut_ptr(), coords.as_mut_ptr());
+        }
+        let past = if index >= cells {
+            " ONE-PAST-THE-END"
+        } else {
+            ""
+        };
+        log(format_args!(
+            "{LOG_PREFIX} cell tab=0x{:016x} index={index} coords={} accessor={}{past}",
+            tab as usize,
+            hex(&coords[..8]),
+            hex(&accessor[..48])
+        ));
+    }
+}
+
+unsafe extern "system" fn tab_init_detour(tab: *mut u8) {
+    let trampoline = TAB_INIT_TRAMPOLINE.load(Ordering::Acquire);
+    if trampoline != 0 {
+        // SAFETY: MinHook published this trampoline for exactly this site, and the signature is the
+        // one the disassembled entry implements.
+        let original: TabInitFn = unsafe { std::mem::transmute::<usize, TabInitFn>(trampoline) };
+        unsafe { original(tab) };
+    }
+    unsafe { report_tab(tab) };
+    let base = ds2_game_base::mem::game_module_base().unwrap_or(0);
+    if base != 0 && !tab.is_null() {
+        // SAFETY: the original init has run, so the grid is bound and its namer is live.
+        let cells = unsafe {
+            tab.add(ds2_rva::FEX_GRID_ROW_EXTENT_OFFSET)
+                .cast::<u32>()
+                .read()
+        };
+        unsafe { report_cell_ids(base, tab, cells) };
+    }
+}
+
 /// What [`install`] managed to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Outcome {
@@ -284,6 +537,61 @@ pub unsafe fn install() -> Outcome {
          open the pause menu's last tab to read the result",
         PAYLOAD.0, PAYLOAD.1
     ));
+
+    // THE DISPATCH DETOUR, which is what makes the appended row DO something. Installed before the
+    // probe because it is the one that matters: without it the row is inert.
+    let dispatch_rva = ds2_rva::FE_INGAME_MENU_DISPATCH;
+    let dispatch_site = base + dispatch_rva as usize;
+    match unsafe { MhHook::new(dispatch_site as *mut c_void, dispatch_detour as *mut c_void) } {
+        Ok(hook) => {
+            DISPATCH_TRAMPOLINE.store(hook.trampoline() as usize, Ordering::Release);
+            let status = unsafe { MH_EnableHook(dispatch_site as *mut c_void) };
+            if status == MH_STATUS::MH_OK {
+                log(format_args!(
+                    "{LOG_PREFIX} dispatch hooked rva=0x{dispatch_rva:08x} \
+                     va=0x{dispatch_site:016x} action={:#x}=quit-to-desktop",
+                    ds2_rva::FE_INGAME_MENU_ACTION_QUIT_TO_DESKTOP
+                ));
+            } else {
+                log(format_args!(
+                    "{LOG_PREFIX} dispatch NOT installed stage=MH_EnableHook status={status:?} \
+                     -- the appended row will be INERT"
+                ));
+            }
+        }
+        Err(status) => log(format_args!(
+            "{LOG_PREFIX} dispatch NOT installed stage=MH_CreateHook status={status:?} \
+             -- the appended row will be INERT"
+        )),
+    }
+
+    // THE PROBE, installed third and never fatal. It only reads, and it reports for all SIX tabs
+    // -- five of which this crate does not touch, which is what makes the sixth's numbers mean
+    // something instead of being a lone reading with nothing to compare against.
+    let probe_rva = ds2_rva::FE_INGAME_MENU_TAB_INIT;
+    let probe_site = base + probe_rva as usize;
+    match unsafe { MhHook::new(probe_site as *mut c_void, tab_init_detour as *mut c_void) } {
+        Ok(hook) => {
+            TAB_INIT_TRAMPOLINE.store(hook.trampoline() as usize, Ordering::Release);
+            let status = unsafe { MH_EnableHook(probe_site as *mut c_void) };
+            if status == MH_STATUS::MH_OK {
+                log(format_args!(
+                    "{LOG_PREFIX} probe hooked rva=0x{probe_rva:08x} va=0x{probe_site:016x} \
+                     (per-tab init; reports all six tabs)"
+                ));
+            } else {
+                log(format_args!(
+                    "{LOG_PREFIX} probe NOT installed stage=MH_EnableHook status={status:?} \
+                     -- the row is still appended, only the measurement is missing"
+                ));
+            }
+        }
+        Err(status) => log(format_args!(
+            "{LOG_PREFIX} probe NOT installed stage=MH_CreateHook status={status:?} \
+             -- the row is still appended, only the measurement is missing"
+        )),
+    }
+
     Outcome { installed: true }
 }
 
@@ -291,14 +599,13 @@ pub unsafe fn install() -> Outcome {
 mod tests {
     use super::*;
 
-    /// The payload must be an action the dispatch already has a case for. A typo here produces a
-    /// row that plays the reject sound, which looks identical to a gated row.
+    /// The payload must be OUR action, and it must be outside the game's own id space -- the
+    /// dispatch's cases are `0..=9`, `0xb`, `0xc`, `0xd`. An id inside that range would make the
+    /// row do whatever the game does for it on any run where the detour failed to install.
     #[test]
-    fn payload_action_is_the_unlisted_one() {
-        assert_eq!(
-            PAYLOAD.0,
-            ds2_rva::FE_INGAME_MENU_ACTION_KEY_BINDINGS_UNUSED
-        );
+    fn payload_action_is_ours_and_outside_the_games_range() {
+        assert_eq!(PAYLOAD.0, ds2_rva::FE_INGAME_MENU_ACTION_QUIT_TO_DESKTOP);
+        assert!(PAYLOAD.0 > 0xd);
         assert_eq!(PAYLOAD.1, ds2_rva::FE_INGAME_MENU_GATE_ALWAYS);
     }
 
