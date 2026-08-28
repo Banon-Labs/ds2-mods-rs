@@ -356,3 +356,82 @@ Four candidate layers, cheapest blast radius last. None of these is built.
    is question 3 wearing a smaller hook.
 
 2 is the one worth building, and its prerequisite is the `.flo` format, not more hooking.
+
+## The architecture, taken from `../er-mods-rs`
+
+Elden Ring has this exact problem solved, and the solution is worth copying rather than reinventing.
+`er-gfx` + `crates/er-quickload/.../profile_table_gfx_files.rs` extend the ER quit menu from two
+buttons to six. Two rules come out of it, and both are load-bearing:
+
+**Ship no game-derived asset.** `er-gfx/src/options_02_040.rs` opens by saying so: *"This does not
+ship a game-derived GFx file. The DLL reads the game's own Scaleform MemoryFile, applies these
+content-addressed tag edits in memory, and serves the derived movie for that process."* The mod
+carries EDITS, not content. It also means the mod adapts to whatever build is installed instead of
+pinning one.
+
+**Fail closed, and gate the encoder on itself.** `apply_edits` is all-or-nothing and refuses any
+`new_tag` that does not parse as exactly one tag AND re-serialize to those exact bytes.
+`options_02_040_quit6_swap_to_edited` validates the vtable, the payload pointer, the length and the
+magic before it reads a byte, and on any failure logs `FAIL-CLOSED (serving native vanilla)` and
+serves the untouched original. Serves and failures are separate counters.
+
+The runtime move itself is three writes: derive once, cache in a `OnceLock` so the pointer outlives
+the call, then repoint the native file object's `data`, `len` and `cursor`.
+
+### ER's grid is DS2's grid
+
+`er-gfx/src/options_02_040.rs` documents `CS::GridControl::MeasureGridFromMovie`: it *"does not take
+its geometry from the property list -- it MEASURES it from the movie"*, probing the child component
+named `Item_<row>_<col>` and stopping *"at the first row whose column 0 is absent"*.
+
+That is `FrontendEx::FexGridControl`'s layout bind at `0x1400216d0`, eight years earlier, probing
+`(col, row)` and stopping at the first null. Same engine lineage, same trap, and the same fix:
+**the layout has to contain the cell, or the engine will not draw it.** ER's fix was four added
+`PlaceObject2` tags. Ours is however many `.flo` records the equivalent turns out to be.
+
+### Where DS2's hook goes -- and why NOT at the EBL read
+
+Option 2 as first written said "hook the EBL read and serve a modified `.febnd.dcx`". Reading
+er-mods-rs corrects that: **`er-gfx` has no zlib dependency at all**, because it edits at the point
+the bytes are already decompressed. The same is available here and is strictly better:
+
+| layer | what it costs |
+| --- | --- |
+| EBL read (`/menu/42.febnd.dcx`) | the DLL must DCX-decompress, rebuild BND4, re-compress -- a zlib dependency and a container writer, for nothing |
+| **BND member (`l42_01_OptionSetting.flo`)** | **the bytes are already the layout. Derive, cache, repoint.** |
+
+The archive layer is identified. `FUN_14090f1d0` at `0x14090f1d0` is the path hash -- the `imul` by
+37 at `0x14090f5e8` is one of exactly TWO in the whole `.text`, and it is the same `h = h*37 + c`
+that `scripts/ds2-ebl.py` reimplements, which is a pleasing cross-check: the Python that opens the
+archive offline and the game's own lookup agree by construction. Its five callers are the
+entry-lookup family -- `0x14090f9c0`, `0x140911570`, `0x140911c00`, `0x140912290`, `0x140912810` --
+which take a container, a name, and an out-descriptor, and fill the descriptor from the matching
+entry (`FUN_14092b880`). That descriptor is the DS2 equivalent of ER's `MemoryFile`: the thing whose
+pointer and length a detour repoints.
+
+**Which of the five, and the descriptor's field offsets, are not yet nailed.** That is the next
+piece of static work on this side.
+
+### The blocker is the `.flo` record format, and pattern-matching will not crack it
+
+Enough was learned to be sure of that rather than to hope otherwise. The 16-byte prefix that
+precedes element id `0x5f5b9f2` occurs exactly **three** times, not five, so the other two
+occurrences of that id sit in records of a different shape; the gaps between the three are 240 and
+5240 bytes, so there is no single stride to read off. The section that contains them
+(`0x3790..0xbfe0`) is 34896 bytes, which 240 does not divide.
+
+The right way to decode it is to read the game's parser, not to keep diffing byte patterns. That is
+`ds2-mods-rs-glz`.
+
+### The shortcut ER used, which is available here too
+
+ER's edits 1-2 were machine-generated: `scripts/gfx_tag_diff.py --emit-rust` over a vanilla/edited
+pair. But edits 3-4 -- the two cells that took the quit tab from four rows to six -- were **hand
+authored**, by copying the record above and changing depth and position, and were gated on this:
+*"the MATRIX encoder was re-derived and made to reproduce edits 2, 3 AND the `Item_2_0` of edit 4
+byte-for-byte before it was allowed to emit a fourth cell."*
+
+That is available for `.flo` and it is much cheaper than a full format decode: find the record for
+the cell that already exists, clone it, change its id and its position, and let the gate be that our
+encoder reproduces every existing record byte-for-byte before it is allowed to emit a new one. It
+needs record boundaries and the position fields -- not the whole format.
