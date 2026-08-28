@@ -1698,3 +1698,202 @@ pub const NET_SERVICE_OFFSET: usize = 0x22f0;
 /// [`NET_IS_ONLINE`] directly, on its own -- never sees it. Recorded here so the next reader does
 /// not have to re-derive that it is a dead end; [`NET_IS_ONLINE`] is the read it was shadowing.
 pub const NET_FORCE_OFFLINE_MENU_ONLY: u32 = 0x0160_de19;
+
+// ============================================================================================
+// THE SAVE-SLOT LOAD PATH. Which character slot a load actually used, and where the game keeps
+// that answer. Read statically from `FeSubStateTitleLoadDataList::v3` at `0x1400fba10`, whose
+// whole body is the decision; full trace in `docs/DS2-CONTINUE.md`.
+//
+// The chain the update walks, taken from its own instructions rather than from a struct:
+//
+//   mov rax,[0x14160de10]            ; FE_TITLE_CONTEXT
+//   mov rdi,[rax+0x98]               ; FeGroupTitleDataList
+//   movsxd rdx,[rax+0x564]           ; the selected slot
+//   mov rax,[0x1416148f0]            ; GAME_MANAGER_IMP
+//   mov rcx,[rax+0xa8]               ; GameDataManager
+//   mov r8,[rcx+0xd8]                ; the slot array
+//   cmp rdx,0xa / jae                ; ten slots, and a negative slot means none
+//   imul rax,rax,0x1f0               ; stride
+//   test BYTE PTR [rbx+0x1d9],0x1    ; occupied
+//   mov edx,[rdi+0x28]               ; the group's confirmed action
+// ============================================================================================
+
+/// `FeSubStateTitleLoadDataList::v3` (update). RVA `0x000fba10`, VA `0x1400fba10`.
+///
+/// The single site worth instrumenting on the load path, because it is the only place the slot,
+/// the action and the outgoing phase are all in scope at once. It runs per frame but does nothing
+/// unless the substate's phase is 1, which its first three instructions establish:
+/// `mov edx,[rcx+0x10]; dec edx; jne <return>`.
+///
+/// **Not an Arxan redirect.** `scripts/ds2-arxan-chain.py` reports `UNKNOWN` here only because its
+/// prologue table does not carry `40 56` (`rex push rsi`); the entry is ordinary code, not the
+/// five-byte `e9` a redirected entry holds.
+pub const FE_SUBSTATE_LOAD_DATA_LIST_UPDATE: u32 = 0x000f_ba10;
+
+/// The selected save slot, at `[`[`FE_TITLE_CONTEXT`]`] + 0x564`. Signed; `0..=9` selects, and
+/// anything else means "none".
+///
+/// The Ghidra project names this field `_x564_slotNum` off the same evidence. It is read with
+/// `movsxd` and immediately bounds-checked against `0xa`, so a mod writing it must respect both
+/// the sign and the bound -- see [`SAVE_SLOT_COUNT`].
+pub const FE_TITLE_CONTEXT_SLOT_NUM_OFFSET: usize = 0x564;
+
+/// The `FeGroupTitleDataList` that owns the character list, at `[`[`FE_TITLE_CONTEXT`]`] + 0x98`.
+pub const FE_TITLE_CONTEXT_DATA_LIST_GROUP_OFFSET: usize = 0x98;
+
+/// The group's confirmed action, at `group + 0x28`. `1` backs out, `2` loads the selected slot.
+///
+/// Written by the group's own `vtable[4]`, which the update calls immediately before reading this.
+/// `3` and `4` are also handled (they route to `0x56` and `0x5f`) but were not identified.
+pub const FE_GROUP_DATA_LIST_ACTION_OFFSET: usize = 0x28;
+
+/// The action value that means "load the selected slot".
+pub const FE_DATA_LIST_ACTION_LOAD: i32 = 2;
+
+/// Offset of `GameDataManager` in [`GAME_MANAGER_IMP`].
+pub const GAME_DATA_MANAGER_OFFSET: usize = 0xa8;
+
+/// Offset of the ten-slot save array inside `GameDataManager`.
+pub const SAVE_SLOT_ARRAY_OFFSET: usize = 0xd8;
+
+/// Stride of one save-slot record. `0x1F0`.
+///
+/// Confirmed far beyond this one function: the image holds 43 separate `imul reg,reg,0x1f0` sites
+/// and nearly all of them are preceded by the same `cmp reg,0xa; jae` bound.
+pub const SAVE_SLOT_STRIDE: usize = 0x1f0;
+
+/// How many save slots the game indexes. Ten, enforced at every indexing site.
+pub const SAVE_SLOT_COUNT: i32 = 10;
+
+/// Flags byte within a save-slot record. `+0x1D9`.
+///
+/// **Runtime only.** It is zero in every record of the `id=4` section of a real `.sl2`, so it is
+/// derived when the per-character entries are loaded rather than persisted. Reading a save file
+/// cold to decide whether a slot exists must use entry content, not this byte.
+pub const SAVE_SLOT_FLAGS_OFFSET: usize = 0x1d9;
+
+/// [`SAVE_SLOT_FLAGS_OFFSET`] bit 0: the slot holds a character. The update nulls its record
+/// pointer when this is clear.
+pub const SAVE_SLOT_FLAG_OCCUPIED: u8 = 0x1;
+
+/// [`SAVE_SLOT_FLAGS_OFFSET`] bit 1: the slot is excluded. Every one of the four action branches
+/// returns without acting when this is set.
+pub const SAVE_SLOT_FLAG_EXCLUDED: u8 = 0x2;
+
+/// The ownership word within a save-slot record, `+0x1E8`, masked with
+/// [`SAVE_SLOT_OWNERSHIP_MASK`].
+///
+/// On the load action the update passes `record[0x1e8] & 0x3f` to `0x140af6610`, and that result
+/// picks phase 6 over phase 2 -- a different destination substate. **A continue flow must not skip
+/// this call**: it is what refuses a character the running build cannot legitimately load.
+pub const SAVE_SLOT_OWNERSHIP_OFFSET: usize = 0x1e8;
+
+/// Mask applied to [`SAVE_SLOT_OWNERSHIP_OFFSET`] before the check. `0x3f`.
+pub const SAVE_SLOT_OWNERSHIP_MASK: u32 = 0x3f;
+
+/// `FeSubStateTitleLoadDataList`'s substate id: `0x55`. The character list.
+pub const FE_SUBSTATE_ID_TITLE_LOAD_DATA_LIST: u32 = 0x55;
+
+/// `FeSubStateTitleLoadProfile`'s substate id: `0x57`.
+///
+/// The destination of the load edge, registered by `FeSubStateTitleLoadDataList::v5`
+/// (`0x1400fb1f0`) as the phase-2 transition. Identified through its constructor `0x1400faa10`,
+/// which writes id `0x57` alongside vtable `0x1410bd658`.
+pub const FE_SUBSTATE_ID_TITLE_LOAD_PROFILE: u32 = 0x57;
+
+/// `FeSubStateTitleStartIngame`'s substate id: `0x6b`. The end of the load chain.
+pub const FE_SUBSTATE_ID_TITLE_START_INGAME: u32 = 0x6b;
+
+/// `FeSubStateTitleLoadDataList::v1` (enter). RVA `0x000fae80`, VA `0x1400fae80`.
+///
+/// Ghidra's project already names it `FUN_1400fae80_continueMenu`. It reads the list group from
+/// `[`[`FE_TITLE_CONTEXT`]`]+0x98`, asks `0x1400f0f60` for the occupied slots, and on a non-empty
+/// list calls `0x1400f1cb0(group, 1)` and sets its own phase to 1. On an empty list it sets phase
+/// 3 and goes straight back to the top menu.
+///
+/// **The site to write a pre-selected slot at.** `0x1400f1cb0`'s `1` is a mode flag -- it lands in
+/// `group+0x2c` and swaps the screen's text ids between load and delete -- so the cursor is not
+/// chosen there. It is chosen downstream in `0x1400f1fa0`, and the list code both reads
+/// [`FE_TITLE_CONTEXT_SLOT_NUM_OFFSET`] (`0x1400f2021`) and writes it back on a cursor move
+/// (`0x1400f220e`, `0x1400f22d7`, `0x1400f238e`). Writing the field before this function runs
+/// therefore reaches the list before it is built; writing it after would be overwritten.
+///
+/// Not an Arxan redirect: `scripts/ds2-arxan-chain.py` reports a clean prologue at the entry.
+pub const FE_SUBSTATE_LOAD_DATA_LIST_ENTER: u32 = 0x000f_ae80;
+
+/// The slot the game itself remembers, at `savedata + 0x1368` -- past the ten records, which end
+/// at `0x1360`.
+///
+/// `FeSubStateTitleSteamLoadSystemData::v2` (`0x1400fb8d0`, substate `0x05`, early boot) copies it
+/// into [`FE_TITLE_CONTEXT_SLOT_NUM_OFFSET`] when it is not negative, and `0x1400fdc82` copies it
+/// back the other way. So the game has a remembered-slot mechanism of its own.
+///
+/// **It is not restored from the save file.** The `id=4` section of a real `.sl2` reads zero at
+/// the corresponding offset even in a save written immediately after loading slot 1, so whatever
+/// seeds this at boot, it is not the file. Recorded so the next reader does not re-derive that.
+pub const SAVE_SLOT_CURRENT_INDEX_OFFSET: usize = 0x1368;
+
+/// The call every accepting branch of `FeSubStateTitleLoadDataList::v3` makes before it writes a
+/// phase. RVA `0x000f10e0`, VA `0x1400f10e0`, one argument: the list group.
+///
+/// `cmp qword [rcx+8],0; je ...` then a call through the object at `group+8`. Whatever it settles,
+/// all four branches make it first, so a transition driven from outside must make it too.
+///
+/// Not an Arxan redirect; `ds2-arxan-chain.py` reports `UNKNOWN` only because `48 83 79` is
+/// missing from its prologue table, as with `40 56` and `4c 8b 89`.
+pub const FE_DATA_LIST_CLOSE: u32 = 0x000f_10e0;
+
+/// Offset of the content/ownership context in [`GAME_MANAGER_IMP`]. A **pointer** field, read as
+/// `mov rcx,[rax+0xc0]` at `0x1400fbb32`.
+pub const GAME_MANAGER_CONTENT_CTX_OFFSET: usize = 0xc0;
+
+/// Inside the content context, the object holding the owned-content masks. `+0x10`; a null here
+/// means the gate passes.
+pub const CONTENT_CTX_OWNED_OFFSET: usize = 0x10;
+
+/// The two owned-content masks, OR'd together before the test. `+0x28` and `+0x30`.
+///
+/// The whole of `0x140af6610`, which the load branch calls and which this repo replicates with
+/// pure reads rather than a call:
+///
+/// ```text
+/// owned = (obj[0x30] | obj[0x28]) & required
+/// refused = owned != required
+/// ```
+pub const CONTENT_OWNED_MASK_A: usize = 0x28;
+
+/// The second owned-content mask. See [`CONTENT_OWNED_MASK_A`].
+pub const CONTENT_OWNED_MASK_B: usize = 0x30;
+
+/// The phase `FeSubStateTitleLoadDataList` writes to load the selected slot: `2`, which its own
+/// transition table routes to [`FE_SUBSTATE_ID_TITLE_LOAD_PROFILE`].
+pub const FE_DATA_LIST_PHASE_LOAD: i32 = 2;
+
+/// The phase written instead when the ownership gate refuses: `6`, routed to `0x5d`.
+pub const FE_DATA_LIST_PHASE_REFUSED: i32 = 6;
+
+/// `FeSubStateTitleTopMenu::v3` (update). RVA `0x000ff300`, VA `0x1400ff300`.
+///
+/// Three statements: poll the top-menu group at `[`[`FE_TITLE_CONTEXT`]`]+0x80`, copy the action
+/// the group parked at `group+0xE8` into the substate's own phase, and zero
+/// `savedata+0x136e` when that action is 4. **The phase and the action id are the same number**,
+/// so the row-1 transition `FeSubStateTitleTopMenu::v5` registers for value
+/// [`FE_TOP_MENU_ACTION_LOAD_GAME`] is taken by writing that value into the phase.
+///
+/// It rewrites the phase from the group on every frame, so a write made here survives exactly one
+/// frame -- which is enough, because `FeStateFlow` evaluates transitions immediately after the
+/// update returns. Writing the group's field instead would be cleared by the poll, the way the
+/// character list's action field was.
+///
+/// Not an Arxan redirect: clean prologue at the entry.
+pub const FE_SUBSTATE_TOP_MENU_UPDATE: u32 = 0x000f_f300;
+
+/// The top menu's row-1 action, LOAD GAME, which routes to
+/// [`FE_SUBSTATE_ID_TITLE_LOAD_DATA_LIST`]. `2`.
+///
+/// Registered unconditionally by the top menu's `v5`, unlike row 3's, so the transition exists
+/// whether or not the row is drawn or selectable. Full row table in `docs/DS2-TITLE-FLOW.md`.
+pub const FE_TOP_MENU_ACTION_LOAD_GAME: i32 = 2;
+
+/// The top menu's resting phase, meaning "no row activated this frame". `0`.
+pub const FE_TOP_MENU_PHASE_RESTING: i32 = 0;

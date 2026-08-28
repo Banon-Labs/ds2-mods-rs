@@ -183,6 +183,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ds2-continue"
+version = "0.1.0"
+dependencies = [
+ "ds2-game-base",
+ "ds2-hook",
+ "ds2-rva",
+]
+
+[[package]]
 name = "ds2-crash-logging"
 version = "0.1.0"
 dependencies = [
@@ -235,6 +244,7 @@ version = "0.1.0"
 dependencies = [
  "dearxan",
  "ds2-boot-timeline",
+ "ds2-continue",
  "ds2-crash-logging-core",
  "ds2-dialog-skip",
  "ds2-game-base",

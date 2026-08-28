@@ -158,6 +158,12 @@ KEY_SUBSTATE_FLOORS = "substate_floors"
 TIMELINE_SECTION = "boot_timeline"
 KEY_TIMELINE_ENABLED = "enabled"
 
+#: Mirrors `CONFIG_SECTION`/`KEY_RECORD` in `crates/ds2-loader/src/continue_flow.rs`.
+#: OFF by default, for the same reason as the timeline: it measures, it does not fix.
+CONTINUE_SECTION = "continue"
+KEY_CONTINUE_RECORD = "record"
+KEY_CONTINUE_SLOT = "slot"
+
 MENU_SECTION = "title_menu"
 KEY_SHOW_UNAVAILABLE = "show_unavailable"
 
@@ -882,6 +888,8 @@ def config_text(
     substate_floors: bool = True,
     show_unavailable: bool = False,
     boot_timeline: bool = False,
+    continue_record: bool = False,
+    continue_slot: int = -1,
     offline: bool = True,
     block_sockets: bool = True,
 ) -> str:
@@ -1053,6 +1061,35 @@ def config_text(
 # sites in a run that was not meant to be instrumented".
 {KEY_TIMELINE_ENABLED} = {str(boot_timeline).lower()}
 
+[{CONTINUE_SECTION}]
+# STARTUP-ONLY, and OFF by default. The first half of a native continue flow, and the half that
+# only watches.
+#
+# Detours FeSubStateTitleLoadDataList::v3 -- the character list's per-frame update, and the only
+# place the selected slot, the group's confirmed action and the outgoing phase are all in scope at
+# once. It logs one line per change: which slot the cursor is on, whether that slot is occupied,
+# what the ownership word says, and which substate the phase it wrote will transition to.
+#
+# It writes NOTHING into the game. Driving the flow -- setting the slot and retargeting the phase-2
+# transition from 0x55 straight to 0x57 -- waits on what this records, because two things the
+# disassembly cannot settle would break it: whether LoadProfile depends on state the list's own
+# `enter` sets up, and whether the ownership gate at 0x140af6610 survives the shortcut.
+#
+# OFF by default; `--continue-record` writes true. Only an exact `true` turns it on.
+{KEY_CONTINUE_RECORD} = {str(continue_record).lower()}
+# STARTUP-ONLY. The slot the character list opens on, 0-9. Negative leaves the game's own
+# selection alone, which is the default.
+#
+# Written in the list's own `enter`, before the list is built, because the list group reads this
+# field when it lays itself out and writes it back on every cursor move -- a later write would be
+# erased by the first press of a direction key. The list still opens and still does all of its own
+# setup: this is the cheap half of a continue flow, and if it is wrong you are looking at a
+# character list rather than a black screen.
+#
+# It refuses to select a slot the game would refuse: same bound the game applies, and the slot must
+# be occupied and not excluded. A rejected slot is named in the log and changes nothing.
+{KEY_CONTINUE_SLOT} = {continue_slot}
+
 [{OFFLINE_SECTION}]
 # STARTUP-ONLY, all four. ON BY DEFAULT, and it is the only feature here whose default is on for a
 # reason that is not convenience: everything else in this mod patches `.text` in a running copy of
@@ -1132,6 +1169,8 @@ def write_config(
     substate_floors: bool = True,
     show_unavailable: bool = False,
     boot_timeline: bool = False,
+    continue_record: bool = False,
+    continue_slot: int = -1,
     offline: bool = True,
     block_sockets: bool = True,
 ) -> tuple[Path, str]:
@@ -1152,6 +1191,8 @@ def write_config(
         substate_floors,
         show_unavailable,
         boot_timeline,
+        continue_record,
+        continue_slot,
         offline,
         block_sockets,
     )
@@ -1230,6 +1271,8 @@ def dry_run(
     substate_floors: bool = True,
     show_unavailable: bool = False,
     boot_timeline: bool = False,
+    continue_record: bool = False,
+    continue_slot: int = -1,
     offline: bool = True,
     block_sockets: bool = True,
 ) -> int:
@@ -1268,6 +1311,8 @@ def dry_run(
             substate_floors,
             show_unavailable,
             boot_timeline,
+            continue_record,
+            continue_slot,
             offline,
             block_sockets,
         ):
@@ -1302,6 +1347,8 @@ def dry_run(
                 substate_floors,
                 show_unavailable,
                 boot_timeline,
+                continue_record,
+                continue_slot,
                 offline,
                 block_sockets,
             ),
@@ -1358,6 +1405,8 @@ def launch(
     substate_floors: bool = True,
     show_unavailable: bool = False,
     boot_timeline: bool = False,
+    continue_record: bool = False,
+    continue_slot: int = -1,
     offline: bool = True,
     block_sockets: bool = True,
 ) -> int:
@@ -1391,6 +1440,8 @@ def launch(
         substate_floors,
         show_unavailable,
         boot_timeline,
+        continue_record,
+        continue_slot,
         offline,
         block_sockets,
     )
@@ -2262,6 +2313,26 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--continue-slot",
+        dest="continue_slot",
+        type=int,
+        default=-1,
+        metavar="N",
+        help=(
+            "open the character list on slot N (0-9) instead of the game's own selection. "
+            "Negative leaves it alone. The list still opens; only the cursor is placed."
+        ),
+    )
+    parser.add_argument(
+        "--continue-record",
+        dest="continue_record",
+        action="store_true",
+        help=(
+            "record which save slot a load actually uses: one line per change of slot, action or "
+            "phase in the character list. Records only -- it drives nothing."
+        ),
+    )
+    parser.add_argument(
         "--boot-timeline",
         dest="boot_timeline",
         action="store_true",
@@ -2445,6 +2516,8 @@ def main() -> int:
             args.substate_floors,
             args.show_unavailable,
             args.boot_timeline,
+            args.continue_record,
+            args.continue_slot,
             args.offline,
             args.block_sockets,
         )
@@ -2464,6 +2537,8 @@ def main() -> int:
         args.substate_floors,
         args.show_unavailable,
         args.boot_timeline,
+        args.continue_record,
+        args.continue_slot,
         args.offline,
         args.block_sockets,
     )

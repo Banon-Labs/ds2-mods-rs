@@ -83,6 +83,7 @@ use dearxan::disabler::{neuter_arxan, schedule_after_arxan};
 
 pub mod arxan_probe;
 pub mod boot_timeline;
+pub mod continue_flow;
 pub mod crash_logging;
 pub mod dialog_skip;
 pub mod intro_skip;
@@ -302,6 +303,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_dialog_skip();
                 install_title_skip();
                 install_boot_timeline();
+                install_continue_record();
                 install_title_menu();
                 arm_fault(crash_config);
             });
@@ -333,6 +335,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_dialog_skip();
                 install_title_skip();
                 install_boot_timeline();
+                install_continue_record();
                 install_title_menu();
                 arm_fault(crash_config);
             });
@@ -801,6 +804,37 @@ fn system_dinput8_path() -> Option<Vec<u16>> {
     buffer.extend("dinput8.dll".encode_utf16());
     buffer.push(0);
     Some(buffer)
+}
+
+/// Install the save-slot load recorder, if `<Game>/ds2-mods.toml` asked for it.
+///
+/// Reports its own outcome, because an instrument that fails to install must say so: a run with no
+/// `data-list` lines is otherwise indistinguishable from a run where the player never opened the
+/// character list, and the two demand opposite next steps.
+fn install_continue_record() {
+    let config = continue_flow::ContinueConfig::load();
+    log_line(format_args!("{}", config.describe()));
+    // Either half is reason enough to patch: the recorder alone is a complete instrument, and the
+    // pre-select alone is a usable feature. Neither asked for means neither site is touched.
+    if !config.record && config.slot < 0 {
+        return;
+    }
+    ds2_continue::set_logger(log_line);
+    ds2_continue::set_preselect_slot(config.slot);
+    // SAFETY: the target is an ordinary function start recorded in `ds2-rva` and resolved against
+    // the live module base. `scripts/ds2-arxan-chain.py` shows a `rex push rsi` prologue at the
+    // entry rather than the five-byte `e9` an Arxan-redirected entry holds, and the detour declares
+    // the single argument the function's own body establishes.
+    let outcome = unsafe { ds2_continue::install() };
+    if outcome.installed != outcome.attempted {
+        log_line(format_args!(
+            "{} NOT INSTALLED {} of {} sites -- this run records nothing, and an empty log is the \
+             hook failing rather than the player declining to load",
+            ds2_continue::LOG_PREFIX,
+            outcome.installed,
+            outcome.attempted
+        ));
+    }
 }
 
 /// Install the boot timeline, if `<Game>/ds2-mods.toml` asked for it.

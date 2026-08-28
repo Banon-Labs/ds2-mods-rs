@@ -44,6 +44,7 @@ ds2-crash-logging-core = { path = "crates/ds2-crash-logging-core" }
 ds2-dialog-skip = { path = "crates/ds2-dialog-skip" }
 ds2-intro-skip = { path = "crates/ds2-intro-skip" }
 ds2-boot-timeline = { path = "crates/ds2-boot-timeline" }
+ds2-continue = { path = "crates/ds2-continue" }
 ds2-offline = { path = "crates/ds2-offline" }
 
 # Arxan neutering. DS2 SOTFS carries 48 Arxan stubs; every MinHook detour patches a prologue
