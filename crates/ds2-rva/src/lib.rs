@@ -3072,7 +3072,7 @@ pub const FLO_ADDED_ROW_LABEL_ID: u32 = 0x001e_ac4a;
 /// It scales the panel's CURSOR with it -- `0x1eac81`'s definition carries both the scroll and the
 /// highlight. Only the quit tab is affected, because what is scaled is this crate's own copy of
 /// that tab's child record rather than the shared definition all three tabs instantiate.
-/// **CURRENTLY A PROBE VALUE, NOT THE SHIP VALUE.** `1.0794` and then `1.1706` were both reported
+/// **ANSWERED, AND THE ANSWER IS THAT THIS FIELD DOES NOTHING.** `1.0794` and then `1.1706` were both reported
 /// as no visible change, and "17% of a 341-unit scroll is invisible" is not credible -- that is 58
 /// units, more than a row. So the thing in doubt is no longer the factor, it is whether this field
 /// reaches the scroll at all. `2.0` is deliberately unmissable, and because it is applied to ONE
@@ -3083,10 +3083,14 @@ pub const FLO_ADDED_ROW_LABEL_ID: u32 = 0x001e_ac4a;
 /// * nothing moves -- the panel record is not what draws the scroll, and the next step is reading
 ///   the 17 quads in shape `0x0220`'s geometry rather than guessing a fourth time.
 ///
-/// The builder's identity test compares `pfVar1[2]` and `pfVar1[3]` against `1.0` and so cannot
-/// tell x from y; nothing else read so far distinguishes them either, which is why this is a
-/// measurement and not another arithmetic correction.
-pub const FLO_PANEL_STRETCH_Y: f32 = 2.0;
+/// It was the third: nothing moved on either axis. The tree walk then found the reason -- the panel
+/// draws through a `FeComponentTextureShape`, which is sized by its own quad
+/// ([`FE_TEXTURE_SHAPE_DEST_RECT_OFFSET`]) and never re-derives it from an ancestor's transform.
+///
+/// So this is `1.0`: the substitution still copies the panel's record like every other, and the
+/// scale it writes is the one the game shipped. A number that provably changes nothing has no
+/// business sitting in a table of measurements pretending otherwise.
+pub const FLO_PANEL_STRETCH_Y: f32 = 1.0;
 
 /// Index into [`FLO_QUIT_TAB_CHILD_IDS`] of the panel the stretch applies to.
 pub const FLO_QUIT_TAB_PANEL: usize = 0;
@@ -3207,13 +3211,24 @@ pub const FE_TEXTURE_SHAPE_INIT: u32 = 0x00b7_0200;
 pub const FE_TEXTURE_SHAPE_ENTRY_OFFSET: usize = 0x40;
 pub const FE_SHAPE_ENTRY_COUNT_OFFSET: usize = 0x02;
 
-/// The two per-quad rect arrays, `0x10` bytes each.
+/// The two per-quad rect arrays, `0x10` bytes each: DESTINATION and SOURCE.
 ///
-/// Both are seeded identically, so which one is destination and which is source cannot be told
-/// apart from the initialiser -- only from changing one and looking. That is a measurement worth
-/// one run, and it is the whole remaining question about the banner.
-pub const FE_TEXTURE_SHAPE_RECT_A_OFFSET: usize = 0x50;
-pub const FE_TEXTURE_SHAPE_RECT_B_OFFSET: usize = 0x58;
+/// The initialiser seeds them identically and so cannot tell them apart. The DRAW can:
+/// `FeComponentTextureShape`'s render (`0x140b6f200`, vtable slot 46) ends every quad with
+///
+/// ```text
+/// FUN_140b521c0(ctx, [this+0x50] + i*0x10, colour, [this+0x58] + i*0x10)
+/// ```
+///
+/// and in the branch where a texture is actually bound it **replaces the fourth argument** with a
+/// local `{0, 0, texWidth, texHeight}` read from `[tex+0x40]` and `[tex+0x44]`. A rect that can be
+/// substituted by the texture's own pixel size is the SOURCE.
+///
+/// So growing both is what put art on the added row that was mostly transparent -- the destination
+/// made room and the source pulled in whatever sits below the banner in the atlas. Growing the
+/// destination alone stretches the shipped art to fill instead.
+pub const FE_TEXTURE_SHAPE_DEST_RECT_OFFSET: usize = 0x50;
+pub const FE_TEXTURE_SHAPE_SOURCE_RECT_OFFSET: usize = 0x58;
 pub const FE_TEXTURE_SHAPE_RECT_STRIDE: usize = 0x10;
 
 /// The display-list key the panel's texture shape is filed under.

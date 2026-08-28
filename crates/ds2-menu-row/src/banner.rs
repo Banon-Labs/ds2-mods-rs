@@ -19,24 +19,31 @@
 //! would lengthen every tab's banner, including the two that have nothing extra to cover. Editing
 //! the one component built for the quit tab touches only the quit tab.
 //!
-//! # The one thing this cannot know in advance
+//! # Destination, not source
 //!
 //! The initialiser fills `+0x50` and `+0x58` with the SAME four floats, so nothing in it
-//! distinguishes destination from source. [`RECTS`] says which are written, and the log prints both
-//! before and after — so if the banner stretches, or clips, or does nothing, the run says which of
-//! those happened rather than leaving "no visible change" to mean any of them.
+//! distinguishes them. The DRAW does: `0x140b6f200` passes both to `FUN_140b521c0` and, when a
+//! texture is bound, substitutes a local `{0, 0, texWidth, texHeight}` for the fourth argument. A
+//! rect the texture's own pixel size can stand in for is the source.
+//!
+//! Growing both is what put nearly-transparent art on the added row -- the destination made room
+//! and the source reached below the banner into empty atlas. Only the destination grows now.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::LOG_PREFIX;
 use crate::install::log;
 
-/// Which rect arrays to write. Both, because the initialiser gives no way to tell them apart and a
-/// run that changes one of two candidate fields answers half a question.
-const RECTS: [usize; 2] = [
-    ds2_rva::FE_TEXTURE_SHAPE_RECT_A_OFFSET,
-    ds2_rva::FE_TEXTURE_SHAPE_RECT_B_OFFSET,
-];
+/// The DESTINATION rect, and only that one.
+///
+/// Growing both put art on the added row that was almost entirely transparent: the destination made
+/// room and the source pulled in whatever sits below the banner in the atlas, which is nothing. The
+/// draw (`0x140b6f200`) is what separates them -- it passes `[this+0x50]` and `[this+0x58]` to
+/// `FUN_140b521c0` and substitutes the texture's own `{0, 0, w, h}` for the fourth argument when a
+/// texture is bound, which is what a SOURCE rect is.
+///
+/// With the source left alone the shipped art stretches to fill the taller destination.
+const RECTS: [usize; 1] = [ds2_rva::FE_TEXTURE_SHAPE_DEST_RECT_OFFSET];
 
 /// Byte offset of `y1` inside a `(x0, y0, x1, y1)` rect.
 const Y1: usize = 0x0c;
@@ -212,12 +219,12 @@ mod tests {
         );
     }
 
-    /// Both rect arrays are written, because the initialiser seeds them identically and nothing
-    /// read so far says which is destination and which is source.
+    /// The SOURCE rect must be left alone: growing it samples atlas the banner does not occupy,
+    /// which is the transparent-art result this replaced.
     #[test]
-    fn both_rects_are_written() {
-        assert_eq!(RECTS.len(), 2);
-        assert_ne!(RECTS[0], RECTS[1]);
+    fn only_the_destination_rect_is_written() {
+        assert_eq!(RECTS, [ds2_rva::FE_TEXTURE_SHAPE_DEST_RECT_OFFSET]);
+        assert!(!RECTS.contains(&ds2_rva::FE_TEXTURE_SHAPE_SOURCE_RECT_OFFSET));
         assert_eq!(Y1 + 4, ds2_rva::FE_TEXTURE_SHAPE_RECT_STRIDE);
     }
 }
