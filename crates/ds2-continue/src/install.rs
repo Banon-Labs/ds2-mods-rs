@@ -261,9 +261,9 @@ unsafe extern "system" fn detour_update(this: *mut u8) {
     // a backed-out or refused list never reaches -- so without this the game would keep playing
     // silently long after the shortcut it was covering had stopped.
     if after.phase == ds2_rva::FE_DATA_LIST_PHASE_REFUSED {
-        crate::silence::release("data-list-refused");
+        crate::end_shortcut("data-list-refused");
     } else if after.phase == ds2_rva::FE_DATA_LIST_PHASE_BACK {
-        crate::silence::release("data-list-backed-out");
+        crate::end_shortcut("data-list-backed-out");
     }
 
     // NOTHING THE POLL TOUCHES IS VALID BEFORE, and that is wider than the first fix assumed. The original opens with
@@ -406,7 +406,7 @@ unsafe fn take_load_branch(this: *mut u8) {
         log(format_args!(
             "{LOG_PREFIX} autoload abandoned reason=no-globals"
         ));
-        crate::silence::release("abandon-no-globals");
+        crate::end_shortcut("abandon-no-globals");
         return;
     };
     // SAFETY: `context` is live; the group is the one the update just polled.
@@ -426,7 +426,7 @@ unsafe fn take_load_branch(this: *mut u8) {
         log(format_args!(
             "{LOG_PREFIX} autoload abandoned slot={wanted} reason=unresolved"
         ));
-        crate::silence::release("abandon-unresolved");
+        crate::end_shortcut("abandon-unresolved");
         return;
     };
     // SAFETY: `record` is one element of the array the game indexes identically.
@@ -437,7 +437,7 @@ unsafe fn take_load_branch(this: *mut u8) {
         log(format_args!(
             "{LOG_PREFIX} autoload abandoned slot={wanted} reason=slot-unusable flags=0x{flags:02x}"
         ));
-        crate::silence::release("abandon-slot-unusable");
+        crate::end_shortcut("abandon-slot-unusable");
         return;
     }
 

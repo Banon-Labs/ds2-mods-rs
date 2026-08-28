@@ -77,5 +77,24 @@ pub use install::{LogFn, Outcome, install, set_logger, set_preselect_slot};
 #[cfg(windows)]
 pub use silence::set_enabled as set_silence;
 
+/// End the shortcut: give the audio back AND stop hiding screens, in one call.
+///
+/// # Why this exists rather than two calls at each site
+///
+/// It did not exist, and that shipped a bug. `silence` was released on six paths --
+/// `StartIngame` plus five ways the shortcut can abandon -- and `hide_menus` was released on none
+/// of them, because nothing forced the two to be listed together. The hide is a detour on
+/// `FeSceneTitle::open`, so "never released" means it posed EVERY open for the life of the
+/// process: quit to the title screen after playing and the menu is there but invisible, a black
+/// screen with no way back. Backing out of the character list does the same thing mid-shortcut,
+/// which is worse -- the recovery path is the screen it just hid.
+///
+/// A comment saying "remember to release both" would have been the same bug with a note attached.
+/// One function that cannot be half-called is the enforcement.
+pub(crate) fn end_shortcut(reason: &str) {
+    silence::release(reason);
+    hide_menus::disarm(reason);
+}
+
 /// Prefix on every line this crate writes to the loader log.
 pub const LOG_PREFIX: &str = "ds2-continue:";

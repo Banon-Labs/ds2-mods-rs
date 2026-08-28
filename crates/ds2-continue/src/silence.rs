@@ -324,7 +324,7 @@ unsafe extern "system" fn detour_sound_drain(this: *mut u8) {
 /// `FeSubStateTitleStartIngame::v1`. The shortcut is over; take the volume back, then let the
 /// substate do its own work with the audio already restored.
 unsafe extern "system" fn detour_start_ingame(this: *mut u8) {
-    release("start-ingame");
+    crate::end_shortcut("start-ingame");
     let trampoline = START_INGAME_TRAMPOLINE.load(Ordering::Acquire);
     if trampoline != 0 {
         // SAFETY: MinHook's copy of this site's original prologue, with the vtable's signature.

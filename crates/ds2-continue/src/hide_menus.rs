@@ -58,6 +58,13 @@ static MODULE_BASE: AtomicUsize = AtomicUsize::new(0);
 /// pose is re-asserted every frame the top menu is resident.
 static LOGGED: AtomicU32 = AtomicU32::new(0);
 
+/// How many times a screen has actually been posed hidden.
+///
+/// Reported by [`disarm`] because the first-pose log line alone could not distinguish "posed once,
+/// correctly" from "posed on every open forever" -- and the second of those is exactly the bug that
+/// black-screened the title after a quit. A count makes the difference visible in one line.
+static POSES: AtomicUsize = AtomicUsize::new(0);
+
 const LOG_BIT_TITLE: u32 = 1;
 const LOG_BIT_DATA_LIST: u32 = 2;
 
@@ -72,6 +79,35 @@ pub(crate) fn enabled() -> bool {
 
 pub(crate) fn set_module_base(base: usize) {
     MODULE_BASE.store(base, Ordering::Release);
+}
+
+/// Stop hiding anything, for the rest of the process.
+///
+/// # Why a disarm is required and not merely tidy
+///
+/// The pose is a detour on `FeSceneTitle::open`, so with nothing to switch it off it poses EVERY
+/// open for as long as the game runs -- not just the one the shortcut walks past. Quit to the title
+/// screen after playing and the menu is raised and immediately posed hidden: a black screen, with
+/// the thing that would let you recover being the thing that was hidden. Backing out of the
+/// character list mid-shortcut does the same.
+///
+/// The earlier claim that this feature "leaves no persistent state, so there is nothing to restore"
+/// was wrong in a way worth keeping written down. It was true of the *scene* -- no flag cleared, no
+/// group torn down, no counter moved -- and false of the *hook*, which outlives the shortcut that
+/// wanted it. State left in the game and state left in the mod are two different questions, and
+/// answering the first does not answer the second.
+///
+/// Called only through [`crate::end_shortcut`], which is what stops this from drifting apart from
+/// the audio release again.
+pub(crate) fn disarm(reason: &str) {
+    if !enabled() {
+        return;
+    }
+    ENABLED.store(0, Ordering::Release);
+    log(format_args!(
+        "{LOG_PREFIX} hide-menu disarmed by={reason} poses={}",
+        POSES.load(Ordering::Relaxed)
+    ));
 }
 
 /// Resolve `[`[`ds2_rva::FE_TITLE_CONTEXT`]`] + offset`, the way the game's own methods open.
@@ -151,6 +187,7 @@ pub(crate) unsafe fn pose_scene_hidden(scene: *mut u8, via: &str) {
         std::mem::transmute::<usize, OneArgFn>(base + ds2_rva::FE_SCENE_TITLE_POSE_HIDDEN as usize)
     };
     unsafe { pose(scene) };
+    POSES.fetch_add(1, Ordering::Relaxed);
 
     if LOGGED.fetch_or(LOG_BIT_TITLE, Ordering::Relaxed) & LOG_BIT_TITLE == 0 {
         log(format_args!(
