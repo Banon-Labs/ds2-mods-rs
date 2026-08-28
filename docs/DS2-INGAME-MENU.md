@@ -597,3 +597,120 @@ five is not a promise about this tab.
 
 **A visible fourth row therefore needs an element that does not currently exist**, by cloning and
 repositioning a live scene node or by adding one to the `.flo`. It is not waiting to be named.
+
+
+## The `.flo` decoded, and the fourth row is a pointer edit
+
+Every route above assumed the layout was a file to be rewritten. It is not — or rather, it is a
+file that the game loads *in place*, and the thing that decides how many rows a container has is a
+`u16` in a table that one function hands out. Detour the function, hand back a copy of the table
+entry that says one more, and the row exists. No zlib, no BND4 writer, nothing on disk.
+
+**First, the file was the wrong one.** `l42_01_OptionSetting.flo` (`/menu/42.febnd.dcx`) is the
+OPTIONS screen and contains none of the pause menu's ids. The pause menu is
+`/menu/02.febnd.dcx` → `l02_01_In-Game.flo`, 285088 bytes, found by extracting all 26 `/menu/NN`
+archives and searching each for `0x1eacc9` as a raw dword. Exactly one file has it.
+
+```
+$ python3 scripts/ds2-ebl.py extract /menu/02.febnd.dcx --out /tmp/menu02
+$ python3 scripts/ds2-flo.py tree /tmp/menu02/l02_01_In-Game.flo --def 0x263
+```
+
+### The format, read off the loader
+
+Not pattern-matched. Each field below names the function that reads it.
+
+| what | where | read by |
+|---|---|---|
+| definition table | `[doc+0x18]`, `[doc+0x4c]` entries, **stride 0x48**, key = `u16` at `+0x00` | `FUN_140b54740` |
+| child count / **capacity** | definition `+0x02` | `FUN_140b50f20`, `FUN_140b6bd80` |
+| child record array | definition `+0x08` | `FUN_140b50f20` |
+| record | **stride 0x28** | `FUN_140b50f20` |
+| definition index | record `+0x00` | `FUN_140b50bc0` |
+| transform block | record `+0x08` → 0x30 bytes | `FUN_140b50bc0` |
+| kind (`1` shape, `2` text, `4` nested, `8` texture; a flag word — `0x1004` occurs) | record `+0x12` | `FUN_140b50bc0` |
+| frame range | record `+0x16` .. `+0x14` | `FUN_140b50bc0` |
+| **element id** | record `+0x1c` | `FeComponentObject::findByIdPath` |
+| x, y | transform `+0x00`, `+0x04` | `FUN_140b50f20`'s identity test |
+| scale x, y | transform `+0x08`, `+0x0c` | same |
+| colour ARGB | transform `+0x18` | same |
+
+The element id is the field that closes the loop with everything above it in this document.
+`FeComponentObject::findByIdPath` is four instructions:
+
+```asm
+mov  rax, [rcx+0x48]        ; the component's record
+cmp  [rax+0x1c], r9d        ; against one path component
+jnz  no_match
+```
+
+So `FE_QUIT_TAB_CELL_IDS` are literally these bytes in this file, and the scene path the namer
+builds is matched against them one component at a time. `FeComponentScene::findByIdPath`
+(`0x140b6b820`) has no id of its own and just searches children; `FUN_140b77dc0` walks the child
+list as `first = [parent+0x38]`, `next = [child+0x28]`.
+
+**The identity test is what fixes the transform layout**, and it is worth stating because guessing
+"x is probably the first float" is exactly the sort of thing that has cost runs here.
+`FUN_140b50f20` decides whether a child is trivial enough to inline by requiring
+`block[0] == 0.0 && block[1] == 0.0 && block[2] == 1.0 && block[3] == 1.0` — translate zero, scale
+one. Four fields identified by one test.
+
+### The quit tab's container has seven children, and all seven slots are used
+
+```
+def 0x0263 @0x011380 children=7 array=0x01ec98
+  [0] 0x1eac81  def 0x0221  ( 0.00, -103.00)   the tab's header
+  [1] 0x1eace9  def 0x0258  (-0.10,  103.90)   row 2, Quit Game
+  [2] 0x1eacca  def 0x025d  (-3.15,   55.90)   row 1
+  [3] 0x1eacc9  def 0x0262  ( 3.95,   10.60)   row 0
+  [4] 0x1eac4c  def 0x022c  (60.20,  114.35)   row 2's mark
+  [5] 0x1eac47  def 0x022c  (60.20,   65.95)   row 1's mark
+  [6] 0x1eac46  def 0x022c  (60.20,   17.55)   row 0's mark
+```
+
+Three rows, three marks, one header. Rows step ~48 in y with +y downwards; marks step 48.4.
+
+`0x1eaccd` and `0x1eacce` appear **nowhere in the file** — which is the same answer the four
+controlled runs gave from the other side, by a method that shares no assumption with this one.
+Two independent instruments, one answer: those ids were never authored.
+
+### Why the child count is also the capacity
+
+`FUN_140b6bd80` — the attach — is the whole reason a fourth row could not be squeezed in:
+
+```asm
+mov   rdx, [rbx+0x70]           ; the display list
+mov   rax, [rbx+0x48]           ; the parent's DEFINITION
+movzx ecx, word [rbx+0x66]      ; how many children are attached
+cmp   [rax+0x2], cx             ; against the definition's child count
+jbe   done                      ; full -> refuse
+```
+
+One `u16`, two meanings: how many records to walk, and how many children the list can hold. And
+none of the seven is flattened away — `FUN_140b50bc0` only inlines a child whose id is zero and
+whose transform is the identity, and every one of these has an id. Seven of seven.
+
+So raising that number is the entire edit, and it grows the list at the same time.
+
+### What ships
+
+`crates/ds2-menu-row/src/layout.rs` detours `FUN_140b54740` (RVA `0x00b54740`, prologue
+`48 8b 01 44 8b ca 48 85 c0`, its own — not one of the 286 Arxan redirects). When the game asks for
+definition `0x263` it gets a leaked copy with `children = 9` and a child array of ours: the seven
+originals copied verbatim, plus a clone of row 0 carrying id `0x1eaccd` at `(-0.1, 151.9)` and a
+clone of row 0's mark carrying `0x1eaccc` at `(60.2, 162.75)`.
+
+Row 0 is cloned, not Quit Game: row 2's definition (`0x0258`) carries a second, grey copy of its
+label for the state where quitting is refused, and a new row should not inherit a disabled state it
+has no code to leave.
+
+The substitution is refused unless the definition the game returned has exactly seven children
+carrying exactly those seven ids in that order. A definition index is a number; `0x263` on another
+document is another container.
+
+There are only four callers of `FUN_140b54740`, all inside the builder (`FUN_140b50950` and
+`FUN_140b50bc0`), so the substitution cannot leak into any other subsystem.
+
+**It is one half of a pair.** The namer entry (`install.rs`) names `0x1eaccd`; the layout supplies
+it. Either alone is a measured null — and the namer-alone case is exactly the run already on record
+with `row-extent 3`, which makes it this change's control.

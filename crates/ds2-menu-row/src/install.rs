@@ -20,7 +20,7 @@ pub fn set_logger(logger: LogFn) {
     LOGGER.store(logger as usize, Ordering::Release);
 }
 
-fn log(args: std::fmt::Arguments<'_>) {
+pub(crate) fn log(args: std::fmt::Arguments<'_>) {
     let raw = LOGGER.load(Ordering::Acquire);
     if raw != 0 {
         // SAFETY: `raw` is only ever a `LogFn` stored by `set_logger` above.
@@ -445,6 +445,155 @@ unsafe fn report_cell_ids(base: usize, tab: *mut u8, cells: u32) {
     }
 }
 
+/// The push a cell namer's list takes: `fn(&namer[0x18], src_entry)`.
+type NamerPushFn = unsafe extern "system" fn(*mut u8, *mut u8);
+
+/// The namer constructor: `fn(out_ref, allocator) -> out_ref`, leaving the namer in `*out_ref`.
+///
+/// **IT RETURNS ITS FIRST ARGUMENT, AND THE DECOMPILER SAYS IT DOES NOT.** Ghidra types it `void`;
+/// the disassembly ends `mov rax, r14` with `r14` holding the `rcx` saved in the prologue, and the
+/// TopSelect constructor passes that return straight into `FeGroupInGameGroupSelect`'s constructor,
+/// whose first instruction dereferences it.
+///
+/// A detour declared `-> ()` therefore hands the game whatever Rust left in RAX. Measured, that was
+/// `1`, and the game died reading address `1` inside `0x1400a40f5` -- a crash with our DLL nowhere
+/// in the stack, on the very next call. Read the RET, not the decompiler's signature.
+type NamerCtorFn = unsafe extern "system" fn(*mut usize, *mut u8) -> *mut usize;
+
+static NAMER_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
+static CELLS_ADDED: AtomicUsize = AtomicUsize::new(0);
+
+/// Name the fourth cell, so the grid asks the layout for the record `layout.rs` just added.
+///
+/// The namer holds the cell path of every row it will draw: four shared components and then one id
+/// per row. The grid walks that list, resolves each path against the scene, and its extent is a
+/// census of the ones that came back non-null -- which is why the appended item had no row.
+///
+/// This appends a fourth entry naming [`ds2_rva::FLO_ADDED_ROW_ID`]. **It is one half of a pair.**
+/// On its own it names an element that does not exist and the extent stays at three -- which is
+/// exactly what an earlier run measured, and which is now the control for this one: if the extent
+/// reads four, the container substitution worked, because nothing else changed.
+///
+/// The clone is a copy of the last shipped entry with one field rewritten, not an entry assembled
+/// from scratch. The slack between the ids and the length is uninitialised stack and differs
+/// between two entries the game built back to back, so only the named fields mean anything.
+///
+/// # Safety
+///
+/// `namer` is the object the original constructor just returned, and `base` the live module base.
+/// The push takes the source entry by reference the same way the original loop does.
+unsafe fn name_added_cell(base: usize, namer: usize) -> bool {
+    if namer == 0 {
+        return false;
+    }
+    let refuse = |why: core::fmt::Arguments<'_>| {
+        log(format_args!(
+            "{LOG_PREFIX} cell REFUSED {why} -- the tab keeps its three rows"
+        ));
+        false
+    };
+    let list = namer + ds2_rva::FE_SCENE_NAMER_LIST_OFFSET;
+    let count_at = (list + ds2_rva::FE_SCENE_NAMER_COUNT_OFFSET) as *mut u64;
+    // SAFETY: the original constructor has just filled this vector.
+    let count = unsafe { count_at.read() } as usize;
+    if count != ds2_rva::FE_QUIT_TAB_CELL_IDS.len() {
+        return refuse(format_args!(
+            "count={count}, expected {}",
+            ds2_rva::FE_QUIT_TAB_CELL_IDS.len()
+        ));
+    }
+    if count >= ds2_rva::FE_SCENE_NAMER_LIST_CAPACITY {
+        return refuse(format_args!(
+            "list is full at {count} of {}",
+            ds2_rva::FE_SCENE_NAMER_LIST_CAPACITY
+        ));
+    }
+    let stride = ds2_rva::FE_SCENE_NAMER_ENTRY_STRIDE;
+    let padding = (0u32.wrapping_sub(list as u32) & 7) as usize;
+    let entry = |i: usize| (list + padding + i * stride) as *mut u8;
+    let dword = |e: *mut u8, off: usize| {
+        // SAFETY: `off` is inside an entry the caller has established is live.
+        unsafe { e.add(off).cast::<u32>().read() }
+    };
+
+    // VERIFY THE ENTRY THE CLONE IS TAKEN FROM, field by field, against what the namer's own
+    // constructor put there. Appending to some other tab's namer would produce a run that looks
+    // exactly like a result and is about nothing.
+    let last = entry(count - 1);
+    for (i, want) in ds2_rva::FE_QUIT_TAB_BASE_PATH.iter().enumerate() {
+        let got = dword(last, i * 4);
+        if got != *want {
+            return refuse(format_args!(
+                "entry[{}] component {i} is {got:#x}, expected {want:#x}",
+                count - 1
+            ));
+        }
+    }
+    let want_id = ds2_rva::FE_QUIT_TAB_CELL_IDS[count - 1];
+    let got_id = dword(last, ds2_rva::FE_SCENE_NAMER_ENTRY_ID_OFFSET);
+    if got_id != want_id {
+        return refuse(format_args!(
+            "entry[{}] id is {got_id:#x}, expected {want_id:#x}",
+            count - 1
+        ));
+    }
+    let got_len = dword(last, ds2_rva::FE_SCENE_NAMER_ENTRY_LEN_OFFSET);
+    if got_len != ds2_rva::FE_SCENE_NAMER_ENTRY_LEN {
+        return refuse(format_args!(
+            "entry[{}] length is {got_len}, expected {}",
+            count - 1,
+            ds2_rva::FE_SCENE_NAMER_ENTRY_LEN
+        ));
+    }
+
+    // SAFETY: the RVA is a `.pdata` function start recorded in `ds2-rva`, and the source is a live
+    // element of the vector it is pushed back into.
+    let push = unsafe {
+        std::mem::transmute::<usize, NamerPushFn>(base + ds2_rva::FE_SCENE_NAMER_PUSH as usize)
+    };
+    // SAFETY: `count < capacity`, checked above, which is the same bound the push enforces itself.
+    unsafe { push(list as *mut u8, last) };
+    // SAFETY: the push just made element `count` live, and the offset is inside it.
+    unsafe {
+        entry(count)
+            .add(ds2_rva::FE_SCENE_NAMER_ENTRY_ID_OFFSET)
+            .cast::<u32>()
+            .write(ds2_rva::FLO_ADDED_ROW_ID);
+    }
+    let n = CELLS_ADDED.fetch_add(1, Ordering::Relaxed) + 1;
+    log(format_args!(
+        "{LOG_PREFIX} cell named row={count} container={:#x} id={:#x} count={count}->{} \
+         additions={n} -- row-extent 4 on the tab line below means the layout answered",
+        ds2_rva::FE_QUIT_TAB_BASE_PATH[3],
+        ds2_rva::FLO_ADDED_ROW_ID,
+        count + 1
+    ));
+    true
+}
+
+unsafe extern "system" fn namer_detour(out: *mut usize, allocator: *mut u8) -> *mut usize {
+    let trampoline = NAMER_TRAMPOLINE.load(Ordering::Acquire);
+    if trampoline == 0 {
+        // The caller dereferences what comes back, so returning the out pointer is the only safe
+        // answer even on a path that cannot happen.
+        return out;
+    }
+    // SAFETY: MinHook published this trampoline for exactly this site.
+    let original: NamerCtorFn = unsafe { std::mem::transmute::<usize, NamerCtorFn>(trampoline) };
+    // RETURNED, not discarded. See the note on `NamerCtorFn`.
+    let returned = unsafe { original(out, allocator) };
+    if out.is_null() {
+        return returned;
+    }
+    // SAFETY: the original writes the constructed namer here.
+    let namer = unsafe { out.read() };
+    let base = ds2_game_base::mem::game_module_base().unwrap_or(0);
+    if base != 0 {
+        unsafe { name_added_cell(base, namer) };
+    }
+    returned
+}
+
 /// The three scene-path calls the quit tab's namer makes, in the order it makes them.
 unsafe extern "system" fn tab_init_detour(tab: *mut u8) {
     let trampoline = TAB_INIT_TRAMPOLINE.load(Ordering::Acquire);
@@ -575,6 +724,36 @@ pub unsafe fn install() -> Outcome {
         Err(status) => log(format_args!(
             "{LOG_PREFIX} dispatch NOT installed stage=MH_CreateHook status={status:?} \
              -- the appended row will be INERT"
+        )),
+    }
+
+    // THE ROW'S CELL, in two halves that only work together. The container substitution adds the
+    // layout record; the namer entry is what makes the grid ask for it. Installed in that order so
+    // that if the first refuses, the log says so before the second claims a cell that is not there.
+    let cell = unsafe { crate::layout::install(base) };
+
+    let namer_rva = ds2_rva::FE_INGAME_MENU_QUIT_TAB_NAMER;
+    let namer_site = base + namer_rva as usize;
+    match unsafe { MhHook::new(namer_site as *mut c_void, namer_detour as *mut c_void) } {
+        Ok(hook) => {
+            NAMER_TRAMPOLINE.store(hook.trampoline() as usize, Ordering::Release);
+            let status = unsafe { MH_EnableHook(namer_site as *mut c_void) };
+            if status == MH_STATUS::MH_OK {
+                log(format_args!(
+                    "{LOG_PREFIX} namer hooked rva=0x{namer_rva:08x} va=0x{namer_site:016x} \
+                     cell={:#x} container-substitution={cell}",
+                    ds2_rva::FLO_ADDED_ROW_ID
+                ));
+            } else {
+                log(format_args!(
+                    "{LOG_PREFIX} namer NOT installed stage=MH_EnableHook status={status:?} \
+                     -- the appended row will have no cell and stay invisible"
+                ));
+            }
+        }
+        Err(status) => log(format_args!(
+            "{LOG_PREFIX} namer NOT installed stage=MH_CreateHook status={status:?} \
+             -- the appended row will have no cell and stay invisible"
         )),
     }
 

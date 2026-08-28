@@ -2798,3 +2798,156 @@ pub const FE_SCENE_NAMER_ENTRY_LEN: u32 = 5;
 /// The sibling container the scene's element cache resolves the five-cell set under, where the
 /// namer's own entries use [`FE_QUIT_TAB_BASE_PATH`]`[3]`.
 pub const FE_QUIT_TAB_CACHE_CONTAINER: u32 = 0x001e_ace7;
+
+// ---------------------------------------------------------------------------------------------
+// The frontend layout document (`.flo`), and the container the quit tab's rows hang off.
+//
+// This is the section that turned the "invisible fourth row" from a file-repacking project into a
+// four-pointer edit. The pause menu's rows are records in `menu/02.febnd.dcx`'s
+// `l02_01_In-Game.flo`, and the game loads that file IN PLACE -- the header IS the document
+// object, and the `u64` file offsets inside it are absolute pointers once the fixup has run. So
+// the table that says how many rows a container has can be replaced with a copy that says one
+// more, without touching the archive, the DCX, the BND4 or a single byte on disk.
+//
+// Reproduce every number below with:
+//
+//     python3 scripts/ds2-ebl.py extract /menu/02.febnd.dcx --out /tmp/menu02
+//     python3 scripts/ds2-flo.py tree /tmp/menu02/l02_01_In-Game.flo --def 0x263
+//
+// THE FILE IS `/menu/02.febnd.dcx`, NOT `/menu/42.febnd.dcx`. 42 is the OPTIONS screen
+// (`l42_01_OptionSetting.flo`) and shares none of these ids; an earlier note in this repo pointed
+// at it and cost a wrong search.
+// ---------------------------------------------------------------------------------------------
+
+/// `FeLayoutDocument::findDefinition(doc, index)`. RVA `0x00b54740`.
+///
+/// `fn(&doc, u32 index) -> *definition`. A linear scan of `[[doc]+0x18]` over `[[doc]+0x4c]`
+/// entries at stride [`FLO_DEFINITION_STRIDE`], keyed by the `u16` at the definition's `+0x00`;
+/// returns null on a miss. Prologue `48 8b 01 44 8b ca 48 85 c0` -- its own, not one of the 286
+/// Arxan redirects.
+///
+/// **Every consumer of a definition goes through here**, which is what makes one detour enough:
+/// the builder reads the child count and the child array out of whatever this hands back, and the
+/// built container keeps the same pointer at its `+0x48` for the capacity check below.
+pub const FLO_FIND_DEFINITION: u32 = 0x00b5_4740;
+
+/// Bytes per definition. `FUN_140b54740`: `add rcx, 0x48`.
+pub const FLO_DEFINITION_STRIDE: usize = 0x48;
+
+/// `u16` child count inside a definition. `FUN_140b50f20` walks that many child records --
+/// **and `FUN_140b6bd80` uses the same field as the display list's CAPACITY**, refusing to attach
+/// a child once `parent+0x66` reaches it. One field, both meanings, so raising it raises both.
+pub const FLO_DEFINITION_CHILD_COUNT_OFFSET: usize = 0x02;
+
+/// Pointer to a definition's child record array. A file offset on disk, an absolute pointer once
+/// the document is loaded.
+pub const FLO_DEFINITION_CHILDREN_OFFSET: usize = 0x08;
+
+/// Bytes per child record. `FUN_140b50f20`: `lVar8 = lVar8 + 0x28`.
+pub const FLO_RECORD_STRIDE: usize = 0x28;
+
+/// `u16` definition index a record instantiates -- the argument [`FLO_FIND_DEFINITION`] takes.
+pub const FLO_RECORD_DEFINITION_OFFSET: usize = 0x00;
+
+/// Pointer to a record's transform block. Read by `FUN_140b50bc0` as `*(float**)(rec+0x08)`.
+pub const FLO_RECORD_TRANSFORM_OFFSET: usize = 0x08;
+
+/// `u16` depth. Passed on only for the leaf kinds; a nested record's copy is inert, and the draw
+/// order of siblings follows the order they are attached in.
+pub const FLO_RECORD_DEPTH_OFFSET: usize = 0x10;
+
+/// `u16` kind flags, the value `FUN_140b50bc0` switches on: `1` shape, `2` text, `4` a nested
+/// definition, `8` texture. A FLAG WORD rather than an enum -- the builder masks it with `0xd` and
+/// records carrying `0x1004` exist, so the bits above the low nibble mean something unread. Every
+/// quit-tab row is plain `4`, and this crate only ever copies the field.
+pub const FLO_RECORD_KIND_OFFSET: usize = 0x12;
+
+/// `u16` last frame and `u16` first frame. `0xffff` as the last frame means "never ends", which is
+/// what every permanent element carries.
+pub const FLO_RECORD_LAST_FRAME_OFFSET: usize = 0x14;
+pub const FLO_RECORD_FIRST_FRAME_OFFSET: usize = 0x16;
+
+/// `u32` ELEMENT ID -- the field a scene path resolves against.
+///
+/// `FeComponentObject::findByIdPath` (`0x140b6a130`) is `mov rax,[rcx+0x48]; cmp [rax+0x1c],r9d`:
+/// the component's `+0x48` is its record, and `+0x1c` of that record is the id being matched. So
+/// the ids in [`FE_QUIT_TAB_CELL_IDS`] are literally these bytes, and a fourth row is a fourth
+/// record carrying a fourth id.
+pub const FLO_RECORD_ID_OFFSET: usize = 0x1c;
+
+/// Bytes per transform block, from the spacing of the blocks the quit tab's records point at.
+pub const FLO_TRANSFORM_SIZE: usize = 0x30;
+
+/// `f32` x and `f32` y inside a transform block.
+///
+/// Not guessed from position in the struct: `FUN_140b50f20`'s "is this child trivial enough to
+/// inline" test reads `pfVar1[0]` and `pfVar1[1]` and requires them to be `0.0`, then `pfVar1[2]`
+/// and `pfVar1[3]` and requires them to be `1.0`. Translate-zero and scale-one is an identity
+/// test, which fixes all four fields at once.
+pub const FLO_TRANSFORM_X_OFFSET: usize = 0x00;
+pub const FLO_TRANSFORM_Y_OFFSET: usize = 0x04;
+
+/// The definition index of the container the quit tab's rows are children of.
+///
+/// It is the definition instantiated by the record whose id is [`FE_QUIT_TAB_BASE_PATH`]`[3]`
+/// (`0x1eace6`), which is the last component of every cell path the namer builds. Its seven
+/// children are [`FLO_QUIT_TAB_CHILD_IDS`].
+pub const FLO_QUIT_TAB_CONTAINER_DEFINITION: u32 = 0x0263;
+
+/// The seven children of [`FLO_QUIT_TAB_CONTAINER_DEFINITION`], in file order, by element id.
+///
+/// ```text
+/// [0] 0x1eac81  def 0x0221  xy (   0, -103   )  the tab's own header
+/// [1] 0x1eace9  def 0x0258  xy (-0.10, 103.90)  row 2, Quit Game    <- has a greyed-out variant
+/// [2] 0x1eacca  def 0x025d  xy (-3.15,  55.90)  row 1
+/// [3] 0x1eacc9  def 0x0262  xy ( 3.95,  10.60)  row 0
+/// [4] 0x1eac4c  def 0x022c  xy (60.20, 114.35)  row 2's mark
+/// [5] 0x1eac47  def 0x022c  xy (60.20,  65.95)  row 1's mark
+/// [6] 0x1eac46  def 0x022c  xy (60.20,  17.55)  row 0's mark
+/// ```
+///
+/// **Seven, and all seven slots are used** -- none of them is flattened away, because
+/// `FUN_140b50bc0` only inlines a child whose id is zero and whose transform is the identity, and
+/// every one of these has a non-zero id. That is why a fourth row cannot be squeezed into the
+/// shipped display list and the child count has to rise.
+///
+/// This array is the content check `ds2-menu-row` runs before it substitutes anything. A
+/// definition index is a number, and index `0x263` on a document this table was not read from is
+/// some other container entirely.
+pub const FLO_QUIT_TAB_CHILD_IDS: [u32; 7] = [
+    0x001e_ac81,
+    0x001e_ace9,
+    0x001e_acca,
+    0x001e_acc9,
+    0x001e_ac4c,
+    0x001e_ac47,
+    0x001e_ac46,
+];
+
+/// Index into [`FLO_QUIT_TAB_CHILD_IDS`] of the row a new row is cloned from.
+///
+/// Row 0, not row 2. Row 2 is Quit Game and its definition (`0x0258`) carries a second, grey copy
+/// of its label for the state where quitting is refused; row 0's (`0x0262`) is the plain one, and
+/// a new row should look like an ordinary row rather than inheriting a disabled state it has no
+/// code to leave.
+pub const FLO_QUIT_TAB_ROW_TEMPLATE: usize = 3;
+
+/// Index into [`FLO_QUIT_TAB_CHILD_IDS`] of the mark a new row's mark is cloned from.
+pub const FLO_QUIT_TAB_MARK_TEMPLATE: usize = 6;
+
+/// Element ids for the row this repo adds, chosen because the file contains neither.
+///
+/// Verified rather than assumed -- `scripts/ds2-flo.py` finds no record with either id anywhere in
+/// `l02_01_In-Game.flo`, and the earlier runtime experiment that named `0x1eaccd` in the namer got
+/// `row-extent 3`, i.e. nothing resolved. The two facts agree, which is the point of having both.
+pub const FLO_ADDED_ROW_ID: u32 = 0x001e_accd;
+pub const FLO_ADDED_MARK_ID: u32 = 0x001e_accc;
+
+/// Where the added row and its mark go, in the container's own coordinates.
+///
+/// The three shipped rows sit at y `10.60`, `55.90`, `103.90` and their marks at `17.55`, `65.95`,
+/// `114.35`. Both series step by ~48 with +y downwards, so the fourth of each continues it:
+/// `103.90 + 48.00` and `114.35 + 48.40`. The x is row 2's and mark 2's, unchanged -- the shipped
+/// rows' x values wobble by a few units and there is no pattern in that to continue.
+pub const FLO_ADDED_ROW_XY: (f32, f32) = (-0.1, 151.9);
+pub const FLO_ADDED_MARK_XY: (f32, f32) = (60.2, 162.75);

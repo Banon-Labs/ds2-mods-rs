@@ -1,67 +1,68 @@
-//! Append a fourth row to the pause menu's quit tab, to find out whether the layout tolerates one.
+//! A fourth row on the pause menu's quit tab, that quits to desktop without asking.
 //!
-//! # What this answers
+//! # The four hooks, and what each one is for
 //!
-//! DS2's pause menu is six tabs. Each tab's contents are a `DLFixedVector` of `(action, gate)`
-//! entries, built by one function per tab and copied into the live `FeGroupInGameGroupSelect`. The
-//! tab that carries the quit item -- `FeGroupInGameReturnTitleCheck`, action `9`, the dialog that
-//! offers to save on the way to the title screen -- holds three of a possible five.
+//! | site | RVA | what it does |
+//! |---|---|---|
+//! | `FeGroupInGameTopSelect`'s quit-tab item builder | `0x000a5900` | appends the item |
+//! | the tab's item dispatch | `0x000a6090` | turns the item into a shutdown |
+//! | the quit tab's cell namer | `0x000a5b50` | names the fourth cell |
+//! | `FeLayoutDocument::findDefinition` | `0x00b54740` | supplies the cell |
 //!
-//! Two things said a fourth entry should become a fourth ROW rather than dead data, and both were
-//! read out of the game's own code:
+//! The first two are the ACTION and were finished first. The last two are the ROW, and they only
+//! work as a pair: the namer asks the scene for an element by id, and the layout is what has one.
 //!
-//! * the per-tab init ([`ds2_rva::FE_INGAME_MENU_TAB_INIT`]) sets a cell count FROM the item
-//!   vector's count -- which turned out to be the count the CURSOR is bounded by, not the number of
-//!   cells there are to draw;
-//! * the copy into the live group (`0x1400a3ef0`) copies `count` entries and accepts up to five.
+//! # The action
 //!
-//! One thing said it might not, and it could not be settled by reading the executable: nothing in
-//! the image maps an action id to a caption.
+//! `FeSubStateTitleShutdown::v1` is three instructions -- load the title singleton, write `1` to
+//! `+0x13a`, return -- and `GameManagerImp`'s per-frame master update polls that byte. So the
+//! dispatch detour writes it directly and does not call the original. The shutdown that follows is
+//! the game's own, on the game's own schedule, with this crate nowhere on the stack.
 //!
-//! # It has been run, and the answer was worse than a missing caption
+//! **It does not save and it does not ask.** The quit-to-title row offers to save because that
+//! flow asks; this one is "without a confirmation" and the absence of a save is the same coin.
 //!
-//! 2026-08-28, one run, one character, the quit tab opened by hand: the vector took the fourth
-//! entry (`count=3->4`, and the integrity check below passed, so this really was that tab), the
-//! cursor reaches a fourth item and it responds -- **and nothing at all is drawn for it.**
+//! The action id is `0x1000`, deliberately outside the dispatch's own space (`0..=9`, `0xb`,
+//! `0xc`, `0xd`). If the dispatch detour ever fails to install, the row plays the confirm sound and
+//! does nothing -- an inert row is the right failure mode, where a row that quietly opened Key
+//! Bindings would not be.
 //!
-//! Not a blank caption. No cell. `FrontendEx::FexGridControl`'s layout bind
-//! ([`ds2_rva::FEX_GRID_CONTROL_LAYOUT_BIND`]) takes no extent from anywhere: it probes the layout
-//! for the element at each `(col, row)` and stops a row at the first null, so the grid's extent is
-//! a count of AUTHORED ELEMENTS. `FUN_140021b30` then writes only the logical item count. Two
-//! numbers, two sources, and appending moved just one of them -- which is exactly "selectable but
-//! invisible".
+//! # The row, and the two measurements that cost the most
 //!
-//! So the crate did its job and the result is negative in a useful way: **a new pause-menu row
-//! needs layout data inside `GameDataEbl.bdt`, and the probe order means cell 3 has to exist before
-//! cell 4 can ever be found.** The caption question was never reached. `docs/DS2-INGAME-MENU.md`
-//! has the measurement and the disassembly.
+//! Appending the item was easy and produced a row that could be selected and could not be seen.
+//! Two beliefs had to die before that made sense:
 //!
-//! It is kept, and kept off, because it is how the next person re-establishes any of this in one
-//! run after touching the archive.
+//! * **"the row count is code-driven."** `FrontendEx::FexGridControl`'s layout bind probes the
+//!   layout for the element at each `(col, row)` and stops at the first null, so the drawn count is
+//!   a census of AUTHORED ELEMENTS. `FUN_140021b30` writes only the logical item count. Two
+//!   numbers, two sources, and appending moved one of them.
+//! * **"the layout authors five cells."** It does not. `FeSceneInGameMenu`'s cache asks for five
+//!   ids and stores whatever comes back, including the zeros; four controlled runs, and later the
+//!   file itself, agree that two of those five were never authored.
 //!
-//! # Why the payload is action `0xd` and not something new
-//!
-//! `0xd` already has a case in the dispatch switch, and its factory branch shares a `case` label
-//! with kind 4 -- `case 4: case 6:` allocate the same `0xc68` bytes and call the same constructor,
-//! `FeGroupInGameSystemSettingKeyboard`. The job carries its kind only to select that branch. So
-//! confirming the new row runs code the shipped Key Bindings row runs every time it is pressed.
-//!
-//! **This crate adds no code path to the game.** It adds one entry to one vector. Anything it can
-//! be blamed for is either the extra row or nothing, which is exactly what makes the result
-//! readable.
+//! What actually works is in [`crate::layout`]: the `.flo` is loaded in place, one function hands
+//! out the table entry that says how many children a container has, and that same `u16` is the
+//! display list's capacity. Substituting a copy that says two more -- a row and its mark -- is the
+//! whole edit. Nothing is written to disk and no archive is repacked.
 //!
 //! # Why it refuses more often than it writes
 //!
-//! The detour checks what the original left behind -- three entries, `(7,0) (8,0) (9,4)` -- and
-//! declines to touch the vector if that is not what it finds. An RVA is a number: on a build whose
-//! tabs are ordered differently this would append to some other tab, and the resulting screenshot
-//! would be evidence about nothing while looking exactly like evidence. A run that refuses says so
-//! in the log, with the entries it actually saw.
+//! Every one of the four hooks checks what the game left behind before it touches anything: the
+//! item builder demands `(7,0) (8,0) (9,4)`, the namer demands the quit tab's own base path, and
+//! the definition lookup demands seven children carrying seven known ids. An RVA is a number, and
+//! on a build these tables were not read from, each of those sites points at something else that
+//! would accept the write and produce a screenshot that looks exactly like a result. A run that
+//! refuses says so in the log, with what it actually saw.
+//!
+//! `docs/DS2-INGAME-MENU.md` has the disassembly, the measurements, and the corrections.
 
 #![cfg_attr(not(windows), allow(unused))]
 
 #[cfg(windows)]
 mod install;
+
+#[cfg(windows)]
+mod layout;
 
 #[cfg(windows)]
 pub use install::{LogFn, Outcome, install, set_logger};
