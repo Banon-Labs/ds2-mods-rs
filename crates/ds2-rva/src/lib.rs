@@ -2377,3 +2377,153 @@ pub const WSTRING_CAPACITY_OFFSET: usize = 0x18;
 /// site as `cmp QWORD PTR [rbp-0x19],0x8` / `cmovae`. Recorded so a reader of a live string does
 /// not have to rediscover which side of the comparison is the heap.
 pub const WSTRING_SSO_MAX: usize = 7;
+
+// ---------------------------------------------------------------------------------------------
+// THE IN-GAME (PAUSE) MENU'S TAB ITEM LISTS
+//
+// `FeGroupInGameTopSelect` (ctor RVA `0x000a41b0`) owns six `FeGroupInGameGroupSelect` members --
+// the six tabs. Each tab's contents are a `DLKR::DLFixedVector` of 8-byte entries built by a
+// dedicated function, one per tab, called from that ctor:
+//
+//   RVA        entries (action, gate)              what the actions open
+//   0x000a4990 (0,0)                               FeGroupInGameMenuEquipTop
+//   0x000a4db0 (1,0)                               FeGroupInGameMenuInventory2
+//   0x000a5620 (2,0) (3,0)                         FeGroupInGameMenuStatusStatus / ...StatusInfo
+//   0x000a4fc0 (4,1) (5,2) (6,3)                   FeGroupIngameMessageWrite / ReadHistory / WriteHistory
+//   0x000a5900 (7,0) (8,0) (9,4)                   SystemSettingGame / SystemSettingScreen / ReturnTitleCheck
+//   0x000a5330 (0xb,0) (0xc,0)                     SystemSettingKeyboard / SystemSettingGraphic
+//
+// Read out of the six builders and out of the dispatch switch [`FE_INGAME_MENU_DISPATCH`], with
+// each destination class confirmed by walking its vtable back to its RTTI type descriptor. None of
+// the six builders, the ctor, the dispatch or the per-tab init is an Arxan redirect --
+// `scripts/ds2-arxan-chain.py` terminates at hop 0 with a clean prologue on every one of them.
+// ---------------------------------------------------------------------------------------------
+
+/// The builder for the tab that carries the quit item. RVA `0x000a5900`.
+///
+/// `FeGroupInGameTopSelect`'s ctor calls this once, with a stack descriptor in RCX, and it is the
+/// ONLY caller -- one candidate RIP-relative reference in the whole image (`0x1400a4382`, inside
+/// that ctor), so a detour here reaches this tab and nothing else. It returns its argument in RAX.
+///
+/// It zeroes the count at [`FE_INGAME_MENU_ITEM_VECTOR_COUNT_OFFSET`] and then pushes three
+/// entries -- [`FE_INGAME_MENU_SYSTEM_TAB_ITEMS`]. The entry the player calls "quit" is the third,
+/// action [`FE_INGAME_MENU_ACTION_RETURN_TITLE`], which the dispatch resolves to
+/// `FeInGameMenuWarehouse + 0x6f10`, the `FeGroupInGameReturnTitleCheck` the warehouse's ctor
+/// (`0x1400991e0`) constructs at member `+0xde2`.
+///
+/// Not an Arxan redirect: clean prologue [`FE_INGAME_TOP_SELECT_SYSTEM_TAB_ITEMS_PROLOGUE`] at the
+/// entry.
+pub const FE_INGAME_TOP_SELECT_SYSTEM_TAB_ITEMS: u32 = 0x000a_5900;
+
+/// The first six bytes of [`FE_INGAME_TOP_SELECT_SYSTEM_TAB_ITEMS`]: `rex push rbx` /
+/// `sub rsp,0x50`.
+///
+/// Recorded so a detour can REFUSE rather than patch when the bytes are not these. That is the
+/// only defence against this table being read against a different build: an RVA is just a number
+/// and will happily point into the middle of some other function.
+pub const FE_INGAME_TOP_SELECT_SYSTEM_TAB_ITEMS_PROLOGUE: [u8; 6] =
+    [0x40, 0x53, 0x48, 0x83, 0xec, 0x50];
+
+/// The dispatch: `switch (action)` over every in-game menu item. RVA `0x000a6090`.
+///
+/// Reached from the tab's confirm handler (`0x1400a6b10`), which reads the entry under the cursor,
+/// applies its gate, and passes either the action or `-1`. `-1` selects a different sound id and
+/// falls through the switch's `default`, which is how a gated row refuses.
+///
+/// Cases 0-9, 0xb, 0xc and **0xd** are present. Two shapes: a direct
+/// `FeInGameMenuWarehouse` member (0, 2, 4, 5, 6, 9), or a `FexDynamicGroupExecJob` carrying a
+/// *kind* that the factory at `0x1400a67c0` turns into a freshly allocated group (3 -> kind 0,
+/// 7 -> 2, 8 -> 3, 0xb -> 4, 0xc -> 5, 0xd -> 6). Action `0xa` has no case at all.
+///
+/// Recorded for provenance and because it is the site to extend for a genuinely new action. Not
+/// currently hooked by anything.
+///
+/// Not an Arxan redirect: clean prologue `48 89 5c 24 18` at the entry.
+pub const FE_INGAME_MENU_DISPATCH: u32 = 0x000a_6090;
+
+/// The per-tab init that turns the item list into rows. RVA `0x000a4d20`.
+///
+/// Recorded because it is the reason an appended entry is expected to become a visible row rather
+/// than dead data: it calls `FUN_140021b30(tab, tab->count)` -- the grid's visible-cell count is
+/// set FROM the item vector's count -- and then the availability pass `0x1400a77c0`, which walks
+/// `0..cellCount`, reads entry `i`, and greys the row whose gate refuses.
+///
+/// Not hooked. Not an Arxan redirect: clean prologue `40 53 48 81 ec b0 00 00 00` at the entry.
+pub const FE_INGAME_MENU_TAB_INIT: u32 = 0x000a_4d20;
+
+/// Byte offset of the element count inside a tab's item `DLFixedVector`.
+///
+/// Every one of the six builders opens with `mov QWORD PTR [rcx+0x30], 0`, and the copy into the
+/// live group (`0x1400a3ef0`) reads and writes the same field. In the constructed group the pair
+/// lands at `+0xf8` (elements) and `+0x128` (count), which is `0xf8 + 0x30` -- the same struct.
+pub const FE_INGAME_MENU_ITEM_VECTOR_COUNT_OFFSET: usize = 0x30;
+
+/// Most entries a tab's item vector can hold.
+///
+/// Spelled by the builders as `if (5 < newCount) panic("out of memory.")` against
+/// `DLFixedVector.inl:0x24c`, and independently by the copy at `0x1400a3ef0`, which panics unless
+/// the source count is `< 6`. Both agree: five.
+pub const FE_INGAME_MENU_ITEM_VECTOR_CAPACITY: usize = 5;
+
+/// Size of one item entry: a `u32` action id followed by a `u32` gate index.
+///
+/// The builders write a whole 8-byte slot per push (`*puVar1 = 0x400000009` for the quit entry --
+/// action `9`, gate `4`), and the two readers split it: the confirm path takes the action from
+/// `[entry]` and the gate from `[entry+4]` (`lea rcx,[rax+4]` at `0x1400a4cce`).
+pub const FE_INGAME_MENU_ITEM_STRIDE: usize = 8;
+
+/// The three entries [`FE_INGAME_TOP_SELECT_SYSTEM_TAB_ITEMS`] is expected to leave behind, as
+/// `(action, gate)` pairs.
+///
+/// Held so a detour can CHECK what the original produced before touching it. Without that, a
+/// build whose tabs are ordered differently would be silently modified in the wrong place, and
+/// the resulting screenshot would be evidence about nothing.
+pub const FE_INGAME_MENU_SYSTEM_TAB_ITEMS: [(u32, u32); 3] = [
+    (
+        FE_INGAME_MENU_ACTION_SETTING_GAME,
+        FE_INGAME_MENU_GATE_ALWAYS,
+    ),
+    (
+        FE_INGAME_MENU_ACTION_SETTING_SCREEN,
+        FE_INGAME_MENU_GATE_ALWAYS,
+    ),
+    (
+        FE_INGAME_MENU_ACTION_RETURN_TITLE,
+        FE_INGAME_MENU_GATE_RETURN_TITLE,
+    ),
+];
+
+/// Action `7` -- `FeGroupInGameSystemSettingGame`, via dynamic-group kind 2.
+pub const FE_INGAME_MENU_ACTION_SETTING_GAME: u32 = 7;
+
+/// Action `8` -- `FeGroupInGameSystemSettingScreen`, via dynamic-group kind 3.
+pub const FE_INGAME_MENU_ACTION_SETTING_SCREEN: u32 = 8;
+
+/// Action `9` -- `FeGroupInGameReturnTitleCheck`. **This is the quit item.**
+///
+/// The dispatch resolves it to `warehouse + 0x6f10`, and the warehouse's ctor builds
+/// `FeGroupInGameReturnTitleCheck` (vtable `0x1410b1768`, ctor `0x14006e390`) at exactly that
+/// member. It is the confirm dialog that offers to save on the way to the title screen.
+pub const FE_INGAME_MENU_ACTION_RETURN_TITLE: u32 = 9;
+
+/// Action `0xd` -- present in the dispatch, listed by **no** tab.
+///
+/// Its factory branch shares a `case` label with kind 4: `case 4: case 6:` both allocate `0xc68`
+/// bytes and call `FUN_1400803b0`, whose vtable writes name `FeGroupInGameSystemSettingKeyboard`.
+/// The job carries the kind ONLY to select that branch (`mov edx,[rbx+0x28]` at `0x14002d884`,
+/// its one and only read), so executing action `0xd` is byte-for-byte what executing the shipped
+/// Key Bindings row already does every time it is pressed.
+///
+/// That is the entire reason it is the probe's payload: it adds a row without adding a code path.
+pub const FE_INGAME_MENU_ACTION_KEY_BINDINGS_UNUSED: u32 = 0x0d;
+
+/// Gate `0` -- no gate. The predicate at `0x1400a4e50` returns `0` (selectable) immediately on it.
+pub const FE_INGAME_MENU_GATE_ALWAYS: u32 = 0;
+
+/// Gate `4` -- the one the quit item carries.
+///
+/// Resolves the session object at `GameManagerImp + 0x22f0` through `FUN_140513270` and asks
+/// `FUN_14025f690` about it; a nonzero answer means the row is refused. Neither callee is named in
+/// the project yet, so what it actually forbids is NOT recorded here -- only that this is the gate
+/// the shipped quit row uses.
+pub const FE_INGAME_MENU_GATE_RETURN_TITLE: u32 = 4;
