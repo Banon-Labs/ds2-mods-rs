@@ -23,9 +23,11 @@
 //! workspace gains no dependency for a grammar one level deep. Build `253` fetched on 2026-08-28
 //! is the fixture both agree on.
 
+pub mod field;
 pub mod saved_build;
 pub mod url;
 
+pub use field::{Field, MAX_UNITS, Reaction};
 pub use saved_build::{Build, MAX_STAT, ParseError, Stats};
 pub use url::{
     BUILD_HOST, BUILD_URL_PREFIX, BUILD_URL_ROW_HELP, UrlRejection, build_id_from_url, build_path,
