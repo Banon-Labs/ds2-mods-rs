@@ -325,11 +325,14 @@ unsafe extern "system" fn detour_top_menu(this: *mut u8) {
     if this.is_null() || PRESELECT_SLOT.load(Ordering::Acquire) < 0 {
         return;
     }
-    // AFTER the original, every frame the menu is resident. The original is what polls and opens
-    // the group, so there is nothing to close before it runs; and the frontend's close tests the
-    // group's own open byte, so every frame after the first is a no-op.
-    // SAFETY: on the game thread, with the group read the way the original reads it.
-    unsafe { crate::hide_menus::close(crate::hide_menus::Menu::TopMenu) };
+    // AFTER the original, every frame the title screen is resident. The original is what opens it,
+    // so there is nothing to hide before it runs, and re-posing an already-posed scene writes the
+    // same playback position again -- which is why this is safe to repeat rather than latch.
+    //
+    // A pose and not a close. The close animates, and this substate does not live long enough for
+    // the fade to finish; see `ds2_rva::FE_SCENE_TITLE_POSE_HIDDEN`.
+    // SAFETY: on the game thread, with the scene read the way the original reads it.
+    unsafe { crate::hide_menus::pose_title_hidden() };
     // SAFETY: the flow just called a virtual on this object, so it is live.
     let phase = unsafe { field::<i32>(this, ds2_rva::FE_SUBSTATE_PHASE_OFFSET) };
     // Only from rest. A non-resting phase means the player activated a row this frame, and their
@@ -500,7 +503,7 @@ unsafe extern "system" fn detour_enter(this: *mut u8) {
     // risk that the menu shows.
     if wanted >= 0 {
         // SAFETY: on the game thread, with the group read the way the original reads it.
-        unsafe { crate::hide_menus::close(crate::hide_menus::Menu::DataList) };
+        unsafe { crate::hide_menus::close_data_list() };
     }
 }
 

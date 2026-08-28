@@ -2148,3 +2148,98 @@ pub const FE_GROUP_TITLE_TOP_MENU_CLOSE: u32 = 0x000f_3590;
 ///
 /// Not an Arxan redirect: clean prologue at the entry.
 pub const FE_SUBSTATE_TOP_MENU_ENTER: u32 = 0x000f_de90;
+
+// ============================================================================================
+// POSING THE TITLE SCREEN, which is what "hide the menu with the logo" actually needs.
+//
+// The three constants below replace a whole line of failed reasoning, so the correction is worth
+// stating once, at the top, rather than three times below.
+//
+// `[`FE_TITLE_CONTEXT`]` + 0x80 IS A `FeSceneTitle`. Two crates had it as two different things --
+// `ds2-dialog-skip` called it "the title scene" and `ds2-continue` called it "the top menu group"
+// -- and both were reading the same eight bytes. It is a `FeSceneTitle`, and its constructor at
+// `0x140f3391` settles it without a single inference: that function writes vtable `0x1410bcab0`
+// (RTTI `FeSceneTitle`, 17 virtuals) to `[this]`, zeroes `[this+0xb8]` -- which is
+// [`FE_TOP_MENU_GROUP_OFFSET`], the top-menu group hanging off the scene, exactly as that constant
+// already claimed -- and zeroes a WORD at `[this+0xf0]`, whose second byte is the `+0xf1` that the
+// open sets and the close clears.
+//
+// So ONE object carries the logo, the PRESS ANY BUTTON prompt and the six menu rows, which is why
+// substate 0x17 and substate 0x47 both poll it, and why the player experiences them as one screen.
+// `0x1400f3820` is that scene's OPEN (not "play sequence 0x67" -- it also builds every row), and
+// `0x1400f3590` is its CLOSE.
+// ============================================================================================
+
+/// `FeGroupBase::v2(this)` -- pose this object's scene hidden, instantly. RVA `0x00505d40`.
+///
+/// The whole function, and it is null-checked before it touches anything:
+///
+/// ```c
+/// scene = this->_0x08;
+/// if (!scene) return;
+/// 0x140afdb70(scene);                                   // a query; its result is discarded
+/// play(scene, 0x65, /*pose=*/1, 0.0f);                  // tail call
+/// ```
+///
+/// # Why this and not the close
+///
+/// [`FE_GROUP_TITLE_TOP_MENU_CLOSE`] plays `0x68` with the pose flag CLEAR, so it *animates* out
+/// over the sequence's own span. Measured on screen: with that close called every frame from the
+/// top-menu update, the menu stayed visible for the whole of the substate's ~25ms residency --
+/// because a fade that needs ~14 frames cannot finish in one or two. **The close was working and
+/// the animation was the problem.**
+///
+/// This is the same play with the flag SET, which is the difference between "start fading" and "be
+/// faded". See [`FE_SEQUENCE_PLAY_FLAG_POSE`] for where that flag lands.
+///
+/// # Why the base and not `FeSceneTitle`'s own override
+///
+/// `FeSceneTitle::v2` (`0x1400f4190`) is exactly `call 0x140505d40(this)` followed by
+/// `inc [this->_0x08 + 0x18]`. That increment is a counter the open decrements and the close
+/// increments, and re-asserting a pose every frame through the override would run it up without
+/// bound -- and a player who returns to the title screen from in-game would find it never comes
+/// back. Calling the base skips the counter, so this leaves **no persistent state behind at all**:
+/// nothing to restore, and the game's own next open re-shows the screen by itself.
+///
+/// # Why it is safe from a per-frame detour, unlike the close
+///
+/// It does not clear the `+0xf1` open flag and does not run the teardown at `0x1400f41b0`. Those
+/// two are what [`FE_SUBSTATE_TOP_MENU_ENTER`] records as having taken boot-to-top-menu from 4.3s
+/// to 29.9s and then killed the process: the substate's update polls a group the close had shut.
+/// Nothing here shuts anything -- it changes a playback position and nothing else.
+///
+/// Called, never patched, so its Arxan status does not arise.
+pub const FE_SCENE_TITLE_POSE_HIDDEN: u32 = 0x0050_5d40;
+
+/// The sequence [`FE_SCENE_TITLE_POSE_HIDDEN`] plays. `0x65`.
+///
+/// It completes the family the frontend already had names for -- `0x66` open, `0x67` settled,
+/// `0x68` close -- as the state *before* an open, which is what makes it the hidden pose.
+///
+/// **This is the `0x65` from `0x1405116f0`**, the one whose `(0x65, true, 0.0)` triple was read as
+/// operator arguments last session and called through vtable slot 24 of an eleven-slot vtable,
+/// which read string data and crashed the game. The arguments were right all along; the receiver
+/// was not. Here it arrives on the receiver the game's own code uses.
+pub const FE_SCENE_TITLE_SEQUENCE_HIDDEN: i32 = 0x65;
+
+/// The play's third argument, when the caller wants a pose rather than an animation. `1`.
+///
+/// Read out of `FeComponentSprite`'s slot 24 (`0x140b6c4f0`) rather than guessed, because the flag
+/// is inverted on its way to the field it controls:
+///
+/// ```text
+/// xmm6 = (float)entry.start + seek      // the seek is relative; see FE_TOP_MENU_SEQUENCE_FADED_SEEK
+/// [this+0x40] = xmm6                    // the playback position
+/// test dil,dil                          // dil is THIS flag
+/// sete dl                               // dl = (flag == 0)
+/// call [vtable+0xb0](this, dl)          // slot 22, "keep playing"
+/// ```
+///
+/// So `0` means play on from here and `1` means hold here. Every animated play in the frontend
+/// passes `0`; [`FE_SCENE_TITLE_POSE_HIDDEN`] is the one that passes `1`.
+///
+/// **This is what makes the seek irrelevant.** Posing the FIRST frame of the hidden sequence needs
+/// no offset, so none of the sequence-span arithmetic that
+/// [`FE_TOP_MENU_SEQUENCE_FADED_SEEK`] had to establish applies here -- and that arithmetic could
+/// not have been done statically anyway, since the spans live in `GameDataEbl.bdt`.
+pub const FE_SEQUENCE_PLAY_FLAG_POSE: i32 = 1;
