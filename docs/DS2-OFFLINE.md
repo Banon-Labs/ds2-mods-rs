@@ -220,6 +220,74 @@ through the game's own QUIT GAME row is what would produce it, and until someone
 line is code that has compiled and never executed. It is the run-total that would say how much
 traffic the socket layer catches over a whole session rather than just at boot.
 
+## The login-failure prompt, and the trap in it
+
+With the login refused, the title flow raises a two-option box:
+
+```text
+The DARK SOULS II service is not available. Please try again later.
+Please see the following URL for more information: ...
+Select "OK" to attempt to log in again.
+Select "CANCEL" to start the game in offline mode.
+```
+
+`ds2-dialog-skip` correctly declined to answer it -- its rule was "suppress notices, never answer a
+question" -- and logged `options=42 action=shown reason=has-a-real-choice`. Its own source comment
+had predicted that a two-option boot dialog would surface exactly this way.
+
+### `+0x12` was never an option count
+
+`FeSubStateCommonWindowBase::v5` (`0x140104f30`) publishes one transition per edge:
+
+```text
+movsx edx, WORD PTR [rdi+0x10]     ; cancel destination
+mov   [rax+0x18], &this[0x30]      ; watch the phase
+mov   [rax+0x08], edx
+mov   BYTE PTR [rax+0x20], 3       ; ...on phase 3, the cancel-closed phase
+
+cmp   WORD PTR [rdi+0x12], 0
+jl    done                         ; negative -> no confirm edge at all
+movsx ecx, WORD PTR [rdi+0x12]     ; confirm destination
+mov   [rax+0x08], ecx
+mov   BYTE PTR [rax+0x20], 4       ; ...on phase 4
+```
+
+So `+0x10` and `+0x12` are **destination substate ids**, not a caption id and an option count.
+`options=42` meant destination `0x2a`. The old reading was behaviourally right -- a negative
+confirm destination really does mean a one-button box -- which is exactly why it survived: it never
+produced a wrong answer until something wanted to know *where the edges went*.
+
+### Reasoning from the button labels gives the wrong answer
+
+The text says CANCEL starts offline mode, so the obvious move is to write
+`FE_DIALOG_RESULT_CANCEL`. **That is backwards.** Read live out of the object on a running game
+(`kind=0x3e`):
+
+```text
+cancel-dest  = 0x39   FeSubStateTitleGameServerLogin   <- retries the login
+confirm-dest = 0x2a   FeSubStateOfflineModeWindow      <- plays offline
+```
+
+Writing the cancel result would have retried the login, in a mod whose entire purpose is not to.
+The fix is to stop reasoning about buttons: the answer is chosen by comparing the two destination
+ids against `FeSubStateOfflineModeWindow`, and only when **exactly one** of them matches. If both
+or neither did, the box is shown and the player decides.
+
+That capability lives in `ds2-dialog-skip`, which owns the `enter` detour; the loader relays
+`[offline] enabled` to it via `set_answer_offline_prompt`. A run with offline off keeps the old
+"never answer a question" behaviour exactly.
+
+Measured, same boot:
+
+```text
+ds2-dialog-skip: suppressed screen=common-window kind=62 cancel-dest=0x39 confirm-dest=0x2a edge=confirm-goes-offline result=2 phase=4 total=1
+ds2-dialog-skip: suppressed screen=offline-mode-window kind=42 cancel-dest=0x47 confirm-dest=0xffff edge=only-edge result=1 phase=3 total=2
+```
+
+The prompt routes to the "playing offline" notice, which is a one-edge box and is suppressed the
+way the other notices always were, and that edge lands on `0x47` -- the top menu. The boot now
+reaches a usable menu, offline, with no button presses.
+
 ## What this does not do
 
 * **It does not touch Steam.** See above.

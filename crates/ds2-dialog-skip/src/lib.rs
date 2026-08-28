@@ -76,7 +76,7 @@ mod menu;
 mod title;
 
 #[cfg(windows)]
-pub use install::{LogFn, Outcome, install, set_logger};
+pub use install::{LogFn, Outcome, install, set_answer_offline_prompt, set_logger};
 #[cfg(windows)]
 pub use menu::{Outcome as MenuOutcome, install as install_menu};
 #[cfg(windows)]

@@ -1,7 +1,7 @@
 //! Installing the one detour, and the answer it writes.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use ds2_game_base::mem::{game_module_base, safe_read_i32, safe_read_u16, safe_read_usize};
 use ds2_hook::{MH_EnableHook, MH_Initialize, MH_STATUS, MhHook};
@@ -90,6 +90,25 @@ static MODULE_BASE: AtomicUsize = AtomicUsize::new(0);
 /// distinguishable from a run where no dialog ever came up.
 static SUPPRESSED: AtomicUsize = AtomicUsize::new(0);
 
+/// Whether a two-option box may be answered toward `FeSubStateOfflineModeWindow`.
+///
+/// **Off unless something turns it on**, and the default matters: with this clear, this crate's
+/// rule is exactly what it always was -- suppress one-outcome notices, never answer a question.
+/// The loader sets it from `[offline] enabled`, so the only run in which a real choice gets
+/// answered is one that has already been configured to play offline, which is what makes the
+/// answer the player's own rather than this mod's.
+static ANSWER_OFFLINE_PROMPT: AtomicBool = AtomicBool::new(false);
+
+/// Allow the offline prompt to be answered. Call before [`install`].
+///
+/// Separate from the config plumbing on purpose: this crate owns the `enter` hook and therefore
+/// has to own the decision, but it must not own the POLICY -- whether this run is an offline run
+/// is `ds2-offline`'s business and the loader's to relay. A setter keeps the dependency pointing
+/// that way rather than making a dialog crate read an unrelated feature's config section.
+pub fn set_answer_offline_prompt(enabled: bool) {
+    ANSWER_OFFLINE_PROMPT.store(enabled, Ordering::Release);
+}
+
 /// Vtables already named in a "seen, left alone" line.
 ///
 /// `enter` runs once per appearance rather than once per frame, so this matters less than it did
@@ -174,11 +193,12 @@ unsafe fn suppress(this: *mut u8) -> bool {
             vptr,
             format_args!(
                 "{LOG_PREFIX} seen screen=<not-allowlisted> vtable=0x{vptr:016x} rva=0x{:08x} \
-                 kind={} caption=0x{:x} options={} action=shown",
+                 kind={} cancel-dest=0x{:02x} confirm-dest=0x{:02x} action=shown",
                 vptr.wrapping_sub(base),
                 unsafe { safe_read_i32(object + ds2_rva::FE_DIALOG_KIND_OFFSET) }.unwrap_or(-1),
-                unsafe { safe_read_u16(object + ds2_rva::FE_DIALOG_CAPTION_OFFSET) }.unwrap_or(0),
-                unsafe { safe_read_u16(object + ds2_rva::FE_DIALOG_OPTIONS_OFFSET) }
+                unsafe { safe_read_u16(object + ds2_rva::FE_DIALOG_CANCEL_DEST_OFFSET) }
+                    .map_or(-1, |raw| raw as i16),
+                unsafe { safe_read_u16(object + ds2_rva::FE_DIALOG_CONFIRM_DEST_OFFSET) }
                     .map_or(-1, |raw| raw as i16),
             ),
         );
@@ -196,37 +216,95 @@ unsafe fn suppress(this: *mut u8) -> bool {
         return false;
     }
 
-    let Some(raw_options) = (unsafe { safe_read_u16(object + ds2_rva::FE_DIALOG_OPTIONS_OFFSET) })
+    // THE TWO EDGES, read from the object rather than reasoned about from button labels. `v5`
+    // (`0x140104f30`) publishes one transition per edge: the cancel destination unconditionally,
+    // the confirm destination only when it is non-negative. See
+    // `ds2_rva::FE_DIALOG_CANCEL_DEST_OFFSET`.
+    let Some(cancel_dest) =
+        (unsafe { safe_read_u16(object + ds2_rva::FE_DIALOG_CANCEL_DEST_OFFSET) })
     else {
         return false;
     };
-    let options = raw_options as i16;
+    let cancel_dest = cancel_dest as i16;
+    let Some(confirm_dest) =
+        (unsafe { safe_read_u16(object + ds2_rva::FE_DIALOG_CONFIRM_DEST_OFFSET) })
+    else {
+        return false;
+    };
+    let confirm_dest = confirm_dest as i16;
 
-    // THIS MOD SUPPRESSES NOTICES. IT NEVER ANSWERS A QUESTION.
+    // THIS MOD SUPPRESSES NOTICES, AND ANSWERS EXACTLY ONE QUESTION.
     //
-    // A negative option count is the game's own marker for a one-button acknowledgement box: the
-    // update's input path can only ever produce a cancel for one, and the closed phase it computes
-    // can only ever be 3. There is no second outcome, so removing the box removes a keypress and
-    // nothing else. A non-negative count means a real decision with a real affirmative, and this
-    // mod shows it and steps back -- whatever it is asking, the player is the one being asked.
+    // The rule used to be "never answer a question", and the comment here used to say that
+    // declining would be how "a two-option boot dialog would come to light -- as a line to read,
+    // not as a choice already made". That happened. The line was
     //
-    // That turns the safety argument from a list of class names into a property of the object in
-    // front of the code. The allowlist still encodes intent and the inertness check still refuses a
-    // box whose answer would run code, but THIS is the condition that makes "silently decided
-    // something on the player's behalf" structurally impossible rather than merely unlikely. Every
-    // dialog it declines says so in the log, which is how a two-option boot dialog would come to
-    // light -- as a line to read, not as a choice already made.
-    if options >= 0 {
+    //   seen screen=common-window vtable=0x1410bcff8 options=42 action=shown reason=has-a-real-choice
+    //
+    // and the box is `The DARK SOULS II service is not available ... Select "CANCEL" to start the
+    // game in offline mode`. So the mechanism worked exactly as designed, and what it surfaced is a
+    // question this mod already knows the answer to on an offline run.
+    //
+    // THE `options=42` IN THAT LINE WAS NEVER AN OPTION COUNT. `+0x12` is the confirm edge's
+    // destination substate id, and 42 is `0x2a`, `FeSubStateOfflineModeWindow`. See
+    // `ds2_rva::FE_DIALOG_CONFIRM_DEST_OFFSET`.
+    //
+    // WHICH EDGE TO TAKE, and the whole safety argument for answering anything at all.
+    //
+    // A negative confirm destination means the game published only one transition, so the box has
+    // exactly one outcome and removing it removes a keypress. That is the original rule and it is
+    // unchanged.
+    //
+    // A two-edge box is a real question and is shown -- UNLESS exactly one of its two destinations
+    // is `FeSubStateOfflineModeWindow` and this run has been asked to play offline. Then the
+    // question is one this mod already knows the answer to, because the answer is the mod's whole
+    // configuration, and taking that edge is pressing the button rather than faking a state.
+    //
+    // "EXACTLY one" is doing real work. If both edges led there the choice would be meaningless
+    // and answering it would be noise; if neither does, this is some other question and none of
+    // this mod's business. Requiring exactly one also means the code never has to know which
+    // BUTTON is which -- see `ds2_rva::FE_SUBSTATE_ID_OFFLINE_MODE_WINDOW` for why that matters,
+    // and for the run where reasoning from the labels would have retried the login instead.
+    let offline = ds2_rva::FE_SUBSTATE_ID_OFFLINE_MODE_WINDOW;
+    let (result, closed_phase, edge) = if confirm_dest < 0 {
+        (
+            ds2_rva::FE_DIALOG_RESULT_CANCEL,
+            ds2_rva::FE_DIALOG_PHASE_CLOSED_CANCEL,
+            "only-edge",
+        )
+    } else if !ANSWER_OFFLINE_PROMPT.load(Ordering::Acquire) {
         report_once(
             vptr,
             format_args!(
-                "{LOG_PREFIX} seen screen={} vtable=0x{vptr:016x} options={options} \
-                 action=shown reason=has-a-real-choice",
-                dialog.name
+                "{LOG_PREFIX} seen screen={} vtable=0x{vptr:016x} cancel-dest=0x{:02x} \
+                 confirm-dest=0x{:02x} action=shown reason=has-a-real-choice",
+                dialog.name, cancel_dest, confirm_dest
             ),
         );
         return false;
-    }
+    } else if confirm_dest == offline && cancel_dest != offline {
+        (
+            ds2_rva::FE_DIALOG_RESULT_CONFIRM,
+            ds2_rva::FE_DIALOG_PHASE_CLOSED_CONFIRM,
+            "confirm-goes-offline",
+        )
+    } else if cancel_dest == offline && confirm_dest != offline {
+        (
+            ds2_rva::FE_DIALOG_RESULT_CANCEL,
+            ds2_rva::FE_DIALOG_PHASE_CLOSED_CANCEL,
+            "cancel-goes-offline",
+        )
+    } else {
+        report_once(
+            vptr,
+            format_args!(
+                "{LOG_PREFIX} seen screen={} vtable=0x{vptr:016x} cancel-dest=0x{:02x} \
+                 confirm-dest=0x{:02x} action=shown reason=has-a-real-choice",
+                dialog.name, cancel_dest, confirm_dest
+            ),
+        );
+        return false;
+    };
 
     // The state the game itself leaves such a box in once it has been closed. `leave` closes the
     // window ONLY when the phase is 1, so writing the closed phase here is also what keeps a
@@ -236,10 +314,9 @@ unsafe fn suppress(this: *mut u8) -> bool {
     // that all succeeded, so it is mapped and at least as large as the fields the game itself
     // writes here.
     unsafe {
-        this.add(ds2_rva::FE_DIALOG_RESULT_OFFSET)
-            .write(ds2_rva::FE_DIALOG_RESULT_CANCEL);
+        this.add(ds2_rva::FE_DIALOG_RESULT_OFFSET).write(result);
         this.add(ds2_rva::FE_DIALOG_PHASE_OFFSET)
-            .write(ds2_rva::FE_DIALOG_PHASE_CLOSED_CANCEL);
+            .write(closed_phase);
         // What the original `enter` would have zeroed. Nothing reads it in the closed phase; it is
         // written so the object is not left carrying a stale timer from a previous appearance.
         this.add(ds2_rva::FE_DIALOG_ELAPSED_OFFSET)
@@ -253,10 +330,11 @@ unsafe fn suppress(this: *mut u8) -> bool {
     // then kind=70/caption=0x47 through the same vtable. Logging only the class would have made
     // two different notices look like one repeated event.
     log(format_args!(
-        "{LOG_PREFIX} suppressed screen={} kind={} caption=0x{:x} options={options} total={total}",
+        "{LOG_PREFIX} suppressed screen={} kind={} cancel-dest=0x{cancel_dest:02x} \
+         confirm-dest=0x{confirm_dest:02x} edge={edge} result={result} phase={closed_phase} \
+         total={total}",
         dialog.name,
         unsafe { safe_read_i32(object + ds2_rva::FE_DIALOG_KIND_OFFSET) }.unwrap_or(-1),
-        unsafe { safe_read_u16(object + ds2_rva::FE_DIALOG_CAPTION_OFFSET) }.unwrap_or(0),
     ));
     true
 }

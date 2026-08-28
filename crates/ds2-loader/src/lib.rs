@@ -397,6 +397,17 @@ fn install_intro_skip() {
 fn install_offline() {
     let config = offline::OfflineConfig::load();
     log_line(format_args!("{}", config.describe()));
+    // RELAYED, not read, and BEFORE the early return so an off run explicitly turns it off rather
+    // than relying on a default.
+    //
+    // `ds2-dialog-skip` owns the `FeSubStateCommonWindowBase::v1` detour, so the decision to answer
+    // the login-failure box has to be made there -- but whether this run is an offline run is this
+    // section's fact, and a dialog crate reading `[offline]` would be one feature reaching into
+    // another's config. The loader relays it.
+    //
+    // Gated on `enabled` alone rather than on any of the three layers, because the box is asking
+    // the player whether to play offline and `[offline] enabled` is that answer already given.
+    ds2_dialog_skip::set_answer_offline_prompt(config.enabled);
     if !config.enabled {
         return;
     }
