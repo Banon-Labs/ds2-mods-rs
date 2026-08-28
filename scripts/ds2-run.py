@@ -163,6 +163,7 @@ KEY_TIMELINE_ENABLED = "enabled"
 CONTINUE_SECTION = "continue"
 KEY_CONTINUE_RECORD = "record"
 KEY_CONTINUE_SLOT = "slot"
+KEY_CONTINUE_SILENCE = "silence"
 
 MENU_SECTION = "title_menu"
 KEY_SHOW_UNAVAILABLE = "show_unavailable"
@@ -890,6 +891,7 @@ def config_text(
     boot_timeline: bool = False,
     continue_record: bool = False,
     continue_slot: int = -1,
+    continue_silence: bool = True,
     offline: bool = True,
     block_sockets: bool = True,
 ) -> str:
@@ -1070,10 +1072,9 @@ def config_text(
 # once. It logs one line per change: which slot the cursor is on, whether that slot is occupied,
 # what the ownership word says, and which substate the phase it wrote will transition to.
 #
-# It writes NOTHING into the game. Driving the flow -- setting the slot and retargeting the phase-2
-# transition from 0x55 straight to 0x57 -- waits on what this records, because two things the
-# disassembly cannot settle would break it: whether LoadProfile depends on state the list's own
-# `enter` sets up, and whether the ownership gate at 0x140af6610 survives the shortcut.
+# It writes NOTHING into the game -- `slot` below is what drives the flow. This is the instrument
+# that made that possible: it is what showed that the two fields a shortcut would want to write are
+# outputs of the list group rather than inputs to it.
 #
 # OFF by default; `--continue-record` writes true. Only an exact `true` turns it on.
 {KEY_CONTINUE_RECORD} = {str(continue_record).lower()}
@@ -1088,7 +1089,24 @@ def config_text(
 #
 # It refuses to select a slot the game would refuse: same bound the game applies, and the slot must
 # be occupied and not excluded. A rejected slot is named in the log and changes nothing.
+#
+# With a slot set, the game also skips the top menu: boot goes straight into that character with no
+# input at all, measured at 5841ms.
 {KEY_CONTINUE_SLOT} = {continue_slot}
+# STARTUP-ONLY. ON by default, and inert unless `slot` above is set.
+#
+# Holds FMOD's master channel group at zero from install until FeSubStateTitleStartIngame, so the
+# title music and the confirm sounds for the two menus nobody pressed do not play. The volume is
+# then restored to the number the game itself last applied -- read out of the sound manager rather
+# than reset to 1.0, so whatever you set in the options menu survives.
+#
+# The lever is the game's own: [0x14166dfa8] is the MOFmodSoundManager singleton (named by RTTI),
+# +0x9f8 is the master channel group FMOD wrote there through getMasterChannelGroup, and setVolume
+# is called through the same fmodex64.dll import slot the game uses. Nothing in .text is patched
+# for the mute itself.
+#
+# Set to false to hear the title as the game plays it. Only an exact `false` turns it off.
+{KEY_CONTINUE_SILENCE} = {str(continue_silence).lower()}
 
 [{OFFLINE_SECTION}]
 # STARTUP-ONLY, all four. ON BY DEFAULT, and it is the only feature here whose default is on for a
@@ -1171,6 +1189,7 @@ def write_config(
     boot_timeline: bool = False,
     continue_record: bool = False,
     continue_slot: int = -1,
+    continue_silence: bool = True,
     offline: bool = True,
     block_sockets: bool = True,
 ) -> tuple[Path, str]:
@@ -1193,6 +1212,7 @@ def write_config(
         boot_timeline,
         continue_record,
         continue_slot,
+        continue_silence,
         offline,
         block_sockets,
     )
@@ -1273,6 +1293,7 @@ def dry_run(
     boot_timeline: bool = False,
     continue_record: bool = False,
     continue_slot: int = -1,
+    continue_silence: bool = True,
     offline: bool = True,
     block_sockets: bool = True,
 ) -> int:
@@ -1313,6 +1334,7 @@ def dry_run(
             boot_timeline,
             continue_record,
             continue_slot,
+            continue_silence,
             offline,
             block_sockets,
         ):
@@ -1349,6 +1371,7 @@ def dry_run(
                 boot_timeline,
                 continue_record,
                 continue_slot,
+                continue_silence,
                 offline,
                 block_sockets,
             ),
@@ -1407,6 +1430,7 @@ def launch(
     boot_timeline: bool = False,
     continue_record: bool = False,
     continue_slot: int = -1,
+    continue_silence: bool = True,
     offline: bool = True,
     block_sockets: bool = True,
 ) -> int:
@@ -1442,6 +1466,7 @@ def launch(
         boot_timeline,
         continue_record,
         continue_slot,
+        continue_silence,
         offline,
         block_sockets,
     )
@@ -2324,6 +2349,15 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--no-continue-silence",
+        dest="continue_silence",
+        action="store_false",
+        help=(
+            "let the title music and the menu confirm sounds play through the autocontinue. "
+            "They are muted by default, because nobody pressed the buttons making the noise."
+        ),
+    )
+    parser.add_argument(
         "--continue-record",
         dest="continue_record",
         action="store_true",
@@ -2518,6 +2552,7 @@ def main() -> int:
             args.boot_timeline,
             args.continue_record,
             args.continue_slot,
+            args.continue_silence,
             args.offline,
             args.block_sockets,
         )
@@ -2539,6 +2574,7 @@ def main() -> int:
         args.boot_timeline,
         args.continue_record,
         args.continue_slot,
+        args.continue_silence,
         args.offline,
         args.block_sockets,
     )

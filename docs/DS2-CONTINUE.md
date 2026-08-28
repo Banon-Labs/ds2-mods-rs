@@ -212,55 +212,91 @@ Against `docs/DS2-BOOT-WORK.md`, where boot to the *top menu* measured 5875.7ms 
 floors landed: autocontinue is **in-game** at 5841ms. The character load costs roughly 1.3s and
 the two skipped screens more than pay for it.
 
-## Still audible
+## Silencing it, and the scan that was wrong
 
-The title BGM and the frontend's own confirm sounds play through the whole shortcut, which is
-conspicuous when nothing on screen appears to be pressing anything. Four static approaches have
-been tried and none converged; recording them so the next attempt does not repeat them:
+The shortcut used to play the title BGM and both menus' confirm sounds, for buttons nobody
+pressed. Four static approaches failed to find a lever, and all four failed **for the same
+reason**, which is worth recording because it is a general trap.
 
-* **The frontend never calls `AppSoundManager` directly.** Every `e8` in `0x000f0000-0x00110000`
-  was resolved against `0x002e9000-0x002ea000`: zero hits. Audio reaches the title through the
-  scene/sequence layer -- `0x140afda00` (41 call sites) and `0x140afdb80` -- not through named
-  sound calls in the substates.
-* **FMOD's own mute levers are not in the code.** `getMasterChannelGroup`, `setMute` and
-  `setPaused` appear only as name-table strings in the statically linked FMOD; no call site
-  references them.
-* **`User.Voice.Volume` is the wrong knob** -- it is console chat voice, not game audio.
-* **`FeSubStateTitleStartIngame::v1` calls `0x14039a4d0(GameManagerImp, 0.0f, 1)`**, which looks
-  exactly like "fade the music out at the handoff" and would be the ideal lever applied earlier.
-  It is **unconfirmed**: the argument was traced to `GameManagerImp+0x1160`, but the scan that
-  appeared to tie that field to `Sound::SoundManager` matched displacement `0x1160` on any
-  register, so the sound-range hits were a different object's field. It may as easily be a screen
-  fade. Do not build on it without a second, register-correct read.
+Every one of them searched for a *call to* an FMOD function: `call qword ptr [rip+N]` landing on
+an import slot. That finds nothing here -- literally zero sites for every FMOD symbol. So
+`getMasterChannelGroup`, `setMute` and `setPaused` were written off as dead strings in a
+statically linked library.
 
-`MOFmodSoundManager@DLMO`'s vtable at `0x1411841b8` has been narrowed to 19 float-handling
-candidates -- v19, v39, v64, v65, v66, v69, v70, v71, v72, v73, v76, v77, v78, v79, v80, v81,
-v101, v117, v120. The next move is a trace, not more reading: hold the title screen open
-(`--continue-slot -1`) and break on those slots while the music plays. A *setter* will not fire
-during steady playback, so the ones worth catching are the per-frame appliers -- the slots that
-fire continuously.
+**FMOD is not statically linked.** `fmodex64.dll` and `fmod_event64.dll` sit beside the exe and
+are imported by name, and MSVC does not call an import directly -- it calls a `jmp qword ptr
+[rip+N]` thunk that jumps through the IAT. Scanning for the *thunks* first, then for calls to
+those, turns up thirteen and the whole API behind them:
 
-### The trace was attempted, and does not work under Proton
+| import | thunk | call sites |
+| --- | --- | --- |
+| `System::getMasterChannelGroup` | `0x1409fd3a8` | 5 |
+| `ChannelGroup::setVolume` | `0x1409fd3c0` | **1** |
+| `Event::setPaused` | `0x140a04bf2` | 7 |
+| `Event::start` | `0x140a04bb6` | 6 |
+| `Event::setMute` | `0x140a04bfe` | 1 |
 
-Recorded so the prescription above is not followed into the same wall. The game runs inside
-pressure-vessel's bwrap container (Steam Linux Runtime 4), and a debugger launched from the host
-cannot reach its namespace:
+That "1" is the useful number: exactly one instruction in the image sets a channel group's volume,
+so there is no second path to fight with.
 
-* Attaching by `targetId` planned `winedbg --gdb <winepid>` and then observed nothing --
-  no registers, no stack, no backtrace, no breakpoint hit.
-* Attaching by `pid` with an explicit `targetPath` could not even plan a command.
+### The object, named rather than guessed
 
-**The attach attempt also appears to have killed the game**, which had been sitting healthily at
-the top menu (`0x47` at t=4.52s) with nothing else touching it.
+```text
+[0x14166dfa8]        MOFmodSoundManager*   ; one write, 0x1409e5d00, from the lazy ctor
+        + 0x930      f32                   ; the master volume the game applies
+        + 0x9f8      FMOD::ChannelGroup*   ; the master group
+```
 
-The PulseAudio fallback -- mute the game's sink-input for the boot window -- could not be
-confirmed either: `pactl list sink-inputs` showed no DARK SOULS II stream, but by then the process
-had already died, so that is an unfinished check rather than a negative result.
+The class is not inferred from offsets. The lazy accessor `0x1409e5c90` allocates `0xce0` bytes and
+constructs them, and the vtable that object carries (`0x1411841b8`) has a complete-object locator
+whose type descriptor reads `.?AVMOFmodSoundManager@DLMO@@`. Both functions that touch `+0x9f8` are
+slots in *that* vtable:
 
-**The recommended route is now in-process, not a debugger.** This repo already injects a DLL into
-the game, so a hook that logs entry to the 19 candidate slots answers the same question from
-inside the container, with no external debugger and no risk of killing the process. That is the
-cheapest remaining path and it reuses machinery `ds2-continue` already has.
+* **v6, `0x1409ddbe0`** (init) does `lea rdx,[r15+0x9f8]` and passes it to
+  `System::getMasterChannelGroup` as the out-parameter. FMOD writes the field itself.
+* **v2, `0x1409e0910`** (the command drain) does `movss xmm1,[rdi+0x930]; mov rcx,[rdi+0x9f8]` and
+  makes the image's only `ChannelGroup::setVolume` call.
+
+Same class, same vtable, same offset, so the two `0x9f8` are one field. That is the whole
+identification, and none of it rests on a name resembling a concept.
+
+### What ships
+
+`crates/ds2-continue/src/silence.rs`, on by default whenever `[continue] slot` is set:
+
+* Detour **`MOFmodSoundManager::v0`** (`0x1409dfef0`, the per-frame pump -- identified by
+  containing the image's only `EventSystem::update` call, which FMOD requires once a frame). After
+  the original, re-assert `setVolume(master, 0.0)`.
+* Detour **`FeSubStateTitleStartIngame::v1`** (`0x1400fde30`, slot 1 of vtable `0x1410bdbf8`) to
+  request the release. The `setVolume` itself is performed by the pump on its next frame, so every
+  call into `fmodex64.dll` happens on the thread that already owns the audio pump.
+* Restore to `mgr[+0x930]` -- the value the game itself last applied -- not to `1.0`, which would
+  silently overwrite the options menu. If that field is not a usable volume (zero because nothing
+  has applied one yet), it falls back to `1.0` and logs which was used.
+
+The mute itself patches no `.text`: it reads two globals and calls through the game's own import
+slot, the same property `ds2-offline` relies on for WS2_32.
+
+A shortcut that dies before `StartIngame` would otherwise stay silent forever, so the list's
+back-out and ownership-refusal phases release it too, as does every path that abandons the
+autoload. Every arm and release is logged with the reason.
+
+### Not measured
+
+This has not been run. The static identification is as tight as static gets -- FMOD writes the
+field, RTTI names the class, and there is only one volume call site -- but nobody has heard it.
+Run `python3 scripts/ds2-run.py --continue-slot N` and read the log for
+`silence armed` / `silence restored volume=… source=…`; `source=default` means `+0x930` was not
+populated and the fallback fired, which is the one behaviour worth checking by ear.
+
+### Why not a debugger
+
+Tracing was the recommended next step and it does not work here. The game runs inside
+pressure-vessel's bwrap container (Steam Linux Runtime 4), so a host-launched `winedbg --gdb`
+cannot reach its namespace -- attaching by `targetId` planned a command and observed nothing, and
+attaching by `pid` could not plan one at all. The attach also appears to have killed the game.
+Anything that needs to observe this process has to be an in-process hook, which is what the repo
+already does.
 
 ## The caveat that governs every address here
 

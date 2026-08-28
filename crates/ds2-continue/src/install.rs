@@ -19,7 +19,7 @@ pub fn set_logger(logger: LogFn) {
     LOGGER.store(logger as usize, Ordering::Release);
 }
 
-fn log(args: std::fmt::Arguments<'_>) {
+pub(crate) fn log(args: std::fmt::Arguments<'_>) {
     let raw = LOGGER.load(Ordering::Acquire);
     if raw != 0 {
         // SAFETY: `raw` is only ever a `LogFn` stored by `set_logger` above.
@@ -252,6 +252,15 @@ unsafe extern "system" fn detour_update(this: *mut u8) {
         unsafe { take_load_branch(this) };
     }
 
+    // THE TWO WAYS THE LIST ENDS WITHOUT LOADING. Suppression is released at `StartIngame`, which
+    // a backed-out or refused list never reaches -- so without this the game would keep playing
+    // silently long after the shortcut it was covering had stopped.
+    if after.phase == ds2_rva::FE_DATA_LIST_PHASE_REFUSED {
+        crate::silence::release("data-list-refused");
+    } else if after.phase == ds2_rva::FE_DATA_LIST_PHASE_BACK {
+        crate::silence::release("data-list-backed-out");
+    }
+
     // NOTHING THE POLL TOUCHES IS VALID BEFORE, and that is wider than the first fix assumed. The original opens with
     // `group->vtable[4](group)`, which is what SETS the action -- so a sample taken before it
     // carries the previous frame's value. The first recorded load printed `action=0` beside a
@@ -354,6 +363,7 @@ unsafe fn take_load_branch(this: *mut u8) {
         log(format_args!(
             "{LOG_PREFIX} autoload abandoned reason=no-globals"
         ));
+        crate::silence::release("abandon-no-globals");
         return;
     };
     // SAFETY: `context` is live; the group is the one the update just polled.
@@ -373,6 +383,7 @@ unsafe fn take_load_branch(this: *mut u8) {
         log(format_args!(
             "{LOG_PREFIX} autoload abandoned slot={wanted} reason=unresolved"
         ));
+        crate::silence::release("abandon-unresolved");
         return;
     };
     // SAFETY: `record` is one element of the array the game indexes identically.
@@ -383,6 +394,7 @@ unsafe fn take_load_branch(this: *mut u8) {
         log(format_args!(
             "{LOG_PREFIX} autoload abandoned slot={wanted} reason=slot-unusable flags=0x{flags:02x}"
         ));
+        crate::silence::release("abandon-slot-unusable");
         return;
     }
 
@@ -567,7 +579,7 @@ pub unsafe fn install() -> Outcome {
         detour: *mut c_void,
         trampoline: &'static AtomicUsize,
     }
-    let sites: [Site; 3] = [
+    let mut sites: Vec<Site> = vec![
         Site {
             name: "top-menu-update",
             rva: ds2_rva::FE_SUBSTATE_TOP_MENU_UPDATE,
@@ -590,6 +602,21 @@ pub unsafe fn install() -> Outcome {
             trampoline: &UPDATE_TRAMPOLINE,
         },
     ];
+    // Only patched when `[continue] silence` asked for it. Two of the three sites above are needed
+    // to record anything at all; these two exist purely to keep the shortcut quiet, so a run that
+    // does not want that should not carry them.
+    if crate::silence::enabled() {
+        sites.extend(
+            crate::silence::sites()
+                .into_iter()
+                .map(|(name, rva, detour, trampoline)| Site {
+                    name,
+                    rva,
+                    detour,
+                    trampoline,
+                }),
+        );
+    }
     let attempted = sites.len();
 
     let base = match ds2_game_base::mem::game_module_base() {
@@ -605,6 +632,7 @@ pub unsafe fn install() -> Outcome {
         }
     };
     MODULE_BASE.store(base, Ordering::Release);
+    crate::silence::set_module_base(base);
 
     // MinHook is statically linked into this DLL, so ALREADY_INITIALIZED can only mean this ran
     // twice. Treat it as success, exactly as the other feature crates do.
@@ -652,9 +680,20 @@ pub unsafe fn install() -> Outcome {
             site.name, site.rva
         ));
     }
+    // ARM ONLY IF THE PUMP IS ACTUALLY HOOKED. Arming with no detour to enforce it would be
+    // harmless, but arming when the *release* failed to install would mute the game with nothing
+    // able to give it back.
+    if installed == attempted && PRESELECT_SLOT.load(Ordering::Acquire) >= 0 {
+        crate::silence::arm();
+    } else if crate::silence::enabled() {
+        log(format_args!(
+            "{LOG_PREFIX} silence not-armed installed={installed} of {attempted}"
+        ));
+    }
     log(format_args!(
-        "{LOG_PREFIX} install installed={installed} of {attempted} preselect={}",
-        PRESELECT_SLOT.load(Ordering::Acquire)
+        "{LOG_PREFIX} install installed={installed} of {attempted} preselect={} silence={}",
+        PRESELECT_SLOT.load(Ordering::Acquire),
+        crate::silence::enabled()
     ));
     Outcome {
         installed,

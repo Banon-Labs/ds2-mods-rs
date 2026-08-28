@@ -52,14 +52,26 @@
 //!
 //! Like `ds2-boot-timeline`, and for the same reason: it is an instrument. `[continue]
 //! record = true`, or `ds2-run.py --continue-record`, turns it on for a measurement run.
+//!
+//! # Silencing the shortcut
+//!
+//! A shortcut nobody pressed anything for still plays the title music and the menu's confirm
+//! sounds, which is conspicuous. `[continue] silence = true` holds FMOD's master channel group at
+//! zero from install until `FeSubStateTitleStartIngame`, then restores the volume the game itself
+//! had applied. See [`silence`] for how that lever was found and why the four approaches before it
+//! failed.
 
 #![cfg_attr(not(windows), allow(unused))]
 
 #[cfg(windows)]
 mod install;
+#[cfg(windows)]
+mod silence;
 
 #[cfg(windows)]
 pub use install::{LogFn, Outcome, install, set_logger, set_preselect_slot};
+#[cfg(windows)]
+pub use silence::set_enabled as set_silence;
 
 /// Prefix on every line this crate writes to the loader log.
 pub const LOG_PREFIX: &str = "ds2-continue:";

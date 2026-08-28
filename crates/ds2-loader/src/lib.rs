@@ -821,6 +821,9 @@ fn install_continue_record() {
     }
     ds2_continue::set_logger(log_line);
     ds2_continue::set_preselect_slot(config.slot);
+    // Only meaningful alongside a slot: without one there is no shortcut to cover, and muting a
+    // run the player is driving by hand would be a bug rather than a feature.
+    ds2_continue::set_silence(config.silence && config.slot >= 0);
     // SAFETY: the target is an ordinary function start recorded in `ds2-rva` and resolved against
     // the live module base. `scripts/ds2-arxan-chain.py` shows a `rex push rsi` prologue at the
     // entry rather than the five-byte `e9` an Arxan-redirected entry holds, and the detour declares

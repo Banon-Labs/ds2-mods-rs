@@ -1869,6 +1869,13 @@ pub const CONTENT_OWNED_MASK_B: usize = 0x30;
 /// transition table routes to [`FE_SUBSTATE_ID_TITLE_LOAD_PROFILE`].
 pub const FE_DATA_LIST_PHASE_LOAD: i32 = 2;
 
+/// The phase the character list writes when the player backs out: `3`, routed to
+/// [`FE_SUBSTATE_ID_TITLE_TOP_MENU`].
+///
+/// One of the list's two ways of ending without loading anything, and so one of the two places a
+/// shortcut that suppressed something for the duration of the load has to undo it.
+pub const FE_DATA_LIST_PHASE_BACK: i32 = 3;
+
 /// The phase written instead when the ownership gate refuses: `6`, routed to `0x5d`.
 pub const FE_DATA_LIST_PHASE_REFUSED: i32 = 6;
 
@@ -1897,3 +1904,77 @@ pub const FE_TOP_MENU_ACTION_LOAD_GAME: i32 = 2;
 
 /// The top menu's resting phase, meaning "no row activated this frame". `0`.
 pub const FE_TOP_MENU_PHASE_RESTING: i32 = 0;
+
+// ---------------------------------------------------------------------------------------------
+// Audio. The frontend never calls a named sound function, which is what made this hard to find:
+// every earlier sweep looked for `call [rip+N]` into the FMOD IAT and found nothing. MSVC routes
+// imports through `jmp [rip+N]` thunks, so the call sites are `call <thunk>` and an IAT-target
+// scan misses all of them. Scanning for the thunks first turns up thirteen, and the levers the
+// project had concluded were absent are all live.
+//
+// FMOD is NOT statically linked in this build. `fmodex64.dll` and `fmod_event64.dll` sit beside
+// the exe and are imported by name.
+// ---------------------------------------------------------------------------------------------
+
+/// The one global holding a `MOFmodSoundManager*` (`DLMO`). RVA `0x0166dfa8`, VA `0x14166dfa8`.
+///
+/// Read at 17 sites and written at exactly one, `0x1409e5d00`, from the lazy accessor
+/// `0x1409e5c90`: it allocates `0xce0` bytes, constructs with `0x1409da780`, and stores the
+/// result. `0x1409ddbc0` is the fast path -- `mov rax,[this]; test rax,rax; je <init>; ret`.
+///
+/// The class is confirmed by RTTI rather than inferred: the vtable at `0x1411841b8` carries a
+/// complete-object locator whose type descriptor names `.?AVMOFmodSoundManager@DLMO@@`, and both
+/// functions below are slots in it.
+pub const SOUND_MANAGER_SINGLETON: u32 = 0x0166_dfa8;
+
+/// `MOFmodSoundManager` -> the master `FMOD::ChannelGroup*`. `0x9f8`.
+///
+/// **Written by the game's own init and read back by its own update**, which is what makes this
+/// an identification rather than a guess:
+///
+/// * `MOFmodSoundManager::v6` (`0x1409ddbe0`, init) does
+///   `lea rdx,[r15+0x9f8]; mov rcx,[r13]; call <System::getMasterChannelGroup>` at `0x1409df157`
+///   -- so FMOD itself writes the master group into this field.
+/// * `MOFmodSoundManager::v2` (`0x1409e0910`, the command-queue drain) does
+///   `movss xmm1,[rdi+0x930]; mov rcx,[rdi+0x9f8]; call <ChannelGroup::setVolume>` at
+///   `0x1409e0c8f` -- the image's **only** call to `ChannelGroup::setVolume`.
+///
+/// Both are methods of the same class on the same vtable, so the two `0x9f8` are the same field.
+pub const SOUND_MANAGER_MASTER_GROUP_OFFSET: usize = 0x9f8;
+
+/// `MOFmodSoundManager` -> the master volume the game itself last applied, `f32`. `0x930`.
+///
+/// The command drain stores its incoming float here (`movss [rdi+0x930],xmm1`) and reloads it
+/// three instructions later to hand to `ChannelGroup::setVolume`. So it is not a cached copy of
+/// something else -- it is the value the game means the master group to have, which is what makes
+/// it the right thing to restore to. Reading it back beats writing `1.0`, which would silently
+/// discard whatever the player set in the options menu.
+pub const SOUND_MANAGER_MASTER_VOLUME_OFFSET: usize = 0x930;
+
+/// IAT slot for `FMOD::ChannelGroup::setVolume(float)` in `fmodex64.dll`. RVA `0x01aae9b4`.
+///
+/// An import slot, not code: patching or reading it never touches `.text`, so Arxan's integrity
+/// checks have nothing to see. Same property `ds2-offline` relies on for the WS2_32 slots.
+///
+/// Calling convention is MSVC `__thiscall` on x64: `rcx` is the `ChannelGroup*`, the float goes in
+/// `xmm1`, and the return is an `FMOD_RESULT` (`0` == `FMOD_OK`).
+pub const FMOD_CHANNEL_GROUP_SET_VOLUME_IAT: u32 = 0x01aa_e9b4;
+
+/// `MOFmodSoundManager::v0`, the per-frame pump. RVA `0x009dfef0`, VA `0x1409dfef0`.
+///
+/// Identified as per-frame by what it contains rather than by where it is called from: the sole
+/// call to `FMOD::EventSystem::update` in the image is at `0x1409e0080`, inside this function.
+/// FMOD requires that once per frame, so this runs once per frame.
+///
+/// Not an Arxan redirect. `scripts/ds2-arxan-chain.py` reported `UNKNOWN` until its prologue table
+/// learned `48 8b c4` (`mov rax,rsp`); the entry is ordinary code, not a five-byte `e9` stub.
+pub const SOUND_MANAGER_UPDATE: u32 = 0x009d_fef0;
+
+/// `FeSubStateTitleStartIngame::v1` (enter). RVA `0x000fde30`, VA `0x1400fde30`.
+///
+/// Slot 1 of vtable `0x1410bdbf8`, which RTTI names `FeSubStateTitleStartIngame`. This is the last
+/// substate on the load chain -- the boundary the autocontinue shortcut ends at, and so the point
+/// at which anything suppressed for the duration of that shortcut has to be given back.
+///
+/// Not an Arxan redirect: clean prologue at the entry.
+pub const FE_SUBSTATE_START_INGAME_ENTER: u32 = 0x000f_de30;
