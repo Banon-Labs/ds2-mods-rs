@@ -15,6 +15,37 @@ static LOGGER: AtomicUsize = AtomicUsize::new(0);
 /// Signature of the sink. Matches the loader's own logging entry point.
 pub type LogFn = fn(std::fmt::Arguments<'_>);
 
+/// Change what a registered row says on screen.
+///
+/// **Safe from any thread, and nothing appears until the game thread pushes it.** The text is
+/// copied into a buffer this crate leaked at first bind; the game only sees it when the pause menu
+/// is next opened, or when [`refresh_row_captions`] is called while it is already up. That split is
+/// deliberate: the caller most likely to want this is reporting the result of something slow, which
+/// means it is holding that result on a worker, and writing into the scene from there would race
+/// the renderer.
+///
+/// Text longer than the caption buffer is TRUNCATED rather than refused -- a short label is a
+/// better failure than one still saying "Fetching...".
+///
+/// Returns whether the row exists. `false` also comes back before any pause menu has been opened,
+/// because the buffers are built from the registry on the first bind.
+pub fn set_row_caption(row: crate::RowId, text: &str) -> bool {
+    crate::caption::set_caption(row.0, text)
+}
+
+/// Push every registered row's caption onto its element now.
+///
+/// # Safety
+///
+/// Calls into the game's scene machinery. **Game thread only**, and only while the pause menu whose
+/// captions these are is actually up -- from a [`RowSpec::on_confirm`](crate::RowSpec::on_confirm),
+/// which is exactly that. Returns how many were written; `0` means no menu has been bound yet and
+/// there was nothing to write to.
+pub unsafe fn refresh_row_captions() -> usize {
+    // SAFETY: forwarded to the caller, who is promising the game thread and a live menu.
+    unsafe { crate::caption::push_captions() }
+}
+
 /// Point this crate's logging at the loader's log file. Call before [`install`].
 pub fn set_logger(logger: LogFn) {
     LOGGER.store(logger as usize, Ordering::Release);

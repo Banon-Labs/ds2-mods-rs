@@ -40,7 +40,11 @@
 pub const LOG_PREFIX: &str = "ds2-build-import:";
 
 #[cfg(windows)]
+mod clipboard;
+#[cfg(windows)]
 mod flow;
+#[cfg(windows)]
+mod save;
 #[cfg(windows)]
 mod steam;
 
@@ -67,13 +71,25 @@ mod install {
     /// busy", which points at the wrong culprit when the thing holding it is us.
     static SESSION_OPEN: AtomicBool = AtomicBool::new(false);
 
+    /// The row this crate registered, so it can be told to change its own caption.
+    ///
+    /// `usize::MAX` until [`register`] succeeds, which is a value no registry index can be -- a
+    /// caption written before registration would otherwise land on row zero, which belongs to
+    /// somebody else.
+    static ROW: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+    /// The row to write captions to.
+    pub(crate) fn row_id() -> ds2_menu_row::RowId {
+        ds2_menu_row::RowId(ROW.load(Ordering::Acquire))
+    }
+
     /// Register the row and point this crate's logging at the loader's file.
     ///
     /// Call BEFORE `ds2_menu_row::install`, which seals the registry. Returns whatever
     /// [`ds2_menu_row::add_row`] said, so the caller can log a refusal in its own voice.
     pub fn register(logger: LogFn) -> Result<ds2_menu_row::RowId, ds2_menu_row::AddRowError> {
         LOGGER.store(logger as usize, Ordering::Release);
-        ds2_menu_row::add_row(ds2_menu_row::RowSpec {
+        let registered = ds2_menu_row::add_row(ds2_menu_row::RowSpec {
             tab: ds2_menu_row::Tab::Quit,
             caption: ROW_CAPTION,
             icon: ds2_rva::FLO_QUIT_ICON_DEFINITION,
@@ -86,22 +102,34 @@ mod install {
                 strength: ds2_rva::FLO_ADDED_ROW_TINT_STRENGTH,
             }),
             on_confirm: open_field,
-        })
+        });
+        if let Ok(id) = registered {
+            ROW.store(id.0, Ordering::Release);
+        }
+        registered
     }
 
     /// What pressing the row does. **Runs on the game thread, with the menu still up.**
     ///
-    /// It starts a worker and returns. Everything else -- the field, the wait, the fetch -- happens
-    /// there; see [`crate::flow`] for why none of it can happen here.
+    /// THE FIELD IS OPENED HERE, not on the worker. The game makes its own `ShowGamepadTextInput`
+    /// call from its own frame loop, and the first run of this crate called it from a worker and got
+    /// `false` back -- so the call moved to the thread the game uses, to take that difference off
+    /// the table. Only the WAIT is handed off, because the wait is unbounded and the fetch that
+    /// follows it is a blocking TLS handshake.
     fn open_field() {
         if SESSION_OPEN.swap(true, Ordering::AcqRel) {
             return log_line(format_args!("{LOG_PREFIX} a field is already open"));
         }
-        // A failed spawn must clear the flag, or the row is dead for the rest of the process.
+        let Some(job) = crate::flow::begin_session() else {
+            SESSION_OPEN.store(false, Ordering::Release);
+            return;
+        };
+        // A failed spawn must clear the flag AND drop the job, or the row is dead for the rest of
+        // the process and any keyboard claim inside the job stays wedged with it.
         if std::thread::Builder::new()
             .name("ds2-build-import".to_owned())
-            .spawn(|| {
-                crate::flow::run_session();
+            .spawn(move || {
+                crate::flow::finish_session(job);
                 SESSION_OPEN.store(false, Ordering::Release);
             })
             .is_err()
@@ -124,4 +152,4 @@ mod install {
 }
 
 #[cfg(windows)]
-pub(crate) use install::log_line;
+pub(crate) use install::{log_line, row_id};

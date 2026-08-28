@@ -23,6 +23,7 @@ ds2-build-import-core.workspace = true
 ds2-game-base.workspace = true
 ds2-menu-row.workspace = true
 ds2-rva.workspace = true
+ds2-sl2-core.workspace = true
 
 [lints]
 workspace = true

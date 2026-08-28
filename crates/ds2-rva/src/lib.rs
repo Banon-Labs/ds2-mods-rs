@@ -3671,3 +3671,94 @@ pub const STEAM_UTILS_GET_ENTERED_TEXT_LENGTH_SLOT: usize = 0xa8;
 /// Same function, at `0x140ff2101`. **The text comes back UTF-8**, which is why the impl keeps a
 /// `char*` scratch buffer at `+0x10` rather than a wide string.
 pub const STEAM_UTILS_GET_ENTERED_TEXT_SLOT: usize = 0xb0;
+
+/// `FeGroupInGameTopSelect::v2` -- the pause-menu group's per-frame update. RVA `0x000a5dd0`.
+///
+/// **The clock a row needs to report anything.** Captions are otherwise written once, when
+/// `FE_INGAME_TOP_SELECT_CAPTIONS` binds them, so a row that learns something while the menu is
+/// open could not say so until the menu was closed and opened again.
+///
+/// How it was established, since "vtable slot 2" is only a number. Both base classes --
+/// `FexGroupList<FeGroupGrid>` (`0x1410adf18`) and `FeGroupInGameGroupSelect` (`0x1410b6658`) --
+/// hold `0x14001bdd0` in this slot, which is `add rcx,0x58; jmp 0x1400271f0`, and `0x1400271f0`
+/// takes a float in XMM1 and forwards it -- the frame-delta signature
+/// [`FE_TOP_MENU_UPDATE`] already documents. `FeGroupInGameTopSelect` (vtable `0x1410b67f8`)
+/// OVERRIDES it with this, which takes the delta in XMM1, polls the cursor through `0x1400a65f0`,
+/// and on a confirm calls [`FE_INGAME_MENU_DISPATCH`] at `0x1400a5e5f`. A function that reads input
+/// and dispatches the confirm runs once a frame by construction.
+///
+/// Signature: `(this /*rcx*/, f32 delta /*xmm1*/)`.
+pub const FE_INGAME_TOP_SELECT_UPDATE: u32 = 0x000a_5dd0;
+
+/// The bytes [`FE_INGAME_TOP_SELECT_UPDATE`] must begin with, or the detour refuses to patch.
+///
+/// `48 89 5c 24 20` is `mov QWORD PTR [rsp+0x20],rbx` -- **exactly five bytes**, so MinHook
+/// relocates one whole instruction and never splits one. Read out of the image, and
+/// `scripts/ds2-arxan-chain.py 0x1400a5dd0` terminates at hop 0: its own prologue is at its own
+/// entry, so the detour never touches Arxan's code.
+pub const FE_INGAME_TOP_SELECT_UPDATE_PROLOGUE: [u8; 5] = [0x48, 0x89, 0x5c, 0x24, 0x20];
+
+/// The game's top-level `HWND`, inside [`FE_SYSTEM_SINGLETON`]'s target. `+0x08`.
+///
+/// Read out of the only two functions that use it -- the game's own clipboard paste
+/// (`0x00b4ac70`) and copy (`0x00b4b860`). Both do the same three instructions:
+///
+/// ```text
+/// 0x140b4ac76: 48 8b 05 7b a5 b2 00   mov rax,[rip+0xb2a57b]   ; -> 0x1416751f8
+/// 0x140b4ac80: 48 8b 48 08            mov rcx,[rax+0x8]
+/// 0x140b4ac84: ff 15 ...              call [OpenClipboard]
+/// ```
+///
+/// `OpenClipboard` takes an `HWND` and nothing else, so the field's TYPE is settled by its only
+/// use rather than by guessing at a struct layout -- two independent sites, one meaning.
+pub const FE_SYSTEM_HWND_OFFSET: usize = 0x08;
+
+// =================================================================================================
+// THE LIVE CHARACTER
+//
+// `GameManagerImp` -> `GameDataManager` -> `player_data`. Everything here was read out of ONE
+// function -- `FeSubStateTitleLoadProfile`'s work starter at `0x1400fc2a2`..`0x1400fc330` -- which
+// is the code that populates the block when a save is loaded, so the offsets and their MEANINGS
+// come from the same place rather than from a struct dump plus a guess.
+//
+// WHAT IS NOT HERE: stats, soul level, soul memory, equipment, inventory. None of them is mapped in
+// this repo. `PlayerGameData` and `GameDataPlayerInfo` exist as RTTI only inside `FeFunctorJob<...>`
+// template names -- non-polymorphic classes with no vtable of their own, so there is no RTTI
+// shortcut to them, and reaching stats means a separate excavation from `PlayerCtrl`.
+// =================================================================================================
+
+/// `GameManagerImp` -> the object holding the live character block. `+0xC0`.
+///
+/// `mov rdi,[rcx+0xc0]` at `0x1400fc2b7` (`48 8b b9 c0 00 00 00`), where `rcx` is the
+/// `GameDataManager` fetched one instruction earlier by `mov rcx,[rax+0xa8]` at `0x1400fc2a2`
+/// (`48 8b 88 a8 00 00 00`) -- that is [`GAME_DATA_MANAGER_OFFSET`], already recorded.
+///
+/// **Beware the neighbour.** [`GAME_MANAGER_CONTENT_CTX_OFFSET`] is also `0xC0`, but it hangs off
+/// `GameManagerImp` and this one hangs off `GameDataManager` -- same number, different object, one
+/// hop apart. Confusing them gets a pointer that reads plausibly and means nothing.
+pub const GAME_DATA_PLAYER_DATA_OFFSET: usize = 0xC0;
+
+/// The live character's name, as `wchar_t[0x20]`. `player_data + 0x24`.
+///
+/// From the copy the profile loader performs: `lea rcx,[rdi+0x24]` / `mov r8d,0x20` at
+/// `0x1400fc302` (`48 8d 4f 24 41 b8 20 00 00 00`) into `wcsncpy`, taking the name out of the save
+/// slot record.
+///
+/// **The clear site is known too**, which is what makes this usable as a liveness test rather than
+/// just a label: `FeSubStateTitleDeleteDataList`'s leave writes `L""` over it at `0x1400fb822`. A
+/// first unit of `0` therefore means "no character", not merely "not written yet".
+pub const PLAYER_DATA_NAME_OFFSET: usize = 0x24;
+
+/// UTF-16 units in the name field, from the `mov r8d,0x20` the copy is bounded by.
+pub const PLAYER_DATA_NAME_UNITS: usize = 0x20;
+
+/// Set to `1` when a profile has been loaded. `player_data + 0x68`.
+///
+/// `mov DWORD PTR [rdi+0x68],1` at `0x1400fc318` (`c7 47 68 01 00 00 00`), immediately after the
+/// name copy.
+///
+/// **The write to `1` is verified and NOTHING WAS FOUND THAT WRITES IT BACK TO `0`.** So this may
+/// be sticky for the life of the process -- "a character was loaded at some point" rather than "one
+/// is loaded now". Use it as corroboration, never as the sole test, and prefer
+/// [`PLAYER_DATA_NAME_OFFSET`], whose clearing site IS known.
+pub const PLAYER_DATA_PROFILE_LOADED_OFFSET: usize = 0x68;

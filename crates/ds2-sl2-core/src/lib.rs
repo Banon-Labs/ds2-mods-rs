@@ -81,6 +81,21 @@ impl core::fmt::Display for Sl2Error {
     }
 }
 
+/// How many payloads a save holds, or why it is not a save.
+///
+/// **A structural check, not a decryption.** It reads the BND4 magic and walks the entry table,
+/// which is enough to separate "this is a Dark Souls II save" from "this is a truncated file, a
+/// zero-byte placeholder, or something else entirely" -- and it is all a caller needs before
+/// deciding whether there is a character to act on. Decrypting the payloads would prove more and
+/// costs an AES pass over the whole file; nothing that only wants to know the save is real should
+/// pay for that.
+///
+/// The count is returned rather than a bare `bool` because zero entries is a structurally valid
+/// BND4 that holds no character, and a caller that wants to refuse that can.
+pub fn validate(save: &[u8]) -> Result<usize, Sl2Error> {
+    entries(save).map(|entries| entries.len())
+}
+
 /// One BND4 entry: where its payload starts and how long it is.
 struct Entry {
     offset: usize,
@@ -284,5 +299,43 @@ mod tests {
             rebind(&mut [], "nothex"),
             Err(Sl2Error::BadSteamId)
         ));
+    }
+}
+
+#[cfg(test)]
+mod validate_tests {
+    use super::*;
+
+    /// Anything that is not a BND4 container is refused by name.
+    #[test]
+    fn a_non_save_is_refused_rather_than_counted() {
+        assert!(matches!(validate(b""), Err(Sl2Error::NotBnd4)));
+        assert!(matches!(
+            validate(b"not a save at all"),
+            Err(Sl2Error::NotBnd4)
+        ));
+        // The right magic on a file too short to hold a header is still not a save.
+        assert!(matches!(validate(b"BND4"), Err(Sl2Error::NotBnd4)));
+    }
+
+    /// A header claiming more entries than the file can hold is truncation, not a count.
+    #[test]
+    fn a_header_that_overruns_the_file_is_truncation() {
+        let mut save = vec![0u8; 0x40];
+        save[..4].copy_from_slice(b"BND4");
+        save[0x0C..0x10].copy_from_slice(&99u32.to_le_bytes());
+        assert!(matches!(validate(&save), Err(Sl2Error::Truncated)));
+    }
+
+    /// A well-formed header with no entries counts zero rather than erroring.
+    ///
+    /// Structurally a save, holding nothing -- which is a different answer from "not a save", and
+    /// the reason this returns a count instead of a bool.
+    #[test]
+    fn an_empty_container_counts_zero() {
+        let mut save = vec![0u8; 0x40];
+        save[..4].copy_from_slice(b"BND4");
+        save[0x0C..0x10].copy_from_slice(&0u32.to_le_bytes());
+        assert!(matches!(validate(&save), Ok(0)));
     }
 }

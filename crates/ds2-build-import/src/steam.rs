@@ -276,6 +276,17 @@ fn impl_singleton() -> Option<usize> {
     (pointer != 0).then_some(pointer)
 }
 
+/// Whether the game has ever built its own `SoftwareKeyboardManagerImpl`.
+///
+/// Reported beside a refusal because it separates two very different stories. If the game has
+/// NEVER built one, the game has never successfully opened a Steam keyboard either -- which on a
+/// desktop Steam is the expected state and points at Big Picture rather than at anything this crate
+/// did. If it HAS, then the same call works for the game and not for us, and the difference is ours
+/// to find.
+pub(crate) fn game_keyboard_built() -> bool {
+    impl_singleton().is_some()
+}
+
 /// A claim on the game's keyboard state, released when it drops.
 ///
 /// The whole point is the `Drop`. Restoring `m_state` on the happy path is easy to write and easy

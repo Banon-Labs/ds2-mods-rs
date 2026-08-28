@@ -480,6 +480,7 @@ dependencies = [
  "ds2-game-base",
  "ds2-menu-row",
  "ds2-rva",
+ "ds2-sl2-core",
 ]
 
 [[package]]
