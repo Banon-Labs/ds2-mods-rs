@@ -3055,7 +3055,21 @@ pub const FLO_ADDED_ROW_LABEL_ID: u32 = 0x001e_ac4a;
 /// It scales the panel's CURSOR with it -- `0x1eac81`'s definition carries both the scroll and the
 /// highlight. Only the quit tab is affected, because what is scaled is this crate's own copy of
 /// that tab's child record rather than the shared definition all three tabs instantiate.
-pub const FLO_PANEL_STRETCH_Y: f32 = 1.1706;
+/// **CURRENTLY A PROBE VALUE, NOT THE SHIP VALUE.** `1.0794` and then `1.1706` were both reported
+/// as no visible change, and "17% of a 341-unit scroll is invisible" is not credible -- that is 58
+/// units, more than a row. So the thing in doubt is no longer the factor, it is whether this field
+/// reaches the scroll at all. `2.0` is deliberately unmissable, and because it is applied to ONE
+/// axis it separates three outcomes in one look:
+///
+/// * the scroll is twice as TALL -- this offset is scale-y, and the factor goes back to `1.1706`;
+/// * the scroll is twice as WIDE -- this offset is scale-X, and the sibling at `+0x08` is the one;
+/// * nothing moves -- the panel record is not what draws the scroll, and the next step is reading
+///   the 17 quads in shape `0x0220`'s geometry rather than guessing a fourth time.
+///
+/// The builder's identity test compares `pfVar1[2]` and `pfVar1[3]` against `1.0` and so cannot
+/// tell x from y; nothing else read so far distinguishes them either, which is why this is a
+/// measurement and not another arithmetic correction.
+pub const FLO_PANEL_STRETCH_Y: f32 = 2.0;
 
 /// Index into [`FLO_QUIT_TAB_CHILD_IDS`] of the panel the stretch applies to.
 pub const FLO_QUIT_TAB_PANEL: usize = 0;

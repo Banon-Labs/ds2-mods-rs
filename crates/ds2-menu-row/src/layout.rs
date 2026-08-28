@@ -159,6 +159,17 @@ unsafe fn child_ids(children: *const u8, count: usize) -> Vec<u32> {
         .collect()
 }
 
+/// The twelve `f32` of a transform block, for a log line.
+fn floats(block: &[u8]) -> String {
+    block
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| format!("{}", f32::from_le_bytes(*c)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// `0x1eac81 0x1eace9 ...`, for a log line.
 fn describe(ids: &[u32]) -> String {
     ids.iter()
@@ -266,6 +277,7 @@ unsafe fn build(original: *mut u8) -> Option<*mut u8> {
     );
 
     // Same for the transform blocks: copied from the row being cloned, then moved down one step.
+    let mut source_panel: *const u8 = std::ptr::null();
     for (slot, template) in [
         (0usize, ds2_rva::FLO_QUIT_TAB_ROW_TEMPLATE),
         (1, ds2_rva::FLO_QUIT_TAB_MARK_TEMPLATE),
@@ -290,7 +302,10 @@ unsafe fn build(original: *mut u8) -> Option<*mut u8> {
         let destination = match slot {
             0 => container.row_transform.as_mut_ptr(),
             1 => container.mark_transform.as_mut_ptr(),
-            _ => container.panel_transform.as_mut_ptr(),
+            _ => {
+                source_panel = source;
+                container.panel_transform.as_mut_ptr()
+            }
         };
         // SAFETY: source is a live transform block, destination is a buffer of exactly that size.
         unsafe {
@@ -325,6 +340,19 @@ unsafe fn build(original: *mut u8) -> Option<*mut u8> {
     }
     container.panel_transform[scale_at..][..4]
         .copy_from_slice(&(scale * ds2_rva::FLO_PANEL_STRETCH_Y).to_le_bytes());
+    // THE WHOLE BLOCK, BEFORE AND AFTER. Two runs reported no visible change from a 17% stretch,
+    // which is 58 units on a 341-unit scroll -- so the question stopped being "what factor" and
+    // became "did the write land, and on which field". Printing the block makes a null result
+    // diagnosable instead of another thing to guess about.
+    // SAFETY: `source_panel` is the live transform this block was copied from, and both are
+    // `FLO_TRANSFORM_SIZE` bytes.
+    let before = unsafe { std::slice::from_raw_parts(source_panel, ds2_rva::FLO_TRANSFORM_SIZE) };
+    log(format_args!(
+        "{LOG_PREFIX} panel transform at=0x{:016x} before=[{}] after=[{}] scaled-offset={scale_at:#x}",
+        source_panel as usize,
+        floats(before),
+        floats(&container.panel_transform),
+    ));
 
     for (slot, id, depth) in [
         (ROW, ds2_rva::FLO_ADDED_ROW_ID, ROW_DEPTH),
