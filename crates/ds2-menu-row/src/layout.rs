@@ -661,7 +661,8 @@ unsafe fn build(original: *mut u8, panel: *mut u8, row: *mut u8) -> Option<*mut 
             // The tint is printed as r/g/b/a rather than as a packed word, because a packed word
             // is exactly the notation that let it be written backwards.
             "{LOG_PREFIX} row definition={:#x} from={:#x} icon={:#x} \
-             tint=r{:02x}g{:02x}b{:02x}a{:02x} flags+={:#x} highlight={:#x} kept",
+             tint=r{:02x}/g{:02x}/b{:02x}/a{:02x} strength={}/255 flags+={:#x} \
+             highlight={:#x} kept",
             ds2_rva::FLO_ADDED_ROW_DEFINITION,
             ds2_rva::FLO_QUIT_ROW_DEFINITION,
             ds2_rva::FLO_QUIT_ICON_DEFINITION,
@@ -669,6 +670,7 @@ unsafe fn build(original: *mut u8, panel: *mut u8, row: *mut u8) -> Option<*mut 
             ds2_rva::FLO_ADDED_ROW_TINT[1],
             ds2_rva::FLO_ADDED_ROW_TINT[2],
             ds2_rva::FLO_ADDED_ROW_TINT[3],
+            ds2_rva::FLO_ADDED_ROW_TINT_STRENGTH,
             ds2_rva::FLO_TRANSFORM_COLOUR_LIVE | ds2_rva::FLO_TRANSFORM_COLOUR_RGB,
             ds2_rva::FLO_QUIT_ROW_HIGHLIGHT_DEFINITION
         ));

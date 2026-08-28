@@ -3134,12 +3134,24 @@ pub const FLO_ADDED_ROW_HUE: [u8; 3] = [0xff, 0x64, 0x50];
 
 /// How far [`FLO_ADDED_ROW_TINT`] is pushed from white toward [`FLO_ADDED_ROW_HUE`], out of `255`.
 ///
-/// `26` is a tenth. Full strength was measured on screen as simply red -- which is a re-skin, not
-/// a mark, and a re-skin of one row out of four reads as a different KIND of thing rather than as
-/// the same thing with a warning on it. **This is the one number in this block that is taste and
-/// not measurement**, and it is on its own line so it can be turned without touching the hue or
-/// the byte order that took a run each to settle.
-pub const FLO_ADDED_ROW_TINT_STRENGTH: u8 = 26;
+/// **This is the one number in this block that is taste and not measurement**, and it is on its
+/// own line so it can be turned without touching the hue or the byte order that took a run each to
+/// settle. Three values have been on screen:
+///
+/// ```text
+///  255  100%  #ff6450   "this is red"          -- a re-skin: a different KIND of row
+///   26   10%  #fff0ee   "it looks like 0% red" -- green moved 15 of 255, under the threshold
+///   77   30%  #ffd1cb   the current value
+/// ```
+///
+/// **The scale is nowhere near linear in the eye.** A tenth of the distance to the hue is a 6%
+/// channel drop, which on a small glyph over a warm background is not a colour, it is a rounding
+/// error. `77` is `-18%` green and `-20%` blue: the smallest step that should register as tinted
+/// at all rather than the smallest step that is arithmetically a tint.
+///
+/// If it still reads as white the next stops are `96` (`#ffc5be`) and `128` (`#ffb2a8`); if it has
+/// gone back to being a red icon, `51` (`#ffe0dc`).
+pub const FLO_ADDED_ROW_TINT_STRENGTH: u8 = 77;
 
 /// Mix one channel `strength/255` of the way from white toward `channel`.
 ///
