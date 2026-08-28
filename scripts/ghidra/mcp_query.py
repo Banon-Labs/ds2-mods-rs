@@ -2,7 +2,7 @@
 """Minimal TCP client for the 13bm Ghidra MCP daemon (ghidra.mcp.MCPServer).
 
 The daemon (scripts/ghidra/mcp-daemon.sh) keeps the DS2 program warm and answers MCP tool
-calls over a TCP socket on 127.0.0.1:8765. This client speaks that raw wire protocol directly,
+calls over a TCP socket on 127.0.0.1:8766. This client speaks that raw wire protocol directly,
 with no Go bridge and no MCP tool surface involved:
 
   wire: 4-byte big-endian length prefix + UTF-8 JSON
@@ -23,7 +23,14 @@ import socket
 import struct
 import sys
 
-HOST, PORT = "127.0.0.1", 8765
+#: 8766 IS THE DS2 DAEMON. 8765 IS ELDEN RING'S, and it is usually up on this machine too.
+#: This default was 8765 -- inherited from the er-mods-rs original -- so every query that did not
+#: pass an explicit port was answered by ELDEN RING while being read as DS2. Measured, not feared:
+#: `getFunctionByAddress 0x1402e6fc1` returns `IsArrivedPathNotNew(AiPathData *, float)` on 8765
+#: and `FUN_1402e6e60` on 8766. Both daemons answer `ping` with "pong", so liveness proves
+#: nothing about WHICH GAME is answering -- see the "Port 8766, not 8765" trap in
+#: `docs/GHIDRA-MCP.md`, which this line was contradicting.
+HOST, PORT = "127.0.0.1", 8766
 
 
 def call(method, params=None, timeout=25.0, host=HOST, port=PORT):

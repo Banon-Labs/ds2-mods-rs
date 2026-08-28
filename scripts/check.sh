@@ -37,7 +37,16 @@ cargo xwin clippy --workspace --all-targets --no-deps --target "$TARGET"
 
 if (( run_host_tests )); then
   echo "== host tests =="
-  cargo test --workspace
+  # SCOPED, NOT `--workspace`, and this is the failure the block comment above predicted actually
+  # happening: a crate whose `mod` declarations are `#[cfg(windows)]` does not compile for the host
+  # at all, so `cargo test --workspace` fails with `E0433` on `ds2-continue` before running a single
+  # test. That is not a lint failure and it is not a regression -- it is the workspace containing
+  # crates that are Windows by construction, which is the normal state here.
+  #
+  # So the host pass names the crates that are game-free BY CONSTRUCTION and can therefore be
+  # exercised without Windows. A crate belongs on this line only if it has no `cfg(windows)` gate;
+  # everything else is covered by the wine pass below.
+  cargo test -p ds2-sl2-core -p ds2-hotkey-config -p ds2-safe-input -p ds2-crash-logging-core
 
   echo "== windows-target tests (wine) =="
   # THE CRATES THAT MATTER MOST WERE THE ONES WITH NO EXECUTABLE TESTS. `ds2-loader` is

@@ -1,0 +1,21 @@
+# THE `.sl2` CONTAINER, WITH NO GAME KNOWLEDGE AND NO `cfg(windows)`.
+#
+# Split out of `ds2-save-redirect` for one reason: that crate is a MinHook detour on a PE image and
+# is gated `#![cfg(windows)]`, so nothing inside it can be exercised by `scripts/check.sh
+# --host-tests`. AES-CBC, an MD5 reseal and a container walk are exactly the code that must be
+# tested, and none of it needs the game to be running. Keeping it here makes it host-testable by
+# construction rather than by discipline.
+[package]
+name = "ds2-sl2-core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+aes = "0.8"
+md-5 = "0.10"
+
+[lints]
+workspace = true

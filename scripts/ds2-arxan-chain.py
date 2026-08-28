@@ -71,6 +71,15 @@ BODY_PROLOGUES = (
     b"\x40\x57\x48\x83\xec",      # push rdi; sub rsp, N
     b"\x48\x83\xec",              # sub rsp, N
     b"\x55\x48\x8b\xec",          # push rbp; mov rbp, rsp
+    b"\x48\x8b\xc4",              # mov rax, rsp  (MSVC frame-pointer-omission prologue)
+    b"\x40\x56",                  # rex push rsi
+    b"\x40\x57",                  # rex push rdi
+    b"\x40\x55",                  # rex push rbp
+    b"\x40\x53",                  # rex push rbx
+    b"\x4c\x8b\x89",              # mov r9, [rcx+N]
+    b"\x4c\x8b\x41",              # mov r8, [rcx+N]
+    b"\x48\x83\x79",              # cmp qword [rcx+N], M
+    b"\x48\x8b\x41",              # mov rax, [rcx+N]
 )
 
 

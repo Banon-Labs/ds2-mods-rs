@@ -1698,3 +1698,682 @@ pub const NET_SERVICE_OFFSET: usize = 0x22f0;
 /// [`NET_IS_ONLINE`] directly, on its own -- never sees it. Recorded here so the next reader does
 /// not have to re-derive that it is a dead end; [`NET_IS_ONLINE`] is the read it was shadowing.
 pub const NET_FORCE_OFFLINE_MENU_ONLY: u32 = 0x0160_de19;
+
+// ============================================================================================
+// THE SAVE-SLOT LOAD PATH. Which character slot a load actually used, and where the game keeps
+// that answer. Read statically from `FeSubStateTitleLoadDataList::v3` at `0x1400fba10`, whose
+// whole body is the decision; full trace in `docs/DS2-CONTINUE.md`.
+//
+// The chain the update walks, taken from its own instructions rather than from a struct:
+//
+//   mov rax,[0x14160de10]            ; FE_TITLE_CONTEXT
+//   mov rdi,[rax+0x98]               ; FeGroupTitleDataList
+//   movsxd rdx,[rax+0x564]           ; the selected slot
+//   mov rax,[0x1416148f0]            ; GAME_MANAGER_IMP
+//   mov rcx,[rax+0xa8]               ; GameDataManager
+//   mov r8,[rcx+0xd8]                ; the slot array
+//   cmp rdx,0xa / jae                ; ten slots, and a negative slot means none
+//   imul rax,rax,0x1f0               ; stride
+//   test BYTE PTR [rbx+0x1d9],0x1    ; occupied
+//   mov edx,[rdi+0x28]               ; the group's confirmed action
+// ============================================================================================
+
+/// `FeSubStateTitleLoadDataList::v3` (update). RVA `0x000fba10`, VA `0x1400fba10`.
+///
+/// The single site worth instrumenting on the load path, because it is the only place the slot,
+/// the action and the outgoing phase are all in scope at once. It runs per frame but does nothing
+/// unless the substate's phase is 1, which its first three instructions establish:
+/// `mov edx,[rcx+0x10]; dec edx; jne <return>`.
+///
+/// **Not an Arxan redirect.** `scripts/ds2-arxan-chain.py` reports `UNKNOWN` here only because its
+/// prologue table does not carry `40 56` (`rex push rsi`); the entry is ordinary code, not the
+/// five-byte `e9` a redirected entry holds.
+pub const FE_SUBSTATE_LOAD_DATA_LIST_UPDATE: u32 = 0x000f_ba10;
+
+/// The selected save slot, at `[`[`FE_TITLE_CONTEXT`]`] + 0x564`. Signed; `0..=9` selects, and
+/// anything else means "none".
+///
+/// The Ghidra project names this field `_x564_slotNum` off the same evidence. It is read with
+/// `movsxd` and immediately bounds-checked against `0xa`, so a mod writing it must respect both
+/// the sign and the bound -- see [`SAVE_SLOT_COUNT`].
+pub const FE_TITLE_CONTEXT_SLOT_NUM_OFFSET: usize = 0x564;
+
+/// The `FeGroupTitleDataList` that owns the character list, at `[`[`FE_TITLE_CONTEXT`]`] + 0x98`.
+pub const FE_TITLE_CONTEXT_DATA_LIST_GROUP_OFFSET: usize = 0x98;
+
+/// The group's confirmed action, at `group + 0x28`. `1` backs out, `2` loads the selected slot.
+///
+/// Written by the group's own `vtable[4]`, which the update calls immediately before reading this.
+/// `3` and `4` are also handled (they route to `0x56` and `0x5f`) but were not identified.
+pub const FE_GROUP_DATA_LIST_ACTION_OFFSET: usize = 0x28;
+
+/// The action value that means "load the selected slot".
+pub const FE_DATA_LIST_ACTION_LOAD: i32 = 2;
+
+/// Offset of `GameDataManager` in [`GAME_MANAGER_IMP`].
+pub const GAME_DATA_MANAGER_OFFSET: usize = 0xa8;
+
+/// Offset of the ten-slot save array inside `GameDataManager`.
+pub const SAVE_SLOT_ARRAY_OFFSET: usize = 0xd8;
+
+/// Stride of one save-slot record. `0x1F0`.
+///
+/// Confirmed far beyond this one function: the image holds 43 separate `imul reg,reg,0x1f0` sites
+/// and nearly all of them are preceded by the same `cmp reg,0xa; jae` bound.
+pub const SAVE_SLOT_STRIDE: usize = 0x1f0;
+
+/// How many save slots the game indexes. Ten, enforced at every indexing site.
+pub const SAVE_SLOT_COUNT: i32 = 10;
+
+/// Flags byte within a save-slot record. `+0x1D9`.
+///
+/// **Runtime only.** It is zero in every record of the `id=4` section of a real `.sl2`, so it is
+/// derived when the per-character entries are loaded rather than persisted. Reading a save file
+/// cold to decide whether a slot exists must use entry content, not this byte.
+pub const SAVE_SLOT_FLAGS_OFFSET: usize = 0x1d9;
+
+/// [`SAVE_SLOT_FLAGS_OFFSET`] bit 0: the slot holds a character. The update nulls its record
+/// pointer when this is clear.
+pub const SAVE_SLOT_FLAG_OCCUPIED: u8 = 0x1;
+
+/// [`SAVE_SLOT_FLAGS_OFFSET`] bit 1: the slot is excluded. Every one of the four action branches
+/// returns without acting when this is set.
+pub const SAVE_SLOT_FLAG_EXCLUDED: u8 = 0x2;
+
+/// The ownership word within a save-slot record, `+0x1E8`, masked with
+/// [`SAVE_SLOT_OWNERSHIP_MASK`].
+///
+/// On the load action the update passes `record[0x1e8] & 0x3f` to `0x140af6610`, and that result
+/// picks phase 6 over phase 2 -- a different destination substate. **A continue flow must not skip
+/// this call**: it is what refuses a character the running build cannot legitimately load.
+pub const SAVE_SLOT_OWNERSHIP_OFFSET: usize = 0x1e8;
+
+/// Mask applied to [`SAVE_SLOT_OWNERSHIP_OFFSET`] before the check. `0x3f`.
+pub const SAVE_SLOT_OWNERSHIP_MASK: u32 = 0x3f;
+
+/// `FeSubStateTitleLoadDataList`'s substate id: `0x55`. The character list.
+pub const FE_SUBSTATE_ID_TITLE_LOAD_DATA_LIST: u32 = 0x55;
+
+/// `FeSubStateTitleLoadProfile`'s substate id: `0x57`.
+///
+/// The destination of the load edge, registered by `FeSubStateTitleLoadDataList::v5`
+/// (`0x1400fb1f0`) as the phase-2 transition. Identified through its constructor `0x1400faa10`,
+/// which writes id `0x57` alongside vtable `0x1410bd658`.
+pub const FE_SUBSTATE_ID_TITLE_LOAD_PROFILE: u32 = 0x57;
+
+/// `FeSubStateTitleStartIngame`'s substate id: `0x6b`. The end of the load chain.
+pub const FE_SUBSTATE_ID_TITLE_START_INGAME: u32 = 0x6b;
+
+/// `FeSubStateTitleLoadDataList::v1` (enter). RVA `0x000fae80`, VA `0x1400fae80`.
+///
+/// Ghidra's project already names it `FUN_1400fae80_continueMenu`. It reads the list group from
+/// `[`[`FE_TITLE_CONTEXT`]`]+0x98`, asks `0x1400f0f60` for the occupied slots, and on a non-empty
+/// list calls `0x1400f1cb0(group, 1)` and sets its own phase to 1. On an empty list it sets phase
+/// 3 and goes straight back to the top menu.
+///
+/// **The site to write a pre-selected slot at.** `0x1400f1cb0`'s `1` is a mode flag -- it lands in
+/// `group+0x2c` and swaps the screen's text ids between load and delete -- so the cursor is not
+/// chosen there. It is chosen downstream in `0x1400f1fa0`, and the list code both reads
+/// [`FE_TITLE_CONTEXT_SLOT_NUM_OFFSET`] (`0x1400f2021`) and writes it back on a cursor move
+/// (`0x1400f220e`, `0x1400f22d7`, `0x1400f238e`). Writing the field before this function runs
+/// therefore reaches the list before it is built; writing it after would be overwritten.
+///
+/// Not an Arxan redirect: `scripts/ds2-arxan-chain.py` reports a clean prologue at the entry.
+pub const FE_SUBSTATE_LOAD_DATA_LIST_ENTER: u32 = 0x000f_ae80;
+
+/// The slot the game itself remembers, at `savedata + 0x1368` -- past the ten records, which end
+/// at `0x1360`.
+///
+/// `FeSubStateTitleSteamLoadSystemData::v2` (`0x1400fb8d0`, substate `0x05`, early boot) copies it
+/// into [`FE_TITLE_CONTEXT_SLOT_NUM_OFFSET`] when it is not negative, and `0x1400fdc82` copies it
+/// back the other way. So the game has a remembered-slot mechanism of its own.
+///
+/// **It is not restored from the save file.** The `id=4` section of a real `.sl2` reads zero at
+/// the corresponding offset even in a save written immediately after loading slot 1, so whatever
+/// seeds this at boot, it is not the file. Recorded so the next reader does not re-derive that.
+pub const SAVE_SLOT_CURRENT_INDEX_OFFSET: usize = 0x1368;
+
+/// The call every accepting branch of `FeSubStateTitleLoadDataList::v3` makes before it writes a
+/// phase. RVA `0x000f10e0`, VA `0x1400f10e0`, one argument: the list group.
+///
+/// `cmp qword [rcx+8],0; je ...` then a call through the object at `group+8`. Whatever it settles,
+/// all four branches make it first, so a transition driven from outside must make it too.
+///
+/// Not an Arxan redirect; `ds2-arxan-chain.py` reports `UNKNOWN` only because `48 83 79` is
+/// missing from its prologue table, as with `40 56` and `4c 8b 89`.
+pub const FE_DATA_LIST_CLOSE: u32 = 0x000f_10e0;
+
+/// Offset of the content/ownership context in [`GAME_MANAGER_IMP`]. A **pointer** field, read as
+/// `mov rcx,[rax+0xc0]` at `0x1400fbb32`.
+pub const GAME_MANAGER_CONTENT_CTX_OFFSET: usize = 0xc0;
+
+/// Inside the content context, the object holding the owned-content masks. `+0x10`; a null here
+/// means the gate passes.
+pub const CONTENT_CTX_OWNED_OFFSET: usize = 0x10;
+
+/// The two owned-content masks, OR'd together before the test. `+0x28` and `+0x30`.
+///
+/// The whole of `0x140af6610`, which the load branch calls and which this repo replicates with
+/// pure reads rather than a call:
+///
+/// ```text
+/// owned = (obj[0x30] | obj[0x28]) & required
+/// refused = owned != required
+/// ```
+pub const CONTENT_OWNED_MASK_A: usize = 0x28;
+
+/// The second owned-content mask. See [`CONTENT_OWNED_MASK_A`].
+pub const CONTENT_OWNED_MASK_B: usize = 0x30;
+
+/// The phase `FeSubStateTitleLoadDataList` writes to load the selected slot: `2`, which its own
+/// transition table routes to [`FE_SUBSTATE_ID_TITLE_LOAD_PROFILE`].
+pub const FE_DATA_LIST_PHASE_LOAD: i32 = 2;
+
+/// The phase the character list writes when the player backs out: `3`, routed to
+/// [`FE_SUBSTATE_ID_TITLE_TOP_MENU`].
+///
+/// One of the list's two ways of ending without loading anything, and so one of the two places a
+/// shortcut that suppressed something for the duration of the load has to undo it.
+pub const FE_DATA_LIST_PHASE_BACK: i32 = 3;
+
+/// The phase written instead when the ownership gate refuses: `6`, routed to `0x5d`.
+pub const FE_DATA_LIST_PHASE_REFUSED: i32 = 6;
+
+/// `FeSubStateTitleTopMenu::v3` (update). RVA `0x000ff300`, VA `0x1400ff300`.
+///
+/// Three statements: poll the top-menu group at `[`[`FE_TITLE_CONTEXT`]`]+0x80`, copy the action
+/// the group parked at `group+0xE8` into the substate's own phase, and zero
+/// `savedata+0x136e` when that action is 4. **The phase and the action id are the same number**,
+/// so the row-1 transition `FeSubStateTitleTopMenu::v5` registers for value
+/// [`FE_TOP_MENU_ACTION_LOAD_GAME`] is taken by writing that value into the phase.
+///
+/// It rewrites the phase from the group on every frame, so a write made here survives exactly one
+/// frame -- which is enough, because `FeStateFlow` evaluates transitions immediately after the
+/// update returns. Writing the group's field instead would be cleared by the poll, the way the
+/// character list's action field was.
+///
+/// Not an Arxan redirect: clean prologue at the entry.
+pub const FE_SUBSTATE_TOP_MENU_UPDATE: u32 = 0x000f_f300;
+
+/// The top menu's row-1 action, LOAD GAME, which routes to
+/// [`FE_SUBSTATE_ID_TITLE_LOAD_DATA_LIST`]. `2`.
+///
+/// Registered unconditionally by the top menu's `v5`, unlike row 3's, so the transition exists
+/// whether or not the row is drawn or selectable. Full row table in `docs/DS2-TITLE-FLOW.md`.
+pub const FE_TOP_MENU_ACTION_LOAD_GAME: i32 = 2;
+
+/// The top menu's resting phase, meaning "no row activated this frame". `0`.
+pub const FE_TOP_MENU_PHASE_RESTING: i32 = 0;
+
+// ---------------------------------------------------------------------------------------------
+// Audio. The frontend never calls a named sound function, which is what made this hard to find:
+// every earlier sweep looked for `call [rip+N]` into the FMOD IAT and found nothing. MSVC routes
+// imports through `jmp [rip+N]` thunks, so the call sites are `call <thunk>` and an IAT-target
+// scan misses all of them. Scanning for the thunks first turns up thirteen, and the levers the
+// project had concluded were absent are all live.
+//
+// FMOD is NOT statically linked in this build. `fmodex64.dll` and `fmod_event64.dll` sit beside
+// the exe and are imported by name.
+// ---------------------------------------------------------------------------------------------
+
+/// The one global holding a `MOFmodSoundManager*` (`DLMO`). RVA `0x0166dfa8`, VA `0x14166dfa8`.
+///
+/// Read at 17 sites and written at exactly one, `0x1409e5d00`, from the lazy accessor
+/// `0x1409e5c90`: it allocates `0xce0` bytes, constructs with `0x1409da780`, and stores the
+/// result. `0x1409ddbc0` is the fast path -- `mov rax,[this]; test rax,rax; je <init>; ret`.
+///
+/// The class is confirmed by RTTI rather than inferred: the vtable at `0x1411841b8` carries a
+/// complete-object locator whose type descriptor names `.?AVMOFmodSoundManager@DLMO@@`, and both
+/// functions below are slots in it.
+pub const SOUND_MANAGER_SINGLETON: u32 = 0x0166_dfa8;
+
+/// `MOFmodSoundManager` -> the master `FMOD::ChannelGroup*`. `0x9f8`.
+///
+/// **Written by the game's own init and read back by its own update**, which is what makes this
+/// an identification rather than a guess:
+///
+/// * `MOFmodSoundManager::v6` (`0x1409ddbe0`, init) does
+///   `lea rdx,[r15+0x9f8]; mov rcx,[r13]; call <System::getMasterChannelGroup>` at `0x1409df157`
+///   -- so FMOD itself writes the master group into this field.
+/// * `MOFmodSoundManager::v2` (`0x1409e0910`, the command-queue drain) does
+///   `movss xmm1,[rdi+0x930]; mov rcx,[rdi+0x9f8]; call <ChannelGroup::setVolume>` at
+///   `0x1409e0c8f` -- the image's **only** call to `ChannelGroup::setVolume`.
+///
+/// Both are methods of the same class on the same vtable, so the two `0x9f8` are the same field.
+pub const SOUND_MANAGER_MASTER_GROUP_OFFSET: usize = 0x9f8;
+
+/// `MOFmodSoundManager` -> the master volume the game itself last applied, `f32`. `0x930`.
+///
+/// The command drain stores its incoming float here (`movss [rdi+0x930],xmm1`) and reloads it
+/// three instructions later to hand to `ChannelGroup::setVolume`. So it is not a cached copy of
+/// something else -- it is the value the game means the master group to have, which is what makes
+/// it the right thing to restore to. Reading it back beats writing `1.0`, which would silently
+/// discard whatever the player set in the options menu.
+pub const SOUND_MANAGER_MASTER_VOLUME_OFFSET: usize = 0x930;
+
+/// IAT slot for `FMOD::ChannelGroup::setVolume(float)` in `fmodex64.dll`. RVA `0x01aae9b4`.
+///
+/// An import slot, not code: patching or reading it never touches `.text`, so Arxan's integrity
+/// checks have nothing to see. Same property `ds2-offline` relies on for the WS2_32 slots.
+///
+/// Calling convention is MSVC `__thiscall` on x64: `rcx` is the `ChannelGroup*`, the float goes in
+/// `xmm1`, and the return is an `FMOD_RESULT` (`0` == `FMOD_OK`).
+pub const FMOD_CHANNEL_GROUP_SET_VOLUME_IAT: u32 = 0x01aa_e9b4;
+
+/// `MOFmodSoundManager::v6`, audio init. RVA `0x009ddbe0`, VA `0x1409ddbe0`.
+///
+/// The function that *creates* [`SOUND_MANAGER_MASTER_GROUP_OFFSET`]: at `0x1409df157` it does
+/// `lea rdx,[r15+0x9f8]` and hands that to `System::getMasterChannelGroup` as the out-parameter.
+/// So on return from this function the master group exists and not one sound has played yet,
+/// which makes it the earliest moment anything can be silenced.
+///
+/// Not an Arxan redirect: clean prologue at the entry.
+pub const SOUND_MANAGER_INIT: u32 = 0x009d_dbe0;
+
+/// `MOFmodSoundManager::v2`, the command-queue drain. RVA `0x009e0910`, VA `0x1409e0910`.
+///
+/// **The only code in the image that can change a channel group's volume.** Its `setVolume` call
+/// at `0x1409e0c96` is the sole `ChannelGroup::setVolume` site, so anything holding the master
+/// group at a chosen level only has to out-run this one function and nothing else.
+///
+/// Not an Arxan redirect: clean prologue at the entry.
+pub const SOUND_MANAGER_COMMAND_DRAIN: u32 = 0x009e_0910;
+
+/// `MOFmodSoundManager::v0`. RVA `0x009dfef0`, VA `0x1409dfef0`.
+///
+/// **NOT a per-frame pump, measured.** It contains the image's only `FMOD::EventSystem::update`
+/// call (`0x1409e0080`), which FMOD documents as a once-a-frame requirement, and that made it look
+/// like the frame pump. A detour on it fired essentially once in a 57-second run, during process
+/// teardown -- so a mute re-asserted here is never asserted, and a restore requested here arrives
+/// 51 seconds late. Kept as a named constant so the next reader does not repeat the inference.
+///
+/// Not an Arxan redirect. `scripts/ds2-arxan-chain.py` reported `UNKNOWN` until its prologue table
+/// learned `48 8b c4` (`mov rax,rsp`); the entry is ordinary code, not a five-byte `e9` stub.
+pub const SOUND_MANAGER_V0_NOT_A_FRAME_PUMP: u32 = 0x009d_fef0;
+
+/// `FeSubStateTitleStartIngame::v1` (enter). RVA `0x000fde30`, VA `0x1400fde30`.
+///
+/// Slot 1 of vtable `0x1410bdbf8`, which RTTI names `FeSubStateTitleStartIngame`. This is the last
+/// substate on the load chain -- the boundary the autocontinue shortcut ends at, and so the point
+/// at which anything suppressed for the duration of that shortcut has to be given back.
+///
+/// Not an Arxan redirect: clean prologue at the entry.
+pub const FE_SUBSTATE_START_INGAME_ENTER: u32 = 0x000f_de30;
+
+// ---------------------------------------------------------------------------------------------
+// The NOW LOADING screen, as a cover for the title flow.
+//
+// `FeOperatorNowLoading` is the operator behind `FeSceneNowLoading` / `FeGroupNowLoading` -- the
+// full-screen loading page the game shows on every map transition. It is constructed once, during
+// GameManagerImp's own init, and then sits idle until something makes it visible. That makes it
+// available for the whole title flow, long before anything the title draws.
+// ---------------------------------------------------------------------------------------------
+
+/// `GameManagerImp` -> the frontend object that owns the operator table. `0x22e0`.
+///
+/// Written at `0x1401bcb79` (`mov [rdi+0x22e0],rsi`) in GameManagerImp's init, immediately after
+/// `0x140500200` has populated the operator slots on that same object.
+///
+/// **Verified live** rather than only read: walking
+/// `[`[`GAME_MANAGER_IMP`]`] + 0x22e0 + `[`FRONTEND_NOW_LOADING_OPERATOR_OFFSET`] in a running
+/// game lands on an object whose vtable is `0x1410fa0c8`, which RTTI names
+/// `FeOperatorNowLoading`. Note the container's own head reads as `DLKR::DLBackAllocator`, so it
+/// embeds an allocator as its first member; the offset is what matters and the vtable at the end
+/// of the walk is what confirms it.
+pub const GAME_MANAGER_FRONTEND_ROOT_OFFSET: usize = 0x22e0;
+
+/// That frontend object -> `FeOperatorNowLoading`. `0xc8`.
+///
+/// Filled by the lazy factory at `0x1405002de` (`mov [rbx+0xc8],rsi`) right after it allocates
+/// `0x3c0` bytes and installs vtable `0x1410fa0c8`. The same pointer is mirrored into the
+/// operator array at `+0x18`, which is how the frontend iterates operators.
+pub const FRONTEND_NOW_LOADING_OPERATOR_OFFSET: usize = 0xc8;
+
+/// That frontend object -> `FeOperatorTitle`. `0xd0`.
+///
+/// The neighbouring named slot to [`FRONTEND_NOW_LOADING_OPERATOR_OFFSET`], and read live at the
+/// top menu: it holds an object whose vtable is `0x1410bc578`, which RTTI names
+/// `FeOperatorTitle`. The same two operators are mirrored into the operator array at `+0x18`
+/// (NowLoading) and `+0x30` (Title).
+pub const FRONTEND_TITLE_OPERATOR_OFFSET: usize = 0xd0;
+
+/// `FeOperatorBase` vtable slot 24 (`+0xc0`) -- show or hide one of an operator's screens.
+///
+/// `void slot24(this, u32 screen_id, bool show, float fade)`. Windows x64 puts those in `rcx`,
+/// `edx`, `r8b` and `xmm3`, which is exactly what the game's own call site loads.
+///
+/// **This is read from a call site, not inferred from one.** `0x1405116f0` is the game's own
+/// switch between the title and the loading screen, and it is a straight swap:
+///
+/// ```text
+/// [param+2] == 1   Title.slot24(0x66, false, 0.0)   NowLoading.slot24(0x65, true,  0.0)
+/// [param+2] != 1   Title.slot24(0x65, true,  0.0)   NowLoading.slot24(0x66, false, 0.0)
+/// ```
+///
+/// So the ids are not "the loading screen" and "the title" -- both operators answer to both. The
+/// id selects which of that operator's screens, and the operator supplies the content.
+///
+/// An earlier version of this constant named slot 4 and called it opacity, on the evidence that
+/// the operator factory calls slot 4 twice with `0.0f` right after construction. That inference
+/// was wrong: setting it to `1.0` at the title changed nothing on screen. Slot 4 is kept out of
+/// this file entirely rather than left around to be believed again.
+pub const FE_OPERATOR_SET_SCREEN_VTABLE_SLOT: usize = 24;
+
+/// The screen id an operator is asked to SHOW when it takes over. `0x65`.
+pub const FE_OPERATOR_SCREEN_ID_SHOW: u32 = 0x65;
+
+/// The screen id an operator is asked to HIDE when it gives way. `0x66`.
+pub const FE_OPERATOR_SCREEN_ID_HIDE: u32 = 0x66;
+
+/// `FeOperatorTitle::v2`, the title operator's setup. RVA `0x000ef030`, VA `0x1400ef030`.
+///
+/// Thirty-two bytes: if `this+0x10` is non-null it runs two calls and writes `1` into
+/// [`FE_OPERATOR_TITLE_ACTIVE`]. It is the moment the title frontend becomes live, which makes it
+/// the earliest point at which covering the title is both possible and meaningful.
+///
+/// Not an Arxan redirect: clean prologue at the entry.
+pub const FE_OPERATOR_TITLE_SETUP: u32 = 0x000e_f030;
+
+/// `FeTitleContext` -> `FeGroupTitleTopMenu`. `0x80`.
+///
+/// Read by `FeSubStateTitleTopMenu::v3` on its first two instructions --
+/// `mov rax,[0x14160de10]; mov rbx,[rax+0x80]` -- and then polled through its own vtable. Not to be
+/// confused with [`FE_TOP_MENU_GROUP_OFFSET`], which is where the same group hangs off
+/// `FeSceneTitle` rather than off the title context.
+pub const FE_TITLE_CONTEXT_TOP_MENU_GROUP_OFFSET: usize = 0x80;
+
+/// `FeGroupBase::close(group)`. RVA `0x000f18b0`, VA `0x1400f18b0`.
+///
+/// Nineteen instructions, and the whole of the frontend's "make this screen go away":
+///
+/// ```c
+/// scene = group->_0x08;
+/// if (scene && group->_0x30) {          // only when the group is open
+///     play_sequence(scene, 0x68, 0, 0.0f);
+///     scene->_0x18 += 1;
+///     group->_0x30 = 0;
+/// }
+/// ```
+///
+/// Its mirror is the open at `0x1400f1cb0`, which plays sequence `0x66` and decrements the same
+/// counter. `ds2-dialog-skip` already plays `0x67` on `FeSceneTitle` for the settled state, so
+/// `0x66`/`0x67`/`0x68` are one family: open, settled, close.
+///
+/// **This is what the `0x65`/`0x66` at `0x1405116f0` really were** -- sequence ids handed to a
+/// scene, not screen ids handed to an operator. Reading them as operator arguments produced a call
+/// through vtable slot 24 of an eleven-slot vtable, which read string data and crashed the game.
+///
+/// Called, never patched, so its Arxan status does not arise -- but it is clean at its entry
+/// anyway.
+pub const FE_GROUP_CLOSE: u32 = 0x000f_18b0;
+
+/// `FeGroupBase` -> the byte that is `1` while the group is open. `0x30`.
+///
+/// Set by the open at `0x1400f1cf2` and cleared by the close at `0x1400f18e1`, and tested at the
+/// head of both, so each is idempotent on its own. That is what makes closing a group safe to do
+/// from a per-frame detour: the second call does nothing.
+pub const FE_GROUP_OPEN_FLAG_OFFSET: usize = 0x30;
+
+/// `FeGroupTitleTopMenu::close(group)`. RVA `0x000f3590`, VA `0x1400f3590`.
+///
+/// **The top menu does not use [`FE_GROUP_CLOSE`].** It has its own pair, and
+/// `FeSubStateTitleTopMenu` names both of them by using them:
+///
+/// * `v1` (enter, `0x1400fde90`): `mov rcx,[0x14160de10]; mov rcx,[rcx+0x80]; call 0x1400f3820`
+/// * `v2` (leave, `0x1400feb50`): the same two loads, then `call 0x1400f3590`
+///
+/// So this is literally what the game calls when the top menu goes away, on the pointer it reads
+/// from the same global at the same offset.
+///
+/// HOW THE WRONG ONE WAS CAUGHT, because it is a cheap trick worth repeating: the first attempt
+/// called [`FE_GROUP_CLOSE`] on this group and logged [`FE_GROUP_OPEN_FLAG_OFFSET`] beside it. The
+/// data list read `1` -- a clean boolean -- and was hidden. The top menu read `248`, which is not a
+/// boolean, and stayed visible. Logging the field a call depends on is what turned "it didn't
+/// work" into "that byte is not what I think it is, so this is the wrong class".
+pub const FE_GROUP_TITLE_TOP_MENU_CLOSE: u32 = 0x000f_3590;
+
+/// `FeSubStateTitleTopMenu::v1` (enter). RVA `0x000fde90`, VA `0x1400fde90`.
+///
+/// Loads the top-menu group from `[`[`FE_TITLE_CONTEXT`]`]+0x80` and calls `0x1400f3820`, the
+/// group's **open**. Its mirror is `v2` (leave, `0x1400feb50`), which calls
+/// [`FE_GROUP_TITLE_TOP_MENU_CLOSE`].
+///
+/// **DO NOT CLOSE THE GROUP FROM HERE.** Measured: closing it immediately after this `enter`
+/// returns took boot-to-top-menu from 4.3s to 29.9s and then killed the process at the top menu,
+/// before the character list was ever reached. The substate's update polls this group through its
+/// own vtable on every frame, and closing it the same frame it opened leaves that poll working on
+/// a group that has been shut. Closing from the update instead is stable across runs.
+///
+/// Kept as a constant because it names the open/close pair, not because anything hooks it.
+///
+/// Not an Arxan redirect: clean prologue at the entry.
+pub const FE_SUBSTATE_TOP_MENU_ENTER: u32 = 0x000f_de90;
+
+// ============================================================================================
+// POSING THE TITLE SCREEN, which is what "hide the menu with the logo" actually needs.
+//
+// The three constants below replace a whole line of failed reasoning, so the correction is worth
+// stating once, at the top, rather than three times below.
+//
+// `[`FE_TITLE_CONTEXT`]` + 0x80 IS A `FeSceneTitle`. Two crates had it as two different things --
+// `ds2-dialog-skip` called it "the title scene" and `ds2-continue` called it "the top menu group"
+// -- and both were reading the same eight bytes. It is a `FeSceneTitle`, and its constructor at
+// `0x140f3391` settles it without a single inference: that function writes vtable `0x1410bcab0`
+// (RTTI `FeSceneTitle`, 17 virtuals) to `[this]`, zeroes `[this+0xb8]` -- which is
+// [`FE_TOP_MENU_GROUP_OFFSET`], the top-menu group hanging off the scene, exactly as that constant
+// already claimed -- and zeroes a WORD at `[this+0xf0]`, whose second byte is the `+0xf1` that the
+// open sets and the close clears.
+//
+// So ONE object carries the logo, the PRESS ANY BUTTON prompt and the six menu rows, which is why
+// substate 0x17 and substate 0x47 both poll it, and why the player experiences them as one screen.
+// `0x1400f3820` is that scene's OPEN (not "play sequence 0x67" -- it also builds every row), and
+// `0x1400f3590` is its CLOSE.
+// ============================================================================================
+
+/// `FeGroupBase::v2(this)` -- pose this object's scene hidden, instantly. RVA `0x00505d40`.
+///
+/// The whole function, and it is null-checked before it touches anything:
+///
+/// ```c
+/// scene = this->_0x08;
+/// if (!scene) return;
+/// 0x140afdb70(scene);                                   // a query; its result is discarded
+/// play(scene, 0x65, /*pose=*/1, 0.0f);                  // tail call
+/// ```
+///
+/// # Why this and not the close
+///
+/// [`FE_GROUP_TITLE_TOP_MENU_CLOSE`] plays `0x68` with the pose flag CLEAR, so it *animates* out
+/// over the sequence's own span. Measured on screen: with that close called every frame from the
+/// top-menu update, the menu stayed visible for the whole of the substate's ~25ms residency --
+/// because a fade that needs ~14 frames cannot finish in one or two. **The close was working and
+/// the animation was the problem.**
+///
+/// This is the same play with the flag SET, which is the difference between "start fading" and "be
+/// faded". See [`FE_SEQUENCE_PLAY_FLAG_POSE`] for where that flag lands.
+///
+/// # Why the base and not `FeSceneTitle`'s own override
+///
+/// `FeSceneTitle::v2` (`0x1400f4190`) is exactly `call 0x140505d40(this)` followed by
+/// `inc [this->_0x08 + 0x18]`. That increment is a counter the open decrements and the close
+/// increments, and re-asserting a pose every frame through the override would run it up without
+/// bound -- and a player who returns to the title screen from in-game would find it never comes
+/// back. Calling the base skips the counter, so this leaves **no persistent state behind at all**:
+/// nothing to restore, and the game's own next open re-shows the screen by itself.
+///
+/// # Why it is safe from a per-frame detour, unlike the close
+///
+/// It does not clear the `+0xf1` open flag and does not run the teardown at `0x1400f41b0`. Those
+/// two are what [`FE_SUBSTATE_TOP_MENU_ENTER`] records as having taken boot-to-top-menu from 4.3s
+/// to 29.9s and then killed the process: the substate's update polls a group the close had shut.
+/// Nothing here shuts anything -- it changes a playback position and nothing else.
+///
+/// Called, never patched, so its Arxan status does not arise.
+pub const FE_SCENE_TITLE_POSE_HIDDEN: u32 = 0x0050_5d40;
+
+/// The sequence [`FE_SCENE_TITLE_POSE_HIDDEN`] plays. `0x65`.
+///
+/// It completes the family the frontend already had names for -- `0x66` open, `0x67` settled,
+/// `0x68` close -- as the state *before* an open, which is what makes it the hidden pose.
+///
+/// **This is the `0x65` from `0x1405116f0`**, the one whose `(0x65, true, 0.0)` triple was read as
+/// operator arguments last session and called through vtable slot 24 of an eleven-slot vtable,
+/// which read string data and crashed the game. The arguments were right all along; the receiver
+/// was not. Here it arrives on the receiver the game's own code uses.
+pub const FE_SCENE_TITLE_SEQUENCE_HIDDEN: i32 = 0x65;
+
+/// The play's third argument, when the caller wants a pose rather than an animation. `1`.
+///
+/// Read out of `FeComponentSprite`'s slot 24 (`0x140b6c4f0`) rather than guessed, because the flag
+/// is inverted on its way to the field it controls:
+///
+/// ```text
+/// xmm6 = (float)entry.start + seek      // the seek is relative; see FE_TOP_MENU_SEQUENCE_FADED_SEEK
+/// [this+0x40] = xmm6                    // the playback position
+/// test dil,dil                          // dil is THIS flag
+/// sete dl                               // dl = (flag == 0)
+/// call [vtable+0xb0](this, dl)          // slot 22, "keep playing"
+/// ```
+///
+/// So `0` means play on from here and `1` means hold here. Every animated play in the frontend
+/// passes `0`; [`FE_SCENE_TITLE_POSE_HIDDEN`] is the one that passes `1`.
+///
+/// **This is what makes the seek irrelevant.** Posing the FIRST frame of the hidden sequence needs
+/// no offset, so none of the sequence-span arithmetic that
+/// [`FE_TOP_MENU_SEQUENCE_FADED_SEEK`] had to establish applies here -- and that arithmetic could
+/// not have been done statically anyway, since the spans live in `GameDataEbl.bdt`.
+pub const FE_SEQUENCE_PLAY_FLAG_POSE: i32 = 1;
+
+/// `FeSceneTitle::open(scene)` -- what raises the title screen. RVA `0x000f3820`.
+///
+/// ```text
+/// if (!this->_0xf1) {                       // not already open
+///     scene = this->_0x08;
+///     if (scene) {
+///         scene->_0x18 -= 1;
+///         play(scene, 0x67, 0, 0.0f);       // the settled pose
+///         this->_0xf1 = 1;
+///     }
+/// }
+/// ... ~1000 further bytes: component lookups, row construction, more plays ...
+/// ```
+///
+/// # This is the same address as `FE_SCENE_TITLE_PLAY_IDLE`, which is misnamed
+///
+/// `ds2-dialog-skip` calls it as "play sequence `0x67` on the title scene". It is the screen's
+/// whole open, rows and all, and `[title_skip] title_settle` defaults ON -- so **the mod itself
+/// opens the title screen during substate `0x17`**, long before `FeSubStateTitleTopMenu` runs.
+/// Tracked as `ds2-mods-rs-ebj`; the duplicate constant is left in place until that lands rather
+/// than editing another crate's call site from here.
+///
+/// # Why this is the site to hook to hide the screen
+///
+/// MEASURED, from the log's own ordering rather than from reasoning about frames. The open logs at
+/// line 49 (`settled screen=title-main`) and a pose driven from `FeSubStateTitleTopMenu`'s update
+/// logs at line 60, with the entire network and dialog chain in between. The process windows cover
+/// the screen for most of that gap, which is why it reads as a brief flash rather than seconds of
+/// menu -- what is seen is the window between the last dialog clearing and substate `0x47`
+/// arriving. Hooking the open closes that gap by construction: whatever raises the screen --
+/// `title_settle` at `0x17`, or `FeSubStateTitleTopMenu::v1` at `0x47` -- is posed hidden on its
+/// way out, so there is no interval in which it is up and un-posed.
+///
+/// # The one configuration this interacts with
+///
+/// Posing [`FE_SCENE_TITLE_SEQUENCE_HIDDEN`] leaves the scene's current sequence at `0x65`, and
+/// the real gate at `0x1400f37f0` reports settled only for `0x67`. `ds2-dialog-skip` replaces that
+/// gate outright when `title_sequence_skip` is on, which is the default, so the wait is already
+/// forced and nothing observes the posed sequence. `title_settle` ON with `title_sequence_skip`
+/// OFF is the combination that would wait forever at PRESS ANY BUTTON -- with `title_settle` off
+/// the open does not happen until `0x47`, by which time the gate is long past.
+///
+/// Not an Arxan redirect: `scripts/ds2-arxan-chain.py` terminates at hop 0 with the clean prologue
+/// `48 89 74 24 20` at the entry.
+pub const FE_SCENE_TITLE_OPEN: u32 = 0x000f_3820;
+
+/// `SaveLoadSystem`'s save-directory builder -- what produces the folder the `.sl2` lives in.
+/// RVA `0x00248db0`.
+///
+/// ```text
+/// FUN_140248db0(std::wstring *out, const wchar_t *subdir)
+///     out  = "%APPDATA%\\DarkSoulsII\\"        // via SAVE_APPDATA_ROOT_BUILD
+///     out += subdir                            // the Steam ID, as text
+///     out += "\\"                              // DAT_1410d04f8, a lone backslash
+/// ```
+///
+/// # Why this site and not the one it calls
+///
+/// [`SAVE_APPDATA_ROOT_BUILD`] is the wider chokepoint -- it is the only thing in the image that
+/// turns `SHGetFolderPathW(CSIDL_APPDATA)` into a DARK SOULS II path -- but it is wider than the
+/// job. Its other caller, `FUN_140248d80`, appends `GraphicsConfig_SOFS.xml`, so a detour there
+/// moves the graphics config as well as the saves. This function has exactly two callers and both
+/// are `SaveLoadSystem` methods (`FUN_1402e6230_saveLoadSetup__` at `0x1402e635c`,
+/// `FUN_1402e67f0` at `0x1402e6930`), so hooking it reaches the saves and nothing else.
+///
+/// # The second argument is the Steam ID, established from the call site
+///
+/// At `0x1402e6331` the caller makes a virtual call through slot `+0x38` -- the same slot
+/// `FUN_140af14e0` uses to fill the cached Steam ID at `DAT_1416681a8` -- converts the result to a
+/// string, and hands its character data to this function in `rdx`:
+///
+/// ```text
+/// 0x1402e634a:  cmp    QWORD PTR [rbp-0x19],0x8      // the wstring's capacity field
+/// 0x1402e634f:  lea    rdx,[rbp-0x31]                // ... so rdx is the inline buffer,
+/// 0x1402e6353:  cmovae rdx,QWORD PTR [rbp-0x31]      // ... or the heap pointer when it spilled
+/// 0x1402e6358:  lea    rcx,[rbp-0x1]                 // the out string
+/// 0x1402e635c:  call   0x140248db0
+/// ```
+///
+/// That is why the observed layout is `…\DarkSoulsII\<steamid hex>\DS2SOFS0000.sl2` with the
+/// graphics config a level above it, and it is why a detour here owns the Steam ID folder too: a
+/// redirect can point at a donor save's own folder name instead of renaming it to the running
+/// account's.
+///
+/// **A replacement must end in a backslash.** The caller appends the file name to whatever this
+/// leaves behind, and the trailing separator is this function's job, not the caller's.
+///
+/// Not an Arxan redirect: `scripts/ds2-arxan-chain.py` terminates at hop 0 with the clean prologue
+/// `48 89 5c 24 08` at the entry.
+pub const SAVE_DIR_BUILD: u32 = 0x0024_8db0;
+
+/// `%APPDATA%\DarkSoulsII\` -- the root every DS2 user path is built on. RVA `0x00248e80`.
+///
+/// `SHGetFolderPathW(0, 0x1a /* CSIDL_APPDATA */, 0, 0)`, then append the literal
+/// `L"\\DarkSoulsII\\"` at `0x1410d04a8`. Recorded because it anchors [`SAVE_DIR_BUILD`] and
+/// because it is the site to hook if the graphics config should move as well -- it is deliberately
+/// NOT the site this crate hooks. See [`SAVE_DIR_BUILD`] for why.
+///
+/// Not an Arxan redirect: clean prologue `48 89 5c 24 10` at the entry.
+pub const SAVE_APPDATA_ROOT_BUILD: u32 = 0x0024_8e80;
+
+/// `std::wstring::assign(dst, src, len)` -- the game's own assign, in its own CRT. RVA `0x000260b0`.
+///
+/// Reused rather than reimplemented, and that is the point: the out-parameter of
+/// [`SAVE_DIR_BUILD`] is a live MSVC `std::basic_string<wchar_t>` owned by the caller, which may
+/// already hold a heap allocation from the game's allocator. Writing its fields by hand would
+/// leak that allocation or free it with the wrong allocator; calling the game's assign hands both
+/// problems back to the code that owns them. It is the same function
+/// `SAVE_APPDATA_ROOT_BUILD` itself calls to seat the `SHGetFolderPathW` result.
+///
+/// `len` is in `wchar_t`, not bytes, and excludes the terminator.
+pub const WSTRING_ASSIGN: u32 = 0x0002_60b0;
+
+/// Byte offset of the length field in the game's `std::wstring`. Length is in `wchar_t`.
+///
+/// Read out of `FUN_140043050`/`FUN_1400260b0`, which index `_x10_strLen_` at this offset and
+/// `_x18_strCapacity_` at [`WSTRING_CAPACITY_OFFSET`], and treat the first sixteen bytes as a
+/// union of an inline buffer and a pointer. That is stock MSVC small-string optimisation.
+pub const WSTRING_LEN_OFFSET: usize = 0x10;
+
+/// Byte offset of the capacity field in the game's `std::wstring`.
+///
+/// The discriminant for the small-string union: at or below [`WSTRING_SSO_MAX`] the characters
+/// live inline at offset 0, above it offset 0 is a pointer to them. Both string helpers branch on
+/// exactly this, and so does the call site documented on [`SAVE_DIR_BUILD`].
+pub const WSTRING_CAPACITY_OFFSET: usize = 0x18;
+
+/// Largest capacity that still lives in the inline buffer -- seven `wchar_t` plus a terminator.
+///
+/// The helpers spell this as `if (7 < capacity) { use the pointer }`, and the disassembled call
+/// site as `cmp QWORD PTR [rbp-0x19],0x8` / `cmovae`. Recorded so a reader of a live string does
+/// not have to rediscover which side of the comparison is the heap.
+pub const WSTRING_SSO_MAX: usize = 7;
