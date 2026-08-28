@@ -807,10 +807,14 @@ def 0x0262   row 0                     def 0x0258   row 2, Quit Game
                                                frames 1..69, colour 00ffffff
 ```
 
-A row definition holds an icon and a transparent flash overlay, and nothing else. The row's TEXT is
-the separate `0x022c` mark at x `60.2`, bound by FMG id. So the `u16` at the row record's `+0x00`
-is the entire answer to "which icon does this row show", and the three shipped rows differ only in
-which shape hangs off it -- `0x025e`, `0x0259`, `0x0253`.
+A row definition holds an icon and one more child, and nothing else. The row's TEXT is the separate
+`0x022c` mark at x `60.2`, bound by FMG id. So the `u16` at the row record's `+0x00` is the entire
+answer to "which icon does this row show", and the three shipped rows differ only in which shape
+hangs off it -- `0x025e`, `0x0259`, `0x0253`.
+
+**That second child is the selection highlight, not decoration** -- see "Two corrections a run
+made" below. It is written here as `def=0x0261` / `0x025c` / `0x0257`, transparent at rest, and it
+is the thing that lights up under the cursor.
 
 ### There are no spare icons, and no better one in another tab
 
@@ -827,16 +831,16 @@ Both were checked before reaching for a tint.
   one of them already means something else on a menu this row sits three inches from. None says
   "quit, but without asking" better than the quit icon does.
 
-### The tint, and why it is the icon ALONE
+
+### The tint, and the flag word that makes it mean anything
 
 `0x0255` instantiates `0x0254` **twice** -- once at `ffffffff`, once at `ff808080` under id
 `0x1eacd0`. That is the greyed-out overlay for a refused quit, and it is the game demonstrating,
-on this exact glyph, that the colour at transform `+0x18` re-skins a definition without touching
-it. One definition, two colours, two appearances. It also proves the colour reaches the shape
-underneath, since the record carrying `ff808080` is a nested record whose child is `ffffffff`.
+on this exact glyph, that a colour re-skins a definition without touching it. One definition, two
+colours, two appearances.
 
-The offset is not counted off the front of the struct. `FUN_140b50bc0`'s "is this child trivial
-enough to inline away" test ends:
+The colour sits at transform `+0x18`. Not counted off the front of the struct: `FUN_140b50bc0`'s
+"is this child trivial enough to inline away" test ends
 
 ```asm
 test  DWORD PTR [rax+0x20], 0x10f
@@ -845,39 +849,72 @@ cmp   BYTE PTR [rax+0x1b], 0xff      ; rax is the record's transform block
 jne   not_trivial
 ```
 
-`+0x1b` is the alpha -- the 35 records carrying `00ffffff` are the transparent flash overlays and
-every one fails that test rather than being flattened. A field the builder refuses to flatten over
-is a field the draw applies.
+so `+0x1b` is the alpha -- the 35 records carrying `00ffffff` are the transparent overlays and
+every one fails that test rather than being flattened.
 
-**So the row record points at `0x0254`, not at `0x0258` or `0x0255`.** Cloning either of those
-would drag the grey twin along, and the twin would never come off:
+**That test fixes the alpha's position and nothing else, which is the second thing a run had to
+say.** The other three bytes were written down here as B, G, R and they are R, G, B: a tint laid
+down as `50 64 ff ff` for red came back BLUE, which is `(0x50, 0x64, 0xff)` read straight through.
+The file could not have settled it -- its only opaque non-white records are `ff808080` and
+`ff000000`, greys and blacks, where the order does not show, and its three hued records read
+plausibly either way. It was a coin flip written down as a measurement. `FLO_ADDED_ROW_TINT` is a
+`[u8; 4]` now, in memory order, because a packed word is the notation that hid it.
 
-```asm
-FeGroupInGameGroupSelect::FUN_1400a77c0
-  0x1400a7851:  cmp   DWORD PTR [rcx+0x4], ebp     ; the entry's GATE, ebp = 0
-  0x1400a7854:  je    0x1400a78c0                  ; ungated -> next cell
-  ...
-  0x1400a789c:  call  0x1400a4e50                  ; ask the gate
-  0x1400a78af:  call  0x1400a64e0                  ; resolve 0x1eacd0 under this cell
-  0x1400a78bb:  call  0x14001e270                  ; visible = refused
+**And that was not enough. The first run wrote `ffff6450` and the icon came back its shipped
+colour**, with no refusal in the log, no crash, nothing to read. The block had been copied from
+row 0's record, whose flag word at `+0x20` is `0`, and the colour is inert without it. Two bits,
+settled against all 1045 records in the file:
+
+```
+ flags    n   white  non-white  alpha<ff
+ 0x000  928     928          0         0
+ 0x001    9       9          0         0
+ 0x010   77       0         77        77    alpha only -- RGB is ffffff in all 77
+ 0x011   19       0         19        19    likewise
+ 0x110    5       0          5         0    RGB changed: ff000000, ff808080
+ 0x111    3       0          3         0    RGB changed: 800080ff, cdff80ff, daff73e9
+ 0x130    4       0          4         0    RGB changed: ff000000
 ```
 
-Only a **gated** row reaches the code that touches `0x1eacd0`. This crate's item carries
-`FE_INGAME_MENU_GATE_ALWAYS` -- gate `0`, deliberately -- so the pass skips it, nothing ever hides
-the twin, and the record's own `ff808080` is what draws. A permanently disabled-looking icon on a
-row that is always available. `0x1eacd0` is shared by `0x0232`, `0x0238`, `0x023f` and `0x0255`,
-which is precisely the four gated rows in the file: the three message rows (gates 1, 2, 3) and
-quit (gate 4).
+`0x10` set with a non-white colour: 108 records. `0x10` clear with a non-white colour: **zero**.
+And every record carrying `0x100` has non-white RGB while every record without it is `xxffffff`.
+So `0x10` is "the colour word is live" and `0x100` is "and its RGB is not white". An opaque
+re-skin needs both -- which is precisely what the grey twin carries: flags `0x110`, colour
+`ff808080`. The one record in the file already doing what this needed to do, and the flags were
+sitting three bytes past the field that got copied.
 
-`0x0254` is the white copy on its own, with a child id of `0`, so it also adds no duplicate id to
-the scene.
+### Two corrections a run made
 
-### Where it goes
+Neither was visible in the file, the log, or the disassembly. Both were visible in one pause menu.
 
-The record now positions the glyph rather than a wrapper the glyph sits inside, so its y is
-anchored to its own label instead of to the row series. Row 2's icon lands at
-`(-0.10, 103.90) + (8.10, 4.55) = (8.00, 108.45)`, `5.90` above its mark at `114.35`; the added
-one keeps that gap at `162.75 - 5.90 = 156.85`. Anchoring to the row series would have given
-`156.45` -- the two series step by `48.00` and `48.40`, and the eye pairs an icon with its caption.
-Each glyph carries its own bearing (row 0's icon is `7.10` above its mark, row 1's `11.25`, row
-2's `5.90`), so there is no shared offset to reuse; row 2's applies because row 2's is the glyph.
+**The colour did nothing** -- the flag word above.
+
+**The second child of a row definition is the SELECTION HIGHLIGHT.** It was described here as a
+"flash overlay" and dismissed as invisible: colour `00ffffff`, frames `1..69`, alpha zero at rest.
+The container's row record was therefore pointed straight at `0x0254`, the bare glyph, on the
+reasoning that a row nobody sees for more than a second does not need a flourish. The right icon
+appeared and the row stopped highlighting under the cursor.
+
+An element that is transparent in the file is not an element that is transparent on screen -- it
+is an element something else animates, and here that something is the cursor. `frames 1..69` was
+the tell, and it was read as "an animation" without asking what plays it.
+
+### What ships, corrected
+
+The container's row record names `0xf258` -- an index nothing in the file uses, answered by the
+same detour that answers `0xf221` for the caret's panel. Behind it is a copy of `0x0258`, Quit
+Game's own row definition, with exactly one child changed:
+
+```
+def 0xf258   OUR ROW                     copied from 0x0258
+  [0] def=0x0254  id=0  (8.10, 4.55)     was 0x0255 id=0x1eacd0 -- the glyph WITHOUT its
+                                         greyed-out twin, on our own transform block:
+                                         colour ffff6450, flags |= 0x110
+  [1] def=0x0257  id=0  (6.90,-3.45)     the selection highlight, verbatim
+```
+
+Both children are checked before anything is copied -- child 0 must name `0x0255` and child 1
+`0x0257` -- because `0x0258` on a document this was not read from is some other row, and copying
+its highlight would be the same class of mistake as substituting the wrong container. If any check
+says no, the record keeps naming row 0's definition and the row is what shipped before: the wrong
+icon, and a highlight that works.

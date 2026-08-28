@@ -2950,35 +2950,60 @@ pub const FLO_QUIT_TAB_CHILD_IDS: [u32; 7] = [
 /// choice of 3 is arbitrary and only has to be a plain row rather than a flash.
 pub const FLO_QUIT_TAB_ROW_TEMPLATE: usize = 3;
 
-/// The definition that IS the Quit Game icon, and nothing else.
+// ---------------------------------------------------------------------------------------------
+// The added row's own definition: the Quit Game glyph, tinted, keeping the selection highlight.
+//
+// A row definition holds TWO children and both of them matter. The first is the icon; the second
+// is a shape at `(6.9, -3.45)`, colour `00ffffff`, frames `1..69` -- transparent at rest, which is
+// why it reads as decoration in the file and is in fact THE SELECTION HIGHLIGHT. Pointing the
+// container's row record straight at the icon (`0x0254`) put the right glyph on screen and took
+// the highlight away with it, which a run showed immediately.
+//
+// So the row gets a copy of row 2's definition with one child swapped, rather than a bare icon.
+// ---------------------------------------------------------------------------------------------
+
+/// Row 2's definition -- Quit Game -- the one the added row's own definition is copied from.
+pub const FLO_QUIT_ROW_DEFINITION: u32 = 0x0258;
+
+/// Children [`FLO_QUIT_ROW_DEFINITION`] declares, and which is which.
 ///
-/// **A pause-menu row's definition is its icon.** Row 0's `0x0262` holds exactly two children --
-/// an icon wrapper at `(4.5, -0.15)` and a flash overlay at `(6.9, -3.45)` whose colour is
-/// `00ffffff`, i.e. transparent -- and rows 1 and 2 are the same shape with different shapes
-/// inside. The label is not in there; it is the separate `0x022c` mark at x `60.2`. So the row
-/// record's definition index is the whole of "which icon does this row show".
+/// ```text
+/// [0] def 0x0255 id 0x1eacd0 (8.10,  4.55)  the icon, paired with its greyed-out twin
+/// [1] def 0x0257 id 0        (6.90, -3.45)  the selection highlight, alpha 0 at rest
+/// ```
+pub const FLO_QUIT_ROW_CHILDREN: usize = 2;
+pub const FLO_QUIT_ROW_ICON: usize = 0;
+pub const FLO_QUIT_ROW_HIGHLIGHT: usize = 1;
+
+/// What child [`FLO_QUIT_ROW_ICON`] names in the shipped file, and what replaces it.
 ///
-/// Three candidates, and only this one is safe:
-///
-/// * `0x0258` is row 2 whole. Its icon child is `0x0255`, which instantiates `0x0254` **twice** --
-///   once at `ffffffff` and once at `ff808080` carrying id `0x1eacd0`. That second one is the
-///   greyed-out overlay for a REFUSED quit.
-/// * `0x0255` is that pair, so it drags the grey twin along.
-/// * `0x0254` is the icon on its own, with a child id of `0`, which is what the white copy of row
-///   2's icon already is.
-///
-/// **And the grey twin would never come off.** `FeGroupInGameGroupSelect::FUN_1400a77c0` walks
-/// the cells, and its first act per cell is `cmp DWORD PTR [rcx+0x4], 0` / `je` -- the entry's
-/// GATE. Only a gated row reaches the call at `0x1400a78af` that resolves `0x1eacd0` under that
-/// cell and sets its visibility from the gate's verdict. This crate's item is
-/// [`FE_INGAME_MENU_GATE_ALWAYS`], so the pass skips it, nothing ever hides the twin, and the
-/// record's own `ff808080` is what draws. A permanently disabled-looking icon on a row that is
-/// always available.
+/// `0x0255` instantiates [`FLO_QUIT_ICON_DEFINITION`] **twice** -- once at `ffffffff` and once at
+/// `ff808080` carrying id [`FLO_QUIT_ROW_DISABLED_ID`]. That second one is the greyed-out overlay
+/// for a REFUSED quit, and it would never come off:
+/// `FeGroupInGameGroupSelect::FUN_1400a77c0` walks the cells and its first act per cell is
+/// `cmp DWORD PTR [rcx+0x4], 0` / `je` -- the entry's GATE. Only a gated row reaches the call at
+/// `0x1400a78af` that resolves `0x1eacd0` under that cell and sets its visibility from the gate's
+/// verdict. This crate's item is [`FE_INGAME_MENU_GATE_ALWAYS`], so the pass skips it, nothing
+/// ever hides the twin, and the record's own `ff808080` is what draws.
 ///
 /// `0x1eacd0` is the shared id for that overlay -- `0x0232`, `0x0238`, `0x023f` and `0x0255` all
 /// use it, which is the four gated rows in this file: the three message rows (gates 1, 2, 3) and
 /// quit (gate 4). It lines up exactly with the builder table in `docs/DS2-INGAME-MENU.md`.
+pub const FLO_QUIT_ROW_ICON_GROUP: u32 = 0x0255;
+pub const FLO_QUIT_ROW_DISABLED_ID: u32 = 0x001e_acd0;
+
+/// What child [`FLO_QUIT_ROW_HIGHLIGHT`] names, checked and then copied through untouched.
+pub const FLO_QUIT_ROW_HIGHLIGHT_DEFINITION: u32 = 0x0257;
+
+/// The definition that IS the Quit Game icon, and nothing else.
+///
+/// The white copy of row 2's icon, with a child id of `0`, so substituting it for
+/// [`FLO_QUIT_ROW_ICON_GROUP`] drops the grey twin and adds no duplicate id to the scene.
 pub const FLO_QUIT_ICON_DEFINITION: u32 = 0x0254;
+
+/// The index the added row's definition is filed under. Ours, like
+/// [`FLO_ADDED_PANEL_DEFINITION`], and asked for only by our own record.
+pub const FLO_ADDED_ROW_DEFINITION: u32 = 0xf258;
 
 /// Index into [`FLO_QUIT_TAB_CHILD_IDS`] of the mark a new row's mark is cloned from.
 pub const FLO_QUIT_TAB_MARK_TEMPLATE: usize = 6;
@@ -2993,22 +3018,15 @@ pub const FLO_ADDED_MARK_ID: u32 = 0x001e_accc;
 
 /// Where the added row and its mark go, in the container's own coordinates.
 ///
-/// The marks are the easy half: they sit at y `17.55`, `65.95`, `114.35`, stepping `48.40`, and
-/// the fourth continues it at `114.35 + 48.40`. The x is mark 2's, unchanged.
+/// The three shipped rows sit at y `10.60`, `55.90`, `103.90` and their marks at `17.55`, `65.95`,
+/// `114.35`. Both series step by ~48 with +y downwards, so the fourth of each continues it:
+/// `103.90 + 48.00` and `114.35 + 48.40`. The x is row 2's and mark 2's, unchanged -- the shipped
+/// rows' x values wobble by a few units and there is no pattern in that to continue.
 ///
-/// **The row is anchored to its own label, not to the row series**, because the record now names
-/// [`FLO_QUIT_ICON_DEFINITION`] directly rather than a row wrapper, so its transform positions the
-/// icon itself and not a container the icon sits inside. Row 2's icon lands at
-/// `(-0.10, 103.90) + (8.10, 4.55) + (0, 0) = (8.00, 108.45)`, which is `5.90` above its own mark
-/// at `114.35`; ours keeps that relationship at `162.75 - 5.90`. Anchoring to the row series
-/// instead would be `103.90 + 48.00 + 4.55 = 156.45`, four tenths off -- the two series do not
-/// step by the same amount, and the eye pairs an icon with its label rather than with the row
-/// above it.
-///
-/// Each glyph carries its own bearing, so there is no shared offset to reuse: row 0's icon is
-/// `7.10` above its mark, row 1's `11.25`, row 2's `5.90`. Row 2's is the one that applies here
-/// because row 2's is the glyph.
-pub const FLO_ADDED_ROW_XY: (f32, f32) = (8.0, 156.85);
+/// This is the ROW's position and not the icon's. The record names [`FLO_ADDED_ROW_DEFINITION`],
+/// which places its own icon at `(8.10, 4.55)` inside it exactly as row 2 does, so the glyph lands
+/// where row 2's would one step down.
+pub const FLO_ADDED_ROW_XY: (f32, f32) = (-0.1, 151.9);
 pub const FLO_ADDED_MARK_XY: (f32, f32) = (60.2, 162.75);
 
 /// Byte offset of the packed colour inside a transform block, and the tint the added row's icon
@@ -3035,17 +3053,74 @@ pub const FLO_ADDED_MARK_XY: (f32, f32) = (60.2, 162.75);
 /// which is also what proves the colour reaches the shape underneath, since the record carrying
 /// `ff808080` is a nested record and the shape below it is `ffffffff`.
 ///
-/// Byte order is `0xAARRGGBB` read as a little-endian `u32`, i.e. B, G, R, A in memory. Fixed by
-/// the alpha being at `+0x1b` above, and consistent with the file's three hued records --
-/// `800080ff`, `cdff80ff`, `daff73e9`.
+/// Byte order in memory is **R, G, B, A** -- see [`FLO_ADDED_ROW_TINT`], which had it backwards
+/// and cost a run to find out. Only the alpha's position is readable from the file, via the
+/// `+0x1b` test above; the file's opaque non-white records are all greys and blacks, so nothing in
+/// it distinguishes R-first from B-first.
+///
+/// Note this does NOT disturb the census in [`FLO_TRANSFORM_FLAGS_OFFSET`]: "RGB is white" there
+/// means the low three bytes of the little-endian `u32` are `ff ff ff`, which is the same set of
+/// records under either reading.
+///
+/// **On its own the colour does nothing.** See [`FLO_TRANSFORM_FLAGS_OFFSET`].
 pub const FLO_TRANSFORM_COLOUR_OFFSET: usize = 0x18;
 
-/// The tint, `0xAARRGGBB`: opaque, red, green and blue pulled down.
+/// Byte offset of the flag word beside it, and the two bits that make the colour mean anything.
 ///
-/// The added row wears the shipped Quit Game glyph, so without this it is the same icon as the row
-/// directly above it and the only thing telling them apart is the caption. Red because the row is
-/// the one that does not ask.
-pub const FLO_ADDED_ROW_TINT: u32 = 0xff_ff_64_50;
+/// **THE COLOUR IS INERT WITHOUT THESE, AND A RUN PROVED IT.** The first version of this wrote
+/// `ffff6450` into a transform block copied from a row whose flags were `0`, and the icon came
+/// back on screen in its shipped colour with no other symptom -- no refusal in the log, no crash,
+/// nothing to read. The field is not a colour, it is a colour PLUS a licence to use it, and
+/// copying a block from a row that never wanted one copies the licence's absence.
+///
+/// Both bits were then settled against all 1045 records in the file, and the split is total:
+///
+/// ```text
+///  flags    n   white  non-white  alpha<ff
+///  0x000  928     928          0         0
+///  0x001    9       9          0         0
+///  0x010   77       0         77        77    alpha only -- RGB is ffffff in all 77
+///  0x011   19       0         19        19    likewise
+///  0x110    5       0          5         0    RGB changed: ff000000, ff808080
+///  0x111    3       0          3         0    RGB changed: 800080ff, cdff80ff, daff73e9
+///  0x130    4       0          4         0    RGB changed: ff000000
+/// ```
+///
+/// `0x10` set with a non-white colour: 108 records. `0x10` clear with a non-white colour: **zero**.
+/// And every record carrying `0x100` has non-white RGB, while every record without it is
+/// `xxffffff` -- varying alpha over white. So `0x10` is "the colour word is live" and `0x100` is
+/// "and its RGB is not white".
+///
+/// An opaque re-skin needs both, which is exactly what `0x0255`'s grey twin carries: flags
+/// `0x110`, colour `ff808080`. The one record in the file already doing what this crate wants to
+/// do. Bit `0x20` (in `0x130`) and bit `0x1` are left alone -- `0x1` occurs on white records too,
+/// so neither is about colour and neither is worth setting on a guess.
+pub const FLO_TRANSFORM_FLAGS_OFFSET: usize = 0x20;
+pub const FLO_TRANSFORM_COLOUR_LIVE: u32 = 0x0010;
+pub const FLO_TRANSFORM_COLOUR_RGB: u32 = 0x0100;
+
+/// The tint, as the four bytes it occupies in memory: **R, G, B, A**.
+///
+/// **A byte array and not a `u32`, because a `u32` is what got this wrong.** The first version was
+/// `0xff_ff_64_50` under a doc comment claiming `0xAARRGGBB` stored B, G, R, A. Written
+/// little-endian that lays down `50 64 ff ff`, and the run came back with a BLUE icon -- which is
+/// `(0x50, 0x64, 0xff)` read straight through, R first.
+///
+/// Alpha last was already fixed, by the builder's `cmp BYTE PTR [rax+0x1b], 0xff`. The other three
+/// were asserted from nothing, and **the file could not have settled them either way**: its only
+/// opaque non-white records are `ff808080` and `ff000000`, greys and blacks, where the order does
+/// not show. The three hued records are all translucent and all read plausibly under either
+/// convention. So this was never a fact in the file waiting to be read -- it was a coin flip
+/// written down as a measurement, and the run is what called it.
+///
+/// Red, opaque, in the order the bytes are actually laid down. The added row wears the shipped
+/// Quit Game glyph, so without this it is the same icon as the row directly above it and the only
+/// thing telling them apart is the caption. Red because the row is the one that does not ask.
+pub const FLO_ADDED_ROW_TINT: [u8; 4] = [0xff, 0x64, 0x50, 0xff];
+
+/// Index of the alpha byte inside [`FLO_ADDED_ROW_TINT`]. It is the byte
+/// [`FLO_TRANSFORM_COLOUR_OFFSET`]` + 3` lands on, which is the one the builder reads.
+pub const FLO_TINT_ALPHA: usize = 3;
 
 // ---------------------------------------------------------------------------------------------
 // Captions: how a pause-menu row gets its text, and where the strings live.

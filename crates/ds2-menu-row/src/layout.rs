@@ -27,14 +27,22 @@
 //! Two, not one. Every shipped row is a pair -- the row itself and a mark at x `60.2` -- and a row
 //! missing its mark is visibly not the same kind of thing as its neighbours.
 //!
-//! # The row is the icon, and the mark is the caption
+//! # The row is the icon and its highlight; the mark is the caption
 //!
-//! Worth stating plainly because it makes both of the added records one-liners. A row's definition
-//! holds an icon and a transparent flash overlay and nothing else; the text is the `0x022c` mark
-//! beside it, bound by [`crate::caption`]. So "which icon does the added row show" is the `u16` at
-//! the record's `+0x00`, and it is set to [`ds2_rva::FLO_QUIT_ICON_DEFINITION`] -- the Quit Game
-//! glyph, tinted red by the colour in the record's own transform, because the row above it is the
-//! other Quit Game and two identical icons would be a puzzle rather than a menu.
+//! A row's definition holds exactly two children and nothing else: the icon, and a shape at
+//! `(6.9, -3.45)` whose colour is `00ffffff`. The text is not in there -- that is the `0x022c`
+//! mark beside it, bound by [`crate::caption`].
+//!
+//! **The second child is the SELECTION HIGHLIGHT, and reading it as decoration cost a run.** It is
+//! transparent at rest and carries a 69-frame range, which in the file looks like a flourish; on
+//! screen it is what lights up under the cursor. Pointing the container's row record straight at
+//! [`ds2_rva::FLO_QUIT_ICON_DEFINITION`] put the right glyph on the row and took the highlight
+//! away in the same stroke, with nothing in the log to say so.
+//!
+//! So the row gets its OWN DEFINITION -- a copy of Quit Game's with only the icon child changed,
+//! served under [`ds2_rva::FLO_ADDED_ROW_DEFINITION`] the way the caret's panel is. The icon
+//! becomes the glyph alone, tinted red, because the row above it is the other Quit Game and two
+//! identical icons would be a puzzle rather than a menu.
 //!
 //! # What makes this safe to be wrong about
 //!
@@ -113,6 +121,17 @@ struct Container {
     panel_definition: [u8; ds2_rva::FLO_DEFINITION_STRIDE],
     panel_records: [u8; ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_PANEL_CHILDREN],
     caret_transform: [u8; ds2_rva::FLO_TRANSFORM_SIZE],
+    /// The added row's OWN copy of row definition `0x0258` -- Quit Game's -- with its icon child
+    /// repointed at the glyph alone and tinted.
+    ///
+    /// **Both children are copied, and the second one is why this exists at all.** A row
+    /// definition holds an icon and a shape at `(6.9, -3.45)` whose colour is `00ffffff`, and that
+    /// second, invisible-at-rest child is the SELECTION HIGHLIGHT. Pointing the container's row
+    /// record straight at the icon put the right glyph on screen and silently took the highlight
+    /// with it.
+    row_definition: [u8; ds2_rva::FLO_DEFINITION_STRIDE],
+    row_records: [u8; ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_QUIT_ROW_CHILDREN],
+    icon_transform: [u8; ds2_rva::FLO_TRANSFORM_SIZE],
 }
 
 /// Substitutions already built, as `(definition the game returned, definition we return)`.
@@ -135,6 +154,10 @@ static BUILT: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
 /// lookup for it can only have come from the record this crate wrote, and the newest container is
 /// always the right answer.
 static PANEL: AtomicUsize = AtomicUsize::new(0);
+
+/// The added row's own definition, answered for [`ds2_rva::FLO_ADDED_ROW_DEFINITION`]. As
+/// [`PANEL`], and for the same reason.
+static ROW_DEFINITION: AtomicUsize = AtomicUsize::new(0);
 
 /// Most substitutions to keep. Past this the detour passes through and says so. The bound exists
 /// so that a misunderstanding shows up as a logged refusal rather than as unbounded growth; at
@@ -216,7 +239,7 @@ fn describe(ids: &[u32]) -> String {
 ///
 /// `original` must be the definition [`ds2_rva::FLO_FIND_DEFINITION`] just returned for
 /// [`ds2_rva::FLO_QUIT_TAB_CONTAINER_DEFINITION`], in a loaded document.
-unsafe fn build(original: *mut u8, panel: *mut u8) -> Option<*mut u8> {
+unsafe fn build(original: *mut u8, panel: *mut u8, row: *mut u8) -> Option<*mut u8> {
     let refuse = |why: std::fmt::Arguments<'_>| -> Option<*mut u8> {
         let n = REFUSED.fetch_add(1, Ordering::Relaxed) + 1;
         log(format_args!(
@@ -272,6 +295,9 @@ unsafe fn build(original: *mut u8, panel: *mut u8) -> Option<*mut u8> {
         panel_definition: [0; ds2_rva::FLO_DEFINITION_STRIDE],
         panel_records: [0; ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_PANEL_CHILDREN],
         caret_transform: [0; ds2_rva::FLO_TRANSFORM_SIZE],
+        row_definition: [0; ds2_rva::FLO_DEFINITION_STRIDE],
+        row_records: [0; ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_QUIT_ROW_CHILDREN],
+        icon_transform: [0; ds2_rva::FLO_TRANSFORM_SIZE],
     });
 
     // COPIED, never assembled field by field. The definition and the records carry fields this
@@ -363,12 +389,6 @@ unsafe fn build(original: *mut u8, panel: *mut u8) -> Option<*mut u8> {
         .copy_from_slice(&mark_x.to_le_bytes());
     container.mark_transform[ds2_rva::FLO_TRANSFORM_Y_OFFSET..][..4]
         .copy_from_slice(&mark_y.to_le_bytes());
-    // THE TINT. The row record's definition is replaced below with the Quit Game glyph, so without
-    // a colour the added row would be pixel-identical to the row above it. This is the same field,
-    // on the same icon, that the game itself sets to `ff808080` for the refused-quit overlay --
-    // see `FLO_TRANSFORM_COLOUR_OFFSET`.
-    container.row_transform[ds2_rva::FLO_TRANSFORM_COLOUR_OFFSET..][..4]
-        .copy_from_slice(&ds2_rva::FLO_ADDED_ROW_TINT.to_le_bytes());
 
     // THE SCROLL. The panel is one fixed graphic with three row slots and about half a row of
     // slack under the last one, so a fourth row hangs off the bottom of it. Its record is copied
@@ -412,14 +432,115 @@ unsafe fn build(original: *mut u8, panel: *mut u8) -> Option<*mut u8> {
             .copy_from_slice(&depth.to_le_bytes());
     }
 
-    // THE ICON. A row's definition IS its icon, and the cloned record names row 0's -- Game
-    // Options. Pointing it at the Quit Game glyph instead is a two-byte write, and it has to be
-    // the glyph ALONE (`0x0254`) rather than row 2's definition, which carries the greyed-out
-    // overlay that only a GATED row's availability pass ever takes off. `FLO_QUIT_ICON_DEFINITION`
-    // has the disassembly.
-    let icon_at = ROW * ds2_rva::FLO_RECORD_STRIDE + ds2_rva::FLO_RECORD_DEFINITION_OFFSET;
-    container.records[icon_at..][..2]
-        .copy_from_slice(&(ds2_rva::FLO_QUIT_ICON_DEFINITION as u16).to_le_bytes());
+    // THE ROW'S OWN DEFINITION. The cloned record names row 0's, which is the Game Options glyph;
+    // what it should name is the Quit Game one, tinted. That is not a field on this record -- a
+    // row definition holds an icon AND the selection highlight, and repointing the record at the
+    // bare glyph loses the second one -- so the row gets a copy of row 2's definition with only
+    // its icon child changed. Same substitution as the panel, one level down.
+    //
+    // If any check below says no, the record keeps naming row 0's definition: an untinted icon
+    // with a working highlight, which is what shipped before this block existed.
+    let mut row_ok = false;
+    if !row.is_null() {
+        // SAFETY: `row` is a definition the game's own table just yielded.
+        let (row_count, row_children) = unsafe {
+            (
+                row.add(ds2_rva::FLO_DEFINITION_CHILD_COUNT_OFFSET)
+                    .cast::<u16>()
+                    .read() as usize,
+                row.add(ds2_rva::FLO_DEFINITION_CHILDREN_OFFSET)
+                    .cast::<*const u8>()
+                    .read(),
+            )
+        };
+        if row_count == ds2_rva::FLO_QUIT_ROW_CHILDREN && (row_children as usize) >= 0x1_0000 {
+            // SAFETY: `row_count` records are live at `row_children`, and the destination holds
+            // exactly that many.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    row,
+                    container.row_definition.as_mut_ptr(),
+                    ds2_rva::FLO_DEFINITION_STRIDE,
+                );
+                std::ptr::copy_nonoverlapping(
+                    row_children,
+                    container.row_records.as_mut_ptr(),
+                    row_count * ds2_rva::FLO_RECORD_STRIDE,
+                );
+            }
+            let icon = ds2_rva::FLO_QUIT_ROW_ICON * ds2_rva::FLO_RECORD_STRIDE;
+            let highlight = ds2_rva::FLO_QUIT_ROW_HIGHLIGHT * ds2_rva::FLO_RECORD_STRIDE;
+            let names = |at: usize| -> u32 {
+                u16::from_le_bytes(
+                    container.row_records[at + ds2_rva::FLO_RECORD_DEFINITION_OFFSET..][..2]
+                        .try_into()
+                        .expect("two bytes"),
+                ) as u32
+            };
+            // Both children are checked, not just the one being replaced. `0x0258` on a document
+            // this was not read from is some other row, and copying its highlight into ours would
+            // be the same class of mistake as substituting the wrong container.
+            let (found_icon, found_highlight) = (names(icon), names(highlight));
+            if found_icon == ds2_rva::FLO_QUIT_ROW_ICON_GROUP
+                && found_highlight == ds2_rva::FLO_QUIT_ROW_HIGHLIGHT_DEFINITION
+            {
+                // SAFETY: the record was copied from a live one whose transform the game
+                // dereferences, and the destination is exactly that size.
+                let source = unsafe {
+                    container
+                        .row_records
+                        .as_ptr()
+                        .add(icon + ds2_rva::FLO_RECORD_TRANSFORM_OFFSET)
+                        .cast::<*const u8>()
+                        .read()
+                };
+                if (source as usize) >= 0x1_0000 {
+                    // SAFETY: a live transform block of exactly this size.
+                    unsafe {
+                        std::ptr::copy_nonoverlapping(
+                            source,
+                            container.icon_transform.as_mut_ptr(),
+                            ds2_rva::FLO_TRANSFORM_SIZE,
+                        );
+                    }
+                    // The glyph alone, so the greyed-out twin inside `0x0255` is not cloned, and
+                    // its id with it -- `0x0254`'s own child carries none.
+                    container.row_records[icon + ds2_rva::FLO_RECORD_DEFINITION_OFFSET..][..2]
+                        .copy_from_slice(&(ds2_rva::FLO_QUIT_ICON_DEFINITION as u16).to_le_bytes());
+                    container.row_records[icon + ds2_rva::FLO_RECORD_ID_OFFSET..][..4]
+                        .copy_from_slice(&0u32.to_le_bytes());
+                    // THE TINT, AND THE LICENCE TO USE IT. A colour with no flag bits is what the
+                    // last run wrote, and it changed nothing at all -- see
+                    // `FLO_TRANSFORM_FLAGS_OFFSET`. Both bits, because the tint is opaque and its
+                    // RGB is not white.
+                    let flags_at = ds2_rva::FLO_TRANSFORM_FLAGS_OFFSET;
+                    let flags = u32::from_le_bytes(
+                        container.icon_transform[flags_at..][..4]
+                            .try_into()
+                            .expect("four bytes"),
+                    ) | ds2_rva::FLO_TRANSFORM_COLOUR_LIVE
+                        | ds2_rva::FLO_TRANSFORM_COLOUR_RGB;
+                    container.icon_transform[flags_at..][..4].copy_from_slice(&flags.to_le_bytes());
+                    container.icon_transform[ds2_rva::FLO_TRANSFORM_COLOUR_OFFSET..][..4]
+                        .copy_from_slice(&ds2_rva::FLO_ADDED_ROW_TINT);
+                    row_ok = true;
+                }
+            } else {
+                log(format_args!(
+                    "{LOG_PREFIX} row definition REFUSED icon={found_icon:#x} \
+                     highlight={found_highlight:#x}, expected {:#x} and {:#x} -- the added row \
+                     keeps row 0's icon",
+                    ds2_rva::FLO_QUIT_ROW_ICON_GROUP,
+                    ds2_rva::FLO_QUIT_ROW_HIGHLIGHT_DEFINITION
+                ));
+            }
+        }
+    }
+    if row_ok {
+        let at = ROW * ds2_rva::FLO_RECORD_STRIDE + ds2_rva::FLO_RECORD_DEFINITION_OFFSET;
+        container.records[at..][..2]
+            .copy_from_slice(&(ds2_rva::FLO_ADDED_ROW_DEFINITION as u16).to_le_bytes());
+    }
 
     // THE CARET. `0x0221` is shared by all three tabs, so the quit tab gets its own copy of it and
     // our panel record is repointed at that copy -- the same substitution as the container, one
@@ -522,6 +643,37 @@ unsafe fn build(original: *mut u8, panel: *mut u8) -> Option<*mut u8> {
         container.records[at..][..8].copy_from_slice(&transform.to_le_bytes());
     }
 
+    if row_ok {
+        let records = container.row_records.as_ptr() as usize;
+        container.row_definition[ds2_rva::FLO_DEFINITION_CHILDREN_OFFSET..][..8]
+            .copy_from_slice(&records.to_le_bytes());
+        container.row_definition[..2]
+            .copy_from_slice(&(ds2_rva::FLO_ADDED_ROW_DEFINITION as u16).to_le_bytes());
+        let at = ds2_rva::FLO_QUIT_ROW_ICON * ds2_rva::FLO_RECORD_STRIDE
+            + ds2_rva::FLO_RECORD_TRANSFORM_OFFSET;
+        let transform = container.icon_transform.as_ptr() as usize;
+        container.row_records[at..][..8].copy_from_slice(&transform.to_le_bytes());
+        ROW_DEFINITION.store(
+            container.row_definition.as_ptr() as usize,
+            Ordering::Release,
+        );
+        log(format_args!(
+            // The tint is printed as r/g/b/a rather than as a packed word, because a packed word
+            // is exactly the notation that let it be written backwards.
+            "{LOG_PREFIX} row definition={:#x} from={:#x} icon={:#x} \
+             tint=r{:02x}g{:02x}b{:02x}a{:02x} flags+={:#x} highlight={:#x} kept",
+            ds2_rva::FLO_ADDED_ROW_DEFINITION,
+            ds2_rva::FLO_QUIT_ROW_DEFINITION,
+            ds2_rva::FLO_QUIT_ICON_DEFINITION,
+            ds2_rva::FLO_ADDED_ROW_TINT[0],
+            ds2_rva::FLO_ADDED_ROW_TINT[1],
+            ds2_rva::FLO_ADDED_ROW_TINT[2],
+            ds2_rva::FLO_ADDED_ROW_TINT[3],
+            ds2_rva::FLO_TRANSFORM_COLOUR_LIVE | ds2_rva::FLO_TRANSFORM_COLOUR_RGB,
+            ds2_rva::FLO_QUIT_ROW_HIGHLIGHT_DEFINITION
+        ));
+    }
+
     if caret_ok {
         let records = container.panel_records.as_ptr() as usize;
         container.panel_definition[ds2_rva::FLO_DEFINITION_CHILDREN_OFFSET..][..8]
@@ -547,13 +699,12 @@ unsafe fn build(original: *mut u8, panel: *mut u8) -> Option<*mut u8> {
     let n = SUBSTITUTED.fetch_add(1, Ordering::Relaxed) + 1;
     log(format_args!(
         "{LOG_PREFIX} container substituted original=0x{:016x} replacement=0x{:016x} \
-         children={count}->{CHILDREN} row={:#x}@({row_x},{row_y}) icon={:#x}/{:08x} \
+         children={count}->{CHILDREN} row={:#x}@({row_x},{row_y}) row-definition={} \
          label={:#x}@({mark_x},{mark_y}) panel-scale-y=x{} substitutions={n}",
         original as usize,
         container as *const Container as usize,
         ds2_rva::FLO_ADDED_ROW_ID,
-        ds2_rva::FLO_QUIT_ICON_DEFINITION,
-        ds2_rva::FLO_ADDED_ROW_TINT,
+        if row_ok { "ours" } else { "row 0's" },
         ds2_rva::FLO_ADDED_ROW_LABEL_ID,
         ds2_rva::FLO_PANEL_STRETCH_Y,
     ));
@@ -565,7 +716,7 @@ unsafe fn build(original: *mut u8, panel: *mut u8) -> Option<*mut u8> {
 /// # Safety
 ///
 /// As [`build`].
-unsafe fn substitute(original: *mut u8, panel: *mut u8) -> *mut u8 {
+unsafe fn substitute(original: *mut u8, panel: *mut u8, row: *mut u8) -> *mut u8 {
     let Ok(mut built) = BUILT.lock() else {
         // A poisoned mutex means a previous call panicked inside the lock. Handing back the
         // original is the one answer that cannot make that worse.
@@ -595,7 +746,7 @@ unsafe fn substitute(original: *mut u8, panel: *mut u8) -> *mut u8 {
         return original;
     }
     // SAFETY: the caller established this is the quit tab's container definition.
-    match unsafe { build(original, panel) } {
+    match unsafe { build(original, panel, row) } {
         Some(replacement) => {
             built.push((original as usize, replacement as usize));
             replacement
@@ -621,14 +772,21 @@ unsafe extern "system" fn detour(doc: *mut usize, index: u32) -> *mut u8 {
         // Ours, and only ever asked for by our own record.
         return PANEL.load(Ordering::Acquire) as *mut u8;
     }
+    if index == ds2_rva::FLO_ADDED_ROW_DEFINITION {
+        // Likewise.
+        return ROW_DEFINITION.load(Ordering::Acquire) as *mut u8;
+    }
     if index != ds2_rva::FLO_QUIT_TAB_CONTAINER_DEFINITION || found.is_null() {
         return found;
     }
-    // The shared panel definition, fetched through the original so the copy is the game's own.
+    // The shared panel definition and Quit Game's row definition, both fetched through the
+    // original so the copies are the game's own.
     // SAFETY: the trampoline is the game's own lookup, called with its own arguments.
     let panel = unsafe { original(doc, ds2_rva::FLO_PANEL_DEFINITION) };
+    // SAFETY: as above.
+    let row = unsafe { original(doc, ds2_rva::FLO_QUIT_ROW_DEFINITION) };
     // SAFETY: `found` is a definition the game's own table just yielded.
-    unsafe { substitute(found, panel) }
+    unsafe { substitute(found, panel, row) }
 }
 
 /// Detour the definition lookup. Returns whether the row's cell will exist.
@@ -713,57 +871,97 @@ mod tests {
         assert!(ds2_rva::FLO_QUIT_TAB_MARK_TEMPLATE < ds2_rva::FLO_QUIT_TAB_CHILD_IDS.len());
     }
 
-    /// The icon is the glyph ALONE, never row 2's definition or the pair that carries its
-    /// greyed-out twin -- the availability pass skips an ungated row, so a cloned twin would draw
-    /// `ff808080` forever. See `FLO_QUIT_ICON_DEFINITION`.
+    /// The icon is the glyph ALONE, never the pair that carries its greyed-out twin -- the
+    /// availability pass skips an ungated row, so a cloned twin would draw `ff808080` forever.
+    /// See `FLO_QUIT_ICON_DEFINITION`.
     #[test]
     fn the_icon_is_the_glyph_without_the_disabled_twin() {
-        const ROW_2_DEFINITION: u32 = 0x0258;
-        const ICON_AND_TWIN: u32 = 0x0255;
-        assert_ne!(ds2_rva::FLO_QUIT_ICON_DEFINITION, ROW_2_DEFINITION);
-        assert_ne!(ds2_rva::FLO_QUIT_ICON_DEFINITION, ICON_AND_TWIN);
-        assert_eq!(ds2_rva::FLO_QUIT_ICON_DEFINITION, 0x0254);
-        // And it is a real file index, not one of ours -- the game's own lookup has to find it.
+        assert_ne!(
+            ds2_rva::FLO_QUIT_ICON_DEFINITION,
+            ds2_rva::FLO_QUIT_ROW_ICON_GROUP
+        );
+        assert_ne!(
+            ds2_rva::FLO_QUIT_ICON_DEFINITION,
+            ds2_rva::FLO_QUIT_ROW_DEFINITION
+        );
+        // A real file index, not one of ours -- the game's own lookup has to find it.
         const { assert!(ds2_rva::FLO_QUIT_ICON_DEFINITION < ds2_rva::FLO_ADDED_PANEL_DEFINITION) };
         // The gate is what makes the twin permanent, so the pairing is asserted from both sides.
         assert_eq!(ds2_rva::FE_INGAME_MENU_GATE_ALWAYS, 0);
     }
 
-    /// The tint has to be opaque and has to be something other than white, or the added row is the
-    /// row above it with a different caption.
+    /// The added row keeps BOTH of a row's children. Losing the second one is a highlight that
+    /// stops appearing, which no log line reports and only a run shows.
     #[test]
-    fn the_tint_is_opaque_and_not_white() {
-        assert_eq!(ds2_rva::FLO_ADDED_ROW_TINT >> 24, 0xff);
-        assert_ne!(ds2_rva::FLO_ADDED_ROW_TINT, 0xffff_ffff);
-        // `+0x1b` is the alpha byte the builder's inline test reads, which is the top byte of a
-        // little-endian `u32` at `FLO_TRANSFORM_COLOUR_OFFSET`.
+    fn the_added_row_keeps_the_selection_highlight() {
+        assert_eq!(ds2_rva::FLO_QUIT_ROW_CHILDREN, 2);
+        assert_ne!(ds2_rva::FLO_QUIT_ROW_ICON, ds2_rva::FLO_QUIT_ROW_HIGHLIGHT);
+        const { assert!(ds2_rva::FLO_QUIT_ROW_ICON < ds2_rva::FLO_QUIT_ROW_CHILDREN) };
+        const { assert!(ds2_rva::FLO_QUIT_ROW_HIGHLIGHT < ds2_rva::FLO_QUIT_ROW_CHILDREN) };
+        assert_ne!(
+            ds2_rva::FLO_QUIT_ROW_HIGHLIGHT_DEFINITION,
+            ds2_rva::FLO_QUIT_ROW_ICON_GROUP
+        );
+        // Our index must be outside the file's own range, like the panel's, or a real definition
+        // is shadowed.
+        const { assert!(ds2_rva::FLO_ADDED_ROW_DEFINITION > 0x0272) };
+        assert_ne!(
+            ds2_rva::FLO_ADDED_ROW_DEFINITION,
+            ds2_rva::FLO_ADDED_PANEL_DEFINITION
+        );
+    }
+
+    /// The tint has to be opaque, non-white, and carry both flag bits -- a colour without them is
+    /// what the first run wrote, and it changed nothing at all.
+    #[test]
+    fn the_tint_is_opaque_not_white_and_licensed() {
+        // The tint is R, G, B, A in the order it is written, and the LAST byte is the alpha --
+        // `+0x1b`, the byte the builder's inline test reads. Asserting the index rather than
+        // trusting a packed literal is the whole point of the array: the first version of this
+        // constant was a `u32` whose documented order was backwards, and it shipped as blue.
         assert_eq!(
-            ds2_rva::FLO_ADDED_ROW_TINT.to_le_bytes()[3],
+            ds2_rva::FLO_TINT_ALPHA,
+            ds2_rva::FLO_ADDED_ROW_TINT.len() - 1
+        );
+        assert_eq!(
+            ds2_rva::FLO_TRANSFORM_COLOUR_OFFSET + ds2_rva::FLO_TINT_ALPHA,
+            0x1b
+        );
+        assert_eq!(
+            ds2_rva::FLO_ADDED_ROW_TINT[ds2_rva::FLO_TINT_ALPHA],
             0xff,
             "a non-opaque tint would also make the record inline-eligible"
         );
-        assert_eq!(ds2_rva::FLO_TRANSFORM_COLOUR_OFFSET + 3, 0x1b);
+        // Red, and red means the FIRST byte is the large one. A tint whose red channel is not the
+        // dominant one is the same mistake wearing a different literal.
+        let [r, g, b, _] = ds2_rva::FLO_ADDED_ROW_TINT;
+        assert!(r > g && r > b, "tint is r{r:02x} g{g:02x} b{b:02x}");
+        // Non-white RGB needs the second bit as well as the first; 108 records in the file agree
+        // and none disagrees.
+        assert_ne!(
+            [r, g, b],
+            [0xff, 0xff, 0xff],
+            "a white-RGB tint would not need FLO_TRANSFORM_COLOUR_RGB"
+        );
+        assert_eq!(
+            ds2_rva::FLO_TRANSFORM_COLOUR_LIVE | ds2_rva::FLO_TRANSFORM_COLOUR_RGB,
+            0x110
+        );
+        // Both bits sit inside the flag word, not past it.
+        const { assert!(ds2_rva::FLO_TRANSFORM_FLAGS_OFFSET + 4 <= ds2_rva::FLO_TRANSFORM_SIZE) };
     }
 
     /// The added row goes BELOW the last shipped one. Above it would overlap a row that exists.
     #[test]
     fn the_added_row_is_below_the_last_shipped_row() {
-        // Quit Game, the bottom row, has its icon at y 108.45 and its mark at 114.35.
-        const SHIPPED_ICON_Y: f32 = 108.45;
-        const SHIPPED_MARK_Y: f32 = 114.35;
-        assert!(ds2_rva::FLO_ADDED_ROW_XY.1 > SHIPPED_ICON_Y);
-        assert!(ds2_rva::FLO_ADDED_MARK_XY.1 > SHIPPED_MARK_Y);
-        // And the mark stays below its own icon, by the same gap row 2 draws -- the record now
-        // positions the glyph itself, so the offset is the glyph's own bearing and not a guess.
+        // Quit Game, the bottom row, sits at y 103.9 and its mark at 114.35.
+        assert!(ds2_rva::FLO_ADDED_ROW_XY.1 > 103.9);
+        assert!(ds2_rva::FLO_ADDED_MARK_XY.1 > 114.35);
+        // And the mark stays below its own row, the way all three shipped pairs do.
         assert!(ds2_rva::FLO_ADDED_MARK_XY.1 > ds2_rva::FLO_ADDED_ROW_XY.1);
-        let gap = ds2_rva::FLO_ADDED_MARK_XY.1 - ds2_rva::FLO_ADDED_ROW_XY.1;
-        assert!(
-            (gap - (SHIPPED_MARK_Y - SHIPPED_ICON_Y)).abs() < 0.01,
-            "icon-to-label gap is {gap}, row 2 draws {}",
-            SHIPPED_MARK_Y - SHIPPED_ICON_Y
-        );
-        // The x is row 2's icon's, unchanged.
-        assert!((ds2_rva::FLO_ADDED_ROW_XY.0 - 8.0).abs() < 0.01);
+        // One row's pitch below row 2, the same step row 2 sits below row 1.
+        let step = ds2_rva::FLO_ADDED_ROW_XY.1 - 103.9;
+        assert!((step - 48.0).abs() < 0.01, "row step is {step}");
     }
 
     /// The replacement declares exactly two more children than the game's own.
@@ -780,11 +978,12 @@ mod tests {
     fn the_container_is_laid_out_the_way_the_game_reads_it() {
         // The fields, then whatever `align(16)` adds on the end. Asserting the bare sum would fail
         // on the padding rather than on a field, which is the opposite of what this is for.
-        let fields = ds2_rva::FLO_DEFINITION_STRIDE * 2
+        let fields = ds2_rva::FLO_DEFINITION_STRIDE * 3
             + ds2_rva::FLO_RECORD_STRIDE * CHILDREN
-            + ds2_rva::FLO_TRANSFORM_SIZE * 4
+            + ds2_rva::FLO_TRANSFORM_SIZE * 5
             + ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_QUIT_TAB_CHILD_IDS.len()
-            + ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_PANEL_CHILDREN;
+            + ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_PANEL_CHILDREN
+            + ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_QUIT_ROW_CHILDREN;
         assert_eq!(
             std::mem::size_of::<Container>(),
             fields.next_multiple_of(16)
