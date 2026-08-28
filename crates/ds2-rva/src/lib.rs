@@ -2951,3 +2951,104 @@ pub const FLO_ADDED_MARK_ID: u32 = 0x001e_accc;
 /// rows' x values wobble by a few units and there is no pattern in that to continue.
 pub const FLO_ADDED_ROW_XY: (f32, f32) = (-0.1, 151.9);
 pub const FLO_ADDED_MARK_XY: (f32, f32) = (60.2, 162.75);
+
+// ---------------------------------------------------------------------------------------------
+// Captions: how a pause-menu row gets its text, and where the strings live.
+//
+// Reproduce the strings with:
+//
+//     python3 scripts/ds2-ebl.py extract /menu/text/english/ingamemenu.fmg --out /tmp/ds2text
+//     python3 scripts/ds2-fmg.py /tmp/ds2text/ingamemenu.fmg --id 0x200f26 --id 0x200f2a
+// ---------------------------------------------------------------------------------------------
+
+/// `FeGroupInGameTopSelect::bindCaptions(this)`. RVA `0x000a7130`.
+///
+/// Ten `(scene path, FMG text id)` pairs, built on the stack at stride `0x38` with the text id at
+/// `+0x30`, then a hardcoded ten-iteration loop that for each one does
+///
+/// ```text
+/// FUN_140026790(this + 0x150, accessor, entry)   ; resolve the element
+/// FUN_14003d870(command, 7, entry->textId)       ; kind 7 = "text by FMG id"
+/// FUN_140029840(accessor + 0x30, command)        ; apply
+/// ```
+///
+/// **The count is a literal in the code and the table is on its stack**, so an eleventh caption
+/// cannot be added by substituting data the way the container's child list can. It has to be bound
+/// by making the same calls again — which is what `ds2-menu-row`'s caption module does, using the
+/// path the original itself just built rather than rebuilding one.
+///
+/// Three of the ten are the quit tab's, all under [`FE_QUIT_TAB_BASE_PATH`]:
+///
+/// ```text
+/// label 0x1eac46  text 0x200f26  "Game Options"
+/// label 0x1eac47  text 0x200f27  "Screen Options"
+/// label 0x1eac4c  text 0x200f2a  "Quit Game"
+/// ```
+///
+/// And the two ids the tab never binds are `0x200f28` "Mouse Settings" and `0x200f29` "Keyboard
+/// Settings" — the PC port's cut input rows, which is what the two spare cells in
+/// [`FE_QUIT_TAB_SPARE_CELL_IDS`] were for. That is the whole story of the missing fourth row,
+/// told by the game's own text.
+pub const FE_INGAME_TOP_SELECT_CAPTIONS: u32 = 0x000a_7130;
+
+/// Byte offset of the scene holder [`FE_BIND_SCENE_OBJ_PROXY`] is called against, inside
+/// `FeGroupInGameTopSelect`. `lea rcx,[rsi+0x150]` in the loop above.
+pub const FE_INGAME_TOP_SELECT_SCENE_HOLDER_OFFSET: usize = 0x150;
+
+/// Byte offset, inside the accessor [`FE_BIND_SCENE_OBJ_PROXY`] fills, of the slot the text calls
+/// take. `lea rcx,[rbp+0x90]` against an accessor built at `rbp+0x60`.
+pub const FE_ELEMENT_ACCESSOR_TEXT_SLOT_OFFSET: usize = 0x30;
+
+/// Bytes the accessor occupies. The original gives it `rbp+0x60 .. rbp+0xf0`.
+pub const FE_ELEMENT_ACCESSOR_SIZE: usize = 0x90;
+
+/// `FeElement::setText(accessor + 0x30, string)`. RVA `0x000297d0`.
+///
+/// **It only READS the string**, which is what makes supplying one cheap. The layout it reads is
+/// MSVC's small-string optimisation as `dantelion2` spells it: the capacity at `+0x18` decides
+/// where the characters are, inline at `+0x00` when it is `<= 7` and behind the pointer at `+0x00`
+/// otherwise. So a caption longer than seven characters is a four-field struct pointing at a
+/// `static` in this DLL — no allocator, no constructor, nothing to free.
+///
+/// It then measures the UTF-16 length itself and calls the element's own `vtable[0x148]`.
+pub const FE_ELEMENT_SET_TEXT: u32 = 0x0002_97d0;
+
+/// Byte offset of the capacity field the string layout above is chosen by.
+pub const DL_STRING_CAPACITY_OFFSET: usize = 0x18;
+/// Capacity at or below which the characters are inline rather than behind the pointer.
+pub const DL_STRING_INLINE_CAPACITY: u64 = 7;
+
+/// The quit tab's bottom row, "Quit Game" — the one that returns to the title screen and offers to
+/// save on the way. Its caption is retargeted so that the row this repo adds can be the one called
+/// "Quit Game", which is what it actually does.
+pub const FE_QUIT_TAB_ROW_TITLE_LABEL_ID: u32 = 0x001e_ac4c;
+
+/// The label element id given to the added row.
+///
+/// `0x1eac4a` rather than something outside the pool: `0x1eac45 + n` is the shared row-label id
+/// space the in-game menu screens draw from, and `0x1eac4a` is the one the cut fourth row used
+/// (its caption, `0x200f28`, is still in the FMG and still reads "Mouse Settings"). Nothing in the
+/// quit tab's container carries it, so nothing is shadowed.
+pub const FLO_ADDED_ROW_LABEL_ID: u32 = 0x001e_ac4a;
+
+/// How much taller the quit tab's panel has to be drawn for a fourth row to sit on it.
+///
+/// **Measured, not chosen.** All three menu tabs share panel definition `0x0221` at scale `(1,1)`;
+/// its shape is `57.80 x 341.25` and its own translate puts it at panel-local `y = -59.90 ..
+/// 281.35`. The three rows sit at panel-local `y = 113.6, 158.9, 206.9` and a row plate is `48.80`
+/// tall, so the bottom row ends at `255.7` and the scroll has `25.65` of slack under it — about
+/// half a row. A fourth row ends at `303.7`, so the panel has to reach that:
+///
+/// ```text
+/// 303.7 / 281.35 = 1.0794
+/// ```
+///
+/// Scaling about the record's own origin, which moves the top edge up by 4.8 — under 8%, which the
+/// scroll's decorated ends should survive.
+pub const FLO_PANEL_STRETCH_Y: f32 = 1.0794;
+
+/// Index into [`FLO_QUIT_TAB_CHILD_IDS`] of the panel the stretch applies to.
+pub const FLO_QUIT_TAB_PANEL: usize = 0;
+
+/// `f32` scale-y inside a transform block. `pfVar1[3]` in the builder's identity test.
+pub const FLO_TRANSFORM_SCALE_Y_OFFSET: usize = 0x0c;

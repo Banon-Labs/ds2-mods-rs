@@ -89,6 +89,7 @@ struct Container {
     records: [u8; ds2_rva::FLO_RECORD_STRIDE * CHILDREN],
     row_transform: [u8; ds2_rva::FLO_TRANSFORM_SIZE],
     mark_transform: [u8; ds2_rva::FLO_TRANSFORM_SIZE],
+    panel_transform: [u8; ds2_rva::FLO_TRANSFORM_SIZE],
 }
 
 /// Substitutions already built, as `(definition the game returned, definition we return)`.
@@ -223,6 +224,7 @@ unsafe fn build(original: *mut u8) -> Option<*mut u8> {
         records: [0; ds2_rva::FLO_RECORD_STRIDE * CHILDREN],
         row_transform: [0; ds2_rva::FLO_TRANSFORM_SIZE],
         mark_transform: [0; ds2_rva::FLO_TRANSFORM_SIZE],
+        panel_transform: [0; ds2_rva::FLO_TRANSFORM_SIZE],
     });
 
     // COPIED, never assembled field by field. The definition and the records carry fields this
@@ -267,6 +269,7 @@ unsafe fn build(original: *mut u8) -> Option<*mut u8> {
     for (slot, template) in [
         (0usize, ds2_rva::FLO_QUIT_TAB_ROW_TEMPLATE),
         (1, ds2_rva::FLO_QUIT_TAB_MARK_TEMPLATE),
+        (2, ds2_rva::FLO_QUIT_TAB_PANEL),
     ] {
         let record = template * ds2_rva::FLO_RECORD_STRIDE;
         // SAFETY: the record was copied from a live one whose transform pointer the game itself
@@ -284,10 +287,10 @@ unsafe fn build(original: *mut u8) -> Option<*mut u8> {
                 "record {template}'s transform is {source:p}, which is a file offset"
             ));
         }
-        let destination = if slot == 0 {
-            container.row_transform.as_mut_ptr()
-        } else {
-            container.mark_transform.as_mut_ptr()
+        let destination = match slot {
+            0 => container.row_transform.as_mut_ptr(),
+            1 => container.mark_transform.as_mut_ptr(),
+            _ => container.panel_transform.as_mut_ptr(),
         };
         // SAFETY: source is a live transform block, destination is a buffer of exactly that size.
         unsafe {
@@ -305,9 +308,27 @@ unsafe fn build(original: *mut u8) -> Option<*mut u8> {
     container.mark_transform[ds2_rva::FLO_TRANSFORM_Y_OFFSET..][..4]
         .copy_from_slice(&mark_y.to_le_bytes());
 
+    // THE SCROLL. The panel is one fixed graphic with three row slots and about half a row of
+    // slack under the last one, so a fourth row hangs off the bottom of it. Its record is copied
+    // like the others and only its vertical scale changes -- see `FLO_PANEL_STRETCH_Y`, which is
+    // arithmetic on two measurements rather than a number that looked about right.
+    let scale_at = ds2_rva::FLO_TRANSFORM_SCALE_Y_OFFSET;
+    let scale = f32::from_le_bytes(
+        container.panel_transform[scale_at..][..4]
+            .try_into()
+            .expect("four bytes"),
+    );
+    if !(0.5..=2.0).contains(&scale) {
+        return refuse(format_args!(
+            "the panel's scale-y is {scale}, which is not the 1.0 every tab ships with"
+        ));
+    }
+    container.panel_transform[scale_at..][..4]
+        .copy_from_slice(&(scale * ds2_rva::FLO_PANEL_STRETCH_Y).to_le_bytes());
+
     for (slot, id, depth) in [
         (ROW, ds2_rva::FLO_ADDED_ROW_ID, ROW_DEPTH),
-        (MARK, ds2_rva::FLO_ADDED_MARK_ID, MARK_DEPTH),
+        (MARK, ds2_rva::FLO_ADDED_ROW_LABEL_ID, MARK_DEPTH),
     ] {
         let at = slot * ds2_rva::FLO_RECORD_STRIDE;
         container.records[at + ds2_rva::FLO_RECORD_ID_OFFSET..][..4]
@@ -330,6 +351,10 @@ unsafe fn build(original: *mut u8) -> Option<*mut u8> {
     for (slot, transform) in [
         (ROW, container.row_transform.as_ptr() as usize),
         (MARK, container.mark_transform.as_ptr() as usize),
+        (
+            ds2_rva::FLO_QUIT_TAB_PANEL,
+            container.panel_transform.as_ptr() as usize,
+        ),
     ] {
         let at = slot * ds2_rva::FLO_RECORD_STRIDE + ds2_rva::FLO_RECORD_TRANSFORM_OFFSET;
         container.records[at..][..8].copy_from_slice(&transform.to_le_bytes());
@@ -338,12 +363,13 @@ unsafe fn build(original: *mut u8) -> Option<*mut u8> {
     let n = SUBSTITUTED.fetch_add(1, Ordering::Relaxed) + 1;
     log(format_args!(
         "{LOG_PREFIX} container substituted original=0x{:016x} replacement=0x{:016x} \
-         children={count}->{CHILDREN} row={:#x}@({row_x},{row_y}) mark={:#x}@({mark_x},{mark_y}) \
-         substitutions={n}",
+         children={count}->{CHILDREN} row={:#x}@({row_x},{row_y}) label={:#x}@({mark_x},{mark_y}) \
+         panel-scale-y=x{} substitutions={n}",
         original as usize,
         container as *const Container as usize,
         ds2_rva::FLO_ADDED_ROW_ID,
-        ds2_rva::FLO_ADDED_MARK_ID,
+        ds2_rva::FLO_ADDED_ROW_LABEL_ID,
+        ds2_rva::FLO_PANEL_STRETCH_Y,
     ));
     Some(container as *mut Container as *mut u8)
 }
@@ -475,12 +501,12 @@ mod tests {
     /// existing ones and the path resolves to whichever comes first.
     #[test]
     fn the_added_ids_are_not_shipped_ids() {
-        for id in [ds2_rva::FLO_ADDED_ROW_ID, ds2_rva::FLO_ADDED_MARK_ID] {
+        for id in [ds2_rva::FLO_ADDED_ROW_ID, ds2_rva::FLO_ADDED_ROW_LABEL_ID] {
             assert!(!ds2_rva::FLO_QUIT_TAB_CHILD_IDS.contains(&id));
             assert!(!ds2_rva::FE_QUIT_TAB_CELL_IDS.contains(&id));
             assert!(!ds2_rva::FE_QUIT_TAB_BASE_PATH.contains(&id));
         }
-        assert_ne!(ds2_rva::FLO_ADDED_ROW_ID, ds2_rva::FLO_ADDED_MARK_ID);
+        assert_ne!(ds2_rva::FLO_ADDED_ROW_ID, ds2_rva::FLO_ADDED_ROW_LABEL_ID);
     }
 
     /// The templates must be the rows this crate says they are, or the clone inherits the wrong
@@ -525,7 +551,7 @@ mod tests {
             std::mem::size_of::<Container>(),
             ds2_rva::FLO_DEFINITION_STRIDE
                 + ds2_rva::FLO_RECORD_STRIDE * CHILDREN
-                + ds2_rva::FLO_TRANSFORM_SIZE * 2
+                + ds2_rva::FLO_TRANSFORM_SIZE * 3
         );
     }
 

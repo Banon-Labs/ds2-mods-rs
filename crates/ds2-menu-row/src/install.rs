@@ -731,6 +731,7 @@ pub unsafe fn install() -> Outcome {
     // layout record; the namer entry is what makes the grid ask for it. Installed in that order so
     // that if the first refuses, the log says so before the second claims a cell that is not there.
     let cell = unsafe { crate::layout::install(base) };
+    let _captions = unsafe { crate::caption::install(base) };
 
     let namer_rva = ds2_rva::FE_INGAME_MENU_QUIT_TAB_NAMER;
     let namer_site = base + namer_rva as usize;
