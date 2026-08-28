@@ -496,3 +496,76 @@ for some id we borrowed.
 
 **So the action half of the goal is done and the presentation half is not.** The row exists, is
 selectable, and quits to desktop. It cannot be seen, and that is one `.flo` record away.
+
+## Measured, 2026-08-28: the quit action works, the row cannot be positioned
+
+### The action, proven end to end
+
+Selecting the appended item wrote the shutdown byte and the game left:
+
+```
+ds2-menu-row: quit-to-desktop requested system=0x10fa60 offset=0x13a value=1 requests=1
+process: EXITED
+ds2-crash-latest.txt: timestamp unchanged
+```
+
+The unchanged crash timestamp is the load-bearing part. A crash and a clean exit look identical
+from outside; no new fatal record means this was `GameManagerImp`'s own shutdown, reached through
+the byte `FeSubStateTitleShutdown` writes. **No save prompt, no dialog, no new code path.**
+
+### The row: three positions exist and there is no fourth
+
+`VLayoutAdapter::v2` (`0x1400a4b20`) is the lookup the grid's bind uses:
+
+```c
+if (cell.col == 0 && cell.row < namer[0x140])
+    element = resolve(namer->sceneProxy, entries[row]);   // entries at namer+0x18, stride 0x30
+else
+    element = null;
+```
+
+Entries are pushed by `FUN_1400a7b30`, a `DLFixedVector` push: count at `list + 0x128`, capacity
+**6** -- the same six as the id loop in the namer's constructor. An entry is five `u32` ids, then
+uninitialised slack, then the path length:
+
+```text
+a9ab1e00 cfac1e00 e8ac1e00 e6ac1e00 c9ac1e00 <slack> 05000000
+ +0x00    +0x04    +0x08    +0x0c    +0x10            +0x28
+```
+
+The slack differs between two entries the game built back to back, so a clone has to COPY an entry
+through the game's own push rather than be assembled field by field.
+
+Four controlled runs, each with a control chosen so a negative could not be ambiguous:
+
+| what was pushed | `row-extent` | what it establishes |
+| --- | --- | --- |
+| hand-built path, `ace6` + `0x1eaccd` | 3 | a hand-built path resolves to nothing |
+| clone of Quit's entry, **unmodified** | **4** | **the mechanism works: a pushed clone becomes a real cell** |
+| clone, id -> `0x1eaccd` / `0x1eacce` under `ace6` | 3 | neither spare id exists in that container |
+| clone, control `0x1eacc9` under `ace7` | 3 | `ace7` is not reachable from this namer's scene proxy |
+
+And the unmodified clone, on screen: **it draws exactly on top of the row it was cloned from.**
+Pressing down past Quit Game flashes the highlight on Quit Game again and activates the new item.
+
+So a cell's position comes from its ELEMENT, exactly three elements are reachable, and therefore
+exactly three positions exist. The five cells `FeSceneInGameMenu`'s cache resolves under `ace7` are
+real and are not addressable from here.
+
+**The duplicate is deliberately not shipped.** A row that highlights "Quit Game" and then quits to
+desktop without saving is worse than an invisible one: it is a trap wearing the label of the thing
+it is not.
+
+### What a visible row now requires
+
+Naming is exhausted. The remaining routes, in the order they are worth trying:
+
+1. **Reposition the cloned element at runtime.** The bind resolves the element to a live scene
+   node; giving the duplicate its own offset is the smallest remaining change and needs the node's
+   transform layout, which is in-memory structure rather than file format.
+2. **Reach `ace7`.** Five cells with five labels are already authored there. What the namer's
+   `FexLayoutSceneProxy` is rooted at, and whether a second proxy exists for `ace7`, is unread.
+3. **The `.flo`** (`ds2-mods-rs-glz`), which is the heaviest and now the least attractive: the
+   layout is not obviously short of rows, the code's reach into it is.
+
+None of this touches the action, which is finished.
