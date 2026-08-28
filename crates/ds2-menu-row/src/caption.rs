@@ -196,7 +196,12 @@ unsafe fn write_caption(
     // THE BANNER, once, and only from the pass that resolves the row this crate added -- the other
     // pass targets the shipped row and would do the same work twice.
     if label == ds2_rva::FLO_ADDED_ROW_LABEL_ID {
-        let mut panel = path_ids(base);
+        // THE CONTAINER PATH, NOT THE CAPTURED ONE. The caption binder seals its base with a
+        // trailing `0x5f5b9f2` -- the text leaf every caption ends at -- so the capture is FIVE ids,
+        // and appending the panel to it asks for `.../0x1eace6/0x5f5b9f2/0x1eac81`, which resolves
+        // to nothing. The tree dump had already said so in as many words -- `prefix5 resolved to
+        // NOTHING` -- and the banner refusal that followed named the consequence.
+        let mut panel = ds2_rva::FE_QUIT_TAB_BASE_PATH.to_vec();
         panel.push(ds2_rva::FLO_QUIT_TAB_CHILD_IDS[ds2_rva::FLO_QUIT_TAB_PANEL]);
         // SAFETY: the accessor is filled and the path is the container's with the panel appended.
         let component = unsafe { crate::tree::resolve_path(accessor.as_ptr(), &panel) };
