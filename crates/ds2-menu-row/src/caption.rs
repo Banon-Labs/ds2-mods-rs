@@ -192,6 +192,17 @@ unsafe fn write_caption(
     // SAFETY: `accessor` was just filled by the game's own binder, and the ids are the path it was
     // filled from.
     unsafe { crate::tree::dump(accessor.as_ptr(), &path_ids(base)) };
+
+    // THE BANNER, once, and only from the pass that resolves the row this crate added -- the other
+    // pass targets the shipped row and would do the same work twice.
+    if label == ds2_rva::FLO_ADDED_ROW_LABEL_ID {
+        let mut panel = path_ids(base);
+        panel.push(ds2_rva::FLO_QUIT_TAB_CHILD_IDS[ds2_rva::FLO_QUIT_TAB_PANEL]);
+        // SAFETY: the accessor is filled and the path is the container's with the panel appended.
+        let component = unsafe { crate::tree::resolve_path(accessor.as_ptr(), &panel) };
+        // SAFETY: `component` came from the game's own lookup, or is null and is checked.
+        unsafe { crate::banner::lengthen(component, base_module) };
+    }
 }
 
 /// The quit tab's own path, as the ids the caption binder built it from.

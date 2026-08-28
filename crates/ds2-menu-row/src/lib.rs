@@ -71,6 +71,9 @@ mod caption;
 mod tree;
 
 #[cfg(windows)]
+mod banner;
+
+#[cfg(windows)]
 pub use install::{LogFn, Outcome, install, set_logger};
 
 /// Prefix on every line this crate writes to the loader log, so a reader can tell which component

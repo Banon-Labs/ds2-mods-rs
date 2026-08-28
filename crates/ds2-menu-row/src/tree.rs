@@ -282,6 +282,33 @@ unsafe fn walk(component: *const u8, depth: usize, lines: &mut usize, label: &st
     }
 }
 
+/// Resolve one scene path against the accessor's scene, the way the grid's bind does.
+///
+/// # Safety
+///
+/// `accessor` must be an accessor filled by [`ds2_rva::FE_BIND_SCENE_OBJ_PROXY`].
+pub unsafe fn resolve_path(accessor: *const u8, ids: &[u32]) -> *mut u8 {
+    if ids.is_empty() || ids.len() > 7 {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: the caller guarantees a filled accessor.
+    let scene = unsafe { scene_of(accessor) };
+    let Ok(base) = ds2_game_base::mem::game_module_base() else {
+        return std::ptr::null_mut();
+    };
+    if scene.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: the RVA is a `.pdata` function start recorded in `ds2-rva`.
+    let find: FindByIdPathFn =
+        unsafe { std::mem::transmute(base + ds2_rva::FE_SCENE_FIND_BY_ID_PATH as usize) };
+    // Zero-terminated, the way the game's own resolve builds one.
+    let mut path = [0u32; 8];
+    path[..ids.len()].copy_from_slice(ids);
+    // SAFETY: `scene` is live and `path` holds `ids.len()` ids followed by a zero.
+    unsafe { find(scene, path.as_ptr(), ids.len() as u32) }
+}
+
 /// Dump every prefix of the quit tab's path, once per process.
 ///
 /// # Safety

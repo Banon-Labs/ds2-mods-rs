@@ -3167,3 +3167,66 @@ pub const FE_COMPONENT_DISPLAY_ENTRY_KEY_OFFSET: usize = 0x0c;
 /// `FeComponentLinked`, `FeComponentMaskShape`, `FeComponentTextureMask`,
 /// `FeComponentTextureShape`. Following `+0x38` on one of these is what crashed the first walk.
 pub const FE_COMPONENT_LEAF_FIND_BY_ID_PATH: u32 = 0x00b6_d2a0;
+
+// ---------------------------------------------------------------------------------------------
+// FeComponentTextureShape: the thing that actually draws the quit tab's banner.
+//
+// Three stretch factors on ancestor transforms did nothing, and this is why: a texture shape is
+// sized by its OWN quad, copied into it at build time and never re-derived from a parent.
+// ---------------------------------------------------------------------------------------------
+
+/// `FeComponentTextureShape`'s vtable. RVA `0x011dea18`, VA `0x1411dea18`. From MSVC RTTI.
+pub const FE_COMPONENT_TEXTURE_SHAPE_VTABLE: u32 = 0x011d_ea18;
+
+/// `FeComponentTextureShape::initFromShape(this, allocator, shapeEntry)`. RVA `0x00b70200`.
+///
+/// Everything below is read off it. It allocates four parallel arrays, one element per quad, and
+/// fills them from the shape table entry's sub-records:
+///
+/// ```text
+/// count = [[this+0x40] + 0x02]                 quads in this shape
+/// [this+0x48]  count * 0x30                    per-quad vertex block, seeded from a constant
+/// [this+0x50]  count * 0x10                    four floats per quad   <- the RECT
+/// [this+0x58]  count * 0x10                    four floats per quad   <- the second RECT
+/// [this+0x60]  count * 0x04                    per-quad colour, from sub-record +0x18..+0x1b
+/// ```
+///
+/// For each quad, `sub = [[this+0x40] + 0x08] + i * 0x40` and `geom = [sub + 0x30]`:
+///
+/// * `geom != 0` -- both rects are filled with the SAME four floats from `geom[0..3]`;
+/// * `geom == 0` -- both are filled with `{0, 0, w, h}` taken from `[[sub+0x20] + 0x0e]` and
+///   `+0x10`, i.e. the texture's own pixel size.
+///
+/// The quit tab's banner is shape `0x0220`, `count = 1`, and its single quad reads
+/// `(914.20, 1.10, 972.00, 342.35)` -- `57.80 x 341.25`, which is the `341.25` the panel
+/// measurements were built on. The sub-record's own translate is `(-914.30, -61.00)`, cancelling
+/// the atlas origin, so these are atlas coordinates mapped into layout space.
+pub const FE_TEXTURE_SHAPE_INIT: u32 = 0x00b7_0200;
+
+/// The shape table entry a texture shape was built from, and the count field inside it.
+pub const FE_TEXTURE_SHAPE_ENTRY_OFFSET: usize = 0x40;
+pub const FE_SHAPE_ENTRY_COUNT_OFFSET: usize = 0x02;
+
+/// The two per-quad rect arrays, `0x10` bytes each.
+///
+/// Both are seeded identically, so which one is destination and which is source cannot be told
+/// apart from the initialiser -- only from changing one and looking. That is a measurement worth
+/// one run, and it is the whole remaining question about the banner.
+pub const FE_TEXTURE_SHAPE_RECT_A_OFFSET: usize = 0x50;
+pub const FE_TEXTURE_SHAPE_RECT_B_OFFSET: usize = 0x58;
+pub const FE_TEXTURE_SHAPE_RECT_STRIDE: usize = 0x10;
+
+/// The display-list key the panel's texture shape is filed under.
+///
+/// Not an element id -- `FUN_140b6bd80` sets a child's key from `FUN_140b6a440(child)`, and a shape
+/// with no id of its own lands on `0xffffffff`. Observed on every texture shape in the live tree.
+pub const FE_TEXTURE_SHAPE_DISPLAY_KEY: u32 = 0xffff_ffff;
+
+/// How much taller the banner's quad has to be for a fourth row.
+///
+/// The quad is `341.25` tall and covers three row slots with `25.65` of margin below the last.
+/// One more row is one more `48.00` of pitch, so `341.25 + 48.00 = 389.25` keeps the margin
+/// exactly. As a rect that is `y1 = 1.10 + 389.25 = 390.35`.
+pub const FE_BANNER_QUAD_Y1: f32 = 390.35;
+/// What the shipped quad's `y1` reads, checked before anything is written.
+pub const FE_BANNER_QUAD_SHIPPED_Y1: f32 = 342.35;
