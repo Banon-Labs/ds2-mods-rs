@@ -1,0 +1,2 @@
+{"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "rename the constant"}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Renamed it."}, {"type": "tool_use", "name": "Edit", "id": "t1", "input": {"file_path": "/tmp/x.rs", "old_string": "a", "new_string": "b"}}]}}

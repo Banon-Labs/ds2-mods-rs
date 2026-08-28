@@ -21,6 +21,16 @@
         ],
         "matcher": ""
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "command": "bash $CLAUDE_PROJECT_DIR/scripts/cupcake-hook.sh",
+            "type": "command"
+          }
+        ]
+      }
     ]
   },
   "env": {

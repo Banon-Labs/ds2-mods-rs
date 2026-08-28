@@ -134,6 +134,18 @@ else
   # a signal that never fires, a policy that compiles but never routes. This is the only step
   # that exercises what the live PreToolUse hook actually runs.
   python3 scripts/test-cupcake-policies.py
+  # Same third layer for the STOP hook, which has its own way of being silently dead: `cupcake
+  # eval` runs the policies as WASM, not in the OPA interpreter, and a builtin the WASM runtime
+  # cannot execute yields undefined -- the rule never fires and the verdict is an ordinary ALLOW.
+  # That is how every Stop guard in the sibling repo sat inert for 36 days with a green suite.
+  # These two steps are what make "the Stop guard is enforced" a measurement rather than a claim:
+  # the first refuses any builtin it has not watched survive the real runtime, the second drives
+  # a real transcript through the hook command out of .claude/settings.json.
+  python3 scripts/check-cupcake-wasm-builtins.py
+  python3 scripts/test-cupcake-stop-guards.py
+  # The signal is the half that decides WHICH turns are violations, and it is where every
+  # false-positive carve-out lives. `opa test` above only pins the policy's tag -> halt mapping.
+  python3 scripts/test-unexecuted-promise-signal.py
 fi
 
 echo "== launcher selftest =="
