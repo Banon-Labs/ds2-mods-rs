@@ -164,7 +164,7 @@ CONTINUE_SECTION = "continue"
 KEY_CONTINUE_RECORD = "record"
 KEY_CONTINUE_SLOT = "slot"
 KEY_CONTINUE_SILENCE = "silence"
-KEY_CONTINUE_LOADING_SCREEN = "loading_screen"
+KEY_CONTINUE_HIDE_MENUS = "hide_menus"
 
 MENU_SECTION = "title_menu"
 KEY_SHOW_UNAVAILABLE = "show_unavailable"
@@ -893,7 +893,7 @@ def config_text(
     continue_record: bool = False,
     continue_slot: int = -1,
     continue_silence: bool = True,
-    continue_loading_screen: bool = False,
+    continue_hide_menus: bool = True,
     offline: bool = True,
     block_sockets: bool = True,
 ) -> str:
@@ -1112,21 +1112,22 @@ def config_text(
 #
 # Set to false to hear the title as the game plays it. Only an exact `false` turns it off.
 {KEY_CONTINUE_SILENCE} = {str(continue_silence).lower()}
-# STARTUP-ONLY. OFF, and it does nothing when on -- do not enable it expecting a cover.
+# STARTUP-ONLY. ON by default, and inert unless `slot` above is set.
 #
-# The intent is to hide the title flow behind the game's own NOW LOADING page, which
-# FeOperatorNowLoading already drives on every map transition. The pointer walk to that operator is
-# verified against a live process; the call that would SHOW it is not known.
+# Calls the frontend's own FeGroupBase::close (0x1400f18b0) on the six-row top menu and on the
+# character list, from the detours the shortcut already owns -- so neither is drawn while the
+# autocontinue walks through it. It patches no extra sites.
 #
-# Two levers were tried and both are dead. Vtable slot 4, which the operator factory calls with
-# 0.0f right after construction, changed nothing on screen. Slot 24 with (0x65, true, 0.0), copied
-# from the game's own title/loading switch at 0x1405116f0, CRASHED the process: these operator
-# vtables have eleven slots, so +0xc0 read string data and called it -- the call site was real, the
-# object was not.
+# That close is nineteen instructions: play sequence 0x68 on the group's scene, bump a counter,
+# clear the group's open byte. Its mirror plays 0x66 to open, and ds2-dialog-skip already plays
+# 0x67 for settled, so 0x66/0x67/0x68 are one family. Both open and close test the open byte
+# first, which is what makes calling this from a per-frame detour safe.
 #
-# The switch is kept so the surviving walk can be exercised, and the log says
-# `operators-resolved-but-no-verified-lever` rather than claiming a cover.
-{KEY_CONTINUE_LOADING_SCREEN} = {str(continue_loading_screen).lower()}
+# It hides two menus. It does NOT cover the logos or the title screen -- that wants the game's own
+# NOW LOADING page, and the call that raises it is still unknown.
+#
+# Set to false to watch the menus flash past. Only an exact `false` turns it off.
+{KEY_CONTINUE_HIDE_MENUS} = {str(continue_hide_menus).lower()}
 
 [{OFFLINE_SECTION}]
 # STARTUP-ONLY, all four. ON BY DEFAULT, and it is the only feature here whose default is on for a
@@ -1210,7 +1211,7 @@ def write_config(
     continue_record: bool = False,
     continue_slot: int = -1,
     continue_silence: bool = True,
-    continue_loading_screen: bool = False,
+    continue_hide_menus: bool = True,
     offline: bool = True,
     block_sockets: bool = True,
 ) -> tuple[Path, str]:
@@ -1234,7 +1235,7 @@ def write_config(
         continue_record,
         continue_slot,
         continue_silence,
-        continue_loading_screen,
+        continue_hide_menus,
         offline,
         block_sockets,
     )
@@ -1316,7 +1317,7 @@ def dry_run(
     continue_record: bool = False,
     continue_slot: int = -1,
     continue_silence: bool = True,
-    continue_loading_screen: bool = False,
+    continue_hide_menus: bool = True,
     offline: bool = True,
     block_sockets: bool = True,
 ) -> int:
@@ -1358,7 +1359,7 @@ def dry_run(
             continue_record,
             continue_slot,
             continue_silence,
-            continue_loading_screen,
+            continue_hide_menus,
             offline,
             block_sockets,
         ):
@@ -1396,7 +1397,7 @@ def dry_run(
                 continue_record,
                 continue_slot,
                 continue_silence,
-                continue_loading_screen,
+                continue_hide_menus,
                 offline,
                 block_sockets,
             ),
@@ -1456,7 +1457,7 @@ def launch(
     continue_record: bool = False,
     continue_slot: int = -1,
     continue_silence: bool = True,
-    continue_loading_screen: bool = False,
+    continue_hide_menus: bool = True,
     offline: bool = True,
     block_sockets: bool = True,
 ) -> int:
@@ -1493,7 +1494,7 @@ def launch(
         continue_record,
         continue_slot,
         continue_silence,
-        continue_loading_screen,
+        continue_hide_menus,
         offline,
         block_sockets,
     )
@@ -2376,13 +2377,12 @@ def main() -> int:
         ),
     )
     parser.add_argument(
-        "--continue-loading-screen",
-        dest="continue_loading_screen",
-        action="store_true",
+        "--no-continue-hide-menus",
+        dest="continue_hide_menus",
+        action="store_false",
         help=(
-            "resolve the NOW LOADING operator during the title flow and log it. It does NOT "
-            "cover anything: the call that shows that screen is not known yet, and the two "
-            "candidates tried so far did nothing and crashed respectively."
+            "let the top menu and the character list draw themselves as the autocontinue passes "
+            "through. They are closed by default whenever --continue-slot is set."
         ),
     )
     parser.add_argument(
@@ -2590,7 +2590,7 @@ def main() -> int:
             args.continue_record,
             args.continue_slot,
             args.continue_silence,
-            args.continue_loading_screen,
+            args.continue_hide_menus,
             args.offline,
             args.block_sockets,
         )
@@ -2613,7 +2613,7 @@ def main() -> int:
         args.continue_record,
         args.continue_slot,
         args.continue_silence,
-        args.continue_loading_screen,
+        args.continue_hide_menus,
         args.offline,
         args.block_sockets,
     )

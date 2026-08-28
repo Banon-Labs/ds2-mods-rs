@@ -64,16 +64,16 @@
 #![cfg_attr(not(windows), allow(unused))]
 
 #[cfg(windows)]
-mod install;
+mod hide_menus;
 #[cfg(windows)]
-mod loading_screen;
+mod install;
 #[cfg(windows)]
 mod silence;
 
 #[cfg(windows)]
-pub use install::{LogFn, Outcome, install, set_logger, set_preselect_slot};
+pub use hide_menus::set_enabled as set_hide_menus;
 #[cfg(windows)]
-pub use loading_screen::set_enabled as set_loading_screen;
+pub use install::{LogFn, Outcome, install, set_logger, set_preselect_slot};
 #[cfg(windows)]
 pub use silence::set_enabled as set_silence;
 

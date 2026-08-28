@@ -325,9 +325,6 @@ unsafe extern "system" fn detour_sound_drain(this: *mut u8) {
 /// substate do its own work with the audio already restored.
 unsafe extern "system" fn detour_start_ingame(this: *mut u8) {
     release("start-ingame");
-    // The same boundary drops the loading-screen cover. Both are "the shortcut is over".
-    // SAFETY: on the game thread, and the walk inside is null-checked throughout.
-    unsafe { crate::loading_screen::hide("start-ingame") };
     let trampoline = START_INGAME_TRAMPOLINE.load(Ordering::Acquire);
     if trampoline != 0 {
         // SAFETY: MinHook's copy of this site's original prologue, with the vtable's signature.

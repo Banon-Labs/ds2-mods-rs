@@ -218,10 +218,6 @@ unsafe extern "system" fn detour_update(this: *mut u8) {
     if this.is_null() {
         return;
     }
-    // The character list is one of the two screens the cover exists to hide, so re-assert it here
-    // rather than trusting that nothing between the title's setup and this frame lowered it.
-    // SAFETY: on the game thread, and the walk inside is null-checked throughout.
-    unsafe { crate::loading_screen::reassert() };
     // SAFETY: the flow is calling a virtual on this object, so it is live.
     let before = unsafe { sample(this) };
     describe_once(&before, MODULE_BASE.load(Ordering::Acquire));
@@ -318,9 +314,6 @@ unsafe extern "system" fn detour_update(this: *mut u8) {
 /// the row itself would have produced. It invents no destination -- the character list still opens
 /// and still runs its own `enter`, which is what keeps `LoadProfile` supplied.
 unsafe extern "system" fn detour_top_menu(this: *mut u8) {
-    // The other screen the cover exists to hide.
-    // SAFETY: on the game thread, and the walk inside is null-checked throughout.
-    unsafe { crate::loading_screen::reassert() };
     let trampoline = TOP_MENU_TRAMPOLINE.load(Ordering::Acquire);
     if trampoline != 0 {
         // SAFETY: MinHook published this trampoline for this site; one argument, established from
@@ -332,6 +325,11 @@ unsafe extern "system" fn detour_top_menu(this: *mut u8) {
     if this.is_null() || PRESELECT_SLOT.load(Ordering::Acquire) < 0 {
         return;
     }
+    // AFTER the original, every frame the menu is resident. The original is what polls and opens
+    // the group, so there is nothing to close before it runs; and the frontend's close tests the
+    // group's own open byte, so every frame after the first is a no-op.
+    // SAFETY: on the game thread, with the group read the way the original reads it.
+    unsafe { crate::hide_menus::close(crate::hide_menus::Menu::TopMenu) };
     // SAFETY: the flow just called a virtual on this object, so it is live.
     let phase = unsafe { field::<i32>(this, ds2_rva::FE_SUBSTATE_PHASE_OFFSET) };
     // Only from rest. A non-resting phase means the player activated a row this frame, and their
@@ -493,6 +491,17 @@ unsafe extern "system" fn detour_enter(this: *mut u8) {
         let original: EnterFn = unsafe { std::mem::transmute::<usize, EnterFn>(trampoline) };
         unsafe { original(this) };
     }
+    // The list's `enter` is what opens the group -- it ends in `0x1400f1cb0(group, 1)`, which plays
+    // the open sequence. Closing here rather than from the update means the list is shut on the
+    // same frame it was opened, before it has a frame to be drawn in.
+    //
+    // Deliberately NOT also done from the update: `take_load_branch` calls the list's own close on
+    // this group, and doing less to the object the working autoload depends on is worth a frame of
+    // risk that the menu shows.
+    if wanted >= 0 {
+        // SAFETY: on the game thread, with the group read the way the original reads it.
+        unsafe { crate::hide_menus::close(crate::hide_menus::Menu::DataList) };
+    }
 }
 
 /// Point the character list at `wanted`, or say why it did not.
@@ -612,20 +621,10 @@ pub unsafe fn install() -> Outcome {
     // Only patched when `[continue] silence` asked for it. Two of the three sites above are needed
     // to record anything at all; these two exist purely to keep the shortcut quiet, so a run that
     // does not want that should not carry them.
-    if crate::loading_screen::enabled() {
-        sites.extend(crate::loading_screen::sites().into_iter().map(
-            |(name, rva, detour, trampoline)| Site {
-                name,
-                rva,
-                detour,
-                trampoline,
-            },
-        ));
-    }
     // EITHER feature, not just silencing: the `start-ingame-enter` site in that list is what ends
     // both, so a run with the cover on and the mute off still needs it. The two sound detours are
     // inert when silencing is off -- they check the flag before touching anything.
-    if crate::silence::enabled() || crate::loading_screen::enabled() {
+    if crate::silence::enabled() || crate::hide_menus::enabled() {
         sites.extend(
             crate::silence::sites()
                 .into_iter()
@@ -653,7 +652,7 @@ pub unsafe fn install() -> Outcome {
     };
     MODULE_BASE.store(base, Ordering::Release);
     crate::silence::set_module_base(base);
-    crate::loading_screen::set_module_base(base);
+    crate::hide_menus::set_module_base(base);
 
     // MinHook is statically linked into this DLL, so ALREADY_INITIALIZED can only mean this ran
     // twice. Treat it as success, exactly as the other feature crates do.
@@ -705,17 +704,17 @@ pub unsafe fn install() -> Outcome {
     // first moment a master channel group exists to mute. What matters at this point is the
     // opposite check: if any site failed, the mute could end up applied with no detour able to
     // give the volume back, so say so loudly rather than let a half-installed run go quiet.
-    if (crate::silence::enabled() || crate::loading_screen::enabled()) && installed != attempted {
+    if (crate::silence::enabled() || crate::hide_menus::enabled()) && installed != attempted {
         log(format_args!(
             "{LOG_PREFIX} silence sites-incomplete installed={installed} of {attempted} --              audio may not be restored and the cover may not be dropped"
         ));
     }
     log(format_args!(
         "{LOG_PREFIX} install installed={installed} of {attempted} preselect={} silence={} \
-         loading-screen={}",
+         hide-menus={}",
         PRESELECT_SLOT.load(Ordering::Acquire),
         crate::silence::enabled(),
-        crate::loading_screen::enabled()
+        crate::hide_menus::enabled()
     ));
     Outcome {
         installed,

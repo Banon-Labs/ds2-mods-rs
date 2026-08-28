@@ -2073,3 +2073,78 @@ pub const FE_OPERATOR_SCREEN_ID_HIDE: u32 = 0x66;
 ///
 /// Not an Arxan redirect: clean prologue at the entry.
 pub const FE_OPERATOR_TITLE_SETUP: u32 = 0x000e_f030;
+
+/// `FeTitleContext` -> `FeGroupTitleTopMenu`. `0x80`.
+///
+/// Read by `FeSubStateTitleTopMenu::v3` on its first two instructions --
+/// `mov rax,[0x14160de10]; mov rbx,[rax+0x80]` -- and then polled through its own vtable. Not to be
+/// confused with [`FE_TOP_MENU_GROUP_OFFSET`], which is where the same group hangs off
+/// `FeSceneTitle` rather than off the title context.
+pub const FE_TITLE_CONTEXT_TOP_MENU_GROUP_OFFSET: usize = 0x80;
+
+/// `FeGroupBase::close(group)`. RVA `0x000f18b0`, VA `0x1400f18b0`.
+///
+/// Nineteen instructions, and the whole of the frontend's "make this screen go away":
+///
+/// ```c
+/// scene = group->_0x08;
+/// if (scene && group->_0x30) {          // only when the group is open
+///     play_sequence(scene, 0x68, 0, 0.0f);
+///     scene->_0x18 += 1;
+///     group->_0x30 = 0;
+/// }
+/// ```
+///
+/// Its mirror is the open at `0x1400f1cb0`, which plays sequence `0x66` and decrements the same
+/// counter. `ds2-dialog-skip` already plays `0x67` on `FeSceneTitle` for the settled state, so
+/// `0x66`/`0x67`/`0x68` are one family: open, settled, close.
+///
+/// **This is what the `0x65`/`0x66` at `0x1405116f0` really were** -- sequence ids handed to a
+/// scene, not screen ids handed to an operator. Reading them as operator arguments produced a call
+/// through vtable slot 24 of an eleven-slot vtable, which read string data and crashed the game.
+///
+/// Called, never patched, so its Arxan status does not arise -- but it is clean at its entry
+/// anyway.
+pub const FE_GROUP_CLOSE: u32 = 0x000f_18b0;
+
+/// `FeGroupBase` -> the byte that is `1` while the group is open. `0x30`.
+///
+/// Set by the open at `0x1400f1cf2` and cleared by the close at `0x1400f18e1`, and tested at the
+/// head of both, so each is idempotent on its own. That is what makes closing a group safe to do
+/// from a per-frame detour: the second call does nothing.
+pub const FE_GROUP_OPEN_FLAG_OFFSET: usize = 0x30;
+
+/// `FeGroupTitleTopMenu::close(group)`. RVA `0x000f3590`, VA `0x1400f3590`.
+///
+/// **The top menu does not use [`FE_GROUP_CLOSE`].** It has its own pair, and
+/// `FeSubStateTitleTopMenu` names both of them by using them:
+///
+/// * `v1` (enter, `0x1400fde90`): `mov rcx,[0x14160de10]; mov rcx,[rcx+0x80]; call 0x1400f3820`
+/// * `v2` (leave, `0x1400feb50`): the same two loads, then `call 0x1400f3590`
+///
+/// So this is literally what the game calls when the top menu goes away, on the pointer it reads
+/// from the same global at the same offset.
+///
+/// HOW THE WRONG ONE WAS CAUGHT, because it is a cheap trick worth repeating: the first attempt
+/// called [`FE_GROUP_CLOSE`] on this group and logged [`FE_GROUP_OPEN_FLAG_OFFSET`] beside it. The
+/// data list read `1` -- a clean boolean -- and was hidden. The top menu read `248`, which is not a
+/// boolean, and stayed visible. Logging the field a call depends on is what turned "it didn't
+/// work" into "that byte is not what I think it is, so this is the wrong class".
+pub const FE_GROUP_TITLE_TOP_MENU_CLOSE: u32 = 0x000f_3590;
+
+/// `FeSubStateTitleTopMenu::v1` (enter). RVA `0x000fde90`, VA `0x1400fde90`.
+///
+/// Loads the top-menu group from `[`[`FE_TITLE_CONTEXT`]`]+0x80` and calls `0x1400f3820`, the
+/// group's **open**. Its mirror is `v2` (leave, `0x1400feb50`), which calls
+/// [`FE_GROUP_TITLE_TOP_MENU_CLOSE`].
+///
+/// **DO NOT CLOSE THE GROUP FROM HERE.** Measured: closing it immediately after this `enter`
+/// returns took boot-to-top-menu from 4.3s to 29.9s and then killed the process at the top menu,
+/// before the character list was ever reached. The substate's update polls this group through its
+/// own vtable on every frame, and closing it the same frame it opened leaves that poll working on
+/// a group that has been shut. Closing from the update instead is stable across runs.
+///
+/// Kept as a constant because it names the open/close pair, not because anything hooks it.
+///
+/// Not an Arxan redirect: clean prologue at the entry.
+pub const FE_SUBSTATE_TOP_MENU_ENTER: u32 = 0x000f_de90;

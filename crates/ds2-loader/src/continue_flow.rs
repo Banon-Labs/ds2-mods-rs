@@ -24,8 +24,8 @@ pub const KEY_SLOT: &str = "slot";
 /// Whether to hold the master channel group at zero for the length of the shortcut.
 pub const KEY_SILENCE: &str = "silence";
 
-/// Whether to cover the title flow with the game's own NOW LOADING screen.
-pub const KEY_LOADING_SCREEN: &str = "loading_screen";
+/// Whether to close the top menu and the character list as the shortcut passes through them.
+pub const KEY_HIDE_MENUS: &str = "hide_menus";
 
 /// `[continue]`, resolved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -39,9 +39,9 @@ pub struct ContinueConfig {
     /// Mute FMOD's master channel group from install until `FeSubStateTitleStartIngame`, then
     /// restore the volume the game itself had applied.
     pub silence: bool,
-    /// Raise `FeOperatorNowLoading` over the title flow, and drop it at
-    /// `FeSubStateTitleStartIngame`.
-    pub loading_screen: bool,
+    /// Call the frontend's own `FeGroupBase::close` on the top menu and the character list as the
+    /// shortcut passes through them, so neither is drawn.
+    pub hide_menus: bool,
 }
 
 impl Default for ContinueConfig {
@@ -61,11 +61,10 @@ impl Default for ContinueConfig {
             // nobody pressed is the surprising behaviour, not the quiet one. Set it to `false` to
             // hear the title as the game plays it.
             silence: true,
-            // OFF. It was on, and it shipped a crash: the show call it made was copied from a
-            // real call site on the wrong class, and these operator vtables have eleven slots, so
-            // it read string data and called it. Nothing here acts until there is a verified
-            // lever; the switch stays so the walk it does keep can be exercised.
-            loading_screen: false,
+            // ON, same guard as `silence`: it cannot act unless `slot` has already turned the
+            // shortcut on, and a menu that flashes past for one frame with nobody pressing
+            // anything is the surprising behaviour.
+            hide_menus: true,
         }
     }
 }
@@ -97,15 +96,15 @@ impl ContinueConfig {
             Some(raw) => !matches!(raw.trim().trim_matches('"'), "false"),
         };
         // Defaults ON, so like `silence` only a literal `false` turns it off.
-        let loading_screen = match parsed.get(CONFIG_SECTION, KEY_LOADING_SCREEN) {
-            None => Self::default().loading_screen,
+        let hide_menus = match parsed.get(CONFIG_SECTION, KEY_HIDE_MENUS) {
+            None => Self::default().hide_menus,
             Some(raw) => !matches!(raw.trim().trim_matches('"'), "false"),
         };
         Self {
             record,
             slot,
             silence,
-            loading_screen,
+            hide_menus,
         }
     }
 
@@ -113,12 +112,12 @@ impl ContinueConfig {
     pub fn describe(&self) -> String {
         format!(
             "{} config [{CONFIG_SECTION}] {KEY_RECORD}={} {KEY_SLOT}={} {KEY_SILENCE}={} \
-             {KEY_LOADING_SCREEN}={}",
+             {KEY_HIDE_MENUS}={}",
             ds2_continue::LOG_PREFIX,
             self.record,
             self.slot,
             self.silence,
-            self.loading_screen
+            self.hide_menus
         )
     }
 }

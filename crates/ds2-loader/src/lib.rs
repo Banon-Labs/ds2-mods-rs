@@ -824,9 +824,9 @@ fn install_continue_record() {
     // Only meaningful alongside a slot: without one there is no shortcut to cover, and muting a
     // run the player is driving by hand would be a bug rather than a feature.
     ds2_continue::set_silence(config.silence && config.slot >= 0);
-    // Same guard: covering a title flow the player is driving by hand would hide the menus they
-    // are trying to use.
-    ds2_continue::set_loading_screen(config.loading_screen && config.slot >= 0);
+    // Same guard, and here it is load-bearing: closing these two menus in a run the player is
+    // driving by hand would hide the menus they are trying to use.
+    ds2_continue::set_hide_menus(config.hide_menus && config.slot >= 0);
     // SAFETY: the target is an ordinary function start recorded in `ds2-rva` and resolved against
     // the live module base. `scripts/ds2-arxan-chain.py` shows a `rex push rsi` prologue at the
     // entry rather than the five-byte `e9` an Arxan-redirected entry holds, and the detour declares
