@@ -80,6 +80,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from collections.abc import Sequence
@@ -177,6 +178,16 @@ KEY_OFFLINE_ENABLED = "enabled"
 KEY_PIN_FLAG = "pin_flag"
 KEY_REPORT_OFFLINE = "report_offline"
 KEY_BLOCK_SOCKETS = "block_sockets"
+
+#: `crates/ds2-loader/src/save_redirect.rs`'s section and keys.
+SAVE_REDIRECT_SECTION = "save_redirect"
+KEY_SAVE_REDIRECT_ENABLED = "enabled"
+KEY_SAVE_REDIRECT_PATH = "path"
+
+#: The only save file name SOTFS builds, and the tool that can read its slot table.
+#: `ds2-sl2.py` owns every fact about the `.sl2` format; this module only asks it questions.
+SAVE_FILE_NAME = "DS2SOFS0000.sl2"
+SL2_TOOL = REPO_ROOT / "scripts" / "ds2-sl2.py"
 
 KEY_POLL_INTERVAL_MS = "poll_interval_ms"
 KEY_HEARTBEAT_INTERVAL_MS = "heartbeat_interval_ms"
@@ -875,6 +886,153 @@ def launch_env(probe: str) -> dict[str, str]:
     return {"WINEDLLOVERRIDES": DLL_OVERRIDE}
 
 
+def host_path_of(win_path):
+    """The host path for a `Z:`-rooted Windows path, or None when it is not one.
+
+    Wine maps `Z:` to `/`, which is the only drive this can translate without reading the prefix's
+    `dosdevices`. Anything else returns None and the caller SKIPS its check rather than guessing --
+    a redirect to `C:\\...` is perfectly valid, it just cannot be inspected from here.
+    """
+    p = win_path.strip().strip('"')
+    if len(p) < 2 or p[1] != ":" or p[0].upper() != "Z":
+        return None
+    return Path("/" + p[2:].replace("\\", "/").lstrip("/"))
+
+
+def save_bytes_from(host_path):
+    """The `DS2SOFS0000.sl2` bytes named by `host_path`, or None with a reason printed.
+
+    Mirrors what the DLL does at staging time -- see `ds2-save-redirect`'s `stage` module -- so the
+    slot table the launcher prints is the one the game will see. Archives are read with the tools
+    already on this machine rather than by reimplementing three container formats in the launcher:
+    the DLL does that itself, in Rust, because it has no shell to call out to.
+    """
+    suffix = host_path.suffix.lower()
+    if suffix == ".sl2":
+        return host_path.read_bytes()
+    if suffix == ".zip":
+        import zipfile
+
+        with zipfile.ZipFile(host_path) as archive:
+            names = [n for n in archive.namelist()
+                     if n.rsplit("/", 1)[-1].lower() == SAVE_FILE_NAME.lower()]
+            if len(names) != 1:
+                print(f"[slots] {len(names)} copies of {SAVE_FILE_NAME} in the archive; not reading slots.")
+                return None
+            return archive.read(names[0])
+    if suffix in (".7z", ".rar"):
+        # LIST FIRST, then ask for the member by its FULL name. A bare `DS2SOFS0000.sl2` matches
+        # nothing when the archive stores it as `DarkSoulsII/<steamid>/DS2SOFS0000.sl2`, which is
+        # the ordinary shape of a downloaded save and is how this was caught.
+        lister = ["7z", "l", "-slt", "-ba", str(host_path)] if suffix == ".7z" else \
+                 ["unrar", "lb", str(host_path)]
+        listed = subprocess.run(lister, capture_output=True, text=True)
+        if listed.returncode:
+            return None
+        if suffix == ".7z":
+            names = [line[7:].strip() for line in listed.stdout.splitlines()
+                     if line.startswith("Path = ")]
+        else:
+            names = [line.strip() for line in listed.stdout.splitlines() if line.strip()]
+        names = [n for n in names
+                 if n.replace("\\", "/").rsplit("/", 1)[-1].lower() == SAVE_FILE_NAME.lower()]
+        if len(names) != 1:
+            print(f"[slots] {len(names)} copies of {SAVE_FILE_NAME} in the archive; not reading slots.")
+            return None
+        # `-so`/`p` write the member to stdout, so nothing is extracted to disk to read a table.
+        argv = ["7z", "e", "-so", str(host_path), names[0]] if suffix == ".7z" else \
+               ["unrar", "p", "-inul", str(host_path), names[0]]
+        r = subprocess.run(argv, capture_output=True)
+        if r.returncode or not r.stdout:
+            return None
+        return r.stdout
+    return None
+
+
+def redirect_slots(win_path):
+    """[(slot, occupied, label)] for the save the redirect names, or None if unreadable.
+
+    None means "could not look" -- a non-`Z:` path, a missing file, an unreadable archive -- and is
+    deliberately distinct from "looked, and every slot is empty".
+    """
+    host = host_path_of(win_path)
+    if host is None or not host.is_file():
+        return None
+    try:
+        blob = save_bytes_from(host)
+    except Exception as error:  # noqa: BLE001 -- an unreadable source must not stop the launch
+        print(f"[slots] cannot read {host}: {error}")
+        return None
+    if not blob:
+        return None
+    with tempfile.NamedTemporaryFile(suffix=".sl2") as tmp:
+        tmp.write(blob)
+        tmp.flush()
+        r = subprocess.run(
+            [sys.executable, str(SL2_TOOL), tmp.name, "--slots"],
+            capture_output=True, text=True,
+        )
+    if r.returncode:
+        return None
+    rows = []
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 3 or parts[0] != "slot":
+            continue
+        # `blank` counts as selectable: the runtime loads those slots. Only `empty` does not.
+        rows.append((int(parts[1]), parts[2] in ("occupied", "blank"), line.strip()))
+    return rows or None
+
+
+def resolve_continue_slot(save_redirect, requested):
+    """Reconcile `--continue-slot` with the save that `--save-redirect` actually points at.
+
+    THE PROBLEM THIS SOLVES. The slot number is a property of the SAVE, not of the account: a donor
+    save may hold its only character in slot 0 while this machine's own save uses slot 1. They are
+    two independent keys that can silently disagree, and the only symptom is the mod declining to
+    autoload and saying so in a log nobody reads until afterwards.
+
+    So when a redirect is armed the slot table is read from the file itself, BEFORE launching:
+
+    * no `--continue-slot` given -> pick the first occupied slot, and say which and why.
+    * a slot given that the file says is empty -> launch anyway, but WARN. The runtime is still the
+      authority (it applies an ownership check this cannot see, and refuses a slot it dislikes
+      while leaving the game's own selection alone), so this reports rather than refuses.
+    * nothing readable -> leave the request exactly as it was.
+
+    Returns the slot to write into the config; -1 means "leave the game's own selection alone".
+    """
+    if not save_redirect:
+        return -1 if requested is None else requested
+    rows = redirect_slots(save_redirect)
+    if rows is None:
+        if requested is None:
+            print("[slots] cannot read the redirected save -- leaving the slot unset.")
+            return -1
+        print(f"[slots] cannot read the redirected save -- using --continue-slot {requested} unchecked.")
+        return requested
+    for _slot, _occ, label in rows:
+        print(f"[slots] {label}")
+    occupied = [slot for slot, occ, _ in rows if occ]
+    if requested is None:
+        if not occupied:
+            print(
+            "[slots] no loadable slot in the redirected save -- leaving the slot unset, so the "
+            "character list is shown. Pass --continue-slot N to override."
+        )
+            return -1
+        chosen = occupied[0]
+        print(f"[slots] autoloading slot {chosen} -- first loadable slot in the redirected save.")
+        return chosen
+    if requested >= 0 and requested not in occupied:
+        print(
+            f"[slots] WARNING: --continue-slot {requested} is EMPTY in the redirected save "
+            f"(loadable: {occupied or 'none'}). The game will refuse it and show the character "
+            f"list instead."
+        )
+    return requested
+
+
 def config_text(
     probe: str,
     fault_after_ms: int = NO_FAULT_MS,
@@ -896,6 +1054,7 @@ def config_text(
     continue_hide_menus: bool = True,
     offline: bool = True,
     block_sockets: bool = True,
+    save_redirect: str | None = None,
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
@@ -904,6 +1063,14 @@ def config_text(
     the content rather than around it.
     """
     settings, _ = PROBE_ARMS[probe]
+    # Written as a TOML basic string, so the backslashes a Windows path is made of are escaped.
+    # The loader un-escapes them; see `SaveRedirectConfig::load`. When nothing was asked for the
+    # key is emitted COMMENTED OUT rather than omitted, so the file still shows what to fill in.
+    save_redirect_path_line = (
+        f'{KEY_SAVE_REDIRECT_PATH} = "' + save_redirect.replace("\\", "\\\\") + '"'
+        if save_redirect is not None
+        else f'# {KEY_SAVE_REDIRECT_PATH} = "Z:\\\\home\\\\you\\\\DS2\\\\DarkSoulsII\\\\0110000100000000"'
+    )
     crash_banner = (
         ""
         if fault_after_ms == NO_FAULT_MS
@@ -1158,6 +1325,42 @@ def config_text(
 {KEY_REPORT_OFFLINE} = {str(offline).lower()}
 {KEY_BLOCK_SOCKETS} = {str(offline and block_sockets).lower()}
 
+[{SAVE_REDIRECT_SECTION}]
+# STARTUP-ONLY, and OFF unless `--save-redirect` asked for it.
+#
+# Detours FUN_140248db0 -- the SaveLoadSystem helper that builds the directory a `.sl2` lives in --
+# and replaces its whole result. That function is `%APPDATA%\\DarkSoulsII\\` + the Steam ID + a
+# trailing `\\`, and its only two callers are SaveLoadSystem methods. So this moves the SAVES and
+# leaves GraphicsConfig_SOFS.xml, which is built from the same root one level down, where it is.
+#
+# `{KEY_SAVE_REDIRECT_PATH}` NAMES A FILE, not a directory, because that is what a file manager's "copy full
+# path" gives you. Either the save itself (.sl2) or a .zip/.7z/.rar holding exactly one
+# DS2SOFS0000.sl2 anywhere inside it. Zero copies, or more than one, is refused rather than
+# resolved by picking the first.
+#
+# THE DLL REWRITES THE STEAM ID INSIDE THE SAVE. DS2 stores the owning account's SteamID64 in the
+# save and refuses a mismatch, which is what "The save data was not loaded correctly" means when
+# the path is otherwise fine. The rebind uses the ID the game hands the hooked function, so nothing
+# has to be looked up or configured, and the source file is never modified.
+#
+# THE STAGED COPY IS REWRITTEN EVERY LAUNCH. It is what the game reads AND writes, so progress made
+# in a redirected run lives in `ds2-save-staging` beside the executable and does not survive the
+# next launch. That is what pointing at a read-only source means.
+#
+# IT IS A WINDOWS PATH, because this DLL runs inside the Proton prefix. Wine maps `Z:` to `/`, so
+# /home/you/DS2 is Z:\\home\\you\\DS2.
+#
+# Only an exact `true` turns it on, and `true` with no `{KEY_SAVE_REDIRECT_PATH}` is REFUSED rather than guessed
+# at. Every other default in this file is chosen so a typo is harmless; for a feature that moves
+# the only copy of a character, the harmless direction is "did nothing".
+#
+# The detour goes in either way. With nothing armed it logs the directory the game builds for
+# itself, which is what a redirect gets diffed against: DS2 draws no LOAD GAME row when it finds no
+# save, so "pointed at the wrong folder" and "there was never a save there" look identical on
+# screen and differ only in this log.
+{KEY_SAVE_REDIRECT_ENABLED} = {str(save_redirect is not None).lower()}
+{save_redirect_path_line}
+
 [{CRASH_SECTION}]
 {crash_banner}# STARTUP-ONLY, both of them. The handler is installed in DllMain BEFORE `neuter_arxan`, because
 # that call patches code from static analysis and is the likeliest crash in the whole startup path
@@ -1214,6 +1417,7 @@ def write_config(
     continue_hide_menus: bool = True,
     offline: bool = True,
     block_sockets: bool = True,
+    save_redirect: str | None = None,
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
@@ -1238,6 +1442,7 @@ def write_config(
         continue_hide_menus,
         offline,
         block_sockets,
+        save_redirect,
     )
     path.write_text(text, encoding="utf-8")
     return path, text
@@ -1320,6 +1525,7 @@ def dry_run(
     continue_hide_menus: bool = True,
     offline: bool = True,
     block_sockets: bool = True,
+    save_redirect: str | None = None,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
@@ -1362,6 +1568,7 @@ def dry_run(
             continue_hide_menus,
             offline,
             block_sockets,
+            save_redirect,
         ):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
         else:
@@ -1460,6 +1667,7 @@ def launch(
     continue_hide_menus: bool = True,
     offline: bool = True,
     block_sockets: bool = True,
+    save_redirect: str | None = None,
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
@@ -1497,6 +1705,7 @@ def launch(
         continue_hide_menus,
         offline,
         block_sockets,
+        save_redirect,
     )
     print(f"[config] {config_path}")
 
@@ -2366,14 +2575,30 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--save-redirect",
+        dest="save_redirect",
+        default=None,
+        metavar="WINPATH",
+        help=(
+            "load the save at WINPATH instead of the game's own. It names a FILE: a .sl2, or a "
+            ".zip/.7z/.rar holding exactly one DS2SOFS0000.sl2 anywhere inside. The DLL extracts "
+            "it, rewrites the Steam ID inside it to this account's, and stages it beside the "
+            "executable -- EVERY LAUNCH, so progress in a redirected run does not survive the "
+            "next one. A WINDOWS path: Wine maps Z: to /, so /home/you/DS2 is Z:\\home\\you\\DS2. "
+            "Your own save is not touched, and neither is the source file."
+        ),
+    )
+    parser.add_argument(
         "--continue-slot",
         dest="continue_slot",
         type=int,
-        default=-1,
+        default=None,
         metavar="N",
         help=(
             "open the character list on slot N (0-9) instead of the game's own selection. "
-            "Negative leaves it alone. The list still opens; only the cursor is placed."
+            "Negative leaves it alone. The list still opens; only the cursor is placed. "
+            "WITH --save-redirect AND NO VALUE, the slot is read from the redirected save and the "
+            "first occupied one is used -- the slot belongs to the save, not to your account."
         ),
     )
     parser.add_argument(
@@ -2570,6 +2795,12 @@ def main() -> int:
 
     if args.selftest:
         return selftest()
+
+    # BEFORE either dispatch, and printed, because it is a decision the run is made on: the slot
+    # belongs to the redirected save rather than to this account, so it cannot be resolved from the
+    # command line alone. See `resolve_continue_slot`.
+    continue_slot = resolve_continue_slot(args.save_redirect, args.continue_slot)
+
     if args.dry_run:
         return dry_run(
             args.probe,
@@ -2588,11 +2819,12 @@ def main() -> int:
             args.show_unavailable,
             args.boot_timeline,
             args.continue_record,
-            args.continue_slot,
+            continue_slot,
             args.continue_silence,
             args.continue_hide_menus,
             args.offline,
             args.block_sockets,
+            args.save_redirect,
         )
     return launch(
         args.probe,
@@ -2611,11 +2843,12 @@ def main() -> int:
         args.show_unavailable,
         args.boot_timeline,
         args.continue_record,
-        args.continue_slot,
+        continue_slot,
         args.continue_silence,
         args.continue_hide_menus,
         args.offline,
         args.block_sockets,
+        args.save_redirect,
     )
 
 

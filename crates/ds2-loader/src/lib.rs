@@ -88,6 +88,7 @@ pub mod crash_logging;
 pub mod dialog_skip;
 pub mod intro_skip;
 pub mod offline;
+pub mod save_redirect;
 pub mod title_menu;
 pub mod title_skip;
 
@@ -299,6 +300,7 @@ unsafe fn attach(module: *mut c_void) {
                 }
                 install_probe(probe);
                 install_offline();
+                install_save_redirect();
                 install_intro_skip();
                 install_dialog_skip();
                 install_title_skip();
@@ -331,6 +333,7 @@ unsafe fn attach(module: *mut c_void) {
                 ));
                 install_probe(probe);
                 install_offline();
+                install_save_redirect();
                 install_intro_skip();
                 install_dialog_skip();
                 install_title_skip();
@@ -440,6 +443,68 @@ fn install_offline() {
             ds2_offline::LOG_PREFIX,
             outcome.sockets_patched,
             outcome.sockets_attempted
+        ));
+    }
+}
+
+/// Redirect the save directory, if `<Game>/ds2-mods.toml` asked for it.
+///
+/// **After `install_offline`, and that order matters more here than anywhere else in this list.**
+/// Loading someone else's save is exactly the shape of thing FromSoftware's matchmaking is
+/// watching for, so the run that does it should already be offline by the time the save system
+/// exists. Offline pins its flag and fronts the import table first; this then moves where the
+/// save comes from. Reversing the two would open a window in which a foreign save is loaded by a
+/// client that can still reach the network.
+///
+/// The detour is installed even when nothing is armed, because its pass-through arm logs the
+/// directory the game builds for itself. DS2 shows no LOAD GAME row at all when it finds no save,
+/// so "redirected to the wrong folder" and "there was never a save there" look identical on
+/// screen. The log line is what separates them.
+fn install_save_redirect() {
+    let config = save_redirect::SaveRedirectConfig::load();
+    log_line(format_args!("{}", config.describe()));
+    ds2_save_redirect::set_logger(log_line);
+    if config.enabled && config.path.is_none() {
+        // Refused rather than guessed at. There is no sensible default directory for this: the
+        // only honest fallback is the game's own, which is what leaving it unarmed produces.
+        log_line(format_args!(
+            "{} enabled with no path -- NOT redirecting; set [{}] {}",
+            ds2_save_redirect::LOG_PREFIX,
+            save_redirect::CONFIG_SECTION,
+            save_redirect::KEY_PATH
+        ));
+    }
+    if config.armable()
+        && let Some(path) = config.path.as_deref()
+    {
+        // The staging directory lives beside the executable, next to the log and the config, for
+        // the same reason those do: it is the one directory this DLL already knows it can write.
+        // `config_file_path` is `<Game>/ds2-mods.toml`, so its parent is the game directory.
+        let staging = crash_logging::config_file_path().and_then(|p| {
+            p.parent()
+                .map(|dir| dir.join(save_redirect::STAGING_DIR_NAME))
+        });
+        match staging {
+            Some(staging) => {
+                ds2_save_redirect::set_source(path, staging);
+            }
+            None => log_line(format_args!(
+                "{} NOT INSTALLED -- cannot locate the game directory to stage into",
+                ds2_save_redirect::LOG_PREFIX
+            )),
+        }
+    }
+    // SAFETY: one MinHook detour on `ds2_rva::SAVE_DIR_BUILD`, checked with
+    // `scripts/ds2-arxan-chain.py` to sit at its own `48 89 5c 24 08` prologue rather than behind
+    // an Arxan redirect, and installed here -- after `neuter_arxan` -- rather than from `DllMain`.
+    let outcome = unsafe { ds2_save_redirect::install() };
+    if config.armable() && !outcome.hooked {
+        // Worth shouting about for the same reason the offline line is: a silent failure here
+        // means the player believes they are playing a donor save and is in fact playing -- and
+        // writing to -- their own.
+        log_line(format_args!(
+            "{} NOT INSTALLED -- saves still come from the game's own directory",
+            ds2_save_redirect::LOG_PREFIX
         ));
     }
 }

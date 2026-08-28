@@ -2289,3 +2289,91 @@ pub const FE_SEQUENCE_PLAY_FLAG_POSE: i32 = 1;
 /// Not an Arxan redirect: `scripts/ds2-arxan-chain.py` terminates at hop 0 with the clean prologue
 /// `48 89 74 24 20` at the entry.
 pub const FE_SCENE_TITLE_OPEN: u32 = 0x000f_3820;
+
+/// `SaveLoadSystem`'s save-directory builder -- what produces the folder the `.sl2` lives in.
+/// RVA `0x00248db0`.
+///
+/// ```text
+/// FUN_140248db0(std::wstring *out, const wchar_t *subdir)
+///     out  = "%APPDATA%\\DarkSoulsII\\"        // via SAVE_APPDATA_ROOT_BUILD
+///     out += subdir                            // the Steam ID, as text
+///     out += "\\"                              // DAT_1410d04f8, a lone backslash
+/// ```
+///
+/// # Why this site and not the one it calls
+///
+/// [`SAVE_APPDATA_ROOT_BUILD`] is the wider chokepoint -- it is the only thing in the image that
+/// turns `SHGetFolderPathW(CSIDL_APPDATA)` into a DARK SOULS II path -- but it is wider than the
+/// job. Its other caller, `FUN_140248d80`, appends `GraphicsConfig_SOFS.xml`, so a detour there
+/// moves the graphics config as well as the saves. This function has exactly two callers and both
+/// are `SaveLoadSystem` methods (`FUN_1402e6230_saveLoadSetup__` at `0x1402e635c`,
+/// `FUN_1402e67f0` at `0x1402e6930`), so hooking it reaches the saves and nothing else.
+///
+/// # The second argument is the Steam ID, established from the call site
+///
+/// At `0x1402e6331` the caller makes a virtual call through slot `+0x38` -- the same slot
+/// `FUN_140af14e0` uses to fill the cached Steam ID at `DAT_1416681a8` -- converts the result to a
+/// string, and hands its character data to this function in `rdx`:
+///
+/// ```text
+/// 0x1402e634a:  cmp    QWORD PTR [rbp-0x19],0x8      // the wstring's capacity field
+/// 0x1402e634f:  lea    rdx,[rbp-0x31]                // ... so rdx is the inline buffer,
+/// 0x1402e6353:  cmovae rdx,QWORD PTR [rbp-0x31]      // ... or the heap pointer when it spilled
+/// 0x1402e6358:  lea    rcx,[rbp-0x1]                 // the out string
+/// 0x1402e635c:  call   0x140248db0
+/// ```
+///
+/// That is why the observed layout is `…\DarkSoulsII\<steamid hex>\DS2SOFS0000.sl2` with the
+/// graphics config a level above it, and it is why a detour here owns the Steam ID folder too: a
+/// redirect can point at a donor save's own folder name instead of renaming it to the running
+/// account's.
+///
+/// **A replacement must end in a backslash.** The caller appends the file name to whatever this
+/// leaves behind, and the trailing separator is this function's job, not the caller's.
+///
+/// Not an Arxan redirect: `scripts/ds2-arxan-chain.py` terminates at hop 0 with the clean prologue
+/// `48 89 5c 24 08` at the entry.
+pub const SAVE_DIR_BUILD: u32 = 0x0024_8db0;
+
+/// `%APPDATA%\DarkSoulsII\` -- the root every DS2 user path is built on. RVA `0x00248e80`.
+///
+/// `SHGetFolderPathW(0, 0x1a /* CSIDL_APPDATA */, 0, 0)`, then append the literal
+/// `L"\\DarkSoulsII\\"` at `0x1410d04a8`. Recorded because it anchors [`SAVE_DIR_BUILD`] and
+/// because it is the site to hook if the graphics config should move as well -- it is deliberately
+/// NOT the site this crate hooks. See [`SAVE_DIR_BUILD`] for why.
+///
+/// Not an Arxan redirect: clean prologue `48 89 5c 24 10` at the entry.
+pub const SAVE_APPDATA_ROOT_BUILD: u32 = 0x0024_8e80;
+
+/// `std::wstring::assign(dst, src, len)` -- the game's own assign, in its own CRT. RVA `0x000260b0`.
+///
+/// Reused rather than reimplemented, and that is the point: the out-parameter of
+/// [`SAVE_DIR_BUILD`] is a live MSVC `std::basic_string<wchar_t>` owned by the caller, which may
+/// already hold a heap allocation from the game's allocator. Writing its fields by hand would
+/// leak that allocation or free it with the wrong allocator; calling the game's assign hands both
+/// problems back to the code that owns them. It is the same function
+/// `SAVE_APPDATA_ROOT_BUILD` itself calls to seat the `SHGetFolderPathW` result.
+///
+/// `len` is in `wchar_t`, not bytes, and excludes the terminator.
+pub const WSTRING_ASSIGN: u32 = 0x0002_60b0;
+
+/// Byte offset of the length field in the game's `std::wstring`. Length is in `wchar_t`.
+///
+/// Read out of `FUN_140043050`/`FUN_1400260b0`, which index `_x10_strLen_` at this offset and
+/// `_x18_strCapacity_` at [`WSTRING_CAPACITY_OFFSET`], and treat the first sixteen bytes as a
+/// union of an inline buffer and a pointer. That is stock MSVC small-string optimisation.
+pub const WSTRING_LEN_OFFSET: usize = 0x10;
+
+/// Byte offset of the capacity field in the game's `std::wstring`.
+///
+/// The discriminant for the small-string union: at or below [`WSTRING_SSO_MAX`] the characters
+/// live inline at offset 0, above it offset 0 is a pointer to them. Both string helpers branch on
+/// exactly this, and so does the call site documented on [`SAVE_DIR_BUILD`].
+pub const WSTRING_CAPACITY_OFFSET: usize = 0x18;
+
+/// Largest capacity that still lives in the inline buffer -- seven `wchar_t` plus a terminator.
+///
+/// The helpers spell this as `if (7 < capacity) { use the pointer }`, and the disassembled call
+/// site as `cmp QWORD PTR [rbp-0x19],0x8` / `cmovae`. Recorded so a reader of a live string does
+/// not have to rediscover which side of the comparison is the heap.
+pub const WSTRING_SSO_MAX: usize = 7;
