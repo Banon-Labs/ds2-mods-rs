@@ -240,6 +240,28 @@ v101, v117, v120. The next move is a trace, not more reading: hold the title scr
 during steady playback, so the ones worth catching are the per-frame appliers -- the slots that
 fire continuously.
 
+### The trace was attempted, and does not work under Proton
+
+Recorded so the prescription above is not followed into the same wall. The game runs inside
+pressure-vessel's bwrap container (Steam Linux Runtime 4), and a debugger launched from the host
+cannot reach its namespace:
+
+* Attaching by `targetId` planned `winedbg --gdb <winepid>` and then observed nothing --
+  no registers, no stack, no backtrace, no breakpoint hit.
+* Attaching by `pid` with an explicit `targetPath` could not even plan a command.
+
+**The attach attempt also appears to have killed the game**, which had been sitting healthily at
+the top menu (`0x47` at t=4.52s) with nothing else touching it.
+
+The PulseAudio fallback -- mute the game's sink-input for the boot window -- could not be
+confirmed either: `pactl list sink-inputs` showed no DARK SOULS II stream, but by then the process
+had already died, so that is an unfinished check rather than a negative result.
+
+**The recommended route is now in-process, not a debugger.** This repo already injects a DLL into
+the game, so a hook that logs entry to the 19 candidate slots answers the same question from
+inside the container, with no external debugger and no risk of killing the process. That is the
+cheapest remaining path and it reuses machinery `ds2-continue` already has.
+
 ## The caveat that governs every address here
 
 The deobfuscated image is not the byte stream that runs. All four candidate sites were checked
