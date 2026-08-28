@@ -95,7 +95,10 @@ unsafe fn scene_of(accessor: *const u8) -> *mut u8 {
     unsafe { get_scene(proxy) }
 }
 
-/// Hex of a component's transform range, for reading back offline.
+/// The component's transform range as floats, for reading back offline.
+///
+/// Only ever called on a pointer that has passed [`looks_like_component`], because
+/// `FE_COMPONENT_TRANSFORM_DUMP_END` is `0xa0` and a class smaller than that would be overread.
 fn transform(component: *const u8) -> String {
     let span =
         ds2_rva::FE_COMPONENT_TRANSFORM_DUMP_END - ds2_rva::FE_COMPONENT_TRANSFORM_DUMP_START;
@@ -115,15 +118,43 @@ fn transform(component: *const u8) -> String {
         .join(" ")
 }
 
+/// Whether a pointer is plausibly a component: readable, aligned, and carrying a vtable that lands
+/// in the loaded image.
+///
+/// The first version of this walk had no such test, followed a leaf's `+0x38` into unrelated
+/// memory and killed the game. A pointer that came out of a struct is a claim, not a fact.
+fn looks_like_component(candidate: *const u8, base: usize) -> Option<usize> {
+    if candidate.is_null()
+        || (candidate as usize) < 0x1_0000
+        || !(candidate as usize).is_multiple_of(8)
+    {
+        return None;
+    }
+    // SAFETY: non-null and aligned; a wild pointer here is exactly what this is filtering, and the
+    // range test below is what makes the value meaningful rather than the read safe. The read
+    // itself is the risk this cannot remove -- which is why the caller only ever passes pointers
+    // taken from a class whose layout is known.
+    let vtable = unsafe { candidate.cast::<usize>().read() };
+    // The image is ~0x1d76000 bytes; a vtable lives in its `.rdata`.
+    if vtable > base && vtable < base + 0x1d7_6000 {
+        Some(vtable)
+    } else {
+        None
+    }
+}
+
 /// Log one component and, up to `MAX_DEPTH`, its descendants.
 ///
 /// # Safety
 ///
-/// `component` must be a live component from the layout tree.
-unsafe fn walk(component: *const u8, depth: usize, lines: &mut usize, label: &str) {
+/// `component` must be a live component from the layout tree, and `base` the live module base.
+unsafe fn walk(component: *const u8, depth: usize, lines: &mut usize, label: &str, base: usize) {
     if component.is_null() || depth > MAX_DEPTH || *lines >= MAX_LINES {
         return;
     }
+    let Some(_) = looks_like_component(component, base) else {
+        return;
+    };
     *lines += 1;
     // SAFETY: the caller guarantees a live component; every offset here is one the game's own
     // `findByIdPath` and child walk read.
@@ -136,7 +167,11 @@ unsafe fn walk(component: *const u8, depth: usize, lines: &mut usize, label: &st
                 .read(),
         )
     };
-    let (id, definition, kind) = if record.is_null() {
+    // A record is a pointer into the loaded `.flo`, not into the image, so it gets its own test:
+    // plausible address and 4-aligned, or it is not read at all.
+    let record_ok =
+        !record.is_null() && (record as usize) >= 0x1_0000 && (record as usize).is_multiple_of(4);
+    let (id, definition, kind) = if !record_ok {
         (0, 0, 0)
     } else {
         // SAFETY: a record is the `.flo`'s own 0x28-byte child record, still mapped.
@@ -166,17 +201,78 @@ unsafe fn walk(component: *const u8, depth: usize, lines: &mut usize, label: &st
         depth = depth * 2
     ));
 
-    // SAFETY: the child links are the ones `FUN_140b77dc0` walks.
+    // HOW A CLASS HOLDS ITS CHILDREN IS PER-CLASS, and getting this wrong is what killed the first
+    // version of this walk. Three shapes, all read off the `findByIdPath` overrides:
+    //
+    //   FeComponentObject / FeComponentScene   `[this+0x38]` then `[child+0x28]`  (FUN_140b77dc0)
+    //   FeComponentSprite                      the display list at `[this+0x70]`  (0x140b6bec0)
+    //   everything else                        `xor eax,eax; ret` -- a leaf       (0x140b6d2a0)
+    let linked = vtable == base + ds2_rva::FE_COMPONENT_OBJECT_VTABLE as usize
+        || vtable == base + ds2_rva::FE_COMPONENT_SCENE_VTABLE as usize;
+    let sprite = vtable == base + ds2_rva::FE_COMPONENT_SPRITE_VTABLE as usize;
+
+    if sprite {
+        // SAFETY: the class has been established, so these are its own display list and count.
+        let (list, count) = unsafe {
+            (
+                component
+                    .add(ds2_rva::FE_COMPONENT_DISPLAY_LIST_OFFSET)
+                    .cast::<*const u8>()
+                    .read(),
+                component
+                    .add(ds2_rva::FE_COMPONENT_DISPLAY_COUNT_OFFSET)
+                    .cast::<u16>()
+                    .read() as usize,
+            )
+        };
+        if list.is_null() || count > 64 {
+            return;
+        }
+        for i in 0..count {
+            if *lines >= MAX_LINES {
+                return;
+            }
+            // SAFETY: `i < count`, and the game's own search reads exactly these two fields at
+            // exactly this stride.
+            let (child, key) = unsafe {
+                let entry = list.add(i * ds2_rva::FE_COMPONENT_DISPLAY_ENTRY_STRIDE);
+                (
+                    entry
+                        .add(ds2_rva::FE_COMPONENT_DISPLAY_ENTRY_CHILD_OFFSET)
+                        .cast::<*const u8>()
+                        .read(),
+                    entry
+                        .add(ds2_rva::FE_COMPONENT_DISPLAY_ENTRY_KEY_OFFSET)
+                        .cast::<u32>()
+                        .read(),
+                )
+            };
+            if looks_like_component(child, base).is_none() {
+                continue;
+            }
+            // SAFETY: `child` passed the component test.
+            unsafe { walk(child, depth + 1, lines, &format!("key={key:#x} "), base) };
+        }
+        return;
+    }
+
+    if !linked {
+        return;
+    }
+    // SAFETY: the class has been established to be one whose `+0x38` is the child list
+    // `FUN_140b77dc0` walks.
     let mut child = unsafe {
         component
             .add(ds2_rva::FE_COMPONENT_FIRST_CHILD_OFFSET)
             .cast::<*const u8>()
             .read()
     };
-    while !child.is_null() && *lines < MAX_LINES {
-        // SAFETY: `child` is a live component.
-        unsafe { walk(child, depth + 1, lines, "") };
-        // SAFETY: same link the game's own sibling walk follows.
+    let mut seen = 0usize;
+    while looks_like_component(child, base).is_some() && *lines < MAX_LINES && seen < 64 {
+        seen += 1;
+        // SAFETY: `child` passed the component test above.
+        unsafe { walk(child, depth + 1, lines, "", base) };
+        // SAFETY: same link the game's own sibling walk follows, on a validated component.
         child = unsafe {
             child
                 .add(ds2_rva::FE_COMPONENT_NEXT_SIBLING_OFFSET)
@@ -238,7 +334,7 @@ pub unsafe fn dump(accessor: *const u8, ids: &[u32]) {
         }
         let label = format!("prefix{depth} ");
         // SAFETY: `component` came from the game's own lookup.
-        unsafe { walk(component, 0, &mut lines, &label) };
+        unsafe { walk(component, 0, &mut lines, &label, base) };
     }
     if lines >= MAX_LINES {
         log(format_args!(

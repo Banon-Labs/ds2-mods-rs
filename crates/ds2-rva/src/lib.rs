@@ -1078,6 +1078,23 @@ pub const FE_SCENE_OBJ_PROXY_ELEMENT_SLOT: usize = 0;
 /// `FeComponentTextField`, `FeComponentTextureShape`, `FeComponentMaskShape`,
 /// `FeComponentTextureMask` and `FeComponentLinked` all inherit that. So a text field never
 /// responds to a play and follows an ancestor sprite instead.
+///
+/// **"Leaf" is right about sequence plays and wrong about the tree, and the difference crashed a
+/// walk.** `FeComponentSprite::findByIdPath` (`0x140b6bec0`) holds children a third way -- not the
+/// `+0x38` linked list `FeComponentObject` and `FeComponentScene` use, but the DISPLAY LIST:
+///
+/// ```asm
+/// mov   rbx, [rcx+0x70]          ; the list
+/// cmp   dx,  [rcx+0x66]          ; against the live child count
+/// cmp   [rbx+0xc], eax           ; this entry's key against the id being looked for
+/// mov   rcx, [rbx]               ; the child
+/// add   rbx, 0x10                ; next entry
+/// ```
+///
+/// That is the same list [`FLO_DEFINITION_CHILD_COUNT_OFFSET`] bounds and `FUN_140b6bd80` fills,
+/// so **the container built from the quit tab's definition is one of these** -- which is why
+/// raising that definition's child count grew it. The genuine tree leaves are the classes whose
+/// `findByIdPath` is `xor eax,eax; ret` at [`FE_COMPONENT_LEAF_FIND_BY_ID_PATH`].
 pub const FE_COMPONENT_SPRITE_VTABLE: u32 = 0x011d_e318;
 
 /// A component's first child. `+0x38`. Siblings chain through [`FE_COMPONENT_SIBLING_OFFSET`].
@@ -3121,3 +3138,32 @@ pub const FE_COMPONENT_RECORD_OFFSET: usize = 0x48;
 /// covers both ranges and the vtable says which one to read.
 pub const FE_COMPONENT_TRANSFORM_DUMP_START: usize = 0x50;
 pub const FE_COMPONENT_TRANSFORM_DUMP_END: usize = 0xa0;
+
+/// The ONLY two classes whose `+0x38` is a child list, as vtable RVAs.
+///
+/// **This cost a crash.** `FUN_140b77dc0` reads `[parent+0x38]` and every component in the tree
+/// looked like a parent, so a walk that followed that offset unconditionally descended into a
+/// `FeComponentTextureShape`, read some unrelated field as a pointer, and recursed until it died
+/// -- `exception_address=DINPUT8.dll+0x769ad` with five identical frames above it.
+///
+/// The classes that recurse are the ones whose `findByIdPath` (vtable `+0x190`) reaches
+/// `FUN_140b77dc0`: `FeComponentObject` matches its own id first and then descends,
+/// `FeComponentScene` has no id and descends immediately. Every other `FeComponent*` overrides that
+/// slot with something else and is a leaf as far as the tree is concerned.
+///
+/// Names from `scripts/ds2-rtti-vtables.py 'FeComponent'`.
+pub const FE_COMPONENT_OBJECT_VTABLE: u32 = 0x011d_dfa8;
+pub const FE_COMPONENT_SCENE_VTABLE: u32 = 0x011d_e158;
+
+/// The display list, its live count, and its stride, inside a `FeComponentSprite`.
+pub const FE_COMPONENT_DISPLAY_LIST_OFFSET: usize = 0x70;
+pub const FE_COMPONENT_DISPLAY_COUNT_OFFSET: usize = 0x66;
+pub const FE_COMPONENT_DISPLAY_ENTRY_STRIDE: usize = 0x10;
+/// Offset of the child pointer and of the id key inside one display-list entry.
+pub const FE_COMPONENT_DISPLAY_ENTRY_CHILD_OFFSET: usize = 0x00;
+pub const FE_COMPONENT_DISPLAY_ENTRY_KEY_OFFSET: usize = 0x0c;
+
+/// Classes whose `findByIdPath` is `xor eax,eax; ret` (`0x140b6d2a0`) -- genuine leaves:
+/// `FeComponentLinked`, `FeComponentMaskShape`, `FeComponentTextureMask`,
+/// `FeComponentTextureShape`. Following `+0x38` on one of these is what crashed the first walk.
+pub const FE_COMPONENT_LEAF_FIND_BY_ID_PATH: u32 = 0x00b6_d2a0;
