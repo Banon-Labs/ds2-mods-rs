@@ -182,9 +182,14 @@ unsafe fn write_caption(
         );
     }
     let n = WRITTEN.fetch_add(1, Ordering::Relaxed) + 1;
-    log(format_args!(
-        "{LOG_PREFIX} caption label={label:#x} written={n}"
-    ));
+    // Logged only for the first couple of opens. The pause menu is opened over and over in a
+    // session and this sink calls `sync_all` per line, so a line that repeats forever is a stall
+    // that repeats forever. The first two are the evidence; the rest are noise with a cost.
+    if n <= 2 {
+        log(format_args!(
+            "{LOG_PREFIX} caption label={label:#x} written={n}"
+        ));
+    }
 
     // THE TREE DUMP IS NOT RUN. It found what it was built to find -- that the banner is a
     // `FeComponentTextureShape` sized by its own quad -- and it costs 117 log lines, each of which

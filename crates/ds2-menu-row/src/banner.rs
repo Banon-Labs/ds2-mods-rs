@@ -194,6 +194,11 @@ pub unsafe fn lengthen(panel: *const u8, base: usize) {
             rect.add(Y1).cast::<f32>().write(ds2_rva::FE_BANNER_QUAD_Y1);
         }
         let n = LENGTHENED.fetch_add(1, Ordering::Relaxed) + 1;
+        // First couple of opens only; the sink calls `sync_all` per line and the pause menu is
+        // opened over and over.
+        if n > 2 {
+            continue;
+        }
         log(format_args!(
             "{LOG_PREFIX} banner rect={offset:#x} at=0x{:016x} before=[{quad}] y1={y1}->{} \
              writes={n}",

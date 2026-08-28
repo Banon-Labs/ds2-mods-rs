@@ -192,13 +192,18 @@ unsafe fn append(descriptor: *mut u8) -> *mut u8 {
     }
 
     let appended = APPENDED.fetch_add(1, Ordering::Relaxed) + 1;
-    log(format_args!(
-        "{LOG_PREFIX} appended action={action:#x} gate={gate} was=[{}] count={}->{} \
-         fire={fired} appends={appended}",
-        describe(&entries),
-        count,
-        count + 1
-    ));
+    // Logged only for the first couple of opens. The pause menu is opened over and over in a
+    // session and this sink calls `sync_all` per line, so a line that repeats forever is a stall
+    // that repeats forever. The first two are the evidence; the rest are noise with a cost.
+    if appended <= 2 {
+        log(format_args!(
+            "{LOG_PREFIX} appended action={action:#x} gate={gate} was=[{}] count={}->{} \
+             fire={fired} appends={appended}",
+            describe(&entries),
+            count,
+            count + 1
+        ));
+    }
     returned
 }
 
@@ -758,32 +763,25 @@ pub unsafe fn install() -> Outcome {
         )),
     }
 
-    // THE PROBE, installed third and never fatal. It only reads, and it reports for all SIX tabs
-    // -- five of which this crate does not touch, which is what makes the sixth's numbers mean
-    // something instead of being a lone reading with nothing to compare against.
-    let probe_rva = ds2_rva::FE_INGAME_MENU_TAB_INIT;
-    let probe_site = base + probe_rva as usize;
-    match unsafe { MhHook::new(probe_site as *mut c_void, tab_init_detour as *mut c_void) } {
-        Ok(hook) => {
-            TAB_INIT_TRAMPOLINE.store(hook.trampoline() as usize, Ordering::Release);
-            let status = unsafe { MH_EnableHook(probe_site as *mut c_void) };
-            if status == MH_STATUS::MH_OK {
-                log(format_args!(
-                    "{LOG_PREFIX} probe hooked rva=0x{probe_rva:08x} va=0x{probe_site:016x} \
-                     (per-tab init; reports all six tabs)"
-                ));
-            } else {
-                log(format_args!(
-                    "{LOG_PREFIX} probe NOT installed stage=MH_EnableHook status={status:?} \
-                     -- the row is still appended, only the measurement is missing"
-                ));
-            }
-        }
-        Err(status) => log(format_args!(
-            "{LOG_PREFIX} probe NOT installed stage=MH_CreateHook status={status:?} \
-             -- the row is still appended, only the measurement is missing"
-        )),
-    }
+    // THE PROBE IS NOT INSTALLED, AND LEAVING IT INSTALLED IS WHAT FROZE THE PAUSE MENU.
+    //
+    // It reports six tabs and every cell of each: twenty-six lines per open, each one followed by a
+    // `sync_all` in the loader's log sink, plus twenty-odd calls into the grid's own cell accessors
+    // just to produce them. That ran on every single pause-menu open, long after the question it
+    // was written to answer -- `row-extent=4` -- had been settled.
+    //
+    // The tree dump in `tree.rs` was disarmed for exactly this reason and the freeze SURVIVED,
+    // because this one was still going. Two instruments, one mistake, and the second run was wasted
+    // by fixing one without looking for the other. An instrument left in the shipping path is a
+    // feature nobody asked for.
+    //
+    // Re-arm by restoring the `MhHook::new` on `ds2_rva::FE_INGAME_MENU_TAB_INIT` here; the detour
+    // and its reporters are untouched.
+    let _ = (
+        report_tab as *const (),
+        tab_init_detour as *const (),
+        ds2_rva::FE_INGAME_MENU_TAB_INIT,
+    );
 
     Outcome { installed: true }
 }
