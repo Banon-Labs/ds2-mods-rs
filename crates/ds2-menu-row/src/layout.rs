@@ -937,11 +937,19 @@ mod tests {
         let [r, g, b, _] = ds2_rva::FLO_ADDED_ROW_TINT;
         assert!(r > g && r > b, "tint is r{r:02x} g{g:02x} b{b:02x}");
         // Non-white RGB needs the second bit as well as the first; 108 records in the file agree
-        // and none disagrees.
+        // and none disagrees. Strength zero would land exactly here.
         assert_ne!(
             [r, g, b],
             [0xff, 0xff, 0xff],
-            "a white-RGB tint would not need FLO_TRANSFORM_COLOUR_RGB"
+            "strength {} mixes to white, which needs no colour at all",
+            ds2_rva::FLO_ADDED_ROW_TINT_STRENGTH
+        );
+        // The mix is a mix: white at one end, the hue itself at the other, and this is neither.
+        assert_ne!(
+            [r, g, b],
+            ds2_rva::FLO_ADDED_ROW_HUE,
+            "strength {} is full strength, which measured as a re-skin rather than a mark",
+            ds2_rva::FLO_ADDED_ROW_TINT_STRENGTH
         );
         assert_eq!(
             ds2_rva::FLO_TRANSFORM_COLOUR_LIVE | ds2_rva::FLO_TRANSFORM_COLOUR_RGB,

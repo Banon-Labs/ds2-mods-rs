@@ -3116,7 +3116,37 @@ pub const FLO_TRANSFORM_COLOUR_RGB: u32 = 0x0100;
 /// Red, opaque, in the order the bytes are actually laid down. The added row wears the shipped
 /// Quit Game glyph, so without this it is the same icon as the row directly above it and the only
 /// thing telling them apart is the caption. Red because the row is the one that does not ask.
-pub const FLO_ADDED_ROW_TINT: [u8; 4] = [0xff, 0x64, 0x50, 0xff];
+///
+/// **It is a strength and a hue rather than three bytes, because the colour MULTIPLIES.** The
+/// game's own greyed-out state is the demonstration: `ff808080` on this very glyph reads as
+/// disabled, and a flat mid-grey silhouette would not -- it darkens the artwork, so white is the
+/// identity and anything below it composites down. Which means a fraction of a hue is meaningful,
+/// and the fraction is the thing worth naming.
+pub const FLO_ADDED_ROW_TINT: [u8; 4] = [
+    toward_white(FLO_ADDED_ROW_HUE[0], FLO_ADDED_ROW_TINT_STRENGTH),
+    toward_white(FLO_ADDED_ROW_HUE[1], FLO_ADDED_ROW_TINT_STRENGTH),
+    toward_white(FLO_ADDED_ROW_HUE[2], FLO_ADDED_ROW_TINT_STRENGTH),
+    0xff,
+];
+
+/// The hue [`FLO_ADDED_ROW_TINT`] is mixed from, at full strength. R, G, B.
+pub const FLO_ADDED_ROW_HUE: [u8; 3] = [0xff, 0x64, 0x50];
+
+/// How far [`FLO_ADDED_ROW_TINT`] is pushed from white toward [`FLO_ADDED_ROW_HUE`], out of `255`.
+///
+/// `26` is a tenth. Full strength was measured on screen as simply red -- which is a re-skin, not
+/// a mark, and a re-skin of one row out of four reads as a different KIND of thing rather than as
+/// the same thing with a warning on it. **This is the one number in this block that is taste and
+/// not measurement**, and it is on its own line so it can be turned without touching the hue or
+/// the byte order that took a run each to settle.
+pub const FLO_ADDED_ROW_TINT_STRENGTH: u8 = 26;
+
+/// Mix one channel `strength/255` of the way from white toward `channel`.
+///
+/// White is the identity for a multiply, so a partial tint is a partial step away from it.
+const fn toward_white(channel: u8, strength: u8) -> u8 {
+    (255 - ((255 - channel as u16) * strength as u16) / 255) as u8
+}
 
 /// Index of the alpha byte inside [`FLO_ADDED_ROW_TINT`]. It is the byte
 /// [`FLO_TRANSFORM_COLOUR_OFFSET`]` + 3` lands on, which is the one the builder reads.
