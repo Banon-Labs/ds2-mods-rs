@@ -714,3 +714,75 @@ There are only four callers of `FUN_140b54740`, all inside the builder (`FUN_140
 **It is one half of a pair.** The namer entry (`install.rs`) names `0x1eaccd`; the layout supplies
 it. Either alone is a measured null — and the namer-alone case is exactly the run already on record
 with `row-extent 3`, which makes it this change's control.
+
+
+## The live tree, and why three stretch factors did nothing
+
+Reading the `.flo` established what elements exist. It could not establish which one is *behind*
+the rows, and three attempts to lengthen the banner by scaling — 8%, 17%, and a deliberately
+unmissable 2.0 — all produced no visible change while the log proved the write landed:
+
+```
+panel transform at=0x7fffe9b57140
+  before=[0 -103 1 1 …]   after=[0 -103 1 2 …]   scaled-offset=0xc
+```
+
+So the walk. `crates/ds2-menu-row/src/tree.rs` resolves every prefix of the quit tab's path and
+dumps the live components. 117 nodes.
+
+### The first walk crashed the game, and the crash was the useful part
+
+`exception_address=DINPUT8.dll+0x769ad`, five identical frames above it — `walk()` recursing into
+garbage after a `FeComponentTextureShape`.
+
+**A component class does not have one way of holding children. It has three**, and each one is
+stated by that class's `findByIdPath` override at vtable `+0x190`:
+
+| class | children | read from |
+|---|---|---|
+| `FeComponentObject`, `FeComponentScene` | `[this+0x38]`, then `[child+0x28]` | `FUN_140b77dc0` |
+| `FeComponentSprite` | display list `[this+0x70]`, count `[this+0x66]`, stride `0x10`, child at `+0x00`, key at `+0x0c` | `0x140b6bec0` |
+| everything else | none — `xor eax,eax; ret` | `0x140b6d2a0` |
+
+The middle row matters beyond the crash. That display list is the same one
+`FLO_DEFINITION_CHILD_COUNT_OFFSET` bounds and `FUN_140b6bd80` fills, so **the container built from
+the quit tab's definition is a `FeComponentSprite`** — which is why raising the definition's child
+count grew it, and why a walk that only knew the linked list would have reported the tab as empty
+even if it had survived.
+
+`ds2-rva` had called `FeComponentSprite` a leaf. That was right about sequence plays and wrong about
+the tree; both readings now sit next to each other there.
+
+### What the tree says
+
+The container `0x1eace6` (def `0x0263`) reports nine children — the seven shipped plus ours:
+
+```
+0x1eac81 def=0x0221   the panel
+0x1eace9 def=0x0258   row 2       0x1eac4c def=0x022c   its label
+0x1eacca def=0x025d   row 1       0x1eac47 def=0x022c   its label
+0x1eacc9 def=0x0262   row 0       0x1eac46 def=0x022c   its label
+0x1eaccd def=0x0262   OUR ROW     0x1eac4a def=0x022c   OUR LABEL
+```
+
+And the panel holds exactly two things: a **`FeComponentTextureShape`** at display-list key
+`0xffffffff`, and the cursor (def `0x004e`). The texture shape is the only drawable — it is the
+banner.
+
+### Why no scale reached it
+
+Two independent readings agree:
+
+* **Every `FeComponentObject` in the tree dumps an identity matrix at `+0x60`.** The three rows sit
+  at different y and their components' own transforms are all identity, so position is applied from
+  the record at draw time rather than baked into the node.
+* **Scale 2.0 on the record moved nothing on either axis.** Had `+0x0c` been scale-x rather than
+  scale-y, the banner would have doubled in width; it did neither.
+
+So the texture shape is sized by its own quad, not by any ancestor's transform. The remaining work
+is that quad — shape `0x0220`'s geometry in the `.flo`, or the equivalent field on the live
+component — and not another factor.
+
+**Three guesses at a factor was two too many.** The tree is what should have been read after the
+first one failed, and the rule the session earned is: when a change that should be unmissable is
+invisible, stop adjusting the value and go find out whether the field is even the one being drawn.
