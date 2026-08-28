@@ -164,6 +164,7 @@ CONTINUE_SECTION = "continue"
 KEY_CONTINUE_RECORD = "record"
 KEY_CONTINUE_SLOT = "slot"
 KEY_CONTINUE_SILENCE = "silence"
+KEY_CONTINUE_LOADING_SCREEN = "loading_screen"
 
 MENU_SECTION = "title_menu"
 KEY_SHOW_UNAVAILABLE = "show_unavailable"
@@ -892,6 +893,7 @@ def config_text(
     continue_record: bool = False,
     continue_slot: int = -1,
     continue_silence: bool = True,
+    continue_loading_screen: bool = True,
     offline: bool = True,
     block_sockets: bool = True,
 ) -> str:
@@ -1110,6 +1112,18 @@ def config_text(
 #
 # Set to false to hear the title as the game plays it. Only an exact `false` turns it off.
 {KEY_CONTINUE_SILENCE} = {str(continue_silence).lower()}
+# STARTUP-ONLY. ON by default, and inert unless `slot` above is set.
+#
+# Covers the whole title flow with the game's own NOW LOADING screen -- FeOperatorNowLoading, the
+# same operator that drives the page you see on every map transition -- so the logos, the title,
+# the six-row menu and the character list are never shown. It is raised at FeOperatorTitle's setup
+# and dropped at FeSubStateTitleStartIngame.
+#
+# The game's own screen rather than a black rectangle, because the shortcut takes ~5.6s and five
+# seconds of black is indistinguishable from a hang.
+#
+# Set to false to watch the title flow drive itself. Only an exact `false` turns it off.
+{KEY_CONTINUE_LOADING_SCREEN} = {str(continue_loading_screen).lower()}
 
 [{OFFLINE_SECTION}]
 # STARTUP-ONLY, all four. ON BY DEFAULT, and it is the only feature here whose default is on for a
@@ -1193,6 +1207,7 @@ def write_config(
     continue_record: bool = False,
     continue_slot: int = -1,
     continue_silence: bool = True,
+    continue_loading_screen: bool = True,
     offline: bool = True,
     block_sockets: bool = True,
 ) -> tuple[Path, str]:
@@ -1216,6 +1231,7 @@ def write_config(
         continue_record,
         continue_slot,
         continue_silence,
+        continue_loading_screen,
         offline,
         block_sockets,
     )
@@ -1297,6 +1313,7 @@ def dry_run(
     continue_record: bool = False,
     continue_slot: int = -1,
     continue_silence: bool = True,
+    continue_loading_screen: bool = True,
     offline: bool = True,
     block_sockets: bool = True,
 ) -> int:
@@ -1338,6 +1355,7 @@ def dry_run(
             continue_record,
             continue_slot,
             continue_silence,
+            continue_loading_screen,
             offline,
             block_sockets,
         ):
@@ -1375,6 +1393,7 @@ def dry_run(
                 continue_record,
                 continue_slot,
                 continue_silence,
+                continue_loading_screen,
                 offline,
                 block_sockets,
             ),
@@ -1434,6 +1453,7 @@ def launch(
     continue_record: bool = False,
     continue_slot: int = -1,
     continue_silence: bool = True,
+    continue_loading_screen: bool = True,
     offline: bool = True,
     block_sockets: bool = True,
 ) -> int:
@@ -1470,6 +1490,7 @@ def launch(
         continue_record,
         continue_slot,
         continue_silence,
+        continue_loading_screen,
         offline,
         block_sockets,
     )
@@ -2352,6 +2373,15 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--no-continue-loading-screen",
+        dest="continue_loading_screen",
+        action="store_false",
+        help=(
+            "let the title flow draw itself instead of covering it with the game's own NOW "
+            "LOADING screen. The cover is on by default whenever --continue-slot is set."
+        ),
+    )
+    parser.add_argument(
         "--no-continue-silence",
         dest="continue_silence",
         action="store_false",
@@ -2556,6 +2586,7 @@ def main() -> int:
             args.continue_record,
             args.continue_slot,
             args.continue_silence,
+            args.continue_loading_screen,
             args.offline,
             args.block_sockets,
         )
@@ -2578,6 +2609,7 @@ def main() -> int:
         args.continue_record,
         args.continue_slot,
         args.continue_silence,
+        args.continue_loading_screen,
         args.offline,
         args.block_sockets,
     )

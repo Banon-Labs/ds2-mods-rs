@@ -24,6 +24,9 @@ pub const KEY_SLOT: &str = "slot";
 /// Whether to hold the master channel group at zero for the length of the shortcut.
 pub const KEY_SILENCE: &str = "silence";
 
+/// Whether to cover the title flow with the game's own NOW LOADING screen.
+pub const KEY_LOADING_SCREEN: &str = "loading_screen";
+
 /// `[continue]`, resolved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ContinueConfig {
@@ -36,6 +39,9 @@ pub struct ContinueConfig {
     /// Mute FMOD's master channel group from install until `FeSubStateTitleStartIngame`, then
     /// restore the volume the game itself had applied.
     pub silence: bool,
+    /// Raise `FeOperatorNowLoading` over the title flow, and drop it at
+    /// `FeSubStateTitleStartIngame`.
+    pub loading_screen: bool,
 }
 
 impl Default for ContinueConfig {
@@ -55,6 +61,10 @@ impl Default for ContinueConfig {
             // nobody pressed is the surprising behaviour, not the quiet one. Set it to `false` to
             // hear the title as the game plays it.
             silence: true,
+            // ON, for the same reason as `silence` and with the same guard: it cannot act unless
+            // `slot` has already turned the shortcut on. Set it to `false` to watch the title
+            // flow drive itself.
+            loading_screen: true,
         }
     }
 }
@@ -85,21 +95,29 @@ impl ContinueConfig {
             None => Self::default().silence,
             Some(raw) => !matches!(raw.trim().trim_matches('"'), "false"),
         };
+        // Defaults ON, so like `silence` only a literal `false` turns it off.
+        let loading_screen = match parsed.get(CONFIG_SECTION, KEY_LOADING_SCREEN) {
+            None => Self::default().loading_screen,
+            Some(raw) => !matches!(raw.trim().trim_matches('"'), "false"),
+        };
         Self {
             record,
             slot,
             silence,
+            loading_screen,
         }
     }
 
     /// One line for the attach log, written before anything acts on it.
     pub fn describe(&self) -> String {
         format!(
-            "{} config [{CONFIG_SECTION}] {KEY_RECORD}={} {KEY_SLOT}={} {KEY_SILENCE}={}",
+            "{} config [{CONFIG_SECTION}] {KEY_RECORD}={} {KEY_SLOT}={} {KEY_SILENCE}={} \
+             {KEY_LOADING_SCREEN}={}",
             ds2_continue::LOG_PREFIX,
             self.record,
             self.slot,
-            self.silence
+            self.silence,
+            self.loading_screen
         )
     }
 }

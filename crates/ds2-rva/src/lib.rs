@@ -1999,3 +1999,54 @@ pub const SOUND_MANAGER_V0_NOT_A_FRAME_PUMP: u32 = 0x009d_fef0;
 ///
 /// Not an Arxan redirect: clean prologue at the entry.
 pub const FE_SUBSTATE_START_INGAME_ENTER: u32 = 0x000f_de30;
+
+// ---------------------------------------------------------------------------------------------
+// The NOW LOADING screen, as a cover for the title flow.
+//
+// `FeOperatorNowLoading` is the operator behind `FeSceneNowLoading` / `FeGroupNowLoading` -- the
+// full-screen loading page the game shows on every map transition. It is constructed once, during
+// GameManagerImp's own init, and then sits idle until something makes it visible. That makes it
+// available for the whole title flow, long before anything the title draws.
+// ---------------------------------------------------------------------------------------------
+
+/// `GameManagerImp` -> the frontend object that owns the operator table. `0x22e0`.
+///
+/// Written at `0x1401bcb79` (`mov [rdi+0x22e0],rsi`) in GameManagerImp's init, immediately after
+/// `0x140500200` has populated the operator slots on that same object.
+///
+/// **Verified live** rather than only read: walking
+/// `[`[`GAME_MANAGER_IMP`]`] + 0x22e0 + `[`FRONTEND_NOW_LOADING_OPERATOR_OFFSET`] in a running
+/// game lands on an object whose vtable is `0x1410fa0c8`, which RTTI names
+/// `FeOperatorNowLoading`. Note the container's own head reads as `DLKR::DLBackAllocator`, so it
+/// embeds an allocator as its first member; the offset is what matters and the vtable at the end
+/// of the walk is what confirms it.
+pub const GAME_MANAGER_FRONTEND_ROOT_OFFSET: usize = 0x22e0;
+
+/// That frontend object -> `FeOperatorNowLoading`. `0xc8`.
+///
+/// Filled by the lazy factory at `0x1405002de` (`mov [rbx+0xc8],rsi`) right after it allocates
+/// `0x3c0` bytes and installs vtable `0x1410fa0c8`. The same pointer is mirrored into the
+/// operator array at `+0x18`, which is how the frontend iterates operators.
+pub const FRONTEND_NOW_LOADING_OPERATOR_OFFSET: usize = 0xc8;
+
+/// Vtable slot 4 of `FeOperatorBase`, which takes a `float`. **Believed to be opacity.**
+///
+/// THE EVIDENCE, AND ITS LIMIT. The factory that creates the operator calls exactly this slot
+/// twice with `xorps xmm1,xmm1` -- `0.0f` -- at `0x14050030b` and `0x140500318`, immediately after
+/// construction and before anything could have shown it. `FeOperatorNowLoading`'s override
+/// (`0x1400a7c30`) forwards that float to two sub-objects, the scene at `+0x10` and the group at
+/// `+0x270`, which is the shape of an opacity that has to reach every layer of a screen.
+///
+/// That is an inference from a call site, not a proof, and this project has already paid once for
+/// exactly that class of reasoning (see [`SOUND_MANAGER_V0_NOT_A_FRAME_PUMP`]). Treat "1.0 shows
+/// the loading screen" as unconfirmed until a run says otherwise.
+pub const FE_OPERATOR_OPACITY_VTABLE_SLOT: usize = 4;
+
+/// `FeOperatorTitle::v2`, the title operator's setup. RVA `0x000ef030`, VA `0x1400ef030`.
+///
+/// Thirty-two bytes: if `this+0x10` is non-null it runs two calls and writes `1` into
+/// [`FE_OPERATOR_TITLE_ACTIVE`]. It is the moment the title frontend becomes live, which makes it
+/// the earliest point at which covering the title is both possible and meaningful.
+///
+/// Not an Arxan redirect: clean prologue at the entry.
+pub const FE_OPERATOR_TITLE_SETUP: u32 = 0x000e_f030;

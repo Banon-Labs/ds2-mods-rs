@@ -66,10 +66,14 @@
 #[cfg(windows)]
 mod install;
 #[cfg(windows)]
+mod loading_screen;
+#[cfg(windows)]
 mod silence;
 
 #[cfg(windows)]
 pub use install::{LogFn, Outcome, install, set_logger, set_preselect_slot};
+#[cfg(windows)]
+pub use loading_screen::set_enabled as set_loading_screen;
 #[cfg(windows)]
 pub use silence::set_enabled as set_silence;
 
