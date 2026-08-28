@@ -253,3 +253,106 @@ Repoint an EXISTING entry. The item vector is `(action, gate)` and both halves a
 swapping the action on one of the three cells the layout already draws gives a working new
 destination -- under that cell's existing caption, which would then be a lie. That is a trade this
 document records rather than recommends.
+
+## The layout, extracted
+
+`menu:/42.febnd.dcx` is the pause menu's layout archive, and `scripts/ds2-ebl.py` reads it with
+nothing but the standard library and the key the game ships.
+
+```
+$ python3 scripts/ds2-ebl.py info
+salt          FRPG2_STEAM_GAME_DATA_EBL_SALT64
+buckets       1931
+entries       11699
+AES-encrypted 1960
+bucket check  0 of 11699 entries violate hash % 1931 == bucket
+
+$ python3 scripts/ds2-ebl.py extract /menu/42.febnd.dcx --out /tmp/menu42
+/menu/42.febnd.dcx  hash=0x27022a7f size=412019 offset=0xd989b5
+  DCX -> 1108656 bytes
+  BND4 -> 3 file(s)
+    l42_01_OptionSetting.flo  (50240 bytes)
+    option.tpf                (1048747 bytes)
+    yubiwa_test.tpf           (8368 bytes)
+```
+
+### How the id becomes a path
+
+`FeGroupInGameTopSelect`'s constructor writes `0x2a` to `TopSelect + 0x140`
+(`mov QWORD PTR [rsi+0x140],0x2a` at `0x1400a425f`). That is the id field of the
+`FrontendEx::FexLayoutBndResourceProxy` embedded at `TopSelect + 0x110`, and the proxy's load
+(`0x140026bc0`) hands it to the path builder at `0x14048b4e0`:
+
+```c
+pwVar1 = L"menu:/%02d.febnd.dcx";
+if ((id - 0x11U & 0xfffffffd) == 0)                  // only ids 0x11 and 0x13
+    pwVar1 = L"gamedata:/menu/%02d.febnd.dcx";
+FUN_140003690_format_wstr(out, pwVar1, id);
+```
+
+`0x2a` is 42, so the path is `menu:/42.febnd.dcx` -- which inside the archive is
+`/menu/42.febnd.dcx`. The proxy then goes to `AppResourceManager` (`0x1400264d0`), which checks a
+cache (`0x140b02360`) and otherwise allocates `0x130` bytes and constructs the resource
+(`0x140affe10`).
+
+### The chain, and what proves each step
+
+| step | how it is checked |
+| --- | --- |
+| RSA-decrypt the BHD with `GameDataKeyCode.pem` | `BHD5` magic lands at plaintext offset 0 |
+| BHD5 record layout | every entry's `hash % 1931` equals its own bucket index -- **0 violations of 11699** |
+| path -> hash, `h = h*37 + byte`, lowercased | reproduces paths read out of the exe's own string table |
+| BDT read | the entry's size comes back exactly |
+| DCX / DFLT | the header's uncompressed-size field matches what zlib produced |
+| BND4 | 3 members, names and magics as above |
+
+The `.pem` is an RSA **public** key. FromSoftware "signed" the header with the private key, so the
+public key that ships beside it is the decryption key. Nothing had to be found or guessed.
+
+`/menu/42.febnd.dcx` carries no AES key record, so it is not encrypted either. 1960 of the 11699
+entries are; `ds2-ebl.py` refuses those rather than returning ciphertext that looks like a corrupt
+file.
+
+### What the `.flo` looks like
+
+`l42_01_OptionSetting.flo`, 50240 bytes, no strings at all -- 107 short ASCII runs, every one of
+them a coincidence inside float data, and zero UTF-16 runs. It opens with a table of `u64` section
+offsets (`0xa8`, `0x19b0`, `0x19b0`, `0x3790`, `0xbfe0`, `0xc080`, `0xc388`, `0xc200`) and holds
+uniform binary records.
+
+The element ids the executable passes around are IN it. `0x5f5b9f2` occurs five times and
+`0x5f5c3e5` twice, each at the same offset within an identical 16-byte record prefix
+(`00 00 00 00 01 00 08 00 ff ff 01 00 00 00 00 00`), followed by a field that differs per record
+and an in-file offset. So an element is a fixed-size record keyed by a numeric id, and adding one
+is a binary edit rather than a string-table edit.
+
+**The `0x1eabXX` ids are NOT in this file**, and that is the shape of the id space rather than a
+problem: `FUN_1400a6310` builds a *path* of three ids -- `[0x1eaba9, cell, 0x5f5b9f2]` -- so the
+`0x1ea....` components address the screen and group and the `0x5f5.....` component addresses the
+leaf element inside this `.flo`.
+
+**The `.flo` record format is not decoded.** What is established is that it is decodable: fixed
+records, numeric keys, no strings, and a section table to anchor them.
+
+## Where a runtime interception would go
+
+Four candidate layers, cheapest blast radius last. None of these is built.
+
+1. **Rewrite the path** -- detour `0x14048b4e0` and hand back a different string. One tiny hook,
+   but it only helps if the virtual filesystem can open whatever it is pointed at, which has not
+   been established.
+2. **Substitute the bytes** -- detour the EBL read that turns a path hash into bytes, and serve a
+   modified `.febnd.dcx` from a loose file. This is the general form: everything in the archive
+   becomes redirectable, the 13 GB `.bdt` is never rewritten, and iteration is "edit a file on
+   disk, relaunch". It needs the `.flo` format, because the file being served has to be a valid
+   one.
+3. **Patch the parsed layout** -- let the resource load, then find the element records in memory
+   and add one. Trades the file format for the in-memory node structure; no obvious win over 2.
+4. **Synthesise the element at bind time** -- detour `FrontendEx::FexGridControl`'s layout bind
+   ([`FEX_GRID_CONTROL_LAYOUT_BIND`], `0x1400216d0`) or the namer it calls at
+   `[grid+0xf0]->vtable[0x10]`, and hand it a cell-3 element it would not otherwise find. The
+   narrowest possible change and it needs no file format at all -- but the element it is handed
+   still has to be a real drawable with its own position, so it is "clone and move a node", which
+   is question 3 wearing a smaller hook.
+
+2 is the one worth building, and its prerequisite is the `.flo` format, not more hooking.
