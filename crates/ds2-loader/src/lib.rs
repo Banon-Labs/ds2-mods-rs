@@ -677,6 +677,41 @@ fn install_menu_row() {
         return;
     }
     ds2_menu_row::set_logger(log_line);
+
+    // REGISTERED THROUGH THE PUBLIC API, not hardcoded inside the crate. This is the same call any
+    // other crate makes to put a row on a pause-menu tab, and it is here rather than in
+    // `ds2-menu-row` on purpose: an API that is only good enough for someone else's row and not
+    // for our own would look fine until someone else tried it.
+    //
+    // The tint is the one three runs settled -- see `ds2_rva::FLO_ADDED_ROW_TINT_STRENGTH` for the
+    // ramp and what each value looked like on screen.
+    let registered = ds2_menu_row::add_row(ds2_menu_row::RowSpec {
+        tab: ds2_menu_row::Tab::Quit,
+        caption: "Quit Game",
+        icon: ds2_rva::FLO_QUIT_ICON_DEFINITION,
+        tint: Some(ds2_menu_row::Tint {
+            rgb: ds2_rva::FLO_ADDED_ROW_HUE,
+            strength: ds2_rva::FLO_ADDED_ROW_TINT_STRENGTH,
+        }),
+        on_confirm: ds2_menu_row::quit_to_desktop,
+    });
+    match registered {
+        Ok(id) => log_line(format_args!(
+            "{} registered {id:?} caption=\"Quit Game\" tab=Quit -- {} of {} slots on that tab \
+             remain",
+            ds2_menu_row::LOG_PREFIX,
+            ds2_menu_row::Tab::Quit.capacity() - 1,
+            ds2_menu_row::Tab::Quit.capacity()
+        )),
+        Err(error) => {
+            log_line(format_args!(
+                "{} NOT REGISTERED: {error} -- no row will be added",
+                ds2_menu_row::LOG_PREFIX
+            ));
+            return;
+        }
+    }
+
     // SAFETY: the target is a `.pdata` function start recorded in `ds2-rva`, resolved against the
     // live module base, and `scripts/ds2-arxan-chain.py` reports a clean prologue at it rather than
     // an Arxan redirect. The detour re-reads that prologue and refuses to patch anything if it is

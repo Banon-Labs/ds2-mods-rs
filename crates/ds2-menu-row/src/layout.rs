@@ -75,15 +75,27 @@ static TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 static SUBSTITUTED: AtomicUsize = AtomicUsize::new(0);
 static REFUSED: AtomicUsize = AtomicUsize::new(0);
 
-/// Children this adds: the row and its mark.
-const ADDED: usize = 2;
+/// Children each added row costs: the row and its mark.
+const PER_ROW: usize = 2;
 
-/// Children the substituted definition declares.
-const CHILDREN: usize = ds2_rva::FLO_QUIT_TAB_CHILD_IDS.len() + ADDED;
+/// Rows this can carry. The struct below is sized for it, and the registry refuses past it.
+const MAX_ROWS: usize = crate::api::MAX_ADDED_ROWS;
 
-/// Index of the added row and the added mark inside the new child array.
-const ROW: usize = ds2_rva::FLO_QUIT_TAB_CHILD_IDS.len();
-const MARK: usize = ROW + 1;
+/// Children the substituted definition can declare at most. What it DOES declare is
+/// `shipped + PER_ROW * rows.len()`, which is smaller whenever fewer rows are registered.
+const CHILDREN: usize = ds2_rva::FLO_QUIT_TAB_CHILD_IDS.len() + PER_ROW * MAX_ROWS;
+
+/// Index of slot `n`'s row and mark inside the new child array.
+///
+/// The shipped records keep indices `0..7` untouched; ours are appended in pairs, so slot 0 is
+/// `(7, 8)` and slot 1 is `(9, 10)`. Pairs rather than two blocks because the transform pointers
+/// are written back per index and interleaving keeps the arithmetic in one place.
+const fn row_at(slot: usize) -> usize {
+    ds2_rva::FLO_QUIT_TAB_CHILD_IDS.len() + PER_ROW * slot
+}
+const fn mark_at(slot: usize) -> usize {
+    row_at(slot) + 1
+}
 
 /// Depths given to the added records.
 ///
@@ -92,8 +104,18 @@ const MARK: usize = ROW + 1;
 /// `FUN_140b50bc0` passes this field on only for the LEAF kinds, and both of these are nested
 /// definitions, so the game never reads it back. Continuing the series costs nothing and leaves
 /// the array readable next to the shipped one.
+///
+/// Slot `n` steps down from each base, into the gaps `2, 3` and `15, 16` -- values no shipped
+/// record uses, which is asserted rather than eyeballed.
 const ROW_DEPTH: u16 = 3;
 const MARK_DEPTH: u16 = 16;
+
+const fn row_depth(slot: usize) -> u16 {
+    ROW_DEPTH - slot as u16
+}
+const fn mark_depth(slot: usize) -> u16 {
+    MARK_DEPTH - slot as u16
+}
 
 /// A replacement container definition, its child records, and the two transform blocks the added
 /// records point at -- one allocation so the pointers between them cannot outlive each other.
@@ -104,8 +126,11 @@ const MARK_DEPTH: u16 = 16;
 struct Container {
     definition: [u8; ds2_rva::FLO_DEFINITION_STRIDE],
     records: [u8; ds2_rva::FLO_RECORD_STRIDE * CHILDREN],
-    row_transform: [u8; ds2_rva::FLO_TRANSFORM_SIZE],
-    mark_transform: [u8; ds2_rva::FLO_TRANSFORM_SIZE],
+    /// One transform block per added row, and one per added mark. Fixed-size rather than a `Vec`
+    /// because the game's own item vector caps a tab at five rows -- there is no allocation to
+    /// grow, only two slots to leave empty when one row is registered.
+    row_transform: [[u8; ds2_rva::FLO_TRANSFORM_SIZE]; MAX_ROWS],
+    mark_transform: [[u8; ds2_rva::FLO_TRANSFORM_SIZE]; MAX_ROWS],
     panel_transform: [u8; ds2_rva::FLO_TRANSFORM_SIZE],
     /// The shipped records exactly as the game had them, kept only so [`still_current`] has
     /// something to compare against.
@@ -129,9 +154,9 @@ struct Container {
     /// second, invisible-at-rest child is the SELECTION HIGHLIGHT. Pointing the container's row
     /// record straight at the icon put the right glyph on screen and silently took the highlight
     /// with it.
-    row_definition: [u8; ds2_rva::FLO_DEFINITION_STRIDE],
-    row_records: [u8; ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_QUIT_ROW_CHILDREN],
-    icon_transform: [u8; ds2_rva::FLO_TRANSFORM_SIZE],
+    row_definition: [[u8; ds2_rva::FLO_DEFINITION_STRIDE]; MAX_ROWS],
+    row_records: [[u8; ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_QUIT_ROW_CHILDREN]; MAX_ROWS],
+    icon_transform: [[u8; ds2_rva::FLO_TRANSFORM_SIZE]; MAX_ROWS],
 }
 
 /// Substitutions already built, as `(definition the game returned, definition we return)`.
@@ -155,9 +180,9 @@ static BUILT: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
 /// always the right answer.
 static PANEL: AtomicUsize = AtomicUsize::new(0);
 
-/// The added row's own definition, answered for [`ds2_rva::FLO_ADDED_ROW_DEFINITION`]. As
-/// [`PANEL`], and for the same reason.
-static ROW_DEFINITION: AtomicUsize = AtomicUsize::new(0);
+/// The added rows' own definitions, answered for [`ds2_rva::FLO_ADDED_ROW_DEFINITION`]` + slot`.
+/// As [`PANEL`], and for the same reason.
+static ROW_DEFINITIONS: [AtomicUsize; MAX_ROWS] = [const { AtomicUsize::new(0) }; MAX_ROWS];
 
 /// Most substitutions to keep. Past this the detour passes through and says so. The bound exists
 /// so that a misunderstanding shows up as a logged refusal rather than as unbounded growth; at
@@ -285,19 +310,33 @@ unsafe fn build(original: *mut u8, panel: *mut u8, row: *mut u8) -> Option<*mut 
         ));
     }
 
+    // THE ROWS THIS CONTAINER WILL CARRY, read once. `install` seals the registry before it
+    // patches anything, so this cannot change between here and the log line at the bottom.
+    let rows = crate::api::rows_for(crate::api::Tab::Quit);
+    if rows.is_empty() {
+        return refuse(format_args!("no rows are registered for this tab"));
+    }
+    if rows.len() > MAX_ROWS {
+        return refuse(format_args!(
+            "{} rows are registered and this container is sized for {MAX_ROWS}",
+            rows.len()
+        ));
+    }
+    let declared = count + PER_ROW * rows.len();
+
     let mut container = Box::new(Container {
         definition: [0; ds2_rva::FLO_DEFINITION_STRIDE],
         records: [0; ds2_rva::FLO_RECORD_STRIDE * CHILDREN],
-        row_transform: [0; ds2_rva::FLO_TRANSFORM_SIZE],
-        mark_transform: [0; ds2_rva::FLO_TRANSFORM_SIZE],
+        row_transform: [[0; ds2_rva::FLO_TRANSFORM_SIZE]; MAX_ROWS],
+        mark_transform: [[0; ds2_rva::FLO_TRANSFORM_SIZE]; MAX_ROWS],
         panel_transform: [0; ds2_rva::FLO_TRANSFORM_SIZE],
         shipped: [0; ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_QUIT_TAB_CHILD_IDS.len()],
         panel_definition: [0; ds2_rva::FLO_DEFINITION_STRIDE],
         panel_records: [0; ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_PANEL_CHILDREN],
         caret_transform: [0; ds2_rva::FLO_TRANSFORM_SIZE],
-        row_definition: [0; ds2_rva::FLO_DEFINITION_STRIDE],
-        row_records: [0; ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_QUIT_ROW_CHILDREN],
-        icon_transform: [0; ds2_rva::FLO_TRANSFORM_SIZE],
+        row_definition: [[0; ds2_rva::FLO_DEFINITION_STRIDE]; MAX_ROWS],
+        row_records: [[0; ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_QUIT_ROW_CHILDREN]; MAX_ROWS],
+        icon_transform: [[0; ds2_rva::FLO_TRANSFORM_SIZE]; MAX_ROWS],
     });
 
     // COPIED, never assembled field by field. The definition and the records carry fields this
@@ -332,63 +371,83 @@ unsafe fn build(original: *mut u8, panel: *mut u8, row: *mut u8) -> Option<*mut 
         );
         records.copy_within(source..source + ds2_rva::FLO_RECORD_STRIDE, destination);
     };
-    clone_into(
-        &mut container.records,
-        ROW,
-        ds2_rva::FLO_QUIT_TAB_ROW_TEMPLATE,
-    );
-    clone_into(
-        &mut container.records,
-        MARK,
-        ds2_rva::FLO_QUIT_TAB_MARK_TEMPLATE,
-    );
+    for slot in 0..rows.len() {
+        clone_into(
+            &mut container.records,
+            row_at(slot),
+            ds2_rva::FLO_QUIT_TAB_ROW_TEMPLATE,
+        );
+        clone_into(
+            &mut container.records,
+            mark_at(slot),
+            ds2_rva::FLO_QUIT_TAB_MARK_TEMPLATE,
+        );
+    }
 
-    // Same for the transform blocks: copied from the row being cloned, then moved down one step.
-    let mut source_panel: *const u8 = std::ptr::null();
-    for (slot, template) in [
-        (0usize, ds2_rva::FLO_QUIT_TAB_ROW_TEMPLATE),
-        (1, ds2_rva::FLO_QUIT_TAB_MARK_TEMPLATE),
-        (2, ds2_rva::FLO_QUIT_TAB_PANEL),
-    ] {
-        let record = template * ds2_rva::FLO_RECORD_STRIDE;
-        // SAFETY: the record was copied from a live one whose transform pointer the game itself
-        // dereferences, and `FLO_TRANSFORM_SIZE` bytes are what the game reads from it.
-        let source = unsafe {
-            container
-                .records
+    // Same for the transform blocks: copied from the record being cloned, then moved down one step
+    // per slot. `template_transform` reads the pointer out of a record the game itself
+    // dereferences; a small integer there means the document's fixup has not run and everything
+    // below would be treating a file offset as an address.
+    let template_transform = |records: &[u8], template: usize| -> *const u8 {
+        // SAFETY: `template` indexes a record copied verbatim from the game's own array.
+        unsafe {
+            records
                 .as_ptr()
-                .add(record + ds2_rva::FLO_RECORD_TRANSFORM_OFFSET)
+                .add(template * ds2_rva::FLO_RECORD_STRIDE + ds2_rva::FLO_RECORD_TRANSFORM_OFFSET)
                 .cast::<*const u8>()
                 .read()
-        };
+        }
+    };
+    let mut sources = [std::ptr::null::<u8>(); 3];
+    for (index, template) in [
+        ds2_rva::FLO_QUIT_TAB_ROW_TEMPLATE,
+        ds2_rva::FLO_QUIT_TAB_MARK_TEMPLATE,
+        ds2_rva::FLO_QUIT_TAB_PANEL,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let source = template_transform(&container.records, template);
         if (source as usize) < 0x1_0000 {
             return refuse(format_args!(
                 "record {template}'s transform is {source:p}, which is a file offset"
             ));
         }
-        let destination = match slot {
-            0 => container.row_transform.as_mut_ptr(),
-            1 => container.mark_transform.as_mut_ptr(),
-            _ => {
-                source_panel = source;
-                container.panel_transform.as_mut_ptr()
-            }
-        };
-        // SAFETY: source is a live transform block, destination is a buffer of exactly that size.
-        unsafe {
-            std::ptr::copy_nonoverlapping(source, destination, ds2_rva::FLO_TRANSFORM_SIZE);
+        sources[index] = source;
+    }
+    let source_panel = sources[2];
+    // SAFETY: every source is a live transform block and every destination is exactly that size.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            source_panel,
+            container.panel_transform.as_mut_ptr(),
+            ds2_rva::FLO_TRANSFORM_SIZE,
+        );
+        for slot in 0..rows.len() {
+            std::ptr::copy_nonoverlapping(
+                sources[0],
+                container.row_transform[slot].as_mut_ptr(),
+                ds2_rva::FLO_TRANSFORM_SIZE,
+            );
+            std::ptr::copy_nonoverlapping(
+                sources[1],
+                container.mark_transform[slot].as_mut_ptr(),
+                ds2_rva::FLO_TRANSFORM_SIZE,
+            );
         }
     }
-    let (row_x, row_y) = ds2_rva::FLO_ADDED_ROW_XY;
-    let (mark_x, mark_y) = ds2_rva::FLO_ADDED_MARK_XY;
-    container.row_transform[ds2_rva::FLO_TRANSFORM_X_OFFSET..][..4]
-        .copy_from_slice(&row_x.to_le_bytes());
-    container.row_transform[ds2_rva::FLO_TRANSFORM_Y_OFFSET..][..4]
-        .copy_from_slice(&row_y.to_le_bytes());
-    container.mark_transform[ds2_rva::FLO_TRANSFORM_X_OFFSET..][..4]
-        .copy_from_slice(&mark_x.to_le_bytes());
-    container.mark_transform[ds2_rva::FLO_TRANSFORM_Y_OFFSET..][..4]
-        .copy_from_slice(&mark_y.to_le_bytes());
+    for (slot, row) in rows.iter().enumerate() {
+        let (row_x, row_y) = row.row_xy();
+        let (mark_x, mark_y) = row.mark_xy();
+        container.row_transform[slot][ds2_rva::FLO_TRANSFORM_X_OFFSET..][..4]
+            .copy_from_slice(&row_x.to_le_bytes());
+        container.row_transform[slot][ds2_rva::FLO_TRANSFORM_Y_OFFSET..][..4]
+            .copy_from_slice(&row_y.to_le_bytes());
+        container.mark_transform[slot][ds2_rva::FLO_TRANSFORM_X_OFFSET..][..4]
+            .copy_from_slice(&mark_x.to_le_bytes());
+        container.mark_transform[slot][ds2_rva::FLO_TRANSFORM_Y_OFFSET..][..4]
+            .copy_from_slice(&mark_y.to_le_bytes());
+    }
 
     // THE SCROLL. The panel is one fixed graphic with three row slots and about half a row of
     // slack under the last one, so a fourth row hangs off the bottom of it. Its record is copied
@@ -421,26 +480,30 @@ unsafe fn build(original: *mut u8, panel: *mut u8, row: *mut u8) -> Option<*mut 
         floats(&container.panel_transform),
     ));
 
-    for (slot, id, depth) in [
-        (ROW, ds2_rva::FLO_ADDED_ROW_ID, ROW_DEPTH),
-        (MARK, ds2_rva::FLO_ADDED_ROW_LABEL_ID, MARK_DEPTH),
-    ] {
-        let at = slot * ds2_rva::FLO_RECORD_STRIDE;
-        container.records[at + ds2_rva::FLO_RECORD_ID_OFFSET..][..4]
-            .copy_from_slice(&id.to_le_bytes());
-        container.records[at + ds2_rva::FLO_RECORD_DEPTH_OFFSET..][..2]
-            .copy_from_slice(&depth.to_le_bytes());
+    for (slot, row) in rows.iter().enumerate() {
+        for (index, id, depth) in [
+            (row_at(slot), row.row_id, row_depth(slot)),
+            (mark_at(slot), row.label_id, mark_depth(slot)),
+        ] {
+            let at = index * ds2_rva::FLO_RECORD_STRIDE;
+            container.records[at + ds2_rva::FLO_RECORD_ID_OFFSET..][..4]
+                .copy_from_slice(&id.to_le_bytes());
+            container.records[at + ds2_rva::FLO_RECORD_DEPTH_OFFSET..][..2]
+                .copy_from_slice(&depth.to_le_bytes());
+        }
     }
 
-    // THE ROW'S OWN DEFINITION. The cloned record names row 0's, which is the Game Options glyph;
-    // what it should name is the Quit Game one, tinted. That is not a field on this record -- a
-    // row definition holds an icon AND the selection highlight, and repointing the record at the
-    // bare glyph loses the second one -- so the row gets a copy of row 2's definition with only
-    // its icon child changed. Same substitution as the panel, one level down.
+    // THE ROWS' OWN DEFINITIONS. A cloned record names row 0's definition, which is the Game
+    // Options glyph; what each row should name is a glyph of its caller's choosing, tinted. That
+    // is not a field on the record -- a row definition holds an icon AND the selection highlight,
+    // and repointing the record at a bare glyph loses the second one -- so every row gets a copy
+    // of row 2's definition with only its icon child changed. Same substitution as the panel, one
+    // level down, once per slot.
     //
-    // If any check below says no, the record keeps naming row 0's definition: an untinted icon
-    // with a working highlight, which is what shipped before this block existed.
-    let mut row_ok = false;
+    // The SOURCE is validated once: it is the same definition for every row. If any check says no,
+    // every record keeps naming row 0's definition -- an untinted icon with a working highlight,
+    // which is what shipped before this block existed.
+    let mut own_definitions = 0usize;
     if !row.is_null() {
         // SAFETY: `row` is a definition the game's own table just yielded.
         let (row_count, row_children) = unsafe {
@@ -454,92 +517,102 @@ unsafe fn build(original: *mut u8, panel: *mut u8, row: *mut u8) -> Option<*mut 
             )
         };
         if row_count == ds2_rva::FLO_QUIT_ROW_CHILDREN && (row_children as usize) >= 0x1_0000 {
-            // SAFETY: `row_count` records are live at `row_children`, and the destination holds
-            // exactly that many.
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    row,
-                    container.row_definition.as_mut_ptr(),
-                    ds2_rva::FLO_DEFINITION_STRIDE,
-                );
-                std::ptr::copy_nonoverlapping(
-                    row_children,
-                    container.row_records.as_mut_ptr(),
-                    row_count * ds2_rva::FLO_RECORD_STRIDE,
-                );
-            }
             let icon = ds2_rva::FLO_QUIT_ROW_ICON * ds2_rva::FLO_RECORD_STRIDE;
             let highlight = ds2_rva::FLO_QUIT_ROW_HIGHLIGHT * ds2_rva::FLO_RECORD_STRIDE;
             let names = |at: usize| -> u32 {
-                u16::from_le_bytes(
-                    container.row_records[at + ds2_rva::FLO_RECORD_DEFINITION_OFFSET..][..2]
-                        .try_into()
-                        .expect("two bytes"),
-                ) as u32
+                // SAFETY: `at` is inside the `row_count` records established live above.
+                unsafe {
+                    row_children
+                        .add(at + ds2_rva::FLO_RECORD_DEFINITION_OFFSET)
+                        .cast::<u16>()
+                        .read() as u32
+                }
             };
             // Both children are checked, not just the one being replaced. `0x0258` on a document
             // this was not read from is some other row, and copying its highlight into ours would
             // be the same class of mistake as substituting the wrong container.
             let (found_icon, found_highlight) = (names(icon), names(highlight));
-            if found_icon == ds2_rva::FLO_QUIT_ROW_ICON_GROUP
-                && found_highlight == ds2_rva::FLO_QUIT_ROW_HIGHLIGHT_DEFINITION
+            if found_icon != ds2_rva::FLO_QUIT_ROW_ICON_GROUP
+                || found_highlight != ds2_rva::FLO_QUIT_ROW_HIGHLIGHT_DEFINITION
             {
-                // SAFETY: the record was copied from a live one whose transform the game
-                // dereferences, and the destination is exactly that size.
-                let source = unsafe {
-                    container
-                        .row_records
-                        .as_ptr()
+                log(format_args!(
+                    "{LOG_PREFIX} row definition REFUSED icon={found_icon:#x} \
+                     highlight={found_highlight:#x}, expected {:#x} and {:#x} -- the added rows \
+                     keep row 0's icon",
+                    ds2_rva::FLO_QUIT_ROW_ICON_GROUP,
+                    ds2_rva::FLO_QUIT_ROW_HIGHLIGHT_DEFINITION
+                ));
+            } else {
+                // SAFETY: the record is one the game itself dereferences the transform of.
+                let icon_source = unsafe {
+                    row_children
                         .add(icon + ds2_rva::FLO_RECORD_TRANSFORM_OFFSET)
                         .cast::<*const u8>()
                         .read()
                 };
-                if (source as usize) >= 0x1_0000 {
-                    // SAFETY: a live transform block of exactly this size.
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            source,
-                            container.icon_transform.as_mut_ptr(),
-                            ds2_rva::FLO_TRANSFORM_SIZE,
-                        );
+                if (icon_source as usize) < 0x1_0000 {
+                    log(format_args!(
+                        "{LOG_PREFIX} row definition REFUSED icon transform is {icon_source:p}, \
+                         which is a file offset -- the added rows keep row 0's icon"
+                    ));
+                } else {
+                    for (slot, spec) in rows.iter().enumerate() {
+                        // SAFETY: `row_count` records are live at `row_children`, the source
+                        // transform is live, and every destination is exactly as large.
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                row,
+                                container.row_definition[slot].as_mut_ptr(),
+                                ds2_rva::FLO_DEFINITION_STRIDE,
+                            );
+                            std::ptr::copy_nonoverlapping(
+                                row_children,
+                                container.row_records[slot].as_mut_ptr(),
+                                row_count * ds2_rva::FLO_RECORD_STRIDE,
+                            );
+                            std::ptr::copy_nonoverlapping(
+                                icon_source,
+                                container.icon_transform[slot].as_mut_ptr(),
+                                ds2_rva::FLO_TRANSFORM_SIZE,
+                            );
+                        }
+                        // The caller's glyph, and no id: `0x0255` pairs the quit glyph with a
+                        // greyed-out twin under `0x1eacd0`, and the availability pass only takes
+                        // that twin off a row whose GATE is nonzero. Every registered row is
+                        // ungated, so a cloned twin would draw `ff808080` for the life of the
+                        // process.
+                        container.row_records[slot][icon + ds2_rva::FLO_RECORD_DEFINITION_OFFSET..]
+                            [..2]
+                            .copy_from_slice(&(spec.icon as u16).to_le_bytes());
+                        container.row_records[slot][icon + ds2_rva::FLO_RECORD_ID_OFFSET..][..4]
+                            .copy_from_slice(&0u32.to_le_bytes());
+                        // THE TINT, AND THE LICENCE TO USE IT. A colour with no flag bits is what
+                        // one run wrote, and it changed nothing at all -- see
+                        // `FLO_TRANSFORM_FLAGS_OFFSET`. `Tint::flags` returns zero for a mix that
+                        // came out white, which needs no licence because it is not a tint.
+                        if let Some(tint) = spec.tint {
+                            let flags_at = ds2_rva::FLO_TRANSFORM_FLAGS_OFFSET;
+                            let flags = u32::from_le_bytes(
+                                container.icon_transform[slot][flags_at..][..4]
+                                    .try_into()
+                                    .expect("four bytes"),
+                            ) | tint.flags();
+                            container.icon_transform[slot][flags_at..][..4]
+                                .copy_from_slice(&flags.to_le_bytes());
+                            container.icon_transform[slot][ds2_rva::FLO_TRANSFORM_COLOUR_OFFSET..]
+                                [..4]
+                                .copy_from_slice(&tint.bytes());
+                        }
+                        // Our record names our definition instead of row 0's.
+                        let at = row_at(slot) * ds2_rva::FLO_RECORD_STRIDE
+                            + ds2_rva::FLO_RECORD_DEFINITION_OFFSET;
+                        let index = ds2_rva::FLO_ADDED_ROW_DEFINITION + slot as u32;
+                        container.records[at..][..2].copy_from_slice(&(index as u16).to_le_bytes());
+                        own_definitions += 1;
                     }
-                    // The glyph alone, so the greyed-out twin inside `0x0255` is not cloned, and
-                    // its id with it -- `0x0254`'s own child carries none.
-                    container.row_records[icon + ds2_rva::FLO_RECORD_DEFINITION_OFFSET..][..2]
-                        .copy_from_slice(&(ds2_rva::FLO_QUIT_ICON_DEFINITION as u16).to_le_bytes());
-                    container.row_records[icon + ds2_rva::FLO_RECORD_ID_OFFSET..][..4]
-                        .copy_from_slice(&0u32.to_le_bytes());
-                    // THE TINT, AND THE LICENCE TO USE IT. A colour with no flag bits is what the
-                    // last run wrote, and it changed nothing at all -- see
-                    // `FLO_TRANSFORM_FLAGS_OFFSET`. Both bits, because the tint is opaque and its
-                    // RGB is not white.
-                    let flags_at = ds2_rva::FLO_TRANSFORM_FLAGS_OFFSET;
-                    let flags = u32::from_le_bytes(
-                        container.icon_transform[flags_at..][..4]
-                            .try_into()
-                            .expect("four bytes"),
-                    ) | ds2_rva::FLO_TRANSFORM_COLOUR_LIVE
-                        | ds2_rva::FLO_TRANSFORM_COLOUR_RGB;
-                    container.icon_transform[flags_at..][..4].copy_from_slice(&flags.to_le_bytes());
-                    container.icon_transform[ds2_rva::FLO_TRANSFORM_COLOUR_OFFSET..][..4]
-                        .copy_from_slice(&ds2_rva::FLO_ADDED_ROW_TINT);
-                    row_ok = true;
                 }
-            } else {
-                log(format_args!(
-                    "{LOG_PREFIX} row definition REFUSED icon={found_icon:#x} \
-                     highlight={found_highlight:#x}, expected {:#x} and {:#x} -- the added row \
-                     keeps row 0's icon",
-                    ds2_rva::FLO_QUIT_ROW_ICON_GROUP,
-                    ds2_rva::FLO_QUIT_ROW_HIGHLIGHT_DEFINITION
-                ));
             }
         }
-    }
-    if row_ok {
-        let at = ROW * ds2_rva::FLO_RECORD_STRIDE + ds2_rva::FLO_RECORD_DEFINITION_OFFSET;
-        container.records[at..][..2]
-            .copy_from_slice(&(ds2_rva::FLO_ADDED_ROW_DEFINITION as u16).to_le_bytes());
     }
 
     // THE CARET. `0x0221` is shared by all three tabs, so the quit tab gets its own copy of it and
@@ -629,49 +702,65 @@ unsafe fn build(original: *mut u8, panel: *mut u8, row: *mut u8) -> Option<*mut 
     let records = container.records.as_ptr() as usize;
     container.definition[ds2_rva::FLO_DEFINITION_CHILDREN_OFFSET..][..8]
         .copy_from_slice(&records.to_le_bytes());
+    // DECLARED, not `CHILDREN`. The struct is sized for the ceiling; the definition must claim
+    // only the records that were actually filled, or the game walks slots holding zeroes.
     container.definition[ds2_rva::FLO_DEFINITION_CHILD_COUNT_OFFSET..][..2]
-        .copy_from_slice(&(CHILDREN as u16).to_le_bytes());
-    for (slot, transform) in [
-        (ROW, container.row_transform.as_ptr() as usize),
-        (MARK, container.mark_transform.as_ptr() as usize),
-        (
-            ds2_rva::FLO_QUIT_TAB_PANEL,
-            container.panel_transform.as_ptr() as usize,
-        ),
-    ] {
-        let at = slot * ds2_rva::FLO_RECORD_STRIDE + ds2_rva::FLO_RECORD_TRANSFORM_OFFSET;
+        .copy_from_slice(&(declared as u16).to_le_bytes());
+    {
+        let at = ds2_rva::FLO_QUIT_TAB_PANEL * ds2_rva::FLO_RECORD_STRIDE
+            + ds2_rva::FLO_RECORD_TRANSFORM_OFFSET;
+        let transform = container.panel_transform.as_ptr() as usize;
         container.records[at..][..8].copy_from_slice(&transform.to_le_bytes());
     }
+    for slot in 0..rows.len() {
+        for (index, transform) in [
+            (
+                row_at(slot),
+                container.row_transform[slot].as_ptr() as usize,
+            ),
+            (
+                mark_at(slot),
+                container.mark_transform[slot].as_ptr() as usize,
+            ),
+        ] {
+            let at = index * ds2_rva::FLO_RECORD_STRIDE + ds2_rva::FLO_RECORD_TRANSFORM_OFFSET;
+            container.records[at..][..8].copy_from_slice(&transform.to_le_bytes());
+        }
+    }
 
-    if row_ok {
-        let records = container.row_records.as_ptr() as usize;
-        container.row_definition[ds2_rva::FLO_DEFINITION_CHILDREN_OFFSET..][..8]
+    for slot in 0..own_definitions {
+        let records = container.row_records[slot].as_ptr() as usize;
+        container.row_definition[slot][ds2_rva::FLO_DEFINITION_CHILDREN_OFFSET..][..8]
             .copy_from_slice(&records.to_le_bytes());
-        container.row_definition[..2]
-            .copy_from_slice(&(ds2_rva::FLO_ADDED_ROW_DEFINITION as u16).to_le_bytes());
+        let index = ds2_rva::FLO_ADDED_ROW_DEFINITION + slot as u32;
+        container.row_definition[slot][..2].copy_from_slice(&(index as u16).to_le_bytes());
         let at = ds2_rva::FLO_QUIT_ROW_ICON * ds2_rva::FLO_RECORD_STRIDE
             + ds2_rva::FLO_RECORD_TRANSFORM_OFFSET;
-        let transform = container.icon_transform.as_ptr() as usize;
-        container.row_records[at..][..8].copy_from_slice(&transform.to_le_bytes());
-        ROW_DEFINITION.store(
-            container.row_definition.as_ptr() as usize,
+        let transform = container.icon_transform[slot].as_ptr() as usize;
+        container.row_records[slot][at..][..8].copy_from_slice(&transform.to_le_bytes());
+        ROW_DEFINITIONS[slot].store(
+            container.row_definition[slot].as_ptr() as usize,
             Ordering::Release,
         );
+        let spec = rows[slot];
+        // The tint is printed as r/g/b/a rather than as a packed word, because a packed word is
+        // exactly the notation that let it be written backwards.
+        let tint = match spec.tint {
+            Some(tint) => {
+                let [r, g, b, a] = tint.bytes();
+                format!(
+                    "r{r:02x}/g{g:02x}/b{b:02x}/a{a:02x} strength={}/255 flags+={:#x}",
+                    tint.strength,
+                    tint.flags()
+                )
+            }
+            None => "none".to_string(),
+        };
         log(format_args!(
-            // The tint is printed as r/g/b/a rather than as a packed word, because a packed word
-            // is exactly the notation that let it be written backwards.
-            "{LOG_PREFIX} row definition={:#x} from={:#x} icon={:#x} \
-             tint=r{:02x}/g{:02x}/b{:02x}/a{:02x} strength={}/255 flags+={:#x} \
-             highlight={:#x} kept",
-            ds2_rva::FLO_ADDED_ROW_DEFINITION,
+            "{LOG_PREFIX} row definition slot={slot} index={index:#x} from={:#x} \
+             icon={:#x} tint={tint} highlight={:#x} kept",
             ds2_rva::FLO_QUIT_ROW_DEFINITION,
-            ds2_rva::FLO_QUIT_ICON_DEFINITION,
-            ds2_rva::FLO_ADDED_ROW_TINT[0],
-            ds2_rva::FLO_ADDED_ROW_TINT[1],
-            ds2_rva::FLO_ADDED_ROW_TINT[2],
-            ds2_rva::FLO_ADDED_ROW_TINT[3],
-            ds2_rva::FLO_ADDED_ROW_TINT_STRENGTH,
-            ds2_rva::FLO_TRANSFORM_COLOUR_LIVE | ds2_rva::FLO_TRANSFORM_COLOUR_RGB,
+            spec.icon,
             ds2_rva::FLO_QUIT_ROW_HIGHLIGHT_DEFINITION
         ));
     }
@@ -701,13 +790,22 @@ unsafe fn build(original: *mut u8, panel: *mut u8, row: *mut u8) -> Option<*mut 
     let n = SUBSTITUTED.fetch_add(1, Ordering::Relaxed) + 1;
     log(format_args!(
         "{LOG_PREFIX} container substituted original=0x{:016x} replacement=0x{:016x} \
-         children={count}->{CHILDREN} row={:#x}@({row_x},{row_y}) row-definition={} \
-         label={:#x}@({mark_x},{mark_y}) panel-scale-y=x{} substitutions={n}",
+         children={count}->{declared} rows=[{}] own-definitions={own_definitions}/{} \
+         panel-scale-y=x{} substitutions={n}",
         original as usize,
         container as *const Container as usize,
-        ds2_rva::FLO_ADDED_ROW_ID,
-        if row_ok { "ours" } else { "row 0's" },
-        ds2_rva::FLO_ADDED_ROW_LABEL_ID,
+        rows.iter()
+            .enumerate()
+            .map(|(slot, row)| format!(
+                "{slot}:{:#x}@({:?})+label {:#x}@({:?})",
+                row.row_id,
+                row.row_xy(),
+                row.label_id,
+                row.mark_xy()
+            ))
+            .collect::<Vec<_>>()
+            .join(" "),
+        rows.len(),
         ds2_rva::FLO_PANEL_STRETCH_Y,
     ));
     Some(container as *mut Container as *mut u8)
@@ -774,9 +872,12 @@ unsafe extern "system" fn detour(doc: *mut usize, index: u32) -> *mut u8 {
         // Ours, and only ever asked for by our own record.
         return PANEL.load(Ordering::Acquire) as *mut u8;
     }
-    if index == ds2_rva::FLO_ADDED_ROW_DEFINITION {
-        // Likewise.
-        return ROW_DEFINITION.load(Ordering::Acquire) as *mut u8;
+    if index >= ds2_rva::FLO_ADDED_ROW_DEFINITION
+        && index < ds2_rva::FLO_ADDED_ROW_DEFINITION + MAX_ROWS as u32
+    {
+        // Likewise, one index per slot.
+        let slot = (index - ds2_rva::FLO_ADDED_ROW_DEFINITION) as usize;
+        return ROW_DEFINITIONS[slot].load(Ordering::Acquire) as *mut u8;
     }
     if index != ds2_rva::FLO_QUIT_TAB_CONTAINER_DEFINITION || found.is_null() {
         return found;
@@ -854,12 +955,20 @@ mod tests {
     /// existing ones and the path resolves to whichever comes first.
     #[test]
     fn the_added_ids_are_not_shipped_ids() {
-        for id in [ds2_rva::FLO_ADDED_ROW_ID, ds2_rva::FLO_ADDED_ROW_LABEL_ID] {
-            assert!(!ds2_rva::FLO_QUIT_TAB_CHILD_IDS.contains(&id));
-            assert!(!ds2_rva::FE_QUIT_TAB_CELL_IDS.contains(&id));
-            assert!(!ds2_rva::FE_QUIT_TAB_BASE_PATH.contains(&id));
+        for slot in 0..MAX_ROWS {
+            for id in [
+                ds2_rva::FLO_ADDED_ROW_IDS[slot],
+                ds2_rva::FLO_ADDED_LABEL_IDS[slot],
+            ] {
+                assert!(!ds2_rva::FLO_QUIT_TAB_CHILD_IDS.contains(&id));
+                assert!(!ds2_rva::FE_QUIT_TAB_CELL_IDS.contains(&id));
+                assert!(!ds2_rva::FE_QUIT_TAB_BASE_PATH.contains(&id));
+            }
+            assert_ne!(
+                ds2_rva::FLO_ADDED_ROW_IDS[slot],
+                ds2_rva::FLO_ADDED_LABEL_IDS[slot]
+            );
         }
-        assert_ne!(ds2_rva::FLO_ADDED_ROW_ID, ds2_rva::FLO_ADDED_ROW_LABEL_ID);
     }
 
     /// The templates must be the rows this crate says they are, or the clone inherits the wrong
@@ -974,12 +1083,22 @@ mod tests {
         assert!((step - 48.0).abs() < 0.01, "row step is {step}");
     }
 
-    /// The replacement declares exactly two more children than the game's own.
+    /// Every slot adds a row and a mark, in pairs, after the shipped records and never over them.
     #[test]
-    fn the_replacement_adds_the_row_and_its_mark() {
-        assert_eq!(CHILDREN, ds2_rva::FLO_QUIT_TAB_CHILD_IDS.len() + 2);
-        assert_eq!(ROW, ds2_rva::FLO_QUIT_TAB_CHILD_IDS.len());
-        assert_eq!(MARK, ROW + 1);
+    fn each_slot_adds_a_row_and_its_mark() {
+        assert_eq!(
+            CHILDREN,
+            ds2_rva::FLO_QUIT_TAB_CHILD_IDS.len() + PER_ROW * MAX_ROWS
+        );
+        assert_eq!(row_at(0), ds2_rva::FLO_QUIT_TAB_CHILD_IDS.len());
+        for slot in 0..MAX_ROWS {
+            assert_eq!(mark_at(slot), row_at(slot) + 1);
+            assert!(row_at(slot) >= ds2_rva::FLO_QUIT_TAB_CHILD_IDS.len());
+            assert!(mark_at(slot) < CHILDREN);
+            if slot > 0 {
+                assert_eq!(row_at(slot), mark_at(slot - 1) + 1);
+            }
+        }
     }
 
     /// The struct is what its pointers assume: the child array immediately follows the definition,
@@ -988,12 +1107,15 @@ mod tests {
     fn the_container_is_laid_out_the_way_the_game_reads_it() {
         // The fields, then whatever `align(16)` adds on the end. Asserting the bare sum would fail
         // on the padding rather than on a field, which is the opposite of what this is for.
-        let fields = ds2_rva::FLO_DEFINITION_STRIDE * 3
+        // Per container: the container definition, the panel's copy, and one row definition per
+        // slot. Per container transforms: the panel's and the caret's. Per slot: a row transform,
+        // a mark transform and an icon transform.
+        let fields = ds2_rva::FLO_DEFINITION_STRIDE * (2 + MAX_ROWS)
             + ds2_rva::FLO_RECORD_STRIDE * CHILDREN
-            + ds2_rva::FLO_TRANSFORM_SIZE * 5
+            + ds2_rva::FLO_TRANSFORM_SIZE * (2 + 3 * MAX_ROWS)
             + ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_QUIT_TAB_CHILD_IDS.len()
             + ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_PANEL_CHILDREN
-            + ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_QUIT_ROW_CHILDREN;
+            + ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_QUIT_ROW_CHILDREN * MAX_ROWS;
         assert_eq!(
             std::mem::size_of::<Container>(),
             fields.next_multiple_of(16)
@@ -1028,8 +1150,10 @@ mod tests {
     #[test]
     fn the_added_depths_are_free() {
         const SHIPPED: [u16; 7] = [1, 4, 10, 14, 18, 20, 22];
-        assert!(!SHIPPED.contains(&ROW_DEPTH));
-        assert!(!SHIPPED.contains(&MARK_DEPTH));
-        assert_ne!(ROW_DEPTH, MARK_DEPTH);
+        for slot in 0..MAX_ROWS {
+            assert!(!SHIPPED.contains(&row_depth(slot)));
+            assert!(!SHIPPED.contains(&mark_depth(slot)));
+            assert_ne!(row_depth(slot), mark_depth(slot));
+        }
     }
 }

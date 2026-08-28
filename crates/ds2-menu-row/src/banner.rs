@@ -181,6 +181,11 @@ pub unsafe fn lengthen(panel: *const u8, base: usize) {
         // SAFETY: a live four-float rect.
         let before = unsafe { std::slice::from_raw_parts(rect.cast::<f32>(), 4) };
         let y1 = before[3];
+        // ONE ROW'S PITCH PER REGISTERED ROW. The shipped quad ends `25.65` below the last row,
+        // and that margin is what the growth preserves -- so two rows want two pitches, not a
+        // second look at a constant sized for one.
+        let rows = crate::api::rows_for(crate::api::Tab::Quit).len().max(1);
+        let grown = ds2_rva::FE_BANNER_QUAD_SHIPPED_Y1 + ds2_rva::FLO_ROW_PITCH * rows as f32;
         if (y1 - ds2_rva::FE_BANNER_QUAD_SHIPPED_Y1).abs() > 0.5 {
             refuse(format_args!(
                 "rect at {offset:#x} reads y1={y1}, expected {}",
@@ -191,7 +196,7 @@ pub unsafe fn lengthen(panel: *const u8, base: usize) {
         let quad = format!("{} {} {} {}", before[0], before[1], before[2], before[3]);
         // SAFETY: element 0 of a `quads`-element array of four floats.
         unsafe {
-            rect.add(Y1).cast::<f32>().write(ds2_rva::FE_BANNER_QUAD_Y1);
+            rect.add(Y1).cast::<f32>().write(grown);
         }
         let n = LENGTHENED.fetch_add(1, Ordering::Relaxed) + 1;
         // First couple of opens only; the sink calls `sync_all` per line and the pause menu is
@@ -202,8 +207,7 @@ pub unsafe fn lengthen(panel: *const u8, base: usize) {
         log(format_args!(
             "{LOG_PREFIX} banner rect={offset:#x} at=0x{:016x} before=[{quad}] y1={y1}->{} \
              writes={n}",
-            rect as usize,
-            ds2_rva::FE_BANNER_QUAD_Y1
+            rect as usize, grown
         ));
     }
 }

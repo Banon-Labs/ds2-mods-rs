@@ -2656,13 +2656,17 @@ pub const FE_SYSTEM_SINGLETON: u32 = 0x0167_51f8;
 /// does not, which is what "without a confirmation" costs.
 pub const FE_SYSTEM_SHUTDOWN_REQUEST_OFFSET: usize = 0x13a;
 
-/// The action id this repo uses for "quit to desktop". Deliberately outside the game's own space.
+/// The first action id this repo hands out. Slot `n` gets `BASE + n`. Deliberately outside the
+/// game's own space.
 ///
 /// The shipped dispatch has cases `0..=9`, `0xb`, `0xc`, `0xd`. Anything else falls to `default`,
 /// which plays the ordinary confirm sound and does nothing. That is the correct failure mode for
 /// an id whose behaviour lives in a detour: if the detour is ever absent, the row is INERT rather
 /// than quietly doing whatever the game does for some id we borrowed.
-pub const FE_INGAME_MENU_ACTION_QUIT_TO_DESKTOP: u32 = 0x1000;
+///
+/// The range is `0x1000..` and the ceiling on rows is five per tab, so the ids stay nowhere near
+/// anything the game uses no matter how many tabs are eventually measured.
+pub const FE_INGAME_MENU_ACTION_BASE: u32 = 0x1000;
 
 /// `FrontendEx::FexGridControl` linear-index -> `(col, row)`. RVA `0x000222c0`.
 ///
@@ -3008,13 +3012,40 @@ pub const FLO_ADDED_ROW_DEFINITION: u32 = 0xf258;
 /// Index into [`FLO_QUIT_TAB_CHILD_IDS`] of the mark a new row's mark is cloned from.
 pub const FLO_QUIT_TAB_MARK_TEMPLATE: usize = 6;
 
-/// Element ids for the row this repo adds, chosen because the file contains neither.
+/// Element ids for the rows this repo adds, one per slot, chosen because the file contains none of
+/// them.
 ///
-/// Verified rather than assumed -- `scripts/ds2-flo.py` finds no record with either id anywhere in
-/// `l02_01_In-Game.flo`, and the earlier runtime experiment that named `0x1eaccd` in the namer got
-/// `row-extent 3`, i.e. nothing resolved. The two facts agree, which is the point of having both.
-pub const FLO_ADDED_ROW_ID: u32 = 0x001e_accd;
-pub const FLO_ADDED_MARK_ID: u32 = 0x001e_accc;
+/// **Absent from the whole file, not merely from the quit tab's container.** A row id is what the
+/// namer resolves and what the substituted record carries, so an id used anywhere else in the
+/// document is an id whose path could resolve to something that already exists. Scanned as raw
+/// dwords over all 285088 bytes: of `0x1eacc0..0x1eacdf`, the free ones are `c0`-`c8`, `cc`, `cd`,
+/// `ce`, `d3`, `d7` and `df` -- fifteen, against a ceiling of two per tab.
+///
+/// `0x1eaccd` is first because it is the one already on record: the earlier runtime experiment
+/// that named it in the namer got `row-extent 3`, i.e. nothing resolved, which is the same answer
+/// the file gives from the other side.
+pub const FLO_ADDED_ROW_IDS: [u32; 2] = [0x001e_accd, 0x001e_acce];
+
+/// Element ids for those rows' caption marks, one per slot.
+///
+/// **These are scoped to the container and only need to be free THERE.** `FeComponentObject`'s
+/// `findByIdPath` matches one path component at a time against the record's `+0x1c`, so a label id
+/// used under some other container is not a collision -- the path differs before it gets there.
+/// Every id in `0x1eac40..0x1eac50` appears somewhere in this document; none of these appears among
+/// [`FLO_QUIT_TAB_CHILD_IDS`].
+///
+/// `0x1eac4a` is first because it is the id the cut fourth row used -- its caption, `0x200f28`, is
+/// still in the FMG and still reads "Mouse Settings".
+pub const FLO_ADDED_LABEL_IDS: [u32; 2] = [0x001e_ac4a, 0x001e_ac4b];
+
+/// How far apart consecutive added rows and their marks sit.
+///
+/// Both series are the shipped ones continued. The rows sit at `10.60`, `55.90`, `103.90` and the
+/// marks at `17.55`, `65.95`, `114.35`; the last step of each is `48.00` and `48.40`, and those are
+/// what a fourth and fifth row continue. **They are not the same number**, which is why the two
+/// pitches are separate constants rather than one shared `48`.
+pub const FLO_ROW_PITCH: f32 = 48.0;
+pub const FLO_MARK_PITCH: f32 = 48.4;
 
 /// Where the added row and its mark go, in the container's own coordinates.
 ///

@@ -47,19 +47,19 @@ static APPENDED: AtomicUsize = AtomicUsize::new(0);
 /// `mov rbx,rcx`, it touches no other argument register, and it ends `mov rax,rbx` / `ret`.
 type BuildItemsFn = unsafe extern "system" fn(*mut u8) -> *mut u8;
 
-/// The entry this crate appends, as `(action, gate)`.
+/// The gate every appended entry carries.
 ///
-/// Gate `0` deliberately: the row must be selectable unconditionally, or a run in which it is
-/// greyed cannot be distinguished from a run in which it never appeared.
+/// Gate `0` deliberately, for every registered row: a gated row is greyed by the availability pass
+/// and a run in which a row is greyed cannot be distinguished from a run in which it never
+/// appeared. It is also what keeps a cloned disabled-state overlay off the icon -- see
+/// [`ds2_rva::FLO_QUIT_ROW_ICON_GROUP`].
 ///
-/// The action is OURS, not one borrowed from the game -- see
-/// [`ds2_rva::FE_INGAME_MENU_ACTION_QUIT_TO_DESKTOP`]. The shipped dispatch has no case for it, so
-/// with the detour below absent the row plays the ordinary confirm sound and does nothing. An
-/// inert row is the right failure mode; a row that quietly opened Key Bindings would not be.
-const PAYLOAD: (u32, u32) = (
-    ds2_rva::FE_INGAME_MENU_ACTION_QUIT_TO_DESKTOP,
-    ds2_rva::FE_INGAME_MENU_GATE_ALWAYS,
-);
+/// The actions are OURS, not borrowed from the game -- see
+/// [`ds2_rva::FE_INGAME_MENU_ACTION_BASE`]. The shipped dispatch has no case for any of them, so
+/// with the dispatch detour absent a registered row plays the ordinary confirm sound and does
+/// nothing. An inert row is the right failure mode; a row that quietly opened Key Bindings would
+/// not be.
+const GATE: u32 = ds2_rva::FE_INGAME_MENU_GATE_ALWAYS;
 
 /// Address of entry `index` inside a tab's item vector.
 ///
@@ -171,24 +171,39 @@ unsafe fn append(descriptor: *mut u8) -> *mut u8 {
         ));
         return returned;
     }
-    if count >= ds2_rva::FE_INGAME_MENU_ITEM_VECTOR_CAPACITY {
-        log(format_args!(
-            "{LOG_PREFIX} REFUSED reason=vector-full count={count} fire={fired}"
-        ));
+    // ONE ENTRY PER REGISTERED ROW. `api::add_row` has already refused anything over the ceiling,
+    // so this loop should never hit the bound -- but it checks anyway, because the registry is
+    // this crate's arithmetic and the vector is the game's, and the game's is the one that panics.
+    let rows = crate::api::rows_for(crate::api::Tab::Quit);
+    let mut written = 0usize;
+    for row in &rows {
+        let at = count + written;
+        if at >= ds2_rva::FE_INGAME_MENU_ITEM_VECTOR_CAPACITY {
+            log(format_args!(
+                "{LOG_PREFIX} REFUSED reason=vector-full count={at} action={:#x} \
+                 fire={fired} -- the registry allowed a row the vector cannot hold",
+                row.action
+            ));
+            break;
+        }
+        // SAFETY: `at < capacity`, so this slot is inside the vector, and it is the same address
+        // the builder's own next push would have written.
+        unsafe {
+            let slot = entry_at(descriptor, at);
+            slot.cast::<u32>().write(row.action);
+            slot.add(4).cast::<u32>().write(GATE);
+        }
+        written += 1;
+    }
+    if written == 0 {
         return returned;
     }
-
-    let (action, gate) = PAYLOAD;
-    // SAFETY: `count < capacity`, so this slot is inside the vector, and it is the same address the
-    // builder's own next push would have written.
+    // SAFETY: `written` slots were just filled, contiguously, from `count`.
     unsafe {
-        let slot = entry_at(descriptor, count);
-        slot.cast::<u32>().write(action);
-        slot.add(4).cast::<u32>().write(gate);
         descriptor
             .add(ds2_rva::FE_INGAME_MENU_ITEM_VECTOR_COUNT_OFFSET)
             .cast::<u64>()
-            .write(count as u64 + 1);
+            .write((count + written) as u64);
     }
 
     let appended = APPENDED.fetch_add(1, Ordering::Relaxed) + 1;
@@ -196,12 +211,18 @@ unsafe fn append(descriptor: *mut u8) -> *mut u8 {
     // session and this sink calls `sync_all` per line, so a line that repeats forever is a stall
     // that repeats forever. The first two are the evidence; the rest are noise with a cost.
     if appended <= 2 {
+        let added = rows
+            .iter()
+            .take(written)
+            .map(|row| format!("({:#x},{GATE})", row.action))
+            .collect::<Vec<_>>()
+            .join(" ");
         log(format_args!(
-            "{LOG_PREFIX} appended action={action:#x} gate={gate} was=[{}] count={}->{} \
-             fire={fired} appends={appended}",
+            "{LOG_PREFIX} appended [{added}] was=[{}] count={}->{} fire={fired} \
+             appends={appended}",
             describe(&entries),
             count,
-            count + 1
+            count + written
         ));
     }
     returned
@@ -263,16 +284,35 @@ unsafe fn request_shutdown(base: usize) -> bool {
     true
 }
 
+/// Quit to desktop, without saving and without asking.
+///
+/// The [`crate::RowSpec::on_confirm`] this crate ships, and the first consumer of its own API --
+/// `ds2-loader` registers a row pointing here rather than this crate hardcoding one. Safe to call
+/// from anywhere on the game thread: it writes one byte the master update polls, and does nothing
+/// but log if the singleton is not up yet.
+pub fn quit_to_desktop() {
+    let base = ds2_game_base::mem::game_module_base().unwrap_or(0);
+    if base == 0 {
+        log(format_args!(
+            "{LOG_PREFIX} quit REFUSED reason=no-module-base -- nothing was written"
+        ));
+        return;
+    }
+    // SAFETY: the base is the live game module and the pause menu cannot be open before the
+    // systems this reads are constructed.
+    unsafe { request_shutdown(base) };
+}
+
 unsafe extern "system" fn dispatch_detour(top_select: *mut u8, action: u32) {
-    if action == ds2_rva::FE_INGAME_MENU_ACTION_QUIT_TO_DESKTOP {
-        // Deliberately NOT calling the original for our own action. The original would play a
-        // sound and fall through its `default`, which is harmless, but every frame between here
-        // and the shutdown is a frame in which the game is still running a menu that is about to
-        // disappear. Fewer moving parts.
-        let base = ds2_game_base::mem::game_module_base().unwrap_or(0);
-        if base != 0 {
-            unsafe { request_shutdown(base) };
-        }
+    if let Some(row) = crate::api::row_for_action(action) {
+        // Deliberately NOT calling the original for a registered action. The original would play a
+        // sound and fall through its `default`, which is harmless, but the id is outside the range
+        // its `switch` handles, so there is nothing there to run. Fewer moving parts.
+        //
+        // The callback belongs to whichever crate registered the row. It runs on the game thread,
+        // inside the menu's own confirm path, which is the same place the shipped rows' handlers
+        // run -- so it may do what they do.
+        (row.on_confirm)();
         return;
     }
     let trampoline = DISPATCH_TRAMPOLINE.load(Ordering::Acquire);
@@ -507,9 +547,15 @@ unsafe fn name_added_cell(base: usize, namer: usize) -> bool {
             ds2_rva::FE_QUIT_TAB_CELL_IDS.len()
         ));
     }
-    if count >= ds2_rva::FE_SCENE_NAMER_LIST_CAPACITY {
+    let rows = crate::api::rows_for(crate::api::Tab::Quit);
+    if rows.is_empty() {
+        return false;
+    }
+    if count + rows.len() > ds2_rva::FE_SCENE_NAMER_LIST_CAPACITY {
         return refuse(format_args!(
-            "list is full at {count} of {}",
+            "list holds {count} and {} rows want {} of {}",
+            rows.len(),
+            count + rows.len(),
             ds2_rva::FE_SCENE_NAMER_LIST_CAPACITY
         ));
     }
@@ -556,22 +602,32 @@ unsafe fn name_added_cell(base: usize, namer: usize) -> bool {
     let push = unsafe {
         std::mem::transmute::<usize, NamerPushFn>(base + ds2_rva::FE_SCENE_NAMER_PUSH as usize)
     };
-    // SAFETY: `count < capacity`, checked above, which is the same bound the push enforces itself.
-    unsafe { push(list as *mut u8, last) };
-    // SAFETY: the push just made element `count` live, and the offset is inside it.
-    unsafe {
-        entry(count)
-            .add(ds2_rva::FE_SCENE_NAMER_ENTRY_ID_OFFSET)
-            .cast::<u32>()
-            .write(ds2_rva::FLO_ADDED_ROW_ID);
+    // ONE PUSHED ENTRY PER REGISTERED ROW, each a clone of the last SHIPPED entry with its id
+    // rewritten. Cloned rather than assembled: the slack between the named fields is uninitialised
+    // stack and differs between two entries the game built back to back, so only the named fields
+    // mean anything and inventing the rest would be inventing the answer.
+    let mut named = Vec::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        let at = count + index;
+        // SAFETY: `at < capacity`, checked above, which is the same bound the push enforces itself.
+        unsafe { push(list as *mut u8, last) };
+        // SAFETY: the push just made element `at` live, and the offset is inside it.
+        unsafe {
+            entry(at)
+                .add(ds2_rva::FE_SCENE_NAMER_ENTRY_ID_OFFSET)
+                .cast::<u32>()
+                .write(row.row_id);
+        }
+        named.push(format!("{}={:#x}", at, row.row_id));
     }
     let n = CELLS_ADDED.fetch_add(1, Ordering::Relaxed) + 1;
     log(format_args!(
-        "{LOG_PREFIX} cell named row={count} container={:#x} id={:#x} count={count}->{} \
-         additions={n} -- row-extent 4 on the tab line below means the layout answered",
+        "{LOG_PREFIX} cells named [{}] container={:#x} count={count}->{} additions={n} \
+         -- row-extent {} on the tab line below means the layout answered",
+        named.join(" "),
         ds2_rva::FE_QUIT_TAB_BASE_PATH[3],
-        ds2_rva::FLO_ADDED_ROW_ID,
-        count + 1
+        count + rows.len(),
+        count + rows.len()
     ));
     true
 }
@@ -637,6 +693,15 @@ pub struct Outcome {
 /// to be early: the site is only reached when `FeGroupInGameTopSelect` is constructed, which is
 /// long after the entry point.
 pub unsafe fn install() -> Outcome {
+    // SEALED FIRST, so a row registered from another thread while the hooks are going in cannot be
+    // half-applied -- named by the namer but absent from the item vector, or the reverse.
+    crate::api::seal();
+    if !crate::api::any() {
+        log(format_args!(
+            "{LOG_PREFIX} nothing registered -- no rows, no hooks, the shipped menu is untouched"
+        ));
+        return Outcome { installed: false };
+    }
     let base = match ds2_game_base::mem::game_module_base() {
         Ok(base) => base,
         Err(error) => {
@@ -700,9 +765,9 @@ pub unsafe fn install() -> Outcome {
     // -- the patch stays for the life of the process, which is what is wanted.
 
     log(format_args!(
-        "{LOG_PREFIX} hooked rva=0x{rva:08x} va=0x{site:016x} payload=({:#x},{}) \
+        "{LOG_PREFIX} hooked rva=0x{rva:08x} va=0x{site:016x} rows={} gate={GATE} \
          open the pause menu's last tab to read the result",
-        PAYLOAD.0, PAYLOAD.1
+        crate::api::rows_for(crate::api::Tab::Quit).len()
     ));
 
     // THE DISPATCH DETOUR, which is what makes the appended row DO something. Installed before the
@@ -716,8 +781,10 @@ pub unsafe fn install() -> Outcome {
             if status == MH_STATUS::MH_OK {
                 log(format_args!(
                     "{LOG_PREFIX} dispatch hooked rva=0x{dispatch_rva:08x} \
-                     va=0x{dispatch_site:016x} action={:#x}=quit-to-desktop",
-                    ds2_rva::FE_INGAME_MENU_ACTION_QUIT_TO_DESKTOP
+                     va=0x{dispatch_site:016x} actions={:#x}..{:#x}",
+                    ds2_rva::FE_INGAME_MENU_ACTION_BASE,
+                    ds2_rva::FE_INGAME_MENU_ACTION_BASE
+                        + crate::api::rows_for(crate::api::Tab::Quit).len() as u32
                 ));
             } else {
                 log(format_args!(
@@ -747,8 +814,12 @@ pub unsafe fn install() -> Outcome {
             if status == MH_STATUS::MH_OK {
                 log(format_args!(
                     "{LOG_PREFIX} namer hooked rva=0x{namer_rva:08x} va=0x{namer_site:016x} \
-                     cell={:#x} container-substitution={cell}",
-                    ds2_rva::FLO_ADDED_ROW_ID
+                     cells=[{}] container-substitution={cell}",
+                    crate::api::rows_for(crate::api::Tab::Quit)
+                        .iter()
+                        .map(|row| format!("{:#x}", row.row_id))
+                        .collect::<Vec<_>>()
+                        .join(" ")
                 ));
             } else {
                 log(format_args!(
@@ -790,22 +861,19 @@ pub unsafe fn install() -> Outcome {
 mod tests {
     use super::*;
 
-    /// The payload must be OUR action, and it must be outside the game's own id space -- the
+    /// Every action a slot can be handed must be outside the game's own id space -- the
     /// dispatch's cases are `0..=9`, `0xb`, `0xc`, `0xd`. An id inside that range would make the
-    /// row do whatever the game does for it on any run where the detour failed to install.
+    /// row do whatever the game does for it on any run where the detour failed to install, and it
+    /// must never be the quit action: a second Return-to-Title row would be a perfectly visible
+    /// row that quietly doubles the one item in this menu that discards progress.
     #[test]
-    fn payload_action_is_ours_and_outside_the_games_range() {
-        assert_eq!(PAYLOAD.0, ds2_rva::FE_INGAME_MENU_ACTION_QUIT_TO_DESKTOP);
-        assert!(PAYLOAD.0 > 0xd);
-        assert_eq!(PAYLOAD.1, ds2_rva::FE_INGAME_MENU_GATE_ALWAYS);
-    }
-
-    /// The payload must NOT be the quit action. Appending a second Return-to-Title row would be a
-    /// perfectly visible fourth row that answers the layout question and quietly doubles the one
-    /// item in this menu that discards progress.
-    #[test]
-    fn payload_is_not_the_quit_action() {
-        assert_ne!(PAYLOAD.0, ds2_rva::FE_INGAME_MENU_ACTION_RETURN_TITLE);
+    fn every_action_is_ours_and_outside_the_games_range() {
+        for slot in 0..crate::api::MAX_ADDED_ROWS {
+            let action = ds2_rva::FE_INGAME_MENU_ACTION_BASE + slot as u32;
+            assert!(action > 0xd, "{action:#x} is inside the shipped switch");
+            assert_ne!(action, ds2_rva::FE_INGAME_MENU_ACTION_RETURN_TITLE);
+        }
+        assert_eq!(GATE, ds2_rva::FE_INGAME_MENU_GATE_ALWAYS);
     }
 
     /// The shipped tab must have room, or the detour can only ever refuse.

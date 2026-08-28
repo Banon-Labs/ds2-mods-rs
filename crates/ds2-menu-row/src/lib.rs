@@ -1,4 +1,28 @@
-//! A fourth row on the pause menu's quit tab, that quits to desktop without asking.
+//! Extra rows on the pause menu's tabs, registered by whoever wants one.
+//!
+//! # The API
+//!
+//! A caller fills in a [`RowSpec`] and calls [`add_row`] before [`install`] runs. The four hooks
+//! below then loop over whatever is registered instead of over one hardcoded row:
+//!
+//! ```no_run
+//! ds2_menu_row::add_row(ds2_menu_row::RowSpec {
+//!     tab: ds2_menu_row::Tab::Quit,
+//!     caption: "Quit Game",
+//!     icon: ds2_rva::FLO_QUIT_ICON_DEFINITION,
+//!     tint: Some(ds2_menu_row::Tint { rgb: [0xff, 0x64, 0x50], strength: 120 }),
+//!     on_confirm: ds2_menu_row::quit_to_desktop,
+//! })?;
+//! # Ok::<(), ds2_menu_row::AddRowError>(())
+//! ```
+//!
+//! **The quit-to-desktop row goes through that same call**, made by `ds2-loader`. Nothing in this
+//! crate is privileged, which is the only way to know the API is usable.
+//!
+//! **The ceiling is the game's and it is small.** A tab's item vector holds five entries and
+//! panics above it; the quit tab ships three, so [`MAX_ADDED_ROWS`] is two. [`add_row`] refuses
+//! the third with the numbers in the error rather than letting the game's allocator find out. See
+//! [`crate::api`] for the other two bounds and which one binds.
 //!
 //! # The four hooks, and what each one is for
 //!
@@ -22,10 +46,10 @@
 //! **It does not save and it does not ask.** The quit-to-title row offers to save because that
 //! flow asks; this one is "without a confirmation" and the absence of a save is the same coin.
 //!
-//! The action id is `0x1000`, deliberately outside the dispatch's own space (`0..=9`, `0xb`,
-//! `0xc`, `0xd`). If the dispatch detour ever fails to install, the row plays the confirm sound and
-//! does nothing -- an inert row is the right failure mode, where a row that quietly opened Key
-//! Bindings would not be.
+//! Action ids start at `0x1000` and step by slot, deliberately outside the dispatch's own space
+//! (`0..=9`, `0xb`, `0xc`, `0xd`). If the dispatch detour ever fails to install, a registered row
+//! plays the confirm sound and does nothing -- an inert row is the right failure mode, where a row
+//! that quietly opened Key Bindings would not be.
 //!
 //! # The row, and the two measurements that cost the most
 //!
@@ -70,6 +94,8 @@
 
 #![cfg_attr(not(windows), allow(unused))]
 
+mod api;
+
 #[cfg(windows)]
 mod install;
 
@@ -85,8 +111,10 @@ mod tree;
 #[cfg(windows)]
 mod banner;
 
+pub use api::{AddRowError, MAX_ADDED_ROWS, RowId, RowSpec, Tab, Tint, add_row};
+
 #[cfg(windows)]
-pub use install::{LogFn, Outcome, install, set_logger};
+pub use install::{LogFn, Outcome, install, quit_to_desktop, set_logger};
 
 /// Prefix on every line this crate writes to the loader log, so a reader can tell which component
 /// spoke and a filter can select it alone.

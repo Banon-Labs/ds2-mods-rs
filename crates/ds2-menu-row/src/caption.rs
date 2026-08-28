@@ -90,18 +90,6 @@ struct DlString {
 unsafe impl Sync for DlString {}
 
 /// NUL-terminated UTF-16, because the setter measures the string itself.
-static QUIT_GAME: [u16; 10] = [
-    b'Q' as u16,
-    b'u' as u16,
-    b'i' as u16,
-    b't' as u16,
-    b' ' as u16,
-    b'G' as u16,
-    b'a' as u16,
-    b'm' as u16,
-    b'e' as u16,
-    0,
-];
 static QUIT_TO_MENU: [u16; 13] = [
     b'Q' as u16,
     b'u' as u16,
@@ -118,12 +106,41 @@ static QUIT_TO_MENU: [u16; 13] = [
     0,
 ];
 
-static ADDED_ROW_TEXT: DlString = DlString {
-    data: QUIT_GAME.as_ptr(),
-    length: (QUIT_GAME.len() - 1) as u64,
-    slack: 0,
-    capacity: 32,
-};
+/// One `DlString` per registered row, built once and leaked.
+///
+/// Leaked rather than owned because the game keeps the pointer: `FeElement::setText` only READS
+/// the string, but it reads it whenever it redraws, so the bytes have to outlive anything this
+/// crate can observe. Once per process, a caption's worth of `u16` each.
+///
+/// Built lazily rather than at registration so a caller can hand in a `&'static str` without this
+/// crate deciding when the allocator is safe to use -- the first pause-menu open is long after
+/// everything is up.
+static ROW_TEXTS: std::sync::OnceLock<Vec<(u32, &'static DlString)>> = std::sync::OnceLock::new();
+
+fn row_texts() -> &'static [(u32, &'static DlString)] {
+    ROW_TEXTS.get_or_init(|| {
+        crate::api::rows_for(crate::api::Tab::Quit)
+            .into_iter()
+            .map(|row| {
+                let mut units: Vec<u16> = row.caption.encode_utf16().collect();
+                units.push(0);
+                let units: &'static [u16] = Box::leak(units.into_boxed_slice());
+                let text: &'static DlString = Box::leak(Box::new(DlString {
+                    data: units.as_ptr(),
+                    // The NUL is not part of the length. The setter measures the string itself and
+                    // the terminator is there for anything that does not.
+                    length: (units.len() - 1) as u64,
+                    slack: 0,
+                    // Above `DL_STRING_INLINE_CAPACITY`, which is what selects the pointer branch.
+                    // A caption of seven units or fewer would otherwise be read out of the inline
+                    // bytes, which hold a pointer rather than characters.
+                    capacity: 32,
+                }));
+                (row.label_id, text)
+            })
+            .collect()
+    })
+}
 static TITLE_ROW_TEXT: DlString = DlString {
     data: QUIT_TO_MENU.as_ptr(),
     length: (QUIT_TO_MENU.len() - 1) as u64,
@@ -201,7 +218,10 @@ unsafe fn write_caption(
 
     // THE BANNER, once, and only from the pass that resolves the row this crate added -- the other
     // pass targets the shipped row and would do the same work twice.
-    if label == ds2_rva::FLO_ADDED_ROW_LABEL_ID {
+    if row_texts()
+        .first()
+        .is_some_and(|(first, _)| label == *first)
+    {
         // THE CONTAINER PATH, NOT THE CAPTURED ONE. The caption binder seals its base with a
         // trailing `0x5f5b9f2` -- the text leaf every caption ends at -- so the capture is FIVE ids,
         // and appending the panel to it asks for `.../0x1eace6/0x5f5b9f2/0x1eac81`, which resolves
@@ -303,12 +323,9 @@ unsafe extern "system" fn bind_detour(top_select: *mut u8) {
     // SAFETY: `bytes` is a scene path copied out of a live one, and `top` the group the original
     // just ran for.
     unsafe {
-        write_caption(
-            &bytes,
-            top,
-            ds2_rva::FLO_ADDED_ROW_LABEL_ID,
-            &ADDED_ROW_TEXT,
-        );
+        for (label, text) in row_texts() {
+            write_caption(&bytes, top, *label, text);
+        }
         write_caption(
             &bytes,
             top,
@@ -384,11 +401,11 @@ pub unsafe fn install(base: usize) -> bool {
 mod tests {
     use super::*;
 
-    /// Both strings must be NUL-terminated, because the setter walks to the terminator itself and
-    /// an unterminated buffer is a read off the end of this DLL's data.
+    /// The shipped row's replacement must be NUL-terminated, because the setter walks to the
+    /// terminator itself and an unterminated buffer is a read off the end of this DLL's data. The
+    /// registered rows' strings get their terminator in `row_texts`, which pushes one.
     #[test]
     fn the_captions_are_nul_terminated() {
-        assert_eq!(*QUIT_GAME.last().unwrap(), 0);
         assert_eq!(*QUIT_TO_MENU.last().unwrap(), 0);
     }
 
@@ -396,9 +413,7 @@ mod tests {
     /// bytes as characters -- which is the pointer, rendered as line noise.
     #[test]
     fn the_strings_use_the_out_of_line_layout() {
-        for s in [&ADDED_ROW_TEXT, &TITLE_ROW_TEXT] {
-            assert!(s.capacity > ds2_rva::DL_STRING_INLINE_CAPACITY);
-        }
+        assert!(TITLE_ROW_TEXT.capacity > ds2_rva::DL_STRING_INLINE_CAPACITY);
         assert_eq!(
             ds2_rva::DL_STRING_CAPACITY_OFFSET,
             std::mem::offset_of!(DlString, capacity)
