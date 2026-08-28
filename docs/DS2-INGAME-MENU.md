@@ -569,3 +569,31 @@ Naming is exhausted. The remaining routes, in the order they are worth trying:
    layout is not obviously short of rows, the code's reach into it is.
 
 None of this touches the action, which is finished.
+
+
+## Correction: "five authored cells" was never measured
+
+The section above reads the five ids in `FeSceneInGameMenu`'s cache as five authored cells. That
+was an inference presented as a measurement, and it sent three runs after a row that is probably
+not there.
+
+`FUN_140afda00` reaches `FUN_140b507d0`:
+
+```c
+if (proxy->_0x30 != 0 && (result = (*proxy->_0x30->vtable[50])(...)) != 0) return result;
+return 0;                      // <- nothing there is a normal, silent answer
+```
+
+A plain lookup that returns zero, and the cache stores what it gets without checking. **Five
+requests is evidence of five requests.** The namer's own path builder is no different:
+`FUN_140026790` just constructs a lazy `FrontendEx::SceneObjProxy` holding the scene proxy and a
+copy of the path -- resolution happens later, when the grid's bind calls the accessor's slot 0.
+
+What IS measured, with controls, is the table above: an unmodified clone resolves and becomes a
+cell; clones naming `0x1eaccd` or `0x1eacce` do not. So those two ids are absent from the container
+the namer reaches, and the likeliest reading is now the plain one -- the quit tab has three cells,
+FromSoft's cache builder still asks for two rows that were cut, and the item vector's capacity of
+five is not a promise about this tab.
+
+**A visible fourth row therefore needs an element that does not currently exist**, by cloning and
+repositioning a live scene node or by adding one to the `.flo`. It is not waiting to be named.

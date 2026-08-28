@@ -2730,10 +2730,15 @@ pub const FE_SCENE_PATH_APPEND: u32 = 0x0001_ed80;
 /// 0x1eace9 + label 0x1eac4c      Quit Game
 /// ```
 ///
-/// **So the quit tab was authored for FIVE rows and ships using three**, which is also why the
-/// item vector's capacity is five ([`FE_INGAME_MENU_ITEM_VECTOR_CAPACITY`]) rather than some other
-/// number. Tab 3 is the control: the same cache resolves exactly three children under its region
-/// and no spares, and tab 3 is not short of cells.
+/// **THAT PARAGRAPH USED TO SAY THE TAB WAS AUTHORED FOR FIVE ROWS. It was not measured and it is
+/// probably false.** The cache ASKS for five ids; `FUN_140afda00` reaches `FUN_140b507d0`, which is
+/// a plain lookup returning 0 when nothing is there, and the cache stores the answer without
+/// checking it. So five requests is evidence of five requests.
+///
+/// What was measured afterwards, with controls: a cloned namer entry becomes a real cell, and
+/// clones naming `0x1eaccd` or `0x1eacce` do not resolve while an unmodified clone does. The two
+/// spares are therefore absent from the container the namer can reach, and most likely absent
+/// full stop -- leftovers from a five-row design that did not ship.
 ///
 /// The namer builds its cell paths under `0x1eace6` while the cache resolves under `0x1eace7` --
 /// two sibling containers below `0x1eace8`, with the same cell ids in each. The pair is presumably
