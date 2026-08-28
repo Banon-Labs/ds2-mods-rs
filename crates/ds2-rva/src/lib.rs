@@ -2877,10 +2877,25 @@ pub const FLO_RECORD_TRANSFORM_OFFSET: usize = 0x08;
 /// order of siblings follows the order they are attached in.
 pub const FLO_RECORD_DEPTH_OFFSET: usize = 0x10;
 
-/// `u16` kind flags, the value `FUN_140b50bc0` switches on: `1` shape, `2` text, `4` a nested
-/// definition, `8` texture. A FLAG WORD rather than an enum -- the builder masks it with `0xd` and
+/// `u16` kind flags, the value `FUN_140b50bc0` switches on: `1` shape, `2` mask, `4` a nested
+/// definition, **`8` text**. A FLAG WORD rather than an enum -- the builder masks it with `0xd` and
 /// records carrying `0x1004` exist, so the bits above the low nibble mean something unread. Every
 /// quit-tab row is plain `4`, and this crate only ever copies the field.
+///
+/// **THIS SAID "`2` TEXT, `8` TEXTURE" UNTIL 2026-08-28 AND IT WAS WRONG BOTH WAYS.** The check
+/// that settles it needs no disassembly: `scripts/ds2-flo.py tree l02_01_In-Game.flo --def 0x22c`
+/// walks the caption mark down to the leaf `caption.rs` writes row labels into -- an element whose
+/// kind is not in question, because this repo already puts text in it -- and prints `kind=0x8`.
+///
+/// The derivation, for the version that does need disassembly: each bit selects a table and a
+/// builder, the builder calls a constructor, the constructor writes a vtable, and MSVC RTTI names
+/// it. `0x1` -> `0x140b6ef80` -> `FeComponentTextureShape` (or `FeComponentTextureMask` when the
+/// builder is inside a mask walk, branched at `0x140b50d29`); `0x2` -> `0x140b6d080` ->
+/// `FeComponentMaskShape`; `0x8` -> `0x140b6d390` -> `FeComponentTextField`.
+///
+/// The mistake survived because it never contradicted anything: in `l02_01_In-Game.flo` the mask
+/// table's count at `doc+0x4a` is zero, so every `kind & 2` record misses that lookup and falls
+/// through to the shape table and draws -- which is exactly what a reader expecting "shape" sees.
 pub const FLO_RECORD_KIND_OFFSET: usize = 0x12;
 
 /// `u16` last frame and `u16` first frame. `0xffff` as the last frame means "never ends", which is

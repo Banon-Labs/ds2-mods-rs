@@ -628,7 +628,7 @@ Not pattern-matched. Each field below names the function that reads it.
 | record | **stride 0x28** | `FUN_140b50f20` |
 | definition index | record `+0x00` | `FUN_140b50bc0` |
 | transform block | record `+0x08` -> 0x30 bytes | `FUN_140b50bc0` |
-| kind (`1` shape, `2` text, `4` nested, `8` texture; a flag word -- `0x1004` occurs) | record `+0x12` | `FUN_140b50bc0` |
+| kind (`1` shape, `2` mask, `4` nested, **`8` text**; a flag word -- `0x1004` occurs) | record `+0x12` | `FUN_140b50bc0` |
 | frame range | record `+0x16` .. `+0x14` | `FUN_140b50bc0` |
 | **element id** | record `+0x1c` | `FeComponentObject::findByIdPath` |
 | x, y | transform `+0x00`, `+0x04` | `FUN_140b50f20`'s identity test |
