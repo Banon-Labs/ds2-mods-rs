@@ -170,6 +170,17 @@ KEY_CONTINUE_HIDE_MENUS = "hide_menus"
 MENU_SECTION = "title_menu"
 KEY_SHOW_UNAVAILABLE = "show_unavailable"
 
+#: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/menu_row.rs`.
+#: OFF by default, and the ONLY key in this file where a typo leaves the feature off rather than
+#: on. It is an instrument: a probe that switched itself on because a value was misspelled would
+#: put an unexplained row in the pause menu and call it a measurement.
+MENU_ROW_SECTION = "menu_row"
+KEY_MENU_ROW_ENABLED = "enabled"
+#: Mirrors `LOG_PREFIX` in `crates/ds2-menu-row/src/lib.rs`. Named here because the generated
+#: config tells the reader which line to look for, and a prefix that drifted would send them
+#: looking for a line that is never written.
+MENU_ROW_LOG_PREFIX = "ds2-menu-row:"
+
 #: Mirrors `CONFIG_SECTION` and the four `KEY_*` in `crates/ds2-loader/src/offline.rs`.
 #: ON by default, unlike every other feature's switch here, because this workspace patches
 #: `.text` in a running copy of the game and FromSoftware's servers are what watch for that.
@@ -1055,6 +1066,7 @@ def config_text(
     offline: bool = True,
     block_sockets: bool = True,
     save_redirect: str | None = None,
+    menu_row: bool = False,
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
@@ -1361,6 +1373,41 @@ def config_text(
 {KEY_SAVE_REDIRECT_ENABLED} = {str(save_redirect is not None).lower()}
 {save_redirect_path_line}
 
+[{MENU_ROW_SECTION}]
+# NOT STARTUP. The only feature here whose hook is never reached during boot: it detours the item
+# builder for one PAUSE menu tab, which the game runs when FeGroupInGameTopSelect is constructed --
+# a game in progress and a press of the pause button away.
+#
+# OFF unless this says exactly `true`. The pause menu is six tabs; each tab's contents are a
+# DLFixedVector of (action, gate) entries, capacity five. The tab holding the quit item -- action 9,
+# FeGroupInGameReturnTitleCheck, the dialog that offers to save on the way to the title -- holds
+# three: Game Options, Screen Settings, Quit.
+#
+# THIS ADDS A FOURTH THAT QUITS TO DESKTOP WITHOUT ASKING. FeSubStateTitleShutdown::v1 is three
+# instructions -- load the title singleton, write 1 to +0x13a, return -- and GameManagerImp's
+# per-frame master update polls that byte, so the shutdown is the game's own. It does not save and
+# it does not ask; the quit-to-title row offers to save because THAT flow asks.
+#
+# FOUR HOOKS, and it is worth knowing which does what when a run disappoints:
+#   0x000a5900  the tab's item builder     appends the item
+#   0x000a6090  the tab's item dispatch    turns action 0x1000 into the shutdown
+#   0x000a5b50  the tab's cell namer       names the fourth cell, id 0x1eaccd
+#   0x00b54740  findDefinition             supplies that cell
+#
+# The last two are a pair. A row is drawn only if the grid's layout bind can resolve the cell's
+# scene path, so naming a cell the layout does not have is a measured null -- which is exactly what
+# an earlier run got, and which makes it this arm's control. The layout half substitutes the quit
+# tab's container definition with a copy declaring two more children (a row and its mark) whose
+# records are clones of row 0's, moved down one step. Nothing is written to disk.
+#
+# EVERY HOOK REFUSES RATHER THAN GUESSES. The builder demands (0x7,0) (0x8,0) (0x9,4); the namer
+# demands the quit tab's own base path; findDefinition demands seven children carrying seven known
+# ids. Read the log before believing a screen -- a refusal and a menu that was never opened look
+# identical there. `{MENU_ROW_LOG_PREFIX} container substituted ...` and `... cell named ...` are
+# the two lines that say the row should exist, and `row-extent` on the tab line is what says it
+# does.
+{KEY_MENU_ROW_ENABLED} = {str(menu_row).lower()}
+
 [{CRASH_SECTION}]
 {crash_banner}# STARTUP-ONLY, both of them. The handler is installed in DllMain BEFORE `neuter_arxan`, because
 # that call patches code from static analysis and is the likeliest crash in the whole startup path
@@ -1418,6 +1465,7 @@ def write_config(
     offline: bool = True,
     block_sockets: bool = True,
     save_redirect: str | None = None,
+    menu_row: bool = False,
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
@@ -1443,6 +1491,7 @@ def write_config(
         offline,
         block_sockets,
         save_redirect,
+        menu_row,
     )
     path.write_text(text, encoding="utf-8")
     return path, text
@@ -1526,6 +1575,7 @@ def dry_run(
     offline: bool = True,
     block_sockets: bool = True,
     save_redirect: str | None = None,
+    menu_row: bool = False,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
@@ -1569,6 +1619,7 @@ def dry_run(
             offline,
             block_sockets,
             save_redirect,
+            menu_row,
         ):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
         else:
@@ -1607,6 +1658,7 @@ def dry_run(
                 continue_hide_menus,
                 offline,
                 block_sockets,
+                menu_row=menu_row,
             ),
             indent="[dry-run]   | ",
         )
@@ -1668,6 +1720,7 @@ def launch(
     offline: bool = True,
     block_sockets: bool = True,
     save_redirect: str | None = None,
+    menu_row: bool = False,
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
@@ -1706,6 +1759,7 @@ def launch(
         offline,
         block_sockets,
         save_redirect,
+        menu_row,
     )
     print(f"[config] {config_path}")
 
@@ -2300,6 +2354,48 @@ def selftest() -> int:
         "--no-title-settle leaves the menu key OFF -- different section, different hooks",
     )
 
+    # THE PAUSE-MENU ROW IS AN INSTRUMENT, and the polarity of its switch is the assertion that
+    # matters. Every other key in this file is written so a typo leaves the feature ON; this one
+    # is the reverse, because a probe that switched itself on by accident would put an
+    # unexplained row in the pause menu and then be read as a measurement.
+    values, _ = parse_config(config_text("off"))
+    check(
+        values.get((MENU_ROW_SECTION, KEY_MENU_ROW_ENABLED)) == "false",
+        f"[{MENU_ROW_SECTION}] {KEY_MENU_ROW_ENABLED} defaults to FALSE -- it measures, it does "
+        "not fix",
+    )
+    values, _ = parse_config(config_text("off", menu_row=True))
+    check(
+        values.get((MENU_ROW_SECTION, KEY_MENU_ROW_ENABLED)) == "true"
+        and values.get((MENU_SECTION, KEY_SHOW_UNAVAILABLE)) == "false"
+        and values.get((TITLE_SECTION, KEY_TITLE_SETTLE)) == "true",
+        "--menu-row turns on only its own key, in its own section",
+    )
+    values, _ = parse_config(config_text("off", show_unavailable=True))
+    check(
+        values.get((MENU_ROW_SECTION, KEY_MENU_ROW_ENABLED)) == "false",
+        "--show-unavailable-menu-rows leaves the pause-menu key OFF -- title menu and pause menu "
+        "are different menus on different hooks",
+    )
+
+    # THE DLL READS THE SECTION AND THE KEY THIS WRITES, and writes the prefix this file tells the
+    # reader to grep for. Same contract as the probe and offline sections.
+    menu_row_src = (REPO_ROOT / "crates/ds2-loader/src/menu_row.rs").read_text(encoding="utf-8")
+    check(
+        f'"{MENU_ROW_SECTION}"' in menu_row_src,
+        f"the DLL reads the section this writes ([{MENU_ROW_SECTION}])",
+    )
+    check(
+        f'"{KEY_MENU_ROW_ENABLED}"' in menu_row_src,
+        f"the DLL reads {MENU_ROW_SECTION}.{KEY_MENU_ROW_ENABLED}",
+    )
+    menu_row_lib = (REPO_ROOT / "crates/ds2-menu-row/src/lib.rs").read_text(encoding="utf-8")
+    check(
+        f'"{MENU_ROW_LOG_PREFIX}"' in menu_row_lib,
+        f"the DLL writes the prefix this config tells the reader to look for "
+        f"({MENU_ROW_LOG_PREFIX})",
+    )
+
     # THE ARMS MUST DIFFER, and in exactly one key. If two arms ever generated the same file the
     # A/B comparison would be two runs of the same experiment, and the arm-readback guard would
     # not catch it because the DLL would be reporting truthfully.
@@ -2742,6 +2838,22 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--menu-row",
+        dest="menu_row",
+        action="store_true",
+        default=False,
+        help=(
+            "add a fourth row to the PAUSE menu tab that carries the quit item, which quits to "
+            "DESKTOP without a confirmation and without saving. OFF BY DEFAULT. Four hooks: the "
+            "tab's item builder, its dispatch, its cell namer, and the layout document's "
+            "definition lookup -- the last two being what makes the row visible, since a grid "
+            "draws a row only if it can resolve that cell's scene path. Every one of them checks "
+            "what the game left behind and refuses rather than guessing. Look for "
+            f"`{MENU_ROW_LOG_PREFIX} container substituted ...` and `row-extent=4` in the log "
+            "before reading the screen."
+        ),
+    )
+    parser.add_argument(
         "--probe-site",
         choices=PROBE_SITES,
         default="m1",
@@ -2825,6 +2937,7 @@ def main() -> int:
             args.offline,
             args.block_sockets,
             args.save_redirect,
+            args.menu_row,
         )
     return launch(
         args.probe,
@@ -2849,6 +2962,7 @@ def main() -> int:
         args.offline,
         args.block_sockets,
         args.save_redirect,
+        args.menu_row,
     )
 
 

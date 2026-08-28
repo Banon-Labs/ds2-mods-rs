@@ -1078,6 +1078,23 @@ pub const FE_SCENE_OBJ_PROXY_ELEMENT_SLOT: usize = 0;
 /// `FeComponentTextField`, `FeComponentTextureShape`, `FeComponentMaskShape`,
 /// `FeComponentTextureMask` and `FeComponentLinked` all inherit that. So a text field never
 /// responds to a play and follows an ancestor sprite instead.
+///
+/// **"Leaf" is right about sequence plays and wrong about the tree, and the difference crashed a
+/// walk.** `FeComponentSprite::findByIdPath` (`0x140b6bec0`) holds children a third way -- not the
+/// `+0x38` linked list `FeComponentObject` and `FeComponentScene` use, but the DISPLAY LIST:
+///
+/// ```asm
+/// mov   rbx, [rcx+0x70]          ; the list
+/// cmp   dx,  [rcx+0x66]          ; against the live child count
+/// cmp   [rbx+0xc], eax           ; this entry's key against the id being looked for
+/// mov   rcx, [rbx]               ; the child
+/// add   rbx, 0x10                ; next entry
+/// ```
+///
+/// That is the same list [`FLO_DEFINITION_CHILD_COUNT_OFFSET`] bounds and `FUN_140b6bd80` fills,
+/// so **the container built from the quit tab's definition is one of these** -- which is why
+/// raising that definition's child count grew it. The genuine tree leaves are the classes whose
+/// `findByIdPath` is `xor eax,eax; ret` at [`FE_COMPONENT_LEAF_FIND_BY_ID_PATH`].
 pub const FE_COMPONENT_SPRITE_VTABLE: u32 = 0x011d_e318;
 
 /// A component's first child. `+0x38`. Siblings chain through [`FE_COMPONENT_SIBLING_OFFSET`].
@@ -2377,3 +2394,1116 @@ pub const WSTRING_CAPACITY_OFFSET: usize = 0x18;
 /// site as `cmp QWORD PTR [rbp-0x19],0x8` / `cmovae`. Recorded so a reader of a live string does
 /// not have to rediscover which side of the comparison is the heap.
 pub const WSTRING_SSO_MAX: usize = 7;
+
+// ---------------------------------------------------------------------------------------------
+// THE IN-GAME (PAUSE) MENU'S TAB ITEM LISTS
+//
+// `FeGroupInGameTopSelect` (ctor RVA `0x000a41b0`) owns six `FeGroupInGameGroupSelect` members --
+// the six tabs. Each tab's contents are a `DLKR::DLFixedVector` of 8-byte entries built by a
+// dedicated function, one per tab, called from that ctor:
+//
+//   RVA        entries (action, gate)              what the actions open
+//   0x000a4990 (0,0)                               FeGroupInGameMenuEquipTop
+//   0x000a4db0 (1,0)                               FeGroupInGameMenuInventory2
+//   0x000a5620 (2,0) (3,0)                         FeGroupInGameMenuStatusStatus / ...StatusInfo
+//   0x000a4fc0 (4,1) (5,2) (6,3)                   FeGroupIngameMessageWrite / ReadHistory / WriteHistory
+//   0x000a5900 (7,0) (8,0) (9,4)                   SystemSettingGame / SystemSettingScreen / ReturnTitleCheck
+//   0x000a5330 (0xb,0) (0xc,0)                     SystemSettingKeyboard / SystemSettingGraphic
+//
+// Read out of the six builders and out of the dispatch switch [`FE_INGAME_MENU_DISPATCH`], with
+// each destination class confirmed by walking its vtable back to its RTTI type descriptor. None of
+// the six builders, the ctor, the dispatch or the per-tab init is an Arxan redirect --
+// `scripts/ds2-arxan-chain.py` terminates at hop 0 with a clean prologue on every one of them.
+// ---------------------------------------------------------------------------------------------
+
+/// The builder for the tab that carries the quit item. RVA `0x000a5900`.
+///
+/// `FeGroupInGameTopSelect`'s ctor calls this once, with a stack descriptor in RCX, and it is the
+/// ONLY caller -- one candidate RIP-relative reference in the whole image (`0x1400a4382`, inside
+/// that ctor), so a detour here reaches this tab and nothing else. It returns its argument in RAX.
+///
+/// It zeroes the count at [`FE_INGAME_MENU_ITEM_VECTOR_COUNT_OFFSET`] and then pushes three
+/// entries -- [`FE_INGAME_MENU_SYSTEM_TAB_ITEMS`]. The entry the player calls "quit" is the third,
+/// action [`FE_INGAME_MENU_ACTION_RETURN_TITLE`], which the dispatch resolves to
+/// `FeInGameMenuWarehouse + 0x6f10`, the `FeGroupInGameReturnTitleCheck` the warehouse's ctor
+/// (`0x1400991e0`) constructs at member `+0xde2`.
+///
+/// Not an Arxan redirect: clean prologue [`FE_INGAME_TOP_SELECT_SYSTEM_TAB_ITEMS_PROLOGUE`] at the
+/// entry.
+pub const FE_INGAME_TOP_SELECT_SYSTEM_TAB_ITEMS: u32 = 0x000a_5900;
+
+/// The first six bytes of [`FE_INGAME_TOP_SELECT_SYSTEM_TAB_ITEMS`]: `rex push rbx` /
+/// `sub rsp,0x50`.
+///
+/// Recorded so a detour can REFUSE rather than patch when the bytes are not these. That is the
+/// only defence against this table being read against a different build: an RVA is just a number
+/// and will happily point into the middle of some other function.
+pub const FE_INGAME_TOP_SELECT_SYSTEM_TAB_ITEMS_PROLOGUE: [u8; 6] =
+    [0x40, 0x53, 0x48, 0x83, 0xec, 0x50];
+
+/// The dispatch: `switch (action)` over every in-game menu item. RVA `0x000a6090`.
+///
+/// Reached from the tab's confirm handler (`0x1400a6b10`), which reads the entry under the cursor,
+/// applies its gate, and passes either the action or `-1`. `-1` selects a different sound id and
+/// falls through the switch's `default`, which is how a gated row refuses.
+///
+/// Cases 0-9, 0xb, 0xc and **0xd** are present. Two shapes: a direct
+/// `FeInGameMenuWarehouse` member (0, 2, 4, 5, 6, 9), or a `FexDynamicGroupExecJob` carrying a
+/// *kind* that the factory at `0x1400a67c0` turns into a freshly allocated group (3 -> kind 0,
+/// 7 -> 2, 8 -> 3, 0xb -> 4, 0xc -> 5, 0xd -> 6). Action `0xa` has no case at all.
+///
+/// Recorded for provenance and because it is the site to extend for a genuinely new action. Not
+/// currently hooked by anything.
+///
+/// Not an Arxan redirect: clean prologue `48 89 5c 24 18` at the entry.
+pub const FE_INGAME_MENU_DISPATCH: u32 = 0x000a_6090;
+
+/// The per-tab init that turns the item list into rows. RVA `0x000a4d20`.
+///
+/// It binds the grid to the layout ([`FEX_GRID_CONTROL_LAYOUT_BIND`]), then calls
+/// `FUN_140021b30(tab, tab->count)`, then the availability pass `0x1400a77c0`, which walks
+/// `0..count`, reads entry `i`, and greys the row whose gate refuses.
+///
+/// **`FUN_140021b30` sets the count the CURSOR is bounded by, not the number of drawable cells.**
+/// A run on 2026-08-28 appended a fourth entry to the quit tab and got exactly that: a fourth item
+/// the cursor reaches and that responds, with nothing drawn for it. The drawable cells were already
+/// fixed by the bind on the line above. This comment used to claim the visible row count came from
+/// here; it does not, and `docs/DS2-INGAME-MENU.md` keeps the wrong version beside the right one.
+///
+/// Not hooked. Not an Arxan redirect: clean prologue `40 53 48 81 ec b0 00 00 00` at the entry.
+pub const FE_INGAME_MENU_TAB_INIT: u32 = 0x000a_4d20;
+
+/// `FrontendEx::FexGridControl`'s layout bind -- where a grid's drawable cells come from. RVA
+/// `0x000216d0`.
+///
+/// It takes no extent from anywhere. It DISCOVERS one, by asking the layout for the element at
+/// each `(col, row)` and stopping a row at the first one that comes back null:
+///
+/// ```text
+/// for (row = 0; row < 15; row++)
+///   for (col = 0; col < 32; col++) {
+///       element = (*namer->vtable[0x10])(col, row);
+///       if (element == 0) break;                        // this row ends here
+///       cell = FUN_14010a060(...);                      // a drawable cell object
+///       grid[FEX_GRID_COL_EXTENT_OFFSET] = max(that, col + 1);
+///       grid[FEX_GRID_ROW_EXTENT_OFFSET] = max(that, row + 1);
+///   }
+/// ```
+///
+/// So the extents are a count of AUTHORED LAYOUT ELEMENTS, not a constant to raise, and the probe
+/// stops at the first hole -- authoring cell 4 without cell 3 would find neither. `0x140022160`
+/// closes the loop from the other side: resolving a cell whose column equals the column extent
+/// takes the `vtable+0x48` one-past-the-end naming branch instead of the ordinary-cell branch.
+///
+/// Recorded because it is the answer to "why is the appended row invisible", and because it is
+/// where anyone extending a menu with new layout data has to look. Not hooked.
+pub const FEX_GRID_CONTROL_LAYOUT_BIND: u32 = 0x0002_16d0;
+
+/// Byte offset of a `FexGridControl`'s logical item count -- what the cursor may reach.
+///
+/// Written by `FUN_140021b30`, read by the grid's `v34` (`0x14001c020`, `return this->+0x38` on the
+/// `FexGroupList` base subobject, which lands here on the whole object). This is the field an
+/// appended item moves.
+pub const FEX_GRID_ITEM_COUNT_OFFSET: usize = 0xc8;
+
+/// Byte offset of a `FexGridControl`'s COLUMN extent -- how many drawable cells the layout gave it.
+///
+/// Set only by [`FEX_GRID_CONTROL_LAYOUT_BIND`], as a running `max` over the elements it found.
+/// `FUN_140021b30` never touches it, which is the whole gap between an item being selectable and
+/// an item being visible.
+pub const FEX_GRID_COL_EXTENT_OFFSET: usize = 0xd4;
+
+/// Byte offset of the scroll state a `FexGridControl` drives. RVA-relative to the grid.
+///
+/// `FUN_140021b30` reads it as `grid[0x1c]` and writes the total at `+0x2c`, compares that total
+/// against `+0x28`, and takes one of two branches: total at or below `+0x28` plays sequence `0x7a`
+/// on the object at `[scroll]`, above it plays `0x70` and computes a thumb size from `+0x44`.
+/// That is a scrollbar being hidden or shown, which is what makes "how many cells are VISIBLE"
+/// a different number again from the extent and the item count.
+pub const FEX_GRID_SCROLL_OFFSET: usize = 0xe0;
+
+/// Within the scroll object: the number of cells on screen at once.
+pub const FEX_GRID_SCROLL_VISIBLE_OFFSET: usize = 0x28;
+
+/// Within the scroll object: the total the count above is compared against.
+pub const FEX_GRID_SCROLL_TOTAL_OFFSET: usize = 0x2c;
+
+/// Byte offset of a `FexGridControl`'s ROW extent. Set the same way as
+/// [`FEX_GRID_COL_EXTENT_OFFSET`].
+///
+/// `1` means a single-line list, and `0x1400222c0` special-cases it: index `n` maps to
+/// `(col = n, row = 0)`. The in-game menu tabs are that shape, so their items run along the column
+/// axis and [`FEX_GRID_COL_EXTENT_OFFSET`] is the one that bounds them.
+pub const FEX_GRID_ROW_EXTENT_OFFSET: usize = 0xd8;
+
+/// Byte offset of the element count inside a tab's item `DLFixedVector`.
+///
+/// Every one of the six builders opens with `mov QWORD PTR [rcx+0x30], 0`, and the copy into the
+/// live group (`0x1400a3ef0`) reads and writes the same field. In the constructed group the pair
+/// lands at `+0xf8` (elements) and `+0x128` (count), which is `0xf8 + 0x30` -- the same struct.
+pub const FE_INGAME_MENU_ITEM_VECTOR_COUNT_OFFSET: usize = 0x30;
+
+/// Most entries a tab's item vector can hold.
+///
+/// Spelled by the builders as `if (5 < newCount) panic("out of memory.")` against
+/// `DLFixedVector.inl:0x24c`, and independently by the copy at `0x1400a3ef0`, which panics unless
+/// the source count is `< 6`. Both agree: five.
+pub const FE_INGAME_MENU_ITEM_VECTOR_CAPACITY: usize = 5;
+
+/// Size of one item entry: a `u32` action id followed by a `u32` gate index.
+///
+/// The builders write a whole 8-byte slot per push (`*puVar1 = 0x400000009` for the quit entry --
+/// action `9`, gate `4`), and the two readers split it: the confirm path takes the action from
+/// `[entry]` and the gate from `[entry+4]` (`lea rcx,[rax+4]` at `0x1400a4cce`).
+pub const FE_INGAME_MENU_ITEM_STRIDE: usize = 8;
+
+/// The three entries [`FE_INGAME_TOP_SELECT_SYSTEM_TAB_ITEMS`] is expected to leave behind, as
+/// `(action, gate)` pairs.
+///
+/// Held so a detour can CHECK what the original produced before touching it. Without that, a
+/// build whose tabs are ordered differently would be silently modified in the wrong place, and
+/// the resulting screenshot would be evidence about nothing.
+pub const FE_INGAME_MENU_SYSTEM_TAB_ITEMS: [(u32, u32); 3] = [
+    (
+        FE_INGAME_MENU_ACTION_SETTING_GAME,
+        FE_INGAME_MENU_GATE_ALWAYS,
+    ),
+    (
+        FE_INGAME_MENU_ACTION_SETTING_SCREEN,
+        FE_INGAME_MENU_GATE_ALWAYS,
+    ),
+    (
+        FE_INGAME_MENU_ACTION_RETURN_TITLE,
+        FE_INGAME_MENU_GATE_RETURN_TITLE,
+    ),
+];
+
+/// Action `7` -- `FeGroupInGameSystemSettingGame`, via dynamic-group kind 2.
+pub const FE_INGAME_MENU_ACTION_SETTING_GAME: u32 = 7;
+
+/// Action `8` -- `FeGroupInGameSystemSettingScreen`, via dynamic-group kind 3.
+pub const FE_INGAME_MENU_ACTION_SETTING_SCREEN: u32 = 8;
+
+/// Action `9` -- `FeGroupInGameReturnTitleCheck`. **This is the quit item.**
+///
+/// The dispatch resolves it to `warehouse + 0x6f10`, and the warehouse's ctor builds
+/// `FeGroupInGameReturnTitleCheck` (vtable `0x1410b1768`, ctor `0x14006e390`) at exactly that
+/// member. It is the confirm dialog that offers to save on the way to the title screen.
+pub const FE_INGAME_MENU_ACTION_RETURN_TITLE: u32 = 9;
+
+/// Action `0xd` -- present in the dispatch, listed by **no** tab.
+///
+/// Its factory branch shares a `case` label with kind 4: `case 4: case 6:` both allocate `0xc68`
+/// bytes and call `FUN_1400803b0`, whose vtable writes name `FeGroupInGameSystemSettingKeyboard`.
+/// The job carries the kind ONLY to select that branch (`mov edx,[rbx+0x28]` at `0x14002d884`,
+/// its one and only read), so executing action `0xd` is byte-for-byte what executing the shipped
+/// Key Bindings row already does every time it is pressed.
+///
+/// That is the entire reason it is the probe's payload: it adds a row without adding a code path.
+pub const FE_INGAME_MENU_ACTION_KEY_BINDINGS_UNUSED: u32 = 0x0d;
+
+/// Gate `0` -- no gate. The predicate at `0x1400a4e50` returns `0` (selectable) immediately on it.
+pub const FE_INGAME_MENU_GATE_ALWAYS: u32 = 0;
+
+/// Gate `4` -- the one the quit item carries.
+///
+/// Resolves the session object at `GameManagerImp + 0x22f0` through `FUN_140513270` and asks
+/// `FUN_14025f690` about it; a nonzero answer means the row is refused. Neither callee is named in
+/// the project yet, so what it actually forbids is NOT recorded here -- only that this is the gate
+/// the shipped quit row uses.
+pub const FE_INGAME_MENU_GATE_RETURN_TITLE: u32 = 4;
+
+// ---------------------------------------------------------------------------------------------
+// QUITTING TO DESKTOP
+// ---------------------------------------------------------------------------------------------
+
+/// `FeSubStateTitleShutdown::v1` (enter) -- the game's own quit-to-desktop, in full. RVA
+/// `0x000fde20`.
+///
+/// Three instructions, and there is no fourth:
+///
+/// ```text
+/// mov rax, QWORD PTR [rip+0x15773d1]      ; [FE_SYSTEM_SINGLETON]
+/// mov BYTE PTR [rax+0x13a], 1             ; FE_SYSTEM_SHUTDOWN_REQUEST_OFFSET
+/// ret
+/// ```
+///
+/// Its `update` (`0x1400ff2e0`) is an empty `ret`, so the substate does not run the shutdown -- it
+/// only asks for one. Recorded because it is the whole implementation of "quit to desktop" and it
+/// is a byte, not a call.
+pub const FE_SUBSTATE_TITLE_SHUTDOWN_ENTER: u32 = 0x000f_de20;
+
+/// The `FeSystem`-ish singleton pointer the title flow reads everything off. RVA `0x016751f8`.
+///
+/// Already relied on elsewhere in this repo without being named: `FeSubStateTitleLogo`'s skip
+/// tests a state word reached through it, and `FeSubStateWarningNoCopy`'s shipped early-out calls
+/// one of its virtuals. It holds a POINTER; dereference it before adding an offset.
+pub const FE_SYSTEM_SINGLETON: u32 = 0x0167_51f8;
+
+/// Byte offset of the shutdown request inside [`FE_SYSTEM_SINGLETON`]'s target.
+///
+/// **Setting it to 1 quits the game, and that is the entire mechanism.** Four sites in the image
+/// write it (`0x1400f4a9a`, `0x1400fbc00`, `0x1400fde23`, `0x1401c2303`) and exactly two read it
+/// (`0x1401bf97e`, `0x1401c0196`) -- both inside `GameManagerImp`'s per-frame master update, the
+/// function that also drives `mapManUpdate`, `damageManUpdate`, `bulletManUpdate`, `demoManager`
+/// and `saveRequest`.
+///
+/// Being polled by the main loop is what makes this usable from anywhere: a write takes effect on
+/// the next frame, through the game's own shutdown, with no confirmation dialog and no new code
+/// path. It is the same byte the title screen's own exit row writes.
+///
+/// It is NOT a save. The game's quit-to-title flow offers to save because that flow asks; this
+/// does not, which is what "without a confirmation" costs.
+pub const FE_SYSTEM_SHUTDOWN_REQUEST_OFFSET: usize = 0x13a;
+
+/// The first action id this repo hands out. Slot `n` gets `BASE + n`. Deliberately outside the
+/// game's own space.
+///
+/// The shipped dispatch has cases `0..=9`, `0xb`, `0xc`, `0xd`. Anything else falls to `default`,
+/// which plays the ordinary confirm sound and does nothing. That is the correct failure mode for
+/// an id whose behaviour lives in a detour: if the detour is ever absent, the row is INERT rather
+/// than quietly doing whatever the game does for some id we borrowed.
+///
+/// The range is `0x1000..` and the ceiling on rows is five per tab, so the ids stay nowhere near
+/// anything the game uses no matter how many tabs are eventually measured.
+pub const FE_INGAME_MENU_ACTION_BASE: u32 = 0x1000;
+
+/// `FrontendEx::FexGridControl` linear-index -> `(col, row)`. RVA `0x000222c0`.
+///
+/// `if (grid->rowExtent == 1) { col = index; row = 0; } else { row = index / cols; col = index % cols; }`.
+/// Measured at runtime, the in-game menu tabs are one COLUMN by N ROWS -- every tab this repo has
+/// looked at reports `col-extent = 1` and `row-extent = itemCount` -- so they take the second
+/// branch and an item's cell is `(0, index)`.
+pub const FEX_GRID_INDEX_TO_CELL: u32 = 0x0002_22c0;
+
+/// `FrontendEx::FexGridControl` `(col, row)` -> element accessor. RVA `0x00022160`.
+///
+/// Asks the namer at `[grid + 0xf0]` through one of five vtable slots, picked by whether the cell
+/// is on an edge: `+0x30` when `row == -1`, `+0x38` when `row == rowExtent`, `+0x40` when
+/// `col == -1`, `+0x48` when `col == colExtent`, and `+0x10` for an ordinary interior cell.
+///
+/// **The `col == colExtent` branch is the one an appended item takes**, which is why its element
+/// resolves to nothing: it is the "one past the end" namer, not the ordinary-cell namer.
+pub const FEX_GRID_CELL_TO_ELEMENT: u32 = 0x0002_2160;
+
+// ---------------------------------------------------------------------------------------------
+// THE CELL NAMER, AND WHY A FOURTH ROW MIGHT BE FOUR BYTES
+// ---------------------------------------------------------------------------------------------
+
+/// The quit tab's cell-namer constructor. RVA `0x000a5b50`.
+///
+/// Read from the disassembly, because the decompiler drops half of it. It builds a FOUR-component
+/// base path and then a SIX-slot array of cell ids of which three are zero:
+///
+/// ```asm
+/// mov  r9d, 0x1eace8
+/// lea  r8d, [r9-0x19]                  ; 0x1eaccf
+/// mov  edx, 0x1eaba9
+/// mov  DWORD PTR [rsp+0x20], 0x1eace6  ; -> path [0x1eaba9, 0x1eaccf, 0x1eace8, 0x1eace6]
+/// mov  DWORD PTR [rsp+0xc0], 0x1eacc9
+/// mov  DWORD PTR [rsp+0xc4], 0x1eacca
+/// mov  QWORD PTR [rsp+0xc8], 0x1eace9  ; and the pad dword behind it
+/// mov  QWORD PTR [rsp+0xd0], rbx       ; zero, zero
+/// ...  cmp rcx, 6 ; jb                 ; the loop already runs SIX times
+/// ```
+///
+/// Each non-zero id becomes one entry pushed into the namer's list at `+0x18`, and that list is
+/// what `FEX_GRID_CELL_TO_ELEMENT` indexes. **So a fourth cell is a four-byte constant here, not a
+/// layout edit -- provided an element exists for the id to resolve to.** Whether one does is the
+/// question `ds2-menu-row`'s enumerator answers.
+///
+/// Both cells the tab gained after the fact are out of sequence -- `c9, ca, ... e9` here and
+/// `7b, 7c, ... d5` on tab 3 -- which is what appending a row to a shipped tab looks like.
+pub const FE_INGAME_MENU_QUIT_TAB_NAMER: u32 = 0x000a_5b50;
+
+/// The quit tab's cell base path, as the four ids the namer builds it from.
+pub const FE_QUIT_TAB_BASE_PATH: [u32; 4] = [0x001e_aba9, 0x001e_accf, 0x001e_ace8, 0x001e_ace6];
+
+/// The three cell ids the quit tab ships with, appended to [`FE_QUIT_TAB_BASE_PATH`].
+pub const FE_QUIT_TAB_CELL_IDS: [u32; 3] = [0x001e_acc9, 0x001e_acca, 0x001e_ace9];
+
+/// `FrontendEx` scene path builder, four ids. RVA `0x000756a0`.
+///
+/// `fn(out, id0, id1, id2, id3) -> out`, with the fourth id on the stack at `[rsp+0x20]`.
+pub const FE_SCENE_PATH_BUILD4: u32 = 0x0007_56a0;
+
+/// Converts a built path into the form the append below takes. RVA `0x0001f8a0`. `fn(path, out)`.
+pub const FE_SCENE_PATH_SEAL: u32 = 0x0001_f8a0;
+
+/// Appends one id to a sealed path, producing an element accessor. RVA `0x0001ed80`.
+///
+/// `fn(path, out, id) -> out`. The accessor's own vtable slot 0 resolves it: non-zero is the live
+/// element, zero means the scene has nothing at that path. That resolve is exactly what the grid's
+/// layout bind uses to decide whether a cell exists, so asking it is asking the same question the
+/// bind asks.
+pub const FE_SCENE_PATH_APPEND: u32 = 0x0001_ed80;
+
+/// The quit tab's cell ids that the LAYOUT authors and the namer never lists.
+///
+/// `FeSceneInGameMenu`'s element cache (`0x140099f90`) resolves five cell-shaped children under
+/// `[0x1eaba9, 0x1eaccf, 0x1eace8, 0x1eace7]`, each followed by its own label element:
+///
+/// ```text
+/// 0x1eacc9 + label 0x1eac46      Game Options
+/// 0x1eacca + label 0x1eac47      Screen Settings
+/// 0x1eaccd + label 0x1eac4a      <- authored, never listed
+/// 0x1eacce + label 0x1eac4b      <- authored, never listed
+/// 0x1eace9 + label 0x1eac4c      Quit Game
+/// ```
+///
+/// **THAT PARAGRAPH USED TO SAY THE TAB WAS AUTHORED FOR FIVE ROWS. It was not measured and it is
+/// probably false.** The cache ASKS for five ids; `FUN_140afda00` reaches `FUN_140b507d0`, which is
+/// a plain lookup returning 0 when nothing is there, and the cache stores the answer without
+/// checking it. So five requests is evidence of five requests.
+///
+/// What was measured afterwards, with controls: a cloned namer entry becomes a real cell, and
+/// clones naming `0x1eaccd` or `0x1eacce` do not resolve while an unmodified clone does. The two
+/// spares are therefore absent from the container the namer can reach, and most likely absent
+/// full stop -- leftovers from a five-row design that did not ship.
+///
+/// The namer builds its cell paths under `0x1eace6` while the cache resolves under `0x1eace7` --
+/// two sibling containers below `0x1eace8`, with the same cell ids in each. The pair is presumably
+/// an interaction layer and a drawing layer.
+pub const FE_QUIT_TAB_SPARE_CELL_IDS: [u32; 2] = [0x001e_accd, 0x001e_acce];
+
+/// Pushes one built accessor onto a cell namer's list at `namer + 0x18`. RVA `0x000a7b30`.
+///
+/// `fn(&namer[0x18], accessor)`. This is the call [`FE_INGAME_MENU_QUIT_TAB_NAMER`] makes once per
+/// non-zero id in its six-slot array, so appending a fourth entry is the same operation the game
+/// performs three times on the way in.
+pub const FE_SCENE_NAMER_PUSH: u32 = 0x000a_7b30;
+
+/// Byte offset of the cell list inside a cell namer.
+pub const FE_SCENE_NAMER_LIST_OFFSET: usize = 0x18;
+
+/// Most entries a cell namer's list at [`FE_SCENE_NAMER_LIST_OFFSET`] can hold.
+///
+/// Measured the expensive way: a run that pushed six extra entries onto a list the game had already
+/// put three in wrote through a null on the seventh and killed the game at `0x141bee1c4`
+/// (`access_kind=1`, `rcx=rdx=rax=0`). Three plus three is fine; three plus four is not.
+///
+/// Six is also the bound of the id loop in [`FE_INGAME_MENU_QUIT_TAB_NAMER`], so the array and the
+/// list it fills are the same size -- which is the sort of agreement worth writing down, because
+/// it says the spare slots in that array are genuinely usable rather than accidental padding.
+pub const FE_SCENE_NAMER_LIST_CAPACITY: usize = 6;
+
+/// Byte offset of the count inside a cell namer's list, relative to the list itself.
+///
+/// `FUN_1400a7b30` reads `*(u64*)(list + 0x128)`, refuses above
+/// [`FE_SCENE_NAMER_LIST_CAPACITY`], and writes the incremented value back before copying the new
+/// element in. Relative to the namer that lands at `+0x140`, which is exactly the field
+/// `VLayoutAdapter`'s cell lookup (`0x1400a4b20`) compares the requested row against.
+pub const FE_SCENE_NAMER_COUNT_OFFSET: usize = 0x128;
+
+/// Bytes per entry in a cell namer's list. `FUN_1400a7b30` addresses element `n` at
+/// `list + (-list & 7) + n * 0x30`, and `0x1400a4b20` reads it back at the same stride.
+pub const FE_SCENE_NAMER_ENTRY_STRIDE: usize = 0x30;
+
+/// A cell namer entry, as dumped from two live entries of the quit tab's list.
+///
+/// ```text
+/// e0: a9ab1e00 cfac1e00 e8ac1e00 e6ac1e00 c9ac1e00 <slack> 05000000
+/// e1: a9ab1e00 cfac1e00 e8ac1e00 e6ac1e00 caac1e00 <slack> 05000000
+///      +0x00    +0x04    +0x08    +0x0c    +0x10            +0x28
+/// ```
+///
+/// Five `u32` ids, then uninitialised slack, then the path LENGTH. The slack genuinely differs
+/// between two entries the game built one after the other -- it is stack residue -- which is why a
+/// clone must copy an entry rather than be assembled field by field, and why a byte-diff has to
+/// ignore everything outside the fields named here.
+pub const FE_SCENE_NAMER_ENTRY_CONTAINER_OFFSET: usize = 0x0c;
+pub const FE_SCENE_NAMER_ENTRY_ID_OFFSET: usize = 0x10;
+pub const FE_SCENE_NAMER_ENTRY_LEN_OFFSET: usize = 0x28;
+/// The path length every quit-tab entry carries: root, region, `ace8`, container, cell.
+pub const FE_SCENE_NAMER_ENTRY_LEN: u32 = 5;
+/// The sibling container the scene's element cache resolves the five-cell set under, where the
+/// namer's own entries use [`FE_QUIT_TAB_BASE_PATH`]`[3]`.
+pub const FE_QUIT_TAB_CACHE_CONTAINER: u32 = 0x001e_ace7;
+
+// ---------------------------------------------------------------------------------------------
+// The frontend layout document (`.flo`), and the container the quit tab's rows hang off.
+//
+// This is the section that turned the "invisible fourth row" from a file-repacking project into a
+// four-pointer edit. The pause menu's rows are records in `menu/02.febnd.dcx`'s
+// `l02_01_In-Game.flo`, and the game loads that file IN PLACE -- the header IS the document
+// object, and the `u64` file offsets inside it are absolute pointers once the fixup has run. So
+// the table that says how many rows a container has can be replaced with a copy that says one
+// more, without touching the archive, the DCX, the BND4 or a single byte on disk.
+//
+// Reproduce every number below with:
+//
+//     python3 scripts/ds2-ebl.py extract /menu/02.febnd.dcx --out /tmp/menu02
+//     python3 scripts/ds2-flo.py tree /tmp/menu02/l02_01_In-Game.flo --def 0x263
+//
+// THE FILE IS `/menu/02.febnd.dcx`, NOT `/menu/42.febnd.dcx`. 42 is the OPTIONS screen
+// (`l42_01_OptionSetting.flo`) and shares none of these ids; an earlier note in this repo pointed
+// at it and cost a wrong search.
+// ---------------------------------------------------------------------------------------------
+
+/// `FeLayoutDocument::findDefinition(doc, index)`. RVA `0x00b54740`.
+///
+/// `fn(&doc, u32 index) -> *definition`. A linear scan of `[[doc]+0x18]` over `[[doc]+0x4c]`
+/// entries at stride [`FLO_DEFINITION_STRIDE`], keyed by the `u16` at the definition's `+0x00`;
+/// returns null on a miss. Prologue `48 8b 01 44 8b ca 48 85 c0` -- its own, not one of the 286
+/// Arxan redirects.
+///
+/// **Every consumer of a definition goes through here**, which is what makes one detour enough:
+/// the builder reads the child count and the child array out of whatever this hands back, and the
+/// built container keeps the same pointer at its `+0x48` for the capacity check below.
+pub const FLO_FIND_DEFINITION: u32 = 0x00b5_4740;
+
+/// Bytes per definition. `FUN_140b54740`: `add rcx, 0x48`.
+pub const FLO_DEFINITION_STRIDE: usize = 0x48;
+
+/// `u16` child count inside a definition. `FUN_140b50f20` walks that many child records --
+/// **and `FUN_140b6bd80` uses the same field as the display list's CAPACITY**, refusing to attach
+/// a child once `parent+0x66` reaches it. One field, both meanings, so raising it raises both.
+pub const FLO_DEFINITION_CHILD_COUNT_OFFSET: usize = 0x02;
+
+/// Pointer to a definition's child record array. A file offset on disk, an absolute pointer once
+/// the document is loaded.
+pub const FLO_DEFINITION_CHILDREN_OFFSET: usize = 0x08;
+
+/// Bytes per child record. `FUN_140b50f20`: `lVar8 = lVar8 + 0x28`.
+pub const FLO_RECORD_STRIDE: usize = 0x28;
+
+/// `u16` definition index a record instantiates -- the argument [`FLO_FIND_DEFINITION`] takes.
+pub const FLO_RECORD_DEFINITION_OFFSET: usize = 0x00;
+
+/// Pointer to a record's transform block. Read by `FUN_140b50bc0` as `*(float**)(rec+0x08)`.
+pub const FLO_RECORD_TRANSFORM_OFFSET: usize = 0x08;
+
+/// `u16` depth. Passed on only for the leaf kinds; a nested record's copy is inert, and the draw
+/// order of siblings follows the order they are attached in.
+pub const FLO_RECORD_DEPTH_OFFSET: usize = 0x10;
+
+/// `u16` kind flags, the value `FUN_140b50bc0` switches on: `1` shape, `2` text, `4` a nested
+/// definition, `8` texture. A FLAG WORD rather than an enum -- the builder masks it with `0xd` and
+/// records carrying `0x1004` exist, so the bits above the low nibble mean something unread. Every
+/// quit-tab row is plain `4`, and this crate only ever copies the field.
+pub const FLO_RECORD_KIND_OFFSET: usize = 0x12;
+
+/// `u16` last frame and `u16` first frame. `0xffff` as the last frame means "never ends", which is
+/// what every permanent element carries.
+pub const FLO_RECORD_LAST_FRAME_OFFSET: usize = 0x14;
+pub const FLO_RECORD_FIRST_FRAME_OFFSET: usize = 0x16;
+
+/// `u32` ELEMENT ID -- the field a scene path resolves against.
+///
+/// `FeComponentObject::findByIdPath` (`0x140b6a130`) is `mov rax,[rcx+0x48]; cmp [rax+0x1c],r9d`:
+/// the component's `+0x48` is its record, and `+0x1c` of that record is the id being matched. So
+/// the ids in [`FE_QUIT_TAB_CELL_IDS`] are literally these bytes, and a fourth row is a fourth
+/// record carrying a fourth id.
+pub const FLO_RECORD_ID_OFFSET: usize = 0x1c;
+
+/// Bytes per transform block, from the spacing of the blocks the quit tab's records point at.
+pub const FLO_TRANSFORM_SIZE: usize = 0x30;
+
+/// `f32` x and `f32` y inside a transform block.
+///
+/// Not guessed from position in the struct: `FUN_140b50f20`'s "is this child trivial enough to
+/// inline" test reads `pfVar1[0]` and `pfVar1[1]` and requires them to be `0.0`, then `pfVar1[2]`
+/// and `pfVar1[3]` and requires them to be `1.0`. Translate-zero and scale-one is an identity
+/// test, which fixes all four fields at once.
+pub const FLO_TRANSFORM_X_OFFSET: usize = 0x00;
+pub const FLO_TRANSFORM_Y_OFFSET: usize = 0x04;
+
+/// The definition index of the container the quit tab's rows are children of.
+///
+/// It is the definition instantiated by the record whose id is [`FE_QUIT_TAB_BASE_PATH`]`[3]`
+/// (`0x1eace6`), which is the last component of every cell path the namer builds. Its seven
+/// children are [`FLO_QUIT_TAB_CHILD_IDS`].
+pub const FLO_QUIT_TAB_CONTAINER_DEFINITION: u32 = 0x0263;
+
+/// The seven children of [`FLO_QUIT_TAB_CONTAINER_DEFINITION`], in file order, by element id.
+///
+/// ```text
+/// [0] 0x1eac81  def 0x0221  xy (   0, -103   )  the tab's own header
+/// [1] 0x1eace9  def 0x0258  xy (-0.10, 103.90)  row 2, Quit Game    <- has a greyed-out variant
+/// [2] 0x1eacca  def 0x025d  xy (-3.15,  55.90)  row 1
+/// [3] 0x1eacc9  def 0x0262  xy ( 3.95,  10.60)  row 0
+/// [4] 0x1eac4c  def 0x022c  xy (60.20, 114.35)  row 2's mark
+/// [5] 0x1eac47  def 0x022c  xy (60.20,  65.95)  row 1's mark
+/// [6] 0x1eac46  def 0x022c  xy (60.20,  17.55)  row 0's mark
+/// ```
+///
+/// **Seven, and all seven slots are used** -- none of them is flattened away, because
+/// `FUN_140b50bc0` only inlines a child whose id is zero and whose transform is the identity, and
+/// every one of these has a non-zero id. That is why a fourth row cannot be squeezed into the
+/// shipped display list and the child count has to rise.
+///
+/// This array is the content check `ds2-menu-row` runs before it substitutes anything. A
+/// definition index is a number, and index `0x263` on a document this table was not read from is
+/// some other container entirely.
+pub const FLO_QUIT_TAB_CHILD_IDS: [u32; 7] = [
+    0x001e_ac81,
+    0x001e_ace9,
+    0x001e_acca,
+    0x001e_acc9,
+    0x001e_ac4c,
+    0x001e_ac47,
+    0x001e_ac46,
+];
+
+/// Index into [`FLO_QUIT_TAB_CHILD_IDS`] of the row whose RECORD a new row is cloned from.
+///
+/// The record only, not what it points at: its definition index is overwritten with
+/// [`FLO_QUIT_ICON_DEFINITION`] straight after the copy. What is inherited is the fields this
+/// repo has not decoded -- the `u16` at `+0x02` (`1` here, `0x3b` on the flash records), the kind
+/// flags, the frame range -- and all three container rows carry the same values for those, so the
+/// choice of 3 is arbitrary and only has to be a plain row rather than a flash.
+pub const FLO_QUIT_TAB_ROW_TEMPLATE: usize = 3;
+
+// ---------------------------------------------------------------------------------------------
+// The added row's own definition: the Quit Game glyph, tinted, keeping the selection highlight.
+//
+// A row definition holds TWO children and both of them matter. The first is the icon; the second
+// is a shape at `(6.9, -3.45)`, colour `00ffffff`, frames `1..69` -- transparent at rest, which is
+// why it reads as decoration in the file and is in fact THE SELECTION HIGHLIGHT. Pointing the
+// container's row record straight at the icon (`0x0254`) put the right glyph on screen and took
+// the highlight away with it, which a run showed immediately.
+//
+// So the row gets a copy of row 2's definition with one child swapped, rather than a bare icon.
+// ---------------------------------------------------------------------------------------------
+
+/// Row 2's definition -- Quit Game -- the one the added row's own definition is copied from.
+pub const FLO_QUIT_ROW_DEFINITION: u32 = 0x0258;
+
+/// Children [`FLO_QUIT_ROW_DEFINITION`] declares, and which is which.
+///
+/// ```text
+/// [0] def 0x0255 id 0x1eacd0 (8.10,  4.55)  the icon, paired with its greyed-out twin
+/// [1] def 0x0257 id 0        (6.90, -3.45)  the selection highlight, alpha 0 at rest
+/// ```
+pub const FLO_QUIT_ROW_CHILDREN: usize = 2;
+pub const FLO_QUIT_ROW_ICON: usize = 0;
+pub const FLO_QUIT_ROW_HIGHLIGHT: usize = 1;
+
+/// What child [`FLO_QUIT_ROW_ICON`] names in the shipped file, and what replaces it.
+///
+/// `0x0255` instantiates [`FLO_QUIT_ICON_DEFINITION`] **twice** -- once at `ffffffff` and once at
+/// `ff808080` carrying id [`FLO_QUIT_ROW_DISABLED_ID`]. That second one is the greyed-out overlay
+/// for a REFUSED quit, and it would never come off:
+/// `FeGroupInGameGroupSelect::FUN_1400a77c0` walks the cells and its first act per cell is
+/// `cmp DWORD PTR [rcx+0x4], 0` / `je` -- the entry's GATE. Only a gated row reaches the call at
+/// `0x1400a78af` that resolves `0x1eacd0` under that cell and sets its visibility from the gate's
+/// verdict. This crate's item is [`FE_INGAME_MENU_GATE_ALWAYS`], so the pass skips it, nothing
+/// ever hides the twin, and the record's own `ff808080` is what draws.
+///
+/// `0x1eacd0` is the shared id for that overlay -- `0x0232`, `0x0238`, `0x023f` and `0x0255` all
+/// use it, which is the four gated rows in this file: the three message rows (gates 1, 2, 3) and
+/// quit (gate 4). It lines up exactly with the builder table in `docs/DS2-INGAME-MENU.md`.
+pub const FLO_QUIT_ROW_ICON_GROUP: u32 = 0x0255;
+pub const FLO_QUIT_ROW_DISABLED_ID: u32 = 0x001e_acd0;
+
+/// What child [`FLO_QUIT_ROW_HIGHLIGHT`] names, checked and then copied through untouched.
+pub const FLO_QUIT_ROW_HIGHLIGHT_DEFINITION: u32 = 0x0257;
+
+/// The definition that IS the Quit Game icon, and nothing else.
+///
+/// The white copy of row 2's icon, with a child id of `0`, so substituting it for
+/// [`FLO_QUIT_ROW_ICON_GROUP`] drops the grey twin and adds no duplicate id to the scene.
+pub const FLO_QUIT_ICON_DEFINITION: u32 = 0x0254;
+
+/// The index the added row's definition is filed under. Ours, like
+/// [`FLO_ADDED_PANEL_DEFINITION`], and asked for only by our own record.
+pub const FLO_ADDED_ROW_DEFINITION: u32 = 0xf258;
+
+/// Index into [`FLO_QUIT_TAB_CHILD_IDS`] of the mark a new row's mark is cloned from.
+pub const FLO_QUIT_TAB_MARK_TEMPLATE: usize = 6;
+
+/// Element ids for the rows this repo adds, one per slot, chosen because the file contains none of
+/// them.
+///
+/// **Absent from the whole file, not merely from the quit tab's container.** A row id is what the
+/// namer resolves and what the substituted record carries, so an id used anywhere else in the
+/// document is an id whose path could resolve to something that already exists. Scanned as raw
+/// dwords over all 285088 bytes: of `0x1eacc0..0x1eacdf`, the free ones are `c0`-`c8`, `cc`, `cd`,
+/// `ce`, `d3`, `d7` and `df` -- fifteen, against a ceiling of two per tab.
+///
+/// `0x1eaccd` is first because it is the one already on record: the earlier runtime experiment
+/// that named it in the namer got `row-extent 3`, i.e. nothing resolved, which is the same answer
+/// the file gives from the other side.
+pub const FLO_ADDED_ROW_IDS: [u32; 2] = [0x001e_accd, 0x001e_acce];
+
+/// Element ids for those rows' caption marks, one per slot.
+///
+/// **These are scoped to the container and only need to be free THERE.** `FeComponentObject`'s
+/// `findByIdPath` matches one path component at a time against the record's `+0x1c`, so a label id
+/// used under some other container is not a collision -- the path differs before it gets there.
+/// Every id in `0x1eac40..0x1eac50` appears somewhere in this document; none of these appears among
+/// [`FLO_QUIT_TAB_CHILD_IDS`].
+///
+/// `0x1eac4a` is first because it is the id the cut fourth row used -- its caption, `0x200f28`, is
+/// still in the FMG and still reads "Mouse Settings".
+pub const FLO_ADDED_LABEL_IDS: [u32; 2] = [0x001e_ac4a, 0x001e_ac4b];
+
+/// How far apart consecutive added rows and their marks sit.
+///
+/// Both series are the shipped ones continued. The rows sit at `10.60`, `55.90`, `103.90` and the
+/// marks at `17.55`, `65.95`, `114.35`; the last step of each is `48.00` and `48.40`, and those are
+/// what a fourth and fifth row continue. **They are not the same number**, which is why the two
+/// pitches are separate constants rather than one shared `48`.
+pub const FLO_ROW_PITCH: f32 = 48.0;
+pub const FLO_MARK_PITCH: f32 = 48.4;
+
+/// Where the added row and its mark go, in the container's own coordinates.
+///
+/// The three shipped rows sit at y `10.60`, `55.90`, `103.90` and their marks at `17.55`, `65.95`,
+/// `114.35`. Both series step by ~48 with +y downwards, so the fourth of each continues it:
+/// `103.90 + 48.00` and `114.35 + 48.40`. The x is row 2's and mark 2's, unchanged -- the shipped
+/// rows' x values wobble by a few units and there is no pattern in that to continue.
+///
+/// This is the ROW's position and not the icon's. The record names [`FLO_ADDED_ROW_DEFINITION`],
+/// which places its own icon at `(8.10, 4.55)` inside it exactly as row 2 does, so the glyph lands
+/// where row 2's would one step down.
+pub const FLO_ADDED_ROW_XY: (f32, f32) = (-0.1, 151.9);
+pub const FLO_ADDED_MARK_XY: (f32, f32) = (60.2, 162.75);
+
+/// Byte offset of the packed colour inside a transform block, and the tint the added row's icon
+/// is drawn with.
+///
+/// **The offset is read off the loader, not counted off the front of the struct.**
+/// `FUN_140b50bc0`'s "is this child trivial enough to inline away" test ends
+///
+/// ```asm
+/// test  DWORD PTR [rax+0x20], 0x10f
+/// jne   not_trivial
+/// cmp   BYTE PTR [rax+0x1b], 0xff        ; rax is the record's transform block
+/// jne   not_trivial
+/// ```
+///
+/// so `+0x1b` is a byte the builder requires to be `0xff` before it will flatten a child away.
+/// That is the alpha: the 35 records in `l02_01_In-Game.flo` carrying `00ffffff` are the
+/// transparent flash overlays, and every one of them fails that test rather than being inlined.
+/// A field the builder refuses to flatten over is a field the draw applies.
+///
+/// **And the game itself demonstrates the tint on this very icon.** `0x0255` instantiates
+/// [`FLO_QUIT_ICON_DEFINITION`] twice, at `ffffffff` and at `ff808080`, and the second one is the
+/// greyed-out quit icon. One definition, two colours, two appearances, from this field alone --
+/// which is also what proves the colour reaches the shape underneath, since the record carrying
+/// `ff808080` is a nested record and the shape below it is `ffffffff`.
+///
+/// Byte order in memory is **R, G, B, A** -- see [`FLO_ADDED_ROW_TINT`], which had it backwards
+/// and cost a run to find out. Only the alpha's position is readable from the file, via the
+/// `+0x1b` test above; the file's opaque non-white records are all greys and blacks, so nothing in
+/// it distinguishes R-first from B-first.
+///
+/// Note this does NOT disturb the census in [`FLO_TRANSFORM_FLAGS_OFFSET`]: "RGB is white" there
+/// means the low three bytes of the little-endian `u32` are `ff ff ff`, which is the same set of
+/// records under either reading.
+///
+/// **On its own the colour does nothing.** See [`FLO_TRANSFORM_FLAGS_OFFSET`].
+pub const FLO_TRANSFORM_COLOUR_OFFSET: usize = 0x18;
+
+/// Byte offset of the flag word beside it, and the two bits that make the colour mean anything.
+///
+/// **THE COLOUR IS INERT WITHOUT THESE, AND A RUN PROVED IT.** The first version of this wrote
+/// `ffff6450` into a transform block copied from a row whose flags were `0`, and the icon came
+/// back on screen in its shipped colour with no other symptom -- no refusal in the log, no crash,
+/// nothing to read. The field is not a colour, it is a colour PLUS a licence to use it, and
+/// copying a block from a row that never wanted one copies the licence's absence.
+///
+/// Both bits were then settled against all 1045 records in the file, and the split is total:
+///
+/// ```text
+///  flags    n   white  non-white  alpha<ff
+///  0x000  928     928          0         0
+///  0x001    9       9          0         0
+///  0x010   77       0         77        77    alpha only -- RGB is ffffff in all 77
+///  0x011   19       0         19        19    likewise
+///  0x110    5       0          5         0    RGB changed: ff000000, ff808080
+///  0x111    3       0          3         0    RGB changed: 800080ff, cdff80ff, daff73e9
+///  0x130    4       0          4         0    RGB changed: ff000000
+/// ```
+///
+/// `0x10` set with a non-white colour: 108 records. `0x10` clear with a non-white colour: **zero**.
+/// And every record carrying `0x100` has non-white RGB, while every record without it is
+/// `xxffffff` -- varying alpha over white. So `0x10` is "the colour word is live" and `0x100` is
+/// "and its RGB is not white".
+///
+/// An opaque re-skin needs both, which is exactly what `0x0255`'s grey twin carries: flags
+/// `0x110`, colour `ff808080`. The one record in the file already doing what this crate wants to
+/// do. Bit `0x20` (in `0x130`) and bit `0x1` are left alone -- `0x1` occurs on white records too,
+/// so neither is about colour and neither is worth setting on a guess.
+pub const FLO_TRANSFORM_FLAGS_OFFSET: usize = 0x20;
+pub const FLO_TRANSFORM_COLOUR_LIVE: u32 = 0x0010;
+pub const FLO_TRANSFORM_COLOUR_RGB: u32 = 0x0100;
+
+/// The tint, as the four bytes it occupies in memory: **R, G, B, A**.
+///
+/// **A byte array and not a `u32`, because a `u32` is what got this wrong.** The first version was
+/// `0xff_ff_64_50` under a doc comment claiming `0xAARRGGBB` stored B, G, R, A. Written
+/// little-endian that lays down `50 64 ff ff`, and the run came back with a BLUE icon -- which is
+/// `(0x50, 0x64, 0xff)` read straight through, R first.
+///
+/// Alpha last was already fixed, by the builder's `cmp BYTE PTR [rax+0x1b], 0xff`. The other three
+/// were asserted from nothing, and **the file could not have settled them either way**: its only
+/// opaque non-white records are `ff808080` and `ff000000`, greys and blacks, where the order does
+/// not show. The three hued records are all translucent and all read plausibly under either
+/// convention. So this was never a fact in the file waiting to be read -- it was a coin flip
+/// written down as a measurement, and the run is what called it.
+///
+/// Red, opaque, in the order the bytes are actually laid down. The added row wears the shipped
+/// Quit Game glyph, so without this it is the same icon as the row directly above it and the only
+/// thing telling them apart is the caption. Red because the row is the one that does not ask.
+///
+/// **It is a strength and a hue rather than three bytes, because the colour MULTIPLIES.** The
+/// game's own greyed-out state is the demonstration: `ff808080` on this very glyph reads as
+/// disabled, and a flat mid-grey silhouette would not -- it darkens the artwork, so white is the
+/// identity and anything below it composites down. Which means a fraction of a hue is meaningful,
+/// and the fraction is the thing worth naming.
+pub const FLO_ADDED_ROW_TINT: [u8; 4] = [
+    toward_white(FLO_ADDED_ROW_HUE[0], FLO_ADDED_ROW_TINT_STRENGTH),
+    toward_white(FLO_ADDED_ROW_HUE[1], FLO_ADDED_ROW_TINT_STRENGTH),
+    toward_white(FLO_ADDED_ROW_HUE[2], FLO_ADDED_ROW_TINT_STRENGTH),
+    0xff,
+];
+
+/// The hue [`FLO_ADDED_ROW_TINT`] is mixed from, at full strength. R, G, B.
+pub const FLO_ADDED_ROW_HUE: [u8; 3] = [0xff, 0x64, 0x50];
+
+/// How far [`FLO_ADDED_ROW_TINT`] is pushed from white toward [`FLO_ADDED_ROW_HUE`], out of `255`.
+///
+/// **This is the one number in this block that is taste and not measurement**, and it is on its
+/// own line so it can be turned without touching the hue or the byte order that took a run each to
+/// settle. Every value that has actually been on screen, and what it was called:
+///
+/// ```text
+///  255  100% linear  #ff6450   "this is red"           -- a re-skin, a different KIND of row
+///   26   10% linear  #fff0ee   "it looks like 0% red"  -- green moved 15 of 255
+///   77   30% linear  #ffd1cb   "that looks like 10%"
+///  120   47% linear  #ffb7ad   asked for as 33%
+/// ```
+///
+/// **Linear is not perceptual, and the three earlier points say by how much.** A 10% mix showed
+/// nothing and a 30% mix read as 10%, which fits a floor of roughly 20% before anything registers
+/// and proportional response above it:
+///
+/// ```text
+/// perceived  ~=  (linear - 0.20) / 0.80
+/// ```
+///
+/// That model reproduces all three points (`10% -> 0`, `30% -> 13`, `100% -> 100`) and is what
+/// picked `120` for a perceived third rather than another guess at the ramp. It is fitted to three
+/// samples of one person's eye on one glyph over one background, so it is a working rule and not a
+/// law -- but it beats halving the interval each time.
+pub const FLO_ADDED_ROW_TINT_STRENGTH: u8 = 120;
+
+/// Mix one channel `strength/255` of the way from white toward `channel`.
+///
+/// White is the identity for a multiply, so a partial tint is a partial step away from it.
+const fn toward_white(channel: u8, strength: u8) -> u8 {
+    (255 - ((255 - channel as u16) * strength as u16) / 255) as u8
+}
+
+/// Index of the alpha byte inside [`FLO_ADDED_ROW_TINT`]. It is the byte
+/// [`FLO_TRANSFORM_COLOUR_OFFSET`]` + 3` lands on, which is the one the builder reads.
+pub const FLO_TINT_ALPHA: usize = 3;
+
+// ---------------------------------------------------------------------------------------------
+// Captions: how a pause-menu row gets its text, and where the strings live.
+//
+// Reproduce the strings with:
+//
+//     python3 scripts/ds2-ebl.py extract /menu/text/english/ingamemenu.fmg --out /tmp/ds2text
+//     python3 scripts/ds2-fmg.py /tmp/ds2text/ingamemenu.fmg --id 0x200f26 --id 0x200f2a
+// ---------------------------------------------------------------------------------------------
+
+/// `FeGroupInGameTopSelect::bindCaptions(this)`. RVA `0x000a7130`.
+///
+/// Ten `(scene path, FMG text id)` pairs, built on the stack at stride `0x38` with the text id at
+/// `+0x30`, then a hardcoded ten-iteration loop that for each one does
+///
+/// ```text
+/// FUN_140026790(this + 0x150, accessor, entry)   ; resolve the element
+/// FUN_14003d870(command, 7, entry->textId)       ; kind 7 = "text by FMG id"
+/// FUN_140029840(accessor + 0x30, command)        ; apply
+/// ```
+///
+/// **The count is a literal in the code and the table is on its stack**, so an eleventh caption
+/// cannot be added by substituting data the way the container's child list can. It has to be bound
+/// by making the same calls again — which is what `ds2-menu-row`'s caption module does, using the
+/// path the original itself just built rather than rebuilding one.
+///
+/// Three of the ten are the quit tab's, all under [`FE_QUIT_TAB_BASE_PATH`]:
+///
+/// ```text
+/// label 0x1eac46  text 0x200f26  "Game Options"
+/// label 0x1eac47  text 0x200f27  "Screen Options"
+/// label 0x1eac4c  text 0x200f2a  "Quit Game"
+/// ```
+///
+/// And the two ids the tab never binds are `0x200f28` "Mouse Settings" and `0x200f29` "Keyboard
+/// Settings" — the PC port's cut input rows, which is what the two spare cells in
+/// [`FE_QUIT_TAB_SPARE_CELL_IDS`] were for. That is the whole story of the missing fourth row,
+/// told by the game's own text.
+pub const FE_INGAME_TOP_SELECT_CAPTIONS: u32 = 0x000a_7130;
+
+/// Byte offset of the scene holder [`FE_BIND_SCENE_OBJ_PROXY`] is called against, inside
+/// `FeGroupInGameTopSelect`. `lea rcx,[rsi+0x150]` in the loop above.
+pub const FE_INGAME_TOP_SELECT_SCENE_HOLDER_OFFSET: usize = 0x150;
+
+/// Byte offset, inside the accessor [`FE_BIND_SCENE_OBJ_PROXY`] fills, of the slot the text calls
+/// take. `lea rcx,[rbp+0x90]` against an accessor built at `rbp+0x60`.
+pub const FE_ELEMENT_ACCESSOR_TEXT_SLOT_OFFSET: usize = 0x30;
+
+/// Bytes the accessor occupies. The original gives it `rbp+0x60 .. rbp+0xf0`.
+pub const FE_ELEMENT_ACCESSOR_SIZE: usize = 0x90;
+
+/// `FeElement::setText(accessor + 0x30, string)`. RVA `0x000297d0`.
+///
+/// **It only READS the string**, which is what makes supplying one cheap. The layout it reads is
+/// MSVC's small-string optimisation as `dantelion2` spells it: the capacity at `+0x18` decides
+/// where the characters are, inline at `+0x00` when it is `<= 7` and behind the pointer at `+0x00`
+/// otherwise. So a caption longer than seven characters is a four-field struct pointing at a
+/// `static` in this DLL — no allocator, no constructor, nothing to free.
+///
+/// It then measures the UTF-16 length itself and calls the element's own `vtable[0x148]`.
+pub const FE_ELEMENT_SET_TEXT: u32 = 0x0002_97d0;
+
+/// Byte offset of the capacity field the string layout above is chosen by.
+pub const DL_STRING_CAPACITY_OFFSET: usize = 0x18;
+/// Capacity at or below which the characters are inline rather than behind the pointer.
+pub const DL_STRING_INLINE_CAPACITY: u64 = 7;
+
+/// The quit tab's bottom row, "Quit Game" — the one that returns to the title screen and offers to
+/// save on the way. Its caption is retargeted so that the row this repo adds can be the one called
+/// "Quit Game", which is what it actually does.
+pub const FE_QUIT_TAB_ROW_TITLE_LABEL_ID: u32 = 0x001e_ac4c;
+
+/// The label element id given to the added row.
+///
+/// `0x1eac4a` rather than something outside the pool: `0x1eac45 + n` is the shared row-label id
+/// space the in-game menu screens draw from, and `0x1eac4a` is the one the cut fourth row used
+/// (its caption, `0x200f28`, is still in the FMG and still reads "Mouse Settings"). Nothing in the
+/// quit tab's container carries it, so nothing is shadowed.
+pub const FLO_ADDED_ROW_LABEL_ID: u32 = 0x001e_ac4a;
+
+/// How much taller the quit tab's panel has to be drawn for a fourth row to sit on it.
+///
+/// **Measured, not chosen.** All three menu tabs share panel definition `0x0221` at scale `(1,1)`;
+/// its shape is `57.80 x 341.25` and its own translate puts it at panel-local `y = -59.90 ..
+/// 281.35`. The three rows sit at panel-local `y = 113.6, 158.9, 206.9` and a row plate is
+/// `48.80` tall, so the bottom row ends at `255.7` and the scroll's own bottom edge is `25.65`
+/// below that.
+///
+/// **That 25.65 is the scroll's bottom MARGIN, and the first version of this constant spent it.**
+/// It reached `303.7`, where the fourth row ends, which puts the scroll's bottom curl exactly on
+/// the row's bottom edge -- arithmetically "covered" and visibly still short. The target is the
+/// fourth row's end PLUS the margin the shipped rows are drawn with:
+///
+/// ```text
+/// (303.7 + 25.65) / 281.35 = 1.1706
+/// ```
+///
+/// Scaling is about the record's own origin, so the top edge moves up by 10.1 as well and the
+/// header margin stretches by the same 17%. A scroll can absorb that; a nine-slice would be better
+/// and this file does not obviously offer one.
+///
+/// It scales the panel's CURSOR with it -- `0x1eac81`'s definition carries both the scroll and the
+/// highlight. Only the quit tab is affected, because what is scaled is this crate's own copy of
+/// that tab's child record rather than the shared definition all three tabs instantiate.
+/// **ANSWERED, AND THE ANSWER IS THAT THIS FIELD DOES NOTHING.** `1.0794` and then `1.1706` were both reported
+/// as no visible change, and "17% of a 341-unit scroll is invisible" is not credible -- that is 58
+/// units, more than a row. So the thing in doubt is no longer the factor, it is whether this field
+/// reaches the scroll at all. `2.0` is deliberately unmissable, and because it is applied to ONE
+/// axis it separates three outcomes in one look:
+///
+/// * the scroll is twice as TALL -- this offset is scale-y, and the factor goes back to `1.1706`;
+/// * the scroll is twice as WIDE -- this offset is scale-X, and the sibling at `+0x08` is the one;
+/// * nothing moves -- the panel record is not what draws the scroll, and the next step is reading
+///   the 17 quads in shape `0x0220`'s geometry rather than guessing a fourth time.
+///
+/// It was the third: nothing moved on either axis. The tree walk then found the reason -- the panel
+/// draws through a `FeComponentTextureShape`, which is sized by its own quad
+/// ([`FE_TEXTURE_SHAPE_DEST_RECT_OFFSET`]) and never re-derives it from an ancestor's transform.
+///
+/// So this is `1.0`: the substitution still copies the panel's record like every other, and the
+/// scale it writes is the one the game shipped. A number that provably changes nothing has no
+/// business sitting in a table of measurements pretending otherwise.
+pub const FLO_PANEL_STRETCH_Y: f32 = 1.0;
+
+/// Index into [`FLO_QUIT_TAB_CHILD_IDS`] of the panel the stretch applies to.
+pub const FLO_QUIT_TAB_PANEL: usize = 0;
+
+/// `f32` scale-y inside a transform block. `pfVar1[3]` in the builder's identity test.
+pub const FLO_TRANSFORM_SCALE_Y_OFFSET: usize = 0x0c;
+
+// ---------------------------------------------------------------------------------------------
+// The live component tree, for finding an element the file alone will not identify.
+//
+// Three stretch factors were tried on the quit tab's panel record and the third one -- scale 2.0,
+// deliberately unmissable -- changed nothing on screen while the log proved the write landed. So
+// the element being scaled is not the one that draws the banner, and no amount of further
+// arithmetic on the `.flo` fixes that. What is needed is the live tree: what is actually built
+// under this tab, and which of it is big enough to be the background.
+// ---------------------------------------------------------------------------------------------
+
+/// `FeLayoutScene::findByIdPath(scene, ids, count)`. RVA `0x00afdad0`.
+///
+/// `mov rcx,[rcx+0x28]` then a tail-jump into the search; returns the component or null. This is
+/// the lookup every scene path in the frontend bottoms out in, so resolving a path by hand and
+/// resolving it the way the grid does are the same operation.
+pub const FE_SCENE_FIND_BY_ID_PATH: u32 = 0x00af_dad0;
+
+/// Byte offset, inside a `FrontendEx::SceneObjProxy`, of the scene proxy its resolve reads.
+///
+/// `SceneObjProxy::resolve` (`0x140027ce0`) opens `mov rcx,[rcx+0x58]; mov rax,[rcx]; call
+/// [rax+8]`, so the scene comes from slot 1 of whatever lives here.
+pub const FE_SCENE_OBJ_PROXY_SCENE_OFFSET: usize = 0x58;
+/// Vtable slot on that object which returns the scene.
+pub const FE_SCENE_PROXY_GET_SCENE_SLOT: usize = 0x08;
+
+/// Component tree links, read off `FUN_140b77dc0` and `FeComponentObject::findByIdPath`.
+///
+/// ```text
+/// child   = [parent + 0x38]      first child
+/// child   = [child  + 0x28]      next sibling
+/// record  = [child  + 0x48]      the `.flo` record, whose +0x1c is the element id
+/// ```
+pub const FE_COMPONENT_NEXT_SIBLING_OFFSET: usize = 0x28;
+pub const FE_COMPONENT_FIRST_CHILD_OFFSET: usize = 0x38;
+pub const FE_COMPONENT_RECORD_OFFSET: usize = 0x48;
+
+/// Where a component's own transform starts, which is NOT the same for every class.
+///
+/// `FeComponentObject`'s constructor (`0x140b69d10`) writes a 4x3 identity at `+0x60`;
+/// `FeComponentScene`'s (`0x140b6b730`) writes the same identity at `+0x50`. They are siblings
+/// under `FeComponentBase`, not parent and child, which is why the offsets differ -- so a dump
+/// covers both ranges and the vtable says which one to read.
+pub const FE_COMPONENT_TRANSFORM_DUMP_START: usize = 0x50;
+pub const FE_COMPONENT_TRANSFORM_DUMP_END: usize = 0xa0;
+
+/// The ONLY two classes whose `+0x38` is a child list, as vtable RVAs.
+///
+/// **This cost a crash.** `FUN_140b77dc0` reads `[parent+0x38]` and every component in the tree
+/// looked like a parent, so a walk that followed that offset unconditionally descended into a
+/// `FeComponentTextureShape`, read some unrelated field as a pointer, and recursed until it died
+/// -- `exception_address=DINPUT8.dll+0x769ad` with five identical frames above it.
+///
+/// The classes that recurse are the ones whose `findByIdPath` (vtable `+0x190`) reaches
+/// `FUN_140b77dc0`: `FeComponentObject` matches its own id first and then descends,
+/// `FeComponentScene` has no id and descends immediately. Every other `FeComponent*` overrides that
+/// slot with something else and is a leaf as far as the tree is concerned.
+///
+/// Names from `scripts/ds2-rtti-vtables.py 'FeComponent'`.
+pub const FE_COMPONENT_OBJECT_VTABLE: u32 = 0x011d_dfa8;
+pub const FE_COMPONENT_SCENE_VTABLE: u32 = 0x011d_e158;
+
+/// The display list, its live count, and its stride, inside a `FeComponentSprite`.
+pub const FE_COMPONENT_DISPLAY_LIST_OFFSET: usize = 0x70;
+pub const FE_COMPONENT_DISPLAY_COUNT_OFFSET: usize = 0x66;
+pub const FE_COMPONENT_DISPLAY_ENTRY_STRIDE: usize = 0x10;
+/// Offset of the child pointer and of the id key inside one display-list entry.
+pub const FE_COMPONENT_DISPLAY_ENTRY_CHILD_OFFSET: usize = 0x00;
+pub const FE_COMPONENT_DISPLAY_ENTRY_KEY_OFFSET: usize = 0x0c;
+
+/// Classes whose `findByIdPath` is `xor eax,eax; ret` (`0x140b6d2a0`) -- genuine leaves:
+/// `FeComponentLinked`, `FeComponentMaskShape`, `FeComponentTextureMask`,
+/// `FeComponentTextureShape`. Following `+0x38` on one of these is what crashed the first walk.
+pub const FE_COMPONENT_LEAF_FIND_BY_ID_PATH: u32 = 0x00b6_d2a0;
+
+// ---------------------------------------------------------------------------------------------
+// FeComponentTextureShape: the thing that actually draws the quit tab's banner.
+//
+// Three stretch factors on ancestor transforms did nothing, and this is why: a texture shape is
+// sized by its OWN quad, copied into it at build time and never re-derived from a parent.
+// ---------------------------------------------------------------------------------------------
+
+/// `FeComponentTextureShape`'s vtable. RVA `0x011dea18`, VA `0x1411dea18`. From MSVC RTTI.
+pub const FE_COMPONENT_TEXTURE_SHAPE_VTABLE: u32 = 0x011d_ea18;
+
+/// `FeComponentTextureShape::initFromShape(this, allocator, shapeEntry)`. RVA `0x00b70200`.
+///
+/// Everything below is read off it. It allocates four parallel arrays, one element per quad, and
+/// fills them from the shape table entry's sub-records:
+///
+/// ```text
+/// count = [[this+0x40] + 0x02]                 quads in this shape
+/// [this+0x48]  count * 0x30                    per-quad vertex block, seeded from a constant
+/// [this+0x50]  count * 0x10                    four floats per quad   <- the RECT
+/// [this+0x58]  count * 0x10                    four floats per quad   <- the second RECT
+/// [this+0x60]  count * 0x04                    per-quad colour, from sub-record +0x18..+0x1b
+/// ```
+///
+/// For each quad, `sub = [[this+0x40] + 0x08] + i * 0x40` and `geom = [sub + 0x30]`:
+///
+/// * `geom != 0` -- both rects are filled with the SAME four floats from `geom[0..3]`;
+/// * `geom == 0` -- both are filled with `{0, 0, w, h}` taken from `[[sub+0x20] + 0x0e]` and
+///   `+0x10`, i.e. the texture's own pixel size.
+///
+/// The quit tab's banner is shape `0x0220`, `count = 1`, and its single quad reads
+/// `(914.20, 1.10, 972.00, 342.35)` -- `57.80 x 341.25`, which is the `341.25` the panel
+/// measurements were built on. The sub-record's own translate is `(-914.30, -61.00)`, cancelling
+/// the atlas origin, so these are atlas coordinates mapped into layout space.
+pub const FE_TEXTURE_SHAPE_INIT: u32 = 0x00b7_0200;
+
+/// The shape table entry a texture shape was built from, and the count field inside it.
+pub const FE_TEXTURE_SHAPE_ENTRY_OFFSET: usize = 0x40;
+pub const FE_SHAPE_ENTRY_COUNT_OFFSET: usize = 0x02;
+
+/// The two per-quad rect arrays, `0x10` bytes each: DESTINATION and SOURCE.
+///
+/// The initialiser seeds them identically and so cannot tell them apart. The DRAW can:
+/// `FeComponentTextureShape`'s render (`0x140b6f200`, vtable slot 46) ends every quad with
+///
+/// ```text
+/// FUN_140b521c0(ctx, [this+0x50] + i*0x10, colour, [this+0x58] + i*0x10)
+/// ```
+///
+/// and in the branch where a texture is actually bound it **replaces the fourth argument** with a
+/// local `{0, 0, texWidth, texHeight}` read from `[tex+0x40]` and `[tex+0x44]`. A rect that can be
+/// substituted by the texture's own pixel size is the SOURCE.
+///
+/// So growing both is what put art on the added row that was mostly transparent -- the destination
+/// made room and the source pulled in whatever sits below the banner in the atlas. Growing the
+/// destination alone stretches the shipped art to fill instead.
+pub const FE_TEXTURE_SHAPE_DEST_RECT_OFFSET: usize = 0x50;
+pub const FE_TEXTURE_SHAPE_SOURCE_RECT_OFFSET: usize = 0x58;
+pub const FE_TEXTURE_SHAPE_RECT_STRIDE: usize = 0x10;
+
+/// The display-list key the panel's texture shape is filed under.
+///
+/// Not an element id -- `FUN_140b6bd80` sets a child's key from `FUN_140b6a440(child)`, and a shape
+/// with no id of its own lands on `0xffffffff`. Observed on every texture shape in the live tree.
+pub const FE_TEXTURE_SHAPE_DISPLAY_KEY: u32 = 0xffff_ffff;
+
+/// How much taller the banner's quad has to be for a fourth row.
+///
+/// The quad is `341.25` tall and covers three row slots with `25.65` of margin below the last.
+/// One more row is one more `48.00` of pitch, so `341.25 + 48.00 = 389.25` keeps the margin
+/// exactly. As a rect that is `y1 = 1.10 + 389.25 = 390.35`.
+pub const FE_BANNER_QUAD_Y1: f32 = 390.35;
+/// What the shipped quad's `y1` reads, checked before anything is written.
+pub const FE_BANNER_QUAD_SHIPPED_Y1: f32 = 342.35;
+
+/// The panel definition the quit tab's `0x1eac81` instantiates, and the caret inside it.
+///
+/// `0x0221` holds exactly two children: the banner shape `0x0220` at `(0, 0)`, and `0x004e` at
+/// `(40.85, 244.65)` -- panel-local, which is container y `141.65`, just below the third row's mark
+/// at `114.35`. That second one is the scroll caret.
+///
+/// **It is SHARED.** All three menu tabs' panels instantiate `0x0221`, so moving the caret inside it
+/// moves it on every tab. The quit tab therefore gets its own copy of the definition under an index
+/// nothing else asks for, reached the same way the container is: our record names it, and the
+/// lookup detour answers it.
+pub const FLO_PANEL_DEFINITION: u32 = 0x0221;
+/// Index of the caret among `0x0221`'s two children.
+pub const FLO_PANEL_CARET: usize = 1;
+/// Children `0x0221` declares.
+pub const FLO_PANEL_CHILDREN: usize = 2;
+
+/// The definition index the quit tab's own panel copy is filed under.
+///
+/// Outside the file's own range -- `l02_01_In-Game.flo` declares 342 definitions and the highest
+/// index seen is `0x0272` -- so a lookup for it can only come from the record this crate wrote.
+pub const FLO_ADDED_PANEL_DEFINITION: u32 = 0xf221;
+
+/// Where the caret goes: down by one row pitch, the same `48.00` the added row is spaced at.
+///
+/// `244.65 + 48.00`. It is the caret's own authored y in panel-local coordinates, so the panel's
+/// position does not enter into it.
+pub const FLO_CARET_Y: f32 = 292.65;
+/// What the shipped caret's y reads, checked before anything is written.
+pub const FLO_CARET_SHIPPED_Y: f32 = 244.65;

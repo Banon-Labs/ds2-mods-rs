@@ -541,9 +541,19 @@ dependencies = [
  "ds2-hook",
  "ds2-hotkey-config",
  "ds2-intro-skip",
+ "ds2-menu-row",
  "ds2-offline",
  "ds2-rva",
  "ds2-save-redirect",
+]
+
+[[package]]
+name = "ds2-menu-row"
+version = "0.1.0"
+dependencies = [
+ "ds2-game-base",
+ "ds2-hook",
+ "ds2-rva",
 ]
 
 [[package]]
