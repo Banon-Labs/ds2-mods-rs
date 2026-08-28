@@ -601,14 +601,14 @@ repositioning a live scene node or by adding one to the `.flo`. It is not waitin
 
 ## The `.flo` decoded, and the fourth row is a pointer edit
 
-Every route above assumed the layout was a file to be rewritten. It is not — or rather, it is a
+Every route above assumed the layout was a file to be rewritten. It is not -- or rather, it is a
 file that the game loads *in place*, and the thing that decides how many rows a container has is a
 `u16` in a table that one function hands out. Detour the function, hand back a copy of the table
 entry that says one more, and the row exists. No zlib, no BND4 writer, nothing on disk.
 
 **First, the file was the wrong one.** `l42_01_OptionSetting.flo` (`/menu/42.febnd.dcx`) is the
 OPTIONS screen and contains none of the pause menu's ids. The pause menu is
-`/menu/02.febnd.dcx` → `l02_01_In-Game.flo`, 285088 bytes, found by extracting all 26 `/menu/NN`
+`/menu/02.febnd.dcx` -> `l02_01_In-Game.flo`, 285088 bytes, found by extracting all 26 `/menu/NN`
 archives and searching each for `0x1eacc9` as a raw dword. Exactly one file has it.
 
 ```
@@ -627,8 +627,8 @@ Not pattern-matched. Each field below names the function that reads it.
 | child record array | definition `+0x08` | `FUN_140b50f20` |
 | record | **stride 0x28** | `FUN_140b50f20` |
 | definition index | record `+0x00` | `FUN_140b50bc0` |
-| transform block | record `+0x08` → 0x30 bytes | `FUN_140b50bc0` |
-| kind (`1` shape, `2` text, `4` nested, `8` texture; a flag word — `0x1004` occurs) | record `+0x12` | `FUN_140b50bc0` |
+| transform block | record `+0x08` -> 0x30 bytes | `FUN_140b50bc0` |
+| kind (`1` shape, `2` text, `4` nested, `8` texture; a flag word -- `0x1004` occurs) | record `+0x12` | `FUN_140b50bc0` |
 | frame range | record `+0x16` .. `+0x14` | `FUN_140b50bc0` |
 | **element id** | record `+0x1c` | `FeComponentObject::findByIdPath` |
 | x, y | transform `+0x00`, `+0x04` | `FUN_140b50f20`'s identity test |
@@ -652,7 +652,7 @@ list as `first = [parent+0x38]`, `next = [child+0x28]`.
 **The identity test is what fixes the transform layout**, and it is worth stating because guessing
 "x is probably the first float" is exactly the sort of thing that has cost runs here.
 `FUN_140b50f20` decides whether a child is trivial enough to inline by requiring
-`block[0] == 0.0 && block[1] == 0.0 && block[2] == 1.0 && block[3] == 1.0` — translate zero, scale
+`block[0] == 0.0 && block[1] == 0.0 && block[2] == 1.0 && block[3] == 1.0` -- translate zero, scale
 one. Four fields identified by one test.
 
 ### The quit tab's container has seven children, and all seven slots are used
@@ -670,13 +670,13 @@ def 0x0263 @0x011380 children=7 array=0x01ec98
 
 Three rows, three marks, one header. Rows step ~48 in y with +y downwards; marks step 48.4.
 
-`0x1eaccd` and `0x1eacce` appear **nowhere in the file** — which is the same answer the four
+`0x1eaccd` and `0x1eacce` appear **nowhere in the file** -- which is the same answer the four
 controlled runs gave from the other side, by a method that shares no assumption with this one.
 Two independent instruments, one answer: those ids were never authored.
 
 ### Why the child count is also the capacity
 
-`FUN_140b6bd80` — the attach — is the whole reason a fourth row could not be squeezed in:
+`FUN_140b6bd80` -- the attach -- is the whole reason a fourth row could not be squeezed in:
 
 ```asm
 mov   rdx, [rbx+0x70]           ; the display list
@@ -687,7 +687,7 @@ jbe   done                      ; full -> refuse
 ```
 
 One `u16`, two meanings: how many records to walk, and how many children the list can hold. And
-none of the seven is flattened away — `FUN_140b50bc0` only inlines a child whose id is zero and
+none of the seven is flattened away -- `FUN_140b50bc0` only inlines a child whose id is zero and
 whose transform is the identity, and every one of these has an id. Seven of seven.
 
 So raising that number is the entire edit, and it grows the list at the same time.
@@ -695,7 +695,7 @@ So raising that number is the entire edit, and it grows the list at the same tim
 ### What ships
 
 `crates/ds2-menu-row/src/layout.rs` detours `FUN_140b54740` (RVA `0x00b54740`, prologue
-`48 8b 01 44 8b ca 48 85 c0`, its own — not one of the 286 Arxan redirects). When the game asks for
+`48 8b 01 44 8b ca 48 85 c0`, its own -- not one of the 286 Arxan redirects). When the game asks for
 definition `0x263` it gets a leaked copy with `children = 9` and a child array of ours: the seven
 originals copied verbatim, plus a clone of row 0 carrying id `0x1eaccd` at `(-0.1, 151.9)` and a
 clone of row 0's mark carrying `0x1eaccc` at `(60.2, 162.75)`.
@@ -712,19 +712,19 @@ There are only four callers of `FUN_140b54740`, all inside the builder (`FUN_140
 `FUN_140b50bc0`), so the substitution cannot leak into any other subsystem.
 
 **It is one half of a pair.** The namer entry (`install.rs`) names `0x1eaccd`; the layout supplies
-it. Either alone is a measured null — and the namer-alone case is exactly the run already on record
+it. Either alone is a measured null -- and the namer-alone case is exactly the run already on record
 with `row-extent 3`, which makes it this change's control.
 
 
 ## The live tree, and why three stretch factors did nothing
 
 Reading the `.flo` established what elements exist. It could not establish which one is *behind*
-the rows, and three attempts to lengthen the banner by scaling — 8%, 17%, and a deliberately
-unmissable 2.0 — all produced no visible change while the log proved the write landed:
+the rows, and three attempts to lengthen the banner by scaling -- 8%, 17%, and a deliberately
+unmissable 2.0 -- all produced no visible change while the log proved the write landed:
 
 ```
 panel transform at=0x7fffe9b57140
-  before=[0 -103 1 1 …]   after=[0 -103 1 2 …]   scaled-offset=0xc
+  before=[0 -103 1 1 ...]   after=[0 -103 1 2 ...]   scaled-offset=0xc
 ```
 
 So the walk. `crates/ds2-menu-row/src/tree.rs` resolves every prefix of the quit tab's path and
@@ -732,7 +732,7 @@ dumps the live components. 117 nodes.
 
 ### The first walk crashed the game, and the crash was the useful part
 
-`exception_address=DINPUT8.dll+0x769ad`, five identical frames above it — `walk()` recursing into
+`exception_address=DINPUT8.dll+0x769ad`, five identical frames above it -- `walk()` recursing into
 garbage after a `FeComponentTextureShape`.
 
 **A component class does not have one way of holding children. It has three**, and each one is
@@ -742,11 +742,11 @@ stated by that class's `findByIdPath` override at vtable `+0x190`:
 |---|---|---|
 | `FeComponentObject`, `FeComponentScene` | `[this+0x38]`, then `[child+0x28]` | `FUN_140b77dc0` |
 | `FeComponentSprite` | display list `[this+0x70]`, count `[this+0x66]`, stride `0x10`, child at `+0x00`, key at `+0x0c` | `0x140b6bec0` |
-| everything else | none — `xor eax,eax; ret` | `0x140b6d2a0` |
+| everything else | none -- `xor eax,eax; ret` | `0x140b6d2a0` |
 
 The middle row matters beyond the crash. That display list is the same one
 `FLO_DEFINITION_CHILD_COUNT_OFFSET` bounds and `FUN_140b6bd80` fills, so **the container built from
-the quit tab's definition is a `FeComponentSprite`** — which is why raising the definition's child
+the quit tab's definition is a `FeComponentSprite`** -- which is why raising the definition's child
 count grew it, and why a walk that only knew the linked list would have reported the tab as empty
 even if it had survived.
 
@@ -755,7 +755,7 @@ the tree; both readings now sit next to each other there.
 
 ### What the tree says
 
-The container `0x1eace6` (def `0x0263`) reports nine children — the seven shipped plus ours:
+The container `0x1eace6` (def `0x0263`) reports nine children -- the seven shipped plus ours:
 
 ```
 0x1eac81 def=0x0221   the panel
@@ -766,7 +766,7 @@ The container `0x1eace6` (def `0x0263`) reports nine children — the seven ship
 ```
 
 And the panel holds exactly two things: a **`FeComponentTextureShape`** at display-list key
-`0xffffffff`, and the cursor (def `0x004e`). The texture shape is the only drawable — it is the
+`0xffffffff`, and the cursor (def `0x004e`). The texture shape is the only drawable -- it is the
 banner.
 
 ### Why no scale reached it
@@ -780,9 +780,104 @@ Two independent readings agree:
   scale-y, the banner would have doubled in width; it did neither.
 
 So the texture shape is sized by its own quad, not by any ancestor's transform. The remaining work
-is that quad — shape `0x0220`'s geometry in the `.flo`, or the equivalent field on the live
-component — and not another factor.
+is that quad -- shape `0x0220`'s geometry in the `.flo`, or the equivalent field on the live
+component -- and not another factor.
 
 **Three guesses at a factor was two too many.** The tree is what should have been read after the
 first one failed, and the rule the session earned is: when a change that should be unmissable is
 invisible, stop adjusting the value and go find out whether the field is even the one being drawn.
+
+
+## The icon: a row's definition IS its icon
+
+Everything in this section is static -- `scripts/ds2-flo.py` on `l02_01_In-Game.flo` and
+`scripts/ds2-disasm.py` on the deobfuscated image. No game was launched for any of it.
+
+The added row shipped wearing **Game Options'** icon, because it clones row 0. That is not a
+cosmetic afterthought that got skipped; it is what cloning a row means here:
+
+```
+def 0x0262   row 0                     def 0x0258   row 2, Quit Game
+  [0] def=0x025f (4.50,-0.15)            [0] def=0x0255 id=0x1eacd0 (8.10, 4.55)
+        [0] def=0x025e kind=1                  [0] def=0x0254            colour ffffffff
+  [1] def=0x0261 (6.90,-3.45)                        [0] def=0x0253 kind=1
+        [0] def=0x0260 kind=1                  [1] def=0x0254 id=0x1eacd0 colour ff808080
+      frames 1..69, colour 00ffffff                  [0] def=0x0253 kind=1
+                                         [1] def=0x0257 (6.90,-3.45)
+                                               frames 1..69, colour 00ffffff
+```
+
+A row definition holds an icon and a transparent flash overlay, and nothing else. The row's TEXT is
+the separate `0x022c` mark at x `60.2`, bound by FMG id. So the `u16` at the row record's `+0x00`
+is the entire answer to "which icon does this row show", and the three shipped rows differ only in
+which shape hangs off it -- `0x025e`, `0x0259`, `0x0253`.
+
+### There are no spare icons, and no better one in another tab
+
+Both were checked before reaching for a tint.
+
+* **Unused.** Thirteen of the file's 342 definitions are never instantiated by a nested record.
+  Every one of them is a screen or panel root -- `0x133` has 31 children, the rest carry `0x1eac80`
+  / `0x1eac81` headers. None is a loose icon. Below the definition layer the leaf tables are not
+  decoded, so an "unused shape index" could not be told apart from a decorative flourish without
+  rendering it, and picking one blind is picking a picture nobody has seen.
+* **Another column.** Four containers in this file hold rows -- `0x022d` (2), `0x0243` (3),
+  `0x024f` (2), `0x0263` (3) -- which is ten rows, exactly the ten captions
+  `FeGroupInGameTopSelect::bindCaptions` binds. So there are ten icons to choose from, and every
+  one of them already means something else on a menu this row sits three inches from. None says
+  "quit, but without asking" better than the quit icon does.
+
+### The tint, and why it is the icon ALONE
+
+`0x0255` instantiates `0x0254` **twice** -- once at `ffffffff`, once at `ff808080` under id
+`0x1eacd0`. That is the greyed-out overlay for a refused quit, and it is the game demonstrating,
+on this exact glyph, that the colour at transform `+0x18` re-skins a definition without touching
+it. One definition, two colours, two appearances. It also proves the colour reaches the shape
+underneath, since the record carrying `ff808080` is a nested record whose child is `ffffffff`.
+
+The offset is not counted off the front of the struct. `FUN_140b50bc0`'s "is this child trivial
+enough to inline away" test ends:
+
+```asm
+test  DWORD PTR [rax+0x20], 0x10f
+jne   not_trivial
+cmp   BYTE PTR [rax+0x1b], 0xff      ; rax is the record's transform block
+jne   not_trivial
+```
+
+`+0x1b` is the alpha -- the 35 records carrying `00ffffff` are the transparent flash overlays and
+every one fails that test rather than being flattened. A field the builder refuses to flatten over
+is a field the draw applies.
+
+**So the row record points at `0x0254`, not at `0x0258` or `0x0255`.** Cloning either of those
+would drag the grey twin along, and the twin would never come off:
+
+```asm
+FeGroupInGameGroupSelect::FUN_1400a77c0
+  0x1400a7851:  cmp   DWORD PTR [rcx+0x4], ebp     ; the entry's GATE, ebp = 0
+  0x1400a7854:  je    0x1400a78c0                  ; ungated -> next cell
+  ...
+  0x1400a789c:  call  0x1400a4e50                  ; ask the gate
+  0x1400a78af:  call  0x1400a64e0                  ; resolve 0x1eacd0 under this cell
+  0x1400a78bb:  call  0x14001e270                  ; visible = refused
+```
+
+Only a **gated** row reaches the code that touches `0x1eacd0`. This crate's item carries
+`FE_INGAME_MENU_GATE_ALWAYS` -- gate `0`, deliberately -- so the pass skips it, nothing ever hides
+the twin, and the record's own `ff808080` is what draws. A permanently disabled-looking icon on a
+row that is always available. `0x1eacd0` is shared by `0x0232`, `0x0238`, `0x023f` and `0x0255`,
+which is precisely the four gated rows in the file: the three message rows (gates 1, 2, 3) and
+quit (gate 4).
+
+`0x0254` is the white copy on its own, with a child id of `0`, so it also adds no duplicate id to
+the scene.
+
+### Where it goes
+
+The record now positions the glyph rather than a wrapper the glyph sits inside, so its y is
+anchored to its own label instead of to the row series. Row 2's icon lands at
+`(-0.10, 103.90) + (8.10, 4.55) = (8.00, 108.45)`, `5.90` above its mark at `114.35`; the added
+one keeps that gap at `162.75 - 5.90 = 156.85`. Anchoring to the row series would have given
+`156.45` -- the two series step by `48.00` and `48.40`, and the eye pairs an icon with its caption.
+Each glyph carries its own bearing (row 0's icon is `7.10` above its mark, row 1's `11.25`, row
+2's `5.90`), so there is no shared offset to reuse; row 2's applies because row 2's is the glyph.

@@ -45,6 +45,18 @@
 //! display list's capacity. Substituting a copy that says two more -- a row and its mark -- is the
 //! whole edit. Nothing is written to disk and no archive is repacked.
 //!
+//! # The icon
+//!
+//! A row's definition IS its icon -- an icon and a transparent flash overlay, with the caption
+//! living in the separate mark beside it -- so a cloned row wears the icon of whatever row it was
+//! cloned from, which was Game Options. The record instead names the Quit Game glyph on its own
+//! ([`ds2_rva::FLO_QUIT_ICON_DEFINITION`]), tinted red by the colour in its own transform, because
+//! the row above it is the other Quit Game.
+//!
+//! Not row 2's definition, which pairs that glyph with a grey twin under id `0x1eacd0`. The
+//! availability pass only resolves that id for a row with a nonzero GATE, and this row's gate is
+//! `0` -- so a cloned twin would draw `ff808080` for the life of the process.
+//!
 //! # Why it refuses more often than it writes
 //!
 //! Every one of the four hooks checks what the game left behind before it touches anything: the
