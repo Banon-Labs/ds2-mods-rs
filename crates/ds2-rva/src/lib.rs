@@ -2664,3 +2664,132 @@ pub const FEX_GRID_INDEX_TO_CELL: u32 = 0x0002_22c0;
 /// **The `col == colExtent` branch is the one an appended item takes**, which is why its element
 /// resolves to nothing: it is the "one past the end" namer, not the ordinary-cell namer.
 pub const FEX_GRID_CELL_TO_ELEMENT: u32 = 0x0002_2160;
+
+// ---------------------------------------------------------------------------------------------
+// THE CELL NAMER, AND WHY A FOURTH ROW MIGHT BE FOUR BYTES
+// ---------------------------------------------------------------------------------------------
+
+/// The quit tab's cell-namer constructor. RVA `0x000a5b50`.
+///
+/// Read from the disassembly, because the decompiler drops half of it. It builds a FOUR-component
+/// base path and then a SIX-slot array of cell ids of which three are zero:
+///
+/// ```asm
+/// mov  r9d, 0x1eace8
+/// lea  r8d, [r9-0x19]                  ; 0x1eaccf
+/// mov  edx, 0x1eaba9
+/// mov  DWORD PTR [rsp+0x20], 0x1eace6  ; -> path [0x1eaba9, 0x1eaccf, 0x1eace8, 0x1eace6]
+/// mov  DWORD PTR [rsp+0xc0], 0x1eacc9
+/// mov  DWORD PTR [rsp+0xc4], 0x1eacca
+/// mov  QWORD PTR [rsp+0xc8], 0x1eace9  ; and the pad dword behind it
+/// mov  QWORD PTR [rsp+0xd0], rbx       ; zero, zero
+/// ...  cmp rcx, 6 ; jb                 ; the loop already runs SIX times
+/// ```
+///
+/// Each non-zero id becomes one entry pushed into the namer's list at `+0x18`, and that list is
+/// what `FEX_GRID_CELL_TO_ELEMENT` indexes. **So a fourth cell is a four-byte constant here, not a
+/// layout edit -- provided an element exists for the id to resolve to.** Whether one does is the
+/// question `ds2-menu-row`'s enumerator answers.
+///
+/// Both cells the tab gained after the fact are out of sequence -- `c9, ca, ... e9` here and
+/// `7b, 7c, ... d5` on tab 3 -- which is what appending a row to a shipped tab looks like.
+pub const FE_INGAME_MENU_QUIT_TAB_NAMER: u32 = 0x000a_5b50;
+
+/// The quit tab's cell base path, as the four ids the namer builds it from.
+pub const FE_QUIT_TAB_BASE_PATH: [u32; 4] = [0x001e_aba9, 0x001e_accf, 0x001e_ace8, 0x001e_ace6];
+
+/// The three cell ids the quit tab ships with, appended to [`FE_QUIT_TAB_BASE_PATH`].
+pub const FE_QUIT_TAB_CELL_IDS: [u32; 3] = [0x001e_acc9, 0x001e_acca, 0x001e_ace9];
+
+/// `FrontendEx` scene path builder, four ids. RVA `0x000756a0`.
+///
+/// `fn(out, id0, id1, id2, id3) -> out`, with the fourth id on the stack at `[rsp+0x20]`.
+pub const FE_SCENE_PATH_BUILD4: u32 = 0x0007_56a0;
+
+/// Converts a built path into the form the append below takes. RVA `0x0001f8a0`. `fn(path, out)`.
+pub const FE_SCENE_PATH_SEAL: u32 = 0x0001_f8a0;
+
+/// Appends one id to a sealed path, producing an element accessor. RVA `0x0001ed80`.
+///
+/// `fn(path, out, id) -> out`. The accessor's own vtable slot 0 resolves it: non-zero is the live
+/// element, zero means the scene has nothing at that path. That resolve is exactly what the grid's
+/// layout bind uses to decide whether a cell exists, so asking it is asking the same question the
+/// bind asks.
+pub const FE_SCENE_PATH_APPEND: u32 = 0x0001_ed80;
+
+/// The quit tab's cell ids that the LAYOUT authors and the namer never lists.
+///
+/// `FeSceneInGameMenu`'s element cache (`0x140099f90`) resolves five cell-shaped children under
+/// `[0x1eaba9, 0x1eaccf, 0x1eace8, 0x1eace7]`, each followed by its own label element:
+///
+/// ```text
+/// 0x1eacc9 + label 0x1eac46      Game Options
+/// 0x1eacca + label 0x1eac47      Screen Settings
+/// 0x1eaccd + label 0x1eac4a      <- authored, never listed
+/// 0x1eacce + label 0x1eac4b      <- authored, never listed
+/// 0x1eace9 + label 0x1eac4c      Quit Game
+/// ```
+///
+/// **So the quit tab was authored for FIVE rows and ships using three**, which is also why the
+/// item vector's capacity is five ([`FE_INGAME_MENU_ITEM_VECTOR_CAPACITY`]) rather than some other
+/// number. Tab 3 is the control: the same cache resolves exactly three children under its region
+/// and no spares, and tab 3 is not short of cells.
+///
+/// The namer builds its cell paths under `0x1eace6` while the cache resolves under `0x1eace7` --
+/// two sibling containers below `0x1eace8`, with the same cell ids in each. The pair is presumably
+/// an interaction layer and a drawing layer.
+pub const FE_QUIT_TAB_SPARE_CELL_IDS: [u32; 2] = [0x001e_accd, 0x001e_acce];
+
+/// Pushes one built accessor onto a cell namer's list at `namer + 0x18`. RVA `0x000a7b30`.
+///
+/// `fn(&namer[0x18], accessor)`. This is the call [`FE_INGAME_MENU_QUIT_TAB_NAMER`] makes once per
+/// non-zero id in its six-slot array, so appending a fourth entry is the same operation the game
+/// performs three times on the way in.
+pub const FE_SCENE_NAMER_PUSH: u32 = 0x000a_7b30;
+
+/// Byte offset of the cell list inside a cell namer.
+pub const FE_SCENE_NAMER_LIST_OFFSET: usize = 0x18;
+
+/// Most entries a cell namer's list at [`FE_SCENE_NAMER_LIST_OFFSET`] can hold.
+///
+/// Measured the expensive way: a run that pushed six extra entries onto a list the game had already
+/// put three in wrote through a null on the seventh and killed the game at `0x141bee1c4`
+/// (`access_kind=1`, `rcx=rdx=rax=0`). Three plus three is fine; three plus four is not.
+///
+/// Six is also the bound of the id loop in [`FE_INGAME_MENU_QUIT_TAB_NAMER`], so the array and the
+/// list it fills are the same size -- which is the sort of agreement worth writing down, because
+/// it says the spare slots in that array are genuinely usable rather than accidental padding.
+pub const FE_SCENE_NAMER_LIST_CAPACITY: usize = 6;
+
+/// Byte offset of the count inside a cell namer's list, relative to the list itself.
+///
+/// `FUN_1400a7b30` reads `*(u64*)(list + 0x128)`, refuses above
+/// [`FE_SCENE_NAMER_LIST_CAPACITY`], and writes the incremented value back before copying the new
+/// element in. Relative to the namer that lands at `+0x140`, which is exactly the field
+/// `VLayoutAdapter`'s cell lookup (`0x1400a4b20`) compares the requested row against.
+pub const FE_SCENE_NAMER_COUNT_OFFSET: usize = 0x128;
+
+/// Bytes per entry in a cell namer's list. `FUN_1400a7b30` addresses element `n` at
+/// `list + (-list & 7) + n * 0x30`, and `0x1400a4b20` reads it back at the same stride.
+pub const FE_SCENE_NAMER_ENTRY_STRIDE: usize = 0x30;
+
+/// A cell namer entry, as dumped from two live entries of the quit tab's list.
+///
+/// ```text
+/// e0: a9ab1e00 cfac1e00 e8ac1e00 e6ac1e00 c9ac1e00 <slack> 05000000
+/// e1: a9ab1e00 cfac1e00 e8ac1e00 e6ac1e00 caac1e00 <slack> 05000000
+///      +0x00    +0x04    +0x08    +0x0c    +0x10            +0x28
+/// ```
+///
+/// Five `u32` ids, then uninitialised slack, then the path LENGTH. The slack genuinely differs
+/// between two entries the game built one after the other -- it is stack residue -- which is why a
+/// clone must copy an entry rather than be assembled field by field, and why a byte-diff has to
+/// ignore everything outside the fields named here.
+pub const FE_SCENE_NAMER_ENTRY_CONTAINER_OFFSET: usize = 0x0c;
+pub const FE_SCENE_NAMER_ENTRY_ID_OFFSET: usize = 0x10;
+pub const FE_SCENE_NAMER_ENTRY_LEN_OFFSET: usize = 0x28;
+/// The path length every quit-tab entry carries: root, region, `ace8`, container, cell.
+pub const FE_SCENE_NAMER_ENTRY_LEN: u32 = 5;
+/// The sibling container the scene's element cache resolves the five-cell set under, where the
+/// namer's own entries use [`FE_QUIT_TAB_BASE_PATH`]`[3]`.
+pub const FE_QUIT_TAB_CACHE_CONTAINER: u32 = 0x001e_ace7;
