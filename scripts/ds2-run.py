@@ -893,7 +893,7 @@ def config_text(
     continue_record: bool = False,
     continue_slot: int = -1,
     continue_silence: bool = True,
-    continue_loading_screen: bool = True,
+    continue_loading_screen: bool = False,
     offline: bool = True,
     block_sockets: bool = True,
 ) -> str:
@@ -1112,17 +1112,20 @@ def config_text(
 #
 # Set to false to hear the title as the game plays it. Only an exact `false` turns it off.
 {KEY_CONTINUE_SILENCE} = {str(continue_silence).lower()}
-# STARTUP-ONLY. ON by default, and inert unless `slot` above is set.
+# STARTUP-ONLY. OFF, and it does nothing when on -- do not enable it expecting a cover.
 #
-# Covers the whole title flow with the game's own NOW LOADING screen -- FeOperatorNowLoading, the
-# same operator that drives the page you see on every map transition -- so the logos, the title,
-# the six-row menu and the character list are never shown. It is raised at FeOperatorTitle's setup
-# and dropped at FeSubStateTitleStartIngame.
+# The intent is to hide the title flow behind the game's own NOW LOADING page, which
+# FeOperatorNowLoading already drives on every map transition. The pointer walk to that operator is
+# verified against a live process; the call that would SHOW it is not known.
 #
-# The game's own screen rather than a black rectangle, because the shortcut takes ~5.6s and five
-# seconds of black is indistinguishable from a hang.
+# Two levers were tried and both are dead. Vtable slot 4, which the operator factory calls with
+# 0.0f right after construction, changed nothing on screen. Slot 24 with (0x65, true, 0.0), copied
+# from the game's own title/loading switch at 0x1405116f0, CRASHED the process: these operator
+# vtables have eleven slots, so +0xc0 read string data and called it -- the call site was real, the
+# object was not.
 #
-# Set to false to watch the title flow drive itself. Only an exact `false` turns it off.
+# The switch is kept so the surviving walk can be exercised, and the log says
+# `operators-resolved-but-no-verified-lever` rather than claiming a cover.
 {KEY_CONTINUE_LOADING_SCREEN} = {str(continue_loading_screen).lower()}
 
 [{OFFLINE_SECTION}]
@@ -1207,7 +1210,7 @@ def write_config(
     continue_record: bool = False,
     continue_slot: int = -1,
     continue_silence: bool = True,
-    continue_loading_screen: bool = True,
+    continue_loading_screen: bool = False,
     offline: bool = True,
     block_sockets: bool = True,
 ) -> tuple[Path, str]:
@@ -1313,7 +1316,7 @@ def dry_run(
     continue_record: bool = False,
     continue_slot: int = -1,
     continue_silence: bool = True,
-    continue_loading_screen: bool = True,
+    continue_loading_screen: bool = False,
     offline: bool = True,
     block_sockets: bool = True,
 ) -> int:
@@ -1453,7 +1456,7 @@ def launch(
     continue_record: bool = False,
     continue_slot: int = -1,
     continue_silence: bool = True,
-    continue_loading_screen: bool = True,
+    continue_loading_screen: bool = False,
     offline: bool = True,
     block_sockets: bool = True,
 ) -> int:
@@ -2373,12 +2376,13 @@ def main() -> int:
         ),
     )
     parser.add_argument(
-        "--no-continue-loading-screen",
+        "--continue-loading-screen",
         dest="continue_loading_screen",
-        action="store_false",
+        action="store_true",
         help=(
-            "let the title flow draw itself instead of covering it with the game's own NOW "
-            "LOADING screen. The cover is on by default whenever --continue-slot is set."
+            "resolve the NOW LOADING operator during the title flow and log it. It does NOT "
+            "cover anything: the call that shows that screen is not known yet, and the two "
+            "candidates tried so far did nothing and crashed respectively."
         ),
     )
     parser.add_argument(

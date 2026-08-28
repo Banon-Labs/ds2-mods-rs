@@ -2029,18 +2029,41 @@ pub const GAME_MANAGER_FRONTEND_ROOT_OFFSET: usize = 0x22e0;
 /// operator array at `+0x18`, which is how the frontend iterates operators.
 pub const FRONTEND_NOW_LOADING_OPERATOR_OFFSET: usize = 0xc8;
 
-/// Vtable slot 4 of `FeOperatorBase`, which takes a `float`. **Believed to be opacity.**
+/// That frontend object -> `FeOperatorTitle`. `0xd0`.
 ///
-/// THE EVIDENCE, AND ITS LIMIT. The factory that creates the operator calls exactly this slot
-/// twice with `xorps xmm1,xmm1` -- `0.0f` -- at `0x14050030b` and `0x140500318`, immediately after
-/// construction and before anything could have shown it. `FeOperatorNowLoading`'s override
-/// (`0x1400a7c30`) forwards that float to two sub-objects, the scene at `+0x10` and the group at
-/// `+0x270`, which is the shape of an opacity that has to reach every layer of a screen.
+/// The neighbouring named slot to [`FRONTEND_NOW_LOADING_OPERATOR_OFFSET`], and read live at the
+/// top menu: it holds an object whose vtable is `0x1410bc578`, which RTTI names
+/// `FeOperatorTitle`. The same two operators are mirrored into the operator array at `+0x18`
+/// (NowLoading) and `+0x30` (Title).
+pub const FRONTEND_TITLE_OPERATOR_OFFSET: usize = 0xd0;
+
+/// `FeOperatorBase` vtable slot 24 (`+0xc0`) -- show or hide one of an operator's screens.
 ///
-/// That is an inference from a call site, not a proof, and this project has already paid once for
-/// exactly that class of reasoning (see [`SOUND_MANAGER_V0_NOT_A_FRAME_PUMP`]). Treat "1.0 shows
-/// the loading screen" as unconfirmed until a run says otherwise.
-pub const FE_OPERATOR_OPACITY_VTABLE_SLOT: usize = 4;
+/// `void slot24(this, u32 screen_id, bool show, float fade)`. Windows x64 puts those in `rcx`,
+/// `edx`, `r8b` and `xmm3`, which is exactly what the game's own call site loads.
+///
+/// **This is read from a call site, not inferred from one.** `0x1405116f0` is the game's own
+/// switch between the title and the loading screen, and it is a straight swap:
+///
+/// ```text
+/// [param+2] == 1   Title.slot24(0x66, false, 0.0)   NowLoading.slot24(0x65, true,  0.0)
+/// [param+2] != 1   Title.slot24(0x65, true,  0.0)   NowLoading.slot24(0x66, false, 0.0)
+/// ```
+///
+/// So the ids are not "the loading screen" and "the title" -- both operators answer to both. The
+/// id selects which of that operator's screens, and the operator supplies the content.
+///
+/// An earlier version of this constant named slot 4 and called it opacity, on the evidence that
+/// the operator factory calls slot 4 twice with `0.0f` right after construction. That inference
+/// was wrong: setting it to `1.0` at the title changed nothing on screen. Slot 4 is kept out of
+/// this file entirely rather than left around to be believed again.
+pub const FE_OPERATOR_SET_SCREEN_VTABLE_SLOT: usize = 24;
+
+/// The screen id an operator is asked to SHOW when it takes over. `0x65`.
+pub const FE_OPERATOR_SCREEN_ID_SHOW: u32 = 0x65;
+
+/// The screen id an operator is asked to HIDE when it gives way. `0x66`.
+pub const FE_OPERATOR_SCREEN_ID_HIDE: u32 = 0x66;
 
 /// `FeOperatorTitle::v2`, the title operator's setup. RVA `0x000ef030`, VA `0x1400ef030`.
 ///

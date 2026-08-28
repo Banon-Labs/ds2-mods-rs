@@ -61,10 +61,11 @@ impl Default for ContinueConfig {
             // nobody pressed is the surprising behaviour, not the quiet one. Set it to `false` to
             // hear the title as the game plays it.
             silence: true,
-            // ON, for the same reason as `silence` and with the same guard: it cannot act unless
-            // `slot` has already turned the shortcut on. Set it to `false` to watch the title
-            // flow drive itself.
-            loading_screen: true,
+            // OFF. It was on, and it shipped a crash: the show call it made was copied from a
+            // real call site on the wrong class, and these operator vtables have eleven slots, so
+            // it read string data and called it. Nothing here acts until there is a verified
+            // lever; the switch stays so the walk it does keep can be exercised.
+            loading_screen: false,
         }
     }
 }
