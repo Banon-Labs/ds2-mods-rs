@@ -3136,22 +3136,28 @@ pub const FLO_ADDED_ROW_HUE: [u8; 3] = [0xff, 0x64, 0x50];
 ///
 /// **This is the one number in this block that is taste and not measurement**, and it is on its
 /// own line so it can be turned without touching the hue or the byte order that took a run each to
-/// settle. Three values have been on screen:
+/// settle. Every value that has actually been on screen, and what it was called:
 ///
 /// ```text
-///  255  100%  #ff6450   "this is red"          -- a re-skin: a different KIND of row
-///   26   10%  #fff0ee   "it looks like 0% red" -- green moved 15 of 255, under the threshold
-///   77   30%  #ffd1cb   the current value
+///  255  100% linear  #ff6450   "this is red"           -- a re-skin, a different KIND of row
+///   26   10% linear  #fff0ee   "it looks like 0% red"  -- green moved 15 of 255
+///   77   30% linear  #ffd1cb   "that looks like 10%"
+///  120   47% linear  #ffb7ad   asked for as 33%
 /// ```
 ///
-/// **The scale is nowhere near linear in the eye.** A tenth of the distance to the hue is a 6%
-/// channel drop, which on a small glyph over a warm background is not a colour, it is a rounding
-/// error. `77` is `-18%` green and `-20%` blue: the smallest step that should register as tinted
-/// at all rather than the smallest step that is arithmetically a tint.
+/// **Linear is not perceptual, and the three earlier points say by how much.** A 10% mix showed
+/// nothing and a 30% mix read as 10%, which fits a floor of roughly 20% before anything registers
+/// and proportional response above it:
 ///
-/// If it still reads as white the next stops are `96` (`#ffc5be`) and `128` (`#ffb2a8`); if it has
-/// gone back to being a red icon, `51` (`#ffe0dc`).
-pub const FLO_ADDED_ROW_TINT_STRENGTH: u8 = 77;
+/// ```text
+/// perceived  ~=  (linear - 0.20) / 0.80
+/// ```
+///
+/// That model reproduces all three points (`10% -> 0`, `30% -> 13`, `100% -> 100`) and is what
+/// picked `120` for a perceived third rather than another guess at the ramp. It is fitted to three
+/// samples of one person's eye on one glyph over one background, so it is a working rule and not a
+/// law -- but it beats halving the interval each time.
+pub const FLO_ADDED_ROW_TINT_STRENGTH: u8 = 120;
 
 /// Mix one channel `strength/255` of the way from white toward `channel`.
 ///
