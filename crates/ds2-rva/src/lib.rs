@@ -2443,13 +2443,66 @@ pub const FE_INGAME_MENU_DISPATCH: u32 = 0x000a_6090;
 
 /// The per-tab init that turns the item list into rows. RVA `0x000a4d20`.
 ///
-/// Recorded because it is the reason an appended entry is expected to become a visible row rather
-/// than dead data: it calls `FUN_140021b30(tab, tab->count)` -- the grid's visible-cell count is
-/// set FROM the item vector's count -- and then the availability pass `0x1400a77c0`, which walks
-/// `0..cellCount`, reads entry `i`, and greys the row whose gate refuses.
+/// It binds the grid to the layout ([`FEX_GRID_CONTROL_LAYOUT_BIND`]), then calls
+/// `FUN_140021b30(tab, tab->count)`, then the availability pass `0x1400a77c0`, which walks
+/// `0..count`, reads entry `i`, and greys the row whose gate refuses.
+///
+/// **`FUN_140021b30` sets the count the CURSOR is bounded by, not the number of drawable cells.**
+/// A run on 2026-08-28 appended a fourth entry to the quit tab and got exactly that: a fourth item
+/// the cursor reaches and that responds, with nothing drawn for it. The drawable cells were already
+/// fixed by the bind on the line above. This comment used to claim the visible row count came from
+/// here; it does not, and `docs/DS2-INGAME-MENU.md` keeps the wrong version beside the right one.
 ///
 /// Not hooked. Not an Arxan redirect: clean prologue `40 53 48 81 ec b0 00 00 00` at the entry.
 pub const FE_INGAME_MENU_TAB_INIT: u32 = 0x000a_4d20;
+
+/// `FrontendEx::FexGridControl`'s layout bind -- where a grid's drawable cells come from. RVA
+/// `0x000216d0`.
+///
+/// It takes no extent from anywhere. It DISCOVERS one, by asking the layout for the element at
+/// each `(col, row)` and stopping a row at the first one that comes back null:
+///
+/// ```text
+/// for (row = 0; row < 15; row++)
+///   for (col = 0; col < 32; col++) {
+///       element = (*namer->vtable[0x10])(col, row);
+///       if (element == 0) break;                        // this row ends here
+///       cell = FUN_14010a060(...);                      // a drawable cell object
+///       grid[FEX_GRID_COL_EXTENT_OFFSET] = max(that, col + 1);
+///       grid[FEX_GRID_ROW_EXTENT_OFFSET] = max(that, row + 1);
+///   }
+/// ```
+///
+/// So the extents are a count of AUTHORED LAYOUT ELEMENTS, not a constant to raise, and the probe
+/// stops at the first hole -- authoring cell 4 without cell 3 would find neither. `0x140022160`
+/// closes the loop from the other side: resolving a cell whose column equals the column extent
+/// takes the `vtable+0x48` one-past-the-end naming branch instead of the ordinary-cell branch.
+///
+/// Recorded because it is the answer to "why is the appended row invisible", and because it is
+/// where anyone extending a menu with new layout data has to look. Not hooked.
+pub const FEX_GRID_CONTROL_LAYOUT_BIND: u32 = 0x0002_16d0;
+
+/// Byte offset of a `FexGridControl`'s logical item count -- what the cursor may reach.
+///
+/// Written by `FUN_140021b30`, read by the grid's `v34` (`0x14001c020`, `return this->+0x38` on the
+/// `FexGroupList` base subobject, which lands here on the whole object). This is the field an
+/// appended item moves.
+pub const FEX_GRID_ITEM_COUNT_OFFSET: usize = 0xc8;
+
+/// Byte offset of a `FexGridControl`'s COLUMN extent -- how many drawable cells the layout gave it.
+///
+/// Set only by [`FEX_GRID_CONTROL_LAYOUT_BIND`], as a running `max` over the elements it found.
+/// `FUN_140021b30` never touches it, which is the whole gap between an item being selectable and
+/// an item being visible.
+pub const FEX_GRID_COL_EXTENT_OFFSET: usize = 0xd4;
+
+/// Byte offset of a `FexGridControl`'s ROW extent. Set the same way as
+/// [`FEX_GRID_COL_EXTENT_OFFSET`].
+///
+/// `1` means a single-line list, and `0x1400222c0` special-cases it: index `n` maps to
+/// `(col = n, row = 0)`. The in-game menu tabs are that shape, so their items run along the column
+/// axis and [`FEX_GRID_COL_EXTENT_OFFSET`] is the one that bounds them.
+pub const FEX_GRID_ROW_EXTENT_OFFSET: usize = 0xd8;
 
 /// Byte offset of the element count inside a tab's item `DLFixedVector`.
 ///

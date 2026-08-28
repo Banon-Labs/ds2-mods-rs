@@ -7,21 +7,37 @@
 //! tab that carries the quit item -- `FeGroupInGameReturnTitleCheck`, action `9`, the dialog that
 //! offers to save on the way to the title screen -- holds three of a possible five.
 //!
-//! Two things say a fourth entry should become a fourth ROW rather than dead data, and both were
+//! Two things said a fourth entry should become a fourth ROW rather than dead data, and both were
 //! read out of the game's own code:
 //!
-//! * the per-tab init ([`ds2_rva::FE_INGAME_MENU_TAB_INIT`]) sets the grid's visible-cell count
-//!   FROM the item vector's count, so the row count is code-driven, not baked;
+//! * the per-tab init ([`ds2_rva::FE_INGAME_MENU_TAB_INIT`]) sets a cell count FROM the item
+//!   vector's count -- which turned out to be the count the CURSOR is bounded by, not the number of
+//!   cells there are to draw;
 //! * the copy into the live group (`0x1400a3ef0`) copies `count` entries and accepts up to five.
 //!
-//! One thing says it might not, and it could not be settled by reading the executable: **nothing
-//! in the image maps an action id to a caption.** The tab captions the exe does set resolve layout
-//! elements by hard-coded name hash, which points at the row labels being authored in the
-//! frontend layout inside `GameDataEbl.bdt` -- an archive this repo does not open. So a fourth row
-//! may come up captionless even if it comes up at all.
+//! One thing said it might not, and it could not be settled by reading the executable: nothing in
+//! the image maps an action id to a caption.
 //!
-//! That is the whole question, and it is one screenshot wide. This crate is the instrument that
-//! takes it.
+//! # It has been run, and the answer was worse than a missing caption
+//!
+//! 2026-08-28, one run, one character, the quit tab opened by hand: the vector took the fourth
+//! entry (`count=3->4`, and the integrity check below passed, so this really was that tab), the
+//! cursor reaches a fourth item and it responds -- **and nothing at all is drawn for it.**
+//!
+//! Not a blank caption. No cell. `FrontendEx::FexGridControl`'s layout bind
+//! ([`ds2_rva::FEX_GRID_CONTROL_LAYOUT_BIND`]) takes no extent from anywhere: it probes the layout
+//! for the element at each `(col, row)` and stops a row at the first null, so the grid's extent is
+//! a count of AUTHORED ELEMENTS. `FUN_140021b30` then writes only the logical item count. Two
+//! numbers, two sources, and appending moved just one of them -- which is exactly "selectable but
+//! invisible".
+//!
+//! So the crate did its job and the result is negative in a useful way: **a new pause-menu row
+//! needs layout data inside `GameDataEbl.bdt`, and the probe order means cell 3 has to exist before
+//! cell 4 can ever be found.** The caption question was never reached. `docs/DS2-INGAME-MENU.md`
+//! has the measurement and the disassembly.
+//!
+//! It is kept, and kept off, because it is how the next person re-establishes any of this in one
+//! run after touching the archive.
 //!
 //! # Why the payload is action `0xd` and not something new
 //!

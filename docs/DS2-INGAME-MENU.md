@@ -3,7 +3,9 @@
 Everything in the first four sections was read statically from `darksoulsii-deobf.bin` (SOTFS build
 9527516) with `scripts/ds2-rtti.py`, `scripts/ds2-xrefs.py`, `scripts/ds2-disasm.py`,
 `scripts/ds2-arxan-chain.py` and the Ghidra MCP daemon. **No game was launched to establish any of
-it**, which is also why the last section is an experiment rather than an answer.
+it.** The last two sections are the run that followed, and one claim below did not survive it: the
+heading "the SELECTABLE row count is code-driven" says "selectable" because a run showed that the
+drawn count is a different number from a different place.
 
 Addresses here are VAs, the form the disassembly prints. Subtract `0x140000000` for the RVA that
 `ds2-rva` records.
@@ -98,9 +100,14 @@ through `FUN_140513270` and asks `FUN_14025f690` about it. Neither callee is nam
 so **what that gate actually forbids is not recorded here** -- only that it is the gate the shipped
 quit row uses.
 
-## The row count is code-driven
+## The SELECTABLE row count is code-driven
 
-This is the fact that makes an extra row plausible rather than wishful. The per-tab init
+**This heading originally read "the row count is code-driven", and that was wrong.** Everything in
+this section is accurate about what these functions do; the error was concluding that it was
+sufficient to put a row on screen. It is not -- see "Measured, one run, 2026-08-28". The word
+"visible" in the code comment below is preserved as it was written, so the mistake is legible.
+
+The per-tab init
 `FUN_1400a4d20` at `0x1400a4d20` is, in full:
 
 ```c
@@ -114,7 +121,9 @@ FeGroupInGameGroupSelect::FUN_1400a77c0(tab);                // <-- gate each ro
 its six tabs. The availability pass then walks `0..cellCount`, reads entry `i` with a bounds check
 that falls back to a static `-1`, and greys what the gate refuses.
 
-So the visible row count is the item vector's count. Appending an entry asks for a row.
+So the count the cursor is bounded by is the item vector's count. Appending an entry asks for a row.
+What it does NOT do is create anything to draw: `FUN_140021b30` writes `+0xc8` and drives the
+scrollbar, and the drawable cells were already fixed by the `0x1400216d0` bind on the line above.
 
 ## What could not be read out of the executable
 
@@ -128,6 +137,10 @@ That points at the row labels being authored in the frontend layout inside `Game
 this repo does not open. A fourth row may therefore appear with no caption, or with one the layout
 happened to author. **Capacity 5 in the code is suggestive that five rows were authored. It is not
 evidence.**
+
+> **Answered by the run below, and the answer made the question moot.** The layout authored three
+> cells for this tab, so the fourth item never became a drawable row at all and no caption was ever
+> asked for. See "Measured, one run, 2026-08-28".
 
 ## Nothing here is an Arxan redirect
 
@@ -147,7 +160,7 @@ The usual caveat still governs the addresses: the deobfuscated image is not the 
 runs, so data (vtables, globals) is trustworthy and a function body must be checked before it is
 detoured. That check is the table above.
 
-## The experiment (`crates/ds2-menu-row`)
+## The experiment (`crates/ds2-menu-row`) -- run, see the section after it
 
 Off by default. `[menu_row] enabled = true`, or `scripts/ds2-run.py --menu-row`, turns it on.
 
@@ -175,12 +188,68 @@ ds2-menu-row: appended action=0xd gate=0 was=[(0x7,0) (0x8,0) (0x9,4)] count=3->
 different causes -- the append was refused, or the tab was never built because the pause menu was
 never opened -- and one counter cannot tell them apart.
 
-### What each outcome would mean
+## Measured, one run, 2026-08-28
 
-| what the tab shows | what it establishes |
-| --- | --- |
-| four rows, fourth captioned | the layout authored five rows; a new item needs only an entry and a dispatch case |
-| four rows, fourth blank | the row exists but its caption lives in `GameDataEbl.bdt`; adding a *labelled* item needs the archive |
-| three rows, `appended` in the log | the grid is bounded by something other than the count, and `FexGroupList`'s binding is the next thing to read |
+`--menu-row`, one character loaded, the quit tab opened by hand.
 
-Only the third outcome would falsify the reading in this document.
+```
+ds2-menu-row: hooked rva=0x000a5900 va=0x00000001400a5900 payload=(0xd,0)
+ds2-menu-row: appended action=0xd gate=0 was=[(0x7,0) (0x8,0) (0x9,4)] count=3->4 fire=1 appends=1
+```
+
+**The item vector took the fourth entry.** `was=` is the integrity check passing: the tab really does
+hold `(7,0) (8,0) (9,4)` in the live process, so every static claim above about which tab this is
+holds at runtime and not only in the decompiler.
+
+**A fourth item exists and is reachable. Nothing is drawn for it.** Reported from the screen: the
+cursor moves onto a fourth entry and it responds; there is nothing visible there.
+
+### Why, and it is not the caption
+
+The open question above assumed the worst case was a blank caption. It was worse and simpler than
+that: **the row does not exist as a drawable cell at all.** `FexGridControl`'s layout bind,
+`FrontendEx::FexGridControl::FUN_1400216d0` at `0x1400216d0`, does not read an extent from anywhere
+-- it DISCOVERS one by probing the layout and stopping at the first hole:
+
+```c
+for (row = 0; row < 15; row++)                 // 0xe < row -> done
+  for (col = 0; col < 32; col++) {             // col < 0x20
+      element = (*namer->vtable[0x10])(col, row);
+      if (element == 0) break;                 // <-- this row ends here
+      cell = FUN_14010a060(...);               // a drawable cell object
+      this->_0xd4 = max(this->_0xd4, col + 1); // extent := what the layout HAS
+      this->_0xd8 = max(this->_0xd8, row + 1);
+  }
+```
+
+So there are two counts, they come from different places, and only one of them moved:
+
+| field | meaning | set by | after the append |
+| --- | --- | --- | --- |
+| `+0xc8` | logical item count -- what the cursor may reach | `FUN_140021b30(tab, itemCount)` | **4** |
+| `+0xd4` | grid extent -- how many drawable cells the layout provided | `0x1400216d0`, by probing | **unchanged** |
+
+`FUN_140021b30` writes `+0xc8` and drives the scrollbar. It never touches `+0xd4`. That is the whole
+gap between "interactable" and "invisible", and `FUN_140022160` closes the argument: resolving the
+element for a cell whose column equals `+0xd4` takes the `vtable+0x48` one-past-the-end naming
+branch rather than the `vtable+0x10` ordinary-cell branch.
+
+### What this settles
+
+* **The row count is NOT code-driven after all**, or rather: the *selectable* count is and the
+  *drawn* count is not. `docs`'s earlier reading of `FUN_1400a4d20` was right about what it does and
+  wrong about what that is sufficient for.
+* **The engine is not the constraint.** The bind will find up to 32 x 15 cells and the item vector
+  caps at 5. What is missing is authored data.
+* **A visible new row needs the layout**, inside `GameDataEbl.bdt` -- and specifically needs cell 3
+  of that tab's grid to exist, because the probe stops at the first hole: authoring cell 4 without
+  cell 3 would find neither.
+* **Captions were never reached as a question.** Whether the row label is authored in the layout or
+  set from a message id is still unknown, because no row got far enough to want one.
+
+### What a mod can still do without touching the archive
+
+Repoint an EXISTING entry. The item vector is `(action, gate)` and both halves are ours to write, so
+swapping the action on one of the three cells the layout already draws gives a working new
+destination -- under that cell's existing caption, which would then be a lie. That is a trade this
+document records rather than recommends.

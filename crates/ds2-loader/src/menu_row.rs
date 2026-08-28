@@ -28,17 +28,18 @@ pub struct MenuRowConfig {
 
 impl Default for MenuRowConfig {
     /// **Off**, and unlike the other defaults in this loader that is not a judgement about which
-    /// behaviour is better -- it is that this feature has no behaviour yet.
+    /// behaviour is better -- it is that this feature's only visible effect is a defect.
     ///
-    /// It exists to answer one question that could not be answered by reading the executable:
-    /// whether a fourth entry in a tab's item vector becomes a fourth visible ROW, and what
-    /// caption it carries if it does. The row count is set from the vector's count by the game's
-    /// own per-tab init, so it should; the captions are not in the executable at all, so it might
-    /// come up blank. Until someone has looked, shipping it on would put an unexplained row in
-    /// every player's pause menu to satisfy this repo's curiosity.
+    /// It existed to answer one question the executable could not: whether a fourth entry in a
+    /// tab's item vector becomes a fourth visible ROW. **It has been run. It does not.** The
+    /// cursor reaches the new item and it responds; nothing is drawn for it, because a grid's
+    /// drawable cells are discovered by probing the layout and the layout authored three. See the
+    /// `ds2-menu-row` crate docs and `docs/DS2-INGAME-MENU.md`.
     ///
-    /// Turn it on for a run, read `ds2-menu-row: appended ...` in the loader log, open the pause
-    /// menu's last tab, and the question is closed.
+    /// So off is now the permanent default rather than a holding position: on, this adds an
+    /// invisible fourth entry next to Quit that a player can land on by accident. It stays in the
+    /// tree because it re-establishes the whole finding in one run, which is what anyone editing
+    /// the layout inside `GameDataEbl.bdt` will want on the other side of that edit.
     fn default() -> Self {
         Self { enabled: false }
     }

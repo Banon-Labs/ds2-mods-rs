@@ -1389,11 +1389,17 @@ def config_text(
 # the shipped Key Bindings row runs. NO CODE PATH IS ADDED TO THE GAME -- one entry is added to one
 # vector.
 #
-# WHAT IT MEASURES, because it could not be read out of the executable: whether the fourth entry
-# becomes a fourth visible ROW, and what caption it carries. The row count IS code-driven -- the
-# per-tab init sets the grid's visible-cell count from the vector's count -- so it should appear.
-# But nothing in the image maps an action id to a caption, which points at the row labels being
-# authored in the frontend layout inside GameDataEbl.bdt. So it may appear blank.
+# WHAT IT MEASURED, and the answer is already in: the fourth entry does NOT become a fourth visible
+# row. Run 2026-08-28 -- the vector took it (count=3->4), the cursor reaches the new item and it
+# responds, and NOTHING IS DRAWN for it. Not a blank caption: no cell at all. FexGridControl's
+# layout bind (0x1400216d0) takes no extent from anywhere, it probes the layout for the element at
+# each (col,row) and stops at the first null, so the drawable count is a count of AUTHORED elements
+# and the layout authored three. FUN_140021b30 writes only the count the CURSOR is bounded by.
+#
+# So turning this on now adds an INVISIBLE fourth entry beside Quit that you can land on by
+# accident. It is kept because it re-establishes all of the above in one run, which is what anyone
+# editing the layout inside GameDataEbl.bdt wants on the other side of that edit. Note the probe
+# order: cell 3 must exist before cell 4 can ever be found.
 #
 # The detour checks what the original built -- (0x7,0) (0x8,0) (0x9,4) -- and REFUSES to touch the
 # vector if that is not what it finds. Read `{MENU_ROW_LOG_PREFIX} appended ...` in the loader log
@@ -2836,14 +2842,15 @@ def main() -> int:
         action="store_true",
         default=False,
         help=(
-            "append a fourth row to the PAUSE menu tab that carries the quit item. OFF BY "
-            "DEFAULT because it measures rather than fixes: the tab holds three of a possible "
-            "five entries, the row count is set from that count by the game's own per-tab init, "
-            "and nothing in the executable maps an entry to a caption -- so whether a fourth row "
-            "appears, and what it says, is one screenshot away and cannot be read statically. "
-            "The appended action (0xd) already has a case in the dispatch and shares its factory "
-            "branch with the shipped Key Bindings row, so no code path is added to the game. "
-            f"Look for `{MENU_ROW_LOG_PREFIX} appended ...` in the log before reading the screen."
+            "append a fourth entry to the PAUSE menu tab that carries the quit item. OFF BY "
+            "DEFAULT, and the run it existed for has already happened: the entry is accepted and "
+            "SELECTABLE but NOTHING IS DRAWN for it, because a grid's drawable cells are "
+            "discovered by probing the layout and that tab's layout authored three. So this adds "
+            "an invisible item next to Quit. It is kept because it re-establishes that in one run "
+            "-- which is what you want on the other side of editing GameDataEbl.bdt. The appended "
+            "action (0xd) already has a case in the dispatch and shares its factory branch with "
+            "the shipped Key Bindings row, so no code path is added to the game. Look for "
+            f"`{MENU_ROW_LOG_PREFIX} appended ...` in the log before reading the screen."
         ),
     )
     parser.add_argument(
