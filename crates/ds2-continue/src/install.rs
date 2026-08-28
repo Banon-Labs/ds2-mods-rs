@@ -42,9 +42,14 @@ type EnterFn = unsafe extern "system" fn(*mut u8);
 /// `FeSubStateTitleTopMenu::v3(this)`. One argument, on the same evidence as the other two.
 type TopMenuUpdateFn = unsafe extern "system" fn(*mut u8);
 
+/// `void open(scene)` -- `FeSceneTitle` in RCX, the single argument its own body establishes and
+/// the one `ds2-dialog-skip` already calls it with.
+type TitleOpenFn = unsafe extern "system" fn(*mut u8);
+
 static UPDATE_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 static ENTER_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 static TOP_MENU_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
+static TITLE_OPEN_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 
 /// Set once the top menu has been sent to the character list, ever. Once per process, for the
 /// same reason [`FIRED`] is: if the list bounces straight back -- no save, a refused character --
@@ -301,6 +306,36 @@ unsafe extern "system" fn detour_update(this: *mut u8) {
             .map_or("?".to_string(), |o| format!("0x{o:02x}")),
         destination(after.phase),
     ));
+}
+
+/// Pose the title screen hidden the moment anything opens it.
+///
+/// # Why the open and not the top menu's update
+///
+/// MEASURED, from the log's own ordering. `title_settle` opens the screen during substate `0x17`
+/// -- `ds2-dialog-skip` logs `settled screen=title-main` there, and that call is the screen's whole
+/// open, not a sequence play. A pose driven from `FeSubStateTitleTopMenu`'s update lands eleven log
+/// lines later, after the entire network and dialog chain. The process windows cover the screen for
+/// most of that gap, which is why it read on screen as a brief flash rather than seconds of menu:
+/// what was visible was the window between the last dialog clearing and substate `0x47` arriving.
+///
+/// Hooking the open removes the gap by construction. Whatever raises the screen is posed hidden on
+/// its way out, so there is no interval in which it is up and un-posed.
+///
+/// The pose uses this detour's own `this` rather than re-reading the title context, so it lands on
+/// the object that was actually opened.
+unsafe extern "system" fn detour_title_open(this: *mut u8) {
+    let trampoline = TITLE_OPEN_TRAMPOLINE.load(Ordering::Acquire);
+    if trampoline != 0 {
+        // SAFETY: MinHook published this trampoline for this site; one argument, established from
+        // the function's own body and matching the call `ds2-dialog-skip` already makes.
+        let original: TitleOpenFn =
+            unsafe { std::mem::transmute::<usize, TitleOpenFn>(trampoline) };
+        unsafe { original(this) };
+    }
+    // AFTER the original: it is the open, so the screen has to exist before it can be posed.
+    // SAFETY: on the game thread, with the receiver the open was itself called on.
+    unsafe { crate::hide_menus::pose_scene_hidden(this, "open") };
 }
 
 /// Take the top menu's LOAD GAME edge as soon as the menu is idle, so no button is needed.
@@ -627,6 +662,23 @@ pub unsafe fn install() -> Outcome {
     // EITHER feature, not just silencing: the `start-ingame-enter` site in that list is what ends
     // both, so a run with the cover on and the mute off still needs it. The two sound detours are
     // inert when silencing is off -- they check the flag before touching anything.
+    // Only patched when `[continue] hide_menus` asked for it, for the same reason the sound sites
+    // are conditional: a run that does not want the feature should not carry its patched site.
+    //
+    // FIRST in the list it joins, because it is the one that decides whether anything is ever seen.
+    // The others act once the flow has already reached a screen; this one acts as the screen goes
+    // up, which is what closes the gap the last run measured.
+    if crate::hide_menus::enabled() {
+        sites.insert(
+            0,
+            Site {
+                name: "title-screen-open",
+                rva: ds2_rva::FE_SCENE_TITLE_OPEN,
+                detour: detour_title_open as *mut c_void,
+                trampoline: &TITLE_OPEN_TRAMPOLINE,
+            },
+        );
+    }
     if crate::silence::enabled() || crate::hide_menus::enabled() {
         sites.extend(
             crate::silence::sites()

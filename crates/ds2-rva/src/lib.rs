@@ -2243,3 +2243,49 @@ pub const FE_SCENE_TITLE_SEQUENCE_HIDDEN: i32 = 0x65;
 /// [`FE_TOP_MENU_SEQUENCE_FADED_SEEK`] had to establish applies here -- and that arithmetic could
 /// not have been done statically anyway, since the spans live in `GameDataEbl.bdt`.
 pub const FE_SEQUENCE_PLAY_FLAG_POSE: i32 = 1;
+
+/// `FeSceneTitle::open(scene)` -- what raises the title screen. RVA `0x000f3820`.
+///
+/// ```text
+/// if (!this->_0xf1) {                       // not already open
+///     scene = this->_0x08;
+///     if (scene) {
+///         scene->_0x18 -= 1;
+///         play(scene, 0x67, 0, 0.0f);       // the settled pose
+///         this->_0xf1 = 1;
+///     }
+/// }
+/// ... ~1000 further bytes: component lookups, row construction, more plays ...
+/// ```
+///
+/// # This is the same address as `FE_SCENE_TITLE_PLAY_IDLE`, which is misnamed
+///
+/// `ds2-dialog-skip` calls it as "play sequence `0x67` on the title scene". It is the screen's
+/// whole open, rows and all, and `[title_skip] title_settle` defaults ON -- so **the mod itself
+/// opens the title screen during substate `0x17`**, long before `FeSubStateTitleTopMenu` runs.
+/// Tracked as `ds2-mods-rs-ebj`; the duplicate constant is left in place until that lands rather
+/// than editing another crate's call site from here.
+///
+/// # Why this is the site to hook to hide the screen
+///
+/// MEASURED, from the log's own ordering rather than from reasoning about frames. The open logs at
+/// line 49 (`settled screen=title-main`) and a pose driven from `FeSubStateTitleTopMenu`'s update
+/// logs at line 60, with the entire network and dialog chain in between. The process windows cover
+/// the screen for most of that gap, which is why it reads as a brief flash rather than seconds of
+/// menu -- what is seen is the window between the last dialog clearing and substate `0x47`
+/// arriving. Hooking the open closes that gap by construction: whatever raises the screen --
+/// `title_settle` at `0x17`, or `FeSubStateTitleTopMenu::v1` at `0x47` -- is posed hidden on its
+/// way out, so there is no interval in which it is up and un-posed.
+///
+/// # The one configuration this interacts with
+///
+/// Posing [`FE_SCENE_TITLE_SEQUENCE_HIDDEN`] leaves the scene's current sequence at `0x65`, and
+/// the real gate at `0x1400f37f0` reports settled only for `0x67`. `ds2-dialog-skip` replaces that
+/// gate outright when `title_sequence_skip` is on, which is the default, so the wait is already
+/// forced and nothing observes the posed sequence. `title_settle` ON with `title_sequence_skip`
+/// OFF is the combination that would wait forever at PRESS ANY BUTTON -- with `title_settle` off
+/// the open does not happen until `0x47`, by which time the gate is long past.
+///
+/// Not an Arxan redirect: `scripts/ds2-arxan-chain.py` terminates at hop 0 with the clean prologue
+/// `48 89 74 24 20` at the entry.
+pub const FE_SCENE_TITLE_OPEN: u32 = 0x000f_3820;

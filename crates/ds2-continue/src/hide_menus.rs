@@ -113,13 +113,31 @@ unsafe fn title_context_slot(offset: usize) -> Option<(usize, *mut u8)> {
 /// The call itself is the game's own [`ds2_rva::FE_SCENE_TITLE_POSE_HIDDEN`], which null-checks the
 /// scene it dereferences before touching it.
 pub(crate) unsafe fn pose_title_hidden() {
-    if !enabled() {
-        return;
-    }
-    let Some((base, scene)) = (unsafe { title_context_slot(ds2_rva::FE_TITLE_CONTEXT_TOP_MENU_GROUP_OFFSET) })
+    let Some((_, scene)) =
+        (unsafe { title_context_slot(ds2_rva::FE_TITLE_CONTEXT_TOP_MENU_GROUP_OFFSET) })
     else {
         return;
     };
+    unsafe { pose_scene_hidden(scene, "title-context") };
+}
+
+/// Pose one `FeSceneTitle` hidden, given the pointer directly.
+///
+/// The open detour has its own `this` in hand and uses it rather than re-reading the global, so
+/// the pose lands on the object that was just opened even if that is somehow not the one the title
+/// context points at.
+///
+/// # Safety
+///
+/// `scene` must be a live `FeSceneTitle`. The call itself null-checks the scene it dereferences.
+pub(crate) unsafe fn pose_scene_hidden(scene: *mut u8, via: &str) {
+    if !enabled() || scene.is_null() {
+        return;
+    }
+    let base = MODULE_BASE.load(Ordering::Acquire);
+    if base == 0 {
+        return;
+    }
     // The `FeSceneTitle` open byte, logged raw on the first pose. It is the field that told the
     // last attempt it had the wrong class -- the generic close reads `+0x30`, which on this object
     // is not a boolean and read 248. On the right class this reads 1 while the screen is up, so a
@@ -136,7 +154,8 @@ pub(crate) unsafe fn pose_title_hidden() {
 
     if LOGGED.fetch_or(LOG_BIT_TITLE, Ordering::Relaxed) & LOG_BIT_TITLE == 0 {
         log(format_args!(
-            "{LOG_PREFIX} hide-menu title-screen pose=0x{:08x} sequence=0x{:x} open={open} posed",
+            "{LOG_PREFIX} hide-menu title-screen via={via} pose=0x{:08x} sequence=0x{:x} \
+             open={open} posed",
             ds2_rva::FE_SCENE_TITLE_POSE_HIDDEN,
             ds2_rva::FE_SCENE_TITLE_SEQUENCE_HIDDEN
         ));
@@ -171,9 +190,8 @@ pub(crate) unsafe fn close_data_list() {
     };
     // SAFETY: an ordinary function entry in the mapped image, called with the single argument its
     // own body establishes -- the same call the game's own substate makes on this same pointer.
-    let close: OneArgFn = unsafe {
-        std::mem::transmute::<usize, OneArgFn>(base + ds2_rva::FE_GROUP_CLOSE as usize)
-    };
+    let close: OneArgFn =
+        unsafe { std::mem::transmute::<usize, OneArgFn>(base + ds2_rva::FE_GROUP_CLOSE as usize) };
     unsafe { close(group) };
 
     if LOGGED.fetch_or(LOG_BIT_DATA_LIST, Ordering::Relaxed) & LOG_BIT_DATA_LIST == 0 {
