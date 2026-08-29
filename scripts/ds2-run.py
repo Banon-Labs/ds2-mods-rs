@@ -1417,12 +1417,19 @@ def config_text(
 
 [{BUILD_IMPORT_SECTION}]
 # NOT STARTUP either, and a different kind of risk from the row above it. This one adds a "Load from
-# URL" row that asks STEAM to draw a prefilled text field, then fetches a soulsplanner build over
-# HTTPS and reads it into the log. It does not apply the build -- the equip and stat writers do not
-# exist for this game yet.
+# URL" row that reads a soulsplanner link off the clipboard (or takes a typed build number), fetches
+# the build over HTTPS, and APPLIES IT TO THE LIVE CHARACTER: soul memory, then the nine stats and
+# therefore the level, then the items, then every weapon, armour piece, ring, spell, hotbar slot and
+# the covenant, and finally the Estus Flask, taken to the maximum this game allows.
 #
-# OFF unless this says exactly `true`, and off is a holding position rather than a verdict: both of
-# the things it does outside this process are believed correct from STATIC READING ALONE.
+# EVERY WRITE IS A CALL INTO THE GAME'S OWN FUNCTION. Nothing here pokes a field the engine
+# maintains -- stats through PlayerParam::SetAllStats, souls through AddSouls, items through
+# ItemGive, slots through SetEquip, the covenant through PlayerCtrl's own setter, and the flask
+# through the same ItemInventory2::SetEstusProperty the Emerald Herald's dialogue calls. Each one is
+# read back afterwards, because several of them fail silently.
+#
+# OFF unless this says exactly `true`. It changes a character, and while a redirected save is
+# re-staged every launch, the game's own save is not.
 #
 # WHY IT NEEDS A NEWER STEAM INTERFACE. The game's own steam_api64.dll knows SteamUtils005, whose
 # ShowGamepadTextInput takes four arguments and cannot prefill; pchExistingText arrives in
@@ -2963,17 +2970,14 @@ def main() -> int:
         action="store_true",
         default=False,
         help=(
-            "add a 'Load from URL' row to the same PAUSE menu tab, which asks STEAM to draw a text "
-            "field prefilled with https://soulsplanner.com/darksouls2/ and then fetches the build "
-            "whose id follows the slash. OFF BY DEFAULT. It READS the build into the log and does "
-            "NOT apply it -- the equip and stat writers do not exist for this game yet. Two things "
-            "here are believed correct from static reading alone and have never been run: asking "
-            "steamclient for SteamUtils007 (the version whose ShowGamepadTextInput can prefill; "
-            "the game's own shim knows only 005), and writing the game's SoftwareKeyboardManagerImpl "
-            "m_state to interlock against character naming. Look for "
-            f"`{BUILD_IMPORT_LOG_PREFIX} field open, prefilled ...` in the log; "
-            f"`{BUILD_IMPORT_LOG_PREFIX} no field: the Steam overlay is disabled` is the one "
-            "failure the executable could never have predicted."
+            "add a 'Load from URL' row to the same PAUSE menu tab. It reads a soulsplanner link "
+            "off the clipboard (or takes a typed build number), fetches the build, and APPLIES IT "
+            "to the live character -- soul memory, then the stats and therefore the level, then "
+            "the items, every equipment slot, the covenant, and the Estus Flask taken to maximum. "
+            "OFF BY DEFAULT, because it changes a character. Every write is a call into the game's "
+            "own function and every one is read back. Look for "
+            f"`{BUILD_IMPORT_LOG_PREFIX} character now: ...` in the log, then the granted, "
+            "equipped and Estus lines that follow it."
         ),
     )
     parser.add_argument(

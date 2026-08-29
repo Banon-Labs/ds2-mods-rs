@@ -49,6 +49,13 @@ pub(crate) enum GameError {
     NoLevelCosts,
     /// A function's first bytes are not what `ds2-rva` recorded.
     PrologueMismatch,
+    /// This character has no Estus Flask, so there is no level to raise.
+    NoEstusFlask,
+    /// The game's own property table does not know the key asked for.
+    ///
+    /// Its own variant because the answer is `0xFF` and passing that on would write the CHARGE
+    /// count rather than a level -- see [`ds2_rva::ESTUS_PROPERTY_NOT_FOUND`].
+    UnknownEstusProperty,
 }
 
 impl core::fmt::Display for GameError {
@@ -60,6 +67,10 @@ impl core::fmt::Display for GameError {
             GameError::NoParams => "the param tables could not be walked",
             GameError::NoLevelCosts => "PlayerLevelUpSoulsParam is not loaded",
             GameError::PrologueMismatch => "a function's prologue is not what ds2-rva recorded",
+            GameError::NoEstusFlask => "this character has no Estus Flask",
+            GameError::UnknownEstusProperty => {
+                "the game's property table does not know that Estus property"
+            }
         };
         f.write_str(text)
     }
@@ -980,4 +991,160 @@ pub(crate) unsafe fn set_covenant(id: u8) -> Result<CovenantSet, GameError> {
         after: read_current().unwrap_or(before),
         already_discovered,
     })
+}
+
+/// `fn(u32 key) -> u8` -- the game's property-key lookup.
+type EstusPropertyIndexFn = unsafe extern "system" fn(u32) -> u8;
+
+/// `fn(ItemInventory2*, const u8* property) -> u8` -- a level, or a maxed-out flag.
+///
+/// The `bool`-returning members of this family are typed `u8` deliberately. A Rust `bool` holding
+/// anything but `0` or `1` is undefined behaviour, and "the callee only ever `sete`s" is a promise
+/// about someone else's code; comparing a byte costs nothing and cannot be wrong.
+type EstusPropertyFn = unsafe extern "system" fn(usize, *const u8) -> u8;
+
+/// `fn(ItemInventory2*) -> u8` -- the charge count.
+type EstusChargesFn = unsafe extern "system" fn(usize) -> u8;
+
+/// `fn(ItemInventory2*, const u8* property, i32 level) -> u8`.
+type EstusSetFn = unsafe extern "system" fn(usize, *const u8, i32) -> u8;
+
+/// `fn(ItemInventory2*)` -- the refill.
+type EstusRefillFn = unsafe extern "system" fn(usize);
+
+/// Resolve one of the Estus thunks, byte-checking [`ds2_rva::ESTUS_THUNK_PROLOGUE`] first.
+///
+/// All five share one prologue because they are the same two-hop shape, so they share one check.
+fn estus_site(rva: u32) -> Result<usize, GameError> {
+    let site = game_rva(rva).map_err(|_| GameError::Unresolved)?;
+    let mut prologue = [0u8; ds2_rva::ESTUS_THUNK_PROLOGUE.len()];
+    // SAFETY: a resolved RVA in the loaded image; the read is fault-safe.
+    if !unsafe { ds2_game_base::mem::read_bytes(site, &mut prologue) }
+        || prologue != ds2_rva::ESTUS_THUNK_PROLOGUE
+    {
+        return Err(GameError::PrologueMismatch);
+    }
+    Ok(site)
+}
+
+/// **The table index for one Estus property, asked of the game rather than assumed.**
+///
+/// The mapping is the identity on this build, so this could have been `key as u8`. It is a call
+/// because the answer is what the setter INDEXES WITH, and the one wrong answer -- `0xFF` for a key
+/// the table does not hold -- is sign-extended by the setter into `entry + 0x24`, the charge count.
+/// A hardcoded index cannot notice that; this can, and refuses.
+fn estus_property(key: u32) -> Result<u8, GameError> {
+    let site = game_rva(ds2_rva::ESTUS_PROPERTY_INDEX).map_err(|_| GameError::Unresolved)?;
+    let mut prologue = [0u8; ds2_rva::ESTUS_PROPERTY_INDEX_PROLOGUE.len()];
+    // SAFETY: a resolved RVA in the loaded image; the read is fault-safe.
+    if !unsafe { ds2_game_base::mem::read_bytes(site, &mut prologue) }
+        || prologue != ds2_rva::ESTUS_PROPERTY_INDEX_PROLOGUE
+    {
+        return Err(GameError::PrologueMismatch);
+    }
+    // SAFETY: the prologue matched, and the disassembly is six instructions over a static table --
+    // it takes a key in ECX, touches no game state at all, and returns a byte in AL.
+    let index = unsafe {
+        let lookup: EstusPropertyIndexFn = core::mem::transmute(site);
+        lookup(key)
+    };
+    if index == ds2_rva::ESTUS_PROPERTY_NOT_FOUND {
+        return Err(GameError::UnknownEstusProperty);
+    }
+    Ok(index)
+}
+
+/// What one [`max_estus`] call did, as before-and-after pairs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct EstusMaxed {
+    /// The uses level -- what Estus Flask Shards buy.
+    pub(crate) uses: (u8, u8),
+    /// The effect level -- what Sublime Bone Dust buys.
+    pub(crate) effect: (u8, u8),
+    /// Charges in the flask right now.
+    pub(crate) charges: (u8, u8),
+    /// The game's own answer to "is the uses level finished", read after the call.
+    pub(crate) uses_at_max: bool,
+    /// The game's own answer for the effect level.
+    pub(crate) effect_at_max: bool,
+}
+
+impl EstusMaxed {
+    /// Whether anything moved. A flask already at maximum is a success that changed nothing.
+    pub(crate) fn changed(&self) -> bool {
+        self.uses.0 != self.uses.1
+            || self.effect.0 != self.effect.1
+            || self.charges.0 != self.charges.1
+    }
+}
+
+/// **Take the Estus Flask to the maximum this game allows, through the game's own upgrade path.**
+///
+/// # This is the Emerald Herald's own function, without the Emerald Herald
+///
+/// Her script command is `get(level); set(level + 1)` on exactly these functions and nothing else;
+/// the conversation is what triggers it, not what performs it. So there is no dialogue to open, no
+/// shard to hold and none to spend -- the setter never looks at the inventory for one. Asking for
+/// the maximum directly is the same operation eleven presses of her menu would perform, minus the
+/// eleven presses.
+///
+/// # It asks for more than the maximum on purpose
+///
+/// [`ds2_rva::ESTUS_LEVEL_ASK`] is deliberately larger than any shipped maximum, because the setter
+/// clamps into `EstusFlaskMaxReinforceParam`'s own range before it writes. Naming `12` here would
+/// have turned the game's maximum into this mod's maximum on any install whose regulation raised it.
+///
+/// # Safety
+///
+/// Calls into the game. **Game thread only**, and only with a character loaded. Every prologue is
+/// byte-checked first.
+pub(crate) unsafe fn max_estus() -> Result<EstusMaxed, GameError> {
+    let inventory = item_inventory()?;
+    let uses = estus_property(ds2_rva::ESTUS_PROPERTY_USES)?;
+    let effect = estus_property(ds2_rva::ESTUS_PROPERTY_EFFECT)?;
+
+    // SAFETY for this block: every site's prologue is checked by `estus_site`, and each signature is
+    // the one its disassembled thunk implements -- the inventory in RCX, where there is a property
+    // a pointer to it in RDX, a level in R8D. `uses` and `effect` are locals that outlive the calls.
+    let level: EstusPropertyFn =
+        unsafe { core::mem::transmute(estus_site(ds2_rva::ESTUS_GET_LEVEL)?) };
+    let charges: EstusChargesFn =
+        unsafe { core::mem::transmute(estus_site(ds2_rva::ESTUS_GET_CHARGES)?) };
+    let at_max: EstusPropertyFn =
+        unsafe { core::mem::transmute(estus_site(ds2_rva::ESTUS_IS_MAX)?) };
+    let set: EstusSetFn = unsafe { core::mem::transmute(estus_site(ds2_rva::ESTUS_SET_PROPERTY)?) };
+    let refill: EstusRefillFn = unsafe { core::mem::transmute(estus_site(ds2_rva::ESTUS_REFILL)?) };
+
+    // NO FLASK MEANS NO UPGRADE, and the game says so in the level itself: the getter answers zero
+    // when the flask's slot is unbound, and the game's own add path seeds a new flask at level one.
+    // Checking here rather than after the write keeps the caller's "grant one first" path honest.
+    // SAFETY: as above.
+    let uses_before = unsafe { level(inventory, &uses) };
+    if uses_before == 0 {
+        return Err(GameError::NoEstusFlask);
+    }
+    // SAFETY: as above.
+    let (effect_before, charges_before) =
+        unsafe { (level(inventory, &effect), charges(inventory)) };
+
+    // SAFETY: as above. The setter's `bool` is deliberately dropped -- `false` from it means "the
+    // level was already that", which is not a failure, and the read-back below is the real answer.
+    unsafe {
+        set(inventory, &uses, ds2_rva::ESTUS_LEVEL_ASK);
+        set(inventory, &effect, ds2_rva::ESTUS_LEVEL_ASK);
+        // The uses write already moved the charge count by the difference. This makes the result
+        // the same whether or not the player had been drinking -- it is the bonfire's own refill.
+        refill(inventory);
+    }
+
+    // SAFETY: as above.
+    unsafe {
+        Ok(EstusMaxed {
+            uses: (uses_before, level(inventory, &uses)),
+            effect: (effect_before, level(inventory, &effect)),
+            charges: (charges_before, charges(inventory)),
+            uses_at_max: at_max(inventory, &uses) != 0,
+            effect_at_max: at_max(inventory, &effect) != 0,
+        })
+    }
 }

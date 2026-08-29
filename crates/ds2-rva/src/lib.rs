@@ -4370,6 +4370,148 @@ pub const ITEM_SPAWN_DURABILITY_MAX: i32 = -1;
 /// `+0x0C` `u16` quantity, `+0x0E` `u8` reinforce, `+0x0F` `u8` infusion.
 pub const ITEM_SPAWN_SIZE: usize = 0x10;
 
+// ---------------------------------------------------------------------------------------------
+// THE ESTUS FLASK.
+//
+// The flask's upgrade level is NOT an item id and NOT a shop transaction. It is two bytes on the
+// flask's own inventory entry, written by a plain method on `ItemInventory2` that reads nothing but
+// the inventory and two param tables. The Emerald Herald's dialogue is the TRIGGER, not the work:
+// her script command at `0x140464ced` is, in its entirety, `get(level); set(level + 1)` on the
+// functions below. Nothing in the chain touches a menu, an NPC, a talk state or `PlayerCtrl`, which
+// is why a pause-menu row can do the same thing.
+//
+// Every RVA here was traced through its thunks and disassembled to the end in
+// `darksoulsii-deobf.bin`, and none of them is Arxan-redirected.
+// ---------------------------------------------------------------------------------------------
+
+/// `ItemInventory2::SetEstusProperty`. RVA `0x001ac5a0`.
+/// `fn(ItemInventory2*, const u8* property, i32 level) -> bool`.
+///
+/// # `property` is a POINTER to a byte, and a wrong one writes the wrong field
+///
+/// The body does `movsx r8, byte [rdx]` and then indexes `entry + r8 + 0x25`. That is a SIGNED
+/// extension, so the `0xFF` [`ESTUS_PROPERTY_INDEX`] returns for a key it does not know would land
+/// on `entry + 0x24` -- the CHARGE COUNT -- and write a level into it. Never pass an index without
+/// checking it against [`ESTUS_PROPERTY_NOT_FOUND`] first.
+///
+/// # What it does, read to the end
+///
+/// `entry = [list + 0x40]`; null returns false. The entry's item id is put through the list's own
+/// `vtable[0x48]`, which is `ItemParam[id] + 0x40 == 450` -- the flask's identity, and the reason
+/// `60155010/20/30` can never bind here (they are `420`). It then clamps `level` into the
+/// `[min, max]` of `EstusFlaskMaxReinforceParam` for this property, writes `entry + 0x25 + property`
+/// and, **only for property 0**, moves the charge count by the difference in uses the two levels
+/// buy. Finally it mirrors the charge count and both level bytes into the save record.
+///
+/// # `false` means "nothing changed", which is not the same as "failed"
+///
+/// A level already equal to the one asked for returns false having done nothing. Read the level
+/// back with [`ESTUS_GET_LEVEL`] rather than trusting the bool.
+///
+/// # Not the sibling one address later
+///
+/// `0x001ac5b0` reaches the same body behind `cmp byte [inner + 0x10144], 2; jne return false` --
+/// a gate twelve bytes past [`ITEM_GIVE_ERROR_OFFSET`]. Character creation calls the gated one; the
+/// Herald's script calls this one.
+pub const ESTUS_SET_PROPERTY: u32 = 0x001a_c5a0;
+
+/// `ItemInventory2::GetEstusPropertyLevel`. RVA `0x001abc40`.
+/// `fn(ItemInventory2*, const u8* property) -> u8`.
+///
+/// Reads `entry + 0x25 + property` -- so `1..12` for the uses axis and `1..6` for the effect axis.
+///
+/// **Zero means there is no flask.** The getter answers `0` when the flask's list slot is unbound
+/// or holds something that is not the flask, and the game's own add path seeds a new flask at the
+/// param minimum, which is `1`. So zero is not a level.
+///
+/// The two bytes it reads are a UNION. On a weapon or armour entry (`entry + 0x1E <= 5`) the same
+/// bytes carry reinforcement and infusion in their low nibbles. Only read them on the flask.
+pub const ESTUS_GET_LEVEL: u32 = 0x001a_bc40;
+
+/// `ItemInventory2::GetEstusCharges`. RVA `0x001abc60`. `fn(ItemInventory2*) -> u8`.
+///
+/// `entry + 0x24` -- uses remaining right now, which is the number under the flask in the HUD.
+pub const ESTUS_GET_CHARGES: u32 = 0x001a_bc60;
+
+/// `ItemInventory2::IsEstusPropertyAtMax`. RVA `0x001ac1d0`.
+/// `fn(ItemInventory2*, const u8* property) -> bool`.
+///
+/// The game's own "is this axis finished" predicate: the level compared against
+/// `EstusFlaskMaxReinforceParam`'s max for that property. **Worth calling instead of comparing
+/// against a hardcoded 12**, because that number lives in a param a regulation mod can change.
+pub const ESTUS_IS_MAX: u32 = 0x001a_c1d0;
+
+/// `ItemInventory2::RefillEstus`. RVA `0x001ac370`. `fn(ItemInventory2*)`.
+///
+/// Sets the charge count to whatever the current uses level buys -- the bonfire's own refill.
+/// [`ESTUS_SET_PROPERTY`] already moves the count by the difference when the level rises, so this
+/// is what makes the result the same whether or not the player had been drinking.
+pub const ESTUS_REFILL: u32 = 0x001a_c370;
+
+/// The five bytes each of the Estus thunks must begin with. `mov rcx,[rcx+0x10]`, then a tail-jump.
+///
+/// Every one of them is the same two-hop shape as [`ITEM_SET_EQUIP`], and the two hops are the same
+/// two that reach [`ITEM_BAG_LIST_OFFSET`] -- so they all take `ItemInventory2`, the object
+/// [`ITEM_GIVE`] takes.
+pub const ESTUS_THUNK_PROLOGUE: [u8; 5] = [0x48, 0x8b, 0x49, 0x10, 0xe9];
+
+/// The game's own property-key to table-index lookup. RVA `0x001ad140`. `fn(u32 key) -> u8`.
+///
+/// A six-instruction leaf that scans the two-entry table at `0x14156b030` (`{const wchar_t* name;
+/// u32 key}`, stride `0x10`, sentinel at `0x14156b050`) and returns `(row - base) >> 4`, or
+/// [`ESTUS_PROPERTY_NOT_FOUND`]. It reads no game state, so it is safe to call at any time.
+///
+/// The mapping is the identity on this build. Call it anyway -- it is what the game's own callers
+/// do, and it is the only thing that would notice a regulation that reordered the table.
+pub const ESTUS_PROPERTY_INDEX: u32 = 0x001a_d140;
+
+/// The seven bytes [`ESTUS_PROPERTY_INDEX`] must begin with. `lea r8,[rip+0x13bdee9]`.
+///
+/// Unusually load-bearing for a prologue check: the displacement IS the address of the property
+/// table, so a match confirms the function is reading the table this documentation describes.
+pub const ESTUS_PROPERTY_INDEX_PROLOGUE: [u8; 7] = [0x4c, 0x8d, 0x05, 0xe9, 0xde, 0x3b, 0x01];
+
+/// [`ESTUS_PROPERTY_INDEX`]'s answer for a key it does not know. `0xFF`.
+///
+/// **Must be rejected rather than passed on.** See [`ESTUS_SET_PROPERTY`] -- it is sign-extended
+/// into an index, so it addresses the byte BEFORE the levels.
+pub const ESTUS_PROPERTY_NOT_FOUND: u8 = 0xFF;
+
+/// The number of uses -- the axis Estus Flask Shards raise. Property key `0`.
+///
+/// Named in the binary: the table row's name pointer is `0x1410c3e40`, the UTF-16 string
+/// `使用回数`, "number of uses".
+pub const ESTUS_PROPERTY_USES: u32 = 0;
+
+/// How much each use heals -- the axis Sublime Bone Dust raises. Property key `1`.
+///
+/// Named in the binary at `0x1410c3e50`: `効果量`, "effect amount". The same setter drives it; there
+/// is no separate bone-dust function, and the in-game path (`0x14017f420`, the item-use handler)
+/// differs only in writing a presentation flag on the player first.
+pub const ESTUS_PROPERTY_EFFECT: u32 = 1;
+
+/// What to ask [`ESTUS_SET_PROPERTY`] for when the intent is "as high as this game allows". `99`.
+///
+/// # Why not 12
+///
+/// The maxima live in `EstusFlaskMaxReinforceParam` (`12` uses and `6` effect as shipped), which a
+/// regulation mod can change, and the setter clamps into that param's own range before it writes.
+/// So asking for more than any real maximum and letting the game decide is exactly right, and it
+/// keeps a number out of this file that would silently become a LIMIT on a modded install.
+///
+/// The comparisons are SIGNED, so this must stay positive; a negative would clamp UP to the minimum.
+pub const ESTUS_LEVEL_ASK: i32 = 99;
+
+/// The one Estus Flask a character can hold. `60155000`.
+///
+/// The three neighbours the item catalogue also calls `Estus Flask` are not upgrade states -- the
+/// upgrade level is a byte on the entry, and the held id never changes. They are rows of
+/// `EstusFlaskLvDataParam` whose ids are `60155000 + (row - 1)`, reachable only at effect levels
+/// 11, 21 and 31 in a game that caps the effect level at 6. `ItemParam[id] + 0x40` is `450` for
+/// this id and `420` for those three, and `450` is what the flask's list checks, so they could not
+/// bind even if something granted them.
+pub const ESTUS_FLASK_ITEM_ID: i32 = 60155000;
+
 /// `PlayerParam::AddSouls`. RVA `0x0038ab40`. `fn(PlayerParam*, u32 amount)`.
 ///
 /// **This is how soul memory is raised through the game rather than written.** One call updates

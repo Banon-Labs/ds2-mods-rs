@@ -310,6 +310,72 @@ fn apply(build: &ds2_build_import_core::Build) {
 
     equip_everything(build);
     join_covenant(build);
+    fill_estus();
+}
+
+/// **Take the Estus Flask to the maximum, every time, through the game's own upgrade path.**
+///
+/// # Why this runs on a build import at all
+///
+/// It has nothing to do with the build -- soulsplanner does not describe a flask. It is here
+/// because a character assembled in one press is one that has not walked the game, and the flask is
+/// the one thing a build cannot express and no player would want left at one charge.
+///
+/// # Why it is unconditional
+///
+/// The setter is idempotent: an already-maximum flask reports the same numbers and writes nothing.
+/// So there is no state to check first and nothing to lose by asking every time.
+fn fill_estus() {
+    // SAFETY: the game thread, from the pause menu's own per-frame update, with a character loaded.
+    // Every prologue is re-checked inside.
+    let mut outcome = unsafe { crate::game::max_estus() };
+
+    // A CHARACTER WITH NO FLASK GETS ONE. There is nothing to upgrade until an Estus Flask is bound
+    // to its list slot, and granting it is the same `ItemGive` every other item goes through -- the
+    // game's own add path seeds the levels and the first charge, exactly as a new character's is.
+    if outcome == Err(crate::game::GameError::NoEstusFlask) {
+        log_line(format_args!(
+            "{LOG_PREFIX} no Estus Flask on this character -- granting {}",
+            ds2_rva::ESTUS_FLASK_ITEM_ID
+        ));
+        let flask = [crate::game::ItemSpawn {
+            mode: ds2_rva::ITEM_SPAWN_MODE_NORMAL,
+            item_id: ds2_rva::ESTUS_FLASK_ITEM_ID,
+            durability: ds2_rva::ITEM_SPAWN_DURABILITY_MAX,
+            quantity: 1,
+            reinforce: 0,
+            infusion: 0,
+        }];
+        // SAFETY: as above.
+        match unsafe { crate::game::give_items(&flask, 1) } {
+            // SAFETY: as above.
+            Ok(1) => outcome = unsafe { crate::game::max_estus() },
+            Ok(_) => log_line(format_args!("{LOG_PREFIX} the Estus Flask was not granted")),
+            Err(error) => log_line(format_args!(
+                "{LOG_PREFIX} could not grant an Estus Flask: {error}"
+            )),
+        }
+    }
+
+    match outcome {
+        Ok(estus) => {
+            log_line(format_args!(
+                "{LOG_PREFIX} Estus: uses {}->{} (max={}) effect {}->{} (max={}) charges {}->{}",
+                estus.uses.0,
+                estus.uses.1,
+                estus.uses_at_max,
+                estus.effect.0,
+                estus.effect.1,
+                estus.effect_at_max,
+                estus.charges.0,
+                estus.charges.1
+            ));
+            if estus.changed() {
+                say(&format!("Estus {} charges", estus.charges.1));
+            }
+        }
+        Err(error) => log_line(format_args!("{LOG_PREFIX} Estus left alone: {error}")),
+    }
 }
 
 /// The FLAT slot a planned position occupies, using the bases `ds2-rva` records.

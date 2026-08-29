@@ -108,11 +108,17 @@ const UNSAFE_SUFFIX: &str = " (UNSAFE)";
 /// NOTHING while `ItemGive` still answers `true`. A caller that trusts the return value believes it
 /// granted something that does not exist.
 ///
-/// **The three Estus Flask rows here are upgrade STATES, not items.** DARK SOULS II has exactly one
-/// Estus Flask, upgraded eleven times with shards, and `60155010/20/30` describe its strength. The
-/// real flask is `60155000` -- the row this catalogue marks `(UNSAFE)`, which is why
-/// [`WRONGLY_FLAGGED`] exists. Granting the flask by name used to pick the lowest of the three
-/// states and silently achieve nothing.
+/// # The three Estus Flask rows here are NOT upgrade states
+///
+/// That was this comment's own first answer and it was wrong. DARK SOULS II has exactly one Estus
+/// Flask, `60155000`, and its upgrade level is a BYTE ON THE INVENTORY ENTRY -- the held id never
+/// changes. See `ds2_rva::ESTUS_SET_PROPERTY`. `60155010/20/30` are rows of `EstusFlaskLvDataParam`
+/// (`60155000 + (row - 1)`), reachable only at effect levels 11, 21 and 31 in a game that caps the
+/// effect level at 6, so nothing in a shipped game ever names them.
+///
+/// The conclusion the wrong reading reached was still the right one: the real flask is `60155000`,
+/// the row this catalogue marks `(UNSAFE)`, which is why [`WRONGLY_FLAGGED`] exists. Granting the
+/// flask by name used to pick the lowest of the other three and silently achieve nothing.
 ///
 /// This list is short because it is only what has been PROVEN from the params. The authoritative
 /// test is the bit itself, and reading it at runtime would retire this list entirely.
