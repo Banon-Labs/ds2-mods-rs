@@ -28,13 +28,15 @@ pub struct InventorySortConfig {
 impl Default for InventorySortConfig {
     /// **Off**, and it is a holding position rather than a verdict.
     ///
-    /// The feature patches two functions in the loaded image and then CALLS a third on the game
-    /// thread, and none of that has been run yet. It also has a default key that is a placeholder
-    /// -- nobody's muscle memory is on `F7` -- so a player who has not asked for this and has not
-    /// chosen a button gets nothing rather than a surprise dialog.
+    /// Both menus are now proven. Runs on 2026-08-29 logged `opening the sort dialog` on the
+    /// Inventory tab and then `on=equip` for the equip picker, the dialog appeared both times, and
+    /// the game was alive after each call. The first equip run also found and fixed a real defect:
+    /// the button was being sampled from the pause menu's TAB STRIP, which does not tick reliably
+    /// inside a list, so most presses were missed entirely.
     ///
-    /// It flips to on once a run shows the dialog opening from the bound button and the shipped ①
-    /// prompt still working afterwards.
+    /// **What has not been run is the default binding.** `lthumb` was only just adopted, and a
+    /// switch that turns itself on should not be the thing that introduces an untested button. One
+    /// run on L3 flips this.
     fn default() -> Self {
         Self { enabled: false }
     }

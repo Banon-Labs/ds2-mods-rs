@@ -12,7 +12,7 @@ for the RVA `ds2-rva` records.
 the pause menu's Inventory tab. What it lacks is any way to move the button.
 
 ```
-common.fmg  10004      '①：Sort'
+common.fmg  10004      '1:Sort'
             80059901   'How should the list be sorted?'
             80050101   'Default positions'    80050102  'By effect'
             80050103   'Attack'               80050104  'Weight'
@@ -115,11 +115,11 @@ until it has.
 10340 Function 1           10341 Function 2
 ```
 
-Sorting is not one of them. It rides on one of the two generic Function keys -- the `①` placeholder,
-which is also `①：Switch` in Equipment, `①：Delete` in messages and `①：Default` in options -- so
+Sorting is not one of them. It rides on one of the two generic Function keys -- the `1` placeholder,
+which is also `1:Switch` in Equipment, `1:Delete` in messages and `1:Default` in options -- so
 rebinding it moves all of those together. That the circled numbers are input placeholders rather
-than decoration is not inferred: `0x1405056a0` walks every string in a message and swaps `⑲` for
-`⑳`, which is the confirm/cancel flip for Japanese pads.
+than decoration is not inferred: `0x1405056a0` walks every string in a message and swaps `19` for
+`20`, which is the confirm/cancel flip for Japanese pads.
 
 There is **no controller remapping in DARK SOULS II at all**. A grep across all twenty-six shipped
 `.fmg` files finds no button-config screen; the options list is camera, vibration, audio, HUD and
@@ -149,11 +149,97 @@ Nothing is injected into the input path. A synthesised press would also fire eve
 shipped Function key does in whatever menu happened to be open, and `ds2-safe-input`'s own docs
 describe the failure mode of a button nobody released.
 
+## The equip screen: the sort is already there, the button never was
+
+Choosing a weapon to equip opens a `FeGroupItemEquip` list, and that screen ships **no sort prompt
+at all** -- so there is nothing to rebind there, only something to add.
+
+**The sorting is already wired in, and that was read rather than assumed.** The picker's list is
+rebuilt by `FeIngameItemSelectMenu::v57` (`0x140097400`, this class's vtable slot `+0x148`), and at
+`0x140097428` that function calls `0x140036080` -- the same shared builder the Inventory tab uses,
+which reads the per-category sort key at `0x140036108`. There are only four readers of that key in
+the whole image (`0x140033bec`, `0x140036108`, `0x1400ba331` in the dialog's own closure, and one
+false positive), so the equip list and the inventory list are sorted by the same value. **Choosing a
+sort in the Inventory tab already reorders the equip list**; what the equip screen lacks is only a
+way to choose one without leaving it.
+
+### One opener serves both, and the game already proves it is generic
+
+`FeGroupInGameMenuInventory2`, `FeGroupItemEquip` and `FeItemBoxMenu` (the storage box) share a base
+class. Their `+0x50` vtables are identical slot for slot through `+0x28`:
+
+```
++0x00 0x14001baf0   +0x08 0x14001bae0   +0x10 0x140072ba0
++0x18 0x140073150   +0x20 0x1400bb9c0   +0x28 0x140074f70    (all three classes)
+```
+
+So `[this+0x58]` (the busy guard) and `this+0x50` (the dialog's parent) mean the same thing in each.
+Everything else the opener needs is virtual: slot `+0x140` returns the category, slot `+0x148`
+rebuilds the list, and each class supplies its own -- `FeItemSelectMenu::v40` / `FeIngameItemSelectMenu::v56`
+for the category, `0x140074ff0` / `0x140097400` for the rebuild.
+
+Two of the three ship an opener -- `0x1400747e0` (inventory) and `0x1400c2ad0` (storage box) -- and
+they are near-identical: same busy check, same `+0x140` call, same `0x1400349d0` slicing, same
+`this+0x50` handed to the dialog. **They also build their rows from the SAME closure**, vtable
+`0x1410b1ec0` and member function `0x1400ba300`. That is the decisive fact: an Inventory-named
+functor that the shipped game already reuses for a different class's list. The only difference is
+one field (`0x8000000005F5E110` written to `dialog+0x860`) that the inventory copy sets and the
+storage box's does not.
+
+`FeGroupItemEquip`'s constructor is `0x14008c0d0` and **takes four arguments, not three** -- it spills
+`R8D` into its home slot on the entry instruction and reads `R9` fourteen bytes later. Its scalar
+deleting destructor is `0x14008dc70`, slot 0 of vtable `0x1410b46c8`. Neither is Arxan-redirected.
+
+## What a run has settled
+
+One run, 2026-08-29, `--inventory-sort --sort-key F7`, staged sha256 `357f1386...c5e2`:
+
+* `FeGroupInGameTopSelect::v2` -- the tick this borrows -- **does keep running while the Inventory tab
+  has focus**. That was the open question and it is answered; no fallback to the Inventory group's
+  own update is needed.
+* `GetAsyncKeyState` reads the bound key through Proton with the focus check passing.
+* The constructor detour records the live group and the vtable check passes:
+  `opening the sort dialog group=0x00007fffe9929000 busy=0`.
+* Calling `0x1400747e0` from that tick does not fault, and **the dialog appears on screen**.
+
+It also found a defect: `LOGGED_LINES` was 3, and three presses outside the Inventory tab spent the
+whole refusal budget before the real test. Raised to 24 -- the tick is edge-triggered, so the cap
+bounds presses, not frames.
+
+## The ELDEN RING button, and why the binary would not give it up
+
+The default controller binding is **`lthumb` -- left stick click, L3**. It is the one value in this
+crate that did not come out of a binary, and the trail is written down here so nobody re-walks it.
+
+What static analysis *did* settle, in `eldenring-deobf.bin` (image base `0x140000000`, flat):
+
+```
+0x14075a1f6  mov edx, 0x1d4d4      ; GR_KeyGuide 120020 = "Sort"
+0x14075a1ff  call 0x1407606a0      ; fetch the prompt text
+0x14075a217  lea edx,[rdi+0x2e]    ; edi=0 -> menu-input id 0x2E
+0x14075a21d  call 0x14075e9e0      ; register(this, 0x2E, flag, text)
+```
+
+All 39 key-guide registrations were pulled the same way. ELDEN RING's whole menu uses nine input
+ids -- `0x18 0x19 0x23 0x27 0x28 0x29 0x2A 0x2E 0x2F` -- and `0x2E` carries both `Sort` and the map's
+"Center on current location", so it is one generic function control doing two jobs, structurally the
+same thing as DS2's `1`.
+
+**Where it dies: ELDEN RING ships no keyboard key-name strings at all.** `Backspace`, `PageUp`,
+`Numpad`, `CapsLock` and `LeftShift` all return zero hits in both ASCII and UTF-16. It draws inputs
+as sprites from an atlas, so there is no name table to resolve an input id against, and the
+registration only forwards the id into a closure chain (`0x14075e9e0` -> `0x14075e8b0` ->
+`0x140758500` -> `0x14075d970`) that re-resolves the glyph per frame as the active device changes.
+Getting from `0x2E` to a physical button means reverse-engineering the input-binding structure of a
+different game -- more work than this entire DS2 feature was, for one fact.
+
+So the player named it. `scripts/which-pad-button.py` exists for the next time this comes up: it
+reads evdev directly and prints the button in the spelling `ds2-mods.toml` takes, which beats asking
+someone to name a button they know as a place their thumb goes.
+
 ## Not established
 
-* Which physical button ELDEN RING puts `Sort` on.
 * Whether the bag reuses freed slots, which is what "sort by acquisition" would rest on.
-* Whether `FeGroupInGameTopSelect::v2` -- the tick this borrows -- keeps running while the Inventory
-  tab has focus. It is on screen, so it should; **no run has confirmed it**, and if it does not, the
-  fix is to hook the Inventory group's own update instead.
-* Anything at all about how this behaves in a running game. **It has not been run.**
+* Whether the equip picker's sort OPTIONS match the slot being equipped, and whether choosing one
+  visibly reorders the list. The dialog is confirmed to open there; its contents are not.
+* Whether `lthumb` works in game. It is the default as of this writing and has never been pressed.

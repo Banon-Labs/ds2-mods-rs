@@ -1,9 +1,9 @@
-//! The two detours that find the Inventory tab, the tick that reads the button, and the watcher
+//! The four detours that find the two item lists, the tick that reads the button, and the watcher
 //! that lets the button move while the game runs.
 
 use core::ffi::c_void;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use ds2_hook::{MH_EnableHook, MH_Initialize, MH_STATUS, MhHook};
 use ds2_hotkey_config::keys::{Chord, MODIFIER_ALT, MODIFIER_CTRL, MODIFIER_SHIFT};
@@ -59,25 +59,75 @@ pub struct Request {
 /// What [`install`] managed to do.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Outcome {
-    /// Both detours went in and the tick is registered.
+    /// At least one menu's detour pair went in and the tick is registered.
+    ///
+    /// Not "all four": the Inventory tab and the equip picker are independent findings on
+    /// independent addresses, and losing one should not take the other with it. Which pairs
+    /// survived is in the `armed inventory=.. equip=..` log line.
     pub installed: bool,
 }
 
-/// The live `FeGroupInGameMenuInventory2`, or `0` when the Inventory tab is not open.
+/// One menu whose list the sort dialog can be opened on.
 ///
-/// Written by both detours and read by the tick, all on the game thread; atomic anyway because
-/// "the game thread" is an expectation this crate cannot enforce on MinHook's behalf.
-static LIVE_GROUP: AtomicUsize = AtomicUsize::new(0);
+/// **There are two, and that is why this is a struct rather than three loose statics.** The pause
+/// menu's Inventory tab (`FeGroupInGameMenuInventory2`) and the Equipment screen's item picker
+/// (`FeGroupItemEquip`) are different classes built by different constructors, and either can be
+/// the one in front of the player when the button is pressed. One opener serves both: they share a
+/// base class, so `[this+0x58]` and `this+0x50` mean the same thing in each, and the shipped
+/// dialog reaches everything else through virtual slots each class implements for itself.
+struct Tracked {
+    /// The live object, or `0` when that menu is not open.
+    ///
+    /// Written by both of that menu's detours and read by the tick, all on the game thread; atomic
+    /// anyway because "the game thread" is an expectation this crate cannot enforce on MinHook's
+    /// behalf.
+    group: AtomicUsize,
+    /// When it was recorded. The NEWEST live record wins a press -- see [`newest_live`].
+    seq: AtomicU64,
+    /// The primary vtable a cached pointer must still carry.
+    vtable: AtomicUsize,
+    /// Trampoline back to the original constructor.
+    ctor: AtomicUsize,
+    /// Trampoline back to the original destructor.
+    dtor: AtomicUsize,
+    /// Trampoline back to this list's own per-frame update, which is where the button is sampled.
+    update: AtomicUsize,
+    /// What the log calls this menu.
+    what: &'static str,
+}
 
-/// Trampolines back to the original constructor and destructor.
-static CTOR_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
-static DTOR_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
+impl Tracked {
+    const fn new(what: &'static str) -> Self {
+        Self {
+            group: AtomicUsize::new(0),
+            seq: AtomicU64::new(0),
+            vtable: AtomicUsize::new(0),
+            ctor: AtomicUsize::new(0),
+            dtor: AtomicUsize::new(0),
+            update: AtomicUsize::new(0),
+            what,
+        }
+    }
+}
+
+/// Index of the pause menu's Inventory tab in [`TRACKED`].
+const INVENTORY: usize = 0;
+/// Index of the Equipment screen's item picker in [`TRACKED`].
+const EQUIP: usize = 1;
+
+static TRACKED: [Tracked; 2] = [Tracked::new("inventory"), Tracked::new("equip")];
+
+/// Hands out the ordering that decides which live group a press belongs to.
+static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 /// Resolved address of [`ds2_rva::FE_INVENTORY_SORT_DIALOG_OPEN`], after its prologue was checked.
+///
+/// ONE opener for both menus. The storage box ships a near-identical second copy at `0x1400c2ad0`,
+/// which is how we know this one is not Inventory-specific: the two differ only in one field the
+/// Inventory copy writes on the finished dialog, and both build their rows from the SAME closure
+/// (`0x1410b1ec0` / `0x1400ba300`) -- an Inventory-named functor the game already reuses for a
+/// different class. This is the copy a real run has exercised, which is why it is the one used.
 static DIALOG_OPEN: AtomicUsize = AtomicUsize::new(0);
-
-/// Resolved address of the object vtable a cached pointer must still carry.
-static GROUP_VTABLE: AtomicUsize = AtomicUsize::new(0);
 
 /// The keyboard binding in force. Empty until [`install`] applies the config.
 static KEY_BINDING: AtomicChord = AtomicChord::unset();
@@ -94,16 +144,44 @@ static OPENED: AtomicU32 = AtomicU32::new(0);
 /// `XInputGetState`, resolved once out of the copy the game itself imports.
 static XINPUT_GET_STATE: AtomicUsize = AtomicUsize::new(0);
 
-/// How many presses of each kind -- opened, refused -- reach the log before it goes quiet. A fact
-/// established three times is established; a fourth line is a write on the game's own frame.
-const LOGGED_LINES: u32 = 3;
+/// How many presses of each kind -- opened, refused -- reach the log before it goes quiet.
+///
+/// **Raised from 3 after the first real run, which spent the whole allowance before the test.**
+/// Three presses outside the Inventory tab exhausted the refusal budget and the log went dark for
+/// the press that mattered; a diagnostic that runs out before the diagnosis is worse than none.
+///
+/// A cap is still right, and the reason is narrower than it first looks: the tick is EDGE
+/// triggered, so a held button logs once, not once a frame. What the cap actually bounds is a
+/// player mashing the button in a menu this cannot serve -- worth bounding, since the loader's log
+/// sink `sync_all`s every line, but not worth bounding at three.
+const LOGGED_LINES: u32 = 24;
 
 /// How many presses have been refused. Bounds the refusal logging, nothing else.
 static REFUSED: AtomicU32 = AtomicU32::new(0);
 
-/// The default keyboard binding. **A placeholder, not a recommendation**: the button worth having
-/// here is whichever one the player's fingers already know, and no default can guess that.
+/// How many times the button has been SAMPLED. Reported on every logged press.
+///
+/// **This exists because the first equip run could not tell two failures apart.** Presses that
+/// produced no log line at all are consistent with "the key was never read" and with "the sampler
+/// never ran", and nothing in the log separated them. A sample count printed beside each press does
+/// separate them: a few hundred between two presses is a healthy per-frame sampler, and a handful
+/// is a starved one. One relaxed increment per frame, no allocation, no I/O.
+static SAMPLES: AtomicU64 = AtomicU64::new(0);
+
+/// The default keyboard binding. **Still a placeholder**, unlike [`DEFAULT_PAD`]: no keyboard key
+/// was ever established for this, and `F7` is only what the first runs happened to use.
 const DEFAULT_KEY: &str = "F7";
+
+/// The default controller binding: **left stick click, which is where ELDEN RING puts Sort.**
+///
+/// That is the whole point of the feature -- muscle memory from a different game -- and it is the
+/// one value here that is not a guess. It did NOT come from the binary: ELDEN RING registers its
+/// `Sort` prompt (`GR_KeyGuide` 120020) with menu-input id `0x2E`, shared with the map's "Center on
+/// current location", and the trail from that id to a physical button dies because **ELDEN RING
+/// ships no keyboard key-name strings at all** -- it draws inputs as sprites, so there is no name
+/// table to anchor the mapping on. The id, the registration site (`0x14075a21d`) and the resolver
+/// chain are all in `docs/DS2-INVENTORY-SORT.md`; the button itself came from the player.
+const DEFAULT_PAD: &str = "lthumb";
 
 /// XInput button names accepted in the config, and their `wButtons` masks.
 ///
@@ -140,45 +218,164 @@ struct XInputState {
 /// `DWORD XInputGetState(DWORD dwUserIndex, XINPUT_STATE *pState)`.
 type XInputGetStateFn = unsafe extern "system" fn(u32, *mut XInputState) -> u32;
 
-/// The constructor: `fn(this, ?, ?) -> this`. The later two arguments are passed straight through.
-type CtorFn = unsafe extern "system" fn(*mut u8, usize, usize) -> *mut u8;
+/// The Inventory tab's constructor: `fn(this, ?, ?) -> this`. The later two are passed through.
+type InventoryCtorFn = unsafe extern "system" fn(*mut u8, usize, usize) -> *mut u8;
 
-/// The scalar deleting destructor: `fn(this, flags) -> this`.
+/// The item picker's constructor: **`fn(this, ?, u32, ?) -> this`, four arguments.**
+///
+/// The count was read, not assumed. `FeGroupItemEquip::ctor` opens by spilling `R8D` into its home
+/// slot and reads `R9` fourteen bytes later, so a three-argument detour would forward three of the
+/// four and leave the constructor a garbage fourth. See [`ds2_rva::FE_EQUIP_GROUP_CTOR`].
+type EquipCtorFn = unsafe extern "system" fn(*mut u8, usize, u32, usize) -> *mut u8;
+
+/// The scalar deleting destructor: `fn(this, flags) -> this`. The same shape in both classes.
 type DtorFn = unsafe extern "system" fn(*mut u8, u32) -> *mut u8;
 
 /// The sort dialog: `fn(this)`.
 type DialogOpenFn = unsafe extern "system" fn(*mut u8);
 
-/// Record the group, then let the game build it.
+/// A list's own per-frame update: **`fn(this, f32 delta, ptr, ptr)` -- four arguments.**
 ///
-/// The record happens BEFORE the original runs and is not conditional on it: the original returns
-/// `this` unchanged, and a detour that waited would be a window in which the object exists and this
-/// crate does not know it.
-unsafe extern "system" fn ctor_detour(this: *mut u8, second: usize, third: usize) -> *mut u8 {
-    LIVE_GROUP.store(this as usize, Ordering::Release);
-    let trampoline = CTOR_TRAMPOLINE.load(Ordering::Acquire);
+/// Not the two `ds2-menu-row` declares for the tab strip's update. Both of these read `R8`, so the
+/// count is load-bearing here; see [`ds2_rva::FE_ITEM_LIST_UPDATE_ARGUMENT_COUNT`]. The `f32` lands
+/// in `XMM1` by position, which is the MS x64 rule and why it is spelled as the second argument
+/// rather than passed some other way.
+type UpdateFn = unsafe extern "system" fn(*mut u8, f32, usize, usize);
+
+/// Record a group as the newest live one.
+///
+/// The record happens BEFORE the original constructor runs and is not conditional on it: those
+/// constructors return `this` unchanged, and a detour that waited would leave a window in which the
+/// object exists and this crate does not know it.
+fn record(slot: usize, this: *mut u8) {
+    let tracked = &TRACKED[slot];
+    // THE SEQUENCE IS WHAT MAKES TWO MENUS UNAMBIGUOUS. Both can be live at once -- the picker is
+    // reached from a screen that does not tear itself down -- and the press belongs to whichever
+    // the player is looking at, which is the one built most recently.
+    tracked.seq.store(
+        SEQUENCE.fetch_add(1, Ordering::Relaxed) + 1,
+        Ordering::Relaxed,
+    );
+    tracked.group.store(this as usize, Ordering::Release);
+}
+
+/// Forget a group, if the record still points at THIS object.
+///
+/// **Compared before clearing.** A destructor for some other instance of the same class must not
+/// blank a record that still points at a live one.
+fn forget(slot: usize, this: *mut u8) {
+    let _ =
+        TRACKED[slot]
+            .group
+            .compare_exchange(this as usize, 0, Ordering::AcqRel, Ordering::Relaxed);
+}
+
+/// The live menu a press belongs to: the newest one still standing.
+fn newest_live() -> Option<&'static Tracked> {
+    TRACKED
+        .iter()
+        .filter(|tracked| tracked.group.load(Ordering::Acquire) != 0)
+        .max_by_key(|tracked| tracked.seq.load(Ordering::Relaxed))
+}
+
+/// Run a constructor detour's original, or return `this` if the trampoline never arrived.
+fn trampoline_of(slot: usize, which: fn(&Tracked) -> &AtomicUsize) -> usize {
+    which(&TRACKED[slot]).load(Ordering::Acquire)
+}
+
+unsafe extern "system" fn inventory_ctor_detour(
+    this: *mut u8,
+    second: usize,
+    third: usize,
+) -> *mut u8 {
+    record(INVENTORY, this);
+    let trampoline = trampoline_of(INVENTORY, |tracked| &tracked.ctor);
     if trampoline == 0 {
         return this;
     }
     // SAFETY: MinHook published this trampoline for this site, and the arguments are the caller's
     // own, forwarded unaltered.
-    let original: CtorFn = unsafe { std::mem::transmute::<usize, CtorFn>(trampoline) };
+    let original: InventoryCtorFn =
+        unsafe { std::mem::transmute::<usize, InventoryCtorFn>(trampoline) };
     unsafe { original(this, second, third) }
 }
 
-/// Forget the group, then let the game destroy it.
-///
-/// **Compared before clearing.** Two objects of this class are not expected to exist at once, but a
-/// destructor for some OTHER instance must not blank a record that still points at a live one.
-unsafe extern "system" fn dtor_detour(this: *mut u8, flags: u32) -> *mut u8 {
-    let _ = LIVE_GROUP.compare_exchange(this as usize, 0, Ordering::AcqRel, Ordering::Relaxed);
-    let trampoline = DTOR_TRAMPOLINE.load(Ordering::Acquire);
+unsafe extern "system" fn inventory_dtor_detour(this: *mut u8, flags: u32) -> *mut u8 {
+    forget(INVENTORY, this);
+    let trampoline = trampoline_of(INVENTORY, |tracked| &tracked.dtor);
     if trampoline == 0 {
         return this;
     }
     // SAFETY: MinHook published this trampoline for this site; both arguments are the caller's own.
     let original: DtorFn = unsafe { std::mem::transmute::<usize, DtorFn>(trampoline) };
     unsafe { original(this, flags) }
+}
+
+unsafe extern "system" fn equip_ctor_detour(
+    this: *mut u8,
+    second: usize,
+    third: u32,
+    fourth: usize,
+) -> *mut u8 {
+    record(EQUIP, this);
+    let trampoline = trampoline_of(EQUIP, |tracked| &tracked.ctor);
+    if trampoline == 0 {
+        return this;
+    }
+    // SAFETY: MinHook published this trampoline for this site. All FOUR arguments are the caller's
+    // own, forwarded unaltered -- see `EquipCtorFn` for why the count matters here.
+    let original: EquipCtorFn = unsafe { std::mem::transmute::<usize, EquipCtorFn>(trampoline) };
+    unsafe { original(this, second, third, fourth) }
+}
+
+unsafe extern "system" fn equip_dtor_detour(this: *mut u8, flags: u32) -> *mut u8 {
+    forget(EQUIP, this);
+    let trampoline = trampoline_of(EQUIP, |tracked| &tracked.dtor);
+    if trampoline == 0 {
+        return this;
+    }
+    // SAFETY: MinHook published this trampoline for this site; both arguments are the caller's own.
+    let original: DtorFn = unsafe { std::mem::transmute::<usize, DtorFn>(trampoline) };
+    unsafe { original(this, flags) }
+}
+
+/// Run the list's own update, then sample the button.
+///
+/// **AFTER the original, not before.** The button opens a dialog that the game builds against the
+/// state this update has just finished settling; sampling first would act on the previous frame.
+///
+/// # Safety
+///
+/// Called by the game on its own thread with its own arguments, forwarded unaltered.
+unsafe fn update_detour(slot: usize, this: *mut u8, delta: f32, third: usize, fourth: usize) {
+    let trampoline = trampoline_of(slot, |tracked| &tracked.update);
+    if trampoline != 0 {
+        // SAFETY: MinHook published this trampoline for this site. All FOUR arguments are the
+        // caller's own -- `R8` is read by both of these updates, so dropping it is not an option.
+        let original: UpdateFn = unsafe { std::mem::transmute::<usize, UpdateFn>(trampoline) };
+        unsafe { original(this, delta, third, fourth) };
+    }
+    // This IS the game thread, inside the list's own per-frame update -- the moment the whole
+    // crate exists to act on.
+    tick();
+}
+
+unsafe extern "system" fn inventory_update_detour(
+    this: *mut u8,
+    delta: f32,
+    third: usize,
+    fourth: usize,
+) {
+    unsafe { update_detour(INVENTORY, this, delta, third, fourth) };
+}
+
+unsafe extern "system" fn equip_update_detour(
+    this: *mut u8,
+    delta: f32,
+    third: usize,
+    fourth: usize,
+) {
+    unsafe { update_detour(EQUIP, this, delta, third, fourth) };
 }
 
 /// Whether the foreground window belongs to THIS process.
@@ -286,28 +483,29 @@ fn read_field(group: usize, offset: usize) -> Option<usize> {
 /// Game thread only, from the pause menu's own per-frame update. It calls into the menu's dialog
 /// machinery, which is not safe to enter from a worker thread.
 unsafe fn open_dialog() {
-    let group = LIVE_GROUP.load(Ordering::Acquire);
-    if group == 0 {
+    let Some(tracked) = newest_live() else {
         note_refusal(format_args!(
-            "{LOG_PREFIX} press ignored -- the Inventory tab is not open"
+            "{LOG_PREFIX} press ignored -- neither the Inventory tab nor the equip picker is open"
         ));
         return;
-    }
-    let wanted = GROUP_VTABLE.load(Ordering::Acquire);
+    };
+    let what = tracked.what;
+    let group = tracked.group.load(Ordering::Acquire);
+    let wanted = tracked.vtable.load(Ordering::Acquire);
     let Some(live) = read_field(group, 0) else {
         note_refusal(format_args!(
-            "{LOG_PREFIX} press ignored -- cached group 0x{group:016x} is not readable"
+            "{LOG_PREFIX} press ignored -- cached {what} group 0x{group:016x} is not readable"
         ));
-        LIVE_GROUP.store(0, Ordering::Release);
+        tracked.group.store(0, Ordering::Release);
         return;
     };
     if wanted != 0 && live != wanted {
         // THE RECORD IS STALE AND THE DESTRUCTOR DID NOT SAY SO. Nothing is called on it.
         note_refusal(format_args!(
-            "{LOG_PREFIX} press ignored -- cached group 0x{group:016x} carries vtable \
+            "{LOG_PREFIX} press ignored -- cached {what} group 0x{group:016x} carries vtable \
              0x{live:016x}, wanted 0x{wanted:016x}"
         ));
-        LIVE_GROUP.store(0, Ordering::Release);
+        tracked.group.store(0, Ordering::Release);
         return;
     }
     let open = DIALOG_OPEN.load(Ordering::Acquire);
@@ -317,8 +515,10 @@ unsafe fn open_dialog() {
     let count = OPENED.fetch_add(1, Ordering::Relaxed);
     if count < LOGGED_LINES {
         let busy = read_field(group, ds2_rva::FE_INVENTORY_GROUP_BUSY_OFFSET).unwrap_or(0);
+        let samples = SAMPLES.load(Ordering::Relaxed);
         log(format_args!(
-            "{LOG_PREFIX} opening the sort dialog group=0x{group:016x} busy={busy}"
+            "{LOG_PREFIX} opening the sort dialog on={what} group=0x{group:016x} busy={busy} \
+             samples={samples}"
         ));
     }
     // SAFETY: the game thread, inside the pause menu's own update, with a group whose vtable was
@@ -344,6 +544,7 @@ fn note_refusal(args: std::fmt::Arguments<'_>) {
 /// Registered with `ds2-menu-row`, so it runs on the game thread from the pause menu's own update
 /// -- which is also the only time it could do anything.
 fn tick() {
+    SAMPLES.fetch_add(1, Ordering::Relaxed);
     let focused = game_has_focus();
     let key = KEY_BINDING.load();
     let pad = PAD_BINDING.load(Ordering::Relaxed);
@@ -430,7 +631,7 @@ fn apply_config(text: &str, first: bool) {
             }
         }
         None if first => log(format_args!(
-            "{LOG_PREFIX} [{CONFIG_SECTION}] {CONFIG_KEY_PAD} not set -- no controller binding"
+            "{LOG_PREFIX} [{CONFIG_SECTION}] {CONFIG_KEY_PAD} not set -- default {DEFAULT_PAD}"
         )),
         None => {}
     }
@@ -511,6 +712,89 @@ unsafe fn hook(
     }
 }
 
+/// Hook one menu's constructor/destructor pair, or leave that menu untracked.
+///
+/// **All or nothing per menu.** A constructor hook whose destructor refused would record a pointer
+/// that nothing ever clears, which is the one failure this crate must not ship: a press after the
+/// menu closes would call a shipped function on freed memory. MinHook offers no removal here, so
+/// on that path the constructor detour stays on the site -- what gets disabled is the RECORD, which
+/// makes it inert.
+///
+/// # Safety
+///
+/// Patches executable memory in the loaded game image.
+#[allow(clippy::too_many_arguments)]
+unsafe fn hook_pair(
+    base: usize,
+    slot: usize,
+    ctor_rva: u32,
+    ctor_prologue: &[u8; 5],
+    ctor_detour: *mut c_void,
+    dtor_rva: u32,
+    dtor_prologue: &[u8; 5],
+    dtor_detour: *mut c_void,
+    update_rva: u32,
+    update_prologue: &[u8; 5],
+    update_detour: *mut c_void,
+) -> bool {
+    let what = TRACKED[slot].what;
+    let ctor = unsafe {
+        hook(
+            base,
+            ctor_rva,
+            ctor_prologue,
+            ctor_detour,
+            &TRACKED[slot].ctor,
+            &format!("{what}-group-ctor"),
+        )
+    };
+    if !ctor {
+        return false;
+    }
+    let dtor = unsafe {
+        hook(
+            base,
+            dtor_rva,
+            dtor_prologue,
+            dtor_detour,
+            &TRACKED[slot].dtor,
+            &format!("{what}-group-dtor"),
+        )
+    };
+    if !dtor {
+        // With no vtable to check against and no destructor to clear it, `open_dialog` would
+        // eventually call into an object nothing forgets. A slot that records nothing is inert.
+        TRACKED[slot].vtable.store(0, Ordering::Release);
+        TRACKED[slot].group.store(0, Ordering::Release);
+        log(format_args!(
+            "{LOG_PREFIX} {what} not tracked -- a constructor hook without its destructor is a \
+             stale pointer waiting to be called"
+        ));
+        return false;
+    }
+    // THE SAMPLER, AND IT FAILS SOFT. Without it the button is still read -- `ds2-menu-row`'s tick
+    // on the pause menu's tab strip is still registered -- but read RARELY, which loses taps rather
+    // than delaying them. Degrading to "the button works if you hold it" is worth having; refusing
+    // to track the menu at all over it is not.
+    let sampled = unsafe {
+        hook(
+            base,
+            update_rva,
+            update_prologue,
+            update_detour,
+            &TRACKED[slot].update,
+            &format!("{what}-list-update"),
+        )
+    };
+    if !sampled {
+        log(format_args!(
+            "{LOG_PREFIX} {what} falls back to the tab strip's tick -- presses may be missed \
+             unless the button is held"
+        ));
+    }
+    true
+}
+
 /// Install both detours and register the tick.
 ///
 /// # Safety
@@ -545,8 +829,12 @@ pub unsafe fn install(request: &Request) -> Outcome {
         return Outcome::default();
     }
     DIALOG_OPEN.store(open_site, Ordering::Release);
-    GROUP_VTABLE.store(
+    TRACKED[INVENTORY].vtable.store(
         base + ds2_rva::FE_INVENTORY_GROUP_VTABLE as usize,
+        Ordering::Release,
+    );
+    TRACKED[EQUIP].vtable.store(
+        base + ds2_rva::FE_EQUIP_GROUP_VTABLE as usize,
         Ordering::Release,
     );
 
@@ -560,37 +848,49 @@ pub unsafe fn install(request: &Request) -> Outcome {
         return Outcome::default();
     }
 
-    let ctor = unsafe {
-        hook(
+    // THE DESTRUCTOR IS NOT OPTIONAL, and it is why these go in as PAIRS. Without it the record
+    // survives the menu closing and the next press calls a shipped function on freed memory. A
+    // constructor whose destructor refused is worse than no hook at all, so a half-installed pair
+    // is cleared back to nothing rather than left recording.
+    let inventory = unsafe {
+        hook_pair(
             base,
+            INVENTORY,
             ds2_rva::FE_INVENTORY_GROUP_CTOR,
             &ds2_rva::FE_INVENTORY_GROUP_CTOR_PROLOGUE,
-            ctor_detour as *mut c_void,
-            &CTOR_TRAMPOLINE,
-            "inventory-group-ctor",
-        )
-    };
-    if !ctor {
-        return Outcome::default();
-    }
-    // THE DESTRUCTOR IS NOT OPTIONAL. Without it the record survives the tab closing and the next
-    // press calls a shipped function on freed memory. If it refuses, the constructor hook stays in
-    // (MinHook has no removal here) but the record is never populated, so nothing is ever called.
-    let dtor = unsafe {
-        hook(
-            base,
+            inventory_ctor_detour as *mut c_void,
             ds2_rva::FE_INVENTORY_GROUP_DTOR,
             &ds2_rva::FE_INVENTORY_GROUP_DTOR_PROLOGUE,
-            dtor_detour as *mut c_void,
-            &DTOR_TRAMPOLINE,
-            "inventory-group-dtor",
+            inventory_dtor_detour as *mut c_void,
+            ds2_rva::FE_INVENTORY_GROUP_UPDATE,
+            &ds2_rva::FE_INVENTORY_GROUP_UPDATE_PROLOGUE,
+            inventory_update_detour as *mut c_void,
         )
     };
-    if !dtor {
+    let equip = unsafe {
+        hook_pair(
+            base,
+            EQUIP,
+            ds2_rva::FE_EQUIP_GROUP_CTOR,
+            &ds2_rva::FE_EQUIP_GROUP_CTOR_PROLOGUE,
+            equip_ctor_detour as *mut c_void,
+            ds2_rva::FE_EQUIP_GROUP_DTOR,
+            &ds2_rva::FE_EQUIP_GROUP_DTOR_PROLOGUE,
+            equip_dtor_detour as *mut c_void,
+            ds2_rva::FE_EQUIP_GROUP_UPDATE,
+            &ds2_rva::FE_EQUIP_GROUP_UPDATE_PROLOGUE,
+            equip_update_detour as *mut c_void,
+        )
+    };
+
+    // ONE MENU IS ENOUGH TO BE USEFUL. The Inventory tab and the equip picker are independent
+    // findings on independent addresses; if the equip pair ever stops matching its prologue on some
+    // other build, the Inventory button should keep working rather than the whole feature vanish.
+    if !inventory && !equip {
         DIALOG_OPEN.store(0, Ordering::Release);
         log(format_args!(
-            "{LOG_PREFIX} disarmed -- no destructor hook means a stale group pointer, and a stale \
-             group pointer is a call into freed memory"
+            "{LOG_PREFIX} disarmed -- neither menu could be tracked, so there is nothing safe to \
+             open the dialog on"
         ));
         return Outcome::default();
     }
@@ -599,6 +899,9 @@ pub unsafe fn install(request: &Request) -> Outcome {
     // leaves a working button rather than a silent feature.
     if let Ok(chord) = parse_chord(DEFAULT_KEY) {
         KEY_BINDING.store(chord);
+    }
+    if let Some((_, mask)) = PAD_BUTTONS.iter().find(|(name, _)| *name == DEFAULT_PAD) {
+        PAD_BINDING.store(*mask, Ordering::Relaxed);
     }
     if let Some(path) = request.config_path.clone() {
         if let Ok(text) = std::fs::read_to_string(&path) {
@@ -620,7 +923,8 @@ pub unsafe fn install(request: &Request) -> Outcome {
     }
 
     log(format_args!(
-        "{LOG_PREFIX} armed -- the shipped ① Sort prompt still works and is untouched"
+        "{LOG_PREFIX} armed inventory={inventory} equip={equip} -- the shipped ① Sort prompt still \
+         works and is untouched"
     ));
     Outcome { installed: true }
 }

@@ -1083,7 +1083,7 @@ def config_text(
     build_import: bool = False,
     inventory_sort: bool = False,
     inventory_sort_key: str = "F7",
-    inventory_sort_pad: str = "",
+    inventory_sort_pad: str = "lthumb",
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
@@ -1466,8 +1466,9 @@ def config_text(
 {KEY_BUILD_IMPORT_ENABLED} = {str(build_import).lower()}
 
 [{INVENTORY_SORT_SECTION}]
-# NOT STARTUP. Two detours on the Inventory tab's constructor and destructor, installed in the same
-# post-Arxan callback as everything else, plus a per-frame tick borrowed from `ds2-menu-row`.
+# NOT STARTUP. Four detours -- the constructor and destructor of the Inventory tab AND of the equip
+# screen's item picker -- installed in the same post-Arxan callback as everything else, plus a
+# per-frame tick borrowed from `ds2-menu-row`.
 #
 # IT ADDS NO FEATURE. DARK SOULS II already sorts the inventory -- `①：Sort`, the dialog headed
 # "How should the list be sorted?", and per-category keys including a real total attack rating
@@ -1477,10 +1478,18 @@ def config_text(
 # controller remapping in this game at all. So this opens the shipped dialog from a button you
 # choose, and leaves the shipped `①` prompt working.
 #
-# It calls one function -- `FeGroupInGameMenuInventory2`'s own sort-dialog entry, which takes the
-# group and nothing else and refuses itself while another dialog is up. Nothing is injected into
-# the input path; a synthesised button press would also fire every OTHER thing the shipped Function
-# key does in whatever menu happened to be open.
+# THE EQUIP SCREEN IS THE OTHER HALF, and there the game ships no sort prompt at all -- so this is
+# not a rebinding there, it is the button that was never there. The sorting itself already is: the
+# picker's list is rebuilt by the same shared builder the Inventory tab uses, reading the same
+# per-category sort key, so a sort chosen in the Inventory tab already reorders the equip list.
+# What was missing is only a way to choose one without leaving the screen.
+#
+# It calls one function -- the shipped sort-dialog entry, which takes the group and nothing else and
+# refuses itself while another dialog is up. One copy serves both menus: they share a base class, so
+# the guard field and the dialog's parent mean the same thing in each, and everything else is
+# reached through virtual slots each class implements for itself. Nothing is injected into the input
+# path; a synthesised button press would also fire every OTHER thing the shipped Function key does
+# in whatever menu happened to be open.
 {KEY_INVENTORY_SORT_ENABLED} = {str(inventory_sort).lower()}
 # NOT startup-only, unlike everything above: these two are re-read about once a second while the
 # game runs, so a button can be moved without a restart. A value that does not parse keeps the one
@@ -1489,6 +1498,12 @@ def config_text(
 # `{KEY_INVENTORY_SORT_KEY}` is a key NAME from `ds2-hotkey-config` ("F7", "]", "KP_Plus", "Insert"), empty for none.
 # `{KEY_INVENTORY_SORT_PAD}` is an XInput button: a b x y lb rb back start lthumb rthumb dpad_up dpad_down
 # dpad_left dpad_right. Empty for none. BOTH may be set; either one opens the dialog.
+#
+# `lthumb` -- LEFT STICK CLICK, L3 -- is the default because that is where ELDEN RING puts Sort, and
+# mirroring it is the whole point. That one value did NOT come out of a binary: ELDEN RING registers
+# its Sort prompt with menu-input id 0x2E and ships NO keyboard key-name strings at all (it draws
+# inputs as sprites), so there is no table to resolve the id against. The player named the button.
+# The keyboard default beside it, `F7`, is still just what the first test runs happened to use.
 {KEY_INVENTORY_SORT_KEY} = "{inventory_sort_key}"
 {KEY_INVENTORY_SORT_PAD} = "{inventory_sort_pad}"
 
@@ -1553,7 +1568,7 @@ def write_config(
     build_import: bool = False,
     inventory_sort: bool = False,
     inventory_sort_key: str = "F7",
-    inventory_sort_pad: str = "",
+    inventory_sort_pad: str = "lthumb",
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
@@ -1671,7 +1686,7 @@ def dry_run(
     build_import: bool = False,
     inventory_sort: bool = False,
     inventory_sort_key: str = "F7",
-    inventory_sort_pad: str = "",
+    inventory_sort_pad: str = "lthumb",
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
@@ -1828,7 +1843,7 @@ def launch(
     build_import: bool = False,
     inventory_sort: bool = False,
     inventory_sort_key: str = "F7",
-    inventory_sort_pad: str = "",
+    inventory_sort_pad: str = "lthumb",
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
@@ -3095,9 +3110,10 @@ def main() -> int:
         action="store_true",
         default=False,
         help=(
-            "bind a key or controller button to the game's OWN inventory sort dialog. Adds no "
-            "sorting: DARK SOULS II already sorts, on a button no menu in the game can rebind. "
-            "OFF BY DEFAULT. Two detours (the Inventory tab's constructor and destructor) and one "
+            "bind a key or controller button to the game's OWN sort dialog, on BOTH the Inventory "
+            "tab and the equip screen's item picker. Adds no sorting: DARK SOULS II already sorts, "
+            "on a button no menu in the game can rebind -- and on the equip screen, on no button "
+            "at all. OFF BY DEFAULT. Four detours (each menu's constructor and destructor) and one "
             "direct call into the shipped dialog entry, which refuses itself while another dialog "
             "is up. Set the button with --sort-key and --sort-pad; both can be changed while the "
             "game runs by editing the config file."
@@ -3116,11 +3132,13 @@ def main() -> int:
     parser.add_argument(
         "--sort-pad",
         dest="inventory_sort_pad",
-        default="",
+        default="lthumb",
         help=(
             "XInput button for --inventory-sort: a b x y lb rb back start lthumb rthumb dpad_up "
-            "dpad_down dpad_left dpad_right. Empty (the default) for no controller binding. Names "
-            "are the Xbox ones because XInput is an Xbox API; on a DualShock, y is Triangle."
+            "dpad_down dpad_left dpad_right. Empty string for no controller binding. DEFAULT: "
+            "lthumb -- left stick click, which is where ELDEN RING puts Sort, and mirroring that "
+            "is the entire point of the feature. Names are the Xbox ones because XInput is an "
+            "Xbox API; on a DualShock, lthumb is L3 and y is Triangle."
         ),
     )
     parser.add_argument(

@@ -17,16 +17,42 @@
 //! So this crate is a rebinding and nothing more. It does not draw a row, add a sort key, reorder
 //! anything itself, or touch the shipped `①` binding, which keeps working.
 //!
-//! # How, and why it is three hooks and no injected input
+//! # The equip screen gets the same button, which the game never gave it
 //!
-//! [`ds2_rva::FE_INVENTORY_SORT_DIALOG_OPEN`] takes exactly one argument -- the live
-//! `FeGroupInGameMenuInventory2` -- and builds and shows the dialog itself. So the only question is
-//! where that object is, and the answer is a constructor and a destructor:
+//! Choosing a weapon to equip opens a `FeGroupItemEquip` list, and that screen ships no sort prompt
+//! at all -- there is no button to rebind there, only one to add.
+//!
+//! **The sorting itself is already wired in.** That list is rebuilt by `FeIngameItemSelectMenu::v57`
+//! (`0x140097400`), which calls the same shared builder `0x140036080` the Inventory tab uses, and
+//! that builder reads the same per-category sort key. So a sort chosen in the Inventory tab ALREADY
+//! reorders the equip list; what is missing is only a way to choose one without leaving the screen.
+//!
+//! One dialog opener serves both. `FeGroupInGameMenuInventory2`, `FeGroupItemEquip` and
+//! `FeItemBoxMenu` (the storage box) share a base class: their `+0x50` vtables agree slot for slot
+//! through `+0x28`, so `[this+0x58]` and `this+0x50` mean the same thing in each, and the opener
+//! reaches everything else through virtual slots each class implements for itself -- `+0x140` for
+//! the category, `+0x148` to rebuild. That the machinery is generic rather than Inventory-specific
+//! is not inferred: the storage box's own copy of the opener builds its rows from the SAME closure,
+//! vtable `0x1410b1ec0` and member function `0x1400ba300`, an Inventory-named functor the shipped
+//! game already reuses for a different class's list.
+//!
+//! # How, and why it is five hooks and no injected input
+//!
+//! [`ds2_rva::FE_INVENTORY_SORT_DIALOG_OPEN`] takes exactly one argument -- a live group -- and
+//! builds and shows the dialog itself. So the only question is where that object is, and the answer
+//! is a constructor and a destructor, once per menu:
 //!
 //! * [`ds2_rva::FE_INVENTORY_GROUP_CTOR`] runs when the player opens the Inventory tab. The detour
 //!   records `RCX` and calls the original.
 //! * [`ds2_rva::FE_INVENTORY_GROUP_DTOR`] runs when it goes away. The detour clears the record.
+//! * [`ds2_rva::FE_EQUIP_GROUP_CTOR`] and [`ds2_rva::FE_EQUIP_GROUP_DTOR`] do the same for the equip
+//!   picker. The constructor takes FOUR arguments, not three, and the detour forwards all four.
 //! * `ds2-menu-row`'s per-frame tick polls the button on the game thread.
+//!
+//! Both menus can be live at once, so each record carries a sequence number and a press goes to the
+//! one built most recently -- which is the one the player is looking at. Each pair installs all or
+//! nothing: a constructor hook whose destructor refused would record a pointer nothing ever clears,
+//! so that menu is left untracked instead. Losing one pair does not disarm the other.
 //!
 //! Nothing here synthesises a keypress into the game's input path. That was the other available
 //! design and it is worse in the way `ds2-safe-input`'s own docs describe: an injected button is a
@@ -38,7 +64,7 @@
 //! The game does. `FE_INVENTORY_SORT_DIALOG_OPEN` tests `[this+0x58]` and returns having done
 //! nothing when the group already has a child dialog up, so a press while the sort dialog (or a
 //! discard prompt) is open is declined by the shipped code rather than by this crate's guess about
-//! whether now is a good moment. A press with no Inventory tab open reaches a null record and is
+//! whether now is a good moment. A press with neither menu open reaches a null record and is
 //! dropped here, which is the only refusal this crate owns.
 //!
 //! # The binding moves without restarting the game
