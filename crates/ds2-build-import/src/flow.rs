@@ -404,7 +404,20 @@ fn equip_everything(build: &ds2_build_import_core::Build) {
             // THE READ-BACK IS THE ONLY EVIDENCE. This function returns nothing and fails silently
             // when an item does not fit the slot it was aimed at, so "it was called" is not "it
             // worked" and only the slot's contents afterwards can say which.
-            Ok(outcome) if outcome.took() => done += 1,
+            // SAY WHERE IT WENT, not just how many went somewhere. `equipped 13/13` cannot tell
+            // anyone that a chime reached the hand the planner drew it in, and a character with
+            // every weapon in the wrong hand still reports every slot as filled. One line per item
+            // makes the run its own evidence.
+            Ok(outcome) if outcome.took() => {
+                done += 1;
+                log_line(format_args!(
+                    "{LOG_PREFIX}   {} -> {} ({}) id={}",
+                    slot.name,
+                    slot.kind.position_name(slot.position),
+                    slot.kind.describe(),
+                    outcome.wanted
+                ));
+            }
             Ok(outcome) => refused.push(format!(
                 "{} into {} {} (slot holds {:?})",
                 slot.name,

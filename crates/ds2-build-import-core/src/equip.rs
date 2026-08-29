@@ -59,6 +59,42 @@ impl SlotKind {
         }
     }
 
+    /// What to call a POSITION within this family, for a log a human has to check.
+    ///
+    /// # The hands are why this exists
+    ///
+    /// `equipped 13/13` is a count, and a count cannot tell you that a chime went into the hand the
+    /// planner drew it in. The weapon list alternates hands -- `LH1, RH1, LH2, RH2, LH3, RH3` --
+    /// and that alternation is the single easiest thing in this feature to get silently backwards,
+    /// because a character with every weapon in the wrong hand still looks armed and still reports
+    /// every slot as filled. Naming the slot in words puts the evidence in the log instead of
+    /// requiring somebody to look at the screen and remember what they expected.
+    pub fn position_name(self, position: usize) -> String {
+        match self {
+            // Even positions are the left hand, odd the right. See the module docs for where that
+            // ordering is read from -- the planner's own field ids, not an inference.
+            SlotKind::Weapon => format!(
+                "{} hand {}",
+                if position.is_multiple_of(2) {
+                    "left"
+                } else {
+                    "right"
+                },
+                position / 2 + 1
+            ),
+            SlotKind::Armour => match position {
+                0 => "head".to_owned(),
+                1 => "chest".to_owned(),
+                2 => "hands".to_owned(),
+                3 => "legs".to_owned(),
+                other => format!("armour {other}"),
+            },
+            SlotKind::Ring => format!("ring {}", position + 1),
+            SlotKind::Spell => format!("attunement {}", position + 1),
+            SlotKind::Hotbar => format!("hotbar {}", position + 1),
+        }
+    }
+
     /// What to call it in a log line.
     pub const fn describe(self) -> &'static str {
         match self {
@@ -201,6 +237,40 @@ mod tests {
         let planned = plan(&build);
         assert_eq!(planned.len(), SlotKind::Spell.positions());
         assert_eq!(planned.last().expect("some").position, 13);
+    }
+
+    /// **THE HANDS, IN WORDS.** Even weapon positions are the left hand, odd the right.
+    ///
+    /// This is what makes a log line checkable by a human. It mirrors the planner's own field ids,
+    /// `lh1 rh1 lh2 rh2 lh3 rh3`, which is where the ordering was read from rather than guessed --
+    /// across eight real builds position 0 held a shield or catalyst six times and a weapon twice,
+    /// which is suggestive and is not evidence.
+    #[test]
+    fn the_weapon_positions_are_named_by_hand() {
+        let names: Vec<String> = (0..SlotKind::Weapon.positions())
+            .map(|position| SlotKind::Weapon.position_name(position))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "left hand 1",
+                "right hand 1",
+                "left hand 2",
+                "right hand 2",
+                "left hand 3",
+                "right hand 3",
+            ]
+        );
+    }
+
+    /// Armour is head, chest, hands, legs -- the game's own internal order, which the planner
+    /// happens to share.
+    #[test]
+    fn armour_positions_are_named_by_body_part() {
+        let names: Vec<String> = (0..SlotKind::Armour.positions())
+            .map(|position| SlotKind::Armour.position_name(position))
+            .collect();
+        assert_eq!(names, ["head", "chest", "hands", "legs"]);
     }
 
     /// The counts are the game's, and the planner's form has exactly as many fields.
