@@ -24,6 +24,7 @@
 
 use ds2_build_import_core::{
     BUILD_HOST, BUILD_URL_PREFIX, UrlRejection, build_id_from_url, build_path,
+    field::{Field, Reaction},
 };
 
 use std::sync::Mutex;
@@ -66,6 +67,78 @@ fn say(text: &str) {
     ds2_menu_row::set_row_caption(crate::row_id(), text);
 }
 
+/// The build id the player is typing, or `None` when nobody is typing.
+///
+/// **This is the third way in, and the only one that needs nothing from outside the game.** Steam's
+/// field is absent on a desktop Steam and the clipboard only answers "what did you already copy" --
+/// a player who knows the number and has an unrelated link in their clipboard could not get in at
+/// all. See [`crate::typed`] for why this reads ten keys and not a keyboard.
+static TYPING: Mutex<Option<Field>> = Mutex::new(None);
+
+/// What the row says while a build id is being typed, with the digits so far after it.
+const TYPING_PREFIX: &str = "Build ID: ";
+
+/// The caret drawn at the end of the digits, so an empty field still looks like a field.
+const CARET: char = '_';
+
+/// Render the field onto the row. Caller must be on the game thread.
+unsafe fn show_typing(field: &Field) {
+    // SAFETY: forwarded to the caller.
+    unsafe { say_now(&format!("{TYPING_PREFIX}{}{CARET}", field.text())) };
+}
+
+/// Start a typing session. **Game thread**, from the row's confirm.
+unsafe fn open_typing() {
+    let field = Field::new("");
+    // The keyboard as it is RIGHT NOW is the baseline, so a key held at the moment of the press --
+    // very possibly the key that caused the press -- does not become the first digit.
+    // SAFETY: game thread, per this function's contract.
+    unsafe { crate::typed::sync_to_current() };
+    // SAFETY: game thread.
+    unsafe { show_typing(&field) };
+    if let Ok(mut typing) = TYPING.lock() {
+        *typing = Some(field);
+    }
+    log_line(format_args!(
+        "{LOG_PREFIX} nothing usable to read -- type the build id and press the row again"
+    ));
+}
+
+/// Feed the field whatever was typed since the last frame. **Runs on the game thread**, per frame.
+///
+/// Returns without touching anything on the frames -- almost all of them -- when nobody is typing.
+fn typing_tick() {
+    let Ok(mut guard) = TYPING.lock() else {
+        return;
+    };
+    let Some(field) = guard.as_mut() else {
+        return;
+    };
+    // SAFETY: the tick runs on the game thread.
+    let units = unsafe { crate::typed::poll() };
+    if units.is_empty() {
+        return;
+    }
+    for unit in units {
+        // Only digits and backspace are read, and `Field` handles both. Every other reaction is
+        // unreachable here rather than ignored -- if one ever arrives, the field is being fed
+        // something `crate::typed` promised not to send.
+        match field.on_char(unit) {
+            Reaction::Handled | Reaction::Ignored => {}
+            other => log_line(format_args!(
+                "{LOG_PREFIX} the field asked for {other:?}, which nothing here sends"
+            )),
+        }
+    }
+    // SAFETY: the tick runs on the game thread, with the menu up.
+    unsafe { show_typing(field) };
+}
+
+/// End a typing session and return what was typed, or `None` if nobody was typing.
+fn close_typing() -> Option<String> {
+    TYPING.lock().ok()?.take().map(|field| field.text())
+}
+
 /// A build the worker has fetched, waiting for the game thread to act on it.
 ///
 /// **The handoff exists because the two halves cannot be on the same thread.** The fetch blocks on
@@ -86,6 +159,9 @@ fn hand_over(build: ds2_build_import_core::Build) {
 /// Registered by [`crate::install::register`]; it does nothing on the overwhelming majority of
 /// frames, because the mailbox is almost always empty.
 pub(crate) fn apply_tick() {
+    // The typing field lives on this same tick. It is first because it is the interactive half:
+    // a frame that also has a build to apply should still show the digit that was just typed.
+    typing_tick();
     let Some(build) = PENDING.lock().ok().and_then(|mut pending| pending.take()) else {
         return;
     };
@@ -142,16 +218,16 @@ fn apply(build: &ds2_build_import_core::Build) {
         )),
     }
 
-    // THE LEVEL THE BUILD IMPLIES, without needing the class's starting spread. A DS2 level is one
-    // point in one stat, so the DIFFERENCE in points is the difference in levels -- and the current
-    // level is known. That sidesteps a whole table of per-class base stats for a subtraction.
+    // THE LEVEL THE BUILD IS. Not computed from this character at all: the game derives a soul
+    // level from the stats themselves (`max(1, sum - 53)`, at `0x14038e310`), so the build's stats
+    // already ARE a level and there is nothing to reconcile. The earlier version of this added the
+    // point difference to the current level, which gives the same answer only while the character
+    // is self-consistent -- and a character whose level disagrees with its stats is exactly the
+    // case worth surviving.
+    let wanted = build.stats.in_game_order();
+    let target = ds2_build_import_core::level::soul_level(&wanted);
     let current_points: u32 = stats.iter().map(|stat| u32::from(*stat)).sum();
-    let wanted_points: u32 = build
-        .stats
-        .each()
-        .iter()
-        .map(|(_, value)| u32::from(*value))
-        .sum();
+    let wanted_points: u32 = wanted.iter().map(|stat| u32::from(*stat)).sum();
     if wanted_points < current_points {
         log_line(format_args!(
             "{LOG_PREFIX} the build is BELOW this character: {wanted_points} points against \
@@ -160,12 +236,20 @@ fn apply(build: &ds2_build_import_core::Build) {
         say("That build is lower than you");
         return;
     }
-    let target = level + (wanted_points - current_points);
     log_line(format_args!(
-        "{LOG_PREFIX} build {} implies level {target} (from {level}, +{} points)",
+        "{LOG_PREFIX} build {} is level {target} (from {level}, +{} points)",
         build.id,
         wanted_points - current_points
     ));
+    // The character's own level should already equal what its own stats imply. Saying so when it
+    // does not costs one line and names a save that something else has edited.
+    let implied = ds2_build_import_core::level::soul_level(&stats);
+    if implied != level {
+        log_line(format_args!(
+            "{LOG_PREFIX} WARNING: this character reads level {level} but its stats imply \
+             {implied} -- its level has been written by hand"
+        ));
+    }
 
     // SOUL MEMORY FIRST. This is the user's rule and the whole reason `LevelChange` exists: there is
     // no way to hold a level here without having computed the soul memory for it.
@@ -181,11 +265,13 @@ fn apply(build: &ds2_build_import_core::Build) {
         )),
     }
 
-    // THE ITEMS, THROUGH THE GAME'S OWN FUNCTION. Stats are NOT written here: doing that properly
-    // means calling the game's level-up path, and that function has not been found yet. Poking the
-    // stat block directly would write soul level and the nine attributes while leaving everything
-    // the level-up path also maintains untouched, which is the class of bug this crate exists to
-    // avoid.
+    // THE STATS, AND THEREFORE THE LEVEL -- SECOND, after the soul memory that supports them.
+    // That order is the user's rule and it is now load-bearing rather than ceremonial: the call
+    // below moves the character to level 150 in one frame, and a level whose soul memory has not
+    // been raised first is a character DS2 will match against the wrong opponents.
+    set_stats(param, &wanted, target);
+
+    // THE ITEMS, THROUGH THE GAME'S OWN FUNCTION.
     let spawns = crate::build_items(build);
     if spawns.is_empty() {
         log_line(format_args!(
@@ -264,6 +350,62 @@ fn raise_soul_memory(param: usize, change: ds2_build_import_core::LevelChange) {
     }
 }
 
+/// Write the build's nine stats, and report what the game did with them.
+///
+/// `wanted` is in the GAME's order -- see [`ds2_build_import_core::saved_build::Stats::in_game_order`],
+/// which is not the planner's. `expected_level` is what the stats imply, computed the same way the
+/// game computes it, and is here only to be COMPARED against what the game actually wrote.
+///
+/// # Everything is read back, and the level is the reason
+///
+/// The level is not passed to the game; the game derives it. So reading it back is a check on the
+/// whole call: if the nine stats landed and the level did not move to match, the recompute did not
+/// run and the character is now inconsistent in exactly the way this crate exists to avoid. That is
+/// worth a loud line rather than silence.
+fn set_stats(param: usize, wanted: &[u16; 9], expected_level: u32) {
+    // SAFETY: the game thread, from the pause menu's own per-frame update, with a character loaded.
+    // The call site's prologue is re-checked inside.
+    let set = match unsafe { crate::game::set_all_stats(param, wanted) } {
+        Ok(set) => set,
+        Err(error) => {
+            log_line(format_args!(
+                "{LOG_PREFIX} could not set the stats: {error}"
+            ));
+            say("Could not set the stats");
+            return;
+        }
+    };
+    log_line(format_args!(
+        "{LOG_PREFIX} stats {:?} -> {:?}, level {} -> {}",
+        set.stats.0, set.stats.1, set.level.0, set.level.1
+    ));
+    if !set.stats_took(wanted) {
+        return log_line(format_args!(
+            "{LOG_PREFIX} THE STATS DID NOT TAKE: asked for {wanted:?}, the character reads {:?}",
+            set.stats.1
+        ));
+    }
+    if set.level.1 != expected_level {
+        return log_line(format_args!(
+            "{LOG_PREFIX} the stats took but the level is {} where these stats imply \
+             {expected_level} -- the game did not recompute",
+            set.level.1
+        ));
+    }
+    match set.mirror_agrees {
+        Some(true) => {}
+        Some(false) => log_line(format_args!(
+            "{LOG_PREFIX} the stats took but the mirror at +{:#x} DISAGREES -- only one copy was \
+             written",
+            ds2_rva::PLAYER_PARAM_STAT_MIRROR_OFFSET
+        )),
+        None => log_line(format_args!(
+            "{LOG_PREFIX} the stats took; the mirror could not be compared"
+        )),
+    }
+    say(&format!("Level {expected_level}"));
+}
+
 /// Where a link came from, for the log.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Source {
@@ -271,6 +413,8 @@ pub(crate) enum Source {
     SteamField,
     /// The player had copied a link.
     Clipboard,
+    /// The player typed the build id on the row itself.
+    Typed,
 }
 
 impl Source {
@@ -278,6 +422,7 @@ impl Source {
         match self {
             Source::SteamField => "the Steam field",
             Source::Clipboard => "the clipboard",
+            Source::Typed => "the row",
         }
     }
 }
@@ -287,20 +432,47 @@ impl Source {
 /// Returns the worker's job when there is one. Everything that can be decided immediately is
 /// decided here, so the player gets an answer on the same frame they pressed.
 pub(crate) fn begin_session() -> Option<Job> {
-    // SAFETY: the confirm path -- game thread, menu up.
-    unsafe { say_now("Reading link...") };
-
     // A GAME MUST BE IN PROGRESS. The row lives on the pause menu, so one nearly always is, but
     // "nearly always" is not a check and the fetch is pointless without a character to aim it at.
     match crate::save::require_live_character() {
         Ok(name) => log_line(format_args!("{LOG_PREFIX} character \"{name}\" is loaded")),
         Err(reason) => {
             log_line(format_args!("{LOG_PREFIX} refused: {reason}"));
-            // SAFETY: still the confirm path.
+            // A typing session belongs to a character. Losing the character ends it, or the digits
+            // would still be sitting on the row after the player quit to the title.
+            close_typing();
+            // SAFETY: the confirm path -- game thread, menu up.
             unsafe { say_now(reason.caption()) };
             return None;
         }
     }
+
+    // A PRESS WHILE TYPING IS THE SUBMIT, and it comes before every other source: the player is
+    // looking at digits they typed, and reading the clipboard out from under them would be the row
+    // ignoring the thing it just asked them to do.
+    if let Some(typed) = close_typing() {
+        if typed.is_empty() {
+            log_line(format_args!(
+                "{LOG_PREFIX} typing cancelled -- the field was empty"
+            ));
+            // SAFETY: still the confirm path.
+            unsafe { say_now(IDLE_CAPTION) };
+            return None;
+        }
+        log_line(format_args!("{LOG_PREFIX} typed build id {typed}"));
+        // SAFETY: still the confirm path.
+        unsafe { say_now("Reading link...") };
+        // The prefix is not the player's to get wrong -- they typed a number, so they get the URL
+        // that number belongs to. It still goes through `build_id_from_url` in `load`, which is
+        // what catches a number too large to be an id.
+        return Some(Job::Link {
+            text: format!("{BUILD_URL_PREFIX}{typed}"),
+            source: Source::Typed,
+        });
+    }
+
+    // SAFETY: the confirm path.
+    unsafe { say_now("Reading link...") };
 
     match steam_field() {
         Ok(session) => return Some(Job::SteamField(session)),
@@ -311,18 +483,36 @@ pub(crate) fn begin_session() -> Option<Job> {
         )),
     }
 
-    let Some(text) = crate::clipboard::text() else {
-        log_line(format_args!(
-            "{LOG_PREFIX} refused: the clipboard holds no text"
-        ));
-        // SAFETY: still the confirm path.
-        unsafe { say_now("Copy a build link first") };
-        return None;
-    };
-    Some(Job::Link {
-        text,
-        source: Source::Clipboard,
-    })
+    // THE CLIPBOARD ONLY WINS IF IT HOLDS A BUILD LINK. It used to win whenever it held anything,
+    // and the rejection was then the end of the press -- so a player with an unrelated link copied
+    // (which is to say, a player who had been browsing) pressed the row, read "not a soulsplanner
+    // link", and had no way forward. Now that is the case that opens the field.
+    match crate::clipboard::text() {
+        Some(text) if build_id_from_url(&text).is_ok() => Some(Job::Link {
+            text,
+            source: Source::Clipboard,
+        }),
+        Some(text) => {
+            // The rejection's own words, so the log says WHY this was not a link rather than that
+            // it was not one. `load` would have said it; this path never reaches `load`.
+            let why = build_id_from_url(&text).err().map_or_else(
+                || String::from("no reason"),
+                |rejection| rejection.to_string(),
+            );
+            log_line(format_args!(
+                "{LOG_PREFIX} the clipboard holds \"{text}\" ({why})"
+            ));
+            // SAFETY: still the confirm path.
+            unsafe { open_typing() };
+            None
+        }
+        None => {
+            log_line(format_args!("{LOG_PREFIX} the clipboard holds no text"));
+            // SAFETY: still the confirm path.
+            unsafe { open_typing() };
+            None
+        }
+    }
 }
 
 /// What the worker has to finish.

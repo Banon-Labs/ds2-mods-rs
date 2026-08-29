@@ -98,6 +98,33 @@ impl Stats {
             ("faith", self.faith),
         ]
     }
+
+    /// The nine stats **in the order `PlayerParam` stores them**, which is NOT the planner's order.
+    ///
+    /// # The one difference, and it is silent
+    ///
+    /// soulsplanner emits adaptability SEVENTH; the game stores it LAST, after intelligence and
+    /// faith. Every other stat is in the same place. So a caller that hands [`Self::each`]'s values
+    /// to the game writes adaptability into intelligence, intelligence into faith and faith into
+    /// adaptability -- three stats wrong, no error, and a character whose total is right so the
+    /// LEVEL still comes out correct. That is the worst shape a bug can have: the number you would
+    /// check agrees, and the character is wrong.
+    ///
+    /// The order is asserted against `ds2_rva::PLAYER_PARAM_STAT_NAMES` in `ds2-build-import`, the
+    /// one crate that depends on both, so the two cannot drift apart without a test failing.
+    pub const fn in_game_order(&self) -> [u16; 9] {
+        [
+            self.vigor,
+            self.endurance,
+            self.vitality,
+            self.attunement,
+            self.strength,
+            self.dexterity,
+            self.intelligence,
+            self.faith,
+            self.adaptability,
+        ]
+    }
 }
 
 /// Why a page did not yield a build.
@@ -314,6 +341,53 @@ const fn is_word_byte(byte: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **THE REORDER, PINNED.** The planner's seventh stat is the game's ninth.
+    ///
+    /// Written with nine DISTINCT values so a wrong permutation cannot pass by coincidence -- with
+    /// two stats equal, three of the six possible swaps still compare equal.
+    #[test]
+    fn the_game_stores_adaptability_last_and_the_planner_does_not() {
+        let stats = Stats {
+            vigor: 1,
+            endurance: 2,
+            vitality: 3,
+            attunement: 4,
+            strength: 5,
+            dexterity: 6,
+            adaptability: 7,
+            intelligence: 8,
+            faith: 9,
+        };
+        // The planner's order, adaptability seventh.
+        assert_eq!(
+            stats.each().map(|(_, value)| value),
+            [1, 2, 3, 4, 5, 6, 7, 8, 9]
+        );
+        // The game's order, adaptability last. Only the tail of three differs.
+        assert_eq!(stats.in_game_order(), [1, 2, 3, 4, 5, 6, 8, 9, 7]);
+    }
+
+    /// The two orders hold the same nine values, so the LEVEL is identical either way -- which is
+    /// exactly why the level cannot be used to detect the wrong one.
+    #[test]
+    fn the_reorder_does_not_change_the_total() {
+        let stats = Stats {
+            vigor: 50,
+            endurance: 20,
+            vitality: 4,
+            attunement: 16,
+            strength: 25,
+            dexterity: 16,
+            adaptability: 16,
+            intelligence: 28,
+            faith: 28,
+        };
+        let planner: u32 = stats.each().iter().map(|(_, v)| u32::from(*v)).sum();
+        let game: u32 = stats.in_game_order().iter().map(|v| u32::from(*v)).sum();
+        assert_eq!(planner, game);
+        assert_eq!(planner, 203, "build 253's total, which is level 150");
+    }
 
     /// The shape of a real response, reduced to the parts this module reads. Values are build 253
     /// as fetched on 2026-08-28 via `scripts/ds2-soulsplanner.py 253`.

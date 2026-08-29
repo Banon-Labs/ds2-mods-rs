@@ -106,6 +106,97 @@ pub(crate) fn read_stats(param: usize) -> Option<[u16; 9]> {
     Some(out)
 }
 
+/// All ELEVEN stats, raw, as [`set_all_stats`] wants them back.
+///
+/// [`read_stats`] returns the nine a level buys. This returns those plus the two at index 9 and 10
+/// that nothing here understands, because the setter takes all eleven and the only safe thing to do
+/// with a field you cannot name is hand it back unchanged.
+fn read_all_stats(param: usize) -> Option<[u16; ds2_rva::PLAYER_PARAM_STAT_COUNT]> {
+    let mut out = [0u16; ds2_rva::PLAYER_PARAM_STAT_COUNT];
+    let base = ds2_rva::PLAYER_PARAM_STAT_OFFSETS[0];
+    for (index, slot) in out.iter_mut().enumerate() {
+        // SAFETY: as `read_stats` -- inside the block the game's getter returned, fault-safe read.
+        *slot = unsafe { safe_read_u16(param + base + index * 2)? };
+    }
+    Some(out)
+}
+
+/// What one [`set_all_stats`] call actually changed.
+///
+/// Before and after for both the stats and the level, for the same reason [`SoulsAdded`] is a pair:
+/// a call that returned is not a call that did anything, and the level in particular is computed by
+/// the game rather than written by us, so it is the one number that proves the recompute ran.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct StatsSet {
+    pub(crate) stats: ([u16; 9], [u16; 9]),
+    pub(crate) level: (u32, u32),
+    /// Whether the mirror at `+0x1E` agrees with `+0x08` AFTERWARDS.
+    pub(crate) mirror_agrees: Option<bool>,
+}
+
+impl StatsSet {
+    /// Whether the character now has the stats that were asked for.
+    pub(crate) fn stats_took(&self, wanted: &[u16; 9]) -> bool {
+        &self.stats.1 == wanted
+    }
+}
+
+/// **Set the nine stats, and let the game work out everything they imply.**
+///
+/// Calls [`ds2_rva::PLAYER_PARAM_SET_ALL_STATS`], which writes both stat copies, recomputes the
+/// effective stats, the derived block (HP, stamina, equip load) and the SOUL LEVEL, then reapplies
+/// the HP and stamina caps to the live character.
+///
+/// # Nothing here writes a soul level, because a soul level is not writable
+///
+/// The game derives it: `level = max(1, sum(nine stats) - 53)`. Writing one would be writing a
+/// cached sum, and a cached sum that disagrees with its inputs is exactly the corrupt character
+/// this crate exists to avoid. So the level is an OUTPUT here, read back to confirm the recompute
+/// happened rather than passed in.
+///
+/// # The two stats it does not touch
+///
+/// Index 9 and 10 are read out of the character and written back unchanged. They are not in the
+/// level sum and nothing in this repo knows what they are; a setter that takes all eleven and a
+/// caller that knows nine means the other two are carried, not zeroed.
+///
+/// # Safety
+///
+/// Calls into the game. **Game thread only**, and only with a `param` from [`player_param`]. The
+/// prologue is byte-checked first, so a moved or patched function refuses rather than executes
+/// whatever is now at that address.
+pub(crate) unsafe fn set_all_stats(param: usize, wanted: &[u16; 9]) -> Result<StatsSet, GameError> {
+    let site = game_rva(ds2_rva::PLAYER_PARAM_SET_ALL_STATS).map_err(|_| GameError::Unresolved)?;
+    let mut prologue = [0u8; ds2_rva::PLAYER_PARAM_SET_ALL_STATS_PROLOGUE.len()];
+    // SAFETY: a resolved RVA in the loaded image; the read is fault-safe.
+    if !unsafe { ds2_game_base::mem::read_bytes(site, &mut prologue) }
+        || prologue != ds2_rva::PLAYER_PARAM_SET_ALL_STATS_PROLOGUE
+    {
+        return Err(GameError::PrologueMismatch);
+    }
+
+    let stats_before = read_stats(param).ok_or(GameError::NoCharacter)?;
+    let level_before = read_soul_level(param).ok_or(GameError::NoCharacter)?;
+    // START FROM THE CHARACTER'S OWN ELEVEN, so the two unnamed ones survive.
+    let mut block = read_all_stats(param).ok_or(GameError::NoCharacter)?;
+    block[..wanted.len()].copy_from_slice(wanted);
+
+    // SAFETY: the prologue matched the bytes recorded for this function, and the signature is the
+    // one the disassembly implements -- the param block in RCX, a pointer to eleven `u16` in RDX,
+    // no return. `block` outlives the call and is 22 readable bytes, which is exactly what the
+    // callee loads.
+    unsafe {
+        let set: unsafe extern "system" fn(usize, *const u16) = core::mem::transmute(site);
+        set(param, block.as_ptr());
+    }
+
+    Ok(StatsSet {
+        stats: (stats_before, read_stats(param).unwrap_or(stats_before)),
+        level: (level_before, read_soul_level(param).unwrap_or(level_before)),
+        mirror_agrees: stat_mirror_agrees(param),
+    })
+}
+
 /// The character's soul level.
 pub(crate) fn read_soul_level(param: usize) -> Option<u32> {
     // SAFETY: as `read_stats`.

@@ -1,8 +1,15 @@
 //! A pause-menu row that loads a DARK SOULS II build from a soulsplanner link.
 //!
-//! Press **Load from URL** on the quit tab and Steam draws a text field, prefilled with
-//! `https://soulsplanner.com/darksouls2/`, that takes the build id after the slash. What comes back
-//! is validated, fetched and read.
+//! Press **Load from URL** on the quit tab, and the row takes a build id from whichever of three
+//! sources can supply one, fetches that build and puts it on the live character.
+//!
+//! # Three ways in, tried in that order
+//!
+//! 1. **Steam's own text field**, prefilled with `https://soulsplanner.com/darksouls2/`. Correct,
+//!    and absent on a desktop Steam outside Big Picture -- measured, not assumed.
+//! 2. **The clipboard**, if it holds a soulsplanner link. Copy a link in a browser, press the row.
+//! 3. **Typing the id on the row itself**, which is what happens when neither of the others can
+//!    supply one. See [`typed`] for why it reads ten keys and not a keyboard.
 //!
 //! # It borrows the game's Steam keyboard rather than drawing its own
 //!
@@ -20,11 +27,20 @@
 //! the keyboard (it uses DirectInput8), so refusing to enqueue a key does not stop it reaching the
 //! player's character.
 //!
-//! # What it does not do
+//! # What one press changes, and the one thing it cannot undo
 //!
-//! **It does not apply the build.** It reads one and writes it to the log. Putting a build on a
-//! character means writing equipment, inventory and nine stats, and none of those writers exist for
-//! this game yet. Saying so in the log beats a row that looks like it worked.
+//! Soul memory is raised to the floor the build's level needs, THEN the nine stats are written, and
+//! then the items are granted -- every one of those through a function the game already has. The
+//! order is not cosmetic: DS2 matches players on soul memory, so a level that arrives before the
+//! soul memory to support it is a character matched against the wrong opponents.
+//!
+//! **RAISING SOUL MEMORY CANNOT BE UNDONE.** The engine has no path that lowers it. A character
+//! already past the floor is left alone -- nothing here ever lowers or overwrites -- but one below
+//! it is moved up permanently.
+//!
+//! **Equipping is not done yet.** The items land in the inventory and the player puts them on. The
+//! game's own equip path has not been identified, and building an equipment entry by hand is
+//! exactly the thing this crate refuses to do.
 //!
 //! # The three failure modes worth knowing before reading the log
 //!
@@ -49,6 +65,8 @@ mod game;
 mod save;
 #[cfg(windows)]
 mod steam;
+#[cfg(windows)]
+mod typed;
 
 /// Turn a build's named gear into the entries the game's grant function takes.
 ///
@@ -216,3 +234,47 @@ mod install {
 
 #[cfg(windows)]
 pub(crate) use install::{log_line, row_id};
+
+/// The one thing this crate can check without a game: that the two stat orders line up.
+///
+/// `ds2-build-import-core` knows the planner's order and `ds2-rva` knows the game's, and neither
+/// can see the other -- core has no dependencies at all. This crate depends on both, so it is the
+/// only place the claim can be tested. It runs on the host, with no game and no Windows.
+#[cfg(test)]
+mod stat_order {
+    /// `Stats::in_game_order` must produce values in the order `PLAYER_PARAM_STAT_NAMES` names.
+    ///
+    /// Built by giving each stat the value of its own index in the GAME's list, then asserting the
+    /// reordered array is `[0, 1, 2, ...]`. If either order changes, this stops being the identity.
+    #[test]
+    fn the_planners_order_maps_onto_the_games() {
+        use ds2_build_import_core::saved_build::Stats;
+
+        let index_of = |name: &str| {
+            ds2_rva::PLAYER_PARAM_STAT_NAMES
+                .iter()
+                .position(|candidate| *candidate == name)
+                .unwrap_or_else(|| panic!("ds2-rva does not name {name:?}")) as u16
+        };
+        let stats = Stats {
+            vigor: index_of("vigor"),
+            endurance: index_of("endurance"),
+            vitality: index_of("vitality"),
+            attunement: index_of("attunement"),
+            strength: index_of("strength"),
+            dexterity: index_of("dexterity"),
+            adaptability: index_of("adaptability"),
+            intelligence: index_of("intelligence"),
+            faith: index_of("faith"),
+        };
+        assert_eq!(
+            stats.in_game_order(),
+            [0, 1, 2, 3, 4, 5, 6, 7, 8],
+            "the two crates disagree about where a stat lives"
+        );
+        // And the thing that makes the bug silent: the TOTAL is the same either way, so a level
+        // computed from a wrong permutation still looks right.
+        let scrambled: u16 = stats.each().iter().map(|(_, value)| value).sum();
+        assert_eq!(scrambled, stats.in_game_order().iter().sum::<u16>());
+    }
+}

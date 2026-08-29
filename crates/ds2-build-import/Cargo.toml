@@ -25,5 +25,12 @@ ds2-menu-row.workspace = true
 ds2-rva.workspace = true
 ds2-sl2-core.workspace = true
 
+# HOST-ONLY, and only for one test. `ds2-rva` is a constants crate with no dependencies of its
+# own, so it compiles on Linux even though the runtime half of this crate does not. It is here so
+# `stat_order` can compare the planner's stat order against the game's WITHOUT a Windows target --
+# that check is the difference between three stats being silently swapped and a test failing.
+[dev-dependencies]
+ds2-rva.workspace = true
+
 [lints]
 workspace = true

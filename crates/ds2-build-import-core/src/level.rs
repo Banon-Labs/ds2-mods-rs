@@ -204,9 +204,69 @@ pub fn level_from_stats(
     Some(class_level + spent)
 }
 
+/// What the soul-level sum subtracts. `level = max(1, sum(nine stats) - 53)`.
+///
+/// `9 * 6 - 1`: a Deprived starts with 6 in every stat, `9 * 6 = 54`, and `54 - 53 = 1`.
+pub const SOUL_LEVEL_BIAS: u32 = 53;
+
+/// The soul level a stat spread IS. **Read off the game's own arithmetic, not inferred.**
+///
+/// # A soul level is a cached sum, not a number you choose
+///
+/// `0x14038e310` computes exactly this and writes it to `PlayerParam + 0xD0` every time the stats
+/// change. So there is no such thing as setting a level: set the nine stats and the level is
+/// already decided. That retires the whole problem [`level_from_stats`] exists for -- it needs the
+/// class's starting spread, and this needs nothing.
+///
+/// It also means a build and a level cannot disagree. If a planner shows a level that this does not
+/// produce from the same stats, the planner is wrong or the stats were misread; there is no third
+/// possibility and nothing to reconcile.
+///
+/// The `max(1, ...)` matters for spreads below a Deprived's, which no real character has but a
+/// malformed build can name.
+pub fn soul_level(stats: &StatSpread) -> u32 {
+    let total: u32 = stats.iter().copied().map(u32::from).sum();
+    total.saturating_sub(SOUL_LEVEL_BIAS).max(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **THE ONE THAT PROVES THE FORMULA.** soulsplanner build 253 shows level 150.
+    ///
+    /// Its nine stats total 203, and the game's own `0x14038e310` subtracts 53. Two independent
+    /// sources -- a website's displayed number and a disassembled sum -- agreeing on 150 is what
+    /// makes this arithmetic a fact rather than a reading of it.
+    #[test]
+    fn a_real_builds_stats_produce_the_level_the_planner_shows() {
+        // vigor, endurance, vitality, attunement, strength, dexterity, adaptability, int, faith --
+        // as the log printed them for build 253.
+        let stats: StatSpread = [50, 20, 4, 16, 25, 16, 16, 28, 28];
+        assert_eq!(stats.iter().map(|s| u32::from(*s)).sum::<u32>(), 203);
+        assert_eq!(soul_level(&stats), 150);
+    }
+
+    /// A Deprived is level 1, which is what fixes the bias at 53 rather than 54 or 52.
+    #[test]
+    fn a_deprived_is_level_one() {
+        assert_eq!(soul_level(&[6; 9]), 1);
+        // And one point in one stat is one level, which is the whole of DS2 levelling.
+        assert_eq!(soul_level(&[7, 6, 6, 6, 6, 6, 6, 6, 6]), 2);
+    }
+
+    /// A spread below a Deprived's cannot go below level 1.
+    #[test]
+    fn nothing_is_below_level_one() {
+        assert_eq!(soul_level(&[1; 9]), 1);
+        assert_eq!(soul_level(&[0; 9]), 1);
+    }
+
+    /// The cap the game enforces on nine stats at 99 agrees with [`MAX_LEVEL`].
+    #[test]
+    fn nine_stats_at_ninety_nine_is_the_maximum_level() {
+        assert_eq!(soul_level(&[99; 9]), MAX_LEVEL);
+    }
 
     /// A small table standing in for the game's, so the arithmetic can be pinned without pretending
     /// to know the real costs. Cost of level 1->2 is 10, 2->3 is 20, 3->4 is 30.

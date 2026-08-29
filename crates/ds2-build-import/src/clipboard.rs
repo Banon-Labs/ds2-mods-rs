@@ -74,7 +74,7 @@ impl OpenBoard {
 }
 
 /// The game's top-level window, or null if it cannot be resolved.
-fn game_window() -> *mut c_void {
+pub(crate) fn game_window() -> *mut c_void {
     let Ok(address) = ds2_game_base::mem::game_rva(ds2_rva::FE_SYSTEM_SINGLETON) else {
         return core::ptr::null_mut();
     };

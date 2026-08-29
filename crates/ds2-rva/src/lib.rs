@@ -4085,6 +4085,53 @@ pub const PLAYER_PARAM_STAT_BLOCK_SIZE: usize = 22;
 /// not a thing to try casually: it blits 204 bytes into the live character.
 pub const PLAYER_PARAM_COMMIT_STATS: u32 = 0x0038_b1a0;
 
+/// **Set all eleven stats and let the game derive everything else.** RVA `0x0038aca0`.
+///
+/// `fn(PlayerParam*, *const [u16; 11])`. This is how a build is applied, and it is the reason
+/// nothing here writes a soul level.
+///
+/// # THE SOUL LEVEL IS NOT A FIELD YOU SET, IT IS A SUM
+///
+/// `0x14038e310` computes `level = max(1, sum(stats[0..8]) - 53)` and writes it to
+/// [`PLAYER_PARAM_SOUL_LEVEL_OFFSET`]. The `53` is `9 * 6 - 1`: a Deprived starts every stat at 6,
+/// `9 * 6 = 54`, and `54 - 53 = 1`. So a character's level is a function of its nine stats and
+/// there is no way to disagree with it -- writing a level would be writing a cached sum. Cheaply
+/// checkable: soulsplanner build 253's stats total 203, and `203 - 53 = 150`, the level the planner
+/// shows.
+///
+/// The two `u16` at index 9 and 10 (`+0x1A`, `+0x1C`) are NOT in that sum. Read them out of the
+/// character and write them back unchanged; nothing here knows what they are.
+///
+/// # What one call does, from the disassembly
+///
+/// Loads all 22 bytes out of `rdx`, writes them to BOTH `+0x08` and [`PLAYER_PARAM_STAT_MIRROR_OFFSET`],
+/// fetches the character context through `PlayerCtrl` vtable slot `0x130`, calls `0x14038d6d0` to
+/// recompute the effective stats, the derived block AND the soul level, then tail-calls
+/// `0x14038be90` to reapply the HP and stamina caps to the live character.
+///
+/// **That is the entire argument for using this instead of [`PLAYER_PARAM_COMMIT_STATS`].** Both
+/// end in the same recompute; this one takes 22 bytes of plain `u16` with no invariants, and the
+/// other takes a 0x104-byte plan with a seven-clause validator, a souls ledger and a
+/// `levels_bought == planned_level - base_level` identity to satisfy. Fewer ways to build a
+/// character that looks right and is wrong.
+///
+/// Not Arxan-redirected. Six existing callers.
+pub const PLAYER_PARAM_SET_ALL_STATS: u32 = 0x0038_aca0;
+
+/// The five bytes [`PLAYER_PARAM_SET_ALL_STATS`] must begin with. `mov [rsp+8],rbx`.
+pub const PLAYER_PARAM_SET_ALL_STATS_PROLOGUE: [u8; 5] = [0x48, 0x89, 0x5c, 0x24, 0x08];
+
+/// Stats in one `PlayerParam` block, INCLUDING the two that are not levelable.
+///
+/// [`PLAYER_PARAM_SET_ALL_STATS`] reads all eleven; [`PLAYER_PARAM_STAT_OFFSETS`] names the nine
+/// that a level buys.
+pub const PLAYER_PARAM_STAT_COUNT: usize = 11;
+
+/// What the soul-level sum subtracts. `level = max(1, sum(nine stats) - 53)`.
+///
+/// From `0x14038e310`. See [`PLAYER_PARAM_SET_ALL_STATS`] for why this is `9 * 6 - 1`.
+pub const PLAYER_PARAM_SOUL_LEVEL_BIAS: u32 = 53;
+
 /// Opens the attribute menu. RVA `0x001992c0`. `fn(menuMgr, mode, *const [f32; 8])`.
 ///
 /// `mode` `1` pushes menu `0x19` (Level Up) and `0` pushes `0x1a` (Reallocate Stats); any other
