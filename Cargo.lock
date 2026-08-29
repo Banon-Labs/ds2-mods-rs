@@ -544,6 +544,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ds2-inventory-sort"
+version = "0.1.0"
+dependencies = [
+ "ds2-game-base",
+ "ds2-hook",
+ "ds2-hotkey-config",
+ "ds2-menu-row",
+ "ds2-rva",
+]
+
+[[package]]
 name = "ds2-loader"
 version = "0.1.0"
 dependencies = [
@@ -557,6 +568,7 @@ dependencies = [
  "ds2-hook",
  "ds2-hotkey-config",
  "ds2-intro-skip",
+ "ds2-inventory-sort",
  "ds2-menu-row",
  "ds2-offline",
  "ds2-rva",

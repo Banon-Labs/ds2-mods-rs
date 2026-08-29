@@ -88,6 +88,7 @@ pub mod continue_flow;
 pub mod crash_logging;
 pub mod dialog_skip;
 pub mod intro_skip;
+pub mod inventory_sort;
 pub mod menu_row;
 pub mod offline;
 pub mod save_redirect;
@@ -310,6 +311,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_continue_record();
                 install_title_menu();
                 install_build_import();
+                install_inventory_sort();
                 install_menu_row();
                 arm_fault(crash_config);
             });
@@ -345,6 +347,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_continue_record();
                 install_title_menu();
                 install_build_import();
+                install_inventory_sort();
                 install_menu_row();
                 arm_fault(crash_config);
             });
@@ -684,6 +687,33 @@ fn install_build_import() {
             "{} NOT REGISTERED: {error} -- no row will be added",
             ds2_build_import::LOG_PREFIX
         )),
+    }
+}
+
+/// Bind a button to the game's own inventory sort dialog, if `<Game>/ds2-mods.toml` asked for it.
+///
+/// **Before [`install_menu_row`], for the same reason [`install_build_import`] is**: the button is
+/// read from a per-frame tick that `ds2_menu_row::install` seals the registry for. A tick
+/// registered afterwards is a button that is never read.
+fn install_inventory_sort() {
+    let config = inventory_sort::InventorySortConfig::load();
+    log_line(format_args!("{}", config.describe()));
+    if !config.enabled {
+        return;
+    }
+    ds2_inventory_sort::set_logger(log_line);
+    let request = ds2_inventory_sort::Request {
+        config_path: crash_logging::config_file_path(),
+    };
+    // SAFETY: both targets are function starts recorded in `ds2-rva` with the five bytes they must
+    // begin with, and the crate re-reads those bytes and refuses to patch anything that does not
+    // match. Called from the post-Arxan position, like every other install here.
+    let outcome = unsafe { ds2_inventory_sort::install(&request) };
+    if !outcome.installed {
+        log_line(format_args!(
+            "{} NOT INSTALLED -- the sort dialog stays on the button the game shipped it on",
+            ds2_inventory_sort::LOG_PREFIX
+        ));
     }
 }
 

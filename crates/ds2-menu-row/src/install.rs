@@ -747,9 +747,16 @@ pub unsafe fn install() -> Outcome {
     // SEALED FIRST, so a row registered from another thread while the hooks are going in cannot be
     // half-applied -- named by the namer but absent from the item vector, or the reverse.
     crate::api::seal();
-    if !crate::api::any() {
+    // TWO REASONS TO INSTALL, AND THEY ARE INDEPENDENT. A row needs the item-vector, dispatch,
+    // namer and caption detours; a TICK needs only the per-frame update. Gating both on `any()` --
+    // which counts rows -- made `add_tick` silently inert for any crate that registered a callback
+    // and no row, which is a public entry point that looks broken rather than absent.
+    let rows = crate::api::any();
+    let ticks = crate::caption::has_ticks();
+    if !rows && !ticks {
         log(format_args!(
-            "{LOG_PREFIX} nothing registered -- no rows, no hooks, the shipped menu is untouched"
+            "{LOG_PREFIX} nothing registered -- no rows, no ticks, no hooks, the shipped menu is \
+             untouched"
         ));
         return Outcome { installed: false };
     }
@@ -762,6 +769,27 @@ pub unsafe fn install() -> Outcome {
             return Outcome { installed: false };
         }
     };
+
+    // MinHook is statically linked into this DLL, so nothing else shares this instance and
+    // ALREADY_INITIALIZED can only mean this ran twice. Treat it as success.
+    let status = unsafe { MH_Initialize() };
+    if status != MH_STATUS::MH_OK && status != MH_STATUS::MH_ERROR_ALREADY_INITIALIZED {
+        log(format_args!(
+            "{LOG_PREFIX} install-failed stage=MH_Initialize status={status:?}"
+        ));
+        return Outcome { installed: false };
+    }
+
+    if !rows {
+        // TICK ONLY: not one byte of the shipped menu's own row machinery is patched. The pause
+        // menu draws exactly what it shipped with; the only detour is the per-frame update, which
+        // runs the original first.
+        unsafe { crate::caption::install_tick(base) };
+        log(format_args!(
+            "{LOG_PREFIX} tick-only install -- no rows registered, the shipped menu is untouched"
+        ));
+        return Outcome { installed: true };
+    }
 
     let rva = ds2_rva::FE_INGAME_TOP_SELECT_SYSTEM_TAB_ITEMS;
     let site = base + rva as usize;
@@ -779,16 +807,6 @@ pub unsafe fn install() -> Outcome {
         log(format_args!(
             "{LOG_PREFIX} install-failed stage=prologue va=0x{site:016x} expected={expected:02x?} \
              found={found:02x?}"
-        ));
-        return Outcome { installed: false };
-    }
-
-    // MinHook is statically linked into this DLL, so nothing else shares this instance and
-    // ALREADY_INITIALIZED can only mean this ran twice. Treat it as success.
-    let status = unsafe { MH_Initialize() };
-    if status != MH_STATUS::MH_OK && status != MH_STATUS::MH_ERROR_ALREADY_INITIALIZED {
-        log(format_args!(
-            "{LOG_PREFIX} install-failed stage=MH_Initialize status={status:?}"
         ));
         return Outcome { installed: false };
     }

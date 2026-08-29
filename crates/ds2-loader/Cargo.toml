@@ -65,6 +65,7 @@ ds2-offline.workspace = true
 ds2-save-redirect.workspace = true
 ds2-build-import.workspace = true
 ds2-menu-row.workspace = true
+ds2-inventory-sort.workspace = true
 ds2-hotkey-config.workspace = true
 ds2-rva.workspace = true
 dearxan = { workspace = true, features = ["disabler", "rayon"] }

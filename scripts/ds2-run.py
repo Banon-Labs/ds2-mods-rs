@@ -179,6 +179,13 @@ KEY_MENU_ROW_ENABLED = "enabled"
 
 #: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/build_import.rs`.
 BUILD_IMPORT_SECTION = "build_import"
+
+#: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/inventory_sort.rs`, and the
+#: two binding keys in `crates/ds2-inventory-sort/src/lib.rs`.
+INVENTORY_SORT_SECTION = "inventory_sort"
+KEY_INVENTORY_SORT_ENABLED = "enabled"
+KEY_INVENTORY_SORT_KEY = "key"
+KEY_INVENTORY_SORT_PAD = "pad"
 KEY_BUILD_IMPORT_ENABLED = "enabled"
 #: Mirrors `LOG_PREFIX` in `crates/ds2-menu-row/src/lib.rs`. Named here because the generated
 #: config tells the reader which line to look for, and a prefix that drifted would send them
@@ -1074,6 +1081,9 @@ def config_text(
     save_redirect: str | None = None,
     menu_row: bool = False,
     build_import: bool = False,
+    inventory_sort: bool = False,
+    inventory_sort_key: str = "F7",
+    inventory_sort_pad: str = "",
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
@@ -1455,6 +1465,33 @@ def config_text(
 # Steam client rather than of the game.
 {KEY_BUILD_IMPORT_ENABLED} = {str(build_import).lower()}
 
+[{INVENTORY_SORT_SECTION}]
+# NOT STARTUP. Two detours on the Inventory tab's constructor and destructor, installed in the same
+# post-Arxan callback as everything else, plus a per-frame tick borrowed from `ds2-menu-row`.
+#
+# IT ADDS NO FEATURE. DARK SOULS II already sorts the inventory -- `①：Sort`, the dialog headed
+# "How should the list be sorted?", and per-category keys including a real total attack rating
+# (the sum of all seven attack components). What the game does not ship is a way to MOVE that
+# button: `win32onlymessage.fmg` 10332..10341 is the complete list of rebindable menu actions and
+# sorting is not among them, riding instead on one of two generic Function keys, and there is no
+# controller remapping in this game at all. So this opens the shipped dialog from a button you
+# choose, and leaves the shipped `①` prompt working.
+#
+# It calls one function -- `FeGroupInGameMenuInventory2`'s own sort-dialog entry, which takes the
+# group and nothing else and refuses itself while another dialog is up. Nothing is injected into
+# the input path; a synthesised button press would also fire every OTHER thing the shipped Function
+# key does in whatever menu happened to be open.
+{KEY_INVENTORY_SORT_ENABLED} = {str(inventory_sort).lower()}
+# NOT startup-only, unlike everything above: these two are re-read about once a second while the
+# game runs, so a button can be moved without a restart. A value that does not parse keeps the one
+# already working and says so in the log.
+#
+# `{KEY_INVENTORY_SORT_KEY}` is a key NAME from `ds2-hotkey-config` ("F7", "]", "KP_Plus", "Insert"), empty for none.
+# `{KEY_INVENTORY_SORT_PAD}` is an XInput button: a b x y lb rb back start lthumb rthumb dpad_up dpad_down
+# dpad_left dpad_right. Empty for none. BOTH may be set; either one opens the dialog.
+{KEY_INVENTORY_SORT_KEY} = "{inventory_sort_key}"
+{KEY_INVENTORY_SORT_PAD} = "{inventory_sort_pad}"
+
 [{CRASH_SECTION}]
 {crash_banner}# STARTUP-ONLY, both of them. The handler is installed in DllMain BEFORE `neuter_arxan`, because
 # that call patches code from static analysis and is the likeliest crash in the whole startup path
@@ -1514,6 +1551,9 @@ def write_config(
     save_redirect: str | None = None,
     menu_row: bool = False,
     build_import: bool = False,
+    inventory_sort: bool = False,
+    inventory_sort_key: str = "F7",
+    inventory_sort_pad: str = "",
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
@@ -1541,6 +1581,9 @@ def write_config(
         save_redirect,
         menu_row,
         build_import,
+        inventory_sort,
+        inventory_sort_key,
+        inventory_sort_pad,
     )
     path.write_text(text, encoding="utf-8")
     return path, text
@@ -1626,6 +1669,9 @@ def dry_run(
     save_redirect: str | None = None,
     menu_row: bool = False,
     build_import: bool = False,
+    inventory_sort: bool = False,
+    inventory_sort_key: str = "F7",
+    inventory_sort_pad: str = "",
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
@@ -1671,6 +1717,9 @@ def dry_run(
             save_redirect,
             menu_row,
             build_import,
+            inventory_sort,
+            inventory_sort_key,
+            inventory_sort_pad,
         ):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
         else:
@@ -1711,6 +1760,9 @@ def dry_run(
                 block_sockets,
                 menu_row=menu_row,
                 build_import=build_import,
+                inventory_sort=inventory_sort,
+                inventory_sort_key=inventory_sort_key,
+                inventory_sort_pad=inventory_sort_pad,
             ),
             indent="[dry-run]   | ",
         )
@@ -1774,6 +1826,9 @@ def launch(
     save_redirect: str | None = None,
     menu_row: bool = False,
     build_import: bool = False,
+    inventory_sort: bool = False,
+    inventory_sort_key: str = "F7",
+    inventory_sort_pad: str = "",
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
@@ -1814,6 +1869,9 @@ def launch(
         save_redirect,
         menu_row,
         build_import,
+        inventory_sort,
+        inventory_sort_key,
+        inventory_sort_pad,
     )
     print(f"[config] {config_path}")
 
@@ -2507,6 +2565,57 @@ def selftest() -> int:
         "install_build_import runs BEFORE install_menu_row, which seals the row registry",
     )
 
+    # THE SORT REBINDING, whose whole risk is that it CALLS a shipped function on the game thread
+    # rather than only patching one. Same two questions as every other feature: is it off unless
+    # asked for, and does the DLL read the section this writes.
+    values, _ = parse_config(config_text("off"))
+    check(
+        values.get((INVENTORY_SORT_SECTION, KEY_INVENTORY_SORT_ENABLED)) == "false",
+        f"[{INVENTORY_SORT_SECTION}] {KEY_INVENTORY_SORT_ENABLED} defaults to FALSE -- it has not "
+        "been run, and its default key is a placeholder nobody's muscle memory is on",
+    )
+    values, _ = parse_config(config_text("off", inventory_sort=True))
+    check(
+        values.get((INVENTORY_SORT_SECTION, KEY_INVENTORY_SORT_ENABLED)) == "true"
+        and values.get((BUILD_IMPORT_SECTION, KEY_BUILD_IMPORT_ENABLED)) == "false",
+        "--inventory-sort turns on only its own key, in its own section",
+    )
+    values, _ = parse_config(
+        config_text("off", inventory_sort=True, inventory_sort_key="", inventory_sort_pad="y")
+    )
+    check(
+        values.get((INVENTORY_SORT_SECTION, KEY_INVENTORY_SORT_KEY)) == ""
+        and values.get((INVENTORY_SORT_SECTION, KEY_INVENTORY_SORT_PAD)) == "y",
+        "a controller-only binding is writable -- an empty key is 'no keyboard binding', not a "
+        "missing value",
+    )
+    inventory_sort_src = (REPO_ROOT / "crates/ds2-loader/src/inventory_sort.rs").read_text(
+        encoding="utf-8"
+    )
+    check(
+        f'"{INVENTORY_SORT_SECTION}"' in inventory_sort_src,
+        f"the DLL reads the section this writes ([{INVENTORY_SORT_SECTION}])",
+    )
+    inventory_sort_lib = (REPO_ROOT / "crates/ds2-inventory-sort/src/lib.rs").read_text(
+        encoding="utf-8"
+    )
+    check(
+        f'"{KEY_INVENTORY_SORT_KEY}"' in inventory_sort_lib
+        and f'"{KEY_INVENTORY_SORT_PAD}"' in inventory_sort_lib,
+        "the DLL reads both binding keys this writes",
+    )
+    # SAME SEALING ORDER AS THE ROWS, for the same reason: the button is read from a per-frame tick
+    # that `ds2_menu_row::install` seals the registry for, so a tick registered after it is a button
+    # nothing ever reads.
+    check(
+        loader_src.count("install_inventory_sort();") == 2,
+        "both Arxan arms install the sort rebinding, or the A/B pair stops being comparable",
+    )
+    check(
+        loader_src.index("install_inventory_sort();") < loader_src.index("install_menu_row();"),
+        "install_inventory_sort runs BEFORE install_menu_row, which seals the tick registry",
+    )
+
     # THE ARMS MUST DIFFER, and in exactly one key. If two arms ever generated the same file the
     # A/B comparison would be two runs of the same experiment, and the arm-readback guard would
     # not catch it because the DLL would be reporting truthfully.
@@ -2981,6 +3090,40 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--inventory-sort",
+        dest="inventory_sort",
+        action="store_true",
+        default=False,
+        help=(
+            "bind a key or controller button to the game's OWN inventory sort dialog. Adds no "
+            "sorting: DARK SOULS II already sorts, on a button no menu in the game can rebind. "
+            "OFF BY DEFAULT. Two detours (the Inventory tab's constructor and destructor) and one "
+            "direct call into the shipped dialog entry, which refuses itself while another dialog "
+            "is up. Set the button with --sort-key and --sort-pad; both can be changed while the "
+            "game runs by editing the config file."
+        ),
+    )
+    parser.add_argument(
+        "--sort-key",
+        dest="inventory_sort_key",
+        default="F7",
+        help=(
+            "key NAME for --inventory-sort, in `ds2-hotkey-config` spelling: F7, ], KP_Plus, "
+            "Insert, Ctrl+S. Empty string for no keyboard binding. THE DEFAULT IS A PLACEHOLDER "
+            "-- the button worth having here is the one your fingers already know."
+        ),
+    )
+    parser.add_argument(
+        "--sort-pad",
+        dest="inventory_sort_pad",
+        default="",
+        help=(
+            "XInput button for --inventory-sort: a b x y lb rb back start lthumb rthumb dpad_up "
+            "dpad_down dpad_left dpad_right. Empty (the default) for no controller binding. Names "
+            "are the Xbox ones because XInput is an Xbox API; on a DualShock, y is Triangle."
+        ),
+    )
+    parser.add_argument(
         "--probe-site",
         choices=PROBE_SITES,
         default="m1",
@@ -3066,6 +3209,9 @@ def main() -> int:
             args.save_redirect,
             args.menu_row,
             args.build_import,
+            args.inventory_sort,
+            args.inventory_sort_key,
+            args.inventory_sort_pad,
         )
     return launch(
         args.probe,
@@ -3092,6 +3238,9 @@ def main() -> int:
         args.save_redirect,
         args.menu_row,
         args.build_import,
+        args.inventory_sort,
+        args.inventory_sort_key,
+        args.inventory_sort_pad,
     )
 
 

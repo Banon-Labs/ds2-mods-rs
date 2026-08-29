@@ -4749,3 +4749,89 @@ pub const FE_OPEN_ATTRIBUTE_MENU: u32 = 0x0019_92c0;
 /// `saveLoadSystem` is `[GAME_MANAGER_IMP + `[`SAVE_LOAD_SYSTEM_OFFSET`]`]`. How a change is
 /// persisted without waiting for a bonfire.
 pub const SAVE_LOAD_REQUEST_SAVE: u32 = 0x002e_7410;
+
+// =================================================================================================
+// THE INVENTORY TAB'S SORT DIALOG, AND THE OBJECT THAT OWNS IT
+//
+// DARK SOULS II ALREADY SHIPS INVENTORY SORTING. It is not a feature to build; it is a feature
+// reachable only from the button FromSoftware chose, and DS2 exposes no per-action rebinding for
+// menus -- `win32onlymessage.fmg` 10332..10341 is the complete list of rebindable menu actions and
+// "Sort" is not among them; it rides on one of two generic Function keys. Everything here exists so
+// a mod can offer the SAME dialog on a different button.
+//
+// The option table lives at VA `0x14155ddf0` as 15 `{u32 FE_ITEM_PARAM_TYPE, u32 fmgId}` pairs,
+// sliced per category by the function at `0x1400349d0`, and the values it sorts by come from a
+// ~95-case switch (`0x140032460` and siblings) -- key `0x5C` is the sum of all seven attack
+// components, which is a real total attack rating. None of that is needed to REBIND the dialog, so
+// none of it is transcribed here. See `docs/DS2-INVENTORY-SORT.md`.
+// =================================================================================================
+
+/// **The sort dialog, opened. RVA `0x00074_7e0`. `fn(this)` and nothing else.**
+///
+/// `this` is a live [`FE_INVENTORY_GROUP_VTABLE`] object. The function reads the current category
+/// through its own vtable slot `+0x140`, asks `0x1400349d0` for that category's slice of the option
+/// table, builds one row per entry, and shows the dialog headed by `common.fmg` 80059901 -- "How
+/// should the list be sorted?". Selecting a row runs the game's own apply path.
+///
+/// # It takes ONE argument, which is why this mod is small
+///
+/// Verified from its own prologue and body: `push rbp; push rbx; lea rbp,[rsp-0x888];
+/// sub rsp,0x988`, then `cmp qword [rcx+0x58],0` / `mov rbx,rcx` and a `jne` to the epilogue. `RDX`
+/// and `R8` are dead on entry -- both are overwritten by `lea` before any read. So a caller needs
+/// the group pointer and nothing else: no job object, no functor, no synthesised input.
+///
+/// # It guards itself
+///
+/// `[this+0x58]` is non-zero while the group already has a dialog up, and the function returns
+/// having done nothing in that case. A hotkey that fires while the sort dialog (or any other child
+/// dialog) is open is therefore refused BY THE GAME rather than by the mod's own guess at whether
+/// now is a good time.
+pub const FE_INVENTORY_SORT_DIALOG_OPEN: u32 = 0x0007_47e0;
+
+/// The five bytes [`FE_INVENTORY_SORT_DIALOG_OPEN`] must begin with, or the mod refuses to call it.
+///
+/// `push rbp; push rbx; lea rbp,...`. Not Arxan-redirected -- the first byte is `0x40`, and an
+/// Arxan-redirected entry keeps its five-byte `e9` stub in the deobfuscated image.
+pub const FE_INVENTORY_SORT_DIALOG_OPEN_PROLOGUE: [u8; 5] = [0x40, 0x55, 0x53, 0x48, 0x8d];
+
+/// `FeGroupInGameMenuInventory2`'s primary vtable. RVA `0x010b_1b38`, 130 slots.
+///
+/// **This is the identity check, and it is the reason no ctor hook needs to trust a name.** The
+/// constructor writes this pointer to `[this]` (`lea rax,[rip+0x1040185]; mov [rsi],rax` at
+/// `0x1400719ac`), plus three secondary vtables at `+0x50`, `+0xc8` and `+0x20a8`. A cached pointer
+/// whose first qword is no longer this value is not the inventory group any more.
+pub const FE_INVENTORY_GROUP_VTABLE: u32 = 0x010b_1b38;
+
+/// `FeGroupInGameMenuInventory2::ctor`. RVA `0x0007_16f0`. `fn(this, ?, ?) -> this`.
+///
+/// Hooked only to learn WHERE the live group is. The object is heap-allocated (`0x3EE8` bytes) by
+/// the factory at `0x1400727b0`, which is itself a vtable slot of the `LoadAndExecJobSequence`
+/// inside `FeGroupInGameMenuInventory2::CreateExecJob` -- so the pause menu's Inventory tab creates
+/// it on demand and there is no static pointer to read instead.
+///
+/// Its later arguments are not used by anything here and are deliberately not documented: a detour
+/// that only records `RCX` and tail-calls the original does not need to know them.
+pub const FE_INVENTORY_GROUP_CTOR: u32 = 0x0007_16f0;
+
+/// The five bytes [`FE_INVENTORY_GROUP_CTOR`] must begin with. `mov [rsp+0x8],rbx`.
+pub const FE_INVENTORY_GROUP_CTOR_PROLOGUE: [u8; 5] = [0x48, 0x89, 0x5c, 0x24, 0x08];
+
+/// `FeGroupInGameMenuInventory2::v0` -- the scalar deleting destructor. RVA `0x0007_25d0`.
+///
+/// `fn(this, u8 flags) -> this`; bit `0` of `flags` means "and free the memory". Slot 0 of
+/// [`FE_INVENTORY_GROUP_VTABLE`].
+///
+/// **Hooked for the same reason the constructor is, in the opposite direction.** Without it a mod
+/// holds a pointer to freed memory from the moment the player closes the pause menu, and the
+/// vtable check that would catch it is a read of that freed memory. Clearing the cache here is what
+/// makes the check a belt rather than the only strap.
+pub const FE_INVENTORY_GROUP_DTOR: u32 = 0x0007_25d0;
+
+/// The five bytes [`FE_INVENTORY_GROUP_DTOR`] must begin with. `mov [rsp+0x8],rbx`.
+pub const FE_INVENTORY_GROUP_DTOR_PROLOGUE: [u8; 5] = [0x48, 0x89, 0x5c, 0x24, 0x08];
+
+/// `[group + 0x58]`, non-zero while the group already has a child dialog up.
+///
+/// Read only to LOG why a press did nothing. [`FE_INVENTORY_SORT_DIALOG_OPEN`] tests it itself and
+/// refuses; this constant exists so the refusal is legible in the log rather than silent.
+pub const FE_INVENTORY_GROUP_BUSY_OFFSET: usize = 0x58;
