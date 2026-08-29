@@ -24,10 +24,12 @@
 //! is the fixture both agree on.
 
 pub mod field;
+pub mod level;
 pub mod saved_build;
 pub mod url;
 
 pub use field::{Field, MAX_UNITS, Reaction};
+pub use level::{LevelChange, LevelError, MAX_LEVEL, SoulCosts, StatSpread, level_from_stats};
 pub use saved_build::{Build, MAX_STAT, ParseError, Stats};
 pub use url::{
     BUILD_HOST, BUILD_URL_PREFIX, BUILD_URL_ROW_HELP, UrlRejection, build_id_from_url, build_path,
