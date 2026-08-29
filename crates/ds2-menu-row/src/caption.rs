@@ -148,6 +148,11 @@ static UPDATE_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 static TICKS: Mutex<Vec<fn()>> = Mutex::new(Vec::new());
 
 /// Register a callback to run once per frame while the pause menu is up.
+/// Whether anything has registered a per-frame callback. The tick-only install gate.
+pub(crate) fn has_ticks() -> bool {
+    TICKS.lock().is_ok_and(|ticks| !ticks.is_empty())
+}
+
 pub(crate) fn add_tick(callback: fn()) -> bool {
     match TICKS.lock() {
         Ok(mut ticks) => {
@@ -499,6 +504,59 @@ unsafe extern "system" fn bind_detour(top_select: *mut u8) {
     }
 }
 
+/// Detour the pause menu's per-frame update, which is what makes [`add_tick`] callbacks run.
+///
+/// Split out of [`install`] so a crate that wants ONLY a tick -- no row, no caption -- can have one
+/// without the caption-bind and path-append detours that a row needs and it does not. `add_tick` is
+/// public API; before this existed it silently did nothing unless some other crate happened to
+/// register a row, which is a feature that looks broken rather than absent.
+///
+/// # Safety
+///
+/// Patches executable memory in the loaded game image. Must run after `neuter_arxan`.
+pub(crate) unsafe fn install_tick(base: usize) {
+    // THE PER-FRAME PUSH IS AN ENHANCEMENT AND FAILS SOFT. Without it every caption still gets
+    // written at bind, so the row is labelled and works; what is lost is a caption that CHANGES
+    // while the menu is open. So a refusal here logs and leaves `ok` alone -- degrading to
+    // "the text updates when you reopen the menu" is not the same class of failure as a blank row.
+    let update_site = base + ds2_rva::FE_INGAME_TOP_SELECT_UPDATE as usize;
+    let mut prologue = [0u8; ds2_rva::FE_INGAME_TOP_SELECT_UPDATE_PROLOGUE.len()];
+    // SAFETY: a resolved RVA inside the loaded game image; `read_bytes` faults safely.
+    let read = unsafe { ds2_game_base::mem::read_bytes(update_site, &mut prologue) };
+    if !read || prologue != ds2_rva::FE_INGAME_TOP_SELECT_UPDATE_PROLOGUE {
+        // THE BYTES BEFORE THE PATCH. An RVA is a number, and on a build this was not read from it
+        // points into the middle of something else that would accept the write.
+        log(format_args!(
+            "{LOG_PREFIX} caption-tick NOT installed reason=prologue read={read} saw={prologue:02x?} \
+             want={:02x?} -- captions will update on the next menu OPEN rather than live",
+            ds2_rva::FE_INGAME_TOP_SELECT_UPDATE_PROLOGUE
+        ));
+    } else {
+        match unsafe { MhHook::new(update_site as *mut c_void, update_detour as *mut c_void) } {
+            Ok(hook) => {
+                UPDATE_TRAMPOLINE.store(hook.trampoline() as usize, Ordering::Release);
+                let status = unsafe { MH_EnableHook(update_site as *mut c_void) };
+                if status == MH_STATUS::MH_OK {
+                    log(format_args!(
+                        "{LOG_PREFIX} caption-tick hooked rva=0x{:08x} va=0x{update_site:016x} \
+                         -- a changed caption now appears without reopening the menu",
+                        ds2_rva::FE_INGAME_TOP_SELECT_UPDATE
+                    ));
+                } else {
+                    log(format_args!(
+                        "{LOG_PREFIX} caption-tick NOT installed stage=MH_EnableHook \
+                         status={status:?} -- captions update on the next menu OPEN"
+                    ));
+                }
+            }
+            Err(status) => log(format_args!(
+                "{LOG_PREFIX} caption-tick NOT installed stage=MH_CreateHook status={status:?} \
+                 -- captions update on the next menu OPEN"
+            )),
+        }
+    }
+}
+
 /// Detour the caption bind and the path append. Returns whether the added row will be labelled.
 ///
 /// # Safety
@@ -550,46 +608,8 @@ pub unsafe fn install(base: usize) -> bool {
             }
         }
     }
-    // THE PER-FRAME PUSH IS AN ENHANCEMENT AND FAILS SOFT. Without it every caption still gets
-    // written at bind, so the row is labelled and works; what is lost is a caption that CHANGES
-    // while the menu is open. So a refusal here logs and leaves `ok` alone -- degrading to
-    // "the text updates when you reopen the menu" is not the same class of failure as a blank row.
-    let update_site = base + ds2_rva::FE_INGAME_TOP_SELECT_UPDATE as usize;
-    let mut prologue = [0u8; ds2_rva::FE_INGAME_TOP_SELECT_UPDATE_PROLOGUE.len()];
-    // SAFETY: a resolved RVA inside the loaded game image; `read_bytes` faults safely.
-    let read = unsafe { ds2_game_base::mem::read_bytes(update_site, &mut prologue) };
-    if !read || prologue != ds2_rva::FE_INGAME_TOP_SELECT_UPDATE_PROLOGUE {
-        // THE BYTES BEFORE THE PATCH. An RVA is a number, and on a build this was not read from it
-        // points into the middle of something else that would accept the write.
-        log(format_args!(
-            "{LOG_PREFIX} caption-tick NOT installed reason=prologue read={read} saw={prologue:02x?} \
-             want={:02x?} -- captions will update on the next menu OPEN rather than live",
-            ds2_rva::FE_INGAME_TOP_SELECT_UPDATE_PROLOGUE
-        ));
-    } else {
-        match unsafe { MhHook::new(update_site as *mut c_void, update_detour as *mut c_void) } {
-            Ok(hook) => {
-                UPDATE_TRAMPOLINE.store(hook.trampoline() as usize, Ordering::Release);
-                let status = unsafe { MH_EnableHook(update_site as *mut c_void) };
-                if status == MH_STATUS::MH_OK {
-                    log(format_args!(
-                        "{LOG_PREFIX} caption-tick hooked rva=0x{:08x} va=0x{update_site:016x} \
-                         -- a changed caption now appears without reopening the menu",
-                        ds2_rva::FE_INGAME_TOP_SELECT_UPDATE
-                    ));
-                } else {
-                    log(format_args!(
-                        "{LOG_PREFIX} caption-tick NOT installed stage=MH_EnableHook \
-                         status={status:?} -- captions update on the next menu OPEN"
-                    ));
-                }
-            }
-            Err(status) => log(format_args!(
-                "{LOG_PREFIX} caption-tick NOT installed stage=MH_CreateHook status={status:?} \
-                 -- captions update on the next menu OPEN"
-            )),
-        }
-    }
+    // The per-frame push, and every registered tick with it.
+    unsafe { install_tick(base) };
 
     if ok {
         // THE CAPTIONS THIS PRINTS ARE THE ONES IT WROTE. It used to print the literals
