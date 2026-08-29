@@ -17,9 +17,17 @@
 //! # Where the numbers come from, and where they do not
 //!
 //! The per-level costs are DATA, injected by the caller, never a formula written from memory. DARK
-//! SOULS II ships them in `param:/LevelUpStatusCalcParam.param` -- **param index `0x23`**, from the
-//! registration thunk at `0x14048c950`, which passes that path and `0x23` to the param registrar at
-//! `0x1400260b0`. The param lives inside `enc_regulation.bnd.dcx`.
+//! SOULS II ships them in `param:/LevelUpStatusCalcParam.param`, which lives inside
+//! `enc_regulation.bnd.dcx`. The path string is at `0x1410f2da0` and its one code reference is
+//! `0x14048c950`.
+//!
+//! **That reference is a `std::wstring` build, NOT a param registration**, and this comment said
+//! otherwise for one commit. `mov r8d,0x23` next to the string looked like a param index; `0x23` is
+//! `35`, which is the LENGTH of `"param:/LevelUpStatusCalcParam.param"`, and `0x1400260b0` is an
+//! assign that compares `[rcx+0x18]` against `8` to pick the SSO branch. A magic number sitting
+//! beside a string literal is a string length until something proves otherwise.
+//!
+//! So the param INDEX is not known, and nothing here pretends to know it.
 //!
 //! **This module contains no cost numbers and will not invent any.** A caller with no table gets a
 //! refusal, not a guess. That is deliberate: a soul-memory figure that is confidently wrong is worse
@@ -56,7 +64,7 @@ impl core::fmt::Display for LevelError {
         match self {
             LevelError::NoCostTable => write!(
                 f,
-                "no soul cost table -- LevelUpStatusCalcParam (param 0x23) has not been read"
+                "no soul cost table -- LevelUpStatusCalcParam has not been read"
             ),
             LevelError::OutOfRange { level } => {
                 write!(f, "level {level} is outside 1..={MAX_LEVEL}")
@@ -225,7 +233,12 @@ mod tests {
     #[test]
     fn no_table_is_a_refusal_not_a_guess() {
         assert_eq!(SoulCosts::new(Vec::new()), Err(LevelError::NoCostTable));
-        assert!(LevelError::NoCostTable.to_string().contains("0x23"));
+        assert!(
+            LevelError::NoCostTable
+                .to_string()
+                .contains("LevelUpStatusCalcParam"),
+            "the refusal must name the param a caller has to go and read"
+        );
     }
 
     /// A level the table cannot reach says so, with both numbers.
