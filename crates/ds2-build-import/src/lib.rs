@@ -248,6 +248,28 @@ mod install {
             SESSION_OPEN.store(false, Ordering::Release);
             return;
         };
+        hand_to_worker(job);
+    }
+
+    /// Start a job the TYPING FIELD submitted, from the field's own Enter rather than a row press.
+    ///
+    /// # This is what makes Enter safe to read at all
+    ///
+    /// The pause menu may confirm the highlighted row on the same keypress -- whether it does has
+    /// not been established here, and this does not depend on knowing. Whichever half runs first
+    /// claims [`SESSION_OPEN`] and takes the typing session with it. If the field wins, the row's
+    /// own press arrives here's sibling and finds the flag already claimed. If the row wins, it
+    /// submits through the same `take_typed`, and the tick then finds no session to confirm. One
+    /// press, one job, in either order.
+    pub(crate) fn submit(job: crate::flow::Job) {
+        if SESSION_OPEN.swap(true, Ordering::AcqRel) {
+            return log_line(format_args!("{LOG_PREFIX} a field is already open"));
+        }
+        hand_to_worker(job);
+    }
+
+    /// Put a claimed job on a worker thread. **[`SESSION_OPEN`] must already be claimed.**
+    fn hand_to_worker(job: crate::flow::Job) {
         // A failed spawn must clear the flag AND drop the job, or the row is dead for the rest of
         // the process and any keyboard claim inside the job stays wedged with it.
         if std::thread::Builder::new()

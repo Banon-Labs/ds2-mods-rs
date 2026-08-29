@@ -108,30 +108,91 @@ unsafe fn open_typing() {
 ///
 /// Returns without touching anything on the frames -- almost all of them -- when nobody is typing.
 fn typing_tick() {
-    let Ok(mut guard) = TYPING.lock() else {
-        return;
-    };
-    let Some(field) = guard.as_mut() else {
-        return;
-    };
-    // SAFETY: the tick runs on the game thread.
-    let units = unsafe { crate::typed::poll() };
-    if units.is_empty() {
-        return;
+    // THE LOCK IS DROPPED BEFORE THE SUBMIT, and that is not tidiness. Submitting closes the
+    // session, which takes the same lock, and a `std::sync::Mutex` is not reentrant -- doing it
+    // inside this scope would deadlock the game thread on the frame the player pressed Enter.
+    let mut confirmed = false;
+    {
+        let Ok(mut guard) = TYPING.lock() else {
+            return;
+        };
+        let Some(field) = guard.as_mut() else {
+            return;
+        };
+        // SAFETY: the tick runs on the game thread.
+        let units = unsafe { crate::typed::poll() };
+        if units.is_empty() {
+            return;
+        }
+        for unit in units {
+            // Digits, backspace and Enter are the only keys read, and `Field` handles all three.
+            // Every other reaction is unreachable rather than ignored -- if one arrives, the field
+            // is being fed something `crate::typed` promised not to send.
+            match field.on_char(unit) {
+                Reaction::Handled | Reaction::Ignored => {}
+                Reaction::Confirm => {
+                    confirmed = true;
+                    break;
+                }
+                other => log_line(format_args!(
+                    "{LOG_PREFIX} the field asked for {other:?}, which nothing here sends"
+                )),
+            }
+        }
+        // SAFETY: the tick runs on the game thread, with the menu up.
+        unsafe { show_typing(field) };
     }
-    for unit in units {
-        // Only digits and backspace are read, and `Field` handles both. Every other reaction is
-        // unreachable here rather than ignored -- if one ever arrives, the field is being fed
-        // something `crate::typed` promised not to send.
-        match field.on_char(unit) {
-            Reaction::Handled | Reaction::Ignored => {}
-            other => log_line(format_args!(
-                "{LOG_PREFIX} the field asked for {other:?}, which nothing here sends"
-            )),
+    if confirmed {
+        // SAFETY: the tick runs on the game thread, with the menu up.
+        match unsafe { take_typed() } {
+            Typed::Job(job) => crate::install::submit(job),
+            Typed::Cancelled | Typed::NotTyping => {}
         }
     }
-    // SAFETY: the tick runs on the game thread, with the menu up.
-    unsafe { show_typing(field) };
+}
+
+/// What was waiting in the typing field when it was closed.
+///
+/// Three cases rather than an `Option<Job>` because two of the three are NOT the same thing to the
+/// row's confirm: a player who was never typing falls through to the Steam field and the clipboard,
+/// and a player who submitted an empty field has CANCELLED and must not have their clipboard read
+/// out from under them as a consolation prize.
+enum Typed {
+    /// Nobody was typing.
+    NotTyping,
+    /// The field was empty, which is the cancel. The caption is already back to idle.
+    Cancelled,
+    /// Digits were waiting, and this is what to do with them.
+    Job(Job),
+}
+
+/// Close the typing session and turn whatever it held into a job.
+///
+/// # Safety
+///
+/// Game thread, menu up -- it writes the row's caption.
+unsafe fn take_typed() -> Typed {
+    let Some(typed) = close_typing() else {
+        return Typed::NotTyping;
+    };
+    if typed.is_empty() {
+        log_line(format_args!(
+            "{LOG_PREFIX} typing cancelled -- the field was empty"
+        ));
+        // SAFETY: forwarded to the caller.
+        unsafe { say_now(IDLE_CAPTION) };
+        return Typed::Cancelled;
+    }
+    log_line(format_args!("{LOG_PREFIX} typed build id {typed}"));
+    // SAFETY: forwarded to the caller.
+    unsafe { say_now("Reading link...") };
+    // The prefix is not the player's to get wrong -- they typed a number, so they get the URL that
+    // number belongs to. It still goes through `build_id_from_url` in `load`, which is what catches
+    // a number too large to be an id.
+    Typed::Job(Job::Link {
+        text: format!("{BUILD_URL_PREFIX}{typed}"),
+        source: Source::Typed,
+    })
 }
 
 /// End a typing session and return what was typed, or `None` if nobody was typing.
@@ -755,25 +816,15 @@ pub(crate) fn begin_session() -> Option<Job> {
     // A PRESS WHILE TYPING IS THE SUBMIT, and it comes before every other source: the player is
     // looking at digits they typed, and reading the clipboard out from under them would be the row
     // ignoring the thing it just asked them to do.
-    if let Some(typed) = close_typing() {
-        if typed.is_empty() {
-            log_line(format_args!(
-                "{LOG_PREFIX} typing cancelled -- the field was empty"
-            ));
-            // SAFETY: still the confirm path.
-            unsafe { say_now(IDLE_CAPTION) };
-            return None;
-        }
-        log_line(format_args!("{LOG_PREFIX} typed build id {typed}"));
-        // SAFETY: still the confirm path.
-        unsafe { say_now("Reading link...") };
-        // The prefix is not the player's to get wrong -- they typed a number, so they get the URL
-        // that number belongs to. It still goes through `build_id_from_url` in `load`, which is
-        // what catches a number too large to be an id.
-        return Some(Job::Link {
-            text: format!("{BUILD_URL_PREFIX}{typed}"),
-            source: Source::Typed,
-        });
+    //
+    // This is the same submit Enter performs from the tick, through the same function. Which of the
+    // two arrives first does not matter: whichever it is takes the session, and the other finds
+    // `NotTyping` here or a claimed `SESSION_OPEN` there.
+    // SAFETY: still the confirm path -- game thread, menu up.
+    match unsafe { take_typed() } {
+        Typed::Job(job) => return Some(job),
+        Typed::Cancelled => return None,
+        Typed::NotTyping => {}
     }
 
     // SAFETY: the confirm path.

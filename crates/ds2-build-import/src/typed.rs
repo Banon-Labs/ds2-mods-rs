@@ -8,24 +8,34 @@
 //! player already copy" -- and a player who has the build id in their head and nothing in their
 //! clipboard had no way in at all. This is the third choice: they type it.
 //!
-//! # It reads TEN KEYS, and that is the whole design
+//! # It reads TWELVE KEYS, and that is the whole design
 //!
-//! Only `0`-`9` (top row and numpad alike) and backspace. Not Enter, not Escape, not letters.
+//! `0`-`9`, backspace and Enter. Not Escape, not letters.
 //!
-//! That is not a shortcut, it is the thing that makes this safe to ship WITHOUT a suppression
-//! hook. **This mod cannot stop a key from reaching the game.** DARK SOULS II reads the keyboard
-//! through DirectInput's `GetDeviceState`, not through the window message queue, so there is no
-//! message to swallow -- suppressing a key would mean wrapping the game's own DirectInput device,
-//! which is a hook nobody here has written or tested. So instead of suppressing keys, this takes
-//! only keys the game does not want:
+//! **Every digit is watched twice.** `VK_0`-`VK_9` (`0x30`-`0x39`) and `VK_NUMPAD0`-`VK_NUMPAD9`
+//! (`0x60`-`0x69`) are different virtual keys producing the same character, and a player reaches
+//! for whichever is nearer. Enter needs no such pair: the main and numpad Enter keys share
+//! `VK_RETURN`, differing only in an extended-key bit that lives in a message's `lParam` --
+//! and [`GetAsyncKeyState`] has no `lParam`, so one entry covers both.
+//!
+//! The short list is not a shortcut, it is the thing that makes this safe to ship WITHOUT a
+//! suppression hook. **This mod cannot stop a key from reaching the game.** DARK SOULS II reads
+//! the keyboard through DirectInput's `GetDeviceState`, not through the window message queue, so
+//! there is no message to swallow -- suppressing a key would mean wrapping the game's own
+//! DirectInput device, which is a hook nobody here has written or tested. So instead of
+//! suppressing keys, this takes only keys whose second effect is harmless:
 //!
 //! * The digits are unbound in DARK SOULS II's default keyboard layout, so typing a build id
 //!   presses nothing.
-//! * **Enter and Escape are deliberately NOT read**, because the pause menu owns both -- Enter
-//!   confirms the highlighted row and Escape backs out. Reading them would mean this field and
-//!   the menu underneath it both acting on one keypress. So submission is the ROW PRESS, which is
-//!   what Enter does anyway by way of the game's own menu, and cancelling is pressing the row with
-//!   an empty field.
+//! * **Enter is read even though the pause menu may also confirm the row with it**, and the
+//!   duplicate cannot fire twice. Whichever half acts first claims `SESSION_OPEN` and takes the
+//!   typing session with it; the other then finds no session and a claim it cannot make, and does
+//!   nothing. That holds in BOTH orders, so it does not depend on knowing which arrives first --
+//!   which is worth saying plainly, because whether this game binds Enter to menu-confirm at all
+//!   has not been established here.
+//! * **Escape is still NOT read.** The menu backs out on it, and a cancel that also closes the
+//!   menu is a different behaviour from the one the row documents. Pressing the row with an empty
+//!   field remains the cancel.
 //!
 //! **The honest limit**: a player who has rebound a digit to something will fire that something
 //! while typing. Nothing here can prevent that, and pretending otherwise is worse than saying it.
@@ -50,13 +60,22 @@ unsafe extern "system" {
 /// `VK_BACK`, which is also the `WM_CHAR` unit for it -- so it needs no translation.
 const VK_BACK: i32 = 0x08;
 
+/// `VK_RETURN`, which is also its own `WM_CHAR` unit, and which BOTH Enter keys produce.
+///
+/// The numpad's Enter is not a separate virtual key. It is distinguished from the main one only by
+/// the extended-key bit in a keyboard message's `lParam`, and [`GetAsyncKeyState`] takes a virtual
+/// key and no `lParam` -- so watching this one value covers both, and there is no numpad twin to
+/// add here the way there is for the digits.
+const VK_RETURN: i32 = 0x0D;
+
 /// The keys this reads, paired with the `WM_CHAR` unit each produces.
 ///
 /// Digits appear twice because `VK_0`-`VK_9` (`0x30`-`0x39`) and `VK_NUMPAD0`-`VK_NUMPAD9`
 /// (`0x60`-`0x69`) are different virtual keys for the same character, and a player typing a number
 /// reaches for whichever is nearer.
-const WATCHED: [(i32, u16); 21] = [
+const WATCHED: [(i32, u16); 22] = [
     (VK_BACK, VK_BACK as u16),
+    (VK_RETURN, VK_RETURN as u16),
     (0x30, b'0' as u16),
     (0x31, b'1' as u16),
     (0x32, b'2' as u16),
