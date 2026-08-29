@@ -355,18 +355,18 @@ fn equip_everything(build: &ds2_build_import_core::Build) {
             over_budget += 1;
             continue;
         }
-        let item_id = match ds2_build_import_core::id_for(&slot.name) {
-            Ok(id) => id,
-            // A name several ids carry: the grant took the lowest, so the equip must too or it
-            // would look for an entry that was never created.
-            Err(ds2_build_import_core::ItemError::Ambiguous { ref ids, .. }) => {
-                match ids.iter().copied().min() {
-                    Some(id) => id,
-                    None => continue,
-                }
-            }
+        // EVERY ID THE NAME COULD MEAN, lowest first -- the lowest is what the grant used. The
+        // rest are there because the game may store an item under a different id from the one it
+        // was granted as; `Estus Flask` did exactly that. See `game::EquipRequest::item_ids`.
+        let mut candidates = match ds2_build_import_core::id_for(&slot.name) {
+            Ok(id) => vec![id],
+            Err(ds2_build_import_core::ItemError::Ambiguous { ref ids, .. }) => ids.clone(),
             Err(_) => continue,
         };
+        candidates.sort_unstable();
+        if candidates.is_empty() {
+            continue;
+        }
         let flat = flat_slot(slot.kind, slot.position);
         let Some(internal) = ds2_rva::ITEM_SLOT_FLAT_TO_INTERNAL
             .get(flat)
@@ -385,7 +385,7 @@ fn equip_everything(build: &ds2_build_import_core::Build) {
         match unsafe {
             crate::game::equip(crate::game::EquipRequest {
                 internal_slot: internal as u32,
-                item_id,
+                item_ids: &candidates,
             })
         } {
             // THE READ-BACK IS THE ONLY EVIDENCE. This function returns nothing and fails silently

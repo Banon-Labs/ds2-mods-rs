@@ -619,15 +619,23 @@ mod tests {
 /// [`ds2_rva::ITEM_SLOT_FLAT_TO_INTERNAL`]. Building one of these from a flat index by hand is the
 /// mistake that puts every weapon in the wrong hand.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) struct EquipRequest {
+pub(crate) struct EquipRequest<'a> {
     pub(crate) internal_slot: u32,
-    pub(crate) item_id: i32,
+    /// **Every id the build's name could mean**, most-preferred first.
+    ///
+    /// Usually one. It is a list because a name the catalogue gives several ids to is granted as
+    /// one of them and may be STORED as another: `Estus Flask` names three ids, the grant took the
+    /// lowest, and the entry that appeared in the bag matched none of them -- so an equip that
+    /// searched only for the id it granted found nothing and reported the flask missing from an
+    /// inventory it was sitting in. The build said "Estus Flask"; any Estus Flask answers it.
+    pub(crate) item_ids: &'a [i32],
 }
 
 /// What one equip actually did, read back rather than assumed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct EquipOutcome {
     pub(crate) internal_slot: u32,
+    /// The id actually put in the slot, from the candidates offered.
     pub(crate) wanted: i32,
     /// The item id the slot holds afterwards, or `None` if the slot is empty.
     pub(crate) landed: Option<i32>,
@@ -784,7 +792,7 @@ fn flat_slot_for(internal: u32) -> Option<i32> {
 /// # Safety
 ///
 /// Calls into the game. **Game thread only.** The prologue is byte-checked first.
-pub(crate) unsafe fn equip(request: EquipRequest) -> Result<EquipOutcome, GameError> {
+pub(crate) unsafe fn equip(request: EquipRequest<'_>) -> Result<EquipOutcome, GameError> {
     let inventory = item_inventory()?;
     let bag = bag_list()?;
     let site = game_rva(ds2_rva::ITEM_SET_EQUIP).map_err(|_| GameError::Unresolved)?;
@@ -795,7 +803,12 @@ pub(crate) unsafe fn equip(request: EquipRequest) -> Result<EquipOutcome, GameEr
     {
         return Err(GameError::PrologueMismatch);
     }
-    let entry = entry_for_item(bag, request.item_id).ok_or(GameError::NotInInventory)?;
+    // The first candidate that is actually in the bag. See `EquipRequest::item_ids`.
+    let (item_id, entry) = request
+        .item_ids
+        .iter()
+        .find_map(|id| entry_for_item(bag, *id).map(|entry| (*id, entry)))
+        .ok_or(GameError::NotInInventory)?;
 
     // SAFETY: the prologue matched, and the signature is the one the disassembled thunk implements
     // -- the inventory in RCX, an internal slot in EDX, an entry pointer in R8, no return. `entry`
@@ -814,7 +827,7 @@ pub(crate) unsafe fn equip(request: EquipRequest) -> Result<EquipOutcome, GameEr
     };
     Ok(EquipOutcome {
         internal_slot: request.internal_slot,
-        wanted: request.item_id,
+        wanted: item_id,
         landed,
     })
 }
