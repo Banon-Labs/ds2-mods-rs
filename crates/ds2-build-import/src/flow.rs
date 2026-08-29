@@ -294,6 +294,67 @@ fn apply(build: &ds2_build_import_core::Build) {
             say("Could not grant the items");
         }
     }
+
+    report_what_was_dropped(build);
+}
+
+/// Say out loud which parts of the build this did NOT apply.
+///
+/// # A row that silently does three quarters of the job
+///
+/// A build carries a covenant, a hand grip, and an arrangement of everything into slots -- worn
+/// armour, held weapons, attuned spells, a hotbar. None of that is applied: the items land in the
+/// inventory and the player puts them on. The game's own equip path has not been identified, and
+/// building an equipment entry by hand is exactly what this crate refuses to do.
+///
+/// Nothing in the log said so. A player reading "granted 17/17 items" would reasonably conclude the
+/// build had been imported, and then wonder why their character was naked and in no covenant. What
+/// a tool does not do is part of what it did, and the only place to say it is here.
+///
+/// **Delete this function when equipping lands.** It exists to name a gap, and it is a bug for it
+/// to outlive the gap.
+fn report_what_was_dropped(build: &ds2_build_import_core::Build) {
+    let mut dropped: Vec<String> = Vec::new();
+
+    // The covenant, only when the build actually names one -- `No_Covenant` is not a gap.
+    if !build.covenant.is_empty()
+        && !ds2_build_import_core::items::is_empty_slot(&build.covenant)
+        && !build.covenant.eq_ignore_ascii_case("No_Covenant")
+    {
+        dropped.push(format!("covenant {}", build.covenant));
+    }
+
+    // The arrangement. Counted from the build rather than asserted, so the numbers are the ones
+    // this particular build wanted.
+    let filled = |slots: &[String]| -> usize {
+        slots
+            .iter()
+            .filter(|name| !ds2_build_import_core::items::is_empty_slot(name))
+            .count()
+    };
+    // Weapons arrive as (name, infusion) pairs, so only the even positions are names.
+    let weapons = filled(&build.weapons.iter().step_by(2).cloned().collect::<Vec<_>>());
+    for (what, count) in [
+        ("weapons", weapons),
+        ("armour", filled(&build.armor)),
+        ("rings", filled(&build.rings)),
+        ("spells to attune", filled(&build.spells)),
+        ("hotbar items", filled(&build.items)),
+    ] {
+        if count > 0 {
+            dropped.push(format!("{count} {what}"));
+        }
+    }
+
+    if dropped.is_empty() {
+        return;
+    }
+    log_line(format_args!(
+        "{LOG_PREFIX} NOT APPLIED -- everything below is in the inventory and nothing is worn, \
+         held, attuned or joined: {}",
+        dropped.join(", ")
+    ));
+    say("Items given -- equip them yourself");
 }
 
 /// Items per call. The engine accepts up to 32; eight is the only width anyone has exercised.
