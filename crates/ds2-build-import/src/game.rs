@@ -449,9 +449,14 @@ pub(crate) fn read_souls_held(param: usize) -> Option<u32> {
 
 /// Raise soul memory to at least `floor`, through the game, and say what happened.
 ///
-/// **Never lowers.** Soul memory is monotonic in this game and the engine offers no path that
-/// reduces it; a character who has played past this level keeps their own larger number. So a floor
-/// already met is `Ok(None)` -- nothing to do -- rather than a write of the exact value.
+/// **Never lowers, by choice rather than by impossibility.** The engine DOES have a path that
+/// assigns soul memory absolutely, including downwards -- see
+/// [`ds2_rva::PLAYER_PARAM_RESTORE_FROM_RECORD`], which this crate deliberately does not call.
+///
+/// Nothing needs reducing. The invariant is `soul memory >= what the level cost`, so a build that
+/// LOWERS a level leaves it satisfied with room to spare: a lifetime total larger than the current
+/// level requires is an ordinary character who respecced or died, not an inconsistent one. A floor
+/// already met is therefore `Ok(None)` -- nothing to do -- rather than a write of the exact value.
 ///
 /// The amount added is the SHORTFALL, and it also raises souls held by the same amount, which is
 /// the game's own coupling rather than a side effect worth avoiding: a character who legitimately

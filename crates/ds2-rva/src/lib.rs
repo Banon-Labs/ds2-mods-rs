@@ -4523,8 +4523,19 @@ pub const ESTUS_FLASK_ITEM_ID: i32 = 60155000;
 /// `44 8b 81 f4 00 00 00`, and the saturation cap at `0x14038ab76` is `b8 ff c9 9a 3b`.
 ///
 /// **Add-only and saturating.** `edx` is compared unsigned, so there is no negative amount, and
-/// every counter clamps at [`PLAYER_PARAM_SOULS_CAP`]. Soul memory is monotonic by design; the game
-/// offers no path that lowers it, which is why a build importer can only ever raise it to a floor.
+/// every counter clamps at [`PLAYER_PARAM_SOULS_CAP`]. So THIS function cannot lower soul memory.
+///
+/// # The game does have a path that lowers it, and this used to say otherwise
+///
+/// The claim here was "the game offers no path that lowers it". That is false.
+/// [`PLAYER_PARAM_RESTORE_FROM_RECORD`] assigns all three counters ABSOLUTELY -- clamped at the top
+/// against [`PLAYER_PARAM_SOULS_CAP`] and not at the bottom -- and `0x14038bc49` zeroes the second
+/// soul-memory field outright. Monotonicity is a property of the paths a PLAYER can reach, not of
+/// the class.
+///
+/// A build importer still only ever raises, and now for a reason that is a choice rather than a
+/// mistaken impossibility: `soul memory >= what the level cost` is the invariant, and lowering a
+/// level keeps it satisfied. There is nothing to reduce.
 ///
 /// **It can silently do nothing, twice over.** A status flag on the player
 /// (`PlayerCtrl -> +0xB8 -> +0x4B8 & 0x0800000000000000`) makes it return before touching anything
@@ -4532,6 +4543,27 @@ pub const ESTUS_FLASK_ITEM_ID: i32 = 60155000;
 /// ([`PLAYER_PARAM_SOUL_COUNTER_GUARDS`]) that suppresses just that one. So a caller must read the
 /// counters back rather than trusting the call.
 pub const PLAYER_PARAM_ADD_SOULS: u32 = 0x0038_ab40;
+
+/// `PlayerParam::RestoreFromRecord`. RVA `0x0038ad20`. `fn(PlayerParam*, const SavedRecord*)`.
+///
+/// **The only path in the class that ASSIGNS the soul counters rather than adding to them**, and
+/// the reason [`PLAYER_PARAM_ADD_SOULS`] no longer claims lowering is impossible.
+///
+/// It is the character-load path. Read in full at `0x14038ad20`: the covenant from `record + 0x9C`
+/// into `PlayerParam + 0x1AC`, then a call to [`PLAYER_PARAM_SET_ALL_STATS`] -- the same function
+/// this repo already calls for stats -- then souls held from `record + 0x1C`, soul memory from
+/// `record + 0x20` and `record + 0x24`. Each of the three is clamped against
+/// [`PLAYER_PARAM_SOULS_CAP`] at the TOP only, guarded by its own byte from
+/// [`PLAYER_PARAM_SOUL_COUNTER_GUARDS`], and then written absolutely. A smaller number goes in
+/// unchanged.
+///
+/// # Recorded as a fact, NOT as a route to call
+///
+/// It takes a whole saved-character record and writes far more than the counters, so using it to
+/// lower soul memory would mean fabricating that record -- which is the one thing this project does
+/// not do. It is here so the next reader does not re-derive "there is no such function" from
+/// `AddSouls` alone, which is exactly how the wrong claim got written the first time.
+pub const PLAYER_PARAM_RESTORE_FROM_RECORD: u32 = 0x0038_ad20;
 
 /// The four bytes [`PLAYER_PARAM_ADD_SOULS`] must begin with. `sub rsp,0x28`, then `mov rax,[rcx]`.
 pub const PLAYER_PARAM_ADD_SOULS_PROLOGUE: [u8; 7] = [0x48, 0x83, 0xec, 0x28, 0x48, 0x8b, 0x01];
