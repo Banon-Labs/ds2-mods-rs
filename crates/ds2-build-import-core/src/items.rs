@@ -40,8 +40,11 @@ const CATALOGUE: &str = include_str!("../data/items.tsv");
 /// six slots named `""` rather than `No_Ring`, and each one was reported as `no item called ""` --
 /// six lines of alarm about a character wearing nothing in six places it was not wearing anything.
 /// The planner uses both spellings and neither is a problem.
-const EMPTY_SLOTS: [&str; 7] = [
+const EMPTY_SLOTS: [&str; 8] = [
     "",
+    // An armour slot the planner draws as wearing nothing. Found by sweeping forty real builds
+    // (`scripts/ds2-catalogue-sweep.py`), not in the game -- which is the point of that tool.
+    "naked",
     "nospell",
     "noitem",
     "noring",
@@ -59,6 +62,8 @@ pub enum ItemError {
     Unknown { name: String },
     /// More than one id carries this name. **Never resolved by picking one.**
     Ambiguous { name: String, ids: Vec<i32> },
+    /// Every id carrying this name is one the catalogue's author flagged unsafe to spawn.
+    UnsafeToSpawn { name: String, ids: Vec<i32> },
 }
 
 impl core::fmt::Display for ItemError {
@@ -69,6 +74,10 @@ impl core::fmt::Display for ItemError {
             ItemError::Ambiguous { name, ids } => {
                 write!(f, "{} items are called {name:?}: {ids:?}", ids.len())
             }
+            ItemError::UnsafeToSpawn { name, ids } => write!(
+                f,
+                "{name:?} is flagged UNSAFE to spawn in the catalogue ({ids:?})"
+            ),
         }
     }
 }
@@ -84,11 +93,37 @@ pub fn normalise(name: &str) -> String {
         .collect()
 }
 
-/// The parsed catalogue: normalised name -> every id carrying it.
-fn catalogue() -> &'static HashMap<String, Vec<i32>> {
-    static PARSED: OnceLock<HashMap<String, Vec<i32>>> = OnceLock::new();
+/// The suffix the catalogue's author appends to an item they warn against spawning.
+///
+/// Sixteen rows carry it: the gestures, the Darksign, the Crushed Eye Orb, the dragon stones, two
+/// broken weapons and one of the four Estus Flasks. They are not items in the sense the grant
+/// function means -- a gesture is not inventory -- and the author flagged them by hand.
+const UNSAFE_SUFFIX: &str = " (UNSAFE)";
+
+/// One catalogue row.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Entry {
+    id: i32,
+    /// The author marked this row [`UNSAFE_SUFFIX`].
+    unsafe_to_spawn: bool,
+}
+
+/// The parsed catalogue: normalised name -> every row carrying it.
+///
+/// # Two annotations, treated oppositely, and the difference is the whole reason this is not a
+/// plain split
+///
+/// Twenty-three names end in a parenthetical. `(UNSAFE)` is stripped before the key is built, so
+/// `Black_Separation_Crystal` FINDS its row and is refused with a reason. `(Recolor)` is left in,
+/// because all seven recoloured weapons have a real unannotated twin -- `Longsword` `1220000`
+/// beside `Longsword (Recolor)` `5600000` -- so that annotation is what tells them apart, and
+/// stripping it would turn seven clean lookups into seven coin flips.
+///
+/// Verified by reading the catalogue: every `(Recolor)` has a twin, and `Darksign` has none.
+fn catalogue() -> &'static HashMap<String, Vec<Entry>> {
+    static PARSED: OnceLock<HashMap<String, Vec<Entry>>> = OnceLock::new();
     PARSED.get_or_init(|| {
-        let mut out: HashMap<String, Vec<i32>> = HashMap::new();
+        let mut out: HashMap<String, Vec<Entry>> = HashMap::new();
         for line in CATALOGUE.lines() {
             if line.starts_with('#') || line.is_empty() {
                 continue;
@@ -99,7 +134,12 @@ fn catalogue() -> &'static HashMap<String, Vec<i32>> {
             let Ok(id) = id.trim().parse::<i32>() else {
                 continue;
             };
-            out.entry(normalise(name)).or_default().push(id);
+            let unsafe_to_spawn = name.ends_with(UNSAFE_SUFFIX);
+            let name = name.strip_suffix(UNSAFE_SUFFIX).unwrap_or(name);
+            out.entry(normalise(name)).or_default().push(Entry {
+                id,
+                unsafe_to_spawn,
+            });
         }
         out
     })
@@ -112,19 +152,37 @@ pub fn is_empty_slot(name: &str) -> bool {
 }
 
 /// The `ItemParam` row id for a planner name.
+///
+/// A name that resolves ONLY to rows the catalogue flags unsafe is refused as
+/// [`ItemError::UnsafeToSpawn`] rather than granted. Where safe and unsafe rows share a name --
+/// `Estus Flask` has three of the first and one of the second -- the unsafe ones are dropped and
+/// the rest answer normally.
 pub fn id_for(name: &str) -> Result<i32, ItemError> {
     if is_empty_slot(name) {
         return Err(ItemError::EmptySlot);
     }
     let key = normalise(name);
-    match catalogue().get(&key).map(Vec::as_slice) {
-        None | Some([]) => Err(ItemError::Unknown {
+    let Some(entries) = catalogue().get(&key).filter(|rows| !rows.is_empty()) else {
+        return Err(ItemError::Unknown {
             name: name.to_owned(),
+        });
+    };
+    let safe: Vec<i32> = entries
+        .iter()
+        .filter(|entry| !entry.unsafe_to_spawn)
+        .map(|entry| entry.id)
+        .collect();
+    match safe.as_slice() {
+        // Every row carrying this name is flagged. Refusing NAMES THE REASON -- "no item called
+        // Black_Separation_Crystal" is false and sends the reader looking for a missing row.
+        [] => Err(ItemError::UnsafeToSpawn {
+            name: name.to_owned(),
+            ids: entries.iter().map(|entry| entry.id).collect(),
         }),
-        Some([only]) => Ok(*only),
-        Some(many) => Err(ItemError::Ambiguous {
+        [only] => Ok(*only),
+        _ => Err(ItemError::Ambiguous {
             name: name.to_owned(),
-            ids: many.to_vec(),
+            ids: safe,
         }),
     }
 }
@@ -277,28 +335,96 @@ mod tests {
         assert!(error.to_string().contains("Sword_Of_Nothing_At_All"));
     }
 
-    /// A colliding name is refused with every candidate, never silently resolved.
+    /// A name carried by several SPAWNABLE ids is refused with every candidate, never resolved.
     ///
-    /// The catalogue has eight duplicate display names. Which ones is not the point -- the point is
-    /// that picking one would be a coin flip the caller never sees.
+    /// The qualifier is load-bearing. Stripping the `(UNSAFE)` suffix creates name collisions that
+    /// did not exist before -- `Dragon Torso Stone` now names both `60406000` and the flagged
+    /// `60406010` -- and those are NOT ambiguous, because only one of them is a thing this will
+    /// ever grant. Ambiguity is about the choices actually on offer.
     #[test]
     fn a_colliding_name_refuses_and_lists_the_candidates() {
         let colliding: Vec<_> = catalogue()
             .iter()
-            .filter(|(_, ids)| ids.len() > 1)
+            .map(|(name, rows)| {
+                let spawnable = rows.iter().filter(|row| !row.unsafe_to_spawn).count();
+                (name, spawnable)
+            })
+            .filter(|(_, spawnable)| *spawnable > 1)
             .collect();
         assert!(
             !colliding.is_empty(),
             "the catalogue should have collisions"
         );
-        for (name, ids) in colliding {
+        for (name, spawnable) in colliding {
             match id_for(name) {
                 Err(ItemError::Ambiguous { ids: reported, .. }) => {
-                    assert_eq!(reported.len(), ids.len());
+                    assert_eq!(reported.len(), spawnable, "{name}");
                 }
                 other => panic!("{name} resolved to {other:?} instead of refusing"),
             }
         }
+    }
+
+    /// **AN ITEM THE CATALOGUE WARNS ABOUT IS REFUSED WITH THAT REASON, NOT AS A MISSING ROW.**
+    ///
+    /// Found by `scripts/ds2-catalogue-sweep.py`: a real build named `Black_Separation_Crystal`, and
+    /// the row exists but is spelled `Black Separation Crystal (UNSAFE)`, so the lookup missed it
+    /// and reported "no item called". That message is FALSE and sends the reader hunting for a row
+    /// that is right there. The suffix is now stripped for matching, which means the refusal has to
+    /// carry the real reason instead.
+    #[test]
+    fn an_unsafe_item_is_refused_for_being_unsafe() {
+        let error = id_for("Black_Separation_Crystal").expect_err("flagged unsafe");
+        assert!(
+            matches!(error, ItemError::UnsafeToSpawn { .. }),
+            "{error:?}"
+        );
+        assert!(error.to_string().contains("UNSAFE"), "{error}");
+        // A gesture is not an inventory item at all, and eight of them are flagged.
+        assert!(matches!(
+            id_for("Wave_Gesture"),
+            Err(ItemError::UnsafeToSpawn { .. })
+        ));
+        // And the one with no unflagged twin, which used to read as missing.
+        assert!(matches!(
+            id_for("Darksign"),
+            Err(ItemError::UnsafeToSpawn { .. })
+        ));
+    }
+
+    /// A flagged row does not poison a name that also has good ones.
+    ///
+    /// `Estus Flask` has four rows: `60155000` flagged, and three that are not. The flagged one is
+    /// dropped and the remaining three are reported as the ambiguity they are.
+    #[test]
+    fn a_flagged_row_does_not_hide_its_unflagged_namesakes() {
+        match id_for("Estus_Flask") {
+            Err(ItemError::Ambiguous { ids, .. }) => {
+                assert_eq!(ids, vec![60155010, 60155020, 60155030]);
+                assert!(!ids.contains(&60155000), "the flagged row must be dropped");
+            }
+            other => panic!("expected the three unflagged flasks, got {other:?}"),
+        }
+        // Dragon Torso Stone is the other shape: one flagged, one not, so it resolves cleanly.
+        assert_eq!(id_for("Dragon_Torso_Stone"), Ok(60406000));
+    }
+
+    /// `(Recolor)` is NOT stripped, because it is what tells seven weapons from their twins.
+    ///
+    /// All seven recoloured weapons have a real unannotated row -- `Longsword` `1220000` beside
+    /// `Longsword (Recolor)` `5600000`. Stripping that suffix the way `(UNSAFE)` is stripped would
+    /// turn seven clean lookups into seven coin flips.
+    #[test]
+    fn the_recolour_annotation_is_left_alone_because_it_disambiguates() {
+        for (plain, recolour) in [
+            ("Longsword", 1220000),
+            ("Murakumo", 5000000),
+            ("Rapier", 1500000),
+            ("Caestus", 3500000),
+        ] {
+            assert_eq!(id_for(plain), Ok(recolour), "{plain}");
+        }
+        assert_eq!(id_for("Longsword_(Recolor)"), Ok(5600000));
     }
 
     /// The infusions a build names map to the bytes the game wants.
