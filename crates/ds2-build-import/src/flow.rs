@@ -226,19 +226,25 @@ fn apply(build: &ds2_build_import_core::Build) {
     let target = ds2_build_import_core::level::soul_level(&wanted);
     let current_points: u32 = stats.iter().map(|stat| u32::from(*stat)).sum();
     let wanted_points: u32 = wanted.iter().map(|stat| u32::from(*stat)).sum();
-    if wanted_points < current_points {
+    // A BUILD BELOW THIS CHARACTER COSTS IT ITS LEVEL, AND NOTHING ELSE. This used to return,
+    // abandoning the gear, the spells and the covenant as well -- and none of those care what
+    // level anyone is. One inapplicable part of a build is not grounds for dropping the rest.
+    let levellable = wanted_points >= current_points;
+    if levellable {
         log_line(format_args!(
-            "{LOG_PREFIX} the build is BELOW this character: {wanted_points} points against \
-             {current_points}. Levels cannot be given back, so nothing is changed."
+            "{LOG_PREFIX} build {} is level {target} (from {level}, +{} points)",
+            build.id,
+            wanted_points - current_points
         ));
-        say("That build is lower than you");
-        return;
+    } else {
+        log_line(format_args!(
+            "{LOG_PREFIX} build {} is level {target} and this character is {level} \
+             ({wanted_points} points against {current_points}). Levels cannot be given back, so \
+             the stats are LEFT ALONE -- the gear and the covenant are applied anyway.",
+            build.id
+        ));
+        say("Lower build -- gear only");
     }
-    log_line(format_args!(
-        "{LOG_PREFIX} build {} is level {target} (from {level}, +{} points)",
-        build.id,
-        wanted_points - current_points
-    ));
     // The character's own level should already equal what its own stats imply. Saying so when it
     // does not costs one line and names a save that something else has edited.
     let implied = ds2_build_import_core::level::soul_level(&stats);
@@ -249,49 +255,56 @@ fn apply(build: &ds2_build_import_core::Build) {
         ));
     }
 
-    // SOUL MEMORY FIRST. This is the user's rule and the whole reason `LevelChange` exists: there is
-    // no way to hold a level here without having computed the soul memory for it.
-    match crate::game::soul_costs() {
-        Ok(costs) => match ds2_build_import_core::LevelChange::to_level(target, &costs) {
-            Ok(change) => raise_soul_memory(param, change),
+    if levellable {
+        // SOUL MEMORY FIRST. This is the user's rule and the whole reason `LevelChange` exists:
+        // there is no way to hold a level here without having computed the soul memory for it.
+        match crate::game::soul_costs() {
+            Ok(costs) => match ds2_build_import_core::LevelChange::to_level(target, &costs) {
+                Ok(change) => raise_soul_memory(param, change),
+                Err(error) => log_line(format_args!(
+                    "{LOG_PREFIX} cannot compute soul memory for level {target}: {error}"
+                )),
+            },
             Err(error) => log_line(format_args!(
-                "{LOG_PREFIX} cannot compute soul memory for level {target}: {error}"
+                "{LOG_PREFIX} no level costs, so no soul memory: {error}"
             )),
-        },
-        Err(error) => log_line(format_args!(
-            "{LOG_PREFIX} no level costs, so no soul memory: {error}"
-        )),
-    }
+        }
 
-    // THE STATS, AND THEREFORE THE LEVEL -- SECOND, after the soul memory that supports them.
-    // That order is the user's rule and it is now load-bearing rather than ceremonial: the call
-    // below moves the character to level 150 in one frame, and a level whose soul memory has not
-    // been raised first is a character DS2 will match against the wrong opponents.
-    set_stats(param, &wanted, target);
+        // THE STATS, AND THEREFORE THE LEVEL -- SECOND, after the soul memory that supports them.
+        // That order is the user's rule and it is load-bearing rather than ceremonial: the call
+        // below moves the character to level 150 in one frame, and a level whose soul memory has
+        // not been raised first is a character DS2 will match against the wrong opponents.
+        set_stats(param, &wanted, target);
+    }
 
     // THE ITEMS, THROUGH THE GAME'S OWN FUNCTION.
     let spawns = crate::build_items(build);
+    // AN EMPTY GRANT LIST IS NOT AN EMPTY JOB, and treating it as one cost a whole run. Once the
+    // grant started skipping items the character already holds, a well-stocked character produced
+    // no spawns at all -- and this returned early, so nothing was equipped and no covenant was
+    // joined. "Nothing to give you" and "nothing to do for you" are different sentences.
     if spawns.is_empty() {
         log_line(format_args!(
-            "{LOG_PREFIX} the build named no grantable items"
+            "{LOG_PREFIX} nothing to grant -- the character already holds everything build {} \
+             names, or none of it resolved",
+            build.id
         ));
-        say("Nothing to grant");
-        return;
-    }
-    // SAFETY: the game thread, from the pause menu's own per-frame update, with a character loaded
-    // -- `player_param` above returned non-null. The call site's prologue is re-checked inside.
-    match unsafe { crate::game::give_items(&spawns, ITEM_BATCH) } {
-        Ok(granted) => {
-            log_line(format_args!(
-                "{LOG_PREFIX} granted {granted}/{} items for build {}",
-                spawns.len(),
-                build.id
-            ));
-            say(&format!("Gave {granted} items"));
-        }
-        Err(error) => {
-            log_line(format_args!("{LOG_PREFIX} grant failed: {error}"));
-            say("Could not grant the items");
+    } else {
+        // SAFETY: the game thread, from the pause menu's own per-frame update, with a character
+        // loaded -- `player_param` above returned non-null. The prologue is re-checked inside.
+        match unsafe { crate::game::give_items(&spawns, ITEM_BATCH) } {
+            Ok(granted) => {
+                log_line(format_args!(
+                    "{LOG_PREFIX} granted {granted}/{} items for build {}",
+                    spawns.len(),
+                    build.id
+                ));
+                say(&format!("Gave {granted} items"));
+            }
+            Err(error) => {
+                log_line(format_args!("{LOG_PREFIX} grant failed: {error}"));
+                say("Could not grant the items");
+            }
         }
     }
 
