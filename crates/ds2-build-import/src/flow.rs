@@ -425,14 +425,37 @@ fn equip_everything(build: &ds2_build_import_core::Build) {
         }
     };
 
+    // SAY THE NUMBER. The whole spell path turns on this one byte and it used to appear in the log
+    // only when something was dropped for exceeding it -- so a run where every spell was refused
+    // ANYWAY printed no budget at all, and "the recalc never ran", "it ran and answered two" and
+    // "the budget was fine and something else refused" were indistinguishable afterwards.
+    log_line(format_args!(
+        "{LOG_PREFIX} attunement gives {capacity} slot(s)"
+    ));
+
     let mut done = 0usize;
     let mut refused: Vec<String> = Vec::new();
     let mut over_budget = 0usize;
 
     for slot in &planned {
-        if slot.kind == SlotKind::Spell && slot.position >= usize::from(capacity) {
-            over_budget += 1;
-            continue;
+        if slot.kind == SlotKind::Spell {
+            // READ THE BUDGET AGAIN, IMMEDIATELY BEFORE EACH SPELL, because the value above is a
+            // snapshot taken before a single item was equipped -- and the rings go on first.
+            //
+            // The game's own gate is `internal_slot - 28 < [bag + 0x259EC]`, at `0x1401b3e69`, and
+            // over it the equip UNEQUIPS the slot rather than refusing. So a budget that shrinks
+            // mid-run is not a missed spell, it is a silently emptied one, and the caller's cached
+            // copy cannot see it. Cheap enough to reread every time: one byte behind two hops.
+            let live = crate::game::attunement_slots().unwrap_or(capacity);
+            if live != capacity {
+                log_line(format_args!(
+                    "{LOG_PREFIX} attunement budget moved {capacity} -> {live} since the                      recalculation -- something equipped since then changed it"
+                ));
+            }
+            if slot.position >= usize::from(live) {
+                over_budget += 1;
+                continue;
+            }
         }
         // EVERY ID THE NAME COULD MEAN, lowest first -- the lowest is what the grant used. The
         // rest are there because the game may store an item under a different id from the one it
@@ -484,11 +507,19 @@ fn equip_everything(build: &ds2_build_import_core::Build) {
                     outcome.wanted
                 ));
             }
+            // ONE SLOT, ONE NAME. This used to print the raw position where the success line
+            // prints `position_name`, so the same slot appeared as "attunement 2" when it worked
+            // and "spell 1" when it did not -- and a log that names one thing two ways reads as a
+            // contradiction. It cost a wrong reading of a real bug.
+            // NAME THE ID, because a refusal list that says a name twice is ambiguous between two
+            // very different bugs: a build that named one spell for several slots, and a slot that
+            // refused for its own reasons. Equipping is a MOVE, and every position resolving to
+            // the same inventory entry means each placement empties the one before it.
             Ok(outcome) => refused.push(format!(
-                "{} into {} {} (slot holds {:?})",
+                "{} (id={}) into {} (slot holds {:?})",
                 slot.name,
-                slot.kind.describe(),
-                slot.position,
+                outcome.wanted,
+                slot.kind.position_name(slot.position),
                 outcome.landed
             )),
             Err(error) => refused.push(format!("{} ({error})", slot.name)),
