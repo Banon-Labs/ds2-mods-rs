@@ -106,29 +106,79 @@ fn apply(build: &ds2_build_import_core::Build) {
             return;
         }
     };
-    if let (Some(stats), Some(level), Some(memory)) = (
+    let (Some(stats), Some(level), Some(memory)) = (
         crate::game::read_stats(param),
         crate::game::read_soul_level(param),
         crate::game::read_soul_memory(param),
-    ) {
-        let named: Vec<String> = ds2_rva::PLAYER_PARAM_STAT_NAMES
-            .iter()
-            .zip(stats)
-            .map(|(name, value)| format!("{name}={value}"))
-            .collect();
+    ) else {
         log_line(format_args!(
-            "{LOG_PREFIX} character now: level={level} soul-memory={memory:?} {}",
-            named.join(" ")
+            "{LOG_PREFIX} the character's stats could not be read"
         ));
+        say("Could not read the character");
+        return;
+    };
+    let named: Vec<String> = ds2_rva::PLAYER_PARAM_STAT_NAMES
+        .iter()
+        .zip(stats)
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect();
+    log_line(format_args!(
+        "{LOG_PREFIX} character now: level={level} soul-memory={memory:?} {}",
+        named.join(" ")
+    ));
+
+    // THE FREE CONSISTENCY CHECK. The stat block is stored twice and every legitimate path writes
+    // both, so a disagreement means something has poked this character by hand. Reported rather
+    // than acted on -- it is evidence about the save, not a reason to refuse.
+    match crate::game::stat_mirror_agrees(param) {
+        Some(true) => {}
+        Some(false) => log_line(format_args!(
+            "{LOG_PREFIX} WARNING: the stat block and its mirror at +{:#x} DISAGREE -- something \
+             has written this character's stats directly",
+            ds2_rva::PLAYER_PARAM_STAT_MIRROR_OFFSET
+        )),
+        None => log_line(format_args!(
+            "{LOG_PREFIX} could not compare the stat mirror"
+        )),
     }
 
-    // WHAT THE BUILD WOULD COST, from the game's OWN loaded params rather than a shipped table.
+    // THE LEVEL THE BUILD IMPLIES, without needing the class's starting spread. A DS2 level is one
+    // point in one stat, so the DIFFERENCE in points is the difference in levels -- and the current
+    // level is known. That sidesteps a whole table of per-class base stats for a subtraction.
+    let current_points: u32 = stats.iter().map(|stat| u32::from(*stat)).sum();
+    let wanted_points: u32 = build
+        .stats
+        .each()
+        .iter()
+        .map(|(_, value)| u32::from(*value))
+        .sum();
+    if wanted_points < current_points {
+        log_line(format_args!(
+            "{LOG_PREFIX} the build is BELOW this character: {wanted_points} points against \
+             {current_points}. Levels cannot be given back, so nothing is changed."
+        ));
+        say("That build is lower than you");
+        return;
+    }
+    let target = level + (wanted_points - current_points);
+    log_line(format_args!(
+        "{LOG_PREFIX} build {} implies level {target} (from {level}, +{} points)",
+        build.id,
+        wanted_points - current_points
+    ));
+
+    // SOUL MEMORY FIRST. This is the user's rule and the whole reason `LevelChange` exists: there is
+    // no way to hold a level here without having computed the soul memory for it.
     match crate::game::soul_costs() {
-        Ok(costs) => log_line(format_args!(
-            "{LOG_PREFIX} level costs read from the game: {} levels covered",
-            costs.covers()
+        Ok(costs) => match ds2_build_import_core::LevelChange::to_level(target, &costs) {
+            Ok(change) => raise_soul_memory(param, change),
+            Err(error) => log_line(format_args!(
+                "{LOG_PREFIX} cannot compute soul memory for level {target}: {error}"
+            )),
+        },
+        Err(error) => log_line(format_args!(
+            "{LOG_PREFIX} no level costs, so no soul memory: {error}"
         )),
-        Err(error) => log_line(format_args!("{LOG_PREFIX} no level costs: {error}")),
     }
 
     // THE ITEMS, THROUGH THE GAME'S OWN FUNCTION. Stats are NOT written here: doing that properly
@@ -164,6 +214,55 @@ fn apply(build: &ds2_build_import_core::Build) {
 
 /// Items per call. The engine accepts up to 32; eight is the only width anyone has exercised.
 const ITEM_BATCH: usize = 8;
+
+/// Raise soul memory to the floor a level implies, through the game's own `AddSouls`.
+///
+/// # Why this happens even though the LEVEL is not written
+///
+/// The level itself needs the commit path at [`ds2_rva::PLAYER_PARAM_COMMIT_STATS`], whose request
+/// object has an unknown layout -- so this crate cannot finish the job. What it CAN do is leave the
+/// character able to finish it: `AddSouls` raises souls held by the same amount it raises soul
+/// memory, so the player walks to a bonfire with exactly the souls the build's level costs and
+/// levels up through the game's own menu. The result is a character the game built.
+///
+/// That ordering is the user's rule, not an accident of what is implemented: soul memory is
+/// assigned BEFORE the level, and here the level is assigned by the player afterwards.
+///
+/// **It never lowers.** Soul memory is monotonic in this game -- the engine has no path that
+/// reduces it -- so a character already past this floor keeps their own number and nothing is
+/// called at all.
+fn raise_soul_memory(param: usize, change: ds2_build_import_core::LevelChange) {
+    let floor = change.soul_memory();
+    // SAFETY: the game thread, from the pause menu's own per-frame update, with a character loaded.
+    // The call site's prologue is re-checked inside.
+    match unsafe { crate::game::raise_soul_memory_to(param, floor) } {
+        Ok(None) => log_line(format_args!(
+            "{LOG_PREFIX} soul memory already covers level {} ({floor} needed) -- left alone",
+            change.level()
+        )),
+        Ok(Some(added)) => {
+            log_line(format_args!(
+                "{LOG_PREFIX} soul memory {:?} -> {:?}, souls held {} -> {} (guards {:?})",
+                added.memory.0, added.memory.1, added.held.0, added.held.1, added.guards
+            ));
+            if added.memory_moved() {
+                log_line(format_args!(
+                    "{LOG_PREFIX} level {} is now affordable -- level up at a bonfire",
+                    change.level()
+                ));
+            } else {
+                // The call can be vetoed by a player status flag, or per counter by a skip byte.
+                // Saying "it did nothing" beats reporting the amount we asked for.
+                log_line(format_args!(
+                    "{LOG_PREFIX} AddSouls changed NOTHING -- a status flag or a counter guard \
+                     refused it. Guards read {:?}",
+                    added.guards
+                ));
+            }
+        }
+        Err(error) => log_line(format_args!("{LOG_PREFIX} could not add souls: {error}")),
+    }
+}
 
 /// Where a link came from, for the log.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

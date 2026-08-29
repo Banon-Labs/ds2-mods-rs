@@ -235,6 +235,133 @@ pub(crate) fn soul_costs() -> Result<SoulCosts, GameError> {
     SoulCosts::new(costs).map_err(|_| GameError::NoLevelCosts)
 }
 
+/// Whether the two copies of the stat block agree.
+///
+/// `PlayerParam` stores the eleven stats at `+0x08` and AGAIN at
+/// [`ds2_rva::PLAYER_PARAM_STAT_MIRROR_OFFSET`]. Every legitimate path writes both; a tool that
+/// pokes one writes one. So a disagreement is positive evidence that something has written this
+/// character's stats by hand -- ours or somebody else's -- and it costs 22 bytes of comparison.
+///
+/// `None` when either copy could not be read.
+pub(crate) fn stat_mirror_agrees(param: usize) -> Option<bool> {
+    let mut primary = [0u8; ds2_rva::PLAYER_PARAM_STAT_BLOCK_SIZE];
+    let mut mirror = [0u8; ds2_rva::PLAYER_PARAM_STAT_BLOCK_SIZE];
+    // SAFETY: both ranges are inside the block the game's own getter returned; the reads are
+    // fault-safe and report an unmapped page rather than raising.
+    let read = unsafe {
+        ds2_game_base::mem::read_bytes(param + ds2_rva::PLAYER_PARAM_STAT_OFFSETS[0], &mut primary)
+            && ds2_game_base::mem::read_bytes(
+                param + ds2_rva::PLAYER_PARAM_STAT_MIRROR_OFFSET,
+                &mut mirror,
+            )
+    };
+    read.then(|| primary == mirror)
+}
+
+/// What one [`add_souls`] call actually changed.
+///
+/// Every field is a BEFORE/AFTER pair because the call can silently do nothing in three different
+/// ways -- a status flag on the player vetoes the whole function, and each counter has its own skip
+/// byte -- so "it returned" is not evidence that anything moved.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct SoulsAdded {
+    pub(crate) held: (u32, u32),
+    pub(crate) memory: ([u32; 2], [u32; 2]),
+    /// The per-counter skip bytes as they read at the time, for the log.
+    pub(crate) guards: [u8; 3],
+}
+
+impl SoulsAdded {
+    /// Whether both soul-memory counters moved.
+    pub(crate) fn memory_moved(&self) -> bool {
+        self.memory.1[0] > self.memory.0[0] && self.memory.1[1] > self.memory.0[1]
+    }
+}
+
+/// Raise souls through the game's own [`ds2_rva::PLAYER_PARAM_ADD_SOULS`], and check it landed.
+///
+/// **One call raises souls held AND both soul-memory counters**, and fires the change notifications
+/// a hand-written triple of stores would not. That is the whole reason to call it: soul memory is
+/// exactly the field this crate must never write by hand, because the game treats it as monotonic
+/// and derives matchmaking from it.
+///
+/// # Safety
+///
+/// Calls into the game. **Game thread only**, with a character loaded.
+pub(crate) unsafe fn add_souls(param: usize, amount: u32) -> Result<SoulsAdded, GameError> {
+    let site = game_rva(ds2_rva::PLAYER_PARAM_ADD_SOULS).map_err(|_| GameError::Unresolved)?;
+    let mut prologue = [0u8; ds2_rva::PLAYER_PARAM_ADD_SOULS_PROLOGUE.len()];
+    // SAFETY: a resolved RVA in the loaded image; the read is fault-safe.
+    if !unsafe { ds2_game_base::mem::read_bytes(site, &mut prologue) }
+        || prologue != ds2_rva::PLAYER_PARAM_ADD_SOULS_PROLOGUE
+    {
+        return Err(GameError::PrologueMismatch);
+    }
+
+    let held_before = read_souls_held(param).ok_or(GameError::NoCharacter)?;
+    let memory_before = read_soul_memory(param).ok_or(GameError::NoCharacter)?;
+    let mut guards = [0u8; 3];
+    for (slot, offset) in guards
+        .iter_mut()
+        .zip(ds2_rva::PLAYER_PARAM_SOUL_COUNTER_GUARDS)
+    {
+        // SAFETY: inside the block the getter returned.
+        *slot = unsafe { ds2_game_base::mem::safe_read_u8(param + offset) }.unwrap_or(0);
+    }
+
+    // SAFETY: the prologue matched the bytes recorded for this function, and the signature is the
+    // one the disassembly implements -- the param block in RCX, an unsigned amount in EDX, no
+    // return. It only reads `param`'s own fields and its own arguments.
+    unsafe {
+        let add: unsafe extern "system" fn(usize, u32) = core::mem::transmute(site);
+        add(param, amount);
+    }
+
+    Ok(SoulsAdded {
+        held: (held_before, read_souls_held(param).unwrap_or(held_before)),
+        memory: (
+            memory_before,
+            read_soul_memory(param).unwrap_or(memory_before),
+        ),
+        guards,
+    })
+}
+
+/// Souls currently held.
+pub(crate) fn read_souls_held(param: usize) -> Option<u32> {
+    // SAFETY: as `read_stats`.
+    unsafe { safe_read_u32(param + ds2_rva::PLAYER_PARAM_SOULS_HELD_OFFSET) }
+}
+
+/// Raise soul memory to at least `floor`, through the game, and say what happened.
+///
+/// **Never lowers.** Soul memory is monotonic in this game and the engine offers no path that
+/// reduces it; a character who has played past this level keeps their own larger number. So a floor
+/// already met is `Ok(None)` -- nothing to do -- rather than a write of the exact value.
+///
+/// The amount added is the SHORTFALL, and it also raises souls held by the same amount, which is
+/// the game's own coupling rather than a side effect worth avoiding: a character who legitimately
+/// reached that soul memory did hold those souls.
+///
+/// # Safety
+///
+/// As [`add_souls`]: game thread, character loaded.
+pub(crate) unsafe fn raise_soul_memory_to(
+    param: usize,
+    floor: u64,
+) -> Result<Option<SoulsAdded>, GameError> {
+    let memory = read_soul_memory(param).ok_or(GameError::NoCharacter)?;
+    let lowest = u64::from(memory[0].min(memory[1]));
+    if lowest >= floor {
+        return Ok(None);
+    }
+    // The counters saturate at the game's own cap, so asking for more than that is asking for a
+    // silent clamp; ask for exactly what the cap allows instead.
+    let shortfall = (floor - lowest).min(u64::from(ds2_rva::PLAYER_PARAM_SOULS_CAP)) as u32;
+    // SAFETY: forwarded to the caller.
+    unsafe { add_souls(param, shortfall) }.map(Some)
+}
+
 /// One entry of the array [`ds2_rva::ITEM_GIVE`] takes.
 ///
 /// `#[repr(C)]` and asserted to be [`ds2_rva::ITEM_SPAWN_SIZE`] at compile time, because the callee
