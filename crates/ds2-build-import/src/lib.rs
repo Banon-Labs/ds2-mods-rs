@@ -76,7 +76,8 @@ mod typed;
 /// they resolve to nothing and read as a broken catalogue.
 ///
 /// Anything that does not resolve is SKIPPED and logged rather than failing the whole build: one
-/// unrecognised name should cost the player that item, not the other thirty.
+/// unrecognised name should cost the player that item, not the other thirty. A name carried by
+/// SEVERAL ids is not in that category -- see the comment on the collision arm below.
 #[cfg(windows)]
 pub(crate) fn build_items(build: &ds2_build_import_core::Build) -> Vec<game::ItemSpawn> {
     use ds2_build_import_core::{Infusion, ItemError, id_for, is_empty_slot};
@@ -85,17 +86,46 @@ pub(crate) fn build_items(build: &ds2_build_import_core::Build) -> Vec<game::Ite
     const MAX: i32 = -1;
 
     let mut out = Vec::new();
-    let mut push = |name: &str, infusion: Infusion| match id_for(name) {
-        Ok(item_id) => out.push(game::ItemSpawn {
+    let mut push = |name: &str, infusion: Infusion| {
+        let item_id = match id_for(name) {
+            Ok(item_id) => item_id,
+            Err(ItemError::EmptySlot) => return,
+            // A NAME CARRIED BY SEVERAL IDS STILL GETS THE PLAYER AN ITEM.
+            //
+            // `id_for` refuses, and it is right to: the question "which id is this name" has no
+            // single answer. But the question the BUILD asks is different. soulsplanner only ever
+            // names a display name, and the seven collisions in the catalogue are all one item
+            // appearing more than once -- three Estus Flasks, and two complete armour sets whose
+            // ids differ by 1000 while every piece keeps its name. So refusing means a player who
+            // asked for an Estus Flask gets nothing, which is a worse answer than getting one of
+            // the three things called Estus Flask.
+            //
+            // The LOWEST id, because the two variant sets are laid out base-then-variant and the
+            // lower run is the one the game's own item lists start from. That is a reading of the
+            // catalogue, not a fact about the game -- so the line below names every candidate,
+            // which makes a wrong pick visible instead of silent.
+            Err(ItemError::Ambiguous { ref ids, .. }) => {
+                let Some(chosen) = ids.iter().copied().min() else {
+                    return;
+                };
+                log_line(format_args!(
+                    "{LOG_PREFIX} {name:?} names {} items {ids:?} -- granting {chosen}",
+                    ids.len()
+                ));
+                chosen
+            }
+            Err(error) => {
+                return log_line(format_args!("{LOG_PREFIX} skipping {name:?}: {error}"));
+            }
+        };
+        out.push(game::ItemSpawn {
             unknown: 0,
             item_id,
             durability: f32::from_bits(MAX as u32),
             quantity: 1,
             reinforce: 0,
             infusion: infusion.byte(),
-        }),
-        Err(ItemError::EmptySlot) => {}
-        Err(error) => log_line(format_args!("{LOG_PREFIX} skipping {name:?}: {error}")),
+        });
     };
 
     // Weapons: (name, infusion) pairs.

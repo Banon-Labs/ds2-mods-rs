@@ -130,8 +130,8 @@ fn read_all_stats(param: usize) -> Option<[u16; ds2_rva::PLAYER_PARAM_STAT_COUNT
 pub(crate) struct StatsSet {
     pub(crate) stats: ([u16; 9], [u16; 9]),
     pub(crate) level: (u32, u32),
-    /// Whether the mirror at `+0x1E` agrees with `+0x08` AFTERWARDS.
-    pub(crate) mirror_agrees: Option<bool>,
+    /// What the stats amount to afterwards, which is what the player's own menu shows them.
+    pub(crate) effective: Option<[u16; 9]>,
 }
 
 impl StatsSet {
@@ -193,7 +193,7 @@ pub(crate) unsafe fn set_all_stats(param: usize, wanted: &[u16; 9]) -> Result<St
     Ok(StatsSet {
         stats: (stats_before, read_stats(param).unwrap_or(stats_before)),
         level: (level_before, read_soul_level(param).unwrap_or(level_before)),
-        mirror_agrees: stat_mirror_agrees(param),
+        effective: read_effective_stats(param),
     })
 }
 
@@ -328,25 +328,29 @@ pub(crate) fn soul_costs() -> Result<SoulCosts, GameError> {
 
 /// Whether the two copies of the stat block agree.
 ///
-/// `PlayerParam` stores the eleven stats at `+0x08` and AGAIN at
-/// [`ds2_rva::PLAYER_PARAM_STAT_MIRROR_OFFSET`]. Every legitimate path writes both; a tool that
-/// pokes one writes one. So a disagreement is positive evidence that something has written this
-/// character's stats by hand -- ours or somebody else's -- and it costs 22 bytes of comparison.
+/// The character's stats as they currently AMOUNT TO -- base plus whatever modifies them.
 ///
-/// `None` when either copy could not be read.
-pub(crate) fn stat_mirror_agrees(param: usize) -> Option<bool> {
-    let mut primary = [0u8; ds2_rva::PLAYER_PARAM_STAT_BLOCK_SIZE];
-    let mut mirror = [0u8; ds2_rva::PLAYER_PARAM_STAT_BLOCK_SIZE];
-    // SAFETY: both ranges are inside the block the game's own getter returned; the reads are
-    // fault-safe and report an unmapped page rather than raising.
-    let read = unsafe {
-        ds2_game_base::mem::read_bytes(param + ds2_rva::PLAYER_PARAM_STAT_OFFSETS[0], &mut primary)
-            && ds2_game_base::mem::read_bytes(
-                param + ds2_rva::PLAYER_PARAM_STAT_MIRROR_OFFSET,
-                &mut mirror,
-            )
-    };
-    read.then(|| primary == mirror)
+/// # This replaced a "mirror check" that was reporting corruption that was not there
+///
+/// `+0x1E` was read as a second copy of the base stats, on the strength of
+/// [`ds2_rva::PLAYER_PARAM_SET_ALL_STATS`] writing each `u16` to both offsets. It does -- and then
+/// calls the recompute, which overwrites `+0x1E` with the EFFECTIVE stats. So a difference is
+/// normal and this crate spent one in-game run announcing that the player's save had been tampered
+/// with, twice, on a save that was fine.
+///
+/// Measured: a character written to `int=38 faith=38` read back `40`/`40` here, everything else
+/// exact. See [`ds2_rva::PLAYER_PARAM_EFFECTIVE_STATS_OFFSET`].
+///
+/// Returned for the LOG, so a run says what the character ended up with rather than only what was
+/// asked for. Nothing branches on it.
+pub(crate) fn read_effective_stats(param: usize) -> Option<[u16; 9]> {
+    let mut out = [0u16; 9];
+    let base = ds2_rva::PLAYER_PARAM_EFFECTIVE_STATS_OFFSET;
+    for (index, slot) in out.iter_mut().enumerate() {
+        // SAFETY: as `read_stats` -- inside the block the game's getter returned, fault-safe read.
+        *slot = unsafe { safe_read_u16(param + base + index * 2)? };
+    }
+    Some(out)
 }
 
 /// What one [`add_souls`] call actually changed.

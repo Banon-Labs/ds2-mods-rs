@@ -203,19 +203,17 @@ fn apply(build: &ds2_build_import_core::Build) {
         named.join(" ")
     ));
 
-    // THE FREE CONSISTENCY CHECK. The stat block is stored twice and every legitimate path writes
-    // both, so a disagreement means something has poked this character by hand. Reported rather
-    // than acted on -- it is evidence about the save, not a reason to refuse.
-    match crate::game::stat_mirror_agrees(param) {
-        Some(true) => {}
-        Some(false) => log_line(format_args!(
-            "{LOG_PREFIX} WARNING: the stat block and its mirror at +{:#x} DISAGREE -- something \
-             has written this character's stats directly",
-            ds2_rva::PLAYER_PARAM_STAT_MIRROR_OFFSET
-        )),
-        None => log_line(format_args!(
-            "{LOG_PREFIX} could not compare the stat mirror"
-        )),
+    // WHAT THE STATS AMOUNT TO, which is what the player's own attribute menu shows and is NOT the
+    // base block above. Logged so a run that ends in "the menu says 40 and you wrote 38" has the
+    // answer in it. This used to be a consistency check that announced tampering on any difference,
+    // which was wrong: `+0x1E` holds derived values, so a difference is the normal case.
+    if let Some(effective) = crate::game::read_effective_stats(param)
+        && effective != stats
+    {
+        log_line(format_args!(
+            "{LOG_PREFIX} effective stats differ from base: {effective:?} against {stats:?} -- \
+             something is modifying them, and the menu shows the first"
+        ));
     }
 
     // THE LEVEL THE BUILD IS. Not computed from this character at all: the game derives a soul
@@ -392,16 +390,15 @@ fn set_stats(param: usize, wanted: &[u16; 9], expected_level: u32) {
             set.level.1
         ));
     }
-    match set.mirror_agrees {
-        Some(true) => {}
-        Some(false) => log_line(format_args!(
-            "{LOG_PREFIX} the stats took but the mirror at +{:#x} DISAGREES -- only one copy was \
-             written",
-            ds2_rva::PLAYER_PARAM_STAT_MIRROR_OFFSET
-        )),
-        None => log_line(format_args!(
-            "{LOG_PREFIX} the stats took; the mirror could not be compared"
-        )),
+    if let Some(effective) = set.effective
+        && effective != *wanted
+    {
+        // NOT a failure. The attribute menu reads this block, so a player comparing it against the
+        // planner will see these numbers, and the difference is whatever is modifying them.
+        log_line(format_args!(
+            "{LOG_PREFIX} the menu will show {effective:?}, which is these stats plus whatever \
+             modifies them"
+        ));
     }
     say(&format!("Level {expected_level}"));
 }

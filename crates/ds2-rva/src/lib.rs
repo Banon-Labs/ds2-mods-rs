@@ -4047,13 +4047,17 @@ pub const PLAYER_PARAM_SOULS_CAP: u32 = 0x3b9a_c9ff;
 /// pad[3]}`, and that record repeats as an array from `+0x104`.
 pub const PLAYER_PARAM_SOUL_COUNTER_GUARDS: [usize; 3] = [0xF0, 0xF8, 0x100];
 
-/// **The stat block is stored TWICE, and the second copy is at `+0x1E`.**
+/// **The EFFECTIVE stat block: what the character's stats currently amount to.** `+0x1E`.
 ///
-/// `0x14038aca0` -- the helper the network-record loader calls first -- writes each of the eleven
-/// `u16` to two destinations. Verified bytes at `0x14038acba`:
+/// Eleven `u16`, immediately after the base block at [`PLAYER_PARAM_STAT_OFFSETS`].
+///
+/// # This was called a MIRROR, and that was wrong
+///
+/// The name came from reading only [`PLAYER_PARAM_SET_ALL_STATS`]'s opening, which writes each of
+/// the eleven `u16` to two destinations. Verified bytes at `0x14038acba`:
 ///
 /// ```text
-/// 48 89 41 08   mov [rcx+0x08],rax     ; the block ds2-rva's stat offsets describe
+/// 48 89 41 08   mov [rcx+0x08],rax     ; the base block
 /// 48 89 41 1e   mov [rcx+0x1e],rax     ; ...and the same qword again, 0x16 further on
 /// 4c 89 41 10   mov [rcx+0x10],r8
 /// 4c 89 41 26   mov [rcx+0x26],r8
@@ -4061,13 +4065,24 @@ pub const PLAYER_PARAM_SOUL_COUNTER_GUARDS: [usize; 3] = [0xF0, 0xF8, 0x100];
 /// 44 89 49 2e   mov [rcx+0x2e],r9d
 /// ```
 ///
-/// 8 + 8 + 4 + 2 bytes = eleven `u16`, written to `+0x08..0x1D` and again to `+0x1E..0x33`.
+/// Those writes are real and they do make the two ranges briefly identical. **But they are a SEED,
+/// not a copy.** The same function then calls `0x14038d6d0`, which recomputes the effective block
+/// FROM the base block and writes it back over `+0x1E`. So the two are equal only for a character
+/// with nothing modifying its stats, and reading a difference as corruption is a false alarm.
 ///
-/// **NEITHER COMMUNITY TABLE MAPS THIS.** A tool that pokes `+0x08` desynchronises a copy it does
-/// not know exists, and nothing complains. It is the sharpest argument in this file for calling the
-/// game's own functions instead of writing fields -- and it is a free consistency check: after any
-/// legitimate stat change the two ranges must be equal.
-pub const PLAYER_PARAM_STAT_MIRROR_OFFSET: usize = 0x1E;
+/// **MEASURED IN GAME, 2026-08-28.** A character written to `int=38 faith=38` displayed `40`/`40`
+/// in its own attribute menu, every other stat exact. The menu reads THIS block. Two stats carried
+/// a `+2` from somewhere, and both ranges were already unequal before anything was written --
+/// which is what makes "one of these is derived" the only reading that fits.
+///
+/// # What it is good for
+///
+/// Reading what the character's stats effectively ARE, and nothing else. It is NOT a tamper check,
+/// it is NOT a write target, and a caller that wants the levelled stats wants
+/// [`PLAYER_PARAM_STAT_OFFSETS`].
+///
+/// Neither community table maps this offset at all.
+pub const PLAYER_PARAM_EFFECTIVE_STATS_OFFSET: usize = 0x1E;
 
 /// Bytes covered by one copy of the stat block: eleven `u16`.
 pub const PLAYER_PARAM_STAT_BLOCK_SIZE: usize = 22;
@@ -4104,10 +4119,15 @@ pub const PLAYER_PARAM_COMMIT_STATS: u32 = 0x0038_b1a0;
 ///
 /// # What one call does, from the disassembly
 ///
-/// Loads all 22 bytes out of `rdx`, writes them to BOTH `+0x08` and [`PLAYER_PARAM_STAT_MIRROR_OFFSET`],
-/// fetches the character context through `PlayerCtrl` vtable slot `0x130`, calls `0x14038d6d0` to
-/// recompute the effective stats, the derived block AND the soul level, then tail-calls
-/// `0x14038be90` to reapply the HP and stamina caps to the live character.
+/// Loads all 22 bytes out of `rdx` and writes them to BOTH `+0x08` and
+/// [`PLAYER_PARAM_EFFECTIVE_STATS_OFFSET`], fetches the character context through `PlayerCtrl`
+/// vtable slot `0x130`, calls `0x14038d6d0` to recompute the effective stats, the derived block AND
+/// the soul level, then tail-calls `0x14038be90` to reapply the HP and stamina caps to the live
+/// character.
+///
+/// **The write to `+0x1E` is overwritten by that recompute** -- it is a seed, not a second copy.
+/// See [`PLAYER_PARAM_EFFECTIVE_STATS_OFFSET`], which was misread as a mirror for exactly this
+/// reason.
 ///
 /// **That is the entire argument for using this instead of [`PLAYER_PARAM_COMMIT_STATS`].** Both
 /// end in the same recompute; this one takes 22 bytes of plain `u16` with no invariants, and the

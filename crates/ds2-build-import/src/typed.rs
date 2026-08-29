@@ -43,6 +43,8 @@ use core::ffi::c_void;
 unsafe extern "system" {
     fn GetAsyncKeyState(key: i32) -> i16;
     fn GetForegroundWindow() -> *mut c_void;
+    fn GetWindowThreadProcessId(window: *mut c_void, process: *mut u32) -> u32;
+    fn GetCurrentProcessId() -> u32;
 }
 
 /// `VK_BACK`, which is also the `WM_CHAR` unit for it -- so it needs no translation.
@@ -83,14 +85,33 @@ const WATCHED: [(i32, u16); 21] = [
 /// the menu-row tick, and nothing else touches it.
 static mut PREVIOUS: [bool; WATCHED.len()] = [false; WATCHED.len()];
 
-/// Whether the game's window is the one the player is typing into.
+/// Whether the foreground window belongs to THIS PROCESS.
 ///
-/// A null `HWND` from the game -- before the window exists, or if the singleton moves -- reads as
-/// NOT focused, so the field goes deaf rather than eating a stranger's keystrokes.
+/// # It asks about the process, not about one window, and the first version got that wrong
+///
+/// The first version compared `GetForegroundWindow()` against the `HWND` in the game's own
+/// singleton and read keys only when they were equal. That is an equality nobody checked: a
+/// process has many windows, the one the singleton records is not necessarily the one the
+/// compositor considers foreground, and under Proton there is a Wine frame in between.
+///
+/// **That equality turned out to HOLD** -- typing worked in the game on the first run. This is not
+/// a bug fix, it is the removal of an assumption that happened to be true: nothing had checked it,
+/// and a gate that is false on every frame makes the field silently deaf.
+///
+/// The question the field actually needs answered is "is the player typing at US" and the process
+/// is the right granularity for it. Any window of ours having focus means the keystroke was aimed
+/// here; which window it was is not the field's business.
 fn game_has_focus() -> bool {
-    let window = crate::clipboard::game_window();
     // SAFETY: a plain Win32 call with no arguments.
-    !window.is_null() && unsafe { GetForegroundWindow() } == window
+    let foreground = unsafe { GetForegroundWindow() };
+    if foreground.is_null() {
+        return false;
+    }
+    let mut owner = 0u32;
+    // SAFETY: `foreground` is a window handle Win32 just returned, and `owner` is a live `u32`.
+    unsafe { GetWindowThreadProcessId(foreground, &raw mut owner) };
+    // SAFETY: a plain Win32 call with no arguments.
+    owner != 0 && owner == unsafe { GetCurrentProcessId() }
 }
 
 /// The `WM_CHAR` units for keys pressed since the last poll, in [`WATCHED`] order.

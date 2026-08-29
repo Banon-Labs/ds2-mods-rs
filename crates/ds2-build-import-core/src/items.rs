@@ -35,7 +35,13 @@ const CATALOGUE: &str = include_str!("../data/items.tsv");
 /// Names the planner uses for an empty slot rather than omitting it.
 ///
 /// Compared after [`normalise`], so the underscores here are decoration.
-const EMPTY_SLOTS: [&str; 6] = [
+///
+/// **The EMPTY STRING is in here**, and it is the one that was missing. A real build came back with
+/// six slots named `""` rather than `No_Ring`, and each one was reported as `no item called ""` --
+/// six lines of alarm about a character wearing nothing in six places it was not wearing anything.
+/// The planner uses both spellings and neither is a problem.
+const EMPTY_SLOTS: [&str; 7] = [
+    "",
     "nospell",
     "noitem",
     "noring",
@@ -227,6 +233,19 @@ mod tests {
     fn punctuation_does_not_have_to_agree() {
         assert_eq!(normalise("Caithas_Chime"), normalise("Caitha's Chime"));
         assert_eq!(id_for("Caithas_Chime"), id_for("Caitha's Chime"));
+    }
+
+    /// **A SLOT NAMED BY NOTHING IS AN EMPTY SLOT.** Real builds use `""` as well as `No_Ring`.
+    ///
+    /// Six of these came back from build 1 and each was announced as a missing item, which reads as
+    /// a broken catalogue rather than as an empty hand -- the same failure `Bare_Fists` was already
+    /// guarded against, in a spelling nobody had seen yet.
+    #[test]
+    fn a_slot_named_by_nothing_is_empty() {
+        for nothing in ["", " ", "_", "   _  "] {
+            assert!(is_empty_slot(nothing), "{nothing:?}");
+            assert_eq!(id_for(nothing), Err(ItemError::EmptySlot), "{nothing:?}");
+        }
     }
 
     /// An empty slot is refused as an empty slot, not as a missing item.
