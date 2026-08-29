@@ -26,6 +26,8 @@ use ds2_build_import_core::{
     BUILD_HOST, BUILD_URL_PREFIX, UrlRejection, build_id_from_url, build_path,
 };
 
+use std::sync::Mutex;
+
 use crate::steam::{KeyboardClaim, SteamError, SteamUtils};
 use crate::{LOG_PREFIX, log_line};
 
@@ -63,6 +65,105 @@ unsafe fn say_now(text: &str) {
 fn say(text: &str) {
     ds2_menu_row::set_row_caption(crate::row_id(), text);
 }
+
+/// A build the worker has fetched, waiting for the game thread to act on it.
+///
+/// **The handoff exists because the two halves cannot be on the same thread.** The fetch blocks on
+/// a TLS handshake and must not be near the game thread; the grant calls INTO the game and must not
+/// be anywhere else. `ds2-menu-row`'s per-frame tick is the only place that is both recurring and
+/// correctly threaded, so the worker leaves the build here and the tick collects it.
+static PENDING: Mutex<Option<ds2_build_import_core::Build>> = Mutex::new(None);
+
+/// Hand a fetched build to the game thread.
+fn hand_over(build: ds2_build_import_core::Build) {
+    if let Ok(mut pending) = PENDING.lock() {
+        *pending = Some(build);
+    }
+}
+
+/// Apply whatever the worker left. **Runs on the game thread**, once per frame, from the tick.
+///
+/// Registered by [`crate::install::register`]; it does nothing on the overwhelming majority of
+/// frames, because the mailbox is almost always empty.
+pub(crate) fn apply_tick() {
+    let Some(build) = PENDING.lock().ok().and_then(|mut pending| pending.take()) else {
+        return;
+    };
+    apply(&build);
+}
+
+/// Put a build on the live character, as far as this crate honestly can.
+fn apply(build: &ds2_build_import_core::Build) {
+    // WHAT THE CHARACTER IS NOW, read before anything changes, so the log can say what happened
+    // rather than what was asked for.
+    let param = match crate::game::player_param() {
+        Ok(param) => param,
+        Err(error) => {
+            log_line(format_args!(
+                "{LOG_PREFIX} cannot read the character: {error}"
+            ));
+            say("Could not read the character");
+            return;
+        }
+    };
+    if let (Some(stats), Some(level), Some(memory)) = (
+        crate::game::read_stats(param),
+        crate::game::read_soul_level(param),
+        crate::game::read_soul_memory(param),
+    ) {
+        let named: Vec<String> = ds2_rva::PLAYER_PARAM_STAT_NAMES
+            .iter()
+            .zip(stats)
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect();
+        log_line(format_args!(
+            "{LOG_PREFIX} character now: level={level} soul-memory={memory:?} {}",
+            named.join(" ")
+        ));
+    }
+
+    // WHAT THE BUILD WOULD COST, from the game's OWN loaded params rather than a shipped table.
+    match crate::game::soul_costs() {
+        Ok(costs) => log_line(format_args!(
+            "{LOG_PREFIX} level costs read from the game: {} levels covered",
+            costs.covers()
+        )),
+        Err(error) => log_line(format_args!("{LOG_PREFIX} no level costs: {error}")),
+    }
+
+    // THE ITEMS, THROUGH THE GAME'S OWN FUNCTION. Stats are NOT written here: doing that properly
+    // means calling the game's level-up path, and that function has not been found yet. Poking the
+    // stat block directly would write soul level and the nine attributes while leaving everything
+    // the level-up path also maintains untouched, which is the class of bug this crate exists to
+    // avoid.
+    let spawns = crate::build_items(build);
+    if spawns.is_empty() {
+        log_line(format_args!(
+            "{LOG_PREFIX} the build named no grantable items"
+        ));
+        say("Nothing to grant");
+        return;
+    }
+    // SAFETY: the game thread, from the pause menu's own per-frame update, with a character loaded
+    // -- `player_param` above returned non-null. The call site's prologue is re-checked inside.
+    match unsafe { crate::game::give_items(&spawns, ITEM_BATCH) } {
+        Ok(granted) => {
+            log_line(format_args!(
+                "{LOG_PREFIX} granted {granted}/{} items for build {}",
+                spawns.len(),
+                build.id
+            ));
+            say(&format!("Gave {granted} items"));
+        }
+        Err(error) => {
+            log_line(format_args!("{LOG_PREFIX} grant failed: {error}"));
+            say("Could not grant the items");
+        }
+    }
+}
+
+/// Items per call. The engine accepts up to 32; eight is the only width anyone has exercised.
+const ITEM_BATCH: usize = 8;
 
 /// Where a link came from, for the log.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -263,6 +364,8 @@ fn load(text: &str, source: Source) {
                 Ok(path) => {
                     log_line(format_args!("{LOG_PREFIX} wrote {}", path.display()));
                     say(&format!("{}: {}", build.id, build.class));
+                    // The game thread takes it from here -- see `apply_tick`.
+                    hand_over(build);
                 }
                 Err(error) => {
                     log_line(format_args!(

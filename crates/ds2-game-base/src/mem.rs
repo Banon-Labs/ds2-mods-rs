@@ -179,6 +179,44 @@ pub unsafe fn safe_read_i32(addr: usize) -> Option<i32> {
     }
 }
 
+/// Fault-tolerant u32 read (None on unmapped memory).
+///
+/// # Safety
+///
+/// `addr` has NO precondition: any value, including 0, a freed pointer, or a wholly
+/// unmapped address, is safe to pass. The read goes through `ReadProcessMemory`, which
+/// validates the range in the kernel and returns `FALSE` rather than raising an access
+/// violation, so this function cannot fault on a bad address -- that fault-tolerance is
+/// the entire reason it exists.
+///
+/// What the CALLER owns is the meaning of the bytes that come back. A successful read
+/// only proves those bytes were mapped at that instant; it does not prove they are a
+/// live object of the expected type, and the game may free or overwrite the region on
+/// another thread immediately afterwards. Treat the value as a sample, not a borrow.
+///
+/// The `unsafe` marker is therefore about interpretation, not memory validity. It is
+/// retained rather than removed so the signature matches the same function in
+/// `../er-mods-rs`: a call site ported from there keeps its `unsafe` block, and the block
+/// keeps meaning "I own what these bytes are".
+pub unsafe fn safe_read_u32(addr: usize) -> Option<u32> {
+    let mut value: u32 = 0;
+    let mut read: usize = ZERO;
+    let ok = unsafe {
+        ReadProcessMemory(
+            CURRENT_PROCESS_PSEUDO_HANDLE,
+            addr as *const c_void,
+            &mut value as *mut u32 as *mut c_void,
+            core::mem::size_of::<u32>(),
+            &mut read,
+        )
+    };
+    if ok != RPM_FALSE && read == core::mem::size_of::<u32>() {
+        Some(value)
+    } else {
+        None
+    }
+}
+
 /// Fault-tolerant f32 read (None on unmapped memory).
 ///
 /// # Safety

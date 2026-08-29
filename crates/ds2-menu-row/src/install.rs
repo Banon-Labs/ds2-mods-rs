@@ -15,6 +15,26 @@ static LOGGER: AtomicUsize = AtomicUsize::new(0);
 /// Signature of the sink. Matches the loader's own logging entry point.
 pub type LogFn = fn(std::fmt::Arguments<'_>);
 
+/// Run `callback` on the GAME THREAD, once per frame, while the pause menu is up.
+///
+/// **This is how a row does anything the game itself has to do.** A row's `on_confirm` is on the
+/// game thread but happens once; work that answers later -- a fetch, a parse, anything on a worker
+/// -- has nowhere to land, and calling into the game from a worker races the renderer. A tick is
+/// both recurring and correctly-threaded, so the pattern is: the worker leaves a result somewhere,
+/// and the tick picks it up and acts on it.
+///
+/// Ticks run BEFORE captions are pushed, so a tick that calls
+/// [`set_row_caption`] is on screen the same frame.
+///
+/// It only fires while the pause menu's group is updating, which is exactly when calling into the
+/// menu is safe and exactly when nobody is watching otherwise. A `fn()` rather than a closure,
+/// because this crate stores it forever and will not own a caller's captured state.
+///
+/// Returns whether it was registered.
+pub fn add_tick(callback: fn()) -> bool {
+    crate::caption::add_tick(callback)
+}
+
 /// Change what a registered row says on screen.
 ///
 /// **Safe from any thread, and nothing appears until the game thread pushes it.** The text is

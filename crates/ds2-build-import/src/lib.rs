@@ -44,9 +44,65 @@ mod clipboard;
 #[cfg(windows)]
 mod flow;
 #[cfg(windows)]
+mod game;
+#[cfg(windows)]
 mod save;
 #[cfg(windows)]
 mod steam;
+
+/// Turn a build's named gear into the entries the game's grant function takes.
+///
+/// **Weapons arrive as PAIRS** -- soulsplanner emits `name, infusion, name, infusion, ...` across
+/// the six weapon slots -- so they are walked two at a time and everything else one at a time.
+/// Reading that list as a flat run of names puts `Dark` and `Bleed` through the item lookup, where
+/// they resolve to nothing and read as a broken catalogue.
+///
+/// Anything that does not resolve is SKIPPED and logged rather than failing the whole build: one
+/// unrecognised name should cost the player that item, not the other thirty.
+#[cfg(windows)]
+pub(crate) fn build_items(build: &ds2_build_import_core::Build) -> Vec<game::ItemSpawn> {
+    use ds2_build_import_core::{Infusion, ItemError, id_for, is_empty_slot};
+
+    /// `-1` is the game's own "maximum" for durability and reinforcement.
+    const MAX: i32 = -1;
+
+    let mut out = Vec::new();
+    let mut push = |name: &str, infusion: Infusion| match id_for(name) {
+        Ok(item_id) => out.push(game::ItemSpawn {
+            unknown: 0,
+            item_id,
+            durability: f32::from_bits(MAX as u32),
+            quantity: 1,
+            reinforce: 0,
+            infusion: infusion.byte(),
+        }),
+        Err(ItemError::EmptySlot) => {}
+        Err(error) => log_line(format_args!("{LOG_PREFIX} skipping {name:?}: {error}")),
+    };
+
+    // Weapons: (name, infusion) pairs.
+    for pair in build.weapons.chunks(2) {
+        let [name, infusion] = pair else { continue };
+        if is_empty_slot(name) {
+            continue;
+        }
+        push(
+            name,
+            Infusion::from_name(infusion).unwrap_or(Infusion::None),
+        );
+    }
+    // Everything else is one name per slot, uninfused.
+    for name in build
+        .armor
+        .iter()
+        .chain(&build.rings)
+        .chain(&build.spells)
+        .chain(&build.items)
+    {
+        push(name, Infusion::None);
+    }
+    out
+}
 
 #[cfg(windows)]
 pub use install::{LogFn, register};
@@ -105,6 +161,13 @@ mod install {
         });
         if let Ok(id) = registered {
             ROW.store(id.0, Ordering::Release);
+            // THE GAME-THREAD HALF. Everything this row does that touches the game happens here,
+            // because the row's own confirm happens once and the work answers later.
+            if !ds2_menu_row::add_tick(crate::flow::apply_tick) {
+                log_line(format_args!(
+                    "{LOG_PREFIX} NO TICK -- a fetched build will be recorded but never applied"
+                ));
+            }
         }
         registered
     }

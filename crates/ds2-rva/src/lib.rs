@@ -3880,3 +3880,226 @@ pub const PLAYER_PARAM_COVENANT_OFFSET: usize = 0x1AD;
 /// `1` Warrior, `2` Knight, `4` Bandit, `6` Cleric, `7` Sorcerer, `8` Explorer, `9` Swordsman,
 /// `10` Deprived. The gaps are the game's.
 pub const PLAYER_DATA_CLASS_OFFSET: usize = 0x64;
+
+// =================================================================================================
+// THE PARAM TABLES, AT RUNTIME
+//
+// DARK SOULS II keeps its balance data in `param:/<Name>.param` tables inside the encrypted
+// `enc_regulation.bnd.dcx`. Decrypting that file is one way to read them; walking the tables the
+// GAME HAS ALREADY LOADED is a better one, and not only because it skips the decryption:
+//
+//   * it cannot drift from the build actually running, and
+//   * it reflects any param mod the player has installed, which a shipped copy of the vanilla
+//     numbers would silently contradict.
+//
+// EVERY CONSTANT BELOW IS TABLE-SOURCED. They come from the community Cheat Engine tables'
+// `ParamUtils`, which has been walking these structures for years, and no write site was traced in
+// the image. The shapes are self-consistent and the row layout is corroborated across two tables,
+// but this is a weaker provenance than the rest of this file and it says so.
+// =================================================================================================
+
+/// The hops from `GAME_MANAGER_IMP` to the pointer the master param table is measured against.
+///
+/// `[[[GameManagerImp] + 0x38] + 0x100] + 0xD8`, then the two constants below are subtracted from
+/// what that yields. The subtraction is what makes this table-sourced rather than derived: it is a
+/// measured relationship, not a field offset, and nothing in the image was found that explains it.
+pub const PARAM_ANCHOR_OFFSETS: [usize; 3] = [0x38, 0x100, 0xD8];
+
+/// The master param table starts this far BELOW the anchor. Subtracted, not added.
+pub const PARAM_TABLE_FROM_ANCHOR: usize = 0x2C44;
+/// The param index ends this far below the anchor.
+pub const PARAM_INDEX_END_FROM_ANCHOR: usize = 0x16A4;
+/// The index array begins this far into the master table.
+pub const PARAM_INDEX_START_OFFSET: usize = 0x40;
+/// Bytes per index entry.
+pub const PARAM_INDEX_STRIDE: usize = 0x18;
+/// `i32` offset of a param's data, relative to the master table.
+pub const PARAM_INDEX_DATA_OFFSET: usize = 0x10;
+/// `i32` offset of a param's name string, relative to the master table.
+pub const PARAM_INDEX_NAME_OFFSET: usize = 0x14;
+
+/// `u16` row count, inside one param table.
+pub const PARAM_ROW_COUNT_OFFSET: usize = 0x0A;
+/// Where a param's own row index begins.
+pub const PARAM_ROW_INDEX_OFFSET: usize = 0x40;
+/// Bytes per row-index entry.
+pub const PARAM_ROW_STRIDE: usize = 0x18;
+/// `u32` row id, inside a row-index entry.
+pub const PARAM_ROW_ID_OFFSET: usize = 0x00;
+/// `u32` offset of the row's data, relative to the param table.
+pub const PARAM_ROW_DATA_OFFSET: usize = 0x08;
+
+/// The param naming the souls each level costs. 852 rows, stride 12.
+///
+/// **Row id is the level being LEFT**, and that direction is verified from the game's own level-up
+/// code in both directions: the increment (`FUN_1401fb970`) pays the value stored for the level it
+/// is leaving, and the decrement (`FUN_1401fb800`) steps down from `L` and refunds `lookup(L-1)`,
+/// which is only correct under this reading. One level's error here is the whole bug.
+///
+/// **Not `LevelUpStatusCalcParam`**, which has the better name and is a nine-row menu table.
+pub const PARAM_PLAYER_LEVEL_UP_SOULS: &str = "PlayerLevelUpSoulsParam";
+
+/// Bytes per `PlayerLevelUpSoulsParam` row. `12` -- measured from consecutive row-index offsets
+/// rather than assumed, by `scripts/ds2-regulation.py`.
+pub const PLAYER_LEVEL_UP_SOULS_STRIDE: usize = 12;
+
+/// `u32` level, at the start of a `PlayerLevelUpSoulsParam` row. Mirrors the row id.
+pub const PLAYER_LEVEL_UP_SOULS_LEVEL_OFFSET: usize = 0x00;
+/// `u32` souls to go from this row's level to the next. `+0x08`.
+///
+/// The row is `{u16 level; u16 pad; i32 gradient; i32 souls}`. `gradient` is `0` in every shipped
+/// row; where it is not, the game interpolates `(wanted - rowLevel) * gradient + souls`, so a table
+/// with a nonzero gradient is not a per-level list and must not be read as one.
+pub const PLAYER_LEVEL_UP_SOULS_COST_OFFSET: usize = 0x08;
+
+// =================================================================================================
+// GRANTING AN ITEM -- the game's own function
+//
+// The mod does NOT build inventory slots. A slot the game did not build is a slot whose invariants
+// nobody maintained: the linked-list links, the handle at `+0x1C` that the discard path consumes,
+// the equip category, and the counters the UI reads. This calls what the game calls.
+// =================================================================================================
+
+/// `ItemGive`. RVA `0x001ac3d0`. `fn(inventory, *const ItemSpawn, count) -> bool`.
+///
+/// A three-instruction thunk, verified byte for byte:
+///
+/// ```text
+/// 48 8b 49 10       mov  rcx,[rcx+0x10]     ; forward the inner bag manager
+/// 45 33 c9          xor  r9d,r9d            ; 4th argument forced to 0
+/// e9 94 b0 ff ff    jmp  0x1401a7470        ; the implementation
+/// ```
+///
+/// **It returns a bool in `AL` and `false` means nothing was granted.** Neither community
+/// implementation checks it, which is part of why their failures are quiet.
+///
+/// **It depends on nothing but its arguments.** Both community implementations call it from a
+/// FRESH REMOTE THREAD (`createthread`, `executeCodeEx`) -- a thread with no registers, no frame and
+/// no relationship to any game state -- and that has worked for years. So a caller on the game's own
+/// thread, from a pause-menu confirm, is strictly better placed than the code this was learned from.
+///
+/// Not Arxan-redirected; the first byte is `0x48`.
+pub const ITEM_GIVE: u32 = 0x001a_c3d0;
+
+/// The five bytes [`ITEM_GIVE`] must begin with, or the mod refuses to call it.
+pub const ITEM_GIVE_PROLOGUE: [u8; 5] = [0x48, 0x8b, 0x49, 0x10, 0x45];
+
+/// The implementation [`ITEM_GIVE`] tail-jumps to. RVA `0x001a7470`.
+///
+/// Recorded because it exposes the fourth argument the thunk forces to zero -- INFERRED to suppress
+/// the pickup notification, from `mov r14d,r9d` and a later `test r14d,r14d / jne` that skips the
+/// notify block. Call this instead of the thunk only if a silent grant is wanted, and note it takes
+/// the INNER bag manager rather than the inventory.
+pub const ITEM_GIVE_IMPL: u32 = 0x001a_7470;
+
+/// Most items one [`ITEM_GIVE`] call accepts. `32`.
+///
+/// From the implementation's own gate at `0x1401a748e`: `lea eax,[rsi-1]; cmp eax,0x1f; ja` --
+/// verified bytes `8d 46 ff 83 f8 1f 0f 87`. **The community scripts cap at 8**, bounded by their
+/// own buffer rather than by the engine, and 8 is therefore the only width anyone has exercised.
+pub const ITEM_GIVE_MAX_PER_CALL: usize = 32;
+
+/// `GameDataManager -> ItemInventory2`. `+0x10`, reached from [`GAME_DATA_MANAGER_OFFSET`].
+///
+/// The full chain is `[[[GAME_MANAGER_IMP] + 0xA8] + 0x10]`, and every hop must be null-checked --
+/// the community scripts' `vortmov` macro emits a `test/jz` after each dereference and bails, which
+/// is the behaviour to copy rather than the shortcut to skip.
+pub const ITEM_INVENTORY_OFFSET: usize = 0x10;
+
+/// Bytes in one `ItemSpawn`, the element [`ITEM_GIVE`] takes an array of.
+///
+/// Layout, corroborated by the two community writers and by the callee's own `add rbx,0x10` stride:
+/// `+0x00` unknown `u32` (both writers store `0`), `+0x04` `i32` item id, `+0x08` `f32` durability,
+/// `+0x0C` `u16` quantity, `+0x0E` `u8` reinforce, `+0x0F` `u8` infusion.
+pub const ITEM_SPAWN_SIZE: usize = 0x10;
+
+/// `PlayerParam::AddSouls`. RVA `0x0038ab40`. `fn(PlayerParam*, u32 amount)`.
+///
+/// **This is how soul memory is raised through the game rather than written.** One call updates
+/// THREE counters together -- souls held ([`PLAYER_PARAM_SOULS_HELD_OFFSET`]) and both soul-memory
+/// fields ([`PLAYER_PARAM_SOUL_MEMORY_OFFSETS`]) -- and then fires the change notifications
+/// `0x11`, `0x14`, `0x12`. Doing it by hand means three writes and no notification.
+///
+/// Verified: prologue `48 83 ec 28`, the soul-memory read at `0x14038abc8` is
+/// `44 8b 81 f4 00 00 00`, and the saturation cap at `0x14038ab76` is `b8 ff c9 9a 3b`.
+///
+/// **Add-only and saturating.** `edx` is compared unsigned, so there is no negative amount, and
+/// every counter clamps at [`PLAYER_PARAM_SOULS_CAP`]. Soul memory is monotonic by design; the game
+/// offers no path that lowers it, which is why a build importer can only ever raise it to a floor.
+///
+/// **It can silently do nothing, twice over.** A status flag on the player
+/// (`PlayerCtrl -> +0xB8 -> +0x4B8 & 0x0800000000000000`) makes it return before touching anything
+/// AND before notifying; and each counter has its own skip byte
+/// ([`PLAYER_PARAM_SOUL_COUNTER_GUARDS`]) that suppresses just that one. So a caller must read the
+/// counters back rather than trusting the call.
+pub const PLAYER_PARAM_ADD_SOULS: u32 = 0x0038_ab40;
+
+/// The four bytes [`PLAYER_PARAM_ADD_SOULS`] must begin with. `sub rsp,0x28`, then `mov rax,[rcx]`.
+pub const PLAYER_PARAM_ADD_SOULS_PROLOGUE: [u8; 7] = [0x48, 0x83, 0xec, 0x28, 0x48, 0x8b, 0x01];
+
+/// Where every soul counter saturates. `999_999_999` -- `mov eax,0x3b9ac9ff` at `0x14038ab76`.
+pub const PLAYER_PARAM_SOULS_CAP: u32 = 0x3b9a_c9ff;
+
+/// Per-counter skip bytes, in the order of souls-held then the two soul-memory fields.
+///
+/// Non-zero means [`PLAYER_PARAM_ADD_SOULS`] leaves that counter alone. They are not padding: the
+/// constructor at `0x14038aa20` initialises each one beside its counter as `{u32 value; u8 guard;
+/// pad[3]}`, and that record repeats as an array from `+0x104`.
+pub const PLAYER_PARAM_SOUL_COUNTER_GUARDS: [usize; 3] = [0xF0, 0xF8, 0x100];
+
+/// **The stat block is stored TWICE, and the second copy is at `+0x1E`.**
+///
+/// `0x14038aca0` -- the helper the network-record loader calls first -- writes each of the eleven
+/// `u16` to two destinations. Verified bytes at `0x14038acba`:
+///
+/// ```text
+/// 48 89 41 08   mov [rcx+0x08],rax     ; the block ds2-rva's stat offsets describe
+/// 48 89 41 1e   mov [rcx+0x1e],rax     ; ...and the same qword again, 0x16 further on
+/// 4c 89 41 10   mov [rcx+0x10],r8
+/// 4c 89 41 26   mov [rcx+0x26],r8
+/// 44 89 49 18   mov [rcx+0x18],r9d
+/// 44 89 49 2e   mov [rcx+0x2e],r9d
+/// ```
+///
+/// 8 + 8 + 4 + 2 bytes = eleven `u16`, written to `+0x08..0x1D` and again to `+0x1E..0x33`.
+///
+/// **NEITHER COMMUNITY TABLE MAPS THIS.** A tool that pokes `+0x08` desynchronises a copy it does
+/// not know exists, and nothing complains. It is the sharpest argument in this file for calling the
+/// game's own functions instead of writing fields -- and it is a free consistency check: after any
+/// legitimate stat change the two ranges must be equal.
+pub const PLAYER_PARAM_STAT_MIRROR_OFFSET: usize = 0x1E;
+
+/// Bytes covered by one copy of the stat block: eleven `u16`.
+pub const PLAYER_PARAM_STAT_BLOCK_SIZE: usize = 22;
+
+/// The commit path for a stat change: validate a request, recompute, blit, charge. RVA `0x0038b1a0`.
+///
+/// It calls a validator, calls `0x14038c0d0` for a freshly computed stat block, `memcpy`s **`0xCC`
+/// bytes over `PlayerParam + 0x08`** -- covering both copies of the stat block and everything to
+/// `+0xD3` -- then subtracts the level cost from souls held while leaving both soul-memory counters
+/// alone, which is exactly right for spending souls.
+///
+/// **Recorded as a LEAD, not as a callable.** The `request` object in `rdx` has an unknown layout,
+/// and whether it can be built without the attribute menu having built it is the open question that
+/// decides whether a headless level-up is possible at all. Calling this with a malformed request is
+/// not a thing to try casually: it blits 204 bytes into the live character.
+pub const PLAYER_PARAM_COMMIT_STATS: u32 = 0x0038_b1a0;
+
+/// Opens the attribute menu. RVA `0x001992c0`. `fn(menuMgr, mode, *const [f32; 8])`.
+///
+/// `mode` `1` pushes menu `0x19` (Level Up) and `0` pushes `0x1a` (Reallocate Stats); any other
+/// value is a silent no-op. `menuMgr` is `[[GAME_MANAGER_IMP + 0x70] + 0x50]`, and the third
+/// argument is a **16-byte-aligned** scratch buffer whose first four floats are copied from
+/// `PlayerCtrl + 0x90`, the player's world position -- the callee reads it with `movaps`, so an
+/// unaligned buffer faults.
+///
+/// **It opens the UI. It does not level anything**, and a human still picks the stat. Recorded
+/// because it is the only level path any community table has, and because it routes through
+/// [`GAME_MANAGER_FRONTEND_ROOT_OFFSET`] -- machinery `ds2-menu-row` already touches.
+pub const FE_OPEN_ATTRIBUTE_MENU: u32 = 0x0019_92c0;
+
+/// `SaveLoadSystem::RequestSave`. RVA `0x002e7410`. `fn(saveLoadSystem, kind)`, `kind = 2`.
+///
+/// `saveLoadSystem` is `[GAME_MANAGER_IMP + `[`SAVE_LOAD_SYSTEM_OFFSET`]`]`. How a change is
+/// persisted without waiting for a bonfire.
+pub const SAVE_LOAD_REQUEST_SAVE: u32 = 0x002e_7410;

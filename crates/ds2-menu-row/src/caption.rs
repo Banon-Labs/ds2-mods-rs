@@ -139,6 +139,25 @@ static CAPTIONS_DIRTY: AtomicBool = AtomicBool::new(false);
 /// The trampoline for the pause-menu group's per-frame update.
 static UPDATE_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 
+/// Callbacks to run on the game thread, once per frame the pause menu updates.
+///
+/// This exists because the useful work a row does is almost never doable where the row is pressed.
+/// A row that fetches over the network answers on a worker; a row that then wants to call INTO the
+/// game cannot do it from there. The tick is the only place this crate already holds that is both
+/// on the game thread and recurring, so it is the seam.
+static TICKS: Mutex<Vec<fn()>> = Mutex::new(Vec::new());
+
+/// Register a callback to run once per frame while the pause menu is up.
+pub(crate) fn add_tick(callback: fn()) -> bool {
+    match TICKS.lock() {
+        Ok(mut ticks) => {
+            ticks.push(callback);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 /// Every registered row's caption, rewritable.
 ///
 /// A `Mutex` rather than a `OnceLock` because these change: [`set_caption`] is what lets a row say
@@ -232,6 +251,17 @@ unsafe extern "system" fn update_detour(top_select: *mut u8, delta: f32) {
         // SAFETY: both arguments are the caller's own.
         unsafe { original(top_select, delta) };
     }
+    // THE CALLBACKS RUN BEFORE THE CAPTION PUSH, so a callback that changes a caption is seen on
+    // this frame rather than the next one. They are copied out from under the lock first: a
+    // callback that registers another tick would otherwise deadlock on a lock its caller holds.
+    let ticks: Vec<fn()> = match TICKS.lock() {
+        Ok(ticks) => ticks.clone(),
+        Err(_) => Vec::new(),
+    };
+    for tick in ticks {
+        tick();
+    }
+
     if CAPTIONS_DIRTY.swap(false, Ordering::AcqRel) {
         // The group is live and this is the game thread, which is exactly what `push_captions`
         // requires. Remember it too: a push can also be wanted on a frame this detour did not

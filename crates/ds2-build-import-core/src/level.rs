@@ -16,18 +16,29 @@
 //!
 //! # Where the numbers come from, and where they do not
 //!
-//! The per-level costs are DATA, injected by the caller, never a formula written from memory. DARK
-//! SOULS II ships them in `param:/LevelUpStatusCalcParam.param`, which lives inside
-//! `enc_regulation.bnd.dcx`. The path string is at `0x1410f2da0` and its one code reference is
-//! `0x14048c950`.
+//! The per-level costs are DATA, injected by the caller, never a formula written from memory. They
+//! live in **`PlayerLevelUpSoulsParam`** -- 852 rows, stride 12, `{u16 level; u16 pad; i32 gradient;
+//! i32 souls}` -- inside `enc_regulation.bnd.dcx`. `scripts/ds2-regulation.py souls` prints it, and
+//! `ds2-build-import` reads it out of the params the game has already loaded, which cannot drift
+//! from the running build and reflects any param mod.
 //!
-//! **That reference is a `std::wstring` build, NOT a param registration**, and this comment said
-//! otherwise for one commit. `mov r8d,0x23` next to the string looked like a param index; `0x23` is
-//! `35`, which is the LENGTH of `"param:/LevelUpStatusCalcParam.param"`, and `0x1400260b0` is an
-//! assign that compares `[rcx+0x18]` against `8` to pick the SSO branch. A magic number sitting
-//! beside a string literal is a string length until something proves otherwise.
+//! **This pointed at `LevelUpStatusCalcParam` for two commits and that is the wrong param.** It has
+//! a promising name, it is genuinely in the regulation, and it is a NINE-ROW menu table -- one
+//! packed `u32` per stat -- listed in the executable among `FeTimeSetting`, `FeColorPalette` and
+//! other frontend params. Nine rows is nine stats, not 850 levels. Nothing about the name was
+//! wrong; everything about the inference from it was.
 //!
-//! So the param INDEX is not known, and nothing here pretends to know it.
+//! # The direction, which is where one level goes missing
+//!
+//! **Row `L` holds the cost of going from level `L` to `L+1`.** Verified from the game's own
+//! level-up code both ways: the increment at `FUN_1401fb970` pays the value stored for the level it
+//! is LEAVING, and the decrement at `FUN_1401fb800` steps down from `L` and refunds `lookup(L-1)` --
+//! which is only correct under this reading.
+//!
+//! So the soul memory a level implies is the sum of rows `1..level-1`, and [`SoulCosts`] indexes
+//! `costs[0]` as row 1. Level 1 costs nothing to have reached. Anchors from the shipped table:
+//! `1 -> 2` costs `500`, soul memory at level 3 is `1,028`, and at level 838 -- every stat at 99 --
+//! it is `407,405,588`.
 //!
 //! **This module contains no cost numbers and will not invent any.** A caller with no table gets a
 //! refusal, not a guess. That is deliberate: a soul-memory figure that is confidently wrong is worse
@@ -64,7 +75,7 @@ impl core::fmt::Display for LevelError {
         match self {
             LevelError::NoCostTable => write!(
                 f,
-                "no soul cost table -- LevelUpStatusCalcParam has not been read"
+                "no soul cost table -- PlayerLevelUpSoulsParam has not been read"
             ),
             LevelError::OutOfRange { level } => {
                 write!(f, "level {level} is outside 1..={MAX_LEVEL}")
@@ -236,7 +247,7 @@ mod tests {
         assert!(
             LevelError::NoCostTable
                 .to_string()
-                .contains("LevelUpStatusCalcParam"),
+                .contains("PlayerLevelUpSoulsParam"),
             "the refusal must name the param a caller has to go and read"
         );
     }
