@@ -53,6 +53,9 @@ pub(crate) enum Refusal {
     /// The save is structurally a container and holds no character.
     SaveEmpty,
     /// The game has no character loaded -- the title screen, or a profile that was deleted.
+    ///
+    /// Judged from `player_data` being null. **NOT from the name being empty**, which is also true
+    /// of every blank character in a mule save.
     NoCharacter,
 }
 
@@ -76,7 +79,7 @@ impl core::fmt::Display for Refusal {
             Refusal::NoSave => "no DS2SOFS0000.sl2 under %APPDATA%/DarkSoulsII",
             Refusal::SaveUnreadable => "the save is not a BND4 container",
             Refusal::SaveEmpty => "the save's entry table is empty",
-            Refusal::NoCharacter => "player_data holds no character name",
+            Refusal::NoCharacter => "player_data is null -- no character is loaded",
         };
         f.write_str(detail)
     }
@@ -101,16 +104,14 @@ pub(crate) fn locate() -> Result<PathBuf, Refusal> {
     Err(Refusal::NoSave)
 }
 
-/// The name of the character the game currently has loaded, if there is one.
+/// The `player_data` block for the character the game currently has loaded.
 ///
-/// `GameManagerImp -> GameDataManager -> player_data -> +0x24`, a `wchar_t[0x20]` the profile
-/// loader fills from the save slot record. **A first unit of zero is a real answer, not an
-/// unwritten one**: the delete-data-list flow writes `L""` over this field, so empty means no
-/// character rather than "not populated yet".
+/// `GameManagerImp -> GameDataManager -> player_data`, every hop null-checked and read through the
+/// fault-safe readers, because this runs while the player is standing in the pause menu and a wrong
+/// pointer here would be their crash.
 ///
-/// Every hop is null-checked and read through the fault-safe readers, because this runs while the
-/// player is standing in the pause menu and a wrong pointer here would be their crash.
-pub(crate) fn live_character_name() -> Option<String> {
+/// **THIS, not the name, is what "a character is loaded" means.** See [`require_live_character`].
+pub(crate) fn live_player_data() -> Option<usize> {
     let address = ds2_game_base::mem::game_rva(ds2_rva::GAME_MANAGER_IMP).ok()?;
     // SAFETY: a resolved RVA in the loaded image, then three pointer hops each checked for null and
     // each read through `safe_read_usize`, which reports an unmapped page instead of faulting.
@@ -119,22 +120,42 @@ pub(crate) fn live_character_name() -> Option<String> {
         let data = non_null(ds2_game_base::mem::safe_read_usize(
             manager + ds2_rva::GAME_DATA_MANAGER_OFFSET,
         )?)?;
-        let player = non_null(ds2_game_base::mem::safe_read_usize(
+        non_null(ds2_game_base::mem::safe_read_usize(
             data + ds2_rva::GAME_DATA_PLAYER_DATA_OFFSET,
-        )?)?;
-        let field = player + ds2_rva::PLAYER_DATA_NAME_OFFSET;
-        let mut units = Vec::with_capacity(ds2_rva::PLAYER_DATA_NAME_UNITS);
-        for index in 0..ds2_rva::PLAYER_DATA_NAME_UNITS {
-            match ds2_game_base::mem::safe_read_u16(field + index * 2) {
-                Some(0) | None => break,
-                Some(unit) => units.push(unit),
-            }
-        }
-        if units.is_empty() {
-            return None;
-        }
-        String::from_utf16(&units).ok()
+        )?)
     }
+}
+
+/// The name of the character the game currently has loaded, if it has one.
+///
+/// `player_data + 0x24`, a `wchar_t[0x20]` the profile loader fills from the save slot record.
+///
+/// # An empty name does NOT mean there is no character
+///
+/// It reads empty in two completely different situations, and an earlier version of this treated
+/// them as one. The delete-data-list flow writes `L""` here, so empty means "deleted" for a profile
+/// that once had a name -- which is what the old reasoning was built on, and it is correct as far
+/// as it goes. But a BLANK CHARACTER, the all-ones-stats kind a mule save is full of, has never
+/// been named and reads empty too, and the game loads it perfectly well. `scripts/ds2-sl2.py`
+/// already learned this from the other end: it once classified that shape as "not a character" and
+/// the runtime disagreed.
+///
+/// So this returns `Option` and says nothing about liveness. Ask [`live_player_data`] that.
+pub(crate) fn live_character_name() -> Option<String> {
+    let player = live_player_data()?;
+    let field = player + ds2_rva::PLAYER_DATA_NAME_OFFSET;
+    let mut units = Vec::with_capacity(ds2_rva::PLAYER_DATA_NAME_UNITS);
+    for index in 0..ds2_rva::PLAYER_DATA_NAME_UNITS {
+        // SAFETY: inside the block the pointer chain produced; the read is fault-safe.
+        match unsafe { ds2_game_base::mem::safe_read_u16(field + index * 2) } {
+            Some(0) | None => break,
+            Some(unit) => units.push(unit),
+        }
+    }
+    if units.is_empty() {
+        return None;
+    }
+    String::from_utf16(&units).ok()
 }
 
 /// `Some(pointer)` unless it is null.
@@ -151,8 +172,12 @@ const fn non_null(pointer: usize) -> Option<usize> {
 ///
 /// The live check comes FIRST because it is the cheaper of the two and the likelier to fail: the
 /// file check reads eight megabytes off disk.
-pub(crate) fn require_live_character() -> Result<String, Refusal> {
-    let name = live_character_name().ok_or(Refusal::NoCharacter)?;
+pub(crate) fn require_live_character() -> Result<Option<String>, Refusal> {
+    // LIVENESS IS THE POINTER CHAIN, NOT THE NAME. This used to refuse whenever the name read
+    // empty, which rejected every blank character in a mule save -- characters the game had loaded
+    // and was happily standing in. The name is returned for the log and decides nothing.
+    live_player_data().ok_or(Refusal::NoCharacter)?;
+    let name = live_character_name();
     let path = locate()?;
     let bytes = std::fs::read(&path).map_err(|_| Refusal::SaveUnreadable)?;
     match ds2_sl2_core::validate(&bytes) {

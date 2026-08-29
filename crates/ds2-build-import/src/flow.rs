@@ -601,7 +601,10 @@ pub(crate) fn begin_session() -> Option<Job> {
     // A GAME MUST BE IN PROGRESS. The row lives on the pause menu, so one nearly always is, but
     // "nearly always" is not a check and the fetch is pointless without a character to aim it at.
     match crate::save::require_live_character() {
-        Ok(name) => log_line(format_args!("{LOG_PREFIX} character \"{name}\" is loaded")),
+        Ok(Some(name)) => log_line(format_args!("{LOG_PREFIX} character \"{name}\" is loaded")),
+        // A blank character -- never named, all-ones stats, the kind a mule save is full of. It is
+        // as loaded as any other and this used to refuse it.
+        Ok(None) => log_line(format_args!("{LOG_PREFIX} an unnamed character is loaded")),
         Err(reason) => {
             log_line(format_args!("{LOG_PREFIX} refused: {reason}"));
             // A typing session belongs to a character. Losing the character ends it, or the digits
