@@ -593,3 +593,260 @@ mod tests {
         assert_ne!(ds2_rva::PLAYER_PARAM_STAT_NAMES[6], "adaptability");
     }
 }
+
+/// A slot to fill and the item to fill it with, as a build names them.
+///
+/// The slot is the INTERNAL index [`ds2_rva::ITEM_SET_EQUIP`] takes, already mapped through
+/// [`ds2_rva::ITEM_SLOT_FLAT_TO_INTERNAL`]. Building one of these from a flat index by hand is the
+/// mistake that puts every weapon in the wrong hand.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct EquipRequest {
+    pub(crate) internal_slot: u32,
+    pub(crate) item_id: i32,
+}
+
+/// What one equip actually did, read back rather than assumed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct EquipOutcome {
+    pub(crate) internal_slot: u32,
+    pub(crate) wanted: i32,
+    /// The item id the slot holds afterwards, or `None` if the slot is empty.
+    pub(crate) landed: Option<i32>,
+}
+
+impl EquipOutcome {
+    /// Whether the slot ended up holding what was asked for.
+    pub(crate) fn took(&self) -> bool {
+        self.landed == Some(self.wanted)
+    }
+}
+
+/// The bag that holds the inventory entries: `ItemInventory2 -> +0x10`.
+fn bag_list() -> Result<usize, GameError> {
+    let inventory = item_inventory()?;
+    hop(inventory, ds2_rva::ITEM_BAG_LIST_OFFSET).ok_or(GameError::NoCharacter)
+}
+
+/// The inventory entry for an item id, preferring one that is not already worn.
+///
+/// # There is no native "item id -> handle" lookup, so this scans
+///
+/// [`ds2_rva::ITEM_SET_EQUIP`] names an item by a POINTER TO ITS INVENTORY ENTRY, not by a param id
+/// -- the same shape of trap `er-build-import` hit, where the equip took an inventory index that
+/// only exists after the grant. DS2 has no function answering "which entry holds item N", so the
+/// entry array is walked. 3840 entries of 0x28 bytes is a 153KB scan, once per item, on a frame
+/// where the player has just pressed a menu row.
+///
+/// **It prefers an UNWORN copy.** A build naming the same item twice, or a re-run over a character
+/// that already wears it, would otherwise resolve both positions to the one entry -- and since the
+/// equip is a MOVE, filling the second slot would strip the first.
+fn entry_for_item(bag: usize, item_id: i32) -> Option<usize> {
+    let base = bag + ds2_rva::ITEM_ENTRY_ARRAY_OFFSET;
+    let mut worn: Option<usize> = None;
+    for index in 0..ds2_rva::ITEM_ENTRY_COUNT {
+        let entry = base + index * ds2_rva::ITEM_ENTRY_STRIDE;
+        // SAFETY: inside the bag the game's own pointer chain produced; the read is fault-safe and
+        // reports an unmapped page rather than raising.
+        let Some(id) = (unsafe { safe_read_u32(entry + ds2_rva::ITEM_ENTRY_ITEM_ID_OFFSET) })
+        else {
+            continue;
+        };
+        if id as i32 != item_id {
+            continue;
+        }
+        // SAFETY: as above.
+        let flags =
+            unsafe { ds2_game_base::mem::safe_read_u8(entry + ds2_rva::ITEM_ENTRY_FLAGS_OFFSET) };
+        if flags.is_some_and(|flags| flags & ds2_rva::ITEM_ENTRY_FLAG_EQUIPPED != 0) {
+            worn.get_or_insert(entry);
+            continue;
+        }
+        return Some(entry);
+    }
+    // Nothing spare. The worn copy beats refusing: re-equipping it into the slot it already
+    // occupies is a no-op, and into a different one it is the move the build asked for.
+    worn
+}
+
+/// What a FLAT slot currently holds, through the game's own accessor.
+///
+/// Takes the flat index because that is what the accessor takes -- it is NOT the internal index
+/// [`ds2_rva::ITEM_SET_EQUIP`] uses, and passing one for the other reads the wrong slot.
+///
+/// # Safety
+///
+/// Calls into the game. Game thread only.
+unsafe fn equipped_in_flat_slot(
+    inventory: usize,
+    flat_slot: i32,
+) -> Result<Option<i32>, GameError> {
+    let site = game_rva(ds2_rva::ITEM_INVENTORY_EQUIPPED_BY_FLAT_SLOT)
+        .map_err(|_| GameError::Unresolved)?;
+    let mut prologue = [0u8; ds2_rva::ITEM_INVENTORY_EQUIPPED_BY_FLAT_SLOT_PROLOGUE.len()];
+    // SAFETY: a resolved RVA in the loaded image; the read is fault-safe.
+    if !unsafe { ds2_game_base::mem::read_bytes(site, &mut prologue) }
+        || prologue != ds2_rva::ITEM_INVENTORY_EQUIPPED_BY_FLAT_SLOT_PROLOGUE
+    {
+        return Err(GameError::PrologueMismatch);
+    }
+    // SAFETY: the prologue matched, and the signature is the one the thunk implements -- the
+    // inventory in RCX, a slot index in EDX, an entry pointer or null back in RAX.
+    let entry = unsafe {
+        let get: unsafe extern "system" fn(usize, i32) -> usize = core::mem::transmute(site);
+        get(inventory, flat_slot)
+    };
+    if entry == 0 {
+        return Ok(None);
+    }
+    // SAFETY: a pointer the game returned; the read is fault-safe regardless.
+    Ok(unsafe { safe_read_u32(entry + ds2_rva::ITEM_ENTRY_ITEM_ID_OFFSET) }.map(|id| id as i32))
+}
+
+/// How many attunement slots the character has RIGHT NOW.
+///
+/// Read AFTER the stats are written, or it answers for the old attunement. See
+/// [`ds2_rva::ITEM_BAG_ATTUNEMENT_SLOTS_OFFSET`] -- it is a budget spells spend, not a count of
+/// positions, so this is an upper bound on how many can be attuned rather than the number.
+pub(crate) fn attunement_slots() -> Result<u8, GameError> {
+    let bag = bag_list()?;
+    // SAFETY: inside the bag the game's own pointer chain produced; fault-safe read.
+    unsafe { ds2_game_base::mem::safe_read_u8(bag + ds2_rva::ITEM_BAG_ATTUNEMENT_SLOTS_OFFSET) }
+        .ok_or(GameError::NoCharacter)
+}
+
+/// The FLAT index for an internal one, by inverting [`ds2_rva::ITEM_SLOT_FLAT_TO_INTERNAL`].
+///
+/// Needed only because the write takes the internal index and the read-back takes the flat one.
+fn flat_slot_for(internal: u32) -> Option<i32> {
+    ds2_rva::ITEM_SLOT_FLAT_TO_INTERNAL
+        .iter()
+        .position(|mapped| *mapped >= 0 && *mapped as u32 == internal)
+        .map(|flat| flat as i32)
+}
+
+/// **Put one item in one slot, through the game's own equip function, and read back what happened.**
+///
+/// # Safety
+///
+/// Calls into the game. **Game thread only.** The prologue is byte-checked first.
+pub(crate) unsafe fn equip(request: EquipRequest) -> Result<EquipOutcome, GameError> {
+    let inventory = item_inventory()?;
+    let bag = bag_list()?;
+    let site = game_rva(ds2_rva::ITEM_SET_EQUIP).map_err(|_| GameError::Unresolved)?;
+    let mut prologue = [0u8; ds2_rva::ITEM_SET_EQUIP_PROLOGUE.len()];
+    // SAFETY: a resolved RVA in the loaded image; the read is fault-safe.
+    if !unsafe { ds2_game_base::mem::read_bytes(site, &mut prologue) }
+        || prologue != ds2_rva::ITEM_SET_EQUIP_PROLOGUE
+    {
+        return Err(GameError::PrologueMismatch);
+    }
+    let entry = entry_for_item(bag, request.item_id).ok_or(GameError::NoCharacter)?;
+
+    // SAFETY: the prologue matched, and the signature is the one the disassembled thunk implements
+    // -- the inventory in RCX, an internal slot in EDX, an entry pointer in R8, no return. `entry`
+    // is a live inventory entry the scan just read out of the game's own array.
+    unsafe {
+        let set: unsafe extern "system" fn(usize, u32, usize) = core::mem::transmute(site);
+        set(inventory, request.internal_slot, entry);
+    }
+
+    // READ IT BACK, because this function fails silently in two ways: a category mismatch returns
+    // having done nothing, and attuning past capacity unequips the slot instead. Neither says so.
+    // SAFETY: game thread, per this function's contract.
+    let landed = match flat_slot_for(request.internal_slot) {
+        Some(flat) => unsafe { equipped_in_flat_slot(inventory, flat) }?,
+        None => None,
+    };
+    Ok(EquipOutcome {
+        internal_slot: request.internal_slot,
+        wanted: request.item_id,
+        landed,
+    })
+}
+
+/// The covenant id a build's name means, or `None` if nothing is named.
+///
+/// Compared with [`ds2_build_import_core::normalise`], because the planner writes
+/// `Brotherhood_of_Blood` and [`ds2_rva::COVENANT_NAMES`] holds `Brotherhood of Blood`.
+pub(crate) fn covenant_id(name: &str) -> Option<u8> {
+    let wanted = ds2_build_import_core::normalise(name);
+    if wanted.is_empty() || wanted == "nocovenant" {
+        return None;
+    }
+    ds2_rva::COVENANT_NAMES
+        .iter()
+        .position(|candidate| ds2_build_import_core::normalise(candidate) == wanted)
+        .map(|id| id as u8)
+}
+
+/// `PlayerCtrl`, the receiver the covenant setter takes.
+fn player_ctrl() -> Result<usize, GameError> {
+    let manager = game_manager().ok_or(GameError::Unresolved)?;
+    hop(manager, ds2_rva::PLAYER_CTRL_OFFSET).ok_or(GameError::NoCharacter)
+}
+
+/// What one covenant change did, read back.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) struct CovenantSet {
+    pub(crate) before: u8,
+    pub(crate) after: u8,
+    /// Whether this character had already discovered the covenant BEFORE the call.
+    ///
+    /// The interesting case is `false`, because the discovered flag is the part that cannot be
+    /// undone -- see [`ds2_rva::PLAYER_PARAM_COVENANT_DISCOVERED_BASE`].
+    pub(crate) already_discovered: bool,
+}
+
+/// **Join a covenant, through the game's own path, WITHOUT announcing it to the session.**
+///
+/// # This one cannot be undone, and it is the second such thing in this crate
+///
+/// The setter marks the covenant permanently discovered on this character
+/// ([`ds2_rva::PLAYER_PARAM_COVENANT_DISCOVERED_BASE`]) and nothing clears that flag -- leaving the
+/// covenant later changes which one is current and leaves the mark. `already_discovered` is read
+/// BEFORE the call so the log can say whether this press is what set it.
+///
+/// `announce` is passed FALSE. A true one runs the server sync and, in an online session, tells
+/// everyone in it that this character changed covenant. A build import is not a covenant the player
+/// walked up to and joined, and has no business saying so on the network.
+///
+/// # Safety
+///
+/// Calls into the game. **Game thread only.** The prologue is byte-checked first.
+pub(crate) unsafe fn set_covenant(id: u8) -> Result<CovenantSet, GameError> {
+    let ctrl = player_ctrl()?;
+    let param = player_param()?;
+    let site = game_rva(ds2_rva::PLAYER_CTRL_SET_COVENANT).map_err(|_| GameError::Unresolved)?;
+    let mut prologue = [0u8; ds2_rva::PLAYER_CTRL_SET_COVENANT_PROLOGUE.len()];
+    // SAFETY: a resolved RVA in the loaded image; the read is fault-safe.
+    if !unsafe { ds2_game_base::mem::read_bytes(site, &mut prologue) }
+        || prologue != ds2_rva::PLAYER_CTRL_SET_COVENANT_PROLOGUE
+    {
+        return Err(GameError::PrologueMismatch);
+    }
+    let read_current = || {
+        // SAFETY: inside the block the game's own getter returned; fault-safe read.
+        unsafe { ds2_game_base::mem::safe_read_u8(param + ds2_rva::PLAYER_PARAM_COVENANT_OFFSET) }
+    };
+    let before = read_current().ok_or(GameError::NoCharacter)?;
+    // SAFETY: as above.
+    let already_discovered = unsafe {
+        ds2_game_base::mem::safe_read_u8(
+            param + ds2_rva::PLAYER_PARAM_COVENANT_DISCOVERED_BASE + usize::from(id),
+        )
+    }
+    .is_some_and(|flag| flag != 0);
+
+    // SAFETY: the prologue matched, and the signature is the one the disassembly implements --
+    // PlayerCtrl in RCX, the id in EDX, an announce flag in R8B, no return.
+    unsafe {
+        let set: unsafe extern "system" fn(usize, i32, bool) = core::mem::transmute(site);
+        set(ctrl, i32::from(id), false);
+    }
+
+    Ok(CovenantSet {
+        before,
+        after: read_current().unwrap_or(before),
+        already_discovered,
+    })
+}

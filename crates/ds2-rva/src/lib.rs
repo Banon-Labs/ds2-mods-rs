@@ -3865,10 +3865,71 @@ pub const PLAYER_PARAM_SOULS_HELD_OFFSET: usize = 0xEC;
 /// so this is an array rather than a single constant, to make forgetting the second one awkward.
 pub const PLAYER_PARAM_SOUL_MEMORY_OFFSETS: [usize; 2] = [0xF4, 0xFC];
 
-/// Covenant. `PlayerParam + 0x1AD`, one byte. `0` None, `1` Heirs of the Sun, `2` Blue Sentinels,
-/// `3` Brotherhood of Blood, `4` Way of Blue, `5` Rat King, `6` Bell Keepers, `7` Dragon Remnants,
-/// `8` Company of Champions, `9` Pilgrims of Dark. Table-sourced.
+/// Covenant. `PlayerParam + 0x1AD`, one byte. See [`COVENANT_NAMES`] for the ids.
+///
+/// **Confirmed from the binary**, no longer table-sourced only: `SetCovenant` (`0x14038bd80`)
+/// writes this byte and the Rat-King branch in `0x140202f10` tests the id against `5`.
 pub const PLAYER_PARAM_COVENANT_OFFSET: usize = 0x1AD;
+
+/// The covenant ids, indexed by id. `0` is "no covenant".
+///
+/// Confirmed two ways: the per-covenant discovered flags at
+/// [`PLAYER_PARAM_COVENANT_DISCOVERED_BASE`] line up with the nine the community table names, and
+/// the binary's own Rat-King test is against id `5`.
+pub const COVENANT_NAMES: [&str; 10] = [
+    "No Covenant",
+    "Heirs of the Sun",
+    "Blue Sentinels",
+    "Brotherhood of Blood",
+    "Way of Blue",
+    "Rat King",
+    "Bell Keepers",
+    "Dragon Remnants",
+    "Company of Champions",
+    "Pilgrims of Dark",
+];
+
+/// **The per-covenant "discovered" flags, and joining one CANNOT BE UNDONE.** `PlayerParam + 0x1AE`.
+///
+/// One `u8` per covenant, indexed by id, so covenant `n`'s flag is at `0x1AE + n`.
+///
+/// `SetCovenant` sets `p[0x1AE + id] = 1` alongside the current-covenant byte, and **nothing in
+/// that function ever clears it**. Leaving a covenant changes [`PLAYER_PARAM_COVENANT_OFFSET`] and
+/// leaves this set. So joining a covenant to satisfy a build permanently marks that covenant as
+/// discovered on that character -- the same shelf as raising soul memory, and worth saying out loud
+/// before anyone presses a button.
+///
+/// Cross-checked offset for offset against the community table's nine named flags: `+0x1AF` Heirs
+/// of the Sun, `+0x1B0` Blue Sentinels, ... `+0x1B7` Pilgrims of Dark.
+///
+/// Rank (`+0x1B9..`) and progress (`+0x1C4..`) are NOT touched by the setter.
+pub const PLAYER_PARAM_COVENANT_DISCOVERED_BASE: usize = 0x1AE;
+
+/// **Join a covenant, through the path that maintains everything a covenant change implies.**
+/// RVA `0x00202f10`.
+///
+/// `fn(PlayerCtrl*, i32 covenant_id, bool announce)`.
+///
+/// Prefer this over `PlayerParam::SetCovenant` (`0x0038bd80`) directly: this one also maintains the
+/// Rat-King flag (`[PlayerCtrl + 0xB0] + 0x4E = (id == 5)`) and runs the refresh that the bare
+/// setter does not.
+///
+/// # `announce` MUST be false for an import
+///
+/// A true `announce` calls the server sync and, in an online session, sends a covenant-change
+/// packet to everyone in it. A build import is not a covenant the player walked up to and joined,
+/// and it has no business telling the session so.
+///
+/// # It still cannot be undone
+///
+/// See [`PLAYER_PARAM_COVENANT_DISCOVERED_BASE`]. `announce = false` suppresses the network, not
+/// the permanent flag.
+///
+/// Not Arxan-redirected.
+pub const PLAYER_CTRL_SET_COVENANT: u32 = 0x0020_2f10;
+
+/// The five bytes [`PLAYER_CTRL_SET_COVENANT`] must begin with. `test rcx,rcx; jz ...`.
+pub const PLAYER_CTRL_SET_COVENANT_PROLOGUE: [u8; 5] = [0x48, 0x85, 0xc9, 0x74, 0x42];
 
 /// Starting class. `player_data + 0x64`, and it is a **`u32`, not the byte the tables declare**.
 ///
@@ -4005,6 +4066,172 @@ pub const ITEM_GIVE_MAX_PER_CALL: usize = 32;
 /// the community scripts' `vortmov` macro emits a `test/jz` after each dereference and bails, which
 /// is the behaviour to copy rather than the shortcut to skip.
 pub const ITEM_INVENTORY_OFFSET: usize = 0x10;
+
+/// **Equip anything: weapons, armour, rings, ammo, hotbar items AND spells.** RVA `0x001ac510`.
+///
+/// `fn(ItemInventory2*, u32 internal_slot, *const ItemEntry)`. A NULL entry unequips the slot.
+///
+/// # DARK SOULS II has ONE equip function, not five
+///
+/// `ItemInventory2::SetEquip` is the direct sibling of [`ITEM_GIVE`] -- 0x140 bytes away, the same
+/// `48 8b 49 10` thunk shape, and it takes THE SAME RECEIVER, so nothing new has to be resolved to
+/// call it. Attuning a spell and holstering a flask go through it exactly like equipping a sword;
+/// only gestures branch elsewhere. That is a different shape from ELDEN RING, where the equip and
+/// the quick-slot writes are separate paths.
+///
+/// One call updates the inventory AND pushes the change into the character: the implementation
+/// reaches `PlayerCtrl` and notifies per category. There is no separate refresh to remember.
+///
+/// # It is a MOVE, not a toggle
+///
+/// The implementation strips the item from wherever it currently sits before writing the new slot,
+/// so equipping something into the slot it already occupies leaves it equipped. **ELDEN RING
+/// toggles it off**, which is why `er-build-import` has to query the slot first; DS2 does not need
+/// that check. Equipping one entry into two slots still strips the first -- one entry, one slot.
+///
+/// **The exception is spells**: unequipping a spell slot compacts the attunement array downward and
+/// re-notifies every shifted slot, so re-attuning is not a clean no-op. Attune ascending, once each.
+///
+/// # It fails SILENTLY, twice
+///
+/// A category mismatch (an item in a slot its type does not fit) returns having done nothing, with
+/// no error. So does attuning past the character's capacity, which *unequips* the slot instead. Both
+/// are why [`ITEM_INVENTORY_EQUIPPED_BY_FLAT_SLOT`] exists: every equip must be read back.
+///
+/// Not Arxan-redirected -- its first byte is `0x48`, and the `e9` at `+4` targets `0x1401a7b80`,
+/// inside the game's own `.text` rather than Arxan's `0x141aaf000..0x141d42fff`.
+pub const ITEM_SET_EQUIP: u32 = 0x001a_c510;
+
+/// The five bytes [`ITEM_SET_EQUIP`] must begin with. `mov rcx,[rcx+0x10]`, then the tail-jump.
+pub const ITEM_SET_EQUIP_PROLOGUE: [u8; 5] = [0x48, 0x8b, 0x49, 0x10, 0xe9];
+
+/// Read back what is equipped in a FLAT slot. RVA `0x001abc00`.
+///
+/// `fn(ItemInventory2*, i32 flat_slot) -> *const ItemEntry`, null when the slot is empty. Read the
+/// item id at [`ITEM_ENTRY_ITEM_ID_OFFSET`].
+///
+/// **Takes the FLAT index, where [`ITEM_SET_EQUIP`] takes the INTERNAL one.** The two spaces are not
+/// the same and [`ITEM_SLOT_FLAT_TO_INTERNAL`] is the map between them.
+pub const ITEM_INVENTORY_EQUIPPED_BY_FLAT_SLOT: u32 = 0x001a_bc00;
+
+/// The five bytes [`ITEM_INVENTORY_EQUIPPED_BY_FLAT_SLOT`] must begin with. `sub rsp,0x28`.
+pub const ITEM_INVENTORY_EQUIPPED_BY_FLAT_SLOT_PROLOGUE: [u8; 5] = [0x48, 0x83, 0xec, 0x28, 0x48];
+
+/// The entry for a `u16` inventory handle. RVA `0x001abfb0`.
+///
+/// `fn(ItemInventory2*, u16 handle) -> *const ItemEntry`.
+pub const ITEM_INVENTORY_ENTRY_BY_HANDLE: u32 = 0x001a_bfb0;
+
+/// The five bytes [`ITEM_INVENTORY_ENTRY_BY_HANDLE`] must begin with.
+pub const ITEM_INVENTORY_ENTRY_BY_HANDLE_PROLOGUE: [u8; 5] = [0x48, 0x8b, 0x49, 0x10, 0xe9];
+
+/// `ItemInventory2 -> BagList`. `+0x10`, one hop past [`ITEM_INVENTORY_OFFSET`].
+pub const ITEM_BAG_LIST_OFFSET: usize = 0x10;
+
+/// Where the inventory entry array starts inside the bag. `+0x28`.
+pub const ITEM_ENTRY_ARRAY_OFFSET: usize = 0x28;
+
+/// Bytes per inventory entry. `0x28`.
+pub const ITEM_ENTRY_STRIDE: usize = 0x28;
+
+/// How many entries the array holds. `3840`, from the constructor's `0xeff` countdown.
+pub const ITEM_ENTRY_COUNT: usize = 3840;
+
+/// `ItemEntry + 0x14`, `u32`. The `ItemParam` row id -- the same number [`ITEM_GIVE`] takes.
+pub const ITEM_ENTRY_ITEM_ID_OFFSET: usize = 0x14;
+
+/// `ItemEntry + 0x1C`, `u16`. The entry's own handle; `0xFFFF` means none.
+pub const ITEM_ENTRY_HANDLE_OFFSET: usize = 0x1C;
+
+/// `ItemEntry + 0x1F`, `u8`. Bit `0x02` is set while the entry is equipped somewhere.
+pub const ITEM_ENTRY_FLAGS_OFFSET: usize = 0x1F;
+
+/// The bit in [`ITEM_ENTRY_FLAGS_OFFSET`] meaning "equipped".
+pub const ITEM_ENTRY_FLAG_EQUIPPED: u8 = 0x02;
+
+/// `ItemEntry + 0x20`, `u16`. How many are in the stack.
+pub const ITEM_ENTRY_QUANTITY_OFFSET: usize = 0x20;
+
+/// **Flat slot index -> the INTERNAL index [`ITEM_SET_EQUIP`] takes.** 52 entries.
+///
+/// Read from the game's own table at `0x1410c0b90`, which `MapFlatSlotToInternal` (`0x140154510`)
+/// indexes. `-1` is a flat position belonging to no category; nothing uses those.
+///
+/// # THE WEAPON HANDS ARE SWAPPED, and nothing complains if you get it wrong
+///
+/// Flat `0` is Left Hand 1 and flat `1` is Right Hand 1, but they map to internal `1` and `0`.
+/// Combined with the internal->ChrAsm remap at `0x1410c44e0` (`[1,0,3,2,5,4]`) this means
+/// **internal slot 0 is the RIGHT hand**. Equipping a build's main weapon into internal 0 believing
+/// it to be the left puts every weapon in the wrong hand, silently, on a character that otherwise
+/// looks correct.
+pub const ITEM_SLOT_FLAT_TO_INTERNAL: [i32; 52] = [
+    1, 0, 3, 2, 5, 4, // weapons: LH1 RH1 LH2 RH2 LH3 RH3, hands swapped
+    6, 7, 8, 9, // armour: head chest hands legs
+    -1, -1, // no category
+    14, 15, 16, 17, // ammo: two arrow slots then two bolt slots
+    10, 11, 12, 13, // rings
+    18, 19, 20, 21, 22, 23, 24, 25, 26, 27, // hotbar, ten of them
+    28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, // attunement, fourteen
+    42, 43, 44, 45, 46, 47, 48, 49, // gestures
+];
+
+/// FLAT slot of the first weapon. The planner's own `lh1 rh1 lh2 rh2 lh3 rh3` order, position for
+/// position -- read off the form's field ids, not guessed from what tends to sit in slot zero.
+pub const ITEM_SLOT_WEAPON_FLAT_BASE: usize = 0;
+
+/// FLAT slot of the head armour piece, then chest, hands, legs -- the planner's `head chest hands
+/// legs` order, position for position.
+pub const ITEM_SLOT_ARMOUR_FLAT_BASE: usize = 6;
+
+/// FLAT slot of the first ring. Four, matching the planner's `ring-1 .. ring-4`.
+pub const ITEM_SLOT_RING_FLAT_BASE: usize = 16;
+
+/// FLAT slot of the first hotbar item. Ten, matching the planner's `item-1 .. item-10`.
+pub const ITEM_SLOT_HOTBAR_FLAT_BASE: usize = 20;
+
+/// FLAT slot of the first attunement position. Fourteen, matching `spell-1 .. spell-14`.
+pub const ITEM_SLOT_SPELL_FLAT_BASE: usize = 30;
+
+/// Internal slot of the first WEAPON. Six follow, and [`ITEM_SLOT_FLAT_TO_INTERNAL`] swaps the hands.
+pub const ITEM_SLOT_WEAPON_BASE: u32 = 0;
+
+/// Internal slot of the HEAD armour piece. Then chest, hands, legs.
+///
+/// Proved by the equip function's own gate: internal 6 requires the armour's `ArmorParam+0x4F == 2`,
+/// 7 requires 3, 8 requires 4, 9 requires 5.
+pub const ITEM_SLOT_ARMOUR_BASE: u32 = 6;
+
+/// Internal slot of the first RING. Four of them.
+pub const ITEM_SLOT_RING_BASE: u32 = 10;
+
+/// Internal slot of the first HOTBAR item. **Ten**, not ELDEN RING's arrangement.
+pub const ITEM_SLOT_HOTBAR_BASE: u32 = 18;
+
+/// How many hotbar slots there are. `10`, from the predicate `ecx-0x12 <= 9`.
+pub const ITEM_SLOT_HOTBAR_COUNT: usize = 10;
+
+/// Internal slot of the first ATTUNEMENT position. Fourteen.
+pub const ITEM_SLOT_SPELL_BASE: u32 = 28;
+
+/// The most attunement positions a character can have. `14`.
+pub const ITEM_SLOT_SPELL_COUNT: usize = 14;
+
+/// **How many attunement slots the character actually has.** `BagList + 0x259ec`, `u8`.
+///
+/// # Attunement is a BUDGET, not a count of positions
+///
+/// `RecalcAttunementSlots` (`0x1401b40f0`) sets this to `bonus + PlayerParam[0x36]`, capped at
+/// [`ITEM_SLOT_SPELL_COUNT`], then walks the spell slots summing each spell's own cost and
+/// unequipping everything past the budget. **A spell can cost more than one slot.**
+///
+/// Attuning into a position at or past this value UNEQUIPS that position instead of equipping --
+/// silently. So a caller must read this and stop, or a build naming fourteen spells loses most of
+/// them with nothing said. It must also be read AFTER the stats are written, or it sizes against
+/// the old attunement.
+///
+/// Corroborated by the community table's "Additional Magic Slots" AOB, which is byte-for-byte the
+/// `movzx ecx,[rsi+0x259ed]; movsx eax,[rax+0x2e]` pair in that function.
+pub const ITEM_BAG_ATTUNEMENT_SLOTS_OFFSET: usize = 0x259EC;
 
 /// Bytes in one `ItemSpawn`, the element [`ITEM_GIVE`] takes an array of.
 ///

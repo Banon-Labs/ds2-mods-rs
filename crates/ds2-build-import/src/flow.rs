@@ -295,66 +295,162 @@ fn apply(build: &ds2_build_import_core::Build) {
         }
     }
 
-    report_what_was_dropped(build);
+    equip_everything(build);
+    join_covenant(build);
 }
 
-/// Say out loud which parts of the build this did NOT apply.
+/// The FLAT slot a planned position occupies, using the bases `ds2-rva` records.
 ///
-/// # A row that silently does three quarters of the job
-///
-/// A build carries a covenant, a hand grip, and an arrangement of everything into slots -- worn
-/// armour, held weapons, attuned spells, a hotbar. None of that is applied: the items land in the
-/// inventory and the player puts them on. The game's own equip path has not been identified, and
-/// building an equipment entry by hand is exactly what this crate refuses to do.
-///
-/// Nothing in the log said so. A player reading "granted 17/17 items" would reasonably conclude the
-/// build had been imported, and then wonder why their character was naked and in no covenant. What
-/// a tool does not do is part of what it did, and the only place to say it is here.
-///
-/// **Delete this function when equipping lands.** It exists to name a gap, and it is a bug for it
-/// to outlive the gap.
-fn report_what_was_dropped(build: &ds2_build_import_core::Build) {
-    let mut dropped: Vec<String> = Vec::new();
+/// The flat index is then mapped to the internal one the equip function takes. Doing it in two
+/// steps rather than one is deliberate: the flat space is what the planner's form matches
+/// position-for-position, and the internal space is the one where the weapon hands are swapped.
+const fn flat_slot(kind: ds2_build_import_core::equip::SlotKind, position: usize) -> usize {
+    use ds2_build_import_core::equip::SlotKind;
+    let base = match kind {
+        SlotKind::Weapon => ds2_rva::ITEM_SLOT_WEAPON_FLAT_BASE,
+        SlotKind::Armour => ds2_rva::ITEM_SLOT_ARMOUR_FLAT_BASE,
+        SlotKind::Ring => ds2_rva::ITEM_SLOT_RING_FLAT_BASE,
+        SlotKind::Spell => ds2_rva::ITEM_SLOT_SPELL_FLAT_BASE,
+        SlotKind::Hotbar => ds2_rva::ITEM_SLOT_HOTBAR_FLAT_BASE,
+    };
+    base + position
+}
 
-    // The covenant, only when the build actually names one -- `No_Covenant` is not a gap.
-    if !build.covenant.is_empty()
-        && !ds2_build_import_core::items::is_empty_slot(&build.covenant)
-        && !build.covenant.eq_ignore_ascii_case("No_Covenant")
-    {
-        dropped.push(format!("covenant {}", build.covenant));
+/// **Wear, hold, attune and quick-slot everything the build named.**
+///
+/// Runs after the grant, because the equip function names an item by a pointer to its inventory
+/// entry and that entry does not exist until the item has been given.
+fn equip_everything(build: &ds2_build_import_core::Build) {
+    use ds2_build_import_core::equip::SlotKind;
+
+    let planned = ds2_build_import_core::equip::plan(build);
+    if planned.is_empty() {
+        return;
     }
 
-    // The arrangement. Counted from the build rather than asserted, so the numbers are the ones
-    // this particular build wanted.
-    let filled = |slots: &[String]| -> usize {
-        slots
-            .iter()
-            .filter(|name| !ds2_build_import_core::items::is_empty_slot(name))
-            .count()
-    };
-    // Weapons arrive as (name, infusion) pairs, so only the even positions are names.
-    let weapons = filled(&build.weapons.iter().step_by(2).cloned().collect::<Vec<_>>());
-    for (what, count) in [
-        ("weapons", weapons),
-        ("armour", filled(&build.armor)),
-        ("rings", filled(&build.rings)),
-        ("spells to attune", filled(&build.spells)),
-        ("hotbar items", filled(&build.items)),
-    ] {
-        if count > 0 {
-            dropped.push(format!("{count} {what}"));
+    // THE ATTUNEMENT BUDGET, read AFTER the stats were written so it reflects the build's own
+    // attunement rather than the character's old one. Attuning past it does not fail -- it
+    // UNEQUIPS the slot -- so the surplus has to be dropped here and said out loud.
+    let capacity = crate::game::attunement_slots().unwrap_or(0);
+
+    let mut done = 0usize;
+    let mut refused: Vec<String> = Vec::new();
+    let mut over_budget = 0usize;
+
+    for slot in &planned {
+        if slot.kind == SlotKind::Spell && slot.position >= usize::from(capacity) {
+            over_budget += 1;
+            continue;
+        }
+        let item_id = match ds2_build_import_core::id_for(&slot.name) {
+            Ok(id) => id,
+            // A name several ids carry: the grant took the lowest, so the equip must too or it
+            // would look for an entry that was never created.
+            Err(ds2_build_import_core::ItemError::Ambiguous { ref ids, .. }) => {
+                match ids.iter().copied().min() {
+                    Some(id) => id,
+                    None => continue,
+                }
+            }
+            Err(_) => continue,
+        };
+        let flat = flat_slot(slot.kind, slot.position);
+        let Some(internal) = ds2_rva::ITEM_SLOT_FLAT_TO_INTERNAL
+            .get(flat)
+            .copied()
+            .filter(|internal| *internal >= 0)
+        else {
+            refused.push(format!(
+                "{} {} (no such slot)",
+                slot.kind.describe(),
+                slot.position
+            ));
+            continue;
+        };
+        // SAFETY: the game thread, from the pause menu's own per-frame update, with a character
+        // loaded. The call site's prologue is re-checked inside.
+        match unsafe {
+            crate::game::equip(crate::game::EquipRequest {
+                internal_slot: internal as u32,
+                item_id,
+            })
+        } {
+            // THE READ-BACK IS THE ONLY EVIDENCE. This function returns nothing and fails silently
+            // when an item does not fit the slot it was aimed at, so "it was called" is not "it
+            // worked" and only the slot's contents afterwards can say which.
+            Ok(outcome) if outcome.took() => done += 1,
+            Ok(outcome) => refused.push(format!(
+                "{} into {} {} (slot holds {:?})",
+                slot.name,
+                slot.kind.describe(),
+                slot.position,
+                outcome.landed
+            )),
+            Err(error) => refused.push(format!("{} ({error})", slot.name)),
         }
     }
 
-    if dropped.is_empty() {
-        return;
-    }
     log_line(format_args!(
-        "{LOG_PREFIX} NOT APPLIED -- everything below is in the inventory and nothing is worn, \
-         held, attuned or joined: {}",
-        dropped.join(", ")
+        "{LOG_PREFIX} equipped {done}/{} for build {}",
+        planned.len(),
+        build.id
     ));
-    say("Items given -- equip them yourself");
+    if over_budget > 0 {
+        log_line(format_args!(
+            "{LOG_PREFIX} {over_budget} spell(s) left unattuned -- attunement gives {capacity} \
+             slot(s) and the build names more"
+        ));
+    }
+    if !refused.is_empty() {
+        log_line(format_args!(
+            "{LOG_PREFIX} did not equip: {}",
+            refused.join("; ")
+        ));
+    }
+    say(&format!("Equipped {done}/{}", planned.len()));
+}
+
+/// **Join the covenant the build names, if it names one.**
+///
+/// # The only thing here besides soul memory that cannot be undone
+///
+/// The game's setter marks the covenant permanently discovered on this character and nothing
+/// clears that flag. Leaving the covenant later changes which one is current and leaves the mark.
+/// So a build import that names a covenant makes a change to the save that outlives the import,
+/// and the log says which press did it rather than leaving the player to find out.
+///
+/// Nothing is announced to the session -- see [`crate::game::set_covenant`].
+fn join_covenant(build: &ds2_build_import_core::Build) {
+    let Some(id) = crate::game::covenant_id(&build.covenant) else {
+        return;
+    };
+    let name = ds2_rva::COVENANT_NAMES
+        .get(usize::from(id))
+        .copied()
+        .unwrap_or("?");
+    // SAFETY: the game thread, from the pause menu's own per-frame update, with a character loaded.
+    // The call site's prologue is re-checked inside.
+    match unsafe { crate::game::set_covenant(id) } {
+        Ok(set) if set.after == id => {
+            log_line(format_args!(
+                "{LOG_PREFIX} covenant {} -> {id} ({name})",
+                set.before
+            ));
+            if !set.already_discovered {
+                log_line(format_args!(
+                    "{LOG_PREFIX} PERMANENT: {name} is now marked discovered on this character, \
+                     and leaving the covenant does not clear it"
+                ));
+            }
+        }
+        Ok(set) => log_line(format_args!(
+            "{LOG_PREFIX} the covenant did not take: asked for {id} ({name}), reads {}",
+            set.after
+        )),
+        Err(error) => log_line(format_args!(
+            "{LOG_PREFIX} could not set the covenant: {error}"
+        )),
+    }
 }
 
 /// Items per call. The engine accepts up to 32; eight is the only width anyone has exercised.

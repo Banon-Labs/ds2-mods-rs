@@ -38,9 +38,16 @@
 //! already past the floor is left alone -- nothing here ever lowers or overwrites -- but one below
 //! it is moved up permanently.
 //!
-//! **Equipping is not done yet.** The items land in the inventory and the player puts them on. The
-//! game's own equip path has not been identified, and building an equipment entry by hand is
-//! exactly the thing this crate refuses to do.
+//! Then everything the build named is worn, held, attuned and quick-slotted through
+//! `ItemInventory2::SetEquip` -- the direct sibling of the grant function, taking the same
+//! receiver -- and the covenant is joined.
+//!
+//! **THE COVENANT ALSO CANNOT BE UNDONE**, and it is the second such thing here. Joining one marks
+//! it permanently discovered on that character; leaving later changes which is current and leaves
+//! the mark. Nothing is announced to the network.
+//!
+//! **What is still not applied**: the hand `grip` the planner records, and the `class` and `gender`
+//! it names -- a character already exists by the time this runs, so those are read and ignored.
 //!
 //! # The three failure modes worth knowing before reading the log
 //!

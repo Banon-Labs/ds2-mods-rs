@@ -23,6 +23,7 @@
 //! workspace gains no dependency for a grammar one level deep. Build `253` fetched on 2026-08-28
 //! is the fixture both agree on.
 
+pub mod equip;
 pub mod field;
 pub mod items;
 pub mod level;
