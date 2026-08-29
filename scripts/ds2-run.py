@@ -1081,7 +1081,7 @@ def config_text(
     save_redirect: str | None = None,
     menu_row: bool = False,
     build_import: bool = False,
-    inventory_sort: bool = False,
+    inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
 ) -> str:
@@ -1566,7 +1566,7 @@ def write_config(
     save_redirect: str | None = None,
     menu_row: bool = False,
     build_import: bool = False,
-    inventory_sort: bool = False,
+    inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
 ) -> tuple[Path, str]:
@@ -1684,7 +1684,7 @@ def dry_run(
     save_redirect: str | None = None,
     menu_row: bool = False,
     build_import: bool = False,
-    inventory_sort: bool = False,
+    inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
 ) -> int:
@@ -1841,7 +1841,7 @@ def launch(
     save_redirect: str | None = None,
     menu_row: bool = False,
     build_import: bool = False,
-    inventory_sort: bool = False,
+    inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
 ) -> int:
@@ -2585,15 +2585,16 @@ def selftest() -> int:
     # asked for, and does the DLL read the section this writes.
     values, _ = parse_config(config_text("off"))
     check(
-        values.get((INVENTORY_SORT_SECTION, KEY_INVENTORY_SORT_ENABLED)) == "false",
-        f"[{INVENTORY_SORT_SECTION}] {KEY_INVENTORY_SORT_ENABLED} defaults to FALSE -- it has not "
-        "been run, and its default key is a placeholder nobody's muscle memory is on",
-    )
-    values, _ = parse_config(config_text("off", inventory_sort=True))
-    check(
         values.get((INVENTORY_SORT_SECTION, KEY_INVENTORY_SORT_ENABLED)) == "true"
+        and values.get((INVENTORY_SORT_SECTION, KEY_INVENTORY_SORT_PAD)) == "lthumb",
+        f"[{INVENTORY_SORT_SECTION}] {KEY_INVENTORY_SORT_ENABLED} defaults to TRUE, bound to "
+        "lthumb -- both menus and the L3 binding have been pressed in game",
+    )
+    values, _ = parse_config(config_text("off", inventory_sort=False))
+    check(
+        values.get((INVENTORY_SORT_SECTION, KEY_INVENTORY_SORT_ENABLED)) == "false"
         and values.get((BUILD_IMPORT_SECTION, KEY_BUILD_IMPORT_ENABLED)) == "false",
-        "--inventory-sort turns on only its own key, in its own section",
+        "--no-inventory-sort turns off only its own key, in its own section",
     )
     values, _ = parse_config(
         config_text("off", inventory_sort=True, inventory_sort_key="", inventory_sort_pad="y")
@@ -3105,18 +3106,18 @@ def main() -> int:
         ),
     )
     parser.add_argument(
-        "--inventory-sort",
+        "--no-inventory-sort",
         dest="inventory_sort",
-        action="store_true",
-        default=False,
+        action="store_false",
+        default=True,
         help=(
-            "bind a key or controller button to the game's OWN sort dialog, on BOTH the Inventory "
-            "tab and the equip screen's item picker. Adds no sorting: DARK SOULS II already sorts, "
-            "on a button no menu in the game can rebind -- and on the equip screen, on no button "
-            "at all. OFF BY DEFAULT. Four detours (each menu's constructor and destructor) and one "
-            "direct call into the shipped dialog entry, which refuses itself while another dialog "
-            "is up. Set the button with --sort-key and --sort-pad; both can be changed while the "
-            "game runs by editing the config file."
+            "TURN OFF the sort button. It is ON by default and bound to L3, which is where ELDEN "
+            "RING puts Sort. It adds no sorting: DARK SOULS II already sorts, on a button no menu "
+            "in the game can rebind -- and on the equip screen, on no button at all. Six detours "
+            "(each menu's constructor, destructor and per-frame update) and one direct call into "
+            "the shipped dialog entry, which refuses itself while another dialog is up. Move the "
+            "button with --sort-key and --sort-pad; both change while the game runs by editing the "
+            "config file."
         ),
     )
     parser.add_argument(

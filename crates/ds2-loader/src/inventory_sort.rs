@@ -26,19 +26,22 @@ pub struct InventorySortConfig {
 }
 
 impl Default for InventorySortConfig {
-    /// **Off**, and it is a holding position rather than a verdict.
+    /// **On**, and every part of that was pressed in game before the switch moved.
     ///
-    /// Both menus are now proven. Runs on 2026-08-29 logged `opening the sort dialog` on the
-    /// Inventory tab and then `on=equip` for the equip picker, the dialog appeared both times, and
-    /// the game was alive after each call. The first equip run also found and fixed a real defect:
-    /// the button was being sampled from the pause menu's TAB STRIP, which does not tick reliably
-    /// inside a list, so most presses were missed entirely.
+    /// Runs on 2026-08-29 logged `opening the sort dialog` on the Inventory tab, then `on=equip`
+    /// for the equip picker, then three consecutive opens from the controller with the keyboard
+    /// binding cleared. The dialog appeared each time and the game was alive after every call.
     ///
-    /// **What has not been run is the default binding.** `lthumb` was only just adopted, and a
-    /// switch that turns itself on should not be the thing that introduces an untested button. One
-    /// run on L3 flips this.
+    /// The default binding is `lthumb` -- L3 -- which is where ELDEN RING puts Sort, and mirroring
+    /// that is the entire point of the feature. So the surprise this could spring on a player who
+    /// has not asked for it is the sort dialog they already had, on the button their hands already
+    /// know, in a menu where the game itself offers no other way to reach it.
+    ///
+    /// The refusal path is the game's own: the shipped entry tests `[this+0x58]` and returns having
+    /// done nothing while another dialog is up, and with no item list on screen there is no
+    /// recorded group and the press is dropped here.
     fn default() -> Self {
-        Self { enabled: false }
+        Self { enabled: true }
     }
 }
 
@@ -52,11 +55,23 @@ impl InventorySortConfig {
             return Self::default();
         };
         let parsed = KeyValues::parse(&text);
+        // THREE-WAY, and it stopped being two-way the moment the default flipped to ON. The old
+        // rule was "only an exact `true` turns it on", which was the harmless direction while the
+        // default was off: a typo left the feature off, which is where it already was. With the
+        // default on, that same rule makes `enabled = ture` silently DELETE a working feature, and
+        // the player has no way to tell a typo from a mod that stopped working.
+        //
+        // So an exact `false` turns it off, an exact `true` turns it on, and anything else is not
+        // an answer -- it falls back to the default. `describe` prints what was resolved, so a
+        // typo shows up as `enabled=true` next to a config file that says otherwise, which is the
+        // discrepancy that tells the player where to look.
         let enabled = match parsed.get(CONFIG_SECTION, KEY_ENABLED) {
             None => Self::default().enabled,
-            // Only an exact `true` turns it on, so a typo leaves the feature OFF -- the harmless
-            // direction while the default is off.
-            Some(raw) => matches!(raw.trim().trim_matches('"'), "true"),
+            Some(raw) => match raw.trim().trim_matches('"') {
+                "false" => false,
+                "true" => true,
+                _ => Self::default().enabled,
+            },
         };
         Self { enabled }
     }

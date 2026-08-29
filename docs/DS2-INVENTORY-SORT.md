@@ -242,4 +242,3 @@ someone to name a button they know as a place their thumb goes.
 * Whether the bag reuses freed slots, which is what "sort by acquisition" would rest on.
 * Whether the equip picker's sort OPTIONS match the slot being equipped, and whether choosing one
   visibly reorders the list. The dialog is confirmed to open there; its contents are not.
-* Whether `lthumb` works in game. It is the default as of this writing and has never been pressed.
