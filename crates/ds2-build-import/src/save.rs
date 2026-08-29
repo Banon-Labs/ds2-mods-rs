@@ -7,9 +7,10 @@
 //! [`ds2_rva::PLAYER_DATA_NAME_OFFSET`]. That field is the right one to test because its CLEARING
 //! site is known as well as its writing site -- the delete-data-list flow puts `L""` there -- so an
 //! empty name means "no character" rather than "not populated yet". The neighbouring
-//! [`ds2_rva::PLAYER_DATA_PROFILE_LOADED_OFFSET`] flag is deliberately NOT used as the test: its
-//! write to `1` is verified and nothing was found that writes it back to `0`, which would make it
-//! "a character was loaded at some point".
+//! [`ds2_rva::PLAYER_DATA_JOURNEY_OFFSET`] is deliberately NOT used as the test -- and it is worth
+//! knowing why, because this crate once called it a "profile loaded" flag: it is the NEW GAME
+//! cycle, `1` meaning Journey 1. One literal `1` on load, and nothing writing it back, reads like a
+//! sticky boolean right up until someone reaches NG+.
 //!
 //! **Is there a save to write beside** is answered off disk, with [`ds2_sl2_core::validate`]. It is
 //! a structural check -- BND4 magic and an entry table in bounds -- not a decryption, which is all

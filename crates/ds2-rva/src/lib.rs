@@ -3752,13 +3752,131 @@ pub const PLAYER_DATA_NAME_OFFSET: usize = 0x24;
 /// UTF-16 units in the name field, from the `mov r8d,0x20` the copy is bounded by.
 pub const PLAYER_DATA_NAME_UNITS: usize = 0x20;
 
-/// Set to `1` when a profile has been loaded. `player_data + 0x68`.
+/// The NEW GAME cycle -- Journey 1, Journey 2, and so on. `player_data + 0x68`, `u32`, **1-based**.
 ///
 /// `mov DWORD PTR [rdi+0x68],1` at `0x1400fc318` (`c7 47 68 01 00 00 00`), immediately after the
-/// name copy.
+/// name copy in the profile loader.
 ///
-/// **The write to `1` is verified and NOTHING WAS FOUND THAT WRITES IT BACK TO `0`.** So this may
-/// be sticky for the life of the process -- "a character was loaded at some point" rather than "one
-/// is loaded now". Use it as corroboration, never as the sole test, and prefer
-/// [`PLAYER_DATA_NAME_OFFSET`], whose clearing site IS known.
-pub const PLAYER_DATA_PROFILE_LOADED_OFFSET: usize = 0x68;
+/// **THIS WAS RECORDED HERE AS A "PROFILE LOADED" FLAG AND THAT WAS WRONG.** The reading came from
+/// seeing one literal `1` written on load and finding nothing that writes it back to `0`, which
+/// made it look like a sticky boolean. Both community Cheat Engine tables identify the same field
+/// independently, with a dropdown reading `1:Journey 1` through `9:Journey 9` -- so the literal `1`
+/// is "New Game", not "true", and nothing writes zero because a journey counter only ever goes up.
+///
+/// One write site is not a type. A field whose only observed value is `1` is as consistent with a
+/// counter as with a flag, and the difference only shows on a character who has been through NG+.
+///
+/// It is still usable as a liveness hint -- it is `0` before any profile is loaded -- but
+/// [`PLAYER_DATA_NAME_OFFSET`] is the better test, and this must never be WRITTEN as a flag.
+pub const PLAYER_DATA_JOURNEY_OFFSET: usize = 0x68;
+
+// =================================================================================================
+// THE LIVE STAT BLOCK -- `PlayerParam`
+//
+// `GameManagerImp -> PlayerCtrl (+0xD0) -> PlayerParam (+0x490)`. The chain is VERIFIED in the
+// image; the FIELD OFFSETS inside `PlayerParam` are not -- they come from two community Cheat
+// Engine tables that agree with each other, and each one says so in its own doc comment.
+//
+// Corroboration for the shape, from a completely unrelated direction: `scripts/ds2-sl2.py` found
+// ELEVEN `i16` at save-slot-record `+0x188` by inspecting real saves ("the nine DS2 stats plus
+// two"), and the tables describe eleven contiguous `u16` at `PlayerParam+0x08`. Two sources that
+// never saw each other, same eleven-short block.
+// =================================================================================================
+
+/// A null-guarded getter for `PlayerParam`. RVA `0x001ab660`. **Call this rather than walking.**
+///
+/// The whole function, verified byte for byte:
+///
+/// ```text
+/// 48 8b 05 89 92 46 01   mov rax,[rip+0x1469289]   ; -> 0x1416148f0, GAME_MANAGER_IMP
+/// 48 85 c0               test rax,rax
+/// 74 07                  je  +7
+/// 48 8b 80 d0 00 00 00   mov rax,[rax+0xd0]        ; PlayerCtrl
+/// 48 85 c0               test rax,rax
+/// 74 08                  je  +8
+/// 48 8b 80 90 04 00 00   mov rax,[rax+0x490]       ; PlayerParam
+/// c3                     ret
+/// ```
+///
+/// Takes nothing, returns the pointer in `rax`, and returns NULL at whichever hop is null rather
+/// than faulting -- which is the case on the title screen, where `PlayerCtrl` is null. Using the
+/// game's own accessor costs one call and removes two chances to get a null check wrong.
+pub const PLAYER_PARAM_GET: u32 = 0x001a_b660;
+
+/// `GameManagerImp -> PlayerCtrl`. `+0xD0`. From [`PLAYER_PARAM_GET`]'s first hop.
+pub const PLAYER_CTRL_OFFSET: usize = 0xD0;
+/// `PlayerCtrl -> PlayerParam`. `+0x490`. From [`PLAYER_PARAM_GET`]'s second hop.
+pub const PLAYER_PARAM_OFFSET: usize = 0x490;
+
+/// The nine levelled stats inside `PlayerParam`, each a `u16`.
+///
+/// **THE MEMORY ORDER IS NOT THE PLANNER'S ORDER.** soulsplanner emits vigor, endurance, vitality,
+/// attunement, strength, dexterity, *adaptability*, intelligence, faith. The game stores
+/// adaptability LAST, after intelligence and faith. Zipping one order onto the other silently swaps
+/// three stats, and the result is a character that levelled up correctly into the wrong attributes.
+///
+/// | offset | stat |
+/// |---|---|
+/// | `+0x08` | vigor |
+/// | `+0x0A` | endurance |
+/// | `+0x0C` | vitality |
+/// | `+0x0E` | attunement |
+/// | `+0x10` | strength |
+/// | `+0x12` | dexterity |
+/// | `+0x14` | intelligence |
+/// | `+0x16` | faith |
+/// | `+0x18` | adaptability |
+///
+/// Two further `u16` follow at `+0x1A` and `+0x1C` that both tables leave unnamed -- the eleven
+/// shorts `scripts/ds2-sl2.py` also sees on disk.
+///
+/// **Source: the Cheat Engine tables, not the executable.** Both agree offset for offset, and the
+/// eleven-short shape is corroborated from the save file, but no write site was found in the image.
+pub const PLAYER_PARAM_STAT_OFFSETS: [usize; 9] =
+    [0x08, 0x0A, 0x0C, 0x0E, 0x10, 0x12, 0x14, 0x16, 0x18];
+
+/// Stat names in the order [`PLAYER_PARAM_STAT_OFFSETS`] lists them -- the GAME's order.
+pub const PLAYER_PARAM_STAT_NAMES: [&str; 9] = [
+    "vigor",
+    "endurance",
+    "vitality",
+    "attunement",
+    "strength",
+    "dexterity",
+    "intelligence",
+    "faith",
+    "adaptability",
+];
+
+/// Soul level. `PlayerParam + 0xD0`, `u32`. Table-sourced.
+pub const PLAYER_PARAM_SOUL_LEVEL_OFFSET: usize = 0xD0;
+
+/// Souls currently held. `PlayerParam + 0xEC`, `u32`. Table-sourced, and the LEAST certain constant
+/// here: one table labels it "Total Get Soul" and the other labels the same offset "Soul" while
+/// separately naming `+0xF4`/`+0xFC` as the totals. The three-record reading (`{u32 value; u8 flag;
+/// pad}` at `0xEC`, `0xF4`, `0xFC`) is self-consistent and makes this the spendable balance.
+/// Confirm by watching it fall when souls are spent.
+pub const PLAYER_PARAM_SOULS_HELD_OFFSET: usize = 0xEC;
+
+/// Soul memory. **TWO fields, and both must be written.** `PlayerParam + 0xF4` and `+ 0xFC`, `u32`.
+///
+/// The tables call them `TotalGetSoul1` and `TotalGetSoul2`. Writing one and not the other leaves
+/// the game free to resynchronise from whichever it trusts, which would silently undo the write --
+/// so this is an array rather than a single constant, to make forgetting the second one awkward.
+pub const PLAYER_PARAM_SOUL_MEMORY_OFFSETS: [usize; 2] = [0xF4, 0xFC];
+
+/// Covenant. `PlayerParam + 0x1AD`, one byte. `0` None, `1` Heirs of the Sun, `2` Blue Sentinels,
+/// `3` Brotherhood of Blood, `4` Way of Blue, `5` Rat King, `6` Bell Keepers, `7` Dragon Remnants,
+/// `8` Company of Champions, `9` Pilgrims of Dark. Table-sourced.
+pub const PLAYER_PARAM_COVENANT_OFFSET: usize = 0x1AD;
+
+/// Starting class. `player_data + 0x64`, and it is a **`u32`, not the byte the tables declare**.
+///
+/// The loader writes it as a dword -- `movzx eax,WORD PTR [rbx+0x1d6]` then
+/// `mov DWORD PTR [rdi+0x64],eax` at `0x1400fc311`/`0x1400fc31f` -- widening a `u16` out of the
+/// save slot record. Both tables type it `Byte`, which reads correctly on a little-endian machine
+/// for every value under 256 and would corrupt the upper three bytes on a write.
+///
+/// `1` Warrior, `2` Knight, `4` Bandit, `6` Cleric, `7` Sorcerer, `8` Explorer, `9` Swordsman,
+/// `10` Deprived. The gaps are the game's.
+pub const PLAYER_DATA_CLASS_OFFSET: usize = 0x64;
