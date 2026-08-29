@@ -453,8 +453,20 @@ fn join_covenant(build: &ds2_build_import_core::Build) {
     }
 }
 
-/// Items per call. The engine accepts up to 32; eight is the only width anyone has exercised.
-const ITEM_BATCH: usize = 8;
+/// Items per call. **One**, deliberately, even though the engine accepts up to 32.
+///
+/// # A batch is all-or-nothing, so a wide batch is a worse answer
+///
+/// [`ds2_rva::ITEM_GIVE`] returns a single bool for the whole call. At eight per call, one item the
+/// engine refuses costs the seven beside it AND hides which one it was: a real run reported
+/// `granted 8/18` with three batches, and the count alone cannot distinguish a bad ninth item from
+/// a bad eighteenth. Eight was never chosen for a reason of ours -- it is the width the community
+/// scripts use, bounded by their own buffer.
+///
+/// At one per call a refused item costs exactly itself and the log names it. Eighteen calls instead
+/// of three, on a frame where the player has just pressed a menu row, is not a cost worth the
+/// ambiguity.
+const ITEM_BATCH: usize = 1;
 
 /// Raise soul memory to the floor a level implies, through the game's own `AddSouls`.
 ///

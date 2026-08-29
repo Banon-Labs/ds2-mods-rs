@@ -36,6 +36,13 @@ pub(crate) enum GameError {
     Unresolved,
     /// A pointer in the chain was null -- no character, or the title screen.
     NoCharacter,
+    /// The item is not in the inventory, so there is no entry to equip.
+    ///
+    /// **Its own variant because the first version reused `NoCharacter` for it**, and the resulting
+    /// log said "no live character -- a null in the player chain" eighteen times about a character
+    /// that was very much alive. A wrong error costs more than no error: it sends the reader to the
+    /// wrong half of the code.
+    NotInInventory,
     /// The param tables could not be walked.
     NoParams,
     /// `PlayerLevelUpSoulsParam` is not among the loaded params.
@@ -49,6 +56,7 @@ impl core::fmt::Display for GameError {
         let text = match self {
             GameError::Unresolved => "a module base or RVA would not resolve",
             GameError::NoCharacter => "no live character -- a null in the player chain",
+            GameError::NotInInventory => "not in the inventory, so there is nothing to equip",
             GameError::NoParams => "the param tables could not be walked",
             GameError::NoLevelCosts => "PlayerLevelUpSoulsParam is not loaded",
             GameError::PrologueMismatch => "a function's prologue is not what ds2-rva recorded",
@@ -520,12 +528,23 @@ pub(crate) unsafe fn give_items(items: &[ItemSpawn], batch: usize) -> Result<usi
     // back in AL. The slice outlives the call and the callee only reads it.
     let give: ItemGiveFn = unsafe { core::mem::transmute(site) };
     let mut granted = 0usize;
-    for chunk in items.chunks(batch) {
+    for (index, chunk) in items.chunks(batch).enumerate() {
         // SAFETY: as above; `chunk` is a live slice of exactly `chunk.len()` entries.
         let ok = unsafe { give(inventory, chunk.as_ptr(), chunk.len() as u32) };
         if ok {
             granted += chunk.len();
+            continue;
         }
+        // NAME WHAT DID NOT LAND. The function answers for a whole batch, so one refused item costs
+        // the other seven and the count alone cannot say which -- a run that granted 8 of 18 looks
+        // identical whether the culprit was the ninth item or the eighteenth. The ids are the only
+        // thing that turns that into a lead.
+        let ids: Vec<i32> = chunk.iter().map(|item| item.item_id).collect();
+        crate::log_line(format_args!(
+            "{} ItemGive refused batch {index} ({} items): {ids:?}",
+            crate::LOG_PREFIX,
+            chunk.len()
+        ));
     }
     Ok(granted)
 }
@@ -621,10 +640,18 @@ impl EquipOutcome {
     }
 }
 
-/// The bag that holds the inventory entries: `ItemInventory2 -> +0x10`.
+/// The bag that holds the inventory entries.
+///
+/// **TWO hops of `+0x10` from `ItemInventory2`**, because the equip function splits them across its
+/// thunk and its implementation -- see [`ds2_rva::ITEM_BAG_LIST_OFFSET`]. One hop lands on a live
+/// object that is not the bag, so nothing faults and nothing matches; the first in-game run of the
+/// equip path reported every single item as missing for exactly that reason.
 fn bag_list() -> Result<usize, GameError> {
-    let inventory = item_inventory()?;
-    hop(inventory, ds2_rva::ITEM_BAG_LIST_OFFSET).ok_or(GameError::NoCharacter)
+    let mut at = item_inventory()?;
+    for _ in 0..ds2_rva::ITEM_BAG_LIST_HOPS {
+        at = hop(at, ds2_rva::ITEM_BAG_LIST_OFFSET).ok_or(GameError::NoCharacter)?;
+    }
+    Ok(at)
 }
 
 /// The inventory entry for an item id, preferring one that is not already worn.
@@ -740,7 +767,7 @@ pub(crate) unsafe fn equip(request: EquipRequest) -> Result<EquipOutcome, GameEr
     {
         return Err(GameError::PrologueMismatch);
     }
-    let entry = entry_for_item(bag, request.item_id).ok_or(GameError::NoCharacter)?;
+    let entry = entry_for_item(bag, request.item_id).ok_or(GameError::NotInInventory)?;
 
     // SAFETY: the prologue matched, and the signature is the one the disassembled thunk implements
     // -- the inventory in RCX, an internal slot in EDX, an entry pointer in R8, no return. `entry`

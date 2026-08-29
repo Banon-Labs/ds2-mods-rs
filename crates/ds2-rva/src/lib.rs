@@ -4125,8 +4125,33 @@ pub const ITEM_INVENTORY_ENTRY_BY_HANDLE: u32 = 0x001a_bfb0;
 /// The five bytes [`ITEM_INVENTORY_ENTRY_BY_HANDLE`] must begin with.
 pub const ITEM_INVENTORY_ENTRY_BY_HANDLE_PROLOGUE: [u8; 5] = [0x48, 0x8b, 0x49, 0x10, 0xe9];
 
-/// `ItemInventory2 -> BagList`. `+0x10`, one hop past [`ITEM_INVENTORY_OFFSET`].
+/// **`ItemInventory2 -> BagList` is TWO hops of `+0x10`, not one.**
+///
+/// The full chain is `[[ItemInventory2 + 0x10] + 0x10]`, and getting it wrong costs nothing
+/// visible: the scan reads a live object that simply is not the bag, finds no entry matching any
+/// item, and reports every equip as a missing item. That is exactly what the first in-game run of
+/// the equip path did -- `equipped 0/18`, with a reason that pointed at the player chain.
+///
+/// It is two hops because the work is split across the thunk and its implementation, and reading
+/// only the thunk shows one:
+///
+/// ```text
+/// 0x1401ac510  mov rcx,[rcx+0x10]   ; SetEquip's thunk: inventory -> the manager
+///              jmp 0x1401a7b80
+/// 0x1401a7b80  cmp edx,0x29
+///              ja  gestures
+///              mov rcx,[rcx+0x10]   ; and again: the manager -> the bag
+/// ```
+///
+/// So this constant is applied TWICE. It is one number and two dereferences, and the doc says so
+/// because the number being the same is what made one of them easy to miss.
 pub const ITEM_BAG_LIST_OFFSET: usize = 0x10;
+
+/// How many `+0x10` hops separate `ItemInventory2` from its `BagList`. **Two.**
+///
+/// A named count rather than a repeated `hop(hop(x))`, so the reason there are two is attached to
+/// the number. See [`ITEM_BAG_LIST_OFFSET`].
+pub const ITEM_BAG_LIST_HOPS: usize = 2;
 
 /// Where the inventory entry array starts inside the bag. `+0x28`.
 pub const ITEM_ENTRY_ARRAY_OFFSET: usize = 0x28;
