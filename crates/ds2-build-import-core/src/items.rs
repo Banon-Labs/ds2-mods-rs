@@ -100,6 +100,35 @@ pub fn normalise(name: &str) -> String {
 /// function means -- a gesture is not inventory -- and the author flagged them by hand.
 const UNSAFE_SUFFIX: &str = " (UNSAFE)";
 
+/// Rows the GAME will never put in an inventory, whatever the catalogue calls them.
+///
+/// # `ItemParam + 0x52` bit 3 is "may exist in an inventory", and 46 rows lack it
+///
+/// The add path checks it -- `test byte [rax+0x52],0x8; je return` -- and returns having added
+/// NOTHING while `ItemGive` still answers `true`. A caller that trusts the return value believes it
+/// granted something that does not exist.
+///
+/// **The three Estus Flask rows here are upgrade STATES, not items.** DARK SOULS II has exactly one
+/// Estus Flask, upgraded eleven times with shards, and `60155010/20/30` describe its strength. The
+/// real flask is `60155000` -- the row this catalogue marks `(UNSAFE)`, which is why
+/// [`WRONGLY_FLAGGED`] exists. Granting the flask by name used to pick the lowest of the three
+/// states and silently achieve nothing.
+///
+/// This list is short because it is only what has been PROVEN from the params. The authoritative
+/// test is the bit itself, and reading it at runtime would retire this list entirely.
+const NOT_INVENTORY_ITEMS: [i32; 3] = [60155010, 60155020, 60155030];
+
+/// Rows the catalogue flags `(UNSAFE)` that the game's own params say are ordinary items.
+///
+/// `60155000` is the real Estus Flask: `ItemParam + 0x52 = 0x0d` -- may exist in an inventory,
+/// unique, maximum stack one. The table's author flagged it, and taking that at face value removed
+/// the only Estus Flask a character can actually hold.
+///
+/// A character who already has a flask will still be refused, by the game, with "already held and
+/// it is not stackable" -- which is the correct answer and is reported as satisfied rather than
+/// failed.
+const WRONGLY_FLAGGED: [i32; 1] = [60155000];
+
 /// One catalogue row.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 struct Entry {
@@ -134,7 +163,11 @@ fn catalogue() -> &'static HashMap<String, Vec<Entry>> {
             let Ok(id) = id.trim().parse::<i32>() else {
                 continue;
             };
-            let unsafe_to_spawn = name.ends_with(UNSAFE_SUFFIX);
+            // A row the game will never place in an inventory is not a row this can offer.
+            if NOT_INVENTORY_ITEMS.contains(&id) {
+                continue;
+            }
+            let unsafe_to_spawn = name.ends_with(UNSAFE_SUFFIX) && !WRONGLY_FLAGGED.contains(&id);
             let name = name.strip_suffix(UNSAFE_SUFFIX).unwrap_or(name);
             out.entry(normalise(name)).or_default().push(Entry {
                 id,
@@ -243,10 +276,15 @@ impl Infusion {
 mod tests {
     use super::*;
 
-    /// The catalogue loads and is the size the extractor reported.
+    /// The catalogue loads, and holds the extractor's rows minus the ones the game refuses to keep.
+    ///
+    /// The extractor reports 1236. Three are dropped here as [`NOT_INVENTORY_ITEMS`] -- the Estus
+    /// Flask upgrade states, which no inventory can ever hold. The subtraction is written out so
+    /// that a change to either number has to be deliberate.
     #[test]
     fn the_catalogue_is_populated() {
-        assert_eq!(catalogue_size(), 1236);
+        const EXTRACTED: usize = 1236;
+        assert_eq!(catalogue_size(), EXTRACTED - NOT_INVENTORY_ITEMS.len());
     }
 
     /// EVERY ITEM IN BUILD 253 RESOLVES.
@@ -392,20 +430,32 @@ mod tests {
         ));
     }
 
-    /// A flagged row does not poison a name that also has good ones.
+    /// **THE REAL ESTUS FLASK IS THE ONE THE CATALOGUE FLAGGED.**
     ///
-    /// `Estus Flask` has four rows: `60155000` flagged, and three that are not. The flagged one is
-    /// dropped and the remaining three are reported as the ambiguity they are.
+    /// `Estus Flask` had four rows: `60155000` marked `(UNSAFE)` and three unmarked. Dropping the
+    /// flagged one and keeping the rest looked obviously right and was exactly backwards. The three
+    /// unmarked ids lack `ItemParam + 0x52` bit 3 -- "may exist in an inventory" -- because they are
+    /// upgrade STATES of the one flask this game has, not three flasks. Granting by name picked the
+    /// lowest of them and silently achieved nothing, while `ItemGive` still answered true.
+    #[test]
+    fn the_estus_flask_is_the_row_that_can_exist() {
+        assert_eq!(id_for("Estus_Flask"), Ok(60155000));
+        // And the upgrade states are gone from the catalogue entirely, so nothing can offer them.
+        for state in NOT_INVENTORY_ITEMS {
+            assert!(
+                !catalogue()
+                    .values()
+                    .flatten()
+                    .any(|entry| entry.id == state),
+                "{state} should not be offerable"
+            );
+        }
+    }
+
+    /// A flagged row still hides behind unflagged namesakes where the flag is right.
     #[test]
     fn a_flagged_row_does_not_hide_its_unflagged_namesakes() {
-        match id_for("Estus_Flask") {
-            Err(ItemError::Ambiguous { ids, .. }) => {
-                assert_eq!(ids, vec![60155010, 60155020, 60155030]);
-                assert!(!ids.contains(&60155000), "the flagged row must be dropped");
-            }
-            other => panic!("expected the three unflagged flasks, got {other:?}"),
-        }
-        // Dragon Torso Stone is the other shape: one flagged, one not, so it resolves cleanly.
+        // Dragon Torso Stone is one flagged, one not, so it resolves cleanly to the good one.
         assert_eq!(id_for("Dragon_Torso_Stone"), Ok(60406000));
     }
 

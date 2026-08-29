@@ -89,9 +89,6 @@ mod typed;
 pub(crate) fn build_items(build: &ds2_build_import_core::Build) -> Vec<game::ItemSpawn> {
     use ds2_build_import_core::{Infusion, ItemError, id_for, is_empty_slot};
 
-    /// `-1` is the game's own "maximum" for durability and reinforcement.
-    const MAX: i32 = -1;
-
     let mut out = Vec::new();
     let mut push = |name: &str, infusion: Infusion| {
         let item_id = match id_for(name) {
@@ -126,9 +123,14 @@ pub(crate) fn build_items(build: &ds2_build_import_core::Build) -> Vec<game::Ite
             }
         };
         out.push(game::ItemSpawn {
-            unknown: 0,
+            mode: ds2_rva::ITEM_SPAWN_MODE_NORMAL,
             item_id,
-            durability: f32::from_bits(MAX as u32),
+            // ZERO, which is what the game's own caller writes. This used to pass `-1`
+            // reinterpreted as a float -- a NaN -- on the strength of a community table's
+            // "-1 means max" convention that the disassembly supports nowhere. It never caused a
+            // refusal (the check path overwrites this field before deciding) but the ADD path
+            // stores the caller's bytes verbatim, so a NaN would have been written onto the item.
+            durability: ds2_rva::ITEM_SPAWN_DURABILITY_DEFAULT,
             quantity: 1,
             reinforce: 0,
             infusion: infusion.byte(),

@@ -4060,6 +4060,63 @@ pub const ITEM_GIVE_IMPL: u32 = 0x001a_7470;
 /// own buffer rather than by the engine, and 8 is therefore the only width anyone has exercised.
 pub const ITEM_GIVE_MAX_PER_CALL: usize = 32;
 
+/// **The game's own reason for refusing a grant.** `inner + 0x10138`, `u32`.
+///
+/// `inner` is one hop of `+0x10` from `ItemInventory2` -- the object the grant thunk's
+/// `mov rcx,[rcx+0x10]` produces, and the FIRST of the two hops that reach
+/// [`ITEM_BAG_LIST_OFFSET`].
+///
+/// # Read this instead of guessing
+///
+/// [`ITEM_GIVE`] answers `bool`, and its whole `false` path is one instruction pair in
+/// `ItemInventory2::CanGive`: `test dword [inner+0x10138], 0x80000000; sete al`. **Bit 31 means
+/// refused and the rest of the word names WHY.** Three items once looked like a mystery worth a
+/// disassembly session; the answer was four readable bytes in the running game the whole time.
+///
+/// Non-fatal bits also appear here: `0x4` category 11, `0x2` the quantity was clamped, `0x1`
+/// accepted.
+pub const ITEM_GIVE_ERROR_OFFSET: usize = 0x1_0138;
+
+/// A number qualifying [`ITEM_GIVE_ERROR_OFFSET`]. `inner + 0x1013c`, `u32`.
+pub const ITEM_GIVE_ERROR_DETAIL_OFFSET: usize = 0x1_013C;
+
+/// The bit in [`ITEM_GIVE_ERROR_OFFSET`] that means the grant was refused.
+pub const ITEM_GIVE_ERROR_REFUSED: u32 = 0x8000_0000;
+
+/// Every refusal code, with what it means, in the order the implementation can set them.
+///
+/// # Four of these mean "the character already has it", which is NOT a failure
+///
+/// `0x800A0000`, `0x800C0000`, `0x80010000` and `0x81000000` all say the build's intent is already
+/// satisfied -- the stack is full, or the item is unique and already held. A mule save that reports
+/// `granted 15/18` for that reason looks broken and is not. See
+/// [`ITEM_GIVE_ERROR_ALREADY_SATISFIED`].
+pub const ITEM_GIVE_ERRORS: [(u32, &str); 13] = [
+    (0x8400_0000, "the count was zero or negative"),
+    (0x8800_0000, "more than one call may carry"),
+    (0xC000_0000, "no such row in ItemParam"),
+    (0xA000_0000, "the item's sub-param row is missing"),
+    (0x9000_0000, "the item is banned from being granted"),
+    (0x8001_0000, "already held, and it is not stackable"),
+    (
+        0x8040_0000,
+        "already held, and the call asked to fail if so",
+    ),
+    (0x8080_0000, "the bag has no free slot"),
+    (0x800A_0000, "the stack is already full"),
+    (0x800C_0000, "the existing stack is already full"),
+    (0x8100_0000, "not stackable, and a stack already exists"),
+    (0x8000_0000, "refused, with no reason bits set"),
+    (0x0000_0001, "accepted"),
+];
+
+/// The codes that mean the character ALREADY HAS what the build asked for.
+///
+/// Reported as satisfied rather than failed. The distinction is the difference between a mod that
+/// says "I could not give you a Poison Moss" and one that says "you already have ninety-nine".
+pub const ITEM_GIVE_ERROR_ALREADY_SATISFIED: [u32; 4] =
+    [0x800A_0000, 0x800C_0000, 0x8001_0000, 0x8100_0000];
+
 /// `GameDataManager -> ItemInventory2`. `+0x10`, reached from [`GAME_DATA_MANAGER_OFFSET`].
 ///
 /// The full chain is `[[[GAME_MANAGER_IMP] + 0xA8] + 0x10]`, and every hop must be null-checked --
@@ -4280,6 +4337,25 @@ pub const ITEM_BAG_RECALC_ATTUNEMENT_PROLOGUE: [u8; 5] = [0x40, 0x53, 0x55, 0x56
 /// Corroborated by the community table's "Additional Magic Slots" AOB, which is byte-for-byte the
 /// `movzx ecx,[rsi+0x259ed]; movsx eax,[rax+0x2e]` pair in that function.
 pub const ITEM_BAG_ATTUNEMENT_SLOTS_OFFSET: usize = 0x259EC;
+
+/// **`ItemSpawn + 0x00` is a MODE, not an unknown.** `u8`; the rest of the dword is ignored.
+///
+/// `0` grants normally. `1` refuses if the item is already held (`0x1401a9779`). `2` spends the
+/// bag's secondary slot budget. The community tables call it unknown and always write `0`, which is
+/// right for a build import and is right by accident.
+pub const ITEM_SPAWN_MODE_NORMAL: u32 = 0;
+
+/// **What to put in `ItemSpawn + 0x08`, the durability float: ZERO.**
+///
+/// The community tables say `-1` means maximum, and this once passed `-1` reinterpreted as a float
+/// -- a NaN. The disassembly does not support that convention anywhere. The game's own caller at
+/// `0x140198a9e` zero-fills `+0x04..+0x0F` and then writes only the id and the quantity.
+///
+/// It never caused the refusals it was suspected of: the check path rebuilds a fresh struct per
+/// unique id at `0x1401a628b` and writes `0` over this field, so the value cannot reach the
+/// decision. But the ADD path forwards the caller's bytes verbatim into the bag, so a NaN would
+/// have been stored on the item. Pass what the game passes.
+pub const ITEM_SPAWN_DURABILITY_DEFAULT: f32 = 0.0;
 
 /// Bytes in one `ItemSpawn`, the element [`ITEM_GIVE`] takes an array of.
 ///

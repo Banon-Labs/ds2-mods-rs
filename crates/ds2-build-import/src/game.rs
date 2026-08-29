@@ -472,8 +472,9 @@ pub(crate) unsafe fn raise_soul_memory_to(
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct ItemSpawn {
-    /// Both community writers store `0` here and nothing observed reads it.
-    pub(crate) unknown: u32,
+    /// **A MODE, not an unknown.** See [`ds2_rva::ITEM_SPAWN_MODE_NORMAL`]; `1` and `2` change
+    /// what the grant does, and a build import wants `0`.
+    pub(crate) mode: u32,
     pub(crate) item_id: i32,
     pub(crate) durability: f32,
     pub(crate) quantity: u16,
@@ -528,25 +529,56 @@ pub(crate) unsafe fn give_items(items: &[ItemSpawn], batch: usize) -> Result<usi
     // back in AL. The slice outlives the call and the callee only reads it.
     let give: ItemGiveFn = unsafe { core::mem::transmute(site) };
     let mut granted = 0usize;
-    for (index, chunk) in items.chunks(batch).enumerate() {
+    let mut satisfied = 0usize;
+    for chunk in items.chunks(batch) {
         // SAFETY: as above; `chunk` is a live slice of exactly `chunk.len()` entries.
         let ok = unsafe { give(inventory, chunk.as_ptr(), chunk.len() as u32) };
         if ok {
             granted += chunk.len();
             continue;
         }
-        // NAME WHAT DID NOT LAND. The function answers for a whole batch, so one refused item costs
-        // the other seven and the count alone cannot say which -- a run that granted 8 of 18 looks
-        // identical whether the culprit was the ninth item or the eighteenth. The ids are the only
-        // thing that turns that into a lead.
+        // ASK THE GAME WHY. `false` is one bit of a word that names the reason, and reading it is
+        // the difference between a mod that reports a mystery and one that reports "you already
+        // have ninety-nine of those". See `ds2_rva::ITEM_GIVE_ERROR_OFFSET`.
         let ids: Vec<i32> = chunk.iter().map(|item| item.item_id).collect();
+        let (code, reason) = give_error().unwrap_or((0, "the reason word could not be read"));
+        if ds2_rva::ITEM_GIVE_ERROR_ALREADY_SATISFIED.contains(&code) {
+            // NOT A FAILURE. The build wanted the character to have this and the character does.
+            satisfied += chunk.len();
+            crate::log_line(format_args!(
+                "{} {ids:?} already satisfied: {reason}",
+                crate::LOG_PREFIX
+            ));
+            continue;
+        }
         crate::log_line(format_args!(
-            "{} ItemGive refused batch {index} ({} items): {ids:?}",
-            crate::LOG_PREFIX,
-            chunk.len()
+            "{} ItemGive refused {ids:?}: {reason} ({code:#010x})",
+            crate::LOG_PREFIX
         ));
     }
-    Ok(granted)
+    Ok(granted + satisfied)
+}
+
+/// The game's own reason for the last refusal, as `(code, words)`.
+///
+/// # The mod spent three runs guessing at something the game was already saying
+///
+/// `ItemGive` returns a bare `bool`, and its entire `false` path is
+/// `test dword [inner+0x10138], 0x80000000; sete al`. The rest of that word names the reason. Three
+/// consumables looked like an unexplained refusal worth a disassembly session; they were a
+/// character already holding ninety-nine of each, and these four bytes said so at the time.
+fn give_error() -> Option<(u32, &'static str)> {
+    let inventory = item_inventory().ok()?;
+    // ONE hop, not the two that reach the bag -- the error word lives on the object the grant
+    // thunk's own `mov rcx,[rcx+0x10]` produces.
+    let inner = hop(inventory, ds2_rva::ITEM_BAG_LIST_OFFSET)?;
+    // SAFETY: inside the object the game's own pointer chain produced; the read is fault-safe.
+    let code = unsafe { safe_read_u32(inner + ds2_rva::ITEM_GIVE_ERROR_OFFSET) }?;
+    let reason = ds2_rva::ITEM_GIVE_ERRORS
+        .iter()
+        .find(|(candidate, _)| *candidate == code)
+        .map_or("an unrecorded reason", |(_, words)| *words);
+    Some((code, reason))
 }
 
 #[cfg(test)]
