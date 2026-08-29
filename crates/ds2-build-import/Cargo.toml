@@ -1,0 +1,36 @@
+# The pause-menu row that loads a soulsplanner build, and the Steam text field behind it.
+#
+# The half that needs Windows. Everything that can be decided without a game -- is this a build
+# link, which build, and what does the page say -- lives in `ds2-build-import-core` and is tested on
+# the host. What is left here is the part that can only be judged against a running DARK SOULS II.
+#
+# EVERY DEPENDENCY IS TARGET-GATED, so `cargo test --workspace` on Linux compiles none of it.
+[package]
+name = "ds2-build-import"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "ds2_build_import"
+
+[dependencies]
+ds2-build-import-core.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+ds2-game-base.workspace = true
+ds2-menu-row.workspace = true
+ds2-rva.workspace = true
+ds2-sl2-core.workspace = true
+
+# HOST-ONLY, and only for one test. `ds2-rva` is a constants crate with no dependencies of its
+# own, so it compiles on Linux even though the runtime half of this crate does not. It is here so
+# `stat_order` can compare the planner's stat order against the game's WITHOUT a Windows target --
+# that check is the difference between three stats being silently swapped and a test failing.
+[dev-dependencies]
+ds2-rva.workspace = true
+
+[lints]
+workspace = true

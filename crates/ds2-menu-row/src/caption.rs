@@ -47,6 +47,8 @@ type PathAppendFn = unsafe extern "system" fn(*const u8, *mut u8, u32) -> *mut u
 type BindProxyFn = unsafe extern "system" fn(*mut u8, *mut u8, *const u8) -> *mut u8;
 /// `fn(accessor + 0x30, string)`, literal text onto an element.
 type SetTextFn = unsafe extern "system" fn(*mut u8, *const DlString);
+/// `fn(topSelect, frameDelta)`, the pause-menu group's per-frame update.
+type UpdateFn = unsafe extern "system" fn(*mut u8, f32);
 
 static BIND_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 static APPEND_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
@@ -106,40 +108,199 @@ static QUIT_TO_MENU: [u16; 13] = [
     0,
 ];
 
-/// One `DlString` per registered row, built once and leaked.
+/// The most UTF-16 units a caption can hold, terminator included.
 ///
-/// Leaked rather than owned because the game keeps the pointer: `FeElement::setText` only READS
-/// the string, but it reads it whenever it redraws, so the bytes have to outlive anything this
-/// crate can observe. Once per process, a caption's worth of `u16` each.
-///
-/// Built lazily rather than at registration so a caller can hand in a `&'static str` without this
-/// crate deciding when the allocator is safe to use -- the first pause-menu open is long after
-/// everything is up.
-static ROW_TEXTS: std::sync::OnceLock<Vec<(u32, &'static DlString)>> = std::sync::OnceLock::new();
+/// Fixed rather than grown, because the buffer is leaked once and then REWRITTEN in place: a row
+/// that reports what it is doing changes its text many times per session, and reallocating would
+/// mean handing the game a new pointer each time. The shipped caption box is `274` units wide at
+/// font size 22 (`ds2_rva::FLO_CAPTION_BOX`), so anything much past this would not be read anyway.
+const CAPTION_CAPACITY: usize = 48;
 
-fn row_texts() -> &'static [(u32, &'static DlString)] {
-    ROW_TEXTS.get_or_init(|| {
-        crate::api::rows_for(crate::api::Tab::Quit)
-            .into_iter()
-            .map(|row| {
-                let mut units: Vec<u16> = row.caption.encode_utf16().collect();
-                units.push(0);
-                let units: &'static [u16] = Box::leak(units.into_boxed_slice());
-                let text: &'static DlString = Box::leak(Box::new(DlString {
-                    data: units.as_ptr(),
-                    // The NUL is not part of the length. The setter measures the string itself and
-                    // the terminator is there for anything that does not.
-                    length: (units.len() - 1) as u64,
-                    slack: 0,
-                    // Above `DL_STRING_INLINE_CAPACITY`, which is what selects the pointer branch.
-                    // A caption of seven units or fewer would otherwise be read out of the inline
-                    // bytes, which hold a pointer rather than characters.
-                    capacity: 32,
-                }));
-                (row.label_id, text)
-            })
-            .collect()
-    })
+/// One rewritable caption: the leaked buffer, and the `DlString` that points at it.
+///
+/// Leaked because the game keeps the pointer -- `FeElement::setText` only READS the string, and it
+/// reads it whenever it redraws, so the bytes must outlive anything this crate can observe.
+struct RowCaption {
+    label_id: u32,
+    units: *mut u16,
+    text: *mut DlString,
+}
+
+// SAFETY: both pointers are leaked allocations owned by this module and reachable only under
+// `ROW_CAPTIONS`'s lock, which is what serialises every read and write of them.
+unsafe impl Send for RowCaption {}
+
+/// Set when a caption has been rewritten and not yet pushed to the screen.
+///
+/// The push has to happen on the game thread, and [`set_caption`] can be called from anywhere, so
+/// the two are joined by this flag rather than by a direct call. [`update_detour`] clears it.
+static CAPTIONS_DIRTY: AtomicBool = AtomicBool::new(false);
+
+/// The trampoline for the pause-menu group's per-frame update.
+static UPDATE_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
+
+/// Callbacks to run on the game thread, once per frame the pause menu updates.
+///
+/// This exists because the useful work a row does is almost never doable where the row is pressed.
+/// A row that fetches over the network answers on a worker; a row that then wants to call INTO the
+/// game cannot do it from there. The tick is the only place this crate already holds that is both
+/// on the game thread and recurring, so it is the seam.
+static TICKS: Mutex<Vec<fn()>> = Mutex::new(Vec::new());
+
+/// Register a callback to run once per frame while the pause menu is up.
+pub(crate) fn add_tick(callback: fn()) -> bool {
+    match TICKS.lock() {
+        Ok(mut ticks) => {
+            ticks.push(callback);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Every registered row's caption, rewritable.
+///
+/// A `Mutex` rather than a `OnceLock` because these change: [`set_caption`] is what lets a row say
+/// "Fetching..." and then say what it found. The lock is held across the `setText` call in
+/// [`push_captions`], which is what makes a worker's write and the game's copy exclusive -- the
+/// game copies the bytes DURING that call and never touches them afterwards.
+static ROW_CAPTIONS: Mutex<Vec<RowCaption>> = Mutex::new(Vec::new());
+
+/// Build the buffers from the registry, once.
+fn ensure_row_captions(captions: &mut Vec<RowCaption>) {
+    if !captions.is_empty() {
+        return;
+    }
+    for row in crate::api::rows_for(crate::api::Tab::Quit) {
+        let units: Box<[u16]> = vec![0u16; CAPTION_CAPACITY].into_boxed_slice();
+        let units = Box::leak(units).as_mut_ptr();
+        let text = Box::leak(Box::new(DlString {
+            data: units,
+            length: 0,
+            slack: 0,
+            // Above `DL_STRING_INLINE_CAPACITY`, which is what selects the pointer branch. A
+            // caption of seven units or fewer would otherwise be read out of the inline bytes,
+            // which hold a pointer rather than characters.
+            capacity: CAPTION_CAPACITY as u64,
+        })) as *mut DlString;
+        let caption = RowCaption {
+            label_id: row.label_id,
+            units,
+            text,
+        };
+        write_units(&caption, row.caption);
+        captions.push(caption);
+    }
+}
+
+/// Copy `text` into a caption's buffer as NUL-terminated UTF-16, truncating to fit.
+///
+/// Truncates rather than refuses: a caption is a label, and a short one is a better failure than a
+/// stale one that still says "Fetching...".
+fn write_units(caption: &RowCaption, text: &str) {
+    let mut units: Vec<u16> = text.encode_utf16().take(CAPTION_CAPACITY - 1).collect();
+    let length = units.len();
+    units.push(0);
+    // SAFETY: `units` is a leaked allocation of exactly `CAPTION_CAPACITY` units and `units.len()`
+    // is at most that, terminator included. The caller holds `ROW_CAPTIONS`.
+    unsafe {
+        std::ptr::copy_nonoverlapping(units.as_ptr(), caption.units, units.len());
+        // The NUL is not part of the length. The setter measures the string itself and the
+        // terminator is there for anything that does not.
+        (*caption.text).length = length as u64;
+    }
+}
+
+/// Change what a registered row says. Safe to call from any thread.
+///
+/// It only rewrites this crate's own buffer -- **nothing reaches the game until
+/// [`crate::refresh_row_captions`] or the next pause-menu open**, both of which are on the game
+/// thread. That split is the whole point: the crate that wants to report a network result has that
+/// result on a worker, and touching the scene from there would be a race with the renderer.
+pub(crate) fn set_caption(row: usize, text: &str) -> bool {
+    let Ok(mut captions) = ROW_CAPTIONS.lock() else {
+        return false;
+    };
+    ensure_row_captions(&mut captions);
+    match captions.get(row) {
+        Some(caption) => {
+            write_units(caption, text);
+            CAPTIONS_DIRTY.store(true, Ordering::Release);
+            true
+        }
+        None => false,
+    }
+}
+
+/// `FeGroupInGameTopSelect::v2`, detoured: run the game's update, then push any changed caption.
+///
+/// **This is what makes a caption change VISIBLE while the menu is still open.** Without it, a row
+/// that learns something -- a fetch that finished, a link that was refused -- could not say so until
+/// the player closed the pause menu and opened it again, because captions are otherwise written
+/// once, at bind.
+///
+/// It does as little as a per-frame detour can: an `AtomicBool` load on every frame, and real work
+/// only on the frames where something actually changed. The original runs FIRST, so a frame in which
+/// the game itself rewrites the captions is not fought over.
+unsafe extern "system" fn update_detour(top_select: *mut u8, delta: f32) {
+    let trampoline = UPDATE_TRAMPOLINE.load(Ordering::Acquire);
+    if trampoline != 0 {
+        // SAFETY: MinHook published this trampoline for exactly this site, and the signature is the
+        // one the disassembled entry implements -- the group in RCX, the frame delta in XMM1.
+        let original: UpdateFn = unsafe { std::mem::transmute::<usize, UpdateFn>(trampoline) };
+        // SAFETY: both arguments are the caller's own.
+        unsafe { original(top_select, delta) };
+    }
+    // THE CALLBACKS RUN BEFORE THE CAPTION PUSH, so a callback that changes a caption is seen on
+    // this frame rather than the next one. They are copied out from under the lock first: a
+    // callback that registers another tick would otherwise deadlock on a lock its caller holds.
+    let ticks: Vec<fn()> = match TICKS.lock() {
+        Ok(ticks) => ticks.clone(),
+        Err(_) => Vec::new(),
+    };
+    for tick in ticks {
+        tick();
+    }
+
+    if CAPTIONS_DIRTY.swap(false, Ordering::AcqRel) {
+        // The group is live and this is the game thread, which is exactly what `push_captions`
+        // requires. Remember it too: a push can also be wanted on a frame this detour did not
+        // start, and the captured path is what the write needs.
+        TOP_SELECT.store(top_select as usize, Ordering::Release);
+        // SAFETY: the game thread, inside the menu's own per-frame update, with the group it was
+        // called for.
+        unsafe { push_captions() };
+    }
+}
+
+/// Push every caption onto its element. **Game thread only.**
+///
+/// # Safety
+///
+/// Calls into the game's scene machinery, so it must run on the thread the game builds its menus
+/// on and only while the pause menu the captions belong to is up.
+pub(crate) unsafe fn push_captions() -> usize {
+    let bytes = match CAPTURED.lock() {
+        Ok(captured) => *captured,
+        Err(_) => None,
+    };
+    let Some(bytes) = bytes else {
+        return 0;
+    };
+    let top = TOP_SELECT.load(Ordering::Acquire);
+    let Ok(mut captions) = ROW_CAPTIONS.lock() else {
+        return 0;
+    };
+    ensure_row_captions(&mut captions);
+    let mut pushed = 0;
+    for caption in captions.iter() {
+        // SAFETY: `bytes` is a scene path copied out of a live one, `top` the group it belongs to,
+        // and `caption.text` a leaked `DlString` this module owns. The lock is held across the
+        // call, so the game's copy cannot race another thread's rewrite.
+        unsafe { write_caption(&bytes, top, caption.label_id, &*caption.text) };
+        pushed += 1;
+    }
+    pushed
 }
 static TITLE_ROW_TEXT: DlString = DlString {
     data: QUIT_TO_MENU.as_ptr(),
@@ -218,9 +379,9 @@ unsafe fn write_caption(
 
     // THE BANNER, once, and only from the pass that resolves the row this crate added -- the other
     // pass targets the shipped row and would do the same work twice.
-    if row_texts()
+    if crate::api::rows_for(crate::api::Tab::Quit)
         .first()
-        .is_some_and(|(first, _)| label == *first)
+        .is_some_and(|first| label == first.label_id)
     {
         // THE CONTAINER PATH, NOT THE CAPTURED ONE. The caption binder seals its base with a
         // trailing `0x5f5b9f2` -- the text leaf every caption ends at -- so the capture is FIVE ids,
@@ -320,12 +481,15 @@ unsafe extern "system" fn bind_detour(top_select: *mut u8) {
         return;
     };
     let top = TOP_SELECT.load(Ordering::Acquire);
-    // SAFETY: `bytes` is a scene path copied out of a live one, and `top` the group the original
-    // just ran for.
+    // THIS IS ALSO WHAT MAKES A CHANGED CAPTION APPEAR. A row that reports a result rewrites its
+    // own buffer from whatever thread got that result; the text reaches the screen HERE, on the
+    // game thread, the next time the menu opens -- or sooner, if the row pushes it itself while the
+    // menu is still up.
+    //
+    // SAFETY: this is the caption bind, on the game thread, with the group the original just ran
+    // for, and `bytes` is a scene path copied out of a live one.
     unsafe {
-        for (label, text) in row_texts() {
-            write_caption(&bytes, top, *label, text);
-        }
+        push_captions();
         write_caption(
             &bytes,
             top,
@@ -386,11 +550,60 @@ pub unsafe fn install(base: usize) -> bool {
             }
         }
     }
-    if ok {
+    // THE PER-FRAME PUSH IS AN ENHANCEMENT AND FAILS SOFT. Without it every caption still gets
+    // written at bind, so the row is labelled and works; what is lost is a caption that CHANGES
+    // while the menu is open. So a refusal here logs and leaves `ok` alone -- degrading to
+    // "the text updates when you reopen the menu" is not the same class of failure as a blank row.
+    let update_site = base + ds2_rva::FE_INGAME_TOP_SELECT_UPDATE as usize;
+    let mut prologue = [0u8; ds2_rva::FE_INGAME_TOP_SELECT_UPDATE_PROLOGUE.len()];
+    // SAFETY: a resolved RVA inside the loaded game image; `read_bytes` faults safely.
+    let read = unsafe { ds2_game_base::mem::read_bytes(update_site, &mut prologue) };
+    if !read || prologue != ds2_rva::FE_INGAME_TOP_SELECT_UPDATE_PROLOGUE {
+        // THE BYTES BEFORE THE PATCH. An RVA is a number, and on a build this was not read from it
+        // points into the middle of something else that would accept the write.
         log(format_args!(
-            "{LOG_PREFIX} captions armed added-row={:#x}=\"Quit Game\" \
-             shipped-row={:#x}=\"Quit to Menu\"",
-            ds2_rva::FLO_ADDED_ROW_LABEL_ID,
+            "{LOG_PREFIX} caption-tick NOT installed reason=prologue read={read} saw={prologue:02x?} \
+             want={:02x?} -- captions will update on the next menu OPEN rather than live",
+            ds2_rva::FE_INGAME_TOP_SELECT_UPDATE_PROLOGUE
+        ));
+    } else {
+        match unsafe { MhHook::new(update_site as *mut c_void, update_detour as *mut c_void) } {
+            Ok(hook) => {
+                UPDATE_TRAMPOLINE.store(hook.trampoline() as usize, Ordering::Release);
+                let status = unsafe { MH_EnableHook(update_site as *mut c_void) };
+                if status == MH_STATUS::MH_OK {
+                    log(format_args!(
+                        "{LOG_PREFIX} caption-tick hooked rva=0x{:08x} va=0x{update_site:016x} \
+                         -- a changed caption now appears without reopening the menu",
+                        ds2_rva::FE_INGAME_TOP_SELECT_UPDATE
+                    ));
+                } else {
+                    log(format_args!(
+                        "{LOG_PREFIX} caption-tick NOT installed stage=MH_EnableHook \
+                         status={status:?} -- captions update on the next menu OPEN"
+                    ));
+                }
+            }
+            Err(status) => log(format_args!(
+                "{LOG_PREFIX} caption-tick NOT installed stage=MH_CreateHook status={status:?} \
+                 -- captions update on the next menu OPEN"
+            )),
+        }
+    }
+
+    if ok {
+        // THE CAPTIONS THIS PRINTS ARE THE ONES IT WROTE. It used to print the literals
+        // `"Quit Game"` and `"Quit to Menu"` no matter what was in the registry, which was true
+        // exactly as long as there was one hardcoded row -- and then read as a wrong caption the
+        // first time another crate registered one. A log line that hardcodes what it claims to have
+        // done cannot report the bug it exists to report.
+        let added = crate::api::rows_for(crate::api::Tab::Quit)
+            .iter()
+            .map(|row| format!("{:#x}=\"{}\"", row.label_id, row.caption))
+            .collect::<Vec<_>>()
+            .join(" ");
+        log(format_args!(
+            "{LOG_PREFIX} captions armed added-rows=[{added}] shipped-row={:#x}=\"Quit to Menu\"",
             ds2_rva::FE_QUIT_TAB_ROW_TITLE_LABEL_ID
         ));
     }
@@ -403,7 +616,7 @@ mod tests {
 
     /// The shipped row's replacement must be NUL-terminated, because the setter walks to the
     /// terminator itself and an unterminated buffer is a read off the end of this DLL's data. The
-    /// registered rows' strings get their terminator in `row_texts`, which pushes one.
+    /// registered rows' strings get their terminator in `write_units`, which pushes one.
     #[test]
     fn the_captions_are_nul_terminated() {
         assert_eq!(*QUIT_TO_MENU.last().unwrap(), 0);

@@ -176,10 +176,16 @@ KEY_SHOW_UNAVAILABLE = "show_unavailable"
 #: put an unexplained row in the pause menu and call it a measurement.
 MENU_ROW_SECTION = "menu_row"
 KEY_MENU_ROW_ENABLED = "enabled"
+
+#: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/build_import.rs`.
+BUILD_IMPORT_SECTION = "build_import"
+KEY_BUILD_IMPORT_ENABLED = "enabled"
 #: Mirrors `LOG_PREFIX` in `crates/ds2-menu-row/src/lib.rs`. Named here because the generated
 #: config tells the reader which line to look for, and a prefix that drifted would send them
 #: looking for a line that is never written.
 MENU_ROW_LOG_PREFIX = "ds2-menu-row:"
+#: The prefix `ds2-build-import` writes. Grep for it when a run disappoints.
+BUILD_IMPORT_LOG_PREFIX = "ds2-build-import:"
 
 #: Mirrors `CONFIG_SECTION` and the four `KEY_*` in `crates/ds2-loader/src/offline.rs`.
 #: ON by default, unlike every other feature's switch here, because this workspace patches
@@ -1067,6 +1073,7 @@ def config_text(
     block_sockets: bool = True,
     save_redirect: str | None = None,
     menu_row: bool = False,
+    build_import: bool = False,
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
@@ -1408,6 +1415,46 @@ def config_text(
 # does.
 {KEY_MENU_ROW_ENABLED} = {str(menu_row).lower()}
 
+[{BUILD_IMPORT_SECTION}]
+# NOT STARTUP either, and a different kind of risk from the row above it. This one adds a "Load from
+# URL" row that reads a soulsplanner link off the clipboard (or takes a typed build number), fetches
+# the build over HTTPS, and APPLIES IT TO THE LIVE CHARACTER: soul memory, then the nine stats and
+# therefore the level, then the items, then every weapon, armour piece, ring, spell, hotbar slot and
+# the covenant, and finally the Estus Flask, taken to the maximum this game allows.
+#
+# EVERY WRITE IS A CALL INTO THE GAME'S OWN FUNCTION. Nothing here pokes a field the engine
+# maintains -- stats through PlayerParam::SetAllStats, souls through AddSouls, items through
+# ItemGive, slots through SetEquip, the covenant through PlayerCtrl's own setter, and the flask
+# through the same ItemInventory2::SetEstusProperty the Emerald Herald's dialogue calls. Each one is
+# read back afterwards, because several of them fail silently.
+#
+# OFF unless this says exactly `true`. It changes a character, and while a redirected save is
+# re-staged every launch, the game's own save is not.
+#
+# WHY IT NEEDS A NEWER STEAM INTERFACE. The game's own steam_api64.dll knows SteamUtils005, whose
+# ShowGamepadTextInput takes four arguments and cannot prefill; pchExistingText arrives in
+# SteamUtils007. ISteamClient012::GetISteamUtils takes a version STRING and passes it through to
+# steamclient64.dll, which vends up to 011 -- so this asks for 007 and gets a second interface whose
+# slot 0xa0 takes the prefill, while the game keeps its own 005 pointer untouched. Handing the game
+# the newer pointer would be a bug: 007 keeps the method at the SAME slot, so the game's four-arg
+# call would pass whatever was in r9 as a const char*.
+#
+# WHY IT WRITES THE GAME'S OWN KEYBOARD STATE. The game's GamepadTextInputDismissed_t listener
+# (0x00ff2040, fourteen branchless bytes) does not check whether the GAME asked for the keyboard,
+# and it is registered process-wide, so it fires for a session this mod opened. It writes m_state,
+# and that field is load-bearing twice over:
+#   * left dirty, SoftwareKeyboardManagerImpl::show refuses forever (it demands -1 at 0x140ff2317)
+#     and character naming silently falls back to the in-game widget for the rest of the process;
+#   * opened over the game's own session, FeSoftKeyImputJob harvests OUR text as the player's name.
+# So the mod refuses unless the field reads -1, claims it while open, and restores it on every path
+# including the error ones.
+#
+# READ THE LOG, NOT THE SCREEN. `{BUILD_IMPORT_LOG_PREFIX} field open, prefilled ...` is the line
+# that says the overlay drew something; `... no field: the Steam overlay is disabled` is the one
+# failure no amount of reading the executable could predict, because it is a property of the running
+# Steam client rather than of the game.
+{KEY_BUILD_IMPORT_ENABLED} = {str(build_import).lower()}
+
 [{CRASH_SECTION}]
 {crash_banner}# STARTUP-ONLY, both of them. The handler is installed in DllMain BEFORE `neuter_arxan`, because
 # that call patches code from static analysis and is the likeliest crash in the whole startup path
@@ -1466,6 +1513,7 @@ def write_config(
     block_sockets: bool = True,
     save_redirect: str | None = None,
     menu_row: bool = False,
+    build_import: bool = False,
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
@@ -1492,6 +1540,7 @@ def write_config(
         block_sockets,
         save_redirect,
         menu_row,
+        build_import,
     )
     path.write_text(text, encoding="utf-8")
     return path, text
@@ -1576,6 +1625,7 @@ def dry_run(
     block_sockets: bool = True,
     save_redirect: str | None = None,
     menu_row: bool = False,
+    build_import: bool = False,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
@@ -1620,6 +1670,7 @@ def dry_run(
             block_sockets,
             save_redirect,
             menu_row,
+            build_import,
         ):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
         else:
@@ -1659,6 +1710,7 @@ def dry_run(
                 offline,
                 block_sockets,
                 menu_row=menu_row,
+                build_import=build_import,
             ),
             indent="[dry-run]   | ",
         )
@@ -1721,6 +1773,7 @@ def launch(
     block_sockets: bool = True,
     save_redirect: str | None = None,
     menu_row: bool = False,
+    build_import: bool = False,
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
@@ -1760,6 +1813,7 @@ def launch(
         block_sockets,
         save_redirect,
         menu_row,
+        build_import,
     )
     print(f"[config] {config_path}")
 
@@ -2396,6 +2450,63 @@ def selftest() -> int:
         f"({MENU_ROW_LOG_PREFIX})",
     )
 
+    # THE SAME CONTRACT FOR THE BUILD-IMPORT ROW. It is a separate section on purpose -- one row
+    # measures whether a fourth row draws, the other opens a Steam overlay and talks to the network
+    # -- so a run that misbehaves is attributable to one of them by editing one line.
+    values, _ = parse_config(config_text("off"))
+    check(
+        values.get((BUILD_IMPORT_SECTION, KEY_BUILD_IMPORT_ENABLED)) == "false",
+        f"[{BUILD_IMPORT_SECTION}] {KEY_BUILD_IMPORT_ENABLED} defaults to FALSE -- it asks Steam "
+        "for an overlay and writes the game's own keyboard state, neither of which has been run",
+    )
+    values, _ = parse_config(config_text("off", build_import=True))
+    check(
+        values.get((BUILD_IMPORT_SECTION, KEY_BUILD_IMPORT_ENABLED)) == "true"
+        and values.get((MENU_ROW_SECTION, KEY_MENU_ROW_ENABLED)) == "false",
+        "--build-import turns on only its own key, in its own section",
+    )
+    values, _ = parse_config(config_text("off", menu_row=True))
+    check(
+        values.get((BUILD_IMPORT_SECTION, KEY_BUILD_IMPORT_ENABLED)) == "false",
+        "--menu-row leaves the build-import key OFF -- two rows on one tab, two switches",
+    )
+    build_import_src = (REPO_ROOT / "crates/ds2-loader/src/build_import.rs").read_text(
+        encoding="utf-8"
+    )
+    check(
+        f'"{BUILD_IMPORT_SECTION}"' in build_import_src,
+        f"the DLL reads the section this writes ([{BUILD_IMPORT_SECTION}])",
+    )
+    check(
+        f'"{KEY_BUILD_IMPORT_ENABLED}"' in build_import_src,
+        f"the DLL reads {BUILD_IMPORT_SECTION}.{KEY_BUILD_IMPORT_ENABLED}",
+    )
+    build_import_lib = (REPO_ROOT / "crates/ds2-build-import/src/lib.rs").read_text(
+        encoding="utf-8"
+    )
+    check(
+        f'"{BUILD_IMPORT_LOG_PREFIX}"' in build_import_lib,
+        f"the DLL writes the prefix this config tells the reader to look for "
+        f"({BUILD_IMPORT_LOG_PREFIX})",
+    )
+    # THE ROW MUST BE REGISTERED BEFORE THE REGISTRY IS SEALED, and that is an ORDERING in the
+    # loader rather than anything this file writes. `ds2_menu_row::install` seals as its first act,
+    # so a row registered after it is a row that silently never appears -- exactly the failure that
+    # would look like "the overlay did not open".
+    loader_src = (REPO_ROOT / "crates/ds2-loader/src/lib.rs").read_text(encoding="utf-8")
+    check(
+        loader_src.count("install_build_import();") == 2,
+        "both Arxan arms register the build-import row, or the A/B pair stops being comparable",
+    )
+    check(
+        all(
+            block.index("install_build_import();") < block.index("install_menu_row();")
+            for block in [loader_src]
+            if "install_build_import();" in block
+        ),
+        "install_build_import runs BEFORE install_menu_row, which seals the row registry",
+    )
+
     # THE ARMS MUST DIFFER, and in exactly one key. If two arms ever generated the same file the
     # A/B comparison would be two runs of the same experiment, and the arm-readback guard would
     # not catch it because the DLL would be reporting truthfully.
@@ -2854,6 +2965,22 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--build-import",
+        dest="build_import",
+        action="store_true",
+        default=False,
+        help=(
+            "add a 'Load from URL' row to the same PAUSE menu tab. It reads a soulsplanner link "
+            "off the clipboard (or takes a typed build number), fetches the build, and APPLIES IT "
+            "to the live character -- soul memory, then the stats and therefore the level, then "
+            "the items, every equipment slot, the covenant, and the Estus Flask taken to maximum. "
+            "OFF BY DEFAULT, because it changes a character. Every write is a call into the game's "
+            "own function and every one is read back. Look for "
+            f"`{BUILD_IMPORT_LOG_PREFIX} character now: ...` in the log, then the granted, "
+            "equipped and Estus lines that follow it."
+        ),
+    )
+    parser.add_argument(
         "--probe-site",
         choices=PROBE_SITES,
         default="m1",
@@ -2938,6 +3065,7 @@ def main() -> int:
             args.block_sockets,
             args.save_redirect,
             args.menu_row,
+            args.build_import,
         )
     return launch(
         args.probe,
@@ -2963,6 +3091,7 @@ def main() -> int:
         args.block_sockets,
         args.save_redirect,
         args.menu_row,
+        args.build_import,
     )
 
 

@@ -47,6 +47,8 @@ ds2-boot-timeline = { path = "crates/ds2-boot-timeline" }
 ds2-continue = { path = "crates/ds2-continue" }
 ds2-offline = { path = "crates/ds2-offline" }
 ds2-save-redirect = { path = "crates/ds2-save-redirect" }
+ds2-build-import = { path = "crates/ds2-build-import" }
+ds2-build-import-core = { path = "crates/ds2-build-import-core" }
 ds2-menu-row = { path = "crates/ds2-menu-row" }
 ds2-sl2-core = { path = "crates/ds2-sl2-core" }
 

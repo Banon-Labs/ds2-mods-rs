@@ -83,6 +83,7 @@ use dearxan::disabler::{neuter_arxan, schedule_after_arxan};
 
 pub mod arxan_probe;
 pub mod boot_timeline;
+pub mod build_import;
 pub mod continue_flow;
 pub mod crash_logging;
 pub mod dialog_skip;
@@ -308,6 +309,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_boot_timeline();
                 install_continue_record();
                 install_title_menu();
+                install_build_import();
                 install_menu_row();
                 arm_fault(crash_config);
             });
@@ -342,6 +344,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_boot_timeline();
                 install_continue_record();
                 install_title_menu();
+                install_build_import();
                 install_menu_row();
                 arm_fault(crash_config);
             });
@@ -661,28 +664,70 @@ fn install_title_menu() {
     }
 }
 
-/// Append the extra row to the pause menu's quit tab, if `<Game>/ds2-mods.toml` asked for it.
+/// Register the Load from URL row, if `<Game>/ds2-mods.toml` asked for it.
+///
+/// Registration only -- the hooks go in later, in [`install_menu_row`], which is why this must run
+/// BEFORE it. `ds2_menu_row::install` seals the registry as its first act, and a row registered
+/// afterwards is a row that silently never appears.
+fn install_build_import() {
+    let config = build_import::BuildImportConfig::load();
+    log_line(format_args!("{}", config.describe()));
+    if !config.enabled {
+        return;
+    }
+    match ds2_build_import::register(log_line) {
+        Ok(id) => log_line(format_args!(
+            "{} registered {id:?} caption=\"Load from URL\" tab=Quit",
+            ds2_build_import::LOG_PREFIX
+        )),
+        Err(error) => log_line(format_args!(
+            "{} NOT REGISTERED: {error} -- no row will be added",
+            ds2_build_import::LOG_PREFIX
+        )),
+    }
+}
+
+/// Append the extra row to the pause menu's quit tab, and install the hooks every registered row
+/// needs.
 ///
 /// Last of the installs, and the only one whose target is not reached during boot at all: the tab
 /// builders run when `FeGroupInGameTopSelect` is constructed, which needs a game in progress and a
 /// player pressing the pause button. Nothing races it, so it goes wherever it is tidiest.
 ///
-/// **This one is an instrument, not a feature.** It exists to find out whether a fourth entry in a
-/// tab's item vector becomes a fourth visible row -- see the crate docs for what could not be
-/// settled by reading the executable. It is off unless the config says exactly `true`.
+/// **The quit-to-desktop row is an instrument, not a feature**, and is off unless the config says
+/// exactly `true`. THE INSTALL IS NOT GATED ON IT. It used to be, which meant a second crate's row
+/// could be registered and then never hooked because an unrelated key was off -- a feature failing
+/// silently on someone else's switch. `install` reads the registry and does nothing when it is
+/// empty, saying so in the log, so calling it unconditionally is "install if anything registered".
 fn install_menu_row() {
     let config = menu_row::MenuRowConfig::load();
     log_line(format_args!("{}", config.describe()));
-    if !config.enabled {
-        return;
-    }
     ds2_menu_row::set_logger(log_line);
+    if config.enabled {
+        register_quit_row();
+    }
 
-    // REGISTERED THROUGH THE PUBLIC API, not hardcoded inside the crate. This is the same call any
-    // other crate makes to put a row on a pause-menu tab, and it is here rather than in
-    // `ds2-menu-row` on purpose: an API that is only good enough for someone else's row and not
-    // for our own would look fine until someone else tried it.
-    //
+    // SAFETY: the target is a `.pdata` function start recorded in `ds2-rva`, resolved against the
+    // live module base, and `scripts/ds2-arxan-chain.py` reports a clean prologue at it rather than
+    // an Arxan redirect. The detour re-reads that prologue and refuses to patch anything if it is
+    // not the six bytes recorded there, and it declares the signature the disassembled entry and
+    // exit implement: one pointer in RCX, the same pointer back in RAX.
+    let outcome = unsafe { ds2_menu_row::install() };
+    if !outcome.installed {
+        log_line(format_args!(
+            "{} NOT INSTALLED -- the pause menu is the game's own, and this run measures nothing",
+            ds2_menu_row::LOG_PREFIX
+        ));
+    }
+}
+
+/// The quit-to-desktop row, registered the way any other crate registers one.
+///
+/// REGISTERED THROUGH THE PUBLIC API, not hardcoded inside the crate. This is the same call
+/// `ds2-build-import` makes, and it is here rather than in `ds2-menu-row` on purpose: an API that
+/// is only good enough for someone else's row and not for our own would look fine until someone
+/// else tried it.
+fn register_quit_row() {
     // The tint is the one three runs settled -- see `ds2_rva::FLO_ADDED_ROW_TINT_STRENGTH` for the
     // ramp and what each value looked like on screen.
     let registered = ds2_menu_row::add_row(ds2_menu_row::RowSpec {
@@ -703,26 +748,10 @@ fn install_menu_row() {
             ds2_menu_row::Tab::Quit.capacity() - 1,
             ds2_menu_row::Tab::Quit.capacity()
         )),
-        Err(error) => {
-            log_line(format_args!(
-                "{} NOT REGISTERED: {error} -- no row will be added",
-                ds2_menu_row::LOG_PREFIX
-            ));
-            return;
-        }
-    }
-
-    // SAFETY: the target is a `.pdata` function start recorded in `ds2-rva`, resolved against the
-    // live module base, and `scripts/ds2-arxan-chain.py` reports a clean prologue at it rather than
-    // an Arxan redirect. The detour re-reads that prologue and refuses to patch anything if it is
-    // not the six bytes recorded there, and it declares the signature the disassembled entry and
-    // exit implement: one pointer in RCX, the same pointer back in RAX.
-    let outcome = unsafe { ds2_menu_row::install() };
-    if !outcome.installed {
-        log_line(format_args!(
-            "{} NOT INSTALLED -- the pause menu is the game's own, and this run measures nothing",
+        Err(error) => log_line(format_args!(
+            "{} NOT REGISTERED: {error} -- no row will be added",
             ds2_menu_row::LOG_PREFIX
-        ));
+        )),
     }
 }
 

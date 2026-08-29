@@ -63,10 +63,26 @@ TRANSFORM_SIZE = 0x30
 #: `rec+0x12`, the kind flags `FUN_140b50bc0` switches on -- in this order, first match wins.
 #: It is a FLAG WORD, not an enum: `FUN_140b50bc0` masks it with `0xd` and records carrying `0x1004`
 #: exist, so bits above the low nibble mean something this has not decoded. Only `NESTED` is walked.
+#:
+#: `0x8` IS TEXT AND `0x2` IS NOT. This file said the opposite until 2026-08-28 and the game
+#: disagrees: run `tree --def 0x22c` on `l02_01_In-Game.flo` and the caption mark's leaf -- the
+#: element `ds2-menu-row`'s `caption.rs` writes row labels into, so its kind is not in doubt --
+#: comes out `kind=0x8`. Each bit's builder, then the constructor it calls, then the vtable that
+#: constructor writes, then MSVC RTTI for that vtable:
+#:
+#:   0x1  table doc+0x08  ctor 0x140b6ef80  FeComponentTextureShape   (0x140b511b0 -> Mask, in a
+#:                                                                     mask walk: 0x140b50d29)
+#:   0x2  table doc+0x10  ctor 0x140b6d080  FeComponentMaskShape
+#:   0x4  table doc+0x18  --                a nested definition
+#:   0x8  table doc+0x40  ctor 0x140b6d390  FeComponentTextField
+#:
+#: In `l02_01_In-Game.flo` the mask table's count at `doc+0x4a` is ZERO, so all eleven `kind&0x2`
+#: records miss that lookup and fall through to the shape table. There is no text under `0x2` in
+#: that document and there never was.
 KIND_SHAPE = 0x1
-KIND_TEXT = 0x2
+KIND_MASK = 0x2
 KIND_NESTED = 0x4
-KIND_TEXTURE = 0x8
+KIND_TEXT = 0x8
 
 
 class Flo:

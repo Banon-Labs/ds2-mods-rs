@@ -2877,10 +2877,25 @@ pub const FLO_RECORD_TRANSFORM_OFFSET: usize = 0x08;
 /// order of siblings follows the order they are attached in.
 pub const FLO_RECORD_DEPTH_OFFSET: usize = 0x10;
 
-/// `u16` kind flags, the value `FUN_140b50bc0` switches on: `1` shape, `2` text, `4` a nested
-/// definition, `8` texture. A FLAG WORD rather than an enum -- the builder masks it with `0xd` and
+/// `u16` kind flags, the value `FUN_140b50bc0` switches on: `1` shape, `2` mask, `4` a nested
+/// definition, **`8` text**. A FLAG WORD rather than an enum -- the builder masks it with `0xd` and
 /// records carrying `0x1004` exist, so the bits above the low nibble mean something unread. Every
 /// quit-tab row is plain `4`, and this crate only ever copies the field.
+///
+/// **THIS SAID "`2` TEXT, `8` TEXTURE" UNTIL 2026-08-28 AND IT WAS WRONG BOTH WAYS.** The check
+/// that settles it needs no disassembly: `scripts/ds2-flo.py tree l02_01_In-Game.flo --def 0x22c`
+/// walks the caption mark down to the leaf `caption.rs` writes row labels into -- an element whose
+/// kind is not in question, because this repo already puts text in it -- and prints `kind=0x8`.
+///
+/// The derivation, for the version that does need disassembly: each bit selects a table and a
+/// builder, the builder calls a constructor, the constructor writes a vtable, and MSVC RTTI names
+/// it. `0x1` -> `0x140b6ef80` -> `FeComponentTextureShape` (or `FeComponentTextureMask` when the
+/// builder is inside a mask walk, branched at `0x140b50d29`); `0x2` -> `0x140b6d080` ->
+/// `FeComponentMaskShape`; `0x8` -> `0x140b6d390` -> `FeComponentTextField`.
+///
+/// The mistake survived because it never contradicted anything: in `l02_01_In-Game.flo` the mask
+/// table's count at `doc+0x4a` is zero, so every `kind & 2` record misses that lookup and falls
+/// through to the shape table and draws -- which is exactly what a reader expecting "shape" sees.
 pub const FLO_RECORD_KIND_OFFSET: usize = 0x12;
 
 /// `u16` last frame and `u16` first frame. `0xffff` as the last frame means "never ends", which is
@@ -3507,3 +3522,1230 @@ pub const FLO_ADDED_PANEL_DEFINITION: u32 = 0xf221;
 pub const FLO_CARET_Y: f32 = 292.65;
 /// What the shipped caret's y reads, checked before anything is written.
 pub const FLO_CARET_SHIPPED_Y: f32 = 244.65;
+
+// =================================================================================================
+// THE SOFTWARE KEYBOARD, AND THE ONE DWORD THAT KEEPS IT SAFE TO BORROW
+//
+// DARK SOULS II already asks Steam for a text field -- `SoftwareKeyboardManagerImpl` wraps
+// `ISteamUtils::ShowGamepadTextInput` and the game uses it for character naming. A mod can call the
+// same API for its own field, and should, because the alternative is drawing and driving a text
+// box by hand. But the game's own dismissal listener does NOT check whether it asked for the
+// keyboard, so a session this mod opens is a session the game will react to.
+//
+// EVERY ADDRESS BELOW WAS BYTE-CHECKED AGAINST `darksoulsii-deobf.bin`, not read out of a report.
+// The four that matter are quoted with their bytes in their own doc comments.
+// =================================================================================================
+
+/// `SoftwareKeyboard::detail::SoftwareKeyboardManagerImpl`'s singleton pointer. RVA `0x01896a08`.
+///
+/// **Null until the first soft-keyboard interaction**, and that null is a fact worth checking
+/// rather than defending against: the game's dismissal listener is registered by the impl's
+/// CONSTRUCTOR, so while this pointer is null there is no listener for `GamepadTextInputDismissed_t`
+/// anywhere in the game and a mod's own keyboard session cannot disturb anything.
+///
+/// Established from the accessor `0x140ff1d20`, which both reads and writes it:
+///
+/// ```text
+/// 0x140ff1d4e: 48 8b 0d b3 4c 8a 00   mov rcx,[rip+0x8a4cb3]   ; -> 0x141896a08
+/// 0x140ff1dbe: 48 89 05 43 4c 8a 00   mov [rip+0x8a4c43],rax   ; the store after construction
+/// ```
+///
+/// Both displacements resolve to the same address, from a scan of the accessor's whole body rather
+/// than from one hit.
+pub const SOFTWARE_KEYBOARD_IMPL_SINGLETON: u32 = 0x0189_6a08;
+
+/// `int32 m_state` inside the impl. `+0x08`.
+///
+/// The constructor at `0x140ff1e28` opens it at idle -- `c7 43 08 ff ff ff ff`,
+/// `mov DWORD PTR [rbx+0x8],0xffffffff` -- and it is the only field any of the three parties
+/// (the game, Steam's callback, this mod) needs to agree on.
+pub const SOFTWARE_KEYBOARD_IMPL_STATE_OFFSET: usize = 0x08;
+
+/// `m_state` when no session is running. `-1`.
+///
+/// **The value [`SOFTWARE_KEYBOARD_IMPL_SHOW`] demands before it will open anything**, and the
+/// value this mod must restore when its own session ends.
+pub const SOFTWARE_KEYBOARD_STATE_IDLE: i32 = -1;
+/// `m_state` while a Steam keyboard is up. `0`. Written by `show` only after
+/// `ShowGamepadTextInput` returned true.
+pub const SOFTWARE_KEYBOARD_STATE_SHOWING: i32 = 0;
+/// `m_state` after a dismissal the player did not submit. `2`.
+pub const SOFTWARE_KEYBOARD_STATE_CANCELLED: i32 = 2;
+/// `m_state` after a dismissal the player submitted. `3`.
+pub const SOFTWARE_KEYBOARD_STATE_SUBMITTED: i32 = 3;
+
+/// `SoftwareKeyboardManagerImpl::show`. RVA `0x00ff22e0`. **Recorded for its gate, not to be
+/// called.**
+///
+/// ```text
+/// 0x140ff2317: 83 79 08 ff   cmp DWORD PTR [rcx+0x8],0xffffffff
+/// 0x140ff231b: 74 07         je  proceed
+/// 0x140ff231d: 32 c0         xor al,al          ; refuse, and never reach Steam
+/// ```
+///
+/// Those bytes are the whole reason [`SOFTWARE_KEYBOARD_STATE_IDLE`] has to be restored. `show`
+/// refuses unless it reads `-1`, and the only writers of `-1` live inside `getResult`, which the
+/// game cannot reach once `show` has started failing -- so a state this mod leaves behind is a
+/// state the game never recovers from on its own. It is not a crash. It is the Steam keyboard
+/// silently never appearing again for the rest of the process.
+pub const SOFTWARE_KEYBOARD_IMPL_SHOW: u32 = 0x00ff_22e0;
+
+/// The game's `GamepadTextInputDismissed_t` listener. RVA `0x00ff2040`. Fourteen bytes, no
+/// branches, and it is the entire collision risk:
+///
+/// ```text
+/// 33 c0        xor  eax,eax
+/// 38 02        cmp  BYTE PTR [rdx],al     ; the callback's m_bSubmitted
+/// 0f 95 c0     setne al
+/// 83 c0 02     add  eax,0x2               ; -> 2 or 3
+/// 89 41 08     mov  DWORD PTR [rcx+0x8],eax
+/// c3           ret
+/// ```
+///
+/// **It reads no text and it cannot fail** -- no allocation, no call, no branch, and the only
+/// pointers it touches are its own `this` and the callback payload. So a session this mod opens can
+/// neither crash the game nor corrupt it.
+///
+/// **What it does not do is ask whether the game wanted this dismissal.** There is no pending-request
+/// flag and no owner check. It is registered exactly once in the image (`0x140ff1e72`, id `714`) and
+/// lives in `steam_api64.dll`'s process-wide table, so it fires for a keyboard THIS MOD opened just
+/// as readily -- which is why not registering a listener of our own buys nothing, and why the
+/// interlock is on `m_state` instead.
+pub const SOFTWARE_KEYBOARD_DISMISSED_HANDLER: u32 = 0x00ff_2040;
+
+/// The `ISteamUtils` version whose `ShowGamepadTextInput` takes a prefill. `"SteamUtils007"`.
+///
+/// DS2's own `steam_api64.dll` carries only `SteamUtils005` and `SteamClient012`, and at
+/// `0x140ff2415` the game loads four arguments and never writes `[rsp+0x28]` -- the
+/// `pchExistingText` slot. **That is the GAME's call site, not a limit of the API.**
+///
+/// Read off Proton Experimental's generated per-version wrappers in
+/// `files/lib/wine/x86_64-unix/lsteamclient.so`, which is the closest thing to the Steamworks
+/// headers available offline. `005` and `006` marshal four arguments; from `007` on there is a
+/// fifth, `mov 0x1d(%rbx),%r9` -- a full 64-bit pointer:
+///
+/// ```text
+/// 005, 006          4 args   slot 0xa0
+/// 007, 008, 009, 010  5 args   slot 0xa0     <- prefill arrives here
+/// 011                 5 args   slot 0x98     <- and the slot moves
+/// ```
+///
+/// `007` is therefore the SMALLEST upgrade that gains the prefill, and the one that keeps
+/// [`STEAM_UTILS_SHOW_GAMEPAD_TEXT_INPUT_SLOT`] where the game's own build already proves it to be.
+/// `~/.local/share/Steam/linux64/steamclient.so` advertises `SteamUtils001` through `011`, so the
+/// client vends it.
+///
+/// **NEVER HAND THE NEWER POINTER TO THE GAME.** `007` keeps the method at the same slot as `005`,
+/// so the game's four-argument call would pass straight through it leaving `r9` holding whatever
+/// was there -- a garbage `pchExistingText`. Two interfaces, two owners.
+pub const STEAM_UTILS_VERSION_WITH_PREFILL: &str = "SteamUtils007";
+
+/// `ISteamClient012::GetISteamUtils(HSteamPipe, const char *pchVersion)`. Vtable slot `+0x48`.
+///
+/// From Proton's `ISteamClient_SteamClient012_GetISteamUtils` thunk, which is
+/// `mov 0x14(%rbx),%rdx` (the version string), `mov 0x10(%rbx),%esi` (the pipe), `call *0x48(%rax)`.
+/// The shim does not validate the version string -- `steamclient64.dll` resolves it -- which is what
+/// makes [`STEAM_UTILS_VERSION_WITH_PREFILL`] reachable from a binary that only knows `005`.
+pub const STEAM_CLIENT_GET_ISTEAM_UTILS_SLOT: usize = 0x48;
+
+/// `ISteamUtils::IsOverlayEnabled()`. Vtable slot `+0x88`.
+///
+/// Read out of DS2 itself: [`SOFTWARE_KEYBOARD_IMPL_SHOW`] gates on it before it will ask for a
+/// keyboard. **It gates this mod's field too, and it is the one thing about this path that no
+/// amount of static reading settles** -- whether the overlay is actually attached is a property of
+/// the running Steam client, not of the executable.
+pub const STEAM_UTILS_IS_OVERLAY_ENABLED_SLOT: usize = 0x88;
+
+/// `ISteamUtils::ShowGamepadTextInput(...)`. Vtable slot `+0xa0`.
+///
+/// Observed twice, independently: DS2 calls `[vtbl+0xa0]` at `0x140ff2424` on its `005` pointer, and
+/// Proton's `007` wrapper calls `*0xa0(%rax)`. Same slot on both sides of the version bump, which is
+/// what makes `007` a drop-in for the game's own layout.
+pub const STEAM_UTILS_SHOW_GAMEPAD_TEXT_INPUT_SLOT: usize = 0xa0;
+
+/// `ISteamUtils::GetEnteredGamepadTextLength()`. Vtable slot `+0xa8`. From
+/// `SoftwareKeyboardManagerImpl::getResult` (`0x00ff2050`), at `0x140ff20b1`.
+pub const STEAM_UTILS_GET_ENTERED_TEXT_LENGTH_SLOT: usize = 0xa8;
+
+/// `ISteamUtils::GetEnteredGamepadTextInput(char *pchText, uint32 cchText)`. Vtable slot `+0xb0`.
+/// Same function, at `0x140ff2101`. **The text comes back UTF-8**, which is why the impl keeps a
+/// `char*` scratch buffer at `+0x10` rather than a wide string.
+pub const STEAM_UTILS_GET_ENTERED_TEXT_SLOT: usize = 0xb0;
+
+/// `FeGroupInGameTopSelect::v2` -- the pause-menu group's per-frame update. RVA `0x000a5dd0`.
+///
+/// **The clock a row needs to report anything.** Captions are otherwise written once, when
+/// `FE_INGAME_TOP_SELECT_CAPTIONS` binds them, so a row that learns something while the menu is
+/// open could not say so until the menu was closed and opened again.
+///
+/// How it was established, since "vtable slot 2" is only a number. Both base classes --
+/// `FexGroupList<FeGroupGrid>` (`0x1410adf18`) and `FeGroupInGameGroupSelect` (`0x1410b6658`) --
+/// hold `0x14001bdd0` in this slot, which is `add rcx,0x58; jmp 0x1400271f0`, and `0x1400271f0`
+/// takes a float in XMM1 and forwards it -- the frame-delta signature
+/// [`FE_TOP_MENU_UPDATE`] already documents. `FeGroupInGameTopSelect` (vtable `0x1410b67f8`)
+/// OVERRIDES it with this, which takes the delta in XMM1, polls the cursor through `0x1400a65f0`,
+/// and on a confirm calls [`FE_INGAME_MENU_DISPATCH`] at `0x1400a5e5f`. A function that reads input
+/// and dispatches the confirm runs once a frame by construction.
+///
+/// Signature: `(this /*rcx*/, f32 delta /*xmm1*/)`.
+pub const FE_INGAME_TOP_SELECT_UPDATE: u32 = 0x000a_5dd0;
+
+/// The bytes [`FE_INGAME_TOP_SELECT_UPDATE`] must begin with, or the detour refuses to patch.
+///
+/// `48 89 5c 24 20` is `mov QWORD PTR [rsp+0x20],rbx` -- **exactly five bytes**, so MinHook
+/// relocates one whole instruction and never splits one. Read out of the image, and
+/// `scripts/ds2-arxan-chain.py 0x1400a5dd0` terminates at hop 0: its own prologue is at its own
+/// entry, so the detour never touches Arxan's code.
+pub const FE_INGAME_TOP_SELECT_UPDATE_PROLOGUE: [u8; 5] = [0x48, 0x89, 0x5c, 0x24, 0x20];
+
+/// The game's top-level `HWND`, inside [`FE_SYSTEM_SINGLETON`]'s target. `+0x08`.
+///
+/// Read out of the only two functions that use it -- the game's own clipboard paste
+/// (`0x00b4ac70`) and copy (`0x00b4b860`). Both do the same three instructions:
+///
+/// ```text
+/// 0x140b4ac76: 48 8b 05 7b a5 b2 00   mov rax,[rip+0xb2a57b]   ; -> 0x1416751f8
+/// 0x140b4ac80: 48 8b 48 08            mov rcx,[rax+0x8]
+/// 0x140b4ac84: ff 15 ...              call [OpenClipboard]
+/// ```
+///
+/// `OpenClipboard` takes an `HWND` and nothing else, so the field's TYPE is settled by its only
+/// use rather than by guessing at a struct layout -- two independent sites, one meaning.
+pub const FE_SYSTEM_HWND_OFFSET: usize = 0x08;
+
+// =================================================================================================
+// THE LIVE CHARACTER
+//
+// `GameManagerImp` -> `GameDataManager` -> `player_data`. Everything here was read out of ONE
+// function -- `FeSubStateTitleLoadProfile`'s work starter at `0x1400fc2a2`..`0x1400fc330` -- which
+// is the code that populates the block when a save is loaded, so the offsets and their MEANINGS
+// come from the same place rather than from a struct dump plus a guess.
+//
+// WHAT IS NOT HERE: stats, soul level, soul memory, equipment, inventory. None of them is mapped in
+// this repo. `PlayerGameData` and `GameDataPlayerInfo` exist as RTTI only inside `FeFunctorJob<...>`
+// template names -- non-polymorphic classes with no vtable of their own, so there is no RTTI
+// shortcut to them, and reaching stats means a separate excavation from `PlayerCtrl`.
+// =================================================================================================
+
+/// `GameManagerImp` -> the object holding the live character block. `+0xC0`.
+///
+/// `mov rdi,[rcx+0xc0]` at `0x1400fc2b7` (`48 8b b9 c0 00 00 00`), where `rcx` is the
+/// `GameDataManager` fetched one instruction earlier by `mov rcx,[rax+0xa8]` at `0x1400fc2a2`
+/// (`48 8b 88 a8 00 00 00`) -- that is [`GAME_DATA_MANAGER_OFFSET`], already recorded.
+///
+/// **Beware the neighbour.** [`GAME_MANAGER_CONTENT_CTX_OFFSET`] is also `0xC0`, but it hangs off
+/// `GameManagerImp` and this one hangs off `GameDataManager` -- same number, different object, one
+/// hop apart. Confusing them gets a pointer that reads plausibly and means nothing.
+pub const GAME_DATA_PLAYER_DATA_OFFSET: usize = 0xC0;
+
+/// The live character's name, as `wchar_t[0x20]`. `player_data + 0x24`.
+///
+/// From the copy the profile loader performs: `lea rcx,[rdi+0x24]` / `mov r8d,0x20` at
+/// `0x1400fc302` (`48 8d 4f 24 41 b8 20 00 00 00`) into `wcsncpy`, taking the name out of the save
+/// slot record.
+///
+/// **The clear site is known too**, which is what makes this usable as a liveness test rather than
+/// just a label: `FeSubStateTitleDeleteDataList`'s leave writes `L""` over it at `0x1400fb822`. A
+/// first unit of `0` therefore means "no character", not merely "not written yet".
+pub const PLAYER_DATA_NAME_OFFSET: usize = 0x24;
+
+/// UTF-16 units in the name field, from the `mov r8d,0x20` the copy is bounded by.
+pub const PLAYER_DATA_NAME_UNITS: usize = 0x20;
+
+/// The NEW GAME cycle -- Journey 1, Journey 2, and so on. `player_data + 0x68`, `u32`, **1-based**.
+///
+/// `mov DWORD PTR [rdi+0x68],1` at `0x1400fc318` (`c7 47 68 01 00 00 00`), immediately after the
+/// name copy in the profile loader.
+///
+/// **THIS WAS RECORDED HERE AS A "PROFILE LOADED" FLAG AND THAT WAS WRONG.** The reading came from
+/// seeing one literal `1` written on load and finding nothing that writes it back to `0`, which
+/// made it look like a sticky boolean. Both community Cheat Engine tables identify the same field
+/// independently, with a dropdown reading `1:Journey 1` through `9:Journey 9` -- so the literal `1`
+/// is "New Game", not "true", and nothing writes zero because a journey counter only ever goes up.
+///
+/// One write site is not a type. A field whose only observed value is `1` is as consistent with a
+/// counter as with a flag, and the difference only shows on a character who has been through NG+.
+///
+/// It is still usable as a liveness hint -- it is `0` before any profile is loaded -- but
+/// [`PLAYER_DATA_NAME_OFFSET`] is the better test, and this must never be WRITTEN as a flag.
+pub const PLAYER_DATA_JOURNEY_OFFSET: usize = 0x68;
+
+// =================================================================================================
+// THE LIVE STAT BLOCK -- `PlayerParam`
+//
+// `GameManagerImp -> PlayerCtrl (+0xD0) -> PlayerParam (+0x490)`. The chain is VERIFIED in the
+// image; the FIELD OFFSETS inside `PlayerParam` are not -- they come from two community Cheat
+// Engine tables that agree with each other, and each one says so in its own doc comment.
+//
+// Corroboration for the shape, from a completely unrelated direction: `scripts/ds2-sl2.py` found
+// ELEVEN `i16` at save-slot-record `+0x188` by inspecting real saves ("the nine DS2 stats plus
+// two"), and the tables describe eleven contiguous `u16` at `PlayerParam+0x08`. Two sources that
+// never saw each other, same eleven-short block.
+// =================================================================================================
+
+/// A null-guarded getter for `PlayerParam`. RVA `0x001ab660`. **Call this rather than walking.**
+///
+/// The whole function, verified byte for byte:
+///
+/// ```text
+/// 48 8b 05 89 92 46 01   mov rax,[rip+0x1469289]   ; -> 0x1416148f0, GAME_MANAGER_IMP
+/// 48 85 c0               test rax,rax
+/// 74 07                  je  +7
+/// 48 8b 80 d0 00 00 00   mov rax,[rax+0xd0]        ; PlayerCtrl
+/// 48 85 c0               test rax,rax
+/// 74 08                  je  +8
+/// 48 8b 80 90 04 00 00   mov rax,[rax+0x490]       ; PlayerParam
+/// c3                     ret
+/// ```
+///
+/// Takes nothing, returns the pointer in `rax`, and returns NULL at whichever hop is null rather
+/// than faulting -- which is the case on the title screen, where `PlayerCtrl` is null. Using the
+/// game's own accessor costs one call and removes two chances to get a null check wrong.
+pub const PLAYER_PARAM_GET: u32 = 0x001a_b660;
+
+/// `GameManagerImp -> PlayerCtrl`. `+0xD0`. From [`PLAYER_PARAM_GET`]'s first hop.
+pub const PLAYER_CTRL_OFFSET: usize = 0xD0;
+/// `PlayerCtrl -> PlayerParam`. `+0x490`. From [`PLAYER_PARAM_GET`]'s second hop.
+pub const PLAYER_PARAM_OFFSET: usize = 0x490;
+
+/// The nine levelled stats inside `PlayerParam`, each a `u16`.
+///
+/// **THE MEMORY ORDER IS NOT THE PLANNER'S ORDER.** soulsplanner emits vigor, endurance, vitality,
+/// attunement, strength, dexterity, *adaptability*, intelligence, faith. The game stores
+/// adaptability LAST, after intelligence and faith. Zipping one order onto the other silently swaps
+/// three stats, and the result is a character that levelled up correctly into the wrong attributes.
+///
+/// | offset | stat |
+/// |---|---|
+/// | `+0x08` | vigor |
+/// | `+0x0A` | endurance |
+/// | `+0x0C` | vitality |
+/// | `+0x0E` | attunement |
+/// | `+0x10` | strength |
+/// | `+0x12` | dexterity |
+/// | `+0x14` | intelligence |
+/// | `+0x16` | faith |
+/// | `+0x18` | adaptability |
+///
+/// Two further `u16` follow at `+0x1A` and `+0x1C` that both tables leave unnamed -- the eleven
+/// shorts `scripts/ds2-sl2.py` also sees on disk.
+///
+/// **Source: the Cheat Engine tables, not the executable.** Both agree offset for offset, and the
+/// eleven-short shape is corroborated from the save file, but no write site was found in the image.
+pub const PLAYER_PARAM_STAT_OFFSETS: [usize; 9] =
+    [0x08, 0x0A, 0x0C, 0x0E, 0x10, 0x12, 0x14, 0x16, 0x18];
+
+/// Stat names in the order [`PLAYER_PARAM_STAT_OFFSETS`] lists them -- the GAME's order.
+pub const PLAYER_PARAM_STAT_NAMES: [&str; 9] = [
+    "vigor",
+    "endurance",
+    "vitality",
+    "attunement",
+    "strength",
+    "dexterity",
+    "intelligence",
+    "faith",
+    "adaptability",
+];
+
+/// Soul level. `PlayerParam + 0xD0`, `u32`. Table-sourced.
+pub const PLAYER_PARAM_SOUL_LEVEL_OFFSET: usize = 0xD0;
+
+/// Souls currently held. `PlayerParam + 0xEC`, `u32`. Table-sourced, and the LEAST certain constant
+/// here: one table labels it "Total Get Soul" and the other labels the same offset "Soul" while
+/// separately naming `+0xF4`/`+0xFC` as the totals. The three-record reading (`{u32 value; u8 flag;
+/// pad}` at `0xEC`, `0xF4`, `0xFC`) is self-consistent and makes this the spendable balance.
+/// Confirm by watching it fall when souls are spent.
+pub const PLAYER_PARAM_SOULS_HELD_OFFSET: usize = 0xEC;
+
+/// Soul memory. **TWO fields, and both must be written.** `PlayerParam + 0xF4` and `+ 0xFC`, `u32`.
+///
+/// The tables call them `TotalGetSoul1` and `TotalGetSoul2`. Writing one and not the other leaves
+/// the game free to resynchronise from whichever it trusts, which would silently undo the write --
+/// so this is an array rather than a single constant, to make forgetting the second one awkward.
+pub const PLAYER_PARAM_SOUL_MEMORY_OFFSETS: [usize; 2] = [0xF4, 0xFC];
+
+/// Covenant. `PlayerParam + 0x1AD`, one byte. See [`COVENANT_NAMES`] for the ids.
+///
+/// **Confirmed from the binary**, no longer table-sourced only: `SetCovenant` (`0x14038bd80`)
+/// writes this byte and the Rat-King branch in `0x140202f10` tests the id against `5`.
+pub const PLAYER_PARAM_COVENANT_OFFSET: usize = 0x1AD;
+
+/// The covenant ids, indexed by id. `0` is "no covenant".
+///
+/// Confirmed two ways: the per-covenant discovered flags at
+/// [`PLAYER_PARAM_COVENANT_DISCOVERED_BASE`] line up with the nine the community table names, and
+/// the binary's own Rat-King test is against id `5`.
+pub const COVENANT_NAMES: [&str; 10] = [
+    "No Covenant",
+    "Heirs of the Sun",
+    "Blue Sentinels",
+    "Brotherhood of Blood",
+    "Way of Blue",
+    "Rat King",
+    "Bell Keepers",
+    "Dragon Remnants",
+    "Company of Champions",
+    "Pilgrims of Dark",
+];
+
+/// **The per-covenant "discovered" flags, and joining one CANNOT BE UNDONE.** `PlayerParam + 0x1AE`.
+///
+/// One `u8` per covenant, indexed by id, so covenant `n`'s flag is at `0x1AE + n`.
+///
+/// `SetCovenant` sets `p[0x1AE + id] = 1` alongside the current-covenant byte, and **nothing in
+/// that function ever clears it**. Leaving a covenant changes [`PLAYER_PARAM_COVENANT_OFFSET`] and
+/// leaves this set. So joining a covenant to satisfy a build permanently marks that covenant as
+/// discovered on that character -- the same shelf as raising soul memory, and worth saying out loud
+/// before anyone presses a button.
+///
+/// Cross-checked offset for offset against the community table's nine named flags: `+0x1AF` Heirs
+/// of the Sun, `+0x1B0` Blue Sentinels, ... `+0x1B7` Pilgrims of Dark.
+///
+/// Rank (`+0x1B9..`) and progress (`+0x1C4..`) are NOT touched by the setter.
+pub const PLAYER_PARAM_COVENANT_DISCOVERED_BASE: usize = 0x1AE;
+
+/// **Join a covenant, through the path that maintains everything a covenant change implies.**
+/// RVA `0x00202f10`.
+///
+/// `fn(PlayerCtrl*, i32 covenant_id, bool announce)`.
+///
+/// Prefer this over `PlayerParam::SetCovenant` (`0x0038bd80`) directly: this one also maintains the
+/// Rat-King flag (`[PlayerCtrl + 0xB0] + 0x4E = (id == 5)`) and runs the refresh that the bare
+/// setter does not.
+///
+/// # `announce` MUST be false for an import
+///
+/// A true `announce` calls the server sync and, in an online session, sends a covenant-change
+/// packet to everyone in it. A build import is not a covenant the player walked up to and joined,
+/// and it has no business telling the session so.
+///
+/// # It still cannot be undone
+///
+/// See [`PLAYER_PARAM_COVENANT_DISCOVERED_BASE`]. `announce = false` suppresses the network, not
+/// the permanent flag.
+///
+/// Not Arxan-redirected.
+pub const PLAYER_CTRL_SET_COVENANT: u32 = 0x0020_2f10;
+
+/// The five bytes [`PLAYER_CTRL_SET_COVENANT`] must begin with. `test rcx,rcx; jz ...`.
+pub const PLAYER_CTRL_SET_COVENANT_PROLOGUE: [u8; 5] = [0x48, 0x85, 0xc9, 0x74, 0x42];
+
+/// Starting class. `player_data + 0x64`, and it is a **`u32`, not the byte the tables declare**.
+///
+/// The loader writes it as a dword -- `movzx eax,WORD PTR [rbx+0x1d6]` then
+/// `mov DWORD PTR [rdi+0x64],eax` at `0x1400fc311`/`0x1400fc31f` -- widening a `u16` out of the
+/// save slot record. Both tables type it `Byte`, which reads correctly on a little-endian machine
+/// for every value under 256 and would corrupt the upper three bytes on a write.
+///
+/// `1` Warrior, `2` Knight, `4` Bandit, `6` Cleric, `7` Sorcerer, `8` Explorer, `9` Swordsman,
+/// `10` Deprived. The gaps are the game's.
+pub const PLAYER_DATA_CLASS_OFFSET: usize = 0x64;
+
+// =================================================================================================
+// THE PARAM TABLES, AT RUNTIME
+//
+// DARK SOULS II keeps its balance data in `param:/<Name>.param` tables inside the encrypted
+// `enc_regulation.bnd.dcx`. Decrypting that file is one way to read them; walking the tables the
+// GAME HAS ALREADY LOADED is a better one, and not only because it skips the decryption:
+//
+//   * it cannot drift from the build actually running, and
+//   * it reflects any param mod the player has installed, which a shipped copy of the vanilla
+//     numbers would silently contradict.
+//
+// EVERY CONSTANT BELOW IS TABLE-SOURCED. They come from the community Cheat Engine tables'
+// `ParamUtils`, which has been walking these structures for years, and no write site was traced in
+// the image. The shapes are self-consistent and the row layout is corroborated across two tables,
+// but this is a weaker provenance than the rest of this file and it says so.
+// =================================================================================================
+
+/// The hops from `GAME_MANAGER_IMP` to the pointer the master param table is measured against.
+///
+/// `[[[GameManagerImp] + 0x38] + 0x100] + 0xD8`, then the two constants below are subtracted from
+/// what that yields. The subtraction is what makes this table-sourced rather than derived: it is a
+/// measured relationship, not a field offset, and nothing in the image was found that explains it.
+pub const PARAM_ANCHOR_OFFSETS: [usize; 3] = [0x38, 0x100, 0xD8];
+
+/// The master param table starts this far BELOW the anchor. Subtracted, not added.
+pub const PARAM_TABLE_FROM_ANCHOR: usize = 0x2C44;
+/// The param index ends this far below the anchor.
+pub const PARAM_INDEX_END_FROM_ANCHOR: usize = 0x16A4;
+/// The index array begins this far into the master table.
+pub const PARAM_INDEX_START_OFFSET: usize = 0x40;
+/// Bytes per index entry.
+pub const PARAM_INDEX_STRIDE: usize = 0x18;
+/// `i32` offset of a param's data, relative to the master table.
+pub const PARAM_INDEX_DATA_OFFSET: usize = 0x10;
+/// `i32` offset of a param's name string, relative to the master table.
+pub const PARAM_INDEX_NAME_OFFSET: usize = 0x14;
+
+/// `u16` row count, inside one param table.
+pub const PARAM_ROW_COUNT_OFFSET: usize = 0x0A;
+/// Where a param's own row index begins.
+pub const PARAM_ROW_INDEX_OFFSET: usize = 0x40;
+/// Bytes per row-index entry.
+pub const PARAM_ROW_STRIDE: usize = 0x18;
+/// `u32` row id, inside a row-index entry.
+pub const PARAM_ROW_ID_OFFSET: usize = 0x00;
+/// `u32` offset of the row's data, relative to the param table.
+pub const PARAM_ROW_DATA_OFFSET: usize = 0x08;
+
+/// The param naming the souls each level costs. 852 rows, stride 12.
+///
+/// **Row id is the level being LEFT**, and that direction is verified from the game's own level-up
+/// code in both directions: the increment (`FUN_1401fb970`) pays the value stored for the level it
+/// is leaving, and the decrement (`FUN_1401fb800`) steps down from `L` and refunds `lookup(L-1)`,
+/// which is only correct under this reading. One level's error here is the whole bug.
+///
+/// **Not `LevelUpStatusCalcParam`**, which has the better name and is a nine-row menu table.
+pub const PARAM_PLAYER_LEVEL_UP_SOULS: &str = "PlayerLevelUpSoulsParam";
+
+/// Bytes per `PlayerLevelUpSoulsParam` row. `12` -- measured from consecutive row-index offsets
+/// rather than assumed, by `scripts/ds2-regulation.py`.
+pub const PLAYER_LEVEL_UP_SOULS_STRIDE: usize = 12;
+
+/// `u32` level, at the start of a `PlayerLevelUpSoulsParam` row. Mirrors the row id.
+pub const PLAYER_LEVEL_UP_SOULS_LEVEL_OFFSET: usize = 0x00;
+/// `u32` souls to go from this row's level to the next. `+0x08`.
+///
+/// The row is `{u16 level; u16 pad; i32 gradient; i32 souls}`. `gradient` is `0` in every shipped
+/// row; where it is not, the game interpolates `(wanted - rowLevel) * gradient + souls`, so a table
+/// with a nonzero gradient is not a per-level list and must not be read as one.
+pub const PLAYER_LEVEL_UP_SOULS_COST_OFFSET: usize = 0x08;
+
+// =================================================================================================
+// GRANTING AN ITEM -- the game's own function
+//
+// The mod does NOT build inventory slots. A slot the game did not build is a slot whose invariants
+// nobody maintained: the linked-list links, the handle at `+0x1C` that the discard path consumes,
+// the equip category, and the counters the UI reads. This calls what the game calls.
+// =================================================================================================
+
+/// `ItemGive`. RVA `0x001ac3d0`. `fn(inventory, *const ItemSpawn, count) -> bool`.
+///
+/// A three-instruction thunk, verified byte for byte:
+///
+/// ```text
+/// 48 8b 49 10       mov  rcx,[rcx+0x10]     ; forward the inner bag manager
+/// 45 33 c9          xor  r9d,r9d            ; 4th argument forced to 0
+/// e9 94 b0 ff ff    jmp  0x1401a7470        ; the implementation
+/// ```
+///
+/// **It returns a bool in `AL` and `false` means nothing was granted.** Neither community
+/// implementation checks it, which is part of why their failures are quiet.
+///
+/// **It depends on nothing but its arguments.** Both community implementations call it from a
+/// FRESH REMOTE THREAD (`createthread`, `executeCodeEx`) -- a thread with no registers, no frame and
+/// no relationship to any game state -- and that has worked for years. So a caller on the game's own
+/// thread, from a pause-menu confirm, is strictly better placed than the code this was learned from.
+///
+/// Not Arxan-redirected; the first byte is `0x48`.
+pub const ITEM_GIVE: u32 = 0x001a_c3d0;
+
+/// The five bytes [`ITEM_GIVE`] must begin with, or the mod refuses to call it.
+pub const ITEM_GIVE_PROLOGUE: [u8; 5] = [0x48, 0x8b, 0x49, 0x10, 0x45];
+
+/// The implementation [`ITEM_GIVE`] tail-jumps to. RVA `0x001a7470`.
+///
+/// Recorded because it exposes the fourth argument the thunk forces to zero -- INFERRED to suppress
+/// the pickup notification, from `mov r14d,r9d` and a later `test r14d,r14d / jne` that skips the
+/// notify block. Call this instead of the thunk only if a silent grant is wanted, and note it takes
+/// the INNER bag manager rather than the inventory.
+pub const ITEM_GIVE_IMPL: u32 = 0x001a_7470;
+
+/// Most items one [`ITEM_GIVE`] call accepts. `32`.
+///
+/// From the implementation's own gate at `0x1401a748e`: `lea eax,[rsi-1]; cmp eax,0x1f; ja` --
+/// verified bytes `8d 46 ff 83 f8 1f 0f 87`. **The community scripts cap at 8**, bounded by their
+/// own buffer rather than by the engine, and 8 is therefore the only width anyone has exercised.
+pub const ITEM_GIVE_MAX_PER_CALL: usize = 32;
+
+/// **The game's own reason for refusing a grant.** `inner + 0x10138`, `u32`.
+///
+/// `inner` is one hop of `+0x10` from `ItemInventory2` -- the object the grant thunk's
+/// `mov rcx,[rcx+0x10]` produces, and the FIRST of the two hops that reach
+/// [`ITEM_BAG_LIST_OFFSET`].
+///
+/// # Read this instead of guessing
+///
+/// [`ITEM_GIVE`] answers `bool`, and its whole `false` path is one instruction pair in
+/// `ItemInventory2::CanGive`: `test dword [inner+0x10138], 0x80000000; sete al`. **Bit 31 means
+/// refused and the rest of the word names WHY.** Three items once looked like a mystery worth a
+/// disassembly session; the answer was four readable bytes in the running game the whole time.
+///
+/// Non-fatal bits also appear here: `0x4` category 11, `0x2` the quantity was clamped, `0x1`
+/// accepted.
+pub const ITEM_GIVE_ERROR_OFFSET: usize = 0x1_0138;
+
+/// A number qualifying [`ITEM_GIVE_ERROR_OFFSET`]. `inner + 0x1013c`, `u32`.
+pub const ITEM_GIVE_ERROR_DETAIL_OFFSET: usize = 0x1_013C;
+
+/// The bit in [`ITEM_GIVE_ERROR_OFFSET`] that means the grant was refused.
+pub const ITEM_GIVE_ERROR_REFUSED: u32 = 0x8000_0000;
+
+/// Every refusal code, with what it means, in the order the implementation can set them.
+///
+/// # Four of these mean "the character already has it", which is NOT a failure
+///
+/// `0x800A0000`, `0x800C0000`, `0x80010000` and `0x81000000` all say the build's intent is already
+/// satisfied -- the stack is full, or the item is unique and already held. A mule save that reports
+/// `granted 15/18` for that reason looks broken and is not. See
+/// [`ITEM_GIVE_ERROR_ALREADY_SATISFIED`].
+pub const ITEM_GIVE_ERRORS: [(u32, &str); 13] = [
+    (0x8400_0000, "the count was zero or negative"),
+    (0x8800_0000, "more than one call may carry"),
+    (0xC000_0000, "no such row in ItemParam"),
+    (0xA000_0000, "the item's sub-param row is missing"),
+    (0x9000_0000, "the item is banned from being granted"),
+    (0x8001_0000, "already held, and it is not stackable"),
+    (
+        0x8040_0000,
+        "already held, and the call asked to fail if so",
+    ),
+    (0x8080_0000, "the bag has no free slot"),
+    (0x800A_0000, "the stack is already full"),
+    (0x800C_0000, "the existing stack is already full"),
+    (0x8100_0000, "not stackable, and a stack already exists"),
+    (0x8000_0000, "refused, with no reason bits set"),
+    (0x0000_0001, "accepted"),
+];
+
+/// The codes that mean the character ALREADY HAS what the build asked for.
+///
+/// Reported as satisfied rather than failed. The distinction is the difference between a mod that
+/// says "I could not give you a Poison Moss" and one that says "you already have ninety-nine".
+pub const ITEM_GIVE_ERROR_ALREADY_SATISFIED: [u32; 4] =
+    [0x800A_0000, 0x800C_0000, 0x8001_0000, 0x8100_0000];
+
+/// `GameDataManager -> ItemInventory2`. `+0x10`, reached from [`GAME_DATA_MANAGER_OFFSET`].
+///
+/// The full chain is `[[[GAME_MANAGER_IMP] + 0xA8] + 0x10]`, and every hop must be null-checked --
+/// the community scripts' `vortmov` macro emits a `test/jz` after each dereference and bails, which
+/// is the behaviour to copy rather than the shortcut to skip.
+pub const ITEM_INVENTORY_OFFSET: usize = 0x10;
+
+/// **Equip anything: weapons, armour, rings, ammo, hotbar items AND spells.** RVA `0x001ac510`.
+///
+/// `fn(ItemInventory2*, u32 internal_slot, *const ItemEntry)`. A NULL entry unequips the slot.
+///
+/// # DARK SOULS II has ONE equip function, not five
+///
+/// `ItemInventory2::SetEquip` is the direct sibling of [`ITEM_GIVE`] -- 0x140 bytes away, the same
+/// `48 8b 49 10` thunk shape, and it takes THE SAME RECEIVER, so nothing new has to be resolved to
+/// call it. Attuning a spell and holstering a flask go through it exactly like equipping a sword;
+/// only gestures branch elsewhere. That is a different shape from ELDEN RING, where the equip and
+/// the quick-slot writes are separate paths.
+///
+/// One call updates the inventory AND pushes the change into the character: the implementation
+/// reaches `PlayerCtrl` and notifies per category. There is no separate refresh to remember.
+///
+/// # It is a MOVE, not a toggle
+///
+/// The implementation strips the item from wherever it currently sits before writing the new slot,
+/// so equipping something into the slot it already occupies leaves it equipped. **ELDEN RING
+/// toggles it off**, which is why `er-build-import` has to query the slot first; DS2 does not need
+/// that check. Equipping one entry into two slots still strips the first -- one entry, one slot.
+///
+/// **The exception is spells**: unequipping a spell slot compacts the attunement array downward and
+/// re-notifies every shifted slot, so re-attuning is not a clean no-op. Attune ascending, once each.
+///
+/// # It fails SILENTLY, twice
+///
+/// A category mismatch (an item in a slot its type does not fit) returns having done nothing, with
+/// no error. So does attuning past the character's capacity, which *unequips* the slot instead. Both
+/// are why [`ITEM_INVENTORY_EQUIPPED_BY_FLAT_SLOT`] exists: every equip must be read back.
+///
+/// Not Arxan-redirected -- its first byte is `0x48`, and the `e9` at `+4` targets `0x1401a7b80`,
+/// inside the game's own `.text` rather than Arxan's `0x141aaf000..0x141d42fff`.
+pub const ITEM_SET_EQUIP: u32 = 0x001a_c510;
+
+/// The five bytes [`ITEM_SET_EQUIP`] must begin with. `mov rcx,[rcx+0x10]`, then the tail-jump.
+pub const ITEM_SET_EQUIP_PROLOGUE: [u8; 5] = [0x48, 0x8b, 0x49, 0x10, 0xe9];
+
+/// Read back what is equipped in a FLAT slot. RVA `0x001abc00`.
+///
+/// `fn(ItemInventory2*, i32 flat_slot) -> *const ItemEntry`, null when the slot is empty. Read the
+/// item id at [`ITEM_ENTRY_ITEM_ID_OFFSET`].
+///
+/// **Takes the FLAT index, where [`ITEM_SET_EQUIP`] takes the INTERNAL one.** The two spaces are not
+/// the same and [`ITEM_SLOT_FLAT_TO_INTERNAL`] is the map between them.
+pub const ITEM_INVENTORY_EQUIPPED_BY_FLAT_SLOT: u32 = 0x001a_bc00;
+
+/// The five bytes [`ITEM_INVENTORY_EQUIPPED_BY_FLAT_SLOT`] must begin with. `sub rsp,0x28`.
+pub const ITEM_INVENTORY_EQUIPPED_BY_FLAT_SLOT_PROLOGUE: [u8; 5] = [0x48, 0x83, 0xec, 0x28, 0x48];
+
+/// The entry for a `u16` inventory handle. RVA `0x001abfb0`.
+///
+/// `fn(ItemInventory2*, u16 handle) -> *const ItemEntry`.
+pub const ITEM_INVENTORY_ENTRY_BY_HANDLE: u32 = 0x001a_bfb0;
+
+/// The five bytes [`ITEM_INVENTORY_ENTRY_BY_HANDLE`] must begin with.
+pub const ITEM_INVENTORY_ENTRY_BY_HANDLE_PROLOGUE: [u8; 5] = [0x48, 0x8b, 0x49, 0x10, 0xe9];
+
+/// **`ItemInventory2 -> BagList` is TWO hops of `+0x10`, not one.**
+///
+/// The full chain is `[[ItemInventory2 + 0x10] + 0x10]`, and getting it wrong costs nothing
+/// visible: the scan reads a live object that simply is not the bag, finds no entry matching any
+/// item, and reports every equip as a missing item. That is exactly what the first in-game run of
+/// the equip path did -- `equipped 0/18`, with a reason that pointed at the player chain.
+///
+/// It is two hops because the work is split across the thunk and its implementation, and reading
+/// only the thunk shows one:
+///
+/// ```text
+/// 0x1401ac510  mov rcx,[rcx+0x10]   ; SetEquip's thunk: inventory -> the manager
+///              jmp 0x1401a7b80
+/// 0x1401a7b80  cmp edx,0x29
+///              ja  gestures
+///              mov rcx,[rcx+0x10]   ; and again: the manager -> the bag
+/// ```
+///
+/// So this constant is applied TWICE. It is one number and two dereferences, and the doc says so
+/// because the number being the same is what made one of them easy to miss.
+pub const ITEM_BAG_LIST_OFFSET: usize = 0x10;
+
+/// How many `+0x10` hops separate `ItemInventory2` from its `BagList`. **Two.**
+///
+/// A named count rather than a repeated `hop(hop(x))`, so the reason there are two is attached to
+/// the number. See [`ITEM_BAG_LIST_OFFSET`].
+pub const ITEM_BAG_LIST_HOPS: usize = 2;
+
+/// Where the inventory entry array starts inside the bag. `+0x28`.
+pub const ITEM_ENTRY_ARRAY_OFFSET: usize = 0x28;
+
+/// Bytes per inventory entry. `0x28`.
+pub const ITEM_ENTRY_STRIDE: usize = 0x28;
+
+/// How many entries the array holds. `3840`, from the constructor's `0xeff` countdown.
+pub const ITEM_ENTRY_COUNT: usize = 3840;
+
+/// `ItemEntry + 0x14`, `u32`. The `ItemParam` row id -- the same number [`ITEM_GIVE`] takes.
+pub const ITEM_ENTRY_ITEM_ID_OFFSET: usize = 0x14;
+
+/// `ItemEntry + 0x1C`, `u16`. The entry's own handle; `0xFFFF` means none.
+pub const ITEM_ENTRY_HANDLE_OFFSET: usize = 0x1C;
+
+/// `ItemEntry + 0x1F`, `u8`. Bit `0x02` is set while the entry is equipped somewhere.
+pub const ITEM_ENTRY_FLAGS_OFFSET: usize = 0x1F;
+
+/// The bit in [`ITEM_ENTRY_FLAGS_OFFSET`] meaning "equipped".
+pub const ITEM_ENTRY_FLAG_EQUIPPED: u8 = 0x02;
+
+/// `ItemEntry + 0x20`, `u16`. How many are in the stack.
+pub const ITEM_ENTRY_QUANTITY_OFFSET: usize = 0x20;
+
+/// **Flat slot index -> the INTERNAL index [`ITEM_SET_EQUIP`] takes.** 52 entries.
+///
+/// Read from the game's own table at `0x1410c0b90`, which `MapFlatSlotToInternal` (`0x140154510`)
+/// indexes. `-1` is a flat position belonging to no category; nothing uses those.
+///
+/// # THE WEAPON HANDS ARE SWAPPED, and nothing complains if you get it wrong
+///
+/// Flat `0` is Left Hand 1 and flat `1` is Right Hand 1, but they map to internal `1` and `0`.
+/// Combined with the internal->ChrAsm remap at `0x1410c44e0` (`[1,0,3,2,5,4]`) this means
+/// **internal slot 0 is the RIGHT hand**. Equipping a build's main weapon into internal 0 believing
+/// it to be the left puts every weapon in the wrong hand, silently, on a character that otherwise
+/// looks correct.
+pub const ITEM_SLOT_FLAT_TO_INTERNAL: [i32; 52] = [
+    1, 0, 3, 2, 5, 4, // weapons: LH1 RH1 LH2 RH2 LH3 RH3, hands swapped
+    6, 7, 8, 9, // armour: head chest hands legs
+    -1, -1, // no category
+    14, 15, 16, 17, // ammo: two arrow slots then two bolt slots
+    10, 11, 12, 13, // rings
+    18, 19, 20, 21, 22, 23, 24, 25, 26, 27, // hotbar, ten of them
+    28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, // attunement, fourteen
+    42, 43, 44, 45, 46, 47, 48, 49, // gestures
+];
+
+/// FLAT slot of the first weapon. The planner's own `lh1 rh1 lh2 rh2 lh3 rh3` order, position for
+/// position -- read off the form's field ids, not guessed from what tends to sit in slot zero.
+pub const ITEM_SLOT_WEAPON_FLAT_BASE: usize = 0;
+
+/// FLAT slot of the head armour piece, then chest, hands, legs -- the planner's `head chest hands
+/// legs` order, position for position.
+pub const ITEM_SLOT_ARMOUR_FLAT_BASE: usize = 6;
+
+/// FLAT slot of the first ring. Four, matching the planner's `ring-1 .. ring-4`.
+pub const ITEM_SLOT_RING_FLAT_BASE: usize = 16;
+
+/// FLAT slot of the first hotbar item. Ten, matching the planner's `item-1 .. item-10`.
+pub const ITEM_SLOT_HOTBAR_FLAT_BASE: usize = 20;
+
+/// FLAT slot of the first attunement position. Fourteen, matching `spell-1 .. spell-14`.
+pub const ITEM_SLOT_SPELL_FLAT_BASE: usize = 30;
+
+/// Internal slot of the first WEAPON. Six follow, and [`ITEM_SLOT_FLAT_TO_INTERNAL`] swaps the hands.
+pub const ITEM_SLOT_WEAPON_BASE: u32 = 0;
+
+/// Internal slot of the HEAD armour piece. Then chest, hands, legs.
+///
+/// Proved by the equip function's own gate: internal 6 requires the armour's `ArmorParam+0x4F == 2`,
+/// 7 requires 3, 8 requires 4, 9 requires 5.
+pub const ITEM_SLOT_ARMOUR_BASE: u32 = 6;
+
+/// Internal slot of the first RING. Four of them.
+pub const ITEM_SLOT_RING_BASE: u32 = 10;
+
+/// Internal slot of the first HOTBAR item. **Ten**, not ELDEN RING's arrangement.
+pub const ITEM_SLOT_HOTBAR_BASE: u32 = 18;
+
+/// How many hotbar slots there are. `10`, from the predicate `ecx-0x12 <= 9`.
+pub const ITEM_SLOT_HOTBAR_COUNT: usize = 10;
+
+/// Internal slot of the first ATTUNEMENT position. Fourteen.
+pub const ITEM_SLOT_SPELL_BASE: u32 = 28;
+
+/// The most attunement positions a character can have. `14`.
+pub const ITEM_SLOT_SPELL_COUNT: usize = 14;
+
+/// **Recompute the attunement slot count from the character's attunement.** RVA `0x001b40f0`.
+///
+/// `fn(BagList*)`. Sets [`ITEM_BAG_ATTUNEMENT_SLOTS_OFFSET`] to `bonus + PlayerParam[0x36]`, capped
+/// at [`ITEM_SLOT_SPELL_COUNT`], then walks the spell slots summing each spell's cost and
+/// unequipping everything past the budget.
+///
+/// # Writing the stats does NOT do this, and that is measured
+///
+/// [`PLAYER_PARAM_SET_ALL_STATS`] recomputes the effective stats, the derived block and the soul
+/// level, and reapplies the HP and stamina caps. It does not touch the bag. So a character written
+/// straight to attunement 30 still has whatever slot count it had before -- and a blank mule
+/// character has ZERO. A real run wrote attunement 30 and then read `attunement gives 0 slot(s)`,
+/// dropping every spell in the build as over budget.
+///
+/// Call it after the stats and before attuning anything. It is what the game runs when attunement
+/// changes; the unequip-over-budget half is its job, not a side effect to fear.
+///
+/// Not Arxan-redirected.
+pub const ITEM_BAG_RECALC_ATTUNEMENT: u32 = 0x001b_40f0;
+
+/// The five bytes [`ITEM_BAG_RECALC_ATTUNEMENT`] must begin with. `push rbx/rbp/rsi/rdi/r14`.
+pub const ITEM_BAG_RECALC_ATTUNEMENT_PROLOGUE: [u8; 5] = [0x40, 0x53, 0x55, 0x56, 0x57];
+
+/// **How many attunement slots the character actually has.** `BagList + 0x259ec`, `u8`.
+///
+/// # Attunement is a BUDGET, not a count of positions
+///
+/// `RecalcAttunementSlots` (`0x1401b40f0`) sets this to `bonus + PlayerParam[0x36]`, capped at
+/// [`ITEM_SLOT_SPELL_COUNT`], then walks the spell slots summing each spell's own cost and
+/// unequipping everything past the budget. **A spell can cost more than one slot.**
+///
+/// Attuning into a position at or past this value UNEQUIPS that position instead of equipping --
+/// silently. So a caller must read this and stop, or a build naming fourteen spells loses most of
+/// them with nothing said. It must also be read AFTER the stats are written, or it sizes against
+/// the old attunement.
+///
+/// Corroborated by the community table's "Additional Magic Slots" AOB, which is byte-for-byte the
+/// `movzx ecx,[rsi+0x259ed]; movsx eax,[rax+0x2e]` pair in that function.
+pub const ITEM_BAG_ATTUNEMENT_SLOTS_OFFSET: usize = 0x259EC;
+
+/// **`ItemSpawn + 0x00` is a MODE, not an unknown.** `u8`; the rest of the dword is ignored.
+///
+/// `0` grants normally. `1` refuses if the item is already held (`0x1401a9779`). `2` spends the
+/// bag's secondary slot budget. The community tables call it unknown and always write `0`, which is
+/// right for a build import and is right by accident.
+pub const ITEM_SPAWN_MODE_NORMAL: u32 = 0;
+
+/// **What to put in `ItemSpawn + 0x08`: `-1`, all bits set.** Maximum durability.
+///
+/// # This was briefly changed to zero, and zero means BROKEN
+///
+/// A static reading found the game's own caller at `0x140198a9e` zero-filling `+0x04..+0x0F` and
+/// concluded that the community tables' `-1 = maximum` convention was unsupported. So this became
+/// `0.0`, and the next run handed the player a full set of gear at zero durability.
+///
+/// The static reading was not wrong about that one caller. It was wrong as an argument for changing
+/// a value that WORKED: `-1` had been granting usable gear, and the only evidence offered against it
+/// was a different function's behaviour. Runtime evidence beats a static inference about what a
+/// value ought to be, and there was no runtime evidence for zero.
+///
+/// It is typed as an INTEGER here because that is what it is. The old code declared the field
+/// `f32` and wrote `f32::from_bits(-1i32 as u32)` -- a NaN, which happens to be the same four bytes
+/// and so happened to work. Same bytes, honest type.
+pub const ITEM_SPAWN_DURABILITY_MAX: i32 = -1;
+
+/// Bytes in one `ItemSpawn`, the element [`ITEM_GIVE`] takes an array of.
+///
+/// Layout, corroborated by the two community writers and by the callee's own `add rbx,0x10` stride:
+/// `+0x00` unknown `u32` (both writers store `0`), `+0x04` `i32` item id, `+0x08` `f32` durability,
+/// `+0x0C` `u16` quantity, `+0x0E` `u8` reinforce, `+0x0F` `u8` infusion.
+pub const ITEM_SPAWN_SIZE: usize = 0x10;
+
+// ---------------------------------------------------------------------------------------------
+// THE ESTUS FLASK.
+//
+// The flask's upgrade level is NOT an item id and NOT a shop transaction. It is two bytes on the
+// flask's own inventory entry, written by a plain method on `ItemInventory2` that reads nothing but
+// the inventory and two param tables. The Emerald Herald's dialogue is the TRIGGER, not the work:
+// her script command at `0x140464ced` is, in its entirety, `get(level); set(level + 1)` on the
+// functions below. Nothing in the chain touches a menu, an NPC, a talk state or `PlayerCtrl`, which
+// is why a pause-menu row can do the same thing.
+//
+// Every RVA here was traced through its thunks and disassembled to the end in
+// `darksoulsii-deobf.bin`, and none of them is Arxan-redirected.
+// ---------------------------------------------------------------------------------------------
+
+/// `ItemInventory2::SetEstusProperty`. RVA `0x001ac5a0`.
+/// `fn(ItemInventory2*, const u8* property, i32 level) -> bool`.
+///
+/// # `property` is a POINTER to a byte, and a wrong one writes the wrong field
+///
+/// The body does `movsx r8, byte [rdx]` and then indexes `entry + r8 + 0x25`. That is a SIGNED
+/// extension, so the `0xFF` [`ESTUS_PROPERTY_INDEX`] returns for a key it does not know would land
+/// on `entry + 0x24` -- the CHARGE COUNT -- and write a level into it. Never pass an index without
+/// checking it against [`ESTUS_PROPERTY_NOT_FOUND`] first.
+///
+/// # What it does, read to the end
+///
+/// `entry = [list + 0x40]`; null returns false. The entry's item id is put through the list's own
+/// `vtable[0x48]`, which is `ItemParam[id] + 0x40 == 450` -- the flask's identity, and the reason
+/// `60155010/20/30` can never bind here (they are `420`). It then clamps `level` into the
+/// `[min, max]` of `EstusFlaskMaxReinforceParam` for this property, writes `entry + 0x25 + property`
+/// and, **only for property 0**, moves the charge count by the difference in uses the two levels
+/// buy. Finally it mirrors the charge count and both level bytes into the save record.
+///
+/// # `false` means "nothing changed", which is not the same as "failed"
+///
+/// A level already equal to the one asked for returns false having done nothing. Read the level
+/// back with [`ESTUS_GET_LEVEL`] rather than trusting the bool.
+///
+/// # Not the sibling one address later
+///
+/// `0x001ac5b0` reaches the same body behind `cmp byte [inner + 0x10144], 2; jne return false` --
+/// a gate twelve bytes past [`ITEM_GIVE_ERROR_OFFSET`]. Character creation calls the gated one; the
+/// Herald's script calls this one.
+pub const ESTUS_SET_PROPERTY: u32 = 0x001a_c5a0;
+
+/// `ItemInventory2::GetEstusPropertyLevel`. RVA `0x001abc40`.
+/// `fn(ItemInventory2*, const u8* property) -> u8`.
+///
+/// Reads `entry + 0x25 + property` -- so `1..12` for the uses axis and `1..6` for the effect axis.
+///
+/// **Zero means there is no flask.** The getter answers `0` when the flask's list slot is unbound
+/// or holds something that is not the flask, and the game's own add path seeds a new flask at the
+/// param minimum, which is `1`. So zero is not a level.
+///
+/// The two bytes it reads are a UNION. On a weapon or armour entry (`entry + 0x1E <= 5`) the same
+/// bytes carry reinforcement and infusion in their low nibbles. Only read them on the flask.
+pub const ESTUS_GET_LEVEL: u32 = 0x001a_bc40;
+
+/// `ItemInventory2::GetEstusCharges`. RVA `0x001abc60`. `fn(ItemInventory2*) -> u8`.
+///
+/// `entry + 0x24` -- uses remaining right now, which is the number under the flask in the HUD.
+pub const ESTUS_GET_CHARGES: u32 = 0x001a_bc60;
+
+/// `ItemInventory2::IsEstusPropertyAtMax`. RVA `0x001ac1d0`.
+/// `fn(ItemInventory2*, const u8* property) -> bool`.
+///
+/// The game's own "is this axis finished" predicate: the level compared against
+/// `EstusFlaskMaxReinforceParam`'s max for that property. **Worth calling instead of comparing
+/// against a hardcoded 12**, because that number lives in a param a regulation mod can change.
+pub const ESTUS_IS_MAX: u32 = 0x001a_c1d0;
+
+/// `ItemInventory2::RefillEstus`. RVA `0x001ac370`. `fn(ItemInventory2*)`.
+///
+/// Sets the charge count to whatever the current uses level buys -- the bonfire's own refill.
+/// [`ESTUS_SET_PROPERTY`] already moves the count by the difference when the level rises, so this
+/// is what makes the result the same whether or not the player had been drinking.
+pub const ESTUS_REFILL: u32 = 0x001a_c370;
+
+/// The five bytes each of the Estus thunks must begin with. `mov rcx,[rcx+0x10]`, then a tail-jump.
+///
+/// Every one of them is the same two-hop shape as [`ITEM_SET_EQUIP`], and the two hops are the same
+/// two that reach [`ITEM_BAG_LIST_OFFSET`] -- so they all take `ItemInventory2`, the object
+/// [`ITEM_GIVE`] takes.
+pub const ESTUS_THUNK_PROLOGUE: [u8; 5] = [0x48, 0x8b, 0x49, 0x10, 0xe9];
+
+/// The game's own property-key to table-index lookup. RVA `0x001ad140`. `fn(u32 key) -> u8`.
+///
+/// A six-instruction leaf that scans the two-entry table at `0x14156b030` (`{const wchar_t* name;
+/// u32 key}`, stride `0x10`, sentinel at `0x14156b050`) and returns `(row - base) >> 4`, or
+/// [`ESTUS_PROPERTY_NOT_FOUND`]. It reads no game state, so it is safe to call at any time.
+///
+/// The mapping is the identity on this build. Call it anyway -- it is what the game's own callers
+/// do, and it is the only thing that would notice a regulation that reordered the table.
+pub const ESTUS_PROPERTY_INDEX: u32 = 0x001a_d140;
+
+/// The seven bytes [`ESTUS_PROPERTY_INDEX`] must begin with. `lea r8,[rip+0x13bdee9]`.
+///
+/// Unusually load-bearing for a prologue check: the displacement IS the address of the property
+/// table, so a match confirms the function is reading the table this documentation describes.
+pub const ESTUS_PROPERTY_INDEX_PROLOGUE: [u8; 7] = [0x4c, 0x8d, 0x05, 0xe9, 0xde, 0x3b, 0x01];
+
+/// [`ESTUS_PROPERTY_INDEX`]'s answer for a key it does not know. `0xFF`.
+///
+/// **Must be rejected rather than passed on.** See [`ESTUS_SET_PROPERTY`] -- it is sign-extended
+/// into an index, so it addresses the byte BEFORE the levels.
+pub const ESTUS_PROPERTY_NOT_FOUND: u8 = 0xFF;
+
+/// The number of uses -- the axis Estus Flask Shards raise. Property key `0`.
+///
+/// Named in the binary: the table row's name pointer is `0x1410c3e40`, the UTF-16 string
+/// `使用回数`, "number of uses".
+pub const ESTUS_PROPERTY_USES: u32 = 0;
+
+/// How much each use heals -- the axis Sublime Bone Dust raises. Property key `1`.
+///
+/// Named in the binary at `0x1410c3e50`: `効果量`, "effect amount". The same setter drives it; there
+/// is no separate bone-dust function, and the in-game path (`0x14017f420`, the item-use handler)
+/// differs only in writing a presentation flag on the player first.
+pub const ESTUS_PROPERTY_EFFECT: u32 = 1;
+
+/// What to ask [`ESTUS_SET_PROPERTY`] for when the intent is "as high as this game allows". `99`.
+///
+/// # Why not 12
+///
+/// The maxima live in `EstusFlaskMaxReinforceParam` (`12` uses and `6` effect as shipped), which a
+/// regulation mod can change, and the setter clamps into that param's own range before it writes.
+/// So asking for more than any real maximum and letting the game decide is exactly right, and it
+/// keeps a number out of this file that would silently become a LIMIT on a modded install.
+///
+/// The comparisons are SIGNED, so this must stay positive; a negative would clamp UP to the minimum.
+pub const ESTUS_LEVEL_ASK: i32 = 99;
+
+/// The one Estus Flask a character can hold. `60155000`.
+///
+/// The three neighbours the item catalogue also calls `Estus Flask` are not upgrade states -- the
+/// upgrade level is a byte on the entry, and the held id never changes. They are rows of
+/// `EstusFlaskLvDataParam` whose ids are `60155000 + (row - 1)`, reachable only at effect levels
+/// 11, 21 and 31 in a game that caps the effect level at 6. `ItemParam[id] + 0x40` is `450` for
+/// this id and `420` for those three, and `450` is what the flask's list checks, so they could not
+/// bind even if something granted them.
+pub const ESTUS_FLASK_ITEM_ID: i32 = 60155000;
+
+/// `PlayerParam::AddSouls`. RVA `0x0038ab40`. `fn(PlayerParam*, u32 amount)`.
+///
+/// **This is how soul memory is raised through the game rather than written.** One call updates
+/// THREE counters together -- souls held ([`PLAYER_PARAM_SOULS_HELD_OFFSET`]) and both soul-memory
+/// fields ([`PLAYER_PARAM_SOUL_MEMORY_OFFSETS`]) -- and then fires the change notifications
+/// `0x11`, `0x14`, `0x12`. Doing it by hand means three writes and no notification.
+///
+/// Verified: prologue `48 83 ec 28`, the soul-memory read at `0x14038abc8` is
+/// `44 8b 81 f4 00 00 00`, and the saturation cap at `0x14038ab76` is `b8 ff c9 9a 3b`.
+///
+/// **Add-only and saturating.** `edx` is compared unsigned, so there is no negative amount, and
+/// every counter clamps at [`PLAYER_PARAM_SOULS_CAP`]. So THIS function cannot lower soul memory.
+///
+/// # The game does have a path that lowers it, and this used to say otherwise
+///
+/// The claim here was "the game offers no path that lowers it". That is false.
+/// [`PLAYER_PARAM_RESTORE_FROM_RECORD`] assigns all three counters ABSOLUTELY -- clamped at the top
+/// against [`PLAYER_PARAM_SOULS_CAP`] and not at the bottom -- and `0x14038bc49` zeroes the second
+/// soul-memory field outright. Monotonicity is a property of the paths a PLAYER can reach, not of
+/// the class.
+///
+/// A build importer still only ever raises, and now for a reason that is a choice rather than a
+/// mistaken impossibility: `soul memory >= what the level cost` is the invariant, and lowering a
+/// level keeps it satisfied. There is nothing to reduce.
+///
+/// **It can silently do nothing, twice over.** A status flag on the player
+/// (`PlayerCtrl -> +0xB8 -> +0x4B8 & 0x0800000000000000`) makes it return before touching anything
+/// AND before notifying; and each counter has its own skip byte
+/// ([`PLAYER_PARAM_SOUL_COUNTER_GUARDS`]) that suppresses just that one. So a caller must read the
+/// counters back rather than trusting the call.
+pub const PLAYER_PARAM_ADD_SOULS: u32 = 0x0038_ab40;
+
+/// `PlayerParam::RestoreFromRecord`. RVA `0x0038ad20`. `fn(PlayerParam*, const SavedRecord*)`.
+///
+/// **The only path in the class that ASSIGNS the soul counters rather than adding to them**, and
+/// the reason [`PLAYER_PARAM_ADD_SOULS`] no longer claims lowering is impossible.
+///
+/// It is the character-load path. Read in full at `0x14038ad20`: the covenant from `record + 0x9C`
+/// into `PlayerParam + 0x1AC`, then a call to [`PLAYER_PARAM_SET_ALL_STATS`] -- the same function
+/// this repo already calls for stats -- then souls held from `record + 0x1C`, soul memory from
+/// `record + 0x20` and `record + 0x24`. Each of the three is clamped against
+/// [`PLAYER_PARAM_SOULS_CAP`] at the TOP only, guarded by its own byte from
+/// [`PLAYER_PARAM_SOUL_COUNTER_GUARDS`], and then written absolutely. A smaller number goes in
+/// unchanged.
+///
+/// # Recorded as a fact, NOT as a route to call
+///
+/// It takes a whole saved-character record and writes far more than the counters, so using it to
+/// lower soul memory would mean fabricating that record -- which is the one thing this project does
+/// not do. It is here so the next reader does not re-derive "there is no such function" from
+/// `AddSouls` alone, which is exactly how the wrong claim got written the first time.
+pub const PLAYER_PARAM_RESTORE_FROM_RECORD: u32 = 0x0038_ad20;
+
+/// The four bytes [`PLAYER_PARAM_ADD_SOULS`] must begin with. `sub rsp,0x28`, then `mov rax,[rcx]`.
+pub const PLAYER_PARAM_ADD_SOULS_PROLOGUE: [u8; 7] = [0x48, 0x83, 0xec, 0x28, 0x48, 0x8b, 0x01];
+
+/// Where every soul counter saturates. `999_999_999` -- `mov eax,0x3b9ac9ff` at `0x14038ab76`.
+pub const PLAYER_PARAM_SOULS_CAP: u32 = 0x3b9a_c9ff;
+
+/// Per-counter skip bytes, in the order of souls-held then the two soul-memory fields.
+///
+/// Non-zero means [`PLAYER_PARAM_ADD_SOULS`] leaves that counter alone. They are not padding: the
+/// constructor at `0x14038aa20` initialises each one beside its counter as `{u32 value; u8 guard;
+/// pad[3]}`, and that record repeats as an array from `+0x104`.
+pub const PLAYER_PARAM_SOUL_COUNTER_GUARDS: [usize; 3] = [0xF0, 0xF8, 0x100];
+
+/// Bytes in the `StatBlock` embedded at [`PLAYER_PARAM_STAT_OFFSETS`]`[0]`. `0xCC`.
+///
+/// It spans `PlayerParam + 0x08 .. + 0xD3` and holds BOTH stat copies plus the derived block and
+/// the soul level. Proved from the class's own constructor `0x14038c060`: eleven `u16` at `+0x00`,
+/// eleven more at `+0x16`, a `0x9c`-byte `memset` at `+0x2c`, and a `u32` at `+0xc8`.
+/// `0x2c + 0x9c = 0xc8`, `+ 4 = 0xcc`.
+///
+/// **This number is what settles which fields a stat write must maintain.** The game's own commit
+/// path blits exactly `0xCC` bytes and stops; anything past `+0xD3` is a different member and not
+/// this write's business.
+pub const PLAYER_PARAM_STAT_BLOCK_BYTES: usize = 0xCC;
+
+/// **Eleven `u16` that are NOT a third stat copy, and are deliberately left alone.** `+0xD4`.
+///
+/// # Why this offset has a constant at all when nothing writes it
+///
+/// It sits immediately after the stat block, is eleven `u16` wide, and is zeroed by the
+/// `PlayerParam` constructor -- which is exactly what a third copy of the stats would look like
+/// from the outside. This crate has already misread one neighbouring field that way (see
+/// [`PLAYER_PARAM_EFFECTIVE_STATS_OFFSET`]), so it is recorded WITH ITS ANSWER, to stop the next
+/// reader re-deriving the same suspicion.
+///
+/// # What it is
+///
+/// The "points allocated per stat" array that follows an embedded `StatBlock`. The level-up request
+/// object has the identical shape -- a `StatBlock` at `+0x00` and eleven `u16` zeroed at `+0xCC`,
+/// the same relative offset -- and THERE the array is used: `0x1401fba30` increments
+/// `[req + i*2 + 0xCC]` when a stat goes up and `0x1401fb890` decrements it, guarded so a player can
+/// only take back points they put in. Those are the only per-element accesses to the array in the
+/// whole image, and they are all on the request, never on `PlayerParam`.
+///
+/// # Why leaving it stale is correct
+///
+/// **In `PlayerParam` it is written exactly once, by the constructor, and never again** -- not by
+/// the commit path (`0x14038b1a0` copies `0xCC` bytes and stops at `+0xD3`), and not by the
+/// character-load path `0x14038ad20`, which restores the stats, souls, soul memory and covenant and
+/// skips this. A loaded character has zeros here, same as a new one. So a mod that writes the stats
+/// and leaves this alone is doing what the game does.
+///
+/// It has one reader, `0x14038b350`, which `memcmp`s it against a 22-byte set and recomputes the
+/// stat block when they differ. Since the field is never written, that comparison is against 22
+/// zero bytes forever -- a memoisation whose update side was never emitted. Vanilla behaviour;
+/// nothing a mod does changes it.
+///
+/// There is no FOURTH stat-shaped array: `PlayerParam` is `0x1E0` bytes (allocation site
+/// `0x14037f499`) and holds exactly three eleven-`u16` regions -- `+0x08`, `+0x1E`, and this one.
+pub const PLAYER_PARAM_POINTS_PER_STAT_OFFSET: usize = 0xD4;
+
+/// **The EFFECTIVE stat block: what the character's stats currently amount to.** `+0x1E`.
+///
+/// Eleven `u16`, immediately after the base block at [`PLAYER_PARAM_STAT_OFFSETS`].
+///
+/// # This was called a MIRROR, and that was wrong
+///
+/// The name came from reading only [`PLAYER_PARAM_SET_ALL_STATS`]'s opening, which writes each of
+/// the eleven `u16` to two destinations. Verified bytes at `0x14038acba`:
+///
+/// ```text
+/// 48 89 41 08   mov [rcx+0x08],rax     ; the base block
+/// 48 89 41 1e   mov [rcx+0x1e],rax     ; ...and the same qword again, 0x16 further on
+/// 4c 89 41 10   mov [rcx+0x10],r8
+/// 4c 89 41 26   mov [rcx+0x26],r8
+/// 44 89 49 18   mov [rcx+0x18],r9d
+/// 44 89 49 2e   mov [rcx+0x2e],r9d
+/// ```
+///
+/// Those writes are real and they do make the two ranges briefly identical. **But they are a SEED,
+/// not a copy.** The same function then calls `0x14038d6d0`, which recomputes the effective block
+/// FROM the base block and writes it back over `+0x1E`. So the two are equal only for a character
+/// with nothing modifying its stats, and reading a difference as corruption is a false alarm.
+///
+/// **MEASURED IN GAME, 2026-08-28.** A character written to `int=38 faith=38` displayed `40`/`40`
+/// in its own attribute menu, every other stat exact. The menu reads THIS block. Two stats carried
+/// a `+2` from somewhere, and both ranges were already unequal before anything was written --
+/// which is what makes "one of these is derived" the only reading that fits.
+///
+/// # What it is good for
+///
+/// Reading what the character's stats effectively ARE, and nothing else. It is NOT a tamper check,
+/// it is NOT a write target, and a caller that wants the levelled stats wants
+/// [`PLAYER_PARAM_STAT_OFFSETS`].
+///
+/// Neither community table maps this offset at all.
+pub const PLAYER_PARAM_EFFECTIVE_STATS_OFFSET: usize = 0x1E;
+
+/// Bytes covered by one copy of the stat block: eleven `u16`.
+pub const PLAYER_PARAM_STAT_BLOCK_SIZE: usize = 22;
+
+/// The commit path for a stat change: validate a request, recompute, blit, charge. RVA `0x0038b1a0`.
+///
+/// It calls a validator, calls `0x14038c0d0` for a freshly computed stat block, `memcpy`s **`0xCC`
+/// bytes over `PlayerParam + 0x08`** -- covering both copies of the stat block and everything to
+/// `+0xD3` -- then subtracts the level cost from souls held while leaving both soul-memory counters
+/// alone, which is exactly right for spending souls.
+///
+/// **Recorded as a LEAD, not as a callable.** The `request` object in `rdx` has an unknown layout,
+/// and whether it can be built without the attribute menu having built it is the open question that
+/// decides whether a headless level-up is possible at all. Calling this with a malformed request is
+/// not a thing to try casually: it blits 204 bytes into the live character.
+pub const PLAYER_PARAM_COMMIT_STATS: u32 = 0x0038_b1a0;
+
+/// **Set all eleven stats and let the game derive everything else.** RVA `0x0038aca0`.
+///
+/// `fn(PlayerParam*, *const [u16; 11])`. This is how a build is applied, and it is the reason
+/// nothing here writes a soul level.
+///
+/// # THE SOUL LEVEL IS NOT A FIELD YOU SET, IT IS A SUM
+///
+/// `0x14038e310` computes `level = max(1, sum(stats[0..8]) - 53)` and writes it to
+/// [`PLAYER_PARAM_SOUL_LEVEL_OFFSET`]. The `53` is `9 * 6 - 1`: a Deprived starts every stat at 6,
+/// `9 * 6 = 54`, and `54 - 53 = 1`. So a character's level is a function of its nine stats and
+/// there is no way to disagree with it -- writing a level would be writing a cached sum. Cheaply
+/// checkable: soulsplanner build 253's stats total 203, and `203 - 53 = 150`, the level the planner
+/// shows.
+///
+/// The two `u16` at index 9 and 10 (`+0x1A`, `+0x1C`) are NOT in that sum. Read them out of the
+/// character and write them back unchanged; nothing here knows what they are.
+///
+/// # What one call does, from the disassembly
+///
+/// Loads all 22 bytes out of `rdx` and writes them to BOTH `+0x08` and
+/// [`PLAYER_PARAM_EFFECTIVE_STATS_OFFSET`], fetches the character context through `PlayerCtrl`
+/// vtable slot `0x130`, calls `0x14038d6d0` to recompute the effective stats, the derived block AND
+/// the soul level, then tail-calls `0x14038be90` to reapply the HP and stamina caps to the live
+/// character.
+///
+/// **The write to `+0x1E` is overwritten by that recompute** -- it is a seed, not a second copy.
+/// See [`PLAYER_PARAM_EFFECTIVE_STATS_OFFSET`], which was misread as a mirror for exactly this
+/// reason.
+///
+/// **That is the entire argument for using this instead of [`PLAYER_PARAM_COMMIT_STATS`].** Both
+/// end in the same recompute; this one takes 22 bytes of plain `u16` with no invariants, and the
+/// other takes a 0x104-byte plan with a seven-clause validator, a souls ledger and a
+/// `levels_bought == planned_level - base_level` identity to satisfy. Fewer ways to build a
+/// character that looks right and is wrong.
+///
+/// Not Arxan-redirected. Six existing callers.
+pub const PLAYER_PARAM_SET_ALL_STATS: u32 = 0x0038_aca0;
+
+/// The five bytes [`PLAYER_PARAM_SET_ALL_STATS`] must begin with. `mov [rsp+8],rbx`.
+pub const PLAYER_PARAM_SET_ALL_STATS_PROLOGUE: [u8; 5] = [0x48, 0x89, 0x5c, 0x24, 0x08];
+
+/// Stats in one `PlayerParam` block, INCLUDING the two that are not levelable.
+///
+/// [`PLAYER_PARAM_SET_ALL_STATS`] reads all eleven; [`PLAYER_PARAM_STAT_OFFSETS`] names the nine
+/// that a level buys.
+pub const PLAYER_PARAM_STAT_COUNT: usize = 11;
+
+/// What the soul-level sum subtracts. `level = max(1, sum(nine stats) - 53)`.
+///
+/// From `0x14038e310`. See [`PLAYER_PARAM_SET_ALL_STATS`] for why this is `9 * 6 - 1`.
+pub const PLAYER_PARAM_SOUL_LEVEL_BIAS: u32 = 53;
+
+/// Opens the attribute menu. RVA `0x001992c0`. `fn(menuMgr, mode, *const [f32; 8])`.
+///
+/// `mode` `1` pushes menu `0x19` (Level Up) and `0` pushes `0x1a` (Reallocate Stats); any other
+/// value is a silent no-op. `menuMgr` is `[[GAME_MANAGER_IMP + 0x70] + 0x50]`, and the third
+/// argument is a **16-byte-aligned** scratch buffer whose first four floats are copied from
+/// `PlayerCtrl + 0x90`, the player's world position -- the callee reads it with `movaps`, so an
+/// unaligned buffer faults.
+///
+/// **It opens the UI. It does not level anything**, and a human still picks the stat. Recorded
+/// because it is the only level path any community table has, and because it routes through
+/// [`GAME_MANAGER_FRONTEND_ROOT_OFFSET`] -- machinery `ds2-menu-row` already touches.
+pub const FE_OPEN_ATTRIBUTE_MENU: u32 = 0x0019_92c0;
+
+/// `SaveLoadSystem::RequestSave`. RVA `0x002e7410`. `fn(saveLoadSystem, kind)`, `kind = 2`.
+///
+/// `saveLoadSystem` is `[GAME_MANAGER_IMP + `[`SAVE_LOAD_SYSTEM_OFFSET`]`]`. How a change is
+/// persisted without waiting for a bonfire.
+pub const SAVE_LOAD_REQUEST_SAVE: u32 = 0x002e_7410;

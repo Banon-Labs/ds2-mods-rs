@@ -15,6 +15,57 @@ static LOGGER: AtomicUsize = AtomicUsize::new(0);
 /// Signature of the sink. Matches the loader's own logging entry point.
 pub type LogFn = fn(std::fmt::Arguments<'_>);
 
+/// Run `callback` on the GAME THREAD, once per frame, while the pause menu is up.
+///
+/// **This is how a row does anything the game itself has to do.** A row's `on_confirm` is on the
+/// game thread but happens once; work that answers later -- a fetch, a parse, anything on a worker
+/// -- has nowhere to land, and calling into the game from a worker races the renderer. A tick is
+/// both recurring and correctly-threaded, so the pattern is: the worker leaves a result somewhere,
+/// and the tick picks it up and acts on it.
+///
+/// Ticks run BEFORE captions are pushed, so a tick that calls
+/// [`set_row_caption`] is on screen the same frame.
+///
+/// It only fires while the pause menu's group is updating, which is exactly when calling into the
+/// menu is safe and exactly when nobody is watching otherwise. A `fn()` rather than a closure,
+/// because this crate stores it forever and will not own a caller's captured state.
+///
+/// Returns whether it was registered.
+pub fn add_tick(callback: fn()) -> bool {
+    crate::caption::add_tick(callback)
+}
+
+/// Change what a registered row says on screen.
+///
+/// **Safe from any thread, and nothing appears until the game thread pushes it.** The text is
+/// copied into a buffer this crate leaked at first bind; the game only sees it when the pause menu
+/// is next opened, or when [`refresh_row_captions`] is called while it is already up. That split is
+/// deliberate: the caller most likely to want this is reporting the result of something slow, which
+/// means it is holding that result on a worker, and writing into the scene from there would race
+/// the renderer.
+///
+/// Text longer than the caption buffer is TRUNCATED rather than refused -- a short label is a
+/// better failure than one still saying "Fetching...".
+///
+/// Returns whether the row exists. `false` also comes back before any pause menu has been opened,
+/// because the buffers are built from the registry on the first bind.
+pub fn set_row_caption(row: crate::RowId, text: &str) -> bool {
+    crate::caption::set_caption(row.0, text)
+}
+
+/// Push every registered row's caption onto its element now.
+///
+/// # Safety
+///
+/// Calls into the game's scene machinery. **Game thread only**, and only while the pause menu whose
+/// captions these are is actually up -- from a [`RowSpec::on_confirm`](crate::RowSpec::on_confirm),
+/// which is exactly that. Returns how many were written; `0` means no menu has been bound yet and
+/// there was nothing to write to.
+pub unsafe fn refresh_row_captions() -> usize {
+    // SAFETY: forwarded to the caller, who is promising the game thread and a live menu.
+    unsafe { crate::caption::push_captions() }
+}
+
 /// Point this crate's logging at the loader's log file. Call before [`install`].
 pub fn set_logger(logger: LogFn) {
     LOGGER.store(logger as usize, Ordering::Release);
