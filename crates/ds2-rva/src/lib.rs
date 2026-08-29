@@ -4274,6 +4274,54 @@ pub const PLAYER_PARAM_SOULS_CAP: u32 = 0x3b9a_c9ff;
 /// pad[3]}`, and that record repeats as an array from `+0x104`.
 pub const PLAYER_PARAM_SOUL_COUNTER_GUARDS: [usize; 3] = [0xF0, 0xF8, 0x100];
 
+/// Bytes in the `StatBlock` embedded at [`PLAYER_PARAM_STAT_OFFSETS`]`[0]`. `0xCC`.
+///
+/// It spans `PlayerParam + 0x08 .. + 0xD3` and holds BOTH stat copies plus the derived block and
+/// the soul level. Proved from the class's own constructor `0x14038c060`: eleven `u16` at `+0x00`,
+/// eleven more at `+0x16`, a `0x9c`-byte `memset` at `+0x2c`, and a `u32` at `+0xc8`.
+/// `0x2c + 0x9c = 0xc8`, `+ 4 = 0xcc`.
+///
+/// **This number is what settles which fields a stat write must maintain.** The game's own commit
+/// path blits exactly `0xCC` bytes and stops; anything past `+0xD3` is a different member and not
+/// this write's business.
+pub const PLAYER_PARAM_STAT_BLOCK_BYTES: usize = 0xCC;
+
+/// **Eleven `u16` that are NOT a third stat copy, and are deliberately left alone.** `+0xD4`.
+///
+/// # Why this offset has a constant at all when nothing writes it
+///
+/// It sits immediately after the stat block, is eleven `u16` wide, and is zeroed by the
+/// `PlayerParam` constructor -- which is exactly what a third copy of the stats would look like
+/// from the outside. This crate has already misread one neighbouring field that way (see
+/// [`PLAYER_PARAM_EFFECTIVE_STATS_OFFSET`]), so it is recorded WITH ITS ANSWER, to stop the next
+/// reader re-deriving the same suspicion.
+///
+/// # What it is
+///
+/// The "points allocated per stat" array that follows an embedded `StatBlock`. The level-up request
+/// object has the identical shape -- a `StatBlock` at `+0x00` and eleven `u16` zeroed at `+0xCC`,
+/// the same relative offset -- and THERE the array is used: `0x1401fba30` increments
+/// `[req + i*2 + 0xCC]` when a stat goes up and `0x1401fb890` decrements it, guarded so a player can
+/// only take back points they put in. Those are the only per-element accesses to the array in the
+/// whole image, and they are all on the request, never on `PlayerParam`.
+///
+/// # Why leaving it stale is correct
+///
+/// **In `PlayerParam` it is written exactly once, by the constructor, and never again** -- not by
+/// the commit path (`0x14038b1a0` copies `0xCC` bytes and stops at `+0xD3`), and not by the
+/// character-load path `0x14038ad20`, which restores the stats, souls, soul memory and covenant and
+/// skips this. A loaded character has zeros here, same as a new one. So a mod that writes the stats
+/// and leaves this alone is doing what the game does.
+///
+/// It has one reader, `0x14038b350`, which `memcmp`s it against a 22-byte set and recomputes the
+/// stat block when they differ. Since the field is never written, that comparison is against 22
+/// zero bytes forever -- a memoisation whose update side was never emitted. Vanilla behaviour;
+/// nothing a mod does changes it.
+///
+/// There is no FOURTH stat-shaped array: `PlayerParam` is `0x1E0` bytes (allocation site
+/// `0x14037f499`) and holds exactly three eleven-`u16` regions -- `+0x08`, `+0x1E`, and this one.
+pub const PLAYER_PARAM_POINTS_PER_STAT_OFFSET: usize = 0xD4;
+
 /// **The EFFECTIVE stat block: what the character's stats currently amount to.** `+0x1E`.
 ///
 /// Eleven `u16`, immediately after the base block at [`PLAYER_PARAM_STAT_OFFSETS`].
