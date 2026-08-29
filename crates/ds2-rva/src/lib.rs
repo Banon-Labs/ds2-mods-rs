@@ -4345,17 +4345,23 @@ pub const ITEM_BAG_ATTUNEMENT_SLOTS_OFFSET: usize = 0x259EC;
 /// right for a build import and is right by accident.
 pub const ITEM_SPAWN_MODE_NORMAL: u32 = 0;
 
-/// **What to put in `ItemSpawn + 0x08`, the durability float: ZERO.**
+/// **What to put in `ItemSpawn + 0x08`: `-1`, all bits set.** Maximum durability.
 ///
-/// The community tables say `-1` means maximum, and this once passed `-1` reinterpreted as a float
-/// -- a NaN. The disassembly does not support that convention anywhere. The game's own caller at
-/// `0x140198a9e` zero-fills `+0x04..+0x0F` and then writes only the id and the quantity.
+/// # This was briefly changed to zero, and zero means BROKEN
 ///
-/// It never caused the refusals it was suspected of: the check path rebuilds a fresh struct per
-/// unique id at `0x1401a628b` and writes `0` over this field, so the value cannot reach the
-/// decision. But the ADD path forwards the caller's bytes verbatim into the bag, so a NaN would
-/// have been stored on the item. Pass what the game passes.
-pub const ITEM_SPAWN_DURABILITY_DEFAULT: f32 = 0.0;
+/// A static reading found the game's own caller at `0x140198a9e` zero-filling `+0x04..+0x0F` and
+/// concluded that the community tables' `-1 = maximum` convention was unsupported. So this became
+/// `0.0`, and the next run handed the player a full set of gear at zero durability.
+///
+/// The static reading was not wrong about that one caller. It was wrong as an argument for changing
+/// a value that WORKED: `-1` had been granting usable gear, and the only evidence offered against it
+/// was a different function's behaviour. Runtime evidence beats a static inference about what a
+/// value ought to be, and there was no runtime evidence for zero.
+///
+/// It is typed as an INTEGER here because that is what it is. The old code declared the field
+/// `f32` and wrote `f32::from_bits(-1i32 as u32)` -- a NaN, which happens to be the same four bytes
+/// and so happened to work. Same bytes, honest type.
+pub const ITEM_SPAWN_DURABILITY_MAX: i32 = -1;
 
 /// Bytes in one `ItemSpawn`, the element [`ITEM_GIVE`] takes an array of.
 ///

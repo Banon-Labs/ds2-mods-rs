@@ -122,15 +122,19 @@ pub(crate) fn build_items(build: &ds2_build_import_core::Build) -> Vec<game::Ite
                 return log_line(format_args!("{LOG_PREFIX} skipping {name:?}: {error}"));
             }
         };
+        // DO NOT GRANT WHAT THE CHARACTER ALREADY HAS. Their copy carries their reinforcement,
+        // their infusion and their durability; a minted duplicate carries none of that and would
+        // then be the one equipped. Silence about an item is not a request for another one.
+        if game::already_held(item_id) {
+            return;
+        }
         out.push(game::ItemSpawn {
             mode: ds2_rva::ITEM_SPAWN_MODE_NORMAL,
             item_id,
-            // ZERO, which is what the game's own caller writes. This used to pass `-1`
-            // reinterpreted as a float -- a NaN -- on the strength of a community table's
-            // "-1 means max" convention that the disassembly supports nowhere. It never caused a
-            // refusal (the check path overwrites this field before deciding) but the ADD path
-            // stores the caller's bytes verbatim, so a NaN would have been written onto the item.
-            durability: ds2_rva::ITEM_SPAWN_DURABILITY_DEFAULT,
+            // MAXIMUM. Zero was tried, on a static argument, and zero is what "broken" means --
+            // it handed the player a full set of gear at no durability. See
+            // `ds2_rva::ITEM_SPAWN_DURABILITY_MAX`.
+            durability: ds2_rva::ITEM_SPAWN_DURABILITY_MAX,
             quantity: 1,
             reinforce: 0,
             infusion: infusion.byte(),

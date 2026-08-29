@@ -476,7 +476,7 @@ pub(crate) struct ItemSpawn {
     /// what the grant does, and a build import wants `0`.
     pub(crate) mode: u32,
     pub(crate) item_id: i32,
-    pub(crate) durability: f32,
+    pub(crate) durability: i32,
     pub(crate) quantity: u16,
     pub(crate) reinforce: u8,
     pub(crate) infusion: u8,
@@ -709,7 +709,7 @@ fn bag_list() -> Result<usize, GameError> {
 /// equip is a MOVE, filling the second slot would strip the first.
 fn entry_for_item(bag: usize, item_id: i32) -> Option<usize> {
     let base = bag + ds2_rva::ITEM_ENTRY_ARRAY_OFFSET;
-    let mut worn: Option<usize> = None;
+    let mut spare: Option<usize> = None;
     for index in 0..ds2_rva::ITEM_ENTRY_COUNT {
         let entry = base + index * ds2_rva::ITEM_ENTRY_STRIDE;
         // SAFETY: inside the bag the game's own pointer chain produced; the read is fault-safe and
@@ -725,14 +725,25 @@ fn entry_for_item(bag: usize, item_id: i32) -> Option<usize> {
         let flags =
             unsafe { ds2_game_base::mem::safe_read_u8(entry + ds2_rva::ITEM_ENTRY_FLAGS_OFFSET) };
         if flags.is_some_and(|flags| flags & ds2_rva::ITEM_ENTRY_FLAG_EQUIPPED != 0) {
-            worn.get_or_insert(entry);
-            continue;
+            // THE COPY ALREADY BEING WORN WINS. This preference used to be the other way round, to
+            // stop two slots resolving to one entry -- and the cost of that was the import taking
+            // the player's own equipped gear off and replacing it with a copy it had just minted.
+            // The player's existing item is the one with their upgrades, their infusion and their
+            // durability on it; a freshly granted duplicate is not an improvement on it.
+            return Some(entry);
         }
-        return Some(entry);
+        spare.get_or_insert(entry);
     }
-    // Nothing spare. The worn copy beats refusing: re-equipping it into the slot it already
-    // occupies is a no-op, and into a different one it is the move the build asked for.
-    worn
+    spare
+}
+
+/// Whether the character already holds this item at all.
+///
+/// Used to decide whether to grant it. **A build asking for a sword the player already owns is not
+/// asking for a second sword** -- and the second one arrives without their reinforcement or their
+/// infusion, so granting it and then equipping it is strictly worse than leaving them alone.
+pub(crate) fn already_held(item_id: i32) -> bool {
+    bag_list().is_ok_and(|bag| entry_for_item(bag, item_id).is_some())
 }
 
 /// What a FLAT slot currently holds, through the game's own accessor.
@@ -827,6 +838,26 @@ fn flat_slot_for(internal: u32) -> Option<i32> {
 pub(crate) unsafe fn equip(request: EquipRequest<'_>) -> Result<EquipOutcome, GameError> {
     let inventory = item_inventory()?;
     let bag = bag_list()?;
+
+    // ALREADY WEARING IT? THEN DO NOTHING. Not merely an optimisation:
+    //
+    // * equipping is a MOVE, which strips the item from wherever it sits before writing the slot,
+    //   so "re-equip what is already there" is a strip and a write for no gain;
+    // * on a SPELL slot the strip compacts the attunement array downward and re-notifies every
+    //   slot after it, so re-attuning in place disturbs spells the build never mentioned;
+    // * and the player's own copy is the one with their upgrades on it. Touching it can only lose.
+    let flat = flat_slot_for(request.internal_slot);
+    if let Some(flat) = flat
+        // SAFETY: game thread, per this function's contract.
+        && let Ok(Some(current)) = unsafe { equipped_in_flat_slot(inventory, flat) }
+        && request.item_ids.contains(&current)
+    {
+        return Ok(EquipOutcome {
+            internal_slot: request.internal_slot,
+            wanted: current,
+            landed: Some(current),
+        });
+    }
     let site = game_rva(ds2_rva::ITEM_SET_EQUIP).map_err(|_| GameError::Unresolved)?;
     let mut prologue = [0u8; ds2_rva::ITEM_SET_EQUIP_PROLOGUE.len()];
     // SAFETY: a resolved RVA in the loaded image; the read is fault-safe.
@@ -853,7 +884,7 @@ pub(crate) unsafe fn equip(request: EquipRequest<'_>) -> Result<EquipOutcome, Ga
     // READ IT BACK, because this function fails silently in two ways: a category mismatch returns
     // having done nothing, and attuning past capacity unequips the slot instead. Neither says so.
     // SAFETY: game thread, per this function's contract.
-    let landed = match flat_slot_for(request.internal_slot) {
+    let landed = match flat {
         Some(flat) => unsafe { equipped_in_flat_slot(inventory, flat) }?,
         None => None,
     };
