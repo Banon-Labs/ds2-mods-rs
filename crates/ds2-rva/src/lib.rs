@@ -4241,6 +4241,29 @@ pub const ITEM_SLOT_SPELL_BASE: u32 = 28;
 /// The most attunement positions a character can have. `14`.
 pub const ITEM_SLOT_SPELL_COUNT: usize = 14;
 
+/// **Recompute the attunement slot count from the character's attunement.** RVA `0x001b40f0`.
+///
+/// `fn(BagList*)`. Sets [`ITEM_BAG_ATTUNEMENT_SLOTS_OFFSET`] to `bonus + PlayerParam[0x36]`, capped
+/// at [`ITEM_SLOT_SPELL_COUNT`], then walks the spell slots summing each spell's cost and
+/// unequipping everything past the budget.
+///
+/// # Writing the stats does NOT do this, and that is measured
+///
+/// [`PLAYER_PARAM_SET_ALL_STATS`] recomputes the effective stats, the derived block and the soul
+/// level, and reapplies the HP and stamina caps. It does not touch the bag. So a character written
+/// straight to attunement 30 still has whatever slot count it had before -- and a blank mule
+/// character has ZERO. A real run wrote attunement 30 and then read `attunement gives 0 slot(s)`,
+/// dropping every spell in the build as over budget.
+///
+/// Call it after the stats and before attuning anything. It is what the game runs when attunement
+/// changes; the unequip-over-budget half is its job, not a side effect to fear.
+///
+/// Not Arxan-redirected.
+pub const ITEM_BAG_RECALC_ATTUNEMENT: u32 = 0x001b_40f0;
+
+/// The five bytes [`ITEM_BAG_RECALC_ATTUNEMENT`] must begin with. `push rbx/rbp/rsi/rdi/r14`.
+pub const ITEM_BAG_RECALC_ATTUNEMENT_PROLOGUE: [u8; 5] = [0x40, 0x53, 0x55, 0x56, 0x57];
+
 /// **How many attunement slots the character actually has.** `BagList + 0x259ec`, `u8`.
 ///
 /// # Attunement is a BUDGET, not a count of positions

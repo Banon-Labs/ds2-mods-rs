@@ -328,10 +328,23 @@ fn equip_everything(build: &ds2_build_import_core::Build) {
         return;
     }
 
-    // THE ATTUNEMENT BUDGET, read AFTER the stats were written so it reflects the build's own
-    // attunement rather than the character's old one. Attuning past it does not fail -- it
-    // UNEQUIPS the slot -- so the surplus has to be dropped here and said out loud.
-    let capacity = crate::game::attunement_slots().unwrap_or(0);
+    // THE ATTUNEMENT BUDGET. Reading it after the stats were written is NOT enough: the count is
+    // cached on the bag and the stat write does not touch it, so a character written to attunement
+    // 30 still reports whatever it had before -- zero, for a blank one, which dropped every spell
+    // in the build. So the game's own recalculation is run first, and the number is read back from
+    // it. Attuning past the budget does not fail; it UNEQUIPS the slot, which is why the surplus is
+    // dropped here and said out loud.
+    // SAFETY: the game thread, from the pause menu's own per-frame update, with a character loaded.
+    let capacity = match unsafe { crate::game::recalc_attunement_slots() } {
+        Ok(capacity) => capacity,
+        Err(error) => {
+            log_line(format_args!(
+                "{LOG_PREFIX} could not recalculate the attunement slots ({error}) -- no spell \
+                 will be attuned"
+            ));
+            0
+        }
+    };
 
     let mut done = 0usize;
     let mut refused: Vec<String> = Vec::new();

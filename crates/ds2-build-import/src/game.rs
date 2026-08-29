@@ -729,6 +729,34 @@ unsafe fn equipped_in_flat_slot(
     Ok(unsafe { safe_read_u32(entry + ds2_rva::ITEM_ENTRY_ITEM_ID_OFFSET) }.map(|id| id as i32))
 }
 
+/// **Recompute the attunement slot count from the character's current attunement.**
+///
+/// Writing the stats does not do this -- see [`ds2_rva::ITEM_BAG_RECALC_ATTUNEMENT`]. Without it a
+/// character written to attunement 30 keeps whatever count it had before, which for a blank
+/// character is zero, and every spell in the build is dropped as over budget.
+///
+/// # Safety
+///
+/// Calls into the game. **Game thread only.** The prologue is byte-checked first.
+pub(crate) unsafe fn recalc_attunement_slots() -> Result<u8, GameError> {
+    let bag = bag_list()?;
+    let site = game_rva(ds2_rva::ITEM_BAG_RECALC_ATTUNEMENT).map_err(|_| GameError::Unresolved)?;
+    let mut prologue = [0u8; ds2_rva::ITEM_BAG_RECALC_ATTUNEMENT_PROLOGUE.len()];
+    // SAFETY: a resolved RVA in the loaded image; the read is fault-safe.
+    if !unsafe { ds2_game_base::mem::read_bytes(site, &mut prologue) }
+        || prologue != ds2_rva::ITEM_BAG_RECALC_ATTUNEMENT_PROLOGUE
+    {
+        return Err(GameError::PrologueMismatch);
+    }
+    // SAFETY: the prologue matched, and the signature is the one the disassembly implements -- the
+    // bag in RCX, nothing else, no return.
+    unsafe {
+        let recalc: unsafe extern "system" fn(usize) = core::mem::transmute(site);
+        recalc(bag);
+    }
+    attunement_slots()
+}
+
 /// How many attunement slots the character has RIGHT NOW.
 ///
 /// Read AFTER the stats are written, or it answers for the old attunement. See
