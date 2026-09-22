@@ -64,6 +64,13 @@ backup/
 *.db-shm
 db.sqlite
 bd.db
+# Bounded `bd prime` override, regenerated per-machine by scripts/beads-prime.sh, plus
+# the full memory title list it points at. Local-only; every clone regenerates its own.
+PRIME.md
+PRIME.md.tmp
+PRIME-memory-index.txt
+PRIME-memory-index.txt.tmp
+
 # NOTE: Do NOT add negation patterns here.
 # They would override fork protection in .git/info/exclude.
 # Config files (metadata.json, config.yaml) are tracked by git by default

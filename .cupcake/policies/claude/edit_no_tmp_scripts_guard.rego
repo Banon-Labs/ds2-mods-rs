@@ -38,9 +38,9 @@ deny contains decision if {
 deny contains decision if {
 	input.hook_event_name == "PreToolUse"
 	bash_tool
-	bash_authors_tmp_script
+	some path in tmp_written_script_paths
 
-	decision := tmp_script_decision(tmp_script_path_from_command)
+	decision := tmp_script_decision(path)
 }
 
 tmp_script_decision(path) := decision if {
@@ -103,20 +103,59 @@ is_script_path(path) if {
 	endswith(path, ext)
 }
 
-tmp_script_path_from_command := path if {
+# WRITE INDICATORS, EACH ANCHORED TO THE PATH ITSELF.
+#
+# The Write/Edit/MultiEdit/NotebookEdit branch above needs no such test -- those tools ALWAYS
+# author the file they name. Bash does not, and the previous form of this branch could not tell
+# the difference: it asked only whether an interpreter-ish word appeared ANYWHERE in the command
+# and a /tmp script path appeared ANYWHERE else. Two measured false positives (2026-08-25):
+#
+#   python3 - <<'EOF' ... open(p) ... glob('/tmp/planner/*.js') ... EOF
+#       -> READS third-party js out of /tmp. Denied because "python3" and a "/tmp/*.js" both
+#          occurred in the same command.
+#   mkdir -p target/planner-bundle && cp -f /tmp/planner/*.js target/planner-bundle/ && ls ...
+#       -> COPIES OUT of /tmp, no interpreter at all. Denied because the alternation had no word
+#          boundaries and "bun" matched inside the substring "planner-bundle", after which `.*`
+#          reached the /tmp path. Same trap for cat/"concatenate", node/"node_modules",
+#          tee/"committee", echo/"echoes".
+#
+# So the interpreter alternation is gone entirely -- an interpreter NAME says nothing about
+# direction -- and each pattern below binds a real write operator DIRECTLY to the path it writes,
+# capturing that path in group 1. Every command word is anchored on both sides ((^|[\s;&|(]) before,
+# required whitespace after) so a substring inside an unrelated word can never arm the rule.
+write_indicator_patterns := [
+	# Shell redirection INTO the path: `> /tmp/x.py`, `>> /tmp/x.py`, `2>/tmp/x.py`, `&>/tmp/x.py`,
+	# `>| /tmp/x.py`. This is also what covers a heredoc / `echo` / `printf` redirected into it.
+	`>>?\|?\s*(/tmp/[^\s"'\\;&|<>]+)`,
+
+	# `| tee /tmp/x.sh`, `tee -a /tmp/x.sh`.
+	`(?:^|[\s;&|(])tee(?:\s+-{1,2}[^\s]+)*\s+(/tmp/[^\s"'\\;&|<>]+)`,
+
+	# Download/output flags: `curl -o /tmp/x.js`, `curl --output /tmp/x.js`, `wget -O /tmp/x.js`.
+	`(?:^|[\s;&|(])(?:-o|-O|--output|--output-document)[=\s]*(/tmp/[^\s"'\\;&|<>]+)`,
+
+	# Copy/move/install DESTINATION. The /tmp path must be the LAST argument of its command
+	# segment, which is what separates `cp a /tmp/x.py` (writes into /tmp) from
+	# `cp /tmp/x.py a` and `cp -f /tmp/planner/*.js target/` (both read OUT of /tmp).
+	`(?m)(?:^|[\s;&|(])(?:cp|mv|install|rsync|scp|ln)\s+(?:[^\s;&|<>]+\s+)+?(/tmp/[^\s"'\\;&|<>]+)\s*(?:$|[;&|)])`,
+
+	# In-language writes inside a heredoc / -c snippet: `open('/tmp/x.py', 'w')`. The mode must be
+	# the second positional argument and must contain w/a/x, so a READ -- `open('/tmp/a.js')`, or
+	# `open('/tmp/a.js', encoding='utf-8')` -- does not match.
+	`open\(\s*['"](/tmp/[^'"]+)['"]\s*,\s*['"][^'"]*[wax][^'"]*['"]`,
+
+	# `Path('/tmp/x.py').write_text(...)` / `.write_bytes(...)`.
+	`['"](/tmp/[^'"]+)['"]\s*\)\s*\.\s*write`,
+]
+
+tmp_written_script_paths contains path if {
 	# NOT regex.find_n: Cupcake's WASM runtime has no host implementation for it, so the call
 	# returned undefined and this entire Bash-authoring branch silently never fired (2026-08-22).
-	# regex.find_all_string_submatch_n is compiled into the WASM module itself; with no capture
-	# groups each submatch is [whole_match], so m[0] is the equivalent of find_n's element.
-	parts := [m[0] |
-		some m in regex.find_all_string_submatch_n(`/tmp/[^\s"'\\;&|<>]+`, command, -1)
-	]
-	some path in parts
-	not in_current_repo(path)
+	# regex.find_all_string_submatch_n is compiled into the WASM module itself, and m[1] is the
+	# path captured by the write-indicator pattern's single group.
+	some pattern in write_indicator_patterns
+	some m in regex.find_all_string_submatch_n(pattern, command, -1)
+	path := m[1]
 	is_script_path(path)
-}
-
-bash_authors_tmp_script if {
-	tmp_script_path_from_command != ""
-	regex.match(`(?is)(cat|tee|printf|echo|write-output|set-content|out-file|new-item|copy-item|python3?|perl|ruby|node|bun).*[/\\]tmp[/\\].*\.(py|sh|bash|rs|java|rego|js|ts|tsx|jsx|go|c|cc|cpp|h|hpp|rb|pl|lua|ps1)`, command)
+	not in_current_repo(path)
 }

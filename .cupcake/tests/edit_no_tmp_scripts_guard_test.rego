@@ -70,3 +70,118 @@ test_allow_non_pretooluse_event if {
 	}
 	count(denials) == 0
 }
+
+# ---------------------------------------------------------------------------
+# READS out of /tmp are not authoring. Every case below is a measured or exactly
+# analogous false positive of the old "interpreter word anywhere + /tmp path
+# anywhere" test (2026-08-25).
+# ---------------------------------------------------------------------------
+
+# The original report: a heredoc that only READS third-party js downloaded into /tmp.
+test_allow_bash_heredoc_reading_tmp_js if {
+	not denied(bash_event(concat("\n", [
+		"python3 - <<'EOF'",
+		"import re,glob",
+		"for p in sorted(glob.glob('/tmp/planner/*.js')):",
+		"    t=open(p,encoding='utf-8',errors='replace').read()",
+		"    print(len(t))",
+		"EOF",
+	])))
+}
+
+# The second report: no interpreter at all -- "bun" matched inside "planner-bundle",
+# and /tmp is the SOURCE of the copy, not its destination.
+test_allow_bash_cp_out_of_tmp_into_repo if {
+	not denied(bash_event("mkdir -p target/planner-bundle && cp -f /tmp/planner/*.js target/planner-bundle/ && ls target/planner-bundle"))
+}
+
+test_allow_bash_node_runs_tmp_script if {
+	not denied(bash_event("node /tmp/x.js"))
+}
+
+test_allow_bash_python3_runs_tmp_script if {
+	not denied(bash_event("python3 /tmp/x.py"))
+}
+
+test_allow_bash_cat_reads_tmp_script if {
+	not denied(bash_event("cat /tmp/x.sh"))
+}
+
+test_allow_bash_grep_reads_tmp_script if {
+	not denied(bash_event("grep -n pattern /tmp/x.py"))
+}
+
+test_allow_bash_glob_over_tmp_scripts if {
+	not denied(bash_event("ls -la /tmp/planner/*.js"))
+}
+
+test_allow_bash_python_open_read_mode if {
+	not denied(bash_event("python3 -c \"print(open('/tmp/planner/a.js').read()[:20])\""))
+}
+
+test_allow_bash_python_open_encoding_kwarg_not_a_mode if {
+	not denied(bash_event("python3 -c \"open('/tmp/planner/a.js', encoding='utf-8', errors='replace')\""))
+}
+
+test_allow_bash_mv_out_of_tmp if {
+	not denied(bash_event("mv /tmp/x.py scripts/x.py"))
+}
+
+# Word-boundary regressions: an interpreter/command name buried in an unrelated word
+# must not arm the rule even when a /tmp script path is present.
+test_allow_bash_command_word_only_as_substring if {
+	not denied(bash_event("cargo run --bin nodemon-concatenate -- --committee /tmp/planner/x.js"))
+}
+
+# Data ARTIFACTS into /tmp remain allowed -- only source/script extensions are blocked.
+test_allow_bash_redirect_data_artifact_into_tmp if {
+	not denied(bash_event("python3 scripts/probe.py > /tmp/out.json"))
+}
+
+# ---------------------------------------------------------------------------
+# WRITES into /tmp are still denied.
+# ---------------------------------------------------------------------------
+
+test_deny_bash_append_redirect_tmp_script if {
+	denied(bash_event("printf 'set -e\\n' >> /tmp/x.sh"))
+}
+
+test_deny_bash_echo_redirect_tmp_script if {
+	denied(bash_event("echo 'print(1)' > /tmp/probe.py"))
+}
+
+test_deny_bash_stderr_redirect_tmp_script if {
+	denied(bash_event("./build.sh 2>/tmp/wrapper.sh"))
+}
+
+test_deny_bash_tee_tmp_script if {
+	denied(bash_event("echo 'print(1)' | tee -a /tmp/probe.py"))
+}
+
+test_deny_bash_curl_output_flag_tmp_script if {
+	denied(bash_event("curl -sL https://example.invalid/x.js -o /tmp/planner/x.js"))
+}
+
+test_deny_bash_curl_long_output_flag_tmp_script if {
+	denied(bash_event("curl -sL https://example.invalid/x.js --output /tmp/planner/x.js"))
+}
+
+test_deny_bash_wget_output_flag_tmp_script if {
+	denied(bash_event("wget -O /tmp/planner/x.js https://example.invalid/x.js"))
+}
+
+test_deny_bash_cp_into_tmp_script if {
+	denied(bash_event("cp scripts/probe.py /tmp/probe.py"))
+}
+
+test_deny_bash_mv_into_tmp_script if {
+	denied(bash_event("mv probe.sh /tmp/probe.sh && bash /tmp/probe.sh"))
+}
+
+test_deny_bash_install_into_tmp_script if {
+	denied(bash_event("install -m 755 probe.sh /tmp/probe.sh"))
+}
+
+test_deny_bash_pathlib_write_text_tmp_script if {
+	denied(bash_event("python3 -c \"from pathlib import Path; Path('/tmp/probe.py').write_text('print(1)')\""))
+}

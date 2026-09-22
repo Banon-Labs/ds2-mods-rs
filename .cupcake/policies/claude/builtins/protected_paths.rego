@@ -109,7 +109,8 @@ halt contains decision if {
 	count(affected_dirs) > 0
 
 	# Check if any protected path is a CHILD of an affected directory
-	some affected_dir in affected_dirs
+	some raw_affected_dir in affected_dirs
+	affected_dir := separator_trimmed_dir(raw_affected_dir)
 	affected_dir_is_destructive_target(command, affected_dir)
 	some protected_path in get_protected_paths
 	protected_is_child_of_affected(protected_path, affected_dir)
@@ -119,6 +120,78 @@ halt contains decision if {
 	decision := {
 		"rule_id": "BUILTIN-PROTECTED-PATHS-PARENT",
 		"reason": concat("", [message, " (", protected_path, " would be affected by operation on ", affected_dir, ")"]),
+		"severity": "HIGH",
+	}
+}
+
+# Block a destructive command hidden inside a SHELL WRAPPER PAYLOAD.
+#
+# `bash -c "rm -rf /"` was ALLOWED both before and after the 2026-08-31
+# command-position fix (measured live, 21 wrapper spellings), and for two
+# INDEPENDENT reasons that both have to be answered before the deny can happen:
+#
+#  1. THE VERB IS NOT IN THE OUTER COMMAND'S COMMAND POSITION. `bash` is; `rm`
+#     stands inside a quoted operand. commands.has_verb never saw it either --
+#     its `(^|\s)` anchor cannot match `"rm`, because the quote sits between the
+#     space and the verb -- so this shape was invisible in both spellings, and
+#     tightening to command position neither closed it nor widened it.
+#
+#  2. `input.affected_parent_directories` DOES NOT CONTAIN THE PAYLOAD'S TARGET.
+#     Measured with `cupcake eval --debug-files`: the Rust preprocessor reads the
+#     quoted payload as a PATH operand of `bash`, so the event arrives carrying
+#
+#         affected_parent_directories: ["<cwd>/rm -rf "]
+#
+#     and never `/`. The PARENT rule pairs its verb test with that advisory list,
+#     so no amount of verb matching can reach a denial through it. Any fix that
+#     only taught the verb test to see into quotes would still have allowed this.
+#
+# This rule therefore derives the endangered directory ITSELF, from the payload
+# text, and does not consult the preprocessor at all. Both sides of the
+# derivation are bounded:
+#
+#   * the PAYLOAD set is commands.shell_payloads_deep, which stops at THREE
+#     nesting levels. Two is the deepest literal quoting reaches without escapes
+#     (`bash -c 'bash -c "..."'`); the third is headroom; a fourth would need
+#     escaped quotes, which are stripped before the split and so cannot form a
+#     payload at all. `bash -c "bash -c \"...\""` therefore terminates rather
+#     than recursing, and a wrapper this cannot read is reported by
+#     commands.unparsed_shell_payload instead of being silently unwrapped.
+#
+#   * the CANDIDATE DIRECTORY set is protected_path_ancestors -- the ancestors of
+#     the CONFIGURED protected paths and nothing else. For this rulebook that is
+#     {"/", "/etc", "/System"}: at most one entry per path component, fixed by
+#     configuration, unable to grow with the command text.
+#
+# WHY A QUOTED OPERAND THAT IS NOT A PROGRAM CANNOT START MATCHING. A quoted span
+# only becomes a payload when the text before its opening quote is a shell
+# awaiting its program (commands.shell_payload_prefix_pattern), checked with the
+# nesting rule that already keeps a commit message describing the bypass form
+# from being read as one. `git commit -m "...install... / ..."` is not a wrapper,
+# produces no payload, and stays allowed -- pinned as a test either side.
+#
+# KNOWN-OPEN, DELIBERATELY, and it fails OPEN rather than closed: a payload this
+# cannot read (`bash -c $CMD`, `bash -c $(...)`) yields no payload text, so this
+# rule is silent on it. Failing closed there would deny every `bash -c "$VAR"`,
+# and unlike the git guards there is no second signal (a `git` and a `push` in
+# the raw text) that could narrow it -- an opaque variable names nothing at all.
+halt contains decision if {
+	input.hook_event_name == "PreToolUse"
+	input.tool_name == "Bash"
+
+	some payload in commands.shell_payloads_deep(input.tool_input.command)
+	some segment in shell_command_segments(lower(payload))
+	parent_destructive_command_detected(segment)
+
+	some protected_path in get_protected_paths
+	some endangered_dir in protected_path_ancestors(protected_path)
+	segment_names_directory_operand(segment, endangered_dir)
+
+	message := get_configured_message
+
+	decision := {
+		"rule_id": "BUILTIN-PROTECTED-PATHS-WRAPPER",
+		"reason": concat("", [message, " (", protected_path, " would be affected by operation on ", endangered_dir, " inside a shell-wrapper payload)"]),
 		"severity": "HIGH",
 	}
 }
@@ -285,8 +358,7 @@ is_whitelisted_read_command(cmd) if {
 		"od", # Octal dump
 	}
 
-	some verb in safe_read_verbs
-	commands.has_verb(cmd, verb)
+	commands.has_dangerous_verb(cmd, safe_read_verbs)
 
 	# CRITICAL: Exclude sed -i specifically
 	# This check is NOT redundant with lines 188-192. OPA evaluates ALL rule bodies
@@ -321,21 +393,34 @@ is_whitelisted_read_command(cmd) if {
 		"ls", # List files
 	}
 
-	some verb in safe_read_verbs
-	commands.has_verb(first_part, verb)
+	commands.has_dangerous_verb(first_part, safe_read_verbs)
 }
 
 # Check whether a Bash command is a known parent-directory mutator.  The
 # affected_parent_directories preprocessor field is intentionally not sufficient
 # by itself because unknown shell forms can over-approximate to `/`.
+#
+# COMMAND POSITION, not mere presence (2026-08-31).  commands.has_verb was asking
+# whether the word appears anywhere in the command text, which made every prose
+# use of "install", "truncate", "cp" or "mv" -- in a heredoc body, a Rust `///`
+# doc comment, a commit message -- look like a destructive program.  See the
+# has_command_verb block in .cupcake/system/commands.rego for why the heredoc
+# body is welded onto the command text by the time a policy sees it, and why
+# nothing that actually runs is lost by requiring command position.
+#
+# SHARED ACROSS THIS FILE'S FOUR USES (2026-09-16), rather than redefined per rule as it was before.
+# has_any_command_verb/has_dangerous_verb below build ONE combined regex.match call for a whole verb
+# set instead of one call per verb; that collapse only holds if every caller passes the SAME set
+# value, so the set moved out to one place a caller cannot accidentally fork from the others. See
+# the note on commands.has_dangerous_verb for why the collapse itself matters beyond style.
+destructive_parent_verbs := {"rm", "rmdir", "mv", "cp", "chmod", "chown", "chgrp", "rsync", "install", "truncate", "shred"}
+
 parent_destructive_command_detected(cmd) if {
-	destructive_parent_verbs := {"rm", "rmdir", "mv", "cp", "chmod", "chown", "chgrp", "rsync", "install", "truncate", "shred"}
-	some verb in destructive_parent_verbs
-	commands.has_verb(cmd, verb)
+	commands.has_any_command_verb(cmd, destructive_parent_verbs)
 }
 
 parent_destructive_command_detected(cmd) if {
-	commands.has_verb(cmd, "find")
+	commands.has_command_verb(cmd, "find")
 	regex.match(`(^|[[:space:]])-(delete|exec|execdir)([[:space:]]|$)`, cmd)
 }
 
@@ -360,9 +445,7 @@ safe_mktemp_file_cleanup(cmd) if {
 
 unsafe_parent_destructive_segment(cmd) if {
 	some segment in shell_command_segments(cmd)
-	destructive_parent_verbs := {"rm", "rmdir", "mv", "cp", "chmod", "chown", "chgrp", "rsync", "install", "truncate", "shred"}
-	some verb in destructive_parent_verbs
-	commands.has_verb(segment, verb)
+	commands.has_dangerous_verb(segment, destructive_parent_verbs)
 	not safe_mktemp_rm_segment(segment)
 }
 
@@ -383,9 +466,11 @@ shell_command_segments(cmd) := segments if {
 }
 
 destructive_command_mentions_absolute_path(cmd) if {
-	destructive_parent_verbs := {"rm", "rmdir", "mv", "cp", "chmod", "chown", "chgrp", "rsync", "install", "truncate", "shred"}
-	some verb in destructive_parent_verbs
-	regex.match(concat("", [`(^|[[:space:];|&])`, verb, `[[:space:]][^\n;|&]*[[:space:]]/`]), cmd)
+	pattern := concat("", [
+		`(^|[[:space:];|&])(`, commands.verb_alternation(destructive_parent_verbs), `)`,
+		`[[:space:]][^\n;|&]*[[:space:]]/`,
+	])
+	regex.match(pattern, cmd)
 }
 
 # The command's SHELL region: every line except heredoc payload.
@@ -402,6 +487,17 @@ destructive_command_mentions_absolute_path(cmd) if {
 # following an `EOF` line is exactly as dangerous as one on its own.  An
 # UNTERMINATED heredoc swallows the rest of the command, which is correct: those
 # lines never reach the shell.
+#
+# THIS SPLIT IS DEAD IN PRODUCTION AND MUST NOT BE RELIED ON (measured 2026-08-31
+# with `cupcake eval --debug-files`).  The engine's `whitespace_normalization`
+# enrichment replaces EVERY newline in the command with a space before any policy
+# runs, so `lines` always has exactly one element live and no line can ever be
+# payload.  It still does real work under `opa test`, which feeds raw multi-line
+# text, so it is kept as defence in depth -- but a rule that needs the payload
+# excluded must not lean on it.  The line-position information the split needs is
+# destroyed before the policy is reached and no Rego can recover it; that is why
+# parent_destructive_command_detected requires COMMAND POSITION for the verb
+# instead, which needs no newlines to be correct.
 command_operand_region := region if {
 	lines := split(input.tool_input.command, "\n")
 	shell_lines := [line |
@@ -457,9 +553,7 @@ heredoc_tag(line) := tag if {
 affected_dir_is_destructive_target(command, affected_dir) if {
 	not safe_mktemp_file_parent_overapprox(command, affected_dir)
 	some segment in shell_command_segments(command)
-	destructive_parent_verbs := {"rm", "rmdir", "mv", "cp", "chmod", "chown", "chgrp", "rsync", "install", "truncate", "shred"}
-	some verb in destructive_parent_verbs
-	commands.has_verb(segment, verb)
+	commands.has_any_command_verb(segment, destructive_parent_verbs)
 	segment_targets_affected_dir(segment, affected_dir)
 }
 
@@ -468,7 +562,7 @@ affected_dir_is_destructive_target(command, affected_dir) if {
 # recursive find escape parent protection.
 affected_dir_is_destructive_target(command, affected_dir) if {
 	some segment in shell_command_segments(command)
-	commands.has_verb(segment, "find")
+	commands.has_command_verb(segment, "find")
 	regex.match(`(^|[[:space:]])-(delete|exec|execdir)([[:space:]]|$)`, segment)
 	segment_targets_affected_dir(segment, affected_dir)
 }
@@ -480,6 +574,61 @@ segment_targets_affected_dir(segment, affected_dir) if {
 
 segment_targets_affected_dir(segment, affected_dir) if {
 	shell_path_prefix_reference_matches(lower(segment), lower(ensure_trailing_slash(affected_dir)))
+}
+
+# Every directory that CONTAINS a configured protected path, plus the path
+# itself: the complete set of directories whose destruction takes a protected
+# path with it. `/etc/` yields {"/", "/etc"}; `/a/b/c/` yields {"/", "/a",
+# "/a/b", "/a/b/c"}. One entry per path component, fixed by configuration -- it
+# cannot grow with the command text, which is what keeps the wrapper rule's
+# candidate set bounded.
+#
+# RELATIVE and `~`-rooted patterns yield NOTHING, and that is deliberate rather
+# than an oversight. `~/.ssh/` would otherwise contribute the ancestor `~`, and
+# `bash -c 'cp file ~'` would start denying while the identical UNWRAPPED
+# `cp file ~` stays allowed -- the preprocessor does not expand the tilde, it
+# reports `<cwd>/~` (measured 2026-08-31), so the parent rule never protects `~`
+# either. A wrapper must not be held to a stricter standard than the command it
+# wraps; a payload that names `~/.ssh` literally is still caught by the
+# protected-path REFERENCE rule, which reads the raw command text.
+protected_path_ancestors(protected_path) := ancestors if {
+	startswith(protected_path, "/")
+	parts := split(trim_right(protected_path, "/"), "/")
+	ancestors := {dir |
+		some i
+		parts[i]
+		dir := ancestor_at(parts, i)
+	}
+}
+
+# Component 0 of an absolute path is the empty string before the leading slash,
+# so the root has to be spelled; every deeper component is a plain join.
+ancestor_at(_, i) := "/" if {
+	i == 0
+}
+
+ancestor_at(parts, i) := dir if {
+	i > 0
+	dir := concat("/", array.slice(parts, 0, i + 1))
+}
+
+# The segment names `dir` AS AN OPERAND -- that directory itself, not merely
+# something beneath it.
+#
+# This distinction is the whole safety margin of the wrapper rule.
+# `shell_path_prefix_reference_matches`, which the preprocessor-fed parent rule
+# also uses, matches ANY absolute path against the candidate `/`, so with a
+# self-derived candidate set it would read `bash -c 'rm -rf /home/banon/scratch'`
+# as endangering `/etc`. Requiring a path TERMINATOR after the directory keeps
+# `/` matching `/`, `//`, `/*` and `"/"` while `/home/...` -- a letter follows
+# the slash -- does not match at all.
+#
+# `*` is in the terminator class here and in no other matcher, because `rm -rf /*`
+# is the canonical spelling of exactly this attack and the glob is the only thing
+# standing between the slash and the end of the operand.
+segment_names_directory_operand(segment, dir) if {
+	regex_dir := replace(lower(dir), ".", "\\.")
+	regex.match(concat("", ["(^|[[:space:]\\\"'=:(])", regex_dir, "([[:space:]\\\"')/:;,&*]|$)"]), lower(segment))
 }
 
 # Check if command references a protected path
@@ -558,6 +707,32 @@ protected_is_child_of_affected(protected_path, affected_dir) if {
 	not endswith(affected_dir, "/")
 	prefix := concat("", [lower(affected_dir), "/"])
 	startswith(lower(protected_path), prefix)
+}
+
+# A reported parent directory with the shell separator welded onto its tail.
+#
+# scripts/cupcake-hook.sh rewrites an unquoted newline to `; ` so line 2 of a
+# multi-line command is visible to anchored patterns at all (bd
+# er-effects-rs-5eah).  The Rust preprocessor then tokenises `rm -rf /;` and
+# reports the affected directory as `/;`, which is a child of nothing and a
+# parent of nothing: `rm -rf /` ALONE was denied while the same delete followed
+# by a second line was ALLOWED (measured 2026-08-31, both before and after the
+# command-position change, so this is an independent hole rather than a
+# regression from it).  Trimming the separator can only make the rule fire on
+# MORE commands, never fewer.  An entry that trims away to nothing is dropped
+# instead: an empty prefix would make every protected path look like a child.
+#
+# `(` and `)` were added 2026-08-31 for the same reason, and they closed a hole
+# the OPA suite claimed was already shut. `test_deny_root_delete_inside_command_
+# substitution` hand-feeds `affected_parent_directories: ["/"]` for
+# `echo $(rm -rf /)` and passes; the real preprocessor reports
+# `["<cwd>/$(rm", "/)"]`, and `/)` is a parent of nothing, so the SAME command
+# was ALLOWED live (measured 2026-08-31, both verdicts through the real binary).
+# A green deny test over a fixture production never produces is the exact defect
+# this file's command_operand_region comment describes, in a second place.
+separator_trimmed_dir(dir) := trimmed if {
+	trimmed := trim_right(dir, " \t\n;&|()")
+	count(trimmed) > 0
 }
 
 # Helper to ensure path ends with /

@@ -147,6 +147,20 @@ else
   # The signal is the half that decides WHICH turns are violations, and it is where every
   # false-positive carve-out lives. `opa test` above only pins the policy's tag -> halt mapping.
   python3 scripts/test-unexecuted-promise-signal.py
+  # The hook shim is the fourth place this layer can be silently dead, and the one no `.rego` file
+  # can reach. scripts/cupcake-hook.sh sits between Claude Code and the engine and repairs three
+  # things the engine gets wrong before any policy runs: a permission mode cupcake does not know
+  # (fatal -- every hook goes inert), the unquoted newlines the engine erases (line 2 of a Bash
+  # command arrives with no separator in front of it, so every command-position anchor misses it),
+  # and a --global-config given a file path where the engine wants a directory (loads project-only
+  # and reports success at DEBUG, which --log-level error hides). Each is invisible to `opa test`,
+  # because the text the policies are tested against is not the text the engine delivers.
+  python3 scripts/test-cupcake-hook-shim.py
+  # And the DELIVERED shape: the engine rewrites a command before any policy sees it (whitespace
+  # normalised, unquoted newlines erased, a heredoc body welded onto its reader), so a test written
+  # against the text a human typed can be green while the rule never fires on what arrives. This
+  # gate drives the real engine and pins the difference.
+  python3 scripts/test-cupcake-delivered-shape.py
 fi
 
 echo "== launcher selftest =="

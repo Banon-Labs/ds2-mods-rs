@@ -12,11 +12,176 @@ has_verb(command, verb) if {
 	regex.match(pattern, command)
 }
 
-# Check if command contains ANY of the dangerous verbs from a set
-# More efficient than checking each verb individually in policy code
+# Check if command contains ANY of the dangerous verbs from a set, in ONE combined
+# regex.match call rather than one per verb (2026-09-16, bd
+# cupcake-wasm-regex-cache-reuse-oob-2026-09-16): see the deny-root-delete-after-heredoc-terminator
+# fix for the measured WASM regex-cache defect this collapse works around.
 has_dangerous_verb(command, verb_set) if {
-	some verb in verb_set
-	has_verb(command, verb)
+	pattern := concat("", ["(^|\\s)(", verb_alternation(verb_set), ")(\\s|$)"])
+	regex.match(pattern, command)
+}
+
+has_any_command_verb(command, verb_set) if {
+	pattern := concat("", [
+		command_position_prefix_pattern, path_prefix_pattern,
+		"(", verb_alternation(verb_set), ")",
+		`([ \t\n;&|(){}]|$)`,
+	])
+	regex.match(pattern, command)
+}
+
+verb_alternation(verb_set) := concat("|", [v | some v in verb_set])
+
+# ---------------------------------------------------------------------------
+# COMMAND POSITION (2026-08-31, bd protected-paths-parent-heredoc-prose-verb)
+#
+# has_verb answers "does this word appear anywhere in the text", which is the
+# right question for a flag or an operand and the WRONG one for a program name.
+# A word only runs when it stands in COMMAND POSITION: at the start of the text,
+# or after a shell separator, optionally behind wrapper words and assignments.
+#
+# The distinction is not academic. The cupcake engine's `whitespace_normalization`
+# enrichment replaces EVERY newline in a Bash command with a space before any
+# policy runs (measured 2026-08-31 from `cupcake eval --debug-files`), so a
+# heredoc body arrives welded onto the command that reads it:
+#
+#     cat > src/lib.rs <<'EOF' /// Install the detour ... EOF
+#
+# Under has_verb the prose word "Install" in a Rust doc comment is a destructive
+# `install(1)`, and the `///` is a path operand. Under has_command_verb it is what
+# it looks like: a word in the middle of an argument. Nothing that actually runs
+# is lost, because a program a shell executes is in command position BY
+# DEFINITION -- that is what command position means.
+#
+# WRAPPERS ARE FOLLOWED, so tightening cannot lose a real invocation: `sudo rm`,
+# `env FOO=1 rm`, `nohup rm`, `xargs -0 rm`, `TMPDIR=/x rm` and option tokens in
+# between all still resolve to the verb behind them.
+#
+# NOT COVERED, deliberately, because has_verb does not cover it either and this
+# is not the change that closes it: a verb inside a quoted wrapper payload
+# (`bash -c "rm -rf /"`). has_verb's own `(^|\s)` anchor never matched `"rm`, so
+# both before and after this rule that shape is invisible here; callers that need
+# it should read commands.executed_texts, which decomposes the payload into a
+# text of its own where the verb IS in position 0.
+# A separator, then any run of things that stand BEFORE a program without being
+# one: assignments, option tokens, and wrapper words.  The second alternative
+# lets a wrapper carry up to four arbitrary tokens of its own (`sudo -u root rm`,
+# `xargs -I{} rm`), which option-shaped matching alone cannot reach because an
+# option's ARGUMENT looks like nothing in particular.  Both alternatives only ever
+# make the verb test match MORE commands, never fewer.
+# `timeout` is in the second alternative only, and that placement is the point: unlike every other
+# wrapper here it takes a MANDATORY operand of its own (`timeout 28 cargo check`, `timeout 5s rm`),
+# and a bare duration is neither option-shaped nor an assignment, so the first alternative cannot
+# consume it and the verb after it was in nobody's command position. Measured 2026-09-21 against
+# the 2026-09-03 incident command, `timeout 28 cargo check ... | grep -E 'error'`, which
+# no_grep_for_build_errors stopped denying the moment it was tightened to command position -- and
+# the same hole sat in front of `timeout 5 rm -rf /` for every guard that reads this function,
+# because nothing here had ever been asked about a wrapper with an argument.
+command_position_prefix_pattern := `(^|[;&|(){}\n])[ \t]*(([A-Za-z_][A-Za-z0-9_]*=[^ \t]*|-{1,2}[A-Za-z0-9][^ \t]*|sudo|doas|env|command|nohup|time|exec|xargs|then|else|do)[ \t]+|(sudo|doas|env|command|nohup|time|exec|xargs|timeout)[ \t]+([^ \t;&|(){}]+[ \t]+){1,4})*`
+
+# An optional path COMPONENT PREFIX immediately before a program name --
+# `/bin/`, `/usr/bin/`, `./`, `../scripts/`. REQUIRES a trailing slash (the `?`
+# makes the whole group optional, not the slash inside it), which is what stops
+# a longer word that merely ENDS in the verb (`confirm` for `rm`, `xmv` for
+# `mv`) from matching: the group can only consume characters that are
+# immediately followed by a literal `/`, so a verb-shaped suffix with no
+# preceding slash falls through to the zero-width alternative and then must
+# match the verb starting exactly at the anchor. Shared with shell_name_pattern
+# below rather than re-spelled, so the two callers cannot drift apart.
+path_prefix_pattern := `([^ \t;&|()'"]*/)?`
+
+# has_command_verb answers "is this word the program a shell would run", which
+# command_position_prefix_pattern alone gets right for a BARE verb (`rm -rf x`)
+# but not for one invoked by absolute or relative PATH (`/bin/rm -rf x`,
+# `./rm -rf x`) -- measured 2026-08-31 (bd er-effects-rs-5z75): a leading path
+# component is none of the anchor's separator characters, and the character
+# immediately before the verb is `/`, so the anchor never lined up and
+# `/bin/rm -rf .cupcake` / `/usr/bin/rm -rf .cupcake` were allowed outright by
+# every guard that reads this function. NOT a regression: has_verb's
+# `(^|\s)verb(\s|$)` boundary missed it identically, so this predates both the
+# command-position work and the segmentation work that came before it -- it was
+# simply never covered. Splicing path_prefix_pattern in between the
+# command-position prefix and the verb closes it: the prefix must still resolve
+# back to a real anchor (string start, a separator, or consumed wrapper words),
+# so a slash deep inside an unrelated operand still cannot manufacture a match
+# (see commands_test.rego for the negative cases this reasoning predicts).
+has_command_verb(command, verb) if {
+	pattern := concat("", [command_position_prefix_pattern, path_prefix_pattern, verb, `([ \t\n;&|(){}]|$)`])
+	regex.match(pattern, command)
+}
+
+# ---------------------------------------------------------------------------
+# SHELL SEGMENTS (2026-08-31, bd er-effects-rs-c0t9)
+#
+# Moved here from guard_layer_destructive_guard.rego, which had the only copy.
+# The move is the point: a SECOND segmenter written for the next policy that
+# needs one is a divergence bug waiting to happen, and the next policy that
+# needed one arrived the same day.
+#
+# WHAT PROBLEM IT SOLVES. A guard that ANDs a verb test with an operand test over
+# the WHOLE command string is asking whether the two tokens are CO-PRESENT, not
+# whether they belong to the same command. That is not the question any of these
+# rules means to ask, and it fires on commands where the two never meet:
+#
+#     rm -rf <some unrelated dir> && mkdir -p <hooks dir> && cp shim <hooks dir>/
+#
+# -- a removal aimed at one path, and a hooks directory named in a DIFFERENT
+# statement, read as removing a hook. Measured live twice on 2026-08-31, the
+# second time on the bug report about the first, because the report quoted both
+# tokens. Evaluating the predicate PER SEGMENT is what closes it.
+#
+# THE INPUT CONTRACT, and it is load-bearing: callers must pass text that has
+# been through scan_text / executed_texts, never the raw command. This splits on
+# separator CHARACTERS, so a `;` inside a quoted operand would split a segment a
+# shell would keep whole -- and splitting the wrong place separates a verb from
+# its operand, which is the fail-OPEN direction. executed_texts blanks the
+# anchors inside quoted spans before this ever sees them, so under that contract
+# a quoted separator is already a space. Both callers satisfy it.
+#
+# TWO GRANULARITIES, because `|` is not the same kind of boundary as the others.
+# `;`, `&&`, `||`, `&` and a newline separate commands that share nothing. A PIPE
+# separates commands that share a data stream -- which is exactly how a removal
+# gets its operand from somewhere else in the line:
+#
+#     echo <hooks dir>/pre-commit | xargs rm -f
+#
+# The path is in one stage and the verb in the next, and the file is deleted all
+# the same. So a co-presence guard whose verb set is small and specific should
+# read shell_statements (pipelines kept whole) and accept the narrow over-denial
+# that comes with it; a guard whose predicate is broad should read shell_segments
+# and accept the narrow gap instead. The destructive guard is the broad case --
+# at statement granularity `git diff .cupcake | grep -c restore` would be denied
+# by its `git (checkout|restore|clean)` arm, which is a worse trade than the
+# xargs gap. That choice is per policy; the SPLITTING is not, and lives here once.
+#
+# NOT SPLIT ON, deliberately: command substitution. `$(...)` really does open a
+# new command context, but leaving it joined to its host errs toward treating
+# `echo $(rm -rf <path>)` as one command that both removes and names the path --
+# a DENY, the safe direction. Splitting it would be the direction that loses a
+# real removal, so the honest gap here costs precision, never coverage.
+
+# Statement boundaries only. `||` and `&&` are consumed WHOLE before the single
+# characters, so that neither leaves a stray `|` behind to be read as a pipe.
+shell_statements(cmd) := out if {
+	no_or := replace(cmd, "||", "\n")
+	no_and := replace(no_or, "&&", "\n")
+	replaced := replace(replace(no_and, ";", "\n"), "&", "\n")
+	out := {statement |
+		some raw in split(replaced, "\n")
+		statement := trim_space(raw)
+		statement != ""
+	}
+}
+
+# Statements further cut at each data pipe. Set-equal to the original single-pass
+# `|`/`&`/`;` replacement this was factored out of.
+shell_segments(cmd) := out if {
+	out := {segment |
+		some statement in shell_statements(cmd)
+		some raw in split(statement, "|")
+		segment := trim_space(raw)
+		segment != ""
+	}
 }
 
 # Detect symlink creation commands
@@ -142,23 +307,80 @@ odd_span_blanked(index, text) := blanked_anchors(text) if {
 	index % 2 == 1
 }
 
+# The shell NAMES this decomposition recognises, as one alternation so the four
+# patterns below cannot drift apart. `(ba|z|k|da|a|fi|c|tc)?sh` covers sh, bash,
+# zsh, ksh, dash, ash, fish, csh and tcsh.
+#
+# fish/csh/tcsh were ADDED 2026-08-31 and were a real hole, not tidiness: this
+# repo's AGENTS.md tells agents to wrap commands for fish, and `fish -c 'git push
+# origin main'` decomposed to NOTHING before -- measured, along with `csh -c` and
+# `tcsh -c`, while every other name on the list decomposed correctly. A name that
+# is not on this list is not a hypothetical gap; it is a working bypass of every
+# guard that reads executed_texts.
+#
+# The leading path_prefix_pattern is what admits `/bin/bash`, and it REQUIRES a
+# trailing slash, so a longer word that merely ends in one of these names (`mycsh`,
+# `wifish`) cannot match: the alternation has to consume the token whole from its
+# boundary. Shared with has_command_verb above (2026-08-31, bd er-effects-rs-5z75)
+# rather than re-spelled, so the two cannot drift apart.
+shell_name_pattern := concat("", [path_prefix_pattern, `(ba|z|k|da|a|fi|c|tc)?sh`])
+
 # A shell wrapper whose program text is the NEXT argument: `bash -c`, `sh -c`,
-# `zsh -c`, `ksh -c`, `dash -c`, `bash -lc`, `/bin/bash --norc -c`, `eval`, and
-# the same reached through `command` / `env VAR=x` / `xargs -I{} bash -c`. The
-# pattern matches the text that PRECEDES a quote, so it is anchored at its end.
+# `zsh -c`, `ksh -c`, `dash -c`, `fish -c`, `bash -lc`, `/bin/bash --norc -c`,
+# `eval`, and the same reached through `command` / `env VAR=x` /
+# `xargs -I{} bash -c`. The pattern matches the text that PRECEDES a quote, so it
+# is anchored at its end.
 # `python3 -c` is deliberately absent: its argument is Python, not shell.
-shell_payload_prefix_pattern := `(?i)(^|[ \t;&|(])(command[ \t]+)?(env([ \t]+[a-z_][a-z0-9_]*=[^ \t]*)+[ \t]+)?(([^ \t;&|()'"]*/)?(ba|z|k|da|a)?sh([ \t]+-{1,2}[a-z][a-z0-9-]*)*[ \t]+-[a-z]*c[a-z]*|eval)[ \t]*$`
+#
+# `ssh host '...'` is deliberately absent too, and that is a decision rather than
+# an oversight: its payload runs on ANOTHER machine, so reading it as an executed
+# text would have the protected-paths rules reason about this host's `/etc` from a
+# program that cannot touch it. Nothing here can see a remote filesystem; claiming
+# otherwise would be a guard that is wrong on purpose.
+# THE `eval` BRANCH NEEDS ITS OWN ANCHOR (2026-09-21).
+#
+# Every pattern below used to spell the wrapper as `(<shell> ... -c|eval)` behind ONE shared
+# prefix whose anchor class is `(^|[ \t;&|(])` -- a SPACE is enough. That anchor is right for the
+# shell form, which needs it to reach `sudo bash -c` and `xargs -I{} bash -c`; it is wrong for
+# `eval`, which is a bare word, because it makes any command containing `eval` as a separate token
+# look like a shell wrapper whose payload cannot be read. Two of this repo's most ordinary
+# commands are exactly that shape:
+#
+#     cupcake eval --harness claude --strict < event.json
+#     opa eval 'data.cupcake.system.commands.unparsed_shell_payload'
+#
+# Both were read as "wraps a shell payload the guard cannot read", so every guard that fails
+# closed on unparsed_shell_payload denied them the moment the command also happened to name git
+# and push, or pgrep -- which is to say, whenever an agent was investigating those guards.
+# Measured twice in one session while debugging this file.
+#
+# The fix is command position for the bare words only. `eval`, `source` and `.` must stand where a
+# shell would run them: at the start, after a real separator, or behind a wrapper word. The shell
+# `-c` form keeps the looser anchor it needs, so nothing that decomposed before stops decomposing.
+eval_position_prefix := `(^|[;&|(){}\n])[ \t]*((sudo|doas|env|command|nohup|time|exec|timeout|xargs)[ \t]+([^ \t;&|(){}]+[ \t]+){0,4})?`
+
+shell_wrapper_head := concat("", [`(^|[ \t;&|(])(command[ \t]+)?(env([ \t]+[a-z_][a-z0-9_]*=[^ \t]*)+[ \t]+)?`, shell_name_pattern, `([ \t]+-{1,2}[a-z][a-z0-9-]*)*[ \t]+-[a-z]*c[a-z]*`])
+
+eval_head := concat("", [eval_position_prefix, `eval`])
+
+shell_payload_prefix_pattern := concat("", [`(?i)(?:`, shell_wrapper_head, `|`, eval_head, `)[ \t]*$`])
 
 # The same wrapper, followed by something that is NOT a quote -- i.e. a payload
 # this decomposition cannot read (`bash -c $CMD`, `bash -c git\ push`).
-shell_payload_unparsed_pattern := `(?i)(^|[ \t;&|(])(command[ \t]+)?(env([ \t]+[a-z_][a-z0-9_]*=[^ \t]*)+[ \t]+)?(([^ \t;&|()'"]*/)?(ba|z|k|da|a)?sh([ \t]+-{1,2}[a-z][a-z0-9-]*)*[ \t]+-[a-z]*c[a-z]*|eval)[ \t]*[^ \t'"]`
+shell_payload_unparsed_pattern := concat("", [`(?i)(?:`, shell_wrapper_head, `|`, eval_head, `)[ \t]*[^ \t'"]`])
 
 # A wrapper token anywhere, used only to decide whether unbalanced quotes are
 # worth failing closed over.
-shell_wrapper_anywhere_pattern := `(?i)(^|[ \t;&|(])(([^ \t;&|()'"]*/)?(ba|z|k|da|a)?sh([ \t]+-{1,2}[a-z][a-z0-9-]*)*[ \t]+-[a-z]*c[a-z]*|eval)([ \t]|$)`
+shell_wrapper_anywhere_pattern := concat("", [`(?i)(?:`, shell_wrapper_head, `|`, eval_head, `)([ \t]|$)`])
 
 # A heredoc whose READER is a shell: its body is a program, not data.
-shell_heredoc_reader_pattern := `(?i)(^|[ \t;&|(])(command[ \t]+)?(([^ \t;&|()'"]*/)?(ba|z|k|da|a)?sh|eval|source|\.)([ \t]+-{1,2}[a-z][a-z0-9-]*)*[ \t]*$`
+shell_heredoc_reader_pattern := concat("", [
+	`(?i)(?:(^|[ \t;&|(])(command[ \t]+)?`,
+	shell_name_pattern,
+	`|`,
+	eval_position_prefix,
+	`(eval|source|\.))([ \t]+-{1,2}[a-z][a-z0-9-]*)*[ \t]*$`,
+])
 
 # Quoted payload of a shell wrapper, one nesting level. Odd split indices are
 # quoted spans; a span counts as a payload only when the text immediately before
@@ -229,23 +451,6 @@ shell_payloads_deep(text) := deep if {
 # Heredoc bodies are DATA for the command reading them, so their contents get
 # the same treatment as a quoted operand -- unless a shell is what reads them,
 # in which case the body stays raw (fail closed) and its separators keep working.
-#
-# THE BODY IS RE-QUOTED, not merely anchor-blanked, and that distinction is the
-# whole fix for ds2-mods-rs-1tc. `blanked_anchors` neutralises SEPARATORS and
-# leaves the words, which is right for stopping `; git push` inside a body and
-# wrong for everything else: `quotes_removed` (which every substring and flag
-# test runs over) DELETES quoted spans, so a body that arrived unquoted kept all
-# of its words and a commit message describing a rule was scanned as if it ran
-# one. Measured 2026-08-26: `git commit -F -` with a heredoc explaining the pgrep
-# guard was denied by the pgrep guard, and one explaining the launch rule was
-# denied by the launch guard.
-#
-# Wrapping the blanked body in one pair of double quotes makes it a well-formed
-# quoted span, so both public views handle it without either needing to know a
-# heredoc was involved: `quotes_removed` deletes it, `operands_blanked`
-# neutralises it. `blanked_anchors` has already replaced every `'` and `"` in the
-# body with a space, so the body cannot close the pair early, and exactly one
-# balanced pair is added -- quote parity is preserved for every later phase.
 heredoc_body_blanked(text) := out if {
 	parts := split(text, "<<")
 	count(parts) == 2
@@ -253,6 +458,26 @@ heredoc_body_blanked(text) := out if {
 	tag := heredoc_tag(parts[1])
 	segments := split(parts[1], concat("", ["\n", tag]))
 	count(segments) == 2
+
+	# THE BODY IS WRAPPED IN A SYNTHETIC DOUBLE QUOTE, and that is this repo's divergence from
+	# er-mods-rs, kept deliberately when commands.rego was refreshed from it on 2026-09-21.
+	#
+	# er-mods-rs emits `blanked_anchors(segments[0])` bare, so the body's TEXT survives into
+	# executed_unquoted_texts and every substring/flag test reads it. It then buys back the cases
+	# that breaks with per-policy exemptions -- block_manual_pgrep carries one for `bd` text and
+	# another for git commit MESSAGE text, each with its own single-command, no-chaining
+	# conditions. That is a workable design; it is not the one the policies in THIS repo were
+	# written against.
+	#
+	# Here the body is a quoted span, so quotes_removed drops it whole and a data heredoc is
+	# uniformly invisible to flag tests -- which is what ds2's own guards assume. Measured when the
+	# bare form was imported: `git commit -q -F - <<'EOF' ... pgrep -f DarkSoulsII.exe ... EOF`, a
+	# commit message DOCUMENTING the pgrep rule, was denied by the rule it documents, and the same
+	# went for a message quoting `git push origin main`. Those two allow-cases are pinned in
+	# scripts/test-cupcake-policies.py and in the guards' own test suites.
+	#
+	# The exemption is for a body a NON-SHELL command reads -- the `not shell_heredoc_reader` test
+	# above is what keeps `bash <<EOF` out, because there the body really is a program.
 	quoted_body := concat("", [`"`, blanked_anchors(segments[0]), `"`])
 	out := concat("", [parts[0], " ", quoted_body, " ", tag, segments[1]])
 }

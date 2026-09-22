@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -111,7 +112,17 @@ def cases() -> list[PolicyCase]:
     """
     return [
         # --- control: an ordinary command must survive the whole policy set -------------------
-        PolicyCase("allow-cargo-build", True, "cargo build --workspace"),
+        #
+        # This case used to be `cargo build --workspace`, allowed. It is not any more, and the
+        # change is the point rather than a casualty: `require_scoped_cargo` (ported from
+        # er-mods-rs 2026-09-21) denies unscoped cargo, and this workspace is the shape that
+        # policy was written for -- `members = ["crates/*"]`, 19 crates, built by parallel agents
+        # in separate worktrees with unshared target/ dirs, which is exactly what the root
+        # Cargo.toml says out loud. A control case has to be a command the rules really do allow,
+        # so the control is now the scoped spelling and the unscoped one is pinned as a deny.
+        PolicyCase("allow-cargo-build-scoped", True, "cargo build -p ds2-inventory-sort"),
+        PolicyCase("deny-cargo-build-workspace", False, "cargo build --workspace"),
+        PolicyCase("allow-cargo-fmt", True, "cargo fmt --check"),
         PolicyCase("allow-ds2-run-dry", True, "python3 scripts/ds2-run.py --dry-run"),
         # --- ds2_launch_guard -------------------------------------------------------------
         # The bare launch this guard exists to stop, and the sanctioned launcher it must
@@ -238,7 +249,112 @@ def cases() -> list[PolicyCase]:
     ]
 
 
+SIGNAL_TIMEOUT_SECONDS = 25.0
+OPA_TEST_TIMEOUT_SECONDS = 120.0
+
+
+def _signal_event() -> str:
+    """A PreToolUse event over an inert command -- nothing for any signal to report on."""
+    return json.dumps(
+        {
+            "session_id": "cupcake-signal-contract",
+            "transcript_path": "/tmp/cupcake-signal-contract.jsonl",
+            "cwd": str(REPO_ROOT),
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "cargo fmt --check", "timeout": DEFAULT_BASH_TIMEOUT_MS},
+        }
+    )
+
+
+def run_signal_contract_checks() -> None:
+    """Every signal must be executable, carry a shebang, and exit 0.
+
+    Ported from er-mods-rs, where the two halves were separate functions and the exit-code half
+    named that repo's own runtime-evidence scripts. Both halves are about how cupcake DELIVERS a
+    signal rather than about any particular signal:
+
+      * NO EXECUTABLE BIT. A script in `.cupcake/signals/` is auto-discovered and exec'd directly,
+        not run through `bash`. Without the bit the kernel refuses and cupcake records exit 126.
+      * NON-ZERO EXIT. Cupcake then replaces the signal's text with a failure record --
+        `{"error", "exit_code", "output", "success"}` -- so every string comparison the policy
+        makes against a word is undefined, the rule body fails, and the decision set comes back
+        empty. Cupcake reports a clean allow and exits 0.
+
+    Either way a guard is off in production while `opa test` stays green and nothing says so.
+    Measured in er-mods-rs on 2026-09-16: a signal shipped without the bit, and the policy reading
+    it allowed the exact edit it exists to refuse.
+
+    The banal way to hit the second one is a `set -o pipefail` script whose last stage is a `grep`
+    that finds nothing, or a helper that exits 1 to mean "no finding" -- both look fine by hand,
+    because the finding IS the silence.
+    """
+    signals = sorted((REPO_ROOT / ".cupcake" / "signals").glob("*.sh"))
+    if not signals:
+        raise AssertionError(
+            ".cupcake/signals/ holds no *.sh at all. Either the directory moved or this gate is "
+            "watching the wrong place; an empty walk makes every signal innocent."
+        )
+    event = _signal_event()
+    for script in signals:
+        rel = script.relative_to(REPO_ROOT)
+        if not os.access(script, os.X_OK):
+            raise AssertionError(
+                f"{rel} is not executable. Cupcake execs it directly, the kernel refuses with 126, "
+                "cupcake replaces its output with a failure record, and every policy reading it "
+                f"silently allows. Run `chmod +x {rel}`."
+            )
+        first = script.read_text(encoding="utf-8", errors="replace").splitlines()[:1]
+        if not first or not first[0].startswith("#!"):
+            raise AssertionError(
+                f"{rel} has no shebang. Exec'd directly, the interpreter line is what decides what "
+                "runs it; without one the exec fails the same way a missing bit does."
+            )
+        result = subprocess.run(
+            ["bash", str(script)],
+            cwd=REPO_ROOT,
+            input=event,
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=SIGNAL_TIMEOUT_SECONDS,
+        )
+        if result.returncode != 0:
+            raise AssertionError(
+                f"{rel} exited {result.returncode} on an event it has nothing to say about. A "
+                "non-zero signal is replaced by a failure record and the guard reading it allows "
+                f"everything, silently.\n{result.stdout}\n{result.stderr}"
+            )
+
+
+def run_rego_suites() -> None:
+    """`opa test` over the WHOLE .cupcake tree, not a hand-listed set of suites.
+
+    er-mods-rs keeps an `ORPHANED_REGO_SUITES` list here -- one entry per suite, naming the exact
+    .rego files to load -- and the comment above that list records what the list costs: a suite
+    added to `.cupcake/tests/` without an edit to it is born orphaned, "which is how four of them
+    accumulated 89 never-executed assertions". Loading the tree removes the maintenance surface
+    entirely, and it is not slower: one process, ~1000 assertions, under a second here.
+    """
+    if not shutil.which("opa"):
+        print("skip: rego suites (no opa on PATH)")
+        return
+    result = subprocess.run(
+        ["opa", "test", str(REPO_ROOT / ".cupcake")],
+        cwd=REPO_ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=OPA_TEST_TIMEOUT_SECONDS,
+    )
+    if result.returncode != 0:
+        raise AssertionError(f"opa test failed for .cupcake/:\n{result.stdout}\n{result.stderr}")
+
+
 def main() -> int:
+    run_rego_suites()
+    run_signal_contract_checks()
+
     cases_to_run = cases()
 
     max_workers = min(8, max(1, len(cases_to_run)))
