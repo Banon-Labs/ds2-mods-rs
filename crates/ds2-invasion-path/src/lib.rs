@@ -640,8 +640,18 @@ mod windows_impl {
                     ));
                 }
                 segment(arrow.tail, arrow.tip);
-                segment(arrow.tip, arrow.left_barb);
-                segment(arrow.tip, arrow.right_barb);
+                // NO BARBS ON A TIP THAT IS BEHIND THE LENS. `project_segment` trims a crossing
+                // segment to the camera plane, where dividing by a near-zero `w` throws the
+                // trimmed end thousands of pixels out -- the live log has barbs at `6138,-525`
+                // on a 2132x1200 screen. For the shaft that is harmless and correct: the line
+                // leaves the character and runs off the edge towards a player who is behind you,
+                // which is the information wanted. For the head it is a huge V flung across the
+                // frame from a vertex that is not on screen at all, which is noise drawn over
+                // the game. An arrowhead is only meaningful where its point is.
+                if camera.project(arrow.tip, screen).is_some() {
+                    segment(arrow.tip, arrow.left_barb);
+                    segment(arrow.tip, arrow.right_barb);
+                }
             }
             RouteShape::Walk(points) => {
                 for pair in points.windows(2) {
