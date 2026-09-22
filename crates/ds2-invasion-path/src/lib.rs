@@ -554,16 +554,27 @@ mod windows_impl {
     /// Eighty is a legible glyph at 1080p without being a thing you have to look past.
     const MIN_ARROW_PX: f32 = 80.0;
 
-    /// Set once the first arrow of the session has been described in the log.
-    /// How many arrows still get reported, and how many frames apart.
+    /// The last hundred-pixel band the arrow's tail landed in, and the frames left before another
+    /// sample may be written.
     ///
-    /// SAMPLES, NOT ONE SHOT. A single line cannot tell a live camera from a latched one: both
-    /// draw a correct arrow in the frame they were captured, and only the latched one drifts off
-    /// the character afterwards. Spaced samples make that drift visible in the log, so whether
-    /// the overlay tracks stops being something only a screenshot can answer.
-    static ARROW_REPORTS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(6);
+    /// SAMPLED ON MOVEMENT, NOT ON A COUNT. A fixed number of samples runs out while the game
+    /// sits on a loaded save with nobody at the controls, which is exactly when the arrow cannot
+    /// move and the log therefore proves nothing: a latched camera and a live one write identical
+    /// lines until something turns. Keying the sample to a CHANGE in where the tail lands makes a
+    /// still camera silent and a turning one talkative, which is the right way round -- and it is
+    /// motion that separates the two failures, because only a latched camera lets the tail walk
+    /// away from the character.
+    static ARROW_BAND: core::sync::atomic::AtomicUsize =
+        core::sync::atomic::AtomicUsize::new(usize::MAX);
     static ARROW_COUNTDOWN: core::sync::atomic::AtomicUsize =
         core::sync::atomic::AtomicUsize::new(0);
+
+    /// Frames between arrow samples, so a swinging camera writes a readable trail rather than one
+    /// line per frame.
+    const ARROW_SAMPLE_FRAMES: usize = 15;
+
+    /// How wide a band of tail-from-centre counts as the same place, in pixels.
+    const ARROW_BAND_PX: f32 = 100.0;
 
     /// Project one route and append its triangles.
     fn emit(out: &mut Vec<Vertex>, route: &Route, camera: &Camera, screen: [f32; 2]) {
@@ -586,41 +597,32 @@ mod windows_impl {
                 // a correct one, because both are right in the frame they are sampled. Hence
                 // several samples, seconds apart: `tail-from-centre` staying small across them
                 // is the overlay tracking, and growing is it drifting.
-                let due = ARROW_COUNTDOWN
+                // The number that answers "is it on the character": how far the tail lands from
+                // the middle of the frame, where a third-person camera keeps them.
+                let drift = camera.project(arrow.tail, screen).map(|p| {
+                    ((p[0] - screen[0] * 0.5).powi(2) + (p[1] - screen[1] * 0.5).powi(2)).sqrt()
+                });
+                let ready = ARROW_COUNTDOWN
                     .fetch_update(
                         core::sync::atomic::Ordering::Relaxed,
                         core::sync::atomic::Ordering::Relaxed,
-                        |left| Some(if left == 0 { 120 } else { left - 1 }),
+                        |left| Some(left.saturating_sub(1)),
                     )
                     .is_ok_and(|left| left == 0);
-                if due
-                    && ARROW_REPORTS
-                        .fetch_update(
-                            core::sync::atomic::Ordering::Relaxed,
-                            core::sync::atomic::Ordering::Relaxed,
-                            |left| left.checked_sub(1),
-                        )
-                        .is_ok()
-                {
+                // `usize::MAX` is the never-sampled state and has to differ from a real band, so
+                // a tail that is off screen gets its own value rather than sharing that one.
+                let band = drift.map_or(usize::MAX - 1, |drift| (drift / ARROW_BAND_PX) as usize);
+                if ready && ARROW_BAND.swap(band, core::sync::atomic::Ordering::Relaxed) != band {
+                    ARROW_COUNTDOWN
+                        .store(ARROW_SAMPLE_FRAMES, core::sync::atomic::Ordering::Relaxed);
                     let px = |world| {
                         camera.project(world, screen).map_or_else(
                             || "off".to_string(),
                             |p| format!("{:.0},{:.0}", p[0], p[1]),
                         )
                     };
-                    // The number that answers "is it on the character": how far the tail lands
-                    // from the middle of the frame, where a third-person camera keeps them.
-                    let drift = camera.project(arrow.tail, screen).map_or_else(
-                        || "off".to_string(),
-                        |p| {
-                            format!(
-                                "{:.0}px",
-                                ((p[0] - screen[0] * 0.5).powi(2)
-                                    + (p[1] - screen[1] * 0.5).powi(2))
-                                .sqrt()
-                            )
-                        },
-                    );
+                    let drift =
+                        drift.map_or_else(|| "off".to_string(), |drift| format!("{drift:.0}px"));
                     log(format_args!(
                         "arrow: tail-from-centre {drift} | tail {:.1},{:.1},{:.1} -> tip {:.1},{:.1},{:.1} | screen tail={} tip={} barbs={} {} | screen={:.0}x{:.0}",
                         arrow.tail[0],
