@@ -33,11 +33,25 @@
 //! everything near the principal point -- the failure that cost several live runs before it was
 //! named.
 //!
+//! # Finding it once is not the job
+//!
+//! The version that first worked stored the matrix it recognised and stopped looking. That draws
+//! a correct arrow for exactly one frame: the renderer overwrites the camera every frame, and an
+//! overlay holding the old one aims with wherever the camera stood when the game first had a
+//! character on screen. On screen it reads as a line that starts somewhere near the player and
+//! then, as soon as they turn, floats off into the sky on its own -- which is what the second
+//! screenshot of this feature showed.
+//!
+//! So what is remembered is the PLACE: which buffer, which byte offset into it, and whether it
+//! needed transposing. From then on every upload of that buffer is re-read there ([`refresh`]),
+//! and the overlay tracks.
+//!
 //! # Cost
 //!
-//! `Map` and `Unmap` are called constantly, so the detours do as little as possible: once a
-//! matrix has been found, both become a flag check and a tail call. Before that, only buffers in
-//! the size range a constant buffer occupies are scanned at all.
+//! `Map` and `Unmap` are called constantly, so the detours do as little as possible. Before
+//! acquisition, only buffers in the size range a constant buffer occupies are scanned at all;
+//! after it, an upload that is not the camera's buffer costs one pointer compare, and the one
+//! that is costs a sixty-four byte read and two projections.
 
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -84,16 +98,36 @@ const MAX_BUFFER: usize = 64 * 1024;
 /// The matrix the renderer last uploaded, once one has been recognised.
 static FOUND: Mutex<Option<Matrix>> = Mutex::new(None);
 
-/// Set once [`FOUND`] holds something, so the hot path is one relaxed load.
+/// Set once a matrix has ever been recognised, so acquisition stops and the hot path is one
+/// relaxed load. NOT a licence to stop reading: see [`refresh`].
 static HAVE: AtomicBool = AtomicBool::new(false);
 
-/// The pointer the last `Map` handed out, and how many bytes it covers.
+/// WHERE the matrix was found -- the buffer, the byte offset into it, and whether it had to be
+/// transposed to read as row-major.
+///
+/// The value at that address is replaced by the renderer every frame. Latching the value and
+/// not the place is the bug this triple exists to prevent: it leaves the overlay aiming with
+/// the camera as it stood in the one frame capture happened, so the arrow sits correctly on the
+/// character until the player turns and then never again.
+static TARGET_RESOURCE: AtomicUsize = AtomicUsize::new(0);
+static TARGET_OFFSET: AtomicUsize = AtomicUsize::new(0);
+static TARGET_TRANSPOSED: AtomicBool = AtomicBool::new(false);
+
+/// The pointer the last `Map` handed out, which resource it belongs to, and how many bytes it
+/// covers.
 ///
 /// A single slot rather than a table keyed by resource: `Map`/`Unmap` on the immediate context
 /// are not interleaved -- the context is single-threaded by contract -- so the last `Map` is the
 /// one `Unmap` is closing.
 static MAPPED_AT: AtomicUsize = AtomicUsize::new(0);
 static MAPPED_LEN: AtomicUsize = AtomicUsize::new(0);
+static MAPPED_RES: AtomicUsize = AtomicUsize::new(0);
+
+/// Frames drawn, and the frame in which an upload last both landed at the latched place AND
+/// still framed the character. One buffer can be filled several times in a frame -- a shadow
+/// pass and the main pass share one -- so this is how the main pass wins.
+static FRAME: AtomicUsize = AtomicUsize::new(0);
+static CONFIRMED_FRAME: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 /// Trampolines back to the real functions.
 static ORIGINAL_MAP: AtomicUsize = AtomicUsize::new(0);
@@ -118,19 +152,16 @@ struct Subject {
 /// scanned at all, which is deliberate: before there is a player there is no way to tell a
 /// camera from any other sixteen floats, and guessing is what this whole module exists to avoid.
 pub(crate) fn set_subject(player: [f32; 3], screen: [f32; 2]) {
-    if HAVE.load(Ordering::Relaxed) {
-        return;
-    }
+    // Goes on being told the subject for the life of the process, not only until a matrix is
+    // first recognised: every later frame's upload is judged against it too.
+    FRAME.fetch_add(1, Ordering::Relaxed);
     if let Ok(mut subject) = SUBJECT.try_lock() {
         *subject = Some(Subject { player, screen });
     }
 }
 
-/// The captured camera, if one has been recognised.
+/// The captured camera, as of the most recent upload.
 pub(crate) fn camera() -> Option<Camera> {
-    if !HAVE.load(Ordering::Relaxed) {
-        return None;
-    }
     let view_projection = (*FOUND.try_lock().ok()?)?;
     // The view half is not recoverable from a combined matrix, and nothing in the draw path
     // needs it except the arrowhead's opening direction -- which falls back to world up.
@@ -191,7 +222,7 @@ fn recognises(candidate: &Matrix, subject: Subject) -> bool {
 ///
 /// Sixteen-byte steps, because a constant buffer's contents are register-aligned and a matrix
 /// never starts off one.
-fn scan(at: usize, len: usize, subject: Subject) -> Option<Matrix> {
+fn scan(at: usize, len: usize, subject: Subject) -> Option<(usize, bool, Matrix)> {
     if len < MIN_BUFFER {
         return None;
     }
@@ -209,15 +240,95 @@ fn scan(at: usize, len: usize, subject: Subject) -> Option<Matrix> {
         // uploads the transpose of what it computed. A constant buffer is therefore the one
         // place where the transposed reading is the expected one rather than the fallback.
         if recognises(&candidate, subject) {
-            return Some(candidate);
+            return Some((offset, false, candidate));
         }
         let flipped = crate::geometry::transpose(&candidate);
         if recognises(&flipped, subject) {
-            return Some(flipped);
+            return Some((offset, true, flipped));
         }
         offset += 16;
     }
     None
+}
+
+/// How much of an upload is readable. `None` is a buffer whose extent the caller did not state.
+type Extent = Option<usize>;
+
+/// Re-read the matrix from the place a previous frame found it.
+///
+/// THE POINT OF THE MODULE. The renderer writes a fresh view-projection into the same buffer
+/// every frame; what is worth remembering is the address, not the sixteen floats that were at it
+/// once. Re-reading costs a pointer compare on every upload that is not the camera's, and two
+/// projections on the one that is.
+///
+/// `true` means this upload was the latched one -- handled, whether or not it was stored -- so
+/// the caller does not fall through to a full scan.
+fn refresh(resource: usize, at: usize, len: Extent, subject: Option<Subject>) -> bool {
+    let target = TARGET_RESOURCE.load(Ordering::Relaxed);
+    if target == 0 || resource != target {
+        return false;
+    }
+    let offset = TARGET_OFFSET.load(Ordering::Relaxed);
+    // An unstated extent is trusted, because a previous upload of this same buffer was read at
+    // this same offset and was sixteen floats of camera.
+    if len.is_some_and(|len| offset + 64 > len) {
+        return false;
+    }
+    let mut candidate = [0.0f32; 16];
+    // SAFETY: `at` is the pointer the caller is about to have Direct3D read from, and `offset`
+    // is inside it -- checked above when the extent is known, and established by a previous
+    // successful read of this same buffer when it is not.
+    unsafe {
+        core::ptr::copy_nonoverlapping((at + offset) as *const f32, candidate.as_mut_ptr(), 16);
+    }
+    if TARGET_TRANSPOSED.load(Ordering::Relaxed) {
+        candidate = crate::geometry::transpose(&candidate);
+    }
+    if !is_finite(&candidate) {
+        return true;
+    }
+    // An upload that still frames the character beats one that does not, so a shadow or
+    // reflection pass sharing the buffer cannot displace the main pass. If nothing recognised
+    // this frame -- the camera swung, the player went behind a wall -- the last upload stands,
+    // which keeps the overlay tracking instead of freezing.
+    let frame = FRAME.load(Ordering::Relaxed);
+    let confirmed = subject.is_some_and(|subject| recognises(&candidate, subject));
+    if !confirmed && CONFIRMED_FRAME.load(Ordering::Relaxed) == frame {
+        return true;
+    }
+    if let Ok(mut slot) = FOUND.try_lock() {
+        *slot = Some(candidate);
+        if confirmed {
+            CONFIRMED_FRAME.store(frame, Ordering::Relaxed);
+        }
+    }
+    true
+}
+
+/// Scan an upload for the matrix and, on a hit, remember where it was so [`refresh`] can take
+/// over from the next frame onwards.
+fn acquire(resource: usize, at: usize, len: Extent, how: &str) {
+    if HAVE.load(Ordering::Relaxed) {
+        return;
+    }
+    let Some(subject) = SUBJECT.try_lock().ok().and_then(|held| *held) else {
+        return;
+    };
+    let Some((offset, transposed, found)) = scan(at, len.unwrap_or(MIN_BUFFER), subject) else {
+        return;
+    };
+    let Ok(mut slot) = FOUND.try_lock() else {
+        return;
+    };
+    *slot = Some(found);
+    TARGET_RESOURCE.store(resource, Ordering::Relaxed);
+    TARGET_OFFSET.store(offset, Ordering::Relaxed);
+    TARGET_TRANSPOSED.store(transposed, Ordering::Relaxed);
+    CONFIRMED_FRAME.store(FRAME.load(Ordering::Relaxed), Ordering::Relaxed);
+    HAVE.store(true, Ordering::Relaxed);
+    log(format_args!(
+        "camera: captured from {how} at +0x{offset:x} transposed={transposed} -- re-read from there every frame"
+    ));
 }
 
 /// `ID3D11DeviceContext::Map`, as the detour must declare it.
@@ -265,7 +376,7 @@ unsafe extern "system" fn map(
         let real: MapFn = core::mem::transmute(original);
         real(context, resource, subresource, map_type, flags, mapped)
     };
-    if HAVE.load(Ordering::Relaxed) || mapped.is_null() || result.is_err() {
+    if mapped.is_null() || result.is_err() {
         return result;
     }
     // SAFETY: Direct3D filled `mapped` on success, which `result` has just confirmed.
@@ -277,6 +388,7 @@ unsafe extern "system" fn map(
     }
     MAPPED_AT.store(filled.data as usize, Ordering::Relaxed);
     MAPPED_LEN.store(len, Ordering::Relaxed);
+    MAPPED_RES.store(resource as usize, Ordering::Relaxed);
     result
 }
 
@@ -286,21 +398,13 @@ unsafe extern "system" fn map(
 ///
 /// Installed by MinHook over `ID3D11DeviceContext::Unmap`, whose ABI this matches.
 unsafe extern "system" fn unmap(context: *mut c_void, resource: *mut c_void, subresource: u32) {
-    if !HAVE.load(Ordering::Relaxed) {
-        let at = MAPPED_AT.swap(0, Ordering::Relaxed);
-        let len = MAPPED_LEN.load(Ordering::Relaxed);
-        if at != 0 {
-            let subject = SUBJECT.try_lock().ok().and_then(|held| *held);
-            if let Some(subject) = subject
-                && let Some(found) = scan(at, len, subject)
-                && let Ok(mut slot) = FOUND.try_lock()
-            {
-                *slot = Some(found);
-                HAVE.store(true, Ordering::Relaxed);
-                log(format_args!(
-                    "camera: captured from a constant buffer upload -- the overlay can aim"
-                ));
-            }
+    let at = MAPPED_AT.swap(0, Ordering::Relaxed);
+    let resource_at = MAPPED_RES.swap(0, Ordering::Relaxed);
+    if at != 0 {
+        let len = Some(MAPPED_LEN.load(Ordering::Relaxed));
+        let subject = SUBJECT.try_lock().ok().and_then(|held| *held);
+        if !refresh(resource_at, at, len, subject) {
+            acquire(resource_at, at, len, "a Map/Unmap upload");
         }
     }
     let original = ORIGINAL_UNMAP.load(Ordering::Acquire);
@@ -345,26 +449,24 @@ unsafe extern "system" fn update_subresource(
     row_pitch: u32,
     depth_pitch: u32,
 ) {
-    if !HAVE.load(Ordering::Relaxed) && !source.is_null() {
+    if !source.is_null() {
         // `row_pitch` is zero for a buffer, where the whole update is one contiguous run of an
-        // unstated length. Sixty-four bytes is all a matrix needs and is always readable if the
-        // caller passed a buffer at all.
+        // unstated length -- sixty-four bytes is all a matrix needs and is always readable if
+        // the caller passed a buffer at all.
         let len = if row_pitch == 0 {
-            64
+            None
         } else {
-            (row_pitch as usize).min(MAX_BUFFER)
+            Some((row_pitch as usize).min(MAX_BUFFER))
         };
-        if len >= MIN_BUFFER {
+        if len.is_none_or(|len| len >= MIN_BUFFER) {
             let subject = SUBJECT.try_lock().ok().and_then(|held| *held);
-            if let Some(subject) = subject
-                && let Some(found) = scan(source as usize, len, subject)
-                && let Ok(mut slot) = FOUND.try_lock()
-            {
-                *slot = Some(found);
-                HAVE.store(true, Ordering::Relaxed);
-                log(format_args!(
-                    "camera: captured from an UpdateSubresource -- the overlay can aim"
-                ));
+            if !refresh(resource as usize, source as usize, len, subject) {
+                acquire(
+                    resource as usize,
+                    source as usize,
+                    len,
+                    "an UpdateSubresource",
+                );
             }
         }
     }

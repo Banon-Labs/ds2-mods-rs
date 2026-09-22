@@ -522,8 +522,15 @@ mod windows_impl {
     const MIN_ARROW_PX: f32 = 80.0;
 
     /// Set once the first arrow of the session has been described in the log.
-    static REPORTED_ARROW: core::sync::atomic::AtomicBool =
-        core::sync::atomic::AtomicBool::new(false);
+    /// How many arrows still get reported, and how many frames apart.
+    ///
+    /// SAMPLES, NOT ONE SHOT. A single line cannot tell a live camera from a latched one: both
+    /// draw a correct arrow in the frame they were captured, and only the latched one drifts off
+    /// the character afterwards. Spaced samples make that drift visible in the log, so whether
+    /// the overlay tracks stops being something only a screenshot can answer.
+    static ARROW_REPORTS: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(6);
+    static ARROW_COUNTDOWN: core::sync::atomic::AtomicUsize =
+        core::sync::atomic::AtomicUsize::new(0);
 
     /// Project one route and append its triangles.
     fn emit(out: &mut Vec<Vertex>, route: &Route, camera: &Camera, screen: [f32; 2]) {
@@ -536,20 +543,53 @@ mod windows_impl {
         match &route.shape {
             RouteShape::Arrow(arrow) => {
                 let arrow = &lengthen(arrow, route.distance_meters, camera, screen);
-                // ONE SHOT, THE FIRST ARROW OF THE SESSION. The first screenshot of this feature
-                // showed an orange stripe floating in the air with no head and no connection to
-                // the player, which is at least two different bugs wearing one appearance --
-                // a tail that is not the body, or barbs collapsing onto the shaft. Theorising
-                // about which costs a game launch per theory; four projected points settle it.
-                if !REPORTED_ARROW.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                // A FEW ARROWS, SPACED. The first screenshot of this feature showed an orange
+                // stripe floating in the air with no head and no connection to the player, which
+                // is at least two different bugs wearing one appearance -- a tail that is not
+                // the body, or barbs collapsing onto the shaft. Theorising about which costs a
+                // game launch per theory; four projected points settle it. The second screenshot
+                // showed the same stripe again, and the one shot this used to take could not
+                // distinguish the remaining cause -- a camera read once and never again -- from
+                // a correct one, because both are right in the frame they are sampled. Hence
+                // several samples, seconds apart: `tail-from-centre` staying small across them
+                // is the overlay tracking, and growing is it drifting.
+                let due = ARROW_COUNTDOWN
+                    .fetch_update(
+                        core::sync::atomic::Ordering::Relaxed,
+                        core::sync::atomic::Ordering::Relaxed,
+                        |left| Some(if left == 0 { 120 } else { left - 1 }),
+                    )
+                    .is_ok_and(|left| left == 0);
+                if due
+                    && ARROW_REPORTS
+                        .fetch_update(
+                            core::sync::atomic::Ordering::Relaxed,
+                            core::sync::atomic::Ordering::Relaxed,
+                            |left| left.checked_sub(1),
+                        )
+                        .is_ok()
+                {
                     let px = |world| {
                         camera.project(world, screen).map_or_else(
                             || "off".to_string(),
                             |p| format!("{:.0},{:.0}", p[0], p[1]),
                         )
                     };
+                    // The number that answers "is it on the character": how far the tail lands
+                    // from the middle of the frame, where a third-person camera keeps them.
+                    let drift = camera.project(arrow.tail, screen).map_or_else(
+                        || "off".to_string(),
+                        |p| {
+                            format!(
+                                "{:.0}px",
+                                ((p[0] - screen[0] * 0.5).powi(2)
+                                    + (p[1] - screen[1] * 0.5).powi(2))
+                                .sqrt()
+                            )
+                        },
+                    );
                     log(format_args!(
-                        "arrow: tail {:.1},{:.1},{:.1} -> tip {:.1},{:.1},{:.1} | screen tail={} tip={} barbs={} {} | screen={:.0}x{:.0}",
+                        "arrow: tail-from-centre {drift} | tail {:.1},{:.1},{:.1} -> tip {:.1},{:.1},{:.1} | screen tail={} tip={} barbs={} {} | screen={:.0}x{:.0}",
                         arrow.tail[0],
                         arrow.tail[1],
                         arrow.tail[2],
