@@ -34,6 +34,12 @@ pub(crate) struct Route {
     pub(crate) color: [f32; 3],
     pub(crate) alpha: f32,
     pub(crate) stroke_px: f32,
+    /// How far the target actually is, in metres.
+    ///
+    /// Carried past the colour ramp because the draw path needs it as a **length budget**: an
+    /// arrow may grow to stay legible, and the one thing it must never do is grow past the
+    /// person it is pointing at. See `crate::windows_impl::emit`.
+    pub(crate) distance_meters: f32,
 }
 
 impl Route {
@@ -51,6 +57,7 @@ impl Route {
             color: geometry::path_color(color_slot),
             alpha: geometry::alpha(boldness),
             stroke_px: geometry::stroke_px(boldness),
+            distance_meters,
         }
     }
 }

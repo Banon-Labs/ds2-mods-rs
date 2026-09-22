@@ -478,6 +478,17 @@ mod windows_impl {
         vertices
     }
 
+    /// The shortest an arrow's shaft may appear, in pixels.
+    ///
+    /// **A world-space arrow pointing away from the camera foreshortens to a dot**, and that is
+    /// not a corner case -- it is what happens whenever you are running towards the person you
+    /// are pointing at, which is most of the time. The first live look at this feature was the
+    /// user asking whether the orange thing on screen was an arrow at all; it was, three metres
+    /// long, aimed almost straight down the view axis, and it projected to a handful of pixels.
+    ///
+    /// Eighty is a legible glyph at 1080p without being a thing you have to look past.
+    const MIN_ARROW_PX: f32 = 80.0;
+
     /// Project one route and append its triangles.
     fn emit(out: &mut Vec<Vertex>, route: &Route, camera: &Camera, screen: [f32; 2]) {
         let color = [route.color[0], route.color[1], route.color[2], route.alpha];
@@ -488,6 +499,7 @@ mod windows_impl {
         };
         match &route.shape {
             RouteShape::Arrow(arrow) => {
+                let arrow = &lengthen(arrow, route.distance_meters, camera, screen);
                 segment(arrow.tail, arrow.tip);
                 segment(arrow.tip, arrow.left_barb);
                 segment(arrow.tip, arrow.right_barb);
@@ -498,6 +510,60 @@ mod windows_impl {
                 }
             }
         }
+    }
+
+    /// Grow an arrow until its shaft is at least [`MIN_ARROW_PX`] long on screen, or until it
+    /// reaches the person it points at -- whichever comes first.
+    ///
+    /// # Why the length is a minimum rather than a size
+    ///
+    /// The configured `arrow_meters` is a WORLD length, and a world length says nothing about how
+    /// big the thing looks. An arrow pointing across your view is three metres of clearly visible
+    /// line; the same arrow pointing away from you is three metres of nearly nothing, because
+    /// almost all of it is depth. That is the case that matters most -- you are usually running
+    /// towards the player you are pointing at.
+    ///
+    /// **Bounded by the real distance**, which is the part that keeps this honest. An arrow is a
+    /// claim about direction, and one that extended past its target would be a claim about
+    /// distance as well, and a false one. A player far away and dead ahead gets a long line that
+    /// stops short of them; a player beside you keeps the short arrow that was already legible.
+    ///
+    /// Returns the arrow unchanged when it cannot be projected at all, which is the case when
+    /// both ends are behind the lens -- there is nothing to make legible.
+    fn lengthen(
+        arrow: &geometry::Arrow,
+        distance_meters: f32,
+        camera: &Camera,
+        screen: [f32; 2],
+    ) -> geometry::Arrow {
+        let Some(direction) = geometry::normalize(geometry::sub(arrow.tip, arrow.tail)) else {
+            return *arrow;
+        };
+        let current = geometry::length(geometry::sub(arrow.tip, arrow.tail));
+        let Some((tail_px, tip_px)) = camera.project_segment(arrow.tail, arrow.tip, screen) else {
+            return *arrow;
+        };
+        let shaft_px = geometry::length([tip_px[0] - tail_px[0], tip_px[1] - tail_px[1], 0.0]);
+        // Already legible, or so foreshortened that the scale factor would be meaningless -- a
+        // shaft of a fraction of a pixel is a target almost exactly along the view axis, and
+        // dividing by it produces a number rather than an answer.
+        const DEGENERATE_PX: f32 = 0.5;
+        if shaft_px >= MIN_ARROW_PX || shaft_px < DEGENERATE_PX || current <= f32::EPSILON {
+            return *arrow;
+        }
+        // Foreshortening is not linear, so one pass undershoots. It converges fast and two passes
+        // are enough; the clamp does the rest.
+        let mut length = current;
+        for _ in 0..2 {
+            let wanted = (length * MIN_ARROW_PX / shaft_px).min(distance_meters);
+            if !wanted.is_finite() || wanted <= length {
+                break;
+            }
+            length = wanted;
+        }
+        let up = camera.up();
+        let target = geometry::add_scaled(arrow.tail, direction, length);
+        geometry::arrow(arrow.tail, target, length, up).unwrap_or(*arrow)
     }
 
     /// The back buffer's size in pixels, which is the coordinate space the overlay draws in.
