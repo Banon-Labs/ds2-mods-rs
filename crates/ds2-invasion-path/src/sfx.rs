@@ -62,11 +62,18 @@ struct Block([u8; ds2_rva::KATANA_SFX_CTRL_BYTES]);
 
 /// One live effect, and the storage the engine linked into itself to drive it.
 ///
-/// **There is no `Drop`.** Dropping one would have to call into the engine, and `Drop` runs
-/// wherever the value happens to die -- which for a `Vec` being cleared on the wrong thread is
-/// the FX manager's lists from somewhere they must not be touched. [`Handle::extinguish`] is
-/// explicit for that reason, and a handle that is dropped without it leaves an effect burning
-/// until the session ends rather than corrupting anything.
+/// **No `Drop` impl, on purpose.** One would have to call into the engine, and `Drop` runs
+/// wherever the value happens to die -- for a `Vec` being cleared, that is the FX manager's
+/// unlocked lists from somewhere they must not be touched. So there are exactly two honest ways
+/// to be rid of one, and which is right depends on whether the engine still points at the block:
+///
+/// | | what happens | when it is right |
+/// |---|---|---|
+/// | [`Handle::extinguish`] | the effect stops, the block is unlinked, then freed | the effect is still live and in the same area it was spawned in |
+/// | `core::mem::forget` | nothing is called, the storage stays allocated forever | the area changed, and whether the engine still holds a pointer is unknowable from here |
+///
+/// Letting one drop plainly is the third option and it is the wrong one: it frees bytes an
+/// effect's controller list may still link to. `crate::gametick` never does it.
 pub(crate) struct Handle {
     block: Box<Block>,
 }

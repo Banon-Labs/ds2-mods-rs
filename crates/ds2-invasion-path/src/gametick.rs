@@ -287,28 +287,44 @@ fn work(nav_system: usize, delta: f32) {
         return;
     };
 
-    // THE MAP CHANGED, AND THE HANDLES DID NOT SURVIVE IT. Every stone's control block points at
-    // an FX node in a pool the old area owned. Extinguishing one now would read through a freed
-    // manager, so the handles are DROPPED rather than put out -- which is safe by construction,
-    // because `sfx::Handle` has no `Drop` that calls the engine. The effects went with the map.
+    // THE MAP CHANGED, AND THE STONES ARE DELIBERATELY LEAKED. Sixteen kilobytes of leak per
+    // warp, worst case, and it is the correct trade rather than laziness.
     //
-    // The planner is a different case: the `NvNavigationSystem` is the same object across areas,
-    // so the planner is still linked and still ours, but its world pointer was bound at creation
-    // from an area that is gone. Retire it properly and make another.
+    // A stone's control block is an intrusive node in an FX effect's controller list -- the head
+    // is `node + 0xf8` and the links live INSIDE the block. Two things could be true across an
+    // area boundary and this code cannot tell which:
+    //
+    //   - the FX manager was torn down with the map, in which case putting the stone out reads a
+    //     freed manager;
+    //   - the manager survived (it hangs off `KatanaSfxSystem`, a `GameManagerImp` singleton) and
+    //     the NODE was recycled into somebody else's effect, in which case putting the stone out
+    //     kills the wrong thing.
+    //
+    // Extinguishing is wrong in the first case, dropping is wrong in the second -- freed memory
+    // the engine still has a pointer to is the worse of the two. `forget` is wrong in NEITHER:
+    // the bytes stay allocated and untouched, so whatever the engine still believes about them
+    // stays true, and nothing is called. It costs a box per stone until the process exits.
+    //
+    // The planner is a different case and is torn down properly: the `NvNavigationSystem` is the
+    // same object across areas, so the planner is still linked and still ours -- but its world
+    // pointer was bound at creation from an area that is gone, so it is retired and remade.
     let area = current_area();
     if state.nav_system != nav_system || state.area != area {
         if state.planner != 0 && state.nav_system == nav_system {
             // SAFETY: game thread, and `retire` only sets the byte the next tick acts on.
             unsafe { navquery::retire(nav_system, state.planner) };
         }
-        let dropped = state.trail.take_all();
-        if !dropped.is_empty() {
+        let stranded = state.trail.take_all();
+        if !stranded.is_empty() {
             log(format_args!(
-                "tick: map changed -- {} marker(s) went with it",
-                dropped.len()
+                "tick: map changed -- {} marker(s) stranded; their storage is leaked on purpose \
+                 rather than freed under an engine that may still hold a pointer to it",
+                stranded.len()
             ));
         }
-        drop(dropped);
+        for handle in stranded {
+            core::mem::forget(handle);
+        }
         state.nav_system = nav_system;
         state.area = area;
         state.planner = 0;
