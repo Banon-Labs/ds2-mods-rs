@@ -42,16 +42,26 @@
 //! then, as soon as they turn, floats off into the sky on its own -- which is what the second
 //! screenshot of this feature showed.
 //!
-//! So what is remembered is the PLACE: which buffer, which byte offset into it, and whether it
-//! needed transposing. From then on every upload of that buffer is re-read there ([`refresh`]),
-//! and the overlay tracks.
+//! So what is remembered is the PLACE -- the byte offset into an upload, and whether it needed
+//! transposing -- and every later upload is re-read there ([`refresh`]).
+//!
+//! # The buffer is not the thing either
+//!
+//! The first version of that remembered the buffer as well, and re-read only that one. DARK
+//! SOULS II rotates its constant buffers: live, the log filled with the capture letting go and
+//! re-scanning, and the arrow blinked out every second or two while it did. Which resource an
+//! upload lands in is not a property of the camera.
+//!
+//! So resource identity is dropped, and what stands in for it is the recognition test itself,
+//! applied to every upload at the acquired offset. An upload that does not frame the character is
+//! not this frame's camera, whatever buffer it arrived in.
 //!
 //! # Cost
 //!
 //! `Map` and `Unmap` are called constantly, so the detours do as little as possible. Before
 //! acquisition, only buffers in the size range a constant buffer occupies are scanned at all;
-//! after it, an upload that is not the camera's buffer costs one pointer compare, and the one
-//! that is costs a sixty-four byte read and two projections.
+//! after it, each upload costs a sixty-four byte read and two projections -- no search, and no
+//! allocation.
 
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -102,30 +112,25 @@ static FOUND: Mutex<Option<Matrix>> = Mutex::new(None);
 /// relaxed load. NOT a licence to stop reading: see [`refresh`].
 static HAVE: AtomicBool = AtomicBool::new(false);
 
-/// WHERE the matrix was found -- the buffer, the byte offset into it, and whether it had to be
-/// transposed to read as row-major.
+/// WHERE in an upload the matrix sits -- the byte offset, and whether it had to be transposed to
+/// read as row-major.
 ///
-/// The value at that address is replaced by the renderer every frame. Latching the value and
-/// not the place is the bug this triple exists to prevent: it leaves the overlay aiming with
-/// the camera as it stood in the one frame capture happened, so the arrow sits correctly on the
-/// character until the player turns and then never again.
-static TARGET_RESOURCE: AtomicUsize = AtomicUsize::new(0);
+/// The offset and NOT the buffer. Which resource an upload lands in is not a property of the
+/// camera: DARK SOULS II rotates its constant buffers, so a capture keyed to the buffer it first
+/// saw loses the camera within seconds. See [`refresh`].
 static TARGET_OFFSET: AtomicUsize = AtomicUsize::new(0);
 static TARGET_TRANSPOSED: AtomicBool = AtomicBool::new(false);
 
-/// The pointer the last `Map` handed out, which resource it belongs to, and how many bytes it
-/// covers.
+/// The pointer the last `Map` handed out and how many bytes it covers.
 ///
 /// A single slot rather than a table keyed by resource: `Map`/`Unmap` on the immediate context
 /// are not interleaved -- the context is single-threaded by contract -- so the last `Map` is the
 /// one `Unmap` is closing.
 static MAPPED_AT: AtomicUsize = AtomicUsize::new(0);
 static MAPPED_LEN: AtomicUsize = AtomicUsize::new(0);
-static MAPPED_RES: AtomicUsize = AtomicUsize::new(0);
 
-/// Frames drawn, and the frame in which an upload last both landed at the latched place AND
-/// still framed the character. One buffer can be filled several times in a frame -- a shadow
-/// pass and the main pass share one -- so this is how the main pass wins.
+/// Frames drawn, and the frame in which an upload last carried a matrix that framed the
+/// character. Their difference is how long the capture has been getting nothing it recognises.
 static FRAME: AtomicUsize = AtomicUsize::new(0);
 static CONFIRMED_FRAME: AtomicUsize = AtomicUsize::new(usize::MAX);
 
@@ -158,18 +163,17 @@ pub(crate) fn set_subject(player: [f32; 3], screen: [f32; 2]) {
     if let Ok(mut subject) = SUBJECT.try_lock() {
         *subject = Some(Subject { player, screen });
     }
-    // LET GO OF A BUFFER THAT HAS STOPPED CARRYING THE CAMERA. Engines rotate constant buffers,
-    // and a map change builds new ones, so the address a matrix was found at is not guaranteed
-    // to keep receiving it. Without this the capture would hold a buffer that no longer gets
-    // written and the overlay would stay dark for the rest of the session with nothing to say
-    // about why. A second of no upload that frames the character is the signal to go and look
-    // again.
+    // GO AND LOOK AGAIN WHEN THE OFFSET STOPS PAYING OUT. Nothing guarantees the camera keeps
+    // arriving at the byte offset it was acquired at -- a map change rebuilds the renderer's
+    // buffers, and a different pass may lay its constants out differently. Without this the
+    // capture would go on reading an offset that no longer holds a camera and the overlay would
+    // stay dark for the rest of the session with nothing to say about why. A second of no upload
+    // that frames the character is the signal.
     const STALE_FRAMES: usize = 60;
     if HAVE.load(Ordering::Relaxed) {
         let confirmed = CONFIRMED_FRAME.load(Ordering::Relaxed);
         if confirmed <= frame && frame - confirmed > STALE_FRAMES {
             HAVE.store(false, Ordering::Relaxed);
-            TARGET_RESOURCE.store(0, Ordering::Relaxed);
             if RELATCH_REPORTS
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
                     left.checked_sub(1)
@@ -177,15 +181,15 @@ pub(crate) fn set_subject(player: [f32; 3], screen: [f32; 2]) {
                 .is_ok()
             {
                 log(format_args!(
-                    "camera: the buffer it was read from stopped carrying it -- looking again"
+                    "camera: nothing has framed the character for a second -- looking for it again"
                 ));
             }
         }
     }
 }
 
-/// How many re-latch lines still get written, so a buffer that rotates every frame cannot fill
-/// the log with the same sentence sixty times a second.
+/// How many re-scan lines still get written, so a session that cannot find a camera at all
+/// cannot fill the log with the same sentence once a second.
 static RELATCH_REPORTS: AtomicUsize = AtomicUsize::new(8);
 
 /// How many acquisition lines still get written, for the same reason.
@@ -294,51 +298,52 @@ type Extent = Option<usize>;
 ///
 /// `true` means this upload was the latched one -- handled, whether or not it was stored -- so
 /// the caller does not fall through to a full scan.
-fn refresh(resource: usize, at: usize, len: Extent, subject: Option<Subject>) -> bool {
-    let target = TARGET_RESOURCE.load(Ordering::Relaxed);
-    if target == 0 || resource != target {
+fn refresh(at: usize, len: Extent, subject: Option<Subject>) -> bool {
+    if !HAVE.load(Ordering::Relaxed) {
         return false;
     }
+    let Some(subject) = subject else {
+        return false;
+    };
     let offset = TARGET_OFFSET.load(Ordering::Relaxed);
-    // An unstated extent is trusted, because a previous upload of this same buffer was read at
-    // this same offset and was sixteen floats of camera.
+    // An unstated extent is trusted at the offset acquisition already read: `UpdateSubresource`
+    // on a buffer states no length, and the scan that found the matrix read the same bytes.
     if len.is_some_and(|len| offset + 64 > len) {
         return false;
     }
     let mut candidate = [0.0f32; 16];
     // SAFETY: `at` is the pointer the caller is about to have Direct3D read from, and `offset`
-    // is inside it -- checked above when the extent is known, and established by a previous
-    // successful read of this same buffer when it is not.
+    // is inside it -- checked above when the extent is known, and no further than the scan that
+    // acquired the matrix reads when it is not.
     unsafe {
         core::ptr::copy_nonoverlapping((at + offset) as *const f32, candidate.as_mut_ptr(), 16);
     }
     if TARGET_TRANSPOSED.load(Ordering::Relaxed) {
         candidate = crate::geometry::transpose(&candidate);
     }
-    if !is_finite(&candidate) {
-        return true;
-    }
-    // An upload that still frames the character beats one that does not, so a shadow or
-    // reflection pass sharing the buffer cannot displace the main pass. If nothing recognised
-    // this frame -- the camera swung, the player went behind a wall -- the last upload stands,
-    // which keeps the overlay tracking instead of freezing.
-    let frame = FRAME.load(Ordering::Relaxed);
-    let confirmed = subject.is_some_and(|subject| recognises(&candidate, subject));
-    if !confirmed && CONFIRMED_FRAME.load(Ordering::Relaxed) == frame {
-        return true;
+    // THE BUFFER IS NOT THE THING; THE MATRIX IS. An earlier version keyed this to the resource
+    // the matrix was first seen in and re-read only that one. Live, DARK SOULS II rotates its
+    // constant buffers: the log filled with `stopped carrying it -- looking again` and the arrow
+    // blinked out every second or two while the re-scan ran. The buffer an upload lands in is
+    // not a property of the camera.
+    //
+    // So identity is dropped and the test is applied instead -- every upload, at the acquired
+    // offset. It is the same test acquisition used and it costs two projections, which is
+    // nothing next to a scan. An upload that does not frame the character is simply not this
+    // frame's camera, whatever buffer it arrived in, and the previous matrix stands.
+    if !recognises(&candidate, subject) {
+        return false;
     }
     if let Ok(mut slot) = FOUND.try_lock() {
         *slot = Some(candidate);
-        if confirmed {
-            CONFIRMED_FRAME.store(frame, Ordering::Relaxed);
-        }
+        CONFIRMED_FRAME.store(FRAME.load(Ordering::Relaxed), Ordering::Relaxed);
     }
     true
 }
 
 /// Scan an upload for the matrix and, on a hit, remember where it was so [`refresh`] can take
 /// over from the next frame onwards.
-fn acquire(resource: usize, at: usize, len: Extent, how: &str) {
+fn acquire(at: usize, len: Extent, how: &str) {
     if HAVE.load(Ordering::Relaxed) {
         return;
     }
@@ -352,7 +357,6 @@ fn acquire(resource: usize, at: usize, len: Extent, how: &str) {
         return;
     };
     *slot = Some(found);
-    TARGET_RESOURCE.store(resource, Ordering::Relaxed);
     TARGET_OFFSET.store(offset, Ordering::Relaxed);
     TARGET_TRANSPOSED.store(transposed, Ordering::Relaxed);
     CONFIRMED_FRAME.store(FRAME.load(Ordering::Relaxed), Ordering::Relaxed);
@@ -427,7 +431,6 @@ unsafe extern "system" fn map(
     }
     MAPPED_AT.store(filled.data as usize, Ordering::Relaxed);
     MAPPED_LEN.store(len, Ordering::Relaxed);
-    MAPPED_RES.store(resource as usize, Ordering::Relaxed);
     result
 }
 
@@ -438,12 +441,11 @@ unsafe extern "system" fn map(
 /// Installed by MinHook over `ID3D11DeviceContext::Unmap`, whose ABI this matches.
 unsafe extern "system" fn unmap(context: *mut c_void, resource: *mut c_void, subresource: u32) {
     let at = MAPPED_AT.swap(0, Ordering::Relaxed);
-    let resource_at = MAPPED_RES.swap(0, Ordering::Relaxed);
     if at != 0 {
         let len = Some(MAPPED_LEN.load(Ordering::Relaxed));
         let subject = SUBJECT.try_lock().ok().and_then(|held| *held);
-        if !refresh(resource_at, at, len, subject) {
-            acquire(resource_at, at, len, "a Map/Unmap upload");
+        if !refresh(at, len, subject) {
+            acquire(at, len, "a Map/Unmap upload");
         }
     }
     let original = ORIGINAL_UNMAP.load(Ordering::Acquire);
@@ -499,13 +501,8 @@ unsafe extern "system" fn update_subresource(
         };
         if len.is_none_or(|len| len >= MIN_BUFFER) {
             let subject = SUBJECT.try_lock().ok().and_then(|held| *held);
-            if !refresh(resource as usize, source as usize, len, subject) {
-                acquire(
-                    resource as usize,
-                    source as usize,
-                    len,
-                    "an UpdateSubresource",
-                );
+            if !refresh(source as usize, len, subject) {
+                acquire(source as usize, len, "an UpdateSubresource");
             }
         }
     }
