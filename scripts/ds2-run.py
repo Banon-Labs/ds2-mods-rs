@@ -228,6 +228,7 @@ KEY_INVASION_PATH_ENABLED = "enabled"
 KEY_INVASION_PATH_TOGGLE = "toggle_key"
 KEY_INVASION_PATH_START_ENABLED = "start_enabled"
 KEY_INVASION_PATH_MARKER_EFFECT_ID = "marker_effect_id"
+KEY_INVASION_PATH_NPC_SELF_CHECK = "npc_self_check"
 #: Mirrors `LOG_PREFIX` in `crates/ds2-invasion-path/src/log.rs`. Grep for it when a run
 #: disappoints: `roster:` and `camera:` under this prefix are the two lines that say whether the
 #: overlay found anything, and `overlay:` is the one that says whether it could draw at all.
@@ -1108,6 +1109,7 @@ def config_text(
     invasion_path_key: str = "semicolon",
     invasion_path_start_enabled: bool = False,
     invasion_path_marker_effect_id: int = 0,
+    invasion_path_npc_self_check: bool = False,
     input_harness: bool = False,
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
@@ -1638,6 +1640,29 @@ def config_text(
 # than drawing over it, and the stones are placed by the engine's own spawn from the game's own
 # tick. Live, like every setting here -- change the id with the game running.
 {KEY_INVASION_PATH_MARKER_EFFECT_ID} = {invasion_path_marker_effect_id}
+# THE ONLY WAY A SOLO PLAYER CAN SEE ANY OF THIS WORK.
+#
+# Everything above starts with ANOTHER PLAYER in your session. Alone, the roster reads
+# `remotes=0`, no route is ever asked for, no stone is ever placed, and every line in the log is
+# an install line -- "hooked", "armed", "requested" -- with not one execution line among them. A
+# real session read `characters=6 players=1 remotes=0`: six objects walked and nothing to point
+# at.
+#
+# The other five objects are the answer. Turn this on and the overlay routes to the nearest
+# NON-PLAYER character instead: a live object at a real world position, standing on the navmesh,
+# so the whole chain runs -- snap both ends, ask the planner, decode the path, space the stones
+# along it, spawn each one. A solo player standing in Majula exercises every line of it.
+#
+# It narrates. Three failures look identical on the ground -- an effect that is not in this map,
+# a spawn the engine's quality throttle discarded, and one that worked and is simply not where
+# you are looking -- so it reads the quality byte and the missing-effect tree AT the attempt,
+# when two of the three are still visible. It sweeps all seven colours, one per stone, so one run
+# says which of them appear. Then it watches them at 1 s, 3 s and 10 s -- which is what says
+# whether a Prism Stone LINGERS or merely flashes -- and takes them down again.
+#
+# OFF unless you are testing. It routes to something you did not ask for and spawns effects to do
+# it. Grep the log for `self-check:`.
+{KEY_INVASION_PATH_NPC_SELF_CHECK} = {str(invasion_path_npc_self_check).lower()}
 
 [{INPUT_HARNESS_SECTION}]
 # LETS AN AGENT MOVE THE CAMERA, AND TAKES YOUR CONTROLLER AWAY WHILE IT DOES.
@@ -1734,6 +1759,7 @@ def write_config(
     invasion_path_key: str = "semicolon",
     invasion_path_start_enabled: bool = False,
     invasion_path_marker_effect_id: int = 0,
+    invasion_path_npc_self_check: bool = False,
     input_harness: bool = False,
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
@@ -1769,6 +1795,7 @@ def write_config(
         invasion_path_key,
         invasion_path_start_enabled,
         invasion_path_marker_effect_id,
+        invasion_path_npc_self_check,
         input_harness,
     )
     path.write_text(text, encoding="utf-8")
@@ -1862,6 +1889,7 @@ def dry_run(
     invasion_path_key: str = "semicolon",
     invasion_path_start_enabled: bool = False,
     invasion_path_marker_effect_id: int = 0,
+    invasion_path_npc_self_check: bool = False,
     input_harness: bool = False,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
@@ -1915,6 +1943,7 @@ def dry_run(
             invasion_path_key,
             invasion_path_start_enabled,
             invasion_path_marker_effect_id,
+            invasion_path_npc_self_check,
             input_harness,
         ):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
@@ -1964,6 +1993,7 @@ def dry_run(
                 invasion_path_key=invasion_path_key,
                 invasion_path_start_enabled=invasion_path_start_enabled,
                 invasion_path_marker_effect_id=invasion_path_marker_effect_id,
+                invasion_path_npc_self_check=invasion_path_npc_self_check,
                 input_harness=input_harness,
             ),
             indent="[dry-run]   | ",
@@ -2295,6 +2325,7 @@ def launch(
     invasion_path_key: str = "semicolon",
     invasion_path_start_enabled: bool = False,
     invasion_path_marker_effect_id: int = 0,
+    invasion_path_npc_self_check: bool = False,
     input_harness: bool = False,
 ) -> int:
     report_environment(probe)
@@ -2343,6 +2374,7 @@ def launch(
         invasion_path_key,
         invasion_path_start_enabled,
         invasion_path_marker_effect_id,
+        invasion_path_npc_self_check,
         input_harness,
     )
     print(f"[config] {config_path}")
@@ -3743,6 +3775,18 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--invasion-path-self-check",
+        dest="invasion_path_npc_self_check",
+        action="store_true",
+        help=(
+            "route to the nearest NPC instead of waiting for another player, and narrate every "
+            "step in the log. THE ONLY WAY A SOLO RUN CAN EXERCISE ANY OF THIS: alone, the "
+            "roster reads remotes=0, nothing is ever requested and every line is an install "
+            "line. Pairs with --invasion-path-markers to also place the stones, sweep all seven "
+            "colours, and report at 1s/3s/10s whether they linger. Grep for `self-check:`."
+        ),
+    )
+    parser.add_argument(
         "--invasion-path-on",
         dest="invasion_path_start_enabled",
         action="store_true",
@@ -3870,6 +3914,7 @@ def main() -> int:
             args.invasion_path_key,
             args.invasion_path_start_enabled,
             args.invasion_path_marker_effect_id,
+            args.invasion_path_npc_self_check,
             args.input_harness,
         )
     return launch(
@@ -3904,6 +3949,7 @@ def main() -> int:
         args.invasion_path_key,
         args.invasion_path_start_enabled,
         args.invasion_path_marker_effect_id,
+        args.invasion_path_npc_self_check,
         args.input_harness,
     )
 

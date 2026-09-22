@@ -135,6 +135,49 @@ pub const DEFAULT_MARKER_KEEP_BEHIND_METERS: f32 = 12.0;
 /// Markers placed per pass, so a trail is laid outwards from your feet rather than all at once.
 pub const DEFAULT_MARKERS_PER_PASS: usize = 3;
 
+/// Route to the nearest NPC and narrate it. `false`, and off is the default.
+///
+/// # What it is for
+///
+/// **A solo player can never see this feature work.** Everything the route and the trail do
+/// starts with another player in the session, so a solo session's log is all install lines --
+/// "hooked", "requested", "armed" -- and not one execution line. A real session read
+/// `characters=6 players=1 remotes=0`: six objects walked, one of them the player, and nothing
+/// to point at. Waiting for a bloodstain phantom to wander past is not a test.
+///
+/// Those other five objects are the answer. An NPC is a live `CharacterCtrl` at a real world
+/// position, standing on the navmesh, so routing to one runs the ENTIRE chain that a second
+/// player would: snap both ends, request, poll, decode, space the stones along the path, spawn
+/// each one. Turn this on and a solo player standing in Majula exercises every line of it.
+///
+/// # What the log will say, and why each line is there
+///
+/// Three failures look identical on the ground -- an effect that is not in this map, a spawn the
+/// quality throttle discarded, and one that worked and is simply not where you are looking. The
+/// self-check separates them at the moment of the attempt, because two of the three are invisible
+/// afterwards:
+///
+/// | the log says | it means |
+/// |---|---|
+/// | `picked 0x..., N.Nm away` | which character, so a bad pick is visible rather than inferred |
+/// | `READY -- N segment(s) decoded to M point(s)` | the route came back; both numbers, because they fail differently |
+/// | `the planner said NO ROUTE` | a finding, not a shrug: that character IS on the navmesh |
+/// | `id 833: spawned, quality 0, the id resolved` | it worked |
+/// | `EMPTY -- ... AT OR ABOVE THE THRESHOLD` | [`ds2_rva::KATANA_SFX_QUALITY_DROP_THRESHOLD`] ate it; the id is not implicated |
+/// | `THIS attempt's lookup failed` | the effect is not resident in this map |
+/// | `t=3.0s -- 7/7 stone(s) still alive` | they LINGER, which is the property a trail needs |
+///
+/// It sweeps [`PRISM_STONE_SFX_IDS`] one id per stone, so a single run also says which of the
+/// seven colours actually appear. Then it takes them down, through the same stand-down path the
+/// real trail uses, so the check leaves nothing behind and the teardown gets tested too.
+///
+/// # Why it is off by default
+///
+/// It spawns effects and routes to a character you did not ask it to route to. That is the right
+/// behaviour for a diagnostic and the wrong behaviour for a feature, and the distance between
+/// those two is one line in a file.
+pub const DEFAULT_NPC_SELF_CHECK: bool = false;
+
 /// The most markers the parser will accept, whatever the file asks for.
 ///
 /// Each one is an object the engine has to build, own and draw, inside a `Present` detour on the
@@ -166,6 +209,9 @@ pub struct PathConfig {
     pub max_markers: usize,
     pub marker_keep_behind_meters: f32,
     pub markers_per_pass: usize,
+    /// Route to the nearest NPC and report, in the log, everything that happened. See
+    /// [`DEFAULT_NPC_SELF_CHECK`].
+    pub npc_self_check: bool,
 }
 
 impl PathConfig {
@@ -208,6 +254,7 @@ impl Default for PathConfig {
             max_markers: DEFAULT_MAX_MARKERS,
             marker_keep_behind_meters: DEFAULT_MARKER_KEEP_BEHIND_METERS,
             markers_per_pass: DEFAULT_MARKERS_PER_PASS,
+            npc_self_check: DEFAULT_NPC_SELF_CHECK,
         }
     }
 }
@@ -341,6 +388,11 @@ impl PathConfig {
                 .and_then(|text| text.parse::<usize>().ok())
                 .filter(|value| *value > 0 && *value <= HARD_MARKER_CAP)
                 .unwrap_or(defaults.markers_per_pass),
+            npc_self_check: values
+                .get(CONFIG_SECTION, "npc_self_check")
+                .map(scalar)
+                .map(|text| text.eq_ignore_ascii_case("true"))
+                .unwrap_or(defaults.npc_self_check),
         }
     }
 }

@@ -141,6 +141,59 @@ pub(crate) fn local_position() -> Option<[f32; 3]> {
 /// real.
 pub(crate) const MAX_ROSTER: usize = 8192;
 
+/// One slot of the roster, as [`walk_roster`] found it.
+enum Entry {
+    /// The slot's pointer or the object's vtable could not be read. Counts as skipped: the
+    /// container was resized under the walk, or the object has been freed since.
+    Unreadable,
+    /// A null slot. An ordinary hole in the roster, not a failure, and not counted as one.
+    Empty,
+    /// A live object and its primary vtable.
+    Object { ctrl: usize, vtable: usize },
+}
+
+/// Walk the roster's begin/end span, handing each slot to `visit`. `false` means the span itself
+/// was refused and nothing was walked.
+///
+/// Shared by [`remotes`] and [`nearest_npc`] so that the part that is dangerous to get wrong --
+/// the bounds -- exists once. The part that differs between them is a vtable comparison, which
+/// is the safe part.
+fn walk_roster(begin: usize, end: usize, mut visit: impl FnMut(Entry)) -> bool {
+    // A begin/end pair, not a pointer and a count -- three independent iteration sites in the
+    // image read it that way. A pair that is inverted, misaligned or absurdly long is a torn
+    // read rather than a roster, and is refused outright.
+    if begin == 0 || end < begin || !(end - begin).is_multiple_of(core::mem::size_of::<usize>()) {
+        return false;
+    }
+    let count = (end - begin) / core::mem::size_of::<usize>();
+    if count > MAX_ROSTER {
+        return false;
+    }
+    for index in 0..count {
+        // SAFETY: `begin` is the engine's own array base and `index` is inside the span it
+        // declared; the read is fault-safe if the container was resized under us.
+        let Some(character) = (unsafe { safe_read_usize(begin + index * 8) }) else {
+            visit(Entry::Unreadable);
+            continue;
+        };
+        let Some(character) = non_null(character) else {
+            visit(Entry::Empty);
+            continue;
+        };
+        // SAFETY: as above -- the object's first word is its vtable, and a freed object reads as
+        // a refusal rather than a fault.
+        let Some(vtable) = (unsafe { safe_read_usize(character) }) else {
+            visit(Entry::Unreadable);
+            continue;
+        };
+        visit(Entry::Object {
+            ctrl: character,
+            vtable,
+        });
+    }
+    true
+}
+
 /// Every other player in the session, nearest first.
 ///
 /// `max` caps the returned list, but the whole roster is still walked and counted, so the
@@ -153,57 +206,37 @@ pub(crate) fn remotes(max: usize) -> Option<(Vec<Player>, Census)> {
     let mut census = Census::default();
     let mut found: Vec<Player> = Vec::new();
 
-    // A begin/end pair, not a pointer and a count -- three independent iteration sites in the
-    // image read it that way. A pair that is inverted, misaligned or absurdly long is a torn
-    // read rather than a roster, and is refused outright.
-    if begin == 0 || end < begin || (end - begin) % core::mem::size_of::<usize>() != 0 {
-        return Some((found, census));
-    }
-    let count = (end - begin) / core::mem::size_of::<usize>();
-    if count > MAX_ROSTER {
-        return Some((found, census));
-    }
-
-    for index in 0..count {
+    walk_roster(begin, end, |entry| {
         census.characters += 1;
-        // SAFETY: `begin` is the engine's own array base and `index` is inside the span it
-        // declared; the read is fault-safe if the container was resized under us.
-        let Some(character) = (unsafe { safe_read_usize(begin + index * 8) }) else {
-            census.skipped += 1;
-            continue;
-        };
-        let Some(character) = non_null(character) else {
-            continue;
-        };
-        // SAFETY: as above -- the object's first word is its vtable, and a freed object reads as
-        // a refusal rather than a fault.
-        let Some(vtable) = (unsafe { safe_read_usize(character) }) else {
-            census.skipped += 1;
-            continue;
+        let Entry::Object { ctrl, vtable } = entry else {
+            if matches!(entry, Entry::Unreadable) {
+                census.skipped += 1;
+            }
+            return;
         };
         if vtable != player_vtable {
-            continue;
+            return;
         }
         census.players += 1;
-        if character == local {
-            continue;
+        if ctrl == local {
+            return;
         }
         census.remotes += 1;
-        let Some(position) = position(character) else {
+        let Some(position) = position(ctrl) else {
             census.skipped += 1;
-            continue;
+            return;
         };
         let distance = crate::geometry::length(crate::geometry::sub(position, local_position));
         if !distance.is_finite() {
             census.skipped += 1;
-            continue;
+            return;
         }
         found.push(Player {
-            ctrl: character,
+            ctrl,
             position,
             distance,
         });
-    }
+    });
 
     // Nearest first, so a `max` that truncates keeps the players worth pointing at. `total_cmp`
     // rather than `partial_cmp`: every distance here is already finite, and a comparator that
@@ -211,4 +244,77 @@ pub(crate) fn remotes(max: usize) -> Option<(Vec<Player>, Census)> {
     found.sort_by(|a, b| a.distance.total_cmp(&b.distance));
     found.truncate(max);
     Some((found, census))
+}
+
+/// The nearest non-player character in the map, or `None` when there is none.
+///
+/// # Why this exists, and why it is not a feature
+///
+/// A solo player has `remotes=0` forever, so every line the route and the trail can write is an
+/// install line and none of them is an execution line. This gives the self-check a real target:
+/// an NPC is a live object at a real world position, standing on the navmesh, so routing to one
+/// runs the whole chain -- snap, request, poll, decode, space, spawn -- in the state the game is
+/// actually in while this is being developed.
+///
+/// # Telling an NPC from a player is the same comparison, with the other constant
+///
+/// [`ds2_rva::CHARACTER_CTRL_VTABLE`] against [`ds2_rva::PLAYER_CTRL_VTABLE`], and the position
+/// comes from the same [`ds2_rva::CHARACTER_CTRL_POSITION_OFFSET`] -- that offset's own
+/// documentation records that `PlayerCtrl` inherits the accessor unchanged, so one offset serves
+/// both. An exact vtable match, not a subclass test: a `CharacterCtrl` SUBCLASS that is not this
+/// class will not match, and that is the conservative direction. It means some NPCs are invisible
+/// to this rather than some non-characters being mistaken for one.
+///
+/// Returns a [`Player`] because everything downstream -- the route request, the colour slot, the
+/// drawn line -- only needs a pointer, a position and a distance, and inventing a second
+/// near-identical struct would mean two of every function that touches one.
+///
+/// # `latched` is what keeps the experiment still
+///
+/// Pass the address the self-check picked last time and this re-finds THAT object and reports
+/// where it is now, falling back to a fresh nearest pick only once it has left the roster.
+///
+/// Without the latch the target is whichever NPC is nearest this frame, and two NPCs milling
+/// around each other would swap the route's destination several times a second -- re-planning
+/// constantly, re-laying the trail, and producing a log in which no two lines are about the same
+/// thing. A latched target also means a walking NPC stays the target while it walks, which is
+/// the case worth watching: it is the only way to see the trail re-lay itself.
+///
+/// The latch is re-found by WALKING the roster rather than by dereferencing the stored address.
+/// An address alone is freed memory the moment the NPC despawns, and "is this pointer still in
+/// the engine's own list" is a question only the list can answer.
+pub(crate) fn self_check_target(latched: Option<usize>) -> Option<Player> {
+    let (local, begin, end) = world()?;
+    let local_position = position(local)?;
+    let character_vtable = game_rva(ds2_rva::CHARACTER_CTRL_VTABLE).ok()?;
+
+    let mut held: Option<Player> = None;
+    let mut best: Option<Player> = None;
+    walk_roster(begin, end, |entry| {
+        let Entry::Object { ctrl, vtable } = entry else {
+            return;
+        };
+        if vtable != character_vtable || ctrl == local {
+            return;
+        }
+        let Some(position) = position(ctrl) else {
+            return;
+        };
+        let distance = crate::geometry::length(crate::geometry::sub(position, local_position));
+        if !distance.is_finite() {
+            return;
+        }
+        let candidate = Player {
+            ctrl,
+            position,
+            distance,
+        };
+        if Some(ctrl) == latched {
+            held = Some(candidate);
+        }
+        if best.as_ref().is_none_or(|kept| distance < kept.distance) {
+            best = Some(candidate);
+        }
+    });
+    held.or(best)
 }

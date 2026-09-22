@@ -250,7 +250,17 @@ pub(crate) enum Poll {
     /// The search finished and there is no way to walk there. Draw the arrow.
     Failed,
     /// A route, in walking order, start first.
-    Ready(Vec<[f32; 3]>),
+    Ready {
+        /// The decoded polyline.
+        points: Vec<[f32; 3]>,
+        /// How many segments the engine's own route held, read straight off
+        /// [`ds2_rva::NV_ROUTE_SEGMENT_COUNT_OFFSET`].
+        ///
+        /// Carried because the two numbers fail differently and a log with only one of them
+        /// cannot say which happened. A route of 40 segments that decodes to 2 points means the
+        /// decoder is wrong; 2 segments and 2 points means the map really is that short a walk.
+        segments: i32,
+    },
     /// The planner could not be read at all -- an unmapped page, which means the object is gone.
     Lost,
 }
@@ -292,7 +302,14 @@ pub(crate) unsafe fn poll(planner: usize) -> Poll {
         // as a failed search than to explain a null dereference afterwards.
         return Poll::Failed;
     }
-    crate::navpath::decode(&GameMemory, route).map_or(Poll::Failed, Poll::Ready)
+    // Read before decoding: the decoder walks the same structure, and a count that disagrees
+    // with the number of points it produced is the single most useful thing the log can say
+    // about a route that came back wrong.
+    let segments =
+        crate::navpath::Memory::i32(&GameMemory, route + ds2_rva::NV_ROUTE_SEGMENT_COUNT_OFFSET)
+            .unwrap_or(-1);
+    crate::navpath::decode(&GameMemory, route)
+        .map_or(Poll::Failed, |points| Poll::Ready { points, segments })
 }
 
 /// `crate::navpath::Memory` over the live process, through the fault-safe reader.

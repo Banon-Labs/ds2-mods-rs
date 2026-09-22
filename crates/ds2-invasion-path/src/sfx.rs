@@ -221,20 +221,187 @@ pub(crate) unsafe fn spawn(
     }
 }
 
+/// [`spawn`], with the three things that distinguish identical-looking failures sampled around
+/// it.
+///
+/// Used by the self-check rather than by the trail, because the missing-effect tree walk costs a
+/// descent per attempt and the trail places stones sixty times a second. The trail wants speed;
+/// a diagnostic wants to know WHY, and a report of "I see nothing" is only worth reading if the
+/// log can separate the reasons.
+///
+/// Note the ORDER: the quality byte and the tree are read BEFORE the call, and the tree again
+/// after. Reading the quality afterwards would report the level during the frame's next load
+/// spike rather than the one that made the decision, and reading the tree only afterwards cannot
+/// tell "this attempt's lookup failed" from "some earlier attempt's did".
+///
+/// # Safety
+///
+/// Game thread only, exactly as [`spawn`].
+pub(crate) unsafe fn spawn_reporting(
+    system: usize,
+    sfx_id: u32,
+    position: [f32; 3],
+    direction: [f32; 3],
+) -> Attempt {
+    let quality = quality(system);
+    let missing_before = id_is_missing(system, sfx_id);
+    // SAFETY: forwarded from this function's own contract.
+    let handle = unsafe { spawn(system, sfx_id, position, direction) };
+    let missing_after = id_is_missing(system, sfx_id);
+    Attempt {
+        handle,
+        quality,
+        missing_before,
+        missing_after,
+    }
+}
+
 impl Handle {
     /// Did the engine actually build something?
     ///
     /// Reads [`ds2_rva::KATANA_SFX_CTRL_NODE_OFFSET`] in both halves. Both null is the shape
     /// `0x140127240` leaves behind when the quality throttle discards a spawn.
+    ///
+    /// **This is the engine's own predicate, inlined.** `0x140a06580` -- the function everything
+    /// else in the image calls to ask the same question -- is a five-byte `jmp` into Arxan whose
+    /// entire body is `cmp [rcx+0x10],0` and `cmp [rcx+0x18],0`. See
+    /// [`ds2_rva::KATANA_SFX_CTRL_IS_EMPTY`], which exists to record that equivalence rather
+    /// than to be called: a hand-written prototype over three stack-swapping Arxan fragments is
+    /// a worse way to learn what two fault-safe reads already say.
     fn is_live(&self) -> bool {
+        self.nodes().into_iter().any(|node| node != 0)
+    }
+
+    /// The two effect-node pointers, zero where there is none.
+    fn nodes(&self) -> [usize; 2] {
         let base = std::ptr::from_ref(&*self.block) as usize;
-        [0, ds2_rva::KATANA_SFX_CTRL_HALF_BYTES]
-            .into_iter()
-            .any(|half| {
-                // SAFETY: an address inside this handle's own box.
-                unsafe { safe_read_usize(base + half + ds2_rva::KATANA_SFX_CTRL_NODE_OFFSET) }
-                    .is_some_and(|node| node != 0)
-            })
+        [0, ds2_rva::KATANA_SFX_CTRL_HALF_BYTES].map(|half| {
+            // SAFETY: an address inside this handle's own box.
+            unsafe { safe_read_usize(base + half + ds2_rva::KATANA_SFX_CTRL_NODE_OFFSET) }
+                .unwrap_or(0)
+        })
+    }
+
+    /// Is the effect still playing?
+    ///
+    /// **The one question that says whether an effect LINGERS**, and it is not the same question
+    /// as [`Handle::is_live`]: that one asks whether the spawn produced anything at all, this one
+    /// asks whether what it produced is still going N seconds later.
+    ///
+    /// Bit 30 of `node + 0x58` -- see [`ds2_rva::KATANA_SFX_NODE_ALIVE_BIT`], read off the engine
+    /// handle method that self-nulls a control block the moment that bit goes clear. A block the
+    /// engine has already disowned reads as all-null nodes and answers `false` here without
+    /// dereferencing anything.
+    ///
+    /// # Safety
+    ///
+    /// Read-only and fault-safe, but the node it reads belongs to the area the effect was spawned
+    /// in. Call it from the game thread, in that area.
+    pub(crate) unsafe fn alive(&self) -> bool {
+        self.nodes().into_iter().any(|node| {
+            node != 0
+                // SAFETY: `node` is an engine FX node this block is linked into; the read
+                // refuses an unmapped page rather than faulting.
+                && unsafe { safe_read_u32(node + ds2_rva::KATANA_SFX_NODE_ALIVE_OFFSET) }
+                    .is_some_and(|word| word & ds2_rva::KATANA_SFX_NODE_ALIVE_BIT != 0)
+        })
+    }
+}
+
+/// Is `id` in the system's missing-effect tree?
+///
+/// `None` means the tree could not be walked -- a torn read or a depth blow-out -- which is a
+/// third answer and must not be reported as either of the other two.
+///
+/// # What a `true` means
+///
+/// The engine looked this id up, did not find it, and recorded that. For a self-check this is the
+/// line between **"the effect is not resident in this map"** and **"it spawned and you cannot see
+/// it"**, which look identical on the ground and are the most expensive pair in the whole feature
+/// to separate by walking around.
+///
+/// The walk is the `lower_bound` descent out of `0x140beb400` with the insert arm removed, so it
+/// is read-only: no allocation, no engine call, no write. It is bounded by
+/// [`ds2_rva::KATANA_SFX_MISSING_MAX_DEPTH`] because the game is free to rebalance the tree
+/// while this reads it, and a torn read must end the walk rather than spin on the simulation
+/// thread.
+pub(crate) fn id_is_missing(system: usize, id: u32) -> Option<bool> {
+    // SAFETY: a live `KatanaSfxSystem`; every read below refuses an unmapped page.
+    let head = unsafe { safe_read_usize(system + ds2_rva::KATANA_SFX_MISSING_IDS_OFFSET)? };
+    if head == 0 {
+        return Some(false);
+    }
+    // The head is not a node: its `_Parent` is the root, and the tree is empty when that is the
+    // head itself.
+    let mut node = unsafe { safe_read_usize(head + ds2_rva::KATANA_SFX_MISSING_PARENT_OFFSET)? };
+    let mut best: Option<u32> = None;
+    for _ in 0..ds2_rva::KATANA_SFX_MISSING_MAX_DEPTH {
+        if node == 0 {
+            return None;
+        }
+        let nil = unsafe { safe_read_u8(node + ds2_rva::KATANA_SFX_MISSING_ISNIL_OFFSET)? };
+        if nil != 0 {
+            // Off the bottom of the tree: `best` holds the lower bound, and the id is present
+            // only if that bound is the id itself.
+            return Some(best == Some(id));
+        }
+        let key = unsafe { safe_read_u32(node + ds2_rva::KATANA_SFX_MISSING_KEY_OFFSET)? };
+        node = if key < id {
+            unsafe { safe_read_usize(node + ds2_rva::KATANA_SFX_MISSING_RIGHT_OFFSET)? }
+        } else {
+            best = Some(key);
+            unsafe { safe_read_usize(node + ds2_rva::KATANA_SFX_MISSING_LEFT_OFFSET)? }
+        };
+    }
+    None
+}
+
+/// Everything one spawn attempt found out, for the self-check's log.
+///
+/// The three fields beyond the handle are the three ways a spawn can produce nothing while
+/// looking exactly like a success, and they have to be sampled AT the attempt -- the quality
+/// level moves with the frame's load, and the missing-effect tree is written by the attempt
+/// itself.
+pub(crate) struct Attempt {
+    /// The live effect, or `None` if the block came back empty.
+    pub(crate) handle: Option<Handle>,
+    /// [`ds2_rva::KATANA_SFX_SYSTEM_QUALITY_OFFSET`] read immediately before the call.
+    pub(crate) quality: Option<u32>,
+    /// Was the id already in the missing-effect tree before this attempt?
+    pub(crate) missing_before: Option<bool>,
+    /// Is it in there now? `false -> true` across one attempt is this attempt's own lookup
+    /// failing, which is the strongest evidence available that the id is not in this map.
+    pub(crate) missing_after: Option<bool>,
+}
+
+impl Attempt {
+    /// One line saying what happened, in the order a reader needs it.
+    pub(crate) fn describe(&self, id: u32) -> String {
+        let quality = self.quality.map_or_else(
+            || "quality ?".to_string(),
+            |level| format!("quality {level}"),
+        );
+        let throttled = self
+            .quality
+            .is_some_and(|level| level >= ds2_rva::KATANA_SFX_QUALITY_DROP_THRESHOLD);
+        let tree = match (self.missing_before, self.missing_after) {
+            (_, Some(false)) => "the id resolved".to_string(),
+            (Some(false), Some(true)) => {
+                "THIS attempt's lookup failed -- the effect is not resident in this map".to_string()
+            }
+            (Some(true), Some(true)) => {
+                "the id was already recorded as missing before this attempt".to_string()
+            }
+            _ => "missing-effect tree unreadable".to_string(),
+        };
+        match &self.handle {
+            Some(_) => format!("id {id}: spawned, {quality}, {tree}"),
+            None if throttled => format!(
+                "id {id}: EMPTY -- {quality}, AT OR ABOVE THE THRESHOLD AT WHICH THE ENGINE \
+                 DISCARDS SPAWNS, so this says nothing about the id; {tree}"
+            ),
+            None => format!("id {id}: EMPTY -- {quality} (not throttled), {tree}"),
+        }
     }
 }
 

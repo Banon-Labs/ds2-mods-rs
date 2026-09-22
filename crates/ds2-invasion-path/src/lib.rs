@@ -110,6 +110,7 @@ pub mod navpath;
 pub mod routes;
 
 pub(crate) mod lines;
+pub(crate) mod selfcheck;
 pub(crate) mod trail;
 
 #[cfg(windows)]
@@ -216,6 +217,10 @@ mod windows_impl {
         /// Whether the camera framed the character last frame. `true` for the same reason as
         /// [`State::had_camera`]: the first refusal has to be audible.
         framed: bool,
+        /// The `CharacterCtrl` the self-check latched onto, so a walking NPC stays the target
+        /// while it walks and two NPCs milling about do not swap the destination every frame.
+        /// See `census::self_check_target`.
+        self_check_target: Option<usize>,
     }
 
     static STATE: Mutex<Option<State>> = Mutex::new(None);
@@ -270,6 +275,7 @@ mod windows_impl {
                 last_drawn: None,
                 framed: true,
                 said_markers: false,
+                self_check_target: None,
             });
         }
 
@@ -620,18 +626,76 @@ mod windows_impl {
         // route lags the roster by up to half a second. `answer_for` refuses an answer about a
         // different player rather than drawing it, because a confident line to the wrong person
         // is worse than the arrow it replaced.
-        let routed = players
+        let mut routed = players
             .iter()
-            .find(|player| player.distance >= state.config.near_suppress_meters);
-        crate::gametick::ask(routed.map(|player| crate::gametick::Wanted {
+            .find(|player| player.distance >= state.config.near_suppress_meters)
+            .copied();
+
+        // THE SELF-CHECK'S TARGET, and it only ever stands in for an absence. A real player in
+        // the session always wins: the diagnostic exists because a solo session cannot exercise
+        // any of this, not because NPCs are interesting to point at.
+        //
+        // See `config::DEFAULT_NPC_SELF_CHECK`. Once the tick has said everything it is going to
+        // say, `self_check_done` goes true and this stops nominating anybody -- which drops the
+        // ask to `None`, which is what puts the stones out.
+        // THE ARM FOLLOWS THE FILE; ONLY THE NOMINATION FOLLOWS "DONE". Gating the arm on
+        // `self_check_done` too was a deadlock: finishing set `done`, `done` made the arm false,
+        // and a false arm is the only thing that can clear `done` -- so the file could say
+        // `true` forever and the check would never run again. Editing the key false and back to
+        // true is now a genuine re-run, which is the whole reason the config is hot-reloaded.
+        crate::gametick::set_self_check(state.config.npc_self_check);
+        let checking = state.config.npc_self_check && !crate::gametick::self_check_done();
+        if !checking {
+            // A finished check must stop bypassing `near_suppress_meters` for its old target,
+            // or an NPC standing next to you keeps an arrow long after the diagnostic is over.
+            state.self_check_target = None;
+        }
+        if checking && routed.is_none() {
+            let latched = state.self_check_target;
+            if let Some(npc) = census::self_check_target(latched) {
+                if latched != Some(npc.ctrl) {
+                    state.self_check_target = Some(npc.ctrl);
+                    // THE PICK IS LOGGED, so a bad one is visible rather than inferred. An
+                    // address, a distance and a position: if the route then fails, the position
+                    // is what says whether the thing picked was somewhere a route could start.
+                    log(format_args!(
+                        "self-check: picked character 0x{:016x} at {:.1},{:.1},{:.1}, {:.1} m \
+                         away -- routing to it",
+                        npc.ctrl, npc.position[0], npc.position[1], npc.position[2], npc.distance
+                    ));
+                }
+                routed = Some(npc);
+            } else if state.self_check_target.take().is_some() {
+                log(format_args!(
+                    "self-check: the character it was routing to has left the roster -- picking \
+                     another"
+                ));
+            }
+        }
+
+        crate::gametick::ask(routed.as_ref().map(|player| crate::gametick::Wanted {
             from: local,
             to: player.position,
             target: player.ctrl as u64,
         }));
 
+        // DRAW THE SELF-CHECK'S TARGET TOO. The user is at the keyboard looking at the screen,
+        // and a diagnostic whose whole output is in a file gives them nothing to look at. The
+        // NPC is appended rather than substituted, so a session that has both a real player and
+        // the check running shows both.
+        let mut drawn = players.clone();
+        if let Some(npc) = routed.filter(|target| !drawn.iter().any(|p| p.ctrl == target.ctrl)) {
+            drawn.push(npc);
+        }
+
         let mut snapshot = Vec::new();
-        for player in &players {
-            if player.distance < state.config.near_suppress_meters {
+        for player in &drawn {
+            // `near_suppress_meters` exists so the overlay stops shouting about someone standing
+            // next to you. It must NOT apply to the self-check's target: an NPC thirty metres
+            // away is the normal case in Majula, and a diagnostic the user cannot see because it
+            // worked too close to them is a diagnostic that reports nothing.
+            let is_check_target = state.self_check_target == Some(player.ctrl);
+            if player.distance < state.config.near_suppress_meters && !is_check_target {
                 continue;
             }
             let slot = state.palette.slot_for(player.ctrl as u64);

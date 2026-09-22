@@ -169,6 +169,14 @@ impl<H> Trail<H> {
         self.placed.len()
     }
 
+    /// Every stone's handle, for asking the engine whether they are still alive.
+    ///
+    /// Borrowed rather than taken: the self-check samples the same stones three times, so a
+    /// reader that consumed them could only ever ask once.
+    pub(crate) fn handles(&self) -> impl Iterator<Item = &H> {
+        self.placed.iter().map(|stone| &stone.handle)
+    }
+
     /// Give up every stone, for a map change or an overlay switched off.
     ///
     /// The handles come back so the caller can extinguish them; dropping the returned vector

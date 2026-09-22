@@ -6707,6 +6707,101 @@ pub const KATANA_SFX_CTRL_PREV_OFFSET: usize = 0x20;
 /// `FXSfxCtrl -> next controller` in the effect node's list. `+0x28`.
 pub const KATANA_SFX_CTRL_NEXT_OFFSET: usize = 0x28;
 
+/// `FXSfxCtrl -> alive`. Bit 30 (`0x4000_0000`) of the word at **`node + 0x58`**, where `node` is
+/// [`KATANA_SFX_CTRL_NODE_OFFSET`]. Set means the effect is still playing.
+///
+/// **This is the only honest answer to "is it still there?"** -- and it is what separates an
+/// effect that LINGERS from one that flashed once, which is the property a marker trail needs and
+/// which nothing in this workspace had established.
+///
+/// Read off `0x140a067c0`, an ordinary handle method, whose first act is:
+///
+/// ```text
+/// node = ctrl->[0x10];
+/// if (node && (~(*(u32*)(node + 0x58) >> 30) & 1)) {
+///     ctrl->[8] = ctrl->[0x10] = ctrl->[0x18] = ctrl->[0x20] = ctrl->[0x28] = 0;
+///     return;                       // the handle has just disowned a dead effect
+/// }
+/// ```
+///
+/// So every handle method self-nulls on a clear bit, which is why a dangling handle is not
+/// possible here and why reading the bit directly is safe: the worst case is that the engine
+/// has already zeroed [`KATANA_SFX_CTRL_NODE_OFFSET`] and there is nothing to read.
+///
+/// `0x140141530`'s third primitive clears it, which is what makes the stop observable.
+pub const KATANA_SFX_NODE_ALIVE_OFFSET: usize = 0x58;
+
+/// The bit at [`KATANA_SFX_NODE_ALIVE_OFFSET`] that means "still playing". `0x4000_0000`.
+pub const KATANA_SFX_NODE_ALIVE_BIT: u32 = 0x4000_0000;
+
+/// `KatanaSfxSystem -> ids that did not resolve`. `+0x2b8`, an MSVC `std::map`-shaped red-black
+/// tree keyed by `u32`.
+///
+/// **Membership is the difference between "not in this map" and "spawned and invisible"**, which
+/// is otherwise the same absence on the ground and the most expensive confusion in the whole
+/// feature to resolve by looking.
+///
+/// `0x140beb400(sys, id)` is the insert, and reading it gives the entire layout. It is a
+/// `lower_bound` descent followed by the usual found-test, so a read-only `contains` is the same
+/// walk with the insert arm removed:
+///
+/// ```text
+/// head = *(usize*)(sys + 0x2b8);         // _Myhead; its +0x08 is the ROOT, not a node
+/// node = head->[KATANA_SFX_MISSING_PARENT_OFFSET];
+/// while (!node->_Isnil) { node = (node->key < id) ? node->_Right : node->_Left; ... }
+/// ```
+///
+/// A hit bumps a counter at `+0x20` and clears a byte at `+0x24` rather than inserting again, so
+/// the tree records how many times each id was asked for.
+pub const KATANA_SFX_MISSING_IDS_OFFSET: usize = 0x2b8;
+
+/// `_Left` of a node in the [`KATANA_SFX_MISSING_IDS_OFFSET`] tree. `+0x00`.
+pub const KATANA_SFX_MISSING_LEFT_OFFSET: usize = 0x00;
+
+/// `_Parent` of a node -- and, on the head node, the tree's ROOT. `+0x08`.
+pub const KATANA_SFX_MISSING_PARENT_OFFSET: usize = 0x08;
+
+/// `_Right` of a node. `+0x10`.
+pub const KATANA_SFX_MISSING_RIGHT_OFFSET: usize = 0x10;
+
+/// `_Isnil` -- non-zero on the head and on the leaf sentinels. `+0x19`.
+///
+/// `+0x18` is `_Color`, which nothing here reads. The pair is the standard MSVC `_Tree_node`
+/// prefix, which is why the key lands at `+0x1c` rather than at `+0x1a`.
+pub const KATANA_SFX_MISSING_ISNIL_OFFSET: usize = 0x19;
+
+/// The `u32` id a node holds. `+0x1c`.
+pub const KATANA_SFX_MISSING_KEY_OFFSET: usize = 0x1c;
+
+/// Depth at which a walk of the [`KATANA_SFX_MISSING_IDS_OFFSET`] tree gives up. `64`.
+///
+/// A red-black tree of `n` keys is at most `2*log2(n+1)` deep, so sixty-four admits about a
+/// billion entries -- far past anything real. It is there because the tree is read while the
+/// game is free to rebalance it, and a torn read must end the walk rather than spin inside a
+/// cycle on the game's own simulation thread.
+pub const KATANA_SFX_MISSING_MAX_DEPTH: usize = 64;
+
+/// The engine's own "did this control block get anything?" predicate. RVA `0x00a0_6580`.
+///
+/// **Recorded so nobody calls it.** `ds2-invasion-path` tests the same thing by reading two
+/// fields, and this constant exists to document that the two are equivalent rather than to be
+/// used.
+///
+/// It is a five-byte `jmp` into Arxan-shattered code, and walking the chain with
+/// `scripts/ds2-arxan-chain.py` shows the whole predicate:
+///
+/// ```text
+/// 0x140a06580  jmp 0x141b873fb
+/// 0x141b873fb  cmp qword [rcx+0x10], 0     ; KATANA_SFX_CTRL_NODE_OFFSET
+/// 0x141c5abbd  cmovne rbx, <other return>  ; the flags pick which address to return to
+/// 0x141b692ad  cmp qword [rcx+0x18], 0     ; the second node slot
+/// ```
+///
+/// Two null tests on fields any caller can read for itself, reached through three stack-swapping
+/// Arxan fragments. Calling it would mean a hand-written prototype over shattered code to learn
+/// something two `safe_read_usize` calls already say.
+pub const KATANA_SFX_CTRL_IS_EMPTY: u32 = 0x00a0_6580;
+
 /// The Prism Stone's seven SFX ids: `833 ..= 839`.
 ///
 /// **This is what `marker_effect_id` wants.** bd `ds2-mods-rs-3al` recorded the id as

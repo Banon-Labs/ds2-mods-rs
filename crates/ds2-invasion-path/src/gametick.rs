@@ -70,6 +70,16 @@ static ORIGINAL: AtomicUsize = AtomicUsize::new(0);
 /// navmesh search per frame to redraw a line that has not meaningfully moved.
 const REPLAN_SECONDS: f32 = 0.5;
 
+/// Seconds a self-check may sit waiting for a route before it gives up and says so.
+///
+/// **A diagnostic that can hang is worse than one that gives up**, and there are several ways for
+/// this one to wait forever, all of them ordinary: `marker_effect_id` left at `0` so there is
+/// nothing to place, no `KatanaSfxSystem` yet, a planner that never answers, an NPC that is
+/// somewhere no route reaches. Each has its own log line where it can be detected, and this is
+/// the backstop for the ones nobody has thought of. Thirty seconds is far longer than the whole
+/// check should take and short enough that a user watching the screen has not given up first.
+const SELF_CHECK_DEADLINE_SECONDS: f32 = 30.0;
+
 /// Ticks a search may stay pending before it is abandoned.
 ///
 /// `NvNavigationSystem::Update` steps every listed object up to 0x80 times per tick, so a search
@@ -105,6 +115,46 @@ pub(crate) struct Answer {
     /// The route in walking order, start first, or `None` when the planner said there is no way
     /// to walk there. `None` is the arrow's cue and is a complete answer, not a missing one.
     pub(crate) route: Option<Vec<[f32; 3]>>,
+}
+
+/// Is the self-check running? Set from the config every frame.
+///
+/// When it is, three things change and nothing else does: spawns go through
+/// `crate::sfx::spawn_reporting` instead of `spawn`, the route's arrival is described in the log,
+/// and the stones are watched on `crate::selfcheck`'s schedule and then taken down. The route,
+/// the snap, the planner, the spacing and the budgets are the SAME code the real trail uses --
+/// which is the point. A self-check that ran its own private path would prove only that its own
+/// private path works.
+static SELF_CHECK: Mutex<bool> = Mutex::new(false);
+
+/// Set once the self-check has said everything it is going to say.
+///
+/// The draw side reads it and stops nominating an NPC, which drops `WANTED` to `None`, which is
+/// what makes the tick put the stones out -- through the ordinary stand-down path rather than a
+/// special one, so the teardown is itself part of what got tested.
+static SELF_CHECK_DONE: Mutex<bool> = Mutex::new(false);
+
+/// Has the self-check finished? Read by the draw side.
+pub(crate) fn self_check_done() -> bool {
+    SELF_CHECK_DONE.try_lock().is_ok_and(|done| *done)
+}
+
+/// Turn the self-check on or off. Called from the draw side every frame.
+///
+/// Going from off to on re-arms it, so editing the config file while the game runs re-runs the
+/// check rather than requiring a restart -- the file is re-read every second, and a diagnostic
+/// you can only run once per launch is a diagnostic nobody runs twice.
+pub(crate) fn set_self_check(on: bool) {
+    let Ok(mut slot) = SELF_CHECK.try_lock() else {
+        return;
+    };
+    if on
+        && !*slot
+        && let Ok(mut done) = SELF_CHECK_DONE.try_lock()
+    {
+        *done = false;
+    }
+    *slot = on;
 }
 
 /// The question, or `None` when the overlay has nothing to route to.
@@ -159,6 +209,28 @@ struct Tick {
     said_route: bool,
     said_no_route: bool,
     said_full: bool,
+    /// How far through a self-check run this is.
+    check: Check,
+}
+
+/// Where a self-check run has got to.
+///
+/// A four-state machine rather than a pile of booleans because the states are genuinely
+/// sequential and the illegal combinations -- watching stones that were never placed, reporting a
+/// route twice -- are the ones a diagnostic must not produce. A log that contradicts itself is
+/// worse than no log.
+#[derive(Debug, Default, PartialEq)]
+enum Check {
+    /// The config does not ask for one.
+    #[default]
+    Off,
+    /// Armed, and waiting for the planner to answer. Carries seconds spent waiting, against
+    /// [`SELF_CHECK_DEADLINE_SECONDS`].
+    WaitingForRoute(f32),
+    /// Stones are down; watching them on `crate::selfcheck`'s schedule.
+    Watching(crate::selfcheck::Schedule),
+    /// Everything has been said. The draw side has been told to stand down.
+    Done,
 }
 
 impl Default for Tick {
@@ -175,6 +247,7 @@ impl Default for Tick {
             said_route: false,
             said_no_route: false,
             said_full: false,
+            check: Check::Off,
         }
     }
 }
@@ -380,9 +453,109 @@ fn work(nav_system: usize, delta: f32) {
         }
     }
 
+    // ARM OR DISARM THE SELF-CHECK BEFORE ANYTHING READS IT, so one tick is entirely inside one
+    // state rather than half in each.
+    let wanted_check = SELF_CHECK.try_lock().is_ok_and(|on| *on);
+    if !wanted_check {
+        state.check = Check::Off;
+    } else if state.check == Check::Off {
+        state.check = Check::WaitingForRoute(0.0);
+        log(format_args!(
+            "self-check: armed -- routing to the nearest non-player character and laying the \
+             trail along whatever comes back"
+        ));
+    }
+
     state.cooldown = (state.cooldown - delta.max(0.0)).max(0.0);
     poll_or_request(state);
     lay_markers(state);
+    watch_stones(state, delta);
+}
+
+/// Sample the self-check's stones on schedule, then take them down.
+///
+/// Everything here is read-only except the last step, which hands the draw side the "stand down"
+/// it needs to stop nominating a target -- and that is what makes the ordinary teardown path
+/// run, rather than a second one written for the diagnostic.
+fn watch_stones(state: &mut Tick, delta: f32) {
+    // THE BACKSTOP, AND IT EXISTS BECAUSE A HUNG DIAGNOSTIC IS WORSE THAN A FAILED ONE. Several
+    // ordinary conditions leave the check waiting for something that is never coming -- markers
+    // switched off, no SFX system yet, a route nobody answers -- and each of those returns early
+    // from somewhere else in this file without ever reaching the finish. Waiting forever would
+    // also mean routing to an NPC forever, which is a feature the player did not ask for.
+    if let Check::WaitingForRoute(waited) = &mut state.check {
+        *waited += delta.max(0.0);
+        if *waited > SELF_CHECK_DEADLINE_SECONDS {
+            let markers = MARKERS.try_lock().ok().and_then(|slot| *slot);
+            log(format_args!(
+                "self-check: gave up after {SELF_CHECK_DEADLINE_SECONDS:.0}s without laying a \
+                 stone. {}",
+                match markers {
+                    None =>
+                        "No marker settings reached the tick at all -- the overlay may never \
+                             have drawn a frame.",
+                    Some(markers) if markers.effect_id == 0 =>
+                        "`marker_effect_id` is 0, so there was never anything to place: the \
+                         route half of the check ran and the trail half could not. Set it to 833 \
+                         (a Prism Stone) and run again.",
+                    Some(_) =>
+                        "Settings were present, so look above for the route lines: either \
+                                no route arrived or no spawn returned a handle.",
+                }
+            ));
+            if let Ok(mut done) = SELF_CHECK_DONE.try_lock() {
+                *done = true;
+            }
+            state.check = Check::Done;
+        }
+        return;
+    }
+
+    let Check::Watching(schedule) = &mut state.check else {
+        return;
+    };
+    let Some(sample) = schedule.advance(delta) else {
+        if !schedule.finished() {
+            return;
+        }
+        // Every sample is in. Tell the draw side to stop asking; the stand-down branch at the
+        // top of `work` puts the stones out on the next tick.
+        log(format_args!(
+            "self-check: done -- standing down, which puts the stones out through the same path \
+             the real trail uses"
+        ));
+        if let Ok(mut done) = SELF_CHECK_DONE.try_lock() {
+            *done = true;
+        }
+        state.check = Check::Done;
+        return;
+    };
+    let placed = state.trail.placed();
+    // SAFETY: game thread, in the area the stones were spawned in -- the area-change branch at
+    // the top of `work` has already run this tick and would have emptied the trail otherwise.
+    let alive = state
+        .trail
+        .handles()
+        .filter(|handle| unsafe { handle.alive() })
+        .count();
+    log(format_args!(
+        "self-check: t={:.1}s{} -- {alive}/{placed} stone(s) still alive{}",
+        sample.scheduled,
+        if sample.late() {
+            format!(
+                " (LATE: actually taken at {:.1}s, the frame stalled)",
+                sample.actual
+            )
+        } else {
+            String::new()
+        },
+        match (alive, placed) {
+            (0, 0) => " -- nothing was ever placed, so this says nothing about lingering",
+            (0, _) => " -- they did NOT linger: a burst, not a marker",
+            (a, p) if a == p => " -- all of them; this is what a trail needs",
+            _ => " -- some died and some did not, which is not a property of the id alone",
+        }
+    ));
 }
 
 /// Advance the one search this crate ever has in flight.
@@ -405,6 +578,19 @@ fn poll_or_request(state: &mut Tick) {
             }
             Poll::Failed => {
                 state.pending = None;
+                if matches!(state.check, Check::WaitingForRoute(_)) {
+                    // FAILED on a live character standing on the navmesh is itself a finding, and
+                    // a loud one: it means the snap or the planner is wrong, not that the world
+                    // is. The real trail treats this as ordinary and says so once; the
+                    // self-check must not let it pass quietly.
+                    log(format_args!(
+                        "self-check: the planner said NO ROUTE to 0x{target:x}. That character is \
+                         a live object at a real position, so this is not \"nowhere to walk\" -- \
+                         suspect the snap (either end returning 0xffffffff), the capability mask, \
+                         or the {} cost budget.",
+                        ds2_rva::NV_ROUTE_MAX_COST_LONG_RANGE
+                    ));
+                }
                 if !state.said_no_route {
                     state.said_no_route = true;
                     log(format_args!(
@@ -414,12 +600,25 @@ fn poll_or_request(state: &mut Tick) {
                 }
                 publish(target, None);
             }
-            Poll::Ready(points) => {
+            Poll::Ready { points, segments } => {
                 state.pending = None;
+                if matches!(state.check, Check::WaitingForRoute(_)) {
+                    // BOTH NUMBERS. A route of forty segments that decodes to two points means
+                    // the decoder is wrong; two and two means the walk really is that short. One
+                    // number cannot tell those apart, and this is the only place both are in
+                    // hand.
+                    log(format_args!(
+                        "self-check: READY -- {segments} segment(s) decoded to {} point(s), \
+                         {:.1} m of path to 0x{target:x}",
+                        points.len(),
+                        path_length(&points)
+                    ));
+                }
                 if !state.said_route {
                     state.said_route = true;
                     log(format_args!(
-                        "tick: first walkable route -- {} point(s) to 0x{target:x}",
+                        "tick: first walkable route -- {segments} segment(s), {} point(s) to \
+                         0x{target:x}",
                         points.len()
                     ));
                 }
@@ -480,6 +679,14 @@ fn publish(target: u64, route: Option<Vec<[f32; 3]>>) {
 
 /// Put down this tick's share of the trail, and put out what has been walked past.
 fn lay_markers(state: &mut Tick) {
+    // THE WATCH IS AN EXPERIMENT AND THE TRAIL MUST HOLD STILL FOR IT. The route keeps being
+    // re-planned every half second while the stones are being watched, so without this the
+    // ordinary trail would go on placing fresh stones -- which are trivially alive -- and
+    // retiring old ones as the target moves. Both corrupt the one number the watch exists to
+    // produce: "7/7 alive at t=10s" would mean nothing if three of the seven were laid at t=9.
+    if matches!(state.check, Check::Watching(_)) {
+        return;
+    }
     let Ok(slot) = MARKERS.try_lock() else {
         return;
     };
@@ -537,6 +744,9 @@ fn lay_markers(state: &mut Tick) {
             state.trail.placed()
         ));
     }
+    let checking = matches!(state.check, Check::WaitingForRoute(_));
+    let mut attempted = 0usize;
+    let mut took = 0usize;
     for (index, at) in planned.iter().enumerate() {
         // The direction a stone faces is the direction the trail runs at that point. The next
         // planned stone is the best available "onwards"; the last one borrows the one before it,
@@ -545,12 +755,62 @@ fn lay_markers(state: &mut Tick) {
             .get(index + 1)
             .or_else(|| index.checked_sub(1).and_then(|back| planned.get(back)));
         let direction = ahead.map_or([0.0, 1.0, 0.0], |next| crate::geometry::sub(*next, *at));
+        attempted += 1;
+        // ONE COLOUR PER STONE WHILE CHECKING. The Prism Stone has seven ids, one per colour, and
+        // sweeping them along the line answers in a single run which of the seven actually
+        // appear -- for the cost of a modulo. The real trail uses the configured id throughout,
+        // because a trail that changes colour as it goes reads as several trails.
+        let id = if checking {
+            ds2_rva::PRISM_STONE_SFX_IDS
+                [state.trail.placed().wrapping_add(index) % ds2_rva::PRISM_STONE_SFX_IDS.len()]
+        } else {
+            markers.effect_id
+        };
+        if checking {
+            // SAFETY: game thread, mid-simulation, no engine lock held.
+            let attempt = unsafe { sfx::spawn_reporting(system, id, *at, direction) };
+            log(format_args!("self-check: {}", attempt.describe(id)));
+            if let Some(handle) = attempt.handle {
+                took += 1;
+                state.trail.remember(*at, handle);
+            }
+            continue;
+        }
         // SAFETY: game thread, mid-simulation, no engine lock held -- which is the whole reason
         // this call is here and not in the `Present` detour.
-        if let Some(handle) = unsafe { sfx::spawn(system, markers.effect_id, *at, direction) } {
+        if let Some(handle) = unsafe { sfx::spawn(system, id, *at, direction) } {
+            took += 1;
             state.trail.remember(*at, handle);
         }
     }
+
+    // THE SELF-CHECK STOPS PLACING ONCE THE TRAIL IS AS LONG AS IT IS GOING TO GET, and starts
+    // watching instead. "As long as it is going to get" is a pass that placed nothing while
+    // something is down -- either the budget is full or every candidate is already taken, and
+    // both mean the laying is over.
+    if checking && attempted > 0 {
+        log(format_args!(
+            "self-check: laid {took}/{attempted} stone(s) this pass -- {} down of at most {}",
+            state.trail.placed(),
+            markers.spacing.max_markers
+        ));
+    }
+    if checking && attempted == 0 && state.trail.placed() > 0 {
+        log(format_args!(
+            "self-check: trail complete at {} stone(s); watching them at t={:?}s",
+            state.trail.placed(),
+            crate::selfcheck::SAMPLE_SECONDS
+        ));
+        state.check = Check::Watching(crate::selfcheck::Schedule::default());
+    }
+}
+
+/// Total length of a polyline, in metres. For the self-check's one-line route summary.
+fn path_length(points: &[[f32; 3]]) -> f32 {
+    points
+        .windows(2)
+        .map(|pair| crate::geometry::length(crate::geometry::sub(pair[1], pair[0])))
+        .sum()
 }
 
 /// The map area the world is currently in, or [`u32::MAX`] when there is no world.
