@@ -489,6 +489,10 @@ mod windows_impl {
     /// Eighty is a legible glyph at 1080p without being a thing you have to look past.
     const MIN_ARROW_PX: f32 = 80.0;
 
+    /// Set once the first arrow of the session has been described in the log.
+    static REPORTED_ARROW: core::sync::atomic::AtomicBool =
+        core::sync::atomic::AtomicBool::new(false);
+
     /// Project one route and append its triangles.
     fn emit(out: &mut Vec<Vertex>, route: &Route, camera: &Camera, screen: [f32; 2]) {
         let color = [route.color[0], route.color[1], route.color[2], route.alpha];
@@ -500,6 +504,34 @@ mod windows_impl {
         match &route.shape {
             RouteShape::Arrow(arrow) => {
                 let arrow = &lengthen(arrow, route.distance_meters, camera, screen);
+                // ONE SHOT, THE FIRST ARROW OF THE SESSION. The first screenshot of this feature
+                // showed an orange stripe floating in the air with no head and no connection to
+                // the player, which is at least two different bugs wearing one appearance --
+                // a tail that is not the body, or barbs collapsing onto the shaft. Theorising
+                // about which costs a game launch per theory; four projected points settle it.
+                if !REPORTED_ARROW.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                    let px = |world| {
+                        camera.project(world, screen).map_or_else(
+                            || "off".to_string(),
+                            |p| format!("{:.0},{:.0}", p[0], p[1]),
+                        )
+                    };
+                    log(format_args!(
+                        "arrow: tail {:.1},{:.1},{:.1} -> tip {:.1},{:.1},{:.1} | screen tail={} tip={} barbs={} {} | screen={:.0}x{:.0}",
+                        arrow.tail[0],
+                        arrow.tail[1],
+                        arrow.tail[2],
+                        arrow.tip[0],
+                        arrow.tip[1],
+                        arrow.tip[2],
+                        px(arrow.tail),
+                        px(arrow.tip),
+                        px(arrow.left_barb),
+                        px(arrow.right_barb),
+                        screen[0],
+                        screen[1]
+                    ));
+                }
                 segment(arrow.tail, arrow.tip);
                 segment(arrow.tip, arrow.left_barb);
                 segment(arrow.tip, arrow.right_barb);
@@ -551,16 +583,37 @@ mod windows_impl {
         if shaft_px >= MIN_ARROW_PX || shaft_px < DEGENERATE_PX || current <= f32::EPSILON {
             return *arrow;
         }
-        // Foreshortening is not linear, so one pass undershoots. It converges fast and two passes
-        // are enough; the clamp does the rest.
-        let mut length = current;
-        for _ in 0..2 {
-            let wanted = (length * MIN_ARROW_PX / shaft_px).min(distance_meters);
-            if !wanted.is_finite() || wanted <= length {
-                break;
+        // BISECT, DO NOT SCALE. The obvious `length * wanted_px / shaft_px` is wrong twice over:
+        // foreshortening is not linear in length, and a shaft that projected to about a pixel
+        // makes that ratio enormous. The first version did exactly that, clamped the result to
+        // the target's distance, and so grew every arrow to the full fifty metres -- which put
+        // the arrowhead off the top of the screen and left a bare orange stripe. The screenshot
+        // that found it is the reason this is a search.
+        //
+        // Six halvings over [current, distance] land within a couple of percent, which is far
+        // finer than the eye needs, and every step re-projects rather than extrapolating.
+        let projected_px = |length: f32| {
+            let tip = geometry::add_scaled(arrow.tail, direction, length);
+            camera
+                .project_segment(arrow.tail, tip, screen)
+                .map_or(0.0, |(a, b)| {
+                    geometry::length([b[0] - a[0], b[1] - a[1], 0.0])
+                })
+        };
+        let (mut low, mut high) = (current, distance_meters.max(current));
+        // The far end is not long enough either: nothing more can be done, and stopping short of
+        // the target is still better than drawing past them.
+        if projected_px(high) > MIN_ARROW_PX {
+            for _ in 0..6 {
+                let middle = 0.5 * (low + high);
+                if projected_px(middle) < MIN_ARROW_PX {
+                    low = middle;
+                } else {
+                    high = middle;
+                }
             }
-            length = wanted;
         }
+        let length = high;
         let up = camera.up();
         let target = geometry::add_scaled(arrow.tail, direction, length);
         geometry::arrow(arrow.tail, target, length, up).unwrap_or(*arrow)

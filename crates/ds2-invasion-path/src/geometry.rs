@@ -88,6 +88,23 @@ pub fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     ]
 }
 
+/// The transpose of `matrix`.
+///
+/// Needed because a 4x4 in memory does not say which convention wrote it. The projection's shape
+/// pins ITS convention -- `m23 == 1` is in a different slot under the other one -- but a view
+/// matrix is sixteen floats with no such landmark, and the same bytes are a valid
+/// world-to-camera transform read either way. So both are tried and the world decides.
+#[must_use]
+pub fn transpose(matrix: &Matrix) -> Matrix {
+    let mut out = [0.0f32; 16];
+    for row in 0..4 {
+        for column in 0..4 {
+            out[column * 4 + row] = matrix[row * 4 + column];
+        }
+    }
+    out
+}
+
 /// `a * b`, row-major, row-vector convention.
 #[must_use]
 pub fn multiply(a: &Matrix, b: &Matrix) -> Matrix {
@@ -283,23 +300,85 @@ impl Camera {
 
     /// Is `point` somewhere a viewport of `screen` pixels could plausibly show it?
     ///
-    /// Used only to confirm a candidate camera is the live one, and generous on purpose: a
-    /// player at the very edge of view is still a pass, a matrix that is not a camera puts them
-    /// thousands of pixels away or behind the lens and fails on any threshold at all.
+    /// Generous on purpose: a player at the very edge of view is still a pass. On its own this
+    /// is a WEAK test -- see [`Self::agrees_with_the_world`], which is the one that matters.
     #[must_use]
     pub fn plausibly_on_screen(&self, world: [f32; 3], screen: [f32; 2]) -> bool {
         let Some(point) = self.project(world, screen) else {
             return false;
         };
         /// How far outside the viewport still counts, as a fraction of its size.
-        const SLACK: f32 = 1.0;
+        const SLACK: f32 = 0.5;
         let (slack_x, slack_y) = (screen[0] * SLACK, screen[1] * SLACK);
         point[0] >= -slack_x
             && point[0] <= screen[0] + slack_x
             && point[1] >= -slack_y
             && point[1] <= screen[1] + slack_y
     }
+
+    /// Does this camera agree with the world about which way is up?
+    ///
+    /// # Why the on-screen test alone was not enough
+    ///
+    /// It accepted a matrix that was wrong, and the way it was wrong is instructive. A live run
+    /// logged an arrow whose world delta was `(14.0, 4.1, 13.4)` -- almost horizontal -- and
+    /// which projected to a near-vertical line up the screen. The local player still landed at
+    /// screen centre, because in a third-person game the player is ALWAYS near screen centre;
+    /// a matrix has to be badly wrong before that stops being true, and "is the player roughly
+    /// where the player always is" is therefore almost no evidence at all.
+    ///
+    /// This is evidence. World `+Y` is up in this engine -- the navigation code treats component
+    /// 1 as the height -- so a point directly above another must project ABOVE it, and by a
+    /// sane number of pixels rather than a thousand. A transposed view matrix, a swapped axis
+    /// pair or a column-vector convention all fail it; the correct matrix passes it from any
+    /// camera angle short of looking straight down.
+    ///
+    /// `from` is the local player, whose position is read independently of anything here.
+    /// How many pixels UP the screen a point ten metres above `from` projects.
+    ///
+    /// Negative means the camera thinks up is down; zero means it moved the point sideways or
+    /// not at all, which is what a transposed or axis-swapped matrix does. Split out from
+    /// [`Self::agrees_with_the_world`] so a candidate that FAILS can say by how much -- a
+    /// rejection with no number is the shape of diagnostic that costs a launch.
+    #[must_use]
+    pub fn rise_px(&self, from: [f32; 3], screen: [f32; 2]) -> f32 {
+        self.rise_along(from, 1, screen)
+    }
+
+    /// [`Self::rise_px`] along an arbitrary world axis, for finding out which one is up.
+    ///
+    /// The camera cannot say which component of a position is the height -- only the world can,
+    /// and only by being asked. A live table of all three settles in one run what reasoning from
+    /// the navigation code's field order did not.
+    #[must_use]
+    pub fn rise_along(&self, from: [f32; 3], axis: usize, screen: [f32; 2]) -> f32 {
+        let mut probe = from;
+        if let Some(component) = probe.get_mut(axis) {
+            *component += UP_PROBE_METERS;
+        }
+        match (self.project(from, screen), self.project(probe, screen)) {
+            (Some(here), Some(there)) => here[1] - there[1],
+            _ => 0.0,
+        }
+    }
+
+    #[must_use]
+    pub fn agrees_with_the_world(&self, from: [f32; 3], screen: [f32; 2]) -> bool {
+        /// The probe must move the projected point at least this many pixels. A matrix that
+        /// moves it by nothing is not passing the test, it is abstaining from it.
+        const MIN_RISE_PX: f32 = 4.0;
+        if self.project(from, screen).is_none() {
+            return false;
+        }
+        let rise = self.rise_px(from, screen);
+        // Ten metres up must not move the point further than a screenful and a half either:
+        // that is a scale error even when the direction is right.
+        rise >= MIN_RISE_PX && rise <= screen[1] * 1.5
+    }
 }
+
+/// How far up [`Camera::rise_px`] probes, in metres. Well above a character, well below a map.
+const UP_PROBE_METERS: f32 = 10.0;
 
 /// Walk a polyline and return a point every `spacing` metres along it, start and end included.
 ///

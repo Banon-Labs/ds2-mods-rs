@@ -46,6 +46,8 @@ pub(crate) struct Candidate {
     pub(crate) view: usize,
     /// Offset of the projection matrix within it.
     pub(crate) projection: usize,
+    /// Whether the view matrix has to be transposed before it is multiplied in.
+    pub(crate) transposed: bool,
     /// Where this candidate came from, for the log line. Nothing branches on it.
     pub(crate) origin: Origin,
 }
@@ -142,6 +144,7 @@ pub(crate) fn candidates() -> Vec<Candidate> {
             object: operator,
             view: ds2_rva::CAMERA_OPERATOR_VIEW_OFFSET,
             projection: ds2_rva::CAMERA_OPERATOR_PROJECTION_OFFSET,
+            transposed: false,
             origin: Origin::Operator(index),
         });
     }
@@ -157,12 +160,14 @@ pub(crate) fn candidates() -> Vec<Candidate> {
             object: slot,
             view: first,
             projection: second,
+            transposed: false,
             origin: Origin::Slot(index),
         });
         out.push(Candidate {
             object: slot,
             view: second,
             projection: first,
+            transposed: false,
             origin: Origin::Slot(index),
         });
     }
@@ -200,11 +205,35 @@ pub(crate) fn candidates() -> Vec<Candidate> {
             object: pointer,
             view: ds2_rva::CAMERA_OPERATOR_VIEW_OFFSET,
             projection: ds2_rva::CAMERA_OPERATOR_PROJECTION_OFFSET,
+            transposed: false,
             origin: Origin::Pointer(offset),
         });
     }
     out
 }
+
+/// Lines of candidate table left to print.
+///
+/// A COUNTER AND NOT A FLAG, because the first version was a flag and it set itself on the first
+/// candidate -- so the "table" was one row, which is the single least useful number of rows a
+/// table can have. It cost a launch.
+static REPORT_BUDGET: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(48);
+
+/// Print the candidate table on EVERY search rather than once.
+///
+/// Off. A search runs when the remembered camera stops working, which in a cutscene-heavy stretch
+/// is often, and this line is one per surviving candidate. Flip it while chasing a camera that
+/// changes mid-session; leave it alone otherwise.
+const VERBOSE: bool = false;
+
+/// How far the implied eye may be from the player before a candidate is refused, in metres.
+///
+/// DARK SOULS II's third-person camera sits a handful of metres behind the character, and its
+/// free and cutscene cameras are not wildly further. Forty is loose enough to cover every one of
+/// them and tight enough that a matrix placing the eye in the next map over is refused -- which
+/// is the failure this exists to catch, because such a matrix still projects the player to screen
+/// centre and still passes every other test here.
+const MAX_EYE_METERS: f32 = 40.0;
 
 /// How far into a candidate object the view matrix is looked for.
 ///
@@ -228,8 +257,18 @@ pub(crate) fn projection_at(candidate: Candidate) -> Option<Matrix> {
 }
 
 /// Combine a view matrix read from `object + view_offset` with an already-validated projection.
-pub(crate) fn pair(object: usize, view_offset: usize, projection: Matrix) -> Option<Camera> {
-    let view = matrix(object + view_offset)?;
+pub(crate) fn pair(
+    object: usize,
+    view_offset: usize,
+    projection: Matrix,
+    transposed: bool,
+) -> Option<Camera> {
+    let raw = matrix(object + view_offset)?;
+    let view = if transposed {
+        crate::geometry::transpose(&raw)
+    } else {
+        raw
+    };
     let view_projection = multiply(&view, &projection);
     if !is_finite(&view_projection) {
         return None;
@@ -247,7 +286,12 @@ pub(crate) fn pair(object: usize, view_offset: usize, projection: Matrix) -> Opt
 /// unknown.
 pub(crate) fn resolve(candidate: Candidate) -> Option<Camera> {
     let projection = projection_at(candidate)?;
-    pair(candidate.object, candidate.view, projection)
+    pair(
+        candidate.object,
+        candidate.view,
+        projection,
+        candidate.transposed,
+    )
 }
 
 /// Which candidate the last successful search chose, so the search is not repeated every frame.
@@ -292,8 +336,12 @@ impl core::fmt::Display for Candidate {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
-            "{} obj=0x{:x} view=+0x{:03x} proj=+0x{:03x}",
-            self.origin, self.object, self.view, self.projection
+            "{} obj=0x{:x} view=+0x{:03x}{} proj=+0x{:03x}",
+            self.origin,
+            self.object,
+            self.view,
+            if self.transposed { "T" } else { "" },
+            self.projection
         )
     }
 }
@@ -336,19 +384,75 @@ impl Tracker {
                 if view_offset == candidate.projection {
                     continue;
                 }
-                let Some(camera) = pair(candidate.object, view_offset, projection) else {
-                    continue;
-                };
-                if !camera.plausibly_on_screen(local, screen) {
-                    continue;
+                // BOTH CONVENTIONS. Sixteen floats do not say whether they were written for a
+                // row-vector or a column-vector multiply, and the same bytes are a valid view
+                // matrix read either way -- the projection has `m23 == 1` to pin it down and a
+                // view matrix has no such landmark. Getting it backwards produced an arrow whose
+                // world direction was almost horizontal and whose line went straight up the
+                // screen, which is what `agrees_with_the_world` now catches.
+                for transposed in [false, true] {
+                    let Some(camera) = pair(candidate.object, view_offset, projection, transposed)
+                    else {
+                        continue;
+                    };
+                    // EVERY CANDIDATE THAT GOT THIS FAR, ONCE PER SESSION. Two builds in a row
+                    // picked a camera that passed both tests and still put the player in the
+                    // wrong place -- first one whose tail was right and whose direction was not,
+                    // then one whose tail was in a corner. Each cost a launch to find out.
+                    // Printing what every survivor thinks about the same known point turns the
+                    // next launch into a table rather than another single guess.
+                    let budget = REPORT_BUDGET
+                        .fetch_update(
+                            core::sync::atomic::Ordering::Relaxed,
+                            core::sync::atomic::Ordering::Relaxed,
+                            |left| left.checked_sub(1),
+                        )
+                        .is_ok();
+                    if budget || VERBOSE {
+                        crate::log::log(format_args!(
+                            "camera probe: {} view=+0x{:03x}{} -> player {} rise x={:.0} y={:.0} z={:.0}",
+                            candidate.origin,
+                            view_offset,
+                            if transposed { "T" } else { "" },
+                            camera.project(local, screen).map_or_else(
+                                || "off-screen".to_string(),
+                                |p| format!("{:.0},{:.0}", p[0], p[1])
+                            ),
+                            camera.rise_along(local, 0, screen),
+                            camera.rise_along(local, 1, screen),
+                            camera.rise_along(local, 2, screen)
+                        ));
+                    }
+                    // THE ORACLE A WRONG MATRIX CANNOT FAKE, and the one that should have been
+                    // here first. "The player projects to screen centre" is almost no evidence:
+                    // a matrix whose translation puts the camera hundreds of metres away maps
+                    // the ENTIRE world to a cluster near the principal point, so the player lands
+                    // dead centre and a ten-metre probe moves barely a hundred pixels. A live
+                    // table showed exactly that -- `player 1289,634 rise x=82 y=-5 z=126`.
+                    //
+                    // A real third-person camera is a few metres from the character it follows.
+                    // The implied eye comes out of the view matrix's own rotation and translation
+                    // and is compared against a position read independently of all of this, so
+                    // there is nothing for a coincidence to hang on.
+                    let eye_distance =
+                        crate::geometry::length(crate::geometry::sub(camera.eye(), local));
+                    if !eye_distance.is_finite() || eye_distance > MAX_EYE_METERS {
+                        continue;
+                    }
+                    if !camera.plausibly_on_screen(local, screen)
+                        || !camera.agrees_with_the_world(local, screen)
+                    {
+                        continue;
+                    }
+                    let winner = Candidate {
+                        view: view_offset,
+                        transposed,
+                        ..candidate
+                    };
+                    self.last_probe = probe;
+                    self.remembered = Some(winner);
+                    return Some((camera, Found::Chose(winner)));
                 }
-                let winner = Candidate {
-                    view: view_offset,
-                    ..candidate
-                };
-                self.last_probe = probe;
-                self.remembered = Some(winner);
-                return Some((camera, Found::Chose(winner)));
             }
         }
         self.last_probe = probe;
