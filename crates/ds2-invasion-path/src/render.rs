@@ -736,6 +736,16 @@ unsafe extern "system" fn present(
     // chain would be catastrophic.
     let borrowed = unsafe { IDXGISwapChain::from_raw_borrowed(&swap_chain) };
     if let Some(chain) = borrowed {
+        // THE CAMERA CAPTURE INSTALLS HERE, and it has to be here rather than inside `draw`.
+        //
+        // `draw` returns immediately when there are no vertices, and there are no vertices until
+        // a camera is known, and a camera is not known until the capture has run -- so putting
+        // the install down there made it unreachable by exactly the condition it exists to fix.
+        // A live run found that: the log had no capture line at all.
+        //
+        // SAFETY: a borrowed live swap chain; `install_capture` is idempotent and does nothing
+        // after the first success.
+        unsafe { install_capture(chain) };
         let vertices = crate::frame(chain);
         if !draw(chain, &vertices) {
             DISABLED.store(true, Ordering::Relaxed);
@@ -745,6 +755,31 @@ unsafe extern "system" fn present(
         }
     }
     call_original(swap_chain)
+}
+
+/// Set once the constant-buffer capture has been offered the context.
+static CAPTURE_TRIED: AtomicBool = AtomicBool::new(false);
+
+/// Hand the game's own immediate context to `crate::capture`, once.
+///
+/// # Safety
+///
+/// `chain` must be a live swap chain. Called from the `Present` detour.
+unsafe fn install_capture(chain: &IDXGISwapChain) {
+    if CAPTURE_TRIED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    // SAFETY: the game's own swap chain, from which its device and that device's immediate
+    // context are reached by the documented accessors.
+    unsafe {
+        let Ok(device) = chain.GetDevice::<ID3D11Device>() else {
+            return;
+        };
+        let Ok(context) = device.GetImmediateContext() else {
+            return;
+        };
+        crate::capture::install(&context);
+    }
 }
 
 /// Find `IDXGISwapChain::Present` by making Direct3D build a swap chain and reading its vtable.

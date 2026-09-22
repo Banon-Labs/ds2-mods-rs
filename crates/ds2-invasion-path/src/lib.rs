@@ -90,6 +90,8 @@ pub(crate) mod lines;
 #[cfg(windows)]
 pub(crate) mod camera;
 #[cfg(windows)]
+pub(crate) mod capture;
+#[cfg(windows)]
 pub(crate) mod census;
 #[cfg(windows)]
 pub(crate) mod render;
@@ -158,6 +160,8 @@ mod windows_impl {
         enabled: bool,
         /// The toggle key's state last frame, so a held key is one toggle and not sixty.
         toggle_was_down: bool,
+        /// Whether the captured-camera line has been written. See `crate::capture`.
+        said_captured: bool,
         /// Whether the first frame has been reported. See the line it writes.
         said_first_frame: bool,
         /// Whether the last pass found a camera, so the refusal is logged on the edge rather
@@ -220,6 +224,7 @@ mod windows_impl {
                 tracker: Tracker::default(),
                 enabled,
                 toggle_was_down: false,
+                said_captured: false,
                 said_first_frame: false,
                 had_camera: true,
                 had_world: true,
@@ -377,6 +382,21 @@ mod windows_impl {
         };
         state.had_world = true;
 
+        // Tell the capture what to judge a candidate against, then prefer whatever it caught.
+        // A matrix taken out of the renderer's own upload is the matrix the frame was drawn
+        // with; one found by searching memory is a matrix that resembles it. The search stays as
+        // the fallback because the capture needs an upload to happen and a player to exist, and
+        // neither is true on the first frames.
+        crate::capture::set_subject(local, screen);
+        if let Some(camera) = crate::capture::camera() {
+            if !state.said_captured {
+                state.said_captured = true;
+                log(format_args!("camera: using the captured view-projection"));
+            }
+            state.had_camera = true;
+            return draw_for(state, &camera, local, screen);
+        }
+
         let Some((camera, found)) = state.tracker.acquire(local, screen) else {
             if state.had_camera {
                 let probe = state.tracker.last_probe;
@@ -393,7 +413,19 @@ mod windows_impl {
             log(format_args!("camera: drawing through {candidate}"));
         }
         state.had_camera = true;
+        draw_for(state, &camera, local, screen)
+    }
 
+    /// Everything downstream of having a camera: read the roster, build the arrows, project them.
+    ///
+    /// Split out because there are now two ways to get a camera -- captured from the renderer's
+    /// own upload, or found by searching memory -- and only the getting differs.
+    fn draw_for(
+        state: &mut State,
+        camera: &Camera,
+        local: [f32; 3],
+        screen: [f32; 2],
+    ) -> Vec<Vertex> {
         let Some((players, census)) = census::remotes(state.config.max_targets) else {
             return Vec::new();
         };
@@ -459,7 +491,7 @@ mod windows_impl {
 
         let mut vertices = Vec::with_capacity(snapshot.len() * 3 * VERTICES_PER_SEGMENT);
         for route in &snapshot {
-            emit(&mut vertices, route, &camera, screen);
+            emit(&mut vertices, route, camera, screen);
         }
 
         // THE ONLY LINE THAT SAYS ANYTHING WAS DRAWN. `camera:` proves a camera was found and
