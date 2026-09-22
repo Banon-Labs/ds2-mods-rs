@@ -6421,11 +6421,71 @@ pub const NV_ROUTE_SEGMENT_POINT_COUNT_OFFSET: usize = 0x50;
 /// [`NAVI_GRAPH_KEY_FROM_AREA`]. Named `MapMan` in the Ghidra project's `GameManagerImp` type.
 pub const GAME_MANAGER_MAP_MANAGER_OFFSET: usize = 0x38;
 
-/// `MapManager -> current area`. `+0x170`, read as a `u32` and masked to six bits downstream.
+/// `MapManager -> the map index the PLAYER is standing in`. `+0x170`, `u32`.
 ///
-/// From `0x14037be98`: `mov ecx,[rax+0x170]` is the only thing done with the `MapManager` before
-/// [`NAVI_GRAPH_KEY_FROM_AREA`] is called on it.
-pub const MAP_MANAGER_AREA_OFFSET: usize = 0x170;
+/// **It used to be called `MAP_MANAGER_AREA_OFFSET` and "area" was the wrong word**, which is how
+/// a perfectly good field ended up as the prime suspect for a routing failure. It is not the
+/// area number `10` out of `m10_04_00_00`, and not the packed map id `0x0A040000`. It is a global
+/// map INDEX in `0..=41`, and the six bits [`NAVI_GRAPH_KEY_FROM_AREA`] keeps are exactly enough
+/// for it.
+///
+/// Written every frame by `MapManager`'s own update, and the shape of that write is the whole
+/// reason this constant carries a warning:
+///
+/// ```text
+/// 0x1403be201   test rsi,rsi                  ; the player's map entity
+/// 0x1403be204   je   0x1403be210
+/// 0x1403be209   call 0x1403ba380              ; -> [[entity+0x28]+0x0c], the map index
+/// 0x1403be20e   jmp  0x1403be213
+/// 0x1403be210   or   eax,0xffffffff           ; NO ENTITY -> the sentinel
+/// 0x1403be213   mov  [rdi+0x170],eax
+/// ```
+///
+/// # The sentinel is a trap, and the engine's own guard does not catch it
+///
+/// When there is no resolvable player entity the field holds [`MAP_INDEX_NONE`]. Feed that to
+/// [`NAVI_GRAPH_KEY_FROM_AREA`] and you get `0x3fffffff` -- a perfectly well-formed key for map
+/// index `0x3f`, which no map has (the highest any shipped `.ngp` carries is
+/// [`NAVI_GRAPH_MAX_MAP_INDEX`]). [`NAVI_GRAPH_DATA_FOR_KEY`] then returns null and the snap
+/// answers [`NAVI_GRAPH_ID_NONE`] with a good position and a loaded graph sitting right there.
+///
+/// Both engine call sites guard with `if (key != -1)`, and that guard **can never fire**: the key
+/// builder ORs in `0xffffff` and masks its input to six bits, so its range is
+/// `0x00ffffff..=0x3fffffff` and `-1` is not in it. The sentinel has to be tested BEFORE the key
+/// is built, which is what `crate::navquery` does.
+pub const MAP_MANAGER_PLAYER_MAP_INDEX_OFFSET: usize = 0x170;
+
+/// "There is no player map entity right now." `0xffffffff`.
+///
+/// What [`MAP_MANAGER_PLAYER_MAP_INDEX_OFFSET`] holds during a load, at the title screen, and
+/// whenever the player's map entity does not resolve. See that constant for why this must be
+/// tested before a key is computed rather than after.
+pub const MAP_INDEX_NONE: u32 = 0xffff_ffff;
+
+/// The highest map index any shipped `.ngp` carries. `0x25`.
+///
+/// Measured rather than inferred: all 28 navmeshes were extracted from `GameDataEbl` and their
+/// `+0x1c` header fields read directly. Every one is `(index << 24) | 0xffffff` with a distinct
+/// index, running `0x00` (`m10_02`) to `0x25` (`m50_38`) with gaps where a map has no mesh --
+/// so the six-bit squeeze is real but never tight, and an index above this is a field that does
+/// not mean what this code thinks it means.
+///
+/// | index | map | | index | map |
+/// |---|---|---|---|---|
+/// | `0x00` | `m10_02` | | `0x10` | `m20_10` |
+/// | `0x01` | `m10_04` (Majula) | | `0x11` | `m20_11` |
+/// | `0x02` | `m10_10` | | `0x13` | `m20_21` |
+/// | `0x03` | `m10_14` | | `0x14` | `m20_24` |
+/// | `0x04` | `m10_16` | | `0x19` | `m40_03` |
+/// | `0x05` | `m10_17` | | `0x1c` | `m10_33` |
+/// | `0x06` | `m10_18` | | `0x1d` | `m10_15` |
+/// | `0x07` | `m10_19` | | `0x1e` | `m10_27` |
+/// | `0x09` | `m10_23` | | `0x1f` | `m10_29` |
+/// | `0x0a` | `m10_25` | | `0x20` | `m10_30` |
+/// | `0x0c` | `m10_31` | | `0x21` | `m20_26` |
+/// | `0x0d` | `m10_32` | | `0x22` | `m50_35` |
+/// | `0x0e` | `m10_34` | | `0x23`..`0x25` | `m50_36`..`m50_38` |
+pub const NAVI_GRAPH_MAX_MAP_INDEX: u32 = 0x25;
 
 /// `u32 area -> u32 key`. RVA `0x00ba_b1f0`, five instructions, no memory access:
 /// `(area & 0x3f) << 24 | 0xffffff`.
@@ -6435,25 +6495,29 @@ pub const MAP_MANAGER_AREA_OFFSET: usize = 0x170;
 /// value it can produce is `0x3fffffff`), and [`NAVI_GRAPH_DATA_FOR_KEY`] re-applies the same
 /// mask itself, so the key form is a convention rather than a requirement.
 ///
-/// # SIX BITS, AND NOBODY HAS CONFIRMED WHICH SIX
+/// # SIX BITS, AND THEY ARE A MAP INDEX -- MEASURED, NOT INFERRED
 ///
-/// **A live run failed here.** A player and an NPC 16.8 m apart in Majula, on ground both walk,
-/// and the planner returned NO ROUTE on every attempt -- which is exactly what a wrong key looks
-/// like, because a wrong key makes [`NAVI_GRAPH_DATA_FOR_KEY`] return the wrong graph or none,
-/// and then both endpoint snaps answer [`NAVI_GRAPH_ID_NONE`].
+/// The input is the global map index at [`MAP_MANAGER_PLAYER_MAP_INDEX_OFFSET`], not an area
+/// number and not a map id. Proven by reading the shipped meshes rather than by reasoning: all 28
+/// `.ngp` files extracted from `GameDataEbl` carry `(index << 24) | 0xffffff` at `+0x1c`, which is
+/// this function's output, with a distinct index each. `m10_04_00_00` -- Majula -- carries
+/// `0x01ffffff`, so its index is `1`. See [`NAVI_GRAPH_MAX_MAP_INDEX`] for the table.
 ///
-/// Only `area & 0x3f` survives, and the engine's own two call sites do not agree on where `area`
-/// comes from: `0x14037be30` reads `MapManager + 0x170`, while `0x14042c9a0` uses
-/// `0x1403ba380(character)` or falls back to the byte at `CharacterCtrl + 0x110`. DARK SOULS II
-/// names its maps `m10_02_00_00` and ships 28 `.ngp` meshes, so six bits cannot hold a map
-/// number -- which makes the input a slot index or an enum, and makes "which slot is the player
-/// in" a question this constant cannot answer on its own.
+/// Both engine call sites reach the same number two ways: `0x14037be30` reads it off `MapManager`,
+/// `0x14042c9a0` computes it with `0x1403ba380(entity)` (`[[entity+0x28]+0x0c]`) or falls back to
+/// the low byte of the packed handle at `CharacterCtrl + 0x110`. They agree because the
+/// `MapManager` field is literally the result of that same call, refreshed every frame.
 ///
-/// **So `ds2-invasion-path` does not rely on it.** `crate::navquery::snap` sweeps every graph the
-/// world holds and lets the snapped DISTANCE choose, then reads the winner's own
-/// [`NV_NAVI_GRAPH_HEADER_KEY_OFFSET`] and logs it -- which is how the correct key stops being a
-/// guess. The keyed lookup is still performed alongside, purely so the log can say whether it
-/// agreed.
+/// # The one way this goes wrong is the sentinel
+///
+/// `0x140bab1f0([`MAP_INDEX_NONE`])` is `0x3fffffff`: a well-formed key for a map that does not
+/// exist. Test the sentinel before calling this. The full account is on
+/// [`MAP_MANAGER_PLAYER_MAP_INDEX_OFFSET`].
+///
+/// `crate::navquery` computes the key AND sweeps every resident graph, keeping the sweep's
+/// answer and logging whether the key agreed -- not because the key is untrustworthy now that it
+/// is understood, but because a disagreement is the cheapest possible alarm for the day one of
+/// these premises stops holding.
 pub const NAVI_GRAPH_KEY_FROM_AREA: u32 = 0x00ba_b1f0;
 
 /// `GameManagerImp* -> NvNaviGraphWorld*`. RVA `0x0039_a9f0`.

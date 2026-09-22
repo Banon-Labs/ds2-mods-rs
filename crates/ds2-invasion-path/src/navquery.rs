@@ -8,14 +8,23 @@
 //! contains the whole of it in twenty-eight instructions and does nothing else:
 //!
 //! ```text
-//! key   = 0x140bab1f0(MapManager->area)      ; (area & 0x3f) << 24 | 0xffffff
-//! world = 0x14039a9f0(GameManagerImp)        ; [[gm + 0xBC0] + 0x10]
-//! data  = 0x140badb90(world, key)            ; the loaded area's graph
+//! key   = 0x140bab1f0(MapManager->player_map_index)   ; (index & 0x3f) << 24 | 0xffffff
+//! world = 0x14039a9f0(GameManagerImp)                 ; [[gm + 0xBC0] + 0x10]
+//! data  = 0x140badb90(world, key)                     ; that map's graph
 //! id    = 0x140babf90(data, &pos, 20.0, 0x28, NULL)
 //! ```
 //!
 //! Every offset and every address is in `ds2-rva` with the disassembly it came from. bd
 //! `ds2-mods-rs-4yd` was filed on the opposite premise and has been corrected.
+//!
+//! # `MapManager -> area` was the wrong name and it cost a run
+//!
+//! That field is the player's global MAP INDEX -- `1` for Majula, `0..=0x25` across the 28
+//! shipped meshes -- not an area number and not a map id. It is also `0xffffffff` whenever the
+//! player's map entity does not resolve, and the key built from THAT (`0x3fffffff`) is a
+//! well-formed key for a map that does not exist. [`snap_reporting`] tests the sentinel before
+//! building a key, and sweeps every resident graph regardless so a wrong key cannot silently
+//! become a missing route again.
 //!
 //! # Nothing here fabricates an engine context
 //!
@@ -134,7 +143,14 @@ pub(crate) struct SnapReport {
     pub(crate) id: Option<u32>,
     /// How many graphs the world says it is holding.
     pub(crate) graphs: i32,
-    /// The key computed from [`ds2_rva::MAP_MANAGER_AREA_OFFSET`], and whether it found anything.
+    /// The raw map index at [`ds2_rva::MAP_MANAGER_PLAYER_MAP_INDEX_OFFSET`].
+    ///
+    /// `None` when the `MapManager` could not be read; `Some(`[`ds2_rva::MAP_INDEX_NONE`]`)` when
+    /// the engine is telling us there is no player map entity, which is a different thing and has
+    /// to stay distinguishable in the log.
+    pub(crate) map_index: Option<u32>,
+    /// The key built from [`SnapReport::map_index`], or `0` when the index was the sentinel and
+    /// no key was built.
     pub(crate) key: u32,
     /// Did the engine's own keyed lookup return a graph for that key?
     pub(crate) keyed_hit: bool,
@@ -199,19 +215,34 @@ pub(crate) unsafe fn snap_reporting(position: [f32; 3]) -> SnapReport {
         return report;
     }
 
-    // The keyed lookup, kept for the log rather than for the answer.
+    // THE KEYED LOOKUP, and the sentinel test that has to come before it.
+    //
+    // `MapManager + 0x170` is the player's global map index -- `1` for Majula -- and the six bits
+    // the key builder keeps are exactly enough for it. But the field is `0xffffffff` whenever the
+    // player's map entity does not resolve, and feeding THAT to `0x140bab1f0` yields `0x3fffffff`:
+    // a well-formed key for map index `0x3f`, which no map has. The lookup then returns null with
+    // a good position and a loaded graph sitting right there, and the engine's own `if (key != -1)`
+    // guard cannot catch it because the builder's range is `0x00ffffff..=0x3fffffff` and never
+    // includes `-1`. So the sentinel is tested here, before a key exists to be wrong.
     if let Some(map_manager) =
         // SAFETY: a live `GameManagerImp`; the reader refuses an unmapped page.
         unsafe { safe_read_usize(manager + ds2_rva::GAME_MANAGER_MAP_MANAGER_OFFSET) }
                 .filter(|value| *value != 0)
-        && let Some(area) =
+        && let Some(index) =
             // SAFETY: as above.
-            unsafe { safe_read_u32(map_manager + ds2_rva::MAP_MANAGER_AREA_OFFSET) }
+            unsafe {
+                safe_read_u32(map_manager + ds2_rva::MAP_MANAGER_PLAYER_MAP_INDEX_OFFSET)
+            }
     {
-        // SAFETY: five instructions, no memory access, cannot fail.
-        report.key = unsafe { key_from_area(area) };
-        // SAFETY: `world` is the engine's own object; the scan is bounded by its own count.
-        report.keyed_hit = unsafe { data_for_key(world, report.key) } != 0;
+        report.map_index = Some(index);
+        if index != ds2_rva::MAP_INDEX_NONE {
+            // SAFETY: five instructions, no memory access, cannot fail. Called rather than
+            // reimplemented as `(index & 0x3f) << 24 | 0xffffff` so a change to the engine's
+            // keying is a changed behaviour here rather than a silent divergence.
+            report.key = unsafe { key_from_area(index) };
+            // SAFETY: `world` is the engine's own object; the scan is bounded by its own count.
+            report.keyed_hit = unsafe { data_for_key(world, report.key) } != 0;
+        }
     }
 
     // SAFETY: a live `NvNaviGraphWorld`; the reader refuses an unmapped page.

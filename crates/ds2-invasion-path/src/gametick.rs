@@ -384,7 +384,7 @@ fn work(nav_system: usize, delta: f32) {
     // The planner is a different case and is torn down properly: the `NvNavigationSystem` is the
     // same object across areas, so the planner is still linked and still ours -- but its world
     // pointer was bound at creation from an area that is gone, so it is retired and remade.
-    let area = current_area();
+    let area = current_map_index();
     if state.nav_system != nav_system || state.area != area {
         if state.planner != 0 && state.nav_system == nav_system {
             // SAFETY: game thread, and `retire` only sets the byte the next tick acts on.
@@ -681,24 +681,7 @@ fn poll_or_request(state: &mut Tick) {
             ds2_rva::NV_ROUTE_PLANNER_CAPABILITY_DEFAULT,
             ds2_rva::NV_ROUTE_MAX_COST_LONG_RANGE,
             from.graphs,
-            match (from.chosen_key, from.keyed_hit) {
-                // The whole point of the sweep, said out loud: what the key SHOULD have been.
-                (Some(found), false) => format!(
-                    "the MapManager key 0x{:08x} matched NO graph, and the one the sweep chose \
-                     carries 0x{found:08x} -- THAT is the key this map wants",
-                    from.key
-                ),
-                (Some(found), true) if found != from.key => format!(
-                    "the MapManager key 0x{:08x} matched a graph, but the sweep chose a \
-                     DIFFERENT one carrying 0x{found:08x}",
-                    from.key
-                ),
-                (Some(_), true) => format!("the MapManager key 0x{:08x} agreed", from.key),
-                (None, _) => format!(
-                    "no graph accepted the player at all; the MapManager key was 0x{:08x}",
-                    from.key
-                ),
-            }
+            describe_key(&from)
         ));
     }
 
@@ -858,6 +841,51 @@ fn lay_markers(state: &mut Tick) {
     }
 }
 
+/// What the map key did, in terms that name the cause rather than the symptom.
+///
+/// Three outcomes matter and they used to be one sentence. The SENTINEL case is the one worth
+/// spelling out: `MapManager + 0x170` reads `0xffffffff` whenever the player's map entity does
+/// not resolve, and the key built from it (`0x3fffffff`) is well-formed and matches nothing, so
+/// a reader sees a plausible hex number and a failed lookup and has no reason to suspect the
+/// field. Saying "the engine says there is no player map entity" is the difference between a
+/// five-minute answer and an afternoon.
+fn describe_key(report: &navquery::SnapReport) -> String {
+    match report.map_index {
+        None => "the MapManager could not be read at all".to_string(),
+        Some(ds2_rva::MAP_INDEX_NONE) => format!(
+            "MapManager+0x170 is the NO-PLAYER-ENTITY sentinel (0x{:08x}), so no key was built. \
+             The engine's own `!= -1` guard cannot catch this -- the key builder's range is \
+             0x00ffffff..=0x3fffffff. The sweep {}",
+            ds2_rva::MAP_INDEX_NONE,
+            match report.chosen_key {
+                Some(found) => format!("found a graph anyway, carrying 0x{found:08x}"),
+                None => "found nothing either".to_string(),
+            }
+        ),
+        Some(index) => {
+            let key = report.key;
+            match (report.chosen_key, report.keyed_hit) {
+                // The point of the sweep, said out loud: what the key SHOULD have been.
+                (Some(found), false) => format!(
+                    "map index {index} gave key 0x{key:08x} which matched NO graph, and the one \
+                     the sweep chose carries 0x{found:08x} -- THAT is the key this map wants"
+                ),
+                (Some(found), true) if found != key => format!(
+                    "map index {index} gave key 0x{key:08x} which matched a graph, but the sweep \
+                     chose a DIFFERENT one carrying 0x{found:08x}"
+                ),
+                (Some(_), true) => {
+                    format!("map index {index} gave key 0x{key:08x} and the sweep agreed")
+                }
+                (None, _) => format!(
+                    "map index {index} gave key 0x{key:08x}, and no graph accepted the player at \
+                     all -- so this is the snap radius or the filter, not the key"
+                ),
+            }
+        }
+    }
+}
+
 /// One end of a snap, as a reader needs to see it.
 ///
 /// Hex, because a navigation-graph id is a packed bitfield -- index in `0..14`, kind in `15..16`,
@@ -883,18 +911,18 @@ fn path_length(points: &[[f32; 3]]) -> f32 {
         .sum()
 }
 
-/// The map area the world is currently in, or [`u32::MAX`] when there is no world.
+/// The map index the player is currently in, or [`u32::MAX`] when there is no world.
 ///
 /// Keyed on rather than on the `NvNavigationSystem` pointer because that pointer is a singleton
 /// that outlives a map change while the FX node pool underneath every marker does not.
-fn current_area() -> u32 {
+fn current_map_index() -> u32 {
     let Some(manager) = navquery::game_manager() else {
         return u32::MAX;
     };
     // SAFETY: a live `GameManagerImp`; both reads refuse an unmapped page.
     unsafe {
         safe_read(manager + ds2_rva::GAME_MANAGER_MAP_MANAGER_OFFSET)
-            .and_then(|map| safe_read_area(map))
+            .and_then(|map| safe_read_map_index(map))
             .unwrap_or(u32::MAX)
     }
 }
@@ -909,11 +937,20 @@ unsafe fn safe_read(at: usize) -> Option<usize> {
     (value != 0).then_some(value)
 }
 
-/// The area word on a `MapManager`.
+/// The player's map index on a `MapManager`.
+///
+/// [`ds2_rva::MAP_INDEX_NONE`] is deliberately NOT filtered out here. This value is only used to
+/// notice that the map changed, and a load screen reading the sentinel and then reading a real
+/// index really is two changes -- which costs one extra trail teardown, on a path that forgets
+/// handles rather than touching them, during a load when the effects are gone anyway.
 ///
 /// # Safety
 ///
 /// `map_manager` must be a live `MapManager`; the reader itself faults safely.
-unsafe fn safe_read_area(map_manager: usize) -> Option<u32> {
-    unsafe { ds2_game_base::mem::safe_read_u32(map_manager + ds2_rva::MAP_MANAGER_AREA_OFFSET) }
+unsafe fn safe_read_map_index(map_manager: usize) -> Option<u32> {
+    unsafe {
+        ds2_game_base::mem::safe_read_u32(
+            map_manager + ds2_rva::MAP_MANAGER_PLAYER_MAP_INDEX_OFFSET,
+        )
+    }
 }
