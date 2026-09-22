@@ -231,6 +231,17 @@ KEY_INVASION_PATH_START_ENABLED = "start_enabled"
 #: disappoints: `roster:` and `camera:` under this prefix are the two lines that say whether the
 #: overlay found anything, and `overlay:` is the one that says whether it could draw at all.
 INVASION_PATH_LOG_PREFIX = "ds2-invasion-path:"
+
+#: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/input_harness.rs`.
+INPUT_HARNESS_SECTION = "input_harness"
+KEY_INPUT_HARNESS_ENABLED = "enabled"
+#: Mirrors `LOG_PREFIX` in `crates/ds2-input-harness/src/log.rs`. Grep for it to find out
+#: whether the three device polls were hooked, which one owns the frame tick, and what every
+#: command the run sent actually did.
+INPUT_HARNESS_LOG_PREFIX = "ds2-input-harness:"
+#: Mirrors `COMMAND_FILE_NAME` in `crates/ds2-input-harness/src/device.rs`. The file an agent
+#: writes to drive the camera while the game is already running; it lives beside the exe.
+INPUT_HARNESS_COMMAND_FILE = "ds2-input-harness-cmd.txt"
 KEY_BUILD_IMPORT_ENABLED = "enabled"
 
 #: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/item_warn.rs`.
@@ -1095,6 +1106,7 @@ def config_text(
     invasion_path: bool = False,
     invasion_path_key: str = "semicolon",
     invasion_path_start_enabled: bool = False,
+    input_harness: bool = False,
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
@@ -1615,6 +1627,33 @@ def config_text(
 {KEY_INVASION_PATH_TOGGLE} = "{invasion_path_key}"
 {KEY_INVASION_PATH_START_ENABLED} = {str(invasion_path_start_enabled).lower()}
 
+[{INPUT_HARNESS_SECTION}]
+# LETS AN AGENT MOVE THE CAMERA, AND TAKES YOUR CONTROLLER AWAY WHILE IT DOES.
+#
+# It detours the three `DLUID` device polls -- pad, mouse, keyboard -- and, after each one has
+# run, writes the fields the engine reads. That is the stage the game actually polls: the mouse
+# is `IDirectInputDevice8::GetDeviceState(0x14, ...)`, the keyboard `GetDeviceState(0x100, ...)`,
+# and the pad is XInput OR a DirectInput joystick OR a third backend, all three of which
+# normalise into the same six floats on the device object. Writing there means the deadzone, the
+# sensitivity setting and the key mapping all still apply, so an injected stick behaves like a
+# real one.
+#
+# OFF by default because it is the only thing in this file that can stop your own input reaching
+# the game. Every command it takes is frame-bounded and the input block has a hard cap of about
+# ten minutes, so a harness that wedges lets go on its own.
+#
+# DRIVE IT while the game runs by writing two lines to `{INPUT_HARNESS_COMMAND_FILE}` beside the
+# exe: a sequence number, then a command. It runs when the NUMBER changes. Commands:
+#   block <frames> | unblock | release | status
+#   axis <index> <value> <frames> | mouse <dx> <dy> <frames> | buttons <hex> <frames>
+#   turn <degrees> [frames]   -- closed loop on the camera's own yaw
+#   probe [frames]            -- hold each pad axis and report what the camera did
+#
+# `turn` and `probe` MEASURE against the camera `[{INVASION_PATH_SECTION}]` draws through, so they
+# need that feature on; without it they refuse rather than guess. Grep the log for
+# `{INPUT_HARNESS_LOG_PREFIX}`.
+{KEY_INPUT_HARNESS_ENABLED} = {str(input_harness).lower()}
+
 [{CRASH_SECTION}]
 {crash_banner}# STARTUP-ONLY, both of them. The handler is installed in DllMain BEFORE `neuter_arxan`, because
 # that call patches code from static analysis and is the likeliest crash in the whole startup path
@@ -1680,6 +1719,7 @@ def write_config(
     invasion_path: bool = False,
     invasion_path_key: str = "semicolon",
     invasion_path_start_enabled: bool = False,
+    input_harness: bool = False,
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
@@ -1713,6 +1753,7 @@ def write_config(
         invasion_path,
         invasion_path_key,
         invasion_path_start_enabled,
+        input_harness,
     )
     path.write_text(text, encoding="utf-8")
     return path, text
@@ -1804,6 +1845,7 @@ def dry_run(
     invasion_path: bool = False,
     invasion_path_key: str = "semicolon",
     invasion_path_start_enabled: bool = False,
+    input_harness: bool = False,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
@@ -1855,6 +1897,7 @@ def dry_run(
             invasion_path,
             invasion_path_key,
             invasion_path_start_enabled,
+            input_harness,
         ):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
         else:
@@ -1902,6 +1945,7 @@ def dry_run(
                 invasion_path=invasion_path,
                 invasion_path_key=invasion_path_key,
                 invasion_path_start_enabled=invasion_path_start_enabled,
+                input_harness=input_harness,
             ),
             indent="[dry-run]   | ",
         )
@@ -2231,6 +2275,7 @@ def launch(
     invasion_path: bool = False,
     invasion_path_key: str = "semicolon",
     invasion_path_start_enabled: bool = False,
+    input_harness: bool = False,
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
@@ -2277,6 +2322,7 @@ def launch(
         invasion_path,
         invasion_path_key,
         invasion_path_start_enabled,
+        input_harness,
     )
     print(f"[config] {config_path}")
 
@@ -3672,6 +3718,23 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--input-harness",
+        dest="input_harness",
+        action="store_true",
+        help=(
+            "TURN ON the agent-driven input harness: it detours DARK SOULS II's three DLUID "
+            "device polls (pad, mouse, keyboard) and, after each one runs, writes the fields "
+            "the engine reads. OFF by default, because it is the only thing here that can stop "
+            "YOUR input reaching the game. Drive it while the game runs by writing a sequence "
+            f"number and a command to `{INPUT_HARNESS_COMMAND_FILE}` beside the exe -- "
+            "`turn <degrees>` closes a loop on the camera's own yaw, `block <frames>` blanks "
+            "every human input, `probe` reports which pad axis actually moves the camera. "
+            "`turn` and `probe` measure against the camera --invasion-path draws through and "
+            "refuse without it. Every command is frame-bounded; the block caps at ten minutes. "
+            f"Grep the log for `{INPUT_HARNESS_LOG_PREFIX}`."
+        ),
+    )
+    parser.add_argument(
         "--probe-site",
         choices=PROBE_SITES,
         default="m1",
@@ -3771,6 +3834,7 @@ def main() -> int:
             args.invasion_path,
             args.invasion_path_key,
             args.invasion_path_start_enabled,
+            args.input_harness,
         )
     return launch(
         args.probe,
@@ -3803,6 +3867,7 @@ def main() -> int:
         args.invasion_path,
         args.invasion_path_key,
         args.invasion_path_start_enabled,
+        args.input_harness,
     )
 
 

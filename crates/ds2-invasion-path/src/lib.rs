@@ -78,6 +78,7 @@
 
 #![cfg_attr(not(windows), allow(dead_code))]
 
+pub mod camera_yaw;
 pub mod config;
 pub mod geometry;
 pub mod log;
@@ -430,6 +431,15 @@ mod windows_impl {
         local: [f32; 3],
         screen: [f32; 2],
     ) -> Vec<Vertex> {
+        // PUBLISH THE HEADING BEFORE ANY EARLY RETURN. This is the one point both ways of
+        // getting a camera meet, and `ds2-input-harness` closes its camera-turn loop on what is
+        // published here -- so it measures the same camera this overlay is drawing through
+        // rather than a second resolution that could disagree. Two relaxed stores; nothing in
+        // this crate reads it back. Above the framing guard on purpose: a camera pointed
+        // somewhere the player is not is still the camera, and a turn that is halfway through
+        // needs its readings to keep arriving while it swings past.
+        crate::camera_yaw::publish(camera.yaw_degrees());
+
         // THE GUARD BOTH WAYS OF GETTING A CAMERA NEEDED, and the reason two screenshots in a row
         // showed an orange line hanging in the sky with nothing under it.
         //

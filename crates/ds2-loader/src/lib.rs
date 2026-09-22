@@ -87,6 +87,7 @@ pub mod build_import;
 pub mod continue_flow;
 pub mod crash_logging;
 pub mod dialog_skip;
+pub mod input_harness;
 pub mod intro_skip;
 pub mod invasion_path;
 pub mod inventory_sort;
@@ -323,6 +324,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_menu_row();
                 install_item_warn();
                 install_invasion_path();
+                install_input_harness();
                 arm_fault(crash_config);
             });
         },
@@ -361,6 +363,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_menu_row();
                 install_item_warn();
                 install_invasion_path();
+                install_input_harness();
                 arm_fault(crash_config);
             });
         },
@@ -799,6 +802,55 @@ fn install_invasion_path() {
         ));
     }
 }
+
+/// Install the agent-driven input harness, if `<Game>/ds2-mods.toml` asked for it.
+///
+/// **After [`install_invasion_path`]**, and that ordering carries one fact rather than being
+/// tidiness: the harness's camera-turn loop measures against the yaw the overlay publishes from
+/// the camera it draws through, so the thing that publishes had better have had its chance to
+/// install first. Nothing breaks if it did not -- the yaw source simply answers `None` and the
+/// harness refuses to claim degrees -- but the log below says so out loud rather than leaving a
+/// later `turn REFUSED` to explain itself.
+fn install_input_harness() {
+    let config = input_harness::InputHarnessConfig::load();
+    log_line(format_args!("{}", config.describe()));
+    if !config.enabled {
+        return;
+    }
+    ds2_input_harness::set_logger(log_line);
+
+    // THE SEAM, and the reason the harness holds no camera address of its own: this is the
+    // heading of the camera `ds2-invasion-path` last DREW through, validated by that crate's own
+    // oracles. A second camera resolution could disagree with it, and then "did the overlay
+    // track the camera?" would be answered against a camera the overlay is not using.
+    ds2_input_harness::set_yaw_source(ds2_invasion_path::camera_yaw::current);
+    if !invasion_path::InvasionPathConfig::load().enabled {
+        log_line(format_args!(
+            "{} no camera yaw source this session: [invasion_path] is off, so nothing publishes \
+             a camera. `axis`/`mouse`/`block` still work; `turn` and `probe` will refuse rather \
+             than guess.",
+            ds2_input_harness::LOG_PREFIX
+        ));
+    }
+
+    // SAFETY: called once, from the post-Arxan position like every other install here. The
+    // three targets are `.pdata` function starts recorded in `ds2-rva`, each checked with
+    // `scripts/ds2-arxan-chain.py` to be a real prologue rather than an Arxan redirect, and the
+    // install re-reads the recorded prologue bytes and refuses any site that has moved. The
+    // detours declare the signature all three overrides implement: `bool poll(this)` with `this`
+    // in RCX.
+    let installed = unsafe { ds2_input_harness::install() };
+    if installed != INPUT_HARNESS_SITES {
+        log_line(format_args!(
+            "{} PARTIAL {installed}/{INPUT_HARNESS_SITES} device polls hooked -- a device that \
+             is not hooked is one whose input is neither blocked nor authorable",
+            ds2_input_harness::LOG_PREFIX
+        ));
+    }
+}
+
+/// How many device polls [`install_input_harness`] expects to hook: pad, mouse, keyboard.
+const INPUT_HARNESS_SITES: usize = 3;
 
 /// Say what `[seamless]` resolved to, and what the save container is called because of it.
 ///

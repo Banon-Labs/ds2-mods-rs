@@ -53,6 +53,8 @@ ds2-menu-row = { path = "crates/ds2-menu-row" }
 ds2-inventory-sort = { path = "crates/ds2-inventory-sort" }
 ds2-item-warn = { path = "crates/ds2-item-warn" }
 ds2-invasion-path = { path = "crates/ds2-invasion-path" }
+# Agent-driven input: writes the device state the engine reads, and blanks the human's.
+ds2-input-harness = { path = "crates/ds2-input-harness" }
 ds2-sl2-core = { path = "crates/ds2-sl2-core" }
 ds2-save-file = { path = "crates/ds2-save-file" }
 ds2-save-file-core = { path = "crates/ds2-save-file-core" }

@@ -74,6 +74,10 @@ ds2-item-warn.workspace = true
 # renderer. See that crate's manifest. It is off by default, but it is LINKED either way, so the
 # dependency is paid whether or not a player turns it on.
 ds2-invasion-path.workspace = true
+# The input harness. It brings `ds2-rva` and `ds2-hook` (already here for the Arxan probe) and
+# nothing else -- it is three MinHook detours and a state machine, with no `windows` dependency
+# of its own. Like the overlay it is off by default and LINKED either way.
+ds2-input-harness.workspace = true
 ds2-hotkey-config.workspace = true
 ds2-seamless.workspace = true
 ds2-rva.workspace = true

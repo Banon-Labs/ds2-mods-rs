@@ -1,0 +1,34 @@
+# Programmatic input for DARK SOULS II: author the pad/mouse state the engine reads, and keep
+# the human's hands out of a measurement.
+#
+# THE SPLIT BETWEEN THIS MANIFEST'S TWO DEPENDENCY TABLES IS THE DESIGN. Everything that decides
+# *what* to press -- the authored-state struct, the closed-loop turn controller, the command
+# parser and its sequence gate -- is arithmetic over plain numbers and is host-compilable, so
+# `cargo test` reaches it with no game and no Windows. Everything that decides *where* to write
+# it is a MinHook install and three raw pointer stores, and that half is `cfg(windows)`.
+[package]
+name = "ds2-input-harness"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "ds2_input_harness"
+
+# `ds2-rva` is the address table and has no dependencies of its own, so it compiles for the host
+# as happily as for the target -- which is what lets the host-side tests below assert against the
+# REAL offsets instead of copies of them. It is the only game-knowledge dependency that is not
+# target-gated, and that is correct: a constant is not a syscall.
+[dependencies]
+ds2-rva.workspace = true
+
+# The two that genuinely cannot exist off Windows: `ds2-hook` compiles MinHook's C, and
+# `ds2-game-base` is Win32 module/memory plumbing.
+[target.'cfg(windows)'.dependencies]
+ds2-game-base.workspace = true
+ds2-hook.workspace = true
+
+[lints]
+workspace = true

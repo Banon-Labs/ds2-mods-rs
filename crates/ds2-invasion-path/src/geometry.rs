@@ -371,6 +371,32 @@ impl Camera {
         normalize([self.view[1], self.view[5], self.view[9]]).unwrap_or([0.0, 1.0, 0.0])
     }
 
+    /// Where the camera is looking, in world space.
+    ///
+    /// Column 2 of the rotation, by exactly the argument [`Camera::up`] spells out: for a
+    /// row-vector world-to-camera matrix the COLUMNS are the camera's axes in world space.
+    #[must_use]
+    pub fn forward(&self) -> [f32; 3] {
+        normalize([self.view[2], self.view[6], self.view[10]]).unwrap_or([0.0, 0.0, 1.0])
+    }
+
+    /// The camera's heading, in degrees, in `-180.0..=180.0`.
+    ///
+    /// **Only differences between two readings of this are meaningful.** Where zero points
+    /// depends on the engine's world axes, which this repo has not pinned down, and nothing here
+    /// needs it to: the harness that consumes this drives a stick until the DIFFERENCE is what
+    /// was asked for. Pitch is deliberately not folded in -- a heading that changed when the
+    /// camera tilted would make a yaw controller chase its own tail.
+    ///
+    /// Degenerate straight up or straight down (where the forward vector has no horizontal
+    /// component at all) is the one case with no answer, and `atan2(0, 0)` returning `0` there
+    /// is as good as any -- a camera pointed at the sky has no heading to report.
+    #[must_use]
+    pub fn yaw_degrees(&self) -> f32 {
+        let forward = self.forward();
+        forward[0].atan2(forward[2]).to_degrees()
+    }
+
     /// Where the camera is, in world space.
     ///
     /// The view matrix's last row is the translation in CAMERA space, not the eye: the transform
@@ -792,6 +818,78 @@ mod tests {
     }
 
     const SCREEN: [f32; 2] = [1920.0, 1080.0];
+
+    /// A camera at the origin yawed `degrees` about `+y`.
+    ///
+    /// Written as the ROTATION of the world into camera space -- the transpose of the camera's
+    /// own rotation -- because that is what a world-to-camera matrix holds, and building it the
+    /// other way round would make these tests agree with a wrong `forward`.
+    fn yawed(degrees: f32) -> Camera {
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        let mut view = identity();
+        // Columns are the camera's axes in world space: right = (cos, 0, -sin),
+        // forward = (sin, 0, cos).
+        view[0] = cos;
+        view[2] = sin;
+        view[8] = -sin;
+        view[10] = cos;
+        Camera {
+            view,
+            view_projection: multiply(&view, &projection()),
+        }
+    }
+
+    #[test]
+    fn an_unrotated_camera_looks_down_positive_z() {
+        let forward = camera().forward();
+        assert!((forward[2] - 1.0).abs() < 1e-5, "forward was {forward:?}");
+        assert!(camera().yaw_degrees().abs() < 1e-3);
+    }
+
+    #[test]
+    fn yaw_tracks_the_rotation_it_was_built_from() {
+        for degrees in [-170.0f32, -90.0, -1.0, 0.0, 30.0, 90.0, 179.0] {
+            let reported = yawed(degrees).yaw_degrees();
+            assert!(
+                (reported - degrees).abs() < 1e-2,
+                "built {degrees} degrees, read back {reported}"
+            );
+        }
+    }
+
+    #[test]
+    fn yaw_ignores_pitch() {
+        // The property the turn controller depends on: tilting the camera up or down must not
+        // move the heading, or a yaw loop would chase its own tail every time the camera
+        // bobbed.
+        let flat = yawed(40.0).yaw_degrees();
+        let mut pitched = yawed(40.0);
+        // Tilt: mix some of the camera's own up axis into its forward column, then renormalise
+        // happens inside `forward()`.
+        pitched.view[6] = 0.5;
+        let tilted = pitched.yaw_degrees();
+        assert!(
+            (tilted - flat).abs() < 1e-2,
+            "pitching moved the heading from {flat} to {tilted}"
+        );
+    }
+
+    #[test]
+    fn a_camera_pointed_straight_up_reports_a_heading_rather_than_a_nan() {
+        // No horizontal component at all: there is no heading, and the answer must still be a
+        // number a controller can subtract.
+        let straight_up = Camera {
+            view: {
+                let mut view = identity();
+                view[2] = 0.0;
+                view[6] = 1.0;
+                view[10] = 0.0;
+                view
+            },
+            view_projection: identity(),
+        };
+        assert!(straight_up.yaw_degrees().is_finite());
+    }
 
     #[test]
     fn a_point_straight_ahead_lands_dead_centre() {

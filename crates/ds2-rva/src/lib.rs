@@ -6391,6 +6391,222 @@ pub const CAMERA_MANAGER_SIZE: usize = 0x458;
 /// and pinning it here is the follow-up that search exists to make possible.
 pub const CAMERA_OPERATOR_OWNER_IS_SEARCHED: () = ();
 
+// ============================================================================================
+// DLUID -- THE INPUT DEVICE LAYER
+//
+// Everything below was read out of three virtual methods that occupy the SAME vtable slot (23,
+// byte offset 0xb8) on the three `DLUID::*Device<DLKR::DLSingleThreadingPolicy>` classes. The
+// vtables themselves came from MSVC RTTI, via `scripts/ds2-rtti-vtables.py 'DLUID'`:
+//
+//     .?AV?$PadDevice@VDLSingleThreadingPolicy@DLKR@@@DLUID@@       vtable=0x141271aa8
+//     .?AV?$MouseDevice@VDLSingleThreadingPolicy@DLKR@@@DLUID@@     vtable=0x141272158
+//     .?AV?$KeyboardDevice@VDLSingleThreadingPolicy@DLKR@@@DLUID@@  vtable=0x141271e98
+//
+// and slot 23 of each was read straight out of `darksoulsii-deobf.bin`. Slots 0..22 are either
+// shared base implementations (identical qwords across all three) or per-class housekeeping;
+// slot 23 is the only one each class overrides with a body that calls an input API.
+//
+// WHY THIS SLOT IS THE STAGE THE GAME ACTUALLY READS. Each of the three bodies is the one place
+// a Win32/DirectInput/XInput call is turned into the numbers the rest of the engine consumes,
+// and each one writes those numbers into fields of its own device object. Downstream (the
+// `DLUI`/`DLUID` mapper: `DLUserInputMapperImpl`, `A2AMappingContext`, `VirtualAnalogKeyInfo<M>`)
+// reads the device object, never the API. So a value written into the device object AFTER the
+// original body has run is indistinguishable from a value the hardware produced -- and a value
+// written BEFORE it is overwritten, which is the same edge `../er-mods-rs`'s `pad_inject` learned
+// the hard way on Elden Ring.
+//
+// ALL THREE ENTRIES ARE CLEAN PROLOGUES, not Arxan redirects, checked one at a time:
+//
+//     $ python3 scripts/ds2-arxan-chain.py 0x140f05540   # PadDevice
+//     $ python3 scripts/ds2-arxan-chain.py 0x140f074a0   # MouseDevice
+//     $ python3 scripts/ds2-arxan-chain.py 0x140f06dd0   # KeyboardDevice
+//     ... NOT REDIRECTED (clean prologue at the entry)
+//
+// WHAT IS *NOT* ESTABLISHED HERE, and must not be read into it: which game action each axis is
+// bound to. The offsets below say "this float is pad axis 3", because that is what the XInput
+// and DirectInput branches both write there. They do NOT say "axis 3 turns the camera" -- that
+// is a mapper binding, it is a runtime fact, and `ds2-input-harness` measures it rather than
+// assuming it. See that crate's `drive` module.
+// ============================================================================================
+
+/// `DLUID::PadDevice<DLKR::DLSingleThreadingPolicy>`'s per-frame poll. RVA `0x00f05540`,
+/// VA `0x140f05540`.
+///
+/// Vtable slot 23 of `0x141271aa8`. The body has three arms, and the reason this crate records
+/// device-object offsets rather than an API is that all three converge on the same fields:
+///
+/// * **XInput.** `XInputGetState([this+0x19c], &state)` at `0x140f05ac2` -- one of only two call
+///   sites of the import in the whole image, and the only per-frame one (the other,
+///   `0x140ef6347`, is the 0..3 port enumeration). `sThumbLX/LY/RX/RY` are divided by
+///   `0x1410dec28` and scaled by `0x1410acb14` into the axis floats below; the triggers are
+///   divided by `0x1410ad0cc`; `wButtons` is stored as a `u16`.
+/// * **DirectInput joystick.** `IDirectInputDevice8::GetDeviceState(0x50, this+0x148)` through
+///   vtable byte offset `0x48` (slot 9) on the device at [`PAD_DEVICE_DINPUT_DEVICE_OFFSET`],
+///   at `0x140f05bcb`. `0x50` is `sizeof(DIJOYSTATE)`. Each of the six axes is then written only
+///   if its bit is set in [`PAD_DEVICE_AXIS_MASK_OFFSET`], into the SAME six floats.
+/// * **A third backend** reached through a function pointer on the device (an 0x78-byte report
+///   with 8-bit, 0x80-centred axes). It normalises into the same fields again.
+///
+/// Prologue, for the same reason every other hook site here records one -- so a detour refuses
+/// rather than patching something that moved:
+/// `48 89 7c 24 18` (`mov [rsp+0x18],rdi`).
+pub const PAD_DEVICE_POLL: u32 = 0x00f0_5540;
+
+/// First five bytes at [`PAD_DEVICE_POLL`], read from `darksoulsii-deobf.bin`.
+pub const PAD_DEVICE_POLL_PROLOGUE: [u8; 5] = [0x48, 0x89, 0x7c, 0x24, 0x18];
+
+/// `IDirectInputDevice8*` for a DirectInput joystick, or null. `PadDevice+0x100`.
+///
+/// From `mov rcx,QWORD PTR [rdi+0x100]` at `0x140f05b93`, the first instruction of the
+/// non-XInput arm, immediately followed by a null test that returns.
+pub const PAD_DEVICE_DINPUT_DEVICE_OFFSET: usize = 0x100;
+
+/// The raw `DIJOYSTATE` the joystick arm's `GetDeviceState` fills. `PadDevice+0x148`, `0x50`
+/// bytes. From `lea r8,[rdi+0x148]` / `mov edx,0x50` at `0x140f05bbc`.
+pub const PAD_DEVICE_DIJOYSTATE_OFFSET: usize = 0x148;
+
+/// Length of [`PAD_DEVICE_DIJOYSTATE_OFFSET`]: the `0x50` the poll passes to `GetDeviceState`.
+pub const PAD_DEVICE_DIJOYSTATE_BYTES: usize = 0x50;
+
+/// Which of the six axes this DirectInput joystick reports. `PadDevice+0x368`, one bit each.
+///
+/// From the six `test BYTE PTR [rdi+0x368],<bit>` at `0x140f05bd6`, `0x140f05c27`, `0x140f05c70`,
+/// `0x140f05cb1` and the two that follow -- bits `0x01`, `0x02`, `0x04`, `0x08`, `0x10`, `0x20`
+/// guarding the writes to `+0x1a4`, `+0x1a8`, `+0x1ac`, `+0x1b0`, `+0x1b4`, `+0x1b8` in that
+/// order. This is the evidence that the axis floats are one array of six.
+///
+/// Only the DirectInput arm consults it; the XInput arm writes its four unconditionally.
+pub const PAD_DEVICE_AXIS_MASK_OFFSET: usize = 0x368;
+
+/// The pad's button bitmask, `u16`. `PadDevice+0x198`.
+///
+/// From `mov WORD PTR [rdi+0x198],ax` at `0x140f05b85`, where `ax` is `XINPUT_GAMEPAD.wButtons`
+/// loaded by `movzx eax,WORD PTR [rbp-0x75]` -- offset 4 of the `XINPUT_STATE` buffer at
+/// `[rbp-0x79]`.
+pub const PAD_DEVICE_BUTTONS_OFFSET: usize = 0x198;
+
+/// XInput user index, `i32`, negative when no XInput pad owns this device. `PadDevice+0x19c`.
+///
+/// From `mov ecx,DWORD PTR [rdi+0x19c]` / `test ecx,ecx` / `js` at `0x140f05ab0` -- the branch
+/// that chooses the DirectInput arm over the XInput one.
+pub const PAD_DEVICE_XINPUT_PORT_OFFSET: usize = 0x19c;
+
+/// Base of the six normalised axis floats. `PadDevice+0x1a4`.
+///
+/// XInput writes four of them (`movss [rdi+0x1a4]`, `[rdi+0x1a8]`, `[rdi+0x1b0]`, `[rdi+0x1b4]`
+/// at `0x140f05af6`, `0x140f05b20`, `0x140f05b3b`, `0x140f05b47`). The DirectInput arm writes all
+/// six, one per bit of the axis mask, at `+0x00`, `+0x04`, `+0x08`, `+0x0c`, `+0x10`, `+0x14`
+/// from this base -- which is what establishes that these are ONE array of six and not four
+/// fields with a gap.
+pub const PAD_DEVICE_AXES_OFFSET: usize = 0x1a4;
+
+/// How many floats [`PAD_DEVICE_AXES_OFFSET`] covers.
+pub const PAD_DEVICE_AXIS_COUNT: usize = 6;
+
+/// Index of the left stick's X axis within [`PAD_DEVICE_AXES_OFFSET`]. XInput `sThumbLX`.
+pub const PAD_AXIS_LEFT_X: usize = 0;
+/// Index of the left stick's Y axis. XInput `sThumbLY`.
+pub const PAD_AXIS_LEFT_Y: usize = 1;
+/// Index 2 is written by the DirectInput arm (a joystick Z axis) and by nothing on the XInput
+/// path. Recorded so the array is not silently treated as four elements.
+pub const PAD_AXIS_DINPUT_Z: usize = 2;
+/// Index of the right stick's X axis. XInput `sThumbRX` -- `movss [rdi+0x1b0]`, which is
+/// `0x1a4 + 3*4`.
+pub const PAD_AXIS_RIGHT_X: usize = 3;
+/// Index of the right stick's Y axis. XInput `sThumbRY` -- `movss [rdi+0x1b4]`.
+pub const PAD_AXIS_RIGHT_Y: usize = 4;
+/// Index 5 is DirectInput-only, same as [`PAD_AXIS_DINPUT_Z`].
+pub const PAD_AXIS_DINPUT_RZ: usize = 5;
+
+/// The magnitude a hard-over axis float reaches: `1.0`.
+///
+/// **Derived from the image's own constants, not assumed.** All three arms normalise to the same
+/// range by different arithmetic, and the three agreeing is the evidence:
+///
+/// * XInput: `sThumb / [0x1410dec28] * [0x1410acb14]`, and those two floats are `65535.0` and
+///   `2.0`. `sThumbLX` spans `-32768..=32767`, so the quotient spans `-1.00002..=0.99998`.
+/// * DirectInput joystick: `((raw - min) / (max - min) - [0x1410ac694]) * [0x1410acb14]` with
+///   `0x1410ac694 == 0.5`, i.e. a `0..=1` fraction re-centred and doubled -- `-1.0..=1.0`. Axis 1
+///   uses `[0x1410ada3c] == -2.0` instead, so it is the same range with the sign flipped.
+/// * The third backend: `(byte / [0x1410ad0cc]) * [0x1410acb14] - [0x1410ac698]` with
+///   `0x1410ad0cc == 255.0` and `0x1410ac698 == 1.0` -- again `-1.0..=1.0`.
+///
+/// So an injected value belongs in `-1.0..=1.0`, and anything outside it is a value no hardware
+/// could have produced.
+pub const PAD_AXIS_FULL_SCALE: f32 = 1.0;
+
+/// Left trigger, normalised `0.0..=1.0`. `PadDevice+0x1c4`.
+///
+/// From `movss [rdi+0x1c4]` at `0x140f05b62`, fed by `bLeftTrigger / 0x1410ad0cc` (`255.0`).
+pub const PAD_DEVICE_LEFT_TRIGGER_OFFSET: usize = 0x1c4;
+
+/// Right trigger. `PadDevice+0x1c8`, from `movss [rdi+0x1c8]` at `0x140f05b7d`.
+pub const PAD_DEVICE_RIGHT_TRIGGER_OFFSET: usize = 0x1c8;
+
+/// `DLUID::MouseDevice<DLKR::DLSingleThreadingPolicy>`'s per-frame poll. RVA `0x00f074a0`.
+///
+/// Vtable slot 23 of `0x141272158`. Body: `GetDeviceState(0x14, this+0xf0)` through the device
+/// vtable's byte offset `0x48`, then the three `LONG`s of that `DIMOUSESTATE2` are converted to
+/// floats. `0x14` is `sizeof(DIMOUSESTATE2)` -- twenty bytes, three axes and eight buttons.
+///
+/// **This device is filled by DirectInput and by nothing else** -- the body has exactly one
+/// source and it is the `GetDeviceState` above. `DarkSoulsII.exe` also imports no raw-input API
+/// at all (no `RegisterRawInputDevices`, no `GetRawInputData`; its only `USER32` pointer calls
+/// are `GetCursorPos`, `SetCursorPos` and `ShowCursor`), so DirectInput is the whole of the
+/// mouse's route into the engine.
+///
+/// Prologue: `40 53 48 83 ec 20` (`push rbx` / `sub rsp,0x20`).
+pub const MOUSE_DEVICE_POLL: u32 = 0x00f0_74a0;
+
+/// First five bytes at [`MOUSE_DEVICE_POLL`].
+pub const MOUSE_DEVICE_POLL_PROLOGUE: [u8; 5] = [0x40, 0x53, 0x48, 0x83, 0xec];
+
+/// `IDirectInputDevice8*` the mouse is read through, or null. `MouseDevice+0xe8`.
+///
+/// From `mov rcx,QWORD PTR [rcx+0xe8]` at `0x140f074a9`, null-tested two instructions later.
+pub const MOUSE_DEVICE_DINPUT_DEVICE_OFFSET: usize = 0xe8;
+
+/// The raw `DIMOUSESTATE2` `GetDeviceState` fills. `MouseDevice+0xf0`, 20 bytes.
+///
+/// `lX`/`lY`/`lZ` at `+0x00`/`+0x04`/`+0x08`, then `rgbButtons[8]` at `+0x0c`. The buttons are
+/// NOT copied out by the poll, so anything that wants them reads them here.
+pub const MOUSE_DEVICE_RAW_STATE_OFFSET: usize = 0xf0;
+
+/// Length of [`MOUSE_DEVICE_RAW_STATE_OFFSET`]: the `0x14` the poll passes to `GetDeviceState`.
+pub const MOUSE_DEVICE_RAW_STATE_BYTES: usize = 0x14;
+
+/// Mouse X delta for this frame, as a float. `MouseDevice+0x108`.
+///
+/// The poll's own conversion of `DIMOUSESTATE2.lX`; it is a RELATIVE count, not a coordinate.
+pub const MOUSE_DEVICE_DELTA_X_OFFSET: usize = 0x108;
+
+/// Mouse Y delta. `MouseDevice+0x10c`.
+pub const MOUSE_DEVICE_DELTA_Y_OFFSET: usize = 0x10c;
+
+/// Mouse wheel delta. `MouseDevice+0x110`, from `DIMOUSESTATE2.lZ`.
+pub const MOUSE_DEVICE_WHEEL_OFFSET: usize = 0x110;
+
+/// `DLUID::KeyboardDevice<DLKR::DLSingleThreadingPolicy>`'s per-frame poll. RVA `0x00f06dd0`.
+///
+/// Vtable slot 23 of `0x141271e98`. Body: `GetDeviceState(0x100, this+0xf0)` -- the 256-byte
+/// DirectInput DIK table. That is the numbering `ds2-hotkey-config::keys` already carries
+/// alongside Win32 virtual keys, and this is the read it was carried for.
+///
+/// Prologue: `40 53 48 83 ec 20`, the same shape as the mouse poll.
+pub const KEYBOARD_DEVICE_POLL: u32 = 0x00f0_6dd0;
+
+/// First five bytes at [`KEYBOARD_DEVICE_POLL`].
+pub const KEYBOARD_DEVICE_POLL_PROLOGUE: [u8; 5] = [0x40, 0x53, 0x48, 0x83, 0xec];
+
+/// `IDirectInputDevice8*` the keyboard is read through, or null. `KeyboardDevice+0xe8`.
+pub const KEYBOARD_DEVICE_DINPUT_DEVICE_OFFSET: usize = 0xe8;
+
+/// The 256-byte DIK table `GetDeviceState(0x100, ...)` fills. `KeyboardDevice+0xf0`.
+pub const KEYBOARD_DEVICE_DIK_TABLE_OFFSET: usize = 0xf0;
+
+/// Length of [`KEYBOARD_DEVICE_DIK_TABLE_OFFSET`]: the `0x100` the poll passes.
+pub const KEYBOARD_DEVICE_DIK_TABLE_BYTES: usize = 0x100;
+
 // THE SAVE/LOAD DIRECTORY SPLIT
 //
 // A session asks for its container directory through a virtual, and the save class and the load
