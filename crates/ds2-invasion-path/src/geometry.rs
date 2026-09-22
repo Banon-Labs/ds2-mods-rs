@@ -44,34 +44,26 @@ pub type Matrix = [f32; 16];
 /// rather than where the game says they stand.
 pub const HEAD_METERS: f32 = 1.8;
 
-/// How far the head may land from the middle of the frame and still count as framed, **in
-/// pixels**.
+/// How far the character's head may land from the middle of the frame and still count as a
+/// camera that is FRAMING them, as a fraction of the viewport's height.
 ///
-/// # One pixel, and why the unit changed twice to get here
+/// # This does not decide where the arrow's base is drawn
 ///
-/// Two earlier values measured against the screen's half-extent and both were wrong for the same
-/// reason. `0.30` was +/-384 pixels on a 2560-wide frame, which let a camera shove the character
-/// most of the way to the edge and still draw a confident arrow -- the failure the player
-/// reported as "I've seen the base off the player more times than I've seen it on the player".
-/// `0.05` was +/-64, and on a frame where a character stands about 490 pixels tall that is close
-/// to half a body width: a visible gap, and still the wrong quantity, because a fraction of the
-/// screen is not a fraction of the player. The same number means "dead on" at 720p and "clear of
-/// the body" at 4K.
+/// It used to, and that was the whole mistake. The base was the projection of the player's
+/// world position, so a camera that was slightly stale moved the base off the player, and the
+/// response was to tighten this budget until only a perfect camera drew anything. At one pixel
+/// that was no camera at all: a live run refused every single frame, with the head measured
+/// between 8.7 and 315.6 pixels from centre. Nothing reached the screen.
 ///
-/// A pixel is not a compromise between those, it is a different claim: the head is AT the centre
-/// or this is not the camera the frame was drawn with. Nothing between one pixel and a body width
-/// is a principled place to stop, and every value in that range admits an arrow whose base is
-/// visibly off the player -- which is the only symptom anyone has ever reported.
-///
-/// **The risk this takes, stated rather than hidden.** A one-frame gap between the matrix the
-/// renderer uploaded and the position the overlay read would move the head far more than a pixel
-/// during a fast turn, and a budget below that flickers the overlay off exactly when the player
-/// is moving. The reason to expect it holds anyway: `draw_for` projects the position it read THIS
-/// frame through the matrix `crate::capture` re-read from THIS frame's upload, and `Present` runs
-/// after both -- so they are the same frame and there is no lag to absorb. If that reasoning is
-/// wrong the log says so at once, in refusals, which is a better way to find out than a tolerance
-/// wide enough to hide it.
-pub const FRAMING_TOLERANCE_PX: f32 = 1.0;
+/// The base is now PINNED to the middle of the frame in pixels, after projection, so no value
+/// here can move it -- see `emit` in `lib.rs`. What is left for this constant is the job it was
+/// introduced for and is genuinely good at: telling a camera that is being CONSIDERED apart from
+/// the one the game is rendering with. A pose-built camera with the quaternion components in the
+/// wrong order is a perfectly valid rotation about the wrong axis; it put the character at
+/// `376,213` on a `2560x1441` frame, 904 pixels out horizontally, and passed every other test in
+/// this module. A quarter of the frame's height rejects that with room to spare while still
+/// admitting the ~316-pixel worst case a real camera reaches halfway through a fast turn.
+pub const FRAMING_TOLERANCE_SHARE: f32 = 0.25;
 
 /// Clip-space `w` below which a point is behind (or on) the lens and cannot be projected.
 ///
@@ -79,6 +71,17 @@ pub const FRAMING_TOLERANCE_PX: f32 = 1.0;
 /// it projects to somewhere past the horizon, which draws as a line shooting off screen. The
 /// game's own near plane is much larger than this; this is only the arithmetic floor.
 pub const NEAR_EPSILON: f32 = 0.05;
+
+/// The point on a character that the camera is actually aimed at.
+///
+/// A DARK SOULS II character's position is their FEET, and the camera looks at the upper body, so
+/// the feet sit a couple of hundred pixels below the middle of the frame even when everything is
+/// correct. Anything that wants "where the player LOOKS like they are" -- the framing oracle, and
+/// the arrow's base -- wants this instead.
+#[must_use]
+pub fn head(world: [f32; 3]) -> [f32; 3] {
+    [world[0], world[1] + HEAD_METERS, world[2]]
+}
 
 /// `a - b`, componentwise.
 #[must_use]
@@ -526,6 +529,24 @@ impl Camera {
         to: [f32; 3],
         screen: [f32; 2],
     ) -> Option<([f32; 2], [f32; 2])> {
+        let (a, b) = self.project_segment_unclipped(from, to, screen)?;
+        clip_to_viewport(a, b, screen)
+    }
+
+    /// Project a segment, trimming it at the near plane but **not** to the viewport.
+    ///
+    /// Split out for the arrow, which is translated in pixels after projection so that its base
+    /// lands on the middle of the frame. Clipping to the viewport before that translation clips
+    /// against the wrong rectangle -- a shaft that would be on screen once moved gets thrown
+    /// away, and one that would be off screen survives. The near-plane trim still has to happen
+    /// first: it is a clip-space operation, and there is no pixel to translate until it is done.
+    #[must_use]
+    pub fn project_segment_unclipped(
+        &self,
+        from: [f32; 3],
+        to: [f32; 3],
+        screen: [f32; 2],
+    ) -> Option<([f32; 2], [f32; 2])> {
         let (mut a, mut b) = (self.to_clip(from), self.to_clip(to));
         let (a_in, b_in) = (a[3] > NEAR_EPSILON, b[3] > NEAR_EPSILON);
         if !a_in && !b_in {
@@ -542,11 +563,35 @@ impl Camera {
             clipped[3] = NEAR_EPSILON;
             if a_in { b = clipped } else { a = clipped }
         }
-        clip_to_viewport(
+        Some((
             self.clip_to_screen(a, screen)?,
             self.clip_to_screen(b, screen)?,
-            screen,
-        )
+        ))
+    }
+
+    /// The pixel translation that puts `anchor` exactly on the middle of the frame.
+    ///
+    /// # Why the arrow's base is arithmetic and not a measurement
+    ///
+    /// A compass needle turns about a fixed pin. The base of this arrow used to be the
+    /// projection of the player's position, which made it a second thing the camera could get
+    /// wrong -- and it got it wrong constantly: "I've seen the base off the player more times
+    /// than I've seen it on the player." Every attempt to fix it by demanding a better camera
+    /// failed the same way, ending at a budget of one pixel that refused every frame of a live
+    /// run and drew nothing at all.
+    ///
+    /// The base has nothing to do with the camera. Only the TIP does. So the whole projected
+    /// arrow is translated by this until its tail sits on the centre, where a third-person camera
+    /// keeps the character: the camera still decides which way the shaft points and how long it
+    /// looks -- everything an arrow actually claims -- and the one quantity the eye checks
+    /// hardest is exact by construction.
+    ///
+    /// `None` when the anchor is behind the lens, which for the player's own head means the
+    /// camera is not looking at them and there is no arrow to place.
+    #[must_use]
+    pub fn pin_for(&self, anchor: [f32; 3], screen: [f32; 2]) -> Option<[f32; 2]> {
+        let at = self.project(anchor, screen)?;
+        Some([screen[0] * 0.5 - at[0], screen[1] * 0.5 - at[1]])
     }
 
     /// Does this camera frame the character the way DARK SOULS II's camera frames a character?
@@ -566,8 +611,9 @@ impl Camera {
     /// character to the edge cannot switch the overlay off mid-fight.
     #[must_use]
     pub fn frames_the_character(&self, world: [f32; 3], screen: [f32; 2]) -> bool {
+        let budget = screen[1] * FRAMING_TOLERANCE_SHARE;
         self.head_offset_px(world, screen)
-            .is_some_and(|(x, y)| x <= FRAMING_TOLERANCE_PX && y <= FRAMING_TOLERANCE_PX)
+            .is_some_and(|(x, y)| x <= budget && y <= budget)
     }
 
     /// How far the character's HEAD lands from the middle of the frame, in pixels on each axis.
@@ -586,8 +632,7 @@ impl Camera {
     /// is therefore the only way this test can be tightened without rejecting every real camera.
     #[must_use]
     pub fn head_offset_px(&self, world: [f32; 3], screen: [f32; 2]) -> Option<(f32, f32)> {
-        let head = [world[0], world[1] + HEAD_METERS, world[2]];
-        let point = self.project(head, screen)?;
+        let point = self.project(head(world), screen)?;
         Some((
             (point[0] - screen[0] * 0.5).abs(),
             (point[1] - screen[1] * 0.5).abs(),
@@ -1328,18 +1373,16 @@ mod framing_is_measured_at_the_head {
     #[test]
     fn a_camera_aimed_at_the_head_frames_the_character() {
         let feet = [10.0, 5.0, -16.0];
-        let head = [feet[0], feet[1] + HEAD_METERS, feet[2]];
-        let camera = looking([10.0, 6.8, -21.0], head);
+        let camera = looking([10.0, 6.8, -21.0], head(feet));
         assert!(camera.frames_the_character(feet, SCREEN));
 
-        let (_, head_y) = camera.head_offset_px(feet, SCREEN).expect("on screen");
-        assert!(
-            head_y <= FRAMING_TOLERANCE_PX,
-            "the head is centred, got {head_y}px"
-        );
+        // Dead centre, not merely inside the budget -- this asserts the arithmetic rather than
+        // the tolerance, so widening the tolerance cannot weaken it.
+        let (x, y) = camera.head_offset_px(feet, SCREEN).expect("on screen");
+        assert!(x < 1.0 && y < 1.0, "the head is centred, got {x},{y}px");
 
         // And the feet are far from centre while everything is right, which is why the feet
-        // cannot be the thing measured.
+        // cannot be the thing measured -- and why the arrow is built from the head.
         let at_feet = camera.project(feet, SCREEN).expect("on screen");
         assert!(
             (at_feet[1] - SCREEN[1] * 0.5).abs() > 100.0,
@@ -1348,32 +1391,97 @@ mod framing_is_measured_at_the_head {
         );
     }
 
-    /// The failure the report described: a base visibly off the player. At the old 0.30 this
-    /// passed; it must not now.
+    /// The case the oracle exists for, and the only one it is now asked to judge: a matrix that
+    /// is a perfectly valid rotation about the WRONG AXIS. It keeps the eye near the player and
+    /// the world the right way up, and it puts the character near a corner. Every other test in
+    /// this module passes it.
     #[test]
-    fn a_camera_that_shoves_the_character_off_centre_is_refused() {
+    fn a_camera_that_shoves_the_character_into_a_corner_is_refused() {
         let feet = [10.0, 5.0, -16.0];
-        let head = [feet[0], feet[1] + HEAD_METERS, feet[2]];
-        // Aimed a long way to one side of the character rather than at them.
-        let camera = looking([10.0, 6.8, -21.0], [head[0] + 2.2, head[1], head[2] + 0.6]);
-        let (x, _) = camera.head_offset_px(feet, SCREEN).expect("on screen");
+        let aim = head(feet);
+        // Aimed most of a right angle away from the character rather than at them.
+        let camera = looking([10.0, 6.8, -21.0], [aim[0] + 6.0, aim[1] - 3.0, aim[2]]);
+        let (x, y) = camera.head_offset_px(feet, SCREEN).expect("on screen");
+        let budget = SCREEN[1] * FRAMING_TOLERANCE_SHARE;
         assert!(
-            x > FRAMING_TOLERANCE_PX,
-            "this camera is visibly off and must fail, offset was {x}px"
+            x > budget || y > budget,
+            "this camera is visibly off and must fail, offset was {x},{y}px against {budget}px"
         );
         assert!(!camera.frames_the_character(feet, SCREEN));
-        // It would have passed both tolerances this replaced: 0.30 and 0.05 of a half-extent
-        // are 384 and 64 pixels on this frame.
-        assert!(x <= 384.0, "the old 0.30 let exactly this through, {x}px");
+    }
+
+    /// The regression that cost a whole live run: a camera a few pixels stale is STILL the
+    /// camera. Tightening this budget to one pixel refused every frame of a real session -- the
+    /// head measured between 8.7 and 315.6 pixels out -- and the overlay drew nothing at all.
+    ///
+    /// Nothing about the arrow depends on this any more; `emit` pins the base in pixels. What is
+    /// being protected here is that the camera SEARCH does not throw away a good candidate.
+    #[test]
+    fn a_camera_a_few_pixels_stale_is_still_accepted() {
+        let feet = [10.0, 5.0, -16.0];
+        let aim = head(feet);
+        let camera = looking([10.0, 6.8, -21.0], [aim[0] + 0.05, aim[1], aim[2]]);
+        let (x, _) = camera.head_offset_px(feet, SCREEN).expect("on screen");
+        assert!(
+            x > 1.0,
+            "this camera is meant to be slightly off, got {x}px"
+        );
+        assert!(camera.frames_the_character(feet, SCREEN));
+    }
+
+    /// "Should the base of the arrow be in the same position no matter what when it's visible? I
+    /// don't think we have any runtime/tests for that." There were none. This is it.
+    ///
+    /// Every camera here is a DIFFERENT amount of wrong -- dead on, a few pixels out, and a long
+    /// way out -- and the base lands on the same pixel in all of them, which is what "pinned"
+    /// has to mean to be worth anything.
+    #[test]
+    fn the_base_lands_dead_centre_however_stale_the_camera_is() {
+        let feet = [10.0, 5.0, -16.0];
+        let tail = head(feet);
+        for sideways in [0.0, 0.05, 0.4, 1.2, -0.9] {
+            let camera = looking([10.0, 6.8, -21.0], [tail[0] + sideways, tail[1], tail[2]]);
+            let shift = camera.pin_for(tail, SCREEN).expect("in front of the lens");
+            let at = camera.project(tail, SCREEN).expect("in front of the lens");
+            let base = [at[0] + shift[0], at[1] + shift[1]];
+            assert!(
+                (base[0] - SCREEN[0] * 0.5).abs() < 0.01
+                    && (base[1] - SCREEN[1] * 0.5).abs() < 0.01,
+                "a camera {sideways} m off aim put the base at {base:?}"
+            );
+        }
+    }
+
+    /// The pin TRANSLATES, it does not turn. If it could rotate the arrow the base would be
+    /// honest and the direction would be a lie, which is worse than what it replaced.
+    #[test]
+    fn pinning_moves_the_arrow_without_turning_it() {
+        let feet = [10.0, 5.0, -16.0];
+        let tail = head(feet);
+        // Deliberately off aim, so the shift is not zero and the test can actually fail.
+        let camera = looking([10.0, 6.8, -21.0], [tail[0] + 0.7, tail[1], tail[2]]);
+        let tip = [tail[0] + 4.0, tail[1] + 1.0, tail[2] + 6.0];
+        let (raw_tail, raw_tip) = camera
+            .project_segment_unclipped(tail, tip, SCREEN)
+            .expect("both ends in front of the lens");
+        let shift = camera.pin_for(tail, SCREEN).expect("in front of the lens");
+        let pinned = [
+            [raw_tail[0] + shift[0], raw_tail[1] + shift[1]],
+            [raw_tip[0] + shift[0], raw_tip[1] + shift[1]],
+        ];
+        let before = (raw_tip[1] - raw_tail[1]).atan2(raw_tip[0] - raw_tail[0]);
+        let after = (pinned[1][1] - pinned[0][1]).atan2(pinned[1][0] - pinned[0][0]);
+        assert!(
+            (before - after).abs() < 1e-4,
+            "the pin turned the arrow by {} degrees",
+            (before - after).to_degrees()
+        );
     }
 
     #[test]
     fn a_character_behind_the_lens_is_not_framed() {
         let feet = [10.0, 5.0, -16.0];
-        let camera = looking(
-            [10.0, 6.8, -21.0],
-            [feet[0], feet[1] + HEAD_METERS, feet[2]],
-        );
+        let camera = looking([10.0, 6.8, -21.0], head(feet));
         let behind = [10.0, 5.0, -26.0];
         assert!(!camera.frames_the_character(behind, SCREEN));
         assert!(camera.head_offset_px(behind, SCREEN).is_none());
