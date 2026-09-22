@@ -6607,6 +6607,211 @@ pub const KEYBOARD_DEVICE_DIK_TABLE_OFFSET: usize = 0xf0;
 /// Length of [`KEYBOARD_DEVICE_DIK_TABLE_OFFSET`]: the `0x100` the poll passes.
 pub const KEYBOARD_DEVICE_DIK_TABLE_BYTES: usize = 0x100;
 
+// ============================================================================================
+// THE CAMERA'S MOUSE-LOOK -- AND THE CORRECTION IT IS
+//
+// `MOUSE_DEVICE_POLL` above is a real device and the engine really does read it, but it is NOT
+// what turns this camera. Measured live 2026-09-22: `mouse 120 0 30` written into
+// `DLUID::MouseDevice`'s normalised deltas left the camera's published yaw at exactly 87.13 for
+// thirty frames. The whole chain is elsewhere, it is traced below, and every step of it was read
+// out of the disassembly rather than inferred:
+//
+//   FUN_140af42b0                     the per-frame input update
+//     -> parseInput(obj[0], dt)       0x140b08660 -- keyboard/general
+//     -> parseCameraInput(obj[1], dt) 0x140b0c950 -- MOUSE-LOOK
+//     -> SetCursorPos(...)            0x140af4525 -- the ONLY SetCursorPos call site in the image
+//
+//   parseCameraInput(cam, dt):
+//     cam[2..3] = cam[0..1]           PREVIOUS := CURRENT, at the top, before anything polls
+//     for device in cam[0x34]..cam[0x36]:
+//         device->vtable[1](dt)       == WindowsMouseDevice::poll, 0x140b5c1f0
+//         if device->vtable[3]() then remember it as the active one
+//     FUN_140b0d0e0(cam, dt, active)  0x140b0d0e0:
+//         *(u64*)cam = *(u64*)(device + 8)    CURRENT := the device's stored POINT
+//         cam[0] += cam[4]; cam[1] += cam[5]  ... plus a fixed origin offset
+//         cam[0xc]/[0xd] from device+0x14/+0x18   buttons
+//         cam[8]        from device+0x10          wheel
+//
+// So **the camera's mouse input is the difference between two successive values of
+// `WindowsMouseDevice+0x08`**, and that field is an ABSOLUTE client-space cursor position, not a
+// delta: the poll calls `GetCursorPos` -> `ScreenToClient` -> `GetClientRect` and clamps the
+// point into the client rect before storing it. `SetCursorPos` afterwards is the re-centring
+// that keeps a relative look going without the real cursor escaping the window.
+//
+// WHY THE HOOK IS THE POLL AND NOT `GetCursorPos`. The import has exactly two callers -- this
+// poll (`0x140b5c224`) and the one-shot init `FUN_140af3f60` (`0x140af40cb`), which seeds the
+// starting position through `FUN_140b0c940` and never runs again. So an IAT detour at
+// `GETCURSORPOS_IAT_THUNK` would be nearly as narrow. It is still the worse site, for a reason
+// that is about WHERE THE VALUE ENDS UP: `GetCursorPos` returns a SCREEN point, which the poll
+// then converts and clamps, so authoring there means reproducing `ScreenToClient` and the clamp
+// to write the number the consumer will actually read. `+0x08` IS that number -- the last thing
+// written before `FUN_140b0d0e0` copies it out -- so one store both authors the mouse and
+// overwrites whatever the human's hand produced. Same principle the camera capture used: stand
+// where the value goes, not where it is kept.
+// ============================================================================================
+
+/// `WindowsMouseDevice`'s per-frame poll. RVA `0x00b5c1f0`, VA `0x140b5c1f0`.
+///
+/// Vtable slot 1 of `0x1411dcc38` (MSVC RTTI, `scripts/ds2-rtti-vtables.py 'MouseDevice'`). Note
+/// that `.?AVMouseDevice@@`'s vtable at `0x1411dcc10` and this one are one contiguous run --
+/// `0x1411dcc10 + 5*8 == 0x1411dcc38` -- so the base has four virtuals and this class overrides
+/// all of them.
+///
+/// **This is a different class from [`MOUSE_DEVICE_POLL`]**, which is
+/// `DLUID::MouseDevice<DLKR::DLSingleThreadingPolicy>` and reads DirectInput. This one reads the
+/// Win32 cursor, and it is the one the camera follows.
+///
+/// Not Arxan-redirected (`scripts/ds2-arxan-chain.py 0x140b5c1f0`).
+///
+/// Prologue: `48 89 5c 24 10` (`mov [rsp+0x10],rbx`).
+pub const WINDOWS_MOUSE_DEVICE_POLL: u32 = 0x00b5_c1f0;
+
+/// First five bytes at [`WINDOWS_MOUSE_DEVICE_POLL`].
+pub const WINDOWS_MOUSE_DEVICE_POLL_PROLOGUE: [u8; 5] = [0x48, 0x89, 0x5c, 0x24, 0x10];
+
+/// The clamped client-space cursor position: two `i32`, x then y. `WindowsMouseDevice+0x08`.
+///
+/// From `mov QWORD PTR [rbx+0x8],rax` at `0x140b5c288`, where `rax` is the packed pair built by
+/// the two `cmovg` clamps at `0x140b5c25e` and `0x140b5c275`. `FUN_140b0d0e0` reads exactly this
+/// qword as `*(u64*)(device + 8)`.
+///
+/// **An absolute position, differenced by the consumer.** Authoring a constant here produces one
+/// frame of motion and then nothing; a sustained turn needs a value that keeps moving. Nothing
+/// re-clamps it after this store, so an authored position is not bounded by the client rect --
+/// which is what makes an arbitrarily long turn possible through this field.
+pub const WINDOWS_MOUSE_DEVICE_POSITION_OFFSET: usize = 0x08;
+
+/// Wheel delta for this frame. `WindowsMouseDevice+0x10`, read by `FUN_140b0d0e0` as
+/// `device+0x10`. From `mov eax,[rbx+0x28]` / `mov [rbx+0x10],eax` at `0x140b5c2d1`.
+pub const WINDOWS_MOUSE_DEVICE_WHEEL_OFFSET: usize = 0x10;
+
+/// Mouse buttons held, bits `0x1`/`0x2`/`0x4`. `WindowsMouseDevice+0x14`.
+///
+/// From the three `or DWORD PTR [rbx+0x14],<bit>` at `0x140b5c2a3`, `0x140b5c2b8`, `0x140b5c2cd`,
+/// each guarded by a call to `0x140af4120`. Whatever that query reads, `+0x14` is the funnel --
+/// `FUN_140b0d0e0` takes the buttons from here -- so blanking it after the poll suppresses a
+/// click regardless of where the click came from.
+pub const WINDOWS_MOUSE_DEVICE_BUTTONS_OFFSET: usize = 0x14;
+
+/// A second per-frame `u32`, `device+0x2c` moved into `device+0x18` by the poll and read by
+/// `FUN_140b0d0e0` into the camera object's `[0xd]` (the "just pressed" half of the button
+/// state). Recorded so blanking covers it; nothing here authors it.
+pub const WINDOWS_MOUSE_DEVICE_BUTTON_EDGE_OFFSET: usize = 0x18;
+
+/// The `HWND` the poll converts and clamps against. `WindowsMouseDevice+0x20`, from
+/// `mov rcx,QWORD PTR [rbx+0x20]` at `0x140b5c22a`, passed to `ScreenToClient`.
+pub const WINDOWS_MOUSE_DEVICE_HWND_OFFSET: usize = 0x20;
+
+/// The two accumulators the window procedure adds to and the poll drains and zeroes.
+/// `WindowsMouseDevice+0x28` and `+0x2c`; the poll's `this[5] = 0` clears both.
+pub const WINDOWS_MOUSE_DEVICE_ACCUMULATOR_OFFSET: usize = 0x28;
+
+/// `parseCameraInput`. RVA `0x00b0c950`, VA `0x140b0c950`. A `USER_DEFINED` symbol in the
+/// Ghidra project -- a name a human typed, not an inference.
+///
+/// Recorded as EVIDENCE rather than as a hook site: it is what establishes that the mouse-look
+/// value is a per-frame difference, because its first act is `previous := current` and its last
+/// is to pull a new `current` out of the active device. Nothing detours it.
+pub const PARSE_CAMERA_INPUT: u32 = 0x00b0_c950;
+
+/// The pull from the active mouse device into the camera-input object. RVA `0x00b0d0e0`.
+///
+/// Also evidence rather than a hook site: `*(u64*)cam = *(u64*)(device + 8)` is the single line
+/// that makes [`WINDOWS_MOUSE_DEVICE_POSITION_OFFSET`] the field worth writing.
+pub const CAMERA_INPUT_PULL_FROM_DEVICE: u32 = 0x00b0_d0e0;
+
+/// The per-frame input update that calls `parseInput`, `parseCameraInput` and then the image's
+/// only `SetCursorPos`. RVA `0x00af42b0`, VA `0x140af42b0`.
+pub const INPUT_UPDATE: u32 = 0x00af_42b0;
+
+/// The import thunk `DarkSoulsII.exe` calls `USER32!GetCursorPos` through. RVA `0x01aae3cc`.
+///
+/// From `call QWORD PTR [rip+0xf521a2]` at `0x140b5c224`, which resolves to `0x141aae3cc` -- the
+/// same `USER32` first-thunk table [`SLEEP_IAT_THUNK`]'s `KERNEL32` neighbour lives in.
+///
+/// **Recorded and deliberately NOT hooked.** See this section's banner for why the poll is the
+/// better site; this constant exists so the next person can see that the alternative was
+/// identified and rejected on evidence rather than missed.
+pub const GETCURSORPOS_IAT_THUNK: u32 = 0x01aa_e3cc;
+
+// ============================================================================================
+// THE CAMERA HAS NO STORED YAW -- A NEGATIVE RESULT, RECORDED SO IT IS NOT RE-SEARCHED
+//
+// The obvious way to turn the camera with no device connected is to find the angles the camera
+// controller integrates and write them. **On this engine there are none.** The evidence:
+//
+// `FUN_140493030` (RVA 0x00493030, 770 bytes) is the function `CAMERA_OPERATOR_VIEW_OFFSET`
+// already points at: it writes the world-to-camera matrix to `this+0x10` and the projection to
+// `this+0x50`, and it is the last thing to touch them before a frame is drawn. It calls `sinf`
+// and `cosf` exactly twice each, and BOTH pairs are fed by the same single float:
+//
+//     0x1404930bf   movss xmm0, DWORD PTR [rcx+0x10c]
+//     0x1404930d9   call  cosf
+//     0x1404930e7   movss xmm0, DWORD PTR [rbx+0x10c]
+//     0x1404930ef   call  sinf
+//     ... and the same pair again at 0x140493177 / 0x140493191 / 0x14049319f / 0x1404931a7
+//
+// One angle, not three. Everything else the builder consumes is a POSITION -- it reads vectors
+// through `FUN_140002680` / `FUN_140002380` (look-at helpers) and `FUN_140001a90` (the
+// projection builder). So `+0x10c` is the camera's ROLL about its own view axis, and heading and
+// pitch are DERIVED from an eye position and a target position rather than stored.
+//
+// `NormalCameraOperator`'s update (`0x1404a2700`) is the same shape from the other end: it
+// computes eye/target/up as 4-float vectors, smooths each toward its target with a per-frame
+// lerp factor, and hands the results to the same look-at helpers. No angle is integrated
+// anywhere in it.
+//
+// CONSEQUENCE FOR AN AGENT THAT WANTS TO TURN THE CAMERA:
+//
+// * Writing the view matrix at `+0x10` is NOT a camera turn for measurement purposes. It is the
+//   builder's OUTPUT, rebuilt from scratch every frame, and -- fatally for the experiment this
+//   repo is running -- `ds2-invasion-path` reads that same matrix, so rotating it would make the
+//   overlay track by construction and prove nothing.
+// * The real state is the eye position and whatever orbit parameter produces it. For the
+//   third-person camera that is inside `ExFollowCameraOperator`'s update (`0x14049afb0`), which
+//   is a pipeline of about fifteen single-argument stages. Two of them have been eliminated:
+//   `0x14049bc00` fills the parameter block at `+0x3f4..+0x430` and `0x14049b1f0` copies that
+//   block into `+0x138..+0x1f4` -- both are camera-parameter blending, not orbit state. The
+//   remaining stages are unexamined and that is where the next search starts.
+//
+// Recorded here rather than left as a gap because "look for the camera's yaw" is exactly the
+// search someone will start again otherwise, and it has now cost one round.
+// ============================================================================================
+
+/// The view/projection matrix builder. RVA `0x00493030`, VA `0x140493030`.
+///
+/// Writes the world-to-camera matrix to `this+`[`CAMERA_OPERATOR_VIEW_OFFSET`] and the projection
+/// to `this+`[`CAMERA_OPERATOR_PROJECTION_OFFSET`]. Called from `0x140493780` and `0x140493340`,
+/// both of which pass their own `this` unchanged -- which is what
+/// [`CAMERA_OPERATOR_OWNER_IS_SEARCHED`] already recorded.
+///
+/// **Evidence, not a hook site.** See this section's banner: its only trigonometry is on
+/// [`CAMERA_OPERATOR_ROLL_OFFSET`], which is what proves the camera's heading is derived from
+/// positions rather than stored as an angle.
+pub const CAMERA_VIEW_MATRIX_BUILDER: u32 = 0x0049_3030;
+
+/// The camera's roll about its own view axis, in radians. `CameraOperator+0x10c`.
+///
+/// The ONLY field [`CAMERA_VIEW_MATRIX_BUILDER`] passes to `sinf`/`cosf`, at `0x1404930bf`,
+/// `0x1404930e7`, `0x140493177` and `0x14049319f`. Writing it tilts the horizon; it does not
+/// turn the camera, and it is recorded to make clear which angle this is and which it is not.
+pub const CAMERA_OPERATOR_ROLL_OFFSET: usize = 0x10c;
+
+/// `ExFollowCameraOperator`'s per-frame update. RVA `0x0049afb0`, VA `0x14049afb0`.
+///
+/// Vtable slot 4 of `0x1410f4a98`. Fifteen single-argument stages; the orbit state that decides
+/// where the third-person camera sits relative to the player is in one of the unexamined ones.
+/// The next search for a device-free camera turn starts here.
+pub const EX_FOLLOW_CAMERA_UPDATE: u32 = 0x0049_afb0;
+
+/// The `ExFollowCameraOperator` stage that fills the camera-parameter block at `+0x3f4..+0x430`.
+/// RVA `0x0049bc00`. **Eliminated**: parameter blending, not orbit state.
+pub const EX_FOLLOW_CAMERA_PARAM_BLEND: u32 = 0x0049_bc00;
+
+/// The stage that copies `+0x3f4..+0x430` into `+0x138..+0x1f4` where a value is non-zero.
+/// RVA `0x0049b1f0`. **Eliminated** for the same reason.
+pub const EX_FOLLOW_CAMERA_PARAM_APPLY: u32 = 0x0049_b1f0;
+
 // THE SAVE/LOAD DIRECTORY SPLIT
 //
 // A session asks for its container directory through a virtual, and the save class and the load

@@ -1630,13 +1630,13 @@ def config_text(
 [{INPUT_HARNESS_SECTION}]
 # LETS AN AGENT MOVE THE CAMERA, AND TAKES YOUR CONTROLLER AWAY WHILE IT DOES.
 #
-# It detours the three `DLUID` device polls -- pad, mouse, keyboard -- and, after each one has
-# run, writes the fields the engine reads. That is the stage the game actually polls: the mouse
-# is `IDirectInputDevice8::GetDeviceState(0x14, ...)`, the keyboard `GetDeviceState(0x100, ...)`,
-# and the pad is XInput OR a DirectInput joystick OR a third backend, all three of which
-# normalise into the same six floats on the device object. Writing there means the deadzone, the
-# sensitivity setting and the key mapping all still apply, so an injected stick behaves like a
-# real one.
+# It detours four device polls and, after each one has run, writes the fields the engine reads.
+# Three are the `DLUID` devices -- pad (XInput OR a DirectInput joystick OR a third backend, all
+# normalising into the same six floats), DirectInput mouse, keyboard. The fourth is the one that
+# actually matters for the camera: `WindowsMouseDevice`, which reads `GetCursorPos` and stores a
+# clamped client-space position that `parseCameraInput` DIFFERENCES frame to frame. Writing at
+# the device means the deadzone, the sensitivity setting and the key mapping all still apply, so
+# an injected input behaves like a real one.
 #
 # OFF by default because it is the only thing in this file that can stop your own input reaching
 # the game. Every command it takes is frame-bounded and the input block has a hard cap of about
@@ -1647,11 +1647,13 @@ def config_text(
 #   block <frames> | unblock | release | status
 #   axis <index> <value> <frames> | mouse <dx> <dy> <frames> | buttons <hex> <frames>
 #   turn <degrees> [frames]   -- closed loop on the camera's own yaw
-#   probe [frames]            -- hold each pad axis and report what the camera did
+#   probe [frames]            -- hold each channel and report what the camera did
+#   channel <name>            -- what `turn` drives: mouse-x (default), mouse-y, pad0..pad5
 #
 # `turn` and `probe` MEASURE against the camera `[{INVASION_PATH_SECTION}]` draws through, so they
-# need that feature on; without it they refuse rather than guess. Grep the log for
-# `{INPUT_HARNESS_LOG_PREFIX}`.
+# need that feature on; without it they refuse rather than guess. `status` also reports how many
+# times each poll has fired, which is how you tell "pressed nothing" from "never reached". Grep
+# the log for `{INPUT_HARNESS_LOG_PREFIX}`.
 {KEY_INPUT_HARNESS_ENABLED} = {str(input_harness).lower()}
 
 [{CRASH_SECTION}]

@@ -824,11 +824,20 @@ fn install_input_harness() {
     // oracles. A second camera resolution could disagree with it, and then "did the overlay
     // track the camera?" would be answered against a camera the overlay is not using.
     ds2_input_harness::set_yaw_source(ds2_invasion_path::camera_yaw::current);
+
+    // THE CLOCK. Everything the harness does -- every countdown, every command dispatch, the
+    // closed camera loop -- advances from here, and `Present` is the one thing in this process
+    // that runs whatever is plugged in and whatever has focus. It used to ride a device poll,
+    // and a live session proved why that was wrong: the game stopped calling the poll the
+    // harness had elected, and the harness went deaf mid-run while the process was still alive.
+    ds2_invasion_path::frame_hook::set_frame_hook(ds2_input_harness::on_present_frame);
     if !invasion_path::InvasionPathConfig::load().enabled {
         log_line(format_args!(
-            "{} no camera yaw source this session: [invasion_path] is off, so nothing publishes \
-             a camera. `axis`/`mouse`/`block` still work; `turn` and `probe` will refuse rather \
-             than guess.",
+            "{} NO CLOCK AND NO CAMERA this session: [invasion_path] is off, so its Present \
+             detour never installs -- nothing calls the harness's per-frame tick and nothing \
+             publishes a camera yaw. The device detours still go in (so a `block` written into \
+             the command file would still be stamped once something ticks), but no command will \
+             be READ, because reading them is part of the tick. Turn [invasion_path] on.",
             ds2_input_harness::LOG_PREFIX
         ));
     }
@@ -849,8 +858,10 @@ fn install_input_harness() {
     }
 }
 
-/// How many device polls [`install_input_harness`] expects to hook: pad, mouse, keyboard.
-const INPUT_HARNESS_SITES: usize = 3;
+/// How many device polls [`install_input_harness`] expects to hook: the three `DLUID` devices
+/// (pad, DirectInput mouse, keyboard) plus `WindowsMouseDevice`, which is the one the camera's
+/// mouse-look actually follows.
+const INPUT_HARNESS_SITES: usize = 4;
 
 /// Say what `[seamless]` resolved to, and what the save container is called because of it.
 ///

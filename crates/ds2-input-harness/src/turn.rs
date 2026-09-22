@@ -46,23 +46,53 @@ pub const NOISE_DEGREES: f32 = 0.25;
 /// wrong initial guess is a blink.
 pub const PROBE_FRAMES: u32 = 10;
 
-/// Error at which the controller starts easing off, in degrees. Above it the axis is held at
-/// [`MAX_MAGNITUDE`].
+/// Error at which the controller starts easing off, in degrees. Above it the channel is held at
+/// its maximum.
 pub const SLOW_SPAN_DEGREES: f32 = 30.0;
 
-/// Smallest axis magnitude the controller will ask for.
+/// How hard the controller is allowed to push, in whatever unit its channel takes.
 ///
-/// **This is a choice, not a measurement.** DARK SOULS II's own right-stick deadzone has not
-/// been read out of the binary, so the floor is set above the value Microsoft publishes as the
-/// XInput right-stick deadzone (`XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE` is 8689 of 32767, about
-/// `0.265` of full scale) with room to spare. If a live run shows the camera stalling near the
-/// goal instead of converging, this floor is the first thing to raise -- and the log line the
-/// drive writes each frame carries the magnitude it asked for, so the stall is visible rather
-/// than inferred.
-pub const MIN_MAGNITUDE: f32 = 0.4;
+/// A pair rather than two constants because the two channels do not share a unit: a pad axis is
+/// a fraction of full deflection and a mouse is pixels of cursor travel per frame. A single
+/// `MAX_MAGNITUDE` would have been right for one of them and nonsense for the other.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Magnitudes {
+    /// Smallest push the controller will ask for.
+    pub min: f32,
+    /// Largest push the controller will ask for.
+    pub max: f32,
+}
 
-/// Largest axis magnitude the controller will ask for: a hard-over stick.
-pub const MAX_MAGNITUDE: f32 = ds2_rva::PAD_AXIS_FULL_SCALE;
+impl Magnitudes {
+    /// For a pad axis, in fractions of full deflection.
+    ///
+    /// **The floor is a choice, not a measurement.** DARK SOULS II's own right-stick deadzone
+    /// has not been read out of the binary, so it is set above the value Microsoft publishes as
+    /// the XInput right-stick deadzone (`XINPUT_GAMEPAD_RIGHT_THUMB_DEADZONE` is 8689 of 32767,
+    /// about `0.265` of full scale) with room to spare. If a live run shows the camera stalling
+    /// near the goal instead of converging, this floor is the first thing to raise -- the drive
+    /// logs the magnitude it asked for, so a stall is visible rather than inferred.
+    pub const PAD: Self = Self {
+        min: 0.4,
+        max: ds2_rva::PAD_AXIS_FULL_SCALE,
+    };
+
+    /// For the mouse, in pixels of authored cursor travel per frame.
+    ///
+    /// The floor is ONE PIXEL and that one is not a choice: the consumer differences two
+    /// successive cursor positions (`ds2_rva::WINDOWS_MOUSE_DEVICE_POSITION_OFFSET`), so a
+    /// one-pixel step is a real, indivisible mouse movement -- there is no deadzone to clear
+    /// because there is no deadzone in a subtraction.
+    ///
+    /// The ceiling IS a choice. Degrees per pixel depends on the player's sensitivity setting,
+    /// which this repo has not measured, so 25 is "brisk but not a spin" rather than a derived
+    /// number. Getting it wrong costs convergence speed and nothing else: the controller eases
+    /// off as the goal approaches and stops when the camera's own yaw says it has arrived.
+    pub const MOUSE: Self = Self {
+        min: 1.0,
+        max: 25.0,
+    };
+}
 
 /// Wrap an angle difference into `-180.0..=180.0`.
 ///
@@ -144,16 +174,19 @@ pub struct Turn {
     frames: u32,
     /// Frames allowed before giving up.
     budget: u32,
+    /// How hard this channel may be pushed, in its own unit.
+    limits: Magnitudes,
 }
 
 impl Turn {
     /// Begin a turn of `degrees` from the camera's current `yaw`.
     ///
     /// `budget` bounds the whole drive. It is not optional and there is no unbounded form: an
-    /// authored axis with no budget is a stuck stick, which is the failure mode every bounded
-    /// action in this repo exists to prevent.
+    /// authored channel with no budget is a stuck input, which is the failure mode every bounded
+    /// action in this repo exists to prevent. `limits` carries the channel's unit -- see
+    /// [`Magnitudes`].
     #[must_use]
-    pub fn begin(degrees: f32, yaw: f32, budget: u32) -> Self {
+    pub fn begin(degrees: f32, yaw: f32, budget: u32, limits: Magnitudes) -> Self {
         Self {
             requested: degrees,
             remaining: degrees,
@@ -163,6 +196,7 @@ impl Turn {
             polarity: Polarity::Unknown,
             frames: 0,
             budget,
+            limits,
         }
     }
 
@@ -220,8 +254,8 @@ impl Turn {
             };
         }
 
-        let magnitude = (self.remaining.abs() / SLOW_SPAN_DEGREES * MAX_MAGNITUDE)
-            .clamp(MIN_MAGNITUDE, MAX_MAGNITUDE);
+        let magnitude = (self.remaining.abs() / SLOW_SPAN_DEGREES * self.limits.max)
+            .clamp(self.limits.min, self.limits.max);
         let direction = match self.polarity {
             // During the probe the request's own sign is as good a guess as any, and being wrong
             // costs `PROBE_FRAMES` frames.
@@ -276,18 +310,63 @@ mod tests {
     /// that is exactly what the `settle` clause in [`Turn::step`] says. A test that demanded
     /// better would be demanding the controller lie.
     fn landing_bound(plant: &Plant) -> f32 {
-        TOLERANCE_DEGREES.max(plant.gain * MAX_MAGNITUDE) + 0.001
+        TOLERANCE_DEGREES.max(plant.gain * Magnitudes::PAD.max) + 0.001
     }
 
     /// Run a turn to completion against a plant, returning the final outcome.
     fn run(plant: &mut Plant, degrees: f32, budget: u32) -> Outcome {
-        let mut turn = Turn::begin(degrees, plant.yaw, budget);
+        run_with(plant, degrees, budget, Magnitudes::PAD)
+    }
+
+    /// Same, for a channel whose unit is not a pad axis.
+    fn run_with(plant: &mut Plant, degrees: f32, budget: u32, limits: Magnitudes) -> Outcome {
+        let mut turn = Turn::begin(degrees, plant.yaw, budget, limits);
         loop {
             match turn.step(plant.yaw) {
-                Outcome::Driving(axis) => plant.apply(axis),
+                Outcome::Driving(push) => plant.apply(push),
                 done => return done,
             }
         }
+    }
+
+    #[test]
+    fn the_mouse_channel_lands_with_its_own_unit() {
+        // Pixels per frame, not fractions of a stick: a plant whose gain is 0.2 degrees per
+        // pixel is a plausible mouse sensitivity, and the controller must converge on it
+        // without knowing that number.
+        let mut plant = Plant {
+            yaw: 0.0,
+            gain: 0.2,
+            sign: 1.0,
+            deadzone: 0.0,
+        };
+        let bound = TOLERANCE_DEGREES.max(plant.gain * Magnitudes::MOUSE.max) + 0.001;
+        let outcome = run_with(&mut plant, 90.0, 2000, Magnitudes::MOUSE);
+        let Outcome::Reached { travelled, .. } = outcome else {
+            panic!("expected Reached, got {outcome:?}");
+        };
+        assert!((travelled - 90.0).abs() <= bound, "travelled {travelled}");
+    }
+
+    #[test]
+    fn a_one_pixel_floor_is_enough_for_a_mouse() {
+        // The pad floor exists to clear a deadzone. A cursor difference has none, so the mouse
+        // channel must be able to creep the last degree at one pixel a frame rather than
+        // oscillating across it.
+        assert_eq!(Magnitudes::MOUSE.min, 1.0);
+        let mut plant = Plant {
+            yaw: 0.0,
+            gain: 0.2,
+            sign: 1.0,
+            // Anything at or below one pixel is swallowed -- so ONLY the floor gets through,
+            // and the turn still has to land.
+            deadzone: 0.99,
+        };
+        let outcome = run_with(&mut plant, 5.0, 2000, Magnitudes::MOUSE);
+        assert!(
+            matches!(outcome, Outcome::Reached { .. }),
+            "got {outcome:?}"
+        );
     }
 
     #[test]
@@ -437,7 +516,7 @@ mod tests {
 
     #[test]
     fn a_turn_that_is_already_satisfied_ends_on_the_first_frame() {
-        let mut turn = Turn::begin(0.0, 12.0, 100);
+        let mut turn = Turn::begin(0.0, 12.0, 100, Magnitudes::PAD);
         assert!(matches!(
             turn.step(12.0),
             Outcome::Reached { frames: 1, .. }

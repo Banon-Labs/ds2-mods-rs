@@ -10,20 +10,24 @@
 //!
 //! * **`DarkSoulsII.exe` imports `DINPUT8.dll` (one thunk) and `XINPUT1_3.dll` (two).** There is
 //!   no raw-input API in the import table at all.
-//! * **Three `DLUID::*Device` classes own the reads**, each overriding vtable slot 23:
-//!   `PadDevice` (`0x140f05540`), `MouseDevice` (`0x140f074a0`), `KeyboardDevice`
+//! * **Three `DLUID::*Device` classes own the DirectInput/XInput reads**, each overriding vtable
+//!   slot 23: `PadDevice` (`0x140f05540`), `MouseDevice` (`0x140f074a0`), `KeyboardDevice`
 //!   (`0x140f06dd0`).
-//! * **The mouse is `IDirectInputDevice8::GetDeviceState(0x14, ...)`** -- a `DIMOUSESTATE2`,
-//!   converted to floats on the device object. That is the mouse-look path, whole.
 //! * **The keyboard is `GetDeviceState(0x100, ...)`** -- the 256-byte DIK table.
 //! * **The pad has three backends** -- `XInputGetState`, `GetDeviceState(0x50, ...)` for a
 //!   DirectInput joystick, and a third HID-shaped one -- **and all three normalise into the same
 //!   six floats on the device object.**
+//! * **The camera's mouse-look is none of those.** It is `WindowsMouseDevice`
+//!   (`0x140b5c1f0`), which calls `GetCursorPos` -> `ScreenToClient` -> `GetClientRect` and
+//!   stores a clamped client-space position; `parseCameraInput` (`0x140b0c950`) turns the
+//!   DIFFERENCE between two successive values of it into camera motion. `DLUID::MouseDevice` is
+//!   a real device the engine polls, but thirty frames of authored delta in it moved the
+//!   published camera yaw by exactly zero. That was a miss in the first version of this crate,
+//!   caught by a live run; the whole chain is now traced in `ds2-rva`.
 //!
-//! That convergence is what makes this crate small. The engine downstream of these three
-//! objects (the `DLUI`/`DLUID` mapper) reads the DEVICE, never the API, so one write per device
-//! after its own poll has run covers every backend a player might have plugged in, and a value
-//! written there is indistinguishable from one the hardware produced.
+//! The engine downstream of these objects reads the DEVICE, never the API, so one write per
+//! device after its own poll has run covers every backend a player might have plugged in, and a
+//! value written there is indistinguishable from one the hardware produced.
 //!
 //! **After, not before.** Each poll rewrites its device's fields from scratch, so a value
 //! written ahead of the original is simply overwritten. Same edge, same fix, as
@@ -31,11 +35,13 @@
 //!
 //! # What this crate does NOT claim
 //!
-//! It does not claim that pad axis 3 is the camera. That binding lives in the `DLUI` mapper,
-//! it is affected by the player's own settings, and it was not established statically. What is
-//! here instead is a way to MEASURE it: `probe` holds each axis in turn and reports what the
-//! camera's yaw did, and `turn` is a closed loop on that same yaw which reports `NO RESPONSE`
-//! rather than success when the axis it drives moves nothing. See [`drive`] and [`turn`].
+//! It does not claim which input a given session's camera follows. Mouse-look's chain is traced
+//! end to end and is the default; whether a pad axis also drives the camera depends on the
+//! mapper's bindings, on the player's settings and on whether anything is plugged in. What is
+//! here instead is a way to MEASURE it: `probe` holds each channel in turn -- both mouse
+//! components and all six pad axes -- and reports what the camera's yaw did, and `turn` is a
+//! closed loop on that same yaw which reports `NO RESPONSE` rather than success when the channel
+//! it drives moves nothing. See [`drive::Channel`] and [`turn`].
 //!
 //! # How an agent drives it
 //!
@@ -62,7 +68,7 @@ pub mod turn;
 mod device;
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 pub use crate::command::Command;
 pub use crate::log::{LOG_PREFIX, LogFn, set_logger};
@@ -70,13 +76,15 @@ pub use crate::log::{LOG_PREFIX, LogFn, set_logger};
 use crate::drive::Session;
 
 /// The harness's whole state. A `Mutex` rather than atomics because this is a state machine and
-/// not a value, and because every one of its users is the game thread -- the three device
-/// detours are the only callers, they run in sequence within one frame, and the critical section
-/// is a few dozen arithmetic instructions with no allocation and nothing that can panic.
+/// not a value, and because its users are two game threads at most -- the `Present` tick, which
+/// is the only thing that advances it, and whatever calls [`request`] -- with a critical section
+/// of a few dozen arithmetic instructions, no allocation and nothing that can panic.
 static SESSION: Mutex<Session> = Mutex::new(Session::new());
 
 /// Whether the detours should blank what the hardware produced. Published out of [`SESSION`]
-/// once per frame so the two detours that are not the frame owner do not need the lock.
+/// once per frame so the device detours never need the lock: they run on whatever thread the
+/// engine polls from, and a detour on the input path that can block on a render-thread tick is
+/// a hitch waiting to happen.
 static BLOCKING: AtomicBool = AtomicBool::new(false);
 
 /// A source of the camera's yaw in degrees, installed by the loader. `0` when none is.
@@ -164,17 +172,82 @@ pub fn is_blocking() -> bool {
     BLOCKING.load(Ordering::Relaxed)
 }
 
+/// Camera motion, in degrees on one frame, that counts as somebody's hand on the controls while
+/// the harness is blocking and authoring nothing.
+///
+/// Bigger than the camera's own follow-and-spring drift, because the point is to catch
+/// interference rather than to report the engine breathing. The test is only applied while a
+/// `block` is running -- outside one, a camera that moves while the harness is idle is simply a
+/// player playing, which is not contamination and not news.
+pub const FOREIGN_MOTION_DEGREES: f32 = 2.0;
+
+/// The yaw the previous tick saw, as `f32` bits, and whether there was one.
+#[cfg(windows)]
+static LAST_TICK_YAW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+#[cfg(windows)]
+static LAST_TICK_YAW_VALID: AtomicBool = AtomicBool::new(false);
+/// Frames on which the camera moved while a block was in force and nothing was being authored.
+static FOREIGN_MOTION_FRAMES: AtomicU64 = AtomicU64::new(0);
+
 /// Advance the harness one frame: poll the command file, step the state machine, publish the
 /// result for the detours to stamp.
 ///
-/// Called by exactly one of the three device detours per frame -- see [`device`] for how that
-/// one is chosen -- so the state machine advances once per frame however many devices exist.
+/// **The clock is `Present`, not an input device.** `ds2-invasion-path`'s frame hook calls this
+/// once per rendered frame, which runs whatever is plugged in, whatever has focus, and whether
+/// or not anybody has touched a control for an hour. The previous version advanced from inside
+/// whichever device poll fired first, and a live session showed what that costs: the game
+/// stopped calling the elected poll and the harness went deaf mid-run.
 #[cfg(windows)]
-fn on_frame() {
+pub fn on_present_frame() {
+    device::tick_devices();
     device::poll_command_file();
-    let frame = session().frame(yaw());
+    let yaw_now = yaw();
+    let frame = session().frame(yaw_now);
     frame.authored.publish();
     BLOCKING.store(frame.block, Ordering::Relaxed);
+    detect_foreign_motion(yaw_now, &frame);
+}
+
+/// Notice the camera moving when, by the harness's own account, nothing should be moving it.
+///
+/// This is the experiment's integrity check. While a `block` is in force the human's input is
+/// supposed to be blanked, so a camera that swings anyway means either that a hand reached an
+/// input path this crate does not cover, or that a device the block relies on stopped being
+/// polled. Either way the run is contaminated and the log has to say so, because a measurement
+/// that cannot detect its own contamination is not evidence.
+#[cfg(windows)]
+fn detect_foreign_motion(yaw_now: Option<f32>, frame: &drive::Frame) {
+    let Some(now) = yaw_now else {
+        LAST_TICK_YAW_VALID.store(false, Ordering::Relaxed);
+        return;
+    };
+    let had_previous = LAST_TICK_YAW_VALID.swap(true, Ordering::Relaxed);
+    let previous = f32::from_bits(LAST_TICK_YAW.swap(now.to_bits(), Ordering::Relaxed));
+    if !had_previous || !frame.block || !frame.authored.is_empty() {
+        return;
+    }
+    let moved = turn::wrap_degrees(now - previous).abs();
+    if moved < FOREIGN_MOTION_DEGREES {
+        return;
+    }
+    let total = FOREIGN_MOTION_FRAMES.fetch_add(1, Ordering::Relaxed) + 1;
+    // Only the first few, and then powers of ten: a contaminated run should say so loudly once,
+    // not drown the log it is trying to make readable.
+    if total <= 3 || total.is_power_of_two() {
+        log::log(format_args!(
+            "{LOG_PREFIX} CONTAMINATED: the camera's yaw moved {moved:.2} degrees while a block \
+             was in force and the harness was authoring nothing. Either an input path this crate \
+             does not cover reached the camera, or a device whose poll does the blanking has \
+             stopped being called. {total} frames so far -- treat any measurement from this run \
+             as suspect."
+        ));
+    }
+}
+
+/// Frames on which the camera moved while blocked and unauthored. Zero is the only clean answer.
+#[must_use]
+pub fn foreign_motion_frames() -> u64 {
+    FOREIGN_MOTION_FRAMES.load(Ordering::Relaxed)
 }
 
 /// Detour the three `DLUID` device polls.
@@ -198,15 +271,16 @@ pub unsafe fn install() -> usize {
     unsafe { device::install() }
 }
 
-/// How many times each of the three device polls has run, in the order pad, mouse, keyboard.
+/// How many times each device poll has run, in the order pad, DirectInput mouse, keyboard,
+/// Win32 mouse.
 ///
 /// A zero here is the difference between "the harness pressed nothing" and "the harness was
-/// never reached", which read identically from the outside and mean opposite things. A pad
-/// count of zero on a keyboard-and-mouse session is expected; all three zero after a hooked
-/// install is a detour that lost its prologue to something else.
+/// never reached", which read identically from the outside and mean opposite things. A pad count
+/// of zero on a keyboard-and-mouse session is expected; all four zero after a hooked install is
+/// a detour that lost its prologue to something else. `status` logs these.
 #[cfg(windows)]
 #[must_use]
-pub fn poll_counts() -> [u64; 3] {
+pub fn poll_counts() -> [u64; 4] {
     device::fire_counts()
 }
 

@@ -26,10 +26,11 @@
 //! block <frames>              suppress every human input for N frames
 //! unblock                     stop suppressing now
 //! axis <index> <value> <frames>   hold one pad axis at a value
-//! mouse <dx> <dy> <frames>    hold a mouse delta for N frames
+//! mouse <dx> <dy> <frames>    move the authored cursor N pixels per frame
 //! buttons <hex> <frames>      hold a pad button mask for N frames
 //! turn <degrees> [frames]     turn the camera, watching its own yaw (closed loop)
-//! probe [frames]              hold each pad axis in turn and report the yaw each one moved
+//! probe [frames]              hold each channel in turn and report the yaw each one moved
+//! channel <name>              what `turn` drives: mouse-x, mouse-y, pad0..pad5
 //! release                     stop authoring anything
 //! status                      write the current state to the log
 //! ```
@@ -68,14 +69,20 @@ pub enum Command {
         value: f32,
         frames: u32,
     },
-    /// Hold a mouse delta for `frames`.
+    /// Move the authored cursor `dx`/`dy` PIXELS PER FRAME for `frames`.
+    ///
+    /// Not a one-off jump: the consumer differences two successive cursor positions, so a
+    /// constant position is a single frame of motion followed by stillness. See
+    /// [`crate::authored::Authored::mouse`].
     Mouse { dx: f32, dy: f32, frames: u32 },
     /// Hold a pad button mask for `frames`.
     Buttons { mask: u16, frames: u32 },
     /// Turn the camera by `degrees`, closed-loop, giving up after `budget` frames.
     Turn { degrees: f32, budget: u32 },
-    /// Hold each pad axis in turn and report how far the camera's yaw moved for each.
+    /// Hold each channel in turn and report how far the camera's yaw moved for each.
     Probe { frames: u32 },
+    /// Point `turn` at a different input.
+    SetChannel(crate::drive::Channel),
     /// Stop authoring anything. Does not lift a `block`.
     Release,
     /// Write the current state to the log.
@@ -147,6 +154,14 @@ pub fn parse(line: &str) -> Result<Command, ParseError> {
         "unblock" => Ok(Command::Unblock),
         "release" => Ok(Command::Release),
         "status" => Ok(Command::Status),
+        "channel" => rest
+            .first()
+            .and_then(|word| crate::drive::Channel::parse(word))
+            .map(Command::SetChannel)
+            .ok_or(ParseError::BadArguments {
+                verb: "channel",
+                expected: "mouse-x | mouse-y | pad0..pad5",
+            }),
         "axis" => {
             let bad = ParseError::BadArguments {
                 verb: "axis",
@@ -332,6 +347,16 @@ mod tests {
                 frames: DEFAULT_PROBE_FRAMES
             })
         );
+        assert_eq!(
+            parse("channel pad3"),
+            Ok(Command::SetChannel(crate::drive::Channel::PadAxis(3)))
+        );
+        assert_eq!(
+            parse("channel mouse-x"),
+            Ok(Command::SetChannel(crate::drive::Channel::MouseX))
+        );
+        assert!(parse("channel elbow").is_err());
+        assert!(parse("channel").is_err());
     }
 
     #[test]
