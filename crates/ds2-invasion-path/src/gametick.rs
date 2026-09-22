@@ -587,10 +587,12 @@ fn poll_or_request(state: &mut Tick) {
                     // is. The real trail treats this as ordinary and says so once; the
                     // self-check must not let it pass quietly.
                     log(format_args!(
-                        "self-check: the planner said NO ROUTE to 0x{target:x}. That character is \
-                         a live object at a real position, so this is not \"nowhere to walk\" -- \
-                         suspect the snap (either end returning 0xffffffff), the capability mask, \
-                         or the {} cost budget.",
+                        "self-check: the planner said NO ROUTE to 0x{target:x}. Read the `snap` \
+                         line above: two real ids there means the SNAP is fine and the planner \
+                         refused to connect them -- look at the capability mask (0x{:03x}) and \
+                         the budget ({:.0}). A MISS at either end means the snap never found \
+                         ground, and the planner is innocent.",
+                        ds2_rva::NV_ROUTE_PLANNER_CAPABILITY_DEFAULT,
                         ds2_rva::NV_ROUTE_MAX_COST_LONG_RANGE
                     ));
                 }
@@ -672,9 +674,12 @@ fn poll_or_request(state: &mut Tick) {
     if matches!(state.check, Check::WaitingForRoute(_)) && !state.said_snap {
         state.said_snap = true;
         log(format_args!(
-            "self-check: snap start={} goal={} | world holds {} graph(s); {}",
+            "self-check: snap start={} goal={} | capability 0x{:03x}, budget {:.0} | world holds \
+             {} graph(s); {}",
             describe_snap(&from),
             describe_snap(&to),
+            ds2_rva::NV_ROUTE_PLANNER_CAPABILITY_DEFAULT,
+            ds2_rva::NV_ROUTE_MAX_COST_LONG_RANGE,
             from.graphs,
             match (from.chosen_key, from.keyed_hit) {
                 // The whole point of the sweep, said out loud: what the key SHOULD have been.

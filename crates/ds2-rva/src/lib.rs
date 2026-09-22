@@ -6265,18 +6265,57 @@ pub const NV_ROUTE_PLANNER_GOAL_OFFSET: usize = 0x38;
 /// can honestly pass.
 pub const NV_ROUTE_PLANNER_CAPABILITY_OFFSET: usize = 0x3c;
 
-/// The capability a caller with no `ChrAiNavimeshCtrl` may pass. `0`.
+/// The capability to route a PLAYER with. `0x7f8`.
 ///
-/// **Not a guess and not a placeholder: it is a value `0x14042ed50` itself returns.** That
-/// function's `switch` has a `default: uVar1 = 0` arm, taken for every size-class enum outside
-/// `2..=7`, and every one of its ten feature bits is off when the corresponding controller
-/// boolean is clear. So `0` is the mask the engine produces for a small agent with no special
-/// movement, and the search treats it as such rather than as a sentinel.
+/// **THIS WAS `0` AND THAT WAS WRONG IN A WAY THAT RETURNS NO ROUTE ON OPEN GROUND.** A live run
+/// asked for a path between a player and an NPC 16.8 m apart in Majula and the planner refused
+/// every time. `0` is a value `0x14042ed50` really does return -- its `default:` arm -- which is
+/// why it looked defensible; what it models is an agent that can do NOTHING but walk on flat
+/// mesh, and DARK SOULS II's navmesh types its edges.
 ///
-/// The local player has no `ChrAiNavimeshCtrl` to read a truer mask from -- that object belongs
-/// to the AI module, and a player is not driven by it. Inventing one to read ten booleans out of
-/// is exactly the fabrication bd `ds2-call-the-games-own-functions` forbids.
-pub const NV_ROUTE_PLANNER_CAPABILITY_DEFAULT: u32 = 0;
+/// `0x140baf0d0(poly_flags, capability, kind)` is the traversability test, returning `0` for
+/// passable and `FLT_MAX` for not. Read it as a table of what a capability of `0` forbids:
+///
+/// ```text
+/// (capability & 7) < (poly & 7)                 size class: 0 is the most permissive, fine
+/// (poly>>8 & 1) == 0 || (capability & 0x8)      polys flagged 0x100 need bit 0x8
+/// switch (poly & 0x78):
+///   0x00 0x08 0x18 0x38 0x48 0x50 0x58  ->  always passable
+///   0x10  ->  passable only if (poly>>9 &1)==0, or capability & 0x40, or capability & 0x80
+///   0x20  ->  passable only if capability & 0x110      <- capability 0 CANNOT
+///   0x40  ->  passable only if capability & 0x10       <- capability 0 CANNOT
+/// ```
+///
+/// So a capability of `0` makes two whole edge types impassable and a third conditionally so. A
+/// route that needs one step down, one ladder or one doorway has no path at all.
+///
+/// # Why `0x7f8` specifically, and why it is not a guess either
+///
+/// **The engine constructs this exact value.** `0x14042ee40`, the AI's own destination step, does
+/// `FUN_140baf0d0(goal_poly_flags, size_class | 0x7f8, 0)` before requesting anything, and calls
+/// `0x140bb40e0` -- the immediate-failure setter -- when even THAT comes back `FLT_MAX`. `0x7f8`
+/// is bits 3..10: `0x8 | 0x10 | 0x20 | 0x40 | 0x80 | 0x100 | 0x200 | 0x400`, every feature gate
+/// in the table above, with the size-class bits left at `0`. It is the engine's own spelling of
+/// "assume this agent can do anything".
+///
+/// That is the right model for a PLAYER. The AI passes its own restricted mask because an AI
+/// really cannot open some doors or take some drops; a person at the controls can use every
+/// ladder, every ledge and every door in the map, and is the most capable agent in it. Routing
+/// them as the least capable one is not conservative, it is wrong -- and it fails silently,
+/// because [`NV_ROUTE_PLANNER_FLAG_FAILED`] looks identical to "there is genuinely no way".
+pub const NV_ROUTE_PLANNER_CAPABILITY_DEFAULT: u32 = 0x7f8;
+
+/// The feature-bit half of [`NV_ROUTE_PLANNER_CAPABILITY_DEFAULT`], for the log line that says
+/// which mask a request used. `0x7f8`.
+pub const NV_ROUTE_CAPABILITY_ALL_FEATURES: u32 = 0x7f8;
+
+/// `(u32 poly_flags, u32 capability, u8 kind) -> f32`. RVA `0x00ba_f0d0`.
+///
+/// The edge traversability test: `0.0` passable, `FLT_MAX` (`0x1410ae854`) not. Recorded because
+/// it is the function that DEFINES what a capability mask means -- see
+/// [`NV_ROUTE_PLANNER_CAPABILITY_DEFAULT`], whose whole derivation is this function's body.
+/// Nothing in this workspace calls it; the planner does.
+pub const NAVI_EDGE_TRAVERSAL_COST: u32 = 0x00ba_f0d0;
 
 /// `NvRoutePlanner -> max cost`. `+0x40`, `f32`, the search's budget.
 ///
@@ -6395,6 +6434,26 @@ pub const MAP_MANAGER_AREA_OFFSET: usize = 0x170;
 /// things worth knowing before trusting a `-1` check on it: it CANNOT return `-1` (the largest
 /// value it can produce is `0x3fffffff`), and [`NAVI_GRAPH_DATA_FOR_KEY`] re-applies the same
 /// mask itself, so the key form is a convention rather than a requirement.
+///
+/// # SIX BITS, AND NOBODY HAS CONFIRMED WHICH SIX
+///
+/// **A live run failed here.** A player and an NPC 16.8 m apart in Majula, on ground both walk,
+/// and the planner returned NO ROUTE on every attempt -- which is exactly what a wrong key looks
+/// like, because a wrong key makes [`NAVI_GRAPH_DATA_FOR_KEY`] return the wrong graph or none,
+/// and then both endpoint snaps answer [`NAVI_GRAPH_ID_NONE`].
+///
+/// Only `area & 0x3f` survives, and the engine's own two call sites do not agree on where `area`
+/// comes from: `0x14037be30` reads `MapManager + 0x170`, while `0x14042c9a0` uses
+/// `0x1403ba380(character)` or falls back to the byte at `CharacterCtrl + 0x110`. DARK SOULS II
+/// names its maps `m10_02_00_00` and ships 28 `.ngp` meshes, so six bits cannot hold a map
+/// number -- which makes the input a slot index or an enum, and makes "which slot is the player
+/// in" a question this constant cannot answer on its own.
+///
+/// **So `ds2-invasion-path` does not rely on it.** `crate::navquery::snap` sweeps every graph the
+/// world holds and lets the snapped DISTANCE choose, then reads the winner's own
+/// [`NV_NAVI_GRAPH_HEADER_KEY_OFFSET`] and logs it -- which is how the correct key stops being a
+/// guess. The keyed lookup is still performed alongside, purely so the log can say whether it
+/// agreed.
 pub const NAVI_GRAPH_KEY_FROM_AREA: u32 = 0x00ba_b1f0;
 
 /// `GameManagerImp* -> NvNaviGraphWorld*`. RVA `0x0039_a9f0`.
@@ -6432,6 +6491,40 @@ pub const NAVI_GRAPH_DATA_FOR_KEY: u32 = 0x00ba_db90;
 /// and the abort is inside the game's own panic handler rather than anywhere this code could
 /// catch it.
 pub const NAVI_GRAPH_NEAREST_ID: u32 = 0x00ba_bf90;
+
+/// `NvNaviGraphWorld -> resident graphs`. `+0x28`, an INLINE array of pointers.
+///
+/// Not a pointer to an array: `0x140badb90` takes `world + 0x28` as the base and indexes it
+/// directly. The count is at [`NV_NAVI_GRAPH_WORLD_GRAPH_COUNT_OFFSET`].
+pub const NV_NAVI_GRAPH_WORLD_GRAPHS_OFFSET: usize = 0x28;
+
+/// `NvNaviGraphWorld -> number of resident graphs`. `+0x68`, `i32`.
+pub const NV_NAVI_GRAPH_WORLD_GRAPH_COUNT_OFFSET: usize = 0x68;
+
+/// How many graphs the inline array can hold. `8`.
+///
+/// **Structural, not a guess**: the array starts at `+0x28` and the count that bounds it lives at
+/// `+0x68`, so a ninth pointer would overwrite its own count. Used as a hard clamp when sweeping,
+/// because a count read from live memory is a number and this is the only thing that makes it a
+/// bound.
+pub const NV_NAVI_GRAPH_WORLD_MAX_GRAPHS: usize = 8;
+
+/// `NvNaviGraphData -> header`. `+0x28`.
+///
+/// `0x140badb90` reaches the key through it and `0x140babf90` reaches the sub-graph array and
+/// its count (`header + 0x08`) through it, so it is the object that actually describes a loaded
+/// mesh.
+pub const NV_NAVI_GRAPH_HEADER_OFFSET: usize = 0x28;
+
+/// The map key a loaded graph carries. `+0x1c` within [`NV_NAVI_GRAPH_HEADER_OFFSET`].
+///
+/// **This is the authoritative key, and reading it is worth more than computing one.**
+/// `0x140badb90` exists to compare `(area & 0x3f) << 24 | 0xffffff` against this field; a mod
+/// that cannot reliably produce the `area` half can instead find the right graph another way and
+/// then READ this, which turns "what is the key?" from a question into a measurement.
+///
+/// See [`NAVI_GRAPH_KEY_FROM_AREA`] for why producing one is not reliable.
+pub const NV_NAVI_GRAPH_HEADER_KEY_OFFSET: usize = 0x1c;
 
 /// The radius `0x14037be30` snaps with. `20.0`, read from `0x1410ad5ec`.
 ///
