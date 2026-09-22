@@ -6556,6 +6556,35 @@ pub const NAVI_GRAPH_DATA_FOR_KEY: u32 = 0x00ba_db90;
 /// catch it.
 pub const NAVI_GRAPH_NEAREST_ID: u32 = 0x00ba_bf90;
 
+/// `(id table*, u32 key) -> NvNaviGraph*`. The lookup the ROUTE PLANNER uses, which is not the
+/// one the snap uses, and that difference is why a route between two good ids can be refused.
+///
+/// `0x140badb90` is a linear scan over the world's eight resident graphs comparing a MAP key.
+/// This is a hash bucket walk -- `(key * 0x89) % buckets` -- over a separate table, keyed by
+/// [`NV_ROUTE_ID_GRAPH_KEY_MASK`] applied to a navigation-graph ID. `NvRoutePlanner`'s step at
+/// `0x140bb4110` calls only this one, for both ends, and hands the two results to the search.
+pub const NV_NAVI_GRAPH_FOR_ROUTE_ID: u32 = 0x00bb_2620;
+
+/// The id table [`NV_NAVI_GRAPH_FOR_ROUTE_ID`] hashes into. `+0x88` on the object
+/// [`NAVI_GRAPH_WORLD_FROM_GAME_MANAGER`] returns.
+///
+/// Read straight off the engine's own call at `0x14042efd1`, which is
+/// `FUN_140bb2620(*(FUN_14039a9f0(GameManagerImp) + 0x88), goal | 0x1ffff)`.
+pub const NV_NAVI_GRAPH_WORLD_ID_TABLE_OFFSET: usize = 0x88;
+
+/// What a navigation-graph ID is OR-ed with to get the key of the graph that owns it. `0x1ffff`.
+///
+/// The low 15 bits of an id are a node index within its graph (`0x14042efe8` indexes the node
+/// array with `id & 0x7fff`); saturating the low 17 leaves the graph's identity. Two ids that
+/// disagree above bit 17 are in DIFFERENT graphs, whatever their positions look like.
+pub const NV_ROUTE_ID_GRAPH_KEY_MASK: u32 = 0x1_ffff;
+
+/// `NvNaviGraph -> number of boundary nodes`. `+0x30`, `i16`.
+///
+/// Part of the cross-graph search's entry guard at `0x140bb4310`: a graph with none of these
+/// cannot be entered or left, and the search gives up before it starts.
+pub const NV_NAVI_GRAPH_LINK_COUNT_OFFSET: usize = 0x30;
+
 /// `NvNaviGraphWorld -> resident graphs`. `+0x28`, an INLINE array of pointers.
 ///
 /// Not a pointer to an array: `0x140badb90` takes `world + 0x28` as the base and indexes it

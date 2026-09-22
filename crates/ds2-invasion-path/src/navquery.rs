@@ -96,6 +96,8 @@ type CreateRoutePlanner = unsafe extern "system" fn(usize, usize, usize, usize) 
 type RequestRoute = unsafe extern "system" fn(usize, u32, u32, u32, f32);
 /// `(NvNavigationSystem*, object*)` -- sets the retire byte and returns.
 type RetireNavObject = unsafe extern "system" fn(usize, usize);
+/// `(id table*, u32 key) -> NvNaviGraph*`. See [`ds2_rva::NV_NAVI_GRAPH_FOR_ROUTE_ID`].
+type GraphForRouteId = unsafe extern "system" fn(usize, u32) -> usize;
 
 /// Resolve an RVA and transmute it to `T`.
 ///
@@ -326,6 +328,95 @@ pub(crate) unsafe fn create_planner(nav_system: usize) -> Option<usize> {
     // allocator that object carries and returns 0 if it cannot.
     let planner = unsafe { create(nav_system, 0, 0, 0) };
     (planner != 0).then_some(planner)
+}
+
+/// The planner's own entry guard, evaluated before the request so a refusal can be named.
+///
+/// # Why this is read out of the engine rather than reasoned about
+///
+/// `NO ROUTE` was being blamed on the capability mask and the cost budget, by a log line this
+/// crate wrote, and neither is reachable from the branch that was actually failing.
+/// `NvRoutePlanner`'s step (`0x140bb4110`, vtable slot 2) resolves each end's graph with
+/// [`ds2_rva::NV_NAVI_GRAPH_FOR_ROUTE_ID`], and when the two graphs differ it enters
+/// `0x140bb4310`, which opens with
+///
+/// ```text
+/// if (area(start) == area(goal) && start_graph && goal_graph
+///     && start_graph->links > 0 && goal_graph->links > 0) { ...search... }
+/// else { flags |= 6; }          // READY|FAILED -- what `poll` reports as NO ROUTE
+/// ```
+///
+/// Four conditions, all of them decided before a single node is expanded. This reads the same
+/// four so the log says which one was false instead of naming a suspect.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Guard {
+    /// The key each id hashes to. Different keys mean different graphs, which is the whole
+    /// reason the cross-graph path is taken at all.
+    pub(crate) start_key: u32,
+    pub(crate) goal_key: u32,
+    /// What [`ds2_rva::NV_NAVI_GRAPH_FOR_ROUTE_ID`] returned for each. Zero is the refusal.
+    pub(crate) start_graph: usize,
+    pub(crate) goal_graph: usize,
+    /// `NvNaviGraph + 0x30`, the boundary-node count the guard also requires to be positive.
+    pub(crate) start_links: i16,
+    pub(crate) goal_links: i16,
+    /// `0x140badb90(world, id)` for each end -- the guard requires these to be EQUAL.
+    pub(crate) start_area: usize,
+    pub(crate) goal_area: usize,
+}
+
+/// Read the four conditions `0x140bb4310` tests, for a start and goal id.
+///
+/// # Safety
+///
+/// Game thread only, and only once the world exists -- both calls are engine functions that walk
+/// engine-owned tables.
+pub(crate) unsafe fn guard(start: u32, goal: u32) -> Option<Guard> {
+    let manager = game_manager()?;
+    let world_from_manager: Option<GraphWorldFromGameManager> =
+        unsafe { entry(ds2_rva::NAVI_GRAPH_WORLD_FROM_GAME_MANAGER) };
+    let graph_for_id: Option<GraphForRouteId> =
+        unsafe { entry(ds2_rva::NV_NAVI_GRAPH_FOR_ROUTE_ID) };
+    let data_for_key: Option<GraphDataForKey> = unsafe { entry(ds2_rva::NAVI_GRAPH_DATA_FOR_KEY) };
+    let (Some(world_from_manager), Some(graph_for_id), Some(data_for_key)) =
+        (world_from_manager, graph_for_id, data_for_key)
+    else {
+        return None;
+    };
+    // SAFETY: `manager` is non-null.
+    let world = unsafe { world_from_manager(manager) };
+    if world == 0 {
+        return None;
+    }
+    // THE TABLE IS NOT THE WORLD. The planner hashes into a separate table hanging off `+0x88`;
+    // passing the world itself would read its graph array as bucket geometry.
+    let table = unsafe { safe_read_usize(world + ds2_rva::NV_NAVI_GRAPH_WORLD_ID_TABLE_OFFSET) }
+        .filter(|table| *table != 0)?;
+    let mut report = Guard {
+        start_key: start | ds2_rva::NV_ROUTE_ID_GRAPH_KEY_MASK,
+        goal_key: goal | ds2_rva::NV_ROUTE_ID_GRAPH_KEY_MASK,
+        ..Guard::default()
+    };
+    // SAFETY: a bucket walk over the engine's own table; a key it does not hold returns 0.
+    report.start_graph = unsafe { graph_for_id(table, report.start_key) };
+    // SAFETY: as above.
+    report.goal_graph = unsafe { graph_for_id(table, report.goal_key) };
+    let links = |graph: usize| {
+        if graph == 0 {
+            return 0;
+        }
+        // SAFETY: an engine-owned graph; the reader refuses an unmapped page.
+        unsafe { safe_read_u32(graph + ds2_rva::NV_NAVI_GRAPH_LINK_COUNT_OFFSET) }
+            .map_or(0, |word| word as i16)
+    };
+    report.start_links = links(report.start_graph);
+    report.goal_links = links(report.goal_graph);
+    // SAFETY: the same linear scan the snap already uses, here with a raw id rather than a map
+    // key -- which is exactly what the engine passes it on this path.
+    report.start_area = unsafe { data_for_key(world, start) };
+    // SAFETY: as above.
+    report.goal_area = unsafe { data_for_key(world, goal) };
+    Some(report)
 }
 
 /// Ask for a route between two graph ids.

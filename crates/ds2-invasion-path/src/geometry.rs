@@ -72,6 +72,22 @@ pub const FRAMING_TOLERANCE_SHARE: f32 = 0.25;
 /// game's own near plane is much larger than this; this is only the arithmetic floor.
 pub const NEAR_EPSILON: f32 = 0.05;
 
+/// How far each barb is turned away from the shaft, in radians. Thirty degrees reads as an
+/// arrowhead; much less is a spike and much more is a fan.
+pub const BARB_RADIANS: f32 = core::f32::consts::FRAC_PI_6;
+
+/// An arrow in pixels: four points in the back buffer's coordinate space, origin top-left.
+///
+/// Every field is already where it will be drawn. See [`Camera::screen_arrow`] for why the arrow
+/// stopped being a world-space object.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenArrow {
+    pub base: [f32; 2],
+    pub tip: [f32; 2],
+    pub left_barb: [f32; 2],
+    pub right_barb: [f32; 2],
+}
+
 /// The point on a character that the camera is actually aimed at.
 ///
 /// A DARK SOULS II character's position is their FEET, and the camera looks at the upper body, so
@@ -592,6 +608,66 @@ impl Camera {
     pub fn pin_for(&self, anchor: [f32; 3], screen: [f32; 2]) -> Option<[f32; 2]> {
         let at = self.project(anchor, screen)?;
         Some([screen[0] * 0.5 - at[0], screen[1] * 0.5 - at[1]])
+    }
+
+    /// The arrow, in pixels, base on the middle of the frame and always the same length.
+    ///
+    /// # Why the arrow is not a world-space object any more
+    ///
+    /// It was, and a world-space arrow pointing near the view axis foreshortens to nothing. That
+    /// is not a corner case, it is the ordinary one -- you are usually facing roughly towards the
+    /// person you want to find. A live run caught it exactly: an NPC 84.6 m away produced
+    /// `tip=1268,710` against a base of `1280,720`, a twelve-pixel stub with both barbs on the
+    /// same pixel. The previous attempt to fix this grew the arrow towards the target until it
+    /// LOOKED long enough, which cannot help when the direction itself has no extent on screen.
+    ///
+    /// A compass needle does not foreshorten. Its base is a pin, its length is fixed, and the
+    /// only thing the world decides is which way it turns. So the whole arrow is built in pixels:
+    /// nothing here can collapse, clip, land off screen, or end up behind the lens.
+    ///
+    /// **The direction is exact for a target in front and sensible for one behind.** The screen
+    /// offset of a projected point from the centre is `(clip.x/w * W/2, -clip.y/w * H/2)`, so for
+    /// `w > 0` the direction is `(clip.x * W, -clip.y * H)` -- this, with the aspect ratio
+    /// already in it. For `w < 0` that same expression keeps the signs of the target's camera
+    /// space `x` and `y`, so a player behind and to the left gets an arrow pointing left, which
+    /// is the way you have to turn. Dividing by a negative `w` would point it the wrong way, and
+    /// refusing to draw would hide the player you most want to find.
+    ///
+    /// A target exactly along the view axis has no direction on screen; the arrow points up,
+    /// which on any compass means straight ahead.
+    #[must_use]
+    pub fn screen_arrow(
+        &self,
+        target: [f32; 3],
+        screen: [f32; 2],
+        length_px: f32,
+        barb_px: f32,
+    ) -> ScreenArrow {
+        let clip = self.to_clip(target);
+        let base = [screen[0] * 0.5, screen[1] * 0.5];
+        let direction =
+            normalize([clip[0] * screen[0], -clip[1] * screen[1], 0.0]).unwrap_or([0.0, -1.0, 0.0]);
+        let tip = [
+            base[0] + direction[0] * length_px,
+            base[1] + direction[1] * length_px,
+        ];
+        // The barbs run BACK from the tip, turned away from the shaft by `BARB_RADIANS` either
+        // side. Rotating the shaft direction rather than reflecting it keeps the head's opening
+        // the same whichever way the arrow is pointing.
+        let barb = |turn: f32| {
+            let (sin, cos) = turn.sin_cos();
+            let back = [
+                -(direction[0] * cos - direction[1] * sin),
+                -(direction[0] * sin + direction[1] * cos),
+            ];
+            [tip[0] + back[0] * barb_px, tip[1] + back[1] * barb_px]
+        };
+        ScreenArrow {
+            base,
+            tip,
+            left_barb: barb(BARB_RADIANS),
+            right_barb: barb(-BARB_RADIANS),
+        }
     }
 
     /// Does this camera frame the character the way DARK SOULS II's camera frames a character?
@@ -1475,6 +1551,55 @@ mod framing_is_measured_at_the_head {
             (before - after).abs() < 1e-4,
             "the pin turned the arrow by {} degrees",
             (before - after).to_degrees()
+        );
+    }
+
+    /// The failure that put nothing usable on screen: a world-space arrow aimed near the view
+    /// axis projected to a twelve-pixel stub with both barbs on one pixel. A screen-space arrow
+    /// is the same length wherever the target is, including straight ahead and straight behind.
+    #[test]
+    fn the_arrow_is_the_same_length_wherever_the_target_is() {
+        let eye = [10.0, 6.8, -21.0];
+        let camera = looking(eye, [10.0, 6.8, -16.0]);
+        const LENGTH: f32 = 200.0;
+        // Dead ahead, hard left, hard right, straight up, straight down, and behind.
+        for target in [
+            [10.0, 6.8, 40.0],
+            [-40.0, 6.8, -16.0],
+            [60.0, 6.8, -16.0],
+            [10.0, 90.0, -16.0],
+            [10.0, -70.0, -16.0],
+            [10.0, 6.8, -90.0],
+        ] {
+            let arrow = camera.screen_arrow(target, SCREEN, LENGTH, 60.0);
+            let shaft = ((arrow.tip[0] - arrow.base[0]).powi(2)
+                + (arrow.tip[1] - arrow.base[1]).powi(2))
+            .sqrt();
+            assert!(
+                (shaft - LENGTH).abs() < 0.01,
+                "a target at {target:?} gave a shaft of {shaft}px"
+            );
+            assert_eq!(arrow.base, [SCREEN[0] * 0.5, SCREEN[1] * 0.5]);
+            assert_ne!(arrow.left_barb, arrow.right_barb, "barbs collapsed");
+        }
+    }
+
+    /// A player behind you is the case you most need the arrow for, and dividing by a negative
+    /// `w` would point it at the opposite side of the screen. Behind-and-left must read left.
+    #[test]
+    fn a_target_behind_you_points_the_way_you_have_to_turn() {
+        let camera = looking([10.0, 6.8, -21.0], [10.0, 6.8, -16.0]);
+        let behind_left = camera.screen_arrow([-20.0, 6.8, -60.0], SCREEN, 200.0, 60.0);
+        assert!(
+            behind_left.tip[0] < behind_left.base[0],
+            "behind and to the left must point left, tip was {:?}",
+            behind_left.tip
+        );
+        let behind_right = camera.screen_arrow([40.0, 6.8, -60.0], SCREEN, 200.0, 60.0);
+        assert!(
+            behind_right.tip[0] > behind_right.base[0],
+            "behind and to the right must point right, tip was {:?}",
+            behind_right.tip
         );
     }
 

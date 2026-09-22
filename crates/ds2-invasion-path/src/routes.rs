@@ -6,7 +6,7 @@
 // Windows-only in practice; ungated so the assignment logic below stays host-testable.
 #![cfg_attr(not(windows), allow(dead_code))]
 
-use crate::geometry::{self, Arrow};
+use crate::geometry;
 
 /// What to draw for one player.
 #[derive(Debug, Clone, PartialEq)]
@@ -25,7 +25,11 @@ pub(crate) enum RouteShape {
     /// No walkable route is available, so an arrow leaves the player's body pointing at the
     /// target. This is what ships today, and it is the same fallback the Elden Ring crate uses
     /// when its navmesh answers "there is no way to walk there".
-    Arrow(Arrow),
+    ///
+    /// **The target's world position, not a shape.** The arrow is built in pixels at draw time
+    /// by [`crate::geometry::Camera::screen_arrow`], because a world-space arrow pointing near
+    /// the view axis foreshortens to a stub -- and that is the usual case, not a rare one.
+    Arrow([f32; 3]),
 }
 
 /// One player's overlay, ready to project.
@@ -128,12 +132,7 @@ mod tests {
     use super::*;
 
     fn arrow() -> RouteShape {
-        RouteShape::Arrow(Arrow {
-            tail: [0.0; 3],
-            tip: [0.0, 0.0, 1.0],
-            left_barb: [0.0; 3],
-            right_barb: [0.0; 3],
-        })
+        RouteShape::Arrow([0.0, 0.0, 1.0])
     }
 
     #[test]

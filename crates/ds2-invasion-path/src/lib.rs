@@ -615,26 +615,27 @@ mod windows_impl {
             .find(|player| player.distance >= state.config.near_suppress_meters)
             .copied();
 
-        // THE SELF-CHECK'S TARGET, and it only ever stands in for an absence. A real player in
-        // the session always wins: the diagnostic exists because a solo session cannot exercise
-        // any of this, not because NPCs are interesting to point at.
+        // A TARGET EVEN WHEN YOU ARE ALONE, and this no longer stops when the diagnostic does.
         //
-        // See `config::DEFAULT_NPC_SELF_CHECK`. Once the tick has said everything it is going to
-        // say, `self_check_done` goes true and this stops nominating anybody -- which drops the
-        // ask to `None`, which is what puts the stones out.
-        // THE ARM FOLLOWS THE FILE; ONLY THE NOMINATION FOLLOWS "DONE". Gating the arm on
-        // `self_check_done` too was a deadlock: finishing set `done`, `done` made the arm false,
-        // and a false arm is the only thing that can clear `done` -- so the file could say
-        // `true` forever and the check would never run again. Editing the key false and back to
-        // true is now a genuine re-run, which is the whole reason the config is hot-reloaded.
+        // It used to. `self_check_done` gated the nomination, so thirty seconds after the check
+        // gave up -- which it does whenever the route never arrives, and the route is not
+        // arriving -- there was no target, no route, no arrow and no dot. A solo session got
+        // `drew 0 arrow(s), 0 vertices` and a player looking at the screen got nothing at all,
+        // with nothing on screen to say whether the overlay was even running. That is the
+        // diagnostic switching OFF THE FEATURE it was written to observe.
+        //
+        // Two things were conflated and are now separate. The TRAIL diagnostic finishes, says
+        // what it found and stops laying stones -- that is what `self_check_done` means, and the
+        // tick still honours it. WHO TO POINT AT is a question about the overlay, and the answer
+        // when nobody else is in your session is "the nearest character", for as long as you are
+        // alone. A real player always wins; see `config::DEFAULT_NPC_SELF_CHECK`.
         crate::gametick::set_self_check(state.config.npc_self_check);
-        let checking = state.config.npc_self_check && !crate::gametick::self_check_done();
-        if !checking {
-            // A finished check must stop bypassing `near_suppress_meters` for its old target,
-            // or an NPC standing next to you keeps an arrow long after the diagnostic is over.
+        if !state.config.npc_self_check {
+            // Switched off in the file: stop bypassing `near_suppress_meters` for the old
+            // target, or an NPC standing next to you keeps an arrow after the key says no.
             state.self_check_target = None;
         }
-        if checking && routed.is_none() {
+        if state.config.npc_self_check && routed.is_none() {
             let latched = state.self_check_target;
             if let Some(npc) = census::self_check_target(latched) {
                 if latched != Some(npc.ctrl) {
@@ -699,22 +700,12 @@ mod windows_impl {
                 ));
                 continue;
             }
-            // HEAD TO HEAD, not foot to foot. A character's position is their feet, and the
-            // camera aims at the upper body, so an arrow built from the feet starts a couple of
-            // hundred pixels below the middle of the frame -- and `emit` then has to drag it
-            // that whole distance to pin the base, dragging the arrowhead off the target with
-            // it. Built from the head the correction is a few pixels and the head stays on the
-            // person. It also points at the person rather than at the ground they stand on.
-            let Some(arrow) = geometry::arrow(
-                geometry::head(local),
-                geometry::head(player.position),
-                state.config.arrow_meters,
-                camera.up(),
-            ) else {
-                continue;
-            };
+            // THE DESTINATION, NOT A SHAPE. The arrow is built in pixels at draw time, so there
+            // is nothing to construct here and nothing that can fail: a target directly behind
+            // the camera, at the same position as the player, or fifty metres below all produce
+            // an arrow, because the direction is read out of clip space rather than projected.
             snapshot.push(Route::new(
-                RouteShape::Arrow(arrow),
+                RouteShape::Arrow(player.position),
                 slot,
                 player.distance,
                 state.config.bold_at_meters,
@@ -756,18 +747,27 @@ mod windows_impl {
     /// as long as the character is wide, which is how the arrow came to be sitting ON the player
     /// and still be unreadable as an arrow. A share of the viewport is the same size to the eye
     /// whatever the display is.
-    const MIN_ARROW_SHARE: f32 = 0.15;
+    /// How long the shaft is, as a share of the viewport's height. **A fixed size, not a
+    /// minimum.**
+    ///
+    /// It used to be a floor under a world-space length that was then grown towards the target
+    /// until it looked long enough. That cannot work when the direction has no extent on screen:
+    /// a live run produced a twelve-pixel stub with both barbs on the same pixel, pointing at an
+    /// NPC 84.6 m away that happened to be near the view axis -- which is the ordinary case, not
+    /// a rare one, because you are usually facing roughly towards whoever you are looking for.
+    /// A compass needle does not foreshorten, so neither does this.
+    const ARROW_SHARE: f32 = 0.15;
 
-    /// The last hundred-pixel band the arrow's tail landed in, and the frames left before another
-    /// sample may be written.
+    /// How long each barb is, as a share of the viewport's height. A third of the shaft.
+    const ARROW_BARB_SHARE: f32 = 0.05;
+
+    /// The last ten-degree band of heading the arrow pointed in, and the frames left before
+    /// another sample may be written.
     ///
     /// SAMPLED ON MOVEMENT, NOT ON A COUNT. A fixed number of samples runs out while the game
     /// sits on a loaded save with nobody at the controls, which is exactly when the arrow cannot
-    /// move and the log therefore proves nothing: a latched camera and a live one write identical
-    /// lines until something turns. Keying the sample to a CHANGE in where the tail lands makes a
-    /// still camera silent and a turning one talkative, which is the right way round -- and it is
-    /// motion that separates the two failures, because only a latched camera lets the tail walk
-    /// away from the character.
+    /// move and the log therefore proves nothing. Keying the sample to a CHANGE of heading makes
+    /// a still camera silent and a turning one talkative, which is the right way round.
     static ARROW_BAND: core::sync::atomic::AtomicUsize =
         core::sync::atomic::AtomicUsize::new(usize::MAX);
     static ARROW_COUNTDOWN: core::sync::atomic::AtomicUsize =
@@ -776,9 +776,6 @@ mod windows_impl {
     /// Frames between arrow samples, so a swinging camera writes a readable trail rather than one
     /// line per frame.
     const ARROW_SAMPLE_FRAMES: usize = 15;
-
-    /// How wide a band of tail-from-centre counts as the same place, in pixels.
-    const ARROW_BAND_PX: f32 = 100.0;
 
     /// Half the width of the dot that marks the arrow's base, in pixels.
     ///
@@ -791,63 +788,18 @@ mod windows_impl {
     /// Project one route and append its triangles.
     fn emit(out: &mut Vec<Vertex>, route: &Route, camera: &Camera, screen: [f32; 2]) {
         let color = [route.color[0], route.color[1], route.color[2], route.alpha];
-        let centre = [screen[0] * 0.5, screen[1] * 0.5];
         match &route.shape {
-            RouteShape::Arrow(arrow) => {
-                let arrow = &lengthen(arrow, route.distance_meters, camera, screen);
-
-                // THE DOT, FIRST AND UNCONDITIONALLY. Everything below can legitimately draw
-                // nothing -- a target behind the lens trims the shaft away, a foreshortened one
-                // collapses it -- and the base is the one part that is never in doubt, because
-                // it is not computed from anything. Two triangles of a square, drawn by handing
-                // `push_segment` a horizontal hair and a stroke as wide as the dot.
-                push_segment(
-                    out,
-                    [centre[0] - BASE_DOT_RADIUS_PX, centre[1]],
-                    [centre[0] + BASE_DOT_RADIUS_PX, centre[1]],
-                    BASE_DOT_RADIUS_PX * 2.0,
-                    color,
+            RouteShape::Arrow(target) => {
+                // THE WHOLE ARROW IS IN PIXELS. Base on the centre, fixed length, direction from
+                // the camera -- see `Camera::screen_arrow` for why it stopped being a world-space
+                // object. Nothing below can collapse, clip, or land behind the lens, so there is
+                // no case in which this branch draws nothing.
+                let arrow = camera.screen_arrow(
+                    geometry::head(*target),
+                    screen,
+                    screen[1] * ARROW_SHARE,
+                    screen[1] * ARROW_BARB_SHARE,
                 );
-
-                // THE BASE IS THE CENTRE OF THE DIAL. `Camera::pin_for` has the argument; the
-                // shift is a few pixels rather than the character's height because the arrow is
-                // built head-to-head upstream, so the arrowhead stays on the person it points
-                // at. `None` is the player's own head behind the lens, which means the camera is
-                // not looking at them: the dot stands and there is no shaft to place.
-                let Some(shift) = camera.pin_for(arrow.tail, screen) else {
-                    return;
-                };
-                let pin = |p: [f32; 2]| [p[0] + shift[0], p[1] + shift[1]];
-                // `out` is a parameter rather than a capture so the dot below can be pushed
-                // between two uses of this: a closure holding the buffer would own it for the
-                // whole branch.
-                let segment = |out: &mut Vec<Vertex>, from: [f32; 3], to: [f32; 3]| {
-                    // UNCLIPPED FIRST, PINNED, THEN CLIPPED. Clipping to the viewport before the
-                    // translation clips against a rectangle the line is not going to be in.
-                    if let Some((a, b)) = camera.project_segment_unclipped(from, to, screen)
-                        && let Some((a, b)) = geometry::clip_to_viewport(pin(a), pin(b), screen)
-                    {
-                        push_segment(out, a, b, route.stroke_px, color);
-                    }
-                };
-                // A FEW ARROWS, SPACED. The first screenshot of this feature showed an orange
-                // stripe floating in the air with no head and no connection to the player, which
-                // is at least two different bugs wearing one appearance -- a tail that is not
-                // the body, or barbs collapsing onto the shaft. Theorising about which costs a
-                // game launch per theory; four projected points settle it. The second screenshot
-                // showed the same stripe again, and the one shot this used to take could not
-                // distinguish the remaining cause -- a camera read once and never again -- from
-                // a correct one, because both are right in the frame they are sampled. Hence
-                // several samples, seconds apart: `pin` staying small across them is the overlay
-                // tracking, and growing is it drifting.
-                //
-                // THE NUMBER IS NOW THE CORRECTION, NOT THE ERROR. The base cannot be off the
-                // player any more -- it is pinned -- so what is worth watching is how hard the
-                // pin had to pull, which is the same measurement the old `tail-from-centre` was
-                // taking and is now the only thing it can tell you. Small means the camera is the
-                // one being rendered; large means it is stale and the arrowhead is being dragged
-                // along with the base, which is the failure that survives pinning.
-                let drift = Some(geometry::length([shift[0], shift[1], 0.0]));
                 let ready = ARROW_COUNTDOWN
                     .fetch_update(
                         core::sync::atomic::Ordering::Relaxed,
@@ -855,54 +807,42 @@ mod windows_impl {
                         |left| Some(left.saturating_sub(1)),
                     )
                     .is_ok_and(|left| left == 0);
-                // `usize::MAX` is the never-sampled state and has to differ from a real band, so
-                // a tail that is off screen gets its own value rather than sharing that one.
-                let band = drift.map_or(usize::MAX - 1, |drift| (drift / ARROW_BAND_PX) as usize);
+                // Sampled on a CHANGE of heading, so a still camera is silent and a turning one
+                // is talkative. The band is the tip's angle in whole tens of degrees.
+                let turn = (arrow.tip[1] - arrow.base[1]).atan2(arrow.tip[0] - arrow.base[0]);
+                let band = (turn.to_degrees() / 10.0) as i32 as usize;
                 if ready && ARROW_BAND.swap(band, core::sync::atomic::Ordering::Relaxed) != band {
                     ARROW_COUNTDOWN
                         .store(ARROW_SAMPLE_FRAMES, core::sync::atomic::Ordering::Relaxed);
-                    // PIXELS AS DRAWN, which means after the pin -- the old version printed the
-                    // raw projection and so could not be compared with anything on screen.
-                    let px = |world| {
-                        camera.project(world, screen).map_or_else(
-                            || "off".to_string(),
-                            |p| {
-                                let p = pin(p);
-                                format!("{:.0},{:.0}", p[0], p[1])
-                            },
-                        )
-                    };
-                    let drift =
-                        drift.map_or_else(|| "off".to_string(), |drift| format!("{drift:.0}px"));
                     log(format_args!(
-                        "arrow: pin {drift} | tail {:.1},{:.1},{:.1} -> tip {:.1},{:.1},{:.1} | screen tail={} tip={} barbs={} {} | screen={:.0}x{:.0}",
-                        arrow.tail[0],
-                        arrow.tail[1],
-                        arrow.tail[2],
+                        "arrow: base {:.0},{:.0} -> tip {:.0},{:.0} ({:.0} deg) | target \
+                         {:.1},{:.1},{:.1} | screen={:.0}x{:.0}",
+                        arrow.base[0],
+                        arrow.base[1],
                         arrow.tip[0],
                         arrow.tip[1],
-                        arrow.tip[2],
-                        px(arrow.tail),
-                        px(arrow.tip),
-                        px(arrow.left_barb),
-                        px(arrow.right_barb),
+                        turn.to_degrees(),
+                        target[0],
+                        target[1],
+                        target[2],
                         screen[0],
                         screen[1]
                     ));
                 }
-                segment(out, arrow.tail, arrow.tip);
-                // NO BARBS ON A TIP THAT IS BEHIND THE LENS. `project_segment` trims a crossing
-                // segment to the camera plane, where dividing by a near-zero `w` throws the
-                // trimmed end thousands of pixels out -- the live log has barbs at `6138,-525`
-                // on a 2132x1200 screen. For the shaft that is harmless and correct: the line
-                // leaves the character and runs off the edge towards a player who is behind you,
-                // which is the information wanted. For the head it is a huge V flung across the
-                // frame from a vertex that is not on screen at all, which is noise drawn over
-                // the game. An arrowhead is only meaningful where its point is.
-                if camera.project(arrow.tip, screen).is_some() {
-                    segment(out, arrow.tip, arrow.left_barb);
-                    segment(out, arrow.tip, arrow.right_barb);
-                }
+                // The base is drawn as a dot because it is a fixed point on the dial, and a
+                // shaft alone leaves nothing under the reticle when the arrow points straight at
+                // you and foreshortens -- which it cannot now, but the dot is also the only
+                // thing on screen that says the overlay is running at all.
+                push_segment(
+                    out,
+                    [arrow.base[0] - BASE_DOT_RADIUS_PX, arrow.base[1]],
+                    [arrow.base[0] + BASE_DOT_RADIUS_PX, arrow.base[1]],
+                    BASE_DOT_RADIUS_PX * 2.0,
+                    color,
+                );
+                push_segment(out, arrow.base, arrow.tip, route.stroke_px, color);
+                push_segment(out, arrow.tip, arrow.left_barb, route.stroke_px, color);
+                push_segment(out, arrow.tip, arrow.right_barb, route.stroke_px, color);
             }
             RouteShape::Walk(points) => {
                 // NOT PINNED. A walkable route is a path over the ground and every point of it
@@ -916,84 +856,6 @@ mod windows_impl {
                 }
             }
         }
-    }
-
-    /// Grow an arrow until its shaft is at least [`MIN_ARROW_SHARE`] of the viewport high, or until it
-    /// reaches the person it points at -- whichever comes first.
-    ///
-    /// # Why the length is a minimum rather than a size
-    ///
-    /// The configured `arrow_meters` is a WORLD length, and a world length says nothing about how
-    /// big the thing looks. An arrow pointing across your view is three metres of clearly visible
-    /// line; the same arrow pointing away from you is three metres of nearly nothing, because
-    /// almost all of it is depth. That is the case that matters most -- you are usually running
-    /// towards the player you are pointing at.
-    ///
-    /// **Bounded by the real distance**, which is the part that keeps this honest. An arrow is a
-    /// claim about direction, and one that extended past its target would be a claim about
-    /// distance as well, and a false one. A player far away and dead ahead gets a long line that
-    /// stops short of them; a player beside you keeps the short arrow that was already legible.
-    ///
-    /// Returns the arrow unchanged when it cannot be projected at all, which is the case when
-    /// both ends are behind the lens -- there is nothing to make legible.
-    fn lengthen(
-        arrow: &geometry::Arrow,
-        distance_meters: f32,
-        camera: &Camera,
-        screen: [f32; 2],
-    ) -> geometry::Arrow {
-        let Some(direction) = geometry::normalize(geometry::sub(arrow.tip, arrow.tail)) else {
-            return *arrow;
-        };
-        let current = geometry::length(geometry::sub(arrow.tip, arrow.tail));
-        let Some((tail_px, tip_px)) =
-            camera.project_segment_unclipped(arrow.tail, arrow.tip, screen)
-        else {
-            return *arrow;
-        };
-        let shaft_px = geometry::length([tip_px[0] - tail_px[0], tip_px[1] - tail_px[1], 0.0]);
-        // Already legible, or so foreshortened that the scale factor would be meaningless -- a
-        // shaft of a fraction of a pixel is a target almost exactly along the view axis, and
-        // dividing by it produces a number rather than an answer.
-        const DEGENERATE_PX: f32 = 0.5;
-        let wanted_px = screen[1] * MIN_ARROW_SHARE;
-        if shaft_px >= wanted_px || shaft_px < DEGENERATE_PX || current <= f32::EPSILON {
-            return *arrow;
-        }
-        // BISECT, DO NOT SCALE. The obvious `length * wanted_px / shaft_px` is wrong twice over:
-        // foreshortening is not linear in length, and a shaft that projected to about a pixel
-        // makes that ratio enormous. The first version did exactly that, clamped the result to
-        // the target's distance, and so grew every arrow to the full fifty metres -- which put
-        // the arrowhead off the top of the screen and left a bare orange stripe. The screenshot
-        // that found it is the reason this is a search.
-        //
-        // Six halvings over [current, distance] land within a couple of percent, which is far
-        // finer than the eye needs, and every step re-projects rather than extrapolating.
-        let projected_px = |length: f32| {
-            let tip = geometry::add_scaled(arrow.tail, direction, length);
-            camera
-                .project_segment_unclipped(arrow.tail, tip, screen)
-                .map_or(0.0, |(a, b)| {
-                    geometry::length([b[0] - a[0], b[1] - a[1], 0.0])
-                })
-        };
-        let (mut low, mut high) = (current, distance_meters.max(current));
-        // The far end is not long enough either: nothing more can be done, and stopping short of
-        // the target is still better than drawing past them.
-        if projected_px(high) > wanted_px {
-            for _ in 0..6 {
-                let middle = 0.5 * (low + high);
-                if projected_px(middle) < wanted_px {
-                    low = middle;
-                } else {
-                    high = middle;
-                }
-            }
-        }
-        let length = high;
-        let up = camera.up();
-        let target = geometry::add_scaled(arrow.tail, direction, length);
-        geometry::arrow(arrow.tail, target, length, up).unwrap_or(*arrow)
     }
 
     /// The back buffer's size in pixels, which is the coordinate space the overlay draws in.

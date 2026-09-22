@@ -129,15 +129,16 @@ static SELF_CHECK: Mutex<bool> = Mutex::new(false);
 
 /// Set once the self-check has said everything it is going to say.
 ///
-/// The draw side reads it and stops nominating an NPC, which drops `WANTED` to `None`, which is
-/// what makes the tick put the stones out -- through the ordinary stand-down path rather than a
-/// special one, so the teardown is itself part of what got tested.
+/// **The draw side no longer reads this, and that is the fix for an overlay that switched itself
+/// off.** It used to: `done` stopped the draw side nominating an NPC, which dropped `WANTED` to
+/// `None`, which took the target away -- so thirty seconds after the check gave up on a route
+/// that was never going to arrive, a solo session drew nothing at all and had no way to say
+/// whether the mod was even loaded. A diagnostic must not be able to disable the feature it
+/// observes.
+///
+/// What it still does, which is all it was ever entitled to do: stop THIS file laying and
+/// re-laying stones for a check that has finished, and stop the check printing its lines twice.
 static SELF_CHECK_DONE: Mutex<bool> = Mutex::new(false);
-
-/// Has the self-check finished? Read by the draw side.
-pub(crate) fn self_check_done() -> bool {
-    SELF_CHECK_DONE.try_lock().is_ok_and(|done| *done)
-}
 
 /// Turn the self-check on or off. Called from the draw side every frame.
 ///
@@ -587,11 +588,13 @@ fn poll_or_request(state: &mut Tick) {
                     // is. The real trail treats this as ordinary and says so once; the
                     // self-check must not let it pass quietly.
                     log(format_args!(
-                        "self-check: the planner said NO ROUTE to 0x{target:x}. Read the `snap` \
-                         line above: two real ids there means the SNAP is fine and the planner \
-                         refused to connect them -- look at the capability mask (0x{:03x}) and \
-                         the budget ({:.0}). A MISS at either end means the snap never found \
-                         ground, and the planner is innocent.",
+                        "self-check: the planner said NO ROUTE to 0x{target:x}. Read the `guard` \
+                         part of the `snap` line above -- it names the condition. `guard \
+                         REFUSES` is the engine rejecting the pair before expanding a node, and \
+                         the reason is printed. `guard OK` means the search really ran and \
+                         really found nothing, and THEN the capability mask (0x{:03x}) and the \
+                         budget ({:.0}) are worth looking at. A MISS at either end is the snap, \
+                         and the planner is innocent.",
                         ds2_rva::NV_ROUTE_PLANNER_CAPABILITY_DEFAULT,
                         ds2_rva::NV_ROUTE_MAX_COST_LONG_RANGE
                     ));
@@ -661,27 +664,35 @@ fn poll_or_request(state: &mut Tick) {
     };
     state.cooldown = REPLAN_SECONDS;
 
-    // PRINT THE IDS BEFORE ASKING, AND PRINT THEM IN HEX.
+    // PRINT THE IDS BEFORE ASKING, AND PRINT THE ENGINE'S OWN GUARD BESIDE THEM.
     //
-    // The first live run reported NO ROUTE and named three suspects -- a bad map key, the
-    // capability mask, the cost budget -- and the log could not tell them apart. It can now:
-    // `0xffffffff` at either end is the SNAP failing and the planner is innocent; two real ids
-    // that still will not connect is the planner's problem and the mask and the budget are the
-    // things to look at. Those are different bugs and they used to read identically.
+    // This line used to name the capability mask and the cost budget as the things to look at
+    // when two good ids would not connect. That was WRONG, and it cost a session: neither is
+    // reachable from the branch that refuses. `NvRoutePlanner`'s step resolves each end's graph
+    // by hashing `id | 0x1ffff`, and when the two graphs differ it enters `0x140bb4310`, which
+    // sets READY|FAILED -- the thing `poll` reports as NO ROUTE -- unless all four of
+    // `area(start) == area(goal)`, both graphs resolved, and both link counts positive. Not one
+    // node is expanded before that decision, so no mask and no budget can be involved in it.
+    //
+    // So the guard is read and printed. A refusal now names the false condition instead of
+    // handing the reader a suspect list.
     //
     // Once per self-check run rather than twice a second, because a line that repeats sixty
     // times is a line nobody reads.
     if matches!(state.check, Check::WaitingForRoute(_)) && !state.said_snap {
         state.said_snap = true;
+        // SAFETY: game thread, and the world exists -- the snaps above just walked it.
+        let guard = match (from.id, to.id) {
+            (Some(start), Some(goal)) => unsafe { navquery::guard(start, goal) },
+            _ => None,
+        };
         log(format_args!(
-            "self-check: snap start={} goal={} | capability 0x{:03x}, budget {:.0} | world holds \
-             {} graph(s); {}",
+            "self-check: snap start={} goal={} | world holds {} graph(s); {} | {}",
             describe_snap(&from),
             describe_snap(&to),
-            ds2_rva::NV_ROUTE_PLANNER_CAPABILITY_DEFAULT,
-            ds2_rva::NV_ROUTE_MAX_COST_LONG_RANGE,
             from.graphs,
-            describe_key(&from)
+            describe_key(&from),
+            describe_guard(guard.as_ref()),
         ));
     }
 
@@ -894,12 +905,63 @@ fn describe_key(report: &navquery::SnapReport) -> String {
 /// that is the single most important thing this line can say.
 fn describe_snap(report: &navquery::SnapReport) -> String {
     match (report.id, report.chosen) {
+        // "SWEEP SLOT", NOT "GRAPH". This index is which entry of the world's eight-pointer
+        // array the sweep happened to pick, and printing it as "graph 0" made two ids in
+        // genuinely different graphs read as though they shared one -- which is the exact
+        // distinction the planner refuses on. The graph identity is in the guard's keys.
         (Some(id), Some(index)) => format!(
-            "0x{id:08x} (graph {index}, {:.1} m off)",
+            "0x{id:08x} (sweep slot {index}, {:.1} m off)",
             report.distance_squared.max(0.0).sqrt()
         ),
         (Some(id), None) => format!("0x{id:08x}"),
         (None, _) => "MISS (0xffffffff -- nothing within the snap radius on any graph)".to_string(),
+    }
+}
+
+/// The planner's entry guard, as the four conditions it actually is.
+///
+/// Reads as `guard OK` or `guard REFUSES: <the false ones>`, so a NO ROUTE that follows has its
+/// cause on the line above it rather than a list of suspects.
+fn describe_guard(guard: Option<&navquery::Guard>) -> String {
+    let Some(guard) = guard else {
+        return "guard NOT READ (one end missed, or the world was not there to ask)".to_string();
+    };
+    let mut wrong = Vec::new();
+    if guard.start_area != guard.goal_area {
+        wrong.push(format!(
+            "different areas (0x{:x} vs 0x{:x})",
+            guard.start_area, guard.goal_area
+        ));
+    }
+    if guard.start_graph == 0 {
+        wrong.push(format!(
+            "start key 0x{:08x} is in no graph",
+            guard.start_key
+        ));
+    }
+    if guard.goal_graph == 0 {
+        wrong.push(format!("goal key 0x{:08x} is in no graph", guard.goal_key));
+    }
+    if guard.start_graph != 0 && guard.start_links <= 0 {
+        wrong.push(format!("start graph has {} links", guard.start_links));
+    }
+    if guard.goal_graph != 0 && guard.goal_links <= 0 {
+        wrong.push(format!("goal graph has {} links", guard.goal_links));
+    }
+    let keys = format!(
+        "keys 0x{:08x}/0x{:08x}{}",
+        guard.start_key,
+        guard.goal_key,
+        if guard.start_key == guard.goal_key {
+            " (same graph)"
+        } else {
+            " (CROSS-GRAPH)"
+        }
+    );
+    if wrong.is_empty() {
+        format!("guard OK -- {keys}")
+    } else {
+        format!("guard REFUSES -- {keys}: {}", wrong.join("; "))
     }
 }
 
