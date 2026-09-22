@@ -227,6 +227,7 @@ INVASION_PATH_SECTION = "invasion_path"
 KEY_INVASION_PATH_ENABLED = "enabled"
 KEY_INVASION_PATH_TOGGLE = "toggle_key"
 KEY_INVASION_PATH_START_ENABLED = "start_enabled"
+KEY_INVASION_PATH_MARKER_EFFECT_ID = "marker_effect_id"
 #: Mirrors `LOG_PREFIX` in `crates/ds2-invasion-path/src/log.rs`. Grep for it when a run
 #: disappoints: `roster:` and `camera:` under this prefix are the two lines that say whether the
 #: overlay found anything, and `overlay:` is the one that says whether it could draw at all.
@@ -1106,6 +1107,7 @@ def config_text(
     invasion_path: bool = False,
     invasion_path_key: str = "semicolon",
     invasion_path_start_enabled: bool = False,
+    invasion_path_marker_effect_id: int = 0,
     input_harness: bool = False,
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
@@ -1608,11 +1610,11 @@ def config_text(
 # it draws through the screen during multiplayer, which is a thing to opt into rather than to
 # discover.
 #
-# What it draws is an ARROW per player, not a walkable route. The Elden Ring crate this is ported
-# from follows the navmesh; DARK SOULS II has its own navigation stack (`NvRoutePlanner`,
-# `NvRouteNavigator`) and the half that READS a finished route is ported and tested, but asking
-# for one takes navigation-graph ids that nothing can produce from a world position yet. See
-# `crates/ds2-invasion-path/src/navpath.rs`.
+# What it draws is a walkable ROUTE along DARK SOULS II's own navigation mesh, and an arrow when
+# the planner reports no way to walk there. Asking for a route was believed impossible here for a
+# while -- the request takes navigation-graph ids, and the conversion from a world position was
+# recorded as an asynchronous engine job. It is not one: it is a plain synchronous call that
+# returns the id in a register. See `crates/ds2-invasion-path/src/navquery.rs`.
 {KEY_INVASION_PATH_ENABLED} = {str(invasion_path).lower()}
 # Live, like the two sort bindings above: re-read about once a second, so the key moves without a
 # restart. A name that does not parse keeps the one already working and says so in the log.
@@ -1626,6 +1628,16 @@ def config_text(
 # the roster and camera code runs without anyone having to press anything.
 {KEY_INVASION_PATH_TOGGLE} = "{invasion_path_key}"
 {KEY_INVASION_PATH_START_ENABLED} = {str(invasion_path_start_enabled).lower()}
+# THE PRISM STONE TRAIL. `0` is off. `833` is the Prism Stone's own effect -- the item DARK SOULS
+# II calls a Prism Stone and ELDEN RING renamed to Rainbow Stone, whose glowing pebble is the
+# whole reason the sibling crate places effects along its route at all. `833..=839` are its seven
+# colours, a seven-entry table the game reaches through an emevd instruction named
+# `七色石発射`, "fire seven-colour stone".
+#
+# ON by nothing: spawning an effect is the only thing this DLL does that changes the game rather
+# than drawing over it, and the stones are placed by the engine's own spawn from the game's own
+# tick. Live, like every setting here -- change the id with the game running.
+{KEY_INVASION_PATH_MARKER_EFFECT_ID} = {invasion_path_marker_effect_id}
 
 [{INPUT_HARNESS_SECTION}]
 # LETS AN AGENT MOVE THE CAMERA, AND TAKES YOUR CONTROLLER AWAY WHILE IT DOES.
@@ -1721,6 +1733,7 @@ def write_config(
     invasion_path: bool = False,
     invasion_path_key: str = "semicolon",
     invasion_path_start_enabled: bool = False,
+    invasion_path_marker_effect_id: int = 0,
     input_harness: bool = False,
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
@@ -1755,6 +1768,7 @@ def write_config(
         invasion_path,
         invasion_path_key,
         invasion_path_start_enabled,
+        invasion_path_marker_effect_id,
         input_harness,
     )
     path.write_text(text, encoding="utf-8")
@@ -1847,6 +1861,7 @@ def dry_run(
     invasion_path: bool = False,
     invasion_path_key: str = "semicolon",
     invasion_path_start_enabled: bool = False,
+    invasion_path_marker_effect_id: int = 0,
     input_harness: bool = False,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
@@ -1899,6 +1914,7 @@ def dry_run(
             invasion_path,
             invasion_path_key,
             invasion_path_start_enabled,
+            invasion_path_marker_effect_id,
             input_harness,
         ):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
@@ -1947,6 +1963,7 @@ def dry_run(
                 invasion_path=invasion_path,
                 invasion_path_key=invasion_path_key,
                 invasion_path_start_enabled=invasion_path_start_enabled,
+                invasion_path_marker_effect_id=invasion_path_marker_effect_id,
                 input_harness=input_harness,
             ),
             indent="[dry-run]   | ",
@@ -2277,6 +2294,7 @@ def launch(
     invasion_path: bool = False,
     invasion_path_key: str = "semicolon",
     invasion_path_start_enabled: bool = False,
+    invasion_path_marker_effect_id: int = 0,
     input_harness: bool = False,
 ) -> int:
     report_environment(probe)
@@ -2324,6 +2342,7 @@ def launch(
         invasion_path,
         invasion_path_key,
         invasion_path_start_enabled,
+        invasion_path_marker_effect_id,
         input_harness,
     )
     print(f"[config] {config_path}")
@@ -3710,6 +3729,20 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--invasion-path-markers",
+        dest="invasion_path_marker_effect_id",
+        type=int,
+        default=0,
+        metavar="EFFECT_ID",
+        help=(
+            "lay the game's OWN glowing stones along the route, one effect id per marker. 0 is "
+            "off and is the default. 833 is the Prism Stone -- the item ELDEN RING renamed to "
+            "Rainbow Stone -- and 833..=839 are its seven colours. This is the only setting here "
+            "that makes the DLL change the game rather than draw over it: the stones are real "
+            "effects, spawned by the engine from the game's own tick."
+        ),
+    )
+    parser.add_argument(
         "--invasion-path-on",
         dest="invasion_path_start_enabled",
         action="store_true",
@@ -3836,6 +3869,7 @@ def main() -> int:
             args.invasion_path,
             args.invasion_path_key,
             args.invasion_path_start_enabled,
+            args.invasion_path_marker_effect_id,
             args.input_harness,
         )
     return launch(
@@ -3869,6 +3903,7 @@ def main() -> int:
         args.invasion_path,
         args.invasion_path_key,
         args.invasion_path_start_enabled,
+        args.invasion_path_marker_effect_id,
         args.input_harness,
     )
 

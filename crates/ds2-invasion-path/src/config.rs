@@ -11,17 +11,26 @@
 //! in the same second as the previous read is invisible to a timestamp check. That is not a rare
 //! race: it is what happens every time someone tweaks a number and immediately tweaks it back.
 //!
-//! # The marker settings are scaffolding, and they say so out loud
+//! # The marker settings
 //!
 //! `er-invasion-path`'s file carries `marker_fxr_id` and its spacing and budget siblings: they
-//! place the game's OWN effect -- the Rainbow Stone's lingering coloured stone -- along the route
-//! at intervals, so the trail is made of real objects in the world rather than of lines drawn
-//! over it. The equivalent keys are parsed here now.
+//! place the game's OWN effect -- the lingering coloured stone -- along the route at intervals, so
+//! the trail is made of real objects in the world rather than of lines drawn over it. The
+//! equivalent keys are here, and `crate::trail` and `crate::sfx` act on them.
 //!
-//! **Nothing places a marker yet, and two separate things are missing before anything can.** DARK
-//! SOULS II's effect-spawn entry point is unidentified in this workspace, so there is no call to
-//! make; and `crate::navpath` can read a finished route but cannot ask for one, so there is no
-//! path to place markers along. Both are under investigation and both are filed.
+//! **The item is the PRISM STONE here.** Elden Ring renamed it to Rainbow Stone; DARK SOULS II's
+//! is `ItemParam` row `60450000`. Worth stating once, because searching this game for "rainbow"
+//! finds nothing and reads as the feature being absent.
+//!
+//! Three things were in the way of this and none of them still is: the spawn is
+//! `KatanaSfxSystem`'s at `0x140beb590`; it runs on the game's own tick (`crate::gametick`) rather
+//! than in the `Present` detour, because its create path read-modify-writes a quality level, two
+//! live vectors, an RNG and a red-black tree with no lock anywhere; and `crate::navquery` can now
+//! ask for a route rather than only read one. `ds2-mods-rs-3al` and `ds2-mods-rs-4yd` carry the
+//! derivations.
+//!
+//! **Still unseen on a screen.** Nobody has watched a stone appear. `ds2-mods-rs-zbo` lists the
+//! log lines a live run should produce and what each missing one would rule out.
 //!
 //! A setting that is read, validated and then silently ignored is worse than a missing one -- it
 //! is a promise the code does not keep. So these are not silent: [`PathConfig::markers_requested`]
@@ -84,14 +93,27 @@ pub const DEFAULT_START_ENABLED: bool = false;
 
 /// The effect placed at each marker along a route. `0` is off, and off is the default.
 ///
-/// **No id is known yet.** Elden Ring's `302022` -- the Rainbow Stone's lingering coloured stone,
-/// the one that stays on the ground after the throw rather than flashing once -- is the id
-/// `er-invasion-path` documents, and FXR ids do not transfer between these games. Whatever DARK
-/// SOULS II uses to identify an effect has not been established here, so this default cannot be a
-/// real id: it is the switch that stays off until one is found.
+/// **`833` is the one to set**, and it is the Prism Stone's own: a seven-entry table at
+/// `0x1410c7b58` holds `833..=839`, one colour each, reached from `ItemParam` row `60450000`
+/// through an emevd instruction whose name is literally `七色石発射` -- "fire seven-colour stone".
+/// Seven ids for seven colours is also the answer to a problem `er-invasion-path` could not solve:
+/// it needed several different EFFECTS to tell players apart, because an Elden Ring FXR carries no
+/// tint. Here the colours are the point of the item.
 ///
-/// Spawning an effect would be the only thing this crate does that changes the game rather than
-/// drawing over it, which is a second reason for off-by-default.
+/// DARK SOULS II identifies an effect by a bare `int32` in the range 40..8557 -- no `SfxParam`, no
+/// FXR -- so Elden Ring's six-digit `302022` is not merely a different number, it is a different
+/// kind of number. Pass the BASE id: with the remaster's high-quality effects on, the engine tries
+/// `id + 20000` itself.
+///
+/// The default is still `0`, because spawning anything is the only thing this crate does that
+/// changes the game rather than drawing over it, and because no one has yet watched a stone appear
+/// on a screen.
+pub const PRISM_STONE_FIRST_EFFECT_ID: u32 = 833;
+
+/// The Prism Stone's seven colours, `833..=839`. See [`PRISM_STONE_FIRST_EFFECT_ID`].
+pub const PRISM_STONE_EFFECT_IDS: core::ops::RangeInclusive<u32> = 833..=839;
+
+/// The effect placed at each marker along a route. `0` is off, and off is the default.
 pub const DEFAULT_MARKER_EFFECT_ID: u32 = 0;
 
 /// Metres between markers along the route.
