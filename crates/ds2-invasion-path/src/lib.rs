@@ -180,6 +180,9 @@ mod windows_impl {
         last_census: Option<(usize, usize, usize, usize)>,
         /// The last (arrows, vertices) pair logged, likewise.
         last_drawn: Option<(usize, usize)>,
+        /// Whether the markers-requested line has been written. One line per session: the file
+        /// is re-read every second and a per-read complaint would be a log full of it.
+        said_markers: bool,
         /// Whether the camera framed the character last frame. `true` for the same reason as
         /// [`State::had_camera`]: the first refusal has to be audible.
         framed: bool,
@@ -236,6 +239,7 @@ mod windows_impl {
                 last_census: None,
                 last_drawn: None,
                 framed: true,
+                said_markers: false,
             });
         }
 
@@ -480,6 +484,20 @@ mod windows_impl {
             return Vec::new();
         }
         state.framed = true;
+
+        // KEEP THE PROMISE THE FILE MAKES. `marker_effect_id` is parsed and nothing places a
+        // marker, which would normally make it the worst kind of setting -- read, validated and
+        // ignored. It is not ignored: asking for markers says, once, which of the two missing
+        // halves is in the way, so an edit that appears to do nothing has an audible reason.
+        if state.config.markers_requested() && !state.said_markers {
+            state.said_markers = true;
+            log(format_args!(
+                "markers: effect {} requested, and none can be placed yet -- DARK SOULS II's \
+                 effect-spawn call is unidentified here, and `navpath` can read a route but not \
+                 ask for one, so there is no path to place them along. The arrow is unaffected.",
+                state.config.marker_effect_id
+            ));
+        }
 
         let Some((players, census)) = census::remotes(state.config.max_targets) else {
             return Vec::new();

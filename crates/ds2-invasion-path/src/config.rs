@@ -11,13 +11,23 @@
 //! in the same second as the previous read is invisible to a timestamp check. That is not a rare
 //! race: it is what happens every time someone tweaks a number and immediately tweaks it back.
 //!
-//! # Only settings that do something are here
+//! # The marker settings are scaffolding, and they say so out loud
 //!
-//! `er-invasion-path`'s file carries `marker_fxr_id`, `marker_spacing_meters`, `max_markers`,
-//! `search_range_meters` and `search_budget`. None of them are here, because nothing in this
-//! crate spawns an effect or asks for a navmesh search yet -- see `crate::navpath`. A setting
-//! that is read, validated, logged and then ignored is worse than a missing one: it is a
-//! documented promise the code does not keep.
+//! `er-invasion-path`'s file carries `marker_fxr_id` and its spacing and budget siblings: they
+//! place the game's OWN effect -- the Rainbow Stone's lingering coloured stone -- along the route
+//! at intervals, so the trail is made of real objects in the world rather than of lines drawn
+//! over it. The equivalent keys are parsed here now.
+//!
+//! **Nothing places a marker yet, and two separate things are missing before anything can.** DARK
+//! SOULS II's effect-spawn entry point is unidentified in this workspace, so there is no call to
+//! make; and `crate::navpath` can read a finished route but cannot ask for one, so there is no
+//! path to place markers along. Both are under investigation and both are filed.
+//!
+//! A setting that is read, validated and then silently ignored is worse than a missing one -- it
+//! is a promise the code does not keep. So these are not silent: [`PathConfig::markers_requested`]
+//! is what the draw path asks, and asking for markers while they cannot be placed produces a log
+//! line naming which of the two halves is missing. The setting does something observable from the
+//! day it lands; what it does today is tell you the truth about why your trail is not there.
 
 // Parsed on Windows; the parser and its defaults are proven on the host.
 #![cfg_attr(not(windows), allow(dead_code))]
@@ -72,6 +82,44 @@ pub const DEFAULT_ARROW_METERS: f32 = 3.0;
 /// Begin with the overlay already on.
 pub const DEFAULT_START_ENABLED: bool = false;
 
+/// The effect placed at each marker along a route. `0` is off, and off is the default.
+///
+/// **No id is known yet.** Elden Ring's `302022` -- the Rainbow Stone's lingering coloured stone,
+/// the one that stays on the ground after the throw rather than flashing once -- is the id
+/// `er-invasion-path` documents, and FXR ids do not transfer between these games. Whatever DARK
+/// SOULS II uses to identify an effect has not been established here, so this default cannot be a
+/// real id: it is the switch that stays off until one is found.
+///
+/// Spawning an effect would be the only thing this crate does that changes the game rather than
+/// drawing over it, which is a second reason for off-by-default.
+pub const DEFAULT_MARKER_EFFECT_ID: u32 = 0;
+
+/// Metres between markers along the route.
+///
+/// Spaced along the PATH rather than placed at its corners, or a doorway collects six of them and
+/// open ground gets none. Elden Ring's `2.7` is carried over as a starting point and recorded as
+/// borrowed rather than measured -- DARK SOULS II's scale is close but nobody here has checked.
+pub const DEFAULT_MARKER_SPACING_METERS: f32 = 2.7;
+
+/// Most markers one route's trail may hold.
+pub const DEFAULT_MAX_MARKERS: usize = 144;
+
+/// Metres of already-walked trail kept behind you before those markers are torn down.
+///
+/// The ones you have passed are clutter, but tearing them down the instant you step past makes
+/// the trail appear to end at your feet, which reads as the trail being broken.
+pub const DEFAULT_MARKER_KEEP_BEHIND_METERS: f32 = 12.0;
+
+/// Markers placed per pass, so a trail is laid outwards from your feet rather than all at once.
+pub const DEFAULT_MARKERS_PER_PASS: usize = 3;
+
+/// The most markers the parser will accept, whatever the file asks for.
+///
+/// Each one is an object the engine has to build, own and draw, inside a `Present` detour on the
+/// render thread. A mistyped `max_markers = 1440000` must be a rejected setting rather than a
+/// frozen game.
+pub const HARD_MARKER_CAP: usize = 1024;
+
 /// `[invasion_path]`, resolved.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PathConfig {
@@ -89,6 +137,26 @@ pub struct PathConfig {
     pub max_targets: usize,
     pub arrow_meters: f32,
     pub start_enabled: bool,
+    /// The effect placed at each marker, or `0` for no markers. See [`DEFAULT_MARKER_EFFECT_ID`]
+    /// for why no non-zero value is known yet.
+    pub marker_effect_id: u32,
+    pub marker_spacing_meters: f32,
+    pub max_markers: usize,
+    pub marker_keep_behind_meters: f32,
+    pub markers_per_pass: usize,
+}
+
+impl PathConfig {
+    /// Has the file asked for a trail of markers?
+    ///
+    /// The one question the draw path asks about all five marker settings, so that "the player
+    /// wants markers" is a single fact rather than five fields that have to be read together and
+    /// could be read inconsistently. Nothing can place one yet -- see this module's header -- and
+    /// the caller's job on `true` is to say WHY not, once, rather than to fail silently.
+    #[must_use]
+    pub fn markers_requested(&self) -> bool {
+        self.marker_effect_id != 0 && self.max_markers > 0 && self.markers_per_pass > 0
+    }
 }
 
 impl Default for PathConfig {
@@ -113,6 +181,11 @@ impl Default for PathConfig {
             max_targets: DEFAULT_MAX_TARGETS,
             arrow_meters: DEFAULT_ARROW_METERS,
             start_enabled: DEFAULT_START_ENABLED,
+            marker_effect_id: DEFAULT_MARKER_EFFECT_ID,
+            marker_spacing_meters: DEFAULT_MARKER_SPACING_METERS,
+            max_markers: DEFAULT_MAX_MARKERS,
+            marker_keep_behind_meters: DEFAULT_MARKER_KEEP_BEHIND_METERS,
+            markers_per_pass: DEFAULT_MARKERS_PER_PASS,
         }
     }
 }
@@ -215,6 +288,37 @@ impl PathConfig {
                 .map(scalar)
                 .map(|text| text.eq_ignore_ascii_case("true"))
                 .unwrap_or(defaults.start_enabled),
+            // ZERO IS MEANINGFUL HERE, unlike every distance above: it is how the file spells
+            // "no markers", and it is the default. So an unparseable id falls back to the
+            // default rather than being filtered out as invalid -- the two are the same value
+            // and both mean off.
+            marker_effect_id: values
+                .get(CONFIG_SECTION, "marker_effect_id")
+                .map(scalar)
+                .and_then(|text| text.parse::<u32>().ok())
+                .unwrap_or(defaults.marker_effect_id),
+            marker_spacing_meters: positive_float(
+                &values,
+                "marker_spacing_meters",
+                defaults.marker_spacing_meters,
+            ),
+            max_markers: values
+                .get(CONFIG_SECTION, "max_markers")
+                .map(scalar)
+                .and_then(|text| text.parse::<usize>().ok())
+                .filter(|value| *value > 0 && *value <= HARD_MARKER_CAP)
+                .unwrap_or(defaults.max_markers),
+            marker_keep_behind_meters: non_negative_float(
+                &values,
+                "marker_keep_behind_meters",
+                defaults.marker_keep_behind_meters,
+            ),
+            markers_per_pass: values
+                .get(CONFIG_SECTION, "markers_per_pass")
+                .map(scalar)
+                .and_then(|text| text.parse::<usize>().ok())
+                .filter(|value| *value > 0 && *value <= HARD_MARKER_CAP)
+                .unwrap_or(defaults.markers_per_pass),
         }
     }
 }
@@ -327,5 +431,68 @@ mod tests {
         );
         assert_eq!(parsed.max_targets, 2);
         assert_eq!(parsed.arrow_meters, DEFAULT_ARROW_METERS);
+    }
+}
+
+#[cfg(test)]
+mod marker_scaffolding {
+    use super::*;
+
+    /// The shipped default must place nothing. Spawning an effect is the only thing this crate
+    /// would do that changes the game rather than drawing over it, and no DARK SOULS II effect id
+    /// is known -- so a non-zero default could only be a guess dressed as a setting.
+    #[test]
+    fn markers_are_off_until_someone_asks() {
+        assert_eq!(PathConfig::default().marker_effect_id, 0);
+        assert!(!PathConfig::default().markers_requested());
+    }
+
+    #[test]
+    fn an_id_in_the_file_is_a_request() {
+        let parsed = PathConfig::parse("[invasion_path]\nmarker_effect_id = 302022\n");
+        assert_eq!(parsed.marker_effect_id, 302_022);
+        assert!(parsed.markers_requested());
+    }
+
+    /// Zero is how the file spells "off", so it is a value rather than a rejected one.
+    #[test]
+    fn zero_is_off_rather_than_invalid() {
+        let parsed = PathConfig::parse("[invasion_path]\nmarker_effect_id = 0\n");
+        assert_eq!(parsed.marker_effect_id, 0);
+        assert!(!parsed.markers_requested());
+    }
+
+    /// A budget of zero would be a request for markers that places none, which reads as the
+    /// feature being broken rather than as the number being wrong.
+    #[test]
+    fn a_zero_budget_is_refused_rather_than_honoured() {
+        let parsed = PathConfig::parse("[invasion_path]\nmarker_effect_id = 1\nmax_markers = 0\n");
+        assert_eq!(parsed.max_markers, DEFAULT_MAX_MARKERS);
+        assert!(parsed.markers_requested());
+    }
+
+    /// Every marker is an object the engine builds and draws from inside a `Present` detour, so a
+    /// mistyped budget has to be a rejected setting and not a frozen game.
+    #[test]
+    fn an_absurd_budget_falls_back_instead_of_freezing_the_render_thread() {
+        let parsed = PathConfig::parse("[invasion_path]\nmax_markers = 1440000\n");
+        assert_eq!(parsed.max_markers, DEFAULT_MAX_MARKERS);
+    }
+
+    #[test]
+    fn spacing_and_trail_length_come_through() {
+        let parsed = PathConfig::parse(
+            "[invasion_path]\nmarker_spacing_meters = 1.5\nmarker_keep_behind_meters = 0\n",
+        );
+        assert!((parsed.marker_spacing_meters - 1.5).abs() < f32::EPSILON);
+        // Zero behind you is a legitimate choice -- tear them down as you pass -- unlike a zero
+        // spacing, which would ask for infinitely many markers.
+        assert!((parsed.marker_keep_behind_meters - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_zero_spacing_is_refused() {
+        let parsed = PathConfig::parse("[invasion_path]\nmarker_spacing_meters = 0\n");
+        assert!((parsed.marker_spacing_meters - DEFAULT_MARKER_SPACING_METERS).abs() < 0.001);
     }
 }
