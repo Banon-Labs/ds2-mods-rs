@@ -88,6 +88,81 @@ pub fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     ]
 }
 
+/// Build a world-to-camera matrix from a camera's own rotation and position.
+///
+/// # Why this exists rather than reading one
+///
+/// The engine stores a finished view matrix somewhere, and a live scan of every sixteen-byte
+/// boundary in the camera object failed to find it in either convention. What the engine
+/// demonstrably DOES store is the pair it builds that matrix from: `0x140493245` writes two
+/// `float4` to `this+0xd0` and `this+0xe0` immediately before handing them to `0x140002680`,
+/// whose result is inverted by `0x140002380` and stored as the view matrix.
+///
+/// So this performs the same two steps. Inverting an orthonormal rotation is its transpose, and
+/// the translation that goes with it is `-position` measured along the camera's own axes -- which
+/// is what makes this an inverse rather than a rotation with the eye pasted into it, the mistake
+/// that puts the camera in the right place facing the wrong way.
+///
+/// `quaternion` is taken in `(x, y, z, w)` order. Nothing in the image says which order this
+/// field uses, and the wrong one is not a detectable error -- it is a perfectly valid rotation
+/// that is simply not the camera's. So the caller tries both and lets the oracles decide, which
+/// is why [`WXYZ`] exists.
+#[must_use]
+pub fn view_from_pose(quaternion: [f32; 4], position: [f32; 3]) -> Option<Matrix> {
+    let [x, y, z, w] = quaternion;
+    let norm = (x * x + y * y + z * z + w * w).sqrt();
+    // A quaternion is a unit quaternion or it is not a quaternion. A field that happens to hold
+    // four floats summing to something else is a field this has misidentified, and saying so is
+    // cheaper than projecting through it.
+    if !norm.is_finite() || (norm - 1.0).abs() > 0.05 {
+        return None;
+    }
+    let (x, y, z, w) = (x / norm, y / norm, z / norm, w / norm);
+    // Rows of the camera-to-world rotation: the camera's right, up and forward in world space.
+    let right = [
+        1.0 - 2.0 * (y * y + z * z),
+        2.0 * (x * y + z * w),
+        2.0 * (x * z - y * w),
+    ];
+    let up = [
+        2.0 * (x * y - z * w),
+        1.0 - 2.0 * (x * x + z * z),
+        2.0 * (y * z + x * w),
+    ];
+    let forward = [
+        2.0 * (x * z + y * w),
+        2.0 * (y * z - x * w),
+        1.0 - 2.0 * (x * x + y * y),
+    ];
+    // The inverse: the transpose in the rotation block, and the eye projected onto each axis,
+    // negated, in the translation row.
+    let mut out = [0.0f32; 16];
+    out[0] = right[0];
+    out[4] = right[1];
+    out[8] = right[2];
+    out[1] = up[0];
+    out[5] = up[1];
+    out[9] = up[2];
+    out[2] = forward[0];
+    out[6] = forward[1];
+    out[10] = forward[2];
+    out[12] = -dot(position, right);
+    out[13] = -dot(position, up);
+    out[14] = -dot(position, forward);
+    out[15] = 1.0;
+    is_finite(&out).then_some(out)
+}
+
+/// Re-order a `(w, x, y, z)` quaternion into the `(x, y, z, w)` [`view_from_pose`] expects.
+///
+/// Both orders are in wide use and a struct field does not say which it holds. Reading one as the
+/// other is not a detectable error -- the result is a unit quaternion and a valid rotation, just
+/// the wrong one -- so this exists to be tried alongside the identity reading rather than chosen.
+#[must_use]
+pub const fn wxyz(raw: [f32; 4]) -> [f32; 4] {
+    [raw[1], raw[2], raw[3], raw[0]]
+}
+
 /// The transpose of `matrix`.
 ///
 /// Needed because a 4x4 in memory does not say which convention wrote it. The projection's shape
@@ -174,6 +249,39 @@ pub fn looks_like_a_projection(matrix: &Matrix) -> bool {
         return false;
     }
     matrix[14] < 0.0
+}
+
+/// The aspect ratio this projection was built for, or `None` if it does not have one.
+///
+/// `0x140001a90` writes `m00 = cot(fov/2)/aspect` and `m11 = cot(fov/2)`, so the ratio of the two
+/// IS the aspect and nothing else in the matrix is needed to recover it.
+///
+/// This is the check that tells the camera being rendered from a camera that merely exists. A
+/// game this era renders several projections per frame -- shadow maps, reflections, cube faces --
+/// and those are square or near it. Comparing against the back buffer's own ratio rejects them
+/// without knowing anything about what they are for, and unlike a screen-position threshold it is
+/// not a number anybody tuned.
+#[must_use]
+pub fn projection_aspect(matrix: &Matrix) -> Option<f32> {
+    if matrix[0].abs() <= f32::EPSILON {
+        return None;
+    }
+    let aspect = matrix[5] / matrix[0];
+    (aspect.is_finite() && aspect > 0.0).then_some(aspect)
+}
+
+/// Does this projection's aspect ratio match the viewport it would be drawn into?
+///
+/// The tolerance is wide enough for a letterboxed or slightly-off back buffer and far too narrow
+/// for the square projections a shadow or reflection pass uses.
+#[must_use]
+pub fn aspect_matches(matrix: &Matrix, screen: [f32; 2]) -> bool {
+    const TOLERANCE: f32 = 0.12;
+    if screen[1] <= 0.0 {
+        return false;
+    }
+    let wanted = screen[0] / screen[1];
+    projection_aspect(matrix).is_some_and(|aspect| ((aspect - wanted) / wanted).abs() <= TOLERANCE)
 }
 
 /// A camera reduced to what drawing needs.
@@ -296,6 +404,33 @@ impl Camera {
             self.clip_to_screen(a, screen)?,
             self.clip_to_screen(b, screen)?,
         ))
+    }
+
+    /// Does this camera frame the character the way DARK SOULS II's camera frames a character?
+    ///
+    /// The strongest oracle available, and the last one added, because it is the only one that
+    /// uses a fact about THIS GAME rather than about projection in general: the camera follows
+    /// the player, so the player sits near the middle of the frame. Not exactly centred -- a
+    /// lock-on or a wall shoves them off it -- but never in a corner.
+    ///
+    /// It is what separates a camera that is merely arithmetically valid from the one being
+    /// rendered. A pose-built camera with the quaternion components in the wrong order is a
+    /// perfectly good rotation about the wrong axis: it keeps the eye near the player, it keeps
+    /// the world the right way up, and it puts the character at `376,213` on a `2560x1441`
+    /// screen. Every other test here passes it.
+    ///
+    /// Used ONLY when choosing a camera, never per frame, so a cutscene that genuinely pushes the
+    /// character to the edge cannot switch the overlay off mid-fight.
+    #[must_use]
+    pub fn frames_the_character(&self, world: [f32; 3], screen: [f32; 2]) -> bool {
+        /// How far from the centre, as a fraction of the half-extent, still counts.
+        const TOLERANCE: f32 = 0.30;
+        let Some(point) = self.project(world, screen) else {
+            return false;
+        };
+        let offset_x = (point[0] - screen[0] * 0.5).abs() / (screen[0] * 0.5);
+        let offset_y = (point[1] - screen[1] * 0.5).abs() / (screen[1] * 0.5);
+        offset_x <= TOLERANCE && offset_y <= TOLERANCE
     }
 
     /// Is `point` somewhere a viewport of `screen` pixels could plausibly show it?

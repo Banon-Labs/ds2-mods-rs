@@ -48,6 +48,18 @@ pub(crate) struct Candidate {
     pub(crate) projection: usize,
     /// Whether the view matrix has to be transposed before it is multiplied in.
     pub(crate) transposed: bool,
+    /// Whether the view matrix is BUILT from a pose rather than read as a matrix.
+    ///
+    /// When set, [`Candidate::view`] is the offset of a unit quaternion and
+    /// [`Candidate::projection`] is the offset of the camera's position -- the projection matrix
+    /// itself is then at [`ds2_rva::CAMERA_OPERATOR_PROJECTION_OFFSET`], which is where it was
+    /// found in the first place.
+    ///
+    /// This distinction is not cosmetic. A remembered candidate is re-checked every frame, and
+    /// re-checking a built camera by READING those two offsets as matrices produces nonsense, so
+    /// the check fails and the full search runs again -- sixty times a second, inside `Present`.
+    /// The first build that found a pose camera did exactly that.
+    pub(crate) pose: bool,
     /// Where this candidate came from, for the log line. Nothing branches on it.
     pub(crate) origin: Origin,
 }
@@ -145,6 +157,7 @@ pub(crate) fn candidates() -> Vec<Candidate> {
             view: ds2_rva::CAMERA_OPERATOR_VIEW_OFFSET,
             projection: ds2_rva::CAMERA_OPERATOR_PROJECTION_OFFSET,
             transposed: false,
+            pose: false,
             origin: Origin::Operator(index),
         });
     }
@@ -161,6 +174,7 @@ pub(crate) fn candidates() -> Vec<Candidate> {
             view: first,
             projection: second,
             transposed: false,
+            pose: false,
             origin: Origin::Slot(index),
         });
         out.push(Candidate {
@@ -168,6 +182,7 @@ pub(crate) fn candidates() -> Vec<Candidate> {
             view: second,
             projection: first,
             transposed: false,
+            pose: false,
             origin: Origin::Slot(index),
         });
     }
@@ -206,6 +221,7 @@ pub(crate) fn candidates() -> Vec<Candidate> {
             view: ds2_rva::CAMERA_OPERATOR_VIEW_OFFSET,
             projection: ds2_rva::CAMERA_OPERATOR_PROJECTION_OFFSET,
             transposed: false,
+            pose: false,
             origin: Origin::Pointer(offset),
         });
     }
@@ -225,6 +241,72 @@ static REPORT_BUDGET: core::sync::atomic::AtomicUsize = core::sync::atomic::Atom
 /// is often, and this line is one per surviving candidate. Flip it while chasing a camera that
 /// changes mid-session; leave it alone otherwise.
 const VERBOSE: bool = false;
+
+/// The two `float4` the camera's transform is built from. `+0xd0` and `+0xe0`.
+///
+/// `0x140493245` writes `xmm2` to the first and `xmm3` to the second, then passes both to
+/// `0x140002680`, whose output is inverted into the view matrix. Which of the two is the rotation
+/// and which the position is not stated anywhere, so both readings are tried.
+/// Both are inside [`POSE_SEARCH_LOW`]..[`POSE_SEARCH_HIGH`], which is where the search that
+/// replaced them looks, so nothing reads these two directly any more -- they are here because
+/// the window's placement is not arbitrary and the disassembly reference is what says so.
+const _POSE_OFFSETS: (usize, usize) = (0xd0, 0xe0);
+
+/// Where the rotation-and-position search looks, as offsets into a candidate object.
+///
+/// Centred on [`POSE_OFFSETS`] rather than starting at zero: those two are where the engine
+/// demonstrably writes the pair, and the window exists because the live run proved they are not
+/// BOTH there. Widening it is free -- the oracles reject everything a wider window adds -- but
+/// this is already generous around the known site.
+const POSE_SEARCH_LOW: usize = 0x80;
+
+/// The end of that window.
+const POSE_SEARCH_HIGH: usize = 0x180;
+
+/// Is this float4 a unit quaternion?
+///
+/// The discriminating test in the whole pose search, and a strong one: four floats that happen to
+/// sit next to each other have no reason to have length one. Tolerance is loose because the
+/// engine's own value is the product of interpolation and will not be exact.
+fn is_unit_quaternion(value: [f32; 4]) -> bool {
+    let norm = value.iter().map(|part| part * part).sum::<f32>().sqrt();
+    norm.is_finite() && (norm - 1.0).abs() <= 0.05
+}
+
+/// Four `f32` at `at`, or `None` if any is unreadable or not a real number.
+fn floats4(at: usize) -> Option<[f32; 4]> {
+    let mut bytes = [0u8; 16];
+    // SAFETY: `read_bytes` reports an unmapped page rather than faulting; `at` is an engine
+    // pointer plus a recorded offset.
+    if !unsafe { read_bytes(at, &mut bytes) } {
+        return None;
+    }
+    let mut out = [0.0f32; 4];
+    for (index, slot) in out.iter_mut().enumerate() {
+        let word: [u8; 4] = bytes[index * 4..index * 4 + 4]
+            .try_into()
+            .expect("a 4-byte window of a 16-byte array");
+        *slot = f32::from_le_bytes(word);
+        if !slot.is_finite() {
+            return None;
+        }
+    }
+    Some(out)
+}
+
+/// Every test a camera has to pass before the overlay will draw through it.
+///
+/// Collected into one place because they are a SET: each is weak alone and the combination is
+/// what a wrong matrix cannot satisfy. Two builds shipped with a subset of these and both drew
+/// the arrow somewhere wrong.
+fn accepts(camera: &Camera, local: [f32; 3], screen: [f32; 2]) -> bool {
+    let eye_distance = crate::geometry::length(crate::geometry::sub(camera.eye(), local));
+    eye_distance.is_finite()
+        && eye_distance <= MAX_EYE_METERS
+        && camera.plausibly_on_screen(local, screen)
+        && camera.agrees_with_the_world(local, screen)
+        && camera.frames_the_character(local, screen)
+}
 
 /// How far the implied eye may be from the player before a candidate is refused, in metres.
 ///
@@ -251,9 +333,12 @@ const MATRIX_ALIGNMENT: usize = 16;
 ///
 /// This is test 1 of the two in this module's header, on its own. It says nothing about whether
 /// the camera is the live one.
-pub(crate) fn projection_at(candidate: Candidate) -> Option<Matrix> {
+pub(crate) fn projection_at(candidate: Candidate, screen: [f32; 2]) -> Option<Matrix> {
     let projection = matrix(candidate.object + candidate.projection)?;
-    looks_like_a_projection(&projection).then_some(projection)
+    // The aspect test is what rejects a shadow or reflection pass, which is shaped exactly like
+    // a camera projection and is not one.
+    (looks_like_a_projection(&projection) && crate::geometry::aspect_matches(&projection, screen))
+        .then_some(projection)
 }
 
 /// Combine a view matrix read from `object + view_offset` with an already-validated projection.
@@ -284,14 +369,47 @@ pub(crate) fn pair(
 /// Used to re-check a REMEMBERED candidate, where both offsets are already known to work. The
 /// search path uses [`projection_at`] and [`pair`] instead, because there the view offset is the
 /// unknown.
-pub(crate) fn resolve(candidate: Candidate) -> Option<Camera> {
-    let projection = projection_at(candidate)?;
+pub(crate) fn resolve(candidate: Candidate, screen: [f32; 2]) -> Option<Camera> {
+    if candidate.pose {
+        return rebuild_pose(candidate, screen);
+    }
+    let projection = projection_at(candidate, screen)?;
     pair(
         candidate.object,
         candidate.view,
         projection,
         candidate.transposed,
     )
+}
+
+/// Re-derive a pose-built camera from the two fields it was built from.
+///
+/// Its `view` is a quaternion offset and its `projection` a position offset; the projection
+/// MATRIX is where it always was. Reading the first two as matrices -- which is what the generic
+/// path does -- yields nonsense, fails the check, and sends the whole search round again every
+/// frame inside `Present`.
+fn rebuild_pose(candidate: Candidate, screen: [f32; 2]) -> Option<Camera> {
+    let projection = matrix(candidate.object + ds2_rva::CAMERA_OPERATOR_PROJECTION_OFFSET)?;
+    if !looks_like_a_projection(&projection)
+        || !crate::geometry::aspect_matches(&projection, screen)
+    {
+        return None;
+    }
+    let raw = floats4(candidate.object + candidate.view)?;
+    // For a pose candidate `transposed` records the component ORDER, not a matrix transpose.
+    let quaternion = if candidate.transposed {
+        crate::geometry::wxyz(raw)
+    } else {
+        raw
+    };
+    let position = floats4(candidate.object + candidate.projection)?;
+    let view =
+        crate::geometry::view_from_pose(quaternion, [position[0], position[1], position[2]])?;
+    let view_projection = multiply(&view, &projection);
+    is_finite(&view_projection).then_some(Camera {
+        view,
+        view_projection,
+    })
 }
 
 /// Which candidate the last successful search chose, so the search is not repeated every frame.
@@ -319,6 +437,8 @@ pub(crate) struct Probe {
     pub(crate) tried: usize,
     /// Of those, ones whose projection matrix passed the shape test.
     pub(crate) shaped: usize,
+    /// Of those, ones that also carried a readable camera pose at `+0xd0`/`+0xe0`.
+    pub(crate) posed: usize,
 }
 
 /// What a search did, for the log.
@@ -355,7 +475,7 @@ impl Tracker {
     /// restatement of test 1.
     pub(crate) fn acquire(&mut self, local: [f32; 3], screen: [f32; 2]) -> Option<(Camera, Found)> {
         if let Some(remembered) = self.remembered
-            && let Some(camera) = resolve(remembered)
+            && let Some(camera) = resolve(remembered, screen)
             && camera.plausibly_on_screen(local, screen)
         {
             return Some((camera, Found::Remembered));
@@ -364,7 +484,7 @@ impl Tracker {
         let mut probe = Probe::default();
         for candidate in candidates() {
             probe.tried += 1;
-            let Some(projection) = projection_at(candidate) else {
+            let Some(projection) = projection_at(candidate, screen) else {
                 continue;
             };
             probe.shaped += 1;
@@ -380,6 +500,81 @@ impl Tracker {
             //
             // So the view offset is searched too, bounded to the object's own head, and the
             // on-screen test adjudicates. Twenty extra reads, once per session.
+            // FIRST, BUILD THE VIEW MATRIX RATHER THAN HUNT FOR IT.
+            //
+            // A scan of every sixteen-byte boundary in this object, in both conventions, found no
+            // view matrix whose implied eye was anywhere near the player. What the engine
+            // demonstrably stores is the POSE the matrix is built from: `0x140493245` writes two
+            // `float4` to `this+0xd0` and `this+0xe0` and immediately hands them to the transform
+            // builder. Reconstructing from those is the same arithmetic the engine does, and it
+            // does not depend on having guessed where the result was filed.
+            // The rotation and the position are searched SEPARATELY, because the live run that
+            // tried them as a fixed pair reported `1 with a camera pose` and still failed every
+            // oracle. A field that passes a unit-quaternion test is not there by accident -- four
+            // arbitrary floats do not have length one -- so the rotation was found and the
+            // position simply was not in the slot beside it.
+            //
+            // The eye oracle is exactly the right judge for "which of these float4 is the camera
+            // position": the answer is the one that puts the eye a few metres from the character
+            // the camera follows, and nothing else in the object does that.
+            for quaternion_at in (POSE_SEARCH_LOW..POSE_SEARCH_HIGH).step_by(MATRIX_ALIGNMENT) {
+                let Some(quaternion) = floats4(candidate.object + quaternion_at) else {
+                    continue;
+                };
+                if !is_unit_quaternion(quaternion) {
+                    continue;
+                }
+                probe.posed += 1;
+                for position_at in (POSE_SEARCH_LOW..POSE_SEARCH_HIGH).step_by(MATRIX_ALIGNMENT) {
+                    if position_at == quaternion_at {
+                        continue;
+                    }
+                    let Some(position) = floats4(candidate.object + position_at) else {
+                        continue;
+                    };
+                    // BOTH COMPONENT ORDERS. `(x,y,z,w)` and `(w,x,y,z)` are both in wide use and
+                    // a struct field does not say which it holds -- and reading one as the other
+                    // is NOT a detectable error. It yields a unit quaternion and a valid
+                    // rotation, just the wrong one, which keeps the eye near the player and the
+                    // world the right way up and still puts the character at `376,213` on a
+                    // `2560x1441` screen. That is a measured line from a live run, and it is why
+                    // `frames_the_character` had to exist before this loop could be trusted.
+                    for swapped in [false, true] {
+                        let ordered = if swapped {
+                            crate::geometry::wxyz(quaternion)
+                        } else {
+                            quaternion
+                        };
+                        let Some(pose) = crate::geometry::view_from_pose(
+                            ordered,
+                            [position[0], position[1], position[2]],
+                        ) else {
+                            continue;
+                        };
+                        let view_projection = multiply(&pose, &projection);
+                        if !crate::geometry::is_finite(&view_projection) {
+                            continue;
+                        }
+                        let camera = Camera {
+                            view: pose,
+                            view_projection,
+                        };
+                        if !accepts(&camera, local, screen) {
+                            continue;
+                        }
+                        let winner = Candidate {
+                            view: quaternion_at,
+                            projection: position_at,
+                            transposed: swapped,
+                            pose: true,
+                            ..candidate
+                        };
+                        self.last_probe = probe;
+                        self.remembered = Some(winner);
+                        return Some((camera, Found::Chose(winner)));
+                    }
+                }
+            }
             for view_offset in (0..VIEW_SEARCH_SPAN).step_by(MATRIX_ALIGNMENT) {
                 if view_offset == candidate.projection {
                     continue;
@@ -447,6 +642,7 @@ impl Tracker {
                     let winner = Candidate {
                         view: view_offset,
                         transposed,
+                        pose: false,
                         ..candidate
                     };
                     self.last_probe = probe;

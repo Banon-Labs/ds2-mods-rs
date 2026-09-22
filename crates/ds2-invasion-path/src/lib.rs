@@ -381,9 +381,9 @@ mod windows_impl {
             if state.had_camera {
                 let probe = state.tracker.last_probe;
                 log(format_args!(
-                    "no camera: {} candidates tried, {} shaped like a projection -- drawing \
+                    "no camera: {} tried, {} shaped like a projection, {} with a camera pose -- drawing \
                      nothing rather than guessing",
-                    probe.tried, probe.shaped
+                    probe.tried, probe.shaped, probe.posed
                 ));
                 state.had_camera = false;
             }
