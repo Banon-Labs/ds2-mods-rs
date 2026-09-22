@@ -17,19 +17,25 @@
 //! # What this is a port of, and what is missing from the port
 //!
 //! `../er-mods-rs/crates/er-invasion-path` draws a **walkable route** along the navmesh, and
-//! falls back to an arrow when the navmesh says there is no way to walk there. This draws the
-//! arrow, always, and that is the honest state of it rather than a design choice.
+//! falls back to an arrow when the navmesh says there is no way to walk there. So does this, now.
 //!
 //! `docs/PORTING.md` filed the Elden Ring crate under "no DS2 analogue (Havok-AI navmesh)". Half
 //! of that is right -- there is no Havok AI in this engine -- and the conclusion is wrong. DARK
 //! SOULS II ships its own navigation stack, RTTI-named throughout, with the same request/poll
-//! shape. `crate::navpath` implements and tests the half of it that could be derived: reading a
-//! finished route. What it cannot do yet is *ask* for one, because the request takes
-//! navigation-graph ids rather than world positions and the conversion is an asynchronous engine
-//! job driven from state this crate does not have. The full account is in that module.
+//! shape: `crate::navquery` snaps both ends of the line to navigation-graph ids and asks
+//! `NvRoutePlanner` for a path, `crate::gametick` polls it on the game's own tick, and
+//! `crate::navpath` decodes what comes back.
 //!
-//! So the route is not here. Everything else is, and everything else is what makes the route
-//! worth having: the roster, the positions, the colours, the ramp, and a place to draw.
+//! This module doc used to say the request could not be made, because turning a world position
+//! into a graph id was an asynchronous engine job. **It is not**: `0x14037be30` does the whole
+//! snap synchronously in twenty-eight instructions. bd `ds2-mods-rs-4yd` was filed on the wrong
+//! premise and has been corrected.
+//!
+//! **The arrow has not gone anywhere**, and it is not a placeholder. It is what you get when the
+//! planner answers "there is no way to walk there" -- which happens whenever the other player is
+//! on the other side of a fog gate, in another area, or off the navmesh entirely -- and it is
+//! what every player past the nearest one gets, because one route is one planner and the engine's
+//! own AI allocates one per agent.
 //!
 //! # The four things this does per frame, in order
 //!
@@ -71,10 +77,27 @@
 //!
 //! # What it does to the game
 //!
-//! **Nothing except drawing.** No param edits, no writes to game memory, no input injection, no
-//! network traffic. It reads a roster, reads two matrices, and appends triangles to a frame that
-//! was already finished. The one detour it installs is on `IDXGISwapChain::Present`, which lives
-//! in `dxgi.dll` and is therefore outside everything this workspace has learned about Arxan.
+//! **No param edits, no writes to game memory, no input injection, no network traffic.** It reads
+//! a roster, reads two matrices, and appends triangles to a frame that was already finished.
+//!
+//! Two things it does beyond drawing, both only while the overlay is on and someone is in your
+//! session, and both through the game's own functions rather than by writing memory:
+//!
+//! - **It asks the navigation system for a route.** That means creating an `NvRoutePlanner` --
+//!   with `0x140bae8d0`, the engine's own factory -- and letting `NvNavigationSystem::Update`
+//!   step it, which is what every AI in the map is already doing. Nothing is created until a
+//!   route is actually wanted.
+//! - **It spawns Prism Stone effects** along that route, if `marker_effect_id` is not `0`, and
+//!   extinguishes them again as you walk past. `marker_effect_id` is `0` by default, so this is
+//!   off unless the file asks for it.
+//!
+//! Both happen on `NvNavigationSystem::Update`, not in the `Present` detour -- `crate::gametick`
+//! has the reason, and it is not the one the repo used to give.
+//!
+//! Two detours are installed. `IDXGISwapChain::Present` lives in `dxgi.dll` and is therefore
+//! outside everything this workspace has learned about Arxan; `NvNavigationSystem::Update` is in
+//! the game image but is not one of its 286 redirected entries, and its prologue is checked
+//! before the detour goes in.
 
 #![cfg_attr(not(windows), allow(dead_code))]
 
@@ -87,6 +110,7 @@ pub mod navpath;
 pub mod routes;
 
 pub(crate) mod lines;
+pub(crate) mod trail;
 
 #[cfg(windows)]
 pub(crate) mod camera;
@@ -95,7 +119,13 @@ pub(crate) mod capture;
 #[cfg(windows)]
 pub(crate) mod census;
 #[cfg(windows)]
+pub(crate) mod gametick;
+#[cfg(windows)]
+pub(crate) mod navquery;
+#[cfg(windows)]
 pub(crate) mod render;
+#[cfg(windows)]
+pub(crate) mod sfx;
 
 pub use log::{LOG_PREFIX, LogFn, set_logger};
 
@@ -245,6 +275,20 @@ mod windows_impl {
 
         // SAFETY: the caller's contract, forwarded -- one detour, from the install position.
         let installed = unsafe { render::install() };
+        // THE SECOND SEAM, AND IT IS NOT OPTIONAL FOR THE ROUTE. `Present` may ask for a route;
+        // only the game's own tick may fetch one. `crate::gametick` says why that is a property
+        // of the frame rather than of the thread -- DARK SOULS II presents from the simulation
+        // thread, with two engine locks held, after `EndDraw`.
+        //
+        // Failing here costs the route and the trail and nothing else: the arrow needs neither.
+        // SAFETY: the caller's contract, forwarded -- one detour, from the install position.
+        let ticking = unsafe { crate::gametick::install() };
+        if !ticking {
+            log(format_args!(
+                "no game tick -- the arrow still draws, but no route will be asked for and no \
+                 marker placed"
+            ));
+        }
         Report { installed }
     }
 
@@ -384,6 +428,13 @@ mod windows_impl {
         }
 
         if !state.enabled {
+            // THE OFF SWITCH HAS TO REACH THE OTHER SEAM TOO, and this is the only place both
+            // are in scope. Without it the tick keeps the last thing it was asked for forever:
+            // it would go on planning a route half a second at a time, and the Prism Stones
+            // behind you would stay lit for the rest of the session, for a feature the player
+            // has switched off. `ask(None)` is what `crate::gametick` reads as "stand down" --
+            // it puts the trail out and drops the stale answer.
+            crate::gametick::ask(None);
             return Vec::new();
         }
 
@@ -398,6 +449,10 @@ mod windows_impl {
                 ));
                 state.had_world = false;
             }
+            // No world means no route and no trail either. Not the same as the camera failing to
+            // frame you -- that is a view problem and the trail should go on being laid through
+            // it; this is "there is nobody standing anywhere".
+            crate::gametick::ask(None);
             return Vec::new();
         };
         state.had_world = true;
@@ -485,21 +540,35 @@ mod windows_impl {
         }
         state.framed = true;
 
-        // KEEP THE PROMISE THE FILE MAKES. `marker_effect_id` is parsed and nothing places a
-        // marker, which would normally make it the worst kind of setting -- read, validated and
-        // ignored. It is not ignored: asking for markers says, once, which of the two missing
-        // halves is in the way, so an edit that appears to do nothing has an audible reason.
+        // KEEP THE PROMISE THE FILE MAKES. `marker_effect_id` is parsed, and now it is also
+        // acted on -- by `crate::gametick`, on the game's own tick, because this detour is the
+        // wrong place to spawn anything. All this does is forward the setting; the line below
+        // says once that it was forwarded, so an edit that appears to do nothing still has an
+        // audible reason when the tick seam is the thing that failed.
+        crate::gametick::set_markers(state.config.markers_requested().then_some(
+            crate::gametick::Markers {
+                effect_id: state.config.marker_effect_id,
+                spacing: crate::trail::Spacing {
+                    meters: state.config.marker_spacing_meters,
+                    keep_behind_meters: state.config.marker_keep_behind_meters,
+                    max_markers: state.config.max_markers,
+                    per_pass: state.config.markers_per_pass,
+                },
+            },
+        ));
         if state.config.markers_requested() && !state.said_markers {
             state.said_markers = true;
             log(format_args!(
-                "markers: effect {} requested, and none can be placed yet -- DARK SOULS II's \
-                 effect-spawn call is unidentified here, and `navpath` can read a route but not \
-                 ask for one, so there is no path to place them along. The arrow is unaffected.",
-                state.config.marker_effect_id
+                "markers: effect {} requested -- handed to the game tick, which places them \
+                 along the route. The Prism Stone's own ids are {:?}; anything else is whatever \
+                 effect carries that number.",
+                state.config.marker_effect_id,
+                ds2_rva::PRISM_STONE_SFX_IDS
             ));
         }
 
         let Some((players, census)) = census::remotes(state.config.max_targets) else {
+            crate::gametick::ask(None);
             return Vec::new();
         };
         let present: Vec<u64> = players.iter().map(|player| player.ctrl as u64).collect();
@@ -539,12 +608,49 @@ mod windows_impl {
             ));
         }
 
+        // ONE ROUTE, TO THE NEAREST PERSON, AND THE REST KEEP THEIR ARROWS.
+        //
+        // Not a shortcut: a route costs an `NvRoutePlanner` linked into the engine's own update
+        // list and an A* search it runs for you, and the engine's AI allocates exactly one of
+        // those per agent. N planners for N phantoms would multiply the one thing in this crate
+        // that touches engine state, to draw four walkable lines nobody can follow at once --
+        // and the trail, which is the reason the route exists at all, can only follow one path.
+        //
+        // The ask is published every frame and answered whenever the tick gets to it, so the
+        // route lags the roster by up to half a second. `answer_for` refuses an answer about a
+        // different player rather than drawing it, because a confident line to the wrong person
+        // is worse than the arrow it replaced.
+        let routed = players
+            .iter()
+            .find(|player| player.distance >= state.config.near_suppress_meters);
+        crate::gametick::ask(routed.map(|player| crate::gametick::Wanted {
+            from: local,
+            to: player.position,
+            target: player.ctrl as u64,
+        }));
+
         let mut snapshot = Vec::new();
         for player in &players {
             if player.distance < state.config.near_suppress_meters {
                 continue;
             }
             let slot = state.palette.slot_for(player.ctrl as u64);
+            // `Some(Some(points))` is a walkable route; `Some(None)` is the planner having
+            // answered "there is no way to walk there"; `None` is no answer yet. The last two
+            // both draw the arrow, and deliberately look the same on screen -- the difference
+            // between them is in the log, not in what the player needs to do about it.
+            if let Some(Some(points)) = crate::gametick::answer_for(player.ctrl as u64)
+                && points.len() >= 2
+            {
+                snapshot.push(Route::new(
+                    RouteShape::Walk(points),
+                    slot,
+                    player.distance,
+                    state.config.bold_at_meters,
+                    state.config.faint_at_meters,
+                ));
+                continue;
+            }
             let Some(arrow) = geometry::arrow(
                 local,
                 player.position,

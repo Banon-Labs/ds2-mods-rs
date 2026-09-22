@@ -6141,10 +6141,12 @@ pub const CHARACTER_CTRL_POSITION_OFFSET: usize = 0x90;
 //   NvRouteNavigator   0x1411e2c60   NvNaviNodePathFindingTask 0x1411e2fd8
 //   NvNaviPolyNearestSearchTask 0x1411e3038   ChrAiNavimeshCtrl 0x1410ede30
 //
-// The request/poll shape is the same one Elden Ring's `CSHkAiWorld` has. WHAT IS NOT HERE YET is
-// the step that turns a world position into the graph id the planner wants -- see
-// [`NV_ROUTE_PLANNER_GOAL_OFFSET`]. Until that lands this mod draws the arrow, which is the
-// degraded mode the Elden Ring crate also falls back to when the navmesh cannot answer.
+// The request/poll shape is the same one Elden Ring's `CSHkAiWorld` has. THE WHOLE CHAIN IS HERE
+// NOW: the world-position-to-graph-id snap is below under THE SNAP, the planner factory and the
+// tick that steps it under THE GAME TICK, and `ds2-invasion-path`'s `navquery` module calls them
+// in that order. The arrow remains as the fallback for when the planner answers
+// [`NV_ROUTE_PLANNER_FLAG_FAILED`], which is the same degraded mode the Elden Ring crate uses
+// when its navmesh cannot answer.
 
 /// Offset of `NvNavigationSystem` in [`GAME_MANAGER_IMP`]. `+0xBC0`.
 ///
@@ -6181,14 +6183,50 @@ pub const NV_ROUTE_PLANNER_FLAG_PENDING: u8 = 0x01;
 pub const NV_ROUTE_PLANNER_FLAG_READY: u8 = 0x02;
 
 /// [`NV_ROUTE_PLANNER_FLAGS_OFFSET`] bit meaning "the search answered, and the answer is no".
+///
+/// **TEST THIS BEFORE [`NV_ROUTE_PLANNER_FLAG_READY`], ALWAYS.** All three ways a search can end
+/// without a route -- `0x140bb4310` (the endpoints are in different parts objects and no gate
+/// joins them), `0x140bb4610` (same parts object, no node pair) and `0x140bb4a60` (an endpoint
+/// id is [`NAVI_GRAPH_ID_NONE`]) -- finish with the same instruction:
+///
+/// ```text
+/// or  byte ptr [planner + 0x30], 6
+/// ```
+///
+/// which sets READY *and* FAILED in one write. A poller that asks "is READY set?" first therefore
+/// believes every failure, and goes on to read `planner + 0x48` -- which those paths just left at
+/// whatever it was, because the failure paths free the scratch arrays and never build a route.
+/// The order is not a style preference; it is the difference between falling back to the arrow
+/// and dereferencing a stale pointer in someone's invasion.
 pub const NV_ROUTE_PLANNER_FLAG_FAILED: u8 = 0x04;
 
-/// `NvRoutePlanner -> goal`. `+0x34`, and **the reason the route is not drawn yet**.
+/// `NvRoutePlanner -> start`. `+0x34`, a packed navigation-graph id.
 ///
-/// `0x140bb4090(planner, a, b, c, d)` is the request, and it writes `+0x34`, `+0x38`, `+0x3c`,
-/// `+0x40` then sets [`NV_ROUTE_PLANNER_FLAG_PENDING`]. `+0x34` is a packed navigation-graph id,
-/// not a world position -- `NvRoutePlanner::Update` (`0x140bb4110`, slot 2 of its vtable) feeds it
-/// to `0x140bb2620(parts_table, id | 0x1ffff)` and dispatches on what comes back:
+/// **THIS CONSTANT USED TO BE CALLED `NV_ROUTE_PLANNER_GOAL_OFFSET` AND HELD `0x34`, AND BOTH
+/// HALVES OF THAT WERE WRONG TOGETHER.** `+0x34` is the START; the goal is at
+/// [`NV_ROUTE_PLANNER_GOAL_OFFSET`], sixteen bits further along. The old name with the old value
+/// is the one mistake that cannot be caught by a crash: a planner asked to route from the
+/// destination to the player answers perfectly well, and the line it draws runs the right shape
+/// in the wrong direction.
+///
+/// The correction is read off the engine's only caller. `0x14042ece0(ChrAiNavimeshCtrl*, const
+/// float4* destination)` is "go to this world point", and it ends:
+///
+/// ```text
+/// eax = 0x14042d1f0(ctrl)                                  ; the AGENT'S OWN node id
+/// r8d = 0x14042c9a0(ctrl, destination, 10.0, 0x40, NULL)   ; the DESTINATION snapped
+/// 0x14042ee40(ctrl, eax, r8d, 200.0)  ->  0x140bb4090(planner, eax, r8d, capability, 200.0)
+/// ```
+///
+/// and `0x140bb4090` stores its second argument at `+0x34`. `0x14042d1f0` is unambiguous about
+/// which is which: it caches its answer in the controller at `+0x78` and recomputes it by
+/// snapping the character's own position through vtable slot `+0x148`. The agent's own node is
+/// the start of the route the agent is about to walk.
+///
+/// # The id itself
+///
+/// `NvRoutePlanner::Update` (`0x140bb4110`, slot 2 of its vtable) feeds both ids to
+/// `0x140bb2620(parts_table, id | 0x1ffff)` and dispatches on what comes back:
 ///
 /// ```text
 /// bits  0..14   index within the parts object
@@ -6197,13 +6235,70 @@ pub const NV_ROUTE_PLANNER_FLAG_FAILED: u8 = 0x04;
 /// bits 30..31   a validity pair; both clear means usable
 /// ```
 ///
-/// **Turning a world position into one of those ids is the missing step.** The engine does it
-/// asynchronously through `NvNaviPolyNearestSearchTask`, and the AI reaches the ids a different
-/// way again -- from state its own controller already holds. Reconstructing either by hand would
-/// mean fabricating an update context the game normally supplies, which is exactly what
-/// bd `ds2-call-the-games-own-functions` says not to do. The inverse direction IS solved:
-/// `0x140bad5a0(graph_world, out, id)` decodes an id back to a position.
-pub const NV_ROUTE_PLANNER_GOAL_OFFSET: usize = 0x34;
+/// [`NAVI_GRAPH_ID_NONE`] is the "no node here" answer and must never be requested.
+pub const NV_ROUTE_PLANNER_START_OFFSET: usize = 0x34;
+
+/// `NvRoutePlanner -> goal`. `+0x38`, a packed navigation-graph id, same encoding as
+/// [`NV_ROUTE_PLANNER_START_OFFSET`].
+///
+/// Third argument of `0x140bb4090`, and the snapped DESTINATION at the only call site -- see
+/// [`NV_ROUTE_PLANNER_START_OFFSET`] for the derivation, which establishes both offsets at once
+/// because it reads one call and one store instruction per field.
+///
+/// `NvRoutePlanner::Update` reads this one second (`this[7]._vfptr` in the decompiler's numbering)
+/// and falls into `0x140bb4a60` when either id is [`NAVI_GRAPH_ID_NONE`]. That function frees the
+/// two scratch arrays and does `flags |= 6` -- so an unsnappable endpoint reports READY and
+/// FAILED together, exactly like the two real failure paths, and a poller that tests FAILED
+/// first needs no special case for it. See [`NV_ROUTE_PLANNER_FLAG_FAILED`].
+pub const NV_ROUTE_PLANNER_GOAL_OFFSET: usize = 0x38;
+
+/// `NvRoutePlanner -> capability`. `+0x3c`, the movement-capability mask the search filters edges
+/// with.
+///
+/// Fourth argument of `0x140bb4090`. The AI builds it in `0x14042ed50`: a size class in bits 0..2
+/// from the switch on `[[[ctrl+8]+0x38]+0x40]+4`, then ten feature bits (`0x300`, `0x40`, `0x80`,
+/// `0x400`, `0x20`, `0x10`, `0x2000`, `0x4000`, `0x8`) each set from a boolean the
+/// `ChrAiNavimeshCtrl` carries. `0x140bb4310` hands it to the parts object's vtable slot `+0x28`
+/// to turn it into a cost-table index.
+///
+/// See [`NV_ROUTE_PLANNER_CAPABILITY_DEFAULT`] for what a caller without a `ChrAiNavimeshCtrl`
+/// can honestly pass.
+pub const NV_ROUTE_PLANNER_CAPABILITY_OFFSET: usize = 0x3c;
+
+/// The capability a caller with no `ChrAiNavimeshCtrl` may pass. `0`.
+///
+/// **Not a guess and not a placeholder: it is a value `0x14042ed50` itself returns.** That
+/// function's `switch` has a `default: uVar1 = 0` arm, taken for every size-class enum outside
+/// `2..=7`, and every one of its ten feature bits is off when the corresponding controller
+/// boolean is clear. So `0` is the mask the engine produces for a small agent with no special
+/// movement, and the search treats it as such rather than as a sentinel.
+///
+/// The local player has no `ChrAiNavimeshCtrl` to read a truer mask from -- that object belongs
+/// to the AI module, and a player is not driven by it. Inventing one to read ten booleans out of
+/// is exactly the fabrication bd `ds2-call-the-games-own-functions` forbids.
+pub const NV_ROUTE_PLANNER_CAPABILITY_DEFAULT: u32 = 0;
+
+/// `NvRoutePlanner -> max cost`. `+0x40`, `f32`, the search's budget.
+///
+/// Fifth argument of `0x140bb4090`, arriving on the stack: the callee reads `[rsp+0x28]`, which
+/// is the fifth-argument slot once the `call` has pushed a return address.
+pub const NV_ROUTE_PLANNER_MAX_COST_OFFSET: usize = 0x40;
+
+/// The larger of the two budgets the engine itself passes. `999.0`, at `0x1410cb67c`.
+///
+/// `0x14042e890` -- the controller step that takes a node id, decodes it to a world triangle and
+/// routes there -- passes this. `0x14042ece0`, the short pursuit step, passes `200.0` from
+/// `0x1410b0d40` instead.
+///
+/// `ds2-invasion-path` uses this one because its target is another player somewhere on the map
+/// rather than an AI's next few metres, and a budget that is too small does not fail loudly: the
+/// planner simply reports [`NV_ROUTE_PLANNER_FLAG_FAILED`] and the overlay falls back to the
+/// arrow, which looks exactly like "there is no way to walk there".
+pub const NV_ROUTE_MAX_COST_LONG_RANGE: f32 = 999.0;
+
+/// The budget the AI's short pursuit step passes. `200.0`, at `0x1410b0d40`. Recorded so the
+/// choice of [`NV_ROUTE_MAX_COST_LONG_RANGE`] is visible as a choice between two engine values.
+pub const NV_ROUTE_MAX_COST_PURSUIT: f32 = 200.0;
 
 /// `NvRouteNavigator -> route`. `+0x28`.
 ///
@@ -6251,6 +6346,419 @@ pub const NV_ROUTE_SEGMENT_FLAGS_OFFSET: usize = 0x48;
 /// Signed, and the engine tests `0 < count` before trusting the pointers -- so a non-positive
 /// value is the documented "this segment has no polyline" case rather than an impossibility.
 pub const NV_ROUTE_SEGMENT_POINT_COUNT_OFFSET: usize = 0x50;
+
+// ---------------------------------------------------------------------------------------------
+// THE SNAP: WORLD POSITION -> NAVIGATION-GRAPH ID.
+//
+// bd `ds2-mods-rs-4yd` was filed on the premise that this step is an asynchronous job
+// (`NvNaviPolyNearestSearchTask`) and that driving it by hand would mean fabricating an engine
+// update context. THAT PREMISE IS FALSE. The snap is an ordinary synchronous call returning the
+// id in `eax`, and the whole of it is spelled out in one function -- `0x14037be30`, twenty-eight
+// instructions -- which does nothing else:
+//
+//   mov  rbx,[0x1416148f0]                     ; GameManagerImp
+//   mov  rax,[rbx+0x38]                        ; MapManager
+//   mov  ecx,[rax+0x170]                       ; the map area
+//   call 0x140bab1f0                           ; -> key
+//   mov  rcx,rbx ; call 0x14039a9f0            ; -> NvNaviGraphWorld ([[gm+0xBC0]+0x10])
+//   mov  edx,esi ; call 0x140badb90            ; -> the graph data for that area
+//   call [vtable+0x148]                        ; -> a pointer to the character's position
+//   mov  r9d,0x28 ; movss xmm2,[0x1410ad5ec]   ; filter, radius 20.0
+//   mov  qword [rsp+0x20],0                    ; out_dist: NULL is allowed
+//   call 0x140babf90                           ; -> the graph id, or 0xffffffff
+//
+// `0x14042c9a0(ChrAiNavimeshCtrl*, pos, radius, filter, out_dist)` is the same chain packaged for
+// an AI agent; it takes the map area from the character instead of from `MapManager` and is not
+// usable by a caller who only has a position.
+//
+// Every address in this section was checked with `scripts/ds2-arxan-chain.py` and none is
+// redirected; the four leaf functions report `UNKNOWN` only because they begin with their real
+// work rather than with a standard prologue, and their first bytes match the disassembly above.
+
+/// Offset of `MapManager` in [`GAME_MANAGER_IMP`]. `+0x38`.
+///
+/// From `0x14037be8f`: `mov rax,[rbx+0x38]` on the `GameManagerImp` just loaded from
+/// `0x1416148f0`, immediately dereferenced at [`MAP_MANAGER_AREA_OFFSET`] and handed to
+/// [`NAVI_GRAPH_KEY_FROM_AREA`]. Named `MapMan` in the Ghidra project's `GameManagerImp` type.
+pub const GAME_MANAGER_MAP_MANAGER_OFFSET: usize = 0x38;
+
+/// `MapManager -> current area`. `+0x170`, read as a `u32` and masked to six bits downstream.
+///
+/// From `0x14037be98`: `mov ecx,[rax+0x170]` is the only thing done with the `MapManager` before
+/// [`NAVI_GRAPH_KEY_FROM_AREA`] is called on it.
+pub const MAP_MANAGER_AREA_OFFSET: usize = 0x170;
+
+/// `u32 area -> u32 key`. RVA `0x00ba_b1f0`, five instructions, no memory access:
+/// `(area & 0x3f) << 24 | 0xffffff`.
+///
+/// The result is what [`NAVI_GRAPH_DATA_FOR_KEY`] compares against `[[data+0x28]+0x1c]`. Two
+/// things worth knowing before trusting a `-1` check on it: it CANNOT return `-1` (the largest
+/// value it can produce is `0x3fffffff`), and [`NAVI_GRAPH_DATA_FOR_KEY`] re-applies the same
+/// mask itself, so the key form is a convention rather than a requirement.
+pub const NAVI_GRAPH_KEY_FROM_AREA: u32 = 0x00ba_b1f0;
+
+/// `GameManagerImp* -> NvNaviGraphWorld*`. RVA `0x0039_a9f0`.
+///
+/// Three instructions: returns `[[gm + 0xBC0] + 0x10]`, or `0` when
+/// [`GAME_MANAGER_NAV_SYSTEM_OFFSET`] is null. **It does not null-check its own argument**, so
+/// the caller must, which is why `ds2-invasion-path` reads the `GameManagerImp` pointer with a
+/// fault-safe read and refuses on null before getting here.
+pub const NAVI_GRAPH_WORLD_FROM_GAME_MANAGER: u32 = 0x0039_a9f0;
+
+/// `(NvNaviGraphWorld*, u32 key) -> graph data*`. RVA `0x00ba_db90`.
+///
+/// A linear scan of the pointer array at `world + 0x28`, `[world + 0x68]` entries long, keeping
+/// the one whose `[[entry + 0x28] + 0x1c]` equals `key & 0x3f000000 | 0xffffff`. Returns `0`
+/// when the area is not loaded -- which is the ordinary answer during a map transition, not a
+/// failure.
+pub const NAVI_GRAPH_DATA_FOR_KEY: u32 = 0x00ba_db90;
+
+/// `(graph data*, const float* pos, f32 radius, u32 filter, f32* out_dist) -> u32 id`.
+/// RVA `0x00ba_bf90`.
+///
+/// `rcx`, `rdx`, `xmm2`, `r9d`, `[rsp+0x20]`. Walks the sub-graphs at `data + 0x28`
+/// (`[[data+0x28]+8]` of them), calling `0x140bac070` on each and keeping the nearest hit;
+/// returns [`NAVI_GRAPH_ID_NONE`] when none is within `radius`.
+///
+/// `out_dist` may be `NULL` -- the function tests it -- and `0x14037bef8` passes exactly that.
+/// When it is not null it receives the SQUARED distance, not the distance: the `sqrtf` in the
+/// loop narrows the search radius and is never written back.
+///
+/// # This must run on the game thread
+///
+/// `0x140bac070` lazy-initialises a `DLKR` allocator through `DAT_1416681a8` on first use and
+/// then panics `"Tried to create container with incompatible heap."` if the container it builds
+/// does not match. Two threads racing that initialisation is a torn global followed by an abort,
+/// and the abort is inside the game's own panic handler rather than anywhere this code could
+/// catch it.
+pub const NAVI_GRAPH_NEAREST_ID: u32 = 0x00ba_bf90;
+
+/// The radius `0x14037be30` snaps with. `20.0`, read from `0x1410ad5ec`.
+///
+/// The `ChrAiNavimeshCtrl` paths use `10.0` (`0x1410ad5e8`) instead. The larger one is used here
+/// because a player standing on a ledge, a staircase or a corpse can be further off the navmesh
+/// than a walking AI ever is, and a snap that fails costs the whole route.
+pub const NAVI_GRAPH_SNAP_RADIUS_METERS: f32 = 20.0;
+
+/// The filter `0x14037be30` snaps with. `0x28`.
+///
+/// The bits are read off `0x140bac070`, which is the only consumer:
+///
+/// | bit | effect when SET |
+/// | --- | --- |
+/// | `0x07` | minimum poly class; a poly passes only when `poly & 7` is strictly greater |
+/// | `0x08` | accept polys carrying flag `0x100`, which are otherwise rejected |
+/// | `0x10` | do not reject polys whose `class & 0x78` is `0x40` |
+/// | `0x20` | likewise |
+///
+/// So `0x28` is `0x20 | 0x08` with a class minimum of zero: the most permissive snap the engine
+/// offers. That is the right one for a player, who is not an AI agent with a movement class and
+/// should be placed on whatever navmesh is under their feet.
+pub const NAVI_GRAPH_SNAP_FILTER: u32 = 0x28;
+
+/// The "there is no node here" graph id. `0xffffffff`.
+///
+/// Returned by [`NAVI_GRAPH_NEAREST_ID`] when nothing is in range, and by `0x14042c9a0` when the
+/// area is not loaded. Requesting a route with it is safe but pointless -- see
+/// [`NV_ROUTE_PLANNER_GOAL_OFFSET`], which explains why it comes back as a FAILED search rather
+/// than as silence.
+pub const NAVI_GRAPH_ID_NONE: u32 = 0xffff_ffff;
+
+// ---------------------------------------------------------------------------------------------
+// THE GAME TICK, and why it is this function rather than one of its callers.
+//
+// `ds2-invasion-path` needs a seam that runs on the thread the game's own logic runs on, because
+// both things it wants to do from one -- the snap above and the SFX spawn below -- read and
+// write unlocked engine state. `Present` is not that seam (`ds2-mods-rs-3al`, blocker (a)).
+//
+// `NvNavigationSystem::Update` is called from four game-state tick handlers:
+// `0x1401bd750` (state 0x0a), `0x1401bf3b3` (state 0x1c), `0x1401bfe46` and `0x1401c2454`, each
+// as one line in a long sequence of `if (subsystem) subsystem->Update(delta)`. Hooking the
+// callee rather than the callers means ONE detour instead of four, and it arrives with the
+// `NvNavigationSystem` already in `rcx` and already known non-null -- every caller tests it
+// first. It also cannot run at the title screen or during a load, which is exactly the window in
+// which neither the navmesh nor the SFX system exists.
+
+/// `NvNavigationSystem::Update(NvNavigationSystem* rcx, f32 delta /*xmm1*/)`. RVA `0x00ba_eb20`.
+///
+/// **The delta is a float in `xmm1`, not an integer in `edx`.** Every call site loads it with
+/// `movaps xmm1,xmm6`. A detour declared with an integer second parameter would compile, run,
+/// and silently hand the engine whatever `xmm1` happened to hold -- which is also why this must
+/// NOT go through `ds2-hook`'s union, whose shared signature is four `usize` and whose dispatcher
+/// is free to clobber the volatile `xmm1`.
+///
+/// What it does, in order: builds a vector of the live objects on the intrusive list at
+/// [`NV_NAVIGATION_SYSTEM_LIST_HEAD_OFFSET`], unlinking and releasing any whose
+/// [`NV_NAVIGATION_NODE_RETIRED_OFFSET`] byte is set; calls each survivor's vtable slot `+0x10`
+/// with the shared context at [`NV_NAVIGATION_SYSTEM_CONTEXT_OFFSET`], repeating until they all
+/// return true or 0x80 passes have gone by; then forwards the delta to the graph world.
+pub const NV_NAVIGATION_SYSTEM_UPDATE: u32 = 0x00ba_eb20;
+
+/// First thirteen bytes of [`NV_NAVIGATION_SYSTEM_UPDATE`], checked before the detour goes in.
+///
+/// `mov [rsp+8],rcx ; push rbp ; push r12 ; push r13 ; mov rbp,rsp`. The first instruction alone
+/// is the five bytes MinHook needs and is position-independent, so the trampoline is a plain
+/// copy; the rest is carried because `48 89 4c 24 08` on its own is one of the most common
+/// sequences in the image and would match almost anything if the RVA ever drifted.
+pub const NV_NAVIGATION_SYSTEM_UPDATE_PROLOGUE: [u8; 13] = [
+    0x48, 0x89, 0x4c, 0x24, 0x08, 0x55, 0x41, 0x54, 0x41, 0x55, 0x48, 0x8b, 0xec,
+];
+
+/// `NvNavigationSystem -> NvNaviGraphWorld`. `+0x10`.
+///
+/// The same pointer [`NAVI_GRAPH_WORLD_FROM_GAME_MANAGER`] returns, reached the other way.
+/// `0x140bae8d0` passes it to `0x140bb4080` to bind a fresh planner to the world, and
+/// `NvNavigationSystem::Update` forwards the frame delta to its vtable slot `+0x18`.
+pub const NV_NAVIGATION_SYSTEM_GRAPH_WORLD_OFFSET: usize = 0x10;
+
+/// `NvNavigationSystem -> search context`. `+0x18`.
+///
+/// The second argument every listed object's `Update` receives. `NvRoutePlanner::Update` passes
+/// it to `0x140bb9610` to allocate search-task nodes, so this is the pool the A* runs out of.
+/// Recorded because it is the "update context the engine supplies" that bd
+/// `ds2-call-the-games-own-functions` warns against fabricating -- and the point of linking a
+/// planner into the list is that the engine supplies it for you.
+pub const NV_NAVIGATION_SYSTEM_CONTEXT_OFFSET: usize = 0x18;
+
+/// `NvNavigationSystem -> head of the intrusive update list`. `+0x20`.
+///
+/// `0x140bae8d0` pushes onto the front: `new->next = head; count += 1; head = new`.
+pub const NV_NAVIGATION_SYSTEM_LIST_HEAD_OFFSET: usize = 0x20;
+
+/// `NvNavigationSystem -> length of that list`. `+0x28`, `i32`.
+///
+/// Incremented by `0x140bae8d0` and decremented by `NvNavigationSystem::Update` as it unlinks a
+/// retired node. Read by `ds2-invasion-path` for one thing only: proving a planner it created
+/// was actually linked.
+pub const NV_NAVIGATION_SYSTEM_LIST_COUNT_OFFSET: usize = 0x28;
+
+/// The `next` pointer of a listed navigation object. `+0x10`.
+///
+/// `NvNavigationSystem::Update` walks `puVar12[2]`; `0x140bae8d0` writes `plVar3[2]`. Same field.
+pub const NV_NAVIGATION_NODE_NEXT_OFFSET: usize = 0x10;
+
+/// "Take me off the list." `+0x18`, one byte.
+///
+/// `0x140baefc0(navsys, obj)` is four instructions -- `mov byte [rdx+0x18],1 ; ret` -- and does
+/// not touch the list. The unlink, the reference release and the destructor all happen on the
+/// next `NvNavigationSystem::Update`, which is what makes teardown safe from anywhere the tick
+/// is not currently running.
+pub const NV_NAVIGATION_NODE_RETIRED_OFFSET: usize = 0x18;
+
+/// `NvNavigationSystem* -> NvRoutePlanner*`. RVA `0x00ba_e8d0`. The whole factory in one call.
+///
+/// It allocates `0xa0` bytes from the allocator at `navsys + 0x40`, runs the constructor
+/// `0x140bb3cf0`, calls `0x140bb4080(planner, navsys->graph_world)` to fill the `+0x28` the
+/// constructor leaves null, and links the result onto
+/// [`NV_NAVIGATION_SYSTEM_LIST_HEAD_OFFSET`]. Returns `0` if the allocation fails.
+///
+/// **That last step is the entire reason to use it.** A planner on that list is stepped by
+/// `NvNavigationSystem::Update` for free, with the context the engine supplies, every frame,
+/// without this crate scheduling anything. The alternative -- constructing one privately and
+/// calling its `Update` by hand -- is the fabricated context bd `ds2-call-the-games-own-functions`
+/// forbids.
+pub const NV_NAVIGATION_SYSTEM_CREATE_ROUTE_PLANNER: u32 = 0x00ba_e8d0;
+
+/// `(NvNavigationSystem*, object*)`. RVA `0x00ba_efc0`. Marks a listed object for removal.
+///
+/// See [`NV_NAVIGATION_NODE_RETIRED_OFFSET`]: it sets one byte and returns. The object stays
+/// valid until the next tick unlinks it.
+pub const NV_NAVIGATION_SYSTEM_RETIRE: u32 = 0x00ba_efc0;
+
+/// `(NvRoutePlanner*, u32 start, u32 goal, u32 capability, f32 max_cost)`. RVA `0x00bb_4090`.
+///
+/// Eight instructions, no allocation, no call: it stores the four values at
+/// [`NV_ROUTE_PLANNER_START_OFFSET`], [`NV_ROUTE_PLANNER_GOAL_OFFSET`],
+/// [`NV_ROUTE_PLANNER_CAPABILITY_OFFSET`] and [`NV_ROUTE_PLANNER_MAX_COST_OFFSET`], then does
+/// `flags = (flags & 0xf1) | 1` at [`NV_ROUTE_PLANNER_FLAGS_OFFSET`] -- clearing both result bits
+/// in the same instruction that sets the request bit, which is what makes "pending" mean pending.
+///
+/// The search itself happens on the planner's `Update`, so this is safe to call from the tick
+/// detour before or after the original; it is NOT safe from another thread, because the planner
+/// it writes is on a list the tick is walking.
+pub const NV_ROUTE_PLANNER_REQUEST: u32 = 0x00bb_4090;
+
+// ---------------------------------------------------------------------------------------------
+// THE SFX SPAWN, for the Prism Stone trail. bd `ds2-mods-rs-3al` has the full account; what is
+// here is the part `ds2-invasion-path` calls.
+
+/// Offset of `KatanaSfxSystem` in [`GAME_MANAGER_IMP`]. `+0xbc8`.
+///
+/// From `0x140446f08`: `mov rbx,[rax+0xbc8]` on the pointer loaded from `0x1416148f0`, named
+/// `KatanaSfxSystem` in the Ghidra project's `GameManagerImp` type.
+pub const GAME_MANAGER_SFX_SYSTEM_OFFSET: usize = 0xbc8;
+
+/// `KatanaSfxSystem -> ready`. `+0x46`, one byte.
+///
+/// From `0x140446f18`: `cmp byte [rbx+0x46],0 ; je <return>` -- the fire-and-forget spawner
+/// refuses to do anything when it is zero, before touching any other field. Treated the same way
+/// here.
+pub const KATANA_SFX_SYSTEM_READY_OFFSET: usize = 0x46;
+
+/// `KatanaSfxSystem -> quality level`. `+0x300`, `u32`.
+///
+/// **A value of 3 or more silently drops spawns.** `0x140beb670` opens with
+/// `if (3 <= sys->quality && sys->vtable[0x50](sys, id)) return empty_ctrl;` -- the caller gets a
+/// control block that looks exactly like a successful one and no effect appears. The engine
+/// raises this under load, so a trail that works in a corridor can stop working in a boss arena
+/// for reasons that are not in this crate. `ds2-invasion-path` logs the byte on the first spawn
+/// of a session precisely so that case is diagnosable without a debugger.
+pub const KATANA_SFX_SYSTEM_QUALITY_OFFSET: usize = 0x300;
+
+/// The quality level at which spawns start being dropped. `3`.
+pub const KATANA_SFX_QUALITY_DROP_THRESHOLD: u32 = 3;
+
+/// `KatanaSfxSystem -> high-quality variants enabled`. `+0x305`, one byte.
+///
+/// When non-zero, `0x140beb670` tries `id + 20000` before `id` and then `id + 10000` -- the SOTFS
+/// remaster's higher-detail effects. Which is why a caller passes the BASE id and not a variant.
+pub const KATANA_SFX_SYSTEM_HIGH_QUALITY_OFFSET: usize = 0x305;
+
+/// The largest id the `+20000` remaster lookup is attempted for. `9999`.
+///
+/// `0x140beb670` tests `if (9999 < id)` and skips straight to a direct lookup. Base ids are all
+/// below it; `ds2-mods-rs-3al` catalogues the usable range as `40..8557`, which is a survey of
+/// where ids appear in the game's params rather than a bound this executable enforces.
+pub const KATANA_SFX_BASE_ID_MAX: u32 = 9999;
+
+/// `(KatanaSfxSystem*, ctrl* out, u32 sfx_id, const f32[8]* pos_and_dir, u32, u8, u8) -> ctrl*`.
+/// RVA `0x00be_b670`.
+///
+/// The core spawn. `0x140beb590` is the same thing behind a `float4x4`: it copies row 3 of the
+/// matrix as the position, derives a direction from the matrix with `0x140005c00`, normalises it,
+/// and calls this. Taking the eight floats directly removes a matrix layout from the things that
+/// can be wrong -- the first four are the world position, the second four a unit direction.
+///
+/// The trailing three arguments are `0`, `0xff`, `0` at every call site, `0x140446ee0` included.
+///
+/// `out` must point at [`KATANA_SFX_CTRL_BYTES`] of zeroed, 16-byte-aligned storage the caller
+/// owns; the function constructs two `FX4CG::FXCGSfxCtrl` sub-objects in it and returns it.
+///
+/// **Game thread only.** The create path underneath reads and writes
+/// [`KATANA_SFX_SYSTEM_QUALITY_OFFSET`], two live vectors, an xorshift RNG and the failed-lookup
+/// red-black tree at `sys + 0x2b8`, with no lock anywhere, and all 46 static call sites are game
+/// logic.
+pub const KATANA_SFX_SPAWN: u32 = 0x00be_b670;
+
+/// `(ctrl*)`. RVA `0x00a0_60f0`. The `FXCGSfxCtrl` destructor.
+///
+/// **It is called on each 0x30-byte HALF of the control block, not on the block.** `0x140446ee0`
+/// tears its block down with two calls, at `+0x30` and then at `+0x00`; so does `0x140beb670`
+/// for its own temporaries. Calling it once on the whole thing leaves the other half linked.
+///
+/// What it actually does: restores the `FFX::FXSfxCtrl` vtable pointer at `+0x00` and unlinks the
+/// block from the effect node's controller list -- the head is `node + 0xf8`, the links are
+/// [`KATANA_SFX_CTRL_PREV_OFFSET`] and [`KATANA_SFX_CTRL_NEXT_OFFSET`]. It reads
+/// [`KATANA_SFX_CTRL_NODE_OFFSET`] and `+0x18` to find the node and does nothing when both are
+/// zero.
+///
+/// **It unlinks. It does not stop the effect.** [`KATANA_SFX_STOP`] is the stop, and it comes
+/// first. Skipping this afterwards is not a leak but a dangling write: a block still on the
+/// node's list is memory the engine will write through later.
+pub const KATANA_SFX_CTRL_DESTROY: u32 = 0x00a0_60f0;
+
+/// `(ctrl* block_of_two)`. RVA `0x0014_1530`. **Stops a spawned effect.**
+///
+/// bd `ds2-mods-rs-3al` blocker (c) said this was unknown and that every marker placed would
+/// therefore be permanent for the session. It is not unknown. Twenty-two instructions, a clean
+/// prologue, not Arxan-redirected, and it takes the whole [`KATANA_SFX_CTRL_BYTES`] block --
+/// looping twice over the two [`KATANA_SFX_CTRL_HALF_BYTES`] halves and issuing the same three
+/// calls on each:
+///
+/// ```text
+/// 0x140a34eb0(half, 0)      ; detach: nulls the effect's follow-transform source
+/// 0x140a069f0(half, 1, 0)   ; set flag bit 0 on the node and its whole child subtree
+/// 0x140a06350(half)         ; the despawn -- returns the node to its pool, clears the
+///                           ; "alive" bit 30 of node+0x58, and zeroes ctrl+8..+0x28
+/// ```
+///
+/// All three are Arxan thunks; the chains were walked with `scripts/ds2-arxan-chain.py` and end
+/// in game code. `0x140141530` itself is not redirected. It is issued as one unit at all sixteen
+/// call sites -- `0x1403c8360`, a distance-culled emitter, pairs it against `0x140beb590`
+/// exactly the way `ds2-invasion-path` does.
+///
+/// **Order: stop, then [`KATANA_SFX_CTRL_DESTROY`].** Not because the reverse fails today -- the
+/// destructor does not clear [`KATANA_SFX_CTRL_NODE_OFFSET`], so a stop after it would still
+/// find the node -- but because the destructor is the only thing that takes the block off the
+/// node's list, and between the two calls that node may be recycled into somebody else's effect.
+/// Stopping through a stale pointer kills the wrong thing.
+///
+/// **Game thread only.** It takes no lock and touches the FX manager's per-bucket lists, its
+/// active-node list, its pool arrays and its deferred-destroy chain -- all of which the FX update
+/// pass walks every frame. A search of these bodies for `lock`, `cmpxchg`, `xchg [mem]` and any
+/// wait call finds nothing.
+///
+/// Safe on a block that never spawned anything: each of the three primitives returns immediately
+/// when the node pointers are null, which is what a throttled spawn leaves behind.
+pub const KATANA_SFX_STOP: u32 = 0x0014_1530;
+
+/// `FXSfxCtrl -> effect node`. `+0x10`, and `+0x18` for the second one.
+///
+/// Read by [`KATANA_SFX_CTRL_DESTROY`] as `param_1[2]` and `param_1[3]` and by every primitive
+/// [`KATANA_SFX_STOP`] calls. **Both zero means the block controls nothing**, which is what a
+/// spawn dropped by [`KATANA_SFX_SYSTEM_QUALITY_OFFSET`] produces -- `0x140beb670` returns a
+/// block built by `0x140127240`, which constructs both halves empty and looks exactly like a
+/// success to its caller. Testing this is the only way to tell them apart.
+pub const KATANA_SFX_CTRL_NODE_OFFSET: usize = 0x10;
+
+/// `FXSfxCtrl -> previous controller` in the effect node's list. `+0x20`.
+pub const KATANA_SFX_CTRL_PREV_OFFSET: usize = 0x20;
+
+/// `FXSfxCtrl -> next controller` in the effect node's list. `+0x28`.
+pub const KATANA_SFX_CTRL_NEXT_OFFSET: usize = 0x28;
+
+/// The Prism Stone's seven SFX ids: `833 ..= 839`.
+///
+/// **This is what `marker_effect_id` wants.** bd `ds2-mods-rs-3al` recorded the id as
+/// unobtainable from the executable; the chain that yields it is `ItemParam` row `60450000` ->
+/// `SpEffectActiveItem.emevd` event `60450000` -> instruction bank `100120` index `2`, whose
+/// entry in the dispatch table at `0x14156fe10` is named `L"七色石発射"` -- "seven-colour-stone
+/// launch" -- and whose factory `0x140216010` installs the vtable of
+/// `.?AVSpEffectActionImpl_ThrowColorStone@@`.
+///
+/// That class's execute method (`0x140216c40`) draws `rng % 7` from `GameManagerImp`'s xorshift
+/// state into the item bag's colour byte, and the item-pack glow spawner reads it back at
+/// `0x1401e69b4`:
+///
+/// ```text
+/// movzx eax, byte ptr [rbp+0x39]              ; the colour, 0..6
+/// lea   rcx, [rip + ...]                      ; the image base
+/// mov   eax, dword ptr [rcx + rax*4 + 0x10c7b58]
+/// ```
+///
+/// and the seven dwords at `0x1410c7b58` are `833 834 835 836 837 838 839`, followed by
+/// `0x3dcccccd` (`0.1f`), so the table is exactly seven long. `0x1401e69bf` is its only xref.
+/// `sfx9999.ffxbnd.dcx` carries `f0000833.ffx` through `f0000839.ffx` and nothing in
+/// `sfx9999_Append.ffxbnd.dcx` matches `f002083x`, so the `+20000` probe finds nothing for these
+/// and falls through to the base id -- which is what [`KATANA_SFX_SPAWN`] is given.
+///
+/// **They linger**, and the evidence is engine-side rather than a claim about the asset: the
+/// effect is bound to a persistent ground entity's transform (`entity+0xd0`) rather than to a
+/// projectile; the spawner retains its controllers in `entity+0x128` and re-spawns only when
+/// those slots are empty; turning the glow off fades it over a whole second; and `0x1401e0490`
+/// sweeps the live item-pack list turning the glow back on. A one-shot burst needs none of that.
+/// The prism bag is created with all eight item slots zeroed, so it is never picked up.
+///
+/// A trail should pick ONE of the seven and keep it, so the trail reads as one thing. Which one
+/// is a matter of taste; the engine chooses at random per throw.
+pub const PRISM_STONE_SFX_IDS: [u32; 7] = [833, 834, 835, 836, 837, 838, 839];
+
+/// Where [`PRISM_STONE_SFX_IDS`] was read from. RVA `0x010c_7b58`, seven `u32`.
+///
+/// Recorded so the next reader can re-derive the ids from the image rather than trusting the
+/// array above, which is a transcription.
+pub const PRISM_STONE_SFX_ID_TABLE: u32 = 0x010c_7b58;
+
+/// Bytes of caller-owned storage `0x140beb670` writes into. `0x68`.
+///
+/// Two `FX4CG::FXCGSfxCtrl` at `0x30` each plus the `param_2[0xc] = 0` at `+0x60`. Must be
+/// 16-byte aligned: the constructors store vtable pointers with aligned moves.
+pub const KATANA_SFX_CTRL_BYTES: usize = 0x68;
+
+/// Bytes per `FXCGSfxCtrl` sub-object inside that block. `0x30`.
+///
+/// The stride [`KATANA_SFX_CTRL_DESTROY`] must be called at, twice, descending.
+pub const KATANA_SFX_CTRL_HALF_BYTES: usize = 0x30;
 
 // ---------------------------------------------------------------------------------------------
 // THE CAMERA, and the one thing in this section that is FOUND rather than declared.

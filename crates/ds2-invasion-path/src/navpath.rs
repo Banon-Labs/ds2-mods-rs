@@ -12,41 +12,28 @@
 //! Every offset in it was read out of the engine's own accessors, and the decode is exercised
 //! below against a synthetic buffer laid out byte for byte the way the engine lays one out.
 //!
-//! What this module does **not** do is ask for a route, and the reason is specific rather than
-//! effort:
+//! # The half that used to be missing, and is not
 //!
-//! - `0x140bb4090(planner, a, b, c, d)` is the request. Its arguments are **navigation-graph
-//!   ids**, not world positions -- `NvRoutePlanner::Update` (`0x140bb4110`) hands `+0x34` to
-//!   `0x140bb2620(parts, id | 0x1ffff)` and dispatches on the object that comes back.
-//! - Turning a world position into such an id is an asynchronous job
-//!   (`NvNaviPolyNearestSearchTask`), and the AI reaches its ids a third way again, out of
-//!   controller state the engine maintains per character.
-//! - Reconstructing either by hand means fabricating an update context the game normally
-//!   supplies. bd `ds2-call-the-games-own-functions` says not to, and the reason is not
-//!   aesthetic: a half-built context is a crash in someone else's invasion.
+//! This module used to say -- at length -- that a route could not be *asked for*, because
+//! `0x140bb4090` takes navigation-graph ids rather than world positions and turning a position
+//! into one was an asynchronous job whose context would have to be fabricated. bd
+//! `ds2-mods-rs-4yd` was filed on that premise.
 //!
-//! So the overlay draws the arrow. That is the same degraded mode the Elden Ring crate falls back
-//! to when its navmesh answers "there is no way to walk there", and it is a complete feature
-//! rather than a placeholder -- it just is not the *walkable* one yet.
+//! **The premise was false.** The snap is a plain synchronous function returning the id in
+//! `eax`, and `0x14037be30` does the whole chain in twenty-eight instructions. `crate::navquery`
+//! calls it; `crate::gametick` requests the route and polls it; this module decodes what comes
+//! back. Nothing fabricates a context: `0x140bae8d0` links a planner onto the navigation
+//! system's own list and the engine steps it from then on, which is the opposite of the thing
+//! bd `ds2-call-the-games-own-functions` warns against.
 //!
-//! Keeping the reader here, tested, is deliberate: it is the half that was expensive to derive,
-//! and it is the half that stops being derivable the moment the Ghidra project drifts.
+//! The arrow is still there, and still matters: it is what the overlay falls back to when the
+//! planner reports [`ds2_rva::NV_ROUTE_PLANNER_FLAG_FAILED`], which is the same degraded mode the
+//! Elden Ring crate uses when its navmesh answers "there is no way to walk there".
 
-// DEBT: THIS WHOLE MODULE IS DEAD CODE ON PURPOSE, and it is the only `allow` in this crate.
-//
-// The decoder has no production caller because nothing can ask for a route yet -- the reason is
-// above, in detail, and it is a missing engine capability rather than an unwritten function.
-// Three options were on the table:
-//
-//   1. Delete it, and rediscover the layout from the disassembly when the request lands.
-//   2. Keep it, tested, with this allow.
-//   3. Wire a caller that never runs, so the lint is satisfied by a lie.
-//
-// (1) throws away the expensive half. The segment stride, the goal-first segment order and the
-// REVERSED point order inside each segment were read out of `0x140bb3bd0` and `0x140bb3b20`, and
-// two of those three are the kind of thing that is wrong-but-plausible when rederived in a hurry.
-// (3) is worse than the lint. So (2), narrowly scoped to this module, with the tests below as the
-// thing that keeps it honest: dead code that is exercised by `cargo test` cannot rot silently.
+// The bounds below are a contract with the engine rather than a set of call sites, and two of
+// them (`MAX_POINTS_PER_SEGMENT`, `MAX_POINTS`) are enforced inside `decode` while
+// `MAX_SEGMENTS` is read by its caller's tests. Scoped to this module so the rest of the crate
+// keeps its unused items visible.
 #![allow(dead_code)]
 
 /// Somewhere bytes can be read from, fallibly.
