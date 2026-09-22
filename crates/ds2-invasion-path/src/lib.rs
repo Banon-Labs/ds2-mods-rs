@@ -544,7 +544,7 @@ mod windows_impl {
         vertices
     }
 
-    /// The shortest an arrow's shaft may appear, in pixels.
+    /// The shortest an arrow's shaft may appear, as a fraction of the viewport height.
     ///
     /// **A world-space arrow pointing away from the camera foreshortens to a dot**, and that is
     /// not a corner case -- it is what happens whenever you are running towards the person you
@@ -552,8 +552,12 @@ mod windows_impl {
     /// user asking whether the orange thing on screen was an arrow at all; it was, three metres
     /// long, aimed almost straight down the view axis, and it projected to a handful of pixels.
     ///
-    /// Eighty is a legible glyph at 1080p without being a thing you have to look past.
-    const MIN_ARROW_PX: f32 = 80.0;
+    /// A FRACTION AND NOT A PIXEL COUNT. Eighty pixels was chosen against 1080p and looks like a
+    /// legible glyph there; on the 2561x1440 back buffer this actually runs on it is a stub about
+    /// as long as the character is wide, which is how the arrow came to be sitting ON the player
+    /// and still be unreadable as an arrow. A share of the viewport is the same size to the eye
+    /// whatever the display is.
+    const MIN_ARROW_SHARE: f32 = 0.15;
 
     /// The last hundred-pixel band the arrow's tail landed in, and the frames left before another
     /// sample may be written.
@@ -662,7 +666,7 @@ mod windows_impl {
         }
     }
 
-    /// Grow an arrow until its shaft is at least [`MIN_ARROW_PX`] long on screen, or until it
+    /// Grow an arrow until its shaft is at least [`MIN_ARROW_SHARE`] of the viewport high, or until it
     /// reaches the person it points at -- whichever comes first.
     ///
     /// # Why the length is a minimum rather than a size
@@ -698,7 +702,8 @@ mod windows_impl {
         // shaft of a fraction of a pixel is a target almost exactly along the view axis, and
         // dividing by it produces a number rather than an answer.
         const DEGENERATE_PX: f32 = 0.5;
-        if shaft_px >= MIN_ARROW_PX || shaft_px < DEGENERATE_PX || current <= f32::EPSILON {
+        let wanted_px = screen[1] * MIN_ARROW_SHARE;
+        if shaft_px >= wanted_px || shaft_px < DEGENERATE_PX || current <= f32::EPSILON {
             return *arrow;
         }
         // BISECT, DO NOT SCALE. The obvious `length * wanted_px / shaft_px` is wrong twice over:
@@ -721,10 +726,10 @@ mod windows_impl {
         let (mut low, mut high) = (current, distance_meters.max(current));
         // The far end is not long enough either: nothing more can be done, and stopping short of
         // the target is still better than drawing past them.
-        if projected_px(high) > MIN_ARROW_PX {
+        if projected_px(high) > wanted_px {
             for _ in 0..6 {
                 let middle = 0.5 * (low + high);
-                if projected_px(middle) < MIN_ARROW_PX {
+                if projected_px(middle) < wanted_px {
                     low = middle;
                 } else {
                     high = middle;

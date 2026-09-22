@@ -284,6 +284,67 @@ pub fn aspect_matches(matrix: &Matrix, screen: [f32; 2]) -> bool {
     projection_aspect(matrix).is_some_and(|aspect| ((aspect - wanted) / wanted).abs() <= TOLERANCE)
 }
 
+/// Trim a screen-space segment to the viewport, or `None` if none of it is inside.
+///
+/// # Why a near-plane trim is not enough on its own
+///
+/// `Camera::project_segment` trims a segment that crosses the camera plane to `w = NEAR_EPSILON`,
+/// which is mathematically right and visually catastrophic: dividing by a number that small
+/// throws the trimmed end thousands of pixels away, and the line drawn to it sweeps across the
+/// whole frame. A live screenshot has an arrowhead whose two barbs reach the top-left corner from
+/// a tip in the middle of the screen, drawn over the sky, for exactly this reason.
+///
+/// The direction of that line is correct; only its far end is nonsense. So the fix is not to drop
+/// the segment -- a line leaving the frame towards a player behind you is the information wanted
+/// -- but to end it where it leaves the viewport. Liang-Barsky, on the four edges.
+///
+/// The `1.0` slack keeps a line that runs exactly along an edge from being trimmed to nothing by
+/// rounding.
+#[must_use]
+pub fn clip_to_viewport(
+    from: [f32; 2],
+    to: [f32; 2],
+    screen: [f32; 2],
+) -> Option<([f32; 2], [f32; 2])> {
+    const SLACK: f32 = 1.0;
+    let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
+    let (mut enter, mut leave) = (0.0f32, 1.0f32);
+    // Each edge as `direction * t <= distance`: negative direction is entering the half-plane,
+    // positive is leaving it, and zero is parallel -- which only fails if it starts outside.
+    for (direction, distance) in [
+        (-dx, from[0] + SLACK),
+        (dx, screen[0] + SLACK - from[0]),
+        (-dy, from[1] + SLACK),
+        (dy, screen[1] + SLACK - from[1]),
+    ] {
+        if direction == 0.0 {
+            if distance < 0.0 {
+                return None;
+            }
+            continue;
+        }
+        let t = distance / direction;
+        if direction < 0.0 {
+            if t > leave {
+                return None;
+            }
+            enter = enter.max(t);
+        } else {
+            if t < enter {
+                return None;
+            }
+            leave = leave.min(t);
+        }
+    }
+    if !enter.is_finite() || !leave.is_finite() || enter > leave {
+        return None;
+    }
+    Some((
+        [from[0] + dx * enter, from[1] + dy * enter],
+        [from[0] + dx * leave, from[1] + dy * leave],
+    ))
+}
+
 /// A camera reduced to what drawing needs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Camera {
@@ -400,10 +461,11 @@ impl Camera {
             clipped[3] = NEAR_EPSILON;
             if a_in { b = clipped } else { a = clipped }
         }
-        Some((
+        clip_to_viewport(
             self.clip_to_screen(a, screen)?,
             self.clip_to_screen(b, screen)?,
-        ))
+            screen,
+        )
     }
 
     /// Does this camera frame the character the way DARK SOULS II's camera frames a character?
@@ -909,5 +971,49 @@ mod tests {
         // A config with `faint_at` below `bold_at` is a user error, not a crash.
         assert!(boldness(50.0, 150.0, 20.0).is_finite());
         assert!(boldness(f32::NAN, 20.0, 150.0).is_finite());
+    }
+}
+
+#[cfg(test)]
+mod viewport_clipping {
+    use super::clip_to_viewport;
+
+    const SCREEN: [f32; 2] = [1000.0, 800.0];
+
+    fn near(a: [f32; 2], b: [f32; 2]) -> bool {
+        (a[0] - b[0]).abs() < 1.5 && (a[1] - b[1]).abs() < 1.5
+    }
+
+    #[test]
+    fn a_segment_wholly_inside_is_untouched() {
+        let clipped = clip_to_viewport([100.0, 100.0], [900.0, 700.0], SCREEN).unwrap();
+        assert!(near(clipped.0, [100.0, 100.0]) && near(clipped.1, [900.0, 700.0]));
+    }
+
+    #[test]
+    fn the_near_plane_blowup_is_trimmed_to_the_edge() {
+        // The live failure: a barb whose far end was thrown to the corner by a near-zero `w`.
+        // The line must survive -- its direction is right -- and must end at the viewport.
+        let clipped = clip_to_viewport([500.0, 400.0], [-40_000.0, -32_000.0], SCREEN).unwrap();
+        assert!(near(clipped.0, [500.0, 400.0]));
+        assert!(clipped.1[0] >= -1.5 && clipped.1[1] >= -1.5);
+        // and it still points the same way
+        assert!(clipped.1[0] < 500.0 && clipped.1[1] < 400.0);
+    }
+
+    #[test]
+    fn a_segment_entirely_off_one_side_is_dropped() {
+        assert!(clip_to_viewport([-500.0, 400.0], [-100.0, 400.0], SCREEN).is_none());
+    }
+
+    #[test]
+    fn a_segment_crossing_the_whole_viewport_keeps_both_edges() {
+        let clipped = clip_to_viewport([-500.0, 400.0], [1500.0, 400.0], SCREEN).unwrap();
+        assert!(near(clipped.0, [-1.0, 400.0]) && near(clipped.1, [1001.0, 400.0]));
+    }
+
+    #[test]
+    fn a_degenerate_point_inside_survives() {
+        assert!(clip_to_viewport([500.0, 400.0], [500.0, 400.0], SCREEN).is_some());
     }
 }
