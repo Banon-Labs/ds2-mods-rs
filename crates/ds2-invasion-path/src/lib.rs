@@ -108,6 +108,7 @@ mod windows_impl {
 
     use ds2_hotkey_config::keys::{MODIFIER_ALT, MODIFIER_CTRL, MODIFIER_SHIFT};
     use ds2_hotkey_config::reload::{FileChange, HotFile};
+    use windows::Win32::Graphics::Direct3D11::ID3D11Texture2D;
     use windows::Win32::Graphics::Dxgi::IDXGISwapChain;
 
     use crate::camera::{Found, Tracker};
@@ -738,10 +739,27 @@ mod windows_impl {
 
     /// The back buffer's size in pixels, which is the coordinate space the overlay draws in.
     fn back_buffer_size(swap_chain: &IDXGISwapChain) -> Option<[f32; 2]> {
-        // SAFETY: `swap_chain` is the game's own, borrowed by the detour.
-        let description = unsafe { swap_chain.GetDesc() }.ok()?;
-        let width = description.BufferDesc.Width as f32;
-        let height = description.BufferDesc.Height as f32;
+        // THE TEXTURE, NOT THE SWAP CHAIN'S DESCRIPTION, and the two are not the same number.
+        //
+        // This used to read `GetDesc().BufferDesc`, which is the MODE the chain was created
+        // with. `crate::render` has always sized its viewport and its shader's `inverse_size`
+        // from the back buffer texture instead. Two sources of truth for one number is a scale
+        // and offset error between where a point is projected and where it is drawn, and the
+        // live log caught them disagreeing: the same display reported `2561x1440` on one run and
+        // `2560x1441` on the next, neither of which is a back buffer any hardware produces.
+        //
+        // A pixel of disagreement moves the arrow by a pixel; a game rendering at a different
+        // internal resolution from its window moves it across the screen. Both paths now ask the
+        // texture that is actually about to be presented.
+        //
+        // SAFETY: slot 0 is the back buffer of any swap chain, and `swap_chain` is the game's
+        // own, borrowed by the detour.
+        let back_buffer = unsafe { swap_chain.GetBuffer::<ID3D11Texture2D>(0) }.ok()?;
+        let mut description = Default::default();
+        // SAFETY: `back_buffer` is a live texture; `GetDesc` fills the out-parameter.
+        unsafe { back_buffer.GetDesc(&mut description) };
+        let width = description.Width as f32;
+        let height = description.Height as f32;
         if width > 0.0 && height > 0.0 {
             Some([width, height])
         } else {
