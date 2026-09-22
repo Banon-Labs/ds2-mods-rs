@@ -837,8 +837,27 @@ mod windows_impl {
                     };
                     let drift =
                         drift.map_or_else(|| "off".to_string(), |drift| format!("{drift:.0}px"));
+                    // THE NUMBER THAT SAYS WHETHER THE BASE IS ON THE PLAYER. The tail is at the
+                    // feet and the camera aims at the upper body, so tail-from-centre is large
+                    // even when everything is right -- it cannot answer the question. The head's
+                    // offset can: the player reports it sits dead centre, so anything but a small
+                    // number here is a camera that is wrong rather than an arrow that is low.
+                    let head = camera
+                        .head_offset_from_centre(arrow.tail, screen)
+                        .map_or_else(
+                            || "off".to_string(),
+                            |(x, y)| {
+                                format!(
+                                    "{:.0},{:.0}px ({:.3},{:.3} of half)",
+                                    x * screen[0] * 0.5,
+                                    y * screen[1] * 0.5,
+                                    x,
+                                    y
+                                )
+                            },
+                        );
                     log(format_args!(
-                        "arrow: tail-from-centre {drift} | tail {:.1},{:.1},{:.1} -> tip {:.1},{:.1},{:.1} | screen tail={} tip={} barbs={} {} | screen={:.0}x{:.0}",
+                        "arrow: head-from-centre {head} | tail-from-centre {drift} | tail {:.1},{:.1},{:.1} -> tip {:.1},{:.1},{:.1} | screen tail={} tip={} barbs={} {} | screen={:.0}x{:.0}",
                         arrow.tail[0],
                         arrow.tail[1],
                         arrow.tail[2],

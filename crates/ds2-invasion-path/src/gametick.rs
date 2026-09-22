@@ -209,6 +209,8 @@ struct Tick {
     said_route: bool,
     said_no_route: bool,
     said_full: bool,
+    /// Whether the self-check has printed its snap line. Once per run, not twice a second.
+    said_snap: bool,
     /// How far through a self-check run this is.
     check: Check,
 }
@@ -247,6 +249,7 @@ impl Default for Tick {
             said_route: false,
             said_no_route: false,
             said_full: false,
+            said_snap: false,
             check: Check::Off,
         }
     }
@@ -648,11 +651,56 @@ fn poll_or_request(state: &mut Tick) {
 
     // SAFETY: game thread. The allocator underneath the snap is lazily built and unguarded; this
     // is the one place in this crate entitled to touch it.
-    let (start, goal) = unsafe { (navquery::snap(wanted.from), navquery::snap(wanted.to)) };
+    let (from, to) = unsafe {
+        (
+            navquery::snap_reporting(wanted.from),
+            navquery::snap_reporting(wanted.to),
+        )
+    };
     state.cooldown = REPLAN_SECONDS;
-    let (Some(start), Some(goal)) = (start, goal) else {
-        // One of them is off the navmesh -- in a lift shaft, mid-fall, or beyond the twenty-metre
-        // snap radius. A complete answer, and the arrow's cue.
+
+    // PRINT THE IDS BEFORE ASKING, AND PRINT THEM IN HEX.
+    //
+    // The first live run reported NO ROUTE and named three suspects -- a bad map key, the
+    // capability mask, the cost budget -- and the log could not tell them apart. It can now:
+    // `0xffffffff` at either end is the SNAP failing and the planner is innocent; two real ids
+    // that still will not connect is the planner's problem and the mask and the budget are the
+    // things to look at. Those are different bugs and they used to read identically.
+    //
+    // Once per self-check run rather than twice a second, because a line that repeats sixty
+    // times is a line nobody reads.
+    if matches!(state.check, Check::WaitingForRoute(_)) && !state.said_snap {
+        state.said_snap = true;
+        log(format_args!(
+            "self-check: snap start={} goal={} | world holds {} graph(s); {}",
+            describe_snap(&from),
+            describe_snap(&to),
+            from.graphs,
+            match (from.chosen_key, from.keyed_hit) {
+                // The whole point of the sweep, said out loud: what the key SHOULD have been.
+                (Some(found), false) => format!(
+                    "the MapManager key 0x{:08x} matched NO graph, and the one the sweep chose \
+                     carries 0x{found:08x} -- THAT is the key this map wants",
+                    from.key
+                ),
+                (Some(found), true) if found != from.key => format!(
+                    "the MapManager key 0x{:08x} matched a graph, but the sweep chose a \
+                     DIFFERENT one carrying 0x{found:08x}",
+                    from.key
+                ),
+                (Some(_), true) => format!("the MapManager key 0x{:08x} agreed", from.key),
+                (None, _) => format!(
+                    "no graph accepted the player at all; the MapManager key was 0x{:08x}",
+                    from.key
+                ),
+            }
+        ));
+    }
+
+    let (Some(start), Some(goal)) = (from.id, to.id) else {
+        // One of them is off the navmesh -- in a lift shaft, mid-fall, beyond the twenty-metre
+        // snap radius, or in a map whose graph is not resident. A complete answer, and the
+        // arrow's cue.
         publish(wanted.target, None);
         return;
     };
@@ -802,6 +850,23 @@ fn lay_markers(state: &mut Tick) {
             crate::selfcheck::SAMPLE_SECONDS
         ));
         state.check = Check::Watching(crate::selfcheck::Schedule::default());
+    }
+}
+
+/// One end of a snap, as a reader needs to see it.
+///
+/// Hex, because a navigation-graph id is a packed bitfield -- index in `0..14`, kind in `15..16`,
+/// parts key in `17..29`, validity in `30..31` -- and decimal hides every one of those
+/// boundaries. `0xffffffff` is spelled out as a miss rather than printed as a number, because
+/// that is the single most important thing this line can say.
+fn describe_snap(report: &navquery::SnapReport) -> String {
+    match (report.id, report.chosen) {
+        (Some(id), Some(index)) => format!(
+            "0x{id:08x} (graph {index}, {:.1} m off)",
+            report.distance_squared.max(0.0).sqrt()
+        ),
+        (Some(id), None) => format!("0x{id:08x}"),
+        (None, _) => "MISS (0xffffffff -- nothing within the snap radius on any graph)".to_string(),
     }
 }
 

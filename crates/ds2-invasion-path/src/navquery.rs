@@ -116,64 +116,162 @@ pub(crate) fn game_manager() -> Option<usize> {
     (manager != 0).then_some(manager)
 }
 
-/// Snap a world position to a navigation-graph id.
+// NO BARE `snap()` WRAPPER HERE. There was one -- `snap_reporting(pos).id` -- and it had no
+// caller, because the only thing that snaps is the route request and the route request is the
+// place that most needs to be able to say WHY a snap missed. A convenience function that
+// discards the diagnosis would be available for someone to reach for on the day the diagnosis
+// matters again.
+
+/// Everything one snap found out, for a log line that can name which suspect was guilty.
 ///
-/// Returns `None` when there is no world, no loaded graph for the current area, or nothing within
-/// [`ds2_rva::NAVI_GRAPH_SNAP_RADIUS_METERS`] -- all three of which are ordinary answers rather
-/// than errors. A player in a lift shaft or mid-fall legitimately has no node under them.
+/// A live run returned NO ROUTE for two characters 16.8 m apart, and the three candidate causes
+/// -- a bad key, a bad capability mask, a small cost budget -- produce the same silence. These
+/// fields exist to separate the first from the other two, and to turn the key itself from a
+/// guess into a measurement.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct SnapReport {
+    /// The navigation-graph id, or `None` if nothing was in range of any graph.
+    pub(crate) id: Option<u32>,
+    /// How many graphs the world says it is holding.
+    pub(crate) graphs: i32,
+    /// The key computed from [`ds2_rva::MAP_MANAGER_AREA_OFFSET`], and whether it found anything.
+    pub(crate) key: u32,
+    /// Did the engine's own keyed lookup return a graph for that key?
+    pub(crate) keyed_hit: bool,
+    /// Index of the graph the sweep chose, if any.
+    pub(crate) chosen: Option<usize>,
+    /// **The measurement.** The key that graph actually carries. When this differs from `key`,
+    /// the area lookup is wrong and this is the value it should have produced.
+    pub(crate) chosen_key: Option<u32>,
+    /// Squared distance from `position` to the node that won.
+    pub(crate) distance_squared: f32,
+}
+
+/// [`snap`], reporting how it got there.
+///
+/// # Why this sweeps instead of trusting the key
+///
+/// The engine's own path is `0x140badb90(world, key)` -- one linear scan that returns the graph
+/// whose [`ds2_rva::NV_NAVI_GRAPH_HEADER_KEY_OFFSET`] matches. That is one lookup and it is
+/// cheaper than what this does. It is also only as good as the `area` fed to
+/// [`ds2_rva::NAVI_GRAPH_KEY_FROM_AREA`], which keeps six bits of a number whose provenance the
+/// engine itself is inconsistent about -- `0x14037be30` reads `MapManager + 0x170`,
+/// `0x14042c9a0` reads a byte off the character instead. Twenty-eight `.ngp` meshes cannot be
+/// told apart by six bits of a map number, so at least one of those is a slot index, and nobody
+/// has established which.
+///
+/// So: ask EVERY graph the world holds, and let the distance decide. That is sound for a reason
+/// beyond stubbornness -- `0x140bac070` rejects a sub-graph on an AABB test before it allocates
+/// or searches anything, so graphs for other areas cost a handful of float comparisons and
+/// return [`ds2_rva::NAVI_GRAPH_ID_NONE`] immediately. The sweep is nearly free exactly where it
+/// is redundant, and it is correct exactly where the key is not.
+///
+/// The keyed lookup is still performed, and its result recorded, so the log can say whether the
+/// two agreed. The day they always agree, this can go back to being one call.
 ///
 /// # Safety
 ///
 /// Game thread only. See the module header: the allocator underneath this is lazily built and
 /// unguarded.
-pub(crate) unsafe fn snap(position: [f32; 3]) -> Option<u32> {
+pub(crate) unsafe fn snap_reporting(position: [f32; 3]) -> SnapReport {
+    let mut report = SnapReport::default();
     if !position.iter().all(|c| c.is_finite()) {
-        return None;
+        return report;
     }
-    let manager = game_manager()?;
-    let map_manager = unsafe {
-        let value = safe_read_usize(manager + ds2_rva::GAME_MANAGER_MAP_MANAGER_OFFSET)?;
-        (value != 0).then_some(value)?
+    let Some(manager) = game_manager() else {
+        return report;
     };
-    let area = unsafe { safe_read_u32(map_manager + ds2_rva::MAP_MANAGER_AREA_OFFSET)? };
+    let key_from_area: Option<KeyFromArea> = unsafe { entry(ds2_rva::NAVI_GRAPH_KEY_FROM_AREA) };
+    let world_from_manager: Option<GraphWorldFromGameManager> =
+        unsafe { entry(ds2_rva::NAVI_GRAPH_WORLD_FROM_GAME_MANAGER) };
+    let data_for_key: Option<GraphDataForKey> = unsafe { entry(ds2_rva::NAVI_GRAPH_DATA_FOR_KEY) };
+    let nearest: Option<NearestGraphId> = unsafe { entry(ds2_rva::NAVI_GRAPH_NEAREST_ID) };
+    let (Some(key_from_area), Some(world_from_manager), Some(data_for_key), Some(nearest)) =
+        (key_from_area, world_from_manager, data_for_key, nearest)
+    else {
+        return report;
+    };
 
-    let key_from_area: KeyFromArea = unsafe { entry(ds2_rva::NAVI_GRAPH_KEY_FROM_AREA)? };
-    let world_from_manager: GraphWorldFromGameManager =
-        unsafe { entry(ds2_rva::NAVI_GRAPH_WORLD_FROM_GAME_MANAGER)? };
-    let data_for_key: GraphDataForKey = unsafe { entry(ds2_rva::NAVI_GRAPH_DATA_FOR_KEY)? };
-    let nearest: NearestGraphId = unsafe { entry(ds2_rva::NAVI_GRAPH_NEAREST_ID)? };
-
-    // SAFETY: five instructions, no memory access, cannot fail. Recorded as a call rather than
-    // reimplemented as `(area & 0x3f) << 24 | 0xffffff` so that a change to the engine's keying
-    // is a changed behaviour here rather than a silent divergence.
-    let key = unsafe { key_from_area(area) };
     // SAFETY: `manager` is non-null, which is the one precondition this function does not check
     // for itself.
     let world = unsafe { world_from_manager(manager) };
     if world == 0 {
-        return None;
+        return report;
     }
-    // SAFETY: `world` is the engine's own `NvNaviGraphWorld`; the scan is bounded by the count
-    // the object carries.
-    let data = unsafe { data_for_key(world, key) };
-    if data == 0 {
-        // The area is mid-transition and its graph is not resident. Not an error.
-        return None;
+
+    // The keyed lookup, kept for the log rather than for the answer.
+    if let Some(map_manager) =
+        // SAFETY: a live `GameManagerImp`; the reader refuses an unmapped page.
+        unsafe { safe_read_usize(manager + ds2_rva::GAME_MANAGER_MAP_MANAGER_OFFSET) }
+                .filter(|value| *value != 0)
+        && let Some(area) =
+            // SAFETY: as above.
+            unsafe { safe_read_u32(map_manager + ds2_rva::MAP_MANAGER_AREA_OFFSET) }
+    {
+        // SAFETY: five instructions, no memory access, cannot fail.
+        report.key = unsafe { key_from_area(area) };
+        // SAFETY: `world` is the engine's own object; the scan is bounded by its own count.
+        report.keyed_hit = unsafe { data_for_key(world, report.key) } != 0;
     }
-    let point = Aligned4::point(position);
-    // SAFETY: `data` is a live graph, `point` is sixteen aligned bytes this frame owns, and the
-    // out-distance pointer is null -- which the function explicitly tests for, and which
-    // `0x14037bef8` itself passes.
-    let id = unsafe {
-        nearest(
-            data,
-            point.as_ptr(),
-            ds2_rva::NAVI_GRAPH_SNAP_RADIUS_METERS,
-            ds2_rva::NAVI_GRAPH_SNAP_FILTER,
-            std::ptr::null_mut(),
-        )
+
+    // SAFETY: a live `NvNaviGraphWorld`; the reader refuses an unmapped page.
+    let Some(count) =
+        (unsafe { safe_read_u32(world + ds2_rva::NV_NAVI_GRAPH_WORLD_GRAPH_COUNT_OFFSET) })
+    else {
+        return report;
     };
-    (id != ds2_rva::NAVI_GRAPH_ID_NONE).then_some(id)
+    report.graphs = count as i32;
+    // A COUNT READ FROM LIVE MEMORY IS A NUMBER UNTIL SOMETHING BOUNDS IT. The array is inline
+    // between `+0x28` and the count at `+0x68`, so a ninth entry would overwrite the count that
+    // describes it -- eight is structural, not a preference.
+    let count = (count as usize).min(ds2_rva::NV_NAVI_GRAPH_WORLD_MAX_GRAPHS);
+
+    let point = Aligned4::point(position);
+    let mut best = f32::INFINITY;
+    for index in 0..count {
+        let at = world + ds2_rva::NV_NAVI_GRAPH_WORLD_GRAPHS_OFFSET + index * 8;
+        // SAFETY: inside the inline array the count above bounds.
+        let Some(graph) = (unsafe { safe_read_usize(at) }).filter(|graph| *graph != 0) else {
+            continue;
+        };
+        let mut distance = f32::INFINITY;
+        // SAFETY: `graph` is one of the engine's own resident meshes and `point` is sixteen
+        // aligned bytes this call owns. The out-distance pointer is written only on a hit; the
+        // function tests it for null, so a non-null one is equally fine.
+        let id = unsafe {
+            nearest(
+                graph,
+                point.as_ptr(),
+                ds2_rva::NAVI_GRAPH_SNAP_RADIUS_METERS,
+                ds2_rva::NAVI_GRAPH_SNAP_FILTER,
+                &raw mut distance,
+            )
+        };
+        // SQUARED distances, both of them -- `0x140babf90` writes the square and takes the root
+        // only to narrow its own search radius. Comparing them is therefore comparing like with
+        // like, and taking a root here would be arithmetic for nobody.
+        if id != ds2_rva::NAVI_GRAPH_ID_NONE && distance < best {
+            best = distance;
+            report.id = Some(id);
+            report.chosen = Some(index);
+            report.chosen_key = graph_key(graph);
+            report.distance_squared = distance;
+        }
+    }
+    report
+}
+
+/// The map key a loaded graph carries, straight off the object.
+///
+/// This is the number `0x140badb90` compares against, so reading it from a graph that was found
+/// another way says what the key for this map IS -- rather than what some expression hopes it is.
+fn graph_key(graph: usize) -> Option<u32> {
+    // SAFETY: a live `NvNaviGraphData`; both reads refuse an unmapped page.
+    unsafe {
+        let header = safe_read_usize(graph + ds2_rva::NV_NAVI_GRAPH_HEADER_OFFSET)?;
+        (header != 0).then_some(())?;
+        safe_read_u32(header + ds2_rva::NV_NAVI_GRAPH_HEADER_KEY_OFFSET)
+    }
 }
 
 // NO `nav_system()` HELPER HERE, deliberately. Reading `GameManagerImp + 0xBC0` would produce a
