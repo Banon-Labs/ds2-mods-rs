@@ -377,7 +377,25 @@ impl Camera {
     /// row-vector world-to-camera matrix the COLUMNS are the camera's axes in world space.
     #[must_use]
     pub fn forward(&self) -> [f32; 3] {
-        normalize([self.view[2], self.view[6], self.view[10]]).unwrap_or([0.0, 0.0, 1.0])
+        // FROM THE COMBINED MATRIX, NOT THE VIEW HALF. The camera caught out of the renderer's
+        // own upload has no view half at all -- `crate::capture` has only the product and stores
+        // an identity in its place -- so reading `view` there returns the identity's third axis
+        // and every heading is exactly zero. Live, that is what happened: the harness's probe
+        // held all six pad axes in turn and reported `0.00 -> 0.00` for every one of them, which
+        // reads as "the stick does nothing" and is really "the instrument is stuck".
+        //
+        // The product has the answer. Row-vector, with the projection's `m23 == 1`, the clip
+        // `w` of a world point is its depth along the camera's own forward axis:
+        //
+        //     w = x*vp[3] + y*vp[7] + z*vp[11] + vp[15]
+        //
+        // so `(vp[3], vp[7], vp[11])` IS that axis in world space, whether or not the view half
+        // was ever seen. It agrees with the view matrix for a camera assembled from both, since
+        // that column of the product is the view's forward column scaled by one.
+        let m = &self.view_projection;
+        normalize([m[3], m[7], m[11]])
+            .or_else(|| normalize([self.view[2], self.view[6], self.view[10]]))
+            .unwrap_or([0.0, 0.0, 1.0])
     }
 
     /// The camera's heading, in degrees, in `-180.0..=180.0`.
@@ -1113,5 +1131,88 @@ mod viewport_clipping {
     #[test]
     fn a_degenerate_point_inside_survives() {
         assert!(clip_to_viewport([500.0, 400.0], [500.0, 400.0], SCREEN).is_some());
+    }
+}
+
+#[cfg(test)]
+mod heading_from_the_product {
+    use super::{Camera, multiply, view_from_pose};
+
+    /// The projection `0x140001a90` emits, at 90 degrees and 16:9.
+    fn projection() -> super::Matrix {
+        let cot = 1.0f32;
+        let (near, far) = (0.1f32, 1000.0f32);
+        [
+            cot / (16.0 / 9.0),
+            0.0,
+            0.0,
+            0.0, //
+            0.0,
+            cot,
+            0.0,
+            0.0, //
+            0.0,
+            0.0,
+            far / (far - near),
+            1.0, //
+            0.0,
+            0.0,
+            -near * far / (far - near),
+            0.0,
+        ]
+    }
+
+    /// A camera yawed `degrees` about the world up axis, built the way the engine builds one.
+    fn yawed(degrees: f32) -> Camera {
+        let half = degrees.to_radians() * 0.5;
+        let view = view_from_pose([0.0, half.sin(), 0.0, half.cos()], [3.0, 5.0, -7.0]).unwrap();
+        Camera {
+            view,
+            view_projection: multiply(&view, &projection()),
+        }
+    }
+
+    #[test]
+    fn a_captured_camera_with_no_view_half_still_has_a_heading() {
+        // THE LIVE FAILURE. `crate::capture` stores an identity where the view matrix would be,
+        // and the old reading of the view's third axis made every such camera report zero.
+        let full = yawed(40.0);
+        let captured = Camera {
+            view: [
+                1.0, 0.0, 0.0, 0.0, //
+                0.0, 1.0, 0.0, 0.0, //
+                0.0, 0.0, 1.0, 0.0, //
+                0.0, 0.0, 0.0, 1.0,
+            ],
+            view_projection: full.view_projection,
+        };
+        assert!((captured.yaw_degrees() - full.yaw_degrees()).abs() < 0.01);
+    }
+
+    #[test]
+    fn turning_the_camera_changes_the_heading_by_that_much() {
+        let before = yawed(10.0).yaw_degrees();
+        let after = yawed(55.0).yaw_degrees();
+        let mut delta = after - before;
+        while delta > 180.0 {
+            delta -= 360.0;
+        }
+        while delta < -180.0 {
+            delta += 360.0;
+        }
+        assert!((delta.abs() - 45.0).abs() < 0.5, "delta was {delta}");
+    }
+
+    #[test]
+    fn the_heading_ignores_where_the_camera_is_standing() {
+        let near = yawed(25.0);
+        let half = 25.0f32.to_radians() * 0.5;
+        let far_view =
+            view_from_pose([0.0, half.sin(), 0.0, half.cos()], [400.0, -90.0, 250.0]).unwrap();
+        let far = Camera {
+            view: far_view,
+            view_projection: multiply(&far_view, &projection()),
+        };
+        assert!((near.yaw_degrees() - far.yaw_degrees()).abs() < 0.01);
     }
 }
