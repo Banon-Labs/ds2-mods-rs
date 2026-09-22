@@ -39,29 +39,39 @@ pub type Matrix = [f32; 16];
 /// How tall a DARK SOULS II character is, from origin to head, in metres.
 ///
 /// The character's own position is at their FEET, so this is what turns it into the point the
-/// camera is actually pointed at. Used by [`Camera::head_offset_from_centre`] and by the capture's
+/// camera is actually pointed at. Used by [`Camera::head_offset_px`] and by the capture's
 /// scale test, which are the two places that need to know where a character LOOKS like they are
 /// rather than where the game says they stand.
 pub const HEAD_METERS: f32 = 1.8;
 
-/// How far the head may land from the middle of the frame and still count as framed, as a
-/// fraction of the half-extent.
+/// How far the head may land from the middle of the frame and still count as framed, **in
+/// pixels**.
 ///
-/// **This was `0.30` and that was far too loose.** Thirty percent of a half-extent is +/-384
-/// pixels on a 2560-wide frame: a camera that put the character most of the way to the edge
-/// passed, and the overlay drew a confident arrow from a base that was visibly not on the player.
-/// The report that found it: "I've seen the base off the player more times than I've seen it on
-/// the player. The player's head is always in the center. The base of the arrow is not."
+/// # One pixel, and why the unit changed twice to get here
 ///
-/// Five percent is +/-64 pixels horizontally on that frame -- tight enough that a camera which is
-/// merely CLOSE is refused, and loose enough to survive the things that legitimately shift a
-/// third-person character off centre: a lock-on, a wall pushing the camera in, and the one-frame
-/// lag between the matrix the renderer uploaded and the position the overlay read.
+/// Two earlier values measured against the screen's half-extent and both were wrong for the same
+/// reason. `0.30` was +/-384 pixels on a 2560-wide frame, which let a camera shove the character
+/// most of the way to the edge and still draw a confident arrow -- the failure the player
+/// reported as "I've seen the base off the player more times than I've seen it on the player".
+/// `0.05` was +/-64, and on a frame where a character stands about 490 pixels tall that is close
+/// to half a body width: a visible gap, and still the wrong quantity, because a fraction of the
+/// screen is not a fraction of the player. The same number means "dead on" at 720p and "clear of
+/// the body" at 4K.
 ///
-/// It is deliberately not tighter than that. A tolerance of a fraction of a pixel would be exact
-/// about the wrong thing -- it would reject the frame lag, which is real and harmless, and the
-/// overlay would flicker off during every turn.
-pub const FRAMING_TOLERANCE: f32 = 0.05;
+/// A pixel is not a compromise between those, it is a different claim: the head is AT the centre
+/// or this is not the camera the frame was drawn with. Nothing between one pixel and a body width
+/// is a principled place to stop, and every value in that range admits an arrow whose base is
+/// visibly off the player -- which is the only symptom anyone has ever reported.
+///
+/// **The risk this takes, stated rather than hidden.** A one-frame gap between the matrix the
+/// renderer uploaded and the position the overlay read would move the head far more than a pixel
+/// during a fast turn, and a budget below that flickers the overlay off exactly when the player
+/// is moving. The reason to expect it holds anyway: `draw_for` projects the position it read THIS
+/// frame through the matrix `crate::capture` re-read from THIS frame's upload, and `Present` runs
+/// after both -- so they are the same frame and there is no lag to absorb. If that reasoning is
+/// wrong the log says so at once, in refusals, which is a better way to find out than a tolerance
+/// wide enough to hide it.
+pub const FRAMING_TOLERANCE_PX: f32 = 1.0;
 
 /// Clip-space `w` below which a point is behind (or on) the lens and cannot be projected.
 ///
@@ -556,12 +566,12 @@ impl Camera {
     /// character to the edge cannot switch the overlay off mid-fight.
     #[must_use]
     pub fn frames_the_character(&self, world: [f32; 3], screen: [f32; 2]) -> bool {
-        self.head_offset_from_centre(world, screen)
-            .is_some_and(|(x, y)| x <= FRAMING_TOLERANCE && y <= FRAMING_TOLERANCE)
+        self.head_offset_px(world, screen)
+            .is_some_and(|(x, y)| x <= FRAMING_TOLERANCE_PX && y <= FRAMING_TOLERANCE_PX)
     }
 
-    /// How far the character's HEAD lands from the middle of the frame, as a fraction of the
-    /// half-extent in each axis. `None` when it cannot be projected at all.
+    /// How far the character's HEAD lands from the middle of the frame, in pixels on each axis.
+    /// `None` when it cannot be projected at all.
     ///
     /// # Why the head and not the position the game gives you
     ///
@@ -575,12 +585,12 @@ impl Camera {
     /// head IS centred, and the arrow's base is at the feet where it belongs. Measuring the head
     /// is therefore the only way this test can be tightened without rejecting every real camera.
     #[must_use]
-    pub fn head_offset_from_centre(&self, world: [f32; 3], screen: [f32; 2]) -> Option<(f32, f32)> {
+    pub fn head_offset_px(&self, world: [f32; 3], screen: [f32; 2]) -> Option<(f32, f32)> {
         let head = [world[0], world[1] + HEAD_METERS, world[2]];
         let point = self.project(head, screen)?;
         Some((
-            (point[0] - screen[0] * 0.5).abs() / (screen[0] * 0.5),
-            (point[1] - screen[1] * 0.5).abs() / (screen[1] * 0.5),
+            (point[0] - screen[0] * 0.5).abs(),
+            (point[1] - screen[1] * 0.5).abs(),
         ))
     }
 
@@ -1322,10 +1332,11 @@ mod framing_is_measured_at_the_head {
         let camera = looking([10.0, 6.8, -21.0], head);
         assert!(camera.frames_the_character(feet, SCREEN));
 
-        let (_, head_y) = camera
-            .head_offset_from_centre(feet, SCREEN)
-            .expect("on screen");
-        assert!(head_y < 0.01, "the head is centred, got {head_y}");
+        let (_, head_y) = camera.head_offset_px(feet, SCREEN).expect("on screen");
+        assert!(
+            head_y <= FRAMING_TOLERANCE_PX,
+            "the head is centred, got {head_y}px"
+        );
 
         // And the feet are far from centre while everything is right, which is why the feet
         // cannot be the thing measured.
@@ -1345,16 +1356,15 @@ mod framing_is_measured_at_the_head {
         let head = [feet[0], feet[1] + HEAD_METERS, feet[2]];
         // Aimed a long way to one side of the character rather than at them.
         let camera = looking([10.0, 6.8, -21.0], [head[0] + 2.2, head[1], head[2] + 0.6]);
-        let (x, _) = camera
-            .head_offset_from_centre(feet, SCREEN)
-            .expect("on screen");
+        let (x, _) = camera.head_offset_px(feet, SCREEN).expect("on screen");
         assert!(
-            x > FRAMING_TOLERANCE,
-            "this camera is visibly off and must fail, offset was {x}"
+            x > FRAMING_TOLERANCE_PX,
+            "this camera is visibly off and must fail, offset was {x}px"
         );
         assert!(!camera.frames_the_character(feet, SCREEN));
-        // It would have passed the tolerance this replaced.
-        assert!(x <= 0.30, "the old 0.30 let exactly this through, {x}");
+        // It would have passed both tolerances this replaced: 0.30 and 0.05 of a half-extent
+        // are 384 and 64 pixels on this frame.
+        assert!(x <= 384.0, "the old 0.30 let exactly this through, {x}px");
     }
 
     #[test]
@@ -1366,6 +1376,6 @@ mod framing_is_measured_at_the_head {
         );
         let behind = [10.0, 5.0, -26.0];
         assert!(!camera.frames_the_character(behind, SCREEN));
-        assert!(camera.head_offset_from_centre(behind, SCREEN).is_none());
+        assert!(camera.head_offset_px(behind, SCREEN).is_none());
     }
 }

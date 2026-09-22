@@ -843,19 +843,8 @@ mod windows_impl {
                     // offset can: the player reports it sits dead centre, so anything but a small
                     // number here is a camera that is wrong rather than an arrow that is low.
                     let head = camera
-                        .head_offset_from_centre(arrow.tail, screen)
-                        .map_or_else(
-                            || "off".to_string(),
-                            |(x, y)| {
-                                format!(
-                                    "{:.0},{:.0}px ({:.3},{:.3} of half)",
-                                    x * screen[0] * 0.5,
-                                    y * screen[1] * 0.5,
-                                    x,
-                                    y
-                                )
-                            },
-                        );
+                        .head_offset_px(arrow.tail, screen)
+                        .map_or_else(|| "off".to_string(), |(x, y)| format!("{x:.1},{y:.1}px"));
                     log(format_args!(
                         "arrow: head-from-centre {head} | tail-from-centre {drift} | tail {:.1},{:.1},{:.1} -> tip {:.1},{:.1},{:.1} | screen tail={} tip={} barbs={} {} | screen={:.0}x{:.0}",
                         arrow.tail[0],
