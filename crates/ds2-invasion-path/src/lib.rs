@@ -46,29 +46,28 @@
 //!
 //! # What has actually been run
 //!
-//! Five live runs on 2026-09-22, under Proton, with the game's own log as the testimony. The
-//! last one wrote, in order:
+//! Seven live runs on 2026-09-22, under Proton, with the game's own log as the testimony and two
+//! screenshots as the correction. The chain is proved end to end: the shader compiles against the
+//! game's own device, the pipeline state is saved and restored, eighteen vertices -- three
+//! segments of six, a shaft and two barbs -- reach the back buffer, and the game goes on
+//! rendering.
 //!
-//! ```text
-//! overlay: Present hooked at 0x6ffffcbdaff0 -- the overlay can draw
-//! first frame: the Present detour is running, overlay on
-//! no live character -- nothing to draw from until one exists     <- title screen
-//! camera: drawing through operator[0] obj=0x7ffff03aa640 view=+0x020 proj=+0x050
-//! roster: characters=2 players=2 remotes=1 skipped=0 nearest=45m
-//! drew 1 arrow(s), 18 vertices
-//! ```
+//! **What the screenshots proved that the log could not.** Both showed an orange line hanging in
+//! the sky with nothing under it, while the log said `drew 1 arrow(s), 18 vertices` and looked
+//! entirely healthy. The cause was the same in both camera paths and is worth naming once: each
+//! vetted a camera when it found one and then reused it without re-checking. A camera is only
+//! the camera for the frame it was taken from, so the arrow was correct at capture and wrong
+//! from the next turn of the player's head onwards -- a line in the WRONG PLACE, which the log
+//! cannot distinguish from a line in the right one.
 //!
-//! Eighteen vertices is three segments of six -- a shaft and two barbs, which is exactly one
-//! arrow. The game went on rendering afterwards, and `draw` logs `overlay: disabled for this
-//! session` on any refusal and did not, so the shader compile, the buffer map and the pipeline
-//! state save/restore all executed against the game's own device.
+//! Two things follow, and both are in the code rather than in this comment. `crate::capture`
+//! remembers the PLACE the matrix was found and re-reads it every frame. And `draw_for` applies
+//! the acceptance test EVERY FRAME to whichever camera it was handed, so a camera that cannot
+//! currently put the player in frame draws nothing instead of drawing somewhere wrong.
 //!
-//! **Two things that run proved and two it did not.** It proved the chain end to end and it
-//! proved the renderer does not take the game down. It did **not** prove the arrow points at the
-//! right place -- that is a visual question, and nobody has looked. And the `remotes=1` was not
-//! an invader: that session was offline and solo, so the second `PlayerCtrl` 45 m away is an NPC
-//! phantom or a bloodstain replay, both of which DARK SOULS II builds from the same class (see
-//! `crate::census`). Whether the overlay is USEFUL is still unmeasured; whether it WORKS is not.
+//! **Still unmeasured: whether the overlay is USEFUL.** Every run so far has been offline and
+//! solo, so the `remotes=1` in them is an NPC phantom or a bloodstain replay -- DARK SOULS II
+//! builds both from the same class (see `crate::census`) -- rather than an invader.
 //!
 //! # What it does to the game
 //!
@@ -178,6 +177,9 @@ mod windows_impl {
         last_census: Option<(usize, usize, usize, usize)>,
         /// The last (arrows, vertices) pair logged, likewise.
         last_drawn: Option<(usize, usize)>,
+        /// Whether the camera framed the character last frame. `true` for the same reason as
+        /// [`State::had_camera`]: the first refusal has to be audible.
+        framed: bool,
     }
 
     static STATE: Mutex<Option<State>> = Mutex::new(None);
@@ -230,6 +232,7 @@ mod windows_impl {
                 had_world: true,
                 last_census: None,
                 last_drawn: None,
+                framed: true,
             });
         }
 
@@ -426,6 +429,36 @@ mod windows_impl {
         local: [f32; 3],
         screen: [f32; 2],
     ) -> Vec<Vertex> {
+        // THE GUARD BOTH WAYS OF GETTING A CAMERA NEEDED, and the reason two screenshots in a row
+        // showed an orange line hanging in the sky with nothing under it.
+        //
+        // Each source vets its camera once and then goes on using it: `crate::camera` remembers
+        // the offsets that passed its oracles, `crate::capture` remembers the buffer that held a
+        // matrix that passed its own. Both were *right when accepted* and neither was re-checked
+        // afterwards, so the first turn of the player's head left the overlay aiming with a
+        // camera the game had stopped using -- which is a line drawn in the wrong place, not a
+        // line that is missing, and therefore the failure that reaches the screen.
+        //
+        // So the acceptance test is applied EVERY FRAME, at the one place both paths meet. A
+        // camera that cannot currently put the player in frame is not the camera being rendered,
+        // whatever it was when it was found, and the honest response is to draw nothing.
+        if !camera.frames_the_character(local, screen) {
+            if state.framed {
+                state.framed = false;
+                let at = camera.project(local, screen).map_or_else(
+                    || "behind the lens".to_string(),
+                    |p| format!("{:.0},{:.0}", p[0], p[1]),
+                );
+                log(format_args!(
+                    "camera no longer frames the character (player at {at} on {:.0}x{:.0}) -- \
+                     drawing nothing rather than drawing it somewhere wrong",
+                    screen[0], screen[1]
+                ));
+            }
+            return Vec::new();
+        }
+        state.framed = true;
+
         let Some((players, census)) = census::remotes(state.config.max_targets) else {
             return Vec::new();
         };

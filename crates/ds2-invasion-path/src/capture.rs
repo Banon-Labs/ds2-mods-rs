@@ -154,11 +154,42 @@ struct Subject {
 pub(crate) fn set_subject(player: [f32; 3], screen: [f32; 2]) {
     // Goes on being told the subject for the life of the process, not only until a matrix is
     // first recognised: every later frame's upload is judged against it too.
-    FRAME.fetch_add(1, Ordering::Relaxed);
+    let frame = FRAME.fetch_add(1, Ordering::Relaxed) + 1;
     if let Ok(mut subject) = SUBJECT.try_lock() {
         *subject = Some(Subject { player, screen });
     }
+    // LET GO OF A BUFFER THAT HAS STOPPED CARRYING THE CAMERA. Engines rotate constant buffers,
+    // and a map change builds new ones, so the address a matrix was found at is not guaranteed
+    // to keep receiving it. Without this the capture would hold a buffer that no longer gets
+    // written and the overlay would stay dark for the rest of the session with nothing to say
+    // about why. A second of no upload that frames the character is the signal to go and look
+    // again.
+    const STALE_FRAMES: usize = 60;
+    if HAVE.load(Ordering::Relaxed) {
+        let confirmed = CONFIRMED_FRAME.load(Ordering::Relaxed);
+        if confirmed <= frame && frame - confirmed > STALE_FRAMES {
+            HAVE.store(false, Ordering::Relaxed);
+            TARGET_RESOURCE.store(0, Ordering::Relaxed);
+            if RELATCH_REPORTS
+                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+                    left.checked_sub(1)
+                })
+                .is_ok()
+            {
+                log(format_args!(
+                    "camera: the buffer it was read from stopped carrying it -- looking again"
+                ));
+            }
+        }
+    }
 }
+
+/// How many re-latch lines still get written, so a buffer that rotates every frame cannot fill
+/// the log with the same sentence sixty times a second.
+static RELATCH_REPORTS: AtomicUsize = AtomicUsize::new(8);
+
+/// How many acquisition lines still get written, for the same reason.
+static ACQUIRE_REPORTS: AtomicUsize = AtomicUsize::new(8);
 
 /// The captured camera, as of the most recent upload.
 pub(crate) fn camera() -> Option<Camera> {
@@ -326,9 +357,17 @@ fn acquire(resource: usize, at: usize, len: Extent, how: &str) {
     TARGET_TRANSPOSED.store(transposed, Ordering::Relaxed);
     CONFIRMED_FRAME.store(FRAME.load(Ordering::Relaxed), Ordering::Relaxed);
     HAVE.store(true, Ordering::Relaxed);
-    log(format_args!(
-        "camera: captured from {how} at +0x{offset:x} transposed={transposed} -- re-read from there every frame"
-    ));
+    // Budgeted for the same reason as the re-latch line: acquisition can happen more than once.
+    if ACQUIRE_REPORTS
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+            left.checked_sub(1)
+        })
+        .is_ok()
+    {
+        log(format_args!(
+            "camera: captured from {how} at +0x{offset:x} transposed={transposed} -- re-read from there every frame"
+        ));
+    }
 }
 
 /// `ID3D11DeviceContext::Map`, as the detour must declare it.
