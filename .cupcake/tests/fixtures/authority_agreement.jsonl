@@ -1,0 +1,2 @@
+{"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "the offset is 0x88d"}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "You're right, the offset is 0x88d."}]}}

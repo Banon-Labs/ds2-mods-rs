@@ -2,10 +2,10 @@
 # Cupcake signal: last_assistant_unexecuted_promise
 #
 # Consumed by:
-#   * no_unexecuted_promise (Stop): halts turn-end when the turn ENDED on a first-person promise to do
+#   * no_unexecuted_promise (Stop): halts turn-end when the turn ended on a first-person promise to do
 #     something, and nothing in the world is going to do it.
 #
-# WHY THIS EXISTS (user directive 2026-08-22, in their words):
+# Why this exists (user directive 2026-08-22, in their words):
 #   "How can I prevent you from ever saying 'I'll <statement of future action>' and then landing on no
 #    shells running, no monitors, and no directive to me to explain why a user is required to
 #    re-initiate the task."
@@ -14,34 +14,34 @@
 # that the user had to do anything. The work evaporated and the user had to notice and re-ask. Prose
 # promises are unenforceable by prose; only a Stop hook that refuses the stop closes this.
 #
-# THE VIOLATION IS THE CONJUNCTION OF FOUR FACTS. All four must hold, and any one missing is fine:
-#   1. the turn's FINAL prose block contains a first-person future commitment to a CONCRETE action
-#      ("I'll re-run the gate", "I'm going to patch it", "let me check the offsets");
+# The violation is the conjunction of four facts. All four must hold, and any one missing is fine:
+#   1. the turn's final prose block contains a first-person commitment to a concrete action
+#      ("I'll re-run the gate", "I'm going to patch it", "let me check the offsets", and -- the shape
+#      that walked through the guard on 2026-09-01 -- the bare present continuous "I'm closing it");
 #   2. no tool_use follows that prose in the turn -- nothing executed it;
 #   3. nothing is carrying it: no watcher (detached shell / Monitor / SendMessage) in the turn, and
-#      no live background job that the promise actually WAITS ON ("once it lands", "whatever it
+#      no live background job that the promise actually waits on ("once it lands", "whatever it
 #      finds"). A live job the promise never mentions is not cover -- a game session the user is
 #      inspecting can be up for an hour, and the promise is deferred behind it, not carried by it;
 #   4. the message does not hand the obligation to the user -- no question, no blocker statement, no
 #      "once you've X", no "I'll need you to Y", no "next session".
 # Emitted as  PROMISE:<the offending clause>  ; empty when the turn is clean.
 #
-# BIASED HARD TOWARD NOT FIRING, on purpose. A guard that cries wolf gets ignored, which is worse than
+# Biased hard toward not firing, on purpose. A guard that cries wolf gets ignored, which is worse than
 # no guard. Three deliberate narrowings:
-#   * only the FINAL prose block is scanned. A mid-turn "I'll check the disassembly" that is followed
+#   * only the final prose block is scanned. A mid-turn "I'll check the disassembly" that is followed
 #     by the tool call doing exactly that is the normal, correct shape and must never be touched.
-#   * the committed verb must be on a CONCRETE-ACTION allowlist. Stance and mental verbs ("I'll keep
+#   * the committed verb must be on a concrete-action allowlist. Stance and mental verbs ("I'll keep
 #     that in mind", "I'll treat it as unproven"), verbs the same message already fulfils ("I'll
 #     summarise", "I'll explain"), hedges ("I'll try to", "I'll probably") and negations ("I'll never")
 #     are not promises of work and are all excluded.
 #   * quoted spans, backticked spans and fenced code are stripped before matching, so quoting the ban
 #     -- this file, the policy text, a test fixture -- cannot trip it.
 #
-# The shared half of the classification (turn bucketing, the blocked-on-user phrasing, live
-# background work) is NOT reimplemented here: it comes from scripts/cupcake_turn_scan.py. That module
-# is the single owner of "what did the last turn actually do", so the next Stop guard ported into
-# this repo takes the same answer from it rather than growing a second copy that can drift.
-# Fail-open (empty output) on any error.
+# The shared half of the classification (turn bucketing, substantive-work vs status-peek, the
+# blocked-on-user phrasing, live background work) is not reimplemented here: it comes from
+# scripts/cupcake_turn_scan.py, the same module last_assistant_idle_hold.sh uses, so the two guards
+# cannot drift into disagreeing about the same turn. Fail-open (empty output) on any error.
 set -uo pipefail
 CUPCAKE_SIGNAL_REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
 export CUPCAKE_SIGNAL_REPO_ROOT
@@ -63,13 +63,13 @@ if turn is None:
     sys.exit(0)
 
 # (2) Anything after the closing prose executed it. At Stop the last block is prose by construction,
-# but an INTERRUPTED turn can end on a tool call, and that turn did act.
+# but an interrupted turn can end on a tool call, and that turn did act.
 idx = turn.last_text_index
 if idx < 0 or turn.tool_after(idx):
     sys.exit(0)
 final = turn.blocks[idx][1]
 
-# Strip fenced code, inline-backticked spans and DOUBLE-quoted spans before prose matching, so
+# Strip fenced code, inline-backticked spans and double-quoted spans before prose matching, so
 # quoting the ban does not count as committing it. Single quotes are left alone: the phrases
 # themselves contain apostrophes (I'll / I'm).
 scrubbed = re.sub(r"```.*?```", " ", final, flags=re.DOTALL)
@@ -79,12 +79,28 @@ scrubbed = re.sub(r'"[^"]*"', " ", scrubbed)
 # --- (1) first-person future commitment --------------------------------------------------------
 # The openers an assistant actually uses to commit itself. "let's" is deliberately absent: it
 # proposes joint action rather than committing the agent.
+#
+# The bare present continuous ("I'm closing it") is last, and it is not cosmetic. The guard shipped
+# without it and a turn walked straight through the hole: "I'm closing it rather than pushing an
+# empty merge commit to make an empty PR green" -- no `gh pr close` ran, the PR stayed open, and the
+# user had to notice and ask. Because the opener never matched, the other three facts were never even
+# evaluated. Present continuous is the more seductive way to make an unkept promise than "I'll",
+# precisely because it reads to a human as already underway.
+#
+# Order matters. Python alternation takes the first alternative that matches at a position, not the
+# longest, so the bare form must come after "i'm going to" / "i'm about to" -- ahead of them it would
+# swallow their prefix and hand `committed_verb` the word "going", which is deliberately not an
+# action. Everything that keeps this narrow lives in `committed_verb`: the next non-filler word must
+# be the -ING form of a verb already on the concrete-action allowlist, so the stative uses this
+# repo's prose is full of ("I'm treating that as unproven", "I'm reporting it rather than fixing it",
+# "I'm not sure", "I'm quoting the failure below") resolve to no action verb and stay silent.
 OPENER_RE = re.compile(
     r"\b(?:i['’]?ll"
     r"|i\s+will"
     r"|i['’]?m\s+going\s+to|i\s+am\s+going\s+to"
     r"|i['’]?m\s+about\s+to|i\s+am\s+about\s+to"
-    r"|let\s+me)\b",
+    r"|let\s+me"
+    r"|i['’]?m|i\s+am)\b",
     re.IGNORECASE,
 )
 
@@ -103,7 +119,7 @@ HEDGE = {
 }
 NEGATION = {"not", "never", "no", "nothing", "avoid", "stop", "refrain", "skip", "leave", "hold"}
 
-# Verbs that name work only a TOOL CALL can do. Everything outside this list is left alone on
+# Verbs that name work only a tool call can do. Everything outside this list is left alone on
 # purpose: stance verbs ("keep", "treat", "use", "follow", "remember"), verbs a message fulfils by
 # itself ("summarise", "explain", "describe", "list", "note", "mention", "show", "tell"), and vague
 # ones ("do", "get", "take", "handle", "continue") are not evidence of unexecuted work.
@@ -122,13 +138,42 @@ ACTIONS = {
     "screenshot", "audit", "lint", "format", "benchmark", "profile", "instrument", "emit",
     "register", "enable", "disable", "toggle", "configure", "tune", "adjust", "tweak", "resolve",
     "ship", "harden", "delegate", "dispatch", "spawn", "teardown", "follow",
-    # In-game input IS agent work here (~/AGENTS.md: during runtime research the agent must
-    # self-drive deterministically and the user's input is blocked), so a promise to
-    # press/drive/navigate/inject is a promise of a tool call like any other.
+    # Terminal actions. `open` and `reopen` were here from the start and `close` was not, which is an
+    # oversight rather than a decision -- and it is half of why "I'm closing it rather than pushing an
+    # empty merge commit to make an empty PR green" walked through the guard on 2026-09-01: even with
+    # the opener fixed there was no verb on the list for it to commit to. `gh pr close` is a tool call
+    # like any other. The siblings are added with it because they name the same terminal act on a
+    # branch/PR/script, though only "close" is evidenced in the transcript corpus (4 uses after a
+    # first-person opener; abandon/archive/withdraw/retire: zero).
+    "close", "archive", "retire", "withdraw", "abandon",
+    # In-game input is agent work in this repo (standing order: the agent drives every input), so a
+    # promise to press/drive/navigate/inject is a promise of a tool call like any other.
     "press", "drive", "navigate", "inject",
 }
 
 WORD_RE = re.compile(r"[A-Za-z][A-Za-z’'\-]*")
+
+
+def base_of_gerund(word):
+    """The concrete-action verb an -ING form inflects, or None.
+
+    Deliberately NOT a stemmer and deliberately NOT a second vocabulary: it proposes the three
+    regular English spellings and accepts one only if it is already on ACTIONS. That is what keeps
+    the tense change from widening the guard -- "reporting" proposes "report"/"reporte", neither is
+    an action, so it is silent; "hoping" proposes "hop"/"hope" and is silent for the same reason,
+    without needing to know that "hope" is a hedge. A free-running stemmer would instead have to be
+    told, in a second list, every word it must not invent a promise out of.
+    """
+    if not word.endswith("ing") or len(word) < 6:
+        return None
+    stem = word[:-3]
+    candidates = [stem, stem + "e"]
+    if len(stem) > 2 and stem[-1] == stem[-2]:
+        candidates.append(stem[:-1])  # commit -> committing, run -> running
+    for cand in candidates:
+        if cand in ACTIONS:
+            return cand
+    return None
 
 
 def committed_verb(tail):
@@ -141,11 +186,18 @@ def committed_verb(tail):
             return None
         if word in ACTIONS:
             return word
-        # A HYPHENATED re- form is the same verb ("re-record" -> "record"). A MERGED one is not
+        # A HYPHENATED re- form is the same verb ("re-record" -> "record"). A merged one is not
         # derivable: stripping a bare "re" turns "report" into "port" and invents a promise that was
         # never made (caught by scripts/audit-unexecuted-promise-false-positives.py against real
-        # transcripts). Merged forms are enumerated in ACTIONS instead.
+        # transcripts). Merged forms are enumerated in actions instead.
         if word.startswith("re-") and word[3:] in ACTIONS:
+            return word
+        # Present continuous: "I'm closing it", "I'm reverting it", "I'm landing it". Same verb, same
+        # allowlist, one tense later -- and the same hyphenated-re- rule ("re-recording").
+        base = base_of_gerund(word)
+        if base:
+            return base
+        if word.startswith("re-") and base_of_gerund(word[3:]):
             return word
         return None
     return None
@@ -160,11 +212,18 @@ def clause(text, start):
     return " ".join(text[start:end].split())[:110]
 
 
+# The last committing sentence, not the first. Which one fires is unchanged either way -- any one of
+# them is the violation -- but the halt quotes this clause back at the agent, so it should be the
+# promise nearest where the turn actually stopped. Measured when the bare present continuous was
+# added (2026-09-01): on a real halted turn the first match moved from the closing sentence "I'll
+# revert the marker spawn to the wrapper..." back to an incidental table cell earlier in the same
+# message ("why I'm not guessing | I'm re-running it with..."), which is a worse instruction to hand
+# back. Broadening the opener set makes an early incidental match likelier; taking the last one
+# cancels that out.
 promise = None
 for m in OPENER_RE.finditer(scrubbed):
     if committed_verb(scrubbed[m.end():m.end() + 120]):
         promise = clause(scrubbed, m.start())
-        break
 if not promise:
     sys.exit(0)
 
@@ -198,10 +257,10 @@ if HANDOFF_RE.search(scrubbed) or scan.blocked_on_user(scrubbed):
 
 # --- (3) something is already carrying it ------------------------------------------------------
 # "Something is running" is not by itself cover. An Elden Ring session the user is inspecting can be
-# up for an hour, and a promise to go fix an unrelated file is not being CARRIED by it -- it is being
+# up for an hour, and a promise to go fix an unrelated file is not being carried by it -- it is being
 # deferred behind it, which is the disappearance this guard exists to stop (measured: the reported
 # instance was silenced by an unrelated game launch two turns earlier). A live job covers a promise
-# in exactly two cases: THIS turn started it (the harness wakes the agent when it exits, so the agent
+# in exactly two cases: This turn started it (the harness wakes the agent when it exits, so the agent
 # genuinely comes back), or the promise explicitly waits on its result.
 WAITS_ON_RESULT_RE = re.compile(
     r"\b(?:when|once|after|as\s+soon\s+as|the\s+moment|while|until)\b[^.\n]{0,60}?"

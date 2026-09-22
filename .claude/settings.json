@@ -1,39 +1,79 @@
 {
+  "env": {
+    "BD_REAL_BIN": "/home/banon/.local/bin/bd"
+  },
   "hooks": {
-    "PreCompact": [
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $CLAUDE_PROJECT_DIR/scripts/cupcake-hook.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|MultiEdit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $CLAUDE_PROJECT_DIR/scripts/cupcake-hook.sh"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
       {
         "hooks": [
           {
-            "command": "bd prime",
-            "type": "command"
+            "type": "command",
+            "command": "bash $CLAUDE_PROJECT_DIR/scripts/cupcake-hook.sh"
           }
-        ],
-        "matcher": ""
+        ]
       }
     ],
     "SessionStart": [
       {
+        "matcher": "",
         "hooks": [
           {
-            "command": "bd prime",
-            "type": "command"
+            "type": "command",
+            "command": "bash $CLAUDE_PROJECT_DIR/scripts/beads-prime.sh"
           }
-        ],
-        "matcher": ""
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $CLAUDE_PROJECT_DIR/scripts/cupcake-hook.sh"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash $CLAUDE_PROJECT_DIR/scripts/beads-prime.sh"
+          }
+        ]
       }
     ],
     "Stop": [
       {
         "hooks": [
           {
-            "command": "bash $CLAUDE_PROJECT_DIR/scripts/cupcake-hook.sh",
-            "type": "command"
+            "type": "command",
+            "command": "bash $CLAUDE_PROJECT_DIR/scripts/cupcake-hook.sh"
           }
         ]
       }
     ]
-  },
-  "env": {
-    "BD_REAL_BIN": "/home/banon/.local/bin/bd"
   }
 }

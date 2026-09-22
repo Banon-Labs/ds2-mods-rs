@@ -1,0 +1,14 @@
+{"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "go fix the offsets"}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Checking step 0."}, {"type": "tool_use", "id": "t0", "name": "Bash", "input": {"command": "python3 scripts/step0.py"}}]}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t0", "content": "ok"}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Checking step 1."}, {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "python3 scripts/step1.py"}}]}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Checking step 2."}, {"type": "tool_use", "id": "t2", "name": "Bash", "input": {"command": "python3 scripts/step2.py"}}]}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t2", "content": "ok"}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Checking step 3."}, {"type": "tool_use", "id": "t3", "name": "Bash", "input": {"command": "python3 scripts/step3.py"}}]}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t3", "content": "ok"}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Checking step 4."}, {"type": "tool_use", "id": "t4", "name": "Bash", "input": {"command": "python3 scripts/step4.py"}}]}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t4", "content": "ok"}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Checking step 5."}, {"type": "tool_use", "id": "t5", "name": "Bash", "input": {"command": "python3 scripts/step5.py"}}]}}
+{"type": "user", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t5", "content": "ok"}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Done: all six steps pass."}]}}

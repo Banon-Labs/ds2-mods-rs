@@ -42,13 +42,29 @@ signals:
 # Builtins provide common security patterns without writing Rego policies.
 # Each builtin can be enabled/disabled and configured independently.
 #
-# IMPORTANT: Builtins are ENABLED BY DEFAULT when configured. 
-# Simply configuring a builtin (even with just empty settings) enables it.
-# To disable, either remove the configuration or set 'enabled: false'.
+# IMPORTANT -- AND THE UPSTREAM TEMPLATE'S OWN CLAIM HERE WAS FALSE. This block
+# used to read "Builtins are ENABLED BY DEFAULT when configured. Simply
+# configuring a builtin (even with just empty settings) enables it." Measured
+# against cupcake 0.5.2 in er-mods-rs on 2026-08-31, that is not what happens: a
+# builtin is DISABLED unless its config block carries an explicit `enabled: true`,
+# however fully it is otherwise configured. `rulebook_security_guardrails` below
+# had a message and a protected_paths list and no `enabled:` key, and the engine
+# logged
+#
+#     Skipping disabled builtin policy: .../rulebook_security_guardrails.rego
+#     Enabled builtins: ["git_pre_check", "protected_paths", "git_block_no_verify"]
+#
+# -- the three that DO carry the key. The policy was never compiled, never routed
+# and never evaluated, for the whole life of this file, while the comment above
+# said it was in force. Reading a configured block as an active one is exactly how
+# a guard layer ends up self-protecting on paper.
+#
+# So: to enable a builtin, write `enabled: true`.
 #
 # FILE PROTECTION BUILTINS (Two-Tier System):
 # 1. protected_paths: Makes specific paths read-only (read allowed, write blocked)
-# 2. rulebook_security_guardrails: Total lockdown of paths (no read OR write)
+# 2. rulebook_security_guardrails: Total lockdown of paths (no read OR write).
+#    NOT ENABLED HERE, deliberately -- see the block at the bottom of this file.
 
 # ============================================================================
 # USAGE NOTES
@@ -191,14 +207,44 @@ builtins:
     # Write operations (edit, rm, mv, sed -i, etc.) are blocked
 
   # ---------------------------------------------------------------------------
-  # RULEBOOK_SECURITY_GUARDRAILS - Cupcake configuration protection
+  # RULEBOOK_SECURITY_GUARDRAILS - OFF ON PURPOSE
   # ---------------------------------------------------------------------------
-  # Protects the .cupcake directory and other critical paths from any 
-  # modification or inspection. This is the highest security level - blocks
-  # BOTH read and write operations. Essential for protecting Cupcake's own
-  # configuration and sensitive system files.
-  
+  # Upstream's highest security level: a TOTAL LOCKDOWN of the listed paths, no
+  # read and no write, for Edit/Write/MultiEdit/NotebookEdit/Read/Grep/Glob/
+  # Bash/Task/WebFetch alike.
+  #
+  # IT HAS NEVER RUN IN THIS REPO. Not "it was turned off" -- it was written as
+  # if enabled and silently skipped, because the block carried no `enabled: true`
+  # (see the measurement in the IMPORTANT note near the top of this file). An
+  # agent reading this file would have believed `.cupcake/` was locked down while
+  # editing it freely all session. That gap between claim and behaviour is the
+  # defect; `enabled: false` below closes it by saying the true thing out loud.
+  #
+  # AND IT STAYS OFF, which is a judgement rather than an omission (the reasoning
+  # is er-mods-rs's, 2026-08-31, and holds identically here):
+  #
+  #   * it blocks Read/Grep/Glob, so the policy layer becomes unauditable. Every
+  #     repair to these guards started by reading them.
+  #   * its Bash arm is a raw substring test for ".cupcake" over the whole
+  #     command: it denies `opa test .cupcake/`, `git commit -- .cupcake/...` and
+  #     every inspection one-liner, while `.cup"cake"` walks past it untouched.
+  #     It stops maintenance, not tampering.
+  #   * its Task arm denies any subagent prompt mentioning `.cupcake`.
+  #   * a policy file stored in the repo cannot defend against an agent editing
+  #     the repo. What actually defends it: `opa test .cupcake/`, the live-eval
+  #     harness in scripts/test-cupcake-policies.py, and a reviewed diff.
+  #
+  # WHAT REPLACES IT, narrowly and honestly:
+  #   .cupcake/policies/claude/guard_layer_destructive_guard.rego -- denies
+  #   DESTRUCTIVE shell operations (rm/rmdir/mv/shred/truncate, `find -delete`,
+  #   `git checkout|restore|clean`, symlink swaps) against `.cupcake` and
+  #   `.git/hooks`, while leaving reads, edits and tests alone. A guard change
+  #   should arrive as a diff someone can read, not as a deletion.
+  #
+  # Do not flip this to true without re-reading the above; the previous state was
+  # not a bug to fix but a claim to retract.
   rulebook_security_guardrails:
+    enabled: false
     message: "Cupcake configuration files are protected from modification"
     # Protected paths (defaults to [".cupcake/"] if not specified)
     protected_paths:
