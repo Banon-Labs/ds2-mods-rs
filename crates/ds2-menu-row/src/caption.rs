@@ -302,7 +302,15 @@ pub(crate) unsafe fn push_captions() -> usize {
         // SAFETY: `bytes` is a scene path copied out of a live one, `top` the group it belongs to,
         // and `caption.text` a leaked `DlString` this module owns. The lock is held across the
         // call, so the game's copy cannot race another thread's rewrite.
-        unsafe { write_caption(&bytes, top, caption.label_id, &*caption.text) };
+        unsafe {
+            write_caption(
+                &bytes,
+                top,
+                caption.label_id,
+                &*caption.text,
+                added_subtree(),
+            )
+        };
         pushed += 1;
     }
     pushed
@@ -314,7 +322,45 @@ static TITLE_ROW_TEXT: DlString = DlString {
     capacity: 32,
 };
 
+/// Which subtree an added row's caption resolves under.
+///
+/// The captured path is the System tab's, because the caption binder only ever builds that one --
+/// so on a tab of our own the label is somewhere else entirely, under the copy
+/// [`crate::strip`] hung off the strip. One component, the same one `crate::install` rewrites in
+/// every cell path and `crate::tab` in the group's own.
+///
+/// This is why the rows drew and stayed blank for a commit: a row record is a grid cell, and its
+/// path was rewritten; a caption is written through a path the game built for the other tab, and
+/// nothing about the write says it resolved to nothing.
+fn added_subtree() -> u32 {
+    if crate::tab::armed() {
+        ds2_rva::FLO_ADDED_TAB_SUBTREE_ID
+    } else {
+        ds2_rva::FLO_TAB_STRIP_PANEL_ID
+    }
+}
+
+/// `base` with its tab-subtree component pointed at `subtree`.
+///
+/// Returned by value rather than written through, because the caller's copy is the one the next
+/// caption is built from and two rows on different tabs would otherwise be one rewrite between
+/// them. Refuses quietly -- by changing nothing -- if component 1 is not the System tab's subtree,
+/// which is the only id the binder can have put there.
+fn under(base: &[u8; PATH_SIZE], subtree: u32) -> [u8; PATH_SIZE] {
+    let mut path = *base;
+    const AT: usize = ds2_rva::FE_SCENE_NAMER_ENTRY_SUBTREE_OFFSET;
+    let component = u32::from_le_bytes(path[AT..][..4].try_into().expect("four bytes"));
+    if component == ds2_rva::FLO_TAB_STRIP_PANEL_ID {
+        path[AT..][..4].copy_from_slice(&subtree.to_le_bytes());
+    }
+    path
+}
+
 /// Resolve `base + label` and write `text` onto it.
+///
+/// `subtree` is the tab the label belongs to: [`added_subtree`] for a row this crate added, and
+/// [`ds2_rva::FLO_TAB_STRIP_PANEL_ID`] for the shipped row it renames, which stays on the System
+/// tab whatever else moves.
 ///
 /// # Safety
 ///
@@ -326,7 +372,9 @@ unsafe fn write_caption(
     top_select: usize,
     label: u32,
     text: &'static DlString,
+    subtree: u32,
 ) {
+    let base = &under(base, subtree);
     let Some(base_module) = ds2_game_base::mem::game_module_base().ok() else {
         return;
     };
@@ -370,17 +418,25 @@ unsafe fn write_caption(
     // that repeats forever. The first two are the evidence; the rest are noise with a cost.
     if n <= 2 {
         log(format_args!(
-            "{LOG_PREFIX} caption label={label:#x} written={n}"
+            "{LOG_PREFIX} caption label={label:#x} subtree={subtree:#x} written={n}"
         ));
     }
 
-    // THE TREE DUMP IS NOT RUN. It found what it was built to find -- that the banner is a
-    // `FeComponentTextureShape` sized by its own quad -- and it costs 117 log lines, each of which
+    // THE WHOLE-MENU TREE DUMP IS NOT RUN. It found what it was built to find -- that the banner is
+    // a `FeComponentTextureShape` sized by its own quad -- and it costs 117 log lines, each of which
     // `ds2-loader`'s sink follows with `sync_all()`. That is most of a second of frozen game on the
     // first pause-menu open, for a measurement that has already been taken and written down.
     //
     // `crate::tree::dump` is kept and still compiles; re-arm it here when the next question needs
     // the live tree rather than the file.
+
+    // THE STRIP'S OWN CHILDREN ARE, once, and they are the next question: a tab is missing from the
+    // screen while the records this crate writes say twenty-one are there. One of those two is
+    // wrong and only the engine's own list can say which. Twenty-odd lines, one level deep, on the
+    // first open of the process.
+    //
+    // SAFETY: the accessor is filled, which is all `dump_strip` asks of it.
+    unsafe { crate::tree::dump_strip(accessor.as_ptr()) };
 
     // THE BANNER, once, and only from the pass that resolves the row this crate added -- the other
     // pass targets the shipped row and would do the same work twice.
@@ -395,12 +451,10 @@ unsafe fn write_caption(
         // NOTHING` -- and the banner refusal that followed named the consequence.
         let mut panel = ds2_rva::FE_QUIT_TAB_BASE_PATH.to_vec();
         // On a tab of our own the rows hang under a copy of the System tab's subtree, so the panel
-        // being lengthened is that copy's -- one component, the same one `crate::install` rewrites
-        // in every cell path and `crate::tab` in the group's own. Naming the System tab's here
-        // would stretch the banner on the tab this crate no longer puts rows on.
-        if crate::tab::armed() {
-            panel[1] = ds2_rva::FLO_ADDED_TAB_SUBTREE_ID;
-        }
+        // being lengthened is that copy's -- the same component `under` has already rewritten in
+        // the path this row's caption went through. Naming the System tab's here would stretch the
+        // banner on the tab this crate no longer puts rows on.
+        panel[1] = subtree;
         panel.push(ds2_rva::FLO_QUIT_TAB_CHILD_IDS[ds2_rva::FLO_QUIT_TAB_PANEL]);
         // SAFETY: the accessor is filled and the path is the container's with the panel appended.
         let component = unsafe { crate::tree::resolve_path(accessor.as_ptr(), &panel) };
@@ -502,11 +556,14 @@ unsafe extern "system" fn bind_detour(top_select: *mut u8) {
     // for, and `bytes` is a scene path copied out of a live one.
     unsafe {
         push_captions();
+        // The System tab's own subtree, explicitly: this row is the one the game shipped and it
+        // stays where the game put it, on the tab this crate no longer adds rows to.
         write_caption(
             &bytes,
             top,
             ds2_rva::FE_QUIT_TAB_ROW_TITLE_LABEL_ID,
             &TITLE_ROW_TEXT,
+            ds2_rva::FLO_TAB_STRIP_PANEL_ID,
         );
     }
 }

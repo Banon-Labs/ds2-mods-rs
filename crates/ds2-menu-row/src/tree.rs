@@ -153,8 +153,15 @@ fn looks_like_component(candidate: *const u8, base: usize) -> Option<usize> {
 /// # Safety
 ///
 /// `component` must be a live component from the layout tree, and `base` the live module base.
-unsafe fn walk(component: *const u8, depth: usize, lines: &mut usize, label: &str, base: usize) {
-    if component.is_null() || depth > MAX_DEPTH || *lines >= MAX_LINES {
+unsafe fn walk(
+    component: *const u8,
+    depth: usize,
+    cap: usize,
+    lines: &mut usize,
+    label: &str,
+    base: usize,
+) {
+    if component.is_null() || depth > cap || *lines >= MAX_LINES {
         return;
     }
     let Some(_) = looks_like_component(component, base) else {
@@ -256,7 +263,16 @@ unsafe fn walk(component: *const u8, depth: usize, lines: &mut usize, label: &st
                 continue;
             }
             // SAFETY: `child` passed the component test.
-            unsafe { walk(child, depth + 1, lines, &format!("key={key:#x} "), base) };
+            unsafe {
+                walk(
+                    child,
+                    depth + 1,
+                    cap,
+                    lines,
+                    &format!("key={key:#x} "),
+                    base,
+                )
+            };
         }
         return;
     }
@@ -276,7 +292,7 @@ unsafe fn walk(component: *const u8, depth: usize, lines: &mut usize, label: &st
     while looks_like_component(child, base).is_some() && *lines < MAX_LINES && seen < 64 {
         seen += 1;
         // SAFETY: `child` passed the component test above.
-        unsafe { walk(child, depth + 1, lines, "", base) };
+        unsafe { walk(child, depth + 1, cap, lines, "", base) };
         // SAFETY: same link the game's own sibling walk follows, on a validated component.
         child = unsafe {
             child
@@ -312,6 +328,53 @@ pub unsafe fn resolve_path(accessor: *const u8, ids: &[u32]) -> *mut u8 {
     path[..ids.len()].copy_from_slice(ids);
     // SAFETY: `scene` is live and `path` holds `ids.len()` ids followed by a zero.
     unsafe { find(scene, path.as_ptr(), ids.len() as u32) }
+}
+
+/// How many strip dumps have run. Its own counter, so arming one does not spend the other's.
+static STRIP_DUMPS: AtomicUsize = AtomicUsize::new(0);
+
+/// Dump the tab strip's own children, one level deep, once per process.
+///
+/// What it answers, and what nothing static could: the `.flo` says the strip holds twenty-one
+/// records once [`crate::strip`] has substituted it, and the screen says a tab is missing. Those
+/// two disagree, and the disagreement is about what the engine actually attached -- which is this
+/// list. Each line carries the element id and the definition index off the component's own record,
+/// so the plate (`0x0268`), the seventh tab's hexagon ([`ds2_rva::FLO_ADDED_TAB_ICON_SHAPE`]), the
+/// end cap (`0x026a`), the two panels and all seven cells are each identifiable by number.
+///
+/// One level, not four: every one of those is a direct child of the strip, and descending into the
+/// tab subtrees is the whole-menu dump whose cost is a visibly frozen first pause-menu open.
+///
+/// # Safety
+///
+/// `accessor` must be an accessor filled by [`ds2_rva::FE_BIND_SCENE_OBJ_PROXY`].
+pub unsafe fn dump_strip(accessor: *const u8) {
+    if STRIP_DUMPS.fetch_add(1, Ordering::Relaxed) > 0 {
+        return;
+    }
+    let Ok(base) = ds2_game_base::mem::game_module_base() else {
+        return;
+    };
+    // SAFETY: the caller guarantees a filled accessor, and the path is the strip's own id -- the
+    // first component of every path under this menu.
+    let strip = unsafe { resolve_path(accessor, &ds2_rva::FE_QUIT_TAB_BASE_PATH[..1]) };
+    if strip.is_null() {
+        log(format_args!(
+            "{LOG_PREFIX} strip tree REFUSED reason=no-component id={:#x}",
+            ds2_rva::FE_QUIT_TAB_BASE_PATH[0]
+        ));
+        return;
+    }
+    log(format_args!(
+        "{LOG_PREFIX} strip tree id={:#x} at=0x{:016x} -- one level, the records the engine \
+         actually attached",
+        ds2_rva::FE_QUIT_TAB_BASE_PATH[0],
+        strip as usize
+    ));
+    let mut lines = 0usize;
+    // SAFETY: `strip` came from the game's own lookup.
+    unsafe { walk(strip, 0, 1, &mut lines, "strip ", base) };
+    log(format_args!("{LOG_PREFIX} strip tree done nodes={lines}"));
 }
 
 /// Kept, not deleted: this is the instrument that found the banner, and the next question about the
@@ -369,7 +432,7 @@ pub unsafe fn dump(accessor: *const u8, ids: &[u32]) {
         }
         let label = format!("prefix{depth} ");
         // SAFETY: `component` came from the game's own lookup.
-        unsafe { walk(component, 0, &mut lines, &label, base) };
+        unsafe { walk(component, 0, MAX_DEPTH, &mut lines, &label, base) };
     }
     if lines >= MAX_LINES {
         log(format_args!(

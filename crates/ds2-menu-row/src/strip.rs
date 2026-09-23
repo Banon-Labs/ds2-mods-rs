@@ -33,6 +33,7 @@
 //! |---|---|---|
 //! | element id | [`ds2_rva::FLO_TAB_STRIP_PANEL_ID`] | [`ds2_rva::FLO_ADDED_TAB_SUBTREE_ID`] |
 //! | definition | [`ds2_rva::FLO_TAB_SUBTREE_DEFINITION`] | [`ds2_rva::FLO_ADDED_TAB_SUBTREE_DEFINITION`] |
+//! | transform x | `-5.9` | `+ `[`ds2_rva::FLO_TAB_PITCH`] |
 //!
 //! That definition is [`crate::layout`]'s copy, and it is what the seventh tab's rows hang under
 //! instead of the System tab's. Sharing the System tab's subtree is what the first run did, and it
@@ -44,14 +45,21 @@
 //! read back for a nested-definition record, so two subtrees draw in array order, and a tab's panel
 //! placed after the strip's own cells would draw over them.
 //!
-//! # Why one transform is copied and the other shared
+//! # Why every transform is copied before it moves
 //!
 //! A record's `+0x08` is a pointer to a transform block in the document, and two records pointing at
-//! one block are one x between them. The added cell moves -- one [`ds2_rva::FLO_TAB_PITCH`] along
-//! the strip -- so its block is copied first, exactly as [`crate::layout`] does for an added row.
-//! The added subtree does not move: it wants the position the System tab's panel already has,
-//! because it is the same panel with different rows in it. So it shares that pointer, and nothing
-//! in this module writes through it.
+//! one block are one x between them. Everything this module moves therefore gets a copy of its
+//! block first, exactly as [`crate::layout`] does for an added row.
+//!
+//! The added subtree moves by the same [`ds2_rva::FLO_TAB_PITCH`] the cell does, and the first run
+//! of the seventh tab is what proved it has to. The subtree was cloned sharing the System tab's
+//! transform on the reasoning that it is the same panel with different rows in it -- which is true
+//! about its contents and wrong about its position. A tab's panel drops out from under that tab's
+//! own hexagon: the System tab's sits at `-5.9 + 288.8 = 282.9`, which is `17.85` right of the
+//! sixth cell's `265.05`, and the seventh tab's rows rolled out under the sixth tab's icon.
+//!
+//! The added icon is the one thing still sharing a pointer, because it is the one thing that does
+//! not move: the slice [`crate::icon`] builds carries the offset inside its own quad.
 //!
 //! # What makes this safe to be wrong about
 //!
@@ -85,9 +93,15 @@
 //! # What a run has shown, and what it has not
 //!
 //! The cell is established. A run logged `strip cell added id=0x1eaba8 x=319.05 children=18->19`
-//! and `strip count raised tabs=6 -> items=7` with no mismatch, and the seventh tab drew its four
-//! rows. The subtree record, the hexagon and the two moved pieces of furniture are new and have not
-//! been in front of a running game.
+//! and `strip count raised tabs=6 -> items=7` with no mismatch, and the seventh tab drew its rows.
+//!
+//! The subtree record is established and its position was wrong: a second run drew the seventh
+//! tab's rows under the sixth tab's hexagon, which is what the transform move above now fixes.
+//!
+//! The hexagon and the two moved pieces of furniture have been in front of a running game once and
+//! the screen disagreed with the records -- a tab button was missing from the strip. Every
+//! candidate this module could be responsible for is ruled out in `docs/DS2-INGAME-MENU.md`, and
+//! [`crate::tree::dump_strip`] is armed to say what the engine attached.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -103,18 +117,19 @@ use crate::install::log;
 /// into the definition is [`Plan::children`], which is the number actually filled.
 const CHILDREN: usize = ds2_rva::FLO_TAB_STRIP_CHILDREN + 3;
 
-/// Transform blocks the replacement owns: the added cell's, the end cap's and the `RB` label's.
+/// Transform blocks the replacement owns: the added cell's, the added panel's, the end cap's and
+/// the `RB` label's.
 ///
 /// A record's `+0x08` points at a block in the document, and two records pointing at one block are
-/// one position between them -- so anything this moves needs a copy first. The added subtree and
-/// the added icon are not here, because neither moves: they want the position the record they were
-/// cloned from already has.
-const MOVED: usize = 3;
+/// one position between them -- so anything this moves needs a copy first. The added icon is not
+/// here, because it does not move: the slice [`crate::icon`] builds carries its own offset.
+const MOVED: usize = 4;
 
 /// Which of [`Strip::transforms`] belongs to what.
 const CELL_TRANSFORM: usize = 0;
 const END_CAP_TRANSFORM: usize = 1;
 const RB_LABEL_TRANSFORM: usize = 2;
+const PANEL_TRANSFORM: usize = 3;
 
 /// Where each added record ends up, and how many records the definition then claims.
 ///
@@ -362,9 +377,8 @@ unsafe fn build(original: *mut u8) -> Option<*mut u8> {
     strip.records[added..added + stride].copy_from_slice(&strip.shipped[last..last + stride]);
 
     // The subtree, cloned from the record beside it, with its definition pointed at this crate's
-    // copy and a new element id so a path can tell the two tabs apart. Its transform pointer is the
-    // template's and stays that way: the seventh tab's panel wants the position the System tab's
-    // panel already has.
+    // copy and a new element id so a path can tell the two tabs apart. Its transform is copied and
+    // moved along with the cell, because a tab's panel drops out from under its own hexagon.
     {
         let template = ds2_rva::FLO_TAB_STRIP_PANEL * stride;
         let at = plan.panel * stride;
@@ -374,6 +388,13 @@ unsafe fn build(original: *mut u8) -> Option<*mut u8> {
         strip.records[at + ds2_rva::FLO_RECORD_ID_OFFSET..][..4]
             .copy_from_slice(&ds2_rva::FLO_ADDED_TAB_SUBTREE_ID.to_le_bytes());
     }
+    let panel_x = move_along(
+        &mut strip.records,
+        &mut strip.transforms,
+        plan.panel,
+        PANEL_TRANSFORM,
+        "panel",
+    )?;
 
     // The hexagon, cloned from the plate beside it, with its shape pointed at `crate::icon`'s slice
     // and a depth that puts it over the plate and under the cells. Its transform pointer is the
@@ -445,7 +466,7 @@ unsafe fn build(original: *mut u8) -> Option<*mut u8> {
     let n = SUBSTITUTED.fetch_add(1, Ordering::Relaxed) + 1;
     log(format_args!(
         "{LOG_PREFIX} strip cell added id={:#x} x={x} depth={} children={}->{children} \
-         subtree={:#x}@{} icon={} definition={:#x} substitutions={n}",
+         subtree={:#x}@{}+x{panel_x} icon={} definition={:#x} substitutions={n}",
         ds2_rva::FLO_ADDED_TAB_ID,
         depth.wrapping_add(ds2_rva::FLO_TAB_DEPTH_PITCH),
         ds2_rva::FLO_TAB_STRIP_CHILDREN,
@@ -639,15 +660,43 @@ mod tests {
             "the chevron would not be under the hexagon, so moving it is gratuitous"
         );
         const {
-            assert!(MOVED == 3);
-            // Three records, three blocks: two sharing one would move both.
-            assert!(
-                CELL_TRANSFORM < MOVED && END_CAP_TRANSFORM < MOVED && RB_LABEL_TRANSFORM < MOVED
-            );
-            assert!(CELL_TRANSFORM != END_CAP_TRANSFORM);
-            assert!(END_CAP_TRANSFORM != RB_LABEL_TRANSFORM);
-            assert!(CELL_TRANSFORM != RB_LABEL_TRANSFORM);
+            // Four records, four blocks: two sharing one would move both.
+            let slots = [
+                CELL_TRANSFORM,
+                END_CAP_TRANSFORM,
+                RB_LABEL_TRANSFORM,
+                PANEL_TRANSFORM,
+            ];
+            assert!(MOVED == slots.len());
+            let mut i = 0;
+            while i < slots.len() {
+                assert!(slots[i] < MOVED);
+                let mut j = i + 1;
+                while j < slots.len() {
+                    assert!(slots[i] != slots[j]);
+                    j += 1;
+                }
+                i += 1;
+            }
         }
+    }
+
+    /// The seventh tab's panel moves with its cell, because a tab's rows drop out from under that
+    /// tab's own hexagon. Sharing the System tab's block put them under the sixth tab.
+    #[test]
+    fn the_panel_moves_by_one_tab() {
+        // The System tab's panel, as the document authors it: the strip's record plus the subtree's
+        // own child. `scripts/ds2-flo.py tree --def 0x271` and `--def 0x265`.
+        const SHIPPED_PANEL_X: f32 = -5.9 + 288.8;
+        // The sixth cell's x, which is the tab that panel drops under.
+        const SIXTH_CELL_X: f32 = 265.05;
+        let offset = SHIPPED_PANEL_X - SIXTH_CELL_X;
+        let seventh_cell = SIXTH_CELL_X + ds2_rva::FLO_TAB_PITCH;
+        let seventh_panel = SHIPPED_PANEL_X + ds2_rva::FLO_TAB_PITCH;
+        assert!(
+            (seventh_panel - seventh_cell - offset).abs() < 0.01,
+            "the panel sits {offset} right of its own cell on the System tab and must keep that"
+        );
     }
 
     /// The definition is first in the struct, because [`substitute`] returns its address as the

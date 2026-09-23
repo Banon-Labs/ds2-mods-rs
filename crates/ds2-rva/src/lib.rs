@@ -3278,6 +3278,13 @@ pub const FE_SCENE_NAMER_ENTRY_STRIDE: usize = 0x30;
 /// between two entries the game built one after the other -- it is stack residue -- which is why a
 /// clone must copy an entry rather than be assembled field by field, and why a byte-diff has to
 /// ignore everything outside the fields named here.
+/// Byte offset of the tab-subtree component, which is the second of the five ids and the one a tab
+/// of our own rewrites: [`FE_QUIT_TAB_BASE_PATH`]`[1]`, [`FLO_TAB_STRIP_PANEL_ID`] as the game
+/// builds it and [`FLO_ADDED_TAB_SUBTREE_ID`] once the seventh tab is in.
+///
+/// It is also the offset inside a scene PATH object, which carries the same five ids at the same
+/// places -- the entry is a path plus its length.
+pub const FE_SCENE_NAMER_ENTRY_SUBTREE_OFFSET: usize = 0x04;
 pub const FE_SCENE_NAMER_ENTRY_CONTAINER_OFFSET: usize = 0x0c;
 pub const FE_SCENE_NAMER_ENTRY_ID_OFFSET: usize = 0x10;
 pub const FE_SCENE_NAMER_ENTRY_LEN_OFFSET: usize = 0x28;
@@ -4014,6 +4021,24 @@ pub const FE_TEXTURE_SHAPE_DISPLAY_KEY: u32 = 0xffff_ffff;
 pub const FE_BANNER_QUAD_Y1: f32 = 390.35;
 /// What the shipped quad's `y1` reads, checked before anything is written.
 pub const FE_BANNER_QUAD_SHIPPED_Y1: f32 = 342.35;
+
+/// Where the banner's quad has to end for `rows` added rows: one pitch per row, margin preserved.
+///
+/// The same series [`caret_y`] walks, and for the same reason -- both follow the last row, which
+/// moves down one [`FLO_ROW_PITCH`] per row added below the shipped three.
+pub const fn banner_y1(rows: usize) -> f32 {
+    FE_BANNER_QUAD_SHIPPED_Y1 + FLO_ROW_PITCH * rows as f32
+}
+
+/// [`banner_y1`] for a tab whose rows start at [`FLO_FIRST_ROW_XY`] rather than below three shipped
+/// ones: the same series, lifted by [`FLO_FIRST_ROW_RISE`], exactly as [`caret_y_from_top`] is.
+///
+/// The lift is what stops the seventh tab's panel from being three rows longer than its list.
+/// Without it a tab of our own carrying two rows is sized for five, and the three rows below the
+/// last one are empty panel.
+pub const fn banner_y1_from_top(rows: usize) -> f32 {
+    banner_y1(rows) - FLO_FIRST_ROW_RISE
+}
 
 /// The panel definition the quit tab's `0x1eac81` instantiates, and the caret inside it.
 ///

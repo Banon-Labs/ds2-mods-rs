@@ -1208,3 +1208,86 @@ no glyph and cannot, the plate is one quad spanning exactly the six tabs, the at
 hexagon, and every offset above came off the instruction that reads it. What a run has to show: that
 the hexagon lands where the arithmetic says, that the seam is invisible, and that the moved chevron
 and label look deliberate rather than nudged.
+
+## The first run with an icon: three answers off the document, one question left
+
+A run on 2026-09-23, `--menu-row --rows save-game-to-file,quit-to-desktop`, one screenshot of the
+seventh tab open and the log beside it. Four things were wrong. Three of them were answered by
+reading `l02_01_In-Game.flo` again -- with `scripts/ds2-flo.py` for the records and a direct read of
+the shape table at `doc+0x08` for the quads -- and the fourth is the one this document could not
+settle.
+
+### The rows rolled out under the sixth tab
+
+The seventh tab's panel was cloned from the System tab's subtree record sharing its transform block,
+on the reasoning that it is the same panel with different rows in it. That is true about its
+contents and wrong about its position: a tab's panel drops out from under that tab's own hexagon.
+
+```
+strip child [4]   id 0x1eaccf   x = -5.90     the System tab's subtree
+  0x0265 child [0] id 0x1eace8  x = 288.80
+                                ------------
+                                x = 282.90    the panel, on screen
+
+strip child [17]  id 0x1eaba5   x = 265.05    the sixth cell
+```
+
+`282.90 - 265.05` is `17.85`, which is how far right of its own cell a panel sits -- the panel is
+`57.80` wide and the cell `77.70`, so that is the centring. The seventh cell is at `319.05` and the
+seventh panel has to be at `336.90`. `strip.rs` now copies the cloned record's transform block and
+adds one `FLO_TAB_PITCH` to it, exactly as it already did for the cell.
+
+### The rows had no text
+
+The caption binder builds one scene path and `caption.rs` captures it, appends each added row's
+label id, and writes the text. The captured path is the System tab's, because that is the only one
+the binder builds: `0x1eaba9 / 0x1eaccf / 0x1eace8 / 0x1eace6`. On a tab of our own the labels live
+under `0x1eaceb`, so every append resolved to nothing and every write landed on no element. The
+count in the log said `written=2` either way -- `setText` on an unresolved accessor reports nothing.
+
+Component 1 is now rewritten before the append, the same one component `install.rs` rewrites in
+every cell path and `tab.rs` in the group's own path. The shipped row's rename keeps the System
+tab's, explicitly, because that row is still on that tab.
+
+### The panel was three rows longer than its list
+
+`banner.rs` grew the panel's quad by one row pitch per registered row from the shipped `342.35`,
+which is the number for a tab whose rows hang below three shipped ones. A tab of our own starts its
+rows at the top, so the same arithmetic overshoots by `FLO_FIRST_ROW_RISE` -- two rows drawn on a
+panel sized for five. `ds2_rva::banner_y1_from_top` is the lifted series, and it is the same lift
+`caret_y_from_top` already applied to the caret, for the same reason.
+
+### The hexagon geometry, measured rather than assumed
+
+The shape table entry for `0x0268` holds one quad: source `(1.10, 781.95)-(337.60, 850.90)`, offset
+`(0, -775.70)`, so it lands at `1.10..337.60` across `6.25..75.20`. Six hexagons at
+`FLO_TAB_PITCH`, and two independent readings agree on where each one is:
+
+* a hexagon is `66.3` wide and they overlap by `12.3`, because the first starts at `1.10` and the
+  sixth ends at the plate's own right edge;
+* the cell highlight `0x026e` is `77.70 x 79.60`, so a hexagon centred in its cell sits at
+  `cell x + 38.85` -- `34.25` for the first cell at `-4.60` and `303.90` for the sixth at `265.05`,
+  which puts the sixth hexagon at `270.75..337.05` against the plate's `337.60`.
+
+So the slice `icon.rs` serves -- the plate's last `54.00`, drawn at `337.60..391.60` -- is centred on
+the seventh cell at `357.90`, and the `12.85` of hexagon it leaves behind on its left is the
+interlock the sixth hexagon's own right end already draws. The seam is where the honeycomb repeats.
+
+### The one that is not answered: a tab button missing from the strip
+
+The player reported one of the seven tab buttons absent. Nothing in the document accounts for it,
+and two candidates are ruled out by the same measurement:
+
+* the end cap `0x026a` draws its shape `0x0269` at `271.05..349.40`, which covers the sixth hexagon
+  at `270.75..337.05` entirely -- and the sixth tab's icon is visible in the shipped game. So the
+  cap is transparent where a hexagon is, it was never standing in front of one, and moving it by a
+  pitch can neither hide nor reveal one. What it does do is keep the strip's end after the last
+  hexagon, which is why the move stays.
+* the added panel covers `282.80..340.60` from above the strip to well below it, but it is child
+  five of twenty-one and the plate is child eight, and a nested record's draw order is its position
+  in that array -- the same relationship the System tab's own panel has had all along.
+
+What is left is a question about what the engine attached rather than about what the document says,
+so `tree::dump_strip` is armed: the tab strip's own children, one level deep, once per process,
+each line carrying the element id and definition index off the component's own record. Twenty-one
+records went in; that list is what says how many came out and which.

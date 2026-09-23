@@ -1396,7 +1396,7 @@ unsafe fn name_added_cell(base: usize, namer: usize) -> bool {
             // components were verified against `FE_QUIT_TAB_BASE_PATH` above.
             unsafe {
                 entry(index)
-                    .add(4)
+                    .add(ds2_rva::FE_SCENE_NAMER_ENTRY_SUBTREE_OFFSET)
                     .cast::<u32>()
                     .write(ds2_rva::FLO_ADDED_TAB_SUBTREE_ID);
             }
