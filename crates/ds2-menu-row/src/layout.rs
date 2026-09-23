@@ -85,6 +85,23 @@ const MAX_ROWS: usize = crate::api::MAX_ADDED_ROWS;
 /// `shipped + PER_ROW * rows.len()`, which is smaller whenever fewer rows are registered.
 const CHILDREN: usize = ds2_rva::FLO_QUIT_TAB_CHILD_IDS.len() + PER_ROW * MAX_ROWS;
 
+/// Where the caret goes for `rows` rows, which depends on where the rows themselves start.
+///
+/// On the System tab the added rows hang below the shipped three and the caret follows them down one
+/// pitch each. On a tab of our own they start at the top, so the same count ends three pitches
+/// higher.
+///
+/// **One caret serves both tabs**, because they share the container this module substitutes. It is
+/// sized for the tab this crate's rows are on; the other tab's panel is then a row or two longer than
+/// its list. That is cosmetic, it is not measured, and it is the price of the shared panel.
+fn caret_for(rows: usize) -> f32 {
+    if crate::tab::armed() {
+        ds2_rva::caret_y_from_top(rows)
+    } else {
+        ds2_rva::caret_y(rows)
+    }
+}
+
 /// Index of slot `n`'s row and mark inside the new child array.
 ///
 /// The shipped records keep indices `0..7` untouched; ours are appended in pairs, so slot 0 is
@@ -440,8 +457,9 @@ unsafe fn build(original: *mut u8, panel: *mut u8, row: *mut u8) -> Option<*mut 
         }
     }
     for (slot, row) in rows.iter().enumerate() {
-        let (row_x, row_y) = row.row_xy();
-        let (mark_x, mark_y) = row.mark_xy();
+        let own_tab = crate::tab::armed();
+        let (row_x, row_y) = row.row_xy(own_tab);
+        let (mark_x, mark_y) = row.mark_xy(own_tab);
         container.row_transform[slot][ds2_rva::FLO_TRANSFORM_X_OFFSET..][..4]
             .copy_from_slice(&row_x.to_le_bytes());
         container.row_transform[slot][ds2_rva::FLO_TRANSFORM_Y_OFFSET..][..4]
@@ -680,7 +698,7 @@ unsafe fn build(original: *mut u8, panel: *mut u8, row: *mut u8) -> Option<*mut 
                     // A fixed one-row offset left the caret above the rows on any tab showing more
                     // than one added row, which is every tab this crate now allows.
                     container.caret_transform[ds2_rva::FLO_TRANSFORM_Y_OFFSET..][..4]
-                        .copy_from_slice(&ds2_rva::caret_y(rows.len()).to_le_bytes());
+                        .copy_from_slice(&caret_for(rows.len()).to_le_bytes());
                     caret_ok = true;
                 } else {
                     log(format_args!(
@@ -789,7 +807,7 @@ unsafe fn build(original: *mut u8, panel: *mut u8, row: *mut u8) -> Option<*mut 
             "{LOG_PREFIX} caret moved definition={:#x} y={}->{} rows={}",
             ds2_rva::FLO_ADDED_PANEL_DEFINITION,
             ds2_rva::FLO_CARET_SHIPPED_Y,
-            ds2_rva::caret_y(rows.len()),
+            caret_for(rows.len()),
             rows.len()
         ));
     }
@@ -806,9 +824,9 @@ unsafe fn build(original: *mut u8, panel: *mut u8, row: *mut u8) -> Option<*mut 
             .map(|(slot, row)| format!(
                 "{slot}:{:#x}@({:?})+label {:#x}@({:?})",
                 row.row_id,
-                row.row_xy(),
+                row.row_xy(crate::tab::armed()),
                 row.label_id,
-                row.mark_xy()
+                row.mark_xy(crate::tab::armed())
             ))
             .collect::<Vec<_>>()
             .join(" "),

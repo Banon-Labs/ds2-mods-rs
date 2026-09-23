@@ -50,7 +50,7 @@
 //! every lookup so a second scene cannot be served a group built against the first one's proxy.
 
 use core::ffi::c_void;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::LOG_PREFIX;
 use crate::install::log;
@@ -90,6 +90,22 @@ static GROUP: AtomicUsize = AtomicUsize::new(0);
 
 /// How many rows this tab carries, which is every row the registry holds.
 static ROWS: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether the three sites went in, decided once at [`install`] and never again.
+///
+/// **This, and not [`GROUP`], is what the System tab's own detours ask.** They run inside
+/// `FUN_1400a41b0` -- before its detour's post-step has built anything -- so a group pointer is
+/// still zero when the question is asked and would send every row onto the System tab as well. The
+/// first run of this module did exactly that: the rows appeared on both tabs at once.
+static ARMED: AtomicBool = AtomicBool::new(false);
+
+/// True only while [`build_group`] is inside the game's namer builder.
+///
+/// The builder is detoured, and that detour is what adds a cell per row. Our call has to get those
+/// cells and the System tab's own call must not, and the two are the same function -- so the
+/// difference has to be a flag, and it is this one. Set and cleared around a single synchronous
+/// call on the thread that is constructing the scene.
+static BUILDING: AtomicBool = AtomicBool::new(false);
 
 /// Counters, so a run's log says which of the three detours actually did anything.
 static GROUPS_BUILT: AtomicUsize = AtomicUsize::new(0);
@@ -179,7 +195,16 @@ unsafe fn build_group(base: usize, top_select: *mut u8, entries: &[(u32, u32)]) 
     // SAFETY: `builder` is the System tab's item builder, and the argument is a 16-aligned buffer
     // of the size its own callers give it.
     unsafe { builder(descriptor_ptr) };
-    if !unsafe { rewrite_items(descriptor_ptr, entries) } {
+    // AS MANY AS THE VECTOR HOLDS, and the rest are served by `crate::install`'s item lookup out of
+    // its own entries -- the same split the System tab uses, with the difference that on this tab
+    // none of the five slots is spoken for. Writing more than five here would be refused by the
+    // game's own copy (`if (5 < src[0x30]) panic`) inside the constructor two calls later.
+    let fits = entries
+        .len()
+        .min(ds2_rva::FE_INGAME_MENU_ITEM_VECTOR_CAPACITY);
+    // SAFETY: the game's own builder has just filled this descriptor, which is what `rewrite_items`
+    // requires of it.
+    if !unsafe { rewrite_items(descriptor_ptr, &entries[..fits]) } {
         log(format_args!(
             "{LOG_PREFIX} tab NOT built stage=items rows={} of-capacity={}",
             entries.len(),
@@ -196,8 +221,13 @@ unsafe fn build_group(base: usize, top_select: *mut u8, entries: &[(u32, u32)]) 
     let namer_builder: NamerBuilderFn =
         unsafe { std::mem::transmute(base + ds2_rva::FE_INGAME_MENU_QUIT_TAB_NAMER as usize) };
     let mut namer: usize = 0;
+    // THE FLAG IS THE ONLY THING THAT TELLS THE TWO CALLS APART. `crate::install`'s detour on this
+    // builder adds a cell per row, and it must do that for this call and not for the System tab's.
+    // Cleared unconditionally after, including on the paths that refuse below.
+    BUILDING.store(true, Ordering::Release);
     // SAFETY: as above; the out-parameter is a live local this function owns.
     unsafe { namer_builder(&raw mut namer, proxy) };
+    BUILDING.store(false, Ordering::Release);
     if !sane(namer) {
         log(format_args!(
             "{LOG_PREFIX} tab NOT built stage=namer namer=0x{namer:016x}"
@@ -417,7 +447,23 @@ pub unsafe fn install(base: usize) -> bool {
             return false;
         }
     }
+    // PUBLISHED LAST, and this is what moves the rows. Until it is set the System tab's own detours
+    // behave exactly as they did before this module existed; after it, they leave the System tab
+    // alone and the rows belong to the seventh tab.
+    ARMED.store(true, Ordering::Release);
     true
+}
+
+/// Whether the seventh tab's sites are in, which is what decides where a row goes.
+///
+/// Asked by the System tab's detours, which run before any group exists -- see [`ARMED`].
+pub(crate) fn armed() -> bool {
+    ARMED.load(Ordering::Acquire)
+}
+
+/// Whether the namer being constructed right now is the seventh tab's.
+pub(crate) fn building() -> bool {
+    BUILDING.load(Ordering::Acquire)
 }
 
 /// A pointer to the seventh group, for the detours in [`crate::install`] that have to recognise it.

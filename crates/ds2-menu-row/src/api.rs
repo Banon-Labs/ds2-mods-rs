@@ -249,15 +249,25 @@ pub(crate) struct Row {
 
 impl Row {
     /// Where this row's record goes, in the container's own coordinates.
-    pub(crate) fn row_xy(&self) -> (f32, f32) {
-        let (x, y) = ds2_rva::FLO_ADDED_ROW_XY;
+    /// `own_tab` says whether this row is on a tab of this crate's own making, where there are no
+    /// shipped rows above it and the series starts at the top instead of below the third.
+    pub(crate) fn row_xy(&self, own_tab: bool) -> (f32, f32) {
+        let (x, y) = if own_tab {
+            ds2_rva::FLO_FIRST_ROW_XY
+        } else {
+            ds2_rva::FLO_ADDED_ROW_XY
+        };
         (x, y + ds2_rva::FLO_ROW_PITCH * self.slot as f32)
     }
 
     /// Where this row's caption mark goes. A different pitch from the row's, because the two
     /// shipped series step by different amounts.
-    pub(crate) fn mark_xy(&self) -> (f32, f32) {
-        let (x, y) = ds2_rva::FLO_ADDED_MARK_XY;
+    pub(crate) fn mark_xy(&self, own_tab: bool) -> (f32, f32) {
+        let (x, y) = if own_tab {
+            ds2_rva::FLO_FIRST_MARK_XY
+        } else {
+            ds2_rva::FLO_ADDED_MARK_XY
+        };
         (x, y + ds2_rva::FLO_MARK_PITCH * self.slot as f32)
     }
 }
@@ -429,13 +439,27 @@ mod tests {
             tint: None,
             on_confirm: || {},
         };
-        assert_eq!(row(0).row_xy(), ds2_rva::FLO_ADDED_ROW_XY);
-        assert_eq!(row(0).mark_xy(), ds2_rva::FLO_ADDED_MARK_XY);
-        let step = row(1).row_xy().1 - row(0).row_xy().1;
-        assert!((step - ds2_rva::FLO_ROW_PITCH).abs() < 0.01);
-        // The mark stays below its own row at every slot, the way all three shipped pairs do.
-        for slot in 0..MAX_ADDED_ROWS {
-            assert!(row(slot).mark_xy().1 > row(slot).row_xy().1);
+        assert_eq!(row(0).row_xy(false), ds2_rva::FLO_ADDED_ROW_XY);
+        assert_eq!(row(0).mark_xy(false), ds2_rva::FLO_ADDED_MARK_XY);
+        // On a tab of our own the same slot 0 is the tab's FIRST row, at the top of the panel.
+        assert_eq!(row(0).row_xy(true), ds2_rva::FLO_FIRST_ROW_XY);
+        assert_eq!(row(0).mark_xy(true), ds2_rva::FLO_FIRST_MARK_XY);
+        // The two origins are the three shipped rows apart -- and that is 141.3, not three pitches.
+        // The shipped rows step by 45.3 then 48.0, so only the step past them is a clean pitch, and
+        // deriving the gap as `3 * FLO_ROW_PITCH` puts every row on our tab 2.7 too low.
+        let gap = row(0).row_xy(false).1 - row(0).row_xy(true).1;
+        assert!((gap - ds2_rva::FLO_FIRST_ROW_RISE).abs() < 0.01, "{gap}");
+        assert!(
+            (gap - ds2_rva::FLO_ROW_PITCH * 3.0).abs() > 2.0,
+            "if these ever agree, the shipped rows were re-authored and the comment above is stale"
+        );
+        for own_tab in [false, true] {
+            let step = row(1).row_xy(own_tab).1 - row(0).row_xy(own_tab).1;
+            assert!((step - ds2_rva::FLO_ROW_PITCH).abs() < 0.01);
+            // The mark stays below its own row at every slot, as all three shipped pairs do.
+            for slot in 0..MAX_ADDED_ROWS {
+                assert!(row(slot).mark_xy(own_tab).1 > row(slot).row_xy(own_tab).1);
+            }
         }
     }
 }

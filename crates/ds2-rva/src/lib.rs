@@ -3520,6 +3520,18 @@ pub const FLO_MARK_PITCH: f32 = 48.4;
 pub const FLO_ADDED_ROW_XY: (f32, f32) = (-0.1, 151.9);
 pub const FLO_ADDED_MARK_XY: (f32, f32) = (60.2, 162.75);
 
+/// Where a tab's first row goes -- the shipped row 0's own position, read off the container.
+///
+/// Child 3 of [`FLO_QUIT_TAB_CONTAINER_DEFINITION`] is `(3.95, 10.60)` and child 6 -- its mark --
+/// is `(60.20, 17.55)`. The x is the shipped row 0's rather than row 2's, because on a tab whose
+/// rows all belong to this crate there is no shipped row above to line up with.
+///
+/// This is the origin a tab of our own uses, where [`FLO_ADDED_ROW_XY`] is the origin for rows
+/// appended below three shipped ones. The two differ by three pitches, which is the three rows that
+/// are not there on the seventh tab.
+pub const FLO_FIRST_ROW_XY: (f32, f32) = (3.95, 10.6);
+pub const FLO_FIRST_MARK_XY: (f32, f32) = (60.2, 17.55);
+
 /// Byte offset of the packed colour inside a transform block, and the tint the added row's icon
 /// is drawn with.
 ///
@@ -3971,6 +3983,20 @@ pub const FLO_ADDED_PANEL_DEFINITION: u32 = 0xf221;
 /// does not enter into it.
 pub const fn caret_y(rows: usize) -> f32 {
     FLO_CARET_SHIPPED_Y + FLO_ROW_PITCH * rows as f32
+}
+
+/// How much higher a tab's first row sits than the first APPENDED row. `141.30`.
+///
+/// `151.90 - 10.60`. **Not three pitches**, which would be `144.00`: the three shipped rows step by
+/// `45.30` then `48.00`, so the distance they actually span is `93.30` and only the step past them is
+/// a clean pitch. Deriving this as `3 * FLO_ROW_PITCH` is off by `2.70`, which is the sort of number
+/// that reads as correct in a comment and wrong on a screen.
+pub const FLO_FIRST_ROW_RISE: f32 = FLO_ADDED_ROW_XY.1 - FLO_FIRST_ROW_XY.1;
+
+/// [`caret_y`] for a tab whose rows start at [`FLO_FIRST_ROW_XY`] rather than below three shipped
+/// ones: the same series, lifted by [`FLO_FIRST_ROW_RISE`].
+pub const fn caret_y_from_top(rows: usize) -> f32 {
+    caret_y(rows) - FLO_FIRST_ROW_RISE
 }
 /// What the shipped caret's y reads, checked before anything is written.
 pub const FLO_CARET_SHIPPED_Y: f32 = 244.65;

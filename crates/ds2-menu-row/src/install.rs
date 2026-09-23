@@ -231,7 +231,23 @@ unsafe fn append(descriptor: *mut u8) -> *mut u8 {
     // vector holds, so the rows that fit here go through the game's own path end to end, exactly as
     // they did before that detour existed -- there is one fewer thing that has to be right for the
     // first rows than for the last ones.
-    let rows = crate::api::rows_for(crate::api::Tab::Quit);
+    // THE SEVENTH TAB TAKES THE ROWS, if there is one. This builder runs for the System tab, and
+    // once `crate::tab` is armed the rows belong somewhere else -- appending here as well is how the
+    // first run of that module put every row on both tabs at once. Asked of `armed()` rather than of
+    // a group pointer because this call happens inside the constructor whose detour builds the
+    // group, so the group does not exist yet.
+    let rows = if crate::tab::armed() {
+        Vec::new()
+    } else {
+        crate::api::rows_for(crate::api::Tab::Quit)
+    };
+    if rows.is_empty() {
+        log(format_args!(
+            "{LOG_PREFIX} appended nothing -- the System tab keeps the {count} rows the game \
+             shipped, and the added rows are on the seventh tab fire={fired}"
+        ));
+        return returned;
+    }
     let fits = ds2_rva::FE_INGAME_MENU_ITEM_VECTOR_CAPACITY.saturating_sub(count);
     let mut written = 0usize;
     for row in rows.iter().take(fits) {
@@ -1054,7 +1070,22 @@ unsafe fn name_added_cell(base: usize, namer: usize) -> bool {
             ds2_rva::FE_QUIT_TAB_CELL_IDS.len()
         ));
     }
-    let rows = crate::api::rows_for(crate::api::Tab::Quit);
+    let all = crate::api::rows_for(crate::api::Tab::Quit);
+    // WHICH ROWS NEED A CELL HERE, which depends on whose namer this is. Three cases, and the
+    // middle one is the seventh tab's:
+    //
+    //   not armed          the System tab carries the added rows, so every one needs a cell of its
+    //                      own beyond the shipped three.
+    //   armed, building    this is the seventh tab's namer. Its rows ARE the tab, so the game's own
+    //                      three cells already draw rows 0..2 and only the rest need one.
+    //   armed, not         the System tab, which keeps exactly what the game shipped.
+    let rows: Vec<_> = if !crate::tab::armed() {
+        all
+    } else if crate::tab::building() {
+        all.into_iter().skip(count).collect()
+    } else {
+        Vec::new()
+    };
     if rows.is_empty() {
         return false;
     }
@@ -1108,6 +1139,25 @@ unsafe fn name_added_cell(base: usize, namer: usize) -> bool {
     let push = unsafe {
         std::mem::transmute::<usize, NamerPushFn>(base + ds2_rva::FE_SCENE_NAMER_PUSH as usize)
     };
+    // ON A TAB OF OUR OWN, THE GAME'S THREE CELLS BECOME OURS TOO. They are already in the list and
+    // they draw the top three row positions, and left alone they draw the game's own rows -- so the
+    // seventh tab's first row would have read "Game Options" and fired quit-to-desktop. Only the id
+    // is rewritten; the path components around it stay the ones the game's own builder wrote.
+    let mut reused = Vec::new();
+    if crate::tab::building() {
+        let head = crate::api::rows_for(crate::api::Tab::Quit);
+        for (index, row) in head.iter().take(count).enumerate() {
+            // SAFETY: `index < count`, so this entry is live, and the offset is the id field the
+            // verification above just read out of entry `count - 1`.
+            unsafe {
+                entry(index)
+                    .add(ds2_rva::FE_SCENE_NAMER_ENTRY_ID_OFFSET)
+                    .cast::<u32>()
+                    .write(row.row_id);
+            }
+            reused.push(format!("{index}={:#x}", row.row_id));
+        }
+    }
     // ONE ENTRY PER REGISTERED ROW, each a clone of the last SHIPPED entry with its id rewritten.
     // Cloned rather than assembled: the slack between the named fields is the unused tail of a
     // `DLFixedVector<u32, 8>` and differs between two entries the game built back to back, so only
@@ -1148,9 +1198,14 @@ unsafe fn name_added_cell(base: usize, namer: usize) -> bool {
     SYSTEM_TAB_NAMER.store(namer, Ordering::Release);
     let n = CELLS_ADDED.fetch_add(1, Ordering::Relaxed) + 1;
     log(format_args!(
-        "{LOG_PREFIX} cells named [{}] container={:#x} list={count}->{} of-capacity={} \
+        "{LOG_PREFIX} cells named{} [{}] container={:#x} list={count}->{} of-capacity={} \
          stand-ins={shadowed} namer=0x{namer:016x} additions={n} \
          -- `*` is ours; row-extent {} on the tab line means the layout answered",
+        if reused.is_empty() {
+            String::new()
+        } else {
+            format!(" reusing-the-games-cells [{}]", reused.join(" "))
+        },
         named.join(" "),
         ds2_rva::FE_QUIT_TAB_BASE_PATH[3],
         count + fits,
@@ -1223,12 +1278,26 @@ unsafe extern "system" fn tab_init_detour(tab: *mut u8) {
     if base == 0 {
         return;
     }
-    // WHICH TAB. The same three shipped entries the item builder demanded, checked again here
-    // because this init runs for all six tabs and raising some other tab's cursor bound would let
-    // its cursor walk onto rows that have no cell.
-    // SAFETY: the original init has just run against this pointer, so the group is constructed.
-    let Some(count) = (unsafe { system_tab_count(tab) }) else {
-        return;
+    // WHICH TAB, and once there is a seventh it is the only one this applies to. The init runs for
+    // every tab, and raising a cursor bound on a tab whose cells were never added lets its cursor
+    // walk onto rows that are not there -- which is what the System tab got on the first run of
+    // `crate::tab`, a bound of seven over six drawn cells.
+    let seventh = crate::tab::group();
+    let count = if crate::tab::armed() {
+        if seventh == 0 || tab as usize != seventh {
+            return;
+        }
+        // SAFETY: our own group, whose vector the game's own constructor filled.
+        match unsafe { vector_count(tab) } {
+            Some(count) => count,
+            None => return,
+        }
+    } else {
+        // SAFETY: the original init has just run against this pointer, so the group is constructed.
+        match unsafe { system_tab_count(tab) } {
+            Some(count) => count,
+            None => return,
+        }
     };
     let want = ds2_rva::FE_INGAME_MENU_SYSTEM_TAB_ITEMS.len() + added;
     if want <= count {
