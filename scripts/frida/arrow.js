@@ -153,7 +153,18 @@ const BASE_COLOUR = [0.15, 0.9, 1.0, 1.0];
 /// immediately and visibly, which is the failure that a log full of plausible numbers hides.
 const PLUMB_METRES = 8.0;
 const PLUMB_LENGTH_PX = 120;
-const PLUMB_COLOUR = [0.25, 1.0, 0.35, 1.0];
+/// The plumb, turned down so it stops competing with the arrow you are actually reading. It
+/// stays on screen because it is the one thing that goes visibly wrong the instant the
+/// projection does.
+///
+/// **THIS IS DIMMING, NOT TRANSPARENCY, AND THE DIFFERENCE IS NOT COSMETIC.** `ClearView` writes
+/// a colour into the render target; it does not blend one, so there is no compositing step for an
+/// alpha to take part in. Alpha `0.1` was tried live and ignored -- the arrow came back solid
+/// green -- which is the answer the D3D11 documentation implies and the screen confirmed. Scaling
+/// the three colour components is what this call can actually do: a DARK green arrow over
+/// whatever is behind it, which reads as faint against a bright scene and as a black line against
+/// a dark one. Ten percent of the colour, not ten percent of the way to the background.
+const PLUMB_COLOUR = [0.025, 0.1, 0.035, 1.0];
 
 /// How far above `CharacterCtrl+0x90` to hang the arrow, in metres.
 ///
@@ -1225,6 +1236,13 @@ function hook() {
   Interceptor.attach(present, {
     onEnter(args) {
       counters.present += 1;
+      // Printed once, for bd `ds2-mods-rs-zbo`: `stone.js` prints the thread
+      // `NvNavigationSystem::Update` runs on, and the two numbers together say whether the queue
+      // between those seams in `crate::gametick` is belt-and-braces or load-bearing.
+      if (counters.present === 1) {
+        console.log('[arrow] IDXGISwapChain::Present runs on thread ' +
+          Process.getCurrentThreadId() + ' -- compare against the nav thread in the stone log.');
+      }
       if (believed === null) return;
       try {
         if (drawState === null) drawState = attachTo(args[0]);
