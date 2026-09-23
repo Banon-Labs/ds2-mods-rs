@@ -110,6 +110,10 @@ const OFN_DONTADDTORECENT: u32 = 0x0200_0000;
 unsafe extern "system" {
     fn GetOpenFileNameW(arg: *mut OpenFileNameW) -> i32;
     fn GetSaveFileNameW(arg: *mut OpenFileNameW) -> i32;
+    /// Put the game back in front. See [`hand_back`].
+    fn SetForegroundWindow(hwnd: *mut c_void) -> i32;
+    fn SetActiveWindow(hwnd: *mut c_void) -> *mut c_void;
+    fn SetFocus(hwnd: *mut c_void) -> *mut c_void;
     /// `0` when the dialog was dismissed by the player, non-zero when it failed.
     ///
     /// This is the only thing that tells a Cancel from a broken dialog: both return `FALSE`.
@@ -223,6 +227,17 @@ pub unsafe fn show(request: &Request<'_>) -> Pick {
             Intent::Save => GetSaveFileNameW(&mut arg),
         }
     };
+    // BEFORE ANY RETURN, on every path. A modal dialog owned by the game window disables that window
+    // for the length of the call and hands activation to the dialog; when the dialog goes away the
+    // activation does not always come back on its own, and a DARK SOULS II that is running but not
+    // active reads to the player as a soft lock -- the menu is on screen and the pad does nothing.
+    // Measured 2026-09-23: a pick the row refused left exactly that, with the refusal as the last
+    // line in the log and the process alive on 89 threads.
+    //
+    // The refusing paths are the ones that need this most, because a pick that is accepted leaves
+    // through the return to the title and gets its activation back from the game's own transition.
+    unsafe { hand_back(arg.hwnd_owner) };
+
     if answered == 0 {
         // SAFETY: a call with no arguments.
         let error = unsafe { CommDlgExtendedError() };
@@ -245,6 +260,33 @@ pub unsafe fn show(request: &Request<'_>) -> Pick {
         return Pick::Failed(0);
     }
     Pick::Chosen(PathBuf::from(picked))
+}
+
+/// Give the game back the foreground, the activation and the keyboard focus the dialog took.
+///
+/// All three, because they are three different things and the dialog took all three: foreground is
+/// which window the desktop shows on top, activation is which window the shell considers current,
+/// and focus is which window keystrokes go to. A window can hold any of them without the others,
+/// and a game holding none of them still draws its last frame -- which is what a player reads as a
+/// lock rather than as a lost window.
+///
+/// Every call is best-effort and unchecked. There is no failure here worth acting on: a refusal
+/// from the window manager leaves the player exactly where they already were, and the alternative
+/// -- not asking -- is the state this exists to get out of.
+///
+/// # Safety
+///
+/// `hwnd` must be a window handle or null. Null is passed straight through and the calls no-op.
+unsafe fn hand_back(hwnd: *mut c_void) {
+    if hwnd.is_null() {
+        return;
+    }
+    // SAFETY: the caller's own window handle, the one the dialog was given as its owner.
+    unsafe {
+        SetForegroundWindow(hwnd);
+        SetActiveWindow(hwnd);
+        SetFocus(hwnd);
+    }
 }
 
 /// The game's top-level window, or null if it cannot be resolved.
