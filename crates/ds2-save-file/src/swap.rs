@@ -327,6 +327,22 @@ fn title_gate() -> ds2_continue::TitleStep {
             TitleStep::Wait
         }
         Phase::Asking { restoring } => {
+            // THE DIRECTORY A CONTAINER READ OPENS IS THE ONE `SAVE_DIR_BUILD` PRODUCES, so that is
+            // what this points. `SLLoadSession`'s directory virtual looked like the seam and is
+            // not: the session's work method reads the content's string inline and never calls that
+            // virtual, which a run measured as `load-answered=1` on a read that still failed.
+            //
+            // It moves both sides at once, and that is safe only here. Between the return to the
+            // title and a character being chosen there is no character loaded, so nothing can be
+            // saved through it; `load_confirmed` swaps back to the per-side arm the instant one is.
+            if restoring {
+                let answers = ds2_save_redirect::clear_session_directory();
+                log_line(format_args!(
+                    "{LOG_PREFIX} swap session directory cleared answers={answers}"
+                ));
+            } else {
+                ds2_save_redirect::set_session_directory(&swap.staged);
+            }
             // SAFETY: the game is mapped and past `DllMain`; this is its own thread at the title.
             let side_ready = if restoring {
                 unsafe { session_dir::LOAD.disarm() }
@@ -467,8 +483,15 @@ fn abandon(why: &str) {
     // reaches a player who declined the confirm: the pause menu is still up, still in front of
     // them, and the row would otherwise go on announcing a departure that never happened.
     crate::import::restore();
+    // THE ANSWER COUNT, not the arm. `load-answered=0` says the game never asked the vtable slot
+    // this flow swapped, so the container behind the staged path was never opened and nothing about
+    // that file explains the failure. Anything above zero says it was asked, got the staged
+    // directory, and the read still failed -- two opposite next moves, told apart by one number.
+    let (answered, passed) = session_dir::LOAD.answers();
+    let session = ds2_save_redirect::clear_session_directory();
     log_line(format_args!(
-        "{LOG_PREFIX} swap ABANDONED -- {why}. load-side-restored={load} save-side-restored={save}"
+        "{LOG_PREFIX} swap ABANDONED -- {why}. load-side-restored={load} save-side-restored={save} \
+         load-answered={answered} load-passed-through={passed} session-dir-answered={session}"
     ));
 }
 
@@ -493,6 +516,10 @@ fn load_confirmed(slot: i32) {
     // been untouched since the save that left it.
     // SAFETY: the game is mapped and past `DllMain`; this is its own thread at the title.
     let armed = unsafe { session_dir::SAVE.arm() };
+    // AND THE WHOLE-SESSION OVERRIDE COMES OFF HERE. It was correct while nothing was loaded; from
+    // this instant a character is, and leaving it on would point the player's every later read and
+    // write at the staged container by a route that cannot tell the two sides apart.
+    let session = ds2_save_redirect::clear_session_directory();
     ds2_continue::clear_title_gate();
     // The flow is over, so the boxes go back to being this build's business. Released here rather
     // than at `StartIngame`: the load is committed, and a hold that outlived its flow would leave
@@ -506,7 +533,7 @@ fn load_confirmed(slot: i32) {
     crate::import::restore();
     if armed {
         log_line(format_args!(
-            "{LOG_PREFIX} swap done slot={slot} -- loading from {staged}, and this session now \
+            "{LOG_PREFIX} swap done slot={slot} session-dir-answered={session} -- loading from {staged}, and this session now \
              saves there too; your own container is untouched"
         ));
     } else {

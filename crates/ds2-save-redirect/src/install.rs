@@ -254,6 +254,51 @@ fn stage_now(steam_id: &str) -> Option<Vec<u16>> {
     }
 }
 
+/// A directory that outranks everything else this detour would answer, for as long as it is set.
+///
+/// Set by the in-session character swap while it is at the title, and cleared by it on every path
+/// that ends the flow. It is a `Mutex<Option<..>>` rather than the `OnceLock` the launch staging
+/// uses because its whole purpose is to be armed and disarmed inside one process.
+static SESSION_OVERRIDE: Mutex<Option<Vec<u16>>> = Mutex::new(None);
+
+/// Times the session override answered, so a flow can report that it did rather than assume it.
+static SESSION_ANSWERED: AtomicUsize = AtomicUsize::new(0);
+
+/// Point every container directory this session builds at `windows_path`, until [`clear_session`].
+///
+/// The path is taken as the game spells one: a Windows path ending in a separator, which is what
+/// the original produces and what its callers append a filename to. A missing separator is added,
+/// because the container would otherwise be looked for beside the folder rather than inside it.
+///
+/// Returns the number of times the override has answered so far, which is zero on a fresh arm.
+pub fn set_session_directory(windows_path: &str) -> usize {
+    let mut wide: Vec<u16> = windows_path.encode_utf16().collect();
+    if !matches!(wide.last(), Some(&c) if c == u16::from(b'\\')) {
+        wide.push(u16::from(b'\\'));
+    }
+    if let Ok(mut held) = SESSION_OVERRIDE.lock() {
+        *held = Some(wide);
+    }
+    SESSION_ANSWERED.swap(0, Ordering::Relaxed)
+}
+
+/// Stop answering the session directory. Idempotent; returns how many times it answered.
+pub fn clear_session_directory() -> usize {
+    if let Ok(mut held) = SESSION_OVERRIDE.lock() {
+        *held = None;
+    }
+    SESSION_ANSWERED.load(Ordering::Relaxed)
+}
+
+/// How many times the session override has answered since it was armed.
+pub fn session_answers() -> usize {
+    SESSION_ANSWERED.load(Ordering::Relaxed)
+}
+
+fn session_override() -> Option<Vec<u16>> {
+    SESSION_OVERRIDE.lock().ok().and_then(|held| held.clone())
+}
+
 /// The detour. Replaces the whole directory -- root and Steam ID folder both -- when armed.
 ///
 /// # Safety
@@ -289,6 +334,43 @@ unsafe extern "system" fn detour_save_dir(out: *mut c_void, steamid: *const u16)
     if let Some(id) = found.as_deref() {
         record_steam_id(id);
     }
+
+    // THE SESSION OVERRIDE COMES FIRST, and it is the seam the in-session swap has to use.
+    //
+    // `SLLoadSession`'s directory virtual is not what a container read opens. The work method
+    // (`SL_LOAD_SESSION_WORK`) reads the content's own string inline -- `[this+0xe8]`, through the
+    // same accessor the virtual uses -- and never calls that virtual, so swapping its vtable slot
+    // changes the answer to a question the read does not ask. One run measured exactly that: the
+    // slot was armed, `load-answered=1` says the game reached it, and the read still failed,
+    // because the content's string had been built here, at session setup, from the player's own
+    // folder.
+    //
+    // So the directory a container read uses is the one this function produces, and this is where
+    // an in-session redirect belongs. It moves both sides at once, which is safe only in the window
+    // the swap arms it for: between the return to the title and a character being chosen, no
+    // character is loaded, so there is nothing a save could write.
+    if let Some(directory) = session_override() {
+        let base = MODULE_BASE.load(Ordering::Acquire);
+        if base == 0 {
+            pass_through("session-override-no-module-base");
+            return;
+        }
+        // SAFETY: `WSTRING_ASSIGN` is the game's own assign, at a recorded RVA in the loaded image.
+        let assign: AssignFn = unsafe {
+            std::mem::transmute::<usize, AssignFn>(base + ds2_rva::WSTRING_ASSIGN as usize)
+        };
+        // SAFETY: `out` is the caller's constructed string and `directory` is this module's own
+        // buffer, alive for the length of the call.
+        unsafe { assign(out, directory.as_ptr(), directory.len()) };
+        // SAFETY: the assign above seated the caller's own constructed string.
+        let produced = unsafe { read_wstring(out) };
+        let n = SESSION_ANSWERED.fetch_add(1, Ordering::Relaxed) + 1;
+        log(format_args!(
+            "{LOG_PREFIX} save-dir session-override count={n} path={produced}"
+        ));
+        return;
+    }
+
     if !armed() {
         pass_through("not-armed");
         return;

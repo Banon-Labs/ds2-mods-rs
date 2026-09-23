@@ -88,6 +88,20 @@ pub struct Side {
     /// This side's replacement override. One `extern` function per side, because the game hands
     /// the override no way to say which side called it.
     replacement: DirectoryOverride,
+    /// Times the replacement ran and handed the game the staged directory.
+    ///
+    /// **An arm is not an answer.** Swapping the vtable slot is a write this crate can confirm by
+    /// reading the slot back; it says nothing about whether the game ever reached that slot for the
+    /// work being waited on. Without this counter a failed read has two indistinguishable
+    /// explanations -- the session class asking was not the one whose vtable was swapped, or it was
+    /// and the container behind that path could not be read -- and they call for opposite fixes.
+    answered: &'static AtomicUsize,
+    /// Times the replacement ran and handed the game its own directory instead.
+    ///
+    /// Counted separately because it is the quiet failure: the override was reached, so the slot is
+    /// right, and the answer was still the player's own folder. Every path into it is a refusal
+    /// inside [`answer`] -- no staged directory, an unresolved setter, a poisoned lock.
+    passed_through: &'static AtomicUsize,
 }
 
 impl Side {
@@ -111,6 +125,19 @@ impl Side {
     /// Whether the vtable slot currently holds the replacement.
     pub fn armed(&self) -> bool {
         self.original.load(Ordering::Acquire) != 0
+    }
+
+    /// `(answered, passed through)` since the process started.
+    ///
+    /// The first number is the only evidence that arming this side changed what the game read.
+    /// A flow that armed, asked for a container, and failed reports it: zero means the request
+    /// never reached this vtable slot at all, and no amount of work on the staged file would have
+    /// made a difference.
+    pub fn answers(&self) -> (usize, usize) {
+        (
+            self.answered.load(Ordering::Relaxed),
+            self.passed_through.load(Ordering::Relaxed),
+        )
     }
 
     /// The directory this side would answer, as text, for a log line that has to say what is
@@ -229,6 +256,14 @@ impl Side {
 unsafe fn answer(side: &Side, this: *mut c_void, out: *mut c_void) {
     let original = side.original.load(Ordering::Acquire);
     let fallback = || {
+        let n = side.passed_through.fetch_add(1, Ordering::Relaxed) + 1;
+        if n <= 2 {
+            log(format_args!(
+                "{LOG_PREFIX} {}-session override answered with the game's own directory \
+                 (count={n}) -- the slot is right and the staging is not",
+                side.what
+            ));
+        }
         if original != 0 {
             // SAFETY: `original` is what the slot held before `arm` replaced it, so it is the
             // game's own override with this exact signature.
@@ -255,6 +290,17 @@ unsafe fn answer(side: &Side, this: *mut c_void, out: *mut c_void) {
     // game handed us -- the same one the original would have filled.
     let setter: StringSet = unsafe { core::mem::transmute(setter) };
     unsafe { setter(out, held.as_ptr(), held.len()) };
+    let n = side.answered.fetch_add(1, Ordering::Relaxed) + 1;
+    // The first two only. A session asks for its directory once, so two lines cover an arm and its
+    // retry; past that this is a per-frame sink writing the same sentence.
+    if n <= 2 {
+        log(format_args!(
+            "{LOG_PREFIX} {}-session override ANSWERED count={n} units={} -- the game asked this \
+             slot for a directory and got the staged one",
+            side.what,
+            held.len()
+        ));
+    }
 }
 
 /// The load side: what the game reads a container through.
@@ -270,11 +316,15 @@ pub static LOAD: Side = Side {
     original: &LOAD_ORIGINAL,
     slot: &LOAD_SLOT,
     replacement: load_override,
+    answered: &LOAD_ANSWERED,
+    passed_through: &LOAD_PASSED_THROUGH,
 };
 
 static LOAD_DIRECTORY: Mutex<Vec<u16>> = Mutex::new(Vec::new());
 static LOAD_ORIGINAL: AtomicUsize = AtomicUsize::new(0);
 static LOAD_SLOT: AtomicUsize = AtomicUsize::new(0);
+static LOAD_ANSWERED: AtomicUsize = AtomicUsize::new(0);
+static LOAD_PASSED_THROUGH: AtomicUsize = AtomicUsize::new(0);
 
 unsafe extern "system" fn load_override(this: *mut c_void, out: *mut c_void) {
     // SAFETY: the game's own call, forwarded with its own arguments.
@@ -294,11 +344,15 @@ pub static SAVE: Side = Side {
     original: &SAVE_ORIGINAL,
     slot: &SAVE_SLOT,
     replacement: save_override,
+    answered: &SAVE_ANSWERED,
+    passed_through: &SAVE_PASSED_THROUGH,
 };
 
 static SAVE_DIRECTORY: Mutex<Vec<u16>> = Mutex::new(Vec::new());
 static SAVE_ORIGINAL: AtomicUsize = AtomicUsize::new(0);
 static SAVE_SLOT: AtomicUsize = AtomicUsize::new(0);
+static SAVE_ANSWERED: AtomicUsize = AtomicUsize::new(0);
+static SAVE_PASSED_THROUGH: AtomicUsize = AtomicUsize::new(0);
 
 unsafe extern "system" fn save_override(this: *mut c_void, out: *mut c_void) {
     // SAFETY: the game's own call, forwarded with its own arguments.
