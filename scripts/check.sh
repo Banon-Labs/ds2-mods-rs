@@ -171,6 +171,11 @@ else
   # invisible until somebody is refused by one arm and waved through by the other, so this compares
   # the patterns across all three files byte for byte as well as pinning the classification.
   python3 scripts/test-shouting-signal.py
+  # And the same half for the live-game guard, whose entire decision is a tense: "I launched it" is
+  # provable and allowed, "the game is up" is a claim about now and needs a check in the same turn.
+  # The lexicon and the liveness-command list live in scripts/cupcake_game_alive.py; `opa test`
+  # above only pins that a spoken signal halts.
+  python3 scripts/test-game-alive-signal.py
   # The hook shim is the fourth place this layer can be silently dead, and the one no `.rego` file
   # can reach. scripts/cupcake-hook.sh sits between Claude Code and the engine and repairs three
   # things the engine gets wrong before any policy runs: a permission mode cupcake does not know
