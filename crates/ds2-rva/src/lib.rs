@@ -2629,47 +2629,59 @@ pub const FE_INGAME_MENU_GATE_ALWAYS: u32 = 0;
 pub const FE_INGAME_MENU_GATE_RETURN_TITLE: u32 = 4;
 
 // ---------------------------------------------------------------------------------------------
-// WHY THERE IS NO SEVENTH TAB, AND WHERE A TAB'S ROW CEILING ACTUALLY IS
+// A SEVENTH TAB: WHERE THE SIX IS WRITTEN DOWN, AND WHAT EACH SPELLING COSTS
 //
-// The obvious way past "two added rows" is a tab of our own. A tab's item vector IS per tab --
-// `FUN_1400a40e0` copies each builder's stack descriptor into its own group with
-// `FUN_1400a3ef0(group + 0x1f, descriptor)`, which is `group + 0xf8`, and each group is a separate
-// subobject -- so a seventh tab really would start with five empty slots.
+// This block used to say a seventh tab could not exist, and it was wrong in the way a wall is
+// wrong when it turns out to be a door with five locks. Every "bound" below is a literal inside a
+// function, and a literal inside a function is a detour site. The row work proved the pattern on
+// two of them already.
 //
-// It cannot exist. FIVE independent bounds say six, and every one of them is a literal in code
-// rather than a table that could be substituted the way a `.flo` child count can:
+// A tab's item vector is per tab -- `FUN_1400a40e0` copies each builder's stack descriptor into
+// the group it is constructing with `FUN_1400a3ef0(group + 0x1f, descriptor)`, which is
+// `group + 0xf8` -- so a seventh tab starts with five empty slots of its own before any of the row
+// machinery is involved.
 //
-//   1. The six groups are INLINE MEMBERS of `FeGroupInGameTopSelect`, at
+// The six spellings, and the answer to each:
+//
+//   1. The six groups are inline members of `FeGroupInGameTopSelect`, at
 //      [`FE_INGAME_TOP_SELECT_TAB_OFFSETS`] with stride [`FE_INGAME_TOP_SELECT_TAB_STRIDE`], and
 //      that object is itself an inline member of `FeSceneInGame` (`FUN_1400995a0` calls
 //      `FUN_1400a41b0(scene + 0x28, ..)` in qwords -- `scene + 0x140`). A seventh would begin at
-//      [`FE_INGAME_TOP_SELECT_AFTER_TABS`], which the SAME constructor already uses for an element
-//      accessor (`FUN_140027c80(.., param_1 + 0x141, ..)`). There is nowhere to put the object.
-//   2. Navigation is a hardcoded six-entry stack table of `this + literal` behind a `< 6` guard --
-//      [`FE_INGAME_TOP_SELECT_TAB_TABLE`], which returns null for index 6.
-//   3. The tab strip's own cell namer ([`FE_INGAME_TOP_SELECT_NAMER`]) pushes exactly six ids,
-//      [`FE_INGAME_TOP_SELECT_NAMER_CELL_IDS`], through the push at [`FE_SCENE_NAMER_PUSH`], whose
-//      first act is `if (6 < count + 1) panic("out of memory.")`. Unlike a tab's ROW namer, which
-//      uses three of its six slots, the tab strip's list is FULL.
-//   4. `FeGroupInGameTopSelect`'s init (`0x1400a6da0`) sets the strip's item count with a literal
-//      `FUN_140021b30(this, 6)` and walks a six-pointer UNROLLED stack array of the same addresses
-//      as (2).
-//   5. Its caption path builder [`FE_INGAME_TOP_SELECT_TAB_CAPTION_PATH`] holds a five-entry table
-//      and hands back an empty accessor for any index `>= 5`.
+//      [`FE_INGAME_TOP_SELECT_AFTER_TABS`], where the same constructor already builds an element
+//      accessor. -> Do not put it there. A group is [`FE_INGAME_GROUP_SELECT_SIZE`] bytes and
+//      [`FE_INGAME_GROUP_SELECT_CTOR`] will construct one anywhere, so it goes in storage we own.
+//      This is the only genuinely new mechanism of the six.
+//   2. Navigation is a six-entry stack table of `this + literal` behind a `< 6` guard --
+//      [`FE_INGAME_TOP_SELECT_TAB_TABLE`], which returns null for index 6. -> Detour it. Measured:
+//      five callers plus one vtable reference at `0x1418a53f4` and nothing else, so it is the
+//      funnel every consumer goes through rather than one of several ways in.
+//   3. The tab strip's cell namer ([`FE_INGAME_TOP_SELECT_NAMER`]) pushes exactly six ids through
+//      [`FE_SCENE_NAMER_PUSH`], which panics at seven. -> The same stand-in
+//      [`FE_SCENE_NAMER_CELL_LOOKUP`] already serves row cells from, one level up.
+//   4. [`FE_INGAME_TOP_SELECT_STRIP_INIT`] sets the strip's item count with a literal
+//      `FUN_140021b30(this, 6)` and walks an unrolled six-pointer array of the same addresses as
+//      (2). -> The same count raise already detoured at [`FE_INGAME_MENU_TAB_INIT`]. The strip is
+//      itself a `FexGridControl`, so its real ceiling is [`FEX_GRID_MAX_COLS`].
+//   5. [`FE_INGAME_TOP_SELECT_TAB_CAPTION_PATH`] holds a five-entry table and hands back an empty
+//      accessor above index 4. -> Nothing to do. There are six tabs and five entries, so index 5
+//      already takes the empty arm today; index 6 behaves exactly as the shipped System tab does.
+//   6. The strip's `.flo` container [`FLO_TAB_STRIP_DEFINITION`] carries six cell records and a
+//      child count that is also the display-list capacity. -> The same child-count raise and
+//      record append `ds2-menu-row`'s layout module already performs on a tab's row container.
 //
-// So the ceiling is per tab, and the two numbers that bound it are the item vector's 5 and the row
-// namer's 6. BOTH are inline storage with no pointer to repoint, and both are one element short of
-// overwriting their own count:
+// So one new mechanism and five repeats. What the six bounds really are is a list of every place
+// the number six is written down, which is what a build needs and is why they are kept here.
+//
+// The two per-tab vectors are still inline storage that cannot be grown -- both are one element
+// short of overwriting their own count:
 //
 //   vector   elements at `descriptor + (-descriptor & 3) + n * 8`, count at `+0x30`
 //            -> element 6 lands exactly on the count
 //   namer    entries at `list + (-list & 7) + n * 0x30`, count at `list + 0x128`
 //            -> entry 6 spans the count
 //
-// What CAN be replaced is the two ACCESSORS the game reads them through --
-// [`FE_INGAME_MENU_TAB_ITEM_LOOKUP`] for an item and [`FE_SCENE_NAMER_CELL_LOOKUP`] for a cell --
-// and once the storage behind them is ours the only bound left is the grid bind's own loop,
-// [`FEX_GRID_MAX_ROWS`].
+// -- which is why a tab's rows are served through [`FE_INGAME_MENU_TAB_ITEM_LOOKUP`] and
+// [`FE_SCENE_NAMER_CELL_LOOKUP`] past that point, leaving [`FEX_GRID_MAX_ROWS`] as the only bound.
 // ---------------------------------------------------------------------------------------------
 
 /// Most rows a `FrontendEx::FexGridControl` will ever bind cells for. **Fifteen.**
@@ -2717,9 +2729,20 @@ pub const FE_INGAME_TOP_SELECT_AFTER_TABS: usize = 0xa08;
 /// return index < 6 ? local[index] : 0;
 /// ```
 ///
-/// A stack array of `this + literal`, with the bound as a literal too. There is no table in data to
-/// lengthen, which is bound (2) of the five above. Recorded, not hooked.
+/// A stack array of `this + literal`, with the bound as a literal too -- there is no table in data
+/// to lengthen, which is spelling (2). What there is instead is a function with five callers and one
+/// vtable reference (`0x1418a53f4`) and no other route to a tab, so a detour here is where a seventh
+/// group is handed out.
+///
+/// Note it takes no index: it reads the cursor through [`FE_INGAME_TOP_SELECT_TAB_INDEX`], so a
+/// detour is answering "the tab the player is on".
+///
+/// Not an Arxan redirect: prologue [`FE_INGAME_TOP_SELECT_TAB_TABLE_PROLOGUE`], with
+/// `scripts/ds2-arxan-chain.py` terminating at hop 0.
 pub const FE_INGAME_TOP_SELECT_TAB_TABLE: u32 = 0x000a_66d0;
+
+/// The first six bytes of [`FE_INGAME_TOP_SELECT_TAB_TABLE`]: `rex push rbx` / `sub rsp,0x50`.
+pub const FE_INGAME_TOP_SELECT_TAB_TABLE_PROLOGUE: [u8; 6] = [0x40, 0x53, 0x48, 0x83, 0xec, 0x50];
 
 /// The order [`FE_INGAME_TOP_SELECT_TAB_TABLE`] puts the tabs in, as indices into
 /// [`FE_INGAME_TOP_SELECT_TAB_OFFSETS`].
@@ -2742,8 +2765,9 @@ pub const FE_INGAME_TOP_SELECT_NAMER: u32 = 0x000a_5c60;
 
 /// The six cell ids [`FE_INGAME_TOP_SELECT_NAMER`] pushes, in the order it pushes them.
 ///
-/// Six ids into a list that holds [`FE_SCENE_NAMER_LIST_CAPACITY`]. That is bound (3): a seventh tab
-/// has no cell to be drawn in, and asking for one panics in the game's own allocator.
+/// Six ids into a list that holds [`FE_SCENE_NAMER_LIST_CAPACITY`], which is spelling (3): pushing a
+/// seventh panics in the game's own allocator, so a seventh tab's cell is served from a stand-in
+/// through [`FE_SCENE_NAMER_CELL_LOOKUP`] instead of being pushed here.
 pub const FE_INGAME_TOP_SELECT_NAMER_CELL_IDS: [u32; FE_INGAME_TOP_SELECT_TABS] = [
     0x001e_aba2,
     0x001e_aba3,
@@ -2755,9 +2779,89 @@ pub const FE_INGAME_TOP_SELECT_NAMER_CELL_IDS: [u32; FE_INGAME_TOP_SELECT_TABS] 
 
 /// The tab strip's caption path builder, `fn(topSelect, out, index)`. RVA `0x000a6310`.
 ///
-/// Holds a FIVE-entry stack table (`0x1eab9b`, `0x1eab9c`, `0x1eab9d`, `0x1eab9f`, `0x1eab9e`)
-/// behind `if (index < 5)`, and calls `FUN_140027980` -- make-empty -- for anything else. Bound (5).
+/// Holds a five-entry stack table (`0x1eab9b`, `0x1eab9c`, `0x1eab9d`, `0x1eab9f`, `0x1eab9e`)
+/// behind `if (index < 5)`, and calls `FUN_140027980` -- make-empty -- for anything else.
+///
+/// **Five entries against six tabs**, so the shipped System tab already takes the empty arm and a
+/// seventh tab needs nothing here. This is spelling (5) and it costs nothing.
 pub const FE_INGAME_TOP_SELECT_TAB_CAPTION_PATH: u32 = 0x000a_6310;
+
+/// `FeGroupInGameTopSelect`'s constructor, `fn(topSelect, arg2, arg3) -> topSelect`.
+/// RVA `0x000a41b0`.
+///
+/// Where a seventh tab is built, because it is where the first six are. It constructs each one with
+/// [`FE_INGAME_GROUP_SELECT_CTOR`] at the offsets in [`FE_INGAME_TOP_SELECT_TAB_OFFSETS`], handing
+/// each a namer and a descriptor produced by that tab's own two builders:
+///
+/// ```text
+/// descriptor = FUN_1400a5900(stack)                 // the System tab's items
+/// namer      = FUN_1400a5b50(&out, proxy)           // the System tab's cells
+/// FUN_1400a40e0(topSelect + 0xe7 * 8, proxy, &namer, descriptor)
+/// ```
+///
+/// `proxy` is `topSelect + `[`FE_INGAME_TOP_SELECT_PROXY_OFFSET`], the same value
+/// [`FE_INGAME_TOP_SELECT_TAB_CAPTION_PATH`] reads. A detour that runs the original and then repeats
+/// those three lines into storage of its own gets a seventh group built by the game's own code.
+///
+/// Not an Arxan redirect: prologue [`FE_INGAME_TOP_SELECT_CTOR_PROLOGUE`], with
+/// `scripts/ds2-arxan-chain.py` terminating at hop 0.
+pub const FE_INGAME_TOP_SELECT_CTOR: u32 = 0x000a_41b0;
+
+/// The first five bytes of [`FE_INGAME_TOP_SELECT_CTOR`]: `mov [rsp+0x10],rbx`.
+pub const FE_INGAME_TOP_SELECT_CTOR_PROLOGUE: [u8; 5] = [0x48, 0x89, 0x5c, 0x24, 0x10];
+
+/// `FeGroupInGameGroupSelect`'s constructor, `fn(group, proxy, *namer, descriptor) -> group`.
+/// RVA `0x000a40e0`.
+///
+/// ```text
+/// FUN_140020df0(group, &namer)                 // FeGroupBase, takes the namer reference
+/// group[0x00] = group[0x0b] = FeGroupInGameGroupSelect::vftable
+/// FUN_1400a3ef0(group + 0x1f, descriptor)      // group + 0xf8  <- the item vector
+/// FUN_1400189f0(group + 0x26, descriptor + 0x38)
+/// group[0x2c] = proxy                          // group + 0x160
+/// Unref(namer)                                 // it consumes the caller's reference
+/// ```
+///
+/// It writes nothing outside `group[0 ..= 0x2c]`, which is what makes
+/// [`FE_INGAME_GROUP_SELECT_SIZE`] enough and a group constructible outside the scene.
+pub const FE_INGAME_GROUP_SELECT_CTOR: u32 = 0x000a_40e0;
+
+/// Bytes in one `FeGroupInGameGroupSelect`. `0x168`.
+///
+/// Two independent spellings: the spacing of [`FE_INGAME_TOP_SELECT_TAB_OFFSETS`], and the highest
+/// field [`FE_INGAME_GROUP_SELECT_CTOR`] writes -- `group[0x2c]`, the last qword inside `0x168`.
+pub const FE_INGAME_GROUP_SELECT_SIZE: usize = FE_INGAME_TOP_SELECT_TAB_STRIDE;
+
+/// Byte offset of the layout proxy inside `FeGroupInGameTopSelect`. `0x150`.
+///
+/// `FUN_1400a41b0` opens by taking `param_1 + 0x2a` in qwords and passes it to every tab
+/// constructor; [`FE_INGAME_TOP_SELECT_TAB_CAPTION_PATH`] spells the same address as
+/// `param_1 + 0x150`. A seventh group needs this value and nothing else from the top select.
+pub const FE_INGAME_TOP_SELECT_PROXY_OFFSET: usize = 0x150;
+
+/// `FeGroupInGameTopSelect::v21` -- the strip's own init. RVA `0x000a6da0`.
+///
+/// Sets the tab strip's item count with a literal `FUN_140021b30(this, 6)`
+/// ([`FEX_GRID_SET_ITEM_COUNT`]) and then runs [`FE_INGAME_MENU_TAB_INIT`] once per tab over an
+/// unrolled six-pointer stack array. Spelling (4).
+///
+/// A detour that runs the original and then re-calls the count setter with seven is the same shape
+/// as the per-tab raise `ds2-menu-row` already installs, one level up. The strip is a
+/// `FrontendEx::FexGridControl`, so the bound past this literal is [`FEX_GRID_MAX_COLS`].
+///
+/// Not an Arxan redirect: prologue [`FE_INGAME_TOP_SELECT_STRIP_INIT_PROLOGUE`], with
+/// `scripts/ds2-arxan-chain.py` terminating at hop 0.
+pub const FE_INGAME_TOP_SELECT_STRIP_INIT: u32 = 0x000a_6da0;
+
+/// The first five bytes of [`FE_INGAME_TOP_SELECT_STRIP_INIT`]: `mov [rsp+0x10],rbx`.
+pub const FE_INGAME_TOP_SELECT_STRIP_INIT_PROLOGUE: [u8; 5] = [0x48, 0x89, 0x5c, 0x24, 0x10];
+
+/// Which tab [`FE_INGAME_TOP_SELECT_TAB_TABLE`] is being asked for: [`FEX_GRID_CURRENT_INDEX`],
+/// called with the top select itself.
+///
+/// The table takes no index argument -- it reads the cursor. So a detour there is answering "the tab
+/// the player is on", and the number it has to recognise is [`FE_INGAME_TOP_SELECT_TABS`].
+pub const FE_INGAME_TOP_SELECT_TAB_INDEX: u32 = FEX_GRID_CURRENT_INDEX;
 
 // ---------------------------------------------------------------------------------------------
 // THE TWO ACCESSORS, WHICH IS WHERE STORAGE OF OUR OWN GOES IN
@@ -3870,6 +3974,73 @@ pub const fn caret_y(rows: usize) -> f32 {
 }
 /// What the shipped caret's y reads, checked before anything is written.
 pub const FLO_CARET_SHIPPED_Y: f32 = 244.65;
+
+// ---------------------------------------------------------------------------------------------
+// THE TAB STRIP'S OWN RECORDS, WHICH ARE A ROW CONTAINER ONE LEVEL UP
+//
+// The strip is a container with six cell records in it, and its child count is its display-list
+// capacity, exactly as a tab's row container is. So a seventh tab's icon is the same substitution
+// `ds2-menu-row`'s layout module already performs: raise the count, append a record copied from the
+// last one with a new x and a new element id.
+// ---------------------------------------------------------------------------------------------
+
+/// The tab strip's container definition. `0x0271`, with [`FLO_TAB_STRIP_CHILDREN`] children.
+///
+/// Reached as child 0 of definition `0x0272`, under element id `0x1eaba9` -- which is the same id
+/// [`FE_INGAME_TOP_SELECT_NAMER`] uses as its base path, so the code and the layout agree on what
+/// the strip is.
+pub const FLO_TAB_STRIP_DEFINITION: u32 = 0x0271;
+
+/// Children the shipped strip carries, checked before the count is raised. Eighteen.
+///
+/// The last six are the tab cells; the first twelve are the strip's own furniture -- the frame, the
+/// `LB`/`RB` prompts and the two captions.
+pub const FLO_TAB_STRIP_CHILDREN: usize = 18;
+
+/// Index of the first tab-cell record inside [`FLO_TAB_STRIP_DEFINITION`]'s child array. Twelve.
+pub const FLO_TAB_STRIP_FIRST_CELL: usize = 12;
+
+/// The definition every tab cell shares. `0x0270`.
+///
+/// Two children, both the same `0x026f` highlight shape at differing frame ranges, and no icon: the
+/// glyph on a tab is bound by the grid control rather than authored here. A seventh cell reusing
+/// this definition therefore inherits the selection highlight and nothing else, which is what a tab
+/// whose icon is bound at runtime needs.
+pub const FLO_TAB_STRIP_CELL_DEFINITION: u32 = 0x0270;
+
+/// The six tab cells' element ids, in child-array order.
+///
+/// Not the same order as [`FE_INGAME_TOP_SELECT_NAMER_CELL_IDS`] pushes them in -- the namer pushes
+/// `..aba6, ..aba7, ..aba5` where the array holds `..aba6, ..aba7, ..aba5` at 15, 16, 17. They agree
+/// here; the ORDER that differs is [`FE_INGAME_TOP_SELECT_TAB_ORDER`], which is about the groups.
+pub const FLO_TAB_STRIP_CELL_IDS: [u32; FE_INGAME_TOP_SELECT_TABS] = [
+    0x001e_aba2,
+    0x001e_aba3,
+    0x001e_aba4,
+    0x001e_aba6,
+    0x001e_aba7,
+    0x001e_aba5,
+];
+
+/// The element id a seventh tab's cell is written under. `0x1eaba8`.
+///
+/// The one gap in the strip's own block: `scripts/ds2-flo.py find` reports no record for it in
+/// `l02_01_In-Game.flo`, while every id either side of it resolves. Taking the neighbour rather than
+/// a free id from the row block keeps the strip's records reading as one run.
+pub const FLO_ADDED_TAB_ID: u32 = 0x001e_aba8;
+
+/// Horizontal spacing between tab cells. `54.0`.
+///
+/// The shipped six sit at `-4.6, 49.4, 103.4, 157.4, 211.55, 265.05`. Four of the five gaps are
+/// `54.0` and the other two are `54.15` and `53.5`, which is authoring drift rather than a second
+/// pitch -- so a seventh at `265.05 + 54.0` lands where the eye expects it.
+pub const FLO_TAB_PITCH: f32 = 54.0;
+
+/// Depth step between tab cells. Four.
+///
+/// `69, 73, 77, 81, 85, 89`. A seventh takes `93`, which is below the strip's own furniture and
+/// above nothing -- it is the last record either way.
+pub const FLO_TAB_DEPTH_PITCH: u16 = 4;
 
 // =================================================================================================
 // THE SOFTWARE KEYBOARD, AND THE ONE DWORD THAT KEEPS IT SAFE TO BORROW

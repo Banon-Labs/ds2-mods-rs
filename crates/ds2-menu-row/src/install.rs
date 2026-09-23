@@ -494,6 +494,38 @@ fn sane(pointer: usize) -> bool {
     pointer >= 0x1_0000 && pointer.is_multiple_of(8)
 }
 
+/// Every registered row as the `(action, gate)` pair the game's item vector stores.
+///
+/// For [`crate::tab`], which builds a group whose vector carries these and nothing else -- as
+/// against the System tab's, which carries the shipped three first.
+pub(crate) fn registered_entries() -> Vec<(u32, u32)> {
+    crate::api::rows_for(crate::api::Tab::Quit)
+        .iter()
+        .map(|row| (row.action, GATE))
+        .collect()
+}
+
+/// The System tab's item builder as the game shipped it, bypassing this crate's detour.
+///
+/// The trampoline when the builder is hooked, and the live entry when it is not -- which is the
+/// order that matters rather than a fallback, because a caller wanting the SHIPPED three items must
+/// not be handed the detour that appends our rows to them.
+///
+/// # Safety
+///
+/// `base` must be the live module base.
+pub(crate) unsafe fn item_builder_original(base: usize) -> BuildItemsFn {
+    let trampoline = TRAMPOLINE.load(Ordering::Acquire);
+    let entry = if trampoline != 0 {
+        trampoline
+    } else {
+        base + ds2_rva::FE_INGAME_TOP_SELECT_SYSTEM_TAB_ITEMS as usize
+    };
+    // SAFETY: either MinHook's trampoline for this exact site, or the `.pdata` function start
+    // recorded in `ds2-rva`; both implement the signature the disassembled entry and exit do.
+    unsafe { std::mem::transmute::<usize, BuildItemsFn>(entry) }
+}
+
 /// The System tab's item-vector count, or `None` if this group is some other tab.
 ///
 /// **This is the identity check, and it is the same one the item builder runs**, moved to the other
@@ -508,6 +540,30 @@ fn sane(pointer: usize) -> bool {
 ///
 /// `tab` must be a constructed `FeGroupInGameGroupSelect` whose item vector has been filled, which
 /// is every caller below: they are the game's own readers of that vector.
+/// A group's item-vector count, with no claim about which group it is.
+///
+/// Split out of [`system_tab_count`] for the seventh tab, whose identity is established by a pointer
+/// compare rather than by the entries -- its vector carries our actions, so the shipped three are
+/// not there to recognise it by.
+///
+/// # Safety
+///
+/// `tab` must be a constructed `FeGroupInGameGroupSelect` whose item vector has been filled.
+unsafe fn vector_count(tab: *const u8) -> Option<usize> {
+    if !sane(tab as usize) {
+        return None;
+    }
+    // SAFETY: the caller guarantees a constructed group, and this is the field the game's own
+    // readers address as `[tab + 0x128]`.
+    let count = unsafe {
+        tab.add(ds2_rva::FE_INGAME_MENU_TAB_ITEM_VECTOR_OFFSET)
+            .add(ds2_rva::FE_INGAME_MENU_ITEM_VECTOR_COUNT_OFFSET)
+            .cast::<u64>()
+            .read()
+    } as usize;
+    (count <= ds2_rva::FE_INGAME_MENU_ITEM_VECTOR_CAPACITY).then_some(count)
+}
+
 unsafe fn system_tab_count(tab: *const u8) -> Option<usize> {
     if !sane(tab as usize) {
         return None;
@@ -559,8 +615,24 @@ unsafe fn our_item_for(base: usize, tab: *mut u8) -> Option<*mut u8> {
     if added == 0 {
         return None;
     }
-    // SAFETY: the caller's argument is the game's own, on the game's own path.
-    let count = unsafe { system_tab_count(tab) }?;
+    // WHICH TAB, AND THEREFORE HOW MANY ROWS ARE THE GAME'S. On the seventh tab none of them are:
+    // its vector was built by `crate::tab` and carries our actions from index 0, so the slot is the
+    // index. The identity test there is a pointer compare against the group this crate constructed,
+    // which is exact -- it does not need the entry-pattern check the shipped tabs are told apart by.
+    let seventh = crate::tab::group();
+    let shipped = if seventh != 0 && tab as usize == seventh {
+        0
+    } else {
+        ds2_rva::FE_INGAME_MENU_SYSTEM_TAB_ITEMS.len()
+    };
+    let count = if shipped == 0 {
+        // SAFETY: our own group, constructed by the game's own constructor, whose item vector's
+        // count field is at the offset every reader of it uses.
+        unsafe { vector_count(tab) }?
+    } else {
+        // SAFETY: the caller's argument is the game's own, on the game's own path.
+        unsafe { system_tab_count(tab) }?
+    };
     // SAFETY: the RVA is a `.pdata` function start recorded in `ds2-rva`, and the argument is the
     // object the game's own lookup passes it one instruction later.
     let current_index: GridCurrentIndexFn =
@@ -576,7 +648,7 @@ unsafe fn our_item_for(base: usize, tab: *mut u8) -> Option<*mut u8> {
     if index < count {
         return None;
     }
-    let slot = index.checked_sub(ds2_rva::FE_INGAME_MENU_SYSTEM_TAB_ITEMS.len())?;
+    let slot = index.checked_sub(shipped)?;
     if slot >= added {
         return None;
     }
@@ -1210,7 +1282,7 @@ unsafe extern "system" fn tab_init_detour(tab: *mut u8) {
 ///
 /// Patches executable memory in the loaded game image. `rva` must be a `.pdata` function start
 /// recorded in `ds2-rva` and `base` the live module base.
-unsafe fn hook_site(
+pub(crate) unsafe fn hook_site(
     base: usize,
     rva: u32,
     prologue: &[u8],
@@ -1387,6 +1459,24 @@ pub unsafe fn install() -> Outcome {
         ));
         return Outcome { installed: false };
     }
+
+    // THE SEVENTH TAB, which is allowed to fail on its own. Its three sites are independent of
+    // everything below: if they do not go in, `crate::tab::group()` stays zero, every detour that
+    // asks about it declines, and the rows appear on the System tab exactly as they did before this
+    // module existed. That is a worse menu, not a broken one, so it is not grounds for refusing the
+    // rows as well.
+    // SAFETY: `base` is the live module base and MinHook is initialised by the same call that
+    // patched the three sites above.
+    let seventh_tab = unsafe { crate::tab::install(base) };
+    log(format_args!(
+        "{LOG_PREFIX} seventh tab {} -- rows go on {}",
+        if seventh_tab { "hooked" } else { "NOT hooked" },
+        if seventh_tab {
+            "a tab of their own"
+        } else {
+            "the System tab, as before"
+        }
+    ));
 
     let rva = ds2_rva::FE_INGAME_TOP_SELECT_SYSTEM_TAB_ITEMS;
     let site = base + rva as usize;

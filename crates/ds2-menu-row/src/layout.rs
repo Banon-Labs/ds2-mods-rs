@@ -886,6 +886,16 @@ unsafe extern "system" fn detour(doc: *mut usize, index: u32) -> *mut u8 {
         let slot = (index - ds2_rva::FLO_ADDED_ROW_DEFINITION) as usize;
         return ROW_DEFINITIONS[slot].load(Ordering::Acquire) as *mut u8;
     }
+    if index == ds2_rva::FLO_TAB_STRIP_DEFINITION && !found.is_null() {
+        // THE TAB STRIP, and only when there is a seventh tab to put a cell under. A strip with an
+        // extra cell and no group behind it is a tab the cursor can land on and that answers
+        // nothing, which is worse than six tabs.
+        if crate::tab::group() != 0 {
+            // SAFETY: `found` is a definition the game's own table just yielded.
+            return unsafe { crate::strip::substitute(found) };
+        }
+        return found;
+    }
     if index != ds2_rva::FLO_QUIT_TAB_CONTAINER_DEFINITION || found.is_null() {
         return found;
     }

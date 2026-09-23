@@ -919,7 +919,7 @@ its highlight would be the same class of mistake as substituting the wrong conta
 says no, the record keeps naming row 0's definition and the row is what shipped before: the wrong
 icon, and a highlight that works.
 
-## There is no seventh tab, and the row ceiling was never about display
+## A seventh tab, and the row ceiling that was never about display
 
 Everything in this section is static: `scripts/ds2-disasm.py` and the Ghidra MCP daemon on
 `darksoulsii-deobf.bin`, `scripts/ds2-ebl.py` and `scripts/ds2-flo.py` on the shipped archive. **No
@@ -927,6 +927,14 @@ game was launched for any of it, and none of it has been run.**
 
 The question was the obvious one. The System tab's item vector holds five and the game ships three,
 so two mod rows fit and four want a slot. A tab of our own would start empty.
+
+> **This section said "the seventh tab cannot exist" and that was wrong.** It listed five bounds,
+> every one of them correct as a statement about the game's code, and then drew a conclusion none of
+> them supports: each is a literal inside a function, and a literal inside a function is a detour
+> site. The rows went onto the System tab instead, and the user's reply on seeing seven rows under
+> one gear icon was that this was not what they asked for. What follows is the same reading with the
+> conclusion corrected; `crates/ds2-menu-row/src/tab.rs` is the build, and the summary of what each
+> bound costs is in `ds2-rva` beside `FE_INGAME_TOP_SELECT_CTOR`.
 
 ### The vector really is per tab
 
@@ -944,10 +952,10 @@ and `FUN_1400a3ef0` is a `DLFixedVector` copy: `if (5 < src[0x30]) panic("out of
 its own five slots, inline, with no pointer anywhere in it. So the premise held: a seventh tab would
 have five free slots.
 
-### The seventh tab cannot exist, five times over
+### Where the six is written down, five times over
 
-Every one of these is a literal in code. None is a table in data that could be substituted the way
-the `.flo` child count is.
+Every one of these is a literal in code rather than a table in data. That is what makes each of them
+a place to stand a detour, and the answer to each is given with it.
 
 **1. There is nowhere to put the object.** The ctor builds the six groups at `param_1 + 0x33`,
 `+0x60`, `+0x8d`, `+0xba`, `+0xe7`, `+0x114` -- qwords, so `+0x198` through `+0x8a0`, stride
@@ -979,8 +987,8 @@ if (6 < uVar2) DLKR::DLBackAllocator::panic(".../DLFixedVector.inl", 0x24c, "out
 ```
 
 A tab's ROW namer uses three of its six, which is the slack this repo has been spending. The tab
-strip's uses six of six. A seventh tab has no cell to be drawn in and asking for one is the panic
-that killed the game the first time this list was overfilled.
+strip's uses six of six, so nothing more can be pushed into it and asking is the panic that killed
+the game the first time this list was overfilled.
 
 **4. The strip's item count is a literal.** `FeGroupInGameTopSelect`'s init calls
 `FUN_140021b30(this, 6)` and then walks a SIX-pointer unrolled stack array of the same addresses as
@@ -989,7 +997,20 @@ that killed the game the first time this list was overfilled.
 **5. The strip's caption path builder holds five entries** (`0x1eab9b`, `0x1eab9c`, `0x1eab9d`,
 `0x1eab9f`, `0x1eab9e`) behind `if (index < 5)`, and returns an empty accessor above it.
 
-So: a measured no. The rows have to live on a tab that already exists.
+### What each one costs, which is the part the first reading skipped
+
+| # | the six | the seventh tab |
+| --- | --- | --- |
+| 1 | the groups are inline in the top select | do not put it there: `FUN_1400a40e0` writes nothing past `group[0x2c]`, so a `0x168` buffer is a whole group and the game's own constructor fills it |
+| 2 | `FUN_1400a66d0` returns null above index 5 | detour it. Five callers and one vtable reference at `0x1418a53f4`, and no other route to a tab -- it is the funnel |
+| 3 | the strip's namer list is six of six | the stand-in above, one level up: the cell lookup is one function shared by every namer including the strip's |
+| 4 | `FUN_140021b30(this, 6)` | the same count raise the per-tab init already gets. The strip is a `FexGridControl`, so past this literal the bound is 32 columns |
+| 5 | five caption entries | nothing. There are six tabs and five entries, so the System tab already takes the empty arm; index 6 behaves as index 5 does today |
+| 6 | the strip's `.flo` container holds six cell records | the same child-count raise and record append a row container gets. Element `0x1eaba8` is the one gap in the strip's own id block |
+
+One new mechanism and five repeats of mechanisms this crate already ships. The build is
+`crates/ds2-menu-row/src/tab.rs` (the group, the lookup, the strip's count) and
+`crates/ds2-menu-row/src/strip.rs` (the cell record).
 
 ### Neither ceiling can be grown, and neither had to be
 
