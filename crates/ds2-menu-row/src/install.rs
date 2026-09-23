@@ -867,8 +867,14 @@ unsafe fn shadow_for(namer: *mut u8, cell: *const i32) -> Option<*mut u8> {
     Some(shadow as *mut u8)
 }
 
-/// Trampoline back to the tab strip's own cell lookup, which is a different function.
+/// Trampolines back to the tab strip's two per-cell lookups, which are two different functions.
+///
+/// A grid asks its adapter for two elements per cell. On a tab the second is a stub, which is why
+/// the row work needed one trampoline; on the strip both are real and both resolve the same entry,
+/// so the seventh tab needs both answered. Serving only the first drew its highlight and not its
+/// glyph.
 static STRIP_CELL_LOOKUP_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
+static STRIP_CELL_SECOND_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 
 /// The tab strip's cell lookup: answer for the one column the strip's namer cannot.
 ///
@@ -886,7 +892,35 @@ unsafe extern "system" fn strip_cell_lookup_detour(
     out: *mut u8,
     cell: *const i32,
 ) -> *mut u8 {
-    let trampoline = STRIP_CELL_LOOKUP_TRAMPOLINE.load(Ordering::Acquire);
+    // SAFETY: every argument is the game's own, and the trampoline is this site's.
+    unsafe { serve_strip_cell(&STRIP_CELL_LOOKUP_TRAMPOLINE, "cell", namer, out, cell) }
+}
+
+/// The strip's second element per cell. Same body, second site -- see
+/// [`ds2_rva::FE_SCENE_NAMER_STRIP_CELL_SECOND`].
+unsafe extern "system" fn strip_cell_second_detour(
+    namer: *mut u8,
+    out: *mut u8,
+    cell: *const i32,
+) -> *mut u8 {
+    // SAFETY: as above, with this site's own trampoline.
+    unsafe { serve_strip_cell(&STRIP_CELL_SECOND_TRAMPOLINE, "glyph", namer, out, cell) }
+}
+
+/// Answer one of the strip's two per-cell lookups out of the seventh tab's stand-in.
+///
+/// # Safety
+///
+/// `trampoline` must hold the published trampoline for the site being answered, and the three
+/// remaining arguments must be that site's own.
+unsafe fn serve_strip_cell(
+    trampoline: &AtomicUsize,
+    what: &str,
+    namer: *mut u8,
+    out: *mut u8,
+    cell: *const i32,
+) -> *mut u8 {
+    let trampoline = trampoline.load(Ordering::Acquire);
     if trampoline == 0 {
         // Published before the site is patched, so unreachable. As the tab's: hand back the game's
         // own empty accessor rather than the caller's uninitialised buffer, whose vtable slot 0 is
@@ -921,10 +955,10 @@ unsafe extern "system" fn strip_cell_lookup_detour(
     if wanted {
         let own_cell = [0i32, 0i32];
         let n = STRIP_CELLS_SERVED.fetch_add(1, Ordering::Relaxed) + 1;
-        if n <= 2 {
+        if n <= 4 {
             log(format_args!(
-                "{LOG_PREFIX} strip cell served column={} stand-in=0x{shadow:016x} served={n} \
-                 -- the seventh tab's own icon, out of our own stand-in",
+                "{LOG_PREFIX} strip {what} served column={} stand-in=0x{shadow:016x} served={n} \
+                 -- the seventh tab's own, out of our own stand-in",
                 ds2_rva::FE_INGAME_TOP_SELECT_TABS
             ));
         }
@@ -1732,6 +1766,15 @@ pub unsafe fn install() -> Outcome {
             strip_cell_lookup_detour as *mut c_void,
             &STRIP_CELL_LOOKUP_TRAMPOLINE,
             "strip-cell-lookup",
+        )
+    } && unsafe {
+        hook_site(
+            base,
+            ds2_rva::FE_SCENE_NAMER_STRIP_CELL_SECOND,
+            &ds2_rva::FE_SCENE_NAMER_STRIP_CELL_LOOKUP_PROLOGUE,
+            strip_cell_second_detour as *mut c_void,
+            &STRIP_CELL_SECOND_TRAMPOLINE,
+            "strip-cell-glyph",
         )
     } && unsafe {
         hook_site(

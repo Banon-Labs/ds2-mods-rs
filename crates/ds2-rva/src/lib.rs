@@ -3012,6 +3012,23 @@ pub const FE_SCENE_NAMER_STRIP_CELL_LOOKUP: u32 = 0x000a_4a70;
 pub const FE_SCENE_NAMER_STRIP_CELL_LOOKUP_PROLOGUE: [u8; 7] =
     [0x40, 0x53, 0x48, 0x81, 0xec, 0x60, 0x02];
 
+/// The tab strip's second element per cell, slot 3 of `HLayoutAdapter`. RVA `0x000a4bd0`.
+///
+/// A grid asks its adapter for two elements per cell, and on a tab the second one
+/// (`FUN_1400a4c80`, slot 3 of `VLayoutAdapter`) is `make-empty; return` -- which is why the row
+/// work never needed it, and why this table used to say there was no second element to supply.
+///
+/// On the strip there is. This function is the same body as
+/// [`FE_SCENE_NAMER_STRIP_CELL_LOOKUP`] instruction for instruction -- same row-must-be-zero test,
+/// same `[rcx+0x140]` count, same `rcx+0x18` list, same `FUN_140026790` -- so it resolves the same
+/// entry to a second accessor. Serving the first and not the second gave a seventh tab whose
+/// selection highlight drew and whose glyph did not.
+///
+/// Not an Arxan redirect: `scripts/ds2-arxan-chain.py 0x1400a4bd0` terminates at hop 0, and its
+/// prologue is [`FE_SCENE_NAMER_STRIP_CELL_LOOKUP_PROLOGUE`] -- the same seven bytes, because the
+/// two functions are the same function twice.
+pub const FE_SCENE_NAMER_STRIP_CELL_SECOND: u32 = 0x000a_4bd0;
+
 /// Byte offset, inside a cell namer, of the scene proxy its lookup resolves paths against.
 /// `mov rcx,QWORD PTR [rcx+0x10]`.
 pub const FE_SCENE_NAMER_PROXY_OFFSET: usize = 0x10;
