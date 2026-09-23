@@ -156,23 +156,56 @@ fn start_directory() -> Option<PathBuf> {
         .or_else(|| Some(live.clone()))
 }
 
-/// `~/Downloads` as the prefix sees it, or `None` when the home directory is not known.
+/// Where the prefix's own user profile lives. Its `Downloads` is not the player's.
 ///
-/// `HOME` rather than `USERPROFILE`: this runs inside a Proton prefix whose Windows profile is
-/// `C:\users\steamuser`, and the downloads the player actually has are in their Linux home.
+/// Measured on this machine: `C:\users\steamuser\Downloads` is a real, empty directory that Proton
+/// created, not a link to the host's. So the shell's own Downloads known folder is the wrong answer
+/// here and is deliberately not asked for.
+const PREFIX_HOME_DRIVE: &str = "Z:\\home";
+
+/// `~/Downloads` as the prefix sees it, or `None` when no such folder can be found.
+///
+/// Two sources, in order, because the first one is not always there. `HOME` is the Linux home and
+/// is the exact answer when it survives into this process -- but the game is started by an
+/// already-running Steam client, through the Steam Linux Runtime's container, and one live run
+/// measured the dialog opening in the fallback, which is what a missing `HOME` looks like from
+/// here. So the second source is to look: `Z:\home` is the host's `/home`, and a directory under it
+/// holding a `Downloads` is a player's downloads folder.
+///
+/// `USERPROFILE` is not a source. Inside the prefix it is `C:\users\steamuser`, whose `Downloads`
+/// is [`PREFIX_HOME_DRIVE`]'s empty impostor.
 fn downloads_directory() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    let windows = downloads_windows_path(&home)?;
-    // TESTED IN THE PREFIX'S SPELLING, NOT THE HOST'S, and that distinction is the whole bug this
-    // guard had. `std::fs` inside this DLL is the Win32 API: `Path::new("/home/you/Downloads")`
-    // is a rooted path on the current drive, so it is asked about as `C:\home\you\Downloads`,
-    // which does not exist -- and the check said "no downloads folder" on a machine that has one.
-    // The `Z:` form is the same directory as Wine maps it, and is also the form handed to the
-    // dialog, so what is tested is what is used.
-    if !Path::new(&windows).is_dir() {
-        return None;
+    // TESTED IN THE PREFIX'S SPELLING, NOT THE HOST'S, and that distinction was a bug of its own.
+    // `std::fs` inside this DLL is the Win32 API: `Path::new("/home/you/Downloads")` is a rooted
+    // path with no drive, so it is asked about as `C:\home\you\Downloads`, which does not exist --
+    // and the check said "no downloads folder" on a machine that has one. The `Z:` form is the same
+    // directory as Wine maps it, and is also the form handed to the dialog, so what is tested is
+    // what is used.
+    let readable = |path: String| Path::new(&path).is_dir().then_some(path);
+
+    if let Some(from_env) = std::env::var("HOME")
+        .ok()
+        .and_then(|home| downloads_windows_path(&home))
+        .and_then(readable)
+    {
+        return Some(PathBuf::from(from_env));
     }
-    Some(PathBuf::from(windows))
+
+    // One level of `Z:\home`, which is a handful of entries on any real machine. The first one
+    // holding a `Downloads` wins; a box with several users gets one of them rather than nothing,
+    // and the player can browse from there.
+    let mut homes: Vec<PathBuf> = std::fs::read_dir(PREFIX_HOME_DRIVE)
+        .ok()?
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    // Sorted so a machine with more than one user picks the same one every launch. An order that
+    // came out of the filesystem would make this open somewhere different on a whim.
+    homes.sort();
+    homes
+        .into_iter()
+        .map(|home| home.join("Downloads"))
+        .find(|candidate| candidate.is_dir())
 }
 
 /// `~/Downloads` as the prefix spells it, from a Unix home directory. Pure, so it is testable.
