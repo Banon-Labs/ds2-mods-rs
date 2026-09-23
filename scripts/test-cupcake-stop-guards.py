@@ -463,6 +463,32 @@ CASES = [
         "that named a defect and changed nothing",
     ),
     Case(
+        "status_table.jsonl",
+        "table of your OWN PROGRESS",
+        "the turn closes on the save-picker table of 2026-09-23 -- `done, host-testable` / "
+        "`deliberately absent` / `next` / `after that` -- two of whose four rows are work that was "
+        "not done, written in the format that makes not-doing-it look like a deliverable. Replayed "
+        "against all seventeen last_assistant_*.sh signals, this fixture leaves every one of them "
+        "silent except its own: a grid of status words is not a first-person promise, a described "
+        "next step or a narrated action, which is how it never got caught. It also proves the "
+        "signal script is EXECUTABLE -- it shipped mode 644 and the guard was inert end to end "
+        "while opa test stayed green, the same class of silence as the 36-day episode above",
+    ),
+    Case(
+        "status_table_data.jsonl",
+        None,
+        "the same turn shape closing on a table of DATA -- offset/field/value out of the save "
+        "header, with one `state` row -- must NOT halt. This is the case that matters most: "
+        "DS2-MODS-WALL-OF-TEXT tells the agent on every single prompt to put content into a table, "
+        "so a guard that read `table` as the offence would fight a rule enforced every turn",
+    ),
+    Case(
+        "status_table_asked.jsonl",
+        None,
+        "the offending table verbatim, after a prompt that asked for one -- must NOT halt, or the "
+        "guard gags the deliverable the user requested",
+    ),
+    Case(
         "clean.jsonl",
         None,
         "substantive work, no banned prose -- must NOT halt, or every turn wedges",

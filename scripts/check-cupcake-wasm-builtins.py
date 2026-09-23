@@ -75,6 +75,10 @@ PROBES: dict[str, str] = {
     "split": 'str:concat("|", split("a,b", ","))',
     "startswith": 'cond:startswith("abc", "a")',
     "substring": 'str:substring("abcdef", 1, 3)',
+    # Verified against cupcake 0.5.2's WASM runtime on 2026-09-23 before
+    # no_status_table_at_turn_end was allowed to use it: the probe fires, so the numeric threshold
+    # in that policy is executed rather than silently yielding undefined.
+    "to_number": 'str:format_int(to_number("7"), 10)',
     "trim": 'str:trim("xxaxx", "x")',
     "trim_left": 'str:trim_left("xxa", "x")',
     "trim_prefix": 'str:trim_prefix("Pa", "P")',
