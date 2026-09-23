@@ -2777,6 +2777,23 @@ pub const FE_INGAME_TOP_SELECT_NAMER_CELL_IDS: [u32; FE_INGAME_TOP_SELECT_TABS] 
     0x001e_aba5,
 ];
 
+/// The first five bytes of [`FE_INGAME_TOP_SELECT_NAMER`]: `rex push rsi` / `push r14` / `sub`.
+///
+/// Not an Arxan redirect: `scripts/ds2-arxan-chain.py 0x1400a5c60` terminates at hop 0.
+pub const FE_INGAME_TOP_SELECT_NAMER_PROLOGUE: [u8; 5] = [0x40, 0x56, 0x41, 0x56, 0x48];
+
+/// Components in one of the tab strip's cell paths: the strip, then the cell. Two.
+///
+/// A tab's ROW paths are five ([`FE_QUIT_TAB_BASE_PATH`] plus the row), and the difference is why
+/// the id cannot be read at a fixed offset: it is the last component, so it sits at
+/// `(length - 1) * 4` and the length is the field at [`FE_SCENE_NAMER_ENTRY_LEN_OFFSET`].
+/// `FUN_1400a5c60` writes `0x1eaba9` into a path whose length it sets to `1`, seals it, and appends
+/// one cell id per entry -- so each finished entry is two long.
+pub const FE_INGAME_TOP_SELECT_NAMER_ENTRY_LEN: u32 = 2;
+
+/// The single base component of every tab-strip cell path, checked before an entry is cloned.
+pub const FE_INGAME_TOP_SELECT_NAMER_BASE: u32 = 0x001e_aba9;
+
 /// The tab strip's caption path builder, `fn(topSelect, out, index)`. RVA `0x000a6310`.
 ///
 /// Holds a five-entry stack table (`0x1eab9b`, `0x1eab9c`, `0x1eab9d`, `0x1eab9f`, `0x1eab9e`)
@@ -2963,6 +2980,37 @@ pub const FE_SCENE_NAMER_CELL_LOOKUP: u32 = 0x000a_4b20;
 /// The first nine bytes of [`FE_SCENE_NAMER_CELL_LOOKUP`]: `rex push rbx` / `sub rsp,0x260`.
 pub const FE_SCENE_NAMER_CELL_LOOKUP_PROLOGUE: [u8; 9] =
     [0x40, 0x53, 0x48, 0x81, 0xec, 0x60, 0x02, 0x00, 0x00];
+
+/// The TAB STRIP's cell lookup -- the same function for the other axis. RVA `0x000a4a70`.
+///
+/// `IngameTopLayoutAdapter` is two classes, not one, and detouring only the first is why a seventh
+/// tab could be selected and never drawn. Their vtables sit next to each other and slot 2 of each
+/// is the cell lookup:
+///
+/// | adapter | vtable | slot 2 | serves |
+/// |---|---|---|---|
+/// | `VLayoutAdapter` | `0x1410b69a8` | [`FE_SCENE_NAMER_CELL_LOOKUP`] | a tab's rows |
+/// | `HLayoutAdapter` | `0x1410b6a08` | this | the strip's tab cells |
+///
+/// The bodies are mirror images and the difference is which field of the cell is the index:
+///
+/// ```asm
+/// 0x1400a4b20:  cmp DWORD PTR [r8],0x0        ; the tab's:   col must be zero
+///               mov edx,DWORD PTR [r8+0x4]    ;              row is the index
+/// 0x1400a4a70:  cmp DWORD PTR [r8+0x4],0x0    ; the strip's: ROW must be zero
+///               mov edx,DWORD PTR [r8]        ;              COL is the index
+/// ```
+///
+/// Everything after that is identical -- `[rcx+0x140]` is the count, `rcx+0x18` the entry list,
+/// `[rcx+0x10]` the scene proxy, stride `0x30` -- so a stand-in built for one is a stand-in for the
+/// other, and the cell it is asked with is `(0, 0)` either way.
+///
+/// Not an Arxan redirect: `scripts/ds2-arxan-chain.py 0x1400a4a70` terminates at hop 0.
+pub const FE_SCENE_NAMER_STRIP_CELL_LOOKUP: u32 = 0x000a_4a70;
+
+/// The first seven bytes of [`FE_SCENE_NAMER_STRIP_CELL_LOOKUP`]: `rex push rbx` / `sub rsp,0x260`.
+pub const FE_SCENE_NAMER_STRIP_CELL_LOOKUP_PROLOGUE: [u8; 7] =
+    [0x40, 0x53, 0x48, 0x81, 0xec, 0x60, 0x02];
 
 /// Byte offset, inside a cell namer, of the scene proxy its lookup resolves paths against.
 /// `mov rcx,QWORD PTR [rcx+0x10]`.
@@ -4067,6 +4115,116 @@ pub const FLO_TAB_PITCH: f32 = 54.0;
 /// `69, 73, 77, 81, 85, 89`. A seventh takes `93`, which is below the strip's own furniture and
 /// above nothing -- it is the last record either way.
 pub const FLO_TAB_DEPTH_PITCH: u16 = 4;
+
+// ---------------------------------------------------------------------------------------------
+// THE SEVENTH TAB'S OWN PANEL SUBTREE
+//
+// A row record is a grid CELL: the tab's namer names it, and a cell no namer names is not drawn.
+// A mark record is a plain child, and a plain child draws whenever its container is posed. That
+// asymmetry is why the seventh tab's first run put the System tab's three captions letter-over-
+// letter on top of its own rows -- both tabs were posing one container, our namer could suppress
+// the shipped rows and nothing could suppress the shipped marks.
+//
+// The level that separates two tabs is not the container. Every tab already owns a subtree hung
+// off the strip, and only the posed one draws:
+//
+//     0x0271  the strip
+//       [ 4]  id 0x1eaccf  def 0x0265   the System tab's subtree
+//               [0] id 0x1eace8  def 0x0264
+//                     [0] id 0x1eace6  def 0x0263   the row container
+//       [12..17]  the six tab cells
+//
+// So the seventh tab gets a second such child: three chained copies with our rows in the last one
+// and the shipped rows and marks left behind in the original. The copies differ from the originals
+// in one field each -- the definition index the child record names -- because the whole point is to
+// reach a different `0x0263`.
+//
+// Reproduce with:
+//
+//     python3 scripts/ds2-flo.py tree /tmp/menu02/l02_01_In-Game.flo --def 0x271
+//     python3 scripts/ds2-flo.py tree /tmp/menu02/l02_01_In-Game.flo --def 0x265
+//     python3 scripts/ds2-flo.py find /tmp/menu02/l02_01_In-Game.flo --id 0x1eaceb
+//
+// ---------------------------------------------------------------------------------------------
+
+/// Index of the System tab's subtree record inside [`FLO_TAB_STRIP_DEFINITION`]'s child array.
+///
+/// The template the seventh tab's own subtree record is cloned from, and the reason the clone is
+/// inserted beside it rather than appended: a nested-definition record's depth is never read back
+/// (`FUN_140b50bc0` passes depth on for leaf kinds only), so the draw order of two subtrees is the
+/// order they sit in the array. Appending ours after the six cells would draw a tab's panel over
+/// the tab strip.
+pub const FLO_TAB_STRIP_PANEL: usize = 4;
+
+/// The element id at [`FLO_TAB_STRIP_PANEL`], which is also
+/// [`FE_QUIT_TAB_BASE_PATH`]`[1]` -- the component every one of the System tab's cell paths carries
+/// and the one the seventh tab rewrites.
+pub const FLO_TAB_STRIP_PANEL_ID: u32 = 0x001e_accf;
+
+/// The definition [`FLO_TAB_STRIP_PANEL`] names. `0x0265`, two children.
+pub const FLO_TAB_SUBTREE_DEFINITION: u32 = 0x0265;
+/// Children `0x0265` carries: the frame below, and a `0x0251` that plays over frames 23..29.
+pub const FLO_TAB_SUBTREE_CHILDREN: usize = 2;
+/// Index of the child of `0x0265` that names [`FLO_TAB_FRAME_DEFINITION`].
+pub const FLO_TAB_SUBTREE_FRAME: usize = 0;
+/// That child's element id, checked before the copy is made.
+pub const FLO_TAB_SUBTREE_FRAME_ID: u32 = 0x001e_ace8;
+
+/// The definition between the subtree and the row container. `0x0264`, one child.
+pub const FLO_TAB_FRAME_DEFINITION: u32 = 0x0264;
+/// Children `0x0264` carries. One: the row container.
+pub const FLO_TAB_FRAME_CHILDREN: usize = 1;
+/// Index of the child of `0x0264` that names [`FLO_QUIT_TAB_CONTAINER_DEFINITION`].
+pub const FLO_TAB_FRAME_CONTAINER: usize = 0;
+/// That child's element id, which is [`FE_QUIT_TAB_BASE_PATH`]`[3]`.
+pub const FLO_TAB_FRAME_CONTAINER_ID: u32 = 0x001e_ace6;
+
+/// The element id the seventh tab's subtree is written under. `0x1eaceb`.
+///
+/// Free in the shipped document: `scripts/ds2-flo.py find --id 0x1eaceb` reports no record, while
+/// `0x1eace6` through `0x1eace9` all resolve. Taking a neighbour of the block it sits beside keeps
+/// the tab's ids reading as one run, the way [`FLO_ADDED_TAB_ID`] does for the cell.
+///
+/// Only this one id is new. The copies below reuse [`FLO_TAB_SUBTREE_FRAME_ID`] and
+/// [`FLO_TAB_FRAME_CONTAINER_ID`] verbatim, because a path is resolved one level at a time and the
+/// two subtrees diverge at the level above -- which is also what lets the seventh tab's cell paths
+/// differ from the System tab's in exactly one component.
+pub const FLO_ADDED_TAB_SUBTREE_ID: u32 = 0x001e_aceb;
+
+/// Indices the three copies are served under, none of which the shipped document uses.
+///
+/// Same arrangement as [`FLO_ADDED_PANEL_DEFINITION`]: a lookup for one of these can only have come
+/// from a record this crate wrote, so the answer is whatever copy was built last.
+///
+/// `0xe000` rather than the `0xf000` the panel and the rows use, and the reason is arithmetic
+/// rather than taste. [`FLO_ADDED_ROW_DEFINITION`] is `0xf258` and claims one index per slot, so
+/// the rows own `0xf258` through `0xf263` -- which swallows the `0xf263` and `0xf264` this block
+/// would otherwise have taken, and the collision is silent: a lookup for the last slot's row would
+/// have been answered with the seventh tab's container. A test in `ds2-menu-row` asserts the two
+/// blocks stay apart; it is the test that found this.
+pub const FLO_ADDED_TAB_SUBTREE_DEFINITION: u32 = 0xe265;
+pub const FLO_ADDED_TAB_FRAME_DEFINITION: u32 = 0xe264;
+pub const FLO_ADDED_TAB_CONTAINER_DEFINITION: u32 = 0xe263;
+
+/// Byte offset of the layout path inside a tab descriptor. `0x38`.
+///
+/// `FUN_1400a5900` builds a `DLKR::DLFixedVector<u32, 8>` on its own stack, writes `0x1eaba9` and
+/// `0x1eaccf` into it, and copies it here with `FUN_1400a4630(descriptor + 0x38, &local)`. The
+/// group constructor then copies that into `group + 0x130`, and
+/// [`FE_INGAME_MENU_TAB_INIT`] resolves it and plays sequence `0x65` on what comes back. So this
+/// field is which subtree a tab poses, and a seventh tab that poses its own writes one dword here.
+pub const FE_INGAME_MENU_TAB_PATH_OFFSET: usize = 0x38;
+
+/// The two ids `FUN_1400a5900` writes into that path: the strip, then the System tab's subtree.
+///
+/// Verified before the second is rewritten, for the same reason every other copy in this crate is
+/// verified: a descriptor that does not hold these is not the one this was read from.
+pub const FE_INGAME_MENU_TAB_PATH: [u32; 2] = [0x001e_aba9, FLO_TAB_STRIP_PANEL_ID];
+
+/// The path's count field, at [`FE_SCENE_NAMER_ENTRY_LEN_OFFSET`] past its base -- so `0x60` in the
+/// descriptor, which is the qword `FUN_1400a5900` zeroes on its second instruction.
+pub const FE_INGAME_MENU_TAB_PATH_COUNT_OFFSET: usize =
+    FE_INGAME_MENU_TAB_PATH_OFFSET + FE_SCENE_NAMER_ENTRY_LEN_OFFSET;
 
 // =================================================================================================
 // THE SOFTWARE KEYBOARD, AND THE ONE DWORD THAT KEEPS IT SAFE TO BORROW

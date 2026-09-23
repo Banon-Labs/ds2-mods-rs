@@ -34,20 +34,30 @@
 //! not appear twice, and then the descriptor's item vector is rewritten to carry our actions and
 //! nothing else.
 //!
-//! **The layout path is deliberately left as the System tab's.** A group locates the container it
-//! draws rows into through `group + 0x130`, copied out of `descriptor + 0x38`
-//! ([`ds2_rva::FE_INGAME_MENU_TAB_INIT`] resolves it and plays sequence `0x65` on the result). Ours
-//! points at the same panel the System tab uses, which is correct because only one tab is bound at a
-//! time: switching to this tab rebinds that panel with our rows, and switching away rebinds it with
-//! the System tab's three. It also means every piece of row machinery this crate already has -- the
-//! panel substitution, the caret, the banner, the captions -- applies without a second copy.
+//! **The layout path is repointed, and the first run of this module is why.** A group locates the
+//! subtree it draws into through `group + 0x130`, copied out of `descriptor + 0x38`
+//! ([`ds2_rva::FE_INGAME_MENU_TAB_INIT`] resolves it and plays sequence `0x65` on the result). That
+//! path was left as the System tab's, on the reasoning that only one tab is bound at a time and
+//! rebinding the shared panel would swap its rows. Rebinding swaps the rows and does not swap the
+//! captions: a row record is a grid cell and this tab's namer can decline to name one, a caption is
+//! a plain child of the same container and nothing can decline to draw it. So the seventh tab drew
+//! the System tab's three captions letter-over-letter on top of its own first three rows.
 //!
-//! # What is not established
+//! [`repoint_path`] writes one dword instead, naming the subtree [`crate::layout`] copies for this
+//! tab -- and [`crate::strip`] hangs off the tab strip beside the System tab's. Each tab then poses
+//! a container of its own with only its own children in it.
 //!
-//! Nothing in this module has been in front of a running game. The riskiest piece is not any one
-//! detour but the lifetime: the top select is constructed once per `FeSceneInGame` and this crate
-//! never sees it destroyed, so the group is built once and reused, and [`TOP_SELECT`] is compared on
-//! every lookup so a second scene cannot be served a group built against the first one's proxy.
+//! # What a run has shown, and what it has not
+//!
+//! The tab exists and the cursor reaches it: a run logged `tab built group=0x32e4b70 rows=4
+//! vtable=0x1410b6658` and `strip count raised tabs=6 -> items=7` with no extent mismatch, and the
+//! tab drew its four rows. [`repoint_path`] and the subtree behind it are new and have not been in
+//! front of a running game.
+//!
+//! The piece with no evidence either way is the lifetime: the top select is constructed once per
+//! `FeSceneInGame` and this crate never sees it destroyed, so the group is built once and reused,
+//! and [`TOP_SELECT`] is compared on every lookup so a second scene cannot be served a group built
+//! against the first one's proxy.
 
 use core::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -71,10 +81,17 @@ type GridSetItemCountFn = unsafe extern "system" fn(*mut u8, u64);
 type GridCurrentIndexFn = unsafe extern "system" fn(*mut u8) -> i32;
 /// `FUN_1400a4d20(group)`.
 type TabInitFn = unsafe extern "system" fn(*mut u8);
+/// `FUN_1400a5c60(*out, proxy) -> out` -- the tab strip's own cell namer builder.
+///
+/// It returns its first argument, read off the exit (`mov rax, r14` with `r14` the saved `rcx`),
+/// the same way [`NamerBuilderFn`] does and for the same reason: a detour declared `-> ()` hands
+/// the game whatever Rust left in RAX, and the caller dereferences it.
+type StripNamerFn = unsafe extern "system" fn(*mut usize, usize) -> *mut usize;
 
 static CTOR_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 static TAB_TABLE_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 static STRIP_INIT_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
+static STRIP_NAMER_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 
 /// The live module base, stored by [`install`] so no detour has to ask for it.
 static MODULE_BASE: AtomicUsize = AtomicUsize::new(0);
@@ -170,6 +187,52 @@ unsafe fn rewrite_items(descriptor: *mut u8, entries: &[(u32, u32)]) -> bool {
     true
 }
 
+/// Point a descriptor's layout path at the seventh tab's own subtree.
+///
+/// Verified before it is written, the same way every other copy in this crate is: both ids and the
+/// count. A descriptor that does not hold `[0x1eaba9, 0x1eaccf]` with a length of two is not the
+/// one this was read from, and rewriting a dword inside it would be writing into something else.
+///
+/// # Safety
+///
+/// `descriptor` must be a [`DESCRIPTOR_SIZE`] buffer the game's own item builder has just filled.
+unsafe fn repoint_path(descriptor: *mut u8) -> bool {
+    let at = ds2_rva::FE_INGAME_MENU_TAB_PATH_OFFSET;
+    // SAFETY: the caller guarantees a filled descriptor, and these are the fields `FUN_1400a5900`
+    // writes into it.
+    let count = unsafe {
+        descriptor
+            .add(ds2_rva::FE_INGAME_MENU_TAB_PATH_COUNT_OFFSET)
+            .cast::<u64>()
+            .read()
+    } as usize;
+    let found: Vec<u32> = (0..ds2_rva::FE_INGAME_MENU_TAB_PATH.len())
+        // SAFETY: inside the same fixed vector, whose count has just been read as its length.
+        .map(|i| unsafe { descriptor.add(at + i * 4).cast::<u32>().read() })
+        .collect();
+    if count != ds2_rva::FE_INGAME_MENU_TAB_PATH.len() || found != ds2_rva::FE_INGAME_MENU_TAB_PATH
+    {
+        log(format_args!(
+            "{LOG_PREFIX} tab NOT built stage=path count={count} found={found:x?} expected={:x?}",
+            ds2_rva::FE_INGAME_MENU_TAB_PATH
+        ));
+        return false;
+    }
+    // SAFETY: component 1 of a live two-component path, just verified.
+    unsafe {
+        descriptor
+            .add(at + 4)
+            .cast::<u32>()
+            .write(ds2_rva::FLO_ADDED_TAB_SUBTREE_ID);
+    }
+    log(format_args!(
+        "{LOG_PREFIX} tab path {:#x}->{:#x} at descriptor+{at:#x}",
+        ds2_rva::FLO_TAB_STRIP_PANEL_ID,
+        ds2_rva::FLO_ADDED_TAB_SUBTREE_ID
+    ));
+    true
+}
+
 /// Build the seventh group, once, against `top_select`.
 ///
 /// Returns the group, or `None` with a log line saying which step declined.
@@ -195,6 +258,17 @@ unsafe fn build_group(base: usize, top_select: *mut u8, entries: &[(u32, u32)]) 
     // SAFETY: `builder` is the System tab's item builder, and the argument is a 16-aligned buffer
     // of the size its own callers give it.
     unsafe { builder(descriptor_ptr) };
+    // THE ONE DWORD THAT MAKES THIS A TAB RATHER THAN A SECOND VIEW OF THE SYSTEM TAB. The builder
+    // writes `[0x1eaba9, 0x1eaccf]` here -- the strip, then the System tab's subtree -- and the
+    // group constructor copies it to `group + 0x130`, where `FUN_1400a4d20` resolves it and poses
+    // what comes back. Left alone, two tabs pose one subtree and the System tab's three captions
+    // draw on top of this tab's first three rows, because a caption is a plain child and no namer
+    // can decline to draw it. Rewritten, this tab poses the subtree `crate::layout` built for it.
+    // SAFETY: the builder has just filled this descriptor, and the offsets are the ones
+    // `FUN_1400a5900` itself writes.
+    if !unsafe { repoint_path(descriptor_ptr) } {
+        return None;
+    }
     // AS MANY AS THE VECTOR HOLDS, and the rest are served by `crate::install`'s item lookup out of
     // its own entries -- the same split the System tab uses, with the difference that on this tab
     // none of the five slots is spoken for. Writing more than five here would be refused by the
@@ -359,6 +433,41 @@ unsafe extern "system" fn tab_table_detour(top_select: *mut u8) -> *mut u8 {
 }
 
 /// The strip's init: run the game's, then raise its cell count and initialise our group.
+/// The tab strip's cell namer: run the game's, then take the namer it built.
+///
+/// This is the site the first three detours left out, and leaving it out is why a seventh tab could
+/// be reached by the cursor and never seen. A tab cell is two halves -- a record in the layout,
+/// which [`crate::strip`] adds, and an entry in the strip's namer, which says the grid should ask
+/// for it. The grid binds a column by resolving the namer's entry for that row, so a record nobody
+/// names is a record nobody asks for, and column six came back empty every time.
+///
+/// The list is six of six and a seventh push panics in the game's own allocator, so the entry goes
+/// in a stand-in instead -- the same mechanism a tab's thirteenth row uses, one level up. The namer
+/// pointer is read out of the out-parameter rather than the return value because the return is the
+/// out-parameter itself.
+unsafe extern "system" fn strip_namer_detour(out: *mut usize, proxy: usize) -> *mut usize {
+    let trampoline = STRIP_NAMER_TRAMPOLINE.load(Ordering::Acquire);
+    if trampoline == 0 {
+        // Published before the site is patched, so unreachable. Returning the out-parameter is what
+        // the original does, and the caller dereferences it either way.
+        return out;
+    }
+    // SAFETY: MinHook published this trampoline for exactly this site, and the signature is the one
+    // the disassembled entry and exit implement.
+    let original: StripNamerFn = unsafe { std::mem::transmute(trampoline) };
+    // SAFETY: both arguments are the game's own, forwarded unchanged.
+    let returned = unsafe { original(out, proxy) };
+    let base = MODULE_BASE.load(Ordering::Acquire);
+    if out.is_null() || base == 0 {
+        return returned;
+    }
+    // SAFETY: the original has just written the constructed namer here.
+    let namer = unsafe { out.read() };
+    // SAFETY: `namer` is the namer the original just built, and `base` is the live module base.
+    unsafe { crate::install::adopt_strip_namer(base, namer) };
+    returned
+}
+
 unsafe extern "system" fn strip_init_detour(top_select: *mut u8) {
     let trampoline = STRIP_INIT_TRAMPOLINE.load(Ordering::Acquire);
     if trampoline != 0 {
@@ -417,7 +526,14 @@ unsafe extern "system" fn strip_init_detour(top_select: *mut u8) {
 /// MinHook must already be initialised, which [`crate::install::install`] guarantees.
 pub unsafe fn install(base: usize) -> bool {
     MODULE_BASE.store(base, Ordering::Release);
-    let sites: [(u32, &[u8], *mut c_void, &AtomicUsize, &str); 3] = [
+    let sites: [(u32, &[u8], *mut c_void, &AtomicUsize, &str); 4] = [
+        (
+            ds2_rva::FE_INGAME_TOP_SELECT_NAMER,
+            &ds2_rva::FE_INGAME_TOP_SELECT_NAMER_PROLOGUE,
+            strip_namer_detour as *mut c_void,
+            &STRIP_NAMER_TRAMPOLINE,
+            "tab strip namer",
+        ),
         (
             ds2_rva::FE_INGAME_TOP_SELECT_CTOR,
             &ds2_rva::FE_INGAME_TOP_SELECT_CTOR_PROLOGUE,

@@ -465,6 +465,126 @@ struct ShadowNamer([u8; ds2_rva::FE_SCENE_NAMER_SHADOW_SIZE]);
 static SHADOW_NAMERS: [AtomicUsize; crate::api::MAX_ADDED_ROWS] =
     [const { AtomicUsize::new(0) }; crate::api::MAX_ADDED_ROWS];
 
+/// The tab strip's own cell namer, and the one stand-in that answers for the seventh tab's cell.
+///
+/// The strip is a grid like a tab is, and its cells are its tab icons. Its namer holds six ids in a
+/// list of six, so the seventh tab's cell cannot be pushed -- and without an entry the grid never
+/// asks the layout for the record [`crate::strip`] added, which is exactly what a first run
+/// measured: the tab was reachable by cursor and nothing was drawn for it.
+///
+/// One stand-in, not twelve, because there is only ever one seventh tab.
+static STRIP_NAMER: AtomicUsize = AtomicUsize::new(0);
+static STRIP_SHADOW: AtomicUsize = AtomicUsize::new(0);
+static STRIP_CELLS_SERVED: AtomicUsize = AtomicUsize::new(0);
+static STRIP_NAMERS_ADOPTED: AtomicUsize = AtomicUsize::new(0);
+
+/// Take the tab strip's namer and fill the stand-in that answers for the seventh tab's cell.
+///
+/// Verified before anything is written, on all four fields the clone depends on: the list holds
+/// exactly the six the game pushes, and its last entry is a two-component path whose base is the
+/// strip and whose cell is the sixth tab's. A namer that is not that one is left alone and the
+/// strip keeps its six tabs.
+///
+/// # Safety
+///
+/// `namer` must be the namer [`ds2_rva::FE_INGAME_TOP_SELECT_NAMER`] has just constructed, and
+/// `base` the live module base.
+pub(crate) unsafe fn adopt_strip_namer(base: usize, namer: usize) -> bool {
+    let refuse = |why: core::fmt::Arguments<'_>| {
+        STRIP_NAMER.store(0, Ordering::Release);
+        log(format_args!(
+            "{LOG_PREFIX} strip namer REFUSED {why} -- the strip keeps its six tabs"
+        ));
+        false
+    };
+    let shadow = STRIP_SHADOW.load(Ordering::Acquire);
+    if !sane(namer) || shadow == 0 {
+        return refuse(format_args!(
+            "namer=0x{namer:016x} stand-in=0x{shadow:016x}"
+        ));
+    }
+    let list = namer + ds2_rva::FE_SCENE_NAMER_LIST_OFFSET;
+    // SAFETY: the constructor has just filled this vector, and this is the field its own push reads.
+    let count =
+        unsafe { ((list + ds2_rva::FE_SCENE_NAMER_COUNT_OFFSET) as *const u64).read() } as usize;
+    if count != ds2_rva::FE_INGAME_TOP_SELECT_TABS {
+        return refuse(format_args!(
+            "count={count}, expected {}",
+            ds2_rva::FE_INGAME_TOP_SELECT_TABS
+        ));
+    }
+    let padding = (0u32.wrapping_sub(list as u32) & 7) as usize;
+    let last = (list + padding + (count - 1) * ds2_rva::FE_SCENE_NAMER_ENTRY_STRIDE) as *mut u8;
+    let dword = |offset: usize| -> u32 {
+        // SAFETY: `offset` is inside an entry the count above established is live.
+        unsafe { last.add(offset).cast::<u32>().read() }
+    };
+    let length = dword(ds2_rva::FE_SCENE_NAMER_ENTRY_LEN_OFFSET);
+    if length != ds2_rva::FE_INGAME_TOP_SELECT_NAMER_ENTRY_LEN {
+        return refuse(format_args!(
+            "entry length is {length}, expected {}",
+            ds2_rva::FE_INGAME_TOP_SELECT_NAMER_ENTRY_LEN
+        ));
+    }
+    // THE CELL ID IS THE LAST COMPONENT, not a fixed offset. A tab's row paths are five long and
+    // the strip's are two, and the one thing both have in common is that the id is at the end.
+    let id_at = (length as usize - 1) * 4;
+    let (root, cell) = (dword(0), dword(id_at));
+    if root != ds2_rva::FE_INGAME_TOP_SELECT_NAMER_BASE
+        || cell != ds2_rva::FE_INGAME_TOP_SELECT_NAMER_CELL_IDS[count - 1]
+    {
+        return refuse(format_args!(
+            "entry[{}] is [{root:#x} {cell:#x}], expected [{:#x} {:#x}]",
+            count - 1,
+            ds2_rva::FE_INGAME_TOP_SELECT_NAMER_BASE,
+            ds2_rva::FE_INGAME_TOP_SELECT_NAMER_CELL_IDS[count - 1]
+        ));
+    }
+    // SAFETY: the namer is live and this is the field its own lookup reads the scene proxy from.
+    let proxy = unsafe {
+        (namer as *const u8)
+            .add(ds2_rva::FE_SCENE_NAMER_PROXY_OFFSET)
+            .cast::<usize>()
+            .read()
+    };
+    if !sane(proxy) {
+        return refuse(format_args!("proxy=0x{proxy:016x}"));
+    }
+    // SAFETY: the RVA is a `.pdata` function start recorded in `ds2-rva`; `last` is a live entry
+    // and the destination is a `FE_SCENE_NAMER_SHADOW_SIZE` buffer this crate owns.
+    let copy: NamerEntryCopyFn =
+        unsafe { std::mem::transmute(base + ds2_rva::FE_SCENE_NAMER_ENTRY_COPY as usize) };
+    // SAFETY: every write below is inside that buffer, at the offsets the lookup reads.
+    unsafe {
+        let shadow = shadow as *mut u8;
+        shadow.write_bytes(0, ds2_rva::FE_SCENE_NAMER_SHADOW_SIZE);
+        shadow
+            .add(ds2_rva::FE_SCENE_NAMER_PROXY_OFFSET)
+            .cast::<usize>()
+            .write(proxy);
+        let entry = shadow.add(ds2_rva::FE_SCENE_NAMER_LIST_OFFSET);
+        copy(entry, last);
+        entry
+            .add(id_at)
+            .cast::<u32>()
+            .write(ds2_rva::FLO_ADDED_TAB_ID);
+        shadow
+            .add(ds2_rva::FE_SCENE_NAMER_COUNT_FROM_NAMER)
+            .cast::<u64>()
+            .write(1);
+    }
+    // Published last, so the cell lookup cannot see a namer whose stand-in is half filled.
+    STRIP_NAMER.store(namer, Ordering::Release);
+    let n = STRIP_NAMERS_ADOPTED.fetch_add(1, Ordering::Relaxed) + 1;
+    log(format_args!(
+        "{LOG_PREFIX} strip namer adopted namer=0x{namer:016x} cells={count} cell {}={:#x} \
+         stand-in=0x{shadow:016x} adoptions={n} -- the seventh tab's icon is now asked for",
+        count,
+        ds2_rva::FLO_ADDED_TAB_ID
+    ));
+    true
+}
+
 /// The System tab's live cell namer, captured when its constructor's detour accepted it.
 ///
 /// The cell lookup is ONE function shared by every tab's namer and by the tab strip's, so the
@@ -710,7 +830,7 @@ unsafe extern "system" fn item_lookup_detour(tab: *mut u8) -> *mut u8 {
 ///
 /// `namer` and `cell` are the game's own arguments to its own lookup.
 unsafe fn shadow_for(namer: *mut u8, cell: *const i32) -> Option<*mut u8> {
-    if namer as usize != SYSTEM_TAB_NAMER.load(Ordering::Acquire) || namer.is_null() {
+    if namer.is_null() {
         return None;
     }
     // A cell is two `i32`s, so four-aligned rather than eight -- `sane` is the wrong test for it.
@@ -720,6 +840,9 @@ unsafe fn shadow_for(namer: *mut u8, cell: *const i32) -> Option<*mut u8> {
     // SAFETY: the lookup itself reads both of these as `[r8]` and `[r8+4]`.
     let (col, row) = unsafe { (cell.read(), cell.add(1).read()) };
     if col != 0 || row < 0 {
+        return None;
+    }
+    if namer as usize != SYSTEM_TAB_NAMER.load(Ordering::Acquire) {
         return None;
     }
     // SAFETY: our namer, whose count the lookup reads at this same offset.
@@ -742,6 +865,76 @@ unsafe fn shadow_for(namer: *mut u8, cell: *const i32) -> Option<*mut u8> {
         return None;
     }
     Some(shadow as *mut u8)
+}
+
+/// Trampoline back to the tab strip's own cell lookup, which is a different function.
+static STRIP_CELL_LOOKUP_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
+
+/// The tab strip's cell lookup: answer for the one column the strip's namer cannot.
+///
+/// A separate detour because it is a separate function --
+/// [`ds2_rva::FE_SCENE_NAMER_STRIP_CELL_LOOKUP`] is slot 2 of `HLayoutAdapter` where the one
+/// [`cell_lookup_detour`] sits on is slot 2 of `VLayoutAdapter`. Detouring only the second is why a
+/// seventh tab could be selected and never drawn: the strip asked its own function, which this
+/// crate was not on, got an empty accessor for column six, and left the highlight on the sixth tab.
+///
+/// The axes are swapped with respect to the tab's: here the COLUMN is the index and the row must be
+/// zero. Everything else about the stand-in is the same object, so it is handed over with a cell of
+/// `(0, 0)` exactly as a row's is.
+unsafe extern "system" fn strip_cell_lookup_detour(
+    namer: *mut u8,
+    out: *mut u8,
+    cell: *const i32,
+) -> *mut u8 {
+    let trampoline = STRIP_CELL_LOOKUP_TRAMPOLINE.load(Ordering::Acquire);
+    if trampoline == 0 {
+        // Published before the site is patched, so unreachable. As the tab's: hand back the game's
+        // own empty accessor rather than the caller's uninitialised buffer, whose vtable slot 0 is
+        // the very next thing it calls.
+        let base = MODULE_BASE.load(Ordering::Acquire);
+        if base == 0 {
+            return out;
+        }
+        // SAFETY: the RVA is a `.pdata` function start recorded in `ds2-rva`, and `out` is the
+        // caller's own accessor buffer.
+        let make_empty: MakeEmptyAccessorFn =
+            unsafe { std::mem::transmute(base + ds2_rva::FE_SCENE_ACCESSOR_MAKE_EMPTY as usize) };
+        // SAFETY: as above.
+        return unsafe { make_empty(out) };
+    }
+    // SAFETY: MinHook published this trampoline for exactly this site, and the signature is the one
+    // the disassembled entry and exit implement.
+    let original: NamerCellLookupFn =
+        unsafe { std::mem::transmute::<usize, NamerCellLookupFn>(trampoline) };
+    let strip = STRIP_NAMER.load(Ordering::Acquire);
+    let shadow = STRIP_SHADOW.load(Ordering::Acquire);
+    let wanted = !namer.is_null()
+        && strip != 0
+        && namer as usize == strip
+        && shadow != 0
+        && !cell.is_null()
+        && (cell as usize) >= 0x1_0000
+        && (cell as usize).is_multiple_of(4)
+        // SAFETY: the lookup itself reads both of these, as `[r8]` and `[r8+4]`.
+        && unsafe { cell.add(1).read() } == 0
+        && unsafe { cell.read() } as usize == ds2_rva::FE_INGAME_TOP_SELECT_TABS;
+    if wanted {
+        let own_cell = [0i32, 0i32];
+        let n = STRIP_CELLS_SERVED.fetch_add(1, Ordering::Relaxed) + 1;
+        if n <= 2 {
+            log(format_args!(
+                "{LOG_PREFIX} strip cell served column={} stand-in=0x{shadow:016x} served={n} \
+                 -- the seventh tab's own icon, out of our own stand-in",
+                ds2_rva::FE_INGAME_TOP_SELECT_TABS
+            ));
+        }
+        // SAFETY: the stand-in carries the three fields this function reads -- proxy at `+0x10`,
+        // one entry at `+0x18`, count `1` at `+0x140` -- and `own_cell` is the pair it reads a cell
+        // as.
+        return unsafe { original(shadow as *mut u8, out, own_cell.as_ptr()) };
+    }
+    // SAFETY: every argument is the game's own, passed through unchanged.
+    unsafe { original(namer, out, cell) }
 }
 
 unsafe extern "system" fn cell_lookup_detour(
@@ -1157,6 +1350,23 @@ unsafe fn name_added_cell(base: usize, namer: usize) -> bool {
             }
             reused.push(format!("{index}={:#x}", row.row_id));
         }
+        // AND THE SUBTREE THEY RESOLVE UNDER. Every entry the builder wrote carries
+        // `FE_QUIT_TAB_BASE_PATH`, whose second component is the System tab's subtree. The seventh
+        // tab draws into a copy of that subtree with a different element id, so each of these paths
+        // has to name it or the cell resolves against the System tab's container and this tab draws
+        // the System tab's rows. One component; everything either side of it is the game's own.
+        //
+        // Done before the appends below, so the clones they take inherit it.
+        for index in 0..count {
+            // SAFETY: `index < count` and the offset is component 1 of an entry whose first four
+            // components were verified against `FE_QUIT_TAB_BASE_PATH` above.
+            unsafe {
+                entry(index)
+                    .add(4)
+                    .cast::<u32>()
+                    .write(ds2_rva::FLO_ADDED_TAB_SUBTREE_ID);
+            }
+        }
     }
     // ONE ENTRY PER REGISTERED ROW, each a clone of the last SHIPPED entry with its id rewritten.
     // Cloned rather than assembled: the slack between the named fields is the unused tail of a
@@ -1204,7 +1414,11 @@ unsafe fn name_added_cell(base: usize, namer: usize) -> bool {
         if reused.is_empty() {
             String::new()
         } else {
-            format!(" reusing-the-games-cells [{}]", reused.join(" "))
+            format!(
+                " reusing-the-games-cells [{}] under-subtree={:#x}",
+                reused.join(" "),
+                ds2_rva::FLO_ADDED_TAB_SUBTREE_ID
+            )
         },
         named.join(" "),
         ds2_rva::FE_QUIT_TAB_BASE_PATH[3],
@@ -1482,6 +1696,13 @@ pub unsafe fn install() -> Outcome {
         )));
         SHADOW_NAMERS[slot].store(shadow as *mut ShadowNamer as usize, Ordering::Release);
     }
+    // And one for the tab strip itself, whose single spare cell is the seventh tab's icon. Same
+    // allocation and the same leak, once for the process; it is filled by `adopt_strip_namer` on
+    // every pause-menu open, because the strip's namer is rebuilt every time too.
+    let strip_shadow = Box::leak(Box::new(ShadowNamer(
+        [0; ds2_rva::FE_SCENE_NAMER_SHADOW_SIZE],
+    )));
+    STRIP_SHADOW.store(strip_shadow as *mut ShadowNamer as usize, Ordering::Release);
     // Published after the storage it describes, and before the detours that read it.
     ADDED_ROWS.store(rows.len(), Ordering::Release);
 
@@ -1502,6 +1723,15 @@ pub unsafe fn install() -> Outcome {
             cell_lookup_detour as *mut c_void,
             &CELL_LOOKUP_TRAMPOLINE,
             "cell-lookup",
+        )
+    } && unsafe {
+        hook_site(
+            base,
+            ds2_rva::FE_SCENE_NAMER_STRIP_CELL_LOOKUP,
+            &ds2_rva::FE_SCENE_NAMER_STRIP_CELL_LOOKUP_PROLOGUE,
+            strip_cell_lookup_detour as *mut c_void,
+            &STRIP_CELL_LOOKUP_TRAMPOLINE,
+            "strip-cell-lookup",
         )
     } && unsafe {
         hook_site(

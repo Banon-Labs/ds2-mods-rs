@@ -6,8 +6,8 @@
 //! per added row. The tab strip is the same kind of object: definition
 //! [`ds2_rva::FLO_TAB_STRIP_DEFINITION`] with [`ds2_rva::FLO_TAB_STRIP_CHILDREN`] children, the last
 //! six of which are the tab cells, and a child count that is also the display-list capacity
-//! (`FUN_140b6bd80` refuses to attach past it). So a seventh cell is one more record and a count of
-//! nineteen.
+//! (`FUN_140b6bd80` refuses to attach past it). So a seventh tab is two more records -- a cell and
+//! the panel that cell selects -- and a count of twenty.
 //!
 //! The record is a copy of the sixth cell's with three fields changed:
 //!
@@ -21,25 +21,50 @@
 //! uncopied, because a tab cell authors only its selection highlight -- the glyph on a tab is bound
 //! by the grid control at runtime, not by the layout. There is no icon here to get wrong.
 //!
-//! # Why the transform is copied rather than shared
+//! # The second record, which is the tab itself
+//!
+//! A cell is the icon in the strip. What the tab shows when it is selected is a separate child of
+//! the same container -- [`ds2_rva::FLO_TAB_STRIP_PANEL`], the System tab's subtree -- and the
+//! seventh tab gets one of those too, cloned from it with two fields changed:
+//!
+//! | field | from | to |
+//! |---|---|---|
+//! | element id | [`ds2_rva::FLO_TAB_STRIP_PANEL_ID`] | [`ds2_rva::FLO_ADDED_TAB_SUBTREE_ID`] |
+//! | definition | [`ds2_rva::FLO_TAB_SUBTREE_DEFINITION`] | [`ds2_rva::FLO_ADDED_TAB_SUBTREE_DEFINITION`] |
+//!
+//! That definition is [`crate::layout`]'s copy, and it is what the seventh tab's rows hang under
+//! instead of the System tab's. Sharing the System tab's subtree is what the first run did, and it
+//! drew the System tab's three captions on top of the seventh tab's first three rows: a row record
+//! is a grid cell and a namer can decline to name it, a caption is a plain child and nothing can
+//! decline to draw it.
+//!
+//! The clone is inserted beside its template rather than appended after the cells. Depth is not
+//! read back for a nested-definition record, so two subtrees draw in array order, and a tab's panel
+//! placed after the strip's own cells would draw over them.
+//!
+//! # Why one transform is copied and the other shared
 //!
 //! A record's `+0x08` is a pointer to a transform block in the document, and two records pointing at
-//! one block are one x between them. The shipped sixth cell would move with ours. So the block is
-//! copied into this crate's allocation and the new record points at the copy, exactly as
-//! [`crate::layout`] does for an added row.
+//! one block are one x between them. The added cell moves -- one [`ds2_rva::FLO_TAB_PITCH`] along
+//! the strip -- so its block is copied first, exactly as [`crate::layout`] does for an added row.
+//! The added subtree does not move: it wants the position the System tab's panel already has,
+//! because it is the same panel with different rows in it. So it shares that pointer, and nothing
+//! in this module writes through it.
 //!
 //! # What makes this safe to be wrong about
 //!
 //! A definition index is a number, and `0x0271` on a document this was not read from is some other
 //! container. The substitution happens only when the definition the game returned has exactly
 //! [`ds2_rva::FLO_TAB_STRIP_CHILDREN`] children whose last six ids are
-//! [`ds2_rva::FLO_TAB_STRIP_CELL_IDS`], in order. Anything else passes through untouched and says so.
+//! [`ds2_rva::FLO_TAB_STRIP_CELL_IDS`], in order, and whose [`ds2_rva::FLO_TAB_STRIP_PANEL`] is a
+//! record naming [`ds2_rva::FLO_TAB_SUBTREE_DEFINITION`] under [`ds2_rva::FLO_TAB_STRIP_PANEL_ID`].
+//! Anything else passes through untouched and says so.
 //!
-//! # Not established
+//! # What a run has shown, and what it has not
 //!
-//! None of this has been in front of a running game. The cell may draw and be unreachable, or be
-//! reachable and not draw: those are two numbers from two places -- the strip's item count, raised in
-//! [`crate::tab`], and this record -- and the run has to show them agreeing.
+//! The cell is established. A run logged `strip cell added id=0x1eaba8 x=319.05 children=18->19`
+//! and `strip count raised tabs=6 -> items=7` with no mismatch, and the seventh tab drew its four
+//! rows. The subtree record is new and has not been in front of a running game.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -47,8 +72,15 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::LOG_PREFIX;
 use crate::install::log;
 
-/// Children the replacement carries: the shipped eighteen and one more.
-const CHILDREN: usize = ds2_rva::FLO_TAB_STRIP_CHILDREN + 1;
+/// Children the replacement carries: the shipped eighteen, the seventh tab's subtree, and its cell.
+const CHILDREN: usize = ds2_rva::FLO_TAB_STRIP_CHILDREN + 2;
+
+/// Where the added subtree sits in the replacement: directly after the template it is cloned from,
+/// so the two tabs' panels are adjacent and both precede the strip's cells.
+const PANEL_AT: usize = ds2_rva::FLO_TAB_STRIP_PANEL + 1;
+
+/// Where the added cell sits: last, after the six the game ships.
+const CELL_AT: usize = CHILDREN - 1;
 
 /// A replacement strip definition, its child records, and the one transform block the added record
 /// points at -- one allocation, so the pointer between them cannot outlive its target.
@@ -106,6 +138,26 @@ unsafe fn is_the_strip(definition: *const u8) -> Option<*const u8> {
             return None;
         }
     }
+    // The subtree template, checked on both of the fields the clone changes. A record at this index
+    // naming something else is a document this was not read from, and cloning it would hang the
+    // seventh tab's rows off whatever it happens to be.
+    let at = ds2_rva::FLO_TAB_STRIP_PANEL * ds2_rva::FLO_RECORD_STRIDE;
+    // SAFETY: the index is below `count`, which the caller guarantees is live at `children`.
+    let (id, definition) = unsafe {
+        (
+            children
+                .add(at + ds2_rva::FLO_RECORD_ID_OFFSET)
+                .cast::<u32>()
+                .read(),
+            children
+                .add(at + ds2_rva::FLO_RECORD_DEFINITION_OFFSET)
+                .cast::<u16>()
+                .read() as u32,
+        )
+    };
+    if id != ds2_rva::FLO_TAB_STRIP_PANEL_ID || definition != ds2_rva::FLO_TAB_SUBTREE_DEFINITION {
+        return None;
+    }
     Some(children)
 }
 
@@ -132,20 +184,40 @@ unsafe fn build(original: *mut u8) -> Option<*mut u8> {
             )
         },
     });
-    strip.records[..strip.shipped.len()].copy_from_slice(&strip.shipped);
+    // THE SHIPPED RECORDS, IN TWO RUNS WITH A GAP. Everything up to and including the subtree
+    // template keeps its index; everything after it moves one along to leave [`PANEL_AT`] free.
+    // Written from the pristine snapshot rather than from the document, so a template read below
+    // cannot pick up a record this loop has already moved.
+    let stride = ds2_rva::FLO_RECORD_STRIDE;
+    let head = PANEL_AT * stride;
+    strip.records[..head].copy_from_slice(&strip.shipped[..head]);
+    strip.records[head + stride..][..strip.shipped.len() - head]
+        .copy_from_slice(&strip.shipped[head..]);
 
     // THE LAST CELL IS THE TEMPLATE, copied whole and then edited. Copying the last rather than the
     // first means the added cell inherits whatever the sixth's authoring says about a tab at the end
     // of the strip, which is where ours is.
-    let last = (ds2_rva::FLO_TAB_STRIP_CHILDREN - 1) * ds2_rva::FLO_RECORD_STRIDE;
-    let added = ds2_rva::FLO_TAB_STRIP_CHILDREN * ds2_rva::FLO_RECORD_STRIDE;
-    let (head, tail) = strip.records.split_at_mut(added);
-    tail[..ds2_rva::FLO_RECORD_STRIDE]
-        .copy_from_slice(&head[last..last + ds2_rva::FLO_RECORD_STRIDE]);
+    let last = (ds2_rva::FLO_TAB_STRIP_CHILDREN - 1) * stride;
+    let added = CELL_AT * stride;
+    strip.records[added..added + stride].copy_from_slice(&strip.shipped[last..last + stride]);
 
-    // The template's transform, copied so moving ours does not move the sixth tab.
+    // The subtree, cloned from the record beside it, with its definition pointed at this crate's
+    // copy and a new element id so a path can tell the two tabs apart. Its transform pointer is the
+    // template's and stays that way: the seventh tab's panel wants the position the System tab's
+    // panel already has.
+    {
+        let template = ds2_rva::FLO_TAB_STRIP_PANEL * stride;
+        let at = PANEL_AT * stride;
+        strip.records[at..at + stride].copy_from_slice(&strip.shipped[template..template + stride]);
+        strip.records[at + ds2_rva::FLO_RECORD_DEFINITION_OFFSET..][..2]
+            .copy_from_slice(&(ds2_rva::FLO_ADDED_TAB_SUBTREE_DEFINITION as u16).to_le_bytes());
+        strip.records[at + ds2_rva::FLO_RECORD_ID_OFFSET..][..4]
+            .copy_from_slice(&ds2_rva::FLO_ADDED_TAB_SUBTREE_ID.to_le_bytes());
+    }
+
+    // The cell template's transform, copied so moving ours does not move the sixth tab.
     let source = u64::from_le_bytes(
-        strip.records[last + ds2_rva::FLO_RECORD_TRANSFORM_OFFSET..][..8]
+        strip.records[added + ds2_rva::FLO_RECORD_TRANSFORM_OFFSET..][..8]
             .try_into()
             .ok()?,
     ) as usize;
@@ -196,11 +268,13 @@ unsafe fn build(original: *mut u8) -> Option<*mut u8> {
     let n = SUBSTITUTED.fetch_add(1, Ordering::Relaxed) + 1;
     log(format_args!(
         "{LOG_PREFIX} strip cell added id={:#x} x={} depth={} children={}->{CHILDREN} \
-         substitutions={n}",
+         subtree={:#x}@{PANEL_AT} definition={:#x} substitutions={n}",
         ds2_rva::FLO_ADDED_TAB_ID,
         x + ds2_rva::FLO_TAB_PITCH,
         depth.wrapping_add(ds2_rva::FLO_TAB_DEPTH_PITCH),
-        ds2_rva::FLO_TAB_STRIP_CHILDREN
+        ds2_rva::FLO_TAB_STRIP_CHILDREN,
+        ds2_rva::FLO_ADDED_TAB_SUBTREE_ID,
+        ds2_rva::FLO_ADDED_TAB_SUBTREE_DEFINITION,
     ));
     Some((&raw mut leaked.definition).cast::<u8>())
 }
@@ -270,21 +344,62 @@ pub(crate) unsafe fn substitute(original: *mut u8) -> *mut u8 {
 mod tests {
     use super::*;
 
-    /// One more child than the game ships, and the added record is the last one.
+    /// Two more children than the game ships, and the added cell is the last one.
     #[test]
-    fn the_replacement_is_the_shipped_strip_plus_one() {
-        assert_eq!(CHILDREN, ds2_rva::FLO_TAB_STRIP_CHILDREN + 1);
+    fn the_replacement_is_the_shipped_strip_plus_two() {
+        assert_eq!(CHILDREN, ds2_rva::FLO_TAB_STRIP_CHILDREN + 2);
         assert_eq!(
             ds2_rva::FLO_TAB_STRIP_FIRST_CELL + ds2_rva::FLO_TAB_STRIP_CELL_IDS.len(),
             ds2_rva::FLO_TAB_STRIP_CHILDREN,
-            "the six cells must be the LAST six children, or the template is the wrong record"
+            "the six cells must be the last six children, or the template is the wrong record"
         );
+    }
+
+    /// The record this module adds and the entry the strip's namer stand-in carries are the same
+    /// cell.
+    ///
+    /// Two halves of one tab, written in two files: a record here, and an entry in
+    /// [`crate::install::adopt_strip_namer`]. A run had the first without the second, and the tab
+    /// was reachable by cursor and invisible -- the grid binds a column by resolving its namer
+    /// entry, so a record nobody names is never asked for. The two id lists agreeing is what says
+    /// the stand-in is naming a cell that exists.
+    #[test]
+    fn the_layouts_cells_and_the_namers_cells_are_the_same_cells() {
+        assert_eq!(
+            ds2_rva::FLO_TAB_STRIP_CELL_IDS,
+            ds2_rva::FE_INGAME_TOP_SELECT_NAMER_CELL_IDS,
+            "the strip's namer and its layout disagree about which cells exist"
+        );
+        // The stand-in clones the namer's LAST entry and rewrites its id, so the cell it names must
+        // be the one this module's added record carries.
+        assert!(!ds2_rva::FE_INGAME_TOP_SELECT_NAMER_CELL_IDS.contains(&ds2_rva::FLO_ADDED_TAB_ID));
     }
 
     /// The added tab's id is not one of the six, which is what keeps the identity check meaningful.
     #[test]
     fn the_added_id_is_not_one_the_strip_already_uses() {
         assert!(!ds2_rva::FLO_TAB_STRIP_CELL_IDS.contains(&ds2_rva::FLO_ADDED_TAB_ID));
+        assert!(!ds2_rva::FLO_TAB_STRIP_CELL_IDS.contains(&ds2_rva::FLO_ADDED_TAB_SUBTREE_ID));
+        assert_ne!(
+            ds2_rva::FLO_ADDED_TAB_SUBTREE_ID,
+            ds2_rva::FLO_TAB_STRIP_PANEL_ID
+        );
+    }
+
+    /// The added subtree goes in beside its template and before the cells, and the added cell goes
+    /// after them. Both halves matter: two panels drawn in the wrong order is the defect this
+    /// record exists to avoid, one level up from the one it fixes.
+    #[test]
+    fn the_added_subtree_precedes_the_cells_and_the_added_cell_follows_them() {
+        const {
+            assert!(PANEL_AT == ds2_rva::FLO_TAB_STRIP_PANEL + 1);
+            // A tab's panel inserted among the cells would draw over them.
+            assert!(PANEL_AT <= ds2_rva::FLO_TAB_STRIP_FIRST_CELL);
+            assert!(CELL_AT == CHILDREN - 1);
+            assert!(
+                CELL_AT > ds2_rva::FLO_TAB_STRIP_FIRST_CELL + ds2_rva::FLO_TAB_STRIP_CELL_IDS.len()
+            );
+        }
     }
 
     /// The definition is first in the struct, because [`substitute`] returns its address as the

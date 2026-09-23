@@ -394,6 +394,13 @@ unsafe fn write_caption(
         // to nothing. The tree dump had already said so in as many words -- `prefix5 resolved to
         // NOTHING` -- and the banner refusal that followed named the consequence.
         let mut panel = ds2_rva::FE_QUIT_TAB_BASE_PATH.to_vec();
+        // On a tab of our own the rows hang under a copy of the System tab's subtree, so the panel
+        // being lengthened is that copy's -- one component, the same one `crate::install` rewrites
+        // in every cell path and `crate::tab` in the group's own. Naming the System tab's here
+        // would stretch the banner on the tab this crate no longer puts rows on.
+        if crate::tab::armed() {
+            panel[1] = ds2_rva::FLO_ADDED_TAB_SUBTREE_ID;
+        }
         panel.push(ds2_rva::FLO_QUIT_TAB_CHILD_IDS[ds2_rva::FLO_QUIT_TAB_PANEL]);
         // SAFETY: the accessor is filled and the path is the container's with the panel appended.
         let component = unsafe { crate::tree::resolve_path(accessor.as_ptr(), &panel) };

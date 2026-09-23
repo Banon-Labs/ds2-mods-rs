@@ -1003,7 +1003,7 @@ the game the first time this list was overfilled.
 | --- | --- | --- |
 | 1 | the groups are inline in the top select | do not put it there: `FUN_1400a40e0` writes nothing past `group[0x2c]`, so a `0x168` buffer is a whole group and the game's own constructor fills it |
 | 2 | `FUN_1400a66d0` returns null above index 5 | detour it. Five callers and one vtable reference at `0x1418a53f4`, and no other route to a tab -- it is the funnel |
-| 3 | the strip's namer list is six of six | the stand-in above, one level up: the cell lookup is one function shared by every namer including the strip's |
+| 3 | the strip's namer list is six of six | the stand-in above, one level up -- but through the strip's own lookup, which is a second function. See the correction below |
 | 4 | `FUN_140021b30(this, 6)` | the same count raise the per-tab init already gets. The strip is a `FexGridControl`, so past this literal the bound is 32 columns |
 | 5 | five caption entries | nothing. There are six tabs and five entries, so the System tab already takes the empty arm; index 6 behaves as index 5 does today |
 | 6 | the strip's `.flo` container holds six cell records | the same child-count raise and record append a row container gets. Element `0x1eaba8` is the one gap in the strip's own id block |
@@ -1011,6 +1011,30 @@ the game the first time this list was overfilled.
 One new mechanism and five repeats of mechanisms this crate already ships. The build is
 `crates/ds2-menu-row/src/tab.rs` (the group, the lookup, the strip's count) and
 `crates/ds2-menu-row/src/strip.rs` (the cell record).
+
+### Two corrections the build cost, both of them "one thing" that was two
+
+Written down while the runs were still on screen, because each was a sentence in this document that
+read as settled and was not.
+
+**A row is a grid cell; a caption is not.** The added rows were kept off the other tabs by the
+namer -- a row record is a cell, and a cell no namer names is never drawn. The caption beside it is
+a plain child of the same container and nothing can decline to draw it. So the seventh tab, sharing
+one container with the System tab, drew its own four rows and the System tab's three captions on
+top of the first three of them. The fix is one level up: each tab already owns a subtree hung off
+the strip (`0x0265` -> `0x0264` -> `0x0263`), and only the posed one draws, so the seventh tab gets
+copies of all three with its rows in the last and a new element id, `0x1eaceb`, on the first. The
+group's own layout path at `descriptor + 0x38` is repointed at that id, and so is component 1 of
+every cell path its namer builds.
+
+**`IngameTopLayoutAdapter` is two classes, not one.** Slot 2 of `VLayoutAdapter` (`0x1410b69a8`) is
+`0x1400a4b20` and serves a tab's rows; slot 2 of `HLayoutAdapter` (`0x1410b6a08`) is `0x1400a4a70`
+and serves the strip's tab cells. The bodies are mirror images -- the tab's requires column zero and
+indexes by row, the strip's requires row zero and indexes by column -- so a stand-in built for one
+works for the other, but a detour on one is not a detour on the other. Sentence (3) in the table
+above said the lookup was "one function shared by every namer including the strip's", and a run
+measured that false: the seventh tab could be selected, its rows drew, and its cell in the strip was
+never asked for, so the highlight stayed on the sixth tab. Both functions are now detoured.
 
 ### Neither ceiling can be grown, and neither had to be
 

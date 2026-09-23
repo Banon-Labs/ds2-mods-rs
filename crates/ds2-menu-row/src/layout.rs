@@ -44,12 +44,27 @@
 //! becomes the glyph alone, tinted red, because the row above it is the other Quit Game and two
 //! identical icons would be a puzzle rather than a menu.
 //!
+//! # The same copy, served to a different tab
+//!
+//! When [`crate::tab`] has armed a seventh tab, the System tab gets its own container back
+//! untouched and the copy is served under [`ds2_rva::FLO_ADDED_TAB_CONTAINER_DEFINITION`] instead,
+//! reached through two more copies -- of `0x0265` and `0x0264` -- that [`crate::strip`] hangs off
+//! the tab strip beside the System tab's. Three chained copies, because the only thing that has to
+//! differ is the last one and the path to it runs through the other two.
+//!
+//! The copy then drops the shipped rows as well, keeping only the panel: see [`kept`]. A row is a
+//! grid cell and a namer can decline to name it, which is how the added rows were kept off the
+//! other tabs; a caption is a plain child and nothing can decline to draw it, which is why sharing
+//! one container drew the System tab's three captions on top of the seventh tab's first three rows.
+//!
 //! # What makes this safe to be wrong about
 //!
 //! A definition index is a number, and `0x263` on a document this was not read from is some other
 //! container. So the substitution happens only when the definition the game returned has exactly
 //! seven children carrying exactly [`ds2_rva::FLO_QUIT_TAB_CHILD_IDS`], in order. Anything else is
-//! logged and passed through untouched, and the game gets the menu it shipped with.
+//! logged and passed through untouched, and the game gets the menu it shipped with. The two
+//! intermediate copies are checked the same way, on their child count and the element id of the
+//! child whose definition index the copy rewrites.
 
 use std::ffi::c_void;
 use std::sync::Mutex;
@@ -102,16 +117,34 @@ fn caret_for(rows: usize) -> f32 {
     }
 }
 
-/// Index of slot `n`'s row and mark inside the new child array.
+/// How many of the shipped seven records the replacement keeps.
 ///
-/// The shipped records keep indices `0..7` untouched; ours are appended in pairs, so slot 0 is
-/// `(7, 8)` and slot 1 is `(9, 10)`. Pairs rather than two blocks because the transform pointers
-/// are written back per index and interleaving keeps the arithmetic in one place.
-const fn row_at(slot: usize) -> usize {
-    ds2_rva::FLO_QUIT_TAB_CHILD_IDS.len() + PER_ROW * slot
+/// All seven on the System tab: the substitution adds rows to the menu the game shipped, so the
+/// menu the game shipped has to still be in it.
+///
+/// One on a tab of our own, and the one is the panel. A row is a grid cell and the tab's namer can
+/// decline to name it; a caption is a plain child and nothing can decline to draw it. So the
+/// seventh tab's container drops the shipped rows and their captions together and keeps only the
+/// panel they sat on. This is safe to do only because that container is served under
+/// [`ds2_rva::FLO_ADDED_TAB_CONTAINER_DEFINITION`] and the System tab keeps the original.
+fn kept() -> usize {
+    if crate::tab::armed() {
+        1
+    } else {
+        ds2_rva::FLO_QUIT_TAB_CHILD_IDS.len()
+    }
 }
-const fn mark_at(slot: usize) -> usize {
-    row_at(slot) + 1
+
+/// Index of slot `n`'s row and mark inside the new child array, after `kept` shipped records.
+///
+/// Ours go in pairs, so with all seven kept slot 0 is `(7, 8)` and slot 1 is `(9, 10)`. Pairs
+/// rather than two blocks because the transform pointers are written back per index and
+/// interleaving keeps the arithmetic in one place.
+const fn row_at(kept: usize, slot: usize) -> usize {
+    kept + PER_ROW * slot
+}
+const fn mark_at(kept: usize, slot: usize) -> usize {
+    row_at(kept, slot) + 1
 }
 
 /// Depths given to the added records.
@@ -177,6 +210,17 @@ struct Container {
     row_definition: [[u8; ds2_rva::FLO_DEFINITION_STRIDE]; MAX_ROWS],
     row_records: [[u8; ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_QUIT_ROW_CHILDREN]; MAX_ROWS],
     icon_transform: [[u8; ds2_rva::FLO_TRANSFORM_SIZE]; MAX_ROWS],
+    /// The two definitions between the tab strip and the row container, copied so the seventh tab
+    /// can reach a container of its own.
+    ///
+    /// They are copies of `0x0265` and `0x0264` with one field changed each -- the definition index
+    /// their single relevant child names -- and they exist for no other reason. The strip's added
+    /// record names the first, the first names the second, the second names `definition` above.
+    /// Filled only when [`crate::tab::armed`]; zero otherwise, and the statics below stay null.
+    tab_subtree_definition: [u8; ds2_rva::FLO_DEFINITION_STRIDE],
+    tab_subtree_records: [u8; ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_TAB_SUBTREE_CHILDREN],
+    tab_frame_definition: [u8; ds2_rva::FLO_DEFINITION_STRIDE],
+    tab_frame_records: [u8; ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_TAB_FRAME_CHILDREN],
 }
 
 /// Substitutions already built, as `(definition the game returned, definition we return)`.
@@ -203,6 +247,16 @@ static PANEL: AtomicUsize = AtomicUsize::new(0);
 /// The added rows' own definitions, answered for [`ds2_rva::FLO_ADDED_ROW_DEFINITION`]` + slot`.
 /// As [`PANEL`], and for the same reason.
 static ROW_DEFINITIONS: [AtomicUsize; MAX_ROWS] = [const { AtomicUsize::new(0) }; MAX_ROWS];
+
+/// The seventh tab's own subtree, frame and row container, answered for the three `0xf26x` indices.
+///
+/// All three are published together or not at all, and only when [`crate::tab::armed`]. A lookup
+/// for one of them can only have come from a record this crate wrote, so as with [`PANEL`] the
+/// newest container is the right answer. [`tab_subtree`] is what says the seventh tab has somewhere
+/// to draw; the strip's added record is pointless without it.
+static TAB_SUBTREE: AtomicUsize = AtomicUsize::new(0);
+static TAB_FRAME: AtomicUsize = AtomicUsize::new(0);
+static TAB_CONTAINER: AtomicUsize = AtomicUsize::new(0);
 
 /// Most substitutions to keep. Past this the detour passes through and says so. The bound exists
 /// so that a misunderstanding shows up as a logged refusal rather than as unbounded growth; at
@@ -278,13 +332,30 @@ fn describe(ids: &[u32]) -> String {
         .join(" ")
 }
 
+/// The definitions [`build`] copies from, every one of them fetched through the game's own lookup
+/// so that what lands in the copy is the game's own bytes.
+struct Sources {
+    /// [`ds2_rva::FLO_QUIT_TAB_CONTAINER_DEFINITION`], the container being substituted.
+    container: *mut u8,
+    /// [`ds2_rva::FLO_PANEL_DEFINITION`], shared by every tab, which is why the caret needs a copy.
+    panel: *mut u8,
+    /// [`ds2_rva::FLO_QUIT_ROW_DEFINITION`], Quit Game's row and its selection highlight.
+    row: *mut u8,
+    /// [`ds2_rva::FLO_TAB_FRAME_DEFINITION`] and [`ds2_rva::FLO_TAB_SUBTREE_DEFINITION`], the two
+    /// levels between the tab strip and the container. Wanted only when there is a seventh tab;
+    /// null otherwise and never read.
+    frame: *mut u8,
+    subtree: *mut u8,
+}
+
 /// Build the replacement container, or explain in the log why not.
 ///
 /// # Safety
 ///
-/// `original` must be the definition [`ds2_rva::FLO_FIND_DEFINITION`] just returned for
-/// [`ds2_rva::FLO_QUIT_TAB_CONTAINER_DEFINITION`], in a loaded document.
-unsafe fn build(original: *mut u8, panel: *mut u8, row: *mut u8) -> Option<*mut u8> {
+/// Every field of `sources` must be a definition [`ds2_rva::FLO_FIND_DEFINITION`] just returned, in
+/// a loaded document, for the index its doc comment names.
+unsafe fn build(sources: &Sources) -> Option<*mut u8> {
+    let (original, panel, row) = (sources.container, sources.panel, sources.row);
     let refuse = |why: std::fmt::Arguments<'_>| -> Option<*mut u8> {
         let n = REFUSED.fetch_add(1, Ordering::Relaxed) + 1;
         log(format_args!(
@@ -342,7 +413,10 @@ unsafe fn build(original: *mut u8, panel: *mut u8, row: *mut u8) -> Option<*mut 
             rows.len()
         ));
     }
-    let declared = count + PER_ROW * rows.len();
+    // HOW MANY OF THE SHIPPED SEVEN SURVIVE, which is the whole difference between the two tabs.
+    // On a tab of our own it is the panel alone; see [`kept`].
+    let kept = kept();
+    let declared = kept + PER_ROW * rows.len();
 
     let mut container = Box::new(Container {
         definition: [0; ds2_rva::FLO_DEFINITION_STRIDE],
@@ -357,6 +431,10 @@ unsafe fn build(original: *mut u8, panel: *mut u8, row: *mut u8) -> Option<*mut 
         row_definition: [[0; ds2_rva::FLO_DEFINITION_STRIDE]; MAX_ROWS],
         row_records: [[0; ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_QUIT_ROW_CHILDREN]; MAX_ROWS],
         icon_transform: [[0; ds2_rva::FLO_TRANSFORM_SIZE]; MAX_ROWS],
+        tab_subtree_definition: [0; ds2_rva::FLO_DEFINITION_STRIDE],
+        tab_subtree_records: [0; ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_TAB_SUBTREE_CHILDREN],
+        tab_frame_definition: [0; ds2_rva::FLO_DEFINITION_STRIDE],
+        tab_frame_records: [0; ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_TAB_FRAME_CHILDREN],
     });
 
     // COPIED, never assembled field by field. The definition and the records carry fields this
@@ -373,7 +451,7 @@ unsafe fn build(original: *mut u8, panel: *mut u8, row: *mut u8) -> Option<*mut 
         std::ptr::copy_nonoverlapping(
             children,
             container.records.as_mut_ptr(),
-            count * ds2_rva::FLO_RECORD_STRIDE,
+            kept * ds2_rva::FLO_RECORD_STRIDE,
         );
         std::ptr::copy_nonoverlapping(
             children,
@@ -383,23 +461,29 @@ unsafe fn build(original: *mut u8, panel: *mut u8, row: *mut u8) -> Option<*mut 
     }
 
     // The added records are clones of shipped ones, so everything about them -- definition index,
-    // kind, frame range, the leaf contents further down -- is the game's own.
-    let clone_into = |records: &mut [u8], to: usize, from: usize| {
+    // kind, frame range, the leaf contents further down -- is the game's own. Cloned out of the
+    // pristine snapshot rather than out of `records`, which on the seventh tab holds only the panel
+    // and would have nothing at the template indices to clone.
+    let clone_into = |records: &mut [u8], shipped: &[u8], to: usize, from: usize| {
         let (source, destination) = (
             from * ds2_rva::FLO_RECORD_STRIDE,
             to * ds2_rva::FLO_RECORD_STRIDE,
         );
-        records.copy_within(source..source + ds2_rva::FLO_RECORD_STRIDE, destination);
+        records[destination..destination + ds2_rva::FLO_RECORD_STRIDE]
+            .copy_from_slice(&shipped[source..source + ds2_rva::FLO_RECORD_STRIDE]);
     };
     for slot in 0..rows.len() {
+        let (records, shipped) = (&mut container.records, &container.shipped);
         clone_into(
-            &mut container.records,
-            row_at(slot),
+            records,
+            shipped,
+            row_at(kept, slot),
             ds2_rva::FLO_QUIT_TAB_ROW_TEMPLATE,
         );
         clone_into(
-            &mut container.records,
-            mark_at(slot),
+            records,
+            shipped,
+            mark_at(kept, slot),
             ds2_rva::FLO_QUIT_TAB_MARK_TEMPLATE,
         );
     }
@@ -408,17 +492,17 @@ unsafe fn build(original: *mut u8, panel: *mut u8, row: *mut u8) -> Option<*mut 
     // per slot. `template_transform` reads the pointer out of a record the game itself
     // dereferences; a small integer there means the document's fixup has not run and everything
     // below would be treating a file offset as an address.
-    let template_transform = |records: &[u8], template: usize| -> *const u8 {
+    let template_transform = |shipped: &[u8], template: usize| -> *const u8 {
         // SAFETY: `template` indexes a record copied verbatim from the game's own array.
         unsafe {
-            records
+            shipped
                 .as_ptr()
                 .add(template * ds2_rva::FLO_RECORD_STRIDE + ds2_rva::FLO_RECORD_TRANSFORM_OFFSET)
                 .cast::<*const u8>()
                 .read()
         }
     };
-    let mut sources = [std::ptr::null::<u8>(); 3];
+    let mut templates = [std::ptr::null::<u8>(); 3];
     for (index, template) in [
         ds2_rva::FLO_QUIT_TAB_ROW_TEMPLATE,
         ds2_rva::FLO_QUIT_TAB_MARK_TEMPLATE,
@@ -427,15 +511,15 @@ unsafe fn build(original: *mut u8, panel: *mut u8, row: *mut u8) -> Option<*mut 
     .into_iter()
     .enumerate()
     {
-        let source = template_transform(&container.records, template);
+        let source = template_transform(&container.shipped, template);
         if (source as usize) < 0x1_0000 {
             return refuse(format_args!(
                 "record {template}'s transform is {source:p}, which is a file offset"
             ));
         }
-        sources[index] = source;
+        templates[index] = source;
     }
-    let source_panel = sources[2];
+    let source_panel = templates[2];
     // SAFETY: every source is a live transform block and every destination is exactly that size.
     unsafe {
         std::ptr::copy_nonoverlapping(
@@ -445,12 +529,12 @@ unsafe fn build(original: *mut u8, panel: *mut u8, row: *mut u8) -> Option<*mut 
         );
         for slot in 0..rows.len() {
             std::ptr::copy_nonoverlapping(
-                sources[0],
+                templates[0],
                 container.row_transform[slot].as_mut_ptr(),
                 ds2_rva::FLO_TRANSFORM_SIZE,
             );
             std::ptr::copy_nonoverlapping(
-                sources[1],
+                templates[1],
                 container.mark_transform[slot].as_mut_ptr(),
                 ds2_rva::FLO_TRANSFORM_SIZE,
             );
@@ -503,8 +587,8 @@ unsafe fn build(original: *mut u8, panel: *mut u8, row: *mut u8) -> Option<*mut 
 
     for (slot, row) in rows.iter().enumerate() {
         for (index, id, depth) in [
-            (row_at(slot), row.row_id, row_depth(slot)),
-            (mark_at(slot), row.label_id, mark_depth(slot)),
+            (row_at(kept, slot), row.row_id, row_depth(slot)),
+            (mark_at(kept, slot), row.label_id, mark_depth(slot)),
         ] {
             let at = index * ds2_rva::FLO_RECORD_STRIDE;
             container.records[at + ds2_rva::FLO_RECORD_ID_OFFSET..][..4]
@@ -625,7 +709,7 @@ unsafe fn build(original: *mut u8, panel: *mut u8, row: *mut u8) -> Option<*mut 
                                 .copy_from_slice(&tint.bytes());
                         }
                         // Our record names our definition instead of row 0's.
-                        let at = row_at(slot) * ds2_rva::FLO_RECORD_STRIDE
+                        let at = row_at(kept, slot) * ds2_rva::FLO_RECORD_STRIDE
                             + ds2_rva::FLO_RECORD_DEFINITION_OFFSET;
                         let index = ds2_rva::FLO_ADDED_ROW_DEFINITION + slot as u32;
                         container.records[at..][..2].copy_from_slice(&(index as u16).to_le_bytes());
@@ -739,11 +823,11 @@ unsafe fn build(original: *mut u8, panel: *mut u8, row: *mut u8) -> Option<*mut 
     for slot in 0..rows.len() {
         for (index, transform) in [
             (
-                row_at(slot),
+                row_at(kept, slot),
                 container.row_transform[slot].as_ptr() as usize,
             ),
             (
-                mark_at(slot),
+                mark_at(kept, slot),
                 container.mark_transform[slot].as_ptr() as usize,
             ),
         ] {
@@ -812,10 +896,129 @@ unsafe fn build(original: *mut u8, panel: *mut u8, row: *mut u8) -> Option<*mut 
         ));
     }
 
+    // THE TWO LEVELS BETWEEN THE STRIP AND THIS CONTAINER, copied so the seventh tab can reach a
+    // container the System tab does not share. Each copy changes exactly one field -- the
+    // definition index its child names -- and inherits every other byte, the element ids included:
+    // a path is resolved a level at a time, and these two subtrees have already diverged at the
+    // level above, which is `crate::strip`'s added record.
+    //
+    // Published as a set at the end, after both are complete, because the strip's record names the
+    // first of them and the game will follow it to the others in the same walk.
+    if crate::tab::armed() {
+        let copy = |definition: *mut u8,
+                    expect_children: usize,
+                    expect_id: u32,
+                    index: u32,
+                    child: usize,
+                    names: u32,
+                    into_definition: &mut [u8],
+                    into_records: &mut [u8]|
+         -> bool {
+            if definition.is_null() {
+                return false;
+            }
+            // SAFETY: the caller established this is a definition the game's own table yielded.
+            let (found, children) = unsafe {
+                (
+                    definition
+                        .add(ds2_rva::FLO_DEFINITION_CHILD_COUNT_OFFSET)
+                        .cast::<u16>()
+                        .read() as usize,
+                    definition
+                        .add(ds2_rva::FLO_DEFINITION_CHILDREN_OFFSET)
+                        .cast::<*const u8>()
+                        .read(),
+                )
+            };
+            if found != expect_children || (children as usize) < 0x1_0000 {
+                return false;
+            }
+            let at = child * ds2_rva::FLO_RECORD_STRIDE;
+            // SAFETY: `child < found`, which is the live record count just read.
+            let id = unsafe {
+                children
+                    .add(at + ds2_rva::FLO_RECORD_ID_OFFSET)
+                    .cast::<u32>()
+                    .read()
+            };
+            if id != expect_id {
+                return false;
+            }
+            // SAFETY: a definition and `found` live records, both established above; the
+            // destinations are exactly as large.
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    definition,
+                    into_definition.as_mut_ptr(),
+                    ds2_rva::FLO_DEFINITION_STRIDE,
+                );
+                std::ptr::copy_nonoverlapping(
+                    children,
+                    into_records.as_mut_ptr(),
+                    found * ds2_rva::FLO_RECORD_STRIDE,
+                );
+            }
+            into_definition[..2].copy_from_slice(&(index as u16).to_le_bytes());
+            let records = into_records.as_ptr() as u64;
+            into_definition[ds2_rva::FLO_DEFINITION_CHILDREN_OFFSET..][..8]
+                .copy_from_slice(&records.to_le_bytes());
+            into_records[at + ds2_rva::FLO_RECORD_DEFINITION_OFFSET..][..2]
+                .copy_from_slice(&(names as u16).to_le_bytes());
+            true
+        };
+        let frame = copy(
+            sources.frame,
+            ds2_rva::FLO_TAB_FRAME_CHILDREN,
+            ds2_rva::FLO_TAB_FRAME_CONTAINER_ID,
+            ds2_rva::FLO_ADDED_TAB_FRAME_DEFINITION,
+            ds2_rva::FLO_TAB_FRAME_CONTAINER,
+            ds2_rva::FLO_ADDED_TAB_CONTAINER_DEFINITION,
+            &mut container.tab_frame_definition,
+            &mut container.tab_frame_records,
+        );
+        let subtree = copy(
+            sources.subtree,
+            ds2_rva::FLO_TAB_SUBTREE_CHILDREN,
+            ds2_rva::FLO_TAB_SUBTREE_FRAME_ID,
+            ds2_rva::FLO_ADDED_TAB_SUBTREE_DEFINITION,
+            ds2_rva::FLO_TAB_SUBTREE_FRAME,
+            ds2_rva::FLO_ADDED_TAB_FRAME_DEFINITION,
+            &mut container.tab_subtree_definition,
+            &mut container.tab_subtree_records,
+        );
+        if frame && subtree {
+            container.definition[..2].copy_from_slice(
+                &(ds2_rva::FLO_ADDED_TAB_CONTAINER_DEFINITION as u16).to_le_bytes(),
+            );
+            TAB_CONTAINER.store(container.definition.as_ptr() as usize, Ordering::Release);
+            TAB_FRAME.store(
+                container.tab_frame_definition.as_ptr() as usize,
+                Ordering::Release,
+            );
+            TAB_SUBTREE.store(
+                container.tab_subtree_definition.as_ptr() as usize,
+                Ordering::Release,
+            );
+            log(format_args!(
+                "{LOG_PREFIX} tab subtree built {:#x}->{:#x}->{:#x} under id={:#x} \
+                 -- the seventh tab draws into a container of its own",
+                ds2_rva::FLO_ADDED_TAB_SUBTREE_DEFINITION,
+                ds2_rva::FLO_ADDED_TAB_FRAME_DEFINITION,
+                ds2_rva::FLO_ADDED_TAB_CONTAINER_DEFINITION,
+                ds2_rva::FLO_ADDED_TAB_SUBTREE_ID,
+            ));
+        } else {
+            log(format_args!(
+                "{LOG_PREFIX} tab subtree REFUSED frame={frame} subtree={subtree} \
+                 -- the seventh tab has nowhere of its own to draw and will show nothing"
+            ));
+        }
+    }
+
     let n = SUBSTITUTED.fetch_add(1, Ordering::Relaxed) + 1;
     log(format_args!(
         "{LOG_PREFIX} container substituted original=0x{:016x} replacement=0x{:016x} \
-         children={count}->{declared} rows=[{}] own-definitions={own_definitions}/{} \
+         kept={kept}/{count} children={count}->{declared} rows=[{}] own-definitions={own_definitions}/{} \
          panel-scale-y=x{} substitutions={n}",
         original as usize,
         container as *const Container as usize,
@@ -841,7 +1044,8 @@ unsafe fn build(original: *mut u8, panel: *mut u8, row: *mut u8) -> Option<*mut 
 /// # Safety
 ///
 /// As [`build`].
-unsafe fn substitute(original: *mut u8, panel: *mut u8, row: *mut u8) -> *mut u8 {
+unsafe fn substitute(sources: &Sources) -> *mut u8 {
+    let original = sources.container;
     let Ok(mut built) = BUILT.lock() else {
         // A poisoned mutex means a previous call panicked inside the lock. Handing back the
         // original is the one answer that cannot make that worse.
@@ -871,13 +1075,46 @@ unsafe fn substitute(original: *mut u8, panel: *mut u8, row: *mut u8) -> *mut u8
         return original;
     }
     // SAFETY: the caller established this is the quit tab's container definition.
-    match unsafe { build(original, panel, row) } {
+    match unsafe { build(sources) } {
         Some(replacement) => {
             built.push((original as usize, replacement as usize));
             replacement
         }
         None => original,
     }
+}
+
+/// Fetch every definition [`build`] copies from and run the substitution, caching as it goes.
+///
+/// # Safety
+///
+/// `original` must be the game's own lookup and `found` what it returned for
+/// [`ds2_rva::FLO_QUIT_TAB_CONTAINER_DEFINITION`] against `doc`.
+unsafe fn substitute_from(original: FindDefinitionFn, doc: *mut usize, found: *mut u8) -> *mut u8 {
+    // Fetched through the original so the copies are the game's own bytes rather than a
+    // substitution of ours read back.
+    let fetch = |index: u32| -> *mut u8 {
+        // SAFETY: the trampoline is the game's own lookup, called with its own arguments.
+        unsafe { original(doc, index) }
+    };
+    // The last two only when there is a seventh tab; on the System tab they are never read.
+    let (frame, subtree) = if crate::tab::armed() {
+        (
+            fetch(ds2_rva::FLO_TAB_FRAME_DEFINITION),
+            fetch(ds2_rva::FLO_TAB_SUBTREE_DEFINITION),
+        )
+    } else {
+        (std::ptr::null_mut(), std::ptr::null_mut())
+    };
+    let sources = Sources {
+        container: found,
+        panel: fetch(ds2_rva::FLO_PANEL_DEFINITION),
+        row: fetch(ds2_rva::FLO_QUIT_ROW_DEFINITION),
+        frame,
+        subtree,
+    };
+    // SAFETY: every field came from the game's own lookup against the document it was asked of.
+    unsafe { substitute(&sources) }
 }
 
 unsafe extern "system" fn detour(doc: *mut usize, index: u32) -> *mut u8 {
@@ -904,27 +1141,53 @@ unsafe extern "system" fn detour(doc: *mut usize, index: u32) -> *mut u8 {
         let slot = (index - ds2_rva::FLO_ADDED_ROW_DEFINITION) as usize;
         return ROW_DEFINITIONS[slot].load(Ordering::Acquire) as *mut u8;
     }
+    for (ours, published) in [
+        (ds2_rva::FLO_ADDED_TAB_SUBTREE_DEFINITION, &TAB_SUBTREE),
+        (ds2_rva::FLO_ADDED_TAB_FRAME_DEFINITION, &TAB_FRAME),
+        (ds2_rva::FLO_ADDED_TAB_CONTAINER_DEFINITION, &TAB_CONTAINER),
+    ] {
+        if index == ours {
+            // The seventh tab's own subtree. As the panel above: nothing in the file names these,
+            // so a lookup for one came from a record this crate wrote.
+            return published.load(Ordering::Acquire) as *mut u8;
+        }
+    }
     if index == ds2_rva::FLO_TAB_STRIP_DEFINITION && !found.is_null() {
         // THE TAB STRIP, and only when there is a seventh tab to put a cell under. A strip with an
         // extra cell and no group behind it is a tab the cursor can land on and that answers
         // nothing, which is worse than six tabs.
-        if crate::tab::group() != 0 {
-            // SAFETY: `found` is a definition the game's own table just yielded.
-            return unsafe { crate::strip::substitute(found) };
+        if crate::tab::group() == 0 {
+            return found;
         }
-        return found;
+        // BUILT BEFORE THE STRIP NAMES IT. The strip is walked from the top down, so the record
+        // added below is followed to our subtree in this same pass -- and the subtree does not
+        // exist until the container substitution has run. Doing it here rather than relying on the
+        // container being asked for first removes the ordering question entirely; it is cached, so
+        // on every later open this is a lock and a compare.
+        // SAFETY: the trampoline is the game's own lookup and the document is the one it was
+        // called with.
+        let container = unsafe { original(doc, ds2_rva::FLO_QUIT_TAB_CONTAINER_DEFINITION) };
+        if !container.is_null() {
+            // SAFETY: as above, and `container` is what that lookup returned.
+            unsafe { substitute_from(original, doc, container) };
+        }
+        // SAFETY: `found` is a definition the game's own table just yielded.
+        return unsafe { crate::strip::substitute(found) };
     }
     if index != ds2_rva::FLO_QUIT_TAB_CONTAINER_DEFINITION || found.is_null() {
         return found;
     }
-    // The shared panel definition and Quit Game's row definition, both fetched through the
-    // original so the copies are the game's own.
-    // SAFETY: the trampoline is the game's own lookup, called with its own arguments.
-    let panel = unsafe { original(doc, ds2_rva::FLO_PANEL_DEFINITION) };
-    // SAFETY: as above.
-    let row = unsafe { original(doc, ds2_rva::FLO_QUIT_ROW_DEFINITION) };
-    // SAFETY: `found` is a definition the game's own table just yielded.
-    unsafe { substitute(found, panel, row) }
+    // SAFETY: `found` is a definition the game's own table just yielded, and `original` is that
+    // table's own lookup.
+    let replacement = unsafe { substitute_from(original, doc, found) };
+    // ON A TAB OF OUR OWN THE GAME GETS ITS OWN CONTAINER BACK. The substitution still runs -- it
+    // is what builds the seventh tab's copy -- but the System tab keeps the seven records it
+    // shipped with, which is the whole point of the seventh tab existing.
+    if crate::tab::armed() {
+        found
+    } else {
+        replacement
+    }
 }
 
 /// Detour the definition lookup. Returns whether the row's cell will exist.
@@ -1119,21 +1382,85 @@ mod tests {
     }
 
     /// Every slot adds a row and a mark, in pairs, after the shipped records and never over them.
+    ///
+    /// Checked at both counts the substitution keeps: all seven on the System tab, the panel alone
+    /// on a tab of our own. The second is the arrangement that makes the seventh tab's rows start
+    /// at the top of the panel instead of below three rows that are no longer there.
     #[test]
     fn each_slot_adds_a_row_and_its_mark() {
         assert_eq!(
             CHILDREN,
             ds2_rva::FLO_QUIT_TAB_CHILD_IDS.len() + PER_ROW * MAX_ROWS
         );
-        assert_eq!(row_at(0), ds2_rva::FLO_QUIT_TAB_CHILD_IDS.len());
-        for slot in 0..MAX_ROWS {
-            assert_eq!(mark_at(slot), row_at(slot) + 1);
-            assert!(row_at(slot) >= ds2_rva::FLO_QUIT_TAB_CHILD_IDS.len());
-            assert!(mark_at(slot) < CHILDREN);
-            if slot > 0 {
-                assert_eq!(row_at(slot), mark_at(slot - 1) + 1);
+        for kept in [1, ds2_rva::FLO_QUIT_TAB_CHILD_IDS.len()] {
+            assert_eq!(row_at(kept, 0), kept);
+            for slot in 0..MAX_ROWS {
+                assert_eq!(mark_at(kept, slot), row_at(kept, slot) + 1);
+                assert!(row_at(kept, slot) >= kept);
+                assert!(mark_at(kept, slot) < CHILDREN);
+                if slot > 0 {
+                    assert_eq!(row_at(kept, slot), mark_at(kept, slot - 1) + 1);
+                }
             }
         }
+    }
+
+    /// The one shipped record a tab of our own keeps is the panel, and it is the record the panel
+    /// substitution and the scroll both address by index.
+    ///
+    /// If [`kept`] ever returned zero, or the panel were not child zero, the seventh tab would lose
+    /// the surface its rows are drawn on and the caret with it -- silently, because every write
+    /// below would still land inside the array.
+    #[test]
+    fn the_record_a_tab_of_our_own_keeps_is_the_panel() {
+        const {
+            assert!(ds2_rva::FLO_QUIT_TAB_PANEL == 0);
+            assert!(ds2_rva::FLO_QUIT_TAB_ROW_TEMPLATE > ds2_rva::FLO_QUIT_TAB_PANEL);
+            assert!(ds2_rva::FLO_QUIT_TAB_MARK_TEMPLATE > ds2_rva::FLO_QUIT_TAB_PANEL);
+            // Room for the ceiling's worth of rows even with the shipped six dropped, which is the
+            // easy direction -- dropping records can only leave more room, never less.
+            assert!(PER_ROW * MAX_ROWS < CHILDREN);
+        }
+    }
+
+    /// The three indices the seventh tab's subtree is served under are its own, and the element id
+    /// it hangs from is not one the document already uses at that level.
+    #[test]
+    fn the_added_tab_definitions_collide_with_nothing() {
+        let ours = [
+            ds2_rva::FLO_ADDED_TAB_SUBTREE_DEFINITION,
+            ds2_rva::FLO_ADDED_TAB_FRAME_DEFINITION,
+            ds2_rva::FLO_ADDED_TAB_CONTAINER_DEFINITION,
+            ds2_rva::FLO_ADDED_PANEL_DEFINITION,
+        ];
+        for (i, index) in ours.iter().enumerate() {
+            assert!(!ours[..i].contains(index), "{index:#x} is served twice");
+            assert!(
+                *index > 0x0272,
+                "{index:#x} is inside the file's own range and would shadow a real definition"
+            );
+            // The rows claim one index per slot from their base, so the block they own grows with
+            // `MAX_ROWS` and a neighbouring index is only free until it does not fit any more.
+            assert!(
+                *index < ds2_rva::FLO_ADDED_ROW_DEFINITION
+                    || *index >= ds2_rva::FLO_ADDED_ROW_DEFINITION + MAX_ROWS as u32,
+                "{index:#x} lands inside the added rows' own block"
+            );
+            for shipped in [
+                ds2_rva::FLO_TAB_SUBTREE_DEFINITION,
+                ds2_rva::FLO_TAB_FRAME_DEFINITION,
+                ds2_rva::FLO_QUIT_TAB_CONTAINER_DEFINITION,
+                ds2_rva::FLO_PANEL_DEFINITION,
+                ds2_rva::FLO_TAB_STRIP_DEFINITION,
+            ] {
+                assert_ne!(*index, shipped);
+            }
+        }
+        assert_ne!(
+            ds2_rva::FLO_ADDED_TAB_SUBTREE_ID,
+            ds2_rva::FLO_TAB_STRIP_PANEL_ID
+        );
+        assert!(!ds2_rva::FE_QUIT_TAB_BASE_PATH.contains(&ds2_rva::FLO_ADDED_TAB_SUBTREE_ID));
     }
 
     /// The struct is what its pointers assume: the child array immediately follows the definition,
@@ -1142,15 +1469,18 @@ mod tests {
     fn the_container_is_laid_out_the_way_the_game_reads_it() {
         // The fields, then whatever `align(16)` adds on the end. Asserting the bare sum would fail
         // on the padding rather than on a field, which is the opposite of what this is for.
-        // Per container: the container definition, the panel's copy, and one row definition per
-        // slot. Per container transforms: the panel's and the caret's. Per slot: a row transform,
-        // a mark transform and an icon transform.
-        let fields = ds2_rva::FLO_DEFINITION_STRIDE * (2 + MAX_ROWS)
+        // Per container: the container definition, the panel's copy, the two levels between the
+        // strip and the container, and one row definition per slot. Per container transforms: the
+        // panel's and the caret's. Per slot: a row transform, a mark transform and an icon
+        // transform.
+        let fields = ds2_rva::FLO_DEFINITION_STRIDE * (4 + MAX_ROWS)
             + ds2_rva::FLO_RECORD_STRIDE * CHILDREN
             + ds2_rva::FLO_TRANSFORM_SIZE * (2 + 3 * MAX_ROWS)
             + ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_QUIT_TAB_CHILD_IDS.len()
             + ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_PANEL_CHILDREN
-            + ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_QUIT_ROW_CHILDREN * MAX_ROWS;
+            + ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_QUIT_ROW_CHILDREN * MAX_ROWS
+            + ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_TAB_SUBTREE_CHILDREN
+            + ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_TAB_FRAME_CHILDREN;
         assert_eq!(
             std::mem::size_of::<Container>(),
             fields.next_multiple_of(16)
