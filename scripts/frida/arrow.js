@@ -155,6 +155,18 @@ const PLUMB_METRES = 8.0;
 const PLUMB_LENGTH_PX = 120;
 const PLUMB_COLOUR = [0.25, 1.0, 0.35, 1.0];
 
+/// How far above `CharacterCtrl+0x90` to hang the arrow, in metres.
+///
+/// `+0x90` is the character's ORIGIN, and the origin is at the feet -- visible in the screenshot
+/// that settled the pointing: the cyan dot sat on the ground between the boots, which is the
+/// right place for a dot whose job is to prove the projection and the wrong place for an arrow
+/// you are meant to read while playing. This is a DRAWING OFFSET CHOSEN BY EYE, not a field read
+/// out of the game: no capsule-height member has been located, so calling it measured would be a
+/// lie. It is applied at BOTH ends -- the arrow leaves your chest and aims at theirs -- because
+/// an arrow from a torso to a pair of boots tips downward by an angle that grows as the target
+/// gets closer, and that tilt would be indistinguishable from a projection bug.
+const TORSO_METRES = 1.1;
+
 /// The game image, and WHAT IT WAS FOUND BY, because one silent null here cost a whole session.
 ///
 /// `playerPosition` opens with `if (base === null) return null`, so a module lookup that misses
@@ -194,6 +206,11 @@ const counters = {
   /// How many times the believed matrix has been re-read. A FROZEN COUNT HERE IS A STALE CAMERA,
   /// and a stale camera draws a confident arrow at where the character used to be.
   refreshed: 0,
+  /// Presented frames that got a matrix read AT DRAW TIME out of the pinned source buffer, and
+  /// the ones where that read did not survive the shape test. `reread` should track `present`
+  /// almost exactly; if `rereadFailed` is the big number the source buffer is not persistent and
+  /// the arrow is back to whatever the upload path last caught.
+  reread: 0, rereadFailed: 0,
 };
 const tracked = new Map();
 /// The same slots as `tracked`, as an array to be walked with a native pointer compare.
@@ -238,6 +255,23 @@ let throttled = 0;
 /// and "no character to scan against" look identical from outside and mean opposite things.
 let unreadable = 0;
 let believed = null;
+/// The CPU-side buffer the camera was last successfully read out of, kept so the DRAW can read it
+/// again instead of waiting for the upload path to hand one over.
+///
+/// MEASURED, 2026-09-22, live: three hundred presented frames per heartbeat window against ten
+/// camera refreshes in the same window. The matrix the arrow drew with was one frame in thirty --
+/// half a second old at 60 Hz -- which is precisely the lag you see when you pan. `follows` had
+/// frozen at 357 forever (the destination resource moved and never came back), so `refresh` on
+/// the gated upload path was the only supply, and the gate throws away 1 upload in 2 out of a
+/// quarter of a million per window.
+///
+/// Reading the SOURCE buffer at draw time decouples the two entirely: the camera is read once per
+/// frame that is actually drawn, on the frame it is drawn. It costs nothing on the upload path.
+/// It is only sound if the game's source buffer is a persistent field rather than a stack temp,
+/// which is why `reread` runs the same shape test before believing what it read and counts both
+/// outcomes -- a stack temp would fail it every frame and say so in the heartbeat rather than
+/// quietly drawing with rubbish.
+let cameraSource = null;
 /// The character the orange arrow points at, latched so it stays the same one.
 let target = null;
 /// Why the roster walk came back with nobody. `scripts/ds2-player-chain.py` reads the same
@@ -734,7 +768,34 @@ function refresh(source) {
   if (score(m, playerPosition(), false) === null) return;
   // COPY: `m` is one of two scratch buffers the next read overwrites.
   believed.matrix = m.slice();
+  cameraSource = source;
   counters.refreshed += 1;
+}
+
+/// Read the camera again, at draw time, out of the buffer it came from last.
+///
+/// This is the whole answer to "why does the arrow lag when I turn". Everything else in this file
+/// waits for D3D to hand it a camera; this asks for one. It runs inside `Present`, one frame
+/// before the arrow is drawn with it, so the matrix and the character are read microseconds
+/// apart and the arrow cannot be aiming with a camera from a different moment than the one it is
+/// drawing into.
+///
+/// It refuses to believe a bad read rather than falling back silently: a freed or reused buffer
+/// fails `readMatrix` or the shape test, `rereadFailed` climbs where you can see it, and the
+/// previous matrix stands. That is a visible half-second of lag instead of an invisible frame of
+/// garbage.
+function reread() {
+  if (cameraSource === null || believed === null) return;
+  const candidate = believed.candidate;
+  if (!readMatrix(cameraSource.add(candidate.offset))) { counters.rereadFailed += 1; return; }
+  let m = RAW;
+  if (candidate.convention === 'transposed') { transposeRaw(); m = TRANSPOSED; }
+  // SHAPE ONLY. The character test in `refresh` exists to separate a camera from a coincidence
+  // during discovery; here the buffer has already been identified and the only question is
+  // whether what it holds right now is still a view-projection.
+  if (score(m, null, false) === null) { counters.rereadFailed += 1; return; }
+  believed.matrix = m.slice();
+  counters.reread += 1;
 }
 
 function prune(slot) {
@@ -770,10 +831,11 @@ function follow(slot, source, player) {
     note(candidate, verdict, player);
     // COPY. `m` is one of two scratch buffers that the very next window overwrites; handing the
     // live buffer to the Present hook would have it drawing with whatever was read last.
-    if (believed !== null) { believed.matrix = m.slice(); continue; }
+    if (believed !== null) { believed.matrix = m.slice(); cameraSource = source; continue; }
     if (candidate.grounded < PASSES_TO_BELIEVE) continue;
     if (spreadOf(candidate) < SPREAD_TO_BELIEVE) continue;
     believed = { slot, candidate, matrix: m.slice() };
+    cameraSource = source;
     console.log(
       '\n[arrow] ===== VIEW-PROJECTION CONFIRMED =====\n' +
       '[arrow] ' + slot.label + ' resource ' + slot.key + ' +0x' + candidate.offset.toString(16) +
@@ -1046,7 +1108,20 @@ function proof(state, m, player, here) {
   );
 }
 
+/// `position + up * metres`, which is how every point this file draws is built.
+function lift(position, metres) {
+  return [
+    position[0] + upAxis[0] * metres,
+    position[1] + upAxis[1] * metres,
+    position[2] + upAxis[2] * metres,
+  ];
+}
+
 function draw(state) {
+  // THE CAMERA FIRST, AND ON THIS FRAME. Read before the character rather than after, so the two
+  // describe the same instant; a camera read after a character read is a camera from the future
+  // by however long the roster walk takes.
+  reread();
   const player = playerPosition();
   if (player === null || believed === null) return;
   // THE TARGET IS A LIVE OBJECT, NOT A SPOT ON THE GROUND. A fixed breadcrumb could be pointed
@@ -1066,25 +1141,28 @@ function draw(state) {
   if (target === null) return;
   const m = believed.matrix;
 
-  const here = toClip(m, player);
+  // CHEST, NOT BOOTS. `player` stays the feet for everything that reasons about the world -- the
+  // camera-distance bound in `score`, the roster's nearest-character test -- and only the drawing
+  // is lifted, so raising the arrow cannot move the thing the arrow is checked against.
+  const chest = lift(player, TORSO_METRES);
+  const here = toClip(m, chest);
   if (!(here[3] > 0.05)) return;
   // THE BASE IS WHERE THE CHARACTER IS, not the middle of the frame by assumption. If those two
   // are not the same place the matrix is wrong, and drawing the base at the character is what
   // makes that visible instead of hiding it.
   const baseX = (here[0] / here[3] * 0.5 + 0.5) * state.width;
   const baseY = (0.5 - here[1] / here[3] * 0.5) * state.height;
-  if (!proved) proof(state, m, player, here);
+  // `chest`, NOT `player`. `proof` steps one metre from the point it is given and subtracts the
+  // clip position it is given, so handing it two different points would report the torso offset
+  // as a projection error and fail three identities that are fine.
+  if (!proved) proof(state, m, chest, here);
 
-  const plumb = bearing(state, m, here, [
-    player[0] + upAxis[0] * PLUMB_METRES,
-    player[1] + upAxis[1] * PLUMB_METRES,
-    player[2] + upAxis[2] * PLUMB_METRES,
-  ]);
+  const plumb = bearing(state, m, here, lift(chest, PLUMB_METRES));
   if (plumb !== null) {
     paint(state, PLUMB_COLOUR, arrow(state, 0, baseX, baseY, plumb, PLUMB_LENGTH_PX));
   }
 
-  const unit = bearing(state, m, here, target.position);
+  const unit = bearing(state, m, here, lift(target.position, TORSO_METRES));
   if (unit !== null) {
     paint(state, ARROW_COLOUR, arrow(state, 0, baseX, baseY, unit, ARROW_LENGTH_PX));
   }
@@ -1250,7 +1328,10 @@ setInterval(function () {
     '[arrow] heartbeat: ' + counters.present + ' present, ' + counters.drawn + ' drawn, ' +
     counters.update + ' update, ' + counters.map + ' map, ' + examined.size + ' resources seen, ' +
     counters.scans + ' scans, ' + counters.scored + ' scored, ' + counters.tracked + ' tracked, ' +
-    counters.follows + ' follows, ' + counters.refreshed + ' camera refreshes' +
+    counters.follows + ' follows, ' + counters.refreshed + ' camera refreshes, ' +
+    // THE RATE, NOT THE TOTAL. What matters is this number against `present`: equal means the
+    // camera is read on every frame it is drawn with, and anything less is lag you can see.
+    counters.reread + ' per-frame camera reads (' + counters.rereadFailed + ' rejected)' +
     (throttled > 0 ? ', THROTTLED ' + throttled : '') +
     (unreadable > 0 ? ', CHARACTER UNREADABLE ' + unreadable + ' times' : '');
   unreadable = 0;
