@@ -1251,6 +1251,29 @@ Component 1 is now rewritten before the append, the same one component `install.
 every cell path and `tab.rs` in the group's own path. The shipped row's rename keeps the System
 tab's, explicitly, because that row is still on that tab.
 
+### A caption outlived the press that set it
+
+`set_row_caption` rewrites a leaked buffer in place -- it has to, because the game keeps the pointer
+-- and nothing ever wrote that buffer back. So a row reporting what it was doing went on reporting
+it after it had stopped: through the menu being closed, through the return to the title, and into
+the next character loaded. On 2026-09-23 a swap was abandoned at the title, the player loaded back
+into a game, and the row was still saying "Returning to the title to pick a character...".
+
+Two writes-back, one per moment a stale caption is visible:
+
+* `caption.rs`'s bind detour puts every caption back to its registered text before it pushes. The
+  bind is the pause menu being built, so the rule is that a menu which has just been opened carries
+  rows nobody has pressed yet in this visit. A result stays up for as long as the menu that produced
+  it, which is where it is read; the next open is a new question.
+* `ds2_menu_row::reset_row_caption` is the row saying so itself, for the case where the menu is not
+  going anywhere. A swap whose confirm the player declined leaves the pause menu up and the flow
+  finished, and `ds2-save-file`'s swap calls it on every path that ends one.
+
+The bind is what proves the first one reaches the screen at all: the stale caption in that run was
+drawn in a session whose menu group had been built from scratch, and the per-frame push only runs on
+a frame something marked dirty. Nothing marked anything dirty in that session, so the write that
+drew it was the bind's.
+
 ### The panel was three rows longer than its list
 
 `banner.rs` grew the panel's quad by one row pitch per registered row from the shipped `342.35`,

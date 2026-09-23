@@ -54,6 +54,23 @@ pub fn set_row_caption(row: crate::RowId, text: &str) -> bool {
     crate::caption::set_caption(row.0, text)
 }
 
+/// Put a row's caption back to the text it registered.
+///
+/// Call it when a flow that borrowed the label is over. It reaches the screen the same way
+/// [`set_row_caption`] does -- the pause menu's own per-frame push if the menu is up, the next
+/// caption bind if it is not.
+///
+/// Calling it is not what keeps a stale caption off the screen the next time the menu is opened:
+/// every caption goes back to its registered text at bind, whether or not the row that changed it
+/// remembered to say so. What this buys is the label going back **while the player is still looking
+/// at it** -- a swap whose confirm was declined leaves the menu up, and a row that goes on
+/// announcing a departure nobody took is the thing to avoid.
+///
+/// Returns whether the row exists.
+pub fn reset_row_caption(row: crate::RowId) -> bool {
+    crate::caption::reset_caption(row.0)
+}
+
 /// Push every registered row's caption onto its element now.
 ///
 /// # Safety

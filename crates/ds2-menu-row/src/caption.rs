@@ -237,6 +237,47 @@ pub(crate) fn set_caption(row: usize, text: &str) -> bool {
     }
 }
 
+/// Put one row's caption back to the text it registered. Safe to call from any thread.
+///
+/// The counterpart to [`set_caption`], for the moment a flow ends. A row that said
+/// "Returning to the title to pick a character..." and then finished has no further claim on the
+/// label, and a label that describes something the row is no longer doing is worse than a plain
+/// one -- it reads as a row stuck mid-press.
+pub(crate) fn reset_caption(row: usize) -> bool {
+    let registered = crate::api::rows_for(crate::api::Tab::Quit)
+        .get(row)
+        .map(|registered| registered.caption);
+    match registered {
+        Some(text) => set_caption(row, text),
+        None => false,
+    }
+}
+
+/// Put every caption back to the text its row registered.
+///
+/// Called from [`bind_detour`], which is the pause menu being built -- and a menu that has just
+/// been built is one whose rows nobody has pressed yet in this visit. Without it a caption is
+/// written once and then lives as long as the process: the buffers are leaked and rewritten in
+/// place, so a row that reported something during one visit goes on reporting it through the menu
+/// being closed, through the return to the title, and into the next character the player loads.
+/// That is what one live run on 2026-09-23 produced -- a row still saying it was on its way to the
+/// title, in a session that had already arrived and started playing.
+///
+/// A result stays on screen for as long as the menu that produced it stays open, which is where it
+/// is read; the next open is a new question.
+fn reset_captions() {
+    let Ok(mut captions) = ROW_CAPTIONS.lock() else {
+        return;
+    };
+    ensure_row_captions(&mut captions);
+    for (caption, registered) in captions
+        .iter()
+        .zip(crate::api::rows_for(crate::api::Tab::Quit))
+    {
+        write_units(caption, registered.caption);
+    }
+}
+
 /// `FeGroupInGameTopSelect::v2`, detoured: run the game's update, then push any changed caption.
 ///
 /// **This is what makes a caption change VISIBLE while the menu is still open.** Without it, a row
@@ -516,6 +557,10 @@ unsafe extern "system" fn append_detour(path: *const u8, out: *mut u8, id: u32) 
 
 unsafe extern "system" fn bind_detour(top_select: *mut u8) {
     TOP_SELECT.store(top_select as usize, Ordering::Release);
+    // THE MENU IS BEING BUILT, so every row starts this visit saying what it registered. Before the
+    // original rather than after, so the defaults are in place even on the path below that gives up
+    // without capturing a path and pushes nothing.
+    reset_captions();
     if let Ok(mut captured) = CAPTURED.lock() {
         *captured = None;
     }
@@ -694,9 +739,73 @@ pub unsafe fn install(base: usize) -> bool {
     ok
 }
 
+/// What a row's caption buffer currently reads as, for the tests below.
+///
+/// The length the game would measure, not the capacity: a reset that wrote the shorter string over
+/// the longer one without shortening the length would still read as the old text, and that is the
+/// bug this is here to catch.
+#[cfg(test)]
+fn caption_text(row: usize) -> Option<String> {
+    let captions = ROW_CAPTIONS.lock().ok()?;
+    let caption = captions.get(row)?;
+    // SAFETY: both pointers are this module's own leaked allocations, the lock is held, and the
+    // length is the one `write_units` wrote alongside the units it counted.
+    unsafe {
+        let length = (*caption.text).length as usize;
+        Some(String::from_utf16_lossy(std::slice::from_raw_parts(
+            caption.units,
+            length,
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A caption a flow changed goes back to the text its row registered -- by the row saying so,
+    /// and by the menu being rebuilt.
+    ///
+    /// One test rather than two because both halves share one process-wide registry and one set of
+    /// leaked buffers; split, they would race each other over the same row.
+    ///
+    /// The live run this comes from: 2026-09-23, a swap that left the game, was abandoned at the
+    /// title, and let the player load a character -- whose pause menu came up with the row still
+    /// saying it was on its way to the title to pick one.
+    #[test]
+    fn a_caption_goes_back_to_what_its_row_registered() {
+        const REGISTERED: &str = "Load Character from File";
+        const DURING: &str = "Returning to the title to pick a character...";
+        let row = crate::api::add_row(crate::api::RowSpec {
+            tab: crate::api::Tab::Quit,
+            caption: REGISTERED,
+            icon: ds2_rva::FLO_QUIT_ICON_DEFINITION,
+            tint: None,
+            on_confirm: || {},
+        })
+        .expect("nothing else in this crate registers a row");
+
+        assert!(set_caption(row.0, DURING));
+        assert_eq!(caption_text(row.0).as_deref(), Some(DURING));
+        // The row saying the flow is over. Note the registered text is the SHORTER of the two, so a
+        // reset that left the length behind would read as the tail of the message it replaced.
+        assert!(reset_caption(row.0));
+        assert_eq!(caption_text(row.0).as_deref(), Some(REGISTERED));
+
+        // And the backstop: the menu being built puts every caption back, whether or not the row
+        // that changed it remembered to.
+        assert!(set_caption(row.0, DURING));
+        reset_captions();
+        assert_eq!(caption_text(row.0).as_deref(), Some(REGISTERED));
+    }
+
+    /// A row that was never registered has no caption to put back, and asking for one is not a
+    /// panic -- `ds2-save-file` asks on every abandoned swap, including in a build where its row
+    /// was refused for want of a slot.
+    #[test]
+    fn resetting_a_row_that_does_not_exist_is_refused() {
+        assert!(!reset_caption(usize::MAX));
+    }
 
     /// The shipped row's replacement must be NUL-terminated, because the setter walks to the
     /// terminator itself and an unterminated buffer is a read off the end of this DLL's data. The

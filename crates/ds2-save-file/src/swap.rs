@@ -401,6 +401,7 @@ fn title_gate() -> ds2_continue::TitleStep {
                      again"
                 ));
                 *guard = None;
+                crate::import::restore();
                 return TitleStep::Finished;
             }
             log_line(format_args!(
@@ -462,6 +463,10 @@ fn abandon(why: &str) {
     let save = unsafe { session_dir::SAVE.disarm() };
     ds2_continue::clear_title_gate();
     ds2_dialog_skip::release();
+    // AND THE LABEL, which the press borrowed to say the game was being left. This is the path that
+    // reaches a player who declined the confirm: the pause menu is still up, still in front of
+    // them, and the row would otherwise go on announcing a departure that never happened.
+    crate::import::restore();
     log_line(format_args!(
         "{LOG_PREFIX} swap ABANDONED -- {why}. load-side-restored={load} save-side-restored={save}"
     ));
@@ -495,6 +500,10 @@ fn load_confirmed(slot: i32) {
     ds2_dialog_skip::release();
     *guard = None;
     drop(guard);
+    // The flow is over, so the row's label is its own again -- before the character finishes
+    // loading, so the first pause menu of the new session is bound from a caption that has already
+    // been put back.
+    crate::import::restore();
     if armed {
         log_line(format_args!(
             "{LOG_PREFIX} swap done slot={slot} -- loading from {staged}, and this session now \

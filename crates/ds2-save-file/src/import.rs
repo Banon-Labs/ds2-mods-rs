@@ -354,6 +354,19 @@ fn announce(caption: &'static str) {
     let _ = unsafe { ds2_menu_row::refresh_row_captions() };
 }
 
+/// Give the label back, for every path that ends a flow which borrowed it.
+///
+/// Deliberately does not push: [`announce`] can, because it runs inside the row's own confirm with
+/// the menu up, and most callers of this one are at the title where there is no pause menu to write
+/// into. Rewriting the buffer is enough -- the menu's own per-frame push takes it if the menu is up,
+/// and the next caption bind takes it if it is not.
+pub(crate) fn restore() {
+    let Some(row) = crate::registered_import_row() else {
+        return;
+    };
+    ds2_menu_row::reset_row_caption(row);
+}
+
 /// Read and CONSUME a handoff left by a previous session.
 ///
 /// Called by the loader during attach, before anything has built a save path. Returns the path the
