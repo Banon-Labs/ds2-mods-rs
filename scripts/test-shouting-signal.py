@@ -13,7 +13,7 @@ two definitions that drift apart are worse than one, because the disagreement is
 somebody is refused by one arm and waved through by the other. So the patterns and the threshold
 are compared across all three files here, byte for byte.
 
-THE FALSE POSITIVE THAT MATTERS. This repo is written in acronyms, register names, screaming-snake
+The false positive that matters. This repo is written in acronyms, register names, screaming-snake
 constants, mangled Ghidra symbols and hex. A guard that read "capital letters" as the offence would
 make it unwritable, and would do it in the one place an author cannot argue back -- after the text
 is composed. So most of what follows proves that names stay silent.
@@ -75,9 +75,10 @@ CASES = [
         "content_words_only",
         "ONE ROW PITCH PER ADDED ROW.",
         True,
-        "four or more capitalised words with no function word among them. The only shape of this "
-        "kind in the whole repo, and the single case that the run rule catches and the word list "
-        "cannot -- which is what stops the run rule being dead weight",
+        "four or more capitalised words with no function word among them, which the word list "
+        "cannot see by construction. No line of this shape survives in the tracked tree today, so "
+        "the case is synthetic on purpose: it is what the run rule is for, and without it nothing "
+        "would notice if that rule stopped working",
     ),
     # --- identifiers, which are one token to a word boundary --------------------------------------
     Case(
@@ -124,7 +125,7 @@ CASES = [
         "comma_separated_acronyms",
         "Sections: PE, COFF, IAT, TLS, PEB.",
         False,
-        "PUNCTUATION ENDS A RUN, and this is the case that requires it. Five acronyms in a row "
+        "Punctuation ends a run, and this is the case that requires it. Five acronyms in a row "
         "would otherwise read as one shouted phrase; the commas are what say they are a list",
     ),
     Case(
@@ -146,8 +147,9 @@ CASES = [
         "The build is staged for DARK SOULS II and nothing else.",
         False,
         "three capitalised words, which is what a proper noun written out looks like. The "
-        "threshold sits one above this on purpose: at three, the sweep that tuned the guard "
-        "collected the game's name 114 times and nobody shouting",
+        "threshold sits one above this on purpose: dropping to three would add 86 runs to the "
+        "sweep that tuned the guard, and 80 of them are the game's name, a title-screen prompt "
+        "and two file markers",
     ),
     # --- verbatim spans ---------------------------------------------------------------------------
     Case(
@@ -175,7 +177,7 @@ CASES = [
         "removed_span_does_not_weld_two_runs",
         "LOAD GAME `FeSubStateTitleLoadDataList` NEW GAME.",
         False,
-        "REMOVING A SPAN MUST NOT CREATE A RUN. Two capitalised words either side of a code span "
+        "Removing a span must not create a run. Two capitalised words either side of a code span "
         "are two runs of two, not one run of four; the pieces are rejoined with a newline rather "
         "than a space for exactly this reason",
     ),

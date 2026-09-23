@@ -8,44 +8,56 @@ docs_no_shouting.rego` carries them verbatim for the PreToolUse arm; the equalit
 copies is asserted by `scripts/test-shouting-signal.py`, because a guard whose two halves disagree
 about what they forbid is worse than one half.
 
-USER DIRECTIVE, 2026-09-23, written in the style it is complaining about: "When I TALK LIKE THIS
-everyone thinks the WORDS ARE IMPORTANT but really it distracts from the SUBSTANCE OF THE MESSAGE
-which is burried by font style and EXCESSIVE PROSE". Capitals used as volume are skimmed exactly
-like a wall of text is skimmed, and the sentence they were meant to rescue goes with them.
+The user's directive, 2026-09-23, written in the style it is complaining about: "When I TALK LIKE
+THIS everyone thinks the WORDS ARE IMPORTANT but really it distracts from the SUBSTANCE OF THE
+MESSAGE which is burried by font style and EXCESSIVE PROSE". Capitals used as volume are skimmed
+exactly like a wall of text is skimmed, and the sentence they were meant to rescue goes with them.
 
 The test is two tests, and both were tuned by sweeping this repo's own prose rather than guessed.
-The sweep is every Markdown file plus every Rust doc comment under `crates/`, verbatim spans
-already removed.
+The sweep is the 120 git-tracked Markdown files and Rust sources in the main checkout, read at the
+scope `doc_text` below defines, with verbatim spans already removed.
 
   1. A run of `MIN_RUN` or more capitalised words in a row. Four, and the number is measured. At
-     four the sweep finds 56 runs and every one of them is the habit -- "the field is opened
-     here", "answered, and the answer is that this field does nothing". At three it finds 175
-     more, and 170 of those are nobody shouting: the game's name written out (114), the beads
-     integration markers in CLAUDE.md (48) and a title-screen prompt (8). Three costs thirty-four
-     false positives for every real one it adds; four costs none.
+     four the sweep finds 54 runs and every one of them is the habit -- "the field is opened
+     here", "answered, and the answer is that this field does nothing". At three it finds 86 more,
+     and 80 of those are nobody shouting: the game's name written out (68), a title-screen prompt
+     (8) and the beads integration markers in CLAUDE.md (4). Three costs thirteen false positives
+     for every real one it adds; four costs none.
 
   2. One capitalised word drawn from a closed list of function words and absolutes. This is what
      catches "NOTHING in ds2-save-file has been run" and "STARTUP-ONLY, both of them", which are
      single words and are unmistakably shouted. It works precisely because the list contains
      nothing that could be a name: `DLL`, `RVA`, `AES`, `TOML`, `CPU` and `OK` are things, while
      `the`, `not`, `every` and `only` are volume. The list is read out of the same sweep -- it
-     fires 702 times there, on 70 distinct words, and every sampled one is the habit, including
-     all 203 capitalised "NOT"s, 54 "NEVER"s and 48 "AND"s. The words deliberately left off it
+     fires 542 times there, on 70 distinct words, led by 110 capitalised "NOT"s, 62 "THE"s, 44
+     "IS"s and 27 "AND"s, and every sampled one is the habit. The words deliberately left off it
      were read out of the sweep too: `ON`/`OFF`, `YES`/`NO`, `TRUE`/`FALSE` and `NEXT` are
      table-cell values here, `LEFT`/`RIGHT` are hand positions, `BE`/`LE` are byte orders, `OUT`
      is a parameter direction, `ONE`/`TWO` are counts, and `OR` appears only as "OR'd together".
 
-The second test is what makes the first one safe to set as high as four: between them, a shouted
-sentence has to be both short and made entirely of content words to get through, and the one
-example of that in the whole repo is a single Rust doc comment.
+Why keep the run rule when the word list already reaches all 54. Because the word list is a list,
+and a list is only ever as good as the last person to extend it. A shouted phrase built entirely
+out of content words -- "one row pitch per added row" -- is invisible to it by construction, and
+the run rule catches that without knowing any vocabulary at all. It costs nothing to keep: on this
+repo it has no false positives of its own.
 
-RESIDUE, said out loud rather than left to be discovered. `AND` and `NOT` name logic operations as
-well as volume, so "an AND and a compare" written without backticks is refused; backticks are the
-fix and are already this repo's habit for an opcode. A quoted span is exempt wholesale, so a
-shouted heading someone quotes back survives -- which is the right trade, since punishing an agent
-for quoting the user would be worse. And a launch banner is not exempted: AGENTS.md requires the
-banner to sit immediately before the launch call, which puts it mid-turn where the Stop arm never
-looks, so a banner that this guard can see has already been written in the wrong place.
+Residue, said out loud rather than left to be discovered.
+
+  * `AND` and `NOT` name logic operations as well as volume, so "an AND and a compare" written
+    without backticks is refused. Backticks are the fix and are already the habit here for an
+    opcode. Measured once in 2,347 blocks of the agent's own chat prose.
+  * A hyphenated identifier in capitals inherits the word list through its parts, so a rule id
+    like `DS2-MODS-NO-SHOUTING-AT-TURN-END` would be refused in prose. None of the 47 such tokens
+    in the swept documentation is one; the three that carry a list word -- `STARTUP-ONLY`,
+    `SECOND-HAND`, `STAND-IN` -- are all the habit, and the first is one of the cases the user
+    named.
+  * A quoted span is exempt wholesale, so a shouted heading somebody quotes back survives. That is
+    the right trade: punishing an agent for quoting the user verbatim would be worse.
+  * A launch banner is not exempted. AGENTS.md requires the banner to sit immediately before the
+    launch call, which puts it mid-turn where the Stop arm never looks, so a banner this guard can
+    see has already been written in the wrong place. Measured over 478 turn-closing prose runs in
+    this project's transcripts, 19 would halt and 12 of those are banners written after the launch
+    rather than before it.
 
 Everything else that looks capitalised is excluded by the word boundary alone, which is why there
 is no allow-list of identifiers: `SAVE_DIR_BUILD`, `FE_INGAME_MENU_ITEM_VECTOR_CAPACITY` and

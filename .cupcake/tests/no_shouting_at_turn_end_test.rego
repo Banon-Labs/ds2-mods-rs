@@ -74,8 +74,8 @@ test_allow_below_the_threshold if {
 }
 
 # Three capitalised words in a row, scored 3, which is what a proper noun written out looks like.
-# The threshold sits one above it deliberately: at three, the sweep that tuned this guard collected
-# the game's name 114 times and nobody shouting.
+# The threshold sits one above it deliberately: dropping to three would add 86 runs to the sweep
+# that tuned this guard, 80 of them the game's name, a title-screen prompt and two file markers.
 test_allow_three_capitalised_words if {
 	not halted(facts("3", "The build is staged for DARK SOULS II and nothing else."))
 }

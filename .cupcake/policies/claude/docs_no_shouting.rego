@@ -25,20 +25,21 @@ import rego.v1
 # supposed to be rescued goes down with it.
 #
 # What is refused, and both halves are measured rather than guessed. The measurement is a sweep of
-# every Markdown file here plus every Rust doc comment under crates/, with backticked spans, fenced
-# blocks and quoted spans already removed; scripts/cupcake_shouting.py carries the full working.
+# the 120 git-tracked Markdown files and Rust sources in this checkout, read at the scope below,
+# with backticked spans, fenced blocks and quoted spans already removed;
+# scripts/cupcake_shouting.py carries the full working.
 #
-#   1. Four or more capitalised words in a row. At four the sweep finds 56 of them and every one is
-#      the habit. At three it finds 175 more, and 170 of those are the game's name written out, the
-#      beads markers in CLAUDE.md and a title-screen prompt -- thirty-four false positives for each
+#   1. Four or more capitalised words in a row. At four the sweep finds 54 of them and every one is
+#      the habit. At three it finds 86 more, and 80 of those are the game's name written out, a
+#      title-screen prompt and the beads markers in CLAUDE.md -- thirteen false positives for each
 #      real one. Four is where that stops.
 #
 #   2. One capitalised word taken from a closed list of function words and absolutes -- the, not,
 #      every, only, must, never. This is the half that catches a one-word shout, which the run rule
 #      cannot see, and it is safe to run at one word precisely because no entry on the list could
-#      ever be a name. It fires 702 times across the same sweep and every sampled hit is the habit.
+#      ever be a name. It fires 542 times across the same sweep and every sampled hit is the habit.
 #
-# What is NOT refused, and none of it needs an allow-list of its own. A word boundary treats an
+# What survives, and none of it needs an allow-list of its own. A word boundary treats an
 # underscore as part of the word, so SAVE_DIR_BUILD, FE_INGAME_MENU_ITEM_VECTOR_CAPACITY and
 # FUN_1402e67f0 are one token and never match; a digit does the same for DS2, BND4, MD5, UTF-8 and
 # DS2SOFS0000.sl2; a lowercase letter does it for DllMain. Acronyms in an ordinary sentence -- DLL,
