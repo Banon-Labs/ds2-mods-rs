@@ -1111,8 +1111,6 @@ def config_text(
     offline: bool = True,
     block_sockets: bool = True,
     save_redirect: str | None = None,
-    menu_row: bool = False,
-    build_import: bool = False,
     inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
@@ -1467,7 +1465,15 @@ def config_text(
 # identical there. `{MENU_ROW_LOG_PREFIX} container substituted ...` and `... cell named ...` are
 # the two lines that say the row should exist, and `row-extent` on the tab line is what says it
 # does.
-{KEY_MENU_ROW_ENABLED} = {str(menu_row).lower()}
+# {KEY_MENU_ROW_ENABLED} = true
+#
+# COMMENTED OUT BY THIS SCRIPT, ALWAYS, and it is the same reason the `{KEY_MENU_ROW_ROWS}` line below is.
+# Set, this key is the LEGACY spelling and the DLL's legacy branch adds ONE row -- quit-to-desktop --
+# and none of the other three. Every row is registered only when neither legacy key is set, which is
+# the `Default` source in the log. So `--menu-row`, a flag named after the rows, was the thing that
+# took three of them away: a run launched with it on 2026-09-23 to exercise a save-file row logged
+# `source=LegacyEnabled rows=[quit-to-desktop]` and did not have the row under test on screen. The
+# flag is gone and this line is a comment; uncomment it to get the one-row behaviour back.
 #
 # WHICH ROWS, and why this is a list. The ceiling is the grid's own layout bind, which stops looking
 # for cells after fifteen rows -- and the System tab ships three, so {MENU_ROW_MAX_ADDED} rows can be added and
@@ -1542,7 +1548,12 @@ def config_text(
 # that says the overlay drew something; `... no field: the Steam overlay is disabled` is the one
 # failure no amount of reading the executable could predict, because it is a property of the running
 # Steam client rather than of the game.
-{KEY_BUILD_IMPORT_ENABLED} = {str(build_import).lower()}
+# {KEY_BUILD_IMPORT_ENABLED} = true
+#
+# COMMENTED OUT BY THIS SCRIPT, ALWAYS, for the reason written under `[{MENU_ROW_SECTION}] {KEY_MENU_ROW_ENABLED}`:
+# it is the other half of the DLL's legacy branch, and setting either one narrows the menu to the
+# rows those two keys name. The row itself is registered by the `{KEY_MENU_ROW_ROWS}` list -- or, as
+# here, by the default that list falls back to -- not by this key.
 
 [{INVENTORY_SORT_SECTION}]
 # NOT STARTUP. Four detours -- the constructor and destructor of the Inventory tab AND of the equip
@@ -1643,8 +1654,6 @@ def write_config(
     offline: bool = True,
     block_sockets: bool = True,
     save_redirect: str | None = None,
-    menu_row: bool = False,
-    build_import: bool = False,
     inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
@@ -1673,8 +1682,6 @@ def write_config(
         offline,
         block_sockets,
         save_redirect,
-        menu_row,
-        build_import,
         inventory_sort,
         inventory_sort_key,
         inventory_sort_pad,
@@ -1761,8 +1768,6 @@ def dry_run(
     offline: bool = True,
     block_sockets: bool = True,
     save_redirect: str | None = None,
-    menu_row: bool = False,
-    build_import: bool = False,
     inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
@@ -1809,8 +1814,6 @@ def dry_run(
             offline,
             block_sockets,
             save_redirect,
-            menu_row,
-            build_import,
             inventory_sort,
             inventory_sort_key,
             inventory_sort_pad,
@@ -1852,8 +1855,6 @@ def dry_run(
                 continue_hide_menus,
                 offline,
                 block_sockets,
-                menu_row=menu_row,
-                build_import=build_import,
                 inventory_sort=inventory_sort,
                 inventory_sort_key=inventory_sort_key,
                 inventory_sort_pad=inventory_sort_pad,
@@ -1918,8 +1919,6 @@ def launch(
     offline: bool = True,
     block_sockets: bool = True,
     save_redirect: str | None = None,
-    menu_row: bool = False,
-    build_import: bool = False,
     inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
@@ -1961,8 +1960,6 @@ def launch(
         offline,
         block_sockets,
         save_redirect,
-        menu_row,
-        build_import,
         inventory_sort,
         inventory_sort_key,
         inventory_sort_pad,
@@ -2560,29 +2557,36 @@ def selftest() -> int:
         "--no-title-settle leaves the menu key OFF -- different section, different hooks",
     )
 
-    # THE PAUSE-MENU ROW IS AN INSTRUMENT, and the polarity of its switch is the assertion that
-    # matters. Every other key in this file is written so a typo leaves the feature ON; this one
-    # is the reverse, because a probe that switched itself on by accident would put an
-    # unexplained row in the pause menu and then be read as a measurement.
-    values, _ = parse_config(config_text("off"))
-    check(
-        values.get((MENU_ROW_SECTION, KEY_MENU_ROW_ENABLED)) == "false",
-        f"[{MENU_ROW_SECTION}] {KEY_MENU_ROW_ENABLED} defaults to FALSE -- it measures, it does "
-        "not fix",
-    )
-    values, _ = parse_config(config_text("off", menu_row=True))
-    check(
-        values.get((MENU_ROW_SECTION, KEY_MENU_ROW_ENABLED)) == "true"
-        and values.get((MENU_SECTION, KEY_SHOW_UNAVAILABLE)) == "false"
-        and values.get((TITLE_SECTION, KEY_TITLE_SETTLE)) == "true",
-        "--menu-row turns on only its own key, in its own section",
-    )
+    # THE LEGACY KEY IS NEVER WRITTEN, in any arm, and that is what makes a launch show every row.
+    # Set, it selects the DLL's legacy branch, which registers quit-to-desktop ALONE; every row is
+    # registered only when neither legacy key is present, which the DLL reports as `Default`. There
+    # was a `--menu-row` flag that wrote it, and on 2026-09-23 it cost a run: launched to exercise a
+    # save-file row, it logged `source=LegacyEnabled rows=[quit-to-desktop]` and the row under test
+    # was not in the menu. Same reasoning as the `rows` assertion further down, and the flag is gone.
+    for arm in PROBE_ARMS:
+        values, _ = parse_config(config_text(arm))
+        check(
+            (MENU_ROW_SECTION, KEY_MENU_ROW_ENABLED) not in values,
+            f"[{MENU_ROW_SECTION}] {KEY_MENU_ROW_ENABLED} is COMMENTED OUT in the {arm} arm -- "
+            "written, it narrows the menu to one row",
+        )
     values, _ = parse_config(config_text("off", show_unavailable=True))
     check(
-        values.get((MENU_ROW_SECTION, KEY_MENU_ROW_ENABLED)) == "false",
-        "--show-unavailable-menu-rows leaves the pause-menu key OFF -- title menu and pause menu "
-        "are different menus on different hooks",
+        (MENU_ROW_SECTION, KEY_MENU_ROW_ENABLED) not in values
+        and values.get((MENU_SECTION, KEY_SHOW_UNAVAILABLE)) == "true",
+        "--show-unavailable-menu-rows touches the title menu's key and not the pause menu's -- "
+        "different menus, different hooks",
     )
+    # SPELT IN HALVES for the same reason the `--rows` check below is: a check that searches its own
+    # file for a literal finds the literal it is written with.
+    legacy_flags = ('dest="menu_' "row\"", 'dest="build_' "import\"")
+    self_source = Path(__file__).read_text(encoding="utf-8")
+    for spelling in legacy_flags:
+        check(
+            spelling not in self_source,
+            "neither legacy key has a flag of its own again -- a flag named after the rows that "
+            f"takes three of them away is how this was lost the first time ({spelling})",
+        )
 
     # THE DLL READS THE SECTION AND THE KEY THIS WRITES, and writes the prefix this file tells the
     # reader to grep for. Same contract as the probe and offline sections.
@@ -2660,23 +2664,14 @@ def selftest() -> int:
     # THE SAME CONTRACT FOR THE BUILD-IMPORT ROW. It is a separate section on purpose -- one row
     # measures whether a fourth row draws, the other opens a Steam overlay and talks to the network
     # -- so a run that misbehaves is attributable to one of them by editing one line.
-    values, _ = parse_config(config_text("off"))
-    check(
-        values.get((BUILD_IMPORT_SECTION, KEY_BUILD_IMPORT_ENABLED)) == "false",
-        f"[{BUILD_IMPORT_SECTION}] {KEY_BUILD_IMPORT_ENABLED} defaults to FALSE -- it asks Steam "
-        "for an overlay and writes the game's own keyboard state, neither of which has been run",
-    )
-    values, _ = parse_config(config_text("off", build_import=True))
-    check(
-        values.get((BUILD_IMPORT_SECTION, KEY_BUILD_IMPORT_ENABLED)) == "true"
-        and values.get((MENU_ROW_SECTION, KEY_MENU_ROW_ENABLED)) == "false",
-        "--build-import turns on only its own key, in its own section",
-    )
-    values, _ = parse_config(config_text("off", menu_row=True))
-    check(
-        values.get((BUILD_IMPORT_SECTION, KEY_BUILD_IMPORT_ENABLED)) == "false",
-        "--menu-row leaves the build-import key OFF -- two rows on one tab, two switches",
-    )
+    for arm in PROBE_ARMS:
+        values, _ = parse_config(config_text(arm))
+        check(
+            (BUILD_IMPORT_SECTION, KEY_BUILD_IMPORT_ENABLED) not in values,
+            f"[{BUILD_IMPORT_SECTION}] {KEY_BUILD_IMPORT_ENABLED} is COMMENTED OUT in the {arm} "
+            "arm -- it is the other half of the legacy branch, and writing either half narrows "
+            "the menu to the rows those two keys name",
+        )
     build_import_src = (REPO_ROOT / "crates/ds2-loader/src/build_import.rs").read_text(
         encoding="utf-8"
     )
@@ -2735,7 +2730,7 @@ def selftest() -> int:
     values, _ = parse_config(config_text("off", inventory_sort=False))
     check(
         values.get((INVENTORY_SORT_SECTION, KEY_INVENTORY_SORT_ENABLED)) == "false"
-        and values.get((BUILD_IMPORT_SECTION, KEY_BUILD_IMPORT_ENABLED)) == "false",
+        and values.get((INVENTORY_SORT_SECTION, KEY_INVENTORY_SORT_PAD)) == "lthumb",
         "--no-inventory-sort turns off only its own key, in its own section",
     )
     values, _ = parse_config(
@@ -3215,38 +3210,10 @@ def main() -> int:
             "segment that leads into the row being removed -- it poses the row invisible."
         ),
     )
-    parser.add_argument(
-        "--menu-row",
-        dest="menu_row",
-        action="store_true",
-        default=False,
-        help=(
-            "add a fourth row to the PAUSE menu tab that carries the quit item, which quits to "
-            "DESKTOP without a confirmation and without saving. OFF BY DEFAULT. Four hooks: the "
-            "tab's item builder, its dispatch, its cell namer, and the layout document's "
-            "definition lookup -- the last two being what makes the row visible, since a grid "
-            "draws a row only if it can resolve that cell's scene path. Every one of them checks "
-            "what the game left behind and refuses rather than guessing. Look for "
-            f"`{MENU_ROW_LOG_PREFIX} container substituted ...` and `row-extent=4` in the log "
-            "before reading the screen."
-        ),
-    )
-    parser.add_argument(
-        "--build-import",
-        dest="build_import",
-        action="store_true",
-        default=False,
-        help=(
-            "add a 'Load from URL' row to the same PAUSE menu tab. It reads a soulsplanner link "
-            "off the clipboard (or takes a typed build number), fetches the build, and APPLIES IT "
-            "to the live character -- soul memory, then the stats and therefore the level, then "
-            "the items, every equipment slot, the covenant, and the Estus Flask taken to maximum. "
-            "OFF BY DEFAULT, because it changes a character. Every write is a call into the game's "
-            "own function and every one is read back. Look for "
-            f"`{BUILD_IMPORT_LOG_PREFIX} character now: ...` in the log, then the granted, "
-            "equipped and Estus lines that follow it."
-        ),
-    )
+    # THERE IS NO --menu-row AND NO --build-import. Both wrote the DLL's legacy `enabled` key, and
+    # that key selects a branch which registers quit-to-desktop ALONE -- so the flags named after
+    # the pause-menu rows were the ones that took the other three away. The launcher writes neither,
+    # which is what the DLL reads as `Default`: every row. `--selftest` pins both spellings out.
     parser.add_argument(
         "--no-inventory-sort",
         dest="inventory_sort",
@@ -3368,8 +3335,6 @@ def main() -> int:
             args.offline,
             args.block_sockets,
             args.save_redirect,
-            args.menu_row,
-            args.build_import,
             args.inventory_sort,
             args.inventory_sort_key,
             args.inventory_sort_pad,
@@ -3397,8 +3362,6 @@ def main() -> int:
         args.offline,
         args.block_sockets,
         args.save_redirect,
-        args.menu_row,
-        args.build_import,
         args.inventory_sort,
         args.inventory_sort_key,
         args.inventory_sort_pad,
