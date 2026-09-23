@@ -307,10 +307,26 @@ def world_is_up() -> tuple[bool, str]:
     for line in reversed(text.splitlines()):
         if "invasion-path: roster:" in line:
             return True, line.strip()
+    # THE SECOND WITNESS, because the first one is only available when the overlay is on.
+    #
+    # `ds2-continue` detours `FeSubStateTitleStartIngame::v1` and logs `by=start-ingame` from
+    # inside it, so the line appears exactly when the game's own title flow hands over to the
+    # in-game substate. That is the property this gate is actually about -- the process has
+    # stopped building its address space and is running a world -- and it is the game's
+    # statement, not this script's inference.
+    #
+    # Weaker than the roster line and labelled as such: entry to the substate precedes the local
+    # player being resolved, which is what the roster line proves. It was added because the
+    # roster line CANNOT appear without `--invasion-path --invasion-path-on`, so a run that loads
+    # a save with every overlay off -- a Frida session, which is the whole point of this script --
+    # was refused with a message telling it to turn on a feature it does not want.
+    for line in reversed(text.splitlines()):
+        if "ds2-continue: silence restored by=start-ingame" in line:
+            return True, line.strip() + "  (weak witness: in-game substate entered)"
     return False, (
-        "the loader log has no `roster:` line yet, so the overlay has not seen a live "
-        "CharacterManager -- the game is at the title screen or still loading. Launch with "
-        "--invasion-path --invasion-path-on, or pass --allow-early if the boot IS the measurement."
+        "the loader log has neither a `roster:` line nor a `by=start-ingame` line, so nothing has "
+        "reported a world: the game is at the title screen or still loading. Load a save (e.g. "
+        "--continue-slot N), or pass --allow-early if the boot IS the measurement."
     )
 def start(
     force: bool = False,

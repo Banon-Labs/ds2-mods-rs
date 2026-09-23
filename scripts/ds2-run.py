@@ -2482,6 +2482,23 @@ def launch(
     # and deleting here would destroy the previous run's evidence for no gain.
     tail = LogTail(log_path)
 
+    # TEAR DOWN FIRST, ALWAYS. `steam -applaunch` is a request to a client that already believes
+    # it knows whether the app is running, and while any process of the previous session survives
+    # -- Steam's own `reaper` is the one that does -- the client answers by doing NOTHING: no
+    # error, no window, and the testimony wait below times out four minutes later against a game
+    # that was never started. Measured 2026-09-22: `pkill -x DarkSoulsII.exe` reported the game
+    # gone and left SIXTEEN processes of its session alive, and the relaunch wrote an empty log.
+    # This is also what "launch" means as an instruction: remove what is running, then start.
+    torn = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "ds2-teardown.py")],
+        capture_output=True, text=True, timeout=60,
+    )
+    for line in torn.stdout.splitlines():
+        print(line)
+    if torn.returncode != 0:
+        print("[launch] REFUSING: the previous session did not die; see the survivors above.")
+        return EXIT_ERROR
+
     pin_to_monitor()
 
     environment = launch_env(probe)
