@@ -1,87 +1,109 @@
-//! **Load Character from File**: pick a save container, and have the next launch read it.
+//! **Load Character from File**: pick a save container, and the row does the rest -- including the
+//! restart.
 //!
-//! # The row does not load anything, and that is the design rather than a shortfall
+//! # Two things this row is not allowed to do, both learned from a live run
 //!
-//! DARK SOULS II keeps one save container per Steam account. Loading somebody else's character means
-//! pointing the game's save-directory builder somewhere else, which `ds2-save-redirect` already does
-//! -- and doing it mid-session does not work:
+//! **It does not accept a file because of its name.** The first version offered an "All files (*.*)"
+//! line in the dialog and gated the pick on its EXTENSION, which accepts `holiday.jpg` renamed to
+//! `save.sl2` -- and the player finds out one launch later, when the game shows no LOAD GAME row,
+//! which is also exactly what a correct redirect to an empty folder looks like. Now the dialog offers
+//! only what can be loaded, and the pick is checked by what the file IS:
+//! [`ds2_save_redirect::validate_source`] unwraps the archive if there is one, requires exactly one
+//! `DS2SOFS0000.sl2` inside it, and structurally validates the BND4 container that comes out.
 //!
-//! > DS2 saves on the way out. The pause menu's Quit Game row is `FeGroupInGameReturnTitleCheck`,
-//! > which persists the character before it returns to the title. A session that re-points the
-//! > directory and then quits writes the CURRENT character into the staged copy, and the LOAD GAME
-//! > that follows reads back the character the player was trying to replace.
+//! **It does not ask the player to restart the game.** The earlier version wrote the pick, relabelled
+//! itself `Staged: restart to load`, and left the restart to whoever was holding the controller. That
+//! is handing the user a chore the mod created. The row now performs the whole sequence itself.
 //!
-//! Neither ordering escapes it, because both halves are the game's: the quit saves, and the load
-//! reads the same directory the quit wrote to. So this row writes the pick to
-//! [`ds2_save_file_core::HANDOFF_FILE_NAME`] and `ds2-loader` arms the redirect from it on the next
-//! launch, during `DLL_PROCESS_ATTACH` -- before the game has built a save path, let alone saved into
-//! one. The loader deletes the file as it reads it, so the handoff is one launch and not a setting.
+//! # The sequence, and why it is in this order
 //!
-//! # What it costs, said plainly
+//! ```text
+//! pick -> validate -> record the handoff -> request a save -> wait for it to land -> quit
+//! ```
 //!
-//! **A restart.** `../er-mods-rs` does this in-session, because Elden Ring has ten save slots and a
-//! profile picker to switch between them; DS2 has one container and no picker. The in-session version
-//! is possible here too and is NOT built: it needs `FUN_1402e67f0`'s
-//! `[saveLoadSystem+8] in {1,3,5,6}` states decoded far enough to tell a SAVE apart from a LOAD, so
-//! the redirect can answer differently for each. That is a bounded static job and it is filed; until
-//! it is done, a restart is the honest price and the row says so on itself.
+//! The save comes FIRST and the quit waits for it, because the quit this row uses is the game's own
+//! one-byte shutdown -- `FeSubStateTitleShutdown`'s write, polled by the master update -- and that
+//! path does not save and does not ask. Quitting without the save would silently cost the player
+//! every step since their last bonfire, which is not a price a row labelled "load" gets to charge.
 //!
-//! # The player's own save is never touched
+//! And the save lands in the player's OWN directory, because the redirect is not armed yet: the
+//! handoff is a file on disk that the loader reads on the next launch, so nothing in this session is
+//! pointing anywhere new. That ordering is the whole reason the handoff is a file rather than a
+//! runtime swap -- see below.
 //!
-//! Nothing here writes to a save. The row writes one text file in the game directory; the staging
-//! that follows on the next launch COPIES the picked file into `ds2-save-staging/` and rebinds the
-//! copy, leaving both the player's container and the donor's file exactly as they were.
+//! # Why the swap cannot happen in this session
+//!
+//! DS2 keeps one save container per Steam account, and it saves on the way out of a game. A session
+//! that re-points [`ds2_rva::SAVE_DIR_BUILD`] and then quits writes the CURRENT character into the
+//! staged copy, and the LOAD GAME that follows reads back the character the player was replacing.
+//! Neither ordering escapes it, because both halves belong to the game. So the swap lands on a
+//! process that has not played anything yet.
+//!
+//! Removing the restart entirely is filed (`ds2-mods-rs-0r3`) and is a bounded static job:
+//! `FUN_1402e67f0` calls `SAVE_DIR_BUILD` per request, so if its states can be split into saves and
+//! loads the detour can answer the game's own folder for one and the staged copy for the other.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::SystemTime;
 
 use ds2_save_file_core::{
     HANDOFF_FILE_NAME, SOURCE_EXTENSIONS, accepts, filter::FilterEntry, filter_string, handoff,
 };
 
 use crate::dialog::{Intent, Pick, Request};
+use crate::game::{self, Landed};
 use crate::{LOG_PREFIX, log_line};
 
-/// The row's caption, before anything has been picked.
+/// The row's caption.
 pub const ROW_CAPTION: &str = "Load Character from File";
 
-/// The caption after a pick has been recorded.
+/// The caption while the row is saving before it quits, so the player can see why nothing has
+/// happened yet.
+pub const ROW_CAPTION_SAVING: &str = "Saving, then quitting...";
+
+/// Menu frames to wait for the save to land before quitting anyway.
 ///
-/// Short on purpose: the caption mark beside a pause-menu row is not wide, and a truncated sentence
-/// is worse than a short one. The log line carries the path and the reasoning.
-pub const ROW_CAPTION_STAGED: &str = "Staged: restart to load";
+/// The pause menu ticks with the game, so this is about five seconds at 60 fps. On the deadline the
+/// row quits regardless and SAYS the save was not observed -- a player who asked to load a different
+/// character is not served by a mod that refuses to do anything because a save was slow.
+const DEADLINE_TICKS: u32 = 300;
+
+const _: () = assert!(DEADLINE_TICKS >= 60, "under a second is not a save");
+const _: () = assert!(DEADLINE_TICKS <= 60 * 30, "half a minute is a hang");
+
+/// A recorded pick, waiting for the game to finish saving before it quits.
+struct Pending {
+    /// The container the game is writing right now -- the player's own, not the pick.
+    source: PathBuf,
+    stamp: Option<(u64, SystemTime)>,
+    flushed: bool,
+    ticks: u32,
+}
+
+static PENDING: Mutex<Option<Pending>> = Mutex::new(None);
 
 /// Where the handoff file goes: next to `DarkSoulsII.exe`, beside the loader's own log.
 fn handoff_path() -> Option<PathBuf> {
     ds2_game_base::log::game_directory_path().map(|dir| dir.join(HANDOFF_FILE_NAME))
 }
 
-/// The dialog's type dropdown: the four shapes staging can read, then everything.
+/// The dialog's type dropdown: exactly what staging can read, and nothing else.
 ///
-/// Two lines and not five. A dropdown with one entry per extension makes the player choose which kind
-/// of archive they have before they can see it, which is the opposite of helpful.
+/// **No "All files" line.** An escape hatch on a LOAD dialog is an invitation to pick something that
+/// is not a save, and the gate behind it used to be an extension check. The player who has renamed
+/// their save can rename it back; every other use of that line was a mistake waiting to be made.
 fn dialog_filter() -> Vec<u16> {
-    filter_string(&[
-        FilterEntry {
-            label: "DARK SOULS II save or archive",
-            extensions: &SOURCE_EXTENSIONS,
-        },
-        FilterEntry {
-            label: "All files",
-            extensions: &[],
-        },
-    ])
+    filter_string(&[FilterEntry {
+        label: "DARK SOULS II save or archive",
+        extensions: &SOURCE_EXTENSIONS,
+    }])
 }
 
-/// Where to start browsing.
-///
-/// The player's own save folder's PARENT, because that is where a donor save most often lands -- one
-/// folder up from `<steamid>/` is `…\DarkSoulsII\`, which holds every account folder on the machine.
-/// Falling back to the save directory itself, and then to nothing, which the dialog treats as "wherever
-/// the shell would have started".
+/// Where to start browsing: the folder above the player's own save directory, which is where the
+/// per-account folders live and where a donor save usually lands.
 fn start_directory() -> Option<PathBuf> {
     let live = ds2_save_redirect::live_directory()?;
-    // A directory path from the game ends in a separator, so `parent()` on it is the directory
-    // itself. Trimming first is what makes the answer the folder ABOVE it.
     let text = live.to_string_lossy().into_owned();
     let trimmed = Path::new(text.trim_end_matches(['\\', '/']));
     trimmed
@@ -91,9 +113,6 @@ fn start_directory() -> Option<PathBuf> {
 }
 
 /// What pressing the row does. **Game thread, inside the menu's confirm path.**
-///
-/// Opens the picker inline -- which blocks the game, on purpose, see [`crate::dialog`] -- checks the
-/// extension, writes the handoff, and relabels itself so the player can see that it took.
 pub fn load_from_file() {
     let Some(handoff_file) = handoff_path() else {
         log_line(format_args!(
@@ -102,6 +121,13 @@ pub fn load_from_file() {
         ));
         return;
     };
+    if PENDING.lock().map(|state| state.is_some()).unwrap_or(true) {
+        log_line(format_args!(
+            "{LOG_PREFIX} import REFUSED reason=already-pending -- a pick is already saving before \
+             it quits"
+        ));
+        return;
+    }
 
     let filter = dialog_filter();
     let start_dir = start_directory();
@@ -130,69 +156,142 @@ pub fn load_from_file() {
         }
     };
 
-    // The cheap gate, before anything is written: say "that is not a save" here rather than surfacing
-    // a decompression error from inside staging on the next launch, where nobody is watching.
-    let kind = match accepts(&picked) {
-        Ok(kind) => kind,
-        Err(rejection) => {
+    // GATE ONE: the name. Cheap, and it is what makes the log say "that is not a save" rather than
+    // surfacing a decompression error from three layers down.
+    if let Err(rejection) = accepts(&picked) {
+        log_line(format_args!(
+            "{LOG_PREFIX} import REFUSED path={} reason={rejection} -- nothing was recorded",
+            picked.display()
+        ));
+        return;
+    }
+    // GATE TWO: the CONTENT, which is the one that matters. Unwraps the archive, demands exactly one
+    // save inside it, and structurally validates the container. A file that passes gate one and
+    // fails here is precisely the renamed-jpeg case, and it is refused while the player is still
+    // looking at the menu rather than one launch later.
+    let (kind, entries) = match ds2_save_redirect::validate_source(&picked) {
+        Ok(found) => found,
+        Err(error) => {
             log_line(format_args!(
-                "{LOG_PREFIX} import REFUSED path={} reason={rejection} -- nothing was recorded",
+                "{LOG_PREFIX} import REFUSED path={} reason={error} -- nothing was recorded",
                 picked.display()
             ));
             return;
         }
     };
-    // Existence is checked too, even though the dialog was opened with `OFN_FILEMUSTEXIST`: the flag
-    // governs what the dialog accepts, and the thing that has to be true is that the file is there on
-    // the NEXT launch. Checking now catches the ordinary case -- a typed path, a removable drive --
-    // while the player can still do something about it.
-    if !picked.is_file() {
-        log_line(format_args!(
-            "{LOG_PREFIX} import REFUSED path={} reason=not-a-file -- nothing was recorded",
-            picked.display()
-        ));
-        return;
-    }
 
     let contents = handoff::encode(&picked.to_string_lossy());
     if let Err(error) = std::fs::write(&handoff_file, contents) {
         log_line(format_args!(
             "{LOG_PREFIX} import FAILED reason=write error={error} file={} -- the pick was NOT \
-             recorded and the next launch will load your own save",
+             recorded and nothing will change",
             handoff_file.display()
         ));
         return;
     }
     log_line(format_args!(
-        "{LOG_PREFIX} import recorded kind={kind} path={} file={} -- the NEXT launch loads it, and \
-         this session is untouched",
+        "{LOG_PREFIX} import recorded kind={kind} entries={entries} path={} file={}",
         picked.display(),
         handoff_file.display()
     ));
-    announce();
+
+    // NOW SAVE THE CHARACTER THE PLAYER IS LEAVING, and quit only once it has landed. The redirect is
+    // not armed in this session, so this save goes to their own directory.
+    let source =
+        ds2_save_redirect::live_directory().map(|dir| dir.join(ds2_save_redirect::SAVE_FILE_NAME));
+    let Some(source) = source else {
+        log_line(format_args!(
+            "{LOG_PREFIX} import QUITTING WITHOUT SAVING -- no live save directory is known, so \
+             there is nothing to wait for"
+        ));
+        return quit();
+    };
+    let Some(system) = game::save_load_system() else {
+        log_line(format_args!(
+            "{LOG_PREFIX} import QUITTING WITHOUT SAVING -- the save system could not be reached"
+        ));
+        return quit();
+    };
+    let before = game::stamp(&source);
+    if !game::request_save(system) {
+        log_line(format_args!(
+            "{LOG_PREFIX} import QUITTING WITHOUT SAVING -- the save could not be requested"
+        ));
+        return quit();
+    }
+    if let Ok(mut pending) = PENDING.lock() {
+        *pending = Some(Pending {
+            source,
+            stamp: before,
+            flushed: false,
+            ticks: 0,
+        });
+        announce();
+    } else {
+        log_line(format_args!(
+            "{LOG_PREFIX} import QUITTING WITHOUT WAITING -- the pending lock is poisoned"
+        ));
+        quit();
+    }
 }
 
-/// Relabel the row so the player can see the pick took, without reading a log file.
-///
-/// The row id is whichever slot the registration got; a caption written before registration would
-/// land on row zero, which belongs to somebody else -- so this does nothing until [`crate::register`]
-/// has succeeded.
+/// The game-thread half: wait for the save, then quit. Registered with `ds2_menu_row::add_tick`.
+pub fn tick() {
+    let Ok(mut guard) = PENDING.lock() else {
+        return;
+    };
+    let Some(pending) = guard.as_mut() else {
+        return;
+    };
+    pending.ticks += 1;
+    let landed = game::poll_landed(
+        &pending.source,
+        pending.stamp,
+        &mut pending.flushed,
+        pending.ticks,
+        DEADLINE_TICKS,
+    );
+    match landed {
+        Landed::Waiting => {}
+        Landed::Yes => {
+            let ticks = pending.ticks;
+            let _ = guard.take();
+            drop(guard);
+            log_line(format_args!(
+                "{LOG_PREFIX} import saved after {ticks} ticks -- quitting; the next launch loads \
+                 the file you picked"
+            ));
+            quit();
+        }
+        Landed::TimedOut => {
+            let ticks = pending.ticks;
+            let _ = guard.take();
+            drop(guard);
+            log_line(format_args!(
+                "{LOG_PREFIX} import THE SAVE WAS NEVER OBSERVED after {ticks} ticks -- quitting \
+                 anyway; progress since the last save may be lost"
+            ));
+            quit();
+        }
+    }
+}
+
+/// Quit to desktop through the game's own shutdown, which the master update polls.
+fn quit() {
+    ds2_menu_row::quit_to_desktop();
+}
+
+/// Relabel the row so the player can see the press took, without reading a log file.
 fn announce() {
     let Some(row) = crate::registered_import_row() else {
         return;
     };
-    if !ds2_menu_row::set_row_caption(row, ROW_CAPTION_STAGED) {
+    if !ds2_menu_row::set_row_caption(row, ROW_CAPTION_SAVING) {
         return;
     }
     // SAFETY: game thread, inside a row's own confirm, with the pause menu this caption belongs to
     // still up -- which is exactly the context `refresh_row_captions` documents.
-    let written = unsafe { ds2_menu_row::refresh_row_captions() };
-    if written == 0 {
-        log_line(format_args!(
-            "{LOG_PREFIX} caption not pushed -- the row will read {ROW_CAPTION_STAGED:?} the next \
-             time the menu opens"
-        ));
-    }
+    let _ = unsafe { ds2_menu_row::refresh_row_captions() };
 }
 
 /// Read and CONSUME a handoff left by a previous session.
@@ -232,27 +331,32 @@ pub fn take_handoff() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
-    /// The dialog offers every shape staging can read, on one line, plus an escape hatch.
+    /// THE DIALOG OFFERS ONLY WHAT CAN BE LOADED. An "All files" line on a load dialog is how a
+    /// player comes to pick something that is not a save; it was there once and is not coming back.
     #[test]
-    fn the_filter_offers_every_stageable_shape() {
+    fn the_filter_offers_no_escape_hatch() {
         let filter = dialog_filter();
         let fields: Vec<String> = filter
             .split(|unit| *unit == 0)
             .map(String::from_utf16_lossy)
             .collect();
+        assert_eq!(
+            fields[0],
+            "DARK SOULS II save or archive (*.sl2;*.zip;*.7z;*.rar)"
+        );
         assert_eq!(fields[1], "*.sl2;*.zip;*.7z;*.rar");
-        assert_eq!(fields[3], "*.*");
+        // Pair, pair, terminator -- and no second pair offering everything.
+        assert_eq!(fields[2], "");
+        assert!(
+            !fields.iter().any(|field| field.contains("*.*")),
+            "a load dialog must not offer every file: {fields:?}"
+        );
     }
 
-    /// THE DUPLICATION GATE. `ds2-save-file-core`'s extension list is `ds2-save-redirect::stage`'s
-    /// four arms spelled a second time, because that crate is `cfg(windows)` in full and cannot be
-    /// imported by a host-tested one. This is where the two are made to agree: a fifth arm there
-    /// without a fifth entry there fails here rather than going silently unoffered.
+    /// THE DUPLICATION GATE between the host-tested extension list and the staging step's arms.
     #[test]
     fn every_stageable_extension_is_offered() {
         assert_eq!(SOURCE_EXTENSIONS, ["sl2", "zip", "7z", "rar"]);
-        // And the bare-save arm is the one the game's own file name uses, so a player who picks their
-        // own container by hand is picking something staging will accept.
         assert!(
             ds2_save_redirect::SAVE_FILE_NAME
                 .to_ascii_lowercase()
@@ -260,9 +364,10 @@ mod tests {
         );
     }
 
-    /// The staged caption is short enough to be a caption.
+    /// A save is waited for before the quit, and the wait is bounded.
     #[test]
-    fn the_staged_caption_is_short() {
-        assert!(ROW_CAPTION_STAGED.len() <= ROW_CAPTION.len());
+    fn the_wait_is_bounded_and_longer_than_a_save() {
+        // Asserted where the constant is, as a `const _`; this test names the property in words.
+        assert_eq!(DEADLINE_TICKS, 300);
     }
 }

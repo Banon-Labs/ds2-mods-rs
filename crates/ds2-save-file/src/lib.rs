@@ -2,7 +2,7 @@
 //!
 //! | row | what one press does | when it takes effect |
 //! |---|---|---|
-//! | **Load Character from File** | records the picked container for the loader to arm | the NEXT launch |
+//! | **Load Character from File** | records the pick, saves your character, then QUITS the game | the next launch, which the row has already asked for |
 //! | **Save Game to File** | asks the game to save, then copies the container out | a few frames later |
 //!
 //! Both open the OS file dialog and neither draws a menu of its own. That is the port decision, and
@@ -19,19 +19,28 @@
 //!   the live container, the dialog asks before replacing anything, and the copy waits for the game to
 //!   finish writing rather than racing it.
 //!
-//! # Why one of them needs a restart
+//! # Why one of them ends the session, and does not ask the player to
 //!
 //! Because DS2 saves on the way out of a game, and a mid-session redirect therefore gets overwritten
 //! by the player's own character before the load can read it. [`import`] has the argument in full.
-//! It is a real limitation with a filed way out, not a thing that was skipped.
+//! The restart is real and it is NOT the player's job: the row records the pick, requests the save
+//! that would otherwise clobber it, waits for that save to land, and takes the game down itself. A
+//! row that relabelled itself `restart to load` and stopped there was the first attempt, and it was
+//! wrong -- it left the mod's last step for the player to perform by hand.
 //!
-//! # What is NOT ported from `../er-mods-rs`
+//! # These two rows are not the whole feature, and the missing half is filed
 //!
-//! `er-quit-menu-core` is 29,000 lines. What it spends them on -- an in-game save browser, a
-//! software keyboard, a Scaleform proxy, a dim cover, a menu pump, ProfileSummary staging -- is
-//! Elden Ring's menu engine, eight years newer than this one and sharing no resource format with it.
-//! The two rows' BEHAVIOUR is ported; none of that machinery is, and a DS2 reimplementation of it
-//! would be a new project rather than a port.
+//! Neither row lets you choose a CHARACTER. The load row swaps a whole container, so the ten slots
+//! you get are the donor file's ten, and picking among them is the game's own character list
+//! rather than anything here. `../er-mods-rs` has that half in `er-save-picker-core`; what DS2
+//! lacks for it is a Rust reader that can name a character -- `ds2-sl2-core` walks the BND4 entry
+//! table and rebinds Steam IDs, and cannot report a slot's name or level. `scripts/ds2-sl2.py
+//! --slots` already does, which is where the port starts.
+//!
+//! An earlier version of this section refused that port on the grounds that it meant reproducing
+//! `er-quit-menu-core` wholesale. That was a mis-measurement of the wrong crate: the menu chrome
+//! is what lives there, and the picker is `er-save-picker-core`, which is mostly a host-testable
+//! row model over the filesystem. Size the thing being asked for, not the crate it is linked into.
 
 #![cfg_attr(not(windows), allow(unused))]
 
@@ -42,6 +51,8 @@ pub const LOG_PREFIX: &str = "ds2-save-file:";
 mod dialog;
 #[cfg(windows)]
 pub mod export;
+#[cfg(windows)]
+mod game;
 #[cfg(windows)]
 pub mod import;
 
@@ -75,9 +86,10 @@ mod install {
 
     /// Whether the export row's per-frame tick has been registered.
     ///
-    /// One tick for the crate, not one per row: `ds2_menu_row::add_tick` has a fixed number of slots
-    /// and only the export row needs one. Latched so registering both rows does not spend two.
-    static TICK_ADDED: AtomicBool = AtomicBool::new(false);
+    /// ONE PER ROW, because both rows now have a second phase: the export waits for the save before
+    /// it copies, and the import waits for the save before it quits. Latched so a row registered
+    /// twice does not spend two of the tick registry's slots.
+    static EXPORT_TICK_ADDED: AtomicBool = AtomicBool::new(false);
 
     /// Point this crate's logging at the loader's log file.
     ///
@@ -134,6 +146,15 @@ mod install {
         });
         if let Ok(id) = registered {
             IMPORT_ROW.store(id.0, Ordering::Release);
+            // THE GAME-THREAD HALF. The press records the pick and asks the game to save; the quit
+            // that follows has to wait for that save to land, and waiting is what a tick is for.
+            // Without it the row would record a pick and never quit, which is the old behaviour it
+            // exists to replace.
+            if !ds2_menu_row::add_tick(crate::import::tick) {
+                log_line(format_args!(
+                    "{LOG_PREFIX} NO TICK -- a pick will be recorded and the game will never quit"
+                ));
+            }
         }
         registered
     }
@@ -157,7 +178,7 @@ mod install {
             }),
             on_confirm: crate::export::save_to_file,
         });
-        if registered.is_ok() && !TICK_ADDED.swap(true, Ordering::AcqRel) {
+        if registered.is_ok() && !EXPORT_TICK_ADDED.swap(true, Ordering::AcqRel) {
             // THE GAME-THREAD HALF. `RequestSave` only asks; the copy happens once the game has
             // actually written the file, which is frames later and therefore here.
             if !ds2_menu_row::add_tick(crate::export::tick) {

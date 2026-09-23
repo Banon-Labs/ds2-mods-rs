@@ -34,13 +34,14 @@
 //! leave the menu before the copy completes, the request stays armed and finishes the next time a
 //! menu is opened. Nothing is lost and nothing is written early.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::SystemTime;
 
 use ds2_save_file_core::{Route, filter::FilterEntry, filter_string, with_extension};
 
 use crate::dialog::{Intent, Pick, Request};
+use crate::game::{self, Landed};
 use crate::{LOG_PREFIX, log_line};
 
 /// The row's caption.
@@ -83,86 +84,6 @@ fn live_container() -> Option<PathBuf> {
     let directory = ds2_save_redirect::live_directory()?;
     Some(directory.join(ds2_save_redirect::SAVE_FILE_NAME))
 }
-
-/// `(length, modified)` for a file, or `None` if it cannot be read.
-fn stamp(path: &Path) -> Option<(u64, SystemTime)> {
-    let metadata = std::fs::metadata(path).ok()?;
-    Some((metadata.len(), metadata.modified().ok()?))
-}
-
-/// The `SaveLoadSystem` the game is using, through the two hops `ds2-rva` records.
-fn save_load_system() -> Option<usize> {
-    let address = ds2_game_base::mem::game_rva(ds2_rva::GAME_MANAGER_IMP).ok()?;
-    // SAFETY: a resolved RVA in the loaded image read through the fault-safe reader, which reports a
-    // bad address rather than faulting on it.
-    let manager = unsafe { ds2_game_base::mem::safe_read_usize(address)? };
-    if manager == 0 {
-        return None;
-    }
-    // SAFETY: as above, one hop further in.
-    let system =
-        unsafe { ds2_game_base::mem::safe_read_usize(manager + ds2_rva::SAVE_LOAD_SYSTEM_OFFSET)? };
-    (system != 0).then_some(system)
-}
-
-/// Whether no save or load request is in flight.
-///
-/// Both halves of the interlock, because both start paths test both
-/// (`if ([this+0x08] != 0 || [this+0x0c] != 0) return false`). A read that cannot be performed
-/// answers `false`: "I do not know whether a writer is active" must never mean "go ahead and copy".
-fn interlock_idle(system: usize) -> bool {
-    // SAFETY: two `u32` reads inside a live `SaveLoadSystem`, through the fault-safe reader. `u32`
-    // and not `usize`: the game's own tests are `cmp DWORD PTR [rcx+8],0`, and reading eight bytes
-    // would fold the neighbouring field into the answer.
-    unsafe {
-        let state =
-            ds2_game_base::mem::safe_read_u32(system + ds2_rva::SAVE_LOAD_SYSTEM_STATE_OFFSET);
-        let substate =
-            ds2_game_base::mem::safe_read_u32(system + ds2_rva::SAVE_LOAD_SYSTEM_SUBSTATE_OFFSET);
-        matches!((state, substate), (Some(0), Some(0)))
-    }
-}
-
-/// `void RequestSave(SaveLoadSystem*, u32 kind)` -- three byte writes, no return value.
-type RequestSaveFn = unsafe extern "system" fn(usize, u32);
-
-/// Ask the game to persist the character. Returns whether the request was made.
-///
-/// Refuses on a prologue that is not the recorded one. `RequestSave` is not Arxan-redirected, but an
-/// RVA is a number: on a build these offsets were not read from, this address is some other function
-/// that would accept the call and leave a log line claiming a save was requested.
-fn request_save(system: usize) -> bool {
-    let Ok(address) = ds2_game_base::mem::game_rva(ds2_rva::SAVE_LOAD_REQUEST_SAVE) else {
-        log_line(format_args!(
-            "{LOG_PREFIX} save REFUSED reason=no-module-base -- nothing was requested"
-        ));
-        return false;
-    };
-    let expected = ds2_rva::SAVE_LOAD_REQUEST_SAVE_PROLOGUE;
-    let mut prologue = [0u8; 3];
-    // SAFETY: a resolved RVA inside the loaded game image; `read_bytes` faults safely.
-    let read = unsafe { ds2_game_base::mem::read_bytes(address, &mut prologue) };
-    if !read || prologue != expected {
-        log_line(format_args!(
-            "{LOG_PREFIX} save REFUSED reason=prologue va=0x{address:016x} read={read} \
-             saw={prologue:02x?} want={expected:02x?} -- that address is not RequestSave on this build"
-        ));
-        return false;
-    }
-    // SAFETY: the prologue matches the function `ds2-rva` transcribed, the signature is the one its
-    // disassembly implements (pointer in RCX, kind in EDX, no return), and `system` is a live
-    // `SaveLoadSystem` reached through two recorded hops. Called on the game thread from the menu's
-    // own confirm path, which is where the game's own save rows call it from.
-    let request: RequestSaveFn = unsafe { std::mem::transmute::<usize, RequestSaveFn>(address) };
-    unsafe { request(system, ds2_rva::SAVE_LOAD_REQUEST_KIND_CHARACTER) };
-    log_line(format_args!(
-        "{LOG_PREFIX} save requested system=0x{system:016x} kind={} -- the game writes it on a \
-         later frame",
-        ds2_rva::SAVE_LOAD_REQUEST_KIND_CHARACTER
-    ));
-    true
-}
-
 /// The dialog's type dropdown: saves, then everything, so a player who wants another name can have
 /// one.
 fn dialog_filter() -> Vec<u16> {
@@ -249,7 +170,7 @@ pub fn save_to_file() {
     }
     let route = Route::of(destination.is_file());
 
-    let Some(system) = save_load_system() else {
+    let Some(system) = game::save_load_system() else {
         log_line(format_args!(
             "{LOG_PREFIX} export REFUSED reason=no-save-load-system -- cannot ask the game to \
              persist, so nothing is copied"
@@ -257,8 +178,8 @@ pub fn save_to_file() {
         return;
     };
 
-    let before = stamp(&source);
-    if !request_save(system) {
+    let before = game::stamp(&source);
+    if !game::request_save(system) {
         return;
     }
     let Ok(mut pending) = PENDING.lock() else {
@@ -292,34 +213,22 @@ pub fn tick() {
         return;
     };
     pending.ticks += 1;
-
-    if !pending.flushed {
-        let now = stamp(&pending.source);
-        if now.is_some() && now != pending.stamp {
-            pending.flushed = true;
-            log_line(format_args!(
-                "{LOG_PREFIX} export saw the save land after {} ticks",
-                pending.ticks
-            ));
-        }
-    }
-    let timed_out = pending.ticks >= DEADLINE_TICKS;
-    if !pending.flushed && !timed_out {
+    // Both signals, and neither alone: the stamp changing says the save landed, which is this row's
+    // actual promise, and the interlock going idle says nobody is still writing, which is what stops
+    // a torn copy. `game::poll_landed` owns that pair for both rows.
+    let landed = game::poll_landed(
+        &pending.source,
+        pending.stamp,
+        &mut pending.flushed,
+        pending.ticks,
+        DEADLINE_TICKS,
+    );
+    if landed == Landed::Waiting {
         return;
-    }
-    // Idle-or-timed-out: a writer still holding the file would give a torn copy, so the interlock
-    // gets the last word right up to the deadline.
-    if !timed_out {
-        let Some(system) = save_load_system() else {
-            return;
-        };
-        if !interlock_idle(system) {
-            return;
-        }
     }
     let pending = guard.take().expect("checked above");
     drop(guard);
-    finish(&pending, timed_out);
+    finish(&pending, landed == Landed::TimedOut);
 }
 
 /// Perform the copy and say exactly what happened.
