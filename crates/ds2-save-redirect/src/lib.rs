@@ -69,6 +69,6 @@ pub mod stage;
 /// Prefix on every line this crate writes, so its lines can be grepped out of the shared log.
 pub const LOG_PREFIX: &str = "ds2-save-redirect:";
 
-pub use install::{Outcome, install, live_directory, set_logger, set_source};
+pub use install::{Outcome, install, live_directory, live_steam_id, set_logger, set_source};
 pub use stage::SAVE_FILE_NAME;
 pub use stage::validate_source;

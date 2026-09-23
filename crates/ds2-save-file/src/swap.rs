@@ -178,17 +178,20 @@ impl std::fmt::Display for NotBegun {
     }
 }
 
-/// The Steam ID the running account's save directory is named after.
+/// The Steam ID the picked container has to be rebound to.
 ///
-/// Read off the live directory rather than asked of Steam, because it is the directory's own last
-/// component that the container has to be rebound to -- if those two ever disagree, the directory
-/// is the one the game will look in.
+/// Asked of `ds2-save-redirect`, which records what the game passed its own directory builder.
+///
+/// # Not the live directory's last component
+///
+/// That was the first version of this, and one live run killed it. With a launch-time redirect
+/// armed the directory is `...\Game\ds2-save-staging\`, whose last component is a folder name this
+/// repo invented -- so the rebind would have bound the donor container to an account called
+/// `ds2-save-staging`, and the character list would have come up empty. An empty list is also what
+/// a failed stage looks like, so the wrong answer would have been indistinguishable from the
+/// failure it caused.
 fn steam_id() -> Option<String> {
-    let live = ds2_save_redirect::live_directory()?;
-    let text = live.to_string_lossy().into_owned();
-    let trimmed = text.trim_end_matches(['\\', '/']);
-    let leaf = trimmed.rsplit(['\\', '/']).next()?;
-    (!leaf.is_empty()).then(|| leaf.to_owned())
+    ds2_save_redirect::live_steam_id()
 }
 
 /// Start a swap: stage the pick, take the title flow, and ask the game to leave the game.

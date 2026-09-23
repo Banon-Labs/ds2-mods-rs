@@ -107,7 +107,7 @@ pub enum Source {
 }
 
 /// `[menu_row]`, resolved.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MenuRowConfig {
     /// The rows to register, in order, already truncated to what the tab can hold.
     pub rows: Vec<Row>,
@@ -119,10 +119,33 @@ pub struct MenuRowConfig {
     pub source: Source,
 }
 
+impl Default for MenuRowConfig {
+    /// Every row, which is what a config file that says nothing about rows means.
+    ///
+    /// Hand-written rather than derived, because the derived one is `rows: vec![]` and that is the
+    /// opposite answer -- reached on the two paths where there is no file to read at all, which are
+    /// exactly the paths a player who has configured nothing takes.
+    fn default() -> Self {
+        Self {
+            rows: EVERY_ROW.to_vec(),
+            overflow: Vec::new(),
+            complaints: Vec::new(),
+            source: Source::Default,
+        }
+    }
+}
+
 impl Default for Source {
-    /// **Nothing**, and unlike the other defaults in this loader that is not a judgement about which
-    /// behaviour is better. These rows change the pause menu, one of them can quit the game without
-    /// asking and one of them writes a file; a player who has not named them should not get them.
+    /// Every row this project adds.
+    ///
+    /// It used to be nothing, on the reasoning that these rows change the pause menu, one of them
+    /// can quit the game without asking and one of them writes a file, so a player who had not
+    /// named them should not get them. The user's words on seeing two of four, 2026-09-23: "I would
+    /// like it on by default. All the extra rows we add ourselves."
+    ///
+    /// The reasoning it replaces was written when the ceiling was two and a row cost another row
+    /// its slot. It is twelve now, and the rows are on a tab of their own, so nothing is displaced
+    /// by carrying all four. `rows = []` still turns every one of them off.
     fn default() -> Self {
         Self::Default
     }
@@ -216,16 +239,22 @@ impl MenuRowConfig {
         if on(crate::build_import::CONFIG_SECTION) {
             rows.push(Row::LoadBuildFromUrl);
         }
-        let source = if rows.is_empty() {
-            Source::Default
-        } else {
-            Source::LegacyEnabled
-        };
+        if rows.is_empty() {
+            // NEITHER KEY SET, so nothing has been said about rows at all -- and what a player who
+            // has said nothing gets is every row this project adds. A `rows` list, including an
+            // empty one, is what says otherwise; that path never reaches here.
+            return Self {
+                rows: EVERY_ROW.to_vec(),
+                overflow: Vec::new(),
+                complaints: Vec::new(),
+                source: Source::Default,
+            };
+        }
         Self {
             rows,
             overflow: Vec::new(),
             complaints: Vec::new(),
-            source,
+            source: Source::LegacyEnabled,
         }
     }
 
@@ -396,32 +425,52 @@ mod tests {
         assert_eq!(config.rows, vec![Row::SaveGameToFile]);
     }
 
-    /// Nothing named means nothing added, and the line says `Default` rather than looking broken.
+    /// Saying nothing gets every row; saying `rows = []` gets none.
+    ///
+    /// The two used to be the same answer, and the difference is the whole of the 2026-09-23
+    /// change: a player who has configured nothing wants the rows this project adds, and a player
+    /// who wrote an empty list has said otherwise in the only place that can say it.
     #[test]
-    fn an_empty_or_absent_selection_adds_nothing() {
-        for text in ["", "[menu_row]\n", "[menu_row]\nrows = []\n"] {
+    fn an_absent_selection_adds_every_row_and_an_empty_one_adds_none() {
+        for text in ["", "[menu_row]\n"] {
             let config = MenuRowConfig::from_text(text);
-            assert!(config.rows.is_empty(), "{text:?}");
+            assert_eq!(config.rows, EVERY_ROW.to_vec(), "{text:?}");
+            assert_eq!(config.source, Source::Default, "{text:?}");
         }
-        assert_eq!(MenuRowConfig::from_text("").source, Source::Default);
-        // An explicitly empty list is still the modern key being read, which is a different thing
-        // from no key at all and is reported as such.
-        assert_eq!(
-            MenuRowConfig::from_text("[menu_row]\nrows = []\n").source,
-            Source::Rows
-        );
+        // An explicitly empty list is the modern key being read, which is a different thing from no
+        // key at all and is reported -- and obeyed -- as such.
+        let none = MenuRowConfig::from_text("[menu_row]\nrows = []\n");
+        assert!(none.rows.is_empty());
+        assert_eq!(none.source, Source::Rows);
     }
 
-    /// Only an exact `true` arms a legacy row.
+    /// The default set is every row the table knows, with nothing left out.
+    ///
+    /// Pinned against `EVERY_ROW` rather than against a list written out here, so a row added to
+    /// the table without being added to the default is a failure rather than a surprise.
     #[test]
-    fn a_misspelled_legacy_value_leaves_the_row_off() {
+    fn the_default_set_is_all_of_them() {
+        assert_eq!(MenuRowConfig::default().rows, EVERY_ROW.to_vec());
+        assert_eq!(MenuRowConfig::default().rows.len(), 4);
+        assert!(EVERY_ROW.len() <= ds2_menu_row::MAX_ADDED_ROWS);
+    }
+
+    /// Only an exact `true` is read as a legacy `enabled`.
+    ///
+    /// A misspelling no longer leaves the row off -- off is not the default any more -- so what it
+    /// leaves behind is the no-key answer, reported as `Default` rather than as `LegacyEnabled`.
+    /// That distinction is what tells a player their typo was not read.
+    #[test]
+    fn a_misspelled_legacy_value_is_not_read_as_true() {
         for value in ["ture", "1", "yes", "TRUE", ""] {
             let text = format!("[menu_row]\nenabled = {value}\n");
-            assert!(
-                MenuRowConfig::from_text(&text).rows.is_empty(),
-                "{value:?} armed a row"
-            );
+            let config = MenuRowConfig::from_text(&text);
+            assert_eq!(config.source, Source::Default, "{value:?} was read as true");
+            assert_eq!(config.rows, EVERY_ROW.to_vec(), "{value:?}");
         }
+        let read = MenuRowConfig::from_text("[menu_row]\nenabled = true\n");
+        assert_eq!(read.source, Source::LegacyEnabled);
+        assert_eq!(read.rows, vec![Row::QuitToDesktop]);
     }
 
     /// Every name is distinct, or two rows would answer to one spelling.

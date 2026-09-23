@@ -1629,23 +1629,30 @@ unsafe extern "system" fn tab_init_detour(tab: *mut u8) {
     // walk onto rows that are not there -- which is what the System tab got on the first run of
     // `crate::tab`, a bound of seven over six drawn cells.
     let seventh = crate::tab::group();
-    let count = if crate::tab::armed() {
+    // HOW MANY ROWS THIS TAB HAS ALTOGETHER, and the two tabs answer differently. The System tab's
+    // is its three shipped rows plus ours; the seventh tab ships nothing, so its total is ours
+    // alone. One expression covering both said `shipped + added` for each, which on the seventh tab
+    // is three more items than there are cells -- a cursor bound of seven over four drawn rows, and
+    // a confirm that resolves an entry the vector does not have.
+    let (count, want) = if crate::tab::armed() {
         if seventh == 0 || tab as usize != seventh {
             return;
         }
         // SAFETY: our own group, whose vector the game's own constructor filled.
         match unsafe { vector_count(tab) } {
-            Some(count) => count,
+            Some(count) => (count, added),
             None => return,
         }
     } else {
         // SAFETY: the original init has just run against this pointer, so the group is constructed.
         match unsafe { system_tab_count(tab) } {
-            Some(count) => count,
+            Some(count) => (
+                count,
+                ds2_rva::FE_INGAME_MENU_SYSTEM_TAB_ITEMS.len() + added,
+            ),
             None => return,
         }
     };
-    let want = ds2_rva::FE_INGAME_MENU_SYSTEM_TAB_ITEMS.len() + added;
     if want <= count {
         // Every row fitted in the game's own vector, so its own count already says so.
         return;

@@ -108,6 +108,39 @@ pub fn live_directory() -> Option<PathBuf> {
     LIVE_DIRECTORY.lock().ok()?.clone()
 }
 
+/// The running account's Steam ID, as the game spells it when it names its own save folder.
+///
+/// `None` before the directory builder has run once. Sixteen hex characters on every account seen
+/// so far, but stored as whatever the game passed rather than parsed, because the only thing it is
+/// ever used for is being handed back to the game in a folder name or a rebind.
+static STEAM_ID: Mutex<Option<String>> = Mutex::new(None);
+
+/// The running account's Steam ID.
+///
+/// # Why this exists rather than reading the directory's last component
+///
+/// That is what the first version of `ds2-save-file`'s swap flow did, and the live log caught it:
+/// with a launch-time redirect armed, the directory is
+/// `...\Game\ds2-save-staging\` and its last component is `ds2-save-staging`. A container rebound to
+/// that string is bound to an account that does not exist, and the game would show no characters in
+/// it -- which looks exactly like a save that failed to stage. The ID the game itself passes to the
+/// directory builder is the one that is always right.
+pub fn live_steam_id() -> Option<String> {
+    STEAM_ID.lock().ok()?.clone()
+}
+
+/// Record the ID the game handed the directory builder.
+fn record_steam_id(id: &str) {
+    if id.is_empty() || id.starts_with('<') {
+        return;
+    }
+    if let Ok(mut held) = STEAM_ID.lock() {
+        if held.as_deref() != Some(id) {
+            *held = Some(id.to_owned());
+        }
+    }
+}
+
 /// Remember the directory the game is using, for the crates that need to find the `.sl2` in it.
 ///
 /// Called with whatever `read_wstring` produced, which on a failed read is one of its own
@@ -246,13 +279,21 @@ unsafe extern "system" fn detour_save_dir(out: *mut c_void, steamid: *const u16)
         ));
     };
 
+    // The account ID the game itself is about to use for the folder name. This is why the rebind
+    // needs nothing from the config -- 64 units is far beyond a 16-character ID.
+    //
+    // Read and recorded BEFORE the arming check, in both arms, because a caller that wants the ID
+    // wants it whether or not a redirect is armed -- and the arm is exactly the case where the
+    // directory it could otherwise be read off is NOT named after the account.
+    let found = unsafe { wide_to_string(steamid, 64) };
+    if let Some(id) = found.as_deref() {
+        record_steam_id(id);
+    }
     if !armed() {
         pass_through("not-armed");
         return;
     }
-    // The account ID the game itself is about to use for the folder name. This is why the rebind
-    // needs nothing from the config -- 64 units is far beyond a 16-character ID.
-    let Some(steam_id) = (unsafe { wide_to_string(steamid, 64) }) else {
+    let Some(steam_id) = found else {
         pass_through("no-steam-id");
         return;
     };
