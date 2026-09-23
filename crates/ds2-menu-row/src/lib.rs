@@ -132,6 +132,9 @@ mod tab;
 #[cfg(windows)]
 mod strip;
 
+#[cfg(windows)]
+mod icon;
+
 pub use api::{AddRowError, MAX_ADDED_ROWS, RowId, RowSpec, Tab, Tint, add_row};
 
 #[cfg(windows)]

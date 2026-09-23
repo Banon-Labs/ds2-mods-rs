@@ -1820,6 +1820,24 @@ pub unsafe fn install() -> Outcome {
         }
     ));
 
+    // THE SEVENTH TAB'S HEXAGON, which is allowed to fail on its own for the same reason the tab is.
+    // The six tab icons are one baked quad and the seventh's is a slice of it, so this is a shape
+    // the layout has to be able to look up; `crate::strip` asks whether it went in before it writes
+    // the record that names it, and before it moves the `RB` prompt out of the way. A refusal is the
+    // iconless seventh tab that shipped before this, not a broken strip.
+    // SAFETY: `base` is the live module base and MinHook is initialised by the same call that
+    // patched the sites above.
+    let icon = seventh_tab && unsafe { crate::icon::install(base) };
+    log(format_args!(
+        "{LOG_PREFIX} seventh tab icon {} -- the tab {}",
+        if icon { "hooked" } else { "NOT hooked" },
+        if icon {
+            "wears the sixth tab's glyph, sliced out of the strip's own plate"
+        } else {
+            "keeps its highlight and no hexagon, as before"
+        }
+    ));
+
     let rva = ds2_rva::FE_INGAME_TOP_SELECT_SYSTEM_TAB_ITEMS;
     let site = base + rva as usize;
 

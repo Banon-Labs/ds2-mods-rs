@@ -6,8 +6,8 @@
 //! per added row. The tab strip is the same kind of object: definition
 //! [`ds2_rva::FLO_TAB_STRIP_DEFINITION`] with [`ds2_rva::FLO_TAB_STRIP_CHILDREN`] children, the last
 //! six of which are the tab cells, and a child count that is also the display-list capacity
-//! (`FUN_140b6bd80` refuses to attach past it). So a seventh tab is two more records -- a cell and
-//! the panel that cell selects -- and a count of twenty.
+//! (`FUN_140b6bd80` refuses to attach past it). So a seventh tab is three more records -- a cell,
+//! the panel that cell selects, and the hexagon it is drawn on -- and a count of twenty-one.
 //!
 //! The record is a copy of the sixth cell's with three fields changed:
 //!
@@ -17,9 +17,11 @@
 //! | transform x | `265.05` | `+ `[`ds2_rva::FLO_TAB_PITCH`] |
 //! | depth | `89` | `+ `[`ds2_rva::FLO_TAB_DEPTH_PITCH`] |
 //!
-//! Its DEFINITION is left as the shipped [`ds2_rva::FLO_TAB_STRIP_CELL_DEFINITION`], unchanged and
-//! uncopied, because a tab cell authors only its selection highlight -- the glyph on a tab is bound
-//! by the grid control at runtime, not by the layout. There is no icon here to get wrong.
+//! Its definition is left as the shipped [`ds2_rva::FLO_TAB_STRIP_CELL_DEFINITION`], unchanged and
+//! uncopied, because a tab cell authors only its selection highlight. That is not a convenience --
+//! it is the reason the seventh tab drew no icon for three commits. A cell holds two copies of one
+//! highlight shape and nothing in it carries an element id, so no glyph is bound there and none can
+//! be. The icon is a third record, sliced out of the strip's own plate by [`crate::icon`].
 //!
 //! # The second record, which is the tab itself
 //!
@@ -60,11 +62,32 @@
 //! record naming [`ds2_rva::FLO_TAB_SUBTREE_DEFINITION`] under [`ds2_rva::FLO_TAB_STRIP_PANEL_ID`].
 //! Anything else passes through untouched and says so.
 //!
+//! # The third record, which is the hexagon
+//!
+//! A cell draws a highlight and a subtree draws rows; neither draws the picture of a tab. That is
+//! [`ds2_rva::FLO_TAB_STRIP_PLATE`], one textured quad holding all six hexagons and all six glyphs,
+//! and a seventh needs one more quad beside it. The record is a copy of the plate's with two fields
+//! changed:
+//!
+//! | field | from | to |
+//! |---|---|---|
+//! | shape index | [`ds2_rva::FLO_TAB_PLATE_SHAPE`] | [`ds2_rva::FLO_ADDED_TAB_ICON_SHAPE`] |
+//! | depth | `60` | [`ds2_rva::FLO_ADDED_TAB_ICON_DEPTH`] |
+//!
+//! Its transform pointer is the plate's and stays that way, because the offset that moves the
+//! hexagon lives in the quad [`crate::icon`] builds rather than in the record.
+//!
+//! This record goes in only when [`crate::icon::armed`] says the shape lookup is hooked. Without
+//! it there is nothing for the index to resolve to, and the two pieces of right-hand furniture
+//! moved below stay where the game put them -- a seventh tab with no hexagon, which is what the
+//! last three commits shipped, rather than a gap where the `RB` prompt used to be.
+//!
 //! # What a run has shown, and what it has not
 //!
 //! The cell is established. A run logged `strip cell added id=0x1eaba8 x=319.05 children=18->19`
 //! and `strip count raised tabs=6 -> items=7` with no mismatch, and the seventh tab drew its four
-//! rows. The subtree record is new and has not been in front of a running game.
+//! rows. The subtree record, the hexagon and the two moved pieces of furniture are new and have not
+//! been in front of a running game.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -72,25 +95,89 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::LOG_PREFIX;
 use crate::install::log;
 
-/// Children the replacement carries: the shipped eighteen, the seventh tab's subtree, and its cell.
-const CHILDREN: usize = ds2_rva::FLO_TAB_STRIP_CHILDREN + 2;
+/// Children the replacement carries: the shipped eighteen, the seventh tab's subtree, its icon and
+/// its cell.
+///
+/// The icon is only added when [`crate::icon`] is in, but the array is sized for it either way: a
+/// slot is twenty bytes and a conditional length is a second thing to get wrong. The count written
+/// into the definition is [`Plan::children`], which is the number actually filled.
+const CHILDREN: usize = ds2_rva::FLO_TAB_STRIP_CHILDREN + 3;
 
-/// Where the added subtree sits in the replacement: directly after the template it is cloned from,
-/// so the two tabs' panels are adjacent and both precede the strip's cells.
-const PANEL_AT: usize = ds2_rva::FLO_TAB_STRIP_PANEL + 1;
+/// Transform blocks the replacement owns: the added cell's, the end cap's and the `RB` label's.
+///
+/// A record's `+0x08` points at a block in the document, and two records pointing at one block are
+/// one position between them -- so anything this moves needs a copy first. The added subtree and
+/// the added icon are not here, because neither moves: they want the position the record they were
+/// cloned from already has.
+const MOVED: usize = 3;
 
-/// Where the added cell sits: last, after the six the game ships.
-const CELL_AT: usize = CHILDREN - 1;
+/// Which of [`Strip::transforms`] belongs to what.
+const CELL_TRANSFORM: usize = 0;
+const END_CAP_TRANSFORM: usize = 1;
+const RB_LABEL_TRANSFORM: usize = 2;
 
-/// A replacement strip definition, its child records, and the one transform block the added record
-/// points at -- one allocation, so the pointer between them cannot outlive its target.
+/// Where each added record ends up, and how many records the definition then claims.
+///
+/// Built by one walk over the shipped array rather than by arithmetic on insertion points, because
+/// there are two insertions and the second one's index depends on the first. Every index below is a
+/// slot in the replacement, so the moves that follow can address the shipped furniture after it has
+/// shifted without recomputing by how much.
+struct Plan {
+    /// Slot the seventh tab's subtree record goes in: directly after the template it is cloned
+    /// from, so the two tabs' panels are adjacent and both precede the strip's cells.
+    panel: usize,
+    /// Slot the seventh tab's hexagon goes in: directly after the plate it is sliced out of.
+    /// [`usize::MAX`] when [`crate::icon`] is not in, and then nothing is written there.
+    icon: usize,
+    /// Slot the seventh cell goes in: last, after the six the game ships.
+    cell: usize,
+    /// Where each shipped record ended up.
+    moved: [usize; ds2_rva::FLO_TAB_STRIP_CHILDREN],
+    /// How many slots are filled, which is the count the definition carries -- and, because the
+    /// game reads one field for both, the display list's capacity.
+    children: usize,
+}
+
+impl Plan {
+    /// The plan for a strip that does or does not get an icon.
+    const fn new(with_icon: bool) -> Self {
+        let mut plan = Plan {
+            panel: 0,
+            icon: usize::MAX,
+            cell: 0,
+            moved: [0; ds2_rva::FLO_TAB_STRIP_CHILDREN],
+            children: 0,
+        };
+        let mut shipped = 0;
+        let mut at = 0;
+        while shipped < ds2_rva::FLO_TAB_STRIP_CHILDREN {
+            plan.moved[shipped] = at;
+            at += 1;
+            if shipped == ds2_rva::FLO_TAB_STRIP_PANEL {
+                plan.panel = at;
+                at += 1;
+            }
+            if with_icon && shipped == ds2_rva::FLO_TAB_STRIP_PLATE {
+                plan.icon = at;
+                at += 1;
+            }
+            shipped += 1;
+        }
+        plan.cell = at;
+        plan.children = at + 1;
+        plan
+    }
+}
+
+/// A replacement strip definition, its child records, and the transform blocks the moved records
+/// point at -- one allocation, so the pointers between them cannot outlive their targets.
 #[repr(C, align(16))]
 struct Strip {
     definition: [u8; ds2_rva::FLO_DEFINITION_STRIDE],
     records: [u8; ds2_rva::FLO_RECORD_STRIDE * CHILDREN],
-    transform: [u8; ds2_rva::FLO_TRANSFORM_SIZE],
+    transforms: [u8; ds2_rva::FLO_TRANSFORM_SIZE * MOVED],
     /// The shipped records exactly as the game had them, so a cache hit can be checked rather than
-    /// assumed. Not `records`, which has its added entry appended and would never match.
+    /// assumed. Not `records`, which has its added entries in it and would never match.
     shipped: [u8; ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_TAB_STRIP_CHILDREN],
 }
 
@@ -158,7 +245,79 @@ unsafe fn is_the_strip(definition: *const u8) -> Option<*const u8> {
     if id != ds2_rva::FLO_TAB_STRIP_PANEL_ID || definition != ds2_rva::FLO_TAB_SUBTREE_DEFINITION {
         return None;
     }
+    // The three records the icon work touches, each on the definition index it names. The plate is
+    // what the seventh hexagon is cloned from; the other two are the furniture standing where that
+    // hexagon goes. A record at one of these indices naming something else is a document this was
+    // not read from, and moving it would move whatever it happens to be.
+    for (index, want) in [
+        (ds2_rva::FLO_TAB_STRIP_PLATE, ds2_rva::FLO_TAB_PLATE_SHAPE),
+        (
+            ds2_rva::FLO_TAB_STRIP_END_CAP,
+            ds2_rva::FLO_TAB_STRIP_END_CAP_DEFINITION,
+        ),
+        (
+            ds2_rva::FLO_TAB_STRIP_RB_LABEL,
+            ds2_rva::FLO_TAB_STRIP_RB_LABEL_DEFINITION,
+        ),
+    ] {
+        // SAFETY: the index is below `count`, which the caller guarantees is live at `children`.
+        let found = unsafe {
+            children
+                .add(index * ds2_rva::FLO_RECORD_STRIDE + ds2_rva::FLO_RECORD_DEFINITION_OFFSET)
+                .cast::<u16>()
+                .read() as u32
+        };
+        if found != want {
+            return None;
+        }
+    }
     Some(children)
+}
+
+/// Copy the block a record points at into `into`, move it along by one [`ds2_rva::FLO_TAB_PITCH`],
+/// and point the record at the copy.
+///
+/// The copy is what keeps the move local: two records pointing at one block are one position
+/// between them, so writing through the document's own block would move the shipped furniture for
+/// every other document that shares it.
+fn move_along(
+    records: &mut [u8],
+    transforms: &mut [u8],
+    slot: usize,
+    which: usize,
+    what: &str,
+) -> Option<f32> {
+    let at = slot * ds2_rva::FLO_RECORD_STRIDE;
+    let source = u64::from_le_bytes(
+        records[at + ds2_rva::FLO_RECORD_TRANSFORM_OFFSET..][..8]
+            .try_into()
+            .ok()?,
+    ) as usize;
+    if source < 0x1_0000 {
+        log(format_args!(
+            "{LOG_PREFIX} strip REFUSED reason=transform-not-a-pointer what={what} \
+             at=0x{source:016x}"
+        ));
+        return None;
+    }
+    let block = which * ds2_rva::FLO_TRANSFORM_SIZE;
+    // SAFETY: a record's `+0x08` is a pointer to a `FLO_TRANSFORM_SIZE` block in the loaded
+    // document, which `is_the_strip` established this record to be part of.
+    transforms[block..][..ds2_rva::FLO_TRANSFORM_SIZE].copy_from_slice(&unsafe {
+        std::ptr::read_unaligned((source as *const u8).cast::<[u8; ds2_rva::FLO_TRANSFORM_SIZE]>())
+    });
+    let x = f32::from_le_bytes(
+        transforms[block + ds2_rva::FLO_TRANSFORM_X_OFFSET..][..4]
+            .try_into()
+            .ok()?,
+    );
+    let moved = x + ds2_rva::FLO_TAB_PITCH;
+    transforms[block + ds2_rva::FLO_TRANSFORM_X_OFFSET..][..4]
+        .copy_from_slice(&moved.to_le_bytes());
+    let pointer = transforms[block..].as_ptr() as u64;
+    records[at + ds2_rva::FLO_RECORD_TRANSFORM_OFFSET..][..8]
+        .copy_from_slice(&pointer.to_le_bytes());
+    Some(moved)
 }
 
 /// Build the replacement. `None` with a log line if the definition is not the one this read.
@@ -175,7 +334,7 @@ unsafe fn build(original: *mut u8) -> Option<*mut u8> {
             std::ptr::read_unaligned(original.cast::<[u8; ds2_rva::FLO_DEFINITION_STRIDE]>())
         },
         records: [0; ds2_rva::FLO_RECORD_STRIDE * CHILDREN],
-        transform: [0; ds2_rva::FLO_TRANSFORM_SIZE],
+        transforms: [0; ds2_rva::FLO_TRANSFORM_SIZE * MOVED],
         // SAFETY: `is_the_strip` established this many records are live at `children`.
         shipped: unsafe {
             std::ptr::read_unaligned(
@@ -184,21 +343,22 @@ unsafe fn build(original: *mut u8) -> Option<*mut u8> {
             )
         },
     });
-    // THE SHIPPED RECORDS, IN TWO RUNS WITH A GAP. Everything up to and including the subtree
-    // template keeps its index; everything after it moves one along to leave [`PANEL_AT`] free.
-    // Written from the pristine snapshot rather than from the document, so a template read below
-    // cannot pick up a record this loop has already moved.
+    let plan = Plan::new(crate::icon::armed());
     let stride = ds2_rva::FLO_RECORD_STRIDE;
-    let head = PANEL_AT * stride;
-    strip.records[..head].copy_from_slice(&strip.shipped[..head]);
-    strip.records[head + stride..][..strip.shipped.len() - head]
-        .copy_from_slice(&strip.shipped[head..]);
 
-    // THE LAST CELL IS THE TEMPLATE, copied whole and then edited. Copying the last rather than the
+    // The shipped records, each into the slot the plan gives it. Written from the pristine snapshot
+    // rather than from the document, so a template read below cannot pick up a record this loop has
+    // already moved.
+    for (from, to) in plan.moved.iter().copied().enumerate() {
+        strip.records[to * stride..][..stride]
+            .copy_from_slice(&strip.shipped[from * stride..][..stride]);
+    }
+
+    // The last cell is the template, copied whole and then edited. Copying the last rather than the
     // first means the added cell inherits whatever the sixth's authoring says about a tab at the end
     // of the strip, which is where ours is.
     let last = (ds2_rva::FLO_TAB_STRIP_CHILDREN - 1) * stride;
-    let added = CELL_AT * stride;
+    let added = plan.cell * stride;
     strip.records[added..added + stride].copy_from_slice(&strip.shipped[last..last + stride]);
 
     // The subtree, cloned from the record beside it, with its definition pointed at this crate's
@@ -207,7 +367,7 @@ unsafe fn build(original: *mut u8) -> Option<*mut u8> {
     // panel already has.
     {
         let template = ds2_rva::FLO_TAB_STRIP_PANEL * stride;
-        let at = PANEL_AT * stride;
+        let at = plan.panel * stride;
         strip.records[at..at + stride].copy_from_slice(&strip.shipped[template..template + stride]);
         strip.records[at + ds2_rva::FLO_RECORD_DEFINITION_OFFSET..][..2]
             .copy_from_slice(&(ds2_rva::FLO_ADDED_TAB_SUBTREE_DEFINITION as u16).to_le_bytes());
@@ -215,34 +375,50 @@ unsafe fn build(original: *mut u8) -> Option<*mut u8> {
             .copy_from_slice(&ds2_rva::FLO_ADDED_TAB_SUBTREE_ID.to_le_bytes());
     }
 
-    // The cell template's transform, copied so moving ours does not move the sixth tab.
-    let source = u64::from_le_bytes(
-        strip.records[added + ds2_rva::FLO_RECORD_TRANSFORM_OFFSET..][..8]
-            .try_into()
-            .ok()?,
-    ) as usize;
-    if source < 0x1_0000 {
-        log(format_args!(
-            "{LOG_PREFIX} strip REFUSED reason=transform-not-a-pointer at=0x{source:016x}"
-        ));
-        return None;
+    // The hexagon, cloned from the plate beside it, with its shape pointed at `crate::icon`'s slice
+    // and a depth that puts it over the plate and under the cells. Its transform pointer is the
+    // plate's and stays that way: the slice carries its own offset, so the record does not move.
+    if plan.icon != usize::MAX {
+        let template = ds2_rva::FLO_TAB_STRIP_PLATE * stride;
+        let at = plan.icon * stride;
+        strip.records[at..at + stride].copy_from_slice(&strip.shipped[template..template + stride]);
+        strip.records[at + ds2_rva::FLO_RECORD_DEFINITION_OFFSET..][..2]
+            .copy_from_slice(&(ds2_rva::FLO_ADDED_TAB_ICON_SHAPE as u16).to_le_bytes());
+        strip.records[at + ds2_rva::FLO_RECORD_DEPTH_OFFSET..][..2]
+            .copy_from_slice(&ds2_rva::FLO_ADDED_TAB_ICON_DEPTH.to_le_bytes());
     }
-    // SAFETY: a record's `+0x08` is a pointer to a `FLO_TRANSFORM_SIZE` block in the loaded
-    // document, which `is_the_strip` established this record to be part of.
-    strip.transform = unsafe {
-        std::ptr::read_unaligned((source as *const u8).cast::<[u8; ds2_rva::FLO_TRANSFORM_SIZE]>())
-    };
-    let x = f32::from_le_bytes(
-        strip.transform[ds2_rva::FLO_TRANSFORM_X_OFFSET..][..4]
-            .try_into()
-            .ok()?,
-    );
-    strip.transform[ds2_rva::FLO_TRANSFORM_X_OFFSET..][..4]
-        .copy_from_slice(&(x + ds2_rva::FLO_TAB_PITCH).to_le_bytes());
 
-    let transform = strip.transform.as_ptr() as u64;
+    // The cell template's transform, copied so moving ours does not move the sixth tab -- and, when
+    // there is an icon, the two pieces of right-hand furniture standing where it goes.
+    let x = move_along(
+        &mut strip.records,
+        &mut strip.transforms,
+        plan.cell,
+        CELL_TRANSFORM,
+        "cell",
+    )?;
+    if plan.icon != usize::MAX {
+        for (slot, which, what) in [
+            (
+                plan.moved[ds2_rva::FLO_TAB_STRIP_END_CAP],
+                END_CAP_TRANSFORM,
+                "end-cap",
+            ),
+            (
+                plan.moved[ds2_rva::FLO_TAB_STRIP_RB_LABEL],
+                RB_LABEL_TRANSFORM,
+                "rb-label",
+            ),
+        ] {
+            let moved = move_along(&mut strip.records, &mut strip.transforms, slot, which, what)?;
+            log(format_args!(
+                "{LOG_PREFIX} strip furniture moved what={what} slot={slot} x={moved} \
+                 -- out from under the seventh tab's hexagon"
+            ));
+        }
+    }
+
     let record = &mut strip.records[added..added + ds2_rva::FLO_RECORD_STRIDE];
-    record[ds2_rva::FLO_RECORD_TRANSFORM_OFFSET..][..8].copy_from_slice(&transform.to_le_bytes());
     record[ds2_rva::FLO_RECORD_ID_OFFSET..][..4]
         .copy_from_slice(&ds2_rva::FLO_ADDED_TAB_ID.to_le_bytes());
     let depth = u16::from_le_bytes(
@@ -259,21 +435,27 @@ unsafe fn build(original: *mut u8) -> Option<*mut u8> {
     // The definition last, pointed at our records and carrying the raised count -- which is also the
     // capacity, so this one number is what gets the record walked AND lets it attach.
     let records = strip.records.as_ptr() as u64;
+    let children = plan.children;
     strip.definition[ds2_rva::FLO_DEFINITION_CHILDREN_OFFSET..][..8]
         .copy_from_slice(&records.to_le_bytes());
     strip.definition[ds2_rva::FLO_DEFINITION_CHILD_COUNT_OFFSET..][..2]
-        .copy_from_slice(&(CHILDREN as u16).to_le_bytes());
+        .copy_from_slice(&(children as u16).to_le_bytes());
 
     let leaked: &'static mut Strip = Box::leak(strip);
     let n = SUBSTITUTED.fetch_add(1, Ordering::Relaxed) + 1;
     log(format_args!(
-        "{LOG_PREFIX} strip cell added id={:#x} x={} depth={} children={}->{CHILDREN} \
-         subtree={:#x}@{PANEL_AT} definition={:#x} substitutions={n}",
+        "{LOG_PREFIX} strip cell added id={:#x} x={x} depth={} children={}->{children} \
+         subtree={:#x}@{} icon={} definition={:#x} substitutions={n}",
         ds2_rva::FLO_ADDED_TAB_ID,
-        x + ds2_rva::FLO_TAB_PITCH,
         depth.wrapping_add(ds2_rva::FLO_TAB_DEPTH_PITCH),
         ds2_rva::FLO_TAB_STRIP_CHILDREN,
         ds2_rva::FLO_ADDED_TAB_SUBTREE_ID,
+        plan.panel,
+        if plan.icon == usize::MAX {
+            "none -- the shape lookup is not hooked, so the tab keeps no hexagon".to_string()
+        } else {
+            format!("{:#x}@{}", ds2_rva::FLO_ADDED_TAB_ICON_SHAPE, plan.icon)
+        },
         ds2_rva::FLO_ADDED_TAB_SUBTREE_DEFINITION,
     ));
     Some((&raw mut leaked.definition).cast::<u8>())
@@ -344,10 +526,12 @@ pub(crate) unsafe fn substitute(original: *mut u8) -> *mut u8 {
 mod tests {
     use super::*;
 
-    /// Two more children than the game ships, and the added cell is the last one.
+    /// Three more children than the game ships, and the added cell is the last one.
     #[test]
-    fn the_replacement_is_the_shipped_strip_plus_two() {
-        assert_eq!(CHILDREN, ds2_rva::FLO_TAB_STRIP_CHILDREN + 2);
+    fn the_replacement_is_the_shipped_strip_plus_three() {
+        assert_eq!(CHILDREN, ds2_rva::FLO_TAB_STRIP_CHILDREN + 3);
+        assert_eq!(Plan::new(true).children, CHILDREN);
+        assert_eq!(Plan::new(false).children, CHILDREN - 1);
         assert_eq!(
             ds2_rva::FLO_TAB_STRIP_FIRST_CELL + ds2_rva::FLO_TAB_STRIP_CELL_IDS.len(),
             ds2_rva::FLO_TAB_STRIP_CHILDREN,
@@ -391,14 +575,78 @@ mod tests {
     /// record exists to avoid, one level up from the one it fixes.
     #[test]
     fn the_added_subtree_precedes_the_cells_and_the_added_cell_follows_them() {
-        const {
-            assert!(PANEL_AT == ds2_rva::FLO_TAB_STRIP_PANEL + 1);
+        for with_icon in [false, true] {
+            let plan = Plan::new(with_icon);
+            assert_eq!(plan.panel, ds2_rva::FLO_TAB_STRIP_PANEL + 1);
             // A tab's panel inserted among the cells would draw over them.
-            assert!(PANEL_AT <= ds2_rva::FLO_TAB_STRIP_FIRST_CELL);
-            assert!(CELL_AT == CHILDREN - 1);
+            assert!(plan.panel <= plan.moved[ds2_rva::FLO_TAB_STRIP_FIRST_CELL]);
+            assert_eq!(plan.cell, plan.children - 1);
+            assert!(plan.cell > plan.moved[ds2_rva::FLO_TAB_STRIP_CHILDREN - 1]);
+        }
+    }
+
+    /// The added hexagon goes in beside the plate it is sliced out of, and still before the cells.
+    ///
+    /// Array order and depth then say the same thing, which is the point: a leaf's depth is read
+    /// back and a nested record's is not, and this record has to sit under the cells either way or
+    /// it draws over the highlight it is supposed to sit beneath.
+    #[test]
+    fn the_added_hexagon_sits_beside_the_plate_and_before_the_cells() {
+        let plan = Plan::new(true);
+        assert_eq!(plan.icon, plan.moved[ds2_rva::FLO_TAB_STRIP_PLATE] + 1);
+        assert!(plan.icon < plan.moved[ds2_rva::FLO_TAB_STRIP_FIRST_CELL]);
+        assert!(plan.icon != plan.panel && plan.icon != plan.cell);
+        assert_eq!(
+            Plan::new(false).icon,
+            usize::MAX,
+            "without the shape lookup there is nothing for an icon record to resolve to"
+        );
+    }
+
+    /// Every shipped record lands in its own slot, and the added ones land in slots nobody else
+    /// claimed. A collision here would silently drop a record the game ships.
+    #[test]
+    fn the_plan_gives_every_record_a_slot_of_its_own() {
+        for with_icon in [false, true] {
+            let plan = Plan::new(with_icon);
+            let mut taken = vec![false; plan.children];
+            for slot in plan
+                .moved
+                .iter()
+                .copied()
+                .chain([plan.panel, plan.cell])
+                .chain(if with_icon { Some(plan.icon) } else { None })
+            {
+                assert!(slot < plan.children, "slot {slot} is past the child count");
+                assert!(!taken[slot], "two records claim slot {slot}");
+                taken[slot] = true;
+            }
+            assert!(taken.iter().all(|&t| t), "a slot was left unwritten");
+        }
+    }
+
+    /// The furniture this moves is the furniture the seventh hexagon lands on, and it is moved by
+    /// exactly the distance the hexagon is.
+    #[test]
+    fn the_moved_furniture_is_what_the_hexagon_lands_on() {
+        // The plate's right edge on screen is where the seventh hexagon starts.
+        let hexagon = ds2_rva::FLO_TAB_PLATE_SOURCE[2] + ds2_rva::FLO_TAB_PLATE_OFFSET[0];
+        // The `RB` chevron's own left edge, which `crate::icon` moves by the same pitch. Mirrored
+        // art subtracts, so the rect's right edge is the chevron's left one.
+        let chevron = ds2_rva::FLO_TAB_ARROWS_RIGHT_X - ds2_rva::FLO_TAB_ARROWS_RIGHT_SOURCE[2];
+        assert!(
+            chevron < hexagon + ds2_rva::FLO_TAB_PITCH,
+            "the chevron would not be under the hexagon, so moving it is gratuitous"
+        );
+        const {
+            assert!(MOVED == 3);
+            // Three records, three blocks: two sharing one would move both.
             assert!(
-                CELL_AT > ds2_rva::FLO_TAB_STRIP_FIRST_CELL + ds2_rva::FLO_TAB_STRIP_CELL_IDS.len()
+                CELL_TRANSFORM < MOVED && END_CAP_TRANSFORM < MOVED && RB_LABEL_TRANSFORM < MOVED
             );
+            assert!(CELL_TRANSFORM != END_CAP_TRANSFORM);
+            assert!(END_CAP_TRANSFORM != RB_LABEL_TRANSFORM);
+            assert!(CELL_TRANSFORM != RB_LABEL_TRANSFORM);
         }
     }
 
@@ -409,7 +657,7 @@ mod tests {
         let strip = Strip {
             definition: [0; ds2_rva::FLO_DEFINITION_STRIDE],
             records: [0; ds2_rva::FLO_RECORD_STRIDE * CHILDREN],
-            transform: [0; ds2_rva::FLO_TRANSFORM_SIZE],
+            transforms: [0; ds2_rva::FLO_TRANSFORM_SIZE * MOVED],
             shipped: [0; ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_TAB_STRIP_CHILDREN],
         };
         assert_eq!(

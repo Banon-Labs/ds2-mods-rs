@@ -1110,3 +1110,101 @@ menu of fixed size, and nobody has looked at a tab carrying twelve added rows. T
 bound, not a recommendation.
 
 **All of it.** Not one line of this section has been in front of a running game.
+
+## The tab icon is one baked quad, and the atlas holds six of them
+
+Read statically on 2026-09-23 from `l02_01_In-Game.flo` and from the four functions that read it.
+No game was launched for any of it. The question it answers: a seventh tab was reachable,
+highlighted and drew its rows, and wore no icon.
+
+### Two readings that were wrong
+
+**"The glyph is bound into the cell by the grid."** It is not. All six tab cells instantiate one
+definition, `0x0270`, whose entire contents are two copies of the highlight shape `0x026f` at
+different frame ranges. Every record inside it -- and inside `0x026f` below it -- carries element id
+`0x000000`. `FeComponentObject::findByIdPath` matches on that field, so nothing inside a cell is
+addressable by any path, and a bind has no target. Six different icons cannot come out of one
+definition that has no id in it.
+
+**"The strip's second per-cell lookup supplies it."** `0x1400a4bd0` is `0x1400a4a70`'s body
+instruction for instruction, and answering both changed nothing on screen. That is consistent with
+the paragraph above rather than a contradiction of it: two accessors resolving the same entry to the
+same cell that holds no glyph.
+
+### Where the icons actually are
+
+Child 7 of the strip is a `kind & 1` record at `(0, 0)`, depth 60, naming shape `0x0268`. Decoded:
+
+| field | value |
+| --- | --- |
+| quads | 1 |
+| texture | index 12, `In-game_01`, 1024x1024 |
+| source rect | `(1.10, 781.95)-(337.60, 850.90)` |
+| offset | `(0, -775.70)` |
+| lands at | `(1.10, 6.25)-(337.60, 75.20)` |
+
+The six cells sit at `-4.6, 49.4, 103.4, 157.4, 211.55, 265.05`, so that one rect is `336.50` wide
+across a band the six tabs span in `269.65` plus one hexagon. It is the whole tab strip -- six
+hexagons and six glyphs -- baked into a single textured quad.
+
+Nothing else in the document draws a hexagon. A sweep of all 342 definitions for a child array whose
+x values step by roughly the tab pitch finds exactly one: the strip, and the hits are its own cells.
+A sweep of all 512 quads on texture 12 finds no unused art in the band `y 781.95..850.90` right of
+`x 337.60` either -- `0x0131` owns `335.95..473.90` there and the tab highlight `0x026e` starts at
+`475.25`. **There is no seventh hexagon in the atlas.**
+
+### The format, off the functions that read it
+
+| what | where | read by |
+| --- | --- | --- |
+| shape table | `[doc+0x08]`, `[doc+0x48]` entries, stride `0x18`, key `u16` at `+0x00` | `FUN_140b54780`, `add rcx,0x18` |
+| quad count | entry `+0x02` | `FUN_140b70200`, `movzx ecx,WORD PTR [rax+0x2]` |
+| quad array | entry `+0x08`, stride `0x40` | `FUN_140b70200`, `shl r8,0x6; add r8,[rax+0x8]` |
+| source rect | quad `+0x30` -> four floats | `FUN_140b70200`, `mov rax,[r8+0x30]` then `[rax]`..`[rax+0xc]` |
+| which table | record `+0x12` kind, record `+0x00` index | `FUN_140b50bc0`, `movzx edx,[rbx]` at `0x140b50d12` |
+
+`FUN_140b54780` returns the entry itself (`mov rax,rcx; ret`), so a detour can hand back storage of
+its own. Three sibling lookups share its prologue -- `0x140b54700` is the mask table, `0x140b54740`
+the definitions, `0x140b547c0` the text -- which is why the rva rather than the bytes is what says
+which one is being hooked.
+
+The same decode names the rest of the strip's furniture, and the numbers are why the seventh tab
+needs room made for it:
+
+| child | what | lands at |
+| --- | --- | --- |
+| 7 | the six-hexagon plate | `x 1.10..337.60` |
+| 8 | the right-hand cap, `0x026a` | `x 271.05..349.40` |
+| 9 | both chevrons, `0x026b`, one rect mirrored | `x -9.30..15.70` and `336.70..361.70` |
+| 10 | the `RB` label | `x 347.05` |
+
+A seventh hexagon starts where the plate ends, at `337.60`. All three of those pieces are already
+standing there.
+
+### What `ds2-menu-row` does about it
+
+`crates/ds2-menu-row/src/icon.rs` detours the shape lookup and serves two shapes:
+
+* `0xe268`, the plate's quad with its source rect's left edge pulled in to `337.60 - 54.0` and its
+  offset moved out by `+54.0`. That is the plate's last whole tab period, drawn immediately past the
+  plate's right edge. The construction needs no hexagon width and no cell offset -- only the pitch
+  the six cells already spell -- and the seam falls between two hexagons, where the art repeats.
+* `0x026b` with quad 0 (`scale x` of `-1`, the right-hand chevron) moved by the same `+54.0`. The
+  left chevron keeps its quad, which is why the shape is copied rather than the record moved: one
+  record draws both.
+
+`crates/ds2-menu-row/src/strip.rs` adds the record that names `0xe268` beside the plate at depth 62,
+and moves the two remaining pieces -- the cap and the `RB` label -- by copying their transform blocks
+and adding a pitch to each x.
+
+**The seventh tab therefore wears the sixth tab's glyph.** The atlas has six and this mod ships no
+texture of its own. `FLO_ADDED_TAB_ICON_SOURCE_LEFT` is the one constant to change if a different
+slice is ever wanted; a genuinely new glyph needs a texture, which is a different piece of work.
+
+### What is not measured
+
+None of this section has been in front of a running game. What is static and settled: the cell holds
+no glyph and cannot, the plate is one quad spanning exactly the six tabs, the atlas has no seventh
+hexagon, and every offset above came off the instruction that reads it. What a run has to show: that
+the hexagon lands where the arithmetic says, that the seam is invisible, and that the moved chevron
+and label look deliberate rather than nudged.

@@ -4244,6 +4244,179 @@ pub const FE_INGAME_MENU_TAB_PATH_COUNT_OFFSET: usize =
     FE_INGAME_MENU_TAB_PATH_OFFSET + FE_SCENE_NAMER_ENTRY_LEN_OFFSET;
 
 // =================================================================================================
+// THE TAB ICONS, WHICH ARE ONE BAKED QUAD AND NOT SIX ELEMENTS
+//
+// A seventh tab was reachable, highlighted and drew its rows, and wore no icon. Two readings were
+// tried and both were wrong: that the glyph is bound into the cell by the grid -- it is not, the
+// cell definition `FLO_TAB_STRIP_CELL_DEFINITION` holds two copies of one highlight shape and
+// nothing inside it carries an element id, so no path can reach into a cell and no bind can put a
+// glyph there -- and that answering the strip's second per-cell lookup would supply it, which
+// changed nothing, because that lookup resolves the same entry to a second accessor.
+//
+// The strip's eighteen children are: four tab panels, a mask, two captions, the `LB`/`RB` labels,
+// three texture leaves, and the six cells. The six hexagons and the six glyphs are inside one of
+// those leaves -- `FLO_TAB_PLATE_SHAPE`, a single textured quad that samples
+// `(1.10, 781.95)-(337.60, 850.90)` out of the 1024x1024 atlas `In-game_01` and lands it at
+// `(1.10, 6.25)-(337.60, 75.20)`, which is exactly the band the six tabs occupy. There is no
+// seventh hexagon anywhere in that atlas: the art immediately right of the plate belongs to
+// another shape, and the plate's own right edge is its last hexagon's.
+//
+// So the seventh tab's icon is not a lookup to answer. It is a quad to draw.
+//
+// The quad this draws is the plate's own last pitch, repeated one pitch right. The six hexagons
+// sit at `FLO_TAB_PITCH`, so the plate's art is periodic at that pitch, and a copy of its final
+// `54.0` of atlas placed immediately past its right edge continues the row -- the seam falls
+// between two hexagons, where the art repeats, and the glyph inside the new hexagon is the sixth
+// tab's glyph shifted whole. That is the one construction needing no number this file cannot
+// check: not the hexagon's width, not its offset inside a cell, only the pitch the six cells
+// already spell.
+//
+// The seventh tab therefore wears the sixth tab's glyph. The atlas has six and this mod ships no
+// texture of its own; a duplicate glyph in a hexagon that is the right shape, the right size and
+// in the right place is what is available. `FLO_ADDED_TAB_ICON_SOURCE_LEFT` is the one number to
+// change if a different slice is ever wanted.
+//
+// Every offset below was read off the function that reads it, not matched to a pattern:
+//
+//   `FUN_140b54780(doc, index)`  the shape lookup: scan of `[doc+0x08]` over `[doc+0x48]` entries,
+//                                stride 0x18, key = the `u16` at `+0x00`, returning the entry.
+//   `FUN_140b70200(this, .., e)` `FeComponentTextureShape::init`: `movzx ecx,[e+0x02]` is the quad
+//                                count, `[e+0x08] + (i << 6)` is quad `i` -- stride 0x40.
+//   `FUN_140b70200` again        `rax = [quad+0x30]`, then four floats `[rax]`..`[rax+0x0c]`
+//                                copied into two per-quad buffers: the source rect.
+//   `FUN_140b50bc0`              `movzx edx,[rec]` -- a `kind & 1` record's `+0x00` is the shape
+//                                index, the same field a `kind & 4` record uses for a definition.
+//
+// Reproduce the numbers with:
+//
+//     python3 scripts/ds2-flo.py tree /tmp/menu02/l02_01_In-Game.flo --def 0x271
+//
+// =================================================================================================
+
+/// `FeLayoutDocument::findShape(doc, index)`. RVA `0x00b54780`.
+///
+/// `fn(&doc, u32 index) -> *entry`. A linear scan of `[[doc]+0x08]` over `[[doc]+0x48]` entries at
+/// stride [`FLO_SHAPE_STRIDE`], keyed by the `u16` at `+0x00`; `mov rax,rcx; ret` on a hit and
+/// null on a miss, so a detour that declines returns what the trampoline gave it.
+///
+/// Three sibling lookups share its shape and its prologue -- `0x00b54700` is the mask table,
+/// `0x00b54740` is [`FLO_FIND_DEFINITION`], `0x00b547c0` is the text table. So the prologue check
+/// proves the bytes are a lookup; it does not prove which of the four. The rva is what says that,
+/// and it came from the call site at `0x140b50d18`, reached with `kind & 1`.
+pub const FLO_FIND_SHAPE: u32 = 0x00b5_4780;
+
+/// `mov rax,[rcx]; mov r9d,edx; test rax,rax`. Shared with the three sibling lookups; see above.
+pub const FLO_FIND_SHAPE_PROLOGUE: [u8; 9] = [0x48, 0x8b, 0x01, 0x44, 0x8b, 0xca, 0x48, 0x85, 0xc0];
+
+/// Bytes per shape-table entry. `FUN_140b54780`: `add rcx,0x18`.
+pub const FLO_SHAPE_STRIDE: usize = 0x18;
+/// `u16` shape index inside an entry -- the key the scan compares.
+pub const FLO_SHAPE_KEY_OFFSET: usize = 0x00;
+/// `u16` how many quads the shape holds. `FUN_140b70200`: `movzx ecx,WORD PTR [rax+0x2]`, used to
+/// size four allocations before anything is read.
+pub const FLO_SHAPE_QUAD_COUNT_OFFSET: usize = 0x02;
+/// Pointer to the quad array. `FUN_140b70200`: `add r8,QWORD PTR [rax+0x8]` after `shl r8,0x6`.
+pub const FLO_SHAPE_QUADS_OFFSET: usize = 0x08;
+
+/// Bytes per quad. `FUN_140b70200`: `shl r8,0x6` -- the index times sixty-four.
+pub const FLO_QUAD_STRIDE: usize = 0x40;
+/// `f32` x and `f32` y the quad's source rect is offset by to reach the screen.
+pub const FLO_QUAD_X_OFFSET: usize = 0x00;
+pub const FLO_QUAD_Y_OFFSET: usize = 0x04;
+/// `f32` scale x inside a quad, at the same place a transform block keeps it. `-1` mirrors.
+pub const FLO_QUAD_SCALE_X_OFFSET: usize = 0x08;
+/// Pointer to the quad's source rect. `FUN_140b70200`: `mov rax,QWORD PTR [r8+0x30]`, and the quad
+/// is skipped when it is null.
+pub const FLO_QUAD_SOURCE_OFFSET: usize = 0x30;
+
+/// Bytes in a source rect: four floats. `FUN_140b70200` reads `[rax]`, `[rax+4]`, `[rax+8]` and
+/// `[rax+0xc]` and copies all four into two sixteen-byte per-quad buffers.
+pub const FLO_SOURCE_RECT_SIZE: usize = 0x10;
+/// `f32` left, top, right and bottom of a source rect, in atlas pixels.
+pub const FLO_SOURCE_LEFT_OFFSET: usize = 0x00;
+pub const FLO_SOURCE_TOP_OFFSET: usize = 0x04;
+pub const FLO_SOURCE_RIGHT_OFFSET: usize = 0x08;
+pub const FLO_SOURCE_BOTTOM_OFFSET: usize = 0x0c;
+
+/// The shape index of the six-hexagon plate. `0x0268`, one quad.
+///
+/// Child [`FLO_TAB_STRIP_PLATE`] of [`FLO_TAB_STRIP_DEFINITION`], a `kind & 1` record at `(0, 0)`
+/// and depth `60` -- below the six cells at `69..89`, which is why a selected tab's highlight draws
+/// over its icon.
+pub const FLO_TAB_PLATE_SHAPE: u32 = 0x0268;
+
+/// Index of the plate's record inside [`FLO_TAB_STRIP_DEFINITION`]'s child array. Seven.
+///
+/// The seventh tab's icon record goes in beside it, so the two hexagon rows sit adjacent in array
+/// order as well as in depth and neither reading of the draw order can put one over a cell.
+pub const FLO_TAB_STRIP_PLATE: usize = 7;
+
+/// Quads the plate carries. One, checked before it is copied: a plate with two is not this plate.
+pub const FLO_TAB_PLATE_QUADS: usize = 1;
+
+/// The plate quad's source rect, checked before the copy is made. `(1.10, 781.95)-(337.60, 850.90)`
+/// of the 1024x1024 atlas `In-game_01`.
+pub const FLO_TAB_PLATE_SOURCE: [f32; 4] = [1.10, 781.95, 337.60, 850.90];
+
+/// The plate quad's screen offset, checked with the rect above. `(0, -775.70)`, which lands that
+/// rect at `(1.10, 6.25)-(337.60, 75.20)`.
+pub const FLO_TAB_PLATE_OFFSET: [f32; 2] = [0.0, -775.70];
+
+/// The shape index the seventh tab's icon is served under. `0xe268`.
+///
+/// Same arrangement as [`FLO_ADDED_TAB_SUBTREE_DEFINITION`] and for the same reason: nothing in the
+/// shipped document names it, so a lookup for it can only have come from a record this crate wrote.
+/// `0xe268` is `0xe000` plus the plate's own index, which keeps the two readable together.
+pub const FLO_ADDED_TAB_ICON_SHAPE: u32 = 0xe268;
+
+/// Where the seventh tab's slice starts in the atlas. The plate's right edge less one
+/// [`FLO_TAB_PITCH`], which is the last whole tab period the plate holds.
+pub const FLO_ADDED_TAB_ICON_SOURCE_LEFT: f32 = FLO_TAB_PLATE_SOURCE[2] - FLO_TAB_PITCH;
+
+/// Depth the icon record is attached at. `62` -- above the plate's `60` and the end cap's `61`, and
+/// below the first cell's `69`, so the icon sits on the strip and under its own highlight.
+pub const FLO_ADDED_TAB_ICON_DEPTH: u16 = 62;
+
+/// Index, in [`FLO_TAB_STRIP_DEFINITION`]'s child array, of the cap drawn over the strip's right
+/// end. Its container is `0x026a` and its quad lands at `(271.05, 5.05)-(349.40, 64.45)`, over the
+/// sixth tab -- so a seventh tab needs it one [`FLO_TAB_PITCH`] further along.
+pub const FLO_TAB_STRIP_END_CAP: usize = 8;
+/// The definition index at that child, checked before its transform is copied.
+pub const FLO_TAB_STRIP_END_CAP_DEFINITION: u32 = 0x026a;
+
+/// Index of the `RB` prompt's label, which sits right of the last tab at `x = 347.05` and would
+/// otherwise be underneath the seventh tab's hexagon.
+pub const FLO_TAB_STRIP_RB_LABEL: usize = 10;
+/// The definition index at that child, checked before its transform is copied.
+pub const FLO_TAB_STRIP_RB_LABEL_DEFINITION: u32 = 0x026d;
+
+/// The shape index of the two chevrons that flank the strip. `0x026b`, two quads off one mirrored
+/// source rect: quad `0` is the right-hand chevron -- its `scale x` is `-1` -- and quad `1` the
+/// left.
+///
+/// Used by exactly one record -- child `9` of the strip -- so serving a moved copy of it moves the
+/// right chevron and nothing else in the document.
+pub const FLO_TAB_ARROWS_SHAPE: u32 = 0x026b;
+/// Quads it carries. Two, checked before either is copied.
+pub const FLO_TAB_ARROWS_QUADS: usize = 2;
+/// Index of the right-hand chevron inside that shape -- the one a seventh tab displaces.
+pub const FLO_TAB_ARROWS_RIGHT: usize = 0;
+/// That quad's `scale x`, which is `-1` because it is the left chevron's art mirrored. Checked
+/// before the move, because it is what says quad `0` is the right chevron and not the left.
+pub const FLO_TAB_ARROWS_RIGHT_SCALE_X: f32 = -1.0;
+/// That quad's screen offset x, checked before it is moved. Mirrored art subtracts, so the chevron
+/// lands at `1357.45 - (995.75..1020.75)`, which is `336.70..361.70` -- flush against the plate's
+/// right edge at `337.60`.
+pub const FLO_TAB_ARROWS_RIGHT_X: f32 = 1357.45;
+
+/// That quad's source rect, checked with the two fields above.
+///
+/// The shape index alone is a weak identity here in a way the plate's is not: this detour sees every
+/// shape lookup in every `.flo` the game loads, and `0x026b` in some other document is some other
+/// picture. Four more floats that all have to agree is what makes the chevron the chevron.
+pub const FLO_TAB_ARROWS_RIGHT_SOURCE: [f32; 4] = [995.75, 724.40, 1020.75, 769.10];
+
+// =================================================================================================
 // THE SOFTWARE KEYBOARD, AND THE ONE DWORD THAT KEEPS IT SAFE TO BORROW
 //
 // DARK SOULS II already asks Steam for a text field -- `SoftwareKeyboardManagerImpl` wraps
