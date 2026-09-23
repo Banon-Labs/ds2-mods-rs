@@ -6018,3 +6018,65 @@ pub const SAVE_LOAD_SYSTEM_LOAD_SYSTEM_DATA: u32 = 0x002e_72c0;
 /// The check is still worth making, because an RVA is a number, and a number that lands on the
 /// wrong function in some other build would be called just as happily.
 pub const SAVE_LOAD_SYSTEM_LOAD_SYSTEM_DATA_PROLOGUE: [u8; 5] = [0x40, 0x53, 0x48, 0x83, 0xec];
+
+/// `SaveLoadSystem`'s per-frame **pump**: the call that finishes a request
+/// [`SAVE_LOAD_SYSTEM_LOAD_SYSTEM_DATA`] started. RVA `0x002e_6230`.
+///
+/// `int pump(SaveLoadSystem *)`, Ghidra's `FUN_1402e6230_saveLoadSetup__`.
+///
+/// # A request is started by one call and finished by a different one, every frame
+///
+/// This was the missing half of the in-session swap, and its absence cost a live run. The start
+/// entry point hands a request to the `SLSession` worker thread and writes the interlock
+/// (`_x8 = 4; _xc = 2`); **nothing on the worker thread ever writes it back**. The clearing, and
+/// the parse of what the worker read, happen here -- on the game thread, when this is called:
+///
+/// ```c
+/// if (((_x8 - 2) & 0xfffffffd) != 0) return 4;            // nothing in flight
+/// if (_x38_SLRequestMan == 0)        return 10;
+/// switch (getSLSessionType(_x38)) {                       // 0x14 == the worker is done
+///   case 4..10, 0xd:  ...; return 1;                      // STILL WORKING
+///   case 0xb..0x12:   ...; return 1;                      // still working, other kinds
+///   case 0x14:  _x8 = 0;                                  // <-- the interlock is cleared HERE
+///               err = _x38->result;
+///               if (err) { _xc = 0; ...; return <err code> }
+///               switch (_xc) { case 2: parse container entry 7 into [this+0x18]; }
+///               _xc = 0; return 0;                        // DONE, and the records are filled
+/// }
+/// ```
+///
+/// # Its only callers are two title substates, and neither is resident at the top menu
+///
+/// `get_xrefs_to` finds exactly two: `FeSubStateTitleSteamLoadSystemData::update`
+/// (`0x1400fbdb0`, three call sites -- one per phase 1, 2 and 3) and
+/// `FeSubStateTitleLoadProfile`'s poll (`0x1400fc5b0`). Both call it once per frame and hold their
+/// phase while it answers `1`, which is what makes it safe to call every frame: that IS the
+/// shipped call pattern, and an idle interlock returns `4` without touching anything.
+///
+/// So a re-read requested while `0x47 TopMenu` is up -- which is exactly where the in-session
+/// character swap requests one -- is accepted, is performed by the worker, and then **waits
+/// forever**, because the substate that would have collected it is not on screen. The first live
+/// run of the swap logged precisely that: `re-read requested accepted=true` followed by fifteen
+/// seconds of nothing and `swap ABANDONED -- the container re-read never finished`. The flow has
+/// to pump it itself, because at the top menu it is the only thing that can.
+pub const SAVE_LOAD_SYSTEM_PUMP: u32 = 0x002e_6230;
+
+/// The five bytes [`SAVE_LOAD_SYSTEM_PUMP`] must begin with: `rex push rbp; push rsi; lea rbp`.
+///
+/// `scripts/ds2-arxan-chain.py 0x1402e6230` reports `NOT REDIRECTED (clean prologue at the entry)`
+/// and prints `40 55 56 48 8d 6c 24 b1`, so these are the bytes the live process holds.
+pub const SAVE_LOAD_SYSTEM_PUMP_PROLOGUE: [u8; 5] = [0x40, 0x55, 0x56, 0x48, 0x8d];
+
+/// [`SAVE_LOAD_SYSTEM_PUMP`]'s answer when the worker has not finished yet: keep calling it.
+///
+/// The one status both shipped callers test by name (`if (iVar8 == 1) break;` -- hold the phase).
+pub const SAVE_LOAD_SYSTEM_PUMP_WORKING: i32 = 1;
+
+/// [`SAVE_LOAD_SYSTEM_PUMP`]'s answer when the request completed and its data was parsed in.
+pub const SAVE_LOAD_SYSTEM_PUMP_DONE: i32 = 0;
+
+/// [`SAVE_LOAD_SYSTEM_PUMP`]'s answer when the interlock was already clear: nothing was in flight.
+///
+/// `mov eax,0x4` at `0x1402e625d`, the first bail. Not an error and not a completion -- it is what
+/// a pump call on an idle system says, which is why calling it unconditionally is harmless.
+pub const SAVE_LOAD_SYSTEM_PUMP_IDLE: i32 = 4;

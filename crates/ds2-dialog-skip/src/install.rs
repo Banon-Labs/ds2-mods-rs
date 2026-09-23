@@ -109,6 +109,56 @@ pub fn set_answer_offline_prompt(enabled: bool) {
     ANSWER_OFFLINE_PROMPT.store(enabled, Ordering::Release);
 }
 
+/// Nesting depth of [`hold`] calls. Zero means this crate answers boxes as usual.
+static HELD: AtomicUsize = AtomicUsize::new(0);
+
+/// Stop answering anything until [`release`] is called. The measurement that forced this:
+///
+/// ```text
+/// ds2-continue:    data-list phase=1->2 slot=0 action=0->2 dest=0x57-LoadProfile
+/// ds2-dialog-skip: suppressed screen=common-window kind=88 cancel-dest=0x55 confirm-dest=0xffff \
+///                  edge=only-edge result=1
+/// ds2-continue:    data-list phase=1->2 ...                     <- and round again, twelve times
+/// ```
+///
+/// A box with no confirm destination is treated here as a notice with one outcome, on the
+/// reasoning that answering it removes a keypress and decides nothing. That reasoning fails when
+/// the box's one published edge is its CANCEL edge and it points back where the player came from:
+/// the way forward is the unpublished edge, so answering the published one is not dismissing a
+/// notice, it is pressing "no" on a question. Confirming a character at the title is such a box,
+/// and the loop above is what it looks like from the player's side -- a save slot that accepts a
+/// press and does nothing.
+///
+/// The general rule is not changed here, because the general rule has been right for every other
+/// box this crate has met and a build is no place to find out otherwise. What changes is that a
+/// flow which is deliberately driving the title -- `ds2-save-file`'s character swap -- takes its
+/// questions back for the duration.
+///
+/// Paired with [`release`], and counted rather than boolean so two flows holding at once cannot
+/// have the first release re-arm it under the second.
+pub fn hold() -> usize {
+    let depth = HELD.fetch_add(1, Ordering::AcqRel) + 1;
+    log(format_args!(
+        "{LOG_PREFIX} held depth={depth} -- boxes are the player's to answer until released"
+    ));
+    depth
+}
+
+/// Undo one [`hold`].
+pub fn release() -> usize {
+    let previous = HELD.fetch_update(Ordering::AcqRel, Ordering::Acquire, |held| {
+        Some(held.saturating_sub(1))
+    });
+    let depth = previous.unwrap_or(0).saturating_sub(1);
+    log(format_args!("{LOG_PREFIX} released depth={depth}"));
+    depth
+}
+
+/// Whether [`hold`] is in force.
+pub fn held() -> bool {
+    HELD.load(Ordering::Acquire) != 0
+}
+
 /// Vtables already named in a "seen, left alone" line.
 ///
 /// `enter` runs once per appearance rather than once per frame, so this matters less than it did
@@ -174,6 +224,11 @@ fn report_once(vptr: usize, args: std::fmt::Arguments<'_>) {
 /// confirmed to be a one-button box.
 unsafe fn suppress(this: *mut u8) -> bool {
     if this.is_null() {
+        return false;
+    }
+    // A flow that is driving the title has taken its questions back. First, before anything is
+    // read: while held, this crate has no opinion about any box at all.
+    if held() {
         return false;
     }
     let base = MODULE_BASE.load(Ordering::Acquire);

@@ -104,8 +104,9 @@ ordering escapes it. One does, and `crates/ds2-save-file/src/swap.rs` is it:
 | 1 | `ds2_save_redirect::stage` | copy the pick, rebind its Steam ID, write it to `<Game>/ds2-swapped-save/` |
 | 2 | `ds2_menu_row::return_to_title` | fire action `9` with its own gate applied: the game's confirm, the game's save, the game's unload |
 | 3 | `session_dir::LOAD.arm` | point the load side at the staged copy. The save side is not touched |
-| 4 | `SaveLoadSystem` `0x1402e72c0` | re-read container entry 7, so the ten in-memory records describe the staged copy |
-| 5 | `ds2-continue`'s title gate | take the top menu's own `LOAD GAME` edge, and hand the player the list |
+| 4 | `SaveLoadSystem` `0x1402e72c0` | ask for a re-read of container entry 7, the section the ten in-memory records come from |
+| 5 | `SaveLoadSystem` `0x1402e6230`, every frame | collect that request: this is what clears the interlock and parses entry 7 in |
+| 6 | `ds2-continue`'s title gate | take the top menu's own `LOAD GAME` edge, and hand the player the list |
 
 The player then picks a character out of the game's own screen, and on the frame the list takes its
 load branch -- phase 2, past the occupancy, exclusion and ownership checks -- `session_dir::SAVE` is
@@ -130,6 +131,25 @@ all. Arming a load redirect therefore changes nothing about what the list SAYS -
 at boot. `0x1402e72c0` is what fills it again; it sets container entry 7 for loading, which is the
 section those ten `0x1f0`-byte records come from, and its own first act is to test the interlock, so
 calling it at a bad moment returns `false` and changes nothing.
+
+**Step 5 is the step that was left out**, and one live run on 2026-09-23 found it. `0x1402e72c0`
+only hands the request to the `SLSession` worker and writes the interlock (`_x8 = 4; _xc = 2`).
+Nothing on the worker thread ever writes it back: the interlock is cleared, and entry 7 actually
+parsed into the records block, by a separate per-frame call, `0x1402e6230`. Its only two callers in
+the image are `FeSubStateTitleSteamLoadSystemData::update` (`0x1400fbdb0`) and
+`FeSubStateTitleLoadProfile`'s poll (`0x1400fc5b0`) -- both title substates, neither resident while
+`0x47 TopMenu` is up, which is exactly where this flow asks. So the run logged `accepted=true` and
+then fifteen seconds of nothing:
+
+```text
+ds2-save-file: re-read requested system=0x00007ffff03a7f50 accepted=true
+ds2-save-file: swap ABANDONED -- the container re-read never finished.
+```
+
+The flow now calls `0x1402e6230` itself on every frame it is waiting, which is the shipped call
+pattern rather than an approximation of one -- both game callers do the same and hold their phase
+while it answers `1`. It returns `1` while the worker is busy, `0` when the records are filled, `4`
+if nothing was in flight, and a small error code otherwise.
 
 The old route is still in the tree, reached only when the title flow is not hooked: the row writes
 `ds2-load-next-save.txt` beside the executable for `ds2-loader` to consume during
@@ -244,7 +264,9 @@ a research question. Filed.
 | `ds2-save-file: swap staged kind=... steam-id=... into=...` | the pick was copied and rebound; nothing is armed yet |
 | `ds2-save-file: swap at the title ...` | the game was left, and the character you left is in your own folder |
 | `ds2-save-redirect: load-session armed slot=... original=...` | the loads now answer the staged copy; the saves do not |
-| `ds2-save-file: re-read requested ... accepted=true` | the ten character records are being filled from the staged copy |
+| `ds2-save-file: re-read requested ... accepted=true` | the request went to the storage worker; the records are not filled yet |
+| `ds2-save-file: swap ready -- the character list now describes ...` | the pump collected it, so the records now come from the staged copy |
+| `ds2-save-file: swap ABANDONED -- the container re-read failed status=N ...` | the pump collected an error: the pick is not readable as a container |
 | `ds2-continue: title-gate took action=2 dest=0x55-LoadDataList` | the character list is being opened for it |
 | `ds2-save-file: swap done slot=N ...` | a character was chosen, and the save side is now armed too |
 | `ds2-save-file: swap ABANDONED -- ...` | why it stopped, and whether both sides were put back |

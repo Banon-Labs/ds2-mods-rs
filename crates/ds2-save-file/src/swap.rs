@@ -33,7 +33,14 @@
 //! flagged occupied. Nothing in it reads a container. So pointing the load side somewhere else
 //! changes nothing about what the list says until that block is filled again, which is what
 //! [`ds2_rva::SAVE_LOAD_SYSTEM_LOAD_SYSTEM_DATA`] does: it asks for container entry 7, the section
-//! those records come from. Three steps in one order -- arm, re-read, open the list.
+//! those records come from.
+//!
+//! **And asking is only half of it.** That call hands the request to the `SLSession` worker and
+//! returns; the interlock is cleared, and entry 7 parsed into the records block, by a separate
+//! per-frame call -- [`ds2_rva::SAVE_LOAD_SYSTEM_PUMP`] -- whose only two shipped callers are
+//! title substates that are not on screen while the top menu is. So at the top menu the request
+//! is accepted, is performed, and then sits there. Four steps in one order: arm, re-read, **pump
+//! until it says done**, open the list.
 //!
 //! **4. The list's load branch is where a character becomes committed.** Phase
 //! [`ds2_rva::FE_DATA_LIST_PHASE_LOAD`] is reached only after the game's own occupancy, exclusion
@@ -62,10 +69,16 @@
 //! title is itself the unload. What this crate removes is the restart of the process, which was
 //! never the game's requirement -- it was the price of not having read fact 1.
 //!
-//! # What has not been run
+//! # What one live run has said so far
 //!
-//! Any of it. Every claim above is a claim about the disassembly, and the flow logs each step with
-//! the value it acted on so that one live run can say which of them is wrong.
+//! 2026-09-23, the first: everything up to the re-read worked -- the pick staged, the game left,
+//! the title reached, the load side armed, `accepted=true` on the request. Then fifteen seconds of
+//! nothing and `swap ABANDONED -- the container re-read never finished`, because the request was
+//! waiting on a collector that only runs inside two title substates. That is the pump above, and
+//! calling it here is the fix that run bought. Everything past the pump -- the list describing the
+//! staged container, the choice, the save side arming on it -- is still only a claim about the
+//! disassembly, and the flow logs each step with the value it acted on so the next run can say
+//! which of them is wrong.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -232,12 +245,19 @@ pub fn begin(picked: &Path) -> Result<(), NotBegun> {
         return Err(NotBegun::NoTitleGate);
     }
     ds2_continue::set_load_confirmed(load_confirmed);
+    // THE QUESTIONS FROM HERE ON ARE THE PLAYER'S. Measured 2026-09-23: confirming a character put
+    // up a `common-window` with `cancel-dest=0x55` and no confirm destination, `ds2-dialog-skip`
+    // read the single published edge as a notice's one outcome and answered it, and the cancel edge
+    // is the way back to the list. Twelve rounds of that, and from the player's side a save slot
+    // that accepts a press and does nothing.
+    ds2_dialog_skip::hold();
 
     // Last, because it is the irreversible half. Everything above can be abandoned by dropping a
     // registration; once the game has been asked to leave, the player is watching a confirm dialog
     // and something had better be waiting for them at the title.
     if !ds2_menu_row::return_to_title() {
         ds2_continue::clear_title_gate();
+        ds2_dialog_skip::release();
         return Err(NotBegun::CannotLeave);
     }
     if let Ok(mut guard) = SWAP.lock() {
@@ -335,9 +355,45 @@ fn title_gate() -> ds2_continue::TitleStep {
             expire_or_wait(guard, "the container re-read was never accepted")
         }
         Phase::Waiting { restoring } => {
-            let idle = game::save_load_system().is_some_and(game::interlock_idle);
-            if !idle {
+            let Some(system) = game::save_load_system() else {
+                return expire_or_wait(guard, "the save system could not be reached");
+            };
+            // THE REQUEST DOES NOT COMPLETE ITSELF. The `SLSession` worker reads the container, but
+            // the interlock is cleared -- and entry 7 actually parsed into the block the character
+            // list is built from -- only by this call, on the game thread. Its two shipped callers
+            // are title substates that are not resident while the top menu is up, so for the one
+            // moment this flow needs it, the flow that started the request is the only thing that
+            // can finish it. Leaving it out is what the first live run spent fifteen seconds not
+            // recovering from.
+            let Some(status) = game::pump(system) else {
+                *guard = None;
+                drop(guard);
+                abandon(
+                    "the save-load pump is not at the address this build records, so a re-read \
+                     started here could never be collected",
+                );
+                return TitleStep::Finished;
+            };
+            if status == ds2_rva::SAVE_LOAD_SYSTEM_PUMP_WORKING {
                 return expire_or_wait(guard, "the container re-read never finished");
+            }
+            if status != ds2_rva::SAVE_LOAD_SYSTEM_PUMP_DONE
+                && status != ds2_rva::SAVE_LOAD_SYSTEM_PUMP_IDLE
+            {
+                let picked = swap.picked.display().to_string();
+                *guard = None;
+                drop(guard);
+                abandon(&format!(
+                    "the container re-read failed status={status} -- the game could not read \
+                     character records out of {picked}"
+                ));
+                return TitleStep::Finished;
+            }
+            if !game::interlock_idle(system) {
+                return expire_or_wait(
+                    guard,
+                    "the container re-read reported finished but the save system stayed busy",
+                );
             }
             if restoring {
                 log_line(format_args!(
@@ -405,6 +461,7 @@ fn abandon(why: &str) {
     let load = unsafe { session_dir::LOAD.disarm() };
     let save = unsafe { session_dir::SAVE.disarm() };
     ds2_continue::clear_title_gate();
+    ds2_dialog_skip::release();
     log_line(format_args!(
         "{LOG_PREFIX} swap ABANDONED -- {why}. load-side-restored={load} save-side-restored={save}"
     ));
@@ -432,6 +489,10 @@ fn load_confirmed(slot: i32) {
     // SAFETY: the game is mapped and past `DllMain`; this is its own thread at the title.
     let armed = unsafe { session_dir::SAVE.arm() };
     ds2_continue::clear_title_gate();
+    // The flow is over, so the boxes go back to being this build's business. Released here rather
+    // than at `StartIngame`: the load is committed, and a hold that outlived its flow would leave
+    // every notice for the rest of the session waiting on a keypress.
+    ds2_dialog_skip::release();
     *guard = None;
     drop(guard);
     if armed {
@@ -475,6 +536,21 @@ mod tests {
         const {
             assert!(HANDOVER_GRACE_FRAMES < REREAD_DEADLINE_FRAMES);
             assert!(REREAD_DEADLINE_FRAMES < LEAVE_DEADLINE_TICKS);
+        }
+    }
+
+    /// The three pump statuses the wait branches on are three different numbers.
+    ///
+    /// They are read out of one `switch`'s exit paths, and a transcription that collapsed two of
+    /// them would turn "still working" into "done" -- which opens the character list over a records
+    /// block the re-read has not finished filling, and that is a list describing the wrong
+    /// container with no sign that anything went wrong.
+    #[test]
+    fn the_pump_statuses_are_distinct() {
+        const {
+            assert!(ds2_rva::SAVE_LOAD_SYSTEM_PUMP_WORKING != ds2_rva::SAVE_LOAD_SYSTEM_PUMP_DONE);
+            assert!(ds2_rva::SAVE_LOAD_SYSTEM_PUMP_WORKING != ds2_rva::SAVE_LOAD_SYSTEM_PUMP_IDLE);
+            assert!(ds2_rva::SAVE_LOAD_SYSTEM_PUMP_DONE != ds2_rva::SAVE_LOAD_SYSTEM_PUMP_IDLE);
         }
     }
 

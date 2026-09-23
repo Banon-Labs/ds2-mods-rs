@@ -134,10 +134,10 @@ fn record_steam_id(id: &str) {
     if id.is_empty() || id.starts_with('<') {
         return;
     }
-    if let Ok(mut held) = STEAM_ID.lock() {
-        if held.as_deref() != Some(id) {
-            *held = Some(id.to_owned());
-        }
+    if let Ok(mut held) = STEAM_ID.lock()
+        && held.as_deref() != Some(id)
+    {
+        *held = Some(id.to_owned());
     }
 }
 

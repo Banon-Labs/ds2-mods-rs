@@ -26,6 +26,9 @@ ds2-save-file-core.workspace = true
 # be two crates fighting over one function. It does not depend on this crate, so the edge is one
 # way.
 ds2-continue.workspace = true
+# The title's dialogs. The swap hands the player questions the game asks about their own load, so it
+# has to be able to stop this crate answering them -- see `swap::begin`.
+ds2-dialog-skip.workspace = true
 ds2-game-base.workspace = true
 ds2-menu-row.workspace = true
 ds2-rva.workspace = true

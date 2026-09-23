@@ -189,3 +189,50 @@ pub fn poll_landed(
         _ => Landed::Waiting,
     }
 }
+
+/// `int pump(SaveLoadSystem*)` -- see [`ds2_rva::SAVE_LOAD_SYSTEM_PUMP`].
+///
+/// `i32` and not an enum, because the interesting statuses are three of about nine and the rest
+/// are error codes this crate only ever prints.
+type PumpFn = unsafe extern "system" fn(usize) -> i32;
+
+/// Run one frame of the game's own save-load pump, and say what it answered.
+///
+/// `None` means the call was refused on a prologue that is not the recorded one, which is the same
+/// answer as "this build's pump is somewhere else" and must not be read as "still working".
+///
+/// # Why a caller has to do this at all
+///
+/// [`load_system_data`] starts a request and the `SLSession` worker performs it, but the interlock
+/// is cleared -- and the container's system data actually parsed into the block the character list
+/// is built from -- only here, on the game thread. The two shipped callers are title substates that
+/// are not resident while the top menu is up, so a flow that requests a re-read from the top menu
+/// is the only thing that can finish it. The first live run of the swap proved that the hard way:
+/// the request was accepted and then nothing collected it for fifteen seconds.
+///
+/// Calling it every frame is the shipped pattern, not an approximation of one: both callers do
+/// exactly that and hold their phase while the answer is
+/// [`ds2_rva::SAVE_LOAD_SYSTEM_PUMP_WORKING`].
+pub fn pump(system: usize) -> Option<i32> {
+    let address = ds2_game_base::mem::game_rva(ds2_rva::SAVE_LOAD_SYSTEM_PUMP).ok()?;
+    let expected = ds2_rva::SAVE_LOAD_SYSTEM_PUMP_PROLOGUE;
+    let mut prologue = [0u8; 5];
+    // SAFETY: a resolved RVA inside the loaded game image; `read_bytes` faults safely.
+    let read = unsafe { ds2_game_base::mem::read_bytes(address, &mut prologue) };
+    if !read || prologue != expected {
+        log_line(format_args!(
+            "{LOG_PREFIX} pump REFUSED reason=prologue va=0x{address:016x} read={read} \
+             saw={prologue:02x?} want={expected:02x?} -- that address is not the save-load pump on \
+             this build, so a request started here can never be collected"
+        ));
+        return None;
+    }
+    // SAFETY: the prologue matches the function `ds2-rva` transcribed, the signature is the one its
+    // disassembly implements (the system in RCX, a status in EAX), and `system` is a live
+    // `SaveLoadSystem` reached through two recorded hops. Called on the game thread from the title
+    // menu's own update, which is the thread and the moment the game's own callers use. Its first
+    // act is to test the interlock and return `SAVE_LOAD_SYSTEM_PUMP_IDLE`, so a call made when
+    // nothing is in flight is a no-op rather than a race.
+    let pump: PumpFn = unsafe { std::mem::transmute::<usize, PumpFn>(address) };
+    Some(unsafe { pump(system) })
+}
