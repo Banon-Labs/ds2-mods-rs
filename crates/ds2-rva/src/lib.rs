@@ -6394,6 +6394,122 @@ pub const NV_ROUTE_SEGMENT_FLAGS_OFFSET: usize = 0x48;
 pub const NV_ROUTE_SEGMENT_POINT_COUNT_OFFSET: usize = 0x50;
 
 // ---------------------------------------------------------------------------------------------
+// WHAT A ROUTE SEGMENT SAYS BESIDES WHERE IT IS.
+//
+// Everything in this block is read off `0x140bb4ac0`, the planner state that WRITES the finished
+// route. Its stores into `[planner+0x58] + i*0x60` are, in order:
+//
+//   *(u32 *)(seg + 0x00) = gateRecord + 0xc      (0xffffffff on the last segment)
+//   *(u32 *)(seg + 0x04) = gateRecord + 0xc      (0xffffffff on the first)
+//   *(u32 *)(seg + 0x08) = FUN_140bb9d50(...)    a packed navi id; planner+0x84 at the end
+//   *(u32 *)(seg + 0x0c) = FUN_140bb9d50(...)    a packed navi id; planner+0x88 at the start
+//   *(f32x4 *)(seg + 0x10), (seg + 0x20) = (v0 + v1) * 0.5
+//
+// Two consequences that are easy to get wrong:
+//
+//   * A ROUTE POINT IS A PORTAL MIDPOINT, not a polygon centre. `(v0 + v1) * 0.5` where `v0` and
+//     `v1` are the two vertices of the edge shared by the polygons either side.
+//   * THE IDS ARE THE REASON A ROUTE CAN BE INTERROGATED AT ALL. A position cannot be asked
+//     whether a character may stand on it; a packed navi id can, because it indexes the same
+//     attribute table the engine's own traversal test reads. See
+//     [`NV_NAVI_GRAPH_NODE_ATTRS_OFFSET`].
+// ---------------------------------------------------------------------------------------------
+
+/// A segment's first packed navi id. `+0x08`.
+pub const NV_ROUTE_SEGMENT_NODE_A_OFFSET: usize = 0x08;
+
+/// A segment's second packed navi id. `+0x0c`.
+pub const NV_ROUTE_SEGMENT_NODE_B_OFFSET: usize = 0x0c;
+
+/// The portal midpoint written in the same breath as [`NV_ROUTE_SEGMENT_NODE_A_OFFSET`]. `+0x10`.
+///
+/// Its partner for node B is [`NV_ROUTE_SEGMENT_POINT_OFFSET`], which already had a name because
+/// the decoder falls back to it. Pairing each id with its own position is what lets a report say
+/// WHERE an unusable node is rather than only that there is one.
+pub const NV_ROUTE_SEGMENT_POINT_A_OFFSET: usize = 0x10;
+
+/// `NvNaviGraph -> node attributes`. `+0x48`, one `u32` per node, indexed by the low fifteen bits
+/// of a packed navi id.
+///
+/// `0x14042ee40` -- `ChrAiNavimeshCtrl`'s own "go here" -- refuses a destination from this table
+/// before it will even ask for a route:
+///
+/// ```text
+/// lVar7 = FUN_140bb2620(navSystem + 0x88, param_3 | 0x1ffff);       ; the graph holding the id
+/// uVar1 = *(u32 *)(*(longlong *)(lVar7 + 0x48) + (param_3 & 0x7fff) * 4);
+/// uVar4 = FUN_14042c180(*(u32 *)([[[chr+8]+0x38]+0x40] + 4));       ; the character's size class
+/// if ((float)FUN_140baf0d0(uVar1, uVar4 | 0x7f8, 0) == DAT_1410ae854) { give up }
+/// ```
+///
+/// The same table, at the same offset, is read again by `0x140bba040` -- the gate-link check --
+/// as `*(u32 *)(*(longlong *)(param_3 + 0x48) + psVar16[lVar18 + 6] * 4)`, where the index comes
+/// out of an edge record instead of a route id. Two independent consumers, one table.
+///
+/// **This is read LIVE, not baked into any crate.** Whether anything rewrites it at runtime is
+/// not established here: `NvNaviGraphCostUpdater` and `MapObjNaviGraphLocationComponent` both
+/// exist in this image, both unexamined. Reading it every pass costs nothing and leaves that
+/// question open instead of answering it by assumption.
+pub const NV_NAVI_GRAPH_NODE_ATTRS_OFFSET: usize = 0x48;
+
+/// The index half of a packed navi id. `0x7fff`.
+///
+/// Every site that touches one masks with this before indexing -- `0x14042ee40`, `0x140bb4310`,
+/// `0x140bb4ac0`, `0x140bba040`.
+pub const NAVI_ID_INDEX_MASK: u32 = 0x7fff;
+
+/// The "no node" value of an index. `0x7fff`, tested by `0x14042ee40` (`(param_3 & 0x7fff) !=
+/// 0x7fff`) before it will index anything, and by `0x140bba040` (`psVar16[6] == 0x7fff`).
+pub const NAVI_ID_INDEX_NONE: u32 = 0x7fff;
+
+/// The type field of a node attribute word: bits 3..6, the value `0x140baf0d0` switches on.
+pub const NAVI_NODE_TYPE_MASK: u32 = 0x78;
+
+/// Node types `0x140baf0d0` admits or refuses on the capability word AND on the traveller's
+/// height relative to the edge.
+///
+/// `0x140bba040` -- the gate check that supplies that third argument -- computes it as geometry
+/// rather than as a direction:
+///
+/// ```text
+/// cVar7 = (midY(edgeA) < refY) || (midY(edgeB) < refY);   ; refY = *(float *)(param_6 + 4)
+/// ... (**(code **)(*estimator + 0x18))(estimator, attrs, capability, cVar7)
+/// ```
+///
+/// so the flag means THIS EDGE SITS BELOW ME, and a type `0x20` or `0x40` node can be a drop you
+/// may take and a climb you may not. Type `0x10` is gated on the capability alone. Every other
+/// type in `0x140baf0d0`'s switch is unconditional: `0`, `8`, `0x18`, `0x38`, `0x48`, `0x50` and
+/// `0x58` are free, and anything not in the switch at all -- `0x28`, `0x30`, `0x60`, `0x68`,
+/// `0x70`, `0x78` -- falls through to impassable.
+pub const NAVI_NODE_TYPES_GATED: [u32; 3] = [0x10, 0x20, 0x40];
+
+/// The `f32` `0x140baf0d0` returns when the answer is no. RVA `0x010a_e854`.
+///
+/// **READ IT, DO NOT ASSUME IT.** `0x1401c1e60` -- `NvNaviGraphCostEstimator`'s boolean wrapper,
+/// the one RTTI names -- is nothing but `cost != DAT_1410ae854`, so the sentinel IS the refusal
+/// and whatever bit pattern sits at this address is the only correct comparand. Assuming
+/// `f32::MAX` would be a guess, and assuming a NaN-shaped value would make every comparison
+/// against it report PASSABLE.
+pub const NAVI_IMPASSABLE_COST: u32 = 0x010a_e854;
+
+/// `(u32 chr_param_field) -> u32`. RVA `0x0042_c180`.
+///
+/// A seven-arm switch mapping a character's size parameter `1..=7` onto navigation size class
+/// `0..=6`, with `default: 0`. `0x14042ee40` calls it on `*(u32 *)([[[chr+8]+0x38]+0x40] + 4)`
+/// and ORs the result with [`NV_ROUTE_CAPABILITY_ALL_FEATURES`] to build the capability word.
+///
+/// Recorded because it is the whole reason
+/// [`NV_ROUTE_PLANNER_CAPABILITY_DEFAULT`] is not what an engine caller would send: that constant
+/// is `0x7f8` with size class **zero**, and `0x140baf0d0` admits a node only while
+/// `(capability & 7) < (attrs & 7)` -- so zero is the SMALLEST agent the format can describe and
+/// passes the MOST nodes. The feature bits are not a differentiator at all; every character gets
+/// `| 0x7f8`, so the only per-character knob in the whole word is these three bits.
+pub const CHR_NAVI_SIZE_CLASS_FROM_PARAM: u32 = 0x0042_c180;
+
+/// How many navigation size classes exist. Seven: `0x14042c180` is a seven-arm switch returning
+/// `0..=6`, so this is the range and not a guess at one.
+pub const NAVI_SIZE_CLASSES: u32 = 7;
+
+// ---------------------------------------------------------------------------------------------
 // THE SNAP: WORLD POSITION -> NAVIGATION-GRAPH ID.
 //
 // bd `ds2-mods-rs-4yd` was filed on the premise that this step is an asynchronous job

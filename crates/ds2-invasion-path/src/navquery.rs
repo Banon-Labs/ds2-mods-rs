@@ -98,6 +98,13 @@ type RequestRoute = unsafe extern "system" fn(usize, u32, u32, u32, f32);
 type RetireNavObject = unsafe extern "system" fn(usize, usize);
 /// `(id table*, u32 key) -> NvNaviGraph*`. See [`ds2_rva::NV_NAVI_GRAPH_FOR_ROUTE_ID`].
 type GraphForRouteId = unsafe extern "system" fn(usize, u32) -> usize;
+/// `(u32 node_attrs, u32 capability, u8 below) -> f32`. See
+/// [`ds2_rva::NAVI_EDGE_TRAVERSAL_COST`].
+///
+/// The third argument is the traveller's height relative to the edge, not a direction -- see
+/// [`ds2_rva::NAVI_NODE_TYPES_GATED`]. It arrives in `r8b`: the Windows x64 ABI assigns by
+/// position, and `0x140bba040` passes a `char` there.
+type TraversalCost = unsafe extern "system" fn(u32, u32, u8) -> f32;
 
 /// Resolve an RVA and transmute it to `T`.
 ///
@@ -559,6 +566,164 @@ impl crate::navpath::Memory for GameMemory {
         // access violation in someone's invasion.
         unsafe { read_bytes(at, &mut out) }.then_some(out)
     }
+}
+
+/// One route node, with the engine's own verdict on it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct AuditedNode {
+    /// The node as [`crate::navpath::segment_nodes`] found it.
+    pub(crate) node: crate::navpath::RouteNode,
+    /// The attribute word at [`ds2_rva::NV_NAVI_GRAPH_NODE_ATTRS_OFFSET`].
+    pub(crate) attrs: u32,
+    /// `attrs & 0x78`, the field `0x140baf0d0` switches on.
+    pub(crate) kind: u32,
+    /// `attrs & 7`, the size class a traveller must be strictly below.
+    pub(crate) capacity: u32,
+    /// Passable to the smallest agent with the edge level with or above them.
+    pub(crate) level: bool,
+    /// Passable to the smallest agent with the edge below them -- a drop rather than a climb.
+    pub(crate) below: bool,
+}
+
+impl AuditedNode {
+    /// Worth a line in the log: unusable even to the smallest agent, or usable only one way up.
+    pub(crate) fn notable(&self) -> bool {
+        !self.level
+            || self.level != self.below
+            || ds2_rva::NAVI_NODE_TYPES_GATED.contains(&self.kind)
+    }
+}
+
+/// What one pass over a finished route's nodes found.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Audit {
+    /// Every node the route names, with its verdict.
+    pub(crate) nodes: Vec<AuditedNode>,
+    /// Nodes whose id resolved but whose attribute word did not read.
+    pub(crate) unreadable: usize,
+    /// The largest size class that still admits EVERY node on the route, or `None` if not even
+    /// the smallest does -- which is a wrong attribute table rather than a fact about the world.
+    pub(crate) widest: Option<u32>,
+}
+
+/// The attribute word the engine tests for one packed navi id.
+///
+/// The two hops -- hash `id | 0x1ffff` to a graph, then index that graph's `+0x48` table by
+/// `id & 0x7fff` -- are `0x14042ee40`'s, quoted at
+/// [`ds2_rva::NV_NAVI_GRAPH_NODE_ATTRS_OFFSET`]. Indexing whichever graph the SNAP happened to
+/// choose instead would read one graph's table with another graph's index, and a wrong `u32`
+/// here reads as a confident verdict rather than as a failure.
+///
+/// # Safety
+///
+/// Game thread only, and only once the world exists.
+unsafe fn node_attributes(table: usize, id: u32) -> Option<u32> {
+    if id & ds2_rva::NAVI_ID_INDEX_MASK == ds2_rva::NAVI_ID_INDEX_NONE {
+        return None;
+    }
+    let graph_for_id: GraphForRouteId = unsafe { entry(ds2_rva::NV_NAVI_GRAPH_FOR_ROUTE_ID) }?;
+    // SAFETY: a bucket walk over the engine's own table; a key it does not hold returns 0.
+    let graph = unsafe { graph_for_id(table, id | ds2_rva::NV_ROUTE_ID_GRAPH_KEY_MASK) };
+    if graph == 0 {
+        return None;
+    }
+    // SAFETY: an engine-owned graph; the reader refuses an unmapped page.
+    let attrs = unsafe { safe_read_usize(graph + ds2_rva::NV_NAVI_GRAPH_NODE_ATTRS_OFFSET) }
+        .filter(|attrs| *attrs != 0)?;
+    let index = (id & ds2_rva::NAVI_ID_INDEX_MASK) as usize;
+    // SAFETY: the table the engine indexes the same way, with the same mask, at the same offset.
+    unsafe { safe_read_u32(attrs + index * 4) }
+}
+
+/// The `f32` `0x140baf0d0` returns when the answer is no.
+///
+/// **A NaN here would make every comparison against it report PASSABLE**, so this refuses rather
+/// than hands back a sentinel that agrees with everything. That failure has already happened
+/// once in this workspace, in the Frida agent's snap sweep, where a quietly-NaN cutoff discarded
+/// every hit while each call looked healthy in the log.
+fn impassable_cost() -> Option<f32> {
+    let at = game_rva(ds2_rva::NAVI_IMPASSABLE_COST).ok()?;
+    // SAFETY: a resolved RVA inside the loaded image; the reader refuses an unmapped page.
+    let value = unsafe { ds2_game_base::mem::safe_read_f32(at)? };
+    (!value.is_nan()).then_some(value)
+}
+
+/// Run the engine's own traversal test over every node a finished route names.
+///
+/// # What this measures, and the one thing it does not
+///
+/// It re-runs `0x140baf0d0` -- the predicate `ChrAiNavimeshCtrl` uses to refuse a destination
+/// before it will even ask for a route -- at each of the seven size classes, and reports the
+/// largest traveller the whole route still admits. That catches gaps sized for smaller agents
+/// and ledges that are a drop one way and a wall the other.
+///
+/// It does **not** settle whether a shut door or a placed object blocks the way. The attribute
+/// word is read live, so anything that rewrites it shows up here -- but `NvNaviGraphGate`,
+/// `NvNaviGatePathFindingTask`, `NvNaviGraphCostUpdater` and `MapObjNaviGraphLocationComponent`
+/// all exist in this image and none of them has been examined. A clean audit is not a clean
+/// bill; the log line says so in those words.
+///
+/// # Safety
+///
+/// Game thread only. `route` must be the embedded `NvRoute` of a planner that has reported
+/// [`ds2_rva::NV_ROUTE_PLANNER_FLAG_READY`] without
+/// [`ds2_rva::NV_ROUTE_PLANNER_FLAG_FAILED`] -- the same address [`poll`] decodes from.
+pub(crate) unsafe fn audit(route: usize) -> Option<Audit> {
+    let cost: TraversalCost = unsafe { entry(ds2_rva::NAVI_EDGE_TRAVERSAL_COST) }?;
+    let impassable = impassable_cost()?;
+    let manager = game_manager()?;
+    let world_from_manager: GraphWorldFromGameManager =
+        unsafe { entry(ds2_rva::NAVI_GRAPH_WORLD_FROM_GAME_MANAGER) }?;
+    // SAFETY: `manager` is non-null.
+    let world = unsafe { world_from_manager(manager) };
+    if world == 0 {
+        return None;
+    }
+    let table = unsafe { safe_read_usize(world + ds2_rva::NV_NAVI_GRAPH_WORLD_ID_TABLE_OFFSET) }
+        .filter(|table| *table != 0)?;
+
+    let passable = |attrs: u32, size: u32, below: u8| {
+        let capability = (size & 0x7) | ds2_rva::NV_ROUTE_CAPABILITY_ALL_FEATURES;
+        // SAFETY: a leaf function -- one comparison chain and a switch over its two integer
+        // arguments, no memory touched and no state changed. Safe to call with any values.
+        unsafe { cost(attrs, capability, below) != impassable }
+    };
+
+    let mut nodes: Vec<AuditedNode> = Vec::new();
+    let mut unreadable = 0usize;
+    for node in crate::navpath::segment_nodes(&GameMemory, route)? {
+        // SAFETY: game thread, world resolved above.
+        let Some(attrs) = (unsafe { node_attributes(table, node.id) }) else {
+            unreadable += 1;
+            continue;
+        };
+        nodes.push(AuditedNode {
+            node,
+            attrs,
+            kind: attrs & ds2_rva::NAVI_NODE_TYPE_MASK,
+            capacity: attrs & 0x7,
+            level: passable(attrs, 0, 0),
+            below: passable(attrs, 0, 1),
+        });
+    }
+    if nodes.is_empty() {
+        return None;
+    }
+    // BIGGER IS MORE RESTRICTED. `0x140baf0d0` admits a node only while `(capability & 7) <
+    // (attrs & 7)`, so the classes are nested and the first one that fails ends the search.
+    let mut widest = None;
+    for size in 0..ds2_rva::NAVI_SIZE_CLASSES {
+        if nodes.iter().all(|node| passable(node.attrs, size, 0)) {
+            widest = Some(size);
+        } else {
+            break;
+        }
+    }
+    Some(Audit {
+        nodes,
+        unreadable,
+        widest,
+    })
 }
 
 /// How many objects the navigation system currently has on its update list.

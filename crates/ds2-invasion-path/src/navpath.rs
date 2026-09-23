@@ -61,6 +61,11 @@ pub(crate) trait Memory {
         Some(i16::from_le_bytes(bytes.try_into().ok()?))
     }
 
+    fn u32(&self, at: usize) -> Option<u32> {
+        let bytes = self.read(at, 4)?;
+        Some(u32::from_le_bytes(bytes.try_into().ok()?))
+    }
+
     /// Read three `f32` at `at`, refusing anything that is not a real number.
     ///
     /// The fourth component of the engine's 16-byte points is padding this never reads.
@@ -144,6 +149,78 @@ pub(crate) fn decode(memory: &dyn Memory, route: usize) -> Option<Vec<[f32; 3]>>
         }
     }
     if out.is_empty() { None } else { Some(out) }
+}
+
+/// One end of one route segment: the packed navi id the engine wrote there, and the portal
+/// midpoint written beside it.
+///
+/// The id is the point of this type. A position cannot be asked whether a character may stand on
+/// it; an id can, because it indexes the attribute table the engine's own traversal test reads.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RouteNode {
+    /// Packed navi id, as `0x140bb4ac0` stored it.
+    pub(crate) id: u32,
+    /// Which segment it came from, in engine order (`0` is the GOAL end -- see [`decode`]).
+    pub(crate) segment: i32,
+    /// `'A'` for [`ds2_rva::NV_ROUTE_SEGMENT_NODE_A_OFFSET`], `'B'` for the other.
+    pub(crate) side: char,
+    /// The portal midpoint stored alongside the id, or `None` if it did not read as three real
+    /// numbers.
+    pub(crate) at: Option<[f32; 3]>,
+}
+
+/// Every node id a finished route names, in engine order, deduplicated.
+///
+/// Segment order is NOT reversed here, unlike [`decode`]. That function exists to draw a line and
+/// a line has to be in walking order; this one exists to answer "which places does this route
+/// use", which is a set. Reversing it would imply an ordering the caller does not have and
+/// cannot check.
+///
+/// Returns an empty vector rather than `None` when the segments read but carry no usable id --
+/// "this route names no nodes" is a finding, and a caller that cannot tell it from "the route
+/// would not read" will report the wrong one.
+pub(crate) fn segment_nodes(memory: &dyn Memory, route: usize) -> Option<Vec<RouteNode>> {
+    let segments = memory.u64(route + ds2_rva::NV_ROUTE_SEGMENTS_OFFSET)? as usize;
+    let count = memory.i32(route + ds2_rva::NV_ROUTE_SEGMENT_COUNT_OFFSET)?;
+    if segments == 0 || count <= 0 || count > MAX_SEGMENTS {
+        return None;
+    }
+    let ends = [
+        (
+            ds2_rva::NV_ROUTE_SEGMENT_NODE_A_OFFSET,
+            ds2_rva::NV_ROUTE_SEGMENT_POINT_A_OFFSET,
+            'A',
+        ),
+        (
+            ds2_rva::NV_ROUTE_SEGMENT_NODE_B_OFFSET,
+            ds2_rva::NV_ROUTE_SEGMENT_POINT_OFFSET,
+            'B',
+        ),
+    ];
+    let mut out: Vec<RouteNode> = Vec::new();
+    for index in 0..count {
+        let segment = segments.checked_add((index as usize).checked_mul(SEGMENT_STRIDE)?)?;
+        for (id_at, point_at, side) in ends {
+            let Some(id) = memory.u32(segment + id_at) else {
+                continue;
+            };
+            // `0xffffffff` is what the engine writes on the first segment's incoming end and the
+            // last segment's outgoing one -- a terminator, not a node.
+            if id == u32::MAX || id & ds2_rva::NAVI_ID_INDEX_MASK == ds2_rva::NAVI_ID_INDEX_NONE {
+                continue;
+            }
+            if out.iter().any(|seen| seen.id == id) {
+                continue;
+            }
+            out.push(RouteNode {
+                id,
+                segment: index,
+                side,
+                at: memory.point(segment + point_at),
+            });
+        }
+    }
+    Some(out)
 }
 
 /// Bytes per route segment, from [`ds2_rva::NV_ROUTE_SEGMENT_STRIDE`].
@@ -318,5 +395,104 @@ mod tests {
         let (memory, _) = build(&[vec![[1.0, 0.0, 0.0]]]);
         // An address outside the fake buffer stands in for an unmapped page.
         assert!(decode(&memory, BASE + 0x10_0000).is_none());
+    }
+
+    /// Write the id and midpoint fields `0x140bb4ac0` writes, on top of a route `build` laid out.
+    fn stamp_ids(memory: &mut Fake, ids: &[(u32, u32)]) {
+        let segment_array = 0x100usize;
+        for (index, (a, b)) in ids.iter().enumerate() {
+            let segment = segment_array + index * SEGMENT_STRIDE;
+            let put_u32 = |bytes: &mut Vec<u8>, at: usize, value: u32| {
+                bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            };
+            put_u32(
+                &mut memory.bytes,
+                segment + ds2_rva::NV_ROUTE_SEGMENT_NODE_A_OFFSET,
+                *a,
+            );
+            put_u32(
+                &mut memory.bytes,
+                segment + ds2_rva::NV_ROUTE_SEGMENT_NODE_B_OFFSET,
+                *b,
+            );
+            // A distinct midpoint per end, so a swapped pairing shows up as a wrong position
+            // rather than as a test that passes either way.
+            let at_a = segment + ds2_rva::NV_ROUTE_SEGMENT_POINT_A_OFFSET;
+            let at_b = segment + ds2_rva::NV_ROUTE_SEGMENT_POINT_OFFSET;
+            for (base, tag) in [(at_a, index as f32), (at_b, index as f32 + 0.5)] {
+                for (slot, value) in [tag, 0.0, 0.0].iter().enumerate() {
+                    memory.bytes[base + slot * 4..base + slot * 4 + 4]
+                        .copy_from_slice(&value.to_le_bytes());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_node_id_on_a_route_comes_back_with_its_own_midpoint() {
+        let (mut memory, route) = build(&[
+            vec![[9.0, 0.0, 0.0], [8.0, 0.0, 0.0]],
+            vec![[7.0, 0.0, 0.0], [6.0, 0.0, 0.0]],
+        ]);
+        stamp_ids(
+            &mut memory,
+            &[(0x0012_0133, 0x0012_4008), (0x0012_4055, 0x0012_481e)],
+        );
+        let nodes = segment_nodes(&memory, route).expect("the route reads");
+        assert_eq!(
+            nodes.iter().map(|node| node.id).collect::<Vec<_>>(),
+            vec![0x0012_0133, 0x0012_4008, 0x0012_4055, 0x0012_481e],
+            "engine order, not walking order -- this answers WHICH places, not in what sequence"
+        );
+        assert_eq!(nodes[0].side, 'A');
+        assert_eq!(nodes[0].at, Some([0.0, 0.0, 0.0]));
+        assert_eq!(nodes[1].side, 'B');
+        assert_eq!(
+            nodes[1].at,
+            Some([0.5, 0.0, 0.0]),
+            "side B must carry the +0x20 midpoint, not side A's"
+        );
+        assert_eq!(nodes[3].segment, 1);
+    }
+
+    #[test]
+    fn the_terminators_the_engine_writes_are_not_nodes() {
+        let (mut memory, route) = build(&[vec![[1.0, 0.0, 0.0]], vec![[2.0, 0.0, 0.0]]]);
+        // `0x140bb4ac0` writes 0xffffffff on the ends of the route, and an index of 0x7fff is the
+        // engine's own "no node" sentinel. Neither is somewhere a character can stand.
+        stamp_ids(
+            &mut memory,
+            &[(u32::MAX, 0x0012_4008), (0x0012_7fff, u32::MAX)],
+        );
+        let nodes = segment_nodes(&memory, route).expect("the route reads");
+        assert_eq!(
+            nodes.iter().map(|node| node.id).collect::<Vec<_>>(),
+            vec![0x0012_4008],
+            "0xffffffff is a terminator and 0x7fff is the no-node index"
+        );
+    }
+
+    #[test]
+    fn one_node_named_twice_is_listed_once() {
+        let (mut memory, route) = build(&[vec![[1.0, 0.0, 0.0]], vec![[2.0, 0.0, 0.0]]]);
+        stamp_ids(
+            &mut memory,
+            &[(0x0012_0133, 0x0012_4008), (0x0012_4008, 0x0012_0133)],
+        );
+        let nodes = segment_nodes(&memory, route).expect("the route reads");
+        assert_eq!(
+            nodes.len(),
+            2,
+            "adjacent segments share their boundary node"
+        );
+    }
+
+    #[test]
+    fn a_route_that_will_not_read_is_none_not_empty() {
+        let (memory, _) = build(&[vec![[1.0, 0.0, 0.0]]]);
+        assert!(
+            segment_nodes(&memory, BASE + 0x10_0000).is_none(),
+            "`None` is 'the route would not read'; an empty vector is 'it named no nodes'"
+        );
     }
 }

@@ -209,6 +209,10 @@ struct Tick {
     said_quality: bool,
     said_route: bool,
     said_no_route: bool,
+    /// Whether the audit's scope paragraph has been printed. The per-route verdict repeats; the
+    /// paragraph saying what the audit cannot see does not, because a paragraph that repeats is
+    /// a paragraph nobody reads.
+    said_audit_scope: bool,
     said_full: bool,
     /// Whether the self-check has printed its snap line. Once per run, not twice a second.
     said_snap: bool,
@@ -249,6 +253,7 @@ impl Default for Tick {
             said_quality: false,
             said_route: false,
             said_no_route: false,
+            said_audit_scope: false,
             said_full: false,
             said_snap: false,
             check: Check::Off,
@@ -630,6 +635,19 @@ fn poll_or_request(state: &mut Tick) {
                         points.len()
                     ));
                 }
+                // ASK THE ENGINE WHAT IT THINKS OF THE ROUTE IT JUST GAVE US.
+                //
+                // Once per request, not once per tick: `Poll::Ready` fires on the pass that
+                // clears `state.pending`, so this is the fresh-route edge and not a poll loop.
+                //
+                // SAFETY: game thread -- this is the `NvNavigationSystem::Update` detour -- and
+                // the planner has just reported READY without FAILED, so the route embedded at
+                // `+0x48` is the one `poll` decoded a moment ago.
+                if let Some(report) = unsafe {
+                    navquery::audit(state.planner + ds2_rva::NV_ROUTE_PLANNER_ROUTE_OFFSET)
+                } {
+                    describe_audit(&report, &mut state.said_audit_scope);
+                }
                 publish(target, Some(points));
             }
             Poll::Lost => {
@@ -915,6 +933,86 @@ fn describe_snap(report: &navquery::SnapReport) -> String {
         ),
         (Some(id), None) => format!("0x{id:08x}"),
         (None, _) => "MISS (0xffffffff -- nothing within the snap radius on any graph)".to_string(),
+    }
+}
+
+/// Print what the engine's own traversal test said about the route it just handed over.
+///
+/// # Why the raw attribute words are always printed
+///
+/// A verdict with no evidence under it cannot be checked by whoever reads the log next, and the
+/// vocabulary of this table is documented nowhere -- it gets learned by watching which values
+/// turn up on routes that behave and routes that do not. Two live words so far: `0x00000007`
+/// (type `0`, capacity `7`) on ordinary floor and `0x00000047` (type `0x40`, capacity `7`) on a
+/// gated edge.
+///
+/// `scope_said` is flipped the first time through: the verdict repeats per route, the paragraph
+/// naming what the audit cannot see does not.
+fn describe_audit(report: &navquery::Audit, scope_said: &mut bool) {
+    let widest = match report.widest {
+        Some(size) => format!("size class {size} of {}", ds2_rva::NAVI_SIZE_CLASSES - 1),
+        // NOT "there is no way through". Every character in the game is size class 0..6 and the
+        // smallest of those admits the most nodes, so a route that refuses even class 0 is a
+        // wrong attribute table, and saying otherwise would blame the world for a bug here.
+        None => "NONE -- not even the smallest agent, which reads as a wrong attribute table \
+                 rather than as a fact about the world"
+            .to_string(),
+    };
+    let words: Vec<String> = report
+        .nodes
+        .iter()
+        .take(10)
+        .map(|node| format!("0x{:08x}(t{:x}/c{})", node.attrs, node.kind, node.capacity))
+        .collect();
+    log(format_args!(
+        "tick: route audit -- {} node(s) read{}. Widest agent this route admits: {widest}. The \
+         request asked as size class 0, the smallest the format has. attrs: {}{}",
+        report.nodes.len(),
+        if report.unreadable == 0 {
+            String::new()
+        } else {
+            format!(", {} unreadable", report.unreadable)
+        },
+        words.join(" "),
+        if report.nodes.len() > 10 {
+            format!(" ... {} more", report.nodes.len() - 10)
+        } else {
+            String::new()
+        }
+    ));
+    for node in report.nodes.iter().filter(|node| node.notable()).take(12) {
+        let verdict = if node.level != node.below {
+            if node.below {
+                "ASYMMETRIC, usable only when the edge sits BELOW you (a drop, not a climb)"
+            } else {
+                "ASYMMETRIC, usable only when the edge sits LEVEL WITH OR ABOVE you"
+            }
+        } else if node.level {
+            // NOT "we are cheating here". `0x14042ee40` ORs `0x7f8` onto EVERY character's size,
+            // so the feature bits are identical for us and for every NPC in the game.
+            "gated type, passable both ways at 0x7f8, which is what every NPC has"
+        } else {
+            "IMPASSABLE even to the smallest agent"
+        };
+        let (x, y, z) = node
+            .node
+            .at
+            .map_or((f32::NAN, f32::NAN, f32::NAN), |at| (at[0], at[1], at[2]));
+        log(format_args!(
+            "tick:   node 0x{:08x} (segment {}{} at {x:.2}, {y:.2}, {z:.2}) attrs 0x{:08x} \
+             type 0x{:x} capacity {} -- {verdict}",
+            node.node.id, node.node.segment, node.node.side, node.attrs, node.kind, node.capacity
+        ));
+    }
+    if !*scope_said {
+        *scope_said = true;
+        log(format_args!(
+            "tick:   Scope: the attribute word is read LIVE, so anything that rewrites it -- and \
+             this engine has an NvNaviGraphCostUpdater and a MapObjNaviGraphLocationComponent, \
+             both runtime-shaped -- shows up above. What is NOT covered is the gate layer \
+             (NvNaviGraphGate, NvNaviGatePathFindingTask) or collision geometry never registered \
+             with the navigation graph. Neither is ruled out by a clean line above."
+        ));
     }
 }
 
