@@ -411,10 +411,14 @@ function score(m, player, explain) {
   // the function returned at the branch above on every one of its ninety thousand calls per
   // window. Fixing that read turned this code on for the first time, and the version that was
   // sitting here built an array in `toClip`, another three for the world axes, and three more
-  // clip vectors -- eight allocations a call, seven hundred thousand a window. The heartbeat
-  // stopped within one reload. That is the FIFTH time this file has starved Frida's JS thread
-  // the same way, and the first where the offending code had been sitting in it for hours
-  // looking harmless because nothing ever reached it.
+  // clip vectors -- eight allocations a call, seven hundred thousand a window. That is the shape
+  // of the four JS-thread starvations this file has already been rescued from, in code that had
+  // been sitting here for hours looking harmless because nothing ever reached it.
+  //
+  // REWRITTEN ON THAT REASONING, NOT ON A MEASURED STALL. The silence that prompted it was the
+  // watcher's stdout block-buffering and the agent was heartbeating throughout; run the watcher
+  // under `PYTHONUNBUFFERED=1` and that ghost does not appear. The allocation count is real and
+  // the rewrite stands on it; the stall it was blamed for did not happen.
   const clipW = player[0] * m[3] + player[1] * m[7] + player[2] * m[11] + m[15];
   if (!(clipW > CAMERA_MIN_METERS && clipW < CAMERA_MAX_METERS)) {
     failCounts[9] += 1;
@@ -1074,6 +1078,18 @@ setInterval(function () {
     failCounts[code] = 0;
   }
   if (blame.length > 0) line += '\n      rejected by: ' + blame.join(', ');
+  // FORGET WHAT WAS LOOKED AT, SO DISCOVERY NEVER RETIRES. `examined` counts each resource's
+  // twenty looks and was never cleared, so after about eight hundred looks -- a few seconds --
+  // every buffer in the game was permanently written off and `shouldDiscover` refused
+  // everything. The heartbeat then reads `39 resources seen, 345 scans, 0 scored` forever, which
+  // looks like the tests being too tight and is nothing of the kind: nothing is being examined
+  // at all. It matters because a buffer's CONTENTS change every frame -- twenty looks during a
+  // loading screen says nothing about what the same buffer holds once a world is up, and the
+  // camera was found in exactly such a buffer.
+  //
+  // Cleared only while nothing is tracked: once a candidate exists the budget's whole job is to
+  // stay out of the way of following it.
+  if (trackedList.length === 0) examined.clear();
   scansThisWindow = 0;
   throttled = 0;
   console.log(line);
