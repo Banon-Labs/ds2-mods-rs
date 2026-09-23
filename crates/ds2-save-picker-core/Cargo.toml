@@ -1,0 +1,37 @@
+# THE SAVE PICKER'S ROWS, WITH NO GAME AND NO WINDOWS IN THEM.
+#
+# `ds2-save-file`'s Load Character from File row opens a common file dialog, checks what comes
+# back, and swaps the WHOLE container. There is no character choice anywhere in it -- which is
+# what "I can't even pick my save slot" means. This crate is the model behind a picker that has
+# one: browse a directory, choose a container, then choose which of its ten characters to load.
+#
+# It is a PORT of `../er-mods-rs`'s `er-save-picker-core` row model and of nothing else. Its drawn
+# overlay, its CPU compositor, its comdlg32 surface and its no-save boot flow stay there: those
+# are Elden Ring's menus and Elden Ring's boot. The rows are the part that carries no game
+# coupling at all, and they are the part the player actually operates.
+#
+# HOST-TESTABLE BY CONSTRUCTION: no `cfg(windows)`, no address table, no unsafe (forbidden at the
+# crate root). It sits on `scripts/check.sh`'s host test line for the same reason
+# `ds2-save-file-core` does -- everything here decides which save a player ends up loading, and
+# that is cheap to get wrong and expensive to discover wrong.
+[package]
+name = "ds2-save-picker-core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "ds2_save_picker_core"
+
+[dependencies]
+# The cheap gate: which extensions a picked path may carry, and the leaf/dot parsing that makes
+# that answer the same on Linux under test as it is in the game. NOT duplicated here.
+ds2-save-file-core = { workspace = true }
+# The expensive gate: the ten character slots inside a container, read from the file and from
+# nothing else. Also NOT duplicated here -- the picker asks it and renders the answer.
+ds2-sl2-core = { workspace = true }
+
+[lints]
+workspace = true

@@ -618,6 +618,14 @@ name = "ds2-save-file-core"
 version = "0.1.0"
 
 [[package]]
+name = "ds2-save-picker-core"
+version = "0.1.0"
+dependencies = [
+ "ds2-save-file-core",
+ "ds2-sl2-core",
+]
+
+[[package]]
 name = "ds2-save-redirect"
 version = "0.1.0"
 dependencies = [
