@@ -30,7 +30,7 @@ const context = vm.createContext({
   console,
   // No modules, so `prepare` refuses at its first line and `hook` returns without touching COM.
   // The maths under test is reached directly and never goes near the drawing path.
-  Process: { findModuleByName: () => null, pointerSize: 8 },
+  Process: { findModuleByName: () => null, enumerateModules: () => [], pointerSize: 8 },
   Memory: stub,
   Interceptor: stub,
   NativeFunction: stub,
@@ -107,6 +107,7 @@ const agent = fs.readFileSync(path.join(__dirname, 'arrow.js'), 'utf8');
 const probe = `
   ({
     score: score,
+    finite: finite,
     toClip: toClip,
     bearing: bearing,
     proof: proof,
@@ -137,6 +138,18 @@ function angleGap(a, b) {
   return Math.abs(gap);
 }
 
+// --- 0. the sanity check that gates every read, at both lengths it is called with -------------
+console.log('\nfinite() takes its length from the array it was handed');
+{
+  // It read `index < 16` while `playerPosition` passes three floats, so `values[3]` was
+  // `undefined` and EVERY character read in the game came back null. The agent then reported an
+  // empty world for a whole session while a character stood at 21.90, 3.90, -12.54.
+  check('three good floats are finite', api.finite([1.5, -2.25, 400.0]) === true);
+  check('three floats with a NaN are not', api.finite([1.5, NaN, 400.0]) === false);
+  check('sixteen good floats are finite', api.finite(new Array(16).fill(1)) === true);
+  check('an absurd magnitude is not', api.finite([1, 2, 1e13]) === false);
+}
+
 // --- 1. the agent's own structural test must accept a real view-projection --------------------
 console.log('\nthe structural test accepts a genuine V*P');
 for (const [name, cam] of [
@@ -149,6 +162,30 @@ for (const [name, cam] of [
   const verdict = api.score(m, player, true);
   check(name, verdict !== null && Math.abs(verdict.w - 6) < 1e-4,
     verdict === null ? 'rejected' : 'w = ' + verdict.w.toFixed(4) + ' m');
+}
+
+// --- 1b. a bare projection passes every structural test, and the character is what kills it ---
+console.log('\na projection with no camera in it survives the shape tests, not the character');
+{
+  // `P = I * P` is a view-projection whose view is the identity, so it has a unit forward column,
+  // perpendicular columns, a column 2 parallel to column 3 and a 16:9 aspect -- every structural
+  // test, passed honestly. The live agent confirmed exactly this at a menu on 2026-09-22.
+  const p = [
+    SX, 0, 0, 0,
+    0, SY, 0, 0,
+    0, 0, FAR / (FAR - NEAR), 1,
+    0, 0, -NEAR * FAR / (FAR - NEAR), 0,
+  ];
+  check('with no character it passes, and says so', (() => {
+    const verdict = api.score(p, null, true);
+    return verdict !== null && verdict.structural === true;
+  })());
+  check('with a character standing anywhere real it is rejected',
+    api.score(p, [21.9, 3.9, -12.54], true) === null);
+  check('the real V*P accepts that same character', (() => {
+    const cam = camera([21.9, 8.0, -18.0], 0.1, -0.2);
+    return api.score(viewProjection(cam), [21.9, 3.9, -12.54], true) !== null;
+  })());
 }
 
 // --- 2. the projection lands where the camera basis says it lands -----------------------------

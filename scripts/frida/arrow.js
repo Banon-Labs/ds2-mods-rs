@@ -118,8 +118,39 @@ const PLUMB_METRES = 8.0;
 const PLUMB_LENGTH_PX = 120;
 const PLUMB_COLOUR = [0.25, 1.0, 0.35, 1.0];
 
-const gameModule = Process.findModuleByName('DarkSoulsII.exe');
+/// The game image, and WHAT IT WAS FOUND BY, because one silent null here cost a whole session.
+///
+/// `playerPosition` opens with `if (base === null) return null`, so a module lookup that misses
+/// makes every character read fail and the agent reports `CHARACTER UNREADABLE 33878 times` --
+/// a message that reads as "the game is at a menu" and is not. Measured against it on
+/// 2026-09-22: `scripts/ds2-player-chain.py` walked the SAME three pointers out of
+/// `/proc/<pid>/mem` at the same moment and came back with a character standing at
+/// `21.90, 3.90, -12.54`. The world was there; the agent just could not find its own image.
+///
+/// So the lookup falls back to enumeration and says which rule answered. The main module is the
+/// first one Frida lists, and under Wine its name is not guaranteed to be the spelling used
+/// here.
+function findGameImage() {
+  const named = Process.findModuleByName('DarkSoulsII.exe');
+  if (named !== null) return { module: named, how: 'findModuleByName' };
+  const all = Process.enumerateModules();
+  for (const candidate of all) {
+    if (candidate.name.toLowerCase() === 'darksoulsii.exe') {
+      return { module: candidate, how: 'enumerateModules by name' };
+    }
+  }
+  // The main image is the first module of a Windows process, and there is exactly one game here.
+  if (all.length > 0 && all[0].name.toLowerCase().endsWith('.exe')) {
+    return { module: all[0], how: 'first module (' + all[0].name + ')' };
+  }
+  return { module: null, how: 'NOT FOUND among ' + all.length + ' modules' };
+}
+
+const found = findGameImage();
+const gameModule = found.module;
 const base = gameModule === null ? null : gameModule.base;
+console.log('[arrow] game image: ' + (base === null ? 'NOT FOUND -- every character read will ' +
+  'fail and the log will say the world is empty when it is not' : base + ' via ' + found.how));
 
 const counters = { update: 0, map: 0, scans: 0, scored: 0, tracked: 0, follows: 0, present: 0, drawn: 0 };
 const tracked = new Map();
@@ -193,8 +224,18 @@ function readMatrix(pointer) {
   return true;
 }
 
+/// Every element real and not absurd. LENGTH FROM THE ARRAY, not from the matrix that was the
+/// first caller.
+///
+/// This read `index < 16` and `playerPosition` passes it THREE floats, so `values[3]` was
+/// `undefined`, `Number.isFinite(undefined)` was false, and the character came back null on every
+/// single frame. The agent then reported `CHARACTER UNREADABLE 33878 times`, which reads as an
+/// empty world and is not one: `scripts/ds2-player-chain.py` walked the same three pointers out
+/// of `/proc/<pid>/mem` at the same moment and found a character standing at 21.90, 3.90,
+/// -12.54. Nothing downstream could work -- no candidate could ever be grounded, and `draw`
+/// returned at its first line for the whole session.
 function finite(values) {
-  for (let index = 0; index < 16; index += 1) {
+  for (let index = 0; index < values.length; index += 1) {
     const value = values[index];
     if (!Number.isFinite(value) || Math.abs(value) >= 1e12) return false;
   }
@@ -256,6 +297,23 @@ function transposeRaw() {
 /// reports "found nothing" for an hour while the answer sits one over-tight bound away.
 let lastReason = '';
 
+/// WHICH TEST SAID NO, COUNTED ON EVERY CALL, INCLUDING THE NINETY THOUSAND THAT CANNOT AFFORD A
+/// STRING.
+///
+/// `lastReason` is only built when `explain` is true, which is the follow path -- so during a
+/// discovery window, where candidates actually die, the log says `0 scored` and not one word
+/// about why. That is the state this file has been in twice now, each time for long enough to
+/// start guessing at bounds. An integer increment costs nothing and turns "nothing passed" into
+/// "forty thousand failed the aspect test and none failed anything else", which is an answer.
+const FAIL_NAMES = [
+  'not finite', 'forward column not 1', 'a world axis row collapsed', 'a column collapsed',
+  'right/up not perpendicular', 'right/forward not perpendicular', 'up/forward not perpendicular',
+  'column 2 not parallel to forward', 'aspect is not a screen', 'camera distance out of range',
+  'ndc not finite', 'character off screen', 'a metre lands behind the camera',
+  'a metre moves the screen too far', 'a metre moves the screen not at all',
+];
+const failCounts = new Array(FAIL_NAMES.length).fill(0);
+
 /// `explain` builds the rejection message; DISCOVERY MUST PASS FALSE.
 ///
 /// `score` runs about ninety thousand times per five-second window during a scan, and every
@@ -265,15 +323,17 @@ let lastReason = '';
 /// the same failure in this file. The messages are only wanted on the follow path, which runs a
 /// few times a second and is where a candidate dying actually tells us something.
 function score(m, player, explain) {
-  if (!finite(m)) { if (explain) lastReason = 'not finite'; return null; }
+  if (!finite(m)) { failCounts[0] += 1; if (explain) lastReason = 'not finite'; return null; }
   const forward = Math.sqrt(m[3] * m[3] + m[7] * m[7] + m[11] * m[11]);
   if (Math.abs(forward - 1.0) > UNIT_TOLERANCE) {
+    failCounts[1] += 1;
     if (explain) lastReason = 'forward column ' + forward.toFixed(4) + ', not 1';
     return null;
   }
   for (let row = 0; row < 3; row += 1) {
     const a = m[row * 4], b = m[row * 4 + 1], c = m[row * 4 + 2];
     if (Math.sqrt(a * a + b * b + c * c) < 0.05) {
+      failCounts[2] += 1;
       if (explain) lastReason = 'world axis ' + row + ' does not reach the screen';
       return null;
     }
@@ -303,29 +363,34 @@ function score(m, player, explain) {
   const la = Math.sqrt(ax * ax + ay * ay + az * az);
   const lb = Math.sqrt(bx * bx + by * by + bz * bz);
   const lc = Math.sqrt(cx * cx + cy * cy + cz * cz);
-  if (!(la > 1e-3 && lb > 1e-3 && lc > 1e-3)) { if (explain) lastReason = 'a column collapsed'; return null; }
+  if (!(la > 1e-3 && lb > 1e-3 && lc > 1e-3)) { failCounts[3] += 1; if (explain) lastReason = 'a column collapsed'; return null; }
   const ab = Math.abs((ax * bx + ay * by + az * bz) / (la * lb));
   if (ab > ORTHOGONAL_TOLERANCE) {
+    failCounts[4] += 1;
     if (explain) lastReason = 'right and up are not perpendicular (' + ab.toFixed(4) + ')';
     return null;
   }
   const af = Math.abs(ax * fx + ay * fy + az * fz) / la;
   if (af > ORTHOGONAL_TOLERANCE) {
+    failCounts[5] += 1;
     if (explain) lastReason = 'right and forward are not perpendicular (' + af.toFixed(4) + ')';
     return null;
   }
   const bf = Math.abs(bx * fx + by * fy + bz * fz) / lb;
   if (bf > ORTHOGONAL_TOLERANCE) {
+    failCounts[6] += 1;
     if (explain) lastReason = 'up and forward are not perpendicular (' + bf.toFixed(4) + ')';
     return null;
   }
   const cf = Math.abs(cx * fx + cy * fy + cz * fz) / lc;
   if (cf < 1.0 - PARALLEL_TOLERANCE) {
+    failCounts[7] += 1;
     if (explain) lastReason = 'column 2 is not parallel to the forward axis (' + cf.toFixed(4) + ')';
     return null;
   }
   const aspect = lb / la;
   if (!(aspect > MIN_ASPECT && aspect < MAX_ASPECT)) {
+    failCounts[8] += 1;
     if (explain) lastReason = 'aspect ' + aspect.toFixed(4) + ' is not a screen';
     return null;
   }
@@ -340,15 +405,29 @@ function score(m, player, explain) {
     lastReason = '';
     return { ndcX: 0, ndcY: 0, w: 0, forward, structural: true };
   }
-  const clip = toClip(m, player);
-  if (!(clip[3] > CAMERA_MIN_METERS && clip[3] < CAMERA_MAX_METERS)) {
-    if (explain) lastReason = 'camera distance ' + clip[3].toFixed(2) + ' m';
+  // SCALARS BELOW THIS LINE TOO, and it is not a style preference.
+  //
+  // This half of `score` had never actually run: `finite` was rejecting every character read, so
+  // the function returned at the branch above on every one of its ninety thousand calls per
+  // window. Fixing that read turned this code on for the first time, and the version that was
+  // sitting here built an array in `toClip`, another three for the world axes, and three more
+  // clip vectors -- eight allocations a call, seven hundred thousand a window. The heartbeat
+  // stopped within one reload. That is the FIFTH time this file has starved Frida's JS thread
+  // the same way, and the first where the offending code had been sitting in it for hours
+  // looking harmless because nothing ever reached it.
+  const clipW = player[0] * m[3] + player[1] * m[7] + player[2] * m[11] + m[15];
+  if (!(clipW > CAMERA_MIN_METERS && clipW < CAMERA_MAX_METERS)) {
+    failCounts[9] += 1;
+    if (explain) lastReason = 'camera distance ' + clipW.toFixed(2) + ' m';
     return null;
   }
-  const ndcX = clip[0] / clip[3];
-  const ndcY = clip[1] / clip[3];
-  if (!Number.isFinite(ndcX) || !Number.isFinite(ndcY)) { if (explain) lastReason = 'ndc not finite'; return null; }
+  const clipX = player[0] * m[0] + player[1] * m[4] + player[2] * m[8] + m[12];
+  const clipY = player[0] * m[1] + player[1] * m[5] + player[2] * m[9] + m[13];
+  const ndcX = clipX / clipW;
+  const ndcY = clipY / clipW;
+  if (!Number.isFinite(ndcX) || !Number.isFinite(ndcY)) { failCounts[10] += 1; if (explain) lastReason = 'ndc not finite'; return null; }
   if (Math.abs(ndcX) > NDC_LIMIT || Math.abs(ndcY) > NDC_LIMIT) {
+    failCounts[11] += 1;
     if (explain) lastReason = 'character off screen at ' + ndcX.toFixed(3) + ',' + ndcY.toFixed(3);
     return null;
   }
@@ -357,28 +436,36 @@ function score(m, player, explain) {
   // the screen by exactly nothing, because that is what looking down an axis means. Requiring
   // every axis to move the image rejected a correct camera on every frame the player faced north,
   // and the failure is invisible from the log, which just stops finding anything for a while.
+  //
+  // Adding one metre to world component `axis` adds row `axis` of the matrix to the clip vector,
+  // so the stepped point costs three adds rather than a point, a matrix multiply and a vector.
   let biggest = 0;
-  for (const axis of [[1, 0, 0], [0, 1, 0], [0, 0, 1]]) {
-    const near = toClip(m, [player[0] + axis[0], player[1] + axis[1], player[2] + axis[2]]);
-    if (!(near[3] > 0.05)) { if (explain) lastReason = 'a metre away lands behind the camera'; return null; }
-    const shift = Math.hypot(near[0] / near[3] - ndcX, near[1] / near[3] - ndcY);
+  for (let axis = 0; axis < 3; axis += 1) {
+    const row = axis * 4;
+    const nearW = clipW + m[row + 3];
+    if (!(nearW > 0.05)) { failCounts[12] += 1; if (explain) lastReason = 'a metre away lands behind the camera'; return null; }
+    const dx = (clipX + m[row]) / nearW - ndcX;
+    const dy = (clipY + m[row + 1]) / nearW - ndcY;
+    const shift = Math.sqrt(dx * dx + dy * dy);
     if (!(Number.isFinite(shift) && shift < 2.0)) {
+      failCounts[13] += 1;
       if (explain) lastReason = 'a metre moves the screen by ' + shift.toFixed(4);
       return null;
     }
     if (shift > biggest) biggest = shift;
   }
   if (!(biggest > 0.005)) {
+    failCounts[14] += 1;
     if (explain) lastReason = 'a metre moves the screen by ' + biggest.toFixed(4) + ' at most';
     return null;
   }
   lastReason = '';
-  return { ndcX, ndcY, w: clip[3], forward };
+  return { ndcX, ndcY, w: clipW, forward };
 }
 
 function entry(offset, convention) {
   return {
-    offset, convention, passes: 0, best: null,
+    offset, convention, passes: 0, grounded: 0, best: null,
     minimum: [Infinity, Infinity, Infinity],
     maximum: [-Infinity, -Infinity, -Infinity],
   };
@@ -396,7 +483,26 @@ function spreadOf(candidate) {
 function note(candidate, verdict, player) {
   candidate.passes += 1;
   candidate.best = verdict;
-  if (player === null) return;
+  // A PASS WITH A CHARACTER IN IT IS A DIFFERENT KIND OF EVIDENCE, AND IS COUNTED SEPARATELY.
+  //
+  // Every structural test in `score` is satisfied by the BARE PROJECTION MATRIX `P`, because
+  // `P = I * P` is a view-projection whose view is the identity: unit forward column, mutually
+  // perpendicular columns, column 2 parallel to column 3, 16:9 aspect. All true, all useless.
+  // Measured here on 2026-09-22 -- the upload at `0x5327a20+0x0` confirmed on 60 structural
+  // passes at a menu, and it is plainly a projection with no camera in it at all:
+  //
+  //     [ 1.3901  0.0000  0.0000  0.0000        [ sx  0   0   0
+  //       0.0000  2.4751  0.0000  0.0000    =     0   sy  0   0
+  //       0.0000  0.0000  1.0000  1.0000          0   0   A   1
+  //       0.0000  0.0000 -0.1000  0.0000 ]        0   0   B   0 ]
+  //
+  // The character is the only thing that separates the two: through `P` alone the world origin
+  // is the camera, so a character standing anywhere real is far off screen or behind the lens,
+  // while through `V * P` it sits a few metres in front of one. So believing a candidate now
+  // costs `grounded` passes -- ones with a character in them -- and structural passes only keep
+  // it alive through menus and loads.
+  if (player === null || verdict.structural) return;
+  candidate.grounded += 1;
   for (let axis = 0; axis < 3; axis += 1) {
     if (player[axis] < candidate.minimum[axis]) candidate.minimum[axis] = player[axis];
     if (player[axis] > candidate.maximum[axis]) candidate.maximum[axis] = player[axis];
@@ -483,7 +589,7 @@ function follow(slot, source, player) {
     // COPY. `m` is one of two scratch buffers that the very next window overwrites; handing the
     // live buffer to the Present hook would have it drawing with whatever was read last.
     if (believed !== null) { believed.matrix = m.slice(); continue; }
-    if (candidate.passes < PASSES_TO_BELIEVE) continue;
+    if (candidate.grounded < PASSES_TO_BELIEVE) continue;
     if (spreadOf(candidate) < SPREAD_TO_BELIEVE) continue;
     believed = { slot, candidate, matrix: m.slice() };
     // The camera can be confirmed from its shape alone with nobody in the world, so there may be
@@ -493,7 +599,8 @@ function follow(slot, source, player) {
       '\n[arrow] ===== VIEW-PROJECTION CONFIRMED =====\n' +
       '[arrow] ' + slot.label + ' resource ' + slot.key + ' +0x' + candidate.offset.toString(16) +
       ' ' + candidate.convention + '\n' +
-      '[arrow] ' + candidate.passes + ' consecutive frames, character moved ' +
+      '[arrow] ' + candidate.grounded + ' of ' + candidate.passes +
+      ' consecutive frames had a character in them; it moved ' +
       spreadOf(candidate).toFixed(2) + ' m across them\n' +
       '[arrow] player ndc ' + verdict.ndcX.toFixed(4) + ',' + verdict.ndcY.toFixed(4) +
       ' (w=' + verdict.w.toFixed(2) + ' m)\n' +
@@ -944,7 +1051,8 @@ setInterval(function () {
   for (const [key, slotFound] of tracked) {
     for (const [, candidate] of slotFound.offsets) leaders.push({ key, slotFound, candidate });
   }
-  leaders.sort((a, b) => b.candidate.passes - a.candidate.passes);
+  leaders.sort((a, b) => (b.candidate.grounded - a.candidate.grounded) ||
+    (b.candidate.passes - a.candidate.passes));
   let line =
     '[arrow] heartbeat: ' + counters.present + ' present, ' + counters.drawn + ' drawn, ' +
     counters.update + ' update, ' + counters.map + ' map, ' + examined.size + ' resources seen, ' +
@@ -955,8 +1063,17 @@ setInterval(function () {
   for (const leader of leaders.slice(0, 4)) {
     line += '\n      ' + leader.slotFound.label + ' ' + leader.key + '+0x' +
       leader.candidate.offset.toString(16) + ' ' + leader.candidate.convention + ': ' +
-      leader.candidate.passes + ' passes, spread ' + spreadOf(leader.candidate).toFixed(2) + ' m';
+      leader.candidate.passes + ' passes (' + leader.candidate.grounded +
+      ' with a character), spread ' + spreadOf(leader.candidate).toFixed(2) + ' m';
   }
+  // WHY NOTHING PASSED, every window, whether or not anything was being followed. `0 scored` on
+  // its own has twice sent this session guessing at which bound was too tight.
+  const blame = [];
+  for (let code = 0; code < failCounts.length; code += 1) {
+    if (failCounts[code] > 0) blame.push(FAIL_NAMES[code] + ' ' + failCounts[code]);
+    failCounts[code] = 0;
+  }
+  if (blame.length > 0) line += '\n      rejected by: ' + blame.join(', ');
   scansThisWindow = 0;
   throttled = 0;
   console.log(line);
