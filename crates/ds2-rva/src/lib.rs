@@ -5958,6 +5958,29 @@ pub const SL_LOAD_SESSION_DIRECTORY_VTABLE_SLOT: usize = 3;
 /// the game's allocator by hand, the same reasoning as [`WSTRING_ASSIGN`].
 pub const SL_SESSION_STRING_SET: u32 = 0x00a8_9050;
 
+/// The `SLLoadContent` a `SaveLoadSystem` builds its container requests from. `[system + 0x30]`.
+///
+/// Read off `SAVE_LOAD_SYSTEM_LOAD_SYSTEM_DATA` (`0x1402e72c0`), which touches it three times in
+/// eleven instructions: `mov rcx,[rbx+0x30]; call 0x140a8a0d0` releases the previous request,
+/// `mov rcx,[rbx+0x30]; mov edx,7; call 0x140a8a250` sets the container entry, and the funnel at
+/// `0x140a86280` is handed the same pointer in `r9`. Every container read in the image goes through
+/// that funnel, so this is the object whose directory a read opens.
+pub const SAVE_LOAD_SYSTEM_CONTENT_OFFSET: usize = 0x30;
+
+/// The directory string inside an `SLLoadContent`. `content + 0x08`.
+///
+/// `FUN_140a8a180`, the accessor both the load session's work method and its directory virtual go
+/// through, is two instructions -- `lea rax,[rcx+8]; ret` -- so the accessor is the offset.
+///
+/// That is also why swapping the directory virtual could not redirect a read: the work method
+/// (`0x140a8f940`) reaches this field through the same accessor rather than through the virtual, so
+/// the virtual is not on the path to the file. One live run measured it as `load-answered=1` on a
+/// read that still failed.
+///
+/// It is an MSVC `basic_string<wchar_t>` with the usual small-string layout, so
+/// [`SL_SESSION_STRING_SET`] is what writes it.
+pub const SL_CONTENT_DIRECTORY_OFFSET: usize = 0x08;
+
 /// `SaveLoad2::SLSaveSession`'s vtable, the save-side twin of [`SL_LOAD_SESSION_VTABLE`].
 ///
 /// Read out of the image's RTTI the same way its twin was, with `scripts/ds2-rtti-vtables.py

@@ -130,9 +130,23 @@ fn dialog_filter() -> Vec<u16> {
     }])
 }
 
-/// Where to start browsing: the folder above the player's own save directory, which is where the
-/// per-account folders live and where a donor save usually lands.
+/// The player's downloads folder, in the Windows spelling the dialog wants.
+///
+/// A donor container arrives as a download and is opened from where it landed, so this is the
+/// folder the row opens in. It was the parent of the player's own save directory, which is where
+/// the per-account folders live -- a sensible-sounding place that nobody's downloads are in, and so
+/// a browse away from the file every time.
+///
+/// Wine maps `Z:` to `/`, which is how a Linux path reaches a dialog running inside the prefix.
+/// The dialog ignores a directory that does not exist and falls back to the shell's own default, so
+/// a machine with no `~/Downloads` loses nothing.
+const DOWNLOADS_WINDOWS_PREFIX: &str = "Z:\\";
+
+/// Where to start browsing. Downloads first, then the folder above the player's own save.
 fn start_directory() -> Option<PathBuf> {
+    if let Some(downloads) = downloads_directory() {
+        return Some(downloads);
+    }
     let live = ds2_save_redirect::live_directory()?;
     let text = live.to_string_lossy().into_owned();
     let trimmed = Path::new(text.trim_end_matches(['\\', '/']));
@@ -140,6 +154,26 @@ fn start_directory() -> Option<PathBuf> {
         .parent()
         .map(Path::to_path_buf)
         .or_else(|| Some(live.clone()))
+}
+
+/// `~/Downloads` as the prefix sees it, or `None` when the home directory is not known.
+///
+/// `HOME` rather than `USERPROFILE`: this runs inside a Proton prefix whose Windows profile is
+/// `C:\users\steamuser`, and the downloads the player actually has are in their Linux home.
+fn downloads_directory() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    let home = home.trim_end_matches('/');
+    if home.is_empty() {
+        return None;
+    }
+    let host = PathBuf::from(format!("{home}/Downloads"));
+    if !host.is_dir() {
+        return None;
+    }
+    // The dialog is a Win32 one, so the path has to be the prefix's spelling of the same folder.
+    let windows =
+        format!("{DOWNLOADS_WINDOWS_PREFIX}{}", home.trim_start_matches('/')).replace('/', "\\");
+    Some(PathBuf::from(format!("{windows}\\Downloads")))
 }
 
 /// What pressing the row does. **Game thread, inside the menu's confirm path.**
