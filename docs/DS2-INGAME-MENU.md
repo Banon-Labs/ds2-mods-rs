@@ -1273,21 +1273,36 @@ So the slice `icon.rs` serves -- the plate's last `54.00`, drawn at `337.60..391
 the seventh cell at `357.90`, and the `12.85` of hexagon it leaves behind on its left is the
 interlock the sixth hexagon's own right end already draws. The seam is where the honeycomb repeats.
 
-### The one that is not answered: a tab button missing from the strip
+### The missing tab button: the end cap is the sixth tab's hexagon
 
-The player reported one of the seven tab buttons absent. Nothing in the document accounts for it,
-and two candidates are ruled out by the same measurement:
+A tab button went missing from the strip in the same commit that moved the end cap, and the second
+run -- five hexagons, a gap, then the seventh tab's own, lit -- is what identifies it. Two readings
+were on the table:
 
-* the end cap `0x026a` draws its shape `0x0269` at `271.05..349.40`, which covers the sixth hexagon
-  at `270.75..337.05` entirely -- and the sixth tab's icon is visible in the shipped game. So the
-  cap is transparent where a hexagon is, it was never standing in front of one, and moving it by a
-  pitch can neither hide nor reveal one. What it does do is keep the strip's end after the last
-  hexagon, which is why the move stays.
-* the added panel covers `282.80..340.60` from above the strip to well below it, but it is child
-  five of twenty-one and the plate is child eight, and a nested record's draw order is its position
-  in that array -- the same relationship the System tab's own panel has had all along.
+* the plate holds six hexagons and the cap is a flourish. Then the sixth hexagon would still be
+  drawn, and the strip would show six unlit hexagons and a lit seventh. The screen showed six in
+  total.
+* the plate's last period is covered art and the cap is the sixth tab's own hexagon. Then moving
+  the cap takes that tab's button one pitch along, which is exactly the gap-then-lit-hexagon the
+  screen shows.
 
-What is left is a question about what the engine attached rather than about what the document says,
-so `tree::dump_strip` is armed: the tab strip's own children, one level deep, once per process,
-each line carrying the element id and definition index off the component's own record. Twenty-one
-records went in; that list is what says how many came out and which.
+The second one is also what the numbers say, and they were in this document before the run. The
+cap's record sits at `271.05`; the sixth tab begins at `1.10 + 5 * 54.00 = 271.10`. Its art is
+`78.35` wide; a cell highlight is `77.70`. A piece that starts on a tab boundary to within half a
+tenth and is one cell wide is that tab's art. The earlier reading here -- that the cap covers the
+sixth hexagon entirely and must therefore be transparent over it -- had the covering right and drew
+the wrong conclusion from it: it is not over a hexagon, it *is* the hexagon.
+
+So `strip.rs` leaves that record where the game put it and gives the seventh tab a copy, one pitch
+along, exactly as it does for the cell and the panel. The seventh tab then wears the sixth tab's
+hexagon in the two layers the sixth tab wears it in: the plate's period underneath and this plate
+over it.
+
+The added panel was the other candidate and it stays ruled out: it covers `282.80..340.60` from
+above the strip to well below it, but it is child five of twenty-one against the plate's eight, and
+a nested record's draw order is its position in that array -- the same relationship the System
+tab's own panel has always had.
+
+`tree::dump_strip` stays armed, at two levels rather than one. One was not enough and the run said
+so in two lines: the strip is a `FeComponentObject` whose only linked child is the
+`FeComponentSprite` holding the display list, so the records are one level below where it stopped.

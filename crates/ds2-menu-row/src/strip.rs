@@ -86,9 +86,24 @@
 //! hexagon lives in the quad [`crate::icon`] builds rather than in the record.
 //!
 //! This record goes in only when [`crate::icon::armed`] says the shape lookup is hooked. Without
-//! it there is nothing for the index to resolve to, and the two pieces of right-hand furniture
-//! moved below stay where the game put them -- a seventh tab with no hexagon, which is what the
-//! last three commits shipped, rather than a gap where the `RB` prompt used to be.
+//! it there is nothing for the index to resolve to, and the `RB` prompt moved below stays where the
+//! game put it -- a seventh tab with no hexagon, which is what three commits shipped, rather than a
+//! gap where that prompt used to be.
+//!
+//! # The fourth record, which is the rest of the hexagon
+//!
+//! [`ds2_rva::FLO_TAB_STRIP_END_CAP`] was read as a cap at the end of the strip and moved one pitch
+//! along to get it out from under the added hexagon. It is not a cap. Its record sits at `271.05`
+//! against a sixth tab that begins at `1.10 + 5 * `[`ds2_rva::FLO_TAB_PITCH`]` = 271.10`, and its
+//! art is `78.35` wide against a cell highlight's `77.70` -- it is the sixth tab's own hexagon,
+//! drawn over the plate's last period the way the plate's own periods are drawn under the cells.
+//! Moving it took the sixth tab's button off the screen, which is the one thing a flourish at the
+//! end of a strip could not have done.
+//!
+//! So the original stays where the game put it and the seventh tab takes a copy: the same record,
+//! with its transform block copied and one pitch added. The seventh tab then wears the sixth tab's
+//! hexagon in the same two layers the sixth tab does -- the plate's period underneath, from the
+//! slice above, and this plate over it.
 //!
 //! # What a run has shown, and what it has not
 //!
@@ -98,10 +113,9 @@
 //! The subtree record is established and its position was wrong: a second run drew the seventh
 //! tab's rows under the sixth tab's hexagon, which is what the transform move above now fixes.
 //!
-//! The hexagon and the two moved pieces of furniture have been in front of a running game once and
-//! the screen disagreed with the records -- a tab button was missing from the strip. Every
-//! candidate this module could be responsible for is ruled out in `docs/DS2-INGAME-MENU.md`, and
-//! [`crate::tree::dump_strip`] is armed to say what the engine attached.
+//! The missing tab button is established and so is its cause: two runs drew five hexagons, a gap
+//! and the seventh tab's own, which is what moving the sixth tab's plate out from under the
+//! seventh does. The copy that replaces that move has not been in front of a running game.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -109,16 +123,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::LOG_PREFIX;
 use crate::install::log;
 
-/// Children the replacement carries: the shipped eighteen, the seventh tab's subtree, its icon and
-/// its cell.
+/// Children the replacement carries: the shipped eighteen, the seventh tab's subtree, its icon, a
+/// copy of the hexagon plate that only the sixth tab has, and its cell.
 ///
-/// The icon is only added when [`crate::icon`] is in, but the array is sized for it either way: a
-/// slot is twenty bytes and a conditional length is a second thing to get wrong. The count written
-/// into the definition is [`Plan::children`], which is the number actually filled.
-const CHILDREN: usize = ds2_rva::FLO_TAB_STRIP_CHILDREN + 3;
+/// The last two are only added when [`crate::icon`] is in, but the array is sized for them either
+/// way: a slot is twenty bytes and a conditional length is a second thing to get wrong. The count
+/// written into the definition is [`Plan::children`], which is the number actually filled.
+const CHILDREN: usize = ds2_rva::FLO_TAB_STRIP_CHILDREN + 4;
 
-/// Transform blocks the replacement owns: the added cell's, the added panel's, the end cap's and
-/// the `RB` label's.
+/// Transform blocks the replacement owns: the added cell's, the added panel's, the added hexagon
+/// plate's and the `RB` label's.
 ///
 /// A record's `+0x08` points at a block in the document, and two records pointing at one block are
 /// one position between them -- so anything this moves needs a copy first. The added icon is not
@@ -130,6 +144,15 @@ const CELL_TRANSFORM: usize = 0;
 const END_CAP_TRANSFORM: usize = 1;
 const RB_LABEL_TRANSFORM: usize = 2;
 const PANEL_TRANSFORM: usize = 3;
+
+/// Where the sixth tab's own hexagon starts, which is what the end cap turned out to be.
+///
+/// The plate `0x0268` draws across `1.10..337.60` and the end cap's record sits at `271.05`.
+/// `1.10 + 5 * FLO_TAB_PITCH` is `271.10`: the cap begins on the sixth tab's boundary to within
+/// half a tenth, and its art is `78.35` wide against the cell highlight's `77.70`. That is a tab's
+/// hexagon, not a flourish at the end of a strip, and moving it is what took the sixth tab's button
+/// off the screen for a commit.
+const SIXTH_TAB_LEFT: f32 = 1.10 + 5.0 * ds2_rva::FLO_TAB_PITCH;
 
 /// Where each added record ends up, and how many records the definition then claims.
 ///
@@ -144,6 +167,10 @@ struct Plan {
     /// Slot the seventh tab's hexagon goes in: directly after the plate it is sliced out of.
     /// [`usize::MAX`] when [`crate::icon`] is not in, and then nothing is written there.
     icon: usize,
+    /// Slot the copy of the sixth tab's own hexagon plate goes in: directly after the record it is
+    /// cloned from, so the seventh tab wears the same art the sixth does. [`usize::MAX`] on the
+    /// same condition as [`Plan::icon`], because both exist only to draw a seventh hexagon.
+    end_cap: usize,
     /// Slot the seventh cell goes in: last, after the six the game ships.
     cell: usize,
     /// Where each shipped record ended up.
@@ -159,6 +186,7 @@ impl Plan {
         let mut plan = Plan {
             panel: 0,
             icon: usize::MAX,
+            end_cap: usize::MAX,
             cell: 0,
             moved: [0; ds2_rva::FLO_TAB_STRIP_CHILDREN],
             children: 0,
@@ -174,6 +202,10 @@ impl Plan {
             }
             if with_icon && shipped == ds2_rva::FLO_TAB_STRIP_PLATE {
                 plan.icon = at;
+                at += 1;
+            }
+            if with_icon && shipped == ds2_rva::FLO_TAB_STRIP_END_CAP {
+                plan.end_cap = at;
                 at += 1;
             }
             shipped += 1;
@@ -418,25 +450,57 @@ unsafe fn build(original: *mut u8) -> Option<*mut u8> {
         CELL_TRANSFORM,
         "cell",
     )?;
-    if plan.icon != usize::MAX {
-        for (slot, which, what) in [
-            (
-                plan.moved[ds2_rva::FLO_TAB_STRIP_END_CAP],
-                END_CAP_TRANSFORM,
-                "end-cap",
-            ),
-            (
-                plan.moved[ds2_rva::FLO_TAB_STRIP_RB_LABEL],
-                RB_LABEL_TRANSFORM,
-                "rb-label",
-            ),
-        ] {
-            let moved = move_along(&mut strip.records, &mut strip.transforms, slot, which, what)?;
+    // THE SIXTH TAB'S OWN HEXAGON, COPIED RATHER THAN MOVED. This record was read as the strip's
+    // end cap and moved one pitch along, "out from under the seventh tab's hexagon" -- and the
+    // sixth tab's button vanished from the screen, because the record is that button. It begins at
+    // `SIXTH_TAB_LEFT` and is one cell wide. So the original stays where the game put it and the
+    // seventh tab gets a copy of it, one pitch on.
+    if plan.end_cap != usize::MAX {
+        let template = ds2_rva::FLO_TAB_STRIP_END_CAP * stride;
+        let at = plan.end_cap * stride;
+        strip.records[at..at + stride].copy_from_slice(&strip.shipped[template..template + stride]);
+        let moved = move_along(
+            &mut strip.records,
+            &mut strip.transforms,
+            plan.end_cap,
+            END_CAP_TRANSFORM,
+            "hexagon-plate",
+        )?;
+        // THE CHECK THAT SAYS THIS RECORD IS A TAB'S HEXAGON. Its x is what identifies it -- a
+        // record one pitch short of the plate's right edge, on the sixth tab's own boundary. On a
+        // document where it sits somewhere else it is something else, and copying it would put an
+        // unknown picture beside the strip.
+        if (moved - ds2_rva::FLO_TAB_PITCH - SIXTH_TAB_LEFT).abs() > 0.1 {
             log(format_args!(
-                "{LOG_PREFIX} strip furniture moved what={what} slot={slot} x={moved} \
-                 -- out from under the seventh tab's hexagon"
+                "{LOG_PREFIX} strip REFUSED reason=hexagon-plate-not-on-a-tab x={} expected={}",
+                moved - ds2_rva::FLO_TAB_PITCH,
+                SIXTH_TAB_LEFT
             ));
+            REFUSED.fetch_add(1, Ordering::Relaxed);
+            return None;
         }
+        log(format_args!(
+            "{LOG_PREFIX} strip hexagon copied slot={} x={moved} -- the sixth tab's own plate, \
+             drawn again one tab along, and the sixth tab keeps the one it had",
+            plan.end_cap
+        ));
+    }
+    // The `RB` prompt really is furniture, and it really is standing where the seventh hexagon
+    // goes: its label sits at `347.05`, past the last tab, and the chevron `crate::icon` moves with
+    // it lands at `336.70..361.70`.
+    if plan.icon != usize::MAX {
+        let slot = plan.moved[ds2_rva::FLO_TAB_STRIP_RB_LABEL];
+        let moved = move_along(
+            &mut strip.records,
+            &mut strip.transforms,
+            slot,
+            RB_LABEL_TRANSFORM,
+            "rb-label",
+        )?;
+        log(format_args!(
+            "{LOG_PREFIX} strip furniture moved what=rb-label slot={slot} x={moved} \
+             -- out from under the seventh tab's hexagon"
+        ));
     }
 
     let record = &mut strip.records[added..added + ds2_rva::FLO_RECORD_STRIDE];
@@ -547,12 +611,14 @@ pub(crate) unsafe fn substitute(original: *mut u8) -> *mut u8 {
 mod tests {
     use super::*;
 
-    /// Three more children than the game ships, and the added cell is the last one.
+    /// Four more children than the game ships -- the subtree, the sliced hexagon, the copy of the
+    /// sixth tab's plate and the cell -- and the added cell is the last one. Two of the four exist
+    /// only to draw a hexagon, so a strip without one carries two fewer.
     #[test]
-    fn the_replacement_is_the_shipped_strip_plus_three() {
-        assert_eq!(CHILDREN, ds2_rva::FLO_TAB_STRIP_CHILDREN + 3);
+    fn the_replacement_is_the_shipped_strip_plus_four() {
+        assert_eq!(CHILDREN, ds2_rva::FLO_TAB_STRIP_CHILDREN + 4);
         assert_eq!(Plan::new(true).children, CHILDREN);
-        assert_eq!(Plan::new(false).children, CHILDREN - 1);
+        assert_eq!(Plan::new(false).children, CHILDREN - 2);
         assert_eq!(
             ds2_rva::FLO_TAB_STRIP_FIRST_CELL + ds2_rva::FLO_TAB_STRIP_CELL_IDS.len(),
             ds2_rva::FLO_TAB_STRIP_CHILDREN,
@@ -624,6 +690,26 @@ mod tests {
         );
     }
 
+    /// The record read as an end cap is the sixth tab's own hexagon, so the seventh tab copies it
+    /// and the sixth keeps it. Moving it is what put a gap in the strip.
+    #[test]
+    fn the_end_cap_is_the_sixth_tabs_hexagon() {
+        // Its record's x, as `scripts/ds2-flo.py tree --def 0x271` prints it.
+        const END_CAP_X: f32 = 271.05;
+        assert!(
+            (END_CAP_X - SIXTH_TAB_LEFT).abs() < 0.1,
+            "the cap starts at {END_CAP_X} against a sixth tab at {SIXTH_TAB_LEFT}"
+        );
+        let plan = Plan::new(true);
+        assert_eq!(plan.end_cap, plan.moved[ds2_rva::FLO_TAB_STRIP_END_CAP] + 1);
+        assert!(plan.end_cap < plan.moved[ds2_rva::FLO_TAB_STRIP_FIRST_CELL]);
+        assert_eq!(
+            Plan::new(false).end_cap,
+            usize::MAX,
+            "without a seventh hexagon there is nothing for a second plate to sit on"
+        );
+    }
+
     /// Every shipped record lands in its own slot, and the added ones land in slots nobody else
     /// claimed. A collision here would silently drop a record the game ships.
     #[test]
@@ -636,7 +722,11 @@ mod tests {
                 .iter()
                 .copied()
                 .chain([plan.panel, plan.cell])
-                .chain(if with_icon { Some(plan.icon) } else { None })
+                .chain(if with_icon {
+                    vec![plan.icon, plan.end_cap]
+                } else {
+                    Vec::new()
+                })
             {
                 assert!(slot < plan.children, "slot {slot} is past the child count");
                 assert!(!taken[slot], "two records claim slot {slot}");

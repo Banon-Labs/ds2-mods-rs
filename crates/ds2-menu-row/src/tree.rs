@@ -372,8 +372,13 @@ pub unsafe fn dump_strip(accessor: *const u8) {
         strip as usize
     ));
     let mut lines = 0usize;
+    // TWO LEVELS, because one was not enough and the first run said so: the strip is a
+    // `FeComponentObject` whose only linked child is the `FeComponentSprite` that holds the display
+    // list, so a one-level walk reports two nodes and none of the records. The records are the
+    // sprite's display-list entries, which is the second level.
+    //
     // SAFETY: `strip` came from the game's own lookup.
-    unsafe { walk(strip, 0, 1, &mut lines, "strip ", base) };
+    unsafe { walk(strip, 0, 2, &mut lines, "strip ", base) };
     log(format_args!("{LOG_PREFIX} strip tree done nodes={lines}"));
 }
 
