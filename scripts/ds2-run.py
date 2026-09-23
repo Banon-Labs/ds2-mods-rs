@@ -178,9 +178,9 @@ MENU_ROW_SECTION = "menu_row"
 KEY_MENU_ROW_ENABLED = "enabled"
 
 #: Mirrors `KEY_ROWS` in `crates/ds2-loader/src/menu_row.rs`. The modern key: a LIST, because the
-#: System tab holds two added rows and there are four that want one. Emitted only when `--rows` was
-#: passed -- present, it overrides `enabled` outright, so writing it unconditionally would make
-#: `--menu-row` silently stop working.
+#: System tab holds two added rows and there are four that want one. This script only ever writes
+#: it COMMENTED OUT: present, it overrides `enabled` outright, and a launcher able to narrow the row
+#: set produced a run missing two shipped rows that read as a regression in the DLL.
 KEY_MENU_ROW_ROWS = "rows"
 
 #: Mirrors `Row::name` for every variant of `EVERY_ROW` in `crates/ds2-loader/src/menu_row.rs`, in
@@ -194,8 +194,8 @@ MENU_ROW_ROW_NAMES = (
 )
 
 #: Mirrors `MAX_ADDED_ROWS` in `crates/ds2-menu-row/src/api.rs`: the most rows the grid's layout
-#: bind will ever go looking for (15) less the rows the System tab ships (3). Named here so `--rows`
-#: can refuse the thirteenth at the command line instead of leaving it to be refused in a log.
+#: bind will ever go looking for (15) less the rows the System tab ships (3). Named here so the
+#: commented line this script emits offers a list the DLL will not refuse.
 #:
 #: IT WAS 2 -- the item vector's capacity (5) less the same three -- until `ds2-menu-row` stopped
 #: keeping its rows in the game's two fixed vectors and started answering the two functions that
@@ -1113,7 +1113,6 @@ def config_text(
     save_redirect: str | None = None,
     menu_row: bool = False,
     build_import: bool = False,
-    menu_row_rows: tuple[str, ...] | None = None,
     inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
@@ -1133,16 +1132,14 @@ def config_text(
         if save_redirect is not None
         else f'# {KEY_SAVE_REDIRECT_PATH} = "Z:\\\\home\\\\you\\\\DS2\\\\DarkSoulsII\\\\0110000100000000"'
     )
-    # THE LIST KEY OVERRIDES `enabled`, so it is emitted only when asked for and COMMENTED OUT
-    # otherwise -- the file still shows the spelling and every name it accepts, which is what a
-    # commented default is for. Writing `rows = []` by default would turn `--menu-row` into a no-op
-    # with nothing in the file to explain it.
+    # THE LIST KEY OVERRIDES `enabled`, AND IT IS NEVER WRITTEN FROM HERE. It was, through a
+    # `--rows` flag, and that flag cost a session: a run launched with two of the four names
+    # narrowed the menu to two rows, and the missing pair read as a regression in the DLL rather
+    # than as the launcher having been told to leave them out. Every row is on by default and the
+    # launcher's job is to launch the default; a player who wants fewer edits this line in the file
+    # it is commented into, where the choice is visible next to the thing it changes.
     menu_row_rows_line = (
-        f"{KEY_MENU_ROW_ROWS} = ["
-        + ", ".join(f'"{name}"' for name in menu_row_rows)
-        + "]"
-        if menu_row_rows is not None
-        else f"# {KEY_MENU_ROW_ROWS} = ["
+        f"# {KEY_MENU_ROW_ROWS} = ["
         + ", ".join(f'"{name}"' for name in MENU_ROW_ROW_NAMES[:MENU_ROW_MAX_ADDED])
         + f"]   # at most {MENU_ROW_MAX_ADDED} of: "
         + ", ".join(MENU_ROW_ROW_NAMES)
@@ -1648,7 +1645,6 @@ def write_config(
     save_redirect: str | None = None,
     menu_row: bool = False,
     build_import: bool = False,
-    menu_row_rows: tuple[str, ...] | None = None,
     inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
@@ -1679,7 +1675,6 @@ def write_config(
         save_redirect,
         menu_row,
         build_import,
-        menu_row_rows,
         inventory_sort,
         inventory_sort_key,
         inventory_sort_pad,
@@ -1768,7 +1763,6 @@ def dry_run(
     save_redirect: str | None = None,
     menu_row: bool = False,
     build_import: bool = False,
-    menu_row_rows: tuple[str, ...] | None = None,
     inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
@@ -1817,7 +1811,6 @@ def dry_run(
             save_redirect,
             menu_row,
             build_import,
-            menu_row_rows,
             inventory_sort,
             inventory_sort_key,
             inventory_sort_pad,
@@ -1861,7 +1854,6 @@ def dry_run(
                 block_sockets,
                 menu_row=menu_row,
                 build_import=build_import,
-                menu_row_rows=menu_row_rows,
                 inventory_sort=inventory_sort,
                 inventory_sort_key=inventory_sort_key,
                 inventory_sort_pad=inventory_sort_pad,
@@ -1928,7 +1920,6 @@ def launch(
     save_redirect: str | None = None,
     menu_row: bool = False,
     build_import: bool = False,
-    menu_row_rows: tuple[str, ...] | None = None,
     inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
@@ -1972,7 +1963,6 @@ def launch(
         save_redirect,
         menu_row,
         build_import,
-        menu_row_rows,
         inventory_sort,
         inventory_sort_key,
         inventory_sort_pad,
@@ -2613,9 +2603,10 @@ def selftest() -> int:
     )
 
     # THE ROW LIST. Four names against twelve slots, so the count and every spelling are checked
-    # here rather than discovered in a log after a launch. `--rows` is the only key in this file
+    # here rather than discovered in a log after a launch. The rows key is the only key in this file
     # whose value is a LIST, and the reason it started as one was the game's item vector; see
-    # `MENU_ROW_MAX_ADDED` for what replaced that ceiling.
+    # `MENU_ROW_MAX_ADDED` for what replaced that ceiling. This script no longer writes it -- the
+    # names are still checked because the commented line it emits offers every one of them.
     for name in MENU_ROW_ROW_NAMES:
         check(
             f'"{name}"' in menu_row_src,
@@ -2630,22 +2621,24 @@ def selftest() -> int:
     menu_row_api = (REPO_ROOT / "crates/ds2-menu-row/src/api.rs").read_text(encoding="utf-8")
     check(
         f"assert_eq!(MAX_ADDED_ROWS, {MENU_ROW_MAX_ADDED});" in menu_row_api,
-        f"MAX_ADDED_ROWS is still {MENU_ROW_MAX_ADDED}, which is what --rows refuses above",
+        f"MAX_ADDED_ROWS is still {MENU_ROW_MAX_ADDED}, which is the ceiling the commented line "
+        "above offers",
     )
     values, _ = parse_config(config_text("off"))
     check(
         (MENU_ROW_SECTION, KEY_MENU_ROW_ROWS) not in values,
-        f"[{MENU_ROW_SECTION}] {KEY_MENU_ROW_ROWS} is COMMENTED OUT unless --rows was passed -- "
-        "present, it overrides the enabled keys, so writing it by default would silently disable "
-        "--menu-row",
+        f"[{MENU_ROW_SECTION}] {KEY_MENU_ROW_ROWS} is COMMENTED OUT in every config this script "
+        "writes -- present, it overrides the enabled keys, and a launcher that narrowed the row "
+        "set turned four shipped rows into two and read as a regression in the DLL",
     )
-    values, _ = parse_config(
-        config_text("off", menu_row_rows=("save-game-to-file", "quit-to-desktop"))
-    )
+    # SPELT IN TWO HALVES SO THIS LINE IS NOT ITSELF THE MATCH. A check that searches its own file
+    # for a literal finds the literal it is written with, and fails forever; the halves are joined
+    # at run time and the contiguous bytes never appear in the source.
+    readded = 'dest="menu_row_' 'rows"'
     check(
-        values.get((MENU_ROW_SECTION, KEY_MENU_ROW_ROWS))
-        == '["save-game-to-file", "quit-to-desktop"]',
-        "--rows writes the names IN ORDER, because that is the order they appear on screen",
+        readded not in Path(__file__).read_text(encoding="utf-8"),
+        "there is no --rows flag: the launcher launches the default row set, and a narrower set is "
+        "an edit to the config file where the choice sits next to what it changes",
     )
 
     # THE HANDOFF FILE, named in this config's prose and written by the DLL. A drifted spelling would
@@ -3239,25 +3232,6 @@ def main() -> int:
         ),
     )
     parser.add_argument(
-        "--rows",
-        dest="menu_row_rows",
-        metavar="NAME[,NAME]",
-        default=None,
-        help=(
-            "WHICH extra rows go on the pause menu's System tab, as a comma-separated list. Writes "
-            f"`[{MENU_ROW_SECTION}] {KEY_MENU_ROW_ROWS}`, which OVERRIDES both --menu-row and "
-            "--build-import for the run. At most "
-            f"{MENU_ROW_MAX_ADDED}: the grid's layout bind stops looking after 15 rows and the game "
-            "ships 3 on that tab, so a 13th is refused. Every name below fits at once. Names: "
-            + ", ".join(MENU_ROW_ROW_NAMES)
-            + ". `load-character-from-file` takes effect on the NEXT launch -- it writes "
-            f"{SAVE_FILE_HANDOFF_NAME} beside the config and the loader consumes it at attach, "
-            "because DS2 saves on the way out of a game and an in-session swap gets overwritten by "
-            "your own character. `save-game-to-file` asks the game to save and then copies the "
-            f"container where you say; look for `{SAVE_FILE_LOG_PREFIX} exported bytes=...`."
-        ),
-    )
-    parser.add_argument(
         "--build-import",
         dest="build_import",
         action="store_true",
@@ -3365,30 +3339,6 @@ def main() -> int:
     if args.selftest:
         return selftest()
 
-    # REFUSED HERE, WITH THE NUMBERS, rather than written into a config for the DLL to refuse in a
-    # log. The DLL refuses too -- it has to, since a player can edit the file by hand -- but a name
-    # or a count this script could have caught is a run that boots, looks wrong, and costs a launch.
-    menu_row_rows: tuple[str, ...] | None = None
-    if args.menu_row_rows is not None:
-        named = tuple(
-            item.strip() for item in args.menu_row_rows.split(",") if item.strip()
-        )
-        unknown = [name for name in named if name not in MENU_ROW_ROW_NAMES]
-        if unknown:
-            parser.error(
-                "--rows does not know "
-                + ", ".join(repr(name) for name in unknown)
-                + "; the names are "
-                + ", ".join(MENU_ROW_ROW_NAMES)
-            )
-        if len(set(named)) > MENU_ROW_MAX_ADDED:
-            parser.error(
-                f"--rows names {len(set(named))} rows and the System tab holds "
-                f"{MENU_ROW_MAX_ADDED}: the grid's layout bind never looks past row 15 and the "
-                "game ships 3 rows on that tab"
-            )
-        menu_row_rows = named
-
     # BEFORE either dispatch, and printed, because it is a decision the run is made on: the slot
     # belongs to the redirected save rather than to this account, so it cannot be resolved from the
     # command line alone. See `resolve_continue_slot`.
@@ -3420,7 +3370,6 @@ def main() -> int:
             args.save_redirect,
             args.menu_row,
             args.build_import,
-            menu_row_rows,
             args.inventory_sort,
             args.inventory_sort_key,
             args.inventory_sort_pad,
@@ -3450,7 +3399,6 @@ def main() -> int:
         args.save_redirect,
         args.menu_row,
         args.build_import,
-        menu_row_rows,
         args.inventory_sort,
         args.inventory_sort_key,
         args.inventory_sort_pad,
