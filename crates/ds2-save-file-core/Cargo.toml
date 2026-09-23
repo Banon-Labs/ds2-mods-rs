@@ -1,0 +1,21 @@
+# The two save-file rows' decisions that do not need a game: what a dialog may accept, what a
+# picked path means, and what the file ends up called.
+#
+# ZERO dependencies and no `cfg(windows)`, so this crate is on `check.sh`'s host test line. That
+# matters more here than it usually does: every rule below decides whether a player's SAVE is
+# overwritten, and those rules are cheap to get wrong and expensive to discover wrong.
+#
+# It deliberately does NOT depend on `ds2-rva`. There is no address here to get wrong.
+[package]
+name = "ds2-save-file-core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "ds2_save_file_core"
+
+[lints]
+workspace = true
