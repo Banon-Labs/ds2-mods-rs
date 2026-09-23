@@ -636,6 +636,7 @@ const route = {
   saidSnap: false,
   saidRoute: false,
   saidNoRoute: false,
+  saidAudit: false,
 };
 
 /// How far the character may move in one pass before it counts as a load rather than a walk.
@@ -731,7 +732,17 @@ function advanceRoute() {
   // Retargeting first is what stops the pile-up: a route that has not moved keeps the stones it
   // already has instead of getting a second set on top. A route that HAS moved takes its old
   // stones down before laying new ones.
-  if (retarget(spots)) removedTotal += clearPlaced();
+  const moved = retarget(spots);
+  if (moved) removedTotal += clearPlaced();
+  // AUDIT EVERY FRESH ROUTE, NOT JUST THE FIRST. The first route a session produces is whatever
+  // the player happened to be standing next to -- two nodes and a metre of walking, which has
+  // nothing interesting in it. The route worth examining is a long one, and that one only turns
+  // up after the target has moved. Re-arming on `moved` costs one pass in a hundred and is the
+  // difference between auditing the question and auditing the warm-up.
+  if (moved || !route.saidAudit) {
+    reportAudit(auditRoute(routeObject(route.planner)), !route.saidAudit);
+    route.saidAudit = true;
+  }
   route.source = 'navmesh';
 }
 
@@ -853,11 +864,32 @@ const NV_ROUTE_PLANNER_FLAG_FAILED = 0x04;
 /// Where the planner's `NvRoute` LIVES. See `routeObject` -- this is an offset to the object,
 /// not to a pointer to it.
 const NV_ROUTE_PLANNER_ROUTE_OFFSET = 0x48;
-/// `0x7f8` -- bits 3..10, every feature gate, size class zero. The engine's own spelling of
-/// "assume this agent can do anything", which is the right model for a person at the controls.
-/// A capability of `0` makes two whole edge types impassable, so one step down or one ladder is
-/// enough to make a route that plainly exists come back as NO ROUTE.
+/// `0x7f8` -- bits 3..10 set, size class ZERO. This is the MOST PERMISSIVE agent the engine can
+/// describe, and calling it "a person at the controls" (which this comment used to) is wrong in
+/// the one direction that matters.
+///
+/// `0x140baf0d0`, the traversal predicate, admits a node only when
+///
+/// ```text
+/// (nodeFlags bit8 clear || capability bit3 set) && (capability & 7) < (nodeFlags & 7)
+/// ```
+///
+/// so the low three bits are the AGENT'S SIZE and a SMALLER number passes MORE nodes. Size class
+/// 0 is the smallest agent the format has: it fits through every gap with a capacity of one or
+/// more. The engine's own caller never uses it blind -- `0x14042ee40` builds the word as
+/// `FUN_14042c180(chrParam) | 0x7f8`, where `0x14042c180` maps a character's size parameter
+/// 1..7 onto size class 0..6. Requesting `0x7f8` alone therefore asks for a route a MOUSE could
+/// walk, and the answer comes back running through gaps, drops and doorways a player cannot use.
+///
+/// See `auditRoute`, which measures that gap instead of guessing at it.
 const NV_ROUTE_PLANNER_CAPABILITY_DEFAULT = 0x7f8;
+/// The feature half of the capability word -- everything except the size class in bits 0..2.
+/// `0x14042ee40` ORs exactly this constant onto the character's size, so it is the engine's own
+/// literal rather than a mask derived here.
+const NV_ROUTE_CAPABILITY_FEATURES = 0x7f8;
+/// Size classes the format can express: `0x14042c180` is a seven-arm switch returning 0..6 and
+/// `default: 0`, so this is the whole range and not a guess at one.
+const NV_ROUTE_CAPABILITY_SIZE_CLASSES = 7;
 /// `999.0`, the larger of the two budgets the engine passes. The target is another character
 /// somewhere on the map rather than an AI's next few metres.
 const NV_ROUTE_MAX_COST_LONG_RANGE = 999.0;
@@ -869,6 +901,83 @@ const NV_ROUTE_SEGMENT_POINT_OFFSET = 0x20;
 const NV_ROUTE_SEGMENT_POINTS_OFFSET = 0x40;
 const NV_ROUTE_SEGMENT_POINT_COUNT_OFFSET = 0x50;
 const ROUTE_POINT_STRIDE = 16;
+
+// WHAT A ROUTE SEGMENT SAYS BESIDES WHERE IT IS.
+//
+// `0x140bb4ac0` is the planner state that WRITES the finished route, and every field below is
+// read off one of its stores into `[planner+0x58] + i*0x60`:
+//
+//   *(u32 *)(seg + 0x00) = edgeRecord + 0xc   (or 0xffffffff on the last segment)
+//   *(u32 *)(seg + 0x04) = edgeRecord + 0xc   (or 0xffffffff on the first)
+//   *(u32 *)(seg + 0x08) = FUN_140bb9d50(...) (a packed navi id; planner+0x84 at the end)
+//   *(u32 *)(seg + 0x0c) = FUN_140bb9d50(...) (a packed navi id; planner+0x88 at the start)
+//   *(f32x4*)(seg + 0x10), (seg + 0x20) = (v0 + v1) * 0.5 -- a PORTAL MIDPOINT, not a node centre
+//
+// The two ids are the reason this block exists. A route point is a position and a position
+// cannot be interrogated; a navi id can, because the same id indexes the attribute table the
+// engine's own traversal test reads. That is what turns "the trail goes through that wall" from
+// an observation into a lookup.
+const NV_ROUTE_SEGMENT_NODE_A_OFFSET = 0x08;
+const NV_ROUTE_SEGMENT_NODE_B_OFFSET = 0x0c;
+/// The portal midpoint written in the same breath as [`NV_ROUTE_SEGMENT_NODE_A_OFFSET`]. Its
+/// partner for node B is [`NV_ROUTE_SEGMENT_POINT_OFFSET`], which already had a name because the
+/// decoder falls back to it. Pairing each id with its own position is what lets a report say
+/// WHERE the unusable node is instead of only that there is one.
+const NV_ROUTE_SEGMENT_POINT_A_OFFSET = 0x10;
+
+/// `NvNaviGraph -> node attributes`. `+0x48`, a `u32` per node, indexed by the LOW FIFTEEN BITS
+/// of a packed navi id.
+///
+/// `0x14042ee40` -- the AI's own "go here" -- does exactly this before it will even ask for a
+/// route:
+///
+/// ```text
+/// lVar7 = FUN_140bb2620(navSystem + 0x88, param_3 | 0x1ffff);       ; the graph holding the id
+/// uVar1 = *(u32 *)(*(longlong *)(lVar7 + 0x48) + (param_3 & 0x7fff) * 4);
+/// uVar4 = FUN_14042c180(*(u32 *)([[[chr+8]+0x38]+0x40] + 4));       ; the character's size class
+/// if ((float)FUN_140baf0d0(uVar1, uVar4 | 0x7f8, 0) == DAT_1410ae854) { give up }
+/// ```
+///
+/// so an unreachable destination is decided from a BAKED `u32` and the agent's capability word,
+/// and nothing else. That is also the ceiling on what this table can ever tell you: see
+/// `auditRoute`.
+const NV_NAVI_GRAPH_NODE_ATTRS_OFFSET = 0x48;
+
+/// The index half of a packed navi id. `0x7fff` everywhere the engine touches one, and
+/// `0x7fff` itself is the "no node" sentinel `0x14042ee40` tests for before indexing.
+const NAVI_ID_INDEX_MASK = 0x7fff;
+const NAVI_ID_INDEX_NONE = 0x7fff;
+
+/// The type field of a node attribute word: bits 3..6, the value `0x140baf0d0` switches on.
+const NAVI_NODE_TYPE_MASK = 0x78;
+
+/// Node types whose admission depends on the capability word AND on the traveller's HEIGHT
+/// relative to the edge.
+///
+/// `0x140baf0d0` gives types `0x20` and `0x40` two different tests depending on its third
+/// argument, and `0x140bba040` -- the gate check that actually passes that argument -- computes
+/// it as geometry, not as a direction:
+///
+/// ```text
+/// cVar7 = (midY(edgeA) < refY) || (midY(edgeB) < refY);   ; refY = *(float *)(param_6 + 4)
+/// ... (**(code **)(*estimator + 0x18))(estimator, attrs, capability, cVar7)
+/// ```
+///
+/// so the flag means THIS EDGE SITS BELOW ME. A type `0x20` or `0x40` edge can therefore be a
+/// drop you may take and a climb you may not, from the same node -- which is the shape of every
+/// ledge in the game. Calling it "direction" would be a guess; calling it height is what the
+/// engine computes. `0x10` is gated on the capability alone.
+const NAVI_NODE_TYPE_GATED = [0x10, 0x20, 0x40];
+
+/// `NvNaviGraphCostEstimator`'s traversal predicate, and the `float` it returns when the answer
+/// is no.
+///
+/// `0x140baf0d0(nodeAttrs, capability, direction)` returns a cost, and `0x1401c1e60` -- the
+/// engine's own boolean wrapper, the one RTTI names `NvNaviGraphCostEstimator` -- is nothing but
+/// `cost != DAT_1410ae854`. So the sentinel IS the refusal, and it is read from the image rather
+/// than assumed to be any particular float.
+const NAVI_EDGE_TRAVERSAL_COST_RVA = 0x00baf0d0;
+const NAVI_IMPASSABLE_COST_RVA = 0x010ae854;
 
 /// Bounds on a structure read out of live memory. A count past these means the pointer was not a
 /// route, so the decode REFUSES rather than truncating: a route half-read draws a confident line
@@ -889,6 +998,8 @@ let nearestGraphId = null;
 let graphForRouteId = null;
 let createRoutePlanner = null;
 let requestRouteCall = null;
+let traversalCost = null;
+let impassableCost = null;
 
 /// Sixteen bytes, sixteen-byte ALIGNED, and both halves matter: the engine's own callers fill
 /// this with a `movaps` of a whole `__m128` and the snap's inner loop reads it back the same way.
@@ -919,6 +1030,11 @@ function bindNav() {
     requestRouteCall = new NativeFunction(
       base.add(NV_ROUTE_PLANNER_REQUEST_RVA), 'void',
       ['pointer', 'uint32', 'uint32', 'uint32', 'float']);
+    traversalCost = new NativeFunction(
+      base.add(NAVI_EDGE_TRAVERSAL_COST_RVA), 'float', ['uint32', 'uint32', 'uint8']);
+    // READ THE SENTINEL, DO NOT ASSUME IT. `0x1401c1e60` compares against this exact global, so
+    // the only correct "impassable" is whatever bit pattern is sitting there.
+    impassableCost = base.add(NAVI_IMPASSABLE_COST_RVA).readFloat();
     snapPoint = alignTo16(Memory.alloc(32));
     snapDistance = Memory.alloc(4);
     return true;
@@ -1216,6 +1332,182 @@ function decodeRoute(route) {
     }
   }
   return out.length === 0 ? null : out;
+}
+
+/// The attribute word the engine tests for one packed navi id, or `null` if it cannot be read.
+///
+/// The two-step lookup -- hash `id | 0x1ffff` to a graph, then index that graph's `+0x48` table
+/// by `id & 0x7fff` -- is `0x14042ee40`'s, quoted at [`NV_NAVI_GRAPH_NODE_ATTRS_OFFSET`]. Doing
+/// it any other way (indexing the graph the SNAP happened to choose, say) reads one graph's
+/// table with another graph's index, and a wrong `u32` here reads as a confident verdict.
+function nodeAttributes(table, id) {
+  const index = id & NAVI_ID_INDEX_MASK;
+  if (index === NAVI_ID_INDEX_NONE) return null;
+  const graph = graphForRouteId(table, (id | NV_ROUTE_ID_GRAPH_KEY_MASK) >>> 0);
+  if (graph === null || graph.isNull()) return null;
+  const attrs = readPointer(graph.add(NV_NAVI_GRAPH_NODE_ATTRS_OFFSET));
+  if (attrs === null) return null;
+  return safeRead(attrs.add(index * 4), function (p) { return p.readU32(); });
+}
+
+/// Ask the engine's own predicate whether an agent of `size` may use a node, with `below` saying
+/// whether the edge sits under the traveller. See [`NAVI_NODE_TYPE_GATED`] for why that is a
+/// height and not a direction.
+function nodePassable(attrs, size, below) {
+  const capability = ((size & 0x7) | NV_ROUTE_CAPABILITY_FEATURES) >>> 0;
+  return traversalCost(attrs, capability, below) !== impassableCost;
+}
+
+/// Name every node on a finished route that a real character could not use, and say plainly what
+/// this test can and cannot see.
+///
+/// # Why this exists
+///
+/// The complaint it answers is "the trail leads up to and through things that block me". There
+/// are two different causes with the same appearance, and only one of them is discoverable from
+/// the navigation data:
+///
+///   * **The route uses nodes sized for a smaller agent, or crosses a one-way drop backwards.**
+///     Discoverable, exactly, right here: the request's capability word is `0x7f8`, whose size
+///     class is ZERO -- the smallest agent the format can describe -- and `0x140baf0d0` admits a
+///     node only while `(capability & 7) < (attrs & 7)`. So the search was told the traveller is
+///     a mouse. Re-running the same predicate at each of the seven size classes measures how big
+///     the traveller may actually be before the route stops existing.
+///   * **A shut door, a crate, a fog gate, a boulder.** NOT discoverable here, and this function
+///     says so rather than letting silence imply a clean bill. `0x140baf0d0` takes a baked `u32`
+///     and the capability word. No world pointer, no object list, no time. `0x1401c1e60`, the
+///     `NvNaviGraphCostEstimator` wrapper RTTI names, is one comparison on its return value.
+///     A route straight through a locked door is a CORRECT route by every question the planner
+///     is able to ask, so catching that one needs the collision world, not the navigation world.
+function auditRoute(routeAt) {
+  if (traversalCost === null || impassableCost === null) return null;
+  // A NaN sentinel would make `cost !== impassable` true for every node and report a route with
+  // no problems at all -- the same silent-pass shape that hid a working snap for a whole run.
+  // Refuse instead of reporting.
+  if (impassableCost !== impassableCost) {
+    return { broken: 'the impassable-cost sentinel read back as NaN, so every comparison ' +
+      'against it would answer PASSABLE. No audit is better than one that always agrees.' };
+  }
+  const manager = gameManager();
+  if (manager === null) return null;
+  const world = graphWorldOf(manager);
+  if (world.isNull()) return null;
+  const table = readPointer(world.add(NV_NAVI_GRAPH_WORLD_ID_TABLE_OFFSET));
+  if (table === null) return null;
+  const segments = readPointer(routeAt.add(NV_ROUTE_SEGMENTS_OFFSET));
+  const count = safeRead(routeAt.add(NV_ROUTE_SEGMENT_COUNT_OFFSET), function (p) { return p.readS32(); });
+  if (segments === null || count === null || count <= 0 || count > MAX_ROUTE_SEGMENTS) return null;
+
+  const nodes = [];
+  let unreadable = 0;
+  const seen = {};
+  for (let index = 0; index < count; index += 1) {
+    const segment = segments.add(index * NV_ROUTE_SEGMENT_STRIDE);
+    const ends = [
+      { idAt: NV_ROUTE_SEGMENT_NODE_A_OFFSET, pointAt: NV_ROUTE_SEGMENT_POINT_A_OFFSET, side: 'A' },
+      { idAt: NV_ROUTE_SEGMENT_NODE_B_OFFSET, pointAt: NV_ROUTE_SEGMENT_POINT_OFFSET, side: 'B' },
+    ];
+    for (let end = 0; end < ends.length; end += 1) {
+      const id = safeRead(segment.add(ends[end].idAt), function (p) { return p.readU32(); });
+      if (id === null || id === NAVI_GRAPH_ID_NONE) continue;
+      if (seen[id] === true) continue;
+      seen[id] = true;
+      const attrs = nodeAttributes(table, id);
+      if (attrs === null) { unreadable += 1; continue; }
+      nodes.push({
+        id: id,
+        attrs: attrs,
+        type: attrs & NAVI_NODE_TYPE_MASK,
+        capacity: attrs & 0x7,
+        segment: index,
+        side: ends[end].side,
+        at: readPoint(segment.add(ends[end].pointAt)),
+      });
+    }
+  }
+  if (nodes.length === 0) return { broken: 'no node id on any segment could be resolved' };
+
+  // The largest agent that still gets this whole route. Bigger is MORE restricted, because the
+  // predicate wants the agent's class strictly below the node's capacity.
+  let widest = -1;
+  for (let size = 0; size < NV_ROUTE_CAPABILITY_SIZE_CLASSES; size += 1) {
+    let all = true;
+    for (let n = 0; n < nodes.length; n += 1) {
+      if (!nodePassable(nodes[n].attrs, size, 0)) { all = false; break; }
+    }
+    if (all) widest = size; else break;
+  }
+
+  const trouble = [];
+  for (let n = 0; n < nodes.length; n += 1) {
+    const node = nodes[n];
+    const level = nodePassable(node.attrs, 0, 0);
+    const below = nodePassable(node.attrs, 0, 1);
+    const gated = NAVI_NODE_TYPE_GATED.indexOf(node.type) !== -1;
+    // A node the smallest possible agent cannot use at all, or one whose answer flips with the
+    // traveller's height -- a ledge you may drop from and not climb back up.
+    if (!level || level !== below || gated) {
+      trouble.push({ node: node, level: level, below: below, gated: gated });
+    }
+  }
+  return { nodes: nodes, unreadable: unreadable, widest: widest, trouble: trouble, segments: count };
+}
+
+function reportAudit(audit, sayTheLimit) {
+  if (audit === null) return;
+  if (audit.broken !== undefined) {
+    console.log('[stone] route audit could not run -- ' + audit.broken);
+    return;
+  }
+  console.log('[stone] route audit -- ' + audit.segments + ' segment(s), ' + audit.nodes.length +
+    ' distinct node(s) read' + (audit.unreadable === 0 ? '' : ', ' + audit.unreadable + ' unreadable') +
+    '. Widest agent this route admits: size class ' +
+    (audit.widest < 0 ? 'NONE (not even the smallest -- read that as a wrong attribute table, ' +
+      'not as a fact about the world)' : audit.widest + ' of ' +
+      (NV_ROUTE_CAPABILITY_SIZE_CLASSES - 1)) +
+    '. The request asked as size class 0, the smallest the format has.');
+  // THE RAW WORDS, ALWAYS. A verdict with no evidence under it cannot be checked, and the
+  // vocabulary of this table is not documented anywhere -- it gets learned by watching which
+  // values turn up on routes that behave and routes that do not.
+  const sample = [];
+  for (let index = 0; index < audit.nodes.length && index < 10; index += 1) {
+    const node = audit.nodes[index];
+    sample.push('0x' + ('00000000' + node.attrs.toString(16)).slice(-8) +
+      '(t' + node.type.toString(16) + '/c' + node.capacity + ')');
+  }
+  console.log('[stone]   attrs: ' + sample.join(' ') +
+    (audit.nodes.length > 10 ? ' ... ' + (audit.nodes.length - 10) + ' more' : ''));
+  for (let index = 0; index < audit.trouble.length && index < 12; index += 1) {
+    const item = audit.trouble[index];
+    const node = item.node;
+    console.log('[stone]   node 0x' + node.id.toString(16) + ' (segment ' + node.segment + node.side +
+      (node.at === null ? '' : ' at ' + node.at[0].toFixed(2) + ', ' + node.at[1].toFixed(2) +
+        ', ' + node.at[2].toFixed(2)) +
+      ') attrs 0x' + ('00000000' + node.attrs.toString(16)).slice(-8) +
+      ' type 0x' + node.type.toString(16) + ' capacity ' + node.capacity +
+      (item.level !== item.below
+        ? ' -- ASYMMETRIC, usable only when the edge sits ' + (item.below ? 'BELOW you (a drop, ' +
+          'not a climb)' : 'LEVEL WITH OR ABOVE you')
+        // NOT "we are cheating here". `0x14042ee40` ORs `0x7f8` onto EVERY character's size, so
+        // the feature bits are identical for us and for every NPC in the game; a gated type that
+        // passes both ways passes for them too. The only per-character knob in the whole
+        // capability word is the three-bit size class.
+        : item.level ? ' -- gated type, passable both ways at 0x7f8, which is what every NPC has'
+          : ' -- IMPASSABLE even to the smallest agent'));
+  }
+  if (audit.trouble.length > 12) {
+    console.log('[stone]   ... and ' + (audit.trouble.length - 12) + ' more.');
+  }
+  // THE HONEST HALF. Silence here would read as "nothing else is wrong", which is not what this
+  // test measured and not what it is able to measure. Said once a session rather than once a
+  // route, because a paragraph that repeats is a paragraph nobody reads.
+  if (!sayTheLimit) return;
+  console.log('[stone]   Scope of this audit: it reads the per-node attribute word LIVE, so ' +
+    'anything that rewrites that word -- and this engine has an NvNaviGraphCostUpdater and a ' +
+    'MapObjNaviGraphLocationComponent, both runtime-shaped -- shows up here. What it does NOT ' +
+    'cover is the GATE layer (NvNaviGraphGate, NvNaviGatePathFindingTask) or plain collision ' +
+    'geometry that was never registered with the navigation graph at all. Neither of those is ' +
+    'ruled out by a clean line above.');
 }
 
 /// Read a planner's flags, and decode the route when there is one.
