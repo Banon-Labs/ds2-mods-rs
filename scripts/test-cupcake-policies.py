@@ -42,6 +42,25 @@ DEFAULT_BASH_TIMEOUT_MS = 30000
 FRESH_OIDS = "a" * 40 + " " + "a" * 40
 STALE_OIDS = "a" * 40 + " " + "b" * 40
 
+# The runtime-evidence signal, in the format .cupcake/signals/runtime_evidence_for_head.sh emits.
+# This one has to be pinned for the same reason the OIDs above do, and the failure it prevents is
+# worse than flakiness: unpinned, every `git push` case in this file reads the REAL game log, so
+# whether the suite is green depends on whether somebody happened to launch Dark Souls II recently.
+# A gate whose verdict changes when nothing in the repo changed teaches agents to re-run it until it
+# passes.
+RUNTIME_PROVEN = "RUNTIME|game_code=1|attached=1|fresh=1|dll_match=1|head=1758600000|log=1758600900"
+RUNTIME_NEVER_RAN = "RUNTIME|game_code=1|attached=0|fresh=0|dll_match=1|head=1758600000|log=0"
+RUNTIME_STALE_LOG = (
+    "RUNTIME|game_code=1|attached=1|fresh=0|dll_match=1|head=1758600000|log=1758500000"
+)
+# A launch that happened after the commit, with a DLL this checkout did not build: the clock says the
+# run is current and the bytes say it was somebody else's. The clock-only version of the guard allowed
+# this, and it is the shape a parallel worktree or a plain Steam launch produces.
+RUNTIME_FOREIGN_BINARY = (
+    "RUNTIME|game_code=1|attached=1|fresh=1|dll_match=0|head=1758600000|log=1758600900"
+)
+RUNTIME_NO_GAME_CODE = "RUNTIME|game_code=0|attached=0|fresh=0|dll_match=0|head=1758600000|log=0"
+
 
 @dataclass(frozen=True)
 class PolicyCase:
@@ -53,6 +72,7 @@ class PolicyCase:
     tool_input: dict[str, object] = field(default_factory=dict)
     current_branch: str = "cupcake-policies"
     origin_main_oids: str = FRESH_OIDS
+    runtime_evidence: str = RUNTIME_PROVEN
 
 
 def run_case(case: PolicyCase) -> None:
@@ -80,6 +100,7 @@ def run_case(case: PolicyCase) -> None:
         "CUPCAKE_CURRENT_BRANCH_OVERRIDE": case.current_branch,
         "CUPCAKE_WORKTREE_BRANCHES_OVERRIDE": "",
         "CUPCAKE_ORIGIN_MAIN_OIDS_OVERRIDE": case.origin_main_oids,
+        "CUPCAKE_RUNTIME_EVIDENCE_OVERRIDE": case.runtime_evidence,
     }
 
     result = subprocess.run(
@@ -214,6 +235,97 @@ def cases() -> list[PolicyCase]:
             True,
             "git push --force-with-lease origin cupcake-policies",
         ),
+        # --- git_require_runtime_test_before_push ----------------------------------------------
+        # The guard the user believed already existed: "no push until runtime tests". Four of these
+        # five cases differ ONLY in the pinned runtime signal, so a verdict here is attributable to
+        # this guard rather than to another rule catching the command first.
+        #
+        # This is also the step that would have caught the guard being inert. `opa test` proves the
+        # rule; it cannot prove cupcake compiled it to WASM, routed it through evaluate.rego and ran
+        # the signal -- and every one of those failures returns an ordinary allow.
+        PolicyCase(
+            "deny-push-of-game-code-never-run",
+            False,
+            "git push origin cupcake-policies",
+            runtime_evidence=RUNTIME_NEVER_RAN,
+            expected_text="ds2-loader: attach",
+        ),
+        PolicyCase(
+            "deny-push-of-game-code-whose-run-predates-head",
+            False,
+            "git push origin cupcake-policies",
+            runtime_evidence=RUNTIME_STALE_LOG,
+            expected_text="predates HEAD",
+        ),
+        PolicyCase(
+            "deny-push-of-game-code-run-with-a-foreign-binary",
+            False,
+            "git push origin cupcake-policies",
+            runtime_evidence=RUNTIME_FOREIGN_BINARY,
+            expected_text="not the one this checkout built",
+        ),
+        # Prefix present, not one field readable. Fail-closed means this reaches the same verdict as
+        # a missing signal, which a bare `startswith("RUNTIME|")` test did not.
+        PolicyCase(
+            "deny-push-when-runtime-signal-is-unreadable",
+            False,
+            "git push origin cupcake-policies",
+            runtime_evidence="RUNTIME|game_code=|attached=|fresh=",
+            expected_text="No runtime evidence could be read",
+        ),
+        # The carve-out that stops the guard being routed around: a policies/docs/beads-export push
+        # is not gated, asserted with the worst runtime evidence the signal can emit.
+        PolicyCase(
+            "allow-push-with-no-game-code-and-no-runtime-evidence",
+            True,
+            "git push origin cupcake-policies",
+            runtime_evidence=RUNTIME_NO_GAME_CODE,
+        ),
+        # Jurisdiction: only a push. An unrun branch must still be able to inspect and commit.
+        PolicyCase(
+            "allow-non-push-git-on-unrun-game-code",
+            True,
+            "git status --short --branch && git log --oneline -3",
+            runtime_evidence=RUNTIME_NEVER_RAN,
+        ),
+        # --- bash_no_python_file_write ---------------------------------------------------------
+        # The committed-script exemption resolves a path against the REAL repo root, which the
+        # repo_paths signal supplies from .cupcake/signals/'s own location. That makes it exactly
+        # the kind of rule `opa test` cannot vouch for: the interpreter test hands the policy a
+        # fixture root, and only this layer proves the signal is wired, executable, and read.
+        #
+        # Measured 2026-09-23, before the widening: the absolute case below was DENIED as a python
+        # file write, while the relative `allow-ds2-run-dry` above was allowed -- the same file,
+        # the same launcher, refused for the spelling the user's global AGENTS.md requires of every
+        # launch command.
+        PolicyCase(
+            "allow-ds2-run-dry-absolute",
+            True,
+            f"python3 {REPO_ROOT}/scripts/ds2-run.py --dry-run",
+        ),
+        PolicyCase(
+            "allow-ds2-run-dry-project-dir-var",
+            True,
+            "python3 $CLAUDE_PROJECT_DIR/scripts/ds2-run.py --dry-run",
+        ),
+        # One `mkdir -p` away from the tail-shaped exemption that was NOT written.
+        PolicyCase(
+            "deny-python-script-in-a-lookalike-repo-dir",
+            False,
+            "python3 /tmp/ds2-mods-rs/scripts/patch.py",
+        ),
+        # A committed script does not launder the scratch script beside it.
+        PolicyCase(
+            "deny-committed-script-beside-a-scratch-script",
+            False,
+            f"python3 {REPO_ROOT}/scripts/ds2-run.py --dry-run && python3 /tmp/patch.py",
+        ),
+        # The shape the whole guard exists to stop, unchanged by the widening.
+        PolicyCase(
+            "deny-inline-python-file-write",
+            False,
+            "python3 -c \"open('notes.md','w').write('x')\"",
+        ),
         # --- git_block_no_verify (builtin) -----------------------------------------------------
         PolicyCase("deny-commit-no-verify", False, 'git commit --no-verify -m "wip"'),
         # --- protected_paths (builtin) ---------------------------------------------------------
@@ -244,6 +356,54 @@ def cases() -> list[PolicyCase]:
             tool_input={
                 "file_path": str(REPO_ROOT / "scripts" / "example.py"),
                 "content": "print(1)\n",
+            },
+        ),
+        # --- docs_no_shouting --------------------------------------------------------------------
+        # The PreToolUse arm of the 2026-09-23 directive on capitals. These three are here rather
+        # than only in `opa test` because the policy's span stripping leans on `%`, which `opa fmt`
+        # writes for the `rem` builtin -- and a builtin the WASM runtime cannot execute returns
+        # undefined, so the rule would never fire and the engine would report a clean allow while
+        # the interpreter suite stayed green. Only this layer runs the WASM build.
+        PolicyCase(
+            "deny-shouted-doc-comment",
+            False,
+            tool_name="Edit",
+            tool_input={
+                "file_path": str(REPO_ROOT / "crates" / "ds2-loader" / "src" / "lib.rs"),
+                "old_string": "x",
+                "new_string": "//! WHAT THIS DOES NOT CLAIM, and it claims nothing.",
+            },
+            # Matched on the reason rather than the rule_id: cupcake renders a lone decision as a
+            # bare reason string with no [rule_id] prefix, so asserting the id would fail on a
+            # working guard.
+            expected_text="documentation that shouts",
+        ),
+        PolicyCase(
+            "deny-shouted-markdown",
+            False,
+            tool_name="Write",
+            tool_input={
+                "file_path": str(REPO_ROOT / "docs" / "DS2-EXAMPLE.md"),
+                "content": "NOTHING in ds2-save-file has been run.\n",
+            },
+            # Matched on the reason rather than the rule_id: cupcake renders a lone decision as a
+            # bare reason string with no [rule_id] prefix, so asserting the id would fail on a
+            # working guard.
+            expected_text="documentation that shouts",
+        ),
+        # The allow-case is the load-bearing one: a sentence made of this repo's own vocabulary --
+        # acronyms, a screaming-snake constant, a backticked Ghidra symbol, a save file and hex.
+        PolicyCase(
+            "allow-doc-comment-full-of-names",
+            True,
+            tool_name="Edit",
+            tool_input={
+                "file_path": str(REPO_ROOT / "crates" / "ds2-loader" / "src" / "lib.rs"),
+                "old_string": "x",
+                "new_string": (
+                    "//! The DLL reads SAVE_DIR_BUILD through `FUN_1402e67f0` at 0xDEADBEEF, so an"
+                    " MSVC build and a DS2 SOTFS save agree on the RVA. Config is TOML, CI is OK."
+                ),
             },
         ),
     ]

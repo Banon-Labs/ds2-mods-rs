@@ -85,6 +85,14 @@ PROBES: dict[str, str] = {
     "trim_right": 'str:trim_right("axx", "x")',
     "trim_space": 'str:trim_space("  a  ")',
     "walk": 'str:concat("", [v | walk({"o": {"k": "v"}}, [_, v]); is_string(v)])',
+    # Arithmetic, which is spelled as an operator rather than as a call -- see INFIX_BUILTINS.
+    # All five were verified against cupcake 0.5.2's WASM runtime on 2026-09-23, when
+    # docs_no_shouting needed `%` to find the pieces of a line that sit outside its code spans.
+    "plus": "str:format_int(1 + 2, 10)",
+    "minus": "str:format_int(5 - 2, 10)",
+    "mul": "str:format_int(3 * 2, 10)",
+    "div": "str:format_int(6 / 2, 10)",
+    "rem": "str:format_int(7 % 2, 10)",
     # Present only so --selftest can assert the detector still catches the original defect.
     # No policy may use it; if one does, step 3 fails and names it.
     "sprintf": 'str:sprintf("%s", ["a"])',
@@ -110,6 +118,23 @@ def opa_builtin_names() -> set[str]:
     return {b["name"] for b in json.loads(out.stdout).get("builtins", [])}
 
 
+# Arithmetic builtins are not written as calls, and for a long time this gate could not see them.
+#
+# `opa fmt` rewrites a named call to its operator -- write `rem(i, 2)` and the formatter hands back
+# `i % 2` -- so a policy reaching for arithmetic ends up with a builtin the scanner below never
+# matched, no probe recipe demanded, and no verification that the WASM runtime can execute it. The
+# whole point of this file is that an unverified builtin returns undefined and the rule silently
+# never fires, so a blind spot here is the same defect wearing the gate's own badge. Measured on
+# 2026-09-23 when docs_no_shouting needed `%`: the tree already contained `%`, `+` and `-` across
+# commands.rego and eight Stop guards, none of them probed.
+#
+# The operand requirement on both sides is what separates a binary operation from a negative
+# literal: `substring(raw, n + 1, -1)` yields `plus` and not `minus`, because the `-1` is preceded
+# by a comma rather than by a value.
+INFIX_BUILTINS = {"+": "plus", "-": "minus", "*": "mul", "/": "div", "%": "rem"}
+_INFIX_RE = re.compile(r"[\w\)\]]\s*([-+*/%])\s*[\w\(]")
+
+
 def builtins_used(names: set[str]) -> dict[str, set[str]]:
     """Map builtin -> set of files calling it. Longest-first so `json.marshal` beats `json`."""
     ordered = sorted(names, key=len, reverse=True)
@@ -122,6 +147,10 @@ def builtins_used(names: set[str]) -> dict[str, set[str]]:
             code = _STRIP.sub(" ", f.read_text(encoding="utf-8"))
             for m in pat.finditer(code):
                 used.setdefault(m.group(1), set()).add(str(f.relative_to(REPO_ROOT)))
+            for m in _INFIX_RE.finditer(code):
+                used.setdefault(INFIX_BUILTINS[m.group(1)], set()).add(
+                    str(f.relative_to(REPO_ROOT))
+                )
     return used
 
 

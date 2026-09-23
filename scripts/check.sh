@@ -165,6 +165,12 @@ else
   # cells are progress words, and which prompts asked for a grid. Every false positive this guard
   # can have is a decision made in that module, and `opa test` above only pins hits -> halt.
   python3 scripts/test-status-table-signal.py
+  # And the same half for the shouting guard, which has one extra way to go wrong: the offence is
+  # defined twice, in Rego for the edit about to hit disk and in Python for the prose about to end
+  # a turn. Two definitions that drift apart are worse than one, because the disagreement is
+  # invisible until somebody is refused by one arm and waved through by the other, so this compares
+  # the patterns across all three files byte for byte as well as pinning the classification.
+  python3 scripts/test-shouting-signal.py
   # The hook shim is the fourth place this layer can be silently dead, and the one no `.rego` file
   # can reach. scripts/cupcake-hook.sh sits between Claude Code and the engine and repairs three
   # things the engine gets wrong before any policy runs: a permission mode cupcake does not know
