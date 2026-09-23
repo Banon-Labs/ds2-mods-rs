@@ -27,6 +27,15 @@ logged `refused api=getaddrinfo host=frpg2-steam64-ope-login.fromsoftware-game.n
 with `--no-offline` and understand what you are turning off. See
 [`docs/DS2-OFFLINE.md`](docs/DS2-OFFLINE.md).
 
+**Four rows for two slots on the pause menu.** `quit-to-desktop`, `load-build-from-url`,
+`load-character-from-file` and `save-game-to-file` all register through
+[`ds2-menu-row`](crates/ds2-menu-row/src/lib.rs)'s public API, and `[menu_row] rows = [...]` picks
+which get a slot -- two, because the tab's item vector is a `DLFixedVector` of capacity five and the
+game ships three rows on it. A third is refused at registration with the numbers, not by the game's
+own `panic("out of memory.")` during a menu open. **The two save-file rows have not been run**; the
+static reading behind them, and the reason loading a save from a file takes effect on the next launch
+rather than this one, are in [`docs/DS2-SAVE-FILE-ROWS.md`](docs/DS2-SAVE-FILE-ROWS.md).
+
 ## Three facts that shape everything here
 
 1. **me3 cannot load DS2.** `me3 profile create --game` accepts `darksouls3, sekiro, eldenring,
