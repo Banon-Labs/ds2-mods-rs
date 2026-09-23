@@ -107,6 +107,17 @@ const STROKE_PX = 7;
 const ARROW_COLOUR = [1.0, 0.45, 0.05, 1.0];
 const BASE_COLOUR = [0.15, 0.9, 1.0, 1.0];
 
+/// A second arrow at a world-space vertical eight metres above the character's feet.
+///
+/// It exists to be WRONG LOUDLY. The bearing arrow needs you to walk somewhere and remember where
+/// you were; this one needs nothing, is drawable on the first frame, and has exactly one correct
+/// answer from every camera angle in the game: UP THE SCREEN. A projection that is mirrored,
+/// transposed, scaled by the aspect ratio or fed the wrong columns tips this arrow off vertical
+/// immediately and visibly, which is the failure that a log full of plausible numbers hides.
+const PLUMB_METRES = 8.0;
+const PLUMB_LENGTH_PX = 120;
+const PLUMB_COLOUR = [0.25, 1.0, 0.35, 1.0];
+
 const gameModule = Process.findModuleByName('DarkSoulsII.exe');
 const base = gameModule === null ? null : gameModule.base;
 
@@ -143,6 +154,10 @@ let throttled = 0;
 let unreadable = 0;
 let believed = null;
 let breadcrumb = null;
+/// Set once the arithmetic proof below has run against a real swap chain, so it prints one time.
+let proved = false;
+/// World up, NAMED FROM THE MATRIX rather than assumed to be +Y. Filled by `proof`.
+let upAxis = [0, 1, 0];
 
 let clearView = null;
 let createRenderTargetView = null;
@@ -337,14 +352,25 @@ function score(m, player, explain) {
     if (explain) lastReason = 'character off screen at ' + ndcX.toFixed(3) + ',' + ndcY.toFixed(3);
     return null;
   }
+  // A metre in world space has to be a sane number of pixels. THE FLOOR IS ACROSS THE THREE AXES,
+  // NOT ON EACH: a metre along whichever world axis the camera happens to be looking down moves
+  // the screen by exactly nothing, because that is what looking down an axis means. Requiring
+  // every axis to move the image rejected a correct camera on every frame the player faced north,
+  // and the failure is invisible from the log, which just stops finding anything for a while.
+  let biggest = 0;
   for (const axis of [[1, 0, 0], [0, 1, 0], [0, 0, 1]]) {
     const near = toClip(m, [player[0] + axis[0], player[1] + axis[1], player[2] + axis[2]]);
     if (!(near[3] > 0.05)) { if (explain) lastReason = 'a metre away lands behind the camera'; return null; }
     const shift = Math.hypot(near[0] / near[3] - ndcX, near[1] / near[3] - ndcY);
-    if (!(Number.isFinite(shift) && shift > 0.005 && shift < 2.0)) {
+    if (!(Number.isFinite(shift) && shift < 2.0)) {
       if (explain) lastReason = 'a metre moves the screen by ' + shift.toFixed(4);
       return null;
     }
+    if (shift > biggest) biggest = shift;
+  }
+  if (!(biggest > 0.005)) {
+    if (explain) lastReason = 'a metre moves the screen by ' + biggest.toFixed(4) + ' at most';
+    return null;
   }
   lastReason = '';
   return { ndcX, ndcY, w: clip[3], forward };
@@ -618,6 +644,124 @@ function paint(state, colour, count) {
   state.clear(state.context, state.view, state.colour, state.rects, count);
 }
 
+/// Unit screen direction, IN PIXELS, from the character to a world point. Null if the two land on
+/// the same pixel, which is the arrow having nothing to say rather than an error.
+function bearing(state, m, here, target) {
+  const there = toClip(m, target);
+  // Cross-multiplied, so `there[3]` is never divided by: these numerators are the NDC difference
+  // times the common factor `there[3] * here[3]`, which normalising cancels.
+  //
+  // AND THAT ALREADY HANDLES A TARGET BEHIND THE CAMERA -- do not "fix" it again. Behind the lens
+  // the projection is the reflection, so the honest NDC difference points at the mirror image,
+  // the wrong way round. But `there[3]` is negative there, and it is sitting in the common factor
+  // these numerators carry, so the numerators come out flipped relative to that NDC difference:
+  // pointing away from the mirror, which is the correct arrow, with no special case at all. An
+  // explicit `if (there[3] < 0) negate` on top of this flips it a second time and sends the arrow
+  // confidently at the reflection -- caught by the selftest, never by looking at it.
+  const dx = there[0] * here[3] - here[0] * there[3];
+  const dy = there[1] * here[3] - here[1] * there[3];
+  // NDC IS NOT PIXELS, AND THIS IS WHERE THE LAST ARROW WAS WRONG. One NDC unit is `width / 2`
+  // pixels across but only `height / 2` pixels down, so taking the angle before that scaling
+  // shears every bearing by the aspect ratio: a true 45 degrees comes out at 60.7 on this 16:9
+  // screen, and 15.7 degrees of error is exactly the kind that looks plausible in a log and
+  // points at the wrong door in the game. Scale first, then take the angle.
+  const px = dx * state.width;
+  const py = -dy * state.height;
+  const length = Math.hypot(px, py);
+  return length > 1e-9 ? [px / length, py / length] : null;
+}
+
+/** Shaft plus two barbs, appended into the shared rect buffer. */
+function arrow(state, count, baseX, baseY, unit, lengthPx) {
+  const tip = [baseX + unit[0] * lengthPx, baseY + unit[1] * lengthPx];
+  const heading = Math.atan2(unit[1], unit[0]);
+  const barb = lengthPx * (ARROW_BARB_PX / ARROW_LENGTH_PX);
+  count = lay(state, count, [baseX, baseY], tip, 512);
+  for (const sign of [-1, 1]) {
+    const angle = heading + Math.PI + sign * ARROW_BARB_RADIANS;
+    count = lay(state, count, tip,
+      [tip[0] + Math.cos(angle) * barb, tip[1] + Math.sin(angle) * barb], 512);
+  }
+  return count;
+}
+
+/// Four exact predictions about a view-projection, measured on the live matrix and printed once.
+///
+/// For a row-vector `VP = V * P` with rotation `R` and a diagonal projection, the four world
+/// columns are `c0 = sx*right`, `c1 = sy*up`, `c2 = A*forward` and `c3 = forward`. Stepping a
+/// world point one metre along each of those axes therefore has an answer that is arithmetic, not
+/// opinion, and every one of them is a different way for a wrong matrix to fail:
+///
+///   * along `c3`: clip.x and clip.y DO NOT MOVE and clip.w rises by exactly one. Walking away
+///     from the camera slides a target toward the vanishing point and nowhere else, and `w` is
+///     metres. A transposed or column-major read fails this immediately.
+///   * along `c0`: clip.x rises by exactly `|c0|`, with clip.y and clip.w untouched. Camera-right
+///     is purely horizontal on screen.
+///   * along `c1`: clip.y rises by exactly `|c1|`, with clip.x and clip.w untouched.
+///   * `|c1| / |c0|` is the aspect ratio, which must match the swap chain the game is actually
+///     presenting to -- the one number here that is checked against something outside the matrix.
+function proof(state, m, player, here) {
+  proved = true;
+  const length3 = (a, b, c) => Math.sqrt(a * a + b * b + c * c);
+  const sx = length3(m[0], m[4], m[8]);
+  const sy = length3(m[1], m[5], m[9]);
+  const sf = length3(m[3], m[7], m[11]);
+  const axes = {
+    'c3 forward': [m[3] / sf, m[7] / sf, m[11] / sf],
+    'c0 right  ': [m[0] / sx, m[4] / sx, m[8] / sx],
+    'c1 up     ': [m[1] / sy, m[5] / sy, m[9] / sy],
+  };
+  const want = { 'c3 forward': [0, 0, 1], 'c0 right  ': [sx, 0, 0], 'c1 up     ': [0, sy, 0] };
+
+  // The camera does not roll, so the largest component of its up axis names the world's up axis
+  // and its sign says which way that axis points. Derived and printed, never assumed to be +Y.
+  const up = axes['c1 up     '];
+  let biggest = 0;
+  for (let index = 1; index < 3; index += 1) {
+    if (Math.abs(up[index]) > Math.abs(up[biggest])) biggest = index;
+  }
+  upAxis = [0, 0, 0];
+  upAxis[biggest] = up[biggest] > 0 ? 1 : -1;
+
+  const lines = [];
+  let failures = 0;
+  for (const name of Object.keys(axes)) {
+    const axis = axes[name];
+    const moved = toClip(m, [player[0] + axis[0], player[1] + axis[1], player[2] + axis[2]]);
+    const got = [moved[0] - here[0], moved[1] - here[1], moved[3] - here[3]];
+    const expected = want[name];
+    const scale = Math.max(1, sx, sy);
+    const ok = got.every((value, index) => Math.abs(value - expected[index]) < 2e-3 * scale);
+    if (!ok) failures += 1;
+    lines.push('[arrow]   step 1 m along ' + name + ' -> d(clip.x, clip.y, clip.w) = (' +
+      got.map((v) => v.toFixed(5).padStart(10)).join(', ') + ')  want (' +
+      expected.map((v) => v.toFixed(5).padStart(10)).join(', ') + ')  ' + (ok ? 'PASS' : 'FAIL'));
+  }
+
+  const fromMatrix = sy / sx;
+  const fromScreen = state.width / state.height;
+  const drift = Math.abs(fromMatrix - fromScreen) / fromScreen;
+  const aspectOk = drift < 0.01;
+  if (!aspectOk) failures += 1;
+
+  console.log(
+    '\n[arrow] ===== POINTING PROOF =====\n' +
+    lines.join('\n') + '\n' +
+    '[arrow]   aspect |c1|/|c0| = ' + fromMatrix.toFixed(4) + ', swap chain ' + state.width + 'x' +
+    state.height + ' = ' + fromScreen.toFixed(4) + ' (' + (drift * 100).toFixed(2) + '% apart)  ' +
+    (aspectOk ? 'PASS' : 'FAIL') + '\n' +
+    '[arrow]   camera is ' + here[3].toFixed(2) + ' m from the character; world up is ' +
+    (upAxis[0] !== 0 ? 'X' : upAxis[1] !== 0 ? 'Y' : 'Z') +
+    (upAxis[biggest] > 0 ? '+' : '-') + ' (camera up ' +
+    up.map((v) => v.toFixed(3)).join(', ') + ')\n' +
+    '[arrow] ' + (failures === 0
+      ? 'ARITHMETIC IS CLEAN. The GREEN arrow is a world-space vertical and must point UP THE\n' +
+        '[arrow] SCREEN from every camera angle; the CYAN dot is the character\'s projected position\n' +
+        '[arrow] and must sit on the character. Those two are the part only your eyes can check.'
+      : failures + ' TESTS FAILED -- the arrow below is pointing somewhere, but not where it claims.')
+  );
+}
+
 function draw(state) {
   const player = playerPosition();
   if (player === null || believed === null) return;
@@ -635,29 +779,21 @@ function draw(state) {
   // makes that visible instead of hiding it.
   const baseX = (here[0] / here[3] * 0.5 + 0.5) * state.width;
   const baseY = (0.5 - here[1] / here[3] * 0.5) * state.height;
+  if (!proved) proof(state, m, player, here);
 
-  // The bearing comes out of clip space, so it carries the engine's handedness instead of an
-  // assumption about it. A target behind the camera has negative w; negating both components
-  // turns the vector round rather than letting it point at the reflection.
-  const there = toClip(m, breadcrumb);
-  let dx = there[0] * here[3] - here[0] * there[3];
-  let dy = there[1] * here[3] - here[1] * there[3];
-  if (there[3] < 0) { dx = -dx; dy = -dy; }
-  const length = Math.hypot(dx, dy);
-  if (!(length > 1e-9)) return;
-  const unitX = dx / length;
-  const unitY = -dy / length;
-
-  const tip = [baseX + unitX * ARROW_LENGTH_PX, baseY + unitY * ARROW_LENGTH_PX];
-  const heading = Math.atan2(unitY, unitX);
-  const barbs = [heading + Math.PI - ARROW_BARB_RADIANS, heading + Math.PI + ARROW_BARB_RADIANS];
-
-  let count = lay(state, 0, [baseX, baseY], tip, 512);
-  for (const angle of barbs) {
-    count = lay(state, count, tip,
-      [tip[0] + Math.cos(angle) * ARROW_BARB_PX, tip[1] + Math.sin(angle) * ARROW_BARB_PX], 512);
+  const plumb = bearing(state, m, here, [
+    player[0] + upAxis[0] * PLUMB_METRES,
+    player[1] + upAxis[1] * PLUMB_METRES,
+    player[2] + upAxis[2] * PLUMB_METRES,
+  ]);
+  if (plumb !== null) {
+    paint(state, PLUMB_COLOUR, arrow(state, 0, baseX, baseY, plumb, PLUMB_LENGTH_PX));
   }
-  paint(state, ARROW_COLOUR, count);
+
+  const unit = bearing(state, m, here, breadcrumb);
+  if (unit !== null) {
+    paint(state, ARROW_COLOUR, arrow(state, 0, baseX, baseY, unit, ARROW_LENGTH_PX));
+  }
   paint(state, BASE_COLOUR, lay(state, 0, [baseX, baseY], [baseX, baseY], 4));
   counters.drawn += 1;
 }
