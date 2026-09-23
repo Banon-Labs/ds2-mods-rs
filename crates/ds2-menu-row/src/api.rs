@@ -37,7 +37,7 @@
 //! [`add_row`] refuses past the ceiling at REGISTRATION -- before anything is hooked, with the
 //! numbers in the error -- because the alternative is finding out during a menu open.
 //!
-//! **What is NOT measured is where the rows stop being visible.** Fifteen is the engine's answer;
+//! **Nobody has measured where the rows stop being visible.** Fifteen is the engine's answer;
 //! the pause menu's banner is lengthened per row ([`ds2_rva::FE_BANNER_QUAD_SHIPPED_Y1`]) and the
 //! panel it sits on is a fixed graphic, so a tab carrying twelve added rows runs `576` layout units
 //! below where the shipped three end. Nobody has looked at that. The ceiling is a refusal bound, not
@@ -88,7 +88,7 @@ impl Tab {
         ds2_rva::FEX_GRID_MAX_ROWS - self.shipped_rows()
     }
 
-    /// Rows the game's OWN item vector can still take on this tab, before ours is needed.
+    /// Rows the game's own item vector can still take on this tab, before ours is needed.
     ///
     /// Not a ceiling -- a split. Rows below it are appended to the vector exactly as they were
     /// before [`ds2_rva::FE_INGAME_MENU_TAB_ITEM_LOOKUP`] was detoured, which is what makes a failed
@@ -97,7 +97,7 @@ impl Tab {
         ds2_rva::FE_INGAME_MENU_ITEM_VECTOR_CAPACITY - self.shipped_rows()
     }
 
-    /// Cells the game's OWN namer list can still take on this tab. The same split, one layer down.
+    /// Cells the game's own namer list can still take on this tab. The same split, one layer down.
     pub const fn namer_slots(self) -> usize {
         ds2_rva::FE_SCENE_NAMER_LIST_CAPACITY - self.shipped_rows()
     }

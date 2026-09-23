@@ -294,7 +294,7 @@ mod tests {
         }
     }
 
-    /// ALL FOUR ROWS FIT. This test used to assert the opposite -- that naming four rows kept two
+    /// All four rows fit. This test used to assert the opposite -- that naming four rows kept two
     /// and refused two -- and the whole point of raising the ceiling was to stop that being true.
     #[test]
     fn every_row_this_table_knows_fits_at_once() {
@@ -316,8 +316,8 @@ mod tests {
         assert!(!line.contains("REFUSED-OVER-CEILING"), "{line}");
     }
 
-    /// THE CEILING IS STILL THE GAME'S, and the refusal is still here -- it is simply out of reach
-    /// while there are fewer names in this table than there are slots on the tab. That inequality is
+    /// The ceiling is still the game's and the refusal is still here -- it is out of reach for now,
+    /// because this table has fewer names than the tab has slots. That inequality is
     /// the thing worth pinning: the day it stops holding, the test above starts failing and whoever
     /// added the row finds out here rather than in a pause menu.
     #[test]

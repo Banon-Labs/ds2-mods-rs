@@ -2844,7 +2844,7 @@ pub const FEX_GRID_SET_ITEM_COUNT: u32 = 0x0002_1b30;
 /// call 0x140026790                ; (proxy, out, entry)
 /// ```
 ///
-/// Three fields is what makes a STAND-IN possible: a buffer carrying a scene proxy at
+/// Three fields is what makes a stand-in possible: a buffer carrying a scene proxy at
 /// [`FE_SCENE_NAMER_PROXY_OFFSET`], one entry at [`FE_SCENE_NAMER_LIST_OFFSET`] and a count of `1`
 /// at `0x140` is indistinguishable from a namer here. Passing that, plus a cell of `(0, 0)`, makes
 /// the game's own code build the accessor for an entry of ours -- with nothing reimplemented, and
@@ -2871,7 +2871,7 @@ pub const FE_SCENE_NAMER_PROXY_OFFSET: usize = 0x10;
 /// cell that is not there, and its slot 0 resolves to null -- which is how the grid's layout bind
 /// learns a row has ended.
 ///
-/// Recorded because it is the ONLY correct answer a detour on that lookup can give when it cannot
+/// Recorded because it is the one correct answer a detour on that lookup can give when it cannot
 /// reach the original: handing back an untouched output buffer would leave the caller to call a
 /// vtable slot on uninitialised stack.
 pub const FE_SCENE_ACCESSOR_MAKE_EMPTY: u32 = 0x0002_7980;
@@ -3856,7 +3856,7 @@ pub const FLO_PANEL_CHILDREN: usize = 2;
 /// index seen is `0x0272` -- so a lookup for it can only come from the record this crate wrote.
 pub const FLO_ADDED_PANEL_DEFINITION: u32 = 0xf221;
 
-/// Where the caret goes: down by ONE ROW PITCH PER ADDED ROW, from the shipped `244.65`.
+/// Where the caret goes: down from the shipped `244.65` by one row pitch per added row.
 ///
 /// **It used to be the constant `292.65` -- `244.65 + 48.00` -- and one row's worth of movement was
 /// wrong the moment a second row could be registered.** The caret sits just below the last row, so

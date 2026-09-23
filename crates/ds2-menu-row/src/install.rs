@@ -437,7 +437,7 @@ static REFUSED_ENTRY: [AtomicU32; 2] = [
 #[repr(C, align(16))]
 struct ShadowNamer([u8; ds2_rva::FE_SCENE_NAMER_SHADOW_SIZE]);
 
-/// One stand-in per slot, allocated ONCE and refreshed per menu open.
+/// One stand-in per slot, allocated a single time and refreshed on every menu open.
 ///
 /// Per slot rather than one shared list, because the lookup's own stride would put entry 6 on top
 /// of the count field at `+0x140` -- the same collision that caps the game's list at six. A
@@ -1544,7 +1544,7 @@ mod tests {
         assert_eq!(GATE, ds2_rva::FE_INGAME_MENU_GATE_ALWAYS);
     }
 
-    /// The shipped tab must have room in the game's OWN vector, or the split below never has a
+    /// The shipped tab must have room in the game's own vector, or the split below never has a
     /// first half and the append is dead code on every run.
     #[test]
     fn the_tab_has_room_for_one_more() {

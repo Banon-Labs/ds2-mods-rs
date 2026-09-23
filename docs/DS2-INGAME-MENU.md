@@ -1042,7 +1042,7 @@ run the availability pass. The bind's extent now counts the stand-in cells, but 
 handed is the vector's, which stops at five. So the init is detoured and the count re-set afterwards.
 
 The availability pass is the reason that is safe rather than merely convenient. It loops over the
-VIRTUAL count but reads each entry with its OWN inlined copy of the vector's bounds check, falling
+virtual count but reads each entry with its own inlined copy of the vector's bounds check, falling
 back to the same static `(0xffffffff, 0)` -- and its first act per entry is `if (gate == 0) skip`. So
 above the vector's count it reads the static, sees gate zero, and does nothing. It never touches
 uninitialised storage. Raising the vector's own count field instead of the virtual one would have
@@ -1053,11 +1053,11 @@ handed that pass an unwritten gate and a gate index the predicate switches on.
 A namer list entry is a `DLKR::DLFixedVector<u32, 8>`, not an opaque struct with slack. The copy the
 push uses, `FUN_1400189f0`, refuses a source count above 8, copies that many `u32`s at stride 4, and
 writes the count at `+0x28` -- which is the field recorded above as "the path length". It is the
-length AND it is a vector's count, and the "uninitialised slack" between the last id and it is the
+length, and it is also a vector's count; the "uninitialised slack" between the last id and it is the
 unused tail of a fixed-capacity array. Nothing that was built on the old reading is wrong -- a clone
 still has to go through that copy rather than be assembled -- but the reason is now the right one.
 
-### What is NOT measured
+### What is not measured
 
 **Where the rows stop being visible.** Fifteen is what the engine will bind. The banner's quad is
 lengthened by one row pitch per row and the caret follows it, but the panel is a fixed graphic on a

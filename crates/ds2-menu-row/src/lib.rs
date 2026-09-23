@@ -34,7 +34,7 @@
 //! |---|---|---|
 //! | `FeGroupInGameTopSelect`'s quit-tab item builder | `0x000a5900` | appends the items that FIT in the game's vector |
 //! | the tab's item dispatch | `0x000a6090` | turns the item into an action |
-//! | the tab's item lookup | `0x000a6750` | answers for the items that do NOT fit |
+//! | the tab's item lookup | `0x000a6750` | answers for the items that do not fit |
 //! | the per-tab init | `0x000a4d20` | raises the cursor bound to match |
 //! | the quit tab's cell namer | `0x000a5b50` | names the cells that fit, and builds stand-ins for the rest |
 //! | the namer's cell lookup | `0x000a4b20` | answers with a stand-in for the cells that do not fit |
