@@ -39,9 +39,48 @@
 //! Neither ordering escapes it, because both halves belong to the game. So the swap lands on a
 //! process that has not played anything yet.
 //!
-//! Removing the restart entirely is filed (`ds2-mods-rs-0r3`) and is a bounded static job:
-//! `FUN_1402e67f0` calls `SAVE_DIR_BUILD` per request, so if its states can be split into saves and
-//! loads the detour can answer the game's own folder for one and the staged copy for the other.
+//! # Removing the restart: where the save/load split actually is
+//!
+//! **Not where this comment used to say it was.** It claimed `FUN_1402e67f0` calls `SAVE_DIR_BUILD`
+//! per request, so splitting its states would let a detour answer the game's own folder for a save
+//! and the staged copy for a load. Read out of the binary, that is false twice over.
+//!
+//! The `{1,3,5,6}` states that plan wanted to split are the outer guard, not a discriminator:
+//! `6 < state || (0x6a >> (state & 31) & 1) == 0` is an early-out, and every state that survives it
+//! lands in the same switch. And `SAVE_DIR_BUILD` is reached from exactly one arm of that switch --
+//! session type `0x18`, which builds the directory string once and hands it to the request manager
+//! through `FUN_140a899f0`. That arm is session setup. A detour there is asked for a folder before
+//! anything has said whether this session will save or load, so there is nothing to split.
+//!
+//! The bit that plan was looking for is one call away. The switch dispatches on
+//! `FUN_140a89940_getSLSessionType__`, and two groups of session types call
+//! `FUN_140a899a0(SLRequestMan, flag)` with a flag that is `1` for `{4..0xa, 0xd}` and `0` for
+//! `{0xb, 0xc, 0xe..0x13}`. The game's own decompiled comment on this function records the offline
+//! sequence from a first load as `0xb, 0x18, 0x14...`, which puts that first load in the `0` group,
+//! so `0` is load and `1` is save.
+//!
+//! # And the directory and that flag live on the same object
+//!
+//! Which is what makes the split possible at all. Both routes resolve a request with
+//! `FUN_140a8bfb0(manager, id)` -- a keyed lookup over the manager's container, so requests are
+//! addressable objects rather than one singleton -- and then write into it:
+//!
+//! ```text
+//! FUN_140a899f0(pair, flag, path) -> request+0x3c = flag, request+0x48 = path (UTF-16)
+//! FUN_140a899a0(pair, flag)       -> request+0x3c = flag
+//! ```
+//!
+//! So the `0x18` arm's directory and the `4..0x13` arms' mode end up on one request. A detour on the
+//! path WRITE still cannot tell save from load, because that request's mode may not be written yet.
+//! A detour on the path READ can: it holds the request pointer, so the mode at `+0x3c` and the
+//! directory at `+0x48` are both in hand at the same instant. Answer the game's own folder for a
+//! save and the staged copy for a load, and this row's handoff file and its restart both go away.
+//!
+//! What is still unread is the consumer of `request+0x48` -- the code that turns that string into
+//! the container it opens. That is the detour site, and finding it is another static read rather
+//! than a game launch. Until it is found, the sequence above is what this row honestly does. Both
+//! write routes also branch on `mode != 3` before storing, setting `request+0x98 = 0x16`, so `3` is
+//! a distinguished mode worth naming before anything is hooked.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;

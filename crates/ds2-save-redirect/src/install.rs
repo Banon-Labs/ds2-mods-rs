@@ -24,7 +24,7 @@ pub fn set_logger(logger: LogFn) {
     ds2_hook::set_hook_logger(logger);
 }
 
-fn log(args: std::fmt::Arguments<'_>) {
+pub(crate) fn log(args: std::fmt::Arguments<'_>) {
     let raw = LOGGER.load(Ordering::Acquire);
     if raw != 0 {
         // SAFETY: `raw` is only ever a `LogFn` stored by `set_logger`.

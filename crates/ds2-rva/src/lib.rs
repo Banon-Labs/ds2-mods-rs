@@ -5316,3 +5316,52 @@ pub const FE_EQUIP_GROUP_UPDATE_PROLOGUE: [u8; 5] = [0x48, 0x89, 0x5c, 0x24, 0x2
 /// `0x1400bbec6` and the picker's reads `[r8+4]` at `0x140092f2a`, so a two-argument detour would
 /// hand them whatever `R8` happened to hold after the detour's own prologue.
 pub const FE_ITEM_LIST_UPDATE_ARGUMENT_COUNT: usize = 4;
+
+// THE SAVE/LOAD DIRECTORY SPLIT
+//
+// A session asks for its container directory through a virtual, and the save class and the load
+// class have their own overrides. Both are three lines with the same shape -- fetch a wide string,
+// measure it, hand it to the session's string setter -- and differ only in the object they read it
+// from. So nothing at runtime has to be decoded to tell a save from a load: the class that is
+// asking is the answer, and the two answers live at two addresses.
+//
+// This replaced a plan aimed at `SAVE_DIR_BUILD`, which cannot work: that function is reached from
+// one arm of `FUN_1402e67f0`'s switch, session type `0x18`, which builds the directory once during
+// session setup -- before anything has said whether the session will save or load.
+
+/// `SaveLoad2::SLLoadSession`'s directory override. **The load side of the split.**
+///
+/// Reads its string from `this+0xe8` through `FUN_140a8a180`, then calls the session string setter
+/// at `0x140a89050`. Its save-side twin is [`SL_SAVE_SESSION_DIRECTORY`].
+pub const SL_LOAD_SESSION_DIRECTORY: u32 = 0x00a8_f8d0;
+
+/// `SaveLoad2::SLSaveSession`'s directory override. **The save side**, recorded so a reader can see
+/// the pair and check that the two really are distinct functions rather than one shared one.
+///
+/// Reads its string from `this[0x1d]` through `FUN_140a89cf0`. Nothing here hooks it: a save must
+/// keep writing the player's own folder, and leaving it alone is how that is guaranteed.
+pub const SL_SAVE_SESSION_DIRECTORY: u32 = 0x00a8_ec40;
+
+/// `SaveLoad2::SLLoadSession`'s vtable.
+///
+/// Written by the class's two constructors, `FUN_140a8f6b0` and `FUN_140a8f7d0`, each storing it
+/// twice in the usual ctor/dtor pattern.
+pub const SL_LOAD_SESSION_VTABLE: u32 = 0x011b_64e0;
+
+/// Where [`SL_LOAD_SESSION_DIRECTORY`] sits in [`SL_LOAD_SESSION_VTABLE`]: slot 3, `+0x18`.
+///
+/// **This is why the load redirect needs no code patch.** The override has no call sites at all --
+/// its only references are this slot and an RTTI entry -- so it is reached exclusively through the
+/// vtable, and arming the redirect is a pointer write into `.rdata`. The instruction stream is
+/// untouched, which takes Arxan out of the question for this site the way a `.flo` table
+/// substitution does for `ds2-menu-row`.
+pub const SL_LOAD_SESSION_DIRECTORY_VTABLE_SLOT: usize = 3;
+
+/// The session string setter both directory overrides finish with: an MSVC
+/// `basic_string<wchar_t>::assign(const wchar_t *, size_t)` on the session's own storage.
+///
+/// `fn(session: *mut SLSession, chars: *const u16, len: usize)`. Its small-string-optimisation
+/// layout is the usual one -- inline buffer until the capacity at `+0x18` exceeds seven, pointer
+/// after that -- and calling it is how a replacement override hands back a path without touching
+/// the game's allocator by hand, the same reasoning as [`WSTRING_ASSIGN`].
+pub const SL_SESSION_STRING_SET: u32 = 0x00a8_9050;
