@@ -82,7 +82,19 @@ const CAMERA_MAX_METERS = 30.0;
 /// centred in DARK SOULS II and the offset grows while moving, so a tight bound here rejects the
 /// real camera on ordinary frames. On screen at all is the honest requirement; persistence does
 /// the discriminating.
-const NDC_LIMIT = 0.9;
+///
+/// 1.5, AND THE MEASUREMENT THAT SET IT. At 0.9 the heartbeat reported, window after window,
+/// `furthest off screen: ndc -0.000,-0.976` -- a matrix that had passed every shape test AND the
+/// camera-distance test, putting the character DEAD CENTRE horizontally and a hair below the
+/// bottom edge. That is not a coincidence a random buffer produces: `x = -0.000` is the camera
+/// looking straight at the character, and `y = -0.976` is the character's ORIGIN, which is
+/// between their feet, sitting just under the frame while their body fills it. The bound was
+/// rejecting the answer for being correct about where feet are.
+///
+/// It still has work to do -- an `ndc` of 12 or 300 is a matrix that is not looking at this
+/// character at all -- but "on screen" was never the right shape for this test, and persistence
+/// does the discriminating anyway.
+const NDC_LIMIT = 1.5;
 /// Sampled looks, not frames: at `GATE_WHILE_FOLLOWING` the camera's own buffer comes round about
 /// seven times a second, so this is roughly eight seconds of unbroken agreement.
 const PASSES_TO_BELIEVE = 60;
@@ -175,7 +187,14 @@ const examined = new Map();
 ///
 /// Coarse while hunting, because a miss only delays discovery; fine once something is being
 /// followed, because a miss there is a frame of evidence lost.
-const GATE_WHILE_HUNTING = 4096;
+///
+/// 4096 WAS TOO COARSE ONCE `examined` STARTED CLEARING. At a quarter of a million uploads per
+/// window that gate admits sixty calls, so sixty looks had to cover every buffer in the game and
+/// the heartbeat sat at `20 resources seen, 66 scans` while `SCANS_PER_WINDOW` -- the budget that
+/// is supposed to do the throttling -- was never within three hundred of being spent. The old
+/// value was tuned when `examined` was permanent and the first few windows were all that
+/// mattered; with the budget doing its job the gate only has to keep the rejected path cheap.
+const GATE_WHILE_HUNTING = 64;
 const GATE_WHILE_FOLLOWING = 8;
 let gate = GATE_WHILE_HUNTING;
 let scansThisWindow = 0;
@@ -314,6 +333,17 @@ const FAIL_NAMES = [
 ];
 const failCounts = new Array(FAIL_NAMES.length).fill(0);
 
+/// The values the last two tests actually saw, so a bound is widened on evidence or not at all.
+///
+/// `camera distance out of range 14` says a matrix that passed every shape test was thrown out,
+/// and nothing about whether it missed by a centimetre or by a kilometre. Those two want
+/// opposite responses: one is a bound set a shade too tight, the other is a matrix that is not a
+/// camera. Four numbers, written on the rejection path, answer it without a string.
+let distanceMin = Infinity;
+let distanceMax = -Infinity;
+let offScreenX = 0;
+let offScreenY = 0;
+
 /// `explain` builds the rejection message; DISCOVERY MUST PASS FALSE.
 ///
 /// `score` runs about ninety thousand times per five-second window during a scan, and every
@@ -422,6 +452,8 @@ function score(m, player, explain) {
   const clipW = player[0] * m[3] + player[1] * m[7] + player[2] * m[11] + m[15];
   if (!(clipW > CAMERA_MIN_METERS && clipW < CAMERA_MAX_METERS)) {
     failCounts[9] += 1;
+    if (clipW < distanceMin) distanceMin = clipW;
+    if (clipW > distanceMax) distanceMax = clipW;
     if (explain) lastReason = 'camera distance ' + clipW.toFixed(2) + ' m';
     return null;
   }
@@ -432,6 +464,8 @@ function score(m, player, explain) {
   if (!Number.isFinite(ndcX) || !Number.isFinite(ndcY)) { failCounts[10] += 1; if (explain) lastReason = 'ndc not finite'; return null; }
   if (Math.abs(ndcX) > NDC_LIMIT || Math.abs(ndcY) > NDC_LIMIT) {
     failCounts[11] += 1;
+    offScreenX = ndcX;
+    offScreenY = ndcY;
     if (explain) lastReason = 'character off screen at ' + ndcX.toFixed(3) + ',' + ndcY.toFixed(3);
     return null;
   }
@@ -1078,6 +1112,19 @@ setInterval(function () {
     failCounts[code] = 0;
   }
   if (blame.length > 0) line += '\n      rejected by: ' + blame.join(', ');
+  if (Number.isFinite(distanceMin)) {
+    line += '\n      camera distance saw ' + distanceMin.toFixed(2) + ' m to ' +
+      distanceMax.toFixed(2) + ' m against the band ' + CAMERA_MIN_METERS + '..' +
+      CAMERA_MAX_METERS + ' m';
+  }
+  if (offScreenX !== 0 || offScreenY !== 0) {
+    line += '\n      furthest off screen: ndc ' + offScreenX.toFixed(3) + ',' +
+      offScreenY.toFixed(3) + ' against the limit ' + NDC_LIMIT;
+  }
+  distanceMin = Infinity;
+  distanceMax = -Infinity;
+  offScreenX = 0;
+  offScreenY = 0;
   // FORGET WHAT WAS LOOKED AT, SO DISCOVERY NEVER RETIRES. `examined` counts each resource's
   // twenty looks and was never cleared, so after about eight hundred looks -- a few seconds --
   // every buffer in the game was permanently written off and `shouldDiscover` refused
