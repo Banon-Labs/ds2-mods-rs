@@ -2293,6 +2293,98 @@ def duplicate_save_for_seamless(seamless_dll: str) -> None:
         )
 
 
+#: The Hyprland monitor DARK SOULS II must open on, by DRM connector name.
+#:
+#: Without a rule the window lands wherever Hyprland's focus happens to be when Steam gets round to
+#: mapping it, which is whichever monitor was last clicked -- so the game turns up on a different
+#: screen between runs and the one being watched is not always the one it appears on.
+#:
+#: `DP-1`, not `DP-0`: Hyprland takes its names from DRM connectors, which start at one
+#: (`/sys/class/drm` lists `card1-DP-1`, `card1-DP-2`, `card1-DP-3` here). NVIDIA's own tooling
+#: numbers the same physical ports from zero, which is where `DP-0` comes from, but this machine is
+#: a Radeon RX 6900 XT and has no connector by that name. Requested by the user 2026-09-22.
+GAME_MONITOR = "DP-1"
+
+
+#: Hyprland's window selector for the game, by the class Proton actually gives it. Confirmed live
+#: rather than assumed: `hyprctl clients` reports `steam_app_335300` for the running game.
+GAME_WINDOW_MATCH = f"class:^steam_app_{APPID}$"
+
+
+def hypr(lua: str) -> str | None:
+    """Run one Lua expression in Hyprland and hand back what it printed, or `None`.
+
+    THIS BUILD HAS A LUA CONFIG PARSER, AND THAT CHANGES EVERY INVOCATION. On Hyprland 0.56 the
+    old spellings are all refused, each with a different error, and none of them is the one an
+    agent reaches for first:
+
+        hyprctl keyword windowrulev2 "monitor DP-1, class:..."  -> "keyword can't work with
+                                                                   non-legacy parsers. Use eval."
+        hyprctl keyword windowrule   "monitor DP-1, class:..."  -> same refusal
+        hyprctl dispatch focuswindow class:...                  -> parsed as Lua; syntax error
+        hyprctl --batch "dispatch a ; dispatch b"               -> parsed as Lua; syntax error
+
+    What works is `hl.dsp.<thing>{...}`, which BUILDS a dispatcher and does not run it -- calling
+    `hl.dsp.focus{ monitor = "DP-1" }` on its own returns an `HL.Dispatcher` and the focus does not
+    move, which is a silent no-op and exactly the sort of thing that gets reported as done. It has
+    to be handed to `hl.dispatch`. `repl` is used rather than `eval` because `eval` answers a bare
+    `ok` and swallows the value, so it cannot confirm anything.
+    """
+    if shutil.which("hyprctl") is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["hyprctl", "repl", lua], capture_output=True, text=True, timeout=5
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    answer = result.stdout.strip()
+    return None if answer.startswith("error:") else answer
+
+
+def pin_to_monitor() -> None:
+    """Point Hyprland at [`GAME_MONITOR`] so the game's window maps there.
+
+    A new window opens on the focused monitor, so focusing the wanted one immediately before
+    `steam -applaunch` is what puts the game where it is meant to go. This is best-effort by
+    design: [`settle_on_monitor`] moves the window outright once it exists, which is what covers
+    the case where focus wanders while Steam is still starting up.
+    """
+    if hypr(f'return hl.dispatch(hl.dsp.focus{{ monitor = "{GAME_MONITOR}" }})') is None:
+        return
+    print(f"[monitor] focused {GAME_MONITOR} so the game maps there")
+
+
+def settle_on_monitor() -> None:
+    """Move the game's window to [`GAME_MONITOR`] and SAY WHERE IT ACTUALLY ENDED UP.
+
+    Called after the DLL's own log line has confirmed the run, by which point the window exists.
+    The move is issued by class rather than by focus, so it does not matter what the user clicked
+    on while the game was loading.
+
+    The check afterwards is the point. A dispatcher that was built and never run fails silently,
+    and so does a move to a monitor that has been unplugged; reading the window's monitor back is
+    the difference between reporting a pin and having made one.
+    """
+    moved = hypr(
+        "return hl.dispatch(hl.dsp.window.move{ "
+        f'monitor = "{GAME_MONITOR}", window = "{GAME_WINDOW_MATCH}" }})'
+    )
+    if moved is None:
+        return
+    where = hypr(
+        "local w = hl.get_windows() "
+        f'for _, x in ipairs(w) do if x.class == "steam_app_{APPID}" then '
+        'return x.monitor and x.monitor.name or "?" end end return "no window"'
+    )
+    if where == GAME_MONITOR:
+        print(f"[monitor] game is on {GAME_MONITOR}")
+    else:
+        print(f"[monitor] WANTED {GAME_MONITOR}, GAME IS ON {where}")
+
+
 def launch(
     probe: str,
     observe: float,
@@ -2390,6 +2482,8 @@ def launch(
     # and deleting here would destroy the previous run's evidence for no gain.
     tail = LogTail(log_path)
 
+    pin_to_monitor()
+
     environment = launch_env(probe)
     argv = ["steam", "-applaunch", APPID]
     workdir = None
@@ -2449,6 +2543,9 @@ def launch(
     print(f"[launch] waiting up to {TESTIMONY_BUDGET_SECONDS:.0f}s for {log_path}")
 
     verdict = await_testimony(tail)
+    # Once the DLL has testified the window exists, so this is the first moment the move can
+    # actually land. Before it there is nothing to move.
+    settle_on_monitor()
     if verdict["status"] != "confirmed":
         if verdict["status"] == "attached-silent":
             reason = "the DLL LOADED but dearxan never reported"
