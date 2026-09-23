@@ -73,7 +73,10 @@ mod silence;
 #[cfg(windows)]
 pub use hide_menus::set_enabled as set_hide_menus;
 #[cfg(windows)]
-pub use install::{LogFn, Outcome, install, set_logger, set_preselect_slot};
+pub use install::{
+    LoadConfirmed, LogFn, Outcome, TitleGate, TitleStep, clear_title_gate, install,
+    set_load_confirmed, set_logger, set_preselect_slot, set_title_gate,
+};
 #[cfg(windows)]
 pub use silence::set_enabled as set_silence;
 

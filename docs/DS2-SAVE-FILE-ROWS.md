@@ -1,7 +1,11 @@
-# The two save-file rows, and the one thing the game will not let them do
+# The two save-file rows, and the restart that turned out not to be needed
 
-Ported from `../er-mods-rs`'s System>Quit rows. What follows is the static reading behind them, the
-design correction that reading forced, and what is still not done.
+Ported from `../er-mods-rs`'s System>Quit rows. What follows is the static reading behind them, two
+design corrections that reading forced, and what is still not done.
+
+The second correction is the larger one and it is worth stating at the top: the load row no longer
+ends the process. It returns to the title, points the loads at the container the player picked, and
+hands them the game's own character list for it. The section below has the five steps.
 
 **Nothing here has been run.** Every address is read out of `darksoulsii-deobf.bin` (SOTFS build
 9527516) with `scripts/ds2-disasm.py` and `scripts/ds2-arxan-chain.py`; every behavioural claim about
@@ -89,27 +93,48 @@ would answer "different file" about the save being played.
 
 ## Load Character from File
 
-### It cannot load in the session that asks, and the reason is the game's
+### It loads in the session that asks, and the five steps are all the game's
 
-DS2 keeps one save container per Steam account. Loading a different character means pointing
-`SAVE_DIR_BUILD` (`0x140248db0`) somewhere else, which `ds2-save-redirect` already does. Doing it
-mid-session does not work:
+The heading here used to read "it cannot load in the session that asks, and the reason is the game's".
+The obstacle it described is real and is quoted below; what was wrong was the conclusion that no
+ordering escapes it. One does, and `crates/ds2-save-file/src/swap.rs` is it:
+
+| step | what performs it | what it is |
+|---|---|---|
+| 1 | `ds2_save_redirect::stage` | copy the pick, rebind its Steam ID, write it to `<Game>/ds2-swapped-save/` |
+| 2 | `ds2_menu_row::return_to_title` | fire action `9` with its own gate applied: the game's confirm, the game's save, the game's unload |
+| 3 | `session_dir::LOAD.arm` | point the load side at the staged copy. The save side is not touched |
+| 4 | `SaveLoadSystem` `0x1402e72c0` | re-read container entry 7, so the ten in-memory records describe the staged copy |
+| 5 | `ds2-continue`'s title gate | take the top menu's own `LOAD GAME` edge, and hand the player the list |
+
+The player then picks a character out of the game's own screen, and on the frame the list takes its
+load branch -- phase 2, past the occupancy, exclusion and ownership checks -- `session_dir::SAVE` is
+armed as well, so the character that is about to be played saves back into the container it came out
+of.
+
+The obstacle, still true, and now only an argument about ordering:
 
 > **DS2 saves on the way out.** The pause menu's Quit Game row is action `9`, which the dispatch
 > resolves to `FeGroupInGameReturnTitleCheck` -- the confirm that persists the character on the way to
-> the title. A session that re-points the save directory and then quits writes the CURRENT character
+> the title. A session that re-points the save directory and then quits writes the current character
 > into the staged copy, and the LOAD GAME that follows reads back the character the player was trying
 > to replace.
 
-Neither ordering escapes it, because both halves belong to the game: the quit saves, and the load
-reads the same directory the quit wrote to. Re-staging per call does not either -- it would discard
-the player's progress on every save-directory build for the rest of the session.
+That describes a session which re-points **both** sides before leaving. Step 2 happens before step 3,
+and step 3 moves only the load side, so the character being left is written by a save side nothing has
+touched. The two halves that "both belong to the game" turn out to belong to two different classes.
 
-So the swap has to land on a process that has not played anything yet, and the row writes
+**Step 4 is the step that is easy to leave out.** `FUN_1400f0f60`, the vector the character list's
+`enter` measures, is built from `GameManagerImp->GameDataManager->savedata__` and reads no file at
+all. Arming a load redirect therefore changes nothing about what the list SAYS -- the block was filled
+at boot. `0x1402e72c0` is what fills it again; it sets container entry 7 for loading, which is the
+section those ten `0x1f0`-byte records come from, and its own first act is to test the interlock, so
+calling it at a bad moment returns `false` and changes nothing.
+
+The old route is still in the tree, reached only when the title flow is not hooked: the row writes
 `ds2-load-next-save.txt` beside the executable for `ds2-loader` to consume during
-`DLL_PROCESS_ATTACH`. The loader **deletes it as it reads it**: a handoff that persisted would leave a
-player in somebody else's save on every launch until they found a text file to delete, and a mod that
-quietly keeps loading the wrong save produces a player who thinks their character is gone.
+`DLL_PROCESS_ATTACH`, and quits. The loader **deletes it as it reads it**: a handoff that persisted
+would leave a player in somebody else's save on every launch until they found a text file to delete.
 
 ### The save and the load ask for their directory from two different functions
 
@@ -216,6 +241,14 @@ a research question. Filed.
 | `ds2-save-file: exported bytes=... destination=...` | the copy happened |
 | `... THE FLUSH WAS NEVER OBSERVED` | the copy is the last autosave, not the moment of the press |
 | `ds2-save-file: export REFUSED reason=destination-is-the-live-save` | the one refusal that protects a save |
-| `ds2-save-file: import recorded kind=... path=...` | the pick is written; the NEXT launch loads it |
+| `ds2-save-file: swap staged kind=... steam-id=... into=...` | the pick was copied and rebound; nothing is armed yet |
+| `ds2-save-file: swap at the title ...` | the game was left, and the character you left is in your own folder |
+| `ds2-save-redirect: load-session armed slot=... original=...` | the loads now answer the staged copy; the saves do not |
+| `ds2-save-file: re-read requested ... accepted=true` | the ten character records are being filled from the staged copy |
+| `ds2-continue: title-gate took action=2 dest=0x55-LoadDataList` | the character list is being opened for it |
+| `ds2-save-file: swap done slot=N ...` | a character was chosen, and the save side is now armed too |
+| `ds2-save-file: swap ABANDONED -- ...` | why it stopped, and whether both sides were put back |
+| `ds2-save-file: import in-session unavailable reason=...` | the restart route ran instead, and why |
+| `ds2-save-file: import recorded kind=... path=...` | restart route only: the pick is written for the next launch |
 | `ds2-save-file: handoff taken path=... -- consumed` | the loader armed it and deleted the file |
 | `ds2-save-redirect: save-dir redirected steam-id=... path=...` | the directory the game will actually use |

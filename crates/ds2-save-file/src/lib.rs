@@ -2,7 +2,7 @@
 //!
 //! | row | what one press does | when it takes effect |
 //! |---|---|---|
-//! | **Load Character from File** | records the pick, saves your character, then QUITS the game | the next launch, which the row has already asked for |
+//! | **Load Character from File** | stages the pick, returns to the title, and opens the game's own character list for it | the same session, once you choose a character |
 //! | **Save Game to File** | asks the game to save, then copies the container out | a few frames later |
 //!
 //! Both open the OS file dialog and neither draws a menu of its own. That is the port decision, and
@@ -19,28 +19,30 @@
 //!   the live container, the dialog asks before replacing anything, and the copy waits for the game to
 //!   finish writing rather than racing it.
 //!
-//! # Why one of them ends the session, and does not ask the player to
+//! # The load row no longer restarts the game, and [`swap`] is why
 //!
-//! Because DS2 saves on the way out of a game, and a mid-session redirect therefore gets overwritten
-//! by the player's own character before the load can read it. [`import`] has the argument in full.
-//! The restart is real and it is NOT the player's job: the row records the pick, requests the save
-//! that would otherwise clobber it, waits for that save to land, and takes the game down itself. A
-//! row that relabelled itself `restart to load` and stopped there was the first attempt, and it was
-//! wrong -- it left the mod's last step for the player to perform by hand.
+//! It used to, and the reason it had to was a misreading rather than a limit of the engine: DS2
+//! saves on the way out of a game, so a session that re-points its save directory and then leaves
+//! writes the character it was playing over the staged copy. That is true, and it stops mattering
+//! once the save side and the load side are separable -- which they are, because `SLSaveSession`
+//! and `SLLoadSession` each override the directory virtual and each is reached only through its own
+//! vtable. [`swap`] arms one side at a time, and the restart is gone.
 //!
-//! # These two rows are not the whole feature, and the missing half is filed
+//! The restart route is still in [`import`], reached only when the title flow is not hooked. A row
+//! that can load a save slowly is worth more than a row that reports a missing detour.
 //!
-//! Neither row lets you choose a CHARACTER. The load row swaps a whole container, so the ten slots
-//! you get are the donor file's ten, and picking among them is the game's own character list
-//! rather than anything here. `../er-mods-rs` has that half in `er-save-picker-core`; what DS2
-//! lacks for it is a Rust reader that can name a character -- `ds2-sl2-core` walks the BND4 entry
-//! table and rebinds Steam IDs, and cannot report a slot's name or level. `scripts/ds2-sl2.py
-//! --slots` already does, which is where the port starts.
+//! # Choosing a character is the game's job, and the game is good at it
 //!
-//! An earlier version of this section refused that port on the grounds that it meant reproducing
-//! `er-quit-menu-core` wholesale. That was a mis-measurement of the wrong crate: the menu chrome
-//! is what lives there, and the picker is `er-save-picker-core`, which is mostly a host-testable
-//! row model over the filesystem. Size the thing being asked for, not the crate it is linked into.
+//! The list of ten characters with their names, levels and playtimes is the title screen's LOAD
+//! GAME screen, which DS2 has always had. What it lists is built from ten records in memory, so
+//! pointing the loads at a staged container and asking the game to re-read that block is all it
+//! takes to make that screen describe a file the player just picked. No list is drawn here.
+//!
+//! This is where an earlier version of this crate planned to port `er-save-picker-core` -- Elden
+//! Ring's own character picker, which exists there because at a no-save boot ER has no such screen
+//! to borrow. DS2 does, so the port is not needed for this row. The host-testable row model in
+//! `ds2-save-picker-core` remains the answer for a picker that has to name a character without the
+//! game's help, which is a different feature.
 
 #![cfg_attr(not(windows), allow(unused))]
 
@@ -55,6 +57,8 @@ pub mod export;
 mod game;
 #[cfg(windows)]
 pub mod import;
+#[cfg(windows)]
+pub mod swap;
 
 #[cfg(windows)]
 pub use import::take_handoff;

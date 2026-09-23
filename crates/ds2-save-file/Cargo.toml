@@ -21,6 +21,11 @@ name = "ds2_save_file"
 ds2-save-file-core.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+# The title flow, for the in-session swap. `ds2-continue` owns the two detours this needs -- the
+# top menu's update and the character list's -- and a second hook on either address from here would
+# be two crates fighting over one function. It does not depend on this crate, so the edge is one
+# way.
+ds2-continue.workspace = true
 ds2-game-base.workspace = true
 ds2-menu-row.workspace = true
 ds2-rva.workspace = true

@@ -304,6 +304,14 @@ unsafe extern "system" fn detour(descriptor: *mut u8) -> *mut u8 {
 static DISPATCH_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 static QUITS_REQUESTED: AtomicUsize = AtomicUsize::new(0);
 
+/// The `FeGroupInGameTopSelect` the dispatch was last called on.
+///
+/// Stashed because a row's [`crate::RowSpec::on_confirm`] takes no arguments, and firing one of the
+/// game's own actions needs the receiver the game would have passed. Recorded on every dispatch,
+/// including the shipped rows', so it is the live object rather than one remembered from a menu
+/// that has since closed. Only [`return_to_title`] reads it, and only from inside a confirm.
+static LAST_TOP_SELECT: AtomicUsize = AtomicUsize::new(0);
+
 /// The dispatch: `void dispatch(topSelect, action)`, `this` in RCX and the action in EDX.
 ///
 /// Read off the disassembly: the entry is `48 89 5c 24 18` / `57` / `sub rsp,...`, and the body
@@ -371,7 +379,97 @@ pub fn quit_to_desktop() {
     unsafe { request_shutdown(base) };
 }
 
+/// `bool refused(const u32 *gate)` -- see [`ds2_rva::FE_INGAME_MENU_GATE_EVALUATE`].
+///
+/// `u8` rather than `bool` on the way back: the game returns its answer in `al` and a `bool` whose
+/// byte is neither 0 nor 1 is undefined behaviour in Rust, which is a poor way to learn that an
+/// address was wrong.
+type GateFn = unsafe extern "system" fn(*const u32) -> u8;
+
+/// Leave the game the way the shipped Quit Game row does, saving on the way out.
+///
+/// This fires the game's own action [`ds2_rva::FE_INGAME_MENU_ACTION_RETURN_TITLE`] on the receiver
+/// the dispatch was last called with, which opens `FeGroupInGameReturnTitleCheck` -- the confirm
+/// that offers to save and then takes the player to the title screen. Nothing is forged: the object,
+/// the action and the code that runs are the ones behind the row three lines above this crate's own.
+///
+/// # It applies the gate, because the row does
+///
+/// The tab's confirm handler runs [`ds2_rva::FE_INGAME_MENU_GATE_EVALUATE`] on the entry's gate
+/// index before it dispatches, and passes `-1` instead of the action when the answer is "refused".
+/// A caller that skipped that would be able to leave a game the shipped row would not let go of, so
+/// this evaluates the same predicate on the same gate and refuses the same cases. What gate `4`
+/// actually forbids is still not recorded anywhere in this project -- which is the reason to ask it
+/// rather than to reason about it.
+///
+/// Returns whether the dispatch was made. A `false` means the game is exactly where it was.
+///
+/// Safe to call from a row's `on_confirm`: that is the game thread, inside the menu's own confirm
+/// path, which is the same stack the shipped quit row dispatches from.
+pub fn return_to_title() -> bool {
+    let top_select = LAST_TOP_SELECT.load(Ordering::Acquire);
+    let trampoline = DISPATCH_TRAMPOLINE.load(Ordering::Acquire);
+    if top_select == 0 || trampoline == 0 {
+        log(format_args!(
+            "{LOG_PREFIX} return-to-title REFUSED reason=not-in-a-menu top_select=0x{top_select:016x} \
+             dispatch=0x{trampoline:016x} -- nothing was dispatched"
+        ));
+        return false;
+    }
+    let Ok(gate_address) = ds2_game_base::mem::game_rva(ds2_rva::FE_INGAME_MENU_GATE_EVALUATE)
+    else {
+        log(format_args!(
+            "{LOG_PREFIX} return-to-title REFUSED reason=no-module-base -- nothing was dispatched"
+        ));
+        return false;
+    };
+    let expected = ds2_rva::FE_INGAME_MENU_GATE_EVALUATE_PROLOGUE;
+    let mut prologue = [0u8; 5];
+    // SAFETY: a resolved RVA inside the loaded game image; `read_bytes` faults safely.
+    let read = unsafe { ds2_game_base::mem::read_bytes(gate_address, &mut prologue) };
+    if !read || prologue != expected {
+        log(format_args!(
+            "{LOG_PREFIX} return-to-title REFUSED reason=gate-prologue va=0x{gate_address:016x} \
+             read={read} saw={prologue:02x?} want={expected:02x?} -- that address is not the gate \
+             predicate on this build"
+        ));
+        return false;
+    }
+    let gate = ds2_rva::FE_INGAME_MENU_GATE_RETURN_TITLE;
+    // SAFETY: the prologue matches the function `ds2-rva` transcribed, the signature is the one its
+    // disassembly implements (one pointer argument, a byte back), and `gate` is a live local for the
+    // duration of the call. The function only reads.
+    let refused = unsafe {
+        let evaluate: GateFn = std::mem::transmute::<usize, GateFn>(gate_address);
+        evaluate(&raw const gate) != 0
+    };
+    if refused {
+        log(format_args!(
+            "{LOG_PREFIX} return-to-title REFUSED reason=gate gate={gate} -- the shipped Quit Game \
+             row is refused right now too, so this one is as well"
+        ));
+        return false;
+    }
+    // SAFETY: MinHook published this trampoline for the dispatch, the signature is the one the
+    // disassembled entry implements, and `top_select` is the receiver the game itself passed on the
+    // call that is still on this stack.
+    unsafe {
+        let dispatch: DispatchFn = std::mem::transmute::<usize, DispatchFn>(trampoline);
+        dispatch(
+            top_select as *mut u8,
+            ds2_rva::FE_INGAME_MENU_ACTION_RETURN_TITLE,
+        );
+    }
+    log(format_args!(
+        "{LOG_PREFIX} return-to-title dispatched action={} top_select=0x{top_select:016x} -- the \
+         game's own confirm is now up",
+        ds2_rva::FE_INGAME_MENU_ACTION_RETURN_TITLE
+    ));
+    true
+}
+
 unsafe extern "system" fn dispatch_detour(top_select: *mut u8, action: u32) {
+    LAST_TOP_SELECT.store(top_select as usize, Ordering::Release);
     if let Some(row) = crate::api::row_for_action(action) {
         // Deliberately NOT calling the original for a registered action. The original would play a
         // sound and fall through its `default`, which is harmless, but the id is outside the range

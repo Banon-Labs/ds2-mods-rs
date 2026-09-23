@@ -15,72 +15,55 @@
 //! itself `Staged: restart to load`, and left the restart to whoever was holding the controller. That
 //! is handing the user a chore the mod created. The row now performs the whole sequence itself.
 //!
-//! # The sequence, and why it is in this order
+//! # What one press does now
+//!
+//! ```text
+//! pick -> validate -> stage the copy -> return to the title -> the game's own character list
+//!      -> the player chooses -> playing it
+//! ```
+//!
+//! [`crate::swap`] owns everything after the validation and documents why each step is where it is.
+//! Nothing in that sequence restarts the process and nothing writes a file for a later launch to
+//! find.
+//!
+//! # The route below it, kept because a hook can fail to install
 //!
 //! ```text
 //! pick -> validate -> record the handoff -> request a save -> wait for it to land -> quit
 //! ```
 //!
-//! The save comes FIRST and the quit waits for it, because the quit this row uses is the game's own
+//! This is what the row used to do always, and it now runs only when [`crate::swap::begin`] refuses
+//! -- which in practice means the title flow is not hooked, so nothing can drive the character list.
+//! A row that loads a save slowly beats a row that reports a missing detour, and the log says which
+//! of the two ran.
+//!
+//! The save comes first and the quit waits for it, because the quit this route uses is the game's own
 //! one-byte shutdown -- `FeSubStateTitleShutdown`'s write, polled by the master update -- and that
 //! path does not save and does not ask. Quitting without the save would silently cost the player
 //! every step since their last bonfire, which is not a price a row labelled "load" gets to charge.
 //!
-//! And the save lands in the player's OWN directory, because the redirect is not armed yet: the
+//! And the save lands in the player's own directory, because no redirect is armed on this route: the
 //! handoff is a file on disk that the loader reads on the next launch, so nothing in this session is
-//! pointing anywhere new. That ordering is the whole reason the handoff is a file rather than a
-//! runtime swap -- see below.
+//! pointing anywhere new.
 //!
-//! # Why the swap cannot happen in this session
+//! # Why this used to be the only route, and what changed
 //!
-//! DS2 keeps one save container per Steam account, and it saves on the way out of a game. A session
-//! that re-points [`ds2_rva::SAVE_DIR_BUILD`] and then quits writes the CURRENT character into the
+//! DS2 keeps one save container per Steam account and saves on the way out of a game, so a session
+//! that re-points [`ds2_rva::SAVE_DIR_BUILD`] and then quits writes the current character into the
 //! staged copy, and the LOAD GAME that follows reads back the character the player was replacing.
-//! Neither ordering escapes it, because both halves belong to the game. So the swap lands on a
-//! process that has not played anything yet.
+//! Every word of that is still true. What it does not survive is the save side and the load side
+//! being separable, which they are: `SLSaveSession` and `SLLoadSession` each override the directory
+//! virtual, each override is reached only through its own vtable, and
+//! `ds2_save_redirect::session_dir` arms them independently. The character being left is written by a
+//! save side nothing has touched; the list and the load read a staged copy. See [`crate::swap`].
 //!
-//! # Removing the restart: where the save/load split actually is
-//!
-//! **Not where this comment used to say it was.** It claimed `FUN_1402e67f0` calls `SAVE_DIR_BUILD`
-//! per request, so splitting its states would let a detour answer the game's own folder for a save
-//! and the staged copy for a load. Read out of the binary, that is false twice over.
-//!
-//! The `{1,3,5,6}` states that plan wanted to split are the outer guard, not a discriminator:
-//! `6 < state || (0x6a >> (state & 31) & 1) == 0` is an early-out, and every state that survives it
-//! lands in the same switch. And `SAVE_DIR_BUILD` is reached from exactly one arm of that switch --
-//! session type `0x18`, which builds the directory string once and hands it to the request manager
-//! through `FUN_140a899f0`. That arm is session setup. A detour there is asked for a folder before
-//! anything has said whether this session will save or load, so there is nothing to split.
-//!
-//! The bit that plan was looking for is one call away. The switch dispatches on
-//! `FUN_140a89940_getSLSessionType__`, and two groups of session types call
-//! `FUN_140a899a0(SLRequestMan, flag)` with a flag that is `1` for `{4..0xa, 0xd}` and `0` for
-//! `{0xb, 0xc, 0xe..0x13}`. The game's own decompiled comment on this function records the offline
-//! sequence from a first load as `0xb, 0x18, 0x14...`, which puts that first load in the `0` group,
-//! so `0` is load and `1` is save.
-//!
-//! # And the directory and that flag live on the same object
-//!
-//! Which is what makes the split possible at all. Both routes resolve a request with
-//! `FUN_140a8bfb0(manager, id)` -- a keyed lookup over the manager's container, so requests are
-//! addressable objects rather than one singleton -- and then write into it:
-//!
-//! ```text
-//! FUN_140a899f0(pair, flag, path) -> request+0x3c = flag, request+0x48 = path (UTF-16)
-//! FUN_140a899a0(pair, flag)       -> request+0x3c = flag
-//! ```
-//!
-//! So the `0x18` arm's directory and the `4..0x13` arms' mode end up on one request. A detour on the
-//! path WRITE still cannot tell save from load, because that request's mode may not be written yet.
-//! A detour on the path READ can: it holds the request pointer, so the mode at `+0x3c` and the
-//! directory at `+0x48` are both in hand at the same instant. Answer the game's own folder for a
-//! save and the staged copy for a load, and this row's handoff file and its restart both go away.
-//!
-//! What is still unread is the consumer of `request+0x48` -- the code that turns that string into
-//! the container it opens. That is the detour site, and finding it is another static read rather
-//! than a game launch. Until it is found, the sequence above is what this row honestly does. Both
-//! write routes also branch on `mode != 3` before storing, setting `request+0x98 = 0x16`, so `3` is
-//! a distinguished mode worth naming before anything is hooked.
+//! Two earlier plans for that split are worth not repeating. One claimed `FUN_1402e67f0` calls
+//! `SAVE_DIR_BUILD` per request and that its `{1,3,5,6}` states separate saves from loads; those
+//! states are an early-out guard (`6 < state || (0x6a >> (state & 31) & 1) == 0`) and every state
+//! surviving it reaches the same switch, whose only `SAVE_DIR_BUILD` arm is session setup. The other
+//! aimed at the request object, where `+0x3c` is a mode (`0` load, `1` save) beside the directory at
+//! `+0x48` -- correct, and still unnecessary, because the class that asks for the directory already
+//! answers the same question without a flag having to be read.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -92,6 +75,7 @@ use ds2_save_file_core::{
 
 use crate::dialog::{Intent, Pick, Request};
 use crate::game::{self, Landed};
+use crate::swap;
 use crate::{LOG_PREFIX, log_line};
 
 /// The row's caption.
@@ -100,6 +84,13 @@ pub const ROW_CAPTION: &str = "Load Character from File";
 /// The caption while the row is saving before it quits, so the player can see why nothing has
 /// happened yet.
 pub const ROW_CAPTION_SAVING: &str = "Saving, then quitting...";
+
+/// The caption once the in-session swap has asked the game to leave.
+///
+/// The player is about to be looking at the game's own confirm dialog, so this is the last frame
+/// the row is on screen -- but it is on screen while that dialog is up, which is exactly when
+/// somebody wonders whether the row did anything.
+pub const ROW_CAPTION_LEAVING: &str = "Returning to the title to pick a character...";
 
 /// Menu frames to wait for the save to land before quitting anyway.
 ///
@@ -219,6 +210,30 @@ pub fn load_from_file() {
         }
     };
 
+    // The in-session route first, and it is the whole feature: [`crate::swap`] stages the pick,
+    // asks the game to return to the title the way its own Quit Game row does, points the loads at
+    // the staged copy, and hands the player the game's own character list for it. No restart, and
+    // no handoff file.
+    //
+    // The fallback below is kept rather than deleted because the in-session route needs the title
+    // flow hooked, and a build where that hook did not install should still be able to load a save
+    // -- slowly, through a restart -- instead of doing nothing at all. Which one ran is in the log.
+    match swap::begin(&picked) {
+        Ok(()) => {
+            log_line(format_args!(
+                "{LOG_PREFIX} import in-session kind={kind} entries={entries} path={} -- leaving \
+                 the game to choose a character out of it",
+                picked.display()
+            ));
+            announce(ROW_CAPTION_LEAVING);
+            return;
+        }
+        Err(reason) => log_line(format_args!(
+            "{LOG_PREFIX} import in-session unavailable reason={reason} -- falling back to the \
+             route that records the pick and restarts the game"
+        )),
+    }
+
     let contents = handoff::encode(&picked.to_string_lossy());
     if let Err(error) = std::fs::write(&handoff_file, contents) {
         log_line(format_args!(
@@ -265,7 +280,7 @@ pub fn load_from_file() {
             flushed: false,
             ticks: 0,
         });
-        announce();
+        announce(ROW_CAPTION_SAVING);
     } else {
         log_line(format_args!(
             "{LOG_PREFIX} import QUITTING WITHOUT WAITING -- the pending lock is poisoned"
@@ -275,7 +290,13 @@ pub fn load_from_file() {
 }
 
 /// The game-thread half: wait for the save, then quit. Registered with `ds2_menu_row::add_tick`.
+///
+/// It carries the in-session swap's pause-menu half too, because both want the same thing from the
+/// same place and the tick registry has a slot count. What that half watches for is this tick
+/// continuing to run: the pause menu updating is what calls it, so a swap that asked the game to
+/// leave and is still being ticked is a swap whose confirm the player declined.
 pub fn tick() {
+    crate::swap::pause_tick();
     let Ok(mut guard) = PENDING.lock() else {
         return;
     };
@@ -321,11 +342,11 @@ fn quit() {
 }
 
 /// Relabel the row so the player can see the press took, without reading a log file.
-fn announce() {
+fn announce(caption: &'static str) {
     let Some(row) = crate::registered_import_row() else {
         return;
     };
-    if !ds2_menu_row::set_row_caption(row, ROW_CAPTION_SAVING) {
+    if !ds2_menu_row::set_row_caption(row, caption) {
         return;
     }
     // SAFETY: game thread, inside a row's own confirm, with the pause menu this caption belongs to

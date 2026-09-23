@@ -139,8 +139,8 @@ pub use api::{AddRowError, MAX_ADDED_ROWS, RowId, RowSpec, Tab, Tint, add_row};
 
 #[cfg(windows)]
 pub use install::{
-    LogFn, Outcome, add_tick, install, quit_to_desktop, refresh_row_captions, set_logger,
-    set_row_caption,
+    LogFn, Outcome, add_tick, install, quit_to_desktop, refresh_row_captions, return_to_title,
+    set_logger, set_row_caption,
 };
 
 /// Prefix on every line this crate writes to the loader log, so a reader can tell which component

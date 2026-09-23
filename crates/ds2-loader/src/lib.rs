@@ -1028,9 +1028,17 @@ fn system_dinput8_path() -> Option<Vec<u16>> {
 fn install_continue_record() {
     let config = continue_flow::ContinueConfig::load();
     log_line(format_args!("{}", config.describe()));
-    // Either half is reason enough to patch: the recorder alone is a complete instrument, and the
-    // pre-select alone is a usable feature. Neither asked for means neither site is touched.
-    if !config.record && config.slot < 0 {
+    // The third reason to patch, and it is not a `[continue]` key at all. The Load Character from
+    // File row does its work at the title screen -- point the loads at a staged container, re-read
+    // it, open the character list for it -- and the two detours that drive that are this crate's.
+    // Without them the row falls back to recording a pick and restarting the game, which works and
+    // is much slower, so a player who asked for that row gets the hooks it needs.
+    let swap_row_wants_it = menu_row::MenuRowConfig::load()
+        .rows
+        .contains(&menu_row::Row::LoadCharacterFromFile);
+    // Any of the three is reason enough to patch: the recorder alone is a complete instrument, and
+    // the pre-select alone is a usable feature. None of them asked for means no site is touched.
+    if !config.record && config.slot < 0 && !swap_row_wants_it {
         return;
     }
     ds2_continue::set_logger(log_line);

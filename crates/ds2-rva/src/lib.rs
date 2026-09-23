@@ -2628,6 +2628,28 @@ pub const FE_INGAME_MENU_GATE_ALWAYS: u32 = 0;
 /// the shipped quit row uses.
 pub const FE_INGAME_MENU_GATE_RETURN_TITLE: u32 = 4;
 
+/// The gate predicate itself. RVA `0x000a_4e50`, `bool refused(const u32 *gate)`.
+///
+/// It takes a pointer to the gate index rather than the index. The confirm handler reaches it with
+/// `lea rcx,[rax+4]` -- the second `u32` of the item-vector entry -- and the body opens
+/// `if (*param_1 == 0) return false`, which is what makes gate `0` mean "no gate". `true` is
+/// refused; the confirm path turns that into the action `-1` that falls out of the dispatch's
+/// `switch` through its `default`.
+///
+/// Recorded because anything that fires a shipped action without going through the tab's own
+/// confirm handler has to apply the gate itself, or it is not doing what the row does. The function
+/// only reads -- `GameManagerImp + 0x22f0`, the net-server manager, and two predicates on the
+/// session -- so calling it costs nothing and forges nothing.
+pub const FE_INGAME_MENU_GATE_EVALUATE: u32 = 0x000a_4e50;
+
+/// The five bytes [`FE_INGAME_MENU_GATE_EVALUATE`] must begin with.
+///
+/// `rex push rbx; sub rsp,0x20`, read out of the image rather than assumed from the shape of its
+/// neighbours -- the first guess at these bytes was the other common MSVC opener and was wrong.
+/// `scripts/ds2-arxan-chain.py 0x1400a4e50` reports a clean prologue at the entry, so these are
+/// what the live process holds.
+pub const FE_INGAME_MENU_GATE_EVALUATE_PROLOGUE: [u8; 5] = [0x40, 0x53, 0x48, 0x83, 0xec];
+
 // ---------------------------------------------------------------------------------------------
 // A SEVENTH TAB: WHERE THE SIX IS WRITTEN DOWN, AND WHAT EACH SPELLING COSTS
 //
@@ -5935,3 +5957,64 @@ pub const SL_LOAD_SESSION_DIRECTORY_VTABLE_SLOT: usize = 3;
 /// after that -- and calling it is how a replacement override hands back a path without touching
 /// the game's allocator by hand, the same reasoning as [`WSTRING_ASSIGN`].
 pub const SL_SESSION_STRING_SET: u32 = 0x00a8_9050;
+
+/// `SaveLoad2::SLSaveSession`'s vtable, the save-side twin of [`SL_LOAD_SESSION_VTABLE`].
+///
+/// Read out of the image's RTTI the same way its twin was, with `scripts/ds2-rtti-vtables.py
+/// 'SLSaveSession' --slot 0x18`, which prints slot 3 holding [`SL_SAVE_SESSION_DIRECTORY`]:
+///
+/// ```text
+/// .?AVSLLoadSession@SaveLoad2@@  vtable=0x1411b64e0  this+0x0  [+0x18]=0x140a8f8d0
+/// .?AVSLSaveSession@SaveLoad2@@  vtable=0x1411b6430  this+0x0  [+0x18]=0x140a8ec40
+/// ```
+///
+/// **Swapping this is not the startup redirect.** A save that answers the staged copy is only
+/// correct once the character being played CAME from that copy; armed any earlier it writes the
+/// player's own character into somebody else's container. The one flow that arms it --
+/// `ds2-save-file`'s in-session swap -- does so only after the game has entered the donor
+/// character, which is the whole reason the two sides are separate constants.
+pub const SL_SAVE_SESSION_VTABLE: u32 = 0x011b_6430;
+
+/// Where [`SL_SAVE_SESSION_DIRECTORY`] sits in [`SL_SAVE_SESSION_VTABLE`]: slot 3, `+0x18`.
+///
+/// The same slot as [`SL_LOAD_SESSION_DIRECTORY_VTABLE_SLOT`], which is what it should be -- both
+/// classes derive from `SaveLoad2::SLSession` and both override the same base virtual. Recorded
+/// separately anyway, because "it must be the same slot" is the sort of reasoning that survives
+/// right up until the build where it is not.
+pub const SL_SAVE_SESSION_DIRECTORY_VTABLE_SLOT: usize = 3;
+
+/// `SaveLoadSystem`'s request to re-read the container's **system data**: the ten character
+/// records the title's LOAD GAME list is built from. RVA `0x002e_72c0`.
+///
+/// `bool loadSystemData(SaveLoadSystem *)`. Ghidra names it
+/// `FUN_1402e72c0_loadSlot_0_andOtherSetup`; what it actually does, read out of its decompilation,
+/// is set container entry **7** for loading and hand the request to the `SLRequestMan`:
+///
+/// ```c
+/// if (SLSystem->_x38_SLRequestMan_ == 0 || SLSystem->_x8 != 0 || SLSystem->_xc != 0) return false;
+/// FUN_140a8a0d0_zeroiseLoadSlots_andLoadContent__(SLSystem->SLLoadContent);
+/// FUN_140a8a250_setSlotForLoading__(SLSystem->SLLoadContent, 7);
+/// ... FUN_140a86280_unk6ArgFct(..., SLSystem->SLLoadContent, 2, 0) ...
+/// SLSystem->_x8 = 4; SLSystem->_xc = 2;
+/// return true;
+/// ```
+///
+/// **This is the refresh the in-session character swap needs.** `FUN_1400f0f60` -- the vector
+/// `FeSubStateTitleLoadDataList::v1` measures before it decides whether the list has anything in
+/// it -- is built entirely out of `GameManagerImp->GameDataManager->savedata__`, walking ten
+/// `0x1f0`-byte records and keeping the ones whose `+0x1d9` says occupied. Nothing in that path
+/// re-reads the file. So pointing the loads at another container changes what the list says only
+/// once that block has been filled again, and this is the call that fills it.
+///
+/// Its own guard is the interlock at [`SAVE_LOAD_SYSTEM_STATE_OFFSET`] /
+/// [`SAVE_LOAD_SYSTEM_SUBSTATE_OFFSET`], so calling it while the game is mid-request returns
+/// `false` and changes nothing -- which is what makes it safe to retry rather than schedule.
+pub const SAVE_LOAD_SYSTEM_LOAD_SYSTEM_DATA: u32 = 0x002e_72c0;
+
+/// The five bytes [`SAVE_LOAD_SYSTEM_LOAD_SYSTEM_DATA`] must begin with: `rex push rbx; sub rsp`.
+///
+/// `scripts/ds2-arxan-chain.py 0x1402e72c0` reports `NOT REDIRECTED (clean prologue at the entry)`,
+/// so the bytes below are what the live process holds. Nothing detours this address; it is called.
+/// The check is still worth making, because an RVA is a number, and a number that lands on the
+/// wrong function in some other build would be called just as happily.
+pub const SAVE_LOAD_SYSTEM_LOAD_SYSTEM_DATA_PROLOGUE: [u8; 5] = [0x40, 0x53, 0x48, 0x83, 0xec];

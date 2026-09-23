@@ -76,6 +76,113 @@ pub fn set_preselect_slot(slot: i32) {
     PRESELECT_SLOT.store(slot, Ordering::Release);
 }
 
+/// What a registered title gate wants the top menu to do on the frame it was asked.
+///
+/// The gate is called once per frame for as long as the title's six-row menu is up, which is the
+/// only per-frame tick a crate outside this one can get at the title screen: `ds2_menu_row::add_tick`
+/// runs from the pause menu and therefore stops existing the moment a game is left.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TitleStep {
+    /// Nothing yet. The menu is left exactly as the game drew it.
+    Wait,
+    /// Take the menu's own `LOAD GAME` edge, as if row 1 had been pressed.
+    TakeLoadGame,
+    /// The gate is finished and is dropped. The menu goes back to being the player's.
+    Finished,
+}
+
+/// A gate: a plain `fn` rather than a closure, for the same reason a row's `on_confirm` is one --
+/// it is read from a detour on the game's thread with no allocation and no lock.
+pub type TitleGate = fn() -> TitleStep;
+
+/// The registered gate, or zero.
+static TITLE_GATE: AtomicUsize = AtomicUsize::new(0);
+
+/// Called once when the character list takes its load branch, with the slot the game chose.
+static LOAD_CONFIRMED: AtomicUsize = AtomicUsize::new(0);
+
+/// Notified with the slot the game accepted. See [`set_load_confirmed`].
+pub type LoadConfirmed = fn(i32);
+
+/// Run `gate` every frame the title's top menu is up, until it answers [`TitleStep::Finished`].
+///
+/// Returns `false` if a gate is already registered, which is the honest answer rather than the
+/// quiet overwrite: two flows driving one menu is a fight neither can win, and the second one to
+/// ask is the one that should hear about it.
+pub fn set_title_gate(gate: TitleGate) -> bool {
+    TITLE_GATE
+        .compare_exchange(
+            0,
+            gate as *const () as usize,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_ok()
+}
+
+/// Drop the registered gate, whether or not it ever answered [`TitleStep::Finished`].
+///
+/// The abandon path for a flow that gives up between registering and reaching the title: without
+/// it, a gate whose flow has already been cancelled keeps being called for the life of the process.
+pub fn clear_title_gate() {
+    TITLE_GATE.store(0, Ordering::Release);
+}
+
+/// Be told when the character list takes its load branch, and which slot it accepted.
+///
+/// This is the moment a character the player chose has passed the game's own occupancy, exclusion
+/// and ownership checks and the flow is committed to loading it -- phase
+/// [`ds2_rva::FE_DATA_LIST_PHASE_LOAD`], the one whose transition goes to `FeSubStateTitleLoadProfile`.
+/// It fires for a load the player drove by hand exactly as it does for one this crate shortcut.
+pub fn set_load_confirmed(notify: LoadConfirmed) {
+    LOAD_CONFIRMED.store(notify as *const () as usize, Ordering::Release);
+}
+
+/// Call the registered gate, and act on what it asks for.
+///
+/// Returns whether a gate is registered, so the caller can leave the rest of the top-menu detour to
+/// the shortcut that owns it. One frame belongs to one of the two, never both.
+///
+/// # Safety
+///
+/// Must run on the game thread, immediately after the top menu's update returned, with `this` live.
+unsafe fn run_title_gate(this: *mut u8) -> bool {
+    let raw = TITLE_GATE.load(Ordering::Acquire);
+    if raw == 0 {
+        return false;
+    }
+    // SAFETY: `raw` is only ever a `TitleGate` stored by `set_title_gate`.
+    let gate: TitleGate = unsafe { std::mem::transmute::<usize, TitleGate>(raw) };
+    match gate() {
+        TitleStep::Wait => {}
+        TitleStep::TakeLoadGame => {
+            // SAFETY: the flow just called a virtual on this object, so it is live.
+            let phase = unsafe { field::<i32>(this, ds2_rva::FE_SUBSTATE_PHASE_OFFSET) };
+            // Only from rest, the same rule the pre-select shortcut follows: a non-resting phase
+            // means the player activated a row this frame, and their choice outranks a gate's.
+            if phase == ds2_rva::FE_TOP_MENU_PHASE_RESTING {
+                // SAFETY: the phase field the flow is about to read for its transition search.
+                unsafe {
+                    this.add(ds2_rva::FE_SUBSTATE_PHASE_OFFSET)
+                        .cast::<i32>()
+                        .write(ds2_rva::FE_TOP_MENU_ACTION_LOAD_GAME);
+                }
+                log(format_args!(
+                    "{LOG_PREFIX} title-gate took action={} dest=0x55-LoadDataList",
+                    ds2_rva::FE_TOP_MENU_ACTION_LOAD_GAME
+                ));
+            }
+        }
+        TitleStep::Finished => {
+            TITLE_GATE.store(0, Ordering::Release);
+            log(format_args!(
+                "{LOG_PREFIX} title-gate finished -- the top menu is the player's again"
+            ));
+        }
+    }
+    true
+}
+
 /// The live module base, resolved once in [`install`] so the detour never has to.
 static MODULE_BASE: AtomicUsize = AtomicUsize::new(0);
 
@@ -257,6 +364,21 @@ unsafe extern "system" fn detour_update(this: *mut u8) {
         unsafe { take_load_branch(this) };
     }
 
+    // THE FRAME A CHARACTER IS COMMITTED TO. Phase 2 is the load branch's own output, reached only
+    // after the game's occupancy, exclusion and ownership checks have all passed, so this fires for
+    // a character the player picked by hand exactly as it does for one the shortcut took. The
+    // notification carries the slot from the `after` sample for the reason the log line below does:
+    // the poll republishes the cursor into that field, so anything read before the original is the
+    // previous frame's.
+    if after.phase == ds2_rva::FE_DATA_LIST_PHASE_LOAD && before.phase != after.phase {
+        let raw = LOAD_CONFIRMED.load(Ordering::Acquire);
+        if raw != 0 {
+            // SAFETY: `raw` is only ever a `LoadConfirmed` stored by `set_load_confirmed`.
+            let notify: LoadConfirmed = unsafe { std::mem::transmute::<usize, LoadConfirmed>(raw) };
+            notify(after.slot);
+        }
+    }
+
     // THE TWO WAYS THE LIST ENDS WITHOUT LOADING. Suppression is released at `StartIngame`, which
     // a backed-out or refused list never reaches -- so without this the game would keep playing
     // silently long after the shortcut it was covering had stopped.
@@ -357,7 +479,17 @@ unsafe extern "system" fn detour_top_menu(this: *mut u8) {
             unsafe { std::mem::transmute::<usize, TopMenuUpdateFn>(trampoline) };
         unsafe { original(this) };
     }
-    if this.is_null() || PRESELECT_SLOT.load(Ordering::Acquire) < 0 {
+    if this.is_null() {
+        return;
+    }
+    // A registered gate owns the menu for this frame. The two never share one: the pre-select
+    // shortcut hides the title screen and drives straight through it, and a flow that wants the
+    // player to SEE the character list would have that screen taken out from under it.
+    // SAFETY: the original returned, so `this` is still the live substate.
+    if unsafe { run_title_gate(this) } {
+        return;
+    }
+    if PRESELECT_SLOT.load(Ordering::Acquire) < 0 {
         return;
     }
     // AFTER the original, every frame the title screen is resident. The original is what opens it,

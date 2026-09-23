@@ -94,6 +94,60 @@ pub fn request_save(system: usize) -> bool {
     true
 }
 
+/// `bool loadSystemData(SaveLoadSystem*)` -- see [`ds2_rva::SAVE_LOAD_SYSTEM_LOAD_SYSTEM_DATA`].
+///
+/// `u8` back rather than `bool`, for the reason the gate predicate in `ds2-menu-row` is: a `bool`
+/// whose byte is neither 0 nor 1 is undefined behaviour, and an address that turned out to be the
+/// wrong function is exactly how that byte arrives.
+type LoadSystemDataFn = unsafe extern "system" fn(usize) -> u8;
+
+/// Ask the game to re-read the container's system data: the ten character records.
+///
+/// Returns whether the request was accepted. `false` covers both refusals -- a prologue that is not
+/// the recorded one, and the game's own interlock saying a request is already in flight -- and both
+/// mean nothing has changed, so a caller can simply try again next frame.
+///
+/// # Why a character list needs this at all
+///
+/// `FUN_1400f0f60`, the vector the list's `enter` measures, is built out of
+/// `GameManagerImp->GameDataManager->savedata__` alone. Pointing the load side at another container
+/// changes what a READ of the file answers; it does not touch a block that was filled before the
+/// redirect was armed. So the sequence is arm, then this, then the list -- in that order, or the
+/// list describes the container the player is leaving.
+pub fn load_system_data(system: usize) -> bool {
+    let Ok(address) = ds2_game_base::mem::game_rva(ds2_rva::SAVE_LOAD_SYSTEM_LOAD_SYSTEM_DATA)
+    else {
+        log_line(format_args!(
+            "{LOG_PREFIX} re-read REFUSED reason=no-module-base -- the list still describes the \
+             old container"
+        ));
+        return false;
+    };
+    let expected = ds2_rva::SAVE_LOAD_SYSTEM_LOAD_SYSTEM_DATA_PROLOGUE;
+    let mut prologue = [0u8; 5];
+    // SAFETY: a resolved RVA inside the loaded game image; `read_bytes` faults safely.
+    let read = unsafe { ds2_game_base::mem::read_bytes(address, &mut prologue) };
+    if !read || prologue != expected {
+        log_line(format_args!(
+            "{LOG_PREFIX} re-read REFUSED reason=prologue va=0x{address:016x} read={read} \
+             saw={prologue:02x?} want={expected:02x?} -- that address is not the system-data load \
+             on this build"
+        ));
+        return false;
+    }
+    // SAFETY: the prologue matches the function `ds2-rva` transcribed, the signature is the one its
+    // decompilation implements (the system in RCX, a byte back), and `system` is a live
+    // `SaveLoadSystem` reached through two recorded hops. The function's own first act is to test
+    // the interlock and return `false`, so calling it at a bad moment is a no-op rather than a
+    // race.
+    let load: LoadSystemDataFn = unsafe { std::mem::transmute::<usize, LoadSystemDataFn>(address) };
+    let accepted = unsafe { load(system) } != 0;
+    log_line(format_args!(
+        "{LOG_PREFIX} re-read requested system=0x{system:016x} accepted={accepted}"
+    ));
+    accepted
+}
+
 /// How a wait for "the save has landed" ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Landed {

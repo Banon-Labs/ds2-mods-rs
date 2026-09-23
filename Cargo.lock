@@ -606,6 +606,7 @@ version = "0.1.0"
 name = "ds2-save-file"
 version = "0.1.0"
 dependencies = [
+ "ds2-continue",
  "ds2-game-base",
  "ds2-menu-row",
  "ds2-rva",

@@ -49,20 +49,21 @@
 //! because DS2 shows no LOAD GAME row when it finds nothing. The log line is what tells those two
 //! apart without anyone having to guess.
 //!
-//! # The second, narrower redirect: [`load_session`]
+//! # The second, narrower redirect: [`session_dir`]
 //!
 //! Everything above moves the directory for a whole process, which is correct at startup and wrong
 //! mid-session -- DARK SOULS II writes on the way out of a game, so a session that re-points the
-//! folder and then quits saves the current character over the staged copy. [`load_session`] is the
-//! other half: it replaces one vtable slot so only the load side answers the staged folder, leaving
-//! the save side pointed at the player's own. It is armed around a single load and disarmed after,
-//! and nothing in it has been run in the game.
+//! folder and then quits saves the current character over the staged copy. [`session_dir`] is the
+//! other half: it replaces one vtable slot per SIDE, so the loads can answer a staged folder while
+//! the saves still answer the player's own, and each side is armed at the moment that side becomes
+//! correct. `ds2-save-file`'s in-session character swap is the flow that uses both, and nothing in
+//! it has been run in the game.
 
 // Windows-only by construction: this is a MinHook detour on a PE image.
 #![cfg(windows)]
 
 pub mod install;
-pub mod load_session;
+pub mod session_dir;
 pub mod stage;
 
 /// Prefix on every line this crate writes, so its lines can be grepped out of the shared log.
