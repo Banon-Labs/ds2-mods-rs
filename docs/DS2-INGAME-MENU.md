@@ -1201,13 +1201,15 @@ and adding a pitch to each x.
 texture of its own. `FLO_ADDED_TAB_ICON_SOURCE_LEFT` is the one constant to change if a different
 slice is ever wanted; a genuinely new glyph needs a texture, which is a different piece of work.
 
-### What is not measured
+### What runs have shown since
 
-None of this section has been in front of a running game. What is static and settled: the cell holds
-no glyph and cannot, the plate is one quad spanning exactly the six tabs, the atlas has no seventh
-hexagon, and every offset above came off the instruction that reads it. What a run has to show: that
-the hexagon lands where the arithmetic says, that the seam is invisible, and that the moved chevron
-and label look deliberate rather than nudged.
+Three of them, and the third is the one the player accepted: seven tabs in the strip, the seventh
+wearing the sixth tab's glyph, the sixth still wearing its own. What changed between the second and
+the third is in the section after next -- the record this section calls the end cap is the sixth
+tab's hexagon, so it is copied now rather than moved.
+
+Still not measured: whether the seam at `337.60` is invisible under scrutiny, and whether the moved
+`RB` prompt reads as deliberate. Both were accepted at a glance rather than looked at closely.
 
 ## The first run with an icon: three answers off the document, one question left
 
@@ -1306,3 +1308,35 @@ tab's own panel has always had.
 `tree::dump_strip` stays armed, at two levels rather than one. One was not enough and the run said
 so in two lines: the strip is a `FeComponentObject` whose only linked child is the
 `FeComponentSprite` holding the display list, so the records are one level below where it stopped.
+
+### The run that settled it
+
+`--menu-row --rows quit-to-desktop,save-game-to-file,load-character-from-file,load-build-from-url`,
+one character loaded, the seventh tab opened by hand. The player's word for the strip was that the
+hexagon is fixed.
+
+```
+ds2-menu-row: tab built group=0x3110ec0 proxy=0x7fffe98f85f0 rows=4 vtable=0x1410b6658 builds=1
+ds2-menu-row: caret moved definition=0xf221 y=244.65->295.35 rows=4
+ds2-menu-row: strip hexagon copied slot=11 x=325.05 -- the sixth tab's own plate, drawn again one
+              tab along, and the sixth tab keeps the one it had
+ds2-menu-row: strip furniture moved what=rb-label slot=13 x=401.05
+ds2-menu-row: strip cell added id=0x1eaba8 x=319.05 depth=93 children=18->22
+              subtree=0x1eaceb@5+x48.1 icon=0xe268@9 definition=0xe265
+ds2-menu-row: icon built shape=0xe268 source=283.6..337.6 screen=337.6..391.6
+ds2-menu-row: chevron moved quad=0 x=1357.45 -> 1411.45
+ds2-menu-row: caption label=0x1eac4a subtree=0x1eaceb written=1
+ds2-menu-row: caption label=0x1eac4b subtree=0x1eaceb written=2
+ds2-menu-row: banner rect=0x50 before=[914.2 1.1000061 972 342.35] y1=342.35->393.05 writes=1
+ds2-menu-row: strip count raised tabs=6 -> items=7 tab-rows=4 raises=1
+```
+
+Four rows on a tab of its own, each with its own caption -- Quit Game, Save Game to File, Load
+Character from File, Load from URL -- under a panel sized for four and a hexagon of its own. The
+`subtree=0x1eaceb` on both caption lines is the component that was resolving to the System tab's
+container before, and `+x48.1` on the cell line is the panel's transform after the pitch was added
+to `-5.90`.
+
+What this does not say anything about: pressing any of the four. The rows draw and they are
+labelled; whether the save, the load and the URL row do what they say is
+`ds2-mods-rs-h4q`'s question and a separate run.
