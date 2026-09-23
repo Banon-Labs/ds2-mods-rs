@@ -999,11 +999,17 @@ function snapReporting(position) {
   snapPoint.add(8).writeFloat(position[2]);
   snapPoint.add(12).writeFloat(0);
 
-  let best = Infinity;
+  // A SENTINEL, NOT `Infinity`. The comparison below decides whether a hit is kept, and
+  // `anything < NaN` is false -- so a cutoff that is quietly NaN discards EVERY hit while the
+  // call that produced it looks perfectly healthy in a log. `report.id === null` is tested first
+  // so the first hit is kept on its own terms rather than on the arithmetic.
+  let best = 0;
   for (let index = 0; index < bounded; index += 1) {
     const graph = readPointer(world.add(NV_NAVI_GRAPH_WORLD_GRAPHS_OFFSET + index * 8));
     if (graph === null) continue;
-    snapDistance.writeFloat(Infinity);
+    // FLT_MAX, written as a literal. `writeFloat(Infinity)` is what the engine's own callers do
+    // not do, and what comes back out of a 32-bit slot after it is not worth relying on.
+    snapDistance.writeFloat(3.4028234663852886e38);
     const id = nearestGraphId(graph, snapPoint, NAVI_GRAPH_SNAP_RADIUS_METRES,
       NAVI_GRAPH_SNAP_FILTER, snapDistance);
     // SQUARED distances on both sides -- the callee writes the square and takes the root only to
@@ -1017,7 +1023,7 @@ function snapReporting(position) {
         ' -> id ' + (id === NAVI_GRAPH_ID_NONE ? 'MISS' : '0x' + id.toString(16)) +
         ', distance^2 ' + distance);
     }
-    if (id !== NAVI_GRAPH_ID_NONE && distance < best) {
+    if (id !== NAVI_GRAPH_ID_NONE && (report.id === null || distance < best)) {
       best = distance;
       report.id = id;
       report.chosen = index;
