@@ -177,6 +177,34 @@ KEY_SHOW_UNAVAILABLE = "show_unavailable"
 MENU_ROW_SECTION = "menu_row"
 KEY_MENU_ROW_ENABLED = "enabled"
 
+#: Mirrors `KEY_ROWS` in `crates/ds2-loader/src/menu_row.rs`. The modern key: a LIST, because the
+#: System tab holds two added rows and there are four that want one. Emitted only when `--rows` was
+#: passed -- present, it overrides `enabled` outright, so writing it unconditionally would make
+#: `--menu-row` silently stop working.
+KEY_MENU_ROW_ROWS = "rows"
+
+#: Mirrors `Row::name` for every variant of `EVERY_ROW` in `crates/ds2-loader/src/menu_row.rs`, in
+#: the same order. `--selftest` checks each one appears there, because a name this script offers and
+#: the DLL does not know is a row that arms nothing and says so only in a log nobody is reading yet.
+MENU_ROW_ROW_NAMES = (
+    "quit-to-desktop",
+    "load-build-from-url",
+    "load-character-from-file",
+    "save-game-to-file",
+)
+
+#: Mirrors `MAX_ADDED_ROWS` in `crates/ds2-menu-row/src/api.rs`: the game's own item-vector capacity
+#: (5) less the rows the System tab ships (3). Named here so `--rows` can refuse a third row at the
+#: command line instead of leaving it to be refused in a log.
+MENU_ROW_MAX_ADDED = 2
+
+#: The prefix `ds2-save-file` writes. Grep for it when an export or a pick disappoints.
+SAVE_FILE_LOG_PREFIX = "ds2-save-file:"
+
+#: Mirrors `HANDOFF_FILE_NAME` in `crates/ds2-save-file-core/src/handoff.rs`. The one-line file the
+#: Load Character from File row writes and the loader consumes on the NEXT launch.
+SAVE_FILE_HANDOFF_NAME = "ds2-load-next-save.txt"
+
 #: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/build_import.rs`.
 BUILD_IMPORT_SECTION = "build_import"
 
@@ -1081,6 +1109,7 @@ def config_text(
     save_redirect: str | None = None,
     menu_row: bool = False,
     build_import: bool = False,
+    menu_row_rows: tuple[str, ...] | None = None,
     inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
@@ -1099,6 +1128,20 @@ def config_text(
         f'{KEY_SAVE_REDIRECT_PATH} = "' + save_redirect.replace("\\", "\\\\") + '"'
         if save_redirect is not None
         else f'# {KEY_SAVE_REDIRECT_PATH} = "Z:\\\\home\\\\you\\\\DS2\\\\DarkSoulsII\\\\0110000100000000"'
+    )
+    # THE LIST KEY OVERRIDES `enabled`, so it is emitted only when asked for and COMMENTED OUT
+    # otherwise -- the file still shows the spelling and every name it accepts, which is what a
+    # commented default is for. Writing `rows = []` by default would turn `--menu-row` into a no-op
+    # with nothing in the file to explain it.
+    menu_row_rows_line = (
+        f"{KEY_MENU_ROW_ROWS} = ["
+        + ", ".join(f'"{name}"' for name in menu_row_rows)
+        + "]"
+        if menu_row_rows is not None
+        else f"# {KEY_MENU_ROW_ROWS} = ["
+        + ", ".join(f'"{name}"' for name in MENU_ROW_ROW_NAMES[:MENU_ROW_MAX_ADDED])
+        + f"]   # at most {MENU_ROW_MAX_ADDED} of: "
+        + ", ".join(MENU_ROW_ROW_NAMES)
     )
     crash_banner = (
         ""
@@ -1424,6 +1467,36 @@ def config_text(
 # the two lines that say the row should exist, and `row-extent` on the tab line is what says it
 # does.
 {KEY_MENU_ROW_ENABLED} = {str(menu_row).lower()}
+#
+# WHICH ROWS, and why this is a list. The tab's item vector is a `DLKR::DLFixedVector` of capacity
+# five -- the builders spell it `if (5 < newCount) panic("out of memory.")` -- and the System tab
+# ships three, so exactly {MENU_ROW_MAX_ADDED} rows can be added and there are {len(MENU_ROW_ROW_NAMES)} that want one. Naming a
+# third is refused at registration with the numbers in the log, rather than by the game's allocator
+# during a menu open. A name this table does not know arms NOTHING and is reported: a typo must lose
+# a row you asked for, never add one you did not.
+#
+# Present, this key OVERRIDES `{KEY_MENU_ROW_ENABLED}` above and `[{BUILD_IMPORT_SECTION}] {KEY_BUILD_IMPORT_ENABLED}` below; absent,
+# those two still mean what they always did. The log line says which of the two a run read.
+#
+#   quit-to-desktop           quits to DESKTOP with no confirmation and no save
+#   load-build-from-url       the soulsplanner row described under [{BUILD_IMPORT_SECTION}]
+#   load-character-from-file  picks a .sl2/.zip/.7z/.rar for the NEXT launch to load
+#   save-game-to-file         asks the game to save, then copies the container where you say
+#
+# The load row takes effect on the next launch and not this one, and that is the GAME's doing rather
+# than a shortfall: DS2 saves on the way out of a game, so a session that re-points the save
+# directory and then quits writes the CURRENT character into the staged copy, and the LOAD GAME that
+# follows reads back the character you were replacing. So the row writes `{SAVE_FILE_HANDOFF_NAME}`
+# beside this file and the loader arms the redirect from it at attach, then DELETES it -- a handoff
+# that persisted would put you in somebody else's save on every launch from then on. Delete that file
+# by hand to cancel a pick.
+#
+# The save row refuses to write onto the container the game is playing, which is the DEFAULT path to
+# that mistake: its dialog opens in the save's own folder with the save's own name already filled in.
+# `{SAVE_FILE_LOG_PREFIX} exported bytes=... destination=...` is the line that says a copy happened,
+# and `... THE FLUSH WAS NEVER OBSERVED` is the one that says the copy is your last autosave rather
+# than the moment you pressed the row.
+{menu_row_rows_line}
 
 [{BUILD_IMPORT_SECTION}]
 # NOT STARTUP either, and a different kind of risk from the row above it. This one adds a "Load from
@@ -1566,6 +1639,7 @@ def write_config(
     save_redirect: str | None = None,
     menu_row: bool = False,
     build_import: bool = False,
+    menu_row_rows: tuple[str, ...] | None = None,
     inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
@@ -1596,6 +1670,7 @@ def write_config(
         save_redirect,
         menu_row,
         build_import,
+        menu_row_rows,
         inventory_sort,
         inventory_sort_key,
         inventory_sort_pad,
@@ -1684,6 +1759,7 @@ def dry_run(
     save_redirect: str | None = None,
     menu_row: bool = False,
     build_import: bool = False,
+    menu_row_rows: tuple[str, ...] | None = None,
     inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
@@ -1732,6 +1808,7 @@ def dry_run(
             save_redirect,
             menu_row,
             build_import,
+            menu_row_rows,
             inventory_sort,
             inventory_sort_key,
             inventory_sort_pad,
@@ -1775,6 +1852,7 @@ def dry_run(
                 block_sockets,
                 menu_row=menu_row,
                 build_import=build_import,
+                menu_row_rows=menu_row_rows,
                 inventory_sort=inventory_sort,
                 inventory_sort_key=inventory_sort_key,
                 inventory_sort_pad=inventory_sort_pad,
@@ -1841,6 +1919,7 @@ def launch(
     save_redirect: str | None = None,
     menu_row: bool = False,
     build_import: bool = False,
+    menu_row_rows: tuple[str, ...] | None = None,
     inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
@@ -1884,6 +1963,7 @@ def launch(
         save_redirect,
         menu_row,
         build_import,
+        menu_row_rows,
         inventory_sort,
         inventory_sort_key,
         inventory_sort_pad,
@@ -2523,6 +2603,57 @@ def selftest() -> int:
         f"({MENU_ROW_LOG_PREFIX})",
     )
 
+    # THE ROW LIST. Four names against two slots, so the count and every spelling are checked here
+    # rather than discovered in a log after a launch. `--rows` is the only key in this file whose
+    # value is a LIST, and the reason is the game's item vector; see `MENU_ROW_MAX_ADDED`.
+    for name in MENU_ROW_ROW_NAMES:
+        check(
+            f'"{name}"' in menu_row_src,
+            f"the DLL knows the row name this script offers ({name})",
+        )
+    check(
+        f'"{KEY_MENU_ROW_ROWS}"' in menu_row_src,
+        f"the DLL reads the list key this script writes ({KEY_MENU_ROW_ROWS})",
+    )
+    # The ceiling this script refuses on is the one the DLL refuses on, spelled in the crate that
+    # owns it. A script that allowed a third row would produce a config whose third row vanishes.
+    menu_row_api = (REPO_ROOT / "crates/ds2-menu-row/src/api.rs").read_text(encoding="utf-8")
+    check(
+        f"assert_eq!(MAX_ADDED_ROWS, {MENU_ROW_MAX_ADDED});" in menu_row_api,
+        f"MAX_ADDED_ROWS is still {MENU_ROW_MAX_ADDED}, which is what --rows refuses above",
+    )
+    values, _ = parse_config(config_text("off"))
+    check(
+        (MENU_ROW_SECTION, KEY_MENU_ROW_ROWS) not in values,
+        f"[{MENU_ROW_SECTION}] {KEY_MENU_ROW_ROWS} is COMMENTED OUT unless --rows was passed -- "
+        "present, it overrides the enabled keys, so writing it by default would silently disable "
+        "--menu-row",
+    )
+    values, _ = parse_config(
+        config_text("off", menu_row_rows=("save-game-to-file", "quit-to-desktop"))
+    )
+    check(
+        values.get((MENU_ROW_SECTION, KEY_MENU_ROW_ROWS))
+        == '["save-game-to-file", "quit-to-desktop"]',
+        "--rows writes the names IN ORDER, because that is the order they appear on screen",
+    )
+
+    # THE HANDOFF FILE, named in this config's prose and written by the DLL. A drifted spelling would
+    # send a player looking for a file that is never created, and leave the real one uncollected.
+    handoff_src = (REPO_ROOT / "crates/ds2-save-file-core/src/handoff.rs").read_text(
+        encoding="utf-8"
+    )
+    check(
+        f'"{SAVE_FILE_HANDOFF_NAME}"' in handoff_src,
+        f"the DLL writes the handoff file this config names ({SAVE_FILE_HANDOFF_NAME})",
+    )
+    save_file_lib = (REPO_ROOT / "crates/ds2-save-file/src/lib.rs").read_text(encoding="utf-8")
+    check(
+        f'"{SAVE_FILE_LOG_PREFIX}"' in save_file_lib,
+        f"the DLL writes the prefix this config tells the reader to look for "
+        f"({SAVE_FILE_LOG_PREFIX})",
+    )
+
     # THE SAME CONTRACT FOR THE BUILD-IMPORT ROW. It is a separate section on purpose -- one row
     # measures whether a fourth row draws, the other opens a Steam overlay and talks to the network
     # -- so a run that misbehaves is attributable to one of them by editing one line.
@@ -2562,23 +2693,31 @@ def selftest() -> int:
         f"the DLL writes the prefix this config tells the reader to look for "
         f"({BUILD_IMPORT_LOG_PREFIX})",
     )
-    # THE ROW MUST BE REGISTERED BEFORE THE REGISTRY IS SEALED, and that is an ORDERING in the
-    # loader rather than anything this file writes. `ds2_menu_row::install` seals as its first act,
-    # so a row registered after it is a row that silently never appears -- exactly the failure that
-    # would look like "the overlay did not open".
+    # EVERY ROW IS REGISTERED FROM ONE PLACE, and that is an invariant in the loader rather than
+    # anything this file writes. `ds2_menu_row::install` seals the registry as its first act, so a row
+    # registered after it is a row that silently never appears -- and a row registered from some other
+    # `install_*` would take a slot out of the order a `rows` list asked for. `install_menu_row` loops
+    # over the selection and is the only caller of `register_row`; the checks below are what say so.
     loader_src = (REPO_ROOT / "crates/ds2-loader/src/lib.rs").read_text(encoding="utf-8")
     check(
-        loader_src.count("install_build_import();") == 2,
-        "both Arxan arms register the build-import row, or the A/B pair stops being comparable",
+        loader_src.count("install_menu_row();") == 2,
+        "both Arxan arms register the rows, or the A/B pair stops being comparable",
     )
     check(
-        all(
-            block.index("install_build_import();") < block.index("install_menu_row();")
-            for block in [loader_src]
-            if "install_build_import();" in block
-        ),
-        "install_build_import runs BEFORE install_menu_row, which seals the row registry",
+        loader_src.count("register_row(*row);") == 1
+        and loader_src.count("fn register_row(") == 1,
+        "one registration loop and one `register_row`, so the list's order is the screen's order",
     )
+    for callee in (
+        "ds2_build_import::register(",
+        "ds2_save_file::register_import_row(",
+        "ds2_save_file::register_export_row(",
+        "ds2_menu_row::add_row(",
+    ):
+        check(
+            loader_src.count(callee) == 1,
+            f"{callee}...) is reached from exactly one place, which is `register_row`",
+        )
 
     # THE SORT REBINDING, whose whole risk is that it CALLS a shipped function on the game thread
     # rather than only patching one. Same two questions as every other feature: is it off unless
@@ -3090,6 +3229,25 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--rows",
+        dest="menu_row_rows",
+        metavar="NAME[,NAME]",
+        default=None,
+        help=(
+            "WHICH extra rows go on the pause menu's System tab, as a comma-separated list. Writes "
+            f"`[{MENU_ROW_SECTION}] {KEY_MENU_ROW_ROWS}`, which OVERRIDES both --menu-row and "
+            "--build-import for the run. At most "
+            f"{MENU_ROW_MAX_ADDED}: the tab's item vector is a DLFixedVector of capacity five and "
+            "the game ships three rows, so a third is refused. Names: "
+            + ", ".join(MENU_ROW_ROW_NAMES)
+            + ". `load-character-from-file` takes effect on the NEXT launch -- it writes "
+            f"{SAVE_FILE_HANDOFF_NAME} beside the config and the loader consumes it at attach, "
+            "because DS2 saves on the way out of a game and an in-session swap gets overwritten by "
+            "your own character. `save-game-to-file` asks the game to save and then copies the "
+            f"container where you say; look for `{SAVE_FILE_LOG_PREFIX} exported bytes=...`."
+        ),
+    )
+    parser.add_argument(
         "--build-import",
         dest="build_import",
         action="store_true",
@@ -3197,6 +3355,30 @@ def main() -> int:
     if args.selftest:
         return selftest()
 
+    # REFUSED HERE, WITH THE NUMBERS, rather than written into a config for the DLL to refuse in a
+    # log. The DLL refuses too -- it has to, since a player can edit the file by hand -- but a name
+    # or a count this script could have caught is a run that boots, looks wrong, and costs a launch.
+    menu_row_rows: tuple[str, ...] | None = None
+    if args.menu_row_rows is not None:
+        named = tuple(
+            item.strip() for item in args.menu_row_rows.split(",") if item.strip()
+        )
+        unknown = [name for name in named if name not in MENU_ROW_ROW_NAMES]
+        if unknown:
+            parser.error(
+                "--rows does not know "
+                + ", ".join(repr(name) for name in unknown)
+                + "; the names are "
+                + ", ".join(MENU_ROW_ROW_NAMES)
+            )
+        if len(set(named)) > MENU_ROW_MAX_ADDED:
+            parser.error(
+                f"--rows names {len(set(named))} rows and the System tab holds "
+                f"{MENU_ROW_MAX_ADDED}: its item vector is a DLFixedVector of capacity 5 and the "
+                "game ships 3 rows on that tab"
+            )
+        menu_row_rows = named
+
     # BEFORE either dispatch, and printed, because it is a decision the run is made on: the slot
     # belongs to the redirected save rather than to this account, so it cannot be resolved from the
     # command line alone. See `resolve_continue_slot`.
@@ -3228,6 +3410,7 @@ def main() -> int:
             args.save_redirect,
             args.menu_row,
             args.build_import,
+            menu_row_rows,
             args.inventory_sort,
             args.inventory_sort_key,
             args.inventory_sort_pad,
@@ -3257,6 +3440,7 @@ def main() -> int:
         args.save_redirect,
         args.menu_row,
         args.build_import,
+        menu_row_rows,
         args.inventory_sort,
         args.inventory_sort_key,
         args.inventory_sort_pad,
