@@ -483,9 +483,30 @@ fn install_save_redirect() {
             save_redirect::KEY_PATH
         ));
     }
-    if config.armable()
-        && let Some(path) = config.path.as_deref()
-    {
+    // THE HANDOFF IS READ HERE AND IT WINS. A file left by the pause menu's Load Character from File
+    // row is a pick the player made deliberately, one launch ago, and it outranks a `path` that has
+    // been sitting in the config file since whenever. `take_handoff` DELETES the file as it reads it,
+    // so this applies to exactly this launch -- see `ds2_save_file::import` for why it has to be a
+    // launch boundary at all rather than happening in the session that asked.
+    //
+    // Taken unconditionally, even on a run whose `[menu_row] rows` does not include that row: the
+    // file exists because somebody asked for it, and leaving it unconsumed would arm it on some later
+    // launch nobody connects to the request.
+    ds2_save_file::set_logger(log_line);
+    let handoff = ds2_save_file::take_handoff();
+    let source = handoff
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned())
+        .or_else(|| config.armable().then(|| config.path.clone()).flatten());
+    if handoff.is_some() && config.path.is_some() {
+        log_line(format_args!(
+            "{} the handoff OVERRIDES [{}] {} for this launch",
+            ds2_save_redirect::LOG_PREFIX,
+            save_redirect::CONFIG_SECTION,
+            save_redirect::KEY_PATH
+        ));
+    }
+    if let Some(path) = source.as_deref() {
         // The staging directory lives beside the executable, next to the log and the config, for
         // the same reason those do: it is the one directory this DLL already knows it can write.
         // `config_file_path` is `<Game>/ds2-mods.toml`, so its parent is the game directory.
@@ -507,7 +528,7 @@ fn install_save_redirect() {
     // `scripts/ds2-arxan-chain.py` to sit at its own `48 89 5c 24 08` prologue rather than behind
     // an Arxan redirect, and installed here -- after `neuter_arxan` -- rather than from `DllMain`.
     let outcome = unsafe { ds2_save_redirect::install() };
-    if config.armable() && !outcome.hooked {
+    if source.is_some() && !outcome.hooked {
         // Worth shouting about for the same reason the offline line is: a silent failure here
         // means the player believes they are playing a donor save and is in fact playing -- and
         // writing to -- their own.
@@ -673,21 +694,15 @@ fn install_title_menu() {
 /// BEFORE it. `ds2_menu_row::install` seals the registry as its first act, and a row registered
 /// afterwards is a row that silently never appears.
 fn install_build_import() {
-    let config = build_import::BuildImportConfig::load();
-    log_line(format_args!("{}", config.describe()));
-    if !config.enabled {
-        return;
-    }
-    match ds2_build_import::register(log_line) {
-        Ok(id) => log_line(format_args!(
-            "{} registered {id:?} caption=\"Load from URL\" tab=Quit",
-            ds2_build_import::LOG_PREFIX
-        )),
-        Err(error) => log_line(format_args!(
-            "{} NOT REGISTERED: {error} -- no row will be added",
-            ds2_build_import::LOG_PREFIX
-        )),
-    }
+    // The registration itself moved to [`install_menu_row`], which registers every selected row in
+    // one loop so the order a `[menu_row] rows` list names is the order they appear. What is left
+    // here is the line that says what `[build_import] enabled` was set to -- still worth writing,
+    // because that key is now only consulted when `rows` is absent, and a player whose `enabled =
+    // true` stopped mattering deserves to see both lines in the same log.
+    log_line(format_args!(
+        "{}",
+        build_import::BuildImportConfig::load().describe()
+    ));
 }
 
 /// Bind a button to the game's own inventory sort dialog, if `<Game>/ds2-mods.toml` asked for it.
@@ -733,8 +748,11 @@ fn install_menu_row() {
     let config = menu_row::MenuRowConfig::load();
     log_line(format_args!("{}", config.describe()));
     ds2_menu_row::set_logger(log_line);
-    if config.enabled {
-        register_quit_row();
+    // ONE REGISTRATION SITE, IN THE ORDER THE LIST NAMES. The rows appear below the shipped ones in
+    // registration order, so the list a player writes is the order they see -- which only holds if
+    // nothing else registers a row behind this loop's back.
+    for row in &config.rows {
+        register_row(*row);
     }
 
     // SAFETY: the target is a `.pdata` function start recorded in `ds2-rva`, resolved against the
@@ -751,36 +769,40 @@ fn install_menu_row() {
     }
 }
 
-/// The quit-to-desktop row, registered the way any other crate registers one.
+/// Register one selected row, through whichever crate owns it.
 ///
-/// REGISTERED THROUGH THE PUBLIC API, not hardcoded inside the crate. This is the same call
-/// `ds2-build-import` makes, and it is here rather than in `ds2-menu-row` on purpose: an API that
-/// is only good enough for someone else's row and not for our own would look fine until someone
-/// else tried it.
-fn register_quit_row() {
-    // The tint is the one three runs settled -- see `ds2_rva::FLO_ADDED_ROW_TINT_STRENGTH` for the
-    // ramp and what each value looked like on screen.
-    let registered = ds2_menu_row::add_row(ds2_menu_row::RowSpec {
-        tab: ds2_menu_row::Tab::Quit,
-        caption: "Quit Game",
-        icon: ds2_rva::FLO_QUIT_ICON_DEFINITION,
-        tint: Some(ds2_menu_row::Tint {
-            rgb: ds2_rva::FLO_ADDED_ROW_HUE,
-            strength: ds2_rva::FLO_ADDED_ROW_TINT_STRENGTH,
+/// EVERY ROW GOES THROUGH THE PUBLIC API, including the one `ds2-menu-row` itself supplies the
+/// action for. That is deliberate: an API only good enough for someone else's row and not for our own
+/// would look fine until someone else tried it. The refusal is logged in the row's own name, because
+/// `TabFull` on the third row and a hook that never installed are different problems.
+fn register_row(row: menu_row::Row) {
+    let registered = match row {
+        // The tint is the one three runs settled -- see `ds2_rva::FLO_ADDED_ROW_TINT_STRENGTH` for
+        // the ramp and what each value looked like on screen.
+        menu_row::Row::QuitToDesktop => ds2_menu_row::add_row(ds2_menu_row::RowSpec {
+            tab: ds2_menu_row::Tab::Quit,
+            caption: "Quit Game",
+            icon: ds2_rva::FLO_QUIT_ICON_DEFINITION,
+            tint: Some(ds2_menu_row::Tint {
+                rgb: ds2_rva::FLO_ADDED_ROW_HUE,
+                strength: ds2_rva::FLO_ADDED_ROW_TINT_STRENGTH,
+            }),
+            on_confirm: ds2_menu_row::quit_to_desktop,
         }),
-        on_confirm: ds2_menu_row::quit_to_desktop,
-    });
+        menu_row::Row::LoadBuildFromUrl => ds2_build_import::register(log_line),
+        menu_row::Row::LoadCharacterFromFile => ds2_save_file::register_import_row(log_line),
+        menu_row::Row::SaveGameToFile => ds2_save_file::register_export_row(log_line),
+    };
     match registered {
         Ok(id) => log_line(format_args!(
-            "{} registered {id:?} caption=\"Quit Game\" tab=Quit -- {} of {} slots on that tab \
-             remain",
+            "{} registered {id:?} row={} tab=Quit",
             ds2_menu_row::LOG_PREFIX,
-            ds2_menu_row::Tab::Quit.capacity() - 1,
-            ds2_menu_row::Tab::Quit.capacity()
+            row.name()
         )),
         Err(error) => log_line(format_args!(
-            "{} NOT REGISTERED: {error} -- no row will be added",
-            ds2_menu_row::LOG_PREFIX
+            "{} NOT REGISTERED row={}: {error}",
+            ds2_menu_row::LOG_PREFIX,
+            row.name()
         )),
     }
 }

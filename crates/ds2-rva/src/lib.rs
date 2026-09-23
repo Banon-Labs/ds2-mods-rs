@@ -4748,7 +4748,48 @@ pub const FE_OPEN_ATTRIBUTE_MENU: u32 = 0x0019_92c0;
 ///
 /// `saveLoadSystem` is `[GAME_MANAGER_IMP + `[`SAVE_LOAD_SYSTEM_OFFSET`]`]`. How a change is
 /// persisted without waiting for a bonfire.
+///
+/// # It RETURNS VOID, and it does not perform a save
+///
+/// Transcribed in full, because reading it as "save now, tell me if it worked" is the mistake it
+/// invites:
+///
+/// ```asm
+/// 0x1402e7410:  cmp  edx,0xe                 ; kind 14 is its own flag and nothing else
+///               jne  0x1402e741d
+///               mov  BYTE PTR [rcx+0x1a9],1
+///               ret
+/// 0x1402e741d:  cmp  edx,[rcx+0x68]          ; keep the LOWEST kind asked for
+///               jge  0x1402e7425
+///               mov  [rcx+0x68],edx
+/// 0x1402e7425:  mov  BYTE PTR [rcx+0x1a2],1  ; "a save is wanted"
+///               cmp  edx,0x2
+///               jne  0x1402e7438
+///               mov  BYTE PTR [rcx+0x1a3],1  ; and kind 2 sets a second flag
+/// 0x1402e7438:  repz ret
+/// ```
+///
+/// Three byte writes and a `min`. **There is no return value to check** -- a caller that branches on
+/// RAX is branching on whatever the last call left there -- and the save itself happens later, from
+/// `GameManagerImp`'s master update, exactly like the shutdown byte `ds2-menu-row` writes. So the
+/// only way to know a save HAPPENED is to watch something else: the interlock at
+/// [`SAVE_LOAD_SYSTEM_STATE_OFFSET`], or the file on disk.
+///
+/// Not an Arxan redirect. `scripts/ds2-arxan-chain.py` reports `UNKNOWN` at hop 0 only because its
+/// prologue table does not carry `83 fa` (`cmp edx, imm8`); the entry is ordinary code rather than
+/// the five-byte `e9` stub a redirected entry keeps in the deobfuscated image.
 pub const SAVE_LOAD_REQUEST_SAVE: u32 = 0x002e_7410;
+
+/// The three bytes [`SAVE_LOAD_REQUEST_SAVE`] must begin with, or a caller refuses to call it.
+///
+/// `cmp edx,0xe` -- the kind-14 special case, which is the first thing the function does.
+pub const SAVE_LOAD_REQUEST_SAVE_PROLOGUE: [u8; 3] = [0x83, 0xfa, 0x0e];
+
+/// The `kind` [`SAVE_LOAD_REQUEST_SAVE`] is asked for when the point is "persist the character now".
+///
+/// `2` is the value that sets BOTH flags the function can set (`+0x1a2` and `+0x1a3`), and it is the
+/// kind the pump at `0x1402e6230` accepts alongside `4`.
+pub const SAVE_LOAD_REQUEST_KIND_CHARACTER: u32 = 2;
 
 // =================================================================================================
 // THE INVENTORY TAB'S SORT DIALOG, AND THE OBJECT THAT OWNS IT

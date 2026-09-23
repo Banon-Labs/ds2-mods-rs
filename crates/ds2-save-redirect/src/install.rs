@@ -3,8 +3,8 @@
 use core::ffi::c_void;
 use std::os::windows::ffi::OsStrExt as _;
 use std::path::PathBuf;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use ds2_hook::{MH_EnableHook, MH_Initialize, MH_STATUS, MhHook};
 
@@ -45,6 +45,14 @@ static STAGING_ROOT: OnceLock<PathBuf> = OnceLock::new();
 /// `None` means staging was attempted and failed, which is remembered so a failing archive is not
 /// re-opened on every call to a function the game invokes more than once per boot.
 static STAGED: OnceLock<Option<Vec<u16>>> = OnceLock::new();
+
+/// The directory the detour last left behind, redirected or not.
+///
+/// Recorded in BOTH arms, because the crate that wants it -- the Save Game to File row -- needs the
+/// directory the game is actually using, and whether that is ours or the game's own is exactly the
+/// distinction it must not have to care about. A `Mutex<Option<..>>` rather than a `OnceLock`: the
+/// answer changes if a redirect is armed, and the last one written is the true one.
+static LIVE_DIRECTORY: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 /// The live module base, resolved once in [`install`] so the detour never has to.
 static MODULE_BASE: AtomicUsize = AtomicUsize::new(0);
@@ -89,6 +97,29 @@ pub fn set_source(source: &str, staging_root: PathBuf) -> bool {
 /// Whether a source was armed.
 pub fn armed() -> bool {
     SOURCE.get().is_some()
+}
+
+/// The directory the game's save-directory builder last produced, redirected or not.
+///
+/// `None` before the detour has run once, which on a live pause menu it always has -- the game
+/// builds a save path to find out whether there is anything to load. The path is the WINDOWS form
+/// the game itself built, ending in a separator.
+pub fn live_directory() -> Option<PathBuf> {
+    LIVE_DIRECTORY.lock().ok()?.clone()
+}
+
+/// Remember the directory the game is using, for the crates that need to find the `.sl2` in it.
+///
+/// Called with whatever `read_wstring` produced, which on a failed read is one of its own
+/// `<...>` placeholders rather than a path -- so those are dropped instead of being remembered as a
+/// directory named `<null>`.
+fn record_live_directory(path: &str) {
+    if path.is_empty() || path.starts_with('<') {
+        return;
+    }
+    if let Ok(mut live) = LIVE_DIRECTORY.lock() {
+        *live = Some(PathBuf::from(path));
+    }
 }
 
 /// Read a null-terminated UTF-16 string the game handed us.
@@ -206,9 +237,12 @@ unsafe extern "system" fn detour_save_dir(out: *mut c_void, steamid: *const u16)
                 unsafe { std::mem::transmute::<usize, SaveDirFn>(trampoline) };
             unsafe { original(out, steamid) };
         }
+        // SAFETY: the original has seated the caller's string, or nothing has and it is still the
+        // constructed one the caller passed in.
+        let produced = unsafe { read_wstring(out) };
+        record_live_directory(&produced);
         log(format_args!(
-            "{LOG_PREFIX} save-dir passthrough reason={note} path={}",
-            unsafe { read_wstring(out) }
+            "{LOG_PREFIX} save-dir passthrough reason={note} path={produced}"
         ));
     };
 
@@ -244,9 +278,11 @@ unsafe extern "system" fn detour_save_dir(out: *mut c_void, steamid: *const u16)
 
     // Read it back rather than logging what was intended. The two differ exactly when this is
     // broken, which is the only time the line matters.
+    // SAFETY: the assign above seated the caller's own constructed string.
+    let produced = unsafe { read_wstring(out) };
+    record_live_directory(&produced);
     log(format_args!(
-        "{LOG_PREFIX} save-dir redirected steam-id={steam_id} path={}",
-        unsafe { read_wstring(out) }
+        "{LOG_PREFIX} save-dir redirected steam-id={steam_id} path={produced}"
     ));
 }
 
