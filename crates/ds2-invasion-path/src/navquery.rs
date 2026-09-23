@@ -511,17 +511,25 @@ pub(crate) unsafe fn poll(planner: usize) -> Poll {
     if flags & ds2_rva::NV_ROUTE_PLANNER_FLAG_READY == 0 {
         return Poll::Pending;
     }
-    // SAFETY: as above.
-    let Some(route) =
-        (unsafe { safe_read_usize(planner + ds2_rva::NV_ROUTE_PLANNER_ROUTE_OFFSET) })
-    else {
-        return Poll::Lost;
-    };
-    if route == 0 {
-        // READY without a route is not a shape the engine produces, but it is cheaper to treat it
-        // as a failed search than to explain a null dereference afterwards.
-        return Poll::Failed;
-    }
+    // THE ROUTE IS EMBEDDED AT `+0x48`. IT IS NOT A POINTER, AND READING IT AS ONE COST A RUN.
+    //
+    // This used to be `safe_read_usize(planner + 0x48)`, decoding from the VALUE there. The
+    // engine's own consumer settles it -- `0x14042ee40`, the navmesh controller's destination
+    // step, takes the planner into `lVar6` and passes the ADDRESS:
+    //
+    // ```text
+    // lVar6 = *(longlong *)(param_1 + 0x10);                 ; the NvRoutePlanner
+    // FUN_140bb5cd0(..., lVar6 + 0x48);                      ; and 0x140bb5cd0 reads param_4+0x18
+    // FUN_140bb3a10(*(longlong *)(param_1 + 0x10) + 0x48);   ; the clear path, same address-of
+    // ```
+    //
+    // so the segment count this decoder wants is at `planner + 0x60`, not at `[planner+0x48]+0x18`.
+    // Reading a pointer out of `+0x48` yields the route's own first field; `decode` then walks
+    // from an address that is not a route, returns `None`, and this function reports that as
+    // `Poll::Failed` -- WHICH IS INDISTINGUISHABLE IN THE LOG FROM "there is genuinely no way to
+    // walk there". Every successful search in the one live session that ran this looked like a
+    // refused one, and the capability mask took the blame.
+    let route = planner + ds2_rva::NV_ROUTE_PLANNER_ROUTE_OFFSET;
     // Read before decoding: the decoder walks the same structure, and a count that disagrees
     // with the number of points it produced is the single most useful thing the log can say
     // about a route that came back wrong.

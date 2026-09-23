@@ -402,6 +402,8 @@ function spawnOne(system, id, position, direction) {
 
 let navTicks = 0;
 let navThread = null;
+/// The `NvNavigationSystem` the engine handed this tick, from `rcx`.
+let navSystemAt = null;
 let threadsCompared = false;
 /// What the stage asked for and has not been given yet. Cleared the instant it is served, so a
 /// stage runs ONCE per reload rather than sixty times a second.
@@ -616,26 +618,25 @@ function layNext(system, batch) {
   return placed;
 }
 
-/// Points every `step` metres along the straight line from `from` to `to`.
+/// The one search this agent ever has in flight.
 ///
-/// A STRAIGHT LINE, NOT A ROUTE, and the difference matters: this proves the spawn and the
-/// cadence, not the pathfinding. A line through a wall is still a line. The walkable route is
-/// `NvRoutePlanner`'s job and is separately stuck on `NO ROUTE` -- bd `ds2-mods-rs-zbo`.
-function resample(from, to, step, most) {
-  const total = apart(from, to);
-  if (!(total > 1e-6)) return [];
-  const count = Math.min(most, Math.floor(total / step));
-  const spots = [];
-  for (let index = 1; index <= count; index += 1) {
-    const t = (index * step) / total;
-    spots.push([
-      from[0] + (to[0] - from[0]) * t,
-      from[1] + (to[1] - from[1]) * t,
-      from[2] + (to[2] - from[2]) * t,
-    ]);
-  }
-  return spots;
-}
+/// NO STRAIGHT-LINE FALLBACK, deliberately. There used to be one, and a straight line is exactly
+/// the thing being fixed -- it runs through walls and hangs over gaps. Worse, laying it when the
+/// planner refuses would HIDE the refusal, which is the failure that most needs to be visible.
+/// The sibling does the same: no route, no trail, and the arrow stands in.
+const route = {
+  /// The `NvRoutePlanner` this agent created and linked onto the navigation system's list.
+  planner: null,
+  /// Is a search outstanding, and for how many passes.
+  pending: false,
+  waited: 0,
+  /// Where the trail's points came from, for the heartbeat: `none` | `navmesh`.
+  source: 'none',
+  saidPlanner: false,
+  saidSnap: false,
+  saidRoute: false,
+  saidNoRoute: false,
+};
 
 /// How far the character may move in one pass before it counts as a load rather than a walk.
 ///
@@ -645,6 +646,94 @@ function resample(from, to, step, most) {
 /// rather than put out. Chosen well above anything a player can cover in a pass and well below
 /// any real transition.
 const LOAD_JUMP_METRES = 100.0;
+
+/// Snap both ends and ask the planner for a walkable route between them.
+///
+/// The snap line is printed ONCE rather than twice a second, because a line that repeats sixty
+/// times is a line nobody reads -- and it carries the guard beside the ids, so a refusal names
+/// the false condition instead of handing the reader three suspects.
+function askRoute(player, goal) {
+  if (route.planner === null) return;
+  const from = snapReporting(player);
+  const to = snapReporting(goal);
+  if (!route.saidSnap) {
+    route.saidSnap = true;
+    const guard = from.id === null || to.id === null ? null : readGuard(from.id, to.id);
+    console.log('[stone] snap start=' + describeSnap(from) + ' goal=' + describeSnap(to) +
+      ' | world holds ' + from.graphs + ' graph(s); map index ' +
+      (from.mapIndex === null ? 'UNREADABLE' :
+        from.mapIndex === MAP_INDEX_NONE ? 'is the NO-PLAYER-ENTITY sentinel (0xffffffff)' :
+        from.mapIndex + ' gave key 0x' + from.key.toString(16) +
+          (from.keyedHit ? ' which matched a graph' : ' which matched NO graph') +
+          (from.chosenKey === null ? '' : ', and the sweep chose one carrying 0x' +
+            from.chosenKey.toString(16))) +
+      ' | ' + describeGuard(guard));
+  }
+  if (from.id === null || to.id === null) {
+    // One end is off the navmesh -- a lift shaft, mid-fall, past the snap radius, or a map whose
+    // graph is not resident. A complete answer, and the arrow's cue.
+    return;
+  }
+  requestRouteCall(route.planner, from.id, to.id,
+    NV_ROUTE_PLANNER_CAPABILITY_DEFAULT, NV_ROUTE_MAX_COST_LONG_RANGE);
+  route.pending = true;
+  route.waited = 0;
+}
+
+/// Advance the outstanding search by one pass.
+function advanceRoute() {
+  const answer = pollRoute(route.planner);
+  if (answer.state === 'pending') {
+    route.waited += 1;
+    if (route.waited > PENDING_PASS_BUDGET) {
+      route.pending = false;
+      console.log('[stone] a search went ' + PENDING_PASS_BUDGET + ' passes without an answer -- ' +
+        'abandoning it. That is the planner not being STEPPED, which is a different failure from ' +
+        'no way to walk there and must not be read as one.');
+    }
+    return;
+  }
+  route.pending = false;
+  if (answer.state === 'lost') {
+    console.log('[stone] the planner became unreadable -- making another');
+    route.planner = null;
+    return;
+  }
+  if (answer.state === 'failed') {
+    if (!route.saidNoRoute) {
+      route.saidNoRoute = true;
+      console.log('[stone] NO WALKABLE ROUTE' +
+        (answer.decoded === false
+          ? ' -- and this one is READY with ' + answer.segments + ' segment(s) that would not ' +
+            'DECODE, which is the decoder or the route base, not the world'
+          : ' -- the search answered and the answer is no. Read the `guard` on the snap line ' +
+            'above: `guard REFUSES` is the engine rejecting the pair before expanding a node. ' +
+            '`guard OK` means the search really ran and found nothing, and THEN the capability ' +
+            '(0x' + NV_ROUTE_PLANNER_CAPABILITY_DEFAULT.toString(16) + ') and the budget (' +
+            NV_ROUTE_MAX_COST_LONG_RANGE + ') are worth looking at.') +
+        ' No stones are laid; the arrow stands in.');
+    }
+    // The route is gone, so the stones laid along it are pointing at nothing.
+    removedTotal += clearPlaced();
+    trail.spots = [];
+    trail.laid = 0;
+    route.source = 'none';
+    return;
+  }
+  const spots = resampleAlong(answer.points, MARKER_SPACING_METRES, MAX_MARKERS);
+  if (!route.saidRoute) {
+    route.saidRoute = true;
+    console.log('[stone] first walkable route -- ' + answer.segments + ' segment(s) decoded to ' +
+      answer.points.length + ' point(s), ' + pathLength(answer.points).toFixed(1) +
+      ' m of path, resampled to ' + spots.length + ' stone position(s) at ' +
+      MARKER_SPACING_METRES + ' m. These sit ON the navmesh, so they follow the ground.');
+  }
+  // Retargeting first is what stops the pile-up: a route that has not moved keeps the stones it
+  // already has instead of getting a second set on top. A route that HAS moved takes its old
+  // stones down before laying new ones.
+  if (retarget(spots)) removedTotal += clearPlaced();
+  route.source = 'navmesh';
+}
 
 /// One roster pass: retarget, clear, prune, lay. In that order, which is the sibling's.
 function pass() {
@@ -669,9 +758,12 @@ function pass() {
   }
   lastPlayerAt = player;
 
-  // THE ROUTE, every `ROUTE_REFRESH_TICKS` and not more often. A pass is for LAYING; re-asking
-  // where the target is on every pass would replace the trail faster than it can be walked.
-  if (navTicks - trail.computedAt >= ROUTE_REFRESH_TICKS) {
+  // THE ROUTE. A search outstanding is polled every pass; otherwise a new one is asked for every
+  // `ROUTE_REFRESH_TICKS` and not more often. A pass is for LAYING; re-asking on every pass would
+  // replace the trail faster than it can be walked.
+  if (route.pending) {
+    advanceRoute();
+  } else if (navTicks - trail.computedAt >= ROUTE_REFRESH_TICKS) {
     trail.computedAt = navTicks;
     const target = nearestCharacter(player, ctrl);
     if (target !== null) {
@@ -685,12 +777,7 @@ function pass() {
         (target.position[1] - player[1]) / target.distance,
         (target.position[2] - player[2]) / target.distance,
       ];
-      // Retargeting first is what stops the pile-up: a route that has not moved keeps the stones
-      // it already has instead of getting a second set on top. A route that HAS moved takes its
-      // old stones down before laying new ones.
-      if (retarget(resample(player, target.position, MARKER_SPACING_METRES, MAX_MARKERS))) {
-        removedTotal += clearPlaced();
-      }
+      askRoute(player, target.position);
     }
   }
 
@@ -699,6 +786,485 @@ function pass() {
   removedTotal += pruneBehind(player, MARKER_KEEP_BEHIND_METRES);
 
   if (trail.laid < trail.spots.length) laidTotal += layNext(found.system, MARKERS_PER_PASS);
+}
+
+// --------------------------------------------------------------------------------------------
+// THE NAVMESH ROUTE, which is what makes the trail follow the ground and stop crossing gaps
+// --------------------------------------------------------------------------------------------
+//
+// A straight line between two characters is not a path. It runs through walls, it hangs in the
+// air over a chasm, and it cuts the corner of every staircase. DARK SOULS II answers the real
+// question itself -- `NvRoutePlanner` walks its own navmesh -- and every address below is one
+// `crates/ds2-rva` already carries with the disassembly it was read from. Nothing here is a new
+// derivation except the one correction in `routeObject`, which is called out where it happens.
+//
+// All of it runs on the game thread, inside this agent's `NvNavigationSystem::Update` hook, and
+// that is not a convention: the snap's inner allocator is lazily built and unguarded, and the
+// planner lives on the list that function is walking.
+
+const GAME_MANAGER_MAP_MANAGER_OFFSET = 0x38;
+const MAP_MANAGER_PLAYER_MAP_INDEX_OFFSET = 0x170;
+/// `MapManager+0x170` when the player has no map entity. A key built from this is WELL-FORMED
+/// and matches nothing, which is why it is tested before a key exists to be wrong.
+const MAP_INDEX_NONE = 0xffffffff;
+
+/// `u32 area -> u32 key`, `(area & 0x3f) << 24 | 0xffffff`.
+const NAVI_GRAPH_KEY_FROM_AREA_RVA = 0x00bab1f0;
+/// `GameManagerImp* -> NvNaviGraphWorld*`, i.e. `[[gm + 0xBC0] + 0x10]`.
+const NAVI_GRAPH_WORLD_FROM_GAME_MANAGER_RVA = 0x0039a9f0;
+/// `(NvNaviGraphWorld*, u32 key) -> graph data*`. A linear scan over the resident graphs.
+const NAVI_GRAPH_DATA_FOR_KEY_RVA = 0x00badb90;
+/// `(graph data*, const f32* pos, f32 radius, u32 filter, f32* out_dist) -> u32 id`.
+const NAVI_GRAPH_NEAREST_ID_RVA = 0x00babf90;
+/// `(id table*, u32 key) -> NvNaviGraph*`. The hash the PLANNER uses, which is not the scan the
+/// snap uses -- and that difference is why two good ids can still be refused.
+const NV_NAVI_GRAPH_FOR_ROUTE_ID_RVA = 0x00bb2620;
+/// `NvNavigationSystem* -> NvRoutePlanner*`, allocated, constructed, bound and LINKED.
+const NV_NAVIGATION_SYSTEM_CREATE_ROUTE_PLANNER_RVA = 0x00bae8d0;
+/// `(NvRoutePlanner*, u32 start, u32 goal, u32 capability, f32 max_cost)`.
+const NV_ROUTE_PLANNER_REQUEST_RVA = 0x00bb4090;
+/// `NvNavigationSystem -> length of its update list`. `+0x28`. Read for one thing: proving a
+/// planner this agent created was actually LINKED, which is a different fact from created.
+const NV_NAVIGATION_SYSTEM_LIST_COUNT_OFFSET = 0x28;
+
+const NV_NAVI_GRAPH_WORLD_GRAPHS_OFFSET = 0x28;
+const NV_NAVI_GRAPH_WORLD_GRAPH_COUNT_OFFSET = 0x68;
+/// Eight, and STRUCTURAL rather than chosen: the inline array starts at `+0x28` and the count
+/// that bounds it sits at `+0x68`, so a ninth pointer would overwrite its own count.
+const NV_NAVI_GRAPH_WORLD_MAX_GRAPHS = 8;
+const NV_NAVI_GRAPH_WORLD_ID_TABLE_OFFSET = 0x88;
+const NV_NAVI_GRAPH_HEADER_OFFSET = 0x28;
+const NV_NAVI_GRAPH_HEADER_KEY_OFFSET = 0x1c;
+const NV_NAVI_GRAPH_LINK_COUNT_OFFSET = 0x30;
+const NV_ROUTE_ID_GRAPH_KEY_MASK = 0x1ffff;
+
+/// The most permissive snap the engine offers: `0x20 | 0x08`, class minimum zero. Right for a
+/// player, who is not an AI with a movement class and should land on whatever mesh is underfoot.
+const NAVI_GRAPH_SNAP_FILTER = 0x28;
+/// `20.0`, the radius `0x14037be30` uses. The AI paths use `10.0`; a player on a ledge, a stair
+/// or a corpse is further off the mesh than a walking AI ever is, and a missed snap costs the
+/// whole route.
+const NAVI_GRAPH_SNAP_RADIUS_METRES = 20.0;
+const NAVI_GRAPH_ID_NONE = 0xffffffff;
+
+const NV_ROUTE_PLANNER_FLAGS_OFFSET = 0x30;
+const NV_ROUTE_PLANNER_FLAG_READY = 0x02;
+const NV_ROUTE_PLANNER_FLAG_FAILED = 0x04;
+/// Where the planner's `NvRoute` LIVES. See `routeObject` -- this is an offset to the object,
+/// not to a pointer to it.
+const NV_ROUTE_PLANNER_ROUTE_OFFSET = 0x48;
+/// `0x7f8` -- bits 3..10, every feature gate, size class zero. The engine's own spelling of
+/// "assume this agent can do anything", which is the right model for a person at the controls.
+/// A capability of `0` makes two whole edge types impassable, so one step down or one ladder is
+/// enough to make a route that plainly exists come back as NO ROUTE.
+const NV_ROUTE_PLANNER_CAPABILITY_DEFAULT = 0x7f8;
+/// `999.0`, the larger of the two budgets the engine passes. The target is another character
+/// somewhere on the map rather than an AI's next few metres.
+const NV_ROUTE_MAX_COST_LONG_RANGE = 999.0;
+
+const NV_ROUTE_SEGMENTS_OFFSET = 0x10;
+const NV_ROUTE_SEGMENT_COUNT_OFFSET = 0x18;
+const NV_ROUTE_SEGMENT_STRIDE = 0x60;
+const NV_ROUTE_SEGMENT_POINT_OFFSET = 0x20;
+const NV_ROUTE_SEGMENT_POINTS_OFFSET = 0x40;
+const NV_ROUTE_SEGMENT_POINT_COUNT_OFFSET = 0x50;
+const ROUTE_POINT_STRIDE = 16;
+
+/// Bounds on a structure read out of live memory. A count past these means the pointer was not a
+/// route, so the decode REFUSES rather than truncating: a route half-read draws a confident line
+/// to somewhere nobody is.
+const MAX_ROUTE_SEGMENTS = 4096;
+const MAX_POINTS_PER_SEGMENT = 1024;
+const MAX_ROUTE_POINTS = 8192;
+
+/// How many passes a search may go unanswered before it is abandoned. Ten passes is a hundred
+/// nav ticks. Abandoning is NOT "no way to walk there" -- it is "the planner stopped being
+/// stepped", a different failure that must not be reported as the first one.
+const PENDING_PASS_BUDGET = 10;
+
+let keyFromArea = null;
+let graphWorldOf = null;
+let graphDataForKey = null;
+let nearestGraphId = null;
+let graphForRouteId = null;
+let createRoutePlanner = null;
+let requestRouteCall = null;
+
+/// Sixteen bytes, sixteen-byte ALIGNED, and both halves matter: the engine's own callers fill
+/// this with a `movaps` of a whole `__m128` and the snap's inner loop reads it back the same way.
+/// A misaligned buffer on an aligned move is a fault, not a wrong answer.
+let snapPoint = null;
+let snapDistance = null;
+
+function alignTo16(pointer) {
+  const slack = pointer.and(15).toUInt32();
+  return slack === 0 ? pointer : pointer.add(16 - slack);
+}
+
+function bindNav() {
+  try {
+    keyFromArea = new NativeFunction(base.add(NAVI_GRAPH_KEY_FROM_AREA_RVA), 'uint32', ['uint32']);
+    graphWorldOf = new NativeFunction(
+      base.add(NAVI_GRAPH_WORLD_FROM_GAME_MANAGER_RVA), 'pointer', ['pointer']);
+    graphDataForKey = new NativeFunction(
+      base.add(NAVI_GRAPH_DATA_FOR_KEY_RVA), 'pointer', ['pointer', 'uint32']);
+    nearestGraphId = new NativeFunction(
+      base.add(NAVI_GRAPH_NEAREST_ID_RVA), 'uint32',
+      ['pointer', 'pointer', 'float', 'uint32', 'pointer']);
+    graphForRouteId = new NativeFunction(
+      base.add(NV_NAVI_GRAPH_FOR_ROUTE_ID_RVA), 'pointer', ['pointer', 'uint32']);
+    createRoutePlanner = new NativeFunction(
+      base.add(NV_NAVIGATION_SYSTEM_CREATE_ROUTE_PLANNER_RVA), 'pointer',
+      ['pointer', 'pointer', 'pointer', 'pointer']);
+    requestRouteCall = new NativeFunction(
+      base.add(NV_ROUTE_PLANNER_REQUEST_RVA), 'void',
+      ['pointer', 'uint32', 'uint32', 'uint32', 'float']);
+    snapPoint = alignTo16(Memory.alloc(32));
+    snapDistance = Memory.alloc(4);
+    return true;
+  } catch (error) {
+    console.log('[stone] the navigation calls would not bind: ' + error.message);
+    return false;
+  }
+}
+
+function safeRead(at, how) {
+  try {
+    return how(at);
+  } catch (error) {
+    return null;
+  }
+}
+
+function readPoint(at) {
+  const values = safeRead(at, function (p) {
+    return [p.readFloat(), p.add(4).readFloat(), p.add(8).readFloat()];
+  });
+  if (values === null) return null;
+  for (const value of values) {
+    if (!Number.isFinite(value)) return null;
+  }
+  return values;
+}
+
+/// Snap a world position to a navigation-graph id, and say how it got there.
+///
+/// # Why this sweeps every graph instead of trusting the map key
+///
+/// The engine's own path is one keyed lookup, and it is only as good as the `area` fed to the key
+/// builder -- which keeps six bits of a number the engine itself is inconsistent about
+/// (`0x14037be30` reads `MapManager+0x170`, `0x14042c9a0` reads a byte off the character).
+/// Twenty-eight meshes cannot be told apart by six bits, so at least one of those is a slot index
+/// and nobody has established which. Asking every resident graph and letting the DISTANCE decide
+/// is nearly free where it is redundant -- the inner call rejects a sub-graph on an AABB test
+/// before allocating anything -- and correct where the key is not. The keyed lookup still runs,
+/// so the log can say whether the two agreed.
+function snapReporting(position) {
+  const report = {
+    id: null, graphs: 0, mapIndex: null, key: 0, keyedHit: false,
+    chosen: null, chosenKey: null, distanceSquared: 0,
+  };
+  for (const value of position) {
+    if (!Number.isFinite(value)) return report;
+  }
+  const manager = gameManager();
+  if (manager === null) return report;
+  const world = graphWorldOf(manager);
+  if (world.isNull()) return report;
+
+  // THE SENTINEL, TESTED BEFORE A KEY EXISTS TO BE WRONG. `0xffffffff` through the key builder
+  // yields `0x3fffffff` -- a well-formed key for a map index no map has -- and the engine's own
+  // `!= -1` guard cannot catch it, because the builder's range never includes `-1`.
+  const mapManager = readPointer(manager.add(GAME_MANAGER_MAP_MANAGER_OFFSET));
+  if (mapManager !== null) {
+    const index = safeRead(mapManager.add(MAP_MANAGER_PLAYER_MAP_INDEX_OFFSET),
+      function (p) { return p.readU32(); });
+    if (index !== null) {
+      report.mapIndex = index;
+      if (index !== MAP_INDEX_NONE) {
+        report.key = keyFromArea(index);
+        report.keyedHit = !graphDataForKey(world, report.key).isNull();
+      }
+    }
+  }
+
+  const count = safeRead(world.add(NV_NAVI_GRAPH_WORLD_GRAPH_COUNT_OFFSET),
+    function (p) { return p.readU32(); });
+  if (count === null) return report;
+  report.graphs = count;
+  const bounded = Math.min(count, NV_NAVI_GRAPH_WORLD_MAX_GRAPHS);
+
+  snapPoint.writeFloat(position[0]);
+  snapPoint.add(4).writeFloat(position[1]);
+  snapPoint.add(8).writeFloat(position[2]);
+  snapPoint.add(12).writeFloat(0);
+
+  let best = Infinity;
+  for (let index = 0; index < bounded; index += 1) {
+    const graph = readPointer(world.add(NV_NAVI_GRAPH_WORLD_GRAPHS_OFFSET + index * 8));
+    if (graph === null) continue;
+    snapDistance.writeFloat(Infinity);
+    const id = nearestGraphId(graph, snapPoint, NAVI_GRAPH_SNAP_RADIUS_METRES,
+      NAVI_GRAPH_SNAP_FILTER, snapDistance);
+    // SQUARED distances on both sides -- the callee writes the square and takes the root only to
+    // narrow its own search. Comparing them is comparing like with like.
+    const distance = snapDistance.readFloat();
+    if (sweepsSaid < 2) {
+      console.log('[stone] sweep ' + (sweepsSaid === 0 ? 'START' : 'GOAL') + ' at ' +
+        position.map(function (v) { return v.toFixed(2); }).join(', ') +
+        ' slot ' + index + ' graph ' + graph + ' radius ' +
+        NAVI_GRAPH_SNAP_RADIUS_METRES + ' filter 0x' + NAVI_GRAPH_SNAP_FILTER.toString(16) +
+        ' -> id ' + (id === NAVI_GRAPH_ID_NONE ? 'MISS' : '0x' + id.toString(16)) +
+        ', distance^2 ' + distance);
+    }
+    if (id !== NAVI_GRAPH_ID_NONE && distance < best) {
+      best = distance;
+      report.id = id;
+      report.chosen = index;
+      report.distanceSquared = distance;
+      const header = readPointer(graph.add(NV_NAVI_GRAPH_HEADER_OFFSET));
+      report.chosenKey = header === null ? null
+        : safeRead(header.add(NV_NAVI_GRAPH_HEADER_KEY_OFFSET), function (p) { return p.readU32(); });
+    }
+  }
+  sweepsSaid += 1;
+  if (report.id === null && !saidMiss && bounded > 0) {
+    const first = readPointer(world.add(NV_NAVI_GRAPH_WORLD_GRAPHS_OFFSET));
+    if (first !== null) {
+      saidMiss = true;
+      explainMiss(first, position);
+    }
+  }
+  return report;
+}
+
+/// The miss diagnosis is printed once. Sixty of them a second buries the first.
+let saidMiss = false;
+/// The per-graph sweep line, once.
+let sweepsSaid = 0;
+
+/// WHY A SNAP MISSED, measured rather than reasoned about. Printed once.
+///
+/// A player standing on the floor of Majula being more than twenty metres from every navmesh poly
+/// is not a plausible geometry -- so either the position is in a different space from the mesh,
+/// or the call is not reaching the mesh at all. Those two look identical from the return value and
+/// completely different in the numbers below.
+///
+/// `FUN_140babf90` walks sub-graphs at `[graph+0x28] + 0x40 + i*8`, `[[graph+0x28]+8]` of them,
+/// and `FUN_140bac070` tests each against an AABB built from its own `+0x10..0x28`. Printing that
+/// box beside the player's position answers the question outright: overlapping boxes mean the
+/// filter or the radius, boxes somewhere else entirely mean the coordinate space.
+function explainMiss(graph, position) {
+  const header = readPointer(graph.add(NV_NAVI_GRAPH_HEADER_OFFSET));
+  if (header === null) {
+    console.log('[stone] MISS UNEXPLAINED: graph ' + graph + ' has no header at +0x28.');
+    return;
+  }
+  const subCount = safeRead(header.add(8), function (p) { return p.readS32(); });
+  console.log('[stone] MISS DIAGNOSIS -- graph ' + graph + ', header ' + header + ', ' +
+    (subCount === null ? '?' : subCount) + ' sub-graph(s); the point that missed is ' +
+    position.map(function (v) { return v.toFixed(2); }).join(', '));
+  const most = Math.min(subCount === null ? 0 : subCount, 4);
+  for (let index = 0; index < most; index += 1) {
+    const sub = readPointer(header.add(0x40 + index * 8));
+    if (sub === null) continue;
+    const lo = readPoint(sub.add(0x10));
+    const hi = readPoint(sub.add(0x1c));
+    console.log('[stone]   sub-graph ' + index + ' ' + sub + ' AABB ' +
+      (lo === null ? '?' : lo.map(function (v) { return v.toFixed(1); }).join(', ')) + '  ..  ' +
+      (hi === null ? '?' : hi.map(function (v) { return v.toFixed(1); }).join(', ')));
+  }
+  // ESCALATING RADIUS. If ten kilometres still misses, distance is not what is wrong.
+  for (const radius of [20, 100, 1000, 10000]) {
+    snapDistance.writeFloat(3.4028234663852886e38);
+    const id = nearestGraphId(graph, snapPoint, radius, NAVI_GRAPH_SNAP_FILTER, snapDistance);
+    // A FILTER OF 0x28 KEEPS A CLASS MINIMUM OF ZERO, and `FUN_140bac070` requires
+    // `(filter & 7) < (poly & 7)` -- STRICTLY -- so a poly of class 0 can never be snapped to by
+    // any filter. `0x2f` is the same feature bits with the class minimum at 7, which rejects
+    // everything; it is here as the control, not as a candidate.
+    snapDistance.writeFloat(3.4028234663852886e38);
+    const permissive = nearestGraphId(graph, snapPoint, radius, 0x38, snapDistance);
+    console.log('[stone]   radius ' + radius + ' m: filter 0x28 -> ' +
+      (id === NAVI_GRAPH_ID_NONE ? 'MISS' : '0x' + id.toString(16)) + ', filter 0x38 -> ' +
+      (permissive === NAVI_GRAPH_ID_NONE ? 'MISS' : '0x' + permissive.toString(16)));
+  }
+}
+
+function describeSnap(report) {
+  if (report.id === null) {
+    return 'MISS (0xffffffff -- nothing within ' + NAVI_GRAPH_SNAP_RADIUS_METRES +
+      ' m on any of the ' + report.graphs + ' resident graph(s))';
+  }
+  // SWEEP SLOT, NOT GRAPH. This is which entry of the world's eight-pointer array won; the graph
+  // identity is in the guard's keys, and printing this as "graph 0" made two ids in genuinely
+  // different graphs read as though they shared one -- the exact distinction a refusal turns on.
+  return '0x' + report.id.toString(16) + ' (sweep slot ' + report.chosen + ', ' +
+    Math.sqrt(Math.max(report.distanceSquared, 0)).toFixed(1) + ' m off)';
+}
+
+/// The four conditions `0x140bb4310` tests BEFORE expanding a single node.
+///
+/// `NO ROUTE` used to be blamed on the capability mask and the cost budget, and neither is
+/// reachable from the branch that refuses. The planner's step resolves each end's graph by
+/// hashing `id | 0x1ffff`, and when the two differ it takes a cross-graph path that opens with
+/// `area(start) == area(goal) && start_graph && goal_graph && start_links > 0 && goal_links > 0`
+/// and sets READY|FAILED when any of those is false. Reading the same four turns a suspect list
+/// into a named cause.
+function readGuard(start, goal) {
+  const manager = gameManager();
+  if (manager === null) return null;
+  const world = graphWorldOf(manager);
+  if (world.isNull()) return null;
+  // THE TABLE IS NOT THE WORLD. The planner hashes into a separate table at `+0x88`; passing the
+  // world itself would read its graph array as bucket geometry.
+  const table = readPointer(world.add(NV_NAVI_GRAPH_WORLD_ID_TABLE_OFFSET));
+  if (table === null) return null;
+  const startKey = (start | NV_ROUTE_ID_GRAPH_KEY_MASK) >>> 0;
+  const goalKey = (goal | NV_ROUTE_ID_GRAPH_KEY_MASK) >>> 0;
+  const startGraph = graphForRouteId(table, startKey);
+  const goalGraph = graphForRouteId(table, goalKey);
+  const links = function (graph) {
+    if (graph.isNull()) return 0;
+    const value = safeRead(graph.add(NV_NAVI_GRAPH_LINK_COUNT_OFFSET),
+      function (p) { return p.readS16(); });
+    return value === null ? 0 : value;
+  };
+  return {
+    startKey: startKey,
+    goalKey: goalKey,
+    startGraph: startGraph,
+    goalGraph: goalGraph,
+    startLinks: links(startGraph),
+    goalLinks: links(goalGraph),
+    startArea: graphDataForKey(world, start),
+    goalArea: graphDataForKey(world, goal),
+  };
+}
+
+function describeGuard(guard) {
+  if (guard === null) return 'guard NOT READ (one end missed, or the world was not there to ask)';
+  const wrong = [];
+  if (!guard.startArea.equals(guard.goalArea)) {
+    wrong.push('different areas (' + guard.startArea + ' vs ' + guard.goalArea + ')');
+  }
+  if (guard.startGraph.isNull()) wrong.push('start key 0x' + guard.startKey.toString(16) + ' is in no graph');
+  if (guard.goalGraph.isNull()) wrong.push('goal key 0x' + guard.goalKey.toString(16) + ' is in no graph');
+  if (!guard.startGraph.isNull() && guard.startLinks <= 0) wrong.push('start graph has ' + guard.startLinks + ' links');
+  if (!guard.goalGraph.isNull() && guard.goalLinks <= 0) wrong.push('goal graph has ' + guard.goalLinks + ' links');
+  const keys = 'keys 0x' + guard.startKey.toString(16) + '/0x' + guard.goalKey.toString(16) +
+    (guard.startKey === guard.goalKey ? ' (same graph)' : ' (CROSS-GRAPH)');
+  return wrong.length === 0 ? 'guard OK -- ' + keys : 'guard REFUSES -- ' + keys + ': ' + wrong.join('; ');
+}
+
+/// Where the planner's finished route LIVES.
+///
+/// **THIS IS AN ADDRESS, NOT A DEREFERENCE, AND THE DIFFERENCE IS A WHOLE SESSION.** The Rust
+/// crate next door reads a pointer out of `planner + 0x48` and decodes from the value. It is not
+/// a pointer: `0x14042ee40` -- the engine's own consumer -- does
+///
+/// ```text
+/// lVar6 = *(longlong *)(param_1 + 0x10);            ; the planner
+/// FUN_140bb5cd0(..., lVar6 + 0x48);                 ; and 0x140bb5cd0 reads param_4 + 0x18
+/// FUN_140bb3a10(*(longlong *)(param_1 + 0x10) + 0x48);  ; the clear path, same address-of
+/// ```
+///
+/// so the `NvRoute` is EMBEDDED at `+0x48` and its segment count is at `planner + 0x60`. Reading
+/// a pointer there yields the route's own first field, and decoding from that returns nothing --
+/// which the crate then reports as NO ROUTE, indistinguishable from a search that genuinely
+/// found no way through. That is the failure this agent exists to not repeat.
+function routeObject(planner) {
+  return planner.add(NV_ROUTE_PLANNER_ROUTE_OFFSET);
+}
+
+/// Decode a finished `NvRoute` into a world-space polyline, START FIRST.
+///
+/// Two reversals, and applying only one of them produces a line that is plausible, connected and
+/// inside out. Both are read off `0x140bb3bd0`, the engine's own "position of route node N":
+/// a route is stored GOAL-FIRST (its navigator starts at `(count - 1) << 16` and walks down), and
+/// the points inside a segment are stored in reverse as well. A segment whose point count is not
+/// positive still contributes one node -- its own `+0x20` -- which is the engine's branch, not an
+/// edge case this invented.
+function decodeRoute(route) {
+  const segments = readPointer(route.add(NV_ROUTE_SEGMENTS_OFFSET));
+  const count = safeRead(route.add(NV_ROUTE_SEGMENT_COUNT_OFFSET), function (p) { return p.readS32(); });
+  if (segments === null || count === null || count <= 0 || count > MAX_ROUTE_SEGMENTS) return null;
+  const out = [];
+  for (let index = count - 1; index >= 0; index -= 1) {
+    const segment = segments.add(index * NV_ROUTE_SEGMENT_STRIDE);
+    const points = safeRead(segment.add(NV_ROUTE_SEGMENT_POINT_COUNT_OFFSET),
+      function (p) { return p.readS16(); });
+    if (points === null || points > MAX_POINTS_PER_SEGMENT) return null;
+    if (points <= 0) {
+      const only = readPoint(segment.add(NV_ROUTE_SEGMENT_POINT_OFFSET));
+      if (only === null) return null;
+      out.push(only);
+      continue;
+    }
+    const array = readPointer(segment.add(NV_ROUTE_SEGMENT_POINTS_OFFSET));
+    if (array === null) return null;
+    for (let point = points - 1; point >= 0; point -= 1) {
+      if (out.length >= MAX_ROUTE_POINTS) return null;
+      const at = readPoint(array.add(point * ROUTE_POINT_STRIDE));
+      if (at === null) return null;
+      out.push(at);
+    }
+  }
+  return out.length === 0 ? null : out;
+}
+
+/// Read a planner's flags, and decode the route when there is one.
+///
+/// # The order of the two bit tests is the whole function
+///
+/// All three of the engine's give-up paths end with `or byte [planner+0x30], 6` -- READY and
+/// FAILED in one write. Testing READY first therefore believes every failure and goes on to read
+/// a route those paths never built.
+function pollRoute(planner) {
+  const flags = safeRead(planner.add(NV_ROUTE_PLANNER_FLAGS_OFFSET), function (p) { return p.readU8(); });
+  if (flags === null) return { state: 'lost' };
+  if ((flags & NV_ROUTE_PLANNER_FLAG_FAILED) !== 0) return { state: 'failed' };
+  if ((flags & NV_ROUTE_PLANNER_FLAG_READY) === 0) return { state: 'pending' };
+  const route = routeObject(planner);
+  const segments = safeRead(route.add(NV_ROUTE_SEGMENT_COUNT_OFFSET), function (p) { return p.readS32(); });
+  const points = decodeRoute(route);
+  // BOTH NUMBERS, ALWAYS. Forty segments decoding to two points means the decoder is wrong; two
+  // and two means the walk really is that short. One number cannot tell those apart.
+  if (points === null) return { state: 'failed', segments: segments === null ? -1 : segments, decoded: false };
+  return { state: 'ready', points: points, segments: segments === null ? -1 : segments };
+}
+
+/// Points every `step` metres ALONG a polyline, rather than along the straight line between its
+/// ends. This is the whole difference between a trail that follows the ground and one that does
+/// not: the route's own vertices sit on the navmesh, so every interpolated point between two
+/// adjacent ones does too.
+function resampleAlong(points, step, most) {
+  const spots = [];
+  if (points.length < 2) return spots;
+  let carried = 0;
+  for (let index = 1; index < points.length && spots.length < most; index += 1) {
+    const from = points[index - 1];
+    const to = points[index];
+    const leg = apart(from, to);
+    if (!(leg > 1e-6)) continue;
+    let walked = step - carried;
+    while (walked <= leg && spots.length < most) {
+      const t = walked / leg;
+      spots.push([
+        from[0] + (to[0] - from[0]) * t,
+        from[1] + (to[1] - from[1]) * t,
+        from[2] + (to[2] - from[2]) * t,
+      ]);
+      walked += step;
+    }
+    carried = leg - (walked - step);
+  }
+  return spots;
+}
+
+function pathLength(points) {
+  let total = 0;
+  for (let index = 1; index < points.length; index += 1) total += apart(points[index - 1], points[index]);
+  return total;
 }
 
 function attach() {
@@ -719,6 +1285,13 @@ function attach() {
   // REFUSE RATHER THAN FALL BACK. Without `VirtualAlloc` the only other storage is the script's
   // own, which `ds2-frida-watch.py` frees on every reload while the engine still points into it.
   // Silently using it would trade a refusal now for a crash on some later save.
+  // REFUSE RATHER THAN LAY A STRAIGHT LINE. Without these the only trail available is the one
+  // through walls, and laying it would look like success.
+  if (!bindNav()) {
+    console.log('[stone] REFUSING: without the navigation calls the only trail available is a ' +
+      'straight line through the scenery, which is the thing this is meant to stop doing.');
+    return;
+  }
   if (!bindAllocator()) {
     console.log('[stone] REFUSING: no VirtualAlloc, and the script\'s own memory is freed on ' +
       'reload while the engine still links it.');
@@ -731,9 +1304,18 @@ function attach() {
   // agent prints the thread it runs on and the two logs are read side by side.
 
   Interceptor.attach(base.add(NAV_UPDATE_RVA), {
-    onEnter() {
+    onEnter(args) {
       navTicks += 1;
       if (navThread === null) navThread = Process.getCurrentThreadId();
+      // The `NvNavigationSystem` the engine is stepping THIS tick, taken from `rcx`. Not read
+      // from `GameManagerImp + 0xBC0`: two sources of truth for one pointer is how a planner
+      // ends up linked onto a list nobody walks.
+      navSystemAt = args[0];
+    },
+    // EVERYTHING ELSE RUNS AFTER THE ORIGINAL, and that is not tidiness. Creating a planner
+    // pushes onto the head of the intrusive list the original is walking; doing it from inside
+    // that walk corrupts the walk.
+    onLeave() {
       if (pending !== null) {
         const asked = pending;
         pending = null;
@@ -744,6 +1326,26 @@ function attach() {
         }
       }
       if (STAGE !== 'follow' || passStopped !== null) return;
+      if (route.planner === null && navSystemAt !== null) {
+        try {
+          const made = createRoutePlanner(navSystemAt, NULL, NULL, NULL);
+          if (!made.isNull()) {
+            route.planner = made;
+            if (!route.saidPlanner) {
+              route.saidPlanner = true;
+              const listed = safeRead(navSystemAt.add(NV_NAVIGATION_SYSTEM_LIST_COUNT_OFFSET),
+                function (p) { return p.readS32(); });
+              console.log('[stone] route planner ' + made + ' linked -- ' +
+                (listed === null ? '?' : listed) + ' object(s) on the navigation system\'s list. ' +
+                'From here the ENGINE steps it every frame; nothing in this agent calls its Update.');
+            }
+          }
+        } catch (error) {
+          passStopped = error.message;
+          console.log('[stone] MAKING A PLANNER THREW: ' + error.message + '\n' + error.stack);
+          return;
+        }
+      }
       // ONE PASS EVERY TEN TICKS. `er_invasion_path::ROSTER_EVERY_TICKS`, which is what the
       // three-stones-per-pass rate above is counted against; doing this every tick would lay the
       // whole trail in half a second and defeat the point of laying it gradually.
@@ -770,7 +1372,8 @@ setInterval(function () {
     (STAGE !== 'follow' ? '' :
       '\n[stone]   trail: ' + trail.placed.length + ' stones standing, ' + trail.laid + ' of ' +
       trail.spots.length + ' laid, ' + laidTotal + ' laid in all, ' + removedTotal +
-      ' put out, ' + forgottenTotal + ' let go of, ' + arenaPages + ' pages' +
+      ' put out, ' + forgottenTotal + ' let go of, ' + arenaPages + ' pages, from the ' + route.source +
+      (route.pending ? ' (a search is outstanding, ' + route.waited + ' pass(es) in)' : '') +
       (passStopped === null ? '' : '\n[stone]   PASSES ARE OFF: ' + passStopped)));
   if (!reported) { console.log('[stone] ' + describeSystem(found)); reported = true; }
   if (navTicks === 0) {

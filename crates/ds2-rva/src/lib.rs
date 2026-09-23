@@ -6157,6 +6157,13 @@ pub const GAME_MANAGER_NAV_SYSTEM_OFFSET: usize = 0xBC0;
 
 /// `NvRoutePlanner -> route`. `+0x48` -- the finished polyline, once the flags say so.
 ///
+/// **THE ROUTE IS EMBEDDED HERE. THIS IS NOT A POINTER TO ONE.** `0x14042ee40` loads the planner
+/// into `lVar6` and passes `lVar6 + 0x48` to `0x140bb5cd0`, which reads `param_4 + 0x18` as the
+/// segment count -- so the count is at `planner + 0x60`. The clear path does the same address-of
+/// (`FUN_140bb3a10(*(longlong *)(param_1 + 0x10) + 0x48)`). A reader that dereferences `+0x48`
+/// decodes from the route`s own first field, produces nothing, and reports a successful search as
+/// NO ROUTE -- a failure that looks exactly like the real one.
+///
 /// From `0x14042ee40`, the navmesh controller's destination step: when the goal is unchanged and
 /// [`NV_ROUTE_PLANNER_FLAGS_OFFSET`] reports a result, it passes `planner + 0x48` to
 /// `0x140bb5cd0`, which binds it into the navigator at [`NV_ROUTE_NAVIGATOR_ROUTE_OFFSET`].
