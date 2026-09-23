@@ -11,20 +11,37 @@
 //! other crate would. That is deliberate: if the API were only good enough for someone else's row
 //! and not for our own, the difference would be invisible until someone else tried it.
 //!
-//! # The ceilings are the game's, and they are not about display
+//! # The ceilings are the game's, and the two that used to bind do not any more
 //!
-//! Two of the three bounds on "how many rows" are hard, and neither of them fails as a missing row:
+//! Four bounds on "how many rows", and which one binds changed when the storage stopped being the
+//! game's:
 //!
 //! | bound | value | what happens above it |
 //! |---|---|---|
-//! | the tab's item vector | [`ds2_rva::FE_INGAME_MENU_ITEM_VECTOR_CAPACITY`] = 5 | the game's own `panic("out of memory.")` |
-//! | the tab's cell namer list | [`ds2_rva::FE_SCENE_NAMER_LIST_CAPACITY`] = 6 | a write through a null; this repo crashed the game at `0x141bee1c4` finding out |
+//! | the tab's item vector | [`ds2_rva::FE_INGAME_MENU_ITEM_VECTOR_CAPACITY`] = 5 | the game's own `panic("out of memory.")` -- **not reached: see below** |
+//! | the tab's cell namer list | [`ds2_rva::FE_SCENE_NAMER_LIST_CAPACITY`] = 6 | the same panic, from [`ds2_rva::FE_SCENE_NAMER_PUSH`] -- **not reached either** |
 //! | the layout's child count | a `u16` this crate substitutes | nothing -- ours to raise |
+//! | **the grid's own bind loop** | [`ds2_rva::FEX_GRID_MAX_ROWS`] = 15 | the loop simply stops looking |
 //!
-//! The item vector is the binding one, and it is per TAB and counts the rows the game shipped. The
-//! quit tab ships three, so [`MAX_ADDED_ROWS`] is two. [`add_row`] refuses the third at
-//! REGISTRATION -- before anything is hooked, with a value in the error -- because the alternative
-//! is finding out during a menu open, inside the game's allocator.
+//! The first two are inline storage that cannot be grown -- element 6 of either lands on its own
+//! count field -- but each one is READ through exactly one function, and this crate detours both
+//! ([`ds2_rva::FE_INGAME_MENU_TAB_ITEM_LOOKUP`] and [`ds2_rva::FE_SCENE_NAMER_CELL_LOOKUP`]) to
+//! answer out of storage it owns. What is left is the bind loop's `if (0xe < row) return`, so
+//! [`MAX_ADDED_ROWS`] is `15 - 3`.
+//!
+//! **The game's own slots are still filled first**, for a failure mode rather than for capacity: the
+//! two item-vector slots and the three namer slots the shipped tab leaves spare carry the first rows
+//! exactly as they did before, so if the new detours fail to install the log says so and the tab
+//! still shows what it showed yesterday instead of nothing.
+//!
+//! [`add_row`] refuses past the ceiling at REGISTRATION -- before anything is hooked, with the
+//! numbers in the error -- because the alternative is finding out during a menu open.
+//!
+//! **What is NOT measured is where the rows stop being visible.** Fifteen is the engine's answer;
+//! the pause menu's banner is lengthened per row ([`ds2_rva::FE_BANNER_QUAD_SHIPPED_Y1`]) and the
+//! panel it sits on is a fixed graphic, so a tab carrying twelve added rows runs `576` layout units
+//! below where the shipped three end. Nobody has looked at that. The ceiling is a refusal bound, not
+//! a recommendation.
 //!
 //! # What is not here
 //!
@@ -64,20 +81,35 @@ impl Tab {
 
     /// Rows that can still be added, before any registration.
     ///
-    /// The item vector is the binding ceiling rather than the namer list: capacity `5` against a
-    /// namer capacity of `6`, so the vector runs out first on any tab shipping three or more.
+    /// The grid's bind loop is the binding ceiling, not the item vector and not the namer list: both
+    /// of those are answered out of this crate's own storage past the point their inline arrays run
+    /// out, and what nothing can answer for is a row the bind never asks about.
     pub const fn capacity(self) -> usize {
+        ds2_rva::FEX_GRID_MAX_ROWS - self.shipped_rows()
+    }
+
+    /// Rows the game's OWN item vector can still take on this tab, before ours is needed.
+    ///
+    /// Not a ceiling -- a split. Rows below it are appended to the vector exactly as they were
+    /// before [`ds2_rva::FE_INGAME_MENU_TAB_ITEM_LOOKUP`] was detoured, which is what makes a failed
+    /// install degrade to the tab this crate used to produce rather than to a tab with no added rows.
+    pub const fn vector_slots(self) -> usize {
         ds2_rva::FE_INGAME_MENU_ITEM_VECTOR_CAPACITY - self.shipped_rows()
+    }
+
+    /// Cells the game's OWN namer list can still take on this tab. The same split, one layer down.
+    pub const fn namer_slots(self) -> usize {
+        ds2_rva::FE_SCENE_NAMER_LIST_CAPACITY - self.shipped_rows()
     }
 }
 
 /// Most rows this crate can add to any one tab.
 ///
-/// Two, on the quit tab: five slots in the item vector, three of them already spoken for. It is a
-/// `const` because the [`Container`](crate::layout) that carries the added records is a fixed-size
-/// struct -- there is no reason to grow an allocation for a bound the game caps at five.
+/// Twelve on the System tab: fifteen rows the grid's bind loop will look for, three of them already
+/// authored. It is a `const` because the [`Container`](crate::layout) that carries the added records
+/// is a fixed-size struct, and because every per-slot table in `ds2-rva` is sized by it.
 pub const MAX_ADDED_ROWS: usize =
-    ds2_rva::FE_INGAME_MENU_ITEM_VECTOR_CAPACITY - ds2_rva::FE_INGAME_MENU_SYSTEM_TAB_ITEMS.len();
+    ds2_rva::FEX_GRID_MAX_ROWS - ds2_rva::FE_INGAME_MENU_SYSTEM_TAB_ITEMS.len();
 
 /// A colour laid over a row's icon.
 ///
@@ -160,9 +192,9 @@ pub struct RowId(pub usize);
 /// Why a row was not accepted.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum AddRowError {
-    /// The tab has no slot left. `added` rows are already registered and the game's own item
-    /// vector holds `shipped + added` of a possible
-    /// [`ds2_rva::FE_INGAME_MENU_ITEM_VECTOR_CAPACITY`].
+    /// The tab has no slot left. `added` rows are already registered, and `shipped + added` has
+    /// reached `capacity` -- [`ds2_rva::FEX_GRID_MAX_ROWS`], the most cells the grid's layout bind
+    /// will ever go looking for.
     TabFull {
         tab: Tab,
         shipped: usize,
@@ -186,8 +218,8 @@ impl std::fmt::Display for AddRowError {
                 capacity,
             } => write!(
                 f,
-                "{tab:?} is full: {shipped} shipped + {added} added = {capacity}, and the game's \
-                 item vector panics above {capacity}"
+                "{tab:?} is full: {shipped} shipped + {added} added = {capacity}, and the grid's \
+                 layout bind never looks past row {capacity}"
             ),
             AddRowError::AlreadyInstalled => {
                 write!(f, "install() has already read the registry")
@@ -249,7 +281,7 @@ pub fn add_row(spec: RowSpec) -> Result<RowId, AddRowError> {
             tab: spec.tab,
             shipped: spec.tab.shipped_rows(),
             added: slot,
-            capacity: ds2_rva::FE_INGAME_MENU_ITEM_VECTOR_CAPACITY,
+            capacity: ds2_rva::FEX_GRID_MAX_ROWS,
         });
     }
     let row = Row {
@@ -300,17 +332,34 @@ pub(crate) fn any() -> bool {
 mod tests {
     use super::*;
 
-    /// The ceiling is the game's, and it is the ITEM VECTOR rather than the namer list -- the
-    /// vector runs out first on any tab shipping three or more rows.
+    /// The ceiling is the game's, and it is the GRID'S BIND LOOP -- the two fixed vectors that used
+    /// to bind are answered out of this crate's own storage past the point they run out.
     #[test]
-    fn the_ceiling_is_the_item_vector() {
-        assert_eq!(MAX_ADDED_ROWS, 2);
+    fn the_ceiling_is_the_grids_bind_loop() {
+        assert_eq!(MAX_ADDED_ROWS, 12);
         assert_eq!(Tab::Quit.capacity(), MAX_ADDED_ROWS);
         assert_eq!(Tab::Quit.shipped_rows(), 3);
-        assert!(
-            Tab::Quit.shipped_rows() + MAX_ADDED_ROWS <= ds2_rva::FE_SCENE_NAMER_LIST_CAPACITY,
-            "the namer list must also hold every row the item vector allows"
+        assert_eq!(
+            Tab::Quit.shipped_rows() + MAX_ADDED_ROWS,
+            ds2_rva::FEX_GRID_MAX_ROWS
         );
+        // And the ceiling is deliberately PAST both game vectors, which is the whole change: a test
+        // asserting it fits inside them would be asserting the bug this replaced.
+        assert!(Tab::Quit.shipped_rows() + MAX_ADDED_ROWS > ds2_rva::FE_SCENE_NAMER_LIST_CAPACITY);
+        assert!(
+            Tab::Quit.shipped_rows() + MAX_ADDED_ROWS
+                > ds2_rva::FE_INGAME_MENU_ITEM_VECTOR_CAPACITY
+        );
+    }
+
+    /// The game's own slots are filled first, and there are fewer of them than there are rows -- so
+    /// the split is real and both halves get exercised by any tab that is more than half full.
+    #[test]
+    fn the_games_own_slots_are_a_split_and_not_the_ceiling() {
+        assert_eq!(Tab::Quit.vector_slots(), 2);
+        assert_eq!(Tab::Quit.namer_slots(), 3);
+        assert!(Tab::Quit.vector_slots() < Tab::Quit.capacity());
+        assert!(Tab::Quit.namer_slots() < Tab::Quit.capacity());
     }
 
     /// Every row needs an id of its own, and enough of them for the ceiling.

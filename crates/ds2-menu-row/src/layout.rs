@@ -13,11 +13,11 @@
 //! container's child list goes through one lookup, [`ds2_rva::FLO_FIND_DEFINITION`].
 //!
 //! So this detours that lookup, and when the quit tab's container is asked for, hands back a copy
-//! of the definition with two more children and a child array of our own. No zlib, no container
-//! writer, no file on disk, and nothing to keep in sync with a game update beyond the ids checked
-//! below.
+//! of the definition with two more children PER REGISTERED ROW and a child array of our own. No
+//! zlib, no container writer, no file on disk, and nothing to keep in sync with a game update
+//! beyond the ids checked below.
 //!
-//! # What "two more children" buys, and why the count is also the capacity
+//! # What two more children per row buys, and why the count is also the capacity
 //!
 //! `FUN_140b6bd80` -- the attach -- refuses once the parent's live child count reaches
 //! `[parent->definition + 0x02]`. That is the same field the builder reads as "how many child
@@ -99,22 +99,25 @@ const fn mark_at(slot: usize) -> usize {
 
 /// Depths given to the added records.
 ///
-/// The shipped rows carry `14, 10, 4` top to bottom and their marks `22, 20, 18`, so a fourth of
-/// each continues both series into a value nothing else uses. It is very likely cosmetic --
-/// `FUN_140b50bc0` passes this field on only for the LEAF kinds, and both of these are nested
-/// definitions, so the game never reads it back. Continuing the series costs nothing and leaves
-/// the array readable next to the shipped one.
+/// The shipped rows carry `14, 10, 4` top to bottom and their marks `22, 20, 18`, and the added ones
+/// only have to avoid those seven values and each other. The field is very likely cosmetic --
+/// `FUN_140b50bc0` passes it on only for the LEAF kinds, and both added records are nested
+/// definitions, so the game never reads it back -- but "avoid" is cheap to make structural.
 ///
-/// Slot `n` steps down from each base, into the gaps `2, 3` and `15, 16` -- values no shipped
-/// record uses, which is asserted rather than eyeballed.
+/// **This used to step DOWN from `3` and `16`, one per slot, and that was correct for exactly two
+/// slots.** At twelve it walks into `1` (the panel's depth) and then underflows a `u16`. So each
+/// series steps UP instead, and the two are separated by PARITY: rows take the odd values from `3`,
+/// marks the even values from `24`. The only odd shipped depth is `1` and the largest even one is
+/// `22`, so neither series can collide with a shipped record or with the other one, for any slot
+/// count -- which is a property rather than a table to re-check.
 const ROW_DEPTH: u16 = 3;
-const MARK_DEPTH: u16 = 16;
+const MARK_DEPTH: u16 = 24;
 
 const fn row_depth(slot: usize) -> u16 {
-    ROW_DEPTH - slot as u16
+    ROW_DEPTH + 2 * slot as u16
 }
 const fn mark_depth(slot: usize) -> u16 {
-    MARK_DEPTH - slot as u16
+    MARK_DEPTH + 2 * slot as u16
 }
 
 /// A replacement container definition, its child records, and the two transform blocks the added
@@ -127,8 +130,8 @@ struct Container {
     definition: [u8; ds2_rva::FLO_DEFINITION_STRIDE],
     records: [u8; ds2_rva::FLO_RECORD_STRIDE * CHILDREN],
     /// One transform block per added row, and one per added mark. Fixed-size rather than a `Vec`
-    /// because the game's own item vector caps a tab at five rows -- there is no allocation to
-    /// grow, only two slots to leave empty when one row is registered.
+    /// because [`MAX_ROWS`] is a compile-time bound the registry already refuses past -- there is
+    /// no allocation to grow, only slots to leave empty when fewer rows are registered.
     row_transform: [[u8; ds2_rva::FLO_TRANSFORM_SIZE]; MAX_ROWS],
     mark_transform: [[u8; ds2_rva::FLO_TRANSFORM_SIZE]; MAX_ROWS],
     panel_transform: [u8; ds2_rva::FLO_TRANSFORM_SIZE],
@@ -673,8 +676,11 @@ unsafe fn build(original: *mut u8, panel: *mut u8, row: *mut u8) -> Option<*mut 
                         .expect("four bytes"),
                 );
                 if (y - ds2_rva::FLO_CARET_SHIPPED_Y).abs() < 0.5 {
+                    // ONE PITCH PER REGISTERED ROW, the same arithmetic the banner's quad grows by.
+                    // A fixed one-row offset left the caret above the rows on any tab showing more
+                    // than one added row, which is every tab this crate now allows.
                     container.caret_transform[ds2_rva::FLO_TRANSFORM_Y_OFFSET..][..4]
-                        .copy_from_slice(&ds2_rva::FLO_CARET_Y.to_le_bytes());
+                        .copy_from_slice(&ds2_rva::caret_y(rows.len()).to_le_bytes());
                     caret_ok = true;
                 } else {
                     log(format_args!(
@@ -780,10 +786,11 @@ unsafe fn build(original: *mut u8, panel: *mut u8, row: *mut u8) -> Option<*mut 
             Ordering::Release,
         );
         log(format_args!(
-            "{LOG_PREFIX} caret moved definition={:#x} y={}->{}",
+            "{LOG_PREFIX} caret moved definition={:#x} y={}->{} rows={}",
             ds2_rva::FLO_ADDED_PANEL_DEFINITION,
             ds2_rva::FLO_CARET_SHIPPED_Y,
-            ds2_rva::FLO_CARET_Y
+            ds2_rva::caret_y(rows.len()),
+            rows.len()
         ));
     }
 
@@ -1138,22 +1145,43 @@ mod tests {
         );
     }
 
-    /// The caret goes DOWN, by the same pitch the added row is spaced at.
+    /// The caret goes DOWN by one row pitch PER ROW, and by nothing at all when no row is added.
     #[test]
-    fn the_caret_moves_one_row_down() {
-        let moved = ds2_rva::FLO_CARET_Y - ds2_rva::FLO_CARET_SHIPPED_Y;
-        assert!((moved - 48.0).abs() < 0.5, "moved by {moved}");
+    fn the_caret_moves_one_row_down_per_row() {
+        assert_eq!(ds2_rva::caret_y(0), ds2_rva::FLO_CARET_SHIPPED_Y);
+        for rows in 1..=MAX_ROWS {
+            let moved = ds2_rva::caret_y(rows) - ds2_rva::FLO_CARET_SHIPPED_Y;
+            assert!(
+                (moved - 48.0 * rows as f32).abs() < 0.5,
+                "{rows} rows moved the caret by {moved}"
+            );
+        }
+        // And it keeps the same distance below the last added row at every count, which is the only
+        // thing the number is for. Compared as a DELTA rather than against a row's y, because the
+        // caret's y is panel-local and a row's is container-local -- two frames, 103 units apart.
+        for rows in 1..MAX_ROWS {
+            let caret_step = ds2_rva::caret_y(rows + 1) - ds2_rva::caret_y(rows);
+            assert!((caret_step - ds2_rva::FLO_ROW_PITCH).abs() < 0.01);
+        }
     }
 
-    /// The depths must not collide with a shipped one, since the whole point of choosing them was
-    /// to continue the series into free values.
+    /// The depths must not collide with a shipped one, with each other, or with a depth from another
+    /// slot -- and the parity split is what makes the first two of those true by construction.
     #[test]
     fn the_added_depths_are_free() {
         const SHIPPED: [u16; 7] = [1, 4, 10, 14, 18, 20, 22];
+        let mut seen = Vec::new();
         for slot in 0..MAX_ROWS {
-            assert!(!SHIPPED.contains(&row_depth(slot)));
-            assert!(!SHIPPED.contains(&mark_depth(slot)));
-            assert_ne!(row_depth(slot), mark_depth(slot));
+            for depth in [row_depth(slot), mark_depth(slot)] {
+                assert!(
+                    !SHIPPED.contains(&depth),
+                    "slot {slot} took shipped {depth}"
+                );
+                assert!(!seen.contains(&depth), "slot {slot} repeats {depth}");
+                seen.push(depth);
+            }
+            assert_eq!(row_depth(slot) % 2, 1, "a row depth must stay odd");
+            assert_eq!(mark_depth(slot) % 2, 0, "a mark depth must stay even");
         }
     }
 }

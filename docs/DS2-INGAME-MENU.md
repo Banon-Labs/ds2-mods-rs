@@ -918,3 +918,150 @@ Both children are checked before anything is copied -- child 0 must name `0x0255
 its highlight would be the same class of mistake as substituting the wrong container. If any check
 says no, the record keeps naming row 0's definition and the row is what shipped before: the wrong
 icon, and a highlight that works.
+
+## There is no seventh tab, and the row ceiling was never about display
+
+Everything in this section is static: `scripts/ds2-disasm.py` and the Ghidra MCP daemon on
+`darksoulsii-deobf.bin`, `scripts/ds2-ebl.py` and `scripts/ds2-flo.py` on the shipped archive. **No
+game was launched for any of it, and none of it has been run.**
+
+The question was the obvious one. The System tab's item vector holds five and the game ships three,
+so two mod rows fit and four want a slot. A tab of our own would start empty.
+
+### The vector really is per tab
+
+`FUN_1400a40e0` -- the function `FeGroupInGameTopSelect::ctor` calls once per tab -- copies the
+builder's stack descriptor into the group it is constructing:
+
+```c
+FUN_1400a3ef0(param_1 + 0x1f, param_4);     // group + 0xf8  <- the item vector
+FUN_1400189f0(param_1 + 0x26, param_4 + 0x38);
+param_1[0x2c] = param_2;
+```
+
+and `FUN_1400a3ef0` is a `DLFixedVector` copy: `if (5 < src[0x30]) panic("out of memory.")`, then
+`dst[0x30] = count` and `count` qwords from `src + (-src & 3)` to `dst + (-dst & 3)`. Each tab owns
+its own five slots, inline, with no pointer anywhere in it. So the premise held: a seventh tab would
+have five free slots.
+
+### The seventh tab cannot exist, five times over
+
+Every one of these is a literal in code. None is a table in data that could be substituted the way
+the `.flo` child count is.
+
+**1. There is nowhere to put the object.** The ctor builds the six groups at `param_1 + 0x33`,
+`+0x60`, `+0x8d`, `+0xba`, `+0xe7`, `+0x114` -- qwords, so `+0x198` through `+0x8a0`, stride
+`0x168` -- and `FeGroupInGameTopSelect` is itself an inline member of `FeSceneInGame`
+(`FUN_1400995a0` calls `FUN_1400a41b0(scene + 0x28, ...)`). A seventh group would begin at `+0xa08`,
+and the same constructor already writes an element accessor there:
+`FUN_140027c80(uVar2, param_1 + 0x141, &local_1c8)` -- `0x141 * 8 == 0xa08`.
+
+**2. Navigation is six `this + literal` on the stack.** `FUN_1400a66d0`, in full:
+
+```c
+index = FUN_140022140(this);
+local_38[0] = this + 0x198;  local_38[1] = this + 0x300;  local_38[2] = this + 0x468;
+local_38[3] = this + 0x5d0;  local_38[4] = this + 0x8a0;  local_38[5] = this + 0x738;
+return (ulonglong)(longlong)index < 6 ? local_38[index] : 0;
+```
+
+Note the last two: display index 4 is the group built SIXTH and index 5 is the one built fifth. The
+System tab -- Game Options / Screen Options / Quit Game -- is the last tab on screen and the fifth
+constructed, which is why this repo's probe calls it tab 4 and a player calls it the last one.
+
+**3. The tab strip's own namer list is FULL.** `FUN_1400a5c60` builds a one-component base path and
+pushes six ids -- `0x1eaba2, 0x1eaba3, 0x1eaba4, 0x1eaba6, 0x1eaba7, 0x1eaba5` -- in a
+`do { } while (i < 6)` loop, through the same push a tab's row namer uses. That push opens:
+
+```c
+uVar2 = *(longlong *)(param_1 + 0x128) + 1;
+if (6 < uVar2) DLKR::DLBackAllocator::panic(".../DLFixedVector.inl", 0x24c, "out of memory.");
+```
+
+A tab's ROW namer uses three of its six, which is the slack this repo has been spending. The tab
+strip's uses six of six. A seventh tab has no cell to be drawn in and asking for one is the panic
+that killed the game the first time this list was overfilled.
+
+**4. The strip's item count is a literal.** `FeGroupInGameTopSelect`'s init calls
+`FUN_140021b30(this, 6)` and then walks a SIX-pointer unrolled stack array of the same addresses as
+(2).
+
+**5. The strip's caption path builder holds five entries** (`0x1eab9b`, `0x1eab9c`, `0x1eab9d`,
+`0x1eab9f`, `0x1eab9e`) behind `if (index < 5)`, and returns an empty accessor above it.
+
+So: a measured no. The rows have to live on a tab that already exists.
+
+### Neither ceiling can be grown, and neither had to be
+
+Both are inline storage whose next element lands on its own count field:
+
+| | elements at | count at | element 6 |
+| --- | --- | --- | --- |
+| item vector | `descriptor + (-descriptor & 3) + n * 8` | `+0x30` | exactly ON the count |
+| namer list | `list + (-list & 7) + n * 0x30` | `list + 0x128` | spans the count |
+
+There is no pointer to repoint and no allocation to enlarge. But each is READ through exactly one
+function, and that is the whole opening:
+
+* **an item** comes from `FUN_1400a6750` -- `index = FUN_140022140(tab); if (index < tab[0x128])
+  return tab + 0xf8 + index * 8; return &static{0xffffffff, 0};` -- whose only two callers are the
+  confirm handler and `FUN_1400a4cc0`. A detour that answers for `index >= count` serves an
+  `(action, gate)` pair from anywhere.
+* **a cell's element** comes from `FrontendEx::IngameTopLayoutAdapter`'s `FUN_1400a4b20`, vtable slot
+  `+0x10`, which reads exactly three fields of the namer and nothing else:
+
+```asm
+cmp DWORD PTR [r8],0x0          ; cell.col != 0 -> empty
+mov edx,DWORD PTR [r8+0x4]      ; cell.row
+cmp rdx,QWORD PTR [rcx+0x140]   ; >= count -> empty
+lea r9,[rcx+0x18]               ; the entry list
+mov rcx,QWORD PTR [rcx+0x10]    ; the scene proxy
+call 0x140026790                ; (proxy, out, &list[row])
+```
+
+Three fields is a stand-in: a buffer with a scene proxy at `+0x10`, ONE entry at `+0x18` and a count
+of `1` at `+0x140` is indistinguishable from a namer here. Hand that over with a cell of `(0, 0)`
+and the game's own code builds the accessor for an entry of ours -- nothing reimplemented, and the
+entry never sits at an index whose stride would reach `+0x140`. One stand-in per row, because one
+shared list of twelve would hit that collision at entry 6 exactly as the game's does.
+
+The sibling slot `+0x18` (`FUN_1400a4c80`) is `make-empty; return` for every cell on every tab, so
+there is no second element to supply.
+
+### What is left is the bind loop, and it is fifteen
+
+`FrontendEx::FexGridControl`'s layout bind ends its outer loop with `if (0xe < iVar13) return` --
+rows `0..=14` -- and the fixed vector it collects built cells in refuses above `0x1e0`, which is
+`15 * 32`. Two spellings of one bound in one function. So a tab holds fifteen rows and the System
+tab ships three: **twelve added rows**, where it was two.
+
+### Why raising the cursor bound is safe, which is not obvious
+
+The per-tab init does three things in order: bind the grid, call `FUN_140021b30(tab, vectorCount)`,
+run the availability pass. The bind's extent now counts the stand-in cells, but the count it was
+handed is the vector's, which stops at five. So the init is detoured and the count re-set afterwards.
+
+The availability pass is the reason that is safe rather than merely convenient. It loops over the
+VIRTUAL count but reads each entry with its OWN inlined copy of the vector's bounds check, falling
+back to the same static `(0xffffffff, 0)` -- and its first act per entry is `if (gate == 0) skip`. So
+above the vector's count it reads the static, sees gate zero, and does nothing. It never touches
+uninitialised storage. Raising the vector's own count field instead of the virtual one would have
+handed that pass an unwritten gate and a gate index the predicate switches on.
+
+### And one correction to this document
+
+A namer list entry is a `DLKR::DLFixedVector<u32, 8>`, not an opaque struct with slack. The copy the
+push uses, `FUN_1400189f0`, refuses a source count above 8, copies that many `u32`s at stride 4, and
+writes the count at `+0x28` -- which is the field recorded above as "the path length". It is the
+length AND it is a vector's count, and the "uninitialised slack" between the last id and it is the
+unused tail of a fixed-capacity array. Nothing that was built on the old reading is wrong -- a clone
+still has to go through that copy rather than be assembled -- but the reason is now the right one.
+
+### What is NOT measured
+
+**Where the rows stop being visible.** Fifteen is what the engine will bind. The banner's quad is
+lengthened by one row pitch per row and the caret follows it, but the panel is a fixed graphic on a
+menu of fixed size, and nobody has looked at a tab carrying twelve added rows. Twelve is a refusal
+bound, not a recommendation.
+
+**All of it.** Not one line of this section has been in front of a running game.

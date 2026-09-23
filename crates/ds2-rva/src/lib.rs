@@ -2536,6 +2536,15 @@ pub const FEX_GRID_SCROLL_TOTAL_OFFSET: usize = 0x2c;
 /// axis and [`FEX_GRID_COL_EXTENT_OFFSET`] is the one that bounds them.
 pub const FEX_GRID_ROW_EXTENT_OFFSET: usize = 0xd8;
 
+/// Byte offset of a tab's item `DLFixedVector` inside the constructed
+/// `FeGroupInGameGroupSelect`.
+///
+/// `FUN_1400a40e0` copies the builder's stack descriptor in with
+/// `FUN_1400a3ef0(param_1 + 0x1f, descriptor)` -- qword `0x1f` -- and
+/// [`FE_INGAME_MENU_TAB_ITEM_LOOKUP`] addresses the same storage as `lea rcx,[rbx+0xf8]`. Two
+/// spellings, one offset.
+pub const FE_INGAME_MENU_TAB_ITEM_VECTOR_OFFSET: usize = 0xf8;
+
 /// Byte offset of the element count inside a tab's item `DLFixedVector`.
 ///
 /// Every one of the six builders opens with `mov QWORD PTR [rcx+0x30], 0`, and the copy into the
@@ -2548,6 +2557,12 @@ pub const FE_INGAME_MENU_ITEM_VECTOR_COUNT_OFFSET: usize = 0x30;
 /// Spelled by the builders as `if (5 < newCount) panic("out of memory.")` against
 /// `DLFixedVector.inl:0x24c`, and independently by the copy at `0x1400a3ef0`, which panics unless
 /// the source count is `< 6`. Both agree: five.
+///
+/// **It is no longer the ceiling on ROWS, and it never was a ceiling on anything but the vector.**
+/// The storage is inline -- elements at `descriptor + (-descriptor & 3) + n * 8` with the count at
+/// `+0x30`, so element 6 would land on the count -- but an item is only ever READ through
+/// [`FE_INGAME_MENU_TAB_ITEM_LOOKUP`], and a detour there serves an entry from storage of our own.
+/// See the section above that constant.
 pub const FE_INGAME_MENU_ITEM_VECTOR_CAPACITY: usize = 5;
 
 /// Size of one item entry: a `u32` action id followed by a `u32` gate index.
@@ -2612,6 +2627,280 @@ pub const FE_INGAME_MENU_GATE_ALWAYS: u32 = 0;
 /// the project yet, so what it actually forbids is NOT recorded here -- only that this is the gate
 /// the shipped quit row uses.
 pub const FE_INGAME_MENU_GATE_RETURN_TITLE: u32 = 4;
+
+// ---------------------------------------------------------------------------------------------
+// WHY THERE IS NO SEVENTH TAB, AND WHERE A TAB'S ROW CEILING ACTUALLY IS
+//
+// The obvious way past "two added rows" is a tab of our own. A tab's item vector IS per tab --
+// `FUN_1400a40e0` copies each builder's stack descriptor into its own group with
+// `FUN_1400a3ef0(group + 0x1f, descriptor)`, which is `group + 0xf8`, and each group is a separate
+// subobject -- so a seventh tab really would start with five empty slots.
+//
+// It cannot exist. FIVE independent bounds say six, and every one of them is a literal in code
+// rather than a table that could be substituted the way a `.flo` child count can:
+//
+//   1. The six groups are INLINE MEMBERS of `FeGroupInGameTopSelect`, at
+//      [`FE_INGAME_TOP_SELECT_TAB_OFFSETS`] with stride [`FE_INGAME_TOP_SELECT_TAB_STRIDE`], and
+//      that object is itself an inline member of `FeSceneInGame` (`FUN_1400995a0` calls
+//      `FUN_1400a41b0(scene + 0x28, ..)` in qwords -- `scene + 0x140`). A seventh would begin at
+//      [`FE_INGAME_TOP_SELECT_AFTER_TABS`], which the SAME constructor already uses for an element
+//      accessor (`FUN_140027c80(.., param_1 + 0x141, ..)`). There is nowhere to put the object.
+//   2. Navigation is a hardcoded six-entry stack table of `this + literal` behind a `< 6` guard --
+//      [`FE_INGAME_TOP_SELECT_TAB_TABLE`], which returns null for index 6.
+//   3. The tab strip's own cell namer ([`FE_INGAME_TOP_SELECT_NAMER`]) pushes exactly six ids,
+//      [`FE_INGAME_TOP_SELECT_NAMER_CELL_IDS`], through the push at [`FE_SCENE_NAMER_PUSH`], whose
+//      first act is `if (6 < count + 1) panic("out of memory.")`. Unlike a tab's ROW namer, which
+//      uses three of its six slots, the tab strip's list is FULL.
+//   4. `FeGroupInGameTopSelect`'s init (`0x1400a6da0`) sets the strip's item count with a literal
+//      `FUN_140021b30(this, 6)` and walks a six-pointer UNROLLED stack array of the same addresses
+//      as (2).
+//   5. Its caption path builder [`FE_INGAME_TOP_SELECT_TAB_CAPTION_PATH`] holds a five-entry table
+//      and hands back an empty accessor for any index `>= 5`.
+//
+// So the ceiling is per tab, and the two numbers that bound it are the item vector's 5 and the row
+// namer's 6. BOTH are inline storage with no pointer to repoint, and both are one element short of
+// overwriting their own count:
+//
+//   vector   elements at `descriptor + (-descriptor & 3) + n * 8`, count at `+0x30`
+//            -> element 6 lands exactly on the count
+//   namer    entries at `list + (-list & 7) + n * 0x30`, count at `list + 0x128`
+//            -> entry 6 spans the count
+//
+// What CAN be replaced is the two ACCESSORS the game reads them through --
+// [`FE_INGAME_MENU_TAB_ITEM_LOOKUP`] for an item and [`FE_SCENE_NAMER_CELL_LOOKUP`] for a cell --
+// and once the storage behind them is ours the only bound left is the grid bind's own loop,
+// [`FEX_GRID_MAX_ROWS`].
+// ---------------------------------------------------------------------------------------------
+
+/// Most rows a `FrontendEx::FexGridControl` will ever bind cells for. **Fifteen.**
+///
+/// [`FEX_GRID_CONTROL_LAYOUT_BIND`] ends its outer loop with `iVar13 + 1; if (0xe < iVar13) return`
+/// -- rows `0..=14` -- and the fixed vector it collects the built cells in refuses above `0x1e0`,
+/// which is exactly `15 * 32`. Two spellings of the same bound in one function.
+///
+/// This is the ceiling a tab has once the item vector and the namer list are no longer in the way.
+pub const FEX_GRID_MAX_ROWS: usize = 15;
+
+/// Most columns, from the inner loop of the same function: `while (iVar12 < 0x20)`.
+///
+/// Recorded because it is the other half of the `0x1e0` the cell vector caps at, which is what makes
+/// [`FEX_GRID_MAX_ROWS`] two measurements rather than one.
+pub const FEX_GRID_MAX_COLS: usize = 32;
+
+/// How many `FeGroupInGameGroupSelect` members `FeGroupInGameTopSelect` owns. Six, inline.
+pub const FE_INGAME_TOP_SELECT_TABS: usize = 6;
+
+/// Byte offset of each tab subobject inside the top select, in CONSTRUCTION order.
+///
+/// Read off `FeGroupInGameTopSelect`'s constructor, which builds them at `param_1 + 0x33`, `+0x60`,
+/// `+0x8d`, `+0xba`, `+0xe7` and `+0x114` in qwords, and corroborated by
+/// [`FE_INGAME_TOP_SELECT_TAB_TABLE`], which spells the same six as byte immediates.
+pub const FE_INGAME_TOP_SELECT_TAB_OFFSETS: [usize; FE_INGAME_TOP_SELECT_TABS] =
+    [0x198, 0x300, 0x468, 0x5d0, 0x738, 0x8a0];
+
+/// Bytes per tab subobject, from the spacing above.
+pub const FE_INGAME_TOP_SELECT_TAB_STRIDE: usize = 0x168;
+
+/// Where a seventh tab would have to begin -- and what is already there.
+///
+/// `0x8a0 + 0x168`. The constructor's next act after the sixth tab is
+/// `FUN_140027c80(.., param_1 + 0x141, ..)`, and `0x141 * 8` is this. A seventh tab would be
+/// constructed on top of the top select's own caption accessor.
+pub const FE_INGAME_TOP_SELECT_AFTER_TABS: usize = 0xa08;
+
+/// `FUN_1400a66d0(topSelect)` -- display index to tab subobject. RVA `0x000a66d0`.
+///
+/// ```text
+/// index = FEX_GRID_CURRENT_INDEX(topSelect);
+/// local[0] = this + 0x198; local[1] = this + 0x300; local[2] = this + 0x468;
+/// local[3] = this + 0x5d0; local[4] = this + 0x8a0; local[5] = this + 0x738;
+/// return index < 6 ? local[index] : 0;
+/// ```
+///
+/// A stack array of `this + literal`, with the bound as a literal too. There is no table in data to
+/// lengthen, which is bound (2) of the five above. Recorded, not hooked.
+pub const FE_INGAME_TOP_SELECT_TAB_TABLE: u32 = 0x000a_66d0;
+
+/// The order [`FE_INGAME_TOP_SELECT_TAB_TABLE`] puts the tabs in, as indices into
+/// [`FE_INGAME_TOP_SELECT_TAB_OFFSETS`].
+///
+/// **Display order is not construction order, and the last two are swapped.** The System tab --
+/// Game Options / Screen Options / Quit Game, built fifth by
+/// [`FE_INGAME_TOP_SELECT_SYSTEM_TAB_ITEMS`] at `+0x738` -- is the LAST tab on screen, and the Key
+/// Bindings / Graphics tab built sixth at `+0x8a0` is the one before it. Worth writing down because
+/// this repo's own probe enumerates tabs in construction order, so its "tab 4" and the player's
+/// "last tab" are the same tab under two numbers.
+pub const FE_INGAME_TOP_SELECT_TAB_ORDER: [usize; FE_INGAME_TOP_SELECT_TABS] = [0, 1, 2, 3, 5, 4];
+
+/// The TAB STRIP's own cell namer constructor. RVA `0x000a5c60`.
+///
+/// Same shape as a tab's row namer ([`FE_INGAME_MENU_QUIT_TAB_NAMER`]): a one-component base path
+/// (`0x1eaba9`), then a six-slot id array pushed one at a time through [`FE_SCENE_NAMER_PUSH`] in a
+/// `do { } while (i < 6)` loop. The difference is the one that matters -- **none of its six slots is
+/// spare.**
+pub const FE_INGAME_TOP_SELECT_NAMER: u32 = 0x000a_5c60;
+
+/// The six cell ids [`FE_INGAME_TOP_SELECT_NAMER`] pushes, in the order it pushes them.
+///
+/// Six ids into a list that holds [`FE_SCENE_NAMER_LIST_CAPACITY`]. That is bound (3): a seventh tab
+/// has no cell to be drawn in, and asking for one panics in the game's own allocator.
+pub const FE_INGAME_TOP_SELECT_NAMER_CELL_IDS: [u32; FE_INGAME_TOP_SELECT_TABS] = [
+    0x001e_aba2,
+    0x001e_aba3,
+    0x001e_aba4,
+    0x001e_aba6,
+    0x001e_aba7,
+    0x001e_aba5,
+];
+
+/// The tab strip's caption path builder, `fn(topSelect, out, index)`. RVA `0x000a6310`.
+///
+/// Holds a FIVE-entry stack table (`0x1eab9b`, `0x1eab9c`, `0x1eab9d`, `0x1eab9f`, `0x1eab9e`)
+/// behind `if (index < 5)`, and calls `FUN_140027980` -- make-empty -- for anything else. Bound (5).
+pub const FE_INGAME_TOP_SELECT_TAB_CAPTION_PATH: u32 = 0x000a_6310;
+
+// ---------------------------------------------------------------------------------------------
+// THE TWO ACCESSORS, WHICH IS WHERE STORAGE OF OUR OWN GOES IN
+//
+// Neither the item vector nor the namer list can be grown or repointed. Both are read through ONE
+// function each, and a detour there can serve an entry from anywhere -- which turns two hard fixed
+// bounds (5 and 6) into [`FEX_GRID_MAX_ROWS`].
+// ---------------------------------------------------------------------------------------------
+
+/// `FUN_1400a6750(tab) -> *entry` -- the item entry under the cursor. RVA `0x000a6750`.
+///
+/// ```text
+/// index = FEX_GRID_CURRENT_INDEX(tab);
+/// if (index < *(u64*)(tab + 0x128))
+///     return tab + 0xf8 + (-(int)(tab + 0xf8) & 3) + index * 8;
+/// return &static{ action = 0xffffffff, gate = 0 };
+/// ```
+///
+/// **Its two callers are the only readers of an item's ACTION**: the confirm handler
+/// (`0x1400a6b10`) and `FUN_1400a4cc0`, which is the same read again for the enable/sound decision.
+/// The availability pass [`FE_INGAME_MENU_AVAILABILITY_PASS`] does NOT come through here -- it
+/// inlines the same bounds check and only ever reads the GATE.
+///
+/// So a detour here can answer for an index the vector does not hold, and the failure mode if it
+/// declines is the game's own `0xffffffff` -- an action no case matches, i.e. an inert row.
+///
+/// Not an Arxan redirect: prologue [`FE_INGAME_MENU_TAB_ITEM_LOOKUP_PROLOGUE`], with
+/// `scripts/ds2-arxan-chain.py` terminating at hop 0.
+pub const FE_INGAME_MENU_TAB_ITEM_LOOKUP: u32 = 0x000a_6750;
+
+/// The first six bytes of [`FE_INGAME_MENU_TAB_ITEM_LOOKUP`]: `rex push rbx` / `sub rsp,0x20`.
+pub const FE_INGAME_MENU_TAB_ITEM_LOOKUP_PROLOGUE: [u8; 6] = [0x40, 0x53, 0x48, 0x83, 0xec, 0x20];
+
+/// The availability pass, `FeGroupInGameGroupSelect::FUN_1400a77c0(tab)`. RVA `0x000a77c0`.
+///
+/// Walks `0..itemCount` -- the VIRTUAL count at [`FEX_GRID_ITEM_COUNT_OFFSET`], read through a
+/// vtable slot -- and for each index reads the entry INLINE, with its own copy of
+/// [`FE_INGAME_MENU_TAB_ITEM_LOOKUP`]'s bounds check against the vector's count and the same static
+/// `(0xffffffff, 0)` fallback. It then does nothing at all unless that entry's GATE is non-zero.
+///
+/// **That is what makes raising the virtual item count safe.** Past the vector's own count this pass
+/// reads the static, sees gate `0`, and skips -- it never touches the storage beyond the last real
+/// entry, so there is no uninitialised gate for it to hand the gate predicate. Its only caller is
+/// [`FE_INGAME_MENU_TAB_INIT`]. Recorded, not hooked.
+pub const FE_INGAME_MENU_AVAILABILITY_PASS: u32 = 0x000a_77c0;
+
+/// The first nine bytes of [`FE_INGAME_MENU_TAB_INIT`]: `rex push rbx` / `sub rsp,0xb0`.
+pub const FE_INGAME_MENU_TAB_INIT_PROLOGUE: [u8; 9] =
+    [0x40, 0x53, 0x48, 0x81, 0xec, 0xb0, 0x00, 0x00, 0x00];
+
+/// `FUN_140022140(grid) -> int` -- the index under the cursor. RVA `0x00022140`.
+///
+/// `if (grid[0x1e] != 0 || grid[0xd0] < 0) return grid[0xcc]; else return grid[0xd0];`. Called
+/// rather than reimplemented wherever a detour needs the same index its caller is about to use.
+pub const FEX_GRID_CURRENT_INDEX: u32 = 0x0002_2140;
+
+/// `FUN_140021b30(grid, count)` -- write [`FEX_GRID_ITEM_COUNT_OFFSET`] and drive the scrollbar.
+/// RVA `0x00021b30`.
+///
+/// The only writer of that field, and on the in-game menu tabs the scroll object at
+/// [`FEX_GRID_SCROLL_OFFSET`] is null, so on this path it writes the count and returns at the null
+/// check. Called -- not hooked -- so that a tab's cursor bound can be raised past what its item
+/// vector holds, through the game's own setter rather than by storing into a field.
+///
+/// Twenty-three callers across the frontend; the two on this path are [`FE_INGAME_MENU_TAB_INIT`]
+/// (per tab, with the vector's count) and `0x1400a6da0` (the tab strip, with a literal `6`).
+/// Nothing else writes the field on these objects, which is why a value written after the init
+/// survives.
+pub const FEX_GRID_SET_ITEM_COUNT: u32 = 0x0002_1b30;
+
+/// `FrontendEx::IngameTopLayoutAdapter`'s ordinary-cell lookup, `fn(namer, out, cell) -> out`.
+/// RVA `0x000a4b20`, vtable slot `+0x10` at `0x1410b69b8`.
+///
+/// **It reads exactly three fields of the namer and nothing else**, which is read off the
+/// disassembly rather than the decompiler:
+///
+/// ```text
+/// cmp DWORD PTR [r8],0x0          ; cell.col != 0 -> empty
+/// mov edx,DWORD PTR [r8+0x4]      ; cell.row
+/// cmp rdx,QWORD PTR [rcx+0x140]   ; >= count -> empty
+/// lea r9,[rcx+0x18]               ; the entry list
+/// mov rcx,QWORD PTR [rcx+0x10]    ; the scene proxy
+/// ...  r8 = list + (-list & 7) + row * 0x30
+/// call 0x140026790                ; (proxy, out, entry)
+/// ```
+///
+/// Three fields is what makes a STAND-IN possible: a buffer carrying a scene proxy at
+/// [`FE_SCENE_NAMER_PROXY_OFFSET`], one entry at [`FE_SCENE_NAMER_LIST_OFFSET`] and a count of `1`
+/// at `0x140` is indistinguishable from a namer here. Passing that, plus a cell of `(0, 0)`, makes
+/// the game's own code build the accessor for an entry of ours -- with nothing reimplemented, and
+/// without the entry ever sitting at an index whose stride would reach the count field.
+///
+/// The sibling slot `+0x18` (`FUN_1400a4c80`) is `make-empty; return` for every cell on every tab,
+/// so there is no second element to supply.
+///
+/// Not an Arxan redirect: prologue [`FE_SCENE_NAMER_CELL_LOOKUP_PROLOGUE`].
+pub const FE_SCENE_NAMER_CELL_LOOKUP: u32 = 0x000a_4b20;
+
+/// The first nine bytes of [`FE_SCENE_NAMER_CELL_LOOKUP`]: `rex push rbx` / `sub rsp,0x260`.
+pub const FE_SCENE_NAMER_CELL_LOOKUP_PROLOGUE: [u8; 9] =
+    [0x40, 0x53, 0x48, 0x81, 0xec, 0x60, 0x02, 0x00, 0x00];
+
+/// Byte offset, inside a cell namer, of the scene proxy its lookup resolves paths against.
+/// `mov rcx,QWORD PTR [rcx+0x10]`.
+pub const FE_SCENE_NAMER_PROXY_OFFSET: usize = 0x10;
+
+/// `FUN_140027980(out) -> out` -- construct the EMPTY element accessor. RVA `0x00027980`.
+///
+/// Four calls: a base init, the `FrontendEx::SceneObjProxy` vtable, a default at `+0x58`, and an
+/// empty path copied into `+0x60`. It is what [`FE_SCENE_NAMER_CELL_LOOKUP`] itself returns for a
+/// cell that is not there, and its slot 0 resolves to null -- which is how the grid's layout bind
+/// learns a row has ended.
+///
+/// Recorded because it is the ONLY correct answer a detour on that lookup can give when it cannot
+/// reach the original: handing back an untouched output buffer would leave the caller to call a
+/// vtable slot on uninitialised stack.
+pub const FE_SCENE_ACCESSOR_MAKE_EMPTY: u32 = 0x0002_7980;
+
+/// Byte offset of a cell namer's entry count, from the namer rather than from its list.
+/// [`FE_SCENE_NAMER_LIST_OFFSET`]` + `[`FE_SCENE_NAMER_COUNT_OFFSET`], which the lookup spells as
+/// the immediate `0x140`.
+pub const FE_SCENE_NAMER_COUNT_FROM_NAMER: usize =
+    FE_SCENE_NAMER_LIST_OFFSET + FE_SCENE_NAMER_COUNT_OFFSET;
+
+/// Bytes a stand-in namer has to cover: past [`FE_SCENE_NAMER_COUNT_FROM_NAMER`].
+pub const FE_SCENE_NAMER_SHADOW_SIZE: usize = FE_SCENE_NAMER_COUNT_FROM_NAMER + 8;
+
+/// `FUN_1400189f0(dst, src) -> dst` -- the copy one namer LIST ENTRY is made with. RVA `0x000189f0`.
+///
+/// **This is what says an entry is a `DLKR::DLFixedVector<u32, 8>` and not an opaque struct.** The
+/// function refuses a source count above `8`, copies that many `u32`s from `src` to `dst` at
+/// stride 4, and writes the count at `+0x28` -- which is exactly
+/// [`FE_SCENE_NAMER_ENTRY_LEN_OFFSET`], the field this table used to call "the path length". It is
+/// the length, and it is a vector's count.
+///
+/// So the "uninitialised slack" between the last id and `+0x28` is the unused tail of a
+/// fixed-capacity array, and a copy through this function reproduces an entry exactly as the game's
+/// own push does -- [`FE_SCENE_NAMER_PUSH`] calls this to do the copying.
+pub const FE_SCENE_NAMER_ENTRY_COPY: u32 = 0x0001_89f0;
+
+/// Ids one namer list entry can hold, from `if (8 < count) panic` in
+/// [`FE_SCENE_NAMER_ENTRY_COPY`]. The quit tab's paths use five of the eight.
+pub const FE_SCENE_NAMER_ENTRY_CAPACITY: usize = 8;
 
 // ---------------------------------------------------------------------------------------------
 // QUITTING TO DESKTOP
@@ -2785,6 +3074,15 @@ pub const FE_SCENE_NAMER_LIST_OFFSET: usize = 0x18;
 /// Six is also the bound of the id loop in [`FE_INGAME_MENU_QUIT_TAB_NAMER`], so the array and the
 /// list it fills are the same size -- which is the sort of agreement worth writing down, because
 /// it says the spare slots in that array are genuinely usable rather than accidental padding.
+///
+/// **And it is spelled in code as well as measured**, which the crash did not establish:
+/// [`FE_SCENE_NAMER_PUSH`] opens `count + 1; if (6 < that) panic("out of memory.")` against
+/// `DLFixedVector.inl:0x24c`. The run that died on the seventh push was reading a bound the
+/// disassembly already had.
+///
+/// Like [`FE_INGAME_MENU_ITEM_VECTOR_CAPACITY`], it stopped being the row ceiling once
+/// [`FE_SCENE_NAMER_CELL_LOOKUP`] -- the one place a cell's element is read -- could be answered
+/// from storage of our own.
 pub const FE_SCENE_NAMER_LIST_CAPACITY: usize = 6;
 
 /// Byte offset of the count inside a cell namer's list, relative to the list itself.
@@ -3039,7 +3337,31 @@ pub const FLO_QUIT_TAB_MARK_TEMPLATE: usize = 6;
 /// `0x1eaccd` is first because it is the one already on record: the earlier runtime experiment
 /// that named it in the namer got `row-extent 3`, i.e. nothing resolved, which is the same answer
 /// the file gives from the other side.
-pub const FLO_ADDED_ROW_IDS: [u32; 2] = [0x001e_accd, 0x001e_acce];
+///
+/// **There are twelve because the ceiling is now [`FEX_GRID_MAX_ROWS`] rather than the item
+/// vector's five.** Re-running the scan over the current file gives 113 free ids in
+/// `0x1eac00..0x1eacff`, of which `0x1eacc0..0x1eacc8`, `0x1eaccc`, `0x1eaccd`, `0x1eacce`,
+/// `0x1eacd3`, `0x1eacd7` and `0x1eacdf` are the fifteen in the row block -- the same fifteen this
+/// comment claimed before, by a script anyone can re-run:
+///
+/// ```text
+/// python3 scripts/ds2-ebl.py extract /menu/02.febnd.dcx --out /tmp/menu02
+/// python3 scripts/ds2-flo.py find /tmp/menu02/l02_01_In-Game.flo --id 0x1eaccd
+/// ```
+pub const FLO_ADDED_ROW_IDS: [u32; 12] = [
+    0x001e_accd,
+    0x001e_acce,
+    0x001e_accc,
+    0x001e_acc0,
+    0x001e_acc1,
+    0x001e_acc2,
+    0x001e_acc3,
+    0x001e_acc4,
+    0x001e_acc5,
+    0x001e_acc6,
+    0x001e_acc7,
+    0x001e_acc8,
+];
 
 /// Element ids for those rows' caption marks, one per slot.
 ///
@@ -3051,7 +3373,26 @@ pub const FLO_ADDED_ROW_IDS: [u32; 2] = [0x001e_accd, 0x001e_acce];
 ///
 /// `0x1eac4a` is first because it is the id the cut fourth row used -- its caption, `0x200f28`, is
 /// still in the FMG and still reads "Mouse Settings".
-pub const FLO_ADDED_LABEL_IDS: [u32; 2] = [0x001e_ac4a, 0x001e_ac4b];
+///
+/// **The first two and the other ten are chosen by different rules, deliberately.** Slots 0 and 1
+/// are the two cut rows' own ids and are the pair that has actually been on screen; there is no
+/// reason to move a working id for the sake of a tidy table. The remaining ten are ids the file does
+/// not use ANYWHERE -- a strictly stronger property than the container-scope freedom a label needs,
+/// and the cheap way to be sure of ten at once.
+pub const FLO_ADDED_LABEL_IDS: [u32; 12] = [
+    0x001e_ac4a,
+    0x001e_ac4b,
+    0x001e_aca0,
+    0x001e_aca1,
+    0x001e_aca2,
+    0x001e_aca3,
+    0x001e_aca4,
+    0x001e_aca5,
+    0x001e_aca6,
+    0x001e_aca7,
+    0x001e_aca8,
+    0x001e_aca9,
+];
 
 /// How far apart consecutive added rows and their marks sit.
 ///
@@ -3515,11 +3856,18 @@ pub const FLO_PANEL_CHILDREN: usize = 2;
 /// index seen is `0x0272` -- so a lookup for it can only come from the record this crate wrote.
 pub const FLO_ADDED_PANEL_DEFINITION: u32 = 0xf221;
 
-/// Where the caret goes: down by one row pitch, the same `48.00` the added row is spaced at.
+/// Where the caret goes: down by ONE ROW PITCH PER ADDED ROW, from the shipped `244.65`.
 ///
-/// `244.65 + 48.00`. It is the caret's own authored y in panel-local coordinates, so the panel's
-/// position does not enter into it.
-pub const FLO_CARET_Y: f32 = 292.65;
+/// **It used to be the constant `292.65` -- `244.65 + 48.00` -- and one row's worth of movement was
+/// wrong the moment a second row could be registered.** The caret sits just below the last row, so
+/// what it follows is the number of rows, exactly as the banner's quad does in
+/// [`FE_BANNER_QUAD_SHIPPED_Y1`]'s consumer. A fixed offset put it under row 4 on a tab showing five.
+///
+/// The value is the caret's own authored y in PANEL-LOCAL coordinates, so the panel's own position
+/// does not enter into it.
+pub const fn caret_y(rows: usize) -> f32 {
+    FLO_CARET_SHIPPED_Y + FLO_ROW_PITCH * rows as f32
+}
 /// What the shipped caret's y reads, checked before anything is written.
 pub const FLO_CARET_SHIPPED_Y: f32 = 244.65;
 

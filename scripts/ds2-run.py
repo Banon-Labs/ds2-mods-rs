@@ -193,10 +193,14 @@ MENU_ROW_ROW_NAMES = (
     "save-game-to-file",
 )
 
-#: Mirrors `MAX_ADDED_ROWS` in `crates/ds2-menu-row/src/api.rs`: the game's own item-vector capacity
-#: (5) less the rows the System tab ships (3). Named here so `--rows` can refuse a third row at the
-#: command line instead of leaving it to be refused in a log.
-MENU_ROW_MAX_ADDED = 2
+#: Mirrors `MAX_ADDED_ROWS` in `crates/ds2-menu-row/src/api.rs`: the most rows the grid's layout
+#: bind will ever go looking for (15) less the rows the System tab ships (3). Named here so `--rows`
+#: can refuse the thirteenth at the command line instead of leaving it to be refused in a log.
+#:
+#: IT WAS 2 -- the item vector's capacity (5) less the same three -- until `ds2-menu-row` stopped
+#: keeping its rows in the game's two fixed vectors and started answering the two functions that
+#: read them. `--selftest` pins this against the crate, so the two cannot drift.
+MENU_ROW_MAX_ADDED = 12
 
 #: The prefix `ds2-save-file` writes. Grep for it when an export or a pick disappoints.
 SAVE_FILE_LOG_PREFIX = "ds2-save-file:"
@@ -1468,12 +1472,17 @@ def config_text(
 # does.
 {KEY_MENU_ROW_ENABLED} = {str(menu_row).lower()}
 #
-# WHICH ROWS, and why this is a list. The tab's item vector is a `DLKR::DLFixedVector` of capacity
-# five -- the builders spell it `if (5 < newCount) panic("out of memory.")` -- and the System tab
-# ships three, so exactly {MENU_ROW_MAX_ADDED} rows can be added and there are {len(MENU_ROW_ROW_NAMES)} that want one. Naming a
-# third is refused at registration with the numbers in the log, rather than by the game's allocator
-# during a menu open. A name this table does not know arms NOTHING and is reported: a typo must lose
+# WHICH ROWS, and why this is a list. The ceiling is the grid's own layout bind, which stops looking
+# for cells after fifteen rows -- and the System tab ships three, so {MENU_ROW_MAX_ADDED} rows can be added and
+# there are {len(MENU_ROW_ROW_NAMES)} that want one. ALL OF THEM FIT; this key is now about ORDER and about turning
+# rows off, not about rationing slots. Naming more than {MENU_ROW_MAX_ADDED} is refused at registration with the
+# numbers in the log. A name this table does not know arms NOTHING and is reported: a typo must lose
 # a row you asked for, never add one you did not.
+#
+# It held TWO until the DLL stopped keeping its rows in the game's own item vector (capacity five)
+# and cell-namer list (capacity six), both of which are inline arrays whose sixth element would
+# land on their own count field. Nothing has measured how far down the banner stays legible, so
+# twelve is what the engine allows rather than a number anyone has looked at.
 #
 # Present, this key OVERRIDES `{KEY_MENU_ROW_ENABLED}` above and `[{BUILD_IMPORT_SECTION}] {KEY_BUILD_IMPORT_ENABLED}` below; absent,
 # those two still mean what they always did. The log line says which of the two a run read.
@@ -2603,9 +2612,10 @@ def selftest() -> int:
         f"({MENU_ROW_LOG_PREFIX})",
     )
 
-    # THE ROW LIST. Four names against two slots, so the count and every spelling are checked here
-    # rather than discovered in a log after a launch. `--rows` is the only key in this file whose
-    # value is a LIST, and the reason is the game's item vector; see `MENU_ROW_MAX_ADDED`.
+    # THE ROW LIST. Four names against twelve slots, so the count and every spelling are checked
+    # here rather than discovered in a log after a launch. `--rows` is the only key in this file
+    # whose value is a LIST, and the reason it started as one was the game's item vector; see
+    # `MENU_ROW_MAX_ADDED` for what replaced that ceiling.
     for name in MENU_ROW_ROW_NAMES:
         check(
             f'"{name}"' in menu_row_src,
@@ -3237,8 +3247,8 @@ def main() -> int:
             "WHICH extra rows go on the pause menu's System tab, as a comma-separated list. Writes "
             f"`[{MENU_ROW_SECTION}] {KEY_MENU_ROW_ROWS}`, which OVERRIDES both --menu-row and "
             "--build-import for the run. At most "
-            f"{MENU_ROW_MAX_ADDED}: the tab's item vector is a DLFixedVector of capacity five and "
-            "the game ships three rows, so a third is refused. Names: "
+            f"{MENU_ROW_MAX_ADDED}: the grid's layout bind stops looking after 15 rows and the game "
+            "ships 3 on that tab, so a 13th is refused. Every name below fits at once. Names: "
             + ", ".join(MENU_ROW_ROW_NAMES)
             + ". `load-character-from-file` takes effect on the NEXT launch -- it writes "
             f"{SAVE_FILE_HANDOFF_NAME} beside the config and the loader consumes it at attach, "
@@ -3374,7 +3384,7 @@ def main() -> int:
         if len(set(named)) > MENU_ROW_MAX_ADDED:
             parser.error(
                 f"--rows names {len(set(named))} rows and the System tab holds "
-                f"{MENU_ROW_MAX_ADDED}: its item vector is a DLFixedVector of capacity 5 and the "
+                f"{MENU_ROW_MAX_ADDED}: the grid's layout bind never looks past row 15 and the "
                 "game ships 3 rows on that tab"
             )
         menu_row_rows = named

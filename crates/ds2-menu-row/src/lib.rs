@@ -19,22 +19,37 @@
 //! **The quit-to-desktop row goes through that same call**, made by `ds2-loader`. Nothing in this
 //! crate is privileged, which is the only way to know the API is usable.
 //!
-//! **The ceiling is the game's and it is small.** A tab's item vector holds five entries and
-//! panics above it; the quit tab ships three, so [`MAX_ADDED_ROWS`] is two. [`add_row`] refuses
-//! the third with the numbers in the error rather than letting the game's allocator find out. See
-//! [`crate::api`] for the other two bounds and which one binds.
+//! **The ceiling is the game's, and it stopped being small.** It was two -- a tab's item vector
+//! holds five entries and the System tab ships three -- and the vector is inline storage that cannot
+//! be grown. But an item is only ever READ through one function, and so is a cell's element, so this
+//! crate detours both and answers out of storage of its own past the point the game's runs out. What
+//! is left is the grid's own bind loop, which stops looking after fifteen rows: [`MAX_ADDED_ROWS`] is
+//! twelve. [`add_row`] still refuses the thirteenth with the numbers in the error. **There is no
+//! seventh TAB** -- see the section above [`ds2_rva::FEX_GRID_MAX_ROWS`] for the five code literals
+//! that say six -- so the extra room is on the tab the rows already sit on.
 //!
-//! # The four hooks, and what each one is for
+//! # The seven hooks, and what each one is for
 //!
 //! | site | RVA | what it does |
 //! |---|---|---|
-//! | `FeGroupInGameTopSelect`'s quit-tab item builder | `0x000a5900` | appends the item |
-//! | the tab's item dispatch | `0x000a6090` | turns the item into a shutdown |
-//! | the quit tab's cell namer | `0x000a5b50` | names the fourth cell |
-//! | `FeLayoutDocument::findDefinition` | `0x00b54740` | supplies the cell |
+//! | `FeGroupInGameTopSelect`'s quit-tab item builder | `0x000a5900` | appends the items that FIT in the game's vector |
+//! | the tab's item dispatch | `0x000a6090` | turns the item into an action |
+//! | the tab's item lookup | `0x000a6750` | answers for the items that do NOT fit |
+//! | the per-tab init | `0x000a4d20` | raises the cursor bound to match |
+//! | the quit tab's cell namer | `0x000a5b50` | names the cells that fit, and builds stand-ins for the rest |
+//! | the namer's cell lookup | `0x000a4b20` | answers with a stand-in for the cells that do not fit |
+//! | `FeLayoutDocument::findDefinition` | `0x00b54740` | supplies every added cell's layout record |
 //!
-//! The first two are the ACTION and were finished first. The last two are the ROW, and they only
-//! work as a pair: the namer asks the scene for an element by id, and the layout is what has one.
+//! Two of them are the ACTION and were finished first. The rest are the ROW, and they only work
+//! together: something has to ask the scene for an element by id, and the layout is what has one.
+//!
+//! **The game's own slots are filled before ours, and the three new sites go in all or nothing.**
+//! The two lookup detours decline for anything the game's own vector and list already hold, so the
+//! first two rows and the first three cells travel the shipped path end to end with nothing of ours
+//! on it -- fewer things have to be right for the early rows than for the late ones. And if any of
+//! the three new sites refuses its prologue, `install` stops there, before one byte of the builder,
+//! the dispatch, the namer, the layout or the captions has been patched: the player gets the menu
+//! the game shipped rather than half of one. Every refusal says which half it was.
 //!
 //! # The action
 //!

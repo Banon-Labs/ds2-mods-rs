@@ -7,12 +7,21 @@
 //!
 //! # Why a list and not four switches
 //!
-//! **Because the tab holds two.** `FeGroupInGameGroupSelect`'s item vector is a
-//! `DLKR::DLFixedVector` of capacity five, spelled by the builders as
-//! `if (5 < newCount) panic("out of memory.")`, and the System tab ships three rows -- so
-//! [`ds2_menu_row::MAX_ADDED_ROWS`] is two and there are FOUR rows that want one. Four independent
-//! `enabled` switches let a player turn on three and find out from an allocator panic during a menu
-//! open. A list refuses the third at registration, with the numbers, before anything is hooked.
+//! **Because the tab used to hold two, and the list is what kept that survivable.**
+//! `FeGroupInGameGroupSelect`'s item vector is a `DLKR::DLFixedVector` of capacity five and the
+//! System tab ships three rows, so for as long as that vector was the ceiling there were two slots
+//! and FOUR rows that wanted one. Four independent `enabled` switches let a player turn on three and
+//! find out from an allocator panic during a menu open; a list refused the third at registration,
+//! with the numbers, before anything was hooked.
+//!
+//! **That ceiling is now [`ds2_menu_row::MAX_ADDED_ROWS`] = 12 and all four rows fit**, because
+//! `ds2-menu-row` stopped storing its rows in the game's two fixed vectors -- see that crate's
+//! [`api`](ds2_menu_row) docs. The list stays, and so does the refusal: the bound is still the
+//! game's (the grid's layout bind stops looking after fifteen rows), and the next row somebody adds
+//! should still be refused by a number rather than by a menu that misbehaves.
+//!
+//! **Nothing has measured where rows stop being VISIBLE**, which is a smaller number than twelve and
+//! is not known. Twelve is what the engine will bind.
 //!
 //! This is the shape `../er-mods-rs` arrived at as well, for the same reason and after the same
 //! mistake: `er-quit-menu-core::row_config` replaced three separate DLLs that each armed a different
@@ -52,7 +61,8 @@ pub const KEY_ENABLED: &str = "enabled";
 
 /// A row that can be put on the pause menu's System tab.
 ///
-/// Four variants against two slots, which is the whole reason [`MenuRowConfig`] exists.
+/// Four variants against what used to be two slots, which is the whole reason [`MenuRowConfig`]
+/// exists -- and they all fit now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Row {
     /// Quit straight to the desktop, without a confirmation and without saving.
@@ -236,10 +246,10 @@ impl MenuRowConfig {
         );
         if !self.overflow.is_empty() {
             line.push_str(&format!(
-                " REFUSED-OVER-CEILING=[{}] -- the System tab's item vector holds {} and the game \
-                 ships {}",
+                " REFUSED-OVER-CEILING=[{}] -- the grid's layout bind never looks past row {} and \
+                 the game ships {} on this tab",
                 names(&self.overflow),
-                ds2_rva::FE_INGAME_MENU_ITEM_VECTOR_CAPACITY,
+                ds2_rva::FEX_GRID_MAX_ROWS,
                 ds2_rva::FE_INGAME_MENU_SYSTEM_TAB_ITEMS.len()
             ));
         }
@@ -284,23 +294,59 @@ mod tests {
         }
     }
 
-    /// THE CEILING IS THE GAME'S. A third row is refused here, not by the game's allocator.
+    /// ALL FOUR ROWS FIT. This test used to assert the opposite -- that naming four rows kept two
+    /// and refused two -- and the whole point of raising the ceiling was to stop that being true.
     #[test]
-    fn a_third_row_is_refused_and_named() {
+    fn every_row_this_table_knows_fits_at_once() {
         let config = MenuRowConfig::from_text(
             "[menu_row]\nrows = [\"quit-to-desktop\", \"load-build-from-url\", \
              \"save-game-to-file\", \"load-character-from-file\"]\n",
         );
-        assert_eq!(config.rows.len(), ds2_menu_row::MAX_ADDED_ROWS);
-        assert_eq!(config.rows, vec![Row::QuitToDesktop, Row::LoadBuildFromUrl]);
         assert_eq!(
-            config.overflow,
-            vec![Row::SaveGameToFile, Row::LoadCharacterFromFile]
+            config.rows,
+            vec![
+                Row::QuitToDesktop,
+                Row::LoadBuildFromUrl,
+                Row::SaveGameToFile,
+                Row::LoadCharacterFromFile,
+            ]
         );
-        // And the log line says so, with the two numbers that explain why.
+        assert!(config.overflow.is_empty());
         let line = config.describe();
-        assert!(line.contains("REFUSED-OVER-CEILING"), "{line}");
-        assert!(line.contains("save-game-to-file"), "{line}");
+        assert!(!line.contains("REFUSED-OVER-CEILING"), "{line}");
+    }
+
+    /// THE CEILING IS STILL THE GAME'S, and the refusal is still here -- it is simply out of reach
+    /// while there are fewer names in this table than there are slots on the tab. That inequality is
+    /// the thing worth pinning: the day it stops holding, the test above starts failing and whoever
+    /// added the row finds out here rather than in a pause menu.
+    #[test]
+    fn the_ceiling_is_above_every_name_this_table_offers() {
+        assert!(
+            EVERY_ROW.len() <= ds2_menu_row::MAX_ADDED_ROWS,
+            "{} rows against {} slots -- the overflow path is live again and wants a test",
+            EVERY_ROW.len(),
+            ds2_menu_row::MAX_ADDED_ROWS
+        );
+        // And the ceiling is the grid's, not either of the two fixed vectors it used to be.
+        assert_eq!(
+            ds2_menu_row::MAX_ADDED_ROWS,
+            ds2_rva::FEX_GRID_MAX_ROWS - ds2_rva::FE_INGAME_MENU_SYSTEM_TAB_ITEMS.len()
+        );
+    }
+
+    /// The overflow SPLIT itself, exercised without needing thirteen real rows: whatever the ceiling
+    /// is, `from_names` keeps that many and reports the rest rather than dropping them silently.
+    #[test]
+    fn the_overflow_split_keeps_the_ceiling_and_reports_the_rest() {
+        let names: Vec<String> = EVERY_ROW.iter().map(|row| row.name().to_owned()).collect();
+        let config = MenuRowConfig::from_names(&names);
+        assert_eq!(
+            config.rows.len() + config.overflow.len(),
+            names.len(),
+            "a name went missing between the list and the two buckets"
+        );
+        assert!(config.rows.len() <= ds2_menu_row::MAX_ADDED_ROWS);
     }
 
     /// A typo loses a row; it never gains one.
