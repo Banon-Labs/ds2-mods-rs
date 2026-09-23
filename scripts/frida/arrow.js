@@ -164,7 +164,12 @@ const base = gameModule === null ? null : gameModule.base;
 console.log('[arrow] game image: ' + (base === null ? 'NOT FOUND -- every character read will ' +
   'fail and the log will say the world is empty when it is not' : base + ' via ' + found.how));
 
-const counters = { update: 0, map: 0, scans: 0, scored: 0, tracked: 0, follows: 0, present: 0, drawn: 0 };
+const counters = {
+  update: 0, map: 0, scans: 0, scored: 0, tracked: 0, follows: 0, present: 0, drawn: 0,
+  /// How many times the believed matrix has been re-read. A FROZEN COUNT HERE IS A STALE CAMERA,
+  /// and a stale camera draws a confident arrow at where the character used to be.
+  refreshed: 0,
+};
 const tracked = new Map();
 /// The same slots as `tracked`, as an array to be walked with a native pointer compare.
 ///
@@ -195,7 +200,12 @@ const examined = new Map();
 /// value was tuned when `examined` was permanent and the first few windows were all that
 /// mattered; with the budget doing its job the gate only has to keep the rejected path cheap.
 const GATE_WHILE_HUNTING = 64;
-const GATE_WHILE_FOLLOWING = 8;
+/// 2, not 8. At 8 the camera's once-per-frame upload was sampled about ten times per three
+/// hundred frames, so the matrix the arrow drew with was half a second old and lagged visibly
+/// when the camera turned. The cost of tightening it is two `NativePointer` materialisations per
+/// admitted call, which is the allocation this gate exists to bound -- so it is tightened as far
+/// as the heartbeat stays alive, and no further.
+const GATE_WHILE_FOLLOWING = 2;
 let gate = GATE_WHILE_HUNTING;
 let scansThisWindow = 0;
 let throttled = 0;
@@ -591,6 +601,34 @@ function discover(resource, source, label, player) {
       note(slot.offsets.get(name), verdict, player);
     }
   }
+}
+
+/// Re-read the believed matrix out of WHATEVER buffer is carrying it now, by offset and not by
+/// pointer.
+///
+/// `follow` matches on the destination resource pointer, and the game does not keep uploading the
+/// camera into the same buffer forever. When it moved, `followed` stopped matching, `follows`
+/// froze at 946 while `update` climbed past seven million, and the agent went on drawing with a
+/// view-projection captured minutes earlier. On screen that is an arrow anchored to where the
+/// character USED to project, sliding around the frame as the camera turns -- which is exactly
+/// what it did, and is the same failure as bd `ds2-mods-rs-5fk` in the Rust overlay.
+///
+/// The offset and convention are the finding; the buffer holding them is not. So once believed,
+/// every gated upload is checked AT THAT OFFSET, and any that still scores as a camera becomes
+/// the current matrix. A buffer swap is then invisible instead of fatal.
+function refresh(source) {
+  const candidate = believed.candidate;
+  if (!readMatrix(source.add(candidate.offset))) return;
+  let m = RAW;
+  if (candidate.convention === 'transposed') { transposeRaw(); m = TRANSPOSED; }
+  // SHAPE FIRST, WITH NO CHARACTER. Nearly every buffer in the game fails at the forward column,
+  // and this runs on every gated upload -- thousands a second -- so the character read has to sit
+  // behind the test that does the rejecting rather than in front of it.
+  if (score(m, null, false) === null) return;
+  if (score(m, playerPosition(), false) === null) return;
+  // COPY: `m` is one of two scratch buffers the next read overwrites.
+  believed.matrix = m.slice();
+  counters.refreshed += 1;
 }
 
 function prune(slot) {
@@ -1039,7 +1077,10 @@ function hookUploads() {
       }
       // Integer first, string second. Everything below here is off the hot path by construction:
       // once the window's budget is spent this hook is a pointer loop and a compare.
-      if (believed !== null) return;
+      if (believed !== null) {
+        refresh(source);
+        return;
+      }
       if (scansThisWindow >= SCANS_PER_WINDOW) { throttled += 1; return; }
       // THE PLAYER READ COMES BEFORE THE BUDGET IS SPENT. With these two the other way round the
       // heartbeat read `20 resources seen, 0 scans`: every resource's twenty looks were consumed
@@ -1071,7 +1112,10 @@ function hookUploads() {
         follow(slotFound, data, player);
         return;
       }
-      if (believed !== null) return;
+      if (believed !== null) {
+        refresh(data);
+        return;
+      }
       if (scansThisWindow >= SCANS_PER_WINDOW) { throttled += 1; return; }
       const player = playerPosition();
       if (player === null) unreadable += 1;
@@ -1095,7 +1139,8 @@ setInterval(function () {
     '[arrow] heartbeat: ' + counters.present + ' present, ' + counters.drawn + ' drawn, ' +
     counters.update + ' update, ' + counters.map + ' map, ' + examined.size + ' resources seen, ' +
     counters.scans + ' scans, ' + counters.scored + ' scored, ' + counters.tracked + ' tracked, ' +
-    counters.follows + ' follows' + (throttled > 0 ? ', THROTTLED ' + throttled : '') +
+    counters.follows + ' follows, ' + counters.refreshed + ' camera refreshes' +
+    (throttled > 0 ? ', THROTTLED ' + throttled : '') +
     (unreadable > 0 ? ', CHARACTER UNREADABLE ' + unreadable + ' times' : '');
   unreadable = 0;
   for (const leader of leaders.slice(0, 4)) {
