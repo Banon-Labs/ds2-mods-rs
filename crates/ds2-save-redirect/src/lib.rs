@@ -69,6 +69,16 @@ pub mod stage;
 /// Prefix on every line this crate writes, so its lines can be grepped out of the shared log.
 pub const LOG_PREFIX: &str = "ds2-save-redirect:";
 
+/// Directory beside the executable that a handoff's save is written into.
+///
+/// Only [`ds2_save_file::take_handoff`](../ds2_save_file/fn.take_handoff.html)'s route reaches
+/// this. There used to be a `[save_redirect] path = ...` key that pointed a whole launch at a file,
+/// and it was removed for lying about what it did: it never opened the file it was given. It copied
+/// it here, pointed the game at this directory, and overwrote the copy on the next launch -- so a
+/// session started that way played a throwaway duplicate and lost everything done in it, under a
+/// help string that said "load the save at WINPATH".
+pub const STAGING_DIR_NAME: &str = "ds2-save-staging";
+
 pub use install::{Outcome, install, live_directory, live_steam_id, set_logger, set_source};
 pub use stage::SAVE_FILE_NAME;
 pub use stage::validate_source;

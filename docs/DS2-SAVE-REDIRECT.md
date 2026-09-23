@@ -105,30 +105,27 @@ heap. `assign` is the same function the original uses to seat its `SHGetFolderPa
 
 ## Using it
 
-`path` names a **file**, because that is what a file manager's "copy full path" gives you:
+There is no config key and no launcher flag. There was a `[save_redirect] path = ...` key and a
+`--save-redirect` flag, and both are deleted, because what they did was not what they said.
 
-```bash
-python3 scripts/ds2-run.py --save-redirect 'Z:\home\you\DS2\some-save.zip'
-```
+The help string said *load the save at WINPATH*. What happened was: the DLL copied that file into
+`ds2-save-staging/` beside the executable, pointed the game at that **directory**, and rewrote the
+copy from the source on the next launch. The file named was never opened by the game, and a session
+started that way threw away everything done in it -- the copy is what the game saved into, and the
+copy is what the next launch overwrote. It also armed both sides at once for the whole session, so
+anything else being tested in that session was silently reading and writing the staged duplicate.
 
-```toml
-[save_redirect]
-enabled = true
-path = "Z:\\home\\you\\DS2\\some-save.zip"
-```
-
-Four shapes are accepted, told apart by extension: a bare `.sl2`, or a `.zip`/`.7z`/`.rar`
-containing **exactly one** `DS2SOFS0000.sl2` at any depth. Zero copies or several are refused by
-name rather than resolved by picking the first — a downloaded archive may hold the save at
+What remains is the pause menu's **Load Character from File** row, which is the feature this was
+standing in for, and the handoff file that row writes when it cannot do the swap in-session. Four
+shapes are accepted, told apart by extension: a bare `.sl2`, or a `.zip`/`.7z`/`.rar` containing
+**exactly one** `DS2SOFS0000.sl2` at any depth. Zero copies or several are refused by name rather
+than resolved by picking the first -- a downloaded archive may hold the save at
 `DarkSoulsII/<steamid>/DS2SOFS0000.sl2` or bare at the root, and both occur in the wild.
-
-It is a **Windows** path: the DLL runs inside the Proton prefix, and Wine maps `Z:` to `/`. Only an
-exact `true` arms it, and `true` with no `path` is refused rather than guessed at.
 
 ### The DLL does the rebind, and needs nothing from you
 
 The source file is never modified. On the detour's first call the DLL extracts the save, rewrites
-the Steam ID inside it, and writes the result to `ds2-save-staging/` beside the executable — then
+the Steam ID inside it, and writes the result to `ds2-save-staging/` beside the executable -- then
 hands the game that directory.
 
 The ID it writes is the one **the game handed the hooked function as its second argument**. That is
@@ -143,7 +140,7 @@ and file writes than a loader callback running before the entry point.
 
 It is what the game reads **and writes**, so progress made in a redirected run lives in
 `ds2-save-staging` and does not survive the next launch. That is what pointing at a read-only
-source means — "start from this save", not "adopt this save".
+source means -- "start from this save", not "adopt this save".
 
 ### It fails open
 
@@ -168,7 +165,7 @@ the first occupied slot is used; with a value the file says is empty, the launch
 but not blocked, because the runtime applies an ownership check the launcher cannot see.
 
 Slots are reported `occupied`, `placeholder` or `empty`. **`placeholder`** means the nine stats are
-all `1` — initialised but holding no character. That state is real and common: it is a save's next
+all `1` -- initialised but holding no character. That state is real and common: it is a save's next
 free slot, and a downloaded "mule" had it in all ten. Reading it as occupied made that mule look
 like ten characters, which is why the classification exists rather than a bare non-zero test.
 
@@ -210,7 +207,7 @@ produces a file the game rejects in exactly the same way as the unpatched one. T
 its own output before writing -- every MD5, every section chain, and the ID set -- and refuses to
 write a save that fails.
 
-Find your own ID from the folder the game already uses: `…\AppData\Roaming\DarkSoulsII\<id>\`.
+Find your own ID from the folder the game already uses: `...\AppData\Roaming\DarkSoulsII\<id>\`.
 It is the SteamID64 in **hex**, not decimal.
 
 ## Ordering, and the thing that is not optional

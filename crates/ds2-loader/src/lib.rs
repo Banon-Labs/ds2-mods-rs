@@ -91,7 +91,6 @@ pub mod intro_skip;
 pub mod inventory_sort;
 pub mod menu_row;
 pub mod offline;
-pub mod save_redirect;
 pub mod title_menu;
 pub mod title_skip;
 
@@ -470,49 +469,30 @@ fn install_offline() {
 /// so "redirected to the wrong folder" and "there was never a save there" look identical on
 /// screen. The log line is what separates them.
 fn install_save_redirect() {
-    let config = save_redirect::SaveRedirectConfig::load();
-    log_line(format_args!("{}", config.describe()));
     ds2_save_redirect::set_logger(log_line);
-    if config.enabled && config.path.is_none() {
-        // Refused rather than guessed at. There is no sensible default directory for this: the
-        // only honest fallback is the game's own, which is what leaving it unarmed produces.
-        log_line(format_args!(
-            "{} enabled with no path -- NOT redirecting; set [{}] {}",
-            ds2_save_redirect::LOG_PREFIX,
-            save_redirect::CONFIG_SECTION,
-            save_redirect::KEY_PATH
-        ));
-    }
-    // THE HANDOFF IS READ HERE AND IT WINS. A file left by the pause menu's Load Character from File
-    // row is a pick the player made deliberately, one launch ago, and it outranks a `path` that has
-    // been sitting in the config file since whenever. `take_handoff` DELETES the file as it reads it,
-    // so this applies to exactly this launch -- see `ds2_save_file::import` for why it has to be a
-    // launch boundary at all rather than happening in the session that asked.
+    // THE HANDOFF IS THE ONLY THING THAT ARMS THIS, and it is a file the player picked in the pause
+    // menu one launch ago. `take_handoff` DELETES the file as it reads it, so it applies to exactly
+    // this launch -- see `ds2_save_file::import` for why it has to be a launch boundary at all
+    // rather than happening in the session that asked.
     //
     // Taken unconditionally, even on a run whose `[menu_row] rows` does not include that row: the
     // file exists because somebody asked for it, and leaving it unconsumed would arm it on some later
     // launch nobody connects to the request.
+    //
+    // THERE IS NO `[save_redirect] path` KEY ANY MORE. It pointed a whole launch at a file and never
+    // opened that file: it copied it into the staging directory, pointed the game there, and
+    // rewrote the copy on the next launch, so a session started that way threw away everything done
+    // in it. A config key that discards the player's progress while its help says "load the save at
+    // WINPATH" is worse than no key, and the pause-menu row is the thing that actually does this.
     ds2_save_file::set_logger(log_line);
-    let handoff = ds2_save_file::take_handoff();
-    let source = handoff
-        .as_ref()
-        .map(|path| path.to_string_lossy().into_owned())
-        .or_else(|| config.armable().then(|| config.path.clone()).flatten());
-    if handoff.is_some() && config.path.is_some() {
-        log_line(format_args!(
-            "{} the handoff OVERRIDES [{}] {} for this launch",
-            ds2_save_redirect::LOG_PREFIX,
-            save_redirect::CONFIG_SECTION,
-            save_redirect::KEY_PATH
-        ));
-    }
+    let source = ds2_save_file::take_handoff().map(|path| path.to_string_lossy().into_owned());
     if let Some(path) = source.as_deref() {
         // The staging directory lives beside the executable, next to the log and the config, for
         // the same reason those do: it is the one directory this DLL already knows it can write.
         // `config_file_path` is `<Game>/ds2-mods.toml`, so its parent is the game directory.
         let staging = crash_logging::config_file_path().and_then(|p| {
             p.parent()
-                .map(|dir| dir.join(save_redirect::STAGING_DIR_NAME))
+                .map(|dir| dir.join(ds2_save_redirect::STAGING_DIR_NAME))
         });
         match staging {
             Some(staging) => {
