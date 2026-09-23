@@ -162,18 +162,27 @@ fn start_directory() -> Option<PathBuf> {
 /// `C:\users\steamuser`, and the downloads the player actually has are in their Linux home.
 fn downloads_directory() -> Option<PathBuf> {
     let home = std::env::var("HOME").ok()?;
+    let windows = downloads_windows_path(&home)?;
+    // TESTED IN THE PREFIX'S SPELLING, NOT THE HOST'S, and that distinction is the whole bug this
+    // guard had. `std::fs` inside this DLL is the Win32 API: `Path::new("/home/you/Downloads")`
+    // is a rooted path on the current drive, so it is asked about as `C:\home\you\Downloads`,
+    // which does not exist -- and the check said "no downloads folder" on a machine that has one.
+    // The `Z:` form is the same directory as Wine maps it, and is also the form handed to the
+    // dialog, so what is tested is what is used.
+    if !Path::new(&windows).is_dir() {
+        return None;
+    }
+    Some(PathBuf::from(windows))
+}
+
+/// `~/Downloads` as the prefix spells it, from a Unix home directory. Pure, so it is testable.
+fn downloads_windows_path(home: &str) -> Option<String> {
     let home = home.trim_end_matches('/');
-    if home.is_empty() {
+    if home.is_empty() || !home.starts_with('/') {
         return None;
     }
-    let host = PathBuf::from(format!("{home}/Downloads"));
-    if !host.is_dir() {
-        return None;
-    }
-    // The dialog is a Win32 one, so the path has to be the prefix's spelling of the same folder.
-    let windows =
-        format!("{DOWNLOADS_WINDOWS_PREFIX}{}", home.trim_start_matches('/')).replace('/', "\\");
-    Some(PathBuf::from(format!("{windows}\\Downloads")))
+    let body = format!("{}/Downloads", home.trim_start_matches('/')).replace('/', "\\");
+    Some(format!("{DOWNLOADS_WINDOWS_PREFIX}{body}"))
 }
 
 /// What pressing the row does. **Game thread, inside the menu's confirm path.**
@@ -195,6 +204,16 @@ pub fn load_from_file() {
 
     let filter = dialog_filter();
     let start_dir = start_directory();
+    // Where it opened, said out loud. A dialog that quietly fell back to somewhere else looks
+    // identical to one that was never told anything, and that is exactly how the first version of
+    // this shipped: its folder test ran as a Win32 call against a Unix path and always said no.
+    log_line(format_args!(
+        "{LOG_PREFIX} import dialog opening in {}",
+        start_dir
+            .as_deref()
+            .map(|dir| dir.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "<the shell's own default>".to_owned())
+    ));
     let request = Request {
         intent: Intent::Open,
         title: "Load a character from a save file",
@@ -469,6 +488,40 @@ mod tests {
                 .to_ascii_lowercase()
                 .ends_with(SOURCE_EXTENSIONS[0])
         );
+    }
+
+    /// The picker opens in the prefix's spelling of `~/Downloads`, with no forward slashes left.
+    ///
+    /// A path the dialog cannot resolve is not refused by it -- it silently falls back to the
+    /// shell's own folder, which is indistinguishable from never having been told anything. So the
+    /// spelling is the whole contract, and one forward slash is enough to lose it.
+    #[test]
+    fn downloads_is_handed_over_in_the_prefixs_own_spelling() {
+        assert_eq!(
+            downloads_windows_path("/home/you").as_deref(),
+            Some("Z:\\home\\you\\Downloads")
+        );
+        // A trailing separator on HOME must not double up in the middle of the path.
+        assert_eq!(
+            downloads_windows_path("/home/you/").as_deref(),
+            Some("Z:\\home\\you\\Downloads")
+        );
+        let produced = downloads_windows_path("/var/lib/steam").expect("an absolute home");
+        assert!(!produced.contains('/'), "{produced}");
+        assert!(produced.starts_with(DOWNLOADS_WINDOWS_PREFIX), "{produced}");
+    }
+
+    /// A home directory that is not an absolute Unix path is refused rather than mangled.
+    ///
+    /// `Z:` maps to `/`, so the mapping only means anything for a path that starts there. Anything
+    /// else -- an empty variable, a Windows `USERPROFILE` that leaked in -- would produce a path
+    /// that resolves to nothing, and the fallback is the better answer.
+    #[test]
+    fn a_home_that_is_not_an_absolute_unix_path_is_refused() {
+        assert_eq!(downloads_windows_path(""), None);
+        assert_eq!(downloads_windows_path("/"), None);
+        assert_eq!(downloads_windows_path("C:\\users\\steamuser"), None);
+        assert_eq!(downloads_windows_path("relative/home"), None);
     }
 
     /// A save is waited for before the quit, and the wait is bounded.
