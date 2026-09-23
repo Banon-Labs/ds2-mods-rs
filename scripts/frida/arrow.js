@@ -6,12 +6,17 @@
 //
 // # What it draws, and why that is the test
 //
-// A breadcrumb is dropped at the character's position the moment the camera is confirmed. The
-// arrow then points from the character to that breadcrumb, forever. WALK AWAY FROM IT AND SPIN THE
-// CAMERA: if the matrix is right the arrow keeps pointing back at the spot you left, from any
-// angle, at any distance. If the matrix is mirrored the arrow points at its reflection and the
-// error is obvious the first time you turn around -- which is precisely the failure that survived
-// a whole session of "the log looks fine".
+// The orange arrow points at the nearest non-player character -- latched onto one object, its
+// position re-read out of the game's own roster every frame. WALK AWAY FROM THEM AND SPIN THE
+// CAMERA: if the matrix is right the arrow stays nailed to them from any angle at any distance.
+// If the matrix is mirrored it points at their reflection, and the error is obvious the first
+// time you turn around -- the failure that survived a whole session of "the log looks fine".
+//
+// A live object rather than a spot on the ground, deliberately. A fixed point can be aimed at by
+// a matrix captured minutes ago and still look almost right; a character whose position is read
+// every frame cannot, so a stale camera shows up as an arrow that stops following rather than as
+// nothing at all. It is also what the real feature aims at, so this is that code path and not a
+// stand-in for it.
 //
 // # Drawing without a renderer
 //
@@ -40,6 +45,26 @@
 const GAME_MANAGER_IMP_RVA = 0x016148f0;
 const GAME_MANAGER_PLAYER_CTRL_OFFSET = 0xd0;
 const CHARACTER_CTRL_POSITION_OFFSET = 0x90;
+
+// --- the roster, for pointing at something that is actually there ------------------------------
+//
+// All four constants are `ds2_rva`'s, quoted with their names so a drift between this file and the
+// crate is visible rather than silent.
+//
+/// `ds2_rva::GAME_MANAGER_CHARACTER_MANAGER_OFFSET`
+const GAME_MANAGER_CHARACTER_MANAGER_OFFSET = 0x18;
+/// `ds2_rva::CHARACTER_MANAGER_ENTITY_BEGIN_OFFSET` / `..._END_OFFSET`. A begin/end POINTER PAIR,
+/// not a base and a count -- three iteration sites in the image read it that way.
+const ROSTER_BEGIN_OFFSET = 0x10;
+const ROSTER_END_OFFSET = 0x18;
+/// `ds2_rva::CHARACTER_CTRL_VTABLE`. An object's first word is its vtable, and an EXACT match
+/// here is what separates an NPC from the local player (whose vtable is `PLAYER_CTRL_VTABLE`).
+/// Exact, not a subclass test: a `CharacterCtrl` subclass that is not this class is invisible to
+/// this, which is the conservative direction to be wrong in.
+const CHARACTER_CTRL_VTABLE_RVA = 0x010df218;
+/// A torn begin/end pair can describe a span of gigabytes, and walking one is a multi-second
+/// stall inside a frame. DARK SOULS II's largest maps hold a few hundred characters.
+const MAX_ROSTER = 8192;
 
 // --- ID3D11DeviceContext / ...Context1 -------------------------------------------------------
 const SLOT_MAP = 14;
@@ -213,7 +238,13 @@ let throttled = 0;
 /// and "no character to scan against" look identical from outside and mean opposite things.
 let unreadable = 0;
 let believed = null;
-let breadcrumb = null;
+/// The character the orange arrow points at, latched so it stays the same one.
+let target = null;
+/// Why the roster walk came back with nobody. `scripts/ds2-player-chain.py` reads the same
+/// offsets from outside the process and answered `9 entries, 6 CHARACTER_CTRL, nearest 8.43 m`,
+/// so a null in here is this code and not the game, and a null return cannot say which of the
+/// five refusals fired.
+let rosterWhy = '';
 /// Set once the arithmetic proof below has run against a real swap chain, so it prints one time.
 let proved = false;
 /// World up, NAMED FROM THE MATRIX rather than assumed to be +Y. Filled by `proof`.
@@ -281,6 +312,81 @@ function playerPosition() {
     const position = readFloats(player.add(CHARACTER_CTRL_POSITION_OFFSET), 3);
     return finite(position) ? position : null;
   } catch (error) {
+    return null;
+  }
+}
+
+/// Metres between two world points, spelled out.
+///
+/// NOT `Math.hypot`. Two arguments of it work in this agent -- `bearing` and `lay` have used it
+/// all session -- and the three-argument form came back with a distance that never once compared
+/// less than Infinity, so the roster walk found six characters, read six good positions, and
+/// returned nobody. Frida 17 runs QuickJS, not V8, and that is exactly the kind of built-in an
+/// embedded engine implements partially.
+function apart(a, b) {
+  const dx = a[0] - b[0];
+  const dy = a[1] - b[1];
+  const dz = a[2] - b[2];
+  return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+/// The nearest non-player character, or null. `latched` re-finds THAT object instead of picking
+/// again.
+///
+/// # Why a latch
+///
+/// Without one the target is whichever NPC is nearest this frame, so two of them milling about
+/// swap the arrow's destination several times a second and it reads as the arrow being broken.
+/// Latched, a walking NPC stays the target while it walks -- which is the behaviour the real
+/// feature needs, and the reason this is worth more as a test target than a fixed spot on the
+/// ground: the position is re-read from the live object every frame, so a stale read shows up as
+/// an arrow that stops following rather than as nothing at all.
+function nearestCharacter(playerAt, latched) {
+  if (base === null) { rosterWhy = "no game image"; return null; }
+  try {
+    const manager = base.add(GAME_MANAGER_IMP_RVA).readPointer();
+    if (manager.isNull()) { rosterWhy = "GameManagerImp null"; return null; }
+    const local = manager.add(GAME_MANAGER_PLAYER_CTRL_OFFSET).readPointer();
+    const characters = manager.add(GAME_MANAGER_CHARACTER_MANAGER_OFFSET).readPointer();
+    if (characters.isNull()) { rosterWhy = "CharacterManager null"; return null; }
+    const begin = characters.add(ROSTER_BEGIN_OFFSET).readPointer();
+    const end = characters.add(ROSTER_END_OFFSET).readPointer();
+    if (begin.isNull()) { rosterWhy = "roster begin null"; return null; }
+    const span = end.sub(begin).toInt32();
+    // Inverted, misaligned or absurdly long is a torn read rather than a roster. Refused whole.
+    if (span < 0 || span % Process.pointerSize !== 0) { rosterWhy = "torn span " + span; return null; }
+    const count = span / Process.pointerSize;
+    if (count > MAX_ROSTER) { rosterWhy = "roster of " + count; return null; }
+    const wanted = base.add(CHARACTER_CTRL_VTABLE_RVA);
+
+    let best = null;
+    let matched = 0;
+    let unplaced = 0;
+    for (let index = 0; index < count; index += 1) {
+      const ctrl = begin.add(index * Process.pointerSize).readPointer();
+      if (ctrl.isNull() || ctrl.equals(local)) continue;
+      if (!ctrl.readPointer().equals(wanted)) continue;
+      matched += 1;
+      const at = ctrl.add(CHARACTER_CTRL_POSITION_OFFSET);
+      const position = [at.readFloat(), at.add(4).readFloat(), at.add(8).readFloat()];
+      if (!finite(position)) { unplaced += 1; continue; }
+      // The latched object wins outright, wherever it has wandered to.
+      if (latched !== null && ctrl.equals(latched)) {
+        return { ctrl, position, distance: apart(position, playerAt) };
+      }
+      const distance = apart(position, playerAt);
+      // Against `best` itself, not a separate running minimum: one variable cannot disagree with
+      // the object it is supposed to describe.
+      if (best === null || distance < best.distance) best = { ctrl, position, distance };
+    }
+    if (best !== null) rosterWhy = "";
+    if (best === null) {
+      rosterWhy = "walked " + count + ", " + matched + " matched CHARACTER_CTRL_VTABLE " + wanted +
+        ", " + unplaced + " had an unreadable position";
+    }
+    return best;
+  } catch (error) {
+    rosterWhy = "threw: " + error.message;
     return null;
   }
 }
@@ -668,9 +774,6 @@ function follow(slot, source, player) {
     if (candidate.grounded < PASSES_TO_BELIEVE) continue;
     if (spreadOf(candidate) < SPREAD_TO_BELIEVE) continue;
     believed = { slot, candidate, matrix: m.slice() };
-    // The camera can be confirmed from its shape alone with nobody in the world, so there may be
-    // no character to drop a breadcrumb at yet. `draw` drops it the first frame there is one.
-    breadcrumb = player === null ? null : [player[0], player[1], player[2]];
     console.log(
       '\n[arrow] ===== VIEW-PROJECTION CONFIRMED =====\n' +
       '[arrow] ' + slot.label + ' resource ' + slot.key + ' +0x' + candidate.offset.toString(16) +
@@ -680,10 +783,8 @@ function follow(slot, source, player) {
       spreadOf(candidate).toFixed(2) + ' m across them\n' +
       '[arrow] player ndc ' + verdict.ndcX.toFixed(4) + ',' + verdict.ndcY.toFixed(4) +
       ' (w=' + verdict.w.toFixed(2) + ' m)\n' +
-      '[arrow] ' + (breadcrumb === null
-        ? 'no character in the world yet; the breadcrumb drops on the first frame there is one'
-        : 'breadcrumb dropped at ' + breadcrumb.map((v) => v.toFixed(2)).join(', ') +
-          ' -- WALK AWAY AND SPIN: the arrow must keep pointing back at it') +
+      '[arrow] the orange arrow latches onto the nearest character on the first frame there is ' +
+      'one to latch onto' +
       format(m)
     );
   }
@@ -948,11 +1049,21 @@ function proof(state, m, player, here) {
 function draw(state) {
   const player = playerPosition();
   if (player === null || believed === null) return;
-  if (breadcrumb === null) {
-    breadcrumb = [player[0], player[1], player[2]];
-    console.log('[arrow] breadcrumb dropped at ' + breadcrumb.map((v) => v.toFixed(2)).join(', ') +
-      ' -- WALK AWAY AND SPIN: the arrow must keep pointing back at it.');
+  // THE TARGET IS A LIVE OBJECT, NOT A SPOT ON THE GROUND. A fixed breadcrumb could be pointed
+  // at by a frozen matrix and look almost right; a character read out of the roster every frame
+  // cannot. It is also what the real feature aims at, so this is the same code path rather than
+  // a stand-in for it.
+  const found = nearestCharacter(player, target === null ? null : target.ctrl);
+  if (found !== null) {
+    if (target === null || !found.ctrl.equals(target.ctrl)) {
+      console.log('[arrow] target latched: CharacterCtrl ' + found.ctrl + ' at ' +
+        found.position.map((v) => v.toFixed(2)).join(', ') + ', ' +
+        found.distance.toFixed(2) + ' m away -- the orange arrow points at THEM now, and keeps ' +
+        'pointing as either of you moves.');
+    }
+    target = found;
   }
+  if (target === null) return;
   const m = believed.matrix;
 
   const here = toClip(m, player);
@@ -973,7 +1084,7 @@ function draw(state) {
     paint(state, PLUMB_COLOUR, arrow(state, 0, baseX, baseY, plumb, PLUMB_LENGTH_PX));
   }
 
-  const unit = bearing(state, m, here, breadcrumb);
+  const unit = bearing(state, m, here, target.position);
   if (unit !== null) {
     paint(state, ARROW_COLOUR, arrow(state, 0, baseX, baseY, unit, ARROW_LENGTH_PX));
   }
@@ -1157,6 +1268,7 @@ setInterval(function () {
     failCounts[code] = 0;
   }
   if (blame.length > 0) line += '\n      rejected by: ' + blame.join(', ');
+  if (target === null && rosterWhy !== '') line += '\n      no target: ' + rosterWhy;
   if (Number.isFinite(distanceMin)) {
     line += '\n      camera distance saw ' + distanceMin.toFixed(2) + ' m to ' +
       distanceMax.toFixed(2) + ' m against the band ' + CAMERA_MIN_METERS + '..' +

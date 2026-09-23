@@ -55,6 +55,74 @@ def read_floats(pid: int, address: int, count: int) -> list[float] | None:
     return list(struct.unpack(f"<{count}f", raw))
 
 
+#: `ds2_rva::CHARACTER_MANAGER_ENTITY_BEGIN_OFFSET` / `..._END_OFFSET`. A begin/end POINTER PAIR.
+ROSTER_BEGIN_OFFSET = 0x10
+ROSTER_END_OFFSET = 0x18
+#: `ds2_rva::CHARACTER_CTRL_VTABLE` and `ds2_rva::PLAYER_CTRL_VTABLE`, as RVAs. An object's first
+#: word is its vtable, and an exact match is what separates an NPC from the local player.
+CHARACTER_CTRL_VTABLE = 0x010DF218
+PLAYER_CTRL_VTABLE = 0x010E4BB8
+MAX_ROSTER = 8192
+
+
+def walk_roster(pid: int, base: int, characters: int | None, player: int) -> None:
+    """Every live character, and which vtable claimed it.
+
+    The Frida agent walks exactly these offsets to pick the arrow's target, and when it came back
+    empty there were three candidates -- a torn begin/end pair, a wrong vtable constant, or a
+    faulting read -- that a null return cannot tell apart. This prints the span, the count and a
+    tally per vtable, so the one that is actually happening is read rather than guessed at.
+    """
+    if characters is None or characters == 0:
+        print("  roster                no CharacterManager")
+        return
+    begin = ds2_run_lib.read_qword(pid, characters + ROSTER_BEGIN_OFFSET)
+    end = ds2_run_lib.read_qword(pid, characters + ROSTER_END_OFFSET)
+    if begin is None or end is None:
+        print("  roster                COULD NOT READ the begin/end pair")
+        return
+    span = end - begin
+    print(f"  roster span           0x{begin:x} .. 0x{end:x}  ({span} bytes)")
+    if begin == 0 or span < 0 or span % 8 != 0 or span // 8 > MAX_ROSTER:
+        print("  -> refused as a torn read: inverted, misaligned or absurdly long.")
+        return
+    tally: dict[int, int] = {}
+    nearest: tuple[float, int, list[float]] | None = None
+    here = read_floats(pid, player + POSITION_OFFSET, 3) or [0.0, 0.0, 0.0]
+    for index in range(span // 8):
+        ctrl = ds2_run_lib.read_qword(pid, begin + index * 8)
+        if not ctrl:
+            continue
+        vtable = ds2_run_lib.read_qword(pid, ctrl)
+        if vtable is None:
+            continue
+        tally[vtable] = tally.get(vtable, 0) + 1
+        if vtable != base + CHARACTER_CTRL_VTABLE or ctrl == player:
+            continue
+        at = read_floats(pid, ctrl + POSITION_OFFSET, 3)
+        if at is None:
+            continue
+        distance = sum((a - b) ** 2 for a, b in zip(at, here)) ** 0.5
+        if nearest is None or distance < nearest[0]:
+            nearest = (distance, ctrl, at)
+    print(f"  roster entries        {span // 8}, {len(tally)} distinct vtables")
+    for vtable, count in sorted(tally.items(), key=lambda row: -row[1])[:6]:
+        name = (
+            " <- CHARACTER_CTRL" if vtable == base + CHARACTER_CTRL_VTABLE
+            else " <- PLAYER_CTRL" if vtable == base + PLAYER_CTRL_VTABLE
+            else ""
+        )
+        print(f"    0x{vtable:x}  x{count}{name}")
+    if nearest is None:
+        print("  nearest NPC           NONE matched CHARACTER_CTRL_VTABLE")
+    else:
+        distance, ctrl, at = nearest
+        print(
+            f"  nearest NPC           0x{ctrl:x} at {at[0]:.2f}, {at[1]:.2f}, {at[2]:.2f}"
+            f"  ({distance:.2f} m away)"
+        )
+
+
 def walk(pid: int, base: int) -> int:
     print(f"  image base            0x{base:x}")
     static = base + GAME_MANAGER_IMP
@@ -88,6 +156,8 @@ def walk(pid: int, base: int) -> int:
             "     fix in the agent -- wait for the world."
         )
         return 1
+
+    walk_roster(pid, base, characters, player)
 
     position = read_floats(pid, player + POSITION_OFFSET, 3)
     if position is None:
