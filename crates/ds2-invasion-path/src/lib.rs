@@ -213,9 +213,13 @@ mod windows_impl {
         last_census: Option<(usize, usize, usize, usize)>,
         /// The last (arrows, vertices) pair logged, likewise.
         last_drawn: Option<(usize, usize)>,
+        /// Consecutive frames the roster counts have not changed. See `ROSTER_SETTLE_FRAMES`.
+        roster_still: u32,
         /// Whether the markers-requested line has been written. One line per session: the file
         /// is re-read every second and a per-read complaint would be a log full of it.
         said_markers: bool,
+        /// Whether the camera matrix has been dumped. Once per session; see its use in `draw_for`.
+        said_matrix: bool,
         /// The `CharacterCtrl` the self-check latched onto, so a walking NPC stays the target
         /// while it walks and two NPCs milling about do not swap the destination every frame.
         /// See `census::self_check_target`.
@@ -272,7 +276,9 @@ mod windows_impl {
                 had_world: true,
                 last_census: None,
                 last_drawn: None,
+                roster_still: 0,
                 said_markers: false,
+                said_matrix: false,
                 self_check_target: None,
             });
         }
@@ -505,6 +511,44 @@ mod windows_impl {
         local: [f32; 3],
         screen: [f32; 2],
     ) -> Vec<Vertex> {
+        // THE MATRIX ITSELF, ONCE, BECAUSE NOBODY HAS EVER LOOKED AT IT.
+        //
+        // Every direction this crate draws comes out of these sixteen floats, and three hours of
+        // wrong arrows were spent reasoning about what they must contain instead of reading
+        // them. A left-handed projection built by `0x140001a90` has a POSITIVE x scale; if the
+        // product's x column is negated, every horizontal offset this crate computes is mirrored
+        // and both the projection and the needle are mirrored together -- which is exactly the
+        // symptom, and is invisible to any test that compares those two against each other.
+        //
+        // Printed once per camera acquisition, not per frame.
+        if !state.said_matrix {
+            state.said_matrix = true;
+            let m = camera.view_projection;
+            log(format_args!(
+                "camera matrix (row-major): [{:.4} {:.4} {:.4} {:.4} | {:.4} {:.4} {:.4} {:.4} \
+                 | {:.4} {:.4} {:.4} {:.4} | {:.1} {:.1} {:.1} {:.1}] | player {:.1},{:.1},{:.1}",
+                m[0],
+                m[1],
+                m[2],
+                m[3],
+                m[4],
+                m[5],
+                m[6],
+                m[7],
+                m[8],
+                m[9],
+                m[10],
+                m[11],
+                m[12],
+                m[13],
+                m[14],
+                m[15],
+                local[0],
+                local[1],
+                local[2]
+            ));
+        }
+
         // PUBLISH THE HEADING BEFORE ANY EARLY RETURN. This is the one point both ways of
         // getting a camera meet, and `ds2-input-harness` closes its camera-turn loop on what is
         // published here -- so it measures the same camera this overlay is drawing through
@@ -580,7 +624,10 @@ mod windows_impl {
             census.remotes,
             census.skipped,
         );
-        if state.last_census != Some(fingerprint) {
+        // Captured BEFORE the line below overwrites it: the settle gate further down needs to
+        // know whether the roster CHANGED this frame, and by then `last_census` always matches.
+        let roster_changed = state.last_census != Some(fingerprint);
+        if roster_changed {
             state.last_census = Some(fingerprint);
             log(format_args!(
                 "roster: characters={} players={} remotes={} skipped={} nearest={}",
@@ -635,7 +682,28 @@ mod windows_impl {
             // target, or an NPC standing next to you keeps an arrow after the key says no.
             state.self_check_target = None;
         }
-        if state.config.npc_self_check && routed.is_none() {
+        // DO NOT LATCH ONTO A ROSTER THAT IS STILL LOADING.
+        //
+        // The target is held until it leaves the roster, the way you keep pointing at one invader
+        // until they are gone -- so the FIRST pick is the only one that matters, and making it
+        // early is making it wrong for the rest of the session. Live, the roster went
+        // `characters=1`, then 3, then 5, then 6 over the first seconds of a load, and the pick
+        // landed on something 84.6 m away that the player could not see, while the Emerald Herald
+        // ten metres in front of them had not been added yet.
+        //
+        // So the count has to hold still first. Once it does, the nearest character is the one a
+        // player would name, and it stays the target until it dies or despawns.
+        let settled = if !roster_changed {
+            state.roster_still = state.roster_still.saturating_add(1);
+            state.roster_still >= ROSTER_SETTLE_FRAMES
+        } else {
+            state.roster_still = 0;
+            false
+        };
+        if state.config.npc_self_check
+            && routed.is_none()
+            && (settled || state.self_check_target.is_some())
+        {
             let latched = state.self_check_target;
             if let Some(npc) = census::self_check_target(latched) {
                 if latched != Some(npc.ctrl) {
@@ -645,8 +713,16 @@ mod windows_impl {
                     // is what says whether the thing picked was somewhere a route could start.
                     log(format_args!(
                         "self-check: picked character 0x{:016x} at {:.1},{:.1},{:.1}, {:.1} m \
-                         away -- routing to it",
-                        npc.ctrl, npc.position[0], npc.position[1], npc.position[2], npc.distance
+                         away -- routing to it. The whole roster, nearest first: {}",
+                        npc.ctrl,
+                        npc.position[0],
+                        npc.position[1],
+                        npc.position[2],
+                        npc.distance,
+                        // NAME THEM ALL, because the count alone cannot say why the arrow points
+                        // somewhere the player can see nothing. `characters=6` with one visible
+                        // NPC is five objects that are not what anybody means by a character.
+                        census::describe_characters(8)
                     ));
                 }
                 routed = Some(npc);
@@ -715,7 +791,7 @@ mod windows_impl {
 
         let mut vertices = Vec::with_capacity(snapshot.len() * 3 * VERTICES_PER_SEGMENT);
         for route in &snapshot {
-            emit(&mut vertices, route, camera, screen);
+            emit(&mut vertices, route, camera, screen, local);
         }
 
         // THE ONLY LINE THAT SAYS ANYTHING WAS DRAWN. `camera:` proves a camera was found and
@@ -758,6 +834,15 @@ mod windows_impl {
     /// A compass needle does not foreshorten, so neither does this.
     const ARROW_SHARE: f32 = 0.15;
 
+    /// Frames the roster counts must hold still before the target may be latched.
+    ///
+    /// A load fills the roster in stages -- measured live as `characters=1`, then 3, 5, 6 over
+    /// the first seconds -- and the target is held until it dies, so a pick made during that
+    /// window is wrong for the whole session. Thirty frames is half a second at 60 Hz: long
+    /// enough that a staged load has finished arriving, short enough that nobody notices the
+    /// arrow appearing late.
+    const ROSTER_SETTLE_FRAMES: u32 = 30;
+
     /// How long each barb is, as a share of the viewport's height. A third of the shaft.
     const ARROW_BARB_SHARE: f32 = 0.05;
 
@@ -777,16 +862,14 @@ mod windows_impl {
     /// line per frame.
     const ARROW_SAMPLE_FRAMES: usize = 15;
 
-    /// Half the width of the dot that marks the arrow's base, in pixels.
-    ///
-    /// The base is a fixed point on the screen, so it is drawn rather than implied: "there should
-    /// ALWAYS be an orange dot at the very centre of the screen". A visible dot is also the only
-    /// thing that distinguishes "the overlay is running and nobody is being pointed at" from "the
-    /// overlay is not running", which no line in a file can tell you while you are playing.
-    const BASE_DOT_RADIUS_PX: f32 = 4.0;
-
     /// Project one route and append its triangles.
-    fn emit(out: &mut Vec<Vertex>, route: &Route, camera: &Camera, screen: [f32; 2]) {
+    fn emit(
+        out: &mut Vec<Vertex>,
+        route: &Route,
+        camera: &Camera,
+        screen: [f32; 2],
+        local: [f32; 3],
+    ) {
         let color = [route.color[0], route.color[1], route.color[2], route.alpha];
         match &route.shape {
             RouteShape::Arrow(target) => {
@@ -814,14 +897,57 @@ mod windows_impl {
                 if ready && ARROW_BAND.swap(band, core::sync::atomic::Ordering::Relaxed) != band {
                     ARROW_COUNTDOWN
                         .store(ARROW_SAMPLE_FRAMES, core::sync::atomic::Ordering::Relaxed);
+                    // THE TWO NUMBERS THAT SEPARATE A BAD CAMERA FROM BAD ARITHMETIC, and
+                    // without them "the arrow points in random directions" is unfalsifiable.
+                    //
+                    // `head` is where the PLAYER'S OWN head projects through the same matrix the
+                    // arrow's direction came from. A third-person camera puts it within a few
+                    // pixels of the middle of the frame; anything else means the matrix is not
+                    // the one this frame was rendered with, and then the direction is garbage
+                    // for a reason that has nothing to do with the arrow.
+                    //
+                    // `target px` is where the thing being pointed at projects. If that lands on
+                    // the character you can see and the arrow points somewhere else, the fault
+                    // is here. If it lands nowhere near them, the fault is the camera. One line
+                    // now answers which, instead of a screenshot and another launch.
+                    let at = |world: [f32; 3]| {
+                        camera.project(world, screen).map_or_else(
+                            || "behind".to_string(),
+                            |p| format!("{:.0},{:.0}", p[0], p[1]),
+                        )
+                    };
+                    // THE CHECK THE CODE SHOULD HAVE BEEN DOING, and its absence is why a
+                    // mirrored needle survived a whole session of launches: the log carried
+                    // `tip` and `target px` side by side for hours and nothing ever compared
+                    // them. A human had to notice, from a screenshot, that the NPC was on the
+                    // other side.
+                    //
+                    // Now the mod notices. When the target projects far enough from the middle
+                    // of the frame to HAVE a side, the needle must lean the same way. It cannot
+                    // fail while the direction is taken from clip space -- which is the point:
+                    // if this ever prints, the thing that was assumed to be impossible happened,
+                    // and that is worth a loud line rather than a silent wrong arrow.
+                    let verdict = camera
+                        .project(geometry::head(*target), screen)
+                        .map_or("", |p| {
+                            let side = p[0] - screen[0] * 0.5;
+                            let needle = arrow.tip[0] - arrow.base[0];
+                            if side.abs() > 40.0 && side.signum() != needle.signum() {
+                                " *** NEEDLE DISAGREES WITH THE PROJECTION ***"
+                            } else {
+                                ""
+                            }
+                        });
                     log(format_args!(
-                        "arrow: base {:.0},{:.0} -> tip {:.0},{:.0} ({:.0} deg) | target \
-                         {:.1},{:.1},{:.1} | screen={:.0}x{:.0}",
+                        "arrow: base {:.0},{:.0} -> tip {:.0},{:.0} ({:.0} deg) | head px {} | \
+                         target px {}{verdict} | target {:.1},{:.1},{:.1} | screen={:.0}x{:.0}",
                         arrow.base[0],
                         arrow.base[1],
                         arrow.tip[0],
                         arrow.tip[1],
                         turn.to_degrees(),
+                        at(geometry::head(local)),
+                        at(geometry::head(*target)),
                         target[0],
                         target[1],
                         target[2],
@@ -829,17 +955,6 @@ mod windows_impl {
                         screen[1]
                     ));
                 }
-                // The base is drawn as a dot because it is a fixed point on the dial, and a
-                // shaft alone leaves nothing under the reticle when the arrow points straight at
-                // you and foreshortens -- which it cannot now, but the dot is also the only
-                // thing on screen that says the overlay is running at all.
-                push_segment(
-                    out,
-                    [arrow.base[0] - BASE_DOT_RADIUS_PX, arrow.base[1]],
-                    [arrow.base[0] + BASE_DOT_RADIUS_PX, arrow.base[1]],
-                    BASE_DOT_RADIUS_PX * 2.0,
-                    color,
-                );
                 push_segment(out, arrow.base, arrow.tip, route.stroke_px, color);
                 push_segment(out, arrow.tip, arrow.left_barb, route.stroke_px, color);
                 push_segment(out, arrow.tip, arrow.right_barb, route.stroke_px, color);

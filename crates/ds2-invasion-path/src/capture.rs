@@ -222,6 +222,13 @@ fn recognises(candidate: &Matrix, subject: Subject) -> bool {
     if !is_finite(candidate) {
         return false;
     }
+    // THE SHAPE TEST, FIRST, because the two below cannot see the horizontal axis at all and one
+    // impostor rode that blindness for a whole session -- a matrix whose first column was zero,
+    // making `clip.x` a constant and the arrow point the same way forever.
+    // `geometry::looks_like_a_view_projection` has the identity it rests on.
+    if !crate::geometry::looks_like_a_view_projection(candidate) {
+        return false;
+    }
     let camera = Camera {
         view: IDENTITY,
         view_projection: *candidate,

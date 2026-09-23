@@ -316,5 +316,73 @@ pub(crate) fn self_check_target(latched: Option<usize>) -> Option<Player> {
             best = Some(candidate);
         }
     });
+    // THE LATCH HOLDS UNTIL THE TARGET LEAVES THE ROSTER, which is what a host or an invader
+    // does: you keep pointing at the same person until they are gone.
+    //
+    // A distance-based hand-off was tried here and is wrong. The arrow is a claim about ONE
+    // person, and a target that changes whenever somebody walks nearer is a different claim every
+    // few seconds -- each hand-off throws away a route mid-search and re-lays the whole trail, and
+    // no two lines of the log end up being about the same thing. Stability is the feature.
+    //
+    // The failure that looked like the latch's fault -- a target 84.6 m away while the player
+    // stood beside the Emerald Herald -- was the latch closing on a roster that was still
+    // loading. That is fixed at the moment of the FIRST pick instead: see `ROSTER_SETTLE_FRAMES`
+    // in `lib.rs`.
     held.or(best)
+}
+
+/// Every `CharacterCtrl` in the roster, nearest first, as one line.
+///
+/// # Why this exists
+///
+/// `roster: characters=6` while the player can see exactly one NPC, and the arrow pointing at
+/// something 84.6 m away that is not on screen. Five of those six are objects the player cannot
+/// see -- disabled NPCs, event entities, whatever the map keeps resident -- and a count cannot
+/// say which. The pick is only defensible if the thing picked can be named, so this names all of
+/// them: address, position, distance. Written once, when the self-check picks.
+pub(crate) fn describe_characters(limit: usize) -> String {
+    let Some((local, begin, end)) = world() else {
+        return "no world".to_string();
+    };
+    let Some(local_position) = position(local) else {
+        return "no local position".to_string();
+    };
+    let Ok(character_vtable) = game_rva(ds2_rva::CHARACTER_CTRL_VTABLE) else {
+        return "no CharacterCtrl vtable".to_string();
+    };
+    let mut found: Vec<Player> = Vec::new();
+    walk_roster(begin, end, |entry| {
+        let Entry::Object { ctrl, vtable } = entry else {
+            return;
+        };
+        if vtable != character_vtable || ctrl == local {
+            return;
+        }
+        let Some(position) = position(ctrl) else {
+            return;
+        };
+        let distance = crate::geometry::length(crate::geometry::sub(position, local_position));
+        found.push(Player {
+            ctrl,
+            position,
+            distance,
+        });
+    });
+    found.sort_by(|a, b| a.distance.total_cmp(&b.distance));
+    let total = found.len();
+    let listed: Vec<String> = found
+        .iter()
+        .take(limit)
+        .map(|player| {
+            format!(
+                "0x{:012x} {:.1}m at {:.1},{:.1},{:.1}",
+                player.ctrl,
+                player.distance,
+                player.position[0],
+                player.position[1],
+                player.position[2]
+            )
+        })
+        .collect();
+    format!("{total} character(s): [{}]", listed.join(" | "))
 }

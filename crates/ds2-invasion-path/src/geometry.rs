@@ -88,6 +88,52 @@ pub struct ScreenArrow {
     pub right_barb: [f32; 2],
 }
 
+/// Is this matrix shaped like a `view * projection` product at all?
+///
+/// # The test every other oracle in this crate was blind to
+///
+/// `crate::capture` accepted a matrix on two grounds: the player projects near the middle of the
+/// frame, and their head projects a plausible number of pixels above their feet. Both are true of
+/// things that are not cameras, and -- worse -- **both are blind to the horizontal axis**. The
+/// centre test measures distance from the centre, which a mirror about the centre does not
+/// change; the scale test is purely vertical. A matrix could do anything at all to `x` and pass.
+///
+/// One did, for an entire session. Read out of the live game:
+///
+/// ```text
+/// [0.0000 3.4405 0.0000 0.0000 | 0.0000 0.0000 2.4751 2.4751
+///  | 0.0000 0.0000 -0.1000 0.0000 | 1.4 0.0 -0.1 0.0]
+/// ```
+///
+/// Its first column is entirely zero, so `clip.x` is the constant `1.4` for every point in the
+/// world -- every target, every frame. The arrow pointed to the right of the screen and stayed
+/// there while an NPC stood plainly to the left, and no amount of work on the arrow's own
+/// arithmetic could have helped, because the input was not a camera.
+///
+/// # Why column 3 is the right thing to test
+///
+/// Not a heuristic -- an identity. The engine's projection (`0x140001a90`) has `m23 == 1` and
+/// `m33 == 0`, so in the product `V * P` the whole of column 3 comes from `V`'s column 2, which
+/// is the camera's forward axis in world space. A rotation's axis is a UNIT vector. So
+/// `length(m[3], m[7], m[11])` is `1.0` for every real camera this game renders with, and is
+/// `2.4751` for the impostor above.
+///
+/// It costs three multiplies and it is the only cheap test here that looks at all three world
+/// axes at once.
+#[must_use]
+pub fn looks_like_a_view_projection(matrix: &Matrix) -> bool {
+    if !matrix.iter().all(|value| value.is_finite()) {
+        return false;
+    }
+    /// How far the forward column's length may sit from one.
+    ///
+    /// Generous next to the error it rejects: the impostor was out by a factor of 2.5, and the
+    /// engine's own matrices are exact to float rounding.
+    const UNIT_TOLERANCE: f32 = 0.02;
+    let forward = length([matrix[3], matrix[7], matrix[11]]);
+    (forward - 1.0).abs() <= UNIT_TOLERANCE
+}
+
 /// The point on a character that the camera is actually aimed at.
 ///
 /// A DARK SOULS II character's position is their FEET, and the camera looks at the upper body, so
@@ -643,10 +689,50 @@ impl Camera {
         length_px: f32,
         barb_px: f32,
     ) -> ScreenArrow {
-        let clip = self.to_clip(target);
         let base = [screen[0] * 0.5, screen[1] * 0.5];
-        let direction =
-            normalize([clip[0] * screen[0], -clip[1] * screen[1], 0.0]).unwrap_or([0.0, -1.0, 0.0]);
+        // A BEARING, NOT A PROJECTED OFFSET, and the difference is the whole readability of the
+        // thing.
+        //
+        // Aiming the arrow at where the target PROJECTS is exact and useless. A target you are
+        // roughly facing lands near the middle of the frame -- measured live at `target px
+        // 1321,733` against a centre of `1280,720`, forty-three pixels -- so a two-hundred-pixel
+        // arrow was having its direction decided by a forty-pixel quantity, and every small
+        // camera movement swung it right round. It also has no answer at all when the target is
+        // exactly under the reticle, and reverses through infinity as it crosses.
+        //
+        // A compass does not work that way. It reports the angle between where you are FACING
+        // and where the thing IS, on the horizontal plane, and that angle is well behaved
+        // everywhere: zero when you face the target, +/-90 degrees at your shoulders, 180 behind
+        // you, and it changes by exactly as much as you turn. Up is straight ahead.
+        //
+        // Height is deliberately dropped. A player forty metres below reads as *down* on a
+        // compass only by convention, and mixing pitch into the needle makes it swing when you
+        // look at your feet -- the arrow would stop meaning "turn this way".
+        // FROM CLIP SPACE, SO IT CANNOT DISAGREE WITH WHERE THE TARGET IS DRAWN.
+        //
+        // The previous version took the bearing from WORLD axes -- `atan2(dx, dz)` against the
+        // camera's forward -- which quietly assumes a handedness for DARK SOULS II that nothing
+        // had established. It was wrong, and it was wrong in the worst way: consistently
+        // mirrored. The live log has the needle at `-130,-172` (up-left) on the same frame the
+        // target projected to `1366,560`, which is up-RIGHT of a centre at `1280,720`. Opposite
+        // sides, four samples running, while an NPC stood plainly to the player's left.
+        //
+        // The engine's own matrix already carries its convention, so the needle is taken from
+        // there and no assumption is left to get backwards. For a row-vector projection with
+        // `m23 == 1`, `clip.w` IS camera-space depth and `clip.x` is camera-space x times a
+        // positive scale. So `atan2(clip.x, clip.w)` is the angle off the view axis: zero dead
+        // ahead, growing to the side the target is really on, past +/-90 degrees when it is
+        // behind you. The projection divides those same two numbers, which is why the needle and
+        // the drawn target can no longer end up on opposite sides of the screen.
+        //
+        // The scale on `clip.x` is not divided out, so the angle is compressed or stretched by
+        // the field of view rather than being a true bearing. That is a cosmetic distortion of a
+        // monotonic quantity: ahead is still ahead, behind still behind, and the side is exact.
+        let clip = self.to_clip(target);
+        let relative = clip[0].atan2(clip[3]);
+        let (sin, cos) = relative.sin_cos();
+        // Screen y runs down, so "ahead" is -y.
+        let direction = [sin, -cos];
         let tip = [
             base[0] + direction[0] * length_px,
             base[1] + direction[1] * length_px,
@@ -1559,8 +1645,8 @@ mod framing_is_measured_at_the_head {
     /// is the same length wherever the target is, including straight ahead and straight behind.
     #[test]
     fn the_arrow_is_the_same_length_wherever_the_target_is() {
-        let eye = [10.0, 6.8, -21.0];
-        let camera = looking(eye, [10.0, 6.8, -16.0]);
+        let me = [10.0, 6.8, -16.0];
+        let camera = looking([10.0, 6.8, -21.0], me);
         const LENGTH: f32 = 200.0;
         // Dead ahead, hard left, hard right, straight up, straight down, and behind.
         for target in [
@@ -1584,22 +1670,118 @@ mod framing_is_measured_at_the_head {
         }
     }
 
-    /// A player behind you is the case you most need the arrow for, and dividing by a negative
-    /// `w` would point it at the opposite side of the screen. Behind-and-left must read left.
+    /// THE ORACLE IS THE PROJECTION, not a convention this file made up.
+    ///
+    /// A screenshot showed the arrow pointing up-RIGHT with the NPC standing up-LEFT. The first
+    /// attempt at a test for that asserted "+x is to the right when facing +z" -- which is an
+    /// assumption about DARK SOULS II's world axes that nothing here had established, so it
+    /// would have passed a wrong sign just as happily as a right one.
+    ///
+    /// What is NOT an assumption: where the target lands on screen when put through the game's
+    /// own view-projection. That is the same arithmetic the renderer used to draw the NPC, so
+    /// for any target in front of the camera the compass must point the same way as the line
+    /// from the middle of the frame to the target's own pixel. Whatever handedness the engine
+    /// has, both sides of this comparison inherit it, and a sign error breaks the agreement.
+    ///
+    /// The bearing is still worth having over the projection it is checked against: it stays
+    /// well behaved when the target is under the reticle or behind the lens, where the
+    /// projection is noise or nothing.
     #[test]
-    fn a_target_behind_you_points_the_way_you_have_to_turn() {
-        let camera = looking([10.0, 6.8, -21.0], [10.0, 6.8, -16.0]);
-        let behind_left = camera.screen_arrow([-20.0, 6.8, -60.0], SCREEN, 200.0, 60.0);
+    fn the_needle_agrees_with_where_the_target_projects() {
+        let me = [10.0, 6.8, -16.0];
+        let camera = looking([10.0, 6.8, -21.0], me);
+        let centre = [SCREEN[0] * 0.5, SCREEN[1] * 0.5];
+        // All well in front and well off axis, so the projected offset is large enough to have a
+        // direction worth comparing against.
+        for target in [
+            [30.0, 6.8, 10.0],
+            [-12.0, 6.8, 6.0],
+            [11.0, 26.0, 14.0],
+            [9.0, -14.0, 20.0],
+            [40.0, 6.8, 60.0],
+        ] {
+            let arrow = camera.screen_arrow(target, SCREEN, 200.0, 60.0);
+            let needle = [arrow.tip[0] - centre[0], arrow.tip[1] - centre[1]];
+            let at = camera
+                .project(target, SCREEN)
+                .expect("in front of the lens");
+            let projected = [at[0] - centre[0], at[1] - centre[1]];
+            // Horizontal agreement is what a compass claims. Vertical is deliberately NOT
+            // compared: the needle drops height on purpose, so a target overhead reads as
+            // "straight ahead" rather than "up", and comparing y here would be testing the
+            // opposite of the intended behaviour.
+            assert!(
+                needle[0].signum() == projected[0].signum(),
+                "target {target:?}: needle {needle:?} disagrees with projection {projected:?}"
+            );
+            // ONLY THE SIGN, and two failed attempts at more than that are the argument.
+            //
+            // The on-screen ANGLE of a projected point is not a bearing and cannot be compared
+            // with one. A target at your own eye height lands on the horizon line whatever its
+            // true bearing, so it projects at 90 degrees while the compass correctly reads 38.
+            // A target twenty metres below projects near the bottom of the frame while the
+            // compass correctly reads "ahead". Both comparisons were written, both failed, and
+            // in both cases the code was right and the test was measuring the wrong quantity.
+            //
+            // What survives is the claim the screenshot actually falsified: which SIDE. If the
+            // NPC is to your left, the needle leans left. A sign error -- the whole failure --
+            // cannot pass this, and nothing else here depends on an axis convention this file
+            // asserted for itself.
+        }
+    }
+
+    /// THE IMPOSTOR, VERBATIM, out of the live game. It passed both of `crate::capture`'s
+    /// oracles -- player near centre, head a plausible rise above the feet -- for a whole
+    /// session, because neither of them looks at the horizontal axis and this matrix's first
+    /// column is zero. Every arrow pointed the same way because `clip.x` was the constant `1.4`.
+    #[test]
+    fn the_matrix_that_was_not_a_camera_is_refused() {
+        let impostor: Matrix = [
+            0.0, 3.4405, 0.0, 0.0, //
+            0.0, 0.0, 2.4751, 2.4751, //
+            0.0, 0.0, -0.1, 0.0, //
+            1.4, 0.0, -0.1, 0.0,
+        ];
+        assert!(!looks_like_a_view_projection(&impostor));
+        // And the reason, so a future change to the tolerance cannot quietly let it back in.
+        let forward = length([impostor[3], impostor[7], impostor[11]]);
         assert!(
-            behind_left.tip[0] < behind_left.base[0],
-            "behind and to the left must point left, tip was {:?}",
-            behind_left.tip
+            (forward - 2.4751).abs() < 0.001,
+            "the forward column's length is the measurement, got {forward}"
         );
-        let behind_right = camera.screen_arrow([40.0, 6.8, -60.0], SCREEN, 200.0, 60.0);
+    }
+
+    /// A real camera passes. Built by the same helper the rest of these tests project through,
+    /// so this also pins that the helper is emitting the shape the engine emits.
+    #[test]
+    fn a_real_camera_passes_the_shape_test() {
+        let camera = looking([10.0, 6.8, -21.0], [10.0, 6.8, -16.0]);
+        assert!(looks_like_a_view_projection(&camera.view_projection));
+        let forward = length([
+            camera.view_projection[3],
+            camera.view_projection[7],
+            camera.view_projection[11],
+        ]);
         assert!(
-            behind_right.tip[0] > behind_right.base[0],
-            "behind and to the right must point right, tip was {:?}",
-            behind_right.tip
+            (forward - 1.0).abs() < 0.01,
+            "column 3 of a view-projection is the camera's forward axis and must be unit, \
+             got {forward}"
+        );
+    }
+
+    /// Height must not turn the needle: looking at your feet would otherwise swing it.
+    #[test]
+    fn a_target_far_below_does_not_change_the_bearing() {
+        let me = [0.0, 0.0, 0.0];
+        let camera = looking([0.0, 0.0, -5.0], me);
+        let level = camera.screen_arrow([50.0, 0.0, 0.0], SCREEN, 200.0, 60.0);
+        let below = camera.screen_arrow([50.0, -80.0, 0.0], SCREEN, 200.0, 60.0);
+        assert!(
+            (level.tip[0] - below.tip[0]).abs() < 0.01
+                && (level.tip[1] - below.tip[1]).abs() < 0.01,
+            "height turned the needle: {:?} against {:?}",
+            level.tip,
+            below.tip
         );
     }
 
