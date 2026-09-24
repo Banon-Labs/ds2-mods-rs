@@ -6,10 +6,17 @@ publish.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# `ds2-rva` is plain constants -- addresses, offsets, prologue bytes -- and nothing in it is
+# Windows-only. It sat under the `cfg(windows)` block with the two crates that genuinely are
+# (`ds2-game-base` patches a live image, `ds2-hook` is MinHook), while `api.rs` referred to
+# `ds2_rva` with no cfg gate of its own. The crate therefore compiled for the game target and had
+# never compiled for the host, so none of its tests had ever run on the machine it is developed on.
+[dependencies]
+ds2-rva.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 ds2-game-base.workspace = true
 ds2-hook.workspace = true
-ds2-rva.workspace = true
 
 [lints]
 workspace = true
