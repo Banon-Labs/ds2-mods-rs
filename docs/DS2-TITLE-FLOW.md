@@ -228,7 +228,7 @@ dialogs keep their phase at `+0x30`; `FeSubStateWarningNoCopy` keeps its at `+0x
 | `+0x12` | **signed** WORD, option count | `cmp WORD PTR [.. +0x12], 0` + `jl`, in both `v1` and `v3` |
 | `+0x14` | float, auto-close timeout (0 = none) | `0x1401051e5` |
 | `+0x18` | float, elapsed | `addss xmm1, [rcx+0x18]` at `0x1401051a2` |
-| `+0x20`, `+0x28` | option strings, null → defaults `0x64`/`0x65` | `v1` at `0x140104e13`/`0x140104e28` |
+| `+0x20`, `+0x28` | option strings, null -> defaults `0x64`/`0x65` | `v1` at `0x140104e13`/`0x140104e28` |
 | `+0x30` | byte, phase | `movsx edx, BYTE PTR [rcx+0x30]` at `0x140105161` |
 | `+0x31` | byte, result | `cmp BYTE PTR [rbx+0x31], 2` at `0x14010518b` |
 
@@ -620,13 +620,19 @@ play forwarder `0x140afdb80`: `0x66`/`0x68` the in and out transitions, `0x67` t
    finish. It tail-calls `0x1409d5610`, which compares `[handle]` against a global and on mismatch
    emits a record tagged `"SMOM"` -- validation or telemetry. It returned success while nothing
    changed on screen. See `FE_SEQUENCE_NOT_A_FINISH_DO_NOT_USE`.
-2. **Call `0x1400f3820` to play `0x67`**, the settled state the gate waits for. This function *does*
-   do what its name says -- its body is unambiguous -- but the text animated in exactly as before.
-   See `FE_SCENE_TITLE_PLAY_IDLE_INEFFECTIVE`.
+2. **Call `0x1400f3820` to play `0x67`**, the settled state the gate waits for. The text animated in
+   exactly as before, so as a way of stopping the animation it failed.
 
-Both calls were removed rather than left in on the chance they helped. Neither had a demonstrated
-effect, and a mod carrying calls whose purpose cannot be shown is a mod nobody can reason about
-later.
+Attempt 1 was removed rather than left in on the chance it helped: it had no demonstrated effect,
+and a mod carrying calls whose purpose cannot be shown is a mod nobody can reason about later.
+
+Attempt 2 was **not** removed, and the paragraph above used to say both were, under a constant name
+(`FE_SCENE_TITLE_PLAY_IDLE_INEFFECTIVE`) that has never existed. `ds2-dialog-skip` still makes that
+call, as `force_title_settled`, and it is kept for a different result than the one it was tried for:
+it does not stop the text animating, but it does make the menu usable as soon as its data is there
+rather than pacing it to the animation. The sentence "its body is unambiguous" was also wrong --
+the body is `FeSceneTitle::open`, and the `0x67` play is its first branch out of roughly a thousand
+further bytes. See `FE_SCENE_TITLE_OPEN`.
 
 **The open question**, stated precisely so the next attempt does not start from scratch: playing
 `0x67` does not replace `0x66`, so either the two run in parallel, or `0x67` has its own entry

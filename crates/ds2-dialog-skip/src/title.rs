@@ -271,20 +271,27 @@ unsafe extern "system" fn detour_show_process_window(
 }
 
 /// `void play_settled(scene)` -- `FeSceneTitle` in RCX, the only argument its own callers pass.
-type PlaySettledFn = unsafe extern "system" fn(*mut u8);
+type OpenTitleFn = unsafe extern "system" fn(*mut u8);
 
-/// Put the title scene straight into its settled state, once.
+/// Open the title screen early, which puts its scene into the settled state, once.
 ///
 /// `FeSubStateTitleMain::v1` starts sequence `0x66` on the scene and nothing in the phase machine
 /// stops it. Forcing the press gate alone makes the gate report a state the scene is not in, so the
-/// flow advances while that sequence keeps running underneath. This plays `0x67` -- the settled
-/// state the gate is actually waiting to observe -- so the scene is *put into* that state rather
-/// than skipped past it.
+/// flow advances while that sequence keeps running underneath. [`ds2_rva::FE_SCENE_TITLE_OPEN`]
+/// plays `0x67` -- the settled state the gate is actually waiting to observe -- so the scene is
+/// *put into* that state rather than skipped past it.
 ///
 /// The effect that matters, and is confirmed in-game: **the menu becomes usable as soon as its data
 /// is available instead of being paced by an animation.** A separate open question is that the
 /// title text is still seen animating; see `docs/DS2-TITLE-FLOW.md`. That is a question about the
 /// remaining animation, not a reason to drop this call.
+///
+/// **It is the screen's whole open, not one sequence play**, and this call site used to say
+/// otherwise: it named a constant that documented `0x1400f3820` as five lines. Past the branch that
+/// plays `0x67` run ~1000 further bytes of component lookups and row construction, so calling it
+/// here raises the title screen during substate `0x17`, earlier than the game would. What that
+/// costs against leaving it to `0x47` has not been measured; the constant's doc records what a
+/// side-effect-free replacement would be if the answer is that it costs something.
 ///
 /// # Safety
 ///
@@ -306,14 +313,12 @@ unsafe fn force_title_settled(base: usize) {
     }
     // SAFETY: resolved from the live module base, called with the scene pointer its own call sites
     // pass, and guarded to run once.
-    let play_settled: PlaySettledFn = unsafe {
-        std::mem::transmute::<usize, PlaySettledFn>(
-            base + ds2_rva::FE_SCENE_TITLE_PLAY_IDLE as usize,
-        )
+    let open_title: OpenTitleFn = unsafe {
+        std::mem::transmute::<usize, OpenTitleFn>(base + ds2_rva::FE_SCENE_TITLE_OPEN as usize)
     };
-    unsafe { play_settled(scene as *mut u8) };
+    unsafe { open_title(scene as *mut u8) };
     log(format_args!(
-        "{LOG_PREFIX} settled screen=title-main scene=0x{scene:x} sequence=0x67"
+        "{LOG_PREFIX} settled screen=title-main scene=0x{scene:x} via=FeSceneTitle::open sequence=0x67"
     ));
 }
 
