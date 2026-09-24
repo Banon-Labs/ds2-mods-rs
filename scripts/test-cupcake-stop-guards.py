@@ -511,6 +511,18 @@ CASES = [
         None,
         "substantive work, no banned prose -- must NOT halt, or every turn wedges",
     ),
+    Case(
+        "post_halt_no_text_yet.jsonl",
+        None,
+        "the state every reply is in immediately after a Stop halt: the halted message, the "
+        "feedback, and a turn that has opened the very artifact the guard demanded but whose prose "
+        "is not in the transcript yet. It must NOT halt. Before ds2-mods-rs-87j it did, and the "
+        "same sentence was convicted eight times running while the agent rewrote its closing seven "
+        "times and read every file named -- `last_text_turn` skipped the text-less newest turn and "
+        "returned the ALREADY-HALTED one, so the correction was invisible and no reply could ever "
+        "satisfy the guard. A livelock, not slow convergence. Every Stop signal shares that helper, "
+        "so this fixture guards all of them at once",
+    ),
 ]
 
 

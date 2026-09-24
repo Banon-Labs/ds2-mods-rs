@@ -3815,6 +3815,11 @@ pub const FE_INGAME_TOP_SELECT_SCENE_HOLDER_OFFSET: usize = 0x150;
 pub const FE_ELEMENT_ACCESSOR_TEXT_SLOT_OFFSET: usize = 0x30;
 
 /// Bytes the accessor occupies. The original gives it `rbp+0x60 .. rbp+0xf0`.
+///
+/// A second site agrees, and independently: `FUN_1400b7680`'s eight accessors are `0x90` apart
+/// (`+0x90`, `+0x120`, `+0x1b0`, `+0x240`, `+0x2d0`, `+0x360`, `+0x3f0`, `+0x480`), built into
+/// stack temporaries it never destroys -- which is also why a caller may use one and walk away.
+/// One stack range and one stride, same number.
 pub const FE_ELEMENT_ACCESSOR_SIZE: usize = 0x90;
 
 /// `FeElement::setText(accessor + 0x30, string)`. RVA `0x000297d0`.
@@ -3893,6 +3898,11 @@ pub const FLO_PANEL_STRETCH_Y: f32 = 1.0;
 /// Index into [`FLO_QUIT_TAB_CHILD_IDS`] of the panel the stretch applies to.
 pub const FLO_QUIT_TAB_PANEL: usize = 0;
 
+/// `f32` scale-x inside a transform block. `pfVar1[2]` in the builder's identity test, and the
+/// pair is visible in the file: every shipped block reads `1.0, 1.0` here except the item icon's
+/// (`l02_03_equipment.flo` transform `0x010470`), which carries `0.810806, 0.810806`.
+pub const FLO_TRANSFORM_SCALE_X_OFFSET: usize = 0x08;
+
 /// `f32` scale-y inside a transform block. `pfVar1[3]` in the builder's identity test.
 pub const FLO_TRANSFORM_SCALE_Y_OFFSET: usize = 0x0c;
 
@@ -3928,6 +3938,14 @@ pub const FE_SCENE_PROXY_GET_SCENE_SLOT: usize = 0x08;
 /// child   = [child  + 0x28]      next sibling
 /// record  = [child  + 0x48]      the `.flo` record, whose +0x1c is the element id
 /// ```
+///
+/// `+0x48` is a RECORD and not a definition, which matters because both structs carry a `u16` at
+/// `+0x02` and `FUN_140b6bd80` bounds the display list by exactly that field. Three readings, two
+/// static and one live, agree: `findByIdPath` at `0x140b6a141` is `mov rax,[rcx+0x48]; cmp
+/// [rax+0x1c],r9d` and [`FLO_RECORD_ID_OFFSET`] is `0x1c`; the display-list bound reads `+0x02`;
+/// and `ds2-item-warn` read the field off two live components in one frame -- its badge and the
+/// infusion glyph it is cloned from differed by exactly `9 * FLO_RECORD_STRIDE`, while both name
+/// definition `0x005a`, so a pointer to a definition would have been equal.
 pub const FE_COMPONENT_NEXT_SIBLING_OFFSET: usize = 0x28;
 pub const FE_COMPONENT_FIRST_CHILD_OFFSET: usize = 0x38;
 pub const FE_COMPONENT_RECORD_OFFSET: usize = 0x48;
@@ -4026,6 +4044,34 @@ pub const FE_SHAPE_ENTRY_COUNT_OFFSET: usize = 0x02;
 /// made room and the source pulled in whatever sits below the banner in the atlas. Growing the
 /// destination alone stretches the shipped art to fill instead.
 pub const FE_TEXTURE_SHAPE_DEST_RECT_OFFSET: usize = 0x50;
+
+/// The per-quad matrix array on a `FeComponentTextureShape`, `0x30` bytes per quad.
+///
+/// `FUN_140b70200` allocates it as `quads * 0x30` at `+0x48` -- alongside the destination and
+/// source rects at `+0x50` and `+0x58`, which it allocates as `quads * 0x10` -- and seeds each one
+/// from the constants at `_FLOAT_141596af0..`. The art's composed position is this translation
+/// plus the destination rect's corner, which is why the quad's own offset
+/// (`(-934.70, -52.50)` for the infusion arrow) cancels a rect that starts at `(934.70, 52.50)`
+/// and leaves the art sitting on its record's origin.
+pub const FE_TEXTURE_SHAPE_QUAD_MATRIX_OFFSET: usize = 0x48;
+
+/// Which two of those twelve floats are the translation: `3` and `7`.
+///
+/// `FUN_140b53c10` is what says so. It reads the twelve and writes a 4x4 whose rows are
+/// `(p0,p4,p8,c)`, `(p1,p5,p9,c)`, `(p2,p6,p10,c)`, `(p3,p7,p11,c)` -- a transpose. So the stored
+/// block is a row-major `3x4` whose last column is `p3, p7, p11`, and transposing it puts that
+/// column in the 4x4's last row, which is where row-vector math (`v' = v * M`) keeps a translate.
+///
+/// **At the cell bind this block is still identity, and a run says so.** `ds2-item-warn` logged all
+/// twelve on four consecutive badges and got `[1,0,0,0, 0,1,0,0, 0,0,1,0]` every time -- exactly
+/// what `FUN_140b70200` seeds from `_FLOAT_141596af0..`, translation included, which is to say
+/// none. So whatever folds a quad's own offset in -- and the cloned infusion glyph's `.flo` quad
+/// carries `(-934.70, -52.50)` against a rect starting at `(934.70, 52.50)` -- does it after the
+/// bind and not here.
+///
+/// These indices are where a translation is read from, then. They are not a claim that one is in
+/// the block when `ds2-item-warn` looks: reading it at bind time measures the seed.
+pub const FE_TEXTURE_SHAPE_QUAD_MATRIX_TRANSLATE: [usize; 2] = [3, 7];
 pub const FE_TEXTURE_SHAPE_SOURCE_RECT_OFFSET: usize = 0x58;
 pub const FE_TEXTURE_SHAPE_RECT_STRIDE: usize = 0x10;
 
@@ -4376,6 +4422,49 @@ pub const FLO_QUAD_SCALE_X_OFFSET: usize = 0x08;
 /// is skipped when it is null.
 pub const FLO_QUAD_SOURCE_OFFSET: usize = 0x30;
 
+/// The four colour bytes inside a quad, which is where a shape's colour lives.
+///
+/// Not the transform block's [`FLO_TRANSFORM_COLOUR_OFFSET`], and one run is what proved the
+/// difference. That colour was written into the added hexagon's own copy of the plate's transform
+/// block, with both flag bits set, and the log said so -- and the tab drew in the shipped grey.
+///
+/// `FUN_140b50bc0` is why. It dispatches on the record's kind, and a record naming a shape
+/// (`kind & 1`) takes a branch that reaches `FUN_140b51270` -> `FUN_140b70200`, neither of which
+/// is handed the record or its transform. A record naming a definition takes `FUN_140b50f20`,
+/// which is the path the added rows' icons are tinted on and the reason that tint works. Two kinds
+/// of record, two colours, and only one of them lives in a transform block.
+///
+/// `FUN_140b70200` copies the quad's four bytes into the drawable's per-quad colour array, one
+/// quad at a time, and it reverses the first three on the way:
+///
+/// ```asm
+/// mov  al, byte ptr [quad+0x18]   ; -> array[2]
+/// mov  al, byte ptr [quad+0x19]   ; -> array[1]
+/// mov  al, byte ptr [quad+0x1a]   ; -> array[0]
+/// mov  al, byte ptr [quad+0x1b]   ; -> array[3]
+/// ```
+///
+/// So whatever the array's order is, the quad's is that order reversed over its first three bytes
+/// with the fourth left where it is. The array's own order has not been read -- its consumer was
+/// not chased -- so [`FLO_QUAD_COLOUR_ORDER_IS_BGR`] carries the guess, on its own line, with what
+/// a run would say about it.
+pub const FLO_QUAD_COLOUR_OFFSET: usize = 0x18;
+
+/// Bytes in a quad's colour. Four, from the four `mov`s above.
+pub const FLO_QUAD_COLOUR_SIZE: usize = 4;
+
+/// **Nothing in this crate writes a quad colour, and the byte order above is therefore unsettled.**
+/// The reversal is read off the four `mov`s; what the array's consumer expects is not, so which of
+/// its bytes is red is not known and nothing here guesses. A previous attempt did guess, and could
+/// not be checked: the added hexagon's quad is the layer UNDER the copy `ds2-menu-row`'s `strip`
+/// draws over it, so the colour written there was invisible either way. An unverifiable guess in a
+/// constant is worse than no constant -- it reads as a measurement to the next person.
+///
+/// The seventh tab is tinted through [`FLO_TRANSFORM_COLOUR_OFFSET`] on that upper copy instead,
+/// whose order a run did settle. Anyone who later needs a shape's own colour starts here, and
+/// starts by picking a hue whose channels are far apart so one screenshot answers it.
+pub const FLO_QUAD_COLOUR_ORDER_UNSETTLED: () = ();
+
 /// Bytes in a source rect: four floats. `FUN_140b70200` reads `[rax]`, `[rax+4]`, `[rax+8]` and
 /// `[rax+0xc]` and copies all four into two sixteen-byte per-quad buffers.
 pub const FLO_SOURCE_RECT_SIZE: usize = 0x10;
@@ -4423,6 +4512,32 @@ pub const FLO_ADDED_TAB_ICON_SOURCE_LEFT: f32 = FLO_TAB_PLATE_SOURCE[2] - FLO_TA
 /// Depth the icon record is attached at. `62` -- above the plate's `60` and the end cap's `61`, and
 /// below the first cell's `69`, so the icon sits on the strip and under its own highlight.
 pub const FLO_ADDED_TAB_ICON_DEPTH: u16 = 62;
+
+/// The hue the seventh tab's hexagon is tinted with, at full strength. R, G, B.
+///
+/// **The same hue the added rows wear**, [`FLO_ADDED_ROW_HUE`], and deliberately not a second
+/// number: the tab and the rows inside it are one mod, and the byte order that hue is laid down in
+/// cost a run to settle (see [`FLO_ADDED_ROW_TINT`]). Reusing it inherits that measurement instead
+/// of betting on it again.
+///
+/// The seventh tab's art is the sixth tab's, shifted one [`FLO_TAB_PITCH`] -- there are six
+/// hexagons in the atlas and this mod ships no texture -- so without a tint the tab this project
+/// adds is pixel-identical to the tab beside it. The colour is the only thing that says which one
+/// is ours.
+pub const FLO_ADDED_TAB_ICON_HUE: [u8; 3] = FLO_ADDED_ROW_HUE;
+
+/// How far the hexagon is pushed from white toward [`FLO_ADDED_TAB_ICON_HUE`], out of `255`.
+///
+/// **Full strength, where a row's icon is [`FLO_ADDED_ROW_TINT_STRENGTH`] = 120**, and the two
+/// differ because they are answering different questions. A row's tint distinguishes two rows that
+/// sit one above the other with captions to tell them apart, so a third of a hue is enough and more
+/// reads as a re-skin. The tab has no caption and no neighbour to compare against at a glance -- it
+/// is one hexagon in a row of seven identical hexagons -- and "a re-skin, a different KIND of row"
+/// is exactly the reading wanted here.
+///
+/// This is taste, not measurement, and it is on its own line for the same reason the row's is: it
+/// can be turned without touching the hue or the byte order underneath it.
+pub const FLO_ADDED_TAB_ICON_TINT_STRENGTH: u8 = 255;
 
 /// Index, in [`FLO_TAB_STRIP_DEFINITION`]'s child array, of the cap drawn over the strip's right
 /// end. Its container is `0x026a` and its quad lands at `(271.05, 5.05)-(349.40, 64.45)`, over the
@@ -6299,3 +6414,836 @@ pub const SL_SESSION_STATE_DIRECTORY_SET: u32 = 0x16;
 /// [`SL_WORKER_INDEX_OFFSET`], which is what makes [`SL_WORKER_SET_DIRECTORY`]'s `index != 3`
 /// test mean "a directory has been chosen".
 pub const SL_WORKER_KIND_OFFSET: usize = 0x38;
+
+// ---------------------------------------------------------------------------------------------
+// THE ITEM CELL: ITS INFUSION MARK, AND THE STAT REQUIREMENT THE GAME ALREADY TESTS
+//
+// Read statically on 2026-09-23 from `darksoulsii-deobf.bin` (SOTFS build 9527516) with the
+// Ghidra MCP daemon and `scripts/ds2-disasm.py`, and from the shipped layout with
+// `scripts/ds2-ebl.py` + `scripts/ds2-flo.py`. **No game was launched for any of it, and none of
+// it has been in front of a running game.** Addresses below are RVAs; add `0x140000000` for the
+// VA the disassembly prints.
+//
+// Reproduce the layout numbers with:
+//
+//     python3 scripts/ds2-ebl.py extract /menu/02.febnd.dcx --out /tmp/menu02
+//     python3 scripts/ds2-flo.py tree /tmp/menu02/l02_02_Inventory.flo --def 0x7a
+//     python3 scripts/ds2-flo.py tree /tmp/menu02/l02_02_Inventory.flo --def 0x70
+//
+// THE QUESTION THIS BLOCK ANSWERS, because it was asked as "how does an infused weapon get a
+// different icon" and the answer is that it does not get one. The item icon is the item's own id
+// and nothing else: `FUN_140035e10` (`0x00035e10`) builds the icon key as `{kind 6, id}` where the
+// id comes from `FUN_14003bd90` (`0x0003bd90`), which reads the u32 at inventory-entry `+0x18` and
+// passes it through `FUN_14003c8c0` (a swap between two specific ids, not an infusion offset).
+// Kind 6 falls to the default arm of the path builder `FUN_14048c3e0` (`0x0048c3e0`), which is
+// `icon:/tex/Icon/IC_%010d.tpf`. **One texture per item id. No infusion component anywhere in it.**
+//
+// The infusion mark is a SEPARATE ELEMENT, and there are nine of them sitting in the cell all the
+// time with at most one visible. See [`FE_ITEM_CELL_INFUSION_ELEMENT_BASE`].
+// ---------------------------------------------------------------------------------------------
+
+/// The inventory item-cell bind. `FUN_1400bc850`. RVA `0x000bc850`.
+///
+/// `fn(cell: *CellView, item: *FeItemData, showIcon: bool)`. Called once per visible row per
+/// refresh from `FUN_1400bc2b0` (`ItemSelectDialog`'s list rebuild), which builds `cell` on its own
+/// stack with `FUN_1400b7680` immediately before. It is the one place every drawable fact about an
+/// item row is written: the icon texture, the name, the count, the durability gauge, the equipped
+/// mark -- and the infusion mark.
+///
+/// Prologue `48 89 5c 24 18 55 56 57` -- its own. `scripts/ds2-arxan-chain.py 0x1400bc850`
+/// terminates at hop 0 with `NOT REDIRECTED (clean prologue at the entry)`.
+pub const FE_ITEM_CELL_BIND: u32 = 0x000b_c850;
+
+/// The bytes at [`FE_ITEM_CELL_BIND`], re-read before the site is patched.
+pub const FE_ITEM_CELL_BIND_PROLOGUE: [u8; 8] = [0x48, 0x89, 0x5c, 0x24, 0x18, 0x55, 0x56, 0x57];
+
+/// The equipment screen's own infusion bind. `FUN_140095650`. RVA `0x00095650`.
+///
+/// `fn(container: *ElementAccessor, item: *FeItemData)` -- and the first argument is already the
+/// infusion container's accessor, not a cell view, which is the whole difference from
+/// [`FE_ITEM_CELL_BIND`]. Its body is that bind's infusion loop and nothing else:
+///
+/// ```text
+/// for i in 0..0x10:
+///     path  = 0x5f5c3e0 + i
+///     shown = i == FUN_140034e70(item)          ; FE_ITEM_INFUSION_READ, the nibble
+///     FUN_14001e270(FUN_140027c80(container, out, &path) + 8, shown)
+/// ```
+///
+/// So it drives all sixteen ids, [`FE_ITEM_WARN_ELEMENT`] among them, and hides ours on every
+/// bind for the same reason the inventory's loop does -- which is what makes a detour running
+/// after the original the last word on the element here too.
+///
+/// **Why the equipment screen needed its own hook at all.** Its slot cells are `def 0x0128` and
+/// `def 0x012c` of `l02_01_In-Game.flo`, laid out by `def 0x0133`: six weapon slots, four armour,
+/// four rings. Both cells hold the nine-id container at child `[2]`, so the container detour
+/// already gives them the badge -- but nothing on that screen went through `FUN_1400bc850`, so
+/// nothing ever showed it. `FUN_140097150` is the refresh that walks the slot table at
+/// `PTR_DAT_141561ef0`, resolves each slot down to element `0x5f5c3e2`, and calls this.
+///
+/// Prologue `48 89 5c 24 10 48 89 6c` -- its own. `scripts/ds2-arxan-chain.py 0x140095650`
+/// terminates at hop 0 with `NOT REDIRECTED (clean prologue at the entry)`.
+pub const FE_EQUIP_SLOT_BIND: u32 = 0x0009_5650;
+
+/// The bytes at [`FE_EQUIP_SLOT_BIND`], re-read before the site is patched.
+pub const FE_EQUIP_SLOT_BIND_PROLOGUE: [u8; 8] = [0x48, 0x89, 0x5c, 0x24, 0x10, 0x48, 0x89, 0x6c];
+
+/// The element id an equipment slot cell hangs its infusion container on, in `l02_01_In-Game.flo`.
+///
+/// `def 0x0128` child `[2]` and `def 0x012c` child `[2]`, both naming `def 0x0121` -- the same
+/// nine-id container the inventory's cell holds. Recorded because it is the path
+/// `FUN_140097150` resolves before calling [`FE_EQUIP_SLOT_BIND`], and therefore the reason that
+/// bind's first argument is already inside the container.
+pub const FE_EQUIP_SLOT_CONTAINER_ELEMENT: u32 = 0x05f5_c3e2;
+
+/// The cell view's element accessors, built by `FUN_1400b7680` (`0x000b7680`) from the grid cell.
+///
+/// Every one of these is an id path resolved against the cell's own element, and the offsets are
+/// what [`FE_ITEM_CELL_BIND`] then writes through. Read straight off `FUN_1400b7680`, whose whole
+/// body is eight `FUN_140027c80` chains:
+///
+/// ```text
+/// +0x090   0x5f5c3e0 / 0x5f5c3e0   the item icon      (the texture is set through its +0x40)
+/// +0x120   0x5f5c3e0 / 0x5f5c3e1   a mark, from the entry's +0x1f bit 1
+/// +0x1b0   0x5f5c3e0 / 0x5f5c3e2   a mark, from FUN_140039140
+/// +0x240   0x5f5c3e1               the durability gauge (value through its +0x40)
+/// +0x2d0   0x5f5c3e2               THE INFUSION CONTAINER
+/// +0x360   ../ 0x5f5c420 / 0x5f5b9f2   the item name text
+/// +0x3f0   ../ 0x5f5c421 / 0x5f5c5ad   the item count text
+/// +0x480   0x5f5c3e0 / 0x5f5c3e3   a mark, from FeItemData byte +4
+/// ```
+pub const FE_ITEM_CELL_INFUSION_ACCESSOR_OFFSET: usize = 0x2d0;
+
+/// An accessor's "visible" sub-object, the `this` [`FE_ELEMENT_SET_VISIBLE`] takes. `+0x08`.
+///
+/// Every `FUN_14001e270` call in [`FE_ITEM_CELL_BIND`] is on `accessor + 8`: `+0x128` for the
+/// accessor at `+0x120`, `+0x1b8` for `+0x1b0`, `+0x248` for `+0x240`, `+0x488` for `+0x480`.
+/// Four sites agreeing is what fixes it rather than one.
+pub const FE_ELEMENT_ACCESSOR_VISIBLE_OFFSET: usize = 0x08;
+
+/// `FUN_140027c80(parent, out, path)`. RVA `0x00027c80`. Resolve an id path to an accessor.
+///
+/// The one lookup the whole frontend builds element accessors with -- `FUN_1400b7680` calls it
+/// eight times, [`FE_ITEM_CELL_BIND`]'s infusion loop calls it sixteen. `path` is a
+/// `DLKR::DLFixedVector<u32, 8>`: elements at `path + (-path & 3)` stride `4`, count at
+/// `path + 0x28`, which is the alignment idiom `0x1400bca4f`..`0x1400bca62` spells out.
+pub const FE_ELEMENT_RESOLVE: u32 = 0x0002_7c80;
+
+/// Byte offset of the count inside the path vector [`FE_ELEMENT_RESOLVE`] takes. `+0x28`.
+///
+/// `mov QWORD PTR [rbp+0x98],0x1` at `0x1400bca7d` against the vector based at `[rbp+0x70]`.
+pub const FE_ELEMENT_PATH_COUNT_OFFSET: usize = 0x28;
+
+/// How many bytes of zeroed scratch one id path needs. `0x30`, the count field plus its own size.
+pub const FE_ELEMENT_PATH_SIZE: usize = 0x30;
+
+/// `FUN_14001e270(visibleSubObject, bool)`. RVA `0x0001e270`. Show or hide an element.
+pub const FE_ELEMENT_SET_VISIBLE: u32 = 0x0001_e270;
+
+/// The sixteen element ids [`FE_ITEM_CELL_BIND`]'s infusion loop drives, starting here.
+///
+/// **This is the whole infusion-icon mechanism, and it is not an icon at all.** The loop at
+/// `0x1400bca70`..`0x1400bcacc`, verbatim:
+///
+/// ```text
+/// 0x1400bca78  call 0x140034e70          ; the infusion nibble -> [rsp+0x20]
+/// 0x1400bca88  movzx r15d,BYTE PTR [rax] ; r15 = that nibble
+/// 0x1400bca9d  add   eax,0x5f5c3e0       ; element id = base + i, with bl = i
+/// 0x1400bcaa2  mov   DWORD PTR [rdi],eax ; the one-component path
+/// 0x1400bcaa4  lea   rcx,[r14+0x2d0]     ; the infusion container's accessor
+/// 0x1400bcab3  call 0x140027c80          ; resolve id under it
+/// 0x1400bcab8  cmp   bl,r15b
+/// 0x1400bcabf  sete  dl
+/// 0x1400bcac2  call 0x14001e270          ; setVisible(i == infusion)
+/// 0x1400bcac9  cmp   bl,0x10             ; sixteen slots
+/// ```
+///
+/// Sixteen ids are driven and **nine are authored**: `l02_02_Inventory.flo`'s definition `0x0070`
+/// holds exactly nine children carrying `0x5f5c3e9` down to `0x5f5c3e1`. Slot `0` -- no infusion --
+/// has no element, which is why an uninfused weapon shows nothing, and slots `10..15` have none
+/// either. An id no element answers resolves to an accessor that reports nothing, so the loop's
+/// extra iterations are free.
+///
+/// So the answer to "how does an infusion change the icon" is that it does not: the icon is the
+/// item id ([`FE_ITEM_CELL_BIND`]'s block comment), and the infusion is a tenth sibling element
+/// that the layout already contains, switched on by index.
+pub const FE_ITEM_CELL_INFUSION_ELEMENT_BASE: u32 = 0x05f5_c3e0;
+
+/// How many slots that loop drives. `cmp bl,0x10` at `0x1400bcac9`.
+pub const FE_ITEM_CELL_INFUSION_SLOTS: u32 = 0x10;
+
+/// `FUN_140034e70(item, out)`. RVA `0x00034e70`. The infusion nibble, and the gate on it.
+///
+/// Four instructions' worth of answer, at `0x140034ea9`:
+///
+/// ```text
+/// cmp   byte ptr [rax + 0x1e],0x1   ; the inventory entry's item TYPE
+/// ja    not-infusable               ; -> 0
+/// movzx eax,byte ptr [rax + 0x26]
+/// and   al,0xf                      ; the low nibble is the infusion
+/// ```
+///
+/// `rax` is the entry [`ITEM_INVENTORY_ENTRY_LOOKUP`] returned. So the infusion is
+/// [`ITEM_ENTRY_INFUSION_OFFSET`] masked with [`ITEM_ENTRY_INFUSION_MASK`], and only item types
+/// `0` and `1` can carry one -- which is the game's own definition of "a weapon or a shield" and
+/// is reused as the gate on the mark this repo adds.
+pub const FE_ITEM_INFUSION_READ: u32 = 0x0003_4e70;
+
+/// `ItemInventory2`'s entry lookup. `FUN_1401abfb0(manager, handle)`. RVA `0x001abfb0`.
+///
+/// `manager` is `[[`[`GAME_MANAGER_IMP`]`] + `[`GAME_DATA_MANAGER_OFFSET`]`] + 0x10`, which is the
+/// walk `0x140034e83`..`0x140034e9f` performs before every call. `handle` is the `u16` at
+/// `FeItemData + 2`; `0xffff` means "no item" and the callers test for it first.
+pub const ITEM_INVENTORY_ENTRY_LOOKUP: u32 = 0x001a_bfb0;
+
+/// `GameDataManager` -> `ItemInventory2`. `+0x10`. `mov RCX,[RCX + 0x10]` at `0x140034e96`.
+pub const GAME_DATA_MANAGER_ITEM_INVENTORY_OFFSET: usize = 0x10;
+
+/// The `u16` handle inside a `FeItemData`. `+0x02`.
+pub const FE_ITEM_DATA_HANDLE_OFFSET: usize = 0x02;
+
+/// The handle value that means "no item". `0xffff`.
+pub const FE_ITEM_DATA_NO_HANDLE: u16 = 0xffff;
+
+/// The `u8` item type on an inventory entry. `+0x1e`.
+pub const ITEM_ENTRY_TYPE_OFFSET: usize = 0x1e;
+
+/// Highest item type that can carry an infusion. `1`, from `cmp byte ptr [rax+0x1e],1; jbe`.
+pub const ITEM_ENTRY_TYPE_MAX_INFUSABLE: u8 = 1;
+
+/// The `u8` holding the infusion in its low nibble. `+0x26`.
+pub const ITEM_ENTRY_INFUSION_OFFSET: usize = 0x26;
+
+/// The mask applied to it. `0x0f`, from `and al,0xf`.
+pub const ITEM_ENTRY_INFUSION_MASK: u8 = 0x0f;
+
+// --- the requirement test, which the game performs on every stat row it draws ---
+
+/// `FUN_1400bcde0`. RVA `0x000bcde0`. **The comparison this repo reuses rather than reinvents.**
+///
+/// It decides which sequence a stat row in the item detail pane plays, and the unmet case is the
+/// red one. Disassembled at `0x1400bcdfa`:
+///
+/// ```text
+/// mov   rax,[0x1416148f0]        ; GAME_MANAGER_IMP
+/// mov   rcx,[rax+0x22e0]         ; GAME_MANAGER_FRONTEND_ROOT_OFFSET
+/// call  0x1404ffb20              ; -> *(u64*)(that + 0x138), the player's stat table
+/// call  0x14003d750              ; -> FE_STAT_ROW_TABLE + key*12
+/// movsx rcx,WORD PTR [rax+0x4]   ; the PLAYER-STAT INDEX for this column
+/// js    not-a-requirement-row    ; negative -> this row compares two items instead
+/// movss xmm0,[rdi+0x4]           ; the item's required value, as a float
+/// lea   rdx,[rcx+rcx*2]          ; idx*3
+/// movd  xmm1,[rsi+rdx*8]         ; stat table entry, stride 0x18, i32 at +0
+/// cvtdq2ps xmm1,xmm1
+/// comiss xmm0,xmm1
+/// jbe   met                      ; required <= have
+/// mov   DWORD PTR [rbx],0x98     ; UNMET: sequence 0x98, element 0x5f5c5b7
+/// ```
+///
+/// So "the player fails this item's requirement" is, in the game's own words,
+/// `required > playerStat[index]` -- strictly greater, on floats, against a table the game
+/// maintains.
+///
+/// **This is the presentation check and not the mechanics check, and the two really are
+/// different.** The damage penalty comes from `FUN_14034d3c0` (RVA `0x0034d3c0`), which computes a
+/// continuous deficiency `sum(max(0, 1 - stat/required))` over the same four columns read straight
+/// out of `WeaponParam` at `+0x18`/`+0x1a`/`+0x1c`/`+0x1e`, against the effective stat block at
+/// `chrStatus + 0x16` (`FUN_14038d510`, nine bytes: `movzx eax,[rcx+rax*2+0x16]`), which is
+/// `clamp(base + modifiers, 1, 99)`. This one is boolean, reads the frontend's own table, and is
+/// what the number on the screen is coloured by.
+///
+/// **Two-handing does not reach this check, and the mechanism is not what it is usually called.**
+/// DS2 does not scale Strength: `FUN_14034d3c0` halves the weapon's Strength requirement with an
+/// integer shift, `shr cx,1` at `0x14034d44c`, for grip states `2` and `3`. The `1.5x` that does
+/// exist belongs to power stance -- `FUN_140350170` (`0x00350170`), `mulss xmm0,[0x1410bd0a8]` at
+/// `0x14035025c` -- and applies to grip states `4`, `5` and `6`. Neither reaches here: this
+/// function takes no grip argument at all, so the detail pane's requirement numbers ignore both,
+/// and so does anything built on this comparison.
+///
+/// **Not established: whether the table at [`FRONTEND_ROOT_PLAYER_STATS_OFFSET`] holds base or
+/// modified stats.** Every xref to `FUN_1404ffb20` is a reader and the writer has not been found,
+/// so "rings and spEffects are included" is unproven here, where the gameplay side's
+/// `chrStatus + 0x16` block proves it. See `docs/DS2-ITEM-REQUIREMENTS.md`.
+pub const FE_STAT_ROW_COLOUR: u32 = 0x000b_cde0;
+
+/// `FUN_1404ffb20(frontendRoot)` -> the player's stat table. `+0x138`, in full:
+/// `48 8b 81 38 01 00 00 c3` -- `mov rax,[rcx+0x138]; ret`.
+pub const FRONTEND_ROOT_PLAYER_STATS_OFFSET: usize = 0x138;
+
+/// Stride of one entry in that table. `0x18`, from `lea rdx,[rcx+rcx*2]` + `[rsi+rdx*8]`.
+pub const PLAYER_STAT_STRIDE: usize = 0x18;
+
+/// `DAT_14155def0`. RVA `0x0155def0`. `FE_ITEM_PARAM_TYPE` -> how to present that column.
+///
+/// `FUN_14003d750` (`0x0003d750`) is the accessor and bounds it at `0x60` entries of `12` bytes:
+/// `if (0 <= key && key < 0x60) return base + key*3` on `undefined4*`. Its `+0x04` is an `i16`
+/// player-stat index, `-1` on every column that is not a requirement.
+///
+/// **Exactly ten columns carry one**, dumped straight out of the image:
+///
+/// ```text
+///  key  stat   what
+///  0x11   8    armour: required Strength        0x33   8   weapon: required Strength
+///  0x12   9    armour: required Dexterity       0x34   9   weapon: required Dexterity
+///  0x13  10    armour: required Intelligence    0x35  10   weapon: required Intelligence
+///  0x14  11    armour: required Faith           0x36  11   weapon: required Faith
+///  0x42  10    ring: required Intelligence
+///  0x43  11    ring: required Faith
+/// ```
+///
+/// Which is corroborated from the other side by the detail pane's own row tables: the weapon pane
+/// (`0x1415640c0`, 19 rows) opens with `0x33 0x34 0x35 0x36`, the armour pane (`0x141564090`, 10
+/// rows) with `0x11 0x12 0x13 0x14`, and the ring pane (`0x141564078`, 5 rows) contains `0x42
+/// 0x43`. Two readings, one answer, and **the stat indices are read from this table at runtime
+/// rather than hardcoded here**, so the mapping stays the game's.
+pub const FE_STAT_ROW_TABLE: u32 = 0x0155_def0;
+
+/// Bytes per entry in [`FE_STAT_ROW_TABLE`]. `12`, from `lea rax,[rcx+rcx*2]` on a `u32` base.
+pub const FE_STAT_ROW_TABLE_STRIDE: usize = 12;
+
+/// The `i16` player-stat index inside one entry. `+0x04`. Negative means "not a requirement row".
+pub const FE_STAT_ROW_STAT_INDEX_OFFSET: usize = 0x04;
+
+/// Highest key [`FE_STAT_ROW_TABLE`] holds. `0x60` entries, so `0x5f`.
+pub const FE_STAT_ROW_TABLE_ENTRIES: u32 = 0x60;
+
+/// The four `FE_ITEM_PARAM_TYPE` keys that are a weapon's stat requirements.
+///
+/// In the order the detail pane lists them, which is the order of the player-stat indices
+/// `8, 9, 10, 11`. `FUN_1400312e0`'s own cases say which bytes they are:
+///
+/// ```text
+/// case 0x33: return *(u16*)(row + 0x70);   case 0x35: return *(u16*)(row + 0x74);
+/// case 0x34: return *(u16*)(row + 0x72);   case 0x36: return *(u16*)(row + 0x76);
+/// ```
+pub const FE_ITEM_PARAM_WEAPON_REQUIREMENTS: [u32; 4] = [0x33, 0x34, 0x35, 0x36];
+
+/// `FUN_14003c2d0(item, out)`. RVA `0x0003c2d0`. `FeItemData` -> the source descriptor.
+///
+/// Fills a union of three places an item can live -- `out[1]` the bag entry, `out[2]` a shop
+/// entry, `out[6]` the allocator -- and always zeroes `out[0]`, which is the precondition
+/// [`FE_ITEM_PARAM_ROWS`] tests. Sized by its own callers' stack temporaries: `0x50` bytes.
+pub const FE_ITEM_DESCRIPTOR: u32 = 0x0003_c2d0;
+
+/// How many bytes of zeroed scratch [`FE_ITEM_DESCRIPTOR`] writes. `0x50`.
+pub const FE_ITEM_DESCRIPTOR_SIZE: usize = 0x50;
+
+/// Index of the allocator inside that descriptor, in qwords. `6`.
+pub const FE_ITEM_DESCRIPTOR_ALLOCATOR_SLOT: usize = 6;
+
+/// `FUN_140035070(allocator, out, descriptor)`. RVA `0x00035070`. Descriptor -> the item's param
+/// row. Returns nonzero on success and leaves the row in `out[0]`.
+pub const FE_ITEM_PARAM_ROWS: u32 = 0x0003_5070;
+
+/// How many bytes of zeroed scratch [`FE_ITEM_PARAM_ROWS`] writes. `out[0..=8]`, so `0x48`.
+pub const FE_ITEM_PARAM_ROWS_SIZE: usize = 0x48;
+
+/// `FUN_1400312e0(row, key)`. RVA `0x000312e0`. One `FE_ITEM_PARAM_TYPE` column out of a row.
+///
+/// A `switch (key - 1)` over `0x5e` cases (`ff ca / 83 fa 5e / 0f 87 ..` at the entry), every arm
+/// of which is a plain load returning in `RAX`. **An integer return, which is what makes it safe
+/// to call from a detour**: no xmm result, no allocation, no out-parameter.
+///
+/// It is reached in the shipped game through `FUN_14003c080` (`0x0003c080`), whose own callers
+/// gate it to keys `0x42`/`0x43`; this repo calls it directly for the weapon requirement keys
+/// instead of widening that gate.
+pub const FE_ITEM_PARAM_COLUMN: u32 = 0x0003_12e0;
+
+// --- the added mark, and the container it is added to ---
+
+/// `FUN_140b50f20(ctx, doc, definition, parent)`. RVA `0x00b50f20`. The container builder.
+///
+/// It reads [`FLO_DEFINITION_CHILD_COUNT_OFFSET`] and [`FLO_DEFINITION_CHILDREN_OFFSET`] out of
+/// `definition` and walks that many records through `FUN_140b50bc0`, and in the branch that
+/// allocates a `FeComponentSprite` it hands the SAME pointer to the component's init
+/// (`vtable[0x1a8](sprite, allocator, definition)`), which is where `+0x48` -- the field
+/// `FUN_140b6bd80` bounds the display list by -- comes from. So substituting this ARGUMENT does
+/// everything substituting [`FLO_FIND_DEFINITION`]'s RETURN does, for one container, without
+/// touching a lookup another crate in this workspace already owns.
+///
+/// Prologue `40 55 41 54 41 56 41 57 48 83 ec 68`. `scripts/ds2-arxan-chain.py 0x140b50f20`
+/// terminates at hop 0: `NOT REDIRECTED (clean prologue at the entry)`.
+pub const FLO_BUILD_CONTAINER: u32 = 0x00b5_0f20;
+
+/// The bytes at [`FLO_BUILD_CONTAINER`], re-read before the site is patched.
+pub const FLO_BUILD_CONTAINER_PROLOGUE: [u8; 12] = [
+    0x40, 0x55, 0x41, 0x54, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xec, 0x68,
+];
+
+/// The nine element ids the infusion container holds, **in the order the file has them**.
+///
+/// This is the fingerprint the container is recognised by, and it is a fingerprint rather than a
+/// definition index on purpose: the same container is authored three times over with three
+/// different indices, and an index would catch one document of the three.
+///
+/// ```text
+/// l02_02_Inventory.flo   def 0x0070   child defs 0x5f 0x61 0x63 0x65 0x67 0x69 0x6b 0x6d 0x6f
+/// l02_03_equipment.flo   def 0x006b   child defs 0x5a 0x5c 0x5e 0x60 0x62 0x64 0x66 0x68 0x6a
+/// l02_01_In-Game.flo     def 0x0121   child defs 0x110 .. 0x120
+/// ```
+///
+/// All three carry these nine ids in this order. Nothing else in any of the three documents has
+/// nine children carrying them.
+pub const FLO_INFUSION_CONTAINER_IDS: [u32; 9] = [
+    0x05f5_c3e9,
+    0x05f5_c3e8,
+    0x05f5_c3e7,
+    0x05f5_c3e6,
+    0x05f5_c3e5,
+    0x05f5_c3e4,
+    0x05f5_c3e3,
+    0x05f5_c3e2,
+    0x05f5_c3e1,
+];
+
+/// The element id the added mark carries. `0x5f5c3ef` -- slot `15` of the sixteen
+/// [`FE_ITEM_CELL_BIND`] drives.
+///
+/// **Chosen because the game's own loop always turns it OFF.** The infusion nibble is masked to
+/// `0..=9` by the nine authored elements and to `0..=15` by [`ITEM_ENTRY_INFUSION_MASK`], so
+/// `i == 15` is a comparison that can succeed only if an entry carries a nibble no element
+/// answers today. Every bind therefore hides this element before the mark's own detour, which
+/// runs after the original, decides whether to show it. If that detour is ever absent the mark is
+/// simply never shown -- the same inert-on-failure shape as `ds2-menu-row`'s action ids.
+pub const FE_ITEM_WARN_ELEMENT: u32 = 0x05f5_c3ef;
+
+/// Where the item icon sits inside a cell: `(left, top, right, bottom)` in cell-local units.
+///
+/// Three nested records and one quad, every one of them read out of `l02_02_Inventory.flo`:
+///
+/// ```text
+/// cell def 0x007a  child[0] id 0x5f5c3e0 def 0x005d  at (0, 0)          scale (1, 1)
+///   def 0x005d     child[1] id 0x5f5c3e0 def 0x0056  at (15.25, -9.65)  scale (0.810806, ..)
+///     def 0x0056   child[0]              def 0x0055  at (0, 0)          scale (1, 1)
+///       def 0x0055 child[1]              def 0x0054  at (0, 0)          scale (1, 1)
+///         shape 0x0054, one quad, rect (0,0)-(64,128), offset (0,0)
+/// ```
+///
+/// `0x0054` is the placeholder the item's own texture is bound into at runtime, so its rect is the
+/// box the icon occupies rather than the art in it.
+///
+/// The scale is the half this was first written without, and the omission was visible on screen:
+/// the badge derived from it hung below the icon instead of sitting in its corner. The quad is
+/// `64 x 128`, but the record carrying it is scaled, so the box is `51.89 x 103.78` -- a bottom
+/// edge of `94.13`, not `118.35`, which is `24.22` lower than the icon ever reaches.
+///
+/// It went unnoticed because `scripts/ds2-flo.py`'s `render` printed `xy=` and not `scale=`, so
+/// four separate readings of these same records all returned a position and no scale. That script
+/// prints both now.
+///
+/// Only the far edges move. `[0]` and `[1]` are the record's own origin, and a scale applies to
+/// what a record contains rather than to where it sits.
+pub const FE_ITEM_ICON_BOX: [f32; 4] = [
+    15.25,
+    -9.65,
+    15.25 + 64.0 * FE_ITEM_ICON_SCALE,
+    -9.65 + 128.0 * FE_ITEM_ICON_SCALE,
+];
+
+/// The scale on the record that carries the item icon's quad, in both documents that author an
+/// item cell: `l02_02_Inventory.flo` `def 0x005d` child[1], and `l02_03_equipment.flo` `def 0x0058`
+/// child[1]. The same number in both, read with `scripts/ds2-flo.py tree`.
+pub const FE_ITEM_ICON_SCALE: f32 = 0.810806;
+
+/// Where the infusion container sits inside a cell, in the same units.
+///
+/// `(51.40, 48.15)` in `l02_02_Inventory.flo` def `0x007a` child `[2]` AND in
+/// `l02_03_equipment.flo` def `0x0075` child `[2]` -- the inventory list and the equip picker
+/// place it identically. The pause menu's own two cells (`l02_01_In-Game.flo` defs `0x0128` and
+/// `0x012c`) put it at `(53.90, 55.25)` and `(51.40, 52.80)`, so a mark positioned from this
+/// constant lands up to `7.1` units off in those two. That is a few pixels and it is written down
+/// rather than corrected, because correcting it means a per-document table and the mark is a
+/// corner badge.
+pub const FE_ITEM_INFUSION_CONTAINER_AT: [f32; 2] = [51.40, 48.15];
+
+/// How far the added mark is inset from the icon's bottom-left corner.
+pub const FE_ITEM_WARN_INSET: f32 = 2.0;
+
+/// Where the cell's durability bar starts, which is the real bottom of the usable portrait.
+///
+/// The badge is anchored on this and not on [`FE_ITEM_ICON_BOX`]`[3]`, because the icon's box runs
+/// *past* the bar: `94.13` against a bar starting at `71.85`. A badge placed against the box's
+/// bottom edge therefore lands on the bar and below it -- which is what four rounds of screenshots
+/// showed, the arrow sitting under the portrait rather than on it, with the box arithmetic correct
+/// the whole time and anchored to the wrong edge.
+///
+/// Element `0x5f5c3e1`, the last child of the cell in both documents that author one:
+///
+/// ```text
+/// l02_03_equipment.flo  def 0x0075 child[7]  def 0x0072  at (9.45, 71.85)
+/// l02_02_Inventory.flo  def 0x007a child[7]  def 0x0077  at (9.45, 73.35)
+/// ```
+///
+/// The lower of the two is taken, so the badge clears the bar in both rather than in one.
+pub const FE_ITEM_CELL_BAR_TOP: f32 = 71.85;
+
+/// Where that same bar starts horizontally, which is the game's own left margin inside a cell.
+///
+/// Both documents put it at `9.45`, and the badge's left edge is aligned to it rather than to
+/// [`FE_ITEM_ICON_BOX`]`[0] + `[`FE_ITEM_WARN_INSET`], which sat `7.80` further right. The icon
+/// box is not the visible tile: the cell's background shape (`0x004d` in equipment, `0x0052` in
+/// inventory, the same quad in both) draws from `2.45` to `97.30`, so there is parchment to the
+/// left of the icon box and the badge was stopping short of it.
+///
+/// The bar is the better anchor of the two edges available. `2.45` is the art's extreme edge and
+/// runs under the cell's frame; `9.45` is where the game itself starts a full-width element inside
+/// the same tile, so a badge on that line shares a margin with something already on screen.
+pub const FE_ITEM_CELL_BAR_LEFT: f32 = 9.45;
+
+/// The atlas rect the cloned infusion glyph ships with, which is the one thing that must be true
+/// before [`FE_ITEM_WARN_SOURCE`] is written over it.
+///
+/// Shape `0x005e` in `l02_02_Inventory.flo`, `0x0059` in `l02_03_equipment.flo`, `0x010f` in
+/// `l02_01_In-Game.flo` -- three different indices, ONE rect, and in all three the quad's own
+/// offset is `(-934.70, -52.50)`, cancelling the rect exactly so the art lands on its record's
+/// origin. All three sample **`waku_03`**, which is also where the game keeps its ✕; that is what
+/// makes the swap a rect write rather than a texture swap. Checked with
+/// `scripts/ds2-flo.py shape` on each document.
+pub const FE_ITEM_WARN_SHIPPED_SOURCE: [f32; 4] = [934.70, 52.50, 960.30, 78.50];
+
+/// **The game's own "you cannot use this" ✕**, as a rect in `waku_03`.
+///
+/// This is the mark the HUD already draws on an unusable quick-slot weapon, not art this repo
+/// invented: `l01_05_L_key.flo` shape `0x002a`, one quad, source `(740.65, 164.05)-(769.65,
+/// 195.55)`, drawn by def `0x0036` child `[6]` -- element `0x5f5c3e6` at `(180.70, 501.25)`,
+/// depth `11`, over an item icon whose own box is `(183.15, 419.20)` plus `64 x 128`. So the game
+/// puts it in the LOWER-LEFT of the icon it marks, which is where
+/// [`FE_ITEM_WARN_OFFSET`] puts this one.
+///
+/// Found arithmetically rather than by eye: the ✕ was cut out of a screenshot of that HUD slot,
+/// turned into a red-dominance template, and cross-correlated against every red blob
+/// `scripts/ds2-atlas-find.py` reports in `waku_03`. This rect scores `+0.79`; the next best
+/// candidate in the atlas scores `+0.35`.
+pub const FE_ITEM_WARN_SOURCE: [f32; 4] = [740.65, 164.05, 769.65, 195.55];
+
+/// The opaque extent of the ✕ inside [`FE_ITEM_WARN_SOURCE`], which is bigger than the ink.
+///
+/// `scripts/ds2-atlas-find.py waku_03.dds --red` labels the connected red blob at
+/// `(745, 169)-(767, 191)`, `367` opaque pixels, mean `rgb(181, 44, 16)`. The quad's rect carries
+/// `4.35` of transparent padding on the left and `4.95` on top, and `l01_05_L_key.flo` pays for it
+/// the same way this does: its quad offset is `(-744.80, -168.70)` against a rect starting at
+/// `(740.65, 164.05)`, overshooting by exactly the padding so the INK lands on the record's origin.
+///
+/// The mark is aligned on this and not on the rect, because a corner badge is aligned on what the
+/// player can see.
+pub const FE_ITEM_WARN_INK: [f32; 4] = [745.0, 169.0, 767.0, 191.0];
+
+/// How far the ink sits inside [`FE_ITEM_WARN_SOURCE`]'s top-left corner.
+pub const FE_ITEM_WARN_INK_INSET: [f32; 2] = [
+    FE_ITEM_WARN_INK[0] - FE_ITEM_WARN_SOURCE[0],
+    FE_ITEM_WARN_INK[1] - FE_ITEM_WARN_SOURCE[1],
+];
+
+/// The mark's size: the ✕'s ink, `22.00 x 22.00`, and not the padded rect around it.
+pub const FE_ITEM_WARN_SIZE: [f32; 2] = [
+    FE_ITEM_WARN_INK[2] - FE_ITEM_WARN_INK[0],
+    FE_ITEM_WARN_INK[3] - FE_ITEM_WARN_INK[1],
+];
+
+/// The mark's translate, **relative to the infusion container**, which is what its record carries.
+///
+/// The icon's bottom-left corner inset by [`FE_ITEM_WARN_INSET`], minus the container's own origin.
+/// Arithmetic rather than a literal so the three constants above stay the only measurements.
+pub const FE_ITEM_WARN_OFFSET: [f32; 2] = [
+    FE_ITEM_CELL_BAR_LEFT - FE_ITEM_INFUSION_CONTAINER_AT[0],
+    FE_ITEM_CELL_BAR_TOP
+        - FE_ITEM_WARN_SIZE[1]
+        - FE_ITEM_WARN_INSET
+        - FE_ITEM_INFUSION_CONTAINER_AT[1],
+];
+
+/// The destination rect `ds2-item-warn`'s `place` writes into the built component.
+///
+/// Anchored on [`FE_ITEM_WARN_SHIPPED_SOURCE`] and not on [`FE_ITEM_WARN_SOURCE`], which is the
+/// one subtlety in the whole swap. `FUN_140b70200` copies the shape's quad rect into both the
+/// destination array at `+0x50` and the source array at `+0x58`, and the cloned glyph's `.flo`
+/// quad carries `(-934.70, -52.50)` against a rect starting at `(934.70, 52.50)` -- so something
+/// downstream cancels the atlas origin and the shipped art lands on its record's origin.
+/// Re-pointing the source at the ✕ changes which pixels are sampled and moves nothing, so the
+/// destination stays measured from the rect that cancellation is built around.
+///
+/// It is not the per-quad matrix at `+0x48` doing the cancelling, or at least not by the time the
+/// cell binds: see [`FE_TEXTURE_SHAPE_QUAD_MATRIX_TRANSLATE`], where a run found identity. Which
+/// transform applies the glyph quad's offset is open, and it is the open half of this mark.
+///
+/// Its size is [`FE_ITEM_WARN_SOURCE`]'s. The draw (`0x140b6f200` -> `FUN_140b521c0`) builds four
+/// vertices straight off the destination corners and maps the source rect onto them as UVs, so a
+/// destination narrower than its source squashes the art.
+pub const FE_ITEM_WARN_DEST: [f32; 4] = [
+    FE_ITEM_WARN_SHIPPED_SOURCE[0] + FE_ITEM_WARN_OFFSET[0] - FE_ITEM_WARN_INK_INSET[0],
+    FE_ITEM_WARN_SHIPPED_SOURCE[1] + FE_ITEM_WARN_OFFSET[1] - FE_ITEM_WARN_INK_INSET[1],
+    FE_ITEM_WARN_SHIPPED_SOURCE[0] + FE_ITEM_WARN_OFFSET[0] - FE_ITEM_WARN_INK_INSET[0]
+        + (FE_ITEM_WARN_SOURCE[2] - FE_ITEM_WARN_SOURCE[0]),
+    FE_ITEM_WARN_SHIPPED_SOURCE[1] + FE_ITEM_WARN_OFFSET[1] - FE_ITEM_WARN_INK_INSET[1]
+        + (FE_ITEM_WARN_SOURCE[3] - FE_ITEM_WARN_SOURCE[1]),
+];
+
+/// Which of the container's nine children the mark's record is cloned from. Child `0`.
+///
+/// The clone is still a clone, but it is no longer a clone for want of art. What it is for now is
+/// the texture: a `FeComponentTextureShape` resolves its texture at draw time out of its shape
+/// entry's quad (`quad+0x20` -> the document's texture table -> `+0x38` on the component), and
+/// that entry is shared with every other user of the shape. Both rect arrays are per-component
+/// copies, so a rect can be re-pointed for one badge without touching anything else -- and the ✕
+/// is reachable that way only because the glyph being cloned samples the same atlas the ✕ lives
+/// in.
+///
+/// `waku_03`, in all three documents that author an item cell. See [`FE_ITEM_WARN_SHIPPED_SOURCE`].
+pub const FE_ITEM_WARN_CLONED_CHILD: usize = 0;
+
+/// Depth the added record carries, relative to the last of the nine it joins.
+///
+/// The nine step by 2 (`1, 3, 5, .., 17`), so `+2` puts the mark above all of them. Draw order
+/// among siblings follows the order they are attached in rather than this field -- see
+/// [`FLO_RECORD_DEPTH_OFFSET`] -- and the mark is appended last either way.
+pub const FE_ITEM_WARN_DEPTH_STEP: u16 = 2;
+
+#[cfg(test)]
+mod item_warn_tests {
+    /// The mark is the ✕'s ink, measured with `scripts/ds2-atlas-find.py waku_03.dds --red`, and
+    /// not the padded rect the quad names.
+    #[test]
+    fn the_size_is_the_ink_and_not_the_rect() {
+        assert!((super::FE_ITEM_WARN_SIZE[0] - 22.0).abs() < 0.01);
+        assert!((super::FE_ITEM_WARN_SIZE[1] - 22.0).abs() < 0.01);
+        let padded = [
+            super::FE_ITEM_WARN_SOURCE[2] - super::FE_ITEM_WARN_SOURCE[0],
+            super::FE_ITEM_WARN_SOURCE[3] - super::FE_ITEM_WARN_SOURCE[1],
+        ];
+        assert!(
+            padded[0] > super::FE_ITEM_WARN_SIZE[0] && padded[1] > super::FE_ITEM_WARN_SIZE[1],
+            "if the rect were the ink, aligning on the ink would be pointless"
+        );
+    }
+
+    /// The ink is inside the rect that samples it, which is what makes the inset a trim and not a
+    /// crop of somebody else's art.
+    #[test]
+    fn the_ink_is_inside_its_source_rect() {
+        let [left, top, right, bottom] = super::FE_ITEM_WARN_SOURCE;
+        let ink = super::FE_ITEM_WARN_INK;
+        assert!(ink[0] >= left && ink[1] >= top && ink[2] <= right && ink[3] <= bottom);
+        const {
+            assert!(super::FE_ITEM_WARN_INK_INSET[0] > 0.0);
+            assert!(super::FE_ITEM_WARN_INK_INSET[1] > 0.0);
+        }
+    }
+
+    /// The ✕ and the glyph it replaces are two rects of one atlas -- `waku_03`, `1024 x 256` --
+    /// which is the only reason a source-rect write can reach the ✕ at all.
+    #[test]
+    fn both_rects_are_inside_waku_03() {
+        for rect in [
+            super::FE_ITEM_WARN_SOURCE,
+            super::FE_ITEM_WARN_SHIPPED_SOURCE,
+        ] {
+            assert!(rect[0] >= 0.0 && rect[1] >= 0.0);
+            assert!(rect[2] <= 1024.0, "past the atlas's right edge");
+            assert!(rect[3] <= 256.0, "past the atlas's bottom edge");
+            assert!(rect[2] > rect[0] && rect[3] > rect[1]);
+        }
+        let apart = (super::FE_ITEM_WARN_SOURCE[0] - super::FE_ITEM_WARN_SHIPPED_SOURCE[0]).abs();
+        assert!(
+            apart > 100.0,
+            "these are supposed to be two different pictures"
+        );
+    }
+
+    /// The destination rect `ds2-item-warn`'s `place` writes: the ✕ at the size of its own rect,
+    /// moved into the icon's near corner.
+    ///
+    /// This lives here rather than beside the code that writes it because that module is
+    /// `#[cfg(windows)]` and the host this is developed on is not Windows -- a test in there
+    /// compiles nowhere and runs never, which is worse than no test, since it reads like coverage.
+    #[test]
+    fn the_destination_carries_the_new_arts_size() {
+        let dest = super::FE_ITEM_WARN_DEST;
+        let source = super::FE_ITEM_WARN_SOURCE;
+        assert!(
+            (dest[2] - dest[0] - (source[2] - source[0])).abs() < 0.01,
+            "a destination narrower than its source squashes the ✕"
+        );
+        assert!((dest[3] - dest[1] - (source[3] - source[1])).abs() < 0.01);
+        assert!(
+            dest[1] < dest[3],
+            "the ✕ is not directional and is not mirrored"
+        );
+        assert!(
+            dest[0] < super::FE_ITEM_WARN_SHIPPED_SOURCE[0],
+            "the badge sits left of the infusion glyph it is cloned from"
+        );
+    }
+
+    /// The destination puts the ink where [`super::FE_ITEM_WARN_OFFSET`] says, padding discounted.
+    ///
+    /// That is the whole point of anchoring on the ink: with the rect anchored instead, the ✕
+    /// would sit `4.35` right and `4.95` low of every other measurement in this module.
+    #[test]
+    fn the_ink_lands_on_the_offset() {
+        let ink = [
+            super::FE_ITEM_WARN_DEST[0] + super::FE_ITEM_WARN_INK_INSET[0]
+                - super::FE_ITEM_WARN_SHIPPED_SOURCE[0],
+            super::FE_ITEM_WARN_DEST[1] + super::FE_ITEM_WARN_INK_INSET[1]
+                - super::FE_ITEM_WARN_SHIPPED_SOURCE[1],
+        ];
+        assert!((ink[0] - super::FE_ITEM_WARN_OFFSET[0]).abs() < 0.01);
+        assert!((ink[1] - super::FE_ITEM_WARN_OFFSET[1]).abs() < 0.01);
+    }
+
+    /// The corner the badge lands in is inside the icon, which is what "on the weapon" means.
+    #[test]
+    fn the_corner_is_inside_the_icon() {
+        let at = [
+            super::FE_ITEM_INFUSION_CONTAINER_AT[0] + super::FE_ITEM_WARN_OFFSET[0],
+            super::FE_ITEM_INFUSION_CONTAINER_AT[1] + super::FE_ITEM_WARN_OFFSET[1],
+        ];
+        // The TILE bounds the badge, not the icon's art box. Those are different rectangles and
+        // conflating them is what put the badge under the portrait and then short of its left
+        // margin: the art box is `(15.25, -9.65)-(67.14, 94.13)`, while the parchment the player
+        // sees runs `(2.45, -5.85)-(97.30, 85.00)`. The badge is deliberately left of the art box
+        // now, on the margin the cell's own durability bar uses.
+        const TILE: [f32; 4] = [2.45, -5.85, 97.30, 85.00];
+        assert!(at[0] >= TILE[0], "not off the left edge of the tile");
+        assert!(
+            at[0] + super::FE_ITEM_WARN_SIZE[0] <= TILE[2],
+            "and not past its right"
+        );
+        assert!(
+            at[1] + super::FE_ITEM_WARN_SIZE[1] <= super::FE_ITEM_CELL_BAR_TOP,
+            "and above the durability bar, which is the edge that actually bounds it"
+        );
+    }
+}
+
+#[cfg(test)]
+mod item_icon_box_tests {
+    /// The icon box is the quad SCALED, not the quad.
+    ///
+    /// The sibling tests in `item_warn_tests` all compare the box against itself, so every one of
+    /// them passed while `FE_ITEM_ICON_BOX` carried a bottom edge `24.22` below where the icon
+    /// actually ends -- and the badge derived from it hung under the portrait on screen. This
+    /// compares the box against the two numbers it is built from instead.
+    #[test]
+    fn the_scale_is_applied_to_both_far_edges() {
+        let box_ = super::FE_ITEM_ICON_BOX;
+        let width = box_[2] - box_[0];
+        let height = box_[3] - box_[1];
+        assert!(
+            (width - 64.0 * super::FE_ITEM_ICON_SCALE).abs() < 0.01,
+            "width must be the quad's 64 scaled, got {width}"
+        );
+        assert!(
+            (height - 128.0 * super::FE_ITEM_ICON_SCALE).abs() < 0.01,
+            "height must be the quad's 128 scaled, got {height}"
+        );
+        const {
+            assert!(
+                super::FE_ITEM_ICON_SCALE < 1.0,
+                "a scale of 1 would make this test vacuous"
+            )
+        };
+    }
+
+    /// The badge sits inside the icon on BOTH axes, measured from the container it hangs off.
+    ///
+    /// The vertical half is the one that was wrong: the badge's bottom edge ran past the icon's.
+    #[test]
+    fn the_badge_does_not_hang_below_the_portrait() {
+        let bottom = super::FE_ITEM_INFUSION_CONTAINER_AT[1]
+            + super::FE_ITEM_WARN_OFFSET[1]
+            + super::FE_ITEM_WARN_SIZE[1];
+        assert!(
+            bottom <= super::FE_ITEM_ICON_BOX[3],
+            "badge bottom {bottom} is below the icon's {}",
+            super::FE_ITEM_ICON_BOX[3]
+        );
+        let right = super::FE_ITEM_INFUSION_CONTAINER_AT[0]
+            + super::FE_ITEM_WARN_OFFSET[0]
+            + super::FE_ITEM_WARN_SIZE[0];
+        assert!(
+            right <= super::FE_ITEM_ICON_BOX[2],
+            "badge right {right} is past the icon's {}",
+            super::FE_ITEM_ICON_BOX[2]
+        );
+    }
+}
+
+#[cfg(test)]
+mod item_warn_bar_tests {
+    /// The badge clears the durability bar, which is the edge that actually bounds the portrait.
+    ///
+    /// The sibling test `the_badge_does_not_hang_below_the_portrait` passed throughout, because it
+    /// measured against `FE_ITEM_ICON_BOX[3]` -- an edge `22.28` below the bar. Four runs put the
+    /// arrow under the portrait while that test stayed green.
+    #[test]
+    fn the_badge_sits_above_the_durability_bar() {
+        let bottom = super::FE_ITEM_INFUSION_CONTAINER_AT[1]
+            + super::FE_ITEM_WARN_OFFSET[1]
+            + super::FE_ITEM_WARN_SIZE[1];
+        assert!(
+            bottom <= super::FE_ITEM_CELL_BAR_TOP,
+            "badge bottom {bottom} is on or under the bar at {}",
+            super::FE_ITEM_CELL_BAR_TOP
+        );
+    }
+
+    /// The bar is the tighter bound, which is the whole reason the anchor moved.
+    #[test]
+    fn the_bar_is_above_the_icon_boxs_bottom() {
+        const {
+            assert!(
+                super::FE_ITEM_CELL_BAR_TOP < super::FE_ITEM_ICON_BOX[3],
+                "if the icon box ended first, anchoring on it would have been correct"
+            )
+        };
+    }
+
+    /// The badge is still inside the portrait vertically, not floated off the top of it.
+    #[test]
+    fn the_badge_is_below_the_icons_top() {
+        let top = super::FE_ITEM_INFUSION_CONTAINER_AT[1] + super::FE_ITEM_WARN_OFFSET[1];
+        assert!(
+            top > super::FE_ITEM_ICON_BOX[1],
+            "badge top {top} is above the icon"
+        );
+    }
+}
+
+#[cfg(test)]
+mod item_warn_left_tests {
+    /// The badge's left edge is the bar's, so the two share the cell's own margin.
+    #[test]
+    fn the_badge_lines_up_with_the_bar() {
+        let left = super::FE_ITEM_INFUSION_CONTAINER_AT[0] + super::FE_ITEM_WARN_OFFSET[0];
+        assert!(
+            (left - super::FE_ITEM_CELL_BAR_LEFT).abs() < 0.01,
+            "badge left {left} is not the bar's {}",
+            super::FE_ITEM_CELL_BAR_LEFT
+        );
+    }
+
+    /// That margin is further left than the icon box allowed, which is the change.
+    #[test]
+    fn the_bar_margin_is_left_of_the_icon_box() {
+        const {
+            assert!(
+                super::FE_ITEM_CELL_BAR_LEFT
+                    < super::FE_ITEM_ICON_BOX[0] + super::FE_ITEM_WARN_INSET,
+                "anchoring on the bar has to move the badge left of where the icon box put it"
+            )
+        };
+    }
+
+    /// And it is still on the tile: the cell's background art starts left of the bar.
+    #[test]
+    fn the_badge_stays_on_the_parchment() {
+        /// The cell background quad, offset plus rect, from `ds2-flo.py shape --shape 0x4d`.
+        const TILE_LEFT: f32 = 2.45;
+        const {
+            assert!(
+                super::FE_ITEM_CELL_BAR_LEFT > TILE_LEFT,
+                "the bar's margin must sit inside the tile, not on its frame"
+            )
+        };
+    }
+}

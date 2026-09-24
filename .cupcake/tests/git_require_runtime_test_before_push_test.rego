@@ -182,6 +182,15 @@ test_reason_names_unreadable_evidence_when_the_signal_is_silent if {
 	contains(reason, "No runtime evidence could be read")
 }
 
+# The cheap fix, which is an ordering and not a code change, and which this guard cost three game
+# restarts in one session for want of saying. Commit, then build, then launch: the floor is
+# `max(HEAD commit time, staged DLL mtime)`, so a run taken before the commit can never clear it no
+# matter how recent it is. Asserted on the stale-log arm because that is the failure it answers.
+test_reason_tells_you_to_commit_before_launching if {
+	some reason in reasons("git push origin quit-menu-file-rows", stale_log)
+	contains(reason, "Commit before you launch")
+}
+
 # --- Jurisdiction: only a push, and only one that runs -----------------------
 
 test_allow_non_push_git_commands_when_unrun if {

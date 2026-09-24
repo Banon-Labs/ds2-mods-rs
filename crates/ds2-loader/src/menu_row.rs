@@ -87,12 +87,21 @@ impl Row {
     }
 }
 
-/// Every row a `rows` list may name, in the order they are listed in the log.
+/// Every row a `rows` list may name, **in the order a player who names none of them sees them** --
+/// which is also the order they are listed in the log.
+///
+/// **Quit is last, and the order is the whole reason this is a list rather than a set.** It sat
+/// first for as long as it was the only row there was, and a tab's cursor starts on the first row:
+/// first place is the cheapest slot to press by accident, and a quit that neither saves nor asks is
+/// the most expensive thing on the tab to press by accident. The three rows that load, import or
+/// write a file take the near slots; the one that cannot be taken back takes the far one.
+///
+/// A `rows` list still says otherwise. This is the default, not a policy.
 pub const EVERY_ROW: [Row; 4] = [
-    Row::QuitToDesktop,
     Row::LoadBuildFromUrl,
     Row::LoadCharacterFromFile,
     Row::SaveGameToFile,
+    Row::QuitToDesktop,
 ];
 
 /// Where a run's selection came from, so the log can say which key was read.
@@ -232,12 +241,14 @@ impl MenuRowConfig {
                 Some("true")
             )
         };
+        // In [`EVERY_ROW`]'s order, for the reason written there. An old config file is exactly the
+        // one that used to put the quit row under the cursor, so this path needs the move most.
         let mut rows = Vec::new();
-        if on(CONFIG_SECTION) {
-            rows.push(Row::QuitToDesktop);
-        }
         if on(crate::build_import::CONFIG_SECTION) {
             rows.push(Row::LoadBuildFromUrl);
+        }
+        if on(CONFIG_SECTION) {
+            rows.push(Row::QuitToDesktop);
         }
         if rows.is_empty() {
             // NEITHER KEY SET, so nothing has been said about rows at all -- and what a player who
@@ -411,7 +422,8 @@ mod tests {
             "[menu_row]\nenabled = true\n[build_import]\nenabled = true\n",
         );
         assert_eq!(config.source, Source::LegacyEnabled);
-        assert_eq!(config.rows, vec![Row::QuitToDesktop, Row::LoadBuildFromUrl]);
+        // In `EVERY_ROW`'s order, quit last -- the same order the no-config default hands back.
+        assert_eq!(config.rows, vec![Row::LoadBuildFromUrl, Row::QuitToDesktop]);
     }
 
     /// `rows` wins outright when present, so there is one source of truth per run.
@@ -453,6 +465,32 @@ mod tests {
         assert_eq!(MenuRowConfig::default().rows, EVERY_ROW.to_vec());
         assert_eq!(MenuRowConfig::default().rows.len(), 4);
         assert!(EVERY_ROW.len() <= ds2_menu_row::MAX_ADDED_ROWS);
+    }
+
+    /// **The quit row is last of the default set**, on every path that produces one.
+    ///
+    /// Pinned here rather than left to the doc comment on `EVERY_ROW`, because "the cursor must not
+    /// start on the row that ends the process without asking" is a property of the shipped menu and
+    /// a comment enforces nothing. A row added to the table in front of it fails here.
+    #[test]
+    fn the_row_that_does_not_ask_is_never_the_one_under_the_cursor() {
+        assert_eq!(EVERY_ROW[EVERY_ROW.len() - 1], Row::QuitToDesktop);
+        for config in [
+            MenuRowConfig::default(),
+            MenuRowConfig::from_text(""),
+            MenuRowConfig::from_text("[menu_row]\n"),
+            MenuRowConfig::from_text(
+                "[menu_row]\nenabled = true\n[build_import]\nenabled = true\n",
+            ),
+        ] {
+            assert_eq!(
+                config.rows.last(),
+                Some(&Row::QuitToDesktop),
+                "{:?} put something after the quit row",
+                config.source
+            );
+            assert_ne!(config.rows.first(), Some(&Row::QuitToDesktop));
+        }
     }
 
     /// Only an exact `true` is read as a legacy `enabled`.

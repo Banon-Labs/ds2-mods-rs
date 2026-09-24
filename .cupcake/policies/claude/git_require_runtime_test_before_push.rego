@@ -43,6 +43,24 @@ import data.cupcake.system.commands
 #
 # FAIL CLOSED. No signal, an unreadable shell wrapper, or a signal that cannot parse means denied,
 # because every one of those is indistinguishable from "the game was never run".
+#
+# WHY THERE IS NO DOCUMENTATION EXEMPTION, asked for 2026-09-24 after this guard cost three game
+# restarts in one session and measured before it was declined. Of the last 120 commits, 101 touch
+# `crates/` or the launcher and 3 of those change nothing but comment and blank lines -- and the
+# jurisdiction test runs over `origin/main...HEAD`, not per commit, so a branch qualifies only if
+# its ENTIRE game-code delta is comments. The branch that prompted the request carries 2255
+# non-comment changed lines. There are also no `.md` files under `crates/` for a file-extension
+# exemption to reach; `docs/` is already outside the gate.
+#
+# None of the three restarts would have been saved by it either. Each carried a real change to the
+# DLL -- twice a log format string, which alters the bytes that ship and the output a run produces,
+# and is exactly what `dll_match` exists to notice. The guard was right all three times.
+#
+# What DID cost those restarts is the order the work was done in, so the denial now says so. The
+# freshness floor is `max(HEAD commit time, staged DLL mtime)`, which means a run taken before the
+# commit can never clear it: commit, then build, then launch, and one launch is enough. Loosening
+# jurisdiction would have bought a 3% case at the price of the property that makes this guard worth
+# having, when the actual fix is free and is a sentence in the reason string.
 deny contains decision if {
 	input.hook_event_name == "PreToolUse"
 	input.tool_name == "Bash"
@@ -58,6 +76,7 @@ deny contains decision if {
 			"This push carries game code that has not been run.",
 			why,
 			"Launch it with `scripts/ds2-run.py`, confirm `ds2-loader: attach` in the game's `ds2-loader.log`, then push.",
+			"Commit before you launch, not after: the freshness floor is the newer of HEAD's commit time and the staged DLL's mtime, so a run taken before the commit never clears it and costs a second launch.",
 		]),
 		"severity": "HIGH",
 	}

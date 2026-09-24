@@ -11,6 +11,7 @@ ds2-game-base.workspace = true
 ds2-hook.workspace = true
 ds2-rva.workspace = true
 ds2-sl2-core.workspace = true
+ds2-seamless.workspace = true
 zip = { version = "2", default-features = false, features = ["deflate"] }
 sevenz-rust = { version = "0.6", default-features = false }
 unrar-rs = { version = "0.5", default-features = false, features = ["crypto-rust", "crc-host"] }

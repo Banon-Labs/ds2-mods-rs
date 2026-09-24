@@ -111,7 +111,7 @@ pub struct Staged {
 fn is_save_member(name: &str) -> bool {
     name.rsplit(['/', '\\'])
         .next()
-        .is_some_and(|leaf| leaf.eq_ignore_ascii_case(SAVE_FILE_NAME))
+        .is_some_and(crate::active::is_save_container_name)
 }
 
 /// Pick the single matching member out of a list of `(name, index)`, or say why not.
@@ -195,6 +195,16 @@ fn read_source(path: &Path) -> Result<(&'static str, Vec<u8>), StageError> {
         .and_then(|e| e.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
+    // The active extension as well as `sl2`: under Seamless Co-op the player's own exported
+    // character is `DS2SOFS0000.co2`, the bytes are a save container either way, and refusing it
+    // for its name would refuse the only save a co-op session has.
+    let active = crate::active::active_save_file_name()
+        .rsplit_once('.')
+        .map_or("sl2", |(_, ext)| ext);
+    if extension == active && active != "sl2" {
+        let bytes = fs::read(path).map_err(|e| StageError::Unreadable(e.to_string()))?;
+        return Ok((active, bytes));
+    }
     match extension.as_str() {
         "sl2" => {
             let bytes = fs::read(path).map_err(|e| StageError::Unreadable(e.to_string()))?;
@@ -241,7 +251,10 @@ pub fn stage(source: &Path, steam_id: &str, staging_root: &Path) -> Result<Stage
     let (kind, mut save) = read_source(source)?;
     let rebound = ds2_sl2_core::rebind(&mut save, steam_id).map_err(StageError::Sl2)?;
     fs::create_dir_all(staging_root).map_err(|e| StageError::Write(e.to_string()))?;
-    let destination = staging_root.join(SAVE_FILE_NAME);
+    // The name the game will ask for, which is not `SAVE_FILE_NAME` while Seamless Co-op is
+    // loaded. A file staged under the wrong name is one the game never opens, and the row that
+    // staged it would report success over it.
+    let destination = staging_root.join(crate::active::active_save_file_name());
     fs::write(&destination, &save).map_err(|e| StageError::Write(e.to_string()))?;
     Ok(Staged {
         directory: staging_root.to_path_buf(),

@@ -70,7 +70,7 @@ use std::sync::Mutex;
 use std::time::SystemTime;
 
 use ds2_save_file_core::{
-    HANDOFF_FILE_NAME, SOURCE_EXTENSIONS, accepts, filter::FilterEntry, filter_string, handoff,
+    HANDOFF_FILE_NAME, accepts_with, filter::FilterEntry, filter_string, handoff,
 };
 
 use crate::dialog::{Intent, Pick, Request};
@@ -124,10 +124,24 @@ fn handoff_path() -> Option<PathBuf> {
 /// is not a save, and the gate behind it used to be an extension check. The player who has renamed
 /// their save can rename it back; every other use of that line was a mistake waiting to be made.
 fn dialog_filter() -> Vec<u16> {
+    // The running session's own container extension leads the list. With Seamless Co-op loaded the
+    // game opens `DS2SOFS0000.co2`, and a dropdown offering only the static four would hide the
+    // player's own character behind a filter -- with no "All files" line to escape through.
+    let extensions = ds2_save_file_core::extensions_with(Some(session_extension()));
     filter_string(&[FilterEntry {
         label: "DARK SOULS II save or archive",
-        extensions: &SOURCE_EXTENSIONS,
+        extensions: &extensions,
     }])
+}
+
+/// The extension the running game is using for its save container.
+///
+/// `sl2` unmodded. See `ds2_save_redirect::active_save_file_name`, which resolves it once from
+/// both mods' config files.
+fn session_extension() -> &'static str {
+    ds2_save_redirect::active_save_file_name()
+        .rsplit_once('.')
+        .map_or("sl2", |(_, extension)| extension)
 }
 
 /// The player's downloads folder, in the Windows spelling the dialog wants.
@@ -274,10 +288,12 @@ pub fn load_from_file() {
 
     // GATE ONE: the name. Cheap, and it is what makes the log say "that is not a save" rather than
     // surfacing a decompression error from three layers down.
-    if let Err(rejection) = accepts(&picked) {
+    if let Err(rejection) = accepts_with(&picked, Some(session_extension())) {
         log_line(format_args!(
-            "{LOG_PREFIX} import REFUSED path={} reason={rejection} -- nothing was recorded",
-            picked.display()
+            "{LOG_PREFIX} import REFUSED path={} reason={rejection} -- expected one of {}; \
+             nothing was recorded",
+            picked.display(),
+            ds2_save_file_core::offered_with(Some(session_extension()))
         ));
         return;
     }
@@ -337,8 +353,8 @@ pub fn load_from_file() {
 
     // NOW SAVE THE CHARACTER THE PLAYER IS LEAVING, and quit only once it has landed. The redirect is
     // not armed in this session, so this save goes to their own directory.
-    let source =
-        ds2_save_redirect::live_directory().map(|dir| dir.join(ds2_save_redirect::SAVE_FILE_NAME));
+    let source = ds2_save_redirect::live_directory()
+        .map(|dir| dir.join(ds2_save_redirect::active_save_file_name()));
     let Some(source) = source else {
         log_line(format_args!(
             "{LOG_PREFIX} import QUITTING WITHOUT SAVING -- no live save directory is known, so \
@@ -515,11 +531,14 @@ mod tests {
     /// THE DUPLICATION GATE between the host-tested extension list and the staging step's arms.
     #[test]
     fn every_stageable_extension_is_offered() {
-        assert_eq!(SOURCE_EXTENSIONS, ["sl2", "zip", "7z", "rar"]);
+        assert_eq!(
+            ds2_save_file_core::SOURCE_EXTENSIONS,
+            ["sl2", "zip", "7z", "rar"]
+        );
         assert!(
             ds2_save_redirect::SAVE_FILE_NAME
                 .to_ascii_lowercase()
-                .ends_with(SOURCE_EXTENSIONS[0])
+                .ends_with(ds2_save_file_core::SOURCE_EXTENSIONS[0])
         );
     }
 

@@ -92,11 +92,11 @@ fn live_container() -> Option<PathBuf> {
     if ds2_save_redirect::session_dir::SAVE.armed() {
         let swapped = ds2_save_redirect::session_dir::SAVE.directory();
         if !swapped.is_empty() {
-            return Some(PathBuf::from(swapped).join(ds2_save_redirect::SAVE_FILE_NAME));
+            return Some(PathBuf::from(swapped).join(ds2_save_redirect::active_save_file_name()));
         }
     }
     let directory = ds2_save_redirect::live_directory()?;
-    Some(directory.join(ds2_save_redirect::SAVE_FILE_NAME))
+    Some(directory.join(ds2_save_redirect::active_save_file_name()))
 }
 /// The dialog's type dropdown: saves, then everything, so a player who wants another name can have
 /// one.
@@ -130,7 +130,7 @@ pub fn save_to_file() {
             "{LOG_PREFIX} export REFUSED reason=no-container path={} -- the save directory holds no \
              {}",
             source.display(),
-            ds2_save_redirect::SAVE_FILE_NAME
+            ds2_save_redirect::active_save_file_name()
         ));
         return;
     }
@@ -148,6 +148,10 @@ pub fn save_to_file() {
         title: "Save this character to a file",
         start_dir: source.parent(),
         filter: &filter,
+        // The vanilla name even inside a co-op session, and deliberately. What is written is a
+        // save container; `.sl2` is the spelling every other DS2 tool and every unmodded game
+        // recognises, and the load side here accepts both. Exporting under `.co2` would hand the
+        // player a file only their own session can read.
         default_name: ds2_save_redirect::SAVE_FILE_NAME,
     };
     // SAFETY: game thread inside the menu's confirm path, which is what `dialog::show` requires.

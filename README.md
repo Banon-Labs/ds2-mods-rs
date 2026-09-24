@@ -27,8 +27,9 @@ logged `refused api=getaddrinfo host=frpg2-steam64-ope-login.fromsoftware-game.n
 with `--no-offline` and understand what you are turning off. See
 [`docs/DS2-OFFLINE.md`](docs/DS2-OFFLINE.md).
 
-**Four rows on the pause menu, and room for twelve.** `quit-to-desktop`, `load-build-from-url`,
-`load-character-from-file` and `save-game-to-file` all register through
+**Four rows on the pause menu, and room for twelve.** `load-build-from-url`,
+`load-character-from-file`, `save-game-to-file` and `quit-to-desktop` -- in that order, the quit row
+last because it is the one the cursor must not start on -- all register through
 [`ds2-menu-row`](crates/ds2-menu-row/src/lib.rs)'s public API, and `[menu_row] rows = [...]` picks
 which appear and in what order. There were two slots, because the tab's item vector is a
 `DLFixedVector` of capacity five and the game ships three rows on it -- and there is no seventh tab

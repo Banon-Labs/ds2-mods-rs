@@ -76,7 +76,9 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -187,10 +189,10 @@ KEY_MENU_ROW_ROWS = "rows"
 #: the same order. `--selftest` checks each one appears there, because a name this script offers and
 #: the DLL does not know is a row that arms nothing and says so only in a log nobody is reading yet.
 MENU_ROW_ROW_NAMES = (
-    "quit-to-desktop",
     "load-build-from-url",
     "load-character-from-file",
     "save-game-to-file",
+    "quit-to-desktop",
 )
 
 #: Mirrors `MAX_ADDED_ROWS` in `crates/ds2-menu-row/src/api.rs`: the most rows the grid's layout
@@ -219,6 +221,56 @@ KEY_INVENTORY_SORT_ENABLED = "enabled"
 KEY_INVENTORY_SORT_KEY = "key"
 KEY_INVENTORY_SORT_PAD = "pad"
 KEY_BUILD_IMPORT_ENABLED = "enabled"
+
+#: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/item_warn.rs`.
+#:
+#: OFF by default here, matching the DLL's own default, and for the DLL's own reason: the badge
+#: patches the frontend's layout builder and its cell bind and has never been in front of a running
+#: game. `--item-warn` is how a run turns it on, which is also the only way to change that.
+ITEM_WARN_SECTION = "item_warn"
+KEY_ITEM_WARN_ENABLED = "enabled"
+#: Mirrors `LOG_PREFIX` in `crates/ds2-item-warn/src/lib.rs`. Grep for it when a run disappoints.
+ITEM_WARN_LOG_PREFIX = "ds2-item-warn:"
+
+#: `[seamless]` -- loading a SECOND, THIRD-PARTY mod's DLL into the same process.
+#:
+#: Nothing here ships that mod and nothing here copies it. The key is a path; the player installs
+#: the other mod themselves, from its own download, under its own licence, next to
+#: `DarkSoulsII.exe`. If the file is not there the DLL logs that and carries on without it.
+#:
+#: OFF by default, and unlike every other feature its key is read as opt-IN: only an exact `true`
+#: arms it, because the failure direction of a typo here is "a foreign binary was loaded into the
+#: game" rather than "a feature stayed off".
+SEAMLESS_SECTION = "seamless"
+KEY_SEAMLESS_ENABLED = "enabled"
+KEY_SEAMLESS_DLL = "dll"
+#: Where Seamless Co-op's own launcher injects from, so where the DLL looks by default. Mirrors
+#: `DEFAULT_DLL` in `crates/ds2-loader/src/seamless.rs`.
+SEAMLESS_DEFAULT_DLL = "SeamlessCoop/ds2sc.dll"
+#: Mirrors `LOG_PREFIX` in `crates/ds2-loader/src/seamless.rs`.
+SEAMLESS_LOG_PREFIX = "ds2-seamless:"
+#: The other mod's own settings file, which it keeps next to its DLL.
+SEAMLESS_SETTINGS_NAME = "ds2sc_settings.ini"
+#: The key in that file that renames the save container. Mirrored in `crates/ds2-seamless`.
+KEY_SEAMLESS_SAVE_EXTENSION = "save_file_extension"
+#: The one container name SOTFS builds, and the extension it builds it with.
+SAVE_FILE_STEM = "DS2SOFS0000"
+VANILLA_SAVE_EXTENSION = "sl2"
+#: Where Proton keeps the prefix for this appid, and where the game's saves land inside it.
+#: `ds2-teardown.py` names the same prefix; the game's own log lines name the same folders as
+#: `C:\users\steamuser\AppData\Roaming\DarkSoulsII\<account>\`.
+PREFIX_DIR = (
+    Path.home() / ".local" / "share" / "Steam" / "steamapps" / "compatdata" / APPID / "pfx"
+)
+SAVE_ROOT = (
+    PREFIX_DIR
+    / "drive_c"
+    / "users"
+    / "steamuser"
+    / "AppData"
+    / "Roaming"
+    / "DarkSoulsII"
+)
 #: Mirrors `LOG_PREFIX` in `crates/ds2-menu-row/src/lib.rs`. Named here because the generated
 #: config tells the reader which line to look for, and a prefix that drifted would send them
 #: looking for a line that is never written.
@@ -1026,6 +1078,9 @@ def config_text(
     inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
+    item_warn: bool = False,
+    seamless: bool = False,
+    seamless_dll: str = SEAMLESS_DEFAULT_DLL,
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
@@ -1466,6 +1521,57 @@ def config_text(
 {KEY_INVENTORY_SORT_KEY} = "{inventory_sort_key}"
 {KEY_INVENTORY_SORT_PAD} = "{inventory_sort_pad}"
 
+[{ITEM_WARN_SECTION}]
+# STARTUP-ONLY. A red badge on the icon of any weapon whose stat requirements the character does
+# not meet, in the bottom-left of the cell, drawn by `ds2-item-warn`.
+#
+# OFF unless `--item-warn` asked for it, and the default is not taste. This feature patches the
+# frontend's layout builder and its cell bind, and the case that it is safe is a case from static
+# reading alone -- no run has put it on screen. `inventory_sort` above defaults ON because three
+# runs put its dialog there; this has no such line to point at.
+#
+# The check it uses is the PRESENTATION one (`FUN_1400bcde0`, the detail pane's), not the mechanics
+# one (`FUN_14034d3c0`). The two disagree and share no predicate: the mechanics check honours grip
+# -- two-handing HALVES a weapon's Strength requirement (`shr cx,1` at `0x14034d44c`) -- and the
+# presentation one takes no grip argument at all. An item in a list is not being held, so it has no
+# grip, which is the argument for the pane's answer. `ds2-mods-rs-6tz` revisits it after a run.
+#
+# Grep the log for `{ITEM_WARN_LOG_PREFIX}`; it names every site it patched and every one it refused.
+{KEY_ITEM_WARN_ENABLED} = {str(item_warn).lower()}
+
+[{SEAMLESS_SECTION}]
+# A SECOND MOD, written by someone else, loaded into this same process.
+#
+# NOTHING HERE SHIPS IT. This key is a path. The other mod is installed by you, from its own
+# download, under its own licence, next to `DarkSoulsII.exe`; if the file is not at the path below
+# the DLL says so in the log and the game runs with this repo's features alone.
+#
+# THIS KEY DOES NOT LOAD IT. It says that mod is in this run, and the only thing the DLL does
+# with that is follow the save file it renames: `save_file_extension` in `ds2sc_settings.ini` is
+# `co2` by default, so the container becomes `DS2SOFS0000.co2` and every save feature above -- load
+# from file, save to file, load a build -- has to open that name instead of `DS2SOFS0000.sl2`.
+#
+# The loading is done by `ds2sc_launcher.exe`, which `scripts/ds2-run.py --seamless` runs. An
+# in-process `LoadLibraryW` was tried from four slots and every one mapped the DLL and left it
+# inert -- it read no settings, installed no hooks, and the game went on opening `.sl2`. Its
+# launcher creates the process SUSPENDED, injects, then resumes, and that ordering is the thing
+# that matters: a DLL loaded by an import cannot reproduce it, because its own DllMain is part of
+# the initialisation that has to not have happened yet.
+#
+# BEFORE THE FIRST CO-OP RUN, two things that have no in-game explanation:
+#   * `cooppassword` in `SeamlessCoop/ds2sc_settings.ini` must not be empty, or the mod stops the
+#     boot on its own dialog. Everyone in a session needs the same string.
+#   * the co-op save starts empty. `--seamless` copies `DS2SOFS0000.sl2` to the co-op extension
+#     when that file does not exist yet, and never overwrites one that does.
+#
+# `[offline]` above and this are mutually exclusive: that section fronts the socket imports, so a
+# co-op mod under it would run, report success and never connect. `--seamless` therefore turns
+# `[offline]` off for the run and says so.
+#
+# Grep the log for `{SEAMLESS_LOG_PREFIX}`.
+{KEY_SEAMLESS_ENABLED} = {str(seamless).lower()}
+{KEY_SEAMLESS_DLL} = "{seamless_dll}"
+
 [{CRASH_SECTION}]
 {crash_banner}# STARTUP-ONLY, both of them. The handler is installed in DllMain BEFORE `neuter_arxan`, because
 # that call patches code from static analysis and is the likeliest crash in the whole startup path
@@ -1525,6 +1631,9 @@ def write_config(
     inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
+    item_warn: bool = False,
+    seamless: bool = False,
+    seamless_dll: str = SEAMLESS_DEFAULT_DLL,
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
@@ -1552,6 +1661,9 @@ def write_config(
         inventory_sort,
         inventory_sort_key,
         inventory_sort_pad,
+        item_warn,
+        seamless,
+        seamless_dll,
     )
     path.write_text(text, encoding="utf-8")
     return path, text
@@ -1637,6 +1749,9 @@ def dry_run(
     inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
+    item_warn: bool = False,
+    seamless: bool = False,
+    seamless_dll: str = SEAMLESS_DEFAULT_DLL,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
@@ -1682,6 +1797,9 @@ def dry_run(
             inventory_sort,
             inventory_sort_key,
             inventory_sort_pad,
+            item_warn,
+            seamless,
+            seamless_dll,
         ):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
         else:
@@ -1723,6 +1841,9 @@ def dry_run(
                 inventory_sort=inventory_sort,
                 inventory_sort_key=inventory_sort_key,
                 inventory_sort_pad=inventory_sort_pad,
+                item_warn=item_warn,
+                seamless=seamless,
+                seamless_dll=seamless_dll,
             ),
             indent="[dry-run]   | ",
         )
@@ -1761,6 +1882,266 @@ def dry_run(
     return EXIT_ERROR if problems else EXIT_OK
 
 
+def game_dialog_lines() -> list[str]:
+    """Any modal window the game process has open, TITLE AND BODY, as text.
+
+    A boot that stops dead with a dialog on it is the single most expensive failure to diagnose
+    from here, because every log this repo writes says the run went perfectly -- the DLL loaded,
+    every hook installed -- and then nothing further happens. Measured 2026-09-24: a run sat at 19
+    threads and zero CPU for minutes and the reason was a message box reading *"Dark Souls II
+    seamless co-op (%s) is depreciated and requires an update. The application will now exit."*
+    Nothing on disk said so. The mod's DLL is packed, so that sentence is not in the file; it only
+    exists decrypted in the process.
+
+    So the body is read the only place it exists: the process's own memory. The window title comes
+    from the compositor, and the title is then used as the needle to find the message around it.
+    That is general -- it reports whatever dialog is up, not a list of sentences this script knows
+    in advance, which is what makes it still work on the next failure nobody has seen yet.
+
+    Returns [] when there is no dialog, no compositor to ask, or no permission to read the memory.
+    Never raises: this runs on the reporting path, where a crash would replace a diagnosis with a
+    traceback.
+    """
+    pid = pgrep_exact(GAME_COMM)
+    if not pid:
+        return []
+    pid = pid[0]
+    if shutil.which("hyprctl") is None or shutil.which("jq") is None:
+        return []
+    try:
+        # ONLY this pid's windows. The filter is in the query, not in what is printed afterwards:
+        # the rest of the desktop is nobody's business and is never read into this process.
+        listed = subprocess.run(
+            [
+                "hyprctl", "-j", "clients",
+            ],
+            capture_output=True, text=True, timeout=10,
+        )
+        clients = json.loads(listed.stdout or "[]")
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        return []
+    titles = [
+        str(c.get("title", ""))
+        for c in clients
+        if c.get("pid") == pid and str(c.get("title", "")).strip()
+    ]
+    # The game's own window is not a dialog. Everything else on this pid is one.
+    titles = [t for t in titles if "DARK SOULS" not in t.upper()]
+    if not titles:
+        return []
+
+    lines = []
+    for title in titles:
+        lines.append(f"dialog title={title!r}")
+        body = dialog_body(pid, title)
+        if body:
+            lines.append(f"dialog body={body!r}")
+    return lines
+
+
+def dialog_body(pid: int, title: str) -> str:
+    """The readable text around `title` in the process's memory, or "".
+
+    A message box keeps its caption and its message as neighbouring strings, so finding the
+    caption finds the message. Both encodings are tried because Win32 has both, and the window
+    manager reports whichever one Wine handed it.
+    """
+    needles = [("ascii", title.encode()), ("utf-16", title.encode("utf-16-le"))]
+    try:
+        with open(f"/proc/{pid}/maps", encoding="utf-8") as handle:
+            regions = handle.read().splitlines()
+        with open(f"/proc/{pid}/mem", "rb", 0) as memory:
+            for region in regions:
+                fields = region.split()
+                if "r" not in fields[1]:
+                    continue
+                low, high = (int(x, 16) for x in fields[0].split("-"))
+                # Whole-image mappings are not where a formatted message lives, and reading a
+                # gigabyte to look would cost more than the answer is worth.
+                if high - low > 64 * 1024 * 1024:
+                    continue
+                try:
+                    memory.seek(low)
+                    buffer = memory.read(high - low)
+                except OSError:
+                    continue
+                for encoding, needle in needles:
+                    at = buffer.find(needle)
+                    if at < 0:
+                        continue
+                    window = buffer[at : at + 1400]
+                    text = (
+                        window.decode("utf-16-le", "replace")
+                        if encoding == "utf-16"
+                        else window.decode("latin1", "replace")
+                    )
+                    # Runs of non-printable bytes separate adjacent strings. Measured: a message
+                    # box's caption and its message are separated by a SINGLE NUL, so they land
+                    # in one part together -- which is the whole answer and is why only the first
+                    # part is returned. Taking more appends whatever string happens to be next in
+                    # the heap, which reads like part of the message and is not.
+                    parts = re.split(r"[^\x20-\x7e\n]{2,}", text)
+                    parts = [p.strip() for p in parts if len(p.strip()) > 12]
+                    for part in parts:
+                        if len(part) > len(title) + 8:
+                            return part
+                    if parts:
+                        return parts[0]
+    except OSError:
+        return ""
+    return ""
+
+
+def seamless_launcher() -> Path:
+    """Seamless Co-op's own launcher, which is the only thing that successfully loads its DLL.
+
+    `LoadLibraryW` from inside the game process was tried from four slots and every one of them
+    produced a DLL that mapped and then did nothing -- see `crates/ds2-loader/src/seamless.rs` for
+    the table and the control run. Its launcher creates the process suspended, injects, and
+    resumes, and the suspended part is load-bearing: a statically imported DLL cannot reproduce it,
+    because its own `DllMain` is part of the initialisation that has to not have happened yet.
+    """
+    return GAME_DIR / "ds2sc_launcher.exe"
+
+
+def proton_chain() -> tuple[list[str], list[str]]:
+    """The argv prefix that runs a Windows executable inside this game's Proton prefix.
+
+    Resolved from the prefix rather than hard-coded, because the Proton a player is on is their
+    choice and a wrong one here would run the game under a different Wine than the prefix was
+    built with. `compatdata/<appid>/config_info` names the Proton directory on its second line;
+    that tool's `toolmanifest.vdf` names the runtime it requires by appid, and that appid's
+    `appmanifest` names the runtime's directory.
+
+    Returns `(argv_prefix, problems)`. A non-empty `problems` means do not launch.
+    """
+    problems: list[str] = []
+    config_info = PREFIX_DIR.parent / "config_info"
+    try:
+        lines = config_info.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return [], [f"cannot read {config_info}; launch the game through Steam once first"]
+    # Line 2 is a path INSIDE the tool: `<tool>/files/share/fonts/`. Three parents up is the tool.
+    if len(lines) < 2:
+        return [], [f"{config_info} does not name a Proton directory"]
+    tool = Path(lines[1]).parent.parent.parent
+    proton = tool / "proton"
+    if not proton.is_file():
+        problems.append(f"no `proton` at {proton}")
+
+    runtime_entry = ""
+    manifest = tool / "toolmanifest.vdf"
+    try:
+        for line in manifest.read_text(encoding="utf-8").splitlines():
+            if "require_tool_appid" in line:
+                runtime_entry = line.split('"')[3]
+                break
+    except OSError:
+        problems.append(f"cannot read {manifest}")
+    if not runtime_entry:
+        # Proton without a container runtime runs directly. Rare now, and not an error.
+        return ([str(proton), "run"], problems)
+
+    # `<steamapps>/compatdata/<appid>/pfx` -- three up is `steamapps`, where the manifests live.
+    steamapps = PREFIX_DIR.parents[2]
+    installdir = ""
+    try:
+        text = (steamapps / f"appmanifest_{runtime_entry}.acf").read_text(encoding="utf-8")
+        for line in text.splitlines():
+            if '"installdir"' in line:
+                installdir = line.split('"')[3]
+                break
+    except OSError:
+        problems.append(f"the runtime Proton requires (appid {runtime_entry}) is not installed")
+    if not installdir:
+        return [], problems or [f"appid {runtime_entry} names no install directory"]
+
+    entry = steamapps / "common" / installdir / "_v2-entry-point"
+    if not entry.is_file():
+        problems.append(f"no runtime entry point at {entry}")
+    return ([str(entry), "--verb=run", "--", str(proton), "run"], problems)
+
+
+def seamless_save_extension(seamless_dll: str) -> str | None:
+    """The extension Seamless Co-op renames the save container to, or None.
+
+    Read from the other mod's own settings file, which sits next to the DLL wherever the player
+    installed it. Its comments are `;` and its values are bare, so this is a two-line parse rather
+    than `configparser` -- whose `[SECTION]` handling would also have to guess at the case the
+    player typed.
+
+    A value that is not an extension is refused rather than pasted into a path. The same rule, and
+    the same test, live in `crates/ds2-seamless`.
+    """
+    settings = GAME_DIR / Path(seamless_dll.replace("\\", "/")).parent / SEAMLESS_SETTINGS_NAME
+    try:
+        text = settings.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith((";", "#", "[")) or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        if key.strip().lower() != KEY_SEAMLESS_SAVE_EXTENSION:
+            continue
+        value = value.strip().strip('"')
+        if not value or len(value) > 120 or not value.isalnum() or not value.isascii():
+            return None
+        return value
+    return None
+
+
+def duplicate_save_for_seamless(seamless_dll: str) -> None:
+    """Give the co-op session a character to load, by copying the vanilla container to its name.
+
+    Seamless keeps its own save file -- `save_file_extension = co2` -- so a first co-op launch on
+    an account that has only ever played vanilla finds no character at all. The copy is what makes
+    the existing one show up in the list.
+
+    **It never overwrites.** A `.co2` that already exists is a co-op character with progress in it,
+    and replacing it with the vanilla save would silently throw that away. Re-syncing is the
+    player's call: delete the `.co2` and launch again.
+    """
+    extension = seamless_save_extension(seamless_dll)
+    if extension is None:
+        print(
+            f"[seamless] no usable {KEY_SEAMLESS_SAVE_EXTENSION} in "
+            f"{GAME_DIR / Path(seamless_dll.replace(chr(92), '/')).parent / SEAMLESS_SETTINGS_NAME}"
+            " -- no save was copied"
+        )
+        return
+    if extension == VANILLA_SAVE_EXTENSION:
+        print(
+            f"[seamless] {KEY_SEAMLESS_SAVE_EXTENSION} = {extension}, which is the name the game "
+            "already uses -- nothing to copy"
+        )
+        return
+    if not SAVE_ROOT.is_dir():
+        print(f"[seamless] no save folder at {SAVE_ROOT} -- nothing to copy")
+        return
+
+    source_name = f"{SAVE_FILE_STEM}.{VANILLA_SAVE_EXTENSION}"
+    target_name = f"{SAVE_FILE_STEM}.{extension}"
+    copied = 0
+    for account in sorted(path for path in SAVE_ROOT.iterdir() if path.is_dir()):
+        source = account / source_name
+        target = account / target_name
+        if target.exists():
+            print(f"[seamless] kept {target} ({target.stat().st_size} bytes) -- not overwritten")
+            continue
+        if not source.is_file():
+            continue
+        shutil.copy2(source, target)
+        copied += 1
+        print(f"[seamless] copied {source} -> {target} ({target.stat().st_size} bytes)")
+    if copied == 0:
+        print(
+            f"[seamless] no {source_name} was copied to .{extension}; a co-op session shows the "
+            f"characters in {target_name} and nothing else"
+        )
+
+
 def launch(
     probe: str,
     observe: float,
@@ -1786,6 +2167,9 @@ def launch(
     inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
+    item_warn: bool = False,
+    seamless: bool = False,
+    seamless_dll: str = SEAMLESS_DEFAULT_DLL,
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
@@ -1826,8 +2210,16 @@ def launch(
         inventory_sort,
         inventory_sort_key,
         inventory_sort_pad,
+        item_warn,
+        seamless,
+        seamless_dll,
     )
     print(f"[config] {config_path}")
+
+    # Before the launch, not after: the game reads its save folder during boot, and a character
+    # copied in afterwards would not be in the list this run shows.
+    if seamless:
+        duplicate_save_for_seamless(seamless_dll)
 
     log_path = GAME_DIR / LOG_NAME
     # Take the tail's mark BEFORE launching. Everything it hands back afterwards is this run's.
@@ -1836,9 +2228,43 @@ def launch(
     tail = LogTail(log_path)
 
     environment = launch_env(probe)
+    argv = ["steam", "-applaunch", APPID]
+    workdir = None
+    if seamless:
+        # Seamless Co-op has to be loaded by its own launcher, so with it armed the run goes
+        # through Proton directly rather than through `steam -applaunch`. What that costs is
+        # Steam's own bookkeeping -- playtime, the overlay, cloud sync on exit -- because Steam
+        # is not the one starting the game. What it buys is a co-op mod that actually initialises.
+        chain, problems = proton_chain()
+        for problem in problems:
+            print(f"[seamless] {problem}")
+        launcher = seamless_launcher()
+        if not launcher.is_file():
+            problems.append(f"no launcher at {launcher}")
+            print(f"[seamless] no launcher at {launcher}")
+        if problems:
+            print(
+                "[seamless] REFUSING TO LAUNCH -- fix the above, or drop --seamless to run "
+                "through Steam without that mod"
+            )
+            return 1
+        argv = [*chain, str(launcher)]
+        workdir = str(GAME_DIR)
+        # The launcher resolves `DarkSoulsII.exe` and `SeamlessCoop//ds2sc.dll` relative to the
+        # working directory, and sets `SteamAppId` itself for the case Steam did not start the
+        # game -- which is this case. It is set here as well so the value is visible in this
+        # script rather than only inside someone else's binary.
+        environment = {
+            **environment,
+            "STEAM_COMPAT_DATA_PATH": str(PREFIX_DIR.parent),
+            "STEAM_COMPAT_CLIENT_INSTALL_PATH": str(PREFIX_DIR.parents[3]),
+            "SteamAppId": APPID,
+            "SteamGameId": APPID,
+        }
     started = datetime.now(timezone.utc).isoformat(timespec="seconds")
     subprocess.Popen(
-        ["steam", "-applaunch", APPID],
+        argv,
+        cwd=workdir,
         env={**os.environ, **environment},
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -1846,10 +2272,17 @@ def launch(
         start_new_session=True,  # survives this shell, and this agent turn
     )
     print(
-        f"[launch] steam -applaunch {APPID}  ("
+        "[launch] "
+        + " ".join(argv)
+        + "  ("
         + " ".join(f"{k}={v}" for k, v in environment.items())
         + ")"
     )
+    if seamless:
+        print(
+            "[launch] started by Seamless Co-op's launcher, NOT by Steam -- no playtime, no "
+            "overlay, and no cloud sync for this session"
+        )
     print(f"[launch] waiting up to {TESTIMONY_BUDGET_SECONDS:.0f}s for {log_path}")
 
     verdict = await_testimony(tail)
@@ -1900,6 +2333,13 @@ def launch(
     )
     if fault_after_ms > NO_FAULT_MS:
         return await_crash_evidence(fault_after_ms, started)
+
+    # A dialog is the one failure every log in this repo reports as a success: the DLL loaded,
+    # every hook installed, and the boot is standing still behind a message box nobody can see
+    # from here. Asked once, after the loader has spoken, because that is when a mod's own
+    # refusal has had time to appear. See `game_dialog_lines`.
+    for line in game_dialog_lines():
+        print(f"[dialog] {line}")
 
     if probe == "off":
         return EXIT_OK
@@ -3101,6 +3541,40 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--item-warn",
+        dest="item_warn",
+        action="store_true",
+        help=(
+            "put a red badge in the bottom-left of any weapon icon whose stat requirements this "
+            "character does not meet. OFF without this flag, matching the DLL, because the feature "
+            "patches the frontend's layout builder and its cell bind and no run has yet put it on "
+            "screen. It answers with the DETAIL PANE's check, which ignores grip -- two-handing "
+            "halves a weapon's Strength requirement and the badge will not know."
+        ),
+    )
+    parser.add_argument(
+        "--seamless",
+        dest="seamless",
+        action="store_true",
+        help=(
+            "also load Seamless Co-op's DLL into the same process. NOTHING HERE SHIPS IT -- you "
+            "install that mod yourself, from its own download, next to DarkSoulsII.exe, and this "
+            "flag only writes the path into the config. Implies --no-offline: that feature fronts "
+            "the socket imports, so a co-op mod under it would load, report success and never "
+            "connect. Grep the log for `ds2-seamless:`."
+        ),
+    )
+    parser.add_argument(
+        "--seamless-dll",
+        dest="seamless_dll",
+        default=SEAMLESS_DEFAULT_DLL,
+        metavar="PATH",
+        help=(
+            "where that DLL is, relative to the game directory "
+            f"(default: {SEAMLESS_DEFAULT_DLL}, which is where its own launcher injects from)."
+        ),
+    )
+    parser.add_argument(
         "--probe-site",
         choices=PROBE_SITES,
         default="m1",
@@ -3152,6 +3626,17 @@ def main() -> int:
     if args.crash_test < 0:
         parser.error("--crash-test takes a non-negative number of milliseconds")
 
+    # THE INTERLOCK, applied here rather than left to the DLL to refuse at runtime. `[offline]`
+    # fronts the socket imports, so a co-op mod under it loads, reports success and never connects
+    # -- and that is indistinguishable on screen from a co-op mod that is simply broken. Turning
+    # the conflicting feature off and SAYING SO is the only outcome that cannot be misread later.
+    if args.seamless and args.offline:
+        args.offline = False
+        print(
+            f"[config] --seamless turned [{OFFLINE_SECTION}] off for this run: it fronts the "
+            "socket imports a co-op mod needs. Pass --no-offline yourself to make that explicit."
+        )
+
     if args.selftest:
         return selftest()
 
@@ -3183,6 +3668,9 @@ def main() -> int:
             args.inventory_sort,
             args.inventory_sort_key,
             args.inventory_sort_pad,
+            args.item_warn,
+            args.seamless,
+            args.seamless_dll,
         )
     return launch(
         args.probe,
@@ -3209,6 +3697,9 @@ def main() -> int:
         args.inventory_sort,
         args.inventory_sort_key,
         args.inventory_sort_pad,
+        args.item_warn,
+        args.seamless,
+        args.seamless_dll,
     )
 
 

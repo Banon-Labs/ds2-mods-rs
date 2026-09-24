@@ -1,0 +1,25 @@
+# The second mod's configuration, read rather than shipped.
+#
+# DARK SOULS II Seamless Co-op is somebody else's work under somebody else's licence, and this
+# repo redistributes no part of it. What lives here is the arithmetic that two mods sharing one
+# process need to agree on: whether the player asked for it, where its DLL is, and -- the part
+# that actually bites -- what it renames the save file to.
+#
+# Host-buildable and game-free on purpose. Every function takes a directory or a string, so the
+# parsing and the extension rules are provable by `cargo test` on Linux, where the game is not.
+[package]
+name = "ds2-seamless"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "ds2_seamless"
+
+[dependencies]
+ds2-hotkey-config.workspace = true
+
+[lints]
+workspace = true

@@ -58,8 +58,9 @@
 //! own hexagon: the System tab's sits at `-5.9 + 288.8 = 282.9`, which is `17.85` right of the
 //! sixth cell's `265.05`, and the seventh tab's rows rolled out under the sixth tab's icon.
 //!
-//! The added icon is the one thing still sharing a pointer, because it is the one thing that does
-//! not move: the slice [`crate::icon`] builds carries the offset inside its own quad.
+//! The added icon copies its block without moving it. The slice [`crate::icon`] builds carries the
+//! offset inside its own quad, so the copy exists for the colour written into it rather than for a
+//! position -- see the hexagon's section below.
 //!
 //! # What makes this safe to be wrong about
 //!
@@ -81,9 +82,16 @@
 //! |---|---|---|
 //! | shape index | [`ds2_rva::FLO_TAB_PLATE_SHAPE`] | [`ds2_rva::FLO_ADDED_TAB_ICON_SHAPE`] |
 //! | depth | `60` | [`ds2_rva::FLO_ADDED_TAB_ICON_DEPTH`] |
+//! | transform | the plate's block | a copy of it, tinted [`ds2_rva::FLO_ADDED_TAB_ICON_HUE`] |
 //!
-//! Its transform pointer is the plate's and stays that way, because the offset that moves the
-//! hexagon lives in the quad [`crate::icon`] builds rather than in the record.
+//! Its position is not in that copy and never was -- the offset that moves the hexagon lives in the
+//! quad [`crate::icon`] builds rather than in the record, so the block goes back byte for byte
+//! except for the colour. The copy exists only so the colour has somewhere private to land: the
+//! pointer the record arrives with is the plate's, and the plate is the six shipped hexagons.
+//!
+//! The tint is the only thing distinguishing this tab from the sixth. Its art is the sixth tab's,
+//! shifted one [`ds2_rva::FLO_TAB_PITCH`], because the atlas holds six hexagons and this mod ships
+//! no texture.
 //!
 //! This record goes in only when [`crate::icon::armed`] says the shape lookup is hooked. Without
 //! it there is nothing for the index to resolve to, and the `RB` prompt moved below stays where the
@@ -136,7 +144,8 @@ const CHILDREN: usize = ds2_rva::FLO_TAB_STRIP_CHILDREN + 4;
 ///
 /// A record's `+0x08` points at a block in the document, and two records pointing at one block are
 /// one position between them -- so anything this moves needs a copy first. The added icon is not
-/// here, because it does not move: the slice [`crate::icon`] builds carries its own offset.
+/// here, because it does not move: the slice [`crate::icon`] builds carries its own offset, and its
+/// colour is in that slice's quad rather than in a transform block.
 const MOVED: usize = 4;
 
 /// Which of [`Strip::transforms`] belongs to what.
@@ -144,6 +153,16 @@ const CELL_TRANSFORM: usize = 0;
 const END_CAP_TRANSFORM: usize = 1;
 const RB_LABEL_TRANSFORM: usize = 2;
 const PANEL_TRANSFORM: usize = 3;
+
+/// The colour the seventh tab's hexagon is drawn in.
+///
+/// The same [`crate::Tint`] a registered row's icon takes, on the same transform-block machinery,
+/// so the hue and the byte order it is laid down in are the ones a run already settled. What
+/// differs is the strength, and [`ds2_rva::FLO_ADDED_TAB_ICON_TINT_STRENGTH`] says why.
+const TAB_ICON_TINT: crate::Tint = crate::Tint {
+    rgb: ds2_rva::FLO_ADDED_TAB_ICON_HUE,
+    strength: ds2_rva::FLO_ADDED_TAB_ICON_TINT_STRENGTH,
+};
 
 /// Where the sixth tab's own hexagon starts, which is what the end cap turned out to be.
 ///
@@ -321,19 +340,21 @@ unsafe fn is_the_strip(definition: *const u8) -> Option<*const u8> {
     Some(children)
 }
 
-/// Copy the block a record points at into `into`, move it along by one [`ds2_rva::FLO_TAB_PITCH`],
-/// and point the record at the copy.
+/// Copy the block a record points at into `which` of `transforms`, point the record at the copy,
+/// and answer where the copy is.
 ///
-/// The copy is what keeps the move local: two records pointing at one block are one position
-/// between them, so writing through the document's own block would move the shipped furniture for
-/// every other document that shares it.
-fn move_along(
+/// The copy is what keeps an edit local. Two records pointing at one block are one position and one
+/// colour between them, so writing through the document's own block edits the shipped furniture for
+/// every other record -- and every other document -- that shares it. Both callers below are that
+/// case: the furniture this moves is pointed at by records it must not move, and the hexagon this
+/// tints arrives pointing at the plate all six shipped hexagons are drawn through.
+fn own_transform(
     records: &mut [u8],
     transforms: &mut [u8],
     slot: usize,
     which: usize,
     what: &str,
-) -> Option<f32> {
+) -> Option<usize> {
     let at = slot * ds2_rva::FLO_RECORD_STRIDE;
     let source = u64::from_le_bytes(
         records[at + ds2_rva::FLO_RECORD_TRANSFORM_OFFSET..][..8]
@@ -353,6 +374,22 @@ fn move_along(
     transforms[block..][..ds2_rva::FLO_TRANSFORM_SIZE].copy_from_slice(&unsafe {
         std::ptr::read_unaligned((source as *const u8).cast::<[u8; ds2_rva::FLO_TRANSFORM_SIZE]>())
     });
+    let pointer = transforms[block..].as_ptr() as u64;
+    records[at + ds2_rva::FLO_RECORD_TRANSFORM_OFFSET..][..8]
+        .copy_from_slice(&pointer.to_le_bytes());
+    Some(block)
+}
+
+/// Take a copy of the block a record points at, move it along by one [`ds2_rva::FLO_TAB_PITCH`],
+/// and answer where it ended up.
+fn move_along(
+    records: &mut [u8],
+    transforms: &mut [u8],
+    slot: usize,
+    which: usize,
+    what: &str,
+) -> Option<f32> {
+    let block = own_transform(records, transforms, slot, which, what)?;
     let x = f32::from_le_bytes(
         transforms[block + ds2_rva::FLO_TRANSFORM_X_OFFSET..][..4]
             .try_into()
@@ -361,9 +398,6 @@ fn move_along(
     let moved = x + ds2_rva::FLO_TAB_PITCH;
     transforms[block + ds2_rva::FLO_TRANSFORM_X_OFFSET..][..4]
         .copy_from_slice(&moved.to_le_bytes());
-    let pointer = transforms[block..].as_ptr() as u64;
-    records[at + ds2_rva::FLO_RECORD_TRANSFORM_OFFSET..][..8]
-        .copy_from_slice(&pointer.to_le_bytes());
     Some(moved)
 }
 
@@ -430,7 +464,9 @@ unsafe fn build(original: *mut u8) -> Option<*mut u8> {
 
     // The hexagon, cloned from the plate beside it, with its shape pointed at `crate::icon`'s slice
     // and a depth that puts it over the plate and under the cells. Its transform pointer is the
-    // plate's and stays that way: the slice carries its own offset, so the record does not move.
+    // plate's and stays that way: the slice carries its own offset, so the record does not move --
+    // and its colour is in that slice's quad rather than here. See `FLO_QUAD_COLOUR_OFFSET` for the
+    // run that established the difference.
     if plan.icon != usize::MAX {
         let template = ds2_rva::FLO_TAB_STRIP_PLATE * stride;
         let at = plan.icon * stride;
@@ -479,10 +515,27 @@ unsafe fn build(original: *mut u8) -> Option<*mut u8> {
             REFUSED.fetch_add(1, Ordering::Relaxed);
             return None;
         }
+        // The tint, on the layer that is actually on top. `FUN_140b6bd80` appends to the parent's
+        // display list at `[parent+0x66]` with no sort, so the strip draws in record order and this
+        // copy -- the last hexagon record written -- covers the slice `crate::icon` builds. Two runs
+        // tinted the slice instead and the tab came back the shipped grey both times.
+        //
+        // This record names a DEFINITION, which is the other half of why it works: `FUN_140b50bc0`
+        // sends `kind & 1` to a shape builder that never sees the transform, and everything else to
+        // `FUN_140b50f20`, the path a row's icon is tinted on. See `FLO_QUAD_COLOUR_OFFSET`.
+        let flags_at = ds2_rva::FLO_TRANSFORM_FLAGS_OFFSET;
+        let block = END_CAP_TRANSFORM * ds2_rva::FLO_TRANSFORM_SIZE;
+        let flags = u32::from_le_bytes(strip.transforms[block + flags_at..][..4].try_into().ok()?)
+            | TAB_ICON_TINT.flags();
+        strip.transforms[block + flags_at..][..4].copy_from_slice(&flags.to_le_bytes());
+        strip.transforms[block + ds2_rva::FLO_TRANSFORM_COLOUR_OFFSET..][..4]
+            .copy_from_slice(&TAB_ICON_TINT.bytes());
         log(format_args!(
-            "{LOG_PREFIX} strip hexagon copied slot={} x={moved} -- the sixth tab's own plate, \
-             drawn again one tab along, and the sixth tab keeps the one it had",
-            plan.end_cap
+            "{LOG_PREFIX} strip hexagon copied slot={} x={moved} colour={:02x?} flags={flags:#x} \
+             -- the sixth tab's own plate, drawn again one tab along and tinted, and the sixth tab \
+             keeps the one it had",
+            plan.end_cap,
+            TAB_ICON_TINT.bytes(),
         ));
     }
     // The `RB` prompt really is furniture, and it really is standing where the seventh hexagon

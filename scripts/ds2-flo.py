@@ -22,8 +22,13 @@ named beside it so the claim can be checked:
                                 block, `rec+0x12` kind flags, `rec+0x14`/`+0x16` frame range,
                                 `rec+0x1c` the ELEMENT ID.
   `FUN_140b6bd80(parent, ..)`   attaches the built component, and bounds the display list by
-                                `[parent+0x48]+0x02` -- the parent DEFINITION's child count. So the
-                                child count is also the CAPACITY: a fourth row needs it raised.
+                                `[parent+0x48]+0x02`. A component's `+0x48` is the child RECORD it
+                                was built from, not a definition -- `FUN_140b6a130` compares
+                                `[[this+0x48]+0x1c]` to a path's element id, and `rec+0x1c` is
+                                where a record keeps that id. Both structs carry a `u16` at `+0x02`,
+                                which is how the two get confused; `FE_COMPONENT_RECORD_OFFSET` in
+                                `ds2-rva` carries the third, live proof. So the count at `+0x02` is
+                                also the CAPACITY: a fourth row needs it raised.
   `FUN_140b6a130`               `FeComponentObject::findByIdPath`, which matches `[this+0x48]+0x1c`
                                 against one path component -- i.e. the id below IS what a scene
                                 path resolves against.
@@ -59,6 +64,27 @@ DEF_STRIDE = 0x48
 RECORD_STRIDE = 0x28
 #: Size of one transform block, from the spacing of the blocks the records point at.
 TRANSFORM_SIZE = 0x30
+
+#: `[doc+0x08]`, the SHAPE table's file offset, and `[doc+0x48]`, `u16`, how many entries it holds.
+#: `FUN_140b54780` dereferences exactly these two: a linear scan of `[[doc]+0x08]` over `[[doc]+0x48]`
+#: entries at `SHAPE_STRIDE`, keyed by the `u16` at `+0x00`.
+SHAPE_TABLE_OFFSET_FIELD = 0x08
+SHAPE_COUNT_FIELD = 0x48
+#: Stride of one shape-table entry. `FUN_140b54780`: `add rcx,0x18`.
+SHAPE_STRIDE = 0x18
+#: Inside an entry: the `u16` quad count and the `u64` quad array. `FUN_140b70200` reads
+#: `movzx ecx,WORD PTR [rax+0x2]` and `add r8,QWORD PTR [rax+0x8]` after `shl r8,0x6`.
+SHAPE_QUAD_COUNT_FIELD = 0x02
+SHAPE_QUADS_FIELD = 0x08
+#: Stride of one quad, from that `shl r8,0x6`.
+QUAD_STRIDE = 0x40
+#: Inside a quad: the offset its source rect is drawn at, the scale that mirrors it, the four
+#: colour bytes `FUN_140b70200` reverses into the drawable, and the pointer to the rect itself.
+#: The offset is why a record's own `xy` does not tell you where the art lands.
+QUAD_X_FIELD = 0x00
+QUAD_SCALE_X_FIELD = 0x08
+QUAD_COLOUR_FIELD = 0x18
+QUAD_SOURCE_FIELD = 0x30
 
 #: `rec+0x12`, the kind flags `FUN_140b50bc0` switches on -- in this order, first match wins.
 #: It is a FLAG WORD, not an enum: `FUN_140b50bc0` masks it with `0xd` and records carrying `0x1004`
@@ -137,6 +163,50 @@ class Flo:
             "colour": colour,
         }
 
+    def shape(self, index: int) -> list[dict[str, int | float]] | None:
+        """Every quad of one shape: where its art lands, and which atlas rect it samples.
+
+        A record's `xy` places the shape's ORIGIN; the quad's own offset places the art relative to
+        that. The two are added, so a record at the right spot can still draw somewhere else
+        entirely -- `FLO_TAB_PLATE_OFFSET` is `(0, -775.70)`, most of a screen away.
+        """
+        table = struct.unpack_from("<Q", self.blob, SHAPE_TABLE_OFFSET_FIELD)[0]
+        count = struct.unpack_from("<H", self.blob, SHAPE_COUNT_FIELD)[0]
+        for i in range(count):
+            off = table + i * SHAPE_STRIDE
+            if off + SHAPE_STRIDE > len(self.blob):
+                break
+            if struct.unpack_from("<H", self.blob, off)[0] != index:
+                continue
+            quads = struct.unpack_from("<Q", self.blob, off + SHAPE_QUADS_FIELD)[0]
+            n = struct.unpack_from("<H", self.blob, off + SHAPE_QUAD_COUNT_FIELD)[0]
+            out = []
+            for q in range(n):
+                at = quads + q * QUAD_STRIDE
+                x, y = struct.unpack_from("<2f", self.blob, at + QUAD_X_FIELD)
+                scale_x, scale_y = struct.unpack_from("<2f", self.blob, at + QUAD_SCALE_X_FIELD)
+                colour = struct.unpack_from("<I", self.blob, at + QUAD_COLOUR_FIELD)[0]
+                source = struct.unpack_from("<Q", self.blob, at + QUAD_SOURCE_FIELD)[0]
+                rect = (
+                    struct.unpack_from("<4f", self.blob, source)
+                    if 0 < source < len(self.blob) - 0x10
+                    else None
+                )
+                out.append(
+                    {
+                        "offset": at,
+                        "x": x,
+                        "y": y,
+                        "scale_x": scale_x,
+                        "scale_y": scale_y,
+                        "colour": colour,
+                        "source": source,
+                        "rect": rect,
+                    }
+                )
+            return out
+        return None
+
     def children(self, index: int) -> list[dict[str, int | float]]:
         found = self.definition(index)
         if found is None:
@@ -148,7 +218,8 @@ class Flo:
 def render(rec: dict[str, int | float]) -> str:
     return (
         f"rec@{rec['offset']:#08x} def={rec['definition']:#06x} id={rec['id']:#08x} "
-        f"xy=({rec['x']:g},{rec['y']:g}) depth={rec['depth']} kind={rec['kind']:#x} "
+        f"xy=({rec['x']:g},{rec['y']:g}) scale=({rec['scale_x']:g},{rec['scale_y']:g}) "
+        f"depth={rec['depth']} kind={rec['kind']:#x} "
         f"frames={rec['first_frame']}..{rec['last_frame']} colour={rec['colour']:08x} "
         f"xform={rec['transform']:#08x}"
     )
@@ -172,10 +243,16 @@ def tree(flo: Flo, index: int, indent: int = 0, seen: frozenset[int] = frozenset
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("action", choices=("tree", "find", "defs", "header"))
+    ap.add_argument("action", choices=("tree", "find", "defs", "header", "shape"))
     ap.add_argument("file", type=Path)
     ap.add_argument("--def", dest="definition", type=lambda s: int(s, 0), help="definition index")
     ap.add_argument("--id", dest="element", type=lambda s: int(s, 0), help="element id to locate")
+    ap.add_argument(
+        "--shape",
+        dest="shape",
+        type=lambda s: int(s, 0),
+        help="shape index for `shape`: prints every quad, its OFFSET and its atlas rect",
+    )
     args = ap.parse_args()
 
     try:
@@ -187,6 +264,26 @@ def main() -> int:
         for off in range(0x08, 0x48, 8):
             print(f"  hdr+{off:#04x} = {struct.unpack_from('<Q', flo.blob, off)[0]:#08x}")
         print(f"  definitions: {flo.def_count} at {flo.def_table:#08x}, stride {DEF_STRIDE:#x}")
+        return 0
+
+    if args.action == "shape":
+        if args.shape is None:
+            sys.exit("shape needs --shape <index>")
+        quads = flo.shape(args.shape)
+        if quads is None:
+            print(f"shape {args.shape:#06x} MISSING")
+            return 1
+        print(f"shape {args.shape:#06x} quads={len(quads)}")
+        for i, q in enumerate(quads):
+            rect = (
+                "none"
+                if q["rect"] is None
+                else "(" + ",".join(f"{v:g}" for v in q["rect"]) + ")"  # type: ignore[union-attr]
+            )
+            print(
+                f"  [{i}] quad@{q['offset']:#08x} offset=({q['x']:g},{q['y']:g}) "
+                f"scale=({q['scale_x']:g},{q['scale_y']:g}) colour={q['colour']:08x} rect={rect}"
+            )
         return 0
 
     if args.action == "defs":
