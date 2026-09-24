@@ -226,6 +226,50 @@ def blank_spans(work, outer, inner):
     return mask
 
 
+def substitution_regions(text):
+    """Every `$( ... )` and backtick region in TEXT, as (start, end) half-open slices.
+
+    None means one of them could not be closed -- an unbalanced `$(`, an odd number of
+    backticks. Where the substitution ends is then unknown, and guessing is the one thing
+    this shim must never do.
+
+    Nesting is handled by paren depth, so `$(cat $(which ls))` and `$((x << 2))` are each
+    ONE region; a backtick or a `$(` inside a region already found is consumed with it.
+
+    A `$(` inside single quotes starts no substitution, and this does not know that. Marking
+    it anyway is harmless: the region is only ever PROTECTED (its newlines left alone and
+    its anchors kept out of the parity read), never rewritten, so the worst case is a
+    newline inside quoted prose staying a newline -- which is the outcome that text wanted.
+    """
+    regions = []
+    i, n = 0, len(text)
+    while i < n:
+        if text[i] == "$" and i + 1 < n and text[i + 1] == "(":
+            depth, j = 0, i + 1
+            while j < n:
+                if text[j] == "(":
+                    depth += 1
+                elif text[j] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            if j >= n:
+                return None
+            regions.append((i, j + 1))
+            i = j + 1
+            continue
+        if text[i] == "`":
+            j = text.find("`", i + 1)
+            if j == -1:
+                return None
+            regions.append((i, j + 1))
+            i = j + 1
+            continue
+        i += 1
+    return regions
+
+
 def continues_line(text, index):
     """A newline preceded by an ODD number of backslashes is a line continuation.
 
@@ -272,14 +316,46 @@ def rewrite_command(command):
     # NO_HEREDOC and SHELL_READ both fall through with nothing marked: there is either no
     # body, or the body is a program whose line breaks are boundaries like any other.
 
-    # commands.rego refuses to read quote spans once command substitution is present,
-    # because substitution inside double quotes really does execute. Same refusal here, and
-    # for the same reason -- disagreeing with the policies about what is quoted is worse
-    # than leaving this shape alone. It is checked after the heredoc blanking, so a `$(` in
-    # a documentation heredoc does not disqualify the whole command (its `(` is gone).
-    resolved = "".join(work)
-    if "$(" in resolved or "`" in resolved:
+    # SUBSTITUTION IS A REGION NOW, NOT A DISQUALIFIER (2026-09-24, bd ds2-mods-rs-a87).
+    #
+    # This used to `return None` the moment a `$(` or a backtick appeared anywhere, mirroring
+    # commands.rego's refusal to read quote spans under substitution. The refusals are not
+    # equivalent, and the difference is a measured false deny. commands.rego falling back to
+    # raw text costs it only its quote awareness; this shim falling back costs every STATEMENT
+    # BOUNDARY in the command, because `cupcake eval` then erases the unquoted newlines itself
+    # and the whole multi-line script arrives as one line. Segments stop existing, and the
+    # per-segment isolation the destructive guard's comments rely on -- "rm -f /tmp/x && opa
+    # test .cupcake/ must stay allowed" -- is gone with them.
+    #
+    # MEASURED: a script whose first line was a `SLUG=$(...)` assignment, with `rm -rf
+    # "$SCRATCH/..."` on one later line and a `cp` from `.cupcake/tests/fixtures/` on another,
+    # was denied as a destructive operation on the guard layer. Nothing in it removed anything
+    # under `.cupcake`. Reproduced again on 2026-09-24 by a `printf` that deleted nothing at
+    # all and merely CONTAINED those two lines as text. Any script using `$(` anywhere and
+    # naming `.cupcake` anywhere was one segment.
+    #
+    # So the substitution is PROTECTED like a heredoc data body rather than used to abandon
+    # the whole command: its newlines stay newlines, and its anchors are kept out of the
+    # parity read so its quotes cannot make the surrounding read meaningless. The text
+    # OUTSIDE it is then readable again and its boundaries survive.
+    #
+    # Leaving a substitution's own newlines alone under-segments what runs inside the
+    # sub-shell. That is the same trade the heredoc data body takes, in the same direction:
+    # this function only ever ADDS separators, so an unrewritten newline can only under-deny,
+    # while a separator invented inside quoted prose would convict a sentence of being a
+    # command. An unclosed substitution still returns None, which is the old behaviour for the
+    # one case where nothing knows where the region ends.
+    #
+    # Computed from `work` rather than the raw command, so a `$(` inside a documentation
+    # heredoc does not start a region here -- its `(` was blanked above.
+    regions = substitution_regions("".join(work))
+    if regions is None:
         return None
+    for start, end in regions:
+        for i in range(start, end):
+            quoted[i] = True
+            if work[i] in ANCHORS:
+                work[i] = " "
 
     mask_escaped_quotes(work)
 

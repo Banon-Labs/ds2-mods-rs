@@ -290,10 +290,43 @@ REWRITE_CASES = [
     ),
     # Fail-safe passthroughs. Each keeps today's behaviour rather than guessing: see the
     # residue notes in cupcake-hook.sh.
+    # A substitution is a protected REGION since 2026-09-24 (bd ds2-mods-rs-a87), not a
+    # reason to abandon the command: its own newlines are left alone, and the boundaries
+    # OUTSIDE it survive. Passing the whole text through cost every statement boundary,
+    # because the engine erases the unquoted newlines itself and the script arrives as one
+    # line -- which is how an `rm` of a scratch path and a `.cupcake` operand on a different
+    # line became one segment and a false destructive deny.
     RewriteCase(
-        "command-substitution-passthrough",
+        "command-substitution-outside-boundaries-survive",
         "run_id=$(date +%s)\necho $run_id",
-        "run_id=$(date +%s)\necho $run_id",
+        "run_id=$(date +%s); echo $run_id",
+    ),
+    # The substitution's OWN newlines stay newlines. Under-segmenting what runs inside the
+    # sub-shell is the same trade the heredoc data body takes, in the safe direction.
+    RewriteCase(
+        "newline-inside-a-substitution-is-left-alone",
+        "x=$(echo a\necho b)\necho done",
+        "x=$(echo a\necho b); echo done",
+    ),
+    # Nesting is by paren depth, so this is ONE region rather than a region ending at the
+    # first `)`.
+    RewriteCase(
+        "nested-substitution-is-one-region",
+        "p=$(dirname $(which ls))\necho $p",
+        "p=$(dirname $(which ls)); echo $p",
+    ),
+    # An unclosed substitution keeps the old passthrough: nothing knows where it ends.
+    RewriteCase(
+        "unclosed-substitution-passthrough",
+        "echo 'it costs $( money'\necho two",
+        "echo 'it costs $( money'\necho two",
+    ),
+    # THE REPORTED SHAPE, reduced: an assignment using a substitution, then a removal of a
+    # scratch path, then a copy naming the guard layer. Three statements, three segments.
+    RewriteCase(
+        "substitution-then-unrelated-rm-then-a-guard-layer-path",
+        'SLUG=$(echo "$REPO" | tr "/" "-")\nrm -rf "$SCRATCH/home-$SLUG"\ncp "$REPO/.cupcake/tests/fixtures/x.jsonl" "$SCRATCH/"',
+        'SLUG=$(echo "$REPO" | tr "/" "-"); rm -rf "$SCRATCH/home-$SLUG"; cp "$REPO/.cupcake/tests/fixtures/x.jsonl" "$SCRATCH/"',
     ),
     RewriteCase(
         "unbalanced-quote-passthrough",
@@ -494,17 +527,30 @@ DECISION_CASES = [
     # residue notes in cupcake-hook.sh). They are exactly as open as they were before this
     # change -- nothing regressed -- and they are pinned as `allow` so that closing one shows
     # up here as a red test rather than going unnoticed.
+    # CLOSED 2026-09-24 (bd ds2-mods-rs-a87), and these two are the pins doing the job they
+    # were put here for: they were `allow` because the shim abandoned any command containing
+    # a substitution, so a real `git push origin main` on the next line was never seen by the
+    # guard that exists to stop it. Treating the substitution as a protected region instead
+    # leaves the boundary outside it intact, and the push is a statement again.
     DecisionCase(
-        "known-open-command-substitution-then-push-main",
+        "command-substitution-then-push-main",
         "run_id=$(date +%s)\ngit push origin main",
-        "allow",
-        "KNOWN-OPEN: `$(` makes the quote-span read meaningless, so the text is passed through",
+        "deny",
+        "the substitution is a region, so the push on the next line is its own statement",
     ),
     DecisionCase(
-        "known-open-backtick-then-push-main",
+        "backtick-then-push-main",
         "echo `date`\ngit push origin main",
+        "deny",
+        "same as the `$(` case: a backtick region no longer costs the whole command",
+    ),
+    # The other direction, which is what makes closing the hole safe rather than merely
+    # stricter: a substitution whose OUTPUT is prose naming the push must still be allowed.
+    DecisionCase(
+        "substitution-carrying-prose-about-a-push",
+        'echo "$(cat notes.txt)"\necho "the rule forbids git push origin main"',
         "allow",
-        "KNOWN-OPEN: same reason as `$(`",
+        "the push is inside a quoted argument to echo, which is data, not a statement",
     ),
     DecisionCase(
         "known-open-two-heredocs-then-push-main",
