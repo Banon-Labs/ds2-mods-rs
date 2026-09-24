@@ -14,13 +14,20 @@
 //!
 //! # The four facts it is built on, all read out of the binary
 //!
-//! **1. The save side and the load side ask for their directory separately.** `SLSaveSession` and
-//! `SLLoadSession` each override the same base virtual, at [`ds2_rva::SL_SAVE_SESSION_DIRECTORY`]
-//! and [`ds2_rva::SL_LOAD_SESSION_DIRECTORY`], and neither override has a call site -- both are
-//! reached only through their vtable. So a redirect is a pointer write per side, and the two sides
-//! can be pointed at different folders at the same time. That is what kills the restart this row
-//! used to perform: the character being left is written to the player's own folder by a save side
-//! that was never touched, while the load side answers the staged copy.
+//! **1. There is ONE container directory, and it lives on the storage worker.** The `0x18` arm of
+//! the session pump builds a path with [`ds2_rva::SAVE_DIR_BUILD`] and hands it to
+//! [`ds2_rva::SL_REQUEST_SET_DIRECTORY`], which seats it at `worker+0x48`. That is the entire
+//! consumer list of the builder's result, and the launch-time redirect on the builder was measured
+//! reading a donor container end to end -- so the worker's copy is the field a read opens, and
+//! `ds2_save_redirect::request_dir` moves it by calling the game's own setter.
+//!
+//! **This was got wrong three times, each corrected by a measurement rather than an argument.**
+//! `SLSaveSession` and `SLLoadSession` do each override a directory virtual, and the pair looked
+//! like a per-side redirect -- but the load session's work method reaches its string through the
+//! accessor and never calls the virtual: `load-answered=1` on a read that still failed. Re-pointing
+//! `SAVE_DIR_BUILD` mid-session missed too, because session setup does not re-run for a re-read:
+//! `session-dir-answered=0`. So did `SLLoadContent`'s own string, which read back `<unreadable>`
+//! and is not what the worker holds.
 //!
 //! **2. Leaving a game is a shipped action.** The pause menu's own Quit Game row is action
 //! [`ds2_rva::FE_INGAME_MENU_ACTION_RETURN_TITLE`], which opens `FeGroupInGameReturnTitleCheck` --
@@ -50,15 +57,18 @@
 //!
 //! # The ordering is the safety, and it only works in one direction
 //!
-//! | when | load side | save side | why |
-//! |---|---|---|---|
-//! | the press | the game's own | the game's own | the character being left has not been saved yet |
-//! | at the title | **staged** | the game's own | the exit save has already gone to the player's folder |
-//! | a character is confirmed | staged | **staged** | what is about to be played came from there |
+//! One directory means one window, and the window is the whole of the safety:
 //!
-//! Arming the save side any earlier writes the player's own character into somebody else's
-//! container. Arming it any later lets the donor character's first bonfire overwrite a slot of the
-//! player's own. There is one correct moment and fact 4 is how this finds it.
+//! | when | worker directory | why it is safe |
+//! |---|---|---|
+//! | the press | the game's own | the character being left has not been saved yet |
+//! | at the title | **staged** | no character is loaded, so there is nothing a save could write |
+//! | a character is confirmed | staged | what is about to be played came from there, so its progress belongs there |
+//! | any path that gives up | put back | or the player's own list would describe somebody else's container |
+//!
+//! Staging any earlier writes the player's own character into somebody else's container. The
+//! moment is fact 4, and the put-back is why nothing is staged until the game's own directory has
+//! been observed -- that record is the only way home.
 //!
 //! # Nothing here is a substitute for the game leaving the game
 //!
@@ -69,16 +79,23 @@
 //! title is itself the unload. What this crate removes is the restart of the process, which was
 //! never the game's requirement -- it was the price of not having read fact 1.
 //!
-//! # What one live run has said so far
+//! # What the live runs have said so far
 //!
-//! 2026-09-23, the first: everything up to the re-read worked -- the pick staged, the game left,
-//! the title reached, the load side armed, `accepted=true` on the request. Then fifteen seconds of
-//! nothing and `swap ABANDONED -- the container re-read never finished`, because the request was
-//! waiting on a collector that only runs inside two title substates. That is the pump above, and
-//! calling it here is the fix that run bought. Everything past the pump -- the list describing the
-//! staged container, the choice, the save side arming on it -- is still only a claim about the
-//! disassembly, and the flow logs each step with the value it acted on so the next run can say
-//! which of them is wrong.
+//! **2026-09-23, the first.** Everything up to the re-read worked -- the pick staged, the game
+//! left, the title reached, the side armed, `accepted=true` on the request. Then fifteen seconds
+//! of nothing and `swap ABANDONED -- the container re-read never finished`, because the request
+//! was waiting on a collector that only runs inside two title substates. That is the pump above,
+//! and calling it here is the fix that run bought.
+//!
+//! **2026-09-23, after the pump.** The pump answered on the very next frame with status 3: the
+//! read had failed. `load-answered=1` said the game had reached the armed vtable slot, which is
+//! what disproved the per-side split and started the search that ended at the storage worker.
+//!
+//! **The worker directory has not been run.** Fact 1 is now read out of the pump's own `0x18` arm
+//! rather than out of a vtable, and the chain to the file is closed by the launch-time redirect's
+//! measurement -- but this flow setting it mid-session is still a claim. Every step logs the value
+//! it acted on, and three distinct failure lines separate a set that never reached the game from
+//! one the game silently skipped from one that landed, so the next run can say which.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
