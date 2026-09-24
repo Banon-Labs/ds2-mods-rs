@@ -151,6 +151,93 @@ test_nested_scripts_subdir_script_is_allowed if {
 	count(bash_no_python_file_write.deny) == 0 with input as bash(cmd)
 }
 
+# --- the absolute-path form of a committed script is also allowed ---------
+#
+# Conflict measured 2026-09-22: AGENTS.md tells agents to use absolute paths
+# because the harness resets Bash's cwd between calls, so `cd scripts &&
+# python3 foo.py` from one call cannot be relied on for the next. The old
+# committed-script regex only recognized the repo-relative spelling
+# (`scripts/<name>.py`), so it blocked the exact invocation shape the
+# environment's own instructions recommend, on a script this repo has
+# already committed. The fix compares the absolute path against `input.cwd`
+# (the session's actual repo root on this call) rather than a hardcoded
+# guess, and only when that prefix is followed immediately by `/scripts/`.
+
+repo_root := "/home/banon/projects/ds2-mods-rs"
+
+bash_cwd(cmd, cwd) := {
+	"hook_event_name": "PreToolUse",
+	"tool_name": "Bash",
+	"tool_input": {"command": cmd},
+	"cwd": cwd,
+}
+
+test_absolute_repo_script_is_allowed if {
+	cmd := sprintf("python3 %s/scripts/ds2-ebl.py info", [repo_root])
+	count(bash_no_python_file_write.deny) == 0 with input as bash_cwd(cmd, repo_root)
+}
+
+test_absolute_repo_script_nested_is_allowed if {
+	cmd := sprintf("python3 %s/scripts/ghidra/mcp_query.py getContext", [repo_root])
+	count(bash_no_python_file_write.deny) == 0 with input as bash_cwd(cmd, repo_root)
+}
+
+test_absolute_repo_script_with_abutting_separator_is_allowed if {
+	cmd := sprintf(`python3 %s/scripts/ds2-ebl.py; echo "exit=$?"`, [repo_root])
+	count(bash_no_python_file_write.deny) == 0 with input as bash_cwd(cmd, repo_root)
+}
+
+# The existing repo-relative form must still be allowed once `cwd` is present
+# on the input -- the new absolute-path branch must not have displaced it.
+test_repo_relative_script_with_cwd_set_is_allowed if {
+	cmd := "python3 scripts/ds2-ebl.py info"
+	count(bash_no_python_file_write.deny) == 0 with input as bash_cwd(cmd, repo_root)
+}
+
+# A `/tmp` script must still be denied even once `cwd` is set on the input --
+# the absolute-path exemption is prefix-scoped to `cwd`, not "any absolute
+# path with a .py suffix".
+test_absolute_tmp_script_with_cwd_set_is_denied if {
+	cmd := "python3 /tmp/claude-scratch/patch.py"
+	count(bash_no_python_file_write.deny) == 1 with input as bash_cwd(cmd, repo_root)
+}
+
+# A `~`-relative script must still be denied with `cwd` set.
+test_home_relative_script_with_cwd_set_is_denied if {
+	cmd := "python3 ~/foo.py"
+	count(bash_no_python_file_write.deny) == 1 with input as bash_cwd(cmd, repo_root)
+}
+
+# Inline `-c` and heredoc programs must still be denied with `cwd` set -- the
+# absolute-path exemption only ever widens FILE invocations, never inline
+# code.
+test_inline_dash_c_with_cwd_set_is_denied if {
+	cmd := `python3 -c "open('notes.md','w').write('x')"`
+	count(bash_no_python_file_write.deny) == 1 with input as bash_cwd(cmd, repo_root)
+}
+
+test_heredoc_with_cwd_set_is_denied if {
+	cmd := "python3 - <<'PY'\nopen('a.txt','w').write('x')\nPY"
+	count(bash_no_python_file_write.deny) == 1 with input as bash_cwd(cmd, repo_root)
+}
+
+# A path that merely CONTAINS "/scripts/" without being rooted at THIS
+# session's cwd must not borrow the exemption -- otherwise any repo's
+# `scripts/` tree would qualify, not just this one.
+test_absolute_script_under_different_repo_is_denied if {
+	cmd := "python3 /home/banon/projects/other-repo/scripts/patch.py"
+	count(bash_no_python_file_write.deny) == 1 with input as bash_cwd(cmd, repo_root)
+}
+
+# A `scripts`-lookalike absolute path with no cwd on the input at all must
+# fail closed: there is no known repo root to compare the prefix against, so
+# no absolute path can be trusted, even one that would have matched had
+# `cwd` been set.
+test_absolute_repo_script_without_cwd_input_is_denied if {
+	cmd := sprintf("python3 %s/scripts/ds2-ebl.py info", [repo_root])
+	count(bash_no_python_file_write.deny) == 1 with input as bash(cmd)
+}
+
 # --- not a python command at all ------------------------------------------
 
 test_non_python_command_is_allowed if {

@@ -474,9 +474,25 @@ impl Tracker {
     /// `screen` is the back buffer's size. Both are what makes test 2 a test rather than a
     /// restatement of test 1.
     pub(crate) fn acquire(&mut self, local: [f32; 3], screen: [f32; 2]) -> Option<(Camera, Found)> {
+        // KEEPING A CANDIDATE NEEDS THE SAME TEST AS CHOOSING ONE, and it used to need a far
+        // weaker one -- `plausibly_on_screen`, which allows the player to be half a screen
+        // OUTSIDE the viewport and still counts as agreement.
+        //
+        // Live, that kept a `CameraOperator` whose matrices never change. The re-read happens
+        // every frame and is not the problem; the object simply is not the camera being
+        // rendered. The symptom was an arrow that held one direction while the player span the
+        // view through a full circle, and the proof is two samples taken seconds apart with the
+        // player's own head projecting to `606,795` in BOTH -- 674 pixels left of centre on a
+        // 2561-wide frame, and not one pixel of movement in between.
+        //
+        // A frozen matrix cannot hold the character near the middle of the frame for long: the
+        // moment you walk or turn, it drifts. So retention now asks exactly what selection asks,
+        // and a candidate that stops framing the character is dropped and searched for again --
+        // which is the behaviour the weak test was there to avoid paying for, and it is four
+        // cache lines a frame in the case that matters.
         if let Some(remembered) = self.remembered
             && let Some(camera) = resolve(remembered, screen)
-            && camera.plausibly_on_screen(local, screen)
+            && camera.frames_the_character(local, screen)
         {
             return Some((camera, Found::Remembered));
         }

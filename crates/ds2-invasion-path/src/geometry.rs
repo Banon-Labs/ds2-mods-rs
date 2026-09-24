@@ -36,12 +36,114 @@
 /// A 4x4 matrix in the game's storage order: sixteen `f32`, row-major.
 pub type Matrix = [f32; 16];
 
+/// How tall a DARK SOULS II character is, from origin to head, in metres.
+///
+/// The character's own position is at their FEET, so this is what turns it into the point the
+/// camera is actually pointed at. Used by [`Camera::head_offset_px`] and by the capture's
+/// scale test, which are the two places that need to know where a character LOOKS like they are
+/// rather than where the game says they stand.
+pub const HEAD_METERS: f32 = 1.8;
+
+/// How far the character's head may land from the middle of the frame and still count as a
+/// camera that is FRAMING them, as a fraction of the viewport's height.
+///
+/// # This does not decide where the arrow's base is drawn
+///
+/// It used to, and that was the whole mistake. The base was the projection of the player's
+/// world position, so a camera that was slightly stale moved the base off the player, and the
+/// response was to tighten this budget until only a perfect camera drew anything. At one pixel
+/// that was no camera at all: a live run refused every single frame, with the head measured
+/// between 8.7 and 315.6 pixels from centre. Nothing reached the screen.
+///
+/// The base is now PINNED to the middle of the frame in pixels, after projection, so no value
+/// here can move it -- see `emit` in `lib.rs`. What is left for this constant is the job it was
+/// introduced for and is genuinely good at: telling a camera that is being CONSIDERED apart from
+/// the one the game is rendering with. A pose-built camera with the quaternion components in the
+/// wrong order is a perfectly valid rotation about the wrong axis; it put the character at
+/// `376,213` on a `2560x1441` frame, 904 pixels out horizontally, and passed every other test in
+/// this module. A quarter of the frame's height rejects that with room to spare while still
+/// admitting the ~316-pixel worst case a real camera reaches halfway through a fast turn.
+pub const FRAMING_TOLERANCE_SHARE: f32 = 0.25;
+
 /// Clip-space `w` below which a point is behind (or on) the lens and cannot be projected.
 ///
 /// Not `0.0`: a point exactly on the plane divides by zero, and a point a micrometre in front of
 /// it projects to somewhere past the horizon, which draws as a line shooting off screen. The
 /// game's own near plane is much larger than this; this is only the arithmetic floor.
 pub const NEAR_EPSILON: f32 = 0.05;
+
+/// How far each barb is turned away from the shaft, in radians. Thirty degrees reads as an
+/// arrowhead; much less is a spike and much more is a fan.
+pub const BARB_RADIANS: f32 = core::f32::consts::FRAC_PI_6;
+
+/// An arrow in pixels: four points in the back buffer's coordinate space, origin top-left.
+///
+/// Every field is already where it will be drawn. See [`Camera::screen_arrow`] for why the arrow
+/// stopped being a world-space object.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScreenArrow {
+    pub base: [f32; 2],
+    pub tip: [f32; 2],
+    pub left_barb: [f32; 2],
+    pub right_barb: [f32; 2],
+}
+
+/// Is this matrix shaped like a `view * projection` product at all?
+///
+/// # The test every other oracle in this crate was blind to
+///
+/// `crate::capture` accepted a matrix on two grounds: the player projects near the middle of the
+/// frame, and their head projects a plausible number of pixels above their feet. Both are true of
+/// things that are not cameras, and -- worse -- **both are blind to the horizontal axis**. The
+/// centre test measures distance from the centre, which a mirror about the centre does not
+/// change; the scale test is purely vertical. A matrix could do anything at all to `x` and pass.
+///
+/// One did, for an entire session. Read out of the live game:
+///
+/// ```text
+/// [0.0000 3.4405 0.0000 0.0000 | 0.0000 0.0000 2.4751 2.4751
+///  | 0.0000 0.0000 -0.1000 0.0000 | 1.4 0.0 -0.1 0.0]
+/// ```
+///
+/// Its first column is entirely zero, so `clip.x` is the constant `1.4` for every point in the
+/// world -- every target, every frame. The arrow pointed to the right of the screen and stayed
+/// there while an NPC stood plainly to the left, and no amount of work on the arrow's own
+/// arithmetic could have helped, because the input was not a camera.
+///
+/// # Why column 3 is the right thing to test
+///
+/// Not a heuristic -- an identity. The engine's projection (`0x140001a90`) has `m23 == 1` and
+/// `m33 == 0`, so in the product `V * P` the whole of column 3 comes from `V`'s column 2, which
+/// is the camera's forward axis in world space. A rotation's axis is a UNIT vector. So
+/// `length(m[3], m[7], m[11])` is `1.0` for every real camera this game renders with, and is
+/// `2.4751` for the impostor above.
+///
+/// It costs three multiplies and it is the only cheap test here that looks at all three world
+/// axes at once.
+#[must_use]
+pub fn looks_like_a_view_projection(matrix: &Matrix) -> bool {
+    if !matrix.iter().all(|value| value.is_finite()) {
+        return false;
+    }
+    /// How far the forward column's length may sit from one.
+    ///
+    /// Generous next to the error it rejects: the impostor was out by a factor of 2.5, and the
+    /// engine's own matrices are exact to float rounding.
+    const UNIT_TOLERANCE: f32 = 0.02;
+    let forward = length([matrix[3], matrix[7], matrix[11]]);
+    (forward - 1.0).abs() <= UNIT_TOLERANCE
+}
+
+/// The point on a character that the camera is actually aimed at.
+///
+/// A DARK SOULS II character's position is their FEET, and the camera looks at the upper body, so
+/// the feet sit a couple of hundred pixels below the middle of the frame even when everything is
+/// correct. Anything that wants "where the player LOOKS like they are" -- the framing oracle, and
+/// the arrow's base -- wants this instead.
+#[must_use]
+pub fn head(world: [f32; 3]) -> [f32; 3] {
+    [world[0], world[1] + HEAD_METERS, world[2]]
+}
 
 /// `a - b`, componentwise.
 #[must_use]
@@ -284,6 +386,67 @@ pub fn aspect_matches(matrix: &Matrix, screen: [f32; 2]) -> bool {
     projection_aspect(matrix).is_some_and(|aspect| ((aspect - wanted) / wanted).abs() <= TOLERANCE)
 }
 
+/// Trim a screen-space segment to the viewport, or `None` if none of it is inside.
+///
+/// # Why a near-plane trim is not enough on its own
+///
+/// `Camera::project_segment` trims a segment that crosses the camera plane to `w = NEAR_EPSILON`,
+/// which is mathematically right and visually catastrophic: dividing by a number that small
+/// throws the trimmed end thousands of pixels away, and the line drawn to it sweeps across the
+/// whole frame. A live screenshot has an arrowhead whose two barbs reach the top-left corner from
+/// a tip in the middle of the screen, drawn over the sky, for exactly this reason.
+///
+/// The direction of that line is correct; only its far end is nonsense. So the fix is not to drop
+/// the segment -- a line leaving the frame towards a player behind you is the information wanted
+/// -- but to end it where it leaves the viewport. Liang-Barsky, on the four edges.
+///
+/// The `1.0` slack keeps a line that runs exactly along an edge from being trimmed to nothing by
+/// rounding.
+#[must_use]
+pub fn clip_to_viewport(
+    from: [f32; 2],
+    to: [f32; 2],
+    screen: [f32; 2],
+) -> Option<([f32; 2], [f32; 2])> {
+    const SLACK: f32 = 1.0;
+    let (dx, dy) = (to[0] - from[0], to[1] - from[1]);
+    let (mut enter, mut leave) = (0.0f32, 1.0f32);
+    // Each edge as `direction * t <= distance`: negative direction is entering the half-plane,
+    // positive is leaving it, and zero is parallel -- which only fails if it starts outside.
+    for (direction, distance) in [
+        (-dx, from[0] + SLACK),
+        (dx, screen[0] + SLACK - from[0]),
+        (-dy, from[1] + SLACK),
+        (dy, screen[1] + SLACK - from[1]),
+    ] {
+        if direction == 0.0 {
+            if distance < 0.0 {
+                return None;
+            }
+            continue;
+        }
+        let t = distance / direction;
+        if direction < 0.0 {
+            if t > leave {
+                return None;
+            }
+            enter = enter.max(t);
+        } else {
+            if t < enter {
+                return None;
+            }
+            leave = leave.min(t);
+        }
+    }
+    if !enter.is_finite() || !leave.is_finite() || enter > leave {
+        return None;
+    }
+    Some((
+        [from[0] + dx * enter, from[1] + dy * enter],
+        [from[0] + dx * leave, from[1] + dy * leave],
+    ))
+}
+
 /// A camera reduced to what drawing needs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Camera {
@@ -308,6 +471,50 @@ impl Camera {
     #[must_use]
     pub fn up(&self) -> [f32; 3] {
         normalize([self.view[1], self.view[5], self.view[9]]).unwrap_or([0.0, 1.0, 0.0])
+    }
+
+    /// Where the camera is looking, in world space.
+    ///
+    /// Column 2 of the rotation, by exactly the argument [`Camera::up`] spells out: for a
+    /// row-vector world-to-camera matrix the COLUMNS are the camera's axes in world space.
+    #[must_use]
+    pub fn forward(&self) -> [f32; 3] {
+        // FROM THE COMBINED MATRIX, NOT THE VIEW HALF. The camera caught out of the renderer's
+        // own upload has no view half at all -- `crate::capture` has only the product and stores
+        // an identity in its place -- so reading `view` there returns the identity's third axis
+        // and every heading is exactly zero. Live, that is what happened: the harness's probe
+        // held all six pad axes in turn and reported `0.00 -> 0.00` for every one of them, which
+        // reads as "the stick does nothing" and is really "the instrument is stuck".
+        //
+        // The product has the answer. Row-vector, with the projection's `m23 == 1`, the clip
+        // `w` of a world point is its depth along the camera's own forward axis:
+        //
+        //     w = x*vp[3] + y*vp[7] + z*vp[11] + vp[15]
+        //
+        // so `(vp[3], vp[7], vp[11])` IS that axis in world space, whether or not the view half
+        // was ever seen. It agrees with the view matrix for a camera assembled from both, since
+        // that column of the product is the view's forward column scaled by one.
+        let m = &self.view_projection;
+        normalize([m[3], m[7], m[11]])
+            .or_else(|| normalize([self.view[2], self.view[6], self.view[10]]))
+            .unwrap_or([0.0, 0.0, 1.0])
+    }
+
+    /// The camera's heading, in degrees, in `-180.0..=180.0`.
+    ///
+    /// **Only differences between two readings of this are meaningful.** Where zero points
+    /// depends on the engine's world axes, which this repo has not pinned down, and nothing here
+    /// needs it to: the harness that consumes this drives a stick until the DIFFERENCE is what
+    /// was asked for. Pitch is deliberately not folded in -- a heading that changed when the
+    /// camera tilted would make a yaw controller chase its own tail.
+    ///
+    /// Degenerate straight up or straight down (where the forward vector has no horizontal
+    /// component at all) is the one case with no answer, and `atan2(0, 0)` returning `0` there
+    /// is as good as any -- a camera pointed at the sky has no heading to report.
+    #[must_use]
+    pub fn yaw_degrees(&self) -> f32 {
+        let forward = self.forward();
+        forward[0].atan2(forward[2]).to_degrees()
     }
 
     /// Where the camera is, in world space.
@@ -384,6 +591,24 @@ impl Camera {
         to: [f32; 3],
         screen: [f32; 2],
     ) -> Option<([f32; 2], [f32; 2])> {
+        let (a, b) = self.project_segment_unclipped(from, to, screen)?;
+        clip_to_viewport(a, b, screen)
+    }
+
+    /// Project a segment, trimming it at the near plane but **not** to the viewport.
+    ///
+    /// Split out for the arrow, which is translated in pixels after projection so that its base
+    /// lands on the middle of the frame. Clipping to the viewport before that translation clips
+    /// against the wrong rectangle -- a shaft that would be on screen once moved gets thrown
+    /// away, and one that would be off screen survives. The near-plane trim still has to happen
+    /// first: it is a clip-space operation, and there is no pixel to translate until it is done.
+    #[must_use]
+    pub fn project_segment_unclipped(
+        &self,
+        from: [f32; 3],
+        to: [f32; 3],
+        screen: [f32; 2],
+    ) -> Option<([f32; 2], [f32; 2])> {
         let (mut a, mut b) = (self.to_clip(from), self.to_clip(to));
         let (a_in, b_in) = (a[3] > NEAR_EPSILON, b[3] > NEAR_EPSILON);
         if !a_in && !b_in {
@@ -406,6 +631,131 @@ impl Camera {
         ))
     }
 
+    /// The pixel translation that puts `anchor` exactly on the middle of the frame.
+    ///
+    /// # Why the arrow's base is arithmetic and not a measurement
+    ///
+    /// A compass needle turns about a fixed pin. The base of this arrow used to be the
+    /// projection of the player's position, which made it a second thing the camera could get
+    /// wrong -- and it got it wrong constantly: "I've seen the base off the player more times
+    /// than I've seen it on the player." Every attempt to fix it by demanding a better camera
+    /// failed the same way, ending at a budget of one pixel that refused every frame of a live
+    /// run and drew nothing at all.
+    ///
+    /// The base has nothing to do with the camera. Only the TIP does. So the whole projected
+    /// arrow is translated by this until its tail sits on the centre, where a third-person camera
+    /// keeps the character: the camera still decides which way the shaft points and how long it
+    /// looks -- everything an arrow actually claims -- and the one quantity the eye checks
+    /// hardest is exact by construction.
+    ///
+    /// `None` when the anchor is behind the lens, which for the player's own head means the
+    /// camera is not looking at them and there is no arrow to place.
+    #[must_use]
+    pub fn pin_for(&self, anchor: [f32; 3], screen: [f32; 2]) -> Option<[f32; 2]> {
+        let at = self.project(anchor, screen)?;
+        Some([screen[0] * 0.5 - at[0], screen[1] * 0.5 - at[1]])
+    }
+
+    /// The arrow, in pixels, base on the middle of the frame and always the same length.
+    ///
+    /// # Why the arrow is not a world-space object any more
+    ///
+    /// It was, and a world-space arrow pointing near the view axis foreshortens to nothing. That
+    /// is not a corner case, it is the ordinary one -- you are usually facing roughly towards the
+    /// person you want to find. A live run caught it exactly: an NPC 84.6 m away produced
+    /// `tip=1268,710` against a base of `1280,720`, a twelve-pixel stub with both barbs on the
+    /// same pixel. The previous attempt to fix this grew the arrow towards the target until it
+    /// LOOKED long enough, which cannot help when the direction itself has no extent on screen.
+    ///
+    /// A compass needle does not foreshorten. Its base is a pin, its length is fixed, and the
+    /// only thing the world decides is which way it turns. So the whole arrow is built in pixels:
+    /// nothing here can collapse, clip, land off screen, or end up behind the lens.
+    ///
+    /// **The direction is exact for a target in front and sensible for one behind.** The screen
+    /// offset of a projected point from the centre is `(clip.x/w * W/2, -clip.y/w * H/2)`, so for
+    /// `w > 0` the direction is `(clip.x * W, -clip.y * H)` -- this, with the aspect ratio
+    /// already in it. For `w < 0` that same expression keeps the signs of the target's camera
+    /// space `x` and `y`, so a player behind and to the left gets an arrow pointing left, which
+    /// is the way you have to turn. Dividing by a negative `w` would point it the wrong way, and
+    /// refusing to draw would hide the player you most want to find.
+    ///
+    /// A target exactly along the view axis has no direction on screen; the arrow points up,
+    /// which on any compass means straight ahead.
+    #[must_use]
+    pub fn screen_arrow(
+        &self,
+        target: [f32; 3],
+        screen: [f32; 2],
+        length_px: f32,
+        barb_px: f32,
+    ) -> ScreenArrow {
+        let base = [screen[0] * 0.5, screen[1] * 0.5];
+        // A BEARING, NOT A PROJECTED OFFSET, and the difference is the whole readability of the
+        // thing.
+        //
+        // Aiming the arrow at where the target PROJECTS is exact and useless. A target you are
+        // roughly facing lands near the middle of the frame -- measured live at `target px
+        // 1321,733` against a centre of `1280,720`, forty-three pixels -- so a two-hundred-pixel
+        // arrow was having its direction decided by a forty-pixel quantity, and every small
+        // camera movement swung it right round. It also has no answer at all when the target is
+        // exactly under the reticle, and reverses through infinity as it crosses.
+        //
+        // A compass does not work that way. It reports the angle between where you are FACING
+        // and where the thing IS, on the horizontal plane, and that angle is well behaved
+        // everywhere: zero when you face the target, +/-90 degrees at your shoulders, 180 behind
+        // you, and it changes by exactly as much as you turn. Up is straight ahead.
+        //
+        // Height is deliberately dropped. A player forty metres below reads as *down* on a
+        // compass only by convention, and mixing pitch into the needle makes it swing when you
+        // look at your feet -- the arrow would stop meaning "turn this way".
+        // FROM CLIP SPACE, SO IT CANNOT DISAGREE WITH WHERE THE TARGET IS DRAWN.
+        //
+        // The previous version took the bearing from WORLD axes -- `atan2(dx, dz)` against the
+        // camera's forward -- which quietly assumes a handedness for DARK SOULS II that nothing
+        // had established. It was wrong, and it was wrong in the worst way: consistently
+        // mirrored. The live log has the needle at `-130,-172` (up-left) on the same frame the
+        // target projected to `1366,560`, which is up-RIGHT of a centre at `1280,720`. Opposite
+        // sides, four samples running, while an NPC stood plainly to the player's left.
+        //
+        // The engine's own matrix already carries its convention, so the needle is taken from
+        // there and no assumption is left to get backwards. For a row-vector projection with
+        // `m23 == 1`, `clip.w` IS camera-space depth and `clip.x` is camera-space x times a
+        // positive scale. So `atan2(clip.x, clip.w)` is the angle off the view axis: zero dead
+        // ahead, growing to the side the target is really on, past +/-90 degrees when it is
+        // behind you. The projection divides those same two numbers, which is why the needle and
+        // the drawn target can no longer end up on opposite sides of the screen.
+        //
+        // The scale on `clip.x` is not divided out, so the angle is compressed or stretched by
+        // the field of view rather than being a true bearing. That is a cosmetic distortion of a
+        // monotonic quantity: ahead is still ahead, behind still behind, and the side is exact.
+        let clip = self.to_clip(target);
+        let relative = clip[0].atan2(clip[3]);
+        let (sin, cos) = relative.sin_cos();
+        // Screen y runs down, so "ahead" is -y.
+        let direction = [sin, -cos];
+        let tip = [
+            base[0] + direction[0] * length_px,
+            base[1] + direction[1] * length_px,
+        ];
+        // The barbs run BACK from the tip, turned away from the shaft by `BARB_RADIANS` either
+        // side. Rotating the shaft direction rather than reflecting it keeps the head's opening
+        // the same whichever way the arrow is pointing.
+        let barb = |turn: f32| {
+            let (sin, cos) = turn.sin_cos();
+            let back = [
+                -(direction[0] * cos - direction[1] * sin),
+                -(direction[0] * sin + direction[1] * cos),
+            ];
+            [tip[0] + back[0] * barb_px, tip[1] + back[1] * barb_px]
+        };
+        ScreenArrow {
+            base,
+            tip,
+            left_barb: barb(BARB_RADIANS),
+            right_barb: barb(-BARB_RADIANS),
+        }
+    }
+
     /// Does this camera frame the character the way DARK SOULS II's camera frames a character?
     ///
     /// The strongest oracle available, and the last one added, because it is the only one that
@@ -423,14 +773,32 @@ impl Camera {
     /// character to the edge cannot switch the overlay off mid-fight.
     #[must_use]
     pub fn frames_the_character(&self, world: [f32; 3], screen: [f32; 2]) -> bool {
-        /// How far from the centre, as a fraction of the half-extent, still counts.
-        const TOLERANCE: f32 = 0.30;
-        let Some(point) = self.project(world, screen) else {
-            return false;
-        };
-        let offset_x = (point[0] - screen[0] * 0.5).abs() / (screen[0] * 0.5);
-        let offset_y = (point[1] - screen[1] * 0.5).abs() / (screen[1] * 0.5);
-        offset_x <= TOLERANCE && offset_y <= TOLERANCE
+        let budget = screen[1] * FRAMING_TOLERANCE_SHARE;
+        self.head_offset_px(world, screen)
+            .is_some_and(|(x, y)| x <= budget && y <= budget)
+    }
+
+    /// How far the character's HEAD lands from the middle of the frame, in pixels on each axis.
+    /// `None` when it cannot be projected at all.
+    ///
+    /// # Why the head and not the position the game gives you
+    ///
+    /// `world` is the character's origin, which is at their FEET. DARK SOULS II's camera aims at
+    /// the upper body, so a perfectly correct camera puts the feet a character's height BELOW
+    /// centre -- on a 1440-pixel frame that is a couple of hundred pixels, and measuring it
+    /// against the centre makes a right answer look like a large error.
+    ///
+    /// The head is what the eye uses. The player reported it as "the player's head is always in
+    /// the centre, the base of the arrow is not", and both halves of that are true at once: the
+    /// head IS centred, and the arrow's base is at the feet where it belongs. Measuring the head
+    /// is therefore the only way this test can be tightened without rejecting every real camera.
+    #[must_use]
+    pub fn head_offset_px(&self, world: [f32; 3], screen: [f32; 2]) -> Option<(f32, f32)> {
+        let point = self.project(head(world), screen)?;
+        Some((
+            (point[0] - screen[0] * 0.5).abs(),
+            (point[1] - screen[1] * 0.5).abs(),
+        ))
     }
 
     /// Is `point` somewhere a viewport of `screen` pixels could plausibly show it?
@@ -731,6 +1099,78 @@ mod tests {
 
     const SCREEN: [f32; 2] = [1920.0, 1080.0];
 
+    /// A camera at the origin yawed `degrees` about `+y`.
+    ///
+    /// Written as the ROTATION of the world into camera space -- the transpose of the camera's
+    /// own rotation -- because that is what a world-to-camera matrix holds, and building it the
+    /// other way round would make these tests agree with a wrong `forward`.
+    fn yawed(degrees: f32) -> Camera {
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        let mut view = identity();
+        // Columns are the camera's axes in world space: right = (cos, 0, -sin),
+        // forward = (sin, 0, cos).
+        view[0] = cos;
+        view[2] = sin;
+        view[8] = -sin;
+        view[10] = cos;
+        Camera {
+            view,
+            view_projection: multiply(&view, &projection()),
+        }
+    }
+
+    #[test]
+    fn an_unrotated_camera_looks_down_positive_z() {
+        let forward = camera().forward();
+        assert!((forward[2] - 1.0).abs() < 1e-5, "forward was {forward:?}");
+        assert!(camera().yaw_degrees().abs() < 1e-3);
+    }
+
+    #[test]
+    fn yaw_tracks_the_rotation_it_was_built_from() {
+        for degrees in [-170.0f32, -90.0, -1.0, 0.0, 30.0, 90.0, 179.0] {
+            let reported = yawed(degrees).yaw_degrees();
+            assert!(
+                (reported - degrees).abs() < 1e-2,
+                "built {degrees} degrees, read back {reported}"
+            );
+        }
+    }
+
+    #[test]
+    fn yaw_ignores_pitch() {
+        // The property the turn controller depends on: tilting the camera up or down must not
+        // move the heading, or a yaw loop would chase its own tail every time the camera
+        // bobbed.
+        let flat = yawed(40.0).yaw_degrees();
+        let mut pitched = yawed(40.0);
+        // Tilt: mix some of the camera's own up axis into its forward column, then renormalise
+        // happens inside `forward()`.
+        pitched.view[6] = 0.5;
+        let tilted = pitched.yaw_degrees();
+        assert!(
+            (tilted - flat).abs() < 1e-2,
+            "pitching moved the heading from {flat} to {tilted}"
+        );
+    }
+
+    #[test]
+    fn a_camera_pointed_straight_up_reports_a_heading_rather_than_a_nan() {
+        // No horizontal component at all: there is no heading, and the answer must still be a
+        // number a controller can subtract.
+        let straight_up = Camera {
+            view: {
+                let mut view = identity();
+                view[2] = 0.0;
+                view[6] = 1.0;
+                view[10] = 0.0;
+                view
+            },
+            view_projection: identity(),
+        };
+        assert!(straight_up.yaw_degrees().is_finite());
+    }
+
     #[test]
     fn a_point_straight_ahead_lands_dead_centre() {
         let point = camera()
@@ -909,5 +1349,448 @@ mod tests {
         // A config with `faint_at` below `bold_at` is a user error, not a crash.
         assert!(boldness(50.0, 150.0, 20.0).is_finite());
         assert!(boldness(f32::NAN, 20.0, 150.0).is_finite());
+    }
+}
+
+#[cfg(test)]
+mod viewport_clipping {
+    use super::clip_to_viewport;
+
+    const SCREEN: [f32; 2] = [1000.0, 800.0];
+
+    fn near(a: [f32; 2], b: [f32; 2]) -> bool {
+        (a[0] - b[0]).abs() < 1.5 && (a[1] - b[1]).abs() < 1.5
+    }
+
+    #[test]
+    fn a_segment_wholly_inside_is_untouched() {
+        let clipped = clip_to_viewport([100.0, 100.0], [900.0, 700.0], SCREEN).unwrap();
+        assert!(near(clipped.0, [100.0, 100.0]) && near(clipped.1, [900.0, 700.0]));
+    }
+
+    #[test]
+    fn the_near_plane_blowup_is_trimmed_to_the_edge() {
+        // The live failure: a barb whose far end was thrown to the corner by a near-zero `w`.
+        // The line must survive -- its direction is right -- and must end at the viewport.
+        let clipped = clip_to_viewport([500.0, 400.0], [-40_000.0, -32_000.0], SCREEN).unwrap();
+        assert!(near(clipped.0, [500.0, 400.0]));
+        assert!(clipped.1[0] >= -1.5 && clipped.1[1] >= -1.5);
+        // and it still points the same way
+        assert!(clipped.1[0] < 500.0 && clipped.1[1] < 400.0);
+    }
+
+    #[test]
+    fn a_segment_entirely_off_one_side_is_dropped() {
+        assert!(clip_to_viewport([-500.0, 400.0], [-100.0, 400.0], SCREEN).is_none());
+    }
+
+    #[test]
+    fn a_segment_crossing_the_whole_viewport_keeps_both_edges() {
+        let clipped = clip_to_viewport([-500.0, 400.0], [1500.0, 400.0], SCREEN).unwrap();
+        assert!(near(clipped.0, [-1.0, 400.0]) && near(clipped.1, [1001.0, 400.0]));
+    }
+
+    #[test]
+    fn a_degenerate_point_inside_survives() {
+        assert!(clip_to_viewport([500.0, 400.0], [500.0, 400.0], SCREEN).is_some());
+    }
+}
+
+#[cfg(test)]
+mod heading_from_the_product {
+    use super::{Camera, multiply, view_from_pose};
+
+    /// The projection `0x140001a90` emits, at 90 degrees and 16:9.
+    fn projection() -> super::Matrix {
+        let cot = 1.0f32;
+        let (near, far) = (0.1f32, 1000.0f32);
+        [
+            cot / (16.0 / 9.0),
+            0.0,
+            0.0,
+            0.0, //
+            0.0,
+            cot,
+            0.0,
+            0.0, //
+            0.0,
+            0.0,
+            far / (far - near),
+            1.0, //
+            0.0,
+            0.0,
+            -near * far / (far - near),
+            0.0,
+        ]
+    }
+
+    /// A camera yawed `degrees` about the world up axis, built the way the engine builds one.
+    fn yawed(degrees: f32) -> Camera {
+        let half = degrees.to_radians() * 0.5;
+        let view = view_from_pose([0.0, half.sin(), 0.0, half.cos()], [3.0, 5.0, -7.0]).unwrap();
+        Camera {
+            view,
+            view_projection: multiply(&view, &projection()),
+        }
+    }
+
+    #[test]
+    fn a_captured_camera_with_no_view_half_still_has_a_heading() {
+        // THE LIVE FAILURE. `crate::capture` stores an identity where the view matrix would be,
+        // and the old reading of the view's third axis made every such camera report zero.
+        let full = yawed(40.0);
+        let captured = Camera {
+            view: [
+                1.0, 0.0, 0.0, 0.0, //
+                0.0, 1.0, 0.0, 0.0, //
+                0.0, 0.0, 1.0, 0.0, //
+                0.0, 0.0, 0.0, 1.0,
+            ],
+            view_projection: full.view_projection,
+        };
+        assert!((captured.yaw_degrees() - full.yaw_degrees()).abs() < 0.01);
+    }
+
+    #[test]
+    fn turning_the_camera_changes_the_heading_by_that_much() {
+        let before = yawed(10.0).yaw_degrees();
+        let after = yawed(55.0).yaw_degrees();
+        let mut delta = after - before;
+        while delta > 180.0 {
+            delta -= 360.0;
+        }
+        while delta < -180.0 {
+            delta += 360.0;
+        }
+        assert!((delta.abs() - 45.0).abs() < 0.5, "delta was {delta}");
+    }
+
+    #[test]
+    fn the_heading_ignores_where_the_camera_is_standing() {
+        let near = yawed(25.0);
+        let half = 25.0f32.to_radians() * 0.5;
+        let far_view =
+            view_from_pose([0.0, half.sin(), 0.0, half.cos()], [400.0, -90.0, 250.0]).unwrap();
+        let far = Camera {
+            view: far_view,
+            view_projection: multiply(&far_view, &projection()),
+        };
+        assert!((near.yaw_degrees() - far.yaw_degrees()).abs() < 0.01);
+    }
+}
+
+#[cfg(test)]
+mod framing_is_measured_at_the_head {
+    use super::*;
+
+    const SCREEN: [f32; 2] = [2560.0, 1440.0];
+
+    /// A camera at `eye` looking at `at`, built the way the engine builds one.
+    fn looking(eye: [f32; 3], at: [f32; 3]) -> Camera {
+        let forward = normalize(sub(at, eye)).expect("a direction");
+        let right = normalize(cross([0.0, 1.0, 0.0], forward)).expect("a right axis");
+        let up = cross(forward, right);
+        let mut view = [0.0f32; 16];
+        view[0] = right[0];
+        view[4] = right[1];
+        view[8] = right[2];
+        view[1] = up[0];
+        view[5] = up[1];
+        view[9] = up[2];
+        view[2] = forward[0];
+        view[6] = forward[1];
+        view[10] = forward[2];
+        view[12] = -dot(eye, right);
+        view[13] = -dot(eye, up);
+        view[14] = -dot(eye, forward);
+        view[15] = 1.0;
+        let cot = 1.0f32;
+        let (near, far) = (0.1f32, 1000.0f32);
+        let projection = [
+            cot / (16.0 / 9.0),
+            0.0,
+            0.0,
+            0.0, //
+            0.0,
+            cot,
+            0.0,
+            0.0, //
+            0.0,
+            0.0,
+            far / (far - near),
+            1.0, //
+            0.0,
+            0.0,
+            -near * far / (far - near),
+            0.0,
+        ];
+        Camera {
+            view,
+            view_projection: multiply(&view, &projection),
+        }
+    }
+
+    /// The whole point. A camera aimed at the head is correct, and measuring the FEET against
+    /// the centre calls it a large error -- which is the trap the old test fell into.
+    #[test]
+    fn a_camera_aimed_at_the_head_frames_the_character() {
+        let feet = [10.0, 5.0, -16.0];
+        let camera = looking([10.0, 6.8, -21.0], head(feet));
+        assert!(camera.frames_the_character(feet, SCREEN));
+
+        // Dead centre, not merely inside the budget -- this asserts the arithmetic rather than
+        // the tolerance, so widening the tolerance cannot weaken it.
+        let (x, y) = camera.head_offset_px(feet, SCREEN).expect("on screen");
+        assert!(x < 1.0 && y < 1.0, "the head is centred, got {x},{y}px");
+
+        // And the feet are far from centre while everything is right, which is why the feet
+        // cannot be the thing measured -- and why the arrow is built from the head.
+        let at_feet = camera.project(feet, SCREEN).expect("on screen");
+        assert!(
+            (at_feet[1] - SCREEN[1] * 0.5).abs() > 100.0,
+            "the feet should sit well below centre, got {}",
+            at_feet[1]
+        );
+    }
+
+    /// The case the oracle exists for, and the only one it is now asked to judge: a matrix that
+    /// is a perfectly valid rotation about the WRONG AXIS. It keeps the eye near the player and
+    /// the world the right way up, and it puts the character near a corner. Every other test in
+    /// this module passes it.
+    #[test]
+    fn a_camera_that_shoves_the_character_into_a_corner_is_refused() {
+        let feet = [10.0, 5.0, -16.0];
+        let aim = head(feet);
+        // Aimed most of a right angle away from the character rather than at them.
+        let camera = looking([10.0, 6.8, -21.0], [aim[0] + 6.0, aim[1] - 3.0, aim[2]]);
+        let (x, y) = camera.head_offset_px(feet, SCREEN).expect("on screen");
+        let budget = SCREEN[1] * FRAMING_TOLERANCE_SHARE;
+        assert!(
+            x > budget || y > budget,
+            "this camera is visibly off and must fail, offset was {x},{y}px against {budget}px"
+        );
+        assert!(!camera.frames_the_character(feet, SCREEN));
+    }
+
+    /// The regression that cost a whole live run: a camera a few pixels stale is STILL the
+    /// camera. Tightening this budget to one pixel refused every frame of a real session -- the
+    /// head measured between 8.7 and 315.6 pixels out -- and the overlay drew nothing at all.
+    ///
+    /// Nothing about the arrow depends on this any more; `emit` pins the base in pixels. What is
+    /// being protected here is that the camera SEARCH does not throw away a good candidate.
+    #[test]
+    fn a_camera_a_few_pixels_stale_is_still_accepted() {
+        let feet = [10.0, 5.0, -16.0];
+        let aim = head(feet);
+        let camera = looking([10.0, 6.8, -21.0], [aim[0] + 0.05, aim[1], aim[2]]);
+        let (x, _) = camera.head_offset_px(feet, SCREEN).expect("on screen");
+        assert!(
+            x > 1.0,
+            "this camera is meant to be slightly off, got {x}px"
+        );
+        assert!(camera.frames_the_character(feet, SCREEN));
+    }
+
+    /// "Should the base of the arrow be in the same position no matter what when it's visible? I
+    /// don't think we have any runtime/tests for that." There were none. This is it.
+    ///
+    /// Every camera here is a DIFFERENT amount of wrong -- dead on, a few pixels out, and a long
+    /// way out -- and the base lands on the same pixel in all of them, which is what "pinned"
+    /// has to mean to be worth anything.
+    #[test]
+    fn the_base_lands_dead_centre_however_stale_the_camera_is() {
+        let feet = [10.0, 5.0, -16.0];
+        let tail = head(feet);
+        for sideways in [0.0, 0.05, 0.4, 1.2, -0.9] {
+            let camera = looking([10.0, 6.8, -21.0], [tail[0] + sideways, tail[1], tail[2]]);
+            let shift = camera.pin_for(tail, SCREEN).expect("in front of the lens");
+            let at = camera.project(tail, SCREEN).expect("in front of the lens");
+            let base = [at[0] + shift[0], at[1] + shift[1]];
+            assert!(
+                (base[0] - SCREEN[0] * 0.5).abs() < 0.01
+                    && (base[1] - SCREEN[1] * 0.5).abs() < 0.01,
+                "a camera {sideways} m off aim put the base at {base:?}"
+            );
+        }
+    }
+
+    /// The pin TRANSLATES, it does not turn. If it could rotate the arrow the base would be
+    /// honest and the direction would be a lie, which is worse than what it replaced.
+    #[test]
+    fn pinning_moves_the_arrow_without_turning_it() {
+        let feet = [10.0, 5.0, -16.0];
+        let tail = head(feet);
+        // Deliberately off aim, so the shift is not zero and the test can actually fail.
+        let camera = looking([10.0, 6.8, -21.0], [tail[0] + 0.7, tail[1], tail[2]]);
+        let tip = [tail[0] + 4.0, tail[1] + 1.0, tail[2] + 6.0];
+        let (raw_tail, raw_tip) = camera
+            .project_segment_unclipped(tail, tip, SCREEN)
+            .expect("both ends in front of the lens");
+        let shift = camera.pin_for(tail, SCREEN).expect("in front of the lens");
+        let pinned = [
+            [raw_tail[0] + shift[0], raw_tail[1] + shift[1]],
+            [raw_tip[0] + shift[0], raw_tip[1] + shift[1]],
+        ];
+        let before = (raw_tip[1] - raw_tail[1]).atan2(raw_tip[0] - raw_tail[0]);
+        let after = (pinned[1][1] - pinned[0][1]).atan2(pinned[1][0] - pinned[0][0]);
+        assert!(
+            (before - after).abs() < 1e-4,
+            "the pin turned the arrow by {} degrees",
+            (before - after).to_degrees()
+        );
+    }
+
+    /// The failure that put nothing usable on screen: a world-space arrow aimed near the view
+    /// axis projected to a twelve-pixel stub with both barbs on one pixel. A screen-space arrow
+    /// is the same length wherever the target is, including straight ahead and straight behind.
+    #[test]
+    fn the_arrow_is_the_same_length_wherever_the_target_is() {
+        let me = [10.0, 6.8, -16.0];
+        let camera = looking([10.0, 6.8, -21.0], me);
+        const LENGTH: f32 = 200.0;
+        // Dead ahead, hard left, hard right, straight up, straight down, and behind.
+        for target in [
+            [10.0, 6.8, 40.0],
+            [-40.0, 6.8, -16.0],
+            [60.0, 6.8, -16.0],
+            [10.0, 90.0, -16.0],
+            [10.0, -70.0, -16.0],
+            [10.0, 6.8, -90.0],
+        ] {
+            let arrow = camera.screen_arrow(target, SCREEN, LENGTH, 60.0);
+            let shaft = ((arrow.tip[0] - arrow.base[0]).powi(2)
+                + (arrow.tip[1] - arrow.base[1]).powi(2))
+            .sqrt();
+            assert!(
+                (shaft - LENGTH).abs() < 0.01,
+                "a target at {target:?} gave a shaft of {shaft}px"
+            );
+            assert_eq!(arrow.base, [SCREEN[0] * 0.5, SCREEN[1] * 0.5]);
+            assert_ne!(arrow.left_barb, arrow.right_barb, "barbs collapsed");
+        }
+    }
+
+    /// THE ORACLE IS THE PROJECTION, not a convention this file made up.
+    ///
+    /// A screenshot showed the arrow pointing up-RIGHT with the NPC standing up-LEFT. The first
+    /// attempt at a test for that asserted "+x is to the right when facing +z" -- which is an
+    /// assumption about DARK SOULS II's world axes that nothing here had established, so it
+    /// would have passed a wrong sign just as happily as a right one.
+    ///
+    /// What is NOT an assumption: where the target lands on screen when put through the game's
+    /// own view-projection. That is the same arithmetic the renderer used to draw the NPC, so
+    /// for any target in front of the camera the compass must point the same way as the line
+    /// from the middle of the frame to the target's own pixel. Whatever handedness the engine
+    /// has, both sides of this comparison inherit it, and a sign error breaks the agreement.
+    ///
+    /// The bearing is still worth having over the projection it is checked against: it stays
+    /// well behaved when the target is under the reticle or behind the lens, where the
+    /// projection is noise or nothing.
+    #[test]
+    fn the_needle_agrees_with_where_the_target_projects() {
+        let me = [10.0, 6.8, -16.0];
+        let camera = looking([10.0, 6.8, -21.0], me);
+        let centre = [SCREEN[0] * 0.5, SCREEN[1] * 0.5];
+        // All well in front and well off axis, so the projected offset is large enough to have a
+        // direction worth comparing against.
+        for target in [
+            [30.0, 6.8, 10.0],
+            [-12.0, 6.8, 6.0],
+            [11.0, 26.0, 14.0],
+            [9.0, -14.0, 20.0],
+            [40.0, 6.8, 60.0],
+        ] {
+            let arrow = camera.screen_arrow(target, SCREEN, 200.0, 60.0);
+            let needle = [arrow.tip[0] - centre[0], arrow.tip[1] - centre[1]];
+            let at = camera
+                .project(target, SCREEN)
+                .expect("in front of the lens");
+            let projected = [at[0] - centre[0], at[1] - centre[1]];
+            // Horizontal agreement is what a compass claims. Vertical is deliberately NOT
+            // compared: the needle drops height on purpose, so a target overhead reads as
+            // "straight ahead" rather than "up", and comparing y here would be testing the
+            // opposite of the intended behaviour.
+            assert!(
+                needle[0].signum() == projected[0].signum(),
+                "target {target:?}: needle {needle:?} disagrees with projection {projected:?}"
+            );
+            // ONLY THE SIGN, and two failed attempts at more than that are the argument.
+            //
+            // The on-screen ANGLE of a projected point is not a bearing and cannot be compared
+            // with one. A target at your own eye height lands on the horizon line whatever its
+            // true bearing, so it projects at 90 degrees while the compass correctly reads 38.
+            // A target twenty metres below projects near the bottom of the frame while the
+            // compass correctly reads "ahead". Both comparisons were written, both failed, and
+            // in both cases the code was right and the test was measuring the wrong quantity.
+            //
+            // What survives is the claim the screenshot actually falsified: which SIDE. If the
+            // NPC is to your left, the needle leans left. A sign error -- the whole failure --
+            // cannot pass this, and nothing else here depends on an axis convention this file
+            // asserted for itself.
+        }
+    }
+
+    /// THE IMPOSTOR, VERBATIM, out of the live game. It passed both of `crate::capture`'s
+    /// oracles -- player near centre, head a plausible rise above the feet -- for a whole
+    /// session, because neither of them looks at the horizontal axis and this matrix's first
+    /// column is zero. Every arrow pointed the same way because `clip.x` was the constant `1.4`.
+    #[test]
+    fn the_matrix_that_was_not_a_camera_is_refused() {
+        let impostor: Matrix = [
+            0.0, 3.4405, 0.0, 0.0, //
+            0.0, 0.0, 2.4751, 2.4751, //
+            0.0, 0.0, -0.1, 0.0, //
+            1.4, 0.0, -0.1, 0.0,
+        ];
+        assert!(!looks_like_a_view_projection(&impostor));
+        // And the reason, so a future change to the tolerance cannot quietly let it back in.
+        let forward = length([impostor[3], impostor[7], impostor[11]]);
+        assert!(
+            (forward - 2.4751).abs() < 0.001,
+            "the forward column's length is the measurement, got {forward}"
+        );
+    }
+
+    /// A real camera passes. Built by the same helper the rest of these tests project through,
+    /// so this also pins that the helper is emitting the shape the engine emits.
+    #[test]
+    fn a_real_camera_passes_the_shape_test() {
+        let camera = looking([10.0, 6.8, -21.0], [10.0, 6.8, -16.0]);
+        assert!(looks_like_a_view_projection(&camera.view_projection));
+        let forward = length([
+            camera.view_projection[3],
+            camera.view_projection[7],
+            camera.view_projection[11],
+        ]);
+        assert!(
+            (forward - 1.0).abs() < 0.01,
+            "column 3 of a view-projection is the camera's forward axis and must be unit, \
+             got {forward}"
+        );
+    }
+
+    /// Height must not turn the needle: looking at your feet would otherwise swing it.
+    #[test]
+    fn a_target_far_below_does_not_change_the_bearing() {
+        let me = [0.0, 0.0, 0.0];
+        let camera = looking([0.0, 0.0, -5.0], me);
+        let level = camera.screen_arrow([50.0, 0.0, 0.0], SCREEN, 200.0, 60.0);
+        let below = camera.screen_arrow([50.0, -80.0, 0.0], SCREEN, 200.0, 60.0);
+        assert!(
+            (level.tip[0] - below.tip[0]).abs() < 0.01
+                && (level.tip[1] - below.tip[1]).abs() < 0.01,
+            "height turned the needle: {:?} against {:?}",
+            level.tip,
+            below.tip
+        );
+    }
+
+    #[test]
+    fn a_character_behind_the_lens_is_not_framed() {
+        let feet = [10.0, 5.0, -16.0];
+        let camera = looking([10.0, 6.8, -21.0], head(feet));
+        let behind = [10.0, 5.0, -26.0];
+        assert!(!camera.frames_the_character(behind, SCREEN));
+        assert!(camera.head_offset_px(behind, SCREEN).is_none());
     }
 }

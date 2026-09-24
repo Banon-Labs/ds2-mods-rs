@@ -23,6 +23,98 @@ bd close <id>         # Complete work
 bd dolt push          # Push beads data to remote
 ```
 
+## Frida first, and only then a DLL
+
+**Ported from `er-mods-rs/AGENTS.md` on 2026-09-22, after a session that proved the cost of not
+having it.** The crates were ported from that repo; the workflow that made them tractable was not.
+
+**The order is Frida, then Frida, then Frida, and only then a DLL: prototype with it, run the
+experiment with it, and fix the thing with it if a hook can. Build a DLL when the mechanism is
+already known and the code is the product, never to find something out.** A build plus a stage plus
+a launch is three minutes of the user's session per attempt, and it puts a polling oracle where an
+event belongs; a Frida agent file reloads in place and costs nothing.
+
+Two tests for reaching for the wrong one:
+
+- The question is **who wrote this**, **when did it change**, **which function ran**, or **what is
+  actually in that buffer**. A rebuild can only sample the value afterwards and guess at the cause.
+- The answer will arrive through a **log line you then have to read**. That is a poll wearing a
+  different hat, and a `tail -f` of `ds2-loader.log` is not an oracle, it is the absence of one.
+
+**The failure this was written from (2026-09-22).** `ds2-invasion-path` drew an arrow that pointed
+the wrong way. Ten build/stage/launch cycles went into theories about the arrow's arithmetic --
+world-space versus screen-space, pinning the base, bearings, clip space, a mirrored axis -- across
+roughly three hours, with the user sending screenshots because no instrument in the repo could
+answer. The cause was sixteen floats that had never once been printed:
+
+```text
+[0.0000 3.4405 0.0000 0.0000 | 0.0000 0.0000 2.4751 2.4751
+ | 0.0000 0.0000 -0.1000 0.0000 | 1.4 0.0 -0.1 0.0]
+```
+
+Not a view-projection at all. Its first column is zero, so `clip.x` was the constant `1.4` for
+every point in the world, and no arrow arithmetic could ever have been right. One attach, one
+`hexdump` of the constant buffer, and the session ends in a minute.
+
+### Bringing it up
+
+- **`python3 /home/banon/projects/ds2-mods-rs/scripts/ds2-frida-up.py`** runs the Windows
+  `frida-server.exe` INSIDE the game's pressure-vessel container via `nsenter`, which is the whole
+  trick. `pid:` and `net:` are shared with the host while `mnt:` and `user:` are not, so entering
+  needs no privilege and the port is reachable afterwards. A server started BESIDE the container
+  talks to a different wineserver: it accepts the TCP connection and then never answers
+  `enumerate_processes`, so a watcher sits silent instead of failing. **An open port is not proof
+  of a working server**; `--force` replaces one that has gone stale.
+- **The world gate is the overlay's own `roster:` line.** `ds2-invasion-path` writes it only after
+  walking `CharacterManager` from a live `GameManagerImp` and resolving the local player, so it
+  cannot appear at the title screen or during a load. Launch with `--invasion-path
+  --invasion-path-on`, or pass `--allow-early` when the boot itself is what you are measuring.
+- **Attach once and hot-reload the agent file:**
+  `uv run --with frida python3 /home/banon/projects/ds2-mods-rs/scripts/ds2-frida-watch.py --agent
+  scripts/frida/<agent>.js`. Editing the `.js` reloads it in place. Every attach/detach cycle
+  installs and reverts trampolines under running game threads, so one attach and many edits is both
+  the intended workflow and the safer one.
+- **A plain `frida.attach()` fails** -- it injects a Linux bootstrapper into a Windows process.
+  Measured on Frida 17.17.0 against Elden Ring; not re-measured here, and there is no reason to.
+- **`python3 .../ds2-frida-up.py --selftest` needs no game** and proves the container entry, the
+  download pin, the stop-by-comm behaviour and the world gate.
+
+### What NOT to do
+
+- **Never arm `MemoryAccessMonitor` on a live game object.** It revokes access to a whole 4 KB page
+  and turns every access by every thread into a fault Frida must resume. Use a hardware watchpoint
+  instead: four per thread, eight bytes each, no protection change.
+- **It is a method on a THREAD OBJECT, not on `Thread`.** `Thread.setHardwareWatchpoint` does not
+  exist. The real one comes off `Process.enumerateThreads()`, slot id first:
+
+  ```js
+  for (const thread of Process.enumerateThreads()) {
+    thread.setHardwareWatchpoint(0, address, 4, 'w');   // slot, address, size, 'r'|'w'|'rw'
+  }
+  Process.setExceptionHandler(function (details) { /* details.address is the writer */ });
+  ```
+
+- **Arm ONE thread -- the one that would do the write. Arming every thread kills the game.** Inside
+  an `Interceptor`, `Process.getCurrentThreadId()` is the thread that just ran the function you
+  care about.
+- **A watchpoint outlives the agent that set it, so NEVER hard-kill a watcher holding one.** It
+  lives in the thread's debug registers. Once the agent is gone nothing services the exception and
+  the next write to that address kills the game with nothing in the crash log. The agent must
+  export `dispose` and unset every slot there, and the caller must not wrap the watcher in
+  `timeout` or any other hard kill.
+- **Give the watcher its own background task. Never chain it after anything** -- the harness's cap
+  applies to the whole chain and lands on the watcher at the end of it.
+- **Count the successes and report the failures.** An instrument that reports an absence it cannot
+  detect is worse than no instrument.
+- **A probe that catches nothing has told you nothing. Rule out the near end first.**
+
+### Not yet ported
+
+`scripts/ds2_run_lib.py` still carries Elden Ring's `WorldChrMan` walk (`player_in_a_world`,
+`world_read_selftest`, the RVA constants). Its selftest passes because it plants its own memory, so
+it proves arithmetic rather than DARK SOULS II offsets. Nothing in the Frida path depends on it --
+the world gate reads the loader log instead -- but do not read those functions as DS2 facts.
+
 ## Non-Interactive Shell Commands
 
 **ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.

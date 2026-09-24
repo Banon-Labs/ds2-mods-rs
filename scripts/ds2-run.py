@@ -227,10 +227,23 @@ INVASION_PATH_SECTION = "invasion_path"
 KEY_INVASION_PATH_ENABLED = "enabled"
 KEY_INVASION_PATH_TOGGLE = "toggle_key"
 KEY_INVASION_PATH_START_ENABLED = "start_enabled"
+KEY_INVASION_PATH_MARKER_EFFECT_ID = "marker_effect_id"
+KEY_INVASION_PATH_NPC_SELF_CHECK = "npc_self_check"
 #: Mirrors `LOG_PREFIX` in `crates/ds2-invasion-path/src/log.rs`. Grep for it when a run
 #: disappoints: `roster:` and `camera:` under this prefix are the two lines that say whether the
 #: overlay found anything, and `overlay:` is the one that says whether it could draw at all.
 INVASION_PATH_LOG_PREFIX = "ds2-invasion-path:"
+
+#: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/input_harness.rs`.
+INPUT_HARNESS_SECTION = "input_harness"
+KEY_INPUT_HARNESS_ENABLED = "enabled"
+#: Mirrors `LOG_PREFIX` in `crates/ds2-input-harness/src/log.rs`. Grep for it to find out
+#: whether the three device polls were hooked, which one owns the frame tick, and what every
+#: command the run sent actually did.
+INPUT_HARNESS_LOG_PREFIX = "ds2-input-harness:"
+#: Mirrors `COMMAND_FILE_NAME` in `crates/ds2-input-harness/src/device.rs`. The file an agent
+#: writes to drive the camera while the game is already running; it lives beside the exe.
+INPUT_HARNESS_COMMAND_FILE = "ds2-input-harness-cmd.txt"
 KEY_BUILD_IMPORT_ENABLED = "enabled"
 
 #: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/item_warn.rs`.
@@ -1095,6 +1108,9 @@ def config_text(
     invasion_path: bool = False,
     invasion_path_key: str = "semicolon",
     invasion_path_start_enabled: bool = False,
+    invasion_path_marker_effect_id: int = 0,
+    invasion_path_npc_self_check: bool = False,
+    input_harness: bool = False,
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
@@ -1596,11 +1612,11 @@ def config_text(
 # it draws through the screen during multiplayer, which is a thing to opt into rather than to
 # discover.
 #
-# What it draws is an ARROW per player, not a walkable route. The Elden Ring crate this is ported
-# from follows the navmesh; DARK SOULS II has its own navigation stack (`NvRoutePlanner`,
-# `NvRouteNavigator`) and the half that READS a finished route is ported and tested, but asking
-# for one takes navigation-graph ids that nothing can produce from a world position yet. See
-# `crates/ds2-invasion-path/src/navpath.rs`.
+# What it draws is a walkable ROUTE along DARK SOULS II's own navigation mesh, and an arrow when
+# the planner reports no way to walk there. Asking for a route was believed impossible here for a
+# while -- the request takes navigation-graph ids, and the conversion from a world position was
+# recorded as an asynchronous engine job. It is not one: it is a plain synchronous call that
+# returns the id in a register. See `crates/ds2-invasion-path/src/navquery.rs`.
 {KEY_INVASION_PATH_ENABLED} = {str(invasion_path).lower()}
 # Live, like the two sort bindings above: re-read about once a second, so the key moves without a
 # restart. A name that does not parse keeps the one already working and says so in the log.
@@ -1614,6 +1630,68 @@ def config_text(
 # the roster and camera code runs without anyone having to press anything.
 {KEY_INVASION_PATH_TOGGLE} = "{invasion_path_key}"
 {KEY_INVASION_PATH_START_ENABLED} = {str(invasion_path_start_enabled).lower()}
+# THE PRISM STONE TRAIL. `0` is off. `833` is the Prism Stone's own effect -- the item DARK SOULS
+# II calls a Prism Stone and ELDEN RING renamed to Rainbow Stone, whose glowing pebble is the
+# whole reason the sibling crate places effects along its route at all. `833..=839` are its seven
+# colours, a seven-entry table the game reaches through an emevd instruction named
+# `七色石発射`, "fire seven-colour stone".
+#
+# ON by nothing: spawning an effect is the only thing this DLL does that changes the game rather
+# than drawing over it, and the stones are placed by the engine's own spawn from the game's own
+# tick. Live, like every setting here -- change the id with the game running.
+{KEY_INVASION_PATH_MARKER_EFFECT_ID} = {invasion_path_marker_effect_id}
+# THE ONLY WAY A SOLO PLAYER CAN SEE ANY OF THIS WORK.
+#
+# Everything above starts with ANOTHER PLAYER in your session. Alone, the roster reads
+# `remotes=0`, no route is ever asked for, no stone is ever placed, and every line in the log is
+# an install line -- "hooked", "armed", "requested" -- with not one execution line among them. A
+# real session read `characters=6 players=1 remotes=0`: six objects walked and nothing to point
+# at.
+#
+# The other five objects are the answer. Turn this on and the overlay routes to the nearest
+# NON-PLAYER character instead: a live object at a real world position, standing on the navmesh,
+# so the whole chain runs -- snap both ends, ask the planner, decode the path, space the stones
+# along it, spawn each one. A solo player standing in Majula exercises every line of it.
+#
+# It narrates. Three failures look identical on the ground -- an effect that is not in this map,
+# a spawn the engine's quality throttle discarded, and one that worked and is simply not where
+# you are looking -- so it reads the quality byte and the missing-effect tree AT the attempt,
+# when two of the three are still visible. It sweeps all seven colours, one per stone, so one run
+# says which of them appear. Then it watches them at 1 s, 3 s and 10 s -- which is what says
+# whether a Prism Stone LINGERS or merely flashes -- and takes them down again.
+#
+# OFF unless you are testing. It routes to something you did not ask for and spawns effects to do
+# it. Grep the log for `self-check:`.
+{KEY_INVASION_PATH_NPC_SELF_CHECK} = {str(invasion_path_npc_self_check).lower()}
+
+[{INPUT_HARNESS_SECTION}]
+# LETS AN AGENT MOVE THE CAMERA, AND TAKES YOUR CONTROLLER AWAY WHILE IT DOES.
+#
+# It detours four device polls and, after each one has run, writes the fields the engine reads.
+# Three are the `DLUID` devices -- pad (XInput OR a DirectInput joystick OR a third backend, all
+# normalising into the same six floats), DirectInput mouse, keyboard. The fourth is the one that
+# actually matters for the camera: `WindowsMouseDevice`, which reads `GetCursorPos` and stores a
+# clamped client-space position that `parseCameraInput` DIFFERENCES frame to frame. Writing at
+# the device means the deadzone, the sensitivity setting and the key mapping all still apply, so
+# an injected input behaves like a real one.
+#
+# OFF by default because it is the only thing in this file that can stop your own input reaching
+# the game. Every command it takes is frame-bounded and the input block has a hard cap of about
+# ten minutes, so a harness that wedges lets go on its own.
+#
+# DRIVE IT while the game runs by writing two lines to `{INPUT_HARNESS_COMMAND_FILE}` beside the
+# exe: a sequence number, then a command. It runs when the NUMBER changes. Commands:
+#   block <frames> | unblock | release | status
+#   axis <index> <value> <frames> | mouse <dx> <dy> <frames> | buttons <hex> <frames>
+#   turn <degrees> [frames]   -- closed loop on the camera's own yaw
+#   probe [frames]            -- hold each channel and report what the camera did
+#   channel <name>            -- what `turn` drives: mouse-x (default), mouse-y, pad0..pad5
+#
+# `turn` and `probe` MEASURE against the camera `[{INVASION_PATH_SECTION}]` draws through, so they
+# need that feature on; without it they refuse rather than guess. `status` also reports how many
+# times each poll has fired, which is how you tell "pressed nothing" from "never reached". Grep
+# the log for `{INPUT_HARNESS_LOG_PREFIX}`.
+{KEY_INPUT_HARNESS_ENABLED} = {str(input_harness).lower()}
 
 [{CRASH_SECTION}]
 {crash_banner}# STARTUP-ONLY, both of them. The handler is installed in DllMain BEFORE `neuter_arxan`, because
@@ -1680,6 +1758,9 @@ def write_config(
     invasion_path: bool = False,
     invasion_path_key: str = "semicolon",
     invasion_path_start_enabled: bool = False,
+    invasion_path_marker_effect_id: int = 0,
+    invasion_path_npc_self_check: bool = False,
+    input_harness: bool = False,
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
@@ -1713,6 +1794,9 @@ def write_config(
         invasion_path,
         invasion_path_key,
         invasion_path_start_enabled,
+        invasion_path_marker_effect_id,
+        invasion_path_npc_self_check,
+        input_harness,
     )
     path.write_text(text, encoding="utf-8")
     return path, text
@@ -1804,6 +1888,9 @@ def dry_run(
     invasion_path: bool = False,
     invasion_path_key: str = "semicolon",
     invasion_path_start_enabled: bool = False,
+    invasion_path_marker_effect_id: int = 0,
+    invasion_path_npc_self_check: bool = False,
+    input_harness: bool = False,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
@@ -1855,6 +1942,9 @@ def dry_run(
             invasion_path,
             invasion_path_key,
             invasion_path_start_enabled,
+            invasion_path_marker_effect_id,
+            invasion_path_npc_self_check,
+            input_harness,
         ):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
         else:
@@ -1902,6 +1992,9 @@ def dry_run(
                 invasion_path=invasion_path,
                 invasion_path_key=invasion_path_key,
                 invasion_path_start_enabled=invasion_path_start_enabled,
+                invasion_path_marker_effect_id=invasion_path_marker_effect_id,
+                invasion_path_npc_self_check=invasion_path_npc_self_check,
+                input_harness=input_harness,
             ),
             indent="[dry-run]   | ",
         )
@@ -2200,6 +2293,98 @@ def duplicate_save_for_seamless(seamless_dll: str) -> None:
         )
 
 
+#: The Hyprland monitor DARK SOULS II must open on, by DRM connector name.
+#:
+#: Without a rule the window lands wherever Hyprland's focus happens to be when Steam gets round to
+#: mapping it, which is whichever monitor was last clicked -- so the game turns up on a different
+#: screen between runs and the one being watched is not always the one it appears on.
+#:
+#: `DP-1`, not `DP-0`: Hyprland takes its names from DRM connectors, which start at one
+#: (`/sys/class/drm` lists `card1-DP-1`, `card1-DP-2`, `card1-DP-3` here). NVIDIA's own tooling
+#: numbers the same physical ports from zero, which is where `DP-0` comes from, but this machine is
+#: a Radeon RX 6900 XT and has no connector by that name. Requested by the user 2026-09-22.
+GAME_MONITOR = "DP-1"
+
+
+#: Hyprland's window selector for the game, by the class Proton actually gives it. Confirmed live
+#: rather than assumed: `hyprctl clients` reports `steam_app_335300` for the running game.
+GAME_WINDOW_MATCH = f"class:^steam_app_{APPID}$"
+
+
+def hypr(lua: str) -> str | None:
+    """Run one Lua expression in Hyprland and hand back what it printed, or `None`.
+
+    THIS BUILD HAS A LUA CONFIG PARSER, AND THAT CHANGES EVERY INVOCATION. On Hyprland 0.56 the
+    old spellings are all refused, each with a different error, and none of them is the one an
+    agent reaches for first:
+
+        hyprctl keyword windowrulev2 "monitor DP-1, class:..."  -> "keyword can't work with
+                                                                   non-legacy parsers. Use eval."
+        hyprctl keyword windowrule   "monitor DP-1, class:..."  -> same refusal
+        hyprctl dispatch focuswindow class:...                  -> parsed as Lua; syntax error
+        hyprctl --batch "dispatch a ; dispatch b"               -> parsed as Lua; syntax error
+
+    What works is `hl.dsp.<thing>{...}`, which BUILDS a dispatcher and does not run it -- calling
+    `hl.dsp.focus{ monitor = "DP-1" }` on its own returns an `HL.Dispatcher` and the focus does not
+    move, which is a silent no-op and exactly the sort of thing that gets reported as done. It has
+    to be handed to `hl.dispatch`. `repl` is used rather than `eval` because `eval` answers a bare
+    `ok` and swallows the value, so it cannot confirm anything.
+    """
+    if shutil.which("hyprctl") is None:
+        return None
+    try:
+        result = subprocess.run(
+            ["hyprctl", "repl", lua], capture_output=True, text=True, timeout=5
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    answer = result.stdout.strip()
+    return None if answer.startswith("error:") else answer
+
+
+def pin_to_monitor() -> None:
+    """Point Hyprland at [`GAME_MONITOR`] so the game's window maps there.
+
+    A new window opens on the focused monitor, so focusing the wanted one immediately before
+    `steam -applaunch` is what puts the game where it is meant to go. This is best-effort by
+    design: [`settle_on_monitor`] moves the window outright once it exists, which is what covers
+    the case where focus wanders while Steam is still starting up.
+    """
+    if hypr(f'return hl.dispatch(hl.dsp.focus{{ monitor = "{GAME_MONITOR}" }})') is None:
+        return
+    print(f"[monitor] focused {GAME_MONITOR} so the game maps there")
+
+
+def settle_on_monitor() -> None:
+    """Move the game's window to [`GAME_MONITOR`] and SAY WHERE IT ACTUALLY ENDED UP.
+
+    Called after the DLL's own log line has confirmed the run, by which point the window exists.
+    The move is issued by class rather than by focus, so it does not matter what the user clicked
+    on while the game was loading.
+
+    The check afterwards is the point. A dispatcher that was built and never run fails silently,
+    and so does a move to a monitor that has been unplugged; reading the window's monitor back is
+    the difference between reporting a pin and having made one.
+    """
+    moved = hypr(
+        "return hl.dispatch(hl.dsp.window.move{ "
+        f'monitor = "{GAME_MONITOR}", window = "{GAME_WINDOW_MATCH}" }})'
+    )
+    if moved is None:
+        return
+    where = hypr(
+        "local w = hl.get_windows() "
+        f'for _, x in ipairs(w) do if x.class == "steam_app_{APPID}" then '
+        'return x.monitor and x.monitor.name or "?" end end return "no window"'
+    )
+    if where == GAME_MONITOR:
+        print(f"[monitor] game is on {GAME_MONITOR}")
+    else:
+        print(f"[monitor] WANTED {GAME_MONITOR}, GAME IS ON {where}")
+
+
 def launch(
     probe: str,
     observe: float,
@@ -2231,6 +2416,9 @@ def launch(
     invasion_path: bool = False,
     invasion_path_key: str = "semicolon",
     invasion_path_start_enabled: bool = False,
+    invasion_path_marker_effect_id: int = 0,
+    invasion_path_npc_self_check: bool = False,
+    input_harness: bool = False,
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
@@ -2277,6 +2465,9 @@ def launch(
         invasion_path,
         invasion_path_key,
         invasion_path_start_enabled,
+        invasion_path_marker_effect_id,
+        invasion_path_npc_self_check,
+        input_harness,
     )
     print(f"[config] {config_path}")
 
@@ -2290,6 +2481,25 @@ def launch(
     # Deliberately NOT deleting the log: the DLL rotates it to `.prev` itself on its first write,
     # and deleting here would destroy the previous run's evidence for no gain.
     tail = LogTail(log_path)
+
+    # TEAR DOWN FIRST, ALWAYS. `steam -applaunch` is a request to a client that already believes
+    # it knows whether the app is running, and while any process of the previous session survives
+    # -- Steam's own `reaper` is the one that does -- the client answers by doing NOTHING: no
+    # error, no window, and the testimony wait below times out four minutes later against a game
+    # that was never started. Measured 2026-09-22: `pkill -x DarkSoulsII.exe` reported the game
+    # gone and left SIXTEEN processes of its session alive, and the relaunch wrote an empty log.
+    # This is also what "launch" means as an instruction: remove what is running, then start.
+    torn = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "ds2-teardown.py")],
+        capture_output=True, text=True, timeout=60,
+    )
+    for line in torn.stdout.splitlines():
+        print(line)
+    if torn.returncode != 0:
+        print("[launch] REFUSING: the previous session did not die; see the survivors above.")
+        return EXIT_ERROR
+
+    pin_to_monitor()
 
     environment = launch_env(probe)
     argv = ["steam", "-applaunch", APPID]
@@ -2350,6 +2560,9 @@ def launch(
     print(f"[launch] waiting up to {TESTIMONY_BUDGET_SECONDS:.0f}s for {log_path}")
 
     verdict = await_testimony(tail)
+    # Once the DLL has testified the window exists, so this is the first moment the move can
+    # actually land. Before it there is nothing to move.
+    settle_on_monitor()
     if verdict["status"] != "confirmed":
         if verdict["status"] == "attached-silent":
             reason = "the DLL LOADED but dearxan never reported"
@@ -3662,6 +3875,32 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--invasion-path-markers",
+        dest="invasion_path_marker_effect_id",
+        type=int,
+        default=0,
+        metavar="EFFECT_ID",
+        help=(
+            "lay the game's OWN glowing stones along the route, one effect id per marker. 0 is "
+            "off and is the default. 833 is the Prism Stone -- the item ELDEN RING renamed to "
+            "Rainbow Stone -- and 833..=839 are its seven colours. This is the only setting here "
+            "that makes the DLL change the game rather than draw over it: the stones are real "
+            "effects, spawned by the engine from the game's own tick."
+        ),
+    )
+    parser.add_argument(
+        "--invasion-path-self-check",
+        dest="invasion_path_npc_self_check",
+        action="store_true",
+        help=(
+            "route to the nearest NPC instead of waiting for another player, and narrate every "
+            "step in the log. THE ONLY WAY A SOLO RUN CAN EXERCISE ANY OF THIS: alone, the "
+            "roster reads remotes=0, nothing is ever requested and every line is an install "
+            "line. Pairs with --invasion-path-markers to also place the stones, sweep all seven "
+            "colours, and report at 1s/3s/10s whether they linger. Grep for `self-check:`."
+        ),
+    )
+    parser.add_argument(
         "--invasion-path-on",
         dest="invasion_path_start_enabled",
         action="store_true",
@@ -3669,6 +3908,23 @@ def main() -> int:
             "start with the overlay already switched on. WHAT A TEST RUN WANTS: the roster read, "
             "the camera search and the draw all happen without anyone pressing anything, so a "
             "headless run produces the `roster:` and `camera:` lines on its own."
+        ),
+    )
+    parser.add_argument(
+        "--input-harness",
+        dest="input_harness",
+        action="store_true",
+        help=(
+            "TURN ON the agent-driven input harness: it detours DARK SOULS II's three DLUID "
+            "device polls (pad, mouse, keyboard) and, after each one runs, writes the fields "
+            "the engine reads. OFF by default, because it is the only thing here that can stop "
+            "YOUR input reaching the game. Drive it while the game runs by writing a sequence "
+            f"number and a command to `{INPUT_HARNESS_COMMAND_FILE}` beside the exe -- "
+            "`turn <degrees>` closes a loop on the camera's own yaw, `block <frames>` blanks "
+            "every human input, `probe` reports which pad axis actually moves the camera. "
+            "`turn` and `probe` measure against the camera --invasion-path draws through and "
+            "refuse without it. Every command is frame-bounded; the block caps at ten minutes. "
+            f"Grep the log for `{INPUT_HARNESS_LOG_PREFIX}`."
         ),
     )
     parser.add_argument(
@@ -3771,6 +4027,9 @@ def main() -> int:
             args.invasion_path,
             args.invasion_path_key,
             args.invasion_path_start_enabled,
+            args.invasion_path_marker_effect_id,
+            args.invasion_path_npc_self_check,
+            args.input_harness,
         )
     return launch(
         args.probe,
@@ -3803,6 +4062,9 @@ def main() -> int:
         args.invasion_path,
         args.invasion_path_key,
         args.invasion_path_start_enabled,
+        args.invasion_path_marker_effect_id,
+        args.invasion_path_npc_self_check,
+        args.input_harness,
     )
 
 

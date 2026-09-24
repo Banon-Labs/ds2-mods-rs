@@ -6,25 +6,30 @@
 // Windows-only in practice; ungated so the assignment logic below stays host-testable.
 #![cfg_attr(not(windows), allow(dead_code))]
 
-use crate::geometry::{self, Arrow};
+use crate::geometry;
 
 /// What to draw for one player.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum RouteShape {
-    /// A walkable route: world-space points along the ground.
+    /// A walkable route: world-space points along the ground, start first.
     ///
-    /// **Nothing produces this yet.** The engine's route READER is implemented and tested in
-    /// `crate::navpath`; what is missing is the request, which needs a world position turned
-    /// into a navigation-graph id -- see [`ds2_rva::NV_ROUTE_PLANNER_GOAL_OFFSET`]. The variant
-    /// exists because the reader is real and the day the request lands, this is where its output
-    /// arrives; carrying it costs one enum tag and keeps the draw path from having to change.
-    #[allow(dead_code)]
-    // DEBT: the producer is blocked on the graph-id snap, not on this crate.
+    /// Produced by `crate::gametick`, which asks `NvRoutePlanner` for one on the game's own tick
+    /// and decodes the answer with `crate::navpath`. The two ends are world positions snapped to
+    /// navigation-graph ids by `crate::navquery::snap` -- the step this variant used to be
+    /// blocked on, and which turned out to be an ordinary synchronous call rather than the
+    /// asynchronous job bd `ds2-mods-rs-4yd` was filed on.
+    ///
+    /// Only the nearest player gets one; see the comment at the `routed` binding in
+    /// `crate::windows_impl::draw_for` for why.
     Walk(Vec<[f32; 3]>),
     /// No walkable route is available, so an arrow leaves the player's body pointing at the
     /// target. This is what ships today, and it is the same fallback the Elden Ring crate uses
     /// when its navmesh answers "there is no way to walk there".
-    Arrow(Arrow),
+    ///
+    /// **The target's world position, not a shape.** The arrow is built in pixels at draw time
+    /// by [`crate::geometry::Camera::screen_arrow`], because a world-space arrow pointing near
+    /// the view axis foreshortens to a stub -- and that is the usual case, not a rare one.
+    Arrow([f32; 3]),
 }
 
 /// One player's overlay, ready to project.
@@ -127,12 +132,7 @@ mod tests {
     use super::*;
 
     fn arrow() -> RouteShape {
-        RouteShape::Arrow(Arrow {
-            tail: [0.0; 3],
-            tip: [0.0, 0.0, 1.0],
-            left_barb: [0.0; 3],
-            right_barb: [0.0; 3],
-        })
+        RouteShape::Arrow([0.0, 0.0, 1.0])
     }
 
     #[test]

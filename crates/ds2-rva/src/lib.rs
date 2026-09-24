@@ -6141,10 +6141,12 @@ pub const CHARACTER_CTRL_POSITION_OFFSET: usize = 0x90;
 //   NvRouteNavigator   0x1411e2c60   NvNaviNodePathFindingTask 0x1411e2fd8
 //   NvNaviPolyNearestSearchTask 0x1411e3038   ChrAiNavimeshCtrl 0x1410ede30
 //
-// The request/poll shape is the same one Elden Ring's `CSHkAiWorld` has. WHAT IS NOT HERE YET is
-// the step that turns a world position into the graph id the planner wants -- see
-// [`NV_ROUTE_PLANNER_GOAL_OFFSET`]. Until that lands this mod draws the arrow, which is the
-// degraded mode the Elden Ring crate also falls back to when the navmesh cannot answer.
+// The request/poll shape is the same one Elden Ring's `CSHkAiWorld` has. THE WHOLE CHAIN IS HERE
+// NOW: the world-position-to-graph-id snap is below under THE SNAP, the planner factory and the
+// tick that steps it under THE GAME TICK, and `ds2-invasion-path`'s `navquery` module calls them
+// in that order. The arrow remains as the fallback for when the planner answers
+// [`NV_ROUTE_PLANNER_FLAG_FAILED`], which is the same degraded mode the Elden Ring crate uses
+// when its navmesh cannot answer.
 
 /// Offset of `NvNavigationSystem` in [`GAME_MANAGER_IMP`]. `+0xBC0`.
 ///
@@ -6154,6 +6156,13 @@ pub const CHARACTER_CTRL_POSITION_OFFSET: usize = 0x90;
 pub const GAME_MANAGER_NAV_SYSTEM_OFFSET: usize = 0xBC0;
 
 /// `NvRoutePlanner -> route`. `+0x48` -- the finished polyline, once the flags say so.
+///
+/// **THE ROUTE IS EMBEDDED HERE. THIS IS NOT A POINTER TO ONE.** `0x14042ee40` loads the planner
+/// into `lVar6` and passes `lVar6 + 0x48` to `0x140bb5cd0`, which reads `param_4 + 0x18` as the
+/// segment count -- so the count is at `planner + 0x60`. The clear path does the same address-of
+/// (`FUN_140bb3a10(*(longlong *)(param_1 + 0x10) + 0x48)`). A reader that dereferences `+0x48`
+/// decodes from the route`s own first field, produces nothing, and reports a successful search as
+/// NO ROUTE -- a failure that looks exactly like the real one.
 ///
 /// From `0x14042ee40`, the navmesh controller's destination step: when the goal is unchanged and
 /// [`NV_ROUTE_PLANNER_FLAGS_OFFSET`] reports a result, it passes `planner + 0x48` to
@@ -6181,14 +6190,50 @@ pub const NV_ROUTE_PLANNER_FLAG_PENDING: u8 = 0x01;
 pub const NV_ROUTE_PLANNER_FLAG_READY: u8 = 0x02;
 
 /// [`NV_ROUTE_PLANNER_FLAGS_OFFSET`] bit meaning "the search answered, and the answer is no".
+///
+/// **TEST THIS BEFORE [`NV_ROUTE_PLANNER_FLAG_READY`], ALWAYS.** All three ways a search can end
+/// without a route -- `0x140bb4310` (the endpoints are in different parts objects and no gate
+/// joins them), `0x140bb4610` (same parts object, no node pair) and `0x140bb4a60` (an endpoint
+/// id is [`NAVI_GRAPH_ID_NONE`]) -- finish with the same instruction:
+///
+/// ```text
+/// or  byte ptr [planner + 0x30], 6
+/// ```
+///
+/// which sets READY *and* FAILED in one write. A poller that asks "is READY set?" first therefore
+/// believes every failure, and goes on to read `planner + 0x48` -- which those paths just left at
+/// whatever it was, because the failure paths free the scratch arrays and never build a route.
+/// The order is not a style preference; it is the difference between falling back to the arrow
+/// and dereferencing a stale pointer in someone's invasion.
 pub const NV_ROUTE_PLANNER_FLAG_FAILED: u8 = 0x04;
 
-/// `NvRoutePlanner -> goal`. `+0x34`, and **the reason the route is not drawn yet**.
+/// `NvRoutePlanner -> start`. `+0x34`, a packed navigation-graph id.
 ///
-/// `0x140bb4090(planner, a, b, c, d)` is the request, and it writes `+0x34`, `+0x38`, `+0x3c`,
-/// `+0x40` then sets [`NV_ROUTE_PLANNER_FLAG_PENDING`]. `+0x34` is a packed navigation-graph id,
-/// not a world position -- `NvRoutePlanner::Update` (`0x140bb4110`, slot 2 of its vtable) feeds it
-/// to `0x140bb2620(parts_table, id | 0x1ffff)` and dispatches on what comes back:
+/// **THIS CONSTANT USED TO BE CALLED `NV_ROUTE_PLANNER_GOAL_OFFSET` AND HELD `0x34`, AND BOTH
+/// HALVES OF THAT WERE WRONG TOGETHER.** `+0x34` is the START; the goal is at
+/// [`NV_ROUTE_PLANNER_GOAL_OFFSET`], sixteen bits further along. The old name with the old value
+/// is the one mistake that cannot be caught by a crash: a planner asked to route from the
+/// destination to the player answers perfectly well, and the line it draws runs the right shape
+/// in the wrong direction.
+///
+/// The correction is read off the engine's only caller. `0x14042ece0(ChrAiNavimeshCtrl*, const
+/// float4* destination)` is "go to this world point", and it ends:
+///
+/// ```text
+/// eax = 0x14042d1f0(ctrl)                                  ; the AGENT'S OWN node id
+/// r8d = 0x14042c9a0(ctrl, destination, 10.0, 0x40, NULL)   ; the DESTINATION snapped
+/// 0x14042ee40(ctrl, eax, r8d, 200.0)  ->  0x140bb4090(planner, eax, r8d, capability, 200.0)
+/// ```
+///
+/// and `0x140bb4090` stores its second argument at `+0x34`. `0x14042d1f0` is unambiguous about
+/// which is which: it caches its answer in the controller at `+0x78` and recomputes it by
+/// snapping the character's own position through vtable slot `+0x148`. The agent's own node is
+/// the start of the route the agent is about to walk.
+///
+/// # The id itself
+///
+/// `NvRoutePlanner::Update` (`0x140bb4110`, slot 2 of its vtable) feeds both ids to
+/// `0x140bb2620(parts_table, id | 0x1ffff)` and dispatches on what comes back:
 ///
 /// ```text
 /// bits  0..14   index within the parts object
@@ -6197,13 +6242,109 @@ pub const NV_ROUTE_PLANNER_FLAG_FAILED: u8 = 0x04;
 /// bits 30..31   a validity pair; both clear means usable
 /// ```
 ///
-/// **Turning a world position into one of those ids is the missing step.** The engine does it
-/// asynchronously through `NvNaviPolyNearestSearchTask`, and the AI reaches the ids a different
-/// way again -- from state its own controller already holds. Reconstructing either by hand would
-/// mean fabricating an update context the game normally supplies, which is exactly what
-/// bd `ds2-call-the-games-own-functions` says not to do. The inverse direction IS solved:
-/// `0x140bad5a0(graph_world, out, id)` decodes an id back to a position.
-pub const NV_ROUTE_PLANNER_GOAL_OFFSET: usize = 0x34;
+/// [`NAVI_GRAPH_ID_NONE`] is the "no node here" answer and must never be requested.
+pub const NV_ROUTE_PLANNER_START_OFFSET: usize = 0x34;
+
+/// `NvRoutePlanner -> goal`. `+0x38`, a packed navigation-graph id, same encoding as
+/// [`NV_ROUTE_PLANNER_START_OFFSET`].
+///
+/// Third argument of `0x140bb4090`, and the snapped DESTINATION at the only call site -- see
+/// [`NV_ROUTE_PLANNER_START_OFFSET`] for the derivation, which establishes both offsets at once
+/// because it reads one call and one store instruction per field.
+///
+/// `NvRoutePlanner::Update` reads this one second (`this[7]._vfptr` in the decompiler's numbering)
+/// and falls into `0x140bb4a60` when either id is [`NAVI_GRAPH_ID_NONE`]. That function frees the
+/// two scratch arrays and does `flags |= 6` -- so an unsnappable endpoint reports READY and
+/// FAILED together, exactly like the two real failure paths, and a poller that tests FAILED
+/// first needs no special case for it. See [`NV_ROUTE_PLANNER_FLAG_FAILED`].
+pub const NV_ROUTE_PLANNER_GOAL_OFFSET: usize = 0x38;
+
+/// `NvRoutePlanner -> capability`. `+0x3c`, the movement-capability mask the search filters edges
+/// with.
+///
+/// Fourth argument of `0x140bb4090`. The AI builds it in `0x14042ed50`: a size class in bits 0..2
+/// from the switch on `[[[ctrl+8]+0x38]+0x40]+4`, then ten feature bits (`0x300`, `0x40`, `0x80`,
+/// `0x400`, `0x20`, `0x10`, `0x2000`, `0x4000`, `0x8`) each set from a boolean the
+/// `ChrAiNavimeshCtrl` carries. `0x140bb4310` hands it to the parts object's vtable slot `+0x28`
+/// to turn it into a cost-table index.
+///
+/// See [`NV_ROUTE_PLANNER_CAPABILITY_DEFAULT`] for what a caller without a `ChrAiNavimeshCtrl`
+/// can honestly pass.
+pub const NV_ROUTE_PLANNER_CAPABILITY_OFFSET: usize = 0x3c;
+
+/// The capability to route a PLAYER with. `0x7f8`.
+///
+/// **THIS WAS `0` AND THAT WAS WRONG IN A WAY THAT RETURNS NO ROUTE ON OPEN GROUND.** A live run
+/// asked for a path between a player and an NPC 16.8 m apart in Majula and the planner refused
+/// every time. `0` is a value `0x14042ed50` really does return -- its `default:` arm -- which is
+/// why it looked defensible; what it models is an agent that can do NOTHING but walk on flat
+/// mesh, and DARK SOULS II's navmesh types its edges.
+///
+/// `0x140baf0d0(poly_flags, capability, kind)` is the traversability test, returning `0` for
+/// passable and `FLT_MAX` for not. Read it as a table of what a capability of `0` forbids:
+///
+/// ```text
+/// (capability & 7) < (poly & 7)                 size class: 0 is the most permissive, fine
+/// (poly>>8 & 1) == 0 || (capability & 0x8)      polys flagged 0x100 need bit 0x8
+/// switch (poly & 0x78):
+///   0x00 0x08 0x18 0x38 0x48 0x50 0x58  ->  always passable
+///   0x10  ->  passable only if (poly>>9 &1)==0, or capability & 0x40, or capability & 0x80
+///   0x20  ->  passable only if capability & 0x110      <- capability 0 CANNOT
+///   0x40  ->  passable only if capability & 0x10       <- capability 0 CANNOT
+/// ```
+///
+/// So a capability of `0` makes two whole edge types impassable and a third conditionally so. A
+/// route that needs one step down, one ladder or one doorway has no path at all.
+///
+/// # Why `0x7f8` specifically, and why it is not a guess either
+///
+/// **The engine constructs this exact value.** `0x14042ee40`, the AI's own destination step, does
+/// `FUN_140baf0d0(goal_poly_flags, size_class | 0x7f8, 0)` before requesting anything, and calls
+/// `0x140bb40e0` -- the immediate-failure setter -- when even THAT comes back `FLT_MAX`. `0x7f8`
+/// is bits 3..10: `0x8 | 0x10 | 0x20 | 0x40 | 0x80 | 0x100 | 0x200 | 0x400`, every feature gate
+/// in the table above, with the size-class bits left at `0`. It is the engine's own spelling of
+/// "assume this agent can do anything".
+///
+/// That is the right model for a PLAYER. The AI passes its own restricted mask because an AI
+/// really cannot open some doors or take some drops; a person at the controls can use every
+/// ladder, every ledge and every door in the map, and is the most capable agent in it. Routing
+/// them as the least capable one is not conservative, it is wrong -- and it fails silently,
+/// because [`NV_ROUTE_PLANNER_FLAG_FAILED`] looks identical to "there is genuinely no way".
+pub const NV_ROUTE_PLANNER_CAPABILITY_DEFAULT: u32 = 0x7f8;
+
+/// The feature-bit half of [`NV_ROUTE_PLANNER_CAPABILITY_DEFAULT`], for the log line that says
+/// which mask a request used. `0x7f8`.
+pub const NV_ROUTE_CAPABILITY_ALL_FEATURES: u32 = 0x7f8;
+
+/// `(u32 poly_flags, u32 capability, u8 kind) -> f32`. RVA `0x00ba_f0d0`.
+///
+/// The edge traversability test: `0.0` passable, `FLT_MAX` (`0x1410ae854`) not. Recorded because
+/// it is the function that DEFINES what a capability mask means -- see
+/// [`NV_ROUTE_PLANNER_CAPABILITY_DEFAULT`], whose whole derivation is this function's body.
+/// Nothing in this workspace calls it; the planner does.
+pub const NAVI_EDGE_TRAVERSAL_COST: u32 = 0x00ba_f0d0;
+
+/// `NvRoutePlanner -> max cost`. `+0x40`, `f32`, the search's budget.
+///
+/// Fifth argument of `0x140bb4090`, arriving on the stack: the callee reads `[rsp+0x28]`, which
+/// is the fifth-argument slot once the `call` has pushed a return address.
+pub const NV_ROUTE_PLANNER_MAX_COST_OFFSET: usize = 0x40;
+
+/// The larger of the two budgets the engine itself passes. `999.0`, at `0x1410cb67c`.
+///
+/// `0x14042e890` -- the controller step that takes a node id, decodes it to a world triangle and
+/// routes there -- passes this. `0x14042ece0`, the short pursuit step, passes `200.0` from
+/// `0x1410b0d40` instead.
+///
+/// `ds2-invasion-path` uses this one because its target is another player somewhere on the map
+/// rather than an AI's next few metres, and a budget that is too small does not fail loudly: the
+/// planner simply reports [`NV_ROUTE_PLANNER_FLAG_FAILED`] and the overlay falls back to the
+/// arrow, which looks exactly like "there is no way to walk there".
+pub const NV_ROUTE_MAX_COST_LONG_RANGE: f32 = 999.0;
+
+/// The budget the AI's short pursuit step passes. `200.0`, at `0x1410b0d40`. Recorded so the
+/// choice of [`NV_ROUTE_MAX_COST_LONG_RANGE`] is visible as a choice between two engine values.
+pub const NV_ROUTE_MAX_COST_PURSUIT: f32 = 200.0;
 
 /// `NvRouteNavigator -> route`. `+0x28`.
 ///
@@ -6251,6 +6392,777 @@ pub const NV_ROUTE_SEGMENT_FLAGS_OFFSET: usize = 0x48;
 /// Signed, and the engine tests `0 < count` before trusting the pointers -- so a non-positive
 /// value is the documented "this segment has no polyline" case rather than an impossibility.
 pub const NV_ROUTE_SEGMENT_POINT_COUNT_OFFSET: usize = 0x50;
+
+// ---------------------------------------------------------------------------------------------
+// WHAT A ROUTE SEGMENT SAYS BESIDES WHERE IT IS.
+//
+// Everything in this block is read off `0x140bb4ac0`, the planner state that WRITES the finished
+// route. Its stores into `[planner+0x58] + i*0x60` are, in order:
+//
+//   *(u32 *)(seg + 0x00) = gateRecord + 0xc      (0xffffffff on the last segment)
+//   *(u32 *)(seg + 0x04) = gateRecord + 0xc      (0xffffffff on the first)
+//   *(u32 *)(seg + 0x08) = FUN_140bb9d50(...)    a packed navi id; planner+0x84 at the end
+//   *(u32 *)(seg + 0x0c) = FUN_140bb9d50(...)    a packed navi id; planner+0x88 at the start
+//   *(f32x4 *)(seg + 0x10), (seg + 0x20) = (v0 + v1) * 0.5
+//
+// Two consequences that are easy to get wrong:
+//
+//   * A ROUTE POINT IS A PORTAL MIDPOINT, not a polygon centre. `(v0 + v1) * 0.5` where `v0` and
+//     `v1` are the two vertices of the edge shared by the polygons either side.
+//   * THE IDS ARE THE REASON A ROUTE CAN BE INTERROGATED AT ALL. A position cannot be asked
+//     whether a character may stand on it; a packed navi id can, because it indexes the same
+//     attribute table the engine's own traversal test reads. See
+//     [`NV_NAVI_GRAPH_NODE_ATTRS_OFFSET`].
+// ---------------------------------------------------------------------------------------------
+
+/// A segment's first packed navi id. `+0x08`.
+pub const NV_ROUTE_SEGMENT_NODE_A_OFFSET: usize = 0x08;
+
+/// A segment's second packed navi id. `+0x0c`.
+pub const NV_ROUTE_SEGMENT_NODE_B_OFFSET: usize = 0x0c;
+
+/// The portal midpoint written in the same breath as [`NV_ROUTE_SEGMENT_NODE_A_OFFSET`]. `+0x10`.
+///
+/// Its partner for node B is [`NV_ROUTE_SEGMENT_POINT_OFFSET`], which already had a name because
+/// the decoder falls back to it. Pairing each id with its own position is what lets a report say
+/// WHERE an unusable node is rather than only that there is one.
+pub const NV_ROUTE_SEGMENT_POINT_A_OFFSET: usize = 0x10;
+
+/// `NvNaviGraph -> node attributes`. `+0x48`, one `u32` per node, indexed by the low fifteen bits
+/// of a packed navi id.
+///
+/// `0x14042ee40` -- `ChrAiNavimeshCtrl`'s own "go here" -- refuses a destination from this table
+/// before it will even ask for a route:
+///
+/// ```text
+/// lVar7 = FUN_140bb2620(navSystem + 0x88, param_3 | 0x1ffff);       ; the graph holding the id
+/// uVar1 = *(u32 *)(*(longlong *)(lVar7 + 0x48) + (param_3 & 0x7fff) * 4);
+/// uVar4 = FUN_14042c180(*(u32 *)([[[chr+8]+0x38]+0x40] + 4));       ; the character's size class
+/// if ((float)FUN_140baf0d0(uVar1, uVar4 | 0x7f8, 0) == DAT_1410ae854) { give up }
+/// ```
+///
+/// The same table, at the same offset, is read again by `0x140bba040` -- the gate-link check --
+/// as `*(u32 *)(*(longlong *)(param_3 + 0x48) + psVar16[lVar18 + 6] * 4)`, where the index comes
+/// out of an edge record instead of a route id. Two independent consumers, one table.
+///
+/// **This is read LIVE, not baked into any crate.** Whether anything rewrites it at runtime is
+/// not established here: `NvNaviGraphCostUpdater` and `MapObjNaviGraphLocationComponent` both
+/// exist in this image, both unexamined. Reading it every pass costs nothing and leaves that
+/// question open instead of answering it by assumption.
+pub const NV_NAVI_GRAPH_NODE_ATTRS_OFFSET: usize = 0x48;
+
+/// The index half of a packed navi id. `0x7fff`.
+///
+/// Every site that touches one masks with this before indexing -- `0x14042ee40`, `0x140bb4310`,
+/// `0x140bb4ac0`, `0x140bba040`.
+pub const NAVI_ID_INDEX_MASK: u32 = 0x7fff;
+
+/// The "no node" value of an index. `0x7fff`, tested by `0x14042ee40` (`(param_3 & 0x7fff) !=
+/// 0x7fff`) before it will index anything, and by `0x140bba040` (`psVar16[6] == 0x7fff`).
+pub const NAVI_ID_INDEX_NONE: u32 = 0x7fff;
+
+/// The type field of a node attribute word: bits 3..6, the value `0x140baf0d0` switches on.
+pub const NAVI_NODE_TYPE_MASK: u32 = 0x78;
+
+/// Node types `0x140baf0d0` admits or refuses on the capability word AND on the traveller's
+/// height relative to the edge.
+///
+/// `0x140bba040` -- the gate check that supplies that third argument -- computes it as geometry
+/// rather than as a direction:
+///
+/// ```text
+/// cVar7 = (midY(edgeA) < refY) || (midY(edgeB) < refY);   ; refY = *(float *)(param_6 + 4)
+/// ... (**(code **)(*estimator + 0x18))(estimator, attrs, capability, cVar7)
+/// ```
+///
+/// so the flag means THIS EDGE SITS BELOW ME, and a type `0x20` or `0x40` node can be a drop you
+/// may take and a climb you may not. Type `0x10` is gated on the capability alone. Every other
+/// type in `0x140baf0d0`'s switch is unconditional: `0`, `8`, `0x18`, `0x38`, `0x48`, `0x50` and
+/// `0x58` are free, and anything not in the switch at all -- `0x28`, `0x30`, `0x60`, `0x68`,
+/// `0x70`, `0x78` -- falls through to impassable.
+pub const NAVI_NODE_TYPES_GATED: [u32; 3] = [0x10, 0x20, 0x40];
+
+/// The `f32` `0x140baf0d0` returns when the answer is no. RVA `0x010a_e854`.
+///
+/// **READ IT, DO NOT ASSUME IT.** `0x1401c1e60` -- `NvNaviGraphCostEstimator`'s boolean wrapper,
+/// the one RTTI names -- is nothing but `cost != DAT_1410ae854`, so the sentinel IS the refusal
+/// and whatever bit pattern sits at this address is the only correct comparand. Assuming
+/// `f32::MAX` would be a guess, and assuming a NaN-shaped value would make every comparison
+/// against it report PASSABLE.
+pub const NAVI_IMPASSABLE_COST: u32 = 0x010a_e854;
+
+/// `(u32 chr_param_field) -> u32`. RVA `0x0042_c180`.
+///
+/// A seven-arm switch mapping a character's size parameter `1..=7` onto navigation size class
+/// `0..=6`, with `default: 0`. `0x14042ee40` calls it on `*(u32 *)([[[chr+8]+0x38]+0x40] + 4)`
+/// and ORs the result with [`NV_ROUTE_CAPABILITY_ALL_FEATURES`] to build the capability word.
+///
+/// Recorded because it is the whole reason
+/// [`NV_ROUTE_PLANNER_CAPABILITY_DEFAULT`] is not what an engine caller would send: that constant
+/// is `0x7f8` with size class **zero**, and `0x140baf0d0` admits a node only while
+/// `(capability & 7) < (attrs & 7)` -- so zero is the SMALLEST agent the format can describe and
+/// passes the MOST nodes. The feature bits are not a differentiator at all; every character gets
+/// `| 0x7f8`, so the only per-character knob in the whole word is these three bits.
+pub const CHR_NAVI_SIZE_CLASS_FROM_PARAM: u32 = 0x0042_c180;
+
+/// How many navigation size classes exist. Seven: `0x14042c180` is a seven-arm switch returning
+/// `0..=6`, so this is the range and not a guess at one.
+pub const NAVI_SIZE_CLASSES: u32 = 7;
+
+// ---------------------------------------------------------------------------------------------
+// THE SNAP: WORLD POSITION -> NAVIGATION-GRAPH ID.
+//
+// bd `ds2-mods-rs-4yd` was filed on the premise that this step is an asynchronous job
+// (`NvNaviPolyNearestSearchTask`) and that driving it by hand would mean fabricating an engine
+// update context. THAT PREMISE IS FALSE. The snap is an ordinary synchronous call returning the
+// id in `eax`, and the whole of it is spelled out in one function -- `0x14037be30`, twenty-eight
+// instructions -- which does nothing else:
+//
+//   mov  rbx,[0x1416148f0]                     ; GameManagerImp
+//   mov  rax,[rbx+0x38]                        ; MapManager
+//   mov  ecx,[rax+0x170]                       ; the map area
+//   call 0x140bab1f0                           ; -> key
+//   mov  rcx,rbx ; call 0x14039a9f0            ; -> NvNaviGraphWorld ([[gm+0xBC0]+0x10])
+//   mov  edx,esi ; call 0x140badb90            ; -> the graph data for that area
+//   call [vtable+0x148]                        ; -> a pointer to the character's position
+//   mov  r9d,0x28 ; movss xmm2,[0x1410ad5ec]   ; filter, radius 20.0
+//   mov  qword [rsp+0x20],0                    ; out_dist: NULL is allowed
+//   call 0x140babf90                           ; -> the graph id, or 0xffffffff
+//
+// `0x14042c9a0(ChrAiNavimeshCtrl*, pos, radius, filter, out_dist)` is the same chain packaged for
+// an AI agent; it takes the map area from the character instead of from `MapManager` and is not
+// usable by a caller who only has a position.
+//
+// Every address in this section was checked with `scripts/ds2-arxan-chain.py` and none is
+// redirected; the four leaf functions report `UNKNOWN` only because they begin with their real
+// work rather than with a standard prologue, and their first bytes match the disassembly above.
+
+/// Offset of `MapManager` in [`GAME_MANAGER_IMP`]. `+0x38`.
+///
+/// From `0x14037be8f`: `mov rax,[rbx+0x38]` on the `GameManagerImp` just loaded from
+/// `0x1416148f0`, immediately dereferenced at [`MAP_MANAGER_AREA_OFFSET`] and handed to
+/// [`NAVI_GRAPH_KEY_FROM_AREA`]. Named `MapMan` in the Ghidra project's `GameManagerImp` type.
+pub const GAME_MANAGER_MAP_MANAGER_OFFSET: usize = 0x38;
+
+/// `MapManager -> the map index the PLAYER is standing in`. `+0x170`, `u32`.
+///
+/// **It used to be called `MAP_MANAGER_AREA_OFFSET` and "area" was the wrong word**, which is how
+/// a perfectly good field ended up as the prime suspect for a routing failure. It is not the
+/// area number `10` out of `m10_04_00_00`, and not the packed map id `0x0A040000`. It is a global
+/// map INDEX in `0..=41`, and the six bits [`NAVI_GRAPH_KEY_FROM_AREA`] keeps are exactly enough
+/// for it.
+///
+/// Written every frame by `MapManager`'s own update, and the shape of that write is the whole
+/// reason this constant carries a warning:
+///
+/// ```text
+/// 0x1403be201   test rsi,rsi                  ; the player's map entity
+/// 0x1403be204   je   0x1403be210
+/// 0x1403be209   call 0x1403ba380              ; -> [[entity+0x28]+0x0c], the map index
+/// 0x1403be20e   jmp  0x1403be213
+/// 0x1403be210   or   eax,0xffffffff           ; NO ENTITY -> the sentinel
+/// 0x1403be213   mov  [rdi+0x170],eax
+/// ```
+///
+/// # The sentinel is a trap, and the engine's own guard does not catch it
+///
+/// When there is no resolvable player entity the field holds [`MAP_INDEX_NONE`]. Feed that to
+/// [`NAVI_GRAPH_KEY_FROM_AREA`] and you get `0x3fffffff` -- a perfectly well-formed key for map
+/// index `0x3f`, which no map has (the highest any shipped `.ngp` carries is
+/// [`NAVI_GRAPH_MAX_MAP_INDEX`]). [`NAVI_GRAPH_DATA_FOR_KEY`] then returns null and the snap
+/// answers [`NAVI_GRAPH_ID_NONE`] with a good position and a loaded graph sitting right there.
+///
+/// Both engine call sites guard with `if (key != -1)`, and that guard **can never fire**: the key
+/// builder ORs in `0xffffff` and masks its input to six bits, so its range is
+/// `0x00ffffff..=0x3fffffff` and `-1` is not in it. The sentinel has to be tested BEFORE the key
+/// is built, which is what `crate::navquery` does.
+pub const MAP_MANAGER_PLAYER_MAP_INDEX_OFFSET: usize = 0x170;
+
+/// "There is no player map entity right now." `0xffffffff`.
+///
+/// What [`MAP_MANAGER_PLAYER_MAP_INDEX_OFFSET`] holds during a load, at the title screen, and
+/// whenever the player's map entity does not resolve. See that constant for why this must be
+/// tested before a key is computed rather than after.
+pub const MAP_INDEX_NONE: u32 = 0xffff_ffff;
+
+/// The highest map index any shipped `.ngp` carries. `0x25`.
+///
+/// Measured rather than inferred: all 28 navmeshes were extracted from `GameDataEbl` and their
+/// `+0x1c` header fields read directly. Every one is `(index << 24) | 0xffffff` with a distinct
+/// index, running `0x00` (`m10_02`) to `0x25` (`m50_38`) with gaps where a map has no mesh --
+/// so the six-bit squeeze is real but never tight, and an index above this is a field that does
+/// not mean what this code thinks it means.
+///
+/// | index | map | | index | map |
+/// |---|---|---|---|---|
+/// | `0x00` | `m10_02` | | `0x10` | `m20_10` |
+/// | `0x01` | `m10_04` (Majula) | | `0x11` | `m20_11` |
+/// | `0x02` | `m10_10` | | `0x13` | `m20_21` |
+/// | `0x03` | `m10_14` | | `0x14` | `m20_24` |
+/// | `0x04` | `m10_16` | | `0x19` | `m40_03` |
+/// | `0x05` | `m10_17` | | `0x1c` | `m10_33` |
+/// | `0x06` | `m10_18` | | `0x1d` | `m10_15` |
+/// | `0x07` | `m10_19` | | `0x1e` | `m10_27` |
+/// | `0x09` | `m10_23` | | `0x1f` | `m10_29` |
+/// | `0x0a` | `m10_25` | | `0x20` | `m10_30` |
+/// | `0x0c` | `m10_31` | | `0x21` | `m20_26` |
+/// | `0x0d` | `m10_32` | | `0x22` | `m50_35` |
+/// | `0x0e` | `m10_34` | | `0x23`..`0x25` | `m50_36`..`m50_38` |
+pub const NAVI_GRAPH_MAX_MAP_INDEX: u32 = 0x25;
+
+/// `u32 area -> u32 key`. RVA `0x00ba_b1f0`, five instructions, no memory access:
+/// `(area & 0x3f) << 24 | 0xffffff`.
+///
+/// The result is what [`NAVI_GRAPH_DATA_FOR_KEY`] compares against `[[data+0x28]+0x1c]`. Two
+/// things worth knowing before trusting a `-1` check on it: it CANNOT return `-1` (the largest
+/// value it can produce is `0x3fffffff`), and [`NAVI_GRAPH_DATA_FOR_KEY`] re-applies the same
+/// mask itself, so the key form is a convention rather than a requirement.
+///
+/// # SIX BITS, AND THEY ARE A MAP INDEX -- MEASURED, NOT INFERRED
+///
+/// The input is the global map index at [`MAP_MANAGER_PLAYER_MAP_INDEX_OFFSET`], not an area
+/// number and not a map id. Proven by reading the shipped meshes rather than by reasoning: all 28
+/// `.ngp` files extracted from `GameDataEbl` carry `(index << 24) | 0xffffff` at `+0x1c`, which is
+/// this function's output, with a distinct index each. `m10_04_00_00` -- Majula -- carries
+/// `0x01ffffff`, so its index is `1`. See [`NAVI_GRAPH_MAX_MAP_INDEX`] for the table.
+///
+/// Both engine call sites reach the same number two ways: `0x14037be30` reads it off `MapManager`,
+/// `0x14042c9a0` computes it with `0x1403ba380(entity)` (`[[entity+0x28]+0x0c]`) or falls back to
+/// the low byte of the packed handle at `CharacterCtrl + 0x110`. They agree because the
+/// `MapManager` field is literally the result of that same call, refreshed every frame.
+///
+/// # The one way this goes wrong is the sentinel
+///
+/// `0x140bab1f0([`MAP_INDEX_NONE`])` is `0x3fffffff`: a well-formed key for a map that does not
+/// exist. Test the sentinel before calling this. The full account is on
+/// [`MAP_MANAGER_PLAYER_MAP_INDEX_OFFSET`].
+///
+/// `crate::navquery` computes the key AND sweeps every resident graph, keeping the sweep's
+/// answer and logging whether the key agreed -- not because the key is untrustworthy now that it
+/// is understood, but because a disagreement is the cheapest possible alarm for the day one of
+/// these premises stops holding.
+pub const NAVI_GRAPH_KEY_FROM_AREA: u32 = 0x00ba_b1f0;
+
+/// `GameManagerImp* -> NvNaviGraphWorld*`. RVA `0x0039_a9f0`.
+///
+/// Three instructions: returns `[[gm + 0xBC0] + 0x10]`, or `0` when
+/// [`GAME_MANAGER_NAV_SYSTEM_OFFSET`] is null. **It does not null-check its own argument**, so
+/// the caller must, which is why `ds2-invasion-path` reads the `GameManagerImp` pointer with a
+/// fault-safe read and refuses on null before getting here.
+pub const NAVI_GRAPH_WORLD_FROM_GAME_MANAGER: u32 = 0x0039_a9f0;
+
+/// `(NvNaviGraphWorld*, u32 key) -> graph data*`. RVA `0x00ba_db90`.
+///
+/// A linear scan of the pointer array at `world + 0x28`, `[world + 0x68]` entries long, keeping
+/// the one whose `[[entry + 0x28] + 0x1c]` equals `key & 0x3f000000 | 0xffffff`. Returns `0`
+/// when the area is not loaded -- which is the ordinary answer during a map transition, not a
+/// failure.
+pub const NAVI_GRAPH_DATA_FOR_KEY: u32 = 0x00ba_db90;
+
+/// `(graph data*, const float* pos, f32 radius, u32 filter, f32* out_dist) -> u32 id`.
+/// RVA `0x00ba_bf90`.
+///
+/// `rcx`, `rdx`, `xmm2`, `r9d`, `[rsp+0x20]`. Walks the sub-graphs at `data + 0x28`
+/// (`[[data+0x28]+8]` of them), calling `0x140bac070` on each and keeping the nearest hit;
+/// returns [`NAVI_GRAPH_ID_NONE`] when none is within `radius`.
+///
+/// `out_dist` may be `NULL` -- the function tests it -- and `0x14037bef8` passes exactly that.
+/// When it is not null it receives the SQUARED distance, not the distance: the `sqrtf` in the
+/// loop narrows the search radius and is never written back.
+///
+/// # This must run on the game thread
+///
+/// `0x140bac070` lazy-initialises a `DLKR` allocator through `DAT_1416681a8` on first use and
+/// then panics `"Tried to create container with incompatible heap."` if the container it builds
+/// does not match. Two threads racing that initialisation is a torn global followed by an abort,
+/// and the abort is inside the game's own panic handler rather than anywhere this code could
+/// catch it.
+pub const NAVI_GRAPH_NEAREST_ID: u32 = 0x00ba_bf90;
+
+/// `(id table*, u32 key) -> NvNaviGraph*`. The lookup the ROUTE PLANNER uses, which is not the
+/// one the snap uses, and that difference is why a route between two good ids can be refused.
+///
+/// `0x140badb90` is a linear scan over the world's eight resident graphs comparing a MAP key.
+/// This is a hash bucket walk -- `(key * 0x89) % buckets` -- over a separate table, keyed by
+/// [`NV_ROUTE_ID_GRAPH_KEY_MASK`] applied to a navigation-graph ID. `NvRoutePlanner`'s step at
+/// `0x140bb4110` calls only this one, for both ends, and hands the two results to the search.
+pub const NV_NAVI_GRAPH_FOR_ROUTE_ID: u32 = 0x00bb_2620;
+
+/// The id table [`NV_NAVI_GRAPH_FOR_ROUTE_ID`] hashes into. `+0x88` on the object
+/// [`NAVI_GRAPH_WORLD_FROM_GAME_MANAGER`] returns.
+///
+/// Read straight off the engine's own call at `0x14042efd1`, which is
+/// `FUN_140bb2620(*(FUN_14039a9f0(GameManagerImp) + 0x88), goal | 0x1ffff)`.
+pub const NV_NAVI_GRAPH_WORLD_ID_TABLE_OFFSET: usize = 0x88;
+
+/// What a navigation-graph ID is OR-ed with to get the key of the graph that owns it. `0x1ffff`.
+///
+/// The low 15 bits of an id are a node index within its graph (`0x14042efe8` indexes the node
+/// array with `id & 0x7fff`); saturating the low 17 leaves the graph's identity. Two ids that
+/// disagree above bit 17 are in DIFFERENT graphs, whatever their positions look like.
+pub const NV_ROUTE_ID_GRAPH_KEY_MASK: u32 = 0x1_ffff;
+
+/// `NvNaviGraph -> number of boundary nodes`. `+0x30`, `i16`.
+///
+/// Part of the cross-graph search's entry guard at `0x140bb4310`: a graph with none of these
+/// cannot be entered or left, and the search gives up before it starts.
+pub const NV_NAVI_GRAPH_LINK_COUNT_OFFSET: usize = 0x30;
+
+/// `NvNaviGraphWorld -> resident graphs`. `+0x28`, an INLINE array of pointers.
+///
+/// Not a pointer to an array: `0x140badb90` takes `world + 0x28` as the base and indexes it
+/// directly. The count is at [`NV_NAVI_GRAPH_WORLD_GRAPH_COUNT_OFFSET`].
+pub const NV_NAVI_GRAPH_WORLD_GRAPHS_OFFSET: usize = 0x28;
+
+/// `NvNaviGraphWorld -> number of resident graphs`. `+0x68`, `i32`.
+pub const NV_NAVI_GRAPH_WORLD_GRAPH_COUNT_OFFSET: usize = 0x68;
+
+/// How many graphs the inline array can hold. `8`.
+///
+/// **Structural, not a guess**: the array starts at `+0x28` and the count that bounds it lives at
+/// `+0x68`, so a ninth pointer would overwrite its own count. Used as a hard clamp when sweeping,
+/// because a count read from live memory is a number and this is the only thing that makes it a
+/// bound.
+pub const NV_NAVI_GRAPH_WORLD_MAX_GRAPHS: usize = 8;
+
+/// `NvNaviGraphData -> header`. `+0x28`.
+///
+/// `0x140badb90` reaches the key through it and `0x140babf90` reaches the sub-graph array and
+/// its count (`header + 0x08`) through it, so it is the object that actually describes a loaded
+/// mesh.
+pub const NV_NAVI_GRAPH_HEADER_OFFSET: usize = 0x28;
+
+/// The map key a loaded graph carries. `+0x1c` within [`NV_NAVI_GRAPH_HEADER_OFFSET`].
+///
+/// **This is the authoritative key, and reading it is worth more than computing one.**
+/// `0x140badb90` exists to compare `(area & 0x3f) << 24 | 0xffffff` against this field; a mod
+/// that cannot reliably produce the `area` half can instead find the right graph another way and
+/// then READ this, which turns "what is the key?" from a question into a measurement.
+///
+/// See [`NAVI_GRAPH_KEY_FROM_AREA`] for why producing one is not reliable.
+pub const NV_NAVI_GRAPH_HEADER_KEY_OFFSET: usize = 0x1c;
+
+/// The radius `0x14037be30` snaps with. `20.0`, read from `0x1410ad5ec`.
+///
+/// The `ChrAiNavimeshCtrl` paths use `10.0` (`0x1410ad5e8`) instead. The larger one is used here
+/// because a player standing on a ledge, a staircase or a corpse can be further off the navmesh
+/// than a walking AI ever is, and a snap that fails costs the whole route.
+pub const NAVI_GRAPH_SNAP_RADIUS_METERS: f32 = 20.0;
+
+/// The filter `0x14037be30` snaps with. `0x28`.
+///
+/// The bits are read off `0x140bac070`, which is the only consumer:
+///
+/// | bit | effect when SET |
+/// | --- | --- |
+/// | `0x07` | minimum poly class; a poly passes only when `poly & 7` is strictly greater |
+/// | `0x08` | accept polys carrying flag `0x100`, which are otherwise rejected |
+/// | `0x10` | do not reject polys whose `class & 0x78` is `0x40` |
+/// | `0x20` | likewise |
+///
+/// So `0x28` is `0x20 | 0x08` with a class minimum of zero: the most permissive snap the engine
+/// offers. That is the right one for a player, who is not an AI agent with a movement class and
+/// should be placed on whatever navmesh is under their feet.
+pub const NAVI_GRAPH_SNAP_FILTER: u32 = 0x28;
+
+/// The "there is no node here" graph id. `0xffffffff`.
+///
+/// Returned by [`NAVI_GRAPH_NEAREST_ID`] when nothing is in range, and by `0x14042c9a0` when the
+/// area is not loaded. Requesting a route with it is safe but pointless -- see
+/// [`NV_ROUTE_PLANNER_GOAL_OFFSET`], which explains why it comes back as a FAILED search rather
+/// than as silence.
+pub const NAVI_GRAPH_ID_NONE: u32 = 0xffff_ffff;
+
+// ---------------------------------------------------------------------------------------------
+// THE GAME TICK, and why it is this function rather than one of its callers.
+//
+// `ds2-invasion-path` needs a seam that runs on the thread the game's own logic runs on, because
+// both things it wants to do from one -- the snap above and the SFX spawn below -- read and
+// write unlocked engine state. `Present` is not that seam (`ds2-mods-rs-3al`, blocker (a)).
+//
+// `NvNavigationSystem::Update` is called from four game-state tick handlers:
+// `0x1401bd750` (state 0x0a), `0x1401bf3b3` (state 0x1c), `0x1401bfe46` and `0x1401c2454`, each
+// as one line in a long sequence of `if (subsystem) subsystem->Update(delta)`. Hooking the
+// callee rather than the callers means ONE detour instead of four, and it arrives with the
+// `NvNavigationSystem` already in `rcx` and already known non-null -- every caller tests it
+// first. It also cannot run at the title screen or during a load, which is exactly the window in
+// which neither the navmesh nor the SFX system exists.
+
+/// `NvNavigationSystem::Update(NvNavigationSystem* rcx, f32 delta /*xmm1*/)`. RVA `0x00ba_eb20`.
+///
+/// **The delta is a float in `xmm1`, not an integer in `edx`.** Every call site loads it with
+/// `movaps xmm1,xmm6`. A detour declared with an integer second parameter would compile, run,
+/// and silently hand the engine whatever `xmm1` happened to hold -- which is also why this must
+/// NOT go through `ds2-hook`'s union, whose shared signature is four `usize` and whose dispatcher
+/// is free to clobber the volatile `xmm1`.
+///
+/// What it does, in order: builds a vector of the live objects on the intrusive list at
+/// [`NV_NAVIGATION_SYSTEM_LIST_HEAD_OFFSET`], unlinking and releasing any whose
+/// [`NV_NAVIGATION_NODE_RETIRED_OFFSET`] byte is set; calls each survivor's vtable slot `+0x10`
+/// with the shared context at [`NV_NAVIGATION_SYSTEM_CONTEXT_OFFSET`], repeating until they all
+/// return true or 0x80 passes have gone by; then forwards the delta to the graph world.
+pub const NV_NAVIGATION_SYSTEM_UPDATE: u32 = 0x00ba_eb20;
+
+/// First thirteen bytes of [`NV_NAVIGATION_SYSTEM_UPDATE`], checked before the detour goes in.
+///
+/// `mov [rsp+8],rcx ; push rbp ; push r12 ; push r13 ; mov rbp,rsp`. The first instruction alone
+/// is the five bytes MinHook needs and is position-independent, so the trampoline is a plain
+/// copy; the rest is carried because `48 89 4c 24 08` on its own is one of the most common
+/// sequences in the image and would match almost anything if the RVA ever drifted.
+pub const NV_NAVIGATION_SYSTEM_UPDATE_PROLOGUE: [u8; 13] = [
+    0x48, 0x89, 0x4c, 0x24, 0x08, 0x55, 0x41, 0x54, 0x41, 0x55, 0x48, 0x8b, 0xec,
+];
+
+/// `NvNavigationSystem -> NvNaviGraphWorld`. `+0x10`.
+///
+/// The same pointer [`NAVI_GRAPH_WORLD_FROM_GAME_MANAGER`] returns, reached the other way.
+/// `0x140bae8d0` passes it to `0x140bb4080` to bind a fresh planner to the world, and
+/// `NvNavigationSystem::Update` forwards the frame delta to its vtable slot `+0x18`.
+pub const NV_NAVIGATION_SYSTEM_GRAPH_WORLD_OFFSET: usize = 0x10;
+
+/// `NvNavigationSystem -> search context`. `+0x18`.
+///
+/// The second argument every listed object's `Update` receives. `NvRoutePlanner::Update` passes
+/// it to `0x140bb9610` to allocate search-task nodes, so this is the pool the A* runs out of.
+/// Recorded because it is the "update context the engine supplies" that bd
+/// `ds2-call-the-games-own-functions` warns against fabricating -- and the point of linking a
+/// planner into the list is that the engine supplies it for you.
+pub const NV_NAVIGATION_SYSTEM_CONTEXT_OFFSET: usize = 0x18;
+
+/// `NvNavigationSystem -> head of the intrusive update list`. `+0x20`.
+///
+/// `0x140bae8d0` pushes onto the front: `new->next = head; count += 1; head = new`.
+pub const NV_NAVIGATION_SYSTEM_LIST_HEAD_OFFSET: usize = 0x20;
+
+/// `NvNavigationSystem -> length of that list`. `+0x28`, `i32`.
+///
+/// Incremented by `0x140bae8d0` and decremented by `NvNavigationSystem::Update` as it unlinks a
+/// retired node. Read by `ds2-invasion-path` for one thing only: proving a planner it created
+/// was actually linked.
+pub const NV_NAVIGATION_SYSTEM_LIST_COUNT_OFFSET: usize = 0x28;
+
+/// The `next` pointer of a listed navigation object. `+0x10`.
+///
+/// `NvNavigationSystem::Update` walks `puVar12[2]`; `0x140bae8d0` writes `plVar3[2]`. Same field.
+pub const NV_NAVIGATION_NODE_NEXT_OFFSET: usize = 0x10;
+
+/// "Take me off the list." `+0x18`, one byte.
+///
+/// `0x140baefc0(navsys, obj)` is four instructions -- `mov byte [rdx+0x18],1 ; ret` -- and does
+/// not touch the list. The unlink, the reference release and the destructor all happen on the
+/// next `NvNavigationSystem::Update`, which is what makes teardown safe from anywhere the tick
+/// is not currently running.
+pub const NV_NAVIGATION_NODE_RETIRED_OFFSET: usize = 0x18;
+
+/// `NvNavigationSystem* -> NvRoutePlanner*`. RVA `0x00ba_e8d0`. The whole factory in one call.
+///
+/// It allocates `0xa0` bytes from the allocator at `navsys + 0x40`, runs the constructor
+/// `0x140bb3cf0`, calls `0x140bb4080(planner, navsys->graph_world)` to fill the `+0x28` the
+/// constructor leaves null, and links the result onto
+/// [`NV_NAVIGATION_SYSTEM_LIST_HEAD_OFFSET`]. Returns `0` if the allocation fails.
+///
+/// **That last step is the entire reason to use it.** A planner on that list is stepped by
+/// `NvNavigationSystem::Update` for free, with the context the engine supplies, every frame,
+/// without this crate scheduling anything. The alternative -- constructing one privately and
+/// calling its `Update` by hand -- is the fabricated context bd `ds2-call-the-games-own-functions`
+/// forbids.
+pub const NV_NAVIGATION_SYSTEM_CREATE_ROUTE_PLANNER: u32 = 0x00ba_e8d0;
+
+/// `(NvNavigationSystem*, object*)`. RVA `0x00ba_efc0`. Marks a listed object for removal.
+///
+/// See [`NV_NAVIGATION_NODE_RETIRED_OFFSET`]: it sets one byte and returns. The object stays
+/// valid until the next tick unlinks it.
+pub const NV_NAVIGATION_SYSTEM_RETIRE: u32 = 0x00ba_efc0;
+
+/// `(NvRoutePlanner*, u32 start, u32 goal, u32 capability, f32 max_cost)`. RVA `0x00bb_4090`.
+///
+/// Eight instructions, no allocation, no call: it stores the four values at
+/// [`NV_ROUTE_PLANNER_START_OFFSET`], [`NV_ROUTE_PLANNER_GOAL_OFFSET`],
+/// [`NV_ROUTE_PLANNER_CAPABILITY_OFFSET`] and [`NV_ROUTE_PLANNER_MAX_COST_OFFSET`], then does
+/// `flags = (flags & 0xf1) | 1` at [`NV_ROUTE_PLANNER_FLAGS_OFFSET`] -- clearing both result bits
+/// in the same instruction that sets the request bit, which is what makes "pending" mean pending.
+///
+/// The search itself happens on the planner's `Update`, so this is safe to call from the tick
+/// detour before or after the original; it is NOT safe from another thread, because the planner
+/// it writes is on a list the tick is walking.
+pub const NV_ROUTE_PLANNER_REQUEST: u32 = 0x00bb_4090;
+
+// ---------------------------------------------------------------------------------------------
+// THE SFX SPAWN, for the Prism Stone trail. bd `ds2-mods-rs-3al` has the full account; what is
+// here is the part `ds2-invasion-path` calls.
+
+/// Offset of `KatanaSfxSystem` in [`GAME_MANAGER_IMP`]. `+0xbc8`.
+///
+/// From `0x140446f08`: `mov rbx,[rax+0xbc8]` on the pointer loaded from `0x1416148f0`, named
+/// `KatanaSfxSystem` in the Ghidra project's `GameManagerImp` type.
+pub const GAME_MANAGER_SFX_SYSTEM_OFFSET: usize = 0xbc8;
+
+/// `KatanaSfxSystem -> ready`. `+0x46`, one byte.
+///
+/// From `0x140446f18`: `cmp byte [rbx+0x46],0 ; je <return>` -- the fire-and-forget spawner
+/// refuses to do anything when it is zero, before touching any other field. Treated the same way
+/// here.
+pub const KATANA_SFX_SYSTEM_READY_OFFSET: usize = 0x46;
+
+/// `KatanaSfxSystem -> quality level`. `+0x300`, `u32`.
+///
+/// **A value of 3 or more silently drops spawns.** `0x140beb670` opens with
+/// `if (3 <= sys->quality && sys->vtable[0x50](sys, id)) return empty_ctrl;` -- the caller gets a
+/// control block that looks exactly like a successful one and no effect appears. The engine
+/// raises this under load, so a trail that works in a corridor can stop working in a boss arena
+/// for reasons that are not in this crate. `ds2-invasion-path` logs the byte on the first spawn
+/// of a session precisely so that case is diagnosable without a debugger.
+pub const KATANA_SFX_SYSTEM_QUALITY_OFFSET: usize = 0x300;
+
+/// The quality level at which spawns start being dropped. `3`.
+pub const KATANA_SFX_QUALITY_DROP_THRESHOLD: u32 = 3;
+
+/// `KatanaSfxSystem -> high-quality variants enabled`. `+0x305`, one byte.
+///
+/// When non-zero, `0x140beb670` tries `id + 20000` before `id` and then `id + 10000` -- the SOTFS
+/// remaster's higher-detail effects. Which is why a caller passes the BASE id and not a variant.
+pub const KATANA_SFX_SYSTEM_HIGH_QUALITY_OFFSET: usize = 0x305;
+
+/// The largest id the `+20000` remaster lookup is attempted for. `9999`.
+///
+/// `0x140beb670` tests `if (9999 < id)` and skips straight to a direct lookup. Base ids are all
+/// below it; `ds2-mods-rs-3al` catalogues the usable range as `40..8557`, which is a survey of
+/// where ids appear in the game's params rather than a bound this executable enforces.
+pub const KATANA_SFX_BASE_ID_MAX: u32 = 9999;
+
+/// `(KatanaSfxSystem*, ctrl* out, u32 sfx_id, const f32[8]* pos_and_dir, u32, u8, u8) -> ctrl*`.
+/// RVA `0x00be_b670`.
+///
+/// The core spawn. `0x140beb590` is the same thing behind a `float4x4`: it copies row 3 of the
+/// matrix as the position, derives a direction from the matrix with `0x140005c00`, normalises it,
+/// and calls this. Taking the eight floats directly removes a matrix layout from the things that
+/// can be wrong -- the first four are the world position, the second four a unit direction.
+///
+/// The trailing three arguments are `0`, `0xff`, `0` at every call site, `0x140446ee0` included.
+///
+/// `out` must point at [`KATANA_SFX_CTRL_BYTES`] of zeroed, 16-byte-aligned storage the caller
+/// owns; the function constructs two `FX4CG::FXCGSfxCtrl` sub-objects in it and returns it.
+///
+/// **Game thread only.** The create path underneath reads and writes
+/// [`KATANA_SFX_SYSTEM_QUALITY_OFFSET`], two live vectors, an xorshift RNG and the failed-lookup
+/// red-black tree at `sys + 0x2b8`, with no lock anywhere, and all 46 static call sites are game
+/// logic.
+pub const KATANA_SFX_SPAWN: u32 = 0x00be_b670;
+
+/// `(ctrl*)`. RVA `0x00a0_60f0`. The `FXCGSfxCtrl` destructor.
+///
+/// **It is called on each 0x30-byte HALF of the control block, not on the block.** `0x140446ee0`
+/// tears its block down with two calls, at `+0x30` and then at `+0x00`; so does `0x140beb670`
+/// for its own temporaries. Calling it once on the whole thing leaves the other half linked.
+///
+/// What it actually does: restores the `FFX::FXSfxCtrl` vtable pointer at `+0x00` and unlinks the
+/// block from the effect node's controller list -- the head is `node + 0xf8`, the links are
+/// [`KATANA_SFX_CTRL_PREV_OFFSET`] and [`KATANA_SFX_CTRL_NEXT_OFFSET`]. It reads
+/// [`KATANA_SFX_CTRL_NODE_OFFSET`] and `+0x18` to find the node and does nothing when both are
+/// zero.
+///
+/// **It unlinks. It does not stop the effect.** [`KATANA_SFX_STOP`] is the stop, and it comes
+/// first. Skipping this afterwards is not a leak but a dangling write: a block still on the
+/// node's list is memory the engine will write through later.
+pub const KATANA_SFX_CTRL_DESTROY: u32 = 0x00a0_60f0;
+
+/// `(ctrl* block_of_two)`. RVA `0x0014_1530`. **Stops a spawned effect.**
+///
+/// bd `ds2-mods-rs-3al` blocker (c) said this was unknown and that every marker placed would
+/// therefore be permanent for the session. It is not unknown. Twenty-two instructions, a clean
+/// prologue, not Arxan-redirected, and it takes the whole [`KATANA_SFX_CTRL_BYTES`] block --
+/// looping twice over the two [`KATANA_SFX_CTRL_HALF_BYTES`] halves and issuing the same three
+/// calls on each:
+///
+/// ```text
+/// 0x140a34eb0(half, 0)      ; detach: nulls the effect's follow-transform source
+/// 0x140a069f0(half, 1, 0)   ; set flag bit 0 on the node and its whole child subtree
+/// 0x140a06350(half)         ; the despawn -- returns the node to its pool, clears the
+///                           ; "alive" bit 30 of node+0x58, and zeroes ctrl+8..+0x28
+/// ```
+///
+/// All three are Arxan thunks; the chains were walked with `scripts/ds2-arxan-chain.py` and end
+/// in game code. `0x140141530` itself is not redirected. It is issued as one unit at all sixteen
+/// call sites -- `0x1403c8360`, a distance-culled emitter, pairs it against `0x140beb590`
+/// exactly the way `ds2-invasion-path` does.
+///
+/// **Order: stop, then [`KATANA_SFX_CTRL_DESTROY`].** Not because the reverse fails today -- the
+/// destructor does not clear [`KATANA_SFX_CTRL_NODE_OFFSET`], so a stop after it would still
+/// find the node -- but because the destructor is the only thing that takes the block off the
+/// node's list, and between the two calls that node may be recycled into somebody else's effect.
+/// Stopping through a stale pointer kills the wrong thing.
+///
+/// **Game thread only.** It takes no lock and touches the FX manager's per-bucket lists, its
+/// active-node list, its pool arrays and its deferred-destroy chain -- all of which the FX update
+/// pass walks every frame. A search of these bodies for `lock`, `cmpxchg`, `xchg [mem]` and any
+/// wait call finds nothing.
+///
+/// Safe on a block that never spawned anything: each of the three primitives returns immediately
+/// when the node pointers are null, which is what a throttled spawn leaves behind.
+pub const KATANA_SFX_STOP: u32 = 0x0014_1530;
+
+/// `FXSfxCtrl -> effect node`. `+0x10`, and `+0x18` for the second one.
+///
+/// Read by [`KATANA_SFX_CTRL_DESTROY`] as `param_1[2]` and `param_1[3]` and by every primitive
+/// [`KATANA_SFX_STOP`] calls. **Both zero means the block controls nothing**, which is what a
+/// spawn dropped by [`KATANA_SFX_SYSTEM_QUALITY_OFFSET`] produces -- `0x140beb670` returns a
+/// block built by `0x140127240`, which constructs both halves empty and looks exactly like a
+/// success to its caller. Testing this is the only way to tell them apart.
+pub const KATANA_SFX_CTRL_NODE_OFFSET: usize = 0x10;
+
+/// `FXSfxCtrl -> previous controller` in the effect node's list. `+0x20`.
+pub const KATANA_SFX_CTRL_PREV_OFFSET: usize = 0x20;
+
+/// `FXSfxCtrl -> next controller` in the effect node's list. `+0x28`.
+pub const KATANA_SFX_CTRL_NEXT_OFFSET: usize = 0x28;
+
+/// `FXSfxCtrl -> alive`. Bit 30 (`0x4000_0000`) of the word at **`node + 0x58`**, where `node` is
+/// [`KATANA_SFX_CTRL_NODE_OFFSET`]. Set means the effect is still playing.
+///
+/// **This is the only honest answer to "is it still there?"** -- and it is what separates an
+/// effect that LINGERS from one that flashed once, which is the property a marker trail needs and
+/// which nothing in this workspace had established.
+///
+/// Read off `0x140a067c0`, an ordinary handle method, whose first act is:
+///
+/// ```text
+/// node = ctrl->[0x10];
+/// if (node && (~(*(u32*)(node + 0x58) >> 30) & 1)) {
+///     ctrl->[8] = ctrl->[0x10] = ctrl->[0x18] = ctrl->[0x20] = ctrl->[0x28] = 0;
+///     return;                       // the handle has just disowned a dead effect
+/// }
+/// ```
+///
+/// So every handle method self-nulls on a clear bit, which is why a dangling handle is not
+/// possible here and why reading the bit directly is safe: the worst case is that the engine
+/// has already zeroed [`KATANA_SFX_CTRL_NODE_OFFSET`] and there is nothing to read.
+///
+/// `0x140141530`'s third primitive clears it, which is what makes the stop observable.
+pub const KATANA_SFX_NODE_ALIVE_OFFSET: usize = 0x58;
+
+/// The bit at [`KATANA_SFX_NODE_ALIVE_OFFSET`] that means "still playing". `0x4000_0000`.
+pub const KATANA_SFX_NODE_ALIVE_BIT: u32 = 0x4000_0000;
+
+/// `KatanaSfxSystem -> ids that did not resolve`. `+0x2b8`, an MSVC `std::map`-shaped red-black
+/// tree keyed by `u32`.
+///
+/// **Membership is the difference between "not in this map" and "spawned and invisible"**, which
+/// is otherwise the same absence on the ground and the most expensive confusion in the whole
+/// feature to resolve by looking.
+///
+/// `0x140beb400(sys, id)` is the insert, and reading it gives the entire layout. It is a
+/// `lower_bound` descent followed by the usual found-test, so a read-only `contains` is the same
+/// walk with the insert arm removed:
+///
+/// ```text
+/// head = *(usize*)(sys + 0x2b8);         // _Myhead; its +0x08 is the ROOT, not a node
+/// node = head->[KATANA_SFX_MISSING_PARENT_OFFSET];
+/// while (!node->_Isnil) { node = (node->key < id) ? node->_Right : node->_Left; ... }
+/// ```
+///
+/// A hit bumps a counter at `+0x20` and clears a byte at `+0x24` rather than inserting again, so
+/// the tree records how many times each id was asked for.
+pub const KATANA_SFX_MISSING_IDS_OFFSET: usize = 0x2b8;
+
+/// `_Left` of a node in the [`KATANA_SFX_MISSING_IDS_OFFSET`] tree. `+0x00`.
+pub const KATANA_SFX_MISSING_LEFT_OFFSET: usize = 0x00;
+
+/// `_Parent` of a node -- and, on the head node, the tree's ROOT. `+0x08`.
+pub const KATANA_SFX_MISSING_PARENT_OFFSET: usize = 0x08;
+
+/// `_Right` of a node. `+0x10`.
+pub const KATANA_SFX_MISSING_RIGHT_OFFSET: usize = 0x10;
+
+/// `_Isnil` -- non-zero on the head and on the leaf sentinels. `+0x19`.
+///
+/// `+0x18` is `_Color`, which nothing here reads. The pair is the standard MSVC `_Tree_node`
+/// prefix, which is why the key lands at `+0x1c` rather than at `+0x1a`.
+pub const KATANA_SFX_MISSING_ISNIL_OFFSET: usize = 0x19;
+
+/// The `u32` id a node holds. `+0x1c`.
+pub const KATANA_SFX_MISSING_KEY_OFFSET: usize = 0x1c;
+
+/// Depth at which a walk of the [`KATANA_SFX_MISSING_IDS_OFFSET`] tree gives up. `64`.
+///
+/// A red-black tree of `n` keys is at most `2*log2(n+1)` deep, so sixty-four admits about a
+/// billion entries -- far past anything real. It is there because the tree is read while the
+/// game is free to rebalance it, and a torn read must end the walk rather than spin inside a
+/// cycle on the game's own simulation thread.
+pub const KATANA_SFX_MISSING_MAX_DEPTH: usize = 64;
+
+/// The engine's own "did this control block get anything?" predicate. RVA `0x00a0_6580`.
+///
+/// **Recorded so nobody calls it.** `ds2-invasion-path` tests the same thing by reading two
+/// fields, and this constant exists to document that the two are equivalent rather than to be
+/// used.
+///
+/// It is a five-byte `jmp` into Arxan-shattered code, and walking the chain with
+/// `scripts/ds2-arxan-chain.py` shows the whole predicate:
+///
+/// ```text
+/// 0x140a06580  jmp 0x141b873fb
+/// 0x141b873fb  cmp qword [rcx+0x10], 0     ; KATANA_SFX_CTRL_NODE_OFFSET
+/// 0x141c5abbd  cmovne rbx, <other return>  ; the flags pick which address to return to
+/// 0x141b692ad  cmp qword [rcx+0x18], 0     ; the second node slot
+/// ```
+///
+/// Two null tests on fields any caller can read for itself, reached through three stack-swapping
+/// Arxan fragments. Calling it would mean a hand-written prototype over shattered code to learn
+/// something two `safe_read_usize` calls already say.
+pub const KATANA_SFX_CTRL_IS_EMPTY: u32 = 0x00a0_6580;
+
+/// The Prism Stone's seven SFX ids: `833 ..= 839`.
+///
+/// **This is what `marker_effect_id` wants.** bd `ds2-mods-rs-3al` recorded the id as
+/// unobtainable from the executable; the chain that yields it is `ItemParam` row `60450000` ->
+/// `SpEffectActiveItem.emevd` event `60450000` -> instruction bank `100120` index `2`, whose
+/// entry in the dispatch table at `0x14156fe10` is named `L"七色石発射"` -- "seven-colour-stone
+/// launch" -- and whose factory `0x140216010` installs the vtable of
+/// `.?AVSpEffectActionImpl_ThrowColorStone@@`.
+///
+/// That class's execute method (`0x140216c40`) draws `rng % 7` from `GameManagerImp`'s xorshift
+/// state into the item bag's colour byte, and the item-pack glow spawner reads it back at
+/// `0x1401e69b4`:
+///
+/// ```text
+/// movzx eax, byte ptr [rbp+0x39]              ; the colour, 0..6
+/// lea   rcx, [rip + ...]                      ; the image base
+/// mov   eax, dword ptr [rcx + rax*4 + 0x10c7b58]
+/// ```
+///
+/// and the seven dwords at `0x1410c7b58` are `833 834 835 836 837 838 839`, followed by
+/// `0x3dcccccd` (`0.1f`), so the table is exactly seven long. `0x1401e69bf` is its only xref.
+/// `sfx9999.ffxbnd.dcx` carries `f0000833.ffx` through `f0000839.ffx` and nothing in
+/// `sfx9999_Append.ffxbnd.dcx` matches `f002083x`, so the `+20000` probe finds nothing for these
+/// and falls through to the base id -- which is what [`KATANA_SFX_SPAWN`] is given.
+///
+/// **They linger**, and the evidence is engine-side rather than a claim about the asset: the
+/// effect is bound to a persistent ground entity's transform (`entity+0xd0`) rather than to a
+/// projectile; the spawner retains its controllers in `entity+0x128` and re-spawns only when
+/// those slots are empty; turning the glow off fades it over a whole second; and `0x1401e0490`
+/// sweeps the live item-pack list turning the glow back on. A one-shot burst needs none of that.
+/// The prism bag is created with all eight item slots zeroed, so it is never picked up.
+///
+/// A trail should pick ONE of the seven and keep it, so the trail reads as one thing. Which one
+/// is a matter of taste; the engine chooses at random per throw.
+pub const PRISM_STONE_SFX_IDS: [u32; 7] = [833, 834, 835, 836, 837, 838, 839];
+
+/// Where [`PRISM_STONE_SFX_IDS`] was read from. RVA `0x010c_7b58`, seven `u32`.
+///
+/// Recorded so the next reader can re-derive the ids from the image rather than trusting the
+/// array above, which is a transcription.
+pub const PRISM_STONE_SFX_ID_TABLE: u32 = 0x010c_7b58;
+
+/// Bytes of caller-owned storage `0x140beb670` writes into. `0x68`.
+///
+/// Two `FX4CG::FXCGSfxCtrl` at `0x30` each plus the `param_2[0xc] = 0` at `+0x60`. Must be
+/// 16-byte aligned: the constructors store vtable pointers with aligned moves.
+pub const KATANA_SFX_CTRL_BYTES: usize = 0x68;
+
+/// Bytes per `FXCGSfxCtrl` sub-object inside that block. `0x30`.
+///
+/// The stride [`KATANA_SFX_CTRL_DESTROY`] must be called at, twice, descending.
+pub const KATANA_SFX_CTRL_HALF_BYTES: usize = 0x30;
 
 // ---------------------------------------------------------------------------------------------
 // THE CAMERA, and the one thing in this section that is FOUND rather than declared.
@@ -6390,6 +7302,427 @@ pub const CAMERA_MANAGER_SIZE: usize = 0x458;
 /// searches the object and lets the projection matrix's own shape decide. The winner is logged,
 /// and pinning it here is the follow-up that search exists to make possible.
 pub const CAMERA_OPERATOR_OWNER_IS_SEARCHED: () = ();
+
+// ============================================================================================
+// DLUID -- THE INPUT DEVICE LAYER
+//
+// Everything below was read out of three virtual methods that occupy the SAME vtable slot (23,
+// byte offset 0xb8) on the three `DLUID::*Device<DLKR::DLSingleThreadingPolicy>` classes. The
+// vtables themselves came from MSVC RTTI, via `scripts/ds2-rtti-vtables.py 'DLUID'`:
+//
+//     .?AV?$PadDevice@VDLSingleThreadingPolicy@DLKR@@@DLUID@@       vtable=0x141271aa8
+//     .?AV?$MouseDevice@VDLSingleThreadingPolicy@DLKR@@@DLUID@@     vtable=0x141272158
+//     .?AV?$KeyboardDevice@VDLSingleThreadingPolicy@DLKR@@@DLUID@@  vtable=0x141271e98
+//
+// and slot 23 of each was read straight out of `darksoulsii-deobf.bin`. Slots 0..22 are either
+// shared base implementations (identical qwords across all three) or per-class housekeeping;
+// slot 23 is the only one each class overrides with a body that calls an input API.
+//
+// WHY THIS SLOT IS THE STAGE THE GAME ACTUALLY READS. Each of the three bodies is the one place
+// a Win32/DirectInput/XInput call is turned into the numbers the rest of the engine consumes,
+// and each one writes those numbers into fields of its own device object. Downstream (the
+// `DLUI`/`DLUID` mapper: `DLUserInputMapperImpl`, `A2AMappingContext`, `VirtualAnalogKeyInfo<M>`)
+// reads the device object, never the API. So a value written into the device object AFTER the
+// original body has run is indistinguishable from a value the hardware produced -- and a value
+// written BEFORE it is overwritten, which is the same edge `../er-mods-rs`'s `pad_inject` learned
+// the hard way on Elden Ring.
+//
+// ALL THREE ENTRIES ARE CLEAN PROLOGUES, not Arxan redirects, checked one at a time:
+//
+//     $ python3 scripts/ds2-arxan-chain.py 0x140f05540   # PadDevice
+//     $ python3 scripts/ds2-arxan-chain.py 0x140f074a0   # MouseDevice
+//     $ python3 scripts/ds2-arxan-chain.py 0x140f06dd0   # KeyboardDevice
+//     ... NOT REDIRECTED (clean prologue at the entry)
+//
+// WHAT IS *NOT* ESTABLISHED HERE, and must not be read into it: which game action each axis is
+// bound to. The offsets below say "this float is pad axis 3", because that is what the XInput
+// and DirectInput branches both write there. They do NOT say "axis 3 turns the camera" -- that
+// is a mapper binding, it is a runtime fact, and `ds2-input-harness` measures it rather than
+// assuming it. See that crate's `drive` module.
+// ============================================================================================
+
+/// `DLUID::PadDevice<DLKR::DLSingleThreadingPolicy>`'s per-frame poll. RVA `0x00f05540`,
+/// VA `0x140f05540`.
+///
+/// Vtable slot 23 of `0x141271aa8`. The body has three arms, and the reason this crate records
+/// device-object offsets rather than an API is that all three converge on the same fields:
+///
+/// * **XInput.** `XInputGetState([this+0x19c], &state)` at `0x140f05ac2` -- one of only two call
+///   sites of the import in the whole image, and the only per-frame one (the other,
+///   `0x140ef6347`, is the 0..3 port enumeration). `sThumbLX/LY/RX/RY` are divided by
+///   `0x1410dec28` and scaled by `0x1410acb14` into the axis floats below; the triggers are
+///   divided by `0x1410ad0cc`; `wButtons` is stored as a `u16`.
+/// * **DirectInput joystick.** `IDirectInputDevice8::GetDeviceState(0x50, this+0x148)` through
+///   vtable byte offset `0x48` (slot 9) on the device at [`PAD_DEVICE_DINPUT_DEVICE_OFFSET`],
+///   at `0x140f05bcb`. `0x50` is `sizeof(DIJOYSTATE)`. Each of the six axes is then written only
+///   if its bit is set in [`PAD_DEVICE_AXIS_MASK_OFFSET`], into the SAME six floats.
+/// * **A third backend** reached through a function pointer on the device (an 0x78-byte report
+///   with 8-bit, 0x80-centred axes). It normalises into the same fields again.
+///
+/// Prologue, for the same reason every other hook site here records one -- so a detour refuses
+/// rather than patching something that moved:
+/// `48 89 7c 24 18` (`mov [rsp+0x18],rdi`).
+pub const PAD_DEVICE_POLL: u32 = 0x00f0_5540;
+
+/// First five bytes at [`PAD_DEVICE_POLL`], read from `darksoulsii-deobf.bin`.
+pub const PAD_DEVICE_POLL_PROLOGUE: [u8; 5] = [0x48, 0x89, 0x7c, 0x24, 0x18];
+
+/// `IDirectInputDevice8*` for a DirectInput joystick, or null. `PadDevice+0x100`.
+///
+/// From `mov rcx,QWORD PTR [rdi+0x100]` at `0x140f05b93`, the first instruction of the
+/// non-XInput arm, immediately followed by a null test that returns.
+pub const PAD_DEVICE_DINPUT_DEVICE_OFFSET: usize = 0x100;
+
+/// The raw `DIJOYSTATE` the joystick arm's `GetDeviceState` fills. `PadDevice+0x148`, `0x50`
+/// bytes. From `lea r8,[rdi+0x148]` / `mov edx,0x50` at `0x140f05bbc`.
+pub const PAD_DEVICE_DIJOYSTATE_OFFSET: usize = 0x148;
+
+/// Length of [`PAD_DEVICE_DIJOYSTATE_OFFSET`]: the `0x50` the poll passes to `GetDeviceState`.
+pub const PAD_DEVICE_DIJOYSTATE_BYTES: usize = 0x50;
+
+/// Which of the six axes this DirectInput joystick reports. `PadDevice+0x368`, one bit each.
+///
+/// From the six `test BYTE PTR [rdi+0x368],<bit>` at `0x140f05bd6`, `0x140f05c27`, `0x140f05c70`,
+/// `0x140f05cb1` and the two that follow -- bits `0x01`, `0x02`, `0x04`, `0x08`, `0x10`, `0x20`
+/// guarding the writes to `+0x1a4`, `+0x1a8`, `+0x1ac`, `+0x1b0`, `+0x1b4`, `+0x1b8` in that
+/// order. This is the evidence that the axis floats are one array of six.
+///
+/// Only the DirectInput arm consults it; the XInput arm writes its four unconditionally.
+pub const PAD_DEVICE_AXIS_MASK_OFFSET: usize = 0x368;
+
+/// The pad's button bitmask, `u16`. `PadDevice+0x198`.
+///
+/// From `mov WORD PTR [rdi+0x198],ax` at `0x140f05b85`, where `ax` is `XINPUT_GAMEPAD.wButtons`
+/// loaded by `movzx eax,WORD PTR [rbp-0x75]` -- offset 4 of the `XINPUT_STATE` buffer at
+/// `[rbp-0x79]`.
+pub const PAD_DEVICE_BUTTONS_OFFSET: usize = 0x198;
+
+/// XInput user index, `i32`, negative when no XInput pad owns this device. `PadDevice+0x19c`.
+///
+/// From `mov ecx,DWORD PTR [rdi+0x19c]` / `test ecx,ecx` / `js` at `0x140f05ab0` -- the branch
+/// that chooses the DirectInput arm over the XInput one.
+pub const PAD_DEVICE_XINPUT_PORT_OFFSET: usize = 0x19c;
+
+/// Base of the six normalised axis floats. `PadDevice+0x1a4`.
+///
+/// XInput writes four of them (`movss [rdi+0x1a4]`, `[rdi+0x1a8]`, `[rdi+0x1b0]`, `[rdi+0x1b4]`
+/// at `0x140f05af6`, `0x140f05b20`, `0x140f05b3b`, `0x140f05b47`). The DirectInput arm writes all
+/// six, one per bit of the axis mask, at `+0x00`, `+0x04`, `+0x08`, `+0x0c`, `+0x10`, `+0x14`
+/// from this base -- which is what establishes that these are ONE array of six and not four
+/// fields with a gap.
+pub const PAD_DEVICE_AXES_OFFSET: usize = 0x1a4;
+
+/// How many floats [`PAD_DEVICE_AXES_OFFSET`] covers.
+pub const PAD_DEVICE_AXIS_COUNT: usize = 6;
+
+/// Index of the left stick's X axis within [`PAD_DEVICE_AXES_OFFSET`]. XInput `sThumbLX`.
+pub const PAD_AXIS_LEFT_X: usize = 0;
+/// Index of the left stick's Y axis. XInput `sThumbLY`.
+pub const PAD_AXIS_LEFT_Y: usize = 1;
+/// Index 2 is written by the DirectInput arm (a joystick Z axis) and by nothing on the XInput
+/// path. Recorded so the array is not silently treated as four elements.
+pub const PAD_AXIS_DINPUT_Z: usize = 2;
+/// Index of the right stick's X axis. XInput `sThumbRX` -- `movss [rdi+0x1b0]`, which is
+/// `0x1a4 + 3*4`.
+pub const PAD_AXIS_RIGHT_X: usize = 3;
+/// Index of the right stick's Y axis. XInput `sThumbRY` -- `movss [rdi+0x1b4]`.
+pub const PAD_AXIS_RIGHT_Y: usize = 4;
+/// Index 5 is DirectInput-only, same as [`PAD_AXIS_DINPUT_Z`].
+pub const PAD_AXIS_DINPUT_RZ: usize = 5;
+
+/// The magnitude a hard-over axis float reaches: `1.0`.
+///
+/// **Derived from the image's own constants, not assumed.** All three arms normalise to the same
+/// range by different arithmetic, and the three agreeing is the evidence:
+///
+/// * XInput: `sThumb / [0x1410dec28] * [0x1410acb14]`, and those two floats are `65535.0` and
+///   `2.0`. `sThumbLX` spans `-32768..=32767`, so the quotient spans `-1.00002..=0.99998`.
+/// * DirectInput joystick: `((raw - min) / (max - min) - [0x1410ac694]) * [0x1410acb14]` with
+///   `0x1410ac694 == 0.5`, i.e. a `0..=1` fraction re-centred and doubled -- `-1.0..=1.0`. Axis 1
+///   uses `[0x1410ada3c] == -2.0` instead, so it is the same range with the sign flipped.
+/// * The third backend: `(byte / [0x1410ad0cc]) * [0x1410acb14] - [0x1410ac698]` with
+///   `0x1410ad0cc == 255.0` and `0x1410ac698 == 1.0` -- again `-1.0..=1.0`.
+///
+/// So an injected value belongs in `-1.0..=1.0`, and anything outside it is a value no hardware
+/// could have produced.
+pub const PAD_AXIS_FULL_SCALE: f32 = 1.0;
+
+/// Left trigger, normalised `0.0..=1.0`. `PadDevice+0x1c4`.
+///
+/// From `movss [rdi+0x1c4]` at `0x140f05b62`, fed by `bLeftTrigger / 0x1410ad0cc` (`255.0`).
+pub const PAD_DEVICE_LEFT_TRIGGER_OFFSET: usize = 0x1c4;
+
+/// Right trigger. `PadDevice+0x1c8`, from `movss [rdi+0x1c8]` at `0x140f05b7d`.
+pub const PAD_DEVICE_RIGHT_TRIGGER_OFFSET: usize = 0x1c8;
+
+/// `DLUID::MouseDevice<DLKR::DLSingleThreadingPolicy>`'s per-frame poll. RVA `0x00f074a0`.
+///
+/// Vtable slot 23 of `0x141272158`. Body: `GetDeviceState(0x14, this+0xf0)` through the device
+/// vtable's byte offset `0x48`, then the three `LONG`s of that `DIMOUSESTATE2` are converted to
+/// floats. `0x14` is `sizeof(DIMOUSESTATE2)` -- twenty bytes, three axes and eight buttons.
+///
+/// **This device is filled by DirectInput and by nothing else** -- the body has exactly one
+/// source and it is the `GetDeviceState` above. `DarkSoulsII.exe` also imports no raw-input API
+/// at all (no `RegisterRawInputDevices`, no `GetRawInputData`; its only `USER32` pointer calls
+/// are `GetCursorPos`, `SetCursorPos` and `ShowCursor`), so DirectInput is the whole of the
+/// mouse's route into the engine.
+///
+/// Prologue: `40 53 48 83 ec 20` (`push rbx` / `sub rsp,0x20`).
+pub const MOUSE_DEVICE_POLL: u32 = 0x00f0_74a0;
+
+/// First five bytes at [`MOUSE_DEVICE_POLL`].
+pub const MOUSE_DEVICE_POLL_PROLOGUE: [u8; 5] = [0x40, 0x53, 0x48, 0x83, 0xec];
+
+/// `IDirectInputDevice8*` the mouse is read through, or null. `MouseDevice+0xe8`.
+///
+/// From `mov rcx,QWORD PTR [rcx+0xe8]` at `0x140f074a9`, null-tested two instructions later.
+pub const MOUSE_DEVICE_DINPUT_DEVICE_OFFSET: usize = 0xe8;
+
+/// The raw `DIMOUSESTATE2` `GetDeviceState` fills. `MouseDevice+0xf0`, 20 bytes.
+///
+/// `lX`/`lY`/`lZ` at `+0x00`/`+0x04`/`+0x08`, then `rgbButtons[8]` at `+0x0c`. The buttons are
+/// NOT copied out by the poll, so anything that wants them reads them here.
+pub const MOUSE_DEVICE_RAW_STATE_OFFSET: usize = 0xf0;
+
+/// Length of [`MOUSE_DEVICE_RAW_STATE_OFFSET`]: the `0x14` the poll passes to `GetDeviceState`.
+pub const MOUSE_DEVICE_RAW_STATE_BYTES: usize = 0x14;
+
+/// Mouse X delta for this frame, as a float. `MouseDevice+0x108`.
+///
+/// The poll's own conversion of `DIMOUSESTATE2.lX`; it is a RELATIVE count, not a coordinate.
+pub const MOUSE_DEVICE_DELTA_X_OFFSET: usize = 0x108;
+
+/// Mouse Y delta. `MouseDevice+0x10c`.
+pub const MOUSE_DEVICE_DELTA_Y_OFFSET: usize = 0x10c;
+
+/// Mouse wheel delta. `MouseDevice+0x110`, from `DIMOUSESTATE2.lZ`.
+pub const MOUSE_DEVICE_WHEEL_OFFSET: usize = 0x110;
+
+/// `DLUID::KeyboardDevice<DLKR::DLSingleThreadingPolicy>`'s per-frame poll. RVA `0x00f06dd0`.
+///
+/// Vtable slot 23 of `0x141271e98`. Body: `GetDeviceState(0x100, this+0xf0)` -- the 256-byte
+/// DirectInput DIK table. That is the numbering `ds2-hotkey-config::keys` already carries
+/// alongside Win32 virtual keys, and this is the read it was carried for.
+///
+/// Prologue: `40 53 48 83 ec 20`, the same shape as the mouse poll.
+pub const KEYBOARD_DEVICE_POLL: u32 = 0x00f0_6dd0;
+
+/// First five bytes at [`KEYBOARD_DEVICE_POLL`].
+pub const KEYBOARD_DEVICE_POLL_PROLOGUE: [u8; 5] = [0x40, 0x53, 0x48, 0x83, 0xec];
+
+/// `IDirectInputDevice8*` the keyboard is read through, or null. `KeyboardDevice+0xe8`.
+pub const KEYBOARD_DEVICE_DINPUT_DEVICE_OFFSET: usize = 0xe8;
+
+/// The 256-byte DIK table `GetDeviceState(0x100, ...)` fills. `KeyboardDevice+0xf0`.
+pub const KEYBOARD_DEVICE_DIK_TABLE_OFFSET: usize = 0xf0;
+
+/// Length of [`KEYBOARD_DEVICE_DIK_TABLE_OFFSET`]: the `0x100` the poll passes.
+pub const KEYBOARD_DEVICE_DIK_TABLE_BYTES: usize = 0x100;
+
+// ============================================================================================
+// THE CAMERA'S MOUSE-LOOK -- AND THE CORRECTION IT IS
+//
+// `MOUSE_DEVICE_POLL` above is a real device and the engine really does read it, but it is NOT
+// what turns this camera. Measured live 2026-09-22: `mouse 120 0 30` written into
+// `DLUID::MouseDevice`'s normalised deltas left the camera's published yaw at exactly 87.13 for
+// thirty frames. The whole chain is elsewhere, it is traced below, and every step of it was read
+// out of the disassembly rather than inferred:
+//
+//   FUN_140af42b0                     the per-frame input update
+//     -> parseInput(obj[0], dt)       0x140b08660 -- keyboard/general
+//     -> parseCameraInput(obj[1], dt) 0x140b0c950 -- MOUSE-LOOK
+//     -> SetCursorPos(...)            0x140af4525 -- the ONLY SetCursorPos call site in the image
+//
+//   parseCameraInput(cam, dt):
+//     cam[2..3] = cam[0..1]           PREVIOUS := CURRENT, at the top, before anything polls
+//     for device in cam[0x34]..cam[0x36]:
+//         device->vtable[1](dt)       == WindowsMouseDevice::poll, 0x140b5c1f0
+//         if device->vtable[3]() then remember it as the active one
+//     FUN_140b0d0e0(cam, dt, active)  0x140b0d0e0:
+//         *(u64*)cam = *(u64*)(device + 8)    CURRENT := the device's stored POINT
+//         cam[0] += cam[4]; cam[1] += cam[5]  ... plus a fixed origin offset
+//         cam[0xc]/[0xd] from device+0x14/+0x18   buttons
+//         cam[8]        from device+0x10          wheel
+//
+// So **the camera's mouse input is the difference between two successive values of
+// `WindowsMouseDevice+0x08`**, and that field is an ABSOLUTE client-space cursor position, not a
+// delta: the poll calls `GetCursorPos` -> `ScreenToClient` -> `GetClientRect` and clamps the
+// point into the client rect before storing it. `SetCursorPos` afterwards is the re-centring
+// that keeps a relative look going without the real cursor escaping the window.
+//
+// WHY THE HOOK IS THE POLL AND NOT `GetCursorPos`. The import has exactly two callers -- this
+// poll (`0x140b5c224`) and the one-shot init `FUN_140af3f60` (`0x140af40cb`), which seeds the
+// starting position through `FUN_140b0c940` and never runs again. So an IAT detour at
+// `GETCURSORPOS_IAT_THUNK` would be nearly as narrow. It is still the worse site, for a reason
+// that is about WHERE THE VALUE ENDS UP: `GetCursorPos` returns a SCREEN point, which the poll
+// then converts and clamps, so authoring there means reproducing `ScreenToClient` and the clamp
+// to write the number the consumer will actually read. `+0x08` IS that number -- the last thing
+// written before `FUN_140b0d0e0` copies it out -- so one store both authors the mouse and
+// overwrites whatever the human's hand produced. Same principle the camera capture used: stand
+// where the value goes, not where it is kept.
+// ============================================================================================
+
+/// `WindowsMouseDevice`'s per-frame poll. RVA `0x00b5c1f0`, VA `0x140b5c1f0`.
+///
+/// Vtable slot 1 of `0x1411dcc38` (MSVC RTTI, `scripts/ds2-rtti-vtables.py 'MouseDevice'`). Note
+/// that `.?AVMouseDevice@@`'s vtable at `0x1411dcc10` and this one are one contiguous run --
+/// `0x1411dcc10 + 5*8 == 0x1411dcc38` -- so the base has four virtuals and this class overrides
+/// all of them.
+///
+/// **This is a different class from [`MOUSE_DEVICE_POLL`]**, which is
+/// `DLUID::MouseDevice<DLKR::DLSingleThreadingPolicy>` and reads DirectInput. This one reads the
+/// Win32 cursor, and it is the one the camera follows.
+///
+/// Not Arxan-redirected (`scripts/ds2-arxan-chain.py 0x140b5c1f0`).
+///
+/// Prologue: `48 89 5c 24 10` (`mov [rsp+0x10],rbx`).
+pub const WINDOWS_MOUSE_DEVICE_POLL: u32 = 0x00b5_c1f0;
+
+/// First five bytes at [`WINDOWS_MOUSE_DEVICE_POLL`].
+pub const WINDOWS_MOUSE_DEVICE_POLL_PROLOGUE: [u8; 5] = [0x48, 0x89, 0x5c, 0x24, 0x10];
+
+/// The clamped client-space cursor position: two `i32`, x then y. `WindowsMouseDevice+0x08`.
+///
+/// From `mov QWORD PTR [rbx+0x8],rax` at `0x140b5c288`, where `rax` is the packed pair built by
+/// the two `cmovg` clamps at `0x140b5c25e` and `0x140b5c275`. `FUN_140b0d0e0` reads exactly this
+/// qword as `*(u64*)(device + 8)`.
+///
+/// **An absolute position, differenced by the consumer.** Authoring a constant here produces one
+/// frame of motion and then nothing; a sustained turn needs a value that keeps moving. Nothing
+/// re-clamps it after this store, so an authored position is not bounded by the client rect --
+/// which is what makes an arbitrarily long turn possible through this field.
+pub const WINDOWS_MOUSE_DEVICE_POSITION_OFFSET: usize = 0x08;
+
+/// Wheel delta for this frame. `WindowsMouseDevice+0x10`, read by `FUN_140b0d0e0` as
+/// `device+0x10`. From `mov eax,[rbx+0x28]` / `mov [rbx+0x10],eax` at `0x140b5c2d1`.
+pub const WINDOWS_MOUSE_DEVICE_WHEEL_OFFSET: usize = 0x10;
+
+/// Mouse buttons held, bits `0x1`/`0x2`/`0x4`. `WindowsMouseDevice+0x14`.
+///
+/// From the three `or DWORD PTR [rbx+0x14],<bit>` at `0x140b5c2a3`, `0x140b5c2b8`, `0x140b5c2cd`,
+/// each guarded by a call to `0x140af4120`. Whatever that query reads, `+0x14` is the funnel --
+/// `FUN_140b0d0e0` takes the buttons from here -- so blanking it after the poll suppresses a
+/// click regardless of where the click came from.
+pub const WINDOWS_MOUSE_DEVICE_BUTTONS_OFFSET: usize = 0x14;
+
+/// A second per-frame `u32`, `device+0x2c` moved into `device+0x18` by the poll and read by
+/// `FUN_140b0d0e0` into the camera object's `[0xd]` (the "just pressed" half of the button
+/// state). Recorded so blanking covers it; nothing here authors it.
+pub const WINDOWS_MOUSE_DEVICE_BUTTON_EDGE_OFFSET: usize = 0x18;
+
+/// The `HWND` the poll converts and clamps against. `WindowsMouseDevice+0x20`, from
+/// `mov rcx,QWORD PTR [rbx+0x20]` at `0x140b5c22a`, passed to `ScreenToClient`.
+pub const WINDOWS_MOUSE_DEVICE_HWND_OFFSET: usize = 0x20;
+
+/// The two accumulators the window procedure adds to and the poll drains and zeroes.
+/// `WindowsMouseDevice+0x28` and `+0x2c`; the poll's `this[5] = 0` clears both.
+pub const WINDOWS_MOUSE_DEVICE_ACCUMULATOR_OFFSET: usize = 0x28;
+
+/// `parseCameraInput`. RVA `0x00b0c950`, VA `0x140b0c950`. A `USER_DEFINED` symbol in the
+/// Ghidra project -- a name a human typed, not an inference.
+///
+/// Recorded as EVIDENCE rather than as a hook site: it is what establishes that the mouse-look
+/// value is a per-frame difference, because its first act is `previous := current` and its last
+/// is to pull a new `current` out of the active device. Nothing detours it.
+pub const PARSE_CAMERA_INPUT: u32 = 0x00b0_c950;
+
+/// The pull from the active mouse device into the camera-input object. RVA `0x00b0d0e0`.
+///
+/// Also evidence rather than a hook site: `*(u64*)cam = *(u64*)(device + 8)` is the single line
+/// that makes [`WINDOWS_MOUSE_DEVICE_POSITION_OFFSET`] the field worth writing.
+pub const CAMERA_INPUT_PULL_FROM_DEVICE: u32 = 0x00b0_d0e0;
+
+/// The per-frame input update that calls `parseInput`, `parseCameraInput` and then the image's
+/// only `SetCursorPos`. RVA `0x00af42b0`, VA `0x140af42b0`.
+pub const INPUT_UPDATE: u32 = 0x00af_42b0;
+
+/// The import thunk `DarkSoulsII.exe` calls `USER32!GetCursorPos` through. RVA `0x01aae3cc`.
+///
+/// From `call QWORD PTR [rip+0xf521a2]` at `0x140b5c224`, which resolves to `0x141aae3cc` -- the
+/// same `USER32` first-thunk table [`SLEEP_IAT_THUNK`]'s `KERNEL32` neighbour lives in.
+///
+/// **Recorded and deliberately NOT hooked.** See this section's banner for why the poll is the
+/// better site; this constant exists so the next person can see that the alternative was
+/// identified and rejected on evidence rather than missed.
+pub const GETCURSORPOS_IAT_THUNK: u32 = 0x01aa_e3cc;
+
+// ============================================================================================
+// THE CAMERA HAS NO STORED YAW -- A NEGATIVE RESULT, RECORDED SO IT IS NOT RE-SEARCHED
+//
+// The obvious way to turn the camera with no device connected is to find the angles the camera
+// controller integrates and write them. **On this engine there are none.** The evidence:
+//
+// `FUN_140493030` (RVA 0x00493030, 770 bytes) is the function `CAMERA_OPERATOR_VIEW_OFFSET`
+// already points at: it writes the world-to-camera matrix to `this+0x10` and the projection to
+// `this+0x50`, and it is the last thing to touch them before a frame is drawn. It calls `sinf`
+// and `cosf` exactly twice each, and BOTH pairs are fed by the same single float:
+//
+//     0x1404930bf   movss xmm0, DWORD PTR [rcx+0x10c]
+//     0x1404930d9   call  cosf
+//     0x1404930e7   movss xmm0, DWORD PTR [rbx+0x10c]
+//     0x1404930ef   call  sinf
+//     ... and the same pair again at 0x140493177 / 0x140493191 / 0x14049319f / 0x1404931a7
+//
+// One angle, not three. Everything else the builder consumes is a POSITION -- it reads vectors
+// through `FUN_140002680` / `FUN_140002380` (look-at helpers) and `FUN_140001a90` (the
+// projection builder). So `+0x10c` is the camera's ROLL about its own view axis, and heading and
+// pitch are DERIVED from an eye position and a target position rather than stored.
+//
+// `NormalCameraOperator`'s update (`0x1404a2700`) is the same shape from the other end: it
+// computes eye/target/up as 4-float vectors, smooths each toward its target with a per-frame
+// lerp factor, and hands the results to the same look-at helpers. No angle is integrated
+// anywhere in it.
+//
+// CONSEQUENCE FOR AN AGENT THAT WANTS TO TURN THE CAMERA:
+//
+// * Writing the view matrix at `+0x10` is NOT a camera turn for measurement purposes. It is the
+//   builder's OUTPUT, rebuilt from scratch every frame, and -- fatally for the experiment this
+//   repo is running -- `ds2-invasion-path` reads that same matrix, so rotating it would make the
+//   overlay track by construction and prove nothing.
+// * The real state is the eye position and whatever orbit parameter produces it. For the
+//   third-person camera that is inside `ExFollowCameraOperator`'s update (`0x14049afb0`), which
+//   is a pipeline of about fifteen single-argument stages. Two of them have been eliminated:
+//   `0x14049bc00` fills the parameter block at `+0x3f4..+0x430` and `0x14049b1f0` copies that
+//   block into `+0x138..+0x1f4` -- both are camera-parameter blending, not orbit state. The
+//   remaining stages are unexamined and that is where the next search starts.
+//
+// Recorded here rather than left as a gap because "look for the camera's yaw" is exactly the
+// search someone will start again otherwise, and it has now cost one round.
+// ============================================================================================
+
+/// The view/projection matrix builder. RVA `0x00493030`, VA `0x140493030`.
+///
+/// Writes the world-to-camera matrix to `this+`[`CAMERA_OPERATOR_VIEW_OFFSET`] and the projection
+/// to `this+`[`CAMERA_OPERATOR_PROJECTION_OFFSET`]. Called from `0x140493780` and `0x140493340`,
+/// both of which pass their own `this` unchanged -- which is what
+/// [`CAMERA_OPERATOR_OWNER_IS_SEARCHED`] already recorded.
+///
+/// **Evidence, not a hook site.** See this section's banner: its only trigonometry is on
+/// [`CAMERA_OPERATOR_ROLL_OFFSET`], which is what proves the camera's heading is derived from
+/// positions rather than stored as an angle.
+pub const CAMERA_VIEW_MATRIX_BUILDER: u32 = 0x0049_3030;
+
+/// The camera's roll about its own view axis, in radians. `CameraOperator+0x10c`.
+///
+/// The ONLY field [`CAMERA_VIEW_MATRIX_BUILDER`] passes to `sinf`/`cosf`, at `0x1404930bf`,
+/// `0x1404930e7`, `0x140493177` and `0x14049319f`. Writing it tilts the horizon; it does not
+/// turn the camera, and it is recorded to make clear which angle this is and which it is not.
+pub const CAMERA_OPERATOR_ROLL_OFFSET: usize = 0x10c;
+
+/// `ExFollowCameraOperator`'s per-frame update. RVA `0x0049afb0`, VA `0x14049afb0`.
+///
+/// Vtable slot 4 of `0x1410f4a98`. Fifteen single-argument stages; the orbit state that decides
+/// where the third-person camera sits relative to the player is in one of the unexamined ones.
+/// The next search for a device-free camera turn starts here.
+pub const EX_FOLLOW_CAMERA_UPDATE: u32 = 0x0049_afb0;
+
+/// The `ExFollowCameraOperator` stage that fills the camera-parameter block at `+0x3f4..+0x430`.
+/// RVA `0x0049bc00`. **Eliminated**: parameter blending, not orbit state.
+pub const EX_FOLLOW_CAMERA_PARAM_BLEND: u32 = 0x0049_bc00;
+
+/// The stage that copies `+0x3f4..+0x430` into `+0x138..+0x1f4` where a value is non-zero.
+/// RVA `0x0049b1f0`. **Eliminated** for the same reason.
+pub const EX_FOLLOW_CAMERA_PARAM_APPLY: u32 = 0x0049_b1f0;
 
 // THE SAVE/LOAD DIRECTORY SPLIT
 //
