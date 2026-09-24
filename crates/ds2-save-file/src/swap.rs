@@ -303,26 +303,11 @@ pub fn begin(picked: &Path) -> Result<(), NotBegun> {
     let root = ds2_game_base::log::game_directory_path()
         .map(|dir| dir.join(STAGING_DIR_NAME))
         .ok_or(NotBegun::NoGameDirectory)?;
-    let id = steam_id().ok_or(NotBegun::NoSteamId)?;
-    // A COPY, not a pointer at the player's file. The pick is staged and its Steam ID rebound to
-    // the running account's, so the file the player chose is never opened for writing and a
-    // container bound to somebody else's account is not handed to a game that would refuse it.
-    let staged = ds2_save_redirect::stage::stage(picked, &id, &root)
-        .map_err(|error| NotBegun::Staging(error.to_string()))?;
-    let directory = staged.directory.to_string_lossy().into_owned();
-    // `rebound` is printed, not just `id`. The line used to carry the ID that was passed IN, which
-    // says nothing about what landed in the file -- a rebind that matched nothing succeeds and
-    // reports zero, and the line looked identical either way. Answering "was the donor actually
-    // rebound?" cost a trip to the staged file on disk with `scripts/ds2-sl2-rebind.py --show`.
-    log_line(format_args!(
-        "{LOG_PREFIX} swap staged kind={} bytes={} steam-id={id} rebound={} was={} from={} \
-         into={directory}",
-        staged.kind,
-        staged.bytes,
-        staged.rebound.replaced,
-        staged.rebound.previous.as_deref().unwrap_or("none"),
-        picked.display()
-    ));
+    // ASKED FOR NOW, USED AT THE TITLE. The staging itself happens there; this is only the early
+    // refusal, so a session with no known Steam ID says so before the player has been taken out of
+    // their game for nothing.
+    steam_id().ok_or(NotBegun::NoSteamId)?;
+    let directory = root.to_string_lossy().into_owned();
 
     // Both sides are told where the staged copy is and neither is armed. Setting a directory is
     // inert on its own, which is what makes this safe to do here: the arming is what changes
@@ -421,12 +406,55 @@ fn title_gate() -> ds2_continue::TitleStep {
             // game is left holding its own directory and its own file name; the container it asks
             // for is answered with the staged one, for as long as this window is armed.
             //
-            // Reads only, so the player's own file cannot be written through this. That is also why
-            // the window can be this wide: the worst a leak does is let the game READ a copy of a
-            // save it was going to read anyway.
+            // AND THE PICK IS EXTRACTED HERE, not when the row was pressed. Staging at the row put
+            // the donor container on disk while a character was still loaded, and leaving that
+            // character to the title saves it -- through this same window, if a previous swap had
+            // armed it. Measured on the second swap of one session, 2026-09-23:
+            //
+            //   379  open-redirect container=staged ... write=true   <- the extraction
+            //   380  swap staged kind=7z ... rebound=1 was=01100001125ced83
+            //   393  open-redirect container=own diverted=true write=true   <- the leave-save,
+            //   394  open-redirect container=own diverted=true write=true      over the top of it
+            //
+            // and the player got their own updated character back out of the file they had just
+            // picked. At the title no character is loaded, so nothing can save over the extraction.
             if restoring {
                 ds2_save_redirect::open_redirect::disarm();
             } else {
+                let Some(id) = steam_id() else {
+                    *guard = None;
+                    drop(guard);
+                    abandon(
+                        "the running account's Steam ID is not known, so the pick cannot be \
+                             rebound",
+                    );
+                    return TitleStep::Finished;
+                };
+                let staged = match ds2_save_redirect::stage::stage(
+                    &swap.picked,
+                    &id,
+                    Path::new(&swap.staged),
+                ) {
+                    Ok(staged) => staged,
+                    Err(error) => {
+                        *guard = None;
+                        drop(guard);
+                        abandon(&format!("the pick could not be staged: {error}"));
+                        return TitleStep::Finished;
+                    }
+                };
+                // `rebound` is printed, not just the id that was passed in: a rebind that matches
+                // nothing succeeds and reports zero, and the line looked identical either way.
+                log_line(format_args!(
+                    "{LOG_PREFIX} swap staged kind={} bytes={} steam-id={id} rebound={} was={} \
+                     from={} into={}",
+                    staged.kind,
+                    staged.bytes,
+                    staged.rebound.replaced,
+                    staged.rebound.previous.as_deref().unwrap_or("none"),
+                    swap.picked.display(),
+                    swap.staged
+                ));
                 let staged = Path::new(&swap.staged).join(ds2_save_redirect::SAVE_FILE_NAME);
                 let own = ds2_save_redirect::live_directory()
                     .map(|dir| dir.join(ds2_save_redirect::SAVE_FILE_NAME));
