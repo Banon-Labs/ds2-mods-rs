@@ -596,12 +596,22 @@ fn load_confirmed(slot: i32) {
         return;
     }
     let staged = swap.staged.clone();
-    // The save side's vtable slot, armed so `export` can read `SAVE.directory()` and say which
-    // container a Save Game to File row's file came from. It is not what a save writes through --
-    // that seam was disproved for loads and the save half has no better claim -- and it is
-    // disarmed again at `StartIngame` alongside the open window.
-    // SAFETY: the game is mapped and past `DllMain`; this is its own thread at the title.
-    let armed = unsafe { session_dir::SAVE.arm() };
+    // THE SAVE SIDE IS NOT ARMED, and this is the one thing this flow still changed about saving.
+    //
+    // A run on 2026-09-23 loaded a character out of the picked file and then put up the game's own
+    // `Failed to save game.` The log of that run rules out everything below the game: 105 opens of
+    // the player's container through `CreateFileW`, every one a read or a query, every one
+    // returning a handle -- no write-open, no failure. So the refusal happened inside the game,
+    // before a file was touched, and the only thing this flow had done to the save path was answer
+    // the save session's directory virtual with the staged folder:
+    //
+    //   ds2-save-redirect: save-session armed slot=0x1411b6448 directory=...\ds2-swapped-save\
+    //   ds2-save-redirect: save-session override ANSWERED count=1 units=81
+    //
+    // Leaving it unarmed puts the save back on untouched code. It also answers what the player
+    // asked for -- a character loaded out of a file, with no interest in saving it -- and if the
+    // dialog survives this, the cause is not this flow at all.
+    let armed = false;
     // The container the list is about, reported rather than assumed. This flow never armed a
     // redirect -- no writable directory field is known -- so a load confirmed here is a load out
     // of the container the game was already using.
