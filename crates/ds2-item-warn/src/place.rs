@@ -255,9 +255,24 @@ pub(crate) unsafe fn place(component: usize, base: usize) {
     unsafe { std::slice::from_raw_parts_mut(destination as *mut f32, 4).copy_from_slice(&want) };
     let n = PLACED.fetch_add(1, Ordering::Relaxed) + 1;
     if n <= LOGGED {
+        // The per-quad matrix, which is where the art's translation actually lives.
+        // `FUN_140b70200` allocates `quads * 0x30` at `+0x48` and seeds it from constants, and the
+        // composed position is `that translation + the destination rect's corner`. Logging it
+        // turns "the arrow is below the portrait" into an offset in the container's own units --
+        // which is the one thing four rounds of moving `FE_ITEM_WARN_OFFSET` never produced.
+        // SAFETY: the quad count is 1, so this matrix is inside the array that count sized.
+        let matrix = unsafe { read_usize(shape + ds2_rva::FE_TEXTURE_SHAPE_QUAD_MATRIX_OFFSET) };
+        let mut composed = [0f32; 12];
+        if sane(matrix) {
+            for (slot, cell) in composed.iter_mut().enumerate() {
+                // SAFETY: as above -- `0x30` bytes is exactly these twelve floats.
+                *cell = unsafe { ((matrix + slot * 4) as *const f32).read_unaligned() };
+            }
+        }
         log(format_args!(
             "{LOG_PREFIX} badge placed shape=0x{shape:016x} rect={was:.2?} -> {want:.2?} \
-             placements={n}"
+             matrix={composed:.2?} container={:.2?} placements={n}",
+            ds2_rva::FE_ITEM_INFUSION_CONTAINER_AT
         ));
     }
 }

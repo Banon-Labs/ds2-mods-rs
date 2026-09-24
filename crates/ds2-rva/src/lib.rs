@@ -4044,6 +4044,16 @@ pub const FE_SHAPE_ENTRY_COUNT_OFFSET: usize = 0x02;
 /// made room and the source pulled in whatever sits below the banner in the atlas. Growing the
 /// destination alone stretches the shipped art to fill instead.
 pub const FE_TEXTURE_SHAPE_DEST_RECT_OFFSET: usize = 0x50;
+
+/// The per-quad matrix array on a `FeComponentTextureShape`, `0x30` bytes per quad.
+///
+/// `FUN_140b70200` allocates it as `quads * 0x30` at `+0x48` -- alongside the destination and
+/// source rects at `+0x50` and `+0x58`, which it allocates as `quads * 0x10` -- and seeds each one
+/// from the constants at `_FLOAT_141596af0..`. The art's composed position is this translation
+/// plus the destination rect's corner, which is why the quad's own offset
+/// (`(-934.70, -52.50)` for the infusion arrow) cancels a rect that starts at `(934.70, 52.50)`
+/// and leaves the art sitting on its record's origin.
+pub const FE_TEXTURE_SHAPE_QUAD_MATRIX_OFFSET: usize = 0x48;
 pub const FE_TEXTURE_SHAPE_SOURCE_RECT_OFFSET: usize = 0x58;
 pub const FE_TEXTURE_SHAPE_RECT_STRIDE: usize = 0x10;
 
@@ -6745,16 +6755,38 @@ pub const FE_ITEM_WARN_ELEMENT: u32 = 0x05f5_c3ef;
 /// Three nested records and one quad, every one of them read out of `l02_02_Inventory.flo`:
 ///
 /// ```text
-/// cell def 0x007a  child[0] id 0x5f5c3e0 def 0x005d  at (0, 0)
-///   def 0x005d     child[1] id 0x5f5c3e0 def 0x0056  at (15.25, -9.65)
-///     def 0x0056   child[0]              def 0x0055  at (0, 0)
-///       def 0x0055 child[1]              def 0x0054  at (0, 0)
+/// cell def 0x007a  child[0] id 0x5f5c3e0 def 0x005d  at (0, 0)          scale (1, 1)
+///   def 0x005d     child[1] id 0x5f5c3e0 def 0x0056  at (15.25, -9.65)  scale (0.810806, ..)
+///     def 0x0056   child[0]              def 0x0055  at (0, 0)          scale (1, 1)
+///       def 0x0055 child[1]              def 0x0054  at (0, 0)          scale (1, 1)
 ///         shape 0x0054, one quad, rect (0,0)-(64,128), offset (0,0)
 /// ```
 ///
 /// `0x0054` is the placeholder the item's own texture is bound into at runtime, so its rect is the
 /// box the icon occupies rather than the art in it.
-pub const FE_ITEM_ICON_BOX: [f32; 4] = [15.25, -9.65, 79.25, 118.35];
+///
+/// The scale is the half this was first written without, and the omission was visible on screen:
+/// the badge derived from it hung below the icon instead of sitting in its corner. The quad is
+/// `64 x 128`, but the record carrying it is scaled, so the box is `51.89 x 103.78` -- a bottom
+/// edge of `94.13`, not `118.35`, which is `24.22` lower than the icon ever reaches.
+///
+/// It went unnoticed because `scripts/ds2-flo.py`'s `render` printed `xy=` and not `scale=`, so
+/// four separate readings of these same records all returned a position and no scale. That script
+/// prints both now.
+///
+/// Only the far edges move. `[0]` and `[1]` are the record's own origin, and a scale applies to
+/// what a record contains rather than to where it sits.
+pub const FE_ITEM_ICON_BOX: [f32; 4] = [
+    15.25,
+    -9.65,
+    15.25 + 64.0 * FE_ITEM_ICON_SCALE,
+    -9.65 + 128.0 * FE_ITEM_ICON_SCALE,
+];
+
+/// The scale on the record that carries the item icon's quad, in both documents that author an
+/// item cell: `l02_02_Inventory.flo` `def 0x005d` child[1], and `l02_03_equipment.flo` `def 0x0058`
+/// child[1]. The same number in both, read with `scripts/ds2-flo.py tree`.
+pub const FE_ITEM_ICON_SCALE: f32 = 0.810806;
 
 /// Where the infusion container sits inside a cell, in the same units.
 ///
@@ -6770,6 +6802,37 @@ pub const FE_ITEM_INFUSION_CONTAINER_AT: [f32; 2] = [51.40, 48.15];
 /// How far the added mark is inset from the icon's bottom-left corner.
 pub const FE_ITEM_WARN_INSET: f32 = 2.0;
 
+/// Where the cell's durability bar starts, which is the real bottom of the usable portrait.
+///
+/// The badge is anchored on this and not on [`FE_ITEM_ICON_BOX`]`[3]`, because the icon's box runs
+/// *past* the bar: `94.13` against a bar starting at `71.85`. A badge placed against the box's
+/// bottom edge therefore lands on the bar and below it -- which is what four rounds of screenshots
+/// showed, the arrow sitting under the portrait rather than on it, with the box arithmetic correct
+/// the whole time and anchored to the wrong edge.
+///
+/// Element `0x5f5c3e1`, the last child of the cell in both documents that author one:
+///
+/// ```text
+/// l02_03_equipment.flo  def 0x0075 child[7]  def 0x0072  at (9.45, 71.85)
+/// l02_02_Inventory.flo  def 0x007a child[7]  def 0x0077  at (9.45, 73.35)
+/// ```
+///
+/// The lower of the two is taken, so the badge clears the bar in both rather than in one.
+pub const FE_ITEM_CELL_BAR_TOP: f32 = 71.85;
+
+/// Where that same bar starts horizontally, which is the game's own left margin inside a cell.
+///
+/// Both documents put it at `9.45`, and the badge's left edge is aligned to it rather than to
+/// [`FE_ITEM_ICON_BOX`]`[0] + `[`FE_ITEM_WARN_INSET`], which sat `7.80` further right. The icon
+/// box is not the visible tile: the cell's background shape (`0x004d` in equipment, `0x0052` in
+/// inventory, the same quad in both) draws from `2.45` to `97.30`, so there is parchment to the
+/// left of the icon box and the badge was stopping short of it.
+///
+/// The bar is the better anchor of the two edges available. `2.45` is the art's extreme edge and
+/// runs under the cell's frame; `9.45` is where the game itself starts a full-width element inside
+/// the same tile, so a badge on that line shares a margin with something already on screen.
+pub const FE_ITEM_CELL_BAR_LEFT: f32 = 9.45;
+
 /// The mark's size, taken from the infusion glyph it clones.
 ///
 /// Shape `0x005e` -- the leaf under def `0x005f`, which is child `[0]` of the inventory
@@ -6782,8 +6845,8 @@ pub const FE_ITEM_WARN_SIZE: [f32; 2] = [25.60, 26.00];
 /// The icon's bottom-left corner inset by [`FE_ITEM_WARN_INSET`], minus the container's own origin.
 /// Arithmetic rather than a literal so the three constants above stay the only measurements.
 pub const FE_ITEM_WARN_OFFSET: [f32; 2] = [
-    FE_ITEM_ICON_BOX[0] + FE_ITEM_WARN_INSET - FE_ITEM_INFUSION_CONTAINER_AT[0],
-    FE_ITEM_ICON_BOX[3]
+    FE_ITEM_CELL_BAR_LEFT - FE_ITEM_INFUSION_CONTAINER_AT[0],
+    FE_ITEM_CELL_BAR_TOP
         - FE_ITEM_WARN_SIZE[1]
         - FE_ITEM_WARN_INSET
         - FE_ITEM_INFUSION_CONTAINER_AT[1],
@@ -6902,14 +6965,144 @@ mod item_warn_tests {
             super::FE_ITEM_INFUSION_CONTAINER_AT[0] + super::FE_ITEM_WARN_OFFSET[0],
             super::FE_ITEM_INFUSION_CONTAINER_AT[1] + super::FE_ITEM_WARN_OFFSET[1],
         ];
-        assert!(at[0] >= super::FE_ITEM_ICON_BOX[0], "not off the left edge");
+        // The TILE bounds the badge, not the icon's art box. Those are different rectangles and
+        // conflating them is what put the badge under the portrait and then short of its left
+        // margin: the art box is `(15.25, -9.65)-(67.14, 94.13)`, while the parchment the player
+        // sees runs `(2.45, -5.85)-(97.30, 85.00)`. The badge is deliberately left of the art box
+        // now, on the margin the cell's own durability bar uses.
+        const TILE: [f32; 4] = [2.45, -5.85, 97.30, 85.00];
+        assert!(at[0] >= TILE[0], "not off the left edge of the tile");
         assert!(
-            at[0] + super::FE_ITEM_WARN_SIZE[0] <= super::FE_ITEM_ICON_BOX[2],
-            "and not past the right"
+            at[0] + super::FE_ITEM_WARN_SIZE[0] <= TILE[2],
+            "and not past its right"
         );
         assert!(
-            at[1] + super::FE_ITEM_WARN_SIZE[1] <= super::FE_ITEM_ICON_BOX[3],
-            "and not below the bottom"
+            at[1] + super::FE_ITEM_WARN_SIZE[1] <= super::FE_ITEM_CELL_BAR_TOP,
+            "and above the durability bar, which is the edge that actually bounds it"
+        );
+    }
+}
+
+#[cfg(test)]
+mod item_icon_box_tests {
+    /// The icon box is the quad SCALED, not the quad.
+    ///
+    /// The sibling tests in `item_warn_tests` all compare the box against itself, so every one of
+    /// them passed while `FE_ITEM_ICON_BOX` carried a bottom edge `24.22` below where the icon
+    /// actually ends -- and the badge derived from it hung under the portrait on screen. This
+    /// compares the box against the two numbers it is built from instead.
+    #[test]
+    fn the_scale_is_applied_to_both_far_edges() {
+        let box_ = super::FE_ITEM_ICON_BOX;
+        let width = box_[2] - box_[0];
+        let height = box_[3] - box_[1];
+        assert!(
+            (width - 64.0 * super::FE_ITEM_ICON_SCALE).abs() < 0.01,
+            "width must be the quad's 64 scaled, got {width}"
+        );
+        assert!(
+            (height - 128.0 * super::FE_ITEM_ICON_SCALE).abs() < 0.01,
+            "height must be the quad's 128 scaled, got {height}"
+        );
+        assert!(
+            super::FE_ITEM_ICON_SCALE < 1.0,
+            "a scale of 1 would make this test vacuous"
+        );
+    }
+
+    /// The badge sits inside the icon on BOTH axes, measured from the container it hangs off.
+    ///
+    /// The vertical half is the one that was wrong: the badge's bottom edge ran past the icon's.
+    #[test]
+    fn the_badge_does_not_hang_below_the_portrait() {
+        let bottom = super::FE_ITEM_INFUSION_CONTAINER_AT[1]
+            + super::FE_ITEM_WARN_OFFSET[1]
+            + super::FE_ITEM_WARN_SIZE[1];
+        assert!(
+            bottom <= super::FE_ITEM_ICON_BOX[3],
+            "badge bottom {bottom} is below the icon's {}",
+            super::FE_ITEM_ICON_BOX[3]
+        );
+        let right = super::FE_ITEM_INFUSION_CONTAINER_AT[0]
+            + super::FE_ITEM_WARN_OFFSET[0]
+            + super::FE_ITEM_WARN_SIZE[0];
+        assert!(
+            right <= super::FE_ITEM_ICON_BOX[2],
+            "badge right {right} is past the icon's {}",
+            super::FE_ITEM_ICON_BOX[2]
+        );
+    }
+}
+
+#[cfg(test)]
+mod item_warn_bar_tests {
+    /// The badge clears the durability bar, which is the edge that actually bounds the portrait.
+    ///
+    /// The sibling test `the_badge_does_not_hang_below_the_portrait` passed throughout, because it
+    /// measured against `FE_ITEM_ICON_BOX[3]` -- an edge `22.28` below the bar. Four runs put the
+    /// arrow under the portrait while that test stayed green.
+    #[test]
+    fn the_badge_sits_above_the_durability_bar() {
+        let bottom = super::FE_ITEM_INFUSION_CONTAINER_AT[1]
+            + super::FE_ITEM_WARN_OFFSET[1]
+            + super::FE_ITEM_WARN_SIZE[1];
+        assert!(
+            bottom <= super::FE_ITEM_CELL_BAR_TOP,
+            "badge bottom {bottom} is on or under the bar at {}",
+            super::FE_ITEM_CELL_BAR_TOP
+        );
+    }
+
+    /// The bar is the tighter bound, which is the whole reason the anchor moved.
+    #[test]
+    fn the_bar_is_above_the_icon_boxs_bottom() {
+        assert!(
+            super::FE_ITEM_CELL_BAR_TOP < super::FE_ITEM_ICON_BOX[3],
+            "if the icon box ended first, anchoring on it would have been correct"
+        );
+    }
+
+    /// The badge is still inside the portrait vertically, not floated off the top of it.
+    #[test]
+    fn the_badge_is_below_the_icons_top() {
+        let top = super::FE_ITEM_INFUSION_CONTAINER_AT[1] + super::FE_ITEM_WARN_OFFSET[1];
+        assert!(
+            top > super::FE_ITEM_ICON_BOX[1],
+            "badge top {top} is above the icon"
+        );
+    }
+}
+
+#[cfg(test)]
+mod item_warn_left_tests {
+    /// The badge's left edge is the bar's, so the two share the cell's own margin.
+    #[test]
+    fn the_badge_lines_up_with_the_bar() {
+        let left = super::FE_ITEM_INFUSION_CONTAINER_AT[0] + super::FE_ITEM_WARN_OFFSET[0];
+        assert!(
+            (left - super::FE_ITEM_CELL_BAR_LEFT).abs() < 0.01,
+            "badge left {left} is not the bar's {}",
+            super::FE_ITEM_CELL_BAR_LEFT
+        );
+    }
+
+    /// That margin is further left than the icon box allowed, which is the change.
+    #[test]
+    fn the_bar_margin_is_left_of_the_icon_box() {
+        assert!(
+            super::FE_ITEM_CELL_BAR_LEFT < super::FE_ITEM_ICON_BOX[0] + super::FE_ITEM_WARN_INSET,
+            "anchoring on the bar has to move the badge LEFT of where the icon box put it"
+        );
+    }
+
+    /// And it is still on the tile: the cell's background art starts left of the bar.
+    #[test]
+    fn the_badge_stays_on_the_parchment() {
+        /// The cell background quad, offset plus rect, from `ds2-flo.py shape --shape 0x4d`.
+        const TILE_LEFT: f32 = 2.45;
+        assert!(
+            super::FE_ITEM_CELL_BAR_LEFT > TILE_LEFT,
+            "the bar's margin must sit inside the tile, not on its frame"
         );
     }
 }
