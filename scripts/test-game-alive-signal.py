@@ -102,6 +102,33 @@ for sentence in CLEAN:
         f"not a live-game claim: {sentence[:54]!r}",
     )
 
+# --- the mention/use split ------------------------------------------------------------------------
+# The guard's first live catch was the agent QUOTING the banned sentence while reporting the guard
+# working. A rule that cannot tell naming the offence from committing it gags its own explanation.
+QUOTED = (
+    'You saw it halt me on "The game is up".',
+    "The reason quotes the phrase: 'the game is running'.",
+    "It fires on `the game is up` and on nothing else.",
+    'The correction reads: "You told the user the game is running".',
+)
+for sentence in QUOTED:
+    check(
+        alive.claims_alive(sentence) is None,
+        f"quoting the offence is not committing it: {sentence[:54]!r}",
+    )
+
+# And the bare claim still lands when it is not inside quotes -- the carve-out must not swallow it.
+check(
+    alive.claims_alive('The build is done. The game is up. Press the row.') is not None,
+    "an unquoted claim beside quoted text is still a claim",
+)
+
+# An unbalanced quote must not become a hiding place: parity says nothing, so the text is judged.
+check(
+    alive.claims_alive('He said "the game is up and I believe him') is not None,
+    "half a quotation does not exempt the sentence it opens",
+)
+
 # A turn that ran a liveness check and reported a DEAD game must never be gagged -- that sentence is
 # the one this guard exists to produce.
 check(

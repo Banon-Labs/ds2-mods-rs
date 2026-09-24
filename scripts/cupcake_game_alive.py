@@ -59,9 +59,36 @@ LIVENESS_COMMANDS = (
 )
 
 
+def _outside_spans(text: str, delimiter: str) -> str:
+    """`text` with every delimited span removed, by parity rather than by rewriting.
+
+    Split on the delimiter and keep the even-indexed pieces -- those are the ones outside it. An odd
+    number of delimiters means the parity read says nothing, so the text comes back untouched and
+    gets judged: half a quotation must not become a way to hide a claim.
+    """
+    parts = text.split(delimiter)
+    if len(parts) % 2 == 0:
+        return text
+    return "\n".join(part for index, part in enumerate(parts) if index % 2 == 0)
+
+
+def quotable(text: str) -> str:
+    """`text` with backticked code and quoted spans taken out before it is judged.
+
+    QUOTING THE OFFENCE IS NOT COMMITTING IT, and this is not a hypothetical: the guard's first
+    live catch was the agent writing `you saw it halt me on "The game is up"` while reporting the
+    guard working. Naming the sentence a rule forbids is how a correction gets explained, and a rule
+    that cannot tell the mention from the use gags the explanation of itself. The repo's shouting
+    guard makes exactly this cut for exactly this reason.
+    """
+    for delimiter in ("`", '"', "'"):
+        text = _outside_spans(text, delimiter)
+    return text
+
+
 def claims_alive(text: str) -> str | None:
     """The first phrase in `text` that asserts the game is running now, or None."""
-    lowered = text.lower()
+    lowered = quotable(text).lower()
     for pattern in ALIVE_PATTERNS:
         found = re.search(pattern, lowered)
         if found:
