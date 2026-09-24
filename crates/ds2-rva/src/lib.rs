@@ -6010,8 +6010,14 @@ pub const SL_REQUEST_SET_DIRECTORY_PROLOGUE: [u8; 5] = [0x48, 0x89, 0x5c, 0x24, 
 /// a set landed -- the worker pointer is otherwise reachable only through the locked finder.
 pub const SL_WORKER_SET_DIRECTORY: u32 = 0x00a8_d9b0;
 
-/// The five bytes [`SL_WORKER_SET_DIRECTORY`] must begin with. `push rdi; push r14; push r15`.
-pub const SL_WORKER_SET_DIRECTORY_PROLOGUE: [u8; 5] = [0x57, 0x41, 0x56, 0x41, 0x57];
+/// The five bytes [`SL_WORKER_SET_DIRECTORY`] must begin with.
+///
+/// `40 57` is `push rdi` carrying a redundant REX prefix, not `57` -- a disassembly LISTING spells
+/// that instruction the same either way, so the encoding has to be read as bytes. It was not, and
+/// the prologue check refused the detour on the first run with
+/// `saw=[40, 57, 41, 56, 41] want=[57, 41, 56, 41, 57]`, which is the check doing its whole job:
+/// five bytes off by one would have been a trampoline into the middle of `push r15`.
+pub const SL_WORKER_SET_DIRECTORY_PROLOGUE: [u8; 5] = [0x40, 0x57, 0x41, 0x56, 0x41];
 
 /// The request holder inside a `SaveLoadSystem`. `[system + 0x38]`.
 ///
