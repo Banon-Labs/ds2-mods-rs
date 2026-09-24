@@ -187,10 +187,10 @@ KEY_MENU_ROW_ROWS = "rows"
 #: the same order. `--selftest` checks each one appears there, because a name this script offers and
 #: the DLL does not know is a row that arms nothing and says so only in a log nobody is reading yet.
 MENU_ROW_ROW_NAMES = (
-    "quit-to-desktop",
     "load-build-from-url",
     "load-character-from-file",
     "save-game-to-file",
+    "quit-to-desktop",
 )
 
 #: Mirrors `MAX_ADDED_ROWS` in `crates/ds2-menu-row/src/api.rs`: the most rows the grid's layout
