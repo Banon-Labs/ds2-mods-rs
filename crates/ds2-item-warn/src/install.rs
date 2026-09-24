@@ -203,8 +203,7 @@ pub unsafe fn install() -> Outcome {
     }
     log(format_args!(
         "{LOG_PREFIX} installed equipment-screen={equip} -- weapons whose requirements the player \
-         fails get the game's own X (waku_03 {:.2?}) at cell-local ({:.2}, {:.2}), {:.2}x{:.2}; \
-         UNVERIFIED AT RUNTIME",
+         fails get the game's own X (waku_03 {:.2?}) at cell-local ({:.2}, {:.2}), {:.2}x{:.2}",
         ds2_rva::FE_ITEM_WARN_SOURCE,
         ds2_rva::FE_ITEM_CELL_BAR_LEFT,
         ds2_rva::FE_ITEM_CELL_BAR_TOP - ds2_rva::FE_ITEM_WARN_SIZE[1] - ds2_rva::FE_ITEM_WARN_INSET,

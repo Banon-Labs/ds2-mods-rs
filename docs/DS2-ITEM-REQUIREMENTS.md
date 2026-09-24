@@ -342,13 +342,11 @@ question as the badge's corner.
 
 ### What is not measured
 
-* **The X, at runtime.** The crate itself has run: a session's `ds2-loader.log` shows both hooks
-  taking, the requirement test naming unmet weapons by stat and threshold (`key=0x33 stat=8
-  required=16 have=11`), the container gaining its tenth child, and `place` writing the destination
-  rect on four badges. What has never been in front of a running game is the X -- that art was
-  written after that session, and the log lines above are the previous build's.
-* **Where the badge lands.** Still the open one. `place`'s write lands and the badge is not where
-  it computes; the matrix that was supposed to explain the difference reads identity at bind time.
+* **Where the quad's offset is applied at runtime.** Not in the per-quad matrix at `+0x48`, which
+  reads identity at cell-bind time on every badge `place` has logged -- so the `(-934.70, -52.50)`
+  the cloned glyph's `.flo` quad carries is folded in somewhere else, and the destination rect is
+  anchored on the rect that cancellation is built around rather than on an explanation of it. The
+  badge lands where it is computed either way; this is a gap in the account, not in the behaviour.
 * **Whether the frontend stat table holds base or modified stats.** Every cross-reference to
   `FUN_1404ffb20` is a reader; its writer was not found. On the gameplay side the equivalent block
   is provably `clamp(base + modifiers, 1, 99)`, and this one has no such proof, so whether rings

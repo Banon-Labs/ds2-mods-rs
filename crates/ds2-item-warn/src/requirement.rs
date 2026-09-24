@@ -46,9 +46,10 @@
 //! `FUN_14034a980` caches the mechanics check as a `float` per weapon slot at
 //! `equipObj + 0x50 + n * 0x48 + 0x38`, where `0.0` means every requirement is met. It covers the
 //! eight records of the equip object -- six equipped slots and the two held weapons -- and this
-//! badge is drawn on inventory rows, most of which are not in any of them. So the check is
-//! recomputed per cell rather than read, and that is a consequence of where the badge lives rather
-//! than an oversight.
+//! badge is drawn on inventory rows too, most of which are not in any of them. Reading the cache
+//! would therefore answer for the equipment screen and go blank for the list, so the check is
+//! recomputed per cell on both instead. That is a consequence of where the badge lives rather than
+//! an oversight, and it is also why one `unmet` serves two binds.
 //!
 //! # Only weapons and shields
 //!
