@@ -115,6 +115,50 @@ every point in the world, and no arrow arithmetic could ever have been right. On
 it proves arithmetic rather than DARK SOULS II offsets. Nothing in the Frida path depends on it --
 the world gate reads the loader log instead -- but do not read those functions as DS2 facts.
 
+## The gate is a pre-push step, not a development loop
+
+**Recorded 2026-09-24, from a session that ran `cargo fmt` and `scripts/check.sh` three times over
+a feature nobody had launched once.**
+
+`scripts/check.sh` answers one question: *is this branch fit to push*. It does not answer *does
+this work*, and it cannot, because every crate here ships as a DLL injected into a running game and
+none of the behaviour that matters is reachable from a host test or from `clippy`. A feature that
+has never executed inside DARK SOULS II is unproven no matter how many times the gate goes green,
+and re-running the gate after each edit converts that fact into the appearance of progress.
+
+So:
+
+- **Write the change, then run it.** `cargo fmt` and the gate belong at the end -- once, when the
+  branch is going out -- not between edits.
+- **A green gate is never evidence a feature works.** Say "it compiles and the gate passes" and
+  stop there; do not let it stand in for a run. Same rule as the log lines in the Frida section
+  above: an instrument that reports an absence it cannot detect is worse than no instrument.
+- **If the code cannot be run yet, say what is blocking the run** and fix that, rather than
+  polishing something that has not executed. Blocked on a live session is a real answer; three
+  clean gates is not.
+- **One compile check while writing is fine** -- `cargo xwin clippy -p <crate> --target
+  x86_64-pc-windows-msvc` catches the borrow errors the host build cannot, because the game code is
+  `cfg(windows)`. That is a syntax check with a short name, not the gate.
+
+## A diagnostic never suspends the feature it observes
+
+**Recorded 2026-09-24, the second time this shape was found in `ds2-invasion-path`.**
+
+Both instances were the same trade made twice: a measurement that needed the world to hold still,
+bought by making the world hold still.
+
+- `SELF_CHECK_DONE` gated the draw side's target nomination, so thirty seconds after the check gave
+  up the overlay had no target, drew nothing, and could not say whether it was loaded.
+- `Check::Watching` stopped `lay_markers` for ten seconds so "7/7 alive at t=10s" described a set
+  of stones nothing had touched. A path that stops being re-laid is a path going out of date in
+  front of somebody following it, and **there is a player at one end of every route this crate
+  plans**, so there is never a moment when freezing one is harmless.
+
+The rule: an observer observes. If a number can only be obtained by suspending, slowing, pinning or
+otherwise altering the behaviour under test, that number is not available from inside the feature
+-- take it in a scratch experiment that owns its own objects, or do without it. Deleting the
+measurement is the cheap half; leaving the freeze in is what costs a session.
+
 ## Non-Interactive Shell Commands
 
 **ALWAYS use non-interactive flags** with file operations to avoid hanging on confirmation prompts.

@@ -19,12 +19,20 @@ pub(crate) enum RouteShape {
     /// blocked on, and which turned out to be an ordinary synchronous call rather than the
     /// asynchronous job bd `ds2-mods-rs-4yd` was filed on.
     ///
-    /// Only the nearest player gets one; see the comment at the `routed` binding in
-    /// `crate::windows_impl::draw_for` for why.
+    /// Every target past `near_suppress_meters` gets one, up to `max_routes` of them, each from
+    /// its own planner. See the comment at the `far_enough` binding in
+    /// `crate::windows_impl::draw_for`, and the lane header in `crate::gametick`.
     Walk(Vec<[f32; 3]>),
-    /// No walkable route is available, so an arrow leaves the player's body pointing at the
-    /// target. This is what ships today, and it is the same fallback the Elden Ring crate uses
-    /// when its navmesh answers "there is no way to walk there".
+    /// The planner has answered that there is no way to walk to this target, so an arrow leaves
+    /// the player's body pointing at them. Same fallback the Elden Ring crate uses when its
+    /// navmesh says the same thing.
+    ///
+    /// **Only on a proven refusal**, which is a narrowing, not a detail. This was also drawn for
+    /// any target the planner had not been asked about -- and back when one `NvRoutePlanner`
+    /// served one target at a time, that was most of them. Arrows appeared beside a perfectly
+    /// good line because "I have not looked" was being drawn as "there is no way". A target
+    /// nobody has pathed to draws nothing now; see the shape decision in
+    /// `crate::windows_impl::draw_for`.
     ///
     /// **The target's world position, not a shape.** The arrow is built in pixels at draw time
     /// by [`crate::geometry::Camera::screen_arrow`], because a world-space arrow pointing near

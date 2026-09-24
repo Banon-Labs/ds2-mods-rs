@@ -6447,6 +6447,33 @@ pub const NV_ROUTE_SEGMENT_POINT_A_OFFSET: usize = 0x10;
 /// question open instead of answering it by assumption.
 pub const NV_NAVI_GRAPH_NODE_ATTRS_OFFSET: usize = 0x48;
 
+/// `NvNaviGraph* -> the centre of one navigation node, on the mesh`. RVA `0x0040_18d0`.
+///
+/// `FUN_1404018d0(graph, out: *mut f32x4, index)` and the whole body is an average:
+///
+/// ```text
+/// tri  = graph->triangles[index]          ; graph + 0x50, three shorts per node
+/// vert = graph->vertices                  ; graph + 0x40, three floats per vertex
+/// *out = (vert[tri[0]] + vert[tri[1]] + vert[tri[2]]) * (1/3)
+/// ```
+///
+/// So it is the centroid of the triangle the id names -- a point standing on the navmesh rather
+/// than near it. An out-of-range index falls back to `graph->triangles[0]` rather than reading
+/// past the array, which is the engine's own guard and not one this needs to add.
+///
+/// # What it is for here
+///
+/// A route's far segments are portal midpoints tens of metres apart with nothing computed between
+/// them (see [`NV_ROUTE_SEGMENT_POINT_OFFSET`]), and a straight line between two of them leaves
+/// the ground the moment the ground is not flat. Reported live on 2026-09-24 from a hilltop: the
+/// trail "jumps over the air instead of binding to the ground" across a 32.5 m chord that
+/// descended three metres.
+///
+/// Sampling that chord and asking this for the node under each sample replaces the interpolation
+/// with positions the navmesh itself holds. Nothing is invented: every point comes back out of
+/// the graph's own vertex array.
+pub const NAVI_GRAPH_NODE_CENTRE: u32 = 0x0040_18d0;
+
 /// The index half of a packed navi id. `0x7fff`.
 ///
 /// Every site that touches one masks with this before indexing -- `0x14042ee40`, `0x140bb4310`,

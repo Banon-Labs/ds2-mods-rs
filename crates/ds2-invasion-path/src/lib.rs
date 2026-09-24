@@ -6,8 +6,9 @@
 //!
 //! | situation | what you see |
 //! |---|---|
-//! | another player in the session | an arrow out of your body, pointing exactly at them |
-//! | N players | N arrows, N colours, each colour stuck to one player |
+//! | another player in the session | a walkable path of Prism Stones, or an arrow when there is no way to walk there |
+//! | N players | N paths and N arrows, N colours, each colour stuck to one player |
+//! | more than `max_routes` of them | the nearest four get paths; the rest draw nothing until a lane frees up |
 //! | they are closer than 30 m | nothing -- you already know where they are |
 //!
 //! The closer a player is, the bolder and more opaque their arrow. A player who is merely far
@@ -32,10 +33,33 @@
 //! premise and has been corrected.
 //!
 //! **The arrow has not gone anywhere**, and it is not a placeholder. It is what you get when the
-//! planner answers "there is no way to walk there" -- which happens whenever the other player is
-//! on the other side of a fog gate, in another area, or off the navmesh entirely -- and it is
-//! what every player past the nearest one gets, because one route is one planner and the engine's
-//! own AI allocates one per agent.
+//! planner answers "there is no way to walk there" -- whenever the other player is on the other
+//! side of a fog gate, in another area, or off the navmesh entirely -- and that answer is the
+//! only thing it means. Somebody past `max_routes` has not been asked about, which is not the
+//! same claim, so they draw nothing rather than an arrow that would be asserting something
+//! nobody looked up.
+//!
+//! # Several paths at once
+//!
+//! Every target past `near_suppress_meters`, up to `max_routes`, gets a path of its own: its own
+//! `NvRoutePlanner`, its own search in flight, its own trail of stones in its own colour. Two
+//! invaders are two lines, and the colour that identifies a person on their arrow is the colour of
+//! the stones under their path.
+//!
+//! This drew exactly one, to the nearest person, on the argument that a planner is engine state
+//! and the game's own AI allocates one per agent. It does -- per AGENT, so an area with a dozen
+//! hollows in it is already stepping a dozen, and four more is a rounding error against that.
+//! `crate::gametick` holds the rest of the reasoning, including which budgets are divided between
+//! the paths rather than multiplied by them.
+//!
+//! # How often a path is re-planned
+//!
+//! When either end has walked far enough to make the old one wrong -- `replan_move_meters` -- with
+//! a floor under it so a fall cannot ask every frame and a ceiling over it so a fog gate opening
+//! is eventually noticed. Not on a timer; `crate::trail::Cadence` has the argument and the
+//! measurements. When a fresh route no longer runs under the stones already down, the whole trail
+//! is put out and laid again from your feet rather than left forking down a corridor nobody is
+//! walking.
 //!
 //! # The four things this does per frame, in order
 //!
@@ -112,7 +136,6 @@ pub mod navpath;
 pub mod routes;
 
 pub(crate) mod lines;
-pub(crate) mod selfcheck;
 pub(crate) mod trail;
 
 #[cfg(windows)]
@@ -211,8 +234,11 @@ mod windows_impl {
         had_world: bool,
         /// The last roster counts logged, so the line is written on change rather than per frame.
         last_census: Option<(usize, usize, usize, usize)>,
-        /// The last (arrows, vertices) pair logged, likewise.
-        last_drawn: Option<(usize, usize)>,
+        /// The last (routes, arrows, vertices) triple logged, likewise.
+        last_drawn: Option<(usize, usize, usize)>,
+        /// The effect id last handed to the tick, so a change of target writes one line rather
+        /// than sixty a second. `0` is "nothing laid yet" and is not a real id.
+        last_marker_id: u32,
         /// Consecutive frames the roster counts have not changed. See `ROSTER_SETTLE_FRAMES`.
         roster_still: u32,
         /// Whether the markers-requested line has been written. One line per session: the file
@@ -224,6 +250,9 @@ mod windows_impl {
         /// while it walks and two NPCs milling about do not swap the destination every frame.
         /// See `census::self_check_target`.
         self_check_target: Option<usize>,
+        /// Who the planner last said it could not walk to, so the arrow's reason is written once
+        /// per target rather than sixty times a second.
+        unreachable: Option<usize>,
     }
 
     static STATE: Mutex<Option<State>> = Mutex::new(None);
@@ -276,10 +305,12 @@ mod windows_impl {
                 had_world: true,
                 last_census: None,
                 last_drawn: None,
+                last_marker_id: 0,
                 roster_still: 0,
                 said_markers: false,
                 said_matrix: false,
                 self_check_target: None,
+                unreachable: None,
             });
         }
 
@@ -444,7 +475,7 @@ mod windows_impl {
             // behind you would stay lit for the rest of the session, for a feature the player
             // has switched off. `ask(None)` is what `crate::gametick` reads as "stand down" --
             // it puts the trail out and drops the stale answer.
-            crate::gametick::ask(None);
+            crate::gametick::ask(Vec::new());
             return Vec::new();
         }
 
@@ -462,52 +493,106 @@ mod windows_impl {
             // No world means no route and no trail either. Not the same as the camera failing to
             // frame you -- that is a view problem and the trail should go on being laid through
             // it; this is "there is nobody standing anywhere".
-            crate::gametick::ask(None);
+            crate::gametick::ask(Vec::new());
             return Vec::new();
         };
         state.had_world = true;
 
-        // Tell the capture what to judge a candidate against, then prefer whatever it caught.
-        // A matrix taken out of the renderer's own upload is the matrix the frame was drawn
-        // with; one found by searching memory is a matrix that resembles it. The search stays as
-        // the fallback because the capture needs an upload to happen and a player to exist, and
-        // neither is true on the first frames.
-        crate::capture::set_subject(local, screen);
-        if let Some(camera) = crate::capture::camera() {
+        // There is a world now, so the capture may start hunting, and here is somebody standing
+        // in it. A matrix taken out of the renderer's own upload is the matrix the frame was
+        // drawn with; one found by searching memory is a matrix that RESEMBLES it, and
+        // resembling is not enough to draw a line through the world.
+        //
+        // The character is handed over because the shape of the matrix is not sufficient on its
+        // own -- see `capture::grounds`. It is not used to judge where they land on screen.
+        crate::capture::arm(local);
+
+        // Resolve the camera to an `Option` and hand that on, rather than returning early when
+        // there is none. Not a tidy-up: the early return used to skip the roster, the target
+        // nomination and the ask along with the projection, so a run whose camera was never
+        // recognised also never asked for a route and never laid a stone -- and said nothing in
+        // the log about either. See `draw_for`, which now decides everything a camera has no
+        // bearing on before it looks at one.
+        let camera = if let Some(camera) = crate::capture::camera() {
             if !state.said_captured {
                 state.said_captured = true;
                 log(format_args!("camera: using the captured view-projection"));
             }
             state.had_camera = true;
-            return draw_for(state, &camera, local, screen);
-        }
-
-        let Some((camera, found)) = state.tracker.acquire(local, screen) else {
-            if state.had_camera {
-                let probe = state.tracker.last_probe;
+            Some(camera)
+        } else {
+            // THE SEARCH RUNS AND DOES NOT DRAW, and the split is measured rather than tasteful.
+            //
+            // It used to draw whenever the capture had nothing, and a live run on 2026-09-24 put
+            // 1835 of about 1840 drawn frames through it against ONE through a captured matrix.
+            // What that produced on screen was a straight green line across the sky that touched
+            // neither the player nor the target -- because the search does not return one answer,
+            // it returns whichever of two unrelated camera objects last passed its oracles, and
+            // it changed its mind on nearly every frame it logged.
+            //
+            // `crate::capture`'s own header already settled this: the oracles are sound, nothing
+            // in `CameraManager` passes them, and the conclusion is not "search harder" but that
+            // the renderer's matrix is not reachable from there at all. A fallback that draws a
+            // near-miss is worse than no overlay, because a wrong line is read as a wrong ROUTE.
+            //
+            // So `acquire` is still called -- its probe counts are the only evidence of what was
+            // tried, and the `no camera` line below is assembled from them -- and its answer is
+            // dropped. When the capture has nothing, this draws nothing.
+            let searched = state.tracker.acquire(local, screen);
+            if let Some((_, Found::Chose(candidate))) = &searched {
                 log(format_args!(
-                    "no camera: {} tried, {} shaped like a projection, {} with a camera pose -- drawing \
-                     nothing rather than guessing",
-                    probe.tried, probe.shaped, probe.posed
+                    "camera: the memory search settled on {candidate} -- NOT drawn through; only \
+                     a matrix caught in the renderer's own upload is"
+                ));
+            }
+            if state.had_camera {
+                // The capture's own counts, not the memory search's. The search no longer draws,
+                // so what it tried says nothing about why there is no line on screen -- and the
+                // four numbers below separate the three ways this fails: the detours never fired,
+                // they fired and nothing was walked, or everything was walked and no window was
+                // ever the right shape.
+                let seen = crate::capture::probe();
+                log(format_args!(
+                    "no camera: {} upload(s) seen, {} walked, {} window(s) tested, {} shaped like \
+                     a view-projection -- drawing nothing rather than guessing. The route and the \
+                     trail carry on without it.",
+                    seen.uploads, seen.walked, seen.windows, seen.shaped
                 ));
                 state.had_camera = false;
             }
-            return Vec::new();
+            None
         };
-        if let Found::Chose(candidate) = found {
-            log(format_args!("camera: drawing through {candidate}"));
-        }
-        state.had_camera = true;
-        draw_for(state, &camera, local, screen)
+        draw_for(state, camera.as_ref(), local, screen)
     }
 
-    /// Everything downstream of having a camera: read the roster, build the arrows, project them.
+    /// Read the roster, decide who to point at, ask the tick for a route, and -- if there is a
+    /// camera -- project the result.
     ///
-    /// Split out because there are now two ways to get a camera -- captured from the renderer's
-    /// own upload, or found by searching memory -- and only the getting differs.
+    /// Split out because there are two ways to get a camera (captured from the renderer's own
+    /// upload, or found by searching memory) and only the getting differs.
+    ///
+    /// The camera is optional, and making it optional is a bug fix, measured 2026-09-24.
+    ///
+    /// This took a `&Camera` and was reached only once one had been found. A session where the
+    /// capture recognised nothing and the fallback search agreed -- `no camera: 98 tried, 2
+    /// shaped like a projection, 9 with a camera pose` -- therefore never got here at all:
+    /// `set_self_check` was never called, no target was ever nominated, no ask was ever
+    /// published, and the log said nothing whatsoever about routing. "The route failed" and "the
+    /// route was never requested" looked identical from the outside, and the run that prompted
+    /// this spent its whole length being the second one.
+    ///
+    /// The file already said this was wrong in two places. The no-world guard in [`frame`]
+    /// separates "there is nobody standing anywhere" from "the camera is not framing you -- that
+    /// is a view problem and the trail should go on being laid through it", and the comment on
+    /// the nomination below says in as many words that a diagnostic must not switch off the
+    /// feature it was written to observe. Only the control flow disagreed.
+    ///
+    /// So everything above the projection runs whether or not there is a camera. A camera
+    /// decides what can be drawn and nothing else: it has no say in where a path goes, and the
+    /// Prism Stone trail is laid by the game tick, which never needed one.
     fn draw_for(
         state: &mut State,
-        camera: &Camera,
+        camera: Option<&Camera>,
         local: [f32; 3],
         screen: [f32; 2],
     ) -> Vec<Vertex> {
@@ -521,7 +606,9 @@ mod windows_impl {
         // symptom, and is invisible to any test that compares those two against each other.
         //
         // Printed once per camera acquisition, not per frame.
-        if !state.said_matrix {
+        if let Some(camera) = camera
+            && !state.said_matrix
+        {
             state.said_matrix = true;
             let m = camera.view_projection;
             log(format_args!(
@@ -556,7 +643,9 @@ mod windows_impl {
         // this crate reads it back. Above the framing guard on purpose: a camera pointed
         // somewhere the player is not is still the camera, and a turn that is halfway through
         // needs its readings to keep arriving while it swings past.
-        crate::camera_yaw::publish(camera.yaw_degrees());
+        if let Some(camera) = camera {
+            crate::camera_yaw::publish(camera.yaw_degrees());
+        }
 
         // THERE IS NO PER-FRAME FRAMING GATE, and deleting the one that used to stand here is
         // the fix for "I've seen the base off the player more times than I've seen it on the
@@ -579,17 +668,6 @@ mod windows_impl {
         // wrong place to spawn anything. All this does is forward the setting; the line below
         // says once that it was forwarded, so an edit that appears to do nothing still has an
         // audible reason when the tick seam is the thing that failed.
-        crate::gametick::set_markers(state.config.markers_requested().then_some(
-            crate::gametick::Markers {
-                effect_id: state.config.marker_effect_id,
-                spacing: crate::trail::Spacing {
-                    meters: state.config.marker_spacing_meters,
-                    keep_behind_meters: state.config.marker_keep_behind_meters,
-                    max_markers: state.config.max_markers,
-                    per_pass: state.config.markers_per_pass,
-                },
-            },
-        ));
         if state.config.markers_requested() && !state.said_markers {
             state.said_markers = true;
             log(format_args!(
@@ -602,7 +680,7 @@ mod windows_impl {
         }
 
         let Some((players, census)) = census::remotes(state.config.max_targets) else {
-            crate::gametick::ask(None);
+            crate::gametick::ask(Vec::new());
             return Vec::new();
         };
         let present: Vec<u64> = players.iter().map(|player| player.ctrl as u64).collect();
@@ -645,22 +723,32 @@ mod windows_impl {
             ));
         }
 
-        // ONE ROUTE, TO THE NEAREST PERSON, AND THE REST KEEP THEIR ARROWS.
+        // A ROUTE AND A TRAIL PER PERSON, UP TO `max_routes`, AND THE REST KEEP THEIR ARROWS.
         //
-        // Not a shortcut: a route costs an `NvRoutePlanner` linked into the engine's own update
-        // list and an A* search it runs for you, and the engine's AI allocates exactly one of
-        // those per agent. N planners for N phantoms would multiply the one thing in this crate
-        // that touches engine state, to draw four walkable lines nobody can follow at once --
-        // and the trail, which is the reason the route exists at all, can only follow one path.
+        // This drew exactly one, to the nearest person, and the argument for that was real: a
+        // route costs an `NvRoutePlanner` linked into the engine's own update list and an A*
+        // search it runs for you, and the engine's AI allocates one of those per agent. What the
+        // argument missed is the other half of that sentence -- one per AGENT, so an area with a
+        // dozen hollows in it is already stepping a dozen, and four more is a rounding error
+        // against what the engine does to itself. What it cost was the case the feature exists
+        // for: two invaders, and a line to one of them.
         //
-        // The ask is published every frame and answered whenever the tick gets to it, so the
-        // route lags the roster by up to half a second. `answer_for` refuses an answer about a
-        // different player rather than drawing it, because a confident line to the wrong person
-        // is worse than the arrow it replaced.
-        let mut routed = players
+        // So every target past `near_suppress_meters` gets its own lane -- its own planner, its
+        // own search in flight, its own trail in its own colour -- and `max_routes` bounds how
+        // many. `crate::gametick::lay_markers` divides the stone budget between them, so a fourth
+        // target shortens the trails rather than quadrupling the spawns.
+        //
+        // The ask is published every frame and answered whenever the tick gets to it. `answer_for`
+        // refuses an answer about a different player rather than drawing it, because a confident
+        // line to the wrong person is worse than the arrow it replaced.
+        let far_enough: Vec<census::Player> = players
             .iter()
-            .find(|player| player.distance >= state.config.near_suppress_meters)
-            .copied();
+            .filter(|player| player.distance >= state.config.near_suppress_meters)
+            .take(state.config.max_routes)
+            .copied()
+            .collect();
+        // The nearest of them, for the self-check's "is anybody real being routed to" question.
+        let mut routed = far_enough.first().copied();
 
         // A TARGET EVEN WHEN YOU ARE ALONE, and this no longer stops when the diagnostic does.
         //
@@ -734,11 +822,90 @@ mod windows_impl {
             }
         }
 
-        crate::gametick::ask(routed.as_ref().map(|player| crate::gametick::Wanted {
-            from: local,
-            to: player.position,
-            target: player.ctrl as u64,
-        }));
+        // ONE COLOUR PER PERSON, AND THE STONES WEAR IT TOO.
+        //
+        // The trail used to lay `marker_effect_id` for everybody, so two targets got two arrows in
+        // two colours and two trails in the same one. On screen that undoes the thing the palette
+        // exists for: a colour is supposed to identify a person, and a trail that ignores it makes
+        // the player work out which line belongs to which stone.
+        //
+        // So the stone is chosen from the same slot the route line is drawn from. A slot is bound
+        // to a `PlayerCtrl` until they leave (see `routes::Palette`), so a target's colour does not
+        // change as people move around them, and the seven Prism Stone ids wrap -- the eighth
+        // person in one session repeats the first, which is the same compromise the line colours
+        // already make.
+        //
+        // AN ID THAT IS NOT A PRISM STONE IS LEFT ALONE. `marker_effect_id` is documented as
+        // "anything else is whatever effect carries that number", and somebody who put a specific
+        // number in the file asked for THAT effect rather than for a palette. Only a value that is
+        // already one of the seven opts into the sweep.
+        //
+        // With several trails on screen this stopped being a nicety. One shared colour for three
+        // routes is one trail with three branches to anybody looking at it, and it is exactly the
+        // picture a player would misread as "the path forks here".
+        let stone_for = |state: &mut State, ctrl: usize| {
+            if ds2_rva::PRISM_STONE_SFX_IDS.contains(&state.config.marker_effect_id) {
+                let slot = state.palette.slot_for(ctrl as u64);
+                ds2_rva::PRISM_STONE_SFX_IDS[slot % ds2_rva::PRISM_STONE_SFX_IDS.len()]
+            } else {
+                state.config.marker_effect_id
+            }
+        };
+
+        // EVERY TARGET WORTH A ROUTE, PUBLISHED TOGETHER. The tick opens a lane per entry and
+        // closes the ones that stop appearing, so this list is the whole statement of who is
+        // being routed to -- there is nothing to withdraw separately.
+        let mut wanted: Vec<crate::gametick::Wanted> = Vec::with_capacity(far_enough.len() + 1);
+        for player in &far_enough {
+            let effect_id = stone_for(state, player.ctrl);
+            wanted.push(crate::gametick::Wanted {
+                from: local,
+                to: player.position,
+                target: player.ctrl as u64,
+                effect_id,
+            });
+        }
+        // The self-check's character, when it nominated one and it is not already in the list.
+        if let Some(npc) = routed.filter(|npc| !wanted.iter().any(|w| w.target == npc.ctrl as u64))
+        {
+            let effect_id = stone_for(state, npc.ctrl);
+            wanted.push(crate::gametick::Wanted {
+                from: local,
+                to: npc.position,
+                target: npc.ctrl as u64,
+                effect_id,
+            });
+        }
+
+        crate::gametick::set_markers(state.config.markers_requested().then_some(
+            crate::gametick::Markers {
+                spacing: crate::trail::Spacing {
+                    meters: state.config.marker_spacing_meters,
+                    keep_behind_meters: state.config.marker_keep_behind_meters,
+                    max_markers: state.config.max_markers,
+                    per_pass: state.config.markers_per_pass,
+                },
+            },
+        ));
+        // THE RE-PLAN RULE REACHES THE TICK WHETHER OR NOT THERE ARE STONES. It rides its own
+        // call rather than `Markers`, because `Markers` is `None` when the trail is switched off
+        // and the routes still have to be kept fresh for the lines.
+        crate::gametick::set_cadence(crate::trail::Cadence {
+            move_meters: state.config.replan_move_meters,
+            min_seconds: state.config.replan_min_seconds,
+            max_seconds: state.config.replan_max_seconds,
+        });
+        let marker_id = wanted.first().map_or(0, |first| first.effect_id);
+        if marker_id != state.last_marker_id {
+            state.last_marker_id = marker_id;
+            log(format_args!(
+                "markers: laying effect {marker_id} on the nearest of {} route(s) -- one colour \
+                 per target, taken from the palette slot their line is drawn in",
+                wanted.len()
+            ));
+        }
+
+        crate::gametick::ask(wanted);
 
         // DRAW THE SELF-CHECK'S TARGET TOO. The user is at the keyboard looking at the screen,
         // and a diagnostic whose whole output is in a file gives them nothing to look at. The
@@ -760,34 +927,71 @@ mod windows_impl {
                 continue;
             }
             let slot = state.palette.slot_for(player.ctrl as u64);
-            // `Some(Some(points))` is a walkable route; `Some(None)` is the planner having
-            // answered "there is no way to walk there"; `None` is no answer yet. The last two
-            // both draw the arrow, and deliberately look the same on screen -- the difference
-            // between them is in the log, not in what the player needs to do about it.
-            if let Some(Some(points)) = crate::gametick::answer_for(player.ctrl as u64)
-                && points.len() >= 2
-            {
-                snapshot.push(Route::new(
-                    RouteShape::Walk(points),
-                    slot,
-                    player.distance,
-                    state.config.bold_at_meters,
-                    state.config.faint_at_meters,
-                ));
-                continue;
+            // THE ARROW IS WHAT THE TRAIL SAYS WHEN IT CANNOT GET THERE, and nothing else.
+            //
+            // Three answers, and they used to collapse into two. `Some(Some(points))` is a
+            // walkable route, so the stones are going down along it. `Some(None)` is the planner
+            // having answered "there is no way to walk there" -- a complete answer, and the only
+            // thing an arrow is entitled to mean. `None` is no answer yet, or a target past
+            // `max_routes` that has no lane and will never be asked about.
+            //
+            // The last two both drew an arrow. That is why arrows were on screen beside a
+            // perfectly good line: every target the planner had not been asked about got one, and
+            // "I have not looked" was being drawn as "there is no way". A target nobody has
+            // pathed to is not known to be unreachable, so it now draws nothing at all and the
+            // arrow means what it says.
+            //
+            // A target past `max_routes` therefore draws NOTHING rather than an arrow, which is
+            // the one place this rule costs something: the fifth player in a session is invisible
+            // until a lane frees up. Drawing them an arrow would be drawing "there is no way to
+            // walk there" about somebody nobody has looked for, which is the confident falsehood
+            // this whole distinction exists to stop.
+            match crate::gametick::answer_for(player.ctrl as u64) {
+                Some(Some(points)) if points.len() >= 2 => {
+                    snapshot.push(Route::new(
+                        RouteShape::Walk(points),
+                        slot,
+                        player.distance,
+                        state.config.bold_at_meters,
+                        state.config.faint_at_meters,
+                    ));
+                }
+                // THE DESTINATION, NOT A SHAPE. The arrow is built in pixels at draw time, so
+                // there is nothing to construct here and nothing that can fail: a target directly
+                // behind the camera, at the same position as the player, or fifty metres below
+                // all produce an arrow, because the direction is read out of clip space rather
+                // than projected.
+                Some(None) => {
+                    if state.unreachable.replace(player.ctrl) != Some(player.ctrl) {
+                        log(format_args!(
+                            "arrow: the planner found no way to walk to {:#x} -- no stones can \
+                             reach them, so an arrow points at them instead",
+                            player.ctrl
+                        ));
+                    }
+                    snapshot.push(Route::new(
+                        RouteShape::Arrow(player.position),
+                        slot,
+                        player.distance,
+                        state.config.bold_at_meters,
+                        state.config.faint_at_meters,
+                    ));
+                }
+                // A route that decoded to fewer than two points is not a path either, and an
+                // answer about a different target is not an answer about this one. Neither is
+                // evidence that the stones cannot reach them, so neither draws.
+                _ => {}
             }
-            // THE DESTINATION, NOT A SHAPE. The arrow is built in pixels at draw time, so there
-            // is nothing to construct here and nothing that can fail: a target directly behind
-            // the camera, at the same position as the player, or fifty metres below all produce
-            // an arrow, because the direction is read out of clip space rather than projected.
-            snapshot.push(Route::new(
-                RouteShape::Arrow(player.position),
-                slot,
-                player.distance,
-                state.config.bold_at_meters,
-                state.config.faint_at_meters,
-            ));
         }
+
+        // The last thing that actually needs a camera, and the first thing that stops without
+        // one. Everything above has already run: the roster was read, the target nominated, the
+        // ask published and the marker settings forwarded -- so the tick goes on planning the
+        // route and laying the trail on the ground while the overlay has nothing to draw with.
+        // The stones are in the world; only the arrow over them is missing.
+        let Some(camera) = camera else {
+            return Vec::new();
+        };
 
         let mut vertices = Vec::with_capacity(snapshot.len() * 3 * VERTICES_PER_SEGMENT);
         for route in &snapshot {
@@ -799,12 +1003,22 @@ mod windows_impl {
         // buffer, and the three steps in between -- suppression, the arrow's direction, the
         // near-plane clip -- can each legitimately eat everything. Logged on change so a run
         // with a steady overlay writes it once.
-        let drawn = (snapshot.len(), vertices.len());
+        // ROUTES, NOT ARROWS, AND THE TWO STOPPED BEING THE SAME NUMBER. `snapshot` counts
+        // targets with something to say about them; only the ones the planner refused produce an
+        // arrow, and a walkable route now produces no geometry at all because the stones carry
+        // it. `1 route(s), 0 vertices` is the ordinary healthy line for a target being walked to,
+        // and reading it as "one arrow was drawn" is how a working overlay looks broken.
+        let arrows = snapshot
+            .iter()
+            .filter(|route| matches!(route.shape, RouteShape::Arrow(_)))
+            .count();
+        let drawn = (snapshot.len(), arrows, vertices.len());
         if state.last_drawn != Some(drawn) {
             state.last_drawn = Some(drawn);
             log(format_args!(
-                "drew {} arrow(s), {} vertices",
-                drawn.0, drawn.1
+                "drew {} route(s), {} of them an arrow, {} vertices -- a walkable route draws \
+                 nothing here; its path is the stones",
+                drawn.0, drawn.1, drawn.2
             ));
         }
         vertices
@@ -959,16 +1173,23 @@ mod windows_impl {
                 push_segment(out, arrow.tip, arrow.left_barb, route.stroke_px, color);
                 push_segment(out, arrow.tip, arrow.right_barb, route.stroke_px, color);
             }
-            RouteShape::Walk(points) => {
-                // NOT PINNED. A walkable route is a path over the ground and every point of it
-                // belongs where the world puts it; dragging the whole polyline so its first node
-                // sits under the reticle would draw a path nobody can follow. Only the arrow is
-                // a dial.
-                for pair in points.windows(2) {
-                    if let Some((a, b)) = camera.project_segment(pair[0], pair[1], screen) {
-                        push_segment(out, a, b, route.stroke_px, color);
-                    }
-                }
+            RouteShape::Walk(_) => {
+                // THE STONES ARE THE PATH. NOTHING IS DRAWN OVER THE GROUND HERE.
+                //
+                // This projected the route as a polyline and pushed a segment per pair of
+                // points, which is where the green line on the ground came from. The line was
+                // how the route was proven while the trail could not be seen; it is not the
+                // product. DARK SOULS II already has a way to mark a path -- the Prism Stone,
+                // which ELDEN RING renamed to Rainbow Stone -- and `crate::trail` lays one every
+                // few metres along exactly these points, in the colour bound to this target.
+                //
+                // So a walkable route draws no overlay at all. It still has to exist as a shape,
+                // because what the draw path needs to know about it is that it EXISTS: a target
+                // the stones can reach is a target that does not get an arrow. See the shape
+                // decision in `draw_for`.
+                //
+                // Nothing to project, and nothing that can be mis-projected -- which also means
+                // a route drawn against a wrong camera can no longer put a line across the sky.
             }
         }
     }

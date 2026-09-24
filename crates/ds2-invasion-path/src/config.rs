@@ -85,6 +85,47 @@ pub const DEFAULT_FAINT_AT_METERS: f32 = crate::geometry::DEFAULT_FAINT_AT_METER
 /// the setting exists for the bloodstain phantoms that share the player class.
 pub const DEFAULT_MAX_TARGETS: usize = 6;
 
+/// Most players routed to at once, each with its own path on the ground.
+///
+/// # Why this is smaller than [`DEFAULT_MAX_TARGETS`], and a separate setting
+///
+/// A target costs a roster entry and a handful of projected pixels. A ROUTE costs an
+/// `NvRoutePlanner` linked onto the navigation system's update list, which the engine then steps
+/// every frame for as long as it is there, plus a trail of effects along whatever comes back. The
+/// two are not the same expense and must not be spelled with the same number.
+///
+/// Four is the engine's own order of magnitude rather than a taste judgement: every AI agent in
+/// the map already owns one of these, so four more is a rounding error against a populated area
+/// -- and it covers three summons or two invaders plus the host, which is every session shape
+/// DARK SOULS II can produce bar a full six-player free-for-all.
+///
+/// Everyone past this still gets an arrow. Nobody loses their line for being fifth.
+pub const DEFAULT_MAX_ROUTES: usize = 4;
+
+/// The largest `max_routes` accepted from a file. See [`DEFAULT_MAX_ROUTES`] for the cost of one.
+pub const HARD_ROUTE_CAP: usize = 8;
+
+/// Metres either end may drift from where a route was planned before it is planned again.
+///
+/// The route is re-asked on MOVEMENT rather than on a clock -- see `crate::trail::Cadence` for
+/// why, and for where velocity went. Two metres is a little under one marker spacing, so the
+/// trail is re-planned at about the rate the player consumes it.
+pub const DEFAULT_REPLAN_MOVE_METERS: f32 = 2.0;
+
+/// The shortest gap between two route searches, in seconds.
+///
+/// The rate limit on the movement gate above, and the only thing standing between a fall down a
+/// lift shaft and a navmesh search on every frame of it. A quarter of a second is twice the
+/// engine AI's own refresh rate, so a sprinting player is served faster than an NPC and a warping
+/// one still cannot flood the planner.
+pub const DEFAULT_REPLAN_MIN_SECONDS: f32 = 0.25;
+
+/// The longest a route may stand without being asked again, in seconds.
+///
+/// The backstop for everything that invalidates a route while both ends stand still: a fog gate
+/// opening, a door pulled, a lift arriving, a bridge turning.
+pub const DEFAULT_REPLAN_MAX_SECONDS: f32 = 3.0;
+
 /// Length of the arrow, in metres.
 pub const DEFAULT_ARROW_METERS: f32 = 3.0;
 
@@ -200,6 +241,16 @@ pub struct PathConfig {
     pub bold_at_meters: f32,
     pub faint_at_meters: f32,
     pub max_targets: usize,
+    /// Most players given a walkable route and a trail of their own at once. See
+    /// [`DEFAULT_MAX_ROUTES`] -- this is deliberately not [`Self::max_targets`], because a route
+    /// costs an engine object and a target costs a few pixels.
+    pub max_routes: usize,
+    /// Metres of drift before a route is planned again. See [`DEFAULT_REPLAN_MOVE_METERS`].
+    pub replan_move_meters: f32,
+    /// Shortest gap between two route searches, in seconds.
+    pub replan_min_seconds: f32,
+    /// Longest a route may stand unasked while nothing moves, in seconds.
+    pub replan_max_seconds: f32,
     pub arrow_meters: f32,
     pub start_enabled: bool,
     /// The effect placed at each marker, or `0` for no markers. See [`DEFAULT_MARKER_EFFECT_ID`]
@@ -210,7 +261,7 @@ pub struct PathConfig {
     pub marker_keep_behind_meters: f32,
     pub markers_per_pass: usize,
     /// Route to the nearest NPC and report, in the log, everything that happened. See
-    /// [`DEFAULT_NPC_SELF_CHECK`].
+    /// [`DEFAULT_NPC_SELF_CHECK`]. It narrates the route; it does not hold it still.
     pub npc_self_check: bool,
 }
 
@@ -247,6 +298,10 @@ impl Default for PathConfig {
             bold_at_meters: DEFAULT_BOLD_AT_METERS,
             faint_at_meters: DEFAULT_FAINT_AT_METERS,
             max_targets: DEFAULT_MAX_TARGETS,
+            max_routes: DEFAULT_MAX_ROUTES,
+            replan_move_meters: DEFAULT_REPLAN_MOVE_METERS,
+            replan_min_seconds: DEFAULT_REPLAN_MIN_SECONDS,
+            replan_max_seconds: DEFAULT_REPLAN_MAX_SECONDS,
             arrow_meters: DEFAULT_ARROW_METERS,
             start_enabled: DEFAULT_START_ENABLED,
             marker_effect_id: DEFAULT_MARKER_EFFECT_ID,
@@ -334,6 +389,21 @@ impl PathConfig {
             (defaults.bold_at_meters, defaults.faint_at_meters)
         };
 
+        // The same repair, for the same reason, on the other pair that is one setting written as
+        // two numbers. A `replan_max_seconds` at or below the floor does not break anything --
+        // the floor still rate-limits the planner -- but it silently deletes the movement gate
+        // between them, so every route is re-asked on a timer again and the file gives no sign
+        // of it. Both go back to their defaults together.
+        let min_seconds =
+            positive_float(&values, "replan_min_seconds", defaults.replan_min_seconds);
+        let max_seconds =
+            positive_float(&values, "replan_max_seconds", defaults.replan_max_seconds);
+        let (min_seconds, max_seconds) = if max_seconds > min_seconds {
+            (min_seconds, max_seconds)
+        } else {
+            (defaults.replan_min_seconds, defaults.replan_max_seconds)
+        };
+
         Self {
             toggle,
             toggle_text,
@@ -351,6 +421,23 @@ impl PathConfig {
                 .and_then(|text| text.parse::<usize>().ok())
                 .filter(|value| *value > 0 && *value <= HARD_TARGET_CAP)
                 .unwrap_or(defaults.max_targets),
+            max_routes: values
+                .get(CONFIG_SECTION, "max_routes")
+                .map(scalar)
+                .and_then(|text| text.parse::<usize>().ok())
+                .filter(|value| *value > 0 && *value <= HARD_ROUTE_CAP)
+                .unwrap_or(defaults.max_routes),
+            replan_move_meters: positive_float(
+                &values,
+                "replan_move_meters",
+                defaults.replan_move_meters,
+            ),
+            // Zero is rejected by `positive_float`, and that is the point here: a floor of zero
+            // is "search as often as the game ticks", which is sixty navmesh searches a second on
+            // the frame the simulation runs from -- a setting that reads as "no delay" and lands
+            // as a stutter nobody could trace back to this file.
+            replan_min_seconds: min_seconds,
+            replan_max_seconds: max_seconds,
             arrow_meters: positive_float(&values, "arrow_meters", defaults.arrow_meters),
             start_enabled: values
                 .get(CONFIG_SECTION, "start_enabled")
@@ -568,5 +655,55 @@ mod marker_scaffolding {
     fn a_zero_spacing_is_refused() {
         let parsed = PathConfig::parse("[invasion_path]\nmarker_spacing_meters = 0\n");
         assert!((parsed.marker_spacing_meters - DEFAULT_MARKER_SPACING_METERS).abs() < 0.001);
+    }
+
+    #[test]
+    fn the_route_count_is_its_own_setting() {
+        let parsed = PathConfig::parse("[invasion_path]\nmax_routes = 6\nmax_targets = 12\n");
+        assert_eq!(parsed.max_routes, 6);
+        assert_eq!(
+            parsed.max_targets, 12,
+            "the two settings ran into each other"
+        );
+    }
+
+    #[test]
+    fn a_route_count_past_the_cap_is_refused() {
+        let asked = HARD_ROUTE_CAP + 1;
+        let parsed = PathConfig::parse(&format!("[invasion_path]\nmax_routes = {asked}\n"));
+        assert_eq!(parsed.max_routes, DEFAULT_MAX_ROUTES);
+        // Zero routes is "draw arrows only", which is a switch that already exists
+        // (`marker_effect_id = 0`) and is not what this setting means.
+        assert_eq!(
+            PathConfig::parse("[invasion_path]\nmax_routes = 0\n").max_routes,
+            DEFAULT_MAX_ROUTES
+        );
+    }
+
+    #[test]
+    fn the_replan_gate_comes_through() {
+        let parsed = PathConfig::parse(
+            "[invasion_path]\nreplan_move_meters = 5\nreplan_min_seconds = 0.1\nreplan_max_seconds \
+             = 8\n",
+        );
+        assert!((parsed.replan_move_meters - 5.0).abs() < f32::EPSILON);
+        assert!((parsed.replan_min_seconds - 0.1).abs() < f32::EPSILON);
+        assert!((parsed.replan_max_seconds - 8.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_replan_floor_of_zero_is_refused() {
+        // Zero would be one navmesh search per tick, on the frame the simulation runs from.
+        let parsed = PathConfig::parse("[invasion_path]\nreplan_min_seconds = 0\n");
+        assert!((parsed.replan_min_seconds - DEFAULT_REPLAN_MIN_SECONDS).abs() < 0.001);
+    }
+
+    #[test]
+    fn a_backstop_under_the_floor_takes_both_defaults_back() {
+        // The movement gate between them would have been deleted silently.
+        let parsed =
+            PathConfig::parse("[invasion_path]\nreplan_min_seconds = 4\nreplan_max_seconds = 1\n");
+        assert!((parsed.replan_min_seconds - DEFAULT_REPLAN_MIN_SECONDS).abs() < 0.001);
+        assert!((parsed.replan_max_seconds - DEFAULT_REPLAN_MAX_SECONDS).abs() < 0.001);
     }
 }

@@ -98,6 +98,38 @@ pub(crate) const MAX_POINTS_PER_SEGMENT: i16 = 1024;
 /// Total points [`decode`] will produce, after which it stops.
 pub(crate) const MAX_POINTS: usize = 8192;
 
+/// One point of a decoded route, and whether the ground between it and the point before it is
+/// known.
+///
+/// # Why a route is not one kind of point
+///
+/// `0x140bb4ac0` writes a segment's two portal midpoints at `+0x10` and `+0x20` and then calls
+/// the polyline builder `0x140bbaa30` -- which is what fills `+0x40` and `+0x50` -- **exactly
+/// once**, for the terminal segment. Every other segment of a fresh route therefore has no
+/// expanded polyline at all, and `0x140bb3bd0`, the engine's own "position of route node N", falls
+/// back to that segment's `+0x20` for them. The engine expands the rest as an agent walks into
+/// them; it does not compute the whole path up front.
+///
+/// So a route is a short run of real, ground-following points near you, followed by a handful of
+/// portal midpoints tens of metres apart. Both are genuine positions on the navmesh. What is not
+/// genuine is the STRAIGHT LINE between two portals: it is an interpolation nothing computed, and
+/// it cuts through whatever hill stands between them.
+///
+/// Measured live on 2026-09-24: a route to a character 63.9 m away decoded to twelve expanded
+/// points spaced 0.18-1.95 m, then three lone portals with steps of 1.5 m, **33.9 m** and **28.8
+/// m**. Stones spaced evenly along those last two hops are stones in mid-air, which is what the
+/// player saw.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RoutePoint {
+    /// Where it is, in world space.
+    pub(crate) at: [f32; 3],
+    /// Does the ground between the PREVIOUS point and this one follow the navmesh?
+    ///
+    /// True only inside one segment's expanded polyline. False for the first point of any segment
+    /// and for every lone portal, because the span leading to it was never expanded by anything.
+    pub(crate) ground: bool,
+}
+
 /// Decode a finished `NvRoute` into a world-space polyline, **start first**.
 ///
 /// # The two things that are not obvious
@@ -118,13 +150,13 @@ pub(crate) const MAX_POINTS: usize = 8192;
 ///
 /// Returns `None` rather than a partial line if anything about the structure fails to validate.
 /// A route half-read is worse than no route: it draws a confident line to somewhere nobody is.
-pub(crate) fn decode(memory: &dyn Memory, route: usize) -> Option<Vec<[f32; 3]>> {
+pub(crate) fn decode(memory: &dyn Memory, route: usize) -> Option<Vec<RoutePoint>> {
     let segments = memory.u64(route + ds2_rva::NV_ROUTE_SEGMENTS_OFFSET)? as usize;
     let count = memory.i32(route + ds2_rva::NV_ROUTE_SEGMENT_COUNT_OFFSET)?;
     if segments == 0 || count <= 0 || count > MAX_SEGMENTS {
         return None;
     }
-    let mut out: Vec<[f32; 3]> = Vec::new();
+    let mut out: Vec<RoutePoint> = Vec::new();
     for index in (0..count).rev() {
         let segment = segments.checked_add((index as usize).checked_mul(SEGMENT_STRIDE)?)?;
         let points = memory.i16(segment + ds2_rva::NV_ROUTE_SEGMENT_POINT_COUNT_OFFSET)?;
@@ -132,8 +164,13 @@ pub(crate) fn decode(memory: &dyn Memory, route: usize) -> Option<Vec<[f32; 3]>>
             return None;
         }
         if points <= 0 {
-            // The engine's own fallback: a segment with no expanded polyline is still one node.
-            out.push(memory.point(segment + ds2_rva::NV_ROUTE_SEGMENT_POINT_OFFSET)?);
+            // The engine's own fallback: a segment with no expanded polyline is still one node,
+            // its portal midpoint. `ground: false` because nothing computed the span leading to
+            // it -- see [`RoutePoint`], and the 33.9 m hop that prompted this.
+            out.push(RoutePoint {
+                at: memory.point(segment + ds2_rva::NV_ROUTE_SEGMENT_POINT_OFFSET)?,
+                ground: false,
+            });
             continue;
         }
         let array = memory.u64(segment + ds2_rva::NV_ROUTE_SEGMENT_POINTS_OFFSET)? as usize;
@@ -145,10 +182,21 @@ pub(crate) fn decode(memory: &dyn Memory, route: usize) -> Option<Vec<[f32; 3]>>
                 return None;
             }
             let at = array.checked_add((point as usize).checked_mul(POINT_STRIDE)?)?;
-            out.push(memory.point(at)?);
+            out.push(RoutePoint {
+                at: memory.point(at)?,
+                // The first point of a segment is reached from the previous segment's last
+                // point, and nothing expanded THAT span. Only steps inside one expanded polyline
+                // are known ground.
+                ground: point != points - 1,
+            });
         }
     }
     if out.is_empty() { None } else { Some(out) }
+}
+
+/// Just the positions, for the callers that only need where the line goes.
+pub(crate) fn positions(points: &[RoutePoint]) -> Vec<[f32; 3]> {
+    points.iter().map(|point| point.at).collect()
 }
 
 /// One end of one route segment: the packed navi id the engine wrote there, and the portal
@@ -327,7 +375,7 @@ mod tests {
             vec![[7.0, 0.0, 0.0], [6.0, 0.0, 0.0]],
         ]);
         let line = decode(&memory, route).expect("a well-formed route decodes");
-        let xs: Vec<f32> = line.iter().map(|point| point[0]).collect();
+        let xs: Vec<f32> = line.iter().map(|point| point.at[0]).collect();
         assert_eq!(
             xs,
             vec![6.0, 7.0, 8.0, 9.0],
@@ -339,7 +387,7 @@ mod tests {
     fn a_single_segment_route_is_still_reversed_inside() {
         let (memory, route) = build(&[vec![[3.0, 0.0, 0.0], [2.0, 0.0, 0.0], [1.0, 0.0, 0.0]]]);
         let line = decode(&memory, route).expect("decodes");
-        let xs: Vec<f32> = line.iter().map(|point| point[0]).collect();
+        let xs: Vec<f32> = line.iter().map(|point| point.at[0]).collect();
         assert_eq!(xs, vec![1.0, 2.0, 3.0]);
     }
 
@@ -350,8 +398,8 @@ mod tests {
         assert_eq!(line.len(), 2, "the empty segment was dropped: {line:?}");
         // Segment 1 is the start, segment 0 the goal, and `build` gives an empty segment the
         // x of its index.
-        assert!((line[0][0] - 5.0).abs() < 1.0e-4);
-        assert!((line[1][0] - 0.0).abs() < 1.0e-4);
+        assert!((line[0].at[0] - 5.0).abs() < 1.0e-4);
+        assert!((line[1].at[0] - 0.0).abs() < 1.0e-4);
     }
 
     #[test]
