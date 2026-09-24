@@ -4054,6 +4054,18 @@ pub const FE_TEXTURE_SHAPE_DEST_RECT_OFFSET: usize = 0x50;
 /// (`(-934.70, -52.50)` for the infusion arrow) cancels a rect that starts at `(934.70, 52.50)`
 /// and leaves the art sitting on its record's origin.
 pub const FE_TEXTURE_SHAPE_QUAD_MATRIX_OFFSET: usize = 0x48;
+
+/// Which two of those twelve floats are the translation: `3` and `7`.
+///
+/// `FUN_140b53c10` is what says so. It reads the twelve and writes a 4x4 whose rows are
+/// `(p0,p4,p8,c)`, `(p1,p5,p9,c)`, `(p2,p6,p10,c)`, `(p3,p7,p11,c)` -- a transpose. So the stored
+/// block is a row-major `3x4` whose last column is `p3, p7, p11`, and transposing it puts that
+/// column in the 4x4's last row, which is where row-vector math (`v' = v * M`) keeps a translate.
+///
+/// Worth naming because the badge's whole position argument rests on one number out of this block:
+/// the composed position of the art is this translation plus the destination rect's corner, and
+/// the cloned glyph's quad puts `(-934.70, -52.50)` here, cancelling the rect it samples.
+pub const FE_TEXTURE_SHAPE_QUAD_MATRIX_TRANSLATE: [usize; 2] = [3, 7];
 pub const FE_TEXTURE_SHAPE_SOURCE_RECT_OFFSET: usize = 0x58;
 pub const FE_TEXTURE_SHAPE_RECT_STRIDE: usize = 0x10;
 

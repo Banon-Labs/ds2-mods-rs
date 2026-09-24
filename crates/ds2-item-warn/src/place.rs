@@ -284,9 +284,13 @@ pub(crate) unsafe fn place(component: usize, base: usize) {
     if n <= LOGGED {
         // The per-quad matrix, which is where the art's translation actually lives.
         // `FUN_140b70200` allocates `quads * 0x30` at `+0x48` and seeds it from constants, and the
-        // composed position is `that translation + the destination rect's corner`. Logging it
-        // turns "the arrow is below the portrait" into an offset in the container's own units --
-        // which is the one thing four rounds of moving `FE_ITEM_WARN_OFFSET` never produced.
+        // composed position is `that translation + the destination rect's corner`. All twelve are
+        // printed, and the two that matter are named: `FUN_140b53c10` transposes the block into a
+        // 4x4, which puts slots 3 and 7 in the translate row.
+        //
+        // That pair is the whole question. `translate + want[0..2] + container` is where the mark
+        // is on screen, in cell-local units, and it can be read straight off one line -- which is
+        // the one thing four rounds of moving `FE_ITEM_WARN_OFFSET` by screenshot never produced.
         // SAFETY: the quad count is 1, so this matrix is inside the array that count sized.
         let matrix = unsafe { read_usize(shape + ds2_rva::FE_TEXTURE_SHAPE_QUAD_MATRIX_OFFSET) };
         let mut composed = [0f32; 12];
@@ -296,11 +300,25 @@ pub(crate) unsafe fn place(component: usize, base: usize) {
                 *cell = unsafe { ((matrix + slot * 4) as *const f32).read_unaligned() };
             }
         }
+        let [tx, ty] = ds2_rva::FE_TEXTURE_SHAPE_QUAD_MATRIX_TRANSLATE;
+        let at = [
+            composed[tx] + want[0] + ds2_rva::FE_ITEM_INFUSION_CONTAINER_AT[0],
+            composed[ty] + want[1] + ds2_rva::FE_ITEM_INFUSION_CONTAINER_AT[1],
+        ];
         log(format_args!(
             "{LOG_PREFIX} badge placed shape=0x{shape:016x} dest={was:.2?} -> {want:.2?} \
-             source={cropped:.2?} -> {art:.2?} (the game's own X, waku_03) matrix={composed:.2?} \
-             container={:.2?} placements={n}",
-            ds2_rva::FE_ITEM_INFUSION_CONTAINER_AT
+             source={cropped:.2?} -> {art:.2?} (the game's own X, waku_03) \
+             translate=({:.2},{:.2}) so cell-local={at:.2?} want={:.2?} matrix={composed:.2?} \
+             placements={n}",
+            composed[tx],
+            composed[ty],
+            [
+                ds2_rva::FE_ITEM_CELL_BAR_LEFT - ds2_rva::FE_ITEM_WARN_INK_INSET[0],
+                ds2_rva::FE_ITEM_CELL_BAR_TOP
+                    - ds2_rva::FE_ITEM_WARN_SIZE[1]
+                    - ds2_rva::FE_ITEM_WARN_INSET
+                    - ds2_rva::FE_ITEM_WARN_INK_INSET[1],
+            ],
         ));
     }
 }
