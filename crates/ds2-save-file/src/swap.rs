@@ -205,14 +205,6 @@ struct Swap {
     frames: u32,
 }
 
-/// Whether the in-session route may run at all.
-///
-/// `false`, and there is no way to set it: the flow has no field to write once the title is
-/// reached. It is a constant rather than a deleted module so the assembled flow survives for
-/// whoever finds the thing that would make it work, and so that turning it back on is one line
-/// against a body that has been kept compiling rather than a rewrite from the git history.
-static ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
 /// The swap in progress, if any.
 ///
 /// A lock taken from a per-frame detour, which this repo is otherwise careful about -- but the gate
@@ -294,10 +286,10 @@ fn steam_id() -> Option<String> {
 /// [`ds2_rva::SL_SESSION_STATE_SETUP`] at the title -- the one thing that would make the rest of
 /// this run.
 pub fn begin(picked: &Path) -> Result<(), NotBegun> {
-    if !ARMED.load(std::sync::atomic::Ordering::Relaxed) {
+    if !ds2_save_redirect::open_redirect::installed() {
         log_line(format_args!(
-            "{LOG_PREFIX} swap not attempted for {} -- no container directory can be written from \
-             the title, so the restart route is the one that loads a file",
+            "{LOG_PREFIX} swap not attempted for {} -- the open redirect is not installed, so the \
+             restart route is the one that can load a file",
             picked.display()
         ));
         return Err(NotBegun::NoDirectoryField);
@@ -417,29 +409,35 @@ fn title_gate() -> ds2_continue::TitleStep {
             TitleStep::Wait
         }
         Phase::Asking { restoring } => {
-            // NOTHING POINTS A DIRECTORY HERE, and [`begin`] refuses before this is ever reached.
-            // Four candidate fields were tried and each was disproved by a run; the table in this
-            // module's header has them, and `ds2_save_redirect::request_dir` has the disassembly.
+            // THE OPEN, NOT A FIELD. Four attempts pointed a `SaveLoadSystem` field somewhere else
+            // and each was disproved by a run -- the table in this module's header has them. The
+            // game is left holding its own directory and its own file name; the container it asks
+            // for is answered with the staged one, for as long as this window is armed.
             //
-            // What is left standing is the arm below: the side redirect, the container re-read, and
-            // the wait. They were measured reaching the game -- `load-answered=1`, `accepted=true`,
-            // the pump answering -- and they are correct for a container that has been pointed
-            // somewhere. Pointing it is the missing piece, not this.
-            //
-            // SAFETY: the game is mapped and past `DllMain`; this is its own thread at the title.
-            let side_ready = if restoring {
-                unsafe { session_dir::LOAD.disarm() }
+            // Reads only, so the player's own file cannot be written through this. That is also why
+            // the window can be this wide: the worst a leak does is let the game READ a copy of a
+            // save it was going to read anyway.
+            if restoring {
+                ds2_save_redirect::open_redirect::disarm();
             } else {
-                unsafe { session_dir::LOAD.arm() }
-            };
-            if !side_ready {
-                *guard = None;
-                drop(guard);
-                abandon(
-                    "the load-side redirect could not be armed, so the character list would \
-                     describe the wrong container",
-                );
-                return TitleStep::Finished;
+                let staged = Path::new(&swap.staged).join(ds2_save_redirect::SAVE_FILE_NAME);
+                let own = ds2_save_redirect::live_directory()
+                    .map(|dir| dir.join(ds2_save_redirect::SAVE_FILE_NAME));
+                let Some(own) = own else {
+                    *guard = None;
+                    drop(guard);
+                    abandon(
+                        "the directory the game builds for itself is not known, so there is no \
+                         container path to answer for",
+                    );
+                    return TitleStep::Finished;
+                };
+                if !ds2_save_redirect::open_redirect::arm(&own, &staged) {
+                    *guard = None;
+                    drop(guard);
+                    abandon("the open redirect could not be armed");
+                    return TitleStep::Finished;
+                }
             }
             let Some(system) = game::save_load_system() else {
                 return expire_or_wait(guard, "the save system could not be reached");

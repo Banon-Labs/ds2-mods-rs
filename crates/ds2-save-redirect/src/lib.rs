@@ -71,6 +71,7 @@
 #![cfg(windows)]
 
 pub mod install;
+pub mod open_redirect;
 pub mod request_dir;
 pub mod session_dir;
 pub mod stage;

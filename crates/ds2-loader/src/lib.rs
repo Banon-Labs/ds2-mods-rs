@@ -517,6 +517,13 @@ fn install_save_redirect() {
     // SAFETY: one MinHook detour on `ds2_rva::SL_WORKER_SET_DIRECTORY`, checked against its
     // recorded prologue, installed here -- after `neuter_arxan` -- rather than from `DllMain`.
     unsafe { ds2_save_redirect::request_dir::install() };
+    // The container-open redirect, which is how the in-session swap hands the game another save
+    // without touching the player's own. Installed here for the same reason as the others, and
+    // deliberately BEFORE anything can arm a window.
+    //
+    // SAFETY: one MinHook detour on `kernel32!CreateFileW`, in pass-through mode until a swap arms
+    // a window, installed after `neuter_arxan` rather than from `DllMain`.
+    unsafe { ds2_save_redirect::open_redirect::install() };
     if source.is_some() && !outcome.hooked {
         // Worth shouting about for the same reason the offline line is: a silent failure here
         // means the player believes they are playing a donor save and is in fact playing -- and
