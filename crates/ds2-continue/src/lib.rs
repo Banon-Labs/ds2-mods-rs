@@ -74,8 +74,9 @@ mod silence;
 pub use hide_menus::set_enabled as set_hide_menus;
 #[cfg(windows)]
 pub use install::{
-    LoadConfirmed, LogFn, Outcome, TitleGate, TitleStep, clear_title_gate, install,
-    set_load_confirmed, set_logger, set_preselect_slot, set_title_gate,
+    LoadConfirmed, LogFn, Outcome, StartedIngame, TitleGate, TitleStep, clear_started_ingame,
+    clear_title_gate, install, set_load_confirmed, set_logger, set_preselect_slot,
+    set_started_ingame, set_title_gate,
 };
 #[cfg(windows)]
 pub use silence::set_enabled as set_silence;

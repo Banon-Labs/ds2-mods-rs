@@ -325,6 +325,9 @@ unsafe extern "system" fn detour_sound_drain(this: *mut u8) {
 /// substate do its own work with the audio already restored.
 unsafe extern "system" fn detour_start_ingame(this: *mut u8) {
     crate::end_shortcut("start-ingame");
+    // And anyone waiting for the load to be over rather than merely committed -- see
+    // `install::set_started_ingame` for the confirm that made the difference matter.
+    crate::install::notify_started_ingame();
     let trampoline = START_INGAME_TRAMPOLINE.load(Ordering::Acquire);
     if trampoline != 0 {
         // SAFETY: MinHook's copy of this site's original prologue, with the vtable's signature.

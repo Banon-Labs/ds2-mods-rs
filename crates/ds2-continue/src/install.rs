@@ -104,6 +104,12 @@ static LOAD_CONFIRMED: AtomicUsize = AtomicUsize::new(0);
 /// Notified with the slot the game accepted. See [`set_load_confirmed`].
 pub type LoadConfirmed = fn(i32);
 
+/// Called once when `FeSubStateTitleStartIngame` is entered: the load is over and play has begun.
+static STARTED_INGAME: AtomicUsize = AtomicUsize::new(0);
+
+/// Notified when the character is in the world. See [`set_started_ingame`].
+pub type StartedIngame = fn();
+
 /// Run `gate` every frame the title's top menu is up, until it answers [`TitleStep::Finished`].
 ///
 /// Returns `false` if a gate is already registered, which is the honest answer rather than the
@@ -136,6 +142,41 @@ pub fn clear_title_gate() {
 /// It fires for a load the player drove by hand exactly as it does for one this crate shortcut.
 pub fn set_load_confirmed(notify: LoadConfirmed) {
     LOAD_CONFIRMED.store(notify as *const () as usize, Ordering::Release);
+}
+
+/// Be told when the character is actually in the world, at `FeSubStateTitleStartIngame`.
+///
+/// # Why a flow wants this and not [`set_load_confirmed`]
+///
+/// The list taking its load branch is not the end of the load. Between that moment and play there
+/// are more of the game's own screens, and one of them is a confirm about the character being
+/// loaded. A flow that tears its own state down at `load_confirmed` is no longer holding
+/// `ds2-dialog-skip` when that confirm arrives, so this build answers it with its only published
+/// edge -- the cancel -- and the player is returned to the title having chosen a character.
+///
+/// Measured 2026-09-23: `swap done slot=0`, then
+/// `suppressed screen=common-window kind=82 cancel-dest=0x17 confirm-dest=0xffff edge=only-edge`,
+/// then the title sequence again.
+///
+/// One callback, cleared by [`clear_started_ingame`] rather than fired repeatedly: it reports every
+/// load, including ones the registering flow had nothing to do with.
+pub fn set_started_ingame(notify: StartedIngame) {
+    STARTED_INGAME.store(notify as *const () as usize, Ordering::Release);
+}
+
+/// Stop being told. Idempotent.
+pub fn clear_started_ingame() {
+    STARTED_INGAME.store(0, Ordering::Release);
+}
+
+/// Fire the registered `StartIngame` callback, if any. Called from the substate's own detour.
+pub(crate) fn notify_started_ingame() {
+    let raw = STARTED_INGAME.load(Ordering::Acquire);
+    if raw != 0 {
+        // SAFETY: `raw` is only ever a `StartedIngame` stored by `set_started_ingame`.
+        let notify: StartedIngame = unsafe { std::mem::transmute::<usize, StartedIngame>(raw) };
+        notify();
+    }
 }
 
 /// Call the registered gate, and act on what it asks for.

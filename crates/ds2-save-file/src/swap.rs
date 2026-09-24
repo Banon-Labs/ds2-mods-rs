@@ -613,10 +613,18 @@ fn load_confirmed(slot: i32) {
             |seated| seated.to_string(),
         );
     ds2_continue::clear_title_gate();
-    // The flow is over, so the boxes go back to being this build's business. Released here rather
-    // than at `StartIngame`: the load is committed, and a hold that outlived its flow would leave
-    // every notice for the rest of the session waiting on a keypress.
-    ds2_dialog_skip::release();
+    // THE HOLD SURVIVES THIS, and releasing it here is a bug this run measured. The list taking its
+    // load branch is not the end of the load: the game puts up one more `common-window` about the
+    // character, and with the hold already released this build answered its only published edge --
+    // the cancel -- and returned the player to the title having chosen a save.
+    //
+    //   ds2-save-file:   swap done slot=0
+    //   ds2-dialog-skip: suppressed screen=common-window kind=82 cancel-dest=0x17
+    //                    confirm-dest=0xffff edge=only-edge
+    //   ds2-dialog-skip: forced screen=title-main gate=title-sequence
+    //
+    // So it is released at `StartIngame` instead, which is the load actually being over.
+    ds2_continue::set_started_ingame(load_started);
     *guard = None;
     drop(guard);
     // The flow is over, so the row's label is its own again -- before the character finishes
@@ -635,6 +643,18 @@ fn load_confirmed(slot: i32) {
              {slot} of it. Leave to the title without saving if that is not what you want"
         ));
     }
+}
+
+/// The character is in the world: the load is over, so the boxes go back to the player.
+///
+/// Registered by [`load_confirmed`] and cleared here, because `ds2-continue` reports this for every
+/// load in the session and only the one that followed a swap is this flow's business.
+fn load_started() {
+    ds2_continue::clear_started_ingame();
+    ds2_dialog_skip::release();
+    log_line(format_args!(
+        "{LOG_PREFIX} swap in game -- the dialogs are yours again"
+    ));
 }
 
 #[cfg(test)]
