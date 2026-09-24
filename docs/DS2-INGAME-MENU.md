@@ -1201,6 +1201,18 @@ and adding a pitch to each x.
 texture of its own. `FLO_ADDED_TAB_ICON_SOURCE_LEFT` is the one constant to change if a different
 slice is ever wanted; a genuinely new glyph needs a texture, which is a different piece of work.
 
+**So the colour is what tells the two apart.** Two identical hexagons side by side is the state
+three commits shipped, and nothing in the geometry can fix it while the art is shared. The icon
+record therefore takes a copy of the plate's transform block and writes
+`FLO_ADDED_TAB_ICON_HUE` into it at `FLO_ADDED_TAB_ICON_TINT_STRENGTH` -- the same hue the added
+rows wear, at full strength rather than a row's `120`, because the tab has no caption beside it and
+nothing to be compared against at a glance. The copy is the load-bearing part: the pointer the
+cloned record arrives with is the plate's, and the plate draws all six shipped hexagons, so a colour
+written through it repaints the whole strip. Same machinery as a row's icon, flags included --
+`FLO_TRANSFORM_COLOUR_LIVE | FLO_TRANSFORM_COLOUR_RGB`, without which the colour is inert.
+
+Not yet in front of a running game.
+
 ### What runs have shown since
 
 Three of them, and the third is the one the player accepted: seven tabs in the strip, the seventh

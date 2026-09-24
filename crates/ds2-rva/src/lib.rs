@@ -4424,6 +4424,32 @@ pub const FLO_ADDED_TAB_ICON_SOURCE_LEFT: f32 = FLO_TAB_PLATE_SOURCE[2] - FLO_TA
 /// below the first cell's `69`, so the icon sits on the strip and under its own highlight.
 pub const FLO_ADDED_TAB_ICON_DEPTH: u16 = 62;
 
+/// The hue the seventh tab's hexagon is tinted with, at full strength. R, G, B.
+///
+/// **The same hue the added rows wear**, [`FLO_ADDED_ROW_HUE`], and deliberately not a second
+/// number: the tab and the rows inside it are one mod, and the byte order that hue is laid down in
+/// cost a run to settle (see [`FLO_ADDED_ROW_TINT`]). Reusing it inherits that measurement instead
+/// of betting on it again.
+///
+/// The seventh tab's art is the sixth tab's, shifted one [`FLO_TAB_PITCH`] -- there are six
+/// hexagons in the atlas and this mod ships no texture -- so without a tint the tab this project
+/// adds is pixel-identical to the tab beside it. The colour is the only thing that says which one
+/// is ours.
+pub const FLO_ADDED_TAB_ICON_HUE: [u8; 3] = FLO_ADDED_ROW_HUE;
+
+/// How far the hexagon is pushed from white toward [`FLO_ADDED_TAB_ICON_HUE`], out of `255`.
+///
+/// **Full strength, where a row's icon is [`FLO_ADDED_ROW_TINT_STRENGTH`] = 120**, and the two
+/// differ because they are answering different questions. A row's tint distinguishes two rows that
+/// sit one above the other with captions to tell them apart, so a third of a hue is enough and more
+/// reads as a re-skin. The tab has no caption and no neighbour to compare against at a glance -- it
+/// is one hexagon in a row of seven identical hexagons -- and "a re-skin, a different KIND of row"
+/// is exactly the reading wanted here.
+///
+/// This is taste, not measurement, and it is on its own line for the same reason the row's is: it
+/// can be turned without touching the hue or the byte order underneath it.
+pub const FLO_ADDED_TAB_ICON_TINT_STRENGTH: u8 = 255;
+
 /// Index, in [`FLO_TAB_STRIP_DEFINITION`]'s child array, of the cap drawn over the strip's right
 /// end. Its container is `0x026a` and its quad lands at `(271.05, 5.05)-(349.40, 64.45)`, over the
 /// sixth tab -- so a seventh tab needs it one [`FLO_TAB_PITCH`] further along.
