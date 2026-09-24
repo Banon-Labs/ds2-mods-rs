@@ -4062,9 +4062,15 @@ pub const FE_TEXTURE_SHAPE_QUAD_MATRIX_OFFSET: usize = 0x48;
 /// block is a row-major `3x4` whose last column is `p3, p7, p11`, and transposing it puts that
 /// column in the 4x4's last row, which is where row-vector math (`v' = v * M`) keeps a translate.
 ///
-/// Worth naming because the badge's whole position argument rests on one number out of this block:
-/// the composed position of the art is this translation plus the destination rect's corner, and
-/// the cloned glyph's quad puts `(-934.70, -52.50)` here, cancelling the rect it samples.
+/// **At the cell bind this block is still identity, and a run says so.** `ds2-item-warn` logged all
+/// twelve on four consecutive badges and got `[1,0,0,0, 0,1,0,0, 0,0,1,0]` every time -- exactly
+/// what `FUN_140b70200` seeds from `_FLOAT_141596af0..`, translation included, which is to say
+/// none. So whatever folds a quad's own offset in -- and the cloned infusion glyph's `.flo` quad
+/// carries `(-934.70, -52.50)` against a rect starting at `(934.70, 52.50)` -- does it after the
+/// bind and not here.
+///
+/// These indices are where a translation is read from, then. They are not a claim that one is in
+/// the block when `ds2-item-warn` looks: reading it at bind time measures the seed.
 pub const FE_TEXTURE_SHAPE_QUAD_MATRIX_TRANSLATE: [usize; 2] = [3, 7];
 pub const FE_TEXTURE_SHAPE_SOURCE_RECT_OFFSET: usize = 0x58;
 pub const FE_TEXTURE_SHAPE_RECT_STRIDE: usize = 0x10;
@@ -6911,11 +6917,15 @@ pub const FE_ITEM_WARN_OFFSET: [f32; 2] = [
 ///
 /// Anchored on [`FE_ITEM_WARN_SHIPPED_SOURCE`] and not on [`FE_ITEM_WARN_SOURCE`], which is the
 /// one subtlety in the whole swap. `FUN_140b70200` copies the shape's quad rect into both the
-/// destination array at `+0x50` and the source array at `+0x58`, and the per-quad matrix at
-/// `+0x48` carries the quad's own offset -- `(-934.70, -52.50)` -- so the composed position is
-/// `that translation + the destination corner` and the shipped pair cancel to the record's origin.
-/// Re-pointing the source at the ✕ changes which pixels are sampled and moves nothing; the
-/// destination therefore still has to be measured from the rect the matrix cancels.
+/// destination array at `+0x50` and the source array at `+0x58`, and the cloned glyph's `.flo`
+/// quad carries `(-934.70, -52.50)` against a rect starting at `(934.70, 52.50)` -- so something
+/// downstream cancels the atlas origin and the shipped art lands on its record's origin.
+/// Re-pointing the source at the ✕ changes which pixels are sampled and moves nothing, so the
+/// destination stays measured from the rect that cancellation is built around.
+///
+/// It is not the per-quad matrix at `+0x48` doing the cancelling, or at least not by the time the
+/// cell binds: see [`FE_TEXTURE_SHAPE_QUAD_MATRIX_TRANSLATE`], where a run found identity. Which
+/// transform applies the glyph quad's offset is open, and it is the open half of this mark.
 ///
 /// Its size is [`FE_ITEM_WARN_SOURCE`]'s. The draw (`0x140b6f200` -> `FUN_140b521c0`) builds four
 /// vertices straight off the destination corners and maps the source rect onto them as UVs, so a

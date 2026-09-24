@@ -260,11 +260,16 @@ pub(crate) unsafe fn place(component: usize, base: usize) {
     }
 
     // The ✕, and where to put it. Both are constants: `FUN_140b70200` seeds the two arrays from
-    // the same quad field (`quad+0x30`), so an untouched component has `destination == source`,
-    // and the art lands at the record's origin because the quad's own offset -- `(-934.70,
-    // -52.50)` against a rect starting at `(934.70, 52.50)` -- cancels it in the per-quad matrix
-    // at `+0x48`. The destination is measured off THAT rect for that reason, and not off the ✕'s:
-    // re-pointing the source moves nothing, it only changes which pixels arrive.
+    // the same quad field (`quad+0x30`), so an untouched component has `destination == source`.
+    // The destination is measured off the SHIPPED rect and not off the ✕'s, because whatever
+    // cancels the atlas origin cancels THAT one -- the glyph's `.flo` quad carries `(-934.70,
+    // -52.50)` against a rect starting at `(934.70, 52.50)`, and the art lands on its record's
+    // origin as a result. Re-pointing the source moves nothing; it only changes which pixels
+    // arrive, so the offset has to stay anchored where the cancellation is.
+    //
+    // WHERE that cancellation happens is open. It is not in the per-quad matrix at `+0x48` at the
+    // time this runs: a run logged all twelve floats on four consecutive badges and every one read
+    // identity, which is the seed and nothing more. See `FE_TEXTURE_SHAPE_QUAD_MATRIX_TRANSLATE`.
     let art = ds2_rva::FE_ITEM_WARN_SOURCE;
     let want = ds2_rva::FE_ITEM_WARN_DEST;
     // SAFETY: as above.
@@ -288,9 +293,10 @@ pub(crate) unsafe fn place(component: usize, base: usize) {
         // printed, and the two that matter are named: `FUN_140b53c10` transposes the block into a
         // 4x4, which puts slots 3 and 7 in the translate row.
         //
-        // That pair is the whole question. `translate + want[0..2] + container` is where the mark
-        // is on screen, in cell-local units, and it can be read straight off one line -- which is
-        // the one thing four rounds of moving `FE_ITEM_WARN_OFFSET` by screenshot never produced.
+        // A run has already read this block as identity on four consecutive badges, so the pair is
+        // printed raw and NOT added to anything. Deriving a screen position from a translation
+        // that is provably still the seed would print a confident number with no referent, which
+        // is worse than printing twelve floats and saying what they are.
         // SAFETY: the quad count is 1, so this matrix is inside the array that count sized.
         let matrix = unsafe { read_usize(shape + ds2_rva::FE_TEXTURE_SHAPE_QUAD_MATRIX_OFFSET) };
         let mut composed = [0f32; 12];
@@ -301,23 +307,19 @@ pub(crate) unsafe fn place(component: usize, base: usize) {
             }
         }
         let [tx, ty] = ds2_rva::FE_TEXTURE_SHAPE_QUAD_MATRIX_TRANSLATE;
-        let at = [
-            composed[tx] + want[0] + ds2_rva::FE_ITEM_INFUSION_CONTAINER_AT[0],
-            composed[ty] + want[1] + ds2_rva::FE_ITEM_INFUSION_CONTAINER_AT[1],
-        ];
         log(format_args!(
             "{LOG_PREFIX} badge placed shape=0x{shape:016x} dest={was:.2?} -> {want:.2?} \
              source={cropped:.2?} -> {art:.2?} (the game's own X, waku_03) \
-             translate=({:.2},{:.2}) so cell-local={at:.2?} want={:.2?} matrix={composed:.2?} \
+             translate=({:.2},{:.2}) matrix={composed:.2?} container={:.2?} ink-target={:.2?} \
              placements={n}",
             composed[tx],
             composed[ty],
+            ds2_rva::FE_ITEM_INFUSION_CONTAINER_AT,
             [
-                ds2_rva::FE_ITEM_CELL_BAR_LEFT - ds2_rva::FE_ITEM_WARN_INK_INSET[0],
+                ds2_rva::FE_ITEM_CELL_BAR_LEFT,
                 ds2_rva::FE_ITEM_CELL_BAR_TOP
                     - ds2_rva::FE_ITEM_WARN_SIZE[1]
-                    - ds2_rva::FE_ITEM_WARN_INSET
-                    - ds2_rva::FE_ITEM_WARN_INK_INSET[1],
+                    - ds2_rva::FE_ITEM_WARN_INSET,
             ],
         ));
     }

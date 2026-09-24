@@ -289,7 +289,7 @@ and the capacity together -- which is the whole of what the lookup substitution 
 
 ### The X is the game's own, and it costs one rect
 
-The mark was asked for as a red X and it is one -- the same  the game already draws on an unusable
+The mark was asked for as a red X and it is one -- the same X the game already draws on an unusable
 quick-slot weapon, not art this repo invented and not a tinted stand-in.
 
 `l01_05_L_key.flo` shape `0x002a` samples `(740.65, 164.05)-(769.65, 195.55)` of **`waku_03`** and
@@ -301,7 +301,7 @@ the icon it marks, which is where `FE_ITEM_WARN_OFFSET` puts this one.
 so the art had to be a clone -- was wrong twice over. `scripts/ds2-tpf.py` pulls a named texture out
 of `GameDataEbl` by walking BND4 member names (the archive keys on a path hash and stores no names,
 so no path lookup could ever have found it), and `scripts/ds2-atlas-find.py` reports art as rects by
-thresholding on colour and labelling the connected blobs. Cross-correlated against the  cut out of
+thresholding on colour and labelling the connected blobs. Cross-correlated against the X cut out of
 a screenshot of that HUD slot, this rect scores `+0.79` and the next best candidate in `waku_03`
 scores `+0.35`. Its ink is `(745, 169)-(767, 191)`, 367 opaque pixels, mean `rgb(181, 44, 16)` --
 already red, so nothing is tinted any more.
@@ -315,9 +315,16 @@ rects, at `+0x50` and `+0x58`. `crates/ds2-item-warn/src/place.rs` re-points the
  and leaves the entry alone, so one badge changes and nothing else in the document does. Same
 atlas, different rect, no texture of this repo's own.
 
-The destination rect is still measured off the glyph's shipped rect rather than the 's, because
-the per-quad matrix at `+0x48` carries the glyph quad's own offset (`-934.70, -52.50`) and cancels
-it. Re-pointing the source changes which pixels arrive and moves nothing.
+The destination rect is still measured off the glyph's shipped rect rather than the X's, because
+that is the rect the atlas-origin cancellation is built around: the glyph's `.flo` quad carries
+`(-934.70, -52.50)` against a rect starting at `(934.70, 52.50)`, and the shipped art lands on its
+record's origin as a result. Re-pointing the source changes which pixels arrive and moves nothing.
+
+**Which transform applies that offset is not known, and a run narrowed it.** It is not the per-quad
+matrix at `+0x48`, or not by the time the cell binds: `ds2-item-warn` logged all twelve floats of
+that block on four consecutive badges and every read came back identity with no translation --
+exactly what `FUN_140b70200` seeds. That is the open half of this mark, and it is the same open
+question as the badge's corner.
 
 ### What the hooks refuse
 
@@ -326,7 +333,7 @@ it. Re-pointing the source changes which pixels arrive and moves nothing.
   definition, because that is the subtree `place` walks to reach the component's rect arrays
   (`FUN_140b50bc0` sends `kind & 1` straight to `FUN_140b51270`, with no definition under it);
 * the placement, unless the component it found carries exactly one quad and its source rect is
-  either the glyph's shipped `(934.70, 52.50)-(960.30, 78.50)` or the  already written over it --
+  either the glyph's shipped `(934.70, 52.50)-(960.30, 78.50)` or the X already written over it --
   so a component this has no business in keeps the rects the game built;
 * both hooks, unless the bytes at the site are the ones recorded, with what was actually found
   printed beside what was wanted;
