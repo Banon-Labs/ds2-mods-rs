@@ -235,7 +235,28 @@ def split_turns(events: list[dict]) -> list[Turn]:
 
 
 def last_text_turn(turns: list[Turn]) -> Turn | None:
-    """The last turn that actually said something -- the turn whose end the Stop hook is judging."""
+    """The last turn that actually said something -- the turn whose end the Stop hook is judging.
+
+    Returns `None` when the NEWEST turn has acted but has no prose yet, which is the state every
+    reply after a Stop halt is in: the assistant's text is not in the transcript when the next Stop
+    hook reads it, only its `tool_use` blocks are. Walking past that turn to the previous one does
+    not find "the turn being judged" -- it finds the turn that was ALREADY halted, and convicts it
+    again on the same sentence. The correction is structurally invisible, so no reply can ever
+    satisfy the guard and the session livelocks.
+
+    Measured on 2026-09-23 (ds2-mods-rs-87j): one guard halted the same message eight times running
+    while the agent rewrote its closing seven times and opened every artifact the guard asked for.
+    The turn table at that moment was `47 texts=2` (the halted message, still returned here) and
+    `48 texts=0 blocks=2` (all seven replies since).
+
+    Declining is the conservative answer and matches what every caller already does with `None` --
+    `sys.exit(0)`, fail open, under the comment "a missing helper must never wedge a session". A
+    turn with no prose has no prose to convict, so passing costs a guard nothing: the same text is
+    judged normally on the next Stop, once it has been written. The empty-`blocks` case is left
+    alone, because a turn that neither spoke nor acted is not a turn anyone is mid-way through.
+    """
+    if turns and not turns[-1].texts and turns[-1].blocks:
+        return None
     for turn in reversed(turns):
         if turn.texts:
             return turn
