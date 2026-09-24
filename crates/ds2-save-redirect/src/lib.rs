@@ -49,20 +49,29 @@
 //! because DS2 shows no LOAD GAME row when it finds nothing. The log line is what tells those two
 //! apart without anyone having to guess.
 //!
-//! # The second, narrower redirect: [`session_dir`]
+//! # Mid-session, it is [`request_dir`] and not this
 //!
-//! Everything above moves the directory for a whole process, which is correct at startup and wrong
-//! mid-session -- DARK SOULS II writes on the way out of a game, so a session that re-points the
-//! folder and then quits saves the current character over the staged copy. [`session_dir`] is the
-//! other half: it replaces one vtable slot per SIDE, so the loads can answer a staged folder while
-//! the saves still answer the player's own, and each side is armed at the moment that side becomes
-//! correct. `ds2-save-file`'s in-session character swap is the flow that uses both, and nothing in
-//! it has been run in the game.
+//! The detour above moves the directory for a whole process, which is what a launch wants and what
+//! a live session cannot use: `SAVE_DIR_BUILD` runs during session setup, so re-pointing it after
+//! the game has booted changes a string nothing reads again.
+//!
+//! [`request_dir`] is the mid-session half. It calls the same function session setup calls with
+//! `SAVE_DIR_BUILD`'s result -- the one that seats the directory on the storage worker that opens
+//! files -- so it reaches the field a container read consults, at a moment of the caller's
+//! choosing. `ds2-save-file`'s in-session character swap is the flow that uses it.
+//!
+//! [`session_dir`] is the third module here and is the seam that did NOT work: it replaces one
+//! vtable slot per side, and a live run measured `load-answered=1` on a read that still failed,
+//! because the load session's work method reaches its string through the accessor rather than
+//! through the virtual. It is kept because the pair of overrides is how the game separates saves
+//! from loads, and because a seam that was disproved by measurement is worth being able to point
+//! at.
 
 // Windows-only by construction: this is a MinHook detour on a PE image.
 #![cfg(windows)]
 
 pub mod install;
+pub mod request_dir;
 pub mod session_dir;
 pub mod stage;
 

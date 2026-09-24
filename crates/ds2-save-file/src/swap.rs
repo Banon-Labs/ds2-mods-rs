@@ -334,49 +334,61 @@ fn title_gate() -> ds2_continue::TitleStep {
             TitleStep::Wait
         }
         Phase::Asking { restoring } => {
-            // THE DIRECTORY A CONTAINER READ OPENS IS THE ONE `SAVE_DIR_BUILD` PRODUCES, so that is
-            // what this points. `SLLoadSession`'s directory virtual looked like the seam and is
-            // not: the session's work method reads the content's string inline and never calls that
-            // virtual, which a run measured as `load-answered=1` on a read that still failed.
+            // THE DIRECTORY A CONTAINER READ OPENS LIVES ON THE STORAGE WORKER, and the game sets
+            // it in exactly one place: the `0x18` arm of the session pump hands `SAVE_DIR_BUILD`'s
+            // result to `SL_REQUEST_SET_DIRECTORY`. `ds2_save_redirect::request_dir` calls that
+            // same function, so this moves the field a read consults rather than one beside it.
+            //
+            // Three seams were tried before this one and all three missed, each proved wrong by a
+            // measurement rather than by argument:
+            //
+            //   * `SLLoadSession`'s directory virtual -- the work method reaches the same string
+            //     through the accessor instead of the virtual: `load-answered=1`, read failed.
+            //   * `SAVE_DIR_BUILD` re-pointed mid-session -- it runs at session setup and not per
+            //     request: `session-dir-answered=0` on a re-read that never called it.
+            //   * `SLLoadContent`'s own string at `[[system+0x30]]+0x08` -- `<unreadable>`, and it
+            //     is not the string the worker holds.
             //
             // It moves both sides at once, and that is safe only here. Between the return to the
-            // title and a character being chosen there is no character loaded, so nothing can be
-            // saved through it; `load_confirmed` swaps back to the per-side arm the instant one is.
-            // THE FIELD A CONTAINER READ OPENS, written through the game's own string assign.
-            //
-            // Two seams were tried before this one and both missed. `SLLoadSession`'s directory
-            // virtual is not on the path to the file -- the session's work method reaches the same
-            // field through the accessor instead of through the virtual, measured as
-            // `load-answered=1` on a read that still failed. `SAVE_DIR_BUILD` is not either: it
-            // runs at session setup and not per request, measured as `session-dir-answered=0` on a
-            // re-read that never called it. What is left is the string itself, on the content the
-            // request is built from, and the game's own setter is what writes it.
-            //
-            // The original is kept so the put-back is a restore rather than a guess.
+            // title and a character being chosen there is no character loaded, so there is nothing
+            // a save could write; every path that ends the flow puts the original back.
             if let Some(system) = game::save_load_system() {
+                // THE ORIGINAL IS THE ONE THE GAME SET ON ITSELF, observed at session setup by the
+                // same detour that watches this write. Captured rather than read back, because the
+                // worker is reachable only inside the setter's own lock -- and captured before the
+                // staged one is seated, or the put-back would restore the staged folder.
+                if !restoring
+                    && let Some(seated) = ds2_save_redirect::request_dir::last()
+                    && let Ok(mut held) = ORIGINAL_DIRECTORY.lock()
+                {
+                    held.get_or_insert(seated.directory);
+                }
+                // AND NOTHING IS STAGED UNTIL THERE IS ONE. The observer is what records it, so an
+                // observer that did not install leaves nothing to put back -- and a flow that armed
+                // anyway would hand the player a character list describing somebody else's
+                // container with no way home short of restarting the game.
+                if !restoring && !matches!(ORIGINAL_DIRECTORY.lock().as_deref(), Ok(Some(_))) {
+                    *guard = None;
+                    drop(guard);
+                    abandon(
+                        "the directory the game set on itself was never observed, so there would \
+                         be nothing to put back -- the worker-directory observer is not installed",
+                    );
+                    return TitleStep::Finished;
+                }
                 let wanted = if restoring {
                     ORIGINAL_DIRECTORY.lock().ok().and_then(|held| held.clone())
                 } else {
-                    // SAFETY: game thread at the title, and the interlock is idle -- the request
-                    // that follows tests it itself and refuses if it is not.
-                    let original = unsafe { game::content_directory(system) };
-                    if let (Ok(mut held), Some(original)) =
-                        (ORIGINAL_DIRECTORY.lock(), original.clone())
-                    {
-                        held.get_or_insert(original);
-                    }
-                    log_line(format_args!(
-                        "{LOG_PREFIX} swap container directory was {}",
-                        original.as_deref().unwrap_or("<unreadable>")
-                    ));
                     Some(swap.staged.clone())
                 };
                 if let Some(wanted) = wanted {
-                    // SAFETY: as above.
-                    let seated = unsafe { game::set_content_directory(system, &wanted) };
+                    // SAFETY: game thread at the title, and the interlock is idle -- the re-read
+                    // that follows tests it itself and refuses if it is not, so no request is in
+                    // flight against the worker whose lock this takes.
+                    let seated = unsafe { ds2_save_redirect::request_dir::set(system, &wanted) };
                     log_line(format_args!(
-                        "{LOG_PREFIX} swap container directory now {} (asked for {wanted})",
-                        seated.as_deref().unwrap_or("<unreadable>")
+                        "{LOG_PREFIX} swap worker directory now {} (asked for {wanted})",
+                        describe(&seated)
                     ));
                 }
             }
@@ -503,6 +515,31 @@ fn expire_or_wait(
     ds2_continue::TitleStep::Finished
 }
 
+/// What a directory set is reported as, in one string.
+///
+/// **Every arm names a different failure**, because they lead to different next moves and a single
+/// `<unreadable>` would flatten them into one: a set that was refused before it reached the game, a
+/// set the game accepted and then skipped, and a set that landed are three distinct things to find
+/// in a log.
+fn describe(
+    seated: &Result<
+        Option<ds2_save_redirect::request_dir::Seated>,
+        ds2_save_redirect::request_dir::NotSet,
+    >,
+) -> String {
+    match seated {
+        Ok(Some(seated)) if seated.skipped => {
+            format!(
+                "{} SKIPPED -- the worker's set flag was up",
+                seated.directory
+            )
+        }
+        Ok(Some(seated)) => seated.directory.clone(),
+        Ok(None) => String::from("<set made, nothing written>"),
+        Err(why) => format!("<not set: {why:?}>"),
+    }
+}
+
 /// Put both sides back and say why, for every path that gives up.
 ///
 /// **Disarms rather than assumes.** A flow that abandoned between arming the load side and reaching
@@ -525,7 +562,7 @@ fn abandon(why: &str) {
     // that file explains the failure. Anything above zero says it was asked, got the staged
     // directory, and the read still failed -- two opposite next moves, told apart by one number.
     let (answered, passed) = session_dir::LOAD.answers();
-    // AND THE CONTAINER DIRECTORY GOES BACK, which is the one that matters now: it is the field a
+    // AND THE WORKER DIRECTORY GOES BACK, which is the one that matters now: it is the field a
     // read opens, so a flow that gave up while it still named the staged folder would leave the
     // player's own character list describing somebody else's container.
     let directory = match (
@@ -533,15 +570,15 @@ fn abandon(why: &str) {
         ORIGINAL_DIRECTORY.lock().ok().and_then(|held| held.clone()),
     ) {
         (Some(system), Some(original)) => {
-            // SAFETY: game thread, and this runs on a path that has already stopped the flow.
-            unsafe { game::set_content_directory(system, &original) }
+            // SAFETY: game thread, and this runs on a path that has already stopped the flow, so
+            // no request of this flow's is in flight against the worker whose lock this takes.
+            describe(&unsafe { ds2_save_redirect::request_dir::set(system, &original) })
         }
-        _ => None,
+        _ => String::from("<not restored>"),
     };
     log_line(format_args!(
         "{LOG_PREFIX} swap ABANDONED -- {why}. load-side-restored={load} save-side-restored={save} \
-         load-answered={answered} load-passed-through={passed} container-directory={}",
-        directory.as_deref().unwrap_or("<not restored>")
+         load-answered={answered} load-passed-through={passed} worker-directory={directory}"
     ));
 }
 
@@ -561,19 +598,22 @@ fn load_confirmed(slot: i32) {
         return;
     }
     let staged = swap.staged.clone();
-    // The one moment the save side is correct. The character about to be loaded came out of the
-    // staged container, so that is where its progress belongs, and the player's own container has
-    // been untouched since the save that left it.
+    // The save side's vtable slot, armed for completeness rather than for effect: it is the seam a
+    // measured run disproved, and the worker directory below is what a save actually writes to. It
+    // stays because `export` reads `SAVE.directory()` to say where a Save Game to File row's file
+    // came from, and because the two being armed together is the state that crate expects.
     // SAFETY: the game is mapped and past `DllMain`; this is its own thread at the title.
     let armed = unsafe { session_dir::SAVE.arm() };
-    // THE CONTAINER DIRECTORY STAYS STAGED, and this is the one place in the flow where that is
-    // the right answer. The load the player just confirmed has not happened yet -- this reports the
+    // THE WORKER DIRECTORY STAYS STAGED, and this is the one place in the flow where that is the
+    // right answer. The load the player just confirmed has not happened yet -- this reports the
     // list taking its load branch -- so restoring the field here would have the character read out
-    // of the player's own container instead of the one they chose from. It is reported rather than
-    // assumed, which is what the readback is for.
-    // SAFETY: game thread at the title, in the list's own callback.
-    let directory =
-        game::save_load_system().and_then(|system| unsafe { game::content_directory(system) });
+    // of the player's own container instead of the one they chose from.
+    //
+    // Reported from the observer's record rather than re-read: the worker is reachable only inside
+    // the setter's own lock, and this runs with a load request about to go out against it.
+    let directory = ds2_save_redirect::request_dir::last()
+        .map(|seated| seated.directory)
+        .unwrap_or_else(|| String::from("<never set>"));
     ds2_continue::clear_title_gate();
     // The flow is over, so the boxes go back to being this build's business. Released here rather
     // than at `StartIngame`: the load is committed, and a hold that outlived its flow would leave
@@ -587,9 +627,8 @@ fn load_confirmed(slot: i32) {
     crate::import::restore();
     if armed {
         log_line(format_args!(
-            "{LOG_PREFIX} swap done slot={slot} container-directory={} -- loading from {staged}, \
-             and this session now saves there too; your own container is untouched",
-            directory.as_deref().unwrap_or("<unreadable>")
+            "{LOG_PREFIX} swap done slot={slot} worker-directory={directory} -- loading from \
+             {staged}, and this session now saves there too; your own container is untouched"
         ));
     } else {
         log_line(format_args!(

@@ -508,6 +508,15 @@ fn install_save_redirect() {
     // `scripts/ds2-arxan-chain.py` to sit at its own `48 89 5c 24 08` prologue rather than behind
     // an Arxan redirect, and installed here -- after `neuter_arxan` -- rather than from `DllMain`.
     let outcome = unsafe { ds2_save_redirect::install() };
+    // The observer on the worker-side directory writer, which is what makes the in-session swap's
+    // redirect measurable instead of assumed. It changes no answer; it reads back what was written
+    // and the byte that would have made the write a no-op. Installed whether or not a handoff was
+    // armed, because the line it writes for the game's OWN session setup is the baseline every
+    // later one is read against.
+    //
+    // SAFETY: one MinHook detour on `ds2_rva::SL_WORKER_SET_DIRECTORY`, checked against its
+    // recorded prologue, installed here -- after `neuter_arxan` -- rather than from `DllMain`.
+    unsafe { ds2_save_redirect::request_dir::install() };
     if source.is_some() && !outcome.hooked {
         // Worth shouting about for the same reason the offline line is: a silent failure here
         // means the player believes they are playing a donor save and is in fact playing -- and

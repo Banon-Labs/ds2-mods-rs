@@ -5917,9 +5917,13 @@ pub const FE_ITEM_LIST_UPDATE_ARGUMENT_COUNT: usize = 4;
 // from. So nothing at runtime has to be decoded to tell a save from a load: the class that is
 // asking is the answer, and the two answers live at two addresses.
 //
-// This replaced a plan aimed at `SAVE_DIR_BUILD`, which cannot work: that function is reached from
-// one arm of `FUN_1402e67f0`'s switch, session type `0x18`, which builds the directory once during
-// session setup -- before anything has said whether the session will save or load.
+// AND IT IS NOT ON THE PATH TO THE FILE, which a live run measured. Recorded because the pair is
+// worth seeing and because the reasoning that led here has to stay visible: this was written as a
+// replacement for a plan aimed at `SAVE_DIR_BUILD`, on the grounds that `SAVE_DIR_BUILD` runs once
+// at session setup rather than per request. That is true and it is not a disqualification --
+// `SAVE_DIR_BUILD`'s result is handed to `SL_REQUEST_SET_DIRECTORY`, which seats it on the storage
+// worker, and the worker is what a container read opens. The split below moves a field the read
+// does not consult; `load-answered=1` on a read that still failed is what that looks like.
 
 /// `SaveLoad2::SLLoadSession`'s directory override. **The load side of the split.**
 ///
@@ -5957,6 +5961,87 @@ pub const SL_LOAD_SESSION_DIRECTORY_VTABLE_SLOT: usize = 3;
 /// after that -- and calling it is how a replacement override hands back a path without touching
 /// the game's allocator by hand, the same reasoning as [`WSTRING_ASSIGN`].
 pub const SL_SESSION_STRING_SET: u32 = 0x00a8_9050;
+
+// THE DIRECTORY A CONTAINER READ ACTUALLY OPENS
+//
+// Not the load session's virtual, and not the content's own string. The storage worker holds it,
+// and exactly one function writes it: `FUN_140a899f0`, below. Read out of the `0x18` arm of the
+// session pump at `0x1402e6230`, which is the whole of the game's own path to it:
+//
+// ```text
+// case 0x18:                                     // session setup
+//     FUN_140248db0(&dir, steamid);              // SAVE_DIR_BUILD -- builds "...\DarkSoulsII\<id>\"
+//     if (!SLSystem->field_0x1a1) {              // the once-per-process latch
+//         FUN_140a899f0(SLSystem->_x38, 0, dir); //   first session: index 0
+//         SLSystem->field_0x1a1 = true;
+//     } else {
+//         FUN_140a899f0(SLSystem->_x38, 1, dir); //   every later session: index 1
+//     }
+// ```
+//
+// That is the ENTIRE consumer list of `SAVE_DIR_BUILD`'s result, which is what makes the chain
+// closed: the launch-time redirect on `SAVE_DIR_BUILD` was measured reading a donor container end
+// to end, and this is the only route its string can have taken to get there.
+
+/// `void SetRequestDirectory(holder, u32 index, const wchar_t *path)` -- `0x140a899f0`.
+///
+/// **The seam an in-session redirect belongs on.** Three calls: find the worker for the holder's
+/// id, set its directory, release it. The find and the release are a lock/unlock PAIR --
+/// `FUN_140a8bfb0` takes `manager+0x50` and the worker's own `+0xb0` and leaves both held,
+/// `FUN_140a8c390` releases them -- so this function is called whole or not at all. Calling the
+/// finder alone to read the directory back would wedge the save system on the next request.
+///
+/// `holder` is the VALUE at [`SL_REQUEST_HOLDER_OFFSET`], not its address: the function reads the
+/// manager from `[holder]` and the worker id from `[holder+8]`.
+pub const SL_REQUEST_SET_DIRECTORY: u32 = 0x00a8_99f0;
+
+/// The five bytes [`SL_REQUEST_SET_DIRECTORY`] must begin with. `mov [rsp+8],rbx`.
+///
+/// Checked for the same reason `SAVE_LOAD_REQUEST_SAVE`'s is: an RVA is a number, and on a build
+/// these offsets were not read from, this address is some other function that would accept the
+/// call and leave a log line claiming a directory was set.
+pub const SL_REQUEST_SET_DIRECTORY_PROLOGUE: [u8; 5] = [0x48, 0x89, 0x5c, 0x24, 0x08];
+
+/// The worker-side half of the same write: `void SetWorkerDirectory(worker, u32 index, path)` --
+/// `0x140a8d9b0`. Hooked to OBSERVE, never to change an answer.
+///
+/// It is the only writer of [`SL_WORKER_DIRECTORY_OFFSET`], so a detour here sees every directory
+/// the game sets on itself as well as every one a mod sets, and is the only way to find out whether
+/// a set landed -- the worker pointer is otherwise reachable only through the locked finder.
+pub const SL_WORKER_SET_DIRECTORY: u32 = 0x00a8_d9b0;
+
+/// The five bytes [`SL_WORKER_SET_DIRECTORY`] must begin with. `push rdi; push r14; push r15`.
+pub const SL_WORKER_SET_DIRECTORY_PROLOGUE: [u8; 5] = [0x57, 0x41, 0x56, 0x41, 0x57];
+
+/// The request holder inside a `SaveLoadSystem`. `[system + 0x38]`.
+///
+/// Ghidra names the field `_x38_SLRequestMan_` and the pump's `0x18` arm passes it straight to
+/// [`SL_REQUEST_SET_DIRECTORY`]. It is a handle rather than the manager itself: `[holder]` is the
+/// manager, `[holder+8]` is the `u32` id of the worker to act on.
+pub const SL_REQUEST_HOLDER_OFFSET: usize = 0x38;
+
+/// The container directory on a storage worker. `worker + 0x48`.
+///
+/// An MSVC `basic_string<wchar_t>` with the usual small-string layout, written by
+/// [`SL_SESSION_STRING_SET`] from the tail of [`SL_WORKER_SET_DIRECTORY`]:
+/// `lea rcx,[r14+0x48]` at `0x140a8da45`, after the length is measured by scanning for the
+/// terminator.
+pub const SL_WORKER_DIRECTORY_OFFSET: usize = 0x48;
+
+/// The flag that makes [`SL_WORKER_SET_DIRECTORY`] do nothing. `worker + 0xad`.
+///
+/// `movzx edi,byte ptr [r14+0xad]` at `0x140a8da06`, and a non-zero value jumps the whole body --
+/// the index write, the status reset and the string set all of it. **A set that is skipped is
+/// silent**, which is why the observer reads this byte out and logs it: it is the difference
+/// between "the directory was refused" and "the directory was never asked for".
+pub const SL_WORKER_SET_SKIPPED_OFFSET: usize = 0xad;
+
+/// The index a mid-session directory set passes: `1`.
+///
+/// The game passes `0` exactly once per process -- the `field_0x1a1` latch in the pump's `0x18` arm
+/// -- and `1` for every session after it. Anything an in-session swap does is after that, so `1` is
+/// what the game itself would pass at that moment. It lands at `worker+0x3c`.
+pub const SL_REQUEST_DIRECTORY_INDEX_SESSION: u32 = 1;
 
 /// The `SLLoadContent` a `SaveLoadSystem` builds its container requests from. `[system + 0x30]`.
 ///

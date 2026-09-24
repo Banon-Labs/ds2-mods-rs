@@ -217,6 +217,51 @@ else's save is the shape of thing FromSoftware's matchmaking watches for, so the
 the import-table guard should already be in place before the save system exists. `[offline]`
 defaults to on for that reason and should stay on for any run that uses this.
 
+## Mid-session, the lever is the storage worker
+
+Everything above is a launch-time redirect and cannot move a live session: `SAVE_DIR_BUILD` runs
+during session setup, so re-pointing it once the game is up rewrites a string nothing reads again.
+That is not a dead end, though, because of *where* its result goes. The `0x18` arm of the session
+pump (`FUN_1402e6230`, at `0x1402e635c`) is the whole of it:
+
+```text
+FUN_140248db0(&dir, steamid);                     // SAVE_DIR_BUILD
+if (!SLSystem->field_0x1a1) {                     // a once-per-process latch
+    FUN_140a899f0(SLSystem->_x38, 0, dir);        //   first session:       index 0
+    SLSystem->field_0x1a1 = true;
+} else {
+    FUN_140a899f0(SLSystem->_x38, 1, dir);        //   every later session: index 1
+}
+```
+
+`FUN_140a899f0` seats the directory on the storage worker, at `worker+0x48`, and that is the field
+a container read opens. Since the launch-time redirect was measured reading a donor container end
+to end, and this is the only route its string can have taken, the worker's copy is the one that
+matters -- so an in-session redirect calls `FUN_140a899f0` directly rather than trying to make
+session setup happen again. `ds2_save_redirect::request_dir` is that call.
+
+### Three seams that are not it
+
+| seam | what it moves | how it was disproved |
+|---|---|---|
+| `SLLoadSession`'s directory virtual (`session_dir`) | the load class's vtable slot 3 | the work method reaches the same string through the accessor and never calls the virtual: `load-answered=1` on a read that still failed |
+| `SAVE_DIR_BUILD` re-pointed mid-session | the string session setup builds | session setup does not re-run for a re-read: `session-dir-answered=0` |
+| `SLLoadContent`'s own string, `[[system+0x30]]+0x08` | a field beside the worker's | measured `<unreadable>`, and it is not the string the worker holds |
+
+### The set is called whole, and the read-back is a hook
+
+`FUN_140a899f0` is a lock/unlock pair around one mutation: `FUN_140a8bfb0` takes the manager's lock
+at `manager+0x50` and the worker's at `worker+0xb0` and leaves **both held**, and `FUN_140a8c390`
+releases them. The worker pointer exists only between those two calls. Reaching for the finder
+alone to read the directory back would leave the save system locked against its own next request,
+so the read-back is a detour on the worker-side writer (`FUN_140a8d9b0`) instead -- the only writer
+of that field, which means it also reports every directory the game sets on itself.
+
+It reports one more thing that nothing else can see. `worker+0xad` is a byte the writer consults
+first, and a non-zero value jumps the entire body: the index write, the status reset and the string
+set, all of it. **A skipped set is otherwise completely silent**, which is the shape of failure the
+three seams above all had.
+
 ## What is NOT done
 
 No validation of the save being loaded. A guard that refuses a save whose soul memory is too low
