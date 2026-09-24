@@ -117,3 +117,29 @@ front rather than discovering them at the block:
   the command that avoids it.
 
 Both guards are correct. If a command is blocked, fix the command; do not work around the guard.
+
+## Every address, offset and enum value a feature touches is a named constant
+
+A magic number in a feature crate is a research finding that was written down in the wrong place.
+When research establishes a field -- an offset, an RVA, a state value, a prologue, a session type --
+it goes into `crates/ds2-rva` as a `pub const` with a name, before any code uses it, and the crate
+that needs it refers to it by that name. The comment beside the constant is where the evidence and
+the disassembly go; the comment is never the only place the value exists.
+
+This is not style. A named constant is the only thing that survives being wrong:
+
+- `SL_CONTENT_DIRECTORY_OFFSET` was `0x08` and was named for a directory. A live run read it and
+  got `length=356486873167 capacity=7` -- UTF-16 `"OFS\0"` and a length of seven, which is the
+  container name `"DS2SOFS"` and not a directory at all. The name is what made the measurement
+  legible; a bare `+ 0x08` in the reader would have been four lines of arithmetic with nothing to
+  contradict.
+- A value spelled once can be corrected once. The same number appearing inline in three crates is
+  three separate things to find when the meaning turns out to be different.
+- `grep` over `ds2-rva` is the only inventory of what has been established about the binary. A
+  finding that lives in a comment in a feature crate is not in that inventory, so the next agent
+  re-derives it.
+
+So: no bare hex in a feature crate, and no offset explained only in prose. If a value is worth
+acting on, it is worth naming, and if it is not yet understood well enough to name, that is the
+thing to say -- name it for what was observed (`SL_CONTENT_NAME_OFFSET`) rather than for what it
+was hoped to be.

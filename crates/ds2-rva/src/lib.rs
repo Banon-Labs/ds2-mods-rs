@@ -6058,19 +6058,91 @@ pub const SL_REQUEST_DIRECTORY_INDEX_SESSION: u32 = 1;
 /// that funnel, so this is the object whose directory a read opens.
 pub const SAVE_LOAD_SYSTEM_CONTENT_OFFSET: usize = 0x30;
 
-/// The directory string inside an `SLLoadContent`. `content + 0x08`.
+/// The container NAME inside an `SLLoadContent`. `content + 0x08`.
 ///
-/// `FUN_140a8a180`, the accessor both the load session's work method and its directory virtual go
-/// through, is two instructions -- `lea rax,[rcx+8]; ret` -- so the accessor is the offset.
+/// `FUN_140a8a180`, the accessor every session builder goes through, is two instructions --
+/// `lea rax,[rcx+8]; ret` -- so the accessor is the offset. `FUN_140a8a6f0` hands the result to
+/// `FUN_140a87d10` to compare against each registered container and to `FUN_140a86e70` to copy,
+/// which is what a key is for.
 ///
-/// That is also why swapping the directory virtual could not redirect a read: the work method
-/// (`0x140a8f940`) reaches this field through the same accessor rather than through the virtual, so
-/// the virtual is not on the path to the file. One live run measured it as `load-answered=1` on a
-/// read that still failed.
+/// # This was called `SL_CONTENT_DIRECTORY_OFFSET` and it is not a directory
 ///
-/// It is an MSVC `basic_string<wchar_t>` with the usual small-string layout, so
-/// [`SL_SESSION_STRING_SET`] is what writes it.
-pub const SL_CONTENT_DIRECTORY_OFFSET: usize = 0x08;
+/// A live run on 2026-09-23 read it and reported
+/// `<unread content=0x00007ffffa809bc0 length=Some(356486873167) capacity=Some(7)>`. Those two
+/// numbers are the whole correction: `356486873167` is `4f 00 46 00 53 00 00 00`, UTF-16 `"OFS\0"`,
+/// and the `7` beside it is a length rather than a capacity. A seven-character string whose fifth,
+/// sixth and seventh characters are `OFS` is `DS2SOFS` -- the save file's own name. So the string
+/// starts at `content+0x10`, the field here is the key that names it, and no directory lives on
+/// `SLLoadContent` at all.
+///
+/// The measurement was only legible because the reader reported its numbers instead of
+/// `<unreadable>`; see `ds2_save_redirect::request_dir::ContentDirectory`.
+pub const SL_CONTENT_NAME_OFFSET: usize = 0x08;
+
+/// Where an `SLLoadSession` keeps the `SLLoadContent` it was built from. `session + 0xe8`.
+///
+/// `FUN_140a8f6b0`, the constructor, writes `param_1[0x1d] = loadContent`. The directory virtual
+/// this crate used to hook reads through the same field, which is why it answers about the
+/// container's identity rather than about a folder.
+pub const SL_SESSION_CONTENT_OFFSET: usize = 0xe8;
+
+/// `u32 GetSessionState(holder)` -- `0x140a89940`, the value the pump switches on.
+///
+/// It looks the worker up by the holder's id and returns [`SL_SESSION_STATE_DONE`] when there is
+/// none, which is the same failed lookup that makes a directory set a no-op.
+pub const SL_GET_SESSION_STATE: u32 = 0x00a8_9940;
+
+/// Session setup: the pump arm that builds a directory and seats it on the worker.
+///
+/// The only arm of either pump (`0x1402e6230` at `0x1402e635c`, `0x1402e67f0` at `0x1402e6930`)
+/// that calls [`SAVE_DIR_BUILD`] and [`SL_REQUEST_SET_DIRECTORY`]. It is a STATE and not a
+/// construction argument: both session constructors take their kind from
+/// [`SL_SESSION_BUILD_SAVE`]'s third parameter, and every one of that function's nine call sites
+/// passes zero (`xor r8d,r8d`), so nothing asks for this state directly.
+pub const SL_SESSION_STATE_SETUP: u32 = 0x18;
+
+/// What [`SL_GET_SESSION_STATE`] answers when the worker lookup finds nothing: the pump reads it
+/// as "the worker is done".
+///
+/// At the title, between requests, this is what the holder's id resolves to -- which is why a
+/// directory set made there reports `set-made-no-write`.
+pub const SL_SESSION_STATE_DONE: u32 = 0x14;
+
+/// What [`SL_GET_SESSION_STATE`] answers when the holder has no manager at all.
+pub const SL_SESSION_STATE_NO_MANAGER: u32 = 0x19;
+
+/// The id a worker answers to, matched by the finder. `worker + 0xa8`.
+///
+/// `FUN_140a8d560` is the getter: lock `worker+0xb0`, read this, unlock.
+pub const SL_WORKER_ID_OFFSET: usize = 0xa8;
+
+/// The index [`SL_WORKER_SET_DIRECTORY`] writes alongside the directory. `worker + 0x3c`.
+pub const SL_WORKER_INDEX_OFFSET: usize = 0x3c;
+
+/// The status [`SL_WORKER_SET_DIRECTORY`] resets when its index is not 3. `worker + 0x98`.
+pub const SL_WORKER_STATUS_OFFSET: usize = 0x98;
+
+/// The value written to [`SL_WORKER_STATUS_OFFSET`] by that reset.
+pub const SL_WORKER_STATUS_DIRECTORY_SET: u32 = 0x16;
+
+/// The lock every worker field is read and written under. `worker + 0xb0`.
+///
+/// A vtable with acquire at `+0x10` and release at `+0x20`. [`SL_REQUEST_SET_DIRECTORY`] takes it
+/// and the manager's own, and only its tail call releases them, which is why that function has to
+/// be called whole.
+pub const SL_WORKER_LOCK_OFFSET: usize = 0xb0;
+
+/// `FUN_140a86280` -- builds a load session and registers it with the manager.
+///
+/// Three callers, all `SaveLoadSystem` methods: `loadSlot_0_andOtherSetup` (`0x1402e72c0`),
+/// `loadSlotByIndex` (`0x1402e6ff0`) and `loadSlot22_andOtherSetup` (`0x1402e7170`).
+pub const SL_SESSION_BUILD_LOAD: u32 = 0x00a8_6280;
+
+/// `FUN_140a863a0(out, listener, u32 kind, content, ...)` -- the save-side twin.
+///
+/// Nine call sites across five `SaveLoadSystem` methods, and every one of them passes `0`  for
+/// `kind`. That is the evidence behind [`SL_SESSION_STATE_SETUP`] being a state.
+pub const SL_SESSION_BUILD_SAVE: u32 = 0x00a8_63a0;
 
 /// `SaveLoad2::SLSaveSession`'s vtable, the save-side twin of [`SL_LOAD_SESSION_VTABLE`].
 ///

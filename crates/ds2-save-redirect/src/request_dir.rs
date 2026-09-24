@@ -1,30 +1,27 @@
-//! Point the container directory at a folder, mid-session, by writing the field every request is
-//! built from.
+//! Watch the container directory the save system is using, and report what can be read of the
+//! container it names.
 //!
-//! # The field, and how it was found
+//! # This module used to write, and it no longer does
 //!
-//! `FUN_140a8a6f0` builds every `SLLoadSession`. It reads the directory through the accessor
-//! `FUN_140a8a180` -- `lea rax,[rcx+8]; ret` -- applied to the `SLLoadContent` at `[system+0x30]`,
-//! and hands the result to the constructor. So `content+0x08` is the durable copy, and everything
-//! else that holds a directory holds a seeding from it.
+//! Every field a mid-session redirect could write has been tried and measured:
 //!
-//! Four seams were tried before this was read. Each is here because a reader deserves to know the
-//! field was found rather than guessed at, and because three of them look right:
-//!
-//! | seam | why it missed |
+//! | seam | what disproved it |
 //! |---|---|
 //! | [`crate::session_dir`]: `SLLoadSession`'s directory virtual | the work method reaches the string through the accessor, never the virtual -- `load-answered=1` on a read that still failed |
 //! | [`ds2_rva::SAVE_DIR_BUILD`] re-pointed mid-session | it runs at session setup, not per request -- `session-dir-answered=0` |
-//! | `content+0x08`, read without diagnostics | the right field; the read returned `<unreadable>` and the bare word named none of the four reads it could have been |
-//! | the storage worker's own string, via [`ds2_rva::SL_REQUEST_SET_DIRECTORY`] | a worker exists only for a live request, and at the title its id names one that finished -- `set-made-no-write` |
+//! | the worker's own string, via [`ds2_rva::SL_REQUEST_SET_DIRECTORY`] | a worker belongs to a live request; at the title the holder's id names a finished one -- `set-made-no-write` |
+//! | `SLLoadContent`'s string, via [`ds2_rva::SL_SESSION_STRING_SET`] | it is the container's NAME. The reader below returned `length=356486873167 capacity=7` -- UTF-16 `"OFS\0"` beside a length of seven, which is `DS2SOFS`. Writing a path there renames the save instead of moving it |
 //!
-//! # The worker-side detour is kept, as an observer
+//! The setter is gone rather than left behind a flag, because the last of those would have
+//! corrupted what the player was loading and a disabled-by-default footgun is still a footgun.
+//!
+//! # What is left is worth keeping
 //!
 //! [`install`] hooks [`ds2_rva::SL_WORKER_SET_DIRECTORY`], the only writer of the worker's copy,
-//! and changes nothing. It is what makes the game's own session setup visible -- the baseline line
-//! a later one is read against -- and it reports the byte at
-//! [`ds2_rva::SL_WORKER_SET_SKIPPED_OFFSET`] that would make a write a no-op. A skipped set is
-//! otherwise silent, and silence is how three of the four seams above were mistaken for working.
+//! and changes nothing. It makes the game's own session setup visible, and it reports the byte at
+//! [`ds2_rva::SL_WORKER_SET_SKIPPED_OFFSET`] that would make a write a no-op. [`content_name`]
+//! reports the container's identity with the numbers its read was made of -- which is the thing
+//! that disproved the fourth seam, and would not have if it had said `<unreadable>`.
 
 use core::ffi::c_void;
 use std::sync::Mutex;
@@ -34,9 +31,6 @@ use ds2_hook::{MH_EnableHook, MH_Initialize, MH_STATUS, MhHook};
 
 use crate::LOG_PREFIX;
 use crate::install::log;
-
-/// `fn(string, chars, len)` -- [`ds2_rva::SL_SESSION_STRING_SET`], the game's own wstring assign.
-type StringSetFn = unsafe extern "system" fn(usize, *const u16, usize);
 
 /// `void SetWorkerDirectory(worker, u32 index, const wchar_t *path)` -- the detour's shape.
 type SetWorkerDirectoryFn = unsafe extern "system" fn(*mut c_void, u32, *const u16);
@@ -152,24 +146,12 @@ unsafe extern "system" fn detour_set_worker_directory(
     }
 }
 
-/// Why a directory set did not happen.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NotSet {
-    /// The module base could not be resolved, so no address in the image can be.
-    NoModuleBase,
-    /// `[system + 0x30]` is null: the save system has no load content to build requests from.
-    NoLoadContent,
-    /// The bytes at [`ds2_rva::SL_SESSION_STRING_SET`] are not the recorded prologue, so that
-    /// address is some other function on this build.
-    WrongPrologue,
-}
-
 /// The content's directory string, with the numbers the read was made of.
 ///
 /// A bare `None` is what the previous attempt at this reported, and `<unreadable>` in a log does
 /// not say which of the four reads failed. Every field here is one of them.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ContentDirectory {
+pub struct ContentName {
     /// `[system + 0x30]`, the `SLLoadContent` every request is built from.
     pub content: usize,
     /// The string's length in characters, from `content+0x18`, or `None` if that read faulted.
@@ -180,7 +162,7 @@ pub struct ContentDirectory {
     pub text: Option<String>,
 }
 
-impl core::fmt::Display for ContentDirectory {
+impl core::fmt::Display for ContentName {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match &self.text {
             Some(text) => write!(f, "{text}"),
@@ -205,7 +187,7 @@ impl core::fmt::Display for ContentDirectory {
 /// # Safety
 ///
 /// Game thread, with a `SaveLoadSystem` pointer the caller resolved this frame.
-pub unsafe fn content_directory(system: usize) -> Option<ContentDirectory> {
+pub unsafe fn content_name(system: usize) -> Option<ContentName> {
     // SAFETY: one read inside a live `SaveLoadSystem`, through the fault-safe reader.
     let content = unsafe {
         ds2_game_base::mem::safe_read_usize(system + ds2_rva::SAVE_LOAD_SYSTEM_CONTENT_OFFSET)?
@@ -213,7 +195,7 @@ pub unsafe fn content_directory(system: usize) -> Option<ContentDirectory> {
     if content == 0 {
         return None;
     }
-    let string = content + ds2_rva::SL_CONTENT_DIRECTORY_OFFSET;
+    let string = content + ds2_rva::SL_CONTENT_NAME_OFFSET;
     // SAFETY: the MSVC layout `SL_SESSION_STRING_SET` itself branches on.
     let (length, capacity) = unsafe {
         (
@@ -243,83 +225,12 @@ pub unsafe fn content_directory(system: usize) -> Option<ContentDirectory> {
         }
         _ => None,
     };
-    Some(ContentDirectory {
+    Some(ContentName {
         content,
         length,
         capacity,
         text,
     })
-}
-
-/// Point the load content at `windows_path`, so every session built after this reads from there.
-///
-/// `system` is a live `SaveLoadSystem`. A trailing separator is added if the caller left one off,
-/// because the read appends a filename and would otherwise look beside the folder rather than
-/// inside it -- which is what [`ds2_rva::SAVE_DIR_BUILD`] does for the game's own calls.
-///
-/// Returns what the field reads back as, which is the only honest report: the two differ exactly
-/// when this is broken.
-///
-/// # Why not the storage worker
-///
-/// [`ds2_rva::SL_REQUEST_SET_DIRECTORY`] writes the worker's own copy and is what the pump's `0x18`
-/// arm calls, so it looked like the seam. A worker exists only for a live request, though, and it
-/// is found by the id at `[[system+0x38]+8]` -- which at the title names a request that has already
-/// finished. A run measured that as `set-made-no-write ... the request manager had no worker for
-/// its id`, and `FUN_140a89940` agrees in the disassembly: the same failed lookup is what makes it
-/// report session type `0x14`, done.
-///
-/// # Safety
-///
-/// Game thread, with a `SaveLoadSystem` pointer the caller resolved this frame, and only while no
-/// container request is in flight -- a session already built has taken its own copy, and changing
-/// this under one would describe a container it is not reading.
-pub unsafe fn set(system: usize, windows_path: &str) -> Result<ContentDirectory, NotSet> {
-    let Ok(address) = ds2_game_base::mem::game_rva(ds2_rva::SL_SESSION_STRING_SET) else {
-        return Err(NotSet::NoModuleBase);
-    };
-    let expected = ds2_rva::SL_SESSION_STRING_SET_PROLOGUE;
-    let mut prologue = [0u8; 5];
-    // SAFETY: a resolved RVA inside the loaded game image; `read_bytes` faults safely.
-    let read = unsafe { ds2_game_base::mem::read_bytes(address, &mut prologue) };
-    if !read || prologue != expected {
-        log(format_args!(
-            "{LOG_PREFIX} content-directory REFUSED reason=prologue va=0x{address:016x} \
-             read={read} saw={prologue:02x?} want={expected:02x?} -- that address is not the \
-             string setter on this build"
-        ));
-        return Err(NotSet::WrongPrologue);
-    }
-    // SAFETY: one read inside a live `SaveLoadSystem`, through the fault-safe reader.
-    let content = unsafe {
-        ds2_game_base::mem::safe_read_usize(system + ds2_rva::SAVE_LOAD_SYSTEM_CONTENT_OFFSET)
-    };
-    let Some(content) = content.filter(|content| *content != 0) else {
-        return Err(NotSet::NoLoadContent);
-    };
-
-    let mut wide: Vec<u16> = windows_path.encode_utf16().collect();
-    if !matches!(wide.last(), Some(&unit) if unit == u16::from(b'\\')) {
-        wide.push(u16::from(b'\\'));
-    }
-
-    // SAFETY: the prologue matches the function `ds2-rva` transcribed, the signature is the one its
-    // callers use, the string object is the content's own, and `wide` outlives the call. On the
-    // game thread, which is where the session builder calls it from.
-    let assign: StringSetFn = unsafe { std::mem::transmute::<usize, StringSetFn>(address) };
-    // SAFETY: as above.
-    unsafe {
-        assign(
-            content + ds2_rva::SL_CONTENT_DIRECTORY_OFFSET,
-            wide.as_ptr(),
-            wide.len(),
-        )
-    };
-    // SAFETY: same thread, same object, immediately after the game's own assign seated it.
-    match unsafe { content_directory(system) } {
-        Some(seated) => Ok(seated),
-        None => Err(NotSet::NoLoadContent),
-    }
 }
 
 /// Install the observer on the worker-side directory writer.
