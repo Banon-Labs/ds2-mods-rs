@@ -96,6 +96,8 @@ all_denials contains decision if { some decision in data.cupcake.policies.claude
 
 all_denials contains decision if { some decision in data.cupcake.policies.claude.block_compositor_input_injection.deny }
 
+all_denials contains decision if { some decision in data.cupcake.policies.claude.bd_bug_needs_qa_steps.deny }
+
 all_denials contains decision if { some decision in data.cupcake.policies.claude.block_pgrep_full_match.deny }
 
 all_denials contains decision if { some decision in data.cupcake.policies.claude.docs_no_size_metrics.deny }
