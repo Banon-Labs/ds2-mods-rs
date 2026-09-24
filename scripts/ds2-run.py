@@ -3896,8 +3896,10 @@ def main() -> int:
             "route to the nearest NPC instead of waiting for another player, and narrate every "
             "step in the log. THE ONLY WAY A SOLO RUN CAN EXERCISE ANY OF THIS: alone, the "
             "roster reads remotes=0, nothing is ever requested and every line is an install "
-            "line. Pairs with --invasion-path-markers to also place the stones, sweep all seven "
-            "colours, and report at 1s/3s/10s whether they linger. Grep for `self-check:`."
+            "line. Pairs with --invasion-path-markers to also place the stones and sweep all "
+            "seven colours. It narrates the trail; it does not hold it still -- the route is "
+            "re-planned as you walk and torn down and re-laid when it moves, exactly as it "
+            "would be for a real player. Grep for `self-check:`."
         ),
     )
     parser.add_argument(

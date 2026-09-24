@@ -426,6 +426,65 @@ pub(crate) unsafe fn guard(start: u32, goal: u32) -> Option<Guard> {
     Some(report)
 }
 
+/// `(NvNaviGraph*, out: *mut f32x4, node index) -> out`. See [`ds2_rva::NAVI_GRAPH_NODE_CENTRE`].
+type NodeCentre = unsafe extern "system" fn(usize, *mut f32, i32) -> *mut f32;
+
+/// The point on the navmesh under `position`, or `None` if nothing is under it.
+///
+/// # Why a route needs this at all
+///
+/// Most of a fresh route is portal midpoints tens of metres apart -- `0x140bb4ac0` expands exactly
+/// one segment's polyline per plan -- and a straight line between two portals is an interpolation
+/// nothing computed. On flat ground it passes for a path. On a slope it leaves the ground, which
+/// is what a player standing on a hill above the character reported on 2026-09-24: "it jumps over
+/// the air instead of binding to the ground", across a 32.5 m chord that dropped three metres.
+///
+/// This replaces a sample on that chord with the centre of the navmesh triangle beneath it. Two
+/// engine calls and no arithmetic of our own: [`snap_reporting`] for the id, then the graph's own vertex
+/// average for the position. A sample over a hole in the mesh answers `None` and the caller keeps
+/// the interpolated point rather than inventing a different one.
+///
+/// # Safety
+///
+/// Game thread only, and only once the world exists -- both calls walk engine-owned tables. Same
+/// contract as [`snap_reporting`], which this begins with.
+pub(crate) unsafe fn ground_under(position: [f32; 3]) -> Option<[f32; 3]> {
+    // SAFETY: game thread; the snap is the same synchronous call the route request already makes.
+    let id = unsafe { snap_reporting(position) }.id?;
+    let manager = game_manager()?;
+    let world_from_manager: GraphWorldFromGameManager =
+        unsafe { entry(ds2_rva::NAVI_GRAPH_WORLD_FROM_GAME_MANAGER)? };
+    let graph_for_id: GraphForRouteId = unsafe { entry(ds2_rva::NV_NAVI_GRAPH_FOR_ROUTE_ID)? };
+    let centre: NodeCentre = unsafe { entry(ds2_rva::NAVI_GRAPH_NODE_CENTRE)? };
+    // SAFETY: `manager` is non-null and this is the engine's own accessor.
+    let world = unsafe { world_from_manager(manager) };
+    if world == 0 {
+        return None;
+    }
+    // The table is not the world: the lookup hashes into the separate structure at `+0x88`, and
+    // passing the world itself would read its graph array as bucket geometry.
+    let table = unsafe { safe_read_usize(world + ds2_rva::NV_NAVI_GRAPH_WORLD_ID_TABLE_OFFSET) }
+        .filter(|table| *table != 0)?;
+    // SAFETY: a bucket walk over the engine's own table; a key it does not hold returns 0.
+    let graph = unsafe { graph_for_id(table, id | ds2_rva::NV_ROUTE_ID_GRAPH_KEY_MASK) };
+    if graph == 0 {
+        return None;
+    }
+    let mut out = [0.0f32; 4];
+    // SAFETY: `graph` is an engine-owned `NvNaviGraph`, `out` is four floats this call owns, and
+    // the index is the id's own index half -- the same masking `0x140bb4ac0` applies before
+    // calling this function.
+    unsafe {
+        centre(
+            graph,
+            out.as_mut_ptr(),
+            (id & ds2_rva::NAVI_ID_INDEX_MASK) as i32,
+        );
+    }
+    let found = [out[0], out[1], out[2]];
+    found.iter().all(|value| value.is_finite()).then_some(found)
+}
+
 /// Ask for a route between two graph ids.
 ///
 /// Clears both result bits and sets pending, so calling it over a search still in flight is a
@@ -478,8 +537,12 @@ pub(crate) enum Poll {
     Failed,
     /// A route, in walking order, start first.
     Ready {
-        /// The decoded polyline.
-        points: Vec<[f32; 3]>,
+        /// The decoded polyline, each point carrying whether the ground reaching it is known.
+        ///
+        /// Not bare positions: most of a fresh route is portal midpoints with nothing computed
+        /// between them, and a consumer that cannot tell those from the expanded part lays
+        /// stones across thirty metres of thin air. See [`crate::navpath::RoutePoint`].
+        points: Vec<crate::navpath::RoutePoint>,
         /// How many segments the engine's own route held, read straight off
         /// [`ds2_rva::NV_ROUTE_SEGMENT_COUNT_OFFSET`].
         ///

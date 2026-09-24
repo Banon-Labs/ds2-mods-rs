@@ -120,6 +120,138 @@ pub struct ScreenArrow {
 ///
 /// It costs three multiplies and it is the only cheap test here that looks at all three world
 /// axes at once.
+/// The whole column identity, not just the unit forward axis -- the test that actually picks the
+/// world camera out of an upload.
+///
+/// # Why the weaker test above is not enough on its own
+///
+/// It is one number, and a constant buffer is full of numbers. `crate::capture` used it as a
+/// pre-filter and then decided between survivors with "the character projects near the middle of
+/// the frame", which is the part that does not work here: a DARK SOULS II character is **not**
+/// centred, and the offset grows while they move, so a tight bound rejects the real camera on
+/// ordinary frames and admits dense parameter blobs with a unit column that happen to land near
+/// the principal point. Measured 2026-09-24: zero acquisitions in a whole session, with the
+/// overlay falling through to a memory search that drew a line across the sky.
+///
+/// # The identity
+///
+/// For `VP = V * P` with row vectors, take the four world columns
+/// `c0 = (m0, m4, m8)`, `c1 = (m1, m5, m9)`, `c2 = (m2, m6, m10)`, `c3 = (m3, m7, m11)`.
+/// Multiplying a rotation `R` by a diagonal projection fixes their shape exactly:
+/// `c0 = sx * R[:,0]`, `c1 = sy * R[:,1]`, `c2 = A * R[:,2]`, `c3 = R[:,2]`. From which:
+///
+/// * `c0`, `c1` and `c3` are mutually perpendicular -- they are scaled rotation columns.
+/// * `|c3| == 1`, because a rotation's axis is a unit vector.
+/// * `c2` is parallel to `c3`, both being multiples of the same axis.
+/// * `|c1| / |c0|` is the aspect ratio -- of a screen, which is all this asks.
+///
+/// These are properties of the sixteen floats alone: no player, no camera motion, no comparison
+/// between frames, and nothing the caller has to supply. Exactly one candidate out of 46 distinct
+/// destination resources survived them for 955 consecutive looks when this was first derived
+/// under Frida, and the same run recorded where it lands -- offset `0x60`, read transposed.
+#[must_use]
+pub fn is_an_uploaded_view_projection(matrix: &Matrix) -> bool {
+    if !matrix.iter().all(|value| value.is_finite()) {
+        return false;
+    }
+    let c0 = [matrix[0], matrix[4], matrix[8]];
+    let c1 = [matrix[1], matrix[5], matrix[9]];
+    let c2 = [matrix[2], matrix[6], matrix[10]];
+    let c3 = [matrix[3], matrix[7], matrix[11]];
+    let (l0, l1, l2) = (length(c0), length(c1), length(c2));
+    // A degenerate column has no direction to compare, and the impostor whose first column was
+    // entirely zero is exactly that case.
+    if l0 <= f32::EPSILON || l1 <= f32::EPSILON || l2 <= f32::EPSILON {
+        return false;
+    }
+    /// How far `|c3|` may sit from one. The engine's own matrices are exact to float rounding.
+    const UNIT_TOLERANCE: f32 = 0.02;
+    if (length(c3) - 1.0).abs() > UNIT_TOLERANCE {
+        return false;
+    }
+    /// Largest cosine two perpendicular columns may show. About 1.7 degrees.
+    const PERPENDICULAR_TOLERANCE: f32 = 0.03;
+    let perpendicular = |a: [f32; 3], la: f32, b: [f32; 3], lb: f32| {
+        (dot(a, b) / (la * lb)).abs() <= PERPENDICULAR_TOLERANCE
+    };
+    if !perpendicular(c0, l0, c1, l1)
+        || !perpendicular(c0, l0, c3, 1.0)
+        || !perpendicular(c1, l1, c3, 1.0)
+    {
+        return false;
+    }
+    // `c2` is a multiple of `c3`, so their unit vectors agree up to sign.
+    if (dot(c2, c3) / l2).abs() < 1.0 - PERPENDICULAR_TOLERANCE {
+        return false;
+    }
+    // A BAND, NOT A MATCH AGAINST THE BACK BUFFER, and the difference has already cost a session.
+    //
+    // This read the presented extent and demanded `|c1| / |c0|` agree with it to within 0.08.
+    // `scripts/frida/arrow.js`, which is the probe that actually found this matrix, deliberately
+    // does not: its comment is that the band "covers 4:3 through 21:9 so the test is about being
+    // a screen, not about being this screen". The renderer composes its projection against its
+    // own internal extent, which is not obliged to be the window's, and a capture that insists on
+    // the window's rejects the real camera for rendering at the wrong size.
+    /// `|c1| / |c0|` for anything anyone presents a game on: 4:3 at the low end, 21:9 at the high.
+    const MIN_ASPECT: f32 = 1.2;
+    const MAX_ASPECT: f32 = 2.6;
+    let aspect = l1 / l0;
+    aspect > MIN_ASPECT && aspect < MAX_ASPECT
+}
+
+/// Does this matrix have a camera in it, or is it only a projection?
+///
+/// # The matrix that passes every shape test and is useless
+///
+/// `P = I * P` is a view-projection whose view is the identity, so a bare projection matrix has a
+/// unit forward column, mutually perpendicular columns, column 2 parallel to column 3 and a 16:9
+/// aspect -- every test in [`is_an_uploaded_view_projection`], passed, by sixteen floats with no
+/// camera in them at all. `scripts/frida/arrow.js` measured this one on 2026-09-22 at `+0x0` of
+/// an upload; `crate::capture` latched the same matrix at `+0x0` on 2026-09-24 and drew with it.
+///
+/// ```text
+/// [ 1.3922  0.0000  0.0000  0.0000      [ sx  0   0   0
+///   0.0000  2.4751  0.0000  0.0000   =    0   sy  0   0
+///   0.0000  0.0000  1.0000  1.0000        0   0   A   1
+///   0.0000  0.0000 -0.1000  0.0000 ]      0   0   B   0 ]
+/// ```
+///
+/// # What separates them
+///
+/// A character standing somewhere real. Through `P` alone the world origin is the camera, so a
+/// character at world coordinates is tens of metres away and far outside the frame; through
+/// `V * P` they sit a few metres in front of the lens. That is the only difference, which is why
+/// the player position came back after being taken out of the recognition path.
+///
+/// # Not the test that failed
+///
+/// The bounds are `arrow.js`'s and they are loose on purpose. The version that never recognised
+/// anything asked for the character near the middle of the frame -- false about this game, where
+/// the character is off-centre and drifts further while moving. `arrow.js` measured the real
+/// camera putting the character at ndc `-0.000, -0.932`: dead centre horizontally and almost off
+/// the bottom, because a character's origin is between their feet. "On screen at all" is the
+/// honest requirement; the camera distance does the discriminating.
+#[must_use]
+pub fn grounds_a_camera(matrix: &Matrix, player: [f32; 3]) -> bool {
+    /// How far the camera may be from the character, in metres. Wide, because narrowing it to a
+    /// third-person camera's resting distance throws out every frame where a lock-on or a
+    /// cutscene pulls it out -- which is how `arrow.js` found and then deleted eighteen
+    /// candidates before the bound was widened.
+    const NEAREST_METERS: f32 = 0.3;
+    const FURTHEST_METERS: f32 = 30.0;
+    /// How far off centre the character may project. Generous: see above.
+    const NDC_LIMIT: f32 = 1.5;
+    let w = player[0] * matrix[3] + player[1] * matrix[7] + player[2] * matrix[11] + matrix[15];
+    if !(w > NEAREST_METERS && w < FURTHEST_METERS) {
+        return false;
+    }
+    let x =
+        (player[0] * matrix[0] + player[1] * matrix[4] + player[2] * matrix[8] + matrix[12]) / w;
+    let y =
+        (player[0] * matrix[1] + player[1] * matrix[5] + player[2] * matrix[9] + matrix[13]) / w;
+    x.is_finite() && y.is_finite() && x.abs() <= NDC_LIMIT && y.abs() <= NDC_LIMIT
+}
+
 #[must_use]
 pub fn looks_like_a_view_projection(matrix: &Matrix) -> bool {
     if !matrix.iter().all(|value| value.is_finite()) {
@@ -1792,5 +1924,283 @@ mod framing_is_measured_at_the_head {
         let behind = [10.0, 5.0, -26.0];
         assert!(!camera.frames_the_character(behind, SCREEN));
         assert!(camera.head_offset_px(behind, SCREEN).is_none());
+    }
+
+    /// `V * P` for a camera standing at `eye`, yawed by `yaw`.
+    ///
+    /// Nothing here is chosen to make the test pass. The three scales are this game's own,
+    /// measured off `CameraOperator` under Frida -- `sx` 1.0789 and `sy` 1.9210, whose ratio is
+    /// the 1.7806 aspect the projection was built with, and `a` the depth scale. The rotation is
+    /// a yaw about world up, which is what a third-person camera does. And the last row is
+    /// *derived* rather than picked: for a world point `p`, clip component `k` is
+    /// `p · c_k + row3[k]`, so putting `row3[k] = -(eye · c_k)` is exactly the statement that the
+    /// camera sees itself at the origin of its own view. That makes `clip.w` the camera-to-point
+    /// distance, which is the one physical quantity `scripts/frida/arrow.js` tests against.
+    fn view_projection(eye: [f32; 3], yaw: f32) -> Matrix {
+        let (sx, sy, a) = (1.0789f32, 1.9210f32, 1.0002f32);
+        let c0 = [sx * yaw.cos(), 0.0, sx * -yaw.sin()];
+        let c1 = [0.0, sy, 0.0];
+        let c2 = [a * yaw.sin(), 0.0, a * yaw.cos()];
+        let c3 = [yaw.sin(), 0.0, yaw.cos()];
+        // Written column by column rather than as a literal, because "column `k` of the matrix is
+        // `c_k`" is the identity under test, and a sixteen-float literal only looks like one.
+        let mut matrix = [0.0f32; 16];
+        for axis in 0..3 {
+            matrix[axis * 4] = c0[axis];
+            matrix[axis * 4 + 1] = c1[axis];
+            matrix[axis * 4 + 2] = c2[axis];
+            matrix[axis * 4 + 3] = c3[axis];
+        }
+        matrix[12] = -dot(eye, c0);
+        matrix[13] = -dot(eye, c1);
+        matrix[14] = -dot(eye, c2);
+        matrix[15] = -dot(eye, c3);
+        matrix
+    }
+
+    /// Somewhere to stand. Only the last row of [`view_projection`] depends on it, and the shape
+    /// test does not read that row -- which [`where_the_camera_stands_does_not_change_the_shape`]
+    /// is there to hold to.
+    const EYE: [f32; 3] = [-13.5, 4.25, -96.0];
+
+    #[test]
+    fn a_real_view_projection_is_recognised_at_any_yaw() {
+        for step in 0..16 {
+            let yaw = step as f32 * core::f32::consts::TAU / 16.0;
+            assert!(
+                is_an_uploaded_view_projection(&view_projection(EYE, yaw)),
+                "yaw {yaw} should be recognised"
+            );
+        }
+    }
+
+    #[test]
+    fn where_the_camera_stands_does_not_change_the_shape() {
+        // The claim the last row rests on. A camera at the world origin and one ninety metres
+        // away are the same sixteen floats as far as this test is concerned, because every term
+        // it reads is a scaled rotation column -- which is why the character may stand anywhere,
+        // or nowhere, and the matrix is still recognisable. That property is the whole reason the
+        // player position came out of `capture::recognises`.
+        let here = view_projection([0.0, 0.0, 0.0], 0.9);
+        let far = view_projection([412.0, -60.5, 1_337.0], 0.9);
+        assert_eq!(here[..12], far[..12]);
+        assert!(is_an_uploaded_view_projection(&here));
+        assert!(is_an_uploaded_view_projection(&far));
+    }
+
+    #[test]
+    fn clip_w_is_the_distance_from_the_camera() {
+        // What makes the derived last row worth deriving: `clip.w` comes out in metres. The Frida
+        // probe leans on this as its one physical test, and a matrix built with a made-up
+        // translation row would not have the property to lean on.
+        let matrix = view_projection(EYE, 0.0);
+        // Ten metres along the camera's own forward axis, which at yaw zero is `+z`.
+        let ahead = [EYE[0], EYE[1], EYE[2] + 10.0];
+        let w = ahead[0] * matrix[3] + ahead[1] * matrix[7] + ahead[2] * matrix[11] + matrix[15];
+        assert!((w - 10.0).abs() < 1e-3, "clip.w was {w}, expected 10 m");
+    }
+
+    /// The bare projection the renderer uploads at `+0x0`, transcribed from the DLL's own log on
+    /// 2026-09-24 and matching what `scripts/frida/arrow.js` recorded on 2026-09-22.
+    const BARE_PROJECTION: Matrix = [
+        1.3922, 0.0000, 0.0000, 0.0000, //
+        0.0000, 2.4751, 0.0000, 0.0000, //
+        0.0000, 0.0000, 1.0000, 1.0000, //
+        0.0000, 0.0000, -0.1000, 0.0000, //
+    ];
+
+    #[test]
+    fn the_shape_test_cannot_reject_a_bare_projection() {
+        // Not a gap to be closed by tightening the shape test: `P = I * P` genuinely IS a
+        // view-projection whose view is the identity, and every structural property holds of it.
+        // The test exists so that nobody reads `is_an_uploaded_view_projection` as sufficient and
+        // draws with the first thing that passes it -- which is what happened.
+        assert!(is_an_uploaded_view_projection(&BARE_PROJECTION));
+    }
+
+    #[test]
+    fn a_bare_projection_does_not_have_a_camera_in_it() {
+        // Through `P` alone the world origin is the camera. A character standing at real world
+        // coordinates is therefore a long way off, and that is what separates the two matrices.
+        let player = [7.2, 6.1, -17.9];
+        assert!(!grounds_a_camera(&BARE_PROJECTION, player));
+        let four_metres_ahead = [EYE[0], EYE[1], EYE[2] + 4.0];
+        assert!(grounds_a_camera(
+            &view_projection(EYE, 0.0),
+            four_metres_ahead
+        ));
+    }
+
+    #[test]
+    fn a_character_behind_the_lens_does_not_ground_a_camera() {
+        // `clip.w` is the camera-to-character distance and goes negative behind it. Without this
+        // the test would accept a matrix aimed the other way.
+        let matrix = view_projection(EYE, 0.0);
+        let behind = [EYE[0], EYE[1], EYE[2] - 4.0];
+        assert!(!grounds_a_camera(&matrix, behind));
+    }
+
+    #[test]
+    fn a_material_blob_with_a_dead_column_is_not_a_camera() {
+        // The shape of every false positive the Frida probe ever reported: dense, finite, and
+        // with one column of exact zeros, because it was a run of material constants read
+        // sideways rather than a transform.
+        let mut blob = view_projection(EYE, 1.2);
+        blob[0] = 0.0;
+        blob[4] = 0.0;
+        blob[8] = 0.0;
+        assert!(!is_an_uploaded_view_projection(&blob));
+    }
+
+    #[test]
+    fn a_square_projection_is_not_a_screen() {
+        // `|c1| / |c0|` is the aspect, and the band exists to throw out sixteen floats that are
+        // shaped like a transform but were never projecting onto anything anyone watches.
+        let mut square = view_projection(EYE, 0.3);
+        for index in [1usize, 5, 9] {
+            square[index] /= 1.7806;
+        }
+        assert!(!is_an_uploaded_view_projection(&square));
+    }
+
+    #[test]
+    fn the_transpose_of_a_view_projection_is_not_one() {
+        // Which is what makes the convention worth latching rather than guessing: exactly one of
+        // the two readings of an upload passes, so the scan learns the engine's packing from the
+        // matrix itself.
+        let upright = view_projection(EYE, 0.7);
+        assert!(is_an_uploaded_view_projection(&upright));
+        assert!(!is_an_uploaded_view_projection(&transpose(&upright)));
+    }
+}
+
+/// How far `point` is from the nearest place on the segment running `from` to `to`, in metres.
+///
+/// The nearest place, not the nearer END. A stone sitting halfway along a forty-metre straight is
+/// on that straight, and an endpoint test would call it twenty metres off the route -- which is
+/// the whole question [`distance_to_path`] exists to answer correctly.
+#[must_use]
+pub fn distance_to_segment(point: [f32; 3], from: [f32; 3], to: [f32; 3]) -> f32 {
+    let span = sub(to, from);
+    let squared = dot(span, span);
+    if !squared.is_finite() || squared <= f32::EPSILON {
+        // A degenerate segment is a point. The route decoder emits these wherever two navigation
+        // nodes share a position, so this is the ordinary case rather than a guard against one.
+        return length(sub(point, from));
+    }
+    // Clamped, so the projection cannot run off either end of the segment.
+    let along = (dot(sub(point, from), span) / squared).clamp(0.0, 1.0);
+    length(sub(point, add_scaled(from, span, along)))
+}
+
+/// How far along `path`, in metres from its start, the nearest place to `point` sits.
+///
+/// # What this is for, and the bug it replaces
+///
+/// "Is this stone behind me?" used to be a dot product against the route's first step:
+/// `dot(stone - path[0], forward) < 0`. That is only "behind" on a route that runs straight. A
+/// route that bends -- around a cliff, back along a ledge, through a switchback -- puts perfectly
+/// good ground ahead of the player on the far side of the turn at a negative dot, and the test
+/// retires it.
+///
+/// Measured live on 2026-09-24: the trail sat at exactly fourteen stones and logged
+/// `laid 1/1 stone(s) this pass -- 14 down of at most 72` forever, because every pass laid one
+/// stone past the bend and the next pass retired it again. Fifteen spawns a second on one patch
+/// of ground, a particle fountain where a marker should be, and a path that stopped there instead
+/// of reaching the character.
+///
+/// Position along the path cannot make that mistake: the route starts at the player, so a stone
+/// you have genuinely walked past projects to the very beginning of it, and one beyond a bend
+/// projects to wherever the bend is -- which is ahead, whatever the angle.
+#[must_use]
+pub fn arc_length_of_nearest(point: [f32; 3], path: &[[f32; 3]]) -> f32 {
+    if path.len() < 2 {
+        return 0.0;
+    }
+    let mut travelled = 0.0f32;
+    let mut best = f32::INFINITY;
+    let mut best_arc = 0.0f32;
+    for pair in path.windows(2) {
+        let (from, to) = (pair[0], pair[1]);
+        let span = sub(to, from);
+        let squared = dot(span, span);
+        let (along, length_here) = if !squared.is_finite() || squared <= f32::EPSILON {
+            (0.0, 0.0)
+        } else {
+            (
+                (dot(sub(point, from), span) / squared).clamp(0.0, 1.0),
+                squared.sqrt(),
+            )
+        };
+        let foot = add_scaled(from, span, along);
+        let gap = length(sub(point, foot));
+        if gap < best {
+            best = gap;
+            best_arc = travelled + along * length_here;
+        }
+        travelled += length_here;
+    }
+    best_arc
+}
+
+/// How far `point` is from the nearest place on the polyline `path`, in metres.
+///
+/// `f32::INFINITY` for an empty path, which reads as "nothing here is near it" at every call site
+/// and therefore needs no separate case. A path of one point is the distance to that point.
+#[must_use]
+pub fn distance_to_path(point: [f32; 3], path: &[[f32; 3]]) -> f32 {
+    match path {
+        [] => f32::INFINITY,
+        [only] => length(sub(point, *only)),
+        _ => path.windows(2).fold(f32::INFINITY, |nearest, pair| {
+            nearest.min(distance_to_segment(point, pair[0], pair[1]))
+        }),
+    }
+}
+
+#[cfg(test)]
+mod distance_tests {
+    use super::*;
+
+    #[test]
+    fn a_point_beside_a_long_straight_is_measured_from_the_straight() {
+        // Two metres off a forty-metre run. An endpoint test would say twenty.
+        let path = [[0.0, 0.0, 0.0], [40.0, 0.0, 0.0]];
+        assert!((distance_to_path([20.0, 0.0, 2.0], &path) - 2.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_point_past_the_end_is_measured_from_the_end() {
+        let path = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0]];
+        assert!((distance_to_path([13.0, 0.0, 4.0], &path) - 5.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_corner_is_measured_from_whichever_leg_is_nearer() {
+        let path = [[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [10.0, 0.0, 10.0]];
+        // Beside the second leg, nowhere near the first.
+        assert!((distance_to_path([13.0, 0.0, 5.0], &path) - 3.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_degenerate_segment_is_a_point_rather_than_a_division_by_zero() {
+        let still = [[5.0, 0.0, 0.0], [5.0, 0.0, 0.0]];
+        let found = distance_to_path([5.0, 0.0, 3.0], &still);
+        assert!(found.is_finite(), "a repeated vertex produced {found}");
+        assert!((found - 3.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn an_empty_path_is_infinitely_far_from_everything() {
+        assert_eq!(distance_to_path([0.0, 0.0, 0.0], &[]), f32::INFINITY);
+        assert!((distance_to_path([0.0, 0.0, 4.0], &[[0.0, 0.0, 0.0]]) - 4.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn height_counts_as_distance() {
+        // A stone on the floor below a walkway is NOT on the route, however well it lines up
+        // from above -- which is the case a 2D test would get wrong.
+        let path = [[0.0, 10.0, 0.0], [20.0, 10.0, 0.0]];
+        assert!((distance_to_path([10.0, 0.0, 0.0], &path) - 10.0).abs() < 1e-4);
     }
 }
