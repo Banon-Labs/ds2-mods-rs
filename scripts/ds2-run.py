@@ -219,6 +219,16 @@ KEY_INVENTORY_SORT_ENABLED = "enabled"
 KEY_INVENTORY_SORT_KEY = "key"
 KEY_INVENTORY_SORT_PAD = "pad"
 KEY_BUILD_IMPORT_ENABLED = "enabled"
+
+#: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/item_warn.rs`.
+#:
+#: OFF by default here, matching the DLL's own default, and for the DLL's own reason: the badge
+#: patches the frontend's layout builder and its cell bind and has never been in front of a running
+#: game. `--item-warn` is how a run turns it on, which is also the only way to change that.
+ITEM_WARN_SECTION = "item_warn"
+KEY_ITEM_WARN_ENABLED = "enabled"
+#: Mirrors `LOG_PREFIX` in `crates/ds2-item-warn/src/lib.rs`. Grep for it when a run disappoints.
+ITEM_WARN_LOG_PREFIX = "ds2-item-warn:"
 #: Mirrors `LOG_PREFIX` in `crates/ds2-menu-row/src/lib.rs`. Named here because the generated
 #: config tells the reader which line to look for, and a prefix that drifted would send them
 #: looking for a line that is never written.
@@ -1026,6 +1036,7 @@ def config_text(
     inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
+    item_warn: bool = False,
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
@@ -1466,6 +1477,24 @@ def config_text(
 {KEY_INVENTORY_SORT_KEY} = "{inventory_sort_key}"
 {KEY_INVENTORY_SORT_PAD} = "{inventory_sort_pad}"
 
+[{ITEM_WARN_SECTION}]
+# STARTUP-ONLY. A red badge on the icon of any weapon whose stat requirements the character does
+# not meet, in the bottom-left of the cell, drawn by `ds2-item-warn`.
+#
+# OFF unless `--item-warn` asked for it, and the default is not taste. This feature patches the
+# frontend's layout builder and its cell bind, and the case that it is safe is a case from static
+# reading alone -- no run has put it on screen. `inventory_sort` above defaults ON because three
+# runs put its dialog there; this has no such line to point at.
+#
+# The check it uses is the PRESENTATION one (`FUN_1400bcde0`, the detail pane's), not the mechanics
+# one (`FUN_14034d3c0`). The two disagree and share no predicate: the mechanics check honours grip
+# -- two-handing HALVES a weapon's Strength requirement (`shr cx,1` at `0x14034d44c`) -- and the
+# presentation one takes no grip argument at all. An item in a list is not being held, so it has no
+# grip, which is the argument for the pane's answer. `ds2-mods-rs-6tz` revisits it after a run.
+#
+# Grep the log for `{ITEM_WARN_LOG_PREFIX}`; it names every site it patched and every one it refused.
+{KEY_ITEM_WARN_ENABLED} = {str(item_warn).lower()}
+
 [{CRASH_SECTION}]
 {crash_banner}# STARTUP-ONLY, both of them. The handler is installed in DllMain BEFORE `neuter_arxan`, because
 # that call patches code from static analysis and is the likeliest crash in the whole startup path
@@ -1525,6 +1554,7 @@ def write_config(
     inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
+    item_warn: bool = False,
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
@@ -1552,6 +1582,7 @@ def write_config(
         inventory_sort,
         inventory_sort_key,
         inventory_sort_pad,
+        item_warn,
     )
     path.write_text(text, encoding="utf-8")
     return path, text
@@ -1637,6 +1668,7 @@ def dry_run(
     inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
+    item_warn: bool = False,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
@@ -1682,6 +1714,7 @@ def dry_run(
             inventory_sort,
             inventory_sort_key,
             inventory_sort_pad,
+            item_warn,
         ):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
         else:
@@ -1723,6 +1756,7 @@ def dry_run(
                 inventory_sort=inventory_sort,
                 inventory_sort_key=inventory_sort_key,
                 inventory_sort_pad=inventory_sort_pad,
+                item_warn=item_warn,
             ),
             indent="[dry-run]   | ",
         )
@@ -1786,6 +1820,7 @@ def launch(
     inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
+    item_warn: bool = False,
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
@@ -1826,6 +1861,7 @@ def launch(
         inventory_sort,
         inventory_sort_key,
         inventory_sort_pad,
+        item_warn,
     )
     print(f"[config] {config_path}")
 
@@ -3101,6 +3137,18 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--item-warn",
+        dest="item_warn",
+        action="store_true",
+        help=(
+            "put a red badge in the bottom-left of any weapon icon whose stat requirements this "
+            "character does not meet. OFF without this flag, matching the DLL, because the feature "
+            "patches the frontend's layout builder and its cell bind and no run has yet put it on "
+            "screen. It answers with the DETAIL PANE's check, which ignores grip -- two-handing "
+            "halves a weapon's Strength requirement and the badge will not know."
+        ),
+    )
+    parser.add_argument(
         "--probe-site",
         choices=PROBE_SITES,
         default="m1",
@@ -3183,6 +3231,7 @@ def main() -> int:
             args.inventory_sort,
             args.inventory_sort_key,
             args.inventory_sort_pad,
+            args.item_warn,
         )
     return launch(
         args.probe,
@@ -3209,6 +3258,7 @@ def main() -> int:
         args.inventory_sort,
         args.inventory_sort_key,
         args.inventory_sort_pad,
+        args.item_warn,
     )
 
 

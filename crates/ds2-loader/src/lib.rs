@@ -89,6 +89,7 @@ pub mod crash_logging;
 pub mod dialog_skip;
 pub mod intro_skip;
 pub mod inventory_sort;
+pub mod item_warn;
 pub mod menu_row;
 pub mod offline;
 pub mod title_menu;
@@ -312,6 +313,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_build_import();
                 install_inventory_sort();
                 install_menu_row();
+                install_item_warn();
                 arm_fault(crash_config);
             });
         },
@@ -348,6 +350,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_build_import();
                 install_inventory_sort();
                 install_menu_row();
+                install_item_warn();
                 arm_fault(crash_config);
             });
         },
@@ -724,6 +727,31 @@ fn install_inventory_sort() {
         log_line(format_args!(
             "{} NOT INSTALLED -- the sort dialog stays on the button the game shipped it on",
             ds2_inventory_sort::LOG_PREFIX
+        ));
+    }
+}
+
+/// Mark weapons the player's stats cannot meet, if `<Game>/ds2-mods.toml` asked for it.
+///
+/// Last of the installs and the only one that has never been in front of a running game, which is
+/// also why it is off unless the config says exactly `true`. It shares no hook site with anything
+/// else here: `ds2-menu-row` owns the `.flo` definition lookup and this owns the container builder
+/// one level below it, so the two coexist rather than racing for one prologue.
+fn install_item_warn() {
+    let config = item_warn::ItemWarnConfig::load();
+    log_line(format_args!("{}", config.describe()));
+    if !config.enabled {
+        return;
+    }
+    ds2_item_warn::set_logger(log_line);
+    // SAFETY: both targets are function starts recorded in `ds2-rva` with the bytes they must
+    // begin with, and the crate re-reads those bytes and refuses to patch anything that does not
+    // match. Called from the post-Arxan position, like every other install here.
+    let outcome = unsafe { ds2_item_warn::install() };
+    if !outcome.installed {
+        log_line(format_args!(
+            "{} NOT INSTALLED -- item cells are the ones the game shipped",
+            ds2_item_warn::LOG_PREFIX
         ));
     }
 }
