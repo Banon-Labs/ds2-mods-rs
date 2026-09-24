@@ -473,41 +473,69 @@ mod windows_impl {
         // the fallback because the capture needs an upload to happen and a player to exist, and
         // neither is true on the first frames.
         crate::capture::set_subject(local, screen);
-        if let Some(camera) = crate::capture::camera() {
+
+        // Resolve the camera to an `Option` and hand that on, rather than returning early when
+        // there is none. Not a tidy-up: the early return used to skip the roster, the target
+        // nomination and the ask along with the projection, so a run whose camera was never
+        // recognised also never asked for a route and never laid a stone -- and said nothing in
+        // the log about either. See `draw_for`, which now decides everything a camera has no
+        // bearing on before it looks at one.
+        let camera = if let Some(camera) = crate::capture::camera() {
             if !state.said_captured {
                 state.said_captured = true;
                 log(format_args!("camera: using the captured view-projection"));
             }
             state.had_camera = true;
-            return draw_for(state, &camera, local, screen);
-        }
-
-        let Some((camera, found)) = state.tracker.acquire(local, screen) else {
+            Some(camera)
+        } else if let Some((camera, found)) = state.tracker.acquire(local, screen) {
+            if let Found::Chose(candidate) = found {
+                log(format_args!("camera: drawing through {candidate}"));
+            }
+            state.had_camera = true;
+            Some(camera)
+        } else {
             if state.had_camera {
                 let probe = state.tracker.last_probe;
                 log(format_args!(
                     "no camera: {} tried, {} shaped like a projection, {} with a camera pose -- drawing \
-                     nothing rather than guessing",
+                     nothing rather than guessing. The route and the trail carry on without it.",
                     probe.tried, probe.shaped, probe.posed
                 ));
                 state.had_camera = false;
             }
-            return Vec::new();
+            None
         };
-        if let Found::Chose(candidate) = found {
-            log(format_args!("camera: drawing through {candidate}"));
-        }
-        state.had_camera = true;
-        draw_for(state, &camera, local, screen)
+        draw_for(state, camera.as_ref(), local, screen)
     }
 
-    /// Everything downstream of having a camera: read the roster, build the arrows, project them.
+    /// Read the roster, decide who to point at, ask the tick for a route, and -- if there is a
+    /// camera -- project the result.
     ///
-    /// Split out because there are now two ways to get a camera -- captured from the renderer's
-    /// own upload, or found by searching memory -- and only the getting differs.
+    /// Split out because there are two ways to get a camera (captured from the renderer's own
+    /// upload, or found by searching memory) and only the getting differs.
+    ///
+    /// The camera is optional, and making it optional is a bug fix, measured 2026-09-24.
+    ///
+    /// This took a `&Camera` and was reached only once one had been found. A session where the
+    /// capture recognised nothing and the fallback search agreed -- `no camera: 98 tried, 2
+    /// shaped like a projection, 9 with a camera pose` -- therefore never got here at all:
+    /// `set_self_check` was never called, no target was ever nominated, no ask was ever
+    /// published, and the log said nothing whatsoever about routing. "The route failed" and "the
+    /// route was never requested" looked identical from the outside, and the run that prompted
+    /// this spent its whole length being the second one.
+    ///
+    /// The file already said this was wrong in two places. The no-world guard in [`frame`]
+    /// separates "there is nobody standing anywhere" from "the camera is not framing you -- that
+    /// is a view problem and the trail should go on being laid through it", and the comment on
+    /// the nomination below says in as many words that a diagnostic must not switch off the
+    /// feature it was written to observe. Only the control flow disagreed.
+    ///
+    /// So everything above the projection runs whether or not there is a camera. A camera
+    /// decides what can be drawn and nothing else: it has no say in where a path goes, and the
+    /// Prism Stone trail is laid by the game tick, which never needed one.
     fn draw_for(
         state: &mut State,
-        camera: &Camera,
+        camera: Option<&Camera>,
         local: [f32; 3],
         screen: [f32; 2],
     ) -> Vec<Vertex> {
@@ -521,7 +549,9 @@ mod windows_impl {
         // symptom, and is invisible to any test that compares those two against each other.
         //
         // Printed once per camera acquisition, not per frame.
-        if !state.said_matrix {
+        if let Some(camera) = camera
+            && !state.said_matrix
+        {
             state.said_matrix = true;
             let m = camera.view_projection;
             log(format_args!(
@@ -556,7 +586,9 @@ mod windows_impl {
         // this crate reads it back. Above the framing guard on purpose: a camera pointed
         // somewhere the player is not is still the camera, and a turn that is halfway through
         // needs its readings to keep arriving while it swings past.
-        crate::camera_yaw::publish(camera.yaw_degrees());
+        if let Some(camera) = camera {
+            crate::camera_yaw::publish(camera.yaw_degrees());
+        }
 
         // THERE IS NO PER-FRAME FRAMING GATE, and deleting the one that used to stand here is
         // the fix for "I've seen the base off the player more times than I've seen it on the
@@ -788,6 +820,15 @@ mod windows_impl {
                 state.config.faint_at_meters,
             ));
         }
+
+        // The last thing that actually needs a camera, and the first thing that stops without
+        // one. Everything above has already run: the roster was read, the target nominated, the
+        // ask published and the marker settings forwarded -- so the tick goes on planning the
+        // route and laying the trail on the ground while the overlay has nothing to draw with.
+        // The stones are in the world; only the arrow over them is missing.
+        let Some(camera) = camera else {
+            return Vec::new();
+        };
 
         let mut vertices = Vec::with_capacity(snapshot.len() * 3 * VERTICES_PER_SEGMENT);
         for route in &snapshot {
