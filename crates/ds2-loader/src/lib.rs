@@ -88,6 +88,7 @@ pub mod continue_flow;
 pub mod crash_logging;
 pub mod dialog_skip;
 pub mod intro_skip;
+pub mod invasion_path;
 pub mod inventory_sort;
 pub mod item_warn;
 pub mod menu_row;
@@ -321,6 +322,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_inventory_sort();
                 install_menu_row();
                 install_item_warn();
+                install_invasion_path();
                 arm_fault(crash_config);
             });
         },
@@ -358,6 +360,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_inventory_sort();
                 install_menu_row();
                 install_item_warn();
+                install_invasion_path();
                 arm_fault(crash_config);
             });
         },
@@ -740,10 +743,10 @@ fn install_inventory_sort() {
 
 /// Mark weapons the player's stats cannot meet, if `<Game>/ds2-mods.toml` asked for it.
 ///
-/// Last of the installs and the only one that has never been in front of a running game, which is
-/// also why it is off unless the config says exactly `true`. It shares no hook site with anything
-/// else here: `ds2-menu-row` owns the `.flo` definition lookup and this owns the container builder
-/// one level below it, so the two coexist rather than racing for one prologue.
+/// Off unless the config says exactly `true`, and the only one that has never been in front of a
+/// running game, which is why. It shares no hook site with anything else here: `ds2-menu-row` owns
+/// the `.flo` definition lookup and this owns the container builder one level below it, so the two
+/// coexist rather than racing for one prologue.
 fn install_item_warn() {
     let config = item_warn::ItemWarnConfig::load();
     log_line(format_args!("{}", config.describe()));
@@ -759,6 +762,40 @@ fn install_item_warn() {
         log_line(format_args!(
             "{} NOT INSTALLED -- item cells are the ones the game shipped",
             ds2_item_warn::LOG_PREFIX
+        ));
+    }
+}
+
+/// Draw a direction to every other player in the session, if `<Game>/ds2-mods.toml` asked for it.
+///
+/// **Last, and after [`install_menu_row`] rather than before it**, which is the opposite of the
+/// ordering rule the two item-list installs follow. Those have to come first because they
+/// register into a per-frame tick that `ds2_menu_row::install` seals. This registers into
+/// nothing: its detour is on `IDXGISwapChain::Present`, which belongs to `dxgi.dll` and has no
+/// relationship to anything else installed here. Putting it last keeps the feature that touches
+/// the renderer out of the way of the ones that do not.
+///
+/// Off unless the config says exactly `true`. See [`invasion_path::InvasionPathConfig`] for why
+/// this one's default is not the `[inventory_sort]` default.
+fn install_invasion_path() {
+    let config = invasion_path::InvasionPathConfig::load();
+    log_line(format_args!("{}", config.describe()));
+    if !config.enabled {
+        return;
+    }
+    ds2_invasion_path::set_logger(log_line);
+    let request = ds2_invasion_path::Request {
+        config_path: crash_logging::config_file_path(),
+    };
+    // SAFETY: called once, from the post-Arxan position like every other install here. The crate
+    // detours exactly one function -- `IDXGISwapChain::Present`, whose address it obtains by
+    // having Direct3D build a throwaway swap chain -- and refuses rather than faulting at every
+    // step that can fail.
+    let outcome = unsafe { ds2_invasion_path::install(&request) };
+    if !outcome.installed {
+        log_line(format_args!(
+            "{} NOT INSTALLED -- no overlay this session, and the frame is untouched",
+            ds2_invasion_path::LOG_PREFIX
         ));
     }
 }

@@ -68,6 +68,12 @@ ds2-save-file.workspace = true
 ds2-menu-row.workspace = true
 ds2-inventory-sort.workspace = true
 ds2-item-warn.workspace = true
+# The overlay. It brings the `windows` crate with it -- the first third-party runtime dependency
+# in this workspace other than `dearxan` -- because it talks COM to Direct3D 11 and a hand-rolled
+# `ID3D11DeviceContext` that is one vtable slot out calls the wrong method on the game's own
+# renderer. See that crate's manifest. It is off by default, but it is LINKED either way, so the
+# dependency is paid whether or not a player turns it on.
+ds2-invasion-path.workspace = true
 ds2-hotkey-config.workspace = true
 ds2-seamless.workspace = true
 ds2-rva.workspace = true

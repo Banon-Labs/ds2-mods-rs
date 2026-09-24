@@ -1,0 +1,76 @@
+# A direction to every other player in your session, drawn over the world.
+#
+# THIS IS AN RLIB, NOT A DLL, and that is the one structural departure from
+# `../er-mods-rs/crates/er-invasion-path`. Elden Ring loads mods through me3's `[[natives]]`
+# list, so over there every feature is its own `.dll` and adding one is a line of TOML. me3
+# cannot launch DARK SOULS II (`docs/LOADING.md`), so this workspace gets into the process by
+# proxying `DINPUT8.dll` and there is exactly ONE loadable module: `ds2-loader`. A second DLL
+# would have to be pulled in with `LoadLibrary` under the loader lock, which is the deadlock
+# this workspace refuses to commit. So features are rlibs and the loader links them.
+#
+# The consequence worth stating: this crate cannot be installed or uninstalled without
+# rebuilding `dinput8.dll`. The config file is what makes it switchable at runtime instead.
+[package]
+name = "ds2-invasion-path"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# HOST-BUILDABLE HALF. The projection maths, the colour assignment, the distance ramp, the
+# config parser and the route decoder are all `f32`/text/bytes and are proven by `cargo test`
+# on Linux rather than by launching a game and squinting at a line. That is not a nicety: a
+# projection off by a factor of `aspect` looks, in game, exactly like "the overlay is broken",
+# and telling those apart from a screenshot costs a launch.
+[dependencies]
+# BOTH OF THESE ARE HOST-BUILDABLE, which is why they are not behind the `cfg(windows)` gate
+# below. `ds2-rva` is `pub const`s and doc comments with no dependencies at all, and
+# `ds2-hotkey-config` is deliberately game-free for the same reason this crate wants it here:
+# the key table, the `key = value` reader and the reload decision are the parts worth proving,
+# and `cargo test` on Linux has to be able to reach all three.
+#
+# Putting `ds2-rva` here is what lets `navpath`'s route decoder -- the reversed point order, the
+# goal-first segment order, the refusals -- be tested against a synthetic buffer using the SAME
+# offsets the shipping build uses. A test with its own copy of those numbers proves the test.
+ds2-rva.workspace = true
+# Key NAMES ("F7", "]", "Insert") rather than virtual-key numbers, plus the `key = value`
+# reader and the compare-by-CONTENT hot reload. Reused rather than re-tabulated: a second copy
+# of that key table is a drift trap, and the content comparison is what a Proton prefix's
+# one-second mtime resolution requires.
+ds2-hotkey-config.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+ds2-game-base.workspace = true
+# MinHook, for the one detour this crate installs: `IDXGISwapChain::Present`.
+ds2-hook.workspace = true
+# THE FIRST THIRD-PARTY RUNTIME DEPENDENCY IN THIS WORKSPACE THAT IS NOT `dearxan`, and it is
+# worth saying why rather than letting it appear in a manifest.
+#
+# `crates/ds2-invasion-path/src/render.rs` has to talk COM to Direct3D 11: create a device, read
+# a swap chain's vtable, build shaders and buffers, save and restore a dozen pieces of pipeline
+# state around a draw. Every other Windows call in this repo is a hand-written `extern "system"`
+# against a handful of `kernel32`/`user32` exports, and that is the right shape for five
+# functions with three arguments each. It is the wrong shape for COM: an interface is a vtable
+# whose slot numbering is the ABI, and a hand-rolled copy of `ID3D11DeviceContext` that is one
+# slot out does not fail to compile -- it calls the wrong method on the game's own renderer.
+#
+# So this takes the generated, audited bindings instead. The feature list is the minimum that
+# compiles; `default-features = false` keeps the rest of the Windows API out.
+#
+# `d3dcompiler` is NOT in it. The shaders are compiled at runtime through a `LoadLibrary` of
+# `d3dcompiler_47.dll`, so a Proton prefix without that DLL is a logged refusal rather than a
+# process that will not start.
+windows = { version = "0.62", default-features = false, features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Direct3D",
+  "Win32_Graphics_Direct3D11",
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Dxgi_Common",
+  "Win32_Graphics_Gdi",
+  "Win32_System_LibraryLoader",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[lints]
+workspace = true

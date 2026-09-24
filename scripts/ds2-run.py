@@ -220,6 +220,17 @@ INVENTORY_SORT_SECTION = "inventory_sort"
 KEY_INVENTORY_SORT_ENABLED = "enabled"
 KEY_INVENTORY_SORT_KEY = "key"
 KEY_INVENTORY_SORT_PAD = "pad"
+
+#: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/invasion_path.rs`, and the
+#: live settings in `crates/ds2-invasion-path/src/config.rs`.
+INVASION_PATH_SECTION = "invasion_path"
+KEY_INVASION_PATH_ENABLED = "enabled"
+KEY_INVASION_PATH_TOGGLE = "toggle_key"
+KEY_INVASION_PATH_START_ENABLED = "start_enabled"
+#: Mirrors `LOG_PREFIX` in `crates/ds2-invasion-path/src/log.rs`. Grep for it when a run
+#: disappoints: `roster:` and `camera:` under this prefix are the two lines that say whether the
+#: overlay found anything, and `overlay:` is the one that says whether it could draw at all.
+INVASION_PATH_LOG_PREFIX = "ds2-invasion-path:"
 KEY_BUILD_IMPORT_ENABLED = "enabled"
 
 #: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/item_warn.rs`.
@@ -1081,6 +1092,9 @@ def config_text(
     item_warn: bool = False,
     seamless: bool = False,
     seamless_dll: str = SEAMLESS_DEFAULT_DLL,
+    invasion_path: bool = False,
+    invasion_path_key: str = "semicolon",
+    invasion_path_start_enabled: bool = False,
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
@@ -1572,6 +1586,35 @@ def config_text(
 {KEY_SEAMLESS_ENABLED} = {str(seamless).lower()}
 {KEY_SEAMLESS_DLL} = "{seamless_dll}"
 
+[{INVASION_PATH_SECTION}]
+# A direction to every other player in your session, drawn over the world.
+#
+# THE ONLY FEATURE IN THIS FILE THAT DETOURS A RENDERING FUNCTION. Everything else here hooks a
+# menu method or reads memory; this one hooks `IDXGISwapChain::Present` -- in `dxgi.dll`, outside
+# the game image and therefore outside everything this repo has learned about Arxan -- and appends
+# triangles to a frame that was already finished. It is OFF by default for that reason and because
+# it draws through the screen during multiplayer, which is a thing to opt into rather than to
+# discover.
+#
+# What it draws is an ARROW per player, not a walkable route. The Elden Ring crate this is ported
+# from follows the navmesh; DARK SOULS II has its own navigation stack (`NvRoutePlanner`,
+# `NvRouteNavigator`) and the half that READS a finished route is ported and tested, but asking
+# for one takes navigation-graph ids that nothing can produce from a world position yet. See
+# `crates/ds2-invasion-path/src/navpath.rs`.
+{KEY_INVASION_PATH_ENABLED} = {str(invasion_path).lower()}
+# Live, like the two sort bindings above: re-read about once a second, so the key moves without a
+# restart. A name that does not parse keeps the one already working and says so in the log.
+#
+# `{KEY_INVASION_PATH_TOGGLE}` is a key NAME from `ds2-hotkey-config`. `semicolon` rather than a function key,
+# and that default was bought with a live failure in the sibling workspace: its overlay shipped on
+# F7, a 15-DLL run found another mod polling VK_F7 in the same process, and the key warped the
+# player instead of drawing anything with nothing warning about it.
+#
+# `{KEY_INVASION_PATH_START_ENABLED}` begins with the overlay already on, which is what a test run wants: it means
+# the roster and camera code runs without anyone having to press anything.
+{KEY_INVASION_PATH_TOGGLE} = "{invasion_path_key}"
+{KEY_INVASION_PATH_START_ENABLED} = {str(invasion_path_start_enabled).lower()}
+
 [{CRASH_SECTION}]
 {crash_banner}# STARTUP-ONLY, both of them. The handler is installed in DllMain BEFORE `neuter_arxan`, because
 # that call patches code from static analysis and is the likeliest crash in the whole startup path
@@ -1634,6 +1677,9 @@ def write_config(
     item_warn: bool = False,
     seamless: bool = False,
     seamless_dll: str = SEAMLESS_DEFAULT_DLL,
+    invasion_path: bool = False,
+    invasion_path_key: str = "semicolon",
+    invasion_path_start_enabled: bool = False,
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
@@ -1664,6 +1710,9 @@ def write_config(
         item_warn,
         seamless,
         seamless_dll,
+        invasion_path,
+        invasion_path_key,
+        invasion_path_start_enabled,
     )
     path.write_text(text, encoding="utf-8")
     return path, text
@@ -1752,6 +1801,9 @@ def dry_run(
     item_warn: bool = False,
     seamless: bool = False,
     seamless_dll: str = SEAMLESS_DEFAULT_DLL,
+    invasion_path: bool = False,
+    invasion_path_key: str = "semicolon",
+    invasion_path_start_enabled: bool = False,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
@@ -1800,6 +1852,9 @@ def dry_run(
             item_warn,
             seamless,
             seamless_dll,
+            invasion_path,
+            invasion_path_key,
+            invasion_path_start_enabled,
         ):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
         else:
@@ -1844,6 +1899,9 @@ def dry_run(
                 item_warn=item_warn,
                 seamless=seamless,
                 seamless_dll=seamless_dll,
+                invasion_path=invasion_path,
+                invasion_path_key=invasion_path_key,
+                invasion_path_start_enabled=invasion_path_start_enabled,
             ),
             indent="[dry-run]   | ",
         )
@@ -2170,6 +2228,9 @@ def launch(
     item_warn: bool = False,
     seamless: bool = False,
     seamless_dll: str = SEAMLESS_DEFAULT_DLL,
+    invasion_path: bool = False,
+    invasion_path_key: str = "semicolon",
+    invasion_path_start_enabled: bool = False,
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
@@ -2213,6 +2274,9 @@ def launch(
         item_warn,
         seamless,
         seamless_dll,
+        invasion_path,
+        invasion_path_key,
+        invasion_path_start_enabled,
     )
     print(f"[config] {config_path}")
 
@@ -3575,6 +3639,39 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--invasion-path",
+        dest="invasion_path",
+        action="store_true",
+        help=(
+            "TURN ON the overlay that draws a direction to every other player in your session. "
+            "OFF by default, and the only feature here that detours a RENDERING function -- "
+            "`IDXGISwapChain::Present`, in dxgi.dll rather than in the game image. It draws an "
+            "arrow per player, not a walkable route: DARK SOULS II's navigation stack can be "
+            "READ but not yet asked, see crates/ds2-invasion-path/src/navpath.rs. Grep the log "
+            f"for `{INVASION_PATH_LOG_PREFIX}` -- `overlay:` says whether it could draw, "
+            "`camera:` which camera it found, `roster:` what it saw."
+        ),
+    )
+    parser.add_argument(
+        "--invasion-path-key",
+        dest="invasion_path_key",
+        default="semicolon",
+        help=(
+            "key NAME that toggles the overlay, in `ds2-hotkey-config` spelling. DEFAULT: "
+            "semicolon, chosen because it is clear of everything else this workspace polls."
+        ),
+    )
+    parser.add_argument(
+        "--invasion-path-on",
+        dest="invasion_path_start_enabled",
+        action="store_true",
+        help=(
+            "start with the overlay already switched on. WHAT A TEST RUN WANTS: the roster read, "
+            "the camera search and the draw all happen without anyone pressing anything, so a "
+            "headless run produces the `roster:` and `camera:` lines on its own."
+        ),
+    )
+    parser.add_argument(
         "--probe-site",
         choices=PROBE_SITES,
         default="m1",
@@ -3671,6 +3768,9 @@ def main() -> int:
             args.item_warn,
             args.seamless,
             args.seamless_dll,
+            args.invasion_path,
+            args.invasion_path_key,
+            args.invasion_path_start_enabled,
         )
     return launch(
         args.probe,
@@ -3700,6 +3800,9 @@ def main() -> int:
         args.item_warn,
         args.seamless,
         args.seamless_dll,
+        args.invasion_path,
+        args.invasion_path_key,
+        args.invasion_path_start_enabled,
     )
 
 

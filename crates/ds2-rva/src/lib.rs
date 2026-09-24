@@ -6024,6 +6024,373 @@ pub const FE_EQUIP_GROUP_UPDATE_PROLOGUE: [u8; 5] = [0x48, 0x89, 0x5c, 0x24, 0x2
 /// hand them whatever `R8` happened to hold after the detour's own prologue.
 pub const FE_ITEM_LIST_UPDATE_ARGUMENT_COUNT: usize = 4;
 
+// ---------------------------------------------------------------------------------------------
+// THE WORLD: characters, where they are, and who among them is a person.
+//
+// Everything in this section was derived for `ds2-invasion-path` on 2026-09-22 and none of it
+// came from Elden Ring. The anchors are MSVC RTTI class names, which this image carries 5271 of:
+// `scripts/ds2-rtti-vtables.py` maps a class name to its vtable, and the vtable is what makes an
+// object's class checkable at runtime rather than guessable.
+
+/// Offset of `CharacterManager` in [`GAME_MANAGER_IMP`]. `+0x18`.
+///
+/// From the curated `GameManagerImp` type in the Ghidra project (field ordinal 3), cross-checked
+/// against 447 call sites in the image that load `[0x1416148f0]` and immediately dereference
+/// `+0x18`.
+pub const GAME_MANAGER_CHARACTER_MANAGER_OFFSET: usize = 0x18;
+
+/// `CharacterManager -> entity_list` **begin**. `+0x10`, a `CharacterCtrl**`.
+///
+/// The roster of every character the map currently holds -- the player, every NPC, and every
+/// remote player in the session.
+pub const CHARACTER_MANAGER_ENTITY_BEGIN_OFFSET: usize = 0x10;
+
+/// `CharacterManager -> entity_list` **end**. `+0x18`, one past the last `CharacterCtrl*`.
+///
+/// **This is a begin/end pair, not a pointer and a count.** Element count is
+/// `(end - begin) / 8`. Read out of three independent iteration sites rather than assumed from
+/// the shape of the struct:
+///
+/// ```text
+/// 0x14021c38b   mov rbx,[rsi+0x10]   cmp rbx,[rsi+0x18]   je ...   mov rdi,[rbx]
+/// 0x140463a11   mov rdi,[rbx+0x18]   mov rbx,[rbx+0x10]   cmp rbx,rdi
+/// 0x14048302a   mov rbx,[rdi+0x10]   mov rdi,[rdi+0x18]   cmp rbx,rdi
+/// ```
+///
+/// Getting this wrong is not a compile error and not a crash: a `+0x18` read as a count would be
+/// a pointer-sized number in the billions, and the sweep would walk off the end of the heap.
+pub const CHARACTER_MANAGER_ENTITY_END_OFFSET: usize = 0x18;
+
+/// `CharacterManager + 0x50` is an ARRAY BASE, and the Ghidra project's `player_ctrl` label on it
+/// is **wrong**. Recorded so the next reader does not make the same mistake twice.
+///
+/// `0x14035b670` settles it in three instructions:
+///
+/// ```text
+/// 0x14035b697   cmp  QWORD PTR [rcx+rax*8+0x50],0    ; is this slot free?
+/// 0x14035b6b5   mov  eax,DWORD PTR [rdx+0x50]        ; index, read off the CHARACTER
+/// 0x14035b6c5   mov  QWORD PTR [rcx+rax*8+0x50],rdx  ; register it in that slot
+/// ```
+///
+/// A single `player_ctrl` pointer is not indexed by `rax*8`. What lives here is a registry of
+/// characters keyed by a per-character index, and slot 0 holding the player in the ordinary case
+/// is exactly what makes the mislabel survive: read it as a pointer and it usually answers with
+/// something plausible.
+///
+/// **The local player is [`PLAYER_CTRL_OFFSET`] on `GameManagerImp`**, which is verified --
+/// `PLAYER_PARAM_GET` (`0x1401ab660`) is eight instructions long and its first hop is that
+/// offset. `ds2-invasion-path` uses that one. This constant exists only to be read by anyone
+/// tempted by the field name, and nothing depends on it.
+pub const CHARACTER_MANAGER_REGISTRY_OFFSET: usize = 0x50;
+
+/// `PlayerCtrl`'s primary vtable. RVA `0x010e_4bb8`.
+///
+/// **This is how a player is told from an NPC**, and the reason it works is that DS2 builds
+/// remote players out of the same class as the local one. Two factories allocate `0x4a0` bytes
+/// and call the `PlayerCtrl` constructor at `0x14037ebe0`, and they differ only in the name they
+/// give the result:
+///
+/// | factory | name it formats | what it builds |
+/// | --- | --- | --- |
+/// | `0x140357920` | `L"Player_%06u"` | the local player |
+/// | `0x1403572e0` | `L"NetworkPlayer_%06u"` / `L"GhostPlayer_%06u"` | a remote player, or a bloodstain replay |
+///
+/// Every other character in the roster is a `CharacterCtrl` (constructor `0x1403114f0`, vtable
+/// `0x010df218`) or a subclass of it that is not this one. So `*chr == base + this RVA` is an
+/// exact membership test, not a guess about a type byte -- and unlike a `chr_type` field it
+/// cannot be confused by a session kind nobody catalogued.
+///
+/// The bloodstain replay phantom shares the class, so it is a player by this test. It is also a
+/// thing worth drawing a line to, so that is not treated as an error.
+pub const PLAYER_CTRL_VTABLE: u32 = 0x010e_4bb8;
+
+/// `CharacterCtrl`'s primary vtable. RVA `0x010d_f218`. Recorded for the roster census's log
+/// line, which counts what it rejected by class rather than reporting only what it accepted.
+pub const CHARACTER_CTRL_VTABLE: u32 = 0x010d_f218;
+
+/// `CharacterCtrl -> position`. `+0x90`, four `f32` -- x, y, z, and a `w` nothing here reads.
+///
+/// Established through the accessor rather than by staring at floats: slot `+0x148` of
+/// [`CHARACTER_CTRL_VTABLE`] is `0x140312b10`, whose entire body copies sixteen bytes from
+/// `this+0x90`. [`PLAYER_CTRL_VTABLE`] inherits that slot unchanged, so one offset serves every
+/// character in the roster.
+///
+/// **Y is up.** The engine's own navigation code treats component 1 as the height: the route
+/// reader at `0x140bb5ff0` compares `node[1]` against `next[1]` to decide whether a step is a
+/// descent.
+///
+/// That the field is a POSITION and not some other vector is its role at `0x14042fe80`: the
+/// navmesh controller calls this slot, adds the character's velocity scaled by a time constant,
+/// and hands the sum to the pathfinder as the agent's current world point. A velocity added to
+/// it is only meaningful if it is where the character is.
+///
+/// `+0xA0` is a second `f32x4` behind slot `+0x150` (`0x140312a80`). It is **not identified**
+/// and nothing here reads it. Recording that it exists is cheaper than the next reader
+/// rediscovering it and assuming it is the position.
+pub const CHARACTER_CTRL_POSITION_OFFSET: usize = 0x90;
+
+// ---------------------------------------------------------------------------------------------
+// THE NAVIGATION STACK.
+//
+// `docs/PORTING.md` filed `er-invasion-path` under "no DS2 analogue (Havok-AI navmesh)". Half of
+// that is right and the conclusion is wrong. There is no Havok AI here -- the Havok in this image
+// is 2013.2/2014.1 animation and physics -- but DS2 ships its OWN navigation stack, and it is
+// RTTI-named throughout:
+//
+//   NvNavigationSystem 0x1411e2980   NvNaviGraphWorld 0x1411e28e8   NvRoutePlanner 0x1411e2c30
+//   NvRouteNavigator   0x1411e2c60   NvNaviNodePathFindingTask 0x1411e2fd8
+//   NvNaviPolyNearestSearchTask 0x1411e3038   ChrAiNavimeshCtrl 0x1410ede30
+//
+// The request/poll shape is the same one Elden Ring's `CSHkAiWorld` has. WHAT IS NOT HERE YET is
+// the step that turns a world position into the graph id the planner wants -- see
+// [`NV_ROUTE_PLANNER_GOAL_OFFSET`]. Until that lands this mod draws the arrow, which is the
+// degraded mode the Elden Ring crate also falls back to when the navmesh cannot answer.
+
+/// Offset of `NvNavigationSystem` in [`GAME_MANAGER_IMP`]. `+0xBC0`.
+///
+/// Named in the Ghidra project's `GameManagerImp` type (field ordinal 382) and confirmed by every
+/// one of the 21 `mov rcx,[rax+0xbc0]` sites in the image: each is preceded by a load of
+/// `0x1416148f0` and followed by a call into the `0x140bad000..0x140bb8000` navigation module.
+pub const GAME_MANAGER_NAV_SYSTEM_OFFSET: usize = 0xBC0;
+
+/// `NvRoutePlanner -> route`. `+0x48` -- the finished polyline, once the flags say so.
+///
+/// From `0x14042ee40`, the navmesh controller's destination step: when the goal is unchanged and
+/// [`NV_ROUTE_PLANNER_FLAGS_OFFSET`] reports a result, it passes `planner + 0x48` to
+/// `0x140bb5cd0`, which binds it into the navigator at [`NV_ROUTE_NAVIGATOR_ROUTE_OFFSET`].
+pub const NV_ROUTE_PLANNER_ROUTE_OFFSET: usize = 0x48;
+
+/// `NvRoutePlanner -> flags`. `+0x30`, one byte.
+///
+/// The bits, all three read off the writers rather than inferred from behaviour:
+///
+/// | bit | set by | meaning |
+/// | --- | --- | --- |
+/// | `0x01` | `0x140bb4090` (request), `0x140bb40c0` | a search is pending |
+/// | `0x02` | the search steps | a route is ready at [`NV_ROUTE_PLANNER_ROUTE_OFFSET`] |
+/// | `0x04` | the search steps | the search finished without a route |
+///
+/// `0x140bb4090` writes `flags = (flags & 0xf1) | 1`, which is what makes "pending" mean pending:
+/// requesting clears the two result bits in the same instruction that sets the request bit.
+pub const NV_ROUTE_PLANNER_FLAGS_OFFSET: usize = 0x30;
+
+/// [`NV_ROUTE_PLANNER_FLAGS_OFFSET`] bit meaning "a search is pending".
+pub const NV_ROUTE_PLANNER_FLAG_PENDING: u8 = 0x01;
+
+/// [`NV_ROUTE_PLANNER_FLAGS_OFFSET`] bit meaning "a route is ready".
+pub const NV_ROUTE_PLANNER_FLAG_READY: u8 = 0x02;
+
+/// [`NV_ROUTE_PLANNER_FLAGS_OFFSET`] bit meaning "the search answered, and the answer is no".
+pub const NV_ROUTE_PLANNER_FLAG_FAILED: u8 = 0x04;
+
+/// `NvRoutePlanner -> goal`. `+0x34`, and **the reason the route is not drawn yet**.
+///
+/// `0x140bb4090(planner, a, b, c, d)` is the request, and it writes `+0x34`, `+0x38`, `+0x3c`,
+/// `+0x40` then sets [`NV_ROUTE_PLANNER_FLAG_PENDING`]. `+0x34` is a packed navigation-graph id,
+/// not a world position -- `NvRoutePlanner::Update` (`0x140bb4110`, slot 2 of its vtable) feeds it
+/// to `0x140bb2620(parts_table, id | 0x1ffff)` and dispatches on what comes back:
+///
+/// ```text
+/// bits  0..14   index within the parts object
+/// bits 15..16   kind   (0 = poly, 0x8000 = gate)
+/// bits 17..29   the parts key the hash table is asked for
+/// bits 30..31   a validity pair; both clear means usable
+/// ```
+///
+/// **Turning a world position into one of those ids is the missing step.** The engine does it
+/// asynchronously through `NvNaviPolyNearestSearchTask`, and the AI reaches the ids a different
+/// way again -- from state its own controller already holds. Reconstructing either by hand would
+/// mean fabricating an update context the game normally supplies, which is exactly what
+/// bd `ds2-call-the-games-own-functions` says not to do. The inverse direction IS solved:
+/// `0x140bad5a0(graph_world, out, id)` decodes an id back to a position.
+pub const NV_ROUTE_PLANNER_GOAL_OFFSET: usize = 0x34;
+
+/// `NvRouteNavigator -> route`. `+0x28`.
+///
+/// `0x140bb5cd0` copies a finished route here and then sets the cursor at `+0x64` to
+/// `(segment_count - 1) << 16`, which is what establishes both the index packing in
+/// [`NV_ROUTE_SEGMENT_STRIDE`]'s documentation and the fact that a route is stored goal-first and
+/// walked backwards.
+pub const NV_ROUTE_NAVIGATOR_ROUTE_OFFSET: usize = 0x28;
+
+/// `NvRoute -> segments`. `+0x10`, an array of [`NV_ROUTE_SEGMENT_STRIDE`]-byte records.
+pub const NV_ROUTE_SEGMENTS_OFFSET: usize = 0x10;
+
+/// `NvRoute -> segment count`. `+0x18`, `i32`.
+pub const NV_ROUTE_SEGMENT_COUNT_OFFSET: usize = 0x18;
+
+/// Bytes per route segment. `0x60`.
+///
+/// The whole layout below comes from `0x140bb3bd0`, the engine's own "position of route node N",
+/// and from `0x140bb3b20`, its "flags of route node N". Both index the same way, and the way is
+/// worth spelling out because it is not the obvious one:
+///
+/// - A node index is **packed**: `(segment << 16) | point`, and `0xFFFFFFFF` means "the last
+///   segment, point 0".
+/// - Points within a segment are stored **in reverse**: node `point` is
+///   `points[count - 1 - point]`.
+/// - A segment whose point count is `<= 0` contributes exactly one node, its own
+///   [`NV_ROUTE_SEGMENT_POINT_OFFSET`].
+pub const NV_ROUTE_SEGMENT_STRIDE: usize = 0x60;
+
+/// A segment's own point. `+0x20` within the segment, four `f32`.
+///
+/// Used when [`NV_ROUTE_SEGMENT_POINT_COUNT_OFFSET`] is not positive -- a segment with no
+/// expanded polyline still has a position.
+pub const NV_ROUTE_SEGMENT_POINT_OFFSET: usize = 0x20;
+
+/// A segment's expanded polyline. `+0x40`, a pointer to 16-byte points.
+pub const NV_ROUTE_SEGMENT_POINTS_OFFSET: usize = 0x40;
+
+/// A segment's per-point flags. `+0x48`, a pointer to `u32`, parallel to
+/// [`NV_ROUTE_SEGMENT_POINTS_OFFSET`] and indexed the same reversed way.
+pub const NV_ROUTE_SEGMENT_FLAGS_OFFSET: usize = 0x48;
+
+/// How many points a segment's polyline holds. `+0x50`, `i16`.
+///
+/// Signed, and the engine tests `0 < count` before trusting the pointers -- so a non-positive
+/// value is the documented "this segment has no polyline" case rather than an impossibility.
+pub const NV_ROUTE_SEGMENT_POINT_COUNT_OFFSET: usize = 0x50;
+
+// ---------------------------------------------------------------------------------------------
+// THE CAMERA, and the one thing in this section that is FOUND rather than declared.
+//
+// The layout below is static, read out of two constructors and the function that fills them. What
+// is NOT static is which of the several camera objects a given frame is drawn through, and that
+// is not papered over with a guess: `ds2-invasion-path`'s `camera` module enumerates the
+// candidates named here and keeps the one whose projection matrix matches the shape
+// `0x140001a90` emits AND that puts the local player somewhere a viewport could show them. A
+// wrong candidate fails both tests by a mile; no candidate passing means the overlay draws
+// nothing and says so.
+
+/// Offset of `CameraManager` in [`GAME_MANAGER_IMP`]. `+0x20`.
+///
+/// Named in the Ghidra project's `GameManagerImp` type (field ordinal 4) and confirmed by the 41
+/// sites in the image that load `[0x1416148f0]` and immediately dereference `+0x20`.
+pub const GAME_MANAGER_CAMERA_MANAGER_OFFSET: usize = 0x20;
+
+/// The three `CameraOperator` pointers `CameraManager` holds: free, player, in-game.
+///
+/// `+0x18`, `+0x20`, `+0x28`, named in the Ghidra project's `CameraManager` type as
+/// `free_cam_operator`, `player_cam_operator` and `ingame_cam_operator`. Which one is driving a
+/// given frame depends on whether a cutscene, a menu or ordinary play is on screen, so all three
+/// are candidates and the matrices decide.
+pub const CAMERA_MANAGER_OPERATOR_OFFSETS: [usize; 3] = [0x18, 0x20, 0x28];
+
+/// `CameraOperator -> view`. `+0x10`, sixteen `f32`, row-major -- **for the class whose
+/// constructor is `0x140ae8180`, which is NOT the object the game draws through.** Measured:
+/// the live one keeps its view at [`CAMERA_OPERATOR_VIEW_OFFSET_MEASURED`].
+///
+/// **World to camera.** Not the other way round, and the difference is the whole projection: at
+/// `0x140493294` the engine calls the 4x4 INVERSE at `0x140002380` on the camera's transform and
+/// stores the result here. Inverting a matrix to reach camera space is only necessary if the
+/// input mapped camera space out to the world, so what lands at `+0x10` is the inverse of that --
+/// a view matrix, usable directly.
+///
+/// The constructor at `0x140ae8180` fills `+0x10..+0x4F` and `+0x50..+0x8F` with identity rows
+/// from `0x141596b20`, which is why a camera that has never been driven reads as two identities
+/// rather than as garbage -- and why the recogniser in `ds2-invasion-path` has a test that an
+/// identity matrix is not mistaken for a projection.
+pub const CAMERA_OPERATOR_VIEW_OFFSET: usize = 0x10;
+
+/// Where the view matrix actually is on the object the game draws through. `+0x20`.
+///
+/// **MEASURED IN GAME 2026-09-22**, on the fourth live run of `ds2-invasion-path`, and it
+/// contradicts the static derivation above. The log line, written by the DLL itself:
+///
+/// ```text
+/// camera: drawing through operator[0] obj=0x7ffff03aa640 view=+0x020 proj=+0x050
+/// ```
+///
+/// `operator[0]` is the pointer at `CAMERA_MANAGER_OPERATOR_OFFSETS[0]` -- `CameraManager+0x18`,
+/// the one Ghidra names `free_cam_operator`. So the POINTER was right and the LAYOUT was not:
+/// the projection is at `+0x50` exactly as derived, and the view is sixteen bytes further along
+/// than the class whose constructor was read.
+///
+/// The two are not reconcilable by arithmetic -- a 64-byte matrix at `+0x10` and one at `+0x20`
+/// overlap, so at most one of them is the view. The consistent reading is that this object is a
+/// different class from the one `0x140ae8180` constructs, which is already known to happen in
+/// this family: `IngameCameraOperator`'s constructor chains to `0x140b455a0` instead. Which
+/// class, and where its `+0x20` comes from, is not established.
+///
+/// **The search stays in `ds2-invasion-path` despite this measurement**, and the reason is that
+/// one run is one run. The overlay tries this offset, and the others, and lets the projection's
+/// shape and the player's own position decide -- so a second camera class with a third layout
+/// costs nothing. When two sessions have agreed, the search can go and this constant can be the
+/// whole answer.
+pub const CAMERA_OPERATOR_VIEW_OFFSET_MEASURED: usize = 0x20;
+
+/// `CameraOperator -> projection`. `+0x50`, sixteen `f32`, row-major.
+///
+/// Built by `0x140001a90(out, fov, aspect, near, far)` and stored here by `0x140493308`:
+///
+/// ```text
+/// [ cot(fov/2)/aspect  0           0              0 ]
+/// [ 0                  cot(fov/2)  0              0 ]
+/// [ 0                  0           f/(f-n)        1 ]
+/// [ 0                  0           -n*f/(f-n)     0 ]
+/// ```
+///
+/// Left-handed, row-vector, so `clip = [x y z 1] * view * projection` and `clip.w` is the
+/// camera-space depth. **`fov` is VERTICAL and in radians**: the builder multiplies it by the
+/// `0.5` at `0x1410ac694`, takes `cos/sin` for the cotangent, and divides only the X term by
+/// `aspect`. Getting that backwards stretches an overlay horizontally by about 1.78 at 16:9,
+/// which is why the convention is recorded rather than assumed.
+pub const CAMERA_OPERATOR_PROJECTION_OFFSET: usize = 0x50;
+
+/// First of the camera states embedded in `CameraManager`. `+0x50`.
+///
+/// The constructor at `0x140491738` takes `this + 0x50` and loops six times, calling the
+/// initialiser at `0x140001000` and advancing by [`CAMERA_MANAGER_SLOT_STRIDE`] each time. Each
+/// slot begins with an identity 4x4 written by `0x140ae7870`, a second block, and a `u32` at
+/// `+0x80`.
+///
+/// **What these slots are for is not established.** They are candidates rather than a finding:
+/// they are the right size and shape to hold a view and a projection, they live on the object
+/// that owns the cameras, and the recogniser can tell in one comparison whether any of them
+/// actually does. Enumerating them costs six fault-safe reads a session and closes the case
+/// either way; asserting what they are without reading their writer would not.
+pub const CAMERA_MANAGER_SLOT_BASE: usize = 0x50;
+
+/// Bytes per embedded camera state. `0x90`, from the `add rdi,0x90` at `0x14049174c`.
+pub const CAMERA_MANAGER_SLOT_STRIDE: usize = 0x90;
+
+/// How many of them there are. Six, from the `mov esi,5` / `dec esi` / `jns` loop at
+/// `0x14049173f`, which runs for `esi` of 5 down to 0 inclusive.
+pub const CAMERA_MANAGER_SLOT_COUNT: usize = 6;
+
+/// The two matrix offsets inside one [`CAMERA_MANAGER_SLOT_STRIDE`] slot. `+0x00` and `+0x40`.
+///
+/// `0x140001000` calls `0x140ae7870`, which writes an identity into `+0x00..+0x3F`, then calls
+/// `0x140ae80d0` for the rest and finally zeroes the `u32` at `+0x80`.
+pub const CAMERA_MANAGER_SLOT_MATRIX_OFFSETS: [usize; 2] = [0x00, 0x40];
+
+/// `sizeof(CameraManager)`. `0x458`, from the curated type in the Ghidra project.
+///
+/// Used as the bound of a SEARCH rather than as an offset, which is the only reason a size taken
+/// from a curated type is safe to trust here: too small and a candidate is missed, too large and
+/// the extra reads are fault-safe and fail the shape test. Neither outcome is a wrong answer.
+pub const CAMERA_MANAGER_SIZE: usize = 0x458;
+
+/// The camera hierarchy is NOT what the field names suggest, and this is the note that says so.
+///
+/// `CameraManager`'s `free_cam_operator` / `player_cam_operator` / `ingame_cam_operator` at
+/// [`CAMERA_MANAGER_OPERATOR_OFFSETS`] are camera CONTROLLERS, and at least one of them is not a
+/// `CameraOperator` at all: `IngameCameraOperator`'s constructor (`0x1404949e0`) chains to
+/// `0x140b455a0`, while `CameraOperator`'s own constructor is `0x140ae8180`. Different base,
+/// different layout, no matrices at `+0x10`/`+0x50`.
+///
+/// What DOES own the matrices is whatever `0x140493030` is called on, and both of its call sites
+/// (`0x140493747`, `0x140493b62`) pass their own `this` unchanged -- so the owner's matrices are
+/// at `this+0x10` and `this+0x50` exactly as [`CAMERA_OPERATOR_VIEW_OFFSET`] says. Ghidra types
+/// one of those callers `FUN_140493340(FreeCameraOperator *this)`.
+///
+/// Rather than assert which pointer on `CameraManager` reaches it -- a field name on this struct
+/// has already been wrong once, see [`CHARACTER_MANAGER_REGISTRY_OFFSET`] -- `ds2-invasion-path`
+/// searches the object and lets the projection matrix's own shape decide. The winner is logged,
+/// and pinning it here is the follow-up that search exists to make possible.
+pub const CAMERA_OPERATOR_OWNER_IS_SEARCHED: () = ();
+
 // THE SAVE/LOAD DIRECTORY SPLIT
 //
 // A session asks for its container directory through a virtual, and the save class and the load
