@@ -452,3 +452,78 @@ test_allow_commit_message_naming_both_tokens if {
 	]))
 	count(denials) == 0
 }
+
+# --- The flag arms read the unquoted decomposition (bd ds2-mods-rs-1tc) ------
+#
+# The measured false positive, and it names no flag at all: a dash token with an
+# `n` in it, inside the commit MESSAGE, satisfied the clustered-short-flag class
+# `-[a-z]*n[a-z]*` when that class was read against the raw text.
+test_allow_commit_message_carrying_a_dash_token_with_an_n if {
+	denials := guard.deny with input as bash_event(
+		`git commit -m "a bare dash token follows: -applaunch 335300 and a path scripts/ds2-run.py."`,
+	)
+	count(denials) == 0
+}
+
+test_allow_commit_message_naming_a_find_predicate if {
+	denials := guard.deny with input as bash_event(
+		`git commit -m "the sweep uses find . -name '*.rego' rather than a glob"`,
+	)
+	count(denials) == 0
+}
+
+# Parity was the diagnosis in the issue and it was wrong. All three of these were
+# measured ALLOW before the fix as well; they are kept so that a future parity
+# regression in commands.rego cannot hide behind this rule.
+test_allow_commit_message_with_one_apostrophe if {
+	denials := guard.deny with input as bash_event(`git commit -m "the repo's rule, one apostrophe"`)
+	count(denials) == 0
+}
+
+test_allow_commit_message_with_two_apostrophes if {
+	denials := guard.deny with input as bash_event(`git commit -m "the repo's rule and the agent's rule"`)
+	count(denials) == 0
+}
+
+# The long form merely NAMED in a sentence: the surface this file's own comment
+# used to describe as a separate defect left unfixed.
+test_allow_commit_message_naming_the_long_flag if {
+	denials := guard.deny with input as bash_event(concat("", [
+		`git commit -m "the guard denies `, no_verify, ` and that is deliberate"`,
+	]))
+	count(denials) == 0
+}
+
+# Everything that was denied before must still be denied. The wrapper cases above
+# already cover `bash -c`; these are the bare forms and the bought-back quoted one.
+test_deny_commit_no_verify_after_a_message if {
+	denials := guard.deny with input as bash_event(concat("", [`git commit -m "an ordinary message" `, no_verify]))
+	"BUILTIN-GIT-BLOCK-NO-VERIFY" in rule_ids(denials)
+}
+
+test_deny_commit_short_flag_after_a_message if {
+	denials := guard.deny with input as bash_event(`git commit -m "an ordinary message" -n`)
+	"BUILTIN-GIT-BLOCK-NO-VERIFY" in rule_ids(denials)
+}
+
+test_deny_commit_with_the_long_flag_quoted_whole if {
+	denials := guard.deny with input as bash_event(concat("", [`git commit "`, no_verify, `" -m bad`]))
+	"BUILTIN-GIT-BLOCK-NO-VERIFY" in rule_ids(denials)
+}
+
+test_deny_push_no_verify_still if {
+	denials := guard.deny with input as bash_event(concat("", ["git push ", no_verify, " origin topic"]))
+	"BUILTIN-GIT-BLOCK-NO-VERIFY" in rule_ids(denials)
+}
+
+test_deny_merge_no_verify_still if {
+	denials := guard.deny with input as bash_event(concat("", ["git merge ", no_verify, " topic"]))
+	"BUILTIN-GIT-BLOCK-NO-VERIFY" in rule_ids(denials)
+}
+
+# The lone-quoted-token arm requires a git verb, so prose in another program's
+# argument cannot reach it.
+test_allow_echo_of_the_quoted_flag if {
+	denials := guard.deny with input as bash_event(concat("", [`echo "`, no_verify, `" >> notes.txt`]))
+	count(denials) == 0
+}
