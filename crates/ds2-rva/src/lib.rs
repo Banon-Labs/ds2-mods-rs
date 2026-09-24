@@ -6194,3 +6194,10 @@ pub const SAVE_LOAD_SYSTEM_PUMP_DONE: i32 = 0;
 /// `mov eax,0x4` at `0x1402e625d`, the first bail. Not an error and not a completion -- it is what
 /// a pump call on an idle system says, which is why calling it unconditionally is harmless.
 pub const SAVE_LOAD_SYSTEM_PUMP_IDLE: i32 = 4;
+
+/// The five bytes [`SL_SESSION_STRING_SET`] must begin with. `mov [rsp+8],rbx`.
+///
+/// Checked before the call for the reason every other prologue here is: an RVA is a number, and on
+/// a build these offsets were not read from, this address is some other function that would accept
+/// the call and leave a log line claiming a directory was set.
+pub const SL_SESSION_STRING_SET_PROLOGUE: [u8; 5] = [0x48, 0x89, 0x5c, 0x24, 0x08];

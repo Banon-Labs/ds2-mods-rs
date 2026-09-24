@@ -363,34 +363,37 @@ fn title_gate() -> ds2_continue::TitleStep {
             //     through the accessor instead of the virtual: `load-answered=1`, read failed.
             //   * `SAVE_DIR_BUILD` re-pointed mid-session -- it runs at session setup and not per
             //     request: `session-dir-answered=0` on a re-read that never called it.
-            //   * `SLLoadContent`'s own string at `[[system+0x30]]+0x08` -- `<unreadable>`, and it
-            //     is not the string the worker holds.
+            //   * the storage worker's own string, through the setter the pump's `0x18` arm calls
+            //     -- a worker exists only for a live request, and at the title the id names one
+            //     that has finished: `set-made-no-write ... no worker for its id`.
             //
             // It moves both sides at once, and that is safe only here. Between the return to the
             // title and a character being chosen there is no character loaded, so there is nothing
             // a save could write; every path that ends the flow puts the original back.
             if let Some(system) = game::save_load_system() {
-                // THE ORIGINAL IS THE ONE THE GAME SET ON ITSELF, observed at session setup by the
-                // same detour that watches this write. Captured rather than read back, because the
-                // worker is reachable only inside the setter's own lock -- and captured before the
-                // staged one is seated, or the put-back would restore the staged folder.
+                // The original is read out of the field before the staged one is written over it,
+                // once per process: it is the player's own folder and does not change, and a second
+                // capture taken while the staged one is seated would record that as the way home.
                 if !restoring
-                    && let Some(seated) = ds2_save_redirect::request_dir::last()
+                    && let Some(seated) =
+                        unsafe { ds2_save_redirect::request_dir::content_directory(system) }
+                    && let Some(text) = seated.text
                     && let Ok(mut held) = ORIGINAL_DIRECTORY.lock()
                 {
-                    held.get_or_insert(seated.directory);
+                    held.get_or_insert(text);
                 }
-                // AND NOTHING IS STAGED UNTIL THERE IS ONE. The observer is what records it, so an
-                // observer that did not install leaves nothing to put back -- and a flow that armed
-                // anyway would hand the player a character list describing somebody else's
-                // container with no way home short of restarting the game.
+                // And nothing is staged until there is one, because that record is the only way
+                // back. A flow that armed without it would hand the player a character list
+                // describing somebody else's container, with no way home short of a restart.
                 if !restoring && !matches!(ORIGINAL_DIRECTORY.lock().as_deref(), Ok(Some(_))) {
+                    let seen = unsafe { ds2_save_redirect::request_dir::content_directory(system) };
                     *guard = None;
                     drop(guard);
-                    abandon(
-                        "the directory the game set on itself was never observed, so there would \
-                         be nothing to put back -- the worker-directory observer is not installed",
-                    );
+                    abandon(&format!(
+                        "the directory the game built for itself could not be read, so there would \
+                         be nothing to put back -- the field answered {}",
+                        seen.map_or_else(|| String::from("<no load content>"), |d| d.to_string())
+                    ));
                     return TitleStep::Finished;
                 }
                 let wanted = if restoring {
@@ -404,7 +407,7 @@ fn title_gate() -> ds2_continue::TitleStep {
                     // flight against the worker whose lock this takes.
                     let seated = unsafe { ds2_save_redirect::request_dir::set(system, &wanted) };
                     log_line(format_args!(
-                        "{LOG_PREFIX} swap worker directory now {} (asked for {wanted})",
+                        "{LOG_PREFIX} swap content directory now {} (asked for {wanted})",
                         describe(&seated)
                     ));
                 }
@@ -534,25 +537,19 @@ fn expire_or_wait(
 
 /// What a directory set is reported as, in one string.
 ///
-/// **Every arm names a different failure**, because they lead to different next moves and a single
-/// `<unreadable>` would flatten them into one: a set that was refused before it reached the game, a
-/// set the game accepted and then skipped, and a set that landed are three distinct things to find
-/// in a log.
+/// A set refused before it reached the game and a set that reached it and could not be read back
+/// are different next moves, so they are different strings. `ContentDirectory`'s own `Display`
+/// carries the second case's numbers -- the content pointer, the length, the capacity -- because
+/// `<unreadable>` on its own was what the previous attempt at this reported, and it named none of
+/// the four reads it could have been.
 fn describe(
     seated: &Result<
-        Option<ds2_save_redirect::request_dir::Seated>,
+        ds2_save_redirect::request_dir::ContentDirectory,
         ds2_save_redirect::request_dir::NotSet,
     >,
 ) -> String {
     match seated {
-        Ok(Some(seated)) if seated.skipped => {
-            format!(
-                "{} SKIPPED -- the worker's set flag was up",
-                seated.directory
-            )
-        }
-        Ok(Some(seated)) => seated.directory.clone(),
-        Ok(None) => String::from("<set made, nothing written>"),
+        Ok(seated) => seated.to_string(),
         Err(why) => format!("<not set: {why:?}>"),
     }
 }
@@ -595,7 +592,7 @@ fn abandon(why: &str) {
     };
     log_line(format_args!(
         "{LOG_PREFIX} swap ABANDONED -- {why}. load-side-restored={load} save-side-restored={save} \
-         load-answered={answered} load-passed-through={passed} worker-directory={directory}"
+         load-answered={answered} load-passed-through={passed} content-directory={directory}"
     ));
 }
 
@@ -621,16 +618,20 @@ fn load_confirmed(slot: i32) {
     // came from, and because the two being armed together is the state that crate expects.
     // SAFETY: the game is mapped and past `DllMain`; this is its own thread at the title.
     let armed = unsafe { session_dir::SAVE.arm() };
-    // THE WORKER DIRECTORY STAYS STAGED, and this is the one place in the flow where that is the
+    // The content directory stays staged, and this is the one place in the flow where that is the
     // right answer. The load the player just confirmed has not happened yet -- this reports the
     // list taking its load branch -- so restoring the field here would have the character read out
     // of the player's own container instead of the one they chose from.
     //
-    // Reported from the observer's record rather than re-read: the worker is reachable only inside
-    // the setter's own lock, and this runs with a load request about to go out against it.
-    let directory = ds2_save_redirect::request_dir::last()
-        .map(|seated| seated.directory)
-        .unwrap_or_else(|| String::from("<never set>"));
+    // Read back rather than assumed, because the load the player just confirmed is built from this
+    // field and the whole flow turns on it holding the staged folder at this instant.
+    let directory = game::save_load_system()
+        // SAFETY: game thread at the title, in the character list's own callback.
+        .and_then(|system| unsafe { ds2_save_redirect::request_dir::content_directory(system) })
+        .map_or_else(
+            || String::from("<no load content>"),
+            |seated| seated.to_string(),
+        );
     ds2_continue::clear_title_gate();
     // The flow is over, so the boxes go back to being this build's business. Released here rather
     // than at `StartIngame`: the load is committed, and a hold that outlived its flow would leave
@@ -644,7 +645,7 @@ fn load_confirmed(slot: i32) {
     crate::import::restore();
     if armed {
         log_line(format_args!(
-            "{LOG_PREFIX} swap done slot={slot} worker-directory={directory} -- loading from \
+            "{LOG_PREFIX} swap done slot={slot} content-directory={directory} -- loading from \
              {staged}, and this session now saves there too; your own container is untouched"
         ));
     } else {
