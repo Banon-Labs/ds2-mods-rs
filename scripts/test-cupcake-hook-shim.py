@@ -613,6 +613,61 @@ def check_decisions() -> list[str]:
     return failures
 
 
+# --- the OTHER wrapper, which is not in this repo and gets a vote anyway -----------------
+#
+# `~/.claude/hooks/cupcake-hook.sh` runs on the same PreToolUse event as this shim, and it
+# evaluates THIS PROJECT'S policies too -- the engine finds the project config from the cwd
+# whichever wrapper invoked it. It does not rewrite newlines. So for as long as it judged the
+# raw text, every rewrite this shim performed was advisory: Claude Code denies when ANY hook
+# denies, and the wrapper's worse-informed verdict won.
+#
+# Measured in vivo 2026-09-24 (bd ds2-mods-rs-a87): a script the shim had split into three
+# statements, and allowed, was denied by the wrapper as one welded line. Fixing the shim alone
+# changed nothing at the prompt. The wrapper now borrows this shim's `--normalize-only`.
+#
+# That file is outside this repo and outside version control, so nothing else can notice it
+# drifting back. This case is what notices. It SKIPS when the wrapper is absent -- a checkout
+# on another machine is not a failure -- and fails only when a wrapper that exists judges the
+# reported shape differently from this shim.
+GLOBAL_WRAPPER = Path.home() / ".claude" / "hooks" / "cupcake-hook.sh"
+
+# The reported shape, reduced: an assignment using a substitution, an `rm` of a scratch path,
+# and a `cp` naming the guard layer. Three statements; only the welded form denies.
+WRAPPER_PROBE = (
+    'SLUG=$(echo "$REPO" | tr "/" "-")\n'
+    'rm -rf "$SCRATCH/home-$SLUG"\n'
+    'cp "$REPO/.cupcake/tests/fixtures/clean.jsonl" "$SCRATCH/home-$SLUG/"'
+)
+
+
+def check_global_wrapper() -> list[str]:
+    if not GLOBAL_WRAPPER.exists():
+        return []
+    env = signal_env({"CLAUDE_PROJECT_DIR": str(REPO)})
+    try:
+        proc = subprocess.run(
+            ["bash", str(GLOBAL_WRAPPER)],
+            input=json.dumps(event(WRAPPER_PROBE)).encode(),
+            capture_output=True,
+            text=False,
+            timeout=25,
+            env=env,
+            cwd=str(REPO),
+        )
+    except subprocess.TimeoutExpired:
+        return [f"global-wrapper-borrows-the-rewrite: {GLOBAL_WRAPPER} timed out"]
+    got = verdict(proc.stdout.decode("utf-8", "replace"))
+    if got != "allow":
+        return [
+            "global-wrapper-borrows-the-rewrite: "
+            f"{GLOBAL_WRAPPER} answered {got!r} on a command this shim allows. It is judging "
+            "the raw text, so every newline rewrite here is advisory and false destructive "
+            "denies come back. That wrapper must pipe the event through "
+            "`$CLAUDE_PROJECT_DIR/scripts/cupcake-hook.sh --normalize-only` before evaluating."
+        ]
+    return []
+
+
 def print_table() -> int:
     """Before (raw event straight to cupcake) beside after (through the shim)."""
     width = max(len(case.name) for case in DECISION_CASES)
@@ -644,14 +699,16 @@ def main() -> int:
     if args.table:
         return print_table()
 
-    failures = check_modes() + check_rewrites() + check_decisions()
+    failures = check_modes() + check_rewrites() + check_decisions() + check_global_wrapper()
     if failures:
         for failure in failures:
             print(f"[test-cupcake-hook-shim] FAIL: {failure}")
         return 1
+    wrapper = "checked" if GLOBAL_WRAPPER.exists() else "absent, skipped"
     print(
         f"[test-cupcake-hook-shim] ok ({len(MODES)} permission modes: {', '.join(MODES)}; "
-        f"{len(REWRITE_CASES)} newline-rewrite shapes; {len(DECISION_CASES)} live decisions)"
+        f"{len(REWRITE_CASES)} newline-rewrite shapes; {len(DECISION_CASES)} live decisions; "
+        f"global wrapper {wrapper})"
     )
     return 0
 
