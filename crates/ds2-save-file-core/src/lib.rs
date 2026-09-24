@@ -47,7 +47,10 @@ pub mod source;
 pub use dest::{Route, with_extension};
 pub use filter::{filter_string, wide_nul};
 pub use handoff::HANDOFF_FILE_NAME;
-pub use source::{SOURCE_EXTENSIONS, SourceRejection, accepts};
+pub use source::{
+    SOURCE_EXTENSIONS, SourceRejection, accepts, accepts_with, extensions_with, offered,
+    offered_with,
+};
 
 /// The extension every DARK SOULS II save container carries, without its dot.
 ///

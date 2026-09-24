@@ -58,12 +58,41 @@ impl core::fmt::Display for SourceRejection {
 
 /// The extension list as a player-facing sentence fragment: `.sl2, .zip, .7z or .rar`.
 pub fn offered() -> String {
-    let mut parts: Vec<String> = SOURCE_EXTENSIONS
+    offered_with(None)
+}
+
+/// [`offered`] with the running session's own container extension folded in.
+///
+/// `extra` is what the game is actually opening on this run. Unmodded that is `sl2` and already in
+/// the list; with DARK SOULS II Seamless Co-op loaded it is whatever its `save_file_extension`
+/// says, and a player's only character lives in a file named that. A sentence that lists four
+/// extensions none of which is the one they are looking at is a sentence that reads as a bug.
+pub fn offered_with(extra: Option<&str>) -> String {
+    let mut parts: Vec<String> = extensions_with(extra)
         .iter()
         .map(|extension| format!(".{extension}"))
         .collect();
     let last = parts.pop().unwrap_or_default();
     format!("{} or {last}", parts.join(", "))
+}
+
+/// [`SOURCE_EXTENSIONS`] with `extra` prepended when it names something new.
+///
+/// Prepended rather than appended: it is the extension of the file the player is most likely to be
+/// reaching for, so it is the pattern the dialog's default line shows -- the same reasoning that
+/// puts `sl2` first on an unmodded run.
+pub fn extensions_with(extra: Option<&str>) -> Vec<&str> {
+    let mut list: Vec<&str> = Vec::with_capacity(SOURCE_EXTENSIONS.len() + 1);
+    if let Some(extra) = extra
+        && !extra.is_empty()
+        && !SOURCE_EXTENSIONS
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(extra))
+    {
+        list.push(extra);
+    }
+    list.extend_from_slice(&SOURCE_EXTENSIONS);
+    list
 }
 
 /// The canonical extension of a path the load dialog returned, or why it is not staged.
@@ -77,6 +106,25 @@ pub fn offered() -> String {
 /// `C:\v1.0\donor` as one filename and reports its extension as `0\donor`. A gate that answers
 /// differently under test than in the game is not a gate.
 pub fn accepts(path: &Path) -> Result<&'static str, SourceRejection> {
+    accepts_with(path, None).map(|(canonical, _)| canonical)
+}
+
+/// [`accepts`], plus the extension the running game is using for its own container.
+///
+/// Returns the canonical entry and whether the match came from `extra` rather than the static
+/// list. A caller needs that second half: an `extra` match is a raw save container under a
+/// renamed extension, which the staging step reads as bytes, while the static arms include three
+/// archive shapes it has to unwrap.
+///
+/// `extra` is not trusted as a path fragment here -- it is compared, never joined. The value is
+/// validated where it is read, in `ds2-seamless`.
+pub fn accepts_with<'a>(
+    path: &Path,
+    extra: Option<&'a str>,
+) -> Result<(&'a str, bool), SourceRejection>
+where
+    'static: 'a,
+{
     let text = path.to_string_lossy();
     let leaf = match text.rfind(['\\', '/']) {
         Some(index) => &text[index + 1..],
@@ -90,10 +138,20 @@ pub fn accepts(path: &Path) -> Result<&'static str, SourceRejection> {
         return Err(SourceRejection::NoExtension);
     };
     let lowered = leaf[dot + 1..].to_ascii_lowercase();
+    if let Some(extra) = extra
+        && !extra.is_empty()
+        && extra.eq_ignore_ascii_case(&lowered)
+        && !SOURCE_EXTENSIONS
+            .iter()
+            .any(|known| known.eq_ignore_ascii_case(extra))
+    {
+        return Ok((extra, true));
+    }
     SOURCE_EXTENSIONS
         .iter()
         .find(|known| **known == lowered)
         .copied()
+        .map(|canonical| (canonical, false))
         .ok_or(SourceRejection::UnknownExtension(lowered))
 }
 
@@ -116,6 +174,52 @@ mod tests {
         ] {
             assert_eq!(accepts(Path::new(name)), Ok(expected), "{name}");
         }
+    }
+
+    /// The running session's own container extension is accepted, and reported as a raw save
+    /// rather than an archive.
+    #[test]
+    fn the_sessions_own_extension_is_accepted() {
+        assert_eq!(
+            accepts_with(Path::new(r"C:\saves\DS2SOFS0000.co2"), Some("co2")),
+            Ok(("co2", true))
+        );
+        assert_eq!(
+            accepts_with(Path::new("DONOR.CO2"), Some("co2")),
+            Ok(("co2", true)),
+            "case is folded for the session's extension too"
+        );
+        assert_eq!(
+            accepts_with(Path::new(r"C:\saves\DS2SOFS0000.sl2"), Some("co2")),
+            Ok(("sl2", false)),
+            "a vanilla donor still loads inside a co-op session"
+        );
+    }
+
+    /// Without the session's extension, that same file is refused -- which is the bug this pair
+    /// exists to fix, stated as a test rather than as a comment.
+    #[test]
+    fn the_same_file_is_refused_with_no_session_extension() {
+        assert_eq!(
+            accepts(Path::new(r"C:\saves\DS2SOFS0000.co2")),
+            Err(SourceRejection::UnknownExtension("co2".to_string()))
+        );
+    }
+
+    /// An `extra` the static list already carries changes nothing, and neither does an empty one.
+    #[test]
+    fn a_redundant_session_extension_changes_nothing() {
+        assert_eq!(extensions_with(Some("sl2")), SOURCE_EXTENSIONS.to_vec());
+        assert_eq!(extensions_with(Some("")), SOURCE_EXTENSIONS.to_vec());
+        assert_eq!(extensions_with(None), SOURCE_EXTENSIONS.to_vec());
+        assert_eq!(offered_with(Some("sl2")), offered());
+    }
+
+    /// The session's extension leads the dropdown, because it is the file being reached for.
+    #[test]
+    fn the_sessions_extension_leads_the_list() {
+        assert_eq!(extensions_with(Some("co2")), ["co2", "sl2", "zip", "7z", "rar"]);
+        assert_eq!(offered_with(Some("co2")), ".co2, .sl2, .zip, .7z or .rar");
     }
 
     /// A save someone renamed in shouting case is still a save.

@@ -37,7 +37,13 @@ use std::path::{Path, PathBuf};
 use ds2_build_import_core::Build;
 
 /// The save the game writes, under `%APPDATA%`.
-const SAVE_NAME: &str = "DS2SOFS0000.sl2";
+///
+/// Not a constant, because it is not constant: with DARK SOULS II Seamless Co-op loaded the game
+/// renames its container to whatever that mod's `save_file_extension` says, and a build written
+/// into `DS2SOFS0000.sl2` while the session is playing `DS2SOFS0000.co2` is a build nobody sees.
+fn save_name() -> &'static str {
+    ds2_save_redirect::active_save_file_name()
+}
 /// The folder it lives in, with a per-account folder between.
 const SAVE_FOLDER: &str = "DarkSoulsII";
 
@@ -96,7 +102,7 @@ pub(crate) fn locate() -> Result<PathBuf, Refusal> {
     let root = Path::new(&app_data).join(SAVE_FOLDER);
     let entries = std::fs::read_dir(&root).map_err(|_| Refusal::NoSave)?;
     for entry in entries.flatten() {
-        let candidate = entry.path().join(SAVE_NAME);
+        let candidate = entry.path().join(save_name());
         if candidate.is_file() {
             return Ok(candidate);
         }

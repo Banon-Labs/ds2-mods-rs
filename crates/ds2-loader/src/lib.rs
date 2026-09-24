@@ -92,6 +92,7 @@ pub mod inventory_sort;
 pub mod item_warn;
 pub mod menu_row;
 pub mod offline;
+pub mod seamless;
 pub mod title_menu;
 pub mod title_skip;
 
@@ -254,6 +255,12 @@ unsafe fn attach(module: *mut c_void) {
         "{LOG_PREFIX} config resolved {}",
         crash_config.describe()
     ));
+
+    // The second mod is NOT loaded here. It is loaded by its own launcher, which `scripts/ds2-run.py
+    // --seamless` runs; see `seamless` for the four slots that were tried in this process and the
+    // control run that settled it. What this reads the section for is the save container's name,
+    // which that mod renames and every save feature below has to follow.
+    report_seamless();
 
     // JOB 2 (first half): say we are here. If dearxan's callback never fires, this line is the
     // difference between "loaded, and dearxan went quiet" and "never loaded at all".
@@ -754,6 +761,21 @@ fn install_item_warn() {
             ds2_item_warn::LOG_PREFIX
         ));
     }
+}
+
+/// Say what `[seamless]` resolved to, and what the save container is called because of it.
+///
+/// Two lines, both written before any save feature reads the name. The second is the one that
+/// matters on a bad day: a run where that mod is in the process and this section is off names
+/// `DS2SOFS0000.sl2` here and then watches every save row miss a game that is opening `.co2`.
+fn report_seamless() {
+    let config = seamless::config();
+    log_line(format_args!("{}", config.describe()));
+    let name = ds2_save_redirect::active_save_file_name();
+    log_line(format_args!(
+        "{} save container this run is {name} -- its own launcher loads that mod, nothing here does",
+        seamless::LOG_PREFIX
+    ));
 }
 
 /// Append the extra row to the pause menu's quit tab, and install the hooks every registered row

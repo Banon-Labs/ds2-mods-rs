@@ -417,3 +417,53 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod opt_in_semantics_tests {
+    use super::KeyValues;
+
+    /// An opt-in key is armed only by an exact `true`, and every near miss leaves it off.
+    ///
+    /// This lives here rather than beside its caller because that caller is `ds2-loader`'s
+    /// `[seamless]` section, and `ds2-loader` is `#![cfg(windows)]` -- a test in there compiles
+    /// nowhere on the host this is developed on. The property it guards is worth running: that
+    /// section decides whether to `LoadLibraryW` a DLL from another project, so a value the parser
+    /// hands back as "close enough to true" would load a foreign binary into the game on a typo.
+    ///
+    /// The shipped features read their key the other way round -- anything but an exact `false`
+    /// leaves them on -- because their failure direction is harmless. This one's is not.
+    #[test]
+    fn only_an_exact_true_arms_an_opt_in_key() {
+        let armed = |raw: &str| {
+            let text = format!("[seamless]\nenabled = {raw}\n");
+            matches!(
+                KeyValues::parse(&text)
+                    .get("seamless", "enabled")
+                    .map(|v| v.trim().trim_matches('"').to_string())
+                    .as_deref(),
+                Some("true")
+            )
+        };
+        for raw in ["", "yes", "True", "TRUE", "1", "ture", "false", "on"] {
+            assert!(!armed(raw), "{raw:?} must not arm an opt-in key");
+        }
+        for raw in ["true", " true ", "\"true\""] {
+            assert!(armed(raw), "{raw:?} is an exact true and must arm it");
+        }
+    }
+
+    /// A missing section and a missing key are both "off", not "unset and therefore on".
+    #[test]
+    fn a_missing_opt_in_key_is_off() {
+        for text in ["", "[seamless]\n", "[other]\nenabled = true\n"] {
+            let parsed = KeyValues::parse(text);
+            assert!(
+                !matches!(
+                    parsed.get("seamless", "enabled").map(str::trim),
+                    Some("true")
+                ),
+                "{text:?} must leave the key unarmed"
+            );
+        }
+    }
+}

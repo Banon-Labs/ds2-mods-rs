@@ -70,6 +70,7 @@
 // Windows-only by construction: this is a MinHook detour on a PE image.
 #![cfg(windows)]
 
+pub mod active;
 pub mod install;
 pub mod open_redirect;
 pub mod request_dir;
@@ -93,5 +94,6 @@ pub use install::{
     Outcome, clear_session_directory, install, live_directory, live_steam_id, session_answers,
     set_logger, set_session_directory, set_source,
 };
+pub use active::{active_save_file_name, is_save_container_name};
 pub use stage::SAVE_FILE_NAME;
 pub use stage::validate_source;
