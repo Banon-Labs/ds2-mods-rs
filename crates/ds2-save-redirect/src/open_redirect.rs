@@ -45,7 +45,13 @@ type CreateFileWFn =
 /// `INVALID_HANDLE_VALUE`, which is what a failed open returns.
 const INVALID_HANDLE: isize = -1;
 
-/// `GENERIC_WRITE`. An open carrying it is the game writing, and is never diverted.
+/// `GENERIC_WRITE`. Reported on every open so the log says which ones were writes.
+///
+/// It used to gate the diversion: an open carrying it was passed straight through, on the reasoning
+/// that a swap has no business writing. That reasoning was backwards. The game saves on its own the
+/// moment a character enters the world, and an undiverted write goes to the path the game asked for
+/// -- the player's own container -- so the donor character would have been written over the very
+/// save this flow tells them it left untouched.
 const GENERIC_WRITE: u32 = 0x4000_0000;
 
 /// Win32's own cap on a path, even in its extended form.
@@ -154,7 +160,9 @@ unsafe fn wide_to_string(text: *const u16) -> Option<String> {
     None
 }
 
-/// Whether this open is the armed one: the same path, asked for reading.
+/// Whether this open is the armed one: the same path, whatever it is being opened for.
+///
+/// Reads and writes alike, because both belong to the staged copy -- see [`GENERIC_WRITE`].
 ///
 /// The comparison is case-insensitive because Windows paths are, and the game's own spelling of its
 /// container is not guaranteed to match the one a directory builder produced character for
@@ -165,10 +173,7 @@ unsafe fn wide_to_string(text: *const u16) -> Option<String> {
 /// lock. A contended lock means somebody is arming or disarming right now, and the honest answer to
 /// that is to let the open through rather than to stop the game until they are done: a missed
 /// diversion is a failed swap, a blocked one is a game that never comes back.
-fn answer_for(path: &str, access: u32) -> Option<Vec<u16>> {
-    if access & GENERIC_WRITE != 0 {
-        return None;
-    }
+fn answer_for(path: &str) -> Option<Vec<u16>> {
     let window = WINDOW.try_lock().ok()?;
     let (asked, answer) = window.as_ref()?;
     let asked = asked.as_os_str().to_string_lossy();
@@ -248,9 +253,7 @@ unsafe extern "system" fn detour_create_file_w(
     // SAFETY: Win32 hands this detour a NUL-terminated path or null.
     let asked_path = unsafe { wide_to_string(file_name) };
     let role = asked_path.as_deref().and_then(container_role);
-    let answer = asked_path
-        .as_deref()
-        .and_then(|path| answer_for(path, access));
+    let answer = asked_path.as_deref().and_then(answer_for);
     let diverted = answer.is_some();
     let handle = match &answer {
         Some(answer) => {
@@ -271,9 +274,10 @@ unsafe extern "system" fn detour_create_file_w(
             String::new()
         };
         log(format_args!(
-            "{LOG_PREFIX} open-redirect container={role} diverted={diverted} \
+            "{LOG_PREFIX} open-redirect container={role} diverted={diverted} write={} \
              access=0x{access:08x} share=0x{share:08x} disposition={disposition} \
              handle={handle} count={} {named}",
+            access & GENERIC_WRITE != 0,
             DIVERTED.load(Ordering::Relaxed)
         ));
     }

@@ -310,10 +310,17 @@ pub fn begin(picked: &Path) -> Result<(), NotBegun> {
     let staged = ds2_save_redirect::stage::stage(picked, &id, &root)
         .map_err(|error| NotBegun::Staging(error.to_string()))?;
     let directory = staged.directory.to_string_lossy().into_owned();
+    // `rebound` is printed, not just `id`. The line used to carry the ID that was passed IN, which
+    // says nothing about what landed in the file -- a rebind that matched nothing succeeds and
+    // reports zero, and the line looked identical either way. Answering "was the donor actually
+    // rebound?" cost a trip to the staged file on disk with `scripts/ds2-sl2-rebind.py --show`.
     log_line(format_args!(
-        "{LOG_PREFIX} swap staged kind={} bytes={} steam-id={id} from={} into={directory}",
+        "{LOG_PREFIX} swap staged kind={} bytes={} steam-id={id} rebound={} was={} from={} \
+         into={directory}",
         staged.kind,
         staged.bytes,
+        staged.rebound.replaced,
+        staged.rebound.previous.as_deref().unwrap_or("none"),
         picked.display()
     ));
 
@@ -608,9 +615,18 @@ fn load_confirmed(slot: i32) {
     //   ds2-save-redirect: save-session armed slot=0x1411b6448 directory=...\ds2-swapped-save\
     //   ds2-save-redirect: save-session override ANSWERED count=1 units=81
     //
-    // Leaving it unarmed puts the save back on untouched code. It also answers what the player
-    // asked for -- a character loaded out of a file, with no interest in saving it -- and if the
-    // dialog survives this, the cause is not this flow at all.
+    // Leaving it unarmed puts the save back on untouched code.
+    //
+    // AND THE BOUNCE TO THE TITLE IS THAT DIALOG, not a second failure after it. The message is id
+    // 10002 of `/menu/text/english/ingamesystem.fmg`, read out of the shipped archive:
+    //
+    //   0x00002712 (10002)  'Failed to save game.\nReturning to Title Menu.'
+    //   0x00002713 (10003)  'Failed to load saved game.\nReturning to Title Menu.'
+    //
+    // Which settles what failed. The game had its own word for a load that went wrong and did not
+    // use it: the character came out of the donor container, and what the game refused was writing
+    // it back. The log agrees -- `data-list phase=1->2 ... dest=0x57-LoadProfile`, thirty diverted
+    // reads, then the title again with no `start-ingame`.
     let armed = false;
     // The container the list is about, reported rather than assumed. This flow never armed a
     // redirect -- no writable directory field is known -- so a load confirmed here is a load out
@@ -662,21 +678,24 @@ fn load_confirmed(slot: i32) {
 fn load_started() {
     ds2_continue::clear_started_ingame();
     ds2_dialog_skip::release();
-    // AND THE WINDOW CLOSES HERE, which is the whole reason it is a window.
+    // AND THE WINDOW STAYS OPEN, for the rest of the session.
     //
-    // Left open it reaches the save side, and not through the write it refuses: DARK SOULS II reads
-    // the existing container before writing one, and that read was still being handed the donor's.
-    // A container bound to another account is not one this session can write back, so the game says
-    // `failed to save game` -- measured 2026-09-23, on a load that had otherwise worked.
+    // It used to close here, on the reasoning that a container bound to another account is not one
+    // this session can write back. That reasoning was checked against the file and is wrong: the
+    // staged copy is rebound at stage time, and `scripts/ds2-sl2-rebind.py --show` reads
+    // `USER_DATA000 +0x39 = 01100001018fa4be` out of both it and the player's own container -- the
+    // same account. Nothing about the staged file makes it unwritable.
     //
-    // The character is in the world by now and was built from the donor container while the window
-    // was open, so nothing this session still needs is behind it.
-    let diverted = ds2_save_redirect::open_redirect::disarm();
+    // Closing it did something else, and that something is the bug. The character in the world came
+    // out of the donor container; the game saves it the moment the world starts; and with the window
+    // shut that write goes to the path the game asked for, which is the player's own save. Leaving
+    // the window open is what makes the line above -- your own container is untouched -- true.
+    let diverted = ds2_save_redirect::open_redirect::diverted();
     // SAFETY: the game is mapped and past `DllMain`; this is its own thread, in the world.
     let save_side = unsafe { session_dir::SAVE.disarm() };
     log_line(format_args!(
         "{LOG_PREFIX} swap in game -- diverted={diverted} save-side-restored={save_side}. The \
-         dialogs are yours again and this character's saves go to your own folder"
+         dialogs are yours again and this character's saves go to the staged copy"
     ));
 }
 
