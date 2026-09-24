@@ -76,27 +76,15 @@ static PENDING: Mutex<Option<Pending>> = Mutex::new(None);
 
 /// The `.sl2` the game is reading and writing right now, redirected or not.
 ///
-/// `ds2-save-redirect`'s detour records the directory it produced in both arms, so that is the live
-/// path whether or not the launch-time redirect is armed -- which is the distinction this row must
-/// not have to care about. `None` means the game has not built a save path yet, which cannot be true
-/// while a pause menu is up and is reported rather than guessed around.
-///
-/// # The save-side swap wins over it, and has to
-///
-/// [`crate::swap`] does not go through that detour at all: it replaces `SLSaveSession`'s directory
-/// override in the vtable, so after an in-session character swap the game writes somewhere the
-/// detour has never heard of and `live_directory` still answers the folder the player's own
-/// container is in. Exporting that would hand the player a copy of the character they swapped away
-/// from, named after the one they are playing -- a wrong file that looks exactly like a right one.
+/// Every seam that can move the container is resolved by
+/// [`ds2_save_redirect::live_container`], and asking it rather than the directory builder is what
+/// this row got wrong. A swap arms nothing the builder knows about, so the builder went on naming
+/// the player's own folder and the export copied a container the game had not written to since the
+/// session began: the player got the save they started with, named after the character they had
+/// been playing. Reported 2026-09-24, one export to `DS2 Saves\new` that loaded back as the
+/// original character.
 fn live_container() -> Option<PathBuf> {
-    if ds2_save_redirect::session_dir::SAVE.armed() {
-        let swapped = ds2_save_redirect::session_dir::SAVE.directory();
-        if !swapped.is_empty() {
-            return Some(PathBuf::from(swapped).join(ds2_save_redirect::active_save_file_name()));
-        }
-    }
-    let directory = ds2_save_redirect::live_directory()?;
-    Some(directory.join(ds2_save_redirect::active_save_file_name()))
+    ds2_save_redirect::live_container()
 }
 /// The dialog's type dropdown: saves, then everything, so a player who wants another name can have
 /// one.

@@ -14,13 +14,17 @@
 //! answers a different path. `er-quit-menu-core::save_dest_open_redirect` is the module this
 //! mirrors, down to the re-entry guard and the full-path match.
 //!
-//! # It diverts reads, and that is what keeps a save safe
+//! # It diverts every open of that path, writes included
 //!
-//! [`arm`] takes the container the game will ask for and the one to answer with, and only opens
-//! that ask for read access are diverted. A write-open of the same path passes through untouched,
-//! so the player's own container stays the thing their progress is written to and this cannot
-//! damage it. That also means a character loaded out of a donor file saves into the player's own
-//! container -- a separate decision, and one that belongs to whoever arms the save side, not here.
+//! [`arm`] takes the container the game will ask for and the one to answer with, and an open of
+//! that path is answered whatever it asked for -- see [`GENERIC_WRITE`], which used to gate this on
+//! read access and was measured doing the opposite of what it promised. So a character loaded out
+//! of a donor file both reads and saves there, and the player's own container is the file nothing
+//! touches for as long as the window is armed.
+//!
+//! Which makes this the only seam that knows where the saves are. No directory inside the game
+//! moves, so `SAVE_DIR_BUILD`'s recorded answer goes on naming the player's own folder the whole
+//! time. [`diverted_path`] is what a caller asks instead of believing that folder.
 //!
 //! # The window is narrow on purpose
 //!
@@ -67,7 +71,16 @@ unsafe extern "system" {
 static TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 
 /// The armed window: the path the game will ask for, and the one to answer with.
-static WINDOW: Mutex<Option<(PathBuf, Vec<u16>)>> = Mutex::new(None);
+struct Window {
+    /// The container the game will ask for.
+    asked: PathBuf,
+    /// The container it is answered with.
+    answer: PathBuf,
+    /// `answer`, NUL-terminated, ready to hand straight to the original API.
+    answer_wide: Vec<u16>,
+}
+
+static WINDOW: Mutex<Option<Window>> = Mutex::new(None);
 
 /// Reads diverted since the window was armed.
 static DIVERTED: AtomicUsize = AtomicUsize::new(0);
@@ -99,7 +112,11 @@ pub fn arm(asked: &Path, answer: &Path) -> bool {
         let Ok(mut window) = WINDOW.lock() else {
             return false;
         };
-        *window = Some((asked.to_path_buf(), wide));
+        *window = Some(Window {
+            asked: asked.to_path_buf(),
+            answer: answer.to_path_buf(),
+            answer_wide: wide,
+        });
         DIVERTED.store(0, Ordering::Relaxed);
     }
     log(format_args!(
@@ -175,9 +192,34 @@ unsafe fn wide_to_string(text: *const u16) -> Option<String> {
 /// diversion is a failed swap, a blocked one is a game that never comes back.
 fn answer_for(path: &str) -> Option<Vec<u16>> {
     let window = WINDOW.try_lock().ok()?;
-    let (asked, answer) = window.as_ref()?;
-    let asked = asked.as_os_str().to_string_lossy();
-    asked.eq_ignore_ascii_case(path).then(|| answer.clone())
+    let window = window.as_ref()?;
+    window
+        .asked
+        .as_os_str()
+        .to_string_lossy()
+        .eq_ignore_ascii_case(path)
+        .then(|| window.answer_wide.clone())
+}
+
+/// What an open of `asked` would be handed instead, or `None` when no armed window is about it.
+///
+/// **This is how a caller finds out where the saves are going.** A swap arms this window and
+/// nothing else -- no directory field inside the game moves, and the save-session override is
+/// deliberately left unarmed -- so anything that asks the game which folder it built is told the
+/// player's own container while every write lands in the staged one.
+///
+/// The same case-insensitive full-path comparison [`answer_for`] makes, because the answer has to
+/// be the one the detour will actually give. `lock` rather than `try_lock`: this runs on the game
+/// thread outside the detour, where a missed answer is the wrong file rather than a slow one.
+pub fn diverted_path(asked: &Path) -> Option<PathBuf> {
+    let window = WINDOW.lock().ok()?;
+    let window = window.as_ref()?;
+    window
+        .asked
+        .as_os_str()
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&asked.as_os_str().to_string_lossy())
+        .then(|| window.answer.clone())
 }
 
 /// Which of the two container paths this open names, if either.
@@ -195,17 +237,18 @@ fn container_role(path: &str) -> Option<&'static str> {
     let lowered = path.to_ascii_lowercase();
     if lowered.contains("ds2sofs") || lowered.ends_with(".sl2") || lowered.ends_with(".sl2.bak") {
         let window = WINDOW.try_lock().ok()?;
-        let Some((asked, answer)) = window.as_ref() else {
+        let Some(window) = window.as_ref() else {
             return Some("save-shaped");
         };
-        if asked
+        if window
+            .asked
             .as_os_str()
             .to_string_lossy()
             .eq_ignore_ascii_case(path)
         {
             return Some("own");
         }
-        let staged = String::from_utf16_lossy(answer.strip_suffix(&[0]).unwrap_or(answer));
+        let staged = window.answer.as_os_str().to_string_lossy();
         return Some(if staged.eq_ignore_ascii_case(path) {
             "staged"
         } else {
@@ -356,4 +399,42 @@ pub unsafe fn install() -> bool {
 /// title. `false` on a build where the export could not be resolved or MinHook refused the site.
 pub fn installed() -> bool {
     TRAMPOLINE.load(Ordering::Acquire) != 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// [`diverted_path`] answers what the detour would answer, and only for the path it is armed
+    /// for.
+    ///
+    /// One test rather than four because [`WINDOW`] is process-wide and `cargo test` runs cases in
+    /// parallel: split up, they would arm and disarm each other's window.
+    #[test]
+    fn the_window_reports_the_container_it_will_hand_over() {
+        let own = Path::new(r"C:\users\steamuser\AppData\Roaming\DarkSoulsII\aaa\DS2SOFS0000.sl2");
+        let staged = Path::new(r"S:\Game\ds2-swapped-save\DS2SOFS0000.sl2");
+
+        assert_eq!(
+            diverted_path(own),
+            None,
+            "nothing is armed in a fresh process"
+        );
+
+        assert!(arm(own, staged));
+        assert_eq!(diverted_path(own).as_deref(), Some(staged));
+        // Windows paths are case-insensitive, and the game's spelling of its own container is not
+        // guaranteed to match the directory builder's character for character. The detour compares
+        // this way, so this has to as well or the two would disagree about the same open.
+        let shouted = PathBuf::from(own.as_os_str().to_string_lossy().to_uppercase());
+        assert_eq!(diverted_path(&shouted).as_deref(), Some(staged));
+        assert_eq!(
+            diverted_path(staged),
+            None,
+            "the answer is not itself diverted, or a caller would follow it in a circle"
+        );
+
+        disarm();
+        assert_eq!(diverted_path(own), None);
+    }
 }
