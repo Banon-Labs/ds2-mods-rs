@@ -85,8 +85,13 @@ mod typed;
 /// Anything that does not resolve is SKIPPED and logged rather than failing the whole build: one
 /// unrecognised name should cost the player that item, not the other thirty. A name carried by
 /// SEVERAL ids is not in that category -- see the comment on the collision arm below.
+///
+/// # Safety
+///
+/// Asks the game what the character already holds, through
+/// [`game::already_held`]. **Game thread only**, which is where the flow that calls this runs.
 #[cfg(windows)]
-pub(crate) fn build_items(build: &ds2_build_import_core::Build) -> Vec<game::ItemSpawn> {
+pub(crate) unsafe fn build_items(build: &ds2_build_import_core::Build) -> Vec<game::ItemSpawn> {
     use ds2_build_import_core::{Infusion, ItemError, id_for, is_empty_slot};
 
     let mut out = Vec::new();
@@ -125,7 +130,8 @@ pub(crate) fn build_items(build: &ds2_build_import_core::Build) -> Vec<game::Ite
         // DO NOT GRANT WHAT THE CHARACTER ALREADY HAS. Their copy carries their reinforcement,
         // their infusion and their durability; a minted duplicate carries none of that and would
         // then be the one equipped. Silence about an item is not a request for another one.
-        if game::already_held(item_id) {
+        // SAFETY: game thread, per this function's contract.
+        if unsafe { game::already_held(item_id) } {
             return;
         }
         out.push(game::ItemSpawn {
