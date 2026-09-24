@@ -1202,16 +1202,74 @@ texture of its own. `FLO_ADDED_TAB_ICON_SOURCE_LEFT` is the one constant to chan
 slice is ever wanted; a genuinely new glyph needs a texture, which is a different piece of work.
 
 **So the colour is what tells the two apart.** Two identical hexagons side by side is the state
-three commits shipped, and nothing in the geometry can fix it while the art is shared. The icon
-record therefore takes a copy of the plate's transform block and writes
-`FLO_ADDED_TAB_ICON_HUE` into it at `FLO_ADDED_TAB_ICON_TINT_STRENGTH` -- the same hue the added
-rows wear, at full strength rather than a row's `120`, because the tab has no caption beside it and
-nothing to be compared against at a glance. The copy is the load-bearing part: the pointer the
-cloned record arrives with is the plate's, and the plate draws all six shipped hexagons, so a colour
-written through it repaints the whole strip. Same machinery as a row's icon, flags included --
-`FLO_TRANSFORM_COLOUR_LIVE | FLO_TRANSFORM_COLOUR_RGB`, without which the colour is inert.
+three commits shipped, and nothing in the geometry can fix it while the art is shared.
 
-Not yet in front of a running game.
+### A shape's colour is not in its record's transform, and a run proved it
+
+The first attempt reused the machinery that tints a row's icon: the added hexagon's record took a
+copy of the plate's transform block, `ff6450ff` went into `FLO_TRANSFORM_COLOUR_OFFSET`, and both
+flag bits went in beside it. The log said so --
+
+```
+ds2-menu-row: strip hexagon tinted slot=9 colour=[ff, 64, 50, ff] flags=0x10110
+```
+
+-- and the screenshot showed seven hexagons, the seventh the same grey as the sixth. The write
+happened; the draw never read it. A log line proves the write and nothing else.
+
+`FUN_140b50bc0` is why, and it is readable without a game. It dispatches on the record's kind:
+
+| record names | kind bit | builder | is the transform's colour read? |
+|---|---|---|---|
+| a definition | `& 2`, `& 4` | `FUN_140b50f20` | yes -- this is the row icon's path |
+| a shape | `& 1` | `FUN_140b51270` | no |
+
+On the shape path the record never reaches the builder. `FUN_140b51270(doc, shape, ...)` allocates
+a `FeComponentTextureShape` and fills it from the shape alone, via `FUN_140b70200`, which is where
+the colour actually comes from -- four bytes per quad, at `quad+0x18`, reversed over their first
+three on the way into the drawable's colour array:
+
+```asm
+mov  al, byte ptr [quad+0x18]   ; -> array[2]
+mov  al, byte ptr [quad+0x19]   ; -> array[1]
+mov  al, byte ptr [quad+0x1a]   ; -> array[0]
+mov  al, byte ptr [quad+0x1b]   ; -> array[3]
+```
+
+So the tint moved into the quad `crates/ds2-menu-row/src/icon.rs` builds -- and the tab came back
+grey a second time.
+
+### The hexagon you can see is the third record, not the first
+
+`strip.rs` writes two hexagons for the seventh tab, and the run named both:
+
+```
+ds2-menu-row: icon built shape=0xe268 ...          slot 9   the plate's last period, re-sliced
+ds2-menu-row: strip hexagon copied slot=11 ...     slot 11  the sixth tab's own plate, copied
+```
+
+`FUN_140b6bd80` appends the built component to the parent's display list at `[parent+0x66]` and
+sorts nothing, so the strip draws in record order and slot 11 covers slot 9. Both tints so far had
+landed on the layer underneath.
+
+The copy at slot 11 is a record naming definition `0x026a` -- so it takes `FUN_140b50f20`, which is
+the row icon's path, which is the path where a transform block's colour is read. It already owns a
+copied transform block (`END_CAP_TRANSFORM`, taken so moving it does not move the sixth tab's), so
+the tint is two writes into a block this crate already holds:
+
+```
+ds2-menu-row: strip hexagon copied slot=11 x=325.05 colour=[ff, 64, 50, ff] flags=0x20110
+```
+
+That one is on screen and the user called it better. The hue is `FLO_ADDED_ROW_HUE` at full
+strength rather than a row's `120`, because the tab has no caption beside it and nothing to be
+compared against at a glance.
+
+**The quad's colour order was left unsettled on purpose.** `FLO_QUAD_COLOUR_OFFSET` records where a
+shape's colour lives, because that reading is what explains the two grey runs -- but the quad in
+question is the covered layer, so no screenshot could ever confirm which of its bytes is red. The
+guess that was briefly there is gone; a constant that reads as a measurement and is not one is
+worse than no constant.
 
 ### What runs have shown since
 

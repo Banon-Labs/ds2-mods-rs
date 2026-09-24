@@ -225,6 +225,14 @@ unsafe fn build_icon(plate: *const u8) -> Option<*mut u8> {
     icon.quads[ds2_rva::FLO_QUAD_X_OFFSET..][..4]
         .copy_from_slice(&(offset[0] + ds2_rva::FLO_TAB_PITCH).to_le_bytes());
 
+    // NOT the colour. This slice is the layer UNDERNEATH the seventh tab's hexagon, and a run
+    // established that: `crate::strip` writes a copy of the sixth tab's own plate after this record,
+    // `FUN_140b6bd80` appends to the display list with no sort, and later means over. A tint written
+    // into this quad is a tint nobody can see, and its byte order is a guess no screenshot could
+    // ever settle. `crate::strip` tints the copy instead, through a transform block, whose order a
+    // run did settle. `FLO_QUAD_COLOUR_OFFSET` records where a shape's colour lives, because that
+    // reading is what explains the first two attempts -- it is just not the layer to write it on.
+
     // The pointers last, so nothing in the struct is addressed before it holds what it should.
     let sources = icon.sources.as_ptr() as u64;
     icon.quads[ds2_rva::FLO_QUAD_SOURCE_OFFSET..][..8].copy_from_slice(&sources.to_le_bytes());
@@ -237,7 +245,7 @@ unsafe fn build_icon(plate: *const u8) -> Option<*mut u8> {
     let leaked: &'static mut Icon = Box::leak(icon);
     log(format_args!(
         "{LOG_PREFIX} icon built shape={:#x} source={}..{} screen={}..{} -- the plate's last \
-         {} of atlas, drawn one pitch on",
+         {} of atlas, drawn one pitch on, under the tinted copy `strip` writes after it",
         ds2_rva::FLO_ADDED_TAB_ICON_SHAPE,
         ds2_rva::FLO_ADDED_TAB_ICON_SOURCE_LEFT,
         rect[2],

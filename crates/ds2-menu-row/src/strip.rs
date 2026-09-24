@@ -140,31 +140,25 @@ use crate::install::log;
 const CHILDREN: usize = ds2_rva::FLO_TAB_STRIP_CHILDREN + 4;
 
 /// Transform blocks the replacement owns: the added cell's, the added panel's, the added hexagon
-/// plate's, the `RB` label's and the added icon's.
+/// plate's and the `RB` label's.
 ///
 /// A record's `+0x08` points at a block in the document, and two records pointing at one block are
-/// one position -- and one colour -- between them, so anything this moves or tints needs a copy
-/// first.
-///
-/// The icon is here for the colour rather than for a move. It does not move: the slice
-/// [`crate::icon`] builds carries its own offset, and this copy goes back verbatim except for the
-/// tint. What it cannot do is write that tint through the block it arrives pointing at, which is
-/// the plate's -- the one record holding all six shipped hexagons. A colour written there repaints
-/// the whole strip.
-const MOVED: usize = 5;
+/// one position between them -- so anything this moves needs a copy first. The added icon is not
+/// here, because it does not move: the slice [`crate::icon`] builds carries its own offset, and its
+/// colour is in that slice's quad rather than in a transform block.
+const MOVED: usize = 4;
 
 /// Which of [`Strip::transforms`] belongs to what.
 const CELL_TRANSFORM: usize = 0;
 const END_CAP_TRANSFORM: usize = 1;
 const RB_LABEL_TRANSFORM: usize = 2;
 const PANEL_TRANSFORM: usize = 3;
-const ICON_TRANSFORM: usize = 4;
 
 /// The colour the seventh tab's hexagon is drawn in.
 ///
-/// The same [`crate::Tint`] a registered row's icon takes, on the same machinery, so the hue and
-/// the byte order it is laid down in are the ones a run already settled -- what differs is the
-/// strength, and [`ds2_rva::FLO_ADDED_TAB_ICON_TINT_STRENGTH`] says why.
+/// The same [`crate::Tint`] a registered row's icon takes, on the same transform-block machinery,
+/// so the hue and the byte order it is laid down in are the ones a run already settled. What
+/// differs is the strength, and [`ds2_rva::FLO_ADDED_TAB_ICON_TINT_STRENGTH`] says why.
 const TAB_ICON_TINT: crate::Tint = crate::Tint {
     rgb: ds2_rva::FLO_ADDED_TAB_ICON_HUE,
     strength: ds2_rva::FLO_ADDED_TAB_ICON_TINT_STRENGTH,
@@ -469,9 +463,10 @@ unsafe fn build(original: *mut u8) -> Option<*mut u8> {
     )?;
 
     // The hexagon, cloned from the plate beside it, with its shape pointed at `crate::icon`'s slice
-    // and a depth that puts it over the plate and under the cells. It does not move -- the slice
-    // carries its own offset -- but it does take a copy of the plate's transform block, because the
-    // colour below has to land on this hexagon and not on the six the plate draws.
+    // and a depth that puts it over the plate and under the cells. Its transform pointer is the
+    // plate's and stays that way: the slice carries its own offset, so the record does not move --
+    // and its colour is in that slice's quad rather than here. See `FLO_QUAD_COLOUR_OFFSET` for the
+    // run that established the difference.
     if plan.icon != usize::MAX {
         let template = ds2_rva::FLO_TAB_STRIP_PLATE * stride;
         let at = plan.icon * stride;
@@ -480,30 +475,6 @@ unsafe fn build(original: *mut u8) -> Option<*mut u8> {
             .copy_from_slice(&(ds2_rva::FLO_ADDED_TAB_ICON_SHAPE as u16).to_le_bytes());
         strip.records[at + ds2_rva::FLO_RECORD_DEPTH_OFFSET..][..2]
             .copy_from_slice(&ds2_rva::FLO_ADDED_TAB_ICON_DEPTH.to_le_bytes());
-        let block = own_transform(
-            &mut strip.records,
-            &mut strip.transforms,
-            plan.icon,
-            ICON_TRANSFORM,
-            "icon",
-        )?;
-        // The tint, and the licence to use it. A colour with no flag bits is inert and a run proved
-        // it -- see `FLO_TRANSFORM_FLAGS_OFFSET`. The bits are or-ed into what the plate's block
-        // already carried rather than written over it, the way a row's icon does it in
-        // `crate::layout`: the other bits in that word are the plate's own and none of them are
-        // about colour.
-        let flags_at = ds2_rva::FLO_TRANSFORM_FLAGS_OFFSET;
-        let flags = u32::from_le_bytes(strip.transforms[block + flags_at..][..4].try_into().ok()?)
-            | TAB_ICON_TINT.flags();
-        strip.transforms[block + flags_at..][..4].copy_from_slice(&flags.to_le_bytes());
-        strip.transforms[block + ds2_rva::FLO_TRANSFORM_COLOUR_OFFSET..][..4]
-            .copy_from_slice(&TAB_ICON_TINT.bytes());
-        log(format_args!(
-            "{LOG_PREFIX} strip hexagon tinted slot={} colour={:02x?} flags={flags:#x} \
-             -- the seventh tab wears the sixth tab's art, and this is what tells them apart",
-            plan.icon,
-            TAB_ICON_TINT.bytes(),
-        ));
     }
 
     // The cell template's transform, copied so moving ours does not move the sixth tab -- and, when
@@ -544,10 +515,27 @@ unsafe fn build(original: *mut u8) -> Option<*mut u8> {
             REFUSED.fetch_add(1, Ordering::Relaxed);
             return None;
         }
+        // The tint, on the layer that is actually on top. `FUN_140b6bd80` appends to the parent's
+        // display list at `[parent+0x66]` with no sort, so the strip draws in record order and this
+        // copy -- the last hexagon record written -- covers the slice `crate::icon` builds. Two runs
+        // tinted the slice instead and the tab came back the shipped grey both times.
+        //
+        // This record names a DEFINITION, which is the other half of why it works: `FUN_140b50bc0`
+        // sends `kind & 1` to a shape builder that never sees the transform, and everything else to
+        // `FUN_140b50f20`, the path a row's icon is tinted on. See `FLO_QUAD_COLOUR_OFFSET`.
+        let flags_at = ds2_rva::FLO_TRANSFORM_FLAGS_OFFSET;
+        let block = END_CAP_TRANSFORM * ds2_rva::FLO_TRANSFORM_SIZE;
+        let flags = u32::from_le_bytes(strip.transforms[block + flags_at..][..4].try_into().ok()?)
+            | TAB_ICON_TINT.flags();
+        strip.transforms[block + flags_at..][..4].copy_from_slice(&flags.to_le_bytes());
+        strip.transforms[block + ds2_rva::FLO_TRANSFORM_COLOUR_OFFSET..][..4]
+            .copy_from_slice(&TAB_ICON_TINT.bytes());
         log(format_args!(
-            "{LOG_PREFIX} strip hexagon copied slot={} x={moved} -- the sixth tab's own plate, \
-             drawn again one tab along, and the sixth tab keeps the one it had",
-            plan.end_cap
+            "{LOG_PREFIX} strip hexagon copied slot={} x={moved} colour={:02x?} flags={flags:#x} \
+             -- the sixth tab's own plate, drawn again one tab along and tinted, and the sixth tab \
+             keeps the one it had",
+            plan.end_cap,
+            TAB_ICON_TINT.bytes(),
         ));
     }
     // The `RB` prompt really is furniture, and it really is standing where the seventh hexagon
@@ -815,13 +803,12 @@ mod tests {
             "the chevron would not be under the hexagon, so moving it is gratuitous"
         );
         const {
-            // Five records, five blocks: two sharing one would move -- or tint -- both.
+            // Four records, four blocks: two sharing one would move both.
             let slots = [
                 CELL_TRANSFORM,
                 END_CAP_TRANSFORM,
                 RB_LABEL_TRANSFORM,
                 PANEL_TRANSFORM,
-                ICON_TRANSFORM,
             ];
             assert!(MOVED == slots.len());
             let mut i = 0;
@@ -834,30 +821,6 @@ mod tests {
                 }
                 i += 1;
             }
-        }
-    }
-
-    /// The seventh tab's colour is one the draw will actually apply.
-    ///
-    /// The inert case has already cost a run: a colour word with no flag bits beside it changed
-    /// nothing on screen and said nothing in the log either way. `Tint::flags` returns zero for a
-    /// mix that came out white, so a strength turned down to nothing takes the licence away with
-    /// it -- and a white tint on a hexagon whose art is the sixth tab's is a seventh tab nobody can
-    /// pick out of the strip.
-    #[test]
-    fn the_tab_hexagon_is_tinted_with_a_colour_the_draw_will_use() {
-        assert_ne!(TAB_ICON_TINT.bytes(), [0xff, 0xff, 0xff, 0xff]);
-        assert_eq!(
-            TAB_ICON_TINT.flags(),
-            ds2_rva::FLO_TRANSFORM_COLOUR_LIVE | ds2_rva::FLO_TRANSFORM_COLOUR_RGB
-        );
-        // Opaque. The builder's own test for a child it can flatten away is `+0x1b == 0xff`, and a
-        // tinted hexagon that gets flattened is a hexagon the colour never reaches.
-        assert_eq!(TAB_ICON_TINT.bytes()[ds2_rva::FLO_TINT_ALPHA], 0xff);
-        const {
-            // Both writes land inside the block that was copied, or they are off the end of it.
-            assert!(ds2_rva::FLO_TRANSFORM_COLOUR_OFFSET + 4 <= ds2_rva::FLO_TRANSFORM_SIZE);
-            assert!(ds2_rva::FLO_TRANSFORM_FLAGS_OFFSET + 4 <= ds2_rva::FLO_TRANSFORM_SIZE);
         }
     }
 
