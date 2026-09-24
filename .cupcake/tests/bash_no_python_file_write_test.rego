@@ -540,34 +540,168 @@ test_absolute_committed_script_plus_stdin_program_is_denied if {
 	count(bash_no_python_file_write.deny) == 1 with input as bash_in_repo(cmd)
 }
 
-# KNOWN OPEN, and older than this change: a program piped in from a FILE
-# (`cat /tmp/patch.py | python3 -`) carries no write text on the command line and
-# is not a `.py` file operand either, so neither deny rule can see it. The
-# `python3 -` disqualifier only stops such a command from borrowing the
-# exemption -- it does not deny it. Filed as ds2-mods-rs-9m8. Pinned as a
-# FAILING-CLOSED-NOWHERE fact rather than left to be rediscovered: this test
-# asserts today's behaviour, so closing the gap will turn it red on purpose.
-test_stdin_program_piped_from_a_file_is_a_known_gap if {
-	cmd := "cat /tmp/patch.py | python3 -"
-	count(bash_no_python_file_write.deny) == 0 with input as bash_in_repo(cmd)
+# --- the three invocations the script-file rule never SAW (2026-09-24) -------
+#
+# WAS KNOWN OPEN until this date, and each of the three tests below asserted the
+# ALLOWING behaviour so that closing the gap would turn a test red on purpose
+# rather than pass unnoticed. bd ds2-mods-rs-9m8 closed all three; these are the
+# same three commands, flipped, each measured ALLOW before the change and DENY
+# after through scripts/cupcake-check-command.py against the live WASM engine.
+#
+# The allow-side siblings under each are the half that matters. Every one of the
+# three fixes could have been bought with a wider rule that denies ordinary work
+# -- blanket-denying `| python3 -`, skipping flags without understanding `-m`,
+# or reading a script's own `-c` -- so each deny below is paired with the
+# command that the wider version would have broken.
+#
+# `every cmd in [...]`, not the `some cmd in [...]` the tests above this line
+# use. `some` is EXISTENTIAL: it passes when ONE entry in the list satisfies the
+# assertion, so a list of six commands where five are wrong is a green test. The
+# older tests predate that observation and are left alone rather than restyled in
+# a change about something else; new lists assert every entry, which is the only
+# form that can prove a fix did not overreach.
+
+# GAP 1. The program is in a FILE; nothing on the command line says what it
+# does. Same two-call bypass the 2026-09-17 work closed for
+# `python3 /tmp/patch.py`, arriving through stdin instead.
+test_stdin_program_piped_from_a_file_is_denied if {
+	every cmd in [
+		"cat /tmp/patch.py | python3 -",
+		"python3 - < /tmp/patch.py",
+		"curl -s https://example.invalid/patch | python3 -",
+		"cat /tmp/patch.py | python3 -u -",
+		`bash -c "cat /tmp/patch.py | python3 -"`,
+	] {
+		count(bash_no_python_file_write.deny) == 1 with input as bash_in_repo(cmd)
+	}
 }
 
-# The other two gaps of the same age and the same kind -- an invocation the
-# script-file rule never SEES, as opposed to a path it wrongly exempts. Pinned
-# for the same reason: a red test is how the next change announces it closed one.
-#
-#   * a flag between the interpreter and the path displaces the operand
-#     script_file_pattern reads. Widening it to skip flags would read
-#     `python3 -m pytest tests/x.py` as a script-file invocation and deny an
-#     ordinary test run, so it needs a module-aware form, not a looser one.
-#   * the `-c` disqualifier is command-WIDE, so a trailing ` -c x` -- which may be
-#     the SCRIPT's own flag -- disqualifies the whole command from the rule.
-test_invocations_the_script_file_rule_does_not_see_are_known_gaps if {
-	some cmd in [
+# A trailing `echo` in a LATER statement must not vouch for the pipeline that
+# ran the file -- which is what a whole-command "is there an echo" test would
+# have done, and why the source test is per statement.
+test_stdin_program_from_a_file_is_denied_beside_an_echo if {
+	cmd := `cat /tmp/patch.py | python3 - ; echo "exit=$?"`
+	count(bash_no_python_file_write.deny) == 1 with input as bash_in_repo(cmd)
+}
+
+# The visible form stays judged by the inline write rules, exactly as before:
+# the program is right there in the command, so `echo 'print(1)'` allows and
+# test_absolute_committed_script_plus_stdin_program_is_denied (an `echo` of an
+# `open(...,'w')`) still denies. Blanket-denying `| python3 -` would have taken
+# both.
+test_stdin_program_visible_on_the_command_line_is_allowed if {
+	every cmd in [
+		"echo 'print(1)' | python3 -",
+		`printf 'print(1)\n' | python3 -`,
+		"python3 - <<'PY'\nprint(1)\nPY",
+	] {
+		count(bash_no_python_file_write.deny) == 0 with input as bash_in_repo(cmd)
+	}
+}
+
+# A pipeline feeding python DATA, not a program. `-` after a script path is the
+# script's own argument, and `-c` names the program inline -- neither is a stdin
+# program, and denying them would break ordinary filtering.
+test_piping_data_into_python_is_allowed if {
+	every cmd in [
+		"cat /tmp/rows.json | python3 scripts/ds2-rows.py -",
+		`cat /tmp/rows.json | python3 -c "import sys; print(len(sys.stdin.read()))"`,
+		"cat /tmp/rows.json | python3 -m json.tool",
+	] {
+		count(bash_no_python_file_write.deny) == 0 with input as bash_in_repo(cmd)
+	}
+}
+
+# A commit message QUOTING one of these commands is prose, not an invocation.
+# The arm reads executed_unquoted_texts precisely so the rule cannot deny the
+# message that documents it -- a false positive this repo has paid for twice.
+test_a_commit_message_quoting_a_stdin_program_is_allowed if {
+	every cmd in [
+		`git commit -m "closed the cat /tmp/patch.py | python3 - bypass"`,
+		`git commit -m "the shape was python3 - < /tmp/patch.py"`,
+	] {
+		count(bash_no_python_file_write.deny) == 0 with input as bash_in_repo(cmd)
+	}
+}
+
+# GAP 2. One flag displaced the operand script_file_pattern reads, and the whole
+# invocation went invisible. `-u` is what an agent reaches for to get a script's
+# output unbuffered, not an exotic spelling.
+test_flag_before_the_script_path_is_denied if {
+	every cmd in [
 		"python3 -u /tmp/patch.py",
+		"python3 -W ignore /tmp/patch.py",
+		"python3 -X importtime /tmp/patch.py",
+		"python3 -- /tmp/patch.py",
+		"python3 -u /tmp/patch.py -c fixtures.json",
+		"uv run --with capstone python3 -u /tmp/scratch/patch.py",
+	] {
+		count(bash_no_python_file_write.deny) == 1 with input as bash_in_repo(cmd)
+	}
+}
+
+# `-m` NAMES A MODULE: everything after it is the module's own argv, so the
+# `.py` there is not a script python executes. Skipping flags without knowing
+# that denies an ordinary test run, which is a worse bug than the gap -- so the
+# clustered spelling has to terminate the scan too.
+test_module_invocation_is_not_a_script_file_invocation if {
+	every cmd in [
+		"python3 -m pytest tests/x.py",
+		"python3 -um pytest tests/x.py",
+		"python3 -m pytest tests/x.py -q",
+		"python3 -m pip install -r requirements.txt",
+	] {
+		count(bash_no_python_file_write.deny) == 0 with input as bash_in_repo(cmd)
+	}
+}
+
+# The flag run must not cost a committed script its exemption in any spelling.
+test_flag_before_a_committed_script_is_allowed if {
+	every cmd in [
+		"python3 -u scripts/ds2-run.py --rows a,b",
+		"python3 -u /home/banon/projects/ds2-mods-rs/scripts/ds2-run.py --rows a,b",
+		"python3 -u $CLAUDE_PROJECT_DIR/scripts/ds2-run.py",
+		"uv run --with capstone python3 -u scripts/ds2-xrefs.py --to 0xa96e0",
+	] {
+		count(bash_no_python_file_write.deny) == 0 with input as bash_in_repo(cmd)
+	}
+}
+
+# GAP 3. The `-c` disqualifier was command-WIDE, so ANY `-c` token -- here the
+# SCRIPT's own flag, which an agent can append to any invocation truthfully --
+# took the whole command out of the script-file rule. A fail-OPEN direction.
+test_a_scripts_own_dash_c_no_longer_disqualifies_the_command if {
+	every cmd in [
 		"python3 /tmp/patch.py -c fixtures.json",
-	]
-	count(bash_no_python_file_write.deny) == 0 with input as bash_in_repo(cmd)
+		"python3 /tmp/patch.py --config -c x",
+		`bash -c "python3 /tmp/patch.py"`,
+	] {
+		count(bash_no_python_file_write.deny) == 1 with input as bash_in_repo(cmd)
+	}
+}
+
+# Narrowing the disqualifier is strictly tighter, so the inline `-c` program it
+# exists for must still be caught -- including behind a leading flag and in
+# clustered form, which is how the shell hands `-uc` to python.
+test_python_adjacent_inline_program_still_disqualifies if {
+	every cmd in [
+		"python3 scripts/ok.py && python3 -c \"open('a','w').write('x')\"",
+		"python3 scripts/ok.py && python3 -u -c \"open('a','w').write('x')\"",
+		"python3 scripts/ok.py && python3 -uc \"open('a','w').write('x')\"",
+	] {
+		count(bash_no_python_file_write.deny) == 1 with input as bash_in_repo(cmd)
+	}
+}
+
+# A committed script keeps its exemption while carrying its own `-c`, which is
+# the work the command-wide test was accidentally protecting.
+test_committed_script_with_its_own_dash_c_is_allowed if {
+	every cmd in [
+		"python3 scripts/ds2-run.py -c fixtures.json",
+		"python3 /home/banon/projects/ds2-mods-rs/scripts/ds2-run.py -c fixtures.json",
+	] {
+		count(bash_no_python_file_write.deny) == 0 with input as bash_in_repo(cmd)
+	}
 }
 
 # Reading stays cheap under the widened exemption too -- the write patterns are

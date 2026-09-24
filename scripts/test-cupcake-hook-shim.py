@@ -290,10 +290,43 @@ REWRITE_CASES = [
     ),
     # Fail-safe passthroughs. Each keeps today's behaviour rather than guessing: see the
     # residue notes in cupcake-hook.sh.
+    # A substitution is a protected REGION since 2026-09-24 (bd ds2-mods-rs-a87), not a
+    # reason to abandon the command: its own newlines are left alone, and the boundaries
+    # OUTSIDE it survive. Passing the whole text through cost every statement boundary,
+    # because the engine erases the unquoted newlines itself and the script arrives as one
+    # line -- which is how an `rm` of a scratch path and a `.cupcake` operand on a different
+    # line became one segment and a false destructive deny.
     RewriteCase(
-        "command-substitution-passthrough",
+        "command-substitution-outside-boundaries-survive",
         "run_id=$(date +%s)\necho $run_id",
-        "run_id=$(date +%s)\necho $run_id",
+        "run_id=$(date +%s); echo $run_id",
+    ),
+    # The substitution's OWN newlines stay newlines. Under-segmenting what runs inside the
+    # sub-shell is the same trade the heredoc data body takes, in the safe direction.
+    RewriteCase(
+        "newline-inside-a-substitution-is-left-alone",
+        "x=$(echo a\necho b)\necho done",
+        "x=$(echo a\necho b); echo done",
+    ),
+    # Nesting is by paren depth, so this is ONE region rather than a region ending at the
+    # first `)`.
+    RewriteCase(
+        "nested-substitution-is-one-region",
+        "p=$(dirname $(which ls))\necho $p",
+        "p=$(dirname $(which ls)); echo $p",
+    ),
+    # An unclosed substitution keeps the old passthrough: nothing knows where it ends.
+    RewriteCase(
+        "unclosed-substitution-passthrough",
+        "echo 'it costs $( money'\necho two",
+        "echo 'it costs $( money'\necho two",
+    ),
+    # THE REPORTED SHAPE, reduced: an assignment using a substitution, then a removal of a
+    # scratch path, then a copy naming the guard layer. Three statements, three segments.
+    RewriteCase(
+        "substitution-then-unrelated-rm-then-a-guard-layer-path",
+        'SLUG=$(echo "$REPO" | tr "/" "-")\nrm -rf "$SCRATCH/home-$SLUG"\ncp "$REPO/.cupcake/tests/fixtures/x.jsonl" "$SCRATCH/"',
+        'SLUG=$(echo "$REPO" | tr "/" "-"); rm -rf "$SCRATCH/home-$SLUG"; cp "$REPO/.cupcake/tests/fixtures/x.jsonl" "$SCRATCH/"',
     ),
     RewriteCase(
         "unbalanced-quote-passthrough",
@@ -494,17 +527,30 @@ DECISION_CASES = [
     # residue notes in cupcake-hook.sh). They are exactly as open as they were before this
     # change -- nothing regressed -- and they are pinned as `allow` so that closing one shows
     # up here as a red test rather than going unnoticed.
+    # CLOSED 2026-09-24 (bd ds2-mods-rs-a87), and these two are the pins doing the job they
+    # were put here for: they were `allow` because the shim abandoned any command containing
+    # a substitution, so a real `git push origin main` on the next line was never seen by the
+    # guard that exists to stop it. Treating the substitution as a protected region instead
+    # leaves the boundary outside it intact, and the push is a statement again.
     DecisionCase(
-        "known-open-command-substitution-then-push-main",
+        "command-substitution-then-push-main",
         "run_id=$(date +%s)\ngit push origin main",
-        "allow",
-        "KNOWN-OPEN: `$(` makes the quote-span read meaningless, so the text is passed through",
+        "deny",
+        "the substitution is a region, so the push on the next line is its own statement",
     ),
     DecisionCase(
-        "known-open-backtick-then-push-main",
+        "backtick-then-push-main",
         "echo `date`\ngit push origin main",
+        "deny",
+        "same as the `$(` case: a backtick region no longer costs the whole command",
+    ),
+    # The other direction, which is what makes closing the hole safe rather than merely
+    # stricter: a substitution whose OUTPUT is prose naming the push must still be allowed.
+    DecisionCase(
+        "substitution-carrying-prose-about-a-push",
+        'echo "$(cat notes.txt)"\necho "the rule forbids git push origin main"',
         "allow",
-        "KNOWN-OPEN: same reason as `$(`",
+        "the push is inside a quoted argument to echo, which is data, not a statement",
     ),
     DecisionCase(
         "known-open-two-heredocs-then-push-main",
@@ -567,6 +613,61 @@ def check_decisions() -> list[str]:
     return failures
 
 
+# --- the OTHER wrapper, which is not in this repo and gets a vote anyway -----------------
+#
+# `~/.claude/hooks/cupcake-hook.sh` runs on the same PreToolUse event as this shim, and it
+# evaluates THIS PROJECT'S policies too -- the engine finds the project config from the cwd
+# whichever wrapper invoked it. It does not rewrite newlines. So for as long as it judged the
+# raw text, every rewrite this shim performed was advisory: Claude Code denies when ANY hook
+# denies, and the wrapper's worse-informed verdict won.
+#
+# Measured in vivo 2026-09-24 (bd ds2-mods-rs-a87): a script the shim had split into three
+# statements, and allowed, was denied by the wrapper as one welded line. Fixing the shim alone
+# changed nothing at the prompt. The wrapper now borrows this shim's `--normalize-only`.
+#
+# That file is outside this repo and outside version control, so nothing else can notice it
+# drifting back. This case is what notices. It SKIPS when the wrapper is absent -- a checkout
+# on another machine is not a failure -- and fails only when a wrapper that exists judges the
+# reported shape differently from this shim.
+GLOBAL_WRAPPER = Path.home() / ".claude" / "hooks" / "cupcake-hook.sh"
+
+# The reported shape, reduced: an assignment using a substitution, an `rm` of a scratch path,
+# and a `cp` naming the guard layer. Three statements; only the welded form denies.
+WRAPPER_PROBE = (
+    'SLUG=$(echo "$REPO" | tr "/" "-")\n'
+    'rm -rf "$SCRATCH/home-$SLUG"\n'
+    'cp "$REPO/.cupcake/tests/fixtures/clean.jsonl" "$SCRATCH/home-$SLUG/"'
+)
+
+
+def check_global_wrapper() -> list[str]:
+    if not GLOBAL_WRAPPER.exists():
+        return []
+    env = signal_env({"CLAUDE_PROJECT_DIR": str(REPO)})
+    try:
+        proc = subprocess.run(
+            ["bash", str(GLOBAL_WRAPPER)],
+            input=json.dumps(event(WRAPPER_PROBE)).encode(),
+            capture_output=True,
+            text=False,
+            timeout=25,
+            env=env,
+            cwd=str(REPO),
+        )
+    except subprocess.TimeoutExpired:
+        return [f"global-wrapper-borrows-the-rewrite: {GLOBAL_WRAPPER} timed out"]
+    got = verdict(proc.stdout.decode("utf-8", "replace"))
+    if got != "allow":
+        return [
+            "global-wrapper-borrows-the-rewrite: "
+            f"{GLOBAL_WRAPPER} answered {got!r} on a command this shim allows. It is judging "
+            "the raw text, so every newline rewrite here is advisory and false destructive "
+            "denies come back. That wrapper must pipe the event through "
+            "`$CLAUDE_PROJECT_DIR/scripts/cupcake-hook.sh --normalize-only` before evaluating."
+        ]
+    return []
+
+
 def print_table() -> int:
     """Before (raw event straight to cupcake) beside after (through the shim)."""
     width = max(len(case.name) for case in DECISION_CASES)
@@ -598,14 +699,16 @@ def main() -> int:
     if args.table:
         return print_table()
 
-    failures = check_modes() + check_rewrites() + check_decisions()
+    failures = check_modes() + check_rewrites() + check_decisions() + check_global_wrapper()
     if failures:
         for failure in failures:
             print(f"[test-cupcake-hook-shim] FAIL: {failure}")
         return 1
+    wrapper = "checked" if GLOBAL_WRAPPER.exists() else "absent, skipped"
     print(
         f"[test-cupcake-hook-shim] ok ({len(MODES)} permission modes: {', '.join(MODES)}; "
-        f"{len(REWRITE_CASES)} newline-rewrite shapes; {len(DECISION_CASES)} live decisions)"
+        f"{len(REWRITE_CASES)} newline-rewrite shapes; {len(DECISION_CASES)} live decisions; "
+        f"global wrapper {wrapper})"
     )
     return 0
 

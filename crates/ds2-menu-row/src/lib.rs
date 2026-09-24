@@ -6,6 +6,8 @@
 //! below then loop over whatever is registered instead of over one hardcoded row:
 //!
 //! ```no_run
+//! # #[cfg(windows)]
+//! # fn example() -> Result<(), ds2_menu_row::AddRowError> {
 //! ds2_menu_row::add_row(ds2_menu_row::RowSpec {
 //!     tab: ds2_menu_row::Tab::Quit,
 //!     caption: "Quit Game",
@@ -13,8 +15,15 @@
 //!     tint: Some(ds2_menu_row::Tint { rgb: [0xff, 0x64, 0x50], strength: 120 }),
 //!     on_confirm: ds2_menu_row::quit_to_desktop,
 //! })?;
-//! # Ok::<(), ds2_menu_row::AddRowError>(())
+//! # Ok(())
+//! # }
 //! ```
+//!
+//! The `cfg(windows)` wrapper on that example is not decoration. `on_confirm` takes a function
+//! this crate only exports on Windows -- [`install`] and everything reachable from it patches a
+//! live game image -- so on the host the body would not resolve, and a doctest has no cfg of its
+//! own to sit under. Hidden lines keep it out of the rendered example while letting it compile in
+//! both places.
 //!
 //! **The quit-to-desktop row goes through that same call**, made by `ds2-loader`. Nothing in this
 //! crate is privileged, which is the only way to know the API is usable.

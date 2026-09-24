@@ -112,6 +112,12 @@ test_deny_shred_of_the_rulebook if {
 	denied_bash(concat(" ", ["shred", concat("", [cup, "/rulebook.yml"])]))
 }
 
+# `unlink` is `rm` by another name, and it was allowed where `rm` was denied until
+# 2026-09-24. The in-vivo case: a throwaway probe file under `.cupcake/signals/`.
+test_deny_unlink_of_a_signal if {
+	denied_bash(concat(" ", ["unlink", concat("", [cup, "/signals/runtime_evidence_for_head.sh"])]))
+}
+
 test_deny_truncate_of_a_policy if {
 	denied_bash(concat(" ", [
 		"truncate", "-s", "0",

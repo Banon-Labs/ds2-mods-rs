@@ -857,40 +857,11 @@ pub const FE_SEQUENCE_PLAYER_HOP2: usize = 0x30;
 /// The vtable slot `0x140b50860` dispatches to: `jmp [rax+0xc0]`, and `0xc0 / 8 == 24`.
 pub const FE_SEQUENCE_PLAYER_PLAY_SLOT: usize = 24;
 
-/// Put `FeSceneTitle` into its settled state by playing sequence `0x67`. RVA `0x000f3820`.
-///
-/// `FeSubStateTitleMain::v1` calls `0x1400f3e30` (`0x1400fda54`), which plays sequence **`0x66`**
-/// on `[scene+8]` -- the "DARK SOULS II SCHOLAR OF THE FIRST SIN" text animating in -- and nothing
-/// in the phase machine stops it. `0x1400f3820` plays **`0x67`** on the same object, the settled
-/// state, and it is exactly the sequence [`FE_TITLE_MAIN_SEQUENCE_GATE`] waits to observe before a
-/// press is accepted:
-///
-/// ```text
-/// if ([scene+0xf1] != 0) return;
-/// rcx = [scene+8];
-/// if (!rcx) return;
-/// [rcx+0x18]--;
-/// play(rcx, 0x67, 0, 0.0f);
-/// ```
-///
-/// # Why this rather than forcing the gate alone
-///
-/// Forcing [`FE_TITLE_MAIN_SEQUENCE_GATE`] makes the gate report a state the scene is not in: the
-/// press is taken early while `0x66` keeps animating underneath. Playing `0x67` puts the scene in
-/// the state the gate is waiting for, so the flow reaches an interactive menu **as soon as the data
-/// is available rather than pacing itself to an animation** -- which is the behaviour this is kept
-/// for, confirmed in-game.
-///
-/// The four sequence ids used across the Fe scenes are `0x65`, `0x66`, `0x67` and `0x68`, read from
-/// the 91 call sites of the play forwarder `0x140afdb80`, with `0x66`/`0x68` the in and out
-/// transitions and `0x67` the settled state -- corroborated by `FeSubStateTitleLogo` using the same
-/// set.
-///
-/// **Open:** the title text is still seen animating. Whether that is `0x66` continuing in parallel,
-/// `0x67` carrying its own entry animation, or a different object entirely is unresolved; see
-/// `docs/DS2-TITLE-FLOW.md`. That is a question about the remaining animation, NOT a reason to drop
-/// this call, whose effect on when the menu becomes usable is real.
-pub const FE_SCENE_TITLE_PLAY_IDLE: u32 = 0x000f_3820;
+// `FE_SCENE_TITLE_PLAY_IDLE` stood here and named the same RVA as
+// [`FE_SCENE_TITLE_OPEN`]. It described `0x1400f3820` as a five-line sequence play, which is the
+// first branch of it and not the function; the disassembly under the surviving constant is the
+// whole thing. Two constants for one address let a caller pick the name that matched what it
+// wished the call did, so the two were collapsed and `ds2-dialog-skip` now names the open.
 
 // --------------------------------------------------------------------------------------------
 // The title top menu. `docs/DS2-TITLE-FLOW.md` carries the trace these came from.
@@ -2275,13 +2246,38 @@ pub const FE_SEQUENCE_PLAY_FLAG_POSE: i32 = 1;
 /// ... ~1000 further bytes: component lookups, row construction, more plays ...
 /// ```
 ///
-/// # This is the same address as `FE_SCENE_TITLE_PLAY_IDLE`, which is misnamed
+/// # It used to carry a second name, and the second name was a wish
 ///
-/// `ds2-dialog-skip` calls it as "play sequence `0x67` on the title scene". It is the screen's
-/// whole open, rows and all, and `[title_skip] title_settle` defaults ON -- so **the mod itself
-/// opens the title screen during substate `0x17`**, long before `FeSubStateTitleTopMenu` runs.
-/// Tracked as `ds2-mods-rs-ebj`; the duplicate constant is left in place until that lands rather
-/// than editing another crate's call site from here.
+/// `FE_SCENE_TITLE_PLAY_IDLE` named this same address and documented it as "play sequence `0x67`
+/// on the title scene". That is the first branch and not the function: past it run ~1000 further
+/// bytes of component lookups and row construction. `ds2-dialog-skip` called it under that name,
+/// and `[title_skip] title_settle` defaults ON -- so **the mod itself opens the title screen during
+/// substate `0x17`**, long before `FeSubStateTitleTopMenu` runs. That is very likely the cause of
+/// the behaviour recorded elsewhere as a puzzle: "the menu is drawn before it can be used".
+///
+/// The duplicate is gone and the call site names the open. What the call BUYS is unchanged and is
+/// the reason it is kept: `FeSubStateTitleMain::v1` calls `0x1400f3e30` (`0x1400fda54`), which
+/// plays `0x66` on `[scene+8]` -- the "DARK SOULS II SCHOLAR OF THE FIRST SIN" text animating in --
+/// and nothing in the phase machine stops it. Forcing [`FE_TITLE_MAIN_SEQUENCE_GATE`] instead makes
+/// the gate report a state the scene is not in, so the press is taken early while `0x66` keeps
+/// animating underneath. Playing `0x67` puts the scene in the state the gate waits for, so the flow
+/// reaches an interactive menu as soon as the data is available rather than pacing itself to an
+/// animation. Confirmed in-game.
+///
+/// The four sequence ids used across the Fe scenes are `0x65`, `0x66`, `0x67` and `0x68`, read from
+/// the 91 call sites of the play forwarder `0x140afdb80`, with `0x66`/`0x68` the in and out
+/// transitions and `0x67` the settled state -- corroborated by `FeSubStateTitleLogo` using the same
+/// set.
+///
+/// **Open:** the title text is still seen animating. Whether that is `0x66` continuing in parallel,
+/// `0x67` carrying its own entry animation, or a different object entirely is unresolved; see
+/// `docs/DS2-TITLE-FLOW.md`. A question about the remaining animation, not a reason to drop the
+/// call, whose effect on when the menu becomes usable is real.
+///
+/// **Not measured:** one boot with `title_settle` on against one with it off, which is what would
+/// say whether the open is still worth making at `0x17` now that it is known to be an open. The
+/// `FeGroupBase::v1` forwarder at `0x140505ce0` plays a sequence on a scene with no side effects
+/// and is the honest replacement if the answer is no.
 ///
 /// # Why this is the site to hook to hide the screen
 ///

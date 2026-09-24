@@ -74,7 +74,16 @@ guard_layer_paths := {".cupcake", ".git/hooks"}
 # `mv` catches `mv .cupcake .cupcake.off`; `git mv` does NOT match, because `git`
 # is not one of the wrapper words `has_command_verb` steps over, which leaves the
 # tracked rename available as the supported way to rename a policy.
-destructive_verbs := {"rm", "rmdir", "shred", "truncate", "mv"}
+#
+# `unlink` is the plain POSIX single-file delete and was missing until 2026-09-24,
+# so `unlink .cupcake/signals/foo.sh` was allowed where the identical `rm` was
+# denied. Found in vivo: an agent removing a throwaway probe file it had just
+# created under `.cupcake/signals/` reached for it and nothing fired. No tampering
+# was intended and this policy's own comment already says it is not a defence
+# against a determined agent -- but a synonym is not an evasion technique, and a
+# set that denies one spelling of delete and allows the other is an oversight
+# rather than a documented gap.
+destructive_verbs := {"rm", "rmdir", "shred", "truncate", "mv", "unlink"}
 
 halt contains decision if {
 	input.hook_event_name == "PreToolUse"

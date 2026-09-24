@@ -21,25 +21,95 @@ import data.cupcake.system.commands
 #
 # The scan set below is STRICTLY ADDITIVE on purpose: it is the executed-text
 # decomposition (which makes wrapper payloads visible) UNION the raw command
-# exactly as this policy saw it before. Nothing this builtin used to deny can
-# stop being denied. That is deliberately narrower than the repo-owned git
-# guards, which also had their quoted-prose false positives fixed: this file is
-# a vendored Cupcake builtin, and its own false-positive surface -- an unanchored
-# `contains(cmd, "--no-verify")` that fires on a doc, commit message or heredoc
-# merely NAMING the flag -- is a separate defect, filed rather than changed here.
+# exactly as this policy saw it before. It is what the HOOK-DISABLE arms read,
+# and they need the quote characters kept: `hooks_path_dev_null_pattern` lists
+# `'` and `"` among the characters that may stand between the key and the value.
 no_verify_scan_texts := commands.executed_texts(input.tool_input.command) | {input.tool_input.command}
+
+# ---------------------------------------------------------------------------
+# THE FLAG ARMS READ THE UNQUOTED DECOMPOSITION (2026-09-24, bd ds2-mods-rs-1tc)
+#
+# The comment this replaces said this builtin's false-positive surface -- an
+# unanchored `contains(cmd, "--no-verify")` that fires on a commit message merely
+# NAMING the flag -- was "filed rather than changed here". This is that filing
+# coming back, with a second and worse shape found while reproducing it.
+#
+# MEASURED 2026-09-24 through scripts/cupcake-check-command.py, on a commit whose
+# message contains no flag at all:
+#
+#     git commit -m "No apostrophes here, but a bare dash token follows:
+#                    -applaunch 335300 and a path scripts/ds2-run.py."
+#
+# denied with "Git operations with --no-verify are not permitted". The cause is
+# `git_commit_short_no_verify_pattern`'s clustered-short-flag class,
+# `-[a-z]*n[a-z]*`, read against the RAW text: `-applaunch` is a dash token
+# containing an `n`, so it reads as `-n`. Any of `-name`, `-print`, `-uni`,
+# `-append` does the same. A guard that calls a commit message a `--no-verify`
+# commit is not reporting on the command, and the agent who reads that denial
+# goes looking for a flag it never wrote.
+#
+# The issue diagnosed this as quote-parity in commands.rego. It is not: parity was
+# bisected first and cleared. `git commit -m "..."` with ONE apostrophe, with TWO,
+# and with none were each measured ALLOW; the same message with a dash token was
+# DENY. The parity repair landed earlier and holds -- `blank_spans` checks parity
+# per phase -- and `quotes_removed` never needed it, because it splits and keeps
+# the even parts rather than requiring a balanced read. Recording the falsified
+# half matters as much as the fix: nothing in commands.rego needed touching.
+#
+# THE FIX IS THE HELPER THAT WAS ALREADY THERE. commands.executed_unquoted_texts
+# is documented as "the same set with quoted spans removed, for substring/flag
+# tests" -- written for exactly this and never wired to this builtin. It still
+# decomposes `bash -c '...'`, and a payload's flags stand unquoted at the top
+# level of its own text, so every wrapper case in the test file below is kept.
+#
+# WHAT THIS COSTS, stated rather than glossed. A flag quoted WHOLE at the top
+# level -- `git commit "--no-verify"` -- is a real invocation git honours, and
+# removing quoted spans takes it away. The long form is bought back by the
+# lone-quoted-token arm below, which fires only when the ENTIRE quoted span is
+# the flag; a message that mentions the flag in a sentence is a longer span and
+# does not match. The SHORT form is NOT bought back, deliberately: `"-n"` cannot
+# be told from a sentence quoting the `-n` flag, and guessing would trade a
+# contrived true positive for a common false one -- which is the trade that
+# produced this bug.
+no_verify_flag_texts := commands.executed_unquoted_texts(input.tool_input.command)
 
 # Block git commands that bypass verification hooks
 deny contains decision if {
 	input.hook_event_name == "PreToolUse"
 	input.tool_name == "Bash"
 
-	# Every text this command actually executes, plus the raw command itself
-	some text in no_verify_scan_texts
+	# Every text this command actually executes, quoted spans removed, so a flag
+	# is read where a shell would read one and a message is the data it is.
+	some text in no_verify_flag_texts
 	command := lower(text)
 
 	# Check if it's a git command with --no-verify flag
 	contains_git_no_verify(command)
+
+	decision := {
+		"rule_id": "BUILTIN-GIT-BLOCK-NO-VERIFY",
+		"reason": "Git operations with --no-verify are not permitted. Commit hooks must run for code quality and security checks.",
+		"severity": "HIGH",
+	}
+}
+
+# The long flag quoted WHOLE, which is a flag git honours: `git commit
+# "--no-verify"`. The quoted span must be EXACTLY the flag -- a quote character
+# on each side and nothing else inside -- so a message that discusses the flag in
+# a sentence is a longer span and cannot reach this. A message that quotes the
+# bare flag and nothing else (`-m "'--no-verify'"`) does match, and that is the
+# one residual false positive; it is affordable because nobody writes it.
+lone_quoted_no_verify_pattern := concat("", [`(^|[ \t])["']--no`, `-verify["']([ \t]|$)`])
+
+deny contains decision if {
+	input.hook_event_name == "PreToolUse"
+	input.tool_name == "Bash"
+
+	some text in no_verify_scan_texts
+	command := lower(text)
+
+	commands.has_verb(command, "git")
+	regex.match(lone_quoted_no_verify_pattern, command)
 
 	decision := {
 		"rule_id": "BUILTIN-GIT-BLOCK-NO-VERIFY",
