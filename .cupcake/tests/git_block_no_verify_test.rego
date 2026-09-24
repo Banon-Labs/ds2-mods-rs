@@ -440,16 +440,12 @@ test_allow_reading_a_hook_and_grepping_for_the_word if {
 # The shape that denied an inspection one-liner in the sibling guard: a python
 # brace puts a quoted token in command position unless quoted spans are deleted.
 test_allow_python_one_liner_inspecting_a_hook if {
-	denials := guard.deny with input as bash_event(concat("", [
-		`python3 -c "s={'rm'}; print(open('`, hooks_dir, `/pre-commit').read())"`,
-	]))
+	denials := guard.deny with input as bash_event(concat("", [`python3 -c "s={'rm'}; print(open('`, hooks_dir, `/pre-commit').read())"`]))
 	count(denials) == 0
 }
 
 test_allow_commit_message_naming_both_tokens if {
-	denials := guard.deny with input as bash_event(concat("", [
-		`git commit -m "stop rm -rf /tmp/lab from reading as a `, hooks_dir, ` removal"`,
-	]))
+	denials := guard.deny with input as bash_event(concat("", [`git commit -m "stop rm -rf /tmp/lab from reading as a `, hooks_dir, ` removal"`]))
 	count(denials) == 0
 }
 
@@ -459,16 +455,12 @@ test_allow_commit_message_naming_both_tokens if {
 # `n` in it, inside the commit MESSAGE, satisfied the clustered-short-flag class
 # `-[a-z]*n[a-z]*` when that class was read against the raw text.
 test_allow_commit_message_carrying_a_dash_token_with_an_n if {
-	denials := guard.deny with input as bash_event(
-		`git commit -m "a bare dash token follows: -applaunch 335300 and a path scripts/ds2-run.py."`,
-	)
+	denials := guard.deny with input as bash_event(`git commit -m "a bare dash token follows: -applaunch 335300 and a path scripts/ds2-run.py."`)
 	count(denials) == 0
 }
 
 test_allow_commit_message_naming_a_find_predicate if {
-	denials := guard.deny with input as bash_event(
-		`git commit -m "the sweep uses find . -name '*.rego' rather than a glob"`,
-	)
+	denials := guard.deny with input as bash_event(`git commit -m "the sweep uses find . -name '*.rego' rather than a glob"`)
 	count(denials) == 0
 }
 
@@ -488,9 +480,7 @@ test_allow_commit_message_with_two_apostrophes if {
 # The long form merely NAMED in a sentence: the surface this file's own comment
 # used to describe as a separate defect left unfixed.
 test_allow_commit_message_naming_the_long_flag if {
-	denials := guard.deny with input as bash_event(concat("", [
-		`git commit -m "the guard denies `, no_verify, ` and that is deliberate"`,
-	]))
+	denials := guard.deny with input as bash_event(concat("", [`git commit -m "the guard denies `, no_verify, ` and that is deliberate"`]))
 	count(denials) == 0
 }
 
