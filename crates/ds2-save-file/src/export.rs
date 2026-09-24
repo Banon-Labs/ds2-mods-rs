@@ -34,7 +34,7 @@
 //! leave the menu before the copy completes, the request stays armed and finishes the next time a
 //! menu is opened. Nothing is lost and nothing is written early.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
@@ -131,10 +131,24 @@ pub fn save_to_file() {
     }
 
     let filter = dialog_filter();
+    // The same folder the load row browses in, and not the container's own. A player saves a
+    // character out so they can load it back, so the two dialogs opening in different places means
+    // hunting for a file they had just written. The container's folder was the wrong answer twice
+    // over: it is inside the Proton prefix, and after a swap it is `ds2-swapped-save` in the game
+    // install, which is a directory this mod owns and nobody should be filing saves into.
+    let start_dir =
+        crate::import::start_directory().or_else(|| source.parent().map(Path::to_path_buf));
+    log_line(format_args!(
+        "{LOG_PREFIX} export dialog opening in {}",
+        start_dir
+            .as_deref()
+            .map(|dir| dir.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "<the shell's own default>".to_owned())
+    ));
     let request = Request {
         intent: Intent::Save,
         title: "Save this character to a file",
-        start_dir: source.parent(),
+        start_dir: start_dir.as_deref(),
         filter: &filter,
         // The vanilla name even inside a co-op session, and deliberately. What is written is a
         // save container; `.sl2` is the spelling every other DS2 tool and every unmodded game
@@ -163,9 +177,10 @@ pub fn save_to_file() {
 
     let destination = with_extension(&picked, ds2_save_file_core::SAVE_EXTENSION);
     // THE ONE REFUSAL THAT PROTECTS A SAVE. Copying a file onto itself truncates it on most
-    // platforms, and the destination dialog opens IN the save's own folder with the save's own name
-    // already filled in -- so pressing Save without typing is the default path to this mistake, not
-    // an exotic one.
+    // platforms, and the dialog opens with the container's own name already filled in -- so a
+    // player who browses to the save's folder and presses Save without typing lands here. It used
+    // to be worse than that: the dialog opened in that folder too, which made this the default
+    // path to the mistake rather than a reachable one.
     if ds2_save_file_core::dest::is_live_container(&destination, &source) {
         log_line(format_args!(
             "{LOG_PREFIX} export REFUSED reason=destination-is-the-live-save path={} -- copying the \

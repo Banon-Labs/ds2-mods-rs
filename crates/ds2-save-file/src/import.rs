@@ -157,7 +157,13 @@ fn session_extension() -> &'static str {
 const DOWNLOADS_WINDOWS_PREFIX: &str = "Z:\\";
 
 /// Where to start browsing. Downloads first, then the folder above the player's own save.
-fn start_directory() -> Option<PathBuf> {
+///
+/// Shared with the export row, which is the point: the two dialogs are one round trip to the
+/// player -- save a character out, browse back to it later -- and a save dialog that opens
+/// somewhere the load dialog never goes makes them hunt for the file they just wrote. It used to
+/// open in the live container's own folder, which after a swap is `ds2-swapped-save` inside the
+/// game install.
+pub(crate) fn start_directory() -> Option<PathBuf> {
     if let Some(downloads) = downloads_directory() {
         return Some(downloads);
     }
