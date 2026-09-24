@@ -287,35 +287,47 @@ return, because `ds2-menu-row` already owns that lookup and MinHook binds one de
 keeps it at `+0x48` as the display list's capacity, so substituting the argument raises the walk
 and the capacity together -- which is the whole of what the lookup substitution does.
 
-### There is no X, and that is the deliverable's one unmet requirement
+### The X is the game's own, and it costs one rect
 
-The mark was asked for as a red X. It is a red **badge**: one of the nine infusion glyphs, cloned,
-moved to the icon's bottom-left corner and tinted opaque red. What was checked before settling:
+The mark was asked for as a red X and it is one -- the same  the game already draws on an unusable
+quick-slot weapon, not art this repo invented and not a tinted stand-in.
 
-* **No X in the document.** `l02_02_Inventory.flo` holds 88 shapes. The nine infusion glyphs tile
-  one atlas block, `x 934.70..1008.30` by `y 3.20..103.20`, with a single gap at
-  `x 984.30..1008.30`, `y 31.95..103.20` that no shape claims. Whether there is art in that gap and
-  what it depicts cannot be established without rendering the texture.
-* **A diagonal is expressible.** Transform `+0x10` and `+0x14` are the off-diagonal matrix terms.
-  Eighteen records in `l02_01_In-Game.flo` use them: fourteen carry `sx = sy = 0`, `|k0| = |k1| = 1`
-  (90 degrees), and two carry `sx = sy = 0.7997`, `k0 = -k1 = 0.1962`, which is a rotation of 13.8
-  degrees at scale 0.8234 (`0.7997/0.8234 = cos`, `0.1962/0.8234 = sin`). So two crossed bars at 45
-  degrees would draw.
-* **There is no bar to rotate.** Every shape samples a specific atlas rect, and no rect in this
-  document can be shown to be a plain fill without looking at the texture. A shape whose source is
-  transparent draws nothing and logs nothing.
+`l01_05_L_key.flo` shape `0x002a` samples `(740.65, 164.05)-(769.65, 195.55)` of **`waku_03`** and
+is drawn by def `0x0036` child `[6]`, element `0x5f5c3e6`, at `(180.70, 501.25)` over an item icon
+whose own box is `(183.15, 419.20)` plus `64 x 128`. So the game puts its  in the lower-left of
+the icon it marks, which is where `FE_ITEM_WARN_OFFSET` puts this one.
 
-Every route bottoms out on the same wall: the atlas cannot be inspected here, so the only art this
-can use is art the game is already observed to draw in that exact place at that exact size. That is
-the nine glyphs. A genuine X needs a texture, which is a different piece of work --
-`ds2-mods-rs` issue filed.
+**Finding it needed no eye.** The earlier reading here -- that the atlas could not be inspected and
+so the art had to be a clone -- was wrong twice over. `scripts/ds2-tpf.py` pulls a named texture out
+of `GameDataEbl` by walking BND4 member names (the archive keys on a path hash and stores no names,
+so no path lookup could ever have found it), and `scripts/ds2-atlas-find.py` reports art as rects by
+thresholding on colour and labelling the connected blobs. Cross-correlated against the  cut out of
+a screenshot of that HUD slot, this rect scores `+0.79` and the next best candidate in `waku_03`
+scores `+0.35`. Its ink is `(745, 169)-(767, 191)`, 367 opaque pixels, mean `rgb(181, 44, 16)` --
+already red, so nothing is tinted any more.
+
+**Why a rect write reaches it.** The cloned infusion glyph samples `waku_03` too: shape `0x005e` in
+`l02_02_Inventory.flo`, `0x0059` in `l02_03_equipment.flo`, `0x010f` in `l02_01_In-Game.flo`, one
+rect `(934.70, 52.50)-(960.30, 78.50)` in all three. A `FeComponentTextureShape` resolves its
+texture at draw time from its shape-table entry's quad, which is shared with every other user of
+that shape -- but `FUN_140b70200` gives each component its own copy of the destination and source
+rects, at `+0x50` and `+0x58`. `crates/ds2-item-warn/src/place.rs` re-points the source copy at the
+ and leaves the entry alone, so one badge changes and nothing else in the document does. Same
+atlas, different rect, no texture of this repo's own.
+
+The destination rect is still measured off the glyph's shipped rect rather than the 's, because
+the per-quad matrix at `+0x48` carries the glyph quad's own offset (`-934.70, -52.50`) and cancels
+it. Re-pointing the source changes which pixels arrive and moves nothing.
 
 ### What the hooks refuse
 
 * the container hook, unless the definition has exactly nine children carrying
   `FLO_INFUSION_CONTAINER_IDS` in order, and unless the child it clones is `kind & 4` -- a nested
-  definition, because a record naming a shape never has its transform colour read (`FUN_140b50bc0`
-  sends `kind & 1` to `FUN_140b70200`, which never sees the record);
+  definition, because that is the subtree `place` walks to reach the component's rect arrays
+  (`FUN_140b50bc0` sends `kind & 1` straight to `FUN_140b51270`, with no definition under it);
+* the placement, unless the component it found carries exactly one quad and its source rect is
+  either the glyph's shipped `(934.70, 52.50)-(960.30, 78.50)` or the  already written over it --
+  so a component this has no business in keeps the rects the game built;
 * both hooks, unless the bytes at the site are the ones recorded, with what was actually found
   printed beside what was wanted;
 * the pair, together: if the cell-bind hook refuses, the container hook is disarmed and every

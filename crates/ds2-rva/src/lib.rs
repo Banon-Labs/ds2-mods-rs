@@ -6833,12 +6833,55 @@ pub const FE_ITEM_CELL_BAR_TOP: f32 = 71.85;
 /// the same tile, so a badge on that line shares a margin with something already on screen.
 pub const FE_ITEM_CELL_BAR_LEFT: f32 = 9.45;
 
-/// The mark's size, taken from the infusion glyph it clones.
+/// The atlas rect the cloned infusion glyph ships with, which is the one thing that must be true
+/// before [`FE_ITEM_WARN_SOURCE`] is written over it.
 ///
-/// Shape `0x005e` -- the leaf under def `0x005f`, which is child `[0]` of the inventory
-/// container -- is one quad sampling `(934.70, 52.50)-(960.30, 78.50)`, so `25.60 x 26.00`. Every
-/// one of the nine is within a unit or two of that.
-pub const FE_ITEM_WARN_SIZE: [f32; 2] = [25.60, 26.00];
+/// Shape `0x005e` in `l02_02_Inventory.flo`, `0x0059` in `l02_03_equipment.flo`, `0x010f` in
+/// `l02_01_In-Game.flo` -- three different indices, ONE rect, and in all three the quad's own
+/// offset is `(-934.70, -52.50)`, cancelling the rect exactly so the art lands on its record's
+/// origin. All three sample **`waku_03`**, which is also where the game keeps its ✕; that is what
+/// makes the swap a rect write rather than a texture swap. Checked with
+/// `scripts/ds2-flo.py shape` on each document.
+pub const FE_ITEM_WARN_SHIPPED_SOURCE: [f32; 4] = [934.70, 52.50, 960.30, 78.50];
+
+/// **The game's own "you cannot use this" ✕**, as a rect in `waku_03`.
+///
+/// This is the mark the HUD already draws on an unusable quick-slot weapon, not art this repo
+/// invented: `l01_05_L_key.flo` shape `0x002a`, one quad, source `(740.65, 164.05)-(769.65,
+/// 195.55)`, drawn by def `0x0036` child `[6]` -- element `0x5f5c3e6` at `(180.70, 501.25)`,
+/// depth `11`, over an item icon whose own box is `(183.15, 419.20)` plus `64 x 128`. So the game
+/// puts it in the LOWER-LEFT of the icon it marks, which is where
+/// [`FE_ITEM_WARN_OFFSET`] puts this one.
+///
+/// Found arithmetically rather than by eye: the ✕ was cut out of a screenshot of that HUD slot,
+/// turned into a red-dominance template, and cross-correlated against every red blob
+/// `scripts/ds2-atlas-find.py` reports in `waku_03`. This rect scores `+0.79`; the next best
+/// candidate in the atlas scores `+0.35`.
+pub const FE_ITEM_WARN_SOURCE: [f32; 4] = [740.65, 164.05, 769.65, 195.55];
+
+/// The opaque extent of the ✕ inside [`FE_ITEM_WARN_SOURCE`], which is bigger than the ink.
+///
+/// `scripts/ds2-atlas-find.py waku_03.dds --red` labels the connected red blob at
+/// `(745, 169)-(767, 191)`, `367` opaque pixels, mean `rgb(181, 44, 16)`. The quad's rect carries
+/// `4.35` of transparent padding on the left and `4.95` on top, and `l01_05_L_key.flo` pays for it
+/// the same way this does: its quad offset is `(-744.80, -168.70)` against a rect starting at
+/// `(740.65, 164.05)`, overshooting by exactly the padding so the INK lands on the record's origin.
+///
+/// The mark is aligned on this and not on the rect, because a corner badge is aligned on what the
+/// player can see.
+pub const FE_ITEM_WARN_INK: [f32; 4] = [745.0, 169.0, 767.0, 191.0];
+
+/// How far the ink sits inside [`FE_ITEM_WARN_SOURCE`]'s top-left corner.
+pub const FE_ITEM_WARN_INK_INSET: [f32; 2] = [
+    FE_ITEM_WARN_INK[0] - FE_ITEM_WARN_SOURCE[0],
+    FE_ITEM_WARN_INK[1] - FE_ITEM_WARN_SOURCE[1],
+];
+
+/// The mark's size: the ✕'s ink, `22.00 x 22.00`, and not the padded rect around it.
+pub const FE_ITEM_WARN_SIZE: [f32; 2] = [
+    FE_ITEM_WARN_INK[2] - FE_ITEM_WARN_INK[0],
+    FE_ITEM_WARN_INK[3] - FE_ITEM_WARN_INK[1],
+];
 
 /// The mark's translate, **relative to the infusion container**, which is what its record carries.
 ///
@@ -6852,61 +6895,39 @@ pub const FE_ITEM_WARN_OFFSET: [f32; 2] = [
         - FE_ITEM_INFUSION_CONTAINER_AT[1],
 ];
 
-/// Scale-y written into the mark's transform, which turns the cloned glyph upside down.
+/// The destination rect `ds2-item-warn`'s `place` writes into the built component.
 ///
-/// The glyph is the infusion arrow, and a run put it on screen pointing the way the game draws it.
-/// The player's words: "I'm ok with the arrow if its upside down and on the left side". An arrow
-/// inverted from the one the game uses for an infusion is a mark that reads as the opposite of one,
-/// which is the whole job here, and it costs no texture -- the same reason the seventh tab wears
-/// the sixth tab's hexagon.
+/// Anchored on [`FE_ITEM_WARN_SHIPPED_SOURCE`] and not on [`FE_ITEM_WARN_SOURCE`], which is the
+/// one subtlety in the whole swap. `FUN_140b70200` copies the shape's quad rect into both the
+/// destination array at `+0x50` and the source array at `+0x58`, and the per-quad matrix at
+/// `+0x48` carries the quad's own offset -- `(-934.70, -52.50)` -- so the composed position is
+/// `that translation + the destination corner` and the shipped pair cancel to the record's origin.
+/// Re-pointing the source at the ✕ changes which pixels are sampled and moves nothing; the
+/// destination therefore still has to be measured from the rect the matrix cancels.
 ///
-/// `-1` is the same lever [`FLO_TAB_ARROWS_RIGHT_SCALE_X`] pulls on the strip's chevron, one axis
-/// over: `FUN_140b50bc0`'s identity test reads scale-x at `pfVar1[2]` and scale-y at `pfVar1[3]`,
-/// so both are live fields of a transform block and a negative one mirrors.
-pub const FE_ITEM_WARN_SCALE_Y: f32 = -1.0;
-
-/// How far the mark is pushed back down after [`FE_ITEM_WARN_SCALE_Y`] flips it.
-///
-/// A mirror is about the record's origin, not about the art's centre. The glyph's quad offset
-/// cancels its own source rect exactly -- `offset=(-934.7,-52.5)` against `rect=(934.7,52.5)-
-/// (960.3,78.5)`, read with `scripts/ds2-flo.py shape --shape 0x59` -- so the art occupies
-/// `0..`[`FE_ITEM_WARN_SIZE`]`[1]` below the origin, and flipping it puts that span ABOVE the
-/// origin instead. Adding the height back lands it where it was, upside down.
-pub const FE_ITEM_WARN_FLIP_Y: f32 = FE_ITEM_WARN_SIZE[1];
-
-/// The mark's colour, in the memory order [`FLO_ADDED_ROW_TINT`] cost a run to settle: R, G, B, A.
-///
-/// Full-strength red, unlike the added row's `FLO_ADDED_ROW_TINT_STRENGTH` third: that one had to
-/// stay recognisable as the Quit Game glyph, and this one has the opposite job. The colour
-/// MULTIPLIES -- the game's own `ff808080` grey twin on the quit glyph is the demonstration -- so
-/// an opaque red reduces whichever infusion glyph is cloned to its red channel.
-///
-/// **It is a red MARK and not a red X**, and that is a limitation rather than a choice; see
-/// [`FE_ITEM_WARN_CLONED_CHILD`].
-pub const FE_ITEM_WARN_TINT: [u8; 4] = [0xff, 0x18, 0x10, 0xff];
+/// Its size is [`FE_ITEM_WARN_SOURCE`]'s. The draw (`0x140b6f200` -> `FUN_140b521c0`) builds four
+/// vertices straight off the destination corners and maps the source rect onto them as UVs, so a
+/// destination narrower than its source squashes the art.
+pub const FE_ITEM_WARN_DEST: [f32; 4] = [
+    FE_ITEM_WARN_SHIPPED_SOURCE[0] + FE_ITEM_WARN_OFFSET[0] - FE_ITEM_WARN_INK_INSET[0],
+    FE_ITEM_WARN_SHIPPED_SOURCE[1] + FE_ITEM_WARN_OFFSET[1] - FE_ITEM_WARN_INK_INSET[1],
+    FE_ITEM_WARN_SHIPPED_SOURCE[0] + FE_ITEM_WARN_OFFSET[0] - FE_ITEM_WARN_INK_INSET[0]
+        + (FE_ITEM_WARN_SOURCE[2] - FE_ITEM_WARN_SOURCE[0]),
+    FE_ITEM_WARN_SHIPPED_SOURCE[1] + FE_ITEM_WARN_OFFSET[1] - FE_ITEM_WARN_INK_INSET[1]
+        + (FE_ITEM_WARN_SOURCE[3] - FE_ITEM_WARN_SOURCE[1]),
+];
 
 /// Which of the container's nine children the mark's record is cloned from. Child `0`.
 ///
-/// **There is no X in this document and this repo ships no texture**, which is why the mark is a
-/// clone of something already there. What was checked before settling for one:
+/// The clone is still a clone, but it is no longer a clone for want of art. What it is for now is
+/// the texture: a `FeComponentTextureShape` resolves its texture at draw time out of its shape
+/// entry's quad (`quad+0x20` -> the document's texture table -> `+0x38` on the component), and
+/// that entry is shared with every other user of the shape. Both rect arrays are per-component
+/// copies, so a rect can be re-pointed for one badge without touching anything else -- and the ✕
+/// is reachable that way only because the glyph being cloned samples the same atlas the ✕ lives
+/// in.
 ///
-/// * `l02_02_Inventory.flo` holds 88 shapes. The nine infusion glyphs tile one atlas block --
-///   `x 934.70..1008.30`, `y 3.20..103.20` -- with a single gap at `x 984.30..1008.30`,
-///   `y 31.95..103.20` that no shape in the file claims. Whether there is art in that gap, and
-///   what it depicts, cannot be established without rendering it, and picking it blind is picking
-///   a picture nobody has seen -- the same trap `ds2-menu-row` documented over the unused
-///   definitions in the pause menu's own document.
-/// * A diagonal IS expressible: transform `+0x10`/`+0x14` are the off-diagonal matrix terms, which
-///   18 records in `l02_01_In-Game.flo` use. Two carry `sx = sy = 0.7997`, `k0 = -k1 = 0.1962`,
-///   which is a rotation of `13.8` degrees at scale `0.8234` (`0.7997/0.8234 = cos`,
-///   `0.1962/0.8234 = sin`); fourteen more carry `sx = sy = 0`, `|k0| = |k1| = 1`, which is 90
-///   degrees. So two crossed bars at 45 degrees would draw. What is missing is a BAR: every shape
-///   in this document samples a specific rect of the atlas, and no rect in it can be shown to be
-///   a plain fill without looking at the texture.
-///
-/// So the cheapest thing that ships no texture is a glyph the game itself already draws in the
-/// corner of an item icon, at the size an item-icon corner badge should be, re-skinned red. It is
-/// unmistakable in colour and position and it is not an X.
+/// `waku_03`, in all three documents that author an item cell. See [`FE_ITEM_WARN_SHIPPED_SOURCE`].
 pub const FE_ITEM_WARN_CLONED_CHILD: usize = 0;
 
 /// Depth the added record carries, relative to the last of the nine it joins.
@@ -6918,44 +6939,94 @@ pub const FE_ITEM_WARN_DEPTH_STEP: u16 = 2;
 
 #[cfg(test)]
 mod item_warn_tests {
-    /// The shipped quad of the arrow the badge is cloned from, read with
-    /// `scripts/ds2-flo.py shape /tmp/menu02/l02_03_equipment.flo --shape 0x59`.
-    const ARROW_QUAD: [f32; 4] = [934.70, 52.50, 960.30, 78.50];
-
-    /// [`super::FE_ITEM_WARN_SIZE`] is the arrow's own rect and not a number someone liked.
+    /// The mark is the ✕'s ink, measured with `scripts/ds2-atlas-find.py waku_03.dds --red`, and
+    /// not the padded rect the quad names.
     #[test]
-    fn the_size_is_the_quad_it_was_read_from() {
-        let width = ARROW_QUAD[2] - ARROW_QUAD[0];
-        let height = ARROW_QUAD[3] - ARROW_QUAD[1];
-        assert!((width - super::FE_ITEM_WARN_SIZE[0]).abs() < 0.01);
-        assert!((height - super::FE_ITEM_WARN_SIZE[1]).abs() < 0.01);
+    fn the_size_is_the_ink_and_not_the_rect() {
+        assert!((super::FE_ITEM_WARN_SIZE[0] - 22.0).abs() < 0.01);
+        assert!((super::FE_ITEM_WARN_SIZE[1] - 22.0).abs() < 0.01);
+        let padded = [
+            super::FE_ITEM_WARN_SOURCE[2] - super::FE_ITEM_WARN_SOURCE[0],
+            super::FE_ITEM_WARN_SOURCE[3] - super::FE_ITEM_WARN_SOURCE[1],
+        ];
+        assert!(
+            padded[0] > super::FE_ITEM_WARN_SIZE[0] && padded[1] > super::FE_ITEM_WARN_SIZE[1],
+            "if the rect were the ink, aligning on the ink would be pointless"
+        );
     }
 
-    /// The destination rect `ds2-item-warn`'s `place` writes: the arrow moved into the icon's near
-    /// corner and turned over.
+    /// The ink is inside the rect that samples it, which is what makes the inset a trim and not a
+    /// crop of somebody else's art.
+    #[test]
+    fn the_ink_is_inside_its_source_rect() {
+        let [left, top, right, bottom] = super::FE_ITEM_WARN_SOURCE;
+        let ink = super::FE_ITEM_WARN_INK;
+        assert!(ink[0] >= left && ink[1] >= top && ink[2] <= right && ink[3] <= bottom);
+        const {
+            assert!(super::FE_ITEM_WARN_INK_INSET[0] > 0.0);
+            assert!(super::FE_ITEM_WARN_INK_INSET[1] > 0.0);
+        }
+    }
+
+    /// The ✕ and the glyph it replaces are two rects of one atlas -- `waku_03`, `1024 x 256` --
+    /// which is the only reason a source-rect write can reach the ✕ at all.
+    #[test]
+    fn both_rects_are_inside_waku_03() {
+        for rect in [
+            super::FE_ITEM_WARN_SOURCE,
+            super::FE_ITEM_WARN_SHIPPED_SOURCE,
+        ] {
+            assert!(rect[0] >= 0.0 && rect[1] >= 0.0);
+            assert!(rect[2] <= 1024.0, "past the atlas's right edge");
+            assert!(rect[3] <= 256.0, "past the atlas's bottom edge");
+            assert!(rect[2] > rect[0] && rect[3] > rect[1]);
+        }
+        let apart = (super::FE_ITEM_WARN_SOURCE[0] - super::FE_ITEM_WARN_SHIPPED_SOURCE[0]).abs();
+        assert!(
+            apart > 100.0,
+            "these are supposed to be two different pictures"
+        );
+    }
+
+    /// The destination rect `ds2-item-warn`'s `place` writes: the ✕ at the size of its own rect,
+    /// moved into the icon's near corner.
     ///
     /// This lives here rather than beside the code that writes it because that module is
     /// `#[cfg(windows)]` and the host this is developed on is not Windows -- a test in there
     /// compiles nowhere and runs never, which is worse than no test, since it reads like coverage.
     #[test]
-    fn the_badge_rect_is_moved_left_and_mirrored() {
-        let [x, y] = super::FE_ITEM_WARN_OFFSET;
-        let want = [
-            ARROW_QUAD[0] + x,
-            ARROW_QUAD[3] + y,
-            ARROW_QUAD[2] + x,
-            ARROW_QUAD[1] + y,
+    fn the_destination_carries_the_new_arts_size() {
+        let dest = super::FE_ITEM_WARN_DEST;
+        let source = super::FE_ITEM_WARN_SOURCE;
+        assert!(
+            (dest[2] - dest[0] - (source[2] - source[0])).abs() < 0.01,
+            "a destination narrower than its source squashes the ✕"
+        );
+        assert!((dest[3] - dest[1] - (source[3] - source[1])).abs() < 0.01);
+        assert!(
+            dest[1] < dest[3],
+            "the ✕ is not directional and is not mirrored"
+        );
+        assert!(
+            dest[0] < super::FE_ITEM_WARN_SHIPPED_SOURCE[0],
+            "the badge sits left of the infusion glyph it is cloned from"
+        );
+    }
+
+    /// The destination puts the ink where [`super::FE_ITEM_WARN_OFFSET`] says, padding discounted.
+    ///
+    /// That is the whole point of anchoring on the ink: with the rect anchored instead, the ✕
+    /// would sit `4.35` right and `4.95` low of every other measurement in this module.
+    #[test]
+    fn the_ink_lands_on_the_offset() {
+        let ink = [
+            super::FE_ITEM_WARN_DEST[0] + super::FE_ITEM_WARN_INK_INSET[0]
+                - super::FE_ITEM_WARN_SHIPPED_SOURCE[0],
+            super::FE_ITEM_WARN_DEST[1] + super::FE_ITEM_WARN_INK_INSET[1]
+                - super::FE_ITEM_WARN_SHIPPED_SOURCE[1],
         ];
-        assert!(
-            x < 0.0,
-            "the badge sits LEFT of the infusion glyph it is cloned from"
-        );
-        assert!(
-            want[3] < want[1],
-            "upside down is the bottom edge above the top"
-        );
-        assert!((want[2] - want[0] - super::FE_ITEM_WARN_SIZE[0]).abs() < 0.01);
-        assert!((want[1] - want[3] - super::FE_ITEM_WARN_SIZE[1]).abs() < 0.01);
+        assert!((ink[0] - super::FE_ITEM_WARN_OFFSET[0]).abs() < 0.01);
+        assert!((ink[1] - super::FE_ITEM_WARN_OFFSET[1]).abs() < 0.01);
     }
 
     /// The corner the badge lands in is inside the icon, which is what "on the weapon" means.
@@ -7004,10 +7075,12 @@ mod item_icon_box_tests {
             (height - 128.0 * super::FE_ITEM_ICON_SCALE).abs() < 0.01,
             "height must be the quad's 128 scaled, got {height}"
         );
-        assert!(
-            super::FE_ITEM_ICON_SCALE < 1.0,
-            "a scale of 1 would make this test vacuous"
-        );
+        const {
+            assert!(
+                super::FE_ITEM_ICON_SCALE < 1.0,
+                "a scale of 1 would make this test vacuous"
+            )
+        };
     }
 
     /// The badge sits inside the icon on BOTH axes, measured from the container it hangs off.
@@ -7056,10 +7129,12 @@ mod item_warn_bar_tests {
     /// The bar is the tighter bound, which is the whole reason the anchor moved.
     #[test]
     fn the_bar_is_above_the_icon_boxs_bottom() {
-        assert!(
-            super::FE_ITEM_CELL_BAR_TOP < super::FE_ITEM_ICON_BOX[3],
-            "if the icon box ended first, anchoring on it would have been correct"
-        );
+        const {
+            assert!(
+                super::FE_ITEM_CELL_BAR_TOP < super::FE_ITEM_ICON_BOX[3],
+                "if the icon box ended first, anchoring on it would have been correct"
+            )
+        };
     }
 
     /// The badge is still inside the portrait vertically, not floated off the top of it.
@@ -7089,10 +7164,13 @@ mod item_warn_left_tests {
     /// That margin is further left than the icon box allowed, which is the change.
     #[test]
     fn the_bar_margin_is_left_of_the_icon_box() {
-        assert!(
-            super::FE_ITEM_CELL_BAR_LEFT < super::FE_ITEM_ICON_BOX[0] + super::FE_ITEM_WARN_INSET,
-            "anchoring on the bar has to move the badge LEFT of where the icon box put it"
-        );
+        const {
+            assert!(
+                super::FE_ITEM_CELL_BAR_LEFT
+                    < super::FE_ITEM_ICON_BOX[0] + super::FE_ITEM_WARN_INSET,
+                "anchoring on the bar has to move the badge left of where the icon box put it"
+            )
+        };
     }
 
     /// And it is still on the tile: the cell's background art starts left of the bar.
@@ -7100,9 +7178,11 @@ mod item_warn_left_tests {
     fn the_badge_stays_on_the_parchment() {
         /// The cell background quad, offset plus rect, from `ds2-flo.py shape --shape 0x4d`.
         const TILE_LEFT: f32 = 2.45;
-        assert!(
-            super::FE_ITEM_CELL_BAR_LEFT > TILE_LEFT,
-            "the bar's margin must sit inside the tile, not on its frame"
-        );
+        const {
+            assert!(
+                super::FE_ITEM_CELL_BAR_LEFT > TILE_LEFT,
+                "the bar's margin must sit inside the tile, not on its frame"
+            )
+        };
     }
 }

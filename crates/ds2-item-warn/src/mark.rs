@@ -24,12 +24,14 @@
 //!
 //! # Two things the badge depends on that are easy to get wrong
 //!
-//! **The tint only works because the cloned record names a definition.** `FUN_140b50bc0`
-//! dispatches on the record's kind, and a record naming a shape (`kind & 1`) goes to
-//! `FUN_140b70200`, which never sees the record or its transform -- a shape's colour lives in four
-//! bytes inside each quad instead. The nine infusion children are all `kind = 0x4`, nested
-//! definitions, so their transform colour is read; [`build`] checks that byte anyway rather than
-//! trusting the file it was read from.
+//! **The badge wears the game's own ✕, and it can only do so because of what it was cloned from.**
+//! The nine infusion glyphs sample `waku_03`, and so does the ✕ the game already draws on an
+//! unusable quick-slot weapon. A `FeComponentTextureShape` resolves its texture at draw time out
+//! of the shape-table entry it was built from, which is shared; its two rect arrays are
+//! per-component copies, which are not. So [`crate::place`] can re-point one badge's source rect
+//! at the ✕ and leave every other cell in the document alone -- and nothing here ships a texture
+//! or tints anything. The cloned child is still checked for `kind & 4`, a nested definition,
+//! because that is the subtree `place` walks to reach those arrays.
 //!
 //! **Draw order is attach order.** `FUN_140b6bd80` appends to the parent's display list at
 //! `[parent+0x66]` with no sort, so a later record covers an earlier one. The badge is appended
@@ -178,8 +180,10 @@ unsafe fn build(definition: *const u8, records: *const u8) -> Option<*mut u8> {
         },
     });
 
-    // The kind is checked before anything is copied, because the colour is the whole badge and a
-    // record naming a shape would take it nowhere. See this module's header.
+    // The kind is checked before anything is copied. Nothing here writes a colour any more, but
+    // the kind is still what says this record wraps a definition holding one texture shape --
+    // which is the subtree `crate::place` walks to find the rect arrays. A `kind & 1` record has
+    // no definition under it and that walk would have nothing to find. See this module's header.
     let kind = record_u16(&built.shipped, cloned, ds2_rva::FLO_RECORD_KIND_OFFSET);
     if kind & KIND_NESTED == 0 {
         log(format_args!(
@@ -229,31 +233,21 @@ unsafe fn build(definition: *const u8, records: *const u8) -> Option<*mut u8> {
                 .ok()?,
         ),
     ];
-    // The corner and the flip are NOT written here, and the `was` above is read only so the log
-    // can say what the clone started from. Both were written into this block once and neither
-    // reached the art: a calibration run set the corner to `-1000.0`, thirteen cell widths against
-    // a grid whose pitch is `72.5`, and every badge stayed where it was. `FE_TEXTURE_SHAPE_INIT`
-    // copies a shape's quad into the component at build time and never re-derives it from an
-    // ancestor's transform, which is the same wall `ds2-menu-row` hit on the quit tab's banner and
-    // why `FLO_PANEL_STRETCH_Y` is `1.0`. [`crate::place`] writes the destination rect instead.
+    // Nothing is written into the transform block, and the `was` above is read only so the log can
+    // say what the clone started from. The block is still copied, because the added record must not
+    // share one with the glyph it was cloned from -- a write to either would otherwise land on
+    // both -- but there is no longer anything to write:
     //
-    // The colour below is a different field of the same block and does reach the art, which is
-    // what makes the badge red and is why this block is copied at all.
-
-    built.transform[ds2_rva::FLO_TRANSFORM_COLOUR_OFFSET..][..4]
-        .copy_from_slice(&ds2_rva::FE_ITEM_WARN_TINT);
-    // The colour is inert without these two bits, which cost `ds2-menu-row` a whole run to find: a
-    // tint written into a transform block whose flag word is `0` produces the shipped colour and
-    // no diagnostic anywhere. `0x10` is "the colour word is live" and `0x100` is "and its RGB is
-    // not white"; the game's own greyed-out quit glyph carries exactly `0x110`.
-    let flags = u32::from_le_bytes(
-        built.transform[ds2_rva::FLO_TRANSFORM_FLAGS_OFFSET..][..4]
-            .try_into()
-            .ok()?,
-    ) | ds2_rva::FLO_TRANSFORM_COLOUR_LIVE
-        | ds2_rva::FLO_TRANSFORM_COLOUR_RGB;
-    built.transform[ds2_rva::FLO_TRANSFORM_FLAGS_OFFSET..][..4]
-        .copy_from_slice(&flags.to_le_bytes());
+    // * The corner and the flip went in here once and neither reached the art. A calibration run
+    //   set the corner to `-1000.0`, thirteen cell widths against a grid whose pitch is `72.5`,
+    //   and every badge stayed where it was. `FE_TEXTURE_SHAPE_INIT` copies a shape's quad into
+    //   the component at build time and never re-derives it from an ancestor's transform -- the
+    //   same wall `ds2-menu-row` hit on the quit tab's banner, and why `FLO_PANEL_STRETCH_Y` is
+    //   `1.0`. `crate::place` writes the component's own destination rect instead.
+    // * The tint did reach the art, and is gone because the art no longer needs it. The badge used
+    //   to be an infusion arrow multiplied down to its red channel; it is now the game's own X,
+    //   cropped out of the same atlas by `crate::place`, and that art is already `rgb(181, 44,
+    //   16)`. Multiplying a red glyph by red would only darken it.
 
     // The pointers last, so nothing in the struct is addressed before it holds what it should.
     let transform = built.transform.as_ptr() as u64;
@@ -268,13 +262,12 @@ unsafe fn build(definition: *const u8, records: *const u8) -> Option<*mut u8> {
     let leaked: &'static mut Container = Box::leak(built);
     log(format_args!(
         "{LOG_PREFIX} badge built id={:#x} children={SHIPPED_CHILDREN}->{ADDED_CHILDREN} \
-         cloned=child{} kind={kind:#x} depth={depth} clone-was-at=({:.2},{:.2}) tint={:02x?} \
-         -- the corner is `place`, not this block",
+         cloned=child{} kind={kind:#x} depth={depth} clone-was-at=({:.2},{:.2}) \
+         -- the corner and the art are `place`, not this block",
         ds2_rva::FE_ITEM_WARN_ELEMENT,
         ds2_rva::FE_ITEM_WARN_CLONED_CHILD,
         was[0],
         was[1],
-        ds2_rva::FE_ITEM_WARN_TINT,
     ));
     Some((&raw mut leaked.definition).cast::<u8>())
 }
@@ -412,14 +405,16 @@ mod tests {
         assert!(y > (top + bottom) / 2.0);
     }
 
-    /// The tint is opaque, is not white, and reads red in the byte order the transform uses.
+    /// The badge is the game's ✕ and not the glyph it is cloned from, which is a rect apart.
+    ///
+    /// The clone exists for the texture the two share; if these ever became the same rect the
+    /// badge would silently go back to being an infusion arrow, drawn in the wrong corner and
+    /// meaning the wrong thing.
     #[test]
-    fn the_tint_is_opaque_and_red() {
-        assert_eq!(ds2_rva::FE_ITEM_WARN_TINT[ds2_rva::FLO_TINT_ALPHA], 0xff);
-        assert_ne!(&ds2_rva::FE_ITEM_WARN_TINT[..3], &[0xff, 0xff, 0xff]);
-        assert!(
-            ds2_rva::FE_ITEM_WARN_TINT[0] > ds2_rva::FE_ITEM_WARN_TINT[1],
-            "R is the first byte in memory order, and this badge is red"
+    fn the_badge_does_not_wear_the_glyph_it_was_cloned_from() {
+        assert_ne!(
+            ds2_rva::FE_ITEM_WARN_SOURCE,
+            ds2_rva::FE_ITEM_WARN_SHIPPED_SOURCE
         );
     }
 

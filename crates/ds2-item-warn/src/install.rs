@@ -180,10 +180,13 @@ pub unsafe fn install() -> Outcome {
     }
     crate::mark::arm();
     log(format_args!(
-        "{LOG_PREFIX} installed -- weapons whose requirements the player fails get a red badge at \
-         icon-local ({:.2}, {:.2}); UNVERIFIED AT RUNTIME",
-        ds2_rva::FE_ITEM_ICON_BOX[0] + ds2_rva::FE_ITEM_WARN_INSET,
-        ds2_rva::FE_ITEM_ICON_BOX[3] - ds2_rva::FE_ITEM_WARN_SIZE[1] - ds2_rva::FE_ITEM_WARN_INSET,
+        "{LOG_PREFIX} installed -- weapons whose requirements the player fails get the game's own \
+         X (waku_03 {:.2?}) at cell-local ({:.2}, {:.2}), {:.2}x{:.2}; UNVERIFIED AT RUNTIME",
+        ds2_rva::FE_ITEM_WARN_SOURCE,
+        ds2_rva::FE_ITEM_CELL_BAR_LEFT,
+        ds2_rva::FE_ITEM_CELL_BAR_TOP - ds2_rva::FE_ITEM_WARN_SIZE[1] - ds2_rva::FE_ITEM_WARN_INSET,
+        ds2_rva::FE_ITEM_WARN_SIZE[0],
+        ds2_rva::FE_ITEM_WARN_SIZE[1],
     ));
     Outcome { installed: true }
 }

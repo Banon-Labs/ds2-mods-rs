@@ -20,15 +20,24 @@
 //! # Why the write is absolute and not a nudge
 //!
 //! This runs on every cell bind, and a relative shift applied on every bind walks the badge off the
-//! screen in about a second. The target is computed from the SOURCE rect instead -- which nothing
-//! here ever writes -- so re-applying it writes the same four floats and the badge cannot drift.
+//! screen in about a second. Both rects are constants -- [`ds2_rva::FE_ITEM_WARN_DEST`] and
+//! [`ds2_rva::FE_ITEM_WARN_SOURCE`] -- so re-applying writes the same eight floats and the badge
+//! can neither drift nor re-crop itself.
 //!
-//! # The flip is the rect, not the scale
+//! # The art is the game's own ✕, and this is the write that reaches it
 //!
-//! [`ds2_rva::FE_ITEM_WARN_SCALE_Y`] is written into the transform for the same reason the position
-//! was, and reaches the art for the same reason -- it does not. A destination rect whose bottom
-//! edge is above its top edge mirrors the art it samples, so the upside-down arrow is `y1 < y0`
-//! here rather than a negative scale one level up.
+//! The other array, `+0x58`, is the SOURCE rect, and `FUN_140b6f200` hands it to `FUN_140b521c0`
+//! as the UVs the four destination corners sample -- scaled by `1/texWidth`, `1/texHeight`, so it
+//! is in atlas pixels. It is a per-component copy for the same reason the destination is, which
+//! means one badge can sample a different part of the atlas without touching the shape every other
+//! cell in the document shares.
+//!
+//! That is only usable because of what the cloned glyph happens to sample. The nine infusion
+//! glyphs are in `waku_03`, and so is the ✕ the game draws on an unusable quick-slot weapon --
+//! `l01_05_L_key.flo` shape `0x002a`, `(740.65, 164.05)-(769.65, 195.55)`. Same atlas, different
+//! rect, so the ✕ costs one rect write and no texture of this repo's own.
+//!
+//! The badge is therefore not tinted any more: the art is already `rgb(181, 44, 16)`.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -176,7 +185,7 @@ unsafe fn read_usize(at: usize) -> usize {
     unsafe { (at as *const usize).read_unaligned() }
 }
 
-/// Put the badge in the icon's bottom-left corner, upside down.
+/// Crop the badge to the game's own ✕ and put it in the icon's bottom-left corner.
 ///
 /// Silent on success after the first few, and silent on refusal in the same way every other check
 /// in this crate is: the badge stays where the shipped art put it, which is the corner it was
@@ -230,29 +239,47 @@ pub(crate) unsafe fn place(component: usize, base: usize) {
         return;
     }
 
-    // The target is derived from the SOURCE rect, which nothing here ever writes, so running this
-    // on every bind writes the same four floats instead of nudging the badge a little further each
-    // time. `FUN_140b70200` fills both arrays from the same quad field (`quad+0x30`), so an
-    // untouched shape has `destination == source` -- and the art still lands at the record's origin
-    // because the quad's own offset, `(-934.70, -52.50)` against a rect starting at
-    // `(934.70, 52.50)`, cancels it in the per-quad matrix at `+0x48`. Shifting the destination by
-    // `FE_ITEM_WARN_OFFSET` therefore moves the art by exactly that, in the container's own space,
-    // which is the space that constant is measured in.
-    //
-    // The two `y` edges are swapped, which is what mirrors the arrow. That is the flip
-    // `FE_ITEM_WARN_SCALE_Y` was written into the transform for and never delivered.
-    let [x, y] = ds2_rva::FE_ITEM_WARN_OFFSET;
+    // THE SECOND CHECK, and the one that keeps this off every other cell in the document. The
+    // source rect a fresh component carries is the cloned glyph's own, and re-running over a badge
+    // this already wrote finds the ✕. Anything else is a component this has no business in, and it
+    // is left exactly as the game built it.
     // SAFETY: a live four-float rect, as the quad count established.
     let from = unsafe { std::slice::from_raw_parts(source as *const f32, 4) };
-    let want = [from[0] + x, from[3] + y, from[2] + x, from[1] + y];
+    let is = |want: [f32; 4]| {
+        from.iter()
+            .zip(want.iter())
+            .all(|(a, b)| (a - b).abs() < 0.01)
+    };
+    if !is(ds2_rva::FE_ITEM_WARN_SHIPPED_SOURCE) && !is(ds2_rva::FE_ITEM_WARN_SOURCE) {
+        refuse(format_args!(
+            "source rect is {from:.2?}, neither the cloned glyph's {:.2?} nor the mark's {:.2?}",
+            ds2_rva::FE_ITEM_WARN_SHIPPED_SOURCE,
+            ds2_rva::FE_ITEM_WARN_SOURCE,
+        ));
+        return;
+    }
+
+    // The ✕, and where to put it. Both are constants: `FUN_140b70200` seeds the two arrays from
+    // the same quad field (`quad+0x30`), so an untouched component has `destination == source`,
+    // and the art lands at the record's origin because the quad's own offset -- `(-934.70,
+    // -52.50)` against a rect starting at `(934.70, 52.50)` -- cancels it in the per-quad matrix
+    // at `+0x48`. The destination is measured off THAT rect for that reason, and not off the ✕'s:
+    // re-pointing the source moves nothing, it only changes which pixels arrive.
+    let art = ds2_rva::FE_ITEM_WARN_SOURCE;
+    let want = ds2_rva::FE_ITEM_WARN_DEST;
     // SAFETY: as above.
     let before = unsafe { std::slice::from_raw_parts(destination as *const f32, 4) };
-    if before == want {
+    if before == want && is(art) {
         return;
     }
     let was = [before[0], before[1], before[2], before[3]];
-    // SAFETY: as above, and this is the array the shape's own draw reads its destination from.
-    unsafe { std::slice::from_raw_parts_mut(destination as *mut f32, 4).copy_from_slice(&want) };
+    let cropped = [from[0], from[1], from[2], from[3]];
+    // SAFETY: as above, and these are the two arrays the shape's own draw reads its geometry and
+    // its UVs from -- per component, so no other user of this shape sees either write.
+    unsafe {
+        std::slice::from_raw_parts_mut(source as *mut f32, 4).copy_from_slice(&art);
+        std::slice::from_raw_parts_mut(destination as *mut f32, 4).copy_from_slice(&want);
+    }
     let n = PLACED.fetch_add(1, Ordering::Relaxed) + 1;
     if n <= LOGGED {
         // The per-quad matrix, which is where the art's translation actually lives.
@@ -270,8 +297,9 @@ pub(crate) unsafe fn place(component: usize, base: usize) {
             }
         }
         log(format_args!(
-            "{LOG_PREFIX} badge placed shape=0x{shape:016x} rect={was:.2?} -> {want:.2?} \
-             matrix={composed:.2?} container={:.2?} placements={n}",
+            "{LOG_PREFIX} badge placed shape=0x{shape:016x} dest={was:.2?} -> {want:.2?} \
+             source={cropped:.2?} -> {art:.2?} (the game's own X, waku_03) matrix={composed:.2?} \
+             container={:.2?} placements={n}",
             ds2_rva::FE_ITEM_INFUSION_CONTAINER_AT
         ));
     }
