@@ -182,17 +182,32 @@ fn answer_for(path: &str, access: u32) -> Option<Vec<u16>> {
 /// and the staged file unmodified, and nothing in the log said which open failed or with what
 /// flags. This is that line.
 fn container_role(path: &str) -> Option<&'static str> {
-    let window = WINDOW.try_lock().ok()?;
-    let (asked, answer) = window.as_ref()?;
-    if asked
-        .as_os_str()
-        .to_string_lossy()
-        .eq_ignore_ascii_case(path)
-    {
-        return Some("own");
+    // Any save-shaped path, wherever it lives. Measured 2026-09-23: on the run that showed
+    // `Failed to save game.` there were 105 opens of the player's own container and every one was
+    // a read that succeeded -- no write-open, no failure. So the writer is not reaching this API
+    // by the container's own name, and narrowing the report to the two known paths is what hid
+    // that. A temporary file, a `.bak`, or a different directory all show up here now.
+    let lowered = path.to_ascii_lowercase();
+    if lowered.contains("ds2sofs") || lowered.ends_with(".sl2") || lowered.ends_with(".sl2.bak") {
+        let window = WINDOW.try_lock().ok()?;
+        let Some((asked, answer)) = window.as_ref() else {
+            return Some("save-shaped");
+        };
+        if asked
+            .as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(path)
+        {
+            return Some("own");
+        }
+        let staged = String::from_utf16_lossy(answer.strip_suffix(&[0]).unwrap_or(answer));
+        return Some(if staged.eq_ignore_ascii_case(path) {
+            "staged"
+        } else {
+            "save-shaped"
+        });
     }
-    let staged = String::from_utf16_lossy(answer.strip_suffix(&[0]).unwrap_or(answer));
-    staged.eq_ignore_ascii_case(path).then_some("staged")
+    None
 }
 
 /// The detour.
@@ -248,10 +263,17 @@ unsafe extern "system" fn detour_create_file_w(
     // diverted. The flags and the handle are the evidence: a `-1` here is the open that failed, and
     // its access and share bits say why without anyone having to reason about which one it was.
     if let Some(role) = role {
+        // The path is printed for anything that is not one of the two known containers, because on
+        // a `save-shaped` line the path IS the finding.
+        let named = if role == "save-shaped" {
+            asked_path.clone().unwrap_or_default()
+        } else {
+            String::new()
+        };
         log(format_args!(
             "{LOG_PREFIX} open-redirect container={role} diverted={diverted} \
              access=0x{access:08x} share=0x{share:08x} disposition={disposition} \
-             handle={handle} count={}",
+             handle={handle} count={} {named}",
             DIVERTED.load(Ordering::Relaxed)
         ));
     }
