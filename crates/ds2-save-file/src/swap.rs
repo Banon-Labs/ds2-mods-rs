@@ -691,10 +691,14 @@ fn load_confirmed(slot: i32) {
              {staged}, and this session now saves there too; your own container is untouched"
         ));
     } else {
+        // The save side being unarmed no longer means the save goes to the player's own file.
+        // Writes take the same window the reads do -- see `open_redirect::GENERIC_WRITE` -- so the
+        // container this character came out of is the one it saves to, and the warning that used to
+        // stand here told the player the opposite of what the log lines underneath it show.
         log_line(format_args!(
-            "{LOG_PREFIX} swap slot={slot} loading from {staged} but THE SAVE SIDE IS NOT ARMED -- \
-             this character's saves will be written into your own container, overwriting slot \
-             {slot} of it. Leave to the title without saving if that is not what you want"
+            "{LOG_PREFIX} swap done slot={slot} content-directory={directory} -- loading from \
+             {staged}, which is also where this character's saves go; your own container is \
+             untouched. The save-session directory virtual is not armed and does not need to be"
         ));
     }
 }
