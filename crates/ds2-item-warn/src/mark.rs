@@ -392,17 +392,37 @@ mod tests {
         assert!(slot as u8 <= ds2_rva::ITEM_ENTRY_INFUSION_MASK);
     }
 
-    /// The offset really does land the badge in the icon's bottom-left corner.
+    /// The offset really does land the badge in the cell's bottom-left corner.
+    ///
+    /// **Bounded by the tile and the bar, not by the icon's art box**, which is the correction the
+    /// wine pass caught. This test asserted `x >= FE_ITEM_ICON_BOX[0]` while the badge's left edge
+    /// is deliberately [`ds2_rva::FE_ITEM_CELL_BAR_LEFT`] -- `9.45` against a box starting at
+    /// `15.25` -- so it contradicted the anchor its own crate documents and the sibling assertion
+    /// `the_bar_margin_is_left_of_the_icon_box` exists to pin. It failed only under
+    /// `scripts/check.sh --host-tests`, which is the pass that runs these under wine, so it sat
+    /// red through a feature that was correct on screen.
+    ///
+    /// The bounds here are the ones `ds2-rva`'s `the_corner_is_inside_the_icon` uses: the cell's
+    /// own parchment, and the durability bar as the real bottom.
     #[test]
-    fn the_badge_lands_in_the_bottom_left_of_the_icon() {
+    fn the_badge_lands_in_the_bottom_left_of_the_cell() {
+        /// The cell background quad, offset plus rect, from `ds2-flo.py shape --shape 0x4d`.
+        const TILE: [f32; 4] = [2.45, -5.85, 97.30, 85.00];
         let x = ds2_rva::FE_ITEM_INFUSION_CONTAINER_AT[0] + ds2_rva::FE_ITEM_WARN_OFFSET[0];
         let y = ds2_rva::FE_ITEM_INFUSION_CONTAINER_AT[1] + ds2_rva::FE_ITEM_WARN_OFFSET[1];
-        let [left, top, right, bottom] = ds2_rva::FE_ITEM_ICON_BOX;
+        let [left, top, right, _bottom] = TILE;
         assert!(x >= left && x + ds2_rva::FE_ITEM_WARN_SIZE[0] <= right);
-        assert!(y >= top && y + ds2_rva::FE_ITEM_WARN_SIZE[1] <= bottom);
-        // Bottom-left: in the left half and the lower half of the icon, `+y` being downwards.
+        assert!(y >= top && y + ds2_rva::FE_ITEM_WARN_SIZE[1] <= ds2_rva::FE_ITEM_CELL_BAR_TOP);
+        // Bottom-left: in the left half of the tile and the lower half of the portrait, `+y` being
+        // downwards.
         assert!(x < (left + right) / 2.0);
-        assert!(y > (top + bottom) / 2.0);
+        assert!(y > (top + ds2_rva::FE_ITEM_CELL_BAR_TOP) / 2.0);
+        // And on the icon it is marking, which is the claim the old bound was reaching for: the
+        // badge's right edge is inside the icon's art even though its left edge is not.
+        assert!(
+            x + ds2_rva::FE_ITEM_WARN_SIZE[0] > ds2_rva::FE_ITEM_ICON_BOX[0],
+            "the mark has to overlap the portrait or it is marking the parchment"
+        );
     }
 
     /// The badge is the game's ✕ and not the glyph it is cloned from, which is a rect apart.
