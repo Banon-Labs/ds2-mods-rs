@@ -342,7 +342,13 @@ question as the badge's corner.
 
 ### What is not measured
 
-* **Any of it, at runtime.** Not one line has been in front of a running game.
+* **The X, at runtime.** The crate itself has run: a session's `ds2-loader.log` shows both hooks
+  taking, the requirement test naming unmet weapons by stat and threshold (`key=0x33 stat=8
+  required=16 have=11`), the container gaining its tenth child, and `place` writing the destination
+  rect on four badges. What has never been in front of a running game is the X -- that art was
+  written after that session, and the log lines above are the previous build's.
+* **Where the badge lands.** Still the open one. `place`'s write lands and the badge is not where
+  it computes; the matrix that was supposed to explain the difference reads identity at bind time.
 * **Whether the frontend stat table holds base or modified stats.** Every cross-reference to
   `FUN_1404ffb20` is a reader; its writer was not found. On the gameplay side the equivalent block
   is provably `clamp(base + modifiers, 1, 99)`, and this one has no such proof, so whether rings
