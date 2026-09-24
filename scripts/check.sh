@@ -182,6 +182,11 @@ else
   # The lexicon and the liveness-command list live in scripts/cupcake_game_alive.py; `opa test`
   # above only pins that a spoken signal halts.
   python3 scripts/test-game-alive-signal.py
+  # And the same half for the property-grant guard, whose whole decision is idiom recognition: a
+  # closing sentence that stages the agent handing the user control over something already theirs.
+  # The lexicon and the quoting carve-out live in scripts/cupcake_property_grant.py; `opa test`
+  # above only pins that a spoken signal halts.
+  python3 scripts/test-property-grant-signal.py
   # The hook shim is the fourth place this layer can be silently dead, and the one no `.rego` file
   # can reach. scripts/cupcake-hook.sh sits between Claude Code and the engine and repairs three
   # things the engine gets wrong before any policy runs: a permission mode cupcake does not know

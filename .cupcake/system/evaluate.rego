@@ -81,6 +81,8 @@ all_halts contains decision if { some decision in data.cupcake.policies.claude.n
 
 all_halts contains decision if { some decision in data.cupcake.policies.claude.no_unexecuted_promise.halt }
 
+all_halts contains decision if { some decision in data.cupcake.policies.claude.no_user_property_grant.halt }
+
 # Deny decisions.
 all_denials contains decision if { some decision in data.cupcake.policies.builtins.claude_code_enforce_full_file_read.deny }
 
