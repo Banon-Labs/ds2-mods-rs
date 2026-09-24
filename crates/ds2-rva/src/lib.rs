@@ -6273,3 +6273,29 @@ pub const SAVE_LOAD_SYSTEM_PUMP_IDLE: i32 = 4;
 /// a build these offsets were not read from, this address is some other function that would accept
 /// the call and leave a log line claiming a directory was set.
 pub const SL_SESSION_STRING_SET_PROLOGUE: [u8; 5] = [0x48, 0x89, 0x5c, 0x24, 0x08];
+
+/// The state the session pump switches on. `worker + 0x98`.
+///
+/// Read by `FUN_140a8d6b0` under the worker's lock, returned by [`SL_GET_SESSION_STATE`], and used
+/// as the index into the pump's two-level jump table at `0x1402e678c` / `0x1402e67a0`. Valid range
+/// `0..=0x19`; anything above falls through.
+pub const SL_WORKER_STATE_OFFSET: usize = 0x98;
+
+/// What `SLSession`'s base constructor leaves the state at. `0x15`.
+///
+/// `FUN_140a8ce00` writes it alongside `worker+0x9c = 8` and
+/// [`SL_WORKER_KIND_OFFSET`]` = 3`.
+pub const SL_SESSION_STATE_CREATED: u32 = 0x15;
+
+/// The state a directory set leaves behind. `0x16`.
+///
+/// [`SL_WORKER_SET_DIRECTORY`] writes it whenever its index is not `3`, and it is the only value
+/// any of the four immediate stores to [`SL_WORKER_STATE_OFFSET`] in the save/load region write.
+pub const SL_SESSION_STATE_DIRECTORY_SET: u32 = 0x16;
+
+/// The kind the constructor is passed, and the value a directory set overwrites. `worker + 0x38`.
+///
+/// `FUN_140a8d760` is the setter; the base constructor leaves `3` at
+/// [`SL_WORKER_INDEX_OFFSET`], which is what makes [`SL_WORKER_SET_DIRECTORY`]'s `index != 3`
+/// test mean "a directory has been chosen".
+pub const SL_WORKER_KIND_OFFSET: usize = 0x38;

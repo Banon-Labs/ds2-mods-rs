@@ -55,6 +55,20 @@ pub struct Seated {
     pub skipped: bool,
     /// The directory read back out of the worker after the original returned.
     pub directory: String,
+    /// [`ds2_rva::SL_WORKER_STATE_OFFSET`] as it stood before the write, or `None` if unreadable.
+    ///
+    /// # The question this exists to answer
+    ///
+    /// The pump switches on this field, and only its
+    /// [`ds2_rva::SL_SESSION_STATE_SETUP`] arm ever sets a directory -- so reaching this detour at
+    /// all should mean the field reads `0x18`. Nothing in the image writes that value there: the
+    /// base constructor writes [`ds2_rva::SL_SESSION_STATE_CREATED`], four sites write
+    /// [`ds2_rva::SL_SESSION_STATE_DIRECTORY_SET`], and a byte search of the whole image finds no
+    /// other immediate or register store to the offset. One of those two readings is wrong, and
+    /// the live value says which without another argument about it.
+    pub state_before: Option<u32>,
+    /// [`ds2_rva::SL_WORKER_KIND_OFFSET`] before the write: what the constructor was passed.
+    pub kind: Option<u32>,
 }
 
 /// The directory the storage worker was last given, whoever gave it.
@@ -121,6 +135,16 @@ unsafe extern "system" fn detour_set_worker_directory(
             &mut flag,
         )
     };
+    // The state and kind are read here for the same reason, and they are the interesting pair:
+    // reaching this function means the pump took its setup arm, so the state should read
+    // `SL_SESSION_STATE_SETUP` -- a value nothing in the image is known to write.
+    // SAFETY: two `u32` reads inside the live worker, through the fault-safe reader.
+    let (state_before, kind) = unsafe {
+        (
+            ds2_game_base::mem::safe_read_u32(worker as usize + ds2_rva::SL_WORKER_STATE_OFFSET),
+            ds2_game_base::mem::safe_read_u32(worker as usize + ds2_rva::SL_WORKER_KIND_OFFSET),
+        )
+    };
     if trampoline != 0 {
         // SAFETY: MinHook published this trampoline for this site, and the signature is the one the
         // call site at `0x140a89a24` uses.
@@ -134,12 +158,14 @@ unsafe extern "system" fn detour_set_worker_directory(
         skipped: read && flag[0] != 0,
         directory: read_directory(worker as usize + ds2_rva::SL_WORKER_DIRECTORY_OFFSET)
             .unwrap_or_else(|| String::from("<unreadable>")),
+        state_before,
+        kind,
     };
     let count = WRITES.fetch_add(1, Ordering::Relaxed) + 1;
     log(format_args!(
         "{LOG_PREFIX} worker-directory count={count} worker=0x{:016x} index={index} \
-         skipped={} path={}",
-        seated.worker, seated.skipped, seated.directory
+         state-before={:?} kind={:?} skipped={} path={}",
+        seated.worker, seated.state_before, seated.kind, seated.skipped, seated.directory
     ));
     if let Ok(mut held) = LAST.lock() {
         *held = Some(seated);
