@@ -175,6 +175,26 @@ fn answer_for(path: &str, access: u32) -> Option<Vec<u16>> {
     asked.eq_ignore_ascii_case(path).then(|| answer.clone())
 }
 
+/// Which of the two container paths this open names, if either.
+///
+/// Reported for every open of either one while a window is armed, whatever its access. `Failed to
+/// save game.` on 2026-09-23 came with the save session having been answered the staged directory
+/// and the staged file unmodified, and nothing in the log said which open failed or with what
+/// flags. This is that line.
+fn container_role(path: &str) -> Option<&'static str> {
+    let window = WINDOW.try_lock().ok()?;
+    let (asked, answer) = window.as_ref()?;
+    if asked
+        .as_os_str()
+        .to_string_lossy()
+        .eq_ignore_ascii_case(path)
+    {
+        return Some("own");
+    }
+    let staged = String::from_utf16_lossy(answer.strip_suffix(&[0]).unwrap_or(answer));
+    staged.eq_ignore_ascii_case(path).then_some("staged")
+}
+
 /// The detour.
 ///
 /// # Safety
@@ -211,20 +231,30 @@ unsafe extern "system" fn detour_create_file_w(
     }
 
     // SAFETY: Win32 hands this detour a NUL-terminated path or null.
-    let answer = unsafe { wide_to_string(file_name) }
+    let asked_path = unsafe { wide_to_string(file_name) };
+    let role = asked_path.as_deref().and_then(container_role);
+    let answer = asked_path
         .as_deref()
         .and_then(|path| answer_for(path, access));
-    let handle = match answer {
+    let diverted = answer.is_some();
+    let handle = match &answer {
         Some(answer) => {
-            let count = DIVERTED.fetch_add(1, Ordering::Relaxed) + 1;
-            log(format_args!(
-                "{LOG_PREFIX} open-redirect diverted count={count} -- the game asked for its own \
-                 container and was handed the staged one"
-            ));
+            DIVERTED.fetch_add(1, Ordering::Relaxed);
             pass_through(answer.as_ptr())
         }
         None => pass_through(file_name),
     };
+    // Every open of either container is reported, whatever its access and whether or not it was
+    // diverted. The flags and the handle are the evidence: a `-1` here is the open that failed, and
+    // its access and share bits say why without anyone having to reason about which one it was.
+    if let Some(role) = role {
+        log(format_args!(
+            "{LOG_PREFIX} open-redirect container={role} diverted={diverted} \
+             access=0x{access:08x} share=0x{share:08x} disposition={disposition} \
+             handle={handle} count={}",
+            DIVERTED.load(Ordering::Relaxed)
+        ));
+    }
     DEPTH.with(|depth| depth.set(depth.get() - 1));
     handle
 }
