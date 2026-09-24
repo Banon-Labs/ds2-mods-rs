@@ -353,8 +353,8 @@ pub fn load_from_file() {
 
     // NOW SAVE THE CHARACTER THE PLAYER IS LEAVING, and quit only once it has landed. The redirect is
     // not armed in this session, so this save goes to their own directory.
-    let source =
-        ds2_save_redirect::live_directory().map(|dir| dir.join(ds2_save_redirect::active_save_file_name()));
+    let source = ds2_save_redirect::live_directory()
+        .map(|dir| dir.join(ds2_save_redirect::active_save_file_name()));
     let Some(source) = source else {
         log_line(format_args!(
             "{LOG_PREFIX} import QUITTING WITHOUT SAVING -- no live save directory is known, so \
@@ -531,7 +531,10 @@ mod tests {
     /// THE DUPLICATION GATE between the host-tested extension list and the staging step's arms.
     #[test]
     fn every_stageable_extension_is_offered() {
-        assert_eq!(ds2_save_file_core::SOURCE_EXTENSIONS, ["sl2", "zip", "7z", "rar"]);
+        assert_eq!(
+            ds2_save_file_core::SOURCE_EXTENSIONS,
+            ["sl2", "zip", "7z", "rar"]
+        );
         assert!(
             ds2_save_redirect::SAVE_FILE_NAME
                 .to_ascii_lowercase()

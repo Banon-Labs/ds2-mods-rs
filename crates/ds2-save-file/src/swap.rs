@@ -455,7 +455,8 @@ fn title_gate() -> ds2_continue::TitleStep {
                     swap.picked.display(),
                     swap.staged
                 ));
-                let staged = Path::new(&swap.staged).join(ds2_save_redirect::active_save_file_name());
+                let staged =
+                    Path::new(&swap.staged).join(ds2_save_redirect::active_save_file_name());
                 let own = ds2_save_redirect::live_directory()
                     .map(|dir| dir.join(ds2_save_redirect::active_save_file_name()));
                 let Some(own) = own else {

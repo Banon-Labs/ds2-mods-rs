@@ -90,10 +90,10 @@ pub const LOG_PREFIX: &str = "ds2-save-redirect:";
 /// help string that said "load the save at WINPATH".
 pub const STAGING_DIR_NAME: &str = "ds2-save-staging";
 
+pub use active::{active_save_file_name, is_save_container_name};
 pub use install::{
     Outcome, clear_session_directory, install, live_directory, live_steam_id, session_answers,
     set_logger, set_session_directory, set_source,
 };
-pub use active::{active_save_file_name, is_save_container_name};
 pub use stage::SAVE_FILE_NAME;
 pub use stage::validate_source;

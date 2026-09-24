@@ -99,7 +99,8 @@ impl SeamlessConfig {
     /// switch and deliberately so: a typo here leaves a foreign DLL unloaded rather than loaded.
     pub fn parse(text: &str) -> Self {
         let parsed = KeyValues::parse(text);
-        let enabled = matches!(parsed.get(CONFIG_SECTION, KEY_ENABLED).map(unquote), Some(v) if v == "true");
+        let enabled =
+            matches!(parsed.get(CONFIG_SECTION, KEY_ENABLED).map(unquote), Some(v) if v == "true");
         let dll = parsed
             .get(CONFIG_SECTION, KEY_DLL)
             .map(unquote)
@@ -257,8 +258,9 @@ mod tests {
             "[{CONFIG_SECTION}]\n{KEY_DLL} = \"mods/coop/ds2sc.dll\"\n"
         ));
         assert_eq!(config.mod_directory(), "mods/coop");
-        let backslashes =
-            SeamlessConfig::parse(&format!("[{CONFIG_SECTION}]\n{KEY_DLL} = mods\\coop\\x.dll\n"));
+        let backslashes = SeamlessConfig::parse(&format!(
+            "[{CONFIG_SECTION}]\n{KEY_DLL} = mods\\coop\\x.dll\n"
+        ));
         assert_eq!(backslashes.mod_directory(), "mods/coop");
         let top_level = SeamlessConfig::parse(&format!("[{CONFIG_SECTION}]\n{KEY_DLL} = x.dll\n"));
         assert_eq!(top_level.mod_directory(), "");

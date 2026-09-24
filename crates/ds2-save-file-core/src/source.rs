@@ -218,7 +218,10 @@ mod tests {
     /// The session's extension leads the dropdown, because it is the file being reached for.
     #[test]
     fn the_sessions_extension_leads_the_list() {
-        assert_eq!(extensions_with(Some("co2")), ["co2", "sl2", "zip", "7z", "rar"]);
+        assert_eq!(
+            extensions_with(Some("co2")),
+            ["co2", "sl2", "zip", "7z", "rar"]
+        );
         assert_eq!(offered_with(Some("co2")), ".co2, .sl2, .zip, .7z or .rar");
     }
 
