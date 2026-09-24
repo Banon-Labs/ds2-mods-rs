@@ -596,10 +596,10 @@ fn load_confirmed(slot: i32) {
         return;
     }
     let staged = swap.staged.clone();
-    // The save side's vtable slot, armed for completeness rather than for effect: it is the seam a
-    // measured run disproved, and the worker directory below is what a save actually writes to. It
-    // stays because `export` reads `SAVE.directory()` to say where a Save Game to File row's file
-    // came from, and because the two being armed together is the state that crate expects.
+    // The save side's vtable slot, armed so `export` can read `SAVE.directory()` and say which
+    // container a Save Game to File row's file came from. It is not what a save writes through --
+    // that seam was disproved for loads and the save half has no better claim -- and it is
+    // disarmed again at `StartIngame` alongside the open window.
     // SAFETY: the game is mapped and past `DllMain`; this is its own thread at the title.
     let armed = unsafe { session_dir::SAVE.arm() };
     // The container the list is about, reported rather than assumed. This flow never armed a
@@ -652,8 +652,21 @@ fn load_confirmed(slot: i32) {
 fn load_started() {
     ds2_continue::clear_started_ingame();
     ds2_dialog_skip::release();
+    // AND THE WINDOW CLOSES HERE, which is the whole reason it is a window.
+    //
+    // Left open it reaches the save side, and not through the write it refuses: DARK SOULS II reads
+    // the existing container before writing one, and that read was still being handed the donor's.
+    // A container bound to another account is not one this session can write back, so the game says
+    // `failed to save game` -- measured 2026-09-23, on a load that had otherwise worked.
+    //
+    // The character is in the world by now and was built from the donor container while the window
+    // was open, so nothing this session still needs is behind it.
+    let diverted = ds2_save_redirect::open_redirect::disarm();
+    // SAFETY: the game is mapped and past `DllMain`; this is its own thread, in the world.
+    let save_side = unsafe { session_dir::SAVE.disarm() };
     log_line(format_args!(
-        "{LOG_PREFIX} swap in game -- the dialogs are yours again"
+        "{LOG_PREFIX} swap in game -- diverted={diverted} save-side-restored={save_side}. The \
+         dialogs are yours again and this character's saves go to your own folder"
     ));
 }
 
