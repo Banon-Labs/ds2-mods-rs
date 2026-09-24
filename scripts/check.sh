@@ -156,6 +156,12 @@ else
   # the first refuses any builtin it has not watched survive the real runtime, the second drives
   # a real transcript through the hook command out of .claude/settings.json.
   python3 scripts/check-cupcake-wasm-builtins.py
+  # A policy whose verb evaluate.rego does not name is INERT: it loads, routes, evaluates, and its
+  # decision is discarded. Measured 2026-09-23 on no_unchecked_game_alive_claim, which shipped with
+  # 8/8 opa tests, a passing signal test, `cupcake verify` green and its name in the routing map,
+  # and could not halt anything. evaluate.rego's own comment claimed the builtins check above caught
+  # this; it did not, so this is the check that comment describes.
+  python3 scripts/check-cupcake-routed-verbs.py
   python3 scripts/test-cupcake-stop-guards.py
   # The signal is the half that decides WHICH turns are violations, and it is where every
   # false-positive carve-out lives. `opa test` above only pins the policy's tag -> halt mapping.

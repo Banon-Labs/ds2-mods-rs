@@ -77,6 +77,8 @@ all_halts contains decision if { some decision in data.cupcake.policies.claude.n
 
 all_halts contains decision if { some decision in data.cupcake.policies.claude.no_unbacked_claim.halt }
 
+all_halts contains decision if { some decision in data.cupcake.policies.claude.no_unchecked_game_alive_claim.halt }
+
 all_halts contains decision if { some decision in data.cupcake.policies.claude.no_unexecuted_promise.halt }
 
 # Deny decisions.
