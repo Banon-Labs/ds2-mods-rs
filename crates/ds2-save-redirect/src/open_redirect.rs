@@ -84,11 +84,18 @@ pub fn arm(asked: &Path, answer: &Path) -> bool {
         .encode_utf16()
         .collect();
     wide.push(0);
-    let Ok(mut window) = WINDOW.lock() else {
-        return false;
-    };
-    *window = Some((asked.to_path_buf(), wide));
-    DIVERTED.store(0, Ordering::Relaxed);
+    // THE LOCK IS RELEASED BEFORE THE LINE IS WRITTEN, and this is not tidiness. Writing a log line
+    // opens a file, which enters the detour, which asks this same lock whether the path is the
+    // armed one -- and `std::sync::Mutex` is not reentrant, so holding it across the log wedges the
+    // game thread against itself. Measured 2026-09-23: the flow logged `swap at the title` and the
+    // process sat there with eighty-five live threads and no further line.
+    {
+        let Ok(mut window) = WINDOW.lock() else {
+            return false;
+        };
+        *window = Some((asked.to_path_buf(), wide));
+        DIVERTED.store(0, Ordering::Relaxed);
+    }
     log(format_args!(
         "{LOG_PREFIX} open-redirect armed asked={} answer={}",
         asked.display(),
@@ -152,11 +159,17 @@ unsafe fn wide_to_string(text: *const u16) -> Option<String> {
 /// The comparison is case-insensitive because Windows paths are, and the game's own spelling of its
 /// container is not guaranteed to match the one a directory builder produced character for
 /// character.
+/// It never blocks -- `try_lock`, not `lock`.
+///
+/// This runs on every file open in the process, including the ones made by whoever is holding the
+/// lock. A contended lock means somebody is arming or disarming right now, and the honest answer to
+/// that is to let the open through rather than to stop the game until they are done: a missed
+/// diversion is a failed swap, a blocked one is a game that never comes back.
 fn answer_for(path: &str, access: u32) -> Option<Vec<u16>> {
     if access & GENERIC_WRITE != 0 {
         return None;
     }
-    let window = WINDOW.lock().ok()?;
+    let window = WINDOW.try_lock().ok()?;
     let (asked, answer) = window.as_ref()?;
     let asked = asked.as_os_str().to_string_lossy();
     asked.eq_ignore_ascii_case(path).then(|| answer.clone())
