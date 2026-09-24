@@ -1,0 +1,4 @@
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"give me a table of what landed and what has not"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","name":"Bash","id":"t1","input":{"command":"git log --oneline -5"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"30e11f1 Merge pull request #38"}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Asked for, so here it is.\n\n| piece | state |\n|---|---|\n| name/state/stats per slot, in Rust | done, host-testable |\n| soul level | deliberately absent |\n| picker rows over those slots | next |\n| load one chosen character instead of the whole container | after that |"}]}}

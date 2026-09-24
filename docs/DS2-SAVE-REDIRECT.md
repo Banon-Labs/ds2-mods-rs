@@ -105,30 +105,27 @@ heap. `assign` is the same function the original uses to seat its `SHGetFolderPa
 
 ## Using it
 
-`path` names a **file**, because that is what a file manager's "copy full path" gives you:
+There is no config key and no launcher flag. There was a `[save_redirect] path = ...` key and a
+`--save-redirect` flag, and both are deleted, because what they did was not what they said.
 
-```bash
-python3 scripts/ds2-run.py --save-redirect 'Z:\home\you\DS2\some-save.zip'
-```
+The help string said *load the save at WINPATH*. What happened was: the DLL copied that file into
+`ds2-save-staging/` beside the executable, pointed the game at that **directory**, and rewrote the
+copy from the source on the next launch. The file named was never opened by the game, and a session
+started that way threw away everything done in it -- the copy is what the game saved into, and the
+copy is what the next launch overwrote. It also armed both sides at once for the whole session, so
+anything else being tested in that session was silently reading and writing the staged duplicate.
 
-```toml
-[save_redirect]
-enabled = true
-path = "Z:\\home\\you\\DS2\\some-save.zip"
-```
-
-Four shapes are accepted, told apart by extension: a bare `.sl2`, or a `.zip`/`.7z`/`.rar`
-containing **exactly one** `DS2SOFS0000.sl2` at any depth. Zero copies or several are refused by
-name rather than resolved by picking the first — a downloaded archive may hold the save at
+What remains is the pause menu's **Load Character from File** row, which is the feature this was
+standing in for, and the handoff file that row writes when it cannot do the swap in-session. Four
+shapes are accepted, told apart by extension: a bare `.sl2`, or a `.zip`/`.7z`/`.rar` containing
+**exactly one** `DS2SOFS0000.sl2` at any depth. Zero copies or several are refused by name rather
+than resolved by picking the first -- a downloaded archive may hold the save at
 `DarkSoulsII/<steamid>/DS2SOFS0000.sl2` or bare at the root, and both occur in the wild.
-
-It is a **Windows** path: the DLL runs inside the Proton prefix, and Wine maps `Z:` to `/`. Only an
-exact `true` arms it, and `true` with no `path` is refused rather than guessed at.
 
 ### The DLL does the rebind, and needs nothing from you
 
 The source file is never modified. On the detour's first call the DLL extracts the save, rewrites
-the Steam ID inside it, and writes the result to `ds2-save-staging/` beside the executable — then
+the Steam ID inside it, and writes the result to `ds2-save-staging/` beside the executable -- then
 hands the game that directory.
 
 The ID it writes is the one **the game handed the hooked function as its second argument**. That is
@@ -143,7 +140,7 @@ and file writes than a loader callback running before the entry point.
 
 It is what the game reads **and writes**, so progress made in a redirected run lives in
 `ds2-save-staging` and does not survive the next launch. That is what pointing at a read-only
-source means — "start from this save", not "adopt this save".
+source means -- "start from this save", not "adopt this save".
 
 ### It fails open
 
@@ -168,7 +165,7 @@ the first occupied slot is used; with a value the file says is empty, the launch
 but not blocked, because the runtime applies an ownership check the launcher cannot see.
 
 Slots are reported `occupied`, `placeholder` or `empty`. **`placeholder`** means the nine stats are
-all `1` — initialised but holding no character. That state is real and common: it is a save's next
+all `1` -- initialised but holding no character. That state is real and common: it is a save's next
 free slot, and a downloaded "mule" had it in all ten. Reading it as occupied made that mule look
 like ten characters, which is why the classification exists rather than a bare non-zero test.
 
@@ -210,7 +207,7 @@ produces a file the game rejects in exactly the same way as the unpatched one. T
 its own output before writing -- every MD5, every section chain, and the ID set -- and refuses to
 write a save that fails.
 
-Find your own ID from the folder the game already uses: `…\AppData\Roaming\DarkSoulsII\<id>\`.
+Find your own ID from the folder the game already uses: `...\AppData\Roaming\DarkSoulsII\<id>\`.
 It is the SteamID64 in **hex**, not decimal.
 
 ## Ordering, and the thing that is not optional
@@ -219,6 +216,51 @@ It is the SteamID64 in **hex**, not decimal.
 else's save is the shape of thing FromSoftware's matchmaking watches for, so the flag patches and
 the import-table guard should already be in place before the save system exists. `[offline]`
 defaults to on for that reason and should stay on for any run that uses this.
+
+## Mid-session, the lever is the storage worker
+
+Everything above is a launch-time redirect and cannot move a live session: `SAVE_DIR_BUILD` runs
+during session setup, so re-pointing it once the game is up rewrites a string nothing reads again.
+That is not a dead end, though, because of *where* its result goes. The `0x18` arm of the session
+pump (`FUN_1402e6230`, at `0x1402e635c`) is the whole of it:
+
+```text
+FUN_140248db0(&dir, steamid);                     // SAVE_DIR_BUILD
+if (!SLSystem->field_0x1a1) {                     // a once-per-process latch
+    FUN_140a899f0(SLSystem->_x38, 0, dir);        //   first session:       index 0
+    SLSystem->field_0x1a1 = true;
+} else {
+    FUN_140a899f0(SLSystem->_x38, 1, dir);        //   every later session: index 1
+}
+```
+
+`FUN_140a899f0` seats the directory on the storage worker, at `worker+0x48`, and that is the field
+a container read opens. Since the launch-time redirect was measured reading a donor container end
+to end, and this is the only route its string can have taken, the worker's copy is the one that
+matters -- so an in-session redirect calls `FUN_140a899f0` directly rather than trying to make
+session setup happen again. `ds2_save_redirect::request_dir` is that call.
+
+### Three seams that are not it
+
+| seam | what it moves | how it was disproved |
+|---|---|---|
+| `SLLoadSession`'s directory virtual (`session_dir`) | the load class's vtable slot 3 | the work method reaches the same string through the accessor and never calls the virtual: `load-answered=1` on a read that still failed |
+| `SAVE_DIR_BUILD` re-pointed mid-session | the string session setup builds | session setup does not re-run for a re-read: `session-dir-answered=0` |
+| `SLLoadContent`'s own string, `[[system+0x30]]+0x08` | a field beside the worker's | measured `<unreadable>`, and it is not the string the worker holds |
+
+### The set is called whole, and the read-back is a hook
+
+`FUN_140a899f0` is a lock/unlock pair around one mutation: `FUN_140a8bfb0` takes the manager's lock
+at `manager+0x50` and the worker's at `worker+0xb0` and leaves **both held**, and `FUN_140a8c390`
+releases them. The worker pointer exists only between those two calls. Reaching for the finder
+alone to read the directory back would leave the save system locked against its own next request,
+so the read-back is a detour on the worker-side writer (`FUN_140a8d9b0`) instead -- the only writer
+of that field, which means it also reports every directory the game sets on itself.
+
+It reports one more thing that nothing else can see. `worker+0xad` is a byte the writer consults
+first, and a non-zero value jumps the entire body: the index write, the status reset and the string
+set, all of it. **A skipped set is otherwise completely silent**, which is the shape of failure the
+three seams above all had.
 
 ## What is NOT done
 

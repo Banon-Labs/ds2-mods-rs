@@ -69,11 +69,19 @@ all_halts contains decision if { some decision in data.cupcake.policies.claude.n
 
 all_halts contains decision if { some decision in data.cupcake.policies.claude.no_proof_without_observation.halt }
 
+all_halts contains decision if { some decision in data.cupcake.policies.claude.no_shouting_at_turn_end.halt }
+
 all_halts contains decision if { some decision in data.cupcake.policies.claude.no_stall_on_friction.halt }
+
+all_halts contains decision if { some decision in data.cupcake.policies.claude.no_status_table_at_turn_end.halt }
 
 all_halts contains decision if { some decision in data.cupcake.policies.claude.no_unbacked_claim.halt }
 
+all_halts contains decision if { some decision in data.cupcake.policies.claude.no_unchecked_game_alive_claim.halt }
+
 all_halts contains decision if { some decision in data.cupcake.policies.claude.no_unexecuted_promise.halt }
+
+all_halts contains decision if { some decision in data.cupcake.policies.claude.no_user_property_grant.halt }
 
 # Deny decisions.
 all_denials contains decision if { some decision in data.cupcake.policies.builtins.claude_code_enforce_full_file_read.deny }
@@ -90,6 +98,10 @@ all_denials contains decision if { some decision in data.cupcake.policies.claude
 
 all_denials contains decision if { some decision in data.cupcake.policies.claude.block_pgrep_full_match.deny }
 
+all_denials contains decision if { some decision in data.cupcake.policies.claude.docs_no_size_metrics.deny }
+
+all_denials contains decision if { some decision in data.cupcake.policies.claude.docs_no_shouting.deny }
+
 all_denials contains decision if { some decision in data.cupcake.policies.claude.ds2_launch_guard.deny }
 
 all_denials contains decision if { some decision in data.cupcake.policies.claude.edit_no_tmp_scripts_guard.deny }
@@ -101,6 +113,8 @@ all_denials contains decision if { some decision in data.cupcake.policies.claude
 all_denials contains decision if { some decision in data.cupcake.policies.claude.git_block_main_push.deny }
 
 all_denials contains decision if { some decision in data.cupcake.policies.claude.git_require_fresh_origin_main.deny }
+
+all_denials contains decision if { some decision in data.cupcake.policies.claude.git_require_runtime_test_before_push.deny }
 
 all_denials contains decision if { some decision in data.cupcake.policies.claude.monitor_rate_limit.deny }
 

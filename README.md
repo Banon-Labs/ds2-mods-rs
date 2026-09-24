@@ -27,6 +27,20 @@ logged `refused api=getaddrinfo host=frpg2-steam64-ope-login.fromsoftware-game.n
 with `--no-offline` and understand what you are turning off. See
 [`docs/DS2-OFFLINE.md`](docs/DS2-OFFLINE.md).
 
+**Four rows on the pause menu, and room for twelve.** `quit-to-desktop`, `load-build-from-url`,
+`load-character-from-file` and `save-game-to-file` all register through
+[`ds2-menu-row`](crates/ds2-menu-row/src/lib.rs)'s public API, and `[menu_row] rows = [...]` picks
+which appear and in what order. There were two slots, because the tab's item vector is a
+`DLFixedVector` of capacity five and the game ships three rows on it -- and there is no seventh tab
+to move to either, for five separate reasons the game spells as code literals. What there is instead
+is one function that reads an item and one that reads a cell, both detoured, so the rows live in
+storage the DLL owns and the ceiling becomes the grid's own bind loop: fifteen rows, less the three
+shipped. A thirteenth is still refused at registration with the numbers. **Where the rows stop being
+legible on the banner is not measured** and is a smaller number than twelve, and **none of the new
+machinery has been in front of a running game**. **The two save-file rows have not been run either**;
+the static reading behind them, and the reason loading a save from a file takes effect on the next
+launch rather than this one, are in [`docs/DS2-SAVE-FILE-ROWS.md`](docs/DS2-SAVE-FILE-ROWS.md).
+
 ## Three facts that shape everything here
 
 1. **me3 cannot load DS2.** `me3 profile create --game` accepts `darksouls3, sekiro, eldenring,

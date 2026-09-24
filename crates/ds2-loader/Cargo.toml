@@ -64,6 +64,7 @@ ds2-continue.workspace = true
 ds2-offline.workspace = true
 ds2-save-redirect.workspace = true
 ds2-build-import.workspace = true
+ds2-save-file.workspace = true
 ds2-menu-row.workspace = true
 ds2-inventory-sort.workspace = true
 ds2-hotkey-config.workspace = true

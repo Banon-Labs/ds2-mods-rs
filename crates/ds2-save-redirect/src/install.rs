@@ -3,8 +3,8 @@
 use core::ffi::c_void;
 use std::os::windows::ffi::OsStrExt as _;
 use std::path::PathBuf;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use ds2_hook::{MH_EnableHook, MH_Initialize, MH_STATUS, MhHook};
 
@@ -24,7 +24,7 @@ pub fn set_logger(logger: LogFn) {
     ds2_hook::set_hook_logger(logger);
 }
 
-fn log(args: std::fmt::Arguments<'_>) {
+pub(crate) fn log(args: std::fmt::Arguments<'_>) {
     let raw = LOGGER.load(Ordering::Acquire);
     if raw != 0 {
         // SAFETY: `raw` is only ever a `LogFn` stored by `set_logger`.
@@ -45,6 +45,14 @@ static STAGING_ROOT: OnceLock<PathBuf> = OnceLock::new();
 /// `None` means staging was attempted and failed, which is remembered so a failing archive is not
 /// re-opened on every call to a function the game invokes more than once per boot.
 static STAGED: OnceLock<Option<Vec<u16>>> = OnceLock::new();
+
+/// The directory the detour last left behind, redirected or not.
+///
+/// Recorded in BOTH arms, because the crate that wants it -- the Save Game to File row -- needs the
+/// directory the game is actually using, and whether that is ours or the game's own is exactly the
+/// distinction it must not have to care about. A `Mutex<Option<..>>` rather than a `OnceLock`: the
+/// answer changes if a redirect is armed, and the last one written is the true one.
+static LIVE_DIRECTORY: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 /// The live module base, resolved once in [`install`] so the detour never has to.
 static MODULE_BASE: AtomicUsize = AtomicUsize::new(0);
@@ -89,6 +97,62 @@ pub fn set_source(source: &str, staging_root: PathBuf) -> bool {
 /// Whether a source was armed.
 pub fn armed() -> bool {
     SOURCE.get().is_some()
+}
+
+/// The directory the game's save-directory builder last produced, redirected or not.
+///
+/// `None` before the detour has run once, which on a live pause menu it always has -- the game
+/// builds a save path to find out whether there is anything to load. The path is the WINDOWS form
+/// the game itself built, ending in a separator.
+pub fn live_directory() -> Option<PathBuf> {
+    LIVE_DIRECTORY.lock().ok()?.clone()
+}
+
+/// The running account's Steam ID, as the game spells it when it names its own save folder.
+///
+/// `None` before the directory builder has run once. Sixteen hex characters on every account seen
+/// so far, but stored as whatever the game passed rather than parsed, because the only thing it is
+/// ever used for is being handed back to the game in a folder name or a rebind.
+static STEAM_ID: Mutex<Option<String>> = Mutex::new(None);
+
+/// The running account's Steam ID.
+///
+/// # Why this exists rather than reading the directory's last component
+///
+/// That is what the first version of `ds2-save-file`'s swap flow did, and the live log caught it:
+/// with a launch-time redirect armed, the directory is
+/// `...\Game\ds2-save-staging\` and its last component is `ds2-save-staging`. A container rebound to
+/// that string is bound to an account that does not exist, and the game would show no characters in
+/// it -- which looks exactly like a save that failed to stage. The ID the game itself passes to the
+/// directory builder is the one that is always right.
+pub fn live_steam_id() -> Option<String> {
+    STEAM_ID.lock().ok()?.clone()
+}
+
+/// Record the ID the game handed the directory builder.
+fn record_steam_id(id: &str) {
+    if id.is_empty() || id.starts_with('<') {
+        return;
+    }
+    if let Ok(mut held) = STEAM_ID.lock()
+        && held.as_deref() != Some(id)
+    {
+        *held = Some(id.to_owned());
+    }
+}
+
+/// Remember the directory the game is using, for the crates that need to find the `.sl2` in it.
+///
+/// Called with whatever `read_wstring` produced, which on a failed read is one of its own
+/// `<...>` placeholders rather than a path -- so those are dropped instead of being remembered as a
+/// directory named `<null>`.
+fn record_live_directory(path: &str) {
+    if path.is_empty() || path.starts_with('<') {
+        return;
+    }
+    if let Ok(mut live) = LIVE_DIRECTORY.lock() {
+        *live = Some(PathBuf::from(path));
+    }
 }
 
 /// Read a null-terminated UTF-16 string the game handed us.
@@ -190,6 +254,51 @@ fn stage_now(steam_id: &str) -> Option<Vec<u16>> {
     }
 }
 
+/// A directory that outranks everything else this detour would answer, for as long as it is set.
+///
+/// Set by the in-session character swap while it is at the title, and cleared by it on every path
+/// that ends the flow. It is a `Mutex<Option<..>>` rather than the `OnceLock` the launch staging
+/// uses because its whole purpose is to be armed and disarmed inside one process.
+static SESSION_OVERRIDE: Mutex<Option<Vec<u16>>> = Mutex::new(None);
+
+/// Times the session override answered, so a flow can report that it did rather than assume it.
+static SESSION_ANSWERED: AtomicUsize = AtomicUsize::new(0);
+
+/// Point every container directory this session builds at `windows_path`, until [`clear_session`].
+///
+/// The path is taken as the game spells one: a Windows path ending in a separator, which is what
+/// the original produces and what its callers append a filename to. A missing separator is added,
+/// because the container would otherwise be looked for beside the folder rather than inside it.
+///
+/// Returns the number of times the override has answered so far, which is zero on a fresh arm.
+pub fn set_session_directory(windows_path: &str) -> usize {
+    let mut wide: Vec<u16> = windows_path.encode_utf16().collect();
+    if !matches!(wide.last(), Some(&c) if c == u16::from(b'\\')) {
+        wide.push(u16::from(b'\\'));
+    }
+    if let Ok(mut held) = SESSION_OVERRIDE.lock() {
+        *held = Some(wide);
+    }
+    SESSION_ANSWERED.swap(0, Ordering::Relaxed)
+}
+
+/// Stop answering the session directory. Idempotent; returns how many times it answered.
+pub fn clear_session_directory() -> usize {
+    if let Ok(mut held) = SESSION_OVERRIDE.lock() {
+        *held = None;
+    }
+    SESSION_ANSWERED.load(Ordering::Relaxed)
+}
+
+/// How many times the session override has answered since it was armed.
+pub fn session_answers() -> usize {
+    SESSION_ANSWERED.load(Ordering::Relaxed)
+}
+
+fn session_override() -> Option<Vec<u16>> {
+    SESSION_OVERRIDE.lock().ok().and_then(|held| held.clone())
+}
+
 /// The detour. Replaces the whole directory -- root and Steam ID folder both -- when armed.
 ///
 /// # Safety
@@ -206,19 +315,67 @@ unsafe extern "system" fn detour_save_dir(out: *mut c_void, steamid: *const u16)
                 unsafe { std::mem::transmute::<usize, SaveDirFn>(trampoline) };
             unsafe { original(out, steamid) };
         }
+        // SAFETY: the original has seated the caller's string, or nothing has and it is still the
+        // constructed one the caller passed in.
+        let produced = unsafe { read_wstring(out) };
+        record_live_directory(&produced);
         log(format_args!(
-            "{LOG_PREFIX} save-dir passthrough reason={note} path={}",
-            unsafe { read_wstring(out) }
+            "{LOG_PREFIX} save-dir passthrough reason={note} path={produced}"
         ));
     };
+
+    // The account ID the game itself is about to use for the folder name. This is why the rebind
+    // needs nothing from the config -- 64 units is far beyond a 16-character ID.
+    //
+    // Read and recorded BEFORE the arming check, in both arms, because a caller that wants the ID
+    // wants it whether or not a redirect is armed -- and the arm is exactly the case where the
+    // directory it could otherwise be read off is NOT named after the account.
+    let found = unsafe { wide_to_string(steamid, 64) };
+    if let Some(id) = found.as_deref() {
+        record_steam_id(id);
+    }
+
+    // THE SESSION OVERRIDE COMES FIRST, and it is the seam the in-session swap has to use.
+    //
+    // `SLLoadSession`'s directory virtual is not what a container read opens. The work method
+    // (`SL_LOAD_SESSION_WORK`) reads the content's own string inline -- `[this+0xe8]`, through the
+    // same accessor the virtual uses -- and never calls that virtual, so swapping its vtable slot
+    // changes the answer to a question the read does not ask. One run measured exactly that: the
+    // slot was armed, `load-answered=1` says the game reached it, and the read still failed,
+    // because the content's string had been built here, at session setup, from the player's own
+    // folder.
+    //
+    // So the directory a container read uses is the one this function produces, and this is where
+    // an in-session redirect belongs. It moves both sides at once, which is safe only in the window
+    // the swap arms it for: between the return to the title and a character being chosen, no
+    // character is loaded, so there is nothing a save could write.
+    if let Some(directory) = session_override() {
+        let base = MODULE_BASE.load(Ordering::Acquire);
+        if base == 0 {
+            pass_through("session-override-no-module-base");
+            return;
+        }
+        // SAFETY: `WSTRING_ASSIGN` is the game's own assign, at a recorded RVA in the loaded image.
+        let assign: AssignFn = unsafe {
+            std::mem::transmute::<usize, AssignFn>(base + ds2_rva::WSTRING_ASSIGN as usize)
+        };
+        // SAFETY: `out` is the caller's constructed string and `directory` is this module's own
+        // buffer, alive for the length of the call.
+        unsafe { assign(out, directory.as_ptr(), directory.len()) };
+        // SAFETY: the assign above seated the caller's own constructed string.
+        let produced = unsafe { read_wstring(out) };
+        let n = SESSION_ANSWERED.fetch_add(1, Ordering::Relaxed) + 1;
+        log(format_args!(
+            "{LOG_PREFIX} save-dir session-override count={n} path={produced}"
+        ));
+        return;
+    }
 
     if !armed() {
         pass_through("not-armed");
         return;
     }
-    // The account ID the game itself is about to use for the folder name. This is why the rebind
-    // needs nothing from the config -- 64 units is far beyond a 16-character ID.
-    let Some(steam_id) = (unsafe { wide_to_string(steamid, 64) }) else {
+    let Some(steam_id) = found else {
         pass_through("no-steam-id");
         return;
     };
@@ -244,9 +401,11 @@ unsafe extern "system" fn detour_save_dir(out: *mut c_void, steamid: *const u16)
 
     // Read it back rather than logging what was intended. The two differ exactly when this is
     // broken, which is the only time the line matters.
+    // SAFETY: the assign above seated the caller's own constructed string.
+    let produced = unsafe { read_wstring(out) };
+    record_live_directory(&produced);
     log(format_args!(
-        "{LOG_PREFIX} save-dir redirected steam-id={steam_id} path={}",
-        unsafe { read_wstring(out) }
+        "{LOG_PREFIX} save-dir redirected steam-id={steam_id} path={produced}"
     ));
 }
 

@@ -918,3 +918,448 @@ Both children are checked before anything is copied -- child 0 must name `0x0255
 its highlight would be the same class of mistake as substituting the wrong container. If any check
 says no, the record keeps naming row 0's definition and the row is what shipped before: the wrong
 icon, and a highlight that works.
+
+## A seventh tab, and the row ceiling that was never about display
+
+Everything in this section is static: `scripts/ds2-disasm.py` and the Ghidra MCP daemon on
+`darksoulsii-deobf.bin`, `scripts/ds2-ebl.py` and `scripts/ds2-flo.py` on the shipped archive. **No
+game was launched for any of it, and none of it has been run.**
+
+The question was the obvious one. The System tab's item vector holds five and the game ships three,
+so two mod rows fit and four want a slot. A tab of our own would start empty.
+
+> **This section said "the seventh tab cannot exist" and that was wrong.** It listed five bounds,
+> every one of them correct as a statement about the game's code, and then drew a conclusion none of
+> them supports: each is a literal inside a function, and a literal inside a function is a detour
+> site. The rows went onto the System tab instead, and the user's reply on seeing seven rows under
+> one gear icon was that this was not what they asked for. What follows is the same reading with the
+> conclusion corrected; `crates/ds2-menu-row/src/tab.rs` is the build, and the summary of what each
+> bound costs is in `ds2-rva` beside `FE_INGAME_TOP_SELECT_CTOR`.
+
+### The vector really is per tab
+
+`FUN_1400a40e0` -- the function `FeGroupInGameTopSelect::ctor` calls once per tab -- copies the
+builder's stack descriptor into the group it is constructing:
+
+```c
+FUN_1400a3ef0(param_1 + 0x1f, param_4);     // group + 0xf8  <- the item vector
+FUN_1400189f0(param_1 + 0x26, param_4 + 0x38);
+param_1[0x2c] = param_2;
+```
+
+and `FUN_1400a3ef0` is a `DLFixedVector` copy: `if (5 < src[0x30]) panic("out of memory.")`, then
+`dst[0x30] = count` and `count` qwords from `src + (-src & 3)` to `dst + (-dst & 3)`. Each tab owns
+its own five slots, inline, with no pointer anywhere in it. So the premise held: a seventh tab would
+have five free slots.
+
+### Where the six is written down, five times over
+
+Every one of these is a literal in code rather than a table in data. That is what makes each of them
+a place to stand a detour, and the answer to each is given with it.
+
+**1. There is nowhere to put the object.** The ctor builds the six groups at `param_1 + 0x33`,
+`+0x60`, `+0x8d`, `+0xba`, `+0xe7`, `+0x114` -- qwords, so `+0x198` through `+0x8a0`, stride
+`0x168` -- and `FeGroupInGameTopSelect` is itself an inline member of `FeSceneInGame`
+(`FUN_1400995a0` calls `FUN_1400a41b0(scene + 0x28, ...)`). A seventh group would begin at `+0xa08`,
+and the same constructor already writes an element accessor there:
+`FUN_140027c80(uVar2, param_1 + 0x141, &local_1c8)` -- `0x141 * 8 == 0xa08`.
+
+**2. Navigation is six `this + literal` on the stack.** `FUN_1400a66d0`, in full:
+
+```c
+index = FUN_140022140(this);
+local_38[0] = this + 0x198;  local_38[1] = this + 0x300;  local_38[2] = this + 0x468;
+local_38[3] = this + 0x5d0;  local_38[4] = this + 0x8a0;  local_38[5] = this + 0x738;
+return (ulonglong)(longlong)index < 6 ? local_38[index] : 0;
+```
+
+Note the last two: display index 4 is the group built SIXTH and index 5 is the one built fifth. The
+System tab -- Game Options / Screen Options / Quit Game -- is the last tab on screen and the fifth
+constructed, which is why this repo's probe calls it tab 4 and a player calls it the last one.
+
+**3. The tab strip's own namer list is FULL.** `FUN_1400a5c60` builds a one-component base path and
+pushes six ids -- `0x1eaba2, 0x1eaba3, 0x1eaba4, 0x1eaba6, 0x1eaba7, 0x1eaba5` -- in a
+`do { } while (i < 6)` loop, through the same push a tab's row namer uses. That push opens:
+
+```c
+uVar2 = *(longlong *)(param_1 + 0x128) + 1;
+if (6 < uVar2) DLKR::DLBackAllocator::panic(".../DLFixedVector.inl", 0x24c, "out of memory.");
+```
+
+A tab's ROW namer uses three of its six, which is the slack this repo has been spending. The tab
+strip's uses six of six, so nothing more can be pushed into it and asking is the panic that killed
+the game the first time this list was overfilled.
+
+**4. The strip's item count is a literal.** `FeGroupInGameTopSelect`'s init calls
+`FUN_140021b30(this, 6)` and then walks a SIX-pointer unrolled stack array of the same addresses as
+(2).
+
+**5. The strip's caption path builder holds five entries** (`0x1eab9b`, `0x1eab9c`, `0x1eab9d`,
+`0x1eab9f`, `0x1eab9e`) behind `if (index < 5)`, and returns an empty accessor above it.
+
+### What each one costs, which is the part the first reading skipped
+
+| # | the six | the seventh tab |
+| --- | --- | --- |
+| 1 | the groups are inline in the top select | do not put it there: `FUN_1400a40e0` writes nothing past `group[0x2c]`, so a `0x168` buffer is a whole group and the game's own constructor fills it |
+| 2 | `FUN_1400a66d0` returns null above index 5 | detour it. Five callers and one vtable reference at `0x1418a53f4`, and no other route to a tab -- it is the funnel |
+| 3 | the strip's namer list is six of six | the stand-in above, one level up -- but through the strip's own lookup, which is a second function. See the correction below |
+| 4 | `FUN_140021b30(this, 6)` | the same count raise the per-tab init already gets. The strip is a `FexGridControl`, so past this literal the bound is 32 columns |
+| 5 | five caption entries | nothing. There are six tabs and five entries, so the System tab already takes the empty arm; index 6 behaves as index 5 does today |
+| 6 | the strip's `.flo` container holds six cell records | the same child-count raise and record append a row container gets. Element `0x1eaba8` is the one gap in the strip's own id block |
+
+One new mechanism and five repeats of mechanisms this crate already ships. The build is
+`crates/ds2-menu-row/src/tab.rs` (the group, the lookup, the strip's count) and
+`crates/ds2-menu-row/src/strip.rs` (the cell record).
+
+### Two corrections the build cost, both of them "one thing" that was two
+
+Written down while the runs were still on screen, because each was a sentence in this document that
+read as settled and was not.
+
+**A row is a grid cell; a caption is not.** The added rows were kept off the other tabs by the
+namer -- a row record is a cell, and a cell no namer names is never drawn. The caption beside it is
+a plain child of the same container and nothing can decline to draw it. So the seventh tab, sharing
+one container with the System tab, drew its own four rows and the System tab's three captions on
+top of the first three of them. The fix is one level up: each tab already owns a subtree hung off
+the strip (`0x0265` -> `0x0264` -> `0x0263`), and only the posed one draws, so the seventh tab gets
+copies of all three with its rows in the last and a new element id, `0x1eaceb`, on the first. The
+group's own layout path at `descriptor + 0x38` is repointed at that id, and so is component 1 of
+every cell path its namer builds.
+
+**`IngameTopLayoutAdapter` is two classes, not one.** Slot 2 of `VLayoutAdapter` (`0x1410b69a8`) is
+`0x1400a4b20` and serves a tab's rows; slot 2 of `HLayoutAdapter` (`0x1410b6a08`) is `0x1400a4a70`
+and serves the strip's tab cells. The bodies are mirror images -- the tab's requires column zero and
+indexes by row, the strip's requires row zero and indexes by column -- so a stand-in built for one
+works for the other, but a detour on one is not a detour on the other. Sentence (3) in the table
+above said the lookup was "one function shared by every namer including the strip's", and a run
+measured that false: the seventh tab could be selected, its rows drew, and its cell in the strip was
+never asked for, so the highlight stayed on the sixth tab. Both functions are now detoured.
+
+### Neither ceiling can be grown, and neither had to be
+
+Both are inline storage whose next element lands on its own count field:
+
+| | elements at | count at | element 6 |
+| --- | --- | --- | --- |
+| item vector | `descriptor + (-descriptor & 3) + n * 8` | `+0x30` | exactly ON the count |
+| namer list | `list + (-list & 7) + n * 0x30` | `list + 0x128` | spans the count |
+
+There is no pointer to repoint and no allocation to enlarge. But each is READ through exactly one
+function, and that is the whole opening:
+
+* **an item** comes from `FUN_1400a6750` -- `index = FUN_140022140(tab); if (index < tab[0x128])
+  return tab + 0xf8 + index * 8; return &static{0xffffffff, 0};` -- whose only two callers are the
+  confirm handler and `FUN_1400a4cc0`. A detour that answers for `index >= count` serves an
+  `(action, gate)` pair from anywhere.
+* **a cell's element** comes from `FrontendEx::IngameTopLayoutAdapter`'s `FUN_1400a4b20`, vtable slot
+  `+0x10`, which reads exactly three fields of the namer and nothing else:
+
+```asm
+cmp DWORD PTR [r8],0x0          ; cell.col != 0 -> empty
+mov edx,DWORD PTR [r8+0x4]      ; cell.row
+cmp rdx,QWORD PTR [rcx+0x140]   ; >= count -> empty
+lea r9,[rcx+0x18]               ; the entry list
+mov rcx,QWORD PTR [rcx+0x10]    ; the scene proxy
+call 0x140026790                ; (proxy, out, &list[row])
+```
+
+Three fields is a stand-in: a buffer with a scene proxy at `+0x10`, ONE entry at `+0x18` and a count
+of `1` at `+0x140` is indistinguishable from a namer here. Hand that over with a cell of `(0, 0)`
+and the game's own code builds the accessor for an entry of ours -- nothing reimplemented, and the
+entry never sits at an index whose stride would reach `+0x140`. One stand-in per row, because one
+shared list of twelve would hit that collision at entry 6 exactly as the game's does.
+
+The sibling slot `+0x18` (`FUN_1400a4c80`) is `make-empty; return` for every cell on every tab, so
+there is no second element to supply.
+
+### What is left is the bind loop, and it is fifteen
+
+`FrontendEx::FexGridControl`'s layout bind ends its outer loop with `if (0xe < iVar13) return` --
+rows `0..=14` -- and the fixed vector it collects built cells in refuses above `0x1e0`, which is
+`15 * 32`. Two spellings of one bound in one function. So a tab holds fifteen rows and the System
+tab ships three: **twelve added rows**, where it was two.
+
+### Why raising the cursor bound is safe, which is not obvious
+
+The per-tab init does three things in order: bind the grid, call `FUN_140021b30(tab, vectorCount)`,
+run the availability pass. The bind's extent now counts the stand-in cells, but the count it was
+handed is the vector's, which stops at five. So the init is detoured and the count re-set afterwards.
+
+The availability pass is the reason that is safe rather than merely convenient. It loops over the
+virtual count but reads each entry with its own inlined copy of the vector's bounds check, falling
+back to the same static `(0xffffffff, 0)` -- and its first act per entry is `if (gate == 0) skip`. So
+above the vector's count it reads the static, sees gate zero, and does nothing. It never touches
+uninitialised storage. Raising the vector's own count field instead of the virtual one would have
+handed that pass an unwritten gate and a gate index the predicate switches on.
+
+### And one correction to this document
+
+A namer list entry is a `DLKR::DLFixedVector<u32, 8>`, not an opaque struct with slack. The copy the
+push uses, `FUN_1400189f0`, refuses a source count above 8, copies that many `u32`s at stride 4, and
+writes the count at `+0x28` -- which is the field recorded above as "the path length". It is the
+length, and it is also a vector's count; the "uninitialised slack" between the last id and it is the
+unused tail of a fixed-capacity array. Nothing that was built on the old reading is wrong -- a clone
+still has to go through that copy rather than be assembled -- but the reason is now the right one.
+
+### What is not measured
+
+**Where the rows stop being visible.** Fifteen is what the engine will bind. The banner's quad is
+lengthened by one row pitch per row and the caret follows it, but the panel is a fixed graphic on a
+menu of fixed size, and nobody has looked at a tab carrying twelve added rows. Twelve is a refusal
+bound, not a recommendation.
+
+**All of it.** Not one line of this section has been in front of a running game.
+
+## The tab icon is one baked quad, and the atlas holds six of them
+
+Read statically on 2026-09-23 from `l02_01_In-Game.flo` and from the four functions that read it.
+No game was launched for any of it. The question it answers: a seventh tab was reachable,
+highlighted and drew its rows, and wore no icon.
+
+### Two readings that were wrong
+
+**"The glyph is bound into the cell by the grid."** It is not. All six tab cells instantiate one
+definition, `0x0270`, whose entire contents are two copies of the highlight shape `0x026f` at
+different frame ranges. Every record inside it -- and inside `0x026f` below it -- carries element id
+`0x000000`. `FeComponentObject::findByIdPath` matches on that field, so nothing inside a cell is
+addressable by any path, and a bind has no target. Six different icons cannot come out of one
+definition that has no id in it.
+
+**"The strip's second per-cell lookup supplies it."** `0x1400a4bd0` is `0x1400a4a70`'s body
+instruction for instruction, and answering both changed nothing on screen. That is consistent with
+the paragraph above rather than a contradiction of it: two accessors resolving the same entry to the
+same cell that holds no glyph.
+
+### Where the icons actually are
+
+Child 7 of the strip is a `kind & 1` record at `(0, 0)`, depth 60, naming shape `0x0268`. Decoded:
+
+| field | value |
+| --- | --- |
+| quads | 1 |
+| texture | index 12, `In-game_01`, 1024x1024 |
+| source rect | `(1.10, 781.95)-(337.60, 850.90)` |
+| offset | `(0, -775.70)` |
+| lands at | `(1.10, 6.25)-(337.60, 75.20)` |
+
+The six cells sit at `-4.6, 49.4, 103.4, 157.4, 211.55, 265.05`, so that one rect is `336.50` wide
+across a band the six tabs span in `269.65` plus one hexagon. It is the whole tab strip -- six
+hexagons and six glyphs -- baked into a single textured quad.
+
+Nothing else in the document draws a hexagon. A sweep of all 342 definitions for a child array whose
+x values step by roughly the tab pitch finds exactly one: the strip, and the hits are its own cells.
+A sweep of all 512 quads on texture 12 finds no unused art in the band `y 781.95..850.90` right of
+`x 337.60` either -- `0x0131` owns `335.95..473.90` there and the tab highlight `0x026e` starts at
+`475.25`. **There is no seventh hexagon in the atlas.**
+
+### The format, off the functions that read it
+
+| what | where | read by |
+| --- | --- | --- |
+| shape table | `[doc+0x08]`, `[doc+0x48]` entries, stride `0x18`, key `u16` at `+0x00` | `FUN_140b54780`, `add rcx,0x18` |
+| quad count | entry `+0x02` | `FUN_140b70200`, `movzx ecx,WORD PTR [rax+0x2]` |
+| quad array | entry `+0x08`, stride `0x40` | `FUN_140b70200`, `shl r8,0x6; add r8,[rax+0x8]` |
+| source rect | quad `+0x30` -> four floats | `FUN_140b70200`, `mov rax,[r8+0x30]` then `[rax]`..`[rax+0xc]` |
+| which table | record `+0x12` kind, record `+0x00` index | `FUN_140b50bc0`, `movzx edx,[rbx]` at `0x140b50d12` |
+
+`FUN_140b54780` returns the entry itself (`mov rax,rcx; ret`), so a detour can hand back storage of
+its own. Three sibling lookups share its prologue -- `0x140b54700` is the mask table, `0x140b54740`
+the definitions, `0x140b547c0` the text -- which is why the rva rather than the bytes is what says
+which one is being hooked.
+
+The same decode names the rest of the strip's furniture, and the numbers are why the seventh tab
+needs room made for it:
+
+| child | what | lands at |
+| --- | --- | --- |
+| 7 | the six-hexagon plate | `x 1.10..337.60` |
+| 8 | the right-hand cap, `0x026a` | `x 271.05..349.40` |
+| 9 | both chevrons, `0x026b`, one rect mirrored | `x -9.30..15.70` and `336.70..361.70` |
+| 10 | the `RB` label | `x 347.05` |
+
+A seventh hexagon starts where the plate ends, at `337.60`. All three of those pieces are already
+standing there.
+
+### What `ds2-menu-row` does about it
+
+`crates/ds2-menu-row/src/icon.rs` detours the shape lookup and serves two shapes:
+
+* `0xe268`, the plate's quad with its source rect's left edge pulled in to `337.60 - 54.0` and its
+  offset moved out by `+54.0`. That is the plate's last whole tab period, drawn immediately past the
+  plate's right edge. The construction needs no hexagon width and no cell offset -- only the pitch
+  the six cells already spell -- and the seam falls between two hexagons, where the art repeats.
+* `0x026b` with quad 0 (`scale x` of `-1`, the right-hand chevron) moved by the same `+54.0`. The
+  left chevron keeps its quad, which is why the shape is copied rather than the record moved: one
+  record draws both.
+
+`crates/ds2-menu-row/src/strip.rs` adds the record that names `0xe268` beside the plate at depth 62,
+and moves the two remaining pieces -- the cap and the `RB` label -- by copying their transform blocks
+and adding a pitch to each x.
+
+**The seventh tab therefore wears the sixth tab's glyph.** The atlas has six and this mod ships no
+texture of its own. `FLO_ADDED_TAB_ICON_SOURCE_LEFT` is the one constant to change if a different
+slice is ever wanted; a genuinely new glyph needs a texture, which is a different piece of work.
+
+### What runs have shown since
+
+Three of them, and the third is the one the player accepted: seven tabs in the strip, the seventh
+wearing the sixth tab's glyph, the sixth still wearing its own. What changed between the second and
+the third is in the section after next -- the record this section calls the end cap is the sixth
+tab's hexagon, so it is copied now rather than moved.
+
+Still not measured: whether the seam at `337.60` is invisible under scrutiny, and whether the moved
+`RB` prompt reads as deliberate. Both were accepted at a glance rather than looked at closely.
+
+## The first run with an icon: three answers off the document, one question left
+
+A run on 2026-09-23, `--menu-row --rows save-game-to-file,quit-to-desktop`, one screenshot of the
+seventh tab open and the log beside it. Four things were wrong. Three of them were answered by
+reading `l02_01_In-Game.flo` again -- with `scripts/ds2-flo.py` for the records and a direct read of
+the shape table at `doc+0x08` for the quads -- and the fourth is the one this document could not
+settle.
+
+### The rows rolled out under the sixth tab
+
+The seventh tab's panel was cloned from the System tab's subtree record sharing its transform block,
+on the reasoning that it is the same panel with different rows in it. That is true about its
+contents and wrong about its position: a tab's panel drops out from under that tab's own hexagon.
+
+```
+strip child [4]   id 0x1eaccf   x = -5.90     the System tab's subtree
+  0x0265 child [0] id 0x1eace8  x = 288.80
+                                ------------
+                                x = 282.90    the panel, on screen
+
+strip child [17]  id 0x1eaba5   x = 265.05    the sixth cell
+```
+
+`282.90 - 265.05` is `17.85`, which is how far right of its own cell a panel sits -- the panel is
+`57.80` wide and the cell `77.70`, so that is the centring. The seventh cell is at `319.05` and the
+seventh panel has to be at `336.90`. `strip.rs` now copies the cloned record's transform block and
+adds one `FLO_TAB_PITCH` to it, exactly as it already did for the cell.
+
+### The rows had no text
+
+The caption binder builds one scene path and `caption.rs` captures it, appends each added row's
+label id, and writes the text. The captured path is the System tab's, because that is the only one
+the binder builds: `0x1eaba9 / 0x1eaccf / 0x1eace8 / 0x1eace6`. On a tab of our own the labels live
+under `0x1eaceb`, so every append resolved to nothing and every write landed on no element. The
+count in the log said `written=2` either way -- `setText` on an unresolved accessor reports nothing.
+
+Component 1 is now rewritten before the append, the same one component `install.rs` rewrites in
+every cell path and `tab.rs` in the group's own path. The shipped row's rename keeps the System
+tab's, explicitly, because that row is still on that tab.
+
+### A caption outlived the press that set it
+
+`set_row_caption` rewrites a leaked buffer in place -- it has to, because the game keeps the pointer
+-- and nothing ever wrote that buffer back. So a row reporting what it was doing went on reporting
+it after it had stopped: through the menu being closed, through the return to the title, and into
+the next character loaded. On 2026-09-23 a swap was abandoned at the title, the player loaded back
+into a game, and the row was still saying "Returning to the title to pick a character...".
+
+Two writes-back, one per moment a stale caption is visible:
+
+* `caption.rs`'s bind detour puts every caption back to its registered text before it pushes. The
+  bind is the pause menu being built, so the rule is that a menu which has just been opened carries
+  rows nobody has pressed yet in this visit. A result stays up for as long as the menu that produced
+  it, which is where it is read; the next open is a new question.
+* `ds2_menu_row::reset_row_caption` is the row saying so itself, for the case where the menu is not
+  going anywhere. A swap whose confirm the player declined leaves the pause menu up and the flow
+  finished, and `ds2-save-file`'s swap calls it on every path that ends one.
+
+The bind is what proves the first one reaches the screen at all: the stale caption in that run was
+drawn in a session whose menu group had been built from scratch, and the per-frame push only runs on
+a frame something marked dirty. Nothing marked anything dirty in that session, so the write that
+drew it was the bind's.
+
+### The panel was three rows longer than its list
+
+`banner.rs` grew the panel's quad by one row pitch per registered row from the shipped `342.35`,
+which is the number for a tab whose rows hang below three shipped ones. A tab of our own starts its
+rows at the top, so the same arithmetic overshoots by `FLO_FIRST_ROW_RISE` -- two rows drawn on a
+panel sized for five. `ds2_rva::banner_y1_from_top` is the lifted series, and it is the same lift
+`caret_y_from_top` already applied to the caret, for the same reason.
+
+### The hexagon geometry, measured rather than assumed
+
+The shape table entry for `0x0268` holds one quad: source `(1.10, 781.95)-(337.60, 850.90)`, offset
+`(0, -775.70)`, so it lands at `1.10..337.60` across `6.25..75.20`. Six hexagons at
+`FLO_TAB_PITCH`, and two independent readings agree on where each one is:
+
+* a hexagon is `66.3` wide and they overlap by `12.3`, because the first starts at `1.10` and the
+  sixth ends at the plate's own right edge;
+* the cell highlight `0x026e` is `77.70 x 79.60`, so a hexagon centred in its cell sits at
+  `cell x + 38.85` -- `34.25` for the first cell at `-4.60` and `303.90` for the sixth at `265.05`,
+  which puts the sixth hexagon at `270.75..337.05` against the plate's `337.60`.
+
+So the slice `icon.rs` serves -- the plate's last `54.00`, drawn at `337.60..391.60` -- is centred on
+the seventh cell at `357.90`, and the `12.85` of hexagon it leaves behind on its left is the
+interlock the sixth hexagon's own right end already draws. The seam is where the honeycomb repeats.
+
+### The missing tab button: the end cap is the sixth tab's hexagon
+
+A tab button went missing from the strip in the same commit that moved the end cap, and the second
+run -- five hexagons, a gap, then the seventh tab's own, lit -- is what identifies it. Two readings
+were on the table:
+
+* the plate holds six hexagons and the cap is a flourish. Then the sixth hexagon would still be
+  drawn, and the strip would show six unlit hexagons and a lit seventh. The screen showed six in
+  total.
+* the plate's last period is covered art and the cap is the sixth tab's own hexagon. Then moving
+  the cap takes that tab's button one pitch along, which is exactly the gap-then-lit-hexagon the
+  screen shows.
+
+The second one is also what the numbers say, and they were in this document before the run. The
+cap's record sits at `271.05`; the sixth tab begins at `1.10 + 5 * 54.00 = 271.10`. Its art is
+`78.35` wide; a cell highlight is `77.70`. A piece that starts on a tab boundary to within half a
+tenth and is one cell wide is that tab's art. The earlier reading here -- that the cap covers the
+sixth hexagon entirely and must therefore be transparent over it -- had the covering right and drew
+the wrong conclusion from it: it is not over a hexagon, it *is* the hexagon.
+
+So `strip.rs` leaves that record where the game put it and gives the seventh tab a copy, one pitch
+along, exactly as it does for the cell and the panel. The seventh tab then wears the sixth tab's
+hexagon in the two layers the sixth tab wears it in: the plate's period underneath and this plate
+over it.
+
+The added panel was the other candidate and it stays ruled out: it covers `282.80..340.60` from
+above the strip to well below it, but it is child five of twenty-one against the plate's eight, and
+a nested record's draw order is its position in that array -- the same relationship the System
+tab's own panel has always had.
+
+`tree::dump_strip` stays armed, at two levels rather than one. One was not enough and the run said
+so in two lines: the strip is a `FeComponentObject` whose only linked child is the
+`FeComponentSprite` holding the display list, so the records are one level below where it stopped.
+
+### The run that settled it
+
+`--menu-row --rows quit-to-desktop,save-game-to-file,load-character-from-file,load-build-from-url`,
+one character loaded, the seventh tab opened by hand. The player's word for the strip was that the
+hexagon is fixed.
+
+```
+ds2-menu-row: tab built group=0x3110ec0 proxy=0x7fffe98f85f0 rows=4 vtable=0x1410b6658 builds=1
+ds2-menu-row: caret moved definition=0xf221 y=244.65->295.35 rows=4
+ds2-menu-row: strip hexagon copied slot=11 x=325.05 -- the sixth tab's own plate, drawn again one
+              tab along, and the sixth tab keeps the one it had
+ds2-menu-row: strip furniture moved what=rb-label slot=13 x=401.05
+ds2-menu-row: strip cell added id=0x1eaba8 x=319.05 depth=93 children=18->22
+              subtree=0x1eaceb@5+x48.1 icon=0xe268@9 definition=0xe265
+ds2-menu-row: icon built shape=0xe268 source=283.6..337.6 screen=337.6..391.6
+ds2-menu-row: chevron moved quad=0 x=1357.45 -> 1411.45
+ds2-menu-row: caption label=0x1eac4a subtree=0x1eaceb written=1
+ds2-menu-row: caption label=0x1eac4b subtree=0x1eaceb written=2
+ds2-menu-row: banner rect=0x50 before=[914.2 1.1000061 972 342.35] y1=342.35->393.05 writes=1
+ds2-menu-row: strip count raised tabs=6 -> items=7 tab-rows=4 raises=1
+```
+
+Four rows on a tab of its own, each with its own caption -- Quit Game, Save Game to File, Load
+Character from File, Load from URL -- under a panel sized for four and a hexagon of its own. The
+`subtree=0x1eaceb` on both caption lines is the component that was resolving to the System tab's
+container before, and `+x48.1` on the cell line is the panel's transform after the pitch was added
+to `-5.90`.
+
+What this does not say anything about: pressing any of the four. The rows draw and they are
+labelled; whether the save, the load and the URL row do what they say is
+`ds2-mods-rs-h4q`'s question and a separate run.

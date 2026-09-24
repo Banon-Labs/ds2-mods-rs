@@ -38,6 +38,10 @@
 
 use md5::{Digest, Md5};
 
+pub mod slots;
+
+pub use slots::{SaveSlot, SlotState, slots};
+
 /// AES-128 key for SOTFS `.sl2` payloads. See the module docs: read out of the game image by
 /// `scripts/ds2-sl2.py --key-from-image`, not remembered.
 const KEY: [u8; 16] = [

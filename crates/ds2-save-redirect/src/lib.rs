@@ -48,14 +48,50 @@
 //! redirect that silently produced the wrong folder is indistinguishable from a game with no save,
 //! because DS2 shows no LOAD GAME row when it finds nothing. The log line is what tells those two
 //! apart without anyone having to guess.
+//!
+//! # Mid-session, it is [`request_dir`] and not this
+//!
+//! The detour above moves the directory for a whole process, which is what a launch wants and what
+//! a live session cannot use: `SAVE_DIR_BUILD` runs during session setup, so re-pointing it after
+//! the game has booted changes a string nothing reads again.
+//!
+//! [`request_dir`] is the mid-session half. It calls the same function session setup calls with
+//! `SAVE_DIR_BUILD`'s result -- the one that seats the directory on the storage worker that opens
+//! files -- so it reaches the field a container read consults, at a moment of the caller's
+//! choosing. `ds2-save-file`'s in-session character swap is the flow that uses it.
+//!
+//! [`session_dir`] is the third module here and is the seam that did NOT work: it replaces one
+//! vtable slot per side, and a live run measured `load-answered=1` on a read that still failed,
+//! because the load session's work method reaches its string through the accessor rather than
+//! through the virtual. It is kept because the pair of overrides is how the game separates saves
+//! from loads, and because a seam that was disproved by measurement is worth being able to point
+//! at.
 
 // Windows-only by construction: this is a MinHook detour on a PE image.
 #![cfg(windows)]
 
 pub mod install;
+pub mod open_redirect;
+pub mod request_dir;
+pub mod session_dir;
 pub mod stage;
 
 /// Prefix on every line this crate writes, so its lines can be grepped out of the shared log.
 pub const LOG_PREFIX: &str = "ds2-save-redirect:";
 
-pub use install::{Outcome, install, set_logger, set_source};
+/// Directory beside the executable that a handoff's save is written into.
+///
+/// Only [`ds2_save_file::take_handoff`](../ds2_save_file/fn.take_handoff.html)'s route reaches
+/// this. There used to be a `[save_redirect] path = ...` key that pointed a whole launch at a file,
+/// and it was removed for lying about what it did: it never opened the file it was given. It copied
+/// it here, pointed the game at this directory, and overwrote the copy on the next launch -- so a
+/// session started that way played a throwaway duplicate and lost everything done in it, under a
+/// help string that said "load the save at WINPATH".
+pub const STAGING_DIR_NAME: &str = "ds2-save-staging";
+
+pub use install::{
+    Outcome, clear_session_directory, install, live_directory, live_steam_id, session_answers,
+    set_logger, set_session_directory, set_source,
+};
+pub use stage::SAVE_FILE_NAME;
+pub use stage::validate_source;

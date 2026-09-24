@@ -47,7 +47,7 @@ if (( run_host_tests )); then
   # exercised without Windows. A crate belongs on this line only if it has no `cfg(windows)` gate;
   # everything else is covered by the wine pass below.
   cargo test -p ds2-sl2-core -p ds2-hotkey-config -p ds2-safe-input -p ds2-crash-logging-core \
-    -p ds2-build-import-core
+    -p ds2-build-import-core -p ds2-save-file-core -p ds2-save-picker-core
 
   echo "== windows-target tests (wine) =="
   # THE CRATES THAT MATTER MOST WERE THE ONES WITH NO EXECUTABLE TESTS. `ds2-loader` is
@@ -126,6 +126,19 @@ else
     }
     echo "  $name: $(echo "$result" | grep -oE 'PASS: [0-9]+/[0-9]+' | head -1)"
   done
+  # A SIGNAL THAT IS NOT EXECUTABLE IS A GUARD THAT IS NOT ENFORCED, and it looks exactly like a
+  # clean turn. Measured 2026-09-23: last_assistant_status_table.sh shipped mode 644, so cupcake
+  # could not run it, the policy saw an empty signal, and the Stop hook returned `{}` -- an ALLOW --
+  # on the very transcript the guard was written for, while `opa test` stayed green at 20/20. Same
+  # silence as the 36-day episode the block below describes, one chmod wide.
+  nonexec=$(find .cupcake/signals -name '*.sh' ! -perm -u+x -print)
+  if [[ -n "$nonexec" ]]; then
+    echo "cupcake signal scripts are not executable -- the policies reading them are INERT:" >&2
+    echo "$nonexec" >&2
+    echo "fix: chmod +x <file>" >&2
+    exit 1
+  fi
+  echo "  signals: executable"
   # `opa test` proves the RULES are right; it does not prove cupcake can LOAD them. Verify
   # compiles the project tree to WASM, which is what the live PreToolUse hook actually evaluates.
   cupcake verify --harness claude --log-level error >/dev/null
@@ -143,10 +156,37 @@ else
   # the first refuses any builtin it has not watched survive the real runtime, the second drives
   # a real transcript through the hook command out of .claude/settings.json.
   python3 scripts/check-cupcake-wasm-builtins.py
+  # A policy whose verb evaluate.rego does not name is INERT: it loads, routes, evaluates, and its
+  # decision is discarded. Measured 2026-09-23 on no_unchecked_game_alive_claim, which shipped with
+  # 8/8 opa tests, a passing signal test, `cupcake verify` green and its name in the routing map,
+  # and could not halt anything. evaluate.rego's own comment claimed the builtins check above caught
+  # this; it did not, so this is the check that comment describes.
+  python3 scripts/check-cupcake-routed-verbs.py
   python3 scripts/test-cupcake-stop-guards.py
   # The signal is the half that decides WHICH turns are violations, and it is where every
   # false-positive carve-out lives. `opa test` above only pins the policy's tag -> halt mapping.
   python3 scripts/test-unexecuted-promise-signal.py
+  # Same half for the status-table guard: scripts/cupcake_status_table.py owns what counts as a
+  # table at all (a separator row is required, so a shell pipeline in prose is not one), which
+  # cells are progress words, and which prompts asked for a grid. Every false positive this guard
+  # can have is a decision made in that module, and `opa test` above only pins hits -> halt.
+  python3 scripts/test-status-table-signal.py
+  # And the same half for the shouting guard, which has one extra way to go wrong: the offence is
+  # defined twice, in Rego for the edit about to hit disk and in Python for the prose about to end
+  # a turn. Two definitions that drift apart are worse than one, because the disagreement is
+  # invisible until somebody is refused by one arm and waved through by the other, so this compares
+  # the patterns across all three files byte for byte as well as pinning the classification.
+  python3 scripts/test-shouting-signal.py
+  # And the same half for the live-game guard, whose entire decision is a tense: "I launched it" is
+  # provable and allowed, "the game is up" is a claim about now and needs a check in the same turn.
+  # The lexicon and the liveness-command list live in scripts/cupcake_game_alive.py; `opa test`
+  # above only pins that a spoken signal halts.
+  python3 scripts/test-game-alive-signal.py
+  # And the same half for the property-grant guard, whose whole decision is idiom recognition: a
+  # closing sentence that stages the agent handing the user control over something already theirs.
+  # The lexicon and the quoting carve-out live in scripts/cupcake_property_grant.py; `opa test`
+  # above only pins that a spoken signal halts.
+  python3 scripts/test-property-grant-signal.py
   # The hook shim is the fourth place this layer can be silently dead, and the one no `.rego` file
   # can reach. scripts/cupcake-hook.sh sits between Claude Code and the engine and repairs three
   # things the engine gets wrong before any policy runs: a permission mode cupcake does not know

@@ -51,6 +51,21 @@ const Y1: usize = 0x0c;
 static LENGTHENED: AtomicUsize = AtomicUsize::new(0);
 static REFUSED: AtomicUsize = AtomicUsize::new(0);
 
+/// How long the banner has to be for `rows` rows, which depends on where the rows start.
+///
+/// The same fork [`crate::layout`]'s `caret_for` takes, and it has to be the same fork: the caret
+/// sits just below the last row and the banner ends just below the caret, so a banner sized from
+/// the System tab's ladder on a tab whose rows start at the top is longer than its list by
+/// [`ds2_rva::FLO_FIRST_ROW_RISE`] -- three empty rows of panel, which is what the seventh tab's
+/// first run drew.
+fn banner_for(rows: usize) -> f32 {
+    if crate::tab::armed() {
+        ds2_rva::banner_y1_from_top(rows)
+    } else {
+        ds2_rva::banner_y1(rows)
+    }
+}
+
 /// Find the texture shape under a panel component.
 ///
 /// The panel is a `FeComponentObject`, so its child is reached through the `+0x38` link; that child
@@ -185,7 +200,7 @@ pub unsafe fn lengthen(panel: *const u8, base: usize) {
         // and that margin is what the growth preserves -- so two rows want two pitches, not a
         // second look at a constant sized for one.
         let rows = crate::api::rows_for(crate::api::Tab::Quit).len().max(1);
-        let grown = ds2_rva::FE_BANNER_QUAD_SHIPPED_Y1 + ds2_rva::FLO_ROW_PITCH * rows as f32;
+        let grown = banner_for(rows);
         if (y1 - ds2_rva::FE_BANNER_QUAD_SHIPPED_Y1).abs() > 0.5 {
             refuse(format_args!(
                 "rect at {offset:#x} reads y1={y1}, expected {}",
@@ -226,6 +241,31 @@ mod tests {
             (grew - 48.0).abs() < 0.5,
             "grew by {grew}, which is not one row pitch"
         );
+    }
+
+    /// A tab of our own has no shipped rows above its own, so its banner is shorter by the rise --
+    /// and the rise is not three pitches. `3 * FLO_ROW_PITCH` is `144.00` against a measured
+    /// `141.30`, so a banner derived from the pitch would be `2.70` too long on every row count.
+    #[test]
+    fn a_tab_of_our_own_is_shorter_by_the_rise_and_not_by_three_pitches() {
+        for rows in 1..=ds2_rva::FE_INGAME_MENU_ITEM_VECTOR_CAPACITY {
+            let lift = ds2_rva::banner_y1(rows) - ds2_rva::banner_y1_from_top(rows);
+            assert!((lift - ds2_rva::FLO_FIRST_ROW_RISE).abs() < 0.01);
+            assert!((lift - 3.0 * ds2_rva::FLO_ROW_PITCH).abs() > 2.0);
+        }
+    }
+
+    /// Every added row is one pitch of banner, on either tab.
+    #[test]
+    fn one_row_is_one_pitch_on_either_tab() {
+        for rows in 0..ds2_rva::FE_INGAME_MENU_ITEM_VECTOR_CAPACITY {
+            for step in [
+                ds2_rva::banner_y1(rows + 1) - ds2_rva::banner_y1(rows),
+                ds2_rva::banner_y1_from_top(rows + 1) - ds2_rva::banner_y1_from_top(rows),
+            ] {
+                assert!((step - ds2_rva::FLO_ROW_PITCH).abs() < 0.01);
+            }
+        }
     }
 
     /// The SOURCE rect must be left alone: growing it samples atlas the banner does not occupy,

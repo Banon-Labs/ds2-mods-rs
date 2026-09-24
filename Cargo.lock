@@ -572,6 +572,7 @@ dependencies = [
  "ds2-menu-row",
  "ds2-offline",
  "ds2-rva",
+ "ds2-save-file",
  "ds2-save-redirect",
 ]
 
@@ -600,6 +601,31 @@ version = "0.1.0"
 [[package]]
 name = "ds2-safe-input"
 version = "0.1.0"
+
+[[package]]
+name = "ds2-save-file"
+version = "0.1.0"
+dependencies = [
+ "ds2-continue",
+ "ds2-dialog-skip",
+ "ds2-game-base",
+ "ds2-menu-row",
+ "ds2-rva",
+ "ds2-save-file-core",
+ "ds2-save-redirect",
+]
+
+[[package]]
+name = "ds2-save-file-core"
+version = "0.1.0"
+
+[[package]]
+name = "ds2-save-picker-core"
+version = "0.1.0"
+dependencies = [
+ "ds2-save-file-core",
+ "ds2-sl2-core",
+]
 
 [[package]]
 name = "ds2-save-redirect"

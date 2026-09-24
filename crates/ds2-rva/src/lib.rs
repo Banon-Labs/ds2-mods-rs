@@ -2536,6 +2536,15 @@ pub const FEX_GRID_SCROLL_TOTAL_OFFSET: usize = 0x2c;
 /// axis and [`FEX_GRID_COL_EXTENT_OFFSET`] is the one that bounds them.
 pub const FEX_GRID_ROW_EXTENT_OFFSET: usize = 0xd8;
 
+/// Byte offset of a tab's item `DLFixedVector` inside the constructed
+/// `FeGroupInGameGroupSelect`.
+///
+/// `FUN_1400a40e0` copies the builder's stack descriptor in with
+/// `FUN_1400a3ef0(param_1 + 0x1f, descriptor)` -- qword `0x1f` -- and
+/// [`FE_INGAME_MENU_TAB_ITEM_LOOKUP`] addresses the same storage as `lea rcx,[rbx+0xf8]`. Two
+/// spellings, one offset.
+pub const FE_INGAME_MENU_TAB_ITEM_VECTOR_OFFSET: usize = 0xf8;
+
 /// Byte offset of the element count inside a tab's item `DLFixedVector`.
 ///
 /// Every one of the six builders opens with `mov QWORD PTR [rcx+0x30], 0`, and the copy into the
@@ -2548,6 +2557,12 @@ pub const FE_INGAME_MENU_ITEM_VECTOR_COUNT_OFFSET: usize = 0x30;
 /// Spelled by the builders as `if (5 < newCount) panic("out of memory.")` against
 /// `DLFixedVector.inl:0x24c`, and independently by the copy at `0x1400a3ef0`, which panics unless
 /// the source count is `< 6`. Both agree: five.
+///
+/// **It is no longer the ceiling on ROWS, and it never was a ceiling on anything but the vector.**
+/// The storage is inline -- elements at `descriptor + (-descriptor & 3) + n * 8` with the count at
+/// `+0x30`, so element 6 would land on the count -- but an item is only ever READ through
+/// [`FE_INGAME_MENU_TAB_ITEM_LOOKUP`], and a detour there serves an entry from storage of our own.
+/// See the section above that constant.
 pub const FE_INGAME_MENU_ITEM_VECTOR_CAPACITY: usize = 5;
 
 /// Size of one item entry: a `u32` action id followed by a `u32` gate index.
@@ -2612,6 +2627,471 @@ pub const FE_INGAME_MENU_GATE_ALWAYS: u32 = 0;
 /// the project yet, so what it actually forbids is NOT recorded here -- only that this is the gate
 /// the shipped quit row uses.
 pub const FE_INGAME_MENU_GATE_RETURN_TITLE: u32 = 4;
+
+/// The gate predicate itself. RVA `0x000a_4e50`, `bool refused(const u32 *gate)`.
+///
+/// It takes a pointer to the gate index rather than the index. The confirm handler reaches it with
+/// `lea rcx,[rax+4]` -- the second `u32` of the item-vector entry -- and the body opens
+/// `if (*param_1 == 0) return false`, which is what makes gate `0` mean "no gate". `true` is
+/// refused; the confirm path turns that into the action `-1` that falls out of the dispatch's
+/// `switch` through its `default`.
+///
+/// Recorded because anything that fires a shipped action without going through the tab's own
+/// confirm handler has to apply the gate itself, or it is not doing what the row does. The function
+/// only reads -- `GameManagerImp + 0x22f0`, the net-server manager, and two predicates on the
+/// session -- so calling it costs nothing and forges nothing.
+pub const FE_INGAME_MENU_GATE_EVALUATE: u32 = 0x000a_4e50;
+
+/// The five bytes [`FE_INGAME_MENU_GATE_EVALUATE`] must begin with.
+///
+/// `rex push rbx; sub rsp,0x20`, read out of the image rather than assumed from the shape of its
+/// neighbours -- the first guess at these bytes was the other common MSVC opener and was wrong.
+/// `scripts/ds2-arxan-chain.py 0x1400a4e50` reports a clean prologue at the entry, so these are
+/// what the live process holds.
+pub const FE_INGAME_MENU_GATE_EVALUATE_PROLOGUE: [u8; 5] = [0x40, 0x53, 0x48, 0x83, 0xec];
+
+// ---------------------------------------------------------------------------------------------
+// A SEVENTH TAB: WHERE THE SIX IS WRITTEN DOWN, AND WHAT EACH SPELLING COSTS
+//
+// This block used to say a seventh tab could not exist, and it was wrong in the way a wall is
+// wrong when it turns out to be a door with five locks. Every "bound" below is a literal inside a
+// function, and a literal inside a function is a detour site. The row work proved the pattern on
+// two of them already.
+//
+// A tab's item vector is per tab -- `FUN_1400a40e0` copies each builder's stack descriptor into
+// the group it is constructing with `FUN_1400a3ef0(group + 0x1f, descriptor)`, which is
+// `group + 0xf8` -- so a seventh tab starts with five empty slots of its own before any of the row
+// machinery is involved.
+//
+// The six spellings, and the answer to each:
+//
+//   1. The six groups are inline members of `FeGroupInGameTopSelect`, at
+//      [`FE_INGAME_TOP_SELECT_TAB_OFFSETS`] with stride [`FE_INGAME_TOP_SELECT_TAB_STRIDE`], and
+//      that object is itself an inline member of `FeSceneInGame` (`FUN_1400995a0` calls
+//      `FUN_1400a41b0(scene + 0x28, ..)` in qwords -- `scene + 0x140`). A seventh would begin at
+//      [`FE_INGAME_TOP_SELECT_AFTER_TABS`], where the same constructor already builds an element
+//      accessor. -> Do not put it there. A group is [`FE_INGAME_GROUP_SELECT_SIZE`] bytes and
+//      [`FE_INGAME_GROUP_SELECT_CTOR`] will construct one anywhere, so it goes in storage we own.
+//      This is the only genuinely new mechanism of the six.
+//   2. Navigation is a six-entry stack table of `this + literal` behind a `< 6` guard --
+//      [`FE_INGAME_TOP_SELECT_TAB_TABLE`], which returns null for index 6. -> Detour it. Measured:
+//      five callers plus one vtable reference at `0x1418a53f4` and nothing else, so it is the
+//      funnel every consumer goes through rather than one of several ways in.
+//   3. The tab strip's cell namer ([`FE_INGAME_TOP_SELECT_NAMER`]) pushes exactly six ids through
+//      [`FE_SCENE_NAMER_PUSH`], which panics at seven. -> The same stand-in
+//      [`FE_SCENE_NAMER_CELL_LOOKUP`] already serves row cells from, one level up.
+//   4. [`FE_INGAME_TOP_SELECT_STRIP_INIT`] sets the strip's item count with a literal
+//      `FUN_140021b30(this, 6)` and walks an unrolled six-pointer array of the same addresses as
+//      (2). -> The same count raise already detoured at [`FE_INGAME_MENU_TAB_INIT`]. The strip is
+//      itself a `FexGridControl`, so its real ceiling is [`FEX_GRID_MAX_COLS`].
+//   5. [`FE_INGAME_TOP_SELECT_TAB_CAPTION_PATH`] holds a five-entry table and hands back an empty
+//      accessor above index 4. -> Nothing to do. There are six tabs and five entries, so index 5
+//      already takes the empty arm today; index 6 behaves exactly as the shipped System tab does.
+//   6. The strip's `.flo` container [`FLO_TAB_STRIP_DEFINITION`] carries six cell records and a
+//      child count that is also the display-list capacity. -> The same child-count raise and
+//      record append `ds2-menu-row`'s layout module already performs on a tab's row container.
+//
+// So one new mechanism and five repeats. What the six bounds really are is a list of every place
+// the number six is written down, which is what a build needs and is why they are kept here.
+//
+// The two per-tab vectors are still inline storage that cannot be grown -- both are one element
+// short of overwriting their own count:
+//
+//   vector   elements at `descriptor + (-descriptor & 3) + n * 8`, count at `+0x30`
+//            -> element 6 lands exactly on the count
+//   namer    entries at `list + (-list & 7) + n * 0x30`, count at `list + 0x128`
+//            -> entry 6 spans the count
+//
+// -- which is why a tab's rows are served through [`FE_INGAME_MENU_TAB_ITEM_LOOKUP`] and
+// [`FE_SCENE_NAMER_CELL_LOOKUP`] past that point, leaving [`FEX_GRID_MAX_ROWS`] as the only bound.
+// ---------------------------------------------------------------------------------------------
+
+/// Most rows a `FrontendEx::FexGridControl` will ever bind cells for. **Fifteen.**
+///
+/// [`FEX_GRID_CONTROL_LAYOUT_BIND`] ends its outer loop with `iVar13 + 1; if (0xe < iVar13) return`
+/// -- rows `0..=14` -- and the fixed vector it collects the built cells in refuses above `0x1e0`,
+/// which is exactly `15 * 32`. Two spellings of the same bound in one function.
+///
+/// This is the ceiling a tab has once the item vector and the namer list are no longer in the way.
+pub const FEX_GRID_MAX_ROWS: usize = 15;
+
+/// Most columns, from the inner loop of the same function: `while (iVar12 < 0x20)`.
+///
+/// Recorded because it is the other half of the `0x1e0` the cell vector caps at, which is what makes
+/// [`FEX_GRID_MAX_ROWS`] two measurements rather than one.
+pub const FEX_GRID_MAX_COLS: usize = 32;
+
+/// How many `FeGroupInGameGroupSelect` members `FeGroupInGameTopSelect` owns. Six, inline.
+pub const FE_INGAME_TOP_SELECT_TABS: usize = 6;
+
+/// Byte offset of each tab subobject inside the top select, in CONSTRUCTION order.
+///
+/// Read off `FeGroupInGameTopSelect`'s constructor, which builds them at `param_1 + 0x33`, `+0x60`,
+/// `+0x8d`, `+0xba`, `+0xe7` and `+0x114` in qwords, and corroborated by
+/// [`FE_INGAME_TOP_SELECT_TAB_TABLE`], which spells the same six as byte immediates.
+pub const FE_INGAME_TOP_SELECT_TAB_OFFSETS: [usize; FE_INGAME_TOP_SELECT_TABS] =
+    [0x198, 0x300, 0x468, 0x5d0, 0x738, 0x8a0];
+
+/// Bytes per tab subobject, from the spacing above.
+pub const FE_INGAME_TOP_SELECT_TAB_STRIDE: usize = 0x168;
+
+/// Where a seventh tab would have to begin -- and what is already there.
+///
+/// `0x8a0 + 0x168`. The constructor's next act after the sixth tab is
+/// `FUN_140027c80(.., param_1 + 0x141, ..)`, and `0x141 * 8` is this. A seventh tab would be
+/// constructed on top of the top select's own caption accessor.
+pub const FE_INGAME_TOP_SELECT_AFTER_TABS: usize = 0xa08;
+
+/// `FUN_1400a66d0(topSelect)` -- display index to tab subobject. RVA `0x000a66d0`.
+///
+/// ```text
+/// index = FEX_GRID_CURRENT_INDEX(topSelect);
+/// local[0] = this + 0x198; local[1] = this + 0x300; local[2] = this + 0x468;
+/// local[3] = this + 0x5d0; local[4] = this + 0x8a0; local[5] = this + 0x738;
+/// return index < 6 ? local[index] : 0;
+/// ```
+///
+/// A stack array of `this + literal`, with the bound as a literal too -- there is no table in data
+/// to lengthen, which is spelling (2). What there is instead is a function with five callers and one
+/// vtable reference (`0x1418a53f4`) and no other route to a tab, so a detour here is where a seventh
+/// group is handed out.
+///
+/// Note it takes no index: it reads the cursor through [`FE_INGAME_TOP_SELECT_TAB_INDEX`], so a
+/// detour is answering "the tab the player is on".
+///
+/// Not an Arxan redirect: prologue [`FE_INGAME_TOP_SELECT_TAB_TABLE_PROLOGUE`], with
+/// `scripts/ds2-arxan-chain.py` terminating at hop 0.
+pub const FE_INGAME_TOP_SELECT_TAB_TABLE: u32 = 0x000a_66d0;
+
+/// The first six bytes of [`FE_INGAME_TOP_SELECT_TAB_TABLE`]: `rex push rbx` / `sub rsp,0x50`.
+pub const FE_INGAME_TOP_SELECT_TAB_TABLE_PROLOGUE: [u8; 6] = [0x40, 0x53, 0x48, 0x83, 0xec, 0x50];
+
+/// The order [`FE_INGAME_TOP_SELECT_TAB_TABLE`] puts the tabs in, as indices into
+/// [`FE_INGAME_TOP_SELECT_TAB_OFFSETS`].
+///
+/// **Display order is not construction order, and the last two are swapped.** The System tab --
+/// Game Options / Screen Options / Quit Game, built fifth by
+/// [`FE_INGAME_TOP_SELECT_SYSTEM_TAB_ITEMS`] at `+0x738` -- is the LAST tab on screen, and the Key
+/// Bindings / Graphics tab built sixth at `+0x8a0` is the one before it. Worth writing down because
+/// this repo's own probe enumerates tabs in construction order, so its "tab 4" and the player's
+/// "last tab" are the same tab under two numbers.
+pub const FE_INGAME_TOP_SELECT_TAB_ORDER: [usize; FE_INGAME_TOP_SELECT_TABS] = [0, 1, 2, 3, 5, 4];
+
+/// The TAB STRIP's own cell namer constructor. RVA `0x000a5c60`.
+///
+/// Same shape as a tab's row namer ([`FE_INGAME_MENU_QUIT_TAB_NAMER`]): a one-component base path
+/// (`0x1eaba9`), then a six-slot id array pushed one at a time through [`FE_SCENE_NAMER_PUSH`] in a
+/// `do { } while (i < 6)` loop. The difference is the one that matters -- **none of its six slots is
+/// spare.**
+pub const FE_INGAME_TOP_SELECT_NAMER: u32 = 0x000a_5c60;
+
+/// The six cell ids [`FE_INGAME_TOP_SELECT_NAMER`] pushes, in the order it pushes them.
+///
+/// Six ids into a list that holds [`FE_SCENE_NAMER_LIST_CAPACITY`], which is spelling (3): pushing a
+/// seventh panics in the game's own allocator, so a seventh tab's cell is served from a stand-in
+/// through [`FE_SCENE_NAMER_CELL_LOOKUP`] instead of being pushed here.
+pub const FE_INGAME_TOP_SELECT_NAMER_CELL_IDS: [u32; FE_INGAME_TOP_SELECT_TABS] = [
+    0x001e_aba2,
+    0x001e_aba3,
+    0x001e_aba4,
+    0x001e_aba6,
+    0x001e_aba7,
+    0x001e_aba5,
+];
+
+/// The first five bytes of [`FE_INGAME_TOP_SELECT_NAMER`]: `rex push rsi` / `push r14` / `sub`.
+///
+/// Not an Arxan redirect: `scripts/ds2-arxan-chain.py 0x1400a5c60` terminates at hop 0.
+pub const FE_INGAME_TOP_SELECT_NAMER_PROLOGUE: [u8; 5] = [0x40, 0x56, 0x41, 0x56, 0x48];
+
+/// Components in one of the tab strip's cell paths: the strip, then the cell. Two.
+///
+/// A tab's ROW paths are five ([`FE_QUIT_TAB_BASE_PATH`] plus the row), and the difference is why
+/// the id cannot be read at a fixed offset: it is the last component, so it sits at
+/// `(length - 1) * 4` and the length is the field at [`FE_SCENE_NAMER_ENTRY_LEN_OFFSET`].
+/// `FUN_1400a5c60` writes `0x1eaba9` into a path whose length it sets to `1`, seals it, and appends
+/// one cell id per entry -- so each finished entry is two long.
+pub const FE_INGAME_TOP_SELECT_NAMER_ENTRY_LEN: u32 = 2;
+
+/// The single base component of every tab-strip cell path, checked before an entry is cloned.
+pub const FE_INGAME_TOP_SELECT_NAMER_BASE: u32 = 0x001e_aba9;
+
+/// The tab strip's caption path builder, `fn(topSelect, out, index)`. RVA `0x000a6310`.
+///
+/// Holds a five-entry stack table (`0x1eab9b`, `0x1eab9c`, `0x1eab9d`, `0x1eab9f`, `0x1eab9e`)
+/// behind `if (index < 5)`, and calls `FUN_140027980` -- make-empty -- for anything else.
+///
+/// **Five entries against six tabs**, so the shipped System tab already takes the empty arm and a
+/// seventh tab needs nothing here. This is spelling (5) and it costs nothing.
+pub const FE_INGAME_TOP_SELECT_TAB_CAPTION_PATH: u32 = 0x000a_6310;
+
+/// `FeGroupInGameTopSelect`'s constructor, `fn(topSelect, arg2, arg3) -> topSelect`.
+/// RVA `0x000a41b0`.
+///
+/// Where a seventh tab is built, because it is where the first six are. It constructs each one with
+/// [`FE_INGAME_GROUP_SELECT_CTOR`] at the offsets in [`FE_INGAME_TOP_SELECT_TAB_OFFSETS`], handing
+/// each a namer and a descriptor produced by that tab's own two builders:
+///
+/// ```text
+/// descriptor = FUN_1400a5900(stack)                 // the System tab's items
+/// namer      = FUN_1400a5b50(&out, proxy)           // the System tab's cells
+/// FUN_1400a40e0(topSelect + 0xe7 * 8, proxy, &namer, descriptor)
+/// ```
+///
+/// `proxy` is `topSelect + `[`FE_INGAME_TOP_SELECT_PROXY_OFFSET`], the same value
+/// [`FE_INGAME_TOP_SELECT_TAB_CAPTION_PATH`] reads. A detour that runs the original and then repeats
+/// those three lines into storage of its own gets a seventh group built by the game's own code.
+///
+/// Not an Arxan redirect: prologue [`FE_INGAME_TOP_SELECT_CTOR_PROLOGUE`], with
+/// `scripts/ds2-arxan-chain.py` terminating at hop 0.
+pub const FE_INGAME_TOP_SELECT_CTOR: u32 = 0x000a_41b0;
+
+/// The first five bytes of [`FE_INGAME_TOP_SELECT_CTOR`]: `mov [rsp+0x10],rbx`.
+pub const FE_INGAME_TOP_SELECT_CTOR_PROLOGUE: [u8; 5] = [0x48, 0x89, 0x5c, 0x24, 0x10];
+
+/// `FeGroupInGameGroupSelect`'s constructor, `fn(group, proxy, *namer, descriptor) -> group`.
+/// RVA `0x000a40e0`.
+///
+/// ```text
+/// FUN_140020df0(group, &namer)                 // FeGroupBase, takes the namer reference
+/// group[0x00] = group[0x0b] = FeGroupInGameGroupSelect::vftable
+/// FUN_1400a3ef0(group + 0x1f, descriptor)      // group + 0xf8  <- the item vector
+/// FUN_1400189f0(group + 0x26, descriptor + 0x38)
+/// group[0x2c] = proxy                          // group + 0x160
+/// Unref(namer)                                 // it consumes the caller's reference
+/// ```
+///
+/// It writes nothing outside `group[0 ..= 0x2c]`, which is what makes
+/// [`FE_INGAME_GROUP_SELECT_SIZE`] enough and a group constructible outside the scene.
+pub const FE_INGAME_GROUP_SELECT_CTOR: u32 = 0x000a_40e0;
+
+/// Bytes in one `FeGroupInGameGroupSelect`. `0x168`.
+///
+/// Two independent spellings: the spacing of [`FE_INGAME_TOP_SELECT_TAB_OFFSETS`], and the highest
+/// field [`FE_INGAME_GROUP_SELECT_CTOR`] writes -- `group[0x2c]`, the last qword inside `0x168`.
+pub const FE_INGAME_GROUP_SELECT_SIZE: usize = FE_INGAME_TOP_SELECT_TAB_STRIDE;
+
+/// Byte offset of the layout proxy inside `FeGroupInGameTopSelect`. `0x150`.
+///
+/// `FUN_1400a41b0` opens by taking `param_1 + 0x2a` in qwords and passes it to every tab
+/// constructor; [`FE_INGAME_TOP_SELECT_TAB_CAPTION_PATH`] spells the same address as
+/// `param_1 + 0x150`. A seventh group needs this value and nothing else from the top select.
+pub const FE_INGAME_TOP_SELECT_PROXY_OFFSET: usize = 0x150;
+
+/// `FeGroupInGameTopSelect::v21` -- the strip's own init. RVA `0x000a6da0`.
+///
+/// Sets the tab strip's item count with a literal `FUN_140021b30(this, 6)`
+/// ([`FEX_GRID_SET_ITEM_COUNT`]) and then runs [`FE_INGAME_MENU_TAB_INIT`] once per tab over an
+/// unrolled six-pointer stack array. Spelling (4).
+///
+/// A detour that runs the original and then re-calls the count setter with seven is the same shape
+/// as the per-tab raise `ds2-menu-row` already installs, one level up. The strip is a
+/// `FrontendEx::FexGridControl`, so the bound past this literal is [`FEX_GRID_MAX_COLS`].
+///
+/// Not an Arxan redirect: prologue [`FE_INGAME_TOP_SELECT_STRIP_INIT_PROLOGUE`], with
+/// `scripts/ds2-arxan-chain.py` terminating at hop 0.
+pub const FE_INGAME_TOP_SELECT_STRIP_INIT: u32 = 0x000a_6da0;
+
+/// The first five bytes of [`FE_INGAME_TOP_SELECT_STRIP_INIT`]: `mov [rsp+0x10],rbx`.
+pub const FE_INGAME_TOP_SELECT_STRIP_INIT_PROLOGUE: [u8; 5] = [0x48, 0x89, 0x5c, 0x24, 0x10];
+
+/// Which tab [`FE_INGAME_TOP_SELECT_TAB_TABLE`] is being asked for: [`FEX_GRID_CURRENT_INDEX`],
+/// called with the top select itself.
+///
+/// The table takes no index argument -- it reads the cursor. So a detour there is answering "the tab
+/// the player is on", and the number it has to recognise is [`FE_INGAME_TOP_SELECT_TABS`].
+pub const FE_INGAME_TOP_SELECT_TAB_INDEX: u32 = FEX_GRID_CURRENT_INDEX;
+
+// ---------------------------------------------------------------------------------------------
+// THE TWO ACCESSORS, WHICH IS WHERE STORAGE OF OUR OWN GOES IN
+//
+// Neither the item vector nor the namer list can be grown or repointed. Both are read through ONE
+// function each, and a detour there can serve an entry from anywhere -- which turns two hard fixed
+// bounds (5 and 6) into [`FEX_GRID_MAX_ROWS`].
+// ---------------------------------------------------------------------------------------------
+
+/// `FUN_1400a6750(tab) -> *entry` -- the item entry under the cursor. RVA `0x000a6750`.
+///
+/// ```text
+/// index = FEX_GRID_CURRENT_INDEX(tab);
+/// if (index < *(u64*)(tab + 0x128))
+///     return tab + 0xf8 + (-(int)(tab + 0xf8) & 3) + index * 8;
+/// return &static{ action = 0xffffffff, gate = 0 };
+/// ```
+///
+/// **Its two callers are the only readers of an item's ACTION**: the confirm handler
+/// (`0x1400a6b10`) and `FUN_1400a4cc0`, which is the same read again for the enable/sound decision.
+/// The availability pass [`FE_INGAME_MENU_AVAILABILITY_PASS`] does NOT come through here -- it
+/// inlines the same bounds check and only ever reads the GATE.
+///
+/// So a detour here can answer for an index the vector does not hold, and the failure mode if it
+/// declines is the game's own `0xffffffff` -- an action no case matches, i.e. an inert row.
+///
+/// Not an Arxan redirect: prologue [`FE_INGAME_MENU_TAB_ITEM_LOOKUP_PROLOGUE`], with
+/// `scripts/ds2-arxan-chain.py` terminating at hop 0.
+pub const FE_INGAME_MENU_TAB_ITEM_LOOKUP: u32 = 0x000a_6750;
+
+/// The first six bytes of [`FE_INGAME_MENU_TAB_ITEM_LOOKUP`]: `rex push rbx` / `sub rsp,0x20`.
+pub const FE_INGAME_MENU_TAB_ITEM_LOOKUP_PROLOGUE: [u8; 6] = [0x40, 0x53, 0x48, 0x83, 0xec, 0x20];
+
+/// The availability pass, `FeGroupInGameGroupSelect::FUN_1400a77c0(tab)`. RVA `0x000a77c0`.
+///
+/// Walks `0..itemCount` -- the VIRTUAL count at [`FEX_GRID_ITEM_COUNT_OFFSET`], read through a
+/// vtable slot -- and for each index reads the entry INLINE, with its own copy of
+/// [`FE_INGAME_MENU_TAB_ITEM_LOOKUP`]'s bounds check against the vector's count and the same static
+/// `(0xffffffff, 0)` fallback. It then does nothing at all unless that entry's GATE is non-zero.
+///
+/// **That is what makes raising the virtual item count safe.** Past the vector's own count this pass
+/// reads the static, sees gate `0`, and skips -- it never touches the storage beyond the last real
+/// entry, so there is no uninitialised gate for it to hand the gate predicate. Its only caller is
+/// [`FE_INGAME_MENU_TAB_INIT`]. Recorded, not hooked.
+pub const FE_INGAME_MENU_AVAILABILITY_PASS: u32 = 0x000a_77c0;
+
+/// The first nine bytes of [`FE_INGAME_MENU_TAB_INIT`]: `rex push rbx` / `sub rsp,0xb0`.
+pub const FE_INGAME_MENU_TAB_INIT_PROLOGUE: [u8; 9] =
+    [0x40, 0x53, 0x48, 0x81, 0xec, 0xb0, 0x00, 0x00, 0x00];
+
+/// `FUN_140022140(grid) -> int` -- the index under the cursor. RVA `0x00022140`.
+///
+/// `if (grid[0x1e] != 0 || grid[0xd0] < 0) return grid[0xcc]; else return grid[0xd0];`. Called
+/// rather than reimplemented wherever a detour needs the same index its caller is about to use.
+pub const FEX_GRID_CURRENT_INDEX: u32 = 0x0002_2140;
+
+/// `FUN_140021b30(grid, count)` -- write [`FEX_GRID_ITEM_COUNT_OFFSET`] and drive the scrollbar.
+/// RVA `0x00021b30`.
+///
+/// The only writer of that field, and on the in-game menu tabs the scroll object at
+/// [`FEX_GRID_SCROLL_OFFSET`] is null, so on this path it writes the count and returns at the null
+/// check. Called -- not hooked -- so that a tab's cursor bound can be raised past what its item
+/// vector holds, through the game's own setter rather than by storing into a field.
+///
+/// Twenty-three callers across the frontend; the two on this path are [`FE_INGAME_MENU_TAB_INIT`]
+/// (per tab, with the vector's count) and `0x1400a6da0` (the tab strip, with a literal `6`).
+/// Nothing else writes the field on these objects, which is why a value written after the init
+/// survives.
+pub const FEX_GRID_SET_ITEM_COUNT: u32 = 0x0002_1b30;
+
+/// `FrontendEx::IngameTopLayoutAdapter`'s ordinary-cell lookup, `fn(namer, out, cell) -> out`.
+/// RVA `0x000a4b20`, vtable slot `+0x10` at `0x1410b69b8`.
+///
+/// **It reads exactly three fields of the namer and nothing else**, which is read off the
+/// disassembly rather than the decompiler:
+///
+/// ```text
+/// cmp DWORD PTR [r8],0x0          ; cell.col != 0 -> empty
+/// mov edx,DWORD PTR [r8+0x4]      ; cell.row
+/// cmp rdx,QWORD PTR [rcx+0x140]   ; >= count -> empty
+/// lea r9,[rcx+0x18]               ; the entry list
+/// mov rcx,QWORD PTR [rcx+0x10]    ; the scene proxy
+/// ...  r8 = list + (-list & 7) + row * 0x30
+/// call 0x140026790                ; (proxy, out, entry)
+/// ```
+///
+/// Three fields is what makes a stand-in possible: a buffer carrying a scene proxy at
+/// [`FE_SCENE_NAMER_PROXY_OFFSET`], one entry at [`FE_SCENE_NAMER_LIST_OFFSET`] and a count of `1`
+/// at `0x140` is indistinguishable from a namer here. Passing that, plus a cell of `(0, 0)`, makes
+/// the game's own code build the accessor for an entry of ours -- with nothing reimplemented, and
+/// without the entry ever sitting at an index whose stride would reach the count field.
+///
+/// The sibling slot `+0x18` (`FUN_1400a4c80`) is `make-empty; return` for every cell on every tab,
+/// so there is no second element to supply.
+///
+/// Not an Arxan redirect: prologue [`FE_SCENE_NAMER_CELL_LOOKUP_PROLOGUE`].
+pub const FE_SCENE_NAMER_CELL_LOOKUP: u32 = 0x000a_4b20;
+
+/// The first nine bytes of [`FE_SCENE_NAMER_CELL_LOOKUP`]: `rex push rbx` / `sub rsp,0x260`.
+pub const FE_SCENE_NAMER_CELL_LOOKUP_PROLOGUE: [u8; 9] =
+    [0x40, 0x53, 0x48, 0x81, 0xec, 0x60, 0x02, 0x00, 0x00];
+
+/// The TAB STRIP's cell lookup -- the same function for the other axis. RVA `0x000a4a70`.
+///
+/// `IngameTopLayoutAdapter` is two classes, not one, and detouring only the first is why a seventh
+/// tab could be selected and never drawn. Their vtables sit next to each other and slot 2 of each
+/// is the cell lookup:
+///
+/// | adapter | vtable | slot 2 | serves |
+/// |---|---|---|---|
+/// | `VLayoutAdapter` | `0x1410b69a8` | [`FE_SCENE_NAMER_CELL_LOOKUP`] | a tab's rows |
+/// | `HLayoutAdapter` | `0x1410b6a08` | this | the strip's tab cells |
+///
+/// The bodies are mirror images and the difference is which field of the cell is the index:
+///
+/// ```asm
+/// 0x1400a4b20:  cmp DWORD PTR [r8],0x0        ; the tab's:   col must be zero
+///               mov edx,DWORD PTR [r8+0x4]    ;              row is the index
+/// 0x1400a4a70:  cmp DWORD PTR [r8+0x4],0x0    ; the strip's: ROW must be zero
+///               mov edx,DWORD PTR [r8]        ;              COL is the index
+/// ```
+///
+/// Everything after that is identical -- `[rcx+0x140]` is the count, `rcx+0x18` the entry list,
+/// `[rcx+0x10]` the scene proxy, stride `0x30` -- so a stand-in built for one is a stand-in for the
+/// other, and the cell it is asked with is `(0, 0)` either way.
+///
+/// Not an Arxan redirect: `scripts/ds2-arxan-chain.py 0x1400a4a70` terminates at hop 0.
+pub const FE_SCENE_NAMER_STRIP_CELL_LOOKUP: u32 = 0x000a_4a70;
+
+/// The first seven bytes of [`FE_SCENE_NAMER_STRIP_CELL_LOOKUP`]: `rex push rbx` / `sub rsp,0x260`.
+pub const FE_SCENE_NAMER_STRIP_CELL_LOOKUP_PROLOGUE: [u8; 7] =
+    [0x40, 0x53, 0x48, 0x81, 0xec, 0x60, 0x02];
+
+/// The tab strip's second element per cell, slot 3 of `HLayoutAdapter`. RVA `0x000a4bd0`.
+///
+/// A grid asks its adapter for two elements per cell, and on a tab the second one
+/// (`FUN_1400a4c80`, slot 3 of `VLayoutAdapter`) is `make-empty; return` -- which is why the row
+/// work never needed it, and why this table used to say there was no second element to supply.
+///
+/// On the strip there is. This function is the same body as
+/// [`FE_SCENE_NAMER_STRIP_CELL_LOOKUP`] instruction for instruction -- same row-must-be-zero test,
+/// same `[rcx+0x140]` count, same `rcx+0x18` list, same `FUN_140026790` -- so it resolves the same
+/// entry to a second accessor. Serving the first and not the second gave a seventh tab whose
+/// selection highlight drew and whose glyph did not.
+///
+/// Not an Arxan redirect: `scripts/ds2-arxan-chain.py 0x1400a4bd0` terminates at hop 0, and its
+/// prologue is [`FE_SCENE_NAMER_STRIP_CELL_LOOKUP_PROLOGUE`] -- the same seven bytes, because the
+/// two functions are the same function twice.
+pub const FE_SCENE_NAMER_STRIP_CELL_SECOND: u32 = 0x000a_4bd0;
+
+/// Byte offset, inside a cell namer, of the scene proxy its lookup resolves paths against.
+/// `mov rcx,QWORD PTR [rcx+0x10]`.
+pub const FE_SCENE_NAMER_PROXY_OFFSET: usize = 0x10;
+
+/// `FUN_140027980(out) -> out` -- construct the EMPTY element accessor. RVA `0x00027980`.
+///
+/// Four calls: a base init, the `FrontendEx::SceneObjProxy` vtable, a default at `+0x58`, and an
+/// empty path copied into `+0x60`. It is what [`FE_SCENE_NAMER_CELL_LOOKUP`] itself returns for a
+/// cell that is not there, and its slot 0 resolves to null -- which is how the grid's layout bind
+/// learns a row has ended.
+///
+/// Recorded because it is the one correct answer a detour on that lookup can give when it cannot
+/// reach the original: handing back an untouched output buffer would leave the caller to call a
+/// vtable slot on uninitialised stack.
+pub const FE_SCENE_ACCESSOR_MAKE_EMPTY: u32 = 0x0002_7980;
+
+/// Byte offset of a cell namer's entry count, from the namer rather than from its list.
+/// [`FE_SCENE_NAMER_LIST_OFFSET`]` + `[`FE_SCENE_NAMER_COUNT_OFFSET`], which the lookup spells as
+/// the immediate `0x140`.
+pub const FE_SCENE_NAMER_COUNT_FROM_NAMER: usize =
+    FE_SCENE_NAMER_LIST_OFFSET + FE_SCENE_NAMER_COUNT_OFFSET;
+
+/// Bytes a stand-in namer has to cover: past [`FE_SCENE_NAMER_COUNT_FROM_NAMER`].
+pub const FE_SCENE_NAMER_SHADOW_SIZE: usize = FE_SCENE_NAMER_COUNT_FROM_NAMER + 8;
+
+/// `FUN_1400189f0(dst, src) -> dst` -- the copy one namer LIST ENTRY is made with. RVA `0x000189f0`.
+///
+/// **This is what says an entry is a `DLKR::DLFixedVector<u32, 8>` and not an opaque struct.** The
+/// function refuses a source count above `8`, copies that many `u32`s from `src` to `dst` at
+/// stride 4, and writes the count at `+0x28` -- which is exactly
+/// [`FE_SCENE_NAMER_ENTRY_LEN_OFFSET`], the field this table used to call "the path length". It is
+/// the length, and it is a vector's count.
+///
+/// So the "uninitialised slack" between the last id and `+0x28` is the unused tail of a
+/// fixed-capacity array, and a copy through this function reproduces an entry exactly as the game's
+/// own push does -- [`FE_SCENE_NAMER_PUSH`] calls this to do the copying.
+pub const FE_SCENE_NAMER_ENTRY_COPY: u32 = 0x0001_89f0;
+
+/// Ids one namer list entry can hold, from `if (8 < count) panic` in
+/// [`FE_SCENE_NAMER_ENTRY_COPY`]. The quit tab's paths use five of the eight.
+pub const FE_SCENE_NAMER_ENTRY_CAPACITY: usize = 8;
 
 // ---------------------------------------------------------------------------------------------
 // QUITTING TO DESKTOP
@@ -2785,6 +3265,15 @@ pub const FE_SCENE_NAMER_LIST_OFFSET: usize = 0x18;
 /// Six is also the bound of the id loop in [`FE_INGAME_MENU_QUIT_TAB_NAMER`], so the array and the
 /// list it fills are the same size -- which is the sort of agreement worth writing down, because
 /// it says the spare slots in that array are genuinely usable rather than accidental padding.
+///
+/// **And it is spelled in code as well as measured**, which the crash did not establish:
+/// [`FE_SCENE_NAMER_PUSH`] opens `count + 1; if (6 < that) panic("out of memory.")` against
+/// `DLFixedVector.inl:0x24c`. The run that died on the seventh push was reading a bound the
+/// disassembly already had.
+///
+/// Like [`FE_INGAME_MENU_ITEM_VECTOR_CAPACITY`], it stopped being the row ceiling once
+/// [`FE_SCENE_NAMER_CELL_LOOKUP`] -- the one place a cell's element is read -- could be answered
+/// from storage of our own.
 pub const FE_SCENE_NAMER_LIST_CAPACITY: usize = 6;
 
 /// Byte offset of the count inside a cell namer's list, relative to the list itself.
@@ -2811,6 +3300,13 @@ pub const FE_SCENE_NAMER_ENTRY_STRIDE: usize = 0x30;
 /// between two entries the game built one after the other -- it is stack residue -- which is why a
 /// clone must copy an entry rather than be assembled field by field, and why a byte-diff has to
 /// ignore everything outside the fields named here.
+/// Byte offset of the tab-subtree component, which is the second of the five ids and the one a tab
+/// of our own rewrites: [`FE_QUIT_TAB_BASE_PATH`]`[1]`, [`FLO_TAB_STRIP_PANEL_ID`] as the game
+/// builds it and [`FLO_ADDED_TAB_SUBTREE_ID`] once the seventh tab is in.
+///
+/// It is also the offset inside a scene PATH object, which carries the same five ids at the same
+/// places -- the entry is a path plus its length.
+pub const FE_SCENE_NAMER_ENTRY_SUBTREE_OFFSET: usize = 0x04;
 pub const FE_SCENE_NAMER_ENTRY_CONTAINER_OFFSET: usize = 0x0c;
 pub const FE_SCENE_NAMER_ENTRY_ID_OFFSET: usize = 0x10;
 pub const FE_SCENE_NAMER_ENTRY_LEN_OFFSET: usize = 0x28;
@@ -3039,7 +3535,31 @@ pub const FLO_QUIT_TAB_MARK_TEMPLATE: usize = 6;
 /// `0x1eaccd` is first because it is the one already on record: the earlier runtime experiment
 /// that named it in the namer got `row-extent 3`, i.e. nothing resolved, which is the same answer
 /// the file gives from the other side.
-pub const FLO_ADDED_ROW_IDS: [u32; 2] = [0x001e_accd, 0x001e_acce];
+///
+/// **There are twelve because the ceiling is now [`FEX_GRID_MAX_ROWS`] rather than the item
+/// vector's five.** Re-running the scan over the current file gives 113 free ids in
+/// `0x1eac00..0x1eacff`, of which `0x1eacc0..0x1eacc8`, `0x1eaccc`, `0x1eaccd`, `0x1eacce`,
+/// `0x1eacd3`, `0x1eacd7` and `0x1eacdf` are the fifteen in the row block -- the same fifteen this
+/// comment claimed before, by a script anyone can re-run:
+///
+/// ```text
+/// python3 scripts/ds2-ebl.py extract /menu/02.febnd.dcx --out /tmp/menu02
+/// python3 scripts/ds2-flo.py find /tmp/menu02/l02_01_In-Game.flo --id 0x1eaccd
+/// ```
+pub const FLO_ADDED_ROW_IDS: [u32; 12] = [
+    0x001e_accd,
+    0x001e_acce,
+    0x001e_accc,
+    0x001e_acc0,
+    0x001e_acc1,
+    0x001e_acc2,
+    0x001e_acc3,
+    0x001e_acc4,
+    0x001e_acc5,
+    0x001e_acc6,
+    0x001e_acc7,
+    0x001e_acc8,
+];
 
 /// Element ids for those rows' caption marks, one per slot.
 ///
@@ -3051,7 +3571,26 @@ pub const FLO_ADDED_ROW_IDS: [u32; 2] = [0x001e_accd, 0x001e_acce];
 ///
 /// `0x1eac4a` is first because it is the id the cut fourth row used -- its caption, `0x200f28`, is
 /// still in the FMG and still reads "Mouse Settings".
-pub const FLO_ADDED_LABEL_IDS: [u32; 2] = [0x001e_ac4a, 0x001e_ac4b];
+///
+/// **The first two and the other ten are chosen by different rules, deliberately.** Slots 0 and 1
+/// are the two cut rows' own ids and are the pair that has actually been on screen; there is no
+/// reason to move a working id for the sake of a tidy table. The remaining ten are ids the file does
+/// not use ANYWHERE -- a strictly stronger property than the container-scope freedom a label needs,
+/// and the cheap way to be sure of ten at once.
+pub const FLO_ADDED_LABEL_IDS: [u32; 12] = [
+    0x001e_ac4a,
+    0x001e_ac4b,
+    0x001e_aca0,
+    0x001e_aca1,
+    0x001e_aca2,
+    0x001e_aca3,
+    0x001e_aca4,
+    0x001e_aca5,
+    0x001e_aca6,
+    0x001e_aca7,
+    0x001e_aca8,
+    0x001e_aca9,
+];
 
 /// How far apart consecutive added rows and their marks sit.
 ///
@@ -3074,6 +3613,18 @@ pub const FLO_MARK_PITCH: f32 = 48.4;
 /// where row 2's would one step down.
 pub const FLO_ADDED_ROW_XY: (f32, f32) = (-0.1, 151.9);
 pub const FLO_ADDED_MARK_XY: (f32, f32) = (60.2, 162.75);
+
+/// Where a tab's first row goes -- the shipped row 0's own position, read off the container.
+///
+/// Child 3 of [`FLO_QUIT_TAB_CONTAINER_DEFINITION`] is `(3.95, 10.60)` and child 6 -- its mark --
+/// is `(60.20, 17.55)`. The x is the shipped row 0's rather than row 2's, because on a tab whose
+/// rows all belong to this crate there is no shipped row above to line up with.
+///
+/// This is the origin a tab of our own uses, where [`FLO_ADDED_ROW_XY`] is the origin for rows
+/// appended below three shipped ones. The two differ by three pitches, which is the three rows that
+/// are not there on the seventh tab.
+pub const FLO_FIRST_ROW_XY: (f32, f32) = (3.95, 10.6);
+pub const FLO_FIRST_MARK_XY: (f32, f32) = (60.2, 17.55);
 
 /// Byte offset of the packed colour inside a transform block, and the tint the added row's icon
 /// is drawn with.
@@ -3493,6 +4044,24 @@ pub const FE_BANNER_QUAD_Y1: f32 = 390.35;
 /// What the shipped quad's `y1` reads, checked before anything is written.
 pub const FE_BANNER_QUAD_SHIPPED_Y1: f32 = 342.35;
 
+/// Where the banner's quad has to end for `rows` added rows: one pitch per row, margin preserved.
+///
+/// The same series [`caret_y`] walks, and for the same reason -- both follow the last row, which
+/// moves down one [`FLO_ROW_PITCH`] per row added below the shipped three.
+pub const fn banner_y1(rows: usize) -> f32 {
+    FE_BANNER_QUAD_SHIPPED_Y1 + FLO_ROW_PITCH * rows as f32
+}
+
+/// [`banner_y1`] for a tab whose rows start at [`FLO_FIRST_ROW_XY`] rather than below three shipped
+/// ones: the same series, lifted by [`FLO_FIRST_ROW_RISE`], exactly as [`caret_y_from_top`] is.
+///
+/// The lift is what stops the seventh tab's panel from being three rows longer than its list.
+/// Without it a tab of our own carrying two rows is sized for five, and the three rows below the
+/// last one are empty panel.
+pub const fn banner_y1_from_top(rows: usize) -> f32 {
+    banner_y1(rows) - FLO_FIRST_ROW_RISE
+}
+
 /// The panel definition the quit tab's `0x1eac81` instantiates, and the caret inside it.
 ///
 /// `0x0221` holds exactly two children: the banner shape `0x0220` at `(0, 0)`, and `0x004e` at
@@ -3515,13 +4084,384 @@ pub const FLO_PANEL_CHILDREN: usize = 2;
 /// index seen is `0x0272` -- so a lookup for it can only come from the record this crate wrote.
 pub const FLO_ADDED_PANEL_DEFINITION: u32 = 0xf221;
 
-/// Where the caret goes: down by one row pitch, the same `48.00` the added row is spaced at.
+/// Where the caret goes: down from the shipped `244.65` by one row pitch per added row.
 ///
-/// `244.65 + 48.00`. It is the caret's own authored y in panel-local coordinates, so the panel's
-/// position does not enter into it.
-pub const FLO_CARET_Y: f32 = 292.65;
+/// **It used to be the constant `292.65` -- `244.65 + 48.00` -- and one row's worth of movement was
+/// wrong the moment a second row could be registered.** The caret sits just below the last row, so
+/// what it follows is the number of rows, exactly as the banner's quad does in
+/// [`FE_BANNER_QUAD_SHIPPED_Y1`]'s consumer. A fixed offset put it under row 4 on a tab showing five.
+///
+/// The value is the caret's own authored y in PANEL-LOCAL coordinates, so the panel's own position
+/// does not enter into it.
+pub const fn caret_y(rows: usize) -> f32 {
+    FLO_CARET_SHIPPED_Y + FLO_ROW_PITCH * rows as f32
+}
+
+/// How much higher a tab's first row sits than the first APPENDED row. `141.30`.
+///
+/// `151.90 - 10.60`. **Not three pitches**, which would be `144.00`: the three shipped rows step by
+/// `45.30` then `48.00`, so the distance they actually span is `93.30` and only the step past them is
+/// a clean pitch. Deriving this as `3 * FLO_ROW_PITCH` is off by `2.70`, which is the sort of number
+/// that reads as correct in a comment and wrong on a screen.
+pub const FLO_FIRST_ROW_RISE: f32 = FLO_ADDED_ROW_XY.1 - FLO_FIRST_ROW_XY.1;
+
+/// [`caret_y`] for a tab whose rows start at [`FLO_FIRST_ROW_XY`] rather than below three shipped
+/// ones: the same series, lifted by [`FLO_FIRST_ROW_RISE`].
+pub const fn caret_y_from_top(rows: usize) -> f32 {
+    caret_y(rows) - FLO_FIRST_ROW_RISE
+}
 /// What the shipped caret's y reads, checked before anything is written.
 pub const FLO_CARET_SHIPPED_Y: f32 = 244.65;
+
+// ---------------------------------------------------------------------------------------------
+// THE TAB STRIP'S OWN RECORDS, WHICH ARE A ROW CONTAINER ONE LEVEL UP
+//
+// The strip is a container with six cell records in it, and its child count is its display-list
+// capacity, exactly as a tab's row container is. So a seventh tab's icon is the same substitution
+// `ds2-menu-row`'s layout module already performs: raise the count, append a record copied from the
+// last one with a new x and a new element id.
+// ---------------------------------------------------------------------------------------------
+
+/// The tab strip's container definition. `0x0271`, with [`FLO_TAB_STRIP_CHILDREN`] children.
+///
+/// Reached as child 0 of definition `0x0272`, under element id `0x1eaba9` -- which is the same id
+/// [`FE_INGAME_TOP_SELECT_NAMER`] uses as its base path, so the code and the layout agree on what
+/// the strip is.
+pub const FLO_TAB_STRIP_DEFINITION: u32 = 0x0271;
+
+/// Children the shipped strip carries, checked before the count is raised. Eighteen.
+///
+/// The last six are the tab cells; the first twelve are the strip's own furniture -- the frame, the
+/// `LB`/`RB` prompts and the two captions.
+pub const FLO_TAB_STRIP_CHILDREN: usize = 18;
+
+/// Index of the first tab-cell record inside [`FLO_TAB_STRIP_DEFINITION`]'s child array. Twelve.
+pub const FLO_TAB_STRIP_FIRST_CELL: usize = 12;
+
+/// The definition every tab cell shares. `0x0270`.
+///
+/// Two children, both the same `0x026f` highlight shape at differing frame ranges, and no icon: the
+/// glyph on a tab is bound by the grid control rather than authored here. A seventh cell reusing
+/// this definition therefore inherits the selection highlight and nothing else, which is what a tab
+/// whose icon is bound at runtime needs.
+pub const FLO_TAB_STRIP_CELL_DEFINITION: u32 = 0x0270;
+
+/// The six tab cells' element ids, in child-array order.
+///
+/// Not the same order as [`FE_INGAME_TOP_SELECT_NAMER_CELL_IDS`] pushes them in -- the namer pushes
+/// `..aba6, ..aba7, ..aba5` where the array holds `..aba6, ..aba7, ..aba5` at 15, 16, 17. They agree
+/// here; the ORDER that differs is [`FE_INGAME_TOP_SELECT_TAB_ORDER`], which is about the groups.
+pub const FLO_TAB_STRIP_CELL_IDS: [u32; FE_INGAME_TOP_SELECT_TABS] = [
+    0x001e_aba2,
+    0x001e_aba3,
+    0x001e_aba4,
+    0x001e_aba6,
+    0x001e_aba7,
+    0x001e_aba5,
+];
+
+/// The element id a seventh tab's cell is written under. `0x1eaba8`.
+///
+/// The one gap in the strip's own block: `scripts/ds2-flo.py find` reports no record for it in
+/// `l02_01_In-Game.flo`, while every id either side of it resolves. Taking the neighbour rather than
+/// a free id from the row block keeps the strip's records reading as one run.
+pub const FLO_ADDED_TAB_ID: u32 = 0x001e_aba8;
+
+/// Horizontal spacing between tab cells. `54.0`.
+///
+/// The shipped six sit at `-4.6, 49.4, 103.4, 157.4, 211.55, 265.05`. Four of the five gaps are
+/// `54.0` and the other two are `54.15` and `53.5`, which is authoring drift rather than a second
+/// pitch -- so a seventh at `265.05 + 54.0` lands where the eye expects it.
+pub const FLO_TAB_PITCH: f32 = 54.0;
+
+/// Depth step between tab cells. Four.
+///
+/// `69, 73, 77, 81, 85, 89`. A seventh takes `93`, which is below the strip's own furniture and
+/// above nothing -- it is the last record either way.
+pub const FLO_TAB_DEPTH_PITCH: u16 = 4;
+
+// ---------------------------------------------------------------------------------------------
+// THE SEVENTH TAB'S OWN PANEL SUBTREE
+//
+// A row record is a grid CELL: the tab's namer names it, and a cell no namer names is not drawn.
+// A mark record is a plain child, and a plain child draws whenever its container is posed. That
+// asymmetry is why the seventh tab's first run put the System tab's three captions letter-over-
+// letter on top of its own rows -- both tabs were posing one container, our namer could suppress
+// the shipped rows and nothing could suppress the shipped marks.
+//
+// The level that separates two tabs is not the container. Every tab already owns a subtree hung
+// off the strip, and only the posed one draws:
+//
+//     0x0271  the strip
+//       [ 4]  id 0x1eaccf  def 0x0265   the System tab's subtree
+//               [0] id 0x1eace8  def 0x0264
+//                     [0] id 0x1eace6  def 0x0263   the row container
+//       [12..17]  the six tab cells
+//
+// So the seventh tab gets a second such child: three chained copies with our rows in the last one
+// and the shipped rows and marks left behind in the original. The copies differ from the originals
+// in one field each -- the definition index the child record names -- because the whole point is to
+// reach a different `0x0263`.
+//
+// Reproduce with:
+//
+//     python3 scripts/ds2-flo.py tree /tmp/menu02/l02_01_In-Game.flo --def 0x271
+//     python3 scripts/ds2-flo.py tree /tmp/menu02/l02_01_In-Game.flo --def 0x265
+//     python3 scripts/ds2-flo.py find /tmp/menu02/l02_01_In-Game.flo --id 0x1eaceb
+//
+// ---------------------------------------------------------------------------------------------
+
+/// Index of the System tab's subtree record inside [`FLO_TAB_STRIP_DEFINITION`]'s child array.
+///
+/// The template the seventh tab's own subtree record is cloned from, and the reason the clone is
+/// inserted beside it rather than appended: a nested-definition record's depth is never read back
+/// (`FUN_140b50bc0` passes depth on for leaf kinds only), so the draw order of two subtrees is the
+/// order they sit in the array. Appending ours after the six cells would draw a tab's panel over
+/// the tab strip.
+pub const FLO_TAB_STRIP_PANEL: usize = 4;
+
+/// The element id at [`FLO_TAB_STRIP_PANEL`], which is also
+/// [`FE_QUIT_TAB_BASE_PATH`]`[1]` -- the component every one of the System tab's cell paths carries
+/// and the one the seventh tab rewrites.
+pub const FLO_TAB_STRIP_PANEL_ID: u32 = 0x001e_accf;
+
+/// The definition [`FLO_TAB_STRIP_PANEL`] names. `0x0265`, two children.
+pub const FLO_TAB_SUBTREE_DEFINITION: u32 = 0x0265;
+/// Children `0x0265` carries: the frame below, and a `0x0251` that plays over frames 23..29.
+pub const FLO_TAB_SUBTREE_CHILDREN: usize = 2;
+/// Index of the child of `0x0265` that names [`FLO_TAB_FRAME_DEFINITION`].
+pub const FLO_TAB_SUBTREE_FRAME: usize = 0;
+/// That child's element id, checked before the copy is made.
+pub const FLO_TAB_SUBTREE_FRAME_ID: u32 = 0x001e_ace8;
+
+/// The definition between the subtree and the row container. `0x0264`, one child.
+pub const FLO_TAB_FRAME_DEFINITION: u32 = 0x0264;
+/// Children `0x0264` carries. One: the row container.
+pub const FLO_TAB_FRAME_CHILDREN: usize = 1;
+/// Index of the child of `0x0264` that names [`FLO_QUIT_TAB_CONTAINER_DEFINITION`].
+pub const FLO_TAB_FRAME_CONTAINER: usize = 0;
+/// That child's element id, which is [`FE_QUIT_TAB_BASE_PATH`]`[3]`.
+pub const FLO_TAB_FRAME_CONTAINER_ID: u32 = 0x001e_ace6;
+
+/// The element id the seventh tab's subtree is written under. `0x1eaceb`.
+///
+/// Free in the shipped document: `scripts/ds2-flo.py find --id 0x1eaceb` reports no record, while
+/// `0x1eace6` through `0x1eace9` all resolve. Taking a neighbour of the block it sits beside keeps
+/// the tab's ids reading as one run, the way [`FLO_ADDED_TAB_ID`] does for the cell.
+///
+/// Only this one id is new. The copies below reuse [`FLO_TAB_SUBTREE_FRAME_ID`] and
+/// [`FLO_TAB_FRAME_CONTAINER_ID`] verbatim, because a path is resolved one level at a time and the
+/// two subtrees diverge at the level above -- which is also what lets the seventh tab's cell paths
+/// differ from the System tab's in exactly one component.
+pub const FLO_ADDED_TAB_SUBTREE_ID: u32 = 0x001e_aceb;
+
+/// Indices the three copies are served under, none of which the shipped document uses.
+///
+/// Same arrangement as [`FLO_ADDED_PANEL_DEFINITION`]: a lookup for one of these can only have come
+/// from a record this crate wrote, so the answer is whatever copy was built last.
+///
+/// `0xe000` rather than the `0xf000` the panel and the rows use, and the reason is arithmetic
+/// rather than taste. [`FLO_ADDED_ROW_DEFINITION`] is `0xf258` and claims one index per slot, so
+/// the rows own `0xf258` through `0xf263` -- which swallows the `0xf263` and `0xf264` this block
+/// would otherwise have taken, and the collision is silent: a lookup for the last slot's row would
+/// have been answered with the seventh tab's container. A test in `ds2-menu-row` asserts the two
+/// blocks stay apart; it is the test that found this.
+pub const FLO_ADDED_TAB_SUBTREE_DEFINITION: u32 = 0xe265;
+pub const FLO_ADDED_TAB_FRAME_DEFINITION: u32 = 0xe264;
+pub const FLO_ADDED_TAB_CONTAINER_DEFINITION: u32 = 0xe263;
+
+/// Byte offset of the layout path inside a tab descriptor. `0x38`.
+///
+/// `FUN_1400a5900` builds a `DLKR::DLFixedVector<u32, 8>` on its own stack, writes `0x1eaba9` and
+/// `0x1eaccf` into it, and copies it here with `FUN_1400a4630(descriptor + 0x38, &local)`. The
+/// group constructor then copies that into `group + 0x130`, and
+/// [`FE_INGAME_MENU_TAB_INIT`] resolves it and plays sequence `0x65` on what comes back. So this
+/// field is which subtree a tab poses, and a seventh tab that poses its own writes one dword here.
+pub const FE_INGAME_MENU_TAB_PATH_OFFSET: usize = 0x38;
+
+/// The two ids `FUN_1400a5900` writes into that path: the strip, then the System tab's subtree.
+///
+/// Verified before the second is rewritten, for the same reason every other copy in this crate is
+/// verified: a descriptor that does not hold these is not the one this was read from.
+pub const FE_INGAME_MENU_TAB_PATH: [u32; 2] = [0x001e_aba9, FLO_TAB_STRIP_PANEL_ID];
+
+/// The path's count field, at [`FE_SCENE_NAMER_ENTRY_LEN_OFFSET`] past its base -- so `0x60` in the
+/// descriptor, which is the qword `FUN_1400a5900` zeroes on its second instruction.
+pub const FE_INGAME_MENU_TAB_PATH_COUNT_OFFSET: usize =
+    FE_INGAME_MENU_TAB_PATH_OFFSET + FE_SCENE_NAMER_ENTRY_LEN_OFFSET;
+
+// =================================================================================================
+// THE TAB ICONS, WHICH ARE ONE BAKED QUAD AND NOT SIX ELEMENTS
+//
+// A seventh tab was reachable, highlighted and drew its rows, and wore no icon. Two readings were
+// tried and both were wrong: that the glyph is bound into the cell by the grid -- it is not, the
+// cell definition `FLO_TAB_STRIP_CELL_DEFINITION` holds two copies of one highlight shape and
+// nothing inside it carries an element id, so no path can reach into a cell and no bind can put a
+// glyph there -- and that answering the strip's second per-cell lookup would supply it, which
+// changed nothing, because that lookup resolves the same entry to a second accessor.
+//
+// The strip's eighteen children are: four tab panels, a mask, two captions, the `LB`/`RB` labels,
+// three texture leaves, and the six cells. The six hexagons and the six glyphs are inside one of
+// those leaves -- `FLO_TAB_PLATE_SHAPE`, a single textured quad that samples
+// `(1.10, 781.95)-(337.60, 850.90)` out of the 1024x1024 atlas `In-game_01` and lands it at
+// `(1.10, 6.25)-(337.60, 75.20)`, which is exactly the band the six tabs occupy. There is no
+// seventh hexagon anywhere in that atlas: the art immediately right of the plate belongs to
+// another shape, and the plate's own right edge is its last hexagon's.
+//
+// So the seventh tab's icon is not a lookup to answer. It is a quad to draw.
+//
+// The quad this draws is the plate's own last pitch, repeated one pitch right. The six hexagons
+// sit at `FLO_TAB_PITCH`, so the plate's art is periodic at that pitch, and a copy of its final
+// `54.0` of atlas placed immediately past its right edge continues the row -- the seam falls
+// between two hexagons, where the art repeats, and the glyph inside the new hexagon is the sixth
+// tab's glyph shifted whole. That is the one construction needing no number this file cannot
+// check: not the hexagon's width, not its offset inside a cell, only the pitch the six cells
+// already spell.
+//
+// The seventh tab therefore wears the sixth tab's glyph. The atlas has six and this mod ships no
+// texture of its own; a duplicate glyph in a hexagon that is the right shape, the right size and
+// in the right place is what is available. `FLO_ADDED_TAB_ICON_SOURCE_LEFT` is the one number to
+// change if a different slice is ever wanted.
+//
+// Every offset below was read off the function that reads it, not matched to a pattern:
+//
+//   `FUN_140b54780(doc, index)`  the shape lookup: scan of `[doc+0x08]` over `[doc+0x48]` entries,
+//                                stride 0x18, key = the `u16` at `+0x00`, returning the entry.
+//   `FUN_140b70200(this, .., e)` `FeComponentTextureShape::init`: `movzx ecx,[e+0x02]` is the quad
+//                                count, `[e+0x08] + (i << 6)` is quad `i` -- stride 0x40.
+//   `FUN_140b70200` again        `rax = [quad+0x30]`, then four floats `[rax]`..`[rax+0x0c]`
+//                                copied into two per-quad buffers: the source rect.
+//   `FUN_140b50bc0`              `movzx edx,[rec]` -- a `kind & 1` record's `+0x00` is the shape
+//                                index, the same field a `kind & 4` record uses for a definition.
+//
+// Reproduce the numbers with:
+//
+//     python3 scripts/ds2-flo.py tree /tmp/menu02/l02_01_In-Game.flo --def 0x271
+//
+// =================================================================================================
+
+/// `FeLayoutDocument::findShape(doc, index)`. RVA `0x00b54780`.
+///
+/// `fn(&doc, u32 index) -> *entry`. A linear scan of `[[doc]+0x08]` over `[[doc]+0x48]` entries at
+/// stride [`FLO_SHAPE_STRIDE`], keyed by the `u16` at `+0x00`; `mov rax,rcx; ret` on a hit and
+/// null on a miss, so a detour that declines returns what the trampoline gave it.
+///
+/// Three sibling lookups share its shape and its prologue -- `0x00b54700` is the mask table,
+/// `0x00b54740` is [`FLO_FIND_DEFINITION`], `0x00b547c0` is the text table. So the prologue check
+/// proves the bytes are a lookup; it does not prove which of the four. The rva is what says that,
+/// and it came from the call site at `0x140b50d18`, reached with `kind & 1`.
+pub const FLO_FIND_SHAPE: u32 = 0x00b5_4780;
+
+/// `mov rax,[rcx]; mov r9d,edx; test rax,rax`. Shared with the three sibling lookups; see above.
+pub const FLO_FIND_SHAPE_PROLOGUE: [u8; 9] = [0x48, 0x8b, 0x01, 0x44, 0x8b, 0xca, 0x48, 0x85, 0xc0];
+
+/// Bytes per shape-table entry. `FUN_140b54780`: `add rcx,0x18`.
+pub const FLO_SHAPE_STRIDE: usize = 0x18;
+/// `u16` shape index inside an entry -- the key the scan compares.
+pub const FLO_SHAPE_KEY_OFFSET: usize = 0x00;
+/// `u16` how many quads the shape holds. `FUN_140b70200`: `movzx ecx,WORD PTR [rax+0x2]`, used to
+/// size four allocations before anything is read.
+pub const FLO_SHAPE_QUAD_COUNT_OFFSET: usize = 0x02;
+/// Pointer to the quad array. `FUN_140b70200`: `add r8,QWORD PTR [rax+0x8]` after `shl r8,0x6`.
+pub const FLO_SHAPE_QUADS_OFFSET: usize = 0x08;
+
+/// Bytes per quad. `FUN_140b70200`: `shl r8,0x6` -- the index times sixty-four.
+pub const FLO_QUAD_STRIDE: usize = 0x40;
+/// `f32` x and `f32` y the quad's source rect is offset by to reach the screen.
+pub const FLO_QUAD_X_OFFSET: usize = 0x00;
+pub const FLO_QUAD_Y_OFFSET: usize = 0x04;
+/// `f32` scale x inside a quad, at the same place a transform block keeps it. `-1` mirrors.
+pub const FLO_QUAD_SCALE_X_OFFSET: usize = 0x08;
+/// Pointer to the quad's source rect. `FUN_140b70200`: `mov rax,QWORD PTR [r8+0x30]`, and the quad
+/// is skipped when it is null.
+pub const FLO_QUAD_SOURCE_OFFSET: usize = 0x30;
+
+/// Bytes in a source rect: four floats. `FUN_140b70200` reads `[rax]`, `[rax+4]`, `[rax+8]` and
+/// `[rax+0xc]` and copies all four into two sixteen-byte per-quad buffers.
+pub const FLO_SOURCE_RECT_SIZE: usize = 0x10;
+/// `f32` left, top, right and bottom of a source rect, in atlas pixels.
+pub const FLO_SOURCE_LEFT_OFFSET: usize = 0x00;
+pub const FLO_SOURCE_TOP_OFFSET: usize = 0x04;
+pub const FLO_SOURCE_RIGHT_OFFSET: usize = 0x08;
+pub const FLO_SOURCE_BOTTOM_OFFSET: usize = 0x0c;
+
+/// The shape index of the six-hexagon plate. `0x0268`, one quad.
+///
+/// Child [`FLO_TAB_STRIP_PLATE`] of [`FLO_TAB_STRIP_DEFINITION`], a `kind & 1` record at `(0, 0)`
+/// and depth `60` -- below the six cells at `69..89`, which is why a selected tab's highlight draws
+/// over its icon.
+pub const FLO_TAB_PLATE_SHAPE: u32 = 0x0268;
+
+/// Index of the plate's record inside [`FLO_TAB_STRIP_DEFINITION`]'s child array. Seven.
+///
+/// The seventh tab's icon record goes in beside it, so the two hexagon rows sit adjacent in array
+/// order as well as in depth and neither reading of the draw order can put one over a cell.
+pub const FLO_TAB_STRIP_PLATE: usize = 7;
+
+/// Quads the plate carries. One, checked before it is copied: a plate with two is not this plate.
+pub const FLO_TAB_PLATE_QUADS: usize = 1;
+
+/// The plate quad's source rect, checked before the copy is made. `(1.10, 781.95)-(337.60, 850.90)`
+/// of the 1024x1024 atlas `In-game_01`.
+pub const FLO_TAB_PLATE_SOURCE: [f32; 4] = [1.10, 781.95, 337.60, 850.90];
+
+/// The plate quad's screen offset, checked with the rect above. `(0, -775.70)`, which lands that
+/// rect at `(1.10, 6.25)-(337.60, 75.20)`.
+pub const FLO_TAB_PLATE_OFFSET: [f32; 2] = [0.0, -775.70];
+
+/// The shape index the seventh tab's icon is served under. `0xe268`.
+///
+/// Same arrangement as [`FLO_ADDED_TAB_SUBTREE_DEFINITION`] and for the same reason: nothing in the
+/// shipped document names it, so a lookup for it can only have come from a record this crate wrote.
+/// `0xe268` is `0xe000` plus the plate's own index, which keeps the two readable together.
+pub const FLO_ADDED_TAB_ICON_SHAPE: u32 = 0xe268;
+
+/// Where the seventh tab's slice starts in the atlas. The plate's right edge less one
+/// [`FLO_TAB_PITCH`], which is the last whole tab period the plate holds.
+pub const FLO_ADDED_TAB_ICON_SOURCE_LEFT: f32 = FLO_TAB_PLATE_SOURCE[2] - FLO_TAB_PITCH;
+
+/// Depth the icon record is attached at. `62` -- above the plate's `60` and the end cap's `61`, and
+/// below the first cell's `69`, so the icon sits on the strip and under its own highlight.
+pub const FLO_ADDED_TAB_ICON_DEPTH: u16 = 62;
+
+/// Index, in [`FLO_TAB_STRIP_DEFINITION`]'s child array, of the cap drawn over the strip's right
+/// end. Its container is `0x026a` and its quad lands at `(271.05, 5.05)-(349.40, 64.45)`, over the
+/// sixth tab -- so a seventh tab needs it one [`FLO_TAB_PITCH`] further along.
+pub const FLO_TAB_STRIP_END_CAP: usize = 8;
+/// The definition index at that child, checked before its transform is copied.
+pub const FLO_TAB_STRIP_END_CAP_DEFINITION: u32 = 0x026a;
+
+/// Index of the `RB` prompt's label, which sits right of the last tab at `x = 347.05` and would
+/// otherwise be underneath the seventh tab's hexagon.
+pub const FLO_TAB_STRIP_RB_LABEL: usize = 10;
+/// The definition index at that child, checked before its transform is copied.
+pub const FLO_TAB_STRIP_RB_LABEL_DEFINITION: u32 = 0x026d;
+
+/// The shape index of the two chevrons that flank the strip. `0x026b`, two quads off one mirrored
+/// source rect: quad `0` is the right-hand chevron -- its `scale x` is `-1` -- and quad `1` the
+/// left.
+///
+/// Used by exactly one record -- child `9` of the strip -- so serving a moved copy of it moves the
+/// right chevron and nothing else in the document.
+pub const FLO_TAB_ARROWS_SHAPE: u32 = 0x026b;
+/// Quads it carries. Two, checked before either is copied.
+pub const FLO_TAB_ARROWS_QUADS: usize = 2;
+/// Index of the right-hand chevron inside that shape -- the one a seventh tab displaces.
+pub const FLO_TAB_ARROWS_RIGHT: usize = 0;
+/// That quad's `scale x`, which is `-1` because it is the left chevron's art mirrored. Checked
+/// before the move, because it is what says quad `0` is the right chevron and not the left.
+pub const FLO_TAB_ARROWS_RIGHT_SCALE_X: f32 = -1.0;
+/// That quad's screen offset x, checked before it is moved. Mirrored art subtracts, so the chevron
+/// lands at `1357.45 - (995.75..1020.75)`, which is `336.70..361.70` -- flush against the plate's
+/// right edge at `337.60`.
+pub const FLO_TAB_ARROWS_RIGHT_X: f32 = 1357.45;
+
+/// That quad's source rect, checked with the two fields above.
+///
+/// The shape index alone is a weak identity here in a way the plate's is not: this detour sees every
+/// shape lookup in every `.flo` the game loads, and `0x026b` in some other document is some other
+/// picture. Four more floats that all have to agree is what makes the chevron the chevron.
+pub const FLO_TAB_ARROWS_RIGHT_SOURCE: [f32; 4] = [995.75, 724.40, 1020.75, 769.10];
 
 // =================================================================================================
 // THE SOFTWARE KEYBOARD, AND THE ONE DWORD THAT KEEPS IT SAFE TO BORROW
@@ -4748,7 +5688,48 @@ pub const FE_OPEN_ATTRIBUTE_MENU: u32 = 0x0019_92c0;
 ///
 /// `saveLoadSystem` is `[GAME_MANAGER_IMP + `[`SAVE_LOAD_SYSTEM_OFFSET`]`]`. How a change is
 /// persisted without waiting for a bonfire.
+///
+/// # It RETURNS VOID, and it does not perform a save
+///
+/// Transcribed in full, because reading it as "save now, tell me if it worked" is the mistake it
+/// invites:
+///
+/// ```asm
+/// 0x1402e7410:  cmp  edx,0xe                 ; kind 14 is its own flag and nothing else
+///               jne  0x1402e741d
+///               mov  BYTE PTR [rcx+0x1a9],1
+///               ret
+/// 0x1402e741d:  cmp  edx,[rcx+0x68]          ; keep the LOWEST kind asked for
+///               jge  0x1402e7425
+///               mov  [rcx+0x68],edx
+/// 0x1402e7425:  mov  BYTE PTR [rcx+0x1a2],1  ; "a save is wanted"
+///               cmp  edx,0x2
+///               jne  0x1402e7438
+///               mov  BYTE PTR [rcx+0x1a3],1  ; and kind 2 sets a second flag
+/// 0x1402e7438:  repz ret
+/// ```
+///
+/// Three byte writes and a `min`. **There is no return value to check** -- a caller that branches on
+/// RAX is branching on whatever the last call left there -- and the save itself happens later, from
+/// `GameManagerImp`'s master update, exactly like the shutdown byte `ds2-menu-row` writes. So the
+/// only way to know a save HAPPENED is to watch something else: the interlock at
+/// [`SAVE_LOAD_SYSTEM_STATE_OFFSET`], or the file on disk.
+///
+/// Not an Arxan redirect. `scripts/ds2-arxan-chain.py` reports `UNKNOWN` at hop 0 only because its
+/// prologue table does not carry `83 fa` (`cmp edx, imm8`); the entry is ordinary code rather than
+/// the five-byte `e9` stub a redirected entry keeps in the deobfuscated image.
 pub const SAVE_LOAD_REQUEST_SAVE: u32 = 0x002e_7410;
+
+/// The three bytes [`SAVE_LOAD_REQUEST_SAVE`] must begin with, or a caller refuses to call it.
+///
+/// `cmp edx,0xe` -- the kind-14 special case, which is the first thing the function does.
+pub const SAVE_LOAD_REQUEST_SAVE_PROLOGUE: [u8; 3] = [0x83, 0xfa, 0x0e];
+
+/// The `kind` [`SAVE_LOAD_REQUEST_SAVE`] is asked for when the point is "persist the character now".
+///
+/// `2` is the value that sets BOTH flags the function can set (`+0x1a2` and `+0x1a3`), and it is the
+/// kind the pump at `0x1402e6230` accepts alongside `4`.
+pub const SAVE_LOAD_REQUEST_KIND_CHARACTER: u32 = 2;
 
 // =================================================================================================
 // THE INVENTORY TAB'S SORT DIALOG, AND THE OBJECT THAT OWNS IT
@@ -4927,3 +5908,394 @@ pub const FE_EQUIP_GROUP_UPDATE_PROLOGUE: [u8; 5] = [0x48, 0x89, 0x5c, 0x24, 0x2
 /// `0x1400bbec6` and the picker's reads `[r8+4]` at `0x140092f2a`, so a two-argument detour would
 /// hand them whatever `R8` happened to hold after the detour's own prologue.
 pub const FE_ITEM_LIST_UPDATE_ARGUMENT_COUNT: usize = 4;
+
+// THE SAVE/LOAD DIRECTORY SPLIT
+//
+// A session asks for its container directory through a virtual, and the save class and the load
+// class have their own overrides. Both are three lines with the same shape -- fetch a wide string,
+// measure it, hand it to the session's string setter -- and differ only in the object they read it
+// from. So nothing at runtime has to be decoded to tell a save from a load: the class that is
+// asking is the answer, and the two answers live at two addresses.
+//
+// AND IT IS NOT ON THE PATH TO THE FILE, which a live run measured. Recorded because the pair is
+// worth seeing and because the reasoning that led here has to stay visible: this was written as a
+// replacement for a plan aimed at `SAVE_DIR_BUILD`, on the grounds that `SAVE_DIR_BUILD` runs once
+// at session setup rather than per request. That is true and it is not a disqualification --
+// `SAVE_DIR_BUILD`'s result is handed to `SL_REQUEST_SET_DIRECTORY`, which seats it on the storage
+// worker, and the worker is what a container read opens. The split below moves a field the read
+// does not consult; `load-answered=1` on a read that still failed is what that looks like.
+
+/// `SaveLoad2::SLLoadSession`'s directory override. **The load side of the split.**
+///
+/// Reads its string from `this+0xe8` through `FUN_140a8a180`, then calls the session string setter
+/// at `0x140a89050`. Its save-side twin is [`SL_SAVE_SESSION_DIRECTORY`].
+pub const SL_LOAD_SESSION_DIRECTORY: u32 = 0x00a8_f8d0;
+
+/// `SaveLoad2::SLSaveSession`'s directory override. **The save side**, recorded so a reader can see
+/// the pair and check that the two really are distinct functions rather than one shared one.
+///
+/// Reads its string from `this[0x1d]` through `FUN_140a89cf0`. Nothing here hooks it: a save must
+/// keep writing the player's own folder, and leaving it alone is how that is guaranteed.
+pub const SL_SAVE_SESSION_DIRECTORY: u32 = 0x00a8_ec40;
+
+/// `SaveLoad2::SLLoadSession`'s vtable.
+///
+/// Written by the class's two constructors, `FUN_140a8f6b0` and `FUN_140a8f7d0`, each storing it
+/// twice in the usual ctor/dtor pattern.
+pub const SL_LOAD_SESSION_VTABLE: u32 = 0x011b_64e0;
+
+/// Where [`SL_LOAD_SESSION_DIRECTORY`] sits in [`SL_LOAD_SESSION_VTABLE`]: slot 3, `+0x18`.
+///
+/// **This is why the load redirect needs no code patch.** The override has no call sites at all --
+/// its only references are this slot and an RTTI entry -- so it is reached exclusively through the
+/// vtable, and arming the redirect is a pointer write into `.rdata`. The instruction stream is
+/// untouched, which takes Arxan out of the question for this site the way a `.flo` table
+/// substitution does for `ds2-menu-row`.
+pub const SL_LOAD_SESSION_DIRECTORY_VTABLE_SLOT: usize = 3;
+
+/// The session string setter both directory overrides finish with: an MSVC
+/// `basic_string<wchar_t>::assign(const wchar_t *, size_t)` on the session's own storage.
+///
+/// `fn(session: *mut SLSession, chars: *const u16, len: usize)`. Its small-string-optimisation
+/// layout is the usual one -- inline buffer until the capacity at `+0x18` exceeds seven, pointer
+/// after that -- and calling it is how a replacement override hands back a path without touching
+/// the game's allocator by hand, the same reasoning as [`WSTRING_ASSIGN`].
+pub const SL_SESSION_STRING_SET: u32 = 0x00a8_9050;
+
+// THE DIRECTORY A CONTAINER READ ACTUALLY OPENS
+//
+// Not the load session's virtual, and not the content's own string. The storage worker holds it,
+// and exactly one function writes it: `FUN_140a899f0`, below. Read out of the `0x18` arm of the
+// session pump at `0x1402e6230`, which is the whole of the game's own path to it:
+//
+// ```text
+// case 0x18:                                     // session setup
+//     FUN_140248db0(&dir, steamid);              // SAVE_DIR_BUILD -- builds "...\DarkSoulsII\<id>\"
+//     if (!SLSystem->field_0x1a1) {              // the once-per-process latch
+//         FUN_140a899f0(SLSystem->_x38, 0, dir); //   first session: index 0
+//         SLSystem->field_0x1a1 = true;
+//     } else {
+//         FUN_140a899f0(SLSystem->_x38, 1, dir); //   every later session: index 1
+//     }
+// ```
+//
+// That is the ENTIRE consumer list of `SAVE_DIR_BUILD`'s result, which is what makes the chain
+// closed: the launch-time redirect on `SAVE_DIR_BUILD` was measured reading a donor container end
+// to end, and this is the only route its string can have taken to get there.
+
+/// `void SetRequestDirectory(holder, u32 index, const wchar_t *path)` -- `0x140a899f0`.
+///
+/// **The seam an in-session redirect belongs on.** Three calls: find the worker for the holder's
+/// id, set its directory, release it. The find and the release are a lock/unlock PAIR --
+/// `FUN_140a8bfb0` takes `manager+0x50` and the worker's own `+0xb0` and leaves both held,
+/// `FUN_140a8c390` releases them -- so this function is called whole or not at all. Calling the
+/// finder alone to read the directory back would wedge the save system on the next request.
+///
+/// `holder` is the VALUE at [`SL_REQUEST_HOLDER_OFFSET`], not its address: the function reads the
+/// manager from `[holder]` and the worker id from `[holder+8]`.
+pub const SL_REQUEST_SET_DIRECTORY: u32 = 0x00a8_99f0;
+
+/// The five bytes [`SL_REQUEST_SET_DIRECTORY`] must begin with. `mov [rsp+8],rbx`.
+///
+/// Checked for the same reason `SAVE_LOAD_REQUEST_SAVE`'s is: an RVA is a number, and on a build
+/// these offsets were not read from, this address is some other function that would accept the
+/// call and leave a log line claiming a directory was set.
+pub const SL_REQUEST_SET_DIRECTORY_PROLOGUE: [u8; 5] = [0x48, 0x89, 0x5c, 0x24, 0x08];
+
+/// The worker-side half of the same write: `void SetWorkerDirectory(worker, u32 index, path)` --
+/// `0x140a8d9b0`. Hooked to OBSERVE, never to change an answer.
+///
+/// It is the only writer of [`SL_WORKER_DIRECTORY_OFFSET`], so a detour here sees every directory
+/// the game sets on itself as well as every one a mod sets, and is the only way to find out whether
+/// a set landed -- the worker pointer is otherwise reachable only through the locked finder.
+pub const SL_WORKER_SET_DIRECTORY: u32 = 0x00a8_d9b0;
+
+/// The five bytes [`SL_WORKER_SET_DIRECTORY`] must begin with.
+///
+/// `40 57` is `push rdi` carrying a redundant REX prefix, not `57` -- a disassembly LISTING spells
+/// that instruction the same either way, so the encoding has to be read as bytes. It was not, and
+/// the prologue check refused the detour on the first run with
+/// `saw=[40, 57, 41, 56, 41] want=[57, 41, 56, 41, 57]`, which is the check doing its whole job:
+/// five bytes off by one would have been a trampoline into the middle of `push r15`.
+pub const SL_WORKER_SET_DIRECTORY_PROLOGUE: [u8; 5] = [0x40, 0x57, 0x41, 0x56, 0x41];
+
+/// The request holder inside a `SaveLoadSystem`. `[system + 0x38]`.
+///
+/// Ghidra names the field `_x38_SLRequestMan_` and the pump's `0x18` arm passes it straight to
+/// [`SL_REQUEST_SET_DIRECTORY`]. It is a handle rather than the manager itself: `[holder]` is the
+/// manager, `[holder+8]` is the `u32` id of the worker to act on.
+pub const SL_REQUEST_HOLDER_OFFSET: usize = 0x38;
+
+/// The container directory on a storage worker. `worker + 0x48`.
+///
+/// An MSVC `basic_string<wchar_t>` with the usual small-string layout, written by
+/// [`SL_SESSION_STRING_SET`] from the tail of [`SL_WORKER_SET_DIRECTORY`]:
+/// `lea rcx,[r14+0x48]` at `0x140a8da45`, after the length is measured by scanning for the
+/// terminator.
+pub const SL_WORKER_DIRECTORY_OFFSET: usize = 0x48;
+
+/// The flag that makes [`SL_WORKER_SET_DIRECTORY`] do nothing. `worker + 0xad`.
+///
+/// `movzx edi,byte ptr [r14+0xad]` at `0x140a8da06`, and a non-zero value jumps the whole body --
+/// the index write, the status reset and the string set all of it. **A set that is skipped is
+/// silent**, which is why the observer reads this byte out and logs it: it is the difference
+/// between "the directory was refused" and "the directory was never asked for".
+pub const SL_WORKER_SET_SKIPPED_OFFSET: usize = 0xad;
+
+/// The index a mid-session directory set passes: `1`.
+///
+/// The game passes `0` exactly once per process -- the `field_0x1a1` latch in the pump's `0x18` arm
+/// -- and `1` for every session after it. Anything an in-session swap does is after that, so `1` is
+/// what the game itself would pass at that moment. It lands at `worker+0x3c`.
+pub const SL_REQUEST_DIRECTORY_INDEX_SESSION: u32 = 1;
+
+/// The `SLLoadContent` a `SaveLoadSystem` builds its container requests from. `[system + 0x30]`.
+///
+/// Read off `SAVE_LOAD_SYSTEM_LOAD_SYSTEM_DATA` (`0x1402e72c0`), which touches it three times in
+/// eleven instructions: `mov rcx,[rbx+0x30]; call 0x140a8a0d0` releases the previous request,
+/// `mov rcx,[rbx+0x30]; mov edx,7; call 0x140a8a250` sets the container entry, and the funnel at
+/// `0x140a86280` is handed the same pointer in `r9`. Every container read in the image goes through
+/// that funnel, so this is the object whose directory a read opens.
+pub const SAVE_LOAD_SYSTEM_CONTENT_OFFSET: usize = 0x30;
+
+/// The container NAME inside an `SLLoadContent`. `content + 0x08`.
+///
+/// `FUN_140a8a180`, the accessor every session builder goes through, is two instructions --
+/// `lea rax,[rcx+8]; ret` -- so the accessor is the offset. `FUN_140a8a6f0` hands the result to
+/// `FUN_140a87d10` to compare against each registered container and to `FUN_140a86e70` to copy,
+/// which is what a key is for.
+///
+/// # This was called `SL_CONTENT_DIRECTORY_OFFSET` and it is not a directory
+///
+/// A live run on 2026-09-23 read it and reported
+/// `<unread content=0x00007ffffa809bc0 length=Some(356486873167) capacity=Some(7)>`. Those two
+/// numbers are the whole correction: `356486873167` is `4f 00 46 00 53 00 00 00`, UTF-16 `"OFS\0"`,
+/// and the `7` beside it is a length rather than a capacity. A seven-character string whose fifth,
+/// sixth and seventh characters are `OFS` is `DS2SOFS` -- the save file's own name. So the string
+/// starts at `content+0x10`, the field here is the key that names it, and no directory lives on
+/// `SLLoadContent` at all.
+///
+/// The measurement was only legible because the reader reported its numbers instead of
+/// `<unreadable>`; see `ds2_save_redirect::request_dir::ContentDirectory`.
+pub const SL_CONTENT_NAME_OFFSET: usize = 0x08;
+
+/// Where an `SLLoadSession` keeps the `SLLoadContent` it was built from. `session + 0xe8`.
+///
+/// `FUN_140a8f6b0`, the constructor, writes `param_1[0x1d] = loadContent`. The directory virtual
+/// this crate used to hook reads through the same field, which is why it answers about the
+/// container's identity rather than about a folder.
+pub const SL_SESSION_CONTENT_OFFSET: usize = 0xe8;
+
+/// `u32 GetSessionState(holder)` -- `0x140a89940`, the value the pump switches on.
+///
+/// It looks the worker up by the holder's id and returns [`SL_SESSION_STATE_DONE`] when there is
+/// none, which is the same failed lookup that makes a directory set a no-op.
+pub const SL_GET_SESSION_STATE: u32 = 0x00a8_9940;
+
+/// Session setup: the pump arm that builds a directory and seats it on the worker.
+///
+/// The only arm of either pump (`0x1402e6230` at `0x1402e635c`, `0x1402e67f0` at `0x1402e6930`)
+/// that calls [`SAVE_DIR_BUILD`] and [`SL_REQUEST_SET_DIRECTORY`]. It is a STATE and not a
+/// construction argument: both session constructors take their kind from
+/// [`SL_SESSION_BUILD_SAVE`]'s third parameter, and every one of that function's nine call sites
+/// passes zero (`xor r8d,r8d`), so nothing asks for this state directly.
+pub const SL_SESSION_STATE_SETUP: u32 = 0x18;
+
+/// What [`SL_GET_SESSION_STATE`] answers when the worker lookup finds nothing: the pump reads it
+/// as "the worker is done".
+///
+/// At the title, between requests, this is what the holder's id resolves to -- which is why a
+/// directory set made there reports `set-made-no-write`.
+pub const SL_SESSION_STATE_DONE: u32 = 0x14;
+
+/// What [`SL_GET_SESSION_STATE`] answers when the holder has no manager at all.
+pub const SL_SESSION_STATE_NO_MANAGER: u32 = 0x19;
+
+/// The id a worker answers to, matched by the finder. `worker + 0xa8`.
+///
+/// `FUN_140a8d560` is the getter: lock `worker+0xb0`, read this, unlock.
+pub const SL_WORKER_ID_OFFSET: usize = 0xa8;
+
+/// The index [`SL_WORKER_SET_DIRECTORY`] writes alongside the directory. `worker + 0x3c`.
+pub const SL_WORKER_INDEX_OFFSET: usize = 0x3c;
+
+/// The status [`SL_WORKER_SET_DIRECTORY`] resets when its index is not 3. `worker + 0x98`.
+pub const SL_WORKER_STATUS_OFFSET: usize = 0x98;
+
+/// The value written to [`SL_WORKER_STATUS_OFFSET`] by that reset.
+pub const SL_WORKER_STATUS_DIRECTORY_SET: u32 = 0x16;
+
+/// The lock every worker field is read and written under. `worker + 0xb0`.
+///
+/// A vtable with acquire at `+0x10` and release at `+0x20`. [`SL_REQUEST_SET_DIRECTORY`] takes it
+/// and the manager's own, and only its tail call releases them, which is why that function has to
+/// be called whole.
+pub const SL_WORKER_LOCK_OFFSET: usize = 0xb0;
+
+/// `FUN_140a86280` -- builds a load session and registers it with the manager.
+///
+/// Three callers, all `SaveLoadSystem` methods: `loadSlot_0_andOtherSetup` (`0x1402e72c0`),
+/// `loadSlotByIndex` (`0x1402e6ff0`) and `loadSlot22_andOtherSetup` (`0x1402e7170`).
+pub const SL_SESSION_BUILD_LOAD: u32 = 0x00a8_6280;
+
+/// `FUN_140a863a0(out, listener, u32 kind, content, ...)` -- the save-side twin.
+///
+/// Nine call sites across five `SaveLoadSystem` methods, and every one of them passes `0`  for
+/// `kind`. That is the evidence behind [`SL_SESSION_STATE_SETUP`] being a state.
+pub const SL_SESSION_BUILD_SAVE: u32 = 0x00a8_63a0;
+
+/// `SaveLoad2::SLSaveSession`'s vtable, the save-side twin of [`SL_LOAD_SESSION_VTABLE`].
+///
+/// Read out of the image's RTTI the same way its twin was, with `scripts/ds2-rtti-vtables.py
+/// 'SLSaveSession' --slot 0x18`, which prints slot 3 holding [`SL_SAVE_SESSION_DIRECTORY`]:
+///
+/// ```text
+/// .?AVSLLoadSession@SaveLoad2@@  vtable=0x1411b64e0  this+0x0  [+0x18]=0x140a8f8d0
+/// .?AVSLSaveSession@SaveLoad2@@  vtable=0x1411b6430  this+0x0  [+0x18]=0x140a8ec40
+/// ```
+///
+/// **Swapping this is not the startup redirect.** A save that answers the staged copy is only
+/// correct once the character being played CAME from that copy; armed any earlier it writes the
+/// player's own character into somebody else's container. The one flow that arms it --
+/// `ds2-save-file`'s in-session swap -- does so only after the game has entered the donor
+/// character, which is the whole reason the two sides are separate constants.
+pub const SL_SAVE_SESSION_VTABLE: u32 = 0x011b_6430;
+
+/// Where [`SL_SAVE_SESSION_DIRECTORY`] sits in [`SL_SAVE_SESSION_VTABLE`]: slot 3, `+0x18`.
+///
+/// The same slot as [`SL_LOAD_SESSION_DIRECTORY_VTABLE_SLOT`], which is what it should be -- both
+/// classes derive from `SaveLoad2::SLSession` and both override the same base virtual. Recorded
+/// separately anyway, because "it must be the same slot" is the sort of reasoning that survives
+/// right up until the build where it is not.
+pub const SL_SAVE_SESSION_DIRECTORY_VTABLE_SLOT: usize = 3;
+
+/// `SaveLoadSystem`'s request to re-read the container's **system data**: the ten character
+/// records the title's LOAD GAME list is built from. RVA `0x002e_72c0`.
+///
+/// `bool loadSystemData(SaveLoadSystem *)`. Ghidra names it
+/// `FUN_1402e72c0_loadSlot_0_andOtherSetup`; what it actually does, read out of its decompilation,
+/// is set container entry **7** for loading and hand the request to the `SLRequestMan`:
+///
+/// ```c
+/// if (SLSystem->_x38_SLRequestMan_ == 0 || SLSystem->_x8 != 0 || SLSystem->_xc != 0) return false;
+/// FUN_140a8a0d0_zeroiseLoadSlots_andLoadContent__(SLSystem->SLLoadContent);
+/// FUN_140a8a250_setSlotForLoading__(SLSystem->SLLoadContent, 7);
+/// ... FUN_140a86280_unk6ArgFct(..., SLSystem->SLLoadContent, 2, 0) ...
+/// SLSystem->_x8 = 4; SLSystem->_xc = 2;
+/// return true;
+/// ```
+///
+/// **This is the refresh the in-session character swap needs.** `FUN_1400f0f60` -- the vector
+/// `FeSubStateTitleLoadDataList::v1` measures before it decides whether the list has anything in
+/// it -- is built entirely out of `GameManagerImp->GameDataManager->savedata__`, walking ten
+/// `0x1f0`-byte records and keeping the ones whose `+0x1d9` says occupied. Nothing in that path
+/// re-reads the file. So pointing the loads at another container changes what the list says only
+/// once that block has been filled again, and this is the call that fills it.
+///
+/// Its own guard is the interlock at [`SAVE_LOAD_SYSTEM_STATE_OFFSET`] /
+/// [`SAVE_LOAD_SYSTEM_SUBSTATE_OFFSET`], so calling it while the game is mid-request returns
+/// `false` and changes nothing -- which is what makes it safe to retry rather than schedule.
+pub const SAVE_LOAD_SYSTEM_LOAD_SYSTEM_DATA: u32 = 0x002e_72c0;
+
+/// The five bytes [`SAVE_LOAD_SYSTEM_LOAD_SYSTEM_DATA`] must begin with: `rex push rbx; sub rsp`.
+///
+/// `scripts/ds2-arxan-chain.py 0x1402e72c0` reports `NOT REDIRECTED (clean prologue at the entry)`,
+/// so the bytes below are what the live process holds. Nothing detours this address; it is called.
+/// The check is still worth making, because an RVA is a number, and a number that lands on the
+/// wrong function in some other build would be called just as happily.
+pub const SAVE_LOAD_SYSTEM_LOAD_SYSTEM_DATA_PROLOGUE: [u8; 5] = [0x40, 0x53, 0x48, 0x83, 0xec];
+
+/// `SaveLoadSystem`'s per-frame **pump**: the call that finishes a request
+/// [`SAVE_LOAD_SYSTEM_LOAD_SYSTEM_DATA`] started. RVA `0x002e_6230`.
+///
+/// `int pump(SaveLoadSystem *)`, Ghidra's `FUN_1402e6230_saveLoadSetup__`.
+///
+/// # A request is started by one call and finished by a different one, every frame
+///
+/// This was the missing half of the in-session swap, and its absence cost a live run. The start
+/// entry point hands a request to the `SLSession` worker thread and writes the interlock
+/// (`_x8 = 4; _xc = 2`); **nothing on the worker thread ever writes it back**. The clearing, and
+/// the parse of what the worker read, happen here -- on the game thread, when this is called:
+///
+/// ```c
+/// if (((_x8 - 2) & 0xfffffffd) != 0) return 4;            // nothing in flight
+/// if (_x38_SLRequestMan == 0)        return 10;
+/// switch (getSLSessionType(_x38)) {                       // 0x14 == the worker is done
+///   case 4..10, 0xd:  ...; return 1;                      // STILL WORKING
+///   case 0xb..0x12:   ...; return 1;                      // still working, other kinds
+///   case 0x14:  _x8 = 0;                                  // <-- the interlock is cleared HERE
+///               err = _x38->result;
+///               if (err) { _xc = 0; ...; return <err code> }
+///               switch (_xc) { case 2: parse container entry 7 into [this+0x18]; }
+///               _xc = 0; return 0;                        // DONE, and the records are filled
+/// }
+/// ```
+///
+/// # Its only callers are two title substates, and neither is resident at the top menu
+///
+/// `get_xrefs_to` finds exactly two: `FeSubStateTitleSteamLoadSystemData::update`
+/// (`0x1400fbdb0`, three call sites -- one per phase 1, 2 and 3) and
+/// `FeSubStateTitleLoadProfile`'s poll (`0x1400fc5b0`). Both call it once per frame and hold their
+/// phase while it answers `1`, which is what makes it safe to call every frame: that IS the
+/// shipped call pattern, and an idle interlock returns `4` without touching anything.
+///
+/// So a re-read requested while `0x47 TopMenu` is up -- which is exactly where the in-session
+/// character swap requests one -- is accepted, is performed by the worker, and then **waits
+/// forever**, because the substate that would have collected it is not on screen. The first live
+/// run of the swap logged precisely that: `re-read requested accepted=true` followed by fifteen
+/// seconds of nothing and `swap ABANDONED -- the container re-read never finished`. The flow has
+/// to pump it itself, because at the top menu it is the only thing that can.
+pub const SAVE_LOAD_SYSTEM_PUMP: u32 = 0x002e_6230;
+
+/// The five bytes [`SAVE_LOAD_SYSTEM_PUMP`] must begin with: `rex push rbp; push rsi; lea rbp`.
+///
+/// `scripts/ds2-arxan-chain.py 0x1402e6230` reports `NOT REDIRECTED (clean prologue at the entry)`
+/// and prints `40 55 56 48 8d 6c 24 b1`, so these are the bytes the live process holds.
+pub const SAVE_LOAD_SYSTEM_PUMP_PROLOGUE: [u8; 5] = [0x40, 0x55, 0x56, 0x48, 0x8d];
+
+/// [`SAVE_LOAD_SYSTEM_PUMP`]'s answer when the worker has not finished yet: keep calling it.
+///
+/// The one status both shipped callers test by name (`if (iVar8 == 1) break;` -- hold the phase).
+pub const SAVE_LOAD_SYSTEM_PUMP_WORKING: i32 = 1;
+
+/// [`SAVE_LOAD_SYSTEM_PUMP`]'s answer when the request completed and its data was parsed in.
+pub const SAVE_LOAD_SYSTEM_PUMP_DONE: i32 = 0;
+
+/// [`SAVE_LOAD_SYSTEM_PUMP`]'s answer when the interlock was already clear: nothing was in flight.
+///
+/// `mov eax,0x4` at `0x1402e625d`, the first bail. Not an error and not a completion -- it is what
+/// a pump call on an idle system says, which is why calling it unconditionally is harmless.
+pub const SAVE_LOAD_SYSTEM_PUMP_IDLE: i32 = 4;
+
+/// The five bytes [`SL_SESSION_STRING_SET`] must begin with. `mov [rsp+8],rbx`.
+///
+/// Checked before the call for the reason every other prologue here is: an RVA is a number, and on
+/// a build these offsets were not read from, this address is some other function that would accept
+/// the call and leave a log line claiming a directory was set.
+pub const SL_SESSION_STRING_SET_PROLOGUE: [u8; 5] = [0x48, 0x89, 0x5c, 0x24, 0x08];
+
+/// The state the session pump switches on. `worker + 0x98`.
+///
+/// Read by `FUN_140a8d6b0` under the worker's lock, returned by [`SL_GET_SESSION_STATE`], and used
+/// as the index into the pump's two-level jump table at `0x1402e678c` / `0x1402e67a0`. Valid range
+/// `0..=0x19`; anything above falls through.
+pub const SL_WORKER_STATE_OFFSET: usize = 0x98;
+
+/// What `SLSession`'s base constructor leaves the state at. `0x15`.
+///
+/// `FUN_140a8ce00` writes it alongside `worker+0x9c = 8` and
+/// [`SL_WORKER_KIND_OFFSET`]` = 3`.
+pub const SL_SESSION_STATE_CREATED: u32 = 0x15;
+
+/// The state a directory set leaves behind. `0x16`.
+///
+/// [`SL_WORKER_SET_DIRECTORY`] writes it whenever its index is not `3`, and it is the only value
+/// any of the four immediate stores to [`SL_WORKER_STATE_OFFSET`] in the save/load region write.
+pub const SL_SESSION_STATE_DIRECTORY_SET: u32 = 0x16;
+
+/// The kind the constructor is passed, and the value a directory set overwrites. `worker + 0x38`.
+///
+/// `FUN_140a8d760` is the setter; the base constructor leaves `3` at
+/// [`SL_WORKER_INDEX_OFFSET`], which is what makes [`SL_WORKER_SET_DIRECTORY`]'s `index != 3`
+/// test mean "a directory has been chosen".
+pub const SL_WORKER_KIND_OFFSET: usize = 0x38;

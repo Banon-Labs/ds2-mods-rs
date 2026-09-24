@@ -1,0 +1,38 @@
+# The two pause-menu rows that move a save between the game and a file the player picks.
+#
+# The half that needs Windows: one comdlg32 dialog, one detour-free read of the game's save
+# directory, and one call to the game's own `SaveLoadSystem::RequestSave`. Everything that can be
+# decided without a game -- which paths are acceptable, which are destructive -- lives in
+# `ds2-save-file-core` and is tested on the host.
+#
+# EVERY DEPENDENCY IS TARGET-GATED, so `cargo test --workspace` on Linux compiles none of it.
+[package]
+name = "ds2-save-file"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "ds2_save_file"
+
+[dependencies]
+ds2-save-file-core.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# The title flow, for the in-session swap. `ds2-continue` owns the two detours this needs -- the
+# top menu's update and the character list's -- and a second hook on either address from here would
+# be two crates fighting over one function. It does not depend on this crate, so the edge is one
+# way.
+ds2-continue.workspace = true
+# The title's dialogs. The swap hands the player questions the game asks about their own load, so it
+# has to be able to stop this crate answering them -- see `swap::begin`.
+ds2-dialog-skip.workspace = true
+ds2-game-base.workspace = true
+ds2-menu-row.workspace = true
+ds2-rva.workspace = true
+ds2-save-redirect.workspace = true
+
+[lints]
+workspace = true

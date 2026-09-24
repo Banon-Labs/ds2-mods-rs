@@ -52,6 +52,8 @@ ds2-build-import-core = { path = "crates/ds2-build-import-core" }
 ds2-menu-row = { path = "crates/ds2-menu-row" }
 ds2-inventory-sort = { path = "crates/ds2-inventory-sort" }
 ds2-sl2-core = { path = "crates/ds2-sl2-core" }
+ds2-save-file = { path = "crates/ds2-save-file" }
+ds2-save-file-core = { path = "crates/ds2-save-file-core" }
 
 # Arxan neutering. DS2 SOTFS carries 48 Arxan stubs; every MinHook detour patches a prologue
 # in `.text`, which is what their integrity checks look for. Path dep on the local checkout

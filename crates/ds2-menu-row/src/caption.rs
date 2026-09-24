@@ -237,6 +237,47 @@ pub(crate) fn set_caption(row: usize, text: &str) -> bool {
     }
 }
 
+/// Put one row's caption back to the text it registered. Safe to call from any thread.
+///
+/// The counterpart to [`set_caption`], for the moment a flow ends. A row that said
+/// "Returning to the title to pick a character..." and then finished has no further claim on the
+/// label, and a label that describes something the row is no longer doing is worse than a plain
+/// one -- it reads as a row stuck mid-press.
+pub(crate) fn reset_caption(row: usize) -> bool {
+    let registered = crate::api::rows_for(crate::api::Tab::Quit)
+        .get(row)
+        .map(|registered| registered.caption);
+    match registered {
+        Some(text) => set_caption(row, text),
+        None => false,
+    }
+}
+
+/// Put every caption back to the text its row registered.
+///
+/// Called from [`bind_detour`], which is the pause menu being built -- and a menu that has just
+/// been built is one whose rows nobody has pressed yet in this visit. Without it a caption is
+/// written once and then lives as long as the process: the buffers are leaked and rewritten in
+/// place, so a row that reported something during one visit goes on reporting it through the menu
+/// being closed, through the return to the title, and into the next character the player loads.
+/// That is what one live run on 2026-09-23 produced -- a row still saying it was on its way to the
+/// title, in a session that had already arrived and started playing.
+///
+/// A result stays on screen for as long as the menu that produced it stays open, which is where it
+/// is read; the next open is a new question.
+fn reset_captions() {
+    let Ok(mut captions) = ROW_CAPTIONS.lock() else {
+        return;
+    };
+    ensure_row_captions(&mut captions);
+    for (caption, registered) in captions
+        .iter()
+        .zip(crate::api::rows_for(crate::api::Tab::Quit))
+    {
+        write_units(caption, registered.caption);
+    }
+}
+
 /// `FeGroupInGameTopSelect::v2`, detoured: run the game's update, then push any changed caption.
 ///
 /// **This is what makes a caption change VISIBLE while the menu is still open.** Without it, a row
@@ -302,7 +343,15 @@ pub(crate) unsafe fn push_captions() -> usize {
         // SAFETY: `bytes` is a scene path copied out of a live one, `top` the group it belongs to,
         // and `caption.text` a leaked `DlString` this module owns. The lock is held across the
         // call, so the game's copy cannot race another thread's rewrite.
-        unsafe { write_caption(&bytes, top, caption.label_id, &*caption.text) };
+        unsafe {
+            write_caption(
+                &bytes,
+                top,
+                caption.label_id,
+                &*caption.text,
+                added_subtree(),
+            )
+        };
         pushed += 1;
     }
     pushed
@@ -314,7 +363,45 @@ static TITLE_ROW_TEXT: DlString = DlString {
     capacity: 32,
 };
 
+/// Which subtree an added row's caption resolves under.
+///
+/// The captured path is the System tab's, because the caption binder only ever builds that one --
+/// so on a tab of our own the label is somewhere else entirely, under the copy
+/// [`crate::strip`] hung off the strip. One component, the same one `crate::install` rewrites in
+/// every cell path and `crate::tab` in the group's own.
+///
+/// This is why the rows drew and stayed blank for a commit: a row record is a grid cell, and its
+/// path was rewritten; a caption is written through a path the game built for the other tab, and
+/// nothing about the write says it resolved to nothing.
+fn added_subtree() -> u32 {
+    if crate::tab::armed() {
+        ds2_rva::FLO_ADDED_TAB_SUBTREE_ID
+    } else {
+        ds2_rva::FLO_TAB_STRIP_PANEL_ID
+    }
+}
+
+/// `base` with its tab-subtree component pointed at `subtree`.
+///
+/// Returned by value rather than written through, because the caller's copy is the one the next
+/// caption is built from and two rows on different tabs would otherwise be one rewrite between
+/// them. Refuses quietly -- by changing nothing -- if component 1 is not the System tab's subtree,
+/// which is the only id the binder can have put there.
+fn under(base: &[u8; PATH_SIZE], subtree: u32) -> [u8; PATH_SIZE] {
+    let mut path = *base;
+    const AT: usize = ds2_rva::FE_SCENE_NAMER_ENTRY_SUBTREE_OFFSET;
+    let component = u32::from_le_bytes(path[AT..][..4].try_into().expect("four bytes"));
+    if component == ds2_rva::FLO_TAB_STRIP_PANEL_ID {
+        path[AT..][..4].copy_from_slice(&subtree.to_le_bytes());
+    }
+    path
+}
+
 /// Resolve `base + label` and write `text` onto it.
+///
+/// `subtree` is the tab the label belongs to: [`added_subtree`] for a row this crate added, and
+/// [`ds2_rva::FLO_TAB_STRIP_PANEL_ID`] for the shipped row it renames, which stays on the System
+/// tab whatever else moves.
 ///
 /// # Safety
 ///
@@ -326,7 +413,9 @@ unsafe fn write_caption(
     top_select: usize,
     label: u32,
     text: &'static DlString,
+    subtree: u32,
 ) {
+    let base = &under(base, subtree);
     let Some(base_module) = ds2_game_base::mem::game_module_base().ok() else {
         return;
     };
@@ -370,17 +459,25 @@ unsafe fn write_caption(
     // that repeats forever. The first two are the evidence; the rest are noise with a cost.
     if n <= 2 {
         log(format_args!(
-            "{LOG_PREFIX} caption label={label:#x} written={n}"
+            "{LOG_PREFIX} caption label={label:#x} subtree={subtree:#x} written={n}"
         ));
     }
 
-    // THE TREE DUMP IS NOT RUN. It found what it was built to find -- that the banner is a
-    // `FeComponentTextureShape` sized by its own quad -- and it costs 117 log lines, each of which
+    // THE WHOLE-MENU TREE DUMP IS NOT RUN. It found what it was built to find -- that the banner is
+    // a `FeComponentTextureShape` sized by its own quad -- and it costs 117 log lines, each of which
     // `ds2-loader`'s sink follows with `sync_all()`. That is most of a second of frozen game on the
     // first pause-menu open, for a measurement that has already been taken and written down.
     //
     // `crate::tree::dump` is kept and still compiles; re-arm it here when the next question needs
     // the live tree rather than the file.
+
+    // THE STRIP'S OWN CHILDREN ARE, once, and they are the next question: a tab is missing from the
+    // screen while the records this crate writes say twenty-one are there. One of those two is
+    // wrong and only the engine's own list can say which. Twenty-odd lines, one level deep, on the
+    // first open of the process.
+    //
+    // SAFETY: the accessor is filled, which is all `dump_strip` asks of it.
+    unsafe { crate::tree::dump_strip(accessor.as_ptr()) };
 
     // THE BANNER, once, and only from the pass that resolves the row this crate added -- the other
     // pass targets the shipped row and would do the same work twice.
@@ -394,6 +491,11 @@ unsafe fn write_caption(
         // to nothing. The tree dump had already said so in as many words -- `prefix5 resolved to
         // NOTHING` -- and the banner refusal that followed named the consequence.
         let mut panel = ds2_rva::FE_QUIT_TAB_BASE_PATH.to_vec();
+        // On a tab of our own the rows hang under a copy of the System tab's subtree, so the panel
+        // being lengthened is that copy's -- the same component `under` has already rewritten in
+        // the path this row's caption went through. Naming the System tab's here would stretch the
+        // banner on the tab this crate no longer puts rows on.
+        panel[1] = subtree;
         panel.push(ds2_rva::FLO_QUIT_TAB_CHILD_IDS[ds2_rva::FLO_QUIT_TAB_PANEL]);
         // SAFETY: the accessor is filled and the path is the container's with the panel appended.
         let component = unsafe { crate::tree::resolve_path(accessor.as_ptr(), &panel) };
@@ -455,6 +557,10 @@ unsafe extern "system" fn append_detour(path: *const u8, out: *mut u8, id: u32) 
 
 unsafe extern "system" fn bind_detour(top_select: *mut u8) {
     TOP_SELECT.store(top_select as usize, Ordering::Release);
+    // THE MENU IS BEING BUILT, so every row starts this visit saying what it registered. Before the
+    // original rather than after, so the defaults are in place even on the path below that gives up
+    // without capturing a path and pushes nothing.
+    reset_captions();
     if let Ok(mut captured) = CAPTURED.lock() {
         *captured = None;
     }
@@ -495,11 +601,14 @@ unsafe extern "system" fn bind_detour(top_select: *mut u8) {
     // for, and `bytes` is a scene path copied out of a live one.
     unsafe {
         push_captions();
+        // The System tab's own subtree, explicitly: this row is the one the game shipped and it
+        // stays where the game put it, on the tab this crate no longer adds rows to.
         write_caption(
             &bytes,
             top,
             ds2_rva::FE_QUIT_TAB_ROW_TITLE_LABEL_ID,
             &TITLE_ROW_TEXT,
+            ds2_rva::FLO_TAB_STRIP_PANEL_ID,
         );
     }
 }
@@ -630,9 +739,73 @@ pub unsafe fn install(base: usize) -> bool {
     ok
 }
 
+/// What a row's caption buffer currently reads as, for the tests below.
+///
+/// The length the game would measure, not the capacity: a reset that wrote the shorter string over
+/// the longer one without shortening the length would still read as the old text, and that is the
+/// bug this is here to catch.
+#[cfg(test)]
+fn caption_text(row: usize) -> Option<String> {
+    let captions = ROW_CAPTIONS.lock().ok()?;
+    let caption = captions.get(row)?;
+    // SAFETY: both pointers are this module's own leaked allocations, the lock is held, and the
+    // length is the one `write_units` wrote alongside the units it counted.
+    unsafe {
+        let length = (*caption.text).length as usize;
+        Some(String::from_utf16_lossy(std::slice::from_raw_parts(
+            caption.units,
+            length,
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A caption a flow changed goes back to the text its row registered -- by the row saying so,
+    /// and by the menu being rebuilt.
+    ///
+    /// One test rather than two because both halves share one process-wide registry and one set of
+    /// leaked buffers; split, they would race each other over the same row.
+    ///
+    /// The live run this comes from: 2026-09-23, a swap that left the game, was abandoned at the
+    /// title, and let the player load a character -- whose pause menu came up with the row still
+    /// saying it was on its way to the title to pick one.
+    #[test]
+    fn a_caption_goes_back_to_what_its_row_registered() {
+        const REGISTERED: &str = "Load Character from File";
+        const DURING: &str = "Returning to the title to pick a character...";
+        let row = crate::api::add_row(crate::api::RowSpec {
+            tab: crate::api::Tab::Quit,
+            caption: REGISTERED,
+            icon: ds2_rva::FLO_QUIT_ICON_DEFINITION,
+            tint: None,
+            on_confirm: || {},
+        })
+        .expect("nothing else in this crate registers a row");
+
+        assert!(set_caption(row.0, DURING));
+        assert_eq!(caption_text(row.0).as_deref(), Some(DURING));
+        // The row saying the flow is over. Note the registered text is the SHORTER of the two, so a
+        // reset that left the length behind would read as the tail of the message it replaced.
+        assert!(reset_caption(row.0));
+        assert_eq!(caption_text(row.0).as_deref(), Some(REGISTERED));
+
+        // And the backstop: the menu being built puts every caption back, whether or not the row
+        // that changed it remembered to.
+        assert!(set_caption(row.0, DURING));
+        reset_captions();
+        assert_eq!(caption_text(row.0).as_deref(), Some(REGISTERED));
+    }
+
+    /// A row that was never registered has no caption to put back, and asking for one is not a
+    /// panic -- `ds2-save-file` asks on every abandoned swap, including in a build where its row
+    /// was refused for want of a slot.
+    #[test]
+    fn resetting_a_row_that_does_not_exist_is_refused() {
+        assert!(!reset_caption(usize::MAX));
+    }
 
     /// The shipped row's replacement must be NUL-terminated, because the setter walks to the
     /// terminator itself and an unterminated buffer is a read off the end of this DLL's data. The

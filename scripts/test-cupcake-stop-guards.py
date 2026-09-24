@@ -463,6 +463,50 @@ CASES = [
         "that named a defect and changed nothing",
     ),
     Case(
+        "status_table.jsonl",
+        "table of your OWN PROGRESS",
+        "the turn closes on the save-picker table of 2026-09-23 -- `done, host-testable` / "
+        "`deliberately absent` / `next` / `after that` -- two of whose four rows are work that was "
+        "not done, written in the format that makes not-doing-it look like a deliverable. Replayed "
+        "against all seventeen last_assistant_*.sh signals, this fixture leaves every one of them "
+        "silent except its own: a grid of status words is not a first-person promise, a described "
+        "next step or a narrated action, which is how it never got caught. It also proves the "
+        "signal script is EXECUTABLE -- it shipped mode 644 and the guard was inert end to end "
+        "while opa test stayed green, the same class of silence as the 36-day episode above",
+    ),
+    Case(
+        "status_table_data.jsonl",
+        None,
+        "the same turn shape closing on a table of DATA -- offset/field/value out of the save "
+        "header, with one `state` row -- must NOT halt. This is the case that matters most: "
+        "DS2-MODS-WALL-OF-TEXT tells the agent on every single prompt to put content into a table, "
+        "so a guard that read `table` as the offence would fight a rule enforced every turn",
+    ),
+    Case(
+        "status_table_asked.jsonl",
+        None,
+        "the offending table verbatim, after a prompt that asked for one -- must NOT halt, or the "
+        "guard gags the deliverable the user requested",
+    ),
+    Case(
+        "shouting.jsonl",
+        "prose that shouts",
+        "the turn closes on \"THE COUNT IS NOT THE CAPACITY\" -- emphasis put in the capitalisation "
+        "instead of in the sentence, which is the 2026-09-23 directive. Its signal script has to "
+        "be executable for this to halt at all: a signal shipped mode 644 cannot be run, the "
+        "policy sees nothing, and the Stop hook returns a clean allow while opa test stays green, "
+        "which is exactly what happened to the status-table guard the day before this one landed",
+    ),
+    Case(
+        "shouting_names.jsonl",
+        None,
+        "the same turn closing on a line made of NAMES -- DLL, MSVC, CRT, DS2, SOTFS, RVA, PE, "
+        "BND4, MD5, UTF-8, CI, PR, a backticked Ghidra symbol, a save file and two hex constants "
+        "-- must NOT halt. This is the case that matters most: this repo's prose is made of "
+        "capitalised names, and a guard that read capital letters as the offence would make it "
+        "unwritable in the one place an author cannot argue back",
+    ),
+    Case(
         "clean.jsonl",
         None,
         "substantive work, no banned prose -- must NOT halt, or every turn wedges",

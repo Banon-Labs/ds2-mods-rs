@@ -57,6 +57,8 @@ pub enum StageError {
     Archive(String),
     /// The save decrypted, but the rebind refused it.
     Sl2(Sl2Error),
+    /// A structurally valid BND4 holding no entries: a real container with no character in it.
+    EmptyContainer,
     /// The staging directory could not be created or written.
     Write(String),
 }
@@ -80,6 +82,10 @@ impl core::fmt::Display for StageError {
             }
             Self::Archive(why) => write!(f, "archive error: {why}"),
             Self::Sl2(why) => write!(f, "save error: {why}"),
+            Self::EmptyContainer => write!(
+                f,
+                "that is a save container with no characters in it -- nothing to load"
+            ),
             Self::Write(why) => write!(f, "cannot write the staged save: {why}"),
         }
     }
@@ -199,6 +205,32 @@ fn read_source(path: &Path) -> Result<(&'static str, Vec<u8>), StageError> {
         "rar" => Ok(("rar", read_rar(path)?)),
         other => Err(StageError::UnknownKind(other.to_owned())),
     }
+}
+
+/// Is this file a DARK SOULS II save at all? Returns how many entries its container holds.
+///
+/// **Everything `stage` does except the writes**: the same four arms, the same archive unwrap, the
+/// same "exactly one `DS2SOFS0000.sl2`" rule -- then a structural BND4 check of the bytes that came
+/// out. It rebinds nothing and writes nothing, so it is safe to call on a file the player has merely
+/// pointed at.
+///
+/// # Why a caller needs this and an extension check is not it
+///
+/// A row that accepts a pick on the strength of its NAME accepts `holiday.jpg` renamed to
+/// `save.sl2`, and the player finds out one launch later when the game shows no LOAD GAME row --
+/// which is also what a correct redirect to an empty folder looks like. Measured the hard way on
+/// 2026-09-23: the picker offered every file on disk and the gate behind it only read the extension.
+///
+/// Zero entries is reported as [`Sl2Error::NoSteamId`]'s structural sibling rather than accepted: a
+/// container with no characters in it is a valid BND4 and a useless save, and a caller asking "can I
+/// load this" wants a no.
+pub fn validate_source(source: &Path) -> Result<(&'static str, usize), StageError> {
+    let (kind, save) = read_source(source)?;
+    let entries = ds2_sl2_core::validate(&save).map_err(StageError::Sl2)?;
+    if entries == 0 {
+        return Err(StageError::EmptyContainer);
+    }
+    Ok((kind, entries))
 }
 
 /// Resolve `source` into `staging_root`, rebound to `steam_id`, and return the directory to use.
