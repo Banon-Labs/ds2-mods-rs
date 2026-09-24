@@ -1,6 +1,28 @@
 //! Swap the character you are playing for one out of a file you picked, without ending the process.
 //!
-//! # What the player sees
+//! # This does not run. [`begin`] refuses, and the row restarts the game instead
+//!
+//! Everything up to the title was measured working -- the pick stages, the game leaves by its own
+//! Quit Game action, the title gate is called, the list can be opened. What is missing is a
+//! container directory a mod can write once the title is reached, and there is not one: four
+//! candidate fields were each disproved by a live run, not by argument.
+//!
+//! | field | what disproved it |
+//! |---|---|
+//! | `SLLoadSession`'s directory virtual | the work method reaches the string through the accessor, never the virtual -- `load-answered=1` on a read that still failed |
+//! | [`ds2_rva::SAVE_DIR_BUILD`] re-pointed mid-session | it runs at session setup, not per request -- `session-dir-answered=0` |
+//! | the storage worker's own string | a worker belongs to a live request; at the title the holder's id names a finished one -- `set-made-no-write` |
+//! | `SLLoadContent`'s string | it is the container's NAME. The field read back `DS2SOFS`; writing a path there renames the save rather than moving it |
+//!
+//! So [`crate::import`] falls through to the route that records the pick and restarts, which is the
+//! one measured reading a donor container end to end: the loader consumes the handoff at attach and
+//! arms the directory builder before the save system exists, so the game's own session setup builds
+//! its directory from it. The body below is kept assembled rather than deleted, because the only
+//! thing it lacks is a way to drive a session into [`ds2_rva::SL_SESSION_STATE_SETUP`] at the
+//! title -- a live read says a session genuinely sits in that state when its directory is written,
+//! and finding what puts it there is the one open question.
+//!
+//! # What the player sees, when this is on
 //!
 //! ```text
 //! press the row -> pick a file -> the game's own "return to title?" confirm
@@ -183,6 +205,14 @@ struct Swap {
     frames: u32,
 }
 
+/// Whether the in-session route may run at all.
+///
+/// `false`, and there is no way to set it: the flow has no field to write once the title is
+/// reached. It is a constant rather than a deleted module so the assembled flow survives for
+/// whoever finds the thing that would make it work, and so that turning it back on is one line
+/// against a body that has been kept compiling rather than a rewrite from the git history.
+static ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// The swap in progress, if any.
 ///
 /// A lock taken from a per-frame detour, which this repo is otherwise careful about -- but the gate
@@ -206,6 +236,8 @@ pub enum NotBegun {
     NoTitleGate,
     /// The game refused to leave -- the shipped Quit Game row is refused right now too.
     CannotLeave,
+    /// There is no container directory a mod can write from the title. See [`begin`].
+    NoDirectoryField,
 }
 
 impl std::fmt::Display for NotBegun {
@@ -217,6 +249,7 @@ impl std::fmt::Display for NotBegun {
             Self::Staging(error) => write!(f, "staging-failed: {error}"),
             Self::NoTitleGate => write!(f, "no-title-gate"),
             Self::CannotLeave => write!(f, "the-game-refused-to-leave"),
+            Self::NoDirectoryField => write!(f, "no-writable-container-directory"),
         }
     }
 }
@@ -241,7 +274,34 @@ fn steam_id() -> Option<String> {
 ///
 /// **Game thread, inside the menu's confirm path.** Returns the reason on refusal so the caller can
 /// fall back to the route that ends in a restart rather than leaving the player with nothing.
+///
+/// # It refuses, and the refusal is the finding
+///
+/// Everything below this guard has been run in the game and works: the pick stages, the game
+/// leaves by its own Quit Game action, the title gate is called, the character list can be opened.
+/// What does not exist is a container directory a mod can write once the title is reached, and the
+/// four candidate fields were each disproved by a run rather than by argument -- the table in this
+/// module's header has them.
+///
+/// Leaving it enabled would take the player out of their game, sit them at the title, and give up
+/// there. Refusing here sends them down [`crate::import`]'s other route instead, which ends in a
+/// restart and is the one measured reading a donor container end to end: the loader consumes the
+/// handoff at attach, arms [`ds2_rva::SAVE_DIR_BUILD`] before the save system exists, and the
+/// game's own session setup builds its directory from the armed builder. Slower, and it works.
+///
+/// The body is kept rather than deleted because the parts that were proved are worth keeping
+/// assembled for whoever finds what drives a session into
+/// [`ds2_rva::SL_SESSION_STATE_SETUP`] at the title -- the one thing that would make the rest of
+/// this run.
 pub fn begin(picked: &Path) -> Result<(), NotBegun> {
+    if !ARMED.load(std::sync::atomic::Ordering::Relaxed) {
+        log_line(format_args!(
+            "{LOG_PREFIX} swap not attempted for {} -- no container directory can be written from \
+             the title, so the restart route is the one that loads a file",
+            picked.display()
+        ));
+        return Err(NotBegun::NoDirectoryField);
+    }
     {
         let guard = SWAP.lock().map_err(|_| NotBegun::AlreadyPending)?;
         if guard.is_some() {
@@ -357,54 +417,15 @@ fn title_gate() -> ds2_continue::TitleStep {
             TitleStep::Wait
         }
         Phase::Asking { restoring } => {
-            // THE DIRECTORY A CONTAINER READ OPENS LIVES ON THE STORAGE WORKER, and the game sets
-            // it in exactly one place: the `0x18` arm of the session pump hands `SAVE_DIR_BUILD`'s
-            // result to `SL_REQUEST_SET_DIRECTORY`. `ds2_save_redirect::request_dir` calls that
-            // same function, so this moves the field a read consults rather than one beside it.
+            // NOTHING POINTS A DIRECTORY HERE, and [`begin`] refuses before this is ever reached.
+            // Four candidate fields were tried and each was disproved by a run; the table in this
+            // module's header has them, and `ds2_save_redirect::request_dir` has the disassembly.
             //
-            // Three seams were tried before this one and all three missed, each proved wrong by a
-            // measurement rather than by argument:
+            // What is left standing is the arm below: the side redirect, the container re-read, and
+            // the wait. They were measured reaching the game -- `load-answered=1`, `accepted=true`,
+            // the pump answering -- and they are correct for a container that has been pointed
+            // somewhere. Pointing it is the missing piece, not this.
             //
-            //   * `SLLoadSession`'s directory virtual -- the work method reaches the same string
-            //     through the accessor instead of the virtual: `load-answered=1`, read failed.
-            //   * `SAVE_DIR_BUILD` re-pointed mid-session -- it runs at session setup and not per
-            //     request: `session-dir-answered=0` on a re-read that never called it.
-            //   * the storage worker's own string, through the setter the pump's `0x18` arm calls
-            //     -- a worker exists only for a live request, and at the title the id names one
-            //     that has finished: `set-made-no-write ... no worker for its id`.
-            //
-            // It moves both sides at once, and that is safe only here. Between the return to the
-            // title and a character being chosen there is no character loaded, so there is nothing
-            // a save could write; every path that ends the flow puts the original back.
-            if !restoring && let Some(system) = game::save_load_system() {
-                // No writable directory field is known, so this refuses instead of arming.
-                //
-                // The container name is reported because it is the one thing here that CAN be read,
-                // and because reading it is what disproved the last attempt: `DS2SOFS` where a
-                // folder was expected. `ds2_rva::SL_CONTENT_NAME_OFFSET` carries that measurement.
-                //
-                // Refusing is not a placeholder for a fix. Every field this flow could write is
-                // either per-request and gone by the time the title is reached, or is the
-                // container's identity rather than its location, and writing the second would
-                // rename what the player is loading instead of moving it.
-                // SAFETY: game thread at the title.
-                let name = unsafe { ds2_save_redirect::request_dir::content_name(system) };
-                let picked = swap.picked.display().to_string();
-                *guard = None;
-                drop(guard);
-                abandon(&format!(
-                    "no directory field can be written from here. The worker's copy is made per \
-                     request and its id names a finished one at the title \
-                     (`set-made-no-write`), and the load content holds the container's NAME -- \
-                     which reads {name} -- not its folder. {picked} is still staged and nothing \
-                     about your own save was touched",
-                    name = name.map_or_else(
-                        || String::from("<no load content>"),
-                        |name| name.to_string()
-                    )
-                ));
-                return TitleStep::Finished;
-            }
             // SAFETY: the game is mapped and past `DllMain`; this is its own thread at the title.
             let side_ready = if restoring {
                 unsafe { session_dir::LOAD.disarm() }
