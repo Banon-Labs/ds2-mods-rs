@@ -65,7 +65,12 @@ use crate::install::{log, module_base};
 /// The game's own cell bind, published by MinHook before the site is patched.
 pub(crate) static TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 
+/// The equipment screen's own, published the same way. Separate because it is a separate site
+/// with a separate signature, and because it may refuse without taking the inventory's down.
+pub(crate) static EQUIP_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
+
 type CellBindFn = unsafe extern "system" fn(*mut u8, *const u8, u8);
+type EquipBindFn = unsafe extern "system" fn(*mut u8, *const u8);
 type ResolveFn = unsafe extern "system" fn(*mut u8, *mut u8, *const u8) -> *mut u8;
 type SetVisibleFn = unsafe extern "system" fn(*mut u8, u8);
 type DescriptorFn = unsafe extern "system" fn(*const u8, *mut u8) -> *mut u8;
@@ -268,7 +273,7 @@ unsafe fn unmet(base: usize, item: *const u8) -> Option<bool> {
     Some(false)
 }
 
-/// Resolve one element id under the cell's infusion container, into a buffer that does not move.
+/// Resolve one element id under an infusion container, into a buffer that does not move.
 ///
 /// The accessor is filled in place and never returned by value, because it is self-referential:
 /// `FE_ELEMENT_SET_VISIBLE` starts with `mov rcx,[rcx]` on `accessor+0x08`, and a run that returned
@@ -277,8 +282,11 @@ unsafe fn unmet(base: usize, item: *const u8) -> Option<bool> {
 ///
 /// # Safety
 ///
-/// `cell` must be the live cell view the bind was called with, and `base` the module base.
-unsafe fn resolve_element(base: usize, cell: *mut u8, id: u32, into: &mut Accessor) {
+/// `container` must be the live infusion-container accessor -- for the inventory, the cell view's
+/// own at [`ds2_rva::FE_ITEM_CELL_INFUSION_ACCESSOR_OFFSET`]; for the equipment screen, the first
+/// argument of [`ds2_rva::FE_EQUIP_SLOT_BIND`], which is already that accessor. `base` must be the
+/// module base.
+unsafe fn resolve_element(base: usize, container: *mut u8, id: u32, into: &mut Accessor) {
     let mut path = IdPath([0; ds2_rva::FE_ELEMENT_PATH_SIZE]);
     // The game's own alignment idiom, rather than a reliance on this struct's `align`.
     let start = (path.0.as_ptr() as usize).wrapping_neg() & 3;
@@ -288,16 +296,10 @@ unsafe fn resolve_element(base: usize, cell: *mut u8, id: u32, into: &mut Access
     let resolve: ResolveFn = unsafe {
         std::mem::transmute::<usize, ResolveFn>(base + ds2_rva::FE_ELEMENT_RESOLVE as usize)
     };
-    // SAFETY: the parent is the cell's own infusion-container accessor -- the same pointer the
-    // game's bind loop hands this function sixteen times -- and both buffers are the sizes the
-    // game gives them on its own stack.
-    unsafe {
-        resolve(
-            cell.add(ds2_rva::FE_ITEM_CELL_INFUSION_ACCESSOR_OFFSET),
-            into.0.as_mut_ptr(),
-            path.0.as_ptr(),
-        )
-    };
+    // SAFETY: the parent is an infusion-container accessor -- the same pointer the game's own bind
+    // loops hand this function sixteen times, on either screen -- and both buffers are the sizes
+    // the game gives them on its own stack.
+    unsafe { resolve(container, into.0.as_mut_ptr(), path.0.as_ptr()) };
 }
 
 /// The component an accessor stands for, by the same two loads and one indirect call
@@ -335,15 +337,22 @@ unsafe fn component_of(accessor: &Accessor) -> usize {
     }
 }
 
-/// Show or hide the badge on one cell.
+/// Show or hide the badge on one cell, given that cell's infusion-container accessor.
 ///
 /// # Safety
 ///
-/// `cell` must be the live cell view the bind was called with, and `base` the module base.
-unsafe fn show(base: usize, cell: *mut u8, visible: bool) {
+/// `container` must be a live infusion-container accessor and `base` the module base.
+unsafe fn show(base: usize, container: *mut u8, visible: bool) {
     let mut accessor = Accessor([0; ds2_rva::FE_ELEMENT_ACCESSOR_SIZE]);
-    // SAFETY: the cell is the live view the bind was called with.
-    unsafe { resolve_element(base, cell, ds2_rva::FE_ITEM_WARN_ELEMENT, &mut accessor) };
+    // SAFETY: the container is the live accessor the caller took off the game's own bind.
+    unsafe {
+        resolve_element(
+            base,
+            container,
+            ds2_rva::FE_ITEM_WARN_ELEMENT,
+            &mut accessor,
+        )
+    };
     if visible {
         // SAFETY: as above.
         let component = unsafe { component_of(&accessor) };
@@ -391,6 +400,52 @@ pub(crate) unsafe extern "system" fn detour(cell: *mut u8, item: *const u8, show
     if !crate::mark::armed() || (cell as usize) < 0x1_0000 {
         return;
     }
+    // SAFETY: the cell is live, and this is the accessor its own bind loop resolves against.
+    let container = unsafe { cell.add(ds2_rva::FE_ITEM_CELL_INFUSION_ACCESSOR_OFFSET) };
+    // SAFETY: `item` is the game's own and `container` is inside the live cell view.
+    unsafe { decide(container, item, "inventory") };
+}
+
+/// The equipment screen's bind: `fn(container, item)`.
+///
+/// Same job, one indirection fewer. [`ds2_rva::FE_EQUIP_SLOT_BIND`] is handed the infusion
+/// container's accessor directly, because `FUN_140097150` resolved the slot down to
+/// [`ds2_rva::FE_EQUIP_SLOT_CONTAINER_ELEMENT`] before calling it -- so there is no cell view here
+/// and nothing to offset into.
+///
+/// **This is a second hook and not a second call site of the first one.** The equipment screen
+/// never goes through [`ds2_rva::FE_ITEM_CELL_BIND`] at all: its slot cells are laid out by
+/// `def 0x0133` of `l02_01_In-Game.flo` and refreshed from the slot table at `PTR_DAT_141561ef0`,
+/// a path that shares nothing with the inventory list but the container definition. The badge was
+/// already in those cells -- the container detour builds it there -- and nothing was switching it
+/// on.
+pub(crate) unsafe extern "system" fn equip_detour(container: *mut u8, item: *const u8) {
+    let trampoline = EQUIP_TRAMPOLINE.load(Ordering::Acquire);
+    if trampoline == 0 {
+        return;
+    }
+    // SAFETY: MinHook published this trampoline for exactly this site, and the signature is the
+    // one the disassembled body implements.
+    let original: EquipBindFn = unsafe { std::mem::transmute::<usize, EquipBindFn>(trampoline) };
+    // The original first, for the same reason the inventory's runs first: its loop hides all
+    // sixteen infusion ids, the badge's among them.
+    // SAFETY: both arguments are the game's own, passed through unchanged.
+    unsafe { original(container, item) };
+
+    if !crate::mark::armed() || (container as usize) < 0x1_0000 {
+        return;
+    }
+    // SAFETY: `container` is the live accessor the game just used sixteen times.
+    unsafe { decide(container, item, "equipment") };
+}
+
+/// Ask the question and write the answer onto one cell's badge.
+///
+/// # Safety
+///
+/// `container` must be a live infusion-container accessor and `item` the `FeItemData` the bind was
+/// called with.
+unsafe fn decide(container: *mut u8, item: *const u8, screen: &str) {
     let base = module_base();
     if base == 0 {
         return;
@@ -407,11 +462,11 @@ pub(crate) unsafe extern "system" fn detour(cell: *mut u8, item: *const u8, show
     let n = DECISIONS.fetch_add(1, Ordering::Relaxed) + 1;
     if n <= LOGGED_DECISIONS {
         log(format_args!(
-            "{LOG_PREFIX} decided unmet={answer:?} shown={visible} decisions={n}"
+            "{LOG_PREFIX} decided screen={screen} unmet={answer:?} shown={visible} decisions={n}"
         ));
     }
-    // SAFETY: `cell` is the live cell view the bind was called with.
-    unsafe { show(base, cell, visible) };
+    // SAFETY: `container` is the live accessor the caller took off the game's own bind.
+    unsafe { show(base, container, visible) };
 }
 
 #[cfg(test)]

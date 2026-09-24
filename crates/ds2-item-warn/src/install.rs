@@ -178,10 +178,33 @@ pub unsafe fn install() -> Outcome {
         ));
         return Outcome { installed: false };
     }
+    // The equipment screen, which is a THIRD site and an additive one. Its slot cells already
+    // carry the badge -- they hold the same nine-id container, so the builder detour above put it
+    // there -- and this is only the switch that shows it. A refusal here therefore costs the
+    // equipment screen its X and costs the inventory nothing, which is why it does not disarm the
+    // pair the way a bind failure does.
+    // SAFETY: as above.
+    let equip = unsafe {
+        hook_site(
+            base,
+            ds2_rva::FE_EQUIP_SLOT_BIND,
+            &ds2_rva::FE_EQUIP_SLOT_BIND_PROLOGUE,
+            crate::requirement::equip_detour as *mut c_void,
+            &crate::requirement::EQUIP_TRAMPOLINE,
+            "equip-slot-bind",
+        )
+    };
     crate::mark::arm();
+    if !equip {
+        log(format_args!(
+            "{LOG_PREFIX} the equipment screen keeps no X -- its slot cells carry the badge and \
+             nothing switches it on; the inventory list is unaffected"
+        ));
+    }
     log(format_args!(
-        "{LOG_PREFIX} installed -- weapons whose requirements the player fails get the game's own \
-         X (waku_03 {:.2?}) at cell-local ({:.2}, {:.2}), {:.2}x{:.2}; UNVERIFIED AT RUNTIME",
+        "{LOG_PREFIX} installed equipment-screen={equip} -- weapons whose requirements the player \
+         fails get the game's own X (waku_03 {:.2?}) at cell-local ({:.2}, {:.2}), {:.2}x{:.2}; \
+         UNVERIFIED AT RUNTIME",
         ds2_rva::FE_ITEM_WARN_SOURCE,
         ds2_rva::FE_ITEM_CELL_BAR_LEFT,
         ds2_rva::FE_ITEM_CELL_BAR_TOP - ds2_rva::FE_ITEM_WARN_SIZE[1] - ds2_rva::FE_ITEM_WARN_INSET,

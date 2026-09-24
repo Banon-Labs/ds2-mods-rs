@@ -6457,6 +6457,45 @@ pub const FE_ITEM_CELL_BIND: u32 = 0x000b_c850;
 /// The bytes at [`FE_ITEM_CELL_BIND`], re-read before the site is patched.
 pub const FE_ITEM_CELL_BIND_PROLOGUE: [u8; 8] = [0x48, 0x89, 0x5c, 0x24, 0x18, 0x55, 0x56, 0x57];
 
+/// The equipment screen's own infusion bind. `FUN_140095650`. RVA `0x00095650`.
+///
+/// `fn(container: *ElementAccessor, item: *FeItemData)` -- and the first argument is already the
+/// infusion container's accessor, not a cell view, which is the whole difference from
+/// [`FE_ITEM_CELL_BIND`]. Its body is that bind's infusion loop and nothing else:
+///
+/// ```text
+/// for i in 0..0x10:
+///     path  = 0x5f5c3e0 + i
+///     shown = i == FUN_140034e70(item)          ; FE_ITEM_INFUSION_READ, the nibble
+///     FUN_14001e270(FUN_140027c80(container, out, &path) + 8, shown)
+/// ```
+///
+/// So it drives all sixteen ids, [`FE_ITEM_WARN_ELEMENT`] among them, and hides ours on every
+/// bind for the same reason the inventory's loop does -- which is what makes a detour running
+/// after the original the last word on the element here too.
+///
+/// **Why the equipment screen needed its own hook at all.** Its slot cells are `def 0x0128` and
+/// `def 0x012c` of `l02_01_In-Game.flo`, laid out by `def 0x0133`: six weapon slots, four armour,
+/// four rings. Both cells hold the nine-id container at child `[2]`, so the container detour
+/// already gives them the badge -- but nothing on that screen went through `FUN_1400bc850`, so
+/// nothing ever showed it. `FUN_140097150` is the refresh that walks the slot table at
+/// `PTR_DAT_141561ef0`, resolves each slot down to element `0x5f5c3e2`, and calls this.
+///
+/// Prologue `48 89 5c 24 10 48 89 6c` -- its own. `scripts/ds2-arxan-chain.py 0x140095650`
+/// terminates at hop 0 with `NOT REDIRECTED (clean prologue at the entry)`.
+pub const FE_EQUIP_SLOT_BIND: u32 = 0x0009_5650;
+
+/// The bytes at [`FE_EQUIP_SLOT_BIND`], re-read before the site is patched.
+pub const FE_EQUIP_SLOT_BIND_PROLOGUE: [u8; 8] = [0x48, 0x89, 0x5c, 0x24, 0x10, 0x48, 0x89, 0x6c];
+
+/// The element id an equipment slot cell hangs its infusion container on, in `l02_01_In-Game.flo`.
+///
+/// `def 0x0128` child `[2]` and `def 0x012c` child `[2]`, both naming `def 0x0121` -- the same
+/// nine-id container the inventory's cell holds. Recorded because it is the path
+/// `FUN_140097150` resolves before calling [`FE_EQUIP_SLOT_BIND`], and therefore the reason that
+/// bind's first argument is already inside the container.
+pub const FE_EQUIP_SLOT_CONTAINER_ELEMENT: u32 = 0x05f5_c3e2;
+
 /// The cell view's element accessors, built by `FUN_1400b7680` (`0x000b7680`) from the grid cell.
 ///
 /// Every one of these is an id path resolved against the cell's own element, and the offsets are
