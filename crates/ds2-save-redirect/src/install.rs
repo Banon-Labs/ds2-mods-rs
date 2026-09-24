@@ -9,6 +9,7 @@ use std::sync::{Mutex, OnceLock};
 use ds2_hook::{MH_EnableHook, MH_Initialize, MH_STATUS, MhHook};
 
 use crate::LOG_PREFIX;
+use crate::active::active_save_file_name;
 use crate::stage;
 
 /// A log sink, installed by the loader so this crate writes into the same file as everything else.
@@ -39,6 +40,13 @@ static SOURCE: OnceLock<PathBuf> = OnceLock::new();
 /// Where the staged save is written. Set by the loader, which is the thing that knows the game
 /// directory; this crate deliberately does not go looking for it.
 static STAGING_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+/// A folder the whole launch reads and writes its saves in, instead of the game's own.
+///
+/// Set from `[save_redirect] directory` by the loader. Nothing is copied into it and nothing is
+/// copied out: the game builds its container path inside it and reads and writes that file for the
+/// rest of the session, so the save a player autoloaded is the save their progress goes back into.
+static DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
 
 /// The staged directory as UTF-16, resolved on the detour's first call and reused after.
 ///
@@ -94,9 +102,65 @@ pub fn set_source(source: &str, staging_root: PathBuf) -> bool {
     ok
 }
 
-/// Whether a source was armed.
+/// Play out of `directory` for this whole launch. Call before [`install`].
+///
+/// # This is the key that was removed, built the other way round
+///
+/// `[save_redirect] path` named a file, and the only thing it could do with a file was copy it --
+/// into the staging folder, which the next launch rewrote from the same source. So a session
+/// started that way played a duplicate and lost everything done in it, under a help string that
+/// said it had loaded the save. It was deleted rather than fixed, and this is the fix: a directory
+/// is not copied anywhere. The game's own builder is answered with it, the game opens its own
+/// container name inside it, and every write goes to that same file. Nothing here can lose a save
+/// because nothing here writes one.
+///
+/// Refused when the folder is not there, because the alternative is a game showing no characters
+/// with nothing on screen to say why -- DS2 hides the LOAD GAME row when it finds no container, so
+/// "redirected to a folder that does not exist" and "there was never a save" look identical.
+///
+/// The container inside it does not have to exist. An empty writable folder is a legitimate fresh
+/// start, and the game creates the save there the way it would in its own.
+pub fn set_directory(directory: &str) -> bool {
+    let trimmed = directory.trim();
+    if trimmed.is_empty() {
+        log(format_args!(
+            "{LOG_PREFIX} directory-refused reason=empty -- the game's own directory is left alone"
+        ));
+        return false;
+    }
+    let path = PathBuf::from(trimmed);
+    if !path.is_dir() {
+        log(format_args!(
+            "{LOG_PREFIX} directory-refused reason=not-a-directory path={trimmed} -- the game's \
+             own directory is left alone. A redirect to a folder that is not there shows up as a \
+             game with no saves, which is why this refuses instead of arming"
+        ));
+        return false;
+    }
+    let container = path.join(active_save_file_name());
+    if DIRECTORY.set(path).is_err() {
+        log(format_args!(
+            "{LOG_PREFIX} directory-refused reason=already-set path={trimmed}"
+        ));
+        return false;
+    }
+    // Which of the two this is, said before the game boots rather than inferred from an empty
+    // character list afterwards.
+    let holding = if container.is_file() {
+        "holds a container already, so this launch plays it and saves back into it"
+    } else {
+        "holds no container yet, so this launch starts fresh and creates one there"
+    };
+    log(format_args!(
+        "{LOG_PREFIX} directory-armed path={trimmed} -- {holding}. Nothing is copied in either \
+         direction"
+    ));
+    true
+}
+
+/// Whether a source or a directory was armed.
 pub fn armed() -> bool {
-    SOURCE.get().is_some()
+    SOURCE.get().is_some() || DIRECTORY.get().is_some()
 }
 
 /// The directory the game's save-directory builder last produced, redirected or not.
@@ -221,6 +285,26 @@ unsafe fn read_wstring(string: *const c_void) -> String {
 
 /// Stage the configured source for `steam_id`, returning the directory as UTF-16 with a trailing
 /// separator -- which is this function's job, since the caller appends the file name to it.
+/// The folder this launch plays out of, as UTF-16 with a trailing separator.
+///
+/// The handoff wins over the configured directory, and has to: a handoff exists because the player
+/// picked a file in the pause menu one launch ago and is waiting for it, while
+/// `[save_redirect] directory` is a standing default they set once. Answering the default over the
+/// request would silently discard the thing they just asked for.
+fn redirect_directory(steam_id: &str) -> Option<Vec<u16>> {
+    if SOURCE.get().is_some() {
+        return stage_now(steam_id);
+    }
+    let directory = DIRECTORY.get()?;
+    // The caller appends the container name to whatever this leaves behind, so the trailing
+    // separator is this function's job -- the same contract `stage_now` fulfils below.
+    let mut wide: Vec<u16> = directory.as_os_str().encode_wide().collect();
+    if !matches!(wide.last(), Some(&c) if c == u16::from(b'\\') || c == u16::from(b'/')) {
+        wide.push(u16::from(b'\\'));
+    }
+    Some(wide)
+}
+
 fn stage_now(steam_id: &str) -> Option<Vec<u16>> {
     let source = SOURCE.get()?;
     let root = STAGING_ROOT.get()?;
@@ -380,7 +464,7 @@ unsafe extern "system" fn detour_save_dir(out: *mut c_void, steamid: *const u16)
         return;
     };
 
-    let staged = STAGED.get_or_init(|| stage_now(&steam_id));
+    let staged = STAGED.get_or_init(|| redirect_directory(&steam_id));
     let Some(directory) = staged else {
         pass_through("stage-failed");
         return;

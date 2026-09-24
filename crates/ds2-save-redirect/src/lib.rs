@@ -88,12 +88,16 @@ pub const LOG_PREFIX: &str = "ds2-save-redirect:";
 /// it here, pointed the game at this directory, and overwrote the copy on the next launch -- so a
 /// session started that way played a throwaway duplicate and lost everything done in it, under a
 /// help string that said "load the save at WINPATH".
+///
+/// `[save_redirect] directory` is the standing key that replaced it, and [`set_directory`] is why
+/// it is safe where the old one was not: a folder needs no copy, so there is no duplicate to play
+/// and no overwrite to lose. Nothing in that path comes through here.
 pub const STAGING_DIR_NAME: &str = "ds2-save-staging";
 
 pub use active::{active_save_file_name, is_save_container_name};
 pub use install::{
     Outcome, clear_session_directory, install, live_directory, live_steam_id, session_answers,
-    set_logger, set_session_directory, set_source,
+    set_directory, set_logger, set_session_directory, set_source,
 };
 pub use stage::SAVE_FILE_NAME;
 pub use stage::validate_source;
