@@ -7423,6 +7423,78 @@ pub const KATANA_SFX_CTRL_IS_EMPTY: u32 = 0x00a0_6580;
 /// is a matter of taste; the engine chooses at random per throw.
 pub const PRISM_STONE_SFX_IDS: [u32; 7] = [833, 834, 835, 836, 837, 838, 839];
 
+// Registering an effect from bytes. This is the engine's own lazy bundle-member path
+// (`0x140bf7960`) without the BND around it: build an `SfxEffectData`, parse `DLsE` bytes into
+// it, wrap it in an `SfxEffectResourceObject` whose constructor inserts the id into the resource
+// manager's effect table, then drop any cached "no such effect" placeholder for that id. None of
+// these entries is Arxan-redirected. Measured in game 2026-09-25: an edited `f0000833.ffx`
+// registered under a new id spawns live, and the id inside the bytes has to equal the registered
+// id or nothing is built.
+
+/// `(size, align, DLAllocator*) -> void*`. RVA `0x0083_3320`. Calls `allocator->vt[0x50]`.
+pub const KATANA_HEAP_ALLOC: u32 = 0x0083_3320;
+
+/// `(SfxEffectData*, DLAllocator*)`. RVA `0x00c1_2e10`. Constructor of a
+/// [`SFX_EFFECT_DATA_BYTES`] object.
+pub const SFX_EFFECT_DATA_CTOR: u32 = 0x00c1_2e10;
+
+/// `(i32* refcount)`. RVA `0x0083_3650`. The `lock xadd` add-ref, applied at
+/// [`SFX_EFFECT_DATA_REFCOUNT_OFFSET`].
+pub const SFX_REF_ADD: u32 = 0x0083_3650;
+
+/// `(SfxEffectData*, const u8* bytes, usize len, u8 flag) -> u8`. RVA `0x00c1_2ee0`.
+///
+/// Parses `DLsE` bytes through the engine's `FXSerializer` (`0x140f78620`) into the creatable at
+/// [`SFX_EFFECT_DATA_CREATABLE_OFFSET`], destroying any previous one first. Returns 1 on
+/// success. `flag` is the byte at [`KATANA_SFX_SYSTEM_PARSE_FLAG_OFFSET`], as every engine call
+/// passes it.
+pub const SFX_EFFECT_DATA_PARSE: u32 = 0x00c1_2ee0;
+
+/// `(SfxEffectResourceObject*, KatanaSfxSystem*, const wchar_t* name, SfxEffectData*)`.
+/// RVA `0x00c1_00a0`.
+///
+/// Registration happens inside this constructor: it stores the data at `+0x90`, names the
+/// object, and inserts `_wtoi(name + 1)` into the resource manager's effect table. So the name
+/// has to be the bare `f%07d.ffx` basename, never a path.
+pub const SFX_EFFECT_RESOURCE_CTOR: u32 = 0x00c1_00a0;
+
+/// `(ResourceObject*)`. RVA `0x00af_f7a0`. Called after the constructor, as the engine does.
+pub const RESOURCE_OBJECT_START: u32 = 0x00af_f7a0;
+
+/// `(SfxFxResourceManager*, u32 id) -> SfxEffectData*` or null. RVA `0x00bf_1500`.
+pub const SFX_EFFECT_LOOKUP: u32 = 0x00bf_1500;
+
+/// `KatanaSfxSystem -> DLAllocator*`. `+0x08`.
+pub const KATANA_SFX_SYSTEM_ALLOCATOR_OFFSET: usize = 0x08;
+
+/// `KatanaSfxSystem -> u8` passed as [`SFX_EFFECT_DATA_PARSE`]'s last argument. `+0x20`.
+pub const KATANA_SFX_SYSTEM_PARSE_FLAG_OFFSET: usize = 0x20;
+
+/// `KatanaSfxSystem -> SfxFxResourceManager*`. `+0x38`.
+pub const KATANA_SFX_SYSTEM_RESOURCE_MANAGER_OFFSET: usize = 0x38;
+
+/// `KatanaSfxSystem` vtable slot `+0x40`: `(sys, u32 id)`, the effect-cache invalidate.
+///
+/// Drops the FX core's cached creatable for `id` -- including the `FXCreatableEffectInvalid`
+/// placeholder a spawn of an unregistered id leaves behind -- and despawns live instances of it.
+pub const KATANA_SFX_SYSTEM_VT_INVALIDATE: usize = 0x40;
+
+/// Size of an `SfxEffectData`. `0x20`.
+pub const SFX_EFFECT_DATA_BYTES: usize = 0x20;
+
+/// `SfxEffectData -> refcount`. `+0x08`.
+pub const SFX_EFFECT_DATA_REFCOUNT_OFFSET: usize = 0x08;
+
+/// `SfxEffectData -> FXCreatableEffect*`, written by a successful parse. `+0x18`.
+pub const SFX_EFFECT_DATA_CREATABLE_OFFSET: usize = 0x18;
+
+/// Size of an `SfxEffectResourceObject`. `0x98`.
+pub const SFX_EFFECT_RESOURCE_BYTES: usize = 0x98;
+
+/// `ResourceObject` reference counts the engine bumps after construction: `+0x10` and `+0x14`.
+/// Holding both at 1 or more forever is what keeps a DLL-registered effect from being purged.
+pub const RESOURCE_OBJECT_REFCOUNT_OFFSETS: [usize; 2] = [0x10, 0x14];
+
 /// Where [`PRISM_STONE_SFX_IDS`] was read from. RVA `0x010c_7b58`, seven `u32`.
 ///
 /// Recorded so the next reader can re-derive the ids from the image rather than trusting the

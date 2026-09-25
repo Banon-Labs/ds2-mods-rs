@@ -86,3 +86,6 @@ ds2-seamless = { path = "crates/ds2-seamless" }
 # in `.text`, which is what their integrity checks look for. Path dep on the local checkout
 # rather than crates.io so a fix lands without a release.
 dearxan = { path = "../dearxan", default-features = false }
+# Pure-Rust zlib inflate, for reading the game's own effect bundle (`ds2-invasion-path`
+# derives its sparkle-free Prism Stone from `sfx9999.ffxbnd.dcx` at runtime).
+miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }

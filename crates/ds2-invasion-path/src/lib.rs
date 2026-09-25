@@ -143,6 +143,7 @@ pub mod routes;
 
 pub(crate) mod lines;
 pub(crate) mod trail;
+pub mod stone_effect;
 
 #[cfg(windows)]
 pub(crate) mod camera;

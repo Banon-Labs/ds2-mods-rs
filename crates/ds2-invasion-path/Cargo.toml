@@ -39,6 +39,9 @@ ds2-rva.workspace = true
 # of that key table is a drift trap, and the content comparison is what a Proton prefix's
 # one-second mtime resolution requires.
 ds2-hotkey-config.workspace = true
+# Inflates the game's own effect bundle so `stone_effect` can build the sparkle-free Prism Stone
+# from the player's install instead of shipping a copy of game data. Pure Rust, host-testable.
+miniz_oxide.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 ds2-game-base.workspace = true
