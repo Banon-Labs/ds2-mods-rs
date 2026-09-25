@@ -18,6 +18,39 @@ TARGET=x86_64-pc-windows-msvc
 run_host_tests=0
 [[ "${1:-}" == "--host-tests" ]] && run_host_tests=1
 
+echo "== commit messages =="
+# Conventional commits, checked in two places because one is not enough. `.beads/hooks/commit-msg`
+# catches a message as it is written, and catches nothing at all in a checkout where no hooks are
+# installed -- a fresh clone has none until beads or a human wires them up. This catches the branch
+# either way, which is the check that actually gates a push. docs/COMMITS.md is the convention.
+# First in the gate because it costs a second and clippy costs minutes.
+python3 scripts/check-commit-message.py --selftest
+if git rev-parse --verify --quiet origin/main >/dev/null; then
+  commit_base=$(git merge-base origin/main HEAD)
+  python3 scripts/check-commit-message.py --range "$commit_base..HEAD"
+else
+  echo "  no origin/main in this checkout -- the branch's own commits were not checked"
+fi
+
+# The pull request template is not this repo's to shape freely. A global policy guard refuses a PR
+# body that lacks these three headings, spelled exactly, or that runs past 2500 characters -- it
+# refused the one that opened this feature, because the headings here were written from taste
+# instead of read off the guard. A template carrying the wrong headings would hand that same block
+# to everyone who fills it in, so the gate pins it.
+pr_template=.github/pull_request_template.md
+for heading in '## What changed' '## Why' '## Evidence'; do
+  if ! grep -qxF "$heading" "$pr_template"; then
+    echo "  $pr_template is missing the heading '$heading' -- a PR filled from it will be blocked" >&2
+    exit 1
+  fi
+done
+template_size=$(wc -c <"$pr_template")
+if [[ "$template_size" -ge 2500 ]]; then
+  echo "  $pr_template is at or over the 2500-character body cap before anyone fills it in" >&2
+  exit 1
+fi
+echo "  $pr_template: OK"
+
 echo "== rustfmt =="
 # NOT `cargo fmt --all`. `--all` is documented as "format all packages, AND ALSO THEIR LOCAL
 # PATH-BASED DEPENDENCIES", so the moment a crate here depended on `../dearxan` the gate started
