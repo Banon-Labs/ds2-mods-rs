@@ -17,6 +17,22 @@
 //! single `ChrType 7` sitting among 582 map NPCs. A vtable comparison cannot make that error:
 //! either the object is that class or it is not.
 //!
+//! # A `PlayerCtrl` is not the same thing as a person
+//!
+//! The class test is exact and it is not enough, and the paragraph above is where that went
+//! wrong: "everything else in the map is not" is false. Four factories build this class. Two of
+//! them build things nobody is controlling -- a bloodstain replay, and a humanoid NPC -- and both
+//! have a position, so both look exactly like somebody to route to.
+//!
+//! The overlay laid a stone path to two of them in a live run, and the log agreed with itself the
+//! whole time: `players=3 remotes=2 nearest=54m`. Reading the same roster out of the running
+//! process with `scripts/ds2-player-kind.py` ended the argument in one line each --
+//! `name='Npc_c741000'` and `name='Npc_c761000'`.
+//!
+//! So the class test picks the candidates and [`is_person`] decides, on the name the factory
+//! formatted plus the replay clause of the engine's own `0x14016f740`. See [`is_person`] for the
+//! four factories and why the name is the field that separates them.
+//!
 //! # Everything refuses rather than faults
 //!
 //! Every hop is null-checked and every read goes through `ds2-game-base`'s fault-safe readers,
@@ -25,7 +41,7 @@
 //! has gone stale between two reads is to return a shorter roster this frame, not to take the
 //! session down.
 
-use ds2_game_base::mem::{game_rva, safe_read_f32, safe_read_usize};
+use ds2_game_base::mem::{game_rva, safe_read_f32, safe_read_u8, safe_read_u16, safe_read_usize};
 
 /// One other player in the session.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -50,8 +66,15 @@ pub(crate) struct Census {
     pub(crate) characters: usize,
     /// Of those, objects whose vtable is `PlayerCtrl`'s.
     pub(crate) players: usize,
-    /// Of those, ones that are not the local player.
+    /// Of those, ones that are not the local player and that [`is_person`] accepted.
     pub(crate) remotes: usize,
+    /// Of the non-local players, the ones [`is_person`] threw out: humanoid NPCs, bloodstain
+    /// replays, wandering ghosts.
+    ///
+    /// This is the count that explains a quiet overlay in a busy map. `remotes=0 not_people=2` is
+    /// "two things that are not people were standing there", which is a different sentence from
+    /// `remotes=0 not_people=0`, and before this field existed both were printed as `remotes=2`.
+    pub(crate) not_people: usize,
     /// Entries skipped because a read failed or a pointer was null. A non-zero value here is the
     /// difference between "there was nobody" and "the walk gave up part way".
     pub(crate) skipped: usize,
@@ -142,6 +165,108 @@ fn position(character: usize) -> Option<[f32; 3]> {
 pub(crate) fn local_position() -> Option<[f32; 3]> {
     let (player, _, _) = world()?;
     position(player)
+}
+
+/// The prefix the remote-player factory gives somebody who is actually in your session.
+///
+/// Four factories in the image build a `PlayerCtrl`, and each one formats a different name into
+/// it. A live roster, read out of the running game by `scripts/ds2-player-kind.py`, printed three
+/// of them side by side:
+///
+/// ```text
+/// 0x7fffd9599a40  name='Player_000100'   kind=0x01 phantom_param=0x00 team=0x00
+/// 0x7fffd9719e60  name='Npc_c741000'     kind=0x07 phantom_param=0x00 team=0x11
+/// 0x7fffd989a280  name='Npc_c761000'     kind=0x07 phantom_param=0x00 team=0x11
+/// ```
+///
+/// That run is why this test is a positive one. It was first written as "is this a replay", and
+/// the two characters above sailed through it: an NPC's phantom param is `0x00`, so a test that
+/// only knows how to reject recordings calls every humanoid NPC in the map a person. The overlay
+/// laid a stone path to both of them.
+const NETWORK_PLAYER_PREFIX: &str = "NetworkPlayer";
+
+/// Is this character somebody in your session, rather than an NPC or a recording?
+///
+/// `None` means the question could not be answered, which the caller counts as a skip. Refusing is
+/// the conservative direction: an unreadable character is left out of the roster rather than
+/// routed to on the assumption that it is a person.
+///
+/// # Why the name decides it
+///
+/// Because the name is the only field that separates all four cases, and the factory that chose
+/// it is the factory that knew which case it was building:
+///
+/// | factory | name | what it is |
+/// | --- | --- | --- |
+/// | `0x140357920` | `Player_%06u` | the local player |
+/// | `0x1403572e0` | `NetworkPlayer_%06u` | somebody in your session |
+/// | `0x1403572e0` | `GhostPlayer_%06u` | a bloodstain replay or a wandering ghost |
+/// | `0x1403560a0` | `Npc_c%06d` | an NPC -- and it builds `PlayerCtrl` for the humanoid ones |
+///
+/// The fourth row is the one that cost a live run. `0x1403560a0` calls both `CharacterCtrl`'s
+/// constructor (`0x1403114f0`) and `PlayerCtrl`'s (`0x14037ebe0`), picking per NPC, so "is a
+/// `PlayerCtrl`" and "is a player" are simply different questions in this engine.
+///
+/// # The phantom param is still checked
+///
+/// A name that begins with the prefix is not the end of it: `0x14016f740`, which the engine calls
+/// on a character to decide whether it takes `chrNetworkPhantomParamLookup`'s params, also rejects
+/// a character whose [`ds2_rva::PHANTOM_BLOCK_PHANTOM_PARAM_OFFSET`] is one of
+/// [`ds2_rva::REPLAY_PHANTOM_PARAM_IDS`]. Both clauses are here because the engine applies both.
+fn is_person(character: usize) -> Option<bool> {
+    if !name(character)?.starts_with(NETWORK_PLAYER_PREFIX) {
+        return Some(false);
+    }
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
+    let block = non_null(unsafe {
+        safe_read_usize(character + ds2_rva::CHARACTER_CTRL_PHANTOM_BLOCK_OFFSET)?
+    })?;
+    // SAFETY: as above -- a freed phantom block answers None rather than faulting.
+    let phantom_param =
+        unsafe { safe_read_u8(block + ds2_rva::PHANTOM_BLOCK_PHANTOM_PARAM_OFFSET)? };
+    Some(!ds2_rva::REPLAY_PHANTOM_PARAM_IDS.contains(&phantom_param))
+}
+
+/// Longest name this will read. Sixty-four characters is three times the longest the player
+/// factories can format, and the cap exists so a torn length field cannot turn one log line into
+/// a megabyte of stack-scraped text.
+const NAME_LIMIT: usize = 64;
+
+/// The name the factory gave this character.
+///
+/// [`is_person`] branches on it and the roster line prints it, so a rejected character can be
+/// named in the line that rejects it -- `Npc_c741000` says what the count `not_people=2` cannot.
+///
+/// [`ds2_rva::CHARACTER_CTRL_NAME_OFFSET`] is an MSVC `std::wstring`, so the characters are
+/// either inline or behind the pointer in the same slot, and which one is decided by the capacity
+/// exactly as every reader in the image decides it.
+fn name(character: usize) -> Option<String> {
+    let string = character + ds2_rva::CHARACTER_CTRL_NAME_OFFSET;
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
+    let length = unsafe { safe_read_usize(string + ds2_rva::WSTRING_LEN_OFFSET)? };
+    // SAFETY: as above.
+    let capacity = unsafe { safe_read_usize(string + ds2_rva::WSTRING_CAPACITY_OFFSET)? };
+    // A length past the capacity is a torn read of two fields the game was writing, not a name.
+    if length == 0 || length > capacity {
+        return None;
+    }
+    let characters = if capacity > ds2_rva::WSTRING_SSO_MAX {
+        // SAFETY: as above -- and the pointer is null-checked before it is read through.
+        non_null(unsafe { safe_read_usize(string)? })?
+    } else {
+        string
+    };
+    let mut out = String::new();
+    for index in 0..length.min(NAME_LIMIT) {
+        // SAFETY: as above -- within the length the string declared, and fault-safe beyond it.
+        let unit = unsafe { safe_read_u16(characters + index * 2)? };
+        out.push(char::from_u32(u32::from(unit)).unwrap_or('?'));
+    }
+    Some(out)
 }
 
 /// Most roster entries one pass will walk.
@@ -240,6 +365,16 @@ pub(crate) fn remotes(max: usize) -> Option<(Vec<Player>, Census)> {
         }
         census.players += 1;
         if ctrl == local {
+            return;
+        }
+        // The class says this is a player. It does not say this is a person -- a humanoid NPC and
+        // a bloodstain replay are both `PlayerCtrl`. See `is_person` for the four factories.
+        let Some(person) = is_person(ctrl) else {
+            census.skipped += 1;
+            return;
+        };
+        if !person {
+            census.not_people += 1;
             return;
         }
         census.remotes += 1;
@@ -350,6 +485,52 @@ pub(crate) fn self_check_target(latched: Option<usize>) -> Option<Player> {
     // loading. That is fixed at the moment of the FIRST pick instead: see `ROSTER_SETTLE_FRAMES`
     // in `lib.rs`.
     held.or(best)
+}
+
+/// Every non-local `PlayerCtrl` [`remotes`] threw out, named, as one line.
+///
+/// # Why this exists
+///
+/// The user reported the overlay routing to something while they were alone in the map, and the
+/// only evidence this crate could offer was `players=2 remotes=1 nearest=33m` -- three numbers
+/// that agree with "an invader is here" and with "a bloodstain replay walked past", and separate
+/// them not at all. A count cannot be checked against what is on the screen. A name can, and when
+/// the names were finally read the answer was neither: `Npc_c741000` and `Npc_c761000`.
+///
+/// Walks the roster a second time rather than carrying names out of [`remotes`], because
+/// [`remotes`] runs on every frame and this runs only when the counts change.
+pub(crate) fn describe_not_people(limit: usize) -> String {
+    let Some((local, begin, end)) = world() else {
+        return "no world".to_string();
+    };
+    let Ok(player_vtable) = game_rva(ds2_rva::PLAYER_CTRL_VTABLE) else {
+        return "no PlayerCtrl vtable".to_string();
+    };
+    let local_position = position(local);
+    let mut found: Vec<String> = Vec::new();
+    walk_roster(begin, end, |entry| {
+        let Entry::Object { ctrl, vtable } = entry else {
+            return;
+        };
+        if vtable != player_vtable || ctrl == local || is_person(ctrl) != Some(false) {
+            return;
+        }
+        let distance = local_position
+            .zip(position(ctrl))
+            .map(|(here, there)| crate::geometry::length(crate::geometry::sub(there, here)));
+        found.push(format!(
+            "{} at 0x{:012x}{}",
+            name(ctrl).unwrap_or_else(|| "<unnamed>".to_string()),
+            ctrl,
+            distance.map_or_else(String::new, |metres| format!(" {metres:.1}m"))
+        ));
+    });
+    let total = found.len();
+    found.truncate(limit);
+    if total > limit {
+        found.push(format!("and {} more", total - limit));
+    }
+    found.join("; ")
 }
 
 /// Every `CharacterCtrl` in the roster, nearest first, as one line.

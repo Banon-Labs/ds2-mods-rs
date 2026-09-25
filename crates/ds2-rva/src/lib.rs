@@ -6325,6 +6325,59 @@ pub const CHARACTER_CTRL_VTABLE: u32 = 0x010d_f218;
 /// rediscovering it and assuming it is the position.
 pub const CHARACTER_CTRL_POSITION_OFFSET: usize = 0x90;
 
+/// `CharacterCtrl -> phantom block`. `+0xB0` -- a `0x110`-byte object the character owns.
+///
+/// Allocated and stored by `CharacterCtrl::assignPhantomProperties` (`0x140312dd0`), the one init
+/// every character in the roster runs: `heapAllocator(0x110, 0x10, ...)` and then
+/// `this->field_0xb0 = ...`. One of its bytes decides whether a `PlayerCtrl` is a person or a
+/// recording -- see [`PHANTOM_BLOCK_PHANTOM_PARAM_OFFSET`].
+pub const CHARACTER_CTRL_PHANTOM_BLOCK_OFFSET: usize = 0xB0;
+
+/// `phantom block -> phantom param id`. `+0x3C`, one byte.
+///
+/// Written by `assignPhantomProperties` out of its params struct's `+0xAE`, and read straight
+/// back by `0x14016f740`, which is the engine's own answer to *is this character a replay rather
+/// than a live player*:
+///
+/// ```text
+/// kind = chr[0x54]                            ; the spawn kind, params +0xAD
+/// if session_kind_table[kind * 5 + 1] == 2    -> replay
+/// if (u8)(chr[0xb0][0x3c] - 0x12) < 2         -> replay
+/// ```
+///
+/// `assignPhantomProperties` calls that function on itself to decide whether the character takes
+/// `chrNetworkPhantomParamLookup`'s params instead of the ordinary ones. So this is not a
+/// heuristic layered over the engine; it is the test the engine already applies to this byte.
+pub const PHANTOM_BLOCK_PHANTOM_PARAM_OFFSET: usize = 0x3C;
+
+/// The two phantom param ids `0x14016f740` calls a replay. `0x12` and `0x13`.
+///
+/// They come from one spawner, `0x1401a0d20`, which sets the byte to
+/// `(*(param_1 + 0x29) != 0) + 0x12` and then plays a recording into the character it has just
+/// built: a `0xD0`-byte blob decoded through `0x140346c10`, a `0x18`-byte one through
+/// `0x140349660`, and a state machine that expires on a duration read out of the same record.
+/// That is a bloodstain replay or a wandering ghost, not somebody in your session.
+///
+/// The remote-player factory `0x1403572e0` tests the same two values on the same byte before it
+/// is stored -- `(byte)(*(param_3 + 0x2a) - 0x12) < 2` -- which is how the pair was read off.
+pub const REPLAY_PHANTOM_PARAM_IDS: [u8; 2] = [0x12, 0x13];
+
+/// `CharacterCtrl -> name`. `+0x118`, an MSVC `std::wstring`.
+///
+/// `assignPhantomProperties` assigns it from the params struct's own string with
+/// `FUN_14003dc00(&this->field249_0x118, ptr, len)`, and both sides use the stock layout:
+/// characters -- or a pointer to them -- at `+0x00`, length at `+0x10`, capacity at `+0x18`.
+///
+/// The name is the factory's own label for what it built, and the three it can be are the ones
+/// tabulated on [`PLAYER_CTRL_VTABLE`]: `Player_%06u`, `NetworkPlayer_%06u`, `GhostPlayer_%06u`.
+/// Every one of those is longer than [`WSTRING_SSO_MAX`], so a player's name is always the
+/// out-of-line case.
+///
+/// The layout constants are the ones the save path already established --
+/// [`WSTRING_LEN_OFFSET`], [`WSTRING_CAPACITY_OFFSET`], [`WSTRING_SSO_MAX`] -- read there out of
+/// the game's own string helpers. This is the same `std::wstring` in the same CRT.
+pub const CHARACTER_CTRL_NAME_OFFSET: usize = 0x118;
+
 // ---------------------------------------------------------------------------------------------
 // THE NAVIGATION STACK.
 //

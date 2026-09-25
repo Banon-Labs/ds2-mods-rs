@@ -585,6 +585,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "ds2-launcher"
+version = "0.1.0"
+dependencies = [
+ "ds2-hotkey-config",
+ "ds2-seamless",
+ "windows",
+]
+
+[[package]]
 name = "ds2-loader"
 version = "0.1.0"
 dependencies = [
