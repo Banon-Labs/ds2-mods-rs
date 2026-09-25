@@ -5282,6 +5282,24 @@ pub const ITEM_ENTRY_FLAGS_OFFSET: usize = 0x1F;
 /// The bit in [`ITEM_ENTRY_FLAGS_OFFSET`] meaning "equipped".
 pub const ITEM_ENTRY_FLAG_EQUIPPED: u8 = 0x02;
 
+/// The bit in [`ITEM_ENTRY_FLAGS_OFFSET`] on entries the inventory screen does not draw.
+///
+/// Named for what was measured rather than for where the item is. Storing something sets it, so
+/// "in the box" is the obvious reading and is probably right -- but the player who reproduced this
+/// could not find the item in the box afterwards either, so this constant claims only the part
+/// that was observed: an entry carrying this bit is not in the pack.
+///
+/// Measured 2026-09-24 in the running game, three ways. A character with the Ice Rapier stored read
+/// `flags=0x04`, went to `0x06` when a build import equipped it, and fell back to `0x04` when it
+/// was taken off, at which point the pack did not list it. The same import on a character that was
+/// granted a fresh copy read `0x00`, `0x02` and `0x00` across those three moments and the sword
+/// stayed in the pack. And in the first character's container all 1073 weapon entries carried this
+/// bit while the player reported no weapons in their pack at all.
+///
+/// Then reproduced on demand: store the rapier, import the build again, take it off, and it is
+/// gone from the pack.
+pub const ITEM_ENTRY_FLAG_NOT_IN_PACK: u8 = 0x04;
+
 /// `ItemEntry + 0x20`, `u16`. How many are in the stack.
 pub const ITEM_ENTRY_QUANTITY_OFFSET: usize = 0x20;
 

@@ -710,19 +710,61 @@ fn bag_list() -> Result<usize, GameError> {
     Ok(at)
 }
 
+/// Resolve a handle the way the game does, or `None` if the game does not know it.
+///
+/// The liveness oracle, and it has to be the game's own function. The entry array is backing
+/// storage: freeing an entry unlinks it from the sub-inventory that owns it, and the slot keeps
+/// whatever bytes it had, item id included. Nothing about the slot itself distinguishes the two.
+///
+/// [`ds2_rva::ITEM_INVENTORY_ENTRY_BY_HANDLE`] does distinguish them. It splits the handle by kind
+/// and asks the owning sub-inventory -- `[inventory+0x10]` or `[inventory+0x18]`, the same pair
+/// [`ds2_rva::ITEM_SET_EQUIP`]'s body picks between -- through that object's own virtual lookup,
+/// answering null for a handle nothing holds.
+///
+/// # Safety
+///
+/// Candidates passed over because the copy found was not in the pack.
+///
+/// A check that cannot report itself is one nobody can tell ran. This bug survived a whole session
+/// of investigation because a stored copy equips exactly like a carried one and says nothing until
+/// the player takes the item off, so a run that skipped stored copies and a run that had none to
+/// skip would otherwise produce the same log.
+static NOT_IN_PACK_SKIPPED: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+/// How many stored copies the scan has passed over. See [`NOT_IN_PACK_SKIPPED`].
+pub(crate) fn not_in_pack_skipped() -> usize {
+    NOT_IN_PACK_SKIPPED.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 /// The inventory entry for an item id, preferring one that is not already worn.
 ///
 /// # There is no native "item id -> handle" lookup, so this scans
 ///
-/// [`ds2_rva::ITEM_SET_EQUIP`] names an item by a POINTER TO ITS INVENTORY ENTRY, not by a param id
-/// -- the same shape of trap `er-build-import` hit, where the equip took an inventory index that
-/// only exists after the grant. DS2 has no function answering "which entry holds item N", so the
-/// entry array is walked. 3840 entries of 0x28 bytes is a 153KB scan, once per item, on a frame
-/// where the player has just pressed a menu row.
+/// [`ds2_rva::ITEM_SET_EQUIP`] names an item by a pointer to its inventory entry rather than by a
+/// param id -- the same shape of trap `er-build-import` hit, where the equip took an inventory
+/// index that only exists after the grant. DS2 has no function answering "which entry holds item
+/// N", so the entry array is walked, once per item, on the frame the player pressed a menu row.
 ///
-/// **It prefers an UNWORN copy.** A build naming the same item twice, or a re-run over a character
+/// # A copy you are not carrying is not a copy, and that cost a sword
+///
+/// One entry array holds the pack and whatever the player has stored, separated by
+/// [`ds2_rva::ITEM_ENTRY_FLAG_NOT_IN_PACK`], and this scan used to ignore that bit entirely. So a
+/// build naming an item the player had put away resolved to the stored copy -- and every step
+/// after that succeeded, which is what made it invisible. The equip reads only the handle and the
+/// id out of whatever it is handed, so a stored entry equips exactly like a carried one and the
+/// weapon appears in the player's hands. Take it off and the bit is still set: it goes back to
+/// wherever it was, and the pack that never held it does not list it.
+///
+/// Reported and then reproduced on demand 2026-09-24 -- store the rapier, import the build again,
+/// take it off, and it is gone.
+///
+/// So a stored copy is not a candidate. `already_held` then answers false for it, the grant runs,
+/// and the player is given a copy they are actually carrying.
+///
+/// **It prefers an unworn copy.** A build naming the same item twice, or a re-run over a character
 /// that already wears it, would otherwise resolve both positions to the one entry -- and since the
-/// equip is a MOVE, filling the second slot would strip the first.
+/// equip is a move, filling the second slot would strip the first.
 fn entry_for_item(bag: usize, item_id: i32) -> Option<usize> {
     let base = bag + ds2_rva::ITEM_ENTRY_ARRAY_OFFSET;
     let mut spare: Option<usize> = None;
@@ -740,6 +782,15 @@ fn entry_for_item(bag: usize, item_id: i32) -> Option<usize> {
         // SAFETY: as above.
         let flags =
             unsafe { ds2_game_base::mem::safe_read_u8(entry + ds2_rva::ITEM_ENTRY_FLAGS_OFFSET) };
+        // A copy you put away is not a copy in your hands -- and equipping one is what lost the
+        // sword. Both live in this array, so the scan sees both; the equip does not care which,
+        // because it reads nothing but the id and the handle. Take the stored copy and the player
+        // wears an item their pack never held, and the moment they take it off it returns to
+        // wherever it was, which is not where they are looking.
+        if flags.is_some_and(|flags| flags & ds2_rva::ITEM_ENTRY_FLAG_NOT_IN_PACK != 0) {
+            NOT_IN_PACK_SKIPPED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            continue;
+        }
         if flags.is_some_and(|flags| flags & ds2_rva::ITEM_ENTRY_FLAG_EQUIPPED != 0) {
             // THE COPY ALREADY BEING WORN WINS. This preference used to be the other way round, to
             // stop two slots resolving to one entry -- and the cost of that was the import taking
@@ -758,6 +809,11 @@ fn entry_for_item(bag: usize, item_id: i32) -> Option<usize> {
 /// Used to decide whether to grant it. **A build asking for a sword the player already owns is not
 /// asking for a second sword** -- and the second one arrives without their reinforcement or their
 /// infusion, so granting it and then equipping it is strictly worse than leaving them alone.
+///
+/// Held means carrying it. A copy the player has stored does not count, which is the other half of
+/// the bug [`entry_for_item`] describes and the half that does the damage: answering true here
+/// skips the grant, so the equip that follows has nothing in the pack to find and takes the stored
+/// copy instead.
 pub(crate) fn already_held(item_id: i32) -> bool {
     bag_list().is_ok_and(|bag| entry_for_item(bag, item_id).is_some())
 }

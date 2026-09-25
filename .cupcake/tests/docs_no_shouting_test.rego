@@ -178,10 +178,25 @@ test_allow_a_removed_span_does_not_weld_two_runs if {
 
 # --- allow: text outside the documentation scope --------------------------------------------------
 
-# An ordinary `//` comment is a note beside the code, not prose anybody skims. Same cut
-# docs_no_size_metrics makes.
-test_allow_shouting_in_an_ordinary_comment if {
-	not denied(edit_event("crates/ds2-loader/src/lib.rs", "// THE GAME IS INVISIBLE TO pgrep"))
+# A plain `//` comment used to be exempt, on the reasoning that a note beside the code is not prose
+# anybody skims. The user found the hole in a merged diff on 2026-09-24 and it is closed: this repo
+# keeps its real explanations in exactly those comments, so exempting them gave the habit the one
+# place the rule could not see.
+test_deny_shouting_in_an_ordinary_comment if {
+	denied(edit_event("crates/ds2-loader/src/lib.rs", "// THE GAME IS INVISIBLE TO pgrep"))
+}
+
+# The line that exposed the hole, kept verbatim so a future widening of the exemption fails here.
+test_deny_the_comment_that_found_the_hole if {
+	denied(edit_event(
+		"crates/ds2-build-import/src/game.rs",
+		"        // A COPY YOU PUT AWAY IS NOT A COPY IN YOUR HANDS, and equipping one is what lost the",
+	))
+}
+
+# Indentation does not buy an exemption either: the match is anchored past leading whitespace.
+test_deny_shouting_in_an_indented_comment if {
+	denied(edit_event("crates/ds2-loader/src/lib.rs", "\t\t// THE FIELD IS OPENED HERE, not on the worker"))
 }
 
 # A log line the code emits is a measurement being reported, not documentation.

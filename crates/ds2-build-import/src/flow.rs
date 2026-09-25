@@ -592,6 +592,14 @@ fn equip_everything(build: &ds2_build_import_core::Build) {
         planned.len(),
         build.id
     ));
+    // Printed whether or not it is zero. A stored copy equips exactly like a carried one and says
+    // nothing until the player takes the item off, so this is the difference between "there were
+    // none to skip" and "nobody looked".
+    log_line(format_args!(
+        "{LOG_PREFIX} stored copies passed over: {} -- the pack and what you have put away share \
+         one entry array, and a build wants the item in your hands",
+        crate::game::not_in_pack_skipped()
+    ));
     if over_budget > 0 {
         log_line(format_args!(
             "{LOG_PREFIX} {over_budget} spell(s) left unattuned -- attunement gives {capacity} \

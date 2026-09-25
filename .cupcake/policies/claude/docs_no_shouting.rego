@@ -49,10 +49,14 @@ import rego.v1
 # removed before any of this runs, which is where a log line, a menu string or a register dump
 # belongs anyway.
 #
-# Scope: documentation text only, and exactly the scope docs_no_size_metrics established --
-# whole-file for Markdown, and Rust `//!` / `///` doc comments. An ordinary `//` comment beside the
-# code, a string literal and a log line the code emits are all untouched, because those are not
-# prose anybody skims.
+# Scope: prose a human reads. Whole-file for Markdown, and every Rust comment -- `//!`, `///` and
+# plain `//` alike. A string literal and a log line the code emits are untouched, because those are
+# output rather than explanation.
+#
+# This is wider than docs_no_size_metrics, deliberately. That rule exempts `//` so an ABI size can
+# sit beside the code depending on it, which is a fact a reader needs at that spot. Shouting is
+# never such a fact, and the `//` beside the code is where this repo keeps its real explanations --
+# so exempting it left the habit its favourite hiding place. Found there on 2026-09-24.
 
 tool_input := object.get(input, "tool_input", {})
 
@@ -149,11 +153,22 @@ doc_lines contains line if {
 	some line in unfenced_lines
 }
 
-# In Rust only the doc comments are, the same cut docs_no_size_metrics makes.
+# In Rust, every comment. This used to read `^\s*//[!/]` -- doc comments only, the cut
+# docs_no_size_metrics makes -- and that exemption was found by the user in a merged diff on
+# 2026-09-24, on a line this rule had waved through:
+#
+#   // A COPY YOU PUT AWAY IS NOT A COPY IN YOUR HANDS, and equipping one is what lost the sword.
+#
+# The reasoning for the old cut was that a `//` beside the code is not prose anybody skims. It does
+# not survive contact with this repo, where the load-bearing explanations live in exactly those
+# comments -- and the shouting habit lives there with them, because it was the one place the rule
+# could not see. A size metric in a `//` is still exempt and should be: that exemption exists so an
+# ABI size can sit beside the code that depends on it, which is a fact a reader needs. Volume is
+# never a fact a reader needs.
 doc_lines contains line if {
 	is_rust
 	some line in unfenced_lines
-	regex.match(`^\s*//[!/]`, line)
+	regex.match(`^\s*//`, line)
 }
 
 # What is left after the inline spans go: backticked code first, then quoted text. A quotation is
@@ -194,7 +209,7 @@ deny contains decision if {
 			"🧁 Cupcake blocked documentation that shouts (", kinds, ") in ", file_path,
 			"\n\n  ", examples,
 			"\n\nWhy: capitals used as emphasis are emphasis by volume, and a reader skims them exactly as they skim a wall of text -- nothing in a shouted phrase says which part of it is the point, so they stop looking for one, and the sentence it was meant to rescue goes down with it. The user's words, 2026-09-23: writing like this \"distracts from the substance of the message, which is buried by font style\".",
-			"\n\nHappy path: put the emphasis in the sentence's structure instead of in its capitalisation. Lead with the thing that matters, or give it its own short paragraph, and let the position carry the weight. \"THE FIELD IS OPENED HERE, not on the worker\" becomes \"The field is opened here -- not on the worker.\" A heading that needs to stand out is a heading: use one. A name, a menu string, a register or a log line belongs in backticks or quotation marks, and this rule does not read either of those, nor plain `//` comments, nor code.",
+			"\n\nHappy path: put the emphasis in the sentence's structure instead of in its capitalisation. Lead with the thing that matters, or give it its own short paragraph, and let the position carry the weight. \"THE FIELD IS OPENED HERE, not on the worker\" becomes \"The field is opened here -- not on the worker.\" A heading that needs to stand out is a heading: use one. A name, a menu string, a register or a log line belongs in backticks or quotation marks, and this rule does not read either of those, nor string literals, nor code. Plain `//` comments beside the code are read too -- exempting them was where the habit hid.",
 		]),
 	}
 }
