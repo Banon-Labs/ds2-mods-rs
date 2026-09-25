@@ -106,10 +106,28 @@ PUSH_MAIN = " ".join(["git", "push", "origin", "main"])
 HOOKS_PATH = "core.hooks" + "Path"
 DEV_NULL = "/dev/" + "null"
 
+def _proven_frida_log() -> str:
+    """A Frida evidence log that says PROVEN, outside the repo and outside the user's own.
+
+    These cases are about the shape the engine delivers a command in, and some of them write a
+    `crates/**/*.rs` path. Without this, DS2-MODS-NO-RUST-EDIT-WITHOUT-FRIDA-PROOF (2026-09-25)
+    refuses them for its own reason, and the verdict stops being about delivered shape at all.
+    """
+    import json as _json
+    import tempfile as _tempfile
+    import time as _time
+
+    path = Path(_tempfile.mkdtemp(prefix="delivered-shape-frida-")) / "frida-evidence.jsonl"
+    path.write_text(_json.dumps({"at": int(_time.time()) + 86400, "agent": "x.js", "pid": 1,
+                                 "messages": 3, "seconds": 1.0}) + "\n", encoding="utf-8")
+    return str(path)
+
+
 BASE_ENV = {
     "CUPCAKE_CURRENT_BRANCH_OVERRIDE": "feature/delivered-shape",
     "CUPCAKE_WORKTREE_BRANCHES_OVERRIDE": "",
     "CUPCAKE_ORIGIN_MAIN_OIDS_OVERRIDE": "a" * 40 + " " + "a" * 40,
+    "DS2_FRIDA_EVIDENCE_LOG": _proven_frida_log(),
 }
 
 

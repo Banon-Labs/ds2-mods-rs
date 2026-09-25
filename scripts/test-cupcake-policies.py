@@ -26,6 +26,8 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -85,10 +87,31 @@ class PolicyCase:
     # checkout's HEAD or the network.
     pr_stamp_head: str = f"{STAMP_SHA} {STAMP_COMMIT_EPOCH}"
     pr_stamp_view: str = "{}"
+    # What scripts/ds2-frida-evidence.py --check answers, via DS2_FRIDA_EVIDENCE_LOG. `proven` by
+    # default so a crate edit in a case about some other guard is not refused by the Frida gate
+    # instead; `none` for the cases that are about the Frida gate.
+    frida_evidence: str = "proven"
     # Evaluate the project policies alone, with no global config found. Needed where a global guard
     # refuses the command outright (`gh pr ready` is always refused by the global draft guard), so
     # that an allow here is attributable to the project rule and a deny to its own reason text.
     project_only: bool = False
+
+
+_FRIDA_DIR = Path(tempfile.mkdtemp(prefix="cupcake-frida-evidence-"))
+
+
+def frida_evidence_log(kind: str) -> Path:
+    """A Frida evidence log in the state `kind` names, outside the repo and outside the user's own.
+
+    `proven` is a session that attached and got messages back, dated a day in the future so no
+    commit in this checkout can have spent it. `none` is a path with nothing at it.
+    """
+    path = _FRIDA_DIR / f"{kind}.jsonl"
+    if kind == "proven" and not path.exists():
+        row = {"at": int(time.time()) + 86400, "agent": "scripts/frida/x.js", "pid": 1,
+               "messages": 3, "seconds": 1.0}
+        path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    return path
 
 
 def pr_view(body_fixture: str, head: str = STAMP_SHA) -> str:
@@ -129,6 +152,7 @@ def run_case(case: PolicyCase) -> None:
         "CUPCAKE_PR_STAMP_HEAD_OVERRIDE": case.pr_stamp_head,
         "CUPCAKE_PR_STAMP_VIEW_OVERRIDE": case.pr_stamp_view,
         "CUPCAKE_PR_STAMP_NOW_OVERRIDE": str(STAMP_NOW_EPOCH),
+        "DS2_FRIDA_EVIDENCE_LOG": str(frida_evidence_log(case.frida_evidence)),
     }
     if case.project_only:
         # cupcake discovers the global root at ${XDG_CONFIG_HOME:-$HOME/.config}/cupcake; an empty
@@ -319,6 +343,83 @@ def cases() -> list[PolicyCase]:
             True,
             "git status --short --branch && git log --oneline -3",
             runtime_evidence=RUNTIME_NEVER_RAN,
+        ),
+        # The 2026-09-25 miss: commit and push in one command. The signal now reports `pending=1`
+        # for it (scripts/test-runtime-evidence-signal.py proves that half); this pins that the
+        # engine refuses it even when every other runtime field is as good as it gets.
+        PolicyCase(
+            "deny-commit-and-push-of-game-code-in-one-command",
+            False,
+            "git commit -qam 'chore(scripts): x' && git push -u origin launcher-drop-flag",
+            runtime_evidence=(
+                "RUNTIME|game_code=1|attached=1|fresh=1|dll_match=1|pending=1|head=1758600000|log=1758600900"
+            ),
+            expected_text="commits and pushes in one go",
+        ),
+        # --- gh_pr_title_conventional (ported from er-mods-rs 2026-09-25) ------------------
+        # `gh pr edit`, because `gh pr create` is also judged by the Run-Stamp and global guards
+        # and a verdict here has to be attributable to this one.
+        PolicyCase(
+            "deny-pr-title-that-is-not-a-commit-header",
+            False,
+            'gh pr edit 91 --title "Lock the added rows in multiplayer"',
+            expected_text="not a commit header of this repo's shape",
+        ),
+        PolicyCase(
+            "allow-pr-title-that-is-a-commit-header",
+            True,
+            'gh pr edit 91 --title "feat(ds2-menu-row): added rows are locked in multiplayer"',
+        ),
+        # --- teardown_must_relaunch (ported from er-mods-rs 2026-09-25) --------------------
+        PolicyCase(
+            "deny-teardown-stapled-to-a-build",
+            False,
+            "python3 scripts/ds2-teardown.py > /dev/null 2>&1; cargo build -p ds2-loader",
+            expected_text="teardown that does not relaunch",
+        ),
+        PolicyCase("allow-teardown-alone", True, "python3 scripts/ds2-teardown.py"),
+        PolicyCase("allow-teardown-status", True, "python3 scripts/ds2-teardown.py --status"),
+        # --- no_rust_edit_without_frida_proof (ported from er-mods-rs 2026-09-25) ----------
+        PolicyCase(
+            "deny-crate-edit-with-no-frida-measurement",
+            False,
+            tool_name="Edit",
+            tool_input={
+                "file_path": str(REPO_ROOT / "crates/ds2-menu-row/src/lib.rs"),
+                "old_string": "a",
+                "new_string": "b",
+            },
+            frida_evidence="none",
+            expected_text="no Frida measurement behind it",
+        ),
+        PolicyCase(
+            "allow-crate-edit-after-a-frida-measurement",
+            True,
+            tool_name="Edit",
+            tool_input={
+                "file_path": str(REPO_ROOT / "crates/ds2-menu-row/src/lib.rs"),
+                "old_string": "a",
+                "new_string": "b",
+            },
+            frida_evidence="proven",
+        ),
+        PolicyCase(
+            "deny-bash-sed-into-a-crate-with-no-frida-measurement",
+            False,
+            "sed -i 's/a/b/' crates/ds2-menu-row/src/lib.rs",
+            frida_evidence="none",
+            expected_text="Bash spelling of the same edit",
+        ),
+        PolicyCase(
+            "allow-script-edit-with-no-frida-measurement",
+            True,
+            tool_name="Edit",
+            tool_input={
+                "file_path": str(REPO_ROOT / "scripts/ds2-flo.py"),
+                "old_string": "a",
+                "new_string": "b",
+            },
+            frida_evidence="none",
         ),
         # --- pr_requires_run_stamp -------------------------------------------------------------
         # User directive 2026-09-25: no PR drafted, and none marked ready, without a Run-Stamp line
@@ -617,6 +718,7 @@ def main() -> int:
     run_signal_contract_checks()
 
     cases_to_run = cases()
+    frida_evidence_log("proven")  # written once, before the workers race to it
 
     max_workers = min(8, max(1, len(cases_to_run)))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:

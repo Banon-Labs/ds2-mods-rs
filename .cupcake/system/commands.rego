@@ -585,3 +585,201 @@ unparsed_shell_payload(command) if {
 	regex.match(shell_wrapper_anywhere_pattern, command)
 }
 
+# Everything from here down was ported from er-mods-rs's copy of this file on 2026-09-25, unchanged,
+# for the two guards that read it: no_rust_edit_without_frida_proof and teardown_must_relaunch. It is
+# additive -- nothing above this line calls it -- and the bd ids below are that repo's.
+
+# ---------------------------------------------------------------------------
+# COMMAND SLOT, AS TOKENS (2026-09-22, bd er-effects-rs-ak3q / er-effects-rs-if5l)
+#
+# `has_command_verb` above answers the same question with a regex, and it is the
+# right tool when the program name is a fixed word. It is the wrong one when the
+# name is a PATH the caller has to recognise by suffix -- `scripts/er-teardown.py`,
+# `./scripts/check.sh`, `/usr/bin/python3` -- because the pattern then has to carry
+# the path shape as well as the anchor, and this package's own header records what
+# a regex costs here: on 2026-09-14 one crashed every policy at once.
+#
+# So the same decision is available as token arithmetic. `no_whole_check_sh` wrote
+# it first and the next two policies that needed it were about to transcribe it,
+# which is the divergence bug the segmenter note above already warns about. It
+# lives here now and that file reads it like everyone else.
+#
+# THE INPUT CONTRACT is the one shell_segments states: pass text that has been
+# through scan_text / executed_texts, never the raw command. Those blank the
+# anchors inside quoted spans, which is what makes a separator in a commit message
+# or a `bd remember` body stop looking like a separator.
+
+# A word that cannot be the separator it looks like, because the anchors inside
+# quoted spans are already neutralised by the time this splits. Kept as a distinct
+# token rather than collapsed to a space so command position survives the split.
+command_slot_separator := "__cupcake_command_slot_sep__"
+
+# Spaces either side, so a separator written tight against its neighbours
+# (`a;b`, `x&&y`) still splits into three words rather than one.
+command_slot_marker := " __cupcake_command_slot_sep__ "
+
+# PUBLIC. One executed text as words, with every command separator standing as a
+# word of its own.
+command_slot_words(text) := [word |
+	marked := replace(
+		replace(
+			replace(replace(text, ";", command_slot_marker), "&", command_slot_marker),
+			"|", command_slot_marker,
+		),
+		"(", command_slot_marker,
+	)
+	some word in split(marked, " ")
+	word != ""
+]
+
+# Words that may stand between a command slot and the thing it runs without the
+# thing stopping being a command: the shells, the exec wrappers, their flags and
+# numeric arguments, and leading `VAR=value` assignments.
+#
+# The set is closed on purpose and short. Anything outside it -- `git`, `cat`,
+# `python3`, `bd` -- means the words after it are that command's OPERANDS, which
+# is the whole of how a commit message naming a guarded script stays allowed.
+command_slot_wrapper(word) if endswith(word, "bash")
+
+command_slot_wrapper(word) if endswith(word, "sh")
+
+command_slot_wrapper(word) if endswith(word, "zsh")
+
+command_slot_wrapper(word) if endswith(word, "env")
+
+command_slot_wrapper("command")
+
+command_slot_wrapper("timeout")
+
+command_slot_wrapper("nice")
+
+command_slot_wrapper("nohup")
+
+command_slot_wrapper("setsid")
+
+command_slot_wrapper("stdbuf")
+
+command_slot_wrapper("exec")
+
+command_slot_wrapper("sudo")
+
+command_slot_wrapper("uv")
+
+# Shell keywords that stand in front of a command without being one. The same three are
+# already in `command_position_prefix_pattern` above, and the loop body is where they
+# matter: `for c in ...; do sed -i ... crates/$c/src/config.rs; done` splits into a
+# statement whose first word is `do`, and reading `do` as the program hides the `sed`
+# behind it. That exact loop rewrote four crate sources past the Frida gate on 2026-09-21
+# (bd er-effects-rs-wuij).
+command_slot_wrapper(word) if word in {"do", "then", "else"}
+
+# Interpreters stand aside the same way shells do. The program a shell runs for
+# `python3 scripts/er-teardown.py` really is `python3`, but the thing every guard
+# in this rulebook needs to recognise is the SCRIPT it was handed -- no policy
+# has ever cared that the interpreter was involved. `startswith` carries the
+# versioned spellings (`python3.12`) and the `/`-form carries the absolute ones
+# (`/usr/bin/python3`).
+command_slot_wrapper(word) if startswith(word, "python")
+
+command_slot_wrapper(word) if contains(word, "/python")
+
+command_slot_wrapper(word) if word in {"perl", "ruby", "node", "uvx", "pwsh"}
+
+command_slot_wrapper(word) if startswith(word, "-")
+
+# `timeout 30`, `nice -n 5`. Spelled as a digit test rather than `regex.match`
+# on `^[0-9]+$`: the header of this package records a regex in a rule crashing
+# every policy at once, and a rule that runs once per word of every command is
+# the last place to spend one.
+command_slot_wrapper(word) if {
+	word != ""
+	count([c |
+		some c in split(word, "")
+		not digit_char(c)
+	]) == 0
+}
+
+digit_char(c) if c in {"0", "1", "2", "3", "4", "5", "6", "7", "8", "9"}
+
+# `VAR=value`, which is a prefix to a command rather than a command. Excludes a
+# path-looking operand so `--out=/some/path` is not read as an assignment.
+command_slot_wrapper(word) if {
+	contains(word, "=")
+	not contains(word, "/")
+}
+
+# The index just past the nearest separator before `index`, or 0 when there is
+# none: where the command containing `index` begins.
+command_slot_start(words, index) := start if {
+	befores := [position |
+		some position, word in words
+		position < index
+		word == command_slot_separator
+	]
+	start := max(array.concat(befores, [-1])) + 1
+}
+
+# Wrapper-ness that needs the word BEFORE it to decide. `uv run --with frida
+# python3 x.py` is the shape AGENTS.md asks for by name, and no per-word rule can
+# read it: `run` on its own is `cargo run` and `npm run`, whose next word is a
+# target rather than a program, and `frida` is the value of a flag rather than a
+# word with a shape. Both are wrappers here only because of what precedes them.
+command_slot_wrapper_at(words, i) if {
+	command_slot_wrapper(words[i])
+}
+
+command_slot_wrapper_at(words, i) if {
+	words[i] == "run"
+	words[i - 1] == "uv"
+}
+
+command_slot_wrapper_at(words, i) if {
+	words[i - 1] == "--with"
+}
+
+# PUBLIC. True when every word from the start of this command up to `index` is a
+# wrapper, which is what makes the word at `index` the thing being run.
+word_in_command_slot(words, index) if {
+	start := command_slot_start(words, index)
+	count([position |
+		some position, _ in words
+		position >= start
+		position < index
+		not command_slot_wrapper_at(words, position)
+	]) == 0
+}
+
+# ---------------------------------------------------------------------------
+# THIS EVENT'S DECOMPOSITION, COMPUTED ONCE (2026-09-22, bd er-effects-rs-xktj)
+#
+# Nine policies called `executed_texts(input.tool_input.command)` with the same
+# argument, and the compiled wasm module re-ran the decomposition for each one:
+# several copies of the command per call plus the split arrays behind them. On a
+# 10 KB command that exhausted the module's linear memory and `opa_malloc`
+# aborted the evaluation -- which in the production hook is not a refusal, it is
+# `{}` at exit 0, every policy in the rulebook silent at once.
+#
+# Measured 2026-09-22 by bisecting the length of a `cat > doc.md <<'EOF' ... EOF`
+# artifact write until it aborts, against a copy of this policy set with only this
+# change applied:
+#
+#   per-policy call, 10MB (the engine default)    10,355 bytes
+#   read as a rule,  10MB                         15,931 bytes
+#   per-policy call, 100MB (the engine ceiling)  118,705 bytes
+#   read as a rule,  100MB                       180,095 bytes
+#
+# A rule is a virtual document, evaluated once per query and cached, so reading
+# these instead of calling the function collapses the work to a single pass.
+# Left undefined when the command key is absent, exactly as the direct call was,
+# so no caller's definedness changes.
+#
+# This is the smaller of the two levers and it is the one that survives an engine
+# upgrade. The larger is `--wasm-max-memory 100MB` in `scripts/cupcake-hook.sh`,
+# which multiplies whatever this achieves by about eleven.
+input_executed_texts := executed_texts(input.tool_input.command)
+
+input_executed_unquoted_texts := executed_unquoted_texts(input.tool_input.command)
+
+input_unparsed_shell_payload if {
+	unparsed_shell_payload(input.tool_input.command)
+}

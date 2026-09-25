@@ -315,3 +315,30 @@ test_allow_push_text_from_a_non_bash_tool if {
 	}
 	count(denials) == 0
 }
+
+# --- a commit chained in front of the push (2026-09-25) -------------------------------------------
+# The command that walked through, verbatim. The hook fired before the commit existed, HEAD was
+# still origin/main, and the signal reported game_code=0. The signal now reads the command and
+# reports `pending=1` plus the working tree's changes; every runtime field below is as good as it
+# gets, because none of them can vouch for a commit that has not been made.
+chained_commit_command := `git commit -qam "$(printf 'chore(scripts): the launcher takes no switch to play online\n')" && git push -u origin launcher-drop-flag 2>&1 | tail -3`
+
+pending_game_code := "RUNTIME|game_code=1|attached=1|fresh=1|dll_match=1|pending=1|head=1758600000|log=1758600900"
+
+pending_docs_only := "RUNTIME|game_code=0|attached=0|fresh=0|dll_match=0|pending=1|head=1758600000|log=0"
+
+test_chained_commit_and_push_of_game_code_is_denied if {
+	some d in guard.deny with input as event(chained_commit_command, pending_game_code)
+	d.rule_id == "DS2-MODS-REQUIRE-RUNTIME-BEFORE-PUSH"
+	contains(d.reason, "commits and pushes in one go")
+}
+
+# A chained commit of docs or policies stays out of jurisdiction, as a separate commit of them does.
+test_chained_commit_and_push_of_docs_is_allowed if {
+	count(guard.deny) == 0 with input as event("git commit -am 'docs: x' && git push", pending_docs_only)
+}
+
+# The signal format before `pending` existed still decides as it did: an absent field is not "1".
+test_signal_without_pending_field_still_proves if {
+	count(guard.deny) == 0 with input as event("git push -u origin b", proven)
+}

@@ -31,7 +31,8 @@ import data.cupcake.system.commands
 # pushed would be routed around within the hour, and a routed-around guard is worse than none.
 #
 # WHAT SATISFIES IT. `ds2-loader.log` beside the game executable containing `ds2-loader: attach`
-# -- written from `DllMain` by the DLL itself, after the game mapped it -- with an mtime at or after
+# -- written from `DllMain` by the DLL itself, after the game mapped it -- with a birth time (the run's
+# start; mtime only where the filesystem has no birth time) at or after
 # both HEAD's commit time and the staged DLL's, AND a staged DLL whose sha256 equals the one this
 # checkout built. An agent cannot write that line by asserting it ran the game. A run older than the
 # code proves nothing about the code, and a run of somebody else's binary proves nothing either.
@@ -142,9 +143,18 @@ runtime_proven if {
 	field("attached") == "1"
 	field("fresh") == "1"
 	field("dll_match") == "1"
+	field("pending") != "1"
 }
 
-why := "The game's log has no `ds2-loader: attach` line, so the DLL has never been loaded." if {
+# A commit chained in front of the push, in one command. Checked first because no run can satisfy
+# it: the hook fires before the commit exists, so there is nothing yet a run could have tested.
+# Measured 2026-09-25 -- `git commit -qam ... && git push -u origin launcher-drop-flag` went out
+# carrying scripts/ds2-run.py, because at hook time HEAD was still origin/main and the diff the
+# signal took was empty. The signal now reads the command (scripts/cupcake_push_scope.py).
+why := "This command commits and pushes in one go, so the commit being pushed does not exist yet and no run can have tested it. Commit in its own command, launch that commit, then push." if {
+	signal_readable
+	field("pending") == "1"
+} else := "The game's log has no `ds2-loader: attach` line, so the DLL has never been loaded." if {
 	signal_readable
 	field("attached") != "1"
 } else := "The DLL staged in the game directory is not the one this checkout built, so whatever ran was not this code." if {

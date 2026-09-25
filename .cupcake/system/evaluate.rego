@@ -63,11 +63,17 @@ all_halts contains decision if { some decision in data.cupcake.policies.claude.n
 
 all_halts contains decision if { some decision in data.cupcake.policies.claude.no_explanation_instead_of_correction.halt }
 
+all_halts contains decision if { some decision in data.cupcake.policies.claude.no_fix_claim_without_runtime_evidence.halt }
+
 all_halts contains decision if { some decision in data.cupcake.policies.claude.no_future_tense_commitment.halt }
+
+all_halts contains decision if { some decision in data.cupcake.policies.claude.no_mergeable_without_green_ci.halt }
 
 all_halts contains decision if { some decision in data.cupcake.policies.claude.no_narrated_action.halt }
 
 all_halts contains decision if { some decision in data.cupcake.policies.claude.no_proof_without_observation.halt }
+
+all_halts contains decision if { some decision in data.cupcake.policies.claude.no_restating_user_own_rule.halt }
 
 all_halts contains decision if { some decision in data.cupcake.policies.claude.no_shouting_at_turn_end.halt }
 
@@ -110,6 +116,8 @@ all_denials contains decision if { some decision in data.cupcake.policies.claude
 
 all_denials contains decision if { some decision in data.cupcake.policies.claude.edit_no_tmp_scripts_guard.deny }
 
+all_denials contains decision if { some decision in data.cupcake.policies.claude.gh_pr_title_conventional.deny }
+
 all_denials contains decision if { some decision in data.cupcake.policies.claude.git_block_detached_push.deny }
 
 all_denials contains decision if { some decision in data.cupcake.policies.claude.git_block_main_commit.deny }
@@ -121,6 +129,10 @@ all_denials contains decision if { some decision in data.cupcake.policies.claude
 all_denials contains decision if { some decision in data.cupcake.policies.claude.git_require_runtime_test_before_push.deny }
 
 all_denials contains decision if { some decision in data.cupcake.policies.claude.monitor_rate_limit.deny }
+
+all_denials contains decision if { some decision in data.cupcake.policies.claude.no_rust_edit_without_frida_proof.deny }
+
+all_denials contains decision if { some decision in data.cupcake.policies.claude.teardown_must_relaunch.deny }
 
 all_denials contains decision if { some decision in data.cupcake.policies.claude.no_grep_for_build_errors.deny }
 
