@@ -723,23 +723,18 @@ fn bag_list() -> Result<usize, GameError> {
 ///
 /// # Safety
 ///
-/// Calls into the game. **Game thread only.** The prologue is byte-checked first.
-unsafe fn entry_by_handle(inventory: usize, handle: u16) -> Option<usize> {
-    let site = game_rva(ds2_rva::ITEM_INVENTORY_ENTRY_BY_HANDLE).ok()?;
-    let mut prologue = [0u8; ds2_rva::ITEM_INVENTORY_ENTRY_BY_HANDLE_PROLOGUE.len()];
-    // SAFETY: a resolved RVA in the loaded image; the read is fault-safe.
-    if !unsafe { ds2_game_base::mem::read_bytes(site, &mut prologue) }
-        || prologue != ds2_rva::ITEM_INVENTORY_ENTRY_BY_HANDLE_PROLOGUE
-    {
-        return None;
-    }
-    // SAFETY: the prologue matched, and the signature is the one the thunk implements -- the
-    // inventory in RCX, a handle in DX, an entry pointer or null back.
-    let entry = unsafe {
-        let by_handle: unsafe extern "system" fn(usize, u16) -> usize = core::mem::transmute(site);
-        by_handle(inventory, handle)
-    };
-    (entry != 0).then_some(entry)
+/// Candidates passed over because the copy found was not in the pack.
+///
+/// A check that cannot report itself is one nobody can tell ran. This bug survived a whole session
+/// of investigation because a stored copy equips exactly like a carried one and says nothing until
+/// the player takes the item off, so a run that skipped stored copies and a run that had none to
+/// skip would otherwise produce the same log.
+static NOT_IN_PACK_SKIPPED: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+/// How many stored copies the scan has passed over. See [`NOT_IN_PACK_SKIPPED`].
+pub(crate) fn not_in_pack_skipped() -> usize {
+    NOT_IN_PACK_SKIPPED.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 /// The inventory entry for an item id, preferring one that is not already worn.
@@ -751,43 +746,26 @@ unsafe fn entry_by_handle(inventory: usize, handle: u16) -> Option<usize> {
 /// index that only exists after the grant. DS2 has no function answering "which entry holds item
 /// N", so the entry array is walked, once per item, on the frame the player pressed a menu row.
 ///
-/// # A matching item id is not a live entry, and that cost a sword
+/// # A copy you are not carrying is not a copy, and that cost a sword
 ///
-/// The array is backing storage, not the inventory. A freed slot keeps its bytes, so a scan
-/// filtered on the item id alone hands back entries the sub-inventories no longer hold -- and
-/// every step after that succeeds, which is what made it invisible. [`ds2_rva::ITEM_SET_EQUIP`]
-/// reads only the handle and the id out of whatever it is given, and its body recomputes the slot
-/// pointer as `bag + 0x28 + handle * 0x28` and sets the worn bit there, so a dead slot equips
-/// exactly like a live one. The unequip body then clears that bit, zeroes the slot, and stops --
-/// it cannot delete a weapon entry -- leaving the item nowhere, because it had never been in the
-/// list the inventory screen reads. Reported 2026-09-24: a sword imported from a build vanished
-/// the moment it was taken off.
+/// One entry array holds the pack and whatever the player has stored, separated by
+/// [`ds2_rva::ITEM_ENTRY_FLAG_NOT_IN_PACK`], and this scan used to ignore that bit entirely. So a
+/// build naming an item the player had put away resolved to the stored copy -- and every step
+/// after that succeeded, which is what made it invisible. The equip reads only the handle and the
+/// id out of whatever it is handed, so a stored entry equips exactly like a carried one and the
+/// weapon appears in the player's hands. Take it off and the bit is still set: it goes back to
+/// wherever it was, and the pack that never held it does not list it.
 ///
-/// So every candidate is confirmed through [`entry_by_handle`] before it is offered. A dead slot's
-/// handle resolves to null or to some other entry, and either answer disqualifies it.
+/// Reported and then reproduced on demand 2026-09-24 -- store the rapier, import the build again,
+/// take it off, and it is gone.
+///
+/// So a stored copy is not a candidate. `already_held` then answers false for it, the grant runs,
+/// and the player is given a copy they are actually carrying.
 ///
 /// **It prefers an unworn copy.** A build naming the same item twice, or a re-run over a character
 /// that already wears it, would otherwise resolve both positions to the one entry -- and since the
 /// equip is a move, filling the second slot would strip the first.
-///
-/// # Safety
-///
-/// Calls into the game through [`entry_by_handle`]. **Game thread only.**
-/// Backing slots this process has matched on item id and then rejected as not held by the game.
-///
-/// A check that cannot report itself is one nobody can tell ran. Without this number, a run where
-/// the liveness test saved a sword and a run where the array happened to be clean produce
-/// identical logs -- and the whole reason this bug survived is that a dead slot behaves like a
-/// live one until the player takes the item off.
-static DEAD_SLOTS_REJECTED: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
-
-/// How many candidates the liveness test has thrown away. See [`DEAD_SLOTS_REJECTED`].
-pub(crate) fn dead_slots_rejected() -> usize {
-    DEAD_SLOTS_REJECTED.load(core::sync::atomic::Ordering::Relaxed)
-}
-
-unsafe fn entry_for_item(inventory: usize, bag: usize, item_id: i32) -> Option<usize> {
+fn entry_for_item(bag: usize, item_id: i32) -> Option<usize> {
     let base = bag + ds2_rva::ITEM_ENTRY_ARRAY_OFFSET;
     let mut spare: Option<usize> = None;
     for index in 0..ds2_rva::ITEM_ENTRY_COUNT {
@@ -801,22 +779,18 @@ unsafe fn entry_for_item(inventory: usize, bag: usize, item_id: i32) -> Option<u
         if id as i32 != item_id {
             continue;
         }
-        // THE GAME HAS TO AGREE THIS ENTRY IS LIVE, before anything is done with it. Checked on
-        // every candidate rather than on the winner alone: a dead slot whose worn bit happens to
-        // be set would otherwise return early and never be tested at all.
-        // SAFETY: game thread, per this function's contract.
-        let Some(handle) = (unsafe { safe_read_u16(entry + ds2_rva::ITEM_ENTRY_HANDLE_OFFSET) })
-        else {
-            continue;
-        };
-        // SAFETY: as above.
-        if unsafe { entry_by_handle(inventory, handle) } != Some(entry) {
-            DEAD_SLOTS_REJECTED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            continue;
-        }
         // SAFETY: as above.
         let flags =
             unsafe { ds2_game_base::mem::safe_read_u8(entry + ds2_rva::ITEM_ENTRY_FLAGS_OFFSET) };
+        // A COPY YOU PUT AWAY IS NOT A COPY IN YOUR HANDS, and equipping one is what lost the
+        // sword. Both live in this array, so the scan sees both; the equip does not care which,
+        // because it reads nothing but the id and the handle. Take the stored copy and the player
+        // wears an item their pack never held, and the moment they take it off it returns to
+        // wherever it was, which is not where they are looking.
+        if flags.is_some_and(|flags| flags & ds2_rva::ITEM_ENTRY_FLAG_NOT_IN_PACK != 0) {
+            NOT_IN_PACK_SKIPPED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            continue;
+        }
         if flags.is_some_and(|flags| flags & ds2_rva::ITEM_ENTRY_FLAG_EQUIPPED != 0) {
             // THE COPY ALREADY BEING WORN WINS. This preference used to be the other way round, to
             // stop two slots resolving to one entry -- and the cost of that was the import taking
@@ -836,19 +810,12 @@ unsafe fn entry_for_item(inventory: usize, bag: usize, item_id: i32) -> Option<u
 /// asking for a second sword** -- and the second one arrives without their reinforcement or their
 /// infusion, so granting it and then equipping it is strictly worse than leaving them alone.
 ///
-/// Held means held by the game, not merely present in the backing array. Answering from a freed
-/// slot here is the other half of the same bug [`entry_for_item`] describes, and it is the worse
-/// half: it skips the grant, so the equip that follows has nothing real to find.
-///
-/// # Safety
-///
-/// Calls into the game through [`entry_for_item`]. **Game thread only.**
-pub(crate) unsafe fn already_held(item_id: i32) -> bool {
-    let Ok(inventory) = item_inventory() else {
-        return false;
-    };
-    // SAFETY: game thread, per this function's contract.
-    bag_list().is_ok_and(|bag| unsafe { entry_for_item(inventory, bag, item_id) }.is_some())
+/// Held means carrying it. A copy the player has stored does not count, which is the other half of
+/// the bug [`entry_for_item`] describes and the half that does the damage: answering true here
+/// skips the grant, so the equip that follows has nothing in the pack to find and takes the stored
+/// copy instead.
+pub(crate) fn already_held(item_id: i32) -> bool {
+    bag_list().is_ok_and(|bag| entry_for_item(bag, item_id).is_some())
 }
 
 /// What a FLAT slot currently holds, through the game's own accessor.
@@ -972,11 +939,10 @@ pub(crate) unsafe fn equip(request: EquipRequest<'_>) -> Result<EquipOutcome, Ga
         return Err(GameError::PrologueMismatch);
     }
     // The first candidate that is actually in the bag. See `EquipRequest::item_ids`.
-    // SAFETY: game thread, per this function's contract.
     let (item_id, entry) = request
         .item_ids
         .iter()
-        .find_map(|id| unsafe { entry_for_item(inventory, bag, *id) }.map(|entry| (*id, entry)))
+        .find_map(|id| entry_for_item(bag, *id).map(|entry| (*id, entry)))
         .ok_or(GameError::NotInInventory)?;
 
     // SAFETY: the prologue matched, and the signature is the one the disassembled thunk implements

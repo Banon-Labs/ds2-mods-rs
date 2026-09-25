@@ -339,10 +339,7 @@ fn apply(build: &ds2_build_import_core::Build) {
     }
 
     // THE ITEMS, THROUGH THE GAME'S OWN FUNCTION.
-    // SAFETY: this flow runs on the game thread with a character loaded, which is what
-    // `build_items` asks for -- it consults the live inventory to skip what the player already
-    // holds.
-    let spawns = unsafe { crate::build_items(build) };
+    let spawns = crate::build_items(build);
     // AN EMPTY GRANT LIST IS NOT AN EMPTY JOB, and treating it as one cost a whole run. Once the
     // grant started skipping items the character already holds, a well-stocked character produced
     // no spawns at all -- and this returned early, so nothing was equipped and no covenant was
@@ -595,14 +592,13 @@ fn equip_everything(build: &ds2_build_import_core::Build) {
         planned.len(),
         build.id
     ));
-    // The number that says the liveness test did something, printed whether or not it did. A dead
-    // backing slot equips exactly like a live entry and only announces itself when the player takes
-    // the item off and it is gone, so a zero here is worth as much as a non-zero: it is the
-    // difference between "the array was clean" and "nobody looked".
+    // Printed whether or not it is zero. A stored copy equips exactly like a carried one and says
+    // nothing until the player takes the item off, so this is the difference between "there were
+    // none to skip" and "nobody looked".
     log_line(format_args!(
-        "{LOG_PREFIX} dead inventory slots rejected: {} -- backing entries whose item id matched \
-         but which the game does not hold",
-        crate::game::dead_slots_rejected()
+        "{LOG_PREFIX} stored copies passed over: {} -- the pack and what you have put away share \
+         one entry array, and a build wants the item in your hands",
+        crate::game::not_in_pack_skipped()
     ));
     if over_budget > 0 {
         log_line(format_args!(
