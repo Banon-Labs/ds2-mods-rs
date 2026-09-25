@@ -1572,14 +1572,14 @@ def config_text(
 {KEY_INVENTORY_SORT_PAD} = "{inventory_sort_pad}"
 
 [{SAVE_REDIRECT_SECTION}]
-# STARTUP-ONLY, and the one key here that can change where your progress is written. The game's own
+# Startup-only, and the one key here that can change where your progress is written. The game's own
 # save-directory builder is answered with this folder, so DS2 opens its own container name inside it
-# and reads AND writes that file for the rest of the session.
+# and both reads and writes that file for the rest of the session.
 #
-# NOTHING IS COPIED, and that is the whole design. The key this replaces named a `.sl2` FILE, and a
+# Nothing is copied, and that is the whole design. The key this replaces named a `.sl2` file, and a
 # file cannot be played in place by a game that builds its own container name -- so it copied the
 # file into a staging folder, pointed the game there, and rewrote the copy from the same source on
-# the NEXT launch. Every session started that way silently threw away its own progress. A folder
+# the next launch. Every session started that way silently threw away its own progress. A folder
 # needs no copy, so there is no duplicate to play and nothing to overwrite.
 #
 # Empty means the game's own directory, which is the only safe default: a save location guessed on
@@ -1587,9 +1587,9 @@ def config_text(
 # and converts it, since the DLL runs inside the Proton prefix and sees `/home/you` as
 # `Z:\\home\\you`.
 #
-# A folder that is not there is REFUSED, and the loader says so. It is not created, because DS2
-# hides the LOAD GAME row when it finds no container -- so a typo'd path would look exactly like a
-# save that had gone missing. A folder that exists but is empty is fine and starts a fresh
+# A folder that is not there is refused, and the loader says so. It is not created, because DS2
+# hides the `LOAD GAME` row when it finds no container -- so a typo'd path would look exactly like
+# a save that had gone missing. A folder that exists but is empty is fine and starts a fresh
 # character there.
 {KEY_SAVE_REDIRECT_DIRECTORY} = "{save_directory}"
 
@@ -3100,7 +3100,7 @@ def selftest() -> int:
         f"--no-intro-skip writes [{INTRO_SECTION}] {KEY_INTRO_ENABLED} = false",
     )
 
-    # THE SAVE FOLDER, whose default has to be empty. An arm that wrote a path nobody asked for
+    # The save folder, whose default has to be empty. An arm that wrote a path nobody asked for
     # would move where a player's progress is written, which is the one setting here that can lose
     # a character, so "unset unless asked" is asserted rather than assumed.
     values, _ = parse_config(config_text("off"))
@@ -3994,7 +3994,7 @@ def main() -> int:
         default="",
         metavar="DIR",
         help=(
-            "PLAY OUT OF THIS FOLDER instead of the game's own save directory, for the whole "
+            "play out of this folder instead of the game's own save directory, for the whole "
             "launch. The game opens its own container name inside it and reads and writes that "
             "file, so a character autoloaded from here saves back into here. Nothing is copied "
             "in either direction -- which is the difference from the `[save_redirect] path` key "

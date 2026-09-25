@@ -496,7 +496,7 @@ fn install_save_redirect() {
     // file exists because somebody asked for it, and leaving it unconsumed would arm it on some later
     // launch nobody connects to the request.
     //
-    // THERE IS NO `[save_redirect] path` KEY ANY MORE. It pointed a whole launch at a FILE and never
+    // There is no `[save_redirect] path` key any more. It pointed a whole launch at a file and never
     // opened that file: it copied it into the staging directory, pointed the game there, and
     // rewrote the copy on the next launch, so a session started that way threw away everything done
     // in it. A config key that discards the player's progress while its help says "load the save at
