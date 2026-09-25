@@ -59,11 +59,24 @@ pub enum ItemError {
     /// The name is a placeholder for an empty slot, not an item.
     EmptySlot,
     /// No catalogue entry has this name.
-    Unknown { name: String },
+    Unknown {
+        /// The name as the planner spelled it.
+        name: String,
+    },
     /// More than one id carries this name. **Never resolved by picking one.**
-    Ambiguous { name: String, ids: Vec<i32> },
+    Ambiguous {
+        /// The name as the planner spelled it.
+        name: String,
+        /// Every id carrying it -- listed so a human can pick, never picked here.
+        ids: Vec<i32>,
+    },
     /// Every id carrying this name is one the catalogue's author flagged unsafe to spawn.
-    UnsafeToSpawn { name: String, ids: Vec<i32> },
+    UnsafeToSpawn {
+        /// The name as the planner spelled it.
+        name: String,
+        /// The flagged ids, so the refusal names what it refused.
+        ids: Vec<i32>,
+    },
 }
 
 impl core::fmt::Display for ItemError {
@@ -196,6 +209,10 @@ pub fn is_empty_slot(name: &str) -> bool {
 /// [`ItemError::UnsafeToSpawn`] rather than granted. Where safe and unsafe rows share a name --
 /// `Estus Flask` has three of the first and one of the second -- the unsafe ones are dropped and
 /// the rest answer normally.
+/// # Errors
+///
+/// [`ItemError`] saying which way the name failed: a placeholder for an empty slot, a name no
+/// catalogue row carries, one that several carry, or one whose every row is flagged unsafe.
 pub fn id_for(name: &str) -> Result<i32, ItemError> {
     if is_empty_slot(name) {
         return Err(ItemError::EmptySlot);
@@ -239,15 +256,25 @@ pub fn catalogue_size() -> usize {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum Infusion {
+    /// Uninfused -- what every weapon starts as.
     None = 0,
+    /// Fire.
     Fire = 1,
+    /// Magic.
     Magic = 2,
+    /// Lightning.
     Lightning = 3,
+    /// Dark.
     Dark = 4,
+    /// Poison.
     Poison = 5,
+    /// Bleed.
     Bleed = 6,
+    /// Raw.
     Raw = 7,
+    /// Enchanted.
     Enchanted = 8,
+    /// Mundane.
     Mundane = 9,
 }
 

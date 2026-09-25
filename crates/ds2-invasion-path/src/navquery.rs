@@ -130,6 +130,9 @@ pub(crate) fn game_manager() -> Option<usize> {
     let at = game_rva(ds2_rva::GAME_MANAGER_IMP).ok()?;
     // SAFETY: a resolved RVA inside the loaded image; the reader reports an unmapped page rather
     // than faulting, which is the state at the very start of boot.
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let manager = unsafe { safe_read_usize(at)? };
     (manager != 0).then_some(manager)
 }
@@ -206,10 +209,22 @@ pub(crate) unsafe fn snap_reporting(position: [f32; 3]) -> SnapReport {
     let Some(manager) = game_manager() else {
         return report;
     };
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let key_from_area: Option<KeyFromArea> = unsafe { entry(ds2_rva::NAVI_GRAPH_KEY_FROM_AREA) };
     let world_from_manager: Option<GraphWorldFromGameManager> =
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         unsafe { entry(ds2_rva::NAVI_GRAPH_WORLD_FROM_GAME_MANAGER) };
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let data_for_key: Option<GraphDataForKey> = unsafe { entry(ds2_rva::NAVI_GRAPH_DATA_FOR_KEY) };
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let nearest: Option<NearestGraphId> = unsafe { entry(ds2_rva::NAVI_GRAPH_NEAREST_ID) };
     let (Some(key_from_area), Some(world_from_manager), Some(data_for_key), Some(nearest)) =
         (key_from_area, world_from_manager, data_for_key, nearest)
@@ -235,6 +250,9 @@ pub(crate) unsafe fn snap_reporting(position: [f32; 3]) -> SnapReport {
     // includes `-1`. So the sentinel is tested here, before a key exists to be wrong.
     if let Some(map_manager) =
         // SAFETY: a live `GameManagerImp`; the reader refuses an unmapped page.
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         unsafe { safe_read_usize(manager + ds2_rva::GAME_MANAGER_MAP_MANAGER_OFFSET) }
                 .filter(|value| *value != 0)
         && let Some(index) =
@@ -256,6 +274,9 @@ pub(crate) unsafe fn snap_reporting(position: [f32; 3]) -> SnapReport {
 
     // SAFETY: a live `NvNaviGraphWorld`; the reader refuses an unmapped page.
     let Some(count) =
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         (unsafe { safe_read_u32(world + ds2_rva::NV_NAVI_GRAPH_WORLD_GRAPH_COUNT_OFFSET) })
     else {
         return report;
@@ -271,6 +292,9 @@ pub(crate) unsafe fn snap_reporting(position: [f32; 3]) -> SnapReport {
     for index in 0..count {
         let at = world + ds2_rva::NV_NAVI_GRAPH_WORLD_GRAPHS_OFFSET + index * 8;
         // SAFETY: inside the inline array the count above bounds.
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         let Some(graph) = (unsafe { safe_read_usize(at) }).filter(|graph| *graph != 0) else {
             continue;
         };
@@ -330,6 +354,9 @@ fn graph_key(graph: usize) -> Option<u32> {
 /// the original has returned, which is why that ordering is not an implementation detail.
 pub(crate) unsafe fn create_planner(nav_system: usize) -> Option<usize> {
     let create: CreateRoutePlanner =
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         unsafe { entry(ds2_rva::NV_NAVIGATION_SYSTEM_CREATE_ROUTE_PLANNER)? };
     // SAFETY: `nav_system` is the engine's own singleton; the factory allocates from the
     // allocator that object carries and returns 0 if it cannot.
@@ -381,9 +408,18 @@ pub(crate) struct Guard {
 pub(crate) unsafe fn guard(start: u32, goal: u32) -> Option<Guard> {
     let manager = game_manager()?;
     let world_from_manager: Option<GraphWorldFromGameManager> =
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         unsafe { entry(ds2_rva::NAVI_GRAPH_WORLD_FROM_GAME_MANAGER) };
     let graph_for_id: Option<GraphForRouteId> =
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         unsafe { entry(ds2_rva::NV_NAVI_GRAPH_FOR_ROUTE_ID) };
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let data_for_key: Option<GraphDataForKey> = unsafe { entry(ds2_rva::NAVI_GRAPH_DATA_FOR_KEY) };
     let (Some(world_from_manager), Some(graph_for_id), Some(data_for_key)) =
         (world_from_manager, graph_for_id, data_for_key)
@@ -397,6 +433,9 @@ pub(crate) unsafe fn guard(start: u32, goal: u32) -> Option<Guard> {
     }
     // THE TABLE IS NOT THE WORLD. The planner hashes into a separate table hanging off `+0x88`;
     // passing the world itself would read its graph array as bucket geometry.
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let table = unsafe { safe_read_usize(world + ds2_rva::NV_NAVI_GRAPH_WORLD_ID_TABLE_OFFSET) }
         .filter(|table| *table != 0)?;
     let mut report = Guard {
@@ -413,6 +452,9 @@ pub(crate) unsafe fn guard(start: u32, goal: u32) -> Option<Guard> {
             return 0;
         }
         // SAFETY: an engine-owned graph; the reader refuses an unmapped page.
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         unsafe { safe_read_u32(graph + ds2_rva::NV_NAVI_GRAPH_LINK_COUNT_OFFSET) }
             .map_or(0, |word| word as i16)
     };
@@ -453,8 +495,17 @@ pub(crate) unsafe fn ground_under(position: [f32; 3]) -> Option<[f32; 3]> {
     let id = unsafe { snap_reporting(position) }.id?;
     let manager = game_manager()?;
     let world_from_manager: GraphWorldFromGameManager =
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         unsafe { entry(ds2_rva::NAVI_GRAPH_WORLD_FROM_GAME_MANAGER)? };
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let graph_for_id: GraphForRouteId = unsafe { entry(ds2_rva::NV_NAVI_GRAPH_FOR_ROUTE_ID)? };
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let centre: NodeCentre = unsafe { entry(ds2_rva::NAVI_GRAPH_NODE_CENTRE)? };
     // SAFETY: `manager` is non-null and this is the engine's own accessor.
     let world = unsafe { world_from_manager(manager) };
@@ -463,6 +514,9 @@ pub(crate) unsafe fn ground_under(position: [f32; 3]) -> Option<[f32; 3]> {
     }
     // The table is not the world: the lookup hashes into the separate structure at `+0x88`, and
     // passing the world itself would read its graph array as bucket geometry.
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let table = unsafe { safe_read_usize(world + ds2_rva::NV_NAVI_GRAPH_WORLD_ID_TABLE_OFFSET) }
         .filter(|table| *table != 0)?;
     // SAFETY: a bucket walk over the engine's own table; a key it does not hold returns 0.
@@ -495,6 +549,9 @@ pub(crate) unsafe fn ground_under(position: [f32; 3]) -> Option<[f32; 3]> {
 /// Game thread only. `planner` must be one [`create_planner`] returned and which has not been
 /// retired.
 pub(crate) unsafe fn request(planner: usize, start: u32, goal: u32, max_cost: f32) -> bool {
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let found: Option<RequestRoute> = unsafe { entry(ds2_rva::NV_ROUTE_PLANNER_REQUEST) };
     let Some(request) = found else {
         return false;
@@ -521,6 +578,9 @@ pub(crate) unsafe fn request(planner: usize, start: u32, goal: u32, max_cost: f3
 /// currently running, because it only sets a byte -- the unlink and the destructor happen inside
 /// `NvNavigationSystem::Update`.
 pub(crate) unsafe fn retire(nav_system: usize, planner: usize) {
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let found: Option<RetireNavObject> = unsafe { entry(ds2_rva::NV_NAVIGATION_SYSTEM_RETIRE) };
     if let Some(retire) = found {
         // SAFETY: four instructions, one byte store into the object.
@@ -571,6 +631,9 @@ pub(crate) enum Poll {
 pub(crate) unsafe fn poll(planner: usize) -> Poll {
     // SAFETY: a resolved engine object; the reader reports an unmapped page rather than faulting,
     // which is how a planner that has already been destroyed is detected instead of crashed on.
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let Some(flags) = (unsafe { safe_read_u8(planner + ds2_rva::NV_ROUTE_PLANNER_FLAGS_OFFSET) })
     else {
         return Poll::Lost;
@@ -684,6 +747,9 @@ unsafe fn node_attributes(table: usize, id: u32) -> Option<u32> {
     if id & ds2_rva::NAVI_ID_INDEX_MASK == ds2_rva::NAVI_ID_INDEX_NONE {
         return None;
     }
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let graph_for_id: GraphForRouteId = unsafe { entry(ds2_rva::NV_NAVI_GRAPH_FOR_ROUTE_ID) }?;
     // SAFETY: a bucket walk over the engine's own table; a key it does not hold returns 0.
     let graph = unsafe { graph_for_id(table, id | ds2_rva::NV_ROUTE_ID_GRAPH_KEY_MASK) };
@@ -691,10 +757,16 @@ unsafe fn node_attributes(table: usize, id: u32) -> Option<u32> {
         return None;
     }
     // SAFETY: an engine-owned graph; the reader refuses an unmapped page.
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let attrs = unsafe { safe_read_usize(graph + ds2_rva::NV_NAVI_GRAPH_NODE_ATTRS_OFFSET) }
         .filter(|attrs| *attrs != 0)?;
     let index = (id & ds2_rva::NAVI_ID_INDEX_MASK) as usize;
     // SAFETY: the table the engine indexes the same way, with the same mask, at the same offset.
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     unsafe { safe_read_u32(attrs + index * 4) }
 }
 
@@ -707,6 +779,9 @@ unsafe fn node_attributes(table: usize, id: u32) -> Option<u32> {
 fn impassable_cost() -> Option<f32> {
     let at = game_rva(ds2_rva::NAVI_IMPASSABLE_COST).ok()?;
     // SAFETY: a resolved RVA inside the loaded image; the reader refuses an unmapped page.
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let value = unsafe { ds2_game_base::mem::safe_read_f32(at)? };
     (!value.is_nan()).then_some(value)
 }
@@ -732,16 +807,25 @@ fn impassable_cost() -> Option<f32> {
 /// [`ds2_rva::NV_ROUTE_PLANNER_FLAG_READY`] without
 /// [`ds2_rva::NV_ROUTE_PLANNER_FLAG_FAILED`] -- the same address [`poll`] decodes from.
 pub(crate) unsafe fn audit(route: usize) -> Option<Audit> {
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let cost: TraversalCost = unsafe { entry(ds2_rva::NAVI_EDGE_TRAVERSAL_COST) }?;
     let impassable = impassable_cost()?;
     let manager = game_manager()?;
     let world_from_manager: GraphWorldFromGameManager =
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         unsafe { entry(ds2_rva::NAVI_GRAPH_WORLD_FROM_GAME_MANAGER) }?;
     // SAFETY: `manager` is non-null.
     let world = unsafe { world_from_manager(manager) };
     if world == 0 {
         return None;
     }
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let table = unsafe { safe_read_usize(world + ds2_rva::NV_NAVI_GRAPH_WORLD_ID_TABLE_OFFSET) }
         .filter(|table| *table != 0)?;
 

@@ -428,6 +428,8 @@ pub(crate) unsafe fn install() -> bool {
         return false;
     }
     // SAFETY: MinHook's own initialiser; idempotent, and `crate::render` may already have run it.
+    // SAFETY: `MH_Initialize` takes no arguments and is safe to call again on an already-
+    // initialised library, which the status below distinguishes.
     let status = unsafe { MH_Initialize() };
     if status != MH_STATUS::MH_OK && status != MH_STATUS::MH_ERROR_ALREADY_INITIALIZED {
         log(format_args!("tick: MH_Initialize said {status:?}"));
@@ -441,6 +443,8 @@ pub(crate) unsafe fn install() -> bool {
     // SAFETY: `site` has been proven to hold this function's own prologue, and `nav_update`
     // matches its ABI. The trampoline is stored before the hook is enabled, so the detour can
     // never run without one.
+    // SAFETY: the target is an RVA this crate validated against the prologue it expects before
+    // reaching here, and the detour is a `'static` fn item of the matching ABI.
     let hook = match unsafe { MhHook::new(site as *mut c_void, nav_update as *mut c_void) } {
         Ok(hook) => hook,
         Err(status) => {
@@ -480,6 +484,8 @@ unsafe extern "system" fn nav_update(nav_system: usize, delta: f32) {
         // SAFETY: `raw` is MinHook's trampoline for this exact function, stored before the hook
         // was enabled, and the signature is the one the prologue check proved.
         let original: NavUpdate = unsafe { std::mem::transmute::<usize, NavUpdate>(raw) };
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(nav_system, delta) };
     }
     // AFTER the original, always. Creating a planner pushes onto the head of the intrusive list
@@ -993,6 +999,9 @@ fn poll_or_request(
         *said_snap = true;
         // SAFETY: game thread, and the world exists -- the snaps above just walked it.
         let guard = match (from.id, to.id) {
+            // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+            // offset this crate validated before installing. The callee's own contract asks for exactly
+            // that live object, and reads inside it go through the fault-tolerant readers.
             (Some(start), Some(goal)) => unsafe { navquery::guard(start, goal) },
             _ => None,
         };
@@ -1596,6 +1605,9 @@ fn current_map_index() -> u32 {
 ///
 /// `at` must be an address it is legal to attempt to read; the reader itself faults safely.
 unsafe fn safe_read(at: usize) -> Option<usize> {
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let value = unsafe { ds2_game_base::mem::safe_read_usize(at)? };
     (value != 0).then_some(value)
 }
@@ -1611,6 +1623,9 @@ unsafe fn safe_read(at: usize) -> Option<usize> {
 ///
 /// `map_manager` must be a live `MapManager`; the reader itself faults safely.
 unsafe fn safe_read_map_index(map_manager: usize) -> Option<u32> {
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe {
         ds2_game_base::mem::safe_read_u32(
             map_manager + ds2_rva::MAP_MANAGER_PLAYER_MAP_INDEX_OFFSET,

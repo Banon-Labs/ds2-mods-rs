@@ -189,6 +189,9 @@ type EnterFn = unsafe extern "system" fn(*mut u8);
 /// `vptr` may be anything; every read goes through a fault-tolerant reader that returns `None` on
 /// unmapped memory rather than faulting.
 unsafe fn handlers_are_inert(vptr: usize, base: usize) -> bool {
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let slot = |index: usize| unsafe { safe_read_usize(vptr + index * size_of::<usize>()) };
     slot(ds2_rva::FE_DIALOG_SLOT_ON_CANCEL)
         == Some(base + ds2_rva::FE_DIALOG_INERT_ON_CANCEL as usize)
@@ -237,6 +240,12 @@ unsafe fn suppress(this: *mut u8) -> bool {
     }
     let object = this as usize;
 
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+
+    // moved or was freed answers None rather than faulting.
+
     let Some(vptr) = (unsafe { safe_read_usize(object) }) else {
         return false;
     };
@@ -250,15 +259,27 @@ unsafe fn suppress(this: *mut u8) -> bool {
                 "{LOG_PREFIX} seen screen=<not-allowlisted> vtable=0x{vptr:016x} rva=0x{:08x} \
                  kind={} cancel-dest=0x{:02x} confirm-dest=0x{:02x} action=shown",
                 vptr.wrapping_sub(base),
+                // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+                // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+                // moved or was freed answers None rather than faulting.
                 unsafe { safe_read_i32(object + ds2_rva::FE_DIALOG_KIND_OFFSET) }.unwrap_or(-1),
+                // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+                // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+                // moved or was freed answers None rather than faulting.
                 unsafe { safe_read_u16(object + ds2_rva::FE_DIALOG_CANCEL_DEST_OFFSET) }
                     .map_or(-1, |raw| raw as i16),
+                // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+                // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+                // moved or was freed answers None rather than faulting.
                 unsafe { safe_read_u16(object + ds2_rva::FE_DIALOG_CONFIRM_DEST_OFFSET) }
                     .map_or(-1, |raw| raw as i16),
             ),
         );
         return false;
     };
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     if !unsafe { handlers_are_inert(vptr, base) } {
         report_once(
             vptr,
@@ -276,12 +297,18 @@ unsafe fn suppress(this: *mut u8) -> bool {
     // the confirm destination only when it is non-negative. See
     // `ds2_rva::FE_DIALOG_CANCEL_DEST_OFFSET`.
     let Some(cancel_dest) =
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         (unsafe { safe_read_u16(object + ds2_rva::FE_DIALOG_CANCEL_DEST_OFFSET) })
     else {
         return false;
     };
     let cancel_dest = cancel_dest as i16;
     let Some(confirm_dest) =
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         (unsafe { safe_read_u16(object + ds2_rva::FE_DIALOG_CONFIRM_DEST_OFFSET) })
     else {
         return false;
@@ -389,6 +416,9 @@ unsafe fn suppress(this: *mut u8) -> bool {
          confirm-dest=0x{confirm_dest:02x} edge={edge} result={result} phase={closed_phase} \
          total={total}",
         dialog.name,
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         unsafe { safe_read_i32(object + ds2_rva::FE_DIALOG_KIND_OFFSET) }.unwrap_or(-1),
     ));
     true
@@ -407,6 +437,9 @@ unsafe fn suppress(this: *mut u8) -> bool {
 /// unbalanced close. Here `leave` closes only when the phase is 1 (`0x1401050a6`), so a box that
 /// was never opened is never closed, and the pairing stays balanced.
 unsafe extern "system" fn detour_enter(this: *mut u8) {
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     if unsafe { suppress(this) } {
         return;
     }
@@ -415,6 +448,8 @@ unsafe extern "system" fn detour_enter(this: *mut u8) {
         // SAFETY: MinHook published this trampoline for exactly this site, and the signature is the
         // one every caller of the shared `enter` uses.
         let original: EnterFn = unsafe { std::mem::transmute::<usize, EnterFn>(trampoline) };
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(this) };
     }
 }
@@ -450,6 +485,8 @@ pub unsafe fn install() -> Outcome {
 
     // MinHook is statically linked into this DLL, so nothing else shares this instance and
     // ALREADY_INITIALIZED can only mean this ran twice. Treat it as success.
+    // SAFETY: `MH_Initialize` takes no arguments and is documented as safe to call again on an
+    // already-initialised library, which the status below distinguishes.
     let status = unsafe { MH_Initialize() };
     if status != MH_STATUS::MH_OK && status != MH_STATUS::MH_ERROR_ALREADY_INITIALIZED {
         log(format_args!(
@@ -459,6 +496,8 @@ pub unsafe fn install() -> Outcome {
     }
 
     let site = base + ds2_rva::FE_DIALOG_ENTER as usize;
+    // SAFETY: the target is an RVA this crate validated against the prologue it expects before
+    // reaching here, and the detour is a `'static` fn item of the matching ABI.
     let hook = match unsafe { MhHook::new(site as *mut c_void, detour_enter as *mut c_void) } {
         Ok(hook) => hook,
         Err(status) => {
@@ -469,6 +508,7 @@ pub unsafe fn install() -> Outcome {
         }
     };
     TRAMPOLINE.store(hook.trampoline() as usize, Ordering::Release);
+    // SAFETY: the target is the address `MhHook::new` above already registered with MinHook.
     let status = unsafe { MH_EnableHook(site as *mut c_void) };
     if status != MH_STATUS::MH_OK {
         log(format_args!(

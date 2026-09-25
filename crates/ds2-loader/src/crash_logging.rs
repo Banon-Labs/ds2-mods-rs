@@ -41,7 +41,7 @@
 //!
 //! The fault is armed from the post-Arxan callback, NOT from `DllMain`. Spawning a thread under
 //! the loader lock is its own hazard, and the callback already runs at the entry point after
-//! `DllMain` has returned -- the same place [`crate::install_probe`] arms the Arxan probe.
+//! `DllMain` has returned -- the same place `crate::install_probe` arms the Arxan probe.
 
 use std::path::PathBuf;
 use std::time::Duration;

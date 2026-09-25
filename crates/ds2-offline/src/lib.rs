@@ -14,13 +14,13 @@
 //! The obvious design is one patch: find the flag that means "we are online", force it to zero,
 //! done. That design was built, and then the disassembly said it does not do what it claims.
 //!
-//! * **The flag layer** ([`flag`]) is real and it is most of the answer. `NetService::isOnline`
+//! * **The flag layer** (`flag`) is real and it is most of the answer. `NetService::isOnline`
 //!   (`0x140513600`) is five bytes -- `movzx eax, BYTE PTR [rcx+0x3a]; ret` -- with **34 call
 //!   sites**, every one followed by `test al,al`. `FeSubStateTitleOnlineCheck`'s own work starter
 //!   is one of them and returns without starting anything when it reads zero. The top menu greys
 //!   out its online rows from another. This layer settles what the game *believes*.
 //!
-//! * **The socket layer** ([`winsock`]) exists because `FeSubStateTitleGameServerLogin`'s work
+//! * **The socket layer** (`winsock`) exists because `FeSubStateTitleGameServerLogin`'s work
 //!   starter -- `0x1400f9820`, vtable slot 8 -- **does not read that flag**. It asks
 //!   `NetSvrManager` two questions of its own and then builds a login job. Read its disassembly
 //!   and the flag layer's story falls apart at exactly the step that matters: the one that talks
@@ -50,13 +50,13 @@
 //! # What this crate does NOT do
 //!
 //! * **It does not touch Steam.** `steamclient64.dll` and `GameOverlayRenderer64.dll` are loaded
-//!   into this process and own their own sockets; [`winsock`] patches the import table of
+//!   into this process and own their own sockets; `winsock` patches the import table of
 //!   `DarkSoulsII.exe` and nothing else, so Steam's own connection, the overlay, achievements and
 //!   the friends list are untouched. That is deliberate -- the target is FromSoftware's game
 //!   servers, not the platform -- but it means this crate is not a firewall and must not be
 //!   described as one.
-//! * **It does not suppress the network boot substates.** `0x20` SteamNetworkCheck, `0x39`
-//!   GameServerLogin and `0x44` Information still run; they now fail early instead of waiting on
+//! * **It does not suppress the network boot substates.** `0x20` `SteamNetworkCheck`, `0x39`
+//!   `GameServerLogin` and `0x44` Information still run; they now fail early instead of waiting on
 //!   a server. Their failure is a path the shipped game already has -- it is what produces
 //!   `FeSubStateTitleOnlineCheckFailWarn` and the "could not retrieve information" box, both of
 //!   which `ds2-dialog-skip` already answers. Removing the substates outright is
@@ -65,13 +65,11 @@
 //!   Wine and the Steam API all use local sockets and breaking those breaks the game rather than
 //!   its matchmaking.
 //!
-//! # `0x14160de19` is not the switch, and this is where that was settled
-//!
-//! `docs/DS2-BOOT-WORK.md` records a byte the game reads to force the online flag to zero, and
-//! asks whether setting it removes the network boot chain. It does not: it is read at exactly one
-//! instruction in the whole image, inside the top-menu builder, and the boot chain calls
-//! `0x140513600` directly. See [`ds2_rva::NET_FORCE_OFFLINE_MENU_ONLY`].
+//! `docs/DS2-OFFLINE.md` has the disassembly, the call-site census and the measurements.
 
+// DEBT: ds2-mods-rs-24r -- not debt to be paid: this crate ships as a Windows DLL and the
+// attribute is what keeps its Rust half parseable on the host, so the game-free tests below it
+// can run at all. The issue is the standing record of that decision.
 #![cfg_attr(not(windows), allow(unused))]
 
 #[cfg(windows)]

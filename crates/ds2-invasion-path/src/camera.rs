@@ -104,7 +104,13 @@ fn camera_manager() -> Option<usize> {
     let manager_address = game_rva(ds2_rva::GAME_MANAGER_IMP).ok()?;
     // SAFETY: a resolved RVA inside the loaded image, read fault-safely -- the global is null
     // until the game builds it.
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let game_manager = non_null(unsafe { safe_read_usize(manager_address)? })?;
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     non_null(unsafe {
         safe_read_usize(game_manager + ds2_rva::GAME_MANAGER_CAMERA_MANAGER_OFFSET)?
     })
@@ -146,6 +152,9 @@ pub(crate) fn candidates() -> Vec<Candidate> {
     {
         // SAFETY: `manager` is the engine's own `CameraManager`; the read is fault-safe and the
         // pointer is null before the operator is built.
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         let Some(operator) = (unsafe { safe_read_usize(manager + offset) }) else {
             continue;
         };
@@ -208,6 +217,9 @@ pub(crate) fn candidates() -> Vec<Candidate> {
             continue;
         }
         // SAFETY: inside the object the engine's own `CameraManager` occupies; fault-safe.
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         let Some(pointer) = (unsafe { safe_read_usize(manager + offset) }) else {
             continue;
         };

@@ -3,7 +3,7 @@
 //!
 //! # Why a side at a time
 //!
-//! The detour in [`crate::install`] replaces the directory for everything a `SaveLoadSystem` does,
+//! The detour in [`mod@crate::install`] replaces the directory for everything a `SaveLoadSystem` does,
 //! which is correct at startup and wrong in a live session: DARK SOULS II saves on the way out of a
 //! game, so a session that re-points the directory and then leaves writes the character it was
 //! playing into the staged copy, and the `LOAD GAME` that follows reads back the one the player was
@@ -176,6 +176,9 @@ impl Side {
             return false;
         };
         // SAFETY: a vtable slot in the image's `.rdata`, read-only but mapped.
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         let found = unsafe { ds2_game_base::mem::safe_read_usize(slot) };
         if found != Some(expected) {
             log(format_args!(
@@ -268,6 +271,8 @@ unsafe fn answer(side: &Side, this: *mut c_void, out: *mut c_void) {
             // SAFETY: `original` is what the slot held before `arm` replaced it, so it is the
             // game's own override with this exact signature.
             let original: DirectoryOverride = unsafe { core::mem::transmute(original) };
+            // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+            // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
             unsafe { original(this, out) };
         }
     };
@@ -289,6 +294,9 @@ unsafe fn answer(side: &Side, this: *mut c_void, out: *mut c_void) {
     // SAFETY: `setter` is `SL_SESSION_STRING_SET` resolved in `arm`, and `out` is the session the
     // game handed us -- the same one the original would have filled.
     let setter: StringSet = unsafe { core::mem::transmute(setter) };
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { setter(out, held.as_ptr(), held.len()) };
     let n = side.answered.fetch_add(1, Ordering::Relaxed) + 1;
     // The first two only. A session asks for its directory once, so two lines cover an arm and its

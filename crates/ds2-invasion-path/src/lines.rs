@@ -6,6 +6,7 @@
 //! unreachable from a Linux `cargo test`, which is the same as not writing them.
 
 // Consumed by `crate::render`, which is `cfg(windows)`; the maths is host-tested.
+// DEBT: ds2-mods-rs-2rs -- module-wide dead_code, reason not yet recorded.
 #![cfg_attr(not(windows), allow(dead_code))]
 
 /// One screen-space vertex: pixels and a straight (non-premultiplied) RGBA colour.

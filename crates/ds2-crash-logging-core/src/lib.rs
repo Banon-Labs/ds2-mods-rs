@@ -67,8 +67,12 @@ const DEFAULT_MODULE_LABEL: &str = "ds2-crash-logging";
 /// feature work should give them its own names, so two loaded mods cannot fight over one log.
 #[derive(Clone, Copy, Debug)]
 pub struct CrashLogConfig {
+    /// The append-only record, one line per event, across the whole run.
     pub log_file_name: &'static str,
+    /// The most recent record on its own, truncated each run so it is short enough to paste.
     pub latest_file_name: &'static str,
+    /// The last phase reached, rewritten as it advances, so a process that dies without
+    /// unwinding still says how far it got.
     pub breadcrumb_file_name: &'static str,
     /// Full loaded-module inventory: what was in the process, where, and which build. Written at
     /// install and rewritten when the process dies, so an offset like `nvwgf2umx.dll+0xead0c0`
@@ -76,6 +80,7 @@ pub struct CrashLogConfig {
     pub modules_file_name: &'static str,
     /// Postmortem minidump, written only from the unhandled-exception path.
     pub minidump_file_name: &'static str,
+    /// What the host DLL calls itself in these files, so two loaded mods are told apart.
     pub module_label: &'static str,
 }
 
@@ -100,13 +105,17 @@ impl Default for CrashLogConfig {
 #[repr(usize)]
 #[derive(Clone, Copy, Debug)]
 pub enum Phase {
+    /// Nothing has run yet -- the value a record carries if the stamp never happened.
     Uninitialized = 0,
+    /// The host DLL's entry point was reached.
     DllAttach = 1,
+    /// This crate's exception handlers are installed, so a fault from here on is recorded.
     HandlerInstalled = 2,
     /// Set by the host DLL when its own feature work is live -- not by this crate, which has no
     /// way to know. (`er-crash-logging-core` called this `ClientReady`, after a networked
     /// feature that has no counterpart in this workspace.)
     HostReady = 10,
+    /// A fault reached one of the handlers. The last phase a record can carry.
     ExceptionObserved = 90,
 }
 
@@ -224,10 +233,13 @@ pub(crate) fn banned_rungs() -> Vec<u32> {
         .unwrap_or_default()
 }
 
+/// Append one line to the run-long record.
 pub fn append_log(args: fmt::Arguments<'_>) {
     ds2_game_base::log::append_line(&path_for(config().log_file_name), args);
 }
 
+/// Rewrite the breadcrumb file with the reason and detail, so a process that dies without
+/// unwinding still leaves the last thing it was doing.
 pub fn write_breadcrumb(reason: &str, args: fmt::Arguments<'_>) {
     let mut body = String::new();
     use fmt::Write as _;
@@ -287,6 +299,7 @@ fn write_common_fields(out: &mut String) {
 }
 
 #[cfg(windows)]
+/// Advance how far the host DLL has got. Stamped into every record written afterwards.
 pub fn mark_phase(phase: Phase) {
     PHASE.store(phase as usize, Ordering::SeqCst);
 }
@@ -337,6 +350,8 @@ const MAX_FAULT_RECORDS: usize = 24;
 #[cfg(windows)]
 const THROW_SITE_SLOTS: usize = 24;
 
+/// Which kind of record an exception code calls for -- a C++ throw reads differently from an
+/// access violation and is written differently.
 pub fn record_class(code: u32) -> RecordClass {
     if code == EXCEPTION_CPP_THROW {
         RecordClass::Throw
@@ -684,6 +699,8 @@ pub fn install(new_config: CrashLogConfig, self_module_base: usize) {
         publish_identity_line();
         mark_phase(Phase::DllAttach);
         let handle =
+            // SAFETY: same -- a `'static` fn item of the documented vectored-handler signature, registered
+            // process-wide. Nothing of ours is passed by pointer.
             unsafe { AddVectoredExceptionHandler(VECTORED_FIRST_HANDLER, crash_vectored_handler) }
                 as usize;
         HANDLER_HANDLE.store(handle, Ordering::SeqCst);
@@ -692,6 +709,9 @@ pub fn install(new_config: CrashLogConfig, self_module_base: usize) {
         // runs only when nothing handled the exception. Chain whatever was installed before us --
         // the game's own filter and Windows Error Reporting live here too, and silently swallowing
         // them would trade one blind spot for another.
+        // SAFETY: the argument is a `'static` fn item of the documented filter signature, and the
+        // call only swaps a process-wide pointer -- it dereferences nothing of ours and returns the
+        // previous value, which is stored rather than dropped so the chain survives.
         let previous = unsafe { SetUnhandledExceptionFilter(unhandled_exception_filter) } as usize;
         PREVIOUS_UNHANDLED_FILTER.store(previous, Ordering::SeqCst);
         if handle != 0 {
@@ -764,6 +784,8 @@ pub fn install(new_config: CrashLogConfig, self_module_base: usize) {
 fn publish_identity_line() {
     let base = SELF_MODULE_BASE.load(Ordering::SeqCst);
     let size = SELF_MODULE_SIZE.load(Ordering::SeqCst);
+    // SAFETY: these PE walkers read through `safe_read_*`, which fails closed on any address --
+    // so a base that is not a mapped image answers None rather than faulting.
     let stamp = unsafe { pe_timedatestamp(base) }.unwrap_or(0);
     ds2_game_base::log::set_identity_line(format!(
         "identity module={} crate=ds2-crash-logging-core v{} image=0x{:x}+0x{:x} pe_watermark=0x{:08x}",
@@ -804,7 +826,7 @@ fn publish_identity_line() {
 /// # The self-chain trap
 ///
 /// If this crate already owns the slot, `SetUnhandledExceptionFilter` hands our OWN function back
-/// as the previous one. Storing that would make [`chain_previous_unhandled_filter`] call us again,
+/// as the previous one. Storing that would make `chain_previous_unhandled_filter` call us again,
 /// forever, inside a crash handler. So a returned pointer equal to ours is recognised and NOT
 /// stored, and the caller is told via the second element of the tuple.
 #[cfg(windows)]
@@ -813,6 +835,9 @@ pub fn reinstall_unhandled_filter() -> (usize, bool) {
     // function item, and rightly -- the item is zero-sized and the cast only means anything once
     // it is a pointer. This is the same value `SetUnhandledExceptionFilter` will hand back.
     let ours = unhandled_exception_filter as UnhandledExceptionFilter as usize;
+    // SAFETY: the argument is a `'static` fn item of the documented filter signature, and the
+    // call only swaps a process-wide pointer -- it dereferences nothing of ours and returns the
+    // previous value, which is stored rather than dropped so the chain survives.
     let previous = unsafe { SetUnhandledExceptionFilter(unhandled_exception_filter) } as usize;
     let replaced_self = previous == ours;
     if !replaced_self {
@@ -871,6 +896,8 @@ fn record_self_module(base: usize) {
     }
     SELF_MODULE_BASE.store(base, Ordering::SeqCst);
     SELF_MODULE_SIZE.store(
+        // SAFETY: these PE walkers read through `safe_read_*`, which fails closed on any address --
+        // so a base that is not a mapped image answers None rather than faulting.
         unsafe { pe_size_of_image(base) }.unwrap_or(0),
         Ordering::SeqCst,
     );
@@ -888,6 +915,9 @@ fn record_self_module(base: usize) {
 /// an unmapped range. The caller owns the meaning of the bytes.
 #[cfg(windows)]
 unsafe fn safe_read_u32(addr: usize) -> Option<u32> {
+    // SAFETY: `safe_read_*` takes any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A crash handler walks
+    // structures the fault may already have corrupted, so that is exactly the read it needs.
     unsafe { ds2_game_base::mem::safe_read_i32(addr) }.map(i32::cast_unsigned)
 }
 
@@ -899,14 +929,23 @@ unsafe fn safe_read_u32(addr: usize) -> Option<u32> {
 /// fault-safe readers rather than the bound being taken from the wrong image.
 #[cfg(windows)]
 unsafe fn pe_nt_headers(base: usize) -> Option<usize> {
+    // SAFETY: `safe_read_*` takes any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A crash handler walks
+    // structures the fault may already have corrupted, so that is exactly the read it needs.
     if unsafe { ds2_game_base::mem::safe_read_u16(base) }? != PE_DOS_MAGIC {
         return None;
     }
+    // SAFETY: `safe_read_*` takes any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A crash handler walks
+    // structures the fault may already have corrupted, so that is exactly the read it needs.
     let e_lfanew = unsafe { safe_read_u32(base + PE_E_LFANEW_OFFSET) }? as usize;
     if e_lfanew > PE_E_LFANEW_MAX {
         return None;
     }
     let nt = base.checked_add(e_lfanew)?;
+    // SAFETY: `safe_read_*` takes any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A crash handler walks
+    // structures the fault may already have corrupted, so that is exactly the read it needs.
     if unsafe { safe_read_u32(nt) }? != 0x0000_4550 {
         return None;
     }
@@ -916,20 +955,32 @@ unsafe fn pe_nt_headers(base: usize) -> Option<usize> {
 /// `SizeOfImage` of the module mapped at `base`: how many bytes the loader mapped it over.
 #[cfg(windows)]
 unsafe fn pe_size_of_image(base: usize) -> Option<usize> {
+    // SAFETY: these PE walkers read through `safe_read_*`, which fails closed on any address --
+    // so a base that is not a mapped image answers None rather than faulting.
     let nt = unsafe { pe_nt_headers(base) }?;
     let optional = nt + PE_OPTIONAL_HEADER_FROM_NT;
+    // SAFETY: `safe_read_*` takes any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A crash handler walks
+    // structures the fault may already have corrupted, so that is exactly the read it needs.
     unsafe { safe_read_u32(optional + PE_SIZE_OF_IMAGE_IN_OPTIONAL) }.map(|size| size as usize)
 }
 
 /// The COFF `TimeDateStamp` of the module mapped at `base`: a per-build watermark, not a date.
 #[cfg(windows)]
 unsafe fn pe_timedatestamp(base: usize) -> Option<u32> {
+    // SAFETY: these PE walkers read through `safe_read_*`, which fails closed on any address --
+    // so a base that is not a mapped image answers None rather than faulting.
     let nt = unsafe { pe_nt_headers(base) }?;
+    // SAFETY: `safe_read_*` takes any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A crash handler walks
+    // structures the fault may already have corrupted, so that is exactly the read it needs.
     unsafe { safe_read_u32(nt + PE_TIMEDATESTAMP_FROM_NT) }
 }
 
 #[cfg(windows)]
 unsafe extern "system" fn crash_vectored_handler(info: *mut ExceptionPointersMin) -> i32 {
+    // SAFETY: `info` is the pointer Windows handed this filter, valid for the call; `from_raw`
+    // null-checks it and every field it reaches before dereferencing anything.
     let Some(snapshot) = (unsafe { ExceptionSnapshot::from_raw(info) }) else {
         return EXCEPTION_CONTINUE_SEARCH;
     };
@@ -976,6 +1027,8 @@ unsafe extern "system" fn unhandled_exception_filter(info: *mut ExceptionPointer
     if !first_entry {
         return chain_previous_unhandled_filter(info);
     }
+    // SAFETY: `info` is the pointer Windows handed this filter, valid for the call; `from_raw`
+    // null-checks it and every field it reaches before dereferencing anything.
     if let Some(snapshot) = unsafe { ExceptionSnapshot::from_raw(info) } {
         let repeat = current_site_count(snapshot.code, snapshot.address);
         let report = exception_report(&snapshot, "unhandled-exception-fatal", repeat);
@@ -983,6 +1036,8 @@ unsafe extern "system" fn unhandled_exception_filter(info: *mut ExceptionPointer
         append_log(format_args!("{report}\n---"));
     }
     write_module_inventory("fatal");
+    // SAFETY: `info` is the filter's own pointer, forwarded unchanged to a function whose contract
+    // is exactly that it receives one.
     unsafe { write_minidump_named(config().minidump_file_name, info) };
     chain_previous_unhandled_filter(info)
 }
@@ -995,7 +1050,11 @@ unsafe extern "system" fn unhandled_exception_filter(info: *mut ExceptionPointer
 fn chain_previous_unhandled_filter(info: *mut ExceptionPointersMin) -> i32 {
     let previous = PREVIOUS_UNHANDLED_FILTER.load(Ordering::SeqCst);
     if previous != 0 {
+        // SAFETY: `previous` is non-zero and is whatever `SetUnhandledExceptionFilter` returned
+        // when this crate installed its own -- by that API's contract, a filter of this exact
+        // signature. Nothing else writes the static.
         let chained: UnhandledExceptionFilter = unsafe { std::mem::transmute(previous) };
+        // SAFETY: as above, passing on the pointer Windows gave us untouched.
         return unsafe { chained(info) };
     }
     EXCEPTION_CONTINUE_SEARCH
@@ -1029,10 +1088,14 @@ impl ExceptionSnapshot {
         if info.is_null() {
             return None;
         }
+        // SAFETY: `info` was just checked non-null, and Windows hands an exception filter a
+        // pointer to a structure it owns for the duration of the call.
         let pointers = unsafe { &*info };
         if pointers.exception_record.is_null() {
             return None;
         }
+        // SAFETY: as above -- checked non-null on the line before, and the record lives as long as
+        // the filter call does.
         let record = unsafe { &*pointers.exception_record };
         let mut out = Self {
             code: record.exception_code,
@@ -1047,6 +1110,7 @@ impl ExceptionSnapshot {
             rdx: 0,
             r8: 0,
             r9: 0,
+            // SAFETY: `GetCurrentThreadId` takes nothing and touches no memory of ours.
             thread_id: unsafe { GetCurrentThreadId() as usize },
             params: [0; CPP_EH_PARAMS_KEPT],
             param_count: record.number_parameters as usize,
@@ -1064,6 +1128,9 @@ impl ExceptionSnapshot {
         }
         if !pointers.context_record.is_null() {
             let base = pointers.context_record as *const u8;
+            // SAFETY: `base` is the non-null `CONTEXT` Windows supplied, and every offset passed
+            // is a `CONTEXT_*` constant inside that structure -- so each read is within the
+            // record the filter was handed, which outlives this call.
             let read_reg = |off: usize| unsafe { *(base.add(off) as *const u64) as usize };
             out.rax = read_reg(CONTEXT_RAX_OFFSET);
             out.rcx = read_reg(CONTEXT_RCX_OFFSET);
@@ -1180,6 +1247,7 @@ pub fn is_reportable_exception(code: u32) -> bool {
     ) || (code & EXCEPTION_SEVERITY_MASK) == EXCEPTION_SEVERITY_MASK
 }
 
+/// The Windows name for an exception code, or a hex rendering when it is not one this knows.
 pub fn exception_code_label(code: u32) -> &'static str {
     match code {
         EXCEPTION_ACCESS_VIOLATION => "STATUS_ACCESS_VIOLATION",
@@ -1237,6 +1305,8 @@ fn write_cpp_throw_fields(
         image_base,
         module_tag(image_base, modules)
     );
+    // SAFETY: both arguments came out of the exception record this handler was handed, and the
+    // function reads every hop through `safe_read_*`, which fails closed rather than faulting.
     match unsafe { read_thrown_type_name(throw_info, image_base) } {
         Some(raw) => {
             let _ = writeln!(out, "cpp_throw_type={}", format_thrown_type_name(&raw));
@@ -1246,6 +1316,8 @@ fn write_cpp_throw_fields(
             let _ = writeln!(out, "cpp_throw_type=<unresolved>");
         }
     }
+    // SAFETY: `object` is the thrown pointer from the exception record, and `read_hex_preview`
+    // reads it through `safe_read_*` -- a freed or bogus object yields a short preview, not a fault.
     let _ = writeln!(out, "cpp_throw_object_bytes={}", unsafe {
         read_hex_preview(object, THROWN_OBJECT_PREVIEW_BYTES)
     });
@@ -1260,20 +1332,32 @@ unsafe fn read_thrown_type_name(throw_info: usize, image_base: usize) -> Option<
     if throw_info < MIN_VALID_PTR || image_base < MIN_VALID_PTR {
         return None;
     }
+    // SAFETY: `safe_read_*` takes any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A crash handler walks
+    // structures the fault may already have corrupted, so that is exactly the read it needs.
     let array_rva = unsafe { safe_read_u32(throw_info + THROW_INFO_CATCHABLE_ARRAY_OFFSET) }?;
     if array_rva == 0 {
         return None;
     }
     let array = image_base + array_rva as usize;
+    // SAFETY: `safe_read_*` takes any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A crash handler walks
+    // structures the fault may already have corrupted, so that is exactly the read it needs.
     let count = unsafe { safe_read_u32(array) }?;
     if count == 0 {
         return None;
     }
+    // SAFETY: `safe_read_*` takes any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A crash handler walks
+    // structures the fault may already have corrupted, so that is exactly the read it needs.
     let first_rva = unsafe { safe_read_u32(array + CATCHABLE_ARRAY_FIRST_TYPE_OFFSET) }?;
     if first_rva == 0 {
         return None;
     }
     let catchable = image_base + first_rva as usize;
+    // SAFETY: `safe_read_*` takes any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A crash handler walks
+    // structures the fault may already have corrupted, so that is exactly the read it needs.
     let descriptor_rva = unsafe { safe_read_u32(catchable + CATCHABLE_TYPE_DESCRIPTOR_OFFSET) }?;
     if descriptor_rva == 0 {
         return None;
@@ -1286,6 +1370,9 @@ unsafe fn read_thrown_type_name(throw_info: usize, image_base: usize) -> Option<
     // `<unresolved>` for a long template name would throw away the only evidence in the record.
     let mut bytes = Vec::with_capacity(TYPE_DESCRIPTOR_NAME_MAX);
     for index in 0..TYPE_DESCRIPTOR_NAME_MAX {
+        // SAFETY: `safe_read_*` takes any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A crash handler walks
+        // structures the fault may already have corrupted, so that is exactly the read it needs.
         match unsafe { ds2_game_base::mem::safe_read_u8(name_addr + index) } {
             Some(0) | None => break,
             Some(byte) => bytes.push(byte),
@@ -1306,6 +1393,9 @@ unsafe fn read_hex_preview(addr: usize, len: usize) -> String {
     }
     let mut out = String::with_capacity(len * 2);
     for index in 0..len {
+        // SAFETY: `safe_read_*` takes any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A crash handler walks
+        // structures the fault may already have corrupted, so that is exactly the read it needs.
         match unsafe { ds2_game_base::mem::safe_read_u8(addr + index) } {
             Some(byte) => {
                 let _ = fmt::Write::write_fmt(&mut out, format_args!("{byte:02x}"));
@@ -1331,6 +1421,7 @@ pub(crate) fn utc_timestamp() -> String {
         second: 0,
         milliseconds: 0,
     };
+    // SAFETY: `now` is a live local of the layout the API expects, which it fills in.
     unsafe { GetSystemTime(&mut now) };
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
@@ -1361,6 +1452,8 @@ fn write_module_inventory(reason: &str) {
     let modules = loaded_modules();
     let _ = writeln!(out, "module_count={}", modules.len());
     for module in &modules {
+        // SAFETY: these PE walkers read through `safe_read_*`, which fails closed on any address --
+        // so a base that is not a mapped image answers None rather than faulting.
         let stamp = unsafe { pe_timedatestamp(module.base) }.unwrap_or(0);
         let _ = writeln!(
             out,
@@ -1394,14 +1487,22 @@ pub(crate) unsafe fn write_minidump_named(file_name: &str, info: *mut ExceptionP
         callback_param: *const c_void,
     ) -> i32;
 
+    // SAFETY: the argument is a NUL-terminated `c""` literal; a missing library answers null,
+
+    // checked on the next line.
+
     let dbghelp = unsafe { LoadLibraryA(c"dbghelp.dll".as_ptr().cast()) };
     if dbghelp.is_null() {
         return;
     }
+    // SAFETY: `dbghelp` was just checked non-null and the symbol is a `c""` literal. A missing
+    // export answers null, checked on the next line.
     let entry = unsafe { GetProcAddress(dbghelp, c"MiniDumpWriteDump".as_ptr().cast()) };
     if entry.is_null() {
         return;
     }
+    // SAFETY: `entry` is non-null and is `dbghelp!MiniDumpWriteDump`, whose signature is what
+    // `MiniDumpWriteDumpFn` transcribes.
     let write_dump: MiniDumpWriteDumpFn = unsafe { std::mem::transmute(entry) };
 
     /// One `MiniDumpWriteDump` attempt, with a sentinel around it.
@@ -1423,6 +1524,9 @@ pub(crate) unsafe fn write_minidump_named(file_name: &str, info: *mut ExceptionP
         let sentinel = sentinel_path();
         // The RUNG, not the flags -- rungs 1 and 2 share MINIDUMP_NORMAL and must ban separately.
         let _ = fs::write(&sentinel, rung.to_string());
+        // SAFETY: `write_dump` is the resolved export; the process handle and id come from Win32 calls
+        // that need no validation, `file` is the open handle from `CreateFileW` above, and
+        // `exception_param` is either null or the record this handler was handed.
         let ok = unsafe {
             write_dump(
                 GetCurrentProcess(),
@@ -1441,6 +1545,8 @@ pub(crate) unsafe fn write_minidump_named(file_name: &str, info: *mut ExceptionP
     let path = path_for(file_name);
     let mut wide: Vec<u16> = path.to_string_lossy().encode_utf16().collect();
     wide.push(0);
+    // SAFETY: `wide` is a NUL-terminated UTF-16 local that outlives the call, and every other
+    // argument is a constant or null. A failure answers `INVALID_HANDLE_VALUE`, checked below.
     let file = unsafe {
         CreateFileW(
             wide.as_ptr(),
@@ -1455,12 +1561,14 @@ pub(crate) unsafe fn write_minidump_named(file_name: &str, info: *mut ExceptionP
     if file == INVALID_HANDLE_VALUE {
         append_log(format_args!(
             "minidump create failed last_error={} path={}",
+            // SAFETY: `GetLastError` takes nothing and reads only this thread's own error slot.
             unsafe { GetLastError() },
             path.display()
         ));
         return;
     }
     let exception = MinidumpExceptionInformation {
+        // SAFETY: `GetCurrentThreadId` takes nothing and touches no memory of ours.
         thread_id: unsafe { GetCurrentThreadId() },
         exception_pointers: info,
         client_pointers: 0,
@@ -1514,6 +1622,7 @@ pub(crate) unsafe fn write_minidump_named(file_name: &str, info: *mut ExceptionP
         dump_type = *flags;
         attempted += 1;
         ok = attempt_dump(write_dump, file, rung, dump_type, *param);
+        // SAFETY: `GetLastError` takes nothing and reads only this thread's own error slot.
         last_error = unsafe { GetLastError() };
         if ok != 0 {
             break;
@@ -1528,12 +1637,14 @@ pub(crate) unsafe fn write_minidump_named(file_name: &str, info: *mut ExceptionP
     let rich_error = last_error;
     let normal_error = last_error;
     let final_error = last_error;
+    // SAFETY: `file` is the handle `CreateFileW` opened above and has not been closed yet.
     unsafe { CloseHandle(file) };
     // `CreateFileW` above already created the file, so a failed dump leaves a 0-byte `.dmp` on
     // disk. That empty file is worse than no file: it is indistinguishable from a captured dump
     // until someone opens it, and users dutifully collect and send it. Delete it, so the ONLY
     // `.dmp` that ever exists is one with a dump in it.
     if ok == 0 {
+        // SAFETY: the same NUL-terminated UTF-16 local, still alive.
         let removed = unsafe { DeleteFileW(wide.as_ptr()) } != 0;
         append_log(format_args!(
             "minidump write FAILED -- no dump exists. rich_last_error={rich_error} \
@@ -1567,6 +1678,8 @@ fn phase_label(phase: usize) -> &'static str {
 #[cfg(windows)]
 fn capture_callers(modules: &[LoadedModule]) -> String {
     let mut frames = [std::ptr::null_mut::<c_void>(); STACK_TRACE_FRAME_COUNT];
+    // SAFETY: `frames` is a live local array and the count passed is its own length, so the API
+    // writes only inside it.
     let captured = unsafe {
         RtlCaptureStackBackTrace(
             STACK_TRACE_FRAMES_TO_SKIP,
@@ -1605,6 +1718,8 @@ fn scan_stack_modules(rsp: usize, modules: &[LoadedModule]) -> String {
         if emitted >= STACK_SCAN_MAX_FRAMES {
             break;
         }
+        // SAFETY: `safe_read_usize` takes any address and fails closed -- walking a stack after a
+        // fault is exactly the case that needs a read which cannot fault again.
         let Some(value) = (unsafe {
             ds2_game_base::mem::safe_read_usize(rsp + slot * std::mem::size_of::<usize>())
         }) else {
@@ -1633,6 +1748,9 @@ fn scan_stack_raw(rsp: usize, modules: &[LoadedModule]) -> String {
         if i != 0 {
             out.push(',');
         }
+        // SAFETY: `safe_read_*` takes any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A crash handler walks
+        // structures the fault may already have corrupted, so that is exactly the read it needs.
         match unsafe { ds2_game_base::mem::safe_read_usize(rsp + i * std::mem::size_of::<usize>()) }
         {
             Some(value) => out.push_str(&format!("0x{:x}{}", value, module_tag(value, modules))),
@@ -1707,6 +1825,9 @@ const MODULE_NAME_MAX_WCHARS: usize = 260;
 #[inline(always)]
 fn current_peb() -> usize {
     let peb: usize;
+    // SAFETY: `gs:[0x60]` is the x86-64 Windows TEB slot holding the PEB pointer -- an
+    // architectural constant, read into a local. `nostack` and `preserves_flags` are both true of
+    // a single `mov`.
     unsafe {
         core::arch::asm!(
             "mov {peb}, gs:[0x60]",
@@ -1724,10 +1845,16 @@ pub(crate) fn loaded_modules() -> Vec<LoadedModule> {
     if peb < MIN_VALID_PTR {
         return modules;
     }
+    // SAFETY: `safe_read_*` takes any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A crash handler walks
+    // structures the fault may already have corrupted, so that is exactly the read it needs.
     let Some(ldr) = (unsafe { ds2_game_base::mem::safe_read_usize(peb + PEB_LDR_OFFSET) }) else {
         return modules;
     };
     let list_head = ldr + PEB_LDR_IN_MEMORY_ORDER_LIST_OFFSET;
+    // SAFETY: `safe_read_*` takes any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A crash handler walks
+    // structures the fault may already have corrupted, so that is exactly the read it needs.
     let Some(mut node) = (unsafe { ds2_game_base::mem::safe_read_usize(list_head) }) else {
         return modules;
     };
@@ -1735,11 +1862,17 @@ pub(crate) fn loaded_modules() -> Vec<LoadedModule> {
     while node != list_head && node >= MIN_VALID_PTR && count < MODULE_WALK_MAX {
         let entry = node - LDR_ENTRY_IN_MEMORY_ORDER_LINKS_OFFSET;
         let base =
+            // SAFETY: `safe_read_*` takes any address and fails closed on an unmapped one -- it reads
+            // through `ReadProcessMemory`, which validates the range in the kernel. A crash handler walks
+            // structures the fault may already have corrupted, so that is exactly the read it needs.
             unsafe { ds2_game_base::mem::safe_read_usize(entry + LDR_ENTRY_DLL_BASE_OFFSET) }
                 .unwrap_or(0);
         // `SizeOfImage` is a `ULONG` in the entry, so only the low half of the qword read is the
         // span; the high half is the next field.
         let size =
+            // SAFETY: `safe_read_*` takes any address and fails closed on an unmapped one -- it reads
+            // through `ReadProcessMemory`, which validates the range in the kernel. A crash handler walks
+            // structures the fault may already have corrupted, so that is exactly the read it needs.
             unsafe { safe_read_u32(entry + LDR_ENTRY_SIZE_OF_IMAGE_OFFSET) }.unwrap_or(0) as usize;
         if base != 0 && size != 0 {
             modules.push(LoadedModule {
@@ -1748,6 +1881,9 @@ pub(crate) fn loaded_modules() -> Vec<LoadedModule> {
                 name: read_module_base_name(entry),
             });
         }
+        // SAFETY: `safe_read_*` takes any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A crash handler walks
+        // structures the fault may already have corrupted, so that is exactly the read it needs.
         let Some(next) = (unsafe { ds2_game_base::mem::safe_read_usize(node) }) else {
             break;
         };
@@ -1768,8 +1904,14 @@ pub(crate) fn loaded_modules() -> Vec<LoadedModule> {
 #[cfg(all(windows, target_arch = "x86_64"))]
 fn read_module_base_name(entry: usize) -> String {
     let name_field = entry + LDR_ENTRY_BASE_DLL_NAME_OFFSET;
+    // SAFETY: `safe_read_*` takes any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A crash handler walks
+    // structures the fault may already have corrupted, so that is exactly the read it needs.
     let len_bytes = unsafe { ds2_game_base::mem::safe_read_u16(name_field) }.unwrap_or(0) as usize;
     let Some(buffer) =
+        // SAFETY: `safe_read_*` takes any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A crash handler walks
+        // structures the fault may already have corrupted, so that is exactly the read it needs.
         (unsafe { ds2_game_base::mem::safe_read_usize(name_field + UNICODE_STRING_BUFFER_OFFSET) })
     else {
         return String::new();
@@ -1780,6 +1922,8 @@ fn read_module_base_name(entry: usize) -> String {
     let wchars = (len_bytes / std::mem::size_of::<u16>()).min(MODULE_NAME_MAX_WCHARS);
     let mut units = Vec::with_capacity(wchars);
     for index in 0..wchars {
+        // SAFETY: any address, fails closed -- so a truncated or unmapped string ends the walk
+        // rather than faulting inside the crash handler.
         match unsafe {
             ds2_game_base::mem::safe_read_u16(buffer + index * std::mem::size_of::<u16>())
         } {

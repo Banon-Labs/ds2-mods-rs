@@ -195,18 +195,21 @@ pub fn open_fresh_run_append(path: &Path) -> Option<fs::File> {
         .ok()
 }
 
-/// Append one line to `path`, creating it if absent and truncating it once per
-/// process. Opens/appends/closes per call (simple, low-frequency callers). For hot
-/// paths prefer a caller-owned persistent handle over [`open_fresh_run_append`].
+/// Append one line to `path`, creating it if absent.
+///
+/// Truncated once per process, and opened, appended and closed per call -- simple, and priced for
+/// low-frequency callers. For a hot path prefer a caller-owned persistent handle over
+/// [`open_fresh_run_append`].
 pub fn append_line(path: &std::path::Path, args: std::fmt::Arguments<'_>) {
     if let Some(mut file) = open_fresh_run_append(path) {
         let _ = writeln!(file, "{args}");
     }
 }
 
-/// Truncate-then-open `path` for a clean per-process log, invoking `header` to
-/// write a banner line once. Returns the open handle so the caller can retain a
-/// persistent `Mutex<Option<File>>` and avoid per-call open/close syscalls.
+/// Truncate-then-open `path` for a clean per-process log.
+///
+/// `header` is invoked once to write a banner line. The open handle comes back so the caller can
+/// retain a persistent `Mutex<Option<File>>` and avoid per-call open/close syscalls.
 ///
 /// Routes through [`begin_fresh_run`] so the previous run's file is rotated aside
 /// rather than destroyed, matching every other writer.

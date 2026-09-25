@@ -65,6 +65,10 @@ impl std::fmt::Display for UrlRejection {
 /// of a browser's address bar has the scheme and one recited from memory does not. Trailing
 /// slashes, query strings and whitespace are tolerated; a fragment is not, and
 /// [`UrlRejection::FragmentForm`] says why.
+/// # Errors
+///
+/// The [`UrlRejection`] naming which way the link failed -- empty, a fragment form, the wrong
+/// host, or no build id where one should be.
 pub fn build_id_from_url(url: &str) -> Result<u32, UrlRejection> {
     let trimmed = url.trim();
     if trimmed.is_empty() {

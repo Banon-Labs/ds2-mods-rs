@@ -87,6 +87,8 @@ pub unsafe fn install() -> Outcome {
         return refused;
     }
     // SAFETY: MinHook's own initialiser; idempotent, and other features in this DLL may have run it.
+    // SAFETY: `MH_Initialize` takes no arguments and is documented as safe to call again on an
+    // already-initialised library, which the status below distinguishes.
     let status = unsafe { MH_Initialize() };
     if status != MH_STATUS::MH_OK && status != MH_STATUS::MH_ERROR_ALREADY_INITIALIZED {
         log(format_args!(
@@ -103,6 +105,8 @@ pub unsafe fn install() -> Outcome {
     // SAFETY: `site` has been proven to hold this function's own prologue, and `save_load_update`
     // matches the ABI recorded with that prologue. The trampoline is stored before the hook is
     // enabled, so the detour can never run without one.
+    // SAFETY: the target is an RVA this crate validated against the prologue it expects before
+    // reaching here, and the detour is a `'static` fn item of the matching ABI.
     let hook = match unsafe { MhHook::new(site as *mut c_void, save_load_update as *mut c_void) } {
         Ok(hook) => hook,
         Err(status) => {
@@ -153,6 +157,8 @@ unsafe extern "system" fn save_load_update(system: usize, delta: f32) {
         // SAFETY: `raw` is MinHook's trampoline for this exact function, stored before the hook was
         // enabled, and the signature is the one the prologue check proved.
         let original: SaveLoadUpdate = unsafe { std::mem::transmute::<usize, SaveLoadUpdate>(raw) };
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(system, delta) };
     }
 }

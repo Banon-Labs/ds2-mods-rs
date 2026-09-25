@@ -58,9 +58,12 @@
 //! A shortcut nobody pressed anything for still plays the title music and the menu's confirm
 //! sounds, which is conspicuous. `[continue] silence = true` holds FMOD's master channel group at
 //! zero from install until `FeSubStateTitleStartIngame`, then restores the volume the game itself
-//! had applied. See [`silence`] for how that lever was found and why the four approaches before it
+//! had applied. See `silence` for how that lever was found and why the four approaches before it
 //! failed.
 
+// DEBT: ds2-mods-rs-24r -- not debt to be paid: this crate ships as a Windows DLL and the
+// attribute is what keeps its Rust half parseable on the host, so the game-free tests below it
+// can run at all. The issue is the standing record of that decision.
 #![cfg_attr(not(windows), allow(unused))]
 
 #[cfg(windows)]

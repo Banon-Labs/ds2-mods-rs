@@ -73,6 +73,9 @@
 //! inside the infusion container and only weapons and shields have one. Marking armour would need
 //! a second element in a second container and a second fingerprint.
 
+// DEBT: ds2-mods-rs-24r -- not debt to be paid: this crate ships as a Windows DLL and the
+// attribute is what keeps its Rust half parseable on the host, so the game-free tests below it
+// can run at all. The issue is the standing record of that decision.
 #![cfg_attr(not(windows), allow(unused))]
 
 #[cfg(windows)]

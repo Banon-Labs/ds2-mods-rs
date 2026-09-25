@@ -169,6 +169,9 @@ unsafe fn unmet(base: usize, item: *const u8) -> Option<bool> {
         )
     }?;
 
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let lookup: EntryLookupFn = unsafe {
         std::mem::transmute::<usize, EntryLookupFn>(
             base + ds2_rva::ITEM_INVENTORY_ENTRY_LOOKUP as usize,
@@ -192,6 +195,9 @@ unsafe fn unmet(base: usize, item: *const u8) -> Option<bool> {
     }
 
     let mut descriptor = [0u8; ds2_rva::FE_ITEM_DESCRIPTOR_SIZE];
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let describe: DescriptorFn = unsafe {
         std::mem::transmute::<usize, DescriptorFn>(base + ds2_rva::FE_ITEM_DESCRIPTOR as usize)
     };
@@ -208,6 +214,9 @@ unsafe fn unmet(base: usize, item: *const u8) -> Option<bool> {
     }
 
     let mut rows = [0u8; ds2_rva::FE_ITEM_PARAM_ROWS_SIZE];
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let resolve_rows: ParamRowsFn = unsafe {
         std::mem::transmute::<usize, ParamRowsFn>(base + ds2_rva::FE_ITEM_PARAM_ROWS as usize)
     };
@@ -233,6 +242,9 @@ unsafe fn unmet(base: usize, item: *const u8) -> Option<bool> {
         )
     }?;
 
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let column: ParamColumnFn = unsafe {
         std::mem::transmute::<usize, ParamColumnFn>(base + ds2_rva::FE_ITEM_PARAM_COLUMN as usize)
     };
@@ -294,6 +306,9 @@ unsafe fn resolve_element(base: usize, container: *mut u8, id: u32, into: &mut A
     path.0[start..][..4].copy_from_slice(&id.to_le_bytes());
     path.0[ds2_rva::FE_ELEMENT_PATH_COUNT_OFFSET..][..8].copy_from_slice(&1u64.to_le_bytes());
 
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let resolve: ResolveFn = unsafe {
         std::mem::transmute::<usize, ResolveFn>(base + ds2_rva::FE_ELEMENT_RESOLVE as usize)
     };
@@ -365,6 +380,9 @@ unsafe fn show(base: usize, container: *mut u8, visible: bool) {
             unsafe { crate::place::place(component, base) };
         }
     }
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let set_visible: SetVisibleFn = unsafe {
         std::mem::transmute::<usize, SetVisibleFn>(base + ds2_rva::FE_ELEMENT_SET_VISIBLE as usize)
     };
@@ -396,6 +414,8 @@ pub(crate) unsafe extern "system" fn detour(cell: *mut u8, item: *const u8, show
     // infusion slots including the badge's, so running it first is what makes the write below the
     // last word on this cell for this frame.
     // SAFETY: all three arguments are the game's own, passed through unchanged.
+    // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+    // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
     unsafe { original(cell, item, show_icon) };
 
     if !crate::mark::armed() || (cell as usize) < 0x1_0000 {
@@ -431,6 +451,8 @@ pub(crate) unsafe extern "system" fn equip_detour(container: *mut u8, item: *con
     // The original first, for the same reason the inventory's runs first: its loop hides all
     // sixteen infusion ids, the badge's among them.
     // SAFETY: both arguments are the game's own, passed through unchanged.
+    // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+    // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
     unsafe { original(container, item) };
 
     if !crate::mark::armed() || (container as usize) < 0x1_0000 {

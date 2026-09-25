@@ -110,6 +110,7 @@ impl SlotKind {
 /// One thing a build wants in one place.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PlannedSlot {
+    /// Which family of slot this is -- weapon, armour, ring, consumable.
     pub kind: SlotKind,
     /// Which position within the family, counting from zero.
     pub position: usize,

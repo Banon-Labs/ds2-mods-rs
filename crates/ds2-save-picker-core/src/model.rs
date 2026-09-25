@@ -11,8 +11,8 @@
 //!
 //! | stage | rows | what activating one means |
 //! |---|---|---|
-//! | [`Stage::Files`] | `[..]`, then folders, then saves | walk into it, or choose it |
-//! | [`Stage::Characters`] | the container's ten slots, then `[back]` | load that character |
+//! | `Stage::Files` | `[..]`, then folders, then saves | walk into it, or choose it |
+//! | `Stage::Characters` | the container's ten slots, then `[back]` | load that character |
 //!
 //! A pick that fails its content gate never leaves the file stage: the refusal becomes the
 //! picker's status message and the listing is exactly where the player left it.
@@ -60,11 +60,18 @@ pub const CHARACTER_BACK_ROW: usize = SLOT_COUNT;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PickerEntry {
     /// A subdirectory. Always listed -- a folder is where the next save lives.
-    Dir { name: String, path: PathBuf },
-    /// A file whose extension the cheap gate accepted. Whether it is a save it can READ is not
+    Dir {
+        /// The leaf, as the row shows it.
+        name: String,
+        /// Where descending goes.
+        path: PathBuf,
+    },
+    /// A file whose extension the cheap gate accepted. Whether it is a save it can read is not
     /// decided here; that costs a decrypt per file and is decided when one is picked.
     File {
+        /// The leaf, as the row shows it.
         name: String,
+        /// What gets staged if this row is picked.
         path: PathBuf,
         /// When it was last written, for the newest-first order. `None` when the listing build
         /// could not read the metadata, which sorts it to the bottom rather than dropping it.
@@ -73,12 +80,14 @@ pub enum PickerEntry {
 }
 
 impl PickerEntry {
+    /// The leaf shown on the row, whichever variant this is.
     pub fn name(&self) -> &str {
         match self {
             PickerEntry::Dir { name, .. } | PickerEntry::File { name, .. } => name,
         }
     }
 
+    /// Where the row points, whichever variant this is.
     pub fn path(&self) -> &Path {
         match self {
             PickerEntry::Dir { path, .. } | PickerEntry::File { path, .. } => path,
@@ -114,7 +123,12 @@ pub enum PickerActivation {
     /// staging step unwraps it.
     PickedFile(PathBuf),
     /// A character in a container. `slot` is the game's own slot number.
-    PickedCharacter { path: PathBuf, slot: usize },
+    PickedCharacter {
+        /// The container the character was read out of.
+        path: PathBuf,
+        /// Which slot in it, as the game numbers them.
+        slot: usize,
+    },
     /// The rows changed -- new directory, new stage, new scroll window. Re-render.
     Repopulate,
     /// Nothing happened. A refused pick leaves its reason in
@@ -173,6 +187,7 @@ impl SavePickerModel {
     // Where we are.
     // -------------------------------------------------------------------------------------
 
+    /// The directory whose contents the rows are currently listing.
     pub fn current_dir(&self) -> &Path {
         &self.current_dir
     }
@@ -203,10 +218,12 @@ impl SavePickerModel {
         self.character_slots().get(slot)
     }
 
+    /// Everything the current directory offers, in the order the rows show it.
     pub fn entries(&self) -> &[PickerEntry] {
         &self.entries
     }
 
+    /// How many of those there are -- not the row count, which adds the back row.
     pub fn entry_count(&self) -> usize {
         self.entries.len()
     }
@@ -276,6 +293,7 @@ impl SavePickerModel {
         self.entries.get(start..end).unwrap_or(&[])
     }
 
+    /// How many rows the surface said it can draw.
     pub fn row_capacity(&self) -> usize {
         self.row_capacity
     }
@@ -361,6 +379,7 @@ impl SavePickerModel {
     // Cursor and scrolling.
     // -------------------------------------------------------------------------------------
 
+    /// The row the highlight is on.
     pub fn cursor(&self) -> usize {
         self.cursor
     }
@@ -373,10 +392,12 @@ impl SavePickerModel {
         }
     }
 
+    /// How far the entry window has been scrolled.
     pub fn scroll_offset(&self) -> usize {
         self.scroll_offset
     }
 
+    /// The furthest that offset can go before the last entry is on screen.
     pub fn scroll_max(&self) -> usize {
         self.max_scroll_offset()
     }
@@ -491,6 +512,11 @@ impl SavePickerModel {
     /// Re-runs [`crate::reason::accept_slots`] even when [`accepts_pick`] just did. It is one
     /// pass over ten records, and one place deciding "these slots are worth showing" is worth
     /// more than the pass it costs.
+    ///
+    /// # Errors
+    ///
+    /// The [`PickRejection`] [`crate::reason::accept_slots`] produced, when the container holds
+    /// nothing worth showing. The picker stays in the file stage.
     pub fn show_characters(
         &mut self,
         path: &Path,
@@ -543,14 +569,17 @@ impl SavePickerModel {
     // Status and listing.
     // -------------------------------------------------------------------------------------
 
+    /// Whatever the last refused pick left behind, if it has not been cleared.
     pub fn status_message(&self) -> Option<&PickerStatusMessage> {
         self.status_message.as_ref()
     }
 
+    /// Replace it.
     pub fn set_status_message(&mut self, message: PickerStatusMessage) {
         self.status_message = Some(message);
     }
 
+    /// Drop it, so the next render shows nothing.
     pub fn clear_status_message(&mut self) {
         self.status_message = None;
     }

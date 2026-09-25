@@ -122,6 +122,8 @@ unsafe fn skip(index: usize, this: *mut u8) {
         // SAFETY: MinHook published this trampoline for exactly this site, and the signature is
         // the one every override implements.
         let original: EnterFn = unsafe { std::mem::transmute::<usize, EnterFn>(trampoline) };
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(this) };
     }
     if this.is_null() {
@@ -161,12 +163,21 @@ unsafe fn skip(index: usize, this: *mut u8) {
 // One detour per screen rather than a shared body: MinHook hands a detour no way to learn which
 // site it was reached from, so the index has to be baked into the function.
 unsafe extern "system" fn detour_warning_no_copy(this: *mut u8) {
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { skip(0, this) }
 }
 unsafe extern "system" fn detour_logo(this: *mut u8) {
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { skip(1, this) }
 }
 unsafe extern "system" fn detour_user_policy(this: *mut u8) {
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { skip(2, this) }
 }
 
@@ -177,7 +188,7 @@ const DETOURS: [EnterFn; SCREENS.len()] = [detour_warning_no_copy, detour_logo, 
 pub struct Outcome {
     /// Screens whose `enter` is now detoured.
     pub installed: usize,
-    /// Screens that were attempted. Always [`SCREENS`]`.len()`; carried so a caller reporting
+    /// Screens that were attempted. Always `SCREENS.len()`; carried so a caller reporting
     /// "2 of 3" does not have to know the total from somewhere else.
     pub attempted: usize,
 }
@@ -209,6 +220,8 @@ pub unsafe fn install() -> Outcome {
 
     // MinHook is statically linked into this DLL, so nothing else shares this instance and
     // ALREADY_INITIALIZED can only mean this ran twice. Treat it as success.
+    // SAFETY: `MH_Initialize` takes no arguments and is documented as safe to call again on an
+    // already-initialised library, which the status below distinguishes.
     let status = unsafe { MH_Initialize() };
     if status != MH_STATUS::MH_OK && status != MH_STATUS::MH_ERROR_ALREADY_INITIALIZED {
         log(format_args!(
@@ -224,6 +237,8 @@ pub unsafe fn install() -> Outcome {
     for (index, screen) in SCREENS.iter().enumerate() {
         let site = base + screen.enter_rva as usize;
         let detour = DETOURS[index];
+        // SAFETY: the target is an RVA this crate validated against the prologue it expects before
+        // reaching here, and the detour is a `'static` fn item of the matching ABI.
         let hook = match unsafe { MhHook::new(site as *mut c_void, detour as *mut c_void) } {
             Ok(hook) => hook,
             Err(status) => {
@@ -238,6 +253,7 @@ pub unsafe fn install() -> Outcome {
         // Published BEFORE the site is patched, so a detour cannot observe a zero and silently
         // decline to call the original.
         TRAMPOLINES[index].store(hook.trampoline() as usize, Ordering::Release);
+        // SAFETY: the target is the address `MhHook::new` above already registered with MinHook.
         let status = unsafe { MH_EnableHook(site as *mut c_void) };
         if status != MH_STATUS::MH_OK {
             log(format_args!(

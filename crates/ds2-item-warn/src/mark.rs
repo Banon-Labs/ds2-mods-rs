@@ -307,6 +307,8 @@ pub(crate) unsafe extern "system" fn detour(
     let substitute = substitution(definition);
     // SAFETY: every argument is the game's own; only `definition` may have been replaced, and then
     // only by a `Container` this module built by copying the one it replaces.
+    // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+    // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
     unsafe { original(ctx, doc, substitute.unwrap_or(definition), parent) }
 }
 

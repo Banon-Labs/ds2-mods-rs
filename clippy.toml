@@ -1,0 +1,27 @@
+# Words `clippy::doc_markdown` must not demand backticks around.
+#
+# THE LINT IS RIGHT ABOUT ALMOST EVERYTHING IT FLAGS. `GameManagerImp`, `SLLoadContent`,
+# `FeSubStateTitleGameServerLogin` and the rest are identifiers in DARK SOULS II, and a comment
+# naming one without backticks reads as prose when it is a claim about the image. Those get fixed,
+# not excused.
+#
+# What is below is the other class: names that are camel-cased because that is how their owners
+# spell them, and that are not code in any program. Backticking `FromSoftware` would say the
+# company is an identifier. `..` keeps clippy's own default list (`OAuth`, `GitHub`, ...) and adds
+# these to it rather than replacing it.
+#
+# Add a word here only when it is a proper noun. If it names something that exists in an image, a
+# header or a crate, it wants backticks and belongs in the comment instead.
+doc-valid-idents = [
+    "..",
+    "DarkSoulsII",   # the shipped executable's own name
+    "DirectInput",   # Microsoft's API, spelled by Microsoft
+    "DirectInput8",  # the version of it DARK SOULS II links against
+    "DualShock",     # Sony's controller, spelled by Sony
+    "FromSoftware",  # the company
+    "MinHook",       # the detour library this workspace vendors
+    "SteamID64",     # Valve's name for the 64-bit account id format
+    "SteamStub",     # Valve's DRM wrapper, spelled by Valve
+    "WinHTTP",       # Microsoft's API, spelled by Microsoft
+    "XInput",        # Microsoft's API, spelled by Microsoft -- the gamepad half of DirectInput
+]

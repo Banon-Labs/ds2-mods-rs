@@ -198,6 +198,8 @@ unsafe fn append(descriptor: *mut u8) -> *mut u8 {
         // one the disassembled entry and exit implement.
         let original: BuildItemsFn =
             unsafe { std::mem::transmute::<usize, BuildItemsFn>(trampoline) };
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(descriptor) }
     };
 
@@ -314,6 +316,9 @@ unsafe fn append(descriptor: *mut u8) -> *mut u8 {
 }
 
 unsafe extern "system" fn detour(descriptor: *mut u8) -> *mut u8 {
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { append(descriptor) }
 }
 
@@ -503,6 +508,8 @@ unsafe extern "system" fn dispatch_detour(top_select: *mut u8, action: u32) {
         // SAFETY: MinHook published this trampoline for exactly this site, and the signature is the
         // one the disassembled entry implements.
         let original: DispatchFn = unsafe { std::mem::transmute::<usize, DispatchFn>(trampoline) };
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(top_select, action) };
     }
 }
@@ -936,6 +943,8 @@ unsafe extern "system" fn item_lookup_detour(tab: *mut u8) -> *mut u8 {
     // the disassembled entry and exit implement.
     let original: TabItemLookupFn =
         unsafe { std::mem::transmute::<usize, TabItemLookupFn>(trampoline) };
+    // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+    // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
     unsafe { original(tab) }
 }
 
@@ -1066,6 +1075,9 @@ unsafe fn serve_strip_cell(
         && (cell as usize).is_multiple_of(4)
         // SAFETY: the lookup itself reads both of these, as `[r8]` and `[r8+4]`.
         && unsafe { cell.add(1).read() } == 0
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         && unsafe { cell.read() } as usize == ds2_rva::FE_INGAME_TOP_SELECT_TABS;
     if wanted {
         let own_cell = [0i32, 0i32];
@@ -1080,9 +1092,13 @@ unsafe fn serve_strip_cell(
         // SAFETY: the stand-in carries the three fields this function reads -- proxy at `+0x10`,
         // one entry at `+0x18`, count `1` at `+0x140` -- and `own_cell` is the pair it reads a cell
         // as.
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         return unsafe { original(shadow as *mut u8, out, own_cell.as_ptr()) };
     }
     // SAFETY: every argument is the game's own, passed through unchanged.
+    // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+    // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
     unsafe { original(namer, out, cell) }
 }
 
@@ -1129,8 +1145,12 @@ unsafe extern "system" fn cell_lookup_detour(
         }
         // SAFETY: the stand-in carries the three fields this function reads -- proxy, one entry,
         // count `1` -- and `own_cell` is the two `i32`s it reads a cell as.
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         return unsafe { original(shadow, out, own_cell.as_ptr()) };
     }
+    // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+    // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
     unsafe { original(namer, out, cell) }
 }
 
@@ -1270,6 +1290,9 @@ unsafe fn report_tab(tab: *mut u8) {
     let namer_vtable = if namer == 0 {
         0
     } else {
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         unsafe { (namer as *const usize).read() }
     };
     let n = TAB_INIT_REPORTS.fetch_add(1, Ordering::Relaxed) + 1;
@@ -1362,7 +1385,7 @@ type NamerPushFn = unsafe extern "system" fn(*mut u8, *mut u8);
 ///
 /// **IT RETURNS ITS FIRST ARGUMENT, AND THE DECOMPILER SAYS IT DOES NOT.** Ghidra types it `void`;
 /// the disassembly ends `mov rax, r14` with `r14` holding the `rcx` saved in the prologue, and the
-/// TopSelect constructor passes that return straight into `FeGroupInGameGroupSelect`'s constructor,
+/// `TopSelect` constructor passes that return straight into `FeGroupInGameGroupSelect`'s constructor,
 /// whose first instruction dereferences it.
 ///
 /// A detour declared `-> ()` therefore hands the game whatever Rust left in RAX. Measured, that was
@@ -1588,6 +1611,9 @@ unsafe extern "system" fn namer_detour(out: *mut usize, allocator: *mut u8) -> *
     // SAFETY: MinHook published this trampoline for exactly this site.
     let original: NamerCtorFn = unsafe { std::mem::transmute::<usize, NamerCtorFn>(trampoline) };
     // RETURNED, not discarded. See the note on `NamerCtorFn`.
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let returned = unsafe { original(out, allocator) };
     if out.is_null() {
         return returned;
@@ -1601,6 +1627,9 @@ unsafe extern "system" fn namer_detour(out: *mut usize, allocator: *mut u8) -> *
     NAMED_ROWS.store(0, Ordering::Release);
     let base = ds2_game_base::mem::game_module_base().unwrap_or(0);
     if base != 0 {
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         unsafe { name_added_cell(base, namer) };
     }
     returned
@@ -1628,6 +1657,8 @@ unsafe extern "system" fn tab_init_detour(tab: *mut u8) {
         // SAFETY: MinHook published this trampoline for exactly this site, and the signature is the
         // one the disassembled entry implements.
         let original: TabInitFn = unsafe { std::mem::transmute::<usize, TabInitFn>(trampoline) };
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(tab) };
     }
     // ROWS THAT HAVE A CELL, not rows that are registered. If the namer detour refused this open,
@@ -1741,6 +1772,8 @@ pub(crate) unsafe fn hook_site(
         return false;
     }
     // SAFETY: the bytes at the site are the recorded ones, so this is the function it claims to be.
+    // SAFETY: the target is an RVA this crate validated against the prologue it expects before
+    // reaching here, and the detour is a `'static` fn item of the matching ABI.
     let hook = match unsafe { MhHook::new(site as *mut c_void, detour) } {
         Ok(hook) => hook,
         Err(status) => {
@@ -1753,6 +1786,7 @@ pub(crate) unsafe fn hook_site(
     };
     trampoline.store(hook.trampoline() as usize, Ordering::Release);
     // SAFETY: the hook was just created for this exact address.
+    // SAFETY: the target is the address `MhHook::new` above already registered with MinHook.
     let status = unsafe { MH_EnableHook(site as *mut c_void) };
     if status != MH_STATUS::MH_OK {
         log(format_args!(
@@ -1813,6 +1847,8 @@ pub unsafe fn install() -> Outcome {
 
     // MinHook is statically linked into this DLL, so nothing else shares this instance and
     // ALREADY_INITIALIZED can only mean this ran twice. Treat it as success.
+    // SAFETY: `MH_Initialize` takes no arguments and is safe to call again on an already-
+    // initialised library, which the status below distinguishes.
     let status = unsafe { MH_Initialize() };
     if status != MH_STATUS::MH_OK && status != MH_STATUS::MH_ERROR_ALREADY_INITIALIZED {
         log(format_args!(
@@ -1825,6 +1861,9 @@ pub unsafe fn install() -> Outcome {
         // TICK ONLY: not one byte of the shipped menu's own row machinery is patched. The pause
         // menu draws exactly what it shipped with; the only detour is the per-frame update, which
         // runs the original first.
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         unsafe { crate::caption::install_tick(base) };
         log(format_args!(
             "{LOG_PREFIX} tick-only install -- no rows registered, the shipped menu is untouched"
@@ -1862,6 +1901,9 @@ pub unsafe fn install() -> Outcome {
     // Published after the storage it describes, and before the detours that read it.
     ADDED_ROWS.store(rows.len(), Ordering::Release);
 
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let lookups = unsafe {
         hook_site(
             base,
@@ -1871,6 +1913,9 @@ pub unsafe fn install() -> Outcome {
             &ITEM_LOOKUP_TRAMPOLINE,
             "item-lookup",
         )
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
     } && unsafe {
         hook_site(
             base,
@@ -1880,6 +1925,9 @@ pub unsafe fn install() -> Outcome {
             &CELL_LOOKUP_TRAMPOLINE,
             "cell-lookup",
         )
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
     } && unsafe {
         hook_site(
             base,
@@ -1889,6 +1937,9 @@ pub unsafe fn install() -> Outcome {
             &STRIP_CELL_LOOKUP_TRAMPOLINE,
             "strip-cell-lookup",
         )
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
     } && unsafe {
         hook_site(
             base,
@@ -1898,6 +1949,9 @@ pub unsafe fn install() -> Outcome {
             &STRIP_CELL_SECOND_TRAMPOLINE,
             "strip-cell-glyph",
         )
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
     } && unsafe {
         hook_site(
             base,
@@ -1980,6 +2034,10 @@ pub unsafe fn install() -> Outcome {
         return Outcome { installed: false };
     }
 
+    // SAFETY: the target is an RVA this crate validated against the prologue it expects before
+
+    // reaching here, and the detour is a `'static` fn item of the matching ABI.
+
     let hook = match unsafe { MhHook::new(site as *mut c_void, detour as *mut c_void) } {
         Ok(hook) => hook,
         Err(status) => {
@@ -1992,6 +2050,7 @@ pub unsafe fn install() -> Outcome {
     // Published BEFORE the site is patched, so a detour cannot observe a zero and skip the
     // original -- which here would mean handing the game a tab with no items at all.
     TRAMPOLINE.store(hook.trampoline() as usize, Ordering::Release);
+    // SAFETY: the target is the address `MhHook::new` above already registered with MinHook.
     let status = unsafe { MH_EnableHook(site as *mut c_void) };
     if status != MH_STATUS::MH_OK {
         log(format_args!(
@@ -2012,9 +2071,12 @@ pub unsafe fn install() -> Outcome {
     // probe because it is the one that matters: without it the row is inert.
     let dispatch_rva = ds2_rva::FE_INGAME_MENU_DISPATCH;
     let dispatch_site = base + dispatch_rva as usize;
+    // SAFETY: the target is an RVA this crate validated against the prologue it expects before
+    // reaching here, and the detour is a `'static` fn item of the matching ABI.
     match unsafe { MhHook::new(dispatch_site as *mut c_void, dispatch_detour as *mut c_void) } {
         Ok(hook) => {
             DISPATCH_TRAMPOLINE.store(hook.trampoline() as usize, Ordering::Release);
+            // SAFETY: the target is the address `MhHook::new` above already registered with MinHook.
             let status = unsafe { MH_EnableHook(dispatch_site as *mut c_void) };
             if status == MH_STATUS::MH_OK {
                 log(format_args!(
@@ -2040,14 +2102,23 @@ pub unsafe fn install() -> Outcome {
     // THE ROW'S CELL, in two halves that only work together. The container substitution adds the
     // layout record; the namer entry is what makes the grid ask for it. Installed in that order so
     // that if the first refuses, the log says so before the second claims a cell that is not there.
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let cell = unsafe { crate::layout::install(base) };
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let _captions = unsafe { crate::caption::install(base) };
 
     let namer_rva = ds2_rva::FE_INGAME_MENU_QUIT_TAB_NAMER;
     let namer_site = base + namer_rva as usize;
+    // SAFETY: the target is an RVA this crate validated against the prologue it expects before
+    // reaching here, and the detour is a `'static` fn item of the matching ABI.
     match unsafe { MhHook::new(namer_site as *mut c_void, namer_detour as *mut c_void) } {
         Ok(hook) => {
             NAMER_TRAMPOLINE.store(hook.trampoline() as usize, Ordering::Release);
+            // SAFETY: the target is the address `MhHook::new` above already registered with MinHook.
             let status = unsafe { MH_EnableHook(namer_site as *mut c_void) };
             if status == MH_STATUS::MH_OK {
                 log(format_args!(

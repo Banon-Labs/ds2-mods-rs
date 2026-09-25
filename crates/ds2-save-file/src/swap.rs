@@ -285,6 +285,10 @@ fn steam_id() -> Option<String> {
 /// assembled for whoever finds what drives a session into
 /// [`ds2_rva::SL_SESSION_STATE_SETUP`] at the title -- the one thing that would make the rest of
 /// this run.
+/// # Errors
+///
+/// [`NotBegun`] naming which precondition was absent -- the open redirect not installed, or a
+/// session that is not in a state a swap can be driven from.
 pub fn begin(picked: &Path) -> Result<(), NotBegun> {
     if !ds2_save_redirect::open_redirect::installed() {
         log_line(format_args!(
@@ -347,7 +351,7 @@ pub fn begin(picked: &Path) -> Result<(), NotBegun> {
 
 /// One pause-menu frame. Registered through the import row's own tick.
 ///
-/// The only phase it can observe is [`Phase::Leaving`], and what it watches for is its own frame
+/// The only phase it can observe is `Phase::Leaving`, and what it watches for is its own frame
 /// count rising -- because the pause menu updating at all means the game was not left.
 pub fn pause_tick() {
     let Ok(mut guard) = SWAP.lock() else {
@@ -593,6 +597,9 @@ fn abandon(why: &str) {
     // SAFETY: the game is mapped and past `DllMain`; both calls are no-ops on a side that is not
     // armed.
     let load = unsafe { session_dir::LOAD.disarm() };
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let save = unsafe { session_dir::SAVE.disarm() };
     ds2_continue::clear_title_gate();
     ds2_dialog_skip::release();

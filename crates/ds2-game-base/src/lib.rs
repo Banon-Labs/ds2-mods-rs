@@ -31,7 +31,7 @@
 //! `#[link(name = "...")]` externs throughout, so a mini-DLL can depend on this crate without
 //! dragging a dependency tree behind it.
 //!
-//! **Tier B (`game-types` feature, `cfg(windows)`-gated):** [`game_types`], the re-export facade
+//! **Tier B (`game-types` feature, `cfg(windows)`-gated):** `game_types`, the re-export facade
 //! over typed game bindings. Declared and EMPTY -- see its own docs.
 
 pub mod fnv1a;

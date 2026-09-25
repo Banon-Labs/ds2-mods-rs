@@ -66,6 +66,9 @@
 //! incomplete allowlist is a log line plus a button press, which is exactly how the allowlist came
 //! to be corrected in the first place.
 
+// DEBT: ds2-mods-rs-24r -- not debt to be paid: this crate ships as a Windows DLL and the
+// attribute is what keeps its Rust half parseable on the host, so the game-free tests below it
+// can run at all. The issue is the standing record of that decision.
 #![cfg_attr(not(windows), allow(unused))]
 
 #[cfg(windows)]
@@ -84,7 +87,8 @@ pub use menu::{Outcome as MenuOutcome, install as install_menu};
 #[cfg(windows)]
 pub use title::{Outcome as TitleOutcome, Request as TitleRequest, install as install_title};
 
-/// Prefix on every line this crate writes to the loader log. Distinct from `ds2-loader:` and from
-/// `ds2-intro-skip:` so a reader can tell which component spoke, and so a run that boots badly can
-/// be attributed to one feature rather than to "the mod".
+/// Prefix on every line this crate writes to the loader log.
+///
+/// Distinct from `ds2-loader:` and from `ds2-intro-skip:` so a reader can tell which component
+/// spoke, and so a run that boots badly can be attributed to one feature rather than to "the mod".
 pub const LOG_PREFIX: &str = "ds2-dialog-skip:";

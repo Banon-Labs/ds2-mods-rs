@@ -169,6 +169,8 @@ unsafe extern "system" fn detour_process_enter(this: *mut u8) {
         // SAFETY: MinHook published this trampoline for exactly this site, and the signature is
         // the one all six sharing classes implement.
         let original: EnterFn = unsafe { std::mem::transmute::<usize, EnterFn>(trampoline) };
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(this) };
     }
     if this.is_null() {
@@ -179,6 +181,9 @@ unsafe extern "system" fn detour_process_enter(this: *mut u8) {
     // Phase 1 is the only phase that reads the minimum duration. `enter` sets phase 3 outright
     // when slot 8 reported there was nothing to do -- no window was shown, and there is nothing to
     // shorten.
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     if unsafe { safe_read_i32(object + ds2_rva::FE_PROCESS_WINDOW_PHASE_OFFSET) }
         != Some(ds2_rva::FE_PROCESS_WINDOW_PHASE_SHOWING)
     {
@@ -187,6 +192,9 @@ unsafe extern "system" fn detour_process_enter(this: *mut u8) {
     // Written as a positive test rather than a negated one so a NaN duration falls through to
     // "leave it alone" instead of to "write zero over it".
     let Some(previous) =
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         (unsafe { safe_read_f32(object + ds2_rva::FE_PROCESS_WINDOW_MIN_DURATION_OFFSET) })
             .filter(|previous| *previous > 0.0)
     else {
@@ -210,6 +218,9 @@ unsafe extern "system" fn detour_process_enter(this: *mut u8) {
     log(format_args!(
         "{LOG_PREFIX} shortened screen=process-window kind={} min-duration={previous:.3}->0 \
          total={total}",
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         unsafe { safe_read_i32(object + ds2_rva::FE_PROCESS_WINDOW_KIND_OFFSET) }.unwrap_or(-1),
     ));
 }
@@ -248,6 +259,9 @@ unsafe extern "system" fn detour_show_process_window(
 ) -> i32 {
     let flag = TITLE_ACTIVE_FLAG.load(Ordering::Acquire);
     let in_title_flow =
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         flag != 0 && unsafe { safe_read_u8(flag) }.is_some_and(|active| active != 0);
     if in_title_flow {
         let total = HIDDEN.fetch_add(1, Ordering::Relaxed) + 1;
@@ -267,6 +281,8 @@ unsafe extern "system" fn detour_show_process_window(
     // exactly as received.
     let original: ShowProcessWindowFn =
         unsafe { std::mem::transmute::<usize, ShowProcessWindowFn>(trampoline) };
+    // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+    // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
     unsafe { original(ui, caption, arg3, arg4) }
 }
 
@@ -301,10 +317,16 @@ unsafe fn force_title_settled(base: usize) {
     if IDLE_FORCED.swap(1, Ordering::AcqRel) != 0 {
         return;
     }
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let Some(globals) = (unsafe { safe_read_usize(base + ds2_rva::FE_TITLE_GLOBALS as usize) })
     else {
         return;
     };
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let Some(scene) = (unsafe { safe_read_usize(globals + ds2_rva::FE_TITLE_SCENE_OFFSET) }) else {
         return;
     };
@@ -316,6 +338,9 @@ unsafe fn force_title_settled(base: usize) {
     let open_title: OpenTitleFn = unsafe {
         std::mem::transmute::<usize, OpenTitleFn>(base + ds2_rva::FE_SCENE_TITLE_OPEN as usize)
     };
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { open_title(scene as *mut u8) };
     log(format_args!(
         "{LOG_PREFIX} settled screen=title-main scene=0x{scene:x} via=FeSceneTitle::open sequence=0x67"
@@ -340,6 +365,8 @@ unsafe extern "system" fn detour_title_main_update(this: *mut u8, delta: f32) {
         // SAFETY: MinHook published this trampoline for this site, and `delta` is forwarded so the
         // idle timer that decides the attract-movie timeout keeps accumulating real frame time.
         let original: UpdateFn = unsafe { std::mem::transmute::<usize, UpdateFn>(trampoline) };
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(this, delta) };
     }
     // The title screen updates every frame from well before the menu exists, which makes it the
@@ -352,12 +379,18 @@ unsafe extern "system" fn detour_title_main_update(this: *mut u8, delta: f32) {
     // opportunity to put the scene into its settled state instead.
     let base = MODULE_BASE_TITLE.load(Ordering::Acquire);
     if base != 0 && SETTLE_ENABLED.load(Ordering::Acquire) {
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         unsafe { force_title_settled(base) };
     }
     if !ANIMATION_ENABLED.load(Ordering::Acquire) {
         return;
     }
     let object = this as usize;
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let phase = unsafe { safe_read_i32(object + ds2_rva::FE_TITLE_MAIN_PHASE_OFFSET) };
     if phase != Some(ds2_rva::FE_TITLE_MAIN_PHASE_ANIMATING)
         && phase != Some(ds2_rva::FE_TITLE_MAIN_PHASE_ANIMATING_LATE)
@@ -488,6 +521,8 @@ unsafe fn lift_floor(index: usize, this: *mut u8) {
         // every substate `enter` implements.
         let original: FloorEnterFn =
             unsafe { std::mem::transmute::<usize, FloorEnterFn>(trampoline) };
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(this) };
     }
     if this.is_null() {
@@ -517,9 +552,15 @@ unsafe fn lift_floor(index: usize, this: *mut u8) {
 
 // One detour per site: MinHook gives a detour no way to learn which site reached it.
 unsafe extern "system" fn detour_floor_steam_load(this: *mut u8) {
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { lift_floor(0, this) }
 }
 unsafe extern "system" fn detour_floor_information(this: *mut u8) {
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { lift_floor(1, this) }
 }
 
@@ -581,6 +622,8 @@ pub unsafe fn install(request: Request) -> Outcome {
             return outcome;
         }
     };
+    // SAFETY: `MH_Initialize` takes no arguments and is documented as safe to call again on an
+    // already-initialised library, which the status below distinguishes.
     let status = unsafe { MH_Initialize() };
     if status != MH_STATUS::MH_OK && status != MH_STATUS::MH_ERROR_ALREADY_INITIALIZED {
         log(format_args!(
@@ -592,12 +635,15 @@ pub unsafe fn install(request: Request) -> Outcome {
     if request.title_sequence_gate {
         let site = base + ds2_rva::FE_TITLE_MAIN_SEQUENCE_GATE as usize;
         // No trampoline: the detour replaces the gate outright rather than fronting it.
+        // SAFETY: the target is an RVA this crate validated against the prologue it expects before
+        // reaching here, and the detour is a `'static` fn item of the matching ABI.
         match unsafe { MhHook::new(site as *mut c_void, detour_sequence_gate as *mut c_void) } {
             Ok(hook) => {
                 // Stored even though the detour never calls it: `title_sequence_settled` asks the
                 // original whether the logo has finished, which is a different question from the
                 // one the detour answers.
                 SEQUENCE_GATE_TRAMPOLINE.store(hook.trampoline() as usize, Ordering::Release);
+                // SAFETY: the target is the address `MhHook::new` above already registered with MinHook.
                 let status = unsafe { MH_EnableHook(site as *mut c_void) };
                 if status == MH_STATUS::MH_OK {
                     outcome.title_sequence_gate = true;
@@ -622,6 +668,9 @@ pub unsafe fn install(request: Request) -> Outcome {
     if request.substate_floors {
         for (index, floor) in FLOORS.iter().enumerate() {
             let site = base + floor.enter_rva as usize;
+            // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+            // offset this crate validated before installing. The callee's own contract asks for exactly
+            // that live object, and reads inside it go through the fault-tolerant readers.
             let hook = match unsafe {
                 MhHook::new(site as *mut c_void, FLOOR_DETOURS[index] as *mut c_void)
             } {
@@ -638,6 +687,7 @@ pub unsafe fn install(request: Request) -> Outcome {
             // Published BEFORE the site is patched: a detour that read a zero here would skip the
             // original, and for an `enter` that means the substate never initialises at all.
             FLOOR_TRAMPOLINES[index].store(hook.trampoline() as usize, Ordering::Release);
+            // SAFETY: the target is the address `MhHook::new` above already registered with MinHook.
             let status = unsafe { MH_EnableHook(site as *mut c_void) };
             if status != MH_STATUS::MH_OK {
                 log(format_args!(
@@ -658,8 +708,11 @@ pub unsafe fn install(request: Request) -> Outcome {
     if request.press_any_button {
         let site = base + ds2_rva::FE_TITLE_MAIN_PRESS_ANY_BUTTON as usize;
         // No trampoline is stored: the detour replaces the poll outright rather than fronting it.
+        // SAFETY: the target is an RVA this crate validated against the prologue it expects before
+        // reaching here, and the detour is a `'static` fn item of the matching ABI.
         match unsafe { MhHook::new(site as *mut c_void, detour_press_gate as *mut c_void) } {
             Ok(_) => {
+                // SAFETY: the target is the address `MhHook::new` above already registered with MinHook.
                 let status = unsafe { MH_EnableHook(site as *mut c_void) };
                 if status == MH_STATUS::MH_OK {
                     outcome.press_any_button = true;
@@ -683,11 +736,14 @@ pub unsafe fn install(request: Request) -> Outcome {
 
     if request.process_windows {
         let site = base + ds2_rva::FE_PROCESS_WINDOW_ENTER as usize;
+        // SAFETY: the target is an RVA this crate validated against the prologue it expects before
+        // reaching here, and the detour is a `'static` fn item of the matching ABI.
         match unsafe { MhHook::new(site as *mut c_void, detour_process_enter as *mut c_void) } {
             Ok(hook) => {
                 // Published BEFORE the site is patched, so a detour cannot observe a zero and skip
                 // the original -- which here would mean never starting the work the window covers.
                 PROCESS_TRAMPOLINE.store(hook.trampoline() as usize, Ordering::Release);
+                // SAFETY: the target is the address `MhHook::new` above already registered with MinHook.
                 let status = unsafe { MH_EnableHook(site as *mut c_void) };
                 if status == MH_STATUS::MH_OK {
                     outcome.process_windows = true;
@@ -717,6 +773,9 @@ pub unsafe fn install(request: Request) -> Outcome {
             Ordering::Release,
         );
         let site = base + ds2_rva::FE_SHOW_PROCESS_WINDOW as usize;
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         match unsafe {
             MhHook::new(
                 site as *mut c_void,
@@ -725,6 +784,7 @@ pub unsafe fn install(request: Request) -> Outcome {
         } {
             Ok(hook) => {
                 SHOW_TRAMPOLINE.store(hook.trampoline() as usize, Ordering::Release);
+                // SAFETY: the target is the address `MhHook::new` above already registered with MinHook.
                 let status = unsafe { MH_EnableHook(site as *mut c_void) };
                 if status == MH_STATUS::MH_OK {
                     outcome.hide_process_windows = true;
@@ -759,11 +819,14 @@ pub unsafe fn install(request: Request) -> Outcome {
         SETTLE_ENABLED.store(request.title_settle, Ordering::Release);
         ANIMATION_ENABLED.store(request.title_animation, Ordering::Release);
         let site = base + ds2_rva::FE_TITLE_MAIN_UPDATE as usize;
+        // SAFETY: the target is an RVA this crate validated against the prologue it expects before
+        // reaching here, and the detour is a `'static` fn item of the matching ABI.
         match unsafe { MhHook::new(site as *mut c_void, detour_title_main_update as *mut c_void) } {
             Ok(hook) => {
                 // Published BEFORE the site is patched: this detour's whole job happens AFTER the
                 // original, so a zero trampoline would mean the title screen stopped updating.
                 TITLE_MAIN_TRAMPOLINE.store(hook.trampoline() as usize, Ordering::Release);
+                // SAFETY: the target is the address `MhHook::new` above already registered with MinHook.
                 let status = unsafe { MH_EnableHook(site as *mut c_void) };
                 if status == MH_STATUS::MH_OK {
                     outcome.title_animation = request.title_animation;
@@ -811,7 +874,13 @@ pub unsafe fn title_sequence_settled() -> Option<bool> {
     if trampoline == 0 || base == 0 {
         return None;
     }
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let globals = unsafe { safe_read_usize(base + ds2_rva::FE_TITLE_GLOBALS as usize) }?;
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let scene = unsafe { safe_read_usize(globals + ds2_rva::FE_TITLE_SCENE_OFFSET) }?;
     if scene == 0 {
         return None;
@@ -820,5 +889,8 @@ pub unsafe fn title_sequence_settled() -> Option<bool> {
     // field the gate's own caller reads at `0x1400fedc9`.
     let original: SequenceGateFn =
         unsafe { std::mem::transmute::<usize, SequenceGateFn>(trampoline) };
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     Some(unsafe { original(scene as *mut u8) } != 0)
 }

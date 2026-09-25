@@ -39,6 +39,7 @@
 //! day it lands; what it does today is tell you the truth about why your trail is not there.
 
 // Parsed on Windows; the parser and its defaults are proven on the host.
+// DEBT: ds2-mods-rs-24r -- keeps the parser host-parseable so its tests can run.
 #![cfg_attr(not(windows), allow(dead_code))]
 
 use ds2_hotkey_config::keys::Chord;
@@ -208,7 +209,7 @@ pub const DEFAULT_MARKERS_PER_PASS: usize = 3;
 /// | `THIS attempt's lookup failed` | the effect is not resident in this map |
 /// | `t=3.0s -- 7/7 stone(s) still alive` | they LINGER, which is the property a trail needs |
 ///
-/// It sweeps [`PRISM_STONE_SFX_IDS`] one id per stone, so a single run also says which of the
+/// It sweeps [`ds2_rva::PRISM_STONE_SFX_IDS`] one id per stone, so a single run also says which of the
 /// seven colours actually appear. Then it takes them down, through the same stand-down path the
 /// real trail uses, so the check leaves nothing behind and the teardown gets tested too.
 ///
@@ -237,9 +238,13 @@ pub struct PathConfig {
     /// True when [`Self::toggle_text`] could not be parsed and the built-in default is standing
     /// in. A typo must never leave the feature unbindable, and it must never do so silently.
     pub toggle_fell_back: bool,
+    /// Closer than this and a target is not drawn -- the player can already see them.
     pub near_suppress_meters: f32,
+    /// At or under this distance a target draws at full strength.
     pub bold_at_meters: f32,
+    /// At or past this distance it draws at its faintest.
     pub faint_at_meters: f32,
+    /// How many targets may be drawn at once.
     pub max_targets: usize,
     /// Most players given a walkable route and a trail of their own at once. See
     /// [`DEFAULT_MAX_ROUTES`] -- this is deliberately not [`Self::max_targets`], because a route
@@ -251,14 +256,20 @@ pub struct PathConfig {
     pub replan_min_seconds: f32,
     /// Longest a route may stand unasked while nothing moves, in seconds.
     pub replan_max_seconds: f32,
+    /// Length of the "no route" arrow, in metres of world space.
     pub arrow_meters: f32,
+    /// Whether the overlay is on when the game reaches the world, before any toggle.
     pub start_enabled: bool,
     /// The effect placed at each marker, or `0` for no markers. See [`DEFAULT_MARKER_EFFECT_ID`]
     /// for why no non-zero value is known yet.
     pub marker_effect_id: u32,
+    /// Metres between consecutive markers along a route.
     pub marker_spacing_meters: f32,
+    /// The ceiling on markers alive at once.
     pub max_markers: usize,
+    /// How far behind the player a marker is kept before it is retired.
     pub marker_keep_behind_meters: f32,
+    /// How many markers may be placed in a single pass, so one frame cannot place them all.
     pub markers_per_pass: usize,
     /// Route to the nearest NPC and report, in the log, everything that happened. See
     /// [`DEFAULT_NPC_SELF_CHECK`]. It narrates the route; it does not hold it still.

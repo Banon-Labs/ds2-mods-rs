@@ -9,13 +9,13 @@
 //!    and absent on a desktop Steam outside Big Picture -- measured, not assumed.
 //! 2. **The clipboard**, if it holds a soulsplanner link. Copy a link in a browser, press the row.
 //! 3. **Typing the id on the row itself**, which is what happens when neither of the others can
-//!    supply one. See [`typed`] for why it reads ten keys and not a keyboard.
+//!    supply one. See `typed` for why it reads ten keys and not a keyboard.
 //!
 //! # It borrows the game's Steam keyboard rather than drawing its own
 //!
 //! DARK SOULS II already asks Steam for a text field -- that is how character naming works -- and
 //! this crate asks for the same thing at a newer interface version, because the game's own version
-//! cannot prefill. See [`steam`] for the version bump and, more importantly, for the interlock: the
+//! cannot prefill. See `steam` for the version bump and, more importantly, for the interlock: the
 //! game's dismissal listener does not check whether the game asked for the keyboard, so a session
 //! opened here is a session the game reacts to.
 //!
@@ -57,6 +57,9 @@
 //! | `no field: the game's keyboard is busy` | the game owns a session; refused rather than stolen |
 //! | `rejected "...": Drop the #` | the fragment form, refused before the request went out |
 
+// DEBT: ds2-mods-rs-24r -- not debt to be paid: this crate ships as a Windows DLL and the
+// attribute is what keeps its Rust half parseable on the host, so the game-free tests below it
+// can run at all. The issue is the standing record of that decision.
 #![cfg_attr(not(windows), allow(unused))]
 
 /// What every line this crate writes begins with.
@@ -204,6 +207,10 @@ mod install {
     ///
     /// Call BEFORE `ds2_menu_row::install`, which seals the registry. Returns whatever
     /// [`ds2_menu_row::add_row`] said, so the caller can log a refusal in its own voice.
+    /// # Errors
+    ///
+    /// Whatever [`ds2_menu_row::add_row`] said -- `TabFull` when the tab is spoken for,
+    /// `AlreadyInstalled` when the registry is sealed.
     pub fn register(logger: LogFn) -> Result<ds2_menu_row::RowId, ds2_menu_row::AddRowError> {
         LOGGER.store(logger as usize, Ordering::Release);
         let registered = ds2_menu_row::add_row(ds2_menu_row::RowSpec {

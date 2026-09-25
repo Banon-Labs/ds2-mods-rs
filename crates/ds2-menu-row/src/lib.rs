@@ -88,7 +88,7 @@
 //!   ids and stores whatever comes back, including the zeros; four controlled runs, and later the
 //!   file itself, agree that two of those five were never authored.
 //!
-//! What actually works is in [`crate::layout`]: the `.flo` is loaded in place, one function hands
+//! What actually works is in `crate::layout`: the `.flo` is loaded in place, one function hands
 //! out the table entry that says how many children a container has, and that same `u16` is the
 //! display list's capacity. Substituting a copy that says two more -- a row and its mark -- is the
 //! whole edit. Nothing is written to disk and no archive is repacked.
@@ -116,6 +116,9 @@
 //!
 //! `docs/DS2-INGAME-MENU.md` has the disassembly, the measurements, and the corrections.
 
+// DEBT: ds2-mods-rs-24r -- not debt to be paid: this crate ships as a Windows DLL and the
+// attribute is what keeps its Rust half parseable on the host, so the game-free tests below it
+// can run at all. The issue is the standing record of that decision.
 #![cfg_attr(not(windows), allow(unused))]
 
 mod api;

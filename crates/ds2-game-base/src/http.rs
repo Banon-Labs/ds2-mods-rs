@@ -27,10 +27,11 @@ const QUERY_FLAG_NUMBER: u32 = 0x2000_0000;
 const HTTPS_PORT: u16 = 443;
 
 /// Cap on a response body, so a hostile or broken endpoint cannot exhaust memory.
+///
 /// The case this is sized for is a document of a few kilobytes; a megabyte is three orders of
 /// magnitude of headroom. A caller that legitimately expects more states its own limit through
 /// [`get_with_limit`] rather than raising this one for everybody.
-const MAX_BODY_BYTES: usize = 1024 * 1024;
+pub const MAX_BODY_BYTES: usize = 1024 * 1024;
 
 #[link(name = "winhttp")]
 unsafe extern "system" {
@@ -82,7 +83,12 @@ unsafe extern "system" {
 #[derive(Debug)]
 pub enum HttpError {
     /// A WinHTTP call failed; carries which one and the OS error.
-    Win32 { step: &'static str, code: u32 },
+    Win32 {
+        /// Which WinHTTP call failed, as its own name.
+        step: &'static str,
+        /// What `GetLastError` said about it.
+        code: u32,
+    },
     /// The server answered, but not with success.
     Status(u32),
     /// The body exceeded [`MAX_BODY_BYTES`].

@@ -75,6 +75,8 @@ unsafe fn hook_site(
         return false;
     }
     // SAFETY: the bytes at the site are the recorded ones, so this is the function it claims to be.
+    // SAFETY: the target is an RVA this crate validated against the prologue it expects before
+    // reaching here, and the detour is a `'static` fn item of the matching ABI.
     let hook = match unsafe { MhHook::new(site as *mut c_void, detour) } {
         Ok(hook) => hook,
         Err(status) => {
@@ -88,6 +90,7 @@ unsafe fn hook_site(
     };
     trampoline.store(hook.trampoline() as usize, Ordering::Release);
     // SAFETY: the hook was just created for this exact address.
+    // SAFETY: the target is the address `MhHook::new` above already registered with MinHook.
     let status = unsafe { MH_EnableHook(site as *mut c_void) };
     if status != MH_STATUS::MH_OK {
         log(format_args!(
@@ -130,6 +133,8 @@ pub unsafe fn install() -> Outcome {
 
     // MinHook is statically linked into this DLL, so nothing else shares this instance and
     // ALREADY_INITIALIZED can only mean this ran twice. Treat it as success.
+    // SAFETY: `MH_Initialize` takes no arguments and is safe to call again on an already-
+    // initialised library, which the status below distinguishes.
     let status = unsafe { MH_Initialize() };
     if status != MH_STATUS::MH_OK && status != MH_STATUS::MH_ERROR_ALREADY_INITIALIZED {
         log(format_args!(

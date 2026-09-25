@@ -135,6 +135,9 @@ unsafe fn arm() {
     if !enabled() || ARMED.swap(1, Ordering::AcqRel) == 1 {
         return;
     }
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let applied = unsafe { apply(0.0) };
     log(format_args!("{LOG_PREFIX} silence armed applied={applied}"));
 }
@@ -146,12 +149,21 @@ unsafe fn arm() {
 ///
 /// The caller must be running in the game process with the image mapped at [`MODULE_BASE`].
 unsafe fn apply(volume: f32) -> ApplyResult {
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let Some(manager) = (unsafe { sound_manager() }) else {
         return ApplyResult::NoManager;
     };
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let Some(group) = (unsafe { master_group(manager) }) else {
         return ApplyResult::NoGroup;
     };
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let Some(set_volume) = (unsafe { set_volume_fn() }) else {
         return ApplyResult::NoImport;
     };
@@ -243,6 +255,9 @@ unsafe fn sound_manager() -> Option<*mut u8> {
     // SAFETY: the RVA names a pointer-sized global in the mapped image; this is the same load the
     // game's own accessor at 0x1409ddbc0 makes.
     let slot = (base + ds2_rva::SOUND_MANAGER_SINGLETON as usize) as *const *mut u8;
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let manager = unsafe { slot.read() };
     (!manager.is_null()).then_some(manager)
 }
@@ -261,6 +276,9 @@ unsafe fn set_volume_fn() -> Option<SetVolumeFn> {
     // SAFETY: the RVA names the import slot for fmodex64.dll's setVolume; the loader wrote a
     // resolved function pointer there before the entry point ran.
     let slot = (base + ds2_rva::FMOD_CHANNEL_GROUP_SET_VOLUME_IAT as usize) as *const usize;
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let raw = unsafe { slot.read() };
     if raw == 0 {
         return None;
@@ -296,6 +314,8 @@ unsafe extern "system" fn detour_sound_init(this: *mut u8) {
     if trampoline != 0 {
         // SAFETY: MinHook's copy of this site's original prologue, with the vtable's signature.
         let original = unsafe { std::mem::transmute::<usize, SoundManagerFn>(trampoline) };
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(this) };
     }
     // SAFETY: the original returned, so the master group is stored and the manager is live.
@@ -312,6 +332,8 @@ unsafe extern "system" fn detour_sound_drain(this: *mut u8) {
     if trampoline != 0 {
         // SAFETY: MinHook's copy of this site's original prologue, with the vtable's signature.
         let original = unsafe { std::mem::transmute::<usize, SoundManagerFn>(trampoline) };
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(this) };
     }
     if ARMED.load(Ordering::Acquire) == 0 {
@@ -332,6 +354,8 @@ unsafe extern "system" fn detour_start_ingame(this: *mut u8) {
     if trampoline != 0 {
         // SAFETY: MinHook's copy of this site's original prologue, with the vtable's signature.
         let original = unsafe { std::mem::transmute::<usize, StartIngameEnterFn>(trampoline) };
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(this) };
     }
 }

@@ -76,7 +76,9 @@ pub const MAX_SAVE_EXTENSION_LEN: usize = 120;
 /// `[seamless]`, resolved.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SeamlessConfig {
+    /// Whether this workspace should expect the second mod to be present at all.
     pub enabled: bool,
+    /// The DLL name the second mod ships under, as its own settings file spells it.
     pub dll: String,
 }
 

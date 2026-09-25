@@ -17,7 +17,7 @@
 //! # It diverts every open of that path, writes included
 //!
 //! [`arm`] takes the container the game will ask for and the one to answer with, and an open of
-//! that path is answered whatever it asked for -- see [`GENERIC_WRITE`], which used to gate this on
+//! that path is answered whatever it asked for -- see `GENERIC_WRITE`, which used to gate this on
 //! read access and was measured doing the opposite of what it promised. So a character loaded out
 //! of a donor file both reads and saves there, and the player's own container is the file nothing
 //! touches for as long as the window is armed.
@@ -165,7 +165,7 @@ pub fn diverted() -> usize {
 ///
 /// # Thread-local, and the same counter the logger uses
 ///
-/// [`DEPTH`] already exists so the detour's own log writes reach the original API instead of
+/// `DEPTH` already exists so the detour's own log writes reach the original API instead of
 /// re-entering. This is that mechanism, made available to a caller that knows its own opens are not
 /// the game asking for its container. It covers this thread only, so a concurrent read on the game
 /// thread is still diverted.
@@ -236,7 +236,7 @@ fn answer_for(path: &str) -> Option<Vec<u16>> {
 /// deliberately left unarmed -- so anything that asks the game which folder it built is told the
 /// player's own container while every write lands in the staged one.
 ///
-/// The same case-insensitive full-path comparison [`answer_for`] makes, because the answer has to
+/// The same case-insensitive full-path comparison `answer_for` makes, because the answer has to
 /// be the one the detour will actually give. `lock` rather than `try_lock`: this runs on the game
 /// thread outside the detour, where a missed answer is the wrong file rather than a slow one.
 pub fn diverted_path(asked: &Path) -> Option<PathBuf> {
@@ -307,6 +307,9 @@ unsafe extern "system" fn detour_create_file_w(
     // SAFETY: MinHook published this trampoline for `CreateFileW`, whose signature this is.
     let original: CreateFileWFn =
         unsafe { std::mem::transmute::<usize, CreateFileWFn>(trampoline) };
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let pass_through = |name: *const u16| unsafe {
         original(name, access, share, security, disposition, flags, template)
     };
@@ -382,6 +385,8 @@ pub unsafe fn install() -> bool {
         return false;
     }
     // SAFETY: MinHook's own initialiser, idempotent across the crates that call it.
+    // SAFETY: `MH_Initialize` takes no arguments and is documented as safe to call again on an
+    // already-initialised library, which the status below distinguishes.
     let status = unsafe { MH_Initialize() };
     if status != MH_STATUS::MH_OK && status != MH_STATUS::MH_ERROR_ALREADY_INITIALIZED {
         log(format_args!(
@@ -391,6 +396,8 @@ pub unsafe fn install() -> bool {
     }
     // SAFETY: a resolved export in a loaded system module.
     let hook =
+        // SAFETY: the target is an RVA this crate validated against the prologue it expects before
+        // reaching here, and the detour is a `'static` fn item of the matching ABI.
         match unsafe { MhHook::new(address as *mut c_void, detour_create_file_w as *mut c_void) } {
             Ok(hook) => hook,
             Err(status) => {
@@ -405,6 +412,7 @@ pub unsafe fn install() -> bool {
     // this, and a detour that read a zero here would fail every file open in the game.
     TRAMPOLINE.store(hook.trampoline() as usize, Ordering::Release);
     // SAFETY: the hook was created for this address by the call above.
+    // SAFETY: the target is the address `MhHook::new` above already registered with MinHook.
     let status = unsafe { MH_EnableHook(address as *mut c_void) };
     if status != MH_STATUS::MH_OK {
         log(format_args!(

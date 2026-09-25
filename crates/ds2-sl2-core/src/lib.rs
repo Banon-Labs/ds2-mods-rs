@@ -96,6 +96,10 @@ impl core::fmt::Display for Sl2Error {
 ///
 /// The count is returned rather than a bare `bool` because zero entries is a structurally valid
 /// BND4 that holds no character, and a caller that wants to refuse that can.
+/// # Errors
+///
+/// The [`Sl2Error`] for whichever structural check the bytes failed -- not a BND4 at all, a
+/// truncated header, or an entry table that runs past the end.
 pub fn validate(save: &[u8]) -> Result<usize, Sl2Error> {
     entries(save).map(|entries| entries.len())
 }
@@ -213,6 +217,10 @@ pub struct Rebound {
 /// `steam_id` is the running account's, as the game itself spells it -- sixteen lowercase hex
 /// characters. Returns without touching the file if it already belongs to this account, which is
 /// the ordinary case on the second launch of the same staged save.
+/// # Errors
+///
+/// `Sl2Error::BadSteamId` when `steam_id` is not sixteen hex characters, or whatever structural
+/// error reading the container's entries produced.
 pub fn rebind(save: &mut [u8], steam_id: &str) -> Result<Rebound, Sl2Error> {
     if steam_id.len() != STEAM_ID_LEN || !steam_id.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(Sl2Error::BadSteamId);

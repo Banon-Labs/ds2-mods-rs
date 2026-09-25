@@ -66,6 +66,7 @@ pub struct PickerStatusMessage {
 }
 
 impl PickerStatusMessage {
+    /// Build one from the two lines a surface will show.
     pub fn new(headline: impl Into<String>, detail: impl Into<String>) -> Self {
         Self {
             headline: headline.into(),
@@ -73,10 +74,12 @@ impl PickerStatusMessage {
         }
     }
 
+    /// The first line: what happened, in the player's terms.
     pub fn headline(&self) -> &str {
         &self.headline
     }
 
+    /// The second line: why, in enough detail to act on.
     pub fn detail(&self) -> &str {
         &self.detail
     }
@@ -140,6 +143,10 @@ pub enum PickedSource {
 /// assumed: `ds2_sl2_core::slots` documents the runtime loading exactly such a slot and setting
 /// its own occupied bit. Refusing it here would hide a character the game is perfectly willing
 /// to load.
+///
+/// # Errors
+///
+/// `PickRejection::NoLoadableCharacter` when not one of the ten slots can be loaded.
 pub fn accept_slots(slots: Vec<SaveSlot>) -> Result<Vec<SaveSlot>, PickRejection> {
     if slots.iter().any(|slot| slot.state.is_loadable()) {
         Ok(slots)
@@ -155,6 +162,11 @@ pub fn accept_slots(slots: Vec<SaveSlot>) -> Result<Vec<SaveSlot>, PickRejection
 /// decided before the path is stat'd, so the answer is the same on a Linux test host as it is in
 /// the game -- and so the common refusal (a file that is simply not a save) never depends on a
 /// disk the test does not have.
+///
+/// # Errors
+///
+/// The [`PickRejection`] for the first check that failed, in that order: `PathNotUtf8`,
+/// `WrongExtension`, `NotAFile`, then whatever reading the container itself produced.
 pub fn accepts_pick(path: &Path) -> Result<PickedSource, PickRejection> {
     if path.to_str().is_none() {
         return Err(PickRejection::PathNotUtf8);

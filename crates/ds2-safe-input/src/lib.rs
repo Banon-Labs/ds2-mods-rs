@@ -30,8 +30,10 @@
 
 use std::fmt;
 
-const DEFAULT_MAX_HOLD_FRAMES: u16 = 30;
-const MIN_ACTION_FRAMES: u16 = 1;
+/// The `max_hold_frames` a [`SafeInputConfig`] starts with.
+pub const DEFAULT_MAX_HOLD_FRAMES: u16 = 30;
+/// The shortest an action may last. An action of no frames is one no backend can express.
+pub const MIN_ACTION_FRAMES: u16 = 1;
 
 /// Whitelisted logical inputs that the automation layer is allowed to emit.
 ///
@@ -41,18 +43,28 @@ const MIN_ACTION_FRAMES: u16 = 1;
 /// sequence fails.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum SafeButton {
+    /// Accept the highlighted row.
     Confirm,
+    /// Back out one level.
     Cancel,
+    /// Open or close the pause menu.
     Start,
+    /// Move the cursor up one row.
     DpadUp,
+    /// Move the cursor down one row.
     DpadDown,
+    /// Move the cursor left one column.
     DpadLeft,
+    /// Move the cursor right one column.
     DpadRight,
+    /// Previous tab.
     LeftBumper,
+    /// Next tab.
     RightBumper,
 }
 
 impl SafeButton {
+    /// The name this button goes by in a log line -- stable, lowercase, underscore-separated.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
@@ -73,13 +85,35 @@ impl SafeButton {
 /// not depend on host sleeps, pointer focus, or wall-clock mouse polling.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SafeInputAction {
-    Tap { button: SafeButton, frames: u16 },
-    Hold { button: SafeButton, frames: u16 },
-    Release { button: SafeButton },
+    /// Press and release, `frames` apart.
+    Tap {
+        /// Which button.
+        button: SafeButton,
+        /// How long it stays down, in game frames.
+        frames: u16,
+    },
+    /// Press and keep held for `frames`, without the release.
+    Hold {
+        /// Which button.
+        button: SafeButton,
+        /// How long it stays down, in game frames.
+        frames: u16,
+    },
+    /// Let one held button up.
+    Release {
+        /// Which button.
+        button: SafeButton,
+    },
+    /// Let every held button up -- what a failed sequence must end with.
     ReleaseAll,
 }
 
 impl SafeInputAction {
+    /// A [`Self::Tap`], with `frames` checked against the config's bounds.
+    ///
+    /// # Errors
+    ///
+    /// [`SafeInputError`] when `frames` is outside what the config allows.
     pub fn tap(
         button: SafeButton,
         frames: u16,
@@ -89,6 +123,11 @@ impl SafeInputAction {
         Ok(Self::Tap { button, frames })
     }
 
+    /// A [`Self::Hold`], with `frames` checked against the config's bounds.
+    ///
+    /// # Errors
+    ///
+    /// [`SafeInputError`] when `frames` is outside what the config allows.
     pub fn hold(
         button: SafeButton,
         frames: u16,
@@ -99,8 +138,11 @@ impl SafeInputAction {
     }
 }
 
+/// The bounds every action is checked against before a backend ever sees it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SafeInputConfig {
+    /// The longest a button may be held, in game frames. A held button that outlives the run is
+    /// what leaves the player unable to move, so the ceiling is a safety limit rather than taste.
     pub max_hold_frames: u16,
 }
 
@@ -113,6 +155,12 @@ impl Default for SafeInputConfig {
 }
 
 impl SafeInputConfig {
+    /// Check a frame count against both ends of the allowed range.
+    ///
+    /// # Errors
+    ///
+    /// `ZeroFrameAction` below [`MIN_ACTION_FRAMES`], `FramesExceedLimit` above
+    /// [`Self::max_hold_frames`].
     pub fn validate_frames(self, frames: u16) -> Result<(), SafeInputError> {
         if frames < MIN_ACTION_FRAMES {
             return Err(SafeInputError::ZeroFrameAction);
@@ -127,10 +175,19 @@ impl SafeInputConfig {
     }
 }
 
+/// Why an action was refused, or how the backend failed to deliver it.
 #[derive(Debug, Eq, PartialEq)]
 pub enum SafeInputError {
+    /// An action that would last no frames at all, which no backend can express.
     ZeroFrameAction,
-    FramesExceedLimit { frames: u16, max: u16 },
+    /// A hold longer than the config allows.
+    FramesExceedLimit {
+        /// What was asked for.
+        frames: u16,
+        /// The ceiling it exceeded.
+        max: u16,
+    },
+    /// The backend refused or failed, in its own words.
     Backend(String),
 }
 
@@ -149,7 +206,16 @@ impl fmt::Display for SafeInputError {
 
 impl std::error::Error for SafeInputError {}
 
+/// Whatever actually delivers an action to the game.
+///
+/// An implementor must release every held button when it is dropped or when a sequence fails --
+/// this crate bounds what can be asked for, and the backend is what makes the bound true.
 pub trait SafeInputBackend {
+    /// Deliver one already-validated action.
+    ///
+    /// # Errors
+    ///
+    /// `SafeInputError::Backend` carrying whatever the injection mechanism said.
     fn apply(&mut self, action: SafeInputAction) -> Result<(), SafeInputError>;
 }
 
@@ -164,28 +230,50 @@ impl<B> SafeInputController<B>
 where
     B: SafeInputBackend,
 {
+    /// Wrap a backend, with the bounds every action through it will be checked against.
     pub fn new(backend: B, config: SafeInputConfig) -> Self {
         Self { backend, config }
     }
 
+    /// Press and release one button.
+    ///
+    /// # Errors
+    ///
+    /// The validation error when `frames` is out of bounds, or the backend's own.
     pub fn tap(&mut self, button: SafeButton, frames: u16) -> Result<(), SafeInputError> {
         self.backend
             .apply(SafeInputAction::tap(button, frames, self.config)?)
     }
 
+    /// Hold one button down for `frames`.
+    ///
+    /// # Errors
+    ///
+    /// The validation error when `frames` is out of bounds, or the backend's own.
     pub fn hold(&mut self, button: SafeButton, frames: u16) -> Result<(), SafeInputError> {
         self.backend
             .apply(SafeInputAction::hold(button, frames, self.config)?)
     }
 
+    /// Let one held button up.
+    ///
+    /// # Errors
+    ///
+    /// The backend's own -- there is nothing to validate.
     pub fn release(&mut self, button: SafeButton) -> Result<(), SafeInputError> {
         self.backend.apply(SafeInputAction::Release { button })
     }
 
+    /// Let every held button up. What a failed sequence must end with.
+    ///
+    /// # Errors
+    ///
+    /// The backend's own -- there is nothing to validate.
     pub fn release_all(&mut self) -> Result<(), SafeInputError> {
         self.backend.apply(SafeInputAction::ReleaseAll)
     }
 
+    /// Give the backend back, so a caller can shut it down on its own terms.
     pub fn into_backend(self) -> B {
         self.backend
     }
@@ -194,6 +282,8 @@ where
 /// Deterministic backend used by tests and trace-only integrations.
 #[derive(Default, Debug)]
 pub struct RecordingBackend {
+    /// Every action it was handed, in order, so a test asserts on the sequence rather than on
+    /// anything a game did with it.
     pub actions: Vec<SafeInputAction>,
 }
 
