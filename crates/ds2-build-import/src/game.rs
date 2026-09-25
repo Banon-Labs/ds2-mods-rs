@@ -782,7 +782,7 @@ fn entry_for_item(bag: usize, item_id: i32) -> Option<usize> {
         // SAFETY: as above.
         let flags =
             unsafe { ds2_game_base::mem::safe_read_u8(entry + ds2_rva::ITEM_ENTRY_FLAGS_OFFSET) };
-        // A COPY YOU PUT AWAY IS NOT A COPY IN YOUR HANDS, and equipping one is what lost the
+        // A copy you put away is not a copy in your hands -- and equipping one is what lost the
         // sword. Both live in this array, so the scan sees both; the equip does not care which,
         // because it reads nothing but the id and the handle. Take the stored copy and the player
         // wears an item their pack never held, and the moment they take it off it returns to
