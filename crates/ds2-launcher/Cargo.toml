@@ -1,0 +1,49 @@
+# The first executable in this workspace. Everything else is an rlib or the `dinput8.dll` proxy.
+#
+# It exists because one mod in this repo's orbit cannot be loaded from inside the game process at
+# all -- see `src/main.rs` for the four-slot measurement -- so something has to start the game
+# suspended and put DLLs in from outside. `ds2sc_launcher.exe` already does that for exactly one
+# DLL; this does it for a list the player writes in `ds2-mods.toml`.
+[package]
+name = "ds2-launcher"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+# The output file name is what a player and `scripts/ds2-run.py` both type, so it is pinned here
+# rather than inherited from the package name.
+name = "ds2-launcher"
+path = "src/main.rs"
+
+# HOST-BUILDABLE ON PURPOSE, which is why these are not behind a `cfg(windows)` gate. The
+# planning half -- which DLLs, in what order, resolved where -- is the part worth proving, and
+# `cargo test` on Linux must reach all of it. Neither of these brings a `windows` dependency:
+# `ds2-hotkey-config` has no dependencies at all by design, and `ds2-seamless` only names the
+# keys and defaults that describe the other mod.
+[dependencies]
+ds2-hotkey-config.workspace = true
+ds2-seamless.workspace = true
+
+# The injection itself. `default-features = false` with a named feature list, the same rule
+# `ds2-invasion-path` follows: take the generated, audited bindings and nothing else.
+#
+# These are hand-rolled easily and wrongly. `STARTUPINFOW` has to carry its own `cb`, and
+# `PROCESS_INFORMATION` hands back two handles that both have to be closed -- a struct one field
+# out does not fail to compile, it passes garbage to `CreateProcessW`.
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", default-features = false, features = [
+  "Win32_Foundation",
+  # `CreateRemoteThread` and `CreateProcessW` both take `SECURITY_ATTRIBUTES` pointers, so the
+  # bindings for them are gated behind this even though every one of those arguments is null here.
+  "Win32_Security",
+  "Win32_System_Diagnostics_Debug",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Memory",
+  "Win32_System_Threading",
+] }
+
+[lints]
+workspace = true

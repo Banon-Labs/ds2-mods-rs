@@ -100,6 +100,20 @@ APPID = "335300"
 BUILT_DLL = REPO_ROOT / "target/x86_64-pc-windows-msvc/release/dinput8.dll"
 STAGED_DLL_NAME = "dinput8.dll"
 
+#: Our own injector, from `crates/ds2-launcher`. Needed only when something has to be loaded
+#: from OUTSIDE the process -- see `[launcher]` below and that crate's docs for the measurement
+#: that says why an in-process load is not an option for every mod.
+BUILT_LAUNCHER = REPO_ROOT / "target/x86_64-pc-windows-msvc/release/ds2-launcher.exe"
+STAGED_LAUNCHER_NAME = "ds2-launcher.exe"
+
+#: `[launcher]` -- the DLLs our own injector puts into the suspended process.
+#: Mirrors `CONFIG_SECTION` in `crates/ds2-launcher/src/plan.rs`.
+LAUNCHER_SECTION = "launcher"
+#: Mirrors `KEY_DLLS` there.
+KEY_LAUNCHER_DLLS = "dlls"
+#: Mirrors `LOG_PREFIX` there.
+LAUNCHER_LOG_PREFIX = "ds2-launcher:"
+
 #: Mirrors `LOG_FILE_NAME` in `crates/ds2-loader/src/lib.rs`. Both halves of this contract have
 #: to change together: rename it on one side only and every run reports a false "did not load".
 LOG_NAME = "ds2-loader.log"
@@ -1137,6 +1151,7 @@ def config_text(
     input_harness: bool = False,
     save_directory: str = "",
     menu_rows_all: bool = False,
+    launcher_dlls: tuple[str, ...] = (),
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
@@ -1170,6 +1185,11 @@ def config_text(
             + f"]   # at most {MENU_ROW_MAX_ADDED} of: "
             + ", ".join(MENU_ROW_ROW_NAMES)
         )
+    # `[seamless] enabled` is NOT folded in here. The injector does that itself, from the
+    # `[seamless]` keys written above, and doing it in both places would put the same path in the
+    # list twice -- which its deduplication would survive, but only by silently disagreeing with
+    # the file a human is reading. One writer per fact.
+    launcher_dll_list = ", ".join(f'"{name}"' for name in launcher_dlls)
     crash_banner = (
         ""
         if fault_after_ms == NO_FAULT_MS
@@ -1642,12 +1662,13 @@ def config_text(
 # `co2` by default, so the container becomes `DS2SOFS0000.co2` and every save feature above -- load
 # from file, save to file, load a build -- has to open that name instead of `DS2SOFS0000.sl2`.
 #
-# The loading is done by `ds2sc_launcher.exe`, which `scripts/ds2-run.py --seamless` runs. An
-# in-process `LoadLibraryW` was tried from four slots and every one mapped the DLL and left it
-# inert -- it read no settings, installed no hooks, and the game went on opening `.sl2`. Its
-# launcher creates the process SUSPENDED, injects, then resumes, and that ordering is the thing
-# that matters: a DLL loaded by an import cannot reproduce it, because its own DllMain is part of
-# the initialisation that has to not have happened yet.
+# The loading is done by `{STAGED_LAUNCHER_NAME}`, this repo's own injector, which
+# `scripts/ds2-run.py --seamless` runs in place of the mod's `ds2sc_launcher.exe`. An in-process
+# `LoadLibraryW` was tried from four slots and every one mapped the DLL and left it inert -- it
+# read no settings, installed no hooks, and the game went on opening `.sl2`. The injector creates
+# the process suspended, injects, then resumes, and that ordering is the thing that matters: a DLL
+# loaded by an import cannot reproduce it, because its own DllMain is part of the initialisation
+# that has to not have happened yet. See `[{LAUNCHER_SECTION}]` below for the list it works from.
 #
 # BEFORE THE FIRST CO-OP RUN, two things that have no in-game explanation:
 #   * `cooppassword` in `SeamlessCoop/ds2sc_settings.ini` must not be empty, or the mod stops the
@@ -1662,6 +1683,32 @@ def config_text(
 # Grep the log for `{SEAMLESS_LOG_PREFIX}`.
 {KEY_SEAMLESS_ENABLED} = {str(seamless).lower()}
 {KEY_SEAMLESS_DLL} = "{seamless_dll}"
+
+[{LAUNCHER_SECTION}]
+# Extra DLLs that get into the game from OUTSIDE it, injected before it runs an instruction.
+#
+# Read by `{STAGED_LAUNCHER_NAME}` rather than by `{STAGED_DLL_NAME}`, because by the time this
+# repo's own DLL is running it is already too late: the process exists and its main thread has run
+# `LdrInitializeThunk`, which is exactly the state the four-slot measurement above showed a mod
+# cannot be loaded into. The injector is the only thing here that runs before that.
+#
+# Paths are relative to the game directory, or absolute. They are injected in the order written,
+# each fully loaded before the next is asked for, because two mods that hook the same function
+# resolve in load order and a list whose order did not survive would make that unfixable from
+# here. `[{SEAMLESS_SECTION}] {KEY_SEAMLESS_ENABLED}` puts its own DLL at the front of this list
+# and is deduplicated against it, so naming it in both places still loads it once.
+#
+# Every entry must exist before anything starts. A missing file is refused with the line to edit,
+# and no process is created -- a session gets the whole list or does not exist, because a game
+# that came up with some of its mods in it has no way to say from the inside which ones.
+#
+# `{STAGED_DLL_NAME}` is deliberately not in this list. It is a static import of
+# `DarkSoulsII.exe`, so the loader maps it unasked, and the injected thread runs process
+# initialisation before its own start routine -- meaning this repo's loader is in first and these
+# follow.
+#
+# Grep the log for `{LAUNCHER_LOG_PREFIX}`.
+{KEY_LAUNCHER_DLLS} = [{launcher_dll_list}]
 
 [{INVASION_PATH_SECTION}]
 # A direction to every other player in your session, drawn over the world.
@@ -1824,6 +1871,7 @@ def write_config(
     input_harness: bool = False,
     save_directory: str = "",
     menu_rows_all: bool = False,
+    launcher_dlls: tuple[str, ...] = (),
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
@@ -1862,6 +1910,7 @@ def write_config(
         input_harness,
         save_directory,
         menu_rows_all,
+        launcher_dlls,
     )
     path.write_text(text, encoding="utf-8")
     return path, text
@@ -1922,6 +1971,20 @@ def stage() -> tuple[Path, str]:
     return staged, sha256(staged)
 
 
+def stage_launcher() -> tuple[Path, str]:
+    """Copy our injector next to the game; return the staged path and ITS hash.
+
+    Staged rather than run out of `target/` for one reason that matters: the injector resolves
+    the game directory from its OWN location, so that it keeps working when Steam or a Proton
+    chain hands it a working directory it did not choose. Running it from the build tree would
+    make it look for `DarkSoulsII.exe` in `target/`.
+    """
+    staged = GAME_DIR / STAGED_LAUNCHER_NAME
+    shutil.copyfile(BUILT_LAUNCHER, staged)
+    staged.chmod(0o755)
+    return staged, sha256(staged)
+
+
 def dry_run(
     probe: str,
     observe: float,
@@ -1958,6 +2021,7 @@ def dry_run(
     input_harness: bool = False,
     save_directory: str = "",
     menu_rows_all: bool = False,
+    launcher_dlls: tuple[str, ...] = (),
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
@@ -2014,6 +2078,7 @@ def dry_run(
             input_harness,
             save_directory,
             menu_rows_all,
+            launcher_dlls,
         ):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
         else:
@@ -2066,6 +2131,7 @@ def dry_run(
                 input_harness=input_harness,
                 save_directory=save_directory,
                 menu_rows_all=menu_rows_all,
+                launcher_dlls=launcher_dlls,
             ),
             indent="[dry-run]   | ",
         )
@@ -2492,6 +2558,7 @@ def launch(
     input_harness: bool = False,
     save_directory: str = "",
     menu_rows_all: bool = False,
+    launcher_dlls: tuple[str, ...] = (),
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
@@ -2543,6 +2610,7 @@ def launch(
         input_harness,
         save_directory,
         menu_rows_all,
+        launcher_dlls,
     )
     print(f"[config] {config_path}")
 
@@ -2579,30 +2647,38 @@ def launch(
     environment = launch_env(probe)
     argv = ["steam", "-applaunch", APPID]
     workdir = None
-    if seamless:
-        # Seamless Co-op has to be loaded by its own launcher, so with it armed the run goes
-        # through Proton directly rather than through `steam -applaunch`. What that costs is
-        # Steam's own bookkeeping -- playtime, the overlay, cloud sync on exit -- because Steam
-        # is not the one starting the game. What it buys is a co-op mod that actually initialises.
+    inject_from_outside = seamless or bool(launcher_dlls)
+    if inject_from_outside:
+        # A mod that cannot be loaded from inside the process has to be injected before the game
+        # runs, so with anything on this list the run goes through Proton directly rather than
+        # through `steam -applaunch`. What that costs is Steam's own bookkeeping -- playtime, the
+        # overlay, cloud sync on exit -- because Steam is not the one starting the game. What it
+        # buys is a mod that actually initialises.
         chain, problems = proton_chain()
         for problem in problems:
-            print(f"[seamless] {problem}")
-        launcher = seamless_launcher()
-        if not launcher.is_file():
-            problems.append(f"no launcher at {launcher}")
-            print(f"[seamless] no launcher at {launcher}")
+            print(f"[launcher] {problem}")
+        if not BUILT_LAUNCHER.is_file():
+            problems.append(f"no built launcher at {BUILT_LAUNCHER}")
+            print(
+                f"[launcher] no built launcher at {BUILT_LAUNCHER}\n"
+                "    build it: cargo xwin build --release --target x86_64-pc-windows-msvc "
+                "-p ds2-launcher"
+            )
         if problems:
             print(
-                "[seamless] REFUSING TO LAUNCH -- fix the above, or drop --seamless to run "
-                "through Steam without that mod"
+                "[launcher] REFUSING TO LAUNCH -- fix the above, or drop --seamless and "
+                "--launcher-dll to run through Steam with this repo's own DLL alone"
             )
             return 1
+        # Staged beside the game rather than run out of `target/`: it resolves the game directory
+        # from its own location, so that it keeps working when a Proton chain hands it a working
+        # directory it did not choose.
+        launcher, launcher_hash = stage_launcher()
+        print(f"[launcher] staged {launcher}")
+        print(f"[launcher] sha256 {launcher_hash}")
         argv = [*chain, str(launcher)]
         workdir = str(GAME_DIR)
-        # The launcher resolves `DarkSoulsII.exe` and `SeamlessCoop//ds2sc.dll` relative to the
-        # working directory, and sets `SteamAppId` itself for the case Steam did not start the
-        # game -- which is this case. It is set here as well so the value is visible in this
-        # script rather than only inside someone else's binary.
+        # `SteamAppId` is set for the case Steam did not start the game -- which is this case.
         environment = {
             **environment,
             "STEAM_COMPAT_DATA_PATH": str(PREFIX_DIR.parent),
@@ -2627,10 +2703,14 @@ def launch(
         + " ".join(f"{k}={v}" for k, v in environment.items())
         + ")"
     )
-    if seamless:
+    if inject_from_outside:
         print(
-            "[launch] started by Seamless Co-op's launcher, NOT by Steam -- no playtime, no "
-            "overlay, and no cloud sync for this session"
+            f"[launch] started by this repo's own {STAGED_LAUNCHER_NAME}, not by Steam -- no "
+            "playtime, no overlay, and no cloud sync for this session"
+        )
+        print(
+            f"[launch] grep the launcher's own output for `{LAUNCHER_LOG_PREFIX}`: it names every "
+            "DLL it injected and refuses rather than starting a half-modded game"
         )
     print(f"[launch] waiting up to {TESTIMONY_BUDGET_SECONDS:.0f}s for {log_path}")
 
@@ -3983,6 +4063,22 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--launcher-dll",
+        dest="launcher_dll",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help=(
+            "another mod's DLL to inject before the game runs an instruction, relative to the "
+            "game directory or absolute. Repeatable, and injected in the order given. This is "
+            "the only way into the process for a mod that cannot be loaded from inside it, and "
+            "it makes the run go through this repo's own "
+            f"{STAGED_LAUNCHER_NAME} rather than through `steam -applaunch` -- the same "
+            "trade `--seamless` makes, and for the same reason. A named file that is not there "
+            "refuses the launch instead of starting a game without it."
+        ),
+    )
+    parser.add_argument(
         "--invasion-path",
         dest="invasion_path",
         action="store_true",
@@ -4197,6 +4293,7 @@ def main() -> int:
             args.input_harness,
             windows_path(args.save_dir),
             args.menu_rows_all,
+            tuple(args.launcher_dll),
         )
     return launch(
         args.probe,
@@ -4234,6 +4331,7 @@ def main() -> int:
         args.input_harness,
         windows_path(args.save_dir),
         args.menu_rows_all,
+        tuple(args.launcher_dll),
     )
 
 

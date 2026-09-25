@@ -892,7 +892,8 @@ fn report_seamless() {
     log_line(format_args!("{}", config.describe()));
     let name = ds2_save_redirect::active_save_file_name();
     log_line(format_args!(
-        "{} save container this run is {name} -- its own launcher loads that mod, nothing here does",
+        "{} save container this run is {name} -- ds2-launcher.exe injected that mod before this \
+         process ran, nothing here does",
         seamless::LOG_PREFIX
     ));
 }
