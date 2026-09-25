@@ -1,7 +1,7 @@
 //! The one detour, and the five writes it makes.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use ds2_game_base::mem::{game_rva, read_bytes};
 use ds2_hook::{MH_ApplyQueued, MH_Initialize, MH_STATUS, MhHook};
@@ -19,6 +19,9 @@ type SaveLoadUpdate = unsafe extern "system" fn(usize, f32);
 /// Trampoline back to the real update, published before the site is patched so a detour that fires
 /// on the next frame cannot read a zero and drop the engine's own save tick on the floor.
 static TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether the detour has run at least once, so the log can say so exactly once.
+static FIRST_TICK: AtomicBool = AtomicBool::new(false);
 
 /// A log sink, installed by the loader so this crate writes into the same file as everything else.
 /// Stored as a `usize` because a `fn` pointer is not an `Atomic` type.
@@ -196,6 +199,27 @@ unsafe fn suppress(system: usize) {
         in_flight: window[field(ds2_rva::SAVE_LOAD_SYSTEM_SAVE_IN_FLIGHT_OFFSET)] != 0,
         kind: i32::from_le_bytes(kind_bytes),
     };
+
+    // One line the first time the detour runs, because "installed" and "on the live path" are
+    // different claims and only the second one means the game's saves are being refused. The update
+    // is reached from two game-state handlers, so a run that never gets into a game never calls it --
+    // and without this line that run looks exactly like a working one.
+    if !FIRST_TICK.swap(true, Ordering::AcqRel) {
+        let mut elapsed = [0u8; 4];
+        elapsed.copy_from_slice(
+            &window[field(ds2_rva::SAVE_LOAD_SYSTEM_AUTOSAVE_ELAPSED_OFFSET)..][..4],
+        );
+        log(format_args!(
+            "{LOG_PREFIX} the save tick is live system=0x{system:016x} wanted={} deferred={} \
+             in-flight={} kind={} autosave-elapsed={:.3}s of {}s",
+            frame.wanted,
+            frame.deferred,
+            frame.in_flight,
+            frame.kind,
+            f32::from_le_bytes(elapsed),
+            ds2_rva::SAVE_LOAD_SYSTEM_AUTOSAVE_SECONDS
+        ));
+    }
 
     let wanted_at = system + ds2_rva::SAVE_LOAD_SYSTEM_SAVE_WANTED_OFFSET;
     let kind2_at = system + ds2_rva::SAVE_LOAD_SYSTEM_SAVE_KIND2_OFFSET;
