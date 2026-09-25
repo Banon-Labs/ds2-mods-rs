@@ -27,6 +27,15 @@
 //!
 //! House rule, same as `ds2-inventory-sort`: a watcher thread re-reads the config file about once a
 //! second and publishes the chord into an atomic the detour loads. Default `F8`.
+//!
+//! # It says which way it went
+//!
+//! After a press the crate reads the byte back and plays a short spoken clip for the state the game
+//! actually holds: "Voice chat on" / "Voice chat off", or the Polish pair. The clips are rendered
+//! offline -- English with espeak-ng, Polish with Piper's CC0 `pl_PL-gosia-medium` voice, because a
+//! Polish speaker could not understand espeak-ng's Polish -- and compiled into the DLL from
+//! `assets/`, so there is no speech engine and no file to go missing. `[voice_chat] announce` picks
+//! the language; `""` silences it.
 
 // DEBT: ds2-mods-rs-24r -- not debt to be paid: this crate ships as a Windows DLL and the
 // attribute is what keeps its Rust half parseable on the host, so the game-free tests below it
@@ -55,6 +64,72 @@ pub const CONFIG_KEY_KEYBOARD: &str = "key";
 /// The binding in force when the file does not name one. Clear of `F7` (`ds2-inventory-sort`) and
 /// `;` (`ds2-invasion-path`), the two other keys this workspace polls by default.
 pub const DEFAULT_KEY: &str = "F8";
+
+/// The announcement language key. `"en"`, `"pl"`, or `""` for none.
+pub const CONFIG_KEY_ANNOUNCE: &str = "announce";
+
+/// The language spoken when the file does not name one.
+pub const DEFAULT_ANNOUNCE: Announce = Announce::English;
+
+/// Which clip pair a press plays.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Announce {
+    /// No sound.
+    Silent = 0,
+    /// "Voice chat on" / "Voice chat off".
+    English = 1,
+    /// "O kurwa, działa!" / "O kurwa, nie działa!".
+    Polish = 2,
+}
+
+impl Announce {
+    /// The inverse of `as u8`, for the atomic the detour loads. Unknown values are silent.
+    pub const fn from_u8(raw: u8) -> Self {
+        match raw {
+            1 => Self::English,
+            2 => Self::Polish,
+            _ => Self::Silent,
+        }
+    }
+
+    /// The WAV to play for a voice chat state, or `None` when silent.
+    pub const fn clip(self, on: bool) -> Option<&'static [u8]> {
+        match (self, on) {
+            (Self::Silent, _) => None,
+            (Self::English, true) => Some(include_bytes!("../assets/en-on.wav")),
+            (Self::English, false) => Some(include_bytes!("../assets/en-off.wav")),
+            (Self::Polish, true) => Some(include_bytes!("../assets/pl-on.wav")),
+            (Self::Polish, false) => Some(include_bytes!("../assets/pl-off.wav")),
+        }
+    }
+}
+
+/// What one config text says about the announcement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AnnounceSetting {
+    /// The key is not in the file. [`DEFAULT_ANNOUNCE`] stands.
+    NotSet,
+    /// A value this crate knows.
+    Set(Announce),
+    /// A value it does not. The language already in force stays in force.
+    Invalid(String),
+}
+
+/// Read `[voice_chat] announce` out of a config text.
+pub fn announce_setting(text: &str) -> AnnounceSetting {
+    let parsed = KeyValues::parse(text);
+    let Some(raw) = parsed.get(CONFIG_SECTION, CONFIG_KEY_ANNOUNCE) else {
+        return AnnounceSetting::NotSet;
+    };
+    let value = raw.trim().trim_matches('"').trim();
+    match value.to_ascii_lowercase().as_str() {
+        "" => AnnounceSetting::Set(Announce::Silent),
+        "en" => AnnounceSetting::Set(Announce::English),
+        "pl" => AnnounceSetting::Set(Announce::Polish),
+        _ => AnnounceSetting::Invalid(value.to_string()),
+    }
+}
 
 /// What one config text says about the binding.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -191,6 +266,46 @@ mod tests {
             KeySetting::Invalid { value, .. } => assert_eq!(value, "NotAKey"),
             other => panic!("expected Invalid, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn the_download_announces_in_english() {
+        assert_eq!(
+            announce_setting(SHIPPED_CONFIG),
+            AnnounceSetting::Set(Announce::English)
+        );
+    }
+
+    #[test]
+    fn announce_reads_each_language_and_empty_is_silent() {
+        let read = |v: &str| announce_setting(&format!("[voice_chat]\nannounce = {v}\n"));
+        assert_eq!(read("\"en\""), AnnounceSetting::Set(Announce::English));
+        assert_eq!(read("PL"), AnnounceSetting::Set(Announce::Polish));
+        assert_eq!(read("\"\""), AnnounceSetting::Set(Announce::Silent));
+        assert_eq!(read("\"de\""), AnnounceSetting::Invalid("de".to_string()));
+        assert_eq!(announce_setting(""), AnnounceSetting::NotSet);
+    }
+
+    #[test]
+    fn every_language_has_two_distinct_riff_wave_clips() {
+        for lang in [Announce::English, Announce::Polish] {
+            let on = lang.clip(true).expect("on clip");
+            let off = lang.clip(false).expect("off clip");
+            for clip in [on, off] {
+                assert_eq!(&clip[..4], b"RIFF");
+                assert_eq!(&clip[8..12], b"WAVE");
+            }
+            assert_ne!(on, off);
+        }
+        assert_eq!(Announce::Silent.clip(true), None);
+    }
+
+    #[test]
+    fn the_atomic_round_trips_every_language() {
+        for lang in [Announce::Silent, Announce::English, Announce::Polish] {
+            assert_eq!(Announce::from_u8(lang as u8), lang);
+        }
+        assert_eq!(Announce::from_u8(0xff), Announce::Silent);
     }
 
     #[test]
