@@ -212,6 +212,19 @@ test_deny_git_dash_c_push_when_unrun if {
 	blocked("git -C /home/banon/projects/ds2-mods-rs push origin quit-menu-file-rows", never_attached)
 }
 
+# Measured 2026-09-25: `/usr/bin/git push -u origin voice-chat-on-a-hotkey` pushed never-run
+# crates/ code, because the anchor wanted `git` straight after the separator.
+test_deny_push_with_git_spelled_by_path_when_unrun if {
+	blocked("/usr/bin/git push -u origin voice-chat-on-a-hotkey", never_attached)
+	blocked("cd /tmp && /usr/bin/git -C /home/banon/projects/ds2-mods-rs push", never_attached)
+	blocked("./bin/git push", never_attached)
+}
+
+test_allow_a_path_that_merely_ends_in_git_when_unrun if {
+	allowed("ls /usr/bin/git", never_attached)
+	allowed("cat /home/banon/projects/git push.txt", never_attached)
+}
+
 test_deny_push_chained_behind_an_innocent_command_when_unrun if {
 	blocked("./scripts/check.sh && git push origin quit-menu-file-rows", never_attached)
 }

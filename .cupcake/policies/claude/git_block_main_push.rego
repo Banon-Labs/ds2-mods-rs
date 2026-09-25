@@ -136,7 +136,7 @@ blocked_push_context if {
 # Match a real git push invocation, including common global-option forms such
 # as `git -C <repo> push`.
 git_push_command_pattern := `(^|[;&|(
-])\s*(command\s+)?git([ \t]+((-c|--git-dir|--work-tree|--namespace|--config-env)(=|[ \t]+)("[^"\n]*"|'[^'\n]*'|[^ \t;&|()\n]+)|--(bare|no-pager|paginate|literal-pathspecs|no-replace-objects|exec-path)(=("[^"\n]*"|'[^'\n]*'|[^ \t;&|()\n]+))?))*[ \t]+push([ \t;&|)\n]|$)`
+])\s*(command\s+)?(?:[^\s;&|()"']*/)?git([ \t]+((-c|--git-dir|--work-tree|--namespace|--config-env)(=|[ \t]+)("[^"\n]*"|'[^'\n]*'|[^ \t;&|()\n]+)|--(bare|no-pager|paginate|literal-pathspecs|no-replace-objects|exec-path)(=("[^"\n]*"|'[^'\n]*'|[^ \t;&|()\n]+))?))*[ \t]+push([ \t;&|)\n]|$)`
 
 is_git_push(cmd) if {
 	regex.match(git_push_command_pattern, cmd)
@@ -166,7 +166,7 @@ push_targets_main(cmd) if {
 # from any feature branch. It was left out before because widening this class on
 # the raw command string widened the quoted-prose false positive with it; now
 # that quoted spans are anchor-neutralised before matching, it does not.
-git_push_main_target_pattern := `(?m)(^|[;&|(]\s*|\n)\s*(command\s+)?git(\s+((-c|--git-dir|--work-tree|--namespace|--config-env)(=|\s+)("[^"\n]*"|'[^'\n]*'|[^\s;&|()]+)|--(bare|no-pager|paginate|literal-pathspecs|no-replace-objects|exec-path)(=("[^"\n]*"|'[^'\n]*'|[^\s;&|()]+))?))*\s+push(\s+[^;&|\n]*)?(\s|:)((refs/)?heads/)?main(\s|$|[;&|)\n])`
+git_push_main_target_pattern := `(?m)(^|[;&|(]\s*|\n)\s*(command\s+)?(?:[^\s;&|()"']*/)?git(\s+((-c|--git-dir|--work-tree|--namespace|--config-env)(=|\s+)("[^"\n]*"|'[^'\n]*'|[^\s;&|()]+)|--(bare|no-pager|paginate|literal-pathspecs|no-replace-objects|exec-path)(=("[^"\n]*"|'[^'\n]*'|[^\s;&|()]+))?))*\s+push(\s+[^;&|\n]*)?(\s|:)((refs/)?heads/)?main(\s|$|[;&|)\n])`
 
 current_branch := branch if {
 	branch := trim(input.signals.current_branch, " \t\r\n")
@@ -180,11 +180,11 @@ current_branch := branch if {
 
 # Case-insensitive find-all twin of git_push_command_pattern, applied to the
 # RAW (unlowered) command so worktree path capitalization survives extraction.
-git_push_findall_pattern := `(?i)(^|[;&|(\n])\s*(command\s+)?git([ \t]+((-c|--git-dir|--work-tree|--namespace|--config-env)(=|[ \t]+)("[^"\n]*"|'[^'\n]*'|[^ \t;&|()\n]+)|--(bare|no-pager|paginate|literal-pathspecs|no-replace-objects|exec-path)(=("[^"\n]*"|'[^'\n]*'|[^ \t;&|()\n]+))?))*[ \t]+push([ \t;&|)\n]|$)`
+git_push_findall_pattern := `(?i)(^|[;&|(\n])\s*(command\s+)?(?:[^\s;&|()"']*/)?git([ \t]+((-c|--git-dir|--work-tree|--namespace|--config-env)(=|[ \t]+)("[^"\n]*"|'[^'\n]*'|[^ \t;&|()\n]+)|--(bare|no-pager|paginate|literal-pathspecs|no-replace-objects|exec-path)(=("[^"\n]*"|'[^'\n]*'|[^ \t;&|()\n]+))?))*[ \t]+push([ \t;&|)\n]|$)`
 
 # Strict single-target form the exception recognizes: `git -C <path> push`.
 # Group 2 captures the path token (optionally quoted).
-git_c_push_extract_pattern := `(?i)(^|[;&|(\n])\s*(?:command\s+)?git[ \t]+-C[ \t]+("[^"\n]*"|'[^'\n]*'|[^ \t;&|()\n]+)[ \t]+push(?:[ \t;&|)\n]|$)`
+git_c_push_extract_pattern := `(?i)(^|[;&|(\n])\s*(?:command\s+)?(?:[^\s;&|()"']*/)?git[ \t]+-C[ \t]+("[^"\n]*"|'[^'\n]*'|[^ \t;&|()\n]+)[ \t]+push(?:[ \t;&|)\n]|$)`
 
 # Every push invocation ACROSS ALL EXECUTED TEXTS, so a push smuggled into a
 # `bash -c` payload counts towards the general tally and no exception can vouch
@@ -250,7 +250,7 @@ worktree_branches_signal := out if {
 # Deliberately narrow: this only recognizes the conventional explicit-upstream
 # form used to publish a feature branch. Other push option arrangements fail
 # closed until they have their own parser and regression coverage.
-git_push_explicit_branch_extract_pattern := `(?i)(^|[;&|(\n])\s*(?:command\s+)?git\s+push\s+(?:-u|--set-upstream)\s+("[^"\n]*"|'[^'\n]*'|[^\s;&|()\n]+)\s+("[^"\n]*"|'[^'\n]*'|[^\s;&|()\n]+)(?:\s|$|[;&|)\n])`
+git_push_explicit_branch_extract_pattern := `(?i)(^|[;&|(\n])\s*(?:command\s+)?(?:[^\s;&|()"']*/)?git\s+push\s+(?:-u|--set-upstream)\s+("[^"\n]*"|'[^'\n]*'|[^\s;&|()\n]+)\s+("[^"\n]*"|'[^'\n]*'|[^\s;&|()\n]+)(?:\s|$|[;&|)\n])`
 
 # A stale/missing branch signal must not block a command when every push in it
 # has the explicit, non-main destination form above. The independent
@@ -293,7 +293,7 @@ explicit_nonmain_destination(token) if {
 # a second operand (`git push origin a:b c:d`) does not match and the command
 # falls back to denied. Without that anchor the parser would vouch for a refspec
 # list it never looked at.
-git_push_refspec_extract_pattern := `(?i)(^|[;&|(\n])\s*(?:command\s+)?git[ \t]+push[ \t]+("[^"\n]*"|'[^'\n]*'|[^-\s;&|()\n][^\s;&|()\n]*)[ \t]+("[^"\n]*"|'[^'\n]*'|[^\s;&|()\n]+)[ \t]*(?:[;&|)\n]|$)`
+git_push_refspec_extract_pattern := `(?i)(^|[;&|(\n])\s*(?:command\s+)?(?:[^\s;&|()"']*/)?git[ \t]+push[ \t]+("[^"\n]*"|'[^'\n]*'|[^-\s;&|()\n][^\s;&|()\n]*)[ \t]+("[^"\n]*"|'[^'\n]*'|[^\s;&|()\n]+)[ \t]*(?:[;&|)\n]|$)`
 
 # Every push invocation in the command must be the strict form above and every
 # extracted refspec must name a destination that cannot be main. One unrecognized

@@ -114,9 +114,11 @@ any_executed_push if {
 }
 
 # The same invocation pattern the main-push guard uses, including `git -C <path> push` and the
-# global options that may sit before the verb.
+# global options that may sit before the verb. `git` may be spelled by path (`/usr/bin/git`): that
+# spelling let a never-run crates/ push through on 2026-09-25, when it was used to get past the
+# rewrite of bare `git` that worktree isolation refuses.
 git_push_command_pattern := `(^|[;&|(
-])\s*(command\s+)?git([ \t]+((-c|--git-dir|--work-tree|--namespace|--config-env)(=|[ \t]+)("[^"\n]*"|'[^'\n]*'|[^ \t;&|()\n]+)|--(bare|no-pager|paginate|literal-pathspecs|no-replace-objects|exec-path)(=("[^"\n]*"|'[^'\n]*'|[^ \t;&|()\n]+))?))*[ \t]+push([ \t;&|)\n]|$)`
+])\s*(command\s+)?(?:[^\s;&|()"']*/)?git([ \t]+((-c|--git-dir|--work-tree|--namespace|--config-env)(=|[ \t]+)("[^"\n]*"|'[^'\n]*'|[^ \t;&|()\n]+)|--(bare|no-pager|paginate|literal-pathspecs|no-replace-objects|exec-path)(=("[^"\n]*"|'[^'\n]*'|[^ \t;&|()\n]+))?))*[ \t]+push([ \t;&|)\n]|$)`
 
 # --- The decision -------------------------------------------------------------
 

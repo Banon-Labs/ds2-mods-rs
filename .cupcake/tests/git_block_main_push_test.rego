@@ -37,6 +37,16 @@ test_deny_bare_git_push_on_main if {
 	"DS2-MODS-BLOCK-MAIN-PUSH" in rule_ids(denials)
 }
 
+test_deny_git_spelled_by_path_push_on_main if {
+	denials := guard.deny with input as bash_event("/usr/bin/git push", "main\n")
+	"DS2-MODS-BLOCK-MAIN-PUSH" in rule_ids(denials)
+}
+
+test_deny_git_spelled_by_path_push_main_from_feature_branch if {
+	denials := guard.deny with input as bash_event("/usr/bin/git push origin main", "feature/no-main-push")
+	"DS2-MODS-BLOCK-MAIN-PUSH" in rule_ids(denials)
+}
+
 test_deny_git_push_when_branch_signal_missing if {
 	denials := guard.deny with input as bash_event_no_branch_signal("git push")
 	"DS2-MODS-BLOCK-MAIN-PUSH" in rule_ids(denials)

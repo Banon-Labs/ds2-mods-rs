@@ -94,7 +94,7 @@ blocked_branch_context if {
 # words. This avoids false positives from shell comments, printf labels, and
 # variable names such as archive_commit while still blocking direct git commit
 # calls, including common global-option forms such as `git -C <repo> commit`.
-git_commit_command_pattern := `(^|[;&|(\n])\s*(command\s+)?git([ \t]+((-c|--git-dir|--work-tree|--namespace|--config-env)(=|[ \t]+)("[^"\n]*"|'[^'\n]*'|[^ \t;&|()\n]+)|--(bare|no-pager|paginate|literal-pathspecs|no-replace-objects|exec-path)(=("[^"\n]*"|'[^'\n]*'|[^ \t;&|()\n]+))?))*[ \t]+commit([ \t;&|)\n]|$)`
+git_commit_command_pattern := `(^|[;&|(\n])\s*(command\s+)?(?:[^\s;&|()"']*/)?git([ \t]+((-c|--git-dir|--work-tree|--namespace|--config-env)(=|[ \t]+)("[^"\n]*"|'[^'\n]*'|[^ \t;&|()\n]+)|--(bare|no-pager|paginate|literal-pathspecs|no-replace-objects|exec-path)(=("[^"\n]*"|'[^'\n]*'|[^ \t;&|()\n]+))?))*[ \t]+commit([ \t;&|)\n]|$)`
 
 is_git_commit(cmd) if {
 	regex.match(git_commit_command_pattern, cmd)
@@ -112,12 +112,12 @@ current_branch := branch if {
 
 # Case-insensitive find-all twin of git_commit_command_pattern, applied to the
 # RAW (unlowered) command so worktree path capitalization survives extraction.
-git_commit_findall_pattern := `(?i)(^|[;&|(\n])\s*(command\s+)?git([ \t]+((-c|--git-dir|--work-tree|--namespace|--config-env)(=|[ \t]+)("[^"\n]*"|'[^'\n]*'|[^ \t;&|()\n]+)|--(bare|no-pager|paginate|literal-pathspecs|no-replace-objects|exec-path)(=("[^"\n]*"|'[^'\n]*'|[^ \t;&|()\n]+))?))*[ \t]+commit([ \t;&|)\n]|$)`
+git_commit_findall_pattern := `(?i)(^|[;&|(\n])\s*(command\s+)?(?:[^\s;&|()"']*/)?git([ \t]+((-c|--git-dir|--work-tree|--namespace|--config-env)(=|[ \t]+)("[^"\n]*"|'[^'\n]*'|[^ \t;&|()\n]+)|--(bare|no-pager|paginate|literal-pathspecs|no-replace-objects|exec-path)(=("[^"\n]*"|'[^'\n]*'|[^ \t;&|()\n]+))?))*[ \t]+commit([ \t;&|)\n]|$)`
 
 # Strict single-target form the exception recognizes: `git -C <path> commit`.
 # Group 2 captures the path token (optionally quoted). Any other global-option
 # arrangement deliberately fails the strict match and keeps the deny.
-git_c_commit_extract_pattern := `(?i)(^|[;&|(\n])\s*(?:command\s+)?git[ \t]+-C[ \t]+("[^"\n]*"|'[^'\n]*'|[^ \t;&|()\n]+)[ \t]+commit(?:[ \t;&|)\n]|$)`
+git_c_commit_extract_pattern := `(?i)(^|[;&|(\n])\s*(?:command\s+)?(?:[^\s;&|()"']*/)?git[ \t]+-C[ \t]+("[^"\n]*"|'[^'\n]*'|[^ \t;&|()\n]+)[ \t]+commit(?:[ \t;&|)\n]|$)`
 
 # Every commit invocation ACROSS ALL EXECUTED TEXTS, so a commit smuggled into a
 # `bash -c` payload counts towards the general tally and the exception cannot
