@@ -207,6 +207,11 @@ MENU_ROW_MAX_ADDED = 12
 #: The prefix `ds2-save-file` writes. Grep for it when an export or a pick disappoints.
 SAVE_FILE_LOG_PREFIX = "ds2-save-file:"
 
+#: Mirrors `LOG_PREFIX` in `crates/ds2-save-block/src/lib.rs`. That crate installs only when the
+#: `save-game-to-file` row registers, and its lines are the only evidence that a run is refusing the
+#: game's own saves rather than quietly taking them. `--selftest` pins this against the crate.
+SAVE_BLOCK_LOG_PREFIX = "ds2-save-block:"
+
 #: Mirrors `HANDOFF_FILE_NAME` in `crates/ds2-save-file-core/src/handoff.rs`. The one-line file the
 #: Load Character from File row writes and the loader consumes on the NEXT launch.
 SAVE_FILE_HANDOFF_NAME = "ds2-load-next-save.txt"
@@ -1131,6 +1136,7 @@ def config_text(
     invasion_path_npc_self_check: bool = False,
     input_harness: bool = False,
     save_directory: str = "",
+    menu_rows_all: bool = False,
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
@@ -1145,12 +1151,25 @@ def config_text(
     # than as the launcher having been told to leave them out. Every row is on by default and the
     # launcher's job is to launch the default; a player who wants fewer edits this line in the file
     # it is commented into, where the choice is visible next to the thing it changes.
-    menu_row_rows_line = (
-        f"# {KEY_MENU_ROW_ROWS} = ["
-        + ", ".join(f'"{name}"' for name in MENU_ROW_ROW_NAMES[:MENU_ROW_MAX_ADDED])
-        + f"]   # at most {MENU_ROW_MAX_ADDED} of: "
-        + ", ".join(MENU_ROW_ROW_NAMES)
-    )
+    every_row = ", ".join(f'"{name}"' for name in MENU_ROW_ROW_NAMES[:MENU_ROW_MAX_ADDED])
+    if menu_rows_all:
+        # ALL of them or none, never a subset, which is the whole lesson of the comment above: a
+        # subset written from here looks like a DLL that lost rows. `--all-menu-rows` exists because
+        # two features can only be reached through a row -- the save-file pair -- and one of them,
+        # `ds2-save-block`, installs only when `save-game-to-file` registers. Without this there is no
+        # way to launch a run that exercises either.
+        menu_row_rows_line = (
+            f"# WRITTEN BY --all-menu-rows: every row this table knows, in the default order.\n"
+            f"# The game's own saving is OFF in this run, because `save-game-to-file` is among them.\n"
+            f"{KEY_MENU_ROW_ROWS} = [{every_row}]"
+        )
+    else:
+        menu_row_rows_line = (
+            f"# {KEY_MENU_ROW_ROWS} = ["
+            + every_row
+            + f"]   # at most {MENU_ROW_MAX_ADDED} of: "
+            + ", ".join(MENU_ROW_ROW_NAMES)
+        )
     crash_banner = (
         ""
         if fault_after_ms == NO_FAULT_MS
@@ -1804,6 +1823,7 @@ def write_config(
     invasion_path_npc_self_check: bool = False,
     input_harness: bool = False,
     save_directory: str = "",
+    menu_rows_all: bool = False,
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
@@ -1841,6 +1861,7 @@ def write_config(
         invasion_path_npc_self_check,
         input_harness,
         save_directory,
+        menu_rows_all,
     )
     path.write_text(text, encoding="utf-8")
     return path, text
@@ -1936,6 +1957,7 @@ def dry_run(
     invasion_path_npc_self_check: bool = False,
     input_harness: bool = False,
     save_directory: str = "",
+    menu_rows_all: bool = False,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
@@ -1991,6 +2013,7 @@ def dry_run(
             invasion_path_npc_self_check,
             input_harness,
             save_directory,
+            menu_rows_all,
         ):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
         else:
@@ -2042,6 +2065,7 @@ def dry_run(
                 invasion_path_npc_self_check=invasion_path_npc_self_check,
                 input_harness=input_harness,
                 save_directory=save_directory,
+                menu_rows_all=menu_rows_all,
             ),
             indent="[dry-run]   | ",
         )
@@ -2467,6 +2491,7 @@ def launch(
     invasion_path_npc_self_check: bool = False,
     input_harness: bool = False,
     save_directory: str = "",
+    menu_rows_all: bool = False,
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
@@ -2517,6 +2542,7 @@ def launch(
         invasion_path_npc_self_check,
         input_harness,
         save_directory,
+        menu_rows_all,
     )
     print(f"[config] {config_path}")
 
@@ -3098,6 +3124,33 @@ def selftest() -> int:
     check(
         values.get((INTRO_SECTION, KEY_INTRO_ENABLED)) == "false",
         f"--no-intro-skip writes [{INTRO_SECTION}] {KEY_INTRO_ENABLED} = false",
+    )
+
+    # The rows key stays commented unless asked for, and then carries every row. A subset written
+    # from here is the failure the key's own comment records: rows the DLL was told to leave out,
+    # read as rows the DLL had lost. And a run with `save-game-to-file` among them does not save by
+    # itself, so "which rows" is no longer only about what is on the menu.
+    default_rows = config_text("off")
+    check(
+        f"\n# {KEY_MENU_ROW_ROWS} = [" in default_rows,
+        f"[{MENU_ROW_SECTION}] {KEY_MENU_ROW_ROWS} stays commented out by default",
+    )
+    values, _ = parse_config(default_rows)
+    check(
+        (MENU_ROW_SECTION, KEY_MENU_ROW_ROWS) not in values,
+        "the default run leaves the legacy keys deciding, exactly as the DLL does",
+    )
+    all_rows = config_text("off", menu_rows_all=True)
+    values, _ = parse_config(all_rows)
+    written = values.get((MENU_ROW_SECTION, KEY_MENU_ROW_ROWS), "")
+    check(
+        all(f'"{name}"' in written for name in MENU_ROW_ROW_NAMES),
+        f"--all-menu-rows writes every one of the {len(MENU_ROW_ROW_NAMES)} rows, not a subset",
+    )
+    check(
+        SAVE_BLOCK_LOG_PREFIX
+        in (REPO_ROOT / "crates/ds2-save-block/src/lib.rs").read_text(encoding="utf-8"),
+        "the prefix this script tells you to grep is the one that crate writes",
     )
 
     # The save folder, whose default has to be empty. An arm that wrote a path nobody asked for
@@ -4008,6 +4061,21 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--all-menu-rows",
+        dest="menu_rows_all",
+        action="store_true",
+        help=(
+            f"write `[{MENU_ROW_SECTION}] {KEY_MENU_ROW_ROWS}` with every row this table knows, "
+            "instead of leaving the key commented out for the DLL's legacy defaults. All of them "
+            "or none: a subset written from here once read as a DLL that had lost two rows. The "
+            "reason to want it is that two features can only be reached through a row -- "
+            "`load-character-from-file` and `save-game-to-file` -- and `ds2-save-block` installs "
+            "only when the second one registers, which means THIS RUN DOES NOT SAVE BY ITSELF: no "
+            "autosave, nothing on quit to menu, nothing at a bonfire. Only that row writes the "
+            f"container. Grep the log for `{SAVE_BLOCK_LOG_PREFIX}`."
+        ),
+    )
+    parser.add_argument(
         "--input-harness",
         dest="input_harness",
         action="store_true",
@@ -4128,6 +4196,7 @@ def main() -> int:
             args.invasion_path_npc_self_check,
             args.input_harness,
             windows_path(args.save_dir),
+            args.menu_rows_all,
         )
     return launch(
         args.probe,
@@ -4164,6 +4233,7 @@ def main() -> int:
         args.invasion_path_npc_self_check,
         args.input_harness,
         windows_path(args.save_dir),
+        args.menu_rows_all,
     )
 
 
