@@ -148,6 +148,34 @@ pub fn diverted() -> usize {
     DIVERTED.load(Ordering::Relaxed)
 }
 
+/// Run `body` with this thread's opens exempt from the window.
+///
+/// # Why anything would want that
+///
+/// The window is armed on the path the game's own directory builder produced, and with
+/// `[save_redirect] directory` pointing at a folder the player also exports into, that is a path
+/// this DLL itself writes. `Save Game to File` copies the live container to a destination the
+/// player named -- and if the destination open is diverted, the copy's source and target become one
+/// file and `std::fs::copy` truncates it. Measured 2026-09-24: `exported bytes=0`, with the staged
+/// save left empty behind it.
+///
+/// The refusal that guards against copying a container onto itself cannot see this. It compares the
+/// two paths the caller holds, and they differ; what makes them the same file is a detour one layer
+/// below.
+///
+/// # Thread-local, and the same counter the logger uses
+///
+/// [`DEPTH`] already exists so the detour's own log writes reach the original API instead of
+/// re-entering. This is that mechanism, made available to a caller that knows its own opens are not
+/// the game asking for its container. It covers this thread only, so a concurrent read on the game
+/// thread is still diverted.
+pub fn bypass<T>(body: impl FnOnce() -> T) -> T {
+    DEPTH.with(|depth| depth.set(depth.get() + 1));
+    let produced = body();
+    DEPTH.with(|depth| depth.set(depth.get() - 1));
+    produced
+}
+
 /// Whether a window is armed.
 pub fn armed() -> bool {
     WINDOW

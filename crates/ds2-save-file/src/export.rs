@@ -260,7 +260,17 @@ fn finish(pending: &Pending, timed_out: bool) {
     } else {
         ""
     };
-    match std::fs::copy(&pending.source, &pending.destination) {
+    // The copy must not go through the swap's window. That window is armed on the path the game's
+    // directory builder produced, and with `[save_redirect] directory` pointing at the folder the
+    // player exports into, the destination is that same path -- so the destination open was
+    // diverted to the source and `std::fs::copy` truncated the save to nothing. Measured
+    // 2026-09-24: `exported bytes=0`, staged container left empty behind it.
+    //
+    // The refusal above cannot catch this. It compares two paths that genuinely differ, and what
+    // makes them one file is a detour underneath both.
+    match ds2_save_redirect::open_redirect::bypass(|| {
+        std::fs::copy(&pending.source, &pending.destination)
+    }) {
         Ok(bytes) => log_line(format_args!(
             "{LOG_PREFIX} exported bytes={bytes} source={} destination={} ticks={}{note}",
             pending.source.display(),
