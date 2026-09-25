@@ -61,6 +61,14 @@ RUNTIME_FOREIGN_BINARY = (
 )
 RUNTIME_NO_GAME_CODE = "RUNTIME|game_code=0|attached=0|fresh=0|dll_match=0|head=1758600000|log=0"
 
+# pr_requires_run_stamp fixtures. The stamped bodies under .cupcake/tests/fixtures carry
+# `at=2026-09-25T01:34:20Z`, one minute after this commit time.
+STAMP_SHA = "0123456789abcdef0123456789abcdef01234567"
+STAMP_OTHER_SHA = "fedcba9876543210fedcba9876543210fedcba98"
+STAMP_COMMIT_EPOCH = 1790300000
+STAMP_NOW_EPOCH = STAMP_COMMIT_EPOCH + 3600
+STAMP_FIXTURES = ".cupcake/tests/fixtures"
+
 
 @dataclass(frozen=True)
 class PolicyCase:
@@ -73,6 +81,23 @@ class PolicyCase:
     current_branch: str = "cupcake-policies"
     origin_main_oids: str = FRESH_OIDS
     runtime_evidence: str = RUNTIME_PROVEN
+    # pr_run_stamp's view of git and gh. Pinned for every case, so a `gh pr` case never reads this
+    # checkout's HEAD or the network.
+    pr_stamp_head: str = f"{STAMP_SHA} {STAMP_COMMIT_EPOCH}"
+    pr_stamp_view: str = "{}"
+    # Evaluate the project policies alone, with no global config found. Needed where a global guard
+    # refuses the command outright (`gh pr ready` is always refused by the global draft guard), so
+    # that an allow here is attributable to the project rule and a deny to its own reason text.
+    project_only: bool = False
+
+
+def pr_view(body_fixture: str, head: str = STAMP_SHA) -> str:
+    text = (REPO_ROOT / STAMP_FIXTURES / body_fixture).read_text(encoding="utf-8")
+    return json.dumps({
+        "body": text,
+        "headRefOid": head,
+        "commits": [{"oid": head, "committedDate": "2026-09-25T01:33:20Z"}],
+    })
 
 
 def run_case(case: PolicyCase) -> None:
@@ -101,7 +126,14 @@ def run_case(case: PolicyCase) -> None:
         "CUPCAKE_WORKTREE_BRANCHES_OVERRIDE": "",
         "CUPCAKE_ORIGIN_MAIN_OIDS_OVERRIDE": case.origin_main_oids,
         "CUPCAKE_RUNTIME_EVIDENCE_OVERRIDE": case.runtime_evidence,
+        "CUPCAKE_PR_STAMP_HEAD_OVERRIDE": case.pr_stamp_head,
+        "CUPCAKE_PR_STAMP_VIEW_OVERRIDE": case.pr_stamp_view,
+        "CUPCAKE_PR_STAMP_NOW_OVERRIDE": str(STAMP_NOW_EPOCH),
     }
+    if case.project_only:
+        # cupcake discovers the global root at ${XDG_CONFIG_HOME:-$HOME/.config}/cupcake; an empty
+        # directory there means no global policy is loaded (scripts/cupcake-hook.sh, bug 4).
+        env["XDG_CONFIG_HOME"] = str(REPO_ROOT / STAMP_FIXTURES / "no-global-config")
 
     result = subprocess.run(
         ["cupcake", "eval", "--harness", "claude", "--strict", "--log-level", "error"],
@@ -288,6 +320,75 @@ def cases() -> list[PolicyCase]:
             "git status --short --branch && git log --oneline -3",
             runtime_evidence=RUNTIME_NEVER_RAN,
         ),
+        # --- pr_requires_run_stamp -------------------------------------------------------------
+        # User directive 2026-09-25: no PR drafted, and none marked ready, without a Run-Stamp line
+        # for the commit it carries. git and gh are pinned by the CUPCAKE_PR_STAMP_* overrides.
+        #
+        # The create-allow case runs WITH the global config loaded, so it also proves the stamped
+        # fixture body satisfies the global draft, template and attribution guards -- the stamp is
+        # not a line those guards trip over. The ready cases run project-only, because the global
+        # draft guard refuses every `gh pr ready` and would mask this rule in both directions.
+        PolicyCase(
+            "allow-pr-create-with-stamp-for-head",
+            True,
+            f"gh pr create --draft --title 'feat(x): y' --body-file {STAMP_FIXTURES}/pr_body_run_stamped.md",
+        ),
+        PolicyCase(
+            "deny-pr-create-without-stamp",
+            False,
+            f"gh pr create --draft --title 'feat(x): y' --body-file {STAMP_FIXTURES}/pr_body_no_run_stamp.md",
+            expected_text="no `Run-Stamp:` line",
+            project_only=True,
+        ),
+        PolicyCase(
+            "deny-pr-create-with-stamp-for-another-commit",
+            False,
+            f"gh pr create --draft --title 'feat(x): y' --body-file {STAMP_FIXTURES}/pr_body_run_stamp_wrong_sha.md",
+            expected_text="names a different commit",
+            project_only=True,
+        ),
+        # Committed (amended) after the run: same sha is impossible in life, but the time check is
+        # what this pins -- a run older than the commit is refused.
+        PolicyCase(
+            "deny-pr-create-with-stamp-older-than-commit",
+            False,
+            f"gh pr create --draft --title 'feat(x): y' --body-file {STAMP_FIXTURES}/pr_body_run_stamped.md",
+            pr_stamp_head=f"{STAMP_SHA} {STAMP_COMMIT_EPOCH + 600}",
+            expected_text="older than the commit",
+            project_only=True,
+        ),
+        PolicyCase(
+            "allow-pr-ready-with-stamp-for-live-head",
+            True,
+            "gh pr ready 69",
+            pr_stamp_view=pr_view("pr_body_run_stamped.md"),
+            project_only=True,
+        ),
+        # Pushed after drafting: the live headRefOid moved and the body's stamp did not.
+        PolicyCase(
+            "deny-pr-ready-with-stamp-for-stale-head",
+            False,
+            "gh pr ready 69",
+            pr_stamp_view=pr_view("pr_body_run_stamped.md", head=STAMP_OTHER_SHA),
+            expected_text="names a different commit",
+            project_only=True,
+        ),
+        PolicyCase(
+            "deny-pr-ready-without-stamp",
+            False,
+            "gh pr ready 69",
+            pr_stamp_view=pr_view("pr_body_no_run_stamp.md"),
+            expected_text="no `Run-Stamp:` line",
+            project_only=True,
+        ),
+        PolicyCase(
+            "deny-pr-ready-when-pr-cannot-be-read",
+            False,
+            "gh pr ready 69",
+            expected_text="could not be read with `gh pr view`",
+            project_only=True,
+        ),
+        PolicyCase("allow-pr-ready-undo", True, "gh pr ready 69 --undo", project_only=True),
         # --- bash_no_python_file_write ---------------------------------------------------------
         # The committed-script exemption resolves a path against the REAL repo root, which the
         # repo_paths signal supplies from .cupcake/signals/'s own location. That makes it exactly
