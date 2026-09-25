@@ -126,6 +126,10 @@ all_denials contains decision if { some decision in data.cupcake.policies.claude
 
 all_denials contains decision if { some decision in data.cupcake.policies.claude.monitor_rate_limit.deny }
 
+all_denials contains decision if { some decision in data.cupcake.policies.claude.no_rust_edit_without_frida_proof.deny }
+
+all_denials contains decision if { some decision in data.cupcake.policies.claude.teardown_must_relaunch.deny }
+
 all_denials contains decision if { some decision in data.cupcake.policies.claude.no_grep_for_build_errors.deny }
 
 all_denials contains decision if { some decision in data.cupcake.policies.claude.require_scoped_cargo.deny }

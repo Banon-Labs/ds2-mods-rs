@@ -67,6 +67,8 @@ PROBES: dict[str, str] = {
     "json.marshal": 'str:json.marshal({"a": [1, "b"]})',
     "lower": 'str:lower("AB")',
     "max": "str:format_int(max([1, 3, 2]), 10)",
+    # Needed by no_rust_edit_without_frida_proof (ported 2026-09-25); er-mods-rs probes it too.
+    "min": "str:format_int(min([3, 1, 2]), 10)",
     "object.get": 'str:object.get({"k": "v"}, "k", "d")',
     "regex.find_all_string_submatch_n": 'str:concat("", regex.find_all_string_submatch_n("a(b)", "ab", 1)[0])',
     "regex.find_n": 'str:concat("", regex.find_n("a", "aa", 2))',

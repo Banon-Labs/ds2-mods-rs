@@ -25,7 +25,7 @@ survives the watcher and can be read while it is still running.
 # What the exit writes down
 
 When the watch ends -- a detach, an interrupt, a `SIGTERM` -- it records what the session did
-through `scripts/er-frida-evidence.py`: the agent file, the pid, how many messages came back, how
+through `scripts/ds2-frida-evidence.py`: the agent file, the pid, how many messages came back, how
 long it ran. `.cupcake/policies/claude/no_rust_edit_without_frida_proof.rego` reads that record and
 refuses a Rust edit under `crates/` without one, so this is where the right to write the code comes
 from. The count is taken here, by the tool, for the obvious reason: evidence a caller can type is
@@ -66,18 +66,18 @@ WAIT_FOR_GAME_SECONDS = 300
 PROGRESS_EVERY_SECONDS = 10.0
 # The evidence recorder, beside this file. Hyphenated, so it is loaded by path rather than imported
 # by name; see `evidence_module`.
-EVIDENCE_SCRIPT = pathlib.Path(__file__).resolve().parent / "er-frida-evidence.py"
+EVIDENCE_SCRIPT = pathlib.Path(__file__).resolve().parent / "ds2-frida-evidence.py"
 
 
 def evidence_module():
-    """`scripts/er-frida-evidence.py` as a module object.
+    """`scripts/ds2-frida-evidence.py` as a module object.
 
     Loaded from its path because the filename carries hyphens and no `import` statement can spell
     it. Its `__name__` is not `__main__` here, so its argument parser does not run.
     """
     import importlib.util
 
-    spec = importlib.util.spec_from_file_location("er_frida_evidence", EVIDENCE_SCRIPT)
+    spec = importlib.util.spec_from_file_location("ds2_frida_evidence", EVIDENCE_SCRIPT)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load {EVIDENCE_SCRIPT}")
     module = importlib.util.module_from_spec(spec)
@@ -102,7 +102,7 @@ def record_evidence(agent_path: pathlib.Path, pid: int, messages: int, seconds: 
     except Exception as exc:
         print(
             f"could not record frida evidence ({exc}). The watch itself was fine; "
-            f"`python3 scripts/er-frida-evidence.py --check` will say UNPROVEN.",
+            f"`python3 scripts/ds2-frida-evidence.py --check` will say UNPROVEN.",
             file=sys.stderr,
             flush=True,
         )
