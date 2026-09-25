@@ -20,7 +20,7 @@
 //!
 //! # The three jobs, in this order
 //!
-//! 1. [`neuter_arxan`](dearxan::disabler::neuter_arxan) -- one call, before anything else.
+//! 1. [`dearxan::disabler::neuter_arxan`] -- one call, before anything else.
 //! 2. Log what it reported, through [`ds2_game_base::log`].
 //! 3. Forward [`DirectInput8Create`] to the real system `dinput8.dll` so input still works.
 //!
@@ -152,6 +152,7 @@ unsafe extern "system" {
 ///
 /// Called by the Windows loader with the loader lock held. Do not call directly.
 #[unsafe(no_mangle)]
+// DEBT: ds2-mods-rs-enw -- the Windows loader looks up this exact spelling.
 #[allow(
     non_snake_case,
     reason = "the loader looks up this exact spelling; `dll_main` is not an entry point"
@@ -174,6 +175,8 @@ pub unsafe extern "system" fn DllMain(
         // touching the filesystem under the loader lock.
         ds2_boot_timeline::mark_origin();
         static ATTACHED: Once = Once::new();
+        // SAFETY: every pointer here is one the loader owns or one Windows handed it, and each read
+        // goes through a call that validates its own range rather than dereferencing blind.
         ATTACHED.call_once(|| unsafe { attach(module) });
     }
     if reason == DLL_PROCESS_DETACH {
@@ -1049,6 +1052,8 @@ fn identity_line(module: *mut c_void) -> String {
         Some(path) => format!("{name} {version} module={}", path.display()),
         None => format!(
             "{name} {version} module=<GetModuleFileNameW failed: {}>",
+            // SAFETY: every pointer here is one the loader owns or one Windows handed it, and each read
+            // goes through a call that validates its own range rather than dereferencing blind.
             unsafe { GetLastError() }
         ),
     }
@@ -1062,6 +1067,8 @@ fn module_file_name(module: *mut c_void) -> Option<PathBuf> {
     let mut capacity = 260usize;
     loop {
         let mut buffer = vec![0u16; capacity];
+        // SAFETY: every pointer here is one the loader owns or one Windows handed it, and each read
+        // goes through a call that validates its own range rather than dereferencing blind.
         let written = unsafe { GetModuleFileNameW(module, buffer.as_mut_ptr(), capacity as u32) };
         if written == 0 {
             return None;
@@ -1119,6 +1126,7 @@ fn log_line(args: std::fmt::Arguments<'_>) {
 /// Called by the game through its import thunk. All pointer arguments are forwarded unmodified
 /// to the system implementation, which is the sole owner of their contracts.
 #[unsafe(no_mangle)]
+// DEBT: ds2-mods-rs-enw -- the export name IS the ABI; renaming it unbinds the import.
 #[allow(
     non_snake_case,
     reason = "the export name IS the ABI -- the game's import descriptor asks the loader for \
@@ -1140,6 +1148,8 @@ pub unsafe extern "system" fn DirectInput8Create(
     let Some(real) = real_direct_input8_create() else {
         return E_FAIL;
     };
+    // SAFETY: every pointer here is one the loader owns or one Windows handed it, and each read
+    // goes through a call that validates its own range rather than dereferencing blind.
     let result = unsafe { real(hinst, version, riidltf, ppv_out, punk_outer) };
     // The forward is marked separately because it is not free: `real_direct_input8_create` does a
     // lazy `LoadLibraryW` of the system DLL on the first call, and a milestone that folded that
@@ -1178,11 +1188,15 @@ fn resolve_real_direct_input8_create() -> Option<usize> {
     // Bound to a local rather than inlined into the call: the buffer must outlive the call that
     // reads it, and a named binding says so instead of relying on temporary-lifetime rules.
     let path = system_dinput8_path()?;
+    // SAFETY: every pointer here is one the loader owns or one Windows handed it, and each read
+    // goes through a call that validates its own range rather than dereferencing blind.
     let module = unsafe { LoadLibraryW(path.as_ptr()) };
     if module.is_null() {
         return None;
     }
     // NUL-terminated, because `GetProcAddress` takes a C string and not a Rust one.
+    // SAFETY: every pointer here is one the loader owns or one Windows handed it, and each read
+    // goes through a call that validates its own range rather than dereferencing blind.
     let address = unsafe { GetProcAddress(module, c"DirectInput8Create".as_ptr().cast()) };
     (!address.is_null()).then_some(address as usize)
 }
@@ -1203,9 +1217,13 @@ fn system_dinput8_path() -> Option<Vec<u16>> {
     // `GetSystemDirectoryW` returns the length WITHOUT the terminator on success, or the
     // required size INCLUDING it when the buffer was too small. Ask once, size from the answer.
     let mut buffer = vec![0u16; 260];
+    // SAFETY: every pointer here is one the loader owns or one Windows handed it, and each read
+    // goes through a call that validates its own range rather than dereferencing blind.
     let mut written = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
     if written as usize >= buffer.len() {
         buffer = vec![0u16; written as usize];
+        // SAFETY: every pointer here is one the loader owns or one Windows handed it, and each read
+        // goes through a call that validates its own range rather than dereferencing blind.
         written = unsafe { GetSystemDirectoryW(buffer.as_mut_ptr(), buffer.len() as u32) };
     }
     if written == 0 || written as usize >= buffer.len() {

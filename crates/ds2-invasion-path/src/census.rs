@@ -78,16 +78,31 @@ fn world() -> Option<(usize, usize, usize)> {
     let manager_address = game_rva(ds2_rva::GAME_MANAGER_IMP).ok()?;
     // SAFETY: a resolved RVA inside the loaded image; the reader reports an unmapped page rather
     // than faulting, which is the case at the very start of boot before the global is written.
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let game_manager = non_null(unsafe { safe_read_usize(manager_address)? })?;
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let characters = non_null(unsafe {
         safe_read_usize(game_manager + ds2_rva::GAME_MANAGER_CHARACTER_MANAGER_OFFSET)?
     })?;
     // Null at the title screen, which is an answer rather than a failure: there is no character
     // to draw from until someone loads one.
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let player = non_null(unsafe { safe_read_usize(game_manager + ds2_rva::PLAYER_CTRL_OFFSET)? })?;
     let begin =
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         unsafe { safe_read_usize(characters + ds2_rva::CHARACTER_MANAGER_ENTITY_BEGIN_OFFSET)? };
     let end =
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         unsafe { safe_read_usize(characters + ds2_rva::CHARACTER_MANAGER_ENTITY_END_OFFSET)? };
     Some((player, begin, end))
 }
@@ -172,6 +187,9 @@ fn walk_roster(begin: usize, end: usize, mut visit: impl FnMut(Entry)) -> bool {
     for index in 0..count {
         // SAFETY: `begin` is the engine's own array base and `index` is inside the span it
         // declared; the read is fault-safe if the container was resized under us.
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         let Some(character) = (unsafe { safe_read_usize(begin + index * 8) }) else {
             visit(Entry::Unreadable);
             continue;
@@ -182,6 +200,9 @@ fn walk_roster(begin: usize, end: usize, mut visit: impl FnMut(Entry)) -> bool {
         };
         // SAFETY: as above -- the object's first word is its vtable, and a freed object reads as
         // a refusal rather than a fault.
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         let Some(vtable) = (unsafe { safe_read_usize(character) }) else {
             visit(Entry::Unreadable);
             continue;

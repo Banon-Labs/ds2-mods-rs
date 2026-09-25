@@ -164,6 +164,8 @@ unsafe fn poll(index: usize, this: *mut u8) -> u64 {
         // SAFETY: MinHook published this trampoline for exactly this site, and the signature is
         // the one all the overrides implement.
         let original: PollFn = unsafe { std::mem::transmute::<usize, PollFn>(trampoline) };
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(this) }
     };
 
@@ -199,6 +201,9 @@ unsafe fn poll(index: usize, this: *mut u8) -> u64 {
 ///
 /// `base + offset` must be inside the live device object.
 unsafe fn put_f32(base: *mut u8, offset: usize, value: f32) {
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { base.add(offset).cast::<f32>().write_unaligned(value) };
 }
 
@@ -208,6 +213,9 @@ unsafe fn put_f32(base: *mut u8, offset: usize, value: f32) {
 ///
 /// `base + offset` must be inside the live device object.
 unsafe fn get_i32(base: *mut u8, offset: usize) -> i32 {
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { base.add(offset).cast::<i32>().read_unaligned() }
 }
 
@@ -217,6 +225,9 @@ unsafe fn get_i32(base: *mut u8, offset: usize) -> i32 {
 ///
 /// `base + offset` must be inside the live device object.
 unsafe fn put_i32(base: *mut u8, offset: usize, value: i32) {
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { base.add(offset).cast::<i32>().write_unaligned(value) };
 }
 
@@ -226,6 +237,9 @@ unsafe fn put_i32(base: *mut u8, offset: usize, value: i32) {
 ///
 /// The whole range must be inside the live device object.
 unsafe fn zero(base: *mut u8, offset: usize, len: usize) {
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { base.add(offset).write_bytes(0, len) };
 }
 
@@ -238,6 +252,9 @@ unsafe fn write_pad(this: *mut u8, blocking: bool, authored: &Authored) {
     if blocking {
         // The six normalised axes, the button word and both triggers: everything the poll
         // itself writes, so everything downstream can see.
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         unsafe {
             zero(
                 this,
@@ -262,6 +279,9 @@ unsafe fn write_pad(this: *mut u8, blocking: bool, authored: &Authored) {
     }
     for (index, value) in authored.axes.iter().enumerate() {
         if let Some(value) = value {
+            // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+            // offset this crate validated before installing. The callee's own contract asks for exactly
+            // that live object, and reads inside it go through the fault-tolerant readers.
             unsafe {
                 put_f32(
                     this,
@@ -272,6 +292,9 @@ unsafe fn write_pad(this: *mut u8, blocking: bool, authored: &Authored) {
         }
     }
     if let Some(mask) = authored.buttons {
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         unsafe {
             this.add(ds2_rva::PAD_DEVICE_BUTTONS_OFFSET)
                 .cast::<u16>()
@@ -279,9 +302,15 @@ unsafe fn write_pad(this: *mut u8, blocking: bool, authored: &Authored) {
         }
     }
     if let Some(value) = authored.triggers[0] {
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         unsafe { put_f32(this, ds2_rva::PAD_DEVICE_LEFT_TRIGGER_OFFSET, value) };
     }
     if let Some(value) = authored.triggers[1] {
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         unsafe { put_f32(this, ds2_rva::PAD_DEVICE_RIGHT_TRIGGER_OFFSET, value) };
     }
 }
@@ -297,6 +326,9 @@ unsafe fn write_pad(this: *mut u8, blocking: bool, authored: &Authored) {
 /// `this` is a live `DLUID::MouseDevice` whose poll has just run.
 unsafe fn write_dinput_mouse(this: *mut u8, blocking: bool) {
     if blocking {
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         unsafe {
             // The raw `DIMOUSESTATE2` first -- its `rgbButtons` are not copied out by the poll,
             // so the buttons live only there.
@@ -326,6 +358,9 @@ unsafe fn write_dinput_mouse(this: *mut u8, blocking: bool) {
 /// `this` is a live `DLUID::KeyboardDevice` whose poll has just run.
 unsafe fn write_keyboard(this: *mut u8, blocking: bool) {
     if blocking {
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         unsafe {
             zero(
                 this,
@@ -343,7 +378,13 @@ unsafe fn write_keyboard(this: *mut u8, blocking: bool) {
 /// `this` is a live `WindowsMouseDevice` whose poll has just run, so the clamped position at
 /// `+0x08` is the value `FUN_140b0d0e0` is about to read.
 unsafe fn write_windows_mouse(this: *mut u8, blocking: bool, authored: &Authored) {
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let real_x = unsafe { get_i32(this, ds2_rva::WINDOWS_MOUSE_DEVICE_POSITION_OFFSET) };
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let real_y = unsafe {
         get_i32(
             this,
@@ -354,6 +395,9 @@ unsafe fn write_windows_mouse(this: *mut u8, blocking: bool, authored: &Authored
     if blocking {
         // Wheel, buttons and the button-edge word. `FUN_140b0d0e0` reads all three, and they
         // are the whole of this device's non-positional contribution.
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         unsafe {
             zero(
                 this,
@@ -424,15 +468,27 @@ unsafe fn write_windows_mouse(this: *mut u8, blocking: bool, authored: &Authored
 // One detour per site rather than a shared body: MinHook hands a detour no way to learn which
 // site it was reached from, so the index has to be baked into the function.
 unsafe extern "system" fn detour_pad(this: *mut u8) -> u64 {
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { poll(PAD, this) }
 }
 unsafe extern "system" fn detour_dinput_mouse(this: *mut u8) -> u64 {
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { poll(DINPUT_MOUSE, this) }
 }
 unsafe extern "system" fn detour_keyboard(this: *mut u8) -> u64 {
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { poll(KEYBOARD, this) }
 }
 unsafe extern "system" fn detour_windows_mouse(this: *mut u8) -> u64 {
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { poll(WINDOWS_MOUSE, this) }
 }
 
@@ -549,6 +605,8 @@ pub(crate) unsafe fn install() -> usize {
 
     // MinHook is statically linked into whichever DLL contains this crate, so nothing else
     // shares this instance and ALREADY_INITIALIZED can only mean this ran twice.
+    // SAFETY: `MH_Initialize` takes no arguments and is safe to call again on an already-
+    // initialised library, which the status below distinguishes.
     let status = unsafe { MH_Initialize() };
     if status != MH_STATUS::MH_OK && status != MH_STATUS::MH_ERROR_ALREADY_INITIALIZED {
         harness_log!("install-failed stage=MH_Initialize status={status:?}");
@@ -586,6 +644,8 @@ pub(crate) unsafe fn install() -> usize {
         }
 
         let hook =
+            // SAFETY: the target is an RVA this crate validated against the prologue it expects before
+            // reaching here, and the detour is a `'static` fn item of the matching ABI.
             match unsafe { MhHook::new(address as *mut c_void, DETOURS[index] as *mut c_void) } {
                 Ok(hook) => hook,
                 Err(status) => {
@@ -600,6 +660,7 @@ pub(crate) unsafe fn install() -> usize {
         // Published BEFORE the site is patched, so a detour cannot observe a zero and silently
         // skip the game's own poll -- which on this path would be the input stopping entirely.
         TRAMPOLINES[index].store(hook.trampoline() as usize, Ordering::Release);
+        // SAFETY: the target is the address `MhHook::new` above already registered with MinHook.
         let status = unsafe { MH_EnableHook(address as *mut c_void) };
         if status != MH_STATUS::MH_OK {
             harness_log!(

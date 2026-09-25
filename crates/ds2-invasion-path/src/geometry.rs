@@ -31,6 +31,7 @@
 // dead. `dead_code` is still denied on the shipping target, where the windows modules are
 // compiled and every item here has a caller -- so this allow cannot hide an unused item, it only
 // stops the host test run from failing over cross-compiled callers.
+// DEBT: ds2-mods-rs-2rs -- module-wide dead_code, reason not yet recorded.
 #![cfg_attr(not(windows), allow(dead_code))]
 
 /// A 4x4 matrix in the game's storage order: sixteen `f32`, row-major.
@@ -82,9 +83,13 @@ pub const BARB_RADIANS: f32 = core::f32::consts::FRAC_PI_6;
 /// stopped being a world-space object.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScreenArrow {
+    /// Where the shaft starts.
     pub base: [f32; 2],
+    /// Where it points.
     pub tip: [f32; 2],
+    /// One barb's outer end.
     pub left_barb: [f32; 2],
+    /// The other's.
     pub right_barb: [f32; 2],
 }
 
@@ -252,6 +257,9 @@ pub fn grounds_a_camera(matrix: &Matrix, player: [f32; 3]) -> bool {
     x.is_finite() && y.is_finite() && x.abs() <= NDC_LIMIT && y.abs() <= NDC_LIMIT
 }
 
+/// Whether a matrix has the shape a view-projection has: finite everywhere, with a forward column
+/// of roughly unit length. A screening test, not a proof that this is the matrix the game draws
+/// through.
 #[must_use]
 pub fn looks_like_a_view_projection(matrix: &Matrix) -> bool {
     if !matrix.iter().all(|value| value.is_finite()) {
@@ -293,11 +301,13 @@ pub fn add_scaled(a: [f32; 3], b: [f32; 3], scale: f32) -> [f32; 3] {
     ]
 }
 
+/// Dot product.
 #[must_use]
 pub fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
+/// Euclidean length.
 #[must_use]
 pub fn length(a: [f32; 3]) -> f32 {
     dot(a, a).sqrt()
@@ -313,6 +323,7 @@ pub fn normalize(a: [f32; 3]) -> Option<[f32; 3]> {
     Some([a[0] / len, a[1] / len, a[2] / len])
 }
 
+/// Cross product.
 #[must_use]
 pub fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [
@@ -340,7 +351,7 @@ pub fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
 /// `quaternion` is taken in `(x, y, z, w)` order. Nothing in the image says which order this
 /// field uses, and the wrong one is not a detectable error -- it is a perfectly valid rotation
 /// that is simply not the camera's. So the caller tries both and lets the oracles decide, which
-/// is why [`WXYZ`] exists.
+/// is why [`wxyz`] exists.
 #[must_use]
 pub fn view_from_pose(quaternion: [f32; 4], position: [f32; 3]) -> Option<Matrix> {
     let [x, y, z, w] = quaternion;
@@ -997,6 +1008,12 @@ impl Camera {
         }
     }
 
+    /// Whether this matrix actually projects the world the way the camera does.
+    ///
+    /// A shape test passes for any well-formed matrix, including one belonging to a camera the
+    /// game is not drawing through. This one probes: it moves a point ten metres up and checks
+    /// the projection moves by a plausible number of pixels in the right direction. A matrix that
+    /// moves it by nothing is abstaining from the test rather than passing it.
     #[must_use]
     pub fn agrees_with_the_world(&self, from: [f32; 3], screen: [f32; 2]) -> bool {
         /// The probe must move the projected point at least this many pixels. A matrix that
@@ -1151,9 +1168,13 @@ pub fn hsv_to_rgb(hue_degrees: f32, saturation: f32, value: f32) -> [f32; 3] {
 /// The world-space skeleton of the "no route" arrow: a shaft plus two barbs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Arrow {
+    /// Where the shaft starts, in world space.
     pub tail: [f32; 3],
+    /// Where it points.
     pub tip: [f32; 3],
+    /// One barb's outer end.
     pub left_barb: [f32; 3],
+    /// The other's.
     pub right_barb: [f32; 3],
 }
 

@@ -65,6 +65,9 @@ fn main() {
     let on_thread = args.any(|a| a == "--thread");
 
     let dll_path = CString::new(dll_path).expect("DLL path contains NUL");
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let module = unsafe { LoadLibraryA(dll_path.as_ptr().cast()) };
     assert!(!module.is_null(), "LoadLibraryA failed");
 

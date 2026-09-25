@@ -272,6 +272,9 @@ fn impl_singleton() -> Option<usize> {
     let address = game_rva(ds2_rva::SOFTWARE_KEYBOARD_IMPL_SINGLETON).ok()?;
     // SAFETY: the address is a resolved RVA inside the loaded game image, and `safe_read_usize`
     // faults safely if the page is not mapped.
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let pointer = unsafe { safe_read_usize(address)? };
     (pointer != 0).then_some(pointer)
 }
@@ -311,6 +314,9 @@ impl KeyboardClaim {
         let field = instance + ds2_rva::SOFTWARE_KEYBOARD_IMPL_STATE_OFFSET;
         // SAFETY: `instance` is the pointer the game itself stores, and the field is the `int32`
         // its constructor initialises. Aligned four-byte accesses, so no torn read is possible.
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         let state = unsafe { safe_read_i32(field) }.ok_or(SteamError::Unresolved)?;
         if state != ds2_rva::SOFTWARE_KEYBOARD_STATE_IDLE {
             return Err(SteamError::KeyboardBusy(state));
@@ -329,6 +335,9 @@ impl KeyboardClaim {
     pub(crate) fn finished_state(&self) -> Option<i32> {
         let field = self.state_field?;
         // SAFETY: see `acquire`.
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         let state = unsafe { safe_read_i32(field) }?;
         (state == ds2_rva::SOFTWARE_KEYBOARD_STATE_SUBMITTED
             || state == ds2_rva::SOFTWARE_KEYBOARD_STATE_CANCELLED)

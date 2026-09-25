@@ -24,7 +24,7 @@
 //! # The deadline copies anyway, and says so
 //!
 //! If the stamp never changes -- the game decided a save was unnecessary, or the request was dropped
-//! -- the wait gives up after [`DEADLINE_TICKS`] and copies the file that IS there, logging that the
+//! -- the wait gives up after `DEADLINE_TICKS` and copies the file that IS there, logging that the
 //! flush was never observed. The alternative is handing the player nothing after they named a
 //! destination, which is worse than handing them their last autosave and saying which it is.
 //!
@@ -104,7 +104,7 @@ fn dialog_filter() -> Vec<u16> {
 /// What pressing the row does. **Game thread, inside the menu's confirm path.**
 ///
 /// Opens the destination dialog inline -- which blocks the game, on purpose, see
-/// [`crate::dialog`] -- validates what came back, then requests the save and arms [`tick`].
+/// `crate::dialog` -- validates what came back, then requests the save and arms [`tick`].
 pub fn save_to_file() {
     let Some(source) = live_container() else {
         log_line(format_args!(
@@ -226,6 +226,10 @@ pub fn save_to_file() {
 }
 
 /// The game-thread half: watch for the save, then copy. Registered with `ds2_menu_row::add_tick`.
+/// # Panics
+///
+/// The `expect` inside is unreachable: the same lock guard is checked for `Some` a few lines
+/// above and is not released in between, so the `take` cannot find it empty.
 pub fn tick() {
     let Ok(mut guard) = PENDING.lock() else {
         return;

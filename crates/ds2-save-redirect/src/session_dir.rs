@@ -3,7 +3,7 @@
 //!
 //! # Why a side at a time
 //!
-//! The detour in [`crate::install`] replaces the directory for everything a `SaveLoadSystem` does,
+//! The detour in [`mod@crate::install`] replaces the directory for everything a `SaveLoadSystem` does,
 //! which is correct at startup and wrong in a live session: DARK SOULS II saves on the way out of a
 //! game, so a session that re-points the directory and then leaves writes the character it was
 //! playing into the staged copy, and the `LOAD GAME` that follows reads back the one the player was

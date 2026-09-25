@@ -24,6 +24,7 @@
 // PARITY: this crate transcribes MinHook's C ABI, so its names, casing and the items it
 // declares-but-does-not-call are the upstream header's shape rather than this repo's.
 // A per-item allow would mean annotating essentially every line of a binding file.
+// DEBT: ds2-mods-rs-5eu -- this file is MinHook's C header, not this repo's shape.
 #![allow(dead_code, non_snake_case, non_camel_case_types, missing_docs)]
 
 use std::ffi::{CStr, c_void};
@@ -89,6 +90,7 @@ struct UnionEntry {
 }
 static UNIONS: Mutex<Vec<UnionEntry>> = Mutex::new(Vec::new());
 /// Lock-free head-handler per slot, read on every dispatch (no mutex in the hot path).
+// DEBT: ds2-mods-rs-5eu -- the documented way to build an array of atomics.
 #[allow(clippy::declare_interior_mutable_const)]
 static UNION_HEADS: [AtomicUsize; MAX_UNION_SLOTS] =
     [const { AtomicUsize::new(0) }; MAX_UNION_SLOTS];
@@ -489,6 +491,7 @@ fn registry_record(target: usize, detour: usize, create_status: MH_STATUS) {
     }
 }
 
+// DEBT: ds2-mods-rs-5eu -- MinHook's own enum spelling.
 #[allow(non_camel_case_types)]
 #[must_use]
 #[repr(C)]

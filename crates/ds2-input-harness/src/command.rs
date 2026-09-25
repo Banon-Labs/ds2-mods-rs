@@ -60,13 +60,19 @@ pub const DEFAULT_PROBE_FRAMES: u32 = 30;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Command {
     /// Zero every human input the engine reads, for this many frames.
-    Block { frames: u32 },
+    Block {
+        /// How long the zeroing lasts.
+        frames: u32,
+    },
     /// Stop zeroing.
     Unblock,
     /// Hold one pad axis (`ds2_rva::PAD_AXIS_*`) at `value` for `frames`.
     Axis {
+        /// Which axis, as a `ds2_rva::PAD_AXIS_*` index.
         index: usize,
+        /// What to hold it at.
         value: f32,
+        /// For how long.
         frames: u32,
     },
     /// Move the authored cursor `dx`/`dy` PIXELS PER FRAME for `frames`.
@@ -74,13 +80,33 @@ pub enum Command {
     /// Not a one-off jump: the consumer differences two successive cursor positions, so a
     /// constant position is a single frame of motion followed by stillness. See
     /// [`crate::authored::Authored::mouse`].
-    Mouse { dx: f32, dy: f32, frames: u32 },
+    Mouse {
+        /// Pixels per frame, horizontally.
+        dx: f32,
+        /// Pixels per frame, vertically.
+        dy: f32,
+        /// For how long.
+        frames: u32,
+    },
     /// Hold a pad button mask for `frames`.
-    Buttons { mask: u16, frames: u32 },
+    Buttons {
+        /// The button bits to hold down.
+        mask: u16,
+        /// For how long.
+        frames: u32,
+    },
     /// Turn the camera by `degrees`, closed-loop, giving up after `budget` frames.
-    Turn { degrees: f32, budget: u32 },
+    Turn {
+        /// How far to turn, signed.
+        degrees: f32,
+        /// The frame budget before it gives up.
+        budget: u32,
+    },
     /// Hold each channel in turn and report how far the camera's yaw moved for each.
-    Probe { frames: u32 },
+    Probe {
+        /// How long to hold each channel before moving to the next.
+        frames: u32,
+    },
     /// Point `turn` at a different input.
     SetChannel(crate::drive::Channel),
     /// Stop authoring anything. Does not lift a `block`.
@@ -101,7 +127,9 @@ pub enum ParseError {
     UnknownVerb(String),
     /// The verb is real but the arguments are not.
     BadArguments {
+        /// The verb that was recognised.
         verb: &'static str,
+        /// What its arguments should have looked like.
         expected: &'static str,
     },
 }

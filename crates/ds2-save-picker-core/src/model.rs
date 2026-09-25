@@ -11,8 +11,8 @@
 //!
 //! | stage | rows | what activating one means |
 //! |---|---|---|
-//! | [`Stage::Files`] | `[..]`, then folders, then saves | walk into it, or choose it |
-//! | [`Stage::Characters`] | the container's ten slots, then `[back]` | load that character |
+//! | `Stage::Files` | `[..]`, then folders, then saves | walk into it, or choose it |
+//! | `Stage::Characters` | the container's ten slots, then `[back]` | load that character |
 //!
 //! A pick that fails its content gate never leaves the file stage: the refusal becomes the
 //! picker's status message and the listing is exactly where the player left it.

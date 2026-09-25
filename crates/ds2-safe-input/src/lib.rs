@@ -30,8 +30,10 @@
 
 use std::fmt;
 
-const DEFAULT_MAX_HOLD_FRAMES: u16 = 30;
-const MIN_ACTION_FRAMES: u16 = 1;
+/// The `max_hold_frames` a [`SafeInputConfig`] starts with.
+pub const DEFAULT_MAX_HOLD_FRAMES: u16 = 30;
+/// The shortest an action may last. An action of no frames is one no backend can express.
+pub const MIN_ACTION_FRAMES: u16 = 1;
 
 /// Whitelisted logical inputs that the automation layer is allowed to emit.
 ///

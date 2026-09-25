@@ -826,7 +826,7 @@ fn publish_identity_line() {
 /// # The self-chain trap
 ///
 /// If this crate already owns the slot, `SetUnhandledExceptionFilter` hands our OWN function back
-/// as the previous one. Storing that would make [`chain_previous_unhandled_filter`] call us again,
+/// as the previous one. Storing that would make `chain_previous_unhandled_filter` call us again,
 /// forever, inside a crash handler. So a returned pointer equal to ours is recognised and NOT
 /// stored, and the caller is told via the second element of the tuple.
 #[cfg(windows)]

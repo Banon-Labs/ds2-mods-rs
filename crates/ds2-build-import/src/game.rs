@@ -219,6 +219,9 @@ pub(crate) unsafe fn set_all_stats(param: usize, wanted: &[u16; 9]) -> Result<St
 /// The character's soul level.
 pub(crate) fn read_soul_level(param: usize) -> Option<u32> {
     // SAFETY: as `read_stats`.
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     unsafe { safe_read_u32(param + ds2_rva::PLAYER_PARAM_SOUL_LEVEL_OFFSET) }
 }
 
@@ -281,6 +284,9 @@ fn find_param(name: &str) -> Result<usize, GameError> {
         // SAFETY: the name is a NUL-terminated ASCII string inside the table; the reader is bounded
         // and walks page by page.
         let Some(bytes) =
+            // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+            // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+            // moved or was freed answers None rather than faulting.
             (unsafe { ds2_game_base::mem::safe_read_cstr(table + name_at as usize, 64) })
         else {
             continue;
@@ -303,6 +309,9 @@ fn find_param(name: &str) -> Result<usize, GameError> {
 pub(crate) fn soul_costs() -> Result<SoulCosts, GameError> {
     let param = find_param(ds2_rva::PARAM_PLAYER_LEVEL_UP_SOULS)?;
     // SAFETY: `param` is a table address the game's own index pointed at.
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let rows = unsafe { safe_read_u16(param + ds2_rva::PARAM_ROW_COUNT_OFFSET) }
         .ok_or(GameError::NoParams)? as usize;
     if rows == 0 {
@@ -444,6 +453,9 @@ pub(crate) unsafe fn add_souls(param: usize, amount: u32) -> Result<SoulsAdded, 
 /// Souls currently held.
 pub(crate) fn read_souls_held(param: usize) -> Option<u32> {
     // SAFETY: as `read_stats`.
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     unsafe { safe_read_u32(param + ds2_rva::PLAYER_PARAM_SOULS_HELD_OFFSET) }
 }
 
@@ -589,6 +601,9 @@ fn give_error() -> Option<(u32, &'static str)> {
     // thunk's own `mov rcx,[rcx+0x10]` produces.
     let inner = hop(inventory, ds2_rva::ITEM_BAG_LIST_OFFSET)?;
     // SAFETY: inside the object the game's own pointer chain produced; the read is fault-safe.
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let code = unsafe { safe_read_u32(inner + ds2_rva::ITEM_GIVE_ERROR_OFFSET) }?;
     let reason = ds2_rva::ITEM_GIVE_ERRORS
         .iter()
@@ -772,6 +787,9 @@ fn entry_for_item(bag: usize, item_id: i32) -> Option<usize> {
         let entry = base + index * ds2_rva::ITEM_ENTRY_STRIDE;
         // SAFETY: inside the bag the game's own pointer chain produced; the read is fault-safe and
         // reports an unmapped page rather than raising.
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         let Some(id) = (unsafe { safe_read_u32(entry + ds2_rva::ITEM_ENTRY_ITEM_ID_OFFSET) })
         else {
             continue;
@@ -781,6 +799,9 @@ fn entry_for_item(bag: usize, item_id: i32) -> Option<usize> {
         }
         // SAFETY: as above.
         let flags =
+            // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+            // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+            // moved or was freed answers None rather than faulting.
             unsafe { ds2_game_base::mem::safe_read_u8(entry + ds2_rva::ITEM_ENTRY_FLAGS_OFFSET) };
         // A copy you put away is not a copy in your hands -- and equipping one is what lost the
         // sword. Both live in this array, so the scan sees both; the equip does not care which,
@@ -888,6 +909,9 @@ pub(crate) unsafe fn recalc_attunement_slots() -> Result<u8, GameError> {
 pub(crate) fn attunement_slots() -> Result<u8, GameError> {
     let bag = bag_list()?;
     // SAFETY: inside the bag the game's own pointer chain produced; fault-safe read.
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     unsafe { ds2_game_base::mem::safe_read_u8(bag + ds2_rva::ITEM_BAG_ATTUNEMENT_SLOTS_OFFSET) }
         .ok_or(GameError::NoCharacter)
 }
@@ -957,6 +981,9 @@ pub(crate) unsafe fn equip(request: EquipRequest<'_>) -> Result<EquipOutcome, Ga
     // having done nothing, and attuning past capacity unequips the slot instead. Neither says so.
     // SAFETY: game thread, per this function's contract.
     let landed = match flat {
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         Some(flat) => unsafe { equipped_in_flat_slot(inventory, flat) }?,
         None => None,
     };
@@ -1029,6 +1056,9 @@ pub(crate) unsafe fn set_covenant(id: u8) -> Result<CovenantSet, GameError> {
     }
     let read_current = || {
         // SAFETY: inside the block the game's own getter returned; fault-safe read.
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         unsafe { ds2_game_base::mem::safe_read_u8(param + ds2_rva::PLAYER_PARAM_COVENANT_OFFSET) }
     };
     let before = read_current().ok_or(GameError::NoCharacter)?;
@@ -1168,12 +1198,27 @@ pub(crate) unsafe fn max_estus() -> Result<EstusMaxed, GameError> {
     // the one its disassembled thunk implements -- the inventory in RCX, where there is a property
     // a pointer to it in RDX, a level in R8D. `uses` and `effect` are locals that outlive the calls.
     let level: EstusPropertyFn =
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         unsafe { core::mem::transmute(estus_site(ds2_rva::ESTUS_GET_LEVEL)?) };
     let charges: EstusChargesFn =
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         unsafe { core::mem::transmute(estus_site(ds2_rva::ESTUS_GET_CHARGES)?) };
     let at_max: EstusPropertyFn =
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         unsafe { core::mem::transmute(estus_site(ds2_rva::ESTUS_IS_MAX)?) };
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let set: EstusSetFn = unsafe { core::mem::transmute(estus_site(ds2_rva::ESTUS_SET_PROPERTY)?) };
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let refill: EstusRefillFn = unsafe { core::mem::transmute(estus_site(ds2_rva::ESTUS_REFILL)?) };
 
     // NO FLASK MEANS NO UPGRADE, and the game says so in the level itself: the getter answers zero

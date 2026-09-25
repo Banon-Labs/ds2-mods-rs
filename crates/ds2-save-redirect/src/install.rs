@@ -348,7 +348,7 @@ static SESSION_OVERRIDE: Mutex<Option<Vec<u16>>> = Mutex::new(None);
 /// Times the session override answered, so a flow can report that it did rather than assume it.
 static SESSION_ANSWERED: AtomicUsize = AtomicUsize::new(0);
 
-/// Point every container directory this session builds at `windows_path`, until [`clear_session`].
+/// Point every container directory this session builds at `windows_path`, until [`clear_session_directory`].
 ///
 /// The path is taken as the game spells one: a Windows path ending in a separator, which is what
 /// the original produces and what its callers append a filename to. A missing separator is added,

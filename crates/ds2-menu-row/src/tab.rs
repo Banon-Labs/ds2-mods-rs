@@ -371,6 +371,8 @@ unsafe extern "system" fn ctor_detour(top_select: *mut u8, a: usize, b: usize) -
         // one the disassembled entry implements.
         let original: TopSelectCtorFn = unsafe { std::mem::transmute(trampoline) };
         // SAFETY: every argument is the game's own, forwarded unchanged.
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(top_select, a, b) }
     };
     let base = MODULE_BASE.load(Ordering::Acquire);
@@ -429,6 +431,8 @@ unsafe extern "system" fn tab_table_detour(top_select: *mut u8) -> *mut u8 {
     // SAFETY: MinHook published this trampoline for exactly this site.
     let original: TabTableFn = unsafe { std::mem::transmute(trampoline) };
     // SAFETY: the argument is the game's own.
+    // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+    // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
     unsafe { original(top_select) }
 }
 
@@ -474,6 +478,8 @@ unsafe extern "system" fn strip_init_detour(top_select: *mut u8) {
         // SAFETY: MinHook published this trampoline for exactly this site.
         let original: StripInitFn = unsafe { std::mem::transmute(trampoline) };
         // SAFETY: the argument is the game's own.
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(top_select) };
     }
     let group = GROUP.load(Ordering::Acquire);

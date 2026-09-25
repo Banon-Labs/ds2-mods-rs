@@ -4,6 +4,7 @@
 //! `cargo test` rather than by squinting at two similar oranges in a screenshot.
 
 // Windows-only in practice; ungated so the assignment logic below stays host-testable.
+// DEBT: ds2-mods-rs-2rs -- module-wide dead_code, reason not yet recorded.
 #![cfg_attr(not(windows), allow(dead_code))]
 
 use crate::geometry;

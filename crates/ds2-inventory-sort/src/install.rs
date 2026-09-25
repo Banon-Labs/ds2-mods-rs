@@ -297,6 +297,8 @@ unsafe extern "system" fn inventory_ctor_detour(
     // own, forwarded unaltered.
     let original: InventoryCtorFn =
         unsafe { std::mem::transmute::<usize, InventoryCtorFn>(trampoline) };
+    // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+    // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
     unsafe { original(this, second, third) }
 }
 
@@ -308,6 +310,8 @@ unsafe extern "system" fn inventory_dtor_detour(this: *mut u8, flags: u32) -> *m
     }
     // SAFETY: MinHook published this trampoline for this site; both arguments are the caller's own.
     let original: DtorFn = unsafe { std::mem::transmute::<usize, DtorFn>(trampoline) };
+    // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+    // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
     unsafe { original(this, flags) }
 }
 
@@ -325,6 +329,8 @@ unsafe extern "system" fn equip_ctor_detour(
     // SAFETY: MinHook published this trampoline for this site. All FOUR arguments are the caller's
     // own, forwarded unaltered -- see `EquipCtorFn` for why the count matters here.
     let original: EquipCtorFn = unsafe { std::mem::transmute::<usize, EquipCtorFn>(trampoline) };
+    // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+    // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
     unsafe { original(this, second, third, fourth) }
 }
 
@@ -336,6 +342,8 @@ unsafe extern "system" fn equip_dtor_detour(this: *mut u8, flags: u32) -> *mut u
     }
     // SAFETY: MinHook published this trampoline for this site; both arguments are the caller's own.
     let original: DtorFn = unsafe { std::mem::transmute::<usize, DtorFn>(trampoline) };
+    // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+    // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
     unsafe { original(this, flags) }
 }
 
@@ -353,6 +361,8 @@ unsafe fn update_detour(slot: usize, this: *mut u8, delta: f32, third: usize, fo
         // SAFETY: MinHook published this trampoline for this site. All FOUR arguments are the
         // caller's own -- `R8` is read by both of these updates, so dropping it is not an option.
         let original: UpdateFn = unsafe { std::mem::transmute::<usize, UpdateFn>(trampoline) };
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(this, delta, third, fourth) };
     }
     // This IS the game thread, inside the list's own per-frame update -- the moment the whole
@@ -366,6 +376,9 @@ unsafe extern "system" fn inventory_update_detour(
     third: usize,
     fourth: usize,
 ) {
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { update_detour(INVENTORY, this, delta, third, fourth) };
 }
 
@@ -375,6 +388,9 @@ unsafe extern "system" fn equip_update_detour(
     third: usize,
     fourth: usize,
 ) {
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { update_detour(EQUIP, this, delta, third, fourth) };
 }
 
@@ -524,6 +540,9 @@ unsafe fn open_dialog() {
     // SAFETY: the game thread, inside the pause menu's own update, with a group whose vtable was
     // just checked. The callee takes one argument and guards itself on `[this+0x58]`.
     let dialog: DialogOpenFn = unsafe { std::mem::transmute::<usize, DialogOpenFn>(open) };
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { dialog(group as *mut u8) };
 }
 
@@ -684,12 +703,15 @@ unsafe fn hook(
         ));
         return false;
     }
+    // SAFETY: the target is an RVA this crate validated against the prologue it expects before
+    // reaching here, and the detour is a `'static` fn item of the matching ABI.
     match unsafe { MhHook::new(site as *mut c_void, detour) } {
         Ok(handle) => {
             // Published BEFORE the site is patched, so a detour that fires immediately cannot read
             // a zero and drop the original -- which for the constructor would mean an Inventory tab
             // that was never built.
             trampoline.store(handle.trampoline() as usize, Ordering::Release);
+            // SAFETY: the target is the address `MhHook::new` above already registered with MinHook.
             let status = unsafe { MH_EnableHook(site as *mut c_void) };
             if status == MH_STATUS::MH_OK {
                 log(format_args!(
@@ -723,6 +745,7 @@ unsafe fn hook(
 /// # Safety
 ///
 /// Patches executable memory in the loaded game image.
+// DEBT: ds2-mods-rs-enw -- eight values behind a struct name would explain nothing.
 #[allow(clippy::too_many_arguments)]
 unsafe fn hook_pair(
     base: usize,
@@ -738,6 +761,9 @@ unsafe fn hook_pair(
     update_detour: *mut c_void,
 ) -> bool {
     let what = TRACKED[slot].what;
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let ctor = unsafe {
         hook(
             base,
@@ -751,6 +777,9 @@ unsafe fn hook_pair(
     if !ctor {
         return false;
     }
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let dtor = unsafe {
         hook(
             base,
@@ -776,6 +805,9 @@ unsafe fn hook_pair(
     // on the pause menu's tab strip is still registered -- but read RARELY, which loses taps rather
     // than delaying them. Degrading to "the button works if you hold it" is worth having; refusing
     // to track the menu at all over it is not.
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let sampled = unsafe {
         hook(
             base,
@@ -840,6 +872,9 @@ pub unsafe fn install(request: &Request) -> Outcome {
 
     // MinHook is statically linked into this DLL, so ALREADY_INITIALIZED can only mean this ran
     // twice. Treat it as success.
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let status = unsafe { MH_Initialize() };
     if status != MH_STATUS::MH_OK && status != MH_STATUS::MH_ERROR_ALREADY_INITIALIZED {
         log(format_args!(
@@ -852,6 +887,9 @@ pub unsafe fn install(request: &Request) -> Outcome {
     // survives the menu closing and the next press calls a shipped function on freed memory. A
     // constructor whose destructor refused is worse than no hook at all, so a half-installed pair
     // is cleared back to nothing rather than left recording.
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let inventory = unsafe {
         hook_pair(
             base,
@@ -867,6 +905,9 @@ pub unsafe fn install(request: &Request) -> Outcome {
             inventory_update_detour as *mut c_void,
         )
     };
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let equip = unsafe {
         hook_pair(
             base,

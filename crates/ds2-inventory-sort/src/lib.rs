@@ -96,5 +96,5 @@ pub const CONFIG_SECTION: &str = "inventory_sort";
 pub const CONFIG_KEY_KEYBOARD: &str = "key";
 
 /// The controller binding key. An XInput button name, e.g. `"Y"`, `"X"`, `"LThumb"`. See
-/// [`install::PAD_BUTTONS`].
+/// `install::PAD_BUTTONS`.
 pub const CONFIG_KEY_PAD: &str = "pad";

@@ -7,7 +7,7 @@
 //!
 //! Both open the OS file dialog and neither draws a menu of its own. That is the port decision, and
 //! it is the whole reason this crate is small: `../er-mods-rs` has both an in-game save browser and a
-//! comdlg32 one, and only the second has no game coupling. See [`dialog`].
+//! comdlg32 one, and only the second has no game coupling. See `dialog`.
 //!
 //! # The asymmetry is the point
 //!
@@ -137,6 +137,10 @@ mod install {
     ///
     /// Returns whatever [`ds2_menu_row::add_row`] said, so the caller can log a refusal in its own
     /// voice -- including the `TabFull` that comes back when the tab's five item slots are spoken for.
+    /// # Errors
+    ///
+    /// Whatever [`ds2_menu_row::add_row`] said -- `TabFull` when the tab is spoken for,
+    /// `AlreadyInstalled` when the registry is sealed.
     pub fn register_import_row(
         logger: LogFn,
     ) -> Result<ds2_menu_row::RowId, ds2_menu_row::AddRowError> {
@@ -171,6 +175,10 @@ mod install {
     /// Also claims the per-frame tick this row's second phase needs. A row registered without a tick
     /// would ask the game to save and then never copy anything, so the failure is logged rather than
     /// left for someone to find in an empty destination folder.
+    /// # Errors
+    ///
+    /// Whatever [`ds2_menu_row::add_row`] said, or the same refusal for the per-frame tick this
+    /// row also needs.
     pub fn register_export_row(
         logger: LogFn,
     ) -> Result<ds2_menu_row::RowId, ds2_menu_row::AddRowError> {

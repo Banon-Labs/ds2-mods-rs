@@ -939,6 +939,8 @@ pub(crate) unsafe fn install() -> bool {
     };
     // SAFETY: MinHook's own initialiser; idempotent and safe to call when another module in this
     // DLL has already done it.
+    // SAFETY: `MH_Initialize` takes no arguments and is safe to call again on an already-
+    // initialised library, which the status below distinguishes.
     let status = unsafe { MH_Initialize() };
     if status != ds2_hook::MH_STATUS::MH_OK
         && status != ds2_hook::MH_STATUS::MH_ERROR_ALREADY_INITIALIZED
@@ -949,6 +951,8 @@ pub(crate) unsafe fn install() -> bool {
     // SAFETY: `address` is slot 8 of a real `IDXGISwapChain` vtable and `present` matches its
     // ABI; the trampoline is stored before the hook is enabled, so the detour can never run
     // without one.
+    // SAFETY: the target is an RVA this crate validated against the prologue it expects before
+    // reaching here, and the detour is a `'static` fn item of the matching ABI.
     let hook = match unsafe { MhHook::new(address as *mut c_void, present as *mut c_void) } {
         Ok(hook) => hook,
         Err(status) => {

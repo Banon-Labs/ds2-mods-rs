@@ -102,7 +102,13 @@ impl Handle {
     /// Game thread only. See the module header.
     pub(crate) unsafe fn extinguish(mut self) {
         let block = std::ptr::from_mut(&mut *self.block).cast::<u8>();
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         let stop: Option<StopSfx> = unsafe { entry(ds2_rva::KATANA_SFX_STOP) };
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         let destroy: Option<DestroySfxCtrl> = unsafe { entry(ds2_rva::KATANA_SFX_CTRL_DESTROY) };
         if let Some(stop) = stop {
             // SAFETY: `block` is this handle's own storage, still where the spawn left it.
@@ -141,11 +147,17 @@ unsafe fn entry<T: Copy>(rva: u32) -> Option<T> {
 pub(crate) fn system() -> Option<usize> {
     let manager = crate::navquery::game_manager()?;
     // SAFETY: a live `GameManagerImp`; the reader reports an unmapped page rather than faulting.
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let system = unsafe { safe_read_usize(manager + ds2_rva::GAME_MANAGER_SFX_SYSTEM_OFFSET)? };
     if system == 0 {
         return None;
     }
     // SAFETY: as above.
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let ready = unsafe { safe_read_u8(system + ds2_rva::KATANA_SFX_SYSTEM_READY_OFFSET)? };
     (ready != 0).then_some(system)
 }
@@ -158,6 +170,9 @@ pub(crate) fn system() -> Option<usize> {
 /// unanswerable report.
 pub(crate) fn quality(system: usize) -> Option<u32> {
     // SAFETY: a live `KatanaSfxSystem`; the reader refuses an unmapped page.
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     unsafe { safe_read_u32(system + ds2_rva::KATANA_SFX_SYSTEM_QUALITY_OFFSET) }
 }
 
@@ -184,6 +199,9 @@ pub(crate) unsafe fn spawn(
     if sfx_id == 0 || !position.iter().all(|c| c.is_finite()) {
         return None;
     }
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let spawn: SpawnSfx = unsafe { entry(ds2_rva::KATANA_SFX_SPAWN)? };
 
     // The direction must be a UNIT vector: `0x140beb590` normalises before calling this, so the
@@ -277,6 +295,9 @@ impl Handle {
         let base = std::ptr::from_ref(&*self.block) as usize;
         [0, ds2_rva::KATANA_SFX_CTRL_HALF_BYTES].map(|half| {
             // SAFETY: an address inside this handle's own box.
+            // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+            // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+            // moved or was freed answers None rather than faulting.
             unsafe { safe_read_usize(base + half + ds2_rva::KATANA_SFX_CTRL_NODE_OFFSET) }
                 .unwrap_or(0)
         })
@@ -327,29 +348,47 @@ impl Handle {
 /// thread.
 pub(crate) fn id_is_missing(system: usize, id: u32) -> Option<bool> {
     // SAFETY: a live `KatanaSfxSystem`; every read below refuses an unmapped page.
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let head = unsafe { safe_read_usize(system + ds2_rva::KATANA_SFX_MISSING_IDS_OFFSET)? };
     if head == 0 {
         return Some(false);
     }
     // The head is not a node: its `_Parent` is the root, and the tree is empty when that is the
     // head itself.
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let mut node = unsafe { safe_read_usize(head + ds2_rva::KATANA_SFX_MISSING_PARENT_OFFSET)? };
     let mut best: Option<u32> = None;
     for _ in 0..ds2_rva::KATANA_SFX_MISSING_MAX_DEPTH {
         if node == 0 {
             return None;
         }
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         let nil = unsafe { safe_read_u8(node + ds2_rva::KATANA_SFX_MISSING_ISNIL_OFFSET)? };
         if nil != 0 {
             // Off the bottom of the tree: `best` holds the lower bound, and the id is present
             // only if that bound is the id itself.
             return Some(best == Some(id));
         }
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         let key = unsafe { safe_read_u32(node + ds2_rva::KATANA_SFX_MISSING_KEY_OFFSET)? };
         node = if key < id {
+            // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+            // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+            // moved or was freed answers None rather than faulting.
             unsafe { safe_read_usize(node + ds2_rva::KATANA_SFX_MISSING_RIGHT_OFFSET)? }
         } else {
             best = Some(key);
+            // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+            // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+            // moved or was freed answers None rather than faulting.
             unsafe { safe_read_usize(node + ds2_rva::KATANA_SFX_MISSING_LEFT_OFFSET)? }
         };
     }

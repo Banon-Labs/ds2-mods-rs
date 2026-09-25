@@ -14,7 +14,7 @@
 //! "that function was simply never called", and those two facts point in opposite directions.
 //! So the probe reports four things, and it is the *combination* that is evidence:
 //!
-//! 1. **The hit counter** ([`HIT_COUNT`]), incremented inside the detour and logged with every
+//! 1. **The hit counter** (`HIT_COUNT`), incremented inside the detour and logged with every
 //!    heartbeat. Proves the detour fires.
 //! 2. **The hook-site byte poller**. Re-reads the bytes at the patched prologue every second and
 //!    compares them against *what MinHook actually wrote* -- not against a predicted `e9`, but
@@ -76,10 +76,11 @@ compile_error!(
 /// and the loader's stay separable, by a reader and by `scripts/ds2-run.py`.
 pub const PROBE_LINE_PREFIX: &str = "ds2-probe:";
 
-/// Prefix on the lines that echo the config back. `ds2-loader:` rather than `ds2-probe:` because
-/// this is the LOADER saying what it read before it decided anything -- it is written even when
-/// the probe is off, and a probe that never installs must not be the only thing that could have
-/// explained why.
+/// Prefix on the lines that echo the config back.
+///
+/// `ds2-loader:` rather than `ds2-probe:` because this is the loader saying what it read before
+/// it decided anything -- it is written even when the probe is off, and a probe that never
+/// installs must not be the only thing that could have explained why.
 pub const CONFIG_LINE_PREFIX: &str = "ds2-loader: config";
 
 /// Bytes watched at the hook site. MinHook writes five (`e9 rel32`); this window is wider so a
@@ -207,9 +208,10 @@ pub const CONFIG_SECTION: &str = "arxan_probe";
 /// Install the detour at all. **Startup-only** -- see [`ProbeConfig::load`].
 pub const KEY_ENABLED: &str = "enabled";
 
-/// Select [`Arm::SkipNeuterArxan`]. Honoured **only** when [`KEY_ENABLED`] is also true: skipping
-/// the Arxan patch with no probe watching produces no evidence at all, so a stale line in a file
-/// cannot quietly turn an ordinary run into an unprotected one. **Startup-only.**
+/// Select [`Arm::SkipNeuterArxan`]. Honoured **only** when [`KEY_ENABLED`] is also true.
+///
+/// Skipping the Arxan patch with no probe watching produces no evidence at all, so a stale line
+/// in a file cannot quietly turn an ordinary run into an unprotected one. **Startup-only.**
 pub const KEY_SKIP_NEUTER: &str = "skip_neuter";
 
 /// Which site to hook: `"m1"` or `"redirected"`. Defaults to `"m1"`, the control.
@@ -372,7 +374,7 @@ impl ProbeConfig {
     /// [`Arm::NeuterArxan`] patches Arxan's 48 stubs before the Arxan entry stub runs, and once
     /// that has happened or not happened, it cannot be undone. There is no un-neutering a live
     /// process. An edit to either key applies to the NEXT run and the poller says so out loud
-    /// when it sees one -- see [`watch_live_config`].
+    /// when it sees one -- see `watch_live_config`.
     ///
     /// [`LiveConfig`] is the other half, and it is genuinely live.
     pub fn load() -> Self {
@@ -776,6 +778,8 @@ pub unsafe fn install(config: &ProbeConfig) {
     // reached this function before we did, and everything downstream would be a measurement of
     // that instead of of Arxan.
     let mut original = vec![0u8; SITE_WINDOW];
+    // SAFETY: every pointer here is one the loader owns or one Windows handed it, and each read
+    // goes through a call that validates its own range rather than dereferencing blind.
     if !unsafe { mem::read_bytes(site, &mut original) } {
         log(format_args!(
             "{PROBE_LINE_PREFIX} install-failed stage=read-original va=0x{site:016x}"
@@ -801,6 +805,8 @@ pub unsafe fn install(config: &ProbeConfig) {
     // MinHook is statically linked into THIS DLL (see `ds2-hook`), so nothing else in the process
     // shares this instance and `MH_ERROR_ALREADY_INITIALIZED` could only mean this code ran
     // twice. Treat it as success rather than as a reason to stop.
+    // SAFETY: every pointer here is one the loader owns or one Windows handed it, and each read
+    // goes through a call that validates its own range rather than dereferencing blind.
     let status = unsafe { MH_Initialize() };
     if status != MH_STATUS::MH_OK && status != MH_STATUS::MH_ERROR_ALREADY_INITIALIZED {
         log(format_args!(
@@ -813,6 +819,8 @@ pub unsafe fn install(config: &ProbeConfig) {
     // SAFETY: `site` is a function start read out of `.pdata`, `probe_detour` is a naked
     // tail-jump that imposes no ABI on it, and `TRAMPOLINE` is published below before the
     // prologue is patched.
+    // SAFETY: the target is an RVA this crate validated against the prologue it expects before
+    // reaching here, and the detour is a `'static` fn item of the matching ABI.
     let hook = match unsafe { MhHook::new(site as *mut c_void, detour as *mut c_void) } {
         Ok(hook) => hook,
         Err(status) => {
@@ -828,6 +836,7 @@ pub unsafe fn install(config: &ProbeConfig) {
 
     // Not the queued API: this is one hook, and `MH_EnableHook` applies it immediately, so there
     // is no window in which the trampoline exists and the site is half-patched.
+    // SAFETY: the target is the address `MhHook::new` above already registered with MinHook.
     let status = unsafe { MH_EnableHook(site as *mut c_void) };
     if status != MH_STATUS::MH_OK {
         log(format_args!(
@@ -840,6 +849,8 @@ pub unsafe fn install(config: &ProbeConfig) {
     // its `patchAbove` path, or a future version writes something else, a predicted baseline
     // would report a divergence on the first poll and the run would be discarded for nothing.
     let mut site_baseline = vec![0u8; SITE_WINDOW];
+    // SAFETY: every pointer here is one the loader owns or one Windows handed it, and each read
+    // goes through a call that validates its own range rather than dereferencing blind.
     if !unsafe { mem::read_bytes(site, &mut site_baseline) } {
         log(format_args!(
             "{PROBE_LINE_PREFIX} install-failed stage=read-patched va=0x{site:016x}"
@@ -847,6 +858,8 @@ pub unsafe fn install(config: &ProbeConfig) {
         return;
     }
     let mut trampoline_baseline = vec![0u8; TRAMPOLINE_WINDOW];
+    // SAFETY: every pointer here is one the loader owns or one Windows handed it, and each read
+    // goes through a call that validates its own range rather than dereferencing blind.
     if !unsafe { mem::read_bytes(trampoline_address, &mut trampoline_baseline) } {
         log(format_args!(
             "{PROBE_LINE_PREFIX} install-failed stage=read-trampoline \

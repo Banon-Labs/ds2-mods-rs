@@ -4480,7 +4480,7 @@ pub const FLO_QUAD_SOURCE_OFFSET: usize = 0x30;
 ///
 /// So whatever the array's order is, the quad's is that order reversed over its first three bytes
 /// with the fourth left where it is. The array's own order has not been read -- its consumer was
-/// not chased -- so [`FLO_QUAD_COLOUR_ORDER_IS_BGR`] carries the guess, on its own line, with what
+/// not chased -- so [`FLO_QUAD_COLOUR_ORDER_UNSETTLED`] carries the guess, on its own line, with what
 /// a run would say about it.
 pub const FLO_QUAD_COLOUR_OFFSET: usize = 0x18;
 
@@ -6763,7 +6763,7 @@ pub const NAVI_SIZE_CLASSES: u32 = 7;
 /// Offset of `MapManager` in [`GAME_MANAGER_IMP`]. `+0x38`.
 ///
 /// From `0x14037be8f`: `mov rax,[rbx+0x38]` on the `GameManagerImp` just loaded from
-/// `0x1416148f0`, immediately dereferenced at [`MAP_MANAGER_AREA_OFFSET`] and handed to
+/// `0x1416148f0`, immediately dereferenced at [`MAP_MANAGER_PLAYER_MAP_INDEX_OFFSET`] and handed to
 /// [`NAVI_GRAPH_KEY_FROM_AREA`]. Named `MapMan` in the Ghidra project's `GameManagerImp` type.
 pub const GAME_MANAGER_MAP_MANAGER_OFFSET: usize = 0x38;
 
@@ -8767,8 +8767,8 @@ pub const FE_ITEM_ICON_BOX: [f32; 4] = [
 
 /// The scale on the record that carries the item icon's quad.
 ///
-/// In both documents that author an item cell: `l02_02_Inventory.flo` `def 0x005d` child[1], and
-/// `l02_03_equipment.flo` `def 0x0058` child[1]. The same number in both, read with
+/// In both documents that author an item cell: `l02_02_Inventory.flo` `def 0x005d` child `[1]`, and
+/// `l02_03_equipment.flo` `def 0x0058` child `[1]`. The same number in both, read with
 /// `scripts/ds2-flo.py tree`.
 pub const FE_ITEM_ICON_SCALE: f32 = 0.810806;
 

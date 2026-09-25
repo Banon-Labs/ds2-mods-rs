@@ -17,7 +17,7 @@
 //! # It diverts every open of that path, writes included
 //!
 //! [`arm`] takes the container the game will ask for and the one to answer with, and an open of
-//! that path is answered whatever it asked for -- see [`GENERIC_WRITE`], which used to gate this on
+//! that path is answered whatever it asked for -- see `GENERIC_WRITE`, which used to gate this on
 //! read access and was measured doing the opposite of what it promised. So a character loaded out
 //! of a donor file both reads and saves there, and the player's own container is the file nothing
 //! touches for as long as the window is armed.
@@ -165,7 +165,7 @@ pub fn diverted() -> usize {
 ///
 /// # Thread-local, and the same counter the logger uses
 ///
-/// [`DEPTH`] already exists so the detour's own log writes reach the original API instead of
+/// `DEPTH` already exists so the detour's own log writes reach the original API instead of
 /// re-entering. This is that mechanism, made available to a caller that knows its own opens are not
 /// the game asking for its container. It covers this thread only, so a concurrent read on the game
 /// thread is still diverted.
@@ -236,7 +236,7 @@ fn answer_for(path: &str) -> Option<Vec<u16>> {
 /// deliberately left unarmed -- so anything that asks the game which folder it built is told the
 /// player's own container while every write lands in the staged one.
 ///
-/// The same case-insensitive full-path comparison [`answer_for`] makes, because the answer has to
+/// The same case-insensitive full-path comparison `answer_for` makes, because the answer has to
 /// be the one the detour will actually give. `lock` rather than `try_lock`: this runs on the game
 /// thread outside the detour, where a missed answer is the wrong file rather than a slow one.
 pub fn diverted_path(asked: &Path) -> Option<PathBuf> {

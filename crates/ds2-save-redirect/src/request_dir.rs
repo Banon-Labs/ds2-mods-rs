@@ -269,8 +269,10 @@ pub unsafe fn content_name(system: usize) -> Option<ContentName> {
 
 /// Install the observer on the worker-side directory writer.
 ///
-/// Returns whether the detour is live. A `false` costs nothing but the read-back: [`set`] still
-/// calls the game's setter, and the game still sets its own directories.
+/// Returns whether the detour is live. A `false` costs nothing but the read-back: this observer
+/// changes nothing either way, and the game still sets its own directories. (It used to say
+/// `set` still calls the game's setter; that function was removed with the write path -- see the
+/// module docs -- and the sentence outlived it.)
 ///
 /// # Safety
 ///

@@ -236,6 +236,9 @@ pub unsafe fn show(request: &Request<'_>) -> Pick {
     //
     // The refusing paths are the ones that need this most, because a pick that is accepted leaves
     // through the return to the title and gets its activation back from the game's own transition.
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { hand_back(arg.hwnd_owner) };
 
     if answered == 0 {

@@ -14,13 +14,13 @@
 //! The obvious design is one patch: find the flag that means "we are online", force it to zero,
 //! done. That design was built, and then the disassembly said it does not do what it claims.
 //!
-//! * **The flag layer** ([`flag`]) is real and it is most of the answer. `NetService::isOnline`
+//! * **The flag layer** (`flag`) is real and it is most of the answer. `NetService::isOnline`
 //!   (`0x140513600`) is five bytes -- `movzx eax, BYTE PTR [rcx+0x3a]; ret` -- with **34 call
 //!   sites**, every one followed by `test al,al`. `FeSubStateTitleOnlineCheck`'s own work starter
 //!   is one of them and returns without starting anything when it reads zero. The top menu greys
 //!   out its online rows from another. This layer settles what the game *believes*.
 //!
-//! * **The socket layer** ([`winsock`]) exists because `FeSubStateTitleGameServerLogin`'s work
+//! * **The socket layer** (`winsock`) exists because `FeSubStateTitleGameServerLogin`'s work
 //!   starter -- `0x1400f9820`, vtable slot 8 -- **does not read that flag**. It asks
 //!   `NetSvrManager` two questions of its own and then builds a login job. Read its disassembly
 //!   and the flag layer's story falls apart at exactly the step that matters: the one that talks
@@ -50,7 +50,7 @@
 //! # What this crate does NOT do
 //!
 //! * **It does not touch Steam.** `steamclient64.dll` and `GameOverlayRenderer64.dll` are loaded
-//!   into this process and own their own sockets; [`winsock`] patches the import table of
+//!   into this process and own their own sockets; `winsock` patches the import table of
 //!   `DarkSoulsII.exe` and nothing else, so Steam's own connection, the overlay, achievements and
 //!   the friends list are untouched. That is deliberate -- the target is FromSoftware's game
 //!   servers, not the platform -- but it means this crate is not a firewall and must not be

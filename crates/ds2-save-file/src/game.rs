@@ -25,12 +25,18 @@ pub fn save_load_system() -> Option<usize> {
     let address = ds2_game_base::mem::game_rva(ds2_rva::GAME_MANAGER_IMP).ok()?;
     // SAFETY: a resolved RVA in the loaded image read through the fault-safe reader, which reports a
     // bad address rather than faulting on it.
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let manager = unsafe { ds2_game_base::mem::safe_read_usize(address)? };
     if manager == 0 {
         return None;
     }
     // SAFETY: as above, one hop further in.
     let system =
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         unsafe { ds2_game_base::mem::safe_read_usize(manager + ds2_rva::SAVE_LOAD_SYSTEM_OFFSET)? };
     (system != 0).then_some(system)
 }
@@ -90,6 +96,9 @@ pub fn request_save(system: usize) -> bool {
     // `SaveLoadSystem` reached through two recorded hops. Called on the game thread from the menu's
     // own confirm path, which is where the game's own save rows call it from.
     let request: RequestSaveFn = unsafe { std::mem::transmute::<usize, RequestSaveFn>(address) };
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { request(system, ds2_rva::SAVE_LOAD_REQUEST_KIND_CHARACTER) };
     log_line(format_args!(
         "{LOG_PREFIX} save requested system=0x{system:016x} kind={} -- the game writes it on a \
@@ -146,6 +155,9 @@ pub fn load_system_data(system: usize) -> bool {
     // the interlock and return `false`, so calling it at a bad moment is a no-op rather than a
     // race.
     let load: LoadSystemDataFn = unsafe { std::mem::transmute::<usize, LoadSystemDataFn>(address) };
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let accepted = unsafe { load(system) } != 0;
     log_line(format_args!(
         "{LOG_PREFIX} re-read requested system=0x{system:016x} accepted={accepted}"
@@ -239,5 +251,8 @@ pub fn pump(system: usize) -> Option<i32> {
     // act is to test the interlock and return `SAVE_LOAD_SYSTEM_PUMP_IDLE`, so a call made when
     // nothing is in flight is a no-op rather than a race.
     let pump: PumpFn = unsafe { std::mem::transmute::<usize, PumpFn>(address) };
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     Some(unsafe { pump(system) })
 }

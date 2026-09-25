@@ -1095,6 +1095,8 @@ unsafe fn substitute_from(original: FindDefinitionFn, doc: *mut usize, found: *m
     // substitution of ours read back.
     let fetch = |index: u32| -> *mut u8 {
         // SAFETY: the trampoline is the game's own lookup, called with its own arguments.
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(doc, index) }
     };
     // The last two only when there is a seventh tab; on the System tab they are never read.
@@ -1210,6 +1212,8 @@ pub unsafe fn install(base: usize) -> bool {
         ));
         return false;
     }
+    // SAFETY: the target is an RVA this crate validated against the prologue it expects before
+    // reaching here, and the detour is a `'static` fn item of the matching ABI.
     let hook = match unsafe { MhHook::new(site as *mut c_void, detour as *mut c_void) } {
         Ok(hook) => hook,
         Err(status) => {
@@ -1223,6 +1227,7 @@ pub unsafe fn install(base: usize) -> bool {
     // Published BEFORE the site is patched: a detour that observed a zero here would return null
     // for every definition in the game, which is a black menu rather than a missing row.
     TRAMPOLINE.store(hook.trampoline() as usize, Ordering::Release);
+    // SAFETY: the target is the address `MhHook::new` above already registered with MinHook.
     let status = unsafe { MH_EnableHook(site as *mut c_void) };
     if status != MH_STATUS::MH_OK {
         log(format_args!(

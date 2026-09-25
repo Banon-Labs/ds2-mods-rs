@@ -27,10 +27,11 @@ const QUERY_FLAG_NUMBER: u32 = 0x2000_0000;
 const HTTPS_PORT: u16 = 443;
 
 /// Cap on a response body, so a hostile or broken endpoint cannot exhaust memory.
+///
 /// The case this is sized for is a document of a few kilobytes; a megabyte is three orders of
 /// magnitude of headroom. A caller that legitimately expects more states its own limit through
 /// [`get_with_limit`] rather than raising this one for everybody.
-const MAX_BODY_BYTES: usize = 1024 * 1024;
+pub const MAX_BODY_BYTES: usize = 1024 * 1024;
 
 #[link(name = "winhttp")]
 unsafe extern "system" {

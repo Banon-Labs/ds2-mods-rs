@@ -295,6 +295,8 @@ unsafe extern "system" fn update_detour(top_select: *mut u8, delta: f32) {
         // one the disassembled entry implements -- the group in RCX, the frame delta in XMM1.
         let original: UpdateFn = unsafe { std::mem::transmute::<usize, UpdateFn>(trampoline) };
         // SAFETY: both arguments are the caller's own.
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(top_select, delta) };
     }
     // THE CALLBACKS RUN BEFORE THE CAPTION PUSH, so a callback that changes a caption is seen on
@@ -508,6 +510,7 @@ unsafe fn write_caption(
 ///
 /// Only the disarmed tree dump wants this; the banner uses [`ds2_rva::FE_QUIT_TAB_BASE_PATH`],
 /// which is the container path by definition rather than by how this caller sealed its own.
+// DEBT: ds2-mods-rs-z23 -- the dump entry point the tree walkers are re-armed from.
 #[allow(dead_code)]
 ///
 /// Read out of the captured path rather than written down twice: the capture is the object the
@@ -572,6 +575,8 @@ unsafe extern "system" fn bind_detour(top_select: *mut u8) {
         let original: BindCaptionsFn =
             unsafe { std::mem::transmute::<usize, BindCaptionsFn>(trampoline) };
         // SAFETY: the argument is the caller's own.
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(top_select) };
     }
     BINDING.store(false, Ordering::Release);
@@ -641,9 +646,12 @@ pub(crate) unsafe fn install_tick(base: usize) {
             ds2_rva::FE_INGAME_TOP_SELECT_UPDATE_PROLOGUE
         ));
     } else {
+        // SAFETY: the target is an RVA this crate validated against the prologue it expects before
+        // reaching here, and the detour is a `'static` fn item of the matching ABI.
         match unsafe { MhHook::new(update_site as *mut c_void, update_detour as *mut c_void) } {
             Ok(hook) => {
                 UPDATE_TRAMPOLINE.store(hook.trampoline() as usize, Ordering::Release);
+                // SAFETY: the target is the address `MhHook::new` above already registered with MinHook.
                 let status = unsafe { MH_EnableHook(update_site as *mut c_void) };
                 if status == MH_STATUS::MH_OK {
                     log(format_args!(
@@ -689,12 +697,15 @@ pub unsafe fn install(base: usize) -> bool {
         ),
     ] {
         let site = base + rva as usize;
+        // SAFETY: the target is an RVA this crate validated against the prologue it expects before
+        // reaching here, and the detour is a `'static` fn item of the matching ABI.
         match unsafe { MhHook::new(site as *mut c_void, detour) } {
             Ok(hook) => {
                 // Published BEFORE the site is patched. The append detour returns its `out` on a
                 // zero trampoline, which is the argument the caller already holds; anything else
                 // would hand the game a path it never built.
                 trampoline.store(hook.trampoline() as usize, Ordering::Release);
+                // SAFETY: the target is the address `MhHook::new` above already registered with MinHook.
                 let status = unsafe { MH_EnableHook(site as *mut c_void) };
                 if status == MH_STATUS::MH_OK {
                     log(format_args!(
@@ -718,6 +729,9 @@ pub unsafe fn install(base: usize) -> bool {
         }
     }
     // The per-frame push, and every registered tick with it.
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { install_tick(base) };
 
     if ok {

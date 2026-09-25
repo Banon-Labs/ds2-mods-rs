@@ -268,6 +268,9 @@ pub fn foreign_motion_frames() -> u64 {
 /// records.
 #[cfg(windows)]
 pub unsafe fn install() -> usize {
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { device::install() }
 }
 

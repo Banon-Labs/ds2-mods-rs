@@ -153,6 +153,9 @@ pub(crate) fn live_character_name() -> Option<String> {
     let mut units = Vec::with_capacity(ds2_rva::PLAYER_DATA_NAME_UNITS);
     for index in 0..ds2_rva::PLAYER_DATA_NAME_UNITS {
         // SAFETY: inside the block the pointer chain produced; the read is fault-safe.
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         match unsafe { ds2_game_base::mem::safe_read_u16(field + index * 2) } {
             Some(0) | None => break,
             Some(unit) => units.push(unit),

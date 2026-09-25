@@ -16,6 +16,8 @@ doc-valid-idents = [
     "..",
     "DarkSoulsII",   # the shipped executable's own name
     "DirectInput",   # Microsoft's API, spelled by Microsoft
+    "DirectInput8",  # the version of it DARK SOULS II links against
+    "DualShock",     # Sony's controller, spelled by Sony
     "FromSoftware",  # the company
     "MinHook",       # the detour library this workspace vendors
     "SteamID64",     # Valve's name for the 64-bit account id format

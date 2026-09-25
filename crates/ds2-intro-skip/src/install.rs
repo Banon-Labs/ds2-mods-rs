@@ -188,7 +188,7 @@ const DETOURS: [EnterFn; SCREENS.len()] = [detour_warning_no_copy, detour_logo, 
 pub struct Outcome {
     /// Screens whose `enter` is now detoured.
     pub installed: usize,
-    /// Screens that were attempted. Always [`SCREENS`]`.len()`; carried so a caller reporting
+    /// Screens that were attempted. Always `SCREENS.len()`; carried so a caller reporting
     /// "2 of 3" does not have to know the total from somewhere else.
     pub attempted: usize,
 }

@@ -88,7 +88,7 @@
 //!   ids and stores whatever comes back, including the zeros; four controlled runs, and later the
 //!   file itself, agree that two of those five were never authored.
 //!
-//! What actually works is in [`crate::layout`]: the `.flo` is loaded in place, one function hands
+//! What actually works is in `crate::layout`: the `.flo` is loaded in place, one function hands
 //! out the table entry that says how many children a container has, and that same `u16` is the
 //! display list's capacity. Substituting a copy that says two more -- a row and its mark -- is the
 //! whole edit. Nothing is written to disk and no archive is repacked.

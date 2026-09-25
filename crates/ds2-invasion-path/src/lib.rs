@@ -125,6 +125,7 @@
 //! the game image but is not one of its 286 redirected entries, and its prologue is checked
 //! before the detour goes in.
 
+// DEBT: ds2-mods-rs-2rs -- module-wide dead_code, reason not yet recorded.
 #![cfg_attr(not(windows), allow(dead_code))]
 
 pub mod camera_yaw;

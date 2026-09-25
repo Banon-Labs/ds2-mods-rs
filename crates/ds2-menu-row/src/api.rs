@@ -106,7 +106,7 @@ impl Tab {
 /// Most rows this crate can add to any one tab.
 ///
 /// Twelve on the System tab: fifteen rows the grid's bind loop will look for, three of them already
-/// authored. It is a `const` because the [`Container`](crate::layout) that carries the added records
+/// authored. It is a `const` because the `Container` that carries the added records
 /// is a fixed-size struct, and because every per-slot table in `ds2-rva` is sized by it.
 pub const MAX_ADDED_ROWS: usize =
     ds2_rva::FEX_GRID_MAX_ROWS - ds2_rva::FE_INGAME_MENU_SYSTEM_TAB_ITEMS.len();
@@ -122,7 +122,9 @@ pub const MAX_ADDED_ROWS: usize =
 /// `perceived ~= (linear - 0.20) / 0.80`. See [`ds2_rva::FLO_ADDED_ROW_TINT_STRENGTH`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Tint {
+    /// The colour, as the transform block stores it.
     pub rgb: [u8; 3],
+    /// How much of it to apply, on the linear scale the section above measures.
     pub strength: u8,
 }
 
@@ -196,9 +198,13 @@ pub enum AddRowError {
     /// reached `capacity` -- [`ds2_rva::FEX_GRID_MAX_ROWS`], the most cells the grid's layout bind
     /// will ever go looking for.
     TabFull {
+        /// Which tab had no room.
         tab: Tab,
+        /// Rows the game itself puts there.
         shipped: usize,
+        /// Rows already registered by callers.
         added: usize,
+        /// The ceiling the two together reached.
         capacity: usize,
     },
     /// [`crate::install`] has already run. The hooks read the registry once, when the menu is
@@ -280,6 +286,11 @@ static INSTALLED: AtomicBool = AtomicBool::new(false);
 /// Refuses rather than truncates: a tab with no slot left comes back as
 /// [`AddRowError::TabFull`] carrying the numbers, because the alternative is the game's own
 /// allocator panic during a menu open.
+/// # Errors
+///
+/// `TabFull` with the numbers when the tab has no slot left, `AlreadyInstalled` when
+/// [`crate::install`] has already read the registry, and `Poisoned` when another caller panicked
+/// holding the lock.
 pub fn add_row(spec: RowSpec) -> Result<RowId, AddRowError> {
     if INSTALLED.load(Ordering::Acquire) {
         return Err(AddRowError::AlreadyInstalled);
