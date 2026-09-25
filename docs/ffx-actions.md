@@ -249,3 +249,171 @@ converts to **milliseconds** (x1000, +0.5). File values are multiples of 1/30 s 
 - Type-44/59/60/46/71/87 "arg reference" params: resolution path not traced.
 - Classes behind 11000/11001 and the per-id Katana hosts 20000-20006.
 - Emitter/movement per-class field names (only index -> field is known).
+
+## 7. Curves over time, flicker, and effect light
+
+Static RE, 2026-09-25. No game run.
+
+### 7.1 File param type -> runtime class **[read]**
+
+The param deserializer switch is `0x140f8b860` (`FXSerializableParam.inl`); each case constructs one
+class, identified by the vtable it stores (names from RTTI):
+
+| file type | value | interpolation | after last key |
+| --- | --- | --- | --- |
+| 3 / 4 | int | none (step) | clamp / **loop** |
+| 5 / 6 | int | linear | clamp / **loop** |
+| 9 / 10 | float | none (step) | clamp / **loop** |
+| 11 / 12 | float | linear | clamp / **loop** |
+| 13 / 14 | float | cubic (key = value, in-tangent, out-tangent) | clamp / **loop** |
+| 17 / 18 | vec4 (colour) | none | clamp / **loop** |
+| 19 / 20 | vec4 | linear | clamp / **loop** |
+| 21 / 22 | vec4 | cubic (3 vec4 per key) | clamp / **loop** |
+| 25-30 | vec4 kind 15 | none/linear/cubic x none/loop | |
+| 33-36 | FXPlacement | none/linear x none/loop | |
+| 79 / 81 / 83 / 85 | int / float / vec4 / tick | `FXSequenceParamRandomSingleBase`: a range, value = min + rand*(max-min) | |
+| 80 / 82 / 84 / 86 | int / float / vec4 / tick | `FXSequenceParamRandomSequenceBase`: a curve (child Param) x a random factor | |
+
+So the odd/even pairs are `LoopCategoryNone` / `LoopCategoryCyclic`: **13 is a float cubic spline,
+not a float3; 21 is a cubic colour.**
+
+### 7.2 How a curve evaluates **[read]**
+
+- Param-object path (`vt+0x50`): linear/none use `0x140a0a2f0` (last key with `t_key <= t`, lerp to
+  the next, **last value held after the last key**). Cyclic first maps time with `0x140fc3c10`:
+  `t = (round(t*1000) % round(t_last*1000)) / 1000` -- the period is the **last key's time**, and it
+  only loops when the curve has **2+ keys**.
+- Compiled path (what appearance blocks store): `{u32 mode; ptr -> [n, times[n], values[n]]}`
+  (`0x140a078c0`). Float modes run through the table at **`0x14127d290`** (29 entries): mode 4 =
+  linear clamp (`0x140f56cd0`), 0x10 = linear cyclic (`0x140f57880`, `fmodf(t, t_last)`), 0x18 =
+  constant, 0x1c = zero; mode+1 = the same curve times a random range (the compile of `p1`/`p3` in
+  Billboard, `0x140f5da68`, bumps the mode).
+- A 2-key cyclic curve is a **sawtooth** (jumps from the last value back to the first). For a smooth
+  loop the last key must repeat the first key's value.
+- **Random is per particle, not per frame.** The "x random" evaluators (`0x140f56a10`,
+  `0x140f56de0`, ...) step a xorshift state passed by pointer, but both callers checked
+  (`0x1410044c3` in the Billboard update, `0x140bfc3e0` in `SfxFXParticleAppearance_Tracer`) copy the
+  seed from the particle (`+0x70`) into a stack local every frame and never write it back, so the
+  random factor is the same every frame for a given particle. There is no per-frame noise param
+  type in this set.
+- Time base: the Billboard update passes `[ctx+0x18]` (current time) and uses
+  `[ctx+0x18]-[ctx+0x14]` as dt for the roll-speed field. That this is particle age and not effect age
+  is **[inf]**.
+
+Shipped examples (`scripts/ds2-ffx.py tree --id N`):
+
+- **181**: one child 2101 whose appearance slot is action **11001** (a point light), orange
+  `rgba 1,.627,.251,.251`, radius 10, **flicker p6=5 p7=10 p8=0.8**. Light only, 2375 bytes.
+- **28** (and 27): 11001 light, radius 0->25 over 1 s, flicker 5/10/0.9, plus
+  `SfxFxClusterAppearance_MultiTextureBillboard` (15001) p49 = **type 20** (looping colour),
+  keys `0:(5,3,2,1) 0.5:(10,3,1,2) 1.0:(5,2,1,1)` -- a 1 s HDR orange pulse.
+- **1391**: 15000 p10/p11 = **type 12** (looping float), 2 keys over 0.133 s (0.4->2.0, 0.8->1.0):
+  a fast sawtooth on size.
+
+Across the bundle: 11001 appears 433 times in 412 effects; 387 have the flicker on. Most common
+settings are p6/p7/p8 = 5/10/0.95 (252 uses), 5/10/0.9, 5/10/0.8, 10/30/0.5, 1/4/0.5. No shipped
+action-59 Billboard uses a looping curve on size or colour (only p11 type 6 and p32 type 18).
+
+### 7.3 Actions 11000 / 11001 are real lights **[read]**
+
+`0x140bef460` (11001) builds `SfxFxDrawEntityHostPointLight` (ctor `0x140c0b6e0`, vtable
+`0x1411edb88`); `0x140bef520` (11000) builds `SfxFxDrawEntityHostSpotLight` (ctor `0x140c0be90`,
+vtable `0x1411edbe8`). Per-frame update of the point light: `0x140c0ba70`.
+
+11001 params (14 in most shipped uses):
+
+| p | field | use |
+| --- | --- | --- |
+| 0 | +0x40 | vec4 curve, x p10 x flicker -> light colour A (diffuse **[inf]**) |
+| 1 | +0x48 | vec4 curve, x p11 x flicker -> light colour B (specular **[inf]**) |
+| 2 | +0x60 | float curve = **radius**; light is registered only while radius > 0 (vt+0xa0 on the adapter), "large" flag when > 44.0 |
+| 3 | +0x68 | float, not read by the update **[unknown]** |
+| 4 | +0x6c | bool -> light byte |
+| 5 | +0x70 | float -> light float (default 1.0) |
+| 6, 7 | +0x74, +0x78 | **flicker period min / max, in 1/30 s ticks** |
+| 8 | +0x7c | **flicker floor** (brightness dips to this; default 1.0) |
+| 9 | +0x90 | int, not read by the update **[unknown]** |
+| 10, 11 | +0x50, +0x58 | vec4 curves multiplied onto p0 / p1 (shipped alpha 1..7 = intensity **[inf]**) |
+| 12, 13 | +0xac, +0xad | bools -> light bytes |
+
+Flicker **[read]**: enabled unless p6 == p7 == 0 or p8 == 1.0. Each period is a random integer in
+[p6, p7] ticks (xorshift seeded 123456789); brightness is a triangle wave 1.0 -> p8 -> 1.0 over the
+period, multiplied onto both colours. Curve time = instance time minus the light's start time.
+
+The same `2101` child template carries either appearance: arg slot 4 is the appearance action
+(833: `59` billboard; 832 and 181: `11001` light).
+
+Lights go through the deferred renderer (`GXDeferredLightRenderer::_RenderLights<GXDrawPointLight>`
+in RTTI) and so light the map and characters **[inf: the adapter vt+0x90/+0xa0 hand-off was not
+traced to the renderer]**.
+
+Katana actions 20000-20006 **[read, ctor vtables]**: 20000 SwordTracer, 20001 Flicker, 20002 Blink,
+20003 Tracer, 20004 PointWind, 20005 RadialBlur, 20006 DirectionalLight. Shipped uses in sfx9999:
+20002 x67, 20004 x20, 20005 x186, 20006 x8, 20000 x1, **20001 x0**. `SfxFxDrawEntityFlicker` reads
+p12..p24 (ints, floats, kind-7 vec4); what it does was not decoded.
+
+### 7.4 KatanaSfxSystem+0x120 is environment-light *receiving*, not emitting **[read]**
+
+`sys+0x120` is a 0x70 object built by `0x140bfa760(obj, allocator, sys)`; `obj+8` = the system.
+When an sfxparam entry has `+0x2c > 0`, `0x140bfaee0` takes a record from pool `0x140bfa070` (and
+from `0x140bfa0f0` too when byte `+0x1a` is set), then `0x140c0b560` sets `root+0x119 = 2` and
+allocates four float4 at `root+0xf0..0x108`. Every frame `0x140bfb1d0` -> `0x140bfb2b0` calls
+`KatanaSfxSystem` vt+0xe0 = `0x1404c50f0`, which samples **the map's baked light data at the
+effect's position** (`MapManager` -> area `+0x188` -> `0x140401800`, three shorts x 1/1024 = RGB).
+The sample is cross-faded over 0.5 s when it changes, then
+`root+0xf0 = max(1 - w*rgb, 0) + sample * w*rgb` with `rgb = entry+0x20..0x28` and
+`w = entry+0x2c`. Result: the effect is **darkened/tinted by the area's lighting**. It casts
+nothing. 833 has `+0x2c = 0`: fully self-lit.
+
+sfxparam entry (0x40 bytes), from `0x140bed0a0`, `0x140bfaee0`, `0x140bfb140`, `0x140bfb2b0`:
+
+| off | type | meaning |
+| --- | --- | --- |
+| +0x00 | i32 | effect id (blob sorted by id; lookup `0x140bf9dc0` = binary search per blob, **first blob that has the id wins**) **[read]** |
+| +0x04 | f32 | equals root ParamList p0; no consumer found **[unknown]** |
+| +0x08 | i32 | start-time skip, ticks of 0.033 s (= root p3); 833: 30 = starts 1 s in **[read]** |
+| +0x0c | i32 | random extra start ticks, 0..n **[read]** |
+| +0x12 | u8 | with +0x14: non-zero -> `KatanaSfxWindControl` via `sys+0x308` (`0x140bf9190` -> sys vt+0xd8 `0x1404c4e00`, ctor `0x1404c58e0`) **[read]** |
+| +0x13 | u8 | set in 1968/2325 entries; no consumer in the spawn **[unknown]** |
+| +0x14 | i32 | see +0x12 (15 in 11 entries) **[read]** |
+| +0x1a | u8 | also take the second pool record (the 3 x float4 at root+0xf8..0x108; directional light terms **[inf]**) **[read gate]** |
+| +0x1c | i32 | passed to the `KatanaSfxWindControl` ctor **[read]**; meaning **[unknown]** |
+| +0x20..+0x28 | f32 x3 | env-light tint colour (= root p7..p9) **[read]** |
+| +0x2c | f32 | env-light weight; > 0 turns the sampling on (= root p10) **[read]** |
+| +0x30..+0x3c | f32 x4 | rgb x a -> `root+0xd0` constant colour multiplier (= root p11..p14) **[read]** |
+
+The root ParamList of the effect matches its sfxparam entry (p0, p3, p7..p14) in 695 of 958
+effects; the entry, not the root list, is what the spawn reads **[read]**.
+
+`0x140becc90(sys, blob, size)` accepts any buffer with magic `"sfxp"` and version 5, copies it with
+the list's allocator, and appends it to the tail of `[sys+0x118]+8`. A DLL can call it with its own
+blob. Because lookup takes the first match in list order, an appended blob cannot override an id the
+shipped `sfxParameter.sfxparam` already has; a new id (25001) is fine. No sfxparam entry is needed
+for an effect to spawn or to carry an 11001 light.
+
+### 7.5 Light shafts, bloom, lens flare **[read]**
+
+No FFX appearance or Sfx host renders shafts or flares. The engine has them as global post
+effects: `ToneMap_LightShaftBlur.fpo` / `ToneMap_LightShaftComposite.fpo` (loaded by
+`0x140b92900`), `ToneMap_Bloom*`, `GXLensFlareFilter` and `LensFlare_FlashLight*` shaders. "Light
+Shaft", "Bloom" and "Player Light Shadow" are graphics-config labels (`0x1410d0420` area, beside
+`GraphicsConfig_SOFS.xml`). What drives the shaft source (sun or light list) was not traced. The
+cheap stand-in is bloom: colour values above 1 (27/28 use 5..10) make the billboard bloom.
+
+### 7.6 What a mod needs for a flickering, light-casting stone
+
+1. **Light:** the effect needs an 11001 point light. With no resizing: `ds2-ffx.py patch --id 181
+   --new-id 25002` with leaf edits (colour at `0x04f4`/`0x052e`, radius `0x0568`, flicker
+   `0x05d8`=p6, `0x05f4`=p7, `0x0610`=p8), register it like 25001, and spawn 25001 and 25002 at the
+   same position. For a candle: p6 3, p7 9, p8 0.6-0.8, radius 3-6.
+2. **Glow flicker:** the billboard p1/p2 (size, type 11) or p8 (colour, type 19) must become the
+   looping type (12 / 20) with 3+ keys whose last key repeats the first, e.g. alpha
+   `0:1.0 0.13:0.8 0.2:0.95 0.33:0.75 0.47:1.0`. That grows the ParamList, and `ds2-ffx.py patch`
+   only rewrites leaves in place: the patcher needs an insert-keyframes operation that fixes every
+   enclosing object length. Random types (81/82/84) do not flicker a single particle; they are fixed
+   per particle.
+3. **sfxparam:** not needed for either. Only add an entry (via `0x140becc90`) to use start-time skip,
+   env-light tinting (+0x2c), the constant colour multiplier (+0x30), or wind.
+
+Unproven until a run: that a looping curve on action-59 p1/p8 survives the Billboard compile (it is
+type-generic, but no shipped 59 does it), and that the FFX point light visibly lights the scene.
