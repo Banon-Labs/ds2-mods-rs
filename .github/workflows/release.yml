@@ -1,0 +1,196 @@
+name: release
+
+# Every push to main builds the three files a player installs and republishes them under one
+# MOVING `latest` tag, so a link pasted into a Discord keeps working forever:
+#
+#   https://github.com/Banon-Labs/ds2-mods-rs/releases/latest/download/ds2-mods-rs.zip
+#   https://github.com/Banon-Labs/ds2-mods-rs/releases/latest/download/dinput8.dll
+#
+# DELIBERATELY NOT the immutable per-commit prerelease that
+# `../er-mods-rs/.github/workflows/release.yml` publishes. That repo has Immutable Releases turned
+# on and each main commit gets its own `main-<sha>` tag; this one has neither (`immutable_releases`
+# reads null on the API and there were zero releases when this file was written), and its audience
+# is people who were handed a link, for whom a tag that changes every commit is a dead link. The
+# cost of that choice is real and is not hidden: there is no download history here, and
+# `git checkout <sha>` is the only way back to an older build.
+#
+# `/releases/latest/download/` resolves the newest NON-prerelease release. That single fact is why
+# nothing below passes `--prerelease`, and flipping it silently breaks both URLs above.
+#
+# THIS IS NOT THE GATE, and must never be mistaken for one. `scripts/check.sh` -- rustfmt, clippy
+# against the Windows target, the commit-message check, the docs lint -- still runs only when a
+# human runs it (`ds2-mods-rs-e60`). A release built here is a release built from a commit that
+# nothing checked.
+
+on:
+  push:
+    branches: [main]
+  # BUILDS, PUBLISHES NOTHING -- the publish step below is gated on `refs/heads/main` and a pull
+  # request's ref is `refs/pull/N/merge`. This trigger is here because `workflow_dispatch` cannot
+  # reach a workflow that is not yet on the default branch, so without it the very first run of
+  # this file would be the one that publishes, from a commit already merged. A PR that changes
+  # this workflow proves it on the run page first.
+  pull_request:
+  # Dispatched from a branch this produces the same files on the run page and touches no release;
+  # dispatched from main it republishes, which is how to recover `latest` after someone deletes it.
+  workflow_dispatch:
+
+# Two merges to main must not race the same tag. NOT cancel-in-progress: a superseded run has
+# already produced a real artifact set, and killing it between two `gh release upload` calls is
+# exactly how a release ends up holding three files from one commit and one file from another.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TARGET: x86_64-pc-windows-msvc
+  # The version `../er-mods-rs` pins, whose release workflow has been green on this toolchain.
+  CARGO_XWIN_VERSION: 0.23.0
+
+  # THE WORKSPACE CANNOT BE LOADED WITHOUT THIS SIBLING. The root manifest carries
+  # `dearxan = { path = "../dearxan" }`, which cargo resolves at metadata time -- so a checkout
+  # without it dies before a single crate is compiled, not at link time where it would be obvious.
+  #
+  # PINNED RATHER THAN `main`, for the reason `../er-mods-rs` learned with fromsoftware-rs and
+  # wrote sixty lines about: a floating sibling means the DLL CI ships and the DLL the author
+  # tested locally are different builds, and no commit in this repo records which. `ccfefc4` is
+  # `Banon-Labs/dearxan`'s own main tip. The local checkout sits on a branch one commit ahead of
+  # it, and that commit changes five files under `examples/` and nothing else -- verified with
+  # `git diff --name-only` -- so the library half this workspace links is identical.
+  DEARXAN_REV: ccfefc47932389fa3b1e05206a1e73a85dc3265b
+  # HTTPS and not the `git@github.com:` URL the local checkout uses. `Banon-Labs/dearxan` is public,
+  # so this needs no key and no token; an SSH remote here would need a deploy key for no gain.
+  DEARXAN_REMOTE: https://github.com/Banon-Labs/dearxan.git
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create and replace the `latest` release and its tag
+      id-token: write # Sigstore OIDC, for the attestation below
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check out dearxan as a sibling
+        run: |
+          git clone "$DEARXAN_REMOTE" "$GITHUB_WORKSPACE/../dearxan"
+          git -C "$GITHUB_WORKSPACE/../dearxan" checkout "$DEARXAN_REV"
+
+      # THERE IS NO MINHOOK STEP HERE ON PURPOSE. `../er-mods-rs` gitignores its vendor drop and so
+      # has to `git clone --branch v1.3.4` MinHook at this point in its own release workflow; this
+      # repo commits `vendor/minhook/` to git, and `crates/ds2-hook/build.rs` joins one fixed path
+      # relative to its own manifest with no search fallback. A clone step would be a second copy
+      # racing the committed one.
+
+      - name: Install Rust and the Windows target
+        run: |
+          # clang and lld are what cargo-xwin drives; llvm carries llvm-lib for the import libs.
+          # The retry is because a cold runner's apt lists are sometimes stale enough that the
+          # first install 404s on a package it can see.
+          sudo apt-get install -y --no-install-recommends clang lld llvm \
+            || { sudo apt-get update && sudo apt-get install -y --no-install-recommends clang lld llvm; }
+          rustup toolchain install stable --profile minimal
+          rustup target add "$TARGET"
+
+      - name: Install cargo-xwin
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-xwin@${{ env.CARGO_XWIN_VERSION }}
+
+      # ~1 GB of Microsoft CRT and SDK headers. Keyed on the cargo-xwin version because that is
+      # what decides the layout it unpacks them into.
+      - name: Cache the Windows CRT and SDK
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/cargo-xwin
+          key: xwin-sdk-${{ runner.os }}-cargo-xwin-${{ env.CARGO_XWIN_VERSION }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      # THREE CRATES BY NAME, not `--workspace`. Everything else under `crates/` is an rlib that is
+      # linked into one of these three; building the workspace would take longer and emit not one
+      # additional file anybody can install.
+      - name: Build what ships
+        run: |
+          cargo xwin build --release --target "$TARGET" \
+            -p ds2-loader -p ds2-launcher -p ds2-crash-logging
+
+      # `dinput8.dll` IS NOT A TYPO FOR THE CRATE NAME. `crates/ds2-loader/Cargo.toml` sets
+      # `[lib] name = "dinput8"` because that is the filename the Windows loader resolves
+      # `DarkSoulsII.exe`'s static import against -- renaming the asset stops the mod loading at
+      # all, so it keeps exactly the name cargo emits.
+      - name: Stage the release assets
+        run: |
+          mkdir dist
+          cp "target/$TARGET/release/dinput8.dll"            dist/
+          cp "target/$TARGET/release/ds2-launcher.exe"       dist/
+          cp "target/$TARGET/release/ds2_crash_logging.dll"  dist/
+          cp .github/dist-README.md dist/README.md
+          (cd dist && sha256sum -- dinput8.dll ds2-launcher.exe ds2_crash_logging.dll README.md > SHA256SUMS)
+          # THE ZIP IS FLAT -- no `dist/` prefix inside it -- because unpacking it beside
+          # `DarkSoulsII.exe` is the whole install, and a wrapper directory makes that the one
+          # wrong move. It is built from `dist` while that holds exactly the individual assets and
+          # their checksums, then moved back in beside them, so the SHA256SUMS a zip-taker unpacks
+          # and the SHA256SUMS a file-at-a-time taker downloads are the same bytes over the same
+          # files, and either can be checked against the other.
+          #
+          # `python3 -m zipfile` rather than `zip(1)`: python3 is what this repo's own gate runs
+          # on, where `zip` is a package that merely happens to be on the runner image today.
+          # Naming the members from inside `dist` is what makes the archive flat -- `-c out.zip
+          # dist/` stores every path under `dist/`, which was measured, not assumed.
+          (cd dist && python3 -m zipfile -c ../ds2-mods-rs.zip \
+            dinput8.dll ds2-launcher.exe ds2_crash_logging.dll README.md SHA256SUMS)
+          mv ds2-mods-rs.zip dist/
+
+      # Attest each installable file, not only the zip that carries them, so
+      # `gh attestation verify dinput8.dll -R Banon-Labs/ds2-mods-rs` still answers for someone who
+      # downloaded one DLL. These are unsigned binaries that people are being asked to drop into a
+      # game directory, which is precisely the shape of thing worth being able to trace to a commit.
+      - name: Attest build provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            dist/dinput8.dll
+            dist/ds2-launcher.exe
+            dist/ds2_crash_logging.dll
+            dist/ds2-mods-rs.zip
+            dist/SHA256SUMS
+
+      # Every trigger gets downloadable files, including a dispatch from a branch, which publishes
+      # nothing below. GitHub serves an artifact as a zip of whatever it holds, so this one is a
+      # zip containing the loose files AND `ds2-mods-rs.zip`; the release is the tidy path and this
+      # is the one that works before a release exists.
+      - name: Upload the assets to the run page
+        uses: actions/upload-artifact@v4
+        with:
+          name: ds2-mods-rs-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+
+      - name: Publish to the moving `latest` release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="$(mktemp)"
+          cat .github/dist-README.md > "$notes"
+          # shellcheck disable=SC2016  # the backticks are markdown for the release page, not a
+          # command substitution someone forgot to expand. actionlint fails the file over this
+          # info-level finding, so it is silenced here rather than left to be rediscovered.
+          printf '\n---\n\nBuilt from `%s`.\n' "$GITHUB_SHA" >> "$notes"
+
+          # DELETE AND RECREATE, rather than edit in place. `gh release edit --target` cannot move
+          # the tag of an already-published release -- GitHub applies `target_commitish` only while
+          # a release is a draft -- so editing would leave `latest` the tag pointing at whichever
+          # commit happened to be first, while its assets came from a commit months later. A tag
+          # that lies about what it contains is worse than the cost of this approach, which is two
+          # real things: the release's download counts reset on every push to main, and for the few
+          # seconds between these two commands the `latest` URLs 404.
+          if gh release view latest >/dev/null 2>&1; then
+            gh release delete latest --yes --cleanup-tag
+          fi
+          gh release create latest dist/* \
+            --target "$GITHUB_SHA" \
+            --title "Latest build ${GITHUB_SHA::12}" \
+            --notes-file "$notes"
