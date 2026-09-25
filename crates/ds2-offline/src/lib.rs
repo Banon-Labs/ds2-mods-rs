@@ -65,13 +65,11 @@
 //!   Wine and the Steam API all use local sockets and breaking those breaks the game rather than
 //!   its matchmaking.
 //!
-//! # `0x14160de19` is not the switch, and this is where that was settled
-//!
-//! `docs/DS2-BOOT-WORK.md` records a byte the game reads to force the online flag to zero, and
-//! asks whether setting it removes the network boot chain. It does not: it is read at exactly one
-//! instruction in the whole image, inside the top-menu builder, and the boot chain calls
-//! `0x140513600` directly. See [`ds2_rva::NET_FORCE_OFFLINE_MENU_ONLY`].
+//! `docs/DS2-OFFLINE.md` has the disassembly, the call-site census and the measurements.
 
+// DEBT: ds2-mods-rs-24r -- not debt to be paid: this crate ships as a Windows DLL and the
+// attribute is what keeps its Rust half parseable on the host, so the game-free tests below it
+// can run at all. The issue is the standing record of that decision.
 #![cfg_attr(not(windows), allow(unused))]
 
 #[cfg(windows)]

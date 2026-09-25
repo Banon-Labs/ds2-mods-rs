@@ -57,6 +57,9 @@
 //! | `no field: the game's keyboard is busy` | the game owns a session; refused rather than stolen |
 //! | `rejected "...": Drop the #` | the fragment form, refused before the request went out |
 
+// DEBT: ds2-mods-rs-24r -- not debt to be paid: this crate ships as a Windows DLL and the
+// attribute is what keeps its Rust half parseable on the host, so the game-free tests below it
+// can run at all. The issue is the standing record of that decision.
 #![cfg_attr(not(windows), allow(unused))]
 
 /// What every line this crate writes begins with.

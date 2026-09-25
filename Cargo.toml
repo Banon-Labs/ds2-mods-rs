@@ -20,9 +20,28 @@ resolver = "2"
 # so. That cost er-mods-rs months of false-green lint runs; see its root Cargo.toml.
 [workspace.lints.rust]
 warnings = { level = "deny", priority = -1 }
+# A public item with no doc comment. `docs/COMMENTS.md` is the convention; this is the part of
+# it a compiler can hold.
+missing_docs = "deny"
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }
+# THE DOC LINTS THE STOCK SET LEAVES OFF. Every one of these lives in `clippy::pedantic` or
+# `clippy::restriction`, neither of which `all` includes, so denying `all` above switched on
+# none of them. They are named one by one rather than by taking all of pedantic: each is a rule
+# `docs/COMMENTS.md` states in prose, and this is the same rule stated where it bites.
+undocumented_unsafe_blocks = "deny"
+missing_panics_doc = "deny"
+missing_errors_doc = "deny"
+too_long_first_doc_paragraph = "deny"
+doc_markdown = "deny"
+
+# `docs/COMMENTS.md` says an address is named by its `ds2_rva` constant, as an intra-doc link,
+# because a link to a deleted entry fails and a bare `0x140513600` does not. This is the lint
+# that makes the failure happen -- and it only runs under `cargo doc`, which is why
+# `scripts/check.sh` now has a docs step.
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
 
 [workspace.package]
 version = "0.1.0"

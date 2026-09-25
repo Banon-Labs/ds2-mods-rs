@@ -52,6 +52,9 @@
 //! playing the game wants. `[boot_timeline] enabled = true`, or `ds2-run.py --boot-timeline`,
 //! turns it on for a measurement run.
 
+// DEBT: ds2-mods-rs-24r -- not debt to be paid: this crate ships as a Windows DLL and the
+// attribute is what keeps its Rust half parseable on the host, so the game-free tests below it
+// can run at all. The issue is the standing record of that decision.
 #![cfg_attr(not(windows), allow(unused))]
 
 #[cfg(windows)]

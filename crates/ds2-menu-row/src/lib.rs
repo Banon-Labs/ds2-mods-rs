@@ -116,6 +116,9 @@
 //!
 //! `docs/DS2-INGAME-MENU.md` has the disassembly, the measurements, and the corrections.
 
+// DEBT: ds2-mods-rs-24r -- not debt to be paid: this crate ships as a Windows DLL and the
+// attribute is what keeps its Rust half parseable on the host, so the game-free tests below it
+// can run at all. The issue is the standing record of that decision.
 #![cfg_attr(not(windows), allow(unused))]
 
 mod api;

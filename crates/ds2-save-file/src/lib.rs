@@ -44,6 +44,9 @@
 //! `ds2-save-picker-core` remains the answer for a picker that has to name a character without the
 //! game's help, which is a different feature.
 
+// DEBT: ds2-mods-rs-24r -- not debt to be paid: this crate ships as a Windows DLL and the
+// attribute is what keeps its Rust half parseable on the host, so the game-free tests below it
+// can run at all. The issue is the standing record of that decision.
 #![cfg_attr(not(windows), allow(unused))]
 
 /// What every line this crate writes begins with, so its lines can be grepped out of the shared log.

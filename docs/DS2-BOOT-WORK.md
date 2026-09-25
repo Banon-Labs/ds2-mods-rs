@@ -238,10 +238,13 @@ the game already has the switch: **`0x14160de19`**, read at exactly one instruct
 image (`0x1400f431f`, in the top-menu builder) and forcing the online flag to 0. Ghidra finds no
 writer. Setting it makes the menu believe it is offline.
 
-**Not established:** whether that byte also diverts the *boot chain* or only the menu rows. It is
-read in the builder; whether `0x20`/`0x39`/`0x44` consult the same flag has not been traced. The
-master online gate they do consult is `0x140513600`, which is `return *(u8*)(this+0x3a)` on the
-network service -- a different read. Trace that before assuming one byte removes the whole chain.
+**Settled, and the answer is no.** The byte diverts the menu rows and nothing else. It is read at
+exactly one instruction in the whole image, inside the top-menu builder, while `0x20`/`0x39`/`0x44`
+call `0x140513600` directly -- `return *(u8*)(this+0x3a)` on the network service, a different read
+on a different object. Setting one byte does not remove the boot chain, and the paragraph above,
+which called it "the switch", was written before that was traced. `ds2_rva::NET_FORCE_OFFLINE_MENU_ONLY`
+carries the name so the mistake is hard to repeat; `ds2-offline` is what actually takes the game
+off the network, and `docs/DS2-OFFLINE.md` is how.
 
 ## The boot writes back system data it has not changed
 

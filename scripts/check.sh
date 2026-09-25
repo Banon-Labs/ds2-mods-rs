@@ -51,6 +51,14 @@ if [[ "$template_size" -ge 2500 ]]; then
 fi
 echo "  $pr_template: OK"
 
+echo "== lint allows =="
+# Every `#[allow]` in `crates/` names the issue that will remove it. An allow switches off a lint
+# the root manifest denies on purpose, so it is a hole in this gate, and a hole nobody is tracking
+# cannot be told from one nobody noticed. docs/COMMENTS.md is the convention. Cheap, so it runs
+# before clippy.
+python3 scripts/check-allow-debt.py --selftest
+python3 scripts/check-allow-debt.py
+
 echo "== rustfmt =="
 # NOT `cargo fmt --all`. `--all` is documented as "format all packages, AND ALSO THEIR LOCAL
 # PATH-BASED DEPENDENCIES", so the moment a crate here depended on `../dearxan` the gate started
@@ -67,6 +75,32 @@ echo "== clippy ($TARGET) =="
 # `--all-targets` so tests and examples are linted too, `--no-deps` so a warning in a path
 # dependency outside this workspace does not fail our gate.
 cargo xwin clippy --workspace --all-targets --no-deps --target "$TARGET"
+
+echo "== docs ($TARGET) =="
+# THIS STEP EXISTS FOR ONE LINT. `docs/COMMENTS.md` says a comment naming an address in
+# `DarkSoulsII.exe` names its `ds2_rva` constant as an intra-doc link, so that deleting or
+# renaming the entry breaks the build instead of leaving a comment quietly describing an address
+# that moved. `rustdoc::broken_intra_doc_links` is what breaks it, and clippy never runs rustdoc
+# -- without this line the rule in the root manifest is denied and never evaluated.
+#
+# MEASURED: a doc comment containing `[notes](../../../docs/GONE.md)` documents CLEAN under
+# `#![deny(warnings)]`. rustdoc has no lint for a dead relative path, which is why the convention
+# spends a plain-text filename there and checks it below rather than writing a link that rots in
+# silence.
+cargo xwin doc $(printf -- '-p %s ' $members) --no-deps --target "$TARGET" --quiet
+
+echo "== docs/ references =="
+# Every `docs/<name>.md` named from a comment must name a file that exists. This is the other
+# half of the same rule: the markdown filename is plain text precisely because rustdoc will not
+# check it, so something has to.
+missing=0
+while read -r ref; do
+  [[ -f "$ref" ]] && continue
+  echo "  $ref is named in a comment and does not exist" >&2
+  missing=1
+done < <(grep -rhoE 'docs/[A-Za-z0-9._-]+\.md' crates --include='*.rs' | sort -u)
+(( missing )) && exit 1
+echo "  OK"
 
 if (( run_host_tests )); then
   echo "== host tests =="
