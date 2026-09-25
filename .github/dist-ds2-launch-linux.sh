@@ -15,8 +15,8 @@
 # with WINEDLLOVERRIDES=dinput8=n,b, so Wine loads this package's dinput8.dll instead of its own.
 #
 # Steam does not start the game this way, so the session records no playtime, has no overlay and
-# does no cloud sync. Launching through Steam keeps those and still loads dinput8.dll -- see the
-# README for the one launch option that needs.
+# does no cloud sync. Steam can start ds2-launcher.exe itself and keep all three -- see "Starting
+# the launcher from Steam" in the README for the launch option.
 set -euo pipefail
 
 APPID=335300

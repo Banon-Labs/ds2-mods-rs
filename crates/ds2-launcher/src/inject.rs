@@ -42,12 +42,13 @@ use windows::Win32::System::Memory::{
     MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAllocEx, VirtualFreeEx,
 };
 use windows::Win32::System::Threading::{
-    CREATE_SUSPENDED, CreateProcessW, CreateRemoteThread, GetExitCodeThread, PROCESS_INFORMATION,
-    ResumeThread, STARTUPINFOW, TerminateProcess, WaitForSingleObject,
+    CREATE_SUSPENDED, CreateProcessW, CreateRemoteThread, GetExitCodeProcess, GetExitCodeThread,
+    INFINITE, PROCESS_INFORMATION, ResumeThread, STARTUPINFOW, TerminateProcess,
+    WaitForSingleObject,
 };
 use windows::core::{PCWSTR, PWSTR};
 
-use crate::plan::{Injection, Plan};
+use crate::plan::{Injection, Plan, command_line};
 
 /// The signature `CreateRemoteThread` starts a thread on.
 ///
@@ -120,19 +121,50 @@ fn wide(value: &OsStr) -> Vec<u16> {
     value.encode_wide().chain(std::iter::once(0)).collect()
 }
 
-/// What a successful launch produced.
+/// What a successful launch produced: a running game, still held.
 pub struct Launched {
     /// The process id, so a caller can say which session this was.
     pub process_id: u32,
+    /// The game's process handle, kept so [`Launched::wait`] can outlive nothing but the game.
+    process: HANDLE,
+}
+
+impl Launched {
+    /// Block until the game exits, and return its exit code.
+    ///
+    /// This is what lets Steam start the launcher and still count the session. Steam's session
+    /// -- playtime, the overlay's lifetime, the cloud sync it runs on exit -- is the life of the
+    /// process it started, and under Proton that process is `proton waitforexitandrun`, which
+    /// returns when this launcher does and takes the container the game runs in down with it. A
+    /// launcher that returned the moment the game was resumed would end the session seconds into
+    /// it.
+    ///
+    /// `None` if the wait itself failed, which leaves nothing to report but that.
+    #[must_use]
+    pub fn wait(self) -> Option<u32> {
+        // SAFETY: `process` is the handle `CreateProcessW` returned, owned by `self` and not yet
+        // closed; `self` is consumed, so it is closed exactly once below.
+        let waited = unsafe { WaitForSingleObject(self.process, INFINITE) };
+        let mut code = 0u32;
+        let read = waited == WAIT_OBJECT_0
+            // SAFETY: the process has exited, so its exit code is final; `code` is a live
+            // out-parameter.
+            && unsafe { GetExitCodeProcess(self.process, &mut code) }.is_ok();
+        close(self.process);
+        read.then_some(code)
+    }
 }
 
 /// Start the plan's executable suspended, inject every DLL, then let it run.
+///
+/// `arguments` are the game's own, passed through after its quoted path -- see
+/// [`crate::plan::game_arguments`] for where they come from.
 ///
 /// # Errors
 ///
 /// Any failure after the process exists terminates it before returning, so a caller that gets an
 /// error is looking at a machine with no half-modded game on it.
-pub fn launch(plan: &Plan, game_dir: &Path) -> Result<Launched, InjectError> {
+pub fn launch(plan: &Plan, game_dir: &Path, arguments: &[String]) -> Result<Launched, InjectError> {
     // Resolved in this process and used in the other one. Kernel32 is mapped at the same base in
     // every process for the life of a boot, which is what makes the address portable; it is also
     // the assumption every injector makes, including the one being replaced here. If it were
@@ -140,7 +172,12 @@ pub fn launch(plan: &Plan, game_dir: &Path) -> Result<Launched, InjectError> {
     // immediately rather than run unmodded, so the failure is loud rather than silent.
     let load_library = load_library_address().ok_or(InjectError::NoLoadLibrary)?;
 
-    let mut command = wide(plan.exe.as_os_str());
+    // The executable is named twice on purpose: as the application name, so `CreateProcessW`
+    // does not search for it by trying each space-separated prefix of an install path full of
+    // spaces, and quoted at the head of the command line, which is what the game reads as its
+    // own `argv[0]`.
+    let application = wide(plan.exe.as_os_str());
+    let mut command = wide(OsStr::new(&command_line(&plan.exe, arguments)));
     let working = wide(game_dir.as_os_str());
     let startup = STARTUPINFOW {
         cb: u32::try_from(size_of::<STARTUPINFOW>()).unwrap_or(0),
@@ -148,12 +185,12 @@ pub fn launch(plan: &Plan, game_dir: &Path) -> Result<Launched, InjectError> {
     };
     let mut process = PROCESS_INFORMATION::default();
 
-    // SAFETY: `command` and `working` are null-terminated wide buffers that outlive the call,
-    // `startup` carries its own `cb`, and `process` is a live out-parameter. The optional
-    // arguments are null, which the documented contract accepts.
+    // SAFETY: `application`, `command` and `working` are null-terminated wide buffers that
+    // outlive the call, `startup` carries its own `cb`, and `process` is a live out-parameter.
+    // The optional arguments are null, which the documented contract accepts.
     unsafe {
         CreateProcessW(
-            PCWSTR::null(),
+            PCWSTR(application.as_ptr()),
             Some(PWSTR(command.as_mut_ptr())),
             None,
             None,
@@ -183,10 +220,11 @@ pub fn launch(plan: &Plan, game_dir: &Path) -> Result<Launched, InjectError> {
     // SAFETY: `hThread` is the initial thread `CreateProcessW` returned, still suspended.
     unsafe { ResumeThread(process.hThread) };
 
-    let process_id = process.dwProcessId;
     close(process.hThread);
-    close(process.hProcess);
-    Ok(Launched { process_id })
+    Ok(Launched {
+        process_id: process.dwProcessId,
+        process: process.hProcess,
+    })
 }
 
 /// The address of `kernel32!LoadLibraryW` in this process.

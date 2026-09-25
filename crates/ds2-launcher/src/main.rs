@@ -20,6 +20,14 @@
 //! `<Game>/ds2-mods.toml`, the same file `ds2-loader` reads once it is in the process. See
 //! [`plan`] for the section and the ordering rules.
 //!
+//! # Started by Steam
+//!
+//! Meant to sit in the game's Steam launch options in front of `%command%`, so Steam still starts
+//! the session and keeps playtime, the overlay and cloud sync. Two things follow from that: the
+//! arguments Steam hands over are the game's command line, which [`plan::game_arguments`] turns
+//! back into the game's own arguments, and this process waits for the game and exits with its
+//! code, because the session Steam sees is this process's lifetime, not the game's.
+//!
 //! # What it is not
 //!
 //! Not a replacement for `dinput8.dll`. This workspace's own loader is a static import of
@@ -92,18 +100,25 @@ fn main() -> ExitCode {
         return ExitCode::from(EXIT_REFUSED);
     }
 
+    // Before the dry-run exit, so `--dry-run` also shows what Steam's `%command%` turned into.
+    let game_arguments = plan::game_arguments(&arguments, &plan.exe);
+    println!(
+        "{LOG_PREFIX} command line {}",
+        plan::command_line(&plan.exe, &game_arguments)
+    );
+
     if dry_run {
         println!("{LOG_PREFIX} --dry-run: the plan above is runnable; nothing was started");
         return ExitCode::SUCCESS;
     }
 
-    run(&plan, &game_dir)
+    run(&plan, &game_dir, &game_arguments)
 }
 
-/// Start the plan, on a platform that can.
+/// Start the plan, on a platform that can, and stay alive exactly as long as the game.
 #[cfg(windows)]
-fn run(plan: &Plan, game_dir: &Path) -> ExitCode {
-    match inject::launch(plan, game_dir) {
+fn run(plan: &Plan, game_dir: &Path, game_arguments: &[String]) -> ExitCode {
+    match inject::launch(plan, game_dir, game_arguments) {
         Ok(launched) => {
             println!(
                 "{LOG_PREFIX} started pid {} with {} DLL(s) in it, every one of them confirmed \
@@ -111,7 +126,24 @@ fn run(plan: &Plan, game_dir: &Path) -> ExitCode {
                 launched.process_id,
                 plan.injections.len()
             );
-            ExitCode::SUCCESS
+            println!(
+                "{LOG_PREFIX} waiting for pid {} to exit, so whatever started this launcher \
+                 sees the session last as long as the game",
+                launched.process_id
+            );
+            match launched.wait() {
+                Some(code) => {
+                    println!("{LOG_PREFIX} the game exited with code {code}");
+                    // Passed on whole rather than squeezed into an `ExitCode`'s byte: a Windows
+                    // exit code is 32 bits, and an NTSTATUS crash code truncated to its low byte
+                    // would read as some unrelated small number.
+                    std::process::exit(i32::from_ne_bytes(code.to_ne_bytes()))
+                }
+                None => {
+                    println!("{LOG_PREFIX} could not wait on the game; its exit code is unknown");
+                    ExitCode::from(EXIT_FAILED)
+                }
+            }
         }
         Err(failure) => {
             println!("{LOG_PREFIX} FAILED: {failure}");
@@ -126,7 +158,7 @@ fn run(plan: &Plan, game_dir: &Path) -> ExitCode {
 /// The crate builds on Linux so `plan` can be unit-tested there; this arm exists so that build
 /// links, and says plainly that it is not the product.
 #[cfg(not(windows))]
-fn run(_plan: &Plan, _game_dir: &Path) -> ExitCode {
+fn run(_plan: &Plan, _game_dir: &Path, _game_arguments: &[String]) -> ExitCode {
     println!(
         "{LOG_PREFIX} this is a host build and cannot start a Windows process. The plan above is \
          what the Windows build would do; `--dry-run` says so without this warning."
