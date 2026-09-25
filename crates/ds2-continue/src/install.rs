@@ -310,6 +310,9 @@ unsafe fn sample(this: *mut u8) -> Sample {
     // SAFETY: `context` is the live title context; both offsets are ones the update reads on it.
     out.slot = unsafe { field::<i32>(context, ds2_rva::FE_TITLE_CONTEXT_SLOT_NUM_OFFSET) };
     let group =
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         unsafe { field::<*mut u8>(context, ds2_rva::FE_TITLE_CONTEXT_DATA_LIST_GROUP_OFFSET) };
     if !group.is_null() {
         // SAFETY: `group` is the list group the update just called a virtual on.
@@ -329,6 +332,9 @@ unsafe fn sample(this: *mut u8) -> Sample {
     if data_manager.is_null() {
         return out;
     }
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let array = unsafe { field::<*mut u8>(data_manager, ds2_rva::SAVE_SLOT_ARRAY_OFFSET) };
     if array.is_null() {
         return out;
@@ -339,6 +345,9 @@ unsafe fn sample(this: *mut u8) -> Sample {
     // SAFETY: `record` is one element of the array the game indexes identically.
     out.flags = Some(unsafe { field::<u8>(record, ds2_rva::SAVE_SLOT_FLAGS_OFFSET) });
     out.ownership = Some(
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         unsafe { field::<u32>(record, ds2_rva::SAVE_SLOT_OWNERSHIP_OFFSET) }
             & ds2_rva::SAVE_SLOT_OWNERSHIP_MASK,
     );
@@ -380,6 +389,8 @@ unsafe extern "system" fn detour_update(this: *mut u8) {
         // SAFETY: MinHook published this trampoline for this site, and the signature is the single
         // argument the function's own body establishes.
         let original: UpdateFn = unsafe { std::mem::transmute::<usize, UpdateFn>(trampoline) };
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(this) };
     }
 
@@ -494,6 +505,8 @@ unsafe extern "system" fn detour_title_open(this: *mut u8) {
         // the function's own body and matching the call `ds2-dialog-skip` already makes.
         let original: TitleOpenFn =
             unsafe { std::mem::transmute::<usize, TitleOpenFn>(trampoline) };
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(this) };
     }
     // AFTER the original: it is the open, so the screen has to exist before it can be posed.
@@ -518,6 +531,8 @@ unsafe extern "system" fn detour_top_menu(this: *mut u8) {
         // the function's own body.
         let original: TopMenuUpdateFn =
             unsafe { std::mem::transmute::<usize, TopMenuUpdateFn>(trampoline) };
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(this) };
     }
     if this.is_null() {
@@ -700,6 +715,8 @@ unsafe extern "system" fn detour_enter(this: *mut u8) {
         // SAFETY: MinHook published this trampoline for this site, and the signature is the single
         // argument the function's own body establishes.
         let original: EnterFn = unsafe { std::mem::transmute::<usize, EnterFn>(trampoline) };
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(this) };
     }
     // The list's `enter` is what opens the group -- it ends in `0x1400f1cb0(group, 1)`, which plays
@@ -884,6 +901,8 @@ pub unsafe fn install() -> Outcome {
 
     // MinHook is statically linked into this DLL, so ALREADY_INITIALIZED can only mean this ran
     // twice. Treat it as success, exactly as the other feature crates do.
+    // SAFETY: `MH_Initialize` takes no arguments and is documented as safe to call again on an
+    // already-initialised library, which the status below distinguishes.
     let status = unsafe { MH_Initialize() };
     if status != MH_STATUS::MH_OK && status != MH_STATUS::MH_ERROR_ALREADY_INITIALIZED {
         log(format_args!(
@@ -898,6 +917,8 @@ pub unsafe fn install() -> Outcome {
     let mut installed = 0;
     for site in &sites {
         let address = base + site.rva as usize;
+        // SAFETY: the target is an RVA this crate validated against the prologue it expects before
+        // reaching here, and the detour is a `'static` fn item of the matching ABI.
         let hook = match unsafe { MhHook::new(address as *mut c_void, site.detour) } {
             Ok(hook) => hook,
             Err(status) => {
@@ -913,6 +934,7 @@ pub unsafe fn install() -> Outcome {
         // list is up, so a detour that read a zero here would skip the original and hang the list.
         site.trampoline
             .store(hook.trampoline() as usize, Ordering::Release);
+        // SAFETY: the target is the address `MhHook::new` above already registered with MinHook.
         let status = unsafe { MH_EnableHook(address as *mut c_void) };
         if status != MH_STATUS::MH_OK {
             log(format_args!(

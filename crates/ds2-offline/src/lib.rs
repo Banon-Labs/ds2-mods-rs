@@ -55,8 +55,8 @@
 //!   the friends list are untouched. That is deliberate -- the target is FromSoftware's game
 //!   servers, not the platform -- but it means this crate is not a firewall and must not be
 //!   described as one.
-//! * **It does not suppress the network boot substates.** `0x20` SteamNetworkCheck, `0x39`
-//!   GameServerLogin and `0x44` Information still run; they now fail early instead of waiting on
+//! * **It does not suppress the network boot substates.** `0x20` `SteamNetworkCheck`, `0x39`
+//!   `GameServerLogin` and `0x44` Information still run; they now fail early instead of waiting on
 //!   a server. Their failure is a path the shipped game already has -- it is what produces
 //!   `FeSubStateTitleOnlineCheckFailWarn` and the "could not retrieve information" box, both of
 //!   which `ds2-dialog-skip` already answers. Removing the substates outright is

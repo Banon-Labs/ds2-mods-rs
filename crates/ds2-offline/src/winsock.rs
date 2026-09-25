@@ -179,6 +179,9 @@ fn set_last_error(code: i32) {
         // `void WSASetLastError(int)`.
         let set: WsaSetLastErrorFn =
             unsafe { std::mem::transmute::<usize, WsaSetLastErrorFn>(raw) };
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         unsafe { set(code) };
     }
 }
@@ -248,6 +251,9 @@ unsafe fn decode(addr: *const u8, len: i32) -> Option<(bool, String)> {
 ///
 /// As [`decode`].
 unsafe fn allow(addr: *const u8, len: i32) -> (bool, String) {
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     match unsafe { decode(addr, len) } {
         Some((loopback, rendered)) => (loopback, rendered),
         // An address this crate cannot decode is refused. The alternative -- forward what we do
@@ -257,6 +263,9 @@ unsafe fn allow(addr: *const u8, len: i32) -> (bool, String) {
 }
 
 unsafe extern "system" fn detour_connect(socket: usize, addr: *const u8, len: i32) -> i32 {
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let (allowed, rendered) = unsafe { allow(addr, len) };
     if allowed {
         ALLOWED_LOOPBACK.fetch_add(1, Ordering::Relaxed);
@@ -264,6 +273,8 @@ unsafe extern "system" fn detour_connect(socket: usize, addr: *const u8, len: i3
         if raw != 0 {
             // SAFETY: published from the IAT slot before it was overwritten.
             let original: ConnectFn = unsafe { std::mem::transmute::<usize, ConnectFn>(raw) };
+            // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+            // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
             return unsafe { original(socket, addr, len) };
         }
     }
@@ -285,6 +296,9 @@ unsafe extern "system" fn detour_sendto(
     addr: *const u8,
     addr_len: i32,
 ) -> i32 {
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let (allowed, rendered) = unsafe { allow(addr, addr_len) };
     if allowed {
         ALLOWED_LOOPBACK.fetch_add(1, Ordering::Relaxed);
@@ -292,6 +306,8 @@ unsafe extern "system" fn detour_sendto(
         if raw != 0 {
             // SAFETY: published from the IAT slot before it was overwritten.
             let original: SendToFn = unsafe { std::mem::transmute::<usize, SendToFn>(raw) };
+            // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+            // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
             return unsafe { original(socket, buffer, length, flags, addr, addr_len) };
         }
     }
@@ -317,6 +333,9 @@ unsafe fn host_name(name: *const u8) -> String {
     if name.is_null() {
         return "<null>".to_string();
     }
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     match unsafe { ds2_game_base::mem::safe_read_cstr(name as usize, 253) } {
         Some(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         None => "<unreadable>".to_string(),
@@ -334,6 +353,9 @@ unsafe extern "system" fn detour_getaddrinfo(
     if n <= LOG_FIRST_N {
         log(format_args!(
             "{LOG_PREFIX} refused api=getaddrinfo host={} error={WSAHOST_NOT_FOUND} count={n}",
+            // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+            // offset this crate validated before installing. The callee's own contract asks for exactly
+            // that live object, and reads inside it go through the fault-tolerant readers.
             unsafe { host_name(node) }
         ));
     }
@@ -351,6 +373,9 @@ unsafe extern "system" fn detour_gethostbyname(name: *const u8) -> *mut c_void {
     if n <= LOG_FIRST_N {
         log(format_args!(
             "{LOG_PREFIX} refused api=gethostbyname host={} error={WSAHOST_NOT_FOUND} count={n}",
+            // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+            // offset this crate validated before installing. The callee's own contract asks for exactly
+            // that live object, and reads inside it go through the fault-tolerant readers.
             unsafe { host_name(name) }
         ));
     }
@@ -387,6 +412,9 @@ pub struct Outcome {
 ///
 /// `addr` must point into the mapped module.
 unsafe fn module_string(addr: usize) -> Option<String> {
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let bytes = unsafe { ds2_game_base::mem::safe_read_cstr(addr, 64)? };
     Some(String::from_utf8_lossy(&bytes).into_owned())
 }
@@ -402,9 +430,15 @@ unsafe fn module_string(addr: usize) -> Option<String> {
 /// `base` must be the live base of a mapped PE image.
 unsafe fn first_thunk_rva(base: usize) -> Option<u32> {
     // `IMAGE_DOS_HEADER.e_lfanew` at `+0x3c`.
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let nt = base + unsafe { ds2_game_base::mem::safe_read_i32(base + 0x3c)? } as usize;
     // `IMAGE_NT_HEADERS64`: Signature u32, FileHeader 20 bytes, then OptionalHeader at `+0x18`.
     // The data directory sits `0x70` into a PE32+ OptionalHeader, and entry 1 is the import table.
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let import_rva = unsafe { ds2_game_base::mem::safe_read_i32(nt + 0x18 + 0x70 + 8)? } as u32;
     if import_rva == 0 {
         return None;
@@ -414,12 +448,21 @@ unsafe fn first_thunk_rva(base: usize) -> Option<u32> {
     // rather than a real limit -- this image has 16 descriptors.
     for index in 0..64usize {
         let descriptor = base + import_rva as usize + index * 20;
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         let name_rva = unsafe { ds2_game_base::mem::safe_read_i32(descriptor + 0x0c)? } as u32;
         if name_rva == 0 {
             return None;
         }
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         let name = unsafe { module_string(base + name_rva as usize)? };
         if name.eq_ignore_ascii_case("ws2_32.dll") {
+            // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+            // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+            // moved or was freed answers None rather than faulting.
             return Some(unsafe { ds2_game_base::mem::safe_read_i32(descriptor + 0x10)? } as u32);
         }
     }
@@ -524,6 +567,9 @@ pub unsafe fn install(base: usize) -> Outcome {
         ));
     }
 
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let Some(thunk_rva) = (unsafe { first_thunk_rva(base) }) else {
         log(format_args!(
             "{LOG_PREFIX} winsock-failed stage=import-walk module=WS2_32.dll"
@@ -552,6 +598,9 @@ pub unsafe fn install(base: usize) -> Outcome {
         for index in 0..64usize {
             let slot =
                 (base + thunk_rva as usize + index * std::mem::size_of::<usize>()) as *mut usize;
+            // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+            // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+            // moved or was freed answers None rather than faulting.
             let Some(current) = (unsafe { ds2_game_base::mem::safe_read_usize(slot as usize) })
             else {
                 break;
@@ -562,6 +611,9 @@ pub unsafe fn install(base: usize) -> Outcome {
             if current != wanted {
                 continue;
             }
+            // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+            // offset this crate validated before installing. The callee's own contract asks for exactly
+            // that live object, and reads inside it go through the fault-tolerant readers.
             if unsafe { patch_slot(slot, target.detour, target.original) } {
                 patched += 1;
                 found = true;

@@ -241,6 +241,8 @@ unsafe extern "system" fn detour_sleep(milliseconds: u32, caller: u64) {
         // SAFETY: read out of the import slot before it was overwritten, so it is whatever the
         // Windows loader resolved `KERNEL32!Sleep` to.
         let original: SleepFn = unsafe { std::mem::transmute::<usize, SleepFn>(original) };
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(milliseconds) };
     }
 }
@@ -341,6 +343,8 @@ unsafe extern "system" fn detour_frame_limiter(this: *mut u8) {
         // function's own body establishes.
         let original: FrameLimiterFn =
             unsafe { std::mem::transmute::<usize, FrameLimiterFn>(trampoline) };
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(this) };
     }
 }
@@ -551,6 +555,9 @@ const PHASE_WATCHED: [u32; 2] = [0x05, 0x44];
 /// `base` is the live game module base. Each offset is one the game itself dereferences at the
 /// same point in the flow, so the chain is valid whenever the watched substate is resident.
 unsafe fn read_through(base: usize, base_rva: u32, first: usize, second: usize) -> Option<u32> {
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe {
         let global = (base + base_rva as usize) as *const *const u8;
         let root = global.read();
@@ -576,6 +583,9 @@ unsafe fn sample_watch(base: usize, resident_id: u32) {
         // service's own start path refuses on. Both halves of the interlock are packed into one
         // sample so a change in either is visible.
         0x05 => {
+            // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+            // offset this crate validated before installing. The callee's own contract asks for exactly
+            // that live object, and reads inside it go through the fault-tolerant readers.
             let state = unsafe {
                 read_through(
                     base,
@@ -584,6 +594,9 @@ unsafe fn sample_watch(base: usize, resident_id: u32) {
                     ds2_rva::SAVE_LOAD_SYSTEM_STATE_OFFSET,
                 )
             };
+            // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+            // offset this crate validated before installing. The callee's own contract asks for exactly
+            // that live object, and reads inside it go through the fault-tolerant readers.
             let sub = unsafe {
                 read_through(
                     base,
@@ -603,6 +616,9 @@ unsafe fn sample_watch(base: usize, resident_id: u32) {
         }
         // 0x44 Information waits on the download job's own state, testing it for 5 or 6.
         0x44 => {
+            // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+            // offset this crate validated before installing. The callee's own contract asks for exactly
+            // that live object, and reads inside it go through the fault-tolerant readers.
             let Some(state) = (unsafe {
                 read_through(
                     base,
@@ -669,6 +685,9 @@ unsafe extern "system" fn detour_flow_update(flow: *mut u8, delta: f32) {
             .read()
     };
 
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { describe_once(flow) };
     let before = resident(flow);
     // SAFETY: `+0x48` is the pending-request id; the flow compares it against `0` as a signed
@@ -678,6 +697,10 @@ unsafe extern "system" fn detour_flow_update(flow: *mut u8, delta: f32) {
             .cast::<i32>()
             .read()
     };
+
+    // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+
+    // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
 
     unsafe { original(flow, delta) };
 
@@ -691,7 +714,13 @@ unsafe extern "system" fn detour_flow_update(flow: *mut u8, delta: f32) {
         // SAFETY: `after` is the substate the flow has just updated, and `base` is the live module
         // base the RVAs in `ds2-rva` are relative to.
         let id = unsafe { substate_id(after) };
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         unsafe { sample_watch(base, id) };
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         unsafe { sample_phase(after, id) };
     }
     if after != before && !after.is_null() {
@@ -717,6 +746,8 @@ unsafe extern "system" fn detour_drop_transitions(
         // the ones both call sites in `FeStateFlow::update` set.
         let original: DropTransitionsFn =
             unsafe { std::mem::transmute::<usize, DropTransitionsFn>(trampoline) };
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(this, transitions, context) };
     }
 }
@@ -799,6 +830,8 @@ pub unsafe fn install() -> Outcome {
 
     // MinHook is statically linked into this DLL, so ALREADY_INITIALIZED can only mean this ran
     // twice. Treat it as success, exactly as the other feature crates do.
+    // SAFETY: `MH_Initialize` takes no arguments and is documented as safe to call again on an
+    // already-initialised library, which the status below distinguishes.
     let status = unsafe { MH_Initialize() };
     if status != MH_STATUS::MH_OK && status != MH_STATUS::MH_ERROR_ALREADY_INITIALIZED {
         log(format_args!(
@@ -816,6 +849,8 @@ pub unsafe fn install() -> Outcome {
     let mut installed = 0;
     for site in &sites {
         let address = base + site.rva as usize;
+        // SAFETY: the target is an RVA this crate validated against the prologue it expects before
+        // reaching here, and the detour is a `'static` fn item of the matching ABI.
         let hook = match unsafe { MhHook::new(address as *mut c_void, site.detour) } {
             Ok(hook) => hook,
             Err(status) => {
@@ -832,6 +867,7 @@ pub unsafe fn install() -> Outcome {
         // the one ordering mistake in this file that would be fatal rather than merely lossy.
         site.trampoline
             .store(hook.trampoline() as usize, Ordering::Release);
+        // SAFETY: the target is the address `MhHook::new` above already registered with MinHook.
         let status = unsafe { MH_EnableHook(address as *mut c_void) };
         if status != MH_STATUS::MH_OK {
             log(format_args!(

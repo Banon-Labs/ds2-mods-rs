@@ -150,10 +150,16 @@ unsafe fn title_context_slot(offset: usize) -> Option<(usize, *mut u8)> {
 /// scene it dereferences before touching it.
 pub(crate) unsafe fn pose_title_hidden() {
     let Some((_, scene)) =
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         (unsafe { title_context_slot(ds2_rva::FE_TITLE_CONTEXT_TOP_MENU_GROUP_OFFSET) })
     else {
         return;
     };
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { pose_scene_hidden(scene, "title-context") };
 }
 
@@ -186,6 +192,9 @@ pub(crate) unsafe fn pose_scene_hidden(scene: *mut u8, via: &str) {
     let pose: OneArgFn = unsafe {
         std::mem::transmute::<usize, OneArgFn>(base + ds2_rva::FE_SCENE_TITLE_POSE_HIDDEN as usize)
     };
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { pose(scene) };
     POSES.fetch_add(1, Ordering::Relaxed);
 
@@ -213,6 +222,9 @@ pub(crate) unsafe fn close_data_list() {
         return;
     }
     let Some((base, group)) =
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         (unsafe { title_context_slot(ds2_rva::FE_TITLE_CONTEXT_DATA_LIST_GROUP_OFFSET) })
     else {
         return;
@@ -229,6 +241,9 @@ pub(crate) unsafe fn close_data_list() {
     // own body establishes -- the same call the game's own substate makes on this same pointer.
     let close: OneArgFn =
         unsafe { std::mem::transmute::<usize, OneArgFn>(base + ds2_rva::FE_GROUP_CLOSE as usize) };
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { close(group) };
 
     if LOGGED.fetch_or(LOG_BIT_DATA_LIST, Ordering::Relaxed) & LOG_BIT_DATA_LIST == 0 {

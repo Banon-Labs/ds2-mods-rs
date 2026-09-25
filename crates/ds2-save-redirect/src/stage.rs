@@ -234,6 +234,10 @@ fn read_source(path: &Path) -> Result<(&'static str, Vec<u8>), StageError> {
 /// Zero entries is reported as [`Sl2Error::NoSteamId`]'s structural sibling rather than accepted: a
 /// container with no characters in it is a valid BND4 and a useless save, and a caller asking "can I
 /// load this" wants a no.
+/// # Errors
+///
+/// The [`StageError`] for whichever check failed: the extension gate, reading or unwrapping the
+/// source, the container's own structure, or `EmptyContainer` when it holds no characters.
 pub fn validate_source(source: &Path) -> Result<(&'static str, usize), StageError> {
     let (kind, save) = read_source(source)?;
     let entries = ds2_sl2_core::validate(&save).map_err(StageError::Sl2)?;
@@ -247,6 +251,10 @@ pub fn validate_source(source: &Path) -> Result<(&'static str, usize), StageErro
 ///
 /// `steam_id` is the running account's, sixteen hex characters, exactly as the game spells it when
 /// it builds its own folder name.
+/// # Errors
+///
+/// The [`StageError`] for whichever step failed: reading the source, rebinding the Steam ID, or
+/// writing into `staging_root`.
 pub fn stage(source: &Path, steam_id: &str, staging_root: &Path) -> Result<Staged, StageError> {
     let (kind, mut save) = read_source(source)?;
     let rebound = ds2_sl2_core::rebind(&mut save, steam_id).map_err(StageError::Sl2)?;

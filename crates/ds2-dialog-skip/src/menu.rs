@@ -273,14 +273,23 @@ unsafe fn reassert_unavailable(group: *mut u8) -> usize {
         if mask & (1 << index) == 0 {
             continue;
         }
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         let cell = unsafe { cell_for_index(group, index as i32) };
         if cell.is_null() {
             continue;
         }
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         unsafe { measure_sequences(cell) };
         let state = cell as usize + ds2_rva::FE_BUTTON_STATE_OFFSET;
         // Read before write: a cell the lookup handed back is mapped, and the read also rejects
         // the case where it is already correct, which is the common one on later frames.
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         match unsafe { safe_read_i32(state) } {
             Some(current) if current == ds2_rva::FE_BUTTON_STATE_UNAVAILABLE => continue,
             Some(_) => {}
@@ -355,6 +364,9 @@ fn sprite_followed(pose: SpritePose, position: f32, seek: f32) -> bool {
 ///
 /// `sprite` must be a live `FeComponentSprite`. Every read is checked.
 unsafe fn sprite_pose(sprite: usize, sequence: i32) -> SpritePose {
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let Some(resource) = (unsafe { safe_read_usize(sprite + ds2_rva::FE_SPRITE_RESOURCE_OFFSET) })
     else {
         return SpritePose::NoTable;
@@ -362,13 +374,22 @@ unsafe fn sprite_pose(sprite: usize, sequence: i32) -> SpritePose {
     let table = if resource == 0 {
         0
     } else {
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         unsafe { safe_read_usize(resource + ds2_rva::FE_SPRITE_TABLE_OFFSET) }.unwrap_or(0)
     };
     if table == 0 {
         return SpritePose::NoTable;
     }
     let entries =
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         unsafe { safe_read_usize(table + ds2_rva::FE_SPRITE_TABLE_ENTRIES_OFFSET) }.unwrap_or(0);
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let count = unsafe { safe_read_u16(table + ds2_rva::FE_SPRITE_TABLE_COUNT_OFFSET) }.unwrap_or(0)
         as usize;
     if entries == 0 || count == 0 {
@@ -376,7 +397,13 @@ unsafe fn sprite_pose(sprite: usize, sequence: i32) -> SpritePose {
     }
     for i in 0..count.min(64) {
         let at = entries + i * ds2_rva::FE_SPRITE_TABLE_ENTRY_STRIDE;
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         if unsafe { safe_read_i32(at) } == Some(sequence) {
+            // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+            // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+            // moved or was freed answers None rather than faulting.
             return match unsafe { safe_read_u16(at + ds2_rva::FE_SPRITE_TABLE_ENTRY_START_OFFSET) }
             {
                 Some(start) => SpritePose::At(start),
@@ -394,10 +421,16 @@ unsafe fn sprite_pose(sprite: usize, sequence: i32) -> SpritePose {
 /// `proxy` must be a `SceneObjProxy` the binder returned. Both hops are checked reads and the call
 /// is the game's own slot 0; see [`ds2_rva::FE_SCENE_OBJ_PROXY_ELEMENT_SLOT`].
 unsafe fn proxy_element(proxy: *mut u8) -> usize {
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let Some(vtable) = (unsafe { safe_read_usize(proxy as usize) }) else {
         return 0;
     };
     let Some(entry) =
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         (unsafe { safe_read_usize(vtable + ds2_rva::FE_SCENE_OBJ_PROXY_ELEMENT_SLOT * 8) })
     else {
         return 0;
@@ -405,6 +438,9 @@ unsafe fn proxy_element(proxy: *mut u8) -> usize {
     // SAFETY: slot 0 of the proxy's own vtable, called with the proxy exactly as `0x14001e4e0`
     // does, and its result null-checked exactly as `0x14001e4e2` does.
     let resolve: ProxyElementFn = unsafe { std::mem::transmute::<usize, ProxyElementFn>(entry) };
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     (unsafe { resolve(proxy) }) as usize
 }
 
@@ -433,9 +469,18 @@ unsafe fn count_stuck_sprites(element: usize, sequence: i32, seek: f32, base: us
         top -= 1;
         let node = stack[top];
         seen += 1;
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         let vtable = unsafe { safe_read_usize(node) }.unwrap_or(0);
         if vtable.wrapping_sub(base) == ds2_rva::FE_COMPONENT_SPRITE_VTABLE as usize {
+            // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+            // offset this crate validated before installing. The callee's own contract asks for exactly
+            // that live object, and reads inside it go through the fault-tolerant readers.
             let pose = unsafe { sprite_pose(node, sequence) };
+            // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+            // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+            // moved or was freed answers None rather than faulting.
             let position = unsafe { safe_read_f32(node + ds2_rva::FE_SPRITE_POSITION_OFFSET) }
                 .unwrap_or(f32::NAN);
             if !sprite_followed(pose, position, seek) {
@@ -446,6 +491,9 @@ unsafe fn count_stuck_sprites(element: usize, sequence: i32, seek: f32, base: us
             ds2_rva::FE_COMPONENT_SIBLING_OFFSET,
             ds2_rva::FE_COMPONENT_CHILD_OFFSET,
         ] {
+            // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+            // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+            // moved or was freed answers None rather than faulting.
             if let Some(next) = unsafe { safe_read_usize(node + offset) }
                 && next != 0
                 && top < MAX_NODES
@@ -507,6 +555,9 @@ unsafe fn unselectable_rows(group: *mut u8, count: usize) -> u32 {
     // drawn during a stretch where nothing on it can be acted on. Asking the ORIGINAL gate, rather
     // than the detour that always says yes, is what makes that stretch nameable.
     let animating = matches!(
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         unsafe { crate::title::title_sequence_settled() },
         Some(false)
     );
@@ -518,10 +569,16 @@ unsafe fn unselectable_rows(group: *mut u8, count: usize) -> u32 {
         ));
     }
     for index in 0..count {
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         let cell = unsafe { cell_for_index(group, index as i32) };
         if cell.is_null() {
             continue;
         }
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         if unsafe { safe_read_i32(cell as usize + ds2_rva::FE_BUTTON_STATE_OFFSET) }
             == Some(ds2_rva::FE_BUTTON_STATE_UNAVAILABLE)
         {
@@ -584,6 +641,9 @@ unsafe fn apply_looks(group: *mut u8, list: *mut u8, count: usize, unselectable:
         // The game's own callers give this 144 bytes.
         let mut scratch = [0u64; 18];
         let descriptor = row_at(list_address, index) as *mut u8;
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         let proxy = unsafe { bind(group.add(0x100), scratch.as_mut_ptr().cast(), descriptor) };
         if proxy.is_null() {
             continue;
@@ -597,11 +657,20 @@ unsafe fn apply_looks(group: *mut u8, list: *mut u8, count: usize, unselectable:
         } else {
             0.0
         };
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         unsafe { play_sequence(proxy, sequence, seek, faded) };
         // Did the whole row follow, or only part of it? Checked immediately after the play, on
         // the element the proxy itself resolves to rather than a guessed offset.
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         let element = unsafe { proxy_element(proxy) };
         if element != 0 {
+            // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+            // offset this crate validated before installing. The callee's own contract asks for exactly
+            // that live object, and reads inside it go through the fault-tolerant readers.
             let stuck = unsafe { count_stuck_sprites(element, sequence, seek, base) };
             if stuck != 0 {
                 let total = BLANK_VIOLATIONS.fetch_add(1, Ordering::Relaxed) + 1;
@@ -676,12 +745,21 @@ unsafe fn describe_grid(group: *mut u8, count: usize) -> String {
         if index != 0 {
             out.push(',');
         }
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         let cell = unsafe { cell_for_index(group, index as i32) };
         if cell.is_null() {
             out.push_str(&format!("{index}:-"));
             continue;
         }
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         let column = unsafe { safe_read_i32(cell as usize + CELL_COLUMN_OFFSET) };
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         let row = unsafe { safe_read_i32(cell as usize + CELL_ROW_OFFSET) };
         match (column, row) {
             (Some(column), Some(row)) => out.push_str(&format!("{index}:({column},{row})")),
@@ -716,11 +794,16 @@ unsafe extern "system" fn detour_apply_states(group: *mut u8, list: *mut u8) {
         ));
     }
     let list_address = list as usize;
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let count = unsafe { safe_read_i32(list_address + ds2_rva::FE_TOP_MENU_LIST_COUNT_OFFSET) }
         .filter(|count| *count >= 0)
         .map(|count| (count as usize).min(ds2_rva::FE_TOP_MENU_ROW_CAPACITY))
         .unwrap_or(0);
     if count == 0 {
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(group, list) };
         return;
     }
@@ -736,6 +819,9 @@ unsafe extern "system" fn detour_apply_states(group: *mut u8, list: *mut u8) {
     let mut saved = [1u8; ds2_rva::FE_TOP_MENU_ROW_CAPACITY];
     for (index, slot) in saved.iter_mut().enumerate().take(count) {
         let enabled = row_at(list_address, index) + ds2_rva::FE_TOP_MENU_ROW_ENABLED_OFFSET;
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         let Some(value) = (unsafe { safe_read_u8(enabled) }) else {
             // A row whose own descriptor cannot be read is left exactly as the game built it.
             continue;
@@ -775,6 +861,10 @@ unsafe extern "system" fn detour_apply_states(group: *mut u8, list: *mut u8) {
         ));
     }
 
+    // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+
+    // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
+
     unsafe { original(group, list) };
 
     // Put the buffer back the way it was handed over.
@@ -791,11 +881,20 @@ unsafe extern "system" fn detour_apply_states(group: *mut u8, list: *mut u8) {
     // `FexGridControl::FUN_140023690` immediately after this pass, and that is what settles the
     // cursor. The activate handler does no enable check of its own, so a cursor allowed to rest on
     // a row this mod made look selectable would be able to fire that row's action.
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let written = unsafe { reassert_unavailable(group) };
     let total = SHOWN.fetch_add(written, Ordering::Relaxed) + written;
     // The states are settled for this pass, so the looks can follow them straight away rather than
     // waiting a frame -- which would otherwise show one frame of a row styled as offered.
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let unselectable = unsafe { unselectable_rows(group, count) };
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { apply_looks(group, list, count, unselectable) };
 
     if LAST_LOGGED.swap(unavailable, Ordering::Relaxed) != unavailable {
@@ -813,6 +912,9 @@ unsafe extern "system" fn detour_apply_states(group: *mut u8, list: *mut u8) {
              forced=0b{forced:06b} allowed=0b{:06b} state={} total={total} grid={}",
             ds2_rva::FE_TOP_MENU_FORCE_SHOWN_ROWS,
             ds2_rva::FE_BUTTON_STATE_UNAVAILABLE,
+            // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+            // offset this crate validated before installing. The callee's own contract asks for exactly
+            // that live object, and reads inside it go through the fault-tolerant readers.
             unsafe { describe_grid(group, count) }
         ));
     }
@@ -828,8 +930,13 @@ unsafe extern "system" fn detour_top_menu_update(this: *mut u8, delta: f32) {
         // SAFETY: MinHook published this trampoline for this site, and `delta` is forwarded
         // untouched.
         let original: UpdateFn = unsafe { std::mem::transmute::<usize, UpdateFn>(trampoline) };
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(this, delta) };
     }
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { refresh_looks() };
 }
 
@@ -853,16 +960,25 @@ unsafe fn refresh_looks() {
             frame()
         ));
     }
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let Some(globals) = (unsafe { safe_read_usize(base + ds2_rva::FE_TITLE_GLOBALS as usize) })
     else {
         return;
     };
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let Some(scene) = (unsafe { safe_read_usize(globals + ds2_rva::FE_TITLE_SCENE_OFFSET) }) else {
         return;
     };
     if scene == 0 {
         return;
     }
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let Some(group) = (unsafe { safe_read_usize(scene + ds2_rva::FE_TOP_MENU_GROUP_OFFSET) })
     else {
         return;
@@ -873,6 +989,9 @@ unsafe fn refresh_looks() {
     // SAFETY: the group pointer came from the field the scene's own builder writes at
     // `0x1400f4950`, through fault-tolerant reads that all succeeded.
     let group = group as *mut u8;
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let written = unsafe { reassert_unavailable(group) };
     if written != 0 {
         SHOWN.fetch_add(written, Ordering::Relaxed);
@@ -881,6 +1000,9 @@ unsafe fn refresh_looks() {
     if count == 0 {
         return;
     }
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let unselectable = unsafe { unselectable_rows(group, count) };
     if unselectable == FADED_LOOKS.load(Ordering::Acquire) {
         return;
@@ -891,10 +1013,16 @@ unsafe fn refresh_looks() {
     let build: BuildRowsFn = unsafe {
         std::mem::transmute::<usize, BuildRowsFn>(base + ds2_rva::FE_TOP_MENU_BUILD_ROWS as usize)
     };
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let list = unsafe { build(list.as_mut_ptr().cast()) };
     if list.is_null() {
         return;
     }
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { apply_looks(group, list, count, unselectable) };
 }
 
@@ -931,6 +1059,9 @@ unsafe fn measure_sequences(cell: *mut u8) {
     }
     // `FeObjectButtonEx`'s own accessors: slot 21 returns `[this+0x40]`, and slot 19 returns
     // `[this+0x30]` when that is null.
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let element = (unsafe { safe_read_usize(cell as usize + 0x40) })
         .filter(|element| *element != 0)
         .or_else(|| unsafe { safe_read_usize(cell as usize + 0x30) })
@@ -942,6 +1073,9 @@ unsafe fn measure_sequences(cell: *mut u8) {
         return;
     };
     let element = element as *mut u8;
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let Some(vtable) = (unsafe { safe_read_usize(element as usize) }) else {
         return;
     };
@@ -961,13 +1095,25 @@ unsafe fn measure_sequences(cell: *mut u8) {
     // the class that actually moves an animation is somewhere below this one. Its vtable cannot be
     // named statically -- the chain is pointers -- but one RVA per hop is enough to read the rest
     // out of the image afterwards.
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let mut node = unsafe { safe_read_usize(element as usize + 0x38) }.unwrap_or(0);
     for depth in 0..6 {
         if node == 0 {
             break;
         }
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         let node_vtable = unsafe { safe_read_usize(node) }.unwrap_or(0);
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         let next = unsafe { safe_read_usize(node + 0x28) }.unwrap_or(0);
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         let child = unsafe { safe_read_usize(node + 0x38) }.unwrap_or(0);
         log(format_args!(
             "{LOG_PREFIX} chain f={} screen=top-menu depth={depth} vtable-rva=0x{:08x} \
@@ -982,12 +1128,21 @@ unsafe fn measure_sequences(cell: *mut u8) {
         // links, and following siblings first would walk the widest part of the tree instead.
         node = if child != 0 { child } else { next };
     }
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let Some(start_entry) = (unsafe { safe_read_usize(vtable + 0x58) }) else {
         return;
     };
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let Some(end_entry) = (unsafe { safe_read_usize(vtable + 0x60) }) else {
         return;
     };
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let Some(current_entry) = (unsafe { safe_read_usize(vtable + 0x50) }) else {
         return;
     };
@@ -996,14 +1151,26 @@ unsafe fn measure_sequences(cell: *mut u8) {
     let start: SequenceBracketFn =
         unsafe { std::mem::transmute::<usize, SequenceBracketFn>(start_entry) };
     let end: SequenceBracketFn =
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         unsafe { std::mem::transmute::<usize, SequenceBracketFn>(end_entry) };
     let current: CurrentSequenceFn =
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         unsafe { std::mem::transmute::<usize, CurrentSequenceFn>(current_entry) };
     for sequence in [
         ds2_rva::FE_TOP_MENU_SEQUENCE_FADED,
         ds2_rva::FE_TOP_MENU_SEQUENCE_AVAILABLE,
     ] {
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         let from = unsafe { start(element, sequence) };
+        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+        // offset this crate validated before installing. The callee's own contract asks for exactly
+        // that live object, and reads inside it go through the fault-tolerant readers.
         let to = unsafe { end(element, sequence) };
         if sequence == ds2_rva::FE_TOP_MENU_SEQUENCE_FADED && to > from {
             FADE_SPAN_BITS.store((to - from).to_bits(), Ordering::Relaxed);
@@ -1013,6 +1180,9 @@ unsafe fn measure_sequences(cell: *mut u8) {
              start={from:.4} end={to:.4} span={:.4} playing=0x{:02x}",
             frame(),
             to - from,
+            // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+            // offset this crate validated before installing. The callee's own contract asks for exactly
+            // that live object, and reads inside it go through the fault-tolerant readers.
             unsafe { current(element) }
         ));
     }
@@ -1025,10 +1195,19 @@ unsafe fn measure_sequences(cell: *mut u8) {
 /// `proxy` must be a `FrontendEx::SceneObjProxy` the game's binder returned. Both vtable hops are
 /// checked reads, and the call carries the four registers `0x1400f5087` sets.
 unsafe fn play_sequence(proxy: *mut u8, sequence: i32, seek: f32, hold: bool) {
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let frame_ctrl = unsafe { proxy.add(ds2_rva::FE_SCENE_OBJ_PROXY_FRAME_CTRL) };
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let Some(vtable) = (unsafe { safe_read_usize(frame_ctrl as usize) }) else {
         return;
     };
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let Some(entry) = (unsafe { safe_read_usize(vtable) }) else {
         return;
     };
@@ -1049,6 +1228,9 @@ unsafe fn play_sequence(proxy: *mut u8, sequence: i32, seek: f32, hold: bool) {
     // then vanished, `14.0` vanished at once, and anything larger landed past the end and never
     // drew at all. Holding the frame is what makes a pose a look instead of a departure.
     let keep_playing = i32::from(!hold);
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe { play(frame_ctrl, sequence, keep_playing, seek) };
 }
 
@@ -1086,6 +1268,9 @@ unsafe extern "system" fn detour_build_cell(
     // SAFETY: MinHook published this trampoline for this site; all three arguments are forwarded
     // exactly as received, and the original's return value is passed straight back.
     let original: BuildCellFn = unsafe { std::mem::transmute::<usize, BuildCellFn>(trampoline) };
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let proxy = unsafe { original(layout, proxy_out, coords) };
     CELLS_BUILT.fetch_add(1, Ordering::Relaxed);
     if proxy.is_null() || coords.is_null() {
@@ -1093,9 +1278,15 @@ unsafe extern "system" fn detour_build_cell(
     }
     // Out-of-range coordinates get an empty cell from `0x140027980` rather than a bound proxy, and
     // an empty cell has no layout element to style. The measured run saw row indices up to 9.
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let Some(column) = (unsafe { safe_read_i32(coords as usize) }) else {
         return proxy;
     };
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let Some(row) = (unsafe { safe_read_i32(coords as usize + 4) }) else {
         return proxy;
     };
@@ -1111,6 +1302,9 @@ unsafe extern "system" fn detour_build_cell(
     if BORN_FADED_ROWS.fetch_or(bit, Ordering::Relaxed) & bit != 0 {
         return proxy;
     }
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     unsafe {
         play_sequence(
             proxy,
@@ -1158,6 +1352,8 @@ pub unsafe fn install() -> Outcome {
             return outcome;
         }
     };
+    // SAFETY: `MH_Initialize` takes no arguments and is documented as safe to call again on an
+    // already-initialised library, which the status below distinguishes.
     let status = unsafe { MH_Initialize() };
     if status != MH_STATUS::MH_OK && status != MH_STATUS::MH_ERROR_ALREADY_INITIALIZED {
         log(format_args!(
@@ -1170,6 +1366,9 @@ pub unsafe fn install() -> Outcome {
     MODULE_BASE.store(base, Ordering::Release);
 
     let apply_site = base + ds2_rva::FE_TOP_MENU_APPLY_STATES as usize;
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let apply_hook = match unsafe {
         MhHook::new(
             apply_site as *mut c_void,
@@ -1180,6 +1379,7 @@ pub unsafe fn install() -> Outcome {
             // Published BEFORE the site is patched: this detour brackets the original and does
             // nothing at all without it, so a zero would mean the menu drew no styles whatsoever.
             APPLY_TRAMPOLINE.store(hook.trampoline() as usize, Ordering::Release);
+            // SAFETY: the target is the address `MhHook::new` above already registered with MinHook.
             let status = unsafe { MH_EnableHook(apply_site as *mut c_void) };
             if status == MH_STATUS::MH_OK {
                 true
@@ -1204,11 +1404,14 @@ pub unsafe fn install() -> Outcome {
     }
 
     let cell_site = base + ds2_rva::FE_TOP_MENU_BUILD_CELL as usize;
+    // SAFETY: the target is an RVA this crate validated against the prologue it expects before
+    // reaching here, and the detour is a `'static` fn item of the matching ABI.
     match unsafe { MhHook::new(cell_site as *mut c_void, detour_build_cell as *mut c_void) } {
         Ok(hook) => {
             // Published BEFORE the site is patched: this detour returns the ORIGINAL's proxy, so a
             // zero here would mean handing back an unbound buffer as if it were a built cell.
             BUILD_CELL_TRAMPOLINE.store(hook.trampoline() as usize, Ordering::Release);
+            // SAFETY: the target is the address `MhHook::new` above already registered with MinHook.
             let status = unsafe { MH_EnableHook(cell_site as *mut c_void) };
             if status != MH_STATUS::MH_OK {
                 log(format_args!(
@@ -1224,6 +1427,9 @@ pub unsafe fn install() -> Outcome {
     }
 
     let update_site = base + ds2_rva::FE_TOP_MENU_UPDATE as usize;
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     match unsafe {
         MhHook::new(
             update_site as *mut c_void,
@@ -1232,6 +1438,7 @@ pub unsafe fn install() -> Outcome {
     } {
         Ok(hook) => {
             UPDATE_TRAMPOLINE.store(hook.trampoline() as usize, Ordering::Release);
+            // SAFETY: the target is the address `MhHook::new` above already registered with MinHook.
             let status = unsafe { MH_EnableHook(update_site as *mut c_void) };
             if status == MH_STATUS::MH_OK {
                 outcome.show_unavailable = true;

@@ -87,7 +87,8 @@ pub use menu::{Outcome as MenuOutcome, install as install_menu};
 #[cfg(windows)]
 pub use title::{Outcome as TitleOutcome, Request as TitleRequest, install as install_title};
 
-/// Prefix on every line this crate writes to the loader log. Distinct from `ds2-loader:` and from
-/// `ds2-intro-skip:` so a reader can tell which component spoke, and so a run that boots badly can
-/// be attributed to one feature rather than to "the mod".
+/// Prefix on every line this crate writes to the loader log.
+///
+/// Distinct from `ds2-loader:` and from `ds2-intro-skip:` so a reader can tell which component
+/// spoke, and so a run that boots badly can be attributed to one feature rather than to "the mod".
 pub const LOG_PREFIX: &str = "ds2-dialog-skip:";

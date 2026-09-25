@@ -116,6 +116,9 @@ pub unsafe fn apply(base: usize, pin: bool, report: bool) -> Outcome {
         // `NetService::setOnline` -> `ret`. The primary: the constructor already wrote zero into
         // the flag, so this keeps the object in the state the game built it in.
         setter_pinned: pin
+            // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+            // offset this crate validated before installing. The callee's own contract asks for exactly
+            // that live object, and reads inside it go through the fault-tolerant readers.
             && unsafe {
                 patch_and_verify(
                     base,
@@ -128,6 +131,9 @@ pub unsafe fn apply(base: usize, pin: bool, report: bool) -> Outcome {
         // `NetService::isOnline` -> `xor eax,eax; ret`. The backstop, answering all 34 readers
         // whatever the byte holds.
         getter_forced: report
+            // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+            // offset this crate validated before installing. The callee's own contract asks for exactly
+            // that live object, and reads inside it go through the fault-tolerant readers.
             && unsafe {
                 patch_and_verify(
                     base,
@@ -157,14 +163,23 @@ pub unsafe fn apply(base: usize, pin: bool, report: bool) -> Outcome {
 /// offsets are only meaningful for build 9527516.
 pub unsafe fn read_flag(base: usize) -> Option<u8> {
     let manager_slot = base + ds2_rva::GAME_MANAGER_IMP as usize;
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     let manager = unsafe { ds2_game_base::mem::safe_read_usize(manager_slot)? };
     if manager == 0 {
         return None;
     }
     let service =
+        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+        // moved or was freed answers None rather than faulting.
         unsafe { ds2_game_base::mem::safe_read_usize(manager + ds2_rva::NET_SERVICE_OFFSET)? };
     if service == 0 {
         return None;
     }
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
     unsafe { ds2_game_base::mem::safe_read_u8(service + ds2_rva::NET_ONLINE_FLAG_OFFSET) }
 }

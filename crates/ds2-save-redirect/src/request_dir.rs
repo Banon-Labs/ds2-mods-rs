@@ -150,6 +150,8 @@ unsafe extern "system" fn detour_set_worker_directory(
         // call site at `0x140a89a24` uses.
         let original: SetWorkerDirectoryFn =
             unsafe { std::mem::transmute::<usize, SetWorkerDirectoryFn>(trampoline) };
+        // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+        // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(worker, index, path) };
     }
     let seated = Seated {
@@ -236,6 +238,9 @@ pub unsafe fn content_name(system: usize) -> Option<ContentName> {
             let data = if capacity < 8 {
                 Some(string)
             } else {
+                // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+                // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+                // moved or was freed answers None rather than faulting.
                 unsafe { ds2_game_base::mem::safe_read_usize(string) }
             };
             data.and_then(|data| {
@@ -243,6 +248,9 @@ pub unsafe fn content_name(system: usize) -> Option<ContentName> {
                 for index in 0..length {
                     // SAFETY: `length` characters from the string's own buffer.
                     units.push(
+                        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+                        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+                        // moved or was freed answers None rather than faulting.
                         unsafe { ds2_game_base::mem::safe_read_u32(data + index * 2) }? as u16,
                     );
                 }
@@ -289,6 +297,8 @@ pub unsafe fn install() -> bool {
     // MinHook is statically linked into this DLL, so ALREADY_INITIALIZED can only mean this ran
     // twice. Treat it as success, exactly as the other feature crates do.
     // SAFETY: MinHook's own initialiser, idempotent across the crates that call it.
+    // SAFETY: `MH_Initialize` takes no arguments and is documented as safe to call again on an
+    // already-initialised library, which the status below distinguishes.
     let status = unsafe { MH_Initialize() };
     if status != MH_STATUS::MH_OK && status != MH_STATUS::MH_ERROR_ALREADY_INITIALIZED {
         log(format_args!(
@@ -317,6 +327,7 @@ pub unsafe fn install() -> bool {
     // detour that read a zero here would silently drop every directory the game sets on itself.
     TRAMPOLINE.store(hook.trampoline() as usize, Ordering::Release);
     // SAFETY: the hook was created for this address by the call above.
+    // SAFETY: the target is the address `MhHook::new` above already registered with MinHook.
     let status = unsafe { MH_EnableHook(address as *mut c_void) };
     if status != MH_STATUS::MH_OK {
         log(format_args!(

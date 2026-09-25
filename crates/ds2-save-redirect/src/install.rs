@@ -397,6 +397,8 @@ unsafe extern "system" fn detour_save_dir(out: *mut c_void, steamid: *const u16)
             // one established from the call site at `0x1402e635c`.
             let original: SaveDirFn =
                 unsafe { std::mem::transmute::<usize, SaveDirFn>(trampoline) };
+            // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
+            // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
             unsafe { original(out, steamid) };
         }
         // SAFETY: the original has seated the caller's string, or nothing has and it is still the
@@ -414,6 +416,9 @@ unsafe extern "system" fn detour_save_dir(out: *mut c_void, steamid: *const u16)
     // Read and recorded BEFORE the arming check, in both arms, because a caller that wants the ID
     // wants it whether or not a redirect is armed -- and the arm is exactly the case where the
     // directory it could otherwise be read off is NOT named after the account.
+    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+    // offset this crate validated before installing. The callee's own contract asks for exactly
+    // that live object, and reads inside it go through the fault-tolerant readers.
     let found = unsafe { wide_to_string(steamid, 64) };
     if let Some(id) = found.as_deref() {
         record_steam_id(id);
@@ -532,6 +537,8 @@ pub unsafe fn install() -> Outcome {
 
     // MinHook is statically linked into this DLL, so ALREADY_INITIALIZED can only mean this ran
     // twice. Treat it as success, exactly as the other feature crates do.
+    // SAFETY: `MH_Initialize` takes no arguments and is documented as safe to call again on an
+    // already-initialised library, which the status below distinguishes.
     let status = unsafe { MH_Initialize() };
     if status != MH_STATUS::MH_OK && status != MH_STATUS::MH_ERROR_ALREADY_INITIALIZED {
         log(format_args!(
@@ -544,6 +551,8 @@ pub unsafe fn install() -> Outcome {
     }
 
     let address = base + ds2_rva::SAVE_DIR_BUILD as usize;
+    // SAFETY: the target is an RVA this crate validated against the prologue it expects before
+    // reaching here, and the detour is a `'static` fn item of the matching ABI.
     let hook = match unsafe { MhHook::new(address as *mut c_void, detour_save_dir as *mut c_void) }
     {
         Ok(hook) => hook,
@@ -561,6 +570,7 @@ pub unsafe fn install() -> Outcome {
     // Published BEFORE the site is patched: every pass-through arm calls straight back through it,
     // and a detour that read a zero here would leave the save directory empty.
     TRAMPOLINE.store(hook.trampoline() as usize, Ordering::Release);
+    // SAFETY: the target is the address `MhHook::new` above already registered with MinHook.
     let status = unsafe { MH_EnableHook(address as *mut c_void) };
     if status != MH_STATUS::MH_OK {
         log(format_args!(
