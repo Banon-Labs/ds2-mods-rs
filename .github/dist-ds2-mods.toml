@@ -1,0 +1,84 @@
+# DARK SOULS II mod settings. Put this file in the folder that holds `DarkSoulsII.exe`, beside
+# `dinput8.dll` -- both the DLL and `ds2-launcher.exe` read it from there.
+#
+# EVERY KEY IN HERE IS OPTIONAL. A missing key means the built-in default, and this file ships
+# with every key set to the default it already has, so a player who changes nothing gets exactly
+# what they would have got with no file at all. It exists to show you what there is to change.
+
+# ---------------------------------------------------------------------------------------------
+# [launcher] -- only read by `ds2-launcher.exe`, and only for DLLs that cannot be loaded from
+# inside the running game. If you are not running Seamless Co-op you do not need the launcher at
+# all: start the game through Steam as usual and `dinput8.dll` loads on its own, with Steam
+# playtime, the overlay and cloud saves intact. The launcher gives all three up, because Steam is
+# not the thing starting the game.
+# ---------------------------------------------------------------------------------------------
+[launcher]
+
+# DLLs to inject, in the order written. Paths are relative to this folder unless they start from
+# a drive or a root.
+#
+# DO NOT PUT `dinput8.dll` IN THIS LIST. The game imports it statically, and the first injected
+# thread runs process initialisation -- static imports and their DllMains -- before its own start
+# routine, so this repo's loader is already in before anything here. Naming it would load it
+# twice.
+#
+# ORDER IS LOAD ORDER, and load order is the contract: two mods that hook the same function
+# resolve in it. `[seamless]` below, when enabled, goes in first whether or not it is named here,
+# and naming it twice still loads it once.
+#
+# If any file in this list is missing, the launch is refused and NO game process is started. A
+# session gets the whole list or does not exist.
+dlls = []
+
+# The executable to start. Change it only if yours is named something else.
+exe = "DarkSoulsII.exe"
+
+# ---------------------------------------------------------------------------------------------
+# [seamless] -- DARK SOULS II Seamless Co-op, which is SOMEBODY ELSE'S MOD and is not shipped
+# here. Install it yourself, keep it updated yourself: it refuses to boot on a build it considers
+# out of date, and says so on a dialog rather than in a log, so a copy bundled by us would go
+# stale on its author's schedule and fail as a hang you could not diagnose.
+# ---------------------------------------------------------------------------------------------
+[seamless]
+
+# `false` is the shipped default, and deliberately so -- loading a foreign binary into your game
+# is not something a default should do without being asked. Set it to `true` once Seamless is
+# installed, and start the game with `ds2-launcher.exe` rather than through Steam.
+enabled = false
+
+# Where its DLL is. This is the path its own launcher uses, so leaving it alone is right for a
+# normal install. Backslashes and forward slashes mean the same thing.
+dll = "SeamlessCoop/ds2sc.dll"
+
+# The save container Seamless uses, which must match `save_file_extension` in its own
+# `ds2sc_settings.ini`. Vanilla is `sl2`; Seamless ships `co2` and keeps its characters apart
+# from your offline ones that way.
+save_file_extension = "co2"
+
+# ---------------------------------------------------------------------------------------------
+# [offline] -- ON BY DEFAULT, AND UNDERSTAND WHAT YOU ARE TURNING OFF. Everything in this mod
+# patches the game's code in memory, which is what FromSoftware's matchmaking servers watch for.
+# These four keys keep you off them.
+# ---------------------------------------------------------------------------------------------
+[offline]
+enabled = true
+pin_flag = true
+report_offline = true
+block_sockets = true
+
+# ---------------------------------------------------------------------------------------------
+# [menu_row] -- extra rows on the in-game pause menu. All four are on with no file present.
+# ---------------------------------------------------------------------------------------------
+[menu_row]
+enabled = true
+
+# Which rows appear, in this order. Remove one to drop it.
+#
+# `save-game-to-file` IS ALSO A SWITCH. While that row is on the menu, the game stops saving by
+# itself -- no five-minute autosave, no save at a bonfire, no save on the way out to the title --
+# and that row is the only thing that writes your character. Take it out of this list to get the
+# ordinary saving behaviour back.
+# KEEP THIS ON ONE LINE. The reader is a line-based key-value parser, not a TOML parser: an array
+# split across lines parses as `rows = [` and every continuation line is discarded, which reads as
+# "no rows" and takes the whole menu away.
+rows = ["load-build-from-url", "load-character-from-file", "save-game-to-file", "quit-to-desktop"]

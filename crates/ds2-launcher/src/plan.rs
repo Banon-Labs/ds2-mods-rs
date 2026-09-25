@@ -259,6 +259,52 @@ mod tests {
         Plan::from_text(text, Path::new(GAME))
     }
 
+    /// The config file that ships in the download, read here by the reader that will read it
+    /// there.
+    ///
+    /// A comment could not hold this rule, which is why it is a test. The file is TOML-shaped and
+    /// is read by a line-based key-value parser, so an array written the way every TOML formatter
+    /// writes one --
+    ///
+    /// ```text
+    /// rows = [
+    ///   "quit-to-desktop",
+    /// ]
+    /// ```
+    ///
+    /// -- parses as `rows = "["`, discards each continuation line as a non-assignment, and reads
+    /// as "no rows at all": the whole pause menu gone, from a file that looks right in an editor
+    /// and produces no error anywhere. It was written that way once, in the change that added it.
+    const SHIPPED_CONFIG: &str = include_str!("../../../.github/dist-ds2-mods.toml");
+
+    #[test]
+    fn the_config_in_the_download_has_no_line_the_reader_throws_away() {
+        let parsed = ds2_hotkey_config::KeyValues::parse(SHIPPED_CONFIG);
+        let rejected: Vec<String> = parsed
+            .rejected()
+            .iter()
+            .map(|entry| format!("line {}: {}", entry.line, entry.text))
+            .collect();
+        assert!(
+            rejected.is_empty(),
+            ".github/dist-ds2-mods.toml has lines the reader discards:\n{}",
+            rejected.join("\n")
+        );
+    }
+
+    #[test]
+    fn the_config_in_the_download_is_the_defaults_it_claims_to_be() {
+        // Seamless staying off is the one that matters. The file ships beside a launcher that
+        // would otherwise refuse every launch on a machine where Seamless is not installed, and
+        // injecting somebody else's binary is not something a shipped default may do unasked.
+        let plan = plan(SHIPPED_CONFIG);
+        assert!(
+            plan.injections.is_empty(),
+            "the shipped config must inject nothing until a player asks for it"
+        );
+        assert_eq!(plan.exe, Path::new(GAME).join(DEFAULT_EXE));
+    }
+
     #[test]
     fn an_empty_config_starts_the_game_and_injects_nothing() {
         let plan = plan("");
