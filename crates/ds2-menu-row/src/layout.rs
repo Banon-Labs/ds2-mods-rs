@@ -221,6 +221,107 @@ struct Container {
     tab_subtree_records: [u8; ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_TAB_SUBTREE_CHILDREN],
     tab_frame_definition: [u8; ds2_rva::FLO_DEFINITION_STRIDE],
     tab_frame_records: [u8; ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_TAB_FRAME_CHILDREN],
+    /// Each added icon's and mark's colour and flag word as built, so [`set_locked`] can put back
+    /// what it greyed. `rows` marks and `icons` icons are filled; `icons` is smaller than `rows`
+    /// only when the row definitions were refused and the rows wear row 0's icon.
+    icon_rest: [Rest; MAX_ROWS],
+    mark_rest: [Rest; MAX_ROWS],
+    rows: usize,
+    icons: usize,
+}
+
+/// A transform block's colour and flag word: `(colour, flags)`.
+type Rest = ([u8; 4], [u8; 4]);
+
+/// Read a block's colour and flags.
+fn rest_of(block: &[u8; ds2_rva::FLO_TRANSFORM_SIZE]) -> Rest {
+    let mut colour = [0; 4];
+    let mut flags = [0; 4];
+    colour.copy_from_slice(&block[ds2_rva::FLO_TRANSFORM_COLOUR_OFFSET..][..4]);
+    flags.copy_from_slice(&block[ds2_rva::FLO_TRANSFORM_FLAGS_OFFSET..][..4]);
+    (colour, flags)
+}
+
+/// What a block reads while its row is locked: the game's own disabled grey, with both bits of the
+/// licence set on top of whatever flags the block already had.
+fn locked_of((_, flags): Rest) -> Rest {
+    let flags = u32::from_le_bytes(flags)
+        | ds2_rva::FLO_TRANSFORM_COLOUR_LIVE
+        | ds2_rva::FLO_TRANSFORM_COLOUR_RGB;
+    (ds2_rva::FLO_DISABLED_COLOUR, flags.to_le_bytes())
+}
+
+/// Write a colour and flag word into a live block.
+///
+/// # Safety
+///
+/// `block` must be a transform block inside a leaked [`Container`].
+unsafe fn write_rest(block: *mut u8, (colour, flags): Rest) {
+    // SAFETY: the caller's block is `FLO_TRANSFORM_SIZE` bytes and both fields are inside it.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            colour.as_ptr(),
+            block.add(ds2_rva::FLO_TRANSFORM_COLOUR_OFFSET),
+            4,
+        );
+        std::ptr::copy_nonoverlapping(
+            flags.as_ptr(),
+            block.add(ds2_rva::FLO_TRANSFORM_FLAGS_OFFSET),
+            4,
+        );
+    }
+}
+
+/// The newest container, which is the one the pause menu is drawing. `0` before one is built.
+static NEWEST: AtomicUsize = AtomicUsize::new(0);
+
+/// The last `container | locked` written, so the per-frame call writes only on a change. A
+/// container is 16-aligned, so bit 0 is free to carry the state.
+static APPLIED: AtomicUsize = AtomicUsize::new(0);
+
+/// Grey every added row, or give it back its own colours. Game thread only.
+///
+/// The draw reads a record's colour out of its transform block on every frame
+/// (`FeComponentObject::FUN_140b69e70` tests `[block+0x20] & 0x100` and pushes `[block+0x18]`), and
+/// the colour reaches everything under the record -- `0x0255`'s grey twin is a nested record over
+/// a white shape. So rewriting the blocks this crate owns changes the rows on the next frame, with
+/// nothing rebuilt. The icon takes the grey in place of its tint, the way the shipped twin does,
+/// and the mark takes it so the caption under it goes grey too. The row record itself is left
+/// alone: it also carries the selection highlight.
+///
+/// Returns whether anything was written.
+pub(crate) fn set_locked(locked: bool) -> bool {
+    let newest = NEWEST.load(Ordering::Acquire);
+    if newest == 0 {
+        return false;
+    }
+    let key = newest | usize::from(locked);
+    if APPLIED.swap(key, Ordering::AcqRel) == key {
+        return false;
+    }
+    let container = newest as *mut Container;
+    // SAFETY: `newest` is a container this module leaked and never frees, and `rows`/`icons` were
+    // written before it was published. The blocks are written in place, which is what the draw
+    // reads.
+    let (rows, icons) = unsafe {
+        let (rows, icons) = ((*container).rows, (*container).icons);
+        for slot in 0..icons {
+            let rest = (*container).icon_rest[slot];
+            let block = (&raw mut (*container).icon_transform[slot]).cast::<u8>();
+            write_rest(block, if locked { locked_of(rest) } else { rest });
+        }
+        for slot in 0..rows {
+            let rest = (*container).mark_rest[slot];
+            let block = (&raw mut (*container).mark_transform[slot]).cast::<u8>();
+            write_rest(block, if locked { locked_of(rest) } else { rest });
+        }
+        (rows, icons)
+    };
+    log(format_args!(
+        "{LOG_PREFIX} session-lock {} rows={rows} icons={icons} container=0x{newest:016x}",
+        if locked { "greyed" } else { "restored" }
+    ));
+    true
 }
 
 /// Substitutions already built, as `(definition the game returned, definition we return)`.
@@ -435,6 +536,10 @@ unsafe fn build(sources: &Sources) -> Option<*mut u8> {
         tab_subtree_records: [0; ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_TAB_SUBTREE_CHILDREN],
         tab_frame_definition: [0; ds2_rva::FLO_DEFINITION_STRIDE],
         tab_frame_records: [0; ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_TAB_FRAME_CHILDREN],
+        icon_rest: [([0; 4], [0; 4]); MAX_ROWS],
+        mark_rest: [([0; 4], [0; 4]); MAX_ROWS],
+        rows: 0,
+        icons: 0,
     });
 
     // COPIED, never assembled field by field. The definition and the records carry fields this
@@ -1015,6 +1120,17 @@ unsafe fn build(sources: &Sources) -> Option<*mut u8> {
         }
     }
 
+    // The colours every block ends up with, tint included, taken last so the session lock restores
+    // exactly what was drawn before it.
+    for slot in 0..rows.len() {
+        container.mark_rest[slot] = rest_of(&container.mark_transform[slot]);
+    }
+    for slot in 0..own_definitions {
+        container.icon_rest[slot] = rest_of(&container.icon_transform[slot]);
+    }
+    container.rows = rows.len();
+    container.icons = own_definitions;
+
     let n = SUBSTITUTED.fetch_add(1, Ordering::Relaxed) + 1;
     log(format_args!(
         "{LOG_PREFIX} container substituted original=0x{:016x} replacement=0x{:016x} \
@@ -1056,6 +1172,7 @@ unsafe fn substitute(sources: &Sources) -> *mut u8 {
         // SAFETY: `replacement` is a leaked `Container` this module built, and `original` is the
         // definition the game just returned.
         if unsafe { still_current(original, replacement) } {
+            publish(replacement);
             return replacement as *mut u8;
         }
         // The document was reloaded onto the same address. Drop the entry -- not the allocation,
@@ -1078,10 +1195,18 @@ unsafe fn substitute(sources: &Sources) -> *mut u8 {
     match unsafe { build(sources) } {
         Some(replacement) => {
             built.push((original as usize, replacement as usize));
+            publish(replacement.cast::<Container>());
             replacement
         }
         None => original,
     }
+}
+
+/// Make `container` the one [`set_locked`] writes, and grey it now if a session is already up, so
+/// a menu opened mid-session never draws a frame of usable-looking rows.
+fn publish(container: *mut Container) {
+    NEWEST.store(container as usize, Ordering::Release);
+    set_locked(crate::session::active());
 }
 
 /// Fetch every definition [`build`] copies from and run the substitution, caching as it goes.

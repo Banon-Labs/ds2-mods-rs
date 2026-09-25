@@ -492,7 +492,20 @@ pub fn return_to_title() -> bool {
 
 unsafe extern "system" fn dispatch_detour(top_select: *mut u8, action: u32) {
     LAST_TOP_SELECT.store(top_select as usize, Ordering::Release);
-    if let Some(row) = crate::api::row_for_action(action) {
+    let row = crate::api::row_for_action(action);
+    // Locked in multiplayer: the press is swallowed, as the shipped Quit Game row's gate swallows
+    // its own, and the row is already drawn grey by `layout::set_locked`.
+    if let Some(row) = row
+        && crate::session::active()
+    {
+        log(format_args!(
+            "{LOG_PREFIX} press REFUSED action={action:#x} caption={:?} reason=multiplayer-session \
+             -- nothing was run",
+            row.caption
+        ));
+        return;
+    }
+    if let Some(row) = row {
         // Deliberately NOT calling the original for a registered action. The original would play a
         // sound and fall through its `default`, which is harmless, but the id is outside the range
         // its `switch` handles, so there is nothing there to run. Fewer moving parts.
@@ -1873,6 +1886,8 @@ pub unsafe fn install() -> Outcome {
 
     // Published before any detour that reads it, and never changed again.
     MODULE_BASE.store(base, Ordering::Release);
+    // Validated before any detour that asks it. A refusal is logged and leaves the rows usable.
+    crate::session::install(base);
 
     // OUR OWN STORAGE, AND THE TWO DETOURS THAT READ IT, BEFORE ANYTHING ELSE IS PATCHED.
     //

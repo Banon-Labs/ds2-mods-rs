@@ -310,6 +310,10 @@ unsafe extern "system" fn update_detour(top_select: *mut u8, delta: f32) {
         tick();
     }
 
+    // A session can start or end with the menu open, so the grey follows it frame by frame. This
+    // writes only when the answer changes.
+    crate::layout::set_locked(crate::session::active());
+
     if CAPTIONS_DIRTY.swap(false, Ordering::AcqRel) {
         // The group is live and this is the game thread, which is exactly what `push_captions`
         // requires. Remember it too: a push can also be wanted on a frame this detour did not

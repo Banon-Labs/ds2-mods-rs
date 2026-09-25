@@ -96,9 +96,19 @@ Gate index `0` means no gate. Nonzero indices go through `0x1400a4e50`, which re
 *refused*: the confirm path turns that into `-1` and the availability pass greys the row.
 
 The quit item carries gate `4`, which resolves the session object at `GameManagerImp + 0x22f0`
-through `FUN_140513270` and asks `FUN_14025f690` about it. Neither callee is named in the project,
-so **what that gate actually forbids is not recorded here** -- only that it is the gate the shipped
-quit row uses.
+through `FUN_140513270` (`mov rax,[rcx+0x3b8]`) and asks `FUN_14025f690` about it, which is
+`state in {1, 2}` for a session-occupancy state computed off the net-session root at
+`[0x141616cf8]`. So gate `4` refuses Quit Game while a multiplayer session is up. `ds2-menu-row`
+asks that same predicate directly (`ds2_rva::NET_SESSION_BUSY`) to lock its own rows in
+multiplayer: the press is swallowed in the dispatch detour and the icon and caption transforms are
+rewritten to the grey twin's `ff808080`.
+
+It does not go through `0x1400a4e50` itself, because that function refuses every nonzero gate when
+the net-server manager is missing, before it reads the index, and that would lock the rows offline.
+
+The availability pass's grey is the twin's visibility: it builds the path `cell/0x1eacd0/0x1eacd0`
+(`FUN_1400a64e0`) and calls the component's slot `+0xc8` with `refused == 0`, and that slot is
+`mov [rcx+0x44],dl` -- the hidden flag every draw tests first (`FUN_140b69e70`).
 
 ## The SELECTABLE row count is code-driven
 
