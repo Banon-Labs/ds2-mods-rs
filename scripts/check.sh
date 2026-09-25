@@ -286,6 +286,9 @@ else
   # this pins where the facts line comes from -- which sentences are claims, which artifacts count
   # as a run, and which crates reach a DLL. The crate walk is the part that can go silently inert.
   python3 scripts/test-fix-claim-classifier.py | grep -v '^  ok '
+  # The own-rule guard's classifier, which is where its one divergence from er-mods-rs lives:
+  # `push` is not a user-owned action here, and the selftest pins that saying so never halts.
+  python3 scripts/cupcake_user_own_rule.py
   # The hook shim is the fourth place this layer can be silently dead, and the one no `.rego` file
   # can reach. scripts/cupcake-hook.sh sits between Claude Code and the engine and repairs three
   # things the engine gets wrong before any policy runs: a permission mode cupcake does not know

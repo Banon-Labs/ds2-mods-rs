@@ -431,6 +431,18 @@ CASES = [
         "the admission and its excuse as a mid-turn preamble before the Edit, with an ordinary "
         "closing report -- the correct shape, and the one this rule must never touch",
     ),
+    Case(
+        "user_own_rule.jsonl",
+        "handing the user back a rule they wrote",
+        "the er-mods-rs 2026-09-23 closer, verbatim: a draft PR link and then 'It stays draft -- "
+        "undrafting is yours.' The user wrote that rule; the global draft guard enforces it",
+    ),
+    Case(
+        "user_own_rule_push_fact.jsonl",
+        None,
+        "the same PR link and 'I pushed the branch' -- must NOT halt. Pushing is the agent's job "
+        "in this repo, which is the one place the port diverges from er-mods-rs",
+    ),
     # `no_fix_claim_without_runtime_evidence`, ported from er-mods-rs on 2026-09-25. The fixtures
     # were er's until then and pointed at er crates, so every case would have passed or failed for
     # the wrong reason; they are now DARK SOULS II shapes -- `crates/ds2-menu-row`, which reaches
