@@ -126,8 +126,13 @@ jobs:
           cp "target/$TARGET/release/dinput8.dll"            dist/
           cp "target/$TARGET/release/ds2-launcher.exe"       dist/
           cp "target/$TARGET/release/ds2_crash_logging.dll"  dist/
-          cp .github/dist-README.md dist/README.md
-          (cd dist && sha256sum -- dinput8.dll ds2-launcher.exe ds2_crash_logging.dll README.md > SHA256SUMS)
+          cp .github/dist-README.md    dist/README.md
+          # THE CONFIG SHIPS SET TO ITS OWN DEFAULTS, so unpacking it changes nothing a player
+          # has not asked for -- it is there to show what there is to change, and because without
+          # it `ds2-launcher.exe` prints `nothing to inject` and a player has no example of the
+          # `[launcher] dlls` list that is the launcher's whole reason to exist.
+          cp .github/dist-ds2-mods.toml dist/ds2-mods.toml
+          (cd dist && sha256sum -- dinput8.dll ds2-launcher.exe ds2_crash_logging.dll README.md ds2-mods.toml > SHA256SUMS)
           # THE ZIP IS FLAT -- no `dist/` prefix inside it -- because unpacking it beside
           # `DarkSoulsII.exe` is the whole install, and a wrapper directory makes that the one
           # wrong move. It is built from `dist` while that holds exactly the individual assets and
@@ -140,7 +145,7 @@ jobs:
           # Naming the members from inside `dist` is what makes the archive flat -- `-c out.zip
           # dist/` stores every path under `dist/`, which was measured, not assumed.
           (cd dist && python3 -m zipfile -c ../ds2-mods-rs.zip \
-            dinput8.dll ds2-launcher.exe ds2_crash_logging.dll README.md SHA256SUMS)
+            dinput8.dll ds2-launcher.exe ds2_crash_logging.dll README.md ds2-mods.toml SHA256SUMS)
           mv ds2-mods-rs.zip dist/
 
       # Attest each installable file, not only the zip that carries them, so

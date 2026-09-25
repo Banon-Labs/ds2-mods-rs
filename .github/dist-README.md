@@ -10,7 +10,8 @@ supported and is not detected for you -- every address in these DLLs was read ou
 | `dinput8.dll` | The mod itself. DS2 statically imports `dinput8`, so a copy in the game folder is loaded by the game with no launcher involved. Reads `ds2-mods.toml` from that same folder. |
 | `ds2-launcher.exe` | Starts the game suspended and injects the DLLs named by `[launcher] dlls` in `ds2-mods.toml`. Needed **only** for mods that cannot be loaded from inside the running process -- Seamless Co-op is the one this exists for. |
 | `ds2_crash_logging.dll` | The crash logger on its own, for loading beside something else. Has not been run inside the game as a standalone DLL. |
-| `SHA256SUMS` | Checksums for the three files above. `sha256sum -c SHA256SUMS`. |
+| `ds2-mods.toml` | Settings, read by both of the above from the folder they sit in. Every key ships set to the default it already has, so unpacking it changes nothing. |
+| `SHA256SUMS` | Checksums for the files above. `sha256sum -c SHA256SUMS`. |
 
 Each file is also attested: `gh attestation verify dinput8.dll -R Banon-Labs/ds2-mods-rs` traces a
 download back to the commit and the workflow run that built it.
@@ -21,13 +22,22 @@ Drop `dinput8.dll` into the folder holding `DarkSoulsII.exe` -- on a default Ste
 `steamapps/common/Dark Souls II Scholar of the First Sin/Game/`. That is the whole install for
 everything except Seamless Co-op.
 
-**No `ds2-mods.toml` is included.** Without one, `dinput8.dll` runs its defaults and
-`ds2-launcher.exe` prints `no config at <path> -- vanilla plus whatever dinput8.dll does` and
-starts the game anyway. See the repository for what the file can hold.
+Put `ds2-mods.toml` in that same folder. It ships with every key already set to the default the
+DLLs use, so it changes nothing on its own -- it is there so you can see what there is to change,
+and so `[launcher] dlls` has an example. Delete it and the DLLs run the same defaults.
 
 ## Seamless Co-op is not in this package, and will not be
 
-Bring your own copy and point `[launcher] dlls` at it. This is not only a licensing line: the mod
+Install it yourself, then flip one line in `ds2-mods.toml`:
+
+```toml
+[seamless]
+enabled = true                   # ships as false
+dll = "SeamlessCoop/ds2sc.dll"   # where its own launcher puts it -- leave alone for a normal install
+```
+
+and start the game with `ds2-launcher.exe` instead of through Steam. This is not only a
+licensing line: the mod
 refuses to boot on a build it considers out of date, and says so on a dialog whose text exists
 only in decrypted process memory. A copy bundled here would go stale on its author's schedule and
 fail as a hang nobody downloading this could diagnose. Yours, you update.
