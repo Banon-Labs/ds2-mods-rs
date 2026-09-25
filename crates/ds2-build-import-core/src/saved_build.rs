@@ -69,14 +69,23 @@ pub struct Build {
 /// The nine stats a Dark Souls 2 character levels.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Stats {
+    /// Health.
     pub vigor: u16,
+    /// Stamina and equip load.
     pub endurance: u16,
+    /// Physical defence and equip load.
     pub vitality: u16,
+    /// Spell slots.
     pub attunement: u16,
+    /// Physical scaling.
     pub strength: u16,
+    /// Physical scaling, the other one.
     pub dexterity: u16,
+    /// Agility, poise and most resistances.
     pub adaptability: u16,
+    /// Sorcery and hex scaling.
     pub intelligence: u16,
+    /// Miracle and hex scaling.
     pub faith: u16,
 }
 
@@ -142,7 +151,12 @@ pub enum ParseError {
     /// A key was there with the wrong kind of value.
     WrongType(&'static str),
     /// A stat was outside `0..=MAX_STAT`, which means the value did not come from where we think.
-    StatOutOfRange { field: &'static str, value: i64 },
+    StatOutOfRange {
+        /// Which stat.
+        field: &'static str,
+        /// What the page claimed it was.
+        value: i64,
+    },
 }
 
 impl std::fmt::Display for ParseError {
@@ -175,6 +189,11 @@ enum Value {
 /// Parse the page a GET of [`crate::build_path`] returned.
 ///
 /// `id` is the build id the caller asked for; the literal does not carry it.
+/// # Errors
+///
+/// The [`ParseError`] for the first thing that did not hold: no body, no `savedBuild` literal, a
+/// key this parser needs missing or carrying the wrong kind of value, or a stat outside
+/// `0..=MAX_STAT`.
 pub fn parse(html: &str, id: u32) -> Result<Build, ParseError> {
     let fields = parse_fields(saved_build_literal(html)?);
 

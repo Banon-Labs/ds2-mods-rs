@@ -63,9 +63,17 @@ pub enum LevelError {
     /// No cost table was supplied. **Not recoverable by guessing.**
     NoCostTable,
     /// The requested level is outside `1..=MAX_LEVEL`.
-    OutOfRange { level: u32 },
+    OutOfRange {
+        /// The level that was asked for.
+        level: u32,
+    },
     /// The cost table does not reach the requested level.
-    TableTooShort { level: u32, covered: u32 },
+    TableTooShort {
+        /// The level that was asked for.
+        level: u32,
+        /// The highest level the table actually reaches.
+        covered: u32,
+    },
     /// The souls implied by the level do not fit a `u64`. Only reachable with a corrupt table.
     Overflow,
 }
@@ -94,6 +102,9 @@ impl SoulCosts {
     ///
     /// `costs[n]` is the cost of going from level `n` to `n + 1`. Refuses an empty table rather than
     /// becoming a table that silently answers zero for every level.
+    /// # Errors
+    ///
+    /// `LevelError::NoCostTable` for an empty table.
     pub fn new(costs: Vec<u64>) -> Result<Self, LevelError> {
         if costs.is_empty() {
             return Err(LevelError::NoCostTable);
@@ -115,6 +126,10 @@ impl SoulCosts {
     /// at that level, never the exact value -- a real character has also held the souls they spent
     /// on equipment and lost to deaths. A floor is the right thing for a consistency rule: below it
     /// the character is impossible, at or above it they are merely thrifty.
+    /// # Errors
+    ///
+    /// `OutOfRange` outside `1..=MAX_LEVEL`, `TableTooShort` past what the table covers, and
+    /// `Overflow` only from a corrupt table.
     pub fn souls_to_reach(&self, level: u32) -> Result<u64, LevelError> {
         if level == 0 || level > MAX_LEVEL {
             return Err(LevelError::OutOfRange { level });
@@ -147,6 +162,9 @@ pub struct LevelChange {
 
 impl LevelChange {
     /// Work out the soul memory for `level`, and pair the two.
+    /// # Errors
+    ///
+    /// Whatever [`SoulCosts::souls_to_reach`] answered.
     pub fn to_level(level: u32, costs: &SoulCosts) -> Result<Self, LevelError> {
         Ok(Self {
             level,
