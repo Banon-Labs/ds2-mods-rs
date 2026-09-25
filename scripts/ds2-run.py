@@ -100,6 +100,16 @@ APPID = "335300"
 BUILT_DLL = REPO_ROOT / "target/x86_64-pc-windows-msvc/release/dinput8.dll"
 STAGED_DLL_NAME = "dinput8.dll"
 
+#: Where runs play out of unless `--save-dir` says otherwise.
+#:
+#: A real folder outside the Proton prefix, chosen so that the default run does not touch the
+#: container Steam syncs. The game opens its own container name INSIDE it, so this one directory
+#: serves both extensions: `DS2SOFS0000.sl2` in an ordinary run, `DS2SOFS0000.co2` under
+#: `--seamless`, because the name is Seamless's to choose and not this script's.
+#:
+#: Pass `--save-dir ''` to turn the redirect off and play out of the prefix's own AppData again.
+DEFAULT_SAVE_DIR = "~/Downloads/DS2 Saves/new"
+
 #: Our own injector, from `crates/ds2-launcher`. Needed only when something has to be loaded
 #: from OUTSIDE the process -- see `[launcher]` below and that crate's docs for the measurement
 #: that says why an in-process load is not an option for every mod.
@@ -1151,6 +1161,7 @@ def config_text(
     input_harness: bool = False,
     save_directory: str = "",
     menu_rows_all: bool = False,
+    menu_rows_no_save: bool = False,
     launcher_dlls: tuple[str, ...] = (),
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
@@ -1177,6 +1188,24 @@ def config_text(
             f"# WRITTEN BY --all-menu-rows: every row this table knows, in the default order.\n"
             f"# The game's own saving is OFF in this run, because `save-game-to-file` is among them.\n"
             f"{KEY_MENU_ROW_ROWS} = [{every_row}]"
+        )
+    elif menu_rows_no_save:
+        # Every row EXCEPT the one that turns the game's own saving off.
+        #
+        # This is a named mode rather than an arbitrary subset, which is the distinction the
+        # comment above cares about: a run missing two rows nobody asked to remove looked like a
+        # DLL regression, and this removes exactly one, for a stated reason, and says so in the
+        # file. `save-game-to-file` registering is what installs `ds2-save-block`, and that block
+        # refuses every save the game makes for itself -- no autosave, nothing at a bonfire,
+        # nothing on the way out. Measured 2026-09-24: a session played under it logged
+        # `refused a save kind=10 ... nothing was written` and the container's mtime never moved,
+        # so the character's progress was being dropped on the floor.
+        kept = [name for name in MENU_ROW_ROW_NAMES[:MENU_ROW_MAX_ADDED] if name != "save-game-to-file"]
+        menu_row_rows_line = (
+            f"# WRITTEN BY --no-save-file-row: every row except `save-game-to-file`, so the\n"
+            f"# game saves itself normally. That row is the only thing that installs\n"
+            f"# `ds2-save-block`, and it is off here for exactly that reason.\n"
+            f"{KEY_MENU_ROW_ROWS} = [" + ", ".join(f'"{name}"' for name in kept) + "]"
         )
     else:
         menu_row_rows_line = (
@@ -1871,6 +1900,7 @@ def write_config(
     input_harness: bool = False,
     save_directory: str = "",
     menu_rows_all: bool = False,
+    menu_rows_no_save: bool = False,
     launcher_dlls: tuple[str, ...] = (),
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
@@ -1910,6 +1940,7 @@ def write_config(
         input_harness,
         save_directory,
         menu_rows_all,
+        menu_rows_no_save,
         launcher_dlls,
     )
     path.write_text(text, encoding="utf-8")
@@ -2021,6 +2052,7 @@ def dry_run(
     input_harness: bool = False,
     save_directory: str = "",
     menu_rows_all: bool = False,
+    menu_rows_no_save: bool = False,
     launcher_dlls: tuple[str, ...] = (),
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
@@ -2078,6 +2110,7 @@ def dry_run(
             input_harness,
             save_directory,
             menu_rows_all,
+            menu_rows_no_save,
             launcher_dlls,
         ):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
@@ -2131,6 +2164,7 @@ def dry_run(
                 input_harness=input_harness,
                 save_directory=save_directory,
                 menu_rows_all=menu_rows_all,
+                menu_rows_no_save=menu_rows_no_save,
                 launcher_dlls=launcher_dlls,
             ),
             indent="[dry-run]   | ",
@@ -2350,6 +2384,63 @@ def proton_chain() -> tuple[list[str], list[str]]:
     return ([str(entry), "--verb=run", "--", str(proton), "run"], problems)
 
 
+def first_loadable_slot(save_dir: str, seamless: bool, seamless_dll: str) -> int | None:
+    """The lowest slot of the redirected save that the game will load, or None.
+
+    This is what `--continue-slot` with no value means, and until now the flag's own help
+    promised it while the code quietly resolved to -1 and autoloaded nothing.
+
+    BOTH `occupied` AND `blank` COUNT. A slot whose nine stats are all 1 has no name and stats
+    below any DS2 starting value, and it is still a character the game loads -- `ds2-sl2.py`
+    records the run that settled it (`autoload slot=9 refused=false ... occupied=true`). Treating
+    those as empty is the mistake that makes a folder full of fresh characters look like an empty
+    file.
+
+    The extension is not assumed. Under Seamless the container is renamed, so the name is built
+    from that mod's own settings rather than from `SAVE_FILE_NAME`; a run that looked for `.sl2`
+    beside a `.co2` would report an empty folder that is not empty.
+    """
+    if not save_dir:
+        return None
+    extension = (seamless and seamless_save_extension(seamless_dll)) or VANILLA_SAVE_EXTENSION
+    container = Path(save_dir).expanduser() / f"{SAVE_FILE_STEM}.{extension}"
+    if not container.is_file():
+        return None
+    try:
+        listed = subprocess.run(
+            [sys.executable, str(SL2_TOOL), "--slots", str(container)],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if listed.returncode != 0:
+        return None
+    # A NAMED CHARACTER BEATS A FRESH ONE, and the lowest index does not decide it. Both classes
+    # load, so "first loadable" alone picks slot 0 out of a container whose slot 0 is an unnamed
+    # all-ones blank and whose slot 1 is the character the player actually wants -- which is the
+    # exact shape of a save file that has been through `--seamless`. Occupied wins; blank is the
+    # fallback for a container that holds nothing else.
+    occupied: int | None = None
+    blank: int | None = None
+    for line in listed.stdout.splitlines():
+        parts = line.split()
+        # `slot <n> <occupied|blank|empty> ...`
+        if len(parts) < 3 or parts[0] != "slot":
+            continue
+        try:
+            index = int(parts[1])
+        except ValueError:
+            continue
+        if parts[2] == "occupied" and occupied is None:
+            occupied = index
+        elif parts[2] == "blank" and blank is None:
+            blank = index
+    return occupied if occupied is not None else blank
+
+
 def seamless_save_extension(seamless_dll: str) -> str | None:
     """The extension Seamless Co-op renames the save container to, or None.
 
@@ -2558,6 +2649,7 @@ def launch(
     input_harness: bool = False,
     save_directory: str = "",
     menu_rows_all: bool = False,
+    menu_rows_no_save: bool = False,
     launcher_dlls: tuple[str, ...] = (),
 ) -> int:
     report_environment(probe)
@@ -2610,6 +2702,7 @@ def launch(
         input_harness,
         save_directory,
         menu_rows_all,
+        menu_rows_no_save,
         launcher_dlls,
     )
     print(f"[config] {config_path}")
@@ -4063,6 +4156,19 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--no-save-file-row",
+        dest="menu_rows_no_save",
+        action="store_true",
+        help=(
+            "put every menu row on EXCEPT `save-game-to-file`, so the game saves itself the way "
+            "it normally does. That row registering is what installs `ds2-save-block`, which "
+            "refuses every save the game makes for itself -- no autosave, nothing at a bonfire, "
+            "nothing on the way out -- so a session played with it on loses progress unless the "
+            "row is pressed by hand. Use this to actually play. The DLL's own defaults include "
+            "that row, so dropping --all-menu-rows is not enough to get saving back."
+        ),
+    )
+    parser.add_argument(
         "--launcher-dll",
         dest="launcher_dll",
         action="append",
@@ -4142,7 +4248,7 @@ def main() -> int:
     parser.add_argument(
         "--save-dir",
         dest="save_dir",
-        default="",
+        default=DEFAULT_SAVE_DIR,
         metavar="DIR",
         help=(
             "play out of this folder instead of the game's own save directory, for the whole "
@@ -4150,10 +4256,13 @@ def main() -> int:
             "file, so a character autoloaded from here saves back into here. Nothing is copied "
             "in either direction -- which is the difference from the `[save_redirect] path` key "
             "this replaces, whose copy the next launch overwrote and whose sessions therefore "
-            "lost everything done in them. Takes a Linux path and converts it for the prefix, so "
-            "`--save-dir '~/Downloads/DS2 Saves/new'` is what you type. A folder that does not "
-            "exist is refused by the DLL and named in the log; an existing empty one is a fresh "
-            "start."
+            "lost everything done in them. Takes a Linux path and converts it for the prefix. "
+            f"DEFAULT: {DEFAULT_SAVE_DIR}, so an ordinary run already plays out of there and "
+            "nothing writes the container Steam syncs; pass an empty string to turn the redirect "
+            "off and use the prefix's own AppData again. The extension is not this flag's to "
+            "choose -- the game opens whatever name is current, which is `.co2` under --seamless "
+            "and `.sl2` otherwise. A folder that does not exist is refused by the DLL and named "
+            "in the log; an existing empty one is a fresh start."
         ),
     )
     parser.add_argument(
@@ -4254,7 +4363,26 @@ def main() -> int:
     if args.selftest:
         return selftest()
 
-    continue_slot = -1 if args.continue_slot is None else args.continue_slot
+    if args.continue_slot is not None:
+        continue_slot = args.continue_slot
+    else:
+        # No value given: read the slot off the redirected save, which is what this flag's help
+        # has always said it does. The slot belongs to the save rather than to the account, so a
+        # folder swapped in under `--save-dir` brings its own answer with it.
+        continue_slot = first_loadable_slot(args.save_dir, args.seamless, args.seamless_dll)
+        if continue_slot is None:
+            continue_slot = -1
+            if args.save_dir:
+                print(
+                    f"[continue] no loadable slot found in {args.save_dir} -- the character list "
+                    "opens where the game left it. Name a slot with --continue-slot N to override."
+                )
+        else:
+            print(
+                f"[continue] autoloading slot {continue_slot} of the save in {args.save_dir} -- "
+                "the first slot holding a named character, or the first fresh one if it holds "
+                "none. Override with --continue-slot N."
+            )
 
     if args.dry_run:
         return dry_run(
@@ -4293,6 +4421,7 @@ def main() -> int:
             args.input_harness,
             windows_path(args.save_dir),
             args.menu_rows_all,
+            args.menu_rows_no_save,
             tuple(args.launcher_dll),
         )
     return launch(
@@ -4331,6 +4460,7 @@ def main() -> int:
         args.input_harness,
         windows_path(args.save_dir),
         args.menu_rows_all,
+        args.menu_rows_no_save,
         tuple(args.launcher_dll),
     )
 
