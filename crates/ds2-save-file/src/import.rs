@@ -357,7 +357,7 @@ pub fn load_from_file() {
         handoff_file.display()
     ));
 
-    // NOW SAVE THE CHARACTER THE PLAYER IS LEAVING, and quit only once it has landed. Which file
+    // Save the character the player is leaving, and quit only once it has landed. Which file
     // that lands in is `ds2-save-redirect`'s answer and not this module's guess: press this row a
     // second time in one session and the character being left is a swapped-in one, whose save goes
     // to the staged copy through the open redirect. Watching the player's own container there would
