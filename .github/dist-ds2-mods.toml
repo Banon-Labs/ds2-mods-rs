@@ -104,3 +104,18 @@ key = "F8"
 # What a press says out loud, so you know which way it went: "en" for "Voice chat on/off", "pl"
 # for the Polish pair, or "" for silence. Also takes effect in about a second.
 announce = "en"
+
+# ---------------------------------------------------------------------------------------------
+# [invasion_path] -- a trail of the game's own Prism Stones along a walkable route to every other
+# player in your session. Nothing is drawn for anyone closer than 30 metres. Needs a co-op
+# session to have anyone to lead to. Off by default: set to true to load it.
+# ---------------------------------------------------------------------------------------------
+[invasion_path]
+enabled = false
+
+# The key that turns the trail on and off while you play.
+toggle_key = "semicolon"
+
+# The stone laid at each step. 833 is the Prism Stone, and 833 to 839 are its seven colours; 0
+# lays none. Editing this while the game runs takes effect in about a second.
+marker_effect_id = 833
