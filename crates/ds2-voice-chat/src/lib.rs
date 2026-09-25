@@ -32,8 +32,9 @@
 //!
 //! After a press the crate reads the byte back and plays a short spoken clip for the state the game
 //! actually holds: "Voice chat on" / "Voice chat off", or the Polish pair. The clips are rendered
-//! offline -- English with espeak-ng, Polish with Piper's CC0 `pl_PL-gosia-medium` voice, because a
-//! Polish speaker could not understand espeak-ng's Polish -- and compiled into the DLL from
+//! offline with Piper, 16 kHz 16-bit mono -- English with `en_US-lessac-medium`, Polish with the CC0
+//! `pl_PL-gosia-medium`, because a Polish speaker could not understand espeak-ng's Polish and the
+//! English followed so both languages sound alike -- and compiled into the DLL from
 //! `assets/`, so there is no speech engine and no file to go missing. `[voice_chat] announce` picks
 //! the language; `""` silences it.
 //!
