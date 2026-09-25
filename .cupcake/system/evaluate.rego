@@ -63,6 +63,8 @@ all_halts contains decision if { some decision in data.cupcake.policies.claude.n
 
 all_halts contains decision if { some decision in data.cupcake.policies.claude.no_explanation_instead_of_correction.halt }
 
+all_halts contains decision if { some decision in data.cupcake.policies.claude.no_fix_claim_without_runtime_evidence.halt }
+
 all_halts contains decision if { some decision in data.cupcake.policies.claude.no_future_tense_commitment.halt }
 
 all_halts contains decision if { some decision in data.cupcake.policies.claude.no_narrated_action.halt }

@@ -276,6 +276,16 @@ else
   # And the PR Run-Stamp guard's deciding half: which body earns which verdict at `gh pr create` and
   # `gh pr ready`, and the helper that prints the stamp. `opa test` above pins verdict -> denial.
   python3 scripts/test-run-stamp.py
+  # The runtime push guard's deciding half, against throwaway repositories and the real engine. The
+  # policy was right on 2026-09-25 and the signal handed it `game_code=0` for a push of the
+  # launcher, because `git commit ... && git push` was one command and the commit did not exist yet
+  # when the hook looked. `opa test` above cannot see that; this can.
+  python3 scripts/cupcake_push_scope.py --selftest | tail -1
+  python3 scripts/test-runtime-evidence-signal.py
+  # The fix-claim guard's deciding half. Its Rego suite pins what the policy does with a facts line;
+  # this pins where the facts line comes from -- which sentences are claims, which artifacts count
+  # as a run, and which crates reach a DLL. The crate walk is the part that can go silently inert.
+  python3 scripts/test-fix-claim-classifier.py | grep -v '^  ok '
   # The hook shim is the fourth place this layer can be silently dead, and the one no `.rego` file
   # can reach. scripts/cupcake-hook.sh sits between Claude Code and the engine and repairs three
   # things the engine gets wrong before any policy runs: a permission mode cupcake does not know
