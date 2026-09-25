@@ -249,6 +249,86 @@ impl Plan {
     }
 }
 
+/// Flags this launcher reads for itself. Everything else on its command line is the game's.
+pub const OWN_FLAGS: [&str; 2] = ["--dry-run", "--selftest"];
+
+/// The arguments this launcher was given that belong to the game.
+///
+/// Steam's `%command%` is the game's own command line, so a launch option that puts this
+/// launcher in front of it hands over the path to `DarkSoulsII.exe` first and any arguments the
+/// player added after. That leading path is dropped -- the plan already names the executable,
+/// and [`command_line`] puts it back quoted -- and the rest is passed through in order, so an
+/// argument the player gave the game is not silently eaten by the thing in front of it.
+#[must_use]
+pub fn game_arguments(arguments: &[String], exe: &Path) -> Vec<String> {
+    let mut rest: Vec<&String> = arguments
+        .iter()
+        .filter(|argument| !OWN_FLAGS.contains(&argument.as_str()))
+        .collect();
+    let leading_is_the_game = rest.first().is_some_and(|first| {
+        // Steam on Windows spells it with backslashes, which a Linux `Path` would not split on.
+        let normalised = first.replace('\\', "/");
+        let named = Path::new(&normalised).file_name();
+        match (named, exe.file_name()) {
+            (Some(named), Some(exe)) => named
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&exe.to_string_lossy()),
+            _ => false,
+        }
+    });
+    if leading_is_the_game {
+        rest.remove(0);
+    }
+    rest.into_iter().cloned().collect()
+}
+
+/// Quote one argument so `CommandLineToArgvW` in the game reads back exactly this string.
+///
+/// The executable path is quoted too. It has spaces in it on a default install
+/// (`Dark Souls II Scholar of the First Sin`), and an unquoted one is found at all only because
+/// `CreateProcessW` retries each space-separated prefix until one is a file -- after which the
+/// game's own `argv[0]` is still split in pieces.
+#[must_use]
+pub fn quote(argument: &str) -> String {
+    if !argument.is_empty() && !argument.contains([' ', '\t', '\n', '\u{b}', '"']) {
+        return argument.to_owned();
+    }
+    let mut quoted = String::with_capacity(argument.len() + 2);
+    quoted.push('"');
+    let mut backslashes = 0usize;
+    for character in argument.chars() {
+        match character {
+            '\\' => backslashes += 1,
+            '"' => {
+                // A quote after a run of backslashes: every one of them doubles, and the quote
+                // gets one more of its own.
+                quoted.extend(std::iter::repeat_n('\\', backslashes * 2 + 1));
+                quoted.push('"');
+                backslashes = 0;
+            }
+            other => {
+                quoted.extend(std::iter::repeat_n('\\', backslashes));
+                quoted.push(other);
+                backslashes = 0;
+            }
+        }
+    }
+    // Backslashes before the closing quote double, or the last one would escape it.
+    quoted.extend(std::iter::repeat_n('\\', backslashes * 2));
+    quoted.push('"');
+    quoted
+}
+
+/// The full command line the game is started with: its path, then its arguments.
+#[must_use]
+pub fn command_line(exe: &Path, arguments: &[String]) -> String {
+    std::iter::once(exe.to_string_lossy().into_owned())
+        .chain(arguments.iter().cloned())
+        .map(|argument| quote(&argument))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -257,6 +337,67 @@ mod tests {
 
     fn plan(text: &str) -> Plan {
         Plan::from_text(text, Path::new(GAME))
+    }
+
+    fn strings(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| (*value).to_owned()).collect()
+    }
+
+    #[test]
+    fn steams_command_drops_the_game_path_and_keeps_what_follows() {
+        let exe = Path::new(GAME).join(DEFAULT_EXE);
+        let given = strings(&[
+            r"C:\Games\Dark Souls II Scholar of the First Sin\Game\DarkSoulsII.exe",
+            "-windowed",
+        ]);
+        assert_eq!(game_arguments(&given, &exe), strings(&["-windowed"]));
+    }
+
+    #[test]
+    fn the_game_path_is_matched_by_name_whatever_the_case() {
+        let exe = Path::new(GAME).join(DEFAULT_EXE);
+        let given = strings(&["z:/elsewhere/darksoulsii.EXE"]);
+        assert!(game_arguments(&given, &exe).is_empty());
+    }
+
+    #[test]
+    fn no_arguments_is_no_arguments() {
+        let exe = Path::new(GAME).join(DEFAULT_EXE);
+        assert!(game_arguments(&[], &exe).is_empty());
+    }
+
+    #[test]
+    fn the_launchers_own_flags_never_reach_the_game() {
+        let exe = Path::new(GAME).join(DEFAULT_EXE);
+        let given = strings(&["--dry-run", "DarkSoulsII.exe", "a"]);
+        assert_eq!(game_arguments(&given, &exe), strings(&["a"]));
+    }
+
+    #[test]
+    fn an_argument_that_is_not_the_game_is_kept_even_first() {
+        let exe = Path::new(GAME).join(DEFAULT_EXE);
+        let given = strings(&["-windowed"]);
+        assert_eq!(game_arguments(&given, &exe), given);
+    }
+
+    #[test]
+    fn quoting_follows_the_rules_the_game_parses_with() {
+        assert_eq!(quote("plain"), "plain");
+        assert_eq!(quote(""), r#""""#);
+        assert_eq!(quote("has space"), r#""has space""#);
+        assert_eq!(quote(r#"say "hi""#), r#""say \"hi\"""#);
+        assert_eq!(quote(r"C:\dir with space\"), r#""C:\dir with space\\""#);
+        assert_eq!(quote(r#"a\"b"#), r#""a\\\"b""#);
+        assert_eq!(quote(r"no\space"), r"no\space");
+    }
+
+    #[test]
+    fn the_command_line_quotes_the_install_path() {
+        let exe = Path::new("/games/Dark Souls II/Game/DarkSoulsII.exe");
+        assert_eq!(
+            command_line(exe, &strings(&["-x"])),
+            r#""/games/Dark Souls II/Game/DarkSoulsII.exe" -x"#
+        );
     }
 
     /// The config file that ships in the download, read here by the reader that will read it
