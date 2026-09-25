@@ -5,10 +5,11 @@ the container is `ds2-save-file`'s **Save Game to File** row. It installs when t
 not otherwise; there is no key of its own in `ds2-mods.toml`, and removing `save-game-to-file` from
 `[menu_row] rows` is how it is turned back off.
 
-**Nothing here has been run.** Every address and every field offset is read out of
-`darksoulsii-deobf.bin` (SOTFS build 9527516) through the Ghidra daemon and
-`scripts/ds2-arxan-chain.py`; every behavioural claim about the game is a claim about its
-disassembly. The runtime test is the remaining step.
+Every address and every field offset was read out of `darksoulsii-deobf.bin` (SOTFS build 9527516)
+through the Ghidra daemon and `scripts/ds2-arxan-chain.py` before anything was written. What a run
+has and has not shown is in [What a run measured](#what-a-run-measured) at the bottom, and it is
+less than the reading: the refusal of a named request -- a bonfire, a quit to menu -- has not been
+observed yet, because a session nobody is playing never asks for one.
 
 Addresses are VAs, the form the disassembly prints. Subtract `0x140000000` for the RVA `ds2-rva`
 records.
@@ -120,3 +121,60 @@ it is tested on the host.
 * **Progress.** This is the feature, not a side effect: with it on, anything gained since the last
   press of the row is gone when the game closes. `ds2-build-import` applies a build to the live
   character and relies on a later save to persist it; under this feature that save is the row press.
+
+## What a run measured
+
+`python3 scripts/ds2-run.py --all-menu-rows --continue-slot 0`, 2026-09-24, SOTFS build 9527516 under
+Proton, DLL `1f12c451`. What the log says, in order:
+
+```text
+ds2-menu-row: registered RowId(2) row=save-game-to-file tab=Quit
+ds2-save-block: installed at 0x00000001402e6b00 -- this run does not save by itself: ...
+ds2-save-redirect: open-redirect ... write=true access=0x40000000 disposition=4 ... DS2SOFS0000.sl2
+ds2-save-redirect: open-redirect ... write=true access=0x40000000 disposition=4 ... DS2SOFS0000.sl2
+ds2-continue: silence restored by=start-ingame volume=1 source=game fmod_result=0
+ds2-save-block: the save tick is live system=0x00007ffff03a7f50 wanted=false deferred=false \
+                in-flight=false kind=15 autosave-elapsed=0.000s of 300s
+```
+
+Three things are settled by those lines. The row registers, so the gate works. The detour goes on the
+address the table records, in the live process, with Arxan live. And the update really is called with
+a game in progress -- which is the claim "installed" does not make, and the reason that line exists.
+
+**The two write-opens are the title flow's, not the character's.** They arrive between the shortened
+`process-window kind=101` -- the "saving system data" window -- and `start-ingame`, which is *before*
+the first call to `SaveLoadSystem::update` in the whole run. That is the out-of-scope writer named
+above, arriving exactly where the static reading says it would, and it is why the container's mtime
+moves on a load even with this feature on.
+
+### Then the run was quit, and a save was refused
+
+The session was ended from the pause menu's own `Quit Game` row, five minutes in:
+
+```text
+ds2-menu-row: quit-to-desktop requested system=0x000000000010fa60 offset=0x13a value=1 requests=1
+ds2-save-block: refused a save kind=10 deferred=false total=1 -- nothing was written; ...
+ds2-offline: detach refused connect=0 sendto=0 resolve=1 allowed-loopback=0
+```
+
+**Kind 10 on the way out, and the container did not move.** Its length and mtime were identical before
+and after the whole session -- the 18:12:44 stamp the load left, unchanged through five minutes in the
+world and through the exit -- and its MD5 matched byte for byte. That is the feature doing the thing it
+exists to do, on the path the user asked about first.
+
+Two smaller findings ride along. The exit asks for kind 10, which is not a kind any of the shipped
+callers of `RequestSave` passes explicitly -- worth remembering when reading that function's `min`. And
+`quit-to-desktop`, whose own documentation says it quits "with no confirmation and no save", plainly
+does reach a save request: what stopped the write here was this feature, not that row.
+
+### What is not measured yet
+
+* **Quit to the title menu**, as opposed to to the desktop. Its request site is read (`0x1401bf9cf`,
+  kind 1 or 3, followed by unconditional code) and has not been run.
+* **The permit.** No `Save Game to File` press has happened under this feature, so the countdown in
+  `policy` has not been exercised against the live `+0x1a4`/`+0x1a5`/`+0x60` gate -- which is the one
+  remaining way this feature could be wrong in the direction that costs something: a row that asks for
+  a save and gets it erased.
+* **The autosave, as an observation.** The 300-second timer was never reached in a run this short, so
+  "held at zero" is still a reading of the code plus one first-frame sample rather than a measurement
+  across the interval.
