@@ -32,6 +32,11 @@ ds2-dialog-skip.workspace = true
 ds2-game-base.workspace = true
 ds2-menu-row.workspace = true
 ds2-rva.workspace = true
+# The feature that refuses the game's own saves. Depended on for one call: a row that asks the game
+# to persist has to say so first, or its own request is the next thing that crate erases. Arming a
+# permit when nothing is installed moves a counter nobody reads, so the edge costs an unconfigured
+# run nothing. It does not depend on this crate, so the edge is one way.
+ds2-save-block.workspace = true
 ds2-save-redirect.workspace = true
 
 [lints]

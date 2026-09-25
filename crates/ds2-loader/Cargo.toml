@@ -65,6 +65,8 @@ ds2-offline.workspace = true
 ds2-save-redirect.workspace = true
 ds2-build-import.workspace = true
 ds2-save-file.workspace = true
+# Installed only when the `save-game-to-file` row registers; see `install_save_block`.
+ds2-save-block.workspace = true
 ds2-menu-row.workspace = true
 ds2-inventory-sort.workspace = true
 ds2-item-warn.workspace = true

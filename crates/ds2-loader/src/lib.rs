@@ -913,8 +913,16 @@ fn install_menu_row() {
     // ONE REGISTRATION SITE, IN THE ORDER THE LIST NAMES. The rows appear below the shipped ones in
     // registration order, so the list a player writes is the order they see -- which only holds if
     // nothing else registers a row behind this loop's back.
+    let mut manual_save_row = false;
     for row in &config.rows {
-        register_row(*row);
+        let registered = register_row(*row);
+        manual_save_row |= registered && *row == menu_row::Row::SaveGameToFile;
+    }
+    // Gated on that row having registered, not on it being listed. A run whose row was refused -- a
+    // full tab, a sealed registry -- has no way to save at all, and turning the game's own saving off
+    // in that run would take the character's progress with it.
+    if manual_save_row {
+        install_save_block();
     }
 
     // SAFETY: the target is a `.pdata` function start recorded in `ds2-rva`, resolved against the
@@ -937,7 +945,9 @@ fn install_menu_row() {
 /// action for. That is deliberate: an API only good enough for someone else's row and not for our own
 /// would look fine until someone else tried it. The refusal is logged in the row's own name, because
 /// `TabFull` on the third row and a hook that never installed are different problems.
-fn register_row(row: menu_row::Row) {
+///
+/// Returns whether the row is on the menu, which is what [`install_save_block`] is gated on.
+fn register_row(row: menu_row::Row) -> bool {
     let registered = match row {
         // The tint is the one three runs settled -- see `ds2_rva::FLO_ADDED_ROW_TINT_STRENGTH` for
         // the ramp and what each value looked like on screen.
@@ -956,16 +966,48 @@ fn register_row(row: menu_row::Row) {
         menu_row::Row::SaveGameToFile => ds2_save_file::register_export_row(log_line),
     };
     match registered {
-        Ok(id) => log_line(format_args!(
-            "{} registered {id:?} row={} tab=Quit",
-            ds2_menu_row::LOG_PREFIX,
-            row.name()
-        )),
-        Err(error) => log_line(format_args!(
-            "{} NOT REGISTERED row={}: {error}",
-            ds2_menu_row::LOG_PREFIX,
-            row.name()
-        )),
+        Ok(id) => {
+            log_line(format_args!(
+                "{} registered {id:?} row={} tab=Quit",
+                ds2_menu_row::LOG_PREFIX,
+                row.name()
+            ));
+            true
+        }
+        Err(error) => {
+            log_line(format_args!(
+                "{} not registered row={}: {error}",
+                ds2_menu_row::LOG_PREFIX,
+                row.name()
+            ));
+            false
+        }
+    }
+}
+
+/// Refuse the game's own saves, because this run has a row that saves on purpose.
+///
+/// No config key of its own, by request: the player who put `save-game-to-file` on the menu saves
+/// through it, so the row's presence is the switch. A run without the row saves exactly as DARK SOULS
+/// II always did, and removing the row from `rows` is how the feature is turned back off.
+///
+/// What it costs is worth stating plainly, because it is not a preference -- it is the feature:
+/// nothing gained since the last press of that row survives the game closing. The five-minute
+/// autosave, the save on the way out to the title, and the bonfire's are all gone.
+fn install_save_block() {
+    ds2_save_block::set_logger(log_line);
+    // SAFETY: the target is a `.pdata` function start recorded in `ds2-rva`, resolved against the
+    // live module base, and `scripts/ds2-arxan-chain.py` reports a clean prologue at it rather than
+    // an Arxan redirect. The detour re-reads that prologue and patches nothing if it is not the six
+    // bytes recorded there, and it declares the signature the disassembled entry implements: the
+    // system in RCX and a frame delta in XMM1.
+    let outcome = unsafe { ds2_save_block::install() };
+    if !outcome.installed {
+        log_line(format_args!(
+            "{} the game still saves by itself this run -- the row will save on top of whatever it \
+             wrote",
+            ds2_save_block::LOG_PREFIX
+        ));
     }
 }
 

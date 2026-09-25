@@ -80,6 +80,11 @@ pub fn request_save(system: usize) -> bool {
         ));
         return false;
     }
+    // BEFORE the request, and it has to be: `ds2-save-block` erases pending requests on the save
+    // system's next update, and it cannot tell this crate's request from a bonfire's. A permit armed
+    // after the call would be armed one frame too late on a frame the game was ready to save.
+    // Inert when that feature is not installed, which is every run without the row.
+    ds2_save_block::permit_save();
     // SAFETY: the prologue matches the function `ds2-rva` transcribed, the signature is the one its
     // disassembly implements (pointer in RCX, kind in EDX, no return), and `system` is a live
     // `SaveLoadSystem` reached through two recorded hops. Called on the game thread from the menu's
