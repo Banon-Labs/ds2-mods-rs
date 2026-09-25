@@ -70,7 +70,10 @@ fn inflate(bytes: &[u8], expected: usize) -> Result<Vec<u8>, String> {
     let out = miniz_oxide::inflate::decompress_to_vec_zlib(bytes)
         .map_err(|error| format!("zlib stream did not inflate: {error:?}"))?;
     if out.len() != expected {
-        return Err(format!("inflated to {} bytes, header says {expected}", out.len()));
+        return Err(format!(
+            "inflated to {} bytes, header says {expected}",
+            out.len()
+        ));
     }
     Ok(out)
 }
@@ -93,7 +96,10 @@ pub fn member_from_bundle(dcx: &[u8], stock_id: u32) -> Result<Vec<u8>, String> 
         .get(0x1c..0x20)
         .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize)
         .ok_or("DCX header is truncated")?;
-    let bnd = inflate(dcx.get(DCX_PAYLOAD_OFFSET..).ok_or("DCX has no payload")?, declared)?;
+    let bnd = inflate(
+        dcx.get(DCX_PAYLOAD_OFFSET..).ok_or("DCX has no payload")?,
+        declared,
+    )?;
     if bnd.get(..4) != Some(b"BND4") {
         return Err("DCX payload is not a BND4".to_owned());
     }
@@ -115,7 +121,11 @@ pub fn member_from_bundle(dcx: &[u8], stock_id: u32) -> Result<Vec<u8>, String> 
         let data = bnd
             .get(offset..offset + stored)
             .ok_or("BND4 member points outside the file")?;
-        return if stored == inflated { Ok(data.to_vec()) } else { inflate(data, inflated) };
+        return if stored == inflated {
+            Ok(data.to_vec())
+        } else {
+            inflate(data, inflated)
+        };
     }
     Err(format!("{wanted} is not in the bundle"))
 }
@@ -146,7 +156,9 @@ fn layout(ffx: &[u8]) -> Result<(usize, u16), String> {
     let mut param_class = None;
     for index in 0..count {
         let length = u32_at(ffx, at).ok_or("class table is truncated")? as usize;
-        let name = ffx.get(at + 4..at + 4 + length).ok_or("class table is truncated")?;
+        let name = ffx
+            .get(at + 4..at + 4 + length)
+            .ok_or("class table is truncated")?;
         if name == PARAM_CLASS.as_bytes() {
             param_class = Some(index + 1);
         }
@@ -237,7 +249,10 @@ mod tests {
         assert_eq!(i32_at(&stripped, root + OBJECT_HEADER + 4), Some(25_833));
         assert_eq!(i32_at(&stripped, stripped.len() - 4), Some(0));
         let changed = stock.iter().zip(&stripped).filter(|(a, b)| a != b).count();
-        assert!(changed <= 8, "only the id and the child reference may change, {changed} did");
+        assert!(
+            changed <= 8,
+            "only the id and the child reference may change, {changed} did"
+        );
     }
 
     #[test]
@@ -259,11 +274,15 @@ mod tests {
     /// and the sparkle cut on all seven colours, with the bytes the game actually loads.
     #[test]
     fn strips_all_seven_colours_from_the_installed_bundle() {
-        let Some(home) = std::env::var_os("HOME") else { return };
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
         let bundle = std::path::Path::new(&home)
             .join(".local/share/Steam/steamapps/common/Dark Souls II Scholar of the First Sin/Game")
             .join(BUNDLE_RELATIVE_PATH);
-        let Ok(dcx) = std::fs::read(&bundle) else { return };
+        let Ok(dcx) = std::fs::read(&bundle) else {
+            return;
+        };
         for stock in ds2_rva::PRISM_STONE_SFX_IDS {
             let ffx = member_from_bundle(&dcx, stock).unwrap();
             let stripped = strip_sparkles(&ffx, stripped_id(stock)).unwrap();
