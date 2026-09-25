@@ -4185,8 +4185,8 @@ def main() -> int:
             "put a red badge in the bottom-left of any weapon icon whose stat requirements this "
             "character does not meet. OFF without this flag, matching the DLL, because the feature "
             "patches the frontend's layout builder and its cell bind and no run has yet put it on "
-            "screen. It answers with the DETAIL PANE's check, which ignores grip -- two-handing "
-            "halves a weapon's Strength requirement and the badge will not know."
+            "screen. It answers with the DETAIL PANE's check, except that while two-handing it "
+            "halves the Strength requirement the way the game's damage check does."
         ),
     )
     parser.add_argument(
