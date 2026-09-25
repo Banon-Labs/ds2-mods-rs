@@ -46,7 +46,7 @@
 //! its state 0 (everything hidden). While the options block does not exist the original runs
 //! untouched. See [`icon_visibility`] and `ds2_rva::FE_VOICE_CHAT_ICON_UPDATE`.
 //!
-//! The icon's animation plays at [`ICON_PLAYBACK_RATE`], a tenth of the shipped speed: the same
+//! The icon's animation plays at [`ICON_PLAYBACK_RATE`], a sixth of the shipped speed: the same
 //! detour writes that rate into every sprite of the icon's own layout scene ([`icon_sprites`]),
 //! and the game's sprite tick multiplies its delta by it. Other HUD elements keep their speed.
 
@@ -220,12 +220,12 @@ pub const fn icon_visibility(voice_chat: u8) -> [u8; 4] {
     icon_state_word(voice_chat).to_le_bytes()
 }
 
-/// The HUD icon's playback rate: a tenth of the game's own, because the shipped animation is
-/// distracting.
+/// The HUD icon's playback rate: a sixth of the game's own, because the shipped animation is
+/// distracting. A tenth was tried live first and the user found it too slow.
 ///
 /// Written into every `FeComponentSprite` of the icon's layout (`ds2_rva::FE_SPRITE_RATE_OFFSET`),
 /// which the sprite tick multiplies its delta by. Nothing outside the icon's own scene is touched.
-pub const ICON_PLAYBACK_RATE: f32 = 0.1;
+pub const ICON_PLAYBACK_RATE: f32 = 1.0 / 6.0;
 
 /// Most components [`icon_sprites`] visits. The icon's layout has fifteen records; a live tree past
 /// this is not the icon's, and the walk stops rather than wander.
@@ -520,8 +520,8 @@ mod tests {
     const SHAPE: u32 = ds2_rva::FE_COMPONENT_TEXTURE_SHAPE_VTABLE;
 
     #[test]
-    fn the_rate_is_a_tenth() {
-        assert_eq!(ICON_PLAYBACK_RATE, 0.1);
+    fn the_rate_is_a_sixth() {
+        assert_eq!(ICON_PLAYBACK_RATE, 1.0 / 6.0);
     }
 
     /// The icon's own shape: root sprite (def 0x3b) -> object -> sprite (def 0x3a) -> a shape and
