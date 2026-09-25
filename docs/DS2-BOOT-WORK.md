@@ -652,7 +652,8 @@ and half of this one did not survive it.
 
 ## Fixed, measured: 875 ms off the boot, and the other second was never a floor
 
-`[title_skip] substate_floors`, on by default, `--no-substate-floors` to rule it out. It detours
+`[title_skip] substate_floors`, off by default since 2026-09-25 (`ds2-run.py` writes it on),
+`--no-substate-floors` to rule it out. It detours
 each substate's `enter`, lets the original run, then writes `2.0` into that class's own elapsed
 field so the game's own `comiss` passes the first time its branch is reached.
 

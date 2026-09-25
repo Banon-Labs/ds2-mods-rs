@@ -22,16 +22,13 @@ pub struct IntroSkipConfig {
 }
 
 impl Default for IntroSkipConfig {
-    /// **On.** Removing the boot screens is what this mod is for; making that conditional on a
-    /// flag means the default experience is the one nobody wanted.
+    /// Off, like every feature here (user directive 2026-09-25): a config that says nothing is the
+    /// game as shipped, boot screens included. `enabled = true` turns it on.
     ///
-    /// It is still a key rather than a constant, and that is the part that matters. This patches
-    /// executable memory in three places during startup, so if a future run fails to boot, the
-    /// first question is whether this is why -- and `enabled = false` answers it by editing one
-    /// line, with no rebuild and no rebuilt DLL to stage. A default that cannot be turned off is
-    /// a default that cannot be ruled out.
+    /// This patches executable memory in three places during startup, so if a run fails to boot,
+    /// the first question is whether this is why -- and one line answers it, with no rebuild.
     fn default() -> Self {
-        Self { enabled: true }
+        Self { enabled: false }
     }
 }
 
@@ -45,13 +42,10 @@ impl IntroSkipConfig {
             return Self::default();
         };
         let parsed = KeyValues::parse(&text);
-        let enabled = match parsed.get(CONFIG_SECTION, KEY_ENABLED) {
-            None => Self::default().enabled,
-            // Only an exact `false` turns it off. A typo therefore leaves the feature ON, which
-            // is the harmless direction now that on is the default: the failure mode of a
-            // misspelled value is "the mod still works", not "the mod silently stopped".
-            Some(raw) => !matches!(raw.trim().trim_matches('"'), "false"),
-        };
+        // Only an exact `true` turns it on, so a typo leaves the game as shipped.
+        let enabled = parsed
+            .get(CONFIG_SECTION, KEY_ENABLED)
+            .is_some_and(|raw| raw.trim().trim_matches('"') == "true");
         Self { enabled }
     }
 
