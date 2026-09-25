@@ -17,6 +17,22 @@
 //! single `ChrType 7` sitting among 582 map NPCs. A vtable comparison cannot make that error:
 //! either the object is that class or it is not.
 //!
+//! # A player is not the same thing as a person
+//!
+//! The class test is exact and it is not enough, because the game builds recordings out of that
+//! class too. A bloodstain replay and a wandering ghost are `PlayerCtrl` objects with a position,
+//! and for one live run this crate drew a route to one while the player was alone in the map and
+//! reported `players=2 remotes=1 nearest=33m` for it.
+//!
+//! So the class test picks the candidates and [`is_replay`] discards the recordings, using the
+//! engine's own test rather than a new one: `0x14016f740` reads a byte off the character's phantom
+//! block and calls the character a replay when it is `0x12` or `0x13`, which is exactly the pair
+//! that the replay spawner at `0x1401a0d20` writes. `assignPhantomProperties` asks that question
+//! about every character it builds, so this crate asks it the same way.
+//!
+//! The name is read alongside it and only to say so in the log. `GhostPlayer_000042 rejected` is a
+//! sentence a reader can check; `remotes=1` was not.
+//!
 //! # Everything refuses rather than faults
 //!
 //! Every hop is null-checked and every read goes through `ds2-game-base`'s fault-safe readers,
@@ -25,7 +41,7 @@
 //! has gone stale between two reads is to return a shorter roster this frame, not to take the
 //! session down.
 
-use ds2_game_base::mem::{game_rva, safe_read_f32, safe_read_usize};
+use ds2_game_base::mem::{game_rva, safe_read_f32, safe_read_u8, safe_read_u16, safe_read_usize};
 
 /// One other player in the session.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -50,8 +66,16 @@ pub(crate) struct Census {
     pub(crate) characters: usize,
     /// Of those, objects whose vtable is `PlayerCtrl`'s.
     pub(crate) players: usize,
-    /// Of those, ones that are not the local player.
+    /// Of those, ones that are not the local player and are not a recording.
     pub(crate) remotes: usize,
+    /// Of the non-local players, the ones [`is_replay`] threw out: bloodstain replays and
+    /// wandering ghosts.
+    ///
+    /// This is the count that explains a quiet overlay in a busy map. `remotes=0 phantoms=3` is
+    /// "three recordings were walking past and none of them was a person", which is a different
+    /// sentence from `remotes=0 phantoms=0`, and before this field existed both of them were
+    /// printed as `remotes=3`.
+    pub(crate) phantoms: usize,
     /// Entries skipped because a read failed or a pointer was null. A non-zero value here is the
     /// difference between "there was nobody" and "the walk gave up part way".
     pub(crate) skipped: usize,
@@ -142,6 +166,75 @@ fn position(character: usize) -> Option<[f32; 3]> {
 pub(crate) fn local_position() -> Option<[f32; 3]> {
     let (player, _, _) = world()?;
     position(player)
+}
+
+/// Is this character a recording rather than somebody in your session?
+///
+/// `None` means the question could not be answered, which the caller counts as a skip. Refusing
+/// is the conservative direction here: an unreadable character is left out of the roster rather
+/// than routed to on the assumption that it is a person.
+///
+/// The test is `0x14016f740`'s second clause, on the same byte it reads:
+/// [`ds2_rva::PHANTOM_BLOCK_PHANTOM_PARAM_OFFSET`] on the character's phantom block is one of
+/// [`ds2_rva::REPLAY_PHANTOM_PARAM_IDS`]. That constant's own documentation traces the pair back
+/// to the spawner that writes it, which decodes a recorded blob into the character it has just
+/// built and expires it on a stored duration.
+///
+/// The function's first clause -- a session-kind byte indexed into a table -- is the one that
+/// also decides whether the factory names the result `GhostPlayer_%06u`, so [`name`] reports it
+/// in the log without this having to index a table of unknown length off a byte read out of live
+/// memory.
+fn is_replay(character: usize) -> Option<bool> {
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
+    let block = non_null(unsafe {
+        safe_read_usize(character + ds2_rva::CHARACTER_CTRL_PHANTOM_BLOCK_OFFSET)?
+    })?;
+    // SAFETY: as above -- a freed phantom block answers None rather than faulting.
+    let phantom_param =
+        unsafe { safe_read_u8(block + ds2_rva::PHANTOM_BLOCK_PHANTOM_PARAM_OFFSET)? };
+    Some(ds2_rva::REPLAY_PHANTOM_PARAM_IDS.contains(&phantom_param))
+}
+
+/// Longest name this will read. Sixty-four characters is three times the longest the player
+/// factories can format, and the cap exists so a torn length field cannot turn one log line into
+/// a megabyte of stack-scraped text.
+const NAME_LIMIT: usize = 64;
+
+/// The name the factory gave this character, for the log and nothing else.
+///
+/// Nothing branches on this. It exists so that a rejected character can be named in the line that
+/// rejects it -- `GhostPlayer_000042` says what the count `phantoms=1` cannot.
+///
+/// [`ds2_rva::CHARACTER_CTRL_NAME_OFFSET`] is an MSVC `std::wstring`, so the characters are
+/// either inline or behind the pointer in the same slot, and which one is decided by the capacity
+/// exactly as every reader in the image decides it.
+fn name(character: usize) -> Option<String> {
+    let string = character + ds2_rva::CHARACTER_CTRL_NAME_OFFSET;
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
+    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
+    // moved or was freed answers None rather than faulting.
+    let length = unsafe { safe_read_usize(string + ds2_rva::WSTRING_LEN_OFFSET)? };
+    // SAFETY: as above.
+    let capacity = unsafe { safe_read_usize(string + ds2_rva::WSTRING_CAPACITY_OFFSET)? };
+    // A length past the capacity is a torn read of two fields the game was writing, not a name.
+    if length == 0 || length > capacity {
+        return None;
+    }
+    let characters = if capacity > ds2_rva::WSTRING_SSO_MAX {
+        // SAFETY: as above -- and the pointer is null-checked before it is read through.
+        non_null(unsafe { safe_read_usize(string)? })?
+    } else {
+        string
+    };
+    let mut out = String::new();
+    for index in 0..length.min(NAME_LIMIT) {
+        // SAFETY: as above -- within the length the string declared, and fault-safe beyond it.
+        let unit = unsafe { safe_read_u16(characters + index * 2)? };
+        out.push(char::from_u32(u32::from(unit)).unwrap_or('?'));
+    }
+    Some(out)
 }
 
 /// Most roster entries one pass will walk.
@@ -240,6 +333,16 @@ pub(crate) fn remotes(max: usize) -> Option<(Vec<Player>, Census)> {
         }
         census.players += 1;
         if ctrl == local {
+            return;
+        }
+        // The class says this is a player. It does not say this is a person -- see the module
+        // header, and `is_replay`'s own doc for the engine function this borrows the test from.
+        let Some(replay) = is_replay(ctrl) else {
+            census.skipped += 1;
+            return;
+        };
+        if replay {
+            census.phantoms += 1;
             return;
         }
         census.remotes += 1;
@@ -350,6 +453,51 @@ pub(crate) fn self_check_target(latched: Option<usize>) -> Option<Player> {
     // loading. That is fixed at the moment of the FIRST pick instead: see `ROSTER_SETTLE_FRAMES`
     // in `lib.rs`.
     held.or(best)
+}
+
+/// Every non-local `PlayerCtrl` [`remotes`] threw out as a recording, named, as one line.
+///
+/// # Why this exists
+///
+/// The user reported the overlay routing to something while they were alone in the map, and the
+/// only evidence this crate could offer was `players=2 remotes=1 nearest=33m` -- three numbers
+/// that agree with "an invader is here" and with "a bloodstain replay walked past", and separate
+/// them not at all. A count cannot be checked against what is on the screen. A name can.
+///
+/// Walks the roster a second time rather than carrying names out of [`remotes`], because
+/// [`remotes`] runs on every frame and this runs only when the counts change.
+pub(crate) fn describe_phantoms(limit: usize) -> String {
+    let Some((local, begin, end)) = world() else {
+        return "no world".to_string();
+    };
+    let Ok(player_vtable) = game_rva(ds2_rva::PLAYER_CTRL_VTABLE) else {
+        return "no PlayerCtrl vtable".to_string();
+    };
+    let local_position = position(local);
+    let mut found: Vec<String> = Vec::new();
+    walk_roster(begin, end, |entry| {
+        let Entry::Object { ctrl, vtable } = entry else {
+            return;
+        };
+        if vtable != player_vtable || ctrl == local || is_replay(ctrl) != Some(true) {
+            return;
+        }
+        let distance = local_position
+            .zip(position(ctrl))
+            .map(|(here, there)| crate::geometry::length(crate::geometry::sub(there, here)));
+        found.push(format!(
+            "{} at 0x{:012x}{}",
+            name(ctrl).unwrap_or_else(|| "<unnamed>".to_string()),
+            ctrl,
+            distance.map_or_else(String::new, |metres| format!(" {metres:.1}m"))
+        ));
+    });
+    let total = found.len();
+    found.truncate(limit);
+    if total > limit {
+        found.push(format!("and {} more", total - limit));
+    }
+    found.join("; ")
 }
 
 /// Every `CharacterCtrl` in the roster, nearest first, as one line.

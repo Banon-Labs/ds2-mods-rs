@@ -98,8 +98,12 @@
 //! come away from the player's body.
 //!
 //! **Still unmeasured: whether the overlay is USEFUL.** Every run so far has been offline and
-//! solo, so the `remotes=1` in them is an NPC phantom or a bloodstain replay -- DARK SOULS II
-//! builds both from the same class (see `crate::census`) -- rather than an invader.
+//! solo, and the `remotes=1` in them was never an invader: DARK SOULS II builds bloodstain
+//! replays and wandering ghosts out of the same class as a person, and this crate counted them.
+//! It no longer does -- `crate::census::is_replay` throws them out using the engine's own test,
+//! and the roster line names each one it threw out -- but that means no run so far has routed to
+//! a human being, and the thing the overlay exists to do remains untested in the only way that
+//! would settle it.
 //!
 //! # What it does to the game
 //!
@@ -234,7 +238,11 @@ mod windows_impl {
         /// Whether the last pass found the world, likewise, and `true` for the same reason.
         had_world: bool,
         /// The last roster counts logged, so the line is written on change rather than per frame.
-        last_census: Option<(usize, usize, usize, usize)>,
+        ///
+        /// The whole [`census::Census`] rather than a tuple of its fields: a tuple has to be
+        /// widened by hand every time a count is added, and the compiler only notices because the
+        /// arity stops matching, not because the line went stale.
+        last_census: Option<census::Census>,
         /// The last (routes, arrows, vertices) triple logged, likewise.
         last_drawn: Option<(usize, usize, usize)>,
         /// The effect id last handed to the tick, so a change of target writes one line rather
@@ -697,22 +705,17 @@ mod windows_impl {
         // narrows it further still, to "the local player was found and nobody else was".
         //
         // Logged on change rather than per frame, because this runs sixty times a second.
-        let fingerprint = (
-            census.characters,
-            census.players,
-            census.remotes,
-            census.skipped,
-        );
         // Captured BEFORE the line below overwrites it: the settle gate further down needs to
         // know whether the roster CHANGED this frame, and by then `last_census` always matches.
-        let roster_changed = state.last_census != Some(fingerprint);
+        let roster_changed = state.last_census != Some(census);
         if roster_changed {
-            state.last_census = Some(fingerprint);
+            state.last_census = Some(census);
             log(format_args!(
-                "roster: characters={} players={} remotes={} skipped={} nearest={}",
+                "roster: characters={} players={} remotes={} phantoms={} skipped={} nearest={}",
                 census.characters,
                 census.players,
                 census.remotes,
+                census.phantoms,
                 census.skipped,
                 // The nearest distance is what says whether `near_suppress_meters` is the reason
                 // nothing is on screen. Without it, "suppressed because they are close" and
@@ -722,6 +725,15 @@ mod windows_impl {
                     |player| format!("{:.0}m", player.distance)
                 )
             ));
+            // Name the recordings that were thrown out, so "the overlay is ignoring that figure
+            // over there" is a claim the log can settle. Only when there are any, and only on the
+            // same change that wrote the line above -- it walks the roster again.
+            if census.phantoms > 0 {
+                log(format_args!(
+                    "roster: not people -- {}",
+                    census::describe_phantoms(state.config.max_targets)
+                ));
+            }
         }
 
         // A ROUTE AND A TRAIL PER PERSON, UP TO `max_routes`, AND THE REST KEEP THEIR ARROWS.
