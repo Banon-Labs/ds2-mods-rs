@@ -157,7 +157,13 @@ fn session_extension() -> &'static str {
 const DOWNLOADS_WINDOWS_PREFIX: &str = "Z:\\";
 
 /// Where to start browsing. Downloads first, then the folder above the player's own save.
-fn start_directory() -> Option<PathBuf> {
+///
+/// Shared with the export row, which is the point: the two dialogs are one round trip to the
+/// player -- save a character out, browse back to it later -- and a save dialog that opens
+/// somewhere the load dialog never goes makes them hunt for the file they just wrote. It used to
+/// open in the live container's own folder, which after a swap is `ds2-swapped-save` inside the
+/// game install.
+pub(crate) fn start_directory() -> Option<PathBuf> {
     if let Some(downloads) = downloads_directory() {
         return Some(downloads);
     }
@@ -351,11 +357,12 @@ pub fn load_from_file() {
         handoff_file.display()
     ));
 
-    // NOW SAVE THE CHARACTER THE PLAYER IS LEAVING, and quit only once it has landed. The redirect is
-    // not armed in this session, so this save goes to their own directory.
-    let source = ds2_save_redirect::live_directory()
-        .map(|dir| dir.join(ds2_save_redirect::active_save_file_name()));
-    let Some(source) = source else {
+    // Save the character the player is leaving, and quit only once it has landed. Which file
+    // that lands in is `ds2-save-redirect`'s answer and not this module's guess: press this row a
+    // second time in one session and the character being left is a swapped-in one, whose save goes
+    // to the staged copy through the open redirect. Watching the player's own container there would
+    // watch a file nothing writes, and the wait would run its deadline out on every swap.
+    let Some(source) = ds2_save_redirect::live_container() else {
         log_line(format_args!(
             "{LOG_PREFIX} import QUITTING WITHOUT SAVING -- no live save directory is known, so \
              there is nothing to wait for"

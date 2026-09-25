@@ -211,6 +211,25 @@ SAVE_FILE_LOG_PREFIX = "ds2-save-file:"
 #: Load Character from File row writes and the loader consumes on the NEXT launch.
 SAVE_FILE_HANDOFF_NAME = "ds2-load-next-save.txt"
 
+#: Mirrors `CONFIG_SECTION`/`KEY_DIRECTORY` in `crates/ds2-loader/src/save_redirect.rs`.
+SAVE_REDIRECT_SECTION = "save_redirect"
+KEY_SAVE_REDIRECT_DIRECTORY = "directory"
+
+#: Wine maps `Z:` to `/`, and the DLL runs INSIDE the prefix, so a folder on this machine reaches
+#: the game as `Z:\home\you\...`. `--save-dir` takes either spelling and this is the conversion --
+#: done here rather than asked of the person typing it, because a path that is one backslash wrong
+#: produces a game with no saves and nothing on screen to say why.
+def windows_path(path: str) -> str:
+    """`/home/you/DS2 Saves` -> `Z:\\home\\you\\DS2 Saves`. A drive-lettered path is left alone."""
+    text = path.strip()
+    if not text:
+        return ""
+    # Already Windows: a drive letter and a colon, or a UNC root. Nothing to do, and guessing at it
+    # would mangle the one spelling that was already correct.
+    if len(text) >= 2 and text[1] == ":" or text.startswith("\\\\"):
+        return text
+    return "Z:" + str(Path(text).expanduser().resolve()).replace("/", "\\")
+
 #: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/build_import.rs`.
 BUILD_IMPORT_SECTION = "build_import"
 
@@ -1111,6 +1130,7 @@ def config_text(
     invasion_path_marker_effect_id: int = 0,
     invasion_path_npc_self_check: bool = False,
     input_harness: bool = False,
+    save_directory: str = "",
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
@@ -1551,6 +1571,28 @@ def config_text(
 {KEY_INVENTORY_SORT_KEY} = "{inventory_sort_key}"
 {KEY_INVENTORY_SORT_PAD} = "{inventory_sort_pad}"
 
+[{SAVE_REDIRECT_SECTION}]
+# Startup-only, and the one key here that can change where your progress is written. The game's own
+# save-directory builder is answered with this folder, so DS2 opens its own container name inside it
+# and both reads and writes that file for the rest of the session.
+#
+# Nothing is copied, and that is the whole design. The key this replaces named a `.sl2` file, and a
+# file cannot be played in place by a game that builds its own container name -- so it copied the
+# file into a staging folder, pointed the game there, and rewrote the copy from the same source on
+# the next launch. Every session started that way silently threw away its own progress. A folder
+# needs no copy, so there is no duplicate to play and nothing to overwrite.
+#
+# Empty means the game's own directory, which is the only safe default: a save location guessed on
+# the player's behalf is one they did not choose. `--save-dir` writes this; it takes a Linux path
+# and converts it, since the DLL runs inside the Proton prefix and sees `/home/you` as
+# `Z:\\home\\you`.
+#
+# A folder that is not there is refused, and the loader says so. It is not created, because DS2
+# hides the `LOAD GAME` row when it finds no container -- so a typo'd path would look exactly like
+# a save that had gone missing. A folder that exists but is empty is fine and starts a fresh
+# character there.
+{KEY_SAVE_REDIRECT_DIRECTORY} = "{save_directory}"
+
 [{ITEM_WARN_SECTION}]
 # STARTUP-ONLY. A red badge on the icon of any weapon whose stat requirements the character does
 # not meet, in the bottom-left of the cell, drawn by `ds2-item-warn`.
@@ -1761,6 +1803,7 @@ def write_config(
     invasion_path_marker_effect_id: int = 0,
     invasion_path_npc_self_check: bool = False,
     input_harness: bool = False,
+    save_directory: str = "",
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
@@ -1797,6 +1840,7 @@ def write_config(
         invasion_path_marker_effect_id,
         invasion_path_npc_self_check,
         input_harness,
+        save_directory,
     )
     path.write_text(text, encoding="utf-8")
     return path, text
@@ -1891,6 +1935,7 @@ def dry_run(
     invasion_path_marker_effect_id: int = 0,
     invasion_path_npc_self_check: bool = False,
     input_harness: bool = False,
+    save_directory: str = "",
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
@@ -1945,6 +1990,7 @@ def dry_run(
             invasion_path_marker_effect_id,
             invasion_path_npc_self_check,
             input_harness,
+            save_directory,
         ):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
         else:
@@ -1995,6 +2041,7 @@ def dry_run(
                 invasion_path_marker_effect_id=invasion_path_marker_effect_id,
                 invasion_path_npc_self_check=invasion_path_npc_self_check,
                 input_harness=input_harness,
+                save_directory=save_directory,
             ),
             indent="[dry-run]   | ",
         )
@@ -2419,6 +2466,7 @@ def launch(
     invasion_path_marker_effect_id: int = 0,
     invasion_path_npc_self_check: bool = False,
     input_harness: bool = False,
+    save_directory: str = "",
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
@@ -2468,6 +2516,7 @@ def launch(
         invasion_path_marker_effect_id,
         invasion_path_npc_self_check,
         input_harness,
+        save_directory,
     )
     print(f"[config] {config_path}")
 
@@ -3050,6 +3099,35 @@ def selftest() -> int:
         values.get((INTRO_SECTION, KEY_INTRO_ENABLED)) == "false",
         f"--no-intro-skip writes [{INTRO_SECTION}] {KEY_INTRO_ENABLED} = false",
     )
+
+    # The save folder, whose default has to be empty. An arm that wrote a path nobody asked for
+    # would move where a player's progress is written, which is the one setting here that can lose
+    # a character, so "unset unless asked" is asserted rather than assumed.
+    values, _ = parse_config(config_text("off"))
+    check(
+        values.get((SAVE_REDIRECT_SECTION, KEY_SAVE_REDIRECT_DIRECTORY)) == "",
+        f"[{SAVE_REDIRECT_SECTION}] {KEY_SAVE_REDIRECT_DIRECTORY} defaults to empty -- the game's "
+        "own directory",
+    )
+    values, _ = parse_config(config_text("off", save_directory="Z:\\home\\you\\DS2 Saves\\new"))
+    check(
+        values.get((SAVE_REDIRECT_SECTION, KEY_SAVE_REDIRECT_DIRECTORY))
+        == "Z:\\home\\you\\DS2 Saves\\new",
+        f"--save-dir writes [{SAVE_REDIRECT_SECTION}] {KEY_SAVE_REDIRECT_DIRECTORY}, backslashes "
+        "and spaces intact",
+    )
+    # The conversion the flag does before it ever reaches the config. A path that is one separator
+    # wrong produces a game with no saves and nothing on screen to say why, so both directions are
+    # pinned: a Linux path is converted, and a path that is already Windows is left alone.
+    check(
+        windows_path("/home/you/DS2 Saves/new") == "Z:\\home\\you\\DS2 Saves\\new",
+        "windows_path converts a Linux path to the Z: spelling the prefix sees",
+    )
+    check(
+        windows_path("Z:\\home\\you\\DS2 Saves\\new") == "Z:\\home\\you\\DS2 Saves\\new",
+        "windows_path leaves a drive-lettered path exactly as typed",
+    )
+    check(windows_path("") == "", "windows_path leaves an unset value unset")
 
     # THE DIALOG SKIP IS A SEPARATE SWITCH, and the point of asserting both here is that they are
     # INDEPENDENT. One flag turning both off would make a boot failure attributable to "the mod"
@@ -3913,6 +3991,23 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--save-dir",
+        dest="save_dir",
+        default="",
+        metavar="DIR",
+        help=(
+            "play out of this folder instead of the game's own save directory, for the whole "
+            "launch. The game opens its own container name inside it and reads and writes that "
+            "file, so a character autoloaded from here saves back into here. Nothing is copied "
+            "in either direction -- which is the difference from the `[save_redirect] path` key "
+            "this replaces, whose copy the next launch overwrote and whose sessions therefore "
+            "lost everything done in them. Takes a Linux path and converts it for the prefix, so "
+            "`--save-dir '~/Downloads/DS2 Saves/new'` is what you type. A folder that does not "
+            "exist is refused by the DLL and named in the log; an existing empty one is a fresh "
+            "start."
+        ),
+    )
+    parser.add_argument(
         "--input-harness",
         dest="input_harness",
         action="store_true",
@@ -4032,6 +4127,7 @@ def main() -> int:
             args.invasion_path_marker_effect_id,
             args.invasion_path_npc_self_check,
             args.input_harness,
+            windows_path(args.save_dir),
         )
     return launch(
         args.probe,
@@ -4067,6 +4163,7 @@ def main() -> int:
         args.invasion_path_marker_effect_id,
         args.invasion_path_npc_self_check,
         args.input_harness,
+        windows_path(args.save_dir),
     )
 
 

@@ -94,6 +94,7 @@ pub mod inventory_sort;
 pub mod item_warn;
 pub mod menu_row;
 pub mod offline;
+pub mod save_redirect;
 pub mod seamless;
 pub mod title_menu;
 pub mod title_skip;
@@ -495,11 +496,17 @@ fn install_save_redirect() {
     // file exists because somebody asked for it, and leaving it unconsumed would arm it on some later
     // launch nobody connects to the request.
     //
-    // THERE IS NO `[save_redirect] path` KEY ANY MORE. It pointed a whole launch at a file and never
+    // There is no `[save_redirect] path` key any more. It pointed a whole launch at a file and never
     // opened that file: it copied it into the staging directory, pointed the game there, and
     // rewrote the copy on the next launch, so a session started that way threw away everything done
     // in it. A config key that discards the player's progress while its help says "load the save at
     // WINPATH" is worse than no key, and the pause-menu row is the thing that actually does this.
+    //
+    // `[save_redirect] directory` is the standing key that replaced it, and it names a FOLDER,
+    // which is what makes it safe: there is nothing to copy, so there is no duplicate to play and
+    // no overwrite to lose. It is read below, after the handoff, because the handoff has to win --
+    // that file is what the player asked for in the pause menu one launch ago, and the directory is
+    // a default they set once.
     ds2_save_file::set_logger(log_line);
     let source = ds2_save_file::take_handoff().map(|path| path.to_string_lossy().into_owned());
     if let Some(path) = source.as_deref() {
@@ -519,6 +526,15 @@ fn install_save_redirect() {
                 ds2_save_redirect::LOG_PREFIX
             )),
         }
+    }
+    // The standing folder, read whether or not a handoff took: the line it writes is the only way
+    // to tell a key that was never read from one that was read and refused, and a player whose
+    // handoff won still wants to see that their default was noticed. `set_directory` is what
+    // refuses a missing folder, and `redirect_directory` is what lets the handoff above win.
+    let configured = save_redirect::SaveRedirectConfig::load();
+    log_line(format_args!("{}", configured.describe()));
+    if let Some(directory) = configured.directory.as_deref() {
+        ds2_save_redirect::set_directory(directory);
     }
     // SAFETY: one MinHook detour on `ds2_rva::SAVE_DIR_BUILD`, checked with
     // `scripts/ds2-arxan-chain.py` to sit at its own `48 89 5c 24 08` prologue rather than behind
