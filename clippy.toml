@@ -18,6 +18,7 @@ doc-valid-idents = [
     "DirectInput",   # Microsoft's API, spelled by Microsoft
     "FromSoftware",  # the company
     "MinHook",       # the detour library this workspace vendors
+    "SteamID64",     # Valve's name for the 64-bit account id format
     "SteamStub",     # Valve's DRM wrapper, spelled by Valve
     "WinHTTP",       # Microsoft's API, spelled by Microsoft
     "XInput",        # Microsoft's API, spelled by Microsoft -- the gamepad half of DirectInput

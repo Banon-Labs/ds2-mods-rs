@@ -105,6 +105,11 @@ pub fn extensions_with(extra: Option<&str>) -> Vec<&str> {
 /// are Windows paths from comdlg32 and its tests run on Linux, where `Path` reads
 /// `C:\v1.0\donor` as one filename and reports its extension as `0\donor`. A gate that answers
 /// differently under test than in the game is not a gate.
+///
+/// # Errors
+///
+/// The [`SourceRejection`] saying which way the path failed -- no extension at all, or one that
+/// is not in [`SOURCE_EXTENSIONS`].
 pub fn accepts(path: &Path) -> Result<&'static str, SourceRejection> {
     accepts_with(path, None).map(|(canonical, _)| canonical)
 }
@@ -118,6 +123,10 @@ pub fn accepts(path: &Path) -> Result<&'static str, SourceRejection> {
 ///
 /// `extra` is not trusted as a path fragment here -- it is compared, never joined. The value is
 /// validated where it is read, in `ds2-seamless`.
+///
+/// # Errors
+///
+/// As [`accepts`], with `extra` counted as one more acceptable extension.
 pub fn accepts_with<'a>(
     path: &Path,
     extra: Option<&'a str>,

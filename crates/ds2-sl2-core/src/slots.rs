@@ -109,6 +109,7 @@ impl SlotState {
 pub struct SaveSlot {
     /// Index within the container, `0..SLOT_COUNT`. This is the index the game's own list uses.
     pub slot: usize,
+    /// Whether the slot holds a character, and if not, why the record read as empty.
     pub state: SlotState,
     /// The character's name. Empty for an empty or unnamed slot.
     pub name: String,
@@ -231,6 +232,10 @@ fn read_records(plain: &[u8], base: usize) -> Vec<SaveSlot> {
 /// This is a reading of a file, not a promise about the game: the runtime applies an ownership
 /// check this cannot see, and a redirect that stages a foreign container rebinds the Steam ID
 /// precisely because of it. See [`crate::rebind`].
+/// # Errors
+///
+/// Whatever reading the container's entry table produced -- a slot that reads as empty is a
+/// [`SlotState`], not an error.
 pub fn slots(save: &[u8]) -> Result<Vec<SaveSlot>, Sl2Error> {
     let table = entries(save)?;
     for entry in &table {
