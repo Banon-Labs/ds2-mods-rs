@@ -18,9 +18,9 @@ bd close <id>         # Complete work
 
 ### Rules
 
-- Use `bd` for ALL task tracking — do NOT use TodoWrite, TaskCreate, or markdown TODO lists
+- Use `bd` for ALL task tracking -- do NOT use TodoWrite, TaskCreate, or markdown TODO lists
 - Run `bd prime` for detailed command reference and session close protocol
-- Use `bd remember` for persistent knowledge — do NOT use MEMORY.md files
+- Use `bd remember` for persistent knowledge -- do NOT use MEMORY.md files
 
 **Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/SYNC_CONCEPTS.md for details and anti-patterns.
 
@@ -32,6 +32,11 @@ bd close <id>         # Complete work
 
 1. **File issues for remaining work** - Create issues for anything that needs follow-up
 2. **Run quality gates** (if code changed) - Tests, linters, builds
+   - **Run the game** if anything under `crates/` or `scripts/ds2-run.py` changed: commit first,
+     launch that commit with `scripts/ds2-run.py`, and only then push. A push of game code with no
+     run behind it is refused by `DS2-MODS-REQUIRE-RUNTIME-BEFORE-PUSH`, and so is `git commit ...
+     && git push` in one command, because the commit it pushes does not exist when the guard looks.
+     The push below is mandatory for work that has run; it is not a reason to skip the run.
 3. **Update issue status** - Close finished work, update in-progress items
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash

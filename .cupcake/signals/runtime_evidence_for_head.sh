@@ -57,7 +57,7 @@
 # it cannot prove which row was pressed. That is the honest ceiling of a filesystem signal, and the
 # alternative -- an agent-written marker -- has no ceiling at all because it is just prose in a file.
 #
-# Emits  RUNTIME|game_code=<0|1>|attached=<0|1>|fresh=<0|1>|dll_match=<0|1>|head=<epoch>|log=<epoch>
+# Emits  RUNTIME|game_code=<0|1>|attached=<0|1>|fresh=<0|1>|dll_match=<0|1>|pending=<0|1>|head=<epoch>|log=<epoch>
 # and nothing when it cannot tell (the policy fails closed on silence).
 set -uo pipefail
 
@@ -87,6 +87,15 @@ fi
 # repo does not. Anything else falls back to this script's own root, including a cwd outside any
 # repository, which is the pre-existing behaviour and the fail-closed one.
 SCRIPT_REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+
+# The pending event. Cupcake pipes the whole PreToolUse event to every signal on stdin (measured in
+# er-mods-rs against cupcake 0.5.2, and it is how `scripts/cupcake_push_target_repo.py` there reads
+# the command). Guarded on a pipe so a hand run from a terminal does not wait on the keyboard.
+event=""
+if [ ! -t 0 ]; then
+    event="$(cat)"
+fi
+
 REPO="$SCRIPT_REPO"
 script_common="$(git -C "$SCRIPT_REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || script_common=""
 invoked_common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || invoked_common=""
@@ -108,20 +117,67 @@ BUILT_DLL="$REPO/target/x86_64-pc-windows-msvc/release/dinput8.dll"
 # Which paths make a push a GAME-CODE push. `crates/` ships inside the DLL; the launcher decides what
 # the DLL is handed. Policies, docs and the beads export are not game code and are not gated -- a
 # guard that demanded a game launch before a Rego fix could be pushed would be gamed within the hour.
-head_time="$(git log -1 --format=%ct 2>/dev/null)" || exit 0
-[ -n "$head_time" ] || exit 0
+#
+# WHAT IS BEING PUSHED IS READ OFF THE COMMAND, NOT OFF `HEAD` (2026-09-25). This used to diff
+# `origin/main...HEAD` as `HEAD` stood when the hook fired, which is before the command runs. The
+# command that walked through was
+#
+#     git commit -qam "..." && git push -u origin launcher-drop-flag
+#
+# on a branch cut from `origin/main` with `scripts/ds2-run.py` edited and uncommitted. At hook time
+# `HEAD` WAS `origin/main`, the diff was empty, `game_code` was 0, and the launcher change went out
+# with `ds2-loader.log` last written 330 seconds before its commit. `scripts/cupcake_push_scope.py`
+# now says which refs the command pushes and whether it commits first:
+#
+#   * `pending=1` -- a `git commit` runs before the push. The working tree's tracked changes and
+#     untracked files join `changed`, because the commit is made of them, and the policy refuses
+#     outright: the commit that would be pushed does not exist yet, so no run can have tested it.
+#     Commit in one command, run the game, push in another.
+#   * each `REF` is diffed against `origin/main` on its own, and `head` is the newest of their
+#     commit times, so `git push origin other-branch` is judged on `other-branch`.
+#   * `ALL 1` (`--all`, `--mirror`) is game code: it pushes every branch and none was measured.
+scope=""
+if [ -n "$event" ] && [ -f "$SCRIPT_REPO/scripts/cupcake_push_scope.py" ]; then
+    scope="$(printf '%s' "$event" | python3 "$SCRIPT_REPO/scripts/cupcake_push_scope.py" 2>/dev/null)" || scope=""
+fi
+pending=0
+case "$scope" in *"COMMIT 1"*) pending=1 ;; esac
+refs="$(printf '%s\n' "$scope" | sed -n 's/^REF //p')"
+[ -n "$refs" ] || refs="HEAD"
 
 upstream="$(git rev-parse --verify --quiet origin/main)" || upstream=""
-if [ -n "$upstream" ]; then
-    changed="$(git diff --name-only origin/main...HEAD 2>/dev/null)"
-else
-    changed="$(git diff --name-only HEAD~1..HEAD 2>/dev/null)"
+changed=""
+head_time=""
+while IFS= read -r ref; do
+    [ -n "$ref" ] || continue
+    # An unknown ref makes the push fail on its own; measure HEAD rather than nothing.
+    git rev-parse --verify --quiet "$ref^{commit}" >/dev/null 2>&1 || ref="HEAD"
+    t="$(git log -1 --format=%ct "$ref" 2>/dev/null)" || t=""
+    [ -n "$t" ] || continue
+    if [ -z "$head_time" ] || [ "$t" -gt "$head_time" ]; then head_time="$t"; fi
+    if [ -n "$upstream" ]; then
+        changed="$changed
+$(git diff --name-only "origin/main...$ref" 2>/dev/null)"
+    else
+        changed="$changed
+$(git diff --name-only "$ref~1..$ref" 2>/dev/null)"
+    fi
+done <<EOF_REFS
+$refs
+EOF_REFS
+[ -n "$head_time" ] || exit 0
+
+if [ "$pending" = 1 ]; then
+    changed="$changed
+$(git diff --name-only HEAD 2>/dev/null)
+$(git ls-files --others --exclude-standard 2>/dev/null)"
 fi
 
 game_code=0
 case "$changed" in
     *crates/*|*scripts/ds2-run.py*) game_code=1 ;;
 esac
+case "$scope" in *"ALL 1"*) game_code=1 ;; esac
 
 # The staged copy's mtime is the floor `fresh` has to clear as well as HEAD's commit time: a run can
 # only vouch for the binary that was in place WHEN IT RAN, so a restage after the run makes the log
@@ -137,7 +193,14 @@ attached=0
 fresh=0
 if [ -r "$GAME_LOG" ]; then
     grep -q "ds2-loader: attach" "$GAME_LOG" 2>/dev/null && attached=1
-    log_time="$(stat -c %Y "$GAME_LOG" 2>/dev/null || echo 0)"
+    # WHEN THE RUN STARTED, not when it last wrote. The DLL rotates the log to `.prev` and creates
+    # it afresh on its first write (crates/ds2-loader/src/lib.rs), so the file's BIRTH time is the
+    # run's start. Its mtime keeps moving for as long as the game is up, so a session launched
+    # before a commit and still logging after it read as fresh, and vouched for code it never
+    # loaded. Birth time is what the filesystem reports as `%W`; where it cannot (0 or `-`), fall
+    # back to mtime, which is the old behaviour and no looser than it was.
+    log_time="$(stat -c %W "$GAME_LOG" 2>/dev/null || echo 0)"
+    case "$log_time" in ''|0|-|*[!0-9]*) log_time="$(stat -c %Y "$GAME_LOG" 2>/dev/null || echo 0)" ;; esac
     [ "$log_time" -ge "$floor" ] 2>/dev/null && fresh=1
 else
     log_time=0
@@ -155,5 +218,5 @@ if [ -r "$STAGED_DLL" ] && [ -r "$BUILT_DLL" ]; then
     fi
 fi
 
-printf 'RUNTIME|game_code=%d|attached=%d|fresh=%d|dll_match=%d|head=%s|log=%s\n' \
-    "$game_code" "$attached" "$fresh" "$dll_match" "$head_time" "$log_time"
+printf 'RUNTIME|game_code=%d|attached=%d|fresh=%d|dll_match=%d|pending=%d|head=%s|log=%s\n' \
+    "$game_code" "$attached" "$fresh" "$dll_match" "$pending" "$head_time" "$log_time"
