@@ -55,23 +55,59 @@ still the one starting the session, so playtime, the overlay and cloud sync work
 without mods. `ds2-launcher.exe` stays running until the game exits, and exits with the game's
 own exit code, so Steam sees the session end when the game does.
 
-| You want | Launch options |
-| --- | --- |
-| Linux, `dinput8.dll` only | `WINEDLLOVERRIDES="dinput8=n,b" %command%` |
-| Linux, with the `[launcher]` list (Seamless Co-op) | `WINEDLLOVERRIDES="dinput8=n,b" bash -c 'exec "${@/%DarkSoulsII.exe/ds2-launcher.exe}"' -- %command%` |
-| Windows, `dinput8.dll` only | leave it empty |
-| Windows, with the `[launcher]` list | `"C:\full\path\to\Game\ds2-launcher.exe" %command%` |
+You need this only for the `[launcher]` list (Seamless Co-op, or anything else you listed there).
+For `dinput8.dll` alone, Steam starts the game as usual -- see the table at the end of this
+section.
+
+### Windows
+
+1. In Steam, right-click DARK SOULS II: Scholar of the First Sin -> **Manage** -> **Browse local
+   files**. Explorer opens the game's install folder. Open `Game` inside it: that is the folder
+   holding `DarkSoulsII.exe`, and where `ds2-launcher.exe` goes.
+2. Click Explorer's address bar and copy the path. On a default install it is
+   `C:\Program Files (x86)\Steam\steamapps\common\Dark Souls II Scholar of the First Sin\Game`.
+3. Right-click the game -> **Properties** -> **General** -> **Launch Options**, and enter that
+   path followed by `\ds2-launcher.exe`, **in double quotes**, then a space and `%command%`:
+
+   ```
+   "C:\Program Files (x86)\Steam\steamapps\common\Dark Souls II Scholar of the First Sin\Game\ds2-launcher.exe" %command%
+   ```
+
+   The quotes are required: the path has spaces in it, and without them Steam runs
+   `C:\Program` and the game does not start.
+4. Press Play.
+
+Steam replaces `%command%` with the path to `DarkSoulsII.exe` and hands it to the launcher as its
+first argument. The launcher drops that argument (it already knows where the game is) and passes
+any arguments after it on to the game. A console window stays open for as long as the game runs.
+That is the launcher waiting for the game, which is how Steam knows the session is still going.
+Leave it open.
+
+This has not been tried on Windows yet. It is the launch-option form other Steam wrapper
+launchers use, and it is what the launcher's argument handling was written for.
+
+### Linux
+
+Enter this as the launch options (Properties -> General -> Launch Options) and press Play. Nothing
+in it needs editing for your install:
+
+```
+WINEDLLOVERRIDES="dinput8=n,b" bash -c 'exec "${@/%DarkSoulsII.exe/ds2-launcher.exe}"' -- %command%
+```
 
 On Linux, `%command%` is Steam's whole Proton chain ending in the path to `DarkSoulsII.exe`. The
-`bash -c` line swaps that last path for `ds2-launcher.exe` beside it and leaves the rest of the
-chain alone, so Proton runs the launcher in the game's own prefix. On Windows, the launcher
-receives the game's path as its first argument; it drops that (it already knows the path) and
-passes every argument after it on to the game.
+`bash -c` part swaps that last path for `ds2-launcher.exe` in the same folder and leaves the rest
+of the chain alone, so Proton runs the launcher in the game's own prefix.
 
-The Windows line has not been tried on Windows.
+### Every case
 
-To go back to plain `dinput8.dll`, switch the launch options back. The launcher with an empty
-list is harmless too: it starts the game with nothing injected.
+| You want | Windows launch options | Linux launch options |
+| --- | --- | --- |
+| `dinput8.dll` only | leave it empty | `WINEDLLOVERRIDES="dinput8=n,b" %command%` |
+| With the `[launcher]` list | `"<Game folder>\ds2-launcher.exe" %command%` | the `bash -c` line above |
+
+To go back to plain `dinput8.dll`, switch the launch options back. Leaving the launcher in place
+with an empty list does no harm either: it starts the game with nothing injected.
 
 ## Linux
 
