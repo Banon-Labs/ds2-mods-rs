@@ -64,18 +64,17 @@ pub struct TitleSkipConfig {
 }
 
 impl Default for TitleSkipConfig {
-    /// Both **on**, matching `intro_skip` and `dialog_skip`. Getting to the menu without touching
-    /// anything is the point; leaving one of the four stops in place would mean the default is
-    /// still a run that has to be babysat.
+    /// All off, like every feature here (user directive 2026-09-25): a config that says nothing is
+    /// the game as shipped. Each key is turned on by an exact `true`.
     fn default() -> Self {
         Self {
-            press_any_button: true,
-            process_windows: true,
-            hide_process_windows: true,
-            title_animation: true,
-            title_sequence_gate: true,
-            title_settle: true,
-            substate_floors: true,
+            press_any_button: false,
+            process_windows: false,
+            hide_process_windows: false,
+            title_animation: false,
+            title_sequence_gate: false,
+            title_settle: false,
+            substate_floors: false,
         }
     }
 }
@@ -90,11 +89,10 @@ impl TitleSkipConfig {
             return Self::default();
         };
         let parsed = KeyValues::parse(&text);
-        // Only an exact `false` turns a key off, so a typo leaves the feature ON -- the harmless
-        // direction when on is the default.
+        // Only an exact `true` turns a key on, so a typo leaves the game as shipped.
         let read = |key: &str, fallback: bool| match parsed.get(CONFIG_SECTION, key) {
             None => fallback,
-            Some(raw) => !matches!(raw.trim().trim_matches('"'), "false"),
+            Some(raw) => raw.trim().trim_matches('"') == "true",
         };
         let defaults = Self::default();
         let hide = read(KEY_HIDE_PROCESS_WINDOWS, defaults.hide_process_windows);

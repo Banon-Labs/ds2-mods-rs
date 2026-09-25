@@ -22,15 +22,14 @@ pub struct DialogSkipConfig {
 }
 
 impl Default for DialogSkipConfig {
-    /// **On**, matching `intro_skip`. Skipping the boot screens only to stop on a message box is
-    /// half a feature, and the two are wanted together or not at all.
+    /// Off, like every feature here (user directive 2026-09-25): a config that says nothing is the
+    /// game as shipped. `enabled = true` turns it on, and it is wanted together with `intro_skip`
+    /// -- skipping the boot screens only to stop on a message box is half a feature.
     ///
-    /// It stays a key for the reason that one does: this patches executable memory during startup,
-    /// so a run that fails to boot has to be attributable to one feature by editing one line
-    /// rather than by rebuilding. Two separate switches, not one, precisely so `intro_skip` and
-    /// this can be ruled out independently.
+    /// Two separate switches, not one, so a run that fails to boot can have `intro_skip` and this
+    /// ruled out independently by editing one line rather than by rebuilding.
     fn default() -> Self {
-        Self { enabled: true }
+        Self { enabled: false }
     }
 }
 
@@ -44,12 +43,10 @@ impl DialogSkipConfig {
             return Self::default();
         };
         let parsed = KeyValues::parse(&text);
-        let enabled = match parsed.get(CONFIG_SECTION, KEY_ENABLED) {
-            None => Self::default().enabled,
-            // Only an exact `false` turns it off, so a typo leaves the feature ON -- the harmless
-            // direction when on is the default.
-            Some(raw) => !matches!(raw.trim().trim_matches('"'), "false"),
-        };
+        // Only an exact `true` turns it on, so a typo leaves the game as shipped.
+        let enabled = parsed
+            .get(CONFIG_SECTION, KEY_ENABLED)
+            .is_some_and(|raw| raw.trim().trim_matches('"') == "true");
         Self { enabled }
     }
 
