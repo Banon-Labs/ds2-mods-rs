@@ -4156,9 +4156,12 @@ def main() -> int:
     parser.add_argument(
         "--seamless",
         dest="seamless",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help=(
-            "also load Seamless Co-op's DLL into the same process. NOTHING HERE SHIPS IT -- you "
+            "also load Seamless Co-op's DLL into the same process. ON BY DEFAULT: the owner plays "
+            "every mod configuration under Seamless, so a run without it is not the game they "
+            "test; --no-seamless turns it off. NOTHING HERE SHIPS IT -- you "
             "install that mod yourself, from its own download, next to DarkSoulsII.exe, and this "
             "flag only writes the path into the config. Implies --no-offline: that feature fronts "
             "the socket imports, so a co-op mod under it would load, report success and never "
