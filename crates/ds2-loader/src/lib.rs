@@ -87,6 +87,7 @@ pub mod build_import;
 pub mod continue_flow;
 pub mod crash_logging;
 pub mod dialog_skip;
+pub mod hp_gauge;
 pub mod input_harness;
 pub mod intro_skip;
 pub mod invasion_path;
@@ -330,6 +331,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_voice_chat();
                 install_menu_row();
                 install_item_warn();
+                install_hp_gauge();
                 install_invasion_path();
                 install_input_harness();
                 arm_fault(crash_config);
@@ -370,6 +372,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_voice_chat();
                 install_menu_row();
                 install_item_warn();
+                install_hp_gauge();
                 install_invasion_path();
                 install_input_harness();
                 arm_fault(crash_config);
@@ -824,6 +827,31 @@ fn install_item_warn() {
         log_line(format_args!(
             "{} NOT INSTALLED -- item cells are the ones the game shipped",
             ds2_item_warn::LOG_PREFIX
+        ));
+    }
+}
+
+/// Resize and centre the HP bar and damage number over other characters, if
+/// `<Game>/ds2-mods.toml` asked for it.
+///
+/// Off unless the config says exactly `true`. Its three sites belong to `FeSceneEnemyHpGuage` and
+/// nothing else here hooks them.
+fn install_hp_gauge() {
+    let config = hp_gauge::HpGaugeConfig::load();
+    log_line(format_args!("{}", config.describe()));
+    if !config.enabled {
+        return;
+    }
+    ds2_hp_gauge::set_logger(log_line);
+    ds2_hp_gauge::set_tune(config.tune);
+    // SAFETY: the three targets are function starts recorded in `ds2-rva`, none of them an Arxan
+    // redirect, and the detours declare the signatures read out of their disassembly. Called from
+    // the post-Arxan position, like every other install here.
+    let outcome = unsafe { ds2_hp_gauge::install() };
+    if !outcome.installed {
+        log_line(format_args!(
+            "{} NOT INSTALLED -- the gauges are the ones the game shipped",
+            ds2_hp_gauge::LOG_PREFIX
         ));
     }
 }
