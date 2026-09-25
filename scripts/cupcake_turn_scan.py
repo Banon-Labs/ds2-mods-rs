@@ -412,6 +412,34 @@ def _user_content_string(ev: dict) -> str:
     return ""
 
 
+def _task_notification_text(ev: dict) -> str:
+    """The raw text of a harness task notification carried by EV, or "".
+
+    Three carriers, because the harness has delivered the same notice three ways:
+
+      * a `user` event whose message content is the bare string (older transcripts);
+      * a `queue-operation` event (`enqueue` / `remove`) with the notice in top-level `content`;
+      * an `attachment` event of type `queued_command` with the notice in `attachment.prompt`.
+
+    Claude Code 2.1.281 writes ONLY the last two when a background subagent finishes while the
+    main thread is busy. Reading the `user` shape alone left that subagent "pending" for
+    RECENT_TURNS turns, so every long prose answer after it tripped VERBOSEPAUSE ("You paused while
+    blocked on a background task") with nothing running -- measured 2026-09-25 on a session whose
+    only subagent had reported `<status>completed</status>` over 200 events earlier.
+    """
+    raw = _user_content_string(ev)
+    if raw:
+        return raw
+    if ev.get("type") == "queue-operation":
+        content = ev.get("content")
+        return content if isinstance(content, str) else ""
+    attachment = ev.get("attachment")
+    if isinstance(attachment, dict) and attachment.get("type") == "queued_command":
+        prompt = attachment.get("prompt")
+        return prompt if isinstance(prompt, str) else ""
+    return ""
+
+
 @dataclass
 class BackgroundWork:
     """Background work still running at turn-end. Falsy when there is none.
@@ -472,7 +500,7 @@ def live_background_work(events: list[dict]) -> BackgroundWork:
         content = ev.get("message", {}).get("content")
 
         # Harness-injected completion notice for a background task.
-        raw = _user_content_string(ev)
+        raw = _task_notification_text(ev)
         if raw and TASK_NOTIFICATION_RE.search(raw):
             m = TASK_TOOL_USE_ID_RE.search(raw)
             status = TASK_STATUS_RE.search(raw)
