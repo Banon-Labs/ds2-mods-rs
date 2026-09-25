@@ -1108,6 +1108,43 @@ pub const FE_SPRITE_TABLE_ENTRY_START_OFFSET: usize = 0x04;
 /// looking at the screen.
 pub const FE_SPRITE_POSITION_OFFSET: usize = 0x40;
 
+/// A `FeComponentSprite`'s playback rate, a `f32` multiplier on the tick's delta. `+0x60`.
+///
+/// The constructor (`0x140b6bc70`) writes `1.0` here (`param_1[0xc] = 0x3f800000`), vtable slot
+/// `0x130` (`0x140b6c5a0`) is its setter, and the sprite's tick (slot `0x168`, `0x140b6c6c0`) is
+/// the only reader:
+///
+/// ```asm
+/// mulss xmm1, [rbx+0x60]     ; delta * rate
+/// addss xmm1, xmm0           ; + position
+/// movss [rbx+0x40], xmm1     ; the new position
+/// ```
+///
+/// It then wraps (flag `+0x64` set) or clamps against the frame count at `[[+0x48]+0x10]`, and
+/// forwards the unscaled delta to its children through slot `0x1b0` (`0x140b6ce80`). So the rate is
+/// per sprite: a nested sprite runs at its own rate, and slowing a subtree means setting every
+/// sprite in it. `FeComponentObject`'s tick (`0x140b6aec0`) takes its keyframe position from its
+/// parent sprite (`[[+0x18]]` slot `0x48`) and has no clock of its own.
+pub const FE_SPRITE_RATE_OFFSET: usize = 0x60;
+
+/// Inside a `FeLayoutScene`, the holder of its root component. `+0x28`.
+///
+/// `0x140afdaf0` (the empty-path resolve) is `[[scene+0x28]+0x30]`, and [`FE_SCENE_FIND_BY_ID_PATH`]
+/// starts every lookup from that same component (`0x140b507d0`: `[holder+0x30]`, slot `0x190`).
+pub const FE_SCENE_ROOT_HOLDER_OFFSET: usize = 0x28;
+/// The root component inside that holder. `+0x30`. See [`FE_SCENE_ROOT_HOLDER_OFFSET`].
+pub const FE_SCENE_ROOT_OFFSET: usize = 0x30;
+
+/// `FrontendEx::FexScene`'s get-scene, slot 1 ([`FE_SCENE_PROXY_GET_SCENE_SLOT`]) of the
+/// `FexLayoutResourceProxy` a HUD scene player embeds. RVA `0x00027720`.
+///
+/// Whole body `mov rax,[rcx-0x10]; ret`: the layout scene is the qword `0x10` before the proxy.
+/// Slot 1 of `FeScenePlayerVoiceChatIcon`'s `+0x18` vtable (`0x1410fa6b8`) is this function.
+pub const FEX_SCENE_GET_SCENE: u32 = 0x0002_7720;
+
+/// What [`FEX_SCENE_GET_SCENE`] subtracts from its `this`. `0x10`.
+pub const FEX_SCENE_GET_SCENE_BACK_OFFSET: usize = 0x10;
+
 /// Rows 2 and 3, the pair the game guarantees is never shown together.
 ///
 /// `0x1400f4344` computes row 3's enable byte as `row2.enabled == 0`, so their XOR is true at every
@@ -9142,6 +9179,95 @@ pub const NET_SESSION_UPDATE: u32 = 0x002c_9540;
 pub const NET_SESSION_UPDATE_PROLOGUE: [u8; 14] = [
     0x48, 0x89, 0x4c, 0x24, 0x08, 0x55, 0x53, 0x41, 0x56, 0x48, 0x8d, 0x6c, 0x24, 0xb9,
 ];
+
+// ============================================================================================
+// The HUD's own voice chat icon, `FeScenePlayerVoiceChatIcon` (`ds2-voice-chat`).
+//
+// Vtable `0x1410fa688`, ctor `0x140506040`, created by `0x140507ea0` as layout document 0 scene 3.
+// The layout is def `0x3a` of `l01_01_hp.flo`; every shape in it is from the `waku_03` atlas.
+//
+// Its per-frame update [`FE_VOICE_CHAT_ICON_UPDATE`], whole, from the disassembly:
+//
+// ```text
+// table = { 0x00000000, 0x00000001, 0x01000001, 0x00010000 }   ; [rbp+0x3f..]
+// index = 0x140513430() ? 0x140509f40(this) : 0                 ; 0x140513430 is `mov al,1; ret`
+// word  = table[index]
+// proxy = 0x140026790(this + 0x18, out, &[0x5f5c3e0])           ; root, byte 0
+// 0x14001e270(out + 8, word.b0)
+// 0x14001e270(0x14050a0d0(this, out) + 8, word.b1)              ; 3e0/3e0, shape 0x37 (grey)
+// 0x14001e270(0x140509ff0(this, out) + 8, word.b2)              ; 3e0/3e1, shape 0x37
+// 0x14001e270(0x14050a1b0(this, out) + 8, word.b3)              ; 3e0/3e2, shape 0x35
+// ```
+//
+// Each byte is a show/hide ([`FE_ELEMENT_SET_VISIBLE`], visible = byte != 0). `out` is ONE
+// 0x90-byte accessor that the three child getters each overwrite in place and return; it is never
+// destroyed. The root shows shapes 0x2f and 0x30 plus text element 0x0f6969.
+// ============================================================================================
+
+/// `FeScenePlayerVoiceChatIcon`'s per-frame update. RVA `0x0050a5f0`, VA `0x14050a5f0`.
+///
+/// `void (this)`. Reached from the icon's vtable. `scripts/ds2-arxan-chain.py 0x14050a5f0`
+/// terminates at hop 0 with `NOT REDIRECTED (clean prologue at the entry)`, and it is not in
+/// [`ARXAN_REDIRECTED_DO_NOT_HOOK`].
+pub const FE_VOICE_CHAT_ICON_UPDATE: u32 = 0x0050_a5f0;
+
+/// First sixteen bytes of [`FE_VOICE_CHAT_ICON_UPDATE`].
+///
+/// `mov [rsp+0x10],rbx; mov [rsp+0x18],rdi; push rbp; lea rbp,[rsp-0x57]`.
+pub const FE_VOICE_CHAT_ICON_UPDATE_PROLOGUE: [u8; 16] = [
+    0x48, 0x89, 0x5c, 0x24, 0x10, 0x48, 0x89, 0x7c, 0x24, 0x18, 0x55, 0x48, 0x8d, 0x6c, 0x24, 0xa9,
+];
+
+/// The icon's `FexLayoutResourceProxy`, the first argument of its root bind. `this + 0x18`.
+///
+/// `lea rcx,[rdi+0x18]` at `0x14050a685`, right before `call 0x140026790`
+/// ([`FE_BIND_SCENE_OBJ_PROXY`]); the three child getters do the same (`param_1 + 0x18`).
+pub const FE_VOICE_CHAT_ICON_LAYOUT_PROXY_OFFSET: usize = 0x18;
+
+/// The icon's root element id, the one-component path the update binds. `0x5f5c3e0`.
+///
+/// `mov dword ptr [rcx],0x5f5c3e0` at `0x14050a67f`, with the path count set to `1` at
+/// `0x14050a64f`.
+pub const FE_VOICE_CHAT_ICON_ROOT_ELEMENT: u32 = 0x05f5_c3e0;
+
+/// The update's four-entry state table, one byte per element: root, `3e0/3e0`, `3e0/3e1`,
+/// `3e0/3e2`, least significant first. Written at `0x14050a618`..`0x14050a62d`.
+pub const FE_VOICE_CHAT_ICON_STATES: [u32; 4] =
+    [0x0000_0000, 0x0000_0001, 0x0100_0001, 0x0001_0000];
+
+/// The table index that hides everything. Index `0`, also the game's answer when its gate is off.
+pub const FE_VOICE_CHAT_ICON_STATE_HIDDEN: usize = 0;
+
+/// The table index for "voice chat on": the root and the `3e0/3e2` shape (`0x35`), the grey
+/// `3e0/3e0` and the `3e0/3e1` shapes (both `0x37`) hidden.
+pub const FE_VOICE_CHAT_ICON_STATE_ON: usize = 2;
+
+/// `accessor* (this, out)`: resolve `3e0/3e0` into `out` and return it. RVA `0x0050a0d0`.
+///
+/// The accessor for byte 1 of the state word. Builds its own root bind via
+/// [`FE_BIND_SCENE_OBJ_PROXY`] and then [`FE_ELEMENT_RESOLVE`]s the child into `out`.
+pub const FE_VOICE_CHAT_ICON_CHILD_3E0: u32 = 0x0050_a0d0;
+
+/// `accessor* (this, out)`: resolve `3e0/3e1` into `out`. RVA `0x00509ff0`. Byte 2.
+pub const FE_VOICE_CHAT_ICON_CHILD_3E1: u32 = 0x0050_9ff0;
+
+/// `accessor* (this, out)`: resolve `3e0/3e2` into `out`. RVA `0x0050a1b0`. Byte 3.
+pub const FE_VOICE_CHAT_ICON_CHILD_3E2: u32 = 0x0050_a1b0;
+
+/// First nine bytes of all three child getters: `push rbx; sub rsp,0x110`.
+///
+/// Identical in each, because the three bodies differ only in the child id they write.
+/// `scripts/ds2-arxan-chain.py` reports each `NOT REDIRECTED`.
+pub const FE_VOICE_CHAT_ICON_CHILD_PROLOGUE: [u8; 9] =
+    [0x40, 0x53, 0x48, 0x81, 0xec, 0x10, 0x01, 0x00, 0x00];
+
+/// First nine bytes of [`FE_BIND_SCENE_OBJ_PROXY`]: `push rbx; sub rsp,0x20; mov rbx,rdx`.
+pub const FE_BIND_SCENE_OBJ_PROXY_PROLOGUE: [u8; 9] =
+    [0x40, 0x53, 0x48, 0x83, 0xec, 0x20, 0x48, 0x8b, 0xda];
+
+/// First nine bytes of [`FE_ELEMENT_SET_VISIBLE`]: `push rbx; sub rsp,0x20; mov rcx,[rcx]`.
+pub const FE_ELEMENT_SET_VISIBLE_PROLOGUE: [u8; 9] =
+    [0x40, 0x53, 0x48, 0x83, 0xec, 0x20, 0x48, 0x8b, 0x09];
 
 #[cfg(test)]
 mod item_warn_tests {

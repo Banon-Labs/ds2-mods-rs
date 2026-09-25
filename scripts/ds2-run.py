@@ -155,6 +155,13 @@ CONFIG_LINE_PREFIX = "ds2-loader: config"
 #: Rust source, because a rename on one side alone turns every run into a silent "probe off".
 CONFIG_NAME = "ds2-mods.toml"
 
+#: The config the release package ships. `--release-config` stages this file verbatim instead of
+#: writing one from the flags, so a run can show a player's game rather than a harness arm.
+RELEASE_CONFIG = REPO_ROOT / ".github" / "dist-ds2-mods.toml"
+
+#: Set by `--release-config`; `config_text` returns this in place of its own when it is set.
+release_config_text: str | None = None
+
 #: Mirrors `CONFIG_SECTION` and the four `KEY_*` constants in that module.
 CONFIG_SECTION = "arxan_probe"
 KEY_ENABLED = "enabled"
@@ -235,6 +242,10 @@ SAVE_FILE_LOG_PREFIX = "ds2-save-file:"
 #: `save-game-to-file` row registers, and its lines are the only evidence that a run is refusing the
 #: game's own saves rather than quietly taking them. `--selftest` pins this against the crate.
 SAVE_BLOCK_LOG_PREFIX = "ds2-save-block:"
+
+#: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/save_block.rs`.
+SAVE_BLOCK_SECTION = "save_block"
+KEY_SAVE_BLOCK_ENABLED = "enabled"
 
 #: Mirrors `HANDOFF_FILE_NAME` in `crates/ds2-save-file-core/src/handoff.rs`. The one-line file the
 #: Load Character from File row writes and the loader consumes on the NEXT launch.
@@ -1170,6 +1181,8 @@ def config_text(
     hostname, so two runs of the same arm are trivially comparable and `--selftest` can assert on
     the content rather than around it.
     """
+    if release_config_text is not None:
+        return release_config_text
     settings, _ = PROBE_ARMS[probe]
     # THE LIST KEY OVERRIDES `enabled`, AND IT IS NEVER WRITTEN FROM HERE. It was, through a
     # `--rows` flag, and that flag cost a session: a run launched with two of the four names
@@ -1178,18 +1191,19 @@ def config_text(
     # launcher's job is to launch the default; a player who wants fewer edits this line in the file
     # it is commented into, where the choice is visible next to the thing it changes.
     every_row = ", ".join(f'"{name}"' for name in MENU_ROW_ROW_NAMES[:MENU_ROW_MAX_ADDED])
-    if menu_rows_all:
+    # The owner's own setup, and so this launcher's default since 2026-09-25: every row, the game's
+    # own saving off, and the autoload `main` works out. The DLL's defaults went the other way on the
+    # same day -- no rows, the game saving as shipped -- because those are what the release ships,
+    # and "I want these personally, but not on by default in my release" is the whole split.
+    # `--all-menu-rows` is kept, and now names the default.
+    if not menu_rows_no_save:
         # ALL of them or none, never a subset, which is the whole lesson of the comment above: a
-        # subset written from here looks like a DLL that lost rows. `--all-menu-rows` exists because
-        # two features can only be reached through a row -- the save-file pair -- and one of them,
-        # `ds2-save-block`, installs only when `save-game-to-file` registers. Without this there is no
-        # way to launch a run that exercises either.
+        # subset written from here looks like a DLL that lost rows.
         menu_row_rows_line = (
-            f"# WRITTEN BY --all-menu-rows: every row this table knows, in the default order.\n"
-            f"# The game's own saving is OFF in this run, because `save-game-to-file` is among them.\n"
+            f"# WRITTEN BY ds2-run.py: every row this table knows, in the default order.\n"
             f"{KEY_MENU_ROW_ROWS} = [{every_row}]"
         )
-    elif menu_rows_no_save:
+    else:
         # Every row EXCEPT the one that turns the game's own saving off.
         #
         # This is a named mode rather than an arbitrary subset, which is the distinction the
@@ -1207,13 +1221,8 @@ def config_text(
             f"# `ds2-save-block`, and it is off here for exactly that reason.\n"
             f"{KEY_MENU_ROW_ROWS} = [" + ", ".join(f'"{name}"' for name in kept) + "]"
         )
-    else:
-        menu_row_rows_line = (
-            f"# {KEY_MENU_ROW_ROWS} = ["
-            + every_row
-            + f"]   # at most {MENU_ROW_MAX_ADDED} of: "
-            + ", ".join(MENU_ROW_ROW_NAMES)
-        )
+    # `[save_block]` follows the save row: on whenever it is listed, off with --no-save-file-row.
+    save_block_enabled = str(not menu_rows_no_save).lower()
     # `[seamless] enabled` is NOT folded in here. The injector does that itself, from the
     # `[seamless]` keys written above, and doing it in both places would put the same path in the
     # list twice -- which its deduplication would survive, but only by silently disagreeing with
@@ -1551,6 +1560,12 @@ def config_text(
 # and `... THE FLUSH WAS NEVER OBSERVED` is the one that says the copy is your last autosave rather
 # than the moment you pressed the row.
 {menu_row_rows_line}
+
+[{SAVE_BLOCK_SECTION}]
+# `true` refuses the game's own saves -- no autosave, nothing at a bonfire, nothing on the way out
+# -- so `save-game-to-file` is the only thing that writes the character. Honoured only while that
+# row is listed above. `--no-save-file-row` writes `false`.
+{KEY_SAVE_BLOCK_ENABLED} = {save_block_enabled}
 
 [{BUILD_IMPORT_SECTION}]
 # NOT STARTUP either, and a different kind of risk from the row above it. This one adds a "Load from
@@ -3299,26 +3314,29 @@ def selftest() -> int:
         f"--no-intro-skip writes [{INTRO_SECTION}] {KEY_INTRO_ENABLED} = false",
     )
 
-    # The rows key stays commented unless asked for, and then carries every row. A subset written
-    # from here is the failure the key's own comment records: rows the DLL was told to leave out,
-    # read as rows the DLL had lost. And a run with `save-game-to-file` among them does not save by
-    # itself, so "which rows" is no longer only about what is on the menu.
-    default_rows = config_text("off")
-    check(
-        f"\n# {KEY_MENU_ROW_ROWS} = [" in default_rows,
-        f"[{MENU_ROW_SECTION}] {KEY_MENU_ROW_ROWS} stays commented out by default",
-    )
-    values, _ = parse_config(default_rows)
-    check(
-        (MENU_ROW_SECTION, KEY_MENU_ROW_ROWS) not in values,
-        "the default run leaves the legacy keys deciding, exactly as the DLL does",
-    )
-    all_rows = config_text("off", menu_rows_all=True)
-    values, _ = parse_config(all_rows)
+    # The default run is the owner's setup: every row, and the game's own saving off. A subset
+    # written from here is the failure the key's own comment records: rows the DLL was told to leave
+    # out, read as rows the DLL had lost.
+    values, _ = parse_config(config_text("off"))
     written = values.get((MENU_ROW_SECTION, KEY_MENU_ROW_ROWS), "")
     check(
         all(f'"{name}"' in written for name in MENU_ROW_ROW_NAMES),
-        f"--all-menu-rows writes every one of the {len(MENU_ROW_ROW_NAMES)} rows, not a subset",
+        f"the default run writes every one of the {len(MENU_ROW_ROW_NAMES)} rows, not a subset",
+    )
+    check(
+        values.get((SAVE_BLOCK_SECTION, KEY_SAVE_BLOCK_ENABLED)) == "true",
+        f"the default run writes [{SAVE_BLOCK_SECTION}] {KEY_SAVE_BLOCK_ENABLED} = true",
+    )
+    values, _ = parse_config(config_text("off", menu_rows_no_save=True))
+    check(
+        '"save-game-to-file"' not in values.get((MENU_ROW_SECTION, KEY_MENU_ROW_ROWS), "")
+        and values.get((SAVE_BLOCK_SECTION, KEY_SAVE_BLOCK_ENABLED)) == "false",
+        f"--no-save-file-row drops the save row and writes [{SAVE_BLOCK_SECTION}] = false",
+    )
+    check(
+        f'"{SAVE_BLOCK_SECTION}"'
+        in (REPO_ROOT / "crates/ds2-loader/src/save_block.rs").read_text(encoding="utf-8"),
+        f"[{SAVE_BLOCK_SECTION}] is the section the loader reads",
     )
     check(
         SAVE_BLOCK_LOG_PREFIX
@@ -3514,10 +3532,12 @@ def selftest() -> int:
     )
     values, _ = parse_config(config_text("off"))
     check(
-        (MENU_ROW_SECTION, KEY_MENU_ROW_ROWS) not in values,
-        f"[{MENU_ROW_SECTION}] {KEY_MENU_ROW_ROWS} is COMMENTED OUT in every config this script "
-        "writes -- present, it overrides the enabled keys, and a launcher that narrowed the row "
-        "set turned four shipped rows into two and read as a regression in the DLL",
+        all(
+            f'"{name}"' in values.get((MENU_ROW_SECTION, KEY_MENU_ROW_ROWS), "")
+            for name in MENU_ROW_ROW_NAMES
+        ),
+        f"[{MENU_ROW_SECTION}] {KEY_MENU_ROW_ROWS} is never narrowed by this script -- a launcher "
+        "that dropped rows nobody asked to drop read as a regression in the DLL",
     )
     # SPELT IN TWO HALVES SO THIS LINE IS NOT ITSELF THE MATCH. A check that searches its own file
     # for a literal finds the literal it is written with, and fails forever; the halves are joined
@@ -4136,9 +4156,12 @@ def main() -> int:
     parser.add_argument(
         "--seamless",
         dest="seamless",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help=(
-            "also load Seamless Co-op's DLL into the same process. NOTHING HERE SHIPS IT -- you "
+            "also load Seamless Co-op's DLL into the same process. ON BY DEFAULT: the owner plays "
+            "every mod configuration under Seamless, so a run without it is not the game they "
+            "test; --no-seamless turns it off. NOTHING HERE SHIPS IT -- you "
             "install that mod yourself, from its own download, next to DarkSoulsII.exe, and this "
             "flag only writes the path into the config. Implies --no-offline: that feature fronts "
             "the socket imports, so a co-op mod under it would load, report success and never "
@@ -4160,12 +4183,10 @@ def main() -> int:
         dest="menu_rows_no_save",
         action="store_true",
         help=(
-            "put every menu row on EXCEPT `save-game-to-file`, so the game saves itself the way "
-            "it normally does. That row registering is what installs `ds2-save-block`, which "
+            "put every menu row on EXCEPT `save-game-to-file`, and write `[save_block] enabled = "
+            "false`, so the game saves itself the way it normally does. Without this flag the run "
             "refuses every save the game makes for itself -- no autosave, nothing at a bonfire, "
-            "nothing on the way out -- so a session played with it on loses progress unless the "
-            "row is pressed by hand. Use this to actually play. The DLL's own defaults include "
-            "that row, so dropping --all-menu-rows is not enough to get saving back."
+            "nothing on the way out -- and only that row writes the character."
         ),
     )
     parser.add_argument(
@@ -4270,14 +4291,20 @@ def main() -> int:
         dest="menu_rows_all",
         action="store_true",
         help=(
-            f"write `[{MENU_ROW_SECTION}] {KEY_MENU_ROW_ROWS}` with every row this table knows, "
-            "instead of leaving the key commented out for the DLL's legacy defaults. All of them "
-            "or none: a subset written from here once read as a DLL that had lost two rows. The "
-            "reason to want it is that two features can only be reached through a row -- "
-            "`load-character-from-file` and `save-game-to-file` -- and `ds2-save-block` installs "
-            "only when the second one registers, which means THIS RUN DOES NOT SAVE BY ITSELF: no "
-            "autosave, nothing on quit to menu, nothing at a bonfire. Only that row writes the "
-            f"container. Grep the log for `{SAVE_BLOCK_LOG_PREFIX}`."
+            "the default, kept so old command lines still parse: every menu row, and "
+            "`[save_block] enabled = true`, so the run does not save by itself and only "
+            f"`save-game-to-file` writes the character. Grep the log for `{SAVE_BLOCK_LOG_PREFIX}`."
+        ),
+    )
+    parser.add_argument(
+        "--release-config",
+        dest="release_config",
+        action="store_true",
+        help=(
+            f"stage {RELEASE_CONFIG.relative_to(REPO_ROOT)} verbatim as the game's config, "
+            "instead of writing one from this script's flags -- the game as a player who "
+            "unpacked the release gets it. Every other config flag is ignored, and no slot is "
+            "autoloaded unless that file asks for one."
         ),
     )
     parser.add_argument(
@@ -4363,7 +4390,14 @@ def main() -> int:
     if args.selftest:
         return selftest()
 
-    if args.continue_slot is not None:
+    if args.release_config:
+        global release_config_text
+        release_config_text = RELEASE_CONFIG.read_text(encoding="utf-8")
+        print(f"[config] --release-config: staging {RELEASE_CONFIG} verbatim")
+        # The release file decides the slot; reading one off the save here would be autoloading
+        # on the harness's behalf in a run meant to show what a player gets.
+        continue_slot = -1
+    elif args.continue_slot is not None:
         continue_slot = args.continue_slot
     else:
         # No value given: read the slot off the redirected save, which is what this flag's help

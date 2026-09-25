@@ -91,6 +91,15 @@ CASES = [
         "turn is a pure pause announcing an idle hold while a background task runs",
     ),
     Case(
+        "verbose_answer_after_queued_notification.jsonl",
+        None,
+        "a long prose answer two turns after a background subagent reported completed -- must NOT "
+        "halt as VERBOSEPAUSE. Claude Code 2.1.281 delivers that notice only as `queue-operation` and "
+        "`attachment: queued_command` events, never as a `user` message; reading the `user` shape "
+        "alone kept the finished subagent 'live' (2026-09-25 false positive). The Artifact result's "
+        "'Live subscription: arming in the background' line is in the fixture too and is not a task",
+    ),
+    Case(
         "authority_agreement.jsonl",
         "authority-coded agreement",
         "turn opens with \"You're right\" -- banned agreement phrasing (2026-07-17 directive)",

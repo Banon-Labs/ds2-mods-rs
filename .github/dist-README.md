@@ -3,6 +3,24 @@
 Built for **build 9527516** (Steam appid 335300), x86-64 Windows. A different game build is not
 supported and is not detected for you -- every address in these DLLs was read out of that one.
 
+## Quick start
+
+1. Copy `dinput8.dll` and `ds2-mods.toml` into the folder holding `DarkSoulsII.exe`. In Steam:
+   right-click the game -> **Manage** -> **Browse local files**, then open `Game`.
+2. **Linux only:** set the game's launch options (Properties -> General -> Launch Options) to
+   `WINEDLLOVERRIDES="dinput8=n,b" %command%`. On Windows, leave them empty.
+3. Press Play.
+
+What you get as shipped:
+
+| Feature | As shipped | How to use it |
+| --- | --- | --- |
+| Voice chat hotkey | **on** | Press **F8** in game to flip Options > Game > Voice chat. A voice says "Voice chat on/off" and the HUD's own voice chat icon shows which way it went. Change the key or the announcement under `[voice_chat]`. |
+| Offline guard | **on** | Keeps the modded game off FromSoftware's matchmaking servers. Turned off automatically when `[seamless]` is enabled, because co-op cannot connect through it. |
+| Everything else | off | The game plays exactly as shipped. `ds2-mods.toml` lists what else can be turned on. |
+
+To remove the mod, delete `dinput8.dll` from the game folder.
+
 ## What each file is
 
 | File | What it does |
@@ -11,7 +29,7 @@ supported and is not detected for you -- every address in these DLLs was read ou
 | `ds2-launcher.exe` | Starts the game suspended and injects the DLLs named by `[launcher] dlls` in `ds2-mods.toml`. Needed **only** for mods that cannot be loaded from inside the running process -- Seamless Co-op is the one this exists for. |
 | `ds2_crash_logging.dll` | The crash logger on its own, for loading beside something else. Has not been run inside the game as a standalone DLL. |
 | `ds2-launch-linux.sh` | Linux only: starts `ds2-launcher.exe` inside the game's Proton prefix. See [Linux](#linux). |
-| `ds2-mods.toml` | Settings, read by both of the above from the folder they sit in. Every key ships set to the default it already has, so unpacking it changes nothing. |
+| `ds2-mods.toml` | Settings, read by both of the above from the folder they sit in. Every feature is off unless it says otherwise; as shipped it turns on the voice chat hotkey and nothing else. |
 | `SHA256SUMS` | Checksums for the files above. `sha256sum -c SHA256SUMS`. |
 
 Each file is also attested: `gh attestation verify dinput8.dll -R Banon-Labs/ds2-mods-rs` traces a
@@ -23,9 +41,8 @@ Drop `dinput8.dll` into the folder holding `DarkSoulsII.exe` -- on a default Ste
 `steamapps/common/Dark Souls II Scholar of the First Sin/Game/`. That is the whole install for
 everything except Seamless Co-op.
 
-Put `ds2-mods.toml` in that same folder. It ships with every key already set to the default the
-DLLs use, so it changes nothing on its own -- it is there so you can see what there is to change,
-and so `[launcher] dlls` has an example. Delete it and the DLLs run the same defaults.
+Put `ds2-mods.toml` in that same folder. Without it every feature is off, the voice chat hotkey
+included, and the offline guard stays on.
 
 ## Seamless Co-op is not in this package, and will not be
 
@@ -36,6 +53,8 @@ Install it yourself, then flip one line in `ds2-mods.toml`:
 enabled = true                   # ships as false
 dll = "SeamlessCoop/ds2sc.dll"   # where its own launcher puts it -- leave alone for a normal install
 ```
+
+`[offline]` turns itself off for that run, because co-op cannot connect through it; the log says so.
 
 and have Steam start `ds2-launcher.exe` instead of the game -- see
 [Starting the launcher from Steam](#starting-the-launcher-from-steam). This is not only a

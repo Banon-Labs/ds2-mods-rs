@@ -1,5 +1,6 @@
 //! The detour on the net session update that reads the key, the call into the Game tab's own
-//! commit, and the watcher that lets the key move while the game runs.
+//! commit, the watcher that lets the key move while the game runs, and the detour on the HUD voice
+//! chat icon's update that shows the byte.
 
 use core::ffi::c_void;
 use std::path::PathBuf;
@@ -13,8 +14,9 @@ use ds2_hotkey_config::reload::{FileChange, HotFile};
 
 use crate::{
     Announce, AnnounceSetting, CONFIG_KEY_ANNOUNCE, CONFIG_KEY_KEYBOARD, CONFIG_SECTION,
-    DEFAULT_ANNOUNCE, DEFAULT_KEY, KeySetting, LOG_PREFIX, announce_setting, default_chord,
-    key_setting, toggled, voice_chat_on,
+    ComponentMemory, DEFAULT_ANNOUNCE, DEFAULT_KEY, ICON_PLAYBACK_RATE, KeySetting, LOG_PREFIX,
+    announce_setting, default_chord, icon_sprites, icon_visibility, key_setting, toggled,
+    voice_chat_on,
 };
 
 unsafe extern "system" {
@@ -71,6 +73,8 @@ pub struct Request {
 pub struct Outcome {
     /// The detour is in and the commit routine matched its prologue.
     pub installed: bool,
+    /// The HUD icon detour is in. Independent of `installed`: a refused icon leaves the key working.
+    pub hud_icon: bool,
 }
 
 /// `NET_SESSION_UPDATE(this, f32 delta)`. The delta is a float in `xmm1`; declaring it as an
@@ -236,6 +240,281 @@ unsafe extern "system" fn net_session_update_detour(this: usize, delta: f32) {
         // SAFETY: forwarding the arguments the game passed.
         unsafe { original(this, delta) };
     }
+}
+
+// ---------------------------------------------------------------------------------------------
+// The HUD icon.
+// ---------------------------------------------------------------------------------------------
+
+/// `FE_VOICE_CHAT_ICON_UPDATE(this)`.
+type IconUpdate = unsafe extern "system" fn(usize);
+
+/// `FE_BIND_SCENE_OBJ_PROXY(layout_proxy, out, path) -> out`.
+type BindProxyFn = unsafe extern "system" fn(usize, *mut u8, *const u8) -> *mut u8;
+
+/// One of the icon's three child getters: `(this, out) -> out`.
+type ChildFn = unsafe extern "system" fn(usize, *mut u8) -> *mut u8;
+
+/// `FE_ELEMENT_SET_VISIBLE(accessor + 8, shown)`.
+type SetVisibleFn = unsafe extern "system" fn(*mut u8, u8);
+
+/// Trampoline back to the real icon update.
+static ICON_ORIGINAL: AtomicUsize = AtomicUsize::new(0);
+
+/// Resolved addresses, in the order the update uses them: bind, set-visible, then the three
+/// children for bytes 1..3. All zero until every prologue has matched.
+static ICON_CALLS: [AtomicUsize; 5] = [
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+];
+
+/// The last state word applied, logged on change only -- the detour runs every frame.
+static ICON_LAST_WORD: AtomicU32 = AtomicU32::new(u32::MAX);
+
+/// A one-component element id path, in the shape [`ds2_rva::FE_ELEMENT_RESOLVE`] reads. Aligned so
+/// the game's `base + (-base & 3)` idiom lands on `base`.
+#[repr(C, align(16))]
+struct IdPath([u8; ds2_rva::FE_ELEMENT_PATH_SIZE]);
+
+/// One element accessor. Self-referential once bound (see `ds2-item-warn`'s `resolve_element`), so
+/// it is built in place and never moved; the game never destroys its own either.
+#[repr(C, align(16))]
+struct Accessor([u8; ds2_rva::FE_ELEMENT_ACCESSOR_SIZE]);
+
+/// Apply four show/hide bytes the way [`ds2_rva::FE_VOICE_CHAT_ICON_UPDATE`] does: bind the root
+/// into one accessor, set it, then let each child getter overwrite that accessor and set the child.
+///
+/// # Safety
+///
+/// Game thread, from the icon update's own detour, with `this` the icon the game passed.
+unsafe fn apply_icon(this: usize, calls: [usize; 5], bytes: [u8; 4]) {
+    let [bind, set_visible, child_3e0, child_3e1, child_3e2] = calls;
+    let mut path = IdPath([0; ds2_rva::FE_ELEMENT_PATH_SIZE]);
+    let start = (path.0.as_ptr() as usize).wrapping_neg() & 3;
+    path.0[start..][..4].copy_from_slice(&ds2_rva::FE_VOICE_CHAT_ICON_ROOT_ELEMENT.to_le_bytes());
+    path.0[ds2_rva::FE_ELEMENT_PATH_COUNT_OFFSET..][..8].copy_from_slice(&1u64.to_le_bytes());
+    let mut accessor = Accessor([0; ds2_rva::FE_ELEMENT_ACCESSOR_SIZE]);
+    let out = accessor.0.as_mut_ptr();
+
+    // SAFETY: every address matched its recorded prologue at install, and the argument shapes are
+    // the ones `0x14050a685`..`0x14050a6ec` pass: the icon's layout proxy, a 0x90-byte accessor, a
+    // one-id path; then `(this, out)` for each child, and `out + 8` for every set.
+    unsafe {
+        let bind: BindProxyFn = std::mem::transmute::<usize, BindProxyFn>(bind);
+        let set_visible: SetVisibleFn = std::mem::transmute::<usize, SetVisibleFn>(set_visible);
+        bind(
+            this + ds2_rva::FE_VOICE_CHAT_ICON_LAYOUT_PROXY_OFFSET,
+            out,
+            path.0.as_ptr(),
+        );
+        set_visible(
+            out.add(ds2_rva::FE_ELEMENT_ACCESSOR_VISIBLE_OFFSET),
+            bytes[0],
+        );
+        for (child, byte) in [child_3e0, child_3e1, child_3e2]
+            .into_iter()
+            .zip(&bytes[1..])
+        {
+            let child: ChildFn = std::mem::transmute::<usize, ChildFn>(child);
+            let accessor = child(this, out);
+            set_visible(
+                accessor.add(ds2_rva::FE_ELEMENT_ACCESSOR_VISIBLE_OFFSET),
+                *byte,
+            );
+        }
+    }
+}
+
+/// The Voice chat byte, or `None` while the options block does not exist.
+fn voice_chat_byte() -> Option<u8> {
+    let options = options_block()?;
+    let mut byte = [0u8; 1];
+    // SAFETY: fault-tolerant read of one byte inside the live options block.
+    unsafe {
+        ds2_game_base::mem::read_bytes(options + ds2_rva::GAME_OPTION_VOICE_CHAT_OFFSET, &mut byte)
+    }
+    .then_some(byte[0])
+}
+
+/// Live game memory for [`icon_sprites`]: every read fault-tolerant.
+struct GameMemory;
+
+impl ComponentMemory for GameMemory {
+    fn read_usize(&self, addr: usize) -> Option<usize> {
+        // SAFETY: fault-tolerant read; an unmapped address is `None`.
+        unsafe { ds2_game_base::mem::safe_read_usize(addr) }
+    }
+    fn read_u16(&self, addr: usize) -> Option<u16> {
+        // SAFETY: as above.
+        unsafe { ds2_game_base::mem::safe_read_u16(addr) }
+    }
+}
+
+/// Module base, for the vtable tests in the icon walk. `0` before install.
+static ICON_BASE: AtomicUsize = AtomicUsize::new(0);
+
+/// Sprites slowed on the last pass, logged on change only -- the detour runs every frame.
+static ICON_SLOWED: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+/// The root component of the icon's own layout scene, reached the way the game's empty-path
+/// resolve does: proxy slot 1 (checked to be [`ds2_rva::FEX_SCENE_GET_SCENE`], whose body is
+/// `mov rax,[rcx-0x10]`), then `[[scene+0x28]+0x30]` (`0x140afdaf0`).
+fn icon_root(this: usize, base: usize) -> Option<usize> {
+    let memory = GameMemory;
+    let proxy = this + ds2_rva::FE_VOICE_CHAT_ICON_LAYOUT_PROXY_OFFSET;
+    let vtable = memory.read_usize(proxy)?;
+    let get_scene = memory.read_usize(vtable + ds2_rva::FE_SCENE_PROXY_GET_SCENE_SLOT)?;
+    if get_scene != base + ds2_rva::FEX_SCENE_GET_SCENE as usize {
+        return None;
+    }
+    let scene = memory
+        .read_usize(proxy - ds2_rva::FEX_SCENE_GET_SCENE_BACK_OFFSET)
+        .filter(|p| *p != 0)?;
+    let holder = memory
+        .read_usize(scene + ds2_rva::FE_SCENE_ROOT_HOLDER_OFFSET)
+        .filter(|p| *p != 0)?;
+    memory
+        .read_usize(holder + ds2_rva::FE_SCENE_ROOT_OFFSET)
+        .filter(|p| *p != 0)
+}
+
+/// Set [`ICON_PLAYBACK_RATE`] on every sprite of the icon's scene. Only this icon's scene is
+/// walked, so no other HUD element changes speed.
+///
+/// # Safety
+///
+/// Game thread, from the icon's own update, with `this` the icon the game passed.
+unsafe fn slow_icon(this: usize) {
+    let base = ICON_BASE.load(Ordering::Acquire);
+    if base == 0 {
+        return;
+    }
+    let Some(root) = icon_root(this, base) else {
+        return;
+    };
+    let sprites = icon_sprites(root, base, &GameMemory);
+    for &sprite in &sprites {
+        let rate = sprite + ds2_rva::FE_SPRITE_RATE_OFFSET;
+        // SAFETY: fault-tolerant read.
+        let now = unsafe { ds2_game_base::mem::safe_read_f32(rate) };
+        if now.is_some_and(|r| r != ICON_PLAYBACK_RATE) {
+            // SAFETY: `sprite` carries `FeComponentSprite`'s vtable (checked by the walk) and was
+            // just read at this field; `+0x60` is its rate, a plain `f32` only its tick reads.
+            unsafe { (rate as *mut f32).write(ICON_PLAYBACK_RATE) };
+        }
+    }
+    if ICON_SLOWED.swap(sprites.len(), Ordering::Relaxed) != sprites.len() {
+        log_capped(format_args!(
+            "{LOG_PREFIX} hud icon playback x{ICON_PLAYBACK_RATE} on {} sprite(s) under root \
+             0x{root:016x}",
+            sprites.len()
+        ));
+    }
+}
+
+/// The icon detour. With the byte known, it applies the game's own state for it and skips the
+/// original; otherwise the original runs untouched. Either way the icon plays at
+/// [`ICON_PLAYBACK_RATE`].
+unsafe extern "system" fn icon_update_detour(this: usize) {
+    if this != 0 {
+        // SAFETY: game thread, inside the icon's own update, with the icon the game passed.
+        unsafe { slow_icon(this) };
+    }
+    let calls: [usize; 5] = core::array::from_fn(|i| ICON_CALLS[i].load(Ordering::Acquire));
+    if this != 0
+        && !calls.contains(&0)
+        && let Some(byte) = voice_chat_byte()
+    {
+        let bytes = icon_visibility(byte);
+        let word = u32::from_le_bytes(bytes);
+        if ICON_LAST_WORD.swap(word, Ordering::Relaxed) != word {
+            log_capped(format_args!(
+                "{LOG_PREFIX} hud icon {} (byte 0x{byte:02x}, word 0x{word:08x})",
+                if voice_chat_on(byte) { "on" } else { "off" }
+            ));
+        }
+        // SAFETY: game thread, inside the icon's own update, with the icon the game passed.
+        unsafe { apply_icon(this, calls, bytes) };
+        return;
+    }
+    let original = ICON_ORIGINAL.load(Ordering::Acquire);
+    if original != 0 {
+        // SAFETY: the trampoline MinHook returned for this exact site and ABI.
+        let original: IconUpdate = unsafe { std::mem::transmute::<usize, IconUpdate>(original) };
+        // SAFETY: forwarding the argument the game passed.
+        unsafe { original(this) };
+    }
+}
+
+/// Check the icon update and every function the detour calls, then hook the update. MinHook must
+/// already be initialised.
+fn install_icon(base: usize) -> bool {
+    let bind = base + ds2_rva::FE_BIND_SCENE_OBJ_PROXY as usize;
+    let set_visible = base + ds2_rva::FE_ELEMENT_SET_VISIBLE as usize;
+    let children = [
+        (ds2_rva::FE_VOICE_CHAT_ICON_CHILD_3E0, "icon-child-3e0"),
+        (ds2_rva::FE_VOICE_CHAT_ICON_CHILD_3E1, "icon-child-3e1"),
+        (ds2_rva::FE_VOICE_CHAT_ICON_CHILD_3E2, "icon-child-3e2"),
+    ]
+    .map(|(rva, what)| (base + rva as usize, what));
+    let site = base + ds2_rva::FE_VOICE_CHAT_ICON_UPDATE as usize;
+    if !prologue_matches(
+        bind,
+        &ds2_rva::FE_BIND_SCENE_OBJ_PROXY_PROLOGUE,
+        "bind-proxy",
+    ) || !prologue_matches(
+        set_visible,
+        &ds2_rva::FE_ELEMENT_SET_VISIBLE_PROLOGUE,
+        "set-visible",
+    ) || !children
+        .iter()
+        .all(|&(at, what)| prologue_matches(at, &ds2_rva::FE_VOICE_CHAT_ICON_CHILD_PROLOGUE, what))
+        || !prologue_matches(
+            site,
+            &ds2_rva::FE_VOICE_CHAT_ICON_UPDATE_PROLOGUE,
+            "icon-update",
+        )
+    {
+        return false;
+    }
+    for (slot, address) in ICON_CALLS.iter().zip([
+        bind,
+        set_visible,
+        children[0].0,
+        children[1].0,
+        children[2].0,
+    ]) {
+        slot.store(address, Ordering::Release);
+    }
+    ICON_BASE.store(base, Ordering::Release);
+    // SAFETY: the site matched its recorded prologue above, and the detour is a `'static` fn of the
+    // same ABI (`this` in rcx, nothing returned).
+    match unsafe { MhHook::new(site as *mut c_void, icon_update_detour as *mut c_void) } {
+        Ok(handle) => {
+            ICON_ORIGINAL.store(handle.trampoline() as usize, Ordering::Release);
+            // SAFETY: the address `MhHook::new` just registered.
+            let status = unsafe { MH_EnableHook(site as *mut c_void) };
+            if status != MH_STATUS::MH_OK {
+                log(format_args!(
+                    "{LOG_PREFIX} hud-icon install-failed stage=MH_EnableHook status={status:?}"
+                ));
+                return false;
+            }
+        }
+        Err(status) => {
+            log(format_args!(
+                "{LOG_PREFIX} hud-icon install-failed stage=MH_CreateHook status={status:?}"
+            ));
+            return false;
+        }
+    }
+    log(format_args!(
+        "{LOG_PREFIX} hud icon armed site=0x{site:016x} -- on shows the game's state 2, off hides it"
+    ));
+    true
 }
 
 /// Apply one config text.
@@ -429,5 +708,15 @@ pub unsafe fn install(request: &Request) -> Outcome {
         "{LOG_PREFIX} armed key={key} site=0x{site:016x} -- the options menu's own Voice chat row \
          still works and is untouched"
     ));
-    Outcome { installed: true }
+    let hud_icon = install_icon(base);
+    if !hud_icon {
+        log(format_args!(
+            "{LOG_PREFIX} hud icon NOT INSTALLED -- the key still works, the HUD shows the game's \
+             own voice state"
+        ));
+    }
+    Outcome {
+        installed: true,
+        hud_icon,
+    }
 }

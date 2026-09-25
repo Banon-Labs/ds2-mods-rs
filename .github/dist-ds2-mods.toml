@@ -1,9 +1,9 @@
 # DARK SOULS II mod settings. Put this file in the folder that holds `DarkSoulsII.exe`, beside
 # `dinput8.dll` -- both the DLL and `ds2-launcher.exe` read it from there.
 #
-# EVERY KEY IN HERE IS OPTIONAL. A missing key means the built-in default, and this file ships
-# with every key set to the default it already has, so a player who changes nothing gets exactly
-# what they would have got with no file at all. It exists to show you what there is to change.
+# Every key in here is optional. A missing key means the built-in default, and every feature's
+# built-in default is off -- the game as shipped. This file turns on one thing, `[voice_chat]`,
+# and otherwise says what there is to change.
 
 # ---------------------------------------------------------------------------------------------
 # [launcher] -- only read by `ds2-launcher.exe`, and only for DLLs that cannot be loaded from
@@ -43,7 +43,8 @@ exe = "DarkSoulsII.exe"
 
 # `false` is the shipped default, and deliberately so -- loading a foreign binary into your game
 # is not something a default should do without being asked. Set it to `true` once Seamless is
-# installed, and start the game with `ds2-launcher.exe` rather than through Steam.
+# installed, and start the game with `ds2-launcher.exe` rather than through Steam. `[offline]`
+# below turns itself off while this is true, because co-op cannot connect through it.
 enabled = false
 
 # Where its DLL is. This is the path its own launcher uses, so leaving it alone is right for a
@@ -58,7 +59,7 @@ save_file_extension = "co2"
 # ---------------------------------------------------------------------------------------------
 # [offline] -- ON BY DEFAULT, AND UNDERSTAND WHAT YOU ARE TURNING OFF. Everything in this mod
 # patches the game's code in memory, which is what FromSoftware's matchmaking servers watch for.
-# These four keys keep you off them.
+# These four keys keep you off them. Ignored while `[seamless] enabled = true`.
 # ---------------------------------------------------------------------------------------------
 [offline]
 enabled = true
@@ -67,21 +68,26 @@ report_offline = true
 block_sockets = true
 
 # ---------------------------------------------------------------------------------------------
-# [menu_row] -- extra rows on the in-game pause menu. All four are on with no file present.
+# [menu_row] -- extra rows on the in-game pause menu. None with no file present, and with none the
+# pause menu is the game's own.
 # ---------------------------------------------------------------------------------------------
 [menu_row]
-enabled = true
 
-# Which rows appear, in this order. Remove one to drop it.
-#
-# `save-game-to-file` IS ALSO A SWITCH. While that row is on the menu, the game stops saving by
-# itself -- no five-minute autosave, no save at a bonfire, no save on the way out to the title --
-# and that row is the only thing that writes your character. Take it out of this list to get the
-# ordinary saving behaviour back.
-# KEEP THIS ON ONE LINE. The reader is a line-based key-value parser, not a TOML parser: an array
-# split across lines parses as `rows = [` and every continuation line is discarded, which reads as
-# "no rows" and takes the whole menu away.
-rows = ["load-build-from-url", "load-character-from-file", "save-game-to-file", "quit-to-desktop"]
+# Which rows appear, in this order. All four, in the order they read best:
+#   rows = ["load-build-from-url", "load-character-from-file", "save-game-to-file", "quit-to-desktop"]
+# Keep it on one line. The reader is a line-based key-value parser, not a TOML parser: an array
+# split across lines parses as `rows = [` and every continuation line is discarded.
+rows = []
+
+# ---------------------------------------------------------------------------------------------
+# [save_block] -- stop the game saving by itself: no five-minute autosave, no save at a bonfire,
+# no save on the way out to the title. Off with no file present.
+# ---------------------------------------------------------------------------------------------
+[save_block]
+# Set to true and the `save-game-to-file` row above is the only thing that writes your character.
+# Anything since your last press of that row is lost when the game closes. Ignored, and the game
+# keeps saving, if that row is not on the menu.
+enabled = false
 
 # ---------------------------------------------------------------------------------------------
 # [voice_chat] -- a key that flips the game's own Voice chat option (Options > Game > Voice chat)

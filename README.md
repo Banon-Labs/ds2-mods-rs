@@ -42,11 +42,11 @@ machinery has been in front of a running game**. **The two save-file rows have n
 the static reading behind them, and the reason loading a save from a file takes effect on the next
 launch rather than this one, are in [`docs/DS2-SAVE-FILE-ROWS.md`](docs/DS2-SAVE-FILE-ROWS.md).
 
-**With `save-game-to-file` on the menu, the game stops saving by itself.** One detour on
-`SaveLoadSystem::update` erases every request the game makes of itself -- the five-minute autosave, the
-save on the way out to the title, the bonfire's -- so that row is the only thing that writes the
-container. It is not a separate switch: the row's presence is the switch, and removing it from `rows`
-gives the vanilla behaviour back. A run on 2026-09-24 loaded a character, spent five minutes in the
+**With `[save_block] enabled = true` and `save-game-to-file` on the menu, the game stops saving by
+itself.** One detour on `SaveLoadSystem::update` erases every request the game makes of itself --
+the five-minute autosave, the save on the way out to the title, the bonfire's -- so that row is the
+only thing that writes the container. The key defaults to `false`, which leaves the game's own saving
+alone, and it is ignored in a run without that row. A run on 2026-09-24 loaded a character, spent five minutes in the
 world and quit from the pause menu: the log answered the exit with `refused a save kind=10` and the
 container's length, mtime and MD5 were unchanged. What is still unmeasured -- a `Save Game to File`
 press under the feature, quit to the title rather than the desktop, a full autosave interval -- and the
