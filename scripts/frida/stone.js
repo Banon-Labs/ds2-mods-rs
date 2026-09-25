@@ -498,7 +498,7 @@ function serve(asked) {
     const mine = spawnOne(found.system, id, [at[0] - 1.5, at[1], at[2]], [0, 1, 0]);
     console.log('[stone] stock 833 at +x: live=' + stock.live + ' alive bits ' + JSON.stringify(aliveBits(stock.at)) +
       '\n[stone] custom ' + id + ' at -x: live=' + mine.live + ' alive bits ' + JSON.stringify(aliveBits(mine.at)) +
-      '\n[stone] LOOK: -x stone should be BLUE and 3x the size of the red +x one.');
+      '\n[stone] LOOK: compare the custom -x stone against the stock +x one.');
     return;
   }
 

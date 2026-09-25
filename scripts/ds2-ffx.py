@@ -188,7 +188,24 @@ class Tree:
         return "\n".join(self.lines)
 
 
-def patch(blob: bytes, sets: list[str], new_id: int | None) -> bytes:
+def drop_child(out: bytearray, tree: "Tree", where: str) -> None:
+    """Zero the effect id of a `Param type 37` (child effect) so its parent spawns nothing there.
+
+    Shipped files already use id 0 for an unused slot (effect 833's action 14 has seven of its
+    eight slots at 0), so this is a value the engine is known to accept, not a new shape.
+    """
+    at = int(where, 0)
+    found = tree.header(at, len(out))
+    if found is None or found[0] != "FXSerializableParam":
+        raise Fail(f"{where}: not a Param object")
+    body = at + 10
+    kind = struct.unpack_from("<i", out, body)[0]
+    if kind != 37:
+        raise Fail(f"{where}: Param type {kind}, not 37 (child effect)")
+    struct.pack_into("<i", out, body + 4, 0)
+
+
+def patch(blob: bytes, sets: list[str], new_id: int | None, drops: list[str] | None = None) -> bytes:
     """Rewrite leaf primitives in place, by the offsets `tree` prints. Same size, so no object
     length anywhere changes and the tree stays valid by construction.
 
@@ -215,6 +232,8 @@ def patch(blob: bytes, sets: list[str], new_id: int | None) -> bytes:
             struct.pack_into("<4f", out, body, *parts)
         else:
             struct.pack_into("<f", out, body, float(value))
+    for where in drops or []:
+        drop_child(out, tree, where)
     if new_id is not None:
         struct.pack_into("<i", out, tree.root + 10 + 4, new_id)
     Tree(bytes(out)).dump()
@@ -243,6 +262,8 @@ def main() -> int:
     p.add_argument("--id", type=int, required=True)
     p.add_argument("--new-id", type=int)
     p.add_argument("--set", dest="sets", action="append", default=[], metavar="OFFSET=VALUE")
+    p.add_argument("--drop-child", dest="drops", action="append", default=[], metavar="OFFSET",
+                   help="offset of a `Param type 37` from `tree`: that child effect is not spawned")
     p.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()
 
@@ -262,7 +283,7 @@ def main() -> int:
         print(Tree(blob).dump())
         return 0
     if args.cmd == "patch":
-        args.out.write_bytes(patch(blob, args.sets, args.new_id))
+        args.out.write_bytes(patch(blob, args.sets, args.new_id, args.drops))
         print(f"{name} -> {args.out} ({len(args.sets)} value(s), id {args.new_id or args.id})")
         return 0
     if args.out:
