@@ -69,6 +69,7 @@ ds2-save-file.workspace = true
 ds2-save-block.workspace = true
 ds2-menu-row.workspace = true
 ds2-inventory-sort.workspace = true
+ds2-voice-chat.workspace = true
 ds2-item-warn.workspace = true
 # The overlay. It brings the `windows` crate with it -- the first third-party runtime dependency
 # in this workspace other than `dearxan` -- because it talks COM to Direct3D 11 and a hand-rolled

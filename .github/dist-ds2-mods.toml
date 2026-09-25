@@ -82,3 +82,15 @@ enabled = true
 # split across lines parses as `rows = [` and every continuation line is discarded, which reads as
 # "no rows" and takes the whole menu away.
 rows = ["load-build-from-url", "load-character-from-file", "save-game-to-file", "quit-to-desktop"]
+
+# ---------------------------------------------------------------------------------------------
+# [voice_chat] -- a key that flips the game's own Voice chat option (Options > Game > Voice chat)
+# on and off, the same way changing it in that menu does. It takes effect at once, and it is kept
+# only if the game saves afterwards, like any option change. The menu's own row still works.
+# ---------------------------------------------------------------------------------------------
+[voice_chat]
+enabled = true
+
+# The key. Any name the other hotkeys here accept, with modifiers if you like: "F8", "Ctrl+V".
+# Set it to "" to unbind it. Editing this while the game runs takes effect in about a second.
+key = "F8"
