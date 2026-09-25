@@ -1108,6 +1108,43 @@ pub const FE_SPRITE_TABLE_ENTRY_START_OFFSET: usize = 0x04;
 /// looking at the screen.
 pub const FE_SPRITE_POSITION_OFFSET: usize = 0x40;
 
+/// A `FeComponentSprite`'s playback rate, a `f32` multiplier on the tick's delta. `+0x60`.
+///
+/// The constructor (`0x140b6bc70`) writes `1.0` here (`param_1[0xc] = 0x3f800000`), vtable slot
+/// `0x130` (`0x140b6c5a0`) is its setter, and the sprite's tick (slot `0x168`, `0x140b6c6c0`) is
+/// the only reader:
+///
+/// ```asm
+/// mulss xmm1, [rbx+0x60]     ; delta * rate
+/// addss xmm1, xmm0           ; + position
+/// movss [rbx+0x40], xmm1     ; the new position
+/// ```
+///
+/// It then wraps (flag `+0x64` set) or clamps against the frame count at `[[+0x48]+0x10]`, and
+/// forwards the unscaled delta to its children through slot `0x1b0` (`0x140b6ce80`). So the rate is
+/// per sprite: a nested sprite runs at its own rate, and slowing a subtree means setting every
+/// sprite in it. `FeComponentObject`'s tick (`0x140b6aec0`) takes its keyframe position from its
+/// parent sprite (`[[+0x18]]` slot `0x48`) and has no clock of its own.
+pub const FE_SPRITE_RATE_OFFSET: usize = 0x60;
+
+/// Inside a `FeLayoutScene`, the holder of its root component. `+0x28`.
+///
+/// `0x140afdaf0` (the empty-path resolve) is `[[scene+0x28]+0x30]`, and [`FE_SCENE_FIND_BY_ID_PATH`]
+/// starts every lookup from that same component (`0x140b507d0`: `[holder+0x30]`, slot `0x190`).
+pub const FE_SCENE_ROOT_HOLDER_OFFSET: usize = 0x28;
+/// The root component inside that holder. `+0x30`. See [`FE_SCENE_ROOT_HOLDER_OFFSET`].
+pub const FE_SCENE_ROOT_OFFSET: usize = 0x30;
+
+/// `FrontendEx::FexScene`'s get-scene, slot 1 ([`FE_SCENE_PROXY_GET_SCENE_SLOT`]) of the
+/// `FexLayoutResourceProxy` a HUD scene player embeds. RVA `0x00027720`.
+///
+/// Whole body `mov rax,[rcx-0x10]; ret`: the layout scene is the qword `0x10` before the proxy.
+/// Slot 1 of `FeScenePlayerVoiceChatIcon`'s `+0x18` vtable (`0x1410fa6b8`) is this function.
+pub const FEX_SCENE_GET_SCENE: u32 = 0x0002_7720;
+
+/// What [`FEX_SCENE_GET_SCENE`] subtracts from its `this`. `0x10`.
+pub const FEX_SCENE_GET_SCENE_BACK_OFFSET: usize = 0x10;
+
 /// Rows 2 and 3, the pair the game guarantees is never shown together.
 ///
 /// `0x1400f4344` computes row 3's enable byte as `row2.enabled == 0`, so their XOR is true at every

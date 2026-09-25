@@ -14,8 +14,9 @@ use ds2_hotkey_config::reload::{FileChange, HotFile};
 
 use crate::{
     Announce, AnnounceSetting, CONFIG_KEY_ANNOUNCE, CONFIG_KEY_KEYBOARD, CONFIG_SECTION,
-    DEFAULT_ANNOUNCE, DEFAULT_KEY, KeySetting, LOG_PREFIX, announce_setting, default_chord,
-    icon_visibility, key_setting, toggled, voice_chat_on,
+    ComponentMemory, DEFAULT_ANNOUNCE, DEFAULT_KEY, ICON_PLAYBACK_RATE, KeySetting, LOG_PREFIX,
+    announce_setting, default_chord, icon_sprites, icon_visibility, key_setting, toggled,
+    voice_chat_on,
 };
 
 unsafe extern "system" {
@@ -338,9 +339,90 @@ fn voice_chat_byte() -> Option<u8> {
     .then_some(byte[0])
 }
 
+/// Live game memory for [`icon_sprites`]: every read fault-tolerant.
+struct GameMemory;
+
+impl ComponentMemory for GameMemory {
+    fn read_usize(&self, addr: usize) -> Option<usize> {
+        // SAFETY: fault-tolerant read; an unmapped address is `None`.
+        unsafe { ds2_game_base::mem::safe_read_usize(addr) }
+    }
+    fn read_u16(&self, addr: usize) -> Option<u16> {
+        // SAFETY: as above.
+        unsafe { ds2_game_base::mem::safe_read_u16(addr) }
+    }
+}
+
+/// Module base, for the vtable tests in the icon walk. `0` before install.
+static ICON_BASE: AtomicUsize = AtomicUsize::new(0);
+
+/// Sprites slowed on the last pass, logged on change only -- the detour runs every frame.
+static ICON_SLOWED: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+/// The root component of the icon's own layout scene, reached the way the game's empty-path
+/// resolve does: proxy slot 1 (checked to be [`ds2_rva::FEX_SCENE_GET_SCENE`], whose body is
+/// `mov rax,[rcx-0x10]`), then `[[scene+0x28]+0x30]` (`0x140afdaf0`).
+fn icon_root(this: usize, base: usize) -> Option<usize> {
+    let memory = GameMemory;
+    let proxy = this + ds2_rva::FE_VOICE_CHAT_ICON_LAYOUT_PROXY_OFFSET;
+    let vtable = memory.read_usize(proxy)?;
+    let get_scene = memory.read_usize(vtable + ds2_rva::FE_SCENE_PROXY_GET_SCENE_SLOT)?;
+    if get_scene != base + ds2_rva::FEX_SCENE_GET_SCENE as usize {
+        return None;
+    }
+    let scene = memory
+        .read_usize(proxy - ds2_rva::FEX_SCENE_GET_SCENE_BACK_OFFSET)
+        .filter(|p| *p != 0)?;
+    let holder = memory
+        .read_usize(scene + ds2_rva::FE_SCENE_ROOT_HOLDER_OFFSET)
+        .filter(|p| *p != 0)?;
+    memory
+        .read_usize(holder + ds2_rva::FE_SCENE_ROOT_OFFSET)
+        .filter(|p| *p != 0)
+}
+
+/// Set [`ICON_PLAYBACK_RATE`] on every sprite of the icon's scene. Only this icon's scene is
+/// walked, so no other HUD element changes speed.
+///
+/// # Safety
+///
+/// Game thread, from the icon's own update, with `this` the icon the game passed.
+unsafe fn slow_icon(this: usize) {
+    let base = ICON_BASE.load(Ordering::Acquire);
+    if base == 0 {
+        return;
+    }
+    let Some(root) = icon_root(this, base) else {
+        return;
+    };
+    let sprites = icon_sprites(root, base, &GameMemory);
+    for &sprite in &sprites {
+        let rate = sprite + ds2_rva::FE_SPRITE_RATE_OFFSET;
+        // SAFETY: fault-tolerant read.
+        let now = unsafe { ds2_game_base::mem::safe_read_f32(rate) };
+        if now.is_some_and(|r| r != ICON_PLAYBACK_RATE) {
+            // SAFETY: `sprite` carries `FeComponentSprite`'s vtable (checked by the walk) and was
+            // just read at this field; `+0x60` is its rate, a plain `f32` only its tick reads.
+            unsafe { (rate as *mut f32).write(ICON_PLAYBACK_RATE) };
+        }
+    }
+    if ICON_SLOWED.swap(sprites.len(), Ordering::Relaxed) != sprites.len() {
+        log_capped(format_args!(
+            "{LOG_PREFIX} hud icon playback x{ICON_PLAYBACK_RATE} on {} sprite(s) under root \
+             0x{root:016x}",
+            sprites.len()
+        ));
+    }
+}
+
 /// The icon detour. With the byte known, it applies the game's own state for it and skips the
-/// original; otherwise the original runs untouched.
+/// original; otherwise the original runs untouched. Either way the icon plays at
+/// [`ICON_PLAYBACK_RATE`].
 unsafe extern "system" fn icon_update_detour(this: usize) {
+    if this != 0 {
+        // SAFETY: game thread, inside the icon's own update, with the icon the game passed.
+        unsafe { slow_icon(this) };
+    }
     let calls: [usize; 5] = core::array::from_fn(|i| ICON_CALLS[i].load(Ordering::Acquire));
     if this != 0
         && !calls.contains(&0)
@@ -407,6 +489,7 @@ fn install_icon(base: usize) -> bool {
     ]) {
         slot.store(address, Ordering::Release);
     }
+    ICON_BASE.store(base, Ordering::Release);
     // SAFETY: the site matched its recorded prologue above, and the detour is a `'static` fn of the
     // same ABI (`this` in rcx, nothing returned).
     match unsafe { MhHook::new(site as *mut c_void, icon_update_detour as *mut c_void) } {
