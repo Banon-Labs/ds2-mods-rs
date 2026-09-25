@@ -58,6 +58,8 @@ ds2-input-harness = { path = "crates/ds2-input-harness" }
 ds2-sl2-core = { path = "crates/ds2-sl2-core" }
 ds2-save-file = { path = "crates/ds2-save-file" }
 ds2-save-file-core = { path = "crates/ds2-save-file-core" }
+# Refuses the game's own saves, so the rows above are the only thing that writes the container.
+ds2-save-block = { path = "crates/ds2-save-block" }
 # The second mod's configuration, read rather than shipped. See the crate docs.
 ds2-seamless = { path = "crates/ds2-seamless" }
 

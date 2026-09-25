@@ -5861,6 +5861,140 @@ pub const SAVE_LOAD_REQUEST_SAVE_PROLOGUE: [u8; 3] = [0x83, 0xfa, 0x0e];
 pub const SAVE_LOAD_REQUEST_KIND_CHARACTER: u32 = 2;
 
 // =================================================================================================
+// The function that performs every save, and the five fields that ask it to
+//
+// `SAVE_LOAD_REQUEST_SAVE` above is a *request* -- three byte writes. This is the other end: the
+// per-frame update that reads those bytes, and the only code in the image that begins a save. A mod
+// that wants the game to stop saving by itself works here, because everything else is a caller of
+// the request and there are twenty-three of those.
+// =================================================================================================
+
+/// `SaveLoadSystem::update(this /*rcx*/, f32 delta /*xmm1*/)`. RVA `0x002e6b00`.
+///
+/// The second argument is a `float` in `xmm1`, not an integer in `edx` -- `movaps xmm6,xmm1` is the
+/// fifth instruction. A detour declared with an integer second parameter compiles, runs, and hands
+/// the engine whatever that volatile register happened to hold; see
+/// [`NV_NAVIGATION_SYSTEM_UPDATE`], which carries the same warning for the same reason.
+///
+/// # Why this address and not the twenty-three requesters
+///
+/// Because it is the only consumer. The whole save pipeline is a flag and a poll:
+///
+/// ```text
+/// item pickup / souls / bonfire / level up / quit-to-menu / new game cycle   (23 call sites)
+///   -> SAVE_LOAD_REQUEST_SAVE        sets [this+0x1a2]=1, maybe [this+0x1a3], min [this+0x68]
+/// the 300-second autosave timer      sets [this+0x1a2]=1 inside this function (see below)
+///   -> this function                 reads [this+0x1a2] and calls 0x1402e78c0, one xref
+///        -> the poll at 0x1402e67f0  drives the SLSession that writes the `.sl2`
+/// ```
+///
+/// A request is cheap to erase and a save is impossible to take back. The tail of this function is
+/// the erasure the game itself performs once it has started one:
+///
+/// ```asm
+/// 0x1402e6b91:  cmp  BYTE PTR [rbx+0x1a2],al  ; a save is wanted
+///               jne  <skip>
+///               ...
+///               call 0x1402e78c0              ; the performer -- its only call site in the image
+///               mov  BYTE PTR [rbx+0x1a6],1   ; and now a save is in flight
+///               mov  BYTE PTR [rbx+0x1a2],0
+///               mov  BYTE PTR [rbx+0x1a9],0
+///               mov  DWORD PTR [rbx+0x68],0xf
+/// ```
+///
+/// Clearing those fields before the original runs is indistinguishable, to the game, from nobody
+/// having asked for a save. Nothing waits on a completion counter: the requester that re-asserts
+/// every frame (`0x1401bf9b5`, a `GameManagerImp` state handler) tests `[this+0x1a2]` and simply does
+/// not ask again when it is clear, and the quit path's `call` is followed by unconditional code
+/// rather than by a wait.
+///
+/// # What skipping the performer instead would cost
+///
+/// `[this+0x1a6]` is set whether or not the call is made -- the game's own `PlayerCtrl == null` arm
+/// proves that -- and the next frame's poll returns `4` for an idle system, which this function
+/// stores into `[this+0x6c]`. That is a save-failure status, and the message the engine has for one
+/// is *"Failed to save game.\nReturning to Title Menu."* So the request is the thing to erase, not
+/// the call.
+///
+/// Not Arxan-redirected: `scripts/ds2-arxan-chain.py 0x1402e6b00` reports a clean prologue at the
+/// entry. Reached from two `GameManagerImp` state handlers (`0x1401c014c`, `0x1401c02f8`), so it runs
+/// during play and not at the title.
+pub const SAVE_LOAD_SYSTEM_UPDATE: u32 = 0x002e_6b00;
+
+/// The six bytes [`SAVE_LOAD_SYSTEM_UPDATE`] must begin with. `push rbx` -- carrying a redundant
+/// `40` REX prefix -- then `sub rsp,0x30`.
+///
+/// Six and not five: MinHook needs five and copies whole instructions, and the fifth byte is in the
+/// middle of the `sub`. Recording the whole instruction is what makes a mismatch mean "this is not
+/// that function" rather than "the table is half an instruction out".
+pub const SAVE_LOAD_SYSTEM_UPDATE_PROLOGUE: [u8; 6] = [0x40, 0x53, 0x48, 0x83, 0xec, 0x30];
+
+/// `[saveLoadSystem + 0x1a2]`: a save is wanted. `u8`.
+///
+/// Set by [`SAVE_LOAD_REQUEST_SAVE`] for any kind, set inline by the autosave timer in
+/// [`SAVE_LOAD_SYSTEM_UPDATE`], and cleared by that function once the save has been started.
+pub const SAVE_LOAD_SYSTEM_SAVE_WANTED_OFFSET: usize = 0x1a2;
+
+/// `[saveLoadSystem + 0x1a3]`: the second flag [`SAVE_LOAD_REQUEST_SAVE`] sets, and only for
+/// `kind == 2`. `u8`.
+///
+/// Passed straight through to the performer as its third argument, where a non-zero forces the
+/// SLSession request type to `5`. The update leaves it alone when it starts a save.
+pub const SAVE_LOAD_SYSTEM_SAVE_KIND2_OFFSET: usize = 0x1a3;
+
+/// `[saveLoadSystem + 0x1a9]`: kind 14's own flag -- a save deferred by a frame. `u8`.
+///
+/// `RequestSave(system, 14)` writes this and nothing else. The update then turns it into an ordinary
+/// request (`min(kind, 11)`, wanted = 1) on the first frame `0x140b0bcf0` says the moment is right.
+/// So erasing only `+0x1a2` leaves this one armed and gets the save a frame later.
+pub const SAVE_LOAD_SYSTEM_SAVE_DEFERRED_OFFSET: usize = 0x1a9;
+
+/// `[saveLoadSystem + 0x68]`: the lowest kind asked for since the last save. `i32`.
+///
+/// Every requester does `if (kind < [this+0x68]) [this+0x68] = kind`, and the performer reads it:
+/// `kind < 2` picks a different SLSession request type, and `kind >= 6` makes the save wait for the
+/// cooldown at `+0x60`.
+pub const SAVE_LOAD_SYSTEM_SAVE_KIND_OFFSET: usize = 0x68;
+
+/// What the game writes to [`SAVE_LOAD_SYSTEM_SAVE_KIND_OFFSET`] when nothing is pending: `15`.
+///
+/// Above every kind any requester passes, which is what makes the `min` work. Worth writing rather
+/// than leaving a dropped request's kind in place: the field is otherwise a standing claim that
+/// somebody asked for something.
+pub const SAVE_LOAD_SYSTEM_SAVE_KIND_NONE: i32 = 15;
+
+/// `[saveLoadSystem + 0x64]`: seconds accumulated toward the periodic autosave. `f32`.
+///
+/// ```asm
+/// 0x1402e6b99:  movaps xmm0,xmm6              ; the frame delta
+///               addss  xmm0,DWORD PTR [rbx+0x64]
+///               comiss xmm0,DWORD PTR [0x1410d7b40]  ; 300.0
+///               movss  DWORD PTR [rbx+0x64],xmm0
+///               jb     <skip>
+///               ...                            ; min(kind, 13); wanted = 1
+/// ```
+///
+/// This is the one save DS2 asks for with no requester at all, and the reason
+/// [`SAVE_LOAD_SYSTEM_UPDATE`] has to be the hook site rather than [`SAVE_LOAD_REQUEST_SAVE`].
+/// Zeroing this field every frame holds the accumulator at one frame's delta, which is five minutes
+/// short of the threshold.
+pub const SAVE_LOAD_SYSTEM_AUTOSAVE_ELAPSED_OFFSET: usize = 0x64;
+
+/// The autosave interval DARK SOULS II ships, in seconds, read out of `0x1410d7b40`: `300.0`.
+///
+/// Recorded as a number rather than as a patch target: that global is read by six functions, so it
+/// is a shared constant and not this system's private setting. Writing to it would change five other
+/// things to stop one.
+pub const SAVE_LOAD_SYSTEM_AUTOSAVE_SECONDS: f32 = 300.0;
+
+/// `[saveLoadSystem + 0x1a6]`: a save has been started and not yet collected. `u8`.
+///
+/// Set by [`SAVE_LOAD_SYSTEM_UPDATE`] immediately after it calls the performer, and cleared by the
+/// same function on the first frame the poll at `0x1402e67f0` answers anything but "still working".
+/// Read by a mod only to tell "the save it asked for has begun" from "it is still pending".
+pub const SAVE_LOAD_SYSTEM_SAVE_IN_FLIGHT_OFFSET: usize = 0x1a6;
+
+// =================================================================================================
 // THE INVENTORY TAB'S SORT DIALOG, AND THE OBJECT THAT OWNS IT
 //
 // DARK SOULS II ALREADY SHIPS INVENTORY SORTING. It is not a feature to build; it is a feature

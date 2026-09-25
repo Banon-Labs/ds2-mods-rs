@@ -39,6 +39,12 @@ coupling at all: it converts strings, calls comdlg32, and dereferences nothing f
 
 ## Save Game to File
 
+When this row is on the menu, `ds2-save-block` turns off every save the game performs on its own, so
+the row is the only thing that writes the container. That feature reads the same system from the other
+end -- the update that consumes the request this row makes -- and its reading is in
+[`DS2-SAVE-BLOCK.md`](DS2-SAVE-BLOCK.md). The one thing it asks of this crate is a call to
+`permit_save()` before `RequestSave`, so the row's own save is not the next thing erased.
+
 ### `SaveLoadSystem::RequestSave` does not save
 
 `0x1402e7410`, in full -- 0x29 bytes:

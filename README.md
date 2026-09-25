@@ -42,6 +42,13 @@ machinery has been in front of a running game**. **The two save-file rows have n
 the static reading behind them, and the reason loading a save from a file takes effect on the next
 launch rather than this one, are in [`docs/DS2-SAVE-FILE-ROWS.md`](docs/DS2-SAVE-FILE-ROWS.md).
 
+**With `save-game-to-file` on the menu, the game stops saving by itself.** One detour on
+`SaveLoadSystem::update` erases every request the game makes of itself -- the five-minute autosave, the
+save on the way out to the title, the bonfire's -- so that row is the only thing that writes the
+container. It is not a separate switch: the row's presence is the switch, and removing it from `rows`
+gives the vanilla behaviour back. The static reading, and the two designs that were rejected for it,
+are in [`docs/DS2-SAVE-BLOCK.md`](docs/DS2-SAVE-BLOCK.md). **This has not been run either.**
+
 ## Three facts that shape everything here
 
 1. **me3 cannot load DS2.** `me3 profile create --game` accepts `darksouls3, sekiro, eldenring,
