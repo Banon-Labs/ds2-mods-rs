@@ -1,0 +1,672 @@
+<title>Drangleic Build Ledger</title>
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&family=Spectral:wght@500;600&display=swap">
+<style>
+:root {
+  --ground: #dcdad2;
+  --surface: #eceae3;
+  --raised: #f6f4ee;
+  --ink: #191b1c;
+  --muted: #5f625d;
+  --faint: #87897f;
+  --line: #c4c1b6;
+  --patina: #2c6a5d;
+  --patina-soft: #2c6a5d1f;
+  --ember: #a2482a;
+  --shadow: 0 1px 0 #ffffff80, 0 1px 3px #0000001a;
+  --fire: #b8532a;  --lightning: #a2841c; --magic: #3a68a8;
+  --dark: #63467f;  --poison: #5e8231;   --bleed: #9c2f3d;
+  --raw: #6f746f;   --enchanted: #44749c; --mundane: #7a6c52;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground: #131619;
+    --surface: #1b1f23;
+    --raised: #232830;
+    --ink: #dfe0da;
+    --muted: #8e918b;
+    --faint: #6d716c;
+    --line: #2e343a;
+    --patina: #5aa791;
+    --patina-soft: #5aa79126;
+    --ember: #d1734c;
+    --shadow: 0 1px 2px #00000059;
+    --fire: #d1703f;  --lightning: #cfae3c; --magic: #6b9bd8;
+    --dark: #9b7cc0;  --poison: #8bb254;   --bleed: #cf5f6d;
+    --raw: #9aa09a;   --enchanted: #74a6cd; --mundane: #b09a76;
+  }
+}
+:root[data-theme="dark"] {
+  --ground: #131619;
+  --surface: #1b1f23;
+  --raised: #232830;
+  --ink: #dfe0da;
+  --muted: #8e918b;
+  --faint: #6d716c;
+  --line: #2e343a;
+  --patina: #5aa791;
+  --patina-soft: #5aa79126;
+  --ember: #d1734c;
+  --shadow: 0 1px 2px #00000059;
+  --fire: #d1703f;  --lightning: #cfae3c; --magic: #6b9bd8;
+  --dark: #9b7cc0;  --poison: #8bb254;   --bleed: #cf5f6d;
+  --raw: #9aa09a;   --enchanted: #74a6cd; --mundane: #b09a76;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font: 400 15px/1.5 "IBM Plex Sans", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: inherit; }
+
+/* ---------------------------------------------------------- masthead */
+.masthead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px 18px;
+  padding: 18px 24px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+}
+.masthead h1 {
+  margin: 0;
+  font: 600 25px/1.1 Spectral, Georgia, serif;
+  letter-spacing: -0.01em;
+}
+.masthead .sub {
+  color: var(--muted);
+  font-size: 13px;
+  max-width: 54ch;
+}
+.masthead .tally {
+  margin-left: auto;
+  font: 500 13px/1 "IBM Plex Mono", ui-monospace, monospace;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.masthead .tally b { color: var(--patina); font-size: 17px; }
+
+/* ---------------------------------------------------------- shell */
+.shell {
+  display: grid;
+  grid-template-columns: 322px minmax(0, 1fr);
+  align-items: start;
+  gap: 0;
+}
+@media (max-width: 900px) { .shell { grid-template-columns: 1fr; } }
+
+/* ---------------------------------------------------------- filters */
+.rail {
+  position: sticky;
+  top: 0;
+  max-height: 100vh;
+  overflow-y: auto;
+  padding: 18px 20px 40px;
+  border-right: 1px solid var(--line);
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+@media (max-width: 900px) {
+  .rail { position: static; max-height: none; border-right: 0;
+          border-bottom: 1px solid var(--line); }
+}
+.rail fieldset {
+  border: 0; margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.rail legend, .eyebrow {
+  padding: 0;
+  font: 600 11px/1 "IBM Plex Sans", sans-serif;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--faint);
+}
+.field { display: flex; flex-direction: column; gap: 4px; }
+.field label { font-size: 12px; color: var(--muted); }
+input, select, button {
+  font: inherit;
+  color: var(--ink);
+  background: var(--raised);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 6px 8px;
+  min-width: 0;
+}
+input:focus-visible, select:focus-visible, button:focus-visible,
+tr:focus-visible {
+  outline: 2px solid var(--patina);
+  outline-offset: 1px;
+}
+.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.statgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.statgrid .field label {
+  font: 600 10px/1 "IBM Plex Mono", monospace;
+  letter-spacing: 0.08em;
+  color: var(--faint);
+}
+.statgrid input { padding: 5px 6px; font-family: "IBM Plex Mono", monospace; }
+.actions { display: flex; gap: 8px; }
+.actions button {
+  flex: 1;
+  cursor: pointer;
+  font-weight: 500;
+}
+.actions .primary {
+  background: var(--patina);
+  border-color: var(--patina);
+  color: var(--surface);
+}
+.actions button:hover { filter: brightness(1.08); }
+
+/* ---------------------------------------------------------- results */
+.results { padding: 0 0 60px; min-width: 0; }
+.resbar {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 10px 22px;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+  color: var(--muted);
+}
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--patina-soft);
+  font: 500 12px/1.6 "IBM Plex Mono", monospace;
+  color: var(--ink);
+}
+.chip button {
+  border: 0; background: none; padding: 0; cursor: pointer;
+  color: var(--muted); font-size: 14px; line-height: 1;
+}
+
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+thead th {
+  position: sticky; top: 0; z-index: 1;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  padding: 8px 10px;
+  text-align: left;
+  font: 600 11px/1.2 "IBM Plex Sans", sans-serif;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--faint);
+  white-space: nowrap;
+}
+thead th.sortable { cursor: pointer; user-select: none; }
+thead th.sortable:hover { color: var(--ink); }
+thead th .dir { color: var(--patina); }
+thead th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
+tbody tr { border-bottom: 1px solid var(--line); cursor: pointer; }
+tbody tr:hover { background: var(--patina-soft); }
+tbody tr.open { background: var(--patina-soft); }
+td { padding: 7px 10px; vertical-align: top; }
+td.mono { font-family: "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums; }
+td.name { font-weight: 500; max-width: 26ch; }
+td.author, td.cls { color: var(--muted); white-space: nowrap; }
+.lvl { font: 600 15px/1 "IBM Plex Mono", monospace; }
+.statcell { font-family: "IBM Plex Mono", monospace; font-size: 12.5px;
+            font-variant-numeric: tabular-nums; white-space: nowrap; }
+.statcell.hit { color: var(--patina); font-weight: 600; }
+
+/* detail row */
+tr.detail { background: var(--raised); }
+tr.detail:hover { background: var(--raised); }
+tr.detail td { padding: 12px 16px 16px 40px; }
+.loadout { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+           gap: 16px 24px; }
+.loadout h4 {
+  margin: 0 0 5px;
+  font: 600 11px/1 "IBM Plex Sans", sans-serif;
+  letter-spacing: 0.1em; text-transform: uppercase; color: var(--faint);
+}
+.loadout ul { margin: 0; padding: 0; list-style: none;
+              display: flex; flex-direction: column; gap: 3px; font-size: 13px; }
+.loadout .slot { color: var(--faint); font: 500 10px/1.6 "IBM Plex Mono", monospace;
+                 letter-spacing: 0.06em; margin-right: 6px; }
+.inf {
+  margin-left: 6px; padding: 0 5px; border-radius: 2px;
+  font: 600 10px/1.7 "IBM Plex Mono", monospace;
+  letter-spacing: 0.04em; text-transform: uppercase;
+  border: 1px solid currentColor;
+}
+.open-link {
+  display: inline-block; margin-top: 12px;
+  font: 500 13px/1 "IBM Plex Sans", sans-serif;
+  color: var(--patina);
+}
+
+/* empty / more */
+.notice {
+  margin: 0; padding: 70px 24px; text-align: center; color: var(--muted);
+}
+.notice strong {
+  display: block; margin-bottom: 8px;
+  font: 600 20px/1.3 Spectral, Georgia, serif; color: var(--ink);
+}
+.more { display: block; margin: 18px auto; padding: 8px 20px; cursor: pointer; }
+[hidden] { display: none !important; }
+</style>
+
+<header class="masthead">
+  <h1>Drangleic Build Ledger</h1>
+  <p class="sub">Every public Dark Souls&nbsp;II build on soulsplanner.com, searchable by the
+    things the site itself won't search on.</p>
+  <div class="tally"><b id="tally">—</b> of <span id="total">0</span> builds
+    <span id="coverage"></span></div>
+</header>
+
+<div class="shell">
+  <form class="rail" id="filters" autocomplete="off">
+    <fieldset>
+      <legend>Character</legend>
+      <div class="field">
+        <label for="f-class">Starting class</label>
+        <select id="f-class" name="class"><option value="">Any</option></select>
+      </div>
+      <div class="pair">
+        <div class="field">
+          <label for="f-lmin">Level from</label>
+          <input id="f-lmin" name="lmin" type="number" min="1" placeholder="1">
+        </div>
+        <div class="field">
+          <label for="f-lmax">to</label>
+          <input id="f-lmax" name="lmax" type="number" min="1" placeholder="838">
+        </div>
+      </div>
+      <div class="field">
+        <label for="f-cov">Covenant</label>
+        <select id="f-cov" name="cov"><option value="">Any</option></select>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Minimum stats</legend>
+      <div class="statgrid" id="statgrid"></div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Equipment</legend>
+      <div class="field">
+        <label for="f-weapon">Weapon</label>
+        <input id="f-weapon" name="weapon" list="l-weapon" placeholder="e.g. Rapier">
+        <datalist id="l-weapon"></datalist>
+      </div>
+      <div class="field">
+        <label for="f-inf">Infusion <span id="inf-scope"></span></label>
+        <select id="f-inf" name="inf"><option value="">Any</option></select>
+      </div>
+      <div class="field">
+        <label for="f-armor">Armour piece</label>
+        <input id="f-armor" name="armor" list="l-armor" placeholder="e.g. Havels">
+        <datalist id="l-armor"></datalist>
+      </div>
+      <div class="field">
+        <label for="f-ring">Ring</label>
+        <input id="f-ring" name="ring" list="l-ring" placeholder="e.g. Chloranthy">
+        <datalist id="l-ring"></datalist>
+      </div>
+      <div class="field">
+        <label for="f-spell">Spell</label>
+        <input id="f-spell" name="spell" list="l-spell" placeholder="e.g. Great Resonant">
+        <datalist id="l-spell"></datalist>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Listing</legend>
+      <div class="field">
+        <label for="f-name">Build name</label>
+        <input id="f-name" name="name" placeholder="e.g. twink">
+      </div>
+      <div class="field">
+        <label for="f-author">Author</label>
+        <input id="f-author" name="author" placeholder="e.g. Adrian">
+      </div>
+    </fieldset>
+
+    <div class="actions">
+      <button type="button" class="primary" id="btn-clear">Clear filters</button>
+    </div>
+  </form>
+
+  <main class="results">
+    <div class="resbar">
+      <span class="eyebrow">Filters</span>
+      <div class="chips" id="chips"><span style="color:var(--faint)">none set</span></div>
+    </div>
+
+    <p class="notice" id="empty">
+      <strong>Set at least one filter</strong>
+      Narrow by class, level, a stat floor, or a piece of kit, and the matches
+      appear here.
+    </p>
+
+    <div class="tablewrap" id="tablewrap" hidden>
+      <table>
+        <thead>
+          <tr id="head"></tr>
+        </thead>
+        <tbody id="rows"></tbody>
+      </table>
+      <button class="more" id="more" type="button" hidden>Show more</button>
+    </div>
+  </main>
+</div>
+
+<script type="application/json" id="payload">__PAYLOAD__</script>
+<script>
+(() => {
+  const DATA = JSON.parse(document.getElementById('payload').textContent);
+  const { pool, rows, stats, armorSlots, handSlots, classes, meta } = DATA;
+  const ABBR = ['VGR','END','VIT','ATN','STR','DEX','ADP','INT','FTH'];
+  const S = i => pool[i];
+  const pretty = s => (s || '').replace(/_/g, ' ');
+  const key = s => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const NONE = new Set(['', 'No_Infusion', 'No_Spell', 'No_Ring', 'No_Item',
+                        'No_Protector', 'No_Weapon', 'Bare_Fists', 'No_Covenant']);
+
+  // row layout: [id, name, author, level, rating, created, cls, cov,
+  //              armor[4], hands[12], rings[4], spells[14], stats[9]]
+  const R = { ID:0, NAME:1, AUTHOR:2, LVL:3, RATING:4, MADE:5, CLS:6, COV:7,
+              ARMOR:8, HANDS:9, RINGS:10, SPELLS:11, STATS:12 };
+
+  // precomputed search keys, so typing stays instant over 6.6k rows
+  const keyed = rows.map(r => ({
+    name: key(r[R.NAME]), author: key(r[R.AUTHOR]),
+    cls: r[R.CLS], cov: r[R.COV],
+    armor: r[R.ARMOR].map(i => key(S(i))),
+    rings: r[R.RINGS].map(i => key(S(i))),
+    spells: r[R.SPELLS].map(i => key(S(i))),
+    hands: Array.from({ length: 6 }, (_, k) =>
+      [key(S(r[R.HANDS][k * 2])), key(S(r[R.HANDS][k * 2 + 1]))]),
+  }));
+
+  // ------------------------------------------------ vocabularies
+  const vocab = (get) => {
+    const seen = new Set();
+    rows.forEach(r => get(r).forEach(i => { if (!NONE.has(S(i))) seen.add(S(i)); }));
+    return [...seen].sort((a, b) => a.localeCompare(b));
+  };
+  const fill = (id, list) => {
+    document.getElementById(id).innerHTML =
+      list.map(v => `<option value="${pretty(v)}"></option>`).join('');
+  };
+  fill('l-weapon', vocab(r => r[R.HANDS].filter((_, k) => k % 2 === 0)));
+  fill('l-armor', vocab(r => r[R.ARMOR]));
+  fill('l-ring', vocab(r => r[R.RINGS]));
+  fill('l-spell', vocab(r => r[R.SPELLS]));
+
+  const opts = (sel, list) => {
+    document.getElementById(sel).insertAdjacentHTML('beforeend',
+      list.map(([v, t]) => `<option value="${v}">${t}</option>`).join(''));
+  };
+  opts('f-class', Object.entries(classes)
+    .sort((a, b) => a[1].localeCompare(b[1])));
+  opts('f-cov', vocab(r => [r[R.COV]]).map(v => [v, pretty(v)]));
+  const INFUSIONS = vocab(r => r[R.HANDS].filter((_, k) => k % 2 === 1));
+  opts('f-inf', INFUSIONS.map(v => [v, pretty(v)]));
+
+  document.getElementById('statgrid').innerHTML = stats.map((s, i) =>
+    `<div class="field"><label for="f-s${i}">${ABBR[i]}</label>
+       <input id="f-s${i}" name="s${i}" type="number" min="1" placeholder="—"></div>`
+  ).join('');
+  document.getElementById('total').textContent = rows.length.toLocaleString();
+  // say out loud what the page actually holds -- a partial mirror looks
+  // exactly like a filter that silently caps results
+  document.getElementById('coverage').textContent =
+    meta.partial
+      ? ` · partial mirror, ${meta.listed.toLocaleString()} listed`
+      : ` · full mirror, lvl ${meta.minLevel}–${meta.maxLevel}`;
+  document.getElementById('f-lmax').placeholder = String(meta.maxLevel);
+
+  // ------------------------------------------------ filtering
+  const form = document.getElementById('filters');
+  const val = n => (form.elements[n]?.value || '').trim();
+
+  function active() {
+    const f = { stats: [] };
+    const num = n => { const v = parseInt(val(n), 10); return isNaN(v) ? null : v; };
+    f.cls = val('class'); f.cov = val('cov');
+    f.lmin = num('lmin'); f.lmax = num('lmax');
+    ['weapon', 'armor', 'ring', 'spell', 'name', 'author']
+      .forEach(n => { f[n] = key(val(n)); });
+    f.inf = key(val('inf'));
+    stats.forEach((s, i) => { const v = num('s' + i); if (v !== null) f.stats.push([i, v]); });
+    f.count = (f.cls ? 1 : 0) + (f.cov ? 1 : 0) + (f.lmin !== null ? 1 : 0) +
+      (f.lmax !== null ? 1 : 0) + f.stats.length +
+      ['weapon', 'armor', 'ring', 'spell', 'name', 'author', 'inf']
+        .filter(n => f[n]).length;
+    return f;
+  }
+
+  function match(r, k, f) {
+    if (f.cls && S(k.cls) !== f.cls) return false;
+    if (f.cov && S(k.cov) !== f.cov) return false;
+    if (f.lmin !== null && r[R.LVL] < f.lmin) return false;
+    if (f.lmax !== null && r[R.LVL] > f.lmax) return false;
+    for (const [i, v] of f.stats) if (r[R.STATS][i] < v) return false;
+    if (f.name && !k.name.includes(f.name)) return false;
+    if (f.author && !k.author.includes(f.author)) return false;
+    if (f.armor && !k.armor.some(a => a.includes(f.armor))) return false;
+    if (f.ring && !k.rings.some(a => a.includes(f.ring))) return false;
+    if (f.spell && !k.spells.some(a => a.includes(f.spell))) return false;
+    if (f.weapon && !k.hands.some(([w]) => w.includes(f.weapon))) return false;
+    // an infusion asked for alongside a weapon must be ON that weapon
+    if (f.inf && !k.hands.some(([w, inf]) =>
+        inf === f.inf && (!f.weapon || w.includes(f.weapon)))) return false;
+    return true;
+  }
+
+  // ------------------------------------------------ rendering
+  const COLS = [
+    { k: 'lvl',    t: 'Lvl',    num: true,  get: r => r[R.LVL] },
+    { k: 'class',  t: 'Class',  get: r => pretty(S(r[R.CLS])) },
+    { k: 'name',   t: 'Build',  get: r => r[R.NAME] },
+    { k: 'author', t: 'Author', get: r => r[R.AUTHOR] },
+    { k: 'stats',  t: ABBR.join(' '), get: null },
+    { k: 'rating', t: 'Rating', num: true, get: r => r[R.RATING] },
+    { k: 'made',   t: 'Created', get: r => r[R.MADE] },
+  ];
+  const SORTV = {
+    lvl: r => r[R.LVL], rating: r => r[R.RATING],
+    name: r => r[R.NAME].toLowerCase(), author: r => r[R.AUTHOR].toLowerCase(),
+    class: r => S(r[R.CLS]), made: r => r[R.MADE].split('.').reverse().join(''),
+    stats: r => r[R.STATS].reduce((a, b) => a + b, 0),
+  };
+  let sort = { k: 'lvl', dir: 1 }, shown = 200, hits = [], filters = active();
+
+  document.getElementById('head').innerHTML = COLS.map(c =>
+    `<th class="sortable${c.num ? ' num' : ''}" data-k="${c.k}">${c.t}` +
+    `<span class="dir" data-dir="${c.k}"></span></th>`).join('');
+
+  const infStyle = inf => {
+    const v = '--' + key(inf);
+    return `color: var(${v}, var(--muted))`;
+  };
+
+  function gearLine(name, inf) {
+    if (NONE.has(name)) return '';
+    let out = pretty(name);
+    if (inf && !NONE.has(inf)) {
+      out += `<span class="inf" style="${infStyle(inf)}">${pretty(inf)}</span>`;
+    }
+    return out;
+  }
+
+  function detail(r) {
+    const block = (title, items) =>
+      items.length ? `<div><h4>${title}</h4><ul>${items.join('')}</ul></div>` : '';
+    const armour = r[R.ARMOR].map((i, n) => {
+      const g = gearLine(S(i), null);
+      return g ? `<li><span class="slot">${armorSlots[n]}</span>${g}</li>` : '';
+    }).filter(Boolean);
+    const hands = handSlots.map((slot, n) => {
+      const g = gearLine(S(r[R.HANDS][n * 2]), S(r[R.HANDS][n * 2 + 1]));
+      return g ? `<li><span class="slot">${slot}</span>${g}</li>` : '';
+    }).filter(Boolean);
+    const rings = r[R.RINGS].map(i => {
+      const g = gearLine(S(i), null);
+      return g ? `<li>${g}</li>` : '';
+    }).filter(Boolean);
+    const spells = r[R.SPELLS].map(i => {
+      const g = gearLine(S(i), null);
+      return g ? `<li>${g}</li>` : '';
+    }).filter(Boolean);
+    const cov = NONE.has(S(r[R.COV])) ? '' :
+      `<div><h4>Covenant</h4><ul><li>${pretty(S(r[R.COV]))}</li></ul></div>`;
+    return `<tr class="detail"><td colspan="${COLS.length}">
+      <div class="loadout">
+        ${block('Hands', hands)}${block('Armour', armour)}
+        ${block('Rings', rings)}${block('Spells', spells)}${cov}
+      </div>
+      <a class="open-link" target="_blank" rel="noopener"
+         href="https://soulsplanner.com/darksouls2/${r[R.ID]}"
+         >Open build ${r[R.ID]} on soulsplanner &rarr;</a>
+    </td></tr>`;
+  }
+
+  const esc = s => String(s).replace(/[&<>"]/g,
+    c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+  function rowHtml(r, i) {
+    const hit = new Set(filters.stats.map(([n]) => n));
+    const cells = COLS.map(c => {
+      if (c.k === 'stats') {
+        return `<td class="statcell">` + r[R.STATS].map((v, n) =>
+          `<span class="${hit.has(n) ? 'hit' : ''}">${String(v).padStart(2, ' ')}</span>`
+        ).join(' ') + `</td>`;
+      }
+      const v = esc(c.get(r));
+      if (c.k === 'lvl') return `<td class="num"><span class="lvl">${v}</span></td>`;
+      if (c.k === 'name') return `<td class="name">${v}</td>`;
+      if (c.k === 'author') return `<td class="author">${v}</td>`;
+      if (c.k === 'class') return `<td class="cls">${v}</td>`;
+      return `<td class="${c.num ? 'num mono' : 'mono'}">${v}</td>`;
+    }).join('');
+    return `<tr tabindex="0" data-i="${i}">${cells}</tr>`;
+  }
+
+  function render() {
+    const body = document.getElementById('rows');
+    const wrap = document.getElementById('tablewrap');
+    const none = document.getElementById('empty');
+    document.getElementById('tally').textContent =
+      filters.count ? hits.length.toLocaleString() : '—';
+
+    if (!filters.count) {
+      wrap.hidden = true; none.hidden = false;
+      none.innerHTML = '<strong>Set at least one filter</strong>' +
+        `Searching all ${rows.length.toLocaleString()} builds at once tells you ` +
+        'nothing. Narrow by class, level, a stat floor, or a piece of kit, and ' +
+        'the matches appear here.';
+      return;
+    }
+    if (!hits.length) {
+      wrap.hidden = true; none.hidden = false;
+      none.innerHTML = '<strong>Nothing matches</strong>' +
+        'No public build meets all of those at once. Loosen a stat floor or drop a filter.';
+      return;
+    }
+    none.hidden = true; wrap.hidden = false;
+    body.innerHTML = hits.slice(0, shown).map(rowHtml).join('');
+    const more = document.getElementById('more');
+    more.hidden = hits.length <= shown;
+    more.textContent = `Show more (${(hits.length - shown).toLocaleString()} left)`;
+    document.querySelectorAll('[data-dir]').forEach(el => {
+      el.textContent = el.dataset.dir === sort.k ? (sort.dir > 0 ? ' ↓' : ' ↑') : '';
+    });
+  }
+
+  function chips() {
+    const box = document.getElementById('chips');
+    const out = [];
+    const add = (field, label) => out.push(
+      `<span class="chip">${esc(label)}<button type="button" data-clear="${field}"
+        aria-label="Remove ${esc(label)} filter">×</button></span>`);
+    if (val('class')) add('class', classes[val('class')]);
+    if (val('lmin')) add('lmin', `lvl ≥ ${val('lmin')}`);
+    if (val('lmax')) add('lmax', `lvl ≤ ${val('lmax')}`);
+    stats.forEach((s, i) => {
+      if (val('s' + i)) add('s' + i, `${ABBR[i]} ≥ ${val('s' + i)}`);
+    });
+    ['weapon', 'armor', 'ring', 'spell', 'name', 'author']
+      .forEach(n => { if (val(n)) add(n, `${n}: ${val(n)}`); });
+    if (val('inf')) add('inf', `${pretty(val('inf'))} infusion`);
+    if (val('cov')) add('cov', pretty(val('cov')));
+    box.innerHTML = out.length ? out.join('')
+      : '<span style="color:var(--faint)">none set</span>';
+  }
+
+  function run() {
+    filters = active();
+    shown = 200;
+    hits = filters.count
+      ? rows.filter((r, i) => match(r, keyed[i], filters))
+      : [];
+    hits.sort((a, b) => {
+      const f = SORTV[sort.k], x = f(a), y = f(b);
+      return (x < y ? -1 : x > y ? 1 : 0) * -sort.dir;
+    });
+    document.getElementById('inf-scope').textContent =
+      val('weapon') ? '(on that weapon)' : '';
+    chips();
+    render();
+  }
+
+  form.addEventListener('input', run);
+  form.addEventListener('change', run);
+  document.getElementById('btn-clear').addEventListener('click', () => {
+    form.reset(); run();
+  });
+  document.getElementById('chips').addEventListener('click', e => {
+    const f = e.target.dataset.clear;
+    if (!f) return;
+    form.elements[f].value = '';
+    run();
+  });
+  document.getElementById('more').addEventListener('click', () => {
+    shown += 400; render();
+  });
+  document.getElementById('head').addEventListener('click', e => {
+    const th = e.target.closest('th');
+    if (!th) return;
+    const k = th.dataset.k;
+    sort = { k, dir: sort.k === k ? -sort.dir : 1 };
+    run();
+  });
+
+  const toggle = tr => {
+    const next = tr.nextElementSibling;
+    if (next && next.classList.contains('detail')) {
+      next.remove(); tr.classList.remove('open'); return;
+    }
+    document.querySelectorAll('tr.detail').forEach(d => d.remove());
+    document.querySelectorAll('tr.open').forEach(d => d.classList.remove('open'));
+    tr.classList.add('open');
+    tr.insertAdjacentHTML('afterend', detail(hits[+tr.dataset.i]));
+  };
+  document.getElementById('rows').addEventListener('click', e => {
+    const tr = e.target.closest('tr[data-i]');
+    if (tr) toggle(tr);
+  });
+  document.getElementById('rows').addEventListener('keydown', e => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    const tr = e.target.closest('tr[data-i]');
+    if (tr) { e.preventDefault(); toggle(tr); }
+  });
+
+  run();
+})();
+</script>
