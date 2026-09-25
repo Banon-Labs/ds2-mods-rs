@@ -125,6 +125,127 @@ impl Handle {
     }
 }
 
+type HeapAlloc = unsafe extern "system" fn(usize, usize, usize) -> usize;
+type EffectDataCtor = unsafe extern "system" fn(usize, usize);
+type RefAdd = unsafe extern "system" fn(usize);
+type ParseEffect = unsafe extern "system" fn(usize, *const u8, usize, u8) -> u8;
+type EffectResourceCtor = unsafe extern "system" fn(usize, usize, *const u16, usize);
+type ResourceStart = unsafe extern "system" fn(usize);
+type EffectLookup = unsafe extern "system" fn(usize, u32) -> usize;
+type Invalidate = unsafe extern "system" fn(usize, u32);
+
+/// Make `id` spawnable from `ffx`, a `DLsE` effect whose own id is already `id`.
+///
+/// The same calls the engine makes when it builds a bundle member on first use, without the
+/// bundle: allocate and construct an `SfxEffectData`, parse the bytes into it, and construct an
+/// `SfxEffectResourceObject` named `f%07d.ffx` -- the constructor is what inserts `id` into the
+/// resource manager's effect table. Both reference counts on the resource are raised and never
+/// dropped, so nothing on an area change or a purge frees it. Last, the FX core's cached entry
+/// for `id` is dropped, because a spawn of an id before it existed leaves a permanent "no such
+/// effect" placeholder that registration alone does not clear.
+///
+/// An id that is already registered is re-parsed from `ffx` in place and invalidated, which
+/// swaps the definition without a second resource.
+///
+/// The bytes and the name are leaked on purpose: a few kilobytes per colour for the life of the
+/// process, against the unknown of whether the parsed effect keeps pointers into its source.
+///
+/// # Safety
+///
+/// Game thread only, with `system` the live `KatanaSfxSystem`. See the module header.
+pub(crate) unsafe fn register_effect(system: usize, id: u32, ffx: Vec<u8>) -> Result<(), String> {
+    // SAFETY: each RVA is a function with the prototype of its type alias, recorded in `ds2_rva`
+    // with the evidence for that prototype; none is Arxan-redirected.
+    let (lookup, parse, invalidate_slot) = unsafe {
+        (
+            entry::<EffectLookup>(ds2_rva::SFX_EFFECT_LOOKUP).ok_or("no game image")?,
+            entry::<ParseEffect>(ds2_rva::SFX_EFFECT_DATA_PARSE).ok_or("no game image")?,
+            safe_read_usize(system).ok_or("KatanaSfxSystem vtable is unreadable")?
+                + ds2_rva::KATANA_SFX_SYSTEM_VT_INVALIDATE,
+        )
+    };
+    // SAFETY: a slot inside the live system's vtable; the reader refuses an unmapped page.
+    let invalidate: Invalidate = unsafe {
+        let slot = safe_read_usize(invalidate_slot).ok_or("invalidate slot is unreadable")?;
+        std::mem::transmute::<usize, Invalidate>(slot)
+    };
+    // SAFETY: plain fields of the live system, read through the fault-tolerant reader.
+    let (manager, allocator, flag) = unsafe {
+        (
+            safe_read_usize(system + ds2_rva::KATANA_SFX_SYSTEM_RESOURCE_MANAGER_OFFSET)
+                .filter(|p| *p != 0)
+                .ok_or("no SfxFxResourceManager")?,
+            safe_read_usize(system + ds2_rva::KATANA_SFX_SYSTEM_ALLOCATOR_OFFSET)
+                .filter(|p| *p != 0)
+                .ok_or("no allocator")?,
+            safe_read_u8(system + ds2_rva::KATANA_SFX_SYSTEM_PARSE_FLAG_OFFSET)
+                .ok_or("parse flag is unreadable")?,
+        )
+    };
+    let bytes: &'static [u8] = Vec::leak(ffx);
+
+    // SAFETY: game thread; `manager` is the live resource manager.
+    let existing = unsafe { lookup(manager, id) };
+    if existing != 0 {
+        // SAFETY: `existing` is the SfxEffectData the engine itself returned for `id`.
+        let parsed = unsafe { parse(existing, bytes.as_ptr(), bytes.len(), flag) };
+        // SAFETY: the engine's own invalidate for this system, on the game thread.
+        unsafe { invalidate(system, id) };
+        return if parsed == 1 { Ok(()) } else { Err(format!("re-parse of {id} returned {parsed}")) };
+    }
+
+    // SAFETY: as above -- prototypes recorded in `ds2_rva`, none Arxan-redirected.
+    let (alloc, data_ctor, ref_add, resource_ctor, start) = unsafe {
+        (
+            entry::<HeapAlloc>(ds2_rva::KATANA_HEAP_ALLOC).ok_or("no game image")?,
+            entry::<EffectDataCtor>(ds2_rva::SFX_EFFECT_DATA_CTOR).ok_or("no game image")?,
+            entry::<RefAdd>(ds2_rva::SFX_REF_ADD).ok_or("no game image")?,
+            entry::<EffectResourceCtor>(ds2_rva::SFX_EFFECT_RESOURCE_CTOR).ok_or("no game image")?,
+            entry::<ResourceStart>(ds2_rva::RESOURCE_OBJECT_START).ok_or("no game image")?,
+        )
+    };
+    // SAFETY: the engine's allocator, asked for the size and alignment the engine asks for.
+    let data = unsafe { alloc(ds2_rva::SFX_EFFECT_DATA_BYTES, 8, allocator) };
+    if data == 0 {
+        return Err("allocator returned null for SfxEffectData".to_owned());
+    }
+    // SAFETY: `data` is fresh storage of the constructor's size; the add-ref targets its count.
+    unsafe {
+        data_ctor(data, allocator);
+        ref_add(data + ds2_rva::SFX_EFFECT_DATA_REFCOUNT_OFFSET);
+    }
+    // SAFETY: `data` is constructed; `bytes` lives for the process.
+    let parsed = unsafe { parse(data, bytes.as_ptr(), bytes.len(), flag) };
+    if parsed != 1 {
+        return Err(format!("the engine refused the effect bytes for {id} (parse returned {parsed})"));
+    }
+    let name: &'static [u16] =
+        Vec::leak(format!("f{id:07}.ffx").encode_utf16().chain([0]).collect::<Vec<u16>>());
+    // SAFETY: as for `data`.
+    let resource = unsafe { alloc(ds2_rva::SFX_EFFECT_RESOURCE_BYTES, 8, allocator) };
+    if resource == 0 {
+        return Err("allocator returned null for SfxEffectResourceObject".to_owned());
+    }
+    // SAFETY: fresh storage of the constructor's size, the live system, a NUL-terminated
+    // basename that lives for the process, and the parsed data. The reference counts are two
+    // `i32` fields of the object just constructed.
+    unsafe {
+        resource_ctor(resource, system, name.as_ptr(), data);
+        for offset in ds2_rva::RESOURCE_OBJECT_REFCOUNT_OFFSETS {
+            let count = (resource + offset) as *mut i32;
+            count.write(count.read() + 1);
+        }
+        start(resource);
+        invalidate(system, id);
+    }
+    // SAFETY: game thread; the live resource manager.
+    if unsafe { lookup(manager, id) } == data {
+        Ok(())
+    } else {
+        Err(format!("{id} was constructed but the resource manager does not resolve it"))
+    }
+}
+
 /// Resolve an RVA to a function pointer. See `crate::navquery::entry`, which is the same three
 /// lines for the same reason; duplicated rather than shared because a `pub(crate)` generic
 /// transmute helper is a thing worth having to write out at each use.

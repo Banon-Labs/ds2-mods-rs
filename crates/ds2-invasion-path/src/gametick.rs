@@ -338,6 +338,61 @@ struct Tick {
     said_snap: bool,
     /// How far through a self-check run this is.
     check: Check,
+    /// Stock Prism Stone id -> the sparkle-free copy registered for it, or `None` when building
+    /// or registering that copy failed and the trail falls back to the stock stone. Filled once
+    /// per colour, on first use; see [`stripped_stone`].
+    stripped: std::collections::HashMap<u32, Option<u32>>,
+}
+
+/// The id to spawn for `stock`: its sparkle-free copy when there is one, else `stock` itself.
+///
+/// The first time a Prism Stone colour is asked for, its `.ffx` is read out of the player's own
+/// `Game/sfx/sfx9999.ffxbnd.dcx`, the sparkle child is cut ([`crate::stone_effect`]), and the
+/// result is registered under [`crate::stone_effect::stripped_id`]. That is one file read and one
+/// inflate per colour per process, on the game thread, the first time a trail of that colour is
+/// laid. Any failure is logged once and that colour keeps the stock stone rather than drawing
+/// nothing. An id that is not a Prism Stone is returned unchanged.
+fn stripped_stone(
+    stripped: &mut std::collections::HashMap<u32, Option<u32>>,
+    system: usize,
+    stock: u32,
+) -> u32 {
+    if !ds2_rva::PRISM_STONE_SFX_IDS.contains(&stock) {
+        return stock;
+    }
+    let resolved = *stripped.entry(stock).or_insert_with(|| {
+        let id = crate::stone_effect::stripped_id(stock);
+        let built = std::env::current_exe()
+            .map_err(|error| format!("no executable path: {error}"))
+            .and_then(|exe| {
+                let path = exe
+                    .parent()
+                    .ok_or("the executable has no directory")?
+                    .join(crate::stone_effect::BUNDLE_RELATIVE_PATH);
+                std::fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))
+            })
+            .and_then(|dcx| crate::stone_effect::member_from_bundle(&dcx, stock))
+            .and_then(|ffx| crate::stone_effect::strip_sparkles(&ffx, id))
+            // SAFETY: game thread, mid-simulation -- `lay_markers` is only reached from the nav
+            // tick -- and `system` is the live `KatanaSfxSystem` that call just resolved.
+            .and_then(|bytes| unsafe { sfx::register_effect(system, id, bytes) });
+        match built {
+            Ok(()) => {
+                log(format_args!(
+                    "Prism Stone {stock}: laying the sparkle-free copy, registered as effect {id}"
+                ));
+                Some(id)
+            }
+            Err(why) => {
+                log(format_args!(
+                    "Prism Stone {stock}: could not build the sparkle-free copy ({why}); this \
+                     colour keeps the stock stone"
+                ));
+                None
+            }
+        }
+    });
+    resolved.unwrap_or(stock)
 }
 
 /// Where a self-check run has got to.
@@ -386,6 +441,7 @@ impl Default for Tick {
             said_full: false,
             said_snap: false,
             check: Check::Off,
+            stripped: std::collections::HashMap::new(),
         }
     }
 }
@@ -1198,6 +1254,7 @@ fn lay_markers(state: &mut Tick) -> bool {
         lanes: open,
         said_quality,
         said_full,
+        stripped,
         ..
     } = state;
     let count = open.len();
@@ -1298,12 +1355,14 @@ fn lay_markers(state: &mut Tick) -> bool {
             // actually appear -- for the cost of a modulo. A real trail uses one id throughout,
             // because a trail that changes colour as it goes reads as several trails -- and with
             // several trails on screen at once that is now literally true of the ones beside it.
-            let id = if checking {
+            let stock = if checking {
                 ds2_rva::PRISM_STONE_SFX_IDS
                     [lane.trail.placed().wrapping_add(index) % ds2_rva::PRISM_STONE_SFX_IDS.len()]
             } else {
                 lane.effect_id
             };
+            // The sparkle-free copy of that colour, so the trail is the glow alone.
+            let id = stripped_stone(stripped, system, stock);
             if checking {
                 // SAFETY: game thread, mid-simulation, no engine lock held.
                 let attempt = unsafe { sfx::spawn_reporting(system, id, *at, direction) };
