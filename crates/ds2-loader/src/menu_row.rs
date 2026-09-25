@@ -87,8 +87,8 @@ impl Row {
     }
 }
 
-/// Every row a `rows` list may name, **in the order a player who names none of them sees them** --
-/// which is also the order they are listed in the log.
+/// Every row a `rows` list may name, **in the order the shipped `ds2-mods.toml` lists them** --
+/// which is also the order they are listed in the log, and the order the legacy keys produce.
 ///
 /// **Quit is last, and the order is the whole reason this is a list rather than a set.** It sat
 /// first for as long as it was the only row there was, and a tab's cursor starts on the first row:
@@ -96,7 +96,8 @@ impl Row {
 /// the most expensive thing on the tab to press by accident. The three rows that load, import or
 /// write a file take the near slots; the one that cannot be taken back takes the far one.
 ///
-/// A `rows` list still says otherwise. This is the default, not a policy.
+/// A `rows` list still says otherwise. This is the recommended order, not a policy -- and not the
+/// default: a config that names no rows gets none. See [`Source::default`].
 pub const EVERY_ROW: [Row; 4] = [
     Row::LoadBuildFromUrl,
     Row::LoadCharacterFromFile,
@@ -107,7 +108,7 @@ pub const EVERY_ROW: [Row; 4] = [
 /// Where a run's selection came from, so the log can say which key was read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
-    /// No config file, or neither key present. Nothing is added.
+    /// No config file, or neither key present. Nothing is added, and there is no quit tab.
     Default,
     /// A `rows` list. The legacy keys were not consulted.
     Rows,
@@ -129,14 +130,14 @@ pub struct MenuRowConfig {
 }
 
 impl Default for MenuRowConfig {
-    /// Every row, which is what a config file that says nothing about rows means.
+    /// No rows, which is what a config file that says nothing about rows means: the vanilla quit
+    /// menu, with no tab added. See [`Source::default`] for why.
     ///
-    /// Hand-written rather than derived, because the derived one is `rows: vec![]` and that is the
-    /// opposite answer -- reached on the two paths where there is no file to read at all, which are
-    /// exactly the paths a player who has configured nothing takes.
+    /// Reached on the two paths where there is no file to read at all, which are exactly the paths
+    /// a player who has configured nothing takes.
     fn default() -> Self {
         Self {
-            rows: EVERY_ROW.to_vec(),
+            rows: Vec::new(),
             overflow: Vec::new(),
             complaints: Vec::new(),
             source: Source::Default,
@@ -145,16 +146,13 @@ impl Default for MenuRowConfig {
 }
 
 impl Default for Source {
-    /// Every row this project adds.
+    /// Nothing this project adds: every feature defaults OFF, to the game's own behaviour.
     ///
-    /// It used to be nothing, on the reasoning that these rows change the pause menu, one of them
-    /// can quit the game without asking and one of them writes a file, so a player who had not
-    /// named them should not get them. The user's words on seeing two of four, 2026-09-23: "I would
-    /// like it on by default. All the extra rows we add ourselves."
-    ///
-    /// The reasoning it replaces was written when the ceiling was two and a row cost another row
-    /// its slot. It is twelve now, and the rows are on a tab of their own, so nothing is displaced
-    /// by carrying all four. `rows = []` still turns every one of them off.
+    /// From 2026-09-23 it was every row, on the user's request at the time. It is nothing again by
+    /// the user's later rule that every feature flag defaults to vanilla -- and here that rule has
+    /// teeth: `save-game-to-file` on the menu turns the game's own saving off, so a default that
+    /// carried it changed how a character is saved for a player who had configured nothing. The
+    /// shipped `ds2-mods.toml` names the rows it wants; a file that names none gets none.
     fn default() -> Self {
         Self::Default
     }
@@ -186,7 +184,8 @@ fn split_list(raw: &str) -> Vec<String> {
 }
 
 impl MenuRowConfig {
-    /// Read the section. A missing file, a missing key or an empty list all mean nothing is added.
+    /// Read the section. A missing file, a missing key or an empty list all mean nothing is added,
+    /// and no quit tab -- see [`Self::adds_quit_tab`].
     pub fn load() -> Self {
         let Some(path) = config_file_path() else {
             return Self::default();
@@ -251,15 +250,10 @@ impl MenuRowConfig {
             rows.push(Row::QuitToDesktop);
         }
         if rows.is_empty() {
-            // NEITHER KEY SET, so nothing has been said about rows at all -- and what a player who
-            // has said nothing gets is every row this project adds. A `rows` list, including an
-            // empty one, is what says otherwise; that path never reaches here.
-            return Self {
-                rows: EVERY_ROW.to_vec(),
-                overflow: Vec::new(),
-                complaints: Vec::new(),
-                source: Source::Default,
-            };
+            // Neither key set, so nothing has been said about rows at all -- and a player who has
+            // said nothing gets the vanilla menu. Reported as `Default` rather than
+            // `LegacyEnabled`, so a misspelt `enabled` reads as "not read" in the log.
+            return Self::default();
         }
         Self {
             rows,
@@ -267,6 +261,17 @@ impl MenuRowConfig {
             complaints: Vec::new(),
             source: Source::LegacyEnabled,
         }
+    }
+
+    /// Whether this run adds the quit tab at all.
+    ///
+    /// **No rows, no tab.** Not a switch of its own: the loader registers exactly [`Self::rows`], and
+    /// `ds2_menu_row::install` finding nothing registered patches none of the tab, strip or item
+    /// sites -- only the per-frame tick other crates ride on. So `rows = []`, or a list whose every
+    /// name was a typo, leaves the shipped quit menu as it shipped. Said here so the log says it
+    /// in the config's own line rather than leaving it to be inferred from a missing `registered`.
+    pub fn adds_quit_tab(&self) -> bool {
+        !self.rows.is_empty()
     }
 
     /// One line for the attach log, written before anything acts on it.
@@ -284,6 +289,9 @@ impl MenuRowConfig {
             names(&self.rows),
             ds2_menu_row::MAX_ADDED_ROWS
         );
+        if !self.adds_quit_tab() {
+            line.push_str(" SKIPPED -- no rows listed, so no quit tab is added and the shipped quit menu is untouched");
+        }
         if !self.overflow.is_empty() {
             line.push_str(&format!(
                 " REFUSED-OVER-CEILING=[{}] -- the grid's layout bind never looks past row {} and \
@@ -437,48 +445,69 @@ mod tests {
         assert_eq!(config.rows, vec![Row::SaveGameToFile]);
     }
 
-    /// Saying nothing gets every row; saying `rows = []` gets none.
+    /// Saying nothing gets no rows, and so does saying `rows = []` -- but they are reported apart.
     ///
-    /// The two used to be the same answer, and the difference is the whole of the 2026-09-23
-    /// change: a player who has configured nothing wants the rows this project adds, and a player
-    /// who wrote an empty list has said otherwise in the only place that can say it.
+    /// Every feature defaults off. An explicitly empty list is the modern key being read, which is
+    /// a different thing from no key at all, and the log's `source=` says which one a run took.
     #[test]
-    fn an_absent_selection_adds_every_row_and_an_empty_one_adds_none() {
+    fn an_absent_selection_and_an_empty_one_both_add_nothing() {
         for text in ["", "[menu_row]\n"] {
             let config = MenuRowConfig::from_text(text);
-            assert_eq!(config.rows, EVERY_ROW.to_vec(), "{text:?}");
+            assert!(config.rows.is_empty(), "{text:?}");
             assert_eq!(config.source, Source::Default, "{text:?}");
         }
-        // An explicitly empty list is the modern key being read, which is a different thing from no
-        // key at all and is reported -- and obeyed -- as such.
+        assert!(MenuRowConfig::default().rows.is_empty());
         let none = MenuRowConfig::from_text("[menu_row]\nrows = []\n");
         assert!(none.rows.is_empty());
         assert_eq!(none.source, Source::Rows);
     }
 
-    /// The default set is every row the table knows, with nothing left out.
+    /// An empty selection adds no tab, and the log says it was skipped; any row at all adds one.
     ///
-    /// Pinned against `EVERY_ROW` rather than against a list written out here, so a row added to
-    /// the table without being added to the default is a failure rather than a surprise.
+    /// An all-typo list is the same answer as `rows = []`, because a typo arms nothing -- a tab
+    /// with no rows on it would be a tab the player did not ask for.
     #[test]
-    fn the_default_set_is_all_of_them() {
-        assert_eq!(MenuRowConfig::default().rows, EVERY_ROW.to_vec());
-        assert_eq!(MenuRowConfig::default().rows.len(), 4);
+    fn no_rows_listed_means_no_quit_tab() {
+        for text in [
+            "",
+            "[menu_row]\n",
+            "[menu_row]\nrows = []\n",
+            "[menu_row]\nrows = [\"quit-to-deskotp\"]\n",
+        ] {
+            let config = MenuRowConfig::from_text(text);
+            assert!(!config.adds_quit_tab(), "{text:?}");
+            let line = config.describe();
+            assert!(line.contains("SKIPPED"), "{text:?}: {line}");
+        }
+        assert!(!MenuRowConfig::default().adds_quit_tab());
+        let one = MenuRowConfig::from_text("[menu_row]\nrows = [\"save-game-to-file\"]\n");
+        assert!(one.adds_quit_tab());
+        assert!(!one.describe().contains("SKIPPED"));
+    }
+
+    /// Every row the table knows fits on the tab at once, so the shipped list is not truncated.
+    #[test]
+    fn every_row_fits_under_the_ceiling() {
+        assert_eq!(EVERY_ROW.len(), 4);
         assert!(EVERY_ROW.len() <= ds2_menu_row::MAX_ADDED_ROWS);
     }
 
-    /// **The quit row is last of the default set**, on every path that produces one.
+    /// **The quit row is last**, on every path that produces more than one row by itself.
     ///
     /// Pinned here rather than left to the doc comment on `EVERY_ROW`, because "the cursor must not
     /// start on the row that ends the process without asking" is a property of the shipped menu and
-    /// a comment enforces nothing. A row added to the table in front of it fails here.
+    /// a comment enforces nothing. The shipped `ds2-mods.toml` lists `EVERY_ROW` in this order, and
+    /// the legacy keys produce it; a row added to the table in front of quit fails here.
     #[test]
     fn the_row_that_does_not_ask_is_never_the_one_under_the_cursor() {
         assert_eq!(EVERY_ROW[EVERY_ROW.len() - 1], Row::QuitToDesktop);
+        let every_name = EVERY_ROW
+            .iter()
+            .map(|row| format!("\"{}\"", row.name()))
+            .collect::<Vec<_>>()
+            .join(", ");
         for config in [
-            MenuRowConfig::default(),
-            MenuRowConfig::from_text(""),
-            MenuRowConfig::from_text("[menu_row]\n"),
+            MenuRowConfig::from_text(&format!("[menu_row]\nrows = [{every_name}]\n")),
             MenuRowConfig::from_text(
                 "[menu_row]\nenabled = true\n[build_import]\nenabled = true\n",
             ),
@@ -495,16 +524,16 @@ mod tests {
 
     /// Only an exact `true` is read as a legacy `enabled`.
     ///
-    /// A misspelling no longer leaves the row off -- off is not the default any more -- so what it
-    /// leaves behind is the no-key answer, reported as `Default` rather than as `LegacyEnabled`.
-    /// That distinction is what tells a player their typo was not read.
+    /// A misspelling leaves the row off, and what it leaves behind is the no-key answer, reported
+    /// as `Default` rather than as `LegacyEnabled`. That distinction is what tells a player their
+    /// typo was not read.
     #[test]
     fn a_misspelled_legacy_value_is_not_read_as_true() {
         for value in ["ture", "1", "yes", "TRUE", ""] {
             let text = format!("[menu_row]\nenabled = {value}\n");
             let config = MenuRowConfig::from_text(&text);
             assert_eq!(config.source, Source::Default, "{value:?} was read as true");
-            assert_eq!(config.rows, EVERY_ROW.to_vec(), "{value:?}");
+            assert!(config.rows.is_empty(), "{value:?}");
         }
         let read = MenuRowConfig::from_text("[menu_row]\nenabled = true\n");
         assert_eq!(read.source, Source::LegacyEnabled);

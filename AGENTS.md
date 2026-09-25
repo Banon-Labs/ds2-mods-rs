@@ -281,6 +281,20 @@ headings and the cap above, measured at the block on 2026-09-24. The other two:
 
 Both guards are correct. If a command is blocked, fix the command; do not work around the guard.
 
+One repo guard, `pr_requires_run_stamp`, adds a footer line naming the head commit and its last run:
+
+```text
+Run-Stamp: sha=<40 hex> at=<YYYY-MM-DDTHH:MM:SSZ> gate=<name> result=<pass|fail> [key=value ...]
+```
+
+`gh pr create` is refused unless the body has one whose `sha` is the commit being proposed and whose
+`at` is not older than that commit. `gh pr ready` is refused unless the live body (`gh pr view`) has
+one for the PR's current `headRefOid`, fresh, whose latest says `result=pass`; `gate=runtime` counts.
+Never type it: `scripts/check.sh` records its run, `python3 scripts/pr-run-stamp.py --from-last-check`
+prints the line from that record, and `python3 scripts/pr-run-stamp.py --gate runtime --result pass`
+stamps another run. After a push, stamp again with `gh pr edit <n> --body-file <file>`. Rules and
+reasons: `scripts/cupcake_run_stamp.py`.
+
 ## Every address, offset and enum value a feature touches is a named constant
 
 A magic number in a feature crate is a research finding that was written down in the wrong place.

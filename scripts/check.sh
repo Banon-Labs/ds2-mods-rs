@@ -18,6 +18,25 @@ TARGET=x86_64-pc-windows-msvc
 run_host_tests=0
 [[ "${1:-}" == "--host-tests" ]] && run_host_tests=1
 
+# RECORD THE RUN, pass or fail, so `scripts/pr-run-stamp.py --from-last-check` can print the PR
+# footer's `Run-Stamp:` line from what actually ran instead of from what an agent types. One file per
+# checkout (`git rev-parse --git-path` resolves inside a worktree's own git dir), overwritten each run.
+# `tree=dirty` means uncommitted changes were in the tree, so the run did not test the commit it names
+# and the helper refuses to stamp from it. Written by the EXIT trap so a failure is recorded as well.
+check_record=$(git rev-parse --path-format=absolute --git-path ds2-last-check)
+check_sha=$(git rev-parse HEAD)
+check_tree=clean
+[[ -n "$(git status --porcelain --untracked-files=no)" ]] && check_tree=dirty
+check_gate=check.sh
+(( run_host_tests )) && check_gate=check.sh+host-tests
+record_check_run() {
+  local rc=$? result=fail
+  (( rc == 0 )) && result=pass
+  printf 'sha=%s at=%s gate=%s result=%s tree=%s\n' \
+    "$check_sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$check_gate" "$result" "$check_tree" >"$check_record"
+}
+trap record_check_run EXIT
+
 echo "== commit messages =="
 # Conventional commits, checked in two places because one is not enough. `.beads/hooks/commit-msg`
 # catches a message as it is written, and catches nothing at all in a checkout where no hooks are
@@ -254,6 +273,9 @@ else
   # The lexicon and the quoting carve-out live in scripts/cupcake_property_grant.py; `opa test`
   # above only pins that a spoken signal halts.
   python3 scripts/test-property-grant-signal.py
+  # And the PR Run-Stamp guard's deciding half: which body earns which verdict at `gh pr create` and
+  # `gh pr ready`, and the helper that prints the stamp. `opa test` above pins verdict -> denial.
+  python3 scripts/test-run-stamp.py
   # The hook shim is the fourth place this layer can be silently dead, and the one no `.rego` file
   # can reach. scripts/cupcake-hook.sh sits between Claude Code and the engine and repairs three
   # things the engine gets wrong before any policy runs: a permission mode cupcake does not know

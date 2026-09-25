@@ -107,3 +107,7 @@ The title of a pull request is a commit header and follows the same rule. The bo
 `.github/pull_request_template.md`, which github fills in automatically: three headings, spelled
 exactly, and the whole body under 2500 characters. Open it as a draft and keep the attribution
 footer. All four are enforced by global policy guards rather than by anything in this repo.
+
+The footer also carries a `Run-Stamp:` line for the head commit's last run, printed by
+`scripts/pr-run-stamp.py`. That one is a repo guard, `pr_requires_run_stamp`; the format and the
+create/ready rules are in `AGENTS.md` under "Opening a PR from this repo".
