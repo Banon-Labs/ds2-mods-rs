@@ -35,11 +35,14 @@
 //! A badge computed from base stats would light up on a weapon the player can actually swing while
 //! wearing a Ring of Blades.
 //!
-//! **Two-handing is not the open question it looks like.** DS2 does not scale Strength: the
-//! mechanics check halves the requirement with `shr cx,1` for grip states `2` and `3`, and the
-//! `1.5x` belongs to power stance (`FUN_140350170`, grips `4`, `5`, `6`). Neither reaches the
-//! presentation check, which takes no grip argument, so this badge ignores both exactly as the
-//! detail pane does.
+//! # Two-handing, which the detail pane ignores and this badge does not
+//!
+//! DS2 does not scale Strength: the mechanics check halves the Strength requirement with
+//! `shr cx,1` for grip states `2` and `3`, and the `1.5x` belongs to power stance
+//! (`FUN_140350170`, grips `4`, `5`, `6`). The presentation check takes no grip argument, so the
+//! detail pane still prints the full requirement in red. This badge reads the player's live grip
+//! ([`ds2_rva::EQUIP_GRIP_OFFSET`]) and, while two-handing, applies the same halving before the
+//! compare -- the X answers "could I swing this the way I am holding my weapon now".
 //!
 //! # There is a cached answer, and it is the wrong shape for this
 //!
@@ -127,6 +130,28 @@ unsafe fn follow(root: usize, offsets: &[usize]) -> Option<usize> {
         at = unsafe { read_usize(at + offset) };
     }
     (at >= 0x1_0000).then_some(at)
+}
+
+/// The local player's grip state, `None` wherever the chain is not built yet.
+///
+/// # Safety
+///
+/// `manager` must be the live `GameManagerImp`.
+unsafe fn grip(manager: usize) -> Option<i32> {
+    // SAFETY: the hops are the two vtable slots `FUN_14034f470` calls before it reads and writes
+    // the grip, each a single field load; `follow` stops at the first null.
+    let equip = unsafe {
+        follow(
+            manager,
+            &[
+                ds2_rva::PLAYER_CTRL_OFFSET,
+                ds2_rva::PLAYER_CTRL_CHR_ASM_CTRL_OFFSET,
+                ds2_rva::CHR_ASM_CTRL_EQUIP_OFFSET,
+            ],
+        )
+    }?;
+    // SAFETY: the equip object is live and the grip is the `i32` at `+0x10`.
+    Some(unsafe { ((equip + ds2_rva::EQUIP_GRIP_OFFSET) as *const i32).read_unaligned() })
 }
 
 /// Whether the player fails any of this weapon's four stat requirements.
@@ -242,6 +267,10 @@ unsafe fn unmet(base: usize, item: *const u8) -> Option<bool> {
         )
     }?;
 
+    // SAFETY: `manager` is the live `GameManagerImp` read above, and `grip` stops at a null hop.
+    let two_handed =
+        unsafe { grip(manager) }.is_some_and(|grip| ds2_rva::EQUIP_GRIP_TWO_HANDED.contains(&grip));
+
     // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
     // offset this crate validated before installing. The callee's own contract asks for exactly
     // that live object, and reads inside it go through the fault-tolerant readers.
@@ -266,7 +295,12 @@ unsafe fn unmet(base: usize, item: *const u8) -> Option<bool> {
         }
         // SAFETY: the row is what the game's own resolver returned and the key is one its switch
         // handles with a plain load; the return is in `RAX` with no allocation behind it.
-        let required = unsafe { column(row, key) } as u32 as f32;
+        let mut required = unsafe { column(row, key) } as u16;
+        if two_handed && key == ds2_rva::FE_ITEM_PARAM_WEAPON_REQUIRED_STRENGTH {
+            // The mechanics check's own `shr cx,1`, so an odd requirement rounds down as it does.
+            required >>= 1;
+        }
+        let required = f32::from(required);
         // SAFETY: the table is the game's, the stride is the one its own indexing uses, and the
         // index came out of the game's table rather than out of this crate.
         let have = unsafe {
@@ -277,7 +311,7 @@ unsafe fn unmet(base: usize, item: *const u8) -> Option<bool> {
             if n <= LOGGED_DECISIONS {
                 log(format_args!(
                     "{LOG_PREFIX} unmet handle={handle:#06x} key={key:#04x} stat={index} \
-                     required={required} have={have} marked={n}"
+                     required={required} have={have} two_handed={two_handed} marked={n}"
                 ));
             }
             return Some(true);
