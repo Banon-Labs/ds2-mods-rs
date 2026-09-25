@@ -75,6 +75,10 @@ cargo xwin build --release --target x86_64-pc-windows-msvc -p ds2-loader
 bash scripts/check.sh
 ```
 
+Commits are conventional commits -- `type(scope): subject`, with the subject still written as prose.
+The gate checks every commit a branch adds, and a `commit-msg` hook checks each one as it is
+written. See [`docs/COMMITS.md`](docs/COMMITS.md).
+
 Check the output hash before staging or launching. A build that succeeded without recompiling
 leaves the previous DLL in place, and a run against it produces evidence for code that is not
 the code under test:

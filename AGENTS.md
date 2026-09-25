@@ -239,10 +239,37 @@ bd close <id>         # Complete work
 - If push fails, resolve and retry until it succeeds
 <!-- END BEADS INTEGRATION -->
 
+## Commit messages are conventional commits
+
+`type(scope): subject`, with the subject still written as this repo's prose. The type is the kind of
+change and the scope is the crate or directory it landed in; the full convention, the type table and
+the scope list are in [`docs/COMMITS.md`](docs/COMMITS.md).
+
+It is enforced, not suggested. `.beads/hooks/commit-msg` refuses the message as it is written, and
+`scripts/check.sh` refuses the branch by re-checking every commit in `origin/main..HEAD`. Both run
+`scripts/check-commit-message.py`, which is also the fastest way to check a message by hand. Reaching
+for `--no-verify` is blocked by a policy guard and would only move the failure to the gate.
+
+```text
+fix(ds2-build-import): a matching item id is not an item you own
+feat(scripts): --all-menu-rows, so a run can reach the two save-file rows
+```
+
 ## Opening a PR from this repo
 
-Two global policy guards apply to `gh` and will block a non-compliant command. Satisfy them up
-front rather than discovering them at the block:
+The title is a commit header and follows the same rule as a commit. The body follows
+[`.github/pull_request_template.md`](.github/pull_request_template.md): three headings, spelled
+exactly `## What changed`, `## Why`, `## Evidence`, and the whole body under 2500 characters. Say
+plainly under the evidence heading when there has been no run -- that is a pass, and silence is not.
+A body that will not fit the cap is a change that should have been two changes; the long-form
+reasoning goes in the commit message or a doc, which the body can link in a line.
+
+Github only fills the template in for a body it is asked to compose. `gh pr create --body` replaces
+the body outright, so a command that passes one has silently skipped the template: start from the
+file, fill it in, and pass it with `--body-file`.
+
+Four global policy guards apply to `gh` and will block a non-compliant command. Two of them are the
+headings and the cap above, measured at the block on 2026-09-24. The other two:
 
 - **`github_pr_draft_guard`** -- PRs must be created **as drafts**, and taking one out of draft is
   blocked. Use `gh pr create --draft`. Note that `--draft` has been observed not to take on

@@ -18,6 +18,20 @@ TARGET=x86_64-pc-windows-msvc
 run_host_tests=0
 [[ "${1:-}" == "--host-tests" ]] && run_host_tests=1
 
+echo "== commit messages =="
+# Conventional commits, checked in two places because one is not enough. `.beads/hooks/commit-msg`
+# catches a message as it is written, and catches nothing at all in a checkout where no hooks are
+# installed -- a fresh clone has none until beads or a human wires them up. This catches the branch
+# either way, which is the check that actually gates a push. docs/COMMITS.md is the convention.
+# First in the gate because it costs a second and clippy costs minutes.
+python3 scripts/check-commit-message.py --selftest
+if git rev-parse --verify --quiet origin/main >/dev/null; then
+  commit_base=$(git merge-base origin/main HEAD)
+  python3 scripts/check-commit-message.py --range "$commit_base..HEAD"
+else
+  echo "  no origin/main in this checkout -- the branch's own commits were not checked"
+fi
+
 echo "== rustfmt =="
 # NOT `cargo fmt --all`. `--all` is documented as "format all packages, AND ALSO THEIR LOCAL
 # PATH-BASED DEPENDENCIES", so the moment a crate here depended on `../dearxan` the gate started

@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+# Conventional-commit check.
+#
+# This is not a beads hook and carries no beads markers. Beads installs post-checkout, post-merge,
+# pre-commit, pre-push and prepare-commit-msg; commit-msg is a name it leaves alone. The file lives
+# in this directory because `core.hooksPath` points here, and git has exactly one hooks directory --
+# so a second one next to it would simply never run.
+#
+# The rule itself is in scripts/check-commit-message.py, and scripts/check.sh runs the same script
+# over a whole branch. That split is the point: a hook only sees commits made on a machine where it
+# is installed, and a fresh clone has no hooks until beads or a human wires them up.
+set -e
+root=$(git rev-parse --show-toplevel)
+exec python3 "$root/scripts/check-commit-message.py" "$1"
