@@ -36,6 +36,14 @@
 //! Polish speaker could not understand espeak-ng's Polish -- and compiled into the DLL from
 //! `assets/`, so there is no speech engine and no file to go missing. `[voice_chat] announce` picks
 //! the language; `""` silences it.
+//!
+//! # And the HUD shows it
+//!
+//! The HUD already has a voice chat icon (`FeScenePlayerVoiceChatIcon`), driven every frame from
+//! the network's voice state through a four-entry table of show/hide bytes. A second detour
+//! replaces that frame's choice with the Voice chat byte: on applies the game's own state 2, off
+//! its state 0 (everything hidden). While the options block does not exist the original runs
+//! untouched. See [`icon_visibility`] and `ds2_rva::FE_VOICE_CHAT_ICON_UPDATE`.
 
 // DEBT: ds2-mods-rs-24r -- not debt to be paid: this crate ships as a Windows DLL and the
 // attribute is what keeps its Rust half parseable on the host, so the game-free tests below it
@@ -188,6 +196,25 @@ pub const fn voice_chat_on(voice_chat: u8) -> bool {
     voice_chat == 0
 }
 
+/// The HUD voice chat icon's state word for a Voice chat byte.
+///
+/// On is the game's own state 2 (root and the `3e0/3e2` shape shown); off is state 0, everything
+/// hidden. The word is one of the game's own table, not a value composed here.
+pub const fn icon_state_word(voice_chat: u8) -> u32 {
+    let index = if voice_chat_on(voice_chat) {
+        ds2_rva::FE_VOICE_CHAT_ICON_STATE_ON
+    } else {
+        ds2_rva::FE_VOICE_CHAT_ICON_STATE_HIDDEN
+    };
+    ds2_rva::FE_VOICE_CHAT_ICON_STATES[index]
+}
+
+/// The four show/hide bytes the icon's update applies, in its order: root, `3e0/3e0`, `3e0/3e1`,
+/// `3e0/3e2`. Nonzero is shown.
+pub const fn icon_visibility(voice_chat: u8) -> [u8; 4] {
+    icon_state_word(voice_chat).to_le_bytes()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,6 +237,25 @@ mod tests {
     fn any_nonzero_byte_is_off_and_a_press_turns_it_on() {
         assert!(!voice_chat_on(2));
         assert_eq!(toggled(0xff), 0);
+    }
+
+    #[test]
+    fn on_is_the_games_state_two_root_and_the_0x35_shape() {
+        assert_eq!(icon_state_word(0), 0x0100_0001);
+        assert_eq!(icon_visibility(0), [1, 0, 0, 1]);
+    }
+
+    #[test]
+    fn off_hides_every_element() {
+        assert_eq!(icon_state_word(1), 0);
+        assert_eq!(icon_visibility(1), [0; 4]);
+        assert_eq!(icon_visibility(0xff), [0; 4]);
+    }
+
+    #[test]
+    fn a_press_moves_the_icon_with_the_byte() {
+        assert_eq!(icon_visibility(toggled(1)), [1, 0, 0, 1]);
+        assert_eq!(icon_visibility(toggled(0)), [0; 4]);
     }
 
     #[test]

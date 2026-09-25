@@ -10,11 +10,13 @@ repository.workspace = true
 # that the host tests exercise, and that crate has no dependencies of its own.
 [dependencies]
 ds2-hotkey-config.workspace = true
+# Not target-gated either: the HUD icon's state table is read by pure code in `lib.rs`, and
+# `ds2-rva` is constants with no dependencies.
+ds2-rva.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 ds2-game-base.workspace = true
 ds2-hook.workspace = true
-ds2-rva.workspace = true
 
 [lints]
 workspace = true

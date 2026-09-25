@@ -780,8 +780,8 @@ fn install_voice_chat() {
     let request = ds2_voice_chat::Request {
         config_path: crash_logging::config_file_path(),
     };
-    // SAFETY: the one patched site and the one called function are both recorded in `ds2-rva` with
-    // the bytes they must begin with, and the crate re-reads those bytes and refuses on a mismatch.
+    // SAFETY: both patched sites and every called function are recorded in `ds2-rva` with the
+    // bytes they must begin with, and the crate re-reads those bytes and refuses on a mismatch.
     // Called from the post-Arxan position, like every other install here.
     let outcome = unsafe { ds2_voice_chat::install(&request) };
     if !outcome.installed {
