@@ -155,6 +155,13 @@ CONFIG_LINE_PREFIX = "ds2-loader: config"
 #: Rust source, because a rename on one side alone turns every run into a silent "probe off".
 CONFIG_NAME = "ds2-mods.toml"
 
+#: The config the release package ships. `--release-config` stages this file verbatim instead of
+#: writing one from the flags, so a run can show a player's game rather than a harness arm.
+RELEASE_CONFIG = REPO_ROOT / ".github" / "dist-ds2-mods.toml"
+
+#: Set by `--release-config`; `config_text` returns this in place of its own when it is set.
+release_config_text: str | None = None
+
 #: Mirrors `CONFIG_SECTION` and the four `KEY_*` constants in that module.
 CONFIG_SECTION = "arxan_probe"
 KEY_ENABLED = "enabled"
@@ -1170,6 +1177,8 @@ def config_text(
     hostname, so two runs of the same arm are trivially comparable and `--selftest` can assert on
     the content rather than around it.
     """
+    if release_config_text is not None:
+        return release_config_text
     settings, _ = PROBE_ARMS[probe]
     # THE LIST KEY OVERRIDES `enabled`, AND IT IS NEVER WRITTEN FROM HERE. It was, through a
     # `--rows` flag, and that flag cost a session: a run launched with two of the four names
@@ -4281,6 +4290,17 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--release-config",
+        dest="release_config",
+        action="store_true",
+        help=(
+            f"stage {RELEASE_CONFIG.relative_to(REPO_ROOT)} verbatim as the game's config, "
+            "instead of writing one from this script's flags -- the game as a player who "
+            "unpacked the release gets it. Every other config flag is ignored, and no slot is "
+            "autoloaded unless that file asks for one."
+        ),
+    )
+    parser.add_argument(
         "--input-harness",
         dest="input_harness",
         action="store_true",
@@ -4363,7 +4383,14 @@ def main() -> int:
     if args.selftest:
         return selftest()
 
-    if args.continue_slot is not None:
+    if args.release_config:
+        global release_config_text
+        release_config_text = RELEASE_CONFIG.read_text(encoding="utf-8")
+        print(f"[config] --release-config: staging {RELEASE_CONFIG} verbatim")
+        # The release file decides the slot; reading one off the save here would be autoloading
+        # on the harness's behalf in a run meant to show what a player gets.
+        continue_slot = -1
+    elif args.continue_slot is not None:
         continue_slot = args.continue_slot
     else:
         # No value given: read the slot off the redirected save, which is what this flag's help
