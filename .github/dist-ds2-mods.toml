@@ -94,3 +94,7 @@ enabled = true
 # The key. Any name the other hotkeys here accept, with modifiers if you like: "F8", "Ctrl+V".
 # Set it to "" to unbind it. Editing this while the game runs takes effect in about a second.
 key = "F8"
+
+# What a press says out loud, so you know which way it went: "en" for "Voice chat on/off", "pl"
+# for the Polish pair, or "" for silence. Also takes effect in about a second.
+announce = "en"

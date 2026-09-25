@@ -3,7 +3,7 @@
 
 use core::ffi::c_void;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
 use ds2_hook::{MH_EnableHook, MH_Initialize, MH_STATUS, MhHook};
 use ds2_hotkey_config::chord_name;
@@ -12,7 +12,8 @@ use ds2_hotkey_config::live::AtomicChord;
 use ds2_hotkey_config::reload::{FileChange, HotFile};
 
 use crate::{
-    CONFIG_KEY_KEYBOARD, CONFIG_SECTION, DEFAULT_KEY, KeySetting, LOG_PREFIX, default_chord,
+    Announce, AnnounceSetting, CONFIG_KEY_ANNOUNCE, CONFIG_KEY_KEYBOARD, CONFIG_SECTION,
+    DEFAULT_ANNOUNCE, DEFAULT_KEY, KeySetting, LOG_PREFIX, announce_setting, default_chord,
     key_setting, toggled, voice_chat_on,
 };
 
@@ -22,6 +23,15 @@ unsafe extern "system" {
     fn GetWindowThreadProcessId(window: *mut c_void, process: *mut u32) -> u32;
     fn GetCurrentProcessId() -> u32;
 }
+
+#[link(name = "winmm")]
+unsafe extern "system" {
+    fn PlaySoundW(sound: *const c_void, module: *mut c_void, flags: u32) -> i32;
+}
+
+/// `SND_ASYNC | SND_NODEFAULT | SND_MEMORY`: return at once, never fall back to the system beep,
+/// and read the WAV from the pointer. A new clip cuts off one still playing.
+const PLAY_FLAGS: u32 = 0x0001 | 0x0002 | 0x0004;
 
 /// `VK_CONTROL`, `VK_MENU`, `VK_SHIFT` -- the three modifiers a [`Chord`] can carry.
 const VK_CONTROL: i32 = 0x11;
@@ -81,6 +91,9 @@ static GAME_MANAGER: AtomicUsize = AtomicUsize::new(0);
 
 /// The binding the detour reads. Unset means unbound.
 static KEY_BINDING: AtomicChord = AtomicChord::unset();
+
+/// The announcement language, as `Announce as u8`.
+static ANNOUNCE: AtomicU8 = AtomicU8::new(DEFAULT_ANNOUNCE as u8);
 
 /// Whether the chord was down last frame, so a hold is one press.
 static WAS_DOWN: AtomicBool = AtomicBool::new(false);
@@ -192,7 +205,14 @@ unsafe fn toggle_voice_chat() {
     let read = unsafe {
         ds2_game_base::mem::read_bytes(options + ds2_rva::GAME_OPTION_VOICE_CHAT_OFFSET, &mut now)
     };
-    let state = if voice_chat_on(now[0]) { "on" } else { "off" };
+    let on = voice_chat_on(now[0]);
+    let state = if on { "on" } else { "off" };
+    // Only the state read back from the game is announced; a failed read says nothing rather than
+    // guess.
+    if read && let Some(clip) = Announce::from_u8(ANNOUNCE.load(Ordering::Relaxed)).clip(on) {
+        // SAFETY: `clip` is a `'static` WAV compiled into this DLL, so it outlives the async play.
+        unsafe { PlaySoundW(clip.as_ptr().cast(), core::ptr::null_mut(), PLAY_FLAGS) };
+    }
     log_capped(format_args!(
         "{LOG_PREFIX} voice chat {state} (byte 0x{was:02x} -> 0x{:02x}, wanted 0x{want:02x}, \
          read={read})",
@@ -223,6 +243,7 @@ unsafe extern "system" fn net_session_update_detour(this: usize, delta: f32) {
 /// A value that does not parse leaves the binding already in force and says so; falling back to
 /// the default would move the key somewhere the player did not ask for.
 fn apply_config(text: &str, first: bool) {
+    apply_announce(text, first);
     match key_setting(text) {
         KeySetting::NotSet => {
             if first {
@@ -260,6 +281,21 @@ fn apply_config(text: &str, first: bool) {
         KeySetting::Invalid { value, error } => log(format_args!(
             "{LOG_PREFIX} [{CONFIG_SECTION}] {CONFIG_KEY_KEYBOARD} = {value:?} not understood \
              ({error:?}) -- keeping the binding already in force"
+        )),
+    }
+}
+
+fn apply_announce(text: &str, first: bool) {
+    match announce_setting(text) {
+        AnnounceSetting::NotSet => {}
+        AnnounceSetting::Set(lang) => {
+            if ANNOUNCE.swap(lang as u8, Ordering::Relaxed) != lang as u8 || first {
+                log(format_args!("{LOG_PREFIX} announce = {lang:?}"));
+            }
+        }
+        AnnounceSetting::Invalid(value) => log(format_args!(
+            "{LOG_PREFIX} [{CONFIG_SECTION}] {CONFIG_KEY_ANNOUNCE} = {value:?} not understood \
+             (en, pl, or \"\") -- keeping the language already in force"
         )),
     }
 }
