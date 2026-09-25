@@ -32,9 +32,10 @@
 //!
 //! After a press the crate reads the byte back and plays a short spoken clip for the state the game
 //! actually holds: "Voice chat on" / "Voice chat off", or the Polish pair. The clips are rendered
-//! offline with espeak-ng as telephone-quality mono WAVs in `assets/` and compiled into the DLL, so
-//! there is no speech engine and no file to go missing. `[voice_chat] announce` picks the language;
-//! `""` silences it.
+//! offline -- English with espeak-ng, Polish with Piper's CC0 `pl_PL-gosia-medium` voice, because a
+//! Polish speaker could not understand espeak-ng's Polish -- and compiled into the DLL from
+//! `assets/`, so there is no speech engine and no file to go missing. `[voice_chat] announce` picks
+//! the language; `""` silences it.
 
 // DEBT: ds2-mods-rs-24r -- not debt to be paid: this crate ships as a Windows DLL and the
 // attribute is what keeps its Rust half parseable on the host, so the game-free tests below it
