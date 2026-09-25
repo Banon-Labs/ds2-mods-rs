@@ -681,9 +681,10 @@ pub const FE_PROCESS_WINDOW_TIMER_OFFSET: usize = 0x14;
 /// path.
 pub const FE_PROCESS_WINDOW_PHASE_OFFSET: usize = 0x20;
 
-/// [`FE_PROCESS_WINDOW_PHASE_OFFSET`] while the window is up and the work is outstanding. The
-/// only phase in which the minimum duration is read, and therefore the only one in which zeroing
-/// it does anything.
+/// [`FE_PROCESS_WINDOW_PHASE_OFFSET`] while the window is up and the work is outstanding.
+///
+/// The only phase in which the minimum duration is read, and therefore the only one in which
+/// zeroing it does anything.
 pub const FE_PROCESS_WINDOW_PHASE_SHOWING: i32 = 1;
 
 /// Kind field within a process-window substate. `+0x0c`, set by the constructor at `0x140104c87`.
@@ -748,9 +749,11 @@ pub const FE_TITLE_MAIN_PHASE_OFFSET: usize = 0x10;
 /// The first activation-animation phase. Written by phase 1's tail at `0x1400feee8`.
 pub const FE_TITLE_MAIN_PHASE_ANIMATING: i32 = 2;
 
-/// The second activation-animation phase. Phase 1's tail can jump straight here at `0x1400feefa`
-/// when the object it just built reports `[+8] == 0`, so BOTH values mean "the setup is done and
-/// only the flourish is left".
+/// The second activation-animation phase.
+///
+/// Phase 1's tail can jump straight here at `0x1400feefa` when the object it just built reports
+/// `[+8] == 0`, so both values -- not just this one -- mean "the setup is done and only the
+/// flourish is left".
 pub const FE_TITLE_MAIN_PHASE_ANIMATING_LATE: i32 = 3;
 
 /// Terminal phase for `FeSubStateTitleMain`. Written by phase 3 at `0x1400fedf7`.
@@ -1942,7 +1945,7 @@ pub const SOUND_MANAGER_MASTER_VOLUME_OFFSET: usize = 0x930;
 /// IAT slot for `FMOD::ChannelGroup::setVolume(float)` in `fmodex64.dll`. RVA `0x01aae9b4`.
 ///
 /// An import slot, not code: patching or reading it never touches `.text`, so Arxan's integrity
-/// checks have nothing to see. Same property `ds2-offline` relies on for the WS2_32 slots.
+/// checks have nothing to see. Same property `ds2-offline` relies on for the `WS2_32` slots.
 ///
 /// Calling convention is MSVC `__thiscall` on x64: `rcx` is the `ChannelGroup*`, the float goes in
 /// `xmm1`, and the return is an `FMOD_RESULT` (`0` == `FMOD_OK`).
@@ -1999,7 +2002,7 @@ pub const FE_SUBSTATE_START_INGAME_ENTER: u32 = 0x000f_de30;
 
 /// `GameManagerImp` -> the frontend object that owns the operator table. `0x22e0`.
 ///
-/// Written at `0x1401bcb79` (`mov [rdi+0x22e0],rsi`) in GameManagerImp's init, immediately after
+/// Written at `0x1401bcb79` (`mov [rdi+0x22e0],rsi`) in `GameManagerImp`'s init, immediately after
 /// `0x140500200` has populated the operator slots on that same object.
 ///
 /// **Verified live** rather than only read: walking
@@ -2022,7 +2025,7 @@ pub const FRONTEND_NOW_LOADING_OPERATOR_OFFSET: usize = 0xc8;
 /// The neighbouring named slot to [`FRONTEND_NOW_LOADING_OPERATOR_OFFSET`], and read live at the
 /// top menu: it holds an object whose vtable is `0x1410bc578`, which RTTI names
 /// `FeOperatorTitle`. The same two operators are mirrored into the operator array at `+0x18`
-/// (NowLoading) and `+0x30` (Title).
+/// (`NowLoading`) and `+0x30` (Title).
 pub const FRONTEND_TITLE_OPERATOR_OFFSET: usize = 0xd0;
 
 /// `FeOperatorBase` vtable slot 24 (`+0xc0`) -- show or hide one of an operator's screens.
@@ -3064,8 +3067,9 @@ pub const FE_SCENE_NAMER_PROXY_OFFSET: usize = 0x10;
 pub const FE_SCENE_ACCESSOR_MAKE_EMPTY: u32 = 0x0002_7980;
 
 /// Byte offset of a cell namer's entry count, from the namer rather than from its list.
-/// [`FE_SCENE_NAMER_LIST_OFFSET`]` + `[`FE_SCENE_NAMER_COUNT_OFFSET`], which the lookup spells as
-/// the immediate `0x140`.
+///
+/// [`FE_SCENE_NAMER_LIST_OFFSET`] plus [`FE_SCENE_NAMER_COUNT_OFFSET`], which the lookup spells
+/// as the immediate `0x140`.
 pub const FE_SCENE_NAMER_COUNT_FROM_NAMER: usize =
     FE_SCENE_NAMER_LIST_OFFSET + FE_SCENE_NAMER_COUNT_OFFSET;
 
@@ -3303,8 +3307,11 @@ pub const FE_SCENE_NAMER_ENTRY_STRIDE: usize = 0x30;
 /// It is also the offset inside a scene PATH object, which carries the same five ids at the same
 /// places -- the entry is a path plus its length.
 pub const FE_SCENE_NAMER_ENTRY_SUBTREE_OFFSET: usize = 0x04;
+/// The container id, two slots into the same entry.
 pub const FE_SCENE_NAMER_ENTRY_CONTAINER_OFFSET: usize = 0x0c;
+/// The element's own id -- the last of the five and the one a lookup matches on.
 pub const FE_SCENE_NAMER_ENTRY_ID_OFFSET: usize = 0x10;
+/// How many of the five ids this entry actually uses, past the ids themselves.
 pub const FE_SCENE_NAMER_ENTRY_LEN_OFFSET: usize = 0x28;
 /// The path length every quit-tab entry carries: root, region, `ace8`, container, cell.
 pub const FE_SCENE_NAMER_ENTRY_LEN: u32 = 5;
@@ -3347,9 +3354,11 @@ pub const FLO_FIND_DEFINITION: u32 = 0x00b5_4740;
 /// Bytes per definition. `FUN_140b54740`: `add rcx, 0x48`.
 pub const FLO_DEFINITION_STRIDE: usize = 0x48;
 
-/// `u16` child count inside a definition. `FUN_140b50f20` walks that many child records --
-/// **and `FUN_140b6bd80` uses the same field as the display list's CAPACITY**, refusing to attach
-/// a child once `parent+0x66` reaches it. One field, both meanings, so raising it raises both.
+/// `u16` child count inside a definition.
+///
+/// `FUN_140b50f20` walks that many child records -- **and `FUN_140b6bd80` uses the same field as
+/// the display list's capacity**, refusing to attach a child once `parent+0x66` reaches it. One
+/// field, both meanings, so raising it raises both.
 pub const FLO_DEFINITION_CHILD_COUNT_OFFSET: usize = 0x02;
 
 /// Pointer to a definition's child record array. A file offset on disk, an absolute pointer once
@@ -3370,9 +3379,11 @@ pub const FLO_RECORD_TRANSFORM_OFFSET: usize = 0x08;
 pub const FLO_RECORD_DEPTH_OFFSET: usize = 0x10;
 
 /// `u16` kind flags, the value `FUN_140b50bc0` switches on: `1` shape, `2` mask, `4` a nested
-/// definition, **`8` text**. A FLAG WORD rather than an enum -- the builder masks it with `0xd` and
-/// records carrying `0x1004` exist, so the bits above the low nibble mean something unread. Every
-/// quit-tab row is plain `4`, and this crate only ever copies the field.
+/// definition, **`8` text**.
+///
+/// A flag word rather than an enum -- the builder masks it with `0xd` and records carrying
+/// `0x1004` exist, so the bits above the low nibble mean something unread. Every quit-tab row is
+/// plain `4`, and this crate only ever copies the field.
 ///
 /// **THIS SAID "`2` TEXT, `8` TEXTURE" UNTIL 2026-08-28 AND IT WAS WRONG BOTH WAYS.** The check
 /// that settles it needs no disassembly: `scripts/ds2-flo.py tree l02_01_In-Game.flo --def 0x22c`
@@ -3393,6 +3404,7 @@ pub const FLO_RECORD_KIND_OFFSET: usize = 0x12;
 /// `u16` last frame and `u16` first frame. `0xffff` as the last frame means "never ends", which is
 /// what every permanent element carries.
 pub const FLO_RECORD_LAST_FRAME_OFFSET: usize = 0x14;
+/// The `u16` beside it: the frame the element first appears on.
 pub const FLO_RECORD_FIRST_FRAME_OFFSET: usize = 0x16;
 
 /// `u32` ELEMENT ID -- the field a scene path resolves against.
@@ -3413,6 +3425,7 @@ pub const FLO_TRANSFORM_SIZE: usize = 0x30;
 /// and `pfVar1[3]` and requires them to be `1.0`. Translate-zero and scale-one is an identity
 /// test, which fixes all four fields at once.
 pub const FLO_TRANSFORM_X_OFFSET: usize = 0x00;
+/// The `f32` beside it, +y downwards. Fixed by the same identity test.
 pub const FLO_TRANSFORM_Y_OFFSET: usize = 0x04;
 
 /// The definition index of the container the quit tab's rows are children of.
@@ -3483,7 +3496,9 @@ pub const FLO_QUIT_ROW_DEFINITION: u32 = 0x0258;
 /// [1] def 0x0257 id 0        (6.90, -3.45)  the selection highlight, alpha 0 at rest
 /// ```
 pub const FLO_QUIT_ROW_CHILDREN: usize = 2;
+/// Child `[0]`: the icon, paired with its greyed-out twin.
 pub const FLO_QUIT_ROW_ICON: usize = 0;
+/// Child `[1]`: the selection highlight, alpha 0 at rest.
 pub const FLO_QUIT_ROW_HIGHLIGHT: usize = 1;
 
 /// What child [`FLO_QUIT_ROW_ICON`] names in the shipped file, and what replaces it.
@@ -3501,6 +3516,7 @@ pub const FLO_QUIT_ROW_HIGHLIGHT: usize = 1;
 /// use it, which is the four gated rows in this file: the three message rows (gates 1, 2, 3) and
 /// quit (gate 4). It lines up exactly with the builder table in `docs/DS2-INGAME-MENU.md`.
 pub const FLO_QUIT_ROW_ICON_GROUP: u32 = 0x0255;
+/// The greyed-out twin's shared id, used by all four gated rows in the file.
 pub const FLO_QUIT_ROW_DISABLED_ID: u32 = 0x001e_acd0;
 
 /// What child [`FLO_QUIT_ROW_HIGHLIGHT`] names, checked and then copied through untouched.
@@ -3595,6 +3611,7 @@ pub const FLO_ADDED_LABEL_IDS: [u32; 12] = [
 /// what a fourth and fifth row continue. **They are not the same number**, which is why the two
 /// pitches are separate constants rather than one shared `48`.
 pub const FLO_ROW_PITCH: f32 = 48.0;
+/// The marks' own step, `48.40` -- deliberately not the rows' `48.00`.
 pub const FLO_MARK_PITCH: f32 = 48.4;
 
 /// Where the added row and its mark go, in the container's own coordinates.
@@ -3608,6 +3625,7 @@ pub const FLO_MARK_PITCH: f32 = 48.4;
 /// which places its own icon at `(8.10, 4.55)` inside it exactly as row 2 does, so the glyph lands
 /// where row 2's would one step down.
 pub const FLO_ADDED_ROW_XY: (f32, f32) = (-0.1, 151.9);
+/// Its mark's origin: `114.35 + 48.40`, at mark 2's x.
 pub const FLO_ADDED_MARK_XY: (f32, f32) = (60.2, 162.75);
 
 /// Where a tab's first row goes -- the shipped row 0's own position, read off the container.
@@ -3620,6 +3638,7 @@ pub const FLO_ADDED_MARK_XY: (f32, f32) = (60.2, 162.75);
 /// appended below three shipped ones. The two differ by three pitches, which is the three rows that
 /// are not there on the seventh tab.
 pub const FLO_FIRST_ROW_XY: (f32, f32) = (3.95, 10.6);
+/// Its mark: child 6 of the same container, `(60.20, 17.55)`.
 pub const FLO_FIRST_MARK_XY: (f32, f32) = (60.2, 17.55);
 
 /// Byte offset of the packed colour inside a transform block, and the tint the added row's icon
@@ -3689,7 +3708,9 @@ pub const FLO_TRANSFORM_COLOUR_OFFSET: usize = 0x18;
 /// do. Bit `0x20` (in `0x130`) and bit `0x1` are left alone -- `0x1` occurs on white records too,
 /// so neither is about colour and neither is worth setting on a guess.
 pub const FLO_TRANSFORM_FLAGS_OFFSET: usize = 0x20;
+/// Bit `0x10`: the colour word is live at all.
 pub const FLO_TRANSFORM_COLOUR_LIVE: u32 = 0x0010;
+/// Bit `0x100`: and its RGB is not white. An opaque re-skin needs both.
 pub const FLO_TRANSFORM_COLOUR_RGB: u32 = 0x0100;
 
 /// The tint, as the four bytes it occupies in memory: **R, G, B, A**.
@@ -3834,9 +3855,10 @@ pub const DL_STRING_CAPACITY_OFFSET: usize = 0x18;
 /// Capacity at or below which the characters are inline rather than behind the pointer.
 pub const DL_STRING_INLINE_CAPACITY: u64 = 7;
 
-/// The quit tab's bottom row, "Quit Game" — the one that returns to the title screen and offers to
-/// save on the way. Its caption is retargeted so that the row this repo adds can be the one called
-/// "Quit Game", which is what it actually does.
+/// The quit tab's bottom row, "Quit Game" -- the one that returns to the title screen.
+///
+/// It offers to save on the way. Its caption is retargeted so that the row this repo adds can be
+/// the one called "Quit Game", which is what it actually does.
 pub const FE_QUIT_TAB_ROW_TITLE_LABEL_ID: u32 = 0x001e_ac4c;
 
 /// The label element id given to the added row.
@@ -3894,9 +3916,11 @@ pub const FLO_PANEL_STRETCH_Y: f32 = 1.0;
 /// Index into [`FLO_QUIT_TAB_CHILD_IDS`] of the panel the stretch applies to.
 pub const FLO_QUIT_TAB_PANEL: usize = 0;
 
-/// `f32` scale-x inside a transform block. `pfVar1[2]` in the builder's identity test, and the
-/// pair is visible in the file: every shipped block reads `1.0, 1.0` here except the item icon's
-/// (`l02_03_equipment.flo` transform `0x010470`), which carries `0.810806, 0.810806`.
+/// `f32` scale-x inside a transform block.
+///
+/// `pfVar1[2]` in the builder's identity test, and the pair is visible in the file: every shipped
+/// block reads `1.0, 1.0` here except the item icon's (`l02_03_equipment.flo` transform
+/// `0x010470`), which carries `0.810806, 0.810806`.
 pub const FLO_TRANSFORM_SCALE_X_OFFSET: usize = 0x08;
 
 /// `f32` scale-y inside a transform block. `pfVar1[3]` in the builder's identity test.
@@ -3943,7 +3967,9 @@ pub const FE_SCENE_PROXY_GET_SCENE_SLOT: usize = 0x08;
 /// infusion glyph it is cloned from differed by exactly `9 * FLO_RECORD_STRIDE`, while both name
 /// definition `0x005a`, so a pointer to a definition would have been equal.
 pub const FE_COMPONENT_NEXT_SIBLING_OFFSET: usize = 0x28;
+/// `[parent + 0x38]` -- the first child, and only on the two classes that have one.
 pub const FE_COMPONENT_FIRST_CHILD_OFFSET: usize = 0x38;
+/// `[child + 0x48]` -- the `.flo` record, whose `+0x1c` is the element id.
 pub const FE_COMPONENT_RECORD_OFFSET: usize = 0x48;
 
 /// Where a component's own transform starts, which is NOT the same for every class.
@@ -3953,6 +3979,7 @@ pub const FE_COMPONENT_RECORD_OFFSET: usize = 0x48;
 /// under `FeComponentBase`, not parent and child, which is why the offsets differ -- so a dump
 /// covers both ranges and the vtable says which one to read.
 pub const FE_COMPONENT_TRANSFORM_DUMP_START: usize = 0x50;
+/// Where that dump stops -- far enough to cover both classes' ranges.
 pub const FE_COMPONENT_TRANSFORM_DUMP_END: usize = 0xa0;
 
 /// The ONLY two classes whose `+0x38` is a child list, as vtable RVAs.
@@ -3969,17 +3996,22 @@ pub const FE_COMPONENT_TRANSFORM_DUMP_END: usize = 0xa0;
 ///
 /// Names from `scripts/ds2-rtti-vtables.py 'FeComponent'`.
 pub const FE_COMPONENT_OBJECT_VTABLE: u32 = 0x011d_dfa8;
+/// `FeComponentScene`: has no id of its own and descends immediately.
 pub const FE_COMPONENT_SCENE_VTABLE: u32 = 0x011d_e158;
 
 /// The display list, its live count, and its stride, inside a `FeComponentSprite`.
 pub const FE_COMPONENT_DISPLAY_LIST_OFFSET: usize = 0x70;
+/// The `u16` beside it saying how many of those entries are live.
 pub const FE_COMPONENT_DISPLAY_COUNT_OFFSET: usize = 0x66;
+/// Bytes per entry in that list.
 pub const FE_COMPONENT_DISPLAY_ENTRY_STRIDE: usize = 0x10;
 /// Offset of the child pointer and of the id key inside one display-list entry.
 pub const FE_COMPONENT_DISPLAY_ENTRY_CHILD_OFFSET: usize = 0x00;
+/// The id key in that same entry -- what a lookup matches on.
 pub const FE_COMPONENT_DISPLAY_ENTRY_KEY_OFFSET: usize = 0x0c;
 
-/// Classes whose `findByIdPath` is `xor eax,eax; ret` (`0x140b6d2a0`) -- genuine leaves:
+/// Classes whose `findByIdPath` is `xor eax,eax; ret` (`0x140b6d2a0`) -- genuine leaves.
+///
 /// `FeComponentLinked`, `FeComponentMaskShape`, `FeComponentTextureMask`,
 /// `FeComponentTextureShape`. Following `+0x38` on one of these is what crashed the first walk.
 pub const FE_COMPONENT_LEAF_FIND_BY_ID_PATH: u32 = 0x00b6_d2a0;
@@ -4021,6 +4053,7 @@ pub const FE_TEXTURE_SHAPE_INIT: u32 = 0x00b7_0200;
 
 /// The shape table entry a texture shape was built from, and the count field inside it.
 pub const FE_TEXTURE_SHAPE_ENTRY_OFFSET: usize = 0x40;
+/// The `u16` count inside that entry: how many quads the shape holds.
 pub const FE_SHAPE_ENTRY_COUNT_OFFSET: usize = 0x02;
 
 /// The two per-quad rect arrays, `0x10` bytes each: DESTINATION and SOURCE.
@@ -4068,7 +4101,9 @@ pub const FE_TEXTURE_SHAPE_QUAD_MATRIX_OFFSET: usize = 0x48;
 /// These indices are where a translation is read from, then. They are not a claim that one is in
 /// the block when `ds2-item-warn` looks: reading it at bind time measures the seed.
 pub const FE_TEXTURE_SHAPE_QUAD_MATRIX_TRANSLATE: [usize; 2] = [3, 7];
+/// Where the built shape's per-quad source rects start.
 pub const FE_TEXTURE_SHAPE_SOURCE_RECT_OFFSET: usize = 0x58;
+/// Bytes per rect in that array -- four floats.
 pub const FE_TEXTURE_SHAPE_RECT_STRIDE: usize = 0x10;
 
 /// The display-list key the panel's texture shape is filed under.
@@ -4309,7 +4344,9 @@ pub const FLO_ADDED_TAB_SUBTREE_ID: u32 = 0x001e_aceb;
 /// have been answered with the seventh tab's container. A test in `ds2-menu-row` asserts the two
 /// blocks stay apart; it is the test that found this.
 pub const FLO_ADDED_TAB_SUBTREE_DEFINITION: u32 = 0xe265;
+/// The frame copy, one index below the subtree's.
 pub const FLO_ADDED_TAB_FRAME_DEFINITION: u32 = 0xe264;
+/// The container copy, and the lowest of the three.
 pub const FLO_ADDED_TAB_CONTAINER_DEFINITION: u32 = 0xe263;
 
 /// Byte offset of the layout path inside a tab descriptor. `0x38`.
@@ -4411,6 +4448,7 @@ pub const FLO_SHAPE_QUADS_OFFSET: usize = 0x08;
 pub const FLO_QUAD_STRIDE: usize = 0x40;
 /// `f32` x and `f32` y the quad's source rect is offset by to reach the screen.
 pub const FLO_QUAD_X_OFFSET: usize = 0x00;
+/// The `f32` beside it, +y downwards.
 pub const FLO_QUAD_Y_OFFSET: usize = 0x04;
 /// `f32` scale x inside a quad, at the same place a transform block keeps it. `-1` mirrors.
 pub const FLO_QUAD_SCALE_X_OFFSET: usize = 0x08;
@@ -4450,9 +4488,10 @@ pub const FLO_QUAD_COLOUR_OFFSET: usize = 0x18;
 pub const FLO_QUAD_COLOUR_SIZE: usize = 4;
 
 /// **Nothing in this crate writes a quad colour, and the byte order above is therefore unsettled.**
+///
 /// The reversal is read off the four `mov`s; what the array's consumer expects is not, so which of
 /// its bytes is red is not known and nothing here guesses. A previous attempt did guess, and could
-/// not be checked: the added hexagon's quad is the layer UNDER the copy `ds2-menu-row`'s `strip`
+/// not be checked: the added hexagon's quad is the layer under the copy `ds2-menu-row`'s `strip`
 /// draws over it, so the colour written there was invisible either way. An unverifiable guess in a
 /// constant is worse than no constant -- it reads as a measurement to the next person.
 ///
@@ -4466,8 +4505,11 @@ pub const FLO_QUAD_COLOUR_ORDER_UNSETTLED: () = ();
 pub const FLO_SOURCE_RECT_SIZE: usize = 0x10;
 /// `f32` left, top, right and bottom of a source rect, in atlas pixels.
 pub const FLO_SOURCE_LEFT_OFFSET: usize = 0x00;
+/// `f32` top, in atlas pixels.
 pub const FLO_SOURCE_TOP_OFFSET: usize = 0x04;
+/// `f32` right, in atlas pixels.
 pub const FLO_SOURCE_RIGHT_OFFSET: usize = 0x08;
+/// `f32` bottom, in atlas pixels.
 pub const FLO_SOURCE_BOTTOM_OFFSET: usize = 0x0c;
 
 /// The shape index of the six-hexagon plate. `0x0268`, one quad.
@@ -4536,7 +4578,9 @@ pub const FLO_ADDED_TAB_ICON_HUE: [u8; 3] = FLO_ADDED_ROW_HUE;
 pub const FLO_ADDED_TAB_ICON_TINT_STRENGTH: u8 = 255;
 
 /// Index, in [`FLO_TAB_STRIP_DEFINITION`]'s child array, of the cap drawn over the strip's right
-/// end. Its container is `0x026a` and its quad lands at `(271.05, 5.05)-(349.40, 64.45)`, over the
+/// end.
+///
+/// Its container is `0x026a` and its quad lands at `(271.05, 5.05)-(349.40, 64.45)`, over the
 /// sixth tab -- so a seventh tab needs it one [`FLO_TAB_PITCH`] further along.
 pub const FLO_TAB_STRIP_END_CAP: usize = 8;
 /// The definition index at that child, checked before its transform is copied.
@@ -4562,9 +4606,10 @@ pub const FLO_TAB_ARROWS_RIGHT: usize = 0;
 /// That quad's `scale x`, which is `-1` because it is the left chevron's art mirrored. Checked
 /// before the move, because it is what says quad `0` is the right chevron and not the left.
 pub const FLO_TAB_ARROWS_RIGHT_SCALE_X: f32 = -1.0;
-/// That quad's screen offset x, checked before it is moved. Mirrored art subtracts, so the chevron
-/// lands at `1357.45 - (995.75..1020.75)`, which is `336.70..361.70` -- flush against the plate's
-/// right edge at `337.60`.
+/// That quad's screen offset x, checked before it is moved.
+///
+/// Mirrored art subtracts, so the chevron lands at `1357.45 - (995.75..1020.75)`, which is
+/// `336.70..361.70` -- flush against the plate's right edge at `337.60`.
 pub const FLO_TAB_ARROWS_RIGHT_X: f32 = 1357.45;
 
 /// That quad's source rect, checked with the two fields above.
@@ -4718,7 +4763,8 @@ pub const STEAM_UTILS_SHOW_GAMEPAD_TEXT_INPUT_SLOT: usize = 0xa0;
 /// `SoftwareKeyboardManagerImpl::getResult` (`0x00ff2050`), at `0x140ff20b1`.
 pub const STEAM_UTILS_GET_ENTERED_TEXT_LENGTH_SLOT: usize = 0xa8;
 
-/// `ISteamUtils::GetEnteredGamepadTextInput(char *pchText, uint32 cchText)`. Vtable slot `+0xb0`.
+/// `ISteamUtils::GetEnteredGamepadTextInput(char *pchText, uint32 cchText)`, vtable slot `+0xb0`.
+///
 /// Same function, at `0x140ff2101`. **The text comes back UTF-8**, which is why the impl keeps a
 /// `char*` scratch buffer at `+0x10` rather than a wide string.
 pub const STEAM_UTILS_GET_ENTERED_TEXT_SLOT: usize = 0xb0;
@@ -4902,8 +4948,10 @@ pub const PLAYER_PARAM_STAT_NAMES: [&str; 9] = [
 /// Soul level. `PlayerParam + 0xD0`, `u32`. Table-sourced.
 pub const PLAYER_PARAM_SOUL_LEVEL_OFFSET: usize = 0xD0;
 
-/// Souls currently held. `PlayerParam + 0xEC`, `u32`. Table-sourced, and the LEAST certain constant
-/// here: one table labels it "Total Get Soul" and the other labels the same offset "Soul" while
+/// Souls currently held. `PlayerParam + 0xEC`, `u32`.
+///
+/// Table-sourced, and the least certain constant in this file: one table labels it "Total Get
+/// Soul" and the other labels the same offset "Soul" while
 /// separately naming `+0xF4`/`+0xFC` as the totals. The three-record reading (`{u32 value; u8 flag;
 /// pad}` at `0xEC`, `0xF4`, `0xFC`) is self-consistent and makes this the spendable balance.
 /// Confirm by watching it fall when souls are spent.
@@ -5939,7 +5987,7 @@ pub const SAVE_LOAD_SYSTEM_SAVE_WANTED_OFFSET: usize = 0x1a2;
 /// `kind == 2`. `u8`.
 ///
 /// Passed straight through to the performer as its third argument, where a non-zero forces the
-/// SLSession request type to `5`. The update leaves it alone when it starts a save.
+/// `SLSession` request type to `5`. The update leaves it alone when it starts a save.
 pub const SAVE_LOAD_SYSTEM_SAVE_KIND2_OFFSET: usize = 0x1a3;
 
 /// `[saveLoadSystem + 0x1a9]`: kind 14's own flag -- a save deferred by a frame. `u8`.
@@ -5952,7 +6000,7 @@ pub const SAVE_LOAD_SYSTEM_SAVE_DEFERRED_OFFSET: usize = 0x1a9;
 /// `[saveLoadSystem + 0x68]`: the lowest kind asked for since the last save. `i32`.
 ///
 /// Every requester does `if (kind < [this+0x68]) [this+0x68] = kind`, and the performer reads it:
-/// `kind < 2` picks a different SLSession request type, and `kind >= 6` makes the save wait for the
+/// `kind < 2` picks a different `SLSession` request type, and `kind >= 6` makes the save wait for the
 /// cooldown at `+0x60`.
 pub const SAVE_LOAD_SYSTEM_SAVE_KIND_OFFSET: usize = 0x68;
 
@@ -6309,7 +6357,7 @@ pub const GAME_MANAGER_NAV_SYSTEM_OFFSET: usize = 0xBC0;
 /// into `lVar6` and passes `lVar6 + 0x48` to `0x140bb5cd0`, which reads `param_4 + 0x18` as the
 /// segment count -- so the count is at `planner + 0x60`. The clear path does the same address-of
 /// (`FUN_140bb3a10(*(longlong *)(param_1 + 0x10) + 0x48)`). A reader that dereferences `+0x48`
-/// decodes from the route`s own first field, produces nothing, and reports a successful search as
+/// decodes from the route's own first field, produces nothing, and reports a successful search as
 /// NO ROUTE -- a failure that looks exactly like the real one.
 ///
 /// From `0x14042ee40`, the navmesh controller's destination step: when the goal is unchanged and
@@ -6808,7 +6856,7 @@ pub const NAVI_GRAPH_MAX_MAP_INDEX: u32 = 0x25;
 ///
 /// # The one way this goes wrong is the sentinel
 ///
-/// `0x140bab1f0([`MAP_INDEX_NONE`])` is `0x3fffffff`: a well-formed key for a map that does not
+/// `0x140bab1f0` of [`MAP_INDEX_NONE`] is `0x3fffffff`: a well-formed key for a map that does not
 /// exist. Test the sentinel before calling this. The full account is on
 /// [`MAP_MANAGER_PLAYER_MAP_INDEX_OFFSET`].
 ///
@@ -7364,9 +7412,10 @@ pub const GAME_MANAGER_CAMERA_MANAGER_OFFSET: usize = 0x20;
 /// are candidates and the matrices decide.
 pub const CAMERA_MANAGER_OPERATOR_OFFSETS: [usize; 3] = [0x18, 0x20, 0x28];
 
-/// `CameraOperator -> view`. `+0x10`, sixteen `f32`, row-major -- **for the class whose
-/// constructor is `0x140ae8180`, which is NOT the object the game draws through.** Measured:
-/// the live one keeps its view at [`CAMERA_OPERATOR_VIEW_OFFSET_MEASURED`].
+/// `CameraOperator -> view`. `+0x10`, sixteen `f32`, row-major.
+///
+/// **For the class whose constructor is `0x140ae8180` -- not the object the game draws through.**
+/// Measured: the live one keeps its view at [`CAMERA_OPERATOR_VIEW_OFFSET_MEASURED`].
 ///
 /// **World to camera.** Not the other way round, and the difference is the whole projection: at
 /// `0x140493294` the engine calls the 4x4 INVERSE at `0x140002380` on the camera's transform and
@@ -7780,9 +7829,10 @@ pub const WINDOWS_MOUSE_DEVICE_WHEEL_OFFSET: usize = 0x10;
 /// click regardless of where the click came from.
 pub const WINDOWS_MOUSE_DEVICE_BUTTONS_OFFSET: usize = 0x14;
 
-/// A second per-frame `u32`, `device+0x2c` moved into `device+0x18` by the poll and read by
-/// `FUN_140b0d0e0` into the camera object's `[0xd]` (the "just pressed" half of the button
-/// state). Recorded so blanking covers it; nothing here authors it.
+/// A second per-frame `u32`, `device+0x2c` moved into `device+0x18` by the poll.
+///
+/// `FUN_140b0d0e0` reads it into the camera object's `[0xd]` -- the "just pressed" half of the
+/// button state. Recorded so blanking covers it; nothing here authors it.
 pub const WINDOWS_MOUSE_DEVICE_BUTTON_EDGE_OFFSET: usize = 0x18;
 
 /// The `HWND` the poll converts and clamps against. `WindowsMouseDevice+0x20`, from
@@ -8715,9 +8765,11 @@ pub const FE_ITEM_ICON_BOX: [f32; 4] = [
     -9.65 + 128.0 * FE_ITEM_ICON_SCALE,
 ];
 
-/// The scale on the record that carries the item icon's quad, in both documents that author an
-/// item cell: `l02_02_Inventory.flo` `def 0x005d` child[1], and `l02_03_equipment.flo` `def 0x0058`
-/// child[1]. The same number in both, read with `scripts/ds2-flo.py tree`.
+/// The scale on the record that carries the item icon's quad.
+///
+/// In both documents that author an item cell: `l02_02_Inventory.flo` `def 0x005d` child[1], and
+/// `l02_03_equipment.flo` `def 0x0058` child[1]. The same number in both, read with
+/// `scripts/ds2-flo.py tree`.
 pub const FE_ITEM_ICON_SCALE: f32 = 0.810806;
 
 /// Where the infusion container sits inside a cell, in the same units.

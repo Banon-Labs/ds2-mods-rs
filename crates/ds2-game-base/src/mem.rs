@@ -50,7 +50,15 @@ unsafe extern "system" {
 /// relocated by the loader, so the live base is neither the preferred base recorded in the PE
 /// header nor necessarily the same as it was last run. Whether a given build sets that bit is a
 /// fact about that build, and belongs in `ds2-rva` rather than here.
+///
+/// # Errors
+///
+/// The message names the call that failed when `GetModuleHandleA` returns 0, which it does only
+/// if the process has no executable image -- a state this code cannot reach from inside one.
 pub fn game_module_base() -> Result<usize, String> {
+    // SAFETY: `GetModuleHandleA(NULL)` takes no pointer to validate and returns a borrowed handle
+    // that needs no release. The null argument is the documented spelling of "this process's own
+    // image", not a missing one.
     let module = unsafe { GetModuleHandleA(core::ptr::null()) };
     if module == 0 {
         return Err("failed to resolve game module: GetModuleHandleA(NULL) returned 0".to_string());
@@ -59,6 +67,10 @@ pub fn game_module_base() -> Result<usize, String> {
 }
 
 /// `game_module_base() + rva`.
+///
+/// # Errors
+///
+/// Whatever [`game_module_base`] returned. The addition itself cannot fail.
 pub fn game_rva(rva: u32) -> Result<usize, String> {
     Ok(game_module_base()? + rva as usize)
 }
@@ -125,6 +137,10 @@ pub fn ptr_in_module(ptr: usize, base: usize, size_of_image: usize) -> bool {
 pub unsafe fn safe_read_usize(addr: usize) -> Option<usize> {
     let mut value: usize = ZERO;
     let mut read: usize = ZERO;
+    // SAFETY: the destination is a local this frame owns, sized by the same expression passed as
+    // the length. `addr` needs no validation -- `ReadProcessMemory` checks the source range in
+    // the kernel and answers FALSE for an unmapped one rather than faulting, which is the whole
+    // reason the read goes through it instead of a dereference.
     let ok = unsafe {
         ReadProcessMemory(
             CURRENT_PROCESS_PSEUDO_HANDLE,
@@ -163,6 +179,10 @@ pub unsafe fn safe_read_usize(addr: usize) -> Option<usize> {
 pub unsafe fn safe_read_i32(addr: usize) -> Option<i32> {
     let mut value: i32 = 0;
     let mut read: usize = ZERO;
+    // SAFETY: the destination is a local this frame owns, sized by the same expression passed as
+    // the length. `addr` needs no validation -- `ReadProcessMemory` checks the source range in
+    // the kernel and answers FALSE for an unmapped one rather than faulting, which is the whole
+    // reason the read goes through it instead of a dereference.
     let ok = unsafe {
         ReadProcessMemory(
             CURRENT_PROCESS_PSEUDO_HANDLE,
@@ -201,6 +221,10 @@ pub unsafe fn safe_read_i32(addr: usize) -> Option<i32> {
 pub unsafe fn safe_read_u32(addr: usize) -> Option<u32> {
     let mut value: u32 = 0;
     let mut read: usize = ZERO;
+    // SAFETY: the destination is a local this frame owns, sized by the same expression passed as
+    // the length. `addr` needs no validation -- `ReadProcessMemory` checks the source range in
+    // the kernel and answers FALSE for an unmapped one rather than faulting, which is the whole
+    // reason the read goes through it instead of a dereference.
     let ok = unsafe {
         ReadProcessMemory(
             CURRENT_PROCESS_PSEUDO_HANDLE,
@@ -239,6 +263,10 @@ pub unsafe fn safe_read_u32(addr: usize) -> Option<u32> {
 pub unsafe fn safe_read_f32(addr: usize) -> Option<f32> {
     let mut value: f32 = 0.0;
     let mut read: usize = ZERO;
+    // SAFETY: the destination is a local this frame owns, sized by the same expression passed as
+    // the length. `addr` needs no validation -- `ReadProcessMemory` checks the source range in
+    // the kernel and answers FALSE for an unmapped one rather than faulting, which is the whole
+    // reason the read goes through it instead of a dereference.
     let ok = unsafe {
         ReadProcessMemory(
             CURRENT_PROCESS_PSEUDO_HANDLE,
@@ -277,6 +305,10 @@ pub unsafe fn safe_read_f32(addr: usize) -> Option<f32> {
 pub unsafe fn safe_read_u8(addr: usize) -> Option<u8> {
     let mut value: u8 = 0;
     let mut read: usize = ZERO;
+    // SAFETY: the destination is a local this frame owns, sized by the same expression passed as
+    // the length. `addr` needs no validation -- `ReadProcessMemory` checks the source range in
+    // the kernel and answers FALSE for an unmapped one rather than faulting, which is the whole
+    // reason the read goes through it instead of a dereference.
     let ok = unsafe {
         ReadProcessMemory(
             CURRENT_PROCESS_PSEUDO_HANDLE,
@@ -293,9 +325,11 @@ pub unsafe fn safe_read_u8(addr: usize) -> Option<u8> {
     }
 }
 
-/// Fault-tolerant bulk read into `out`. Returns true only if the whole slice was
-/// read (the None-equivalent for byte buffers). This is what lets a signature scan walk
-/// `.text` and fail closed on a drifted or unmapped region instead of faulting.
+/// Fault-tolerant bulk read into `out`, true only if the whole slice was read.
+///
+/// That all-or-nothing answer is the `None`-equivalent for byte buffers, and it is what lets a
+/// signature scan walk `.text` and fail closed on a drifted or unmapped region instead of
+/// faulting.
 ///
 /// # Safety
 ///
@@ -312,6 +346,10 @@ pub unsafe fn read_bytes(addr: usize, out: &mut [u8]) -> bool {
         return true;
     }
     let mut read: usize = ZERO;
+    // SAFETY: the destination is a local this frame owns, sized by the same expression passed as
+    // the length. `addr` needs no validation -- `ReadProcessMemory` checks the source range in
+    // the kernel and answers FALSE for an unmapped one rather than faulting, which is the whole
+    // reason the read goes through it instead of a dereference.
     let ok = unsafe {
         ReadProcessMemory(
             CURRENT_PROCESS_PSEUDO_HANDLE,
@@ -332,21 +370,25 @@ pub unsafe fn read_bytes(addr: usize, out: &mut [u8]) -> bool {
 fn nt_headers(base: usize) -> Option<usize> {
     // DOS header: e_lfanew (u32) at +0x3C -> PE header offset.
     let mut w4 = [0u8; 4];
+    // SAFETY: `read_bytes` has no precondition on its address -- it fails closed on an unmapped
+    // range rather than faulting -- and the destination is a local of exactly the length passed.
     if !unsafe { read_bytes(base + 0x3C, &mut w4) } {
         return None;
     }
     let pe = base.checked_add(u32::from_le_bytes(w4) as usize)?;
     let mut sig = [0u8; 4];
+    // SAFETY: as above. `pe` came from the image's own header and is unvalidated on purpose; a
+    // wrong one reads nothing and returns None.
     if !unsafe { read_bytes(pe, &mut sig) } || &sig != b"PE\0\0" {
         return None;
     }
     Some(pe)
 }
 
-/// The running game image's `SizeOfImage`: how many bytes the loader mapped, read out of the
-/// in-memory PE headers rather than assumed.
+/// The running game image's `SizeOfImage`, read out of the in-memory PE headers.
 ///
-/// This is the upper bound to hand [`ptr_in_module`]. It is read at runtime because it is a
+/// How many bytes the loader actually mapped, rather than a number anyone assumed. This is the
+/// upper bound to hand [`ptr_in_module`]. It is read at runtime because it is a
 /// property of the build that is actually loaded -- a game update changes it, and a constant
 /// copied from a different game is simply a wrong number wearing a type.
 ///
@@ -359,6 +401,8 @@ pub fn module_image_size() -> Option<usize> {
     let pe = nt_headers(base)?;
     let mut size = [0u8; 4];
     // Optional header begins at pe+24 (4-byte signature + 20-byte COFF file header).
+    // SAFETY: `read_bytes` validates the source range in the kernel and fails closed, and the
+    // destination is a 4-byte local matching the length it is given.
     if !unsafe { read_bytes(pe + 24 + 0x38, &mut size) } {
         return None;
     }
@@ -366,13 +410,19 @@ pub fn module_image_size() -> Option<usize> {
     (size != ZERO).then_some(size)
 }
 
-/// Resolve the running game image's `.text` section as `(start_va, len)` by parsing
-/// the in-memory PE headers. Returns `None` if the headers are unreadable or no
-/// `.text` section is found. This is the bound for a fault-safe AOB scan; it makes
-/// signature-based function discovery version-agnostic (no hardcoded RVAs).
+/// Resolve the running game image's `.text` section as `(start_va, len)`.
+///
+/// Parsed out of the in-memory PE headers, and `None` if those are unreadable or no `.text`
+/// section is found. This is the bound for a fault-safe AOB scan, which is what makes
+/// signature-based function discovery version-agnostic -- no hardcoded RVAs.
 pub fn module_text_range() -> Option<(usize, usize)> {
     let base = game_module_base().ok()?;
     let pe = nt_headers(base)?;
+    // SAFETY: every read inside this block goes through `read_bytes`, which has no precondition
+    // on its address and answers false for an unmapped range instead of faulting. The block spans
+    // the whole section walk rather than each read because the walk's offsets come from the
+    // headers it is reading, so none of them is known-good until the read that fetched it
+    // succeeded -- and each one that does not, returns None.
     unsafe {
         // COFF file header at pe+4: NumberOfSections (u16) at +2, SizeOfOptionalHeader (u16) at +16.
         let mut nsec = [0u8; 2];
@@ -426,6 +476,10 @@ pub fn module_text_range() -> Option<(usize, usize)> {
 pub unsafe fn safe_read_u16(addr: usize) -> Option<u16> {
     let mut value: u16 = 0;
     let mut read: usize = ZERO;
+    // SAFETY: the destination is a local this frame owns, sized by the same expression passed as
+    // the length. `addr` needs no validation -- `ReadProcessMemory` checks the source range in
+    // the kernel and answers FALSE for an unmapped one rather than faulting, which is the whole
+    // reason the read goes through it instead of a dereference.
     let ok = unsafe {
         ReadProcessMemory(
             CURRENT_PROCESS_PSEUDO_HANDLE,
@@ -472,6 +526,7 @@ const PAGE_SIZE: usize = 0x1000;
 /// The caller still owns the MEANING of the bytes: a successful read proves only that they were
 /// mapped at that instant.
 pub unsafe fn safe_read_cstr(addr: usize, max_len: usize) -> Option<Vec<u8>> {
+    // SAFETY: `read_bytes` takes any address and fails closed; `out` is the walk's own buffer.
     cstr_walk(addr, max_len, &mut |at, out| unsafe { read_bytes(at, out) })
 }
 
@@ -653,6 +708,8 @@ mod span_tests {
     /// anything is dereferenced.
     #[test]
     fn heap_alignment_screens_low_and_misaligned_pointers() {
+        // SAFETY: `is_heap_aligned_ptr` dereferences nothing -- it compares the integer against a
+        // floor and an alignment. The block exists only to match the sibling repo's signature.
         unsafe {
             assert!(!is_heap_aligned_ptr(0), "null");
             assert!(

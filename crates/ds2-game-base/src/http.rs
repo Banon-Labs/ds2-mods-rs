@@ -82,7 +82,12 @@ unsafe extern "system" {
 #[derive(Debug)]
 pub enum HttpError {
     /// A WinHTTP call failed; carries which one and the OS error.
-    Win32 { step: &'static str, code: u32 },
+    Win32 {
+        /// Which WinHTTP call failed, as its own name.
+        step: &'static str,
+        /// What `GetLastError` said about it.
+        code: u32,
+    },
     /// The server answered, but not with success.
     Status(u32),
     /// The body exceeded [`MAX_BODY_BYTES`].

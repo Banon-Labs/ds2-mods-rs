@@ -103,7 +103,11 @@ unsafe extern "system" fn union_dispatch<const N: usize>(
     if head == 0 {
         return 0;
     }
+    // SAFETY: `head` is non-zero and was stored by `register_union_hook`, whose own contract makes
+    // the caller promise it is a `UnionFn` matching the target's ABI. Nothing else writes the slot.
     let f: UnionFn = unsafe { std::mem::transmute::<usize, UnionFn>(head) };
+    // SAFETY: as above -- calling the handler the registrant vouched for, with this detour's own
+    // four arguments passed straight through.
     unsafe { f(a, b, c, d) }
 }
 
@@ -120,6 +124,11 @@ static DISPATCHERS: [UnionFn; MAX_UNION_SLOTS] = union_dispatchers!(
 /// Register `handler` on `target`, chaining through `orig_slot`. First registrant installs
 /// the dispatcher + owns the trampoline; later ones append and no handler is ever dropped.
 ///
+/// # Errors
+///
+/// The `MH_STATUS` MinHook answered with, or `MH_ERROR_MEMORY_ALLOC` when the dispatcher pool is
+/// full. A duplicate registration of the same handler is `Ok`, not an error.
+///
 /// # Safety
 /// `handler` must be a valid `UnionFn` matching the target's ABI; `orig_slot` must be the
 /// static the handler reads to call its original.
@@ -128,6 +137,8 @@ pub unsafe fn register_union_hook(
     handler: UnionFn,
     orig_slot: &'static AtomicUsize,
 ) -> Result<(), MH_STATUS> {
+    // SAFETY: `MH_Initialize` takes no arguments and is documented as safe to call again on an
+    // already-initialised library, which is the second arm of the match below.
     match unsafe { MH_Initialize() } {
         MH_STATUS::MH_OK | MH_STATUS::MH_ERROR_ALREADY_INITIALIZED => {}
         s => return Err(s),
@@ -156,6 +167,9 @@ pub unsafe fn register_union_hook(
         return Err(MH_STATUS::MH_ERROR_MEMORY_ALLOC);
     }
     let mut trampoline = null_mut();
+    // SAFETY: `target` is the address the caller vouched for in this function's own contract;
+    // `DISPATCHERS[slot]` is a `'static` fn item bounds-checked against `MAX_UNION_SLOTS` above,
+    // and `trampoline` is a live local MinHook writes once.
     unsafe {
         MH_CreateHook(
             target as *mut c_void,
@@ -172,6 +186,8 @@ pub unsafe fn register_union_hook(
     // unreachable until the detour is enabled, so publishing the head first is free.
     UNION_HEADS[slot].store(handler_addr, Ordering::Release);
     orig_slot.store(trampoline as usize, Ordering::Release); // sole handler -> game orig
+    // SAFETY: `target` is the address `MH_CreateHook` just accepted above, so MinHook holds a
+    // record for it; enabling one twice is the second arm of the match.
     match unsafe { MH_EnableHook(target as *mut c_void) } {
         MH_STATUS::MH_OK | MH_STATUS::MH_ERROR_ENABLED => {}
         s => {
@@ -212,8 +228,10 @@ pub unsafe fn register_union_hook(
 // this crate is substrate and holds no product identity of its own.
 // ============================================================================
 
-/// C-ABI shape of the product DLL's union-register export: `(target, handler, *mut orig_slot)
-/// -> 0 ok | -1 null slot | positive `MH_STATUS` on MinHook failure`.
+/// C-ABI shape of the product DLL's union-register export.
+///
+/// `(target, handler, *mut orig_slot)`, answering `0` for ok, `-1` for a null slot, and a
+/// positive [`MH_STATUS`] on MinHook failure.
 pub type UnionRegisterFn = unsafe extern "system" fn(usize, UnionFn, *mut usize) -> i32;
 
 /// Which module publishes the cross-DLL union register, and under what symbol.
@@ -239,9 +257,10 @@ pub struct UnionExport {
     pub export_name: &'static CStr,
 }
 
-/// Which MinHook instance a [`register_shared_hook`] call ended up on. Worth logging: it is the
-/// difference between "chained onto the product's detour" and "installed a second instance that
-/// may be about to lose a trampoline race".
+/// Which MinHook instance a [`register_shared_hook`] call ended up on.
+///
+/// Worth logging: it is the difference between "chained onto the product's detour" and "installed
+/// a second instance that may be about to lose a trampoline race".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HookRoute {
     /// Chained into the product DLL's single union -- the product is co-loaded.
@@ -271,9 +290,10 @@ unsafe extern "system" {
     fn Sleep(ms: u32);
 }
 
-/// Resolve the product DLL's union-register export, polling `tries` times at `sleep_ms`
-/// intervals. `None` means the product is not in this process (a standalone companion run) or
-/// this DLL *is* the product -- in both cases the caller owns the address itself.
+/// Resolve the product DLL's union-register export, polling `tries` times at `sleep_ms` intervals.
+///
+/// `None` means the product is not in this process (a standalone companion run) or this DLL *is*
+/// the product -- in both cases the caller owns the address itself.
 ///
 /// Pass `tries = 1, sleep_ms = 0` for a non-blocking probe.
 #[cfg(windows)]
@@ -283,11 +303,15 @@ pub fn resolve_product_union_register(
     sleep_ms: u32,
 ) -> Option<UnionRegisterFn> {
     for attempt in 0..tries.max(1) {
+        // SAFETY: `dll_name` is a `UnionExport`'s own NUL-terminated literal, and the call returns
+        // a borrowed handle -- null when the module is absent, which is checked below.
         let hmod = unsafe { GetModuleHandleA(export.dll_name.as_ptr()) };
         // Resolving our OWN export would route right back into the local union through a C-ABI
         // round trip. Same outcome, so this is a clarity guard rather than a correctness one --
         // but it also means the product can call `register_shared_hook` without special-casing.
         if !hmod.is_null() && hmod as usize != dll_base() {
+            // SAFETY: `hmod` was just checked non-null, and `export_name` is the same struct's
+            // NUL-terminated literal. A missing export answers null, checked below.
             let proc = unsafe { GetProcAddress(hmod, export.export_name.as_ptr()) };
             if !proc.is_null() {
                 // SAFETY: the export's C-ABI shape is fixed by the product DLL, and both images
@@ -296,6 +320,7 @@ pub fn resolve_product_union_register(
             }
         }
         if attempt + 1 < tries.max(1) && sleep_ms > 0 {
+            // SAFETY: `Sleep` takes an integer and touches no memory of ours.
             unsafe { Sleep(sleep_ms) };
         }
     }
@@ -307,6 +332,11 @@ pub fn resolve_product_union_register(
 ///
 /// Use this -- never a bare [`MhHook`] -- for any prologue a SECOND DLL in this process might
 /// also detour.
+///
+/// # Errors
+///
+/// The `MH_STATUS` the chosen route answered with -- MinHook's own on the local route, or the
+/// product export's return code mapped back on the cross-DLL one.
 ///
 /// # Safety
 /// `handler` must be a valid [`UnionFn`] matching `target`'s ABI (<=4 integer/pointer args), and
@@ -320,6 +350,8 @@ pub unsafe fn register_shared_hook(
     handler: UnionFn,
     orig_slot: &'static AtomicUsize,
 ) -> Result<HookRoute, MH_STATUS> {
+    // SAFETY: every precondition is this function's own, forwarded unchanged -- the caller has
+    // already promised `handler` matches the target's ABI and `orig_slot` is the static it reads.
     unsafe {
         register_shared_hook_with_budget(
             export,
@@ -341,6 +373,10 @@ pub unsafe fn register_shared_hook(
 /// answer there, and the polling budget would only be a stall on the game thread in the case where
 /// the product is genuinely absent.
 ///
+/// # Errors
+///
+/// Same as [`register_shared_hook`].
+///
 /// # Safety
 /// Same contract as [`register_shared_hook`].
 #[cfg(windows)]
@@ -356,6 +392,8 @@ pub unsafe fn register_shared_hook_with_budget(
         // AtomicUsize is a repr(transparent) usize, so handing the product a `*mut usize` into our
         // own static is sound; our image outlives every dispatch.
         let slot_ptr = orig_slot.as_ptr();
+        // SAFETY: `register` came from a resolved export whose C-ABI shape is fixed by the product
+        // DLL; `slot_ptr` points into a `'static` of ours, and this image outlives every dispatch.
         return match unsafe { register(target, handler, slot_ptr) } {
             0 => Ok(HookRoute::ProductUnion),
             // -1 is the export's null-slot rejection, which cannot happen here (the pointer comes
@@ -364,6 +402,7 @@ pub unsafe fn register_shared_hook_with_budget(
             code => Err(mh_status_from_i32(code)),
         };
     }
+    // SAFETY: this function's own preconditions, forwarded unchanged to the local route.
     unsafe { register_union_hook(target, handler, orig_slot) }.map(|()| HookRoute::LocalUnion)
 }
 
@@ -387,10 +426,11 @@ fn mh_status_from_i32(code: i32) -> MH_STATUS {
     }
 }
 
-/// Central hook registry. Every MinHook detour creation records its TARGET game address here.
-/// MinHook binds only ONE detour per address: when a second feature hooks an address that is
-/// already claimed, MH_CreateHook returns MH_ERROR_ALREADY_CREATED and the loser's handler NEVER
-/// runs. Which detour wins depends on thread install order, so on native Windows it is a
+/// Central hook registry. Every MinHook detour creation records its target game address here.
+///
+/// MinHook binds only one detour per address: when a second feature hooks an address that is
+/// already claimed, `MH_CreateHook` returns `MH_ERROR_ALREADY_CREATED` and the loser's handler
+/// never runs. Which detour wins depends on thread install order, so on native Windows it is a
 /// non-deterministic race (Wine's scheduler happens to be consistent, which is why the same build
 /// can look fine under Proton and flake on Windows). This registry turns that invisible race into
 /// an explicit LOGGED COLLISION at install time, naming the target address and both detours -- so
@@ -411,6 +451,9 @@ fn dll_base() -> usize {
         const UNCHANGED_REFCOUNT: u32 = 0x2;
         let mut h: *mut c_void = null_mut();
         let anchor = dll_base as *const c_void; // any address inside our DLL
+        // SAFETY: `anchor` is a function pointer into this image, which is the documented input
+        // for `FROM_ADDRESS`, and `h` is a live local. `UNCHANGED_REFCOUNT` means no handle to
+        // release. A failure answers zero and is handled below.
         if unsafe { GetModuleHandleExW(FROM_ADDRESS | UNCHANGED_REFCOUNT, anchor, &mut h) } != 0 {
             h as usize
         } else {
@@ -483,10 +526,20 @@ unsafe extern "system" {
 }
 
 impl MH_STATUS {
+    /// [`Self::ok`], with a call-site label the caller keeps for its own log line.
+    ///
+    /// # Errors
+    ///
+    /// `self`, whenever it is not `MH_OK`.
     pub fn ok_context(self, _context: &str) -> Result<(), MH_STATUS> {
         self.ok()
     }
 
+    /// This status as a `Result`.
+    ///
+    /// # Errors
+    ///
+    /// `self`, whenever it is not `MH_OK`.
     pub fn ok(self) -> Result<(), MH_STATUS> {
         if self == MH_STATUS::MH_OK {
             Ok(())
@@ -504,11 +557,18 @@ pub struct MhHook {
 }
 
 impl MhHook {
+    /// # Errors
+    ///
+    /// The `MH_STATUS` `MH_CreateHook` answered with -- `MH_ERROR_ALREADY_CREATED` when another
+    /// detour already owns this prologue, which is the collision the registry above logs.
+    ///
     /// # Safety
     ///
     /// Installs native code detours; caller must ensure ABI and lifetime are valid.
     pub unsafe fn new(addr: *mut c_void, hook_impl: *mut c_void) -> Result<Self, MH_STATUS> {
         let mut trampoline = null_mut();
+        // SAFETY: both pointers are the caller's, and this constructor's contract is exactly that
+        // they are a valid target and a detour of matching ABI. `trampoline` is a live local.
         let status = unsafe { MH_CreateHook(addr, hook_impl, &mut trampoline) };
         registry_record(addr as usize, hook_impl as usize, status);
         status.ok_context("MH_CreateHook")?;
@@ -524,17 +584,28 @@ impl MhHook {
         self.trampoline
     }
 
+    /// # Errors
+    ///
+    /// MinHook's own status for queueing this target.
+    ///
     /// # Safety
     ///
     /// Enables a native detour through MinHook's queued API.
     pub unsafe fn queue_enable(&self) -> Result<(), MH_STATUS> {
+        // SAFETY: `self.addr` is the target MinHook already accepted in `new`, so it holds a
+        // record for it.
         unsafe { MH_QueueEnableHook(self.addr) }.ok_context("MH_QueueEnableHook")
     }
 
+    /// # Errors
+    ///
+    /// MinHook's own status for queueing this target.
+    ///
     /// # Safety
     ///
     /// Disables a native detour through MinHook's queued API.
     pub unsafe fn queue_disable(&self) -> Result<(), MH_STATUS> {
+        // SAFETY: as in `queue_enable` -- `self.addr` is MinHook's own registered target.
         unsafe { MH_QueueDisableHook(self.addr) }.ok_context("MH_QueueDisableHook")
     }
 }
@@ -627,6 +698,8 @@ unsafe fn write_code_byte_with<O: CodePageOps>(ops: &mut O, address: usize, valu
         ));
         return false;
     }
+    // SAFETY: the page was just made `PAGE_EXECUTE_READWRITE` by the `protect` call above, which
+    // returned true. That `address` is a byte worth overwriting is this function's own contract.
     unsafe { ops.store(address, value) };
     let mut restored = PAGE_PROTECT_UNSET;
     ops.protect(address, ONE_CODE_BYTE, old_protect, &mut restored);
@@ -648,24 +721,32 @@ impl CodePageOps for Win32CodePage {
         new_protect: u32,
         old_protect: &mut u32,
     ) -> bool {
+        // SAFETY: `VirtualProtect` validates the range itself and fails rather than faulting on a
+        // bad one; `old_protect` is a live caller-owned local it writes once.
         let allowed = unsafe { VirtualProtect(addr as *mut c_void, len, new_protect, old_protect) };
         allowed != WIN32_FALSE
     }
 
     unsafe fn store(&mut self, addr: usize, value: u8) {
+        // SAFETY: the trait method's own contract -- the caller has made the page writable and
+        // vouched that this byte is one to overwrite.
         unsafe { *(addr as *mut u8) = value };
     }
 
     fn flush(&mut self, addr: usize, len: usize) {
+        // SAFETY: a pseudo-handle to the current process needs no validation or release, and the
+        // call only invalidates a cache range -- it dereferences nothing on our behalf.
         unsafe { FlushInstructionCache(CURRENT_PROCESS_PSEUDO_HANDLE, addr as *const c_void, len) };
     }
 }
 
-/// Write a single byte of executable code at `address`, with the protection dance the write needs:
-/// `PAGE_EXECUTE_READWRITE`, the store, the original protection back, then an instruction-cache
-/// flush so threads already inside that code see the new byte.
+/// Write a single byte of executable code at `address`.
 ///
-/// Returns whether `VirtualProtect` allowed the write. It deliberately does NOT report whether the
+/// With the protection dance the write needs: `PAGE_EXECUTE_READWRITE`, the store, the original
+/// protection back, then an instruction-cache flush so threads already inside that code see the
+/// new byte.
+///
+/// Returns whether `VirtualProtect` allowed the write. It deliberately does not report whether the
 /// byte landed: a caller patching game code should read it back, because another mod can own the
 /// same address, and a successful `VirtualProtect` says nothing about that.
 ///
@@ -681,12 +762,15 @@ impl CodePageOps for Win32CodePage {
 /// the patched instruction at any point during the call.
 #[cfg(windows)]
 pub unsafe fn write_code_byte(address: usize, value: u8) -> bool {
+    // SAFETY: this function's own contract, forwarded -- the caller has vouched that `address` is
+    // a byte of mapped code safe to overwrite.
     unsafe { write_code_byte_with(&mut Win32CodePage, address, value) }
 }
 
-/// Write a self-contained 3-byte stub over the function body at `base+rva`, after validating that
-/// the byte already there is `expected_first`. RWX via VirtualProtect, write, restore the previous
-/// protection, icache flush. Returns true on success.
+/// Write a self-contained 3-byte stub over the function body at `base+rva`.
+///
+/// Only after validating that the byte already there is `expected_first`. RWX via
+/// `VirtualProtect`, write, restore the previous protection, icache flush. True on success.
 ///
 /// The `expected_first` check is the guard that stops a version-drifted RVA from being patched
 /// mid-instruction. Both it and `stub` are the caller's facts: this function holds no knowledge of
@@ -700,6 +784,9 @@ pub fn patch_3byte_stub(
     label: &str,
 ) -> bool {
     let target = (base + rva) as *mut u8;
+    // SAFETY: `base` is the image the loader mapped and `rva` an offset into it, so this is a byte
+    // of the running image. Reading it is the whole point -- the comparison below is what refuses
+    // to patch an address a version drift moved.
     let existing = unsafe { *target };
     if existing != expected_first {
         hook_log(format_args!(
@@ -709,6 +796,8 @@ pub fn patch_3byte_stub(
         return false;
     }
     let mut old_protect = PAGE_PROTECT_UNSET;
+    // SAFETY: `VirtualProtect` validates the range itself and fails rather than faulting on a bad
+    // one; `old_protect` is a live local it writes once.
     let protect_ok = unsafe {
         VirtualProtect(
             target as *mut c_void,
@@ -723,11 +812,16 @@ pub fn patch_3byte_stub(
     }
     let mut i = BYTE_START;
     while i < STUB_LEN {
+        // SAFETY: `i < STUB_LEN` bounds both sides, and the whole `STUB_LEN` range was just made
+        // `PAGE_EXECUTE_READWRITE` by the call above, which returned non-false.
         unsafe { *target.add(i) = stub[i] };
         i += BYTE_STEP;
     }
     let mut restored = PAGE_PROTECT_UNSET;
+    // SAFETY: the same range, put back the way it was found; `restored` is a live local.
     unsafe { VirtualProtect(target as *mut c_void, STUB_LEN, old_protect, &mut restored) };
+    // SAFETY: a current-process pseudo-handle needs no validation, and the call invalidates a
+    // cache range rather than dereferencing anything of ours.
     unsafe {
         FlushInstructionCache(
             CURRENT_PROCESS_PSEUDO_HANDLE,
@@ -851,6 +945,8 @@ mod tests {
     fn writes_between_unlocking_and_relocking_then_flushes() {
         let mut page = FakePage::allowing(PAGE_EXECUTE_READ);
 
+        // SAFETY: `FakePage` records the calls instead of making them -- nothing is dereferenced
+        // and `TEST_ADDR` is never touched as an address.
         let wrote = unsafe { write_code_byte_with(&mut page, TEST_ADDR, TEST_BYTE) };
 
         assert!(wrote);
@@ -886,6 +982,7 @@ mod tests {
         for original in [PAGE_EXECUTE_READ, 0x02, 0x04, 0x80] {
             let mut page = FakePage::allowing(original);
 
+            // SAFETY: as above -- `FakePage` dereferences nothing.
             unsafe { write_code_byte_with(&mut page, TEST_ADDR, TEST_BYTE) };
 
             let last_protect = page
@@ -911,6 +1008,8 @@ mod tests {
     fn refused_protection_change_writes_nothing() {
         let mut page = FakePage::refusing();
 
+        // SAFETY: `FakePage` records the calls instead of making them -- nothing is dereferenced
+        // and `TEST_ADDR` is never touched as an address.
         let wrote = unsafe { write_code_byte_with(&mut page, TEST_ADDR, TEST_BYTE) };
 
         assert!(!wrote);
@@ -932,6 +1031,7 @@ mod tests {
     fn every_page_operation_covers_the_same_single_byte() {
         let mut page = FakePage::allowing(PAGE_EXECUTE_READ);
 
+        // SAFETY: as above -- `FakePage` dereferences nothing.
         unsafe { write_code_byte_with(&mut page, TEST_ADDR, TEST_BYTE) };
 
         assert_eq!(ONE_CODE_BYTE, size_of::<u8>());
