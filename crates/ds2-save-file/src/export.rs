@@ -60,12 +60,15 @@ const _: () = assert!(DEADLINE_TICKS <= 60 * 30, "half a minute is a hang");
 
 /// An export that has been asked for and not yet written.
 struct Pending {
-    /// Where the copy goes. Already extension-completed and already checked not to be the live one.
+    /// Where the game has been pointed, and where its own save will land. Already
+    /// extension-completed.
+    ///
+    /// There is no `source` beside this any more. The row detours the game's open of its container
+    /// to this path rather than letting it write its own and copying afterwards, so one file is
+    /// written by one operation and there is no second path to keep in step.
     destination: PathBuf,
-    /// The container being copied -- the live save in the directory the game is actually using.
-    source: PathBuf,
-    /// `(length, modified)` of `source` as it was before the save was requested. `None` when the file
-    /// could not be stat'd, in which case any successful stat counts as a change.
+    /// `(length, modified)` of `destination` as it was before the save was requested. `None` when
+    /// the file could not be stat'd, in which case any successful stat counts as a change.
     stamp: Option<(u64, SystemTime)>,
     /// The stamp has changed: the save the press asked for has been written.
     flushed: bool,
@@ -92,13 +95,28 @@ fn dialog_filter() -> Vec<u16> {
     filter_string(&[
         FilterEntry {
             label: "DARK SOULS II save",
-            extensions: &[ds2_save_file_core::SAVE_EXTENSION],
+            // The running session's own extension, which is `co2` under Seamless Co-op and `sl2`
+            // otherwise. A dropdown fixed at `sl2` hid the folder the player had just been
+            // playing out of, because every file in it was named `.co2`.
+            extensions: &[session_extension()],
         },
         FilterEntry {
             label: "All files",
             extensions: &[],
         },
     ])
+}
+
+/// The extension the running game is using for its save container.
+///
+/// The same resolution `crate::import` performs, and from the same source: `ds2-save-redirect`
+/// reads it once out of both mods' config files. `sl2` unmodded.
+fn session_extension() -> &'static str {
+    ds2_save_redirect::active_save_file_name()
+        .rsplit_once('.')
+        .map_or(ds2_save_file_core::SAVE_EXTENSION, |(_, extension)| {
+            extension
+        })
 }
 
 /// What pressing the row does. **Game thread, inside the menu's confirm path.**
@@ -150,11 +168,18 @@ pub fn save_to_file() {
         title: "Save this character to a file",
         start_dir: start_dir.as_deref(),
         filter: &filter,
-        // The vanilla name even inside a co-op session, and deliberately. What is written is a
-        // save container; `.sl2` is the spelling every other DS2 tool and every unmodded game
-        // recognises, and the load side here accepts both. Exporting under `.co2` would hand the
-        // player a file only their own session can read.
-        default_name: ds2_save_redirect::SAVE_FILE_NAME,
+        // The name the RUNNING session uses, so a co-op export lands as `DS2SOFS0000.co2` and
+        // drops straight back into a co-op save folder without being renamed.
+        //
+        // This used to offer the vanilla `.sl2` even inside a co-op session, reasoning that
+        // exporting under `.co2` would hand the player a file only their own session could read.
+        // That reasoning was wrong: the container format does not change with the extension --
+        // a `.sl2` copied to `.co2` loads, and `scripts/ds2-sl2.py` reads either -- so the
+        // spelling only decides which folder the file is useful in. Offering the wrong one made
+        // the common case (export, then put it back) need a rename every time. The load side
+        // still accepts both, and this is a default rather than a constraint: the dialog's
+        // "All files" line is still there for a player who wants the other spelling.
+        default_name: ds2_save_redirect::active_save_file_name(),
     };
     // SAFETY: game thread inside the menu's confirm path, which is what `dialog::show` requires.
     let picked = unsafe { crate::dialog::show(&request) };
@@ -181,14 +206,11 @@ pub fn save_to_file() {
     // player who browses to the save's folder and presses Save without typing lands here. It used
     // to be worse than that: the dialog opened in that folder too, which made this the default
     // path to the mistake rather than a reachable one.
-    if ds2_save_file_core::dest::is_live_container(&destination, &source) {
-        log_line(format_args!(
-            "{LOG_PREFIX} export REFUSED reason=destination-is-the-live-save path={} -- copying the \
-             container onto itself would truncate the save you are playing",
-            destination.display()
-        ));
-        return;
-    }
+    // The destination being the live container is no longer a refusal, because nothing is copied
+    // any more. The game is pointed at the destination and writes it once; when that path is the
+    // live container, the window points it at itself and the press is an ordinary manual save --
+    // which is the thing a player wants most under `ds2-save-block`, and which this row used to
+    // refuse outright while also throwing away the save request behind the refusal.
     let route = Route::of(destination.is_file());
 
     let Some(system) = game::save_load_system() else {
@@ -199,8 +221,27 @@ pub fn save_to_file() {
         return;
     };
 
-    let before = game::stamp(&source);
+    // Detour the save instead of duplicating it.
+    //
+    // This used to let the game write its own container and then `std::fs::copy` the result. That
+    // is one save turned into two file operations, and every failure this row has ever had came
+    // out of the gap between them: a flush that had to be observed to know when to copy, a
+    // two-phase tick to observe it in, a self-copy that truncated the save to nothing, and a
+    // destination open that was itself diverted back onto the source so the copy read and wrote
+    // one file (`exported bytes=0`, measured 2026-09-24).
+    //
+    // `ds2-save-redirect` already owns the seam that removes all of it: point the game's own open
+    // of the container at the destination, let it write there once, and there is no second
+    // operation to get wrong. The window is dropped in `finish` once the write has landed.
+    let before = game::stamp(&destination);
+    if !ds2_save_redirect::open_redirect::arm(&source, &destination) {
+        log_line(format_args!(
+            "{LOG_PREFIX} export REFUSED reason=cannot-arm-redirect -- the save was NOT requested"
+        ));
+        return;
+    }
     if !game::request_save(system) {
+        ds2_save_redirect::open_redirect::disarm();
         return;
     }
     let Ok(mut pending) = PENDING.lock() else {
@@ -218,7 +259,6 @@ pub fn save_to_file() {
     ));
     *pending = Some(Pending {
         destination,
-        source,
         stamp: before,
         flushed: false,
         ticks: 0,
@@ -241,8 +281,11 @@ pub fn tick() {
     // Both signals, and neither alone: the stamp changing says the save landed, which is this row's
     // actual promise, and the interlock going idle says nobody is still writing, which is what stops
     // a torn copy. `game::poll_landed` owns that pair for both rows.
+    // The destination, not the source. The game's own open is diverted, so the bytes land in the
+    // file the player picked and the source may never be touched at all -- watching it would wait
+    // out the deadline on every export.
     let landed = game::poll_landed(
-        &pending.source,
+        &pending.destination,
         pending.stamp,
         &mut pending.flushed,
         pending.ticks,
@@ -272,19 +315,20 @@ fn finish(pending: &Pending, timed_out: bool) {
     //
     // The refusal above cannot catch this. It compares two paths that genuinely differ, and what
     // makes them one file is a detour underneath both.
-    match ds2_save_redirect::open_redirect::bypass(|| {
-        std::fs::copy(&pending.source, &pending.destination)
-    }) {
+    // Drop the window first, so the next save the game makes goes back to its own container even
+    // if the reporting below were to fail.
+    let diverted = ds2_save_redirect::open_redirect::disarm();
+    let bytes = std::fs::metadata(&pending.destination).map(|meta| meta.len());
+    match bytes {
         Ok(bytes) => log_line(format_args!(
-            "{LOG_PREFIX} exported bytes={bytes} source={} destination={} ticks={}{note}",
-            pending.source.display(),
+            "{LOG_PREFIX} exported bytes={bytes} destination={} diverted={diverted} ticks={}{note} \
+             -- written by the game itself, not copied",
             pending.destination.display(),
             pending.ticks
         )),
         Err(error) => log_line(format_args!(
-            "{LOG_PREFIX} export FAILED error={error} source={} destination={} ticks={} -- nothing \
-             was written",
-            pending.source.display(),
+            "{LOG_PREFIX} export FAILED error={error} destination={} diverted={diverted} \
+             ticks={} -- the game was asked to save there and the file is not readable",
             pending.destination.display(),
             pending.ticks
         )),
