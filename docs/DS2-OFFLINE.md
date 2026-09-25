@@ -160,7 +160,6 @@ block_sockets = true    # front the WS2_32 imports
 | launcher flag | effect |
 | --- | --- |
 | *(default)* | all four true |
-| `--no-offline` | all four false -- **plays online with a modded client, on purpose** |
 | `--offline-no-socket-block` | flag patches on, socket guard off |
 
 The third is the measurement arm. Because the login starter does not read the flag, it is the run
