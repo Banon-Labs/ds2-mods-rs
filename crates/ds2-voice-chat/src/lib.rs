@@ -32,10 +32,23 @@
 //!
 //! After a press the crate reads the byte back and plays a short spoken clip for the state the game
 //! actually holds: "Voice chat on" / "Voice chat off", or the Polish pair. The clips are rendered
-//! offline -- English with espeak-ng, Polish with Piper's CC0 `pl_PL-gosia-medium` voice, because a
-//! Polish speaker could not understand espeak-ng's Polish -- and compiled into the DLL from
+//! offline with Piper, 16 kHz 16-bit mono -- English with `en_US-lessac-medium`, Polish with the CC0
+//! `pl_PL-gosia-medium`, because a Polish speaker could not understand espeak-ng's Polish and the
+//! English followed so both languages sound alike -- and compiled into the DLL from
 //! `assets/`, so there is no speech engine and no file to go missing. `[voice_chat] announce` picks
 //! the language; `""` silences it.
+//!
+//! # And the HUD shows it
+//!
+//! The HUD already has a voice chat icon (`FeScenePlayerVoiceChatIcon`), driven every frame from
+//! the network's voice state through a four-entry table of show/hide bytes. A second detour
+//! replaces that frame's choice with the Voice chat byte: on applies the game's own state 2, off
+//! its state 0 (everything hidden). While the options block does not exist the original runs
+//! untouched. See [`icon_visibility`] and `ds2_rva::FE_VOICE_CHAT_ICON_UPDATE`.
+//!
+//! The icon's animation plays at [`ICON_PLAYBACK_RATE`], a sixth of the shipped speed: the same
+//! detour writes that rate into every sprite of the icon's own layout scene ([`icon_sprites`]),
+//! and the game's sprite tick multiplies its delta by it. Other HUD elements keep their speed.
 
 // DEBT: ds2-mods-rs-24r -- not debt to be paid: this crate ships as a Windows DLL and the
 // attribute is what keeps its Rust half parseable on the host, so the game-free tests below it
@@ -188,6 +201,136 @@ pub const fn voice_chat_on(voice_chat: u8) -> bool {
     voice_chat == 0
 }
 
+/// The HUD voice chat icon's state word for a Voice chat byte.
+///
+/// On is the game's own state 2 (root and the `3e0/3e2` shape shown); off is state 0, everything
+/// hidden. The word is one of the game's own table, not a value composed here.
+pub const fn icon_state_word(voice_chat: u8) -> u32 {
+    let index = if voice_chat_on(voice_chat) {
+        ds2_rva::FE_VOICE_CHAT_ICON_STATE_ON
+    } else {
+        ds2_rva::FE_VOICE_CHAT_ICON_STATE_HIDDEN
+    };
+    ds2_rva::FE_VOICE_CHAT_ICON_STATES[index]
+}
+
+/// The four show/hide bytes the icon's update applies, in its order: root, `3e0/3e0`, `3e0/3e1`,
+/// `3e0/3e2`. Nonzero is shown.
+pub const fn icon_visibility(voice_chat: u8) -> [u8; 4] {
+    icon_state_word(voice_chat).to_le_bytes()
+}
+
+/// The HUD icon's playback rate: a sixth of the game's own, because the shipped animation is
+/// distracting. A tenth was tried live first and the user found it too slow.
+///
+/// Written into every `FeComponentSprite` of the icon's layout (`ds2_rva::FE_SPRITE_RATE_OFFSET`),
+/// which the sprite tick multiplies its delta by. Nothing outside the icon's own scene is touched.
+pub const ICON_PLAYBACK_RATE: f32 = 1.0 / 6.0;
+
+/// Most components [`icon_sprites`] visits. The icon's layout has fifteen records; a live tree past
+/// this is not the icon's, and the walk stops rather than wander.
+pub const ICON_WALK_MAX_NODES: usize = 64;
+
+/// Deepest level [`icon_sprites`] descends to. The icon's layout nests six deep.
+pub const ICON_WALK_MAX_DEPTH: usize = 12;
+
+/// Fault-tolerant reads of game memory, so the walk can be tested against a fake tree.
+pub trait ComponentMemory {
+    /// A pointer-sized value, or `None` when the address is not readable.
+    fn read_usize(&self, addr: usize) -> Option<usize>;
+    /// A `u16`, or `None` when the address is not readable.
+    fn read_u16(&self, addr: usize) -> Option<u16>;
+}
+
+/// How a component holds its children, decided by its vtable alone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Class {
+    /// `FeComponentSprite`: a clock of its own, children in its display list.
+    Sprite,
+    /// `FeComponentObject` / `FeComponentScene`: children on the `+0x38` list.
+    Parent,
+    /// Everything else. Its `+0x38` is some other field, and following it crashed a walk once.
+    Leaf,
+}
+
+fn class_of(vtable: usize, base: usize) -> Class {
+    let Some(rva) = vtable.checked_sub(base) else {
+        return Class::Leaf;
+    };
+    if rva == ds2_rva::FE_COMPONENT_SPRITE_VTABLE as usize {
+        Class::Sprite
+    } else if rva == ds2_rva::FE_COMPONENT_OBJECT_VTABLE as usize
+        || rva == ds2_rva::FE_COMPONENT_SCENE_VTABLE as usize
+    {
+        Class::Parent
+    } else {
+        Class::Leaf
+    }
+}
+
+/// Every `FeComponentSprite` under `root`, `root` included.
+///
+/// Children are followed the way the sprite tick (`0x140b6ce80`) does: a sprite's display list
+/// when it has one, else the `+0x38` list; `FeComponentObject`/`FeComponentScene` through `+0x38`
+/// and `+0x28`; nothing else descends.
+///
+/// Bounded by [`ICON_WALK_MAX_NODES`] and [`ICON_WALK_MAX_DEPTH`], and a component seen twice is
+/// not walked twice, so a corrupt link cannot loop it.
+pub fn icon_sprites(root: usize, base: usize, memory: &impl ComponentMemory) -> Vec<usize> {
+    let mut sprites = Vec::new();
+    let mut seen = Vec::new();
+    let mut stack = vec![(root, 0usize)];
+    while let Some((node, depth)) = stack.pop() {
+        if node == 0 || seen.contains(&node) || seen.len() >= ICON_WALK_MAX_NODES {
+            continue;
+        }
+        seen.push(node);
+        let Some(vtable) = memory.read_usize(node) else {
+            continue;
+        };
+        let class = class_of(vtable, base);
+        if class == Class::Sprite {
+            sprites.push(node);
+        }
+        if class == Class::Leaf || depth >= ICON_WALK_MAX_DEPTH {
+            continue;
+        }
+        let list = if class == Class::Sprite {
+            memory
+                .read_usize(node + ds2_rva::FE_COMPONENT_DISPLAY_LIST_OFFSET)
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        if list != 0 {
+            let count = memory
+                .read_u16(node + ds2_rva::FE_COMPONENT_DISPLAY_COUNT_OFFSET)
+                .unwrap_or(0);
+            for i in 0..usize::from(count).min(ICON_WALK_MAX_NODES) {
+                let entry = list
+                    + i * ds2_rva::FE_COMPONENT_DISPLAY_ENTRY_STRIDE
+                    + ds2_rva::FE_COMPONENT_DISPLAY_ENTRY_CHILD_OFFSET;
+                if let Some(child) = memory.read_usize(entry) {
+                    stack.push((child, depth + 1));
+                }
+            }
+        } else {
+            let mut child = memory
+                .read_usize(node + ds2_rva::FE_COMPONENT_FIRST_CHILD_OFFSET)
+                .unwrap_or(0);
+            let mut links = 0;
+            while child != 0 && links < ICON_WALK_MAX_NODES {
+                stack.push((child, depth + 1));
+                child = memory
+                    .read_usize(child + ds2_rva::FE_COMPONENT_NEXT_SIBLING_OFFSET)
+                    .unwrap_or(0);
+                links += 1;
+            }
+        }
+    }
+    sprites
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -210,6 +353,25 @@ mod tests {
     fn any_nonzero_byte_is_off_and_a_press_turns_it_on() {
         assert!(!voice_chat_on(2));
         assert_eq!(toggled(0xff), 0);
+    }
+
+    #[test]
+    fn on_is_the_games_state_two_root_and_the_0x35_shape() {
+        assert_eq!(icon_state_word(0), 0x0100_0001);
+        assert_eq!(icon_visibility(0), [1, 0, 0, 1]);
+    }
+
+    #[test]
+    fn off_hides_every_element() {
+        assert_eq!(icon_state_word(1), 0);
+        assert_eq!(icon_visibility(1), [0; 4]);
+        assert_eq!(icon_visibility(0xff), [0; 4]);
+    }
+
+    #[test]
+    fn a_press_moves_the_icon_with_the_byte() {
+        assert_eq!(icon_visibility(toggled(1)), [1, 0, 0, 1]);
+        assert_eq!(icon_visibility(toggled(0)), [0; 4]);
     }
 
     #[test]
@@ -306,6 +468,125 @@ mod tests {
             assert_eq!(Announce::from_u8(lang as u8), lang);
         }
         assert_eq!(Announce::from_u8(0xff), Announce::Silent);
+    }
+
+    /// A fake heap: address -> value, anything else unreadable.
+    #[derive(Default)]
+    struct Fake {
+        words: std::collections::HashMap<usize, usize>,
+        halves: std::collections::HashMap<usize, u16>,
+    }
+
+    impl ComponentMemory for Fake {
+        fn read_usize(&self, addr: usize) -> Option<usize> {
+            self.words.get(&addr).copied()
+        }
+        fn read_u16(&self, addr: usize) -> Option<u16> {
+            self.halves.get(&addr).copied()
+        }
+    }
+
+    const BASE: usize = 0x1_4000_0000;
+
+    impl Fake {
+        fn node(&mut self, at: usize, vtable_rva: u32) {
+            self.words.insert(at, BASE + vtable_rva as usize);
+        }
+        fn display_list(&mut self, sprite: usize, list: usize, children: &[usize]) {
+            self.words
+                .insert(sprite + ds2_rva::FE_COMPONENT_DISPLAY_LIST_OFFSET, list);
+            self.halves.insert(
+                sprite + ds2_rva::FE_COMPONENT_DISPLAY_COUNT_OFFSET,
+                children.len() as u16,
+            );
+            for (i, child) in children.iter().enumerate() {
+                self.words.insert(
+                    list + i * ds2_rva::FE_COMPONENT_DISPLAY_ENTRY_STRIDE,
+                    *child,
+                );
+            }
+        }
+        fn child_list(&mut self, parent: usize, children: &[usize]) {
+            let mut link = parent + ds2_rva::FE_COMPONENT_FIRST_CHILD_OFFSET;
+            for child in children {
+                self.words.insert(link, *child);
+                link = child + ds2_rva::FE_COMPONENT_NEXT_SIBLING_OFFSET;
+            }
+        }
+    }
+
+    const SPRITE: u32 = ds2_rva::FE_COMPONENT_SPRITE_VTABLE;
+    const OBJECT: u32 = ds2_rva::FE_COMPONENT_OBJECT_VTABLE;
+    const SHAPE: u32 = ds2_rva::FE_COMPONENT_TEXTURE_SHAPE_VTABLE;
+
+    #[test]
+    fn the_rate_is_a_sixth() {
+        assert_eq!(ICON_PLAYBACK_RATE, 1.0 / 6.0);
+    }
+
+    /// The icon's own shape: root sprite (def 0x3b) -> object -> sprite (def 0x3a) -> a shape and
+    /// an object holding a nested sprite (def 0x39).
+    #[test]
+    fn every_sprite_in_the_icon_is_found_through_objects_and_display_lists() {
+        let mut m = Fake::default();
+        m.node(0x1000, SPRITE);
+        m.display_list(0x1000, 0x9000, &[0x2000]);
+        m.node(0x2000, OBJECT);
+        m.child_list(0x2000, &[0x3000]);
+        m.node(0x3000, SPRITE);
+        m.display_list(0x3000, 0x9100, &[0x4000, 0x5000]);
+        m.node(0x4000, SHAPE);
+        m.node(0x5000, OBJECT);
+        m.child_list(0x5000, &[0x6000]);
+        m.node(0x6000, SPRITE);
+        let mut found = icon_sprites(0x1000, BASE, &m);
+        found.sort_unstable();
+        assert_eq!(found, vec![0x1000, 0x3000, 0x6000]);
+    }
+
+    #[test]
+    fn a_leafs_0x38_is_never_followed() {
+        let mut m = Fake::default();
+        m.node(0x1000, SHAPE);
+        m.words
+            .insert(0x1000 + ds2_rva::FE_COMPONENT_FIRST_CHILD_OFFSET, 0x2000);
+        m.node(0x2000, SPRITE);
+        assert!(icon_sprites(0x1000, BASE, &m).is_empty());
+    }
+
+    #[test]
+    fn a_sprite_without_a_display_list_uses_its_child_list() {
+        let mut m = Fake::default();
+        m.node(0x1000, SPRITE);
+        m.child_list(0x1000, &[0x2000, 0x3000]);
+        m.node(0x2000, SPRITE);
+        m.node(0x3000, SPRITE);
+        let mut found = icon_sprites(0x1000, BASE, &m);
+        found.sort_unstable();
+        assert_eq!(found, vec![0x1000, 0x2000, 0x3000]);
+    }
+
+    #[test]
+    fn a_cycle_or_unreadable_node_ends_the_walk() {
+        let mut m = Fake::default();
+        m.node(0x1000, OBJECT);
+        m.child_list(0x1000, &[0x2000]);
+        m.node(0x2000, OBJECT);
+        m.child_list(0x2000, &[0x1000, 0xdead_0000]);
+        assert!(icon_sprites(0x1000, BASE, &m).is_empty());
+        assert!(icon_sprites(0, BASE, &m).is_empty());
+    }
+
+    #[test]
+    fn the_walk_stops_at_its_node_cap() {
+        let mut m = Fake::default();
+        let children: Vec<usize> = (1..=200).map(|i| 0x10_0000 + i * 0x100).collect();
+        m.node(0x1000, SPRITE);
+        m.display_list(0x1000, 0x9000, &children);
+        for child in &children {
+            m.node(*child, SPRITE);
+        }
+        assert!(icon_sprites(0x1000, BASE, &m).len() <= ICON_WALK_MAX_NODES);
     }
 
     #[test]
