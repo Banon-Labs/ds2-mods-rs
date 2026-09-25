@@ -10,6 +10,7 @@ supported and is not detected for you -- every address in these DLLs was read ou
 | `dinput8.dll` | The mod itself. DS2 statically imports `dinput8`, so a copy in the game folder is loaded by the game with no launcher involved. Reads `ds2-mods.toml` from that same folder. |
 | `ds2-launcher.exe` | Starts the game suspended and injects the DLLs named by `[launcher] dlls` in `ds2-mods.toml`. Needed **only** for mods that cannot be loaded from inside the running process -- Seamless Co-op is the one this exists for. |
 | `ds2_crash_logging.dll` | The crash logger on its own, for loading beside something else. Has not been run inside the game as a standalone DLL. |
+| `ds2-launch-linux.sh` | Linux only: starts `ds2-launcher.exe` inside the game's Proton prefix. See [Linux](#linux). |
 | `ds2-mods.toml` | Settings, read by both of the above from the folder they sit in. Every key ships set to the default it already has, so unpacking it changes nothing. |
 | `SHA256SUMS` | Checksums for the files above. `sha256sum -c SHA256SUMS`. |
 
@@ -47,11 +48,30 @@ is missing, and names the path it could not find. A session gets every DLL or do
 
 ## Linux
 
-The DLLs are PE either way -- the game is a Proton process, so nothing here changes. What does
-change is starting `ds2-launcher.exe`, which has to run inside the game's own Proton prefix with
-`WINEDLLOVERRIDES=dinput8=n,b` so Wine's builtin `dinput8` does not win the load. Nothing in this
-package does that yet; `scripts/ds2-run.py` in the repository is the only thing that resolves the
-Proton chain today, and it builds from source.
+The DLLs are PE either way -- the game is a Proton process, so the files and the folder are the
+same. Two things differ, both because Wine has a `dinput8` of its own and prefers it:
+
+**Launching through Steam.** Set the game's launch options (Steam -> DARK SOULS II -> Properties ->
+General -> Launch Options) to
+
+```
+WINEDLLOVERRIDES="dinput8=n,b" %command%
+```
+
+Without it Wine's builtin `dinput8` wins the load and this package's `dinput8.dll` never runs.
+
+**Launching through `ds2-launcher.exe`.** Run `ds2-launch-linux.sh` from the game folder, with
+Steam running:
+
+```
+./ds2-launch-linux.sh            # start the game through the launcher
+./ds2-launch-linux.sh --print    # show the command and environment it would use, run nothing
+```
+
+It finds the Proton this game's prefix was made by and the container runtime that Proton needs,
+the same way Steam does, and starts `ds2-launcher.exe` inside that prefix with the override set.
+It refuses when the game is already running, and when the prefix does not exist yet -- start the
+game through Steam once first.
 
 ## What launching through `ds2-launcher.exe` costs
 
