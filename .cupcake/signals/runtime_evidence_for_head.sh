@@ -72,7 +72,28 @@ if [ -n "${CUPCAKE_RUNTIME_EVIDENCE_OVERRIDE:-}" ]; then
     exit 0
 fi
 
-REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+# THE CHECKOUT BEING PUSHED IS NOT ALWAYS THE ONE THIS SCRIPT LIVES IN, and resolving it from
+# `BASH_SOURCE` alone was wrong in the direction that matters. AGENTS.md has agents working in
+# `git worktree`s under `.claude/worktrees/`, and the hook always runs the MAIN checkout's copy of
+# this file -- so every field below described the main checkout's branch while the push being judged
+# was a worktree's. Measured 2026-09-24: a worktree whose build was staged and launched, staged and
+# built sha256 byte-identical, and this signal answered `dll_match=0` because it hashed a different
+# checkout's `target/`. The dangerous direction is the other one: `game_code` read off the main
+# checkout's diff is 0 whenever THAT branch happens to touch no `crates/`, which would have let an
+# unrun worktree push of pure game code straight through.
+#
+# So: the invoking directory wins when it is a checkout of this same repository -- same
+# `--git-common-dir`, which is what a worktree shares with its main checkout and what an unrelated
+# repo does not. Anything else falls back to this script's own root, including a cwd outside any
+# repository, which is the pre-existing behaviour and the fail-closed one.
+SCRIPT_REPO="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
+REPO="$SCRIPT_REPO"
+script_common="$(git -C "$SCRIPT_REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || script_common=""
+invoked_common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || invoked_common=""
+if [ -n "$script_common" ] && [ "$invoked_common" = "$script_common" ]; then
+    invoked_root="$(git rev-parse --show-toplevel 2>/dev/null)" || invoked_root=""
+    [ -n "$invoked_root" ] && REPO="$invoked_root"
+fi
 cd "$REPO" || exit 0
 
 GAME_DIR="$HOME/.local/share/Steam/steamapps/common/Dark Souls II Scholar of the First Sin/Game"

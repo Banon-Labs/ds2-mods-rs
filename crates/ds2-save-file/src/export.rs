@@ -34,7 +34,7 @@
 //! leave the menu before the copy completes, the request stays armed and finishes the next time a
 //! menu is opened. Nothing is lost and nothing is written early.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
@@ -76,27 +76,15 @@ static PENDING: Mutex<Option<Pending>> = Mutex::new(None);
 
 /// The `.sl2` the game is reading and writing right now, redirected or not.
 ///
-/// `ds2-save-redirect`'s detour records the directory it produced in both arms, so that is the live
-/// path whether or not the launch-time redirect is armed -- which is the distinction this row must
-/// not have to care about. `None` means the game has not built a save path yet, which cannot be true
-/// while a pause menu is up and is reported rather than guessed around.
-///
-/// # The save-side swap wins over it, and has to
-///
-/// [`crate::swap`] does not go through that detour at all: it replaces `SLSaveSession`'s directory
-/// override in the vtable, so after an in-session character swap the game writes somewhere the
-/// detour has never heard of and `live_directory` still answers the folder the player's own
-/// container is in. Exporting that would hand the player a copy of the character they swapped away
-/// from, named after the one they are playing -- a wrong file that looks exactly like a right one.
+/// Every seam that can move the container is resolved by
+/// [`ds2_save_redirect::live_container`], and asking it rather than the directory builder is what
+/// this row got wrong. A swap arms nothing the builder knows about, so the builder went on naming
+/// the player's own folder and the export copied a container the game had not written to since the
+/// session began: the player got the save they started with, named after the character they had
+/// been playing. Reported 2026-09-24, one export to `DS2 Saves\new` that loaded back as the
+/// original character.
 fn live_container() -> Option<PathBuf> {
-    if ds2_save_redirect::session_dir::SAVE.armed() {
-        let swapped = ds2_save_redirect::session_dir::SAVE.directory();
-        if !swapped.is_empty() {
-            return Some(PathBuf::from(swapped).join(ds2_save_redirect::active_save_file_name()));
-        }
-    }
-    let directory = ds2_save_redirect::live_directory()?;
-    Some(directory.join(ds2_save_redirect::active_save_file_name()))
+    ds2_save_redirect::live_container()
 }
 /// The dialog's type dropdown: saves, then everything, so a player who wants another name can have
 /// one.
@@ -143,10 +131,24 @@ pub fn save_to_file() {
     }
 
     let filter = dialog_filter();
+    // The same folder the load row browses in, and not the container's own. A player saves a
+    // character out so they can load it back, so the two dialogs opening in different places means
+    // hunting for a file they had just written. The container's folder was the wrong answer twice
+    // over: it is inside the Proton prefix, and after a swap it is `ds2-swapped-save` in the game
+    // install, which is a directory this mod owns and nobody should be filing saves into.
+    let start_dir =
+        crate::import::start_directory().or_else(|| source.parent().map(Path::to_path_buf));
+    log_line(format_args!(
+        "{LOG_PREFIX} export dialog opening in {}",
+        start_dir
+            .as_deref()
+            .map(|dir| dir.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "<the shell's own default>".to_owned())
+    ));
     let request = Request {
         intent: Intent::Save,
         title: "Save this character to a file",
-        start_dir: source.parent(),
+        start_dir: start_dir.as_deref(),
         filter: &filter,
         // The vanilla name even inside a co-op session, and deliberately. What is written is a
         // save container; `.sl2` is the spelling every other DS2 tool and every unmodded game
@@ -175,9 +177,10 @@ pub fn save_to_file() {
 
     let destination = with_extension(&picked, ds2_save_file_core::SAVE_EXTENSION);
     // THE ONE REFUSAL THAT PROTECTS A SAVE. Copying a file onto itself truncates it on most
-    // platforms, and the destination dialog opens IN the save's own folder with the save's own name
-    // already filled in -- so pressing Save without typing is the default path to this mistake, not
-    // an exotic one.
+    // platforms, and the dialog opens with the container's own name already filled in -- so a
+    // player who browses to the save's folder and presses Save without typing lands here. It used
+    // to be worse than that: the dialog opened in that folder too, which made this the default
+    // path to the mistake rather than a reachable one.
     if ds2_save_file_core::dest::is_live_container(&destination, &source) {
         log_line(format_args!(
             "{LOG_PREFIX} export REFUSED reason=destination-is-the-live-save path={} -- copying the \

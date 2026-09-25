@@ -94,6 +94,42 @@ pub const LOG_PREFIX: &str = "ds2-save-redirect:";
 /// and no overwrite to lose. Nothing in that path comes through here.
 pub const STAGING_DIR_NAME: &str = "ds2-save-staging";
 
+/// The `.sl2` the game is reading and writing right now, whichever seam is pointing it there.
+///
+/// Three things can move the container, and they are consulted innermost-answer-first because that
+/// is the order the game reaches them in:
+///
+/// 1. [`session_dir::SAVE`] -- a vtable override on the save session's own directory. While it is
+///    armed the game builds its save path out of that folder, so nothing underneath ever sees the
+///    player's own.
+/// 2. [`open_redirect`] -- one `CreateFileW` answering a different file. It matches the exact path
+///    the game asks for, so it applies only when that path is the one the directory builder made,
+///    which is why the builder's answer is what gets offered to it.
+/// 3. [`live_directory`] -- what the builder produced. The answer when nothing is armed.
+///
+/// # Why a caller cannot stop at `live_directory`
+///
+/// `ds2-save-file`'s character swap leaves the save-session override unarmed on purpose and moves
+/// the saves with the open redirect alone. A caller that stops at step 3 is therefore handed the
+/// player's own container -- a file the game has not written a byte to since the swap -- while the
+/// whole session goes to the staged copy. `Save Game to File` did exactly that, and handed the
+/// player back the save they had started the session with, under the name of the character they
+/// had spent it playing.
+///
+/// `None` means the game has not built a save path yet, which cannot be true once a character is
+/// loaded and is reported rather than guessed around.
+pub fn live_container() -> Option<std::path::PathBuf> {
+    let name = active_save_file_name();
+    if session_dir::SAVE.armed() {
+        let directory = session_dir::SAVE.directory();
+        if !directory.is_empty() {
+            return Some(std::path::PathBuf::from(directory).join(name));
+        }
+    }
+    let own = live_directory()?.join(name);
+    Some(open_redirect::diverted_path(&own).unwrap_or(own))
+}
+
 pub use active::{active_save_file_name, is_save_container_name};
 pub use install::{
     Outcome, clear_session_directory, install, live_directory, live_steam_id, session_answers,
