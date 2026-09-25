@@ -50,17 +50,34 @@ before) and `git_block_no_verify` (the `core.hooksPath` and hook-removal arms, w
 | `scripts/test-cupcake-policies.py` | Kept this repo's own 28-case table (er-mods-rs's 191 cases are mostly about policies not ported here). Gained er-mods-rs's signal-contract gate, generalised from its two runtime-evidence signals to every signal, and replaced its hand-listed `ORPHANED_REGO_SUITES` with `opa test .cupcake/` over the whole tree -- the list's own comment records that four suites sat orphaned in it, accumulating 89 never-executed assertions. |
 | `rulebook.yml` | Retracts upstream's false "builtins are enabled by default when configured" claim and makes `rulebook_security_guardrails: enabled: false` explicit. It was never running; the comment said it was. |
 
-## Deliberately NOT ported
+## Ported 2026-09-25, from er-mods-rs's tree as it stood that day
+
+Each file says in its own header what changed on the way in; this is the index.
+
+| Policy | What had to change |
+|---|---|
+| `no_fix_claim_without_runtime_evidence` | Evidence allowlist is DARK SOULS II's run artifacts (`ds2-loader.log`, `ds2-crash-*.txt`, `ds2-teardown.py --status`, `ds2-frida-watch.py`); the crate walk reads `[workspace.dependencies]`, which er's does not. Its five fixtures were er's and now describe a `ds2-menu-row` edit. |
+| `no_restating_user_own_rule` | Pushing is not a user-owned action here: `CLAUDE.md` makes it the agent's job. |
+| `no_rust_edit_without_frida_proof` | Reader renamed to `scripts/ds2-frida-evidence.py`; `ds2-frida-watch.py` was already calling it under er's name and recording nothing. |
+| `teardown_must_relaunch` | `ds2-teardown.py` / `ds2-run.py`; er's two extra launchers and `--reason` dropped. `ds2-run.py` tears down on its own. |
+| `no_mergeable_without_green_ci` | The reason it was left behind -- no CI -- stopped being true: `.github/workflows/release.yml` builds on every pull request. er's signal was inert (a property called as a function); this one is driven end to end. |
+| `gh_pr_title_conventional` | Authority is `scripts/check-commit-message.py`, not a CI job; its type list and two header rules. |
+
+`git_require_runtime_test_before_push` also changed that day, for a miss of its own rather than a
+port: `git commit ... && git push` in one command went through, because the hook fires before the
+commit exists. See that policy and `scripts/test-runtime-evidence-signal.py`.
+
+## Deliberately not ported
 
 | File | Why not |
 |---|---|
-| `block_manual_pgrep` | Bans `pgrep` outright on a WSL2 box where Steam and the game are native Windows processes `pgrep` cannot see. False premise here: this is native Linux and `pgrep -x DarkSoulsII.exe` is correct. `block_pgrep_full_match` is this repo's answer to the real hazard, the `-f` flag. |
-| `bash_elden_ring_launch_guard` | `ds2_launch_guard` is the local equivalent. |
-| `git_block_any_push` | Encodes "you should NEVER be pushing". `CLAUDE.md` here says the opposite, in capitals: work is not complete until `git push` succeeds. |
-| `no_whole_check_sh` | Its premise is "the pre-push hook runs it and CI runs it". Neither is true here -- there is no `.github/workflows/`, and `core.hooksPath` is `.beads/hooks`. Banning the agent from `scripts/check.sh` would mean nothing ever runs it. |
-| `no_mergeable_without_green_ci` | Requires a green CI verdict that this repo has no CI to produce, so the halt would be unsatisfiable -- a permanent wedge. `no_false_ci_green` is kept instead: it handles the no-CI case correctly by refusing to let a branch be called green. |
-| `edit_no_comment_caps_guard` | Enforces a zero-shouted-words convention er-mods-rs swept its tree to on 2026-09-07. This tree was never swept and its prose uses capitals throughout, so the guard would deny an edit to almost every file -- and its refusal text asserts a sweep that did not happen here. |
-| `git_require_runtime_evidence`, `no_fix_claim_without_runtime_evidence`, `no_rust_edit_without_frida_proof`, `no_source_edit_during_live_run`, `teardown_must_relaunch` | All four depend on Elden Ring runtime plumbing -- Frida agents, `er-me3-runs` artifacts, a live-run sentinel. The equivalents here would have to be built against `scripts/ds2-run.py`, which is real work rather than a copy. |
+| `block_manual_pgrep` | Bans `pgrep` outright on a WSL2 box where Steam and the game are native Windows processes `pgrep` cannot see. That premise is WSL's. `block_pgrep_full_match` is this repo's answer to the `-f` self-match. Open question, not settled here: `scripts/ds2-teardown.py`'s docstring (2026-09-23) says `pgrep -x DarkSoulsII.exe` answers "nothing running" about a game on screen, which contradicts the `-x` premise in `block_pgrep_full_match`. One of the two is wrong, and deciding which needs a measurement against a live session. |
+| `bash_elden_ring_launch_guard` | `ds2_launch_guard` is the local equivalent. er's also refuses bundling Seamless Co-op's `ersc.dll`; no DS2 rule says the DS2 Seamless DLL may not be bundled, so that arm has nothing to encode here. |
+| `git_block_any_push` | Encodes "you should never be pushing". `CLAUDE.md` here says the opposite: work is not complete until `git push` succeeds. What stands between that and unrun game code is `git_require_runtime_test_before_push`. |
+| `no_whole_check_sh` | Its premise is "the pre-push hook runs it and CI runs it". Neither is true here: `core.hooksPath` is `.beads/hooks`, and `release.yml` says in its own header that it is not the gate. AGENTS.md asks for `scripts/check.sh` once, when the branch is going out; banning it would mean nothing runs it. |
+| `edit_no_comment_caps_guard` | `docs_no_shouting` is this repo's version, measured against this tree (runs of four capitalised words, and a closed list of function words), and `no_shouting_at_turn_end` carries it into prose. er's list was tuned to a tree swept to zero on 2026-09-07; this one was not swept. |
+| `git_require_runtime_evidence` | `git_require_runtime_test_before_push` covers it: same jurisdiction (`crates/`, plus `scripts/ds2-run.py` here), and it additionally demands the staged DLL be byte-identical to the one this checkout built, with no `ER_ALLOW_UNPROVEN_PUSH`-style escape hatch. The part of er's that is stronger is provenance: its DLLs print `build git=<sha>` on their first line and the signal matches that sha to the tip, where this one compares times and bytes. Porting that needs `ds2-loader` to embed its commit, which is a crate change and is filed rather than done here. |
+| `no_source_edit_during_live_run` | Its premise is er's PostToolUse stale-run sentinel, which tears a live run down when an edit feeds a loaded DLL, so the edit kills the run. This repo has no such sentinel -- the PostToolUse hook only runs cupcake -- so an edit here does not end a session and there is nothing for the guard to prevent. |
 
 ## Keeping the two in step
 

@@ -356,6 +356,20 @@ def cases() -> list[PolicyCase]:
             ),
             expected_text="commits and pushes in one go",
         ),
+        # --- gh_pr_title_conventional (ported from er-mods-rs 2026-09-25) ------------------
+        # `gh pr edit`, because `gh pr create` is also judged by the Run-Stamp and global guards
+        # and a verdict here has to be attributable to this one.
+        PolicyCase(
+            "deny-pr-title-that-is-not-a-commit-header",
+            False,
+            'gh pr edit 91 --title "Lock the added rows in multiplayer"',
+            expected_text="not a commit header of this repo's shape",
+        ),
+        PolicyCase(
+            "allow-pr-title-that-is-a-commit-header",
+            True,
+            'gh pr edit 91 --title "feat(ds2-menu-row): added rows are locked in multiplayer"',
+        ),
         # --- teardown_must_relaunch (ported from er-mods-rs 2026-09-25) --------------------
         PolicyCase(
             "deny-teardown-stapled-to-a-build",

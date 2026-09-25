@@ -67,6 +67,8 @@ all_halts contains decision if { some decision in data.cupcake.policies.claude.n
 
 all_halts contains decision if { some decision in data.cupcake.policies.claude.no_future_tense_commitment.halt }
 
+all_halts contains decision if { some decision in data.cupcake.policies.claude.no_mergeable_without_green_ci.halt }
+
 all_halts contains decision if { some decision in data.cupcake.policies.claude.no_narrated_action.halt }
 
 all_halts contains decision if { some decision in data.cupcake.policies.claude.no_proof_without_observation.halt }
@@ -113,6 +115,8 @@ all_denials contains decision if { some decision in data.cupcake.policies.claude
 all_denials contains decision if { some decision in data.cupcake.policies.claude.pr_requires_run_stamp.deny }
 
 all_denials contains decision if { some decision in data.cupcake.policies.claude.edit_no_tmp_scripts_guard.deny }
+
+all_denials contains decision if { some decision in data.cupcake.policies.claude.gh_pr_title_conventional.deny }
 
 all_denials contains decision if { some decision in data.cupcake.policies.claude.git_block_detached_push.deny }
 

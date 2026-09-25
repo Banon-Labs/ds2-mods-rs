@@ -54,6 +54,9 @@ class Case:
     # bare reason string with no [rule_id] prefix.
     expect_halt_text: str | None
     why: str
+    # Extra environment for the hook, as (name, value) pairs. Used to pin a signal's outside
+    # measurement -- the CI verdict -- so a case never depends on the network.
+    env: tuple = ()
 
 
 CASES = [
@@ -432,6 +435,21 @@ CASES = [
         "closing report -- the correct shape, and the one this rule must never touch",
     ),
     Case(
+        "mergeable_claim.jsonl",
+        "You're a fucking moron.",
+        "the er-mods-rs 2026-09-11 closer: 'PR #91 is MERGEABLE now -- the conflicts are gone.' "
+        "with CI unmeasured. `mergeable` is GitHub's three-way merge result, not a green build. "
+        "The er copy of this signal never fired at all -- it called a property as a function -- "
+        "so this fixture is the first proof the rule halts anything",
+        env=(("CUPCAKE_MERGEABLE_CI_VERDICT_OVERRIDE", "PENDING"),),
+    ),
+    Case(
+        "mergeable_claim_green.jsonl",
+        None,
+        "the same sentence with the PR's checks all SUCCESS -- must NOT halt: then it is true",
+        env=(("CUPCAKE_MERGEABLE_CI_VERDICT_OVERRIDE", "PASS"),),
+    ),
+    Case(
         "user_own_rule.jsonl",
         "handing the user back a rule they wrote",
         "the er-mods-rs 2026-09-23 closer, verbatim: a draft PR link and then 'It stays draft -- "
@@ -621,7 +639,9 @@ def hook_command(event: str) -> list[str]:
     )
 
 
-def run_hook(fixture_name: str, event_name: str, argv: list[str]) -> tuple[dict, str] | str:
+def run_hook(
+    fixture_name: str, event_name: str, argv: list[str], extra_env: tuple = ()
+) -> tuple[dict, str] | str:
     """Drive one fixture through a real cupcake hook invocation. Returns (decision, raw stdout), or
     a failure message string."""
     fixture = FIXTURES / fixture_name
@@ -637,7 +657,14 @@ def run_hook(fixture_name: str, event_name: str, argv: list[str]) -> tuple[dict,
         tdir.mkdir(parents=True)
         shutil.copy(fixture, tdir / "session.jsonl")
 
-        env = {**os.environ, "HOME": tmp, "CLAUDE_PROJECT_DIR": str(REPO_ROOT)}
+        env = {
+            **os.environ,
+            "HOME": tmp,
+            "CLAUDE_PROJECT_DIR": str(REPO_ROOT),
+            # No PR's CI is consulted unless a case pins one.
+            "CUPCAKE_MERGEABLE_CI_VERDICT_OVERRIDE": "UNKNOWN",
+            **dict(extra_env),
+        }
         payload = {
             "session_id": f"stop-guard-{fixture_name}",
             "transcript_path": str(tdir / "session.jsonl"),
@@ -661,7 +688,7 @@ def run_hook(fixture_name: str, event_name: str, argv: list[str]) -> tuple[dict,
 
 def run_case(case: Case, argv: list[str]) -> str | None:
     """Returns None on pass, or a failure message."""
-    outcome = run_hook(case.fixture, "Stop", argv)
+    outcome = run_hook(case.fixture, "Stop", argv, case.env)
     if isinstance(outcome, str):
         return outcome
     decision, raw = outcome
