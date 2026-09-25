@@ -1484,8 +1484,7 @@ def config_text(
 # without this the login goes out on the wire while the menu says you are offline. Steam's own
 # sockets are untouched -- this patches one executable's import table, not the process.
 #
-# `--no-offline` writes false and PLAYS ONLINE WITH A MODDED CLIENT. `--offline-no-socket-block`
-# keeps the flag patches and drops the socket guard, which is the arm that measures how much
+# `--offline-no-socket-block` keeps the flag patches and drops the socket guard, which is the arm that measures how much
 # traffic the flag layer never reaches.
 {KEY_OFFLINE_ENABLED} = {str(offline).lower()}
 {KEY_PIN_FLAG} = {str(offline).lower()}
@@ -3276,14 +3275,14 @@ def selftest() -> int:
             f"[{OFFLINE_SECTION}] {key} defaults to true",
         )
 
-    # --no-offline HAS TO REACH ALL FOUR KEYS. The master switch alone would leave three true
-    # keys in a file whose header says the run is online, and the next person to read that file
-    # would have to know which key the DLL actually consults to tell what happened.
+    # SEAMLESS HAS TO REACH ALL FOUR KEYS. The master switch alone would leave three true keys in a
+    # file whose header says the run is online, and the next person to read that file would have to
+    # know which key the DLL actually consults to tell what happened.
     values, _ = parse_config(config_text("off", offline=False))
     for key in (KEY_OFFLINE_ENABLED, KEY_PIN_FLAG, KEY_REPORT_OFFLINE, KEY_BLOCK_SOCKETS):
         check(
             values.get((OFFLINE_SECTION, key)) == "false",
-            f"--no-offline writes [{OFFLINE_SECTION}] {key} = false",
+            f"a Seamless run writes [{OFFLINE_SECTION}] {key} = false",
         )
 
     # THE MEASUREMENT ARM DROPS ONLY THE SOCKET GUARD. If this ever turned off a flag patch too
@@ -3960,18 +3959,7 @@ def main() -> int:
             "that says whether a boot failure is theirs."
         ),
     )
-    parser.add_argument(
-        "--no-offline",
-        dest="offline",
-        action="store_false",
-        default=True,
-        help=(
-            "PLAY ONLINE WITH A MODDED CLIENT. Offline mode is on by default and this is the "
-            "switch that turns it off. Everything else this DLL does patches game code in memory, "
-            "which is what FromSoftware's matchmaking servers watch for, so an online run with "
-            "the mod loaded is an account risk you are taking on purpose."
-        ),
-    )
+    parser.set_defaults(offline=True)
     parser.add_argument(
         "--offline-no-socket-block",
         dest="block_sockets",
@@ -4211,7 +4199,7 @@ def main() -> int:
             "every mod configuration under Seamless, so a run without it is not the game they "
             "test; --no-seamless turns it off. NOTHING HERE SHIPS IT -- you "
             "install that mod yourself, from its own download, next to DarkSoulsII.exe, and this "
-            "flag only writes the path into the config. Implies --no-offline: that feature fronts "
+            "flag only writes the path into the config. Turns [offline] off: that feature fronts "
             "the socket imports, so a co-op mod under it would load, report success and never "
             "connect. Grep the log for `ds2-seamless:`."
         ),
@@ -4432,7 +4420,7 @@ def main() -> int:
         args.offline = False
         print(
             f"[config] --seamless turned [{OFFLINE_SECTION}] off for this run: it fronts the "
-            "socket imports a co-op mod needs. Pass --no-offline yourself to make that explicit."
+            "socket imports a co-op mod needs."
         )
 
     if args.selftest:

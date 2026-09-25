@@ -1709,6 +1709,46 @@ pub const NET_ONLINE_FLAG_OFFSET: usize = 0x3a;
 /// `mov rax,[0x1416148f0]; mov rcx,[rax+0x22f0]`.
 pub const NET_SERVICE_OFFSET: usize = 0x22f0;
 
+/// The session object inside the network service. `+0x3b8`.
+///
+/// `FUN_140513270` is its whole accessor -- `mov rax,[rcx+0x3b8]; ret` -- and it is what gate
+/// [`FE_INGAME_MENU_GATE_RETURN_TITLE`] resolves before asking [`NET_SESSION_BUSY`]. Null means
+/// there is no session to ask about, which the gate treats as "not refused".
+pub const NET_SERVICE_SESSION_OFFSET: usize = 0x3b8;
+
+/// `bool busy(session)`: a multiplayer session is up. RVA `0x0025_f690`.
+///
+/// The predicate behind gate `4`, the one that greys the shipped Quit Game row. Its whole body:
+///
+/// ```text
+/// sub rsp,0x28 ; call 0x14025ed80 ; dec eax ; cmp eax,1 ; setbe al ; add rsp,0x28 ; ret
+/// ```
+///
+/// so it is `state in {1, 2}` for the state `0x14025ed80` computes:
+///
+/// ```text
+/// n = max over [[0x141616cf8]+0x18]+0x48's list of vtable[0xf0]()   ; 0x140513150
+/// if n >= 1                                   -> 1
+/// if [[[0x141616cf8]+0x18]+0x40]->vtable[200]() >= 1  -> 2         ; 0x140513130
+/// if 0x140253c10(session[+8])                 -> 1
+/// n < 0 ? 3 : 0
+/// ```
+///
+/// `[0x141616cf8]` is the net-session root `getNetSessionManager` (`0x1402d85e0`) dereferences,
+/// and the two counts are read off lists inside it. What each list holds is not named in the
+/// project. What is established is that this is the predicate the game uses to refuse its own Quit
+/// Game row, called the way `FUN_1400a4e50` calls it. It only reads.
+///
+/// Not an Arxan redirect: `scripts/ds2-arxan-chain.py 0x14025f690` stops at hop 0.
+pub const NET_SESSION_BUSY: u32 = 0x0025_f690;
+
+/// The first five bytes of [`NET_SESSION_BUSY`]: `sub rsp,0x28` / `call`.
+pub const NET_SESSION_BUSY_PROLOGUE: [u8; 5] = [0x48, 0x83, 0xec, 0x28, 0xe8];
+
+/// The colour the game greys a refused row's icon with: the `ff808080` twin inside `0x0255`,
+/// flags `0x110`. Memory order R, G, B, A, like [`FLO_ADDED_ROW_TINT`].
+pub const FLO_DISABLED_COLOUR: [u8; 4] = [0x80, 0x80, 0x80, 0xff];
+
 /// The force-offline byte at VA `0x14160de19`, and **it is not the switch it looks like**.
 /// RVA `0x0160de19`.
 ///
@@ -2658,10 +2698,14 @@ pub const FE_INGAME_MENU_GATE_ALWAYS: u32 = 0;
 
 /// Gate `4` -- the one the quit item carries.
 ///
-/// Resolves the session object at `GameManagerImp + 0x22f0` through `FUN_140513270` and asks
-/// `FUN_14025f690` about it; a nonzero answer means the row is refused. Neither callee is named in
-/// the project yet, so what it actually forbids is NOT recorded here -- only that this is the gate
-/// the shipped quit row uses.
+/// Resolves the session object at [`NET_SERVICE_SESSION_OFFSET`] of the network service through
+/// `FUN_140513270` and asks [`NET_SESSION_BUSY`] about it; a nonzero answer means the row is
+/// refused. So the shipped Quit Game row is refused while a multiplayer session is up.
+///
+/// Only this branch is the session test. [`FE_INGAME_MENU_GATE_EVALUATE`] also refuses every
+/// nonzero gate outright when the net-server manager is missing or its slot-`0x30` query answers
+/// zero, before it looks at the index at all -- so evaluating gate `4` through it is not the same
+/// question as "is there a session", and `ds2-menu-row` asks [`NET_SESSION_BUSY`] directly.
 pub const FE_INGAME_MENU_GATE_RETURN_TITLE: u32 = 4;
 
 /// The gate predicate itself. RVA `0x000a_4e50`, `bool refused(const u32 *gate)`.
