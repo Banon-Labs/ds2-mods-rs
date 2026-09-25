@@ -94,6 +94,7 @@ pub mod inventory_sort;
 pub mod item_warn;
 pub mod menu_row;
 pub mod offline;
+pub mod save_block;
 pub mod save_redirect;
 pub mod seamless;
 pub mod title_menu;
@@ -432,8 +433,18 @@ fn install_intro_skip() {
 /// with no frame drawn -- the game has not created its `NexusRevolution Socket` thread yet, so the
 /// window is empty. Moving this call after the others would start narrowing it for no reason.
 fn install_offline() {
-    let config = offline::OfflineConfig::load();
+    let mut config = offline::OfflineConfig::load();
     log_line(format_args!("{}", config.describe()));
+    // The interlock `scripts/ds2-run.py` applies, here as well, because a player edits the toml and
+    // never runs that script. `[offline]` fronts the socket imports, so Seamless Co-op under it
+    // loads, reports success and never connects -- indistinguishable on screen from a broken mod.
+    if config.enabled && seamless::config().enabled {
+        config.enabled = false;
+        log_line(format_args!(
+            "{} off for this run: [seamless] is enabled, and co-op cannot connect through it",
+            ds2_offline::LOG_PREFIX
+        ));
+    }
     // RELAYED, not read, and BEFORE the early return so an off run explicitly turns it off rather
     // than relying on a default.
     //
@@ -780,8 +791,8 @@ fn install_voice_chat() {
     let request = ds2_voice_chat::Request {
         config_path: crash_logging::config_file_path(),
     };
-    // SAFETY: the one patched site and the one called function are both recorded in `ds2-rva` with
-    // the bytes they must begin with, and the crate re-reads those bytes and refuses on a mismatch.
+    // SAFETY: both patched sites and every called function are recorded in `ds2-rva` with the
+    // bytes they must begin with, and the crate re-reads those bytes and refuses on a mismatch.
     // Called from the post-Arxan position, like every other install here.
     let outcome = unsafe { ds2_voice_chat::install(&request) };
     if !outcome.installed {
@@ -951,10 +962,13 @@ fn install_menu_row() {
         let registered = register_row(*row);
         manual_save_row |= registered && *row == menu_row::Row::SaveGameToFile;
     }
-    // Gated on that row having registered, not on it being listed. A run whose row was refused -- a
-    // full tab, a sealed registry -- has no way to save at all, and turning the game's own saving off
-    // in that run would take the character's progress with it.
-    if manual_save_row {
+    // Only when `[save_block] enabled = true` asks for it, and even then gated on that row having
+    // registered, not on it being listed. A run whose row was refused -- a full tab, a sealed
+    // registry -- has no way to save at all, and turning the game's own saving off in that run would
+    // take the character's progress with it.
+    let save_block = save_block::SaveBlockConfig::load();
+    log_line(format_args!("{}", save_block.describe()));
+    if save_block.enabled && manual_save_row {
         install_save_block();
     }
 
@@ -1020,9 +1034,8 @@ fn register_row(row: menu_row::Row) -> bool {
 
 /// Refuse the game's own saves, because this run has a row that saves on purpose.
 ///
-/// No config key of its own, by request: the player who put `save-game-to-file` on the menu saves
-/// through it, so the row's presence is the switch. A run without the row saves exactly as DARK SOULS
-/// II always did, and removing the row from `rows` is how the feature is turned back off.
+/// Opt-in through `[save_block] enabled = true`, and only in a run whose `save-game-to-file` row
+/// registered -- see [`save_block`]. Every other run saves exactly as DARK SOULS II always did.
 ///
 /// What it costs is worth stating plainly, because it is not a preference -- it is the feature:
 /// nothing gained since the last press of that row survives the game closing. The five-minute

@@ -26,7 +26,8 @@ pub struct InventorySortConfig {
 }
 
 impl Default for InventorySortConfig {
-    /// **On**, and every part of that was pressed in game before the switch moved.
+    /// Off, like every feature here (user directive 2026-09-25): a config that says nothing is the
+    /// game as shipped. What follows is why `enabled = true` is safe to ask for.
     ///
     /// Runs on 2026-08-29 logged `opening the sort dialog` on the Inventory tab, then `on=equip`
     /// for the equip picker, then three consecutive opens from the controller with the keyboard
@@ -41,7 +42,7 @@ impl Default for InventorySortConfig {
     /// done nothing while another dialog is up, and with no item list on screen there is no
     /// recorded group and the press is dropped here.
     fn default() -> Self {
-        Self { enabled: true }
+        Self { enabled: false }
     }
 }
 

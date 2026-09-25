@@ -22,11 +22,10 @@ pub struct VoiceChatConfig {
 }
 
 impl Default for VoiceChatConfig {
-    /// On, with `F8` bound (user directive 2026-09-25). A press changes one option the player can
-    /// already change in the menu, through the menu's own commit, so the surprise a default can
-    /// spring is the setting the menu would have given them.
+    /// Off, like every feature here (user directive 2026-09-25): a config that says nothing is the
+    /// game as shipped. `enabled = true` binds `F8` unless `key` says otherwise.
     fn default() -> Self {
-        Self { enabled: true }
+        Self { enabled: false }
     }
 }
 
