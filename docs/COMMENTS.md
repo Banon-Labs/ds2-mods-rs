@@ -101,11 +101,17 @@ so denying `all` switched on none of them:
 | `clippy::doc_markdown` | type and symbol names wear backticks |
 | `rustdoc::broken_intra_doc_links` | the rule in the first section, enforced |
 
-**The gate is red as of this writing.** The first 8 of 27 crates produce 239 violations -- 83
-`doc_markdown`, 101 `missing_docs`, 21 `missing_errors_doc`, 20 `too_long_first_doc_paragraph`,
-14 `undocumented_unsafe_blocks` -- and the run aborted there, so the workspace total is higher.
-That is the cost of the convention being real rather than advisory, and it is tracked rather than
-waved through.
+**All 27 crates pass.** Turning the seven on cost about 690 fixes, and they were not evenly
+spread: roughly 350 were `unsafe` blocks with no `// SAFETY:`, and almost all of those wrap a
+call that cannot fault, because `ds2_game_base::mem::safe_read_*` validates its range in the
+kernel and answers `None` for an unmapped one. A crate that patches a live image uses it
+precisely so a structure that moved between game versions produces a refusal in the log rather
+than a crash in a player's lap -- and that reasoning now sits at each block rather than only in
+the callee's own docs.
+
+The rest were what a name alone does not say: `Adaptability` is a stat, but which one; `Ambiguous
+{ name, ids }` lists the ids so a HUMAN can pick, which is why that variant refuses to pick one
+itself.
 
 ## Every lint allow names the issue that will remove it
 
@@ -114,7 +120,7 @@ gate, and a hole nobody is tracking cannot be told from one nobody noticed. So e
 `crates/` carries a comment directly above it, and that comment names a `bd` issue:
 
 ```rust
-// DEBT: ds2-mods-rs-24r -- not debt to be paid: this crate ships as a Windows DLL and the
+// DEBT: <issue-id> -- not debt to be paid: this crate ships as a Windows DLL and the
 // attribute is what keeps its Rust half parseable on the host.
 #![cfg_attr(not(windows), allow(unused))]
 ```
@@ -132,8 +138,13 @@ decision rather than filing the same debt ten times.
 cannot rot into a silent hole the way an allow does.
 
 Enforced by `scripts/check-allow-debt.py`, in the gate ahead of clippy, with `--selftest` for the
-nine cases the rule is supposed to get right. **20 sites are still unaccounted for**
-(`ds2-mods-rs-wmo`), so this check is red as of this writing.
+nine cases the rule is supposed to get right. Every site in the workspace is accounted for, under
+five issues. Four of them record standing decisions rather than work: the attribute that keeps a
+Windows-only crate's Rust half parseable on the host, the file that transcribes MinHook's C header
+verbatim, the menu-tree dump that is disarmed but kept for re-arming, and the two export names the
+Windows loader and the game's import descriptor demand letter for letter. The fifth is real debt:
+one crate carries module-wide `dead_code` with no recorded reason, which also hides the next thing
+that goes unused in those modules.
 
 ## A disproved belief is deleted once it can no longer mislead anyone
 
