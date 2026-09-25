@@ -285,5 +285,12 @@ echo "  ds2-run.py: OK"
 # cannot run here; this is the planning half, which is the half that can be wrong quietly.
 cargo run --quiet -p ds2-launcher -- --selftest >/dev/null
 echo "  ds2-launcher: OK"
+# The live roster reader. `ds2-invasion-path` decides who to draw a path to by reading a name out
+# of a `std::wstring`, and this script reads the same fields the same way -- so a wrong reader
+# here is a wrong reader in the crate, discovered against a fixture instead of against a session.
+# Its first draft failed on its own fixture because `ctypes.create_unicode_buffer` is UCS-4 on
+# Linux; that is exactly the class of mistake this line catches before a run is spent on it.
+python3 scripts/ds2-player-kind.py --selftest >/dev/null
+echo "  ds2-player-kind.py: OK"
 
 echo "== OK =="

@@ -98,12 +98,13 @@
 //! come away from the player's body.
 //!
 //! **Still unmeasured: whether the overlay is USEFUL.** Every run so far has been offline and
-//! solo, and the `remotes=1` in them was never an invader: DARK SOULS II builds bloodstain
-//! replays and wandering ghosts out of the same class as a person, and this crate counted them.
-//! It no longer does -- `crate::census::is_replay` throws them out using the engine's own test,
-//! and the roster line names each one it threw out -- but that means no run so far has routed to
-//! a human being, and the thing the overlay exists to do remains untested in the only way that
-//! would settle it.
+//! solo, and the `remotes` in them were never invaders. A 2026-09-24 run laid stone paths to two
+//! of them and named them when asked: `Npc_c741000` and `Npc_c761000`. DARK SOULS II builds
+//! humanoid NPCs, bloodstain replays and wandering ghosts out of the same class as a person, and
+//! this crate counted all of them. It no longer does -- `crate::census::is_person` keeps only the
+//! name the remote-player factory formats, and the roster line names everything it threw out --
+//! but that means no run so far has routed to a human being, and the thing the overlay exists to
+//! do remains untested in the only way that would settle it.
 //!
 //! # What it does to the game
 //!
@@ -711,11 +712,11 @@ mod windows_impl {
         if roster_changed {
             state.last_census = Some(census);
             log(format_args!(
-                "roster: characters={} players={} remotes={} phantoms={} skipped={} nearest={}",
+                "roster: characters={} players={} remotes={} not_people={} skipped={} nearest={}",
                 census.characters,
                 census.players,
                 census.remotes,
-                census.phantoms,
+                census.not_people,
                 census.skipped,
                 // The nearest distance is what says whether `near_suppress_meters` is the reason
                 // nothing is on screen. Without it, "suppressed because they are close" and
@@ -728,10 +729,10 @@ mod windows_impl {
             // Name the recordings that were thrown out, so "the overlay is ignoring that figure
             // over there" is a claim the log can settle. Only when there are any, and only on the
             // same change that wrote the line above -- it walks the roster again.
-            if census.phantoms > 0 {
+            if census.not_people > 0 {
                 log(format_args!(
                     "roster: not people -- {}",
-                    census::describe_phantoms(state.config.max_targets)
+                    census::describe_not_people(state.config.max_targets)
                 ));
             }
         }
