@@ -98,6 +98,7 @@ pub mod save_redirect;
 pub mod seamless;
 pub mod title_menu;
 pub mod title_skip;
+pub mod voice_chat;
 
 /// `fdwReason` value for the loader's process-attach notification.
 const DLL_PROCESS_ATTACH: u32 = 1;
@@ -325,6 +326,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_title_menu();
                 install_build_import();
                 install_inventory_sort();
+                install_voice_chat();
                 install_menu_row();
                 install_item_warn();
                 install_invasion_path();
@@ -364,6 +366,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_title_menu();
                 install_build_import();
                 install_inventory_sort();
+                install_voice_chat();
                 install_menu_row();
                 install_item_warn();
                 install_invasion_path();
@@ -759,6 +762,32 @@ fn install_inventory_sort() {
         log_line(format_args!(
             "{} NOT INSTALLED -- the sort dialog stays on the button the game shipped it on",
             ds2_inventory_sort::LOG_PREFIX
+        ));
+    }
+}
+
+/// Put the game's own Voice chat option on a key, if `[voice_chat] enabled` is not `false`.
+///
+/// Independent of `ds2-menu-row`'s tick registry: the key is read inside the crate's own detour on
+/// the net session update, so the order relative to [`install_menu_row`] does not matter.
+fn install_voice_chat() {
+    let config = voice_chat::VoiceChatConfig::load();
+    log_line(format_args!("{}", config.describe()));
+    if !config.enabled {
+        return;
+    }
+    ds2_voice_chat::set_logger(log_line);
+    let request = ds2_voice_chat::Request {
+        config_path: crash_logging::config_file_path(),
+    };
+    // SAFETY: the one patched site and the one called function are both recorded in `ds2-rva` with
+    // the bytes they must begin with, and the crate re-reads those bytes and refuses on a mismatch.
+    // Called from the post-Arxan position, like every other install here.
+    let outcome = unsafe { ds2_voice_chat::install(&request) };
+    if !outcome.installed {
+        log_line(format_args!(
+            "{} NOT INSTALLED -- Voice chat stays on the options menu only",
+            ds2_voice_chat::LOG_PREFIX
         ));
     }
 }

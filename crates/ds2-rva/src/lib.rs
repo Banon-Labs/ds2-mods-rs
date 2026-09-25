@@ -8978,6 +8978,99 @@ pub const FE_ITEM_WARN_CLONED_CHILD: usize = 0;
 /// [`FLO_RECORD_DEPTH_OFFSET`] -- and the mark is appended last either way.
 pub const FE_ITEM_WARN_DEPTH_STEP: u16 = 2;
 
+// ============================================================================================
+// The game's options block and its Voice Chat switch (`ds2-voice-chat`).
+//
+// Chain: [`GAME_MANAGER_IMP`] -> `+0xa8` ([`GAME_DATA_MANAGER_OFFSET`]) -> `+0xc8`
+// ([`GAME_DATA_MANAGER_OPTIONS_OFFSET`]) -> byte `+0x0b` ([`GAME_OPTION_VOICE_CHAT_OFFSET`]).
+//
+// Measured live 2026-09-25 with `scripts/frida/voice-chat.js`: the block read
+// `[0,0,0,50,20,0,0,0,0,1,1,1,0,10,30,0,...]`, the net update below ran 184 times in 3 s, all on
+// thread 328 (the process's first thread), and calling [`GAME_OPTION_GAME_TAB_APPLY`] from inside
+// it with byte `0x0b` inverted moved the byte 1 -> 0 and the net update's cached "voice active"
+// flag 0 -> 1 on the very next pass of the original; a second call put both back.
+// ============================================================================================
+
+/// `GameDataManager -> options block`. `+0xc8`.
+///
+/// The object `SaveDataOption` serialises: its save routine `0x1402e5c90` and its load switch
+/// `0x1402e5c30` both begin `GameManagerImp->GameDataManager->[+0xc8]` and bail on null, then
+/// stream `0x10` bytes (Game tab), `4` bytes (Screen tab) and `0x14` bytes from it. Every Game-tab
+/// function of `FeGroupInGameSystemSettingGame` reaches it the same way, e.g. `0x140085b80`:
+/// `mov rbx,[rax+0xa8]; mov rbx,[rbx+0xc8]` (`48 8b 9b c8 00 00 00`).
+pub const GAME_DATA_MANAGER_OPTIONS_OFFSET: usize = 0xc8;
+
+/// Length of the Game tab's part of the options block: bytes `0x00..0x10`.
+///
+/// [`GAME_OPTION_GAME_TAB_APPLY`] copies exactly this much (two `qword` moves), and the tab's
+/// default routine `0x14019d690` writes exactly this much.
+pub const GAME_OPTION_GAME_TAB_LEN: usize = 0x10;
+
+/// Voice chat, byte `+0x0b` of the options block. `0` = on, nonzero = off.
+///
+/// **Which byte**, from the menu's own table: `FeGroupInGameSystemSettingGame` slot `0x140083d60`
+/// maps its fifteen rows to option bytes `0,1,2,3,4,5,6,7,8,0xa,0xb,9,0xc,0xd,0xe`, and the
+/// menu's text in memory lists the rows as Flip y-axis, Flip x-axis, Reset y-axis, Camera
+/// sensitivity, Vibration, Camera auto-adjust, Cinematic effects, Toggle auto lock-on,
+/// Auto-target, Jump controls, **Voice chat**, Cross-region play, Music, Sound effect and Voice
+/// volume -- row 10, byte `0x0b`. The two values that read as numbers agree with the rows the
+/// mapping gives them (sensitivity `50`, vibration `20`).
+///
+/// **What it does**, from its readers -- which is what makes this an identification and not a
+/// menu-order inference:
+///
+/// * `0x1402cb830` sets the per-peer voice mute (`0x140520dc0` -> session `0x140a4ef20`) to TRUE
+///   whenever this byte is nonzero.
+/// * `0x1402cb140` re-applies that mute to every peer in the session and stores
+///   `byte == 0` as the "voice active" result.
+/// * The net session update [`NET_SESSION_UPDATE`] computes `byte == 0` every frame and calls
+///   `0x1402cb140` when it differs from its cached copy at `+0x90`, so a change takes effect on the
+///   next frame without anything else being called.
+///
+/// Byte `9`, the one beside it, is Cross-region play, not voice: `createMatchingParameter`
+/// (`0x1402aa540`) copies it into the matchmaking parameter and `0x1402947e0` re-syncs it to the
+/// server when it changes.
+pub const GAME_OPTION_VOICE_CHAT_OFFSET: usize = 0x0b;
+
+/// The Game tab's commit: `void (options*, const u8 working_copy[0x10])`. RVA `0x0019d7d0`.
+///
+/// **This is the call the options menu makes.** `FeGroupInGameSystemSettingGame`'s vtable slot 42
+/// (`0x1410b2fa8` -> `0x140085cc0`) is `mov rcx,[GameDataManager+0xc8]; add rdx,0x320;
+/// jmp 0x14019d7d0` -- the options block and the menu's 16-byte working copy. The body copies the
+/// sixteen bytes over, pushes byte `0x0f` into the input layer (`[[BaseP1+0x60]]+8 -> +0x6c`), and
+/// tail-calls `0x14019d8e0`, which re-applies rumble, the three volumes and the key layout from the
+/// block. Nothing in it touches voice; the voice switch is picked up by [`NET_SESSION_UPDATE`].
+///
+/// Game thread only: it is reached from the menu's own update, and it calls into the sound and
+/// input managers.
+pub const GAME_OPTION_GAME_TAB_APPLY: u32 = 0x0019_d7d0;
+
+/// First ten bytes of [`GAME_OPTION_GAME_TAB_APPLY`].
+///
+/// `mov rax,[rdx]; mov [rcx],rax; mov rax,[rdx+8]`.
+pub const GAME_OPTION_GAME_TAB_APPLY_PROLOGUE: [u8; 10] =
+    [0x48, 0x8b, 0x02, 0x48, 0x89, 0x01, 0x48, 0x8b, 0x42, 0x08];
+
+/// The net session manager's per-frame update. RVA `0x002c9540`, VA `0x1402c9540`.
+///
+/// The reader of [`GAME_OPTION_VOICE_CHAT_OFFSET`] that makes a change take effect: near its end
+/// it computes `options[0x0b] == 0`, compares it with the byte at `this+0x90`, and on a difference
+/// calls `0x1402cb140(this+0x90)`, which re-mutes or unmutes every voice peer and stores the new
+/// value. Called from a vtable, 60 times a second on the game thread (184 calls in 3 s, all on the
+/// first thread, measured live).
+///
+/// Not in [`ARXAN_REDIRECTED_DO_NOT_HOOK`], and the entry is ordinary code.
+pub const NET_SESSION_UPDATE: u32 = 0x002c_9540;
+
+/// First fourteen bytes of [`NET_SESSION_UPDATE`].
+///
+/// `mov [rsp+8],rcx; push rbp; push rbx; push r14; lea rbp,[rsp-0x47]`. The first five are what
+/// MinHook relocates; the rest is carried so a drifted RVA does not match the most common prologue
+/// in the image.
+pub const NET_SESSION_UPDATE_PROLOGUE: [u8; 14] = [
+    0x48, 0x89, 0x4c, 0x24, 0x08, 0x55, 0x53, 0x41, 0x56, 0x48, 0x8d, 0x6c, 0x24, 0xb9,
+];
+
 #[cfg(test)]
 mod item_warn_tests {
     /// The mark is the ✕'s ink, measured with `scripts/ds2-atlas-find.py waku_03.dds --red`, and

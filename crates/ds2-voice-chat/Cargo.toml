@@ -1,0 +1,20 @@
+[package]
+name = "ds2-voice-chat"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# `ds2-hotkey-config` is NOT target-gated here: the key setting is parsed by pure code in `lib.rs`
+# that the host tests exercise, and that crate has no dependencies of its own.
+[dependencies]
+ds2-hotkey-config.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+ds2-game-base.workspace = true
+ds2-hook.workspace = true
+ds2-rva.workspace = true
+
+[lints]
+workspace = true
