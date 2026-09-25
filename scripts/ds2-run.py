@@ -315,6 +315,15 @@ KEY_ITEM_WARN_ENABLED = "enabled"
 #: Mirrors `LOG_PREFIX` in `crates/ds2-item-warn/src/lib.rs`. Grep for it when a run disappoints.
 ITEM_WARN_LOG_PREFIX = "ds2-item-warn:"
 
+#: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/hp_gauge.rs`.
+#:
+#: ON here and off in the DLL: the DLL's default is the game as shipped, and this launcher's is the
+#: setup the user tuned live on 2026-09-25. `--no-hp-gauge` writes false.
+HP_GAUGE_SECTION = "hp_gauge"
+KEY_HP_GAUGE_ENABLED = "enabled"
+#: Mirrors `LOG_PREFIX` in `crates/ds2-hp-gauge/src/lib.rs`.
+HP_GAUGE_LOG_PREFIX = "ds2-hp-gauge:"
+
 #: `[seamless]` -- loading a SECOND, THIRD-PARTY mod's DLL into the same process.
 #:
 #: Nothing here ships that mod and nothing here copies it. The key is a path; the player installs
@@ -1162,6 +1171,7 @@ def config_text(
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
     item_warn: bool = False,
+    hp_gauge: bool = True,
     seamless: bool = False,
     seamless_dll: str = SEAMLESS_DEFAULT_DLL,
     invasion_path: bool = False,
@@ -1694,6 +1704,26 @@ def config_text(
 # Grep the log for `{ITEM_WARN_LOG_PREFIX}`; it names every site it patched and every one it refused.
 {KEY_ITEM_WARN_ENABLED} = {str(item_warn).lower()}
 
+[{HP_GAUGE_SECTION}]
+# STARTUP-ONLY. The HP bar and damage number floating over other characters, drawn by
+# `ds2-hp-gauge`: the bar grown and moved to sit centred over the target, and the number grown,
+# lifted clear of the bar and centred on it as a block.
+#
+# ON unless `--no-hp-gauge`. Every tuning key is optional and falls back to the value the DLL was
+# built with, so they are left out here; add any of these under this section to override it.
+# Distances are 720p layout units, scaled with the resolution; screen y grows downward.
+#
+#   text_scale = 1.25     multiplier on the game's scale for the number (1.25 -> 2.5x at 1440p)
+#   text_lift = 12        how far to raise the number
+#   text_dx = 0           nudge the number after centring, negative = left
+#   digit_advance = 8     width of one digit, which is what centring divides by
+#   bar_scale = 2.25      multiplier on the game's scale for the bar
+#   bar_dx = -98.4        move the bar right (negative = left)
+#   bar_dy = 6            move the bar down
+#
+# Grep the log for `{HP_GAUGE_LOG_PREFIX}`.
+{KEY_HP_GAUGE_ENABLED} = {str(hp_gauge).lower()}
+
 [{SEAMLESS_SECTION}]
 # A SECOND MOD, written by someone else, loaded into this same process.
 #
@@ -1905,6 +1935,7 @@ def write_config(
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
     item_warn: bool = False,
+    hp_gauge: bool = True,
     seamless: bool = False,
     seamless_dll: str = SEAMLESS_DEFAULT_DLL,
     invasion_path: bool = False,
@@ -1945,6 +1976,7 @@ def write_config(
         inventory_sort_key,
         inventory_sort_pad,
         item_warn,
+        hp_gauge,
         seamless,
         seamless_dll,
         invasion_path,
@@ -2057,6 +2089,7 @@ def dry_run(
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
     item_warn: bool = False,
+    hp_gauge: bool = True,
     seamless: bool = False,
     seamless_dll: str = SEAMLESS_DEFAULT_DLL,
     invasion_path: bool = False,
@@ -2115,6 +2148,7 @@ def dry_run(
             inventory_sort_key,
             inventory_sort_pad,
             item_warn,
+            hp_gauge,
             seamless,
             seamless_dll,
             invasion_path,
@@ -2169,6 +2203,7 @@ def dry_run(
                 inventory_sort_key=inventory_sort_key,
                 inventory_sort_pad=inventory_sort_pad,
                 item_warn=item_warn,
+                hp_gauge=hp_gauge,
                 seamless=seamless,
                 seamless_dll=seamless_dll,
                 invasion_path=invasion_path,
@@ -2654,6 +2689,7 @@ def launch(
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
     item_warn: bool = False,
+    hp_gauge: bool = True,
     seamless: bool = False,
     seamless_dll: str = SEAMLESS_DEFAULT_DLL,
     invasion_path: bool = False,
@@ -2707,6 +2743,7 @@ def launch(
         inventory_sort_key,
         inventory_sort_pad,
         item_warn,
+        hp_gauge,
         seamless,
         seamless_dll,
         invasion_path,
@@ -4142,6 +4179,17 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--no-hp-gauge",
+        dest="hp_gauge",
+        action="store_false",
+        default=True,
+        help=(
+            "leave the HP bar and damage number over other characters as the game draws them. "
+            "By default the bar is grown and centred over the target and the number is grown, "
+            "lifted and centred on the bar."
+        ),
+    )
+    parser.add_argument(
         "--item-warn",
         dest="item_warn",
         action="store_true",
@@ -4445,6 +4493,7 @@ def main() -> int:
             args.inventory_sort_key,
             args.inventory_sort_pad,
             args.item_warn,
+            args.hp_gauge,
             args.seamless,
             args.seamless_dll,
             args.invasion_path,
@@ -4484,6 +4533,7 @@ def main() -> int:
         args.inventory_sort_key,
         args.inventory_sort_pad,
         args.item_warn,
+        args.hp_gauge,
         args.seamless,
         args.seamless_dll,
         args.invasion_path,

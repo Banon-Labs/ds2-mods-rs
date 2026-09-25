@@ -9518,3 +9518,78 @@ mod item_warn_left_tests {
         };
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// The floating HP bar and damage number drawn over other characters: `FeSceneEnemyHpGuage`.
+//
+// `docs/DS2-HP-GAUGE.md` has the call chain and the live tuning runs these were checked against.
+// ---------------------------------------------------------------------------------------------
+
+/// `FeSceneEnemyHpGuage` bar transform: `void(gauge, u32 slot, float4* pos, float scale, float2* offset)`.
+///
+/// Places the frame (`0x113e10`) and both fills (`0x113e11`, `0x113e12`) of one slot's bar through
+/// `0x140066290`, which submits their matrices with flag `0` -- so the scale in XMM3 is honoured.
+/// `pos` is the screen-space pivot, y growing down; `scale` is render height / 720. Not an Arxan
+/// redirect: `scripts/ds2-arxan-chain.py` finds its own prologue at the entry.
+pub const HP_GAUGE_BAR_TRANSFORM: u32 = 0x0006_63b0;
+
+/// `FeSceneEnemyHpGuage` text transform: same signature as [`HP_GAUGE_BAR_TRANSFORM`].
+///
+/// Builds a scaled 4x4 for element [`HP_GAUGE_TEXT_ELEMENT`] and hands it to vtable `+0x120` with
+/// flag `1`, which is why the damage number never grows with the scale argument -- see
+/// [`FE_COMPONENT_OBJECT_APPLY_MASK_OFFSET`]. Entry `4c 8b dc 48 81 ec f8 00 00 00`
+/// (`mov r11,rsp; sub rsp,0xf8`), a real prologue.
+pub const HP_GAUGE_TEXT_TRANSFORM: u32 = 0x0006_69c0;
+
+/// `FeSceneEnemyHpGuage` number setter: `void(gauge, scene, i32 value)`.
+///
+/// The game's only writer of the damage number's text. `value < 1` clears it; otherwise it is
+/// clamped to [`HP_GAUGE_NUMBER_MAX`] and formatted in decimal into vtable `+0x148`. Called from
+/// two sites in `0x140067900`, only when the number changes.
+pub const HP_GAUGE_SET_NUMBER: u32 = 0x0006_6190;
+
+/// The clamp inside [`HP_GAUGE_SET_NUMBER`]: `if (99999 < value) value = 99999`.
+pub const HP_GAUGE_NUMBER_MAX: i32 = 99_999;
+
+/// `FeLayoutScene::findById(scene, id, id, 0, 0, 0, 0, 0, 0, 0, 0)`. RVA `0x00afda00`.
+///
+/// Eleven arguments, all read: the four register ones and seven stack ones at `[rsp+0x80]` ..
+/// `[rsp+0xb0]` are packed into a zero-terminated id path of up to ten and handed to
+/// `0x140b507d0`. Returns the component or null. Both gauge callers pass the id twice and zeros
+/// after.
+pub const FE_SCENE_FIND_BY_ID: u32 = 0x00af_da00;
+
+/// The damage number's element id in `l01_13_hp_enemy.flo`: def `0x11`, at `(3.05, 0.3)` under
+/// the gauge root def `0x12`. A [`FE_COMPONENT_OBJECT_VTABLE`] instance at runtime.
+pub const HP_GAUGE_TEXT_ELEMENT: u32 = 0x05f5_b9f2;
+
+/// Byte offset of the gauge's per-slot scene pointers: `[gauge + 0x18 + slot * 8]`.
+pub const HP_GAUGE_SCENES_OFFSET: usize = 0x18;
+
+/// How many gauge slots there are. Both transforms refuse `slot >= 0x14`.
+pub const HP_GAUGE_SLOTS: usize = 20;
+
+/// Width of the bar frame in layout units: shape `0x0006`'s atlas rect, x `153.1 .. 252.7`.
+///
+/// The frame is left-anchored at the pivot, so the bar's centre is `pivot.x + width / 2 * scale`.
+pub const HP_GAUGE_BAR_WIDTH: f32 = 99.6;
+
+/// `FeComponentObject::setMatrix(this, mat3x4*, u8 translate_only)`. RVA `0x00b6aa70`.
+///
+/// Copies the matrix to `*(this + 0x58)` (allocating it on first use), then writes `1` to
+/// `this + 0x99`, the flag to [`FE_COMPONENT_OBJECT_MATRIX_FLAG_OFFSET`] and `flag ? 1 : 7` to
+/// [`FE_COMPONENT_OBJECT_APPLY_MASK_OFFSET`]. Recorded for its offsets; nothing calls it directly.
+pub const FE_COMPONENT_OBJECT_SET_MATRIX: u32 = 0x00b6_aa70;
+
+/// `u64` at `this + 0x58`: the stored matrix, null until the first `setMatrix`.
+pub const FE_COMPONENT_OBJECT_MATRIX_OFFSET: usize = 0x58;
+
+/// `u8` at `this + 0x30`: which parts of the stored matrix apply. `7` is all of it; `1` is the
+/// translation alone, which is what a flag-1 submit leaves and why the scale was invisible.
+pub const FE_COMPONENT_OBJECT_APPLY_MASK_OFFSET: usize = 0x30;
+
+/// [`FE_COMPONENT_OBJECT_APPLY_MASK_OFFSET`]'s value for a full matrix.
+pub const FE_COMPONENT_OBJECT_APPLY_MASK_FULL: u8 = 7;
+
+/// `u8` at `this + 0x9a`: the flag the last `setMatrix` was given.
+pub const FE_COMPONENT_OBJECT_MATRIX_FLAG_OFFSET: usize = 0x9a;

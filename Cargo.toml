@@ -73,6 +73,8 @@ ds2-inventory-sort = { path = "crates/ds2-inventory-sort" }
 ds2-voice-chat = { path = "crates/ds2-voice-chat" }
 ds2-item-warn = { path = "crates/ds2-item-warn" }
 ds2-invasion-path = { path = "crates/ds2-invasion-path" }
+# The floating HP bar and damage number over other characters, resized and centred.
+ds2-hp-gauge = { path = "crates/ds2-hp-gauge" }
 # Agent-driven input: writes the device state the engine reads, and blanks the human's.
 ds2-input-harness = { path = "crates/ds2-input-harness" }
 ds2-sl2-core = { path = "crates/ds2-sl2-core" }
