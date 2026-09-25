@@ -236,8 +236,12 @@ stance: `FUN_140350170` (`0x00350170`) requires
 `1.5f` at `0x1410bd0a8` (`mulss xmm0,[0x1410bd0a8]` at `0x14035025c` and `0x14035028b`), for grip
 states `4`, `5` and `6`. Grip states `5` and `6` do not get the halving.
 
-**Neither reaches the presentation check**, which takes no grip argument at all. So the detail
-pane's requirement numbers -- and the badge -- ignore both.
+**Neither reaches the presentation check**, which takes no grip argument at all, so the detail
+pane's requirement numbers ignore both. The badge does not: it reads the live grip and applies the
+same halving while two-handing (confirmed on screen by the user, 2026-09-25). The grip is the `i32`
+at `equip + 0x10`, reached as `PlayerCtrl + 0x378` (vtable slot `0x120`, `0x1403126b0`) ->
+`ChrAsmCtrl + 0x28` (vtable slot `0x70`, `0x1401513d0`); `FUN_140347970` initialises it to `1`
+and `FUN_14034f470` rewrites it.
 
 ### The cached answer, and why it is the wrong shape here
 
