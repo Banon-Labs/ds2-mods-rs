@@ -26,6 +26,10 @@
 //              fields, the two thread ids. Everything that can be checked without touching the
 //              game runs here, and `feet` refuses to run until it has.
 //   'feet'     one stone, at the character's feet, once.
+//   'tweak'    two stones beside you, one with its colour float4 and transform scale rewritten.
+//   'custom'   register an edited .ffx (--config-json '{"custom_id":25000,"ffx_hex":"..."}', built
+//              with `scripts/ds2-ffx.py patch --new-id 25000`) and spawn it beside a stock stone.
+//              The id inside the file MUST equal custom_id or the spawn comes back empty.
 //   'follow'   a trail to whoever the arrow points at, laid three stones per pass from your feet
 //              outwards, pruned behind you as you walk past it, and torn down whole only when the
 //              route it was laid along has actually changed. This is the real thing.
@@ -42,7 +46,7 @@
 
 'use strict';
 
-/// 'observe' | 'feet' | 'follow'. Edit and save; the watcher reloads in place.
+/// 'observe' | 'feet' | 'tweak' | 'custom' | 'follow'. Edit and save; the watcher reloads in place.
 const STAGE = 'follow';
 
 // --------------------------------------------------------------------------------------------
@@ -479,6 +483,209 @@ function serve(asked) {
     return;
   }
 
+  if (asked === 'custom') {
+    const config = globalThis.__ER_FRIDA_CONFIG || {};
+    const id = config.custom_id;
+    if (!id || !config.ffx_hex) { console.log('[stone] custom: no ffx_hex/custom_id in --config-json'); return; }
+    const result = registerCustom(found.system, id, hexBytes(config.ffx_hex));
+    console.log('[stone] ===== CUSTOM EFFECT ' + id + ' =====\n[stone] register: ' +
+      JSON.stringify({ registered: result.registered, why: result.why,
+        resource: String(result.resource), lookup_after: String(result.found),
+        creatable: String(result.creatable),
+        creatable_id: result.creatable && !result.creatable.isNull()
+          ? result.creatable.add(8).readS32() : null }));
+    const stock = spawnOne(found.system, PRISM_STONE_SFX_IDS[0], [at[0] + 1.5, at[1], at[2]], [0, 1, 0]);
+    const mine = spawnOne(found.system, id, [at[0] - 1.5, at[1], at[2]], [0, 1, 0]);
+    console.log('[stone] stock 833 at +x: live=' + stock.live + ' alive bits ' + JSON.stringify(aliveBits(stock.at)) +
+      '\n[stone] custom ' + id + ' at -x: live=' + mine.live + ' alive bits ' + JSON.stringify(aliveBits(mine.at)) +
+      '\n[stone] LOOK: -x stone should be BLUE and 3x the size of the red +x one.');
+    return;
+  }
+
+  if (asked === 'tweak') {
+    // Two stones side by side, same id: CONTROL on your left (+x), TWEAKED on your right (-x).
+    // The tweaked one gets its effect root's +0xd0 float4 rewritten to blue and its node
+    // transform's 3x3 scaled by TWEAK_SCALE. Whatever differs between them on screen is those
+    // two writes and nothing else.
+    const id = PRISM_STONE_SFX_IDS[0];
+    const control = spawnOne(found.system, id, [at[0] + 1.5, at[1], at[2]], [0, 1, 0]);
+    const tweaked = spawnOne(found.system, id, [at[0] - 1.5, at[1], at[2]], [0, 1, 0]);
+    console.log('[stone] ===== TWEAK: effect ' + id + ', control +x ' + control.at + ' live=' +
+      control.live + ', tweaked -x ' + tweaked.at + ' live=' + tweaked.live + ' =====');
+    if (!tweaked.live) { console.log('[stone] tweaked stone did not spawn; nothing to write'); return; }
+    tweak = { at: tweaked.at, spawnedAt: navTicks, checked: false, colour: [], matrix: [] };
+    for (const part of effectParts(tweaked.at)) {
+      const colour = readFloats(part.root.add(TWEAK_COLOUR_OFFSET), 4);
+      const matrix = readFloats(part.node.add(TWEAK_MATRIX_OFFSET), 12);
+      console.log('[stone] half ' + part.half + ' node ' + part.node + ' root ' + part.root +
+        '\n[stone]   root+0xd0 before  ' + fmt(colour) +
+        '\n[stone]   node+0x20 before  ' + fmt(matrix));
+      if (colour !== null) {
+        TWEAK_COLOUR.forEach((v, i) => part.root.add(TWEAK_COLOUR_OFFSET + i * 4).writeFloat(v));
+        tweak.colour.push({ root: part.root, wrote: TWEAK_COLOUR });
+      }
+      const layout = matrix === null ? null : matrixLayout(matrix, [at[0] - 1.5, at[1], at[2]]);
+      if (layout === null) {
+        console.log('[stone]   matrix: no translation matching the spawn point -- NOT scaling');
+      } else {
+        layout.forEach((i) => part.node.add(TWEAK_MATRIX_OFFSET + i * 4)
+          .writeFloat(matrix[i] * TWEAK_SCALE));
+        tweak.matrix.push({ node: part.node, wrote: readFloats(part.node.add(TWEAK_MATRIX_OFFSET), 12) });
+      }
+      console.log('[stone]   root+0xd0 after   ' + fmt(readFloats(part.root.add(TWEAK_COLOUR_OFFSET), 4)) +
+        '\n[stone]   node+0x20 after   ' + fmt(readFloats(part.node.add(TWEAK_MATRIX_OFFSET), 12)));
+    }
+    console.log('[stone] LOOK: the stone on your -x side should be BLUE and ' + TWEAK_SCALE +
+      'x the size of the one on your +x side. Rechecking in ' + TWEAK_RECHECK_TICKS + ' ticks ' +
+      'whether the engine overwrote either write.');
+  }
+}
+
+// --------------------------------------------------------------------------------------------
+// The 'custom' stage: register OUR .ffx bytes under a new id with the game's own calls, spawn it
+// --------------------------------------------------------------------------------------------
+//
+// bd `ds2-mods-rs-azc`, path (b): no bundle, no file I/O. Every call below is the one
+// `0x140bf7960` makes when it materialises a bundle member lazily, minus the BND around it.
+// The bytes come in through `--config-json '{"ffx_hex": "...", "custom_id": 25000}'`.
+
+const CUSTOM = {
+  HEAP_ALLOC: 0x00833320,        // (size, align, DLAllocator*) -> ptr
+  EFFECT_DATA_CTOR: 0x00c12e10,  // (SfxEffectData*, DLAllocator*)
+  ADDREF: 0x00833650,            // (refcount*)
+  PARSE_DLSE: 0x00c12ee0,        // (SfxEffectData*, bytes, size, u8 sys+0x20) -> 1 on success
+  RESOURCE_CTOR: 0x00c100a0,     // (SfxEffectResourceObject*, sys, L"f%07d.ffx", SfxEffectData*) -- registers
+  RESOURCE_START: 0x00aff7a0,    // (ResourceObject*)
+  LOOKUP: 0x00bf1500,            // (SfxFxResourceManager*, id) -> resource or 0
+  SYS_ALLOCATOR_OFFSET: 0x08,
+  SYS_PARSE_FLAG_OFFSET: 0x20,
+  SYS_RESOURCE_MANAGER_OFFSET: 0x38,
+  SYS_VT_INVALIDATE: 0x40,
+  EFFECT_DATA_BYTES: 0x20,
+  RESOURCE_BYTES: 0x98,
+};
+
+function fn(rva, ret, args) {
+  return new NativeFunction(base.add(rva), ret, args, 'win64');
+}
+
+/// Process-lifetime storage: survives this script's unload, like `blockStorage`.
+function keep(bytes) {
+  const page = virtualAlloc(NULL, Math.max(bytes.byteLength, 16), MEM_COMMIT_RESERVE, PAGE_READWRITE);
+  if (page.isNull()) throw new Error('VirtualAlloc failed');
+  page.writeByteArray(bytes);
+  return page;
+}
+
+function hexBytes(hex) {
+  const out = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < out.length; i += 1) out[i] = parseInt(hex.substr(i * 2, 2), 16);
+  return out.buffer;
+}
+
+function registerCustom(system, id, ffx) {
+  const lookup = fn(CUSTOM.LOOKUP, 'pointer', ['pointer', 'uint32']);
+  const manager = readPointer(system.add(CUSTOM.SYS_RESOURCE_MANAGER_OFFSET));
+  const invalidate = new NativeFunction(
+    readPointer(system).add(CUSTOM.SYS_VT_INVALIDATE).readPointer(), 'void', ['pointer', 'uint32'], 'win64');
+  // `LOOKUP` returns the resource's SfxEffectData (+0x90), not the resource.
+  const already = lookup(manager, id);
+  if (!already.isNull()) {
+    // Re-parse into the existing SfxEffectData: 0x140c12ee0 destroys the old creatable at +0x18
+    // first. Then drop the core's cached creatable (and any Invalid placeholder) for this id.
+    const bytes = keep(ffx);
+    const parsed = fn(CUSTOM.PARSE_DLSE, 'uint8', ['pointer', 'pointer', 'uint64', 'uint8'])(
+      already, bytes, ffx.byteLength, system.add(CUSTOM.SYS_PARSE_FLAG_OFFSET).readU8());
+    invalidate(system, id);
+    return { registered: false, why: 'already registered; re-parsed -> ' + parsed,
+      found: already, creatable: readPointer(already.add(0x18)) };
+  }
+
+  const allocator = readPointer(system.add(CUSTOM.SYS_ALLOCATOR_OFFSET));
+  const heapAlloc = fn(CUSTOM.HEAP_ALLOC, 'pointer', ['uint64', 'uint64', 'pointer']);
+  const data = heapAlloc(CUSTOM.EFFECT_DATA_BYTES, 8, allocator);
+  if (data.isNull()) throw new Error('heapAllocator returned null for SfxEffectData');
+  fn(CUSTOM.EFFECT_DATA_CTOR, 'void', ['pointer', 'pointer'])(data, allocator);
+  fn(CUSTOM.ADDREF, 'void', ['pointer'])(data.add(8));
+
+  const bytes = keep(ffx);
+  const flag = system.add(CUSTOM.SYS_PARSE_FLAG_OFFSET).readU8();
+  const parsed = fn(CUSTOM.PARSE_DLSE, 'uint8', ['pointer', 'pointer', 'uint64', 'uint8'])(
+    data, bytes, ffx.byteLength, flag);
+  if (parsed !== 1) return { registered: false, why: 'DLsE parse returned ' + parsed };
+
+  const name = keep(new Uint8Array(Array.from('f' + String(id).padStart(7, '0') + '.ffx\0')
+    .flatMap((c) => [c.charCodeAt(0), 0])).buffer);
+  const resource = heapAlloc(CUSTOM.RESOURCE_BYTES, 8, allocator);
+  if (resource.isNull()) throw new Error('heapAllocator returned null for SfxEffectResourceObject');
+  fn(CUSTOM.RESOURCE_CTOR, 'void', ['pointer', 'pointer', 'pointer', 'pointer'])(resource, system, name, data);
+  resource.add(0x10).writeS32(resource.add(0x10).readS32() + 1);
+  resource.add(0x14).writeS32(resource.add(0x14).readS32() + 1);
+  fn(CUSTOM.RESOURCE_START, 'void', ['pointer'])(resource);
+  invalidate(system, id);
+  return { registered: true, resource, found: lookup(manager, id), creatable: readPointer(data.add(0x18)) };
+}
+
+function aliveBits(block) {
+  return effectParts(block).map((p) => ((p.node.add(0x58).readU32() >>> 30) & 1));
+}
+
+// --------------------------------------------------------------------------------------------
+// The 'tweak' stage: per-stone colour and scale, written into the live effect after spawn
+// --------------------------------------------------------------------------------------------
+
+/// Effect root `+0xd0`: a float4 `0x140bfb140` fills from the per-id table as rgb * a, w = 1.
+const TWEAK_COLOUR_OFFSET = 0xd0;
+/// Effect node `+0x20..+0x4f`: the 48-byte transform `0x140a067c0` writes.
+const TWEAK_MATRIX_OFFSET = 0x20;
+const TWEAK_COLOUR = [0.0, 0.4, 3.0, 1.0];
+const TWEAK_SCALE = 3.0;
+const TWEAK_RECHECK_TICKS = 120;
+let tweak = null;
+
+const fmt = (values) => values === null ? 'unreadable' : values.map((v) => v.toFixed(3)).join(' ');
+
+/// Every live half of a block: `node = *(half + 0x10)`, `root = *(node + 0xe0 - 0x18)` -- the
+/// same walk `0x140a06aa0` and its four callers do.
+function effectParts(block) {
+  const parts = [];
+  for (const half of [0, SFX_CTRL_HALF_BYTES]) {
+    const node = readPointer(block.add(half + SFX_CTRL_NODE_OFFSET));
+    if (node === null || node.isNull()) continue;
+    const root = readPointer(node.add(0xe0 - 0x18));
+    if (root === null || root.isNull()) continue;
+    parts.push({ half, node, root });
+  }
+  return parts;
+}
+
+/// Which 9 of the 12 floats are the rotation/scale, found from where the translation sits.
+/// Rows-with-w-translation (3x float4) or four vec3 with translation last; anything else is null.
+function matrixLayout(m, position) {
+  const near = (a, b) => Math.abs(a - b) < 0.05;
+  if (near(m[3], position[0]) && near(m[7], position[1]) && near(m[11], position[2])) {
+    return [0, 1, 2, 4, 5, 6, 8, 9, 10];
+  }
+  if (near(m[9], position[0]) && near(m[10], position[1]) && near(m[11], position[2])) {
+    return [0, 1, 2, 3, 4, 5, 6, 7, 8];
+  }
+  return null;
+}
+
+function recheckTweak() {
+  if (tweak === null || tweak.checked || navTicks - tweak.spawnedAt < TWEAK_RECHECK_TICKS) return;
+  tweak.checked = true;
+  if (!live(tweak.at)) { console.log('[stone] recheck: tweaked stone is no longer live'); return; }
+  for (const c of tweak.colour) {
+    const now = readFloats(c.root.add(TWEAK_COLOUR_OFFSET), 4);
+    console.log('[stone] recheck root+0xd0 ' + fmt(now) + (now !== null &&
+      now.every((v, i) => Math.abs(v - c.wrote[i]) < 1e-4) ? '  KEPT' : '  OVERWRITTEN by the engine'));
+  }
+  for (const m of tweak.matrix) {
+    const now = readFloats(m.node.add(TWEAK_MATRIX_OFFSET), 12);
+    console.log('[stone] recheck node+0x20 ' + fmt(now) + (now !== null && m.wrote !== null &&
+      now.every((v, i) => Math.abs(v - m.wrote[i]) < 1e-4) ? '  KEPT' : '  OVERWRITTEN by the engine'));
+  }
 }
 
 // --------------------------------------------------------------------------------------------
@@ -1623,6 +1830,7 @@ function attach() {
           console.log('[stone] ' + asked + ' THREW: ' + error.message + '\n' + error.stack);
         }
       }
+      recheckTweak();
       if (STAGE !== 'follow' || passStopped !== null) return;
       if (route.planner === null && navSystemAt !== null) {
         try {
