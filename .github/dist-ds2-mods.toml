@@ -43,7 +43,8 @@ exe = "DarkSoulsII.exe"
 
 # `false` is the shipped default, and deliberately so -- loading a foreign binary into your game
 # is not something a default should do without being asked. Set it to `true` once Seamless is
-# installed, and start the game with `ds2-launcher.exe` rather than through Steam.
+# installed, and start the game with `ds2-launcher.exe` rather than through Steam. `[offline]`
+# below turns itself off while this is true, because co-op cannot connect through it.
 enabled = false
 
 # Where its DLL is. This is the path its own launcher uses, so leaving it alone is right for a
@@ -58,7 +59,7 @@ save_file_extension = "co2"
 # ---------------------------------------------------------------------------------------------
 # [offline] -- ON BY DEFAULT, AND UNDERSTAND WHAT YOU ARE TURNING OFF. Everything in this mod
 # patches the game's code in memory, which is what FromSoftware's matchmaking servers watch for.
-# These four keys keep you off them.
+# These four keys keep you off them. Ignored while `[seamless] enabled = true`.
 # ---------------------------------------------------------------------------------------------
 [offline]
 enabled = true

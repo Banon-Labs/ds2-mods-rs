@@ -433,8 +433,18 @@ fn install_intro_skip() {
 /// with no frame drawn -- the game has not created its `NexusRevolution Socket` thread yet, so the
 /// window is empty. Moving this call after the others would start narrowing it for no reason.
 fn install_offline() {
-    let config = offline::OfflineConfig::load();
+    let mut config = offline::OfflineConfig::load();
     log_line(format_args!("{}", config.describe()));
+    // The interlock `scripts/ds2-run.py` applies, here as well, because a player edits the toml and
+    // never runs that script. `[offline]` fronts the socket imports, so Seamless Co-op under it
+    // loads, reports success and never connects -- indistinguishable on screen from a broken mod.
+    if config.enabled && seamless::config().enabled {
+        config.enabled = false;
+        log_line(format_args!(
+            "{} off for this run: [seamless] is enabled, and co-op cannot connect through it",
+            ds2_offline::LOG_PREFIX
+        ));
+    }
     // RELAYED, not read, and BEFORE the early return so an off run explicitly turns it off rather
     // than relying on a default.
     //
