@@ -189,7 +189,7 @@ type SleepThunkFn = unsafe extern "system" fn(u32);
 /// frame-limiter candidate is called at all -- which is what makes reading the return address worth
 /// the naked thunk.
 static SLEEP_CALLERS: [CallerRow; SLEEP_CALLER_SLOTS] =
-    [const { CallerRow::EMPTY }; SLEEP_CALLER_SLOTS];
+    [const { CallerRow::empty() }; SLEEP_CALLER_SLOTS];
 
 /// One caller's row: its return address, then count and requested milliseconds over every thread,
 /// then the same two for calls made on [`BOOT_THREAD`] alone.
@@ -202,13 +202,17 @@ struct CallerRow {
 }
 
 impl CallerRow {
-    const EMPTY: Self = Self {
-        caller: AtomicU64::new(0),
-        count: AtomicU64::new(0),
-        ms: AtomicU64::new(0),
-        boot_count: AtomicU64::new(0),
-        boot_ms: AtomicU64::new(0),
-    };
+    /// A function rather than an associated `const`: a named constant holding atomics would be
+    /// copied fresh at every use, which is what `clippy::declare_interior_mutable_const` refuses.
+    const fn empty() -> Self {
+        Self {
+            caller: AtomicU64::new(0),
+            count: AtomicU64::new(0),
+            ms: AtomicU64::new(0),
+            boot_count: AtomicU64::new(0),
+            boot_ms: AtomicU64::new(0),
+        }
+    }
 
     fn add(&self, milliseconds: u32, boot_thread: bool) {
         self.count.fetch_add(1, Ordering::Relaxed);
@@ -488,9 +492,14 @@ unsafe fn describe_once(flow: *const u8) {
         };
         (list, count)
     };
+    // Whether the flow runs on the thread `install` recorded. The boot-thread sleep columns rest
+    // on that being the same thread; this is where it is checked rather than assumed.
     log(format_args!(
-        "{LOG_PREFIX} flow flow=0x{:016x} list=0x{:016x} registered={count}",
-        flow as usize, list as usize
+        "{LOG_PREFIX} flow flow=0x{:016x} list=0x{:016x} registered={count} \
+         on-boot-thread={}",
+        flow as usize,
+        list as usize,
+        on_boot_thread()
     ));
 }
 
