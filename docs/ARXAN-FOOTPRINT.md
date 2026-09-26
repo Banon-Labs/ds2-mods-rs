@@ -2,22 +2,55 @@
 
 Measured from `darksoulsii-deobf.bin` (build 9527516). Counts, not inferences.
 
+`darksoulsii-deobf.bin` and the shipped `DarkSoulsII.exe` are the same image: mapped to memory
+layout, every page of the two is byte-identical (`scripts/ds2-arxan-redirects.py --same-image`).
+Any difference between a count taken on one and a count taken on the other is a difference of
+method, never of bytes.
+
 ## The shape of it
 
+`scripts/ds2-arxan-redirects.py` reproduces every number here, and with `--ghidra` diffs them
+against the functions in the Ghidra DS2 program.
+
 ```
-.pdata functions                        95434   (all in .text #1)
-  ARXAN-REDIRECTED (e9 rel32 -> .text#2)  286
-  clean prologue                        95148
-distinct Arxan stub entry targets         286
+.pdata records (exception directory)     95434   (all in .text #1)
+  of which chained (a fragment, not a start)  32447
+  ARXAN-REDIRECTED (e9 rel32 -> .text#2)    286
+    primary records (a function start)        226
+    chained records (mid-function)             60
+
+Ghidra functions                          88374
+  ARXAN-REDIRECTED                          311   (Ds2ArxanStubs.java gives the same)
+in both lists                               190
+union                                       407   (407 distinct stub entry targets)
 ```
 
-Arxan owns **286 functions**, 0.3% of the binary. Each begins with an unconditional
-`e9 <rel32>` into `.text` #2 -- VA `0x141aaf000`-`0x141d43000` -- which is Arxan's own code
-section, the one carrying the elevated entropy noted in `PORTING.md`. Each redirect goes to its
-own distinct stub entry.
+A redirected entry begins with an unconditional `e9 <rel32>` into `.text` #2 -- VA
+`0x141aaf000`-`0x141d43000` -- which is Arxan's own code section, the one carrying the elevated
+entropy noted in `PORTING.md`. Every redirect in the union goes to its own distinct stub entry.
 
-dearxan independently finds **48 stubs**. 286 redirects into 48 stubs is consistent: several
-entry points chain into a shared check network.
+### Why the two counts differ, and why neither is the total
+
+The lists overlap in only 190 addresses, so the gap is not a matter of one side finding a few
+extra. Each method misses a class of redirect the other sees:
+
+- **Ghidra finds 121 that `.pdata` does not.** 120 of them are functions that no `.pdata` record
+  covers at all -- they sit in the gaps between unwind records, and Ghidra found them through a
+  call or other reference (`0x14014b8b0`, called from `assignPhantomProperties`, is one). The
+  last, `0x14038cea5`, lies inside the primary record that starts at `0x14038c210`.
+- **`.pdata` finds 96 that Ghidra does not.** 60 are chained records -- unwind entries for a
+  fragment partway through a function, not function starts -- whose first bytes are an Arxan
+  `e9`, so Arxan redirects mid-function blocks as well as entries. The other 36 are primary
+  records at which Ghidra never created a function; `0x14014bce0`, for example, is reached only
+  through data references and a computed jump out of Arxan's own code.
+
+So Arxan's redirects number **at least 407**, not 286 and not 311. Neither method is exhaustive:
+a redirected leaf function that nothing references directly and that has no unwind record would
+appear in neither list. To ask whether one address is redirected, read its first five bytes
+(`Ds2ArxanStubs.java <va>`), rather than looking it up in either list.
+
+dearxan independently finds **48 stubs**. Hundreds of redirects into 48 stubs is consistent:
+several entry points chain into a shared check network.
 
 ## Arxan took the hot functions
 
@@ -34,7 +67,7 @@ resolved calls -- the top two are **both Arxan-redirected**:
 | `0x00833dc0` | 1006 | `48 83 ec 28` | clean, but only 0x12 bytes long |
 
 That is not a coincidence -- it is Arxan deliberately covering high-value code. Detouring one of
-those 286 would mean writing over Arxan's own jump, which is the worst possible way to learn
+those redirects would mean writing over Arxan's own jump, which is the worst possible way to learn
 whether our hooks survive: the experiment would fail for a reason that has nothing to do with
 the question.
 
@@ -47,7 +80,7 @@ the question.
 - Prologue `48 89 5c 24 08` is a single 5-byte instruction, so MinHook's displaced-instruction
   relocation is the trivial case.
 - 0x47 bytes long -- ample room, no jump target inside the first five bytes.
-- Not in the 286.
+- Not redirected: it is in neither the `.pdata` list nor the Ghidra list, and its first bytes are its own prologue.
 
 Backup: **RVA `0x008389e0`**, same prologue shape, 1287 call sites, 0x4e bytes.
 
@@ -56,10 +89,14 @@ Backup: **RVA `0x008389e0`**, same prologue shape, 1287 call sites, 0x4e bytes.
 
 ## How this was derived
 
-`.pdata` gives every function start for free -- `RUNTIME_FUNCTION[]` at RVA `0x189a000`, size
-`0x117978`, 12 bytes each. Counting `e8 rel32` call targets that land exactly on one of those
-95434 starts filters essentially all false positives without disassembling 17 MB. Scripts are in
-the scratchpad; the numbers above are reproducible from the deobfuscated image alone, with no
+`.pdata` gives most function starts for free -- `RUNTIME_FUNCTION[]` at RVA `0x189a000`, 12
+bytes each. Bound it by the exception directory's size, not the `.pdata` section's: the section
+runs past the table, and that padding parses as six bogus records. About a third of the records
+are chained (a fragment of a function, not its start), and leaf functions have none, so the table
+is neither only starts nor every start. Counting `e8 rel32` call targets that land exactly on a
+record still filters essentially all false positives without disassembling the image. The
+redirect counts come from `scripts/ds2-arxan-redirects.py`; the call-site ranking came from a
+scratchpad script that was not kept. All of it is reproducible from the image alone, with no
 runtime and nothing that can be contaminated.
 
 ## What a redirected entry actually looks like

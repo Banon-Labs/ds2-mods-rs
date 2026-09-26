@@ -346,5 +346,9 @@ echo "  ds2-player-kind.py: OK"
 # file this repository never had.
 python3 scripts/ds2-frida-watch.py --selftest >/dev/null
 echo "  ds2-frida-watch.py: OK"
+# The Arxan redirect census. Its selftest builds a small PE in both layouts, so it needs no game
+# image; it pins the exception-directory bound, the chained-record flag, and the diff's reasons.
+python3 scripts/ds2-arxan-redirects.py --selftest >/dev/null
+echo "  ds2-arxan-redirects.py: OK"
 
 echo "== OK =="

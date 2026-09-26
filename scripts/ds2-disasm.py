@@ -19,9 +19,10 @@ WHAT IT ADDS over `objdump -D`:
 * `--follow` stops at the first `ret` at depth 0 instead of printing a fixed window that either
   truncates the function or runs past it into the next one.
 
-THE CAVEAT THAT GOVERNS EVERY ADDRESS HERE, same as its sibling scripts: the deobfuscated image
-is not the byte stream that runs. At the 286 Arxan-redirected entries this image shows recovered
-code where the live process holds a five-byte stub. Data (vtables, globals) is trustworthy; a
+THE CAVEAT THAT GOVERNS EVERY ADDRESS HERE, same as its sibling scripts: the image is the file on
+disk, not necessarily the byte stream that runs, and at an Arxan-redirected entry it holds only a
+five-byte `jmp` into Arxan's section -- `darksoulsii-deobf.bin` is byte-identical to the shipped
+exe, redirects included. Data (vtables, globals) is trustworthy; a
 function body must be checked with `scripts/ds2-arxan-chain.py` before anything is detoured onto
 it. See `docs/ARXAN-FOOTPRINT.md`.
 """
