@@ -189,6 +189,22 @@ static LAST_TICK_YAW_VALID: AtomicBool = AtomicBool::new(false);
 /// Frames on which the camera moved while a block was in force and nothing was being authored.
 static FOREIGN_MOTION_FRAMES: AtomicU64 = AtomicU64::new(0);
 
+/// Frames since the harness last authored anything. Starts high, so a run that has not authored
+/// yet gets no grace.
+#[cfg(windows)]
+static FRAMES_SINCE_AUTHORED: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(u32::MAX);
+
+/// Frames after the harness stops authoring during which the camera may still be carrying its
+/// push, and motion is not counted as foreign.
+///
+/// Measured on 2026-09-26: after `pad3` was released at full deflection the camera kept turning
+/// about 4.4 degrees a frame, and the check logged that as contamination although nothing but
+/// the harness had touched a control. The probe already waits this many frames for the same
+/// reason before it reports.
+#[cfg(windows)]
+const AUTHORED_COAST_FRAMES: u32 = 15;
+
 /// Advance the harness one frame: poll the command file, step the state machine, publish the
 /// result for the detours to stamp.
 ///
@@ -223,7 +239,18 @@ fn detect_foreign_motion(yaw_now: Option<f32>, frame: &drive::Frame) {
     };
     let had_previous = LAST_TICK_YAW_VALID.swap(true, Ordering::Relaxed);
     let previous = f32::from_bits(LAST_TICK_YAW.swap(now.to_bits(), Ordering::Relaxed));
-    if !had_previous || !frame.block || !frame.authored.is_empty() {
+    if !frame.authored.is_empty() {
+        FRAMES_SINCE_AUTHORED.store(0, Ordering::Relaxed);
+        return;
+    }
+    // Saturating, so the "never authored" marker stays at the top instead of wrapping to zero.
+    let since_authored = FRAMES_SINCE_AUTHORED
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+            Some(n.saturating_add(1))
+        })
+        .unwrap_or(u32::MAX)
+        .saturating_add(1);
+    if !had_previous || !frame.block || since_authored <= AUTHORED_COAST_FRAMES {
         return;
     }
     let moved = turn::wrap_degrees(now - previous).abs();
