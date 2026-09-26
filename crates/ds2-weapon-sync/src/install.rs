@@ -296,6 +296,15 @@ fn weapon_records(character: usize) -> Option<RemoteWeapons> {
     Some(out)
 }
 
+/// The live weapon entry for character-side slot `chr_slot`.
+///
+/// Records alternate hands (`r = index * 2 + hand`), live entries group them
+/// (`n = hand * 3 + index`). Read live: record 0 (right hand 1, the Dagger) was live entry 0 and
+/// record 1 (left hand 1, the shield) was live entry 3.
+const fn live_index(chr_slot: usize) -> usize {
+    (chr_slot % 2) * 3 + chr_slot / 2
+}
+
 /// A character's live weapon levels, `ChrAsmEquip +0x70` per weapon entry.
 fn live_levels(character: usize) -> Option<[u8; 6]> {
     let asm = read_ptr(character + ds2_rva::CHARACTER_CTRL_CHR_ASM_CTRL_OFFSET)?;
@@ -532,26 +541,45 @@ fn push(player: usize, cap: Option<u8>) {
     // than the patched entry runs the game's code only; the clamp has already been applied to the
     // request by `policy::clamp` below.
     let update: WeaponUpdate = unsafe { std::mem::transmute::<usize, WeaponUpdate>(raw) };
+    let records = weapon_records(player);
+    let live = live_levels(player);
     let mut pushed = Vec::new();
     for slot in 0..ds2_rva::WEAPON_SLOT_COUNT {
         let Some(weapon) = inventory_weapon(bag, slot) else {
             continue;
         };
         let level = policy::clamp(weapon.level, cap);
-        let mut request = Request([0u8; ds2_rva::WEAPON_UPDATE_REQUEST_SIZE]);
         let chr_slot = ds2_rva::WEAPON_INTERNAL_TO_CHR_SLOT[slot];
-        request.0[ds2_rva::WEAPON_UPDATE_REQUEST_SLOT_OFFSET..][..4]
-            .copy_from_slice(&chr_slot.to_le_bytes());
-        request.0[ds2_rva::WEAPON_UPDATE_REQUEST_ITEM_OFFSET..][..4]
-            .copy_from_slice(&weapon.item.to_le_bytes());
-        request.0[ds2_rva::WEAPON_UPDATE_REQUEST_DURABILITY_OFFSET..][..4]
-            .copy_from_slice(&weapon.durability_bits.to_le_bytes());
-        request.0[ds2_rva::WEAPON_UPDATE_REQUEST_LEVEL_OFFSET] = level;
-        request.0[ds2_rva::WEAPON_UPDATE_REQUEST_INFUSION_OFFSET] = weapon.infusion;
-        // SAFETY: game thread, after the net session update returned; `player` is the local
-        // PlayerCtrl read this frame, and the request is laid out exactly as `0x1401b66a0` lays
-        // out the one it passes (ds2-rva CHR_WEAPON_UPDATE).
-        unsafe { update(player, request.0.as_mut_ptr()) };
+        let carried = records.map(|records| records[chr_slot as usize]);
+        let live_level = live.map(|live| live[live_index(chr_slot as usize)]);
+        if carried == Some((weapon.item, level)) && live_level == Some(level) {
+            continue;
+        }
+        // Two calls, not one, and the first is what makes the second land. The record table's
+        // writer (0x1403463d0) keeps a new record only when the item id or the u16 at +0x0C
+        // differs from the old one, and the level sits in the byte after that u16: a level-only
+        // change with the same item is computed and thrown away. Measured: one push left the
+        // record at +10 while the live state took +3. The packet 61 receiver on every peer
+        // writes through the same function, so a peer would keep our old level too. Fists first
+        // changes the id; the real item at the new level then lands, here and on every peer.
+        for (item, item_level, infusion) in [
+            (ds2_rva::FISTS_ITEM_ID, 0, 0),
+            (weapon.item, level, weapon.infusion),
+        ] {
+            let mut request = Request([0u8; ds2_rva::WEAPON_UPDATE_REQUEST_SIZE]);
+            request.0[ds2_rva::WEAPON_UPDATE_REQUEST_SLOT_OFFSET..][..4]
+                .copy_from_slice(&chr_slot.to_le_bytes());
+            request.0[ds2_rva::WEAPON_UPDATE_REQUEST_ITEM_OFFSET..][..4]
+                .copy_from_slice(&item.to_le_bytes());
+            request.0[ds2_rva::WEAPON_UPDATE_REQUEST_DURABILITY_OFFSET..][..4]
+                .copy_from_slice(&weapon.durability_bits.to_le_bytes());
+            request.0[ds2_rva::WEAPON_UPDATE_REQUEST_LEVEL_OFFSET] = item_level;
+            request.0[ds2_rva::WEAPON_UPDATE_REQUEST_INFUSION_OFFSET] = infusion;
+            // SAFETY: game thread, after the net session update returned; `player` is the local
+            // PlayerCtrl read this frame, and the request is laid out exactly as `0x1401b66a0`
+            // lays out the one it passes (ds2-rva CHR_WEAPON_UPDATE).
+            unsafe { update(player, request.0.as_mut_ptr()) };
+        }
         pushed.push(format!("s{slot}:{}+{}->+{level}", weapon.item, weapon.level));
     }
     let verb = if cap.is_some() { "CAPPED" } else { "RESTORED" };
@@ -576,11 +604,17 @@ fn copies(bag: usize, player: usize) -> String {
             .map(|chr| format!("+{}", records[*chr as usize].1 & 0x0f))
             .collect()
     });
-    let live = live_levels(player).map_or_else(|| "?".to_string(), |l| format!("{l:?}"));
+    let live: Vec<String> = live_levels(player).map_or_else(Vec::new, |live| {
+        ds2_rva::WEAPON_INTERNAL_TO_CHR_SLOT
+            .iter()
+            .map(|chr| format!("+{}", live[live_index(*chr as usize)]))
+            .collect()
+    });
     format!(
-        "inventory=[{}] records=[{}] live={live}",
+        "inventory=[{}] records=[{}] live=[{}] (inventory slot order)",
         inventory.join(","),
-        records.join(",")
+        records.join(","),
+        live.join(",")
     )
 }
 
