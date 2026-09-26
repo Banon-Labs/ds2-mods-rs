@@ -561,6 +561,54 @@ pub const FE_DIALOG_VTABLE_COMMON_WINDOW: u32 = 0x010b_cff8;
 /// argument. Logged as a diagnostic; nothing branches on it here.
 pub const FE_DIALOG_KIND_OFFSET: usize = 0x0c;
 
+// The `common-window` instances, by kind.
+//
+// [`FE_DIALOG_KIND_OFFSET`] is the substate's own id ([`FE_SUBSTATE_ID_OFFSET`]), and one
+// `FeSubStateCommonWindow` class is instantiated many times by `FeStateTitle::v6` (`0x1400f72e0`),
+// each with its own id, cancel destination and message. So the class says nothing about which
+// message is on screen; the kind does. Each construction is
+// `ctor(obj, kind, cancel_dest, caption)` at `0x140104c00` with the message from
+// `FUN_140503620(0x19, id)`, category `0x19` being `titleflow.fmg` (`scripts/ds2-fmg.py`).
+
+/// Kind 6: "The game may not have been exited properly the last time you played." One button.
+///
+/// Built at `0x1400f75d3` (message `0x1adc0`, cancel destination `0x20`). Logged as a suppressed
+/// notice on real boots in `docs/DS2-TITLE-FLOW.md`
+/// (`suppressed screen=common-window kind=6  caption=0x20 options=-1`).
+pub const FE_COMMON_WINDOW_KIND_NOT_EXITED_PROPERLY: i32 = 6;
+
+/// Kind 62: "The DARK SOULS II service is not available ... Select CANCEL to start the game in
+/// offline mode".
+///
+/// The one two-edge box: cancel `0x39` retries the login, confirm `0x2a` goes
+/// offline. Answered only on an offline run, by destination, never by button name. Evidence:
+/// `docs/DS2-OFFLINE.md`, `suppressed screen=common-window kind=62 cancel-dest=0x39
+/// confirm-dest=0x2a edge=confirm-goes-offline`.
+pub const FE_COMMON_WINDOW_KIND_SERVICE_UNAVAILABLE: i32 = 62;
+
+/// Kind 70: "There is no new information." One button.
+///
+/// Built at `0x1400f7f8b` (message `0x33452`, cancel destination `0x47`, the top menu). Logged as a
+/// suppressed notice on real boots in `docs/DS2-TITLE-FLOW.md`
+/// (`suppressed screen=common-window kind=70 caption=0x47 options=-1`).
+pub const FE_COMMON_WINDOW_KIND_NO_NEW_INFORMATION: i32 = 70;
+
+/// Kind 82: "Failed to save game." One button, cancel destination `0x17` (title main).
+///
+/// Built at `0x1400f8391` (message `0xdbba2`). Earlier comments in `ds2-continue` and
+/// `ds2-save-file` read the `kind=82` line after a swap as "a confirm about the character"; the
+/// message id says it is a save failure. Shown, not suppressed: a failed save is news.
+pub const FE_COMMON_WINDOW_KIND_SAVE_FAILED: i32 = 82;
+
+/// Kind 88: "Failed to load character data." One button, cancel destination `0x55` (back to the
+/// character list).
+///
+/// Built at `0x1400f84a1`: `mov edx,0x58`, `lea r8d,[rdx-0x3]`, message `0x38271`. This is the box
+/// the hollow-slot escape ends on, and the box an earlier `hold()` comment called "confirming a
+/// character". Suppressing it turned every failed load into a list that accepts a press and does
+/// nothing, which is what the player reported. Shown, not suppressed.
+pub const FE_COMMON_WINDOW_KIND_LOAD_CHARACTER_FAILED: i32 = 88;
+
 /// **Destination substate id for the CANCEL edge.** `+0x10`, a signed WORD.
 ///
 /// This was recorded as a "caption/message id" and that was wrong. It is a substate id, and `v5`
