@@ -196,12 +196,101 @@ Each id below is an event in the file named, read with `scripts/ds2-emevd.py eve
   says what an event is for; the instructions are there to read, but their bank/index meanings are
   not mapped.
 
+## 4. Whether an applied effect is sent to other players
+
+Yes. In an online session, `applySpEffect` on a character this machine owns (the local player
+included) sends a SpEffect-sync packet for each effect it adds. Offline, nothing is sent. Nothing
+in the request turns the send off; only the id and the character decide it.
+
+### The packet
+
+- **Verified in binary.** Packet id `0x31` (49) is the SpEffect sync. `FUN_14051e3d0` allocates a
+  `NetP2pPacketSpEffect` (vtable `0x1410fb6c8`), stores it at `+0x48` of the packet table reached
+  through `BaseB + 0x8` (`BaseB` is the global at `0x141616cf8`; `0x140513230` returns that
+  field), and registers it with the `NetSessionManager` under id `0x31`. Its vtable slot `0x18`
+  (`0x14025d0a0`) sends through `NetSessionManager` slot `0x78` (to the whole session) or
+  `0x70` (to one player); slot `0x20` (`0x14025cef0`) is the receive handler.
+- **Verified in binary.** `0x14051e710(table, op, kind, handle, id, type, duration, via_host)`
+  builds the packet and calls that sender:
+
+  ```text
+  +0x00 u32  bits 0-1 kind (0 player, 1 enemy), bits 2-3 op (0 add, 1 remove),
+             bit 31 set when an enemy effect is sent to the host for it to forward
+  +0x04 u32  who: the session player number (kind 0) or the character's +0x110 id (kind 1)
+  +0x08 i32  SpEffect id
+  +0x0c i32  a second per-effect value (called type here; meaning unknown)
+  +0x10 f32  remaining duration
+  ```
+
+  With `via_host` set and this machine not the host (`[NetSessionManager + 0xa4] != 2`), only an
+  enemy packet is sent, and only to the host; the host's receive handler clears bit 31 and
+  forwards it to the session (`0x14025cfda`..`0x14025cff0`).
+
+### The send inside applySpEffect
+
+- **Verified in binary.** The worker `0x14022eb30` (reached from `applySpEffect` as section 1
+  describes; `rbx` is the object at `ChrSpEffectCtrl + 0x10`, `rdi` the request) first decides
+  whether the effect is synced, in `r15b`:
+  1. `0x140228860(id)` true (a hard-coded list; every constant read is in the enemy band,
+     `95146040`..`98830000`): not synced.
+  2. else `0x14023ca50(owner)` true (a lookup on the character's kind in the table at
+     `0x1410bfff3`): synced.
+  3. else `0x140228820(id)` true (`40500000`, `5400000`, `21210101`, `22510100`, `22510101`,
+     `40550000`, `40620000`): not synced.
+  4. else synced.
+- **Verified in binary.** A synced effect must pass `0x140228790(character)` or the whole call
+  returns `0` and applies nothing. It passes when there is no net manager
+  (`[GameManagerImp + 0x22f0]` null), when that manager's byte `+0x38` is `0`, when the character
+  is a player whose `[[chr + 0xe8] + 0x28]` is non-zero, or when it is an enemy whose entry in
+  `EnemyGeneratorManager` (`0x140419ab0`) has bit 0 of `+0x42` set.
+- **Verified in binary.** `+0x04` of the request is a repeat count: the body runs while
+  `esi < [rdi + 4]` (`0x141afc3ee`), and returns at once when it is `<= 0` (`0x141beb005`). Each
+  pass adds the effect with `0x14022fe50` and, if synced, calls `0x140228f60` at `0x14022ecdd`
+  with `(character, id, type, duration)`, but only when all of these hold: `[owner + 0x18]` is
+  zero (`0x14023cb50`), `0x14022fe50` returned a non-zero handle, and the duration from
+  `0x14022e820` is `>= 0`. That duration is the larger of the effect's own and `+0x08` of the
+  request, so `+0x08 = -1.0` means "the effect's own".
+- **Verified in binary.** `0x140228f60` returns without sending when `[GameManagerImp + 0x22f0]`
+  is null or `0x140513610` is true. `0x140513610` is true unless `BaseB + 0x18` reports an active
+  session (`0x1402c6eb0` or `0x1402c6d80` non-zero). It repeats the ownership test above, then:
+  for a player-type character (`0x140203be0`, table byte `0x1410bfff1 == 0`) it looks up the
+  session player number with `0x14051b5d0`, which returns `[table + 0x174]` when the character is
+  `GameManagerImp->PlayerCtrl`, and sends `op 0, kind 0, via_host 0`; for any other character it
+  sends `op 0, kind 1, who = [chr + 0x110], via_host 1`.
+- **Verified in binary.** Removals go the same way: `0x1402290d0` runs the same session and
+  ownership tests and sends `op 1` for each removed entry.
+- **Inferred.** For the local player online, step 4 applies to the bonfire id `110000010` and to
+  any id outside the two lists, `0x140228790` passes because `[[chr + 0xe8] + 0x28]` marks a
+  locally controlled player, and the packet goes to the whole session. The meaning of
+  `[chr + 0xe8] + 0x28` and of the manager's `+0x38` was not traced.
+- **Not traced.** Whether `0x14022fe50` rejects some requests on `+0x0d`, `+0x0e` or `+0x0f`
+  (which would return a zero handle and so skip the send). The worker itself never reads those
+  bytes; it passes the whole request to `0x14022fe50`.
+
+### Receiving an effect
+
+- **Verified in binary.** The handler `0x14025cef0` drops a packet whose length is not the full
+  layout above, and one with `kind >= 2`. Op `0` calls `0x140228a30`, op `1` calls `0x140228c00`.
+  For a player (`kind 0`) the character looked up by `who` (`0x14051b3c0`) must be the one that
+  sent the packet (`0x14051b380`), so a player can only sync effects on their own character. If
+  the character is not loaded yet the effect is queued (`0x1402c8040`) and later replayed by
+  `0x140228dc0`.
+- **Verified in binary.** A received add does not go through `applySpEffect`. It is applied only
+  when `0x140228790(character)` is false, that is, on a character this machine does not own, by
+  `0x14014bcc0` (`ChrSpEffectCtrl`, id, type, duration), whose body `0x14022e890` builds its own
+  request with bit 0 of `+0x0f` set and calls the same `0x14022fe50`. It never calls
+  `0x140228f60`, so a received effect is not sent again. Bit 0 of `+0x0f` therefore marks an
+  effect that came from the network; every local caller clears it.
+- **Inferred.** So a mod that calls `applySpEffect` on the local player's controller while online
+  broadcasts the effect to everyone in the session, and each of them applies it to their copy of
+  that player. Keeping it local needs a hook: on `0x140228f60`, on the sender `0x14051e710`, or
+  on the check `0x140513610`, and not a flag in the request.
+
 ## Still unknown
 
-- What `0x14022eb30` does with the request, including what `+0x04`, `+0x08` and `+0x0d` mean.
-- Whether an effect applied this way is sent to other players. `SpEffectNetCtrl` and
-  `NetP2pPacketSpEffect_spEffectSync` (`0x14025cef0`) exist; nothing here shows whether
-  `applySpEffect` reaches them.
+- What `+0x0d` and `+0x0e` of the request mean, and what `0x14022fe50` does with them.
+- Whether other players actually see an effect sent this way. The send path is read from the
+  binary; nothing was run with two machines.
 - Which thread the game calls `applySpEffect` on, and whether calling it from a hook on another
   thread is safe.
 - The id-to-event resolver, and what the game does with an id that has no event.
