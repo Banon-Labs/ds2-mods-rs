@@ -1157,7 +1157,8 @@ fn install_save_block() {
     }
 }
 
-/// Arm the deliberate crash test, if `<Game>/ds2-mods.toml` asked for one.
+/// Start the crash logger's late threads: the filter re-assert, the hang watchdog, and the
+/// deliberate crash test if `<Game>/ds2-mods.toml` asked for one.
 ///
 /// Called from the post-Arxan callback and NEVER from `DllMain`, for the same reason
 /// [`install_probe`] is: this runs at the entry point after `DllMain` has returned, so spawning a
@@ -1169,6 +1170,12 @@ fn arm_fault(config: crash_logging::CrashConfig) {
     // The re-assert first: it is the one that matters on an ordinary run, and on a crash-test run
     // it has to be scheduled before the fault it exists to make visible.
     if let Some(line) = crash_logging::schedule_filter_reinstall(config) {
+        log_line(format_args!("{LOG_PREFIX} {line}"));
+    }
+    // The hang watchdog starts here rather than in `install` for the same reason the re-assert
+    // does: its thread must not be created under the loader lock. It sleeps and then waits for
+    // `GameManagerImp` on its own thread, so this call returns at once.
+    if let Some(line) = crash_logging::start_hang_watchdog(config) {
         log_line(format_args!("{LOG_PREFIX} {line}"));
     }
     if let Some(line) = crash_logging::arm_deliberate_fault(config) {

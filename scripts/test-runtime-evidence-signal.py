@@ -187,6 +187,25 @@ def main() -> int:
               w2.signal("git commit -am 'docs: c' && git push"), game_code="0", pending="1")
         check("--all is game code", w2.signal("git push --all origin"), game_code="1")
 
+        # 5b. The 2026-09-26 refusal: game code committed and run, then a docs-only commit on top.
+        #     The run still covers every game-code commit on the branch, so it stays fresh.
+        w4 = World(Path(tmp) / "docs-on-top")
+        git(w4.repo, "checkout", "-q", "-b", "game-then-docs", env=w4.env)
+        (w4.repo / "crates" / "ds2-x" / "src" / "lib.rs").write_text("// changed\n")
+        git(w4.repo, "add", "-A", env=w4.env)
+        w4.commit("feat(ds2-x): y", offset=-50)
+        w4.write_log()
+        (w4.repo / "docs" / "a.md").write_text("after the run\n")
+        git(w4.repo, "add", "-A", env=w4.env)
+        w4.commit("docs: after the run", offset=100)
+        check("a docs commit after the run does not make the run stale",
+              w4.signal("git push -u origin game-then-docs"), game_code="1", fresh="1")
+        (w4.repo / "crates" / "ds2-x" / "src" / "lib.rs").write_text("// changed again\n")
+        git(w4.repo, "add", "-A", env=w4.env)
+        w4.commit("fix(ds2-x): z", offset=200)
+        check("a game-code commit after the run still makes it stale",
+              w4.signal("git push -u origin game-then-docs"), game_code="1", fresh="0")
+
         # 6. The whole path through the real engine: `cupcake eval` over this checkout's .cupcake/,
         #    in a repository shaped like the one the miss happened in. This is what proves cupcake
         #    hands the pending event to the signal on stdin -- if it did not, `pending` would stay

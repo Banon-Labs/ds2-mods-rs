@@ -65,6 +65,8 @@ pub mod log;
 pub mod turn;
 
 #[cfg(windows)]
+mod click;
+#[cfg(windows)]
 mod device;
 
 use std::sync::Mutex;

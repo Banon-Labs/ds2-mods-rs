@@ -22,6 +22,7 @@
 //! |---|---|
 //! | [`editor`] | is the field still open, and if not, did it end in a submit or a cancel |
 //! | [`clipboard`] | is pasted or copied text a link worth putting in the field |
+//! | [`dialog`] | the Win32 link dialog's template, its prefill, and what its answer means |
 //! | [`session`] | after a submit: import it, re-open it for correction, or stop asking |
 //! | [`row`] | is a latched request still backed by a field, and has a queued one gone unsubmitted |
 //!
@@ -35,6 +36,7 @@
 #![forbid(unsafe_code)]
 
 pub mod clipboard;
+pub mod dialog;
 pub mod editor;
 pub mod row;
 pub mod session;
