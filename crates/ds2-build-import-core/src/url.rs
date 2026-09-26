@@ -87,6 +87,11 @@ pub fn build_id_from_url(url: &str) -> Result<u32, UrlRejection> {
     let Some(rest) = strip_prefix_ignore_ascii_case(rest, "darksouls2") else {
         return Err(UrlRejection::NotSoulsplanner);
     };
+    // The game segment has to end here: `darksouls2253` is not `darksouls2/253`, and
+    // `darksouls2x` is some other page.
+    if !(rest.is_empty() || rest.starts_with(['/', '#', '?'])) {
+        return Err(UrlRejection::NotSoulsplanner);
+    }
     let rest = rest.strip_prefix('/').unwrap_or(rest);
 
     // A query string is someone else's business; the id ends where one begins.
@@ -164,6 +169,30 @@ mod tests {
         ] {
             assert_eq!(build_id_from_url(spelling), Ok(253), "{spelling}");
         }
+    }
+
+    /// The game segment ends at a separator: a digit run glued onto it is not an id.
+    #[test]
+    fn the_game_segment_must_end_before_the_id() {
+        for spelling in [
+            "https://soulsplanner.com/darksouls2253",
+            "soulsplanner.com/darksouls23/253",
+            "soulsplanner.com/darksouls2x/253",
+        ] {
+            assert_eq!(
+                build_id_from_url(spelling),
+                Err(UrlRejection::NotSoulsplanner),
+                "{spelling}"
+            );
+        }
+        assert_eq!(
+            build_id_from_url("soulsplanner.com/darksouls2#253"),
+            Err(UrlRejection::FragmentForm)
+        );
+        assert_eq!(
+            build_id_from_url("soulsplanner.com/darksouls2"),
+            Err(UrlRejection::Empty)
+        );
     }
 
     /// The fragment form is refused BEFORE the fetch, and says what to do instead.
