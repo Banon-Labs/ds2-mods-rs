@@ -103,7 +103,9 @@ namespace; `CSDlc` does not exist (section 6d).
 open opportunity in the port** and it is also the biggest thing that could fail: if the registry
 can be walked at runtime, name-to-class lookup comes back and partly replaces what FD4 singletons
 give DS3. If it only carries type metadata and no instance pointers, it gives nothing for
-singleton discovery. *Nothing in this survey establishes which.* See "First investigations".
+singleton discovery. It is the second: the registry can be walked and looked up by name, but its
+records are class metadata only, and no manager is registered. It gives a checked downcast, not
+singleton discovery. Evidence in `docs/DS2-DLRF-REGISTRY.md`.
 
 **(~) `game/` replaces `sprj/`, `fe/` replaces `app_menu/`.** Not renames -- different classes.
 Keeping the name `sprj` for a module containing no `Sprj*` class would be a lie in the directory
@@ -211,8 +213,9 @@ Numbered because the dependencies are real, not because a plan looks tidier numb
 
 7. **`dl::rf` investigation.** Can the `DLRF::DLRuntimeClass` registry be enumerated at runtime,
    and does a registration carry an instance pointer? If yes, singleton lookup gets much cheaper
-   and step 3 stops being per-manager work. If no, say so and stop. This is worth doing early
-   *as an investigation* and late *as code*.
+   and step 3 stops being per-manager work. If no, say so and stop. Answered: it can be
+   enumerated, a registration carries no instance pointer, and step 3 stays per-manager work
+   (`docs/DS2-DLRF-REGISTRY.md`).
 
 8. **`param`.** Purely a question of whether a DS2 paramdef set exists in a form
    `tools/param-generator` can eat. If it does, ~35000 lines appear for near-zero RE effort and
