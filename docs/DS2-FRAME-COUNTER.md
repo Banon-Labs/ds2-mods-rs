@@ -2,7 +2,9 @@
 
 Elden Ring's `hang.rs` (in `er-crash-logging-core`) rests on one dword: the one `MainUpdate`
 increments once per main-loop tick, at a fixed RVA in `eldenring.exe`. This is DARK SOULS II's
-equivalent, found statically. Nothing here has been read from a running game yet.
+equivalent, found statically. On 2026-09-26 it was read from a running game: it advanced once per
+frame through a load and through play, and the ported watchdog armed on it and reported a 40 s
+main-thread stall (`scripts/frida/stall-main-thread.js`) at the 30 s mark.
 
 Every claim is labelled:
 

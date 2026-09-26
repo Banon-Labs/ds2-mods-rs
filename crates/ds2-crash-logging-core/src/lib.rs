@@ -16,34 +16,27 @@
 //! | `ds2-crash-modules.txt` | install, and again on a fatal exception | every loaded module: base, span, PE timestamp, name |
 //! | `ds2-crash-minidump.dmp` | fatal exception only | every thread's stack, if `dbghelp` cooperates |
 //!
-//! Ported from `../er-mods-rs`'s `er-crash-logging-core`. Two things changed on the way and both
-//! matter more than the line count suggests:
+//! A freeze raises no exception, so the handlers above cannot see one. [`start_hang_watchdog`]
+//! starts the hang watchdog in `hang.rs`, which writes `ds2-crash-hang-latest.txt` and a minidump
+//! when the game's per-frame counter stops advancing.
 //!
-//! # Nothing here knows what game it is running in
+//! Ported from `../er-mods-rs`'s `er-crash-logging-core`.
 //!
-//! Deliberately, and this is what makes crash logging the first mod worth porting: it exercises
-//! the loader, the Arxan neutering and the log path end to end while needing **zero** knowledge
-//! of DARK SOULS II structures. Every address in a record is resolved against the module table
-//! the loader itself maintains (the PEB `InMemoryOrderModuleList`), so a fault reads as
-//! `nvwgf2umx.dll+0xead0c0` without this crate ever being told what modules to expect. There is
-//! no dependency on `ds2-rva` and no reason for one.
+//! # The exception path knows nothing about the game
 //!
-//! # The hang watchdog did NOT come across
+//! Every address in a fault record is resolved against the module table the loader itself
+//! maintains (the PEB `InMemoryOrderModuleList`), so a fault reads as `nvwgf2umx.dll+0xead0c0`
+//! without this crate being told what modules to expect. That half needs no knowledge of
+//! DARK SOULS II structures and uses nothing from `ds2-rva`.
 //!
-//! `er-crash-logging-core` ships a second module, `hang.rs`, that reports freezes -- which raise
-//! no exception and are therefore invisible to everything above. It is not ported, and not
-//! because of its size. Its three detectors all hang off two Elden Ring facts:
+//! # The hang watchdog does
 //!
-//! * a version-pinned RVA for the dword `MainUpdate` increments once per frame, and the name of
-//!   the executable that dword lives in; and
-//! * the field offsets of `CS::LoadingScreenData`, an object from a class hierarchy that
-//!   postdates this engine.
-//!
-//! Strip those out and what remains is a thread-suspension harness with nothing to watch. The
-//! equivalent for this game starts with finding DS2's own per-frame counter in the disassembly,
-//! which is reverse engineering nobody has done yet, and the address it produces would belong in
-//! `ds2-rva` rather than here. Writing the harness first would mean shipping a watchdog that can
-//! only ever report that it is disarmed.
+//! Its stall signal is the dword at `GameManagerImp + 0x104`, named in `ds2-rva` as
+//! [`ds2_rva::GAME_MANAGER_IMP`] and [`ds2_rva::GAME_MANAGER_FRAME_COUNTER_OFFSET`], and it only
+//! arms inside `DarkSoulsII.exe`. That is the one reason this crate depends on `ds2-rva`. Elden
+//! Ring's loading-screen detector did not come across: DARK SOULS II has no researched equivalent
+//! of `CS::LoadingScreenData`, so a load that stops progressing while frames keep advancing is not
+//! detected.
 
 use std::{fmt, path::PathBuf, sync::OnceLock};
 
@@ -95,6 +88,53 @@ impl Default for CrashLogConfig {
             module_label: DEFAULT_MODULE_LABEL,
         }
     }
+}
+
+mod hang;
+
+const DEFAULT_HANG_REPORT_FILE: &str = "ds2-crash-hang-latest.txt";
+const DEFAULT_HANG_MINIDUMP_FILE: &str = "ds2-crash-hang-minidump.dmp";
+const DEFAULT_HANG_STALL_SECONDS: u64 = 30;
+
+/// Where the hang watchdog writes, and how long the frame counter may stand still first.
+///
+/// Kept apart from [`CrashLogConfig`] because the watchdog starts later than the handlers: after
+/// the game's entry point rather than in `DllMain`.
+#[derive(Clone, Copy, Debug)]
+pub struct HangWatchdogConfig {
+    /// One stall's thread snapshot, rewritten per report. Relative to the game directory.
+    pub report_file_name: &'static str,
+    /// The minidump taken of the frozen process. Relative to the game directory.
+    pub minidump_file_name: &'static str,
+    /// Seconds without a frame before a stall is reported. 0 disables the watchdog.
+    pub stall_seconds: u64,
+}
+
+impl Default for HangWatchdogConfig {
+    fn default() -> Self {
+        Self {
+            report_file_name: DEFAULT_HANG_REPORT_FILE,
+            minidump_file_name: DEFAULT_HANG_MINIDUMP_FILE,
+            stall_seconds: DEFAULT_HANG_STALL_SECONDS,
+        }
+    }
+}
+
+/// Start the hang watchdog thread. Returns whether this call started it.
+///
+/// Call after [`install`], once `DllMain` has returned: the thread writes through the crash log
+/// and must not be created under the loader lock. It sleeps briefly, waits for `GameManagerImp`
+/// to exist, and refuses to arm until it has watched the frame counter advance, logging why if it
+/// gives up. A `stall_seconds` of 0 starts nothing. First call wins.
+#[cfg(windows)]
+pub fn start_hang_watchdog(config: HangWatchdogConfig) -> bool {
+    hang::start(config)
+}
+
+/// Host stub: there is no game to watch, so nothing starts.
+#[cfg(not(windows))]
+pub fn start_hang_watchdog(_config: HangWatchdogConfig) -> bool {
+    false
 }
 
 /// How far the host DLL got before the process died.
@@ -519,7 +559,7 @@ const CONTEXT_RAX_OFFSET: usize = 0x78;
 const CONTEXT_RCX_OFFSET: usize = 0x80;
 #[cfg(windows)]
 const CONTEXT_RDX_OFFSET: usize = 0x88;
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 const CONTEXT_RSP_OFFSET: usize = 0x98;
 /// `Rbp` sits one slot past `Rsp`. `er-crash-logging-core` never read it and reported a hardcoded
 /// `context_rbp=0x0` in every record -- a field that always lies is worse than an absent one.
@@ -529,7 +569,7 @@ const CONTEXT_RBP_OFFSET: usize = 0xa0;
 const CONTEXT_R8_OFFSET: usize = 0xb8;
 #[cfg(windows)]
 const CONTEXT_R9_OFFSET: usize = 0xc0;
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 const CONTEXT_RIP_OFFSET: usize = 0xf8;
 
 // MSVC C++ EH payload, as raised by `_CxxThrowException`. `ExceptionInformation` is
@@ -1042,7 +1082,7 @@ fn record_self_module(base: usize) {
 /// `addr` has no precondition -- the read is performed by `ReadProcessMemory` and fails closed on
 /// an unmapped range. The caller owns the meaning of the bytes.
 #[cfg(windows)]
-unsafe fn safe_read_u32(addr: usize) -> Option<u32> {
+pub(crate) unsafe fn safe_read_u32(addr: usize) -> Option<u32> {
     // SAFETY: `safe_read_*` takes any address and fails closed on an unmapped one -- it reads
     // through `ReadProcessMemory`, which validates the range in the kernel. A crash handler walks
     // structures the fault may already have corrupted, so that is exactly the read it needs.
@@ -2190,6 +2230,19 @@ mod tests {
         assert_eq!(cfg.modules_file_name, DEFAULT_MODULES_FILE);
         assert_eq!(cfg.minidump_file_name, DEFAULT_MINIDUMP_FILE);
         assert_eq!(cfg.module_label, DEFAULT_MODULE_LABEL);
+    }
+
+    /// The watchdog's own files carry this game's prefix, and its default window is not zero.
+    #[test]
+    fn hang_watchdog_defaults_are_ds2_names_and_on() {
+        let cfg = HangWatchdogConfig::default();
+        assert_eq!(cfg.report_file_name, "ds2-crash-hang-latest.txt");
+        assert_eq!(cfg.minidump_file_name, "ds2-crash-hang-minidump.dmp");
+        assert_eq!(cfg.stall_seconds, 30);
+        // Only the host stub is inert. Under the wine pass this is the real entry point, which
+        // spawns its thread and finds no DarkSoulsII.exe from inside it, so it is not called there.
+        #[cfg(not(windows))]
+        assert!(!start_hang_watchdog(cfg), "the host stub starts nothing");
     }
 
     /// The port must not have left an Elden Ring name in a default that lands on a player's disk.

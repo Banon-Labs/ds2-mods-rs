@@ -1,12 +1,13 @@
-# First-chance exception capture, as a library. The loadable DLL shell is `ds2-crash-logging`.
+# First-chance exception capture and a hang watchdog, as a library. The loadable DLL shell is
+# `ds2-crash-logging`.
 #
-# Depends on `ds2-game-base` and nothing else: the fault-safe readers and the fresh-per-run file
-# logger come from there, so this crate adds only Win32 exception plumbing on top.
+# The fault-safe readers and the fresh-per-run file logger come from `ds2-game-base`, so this crate
+# adds Win32 exception plumbing on top. Symbolizing a fault resolves the faulting module and an
+# offset into it from the loaded image at runtime -- the PEB module list gives base, span and name --
+# so the exception path has no address or layout in it to go stale.
 #
-# It deliberately does NOT depend on `ds2-rva`, and needs nothing from it. Symbolizing a fault
-# here means resolving the faulting module and an offset into it from the LOADED image at
-# runtime -- the PEB module list gives base, span and name -- so there is no address, offset or
-# structure layout in this crate to get wrong when the game updates.
+# `ds2-rva` is here for the hang watchdog alone: its stall signal is the per-frame counter at
+# `GameManagerImp + 0x104`, and that address is a fact about the game, which lives in `ds2-rva`.
 [package]
 name = "ds2-crash-logging-core"
 version.workspace = true
@@ -20,6 +21,7 @@ name = "ds2_crash_logging_core"
 
 [dependencies]
 ds2-game-base.workspace = true
+ds2-rva.workspace = true
 
 [lints]
 workspace = true
