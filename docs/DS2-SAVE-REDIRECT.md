@@ -268,8 +268,8 @@ No validation of the save being loaded. A guard that refuses a save whose soul m
 for its level was scoped and partly reversed -- soul memory is `sPlayerParam+0xF4`
 (`total_get_soul_1`, written by `addSoul` at `0x14038ab40`, capped at 999,999,999), and the
 souls-per-level table is `PlayerLevelUpSoulsParam`, param index `0x27`, whose container is
-`CharacterManager+0x580`. Two pieces are missing: the row format of `ParamFileResourceObject`, and
-the attributes-to-level relation (DS2 has no level field -- `sPlayerParam` carries
-`attributes: short[11]` and derives it; `RelatePhysicalStatToLevelStatParam`, index `0x28`, is the
-likely home of the rule). No primary source was found for FromSoftware's actual ban criteria, so
-the specification for such a guard is presently folklore rather than fact.
+`CharacterManager+0x580`. The param row format, the cost function and the stats-to-level rule
+(`sPlayerParam+0xD0`, `max(1, sum of the nine stats - 53)`) are now read out of the binary in
+[DS2-SOUL-LEVEL.md](DS2-SOUL-LEVEL.md); the guard itself is not written. No primary source was
+found for FromSoftware's actual ban criteria, so the specification for such a guard is presently
+folklore rather than fact.
