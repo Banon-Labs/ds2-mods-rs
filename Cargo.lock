@@ -599,6 +599,7 @@ dependencies = [
 name = "ds2-item-warn"
 version = "0.1.0"
 dependencies = [
+ "darksouls2",
  "ds2-game-base",
  "ds2-hook",
  "ds2-rva",

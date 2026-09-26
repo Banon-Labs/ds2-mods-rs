@@ -8950,28 +8950,8 @@ pub const FE_ITEM_PARAM_WEAPON_REQUIREMENTS: [u32; 4] = [0x33, 0x34, 0x35, 0x36]
 /// The one of [`FE_ITEM_PARAM_WEAPON_REQUIREMENTS`] that a two-handed grip halves: Strength.
 pub const FE_ITEM_PARAM_WEAPON_REQUIRED_STRENGTH: u32 = 0x33;
 
-/// `PlayerCtrl -> ChrAsmCtrl`. `+0x378`.
-///
-/// `PlayerCtrl` vtable (`0x1410e4bb8`) slot `0x120` is `0x1403126b0`, in full
-/// `48 8b 81 78 03 00 00 c3` -- `mov rax,[rcx+0x378]; ret`.
-pub const PLAYER_CTRL_CHR_ASM_CTRL_OFFSET: usize = 0x378;
-
-/// `ChrAsmCtrl -> equip object`. `+0x28`.
-///
-/// `ChrAsmCtrl` vtable (`0x1410e0a38`) slot `0x70` is `0x1401513d0`, in full `48 8b 41 28 c3` --
-/// `mov rax,[rcx+0x28]; ret`. The object is built by `FUN_140347970` into `this[5]` of
-/// `FUN_140338e40`, and it is what `FUN_14034a980` walks.
-pub const CHR_ASM_CTRL_EQUIP_OFFSET: usize = 0x28;
-
-/// The `i32` grip state inside the equip object. `+0x10`.
-///
-/// `FUN_140347970` stores `1` there at `0x140347994`; `FUN_14034f470` rewrites it from the
-/// power-stance resolver `FUN_140350170`; `FUN_14034a980` passes it to the mechanics requirement
-/// check `FUN_14034d3c0`, which halves the Strength requirement (`u16`, `shr cx,1` at
-/// `0x14034d44c`) when `grip - 2 < 2`. `1` is one-handed, `2`/`3` two-handed, `4..=6` power stance.
-pub const EQUIP_GRIP_OFFSET: usize = 0x10;
-
-/// The grip states [`EQUIP_GRIP_OFFSET`] holds while two-handing: the halving range `2..=3`.
+/// The grip states `darksouls2::game::chr::ChrAsmEquip::grip` holds while two-handing: the halving
+/// range `2..=3`.
 pub const EQUIP_GRIP_TWO_HANDED: std::ops::RangeInclusive<i32> = 2..=3;
 
 /// `FUN_14003c2d0(item, out)`. RVA `0x0003c2d0`. `FeItemData` -> the source descriptor.
