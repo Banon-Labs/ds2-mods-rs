@@ -114,6 +114,20 @@ def frida_evidence_log(kind: str) -> Path:
     return path
 
 
+# git_block_main_commit judges a commit into ANOTHER repository by the branch that repository is
+# on (bd ds2-mods-rs-qzd). Two throwaway checkouts outside this repo, one per branch that matters,
+# resolved for real by .cupcake/signals/commit_target_branches.sh -- no override stands in for it.
+_OTHER_REPOS_DIR = Path(tempfile.mkdtemp(prefix="cupcake-other-repos-"))
+OTHER_REPO_FEATURE = _OTHER_REPOS_DIR / "feature"
+OTHER_REPO_MAIN = _OTHER_REPOS_DIR / "main"
+
+
+def make_other_repos() -> None:
+    for path, branch in ((OTHER_REPO_FEATURE, "ds2-paramdefs"), (OTHER_REPO_MAIN, "main")):
+        if not (path / ".git").exists():
+            subprocess.run(["git", "init", "-q", "-b", branch, str(path)], check=True)
+
+
 def pr_view(body_fixture: str, head: str = STAMP_SHA) -> str:
     text = (REPO_ROOT / STAMP_FIXTURES / body_fixture).read_text(encoding="utf-8")
     return json.dumps({
@@ -266,6 +280,31 @@ def cases() -> list[PolicyCase]:
             "allow-commit-on-feature-branch",
             True,
             'git commit -m "wip"',
+        ),
+        # Another repository's checkout, with this one on main (bd ds2-mods-rs-qzd).
+        PolicyCase(
+            "allow-commit-in-other-repo-feature-branch-by-dash-c",
+            True,
+            f"git -C {OTHER_REPO_FEATURE} commit -q -F /tmp/msg.txt",
+            current_branch="main",
+        ),
+        PolicyCase(
+            "allow-commit-in-other-repo-feature-branch-after-cd",
+            True,
+            f"cd {OTHER_REPO_FEATURE} && git commit -q -F /tmp/msg.txt",
+            current_branch="main",
+        ),
+        PolicyCase(
+            "deny-commit-in-other-repo-main-by-dash-c",
+            False,
+            f"git -C {OTHER_REPO_MAIN} commit -m wip",
+            current_branch="main",
+        ),
+        PolicyCase(
+            "deny-commit-in-other-repo-main-after-cd",
+            False,
+            f"cd {OTHER_REPO_MAIN} && git commit -m wip",
+            current_branch="main",
         ),
         # --- git_block_main_push ---------------------------------------------------------------
         PolicyCase("deny-push-origin-main", False, "git push origin main"),
@@ -719,6 +758,7 @@ def main() -> int:
 
     cases_to_run = cases()
     frida_evidence_log("proven")  # written once, before the workers race to it
+    make_other_repos()
 
     max_workers = min(8, max(1, len(cases_to_run)))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
