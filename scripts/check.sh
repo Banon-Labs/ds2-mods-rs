@@ -304,6 +304,12 @@ else
   # launcher, because `git commit ... && git push` was one command and the commit did not exist yet
   # when the hook looked. `opa test` above cannot see that; this can.
   python3 scripts/cupcake_push_scope.py --selftest | tail -1
+  # Which checkout the push runs in: `cd <worktree> && git push` was measured in the main checkout
+  # on 2026-09-26 and refused although that worktree's build was the one staged and run.
+  python3 scripts/cupcake_push_target_repo.py --selftest | tail -1
+  # Whether a ref's crate changes are comments only, by lexing both sides; a lexer that drifts into
+  # reading a string literal as a comment would wave real code through.
+  python3 scripts/cupcake_comment_only.py --selftest | tail -1
   python3 scripts/test-runtime-evidence-signal.py
   # The fix-claim guard's deciding half. Its Rego suite pins what the policy does with a facts line;
   # this pins where the facts line comes from -- which sentences are claims, which artifacts count
