@@ -66,6 +66,12 @@ The body is where the evidence goes: the run, the disassembly, the measurement, 
 assumed and turned out to be false. A blank line separates it from the header. Footers are ordinary
 git trailers and go at the end, the `Co-Authored-By` line among them.
 
+A `feat`, `fix`, `perf` or `refactor` commit that changes a `.rs` file under `crates/` must say in
+its body whether that code has run in the game: `Not yet run in the game.`, or what a run measured,
+with the log line. The commit-msg hook refuses one that says neither. It does not try to tell a
+claim about behaviour from any other sentence; it asks for the one fact a reader needs to weigh the
+rest. It judges only the commit being made, not a branch's history.
+
 Track work in beads and describe the behaviour in the message. A commit body pointing at an issue id
 instead of saying what changed is a dangling reference aimed at a database the reader of a clone does
 not have.
