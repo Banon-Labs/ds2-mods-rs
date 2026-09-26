@@ -1037,18 +1037,64 @@ def stale_sources() -> list[Path]:
     `BUILT_DLL`, and a DLL built from older code is the one failure that produces a confident,
     well-formatted, entirely wrong verdict. `--release` is the profile that gets staged; building
     `dev` leaves this file untouched and is exactly how the mismatch arises.
+
+    Only crates `ds2-loader` actually links are counted. A host-only crate the loader does not
+    depend on (`ds2-build-url-core`, say) can be newer than the DLL after a merge, and a loader
+    build does not relink for it, so counting it refused a launch no rebuild could satisfy.
     """
     if not BUILT_DLL.is_file():
         return []
     built = BUILT_DLL.stat().st_mtime
+    linked = loader_crate_dirs()
     newer = []
     for pattern in SOURCE_GLOBS:
         for path in REPO_ROOT.glob(pattern):
             if "target" in path.parts:
                 continue
+            if linked is not None and path.parts[len(REPO_ROOT.parts)] == "crates":
+                crate_dir = REPO_ROOT / "crates" / path.parts[len(REPO_ROOT.parts) + 1]
+                if crate_dir not in linked:
+                    continue
             if path.is_file() and path.stat().st_mtime > built:
                 newer.append(path)
     return newer
+
+
+def loader_crate_dirs() -> set[Path] | None:
+    """The workspace crate directories in `ds2-loader`'s dependency closure, for the DLL target.
+
+    `None` when cargo cannot answer, and then every crate counts: over-refusing a launch costs a
+    rebuild, while under-counting stages a stale DLL.
+    """
+    try:
+        out = subprocess.run(
+            ["cargo", "metadata", "--format-version", "1",
+             "--filter-platform", "x86_64-pc-windows-msvc"],
+            cwd=REPO_ROOT, capture_output=True, text=True, timeout=60, check=True,
+        ).stdout
+        meta = json.loads(out)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    packages = {p["id"]: p for p in meta["packages"]}
+    nodes = {n["id"]: n for n in (meta.get("resolve") or {}).get("nodes", [])}
+    root = next((i for i, p in packages.items() if p["name"] == "ds2-loader"), None)
+    if root is None or root not in nodes:
+        return None
+    seen: set[str] = set()
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        stack.extend(d["pkg"] for d in nodes.get(current, {}).get("deps", []))
+    crates = (REPO_ROOT / "crates").resolve()
+    dirs = set()
+    for package_id in seen:
+        manifest = Path(packages[package_id]["manifest_path"]).resolve().parent
+        if manifest.parent == crates:
+            dirs.add(REPO_ROOT / "crates" / manifest.name)
+    return dirs
 
 
 def preflight(dry_run: bool) -> list[str]:
