@@ -165,8 +165,8 @@ Elden Ring is everywhere:
 
 All three of its detectors hang off those. Strip them and what is left is a thread-suspension
 harness with nothing to watch. The DS2 equivalent starts in the disassembly, with a per-frame
-counter nobody has found yet, and the address it produced would belong in `ds2-rva` rather than
-in a crash logger. Porting the harness first would have shipped a watchdog whose only possible
+counter -- found statically since, and not yet confirmed live, in `DS2-FRAME-COUNTER.md` -- and
+the address it produced would belong in `ds2-rva` rather than in a crash logger. Porting the harness first would have shipped a watchdog whose only possible
 report is that it is disarmed.
 
 Three smaller constants that were quietly wrong rather than obviously so:
