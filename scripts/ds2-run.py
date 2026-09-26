@@ -315,6 +315,12 @@ KEY_ITEM_WARN_ENABLED = "enabled"
 #: Mirrors `LOG_PREFIX` in `crates/ds2-item-warn/src/lib.rs`. Grep for it when a run disappoints.
 ITEM_WARN_LOG_PREFIX = "ds2-item-warn:"
 
+#: Mirrors `CONFIG_SECTION` in `crates/ds2-loader/src/voice_chat.rs`. Off unless `--voice-chat`
+#: asks for it, matching the DLL's own default; without this section no launch could turn it on.
+VOICE_CHAT_SECTION = "voice_chat"
+KEY_VOICE_CHAT_ENABLED = "enabled"
+VOICE_CHAT_LOG_PREFIX = "ds2-voice-chat:"
+
 #: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/soul_memory_guard.rs`. OFF by
 #: default here, matching the DLL; `--soul-memory-guard` turns it on.
 SOUL_MEMORY_GUARD_SECTION = "soul_memory_guard"
@@ -1178,6 +1184,7 @@ def config_text(
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
     item_warn: bool = False,
+    voice_chat: bool = False,
     hp_gauge: bool = True,
     seamless: bool = False,
     seamless_dll: str = SEAMLESS_DEFAULT_DLL,
@@ -1711,6 +1718,12 @@ def config_text(
 # Grep the log for `{ITEM_WARN_LOG_PREFIX}`; it names every site it patched and every one it refused.
 {KEY_ITEM_WARN_ENABLED} = {str(item_warn).lower()}
 
+[{VOICE_CHAT_SECTION}]
+# STARTUP-ONLY. A keyboard key (default F8) that toggles the game's own Options > Game > Voice chat
+# setting, drawn on the HUD by `ds2-voice-chat`. Off unless `--voice-chat` asked for it. The key is
+# `key` in this section; leaving it out keeps the default. Grep the log for `{VOICE_CHAT_LOG_PREFIX}`.
+{KEY_VOICE_CHAT_ENABLED} = {str(voice_chat).lower()}
+
 [{HP_GAUGE_SECTION}]
 # STARTUP-ONLY. The HP bar and damage number floating over other characters, drawn by
 # `ds2-hp-gauge`: the bar grown and moved to sit centred over the target, and the number grown,
@@ -1948,6 +1961,7 @@ def write_config(
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
     item_warn: bool = False,
+    voice_chat: bool = False,
     hp_gauge: bool = True,
     seamless: bool = False,
     seamless_dll: str = SEAMLESS_DEFAULT_DLL,
@@ -1990,6 +2004,7 @@ def write_config(
         inventory_sort_key,
         inventory_sort_pad,
         item_warn,
+        voice_chat,
         hp_gauge,
         seamless,
         seamless_dll,
@@ -2104,6 +2119,7 @@ def dry_run(
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
     item_warn: bool = False,
+    voice_chat: bool = False,
     hp_gauge: bool = True,
     seamless: bool = False,
     seamless_dll: str = SEAMLESS_DEFAULT_DLL,
@@ -2164,6 +2180,7 @@ def dry_run(
             inventory_sort_key,
             inventory_sort_pad,
             item_warn,
+            voice_chat,
             hp_gauge,
             seamless,
             seamless_dll,
@@ -2220,6 +2237,7 @@ def dry_run(
                 inventory_sort_key=inventory_sort_key,
                 inventory_sort_pad=inventory_sort_pad,
                 item_warn=item_warn,
+                voice_chat=voice_chat,
                 hp_gauge=hp_gauge,
                 seamless=seamless,
                 seamless_dll=seamless_dll,
@@ -2777,6 +2795,7 @@ def launch(
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
     item_warn: bool = False,
+    voice_chat: bool = False,
     hp_gauge: bool = True,
     seamless: bool = False,
     seamless_dll: str = SEAMLESS_DEFAULT_DLL,
@@ -2832,6 +2851,7 @@ def launch(
         inventory_sort_key,
         inventory_sort_pad,
         item_warn,
+        voice_chat,
         hp_gauge,
         seamless,
         seamless_dll,
@@ -4309,6 +4329,15 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--voice-chat",
+        dest="voice_chat",
+        action="store_true",
+        help=(
+            "turn on ds2-voice-chat: a keyboard key (F8 unless [voice_chat] key says otherwise) "
+            "toggles the game's own Voice chat option. Off without this flag, matching the DLL."
+        ),
+    )
+    parser.add_argument(
         "--item-warn",
         dest="item_warn",
         action="store_true",
@@ -4636,6 +4665,7 @@ def main() -> int:
             args.inventory_sort_key,
             args.inventory_sort_pad,
             args.item_warn,
+            args.voice_chat,
             args.hp_gauge,
             args.seamless,
             args.seamless_dll,
@@ -4677,6 +4707,7 @@ def main() -> int:
         args.inventory_sort_key,
         args.inventory_sort_pad,
         args.item_warn,
+        args.voice_chat,
         args.hp_gauge,
         args.seamless,
         args.seamless_dll,
