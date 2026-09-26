@@ -1,0 +1,164 @@
+name: gate
+
+# THE REPO GATE, ON EVERY PULL REQUEST AND EVERY PUSH TO MAIN: `scripts/check.sh`, unmodified,
+# with every tool it needs installed. Until this file existed nothing ran check.sh except a human
+# or an agent who remembered to, so a pull request could be merged without fmt, clippy, the docs
+# lint, the cupcake policy suites or the launcher selftest ever having run.
+#
+# NEITHER CUPCAKE_SKIP NOR WINE_SKIP IS SET HERE, AND NEITHER MAY BE. check.sh treats a missing
+# `opa`, `cupcake` or `wine` as a hard failure precisely so that a check which quietly did nothing
+# cannot look enforced; the two variables are the deliberate, visible opt-outs for a human who knows
+# what they are skipping. A workflow that set them would be exactly the silent skip the script was
+# written to refuse. If a tool below fails to install, the run goes red, which is the point.
+#
+# TWO LEGS, because check.sh has two modes and they do not share a verdict:
+#
+#   check          `bash scripts/check.sh` -- commit messages, PR template, allow debt, fresh-run
+#                  logs, rustfmt, clippy and rustdoc against the Windows target, docs/ references,
+#                  the cupcake policy suites (opa test, cupcake verify, the engine-driven tests),
+#                  and the launcher/script selftests.
+#   host-tests     `bash scripts/check.sh --host-tests` -- all of the above, plus `cargo test` on the
+#                  game-free crates and the cfg(windows) test binaries executed under wine. This is
+#                  the only mode in which wine runs at all.
+#
+# `fail-fast: false` so one leg going red never cancels the other and hides its verdict.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# A newer push to the same pull request supersedes the older run. Runs on main are never cancelled,
+# so every main commit keeps a verdict.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  TARGET: x86_64-pc-windows-msvc
+  # Same pin as release.yml, and it also keys the xwin CRT/SDK cache below.
+  CARGO_XWIN_VERSION: 0.23.0
+  # Same sibling, same pin, same reason as release.yml: the root manifest carries
+  # `dearxan = { path = "../dearxan" }`, so cargo cannot load the workspace without it.
+  DEARXAN_REV: ccfefc47932389fa3b1e05206a1e73a85dc3265b
+  DEARXAN_REMOTE: https://github.com/Banon-Labs/dearxan.git
+  # The versions installed on the developer machine this gate is run on by hand (`opa version` ->
+  # 1.16.1; `cupcake --version` -> 0.5.2, built from the Banon-Labs fork at this commit, which is
+  # upstream 27b94b8 plus one validator fix). `opa test` and `cupcake verify` decide whether a
+  # guard fires, so CI running a different engine from the developer tree would be a gate whose
+  # verdict drifts. Bump these when the developer tree bumps.
+  OPA_VERSION: v1.16.1
+  CUPCAKE_REMOTE: https://github.com/Banon-Labs/cupcake.git
+  CUPCAKE_REV: b028029f42eeaff08f3cb997dae45dc923ef2a20
+  # Local is 3.14. The runner's system python3 is older, and a script that uses a newer stdlib
+  # feature would then fail here and pass locally for no reason worth debugging.
+  PYTHON_VERSION: "3.14"
+  BD_VERSION: 1.0.4
+
+jobs:
+  gate:
+    name: ${{ matrix.leg }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - leg: check
+            args: ""
+          - leg: host-tests
+            args: --host-tests
+    steps:
+      # fetch-depth: 0 because check.sh's first step runs `git merge-base origin/main HEAD` to
+      # find the branch's own commits; a shallow clone has no merge base and no origin/main.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check out dearxan as a sibling
+        run: |
+          git clone "$DEARXAN_REMOTE" "$GITHUB_WORKSPACE/../dearxan"
+          git -C "$GITHUB_WORKSPACE/../dearxan" checkout "$DEARXAN_REV"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      # clang/lld/llvm are what cargo-xwin drives. wine executes the cfg(windows) test binaries in
+      # the host-tests leg; it is installed in both legs so the two legs differ only in check.sh's
+      # own argument.
+      - name: Install the cross-compile toolchain and wine
+        run: |
+          sudo apt-get install -y --no-install-recommends clang lld llvm wine \
+            || { sudo apt-get update && sudo apt-get install -y --no-install-recommends clang lld llvm wine; }
+          wine --version
+
+      # rust-toolchain.toml names the channel, components (rustfmt, clippy) and the Windows target;
+      # this installs exactly that instead of restating it.
+      - name: Install Rust from rust-toolchain.toml
+        run: |
+          rustup toolchain install
+          rustc --version
+          cargo clippy --version
+          cargo fmt --version
+
+      - name: Install cargo-xwin
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-xwin@${{ env.CARGO_XWIN_VERSION }}
+
+      - name: Cache the Windows CRT and SDK
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/cargo-xwin
+          key: xwin-sdk-${{ runner.os }}-cargo-xwin-${{ env.CARGO_XWIN_VERSION }}
+
+      # From the release asset, pinned, and checked: without `-f` a redirector's error page would be
+      # written over the binary and every policy step would then fail to parse.
+      - name: Install OPA (pinned)
+        run: |
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 -o /tmp/opa \
+            "https://github.com/open-policy-agent/opa/releases/download/${OPA_VERSION}/opa_linux_amd64_static"
+          sudo install -m 0755 /tmp/opa /usr/local/bin/opa
+          opa version | grep -qx "Version: ${OPA_VERSION#v}"
+
+      # No release exists for 0.5.2 at all, so it is built from source; the binary is cached on the
+      # rev so the build only runs when CUPCAKE_REV moves.
+      - name: Cache the cupcake binary
+        id: cache-cupcake
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cupcake
+          key: cupcake-${{ runner.os }}-${{ env.CUPCAKE_REV }}
+
+      - name: Build cupcake (pinned)
+        if: steps.cache-cupcake.outputs.cache-hit != 'true'
+        run: cargo install --git "$CUPCAKE_REMOTE" --rev "$CUPCAKE_REV" cupcake-cli --locked
+
+      - name: Check cupcake
+        run: cupcake --version | grep -qx 'cupcake 0.5.2'
+
+      # scripts/check-allow-debt.py runs `~/.local/bin/bd show <id>` for every `# DEBT: <id>` above an
+      # `#[allow]`, so the gate needs bd AND this repo's issue database, or an allow naming a closed
+      # or invented issue would pass. The database is not in git; `bd bootstrap` clones it from the
+      # `sync.remote` in .beads/config.yaml, a public DoltHub repository, so this needs no secret.
+      # bd is the developer tree's version (`bd version` -> 1.0.4).
+      - name: Install bd and clone the issue database
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
+            "https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/beads_${BD_VERSION}_linux_amd64.tar.gz" \
+            | tar -xz -C "$HOME/.local/bin" bd
+          "$HOME/.local/bin/bd" version | grep -q "bd version ${BD_VERSION} "
+          "$HOME/.local/bin/bd" bootstrap --yes
+          "$HOME/.local/bin/bd" count
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.leg }}
+
+      - name: scripts/check.sh ${{ matrix.args }}
+        run: bash scripts/check.sh ${{ matrix.args }}
