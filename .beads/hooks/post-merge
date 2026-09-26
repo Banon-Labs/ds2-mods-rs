@@ -1,4 +1,7 @@
 #!/usr/bin/env sh
+# Not run in this repository, for the reason given in post-checkout: the import reads a gitignored
+# export that a merge never changes, so all it can do is put stale rows back over newer ones.
+exit 0
 # --- BEGIN BEADS INTEGRATION v1.0.4 ---
 # This section is managed by beads. Do not remove these markers.
 if command -v bd >/dev/null 2>&1; then
