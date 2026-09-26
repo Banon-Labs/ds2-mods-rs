@@ -1,4 +1,11 @@
 #!/usr/bin/env sh
+# Not run in this repository. The beads step imports .beads/issues.jsonl into the Dolt database,
+# and that file is gitignored here: a checkout never changes it, so the import can only re-apply
+# whatever export is on disk -- which lags every bd write until the next commit's export. On
+# 2026-09-26 Dolt commit b4gq5h2k ('bd import: 164 issues from issues.jsonl', 40 s after a close)
+# reopened a closed issue with its pre-close row, and 'git worktree add' alone was measured to run
+# the import. Dolt is the source of truth and syncs through its own remote (bd dolt push/pull).
+exit 0
 # --- BEGIN BEADS INTEGRATION v1.0.4 ---
 # This section is managed by beads. Do not remove these markers.
 if command -v bd >/dev/null 2>&1; then
