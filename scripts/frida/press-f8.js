@@ -12,7 +12,9 @@
 
 'use strict';
 
-const VK_F8 = 0x77;
+// Any other key: `--config-json '{"vk": 118}'` (118 is F7, ds2-inventory-sort's default key).
+const config = globalThis.__ER_FRIDA_CONFIG || {};
+const VK_F8 = typeof config.vk === 'number' ? config.vk : 0x77;
 const HELD_CALLS = 8;
 const ours = Process.getModuleByName('dinput8.dll');
 const fromOurs = (ret) => ret.compare(ours.base) >= 0 && ret.compare(ours.base.add(ours.size)) < 0;
@@ -58,9 +60,9 @@ Interceptor.attach(user32.getExportByName('GetAsyncKeyState'), {
     calls += 1;
     if (calls <= HELD_CALLS) {
       retval.replace(ptr(0x8000));
-      if (calls === 1 || calls === HELD_CALLS) console.log('[press-f8] F8 reported held, poll ' + calls);
+      if (calls === 1 || calls === HELD_CALLS) console.log('[press-f8] vk 0x' + VK_F8.toString(16) + ' reported held, poll ' + calls);
     } else if (calls === HELD_CALLS + 1) {
-      console.log('[press-f8] F8 released after ' + HELD_CALLS + ' polls');
+      console.log('[press-f8] vk 0x' + VK_F8.toString(16) + ' released after ' + HELD_CALLS + ' polls');
     }
   },
 });
