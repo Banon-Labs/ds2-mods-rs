@@ -252,8 +252,7 @@ REWRITE_CASES = [
         'bd remember --key k "a\nb"; echo done',
     ),
     # A heredoc a non-shell command reads is data. Its newlines, including the one before
-    # the terminator, stay newlines -- commands.rego finds the body by looking for "\n"+tag,
-    # so breaking that newline would drop the whole text back to its raw form there.
+    # the terminator, stay newlines (the engine then collapses them to spaces).
     RewriteCase(
         "data-heredoc-preserved",
         "cat > docs/guards.md <<'EOF'\ngit push origin main\nEOF",
@@ -264,7 +263,8 @@ REWRITE_CASES = [
         "python3 - <<'PY'\nimport os\nprint(os.getpid())\nPY",
         "python3 - <<'PY'\nimport os\nprint(os.getpid())\nPY",
     ),
-    # ... but text after the terminator is command text again.
+    # ... but text after the terminator is command text again. The `; ` after the terminator
+    # is also what lets commands.rego find the terminator in the collapsed delivered text.
     RewriteCase(
         "line-after-data-heredoc-terminator-separated",
         "git commit -F - <<'EOF'\nmessage body\nEOF\ngit push origin main",
@@ -494,6 +494,29 @@ DECISION_CASES = [
         "cat > docs/guards.md <<'EOF'\ndocumentation\nEOF\ngit push origin main",
         "deny",
         "the body is data, but the line after the terminator is command text again",
+    ),
+    # THE MEASURED CASE (2026-09-25, bd ds2-mods-rs-1um.4). The engine collapses a data
+    # heredoc's body onto one line, so commands.rego used to find no "\n" + tag, fall back to
+    # the raw text, and read the ` -n ` in the message as git's short no-verify flag. Denied
+    # live while `opa test` on the same text allowed it.
+    DecisionCase(
+        "allow-commit-message-heredoc-containing-a-dash-n-word",
+        "git commit -q -F - <<'EOF'\nfix: print one line with sed -n\n\nbody text\nEOF",
+        "allow",
+        "the body is data for git; its ` -n ` is prose, not a flag",
+    ),
+    DecisionCase(
+        "deny-push-after-a-commit-message-heredoc",
+        "git commit -q -F - <<'EOF'\nfix: print one line with sed -n\nEOF\ngit push origin main",
+        "deny",
+        "resolving the body must stop at the terminator: the next line is a command again",
+    ),
+    DecisionCase(
+        "deny-push-after-a-heredoc-whose-body-names-its-own-tag",
+        "cat > notes <<'EOF'\nthe EOF line ends this\nEOF\ngit push origin main",
+        "deny",
+        "a body that uses the tag as a word makes the terminator ambiguous once newlines are "
+        "gone, so the body is not resolved and the raw text is scanned -- fail closed",
     ),
     DecisionCase(
         "deny-two-line-push-inside-double-quoted-bash-c",

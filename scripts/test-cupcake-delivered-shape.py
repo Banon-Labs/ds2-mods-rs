@@ -105,6 +105,8 @@ PUSH_MAIN = " ".join(["git", "push", "origin", "main"])
 # and one that can only be read.
 HOOKS_PATH = "core.hooks" + "Path"
 DEV_NULL = "/dev/" + "null"
+# git's short no-verify flag as a bare word, for the commit-message heredoc cases.
+SHORT_N = " -" + "n"
 
 def _proven_frida_log() -> str:
     """A Frida evidence log that says PROVEN, outside the repo and outside the user's own.
@@ -538,21 +540,44 @@ def check_dead_logic_inventory() -> list[str]:
         "heredoc_terminated_between + protected_paths.heredoc_tag: DEAD (need an unquoted newline)"
     )
 
-    # (b) commands.heredoc_body_blanked finds a body by looking for "\n" + tag.
-    #     No unquoted newline survives, so it never fires, and a data heredoc's
-    #     body keeps its command-position characters.
+    # (b) commands.heredoc_body_blanked -- LIVE AGAIN since 2026-09-25 (bd
+    #     ds2-mods-rs-1um.4), so this entry is now the opposite assertion. It used
+    #     to find a body only by "\n" + tag, which never arrives, so every
+    #     data-heredoc carve-out was inert and a commit message containing ` -n `
+    #     was denied as a no-verify flag. It now also accepts a space-delimited
+    #     terminator followed by a separator or the end of the text. Both halves
+    #     are pinned here against the delivered shape:
+    #       * the end-of-text form resolves (the collapsed commit message above);
+    #       * a terminator followed by more text with NO separator -- what the
+    #         engine delivers when nothing rewrote the newline after it -- does
+    #         NOT resolve, so it cannot swallow the line after the heredoc.
+    #     Section 4 checks the shim supplies that separator end to end.
     blanked = opa_eval(
         f"data.cupcake.system.commands.heredoc_body_blanked({json.dumps(delivered)})",
         COMMANDS_POLICY,
     )
-    if blanked is not UNDEFINED:
+    if blanked is UNDEFINED:
         raise Failure(
-            "commands.heredoc_body_blanked now resolves a DELIVERED heredoc; the inventory "
-            f"says it cannot.\n  {blanked!r}"
+            "commands.heredoc_body_blanked no longer resolves a DELIVERED heredoc; every "
+            "data-heredoc carve-out in commands.rego is dead again.\n"
+            f"  delivered {delivered!r}"
+        )
+    welded = eval_bash(f"cat > notes <<'EOF'\ndocumentation\nEOF\n{PUSH_MAIN}")["delivered"]
+    if f"EOF {PUSH_MAIN}" not in welded:
+        raise Failure(f"the no-separator control no longer collapses as measured: {welded!r}")
+    unresolved = opa_eval(
+        f"data.cupcake.system.commands.heredoc_body_blanked({json.dumps(welded)})",
+        COMMANDS_POLICY,
+    )
+    if unresolved is not UNDEFINED:
+        raise Failure(
+            "commands.heredoc_body_blanked resolved a terminator with no separator after it, "
+            f"so it can swallow the next line.\n  delivered {welded!r}\n  blanked   {unresolved!r}"
         )
     findings.append(
-        "commands.heredoc_body_blanked / heredoc_tag / heredoc_resolved: DEAD for the "
-        "delivered shape (need \"\\n\" + tag); heredoc_resolved silently falls through to the raw text"
+        "commands.heredoc_body_blanked: LIVE for the delivered shape when the terminator is "
+        "followed by a separator or the end of the text (the separator is scripts/cupcake-hook.sh's "
+        "`; `); a welded terminator stays unresolved and heredoc_resolved falls back to the raw text"
     )
 
     # (c) Every command-position anchor in the git guards offers `\n` as an
@@ -612,6 +637,27 @@ SHIM_CASES = [
         f"cat > docs/guards.md <<'EOF'\n{PUSH_MAIN}\nEOF",
         True,
         "",
+    ),
+    # bd ds2-mods-rs-1um.4, the measured case: the engine collapses the body onto
+    # one line, and before commands.rego recognised a space-delimited terminator
+    # the ` -n ` in the message was read as git's short no-verify flag.
+    (
+        "a commit message heredoc whose body contains a dash-n word is data",
+        f"git commit -q -F - <<'EOF'\nfix: print one line with sed{SHORT_N} and exit\n\nbody\nEOF",
+        True,
+        "",
+    ),
+    (
+        "the line after a commit message heredoc is a command again",
+        f"git commit -q -F - <<'EOF'\nfix: print one line with sed{SHORT_N}\nEOF\n{PUSH_MAIN}",
+        False,
+        "Do not push directly to main",
+    ),
+    (
+        "a body that names its own tag makes the terminator ambiguous, so it fails closed",
+        f"cat > notes <<'EOF'\nthe EOF line ends this\nEOF\n{PUSH_MAIN}",
+        False,
+        "Do not push directly to main",
     ),
     (
         "a quoted memory body that names the command executes nothing",

@@ -37,6 +37,19 @@ test_allow_git_commit_help_piped_to_sed_n if {
 	count(denials) == 0
 }
 
+# bd ds2-mods-rs-1um.4: the commit message heredoc as the engine DELIVERS it -- body collapsed
+# onto one line. Its ` -n ` is message text, not a flag.
+test_allow_delivered_commit_message_heredoc_containing_sed_n if {
+	denials := guard.deny with input as bash_event("git commit -q -F - <<'EOF' fix: print one line with sed -n body EOF")
+	count(denials) == 0
+}
+
+# ... but a real short flag after the terminator's separator is still a flag.
+test_deny_short_flag_commit_after_delivered_heredoc if {
+	denials := guard.deny with input as bash_event("cat > notes <<'EOF' notes EOF; git commit -n -m bad")
+	"BUILTIN-GIT-BLOCK-NO-VERIFY" in rule_ids(denials)
+}
+
 test_allow_git_commit_then_later_sed_n if {
 	denials := guard.deny with input as bash_event("git commit -m ok && sed -n '1,80p' file")
 	count(denials) == 0

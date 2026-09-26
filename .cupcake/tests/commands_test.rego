@@ -181,6 +181,53 @@ test_shell_read_heredoc_body_keeps_its_separators if {
 	regex.match(`(?m)^git push`, single_text(commands.executed_texts(text)))
 }
 
+# --- the DELIVERED shape (2026-09-25, bd ds2-mods-rs-1um.4) --------------------
+#
+# The engine turns every unquoted newline into a space before a policy runs, heredoc bodies
+# included, and scripts/cupcake-hook.sh turns the newline AFTER a data heredoc's terminator
+# into `; `. These are the texts the policies actually receive.
+
+test_delivered_heredoc_at_end_of_text_is_resolved if {
+	text := concat("", ["cat > docs/x.md <<'EOF' first; ", push_main, " EOF"])
+	resolved := commands.heredoc_body_blanked(text)
+	not contains(commands.quotes_removed(text), push_main)
+	startswith(resolved, "cat > docs/x.md ")
+}
+
+test_delivered_heredoc_then_separator_keeps_the_next_command if {
+	text := concat("", ["cat > notes <<'EOF' some notes EOF; ", push_main])
+	commands.heredoc_body_blanked(text)
+	endswith(commands.quotes_removed(text), concat("", ["EOF; ", push_main]))
+}
+
+# No separator after the terminator: the newline was not rewritten, so where the body ends is
+# unknown. Unresolved, and the raw text is scanned.
+test_delivered_heredoc_welded_to_the_next_line_is_not_resolved if {
+	text := concat("", ["cat > notes <<'EOF' some notes EOF ", push_main])
+	not commands.heredoc_body_blanked(text)
+	contains(commands.quotes_removed(text), push_main)
+}
+
+# A body that uses the tag as a word could hold a fake terminator once newlines are gone.
+test_delivered_heredoc_whose_body_names_the_tag_is_not_resolved if {
+	text := concat("", ["cat > notes <<'EOF' the EOF line ends this EOF; ", push_main])
+	not commands.heredoc_body_blanked(text)
+}
+
+test_delivered_shell_read_heredoc_is_not_resolved if {
+	text := concat("", ["bash <<'EOF'; ", push_main, "; EOF"])
+	not commands.heredoc_body_blanked(text)
+}
+
+# The raw shape keeps working: an indented `<<-` terminator, and CRLF after the terminator.
+test_raw_dash_heredoc_with_tab_indented_terminator_is_resolved if {
+	commands.heredoc_body_blanked("cat <<-EOF > x\n\tbody\n\tEOF\necho done")
+}
+
+test_raw_heredoc_terminator_followed_by_crlf_is_resolved if {
+	commands.heredoc_body_blanked("cat <<EOF > x\r\nbody\r\nEOF\r\necho done")
+}
+
 single_text(texts) := t if {
 	count(texts) == 1
 	some t in texts
