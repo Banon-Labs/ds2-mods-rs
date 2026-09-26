@@ -5251,6 +5251,15 @@ pub const SP_EFFECT_REQUEST_FLAGS: u8 = 0;
 /// next frame.
 pub const SP_EFFECT_BONFIRE_REST: i32 = 110_000_010;
 
+/// `SpEffect` `140001010`: one Spawn SFX (`659`, dummy poly `249`) and a 1.5 s length, nothing
+/// else.
+///
+/// Its event in `SpEffectWideUse.emevd` holds no stat, heal, damage or status instruction, and
+/// `f0000659.ffx` is in the resident `sfx9999` bundle, both read from the regulation and the game
+/// files (`docs/DS2-SPEFFECT-VISUAL.md` on the `visual-speffect-survey` branch). What sfx `659`
+/// looks like on screen has not been checked.
+pub const SP_EFFECT_VISUAL_SFX: i32 = 140_001_010;
+
 /// The nine levelled stats inside `PlayerParam`, each a `u16`.
 ///
 /// **THE MEMORY ORDER IS NOT THE PLANNER'S ORDER.** soulsplanner emits vigor, endurance, vitality,
