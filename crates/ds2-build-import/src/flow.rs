@@ -1,6 +1,6 @@
 //! One press: find a link, say what is happening, fetch what it names.
 //!
-//! # Where the link comes from, and why it is the clipboard
+//! # Where the link comes from
 //!
 //! The first design asked STEAM for a text field. That work is kept ([`crate::steam`]) and it is
 //! correct -- it obtains `SteamUtils007`, it interlocks against the game's own keyboard, and on a
@@ -11,9 +11,11 @@
 //! either (`game-keyboard-built=false`), which is why DARK SOULS II ships a `SimpleEditBox`
 //! fallback for exactly this case.
 //!
-//! So the link is read off the CLIPBOARD, which is the half of "copy and paste" that works
-//! everywhere: copy a link in a browser, press the row. Steam is still tried first, so the field
-//! appears for anyone who has it, and the clipboard is what happens when it declines.
+//! So when Steam declines, the row opens [`crate::url_dialog`]: a modal Win32 dialog with one edit
+//! control, shown inline on this thread. The clipboard is read only to prefill it -- a copied build
+//! link is already in the box and Enter takes it, anything else leaves the bare prefix. The dialog
+//! used to be the clipboard acting on its own, which gave a player with the wrong thing copied no
+//! way to correct it.
 //!
 //! # What the row says while it works
 //!
@@ -782,8 +784,8 @@ fn set_stats(param: usize, wanted: &[u16; 9], expected_level: u32) {
 pub(crate) enum Source {
     /// Steam drew a field and the player typed into it.
     SteamField,
-    /// The player had copied a link.
-    Clipboard,
+    /// The player pressed OK in the link dialog.
+    Dialog,
     /// The player typed the build id on the row itself.
     Typed,
 }
@@ -792,7 +794,7 @@ impl Source {
     const fn describe(self) -> &'static str {
         match self {
             Source::SteamField => "the Steam field",
-            Source::Clipboard => "the clipboard",
+            Source::Dialog => "the link dialog",
             Source::Typed => "the row",
         }
     }
@@ -841,38 +843,69 @@ pub(crate) fn begin_session() -> Option<Job> {
     match steam_field() {
         Ok(session) => return Some(Job::SteamField(session)),
         Err(error) => log_line(format_args!(
-            "{LOG_PREFIX} no Steam field ({error}, game-keyboard-built={}) -- reading the \
-             clipboard instead",
+            "{LOG_PREFIX} no Steam field ({error}, game-keyboard-built={}) -- opening the link \
+             dialog instead",
             crate::steam::game_keyboard_built()
         )),
     }
 
-    // THE CLIPBOARD ONLY WINS IF IT HOLDS A BUILD LINK. It used to win whenever it held anything,
-    // and the rejection was then the end of the press -- so a player with an unrelated link copied
-    // (which is to say, a player who had been browsing) pressed the row, read "not a soulsplanner
-    // link", and had no way forward. Now that is the case that opens the field.
-    match crate::clipboard::text() {
-        Some(text) if build_id_from_url(&text).is_ok() => Some(Job::Link {
-            text,
-            source: Source::Clipboard,
-        }),
-        Some(text) => {
-            // The rejection's own words, so the log says WHY this was not a link rather than that
-            // it was not one. `load` would have said it; this path never reaches `load`.
-            let why = build_id_from_url(&text).err().map_or_else(
-                || String::from("no reason"),
-                |rejection| rejection.to_string(),
-            );
-            log_line(format_args!(
-                "{LOG_PREFIX} the clipboard holds \"{text}\" ({why})"
-            ));
-            // SAFETY: still the confirm path.
-            unsafe { open_typing() };
+    // SAFETY: still the confirm path -- game thread, menu up, which is what both calls need.
+    unsafe { link_dialog() }
+}
+
+/// Open the link dialog, and turn its answer into a job.
+///
+/// The clipboard is read here only to prefill the edit control. A clipboard holding anything other
+/// than a build link leaves the bare prefix, so an unrelated copy is never what the player has to
+/// clear before typing.
+///
+/// # Safety
+///
+/// Game thread, menu up, from the row's confirm: the dialog blocks this thread on purpose and the
+/// caption writes need the menu.
+unsafe fn link_dialog() -> Option<Job> {
+    let prefill = ds2_build_url_core::dialog::prefill(crate::clipboard::text().as_deref());
+    log_line(format_args!(
+        "{LOG_PREFIX} link dialog open, prefilled \"{prefill}\""
+    ));
+    // SAFETY: forwarded to the caller.
+    match unsafe { crate::url_dialog::ask(&prefill) } {
+        crate::url_dialog::Answer::Entered(raw) => {
+            let entry = ds2_build_url_core::dialog::read_entry(&raw);
+            match entry.build {
+                Ok(id) => {
+                    log_line(format_args!(
+                        "{LOG_PREFIX} link dialog entered \"{}\" (build {id})",
+                        entry.text
+                    ));
+                    Some(Job::Link {
+                        text: entry.text,
+                        source: Source::Dialog,
+                    })
+                }
+                Err(rejection) => {
+                    log_line(format_args!(
+                        "{LOG_PREFIX} link dialog entered \"{}\" (refused: {rejection})",
+                        entry.text
+                    ));
+                    // SAFETY: forwarded to the caller.
+                    unsafe { say_now(short_rejection(rejection)) };
+                    None
+                }
+            }
+        }
+        crate::url_dialog::Answer::Cancelled => {
+            log_line(format_args!("{LOG_PREFIX} link dialog cancelled"));
+            // SAFETY: forwarded to the caller.
+            unsafe { say_now(IDLE_CAPTION) };
             None
         }
-        None => {
-            log_line(format_args!("{LOG_PREFIX} the clipboard holds no text"));
-            // SAFETY: still the confirm path.
+        // The typed digits are what is left when Win32 will not draw a dialog at all.
+        crate::url_dialog::Answer::Failed(error) => {
+            log_line(format_args!(
+                "{LOG_PREFIX} link dialog did not open (error {error}) -- type the build id instead"
+            ));
+            // SAFETY: forwarded to the caller.
             unsafe { open_typing() };
             None
         }
