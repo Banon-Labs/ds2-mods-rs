@@ -242,20 +242,21 @@ Param index -> compiled field (the draw code that consumes the fields was not tr
 | 1 | 11 | curve, scaled by p3 range -> +0x40: **width** (see below) |
 | 2 | 11 | curve, scaled by p4 -> +0x50: **height**; **ignored when p5 != 0** (default curve used) |
 | 3, 4 | 7 | scale for p1 / p2 (min/max against a constant, `0x140f5d490`) |
-| 5 | 1 | flag bit0 of the block's tail flags word ("square: height follows width" **[inf]**) |
-| 6, 7 | 1 | ints -> +0x38, +0x3c |
-| 8 | 19 | RGBA colour curve, 4 channels compiled separately (833: 1,.251,.251,1 = the red tint) |
-| 9, 10 | 1 | ints -> +0x90, +0x94 |
-| 11 | 6 | int curve -> +0xa8 |
-| 12 | 40 | +0x34 second texture id |
+| 5 | 1 | flag bit0 of `+0x12c`: square quad, the vertex fill uses the width for the height too **[read]** |
+| 6 | 1 | int -> +0x38: orientation type 0..5 (vertex fill below) **[read]** |
+| 7 | 1 | int -> +0x3c (render-state map, see the resource bind below) |
+| 8 | 19 | RGBA colour curve at `+0xd8/+0xe8/+0xf8/+0x108` = R, G, B, A, multiplied by the particle's own colour **[read]** (833: 1,.251,.251,1 = the red tint) |
+| 9, 10 | 1 | ints -> +0x90, +0x94: texture-sheet columns and frame count **[read]** |
+| 11 | 6 | int curve -> +0xa8: frames advanced over the particle's life **[read]** |
+| 12 | 40 | +0x34 second texture id (a normal map **[inf]**, see the vertex fill) |
 | 13, 14, 15 | 1 | ints -> `+0x118`, `+0x11c`, `+0x124`; draw use below |
-| 16 | 11 | curve -> +0x80 |
+| 16 | 11 | curve -> +0x80: distance the quad is moved toward the view position **[read]** |
 | 17 | 7 | float -> +0x28 |
-| 20 | 79 | int range (kind 3) -> +0x98 (random int, e.g. texture-sheet frame **[inf]**) |
-| 21 | 81 | random range -> +0x60 (833: 0..6.28 = random initial roll in radians **[inf]**) |
+| 20 | 79 | int range (kind 3) -> +0x98: start frame, evaluated once at time 0 **[read]** |
+| 21 | 81 | random range -> +0x60: initial roll in radians, drawn once per particle at creation **[read]** (833: 0..6.28, a random full turn) |
 | 22 + 23 | 11 + 81 | curve x range combined -> +0x70: **roll speed, radians per second** (see below) |
 | 24 | 7 | float -> `+0x128`, only if kind 4 and count > 24, default -1.0 (`0x1410ac6a4`); draw use below |
-| 25, 26 | 11 | curves (count > 25 / > 26) |
+| 25, 26 | 11 | curves (count > 25 / > 26) -> +0xb8, +0xc8: U and V scroll when no texture sheet is used **[read]** |
 | 27 | 7 | float -> `+0x120` (count > 27); no reader found in the draw |
 | 29 | 1 | flag bit1 of `+0x12c` (count > 29); draw use below |
 | 18, 19, 28, 30-40 | | not read by the compile function; presumably read by the generic particle path (p28 is a tick, -1/30 in 833 = the "unset/infinite" sentinel **[inf]**) |
@@ -309,6 +310,66 @@ What the render-context slots do was not traced, so the names stay open. Data **
 p14 are -1 and p24 is -1.0 in every shipped action-59 use (so the indexed path never runs), p27 is
 0, p15 is 1 in most uses and 0 in the rest, p29 is 0 or 1 in about equal shares.
 
+Vertex fill **[read]**: the draw calls `0x141005910(this, vertices, particle, time, view, light,
+light_colours)` at `0x140fe17ae` with a vertex stride of `0x30` bytes (12 floats). `this` is the
+per-particle appearance object, `view` is the matrix at draw context `+0x10`, and `light` and
+`light_colours` are what render-context vtable `+0x98` returned for p14. The block is `[this+0x8]`.
+Constants were read from the image: `0x1410ac420` and `0x141136f60` are identity rows, the byte
+scale is 255.0 (`0x1410ad0cc`), the normal packing is `x * 127 + 127` (`0x1410c9c3c`).
+
+- Orientation (`+0x38`, p6), a switch whose default panics with `FXParticleAppearance_Billboard.cpp`
+  line `0xbc` "invalid orientationType.": 0 identity (world axes); 1 the `view` matrix as is; 2 the
+  particle's own 3x4 matrix at particle `+0x40..+0x6f`; 3 the `view` matrix with row 0 replaced by
+  world X `(1,0,0)`; 4 with row 1 replaced by world Y `(0,1,0)`; 5 with row 0 replaced by world Z
+  `(0,0,1)`. Cases 1 and 3-5 drop the translation row. That 1 is the ordinary camera-facing billboard
+  and 4 the upright one is **[inf]** from `view` being the camera matrix.
+- Roll: the chosen basis is multiplied by a rotation about Z built by `0x1403c2580` from `this+0x10`,
+  the angle the bounds update integrates from `+0x70`. The seed is written once, at creation: the
+  create function `0x140fe13f0` calls `0x1410058b0` (`0x140fe1479`, its only caller), which
+  evaluates the `+0x60` curve (p21) through the compiled-curve table `0x14127d290` with time 0 and
+  the dword at `+0x70` of the create's third argument as the random input, and stores the result in
+  `this+0x10`. The base constructor `0x141004410` had zeroed it. So p21 is the initial roll and p22 x
+  p23 its speed **[read]**; that the third argument is the particle and its `+0x70` a per-particle
+  random seed is **[inf]**. `+0x60` is not read by the vertex fill.
+- Size: width = `+0x40` curve x particle `+0x78`; height = `+0x50` curve x particle `+0x7c`, or the
+  width when `+0x12c` bit0 (p5) is set. Vertex float 10 carries `(width + height) / 2`.
+- Depth pull: when the `+0x80` curve (p16) is positive, the particle position is moved that far
+  along the unit vector toward row 3 (the translation) of `view`.
+- UVs: when both `+0xb8` and `+0xc8` are curve kind `0x1c` and the frame count `+0x94` (p10) is at
+  least 2, the quad shows one cell of a sheet with `+0x90` (p9) columns and `ceil(frames / columns)`
+  rows. The cell is `floor(+0x98 at time 0 + +0xa8 at the particle's time) mod frames`, so p20 is the
+  start frame and p11 the frames advanced over time. Otherwise `+0xb8` (p25) and `+0xc8` (p26) are
+  evaluated as a U and V offset and the UVs are `offset .. offset + 1` (scrolling). That kind `0x1c`
+  is what an absent p25 / p26 compiles to is **[inf]**: the compile substitutes the static default
+  curve `0x141894a20` (vtable `0x14127de68`, payload 0) when the file lacks them.
+- Colour: channel curves `+0xd8`, `+0xe8`, `+0xf8`, `+0x108` are multiplied by the particle's
+  colour bytes `+0x76`, `+0x75`, `+0x74`, `+0x77` (divided by 255), clamped to 0..1 and packed with R
+  in the low byte and A in the high byte. So p8 is R, G, B, A and the particle stores its colour as
+  B, G, R, A at `+0x74..+0x77`. The draw skips a particle whose alpha byte `+0x77` is 0 when the
+  appearance's `this+0x30` is non-zero.
+- Second texture (`+0x34`, p12, non-zero): each vertex also gets three packed vectors, the cross
+  product of the basis X and Y rows and the two rows themselves, i.e. a normal and tangent frame. That
+  makes the p12 texture a normal map **[inf]**. Without p12 those slots are 0.
+- Vertex count, chosen by p24 (`+0x128`) and p29:
+  - p12 set or p24 < 0, p29 clear: 4 corners at `+-width/2`, `+-height/2`, computed inline.
+  - p12 set or p24 < 0, p29 set: 8 vertices from the table `0x140f5e7f0(8)` = `0x14127d850`
+    (18 floats per entry), an octagon inscribed in the unit quad (corners cut at +-0.207), with the
+    UVs interpolated by the same table. Fewer covered but transparent pixels than the quad is the
+    likely point **[inf]**.
+  - p12 unset and p24 >= 0: 5 vertices computed inline, the particle centre plus four corners, drawn
+    with a six-entry index list. Each gets a normal in the billboard's frame: `-Z` for the centre and
+    `normalize(-Z +-X +-Y)` for the corners (the same values as the 5-entry table `0x14127d6c0`).
+    Each vertex's colour is scaled by `clamp(dot(N, light) * (1 - p24) + p24, 0, 1)` times one
+    `light_colours` term plus two more terms. So p24 >= 0 turns on per-vertex lighting and p24 is the
+    floor the lighting never goes below (wrap lighting). The arithmetic is **[read]**; calling the
+    inputs a light direction and light colours is **[inf]**. Vertex float 9 also carries p24.
+
+`FXClusterAppearance_Billboard` (71) makes the same choice at compile time (`0x14100c880`): its
+block `+0x1a0` is set to 5 when p2 is 0 and p30 >= 0, else 8 when p29 is non-zero, else 4
+(`0x14100d705/718/724`), and `+0x1dc` takes bit0 from the emitter tail and bit1 from p31 **[read]**.
+The cluster draw is read in section 4.5: p2 is the second texture and p30 the lighting floor there,
+the same roles as 59's p12 and p24 **[read]**.
+
 ### 4.1 Cluster emitters (28-33, 45, 117) **[read]**
 
 Every emitter class has the same vtable shape: slot `+0x10` is the emit function
@@ -345,10 +406,10 @@ Conventions shared by all eight **[read]**:
   block, slot 1 next to it (replaced by the default curve `0x140f5e830` when slot 4 is non-zero),
   slot 3 as four colour channels, and sets bit0 of its flags from slot 4; the PointSprite compile
   `0x14100b800` uses slots 0 and 3 only, and the Sfx Billboard `0x140c01220` slots 0, 1, 3 and 4.
-  None of those three reads slot 2. Names **[inf]** from that use: slots 0 and 1 are the
-  particle's width and height scales (random-ranged per particle), slot 4 is "height follows
-  width" (the same switch as Billboard 59's p5), slot 3 is a per-particle colour, slot 2 a third
-  (depth) scale that a flat sprite has no use for. Cone data **[data]**: the three scale slots are
+  None of those three reads slot 2. For Billboard 71 the draw is read (section 4.5): slots 0 and 1
+  are width and height scales, slot 4 is "height follows width" (Billboard 59's p5), slot 3 is a
+  colour multiplier, all evaluated at the particle's emission time **[read]**. Slot 2 as a third
+  (depth) scale that a flat sprite has no use for is **[inf]**. Cone data **[data]**: the three scale slots are
   1.875 +/- 0.2 in the sample, and the colour is white.
 
 p0 of every emitter is a type-44 reference that no compile function reads (section 2.1).
@@ -498,6 +559,112 @@ past the table it reaches the external handler `0x141894758` as a stack argument
 `KatanaSfxFxActionHandler` forwards a descriptor to `0x140bef5e0` (section 1). Which draw host
 consumes `{limit, rate, n}`, and so the names "count limit / rate / step", are **[inf]**.
 
+### 4.5 71 FXClusterAppearance_Billboard **[read]** (compile `0x14100c880`, block tag 0x47)
+
+The cluster version of Billboard 59: one draw call for every particle of a cluster, with the
+per-particle values held in arrays instead of one object per particle.
+
+Classes **[read]**: the registration at `0x140fe4e98` passes the compile thunk `0x140fe4ec0`, the
+create `0x140fe4eb0` -> `0x140fe49f0` and the resource bind `0x140fe4f10`. The create allocates
+`FX4CG::FXCGClusterAppearance_Billboard` (vtable `0x141290c50`, RTTI name read from the image) on
+top of `FFX::FXClusterAppearance_Billboard` (constructor `0x14100c3d0`), then copies the bind's
+resource record into `this+0x38..+0x57`. Vtable slots: `+0x8` = `0x14100c4c0` copies entry j over
+entry i in the four per-particle arrays (compaction when a particle dies **[inf]**), `+0x10` =
+`0x14100c540` per-frame update and bounds, `+0x18` = `0x140fe4ae0` the draw.
+
+Param -> block field, read from the compile's stores (`p` = index in the ParamList; the compile
+never reads p0, p33 or p34):
+
+| p | block field | use |
+| --- | --- | --- |
+| 1 | `+0x40` int | texture id: the bind looks it up through manager vtable `+0x18` into the record's first slot (`this+0x38`) **[read]** |
+| 2 | `+0x44` int | second texture id, into the record's second slot (`this+0x40`), a normal map **[inf]** as in 59; also picks the vertex body below **[read]** |
+| 3 | range -> `+0x28`, `+0x2c`, `+0x30` | `+0x28` = (min + max) / 2, `+0x2c` = min / mid, `+0x30` = (max - min) / mid; 0 and 1 when the mid is within 1.19e-7 of 0 (`0x1410af2e4`). No reader found in the draw |
+| 4 | `+0x48` int | orientation type 0..5, the same six cases as 59's p6 (panic `FXClusterAppearance_Billboard.cpp` line `0x14e` "invalid orientationType.") **[read]**; case 2 takes the cluster's own matrix at state `+0x50..+0x7f` |
+| 5 | `+0x4c` int | render-state map: bind calls manager vtable `+0x40` and `+0x30` with it, as 59 does with p7 **[read]**; blend mode **[inf]** |
+| 6, 7 | `+0xf8`, `+0xfc` ints | texture-sheet columns and frame count **[read]** (rows = `ceil(p7 / p6)`, the divisor of `1.0` at `0x1410ac698`) |
+| 8, 9 | curves `+0x100`, `+0x110` | summed and floored into the sheet frame, taken mod p7 **[read]** |
+| 10, 11 | curves `+0x78`, `+0x88` | width and height over the particle's normalised age, times the emitter tail scales **[read]** |
+| 12 + 13 | curve x range -> `+0x160/+0x170/+0x180/+0x190` | colour R, G, B, A over the particle's normalised age **[read]** |
+| 14, 15, 16 | curves `+0x98`, `+0xa8`, `+0xb8` | initial pitch, yaw, roll in radians, evaluated once per particle at emission **[read]** |
+| 17 + 18, 19 + 20, 21 + 22 | range x curve -> `+0xc8`, `+0xd8`, `+0xe8` | pitch, yaw, roll speed in radians per second **[read]** |
+| 23 | `+0x34` int | no reader found in the draw |
+| 24 | `+0x1c4` int | first argument of render-context vtable `+0x68` (59's p13) |
+| 25 | `+0x1c8` int | argument of render-context vtable `+0x38` and of the light query vtable `+0x98` (59's p14) |
+| 26 | `+0x1cc` int | no reader found in the draw |
+| 27 | `+0x1d4` int | shader variant switch (59's p15): the bind asks vtable `+0x20` for 2 / 3 when it is 0, 4 / 5 otherwise, and the draw's `0x140bf2700` test falls back to `this+0x4c` **[read]** |
+| 28 | `+0x50` int | draw order: non-zero sorts the particles before writing indices (below) **[read]** |
+| 29 | via `+0x1a0` | vertex count: 5 (lit centre fan) when p2 = 0 and p30 >= 0, else 8 (59's octagon) when p29 is set, else 4 **[read]** |
+| 30 | `+0x1d8` float | lighting floor (59's p24): >= 0 with no second texture turns on the lit vertex body **[read]** |
+| 31 | `+0x1dc` bit1 | swaps the width and height values before they reach the quad **[read]**; which axis each lands on was not traced |
+| 32 | `+0x38` float | no reader found in the draw |
+| 35 | `+0x1d0` float, only when the list has more than 35 entries, else 0.0 | no reader found in the draw |
+
+From the emitter's common tail (section 4.1), now **[read]** at the consumer: slot 0 -> `+0x58`
+is a width scale, slot 1 -> `+0x68` a height scale, slot 4 -> `+0x1dc` bit0 makes the height use
+slot 0 too (square, 59's p5), slot 3 -> `+0x120/+0x130/+0x140/+0x150` a colour multiplier. Tail
+curves are evaluated at the particle's emission time, so they vary over the emitter's life and are
+frozen per particle; the appearance's own curves are evaluated at the particle's normalised age.
+
+Per-frame update `0x14100c540` **[read]**:
+
+- Allocation `0x14100d7d0` (from the create): the pitch, yaw and roll arrays (`this+0x18`, `+0x20`,
+  `+0x28`) exist only when the initial curve or the speed curve of that axis is not kind `0x1c`
+  (the default), and the seed array `this+0x30` only when `0x140f5e8d0` reports one of the block's
+  curves needs it.
+- New particles get a random dword each in `this+0x30` (xorshift `0x140f56470`).
+- `0x140f744a0` then advances each existing particle's angle by `speed(age) x dt` (dt = state
+  `+0x1c` - `+0x18`, current minus previous time; age = `+0x1c` minus the emission time at state
+  `+0xc0`) and sets each new particle's
+  angle from the initial curve.
+- Bounds: half-size `0.5 * sqrt(w*w + h*h)` with `w = slot0 x p10 x state+0xb4` and
+  `h = (slot0 or slot1) x p11 x state+0xb8`, added around the cluster box at state `+0x30/+0x40`.
+
+Draw `0x140fe4ae0` **[read]**, block in `r13`, per-draw record in `this+0x38..+0x57`:
+
+- `this+0x50` (the p5 mapping) goes to render-context vtable `+0x28`; when it is non-zero and the
+  cluster's alpha byte (state `+0xb3`) is 0, nothing is drawn.
+- `this+0x38` (p1 texture) goes to `0x140bf2780`, `this+0x40` (p2 texture) to `0x140bf2a10`.
+- Vertex count from `+0x1a0`; `0x140f5e560` maps it to a triangle-list index template (4 -> 6
+  indices `0x14127d6b0`, 5 -> 12 `0x14127d468` (a centre fan), 8 -> 18 `0x14127d568`; anything else
+  panics "invalid type." in `FXParameterUtility.cpp`) and always reports primitive kind 3.
+  `0x140fe0eb0` then reserves `count x ((n + 3) & ~3)` vertices of `0x30` bytes and `n x indices`
+  indices for the cluster's `n` particles.
+- Vertex fill `0x14100dff0`: copies the 18-float template rows of `0x140f5e7f0(count)` (`0x48` bytes
+  each), scaling the position by the cluster scale at state `+0xb4/+0xb8/+0xbc` and the last four
+  floats by the cluster colour bytes `+0xb2`, `+0xb1`, `+0xb0`, `+0xb3` / 255 (so the cluster stores
+  B, G, R, A as particles do). It builds the orientation basis from p4 and calls one of three
+  4-particles-at-a-time bodies: `0x140f60f80` when p2 is set, else `0x140f71530` (lit, gets p30
+  and the light query's outputs) when p30 >= 0, else `0x140f6ee80`.
+- Index lists: the draw picks its writer by that primitive kind, and since it is always 3 it
+  always calls `0x14100da50` (p28 = 0: the template repeated per particle in emission order, offset
+  by `count` each) or `0x14100daf0` (p28 != 0). The other pair, `0x14100df40` / `0x14100dd10`,
+  writes strips ended by `0xffff` and is reached only for kinds 2, 4 and 5, which `0x140f5e560`
+  never returns. `0x14100daf0` orders the particles through `0x140f74b20` on their positions
+  (state `+0xc8/+0xd0/+0xd8`) and a matrix built from state `+0x80` and the entity's `+0x50`, then
+  writes each particle's template at `sorted_index x count`; if its scratch allocation fails it
+  falls back to the unsorted `0x14100da50`. That the order is back-to-front depth for blending is
+  **[inf]**.
+
+Inside the plain body `0x140f6ee80` **[read]**:
+
+- Rotation: sin and cos of the three angles come from the polynomials at `0x1410ac3f4` (sin) and
+  `0x1410ac404` (cos), and the nine products are exactly the D3DX yaw-pitch-roll matrix with
+  yaw = `this+0x20`, pitch = `this+0x18`, roll = `this+0x28` (row 0 `cr*cy + sr*sp*sy, sr*cp,
+  sr*sp*cy - cr*sy`, row 2 `cp*sy, -sp, cp*cy`). So a cluster billboard can tumble in 3D, where 59
+  only rolls. How that matrix composes with the orientation basis was not followed through the
+  vector code.
+- Normalised age = `(t - emission time) / (a + b * r)`, with `r` in 0..1 from the particle's seed
+  and `a`, `b` the floats at `+0x2c` / `+0x30` of the object at state `+0x8`. That object was not
+  identified; 71's own `+0x2c` / `+0x30` (from p3) have the same min / range shape, so p3 as
+  particle lifetime is a lead **[inf]**, not a finding.
+- Colour: each channel is tail colour (at emission time) x p12/p13 colour (at normalised age).
+- Sheet: `cell = floor(p8 + p9) mod p7`, then row and column of that cell in a sheet of p6
+  columns; the reciprocal factors used for the column and row steps are **[inf]** from their use.
+
+Shipped param values for 71 were not tallied: `scripts/ds2-ffx.py tree` prints only the root
+effect's actions, and cluster appearances sit inside child templates.
+
 ### 15000 SfxFxClusterAppearance_Billboard **[read, partial]** (compile `0x140c01220`, tag 15000)
 Reads p1-p37 with version gates (p30..p36 only if count > 30..36, defaults -1.0f); also reads a
 kind-9 (vec4 sequence) colour from the *extra* arg list at `count+2`, and kind-4 floats at
@@ -549,12 +716,18 @@ converts to **milliseconds** (x1000, +0.5). File values are multiples of 1/30 s 
   **[read]**. The templates read those args through scope-1 reference params (section 2.1).
 - Action 59's draw (`0x140fe14e0`) is read (section 4): p13, p14, p15, p24 and p29 reach
   render-context slots `+0x30/+0x60/+0x68/+0x98` and the vertex setup `0x140fe0eb0`, whose own
-  meaning was not traced, so those names stay open; the vertex fill `0x141005910` (colour curve
-  p8, the `+0x80/+0x90/+0x98/+0xa8` fields) was not read. The other appearance classes are
-  index -> field only.
-- Cluster emitters: the common tail is placed by the cluster appearance compiles (section 4.1),
-  but what the draw does with those block fields was not followed, so "width / height / colour"
-  for the tail slots is inferred from placement; no reader of slot 2 was found.
+  meaning was not traced, so those names stay open. The vertex fill `0x141005910` is read
+  (orientation, sheet animation, UV scroll, colour, depth pull, lighting), and the initial roll
+  writer `0x1410058b0` is read; still open there are the consumer of vertex floats 9-11 (shader
+  side) and which render-context call produces the light inputs.
+- Cluster Billboard 71's draw is read (section 4.5). Open there: the object at state `+0x8` whose
+  `+0x2c/+0x30` give the particle lifetime (and so whether p3 is the lifetime), readers of p23,
+  p26, p32 and p35, how the yaw-pitch-roll matrix composes with the orientation basis, and the
+  normal-mapped and lit bodies `0x140f60f80` / `0x140f71530` beyond their selection. The other
+  appearance classes (Tracer, Distortion, PointSprite, MultiTextureBillboard, Model, RadialBlur,
+  Line) are index -> field only.
+- Cluster emitters: the common tail's slots 0, 1, 3 and 4 are read at the Billboard 71 consumer;
+  no reader of slot 2 was found.
 - Cluster movements: the force-manager terms (`+0x58` id via vtable `+0x18`, `+0x5c` via vtable
   `+0x28`) are named from the call shape only.
 - Positional params are now read for every shape spawner and param-ref writer (sections 4.3, 4.4),
