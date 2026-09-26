@@ -1483,6 +1483,17 @@ pub const GAME_MANAGER_IMP: u32 = 0x0161_48f0;
 /// in `SteamLoadSystemData`'s, among others.
 pub const SAVE_LOAD_SYSTEM_OFFSET: usize = 0xb8;
 
+/// Offset of the per-frame counter in [`GAME_MANAGER_IMP`]: a `u32` at
+/// `[`[`GAME_MANAGER_IMP`]`] + 0x104`, read pointer first and dword second.
+///
+/// Measured at runtime on 2026-09-26: it advanced exactly once per frame through a load and
+/// through play. The pointer at [`GAME_MANAGER_IMP`] can still be null early in boot, so a reader
+/// has to fetch it on every sample and treat null as "not yet" rather than as a stopped counter.
+/// This is the stall signal for `ds2-crash-logging-core`'s hang watchdog, which also refuses to
+/// arm until it has watched the value advance, so a build that moves the field disarms it instead
+/// of reporting a hang.
+pub const GAME_MANAGER_FRAME_COUNTER_OFFSET: usize = 0x104;
+
 // ============================================================================================
 // Managers reached through the Ghidra project's named accessors.
 //
