@@ -51,7 +51,11 @@ import ds2_run_lib as er_run_lib
 
 PORT = 27042
 DEFAULT_ENDPOINT = f"127.0.0.1:{PORT}"
-DEFAULT_AGENT = pathlib.Path(__file__).resolve().parent / "frida" / "ersc-session.js"
+# No default agent. The er-mods-rs original defaulted to its session agent, `ersc-session.js`,
+# and the port kept that default -- a file this repository never had, so a bare run and
+# `--selftest` both died on FileNotFoundError (measured 2026-09-25). Every DS2 agent answers one
+# question and every caller here names one, so `--agent` is required instead.
+AGENT_DIR = pathlib.Path(__file__).resolve().parent / "frida"
 DEFAULT_LOG = pathlib.Path(
     os.environ.get("ER_FRIDA_LOG", pathlib.Path.home() / ".cache" / "er-frida" / "hits.jsonl")
 )
@@ -445,9 +449,12 @@ def selftest() -> int:
     import inspect
 
     checks = [
-        ("the agent file exists", DEFAULT_AGENT.is_file()),
-        ("the agent hooks the invade action", "0x25850" in DEFAULT_AGENT.read_text()),
-        ("the agent hooks the cancel action", "0x258d0" in DEFAULT_AGENT.read_text()),
+        ("the agent directory holds at least one agent", any(AGENT_DIR.glob("*.js"))),
+        (
+            "no agent is defaulted, so a missing one cannot be",
+            # Built from pieces so the assertion does not match its own source text.
+            "DEFAULT" + "_AGENT" not in pathlib.Path(__file__).read_text(encoding="utf-8"),
+        ),
         ("the log path is user-owned, not a repo path", "ds2-mods-rs" not in str(DEFAULT_LOG)),
         (
             "a hung enumerate_processes is bounded rather than waited on forever",
@@ -502,7 +509,7 @@ def selftest() -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--agent", type=pathlib.Path, default=DEFAULT_AGENT)
+    parser.add_argument("--agent", type=pathlib.Path, help=f"the Frida agent to load, e.g. {AGENT_DIR}/tick.js")
     parser.add_argument("--log", type=pathlib.Path, default=DEFAULT_LOG)
     parser.add_argument("--endpoint", default=DEFAULT_ENDPOINT)
     parser.add_argument("--pid", type=int, help="Windows pid to attach. Omitting it keeps legacy first-game behavior.")
@@ -512,6 +519,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.selftest:
         return selftest()
+    if args.agent is None:
+        parser.error(f"--agent is required; the agents live in {AGENT_DIR}")
     config = None
     if args.config_json:
         try:
