@@ -99,20 +99,16 @@ fn game_manager() -> Option<usize> {
     non_null(unsafe { safe_read_usize(address)? })
 }
 
-/// `PlayerParam`, by calling the game's own null-guarded getter.
+/// `PlayerParam`, through `darksouls2`'s bindings: `GameManagerImp -> PlayerCtrl -> PlayerParam`.
 ///
-/// The getter returns NULL at whichever hop is null -- which is the case at the title screen, where
-/// `PlayerCtrl` does not exist -- rather than faulting, so a null return is an answer.
+/// The same two hops the game's own getter makes (`ds2_rva::PLAYER_PARAM_GET`), each a fault-safe
+/// read, so a null at either -- the title screen, where `PlayerCtrl` does not exist -- is an answer
+/// rather than a fault.
 pub(crate) fn player_param() -> Result<usize, GameError> {
-    let getter = game_rva(ds2_rva::PLAYER_PARAM_GET).map_err(|_| GameError::Unresolved)?;
-    // SAFETY: the target is a `.pdata` function start recorded in `ds2-rva` and verified byte for
-    // byte -- eight instructions, two null checks, a `ret`. It takes no arguments and touches no
-    // state, so there is nothing for a caller to get wrong beyond calling it at all.
-    let param: usize = unsafe {
-        let get: unsafe extern "system" fn() -> usize = core::mem::transmute(getter);
-        get()
-    };
-    non_null(param).ok_or(GameError::NoCharacter)
+    let player = player_ctrl()?;
+    PlayerCtrl::player_param(player)
+        .map(|param| param.as_ptr() as usize)
+        .ok_or(GameError::NoCharacter)
 }
 
 /// The nine stats, **in the game's storage order**.
