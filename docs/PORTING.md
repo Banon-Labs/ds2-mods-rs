@@ -206,7 +206,7 @@ NvNaviPolyNearestSearchTask 0x1411e3038   ChrAiNavimeshCtrl 0x1410ede30
 
 It has the same request/poll shape Elden Ring's `CSHkAiWorld` has. `ds2-invasion-path` ships
 the feature as an **arrow** per player -- proven in game, five runs, see that crate's docs -- with
-the route reader ported and tested and the route *request* still open (`ds2-mods-rs-4yd`).
+the route reader ported and tested and the route *request* still open (the world-position to graph-id snap is unfound).
 
 **The lesson is about this document, not about that crate.** Two of the three Tier 3
 "multiplayer" entries were filed on a reading of the Elden Ring side plus an assumption about

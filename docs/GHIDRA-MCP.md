@@ -1,7 +1,7 @@
 # The Ghidra MCP daemon
 
 One warm Ghidra process holding the DS2 program, serving every agent that connects.
-Tracking issue: `ds2-mods-rs-bc2`.
+It exists so static RE gets a decompiler, not just a symbol lookup.
 
 ```bash
 bash scripts/ghidra/mcp-daemon.sh start     # read-only, port 8766
@@ -13,11 +13,11 @@ bash scripts/ghidra/mcp-daemon.sh stop
 
 Every `scripts/ghidra/query.sh` run spawns its own `analyzeHeadless` and takes an **exclusive**
 lock on the project, so two agents cannot use Ghidra at the same time at all. That is not a
-theoretical cost: during `ds2-mods-rs-3rr` a background survey agent held the project, and the
+theoretical cost: during the boot-screen skip work a background survey agent held the project, and the
 title-flow trace was done with `objdump` and two new scripts instead.
 
 The daemon fixes that by inverting it. One process takes the lock and serves a TCP port; each
-MCP client spawns its own Go bridge and connects. N agents → N bridges → 1 server → 1 lock.
+MCP client spawns its own Go bridge and connects. N agents -> N bridges -> 1 server -> 1 lock.
 Queries serialise inside the daemon at millisecond scale, which is concurrent as far as any
 caller is concerned.
 

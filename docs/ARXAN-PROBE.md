@@ -260,7 +260,7 @@ runtime because `DllCharacteristics` is `0x8160` and the loader may relocate the
 **It is the control, and its limitation is structural.** `scripts/ds2-arxan-chain.py` terminates
 at hop 0 on this address: the function's own prologue is at its own entry, so Arxan has no
 presence here at all. A detour that survives says only that hooking works in this game. It cannot
-say anything about Arxan, which is why both arms of `ds2-mods-rs-z6m` surviving was a null result
+say anything about Arxan, which is why both arms of the M1 detour-survival probe surviving was a null result
 by construction rather than evidence.
 
 The top two functions by call count, `0x00832cb0` (12401 sites) and `0x00c2c9e0` (4866), are

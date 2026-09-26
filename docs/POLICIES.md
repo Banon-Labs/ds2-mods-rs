@@ -67,7 +67,7 @@ The intent still transfers, with the mechanism inverted: deny a *raw* `steam -ap
 issued outside `scripts/ds2-run.py`. The launcher is testimony-gated -- it stages the DLL, records
 both the built and the staged sha256, and prints a success block only after reading the DLL's own
 log line. A raw applaunch skips all of that, which is precisely the shape of a false "it launched
-with our DLL" claim. Shipped as `ds2_launch_guard.rego` (`ds2-mods-rs-yx2`).
+with our DLL" claim. Shipped as `ds2_launch_guard.rego`.
 
 It denies `steam -applaunch 335300`, the `steam://run/` and `steam://rungameid/` URL forms, and a
 wine/proton invocation naming `DarkSoulsII.exe` -- and fails closed on an unreadable `-c`/`eval`
@@ -96,8 +96,7 @@ The real hazard here is a different one, measured twice in a single session:
 2. `pkill -f 'ds2-run.py --probe neuter'` matched and killed the agent's own shell (exit 144).
 
 Both are the `-f` flag matching the full command line, the agent's included. So the DS2 guard bans
-`-f` and steers to `-x`, rather than banning the tool. Shipped as `block_pgrep_full_match.rego`
-(`ds2-mods-rs-hst`).
+`-f` and steers to `-x`, rather than banning the tool. Shipped as `block_pgrep_full_match.rego`.
 
 It catches the cluster spellings (`-af`, `-fl`), `--full`, and the flag arriving after an option
 that takes an operand (`pgrep -u banon -f ...`). `-F` is left alone on purpose -- that is
@@ -132,7 +131,7 @@ fail-closed rules are what refuse to guess when the text genuinely cannot be rea
 `wall_of_text`, `idle_hold`, `native_ownership_vocab_reminder`. These are not self-contained: every
 signal in `.cupcake/signals/` shells into `scripts/cupcake_turn_scan.py` (512 lines) and
 `cupcake_unbacked_claim.py`, which have to come across first, along with the audit scripts that
-prove the guards do not cry wolf against real transcripts. Tracked as `ds2-mods-rs-68n`.
+prove the guards do not cry wolf against real transcripts. Porting them is still open work.
 
 ## How it is tested
 

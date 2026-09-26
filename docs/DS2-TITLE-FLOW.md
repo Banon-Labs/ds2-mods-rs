@@ -1,8 +1,8 @@
 # The DS2 boot flow, and where an intro skip would cut into it
 
 Everything below was read statically from `darksoulsii-deobf.bin` (SOTFS build 9527516) with
-`scripts/ds2-rtti.py`, `scripts/ds2-xrefs.py` and `objdump`. No game was launched. Tracking
-issue: `ds2-mods-rs-3rr`.
+`scripts/ds2-rtti.py`, `scripts/ds2-xrefs.py` and `objdump`. No game was launched. The goal
+is to skip the boot logo and warning screens entirely.
 
 ## The screens are not videos
 
@@ -128,7 +128,7 @@ These addresses come from the deobfuscated image, which is not the byte stream t
 stub. Vtable slots are data and are trustworthy; the function *at* a slot must be checked against
 the Arxan set before it is detoured. See `docs/ARXAN-FOOTPRINT.md`.
 
-## The skip, as built (`ds2-mods-rs-3rr`)
+## The skip, as built
 
 `crates/ds2-intro-skip`, off by default since 2026-09-25, like every feature. `[intro_skip]
 enabled = true` turns it on; `ds2-run.py` writes `true` unless given `--no-intro-skip`.
@@ -189,7 +189,7 @@ profile that does show it is covered.
 The fire counts are logged precisely so "no logo appeared" and "the hook never installed" cannot
 be confused for one another from the outside.
 
-## The message boxes after the boot screens (`ds2-mods-rs-j3b`)
+## The message boxes after the boot screens
 
 Skipping the three boot screens does not reach the title menu. The flow then stops on message
 boxes that wait for a button, so the intro skip on its own just moves the button presses later.

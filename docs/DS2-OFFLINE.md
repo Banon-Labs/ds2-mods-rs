@@ -61,7 +61,7 @@ followed by `test al,al` and a branch. Three were disassembled to check the pola
 * **`0x1400fe739`**, inside `FeSubStateTitleTopMenu::v5`, gating whether the row-3 transition is
   registered at all.
 
-## `0x14160de19` is NOT the switch -- `ds2-mods-rs-rk4`, answered
+## `0x14160de19` is not the switch -- the network-chain removal question, answered
 
 `DS2-BOOT-WORK.md` recorded a byte the game reads to force the online flag to zero and asked
 whether setting it removes the network boot chain. **It does not.** It is read at exactly one
@@ -291,7 +291,7 @@ reaches a usable menu, offline, with no button presses.
 
 * **It does not touch Steam.** See above.
 * **It does not remove the network boot substates.** `0x20`, `0x39` and `0x44` still run; they now
-  fail early instead of waiting on a server. Removing them is `ds2-mods-rs-rk4`'s business.
+  fail early instead of waiting on a server. Removing them is a separate question: whether the network boot chain can go at all.
   Whatever boot time that saves is a side effect, and this document does not claim a number for it
   -- `DS2-BOOT-WORK.md` measured the noise floor at +/-300 ms, so any such claim needs several
   runs before it is believed.
