@@ -1183,18 +1183,17 @@ fn arm_fault(config: crash_logging::CrashConfig) {
 /// directory from any other `dinput8.dll` that could have won the search order, which is the
 /// first thing to check when a run behaves like a build that is not the one under test.
 ///
-/// It deliberately does NOT carry a git sha or a build timestamp. `../er-mods-rs` bakes those
-/// in via a `build.rs` (`er-game-base::build_id`), and that was not ported -- so inventing a
-/// half-version of it here would be new machinery, not a port. The build identity for a run is
-/// the SHA-256 `scripts/ds2-run.py` prints for the staged file immediately before launching;
-/// this line says which file, that hash says which bytes.
+/// `build git=<sha>` is the commit `build.rs` found at build time, with `-dirty` when `crates/`
+/// differed from it. The push guard reads it to tie a run to a commit exactly; the SHA-256
+/// `scripts/ds2-run.py` prints for the staged file still says which bytes.
 fn identity_line(module: *mut c_void) -> String {
     let name = env!("CARGO_PKG_NAME");
     let version = env!("CARGO_PKG_VERSION");
+    let build = env!("DS2_BUILD_GIT");
     match module_file_name(module) {
-        Some(path) => format!("{name} {version} module={}", path.display()),
+        Some(path) => format!("{name} {version} build git={build} module={}", path.display()),
         None => format!(
-            "{name} {version} module=<GetModuleFileNameW failed: {}>",
+            "{name} {version} build git={build} module=<GetModuleFileNameW failed: {}>",
             // SAFETY: every pointer here is one the loader owns or one Windows handed it, and each read
             // goes through a call that validates its own range rather than dereferencing blind.
             unsafe { GetLastError() }

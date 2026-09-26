@@ -100,11 +100,16 @@ class World:
         env = dict(self.env, GIT_COMMITTER_DATE=when, GIT_AUTHOR_DATE=when)
         git(self.repo, "commit", "-q", "-m", message, env=env)
 
-    def write_log(self) -> None:
-        """A fresh run: the DLL creates its log anew, so the file's birth is the run's start."""
+    def write_log(self, build: str | None = None) -> None:
+        """A fresh run: the DLL creates its log anew, so the file's birth is the run's start.
+
+        `build` is the `build git=` value ds2-loader's first line carries, or None for a DLL that
+        predates it.
+        """
         log = self.game / "ds2-loader.log"
         log.unlink(missing_ok=True)
-        log.write_text("ds2-loader: attach awaiting-arxan-callback\n")
+        first = f"ds2-loader 0.1.0 build git={build} module=S:\\x\\DINPUT8.dll\n" if build else ""
+        log.write_text(first + "ds2-loader: attach awaiting-arxan-callback\n")
 
     def signal(self, command: str) -> dict[str, str]:
         event = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
@@ -205,6 +210,30 @@ def main() -> int:
         w4.commit("fix(ds2-x): z", offset=200)
         check("a game-code commit after the run still makes it stale",
               w4.signal("git push -u origin game-then-docs"), game_code="1", fresh="0")
+
+        # 5c. A log naming its build commit is judged by commits, not times.
+        w5 = World(Path(tmp) / "build-sha")
+        git(w5.repo, "checkout", "-q", "-b", "sha", env=w5.env)
+        (w5.repo / "crates" / "ds2-x" / "src" / "lib.rs").write_text("// v1\n")
+        git(w5.repo, "add", "-A", env=w5.env)
+        w5.commit("feat(ds2-x): v1", offset=300)  # dated after the log: times alone would refuse
+        built = git(w5.repo, "rev-parse", "HEAD").strip()
+        w5.write_log(build=built)
+        check("a run naming the pushed commit is fresh whatever the clock says",
+              w5.signal("git push -u origin sha"), game_code="1", fresh="1")
+        w5.write_log(build=built + "-dirty")
+        check("a dirty build covers nothing", w5.signal("git push -u origin sha"), fresh="0")
+        w5.write_log(build=built)
+        (w5.repo / "docs" / "a.md").write_text("later\n")
+        git(w5.repo, "add", "-A", env=w5.env)
+        w5.commit("docs: later", offset=400)
+        check("a docs commit after the named build stays covered",
+              w5.signal("git push -u origin sha"), fresh="1")
+        (w5.repo / "crates" / "ds2-x" / "src" / "lib.rs").write_text("// v2\n")
+        git(w5.repo, "add", "-A", env=w5.env)
+        w5.commit("fix(ds2-x): v2", offset=-900)  # dated before the log: times alone would allow
+        check("a game-code commit after the named build is not covered",
+              w5.signal("git push -u origin sha"), fresh="0")
 
         # 6. The whole path through the real engine: `cupcake eval` over this checkout's .cupcake/,
         #    in a repository shaped like the one the miss happened in. This is what proves cupcake
