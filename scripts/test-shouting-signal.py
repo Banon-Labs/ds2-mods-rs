@@ -44,6 +44,20 @@ class Case:
 
 
 CASES = [
+    # --- capitalised identifiers are names (measured 2026-09-25) ---------------------------------
+    Case(
+        "rule_ids_in_prose",
+        "The port kept DS2-MODS-NO-FIX-CLAIM-WITHOUT-RUNTIME-EVIDENCE and DS2-MODS-NO-GREP-FOR-BUILD-ERRORS.",
+        False,
+        "a rule id is a name; a hyphen is a word boundary, so without the identifier drop its FOR "
+        "and WITHOUT read as shouted function words",
+    ),
+    Case(
+        "shout_beside_a_rule_id",
+        "BUILTIN-GIT-BLOCK-NO-VERIFY is NOT optional.",
+        True,
+        "the identifier drop takes only the identifier; the NOT beside it is still a shout",
+    ),
     # --- the four shapes the user named, all of which must be refused ---------------------------
     Case(
         "one_word_absolute",
@@ -348,6 +362,7 @@ def check_policies_carry_the_same_definition() -> list[str]:
     for label, pattern in (
         ("run_pattern", shouting.RUN_PATTERN),
         ("emphasis_pattern", shouting.EMPHASIS_PATTERN),
+        ("capitalised_identifier_pattern", shouting.IDENTIFIER_PATTERN),
     ):
         expected = f"{label} := `{pattern}`"
         if expected not in docs:
