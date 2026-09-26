@@ -222,10 +222,74 @@ c3                  ret
 ```
 
 `chrStatus + 0x00 + i*2` is the base stat block and `+0x16 + i*2` the effective one; indices
-`4..7` are Strength, Dexterity, Intelligence, Faith. The effective block is
-`clamp(base + modifiers, 1, 99)` -- `FUN_1401ffcc0` (`0x001ffcc0`), called from `FUN_14038d570`
-at `0x14038d61c` -- so rings and spEffects are provably in it, which is exactly what could not be
-proved about the frontend's table.
+`4..7` are Strength, Dexterity, Intelligence, Faith. `chrStatus` is `PlayerParam + 0x08`, so the
+effective block is `PlayerParam + 0x1e`. The gameplay callers of the cached requirement check reach
+it this way: `mov rcx,[rcx+0x490]` on the character, `call 0x14038b990`, whose body is
+`lea rax,[rcx+8]` (`0x14037d4ee`..`0x14037d503` in `updateCharacterVariables` and
+`0x14037d290`..`0x14037d2a8` in `FUN_14037fa40`, each feeding `FUN_14034a980`).
+
+`FUN_1401ffcc0` (`0x001ffcc0`) computes `clamp(base + modifiers, 1, 99)` per stat, and it is not
+the site at `0x14038d61c` that puts modifiers into this block. That call, inside the base-stat
+setter `FUN_14038d570`, hands the modifier builder `0x14014cfe0` a sixteen-byte handle it has just
+zeroed (`mov [rsp+0x28],rbx` / `mov [rsp+0x30],rbx` with `rbx = 0`), and the builder
+(`0x141b48fa4`, reached through that thunk) branches on the handle's first qword being null before
+anything else. That the null branch yields zero modifiers is inferred from the zeroed output it
+starts with, not followed to the end. The recompute that carries a real handle
+is `0x14038d6d0`, which reaches `0x14038d710` -> `FUN_1400c4706` and writes
+`clamp(base + modifiers(handle))` to `chrStatus + 0x16`, then passes it to `0x14038d790` with
+`chrStatus + 0x2c` and tail-jumps to the soul-level sum at `0x14038e310`.
+`assignAttributes` (`0x14038aca0`) calls it with the handle built by `0x14014bb40` from
+`CharacterCtrl + 0x3e0` (`PlayerCtrl` vtable slot `0x130`, `0x1405ba9d0`). What that handle
+aggregates -- rings, spEffects, or both -- is not traced; the builder is Arxan-threaded past its
+first null test. The in-game measurement recorded beside `PLAYER_PARAM_EFFECTIVE_STATS_OFFSET` in
+`ds2-rva` (a character written to `38` Intelligence and Faith showed `40` in its own attribute
+menu) says something does land there.
+
+### The frontend stat table is that same effective block
+
+The table `FUN_1400bcde0` compares against, `[[GameManagerImp] + 0x22e0] + 0x138`, is not a second
+source. It is a copy of `PlayerParam + 0x1e`, taken with the same accessor the requirement check
+uses. Read from the binary:
+
+* **Allocated** by `FUN_1405020c0`, which the frontend root's init `FUN_140500200` calls: `0x51c`
+  bytes, constructed by `FUN_14003e9f0`, stored with `mov [rbx+0x138],rdi` at `0x140502153`. The
+  constructor lays out `i32 value` plus a formatted-text buffer at stride `0x18` from `+0x000`, then
+  a second array at stride `0x24` from `+0x150`.
+* **Written** by `FUN_14003ebe0`, called from the root's update routine `FUN_140501c20` at
+  `0x140501d57` (`mov rcx,[rdi+0x138]; test rcx,rcx; je; call 0x14003ebe0`). Each entry is
+  compare-then-store: `cmp [rbx+off],r8d; je skip; mov [rbx+off],r8d`, then the text is re-rendered.
+* **The values** for entries `4..13` come from `FUN_140200340(PlayerCtrl + 0x498 object, i)`, which
+  is `mov rax,[rcx]; mov rcx,[rax+0x490]; call 0x14038b990; jmp 0x14038d510` -- the effective-block
+  reader above, on `PlayerParam + 0x08`. The mapping, from the `mov edx,<i>` before each call:
+
+| table entry | offset | `chrStatus` index | stat |
+| --- | --- | --- | --- |
+| `4` | `+0x060` | `0` | Vigor |
+| `5` | `+0x078` | `3` | Attunement |
+| `6` | `+0x090` | `1` | Endurance |
+| `7` | `+0x0a8` | `2` | Vitality |
+| `8` | `+0x0c0` | `4` | Strength |
+| `9` | `+0x0d8` | `5` | Dexterity |
+| `10` | `+0x0f0` | `6` | Intelligence |
+| `11` | `+0x108` | `7` | Faith |
+| `12` | `+0x120` | `8` | Adaptability |
+| `13` | `+0x138` | `9` | not levelable, unnamed |
+
+So entries `8..11`, the ones the key table points at, are effective Strength, Dexterity,
+Intelligence and Faith, the same `u16` values `FUN_14034d3c0` reads, sign-extended to `i32`.
+
+What is inference rather than a read: that `[PlayerCtrl + 0x498]` points back at the `PlayerCtrl`
+whose `+0x490` is the `PlayerParam` the gameplay path uses. The writer holds `[PlayerCtrl + 0x490]`
+in `r14` for its own derived-stat rows and reaches the stat block through `[[PlayerCtrl +
+0x498]] + 0x490` for these. That the second is a `PlayerParam` is read: entry `0` of the same
+table is `FUN_140200320`, `mov rax,[rcx]; mov rcx,[rax+0x490]; mov eax,[rcx+0xd0]`, and `+0xd0` is
+`PLAYER_PARAM_SOUL_LEVEL_OFFSET`. That it is the same `PlayerParam` as `[PlayerCtrl + 0x490]` is
+what the shape says, not something a load proves. That the table lags the live block by at most one frontend update is also inferred, from
+where `FUN_140501c20` sits, not measured.
+
+**What this means for `ds2-item-warn`:** nothing changes in what it reads. The badge, the detail
+pane's red numbers and the damage-penalty check all look at the effective block. Whatever a ring
+adds there, the badge already sees. The one place they part is grip, covered next.
 
 ### Two-handing, which is not a Strength multiplier
 
@@ -351,11 +415,11 @@ question as the badge's corner.
   the cloned glyph's `.flo` quad carries is folded in somewhere else, and the destination rect is
   anchored on the rect that cancellation is built around rather than on an explanation of it. The
   badge lands where it is computed either way; this is a gap in the account, not in the behaviour.
-* **Whether the frontend stat table holds base or modified stats.** Every cross-reference to
-  `FUN_1404ffb20` is a reader; its writer was not found. On the gameplay side the equivalent block
-  is provably `clamp(base + modifiers, 1, 99)`, and this one has no such proof, so whether rings
-  and spEffects are in these numbers is open. A badge computed from base stats would light up on a
-  weapon the player can swing while wearing a Ring of Blades.
+* **What the effective block's modifiers include.** The frontend table is the effective block (see
+  "The frontend stat table is that same effective block"), so the badge agrees with the game's own
+  requirement check either way. Which sources feed the modifier handle -- ring stat bonuses,
+  spEffects, or both -- is past an Arxan-threaded builder and has not been traced. A run with a
+  Ring of Blades on, reading `PlayerParam + 0x10` against `+0x26`, would settle it.
 * **That style `0x98` renders red.** It is not a `FeColorSetParam` row -- that param's ids are
   `1`, `2`, `100`, `101`, `10000..10009`, `20000..20002`, `30000..30003` -- so the style-id space
   is FeLayout element states inside `.flo` payloads, which `scripts/ds2-flo.py` does not decode.
