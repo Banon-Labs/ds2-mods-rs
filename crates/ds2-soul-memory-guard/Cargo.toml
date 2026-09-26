@@ -1,0 +1,17 @@
+[package]
+name = "ds2-soul-memory-guard"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The verdict is plain arithmetic over a level, two counters and a cost function, and builds
+# everywhere, so its tests run on the machine the code is written on. Only the detour needs Windows.
+[target.'cfg(windows)'.dependencies]
+ds2-game-base.workspace = true
+ds2-hook.workspace = true
+ds2-rva.workspace = true
+
+[lints]
+workspace = true
