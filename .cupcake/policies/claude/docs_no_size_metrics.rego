@@ -7,10 +7,12 @@
 #   id: DS2-MODS-DOCS-NO-SIZE-METRICS
 #   routing:
 #     required_events: ["PreToolUse"]
-#     required_tools: ["Write", "Edit", "MultiEdit", "NotebookEdit"]
+#     required_tools: ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"]
 package cupcake.policies.claude.docs_no_size_metrics
 
 import rego.v1
+
+import data.cupcake.system.commands
 
 # WHY THIS POLICY EXISTS
 #
@@ -86,6 +88,47 @@ doc_lines contains line if {
 	regex.match(`^\s*//[!/]`, line)
 }
 
+# A SHELL WRITE INTO DOCUMENTATION is documentation too. Measured 2026-09-24: this rule refused a
+# beads id on an Edit to docs/COMMENTS.md minutes after two ids had gone into the same file through
+# `cat >> docs/COMMENTS.md <<EOF` from Bash, which it never looked at. Four more docs already
+# carried ids, consistent with the same path. The one that was missed is the one an agent reaches
+# for when creating a document from scratch.
+#
+# The target is a redirection (`>`, `>>`) or a `tee` into a `.md` file or anything under `docs/`,
+# read from the statement with its quoted spans and heredoc body REMOVED -- so a path merely named
+# inside a quoted string or a heredoc is not a target. What is judged is that whole statement with
+# its quoted spans and heredoc body KEPT: every word an `echo`, a `printf ... | tee` or a heredoc
+# writes into the document is a word of the document. Other statements in the same command are not
+# judged. That was the first draft's mistake, measured on its own first use (2026-09-25): judging the
+# whole command read `timeout 25 opa test` as a test count, and the doc paths inside a heredoc
+# being written into a .rego file were taken as targets.
+bash_tool if lower(object.get(input, "tool_name", "")) == "bash"
+
+command := object.get(tool_input, "command", "")
+
+shell_doc_target_pattern := `(?:>>?|(?:^|[\s;&|(])tee(?:\s+-a)?)\s*((?:[^\s'";&|<>()]*/)?docs/[^\s'";&|<>()]+|[^\s'";&|<>()]+\.md)(?:$|[\s;&|)])`
+
+shell_doc_writes contains {"target": m[1], "statement": statement} if {
+	bash_tool
+	some text in commands.executed_texts(command)
+	some statement in commands.shell_statements(text)
+	some m in regex.find_all_string_submatch_n(shell_doc_target_pattern, commands.quotes_removed(statement), -1)
+}
+
+shell_doc_targets := {w.target | some w in shell_doc_writes}
+
+doc_lines contains w.statement if {
+	some w in shell_doc_writes
+}
+
+writes_documentation if authoring_tool
+
+writes_documentation if count(shell_doc_targets) > 0
+
+doc_target := file_path if {
+	authoring_tool
+} else := concat(", ", shell_doc_targets)
+
 # THE FOUR BANNED SHAPES.
 #
 # Each requires a DIGIT bound to the unit, so "the two rows", "every line of the table" and "the
@@ -116,7 +159,7 @@ violation contains {"kind": "a file size in bytes", "line": trim_space(line)} if
 
 deny contains decision if {
 	input.hook_event_name == "PreToolUse"
-	authoring_tool
+	writes_documentation
 	count(violation) > 0
 
 	# NO `sort`: `scripts/check-cupcake-wasm-builtins.py` has no probe recipe for it, and an
@@ -130,7 +173,7 @@ deny contains decision if {
 		"rule_id": "DS2-MODS-DOCS-NO-SIZE-METRICS",
 		"severity": "MEDIUM",
 		"reason": concat("", [
-			"🧁 Cupcake blocked documentation carrying ", kinds, " in ", file_path,
+			"🧁 Cupcake blocked documentation carrying ", kinds, " in ", doc_target,
 			"\n\n  ", examples,
 			"\n\nWhy: a size is a fact about a snapshot, and documentation outlives the snapshot. This repo's own doc comment refused to port the save picker because a crate was \"29,000 lines\" -- the number was real, the crate was the wrong one, and no reader could check either without leaving the document. Test counts go stale on the next test. Beads IDs point at a Dolt database that gets squashed and renumbered, and that a reader of the published crate does not have.",
 			"\n\nHappy path: say what the code DOES and what is MISSING, in behaviour. Instead of \"er-quit-menu-core is 29,000 lines\" write \"the picker's menu chrome is Elden Ring's and does not port\"; instead of \"25 host tests\" write what they cover; instead of \"see ds2-mods-rs-v3f\" describe the missing behaviour and leave the tracking in beads. Sizes that a reader must act on -- a struct's ABI size, a block length -- belong in a plain `//` comment beside the code that depends on them, which this rule does not touch.",
