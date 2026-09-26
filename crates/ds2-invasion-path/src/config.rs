@@ -204,9 +204,10 @@ pub const DEFAULT_MARKERS_PER_PASS: usize = 3;
 /// | `picked 0x..., N.Nm away` | which character, so a bad pick is visible rather than inferred |
 /// | `READY -- N segment(s) decoded to M point(s)` | the route came back; both numbers, because they fail differently |
 /// | `the planner said NO ROUTE` | a finding, not a shrug: that character IS on the navmesh |
-/// | `id 833: spawned, quality 0, the id resolved` | it worked |
+/// | `id 833: spawned, quality 0, the engine counted this spawn (N so far)` | it worked, by the engine's own count |
 /// | `EMPTY -- ... AT OR ABOVE THE THRESHOLD` | [`ds2_rva::KATANA_SFX_QUALITY_DROP_THRESHOLD`] ate it; the id is not implicated |
-/// | `THIS attempt's lookup failed` | the effect is not resident in this map |
+/// | `the engine did not count it -- nothing was built` | the spawn built nothing |
+/// | `CONTRADICTION` | the handle and the engine's count disagree; neither is trusted |
 /// | `t=3.0s -- 7/7 stone(s) still alive` | they LINGER, which is the property a trail needs |
 ///
 /// It sweeps [`ds2_rva::PRISM_STONE_SFX_IDS`] one id per stone, so a single run also says which of the
