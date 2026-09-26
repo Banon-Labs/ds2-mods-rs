@@ -143,6 +143,10 @@ static WRONG_ARM_SAID: AtomicBool = AtomicBool::new(false);
 static PAD_BUTTONS_WRITTEN: AtomicU64 = AtomicU64::new(0);
 static PAD_BLANKED: AtomicU64 = AtomicU64::new(0);
 static PAD_WRONG_ARM: AtomicU64 = AtomicU64::new(0);
+/// The pad object the last pad poll handed this detour, for `status`. An outside probe that wants
+/// to act on the harness's pad needs this exact pointer: one found by hooking the poll from Frida
+/// turned out, on 2026-09-26, not to be it.
+static LAST_PAD: AtomicUsize = AtomicUsize::new(0);
 /// The virtual cursor, as `f32` bits so a fractional push accumulates instead of rounding to
 /// nothing every frame.
 static VIRTUAL_X: AtomicU32 = AtomicU32::new(0);
@@ -194,7 +198,10 @@ unsafe fn poll(index: usize, this: *mut u8) -> u64 {
     // is one that same function wrote.
     unsafe {
         match index {
-            PAD => write_pad(this, blocking, &authored),
+            PAD => {
+                LAST_PAD.store(this as usize, Ordering::Relaxed);
+                write_pad(this, blocking, &authored);
+            }
             DINPUT_MOUSE => write_dinput_mouse(this, blocking),
             KEYBOARD => write_keyboard(this, blocking),
             WINDOWS_MOUSE => write_windows_mouse(this, blocking, &authored),
@@ -630,10 +637,11 @@ pub(crate) fn poll_command_file() {
                     CURSOR_ENGAGED.load(Ordering::Relaxed)
                 );
                 harness_log!(
-                    "status: pad writes buttons={} blanked={} wrong-arm={}",
+                    "status: pad writes buttons={} blanked={} wrong-arm={} pad=0x{:x}",
                     PAD_BUTTONS_WRITTEN.load(Ordering::Relaxed),
                     PAD_BLANKED.load(Ordering::Relaxed),
-                    PAD_WRONG_ARM.load(Ordering::Relaxed)
+                    PAD_WRONG_ARM.load(Ordering::Relaxed),
+                    LAST_PAD.load(Ordering::Relaxed)
                 );
             }
         }
