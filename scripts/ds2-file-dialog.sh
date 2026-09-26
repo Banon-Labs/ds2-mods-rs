@@ -2,52 +2,78 @@
 # Answer one of ds2-save-file's Wine file dialogs with a path, the way a player typing it would.
 #
 #   scripts/ds2-file-dialog.sh 'Save this character to a file' 'ds2-test.sl2'
-#   scripts/ds2-file-dialog.sh 'Load a character from a save file' 'Z:\home\me\Downloads\x.sl2'
+#   scripts/ds2-file-dialog.sh 'Load a character from a save file' 'ds2 saves\new\ds2sofs0000.sl2'
 #
-# The dialog is found by its exact title only; no other window is listed. It needs X input focus
-# (`xdotool windowfocus --sync`) before it takes keys: compositor focus alone is not enough, and a
-# dialog without X focus drops every synthetic key while looking active (measured 2026-09-26: two
-# load dialogs ignored the typed path until windowfocus was added). A second window with the same
-# title after Return is the overwrite confirmation, and it is answered Yes.
+# Three things measured on 2026-09-26 decide how it types:
+#   * The dialog needs X input focus (`xdotool windowfocus --sync`) before it takes keys;
+#     compositor focus alone is not enough, and without it every synthetic key is dropped.
+#   * Synthetic keys lose Shift: `Z:\...` arrived as something the dialog answered with "Invalid
+#     character(s) in path". So a path may hold only unshifted characters -- lower case, digits,
+#     space, `\ . - = ; ' , /` -- and is taken relative to the folder the dialog opens in (the
+#     save-file rows open in Downloads; Wine matches names without regard to case).
+#   * A typed path opens the name box's autocomplete, which takes the first Return. Return is
+#     pressed again while the dialog is still up and no error box has appeared.
+# A second window with the dialog's own title is the overwrite confirmation, answered Yes. The
+# dialog is found by its exact title only; no other window is listed.
 #
 # Exit status: 0 when every window with that title has closed, 1 otherwise.
 set -u
 title=${1:?dialog title}
 path=${2:?path or file name}
+error_title='Invalid character(s) in path'
 
-find_dialog() { xdotool search --name "^${title}\$" 2>/dev/null | head -1; }
+if [[ "$path" =~ [A-Z~!@#\$%^\&*\(\)_+{}|:\"\<\>?] ]]; then
+    echo "refused: '$path' holds a character typed with Shift, which these dialogs never receive;"
+    echo "use lower case and a path relative to the dialog's folder"
+    exit 1
+fi
+
+find_window() { xdotool search --name "^$1\$" 2>/dev/null; }
 
 focus() {
-    local wid=$1
-    hyprctl repl "for _, x in ipairs(hl.get_windows()) do if x.title == \"${title}\" then hl.dispatch(hl.dsp.focus({ window = \"address:\" .. tostring(x.address) })) end end" >/dev/null 2>&1
+    local wid=$1 name=$2
+    hyprctl repl "for _, x in ipairs(hl.get_windows()) do if x.title == \"${name}\" then hl.dispatch(hl.dsp.focus({ window = \"address:\" .. tostring(x.address) })) end end" >/dev/null 2>&1
     xdotool windowfocus --sync "$wid" 2>/dev/null
 }
 
 wid=""
 for _ in $(seq 1 30); do
-    wid=$(find_dialog)
+    wid=$(find_window "$title" | head -1)
     [ -n "$wid" ] && break
     sleep 0.2
 done
 [ -n "$wid" ] || { echo "no window titled '$title'"; exit 1; }
 
-focus "$wid"
+focus "$wid" "$title"
 xdotool key --window "$wid" --clearmodifiers ctrl+a BackSpace
 xdotool type --window "$wid" --delay 25 "$path"
 sleep 0.3
 xdotool key --window "$wid" Return
 
-for _ in $(seq 1 25); do
+returns=1
+for tick in $(seq 1 30); do
     sleep 0.2
-    current=$(xdotool search --name "^${title}\$" 2>/dev/null)
+    error=$(find_window "$error_title" | head -1)
+    if [ -n "$error" ]; then
+        focus "$error" "$error_title"
+        xdotool key --window "$error" Return 2>/dev/null
+        echo "dialog '$title' said '$error_title' for '$path'"
+        exit 1
+    fi
+    current=$(find_window "$title")
     [ -z "$current" ] && { echo "dialog '$title' answered with '$path'"; exit 0; }
     for other in $current; do
         if [ "$other" != "$wid" ]; then
-            focus "$other"
+            focus "$other" "$title"
             xdotool key --window "$other" --clearmodifiers alt+y 2>/dev/null
             wid=$other
         fi
     done
+    if [ $((tick % 5)) -eq 0 ] && [ "$returns" -lt 3 ]; then
+        focus "$wid" "$title"
+        xdotool key --window "$wid" Return 2>/dev/null
+        returns=$((returns + 1))
+    fi
 done
 echo "dialog '$title' is still open after answering '$path'"
 exit 1
