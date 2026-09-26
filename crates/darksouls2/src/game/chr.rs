@@ -56,13 +56,53 @@ pub struct CharacterCtrl {
 
 /// `PlayerCtrl`, the controller the local player, a remote player and a bloodstain replay share.
 ///
-/// Source of name: RTTI and DLRF. Its own fields past the `CharacterCtrl` part are not read by
-/// this repo yet.
+/// Source of name: RTTI and DLRF.
 #[repr(C)]
 pub struct PlayerCtrl {
     /// The `CharacterCtrl` part.
     pub base: CharacterCtrl,
-    _unk0480: [u8; 0x20],
+    _unk0480: [u8; 0x10],
+    /// The character's `PlayerParam`: level, stats, souls and soul memory.
+    ///
+    /// The game's own getter `FUN_1401ab660` is the whole path from the manager, in full
+    /// `mov rax,[0x1416148f0]; test; jz; mov rax,[rax+0xd0]; test; jz; mov rax,[rax+0x490]; ret`.
+    pub player_param: Option<NonNull<PlayerParam>>,
+    _unk0498: [u8; 0x08],
+}
+
+/// `PlayerParam`, a character's levelled state. A prefix: only the fields this repo reads.
+///
+/// Source of name: the Cheat Engine tables and `scripts/ds2-sl2.py`; there is no RTTI for it.
+#[repr(C)]
+pub struct PlayerParam {
+    _unk00: [u8; 0x08],
+    /// The nine levelled stats in the game's order, which is not the planner's: vigor, endurance,
+    /// vitality, attunement, strength, dexterity, intelligence, faith, adaptability. See
+    /// `ds2_rva::PLAYER_PARAM_STAT_OFFSETS`.
+    pub stats: [u16; 9],
+    _unk001a: [u8; 0xb6],
+    /// Soul level.
+    pub soul_level: u32,
+    _unk00d4: [u8; 0x18],
+    /// Souls held.
+    pub souls_held: u32,
+    _unk00f0: [u8; 0x04],
+    /// Soul memory, first copy. The game keeps two; a write has to update both.
+    pub soul_memory: u32,
+    _unk00f8: [u8; 0x04],
+    /// Soul memory, second copy.
+    pub soul_memory_2: u32,
+}
+
+#[cfg(windows)]
+impl PlayerCtrl {
+    /// The character's `PlayerParam`, or `None` when the pointer is null or unreadable.
+    pub fn player_param(player: NonNull<Self>) -> Option<NonNull<PlayerParam>> {
+        let field = player.as_ptr() as usize + core::mem::offset_of!(Self, player_param);
+        // SAFETY: a fault-safe read of one pointer-sized field; `None` on an unmapped address.
+        let param = unsafe { ds2_game_base::mem::safe_read_usize(field) }?;
+        NonNull::new(param as *mut PlayerParam)
+    }
 }
 
 /// The phantom block a [`CharacterCtrl`] owns. A prefix: only the field this repo reads.
@@ -124,8 +164,41 @@ mod tests {
 
     use super::{
         CharacterCtrl, CharacterCtrlBase, ChrAsmCtrl, ChrAsmEquip, PhantomBlock, PlayerCtrl,
-        WString,
+        PlayerParam, WString,
     };
+
+    /// The `PlayerParam` hop and fields land where `ds2-rva` and the game's getter put them.
+    #[test]
+    fn player_param_fields_match_ds2_rva() {
+        assert_eq!(
+            offset_of!(PlayerCtrl, player_param),
+            ds2_rva::PLAYER_PARAM_OFFSET
+        );
+        assert_eq!(
+            offset_of!(PlayerParam, stats),
+            ds2_rva::PLAYER_PARAM_STAT_OFFSETS[0]
+        );
+        assert_eq!(
+            offset_of!(PlayerParam, stats) + size_of::<[u16; 8]>(),
+            ds2_rva::PLAYER_PARAM_STAT_OFFSETS[8]
+        );
+        assert_eq!(
+            offset_of!(PlayerParam, soul_level),
+            ds2_rva::PLAYER_PARAM_SOUL_LEVEL_OFFSET
+        );
+        assert_eq!(
+            offset_of!(PlayerParam, souls_held),
+            ds2_rva::PLAYER_PARAM_SOULS_HELD_OFFSET
+        );
+        assert_eq!(
+            offset_of!(PlayerParam, soul_memory),
+            ds2_rva::PLAYER_PARAM_SOUL_MEMORY_OFFSETS[0]
+        );
+        assert_eq!(
+            offset_of!(PlayerParam, soul_memory_2),
+            ds2_rva::PLAYER_PARAM_SOUL_MEMORY_OFFSETS[1]
+        );
+    }
 
     // Sizes: each is the value slot 9 of the class's DLRF runtime-class vtable returns, and the
     // game's own allocations agree. `FUN_140357920` allocates 0x4a0 and passes it to the PlayerCtrl
