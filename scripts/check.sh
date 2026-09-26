@@ -78,6 +78,14 @@ echo "== lint allows =="
 python3 scripts/check-allow-debt.py --selftest
 python3 scripts/check-allow-debt.py
 
+echo "== fresh-run logs =="
+# A log describes exactly one process run. ds2-game-base::log has always said so and said, too,
+# that nothing here enforced it. Every appending opener in crates/ must route through its one-shot
+# truncation or be exempt with a reason. Selftest first, so the gate is never trusted on its own
+# say-so.
+python3 scripts/check-fresh-run-logs.py --selftest
+python3 scripts/check-fresh-run-logs.py
+
 echo "== rustfmt =="
 # NOT `cargo fmt --all`. `--all` is documented as "format all packages, AND ALSO THEIR LOCAL
 # PATH-BASED DEPENDENCIES", so the moment a crate here depended on `../dearxan` the gate started
