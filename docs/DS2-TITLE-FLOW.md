@@ -633,18 +633,145 @@ rather than pacing it to the animation. The sentence "its body is unambiguous" w
 the body is `FeSceneTitle::open`, and the `0x67` play is its first branch out of roughly a thousand
 further bytes. See `FE_SCENE_TITLE_OPEN`.
 
-**The open question**, stated precisely so the next attempt does not start from scratch: playing
-`0x67` does not replace `0x66`, so either the two run in parallel, or `0x67` has its own entry
-animation, or the visible text is not driven by that sequence object at all. The next measurement
-is the one this probe could not take -- `[[scene+0x28]+0x30]` was still null on the first
-`FeSubStateTitleMain` update, so the player object attaches later. Probing it once the title screen
-is settled would name the animation player class and expose whatever seek or rate control it has.
+This section used to end on an open question -- why playing `0x67` did not replace `0x66`. It has a
+plain answer, read from the binary: the call never played `0x67` at all. The `0x67` branch of the
+open is guarded by a flag that `FeSubStateTitleMain::v1` has already set by the time
+`force_title_settled` runs. See the next section.
 
 ### What shipped
 
 The gate forcing stays, because the outcome it produces is good on its own terms: the flow reaches
 the menu as soon as the data is there, rather than pacing itself to an animation. The title text
 still animates over the top of an already-interactive menu.
+
+## `FeSceneTitle::open` (`0x1400f3820`), read in full
+
+Read statically with the Ghidra MCP daemon against `DarkSoulsII.exe`. No game was launched.
+Each claim is marked **verified** (read from the instructions) or **inferred** (a reading of what
+the instructions are for, not established by them).
+
+### Identity
+
+`0x1400f3820` is the open of the `FeSceneTitle` that hangs off `[[0x14160de10]+0x80]`. It has one
+direct caller in the game, `FeSubStateTitleTopMenu::v1` (enter) at `0x1400fdeac`, which loads that
+pointer and calls it. Its mirror is the close at `0x1400f3590`, called from
+`FeSubStateTitleTopMenu::v2` (leave) and from `FeSubStateTitleMain::v3` phase 1 on the idle
+timeout. **Verified.**
+
+In order, the body does this (**verified**):
+
+1. `if (!this->_0xf1 && this->_0x08) { --scene->_0x18; play(scene, 0x67, 0, 0.0); this->_0xf1 = 1; }`
+   -- the only part the old name described.
+2. Looks up component `0x1038d51` on the scene through `0x140afda00` and plays `0x6f` on it through
+   its vtable slot 24. This runs whatever `+0xf1` said.
+3. Looks up four more components on the scene (the `0x5f5b9f2` family). On one it calls vtable
+   slot 25 with a flag taken from `0x140513600`; on three it calls slot 40 with a value from
+   `0x140503620` keyed by `0x77367e67`, `0x77367e6a` and `0x77367e6b`; on two it formats a number
+   as `x.yy` (one from `0x140248d70`, one from `[0x141614278]`) and passes the string to slot 41.
+   Those two paths call `0x140832cb0` and then `int3` if bit 5 of a value read through
+   `0x140833dc0` is clear. **Verified** for the calls. That slot 25 is visibility, slot 40 is
+   message text, and the two numbers are the version strings on the title screen is **inferred**.
+4. Calls `0x1400f4950`, which allocates a new `0x120`-byte object, constructs it as the top-menu
+   group (`0x1400f3250`), runs its vtable slot 1 with the frontend heap, and stores it at
+   `this+0xb8`. It then allocates a second `0xf8`-byte object and stores it at `this+0xc0`. It does
+   not look at what those two fields held before. **Verified.**
+5. Computes `this+0xec` once (if negative), then drives the new group through `0x140021b00` and
+   `0x1401060b0`, sets `this+0xf0 = 1` and `this+0xe8 = 0`. **Verified.**
+
+Only step 1 is behind the `+0xf1` guard. Steps 2 to 5 run on every call.
+
+### The flag that made the `0x67` play dead code
+
+A scan of every `[reg+0xf1]` byte write and every word or dword write at `+0xf0` in the image finds
+exactly four writers of `+0xf1` (**verified**):
+
+| Writer | Effect on `+0xf1` |
+| --- | --- |
+| constructor, `0x1400f33e3` | word `+0xf0 = 0`, so `+0xf1 = 0` |
+| `0x1400f3e30`, from `FeSubStateTitleMain::v1` | word `+0xf0 = 0x100`, so `+0xf1 = 1` |
+| the open, `0x1400f3820` | `+0xf1 = 1` |
+| the close, `0x1400f3590` | `+0xf1 = 0` |
+
+`0x1400f3e30` is what `FeSubStateTitleMain::v1` calls at `0x1400fda54`. It plays `0x66` on the
+scene, plays `0x6e` on the same component `0x1038d51` that the open plays `0x6f` on, and ends by
+writing the word. It writes it only on the path where `this+0x08` is non-null, which is the same
+condition the open's `0x67` branch needs.
+
+`force_title_settled` runs from the `FeSubStateTitleMain` update detour, so after `v1` has run.
+By then `+0xf1` is 1 and step 1 is skipped. **The call has never played `0x67`.** That is why the
+text kept animating exactly as before: nothing was asked to replace `0x66`. The flag logic is
+verified; that the update runs after `v1` is inferred from the state flow's enter-then-update order
+and from the detour's own comment, not traced through `FeStateFlow`.
+
+The same holds for the game's own open at substate `0x47`, because nothing between the two clears
+`+0xf1` unless the idle timeout closes the scene. In the game's flow the `0x67` branch matters when
+the top menu is re-entered after its own close cleared the flag, such as backing out of the
+character list (**inferred**).
+
+### What calling it from `force_title_settled` actually does
+
+With `title_settle` on, which is the `scripts/ds2-run.py` default:
+
+- **No `0x67`.** As above. The sequence gate is satisfied by `title_sequence_skip` replacing
+  `0x1400f37f0`, not by anything this call does. **Verified** for the call; the gate replacement
+  is `ds2-dialog-skip`'s own code.
+- **The prompt component is switched early.** `0x6f` is played on component `0x1038d51` during
+  substate `0x17`, where the game has just played `0x6e` on it. Reading `0x6e` as the PRESS ANY
+  BUTTON prompt coming in and `0x6f` as it giving way to the menu is **inferred**; it fits the
+  recorded puzzle that the menu is drawn before it can be used.
+- **The top-menu group is built at `0x17`.** `this+0xb8` holds a live, driven group from the first
+  title-main update onward, where the game would first build it at `0x47`. Anything reading
+  `FE_TOP_MENU_GROUP_OFFSET` in between sees that early group. **Verified** for the write; which
+  mod code reads it in that window was not traced.
+- **The early group is leaked at `0x47`.** `FeSubStateTitleTopMenu::v1` calls the open again, and
+  step 4 overwrites `this+0xb8` and `this+0xc0` with fresh allocations. The only code that frees
+  them is `0x1400f41b0`, called from the close and from the `FeSceneTitle` destructor
+  (`0x1400f3400`). Neither runs between `0x17` and `0x47` unless the idle timeout fires. The first
+  group and its `0xf8` companion are never freed, and `0x140105a90`, which the teardown uses to
+  release whatever the group holds at `group+0x08`, never runs on it. **Verified** for the
+  overwrite and the absence of a free. That `group+0x08` was attached by the group's slot-1 call in
+  step 4 is **inferred**, and whether the orphaned group still ticks or draws anywhere is not
+  known.
+- **Repeated calls.** The mod makes the call once per process (`IDLE_FORCED`), so the mod alone
+  never repeats it. Every call, the mod's or the game's, re-runs steps 2 to 5 regardless of
+  `+0xf1`, so every open allocates. The guard protects the counter at `scene+0x18` and the `0x67`
+  play, nothing else. **Verified.**
+
+### The second caller: `ds2-continue`
+
+`ds2-continue` hooks the same address as `title-screen-open` when `hide_menus` is on, and poses
+the scene hidden after the original returns. The mod's own call enters through the same patched
+entry, so with `title_settle` on the hook fires twice per boot: at `0x17` for the mod's call and at
+`0x47` for the game's. Its doc says the hook closes the gap "whatever raises the screen", and it
+does -- but part of the gap it closes exists only because `title_settle` raises the screen early.
+Removing the early open does not break the hook; it leaves it firing once, at `0x47`, which is the
+only open the game makes. **Inferred** from both crates' code; not measured.
+
+### The primitive `force_title_settled` meant to call
+
+Two functions play a sequence with no other side effect (**verified**):
+
+- `0x140afdb80(FeScene* scene, int id, int pose, float seek)` is the bare primitive. It follows
+  `[scene+0x28]`, then `[+0x30]`, and tail-calls that object's vtable slot 24. This is the call the
+  open's step 1 makes, and the play forwarder the sequence ids above were read from.
+- `0x140505ce0(owner, int id, int pose)` is `FeGroupBase::v1`: it loads `owner+0x08`, returns if
+  null, zeroes the seek and tail-calls `0x140afdb80`. `FeSceneTitle` inherits it unchanged -- the
+  slot-1 entry of its vtable at `0x1410bcab8` points here. So it takes the same `FeSceneTitle`
+  pointer `force_title_settled` already has.
+
+`FeGroupBase::v1(scene_title, 0x67, 0)` is what the old name promised: the `0x67` play from the
+open's step 1, without the `+0xf1` guard, the `scene+0x18` decrement, or steps 2 to 5. Because it
+has no guard, it would actually play `0x67` at `0x17`, which the current call never did. Whether
+that is wanted -- whether it cuts `0x66` short on screen, and what the menu does when it becomes
+usable at `0x47` -- is a runtime question.
+
+### The change this points to
+
+Replace the open in `force_title_settled` with `FeGroupBase::v1(scene, 0x67, 0)`, and add named
+constants for the two primitives in `ds2-rva`. Then boot once with `title_settle` on and once with
+it off. The existing claim that the call makes the menu usable sooner was made while believing the
+call played `0x67`; with that belief gone, the effect has to be attributed again from a run, and
+the leak is a reason not to keep the open while that is settled.
 
 ## The top menu: nothing is inserted, nothing is removed, and only one bit differs
 
