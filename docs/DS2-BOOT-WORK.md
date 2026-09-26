@@ -301,6 +301,9 @@ The honest caveat: the chain is a **graph, not a line**. Every step can fork to 
 wrong on any non-happy path. Drive it off a weight table keyed by id, with the weights measured,
 and treat an unexpected id as "hold position" rather than "jump".
 
+The design that follows from this, with the weights and the renderer, is
+[`DS2-LOADING-BAR.md`](DS2-LOADING-BAR.md).
+
 ## What this trace cannot tell you, and the one run that would
 
 **Nothing here is a duration.** Static analysis names the steps and proves the dependency shape; it
