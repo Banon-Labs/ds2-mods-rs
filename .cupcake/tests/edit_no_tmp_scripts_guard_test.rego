@@ -138,6 +138,33 @@ test_allow_bash_redirect_data_artifact_into_tmp if {
 	not denied(bash_event("python3 scripts/probe.py > /tmp/out.json"))
 }
 
+# Measured 2026-09-24: one side of a merge conflict saved for comparison. Every byte came out of a
+# tracked file; the .rs name describes the content, not a script being written.
+test_allow_bash_sed_extract_into_tmp_rs if {
+	not denied(bash_event("sed -n '/<<<<<<< /,/=======/p' crates/ds2-loader/src/lib.rs > /tmp/claude-1000/scratch/ours.rs"))
+}
+
+test_allow_bash_git_show_extract_into_tmp_rs if {
+	not denied(bash_event("git -C /home/banon/projects/ds2-mods-rs show HEAD:crates/ds2-loader/src/lib.rs > /tmp/theirs.rs"))
+}
+
+test_allow_bash_head_extract_after_separator if {
+	not denied(bash_event("mkdir -p /tmp/cmp && head -80 scripts/ds2-run.py > /tmp/cmp/run-head.py"))
+}
+
+# The carve-out must not become a way to author. Each of these still writes new bytes.
+test_deny_bash_echo_piped_through_sed_into_tmp_script if {
+	denied(bash_event("echo 'print(1)' | sed -n p > /tmp/probe.py"))
+}
+
+test_deny_bash_heredoc_into_sed_into_tmp_script if {
+	denied(bash_event("sed -n p <<'EOF' > /tmp/probe.py\nprint(1)\nEOF"))
+}
+
+test_deny_bash_extract_then_append_authoring if {
+	denied(bash_event("sed -n 1,5p a.py > /tmp/probe.py; echo 'print(1)' >> /tmp/probe.py"))
+}
+
 # ---------------------------------------------------------------------------
 # WRITES into /tmp are still denied.
 # ---------------------------------------------------------------------------
