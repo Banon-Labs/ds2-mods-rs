@@ -59,4 +59,4 @@ pub mod policy;
 mod install;
 
 #[cfg(windows)]
-pub use install::{LogFn, Outcome, install, set_logger};
+pub use install::{LogFn, Outcome, install, set_logger, set_test_cap};

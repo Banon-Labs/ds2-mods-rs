@@ -2,10 +2,12 @@
 //! session update that decides when to push our weapons through it again.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
-use ds2_game_base::mem::{game_rva, read_bytes, safe_read_u8, safe_read_u16, safe_read_u32, safe_read_usize};
+use ds2_game_base::mem::{
+    game_rva, read_bytes, safe_read_u8, safe_read_u16, safe_read_u32, safe_read_usize,
+};
 use ds2_hook::{MH_EnableHook, MH_Initialize, MH_STATUS, MhHook};
 
 use crate::LOG_PREFIX;
@@ -81,6 +83,21 @@ pub struct Outcome {
     pub installed: bool,
 }
 
+/// Change the pretend remote player's level while the game runs, or remove it with `None`.
+///
+/// The next check (within a quarter second) picks it up exactly as it would a real player
+/// arriving, changing weapons or leaving, so removing it exercises the in-world restore.
+pub fn set_test_cap(test_cap: Option<u8>) {
+    let previous = TEST_CAP.swap(cap_to_atomic(test_cap), Ordering::AcqRel);
+    if previous != cap_to_atomic(test_cap) {
+        log(format_args!(
+            "{LOG_PREFIX} test_cap {} -> {}",
+            show(cap_from_atomic(previous)),
+            show(test_cap)
+        ));
+    }
+}
+
 fn cap_from_atomic(raw: u32) -> Option<u8> {
     u8::try_from(raw).ok()
 }
@@ -148,7 +165,9 @@ pub unsafe fn install(test_cap: Option<u8>) -> Outcome {
         game_rva(ds2_rva::GAME_MANAGER_IMP),
         game_rva(ds2_rva::PLAYER_CTRL_VTABLE),
     ) else {
-        log(format_args!("{LOG_PREFIX} not installed reason=no-module-base"));
+        log(format_args!(
+            "{LOG_PREFIX} not installed reason=no-module-base"
+        ));
         return refused;
     };
     GAME_MANAGER.store(manager, Ordering::Release);
@@ -184,7 +203,10 @@ pub unsafe fn install(test_cap: Option<u8>) -> Outcome {
     };
     // SAFETY: the site matched its recorded prologue, and the detour has the same ABI.
     let weapon = match unsafe {
-        MhHook::new(weapon_site as *mut c_void, weapon_update_detour as *mut c_void)
+        MhHook::new(
+            weapon_site as *mut c_void,
+            weapon_update_detour as *mut c_void,
+        )
     } {
         Ok(hook) => hook,
         Err(status) => {
@@ -197,7 +219,10 @@ pub unsafe fn install(test_cap: Option<u8>) -> Outcome {
     // Published before the sites are patched, so a detour that fires at once has somewhere to go.
     TICK_ORIGINAL.store(tick.trampoline() as usize, Ordering::Release);
     WEAPON_UPDATE_ORIGINAL.store(weapon.trampoline() as usize, Ordering::Release);
-    for (site, name) in [(weapon_site, "CHR_WEAPON_UPDATE"), (tick_site, "NET_SESSION_UPDATE")] {
+    for (site, name) in [
+        (weapon_site, "CHR_WEAPON_UPDATE"),
+        (tick_site, "NET_SESSION_UPDATE"),
+    ] {
         // SAFETY: an address `MhHook::new` accepted above.
         let status = unsafe { MH_EnableHook(site as *mut c_void) };
         if status != MH_STATUS::MH_OK {
@@ -270,8 +295,16 @@ fn inventory_weapon(bag: usize, slot: usize) -> Option<InventoryWeapon> {
     Some(InventoryWeapon {
         item,
         durability_bits,
-        level: if kind < ds2_rva::ITEM_TYPE_HAS_LEVEL_BELOW { level & 0x0f } else { 0 },
-        infusion: if kind < ds2_rva::ITEM_TYPE_HAS_INFUSION_BELOW { infusion & 0x0f } else { 0 },
+        level: if kind < ds2_rva::ITEM_TYPE_HAS_LEVEL_BELOW {
+            level & 0x0f
+        } else {
+            0
+        },
+        infusion: if kind < ds2_rva::ITEM_TYPE_HAS_INFUSION_BELOW {
+            infusion & 0x0f
+        } else {
+            0
+        },
     })
 }
 
@@ -492,7 +525,11 @@ fn check() {
             copies(bag, local)
         ));
     }
-    let remotes = if local == 0 { Vec::new() } else { remotes(local) };
+    let remotes = if local == 0 {
+        Vec::new()
+    } else {
+        remotes(local)
+    };
     let test_cap = cap_from_atomic(TEST_CAP.load(Ordering::Acquire));
     let cap = policy::cap(&remotes, test_cap);
     if !FIRST_TICK.swap(true, Ordering::AcqRel) {
@@ -507,7 +544,10 @@ fn check() {
         let previous = tracker.applied();
         (tracker.step(local, cap), previous)
     };
-    CURRENT_CAP.store(cap_to_atomic(if local == 0 { None } else { cap }), Ordering::Release);
+    CURRENT_CAP.store(
+        cap_to_atomic(if local == 0 { None } else { cap }),
+        Ordering::Release,
+    );
     if let Action::Redrive { cap } = action {
         let highest: Vec<String> = remotes
             .iter()
@@ -580,7 +620,10 @@ fn push(player: usize, cap: Option<u8>) {
             // lays out the one it passes (ds2-rva CHR_WEAPON_UPDATE).
             unsafe { update(player, request.0.as_mut_ptr()) };
         }
-        pushed.push(format!("s{slot}:{}+{}->+{level}", weapon.item, weapon.level));
+        pushed.push(format!(
+            "s{slot}:{}+{}->+{level}",
+            weapon.item, weapon.level
+        ));
     }
     let verb = if cap.is_some() { "CAPPED" } else { "RESTORED" };
     log(format_args!(

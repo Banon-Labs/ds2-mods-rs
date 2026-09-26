@@ -8,6 +8,7 @@
 //! [weapon_sync]
 //! enabled = true
 //! # Optional. A pretend remote player at this level, so the cap can be tested solo.
+//! # Re-read once a second while the game runs; delete the line to make the player leave.
 //! test_cap = 3
 //! ```
 
@@ -70,6 +71,23 @@ impl WeaponSyncConfig {
     }
 }
 
+/// How often [`watch_test_cap`] re-reads the file.
+const WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Re-read `test_cap` once a second for the life of the process and hand every change to the
+/// crate. `enabled` is not re-read: the detours are installed once, at startup.
+pub fn watch_test_cap() {
+    let mut last = WeaponSyncConfig::load().test_cap;
+    loop {
+        std::thread::sleep(WATCH_INTERVAL);
+        let now = WeaponSyncConfig::load().test_cap;
+        if now != last {
+            ds2_weapon_sync::set_test_cap(now);
+            last = now;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,7 +95,10 @@ mod tests {
     #[test]
     fn an_absent_section_leaves_it_off() {
         for text in ["", "[weapon_sync]\n", "[save_block]\nenabled = true\n"] {
-            assert_eq!(WeaponSyncConfig::from_text(text), WeaponSyncConfig::default());
+            assert_eq!(
+                WeaponSyncConfig::from_text(text),
+                WeaponSyncConfig::default()
+            );
         }
     }
 
@@ -93,8 +114,10 @@ mod tests {
     #[test]
     fn test_cap_is_a_level_or_nothing() {
         let read = |value: &str| {
-            WeaponSyncConfig::from_text(&format!("[weapon_sync]\nenabled = true\ntest_cap = {value}\n"))
-                .test_cap
+            WeaponSyncConfig::from_text(&format!(
+                "[weapon_sync]\nenabled = true\ntest_cap = {value}\n"
+            ))
+            .test_cap
         };
         assert_eq!(read("3"), Some(3));
         assert_eq!(read("0"), Some(0));

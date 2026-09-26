@@ -134,8 +134,22 @@ mod tests {
     #[test]
     fn the_cap_is_the_highest_level_any_other_player_has() {
         // The user's example: host +0, phantom +9 -> 9.
-        let host = player([(DAGGER, 0), (FISTS, 0), (FISTS, 0), (SHIELD, 0), (FISTS, 0), (FISTS, 0)]);
-        let phantom = player([(DAGGER, 9), (FISTS, 0), (FISTS, 0), (SHIELD, 3), (FISTS, 0), (FISTS, 0)]);
+        let host = player([
+            (DAGGER, 0),
+            (FISTS, 0),
+            (FISTS, 0),
+            (SHIELD, 0),
+            (FISTS, 0),
+            (FISTS, 0),
+        ]);
+        let phantom = player([
+            (DAGGER, 9),
+            (FISTS, 0),
+            (FISTS, 0),
+            (SHIELD, 3),
+            (FISTS, 0),
+            (FISTS, 0),
+        ]);
         assert_eq!(cap(&[host, phantom], None), Some(9));
         assert_eq!(cap(&[host], None), Some(0));
     }
@@ -163,7 +177,14 @@ mod tests {
     #[test]
     fn level_bytes_are_nibbles_and_out_of_range_ones_are_ignored() {
         // Infusion lives in the next byte, but a high nibble here must still not raise the cap.
-        let odd = player([(DAGGER, 0x35), (SHIELD, 0x0c), (0, 0), (0, 0), (0, 0), (0, 0)]);
+        let odd = player([
+            (DAGGER, 0x35),
+            (SHIELD, 0x0c),
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (0, 0),
+        ]);
         assert_eq!(remote_highest(&odd), Some(5));
     }
 
@@ -192,7 +213,11 @@ mod tests {
     #[test]
     fn a_cap_arriving_pushes_once_and_a_steady_cap_pushes_nothing() {
         let mut t = Tracker::new();
-        assert_eq!(t.step(0x100, None), Action::Nothing, "alone in our own world");
+        assert_eq!(
+            t.step(0x100, None),
+            Action::Nothing,
+            "alone in our own world"
+        );
         assert_eq!(t.step(0x100, Some(9)), Action::Redrive { cap: Some(9) });
         assert_eq!(t.step(0x100, Some(9)), Action::Nothing);
         assert_eq!(t.applied(), Some(9));

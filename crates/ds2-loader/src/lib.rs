@@ -986,7 +986,11 @@ fn install_weapon_sync() {
             "{} NOT INSTALLED -- weapon levels are never capped this run",
             ds2_weapon_sync::LOG_PREFIX
         ));
+        return;
     }
+    // `test_cap` is live: editing it in ds2-mods.toml while the game runs is how a pretend player
+    // arrives, changes weapons or leaves, which is the only way to see the in-world restore alone.
+    std::thread::spawn(weapon_sync::watch_test_cap);
 }
 
 /// Install the agent-driven input harness, if `<Game>/ds2-mods.toml` asked for it.
