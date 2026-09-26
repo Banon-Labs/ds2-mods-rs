@@ -6988,6 +6988,40 @@ pub const NAVI_ID_INDEX_MASK: u32 = 0x7fff;
 /// 0x7fff`) before it will index anything, and by `0x140bba040` (`psVar16[6] == 0x7fff`).
 pub const NAVI_ID_INDEX_NONE: u32 = 0x7fff;
 
+/// The bit that makes a packed navi id an EDGE rather than a triangle. `0x8000`.
+///
+/// `0x140bab200` is the triangle packer `0x140bab230` plus one `bts eax, 0xf` at `0x140bab21c`,
+/// and it is the packer `0x140bb3f00` uses for a route's portals. So a route segment's ids are
+/// edges, and their index belongs to [`NV_NAVI_GRAPH_EDGES_OFFSET`], not to the per-triangle
+/// table at [`NV_NAVI_GRAPH_NODE_ATTRS_OFFSET`].
+///
+/// Measured live on 2026-09-26 with `scripts/frida/route-edge-ids.js`: every id of a self-check
+/// route carried this bit, and one of them, `0x0002815f`, indexed an edge past the end of its
+/// graph's triangle table -- the word read there was a neighbouring allocation, and it is what
+/// capped the route audit below the widest size class.
+pub const NAVI_ID_EDGE_FLAG: u32 = 0x8000;
+
+/// `i16` triangle count of an `NvNaviGraph`: the bound on [`NV_NAVI_GRAPH_NODE_ATTRS_OFFSET`]'s
+/// table. Read by `0x1404018d0`, `0x140bac070` and `0x140bb3f00`.
+pub const NV_NAVI_GRAPH_TRIANGLE_COUNT_OFFSET: usize = 0x2c;
+
+/// `i16` edge count of an `NvNaviGraph`: the bound on [`NV_NAVI_GRAPH_EDGES_OFFSET`], checked
+/// by `0x140bb4ac0`, `0x140bb9de0` and `0x140bba040` before they index it.
+pub const NV_NAVI_GRAPH_EDGE_COUNT_OFFSET: usize = 0x2e;
+
+/// Pointer to an `NvNaviGraph`'s edge records, [`NV_NAVI_EDGE_STRIDE`] apart.
+pub const NV_NAVI_GRAPH_EDGES_OFFSET: usize = 0x58;
+
+/// Bytes per edge record at [`NV_NAVI_GRAPH_EDGES_OFFSET`].
+pub const NV_NAVI_EDGE_STRIDE: usize = 0x10;
+
+/// Two `i16` triangle indices in an edge record, one per side.
+///
+/// [`NAVI_ID_INDEX_NONE`] means the edge is a border with nothing on that side. `0x140bba040`
+/// reads an edge's attribute word as
+/// `[graph+0x48][edge[6 + side]]`, i.e. through these.
+pub const NV_NAVI_EDGE_TRIANGLES_OFFSET: usize = 0xc;
+
 /// The type field of a node attribute word: bits 3..6, the value `0x140baf0d0` switches on.
 pub const NAVI_NODE_TYPE_MASK: u32 = 0x78;
 

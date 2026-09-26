@@ -1533,7 +1533,12 @@ fn describe_audit(report: &navquery::Audit, scope_said: &mut bool) {
         .nodes
         .iter()
         .take(10)
-        .map(|node| format!("0x{:08x}(t{:x}/c{})", node.attrs, node.kind, node.capacity))
+        .map(|node| {
+            format!(
+                "tri {} 0x{:08x}(t{:x}/c{})",
+                node.triangle, node.attrs, node.kind, node.capacity
+            )
+        })
         .collect();
     log(format_args!(
         "tick: route audit -- {} node(s) read{}. Widest agent this route admits: {widest}. The \
@@ -1570,9 +1575,15 @@ fn describe_audit(report: &navquery::Audit, scope_said: &mut bool) {
             .at
             .map_or((f32::NAN, f32::NAN, f32::NAN), |at| (at[0], at[1], at[2]));
         log(format_args!(
-            "tick:   node 0x{:08x} (segment {}{} at {x:.2}, {y:.2}, {z:.2}) attrs 0x{:08x} \
+            "tick:   node 0x{:08x} -> tri {} (segment {}{} at {x:.2}, {y:.2}, {z:.2}) attrs 0x{:08x} \
              type 0x{:x} capacity {} -- {verdict}",
-            node.node.id, node.node.segment, node.node.side, node.attrs, node.kind, node.capacity
+            node.node.id,
+            node.triangle,
+            node.node.segment,
+            node.node.side,
+            node.attrs,
+            node.kind,
+            node.capacity
         ));
     }
     if !*scope_said {
