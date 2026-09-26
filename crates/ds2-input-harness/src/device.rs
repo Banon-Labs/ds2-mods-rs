@@ -134,6 +134,8 @@ static FIRED: [AtomicU64; SITES.len()] = [const { AtomicU64::new(0) }; SITES.len
 
 /// Whether the virtual cursor is being published. One-way; see the module docs.
 static CURSOR_ENGAGED: AtomicBool = AtomicBool::new(false);
+/// Whether the current button hold has already reported that the pad is not on the XInput arm.
+static WRONG_ARM_SAID: AtomicBool = AtomicBool::new(false);
 /// The virtual cursor, as `f32` bits so a fractional push accumulates instead of rounding to
 /// nothing every frame.
 static VIRTUAL_X: AtomicU32 = AtomicU32::new(0);
@@ -262,6 +264,13 @@ unsafe fn write_pad(this: *mut u8, blocking: bool, authored: &Authored) {
                 ds2_rva::PAD_DEVICE_AXIS_COUNT * size_of::<f32>(),
             );
             zero(this, ds2_rva::PAD_DEVICE_BUTTONS_OFFSET, size_of::<u16>());
+            // The third backend's mask is the word the game's key test reads instead when that
+            // backend owns the pad, so a block has to blank it too.
+            zero(
+                this,
+                ds2_rva::PAD_DEVICE_THIRD_BACKEND_BUTTONS_OFFSET,
+                size_of::<u32>(),
+            );
             zero(
                 this,
                 ds2_rva::PAD_DEVICE_LEFT_TRIGGER_OFFSET,
@@ -292,14 +301,31 @@ unsafe fn write_pad(this: *mut u8, blocking: bool, authored: &Authored) {
         }
     }
     if let Some(mask) = authored.buttons {
-        // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
-        // offset this crate validated before installing. The callee's own contract asks for exactly
-        // that live object, and reads inside it go through the fault-tolerant readers.
-        unsafe {
-            this.add(ds2_rva::PAD_DEVICE_BUTTONS_OFFSET)
-                .cast::<u16>()
-                .write_unaligned(mask);
+        // The game's key test reads `+0x198` only on the XInput arm: no third backend, and an
+        // XInput port. On any other arm the word would be written and never read, so say so once
+        // per hold instead of reporting a press the game cannot see.
+        // SAFETY: the same live device the poll just filled.
+        let third = unsafe { get_i32(this, ds2_rva::PAD_DEVICE_THIRD_BACKEND_OFFSET) };
+        // SAFETY: as above.
+        let port = unsafe { get_i32(this, ds2_rva::PAD_DEVICE_XINPUT_PORT_OFFSET) };
+        if third < 0 && port >= 0 {
+            // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
+            // offset this crate validated before installing. The callee's own contract asks for exactly
+            // that live object, and reads inside it go through the fault-tolerant readers.
+            unsafe {
+                this.add(ds2_rva::PAD_DEVICE_BUTTONS_OFFSET)
+                    .cast::<u16>()
+                    .write_unaligned(mask);
+            }
+        } else if !WRONG_ARM_SAID.swap(true, Ordering::Relaxed) {
+            harness_log!(
+                "buttons: mask 0x{mask:04x} not applied -- this pad is not on the XInput arm \
+                 (third-backend={third} xinput-port={port}), and the game reads its buttons \
+                 elsewhere there"
+            );
         }
+    } else {
+        WRONG_ARM_SAID.store(false, Ordering::Relaxed);
     }
     if let Some(value) = authored.triggers[0] {
         // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an

@@ -26,14 +26,13 @@
 //! item is not being held, so there is no grip to ask about, and the number the badge is agreeing
 //! with is the one in the detail pane a player opens to find out why.
 //!
-//! # What that leaves unproven
+//! # Which stats it compares against
 //!
-//! Whether the table at [`ds2_rva::FRONTEND_ROOT_PLAYER_STATS_OFFSET`] holds base or modified
-//! stats. Every cross-reference to `FUN_1404ffb20` is a reader and its writer has not been found,
-//! so whether rings and spEffects are in these numbers is open -- on the gameplay side the
-//! equivalent block is provably `clamp(base + modifiers, 1, 99)`, and this one has no such proof.
-//! A badge computed from base stats would light up on a weapon the player can actually swing while
-//! wearing a Ring of Blades.
+//! The effective ones. The table at [`ds2_rva::FRONTEND_ROOT_PLAYER_STATS_OFFSET`] is written by
+//! [`ds2_rva::FRONTEND_STAT_TABLE_WRITER`] from the same effective block the game's own mechanics
+//! check reads, so a Ring of Blades counts here exactly as it counts when the weapon is swung, and
+//! the badge cannot light up on a weapon the player can actually use. Whether spEffects are in that
+//! block as well as rings is still open; the badge agrees with the game either way.
 //!
 //! # Two-handing, which the detail pane ignores and this badge does not
 //!
@@ -54,12 +53,14 @@
 //! recomputed per cell on both instead. That is a consequence of where the badge lives rather than
 //! an oversight, and it is also why one `unmet` serves two binds.
 //!
-//! # Only weapons and shields
+//! # Weapons, shields, armour and spells
 //!
-//! The gate is the game's own infusion gate -- item type `0` or `1`, from the four instructions at
-//! `0x140034ea9` -- because the badge lives inside the infusion container and only those two types
-//! have one. Armour (`0x11..0x14`) and rings (`0x42`, `0x43`) have requirement columns and stat
-//! indices in the same table and are not marked.
+//! The item type at the entry's `+0x1e` picks the requirement columns: `0`/`1` weapons and shields
+//! (`0x33..0x36`, with the two-handed Strength rule), `2..=5` armour (`0x11..0x14`), `9` spells
+//! (`0x42`, `0x43`). Rings (`7`) have no stat requirement and are never marked. The infusion
+//! container the badge lives in is built for every item cell, not only weapons -- both binds run
+//! their infusion loop with no type check; the `+0x1e <= 1` test only picks which infusion glyph
+//! shows.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -82,14 +83,31 @@ type ParamRowsFn = unsafe extern "system" fn(usize, *mut u8, *const u8) -> u8;
 type ParamColumnFn = unsafe extern "system" fn(usize, u32) -> u64;
 type EntryLookupFn = unsafe extern "system" fn(usize, u16) -> usize;
 
-/// How many decisions to write to the log before going quiet.
+/// How many "could not ask" decisions (`None`) to write to the log before going quiet.
 ///
 /// The bind runs per visible row per refresh, so an uncapped line here is a log that fills a disk
-/// while the player scrolls. Two of each answer is enough to tell "the check ran and said met"
-/// from "the check never ran", which are the two outcomes that look identical on screen.
+/// while the player scrolls. A handful is enough to show the check is being reached.
 const LOGGED_DECISIONS: usize = 8;
 
+/// How many real answers (`Some`) to write before going quiet. Kept separate from the `None` cap
+/// because the equipment screen binds every slot, empty ones first: with one shared cap, a run on
+/// 2026-09-26 spent all of its lines on empty slots and never showed an armour answer.
+const LOGGED_ANSWERS: usize = 48;
+
+/// How many "unmet" answers (`Some(true)`) to write, counted apart from the met ones.
+///
+/// An unmet answer is the one the badge exists for and the rarest, so it gets its own budget:
+/// on 2026-09-26 the equipment screen's met answers used up the shared cap before the armour
+/// picker's rows were bound, and the picker's answers went unlogged.
+const LOGGED_UNMET: usize = 48;
+
+static UNMET: AtomicUsize = AtomicUsize::new(0);
 static DECISIONS: AtomicUsize = AtomicUsize::new(0);
+static ANSWERS: AtomicUsize = AtomicUsize::new(0);
+/// The item type the last [`unmet`] read, for the decision line; [`NO_KIND`] when it stopped
+/// before reading one.
+static LAST_KIND: AtomicUsize = AtomicUsize::new(NO_KIND);
+const NO_KIND: usize = usize::MAX;
 static MARKED: AtomicUsize = AtomicUsize::new(0);
 
 /// A one-component element id path, in the shape [`ds2_rva::FE_ELEMENT_RESOLVE`] reads.
@@ -214,10 +232,20 @@ unsafe fn unmet(base: usize, item: *const u8) -> Option<bool> {
             .add(ds2_rva::ITEM_ENTRY_TYPE_OFFSET)
             .read()
     };
-    if kind > ds2_rva::ITEM_ENTRY_TYPE_MAX_INFUSABLE {
-        // Not a weapon or a shield. The game's own infusion reader stops here too.
+    LAST_KIND.store(usize::from(kind), Ordering::Relaxed);
+    // Which requirement columns this kind of item has. Weapons and shields use the weapon keys and
+    // the two-handed Strength rule; armour and spells have their own keys and no grip rule. Rings
+    // and everything else have no stat requirement, so nothing to mark.
+    let (keys, halves_strength): (&[u32], bool) = if kind <= ds2_rva::ITEM_ENTRY_TYPE_MAX_INFUSABLE
+    {
+        (&ds2_rva::FE_ITEM_PARAM_WEAPON_REQUIREMENTS, true)
+    } else if ds2_rva::ITEM_ENTRY_TYPE_ARMOUR.contains(&kind) {
+        (&ds2_rva::FE_ITEM_PARAM_ARMOUR_REQUIREMENTS, false)
+    } else if kind == ds2_rva::ITEM_ENTRY_TYPE_SPELL {
+        (&ds2_rva::FE_ITEM_PARAM_SPELL_REQUIREMENTS, false)
+    } else {
         return Some(false);
-    }
+    };
 
     let mut descriptor = [0u8; ds2_rva::FE_ITEM_DESCRIPTOR_SIZE];
     // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
@@ -277,7 +305,7 @@ unsafe fn unmet(base: usize, item: *const u8) -> Option<bool> {
     let column: ParamColumnFn = unsafe {
         std::mem::transmute::<usize, ParamColumnFn>(base + ds2_rva::FE_ITEM_PARAM_COLUMN as usize)
     };
-    for key in ds2_rva::FE_ITEM_PARAM_WEAPON_REQUIREMENTS {
+    for &key in keys {
         if key >= ds2_rva::FE_STAT_ROW_TABLE_ENTRIES {
             continue;
         }
@@ -296,7 +324,7 @@ unsafe fn unmet(base: usize, item: *const u8) -> Option<bool> {
         // SAFETY: the row is what the game's own resolver returned and the key is one its switch
         // handles with a plain load; the return is in `RAX` with no allocation behind it.
         let mut required = unsafe { column(row, key) } as u16;
-        if two_handed && key == ds2_rva::FE_ITEM_PARAM_WEAPON_REQUIRED_STRENGTH {
+        if halves_strength && two_handed && key == ds2_rva::FE_ITEM_PARAM_WEAPON_REQUIRED_STRENGTH {
             // The mechanics check's own `shr cx,1`, so an odd requirement rounds down as it does.
             required >>= 1;
         }
@@ -310,8 +338,9 @@ unsafe fn unmet(base: usize, item: *const u8) -> Option<bool> {
             let n = MARKED.fetch_add(1, Ordering::Relaxed) + 1;
             if n <= LOGGED_DECISIONS {
                 log(format_args!(
-                    "{LOG_PREFIX} unmet handle={handle:#06x} key={key:#04x} stat={index} \
-                     required={required} have={have} two_handed={two_handed} marked={n}"
+                    "{LOG_PREFIX} unmet handle={handle:#06x} kind={kind} key={key:#04x} \
+                     stat={index} required={required} have={have} two_handed={two_handed} \
+                     marked={n}"
                 ));
             }
             return Some(true);
@@ -507,8 +536,13 @@ unsafe fn decide(container: *mut u8, item: *const u8, screen: &str) {
     if base == 0 {
         return;
     }
+    LAST_KIND.store(NO_KIND, Ordering::Relaxed);
     // SAFETY: `item` is the game's own and `base` is the live module base.
     let answer = unsafe { unmet(base, item) };
+    let kind = match LAST_KIND.load(Ordering::Relaxed) {
+        NO_KIND => "?".to_string(),
+        kind => kind.to_string(),
+    };
     // A write on every bind, including the binds where the question could not be asked. The scene
     // element outlives the cell view -- the view is a stack temporary, the element is not -- so a
     // bind that returned early would leave the previous item's badge standing over a different
@@ -516,10 +550,20 @@ unsafe fn decide(container: *mut u8, item: *const u8, screen: &str) {
     // entry carrying an infusion nibble the layout does not author would otherwise light the badge
     // up on its own, and after this write it cannot.
     let visible = answer.unwrap_or(false);
-    let n = DECISIONS.fetch_add(1, Ordering::Relaxed) + 1;
-    if n <= LOGGED_DECISIONS {
+    let (n, cap) = if answer == Some(true) {
+        (UNMET.fetch_add(1, Ordering::Relaxed) + 1, LOGGED_UNMET)
+    } else if answer.is_some() {
+        (ANSWERS.fetch_add(1, Ordering::Relaxed) + 1, LOGGED_ANSWERS)
+    } else {
+        (
+            DECISIONS.fetch_add(1, Ordering::Relaxed) + 1,
+            LOGGED_DECISIONS,
+        )
+    };
+    if n <= cap {
         log(format_args!(
-            "{LOG_PREFIX} decided screen={screen} unmet={answer:?} shown={visible} decisions={n}"
+            "{LOG_PREFIX} decided screen={screen} kind={kind} unmet={answer:?} shown={visible} \
+             decisions={n}"
         ));
     }
     // SAFETY: `container` is the live accessor the caller took off the game's own bind.

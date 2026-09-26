@@ -286,33 +286,30 @@ unsafe extern "system" fn detour_show_process_window(
     unsafe { original(ui, caption, arg3, arg4) }
 }
 
-/// `void play_settled(scene)` -- `FeSceneTitle` in RCX, the only argument its own callers pass.
-type OpenTitleFn = unsafe extern "system" fn(*mut u8);
+/// `void play(group, int sequence, int flag)` -- [`ds2_rva::FE_GROUP_PLAY_SEQUENCE`],
+/// `FeGroupBase::v1`. RCX/EDX/R8D; it zeroes the seek in XMM3 itself before the tail call.
+type GroupPlayFn = unsafe extern "system" fn(*mut u8, i32, i32);
 
-/// Open the title screen early, which puts its scene into the settled state, once.
+/// Put the title scene into its settled sequence, once.
 ///
 /// `FeSubStateTitleMain::v1` starts sequence `0x66` on the scene and nothing in the phase machine
 /// stops it. Forcing the press gate alone makes the gate report a state the scene is not in, so the
-/// flow advances while that sequence keeps running underneath. [`ds2_rva::FE_SCENE_TITLE_OPEN`]
-/// plays `0x67` -- the settled state the gate is actually waiting to observe -- so the scene is
-/// *put into* that state rather than skipped past it.
+/// flow advances while that sequence keeps running underneath. Playing
+/// [`ds2_rva::FE_SCENE_TITLE_SEQUENCE_SETTLED`] puts the scene into the state the gate waits for
+/// rather than skipping past it.
 ///
-/// The effect that matters, and is confirmed in-game: **the menu becomes usable as soon as its data
-/// is available instead of being paced by an animation.** A separate open question is that the
-/// title text is still seen animating; see `docs/DS2-TITLE-FLOW.md`. That is a question about the
-/// remaining animation, not a reason to drop this call.
-///
-/// **It is the screen's whole open, not one sequence play**, and this call site used to say
-/// otherwise: it named a constant that documented `0x1400f3820` as five lines. Past the branch that
-/// plays `0x67` run ~1000 further bytes of component lookups and row construction, so calling it
-/// here raises the title screen during substate `0x17`, earlier than the game would. What that
-/// costs against leaving it to `0x47` has not been measured; the constant's doc records what a
-/// side-effect-free replacement would be if the answer is that it costs something.
+/// **This used to call [`ds2_rva::FE_SCENE_TITLE_OPEN`], and never played `0x67` from here.** The
+/// open plays it only while the scene's `+0xf1` flag is clear, and `FeSubStateTitleMain::v1` has set
+/// that flag by the time this runs. What the call did do was rebuild the top-menu group on every
+/// call, leaving the previous one allocated. [`ds2_rva::FE_GROUP_PLAY_SEQUENCE`] is the bare play
+/// the open itself makes, with no other side effects, so this now does what its name said. The
+/// in-game effect once credited to the old call ("the menu becomes usable sooner") was attributed
+/// to a play that did not happen; see `docs/DS2-TITLE-FLOW.md`.
 ///
 /// # Safety
 ///
-/// Reads the scene through fault-tolerant reads and calls a game function with the same single
-/// argument its own call sites pass. Runs at most once per process.
+/// Reads the scene through fault-tolerant reads and calls a game function on it with the arguments
+/// the game's own callers of that function pass. Runs at most once per process.
 unsafe fn force_title_settled(base: usize) {
     if IDLE_FORCED.swap(1, Ordering::AcqRel) != 0 {
         return;
@@ -333,17 +330,23 @@ unsafe fn force_title_settled(base: usize) {
     if scene == 0 {
         return;
     }
-    // SAFETY: resolved from the live module base, called with the scene pointer its own call sites
-    // pass, and guarded to run once.
-    let open_title: OpenTitleFn = unsafe {
-        std::mem::transmute::<usize, OpenTitleFn>(base + ds2_rva::FE_SCENE_TITLE_OPEN as usize)
+    // SAFETY: resolved from the live module base; `FeSceneTitle` inherits this as its vtable slot 1,
+    // so the scene is the receiver the game's own calls use. Guarded to run once.
+    let play: GroupPlayFn = unsafe {
+        std::mem::transmute::<usize, GroupPlayFn>(base + ds2_rva::FE_GROUP_PLAY_SEQUENCE as usize)
     };
-    // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
-    // offset this crate validated before installing. The callee's own contract asks for exactly
-    // that live object, and reads inside it go through the fault-tolerant readers.
-    unsafe { open_title(scene as *mut u8) };
+    // SAFETY: `scene` is the live `FeSceneTitle` read above. The callee null-checks `[scene+8]`
+    // itself before it plays anything, and a flag of 0 is an animated play, not a pose.
+    unsafe {
+        play(
+            scene as *mut u8,
+            ds2_rva::FE_SCENE_TITLE_SEQUENCE_SETTLED,
+            0,
+        )
+    };
     log(format_args!(
-        "{LOG_PREFIX} settled screen=title-main scene=0x{scene:x} via=FeSceneTitle::open sequence=0x67"
+        "{LOG_PREFIX} settled screen=title-main scene=0x{scene:x} via=FeGroupBase::v1 sequence=0x{:x}",
+        ds2_rva::FE_SCENE_TITLE_SEQUENCE_SETTLED
     ));
 }
 

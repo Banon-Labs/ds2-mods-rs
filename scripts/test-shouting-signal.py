@@ -33,6 +33,7 @@ import cupcake_shouting as shouting  # noqa: E402
 
 DOCS_POLICY = REPO_ROOT / ".cupcake" / "policies" / "claude" / "docs_no_shouting.rego"
 STOP_POLICY = REPO_ROOT / ".cupcake" / "policies" / "claude" / "no_shouting_at_turn_end.rego"
+SCRIPT_POLICY = REPO_ROOT / ".cupcake" / "policies" / "claude" / "script_comments_no_shouting.rego"
 
 
 @dataclass(frozen=True)
@@ -356,20 +357,23 @@ def check_policies_carry_the_same_definition() -> list[str]:
     so a byte comparison is the strongest check available and the cheapest to keep true.
     """
     failures = []
-    docs = DOCS_POLICY.read_text(encoding="utf-8")
     stop = STOP_POLICY.read_text(encoding="utf-8")
 
-    for label, pattern in (
-        ("run_pattern", shouting.RUN_PATTERN),
-        ("emphasis_pattern", shouting.EMPHASIS_PATTERN),
-        ("capitalised_identifier_pattern", shouting.IDENTIFIER_PATTERN),
-    ):
-        expected = f"{label} := `{pattern}`"
-        if expected not in docs:
-            failures.append(
-                f"{DOCS_POLICY.name} does not carry this module's {label} verbatim. The two arms "
-                f"of the guard now forbid different things. Expected the line:\n    {expected}"
-            )
+    # script_comments_no_shouting carries its own copy because scripts/check.sh tests each policy
+    # alone, where a reference into docs_no_shouting's package is undefined.
+    for policy in (DOCS_POLICY, SCRIPT_POLICY):
+        text = policy.read_text(encoding="utf-8")
+        for label, pattern in (
+            ("run_pattern", shouting.RUN_PATTERN),
+            ("emphasis_pattern", shouting.EMPHASIS_PATTERN),
+            ("capitalised_identifier_pattern", shouting.IDENTIFIER_PATTERN),
+        ):
+            expected = f"{label} := `{pattern}`"
+            if expected not in text:
+                failures.append(
+                    f"{policy.name} does not carry this module's {label} verbatim. The arms of the "
+                    f"guard now forbid different things. Expected the line:\n    {expected}"
+                )
 
     threshold = f"min_score := {shouting.MIN_RUN}"
     if threshold not in stop:
@@ -393,6 +397,7 @@ def check_routing() -> list[str]:
     evaluate = (REPO_ROOT / ".cupcake" / "system" / "evaluate.rego").read_text(encoding="utf-8")
     for verb, package in (
         ("deny", "docs_no_shouting"),
+        ("deny", "script_comments_no_shouting"),
         ("halt", "no_shouting_at_turn_end"),
     ):
         needle = f"data.cupcake.policies.claude.{package}.{verb}"
