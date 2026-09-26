@@ -175,3 +175,55 @@ test_allow_unrelated_tool if {
 		"tool_input": {"command": "wc -l crates/ds2-save-file/src/lib.rs"},
 	})
 }
+
+# ---------------------------------------------------------------- shell writes into documentation
+
+bash_event(command) := {
+	"hook_event_name": "PreToolUse",
+	"tool_name": "Bash",
+	"tool_input": {"command": command},
+}
+
+issue_id := concat("", ["ds2-mods", "-rs-v3f"])
+
+# Measured 2026-09-24: two ids went into docs/COMMENTS.md this way while the Edit path refused them.
+test_deny_heredoc_append_into_docs if {
+	denied(bash_event(concat("", ["cat >> docs/COMMENTS.md <<'EOF'\nTracked as ", issue_id, ".\nEOF"])))
+}
+
+# The delivered shape: the engine collapses the heredoc's newlines, and the shim separates the
+# statement after the terminator.
+test_deny_heredoc_append_into_docs_delivered_shape if {
+	denied(bash_event(concat("", ["cat >> docs/COMMENTS.md <<'EOF' Tracked as ", issue_id, ". EOF; echo done"])))
+}
+
+test_deny_echo_into_a_markdown_file_anywhere if {
+	denied(bash_event(concat("", ["echo 'see ", issue_id, "' > README.md"])))
+}
+
+test_deny_printf_piped_through_tee_into_docs if {
+	denied(bash_event(concat("", ["printf '", "25 host ", "tests' | tee -a docs/PORTING.md"])))
+}
+
+# A write that is not documentation, and a read of documentation, stay out of it.
+test_allow_id_redirected_into_a_non_doc_file if {
+	not denied(bash_event(concat("", ["echo ", issue_id, " > /tmp/claude-1000/ids.txt"])))
+}
+
+test_allow_grep_of_docs_for_ids if {
+	not denied(bash_event("grep -rn ds2-mods-rs- docs/"))
+}
+
+test_allow_clean_heredoc_into_docs if {
+	not denied(bash_event("cat > docs/NEW.md <<'EOF'\nThe loader writes one log per run.\nEOF"))
+}
+
+# Measured on this rule's first draft: a doc path named inside a heredoc that writes a .rego file is
+# not a target, and a separate statement's `timeout 25 opa test` is not a test count in a document.
+test_allow_doc_path_inside_a_heredoc_written_elsewhere if {
+	not denied(bash_event(concat("", ["cat >> tests/x.rego <<'REGO'\ndenied(bash_event(\"echo ", issue_id, " > README.md\"))\nREGO\ntimeout 25 opa test ."])))
+}
+
+test_allow_clean_doc_write_beside_a_counted_command if {
+	not denied(bash_event("echo 'The loader writes one log per run.' > docs/NEW.md; timeout 25 opa test ."))
+}
