@@ -2381,6 +2381,24 @@ pub const FE_SUBSTATE_TOP_MENU_ENTER: u32 = 0x000f_de90;
 /// Called, never patched, so its Arxan status does not arise.
 pub const FE_SCENE_TITLE_POSE_HIDDEN: u32 = 0x0050_5d40;
 
+/// `FeGroupBase::v1(group, sequence, flag)`: play one sequence on a group, and nothing else.
+/// RVA `0x00505ce0`.
+///
+/// `mov rcx,[rcx+0x8]; test rcx,rcx; jz ret; xorps xmm3,xmm3; jmp 0x140afdb80` -- the same play
+/// [`FE_SCENE_TITLE_POSE_HIDDEN`] makes, with the pose flag left to the caller and the seek zeroed.
+/// `FeSceneTitle` inherits it as vtable slot 1, so the scene pointer is the right receiver. It is
+/// what `ds2-dialog-skip`'s title settle meant to call when it called [`FE_SCENE_TITLE_OPEN`], which
+/// plays the settled sequence only while `+0xf1` is clear -- and by the time the settle runs,
+/// `FeSubStateTitleMain::v1` has already set it -- and then rebuilds the top-menu group on every
+/// call. Real instructions, not an Arxan redirect; called, never patched.
+pub const FE_GROUP_PLAY_SEQUENCE: u32 = 0x0050_5ce0;
+
+/// The title scene's settled sequence, the one the press gate at `0x1400f37f0` waits for. `0x67`.
+///
+/// One of the family [`FE_SCENE_TITLE_SEQUENCE_HIDDEN`] completes: `0x66` open, `0x67` settled,
+/// `0x68` close.
+pub const FE_SCENE_TITLE_SEQUENCE_SETTLED: i32 = 0x67;
+
 /// The sequence [`FE_SCENE_TITLE_POSE_HIDDEN`] plays. `0x65`.
 ///
 /// It completes the family the frontend already had names for -- `0x66` open, `0x67` settled,
@@ -2456,10 +2474,12 @@ pub const FE_SEQUENCE_PLAY_FLAG_POSE: i32 = 1;
 /// `docs/DS2-TITLE-FLOW.md`. A question about the remaining animation, not a reason to drop the
 /// call, whose effect on when the menu becomes usable is real.
 ///
-/// **Not measured:** one boot with `title_settle` on against one with it off, which is what would
-/// say whether the open is still worth making at `0x17` now that it is known to be an open. The
-/// `FeGroupBase::v1` forwarder at `0x140505ce0` plays a sequence on a scene with no side effects
-/// and is the honest replacement if the answer is no.
+/// **No longer called for the settle.** By the time `ds2-dialog-skip`'s title settle ran, the
+/// scene's `+0xf1` open flag was already set, so this open never played `0x67` from there -- it
+/// only rebuilt the top-menu group, again, on every call. The settle now plays
+/// [`FE_SCENE_TITLE_SEQUENCE_SETTLED`] through [`FE_GROUP_PLAY_SEQUENCE`], which has no other side
+/// effects. The "confirmed in-game" effect above was credited to a `0x67` play that did not happen,
+/// so what caused it is open until a boot with the settle on is compared against one with it off.
 ///
 /// # Why this is the site to hook to hide the screen
 ///
