@@ -667,6 +667,7 @@ name = "ds2-net-effects"
 version = "0.1.0"
 dependencies = [
  "ds2-game-base",
+ "ds2-hook",
  "ds2-hotkey-config",
  "ds2-invasion-path",
  "ds2-rva",
