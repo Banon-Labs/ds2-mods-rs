@@ -163,8 +163,10 @@ key  stat  key  stat  key  stat
 
 Corroborated from the other side by the detail pane's own row tables, which `FUN_1400bbaa0` walks:
 the weapon pane (`0x1415640c0`, 19 rows) opens `0x33 0x34 0x35 0x36`, the armour pane
-(`0x141564090`, 10 rows) opens `0x11 0x12 0x13 0x14`, and the ring pane (`0x141564078`, 5 rows)
-contains `0x42 0x43`. Two instruments, one answer.
+(`0x141564090`, 10 rows) opens `0x11 0x12 0x13 0x14`, and the spell pane (`0x141564078`, 5 rows)
+contains `0x42 0x43`. Two instruments, one answer. That last pane was earlier called the ring
+pane; it is the spell pane, and rings have no requirement rows at all -- see "Armour and spells"
+below.
 
 ### Where the required value lives
 
@@ -430,7 +432,138 @@ question as the badge's corner.
 * **Shop lists.** `FUN_14003c2d0`'s descriptor covers a shop entry as well as a bag entry, but only
   the bag path has been traced, and the gate reads the bag entry's `+0x1e`. A shop row is expected
   to fall out as "cannot ask", which shows no badge.
-* **Armour and rings.** The columns and stat indices exist (`0x11..0x14`, `0x42`, `0x43`) and are
-  not used: the badge lives inside the infusion container, which only weapons and shields have.
+* **Armour and spells.** The columns and stat indices exist (`0x11..0x14`, `0x42`, `0x43`) and are
+  not used yet. The reason previously given here -- that only weapons and shields have an
+  infusion container -- is wrong; see the next section.
 * **The pause menu's own two item cells** put the infusion container up to `7.1` units from where
   the inventory and equip cells put it, so the badge lands correspondingly off there.
+
+## Armour and spells: the container is already there, and rings have nothing to check
+
+Static only, like everything above; nothing here has run. Each claim is tagged **verified in
+binary** (with the addresses that show it) or **inferred**.
+
+### The premise was wrong: every item cell has the container
+
+The earlier reading was that the game only builds the infusion container for inventory entries with
+`+0x1e <= 1`. It does not gate the container at all. The `+0x1e <= 1` test lives inside
+`FUN_140034e70` and decides only which glyph the loop turns on; the container, and the badge this
+crate clones into it, exist in every cell.
+
+* **Verified in binary.** `FUN_1400bc850` runs the sixteen-id loop at `0x1400bca70`..`0x1400bcacc`
+  on `[r14+0x2d0]` unconditionally. Every branch between the entry and the end of that loop is
+  either the count-text sign test (`0x1400bc9b7`, `0x1400bc9be`) or the `DLFixedVector` bound check
+  (`0x1400bca8f`); none reads the item type.
+* **Verified in binary.** `FUN_140095650`, the equipment-screen bind, has the same shape: its only
+  branches are the vector bound check (`0x14009569c`) and the loop back-edge (`0x1400956eb`).
+* **Verified in the layout.** `ds2-flo.py find --id 0x5f5c3e2` over `l02_02_Inventory.flo` places the
+  nine-id container `def 0x0070` in one item-cell template only, `def 0x007a` (wrapped by
+  `def 0x007d`). `l02_03_equipment.flo` does the same with `def 0x006b` in `def 0x0075`, and
+  `l02_01_In-Game.flo` with `def 0x0121` in `def 0x0128` and `def 0x012c`.
+* **Inferred.** The inventory list uses that one template for every category tab, armour and spells
+  included. No second item-cell template carrying the icon group `0x5f5c3e0` and a container exists
+  in the file, but which template each tab instantiates was not traced through the dialog code.
+* **Verified in binary.** The container builder hook (`FUN_140b50f20`, `crates/ds2-item-warn/src/mark.rs`)
+  fingerprints definitions by their nine ids at layout build time and reads no item at all, so the
+  badge is already present in armour and spell cells today. What keeps it hidden there is this
+  crate's own gate: `unmet` returns `Some(false)` for `kind > ITEM_ENTRY_TYPE_MAX_INFUSABLE`.
+
+### The equipment screen already calls the bind for armour and ring slots
+
+`FUN_140097150` walks the slot table at `PTR_DAT_141561ef0` (`0x23` pointers, a null pointer falling
+back to `DAT_141562010`) and calls `FUN_140095650` for every entry whose `+0x08` element id is
+non-zero. The entries are filled by dynamic initialisers in `0x14106f800`..`0x141070100`, each
+`call <slot helper>(n)` followed by stores to `+0x04`, `+0x08`, `+0x0c`, `+0x10` and `+0x00`.
+**Verified in binary**, with the helpers read one by one:
+
+| helper | body | slot index | table entries | `+0x08` element ids |
+| --- | --- | --- | --- | --- |
+| `0x14034e310` | `mov eax,ecx` | `0..5`, weapons | `0..2`, `7..9` | `0x1eac1f`..`0x1eac24` |
+| `0x14034e2e0` | `lea eax,[rcx+0x6]` | `6..9`, armour | `14..17` | `0x1eac25`..`0x1eac28` |
+| `0x14034e2b0` | `lea eax,[rcx+0xc]` | `12..15`, ammunition | `26`, `27`, `33`, `34` | `0x1eac3d`..`0x1eac40` |
+| `0x14034e2f0` | `lea eax,[rcx+0x10]` | `16..19`, rings | `3`, `4`, `10`, `11` | `0x1eac29`, `0x1eac2a`, `0x1eac41`, `0x1eac42` |
+| `0x14034e2d0` | `lea eax,[rcx+0x14]` | `20..29`, quick items | `21..25`, `28..32` | `0x1eac2b`..`0x1eac34` |
+
+Every one of those `+0x08` ids is non-zero, so the armour slots already reach `FUN_140095650` and
+therefore `crate::requirement::equip_detour`. The weapon/armour/ring names on the slot ranges are
+**inferred** from the helper grouping and the `+0x1e` category map below; the addresses, bodies and
+ids are read.
+
+### The category map, and why "rings 0x42/0x43" was a misreading
+
+`FUN_1400bbaa0` picks the detail pane from the item's category. **Verified in binary:**
+`FUN_14003bef0` returns inventory-entry `+0x1e`, `FUN_1401ad2a0` maps it to a category, and
+`FUN_1401ad030` indexes the category table at `0x14156b070` (stride `0x18`), whose first qword is a
+UTF-16 name and whose `+0x0c` is the category again. `FUN_1400bbaa0` then indexes its local
+`{0xaf, 0xae, 0xac, 0xac, 0xac, 0xad, 0xac}` by that category:
+
+| entry `+0x1e` | category | table name | pane | requirement keys |
+| --- | --- | --- | --- | --- |
+| `0`, `1` | `0` | Wu Qi  weapon | `0xaf`, `0x1415640c0` | `0x33..0x36` |
+| `2..5` | `1` | Fang Ju  armour | `0xae`, `0x141564090` | `0x11..0x14` |
+| `7` | `2` | Zhi Lun  ring | `0xac`, none | none |
+| `6` | `3` | Shi  arrow | `0xac`, none | none |
+| `8` | `4` | Dao Ju  item | `0xac`, none | none |
+| `9` | `5` | superu spell | `0xad`, `0x141564078` | `0x42`, `0x43` |
+| `10` | `6` | ziesuchiya gesture | `0xac`, none | none |
+
+So the pane holding `0x42`/`0x43` is the spell pane -- `0x141564078` reads
+`0x41 0x40 0x42 0x43 0x3f` -- and rings have no requirement rows in the game's own UI. There is
+nothing to check for a ring, and the plan below does not invent one.
+
+### The exact checks
+
+The stat index is the `i16` at `DAT_14155def0 + key * 12 + 4`, re-dumped for this section
+(**verified in binary**): `0x11`->`8`, `0x12`->`9`, `0x13`->`10`, `0x14`->`11`, `0x42`->`10`,
+`0x43`->`11`, the same `8..11` the weapon keys map to (Strength, Dexterity, Intelligence, Faith).
+The compare is `FUN_1400bcde0`'s: unmet when `required > statTable[index * 0x18]`.
+
+The required value is `FUN_1400312e0(row, key)` (**verified in binary**, disassembly):
+
+* armour, keys `0x11..0x14`: the `u16` at `row + 0x3c`, `+0x3e`, `+0x40`, `+0x42`. Plain loads.
+* spell, key `0x42` (`0x14003150c`): `ecx = [row+0x7c]` (the item id), `call 0x14003c160`, then
+  `edx = u16 [row+0x8] - (al)`; key `0x43` (`0x140031540`): the same call, `shr ax,8`, then
+  `u16 [row+0xa] - that byte`. Both join at `0x140031521`, which returns `max(0, value)` via
+  `cmovns`. So Intelligence is reduced by the low byte and Faith by the high byte of one `u16`.
+* `FUN_14003c160(id)` (`0x14003c160`): `[[GameManagerImp] + 0xa8] + 0xc0`, then
+  `FUN_14019e110`'s binary search of a sorted `{i32 id, u16}` array at `+0xe0` with its count at
+  `+0xdc`, returning the `u16` or `0`. **Inferred:** a per-spell reduction held on the player; what
+  grants it was not traced. It does not matter to the badge, because the badge calls the same
+  column accessor and gets the reduced, clamped value the pane shows.
+
+`FUN_140035070` (`0x140035070`), which produces `row`, is type-agnostic -- it resolves through
+`FUN_1401abbc0` / `FUN_1401ac060` with no branch on the item type (**verified in binary**, decompiled)
+-- so the same descriptor-and-rows chain `unmet` already runs yields an armour or spell row
+unchanged. Which param the armour record's `+0x3c..+0x42` is copied from was not found;
+**inferred** to be `ArmorParam + 0x2c..0x32`, the columns the armour mechanics check reads.
+
+### The plan
+
+No new hook, no new element, no new fingerprint.
+
+1. **Hooks: none added.** The sites that already switch the badge -- `FUN_1400bc850`
+   (RVA `0x000bc850`) and `FUN_140095650` (RVA `0x00095650`) -- run for armour, ring and spell
+   cells as shown above. `scripts/ds2-arxan-chain.py` on each, rerun for this section, reports a
+   clean prologue at the entry: neither is an Arxan redirect. `crates/ds2-item-warn/src/mark.rs`,
+   `place.rs` and `install.rs` do not change.
+2. **Attach point: unchanged.** The cell view's accessor at `+0x2d0` (inventory) and the
+   container accessor passed as the first argument (equipment screen), element
+   `FE_ITEM_WARN_ELEMENT` under either.
+3. **`ds2-rva`: new constants.** `FE_ITEM_PARAM_ARMOUR_REQUIREMENTS = [0x11, 0x12, 0x13, 0x14]`,
+   `FE_ITEM_PARAM_SPELL_REQUIREMENTS = [0x42, 0x43]`, and the entry-type values from the table
+   above (`2..=5` armour, `9` spell, `7` ring), each citing `FUN_1401ad2a0`.
+4. **`requirement.rs::unmet`: replace the gate with a dispatch on entry `+0x1e`.** `0 | 1` -> the
+   weapon keys, with the existing two-handed Strength halving; `2..=5` -> the armour keys, no grip
+   adjustment (the halving is keyed on `FE_ITEM_PARAM_WEAPON_REQUIRED_STRENGTH` already, so armour
+   Strength `0x11` is untouched); `9` -> the spell keys; anything else, rings included,
+   `Some(false)`. The loop body -- stat index from the game's table, `FE_ITEM_PARAM_COLUMN`, the
+   stride-`0x18` stat read, strict `>` -- is reused as is.
+5. **Log the entry type** in the `unmet` and `decided` lines, so a run can tell an armour decision
+   from a weapon one.
+6. **Tests:** extend the host-side key tests to the armour and spell key sets (in range of the
+   table's `0x60` bound; armour keys consecutive).
+7. **Runtime proof still needed**, and required before the Rust change is pushed: an armour piece
+   with a Strength requirement above the character's, in both the inventory armour tab and an
+   equipment armour slot; a spell whose Intelligence or Faith requirement exceeds the stat; a ring,
+   which must never show the badge. The open question about base versus modified stats in the
+   frontend table applies to all of these as it does to weapons.
