@@ -341,5 +341,10 @@ echo "  ds2-launcher: OK"
 # Linux; that is exactly the class of mistake this line catches before a run is spent on it.
 python3 scripts/ds2-player-kind.py --selftest >/dev/null
 echo "  ds2-player-kind.py: OK"
+# The Frida watcher, which is how a crate change gets its measurement. Its selftest was never wired
+# in here, and it had been failing since the port: it defaulted to er-mods-rs's session agent, a
+# file this repository never had.
+python3 scripts/ds2-frida-watch.py --selftest >/dev/null
+echo "  ds2-frida-watch.py: OK"
 
 echo "== OK =="
