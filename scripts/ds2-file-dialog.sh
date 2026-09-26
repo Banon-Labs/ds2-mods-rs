@@ -4,11 +4,16 @@
 #   scripts/ds2-file-dialog.sh 'Save this character to a file' 'ds2-test.sl2'
 #   scripts/ds2-file-dialog.sh 'Load a character from a save file' 'ds2 saves\new\ds2sofs0000.sl2'
 #
+# For a deterministic answer use scripts/frida/answer-file-dialog.js instead: it replaces the
+# comdlg32 call in the game process and never shows a window. This script is for exercising the
+# dialog itself, and on 2026-09-26 it also met an untitled "File does not exist" box it cannot see.
+#
 # Three things measured on 2026-09-26 decide how it types:
 #   * The dialog needs X input focus (`xdotool windowfocus --sync`) before it takes keys;
 #     compositor focus alone is not enough, and without it every synthetic key is dropped.
-#   * Synthetic keys lose Shift: `Z:\...` arrived as something the dialog answered with "Invalid
-#     character(s) in path". So a path may hold only unshifted characters -- lower case, digits,
+#   * Paths with Shift characters (`Z:\...`, `Z:/...`) were answered "Invalid character(s) in
+#     path" and a lower-case relative one was not; the likely cause, not proven, is that Shift does
+#     not survive a synthetic key. So a path may hold only unshifted characters -- lower case, digits,
 #     space, `\ . - = ; ' , /` -- and is taken relative to the folder the dialog opens in (the
 #     save-file rows open in Downloads; Wine matches names without regard to case).
 #   * A typed path opens the name box's autocomplete, which takes the first Return. Return is
