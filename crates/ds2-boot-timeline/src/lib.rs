@@ -59,6 +59,8 @@
 
 #[cfg(windows)]
 mod install;
+#[cfg(windows)]
+mod sampler;
 
 #[cfg(windows)]
 pub use install::{LogFn, Outcome, install, mark, mark_origin, set_logger};

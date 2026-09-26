@@ -78,13 +78,20 @@ to get the target `Param*` and forwards the call to it **[read]**. `0x140a11100`
 
 | scope | resolves to | reading |
 | --- | --- | --- |
-| 1 | `(*[instance+0x50])[index]`: a param of the effect's own root ParamList | **[read]**; "root list" **[inf]** from the preprocessor reading the same pointer |
-| 2 | `[[instance+0x98]+0x78][index]` (`0x140a10130`): the argument list handed in by the spawner's Param37 | **[read]** access; "spawner's args" **[inf]** |
+| 1 | `(*[instance+0x50])[index]`: the argument list handed in by the spawner's Param37 | **verified in binary**: `0x140a10f70` stores the 3rd argument of `0x140a08fb0` at `+0x50`, and action 79 (`0x140f4f840`) passes Param37's vtable `+0x58` value there |
+| 2 | `[[instance+0x98]+0x78][index]`: a list owned by the effect id, the same for every instance | **verified in binary**: `0x140a10f70` stores at `+0x98` the object `0x140a08fb0` gets from the cached `FXCreatableEffect`'s vtable `+0x18`; what fills its `+0x78` was not traced |
 | 3 | a 16-byte local slot: inline at `instance+0xa0+16*index` while `[instance+0xc0] <= 2`, else in the heap array at `[instance+0xa0]` | **[read]**; the same storage `0x140a10df0` hands to action 118, so actions 21/54/109/111/112/115/118 write the locals these refs read **[inf]** |
 | other | null | **[read]** |
 
-So a child template like 2101 is parameterised by scope-2 references into the `{id, args}` its
-parent's Param37 passes; the arg index is the `i16` at `+0xa`.
+So a child template like 2101 is parameterised by scope-1 references into the args its parent's
+Param37 passes; the arg index is the `i16` at `+0xa`. The data agrees: every reference param in
+f0002101 is `raw 1 N` (scope 1), for example the appearance action at arg 4, and both of its root
+ParamLists are empty. (An earlier version of this table had scopes 1 and 2 the other way round.)
+
+Other instance fields `0x140a10f70` writes **verified in binary**: `+0x80` the parent instance (the
+spawning instance for action 79), `+0xc8` the object `0x140a0b4b0` built (EmittersStopped reads its
+`+0x40`), `+0x58` a mask (`0xdfffffff`, or `0xffffffff` when byte `core+0xa0` is set),
+byte `+0x78` = 0 (ParentExists `0x140fd86c0` is `byte [+0x78] == 0`).
 
 ## 3. id -> class table
 
@@ -206,8 +213,8 @@ Param index -> compiled field (the draw code that consumes the fields was not tr
 | p | file type | field / use |
 | --- | --- | --- |
 | 0 | 40 | +0x30 texture id (833: 132, in the ResourceSet texture vector) |
-| 1 | 11 | curve, scaled by p3 range -> +0x40 (width **[inf]**) |
-| 2 | 11 | curve, scaled by p4 -> +0x50 (height **[inf]**); **ignored when p5 != 0** (default curve used) |
+| 1 | 11 | curve, scaled by p3 range -> +0x40: **width** (see below) |
+| 2 | 11 | curve, scaled by p4 -> +0x50: **height**; **ignored when p5 != 0** (default curve used) |
 | 3, 4 | 7 | scale for p1 / p2 (min/max against a constant, `0x140f5d490`) |
 | 5 | 1 | flag bit0 of the block's tail flags word ("square: height follows width" **[inf]**) |
 | 6, 7 | 1 | ints -> +0x38, +0x3c |
@@ -220,19 +227,45 @@ Param index -> compiled field (the draw code that consumes the fields was not tr
 | 17 | 7 | float -> +0x28 |
 | 20 | 79 | int range (kind 3) -> +0x98 (random int, e.g. texture-sheet frame **[inf]**) |
 | 21 | 81 | random range -> +0x60 (833: 0..6.28 = random initial roll in radians **[inf]**) |
-| 22 + 23 | 11 + 81 | curve x range combined -> +0x70 (roll speed **[inf]**) |
+| 22 + 23 | 11 + 81 | curve x range combined -> +0x70: **roll speed, radians per second** (see below) |
 | 24 | 7 | float, only if kind 4 and count > 24 |
 | 25, 26 | 11 | curves (count > 25 / > 26) |
 | 27 | 7 | float (count > 27) |
 | 29 | 1 | flag bit1 (count > 29) |
 | 18, 19, 28, 30-40 | | not read by the compile function; presumably read by the generic particle path (p28 is a tick, -1/30 in 833 = the "unset/infinite" sentinel **[inf]**) |
 
+Consumer read **verified in binary**: `FXParticleAppearance_Billboard` (vtable `0x14129c118`) slot
+`+0x8` = `0x141004480`, the per-particle bounds update. It evaluates the `+0x70` curve at the
+particle's time (`[ctx+0x18]`), multiplies by the frame step `[ctx+0x18] - [ctx+0x14]`, adds it to
+the roll angle at `this+0x10`, and wraps it into -pi..pi (constants pi `0x1410ac9fc`, 2 pi
+`0x1410aca00`). It then evaluates `+0x40` and `+0x50`, multiplies them by the particle's own scales
+at `+0x78` / `+0x7c`, and writes a box of half-size `0.5 * sqrt(w*w + h*h)` around the particle
+position. So `+0x40` / `+0x50` are width / height and `+0x70` is roll speed in rad/s. The other
+slots are the destructor, a pure-call, `return 0` and `ret`: the textured draw of the block is
+not in this class, and the remaining field names stay **inferred**.
+
 ### 28 FXClusterEmitter_Cone **[read]** (compile `0x140f7b7b0`)
 Signature `[44,11,11,82,82,82,1,1,82,19]`. p0 (type 44 arg ref) is not read by the compile.
 Cone-specific block: p1, p2 (curves) -> +0x28, +0x38; p3 (type 82 = curve x float) -> +0x48; p6
 int -> +0x58. Common emitter outputs (written to the caller's struct, i.e. shared FXClusterEmitter
-fields): p4, p5, p8 sequences, p9 colour sequence (only if count > 9), p7 int. Names (radius, angle,
-spawn rate...) **[unknown]**. Emitters 29-33/45/117 follow the same compile shape; their per-class
+fields): p4, p5, p8 sequences, p9 colour sequence (only if count > 9), p7 int.
+
+Emit read **verified in binary** (`FXClusterEmitter_Cone` vtable `0x14127e938`, slot `+0x10` =
+`0x140f7b020`; the block is `[this+0x8]`):
+
+- `+0x28` (p1) is evaluated once per call and converted by `/ 90.0 * pi/2` (`0x1410c9f20`,
+  `0x1410ac6a0`): an **angle in degrees**. That it is the cone's half-angle is **inferred**.
+- `+0x38` (p2) is evaluated once per call; its sign picks between `1 + v` and `1 - v` and flips the
+  sign of the angle term. Meaning **unknown**.
+- `+0x58` (p6) is the **emission type**, 0..3 (`0x140f7b237`); anything else panics with
+  "invalid emission type." from `FXEmitterUtility.inl`. 0 uses the emitter matrix as is, 1 and 2
+  multiply it by the constant matrices at `0x141894bd0` / `0x141894c10`, 3 uses a derived matrix
+  (`0x14012ec30`).
+- `+0x48` (p3) is evaluated once **per particle** (`0x140f7b415`) and handed to the per-particle
+  writer `0x140f7b5f0` with two random numbers; speed or distance is **inferred**, not read.
+
+Other emitters and the three movement classes were not read at this level (the acceleration
+update `0x140f82520` hands everything to `0x140f54ff0`, not decoded). Emitters 29-33/45/117 follow the same compile shape; their per-class
 indices are in `Ds2DecompAt` output for `0x140f7c3d0 0x140f7d110 0x140f7e050 0x140f7f0f0 0x140f80300
 0x140f81380 0x140f82010`.
 
@@ -285,11 +318,13 @@ converts to **milliseconds** (x1000, +0.5). File values are multiples of 1/30 s 
   (`0x140f52b70`) and builds descriptors for 2020/2023/2024/2031/2032/2034/2101/2102 (`0x140f52d60`,
   reading arg slots 0,1,2,5,6,7,8,9,11,12,13,15); arg0 tick + arg1 bool feed descriptor type 6
   **[read]**. The templates read those args through scope-2 reference params (section 2.1).
-- The draw/update code that consumes each compiled appearance block was not traced, so most
-  appearance field names above are **[inf]** or blank.
-- Reference params: the class and the scope/index lookup are read (section 2.1); what object sits
-  at `instance+0x98` (the scope-2 owner) was not traced to its writer in `0x140a08fb0`.
-- Emitter/movement per-class field names (only index -> field is known).
+- The textured draw that consumes each compiled appearance block was not found; for action 59 only
+  width, height and roll speed are named from a consumer (section 4). The rest are **[inf]** or
+  blank.
+- Reference params: the writer of `instance+0x98` is `0x140a10f70` (section 2.1); what fills
+  `[+0x98]+0x78`, the scope-2 list, was not traced.
+- Emitter/movement per-class field names: Cone p1/p6 named from its emit code (section 4); the other
+  emitters and all movement classes are index -> field only.
 - Field-level meaning of the weight list in 7 and 58 (`vt+0x58(i)` per slot) is read as "weight"
   from how the sum and the draw use it; the file encoding of that list was not checked against
   shipped data.
@@ -459,5 +494,8 @@ cheap stand-in is bloom: colour values above 1 (27/28 use 5..10) make the billbo
 3. **sfxparam:** not needed for either. Only add an entry (via `0x140becc90`) to use start-time skip,
    env-light tinting (+0x2c), the constant colour multiplier (+0x30), or wind.
 
-Unproven until a run: that a looping curve on action-59 p1/p8 survives the Billboard compile (it is
-type-generic, but no shipped 59 does it), and that the FFX point light visibly lights the scene.
+A looping colour on action-59 p8 does survive the Billboard compile: the type-20 class's per-channel
+compile `0x140fb8ae0` emits mode `0x10` (looped) with 2+ keys **[read]**. Still unproven until a
+run: that the FFX point light visibly lights the scene. The exact byte changes for the stone's
+derived copy (181's light child spliced over the sparkle child, p8 as a type-20 curve, and the
+enclosing lengths to fix) are in `docs/DS2-STONE-LIGHT-FLICKER.md`.

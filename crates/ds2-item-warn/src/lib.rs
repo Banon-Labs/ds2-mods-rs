@@ -65,13 +65,13 @@
 //! * whether an item in a shop list (rather than the bag) reaches the same rows -- the descriptor
 //!   covers both, but only the bag path has been traced.
 //!
-//! # Armour and rings are not marked
+//! # Armour and spells are marked; rings are not
 //!
-//! The same table gives `0x11..0x14` for armour and `0x42`/`0x43` for rings, so the check would
-//! extend. The gate this crate uses is the game's own infusion gate --
-//! [`ds2_rva::ITEM_ENTRY_TYPE_MAX_INFUSABLE`], "item type 0 or 1" -- because the badge lives
-//! inside the infusion container and only weapons and shields have one. Marking armour would need
-//! a second element in a second container and a second fingerprint.
+//! The same table gives `0x11..0x14` for armour and `0x42`/`0x43` for spells, and the infusion
+//! container the badge lives in is built for every item cell, so `requirement::unmet` picks the
+//! columns by item type. Rings have no stat requirement. An earlier version of this comment said
+//! only weapons and shields had the container; the binds' own loops say otherwise
+//! (`docs/DS2-ITEM-REQUIREMENTS.md`, "Armour and spells").
 
 // DEBT: ds2-mods-rs-24r -- not debt to be paid: this crate ships as a Windows DLL and the
 // attribute is what keeps its Rust half parseable on the host, so the game-free tests below it
