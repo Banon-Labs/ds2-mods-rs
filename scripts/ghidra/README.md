@@ -116,10 +116,9 @@ not the same as "it has no game knowledge."*
 
 Also not ported, because nothing needs them yet:
 
-- **The GhidraMCP daemon stack** (`bootstrap.sh`, `build-ghidramcp.sh`, `mcp-ghidra-daemon.sh`,
-  `MCPServeHeadless.java`, `mcp_query.py`). A warm MCP server pays off when a session makes hundreds
-  of queries; `query.sh` costs ~15s per run, which is fine until it isn't. Revisit when the Fe* menu
-  work makes it hurt.
+- ~~The GhidraMCP daemon stack~~ -- since ported, once the title-flow trace made `query.sh`'s
+  exclusive project lock hurt: `scripts/ghidra/mcp-daemon.sh` serves the DS2 program read-only on
+  port 8766, and `docs/GHIDRA-MCP.md` says why it defaults to read-only and what that costs.
 - **The RF function finder** (`find-functions-rf*.sh`, `FindFunctionStartsRF*.java`). It exists to
   recover function starts a stripped binary lost. This project already has 88780 functions.
 - **`autotranslate-jp.py` / `jp-en-dict.json`.** ER-specific message-table translation.
