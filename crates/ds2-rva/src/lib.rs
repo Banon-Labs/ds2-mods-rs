@@ -5256,7 +5256,7 @@ pub const SP_EFFECT_BONFIRE_REST: i32 = 110_000_010;
 ///
 /// Its event in `SpEffectWideUse.emevd` holds no stat, heal, damage or status instruction, and
 /// `f0000659.ffx` is in the resident `sfx9999` bundle, both read from the regulation and the game
-/// files (`docs/DS2-SPEFFECT-VISUAL.md` on the `visual-speffect-survey` branch). What sfx `659`
+/// files (`docs/DS2-SPEFFECT-VISUAL.md`). What sfx `659`
 /// looks like on screen has not been checked.
 pub const SP_EFFECT_VISUAL_SFX: i32 = 140_001_010;
 
