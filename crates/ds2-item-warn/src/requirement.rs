@@ -95,6 +95,14 @@ const LOGGED_DECISIONS: usize = 8;
 /// 2026-09-26 spent all of its lines on empty slots and never showed an armour answer.
 const LOGGED_ANSWERS: usize = 48;
 
+/// How many "unmet" answers (`Some(true)`) to write, counted apart from the met ones.
+///
+/// An unmet answer is the one the badge exists for and the rarest, so it gets its own budget:
+/// on 2026-09-26 the equipment screen's met answers used up the shared cap before the armour
+/// picker's rows were bound, and the picker's answers went unlogged.
+const LOGGED_UNMET: usize = 48;
+
+static UNMET: AtomicUsize = AtomicUsize::new(0);
 static DECISIONS: AtomicUsize = AtomicUsize::new(0);
 static ANSWERS: AtomicUsize = AtomicUsize::new(0);
 /// The item type the last [`unmet`] read, for the decision line; [`NO_KIND`] when it stopped
@@ -543,7 +551,9 @@ unsafe fn decide(container: *mut u8, item: *const u8, screen: &str) {
     // entry carrying an infusion nibble the layout does not author would otherwise light the badge
     // up on its own, and after this write it cannot.
     let visible = answer.unwrap_or(false);
-    let (n, cap) = if answer.is_some() {
+    let (n, cap) = if answer == Some(true) {
+        (UNMET.fetch_add(1, Ordering::Relaxed) + 1, LOGGED_UNMET)
+    } else if answer.is_some() {
         (ANSWERS.fetch_add(1, Ordering::Relaxed) + 1, LOGGED_ANSWERS)
     } else {
         (
