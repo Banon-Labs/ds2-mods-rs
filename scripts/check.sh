@@ -284,6 +284,9 @@ else
   # And the PR Run-Stamp guard's deciding half: which body earns which verdict at `gh pr create` and
   # `gh pr ready`, and the helper that prints the stamp. `opa test` above pins verdict -> denial.
   python3 scripts/test-run-stamp.py
+  # The stack-merge guard's deciding half: which `gh pr merge` spellings delete the head branch, and
+  # which GitHub answers refuse it. `opa test` above pins verdict -> denial.
+  python3 scripts/cupcake_stack_merge.py --selftest
   # The runtime push guard's deciding half, against throwaway repositories and the real engine. The
   # policy was right on 2026-09-25 and the signal handed it `game_code=0` for a push of the
   # launcher, because `git commit ... && git push` was one command and the commit did not exist yet

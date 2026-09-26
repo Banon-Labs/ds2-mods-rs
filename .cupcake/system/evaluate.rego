@@ -114,6 +114,8 @@ all_denials contains decision if { some decision in data.cupcake.policies.claude
 
 all_denials contains decision if { some decision in data.cupcake.policies.claude.pr_requires_run_stamp.deny }
 
+all_denials contains decision if { some decision in data.cupcake.policies.claude.no_delete_branch_under_stack.deny }
+
 all_denials contains decision if { some decision in data.cupcake.policies.claude.edit_no_tmp_scripts_guard.deny }
 
 all_denials contains decision if { some decision in data.cupcake.policies.claude.gh_pr_title_conventional.deny }
