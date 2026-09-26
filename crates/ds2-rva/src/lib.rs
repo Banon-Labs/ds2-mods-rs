@@ -1659,6 +1659,24 @@ pub const FE_SUBSTATE_FLOOR_ELAPSED: f32 = 2.0;
 /// two of them are `Sleep(0)` yield loops and one is the `Sleep(1)` pump above.
 pub const SLEEP_IAT_THUNK: u32 = 0x01aa_e314;
 
+/// The import slot `DarkSoulsII.exe` calls `KERNEL32!WaitForSingleObject` through. RVA `0x01aae264`.
+///
+/// Read out of the image on disk (the slot's hint/name entry at `0x1aab8ac` names it) and read live
+/// on 2026-09-26 with `scripts/frida/wait-imports.js`, which found it pointing into
+/// `kernel32.dll`. `ds2-boot-timeline` fronts it to time how long the boot thread spends blocked.
+pub const WAIT_FOR_SINGLE_OBJECT_IAT_THUNK: u32 = 0x01aa_e264;
+
+/// The import slot for `KERNEL32!WaitForMultipleObjects`. RVA `0x01aae05c`.
+///
+/// Same two reads as [`WAIT_FOR_SINGLE_OBJECT_IAT_THUNK`]: hint/name entry `0x1aab3f0`, live target
+/// in `kernel32.dll`.
+pub const WAIT_FOR_MULTIPLE_OBJECTS_IAT_THUNK: u32 = 0x01aa_e05c;
+
+/// The import slot for `USER32!MsgWaitForMultipleObjects`. RVA `0x01aae554`.
+///
+/// Same two reads: hint/name entry `0x1aabf0c`, live target `user32!MsgWaitForMultipleObjects`.
+pub const MSG_WAIT_FOR_MULTIPLE_OBJECTS_IAT_THUNK: u32 = 0x01aa_e554;
+
 /// The frame limiter: "sleep the rest of this frame, or yield if we are already late".
 /// RVA `0x00feb910`.
 ///
@@ -1687,6 +1705,36 @@ pub const SLEEP_IAT_THUNK: u32 = 0x01aa_e314;
 /// at hop 0 on its own prologue, `40 53 48 83 ec 20` (`push rbx; sub rsp,0x20`), which also gives
 /// MinHook six clean bytes to relocate.
 pub const FRAME_LIMITER: u32 = 0x00fe_b910;
+
+/// The boot thread's startup calls, in the order they run, for the boot timeline's phase marks.
+///
+/// Read out of `WinMain` (`0x1402eb630`) and `MainApp::Init` (`0x140aee6f0`), whose own entry is
+/// an Arxan redirect and so is covered by the calls it makes instead. Every entry here was read
+/// live with `scripts/frida/boot-phase-prologues.js` on 2026-09-26 and is the clean prologue the
+/// deobfuscated image shows, and every one takes at most the four register arguments.
+///
+/// | name | RVA | what it does |
+/// |---|---|---|
+/// | `win-main` | `0x002eb630` | `WinMain`; its return is process exit |
+/// | `app-setup` | `0x00aef500` | heaps, `config.properties`, DXGI factory and mode list |
+/// | `archive-mounts` | `0x002ef410` | the `*Ebl.bhd` archives and their keys |
+/// | `input-devices` | `0x002ec290` | the input device list; Steam init runs just before it |
+/// | `graphics-init` | `0x00aead80` | `D3D11CreateDevice` and the first presents |
+/// | `sound-init` | `0x00b049f0` | the sound heaps and FMOD |
+/// | `katana-init` | `0x002eed00` | draw system, job threads, scene manager |
+/// | `app-frame` | `0x00aeeed0` | one main-loop frame; the first call ends `MainApp::Init` |
+///
+/// `DirectInput8Create` falls between `input-devices` and `graphics-init`.
+pub const BOOT_PHASES: [(&str, u32); 8] = [
+    ("win-main", 0x002e_b630),
+    ("app-setup", 0x00ae_f500),
+    ("archive-mounts", 0x002e_f410),
+    ("input-devices", 0x002e_c290),
+    ("graphics-init", 0x00ae_ad80),
+    ("sound-init", 0x00b0_49f0),
+    ("katana-init", 0x002e_ed00),
+    ("app-frame", 0x00ae_eed0),
+];
 
 /// The simpler sibling of [`FRAME_LIMITER`], and **measured never to be called during boot**.
 ///
