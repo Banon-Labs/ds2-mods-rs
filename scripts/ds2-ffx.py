@@ -4,13 +4,20 @@
 The loose bundles live under `Game/sfx/`. `sfx9999.ffxbnd.dcx` is a DS2 `DCX`/`DFLT` around a
 `BND4` whose entries are 36 bytes (format byte `0x74`, UTF-16 names):
 
-    u32 flags; i32 -1; u64 size; u64 size_again; u32 data_offset; i32 id; u32 name_offset
+    u8 flags; u8[3] 0; i32 -1; u64 size; u64 size_again; u32 data_offset; i32 id; u32 name_offset
 
-Measured on this install 2026-09-25: 1778 members, header 0x40, entry 36. The layout is asserted
-per entry rather than trusted, same as `scripts/ds2-regulation.py`.
+`sfxcommon.ffxbnd` is a bare `BND4` with format byte `0x70` and single-byte names, so its entries
+drop `size_again` and are 28 bytes. The entry layout is therefore built from the header's format
+byte (SoulsFormats `Binder.Format`: ids, names, long offsets, compression), and the entry size the
+header declares must equal the size those flags imply. The stored byte is bit-reversed unless its
+low bit is set and its high bit clear, or the header's bit-big-endian byte is set.
+
+Measured on this install 2026-09-26: `sfx9999.ffxbnd.dcx` 1778 members, entry 36;
+`sfxcommon.ffxbnd` one member, entry 28, a zero-length `dummy.dmy` and no `.ffx` at all.
 
     python3 scripts/ds2-ffx.py list  [--bundle PATH] [--id 833 --id 834]
     python3 scripts/ds2-ffx.py dump  --id 833 [--bundle PATH] [--out FILE]
+    python3 scripts/ds2-ffx.py --selftest
 """
 
 from __future__ import annotations
@@ -26,7 +33,14 @@ DEFAULT_BUNDLE = GAME_SFX / "sfx9999.ffxbnd.dcx"
 
 DCX_PAYLOAD_OFFSET = 0x4C
 BND4_HEADER_SIZE = 0x40
-BND4_ENTRY_SIZE = 36
+
+# SoulsFormats `Binder.Format` bits, after `bnd4_format` has undone the stored bit order.
+FMT_BIG_ENDIAN = 0x01
+FMT_IDS = 0x02
+FMT_NAMES1 = 0x04
+FMT_NAMES2 = 0x08
+FMT_LONG_OFFSETS = 0x10
+FMT_COMPRESSION = 0x20
 
 
 class Fail(SystemExit):
@@ -52,31 +66,128 @@ def utf16z(data: bytes, at: int) -> str:
     return data[at:end].decode("utf-16le")
 
 
+def bytez(data: bytes, at: int) -> str:
+    end = data.index(b"\0", at)
+    return data[at:end].decode("shift_jis")
+
+
+def bnd4_format(raw: int, bit_big_endian: bool) -> int:
+    """SoulsFormats `Binder.ReadFormat`: the stored byte is bit-reversed unless told otherwise."""
+    if bit_big_endian or (raw & 0x01 and not raw & 0x80):
+        return raw
+    return int(f"{raw:08b}"[::-1], 2)
+
+
+def bnd4_entry_fields(fmt: int) -> list[tuple[str, str]]:
+    """`[(field, struct code)]` of one file entry, in order, as the format flags select them."""
+    fields = [("flags", "B"), ("pad", "3s"), ("sentinel", "i"), ("size", "Q")]
+    if fmt & FMT_COMPRESSION:
+        fields.append(("size2", "Q"))
+    fields.append(("offset", "Q" if fmt & FMT_LONG_OFFSETS else "I"))
+    if fmt & FMT_IDS:
+        fields.append(("id", "i"))
+    if fmt & (FMT_NAMES1 | FMT_NAMES2):
+        fields.append(("name_at", "I"))
+    if fmt == FMT_NAMES1:
+        # SoulsFormats reads a second id and an asserted zero for this exact format only.
+        fields += [("id", "i"), ("zero", "i")]
+    return fields
+
+
 def members(data: bytes) -> list[tuple[int, str, bytes]]:
     """`[(id, name, bytes)]` for every entry."""
     if data[:4] != b"BND4":
         raise Fail(f"expected BND4, got {data[:4]!r}")
+    if data[0x08]:
+        raise Fail("big-endian BND4, this parses little-endian only")
     count = struct.unpack_from("<I", data, 0x0C)[0]
     header = struct.unpack_from("<Q", data, 0x10)[0]
     entry = struct.unpack_from("<Q", data, 0x20)[0]
-    if header != BND4_HEADER_SIZE or entry != BND4_ENTRY_SIZE:
-        raise Fail(f"BND4 header/entry {header:#x}/{entry}, this parses {BND4_HEADER_SIZE:#x}/{BND4_ENTRY_SIZE}")
+    unicode = data[0x30] != 0
+    fmt = bnd4_format(data[0x31], data[0x09] != 0)
+    if fmt & FMT_BIG_ENDIAN:
+        raise Fail(f"format {fmt:#04x} marks big-endian entries, this parses little-endian only")
+    fields = bnd4_entry_fields(fmt)
+    layout = "<" + "".join(code for _, code in fields)
+    if header != BND4_HEADER_SIZE:
+        raise Fail(f"BND4 header {header:#x}, this parses {BND4_HEADER_SIZE:#x}")
+    if entry != struct.calcsize(layout):
+        raise Fail(f"BND4 entry size {entry}, format {fmt:#04x} implies {struct.calcsize(layout)}")
     out = []
     for index in range(count):
-        at = header + index * entry
-        _flags, sentinel, size, size2, offset, ident, name_at = struct.unpack_from("<IiQQIiI", data, at)
-        if sentinel != -1:
-            raise Fail(f"entry {index}: sentinel {sentinel}")
+        values = dict(zip([name for name, _ in fields], struct.unpack_from(layout, data, header + index * entry)))
+        if values["sentinel"] != -1 or values["pad"] != b"\0\0\0" or values.get("zero", 0) != 0:
+            raise Fail(f"entry {index}: sentinel {values['sentinel']} pad {values['pad'].hex()}")
+        size, offset = values["size"], values["offset"]
         if offset + size > len(data):
             raise Fail(f"entry {index} points outside the file")
         blob = data[offset:offset + size]
+        size2 = values.get("size2", size)
         if size2 != size:
             # Stored as a bare zlib stream (`78 9c`), `size2` being the inflated length.
             blob = zlib.decompress(blob)
             if len(blob) != size2:
                 raise Fail(f"entry {index}: inflated to {len(blob)}, header says {size2}")
-        out.append((ident, utf16z(data, name_at), blob))
+        name = ""
+        if "name_at" in values:
+            name = (utf16z if unicode else bytez)(data, values["name_at"])
+        out.append((values.get("id", index), name, blob))
     return out
+
+
+def bnd4_fixture(raw_format: int, unicode: bool, files: list[tuple[int, str, bytes]]) -> bytes:
+    """A little-endian BND4 in the given stored format byte, for the selftest."""
+    fmt = bnd4_format(raw_format, False)
+    fields = bnd4_entry_fields(fmt)
+    layout = "<" + "".join(code for _, code in fields)
+    entry = struct.calcsize(layout)
+    names_at = BND4_HEADER_SIZE + entry * len(files)
+    names = b""
+    name_offsets = []
+    for _, name, _ in files:
+        name_offsets.append(names_at + len(names))
+        names += name.encode("utf-16le") + b"\0\0" if unicode else name.encode("shift_jis") + b"\0"
+    data_at = names_at + len(names)
+    entries = b""
+    payload = b""
+    for (ident, _, blob), name_at in zip(files, name_offsets):
+        values = {"flags": 0x40, "pad": b"\0\0\0", "sentinel": -1, "size": len(blob), "size2": len(blob),
+                  "offset": data_at + len(payload), "id": ident, "name_at": name_at, "zero": 0}
+        entries += struct.pack(layout, *(values[name] for name, _ in fields))
+        payload += blob
+    head = bytearray(BND4_HEADER_SIZE)
+    head[0:4] = b"BND4"
+    head[0x0A] = 1
+    struct.pack_into("<IQ8sQQ", head, 0x0C, len(files), BND4_HEADER_SIZE, b"00000000", entry, data_at)
+    head[0x30] = int(unicode)
+    head[0x31] = raw_format
+    return bytes(head) + entries + names + payload
+
+
+def selftest() -> int:
+    # Stored `0x74` is `0x2e` (ids, both names, compression): the sfx9999 layout.
+    assert bnd4_format(0x74, False) == FMT_IDS | FMT_NAMES1 | FMT_NAMES2 | FMT_COMPRESSION
+    # Stored `0x70` is `0x0e`: no compression flag, so no `size2`, as in sfxcommon.ffxbnd.
+    assert bnd4_format(0x70, False) == FMT_IDS | FMT_NAMES1 | FMT_NAMES2
+    # Low bit set and high bit clear means already in order.
+    assert bnd4_format(0x2F, False) == 0x2F
+    assert bnd4_format(0x74, True) == 0x74
+    for raw, unicode, size in ((0x74, True, 36), (0x70, False, 28)):
+        files = [(833, "f0000833.ffx", b"DLsE-a"), (7, "dummy.dmy", b"")]
+        data = bnd4_fixture(raw, unicode, files)
+        assert struct.unpack_from("<Q", data, 0x20)[0] == size, (raw, size)
+        assert members(data) == files, (raw, members(data))
+        # A header whose declared entry size disagrees with its flags is refused, not parsed.
+        bad = bytearray(data)
+        struct.pack_into("<Q", bad, 0x20, 64 - size)
+        try:
+            members(bytes(bad))
+        except Fail:
+            pass
+        else:
+            raise AssertionError(f"format {raw:#x}: mismatched entry size parsed")
+    print("selftest ok")
+    return 0
 
 
 class Tree:
@@ -245,7 +356,10 @@ def load(bundle: Path) -> list[tuple[int, str, bytes]]:
 
 
 def main() -> int:
+    if sys.argv[1:] == ["--selftest"]:
+        return selftest()
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--selftest", action="store_true", help="parse synthetic BND4s in both entry layouts")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("list")
     p.add_argument("--bundle", type=Path, default=DEFAULT_BUNDLE)

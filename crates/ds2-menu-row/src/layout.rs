@@ -1611,9 +1611,17 @@ mod tests {
             + ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_QUIT_ROW_CHILDREN * MAX_ROWS
             + ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_TAB_SUBTREE_CHILDREN
             + ds2_rva::FLO_RECORD_STRIDE * ds2_rva::FLO_TAB_FRAME_CHILDREN;
+        // Everything the game reads comes first and ends exactly where our own bookkeeping
+        // begins, so a field inserted into the game-read span fails here rather than hiding in
+        // the total.
+        assert_eq!(std::mem::offset_of!(Container, icon_rest), fields);
+        // Then the bookkeeping, which the game never sees: the colour and flag words `set_locked`
+        // restores, one pair per icon and per mark, and the two fill counts.
+        let bookkeeping =
+            2 * std::mem::size_of::<Rest>() * MAX_ROWS + 2 * std::mem::size_of::<usize>();
         assert_eq!(
             std::mem::size_of::<Container>(),
-            fields.next_multiple_of(16)
+            (fields + bookkeeping).next_multiple_of(16)
         );
         assert_eq!(std::mem::align_of::<Container>(), 16);
     }

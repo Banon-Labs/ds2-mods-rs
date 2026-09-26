@@ -636,6 +636,7 @@ dependencies = [
  "ds2-save-file",
  "ds2-save-redirect",
  "ds2-seamless",
+ "ds2-soul-memory-guard",
  "ds2-voice-chat",
 ]
 
@@ -727,6 +728,15 @@ version = "0.1.0"
 dependencies = [
  "aes 0.8.4",
  "md-5",
+]
+
+[[package]]
+name = "ds2-soul-memory-guard"
+version = "0.1.0"
+dependencies = [
+ "ds2-game-base",
+ "ds2-hook",
+ "ds2-rva",
 ]
 
 [[package]]

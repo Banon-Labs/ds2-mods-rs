@@ -20,8 +20,9 @@ READY -- 2 segment(s) decoded to 26 point(s), 66.1 m of path
 tick: first walkable route
 ```
 
-The question of which function snaps a position is answered, statically and by that run. What
-is still open is how to read the route's node attributes (see [Still open](#still-open)).
+The question of which function snaps a position is answered, statically and by that run. How to
+read a route's node attributes is answered statically in
+[Route segment ids are edge ids](#route-segment-ids-are-edge-ids); it still needs a run.
 
 ## The chain
 
@@ -137,17 +138,132 @@ Nothing below has been run. It reads, and does not call, so it cannot disturb th
    `0x14037be30` keys off the local player's map, not that character's, so its id should always
    carry the local player's map index in bits 24..29.
 
-## Still open
+## Route segment ids are edge ids
 
 The self-check's route audit reported `Widest agent this route admits: NONE` and
 `node 0x000281cd attrs 0x00370036 type 0x30 capacity 6 -- IMPASSABLE even to the smallest agent`.
+The cause is that the ids a finished route stores are not triangle ids. They are EDGE ids, and bit
+15 is the tag that says so. The audit indexed the per-triangle attribute table with an edge index.
 
-- `0x000281cd` has bit 15 set, which no snap-produced id can have (`0x140bab230` masks the index to
-  15 bits and shifts the sub-graph to bit 17). Verified.
-- Route-segment ids at `+0x08`/`+0x0c` are not built by `0x140bab230`. `0x140bb9d50` returns a
-  `u32` from a table, `[[rsi+0x28]+0x30][base + slot]`, where `base` is one of two `i16`s at
-  `+0x14`/`+0x16` chosen by comparing `id | 0x1ffff` with `[rbx+0x18]`. Verified.
-- Inferred: those segment values use a different encoding, or bits 15 and 16 are flags, so
-  indexing the node attribute table (`NvNaviGraph+0x48`) with `id & 0x7fff` reads some other node's
-  word. `0x00370036` reads like two adjacent `u16` indices, not an attribute word. Decoding
-  `0x140bb9d50`'s table, not the snap, is the remaining work.
+### Two packers, one bit apart
+
+`0x140bab200` is `0x140bab230` plus one instruction, `bts eax, 0xf` at `0x140bab21c` (bytes
+`0f ba e8 0f`). Verified in binary:
+
+```
+0x140bab230 (triangle id): ((key>>24 & 0x3f) << 7 | (key>>17 & 0x7f)) << 17 | (index & 0x7fff)
+0x140bab200 (edge id):     the same, | 0x8000
+```
+
+So a packed navi id is:
+
+| Bits | Meaning |
+|---|---|
+| 0..14 | index: a triangle index when bit 15 is clear, an edge index when it is set |
+| 15 | `1` = edge id (`0x140bab200`), `0` = triangle id (`0x140bab230`) |
+| 16 | clear in both packers |
+| 17..23 | sub-graph number |
+| 24..29 | map index |
+
+`id | 0x1ffff` still names the owning `NvNaviGraph` for both kinds, because bit 15 is inside the
+mask; `0x140bb3f00` looks up a graph from a triangle id that way and then packs an edge id with
+that graph's own key word `[graph+0]`. Verified. `0x000281cd` is map 0, sub-graph 1, edge `0x1cd`.
+
+### Where route segment ids come from
+
+`0x140bb4ac0` writes each `0x60`-byte segment. Verified in binary:
+
+- The last segment's `+0x08` is `[planner+0x84]` and the first segment's `+0x0c` is
+  `[planner+0x88]`. `0x140bb4310` fills those from `0x140bb3f00(planner, [planner+0x34], goal
+  centroid)` and `0x140bb3f00(planner, [planner+0x38], start centroid)`. `0x140bb3f00` takes the
+  given triangle's three edge references (the `u16`s at `+0x6`, `+0x8`, `+0xa` of its `0xc`-byte
+  triangle record, each shifted right by one), picks the edge whose midpoint is nearest the given
+  point, and returns `0x140bab200(graph key, edge)`. So the two end ids are edge ids of the start
+  and goal triangles.
+- Every other `+0x08`/`+0x0c` comes out of the gate layer's shared table
+  `[[gate_graph+0x28]+0x30]` (`u32` entries), at `i16 [link+0x14]` or `i16 [link+0x16]` plus a slot,
+  where `link` is a `0x24`-byte record from `[[gate_graph+0x28]+0x20]` and the half is picked by
+  comparing `[link+0x18]` with the graph key `| 0x1ffff`. `0x140bb9d50` is that read wrapped
+  around `0x140bb9de0`'s slot choice. Verified.
+- Every consumer of those table values masks them with `0x7fff` and indexes the graph's EDGE array
+  at `+0x58`, never its triangle array: `0x140bb4ac0` (portal midpoint), `0x140bb9de0` and
+  `0x140bba040`. Verified. That the table values also carry bit 15 is inferred from the one live
+  value, `0x000281cd`, and from the two end ids being built by `0x140bab200`.
+
+### NvNaviGraph layout this needs
+
+Each row verified in binary, from the functions named.
+
+| Offset | Type | What | Read by |
+|---|---|---|---|
+| `+0x00` | `u32` | graph key; `\| 0x1ffff` is what `0x140bb2620` hashes | `0x140bb3f00`, `0x140bac070` |
+| `+0x2c` | `i16` | triangle count | `0x1404018d0`, `0x140bac070`, `0x140bb3f00` |
+| `+0x2e` | `i16` | edge count | `0x140bb3f00`, `0x140bb4ac0`, `0x140bba040` |
+| `+0x40` | `f32[3]*` | vertices, stride `0xc` | all of the above |
+| `+0x48` | `u32*` | per-TRIANGLE attribute word | `0x140bac070`, `0x14042ee40`, `0x140bba040` |
+| `+0x50` | record `*` | triangles, stride `0xc`: `u16` vertices at `+0,+2,+4`, `u16` edge refs `(edge << 1 \| bit)` at `+6,+8,+a` | `0x1404018d0`, `0x140bac070`, `0x140bb3f00` |
+| `+0x58` | record `*` | edges, stride `0x10` | `0x140bb4ac0`, `0x140bb9de0`, `0x140bba040` |
+
+Edge record (stride `0x10`), from `0x140bba040`, verified:
+
+| Offset | Type | What |
+|---|---|---|
+| `+0x0`, `+0x2` | `i16` | the edge's two vertex indices |
+| `+0x4`, `+0x6` | `i16` | the other two edges of the triangle on side 0 |
+| `+0x8`, `+0xa` | `i16` | the other two edges of the triangle on side 1 |
+| `+0xc`, `+0xe` | `i16` | the triangle on side 0 and side 1; `0x7fff` = none (a boundary edge) |
+
+`0x140bba040` reads an edge's attribute word as `[graph+0x48][tri * 4]` with
+`side = (u16 [edge+0xc] == 0x7fff)` and `tri = u16 [edge+0xc + side*2]`, falling back to
+`[graph+0x48][0]` when `tri >= 0x7fff`. Verified.
+
+### The decode for the audit
+
+For one route id:
+
+1. `graph = 0x140bb2620([world+0x88], id | 0x1ffff)`; 0 means unreadable. (Unchanged.)
+2. If `id & 0x8000 == 0`: `tri = id & 0x7fff`; require `tri < i16 [graph+0x2c]`; the word is
+   `u32 [[graph+0x48] + tri*4]`.
+3. If `id & 0x8000 != 0`: `edge = id & 0x7fff`; require `edge < i16 [graph+0x2e]`;
+   `rec = [graph+0x58] + edge*0x10`; for each of `i16 [rec+0xc]` and `i16 [rec+0xe]` that is
+   `>= 0`, `!= 0x7fff` and `< i16 [graph+0x2c]`, the word is `u32 [[graph+0x48] + tri*4]`. A portal
+   inside one graph has two triangles, and the route crosses both; a boundary edge has one.
+
+Inferred, not proven: `0x00370036` at `attrs[0x1cd]` is two small `u16` vertex or edge indices
+because edge `0x1cd` is past the end of that sub-graph's triangle count and the read ran off the
+attribute array. The bound check in steps 2 and 3 makes that case an unreadable node instead of a
+verdict.
+
+### Code change for crates/ds2-invasion-path
+
+Not made here. What it should be:
+
+- `crates/ds2-rva/src/lib.rs`: add `NAVI_ID_EDGE_FLAG: u32 = 0x8000`,
+  `NV_NAVI_GRAPH_TRIANGLE_COUNT_OFFSET = 0x2c`, `NV_NAVI_GRAPH_EDGE_COUNT_OFFSET = 0x2e`,
+  `NV_NAVI_GRAPH_EDGES_OFFSET = 0x58`, `NV_NAVI_EDGE_STRIDE = 0x10`,
+  `NV_NAVI_EDGE_TRIANGLES_OFFSET = 0xc`, and correct `NV_NAVI_GRAPH_NODE_ATTRS_OFFSET`'s doc to
+  say it is indexed by TRIANGLE index, which a route id is not.
+- `crates/ds2-invasion-path/src/navquery.rs`, `node_attributes(table, id)`: keep the graph lookup,
+  then branch on `id & NAVI_ID_EDGE_FLAG` as in steps 2 and 3, and return the triangle(s) and their
+  words (for example `Vec<(u16 tri, u32 attrs)>`) instead of one `u32`. Bound every index by the
+  graph's own `i16` counts before reading.
+- `audit()`: push one `AuditedNode` per triangle word, carrying the triangle index next to the
+  route id, and count an id whose bound check fails as `unreadable`. `widest` stays as it is.
+- `crates/ds2-invasion-path/src/gametick.rs`, `describe_audit`: print the triangle index beside
+  each id (`node 0x000281cd edge 0x1cd -> tri N attrs ...`) so a wrong decode is visible in the
+  log.
+
+### What a run should show
+
+For a route the character can walk (the self-check's start `0x00000001` to goal `0x0002007e`
+with `READY`), inferred from the decode:
+
+- every route id printed has `id & 0x8000` set, and its edge index resolves to one or two
+  triangle indices below the graph's triangle count;
+- `unreadable` absent or zero;
+- attribute words with small type and capacity fields, like the two already logged on normal
+  ground (`0x00000007`, `0x00000047`), and no word that splits into two small `u16`s;
+- `Widest agent this route admits: size class N of 6` with some `N`, not `NONE`.
+
+A route of all edge ids that still says `NONE` after this change means the edge record layout
+above is wrong for that graph, not that the ground is impassable.
