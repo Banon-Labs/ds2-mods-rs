@@ -451,13 +451,53 @@ shell_payloads_deep(text) := deep if {
 # Heredoc bodies are DATA for the command reading them, so their contents get
 # the same treatment as a quoted operand -- unless a shell is what reads them,
 # in which case the body stays raw (fail closed) and its separators keep working.
+#
+# FINDING THE TERMINATOR IN THE DELIVERED SHAPE (2026-09-25, bd ds2-mods-rs-1um.4).
+#
+# This used to split on "\n" + tag. The engine replaces every unquoted newline with a space
+# before any policy runs, heredoc bodies included, so on the live path that newline never
+# arrived: the body was never resolved, heredoc_resolved fell back to the raw text, and every
+# data-heredoc carve-out below was inert. Measured through scripts/cupcake-hook.sh: a
+# `git commit -q -F - <<'EOF'` whose message contained ` -n ` was denied as a no-verify flag,
+# while `opa test` on the raw text allowed it.
+#
+# The terminator is now recognised in either shape: a newline OR a space before the tag, and
+# after it only blanks followed by a separator, a newline, or the end of the text. The shim
+# (scripts/cupcake-hook.sh) is what makes the separator exist: it leaves the body's newlines
+# alone but rewrites the unquoted newline AFTER the terminator line to `; `, so
+#
+#     cat > notes <<'EOF'<NL>body<NL>EOF<NL>git push origin main
+#
+# is delivered as `cat > notes <<'EOF' body EOF; git push origin main`. The `;` is what
+# separates "the terminator" from "a body line that merely starts with the tag", and the text
+# after it stays command text.
+#
+# Collapsed newlines make a body line ambiguous with the terminator, so this fails closed on
+# ambiguity: the tag must occur EXACTLY ONCE as a whole word after the opener. A body that uses
+# the tag as a word anywhere (`the EOF line ends this`), a second heredoc, or a terminator with
+# no separator after it (the no-shim path, or a command the shim passed through untouched)
+# leaves the body unresolved, and the raw text is scanned as before. Resolving can only stop
+# early at the one terminator candidate there is; it can never swallow a later line.
 heredoc_body_blanked(text) := out if {
 	parts := split(text, "<<")
 	count(parts) == 2
 	not regex.match(shell_heredoc_reader_pattern, parts[0])
+	opener := heredoc_opener(parts[1])
 	tag := heredoc_tag(parts[1])
-	segments := split(parts[1], concat("", ["\n", tag]))
-	count(segments) == 2
+	rest := substring(parts[1], count(opener), -1)
+
+	# Counted with find_all_string_submatch_n, not regex.find_n: find_n never fires in cupcake
+	# 0.5.2's WASM runtime (measured 2026-09-25 with scripts/check-cupcake-wasm-builtins.py's
+	# run_probes; `opa test` evaluates it fine, which is how the first draft of this passed there
+	# and still denied live). The left boundary only, so a word that merely STARTS with the tag
+	# (`EOFX`) is counted too -- over-counting leaves the body unresolved, the fail-closed side.
+	count(regex.find_all_string_submatch_n(concat("", [`(^|[^A-Za-z0-9_])`, tag]), rest, -1)) == 1
+	pieces := regex.find_all_string_submatch_n(
+		concat("", [`^([\s\S]*[\n ][ \t]*)`, tag, `([ \t\r]*(?:[;&|)\n][\s\S]*)?)$`]),
+		rest,
+		1,
+	)
+	segments := [concat("", [opener, pieces[0][1]]), pieces[0][2]]
 
 	# THE BODY IS WRAPPED IN A SYNTHETIC DOUBLE QUOTE, and that is this repo's divergence from
 	# er-mods-rs, kept deliberately when commands.rego was refreshed from it on 2026-09-21.
@@ -482,9 +522,17 @@ heredoc_body_blanked(text) := out if {
 	out := concat("", [parts[0], " ", quoted_body, " ", tag, segments[1]])
 }
 
+heredoc_tag_pattern := `^-?[ \t]*["']?([A-Za-z_][A-Za-z0-9_]*)["']?`
+
 heredoc_tag(after_marker) := tag if {
-	matched := regex.find_all_string_submatch_n(`^-?[ \t]*["']?([A-Za-z_][A-Za-z0-9_]*)["']?`, after_marker, 1)
+	matched := regex.find_all_string_submatch_n(heredoc_tag_pattern, after_marker, 1)
 	tag := matched[0][1]
+}
+
+# The opener as written (`'EOF'`, `-EOF`, `"EOF"`), so the body search starts after it.
+heredoc_opener(after_marker) := opener if {
+	matched := regex.find_all_string_submatch_n(heredoc_tag_pattern, after_marker, 1)
+	opener := matched[0][0]
 }
 
 heredoc_resolved(text) := out if {

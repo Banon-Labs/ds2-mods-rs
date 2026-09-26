@@ -146,11 +146,16 @@ def heredoc_region(text):
         `git commit -F - <<'EOF'` -- is DATA, and is treated exactly like a quoted span:
         its newlines are left as newlines. This repo's agents write those constantly, and
         one containing a line-anchored `git push origin main` is documentation, not a push.
-        It is also what keeps this shim from breaking the policies' own heredoc handling:
-        commands.rego finds the body by looking for "\n" + tag, so rewriting the
-        terminator's newline to `;` would make the heredoc unrecognisable there, drop the
-        text back to its raw form, and deny every doc heredoc. The terminator newline is
-        therefore inside the preserved region.
+        The newline BEFORE the terminator is inside the preserved region; the newline
+        AFTER the terminator line is outside it and becomes `; ` like any other.
+
+        That `; ` is load-bearing for commands.rego (2026-09-25, bd ds2-mods-rs-1um.4). The
+        engine collapses the body's preserved newlines to spaces anyway, so the policy
+        cannot find the body by "\n" + tag on the live path; it recognises a space-delimited
+        tag followed by a separator or the end of the text instead. Without the separator a
+        terminator is indistinguishable from a body word, and the policy leaves the body
+        unresolved and scans the raw text -- which is also what happens to every command
+        this function reports UNRESOLVABLE, since the rewrite then never runs.
 
       * a body a SHELL reads -- `bash <<EOF` -- is a PROGRAM, and its newlines become
         separators like any other command text. commands.rego already refuses to blank
