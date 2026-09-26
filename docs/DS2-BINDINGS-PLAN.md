@@ -117,7 +117,7 @@ DS3's own per-module line counts are the unit, adjusted by the measured class co
 | --- | ---: | ---: | --- |
 | `stl.rs` | 31 | 30-60 | Same job. VS2012-era CRT shapes present (section 6d), but `size_of::<DLVector<usize>> == 0x20` is unconfirmed. |
 | `util.rs` | 59 | 60 | Generic. |
-| `dl/kr.rs` | 69 | 150-250 | Same two types, but `DLAllocator` is **27 slots** here vs 14 in DS3 -- the trait alone is twice as long, and 5 lock types exist rather than 1. |
+| `dl/kr.rs` | 69 | 150-250 | Same two types, but `DLAllocator` is **26 slots** here vs 14 in DS3 -- the trait alone is twice as long, and 5 lock types exist rather than 1. |
 | `dl/io.rs` | 196 | 200-350 | 56 classes vs DS3's handful; `DLMemoryInputStream` is >=16 slots vs DS3's 7. |
 | `dl/tx.rs` | 162 | 150-250 | Same job, but the character-set enum must be re-derived: DS2's `wchar_t` instantiation carries template arg `3` where DS3's `DLCharacterSet` puts UTF16 at `1`. |
 | `dl/ut.rs` | 135 | 150-250 | DS3's is pure Rust with no addresses -- the one module that might port near-verbatim, after checking the container layout. |
@@ -197,9 +197,9 @@ Numbered because the dependencies are real, not because a plan looks tidier numb
    after.
 
 4. **`dl::kr` -- the allocator.** Everything with a container or a string in it needs
-   `DLKR::DLAllocator` first. Start by settling the unresolved slot question (section 4): walk
-   `DLKRD::HeapAllocator<...>::vftable` at `0x1410d2e28` and identify allocate / allocate-aligned
-   / deallocate from the implementations, not from DS3's slot numbers.
+   `DLKR::DLAllocator` first. The slot question is settled in `docs/DS2-ALLOCATOR.md`: allocate
+   is slot 9 (`+0x48`), allocate-aligned slot 10 (`+0x50`), free slot 13 (`+0x68`), with a
+   back-end family at slots 15 to 19. Take slot numbers from that table, not from DS3's.
 
 5. **`stl` + `dl::tx` + `dl::ut`.** The container and string layer. `DLVector`'s size assertion is
    the first cheap falsifiable test the crate can carry.
@@ -232,7 +232,8 @@ four of its slots, section 4 still cannot say which slot allocates. The one piec
 that looked like an answer -- `heapAllocator` dispatching to `+0x50`, exactly where DS3 puts
 `allocate_aligned` -- turned out not to survive the check that would have confirmed it. That is
 the whole lesson of this survey in one class: the name matches, the shape does not, and the
-temptation to fill the gap from DS3 is strongest exactly where it is most wrong.
+temptation to fill the gap from DS3 is strongest exactly where it is most wrong. (The gap has
+since been closed from the binary; see `docs/DS2-ALLOCATOR.md`.)
 
 A `#[repr(C)] pub struct DLAllocator` with DS3's vtable trait would compile today, would look
 correct on the page, and would call the wrong function on most slots. `docs/PORTING.md` already
