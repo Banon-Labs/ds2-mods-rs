@@ -30,13 +30,6 @@
 //! planner reports [`ds2_rva::NV_ROUTE_PLANNER_FLAG_FAILED`], which is the same degraded mode the
 //! Elden Ring crate uses when its navmesh answers "there is no way to walk there".
 
-// The bounds below are a contract with the engine rather than a set of call sites, and two of
-// them (`MAX_POINTS_PER_SEGMENT`, `MAX_POINTS`) are enforced inside `decode` while
-// `MAX_SEGMENTS` is read by its caller's tests. Scoped to this module so the rest of the crate
-// keeps its unused items visible.
-// DEBT: ds2-mods-rs-2rs -- the bounds are an engine contract, not call sites.
-#![allow(dead_code)]
-
 /// Somewhere bytes can be read from, fallibly.
 ///
 /// The live implementation is the fault-safe reader in `ds2-game-base`, which reports an unmapped

@@ -54,10 +54,6 @@
 //! [`ds2_rva::KATANA_SFX_STOP`] -- so retiring a stone really extinguishes it, and this module
 //! hands the caller the handles to do it with rather than dropping them.
 
-// Windows-only in practice; ungated so every rule above stays host-testable.
-// DEBT: ds2-mods-rs-2rs -- module-wide dead_code, reason not yet recorded.
-#![cfg_attr(not(windows), allow(dead_code))]
-
 use crate::geometry::{arc_length_of_nearest, distance_to_path, length, resample, sub};
 use crate::navpath::RoutePoint;
 
