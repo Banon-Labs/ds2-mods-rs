@@ -100,7 +100,24 @@ The gap is the other arms. When `[this+0x314] >= 0` slot 27 reads `+0x2f8` inste
 pad is DirectInput it reads `rgbButtons` at `+0x178`; an authored `+0x198` is invisible in both.
 Verified in binary. The harness should pick the field by the same test slot 27 uses.
 
-## Why the live START press still did nothing: open
+## Measured live: an authored START opens the pause menu
+
+On 2026-09-26, with an Xbox controller connected (the XInput arm), a `block 600` confirmed in the
+log, then `buttons 0x0010 12`: `scripts/frida/pad-button-read.js`, hooked on `0x140f04d40`, logged
+key id `0x2c` on the stamped device as
+
+```
+device=0xe53db8 third=-1 port=0 buttons=0x0 down=0
+device=0xe53db8 third=-1 port=0 buttons=0x10 down=1
+device=0xe53db8 third=-1 port=0 buttons=0x0 down=0
+```
+
+and `ds2-menu-row` built the pause menu for the first time in that session straight after the
+hold. So the reading above holds end to end: slot 27 reads the harness's word, answers START down,
+and the menu opens. The earlier failure below was in a session whose controller state was not
+recorded.
+
+## Why the earlier live START press did nothing: open
 
 Since the field is read, the failed press is explained somewhere downstream of slot 27, and this
 static pass did not settle where. Candidates, all inferred:
