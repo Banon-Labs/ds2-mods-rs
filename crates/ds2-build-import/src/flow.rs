@@ -497,6 +497,9 @@ fn equip_everything(build: &ds2_build_import_core::Build) {
     let mut done = 0usize;
     let mut refused: Vec<String> = Vec::new();
     let mut over_budget = 0usize;
+    // Copies of each name already placed this pass, so a name the build gives several positions
+    // takes a different copy for each instead of moving one copy from slot to slot.
+    let mut placed = std::collections::HashMap::<String, usize>::new();
 
     for slot in &planned {
         if slot.kind == SlotKind::Spell {
@@ -549,6 +552,7 @@ fn equip_everything(build: &ds2_build_import_core::Build) {
             crate::game::equip(crate::game::EquipRequest {
                 internal_slot: internal as u32,
                 item_ids: &candidates,
+                copies_placed: placed.get(&slot.name).copied().unwrap_or(0),
             })
         } {
             // THE READ-BACK IS THE ONLY EVIDENCE. This function returns nothing and fails silently
@@ -560,6 +564,7 @@ fn equip_everything(build: &ds2_build_import_core::Build) {
             // makes the run its own evidence.
             Ok(outcome) if outcome.took() => {
                 done += 1;
+                *placed.entry(slot.name.clone()).or_insert(0) += 1;
                 log_line(format_args!(
                     "{LOG_PREFIX}   {} -> {} ({}) id={}",
                     slot.name,

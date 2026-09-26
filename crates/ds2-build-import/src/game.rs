@@ -696,6 +696,9 @@ pub(crate) struct EquipRequest<'a> {
     /// searched only for the id it granted found nothing and reported the flask missing from an
     /// inventory it was sitting in. The build said "Estus Flask"; any Estus Flask answers it.
     pub(crate) item_ids: &'a [i32],
+    /// How many earlier positions of this same build already took this item, so this one takes
+    /// the next copy rather than the one they are holding. See [`entry_for_item`].
+    pub(crate) copies_placed: usize,
 }
 
 /// What one equip actually did, read back rather than assumed.
@@ -778,15 +781,24 @@ pub(crate) fn not_in_pack_skipped() -> usize {
 /// Reported and then reproduced on demand 2026-09-24 -- store the rapier, import the build again,
 /// take it off, and it is gone.
 ///
-/// So a stored copy is not a candidate. `already_held` then answers false for it, the grant runs,
+/// So a stored copy is not a candidate. `held_count` then leaves it out, the grant runs,
 /// and the player is given a copy they are actually carrying.
 ///
-/// **It prefers an unworn copy.** A build naming the same item twice, or a re-run over a character
-/// that already wears it, would otherwise resolve both positions to the one entry -- and since the
-/// equip is a move, filling the second slot would strip the first.
-fn entry_for_item(bag: usize, item_id: i32) -> Option<usize> {
+/// **Worn copies first, then spares, and `skip` of them passed over.** A build naming one item for
+/// several positions asks for several copies, and the equip is a move: handing the second position
+/// the entry the first one just took strips the first. Measured 2026-09-26 on build 234, which
+/// names Great Heal Excerpt twice -- two copies were granted, and attunement 3 still read back
+/// `None` because it was handed the copy attunement 2 had just been given. The caller passes how
+/// many copies of this item it has already placed, so the n-th position takes the n-th copy.
+fn entry_for_item(bag: usize, item_id: i32, skip: usize) -> Option<usize> {
+    entries_for_item(bag, item_id).into_iter().nth(skip)
+}
+
+/// Every carried copy of an item: the worn ones in array order, then the unworn ones.
+fn entries_for_item(bag: usize, item_id: i32) -> Vec<usize> {
     let base = bag + ds2_rva::ITEM_ENTRY_ARRAY_OFFSET;
-    let mut spare: Option<usize> = None;
+    let mut worn = Vec::new();
+    let mut spares = Vec::new();
     for index in 0..ds2_rva::ITEM_ENTRY_COUNT {
         let entry = base + index * ds2_rva::ITEM_ENTRY_STRIDE;
         // SAFETY: inside the bag the game's own pointer chain produced; the read is fault-safe and
@@ -822,25 +834,27 @@ fn entry_for_item(bag: usize, item_id: i32) -> Option<usize> {
             // the player's own equipped gear off and replacing it with a copy it had just minted.
             // The player's existing item is the one with their upgrades, their infusion and their
             // durability on it; a freshly granted duplicate is not an improvement on it.
-            return Some(entry);
+            worn.push(entry);
+            continue;
         }
-        spare.get_or_insert(entry);
+        spares.push(entry);
     }
-    spare
+    worn.extend(spares);
+    worn
 }
 
-/// Whether the character already holds this item at all.
+/// How many copies of this item the character is carrying.
 ///
-/// Used to decide whether to grant it. **A build asking for a sword the player already owns is not
+/// Used to decide how many to grant. **A build asking for a sword the player already owns is not
 /// asking for a second sword** -- and the second one arrives without their reinforcement or their
-/// infusion, so granting it and then equipping it is strictly worse than leaving them alone.
+/// infusion, so granting it and then equipping it is strictly worse than leaving them alone. A build
+/// naming the same spell for two positions is asking for a second copy, and gets one.
 ///
 /// Held means carrying it. A copy the player has stored does not count, which is the other half of
-/// the bug [`entry_for_item`] describes and the half that does the damage: answering true here
-/// skips the grant, so the equip that follows has nothing in the pack to find and takes the stored
-/// copy instead.
-pub(crate) fn already_held(item_id: i32) -> bool {
-    bag_list().is_ok_and(|bag| entry_for_item(bag, item_id).is_some())
+/// the bug [`entry_for_item`] describes and the half that does the damage: counting it here skips
+/// the grant, so the equip that follows has nothing in the pack to find and takes the stored copy.
+pub(crate) fn held_count(item_id: i32) -> usize {
+    bag_list().map_or(0, |bag| entries_for_item(bag, item_id).len())
 }
 
 /// What a FLAT slot currently holds, through the game's own accessor.
@@ -970,7 +984,7 @@ pub(crate) unsafe fn equip(request: EquipRequest<'_>) -> Result<EquipOutcome, Ga
     let (item_id, entry) = request
         .item_ids
         .iter()
-        .find_map(|id| entry_for_item(bag, *id).map(|entry| (*id, entry)))
+        .find_map(|id| entry_for_item(bag, *id, request.copies_placed).map(|entry| (*id, entry)))
         .ok_or(GameError::NotInInventory)?;
 
     // SAFETY: the prologue matched, and the signature is the one the disassembled thunk implements
