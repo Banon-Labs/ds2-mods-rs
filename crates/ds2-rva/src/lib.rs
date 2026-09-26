@@ -561,6 +561,54 @@ pub const FE_DIALOG_VTABLE_COMMON_WINDOW: u32 = 0x010b_cff8;
 /// argument. Logged as a diagnostic; nothing branches on it here.
 pub const FE_DIALOG_KIND_OFFSET: usize = 0x0c;
 
+// The `common-window` instances, by kind.
+//
+// [`FE_DIALOG_KIND_OFFSET`] is the substate's own id ([`FE_SUBSTATE_ID_OFFSET`]), and one
+// `FeSubStateCommonWindow` class is instantiated many times by `FeStateTitle::v6` (`0x1400f72e0`),
+// each with its own id, cancel destination and message. So the class says nothing about which
+// message is on screen; the kind does. Each construction is
+// `ctor(obj, kind, cancel_dest, caption)` at `0x140104c00` with the message from
+// `FUN_140503620(0x19, id)`, category `0x19` being `titleflow.fmg` (`scripts/ds2-fmg.py`).
+
+/// Kind 6: "The game may not have been exited properly the last time you played." One button.
+///
+/// Built at `0x1400f75d3` (message `0x1adc0`, cancel destination `0x20`). Logged as a suppressed
+/// notice on real boots in `docs/DS2-TITLE-FLOW.md`
+/// (`suppressed screen=common-window kind=6  caption=0x20 options=-1`).
+pub const FE_COMMON_WINDOW_KIND_NOT_EXITED_PROPERLY: i32 = 6;
+
+/// Kind 62: "The DARK SOULS II service is not available ... Select CANCEL to start the game in
+/// offline mode".
+///
+/// The one two-edge box: cancel `0x39` retries the login, confirm `0x2a` goes
+/// offline. Answered only on an offline run, by destination, never by button name. Evidence:
+/// `docs/DS2-OFFLINE.md`, `suppressed screen=common-window kind=62 cancel-dest=0x39
+/// confirm-dest=0x2a edge=confirm-goes-offline`.
+pub const FE_COMMON_WINDOW_KIND_SERVICE_UNAVAILABLE: i32 = 62;
+
+/// Kind 70: "There is no new information." One button.
+///
+/// Built at `0x1400f7f8b` (message `0x33452`, cancel destination `0x47`, the top menu). Logged as a
+/// suppressed notice on real boots in `docs/DS2-TITLE-FLOW.md`
+/// (`suppressed screen=common-window kind=70 caption=0x47 options=-1`).
+pub const FE_COMMON_WINDOW_KIND_NO_NEW_INFORMATION: i32 = 70;
+
+/// Kind 82: "Failed to save game." One button, cancel destination `0x17` (title main).
+///
+/// Built at `0x1400f8391` (message `0xdbba2`). Earlier comments in `ds2-continue` and
+/// `ds2-save-file` read the `kind=82` line after a swap as "a confirm about the character"; the
+/// message id says it is a save failure. Shown, not suppressed: a failed save is news.
+pub const FE_COMMON_WINDOW_KIND_SAVE_FAILED: i32 = 82;
+
+/// Kind 88: "Failed to load character data." One button, cancel destination `0x55` (back to the
+/// character list).
+///
+/// Built at `0x1400f84a1`: `mov edx,0x58`, `lea r8d,[rdx-0x3]`, message `0x38271`. This is the box
+/// the hollow-slot escape ends on, and the box an earlier `hold()` comment called "confirming a
+/// character". Suppressing it turned every failed load into a list that accepts a press and does
+/// nothing, which is what the player reported. Shown, not suppressed.
+pub const FE_COMMON_WINDOW_KIND_LOAD_CHARACTER_FAILED: i32 = 88;
+
 /// **Destination substate id for the CANCEL edge.** `+0x10`, a signed WORD.
 ///
 /// This was recorded as a "caption/message id" and that was wrong. It is a substate id, and `v5`
@@ -1482,6 +1530,17 @@ pub const GAME_MANAGER_IMP: u32 = 0x0161_48f0;
 /// Read at `0x1400fc3f7` (`mov rbp,[rdx+0xb8]`) in `SaveSystemData`'s enter and at `0x1400fb004`
 /// in `SteamLoadSystemData`'s, among others.
 pub const SAVE_LOAD_SYSTEM_OFFSET: usize = 0xb8;
+
+/// Offset of the per-frame counter in [`GAME_MANAGER_IMP`]: a `u32` at
+/// `[`[`GAME_MANAGER_IMP`]`] + 0x104`, read pointer first and dword second.
+///
+/// Measured at runtime on 2026-09-26: it advanced exactly once per frame through a load and
+/// through play. The pointer at [`GAME_MANAGER_IMP`] can still be null early in boot, so a reader
+/// has to fetch it on every sample and treat null as "not yet" rather than as a stopped counter.
+/// This is the stall signal for `ds2-crash-logging-core`'s hang watchdog, which also refuses to
+/// arm until it has watched the value advance, so a build that moves the field disarms it instead
+/// of reporting a hang.
+pub const GAME_MANAGER_FRAME_COUNTER_OFFSET: usize = 0x104;
 
 // ============================================================================================
 // Managers reached through the Ghidra project's named accessors.
@@ -8334,6 +8393,32 @@ pub const MOUSE_DEVICE_DELTA_Y_OFFSET: usize = 0x10c;
 /// Mouse wheel delta. `MouseDevice+0x110`, from `DIMOUSESTATE2.lZ`.
 pub const MOUSE_DEVICE_WHEEL_OFFSET: usize = 0x110;
 
+/// Folds one window-message mouse event into an input block's button word. RVA `0x00b08ef0`.
+///
+/// `fn(block, event)`: `rcx` is the input block, `rdx` the event. Called once per block (two of
+/// them, stride `0x288`) by `FUN_140af41a0`, whose only caller is `KatanaMainApp`'s message handler
+/// `FUN_1402ef110`. This is how mouse clicks reach the game; the DirectInput mouse's buttons do
+/// not. A jump table on the event type, not an Arxan redirect (`scripts/ds2-arxan-chain.py`
+/// stops on it as unknown, and the disassembly is the body).
+///
+/// Prologue: `48 63 02 83 f8` (`movsxd rax,[rdx]`, then `cmp eax,0xa`).
+pub const MOUSE_EVENT_FOLD: u32 = 0x00b0_8ef0;
+
+/// First five bytes at [`MOUSE_EVENT_FOLD`].
+pub const MOUSE_EVENT_FOLD_PROLOGUE: [u8; 5] = [0x48, 0x63, 0x02, 0x83, 0xf8];
+
+/// The event's type, a `u32` at `event+0x00`.
+///
+/// Presses: `0`/`2` left, `3`/`4` right, `6`/`7` middle. Releases: `1` left, `5` right, `8`
+/// middle. `9` is a move (`+0x08`/`+0x0c`), `10` a wheel step (`+0x10`).
+pub const MOUSE_EVENT_TYPE_OFFSET: usize = 0x00;
+
+/// Modifier bits at `event+0x04`; the low four each OR a bit (`0x40`..`0x200`) into the word.
+pub const MOUSE_EVENT_MODIFIERS_OFFSET: usize = 0x04;
+
+/// The wheel step of a type-`10` event, an `i32` at `event+0x10`, added to `block+0x224`.
+pub const MOUSE_EVENT_WHEEL_OFFSET: usize = 0x10;
+
 /// `DLUID::KeyboardDevice<DLKR::DLSingleThreadingPolicy>`'s per-frame poll. RVA `0x00f06dd0`.
 ///
 /// Vtable slot 23 of `0x141271e98`. Body: `GetDeviceState(0x100, this+0xf0)` -- the 256-byte
@@ -8356,13 +8441,21 @@ pub const KEYBOARD_DEVICE_DIK_TABLE_OFFSET: usize = 0xf0;
 pub const KEYBOARD_DEVICE_DIK_TABLE_BYTES: usize = 0x100;
 
 // ============================================================================================
-// THE CAMERA'S MOUSE-LOOK -- AND THE CORRECTION IT IS
+// The menu pointer's chain, which is not the camera's
 //
-// `MOUSE_DEVICE_POLL` above is a real device and the engine really does read it, but it is NOT
-// what turns this camera. Measured live 2026-09-22: `mouse 120 0 30` written into
-// `DLUID::MouseDevice`'s normalised deltas left the camera's published yaw at exactly 87.13 for
-// thirty frames. The whole chain is elsewhere, it is traced below, and every step of it was read
-// out of the disassembly rather than inferred:
+// Superseded 2026-09-26. The camera's mouse-look is `MOUSE_DEVICE_POLL`'s X/Y floats
+// (`MOUSE_DEVICE_DELTA_X_OFFSET`), mapped into `cursorObj+0x18` and read by the camera stage only
+// while the window is active (`docs/DS2-MOUSE-LOOK.md`). Measured with
+// `scripts/frida/mouse-look-author.js`, window focused: `+20` added there for sixty frames turned
+// the camera about 90 degrees, with zero drift idle. The 2026-09-22 run that saw no turn wrote the
+// same floats into an unfocused window. What follows is the chain that feeds the menu pointer; its
+// conclusions about the camera are wrong and are kept only so the addresses stay explained.
+//
+// The original text follows. `MOUSE_DEVICE_POLL` above is a real device and the engine really
+// does read it, but it is not what turns this camera. Measured live 2026-09-22: `mouse 120 0 30`
+// written into `DLUID::MouseDevice`'s normalised deltas left the camera's published yaw at exactly
+// 87.13 for thirty frames. The whole chain is elsewhere, it is traced below, and every step of it
+// was read out of the disassembly rather than inferred:
 //
 //   FUN_140af42b0                     the per-frame input update
 //     -> parseInput(obj[0], dt)       0x140b08660 -- keyboard/general
@@ -8918,6 +9011,85 @@ pub const SAVE_LOAD_SYSTEM_PUMP_DONE: i32 = 0;
 /// `mov eax,0x4` at `0x1402e625d`, the first bail. Not an error and not a completion -- it is what
 /// a pump call on an idle system says, which is why calling it unconditionally is harmless.
 pub const SAVE_LOAD_SYSTEM_PUMP_IDLE: i32 = 4;
+
+// ============================================================================================
+// The section walk that spins on a hollow slot
+//
+// Loading a character streams its two data entries (USER_DATA(slot+1), USER_DATA(slot+11))
+// through `FUN_1402e47f0`, which walks 0x20-byte section headers until it reads the end marker.
+// On a slot whose entries are all zeros it never reads one: it steps to the end of the stream,
+// where the read fails and leaves the header as it was, the seek clamps, and the same step repeats
+// forever on the game thread. Measured live 2026-09-26: frame counter frozen, tid 332 at 100% in
+// this function, called from `0x1402e66cd` in the pump, both streams all zero.
+// ============================================================================================
+
+/// `FUN_1402e47f0`: the save section header walk. RVA `0x002e_47f0`.
+///
+/// `u32 walk(void *unused, DLMemoryInputStream *stream, void **handlers)`. RCX is never read
+/// (overwritten at `0x1402e482d` before any use), RDX is the stream, R8 the handler table.
+///
+/// ```text
+/// if (*handlers == 0) return 1;
+/// stream->read(&hdr, 0x20);                 // call [vtbl+0x18]  at 0x1402e483d
+/// while (hdr.type != 0xd) {
+///     if (hdr.type > 0xe) return 1;         // cmp edx,0xf; jnc -> mov eax,1
+///     // type looked up in the table at 0x1410da1f0; handler and version checked
+///     stream->seek(hdr.size, 1);            // call [vtbl+0x68]  at 0x1402e48e5
+///     stream->read(&hdr, 0x20);             // call [vtbl+0x18]  at 0x1402e48f9
+/// }
+/// stream->seek(hdr.size, 1); return ok ? 0 : 2;
+/// ```
+///
+/// Both reads and the seek go through the stream's vtable, never a direct call, which is what lets
+/// a detour here swap in a shadow vtable for the length of one call. The failed read at the end of
+/// the stream returns `-1` without writing the header, so a stream that ends before a `0xd` header
+/// keeps re-reading the last one. `scripts/ds2-arxan-chain.py 0x1402e47f0` reports it is not an
+/// Arxan-redirected entry.
+pub const SL_SECTION_WALK: u32 = 0x002e_47f0;
+
+/// The bytes [`SL_SECTION_WALK`] begins with: `rex push rbx; push rsi; push rdi; sub rsp,0x50`.
+/// Read from the shipped image at file offset `0x2e3bf0`.
+pub const SL_SECTION_WALK_PROLOGUE: [u8; 5] = [0x40, 0x53, 0x56, 0x57, 0x48];
+
+/// [`SL_SECTION_WALK`]'s answer for a header whose type is not in its table: `mov eax,1` at
+/// `0x1402e486f`. The caller treats it as a failed load, which is the answer the escape produces.
+pub const SL_SECTION_WALK_RESULT_BAD_TYPE: u32 = 1;
+
+/// The walk's header size, and the `len` both of its reads pass (`mov r8d,0x20`).
+pub const SL_SECTION_HEADER_SIZE: usize = 0x20;
+
+/// The type the walk stops on (`cmp edx,0xd`).
+pub const SL_SECTION_TYPE_END: u32 = 0xd;
+
+/// A header type the walk rejects: anything above `0xe` takes `if (0xe < type) return 1`.
+///
+/// The escape writes this into the header buffer when a read inside the walk fails. It was proven
+/// live on the hung game 2026-09-26 with `scripts/frida/load-hang-escape.js`: the watcher logged
+/// `failed header read in the walk: type 0 -> 0xff, walk exits (fire 1)`, the game showed its own
+/// load-failure box ([`FE_COMMON_WINDOW_KIND_LOAD_CHARACTER_FAILED`]) and returned to the
+/// character list.
+pub const SL_SECTION_TYPE_ESCAPE: u32 = 0xff;
+
+/// `DLMemoryInputStream`'s vtable. RVA `0x0113_c7c8`, VA `0x14113c7c8`.
+///
+/// Its function slots run `0x14113c7c8..0x14113c848` (the next qword is Shift-JIS text, not a
+/// pointer), and its RTTI complete-object locator sits at slot `-1` (`0x1412f88b8`). The live walk
+/// stream on the hang was this class (Frida: size 111292, cursor 111292, all zero).
+pub const DL_MEMORY_INPUT_STREAM_VTABLE: u32 = 0x0113_c7c8;
+
+/// Number of function slots in [`DL_MEMORY_INPUT_STREAM_VTABLE`].
+pub const DL_MEMORY_INPUT_STREAM_VTABLE_SLOTS: usize = 16;
+
+/// `int read(this, void *out, size_t len)`: slot 3 (`call [rax+0x18]`), `0x14084a8e0`.
+///
+/// Returns `-1` without touching `out` when the stream is closed (`[this+0x24] == 0`) or the
+/// cursor `[this+0x18]` has reached the size `[this+0x8]`; otherwise copies `min(len, left)` bytes
+/// from `[this+0x10] + cursor` and returns the count. The `-1` with `out` untouched is the half of
+/// the hang that belongs to the stream.
+pub const DL_INPUT_STREAM_SLOT_READ: usize = 3;
+
+/// [`DL_INPUT_STREAM_SLOT_READ`]'s failure answer.
+pub const DL_INPUT_STREAM_READ_FAILED: i32 = -1;
 
 /// The five bytes [`SL_SESSION_STRING_SET`] must begin with. `mov [rsp+8],rbx`.
 ///

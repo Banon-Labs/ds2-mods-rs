@@ -48,6 +48,7 @@ fn slot(index: usize, state: SlotState) -> SaveSlot {
         SlotState::Empty => (String::new(), [0i16; 9]),
         SlotState::Blank => (format!("blank{index}"), [1i16; 9]),
         SlotState::Occupied => (format!("char{index}"), [10i16 + index as i16; 9]),
+        SlotState::Hollow => (format!("hollow{index}"), [10i16 + index as i16; 9]),
     };
     SaveSlot {
         slot: index,

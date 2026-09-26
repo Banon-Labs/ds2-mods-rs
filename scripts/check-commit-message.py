@@ -75,6 +75,51 @@ HEADER_PATTERN = re.compile(
 # Wording git composes itself. Refusing any of these refuses git, not the author.
 EXEMPT_PREFIXES = ("Merge ", "Revert ", "fixup! ", "squash! ", "amend! ")
 
+# Types whose commit to game code is a claim about what the game will do.
+BEHAVIOUR_TYPES = {"feat", "fix", "perf", "refactor"}
+
+# A body that says whether the code has been in front of the game. The rule does not try to tell a
+# behaviour claim from any other sentence -- that vocabulary was the part nobody could pin down
+# (commit 686200f said "pressing any row this crate adds does nothing" about code that had never
+# run). It asks for the one thing a reader needs to weigh every other sentence: ran, or not.
+RUN_STATUS = re.compile(
+    r"\b(not (yet )?run|never run|has not run|not been run|not launched|untested|"
+    r"ran (it )?in|ran on|run in the game|measured|launched|in-game|live run|dll run|"
+    r"host tests? only|no game code|docs only|doc comments only)\b",
+    re.IGNORECASE,
+)
+
+
+def run_status_problem(message: str, touches_game_code: bool) -> str | None:
+    """A behaviour commit to game code that never says whether it ran, or None."""
+    if not touches_game_code:
+        return None
+    text = strip_git_furniture(message, comment_char())
+    header = text.split("\n")[0]
+    match = HEADER_PATTERN.match(header)
+    if is_exempt(header) or not match or match.group("type") not in BEHAVIOUR_TYPES:
+        return None
+    body = "\n".join(text.split("\n")[1:])
+    if RUN_STATUS.search(body):
+        return None
+    return (
+        "This commit changes game code under crates/ and its body never says whether that code "
+        "has run in the game. Add one line: 'Not yet run in the game.', or what a run measured "
+        "('Ran in-game: <the log line>'). Code that has not run must not be described as working."
+    )
+
+
+def staged_game_code() -> bool:
+    """Whether the commit being made touches a `.rs` file under `crates/`."""
+    try:
+        names = subprocess.run(
+            ["git", "diff", "--cached", "--name-only"],
+            capture_output=True, text=True, cwd=REPO_ROOT, check=False,
+        ).stdout.split()
+    except OSError:
+        return False
+    return any(name.startswith("crates/") and name.endswith(".rs") for name in names)
+
 
 def crate_scopes() -> set[str]:
     crates = REPO_ROOT / "crates"
@@ -212,6 +257,11 @@ def report(header: str, problems: list[str], source: str) -> None:
 def check_file(path: Path) -> int:
     message = path.read_text(encoding="utf-8", errors="replace")
     problems = check(message)
+    # Only here, for the commit being made: judging a whole branch's history by a rule it predates
+    # would fail branches for commits nobody can reword without a rebase.
+    status = run_status_problem(message, staged_game_code())
+    if status:
+        problems.append(status)
     if not problems:
         return 0
     header = strip_git_furniture(message, comment_char()).split("\n")[0]
@@ -302,6 +352,21 @@ def selftest() -> int:
             print(f"  expected {want}: {message.splitlines()[0]!r}", file=sys.stderr)
             for problem in problems:
                 print(f"    got: {problem}", file=sys.stderr)
+
+    run_status_cases = [
+        ("fix(ds2-menu-row): a row does nothing\n\nPressing a row does nothing.", True, False),
+        ("fix(ds2-menu-row): a row does nothing\n\nNot yet run in the game.", True, True),
+        ("feat(ds2-menu-row): x\n\nRan in-game: `menu-row: pressed id=3`.", True, True),
+        ("docs(ds2-menu-row): x\n\nWords only.", True, True),
+        ("fix(scripts): x\n\nA body.", False, True),
+        ("Merge branch 'x'", True, True),
+    ]
+    for message, touches, should_pass in run_status_cases:
+        passed = run_status_problem(message, touches) is None
+        if passed != should_pass:
+            failures += 1
+            want = "accepted" if should_pass else "rejected"
+            print(f"  run status: expected {want}: {message.splitlines()[0]!r}", file=sys.stderr)
 
     # The scope list has to come off disk, or a renamed crate silently stops being a legal scope.
     if not crate_scopes():

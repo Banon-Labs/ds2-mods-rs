@@ -57,6 +57,15 @@ import data.cupcake.system.commands
 # DLL -- twice a log format string, which alters the bytes that ship and the output a run produces,
 # and is exactly what `dll_match` exists to notice. The guard was right all three times.
 #
+# REVISITED 2026-09-26, and narrowed rather than reversed. A branch whose crate changes are comments
+# only is now out of jurisdiction, decided by `scripts/cupcake_comment_only.py` in the signal: both
+# sides of each changed `.rs` file are lexed and must be token-identical with comments removed (doc
+# comments count only where no non-builtin attribute or derive could read them). That is not the
+# file-extension or path carve-out declined above -- a changed format string, const or attribute is
+# still game code -- and it would have refused all three of those restarts again. The branch that
+# prompted the revisit, `item-warn-spell-bind-re`, is refused by it too: besides doc comments it adds
+# `pub const` RVAs to `ds2-rva`.
+#
 # What DID cost those restarts is the order the work was done in, so the denial now says so. The
 # freshness floor is `max(HEAD commit time, staged DLL mtime)`, which means a run taken before the
 # commit can never clear it: commit, then build, then launch, and one launch is enough. Loosening

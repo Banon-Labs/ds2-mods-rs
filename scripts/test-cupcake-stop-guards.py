@@ -61,6 +61,27 @@ class Case:
 
 CASES = [
     Case(
+        "launch_deferral_prose.jsonl",
+        "withheld a launch because the game is running",
+        "the 2026-09-26 instance: a committed build left unlaunched because the user's DS2 session "
+        "was up and they 'plan to go back to it'",
+    ),
+    Case(
+        "launch_deferral_reported.jsonl",
+        None,
+        "a past-tense report of a launch that tore the user's session down must NOT halt",
+    ),
+    Case(
+        "launch_deferral_unrun_commit.jsonl",
+        "touched game code this session and nothing launched it",
+        "a session commit of crates/ code (970c7d9) with no ds2-run.py launch after it",
+    ),
+    Case(
+        "launch_deferral_commit_launched.jsonl",
+        None,
+        "the same commit followed by a ds2-run.py launch must NOT halt",
+    ),
+    Case(
         "unexecuted_promise.jsonl",
         "promise nothing is going to keep",
         "turn ends on 'I'll re-run the gate...' with no tool call, no background work, no handoff",

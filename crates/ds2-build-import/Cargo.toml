@@ -18,6 +18,8 @@ name = "ds2_build_import"
 
 [dependencies]
 ds2-build-import-core.workspace = true
+# The link dialog's template, prefill and answer rules, host-tested there.
+ds2-build-url-core.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 darksouls2.workspace = true

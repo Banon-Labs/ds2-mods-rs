@@ -31,6 +31,8 @@ SIGNAL = REPO_ROOT / ".cupcake" / "signals" / "runtime_evidence_for_head.sh"
 # Point this at an older copy of the signal to watch these cases fail against it.
 SIGNAL = Path(os.environ.get("RUNTIME_EVIDENCE_SIGNAL_UNDER_TEST", SIGNAL))
 SCOPE = REPO_ROOT / "scripts" / "cupcake_push_scope.py"
+TARGET = REPO_ROOT / "scripts" / "cupcake_push_target_repo.py"
+COMMENT_ONLY = REPO_ROOT / "scripts" / "cupcake_comment_only.py"
 
 GAME_REL = ".local/share/Steam/steamapps/common/Dark Souls II Scholar of the First Sin/Game"
 BUILT_REL = "target/x86_64-pc-windows-msvc/release/dinput8.dll"
@@ -76,6 +78,8 @@ class World:
         shutil.copy2(SIGNAL, signals / SIGNAL.name)
         (self.repo / "scripts").mkdir()
         shutil.copy2(SCOPE, self.repo / "scripts" / SCOPE.name)
+        shutil.copy2(TARGET, self.repo / "scripts" / TARGET.name)
+        shutil.copy2(COMMENT_ONLY, self.repo / "scripts" / COMMENT_ONLY.name)
         (self.repo / "scripts" / "ds2-run.py").write_text("FLAGS = ['--no-offline']\n")
         (self.repo / "crates" / "ds2-x" / "src").mkdir(parents=True)
         (self.repo / "crates" / "ds2-x" / "src" / "lib.rs").write_text("// x\n")
@@ -107,13 +111,15 @@ class World:
         log.write_text("ds2-loader: attach awaiting-arxan-callback\n")
 
     def signal(self, command: str) -> dict[str, str]:
+        return fields(self.signal_raw(command))
+
+    def signal_raw(self, command: str) -> str:
         event = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
                  "tool_input": {"command": command}, "cwd": str(self.repo)}
-        out = subprocess.run(
+        return subprocess.run(
             ["bash", str(self.repo / ".cupcake" / "signals" / SIGNAL.name)],
             input=json.dumps(event), capture_output=True, text=True, cwd=self.repo, env=self.env,
         ).stdout
-        return fields(out)
 
 
 def birth_time_supported(directory: Path) -> bool:
@@ -173,7 +179,7 @@ def main() -> int:
         # 5. `git push origin <branch>` from a checkout sitting on a docs branch is judged on <branch>.
         w2 = World(Path(tmp) / "refspec")
         git(w2.repo, "checkout", "-q", "-b", "game", env=w2.env)
-        (w2.repo / "crates" / "ds2-x" / "src" / "lib.rs").write_text("// changed\n")
+        (w2.repo / "crates" / "ds2-x" / "src" / "lib.rs").write_text("pub fn changed() {}\n")
         git(w2.repo, "add", "-A", env=w2.env)
         w2.commit("feat(ds2-x): y")
         git(w2.repo, "checkout", "-q", "-b", "docs-only", "main", env=w2.env)
@@ -187,7 +193,89 @@ def main() -> int:
               w2.signal("git commit -am 'docs: c' && git push"), game_code="0", pending="1")
         check("--all is game code", w2.signal("git push --all origin"), game_code="1")
 
-        # 6. The whole path through the real engine: `cupcake eval` over this checkout's .cupcake/,
+        # 5b. The 2026-09-26 refusal: game code committed and run, then a docs-only commit on top.
+        #     The run still covers every game-code commit on the branch, so it stays fresh.
+        wd = World(Path(tmp) / "docs-on-top")
+        git(wd.repo, "checkout", "-q", "-b", "game-then-docs", env=wd.env)
+        (wd.repo / "crates" / "ds2-x" / "src" / "lib.rs").write_text("pub fn y() {}\n")
+        git(wd.repo, "add", "-A", env=wd.env)
+        wd.commit("feat(ds2-x): y", offset=-50)
+        wd.write_log()
+        (wd.repo / "docs" / "a.md").write_text("after the run\n")
+        git(wd.repo, "add", "-A", env=wd.env)
+        wd.commit("docs: after the run", offset=100)
+        check("a docs commit after the run does not make the run stale",
+              wd.signal("git push -u origin game-then-docs"), game_code="1", fresh="1")
+        (wd.repo / "crates" / "ds2-x" / "src" / "lib.rs").write_text("pub fn z() {}\n")
+        git(wd.repo, "add", "-A", env=wd.env)
+        wd.commit("fix(ds2-x): z", offset=200)
+        check("a game-code commit after the run still makes it stale",
+              wd.signal("git push -u origin game-then-docs"), game_code="1", fresh="0")
+
+        # 5c. Comment-only crate changes (2026-09-26). Each branch is cut from main, where lib.rs is
+        #     `// x\n`, and changes that file one way.
+        for branch, text, want in (
+            ("comment-only", "// x, and why\n/// doc\n\n", "0"),
+            ("adds-a-const", "// x\npub const FE_X: u32 = 0x10;\n", "1"),
+            ("string-with-slashes", "// x\nconst S: &str = \"// y\";\n", "1"),
+        ):
+            git(w2.repo, "checkout", "-q", "-b", branch, "main", env=w2.env)
+            (w2.repo / "crates" / "ds2-x" / "src" / "lib.rs").write_text(text)
+            git(w2.repo, "add", "-A", env=w2.env)
+            w2.commit(f"docs(ds2-x): {branch}")
+            check(f"crate change `{branch}` is game_code={want}", w2.signal(f"git push -u origin {branch}"),
+                  game_code=want)
+        # A non-Rust file under crates/ is game code however small the change.
+        git(w2.repo, "checkout", "-q", "-b", "crate-toml", "main", env=w2.env)
+        (w2.repo / "crates" / "ds2-x" / "Cargo.toml").write_text("# comment\n")
+        git(w2.repo, "add", "-A", env=w2.env)
+        w2.commit("chore(ds2-x): toml")
+        check("an added non-.rs file under crates/ is game code",
+              w2.signal("git push -u origin crate-toml"), game_code="1")
+
+        # 6. The 2026-09-26 false denial: the hook sits in the main checkout (docs branch, a stale
+        #    build in its target/), the command `cd`s into a linked worktree whose build is the one
+        #    staged and whose run attached, and pushes from there. Every field has to be measured in
+        #    the worktree.
+        w4 = World(Path(tmp) / "worktree")
+        git(w4.repo, "checkout", "-q", "-b", "docs-only", env=w4.env)
+        (w4.repo / "docs" / "a.md").write_text("b\n")
+        git(w4.repo, "add", "-A", env=w4.env)
+        w4.commit("docs: b", offset=-600)
+        (w4.repo / BUILT_REL).write_bytes(b"MZ stale main-checkout build")
+        wt = w4.root / "wt"
+        git(w4.repo, "worktree", "add", "-q", "-b", "save-file-load-hang", str(wt), "main", env=w4.env)
+        (wt / "crates" / "ds2-x" / "src" / "lib.rs").write_text("pub fn load_hang() {}\n")
+        git(wt, "add", "-A", env=w4.env)
+        when = f"@{int(time.time()) - 300} +0000"
+        git(wt, "commit", "-q", "-m", "fix(ds2-x): load hang",
+            env=dict(w4.env, GIT_COMMITTER_DATE=when, GIT_AUTHOR_DATE=when))
+        (wt / BUILT_REL).parent.mkdir(parents=True)
+        (wt / BUILT_REL).write_bytes(b"MZ worktree build")
+        shutil.copy2(wt / BUILT_REL, w4.game / "dinput8.dll")
+        os.utime(w4.game / "dinput8.dll", (time.time() - 200, time.time() - 200))
+        w4.write_log()
+        for command in (
+            f"cd {wt} && git push -u origin save-file-load-hang",
+            f"git -C {wt} push -u origin save-file-load-hang",
+            f"bash -lc 'cd {wt} && git push -u origin save-file-load-hang'",
+        ):
+            check(f"measured in the worktree: {command.replace(str(wt), '<wt>')}", w4.signal(command),
+                  game_code="1", dll_match="1", attached="1", fresh="1", pending="0")
+        check("a bare push from the main checkout is still measured there", w4.signal("git push"),
+              game_code="0", dll_match="0")
+        for command in (
+            f"cd {w4.root}/absent && git push",
+            f"(cd {wt} && git push)",
+            f"cd {w4.root} && git push",
+        ):
+            out = w4.signal_raw(command)
+            ok = out == ""
+            bad += 0 if ok else 1
+            print(f"  {'ok  ' if ok else 'FAIL'} fails closed (silent): {command.replace(str(w4.root), '<tmp>')}"
+                  + ("" if ok else f": {out!r}"))
+
+        # 7. The whole path through the real engine: `cupcake eval` over this checkout's .cupcake/,
         #    in a repository shaped like the one the miss happened in. This is what proves cupcake
         #    hands the pending event to the signal on stdin -- if it did not, `pending` would stay
         #    0, `game_code` would read the empty diff, and the verdict would be the allow of

@@ -36,6 +36,41 @@ pub(crate) fn log(args: std::fmt::Arguments<'_>) {
 struct Dialog {
     name: &'static str,
     vtable_rva: u32,
+    kinds: Kinds,
+}
+
+/// Which appearances of an allowlisted class may be suppressed.
+#[derive(Clone, Copy, Debug)]
+enum Kinds {
+    /// A class with one message of its own, so the class names the message. The three
+    /// network/offline classes each override the message getter with their own text.
+    Any,
+    /// A class the title re-enters with many messages, told apart only by kind (its substate id).
+    /// Only these kinds are suppressed; every other appearance is shown.
+    Only(&'static [i32]),
+}
+
+/// The `common-window` kinds with evidence of being boxes this crate may take off the screen.
+///
+/// Each one is cited, with its message and the run that logged it, on its `ds2-rva` constant.
+/// Kind 62 is the offline prompt: listed so the offline answer can still reach it, and it is
+/// still shown on any run that has not been configured to play offline, because it has two edges.
+///
+/// Deliberately absent, with the message the image gives each: 82 "Failed to save game." and 88
+/// "Failed to load character data." A failure the player is not told about is a press that did
+/// nothing, which is exactly what 88's suppression looked like.
+const COMMON_WINDOW_KINDS: &[i32] = &[
+    ds2_rva::FE_COMMON_WINDOW_KIND_NOT_EXITED_PROPERLY,
+    ds2_rva::FE_COMMON_WINDOW_KIND_SERVICE_UNAVAILABLE,
+    ds2_rva::FE_COMMON_WINDOW_KIND_NO_NEW_INFORMATION,
+];
+
+/// Whether an appearance of kind `kind` is on its class's allowlist.
+fn kind_allowed(kinds: Kinds, kind: i32) -> bool {
+    match kinds {
+        Kinds::Any => true,
+        Kinds::Only(listed) => listed.contains(&kind),
+    }
 }
 
 /// The boot dialogs, allowlisted by vtable.
@@ -61,18 +96,22 @@ const DIALOGS: [Dialog; 4] = [
     Dialog {
         name: "common-window",
         vtable_rva: ds2_rva::FE_DIALOG_VTABLE_COMMON_WINDOW,
+        kinds: Kinds::Only(COMMON_WINDOW_KINDS),
     },
     Dialog {
         name: "online-check-fail-warn",
         vtable_rva: ds2_rva::FE_DIALOG_VTABLE_ONLINE_CHECK_FAIL_WARN,
+        kinds: Kinds::Any,
     },
     Dialog {
         name: "information-fail-warn",
         vtable_rva: ds2_rva::FE_DIALOG_VTABLE_INFORMATION_FAIL_WARN,
+        kinds: Kinds::Any,
     },
     Dialog {
         name: "offline-mode-window",
         vtable_rva: ds2_rva::FE_DIALOG_VTABLE_OFFLINE_MODE_WINDOW,
+        kinds: Kinds::Any,
     },
 ];
 
@@ -121,18 +160,14 @@ static HELD: AtomicUsize = AtomicUsize::new(0);
 /// ds2-continue:    data-list phase=1->2 ...                     <- and round again, twelve times
 /// ```
 ///
-/// A box with no confirm destination is treated here as a notice with one outcome, on the
-/// reasoning that answering it removes a keypress and decides nothing. That reasoning fails when
-/// the box's one published edge is its CANCEL edge and it points back where the player came from:
-/// the way forward is the unpublished edge, so answering the published one is not dismissing a
-/// notice, it is pressing "no" on a question. Confirming a character at the title is such a box,
-/// and the loop above is what it looks like from the player's side -- a save slot that accepts a
-/// press and does nothing.
+/// This comment used to call kind 88 a character confirm being answered "no". The image says
+/// otherwise: kind 88 is built with message `0x38271`, "Failed to load character data."
+/// ([`ds2_rva::FE_COMMON_WINDOW_KIND_LOAD_CHARACTER_FAILED`]). The loop above was a load failing
+/// twelve times with the failure hidden each time. Kind 88 is now off the allowlist and always
+/// shown, so that case no longer needs a hold.
 ///
-/// The general rule is not changed here, because the general rule has been right for every other
-/// box this crate has met and a build is no place to find out otherwise. What changes is that a
-/// flow which is deliberately driving the title -- `ds2-save-file`'s character swap -- takes its
-/// questions back for the duration.
+/// The hold stays for what it still does: a flow deliberately driving the title --
+/// `ds2-save-file`'s character swap -- gets every box, allowlisted or not, for the duration.
 ///
 /// Paired with [`release`], and counted rather than boolean so two flows holding at once cannot
 /// have the first release re-arm it under the second.
@@ -277,6 +312,25 @@ unsafe fn suppress(this: *mut u8) -> bool {
         );
         return false;
     };
+    // The class is allowlisted; the message may not be. `common-window` is one class entered with
+    // many messages, so the kind decides, and a kind nobody has vouched for is shown and logged
+    // every time it appears -- a new message is a line to read, never a box answered unseen.
+    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one.
+    let kind = unsafe { safe_read_i32(object + ds2_rva::FE_DIALOG_KIND_OFFSET) }.unwrap_or(-1);
+    if !kind_allowed(dialog.kinds, kind) {
+        log(format_args!(
+            "{LOG_PREFIX} seen screen={} kind={kind} cancel-dest=0x{:02x} confirm-dest=0x{:02x} \
+             action=shown reason=kind-not-allowlisted",
+            dialog.name,
+            // SAFETY: as above.
+            unsafe { safe_read_u16(object + ds2_rva::FE_DIALOG_CANCEL_DEST_OFFSET) }
+                .map_or(-1, |raw| raw as i16),
+            // SAFETY: as above.
+            unsafe { safe_read_u16(object + ds2_rva::FE_DIALOG_CONFIRM_DEST_OFFSET) }
+                .map_or(-1, |raw| raw as i16),
+        ));
+        return false;
+    }
     // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
     // offset this crate validated before installing. The callee's own contract asks for exactly
     // that live object, and reads inside it go through the fault-tolerant readers.
@@ -412,14 +466,10 @@ unsafe fn suppress(this: *mut u8) -> bool {
     // then kind=70/caption=0x47 through the same vtable. Logging only the class would have made
     // two different notices look like one repeated event.
     log(format_args!(
-        "{LOG_PREFIX} suppressed screen={} kind={} cancel-dest=0x{cancel_dest:02x} \
+        "{LOG_PREFIX} suppressed screen={} kind={kind} cancel-dest=0x{cancel_dest:02x} \
          confirm-dest=0x{confirm_dest:02x} edge={edge} result={result} phase={closed_phase} \
          total={total}",
         dialog.name,
-        // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
-        // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
-        // moved or was freed answers None rather than faulting.
-        unsafe { safe_read_i32(object + ds2_rva::FE_DIALOG_KIND_OFFSET) }.unwrap_or(-1),
     ));
     true
 }
@@ -525,4 +575,52 @@ pub unsafe fn install() -> Outcome {
         DIALOGS.len()
     ));
     Outcome { installed: true }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn common_window() -> Kinds {
+        DIALOGS
+            .iter()
+            .find(|dialog| dialog.name == "common-window")
+            .expect("common-window is allowlisted")
+            .kinds
+    }
+
+    #[test]
+    fn a_common_window_is_suppressed_only_for_its_vouched_kinds() {
+        let kinds = common_window();
+        // The two boot notices, and the offline prompt the offline answer needs to reach.
+        assert!(kind_allowed(kinds, 6));
+        assert!(kind_allowed(kinds, 70));
+        assert!(kind_allowed(kinds, 62));
+    }
+
+    #[test]
+    fn the_load_and_save_failures_are_always_shown() {
+        let kinds = common_window();
+        assert!(!kind_allowed(
+            kinds,
+            ds2_rva::FE_COMMON_WINDOW_KIND_LOAD_CHARACTER_FAILED
+        ));
+        assert!(!kind_allowed(
+            kinds,
+            ds2_rva::FE_COMMON_WINDOW_KIND_SAVE_FAILED
+        ));
+    }
+
+    #[test]
+    fn an_unknown_or_unreadable_kind_is_shown() {
+        let kinds = common_window();
+        assert!(!kind_allowed(kinds, 90));
+        assert!(!kind_allowed(kinds, -1));
+    }
+
+    #[test]
+    fn a_single_message_class_is_suppressed_whatever_its_kind() {
+        assert!(kind_allowed(Kinds::Any, 42));
+        assert!(kind_allowed(Kinds::Any, -1));
+    }
 }

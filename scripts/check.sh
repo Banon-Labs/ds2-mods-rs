@@ -87,6 +87,12 @@ echo "== fresh-run logs =="
 python3 scripts/check-fresh-run-logs.py --selftest
 python3 scripts/check-fresh-run-logs.py
 
+echo "== ds2-sl2 section walk =="
+# `--slots` marks a slot `hollow` when the game's header walk would spin forever on it, and
+# `ds2-run.py` autoloads by that word. Pure python on built streams; needs no save.
+python3 scripts/ds2-sl2.py --selftest >/dev/null
+echo "  ds2-sl2.py: OK"
+
 echo "== rustfmt =="
 # NOT `cargo fmt --all`. `--all` is documented as "format all packages, AND ALSO THEIR LOCAL
 # PATH-BASED DEPENDENCIES", so the moment a crate here depended on `../dearxan` the gate started
@@ -278,6 +284,10 @@ else
   # The lexicon and the liveness-command list live in scripts/cupcake_game_alive.py; `opa test`
   # above only pins that a spoken signal halts.
   python3 scripts/test-game-alive-signal.py
+  # And the launch-deferral guard's deciding half: which sentences withhold a launch because the
+  # game is in use, which subagent prompts forbid one, what counts as a launch, and which session
+  # commits are game code left unrun. `opa test` above only pins that a spoken signal halts.
+  python3 scripts/test-launch-deferral-signal.py | grep -v '^  ok '
   # And the same half for the property-grant guard, whose whole decision is idiom recognition: a
   # closing sentence that stages the agent handing the user control over something already theirs.
   # The lexicon and the quoting carve-out live in scripts/cupcake_property_grant.py; `opa test`
@@ -294,6 +304,12 @@ else
   # launcher, because `git commit ... && git push` was one command and the commit did not exist yet
   # when the hook looked. `opa test` above cannot see that; this can.
   python3 scripts/cupcake_push_scope.py --selftest | tail -1
+  # Which checkout the push runs in: `cd <worktree> && git push` was measured in the main checkout
+  # on 2026-09-26 and refused although that worktree's build was the one staged and run.
+  python3 scripts/cupcake_push_target_repo.py --selftest | tail -1
+  # Whether a ref's crate changes are comments only, by lexing both sides; a lexer that drifts into
+  # reading a string literal as a comment would wave real code through.
+  python3 scripts/cupcake_comment_only.py --selftest | tail -1
   python3 scripts/test-runtime-evidence-signal.py
   # The fix-claim guard's deciding half. Its Rego suite pins what the policy does with a facts line;
   # this pins where the facts line comes from -- which sentences are claims, which artifacts count
@@ -351,6 +367,10 @@ echo "  ds2-player-kind.py: OK"
 # file this repository never had.
 python3 scripts/ds2-frida-watch.py --selftest >/dev/null
 echo "  ds2-frida-watch.py: OK"
+# The evidence reader the Rust-edit gate opens on. Its selftest pins the three recorders' refusals
+# (Frida, telemetry, build) and the verdict prefix the policy anchors on.
+python3 scripts/ds2-frida-evidence.py --selftest >/dev/null
+echo "  ds2-frida-evidence.py: OK"
 # The Arxan redirect census. Its selftest builds a small PE in both layouts, so it needs no game
 # image; it pins the exception-directory bound, the chained-record flag, and the diff's reasons.
 python3 scripts/ds2-arxan-redirects.py --selftest >/dev/null

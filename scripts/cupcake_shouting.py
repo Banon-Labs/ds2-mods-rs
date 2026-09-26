@@ -46,11 +46,10 @@ Residue, said out loud rather than left to be discovered.
   * `AND` and `NOT` name logic operations as well as volume, so "an AND and a compare" written
     without backticks is refused. Backticks are the fix and are already the habit here for an
     opcode. Measured once in 2,347 blocks of the agent's own chat prose.
-  * A hyphenated identifier in capitals inherits the word list through its parts, so a rule id
-    like `DS2-MODS-NO-SHOUTING-AT-TURN-END` would be refused in prose. None of the 47 such tokens
-    in the swept documentation is one; the three that carry a list word -- `STARTUP-ONLY`,
-    `SECOND-HAND`, `STAND-IN` -- are all the habit, and the first is one of the cases the user
-    named.
+  * A hyphenated identifier of two capital segments still inherits the word list through its
+    parts: `STARTUP-ONLY`, `SECOND-HAND` and `STAND-IN` are refused, and all three are the habit.
+    Three segments or more are a name and are exempt (`IDENTIFIER_PATTERN` below), which is what
+    lets a rule id like `DS2-MODS-NO-SHOUTING-AT-TURN-END` appear in prose.
   * A quoted span is exempt wholesale, so a shouted heading somebody quotes back survives. That is
     the right trade: punishing an agent for quoting the user verbatim would be worse.
   * A launch banner is not exempted. AGENTS.md requires the banner to sit immediately before the

@@ -345,6 +345,13 @@ def run(
         payload = message.get("payload", message)
         print(f"AGENT {payload}", flush=True)
 
+    def on_log(level, text):
+        seen["messages"] += 1
+        record = {"at": time.time(), "role": role, "endpoint": endpoint, "pid": pid,
+                  "message": {"type": "log", "level": level, "payload": text}}
+        log.write(json.dumps(record) + "\n")
+        print(text, flush=True)
+
     try:
         script = None
         stamp = None
@@ -356,6 +363,10 @@ def run(
             source = agent_prelude(role, endpoint, pid, config) + "\n" + agent_path.read_text(encoding="utf-8")
             script = session.create_script(source)
             script.on("message", on_message)
+            # The agent's console.log. Frida's default handler prints without flushing, and a
+            # backgrounded watcher's stdout is a file, so block-buffered: log lines sat in the
+            # buffer until something else flushed it, and an agent that only logs looked dead.
+            script.set_log_handler(on_log)
             script.load()
             stamp = agent_path.stat().st_mtime
             print(f"loaded {agent_path.name} ({len(source)} bytes)", flush=True)

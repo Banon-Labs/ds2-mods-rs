@@ -448,6 +448,57 @@ test_a_frida_verdict_still_opens_any_crate if {
 	count(guard.deny) == 0 with input as edit_event("crates/er-quickload/src/lib.rs", PROVEN)
 }
 
+# --- the third instrument: a failed build, scoped to the crate it blamed -------
+#
+# A DLL that does not link never runs, so a linker error is invisible to Frida and to telemetry.
+# The verdict is copied from `scripts/ds2-frida-evidence.py`'s format string, which its selftest
+# pins; the case is PR #199's host-tests failure.
+PROVEN_BUILD := "PROVEN build crate=ds2-invasion-path log=/tmp/sb-wine.log line='lld-link: error: undefined symbol: GetAsyncKeyState'"
+
+test_allow_the_crate_the_build_error_blamed if {
+	count(guard.deny) == 0 with input as edit_event(
+		"/home/banon/projects/ds2-mods-rs/.claude/worktrees/speffect-bind/crates/ds2-invasion-path/src/lib.rs",
+		PROVEN_BUILD,
+	)
+}
+
+test_deny_a_different_crate_on_the_same_build_error if {
+	denied(edit_event("crates/ds2-net-effects/src/lib.rs", PROVEN_BUILD))
+}
+
+test_deny_a_crate_whose_name_extends_the_build_licensed_one if {
+	denied(edit_event("crates/ds2-invasion-path-core/src/lib.rs", PROVEN_BUILD))
+}
+
+test_deny_a_build_verdict_with_no_crate_field if {
+	denied(edit_event("crates/ds2-invasion-path/src/lib.rs", "PROVEN build log=/tmp/x.log"))
+}
+
+test_deny_when_a_second_crate_field_appears_in_the_quoted_build_line if {
+	denied(edit_event(
+		"crates/ds2-net-effects/src/lib.rs",
+		"PROVEN build crate=ds2-invasion-path log=/x.log line='error: x crate=ds2-net-effects y'",
+	))
+}
+
+test_deny_the_bash_spelling_outside_the_build_licensed_crate if {
+	denied(bash_event("sed -i 's/a/b/' crates/ds2-net-effects/src/lib.rs", PROVEN_BUILD))
+}
+
+test_allow_the_bash_spelling_inside_the_build_licensed_crate if {
+	not denied(bash_event("sed -i 's/a/b/' crates/ds2-invasion-path/src/lib.rs", PROVEN_BUILD))
+}
+
+# The unscoped path opens on the Frida verdict's own `agent=` field, not on the bare word, so a
+# PROVEN kind this policy has no clause for opens nothing instead of the whole tree.
+test_deny_an_unknown_proven_kind if {
+	denied(edit_event("crates/ds2-invasion-path/src/lib.rs", "PROVEN vibes crate=ds2-invasion-path"))
+}
+
+test_deny_a_bare_proven if {
+	denied(edit_event("crates/ds2-invasion-path/src/lib.rs", "PROVEN"))
+}
+
 # --- the same edit, typed into the Bash tool (bd er-effects-rs-wuij) ----------
 #
 # The rule routed on the write TOOLS and denied on `tool_input.file_path`; a Bash call has

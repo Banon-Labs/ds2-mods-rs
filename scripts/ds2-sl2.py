@@ -149,6 +149,79 @@ def _classify(attrs):
     return "occupied"
 
 
+#: A slot's own data lives in two entries, not in the character list: USER_DATA(slot+1) and
+#: USER_DATA(slot+11). `FUN_1402e6230` loads load-content indices slot+8 and slot+0x12, and its
+#: type-2 path loads index 7, which is USER_DATA000 -- so index k is USER_DATA(k-7). Measured on a
+#: hung load (2026-09-26, ds2-mods-rs-t46i): slot 1's two streams were 111292 and
+#: 501928 bytes, the length words of USER_DATA002 and USER_DATA012.
+SLOT_DATA_ENTRY_OFFSETS = (1, 11)
+
+#: `FUN_1402e47f0`'s header walk: 0x20-byte headers, u32 type at +0, u32 version at +4, u32 size
+#: at +8, then a relative seek by size. It stops on type 0xD and bails out on a type missing from
+#: the fifteen-entry table at 0x1410da1f0.
+SECTION_HEADER = 0x20
+SECTION_END = 0xD
+SECTION_TYPES = frozenset(range(15))
+
+
+def section_walk(stream):
+    """What the game's header walk does with one slot entry's stream: `ends`, `bails` or `hangs`.
+
+    Emulates `FUN_1402e47f0` over `DLMemoryInputStream` exactly where it matters. A read copies
+    whatever is left and returns -1 AT the end without touching the header; a seek clamps to the
+    end. So a walk that reaches the end without having read a 0xD header keeps the last header it
+    read, seeks nowhere, fails the read again, and never leaves the loop. That is the hang: the
+    game thread spins there with no timeout. An all-zero entry gets there in size/0x20 steps,
+    because type 0 is a legal type and a size of 0 is a legal size.
+
+    `bails` is the walk's own error exit (a type outside the table); the game survives that one.
+    """
+    if not stream:
+        # The first header is then uninitialised stack. Nothing sane can be said except "unsafe".
+        return "hangs"
+    header = bytearray(SECTION_HEADER)
+    cursor = 0
+    while True:
+        if cursor >= len(stream):
+            # The read fails and the header is the one already acted on: the same step forever,
+            # unless that header was the end marker, which would have left the loop already.
+            return "hangs"
+        chunk = stream[cursor : cursor + SECTION_HEADER]
+        header[: len(chunk)] = chunk
+        cursor += len(chunk)
+        kind, _version, size = struct.unpack_from("<III", header, 0)
+        if kind == SECTION_END:
+            return "ends"
+        if kind not in SECTION_TYPES:
+            return "bails"
+        cursor = min(cursor + size, len(stream))
+
+
+def slot_hangs(b, table, slot, key_hex):
+    """Whether loading `slot` would spin the game thread forever in `FUN_1402e47f0`.
+
+    A missing entry counts as hanging: the game would stream a null buffer, whose first header is
+    uninitialised stack.
+    """
+    for delta in SLOT_DATA_ENTRY_OFFSETS:
+        index = slot + delta
+        if index >= len(table):
+            return True
+        _i, _name, off, size = table[index]
+        payload = decrypt(b[off + 32 : off + size], b[off + 16 : off + 32], key_hex)
+        if section_walk(entry_stream(payload)) == "hangs":
+            return True
+    return False
+
+
+def entry_stream(payload):
+    """The bytes the game streams from one decrypted entry: past the u32 length, that long."""
+    if len(payload) < 4:
+        return b""
+    length = struct.unpack_from("<I", payload, 0)[0]
+    return payload[4 : 4 + length]
+
+
 def _wide_name(record, offset):
     """Decode a UTF-16LE name, terminating on an ALIGNED pair of zero bytes.
 
@@ -166,7 +239,14 @@ def _wide_name(record, offset):
 
 
 def slot_records(b, key_hex):
-    """(index, occupied, stats tuple, name) for each of the ten character slots.
+    """(index, state, stats tuple, name) for each of the ten character slots.
+
+    `hollow` is a slot the character list calls `blank` or `occupied` whose own data entries the
+    game cannot load: its section walk runs off the end with no 0xD header, and the game thread
+    then spins in `FUN_1402e47f0` forever (see `section_walk`). It is NOT loadable, and
+    `ds2-run.py`'s autoload skips it because it only takes `occupied` and `blank`. Measured on
+    `~/Downloads/DS2 Saves/new/DS2SOFS0000.sl2`, whose list names "Swornsword Ole" in slot 1 while
+    USER_DATA002 and USER_DATA012 are all zeros; picking him hard-locked the game.
 
     Occupancy is "the record is not all zeros", which is what distinguishes a used slot from an
     unused one in every save examined. It is deliberately NOT a claim about what the game will
@@ -174,7 +254,8 @@ def slot_records(b, key_hex):
     a slot the game would refuse and says so in the log. This is a reading of the file, not a
     promise about the game.
     """
-    for _i, _name, off, size in entries(b):
+    table = list(entries(b))
+    for _i, _name, off, size in table:
         payload = decrypt(b[off + 32 : off + size], b[off + 16 : off + 32], key_hex)
         o = 4
         while o + 12 <= len(payload):
@@ -187,8 +268,10 @@ def slot_records(b, key_hex):
                     if len(r) < SLOT_STRIDE:
                         break
                     attrs = struct.unpack_from(f"<{SLOT_ATTRS_COUNT}h", r, SLOT_ATTRS_OFFSET)
-                    out.append((slot, _classify(attrs[:9]), attrs[:9],
-                                _wide_name(r, SLOT_NAME_OFFSET)))
+                    state = _classify(attrs[:9])
+                    if state != "empty" and slot_hangs(b, table, slot, key_hex):
+                        state = "hollow"
+                    out.append((slot, state, attrs[:9], _wide_name(r, SLOT_NAME_OFFSET)))
                 return out
             if ssize == 0:
                 break
@@ -211,9 +294,44 @@ def entries(b):
         yield i, b[name_off:end].decode("utf-16-le"), data_off, size
 
 
+def selftest():
+    """The walk's three outcomes, on streams built here rather than on anyone's save."""
+
+    def header(kind, size):
+        return struct.pack("<III", kind, 0, size).ljust(SECTION_HEADER, b"\0")
+
+    good = header(0, 4) + b"abcd" + header(5, 0) + header(SECTION_END, 0)
+    cases = [
+        # Slot 1 of the save that hard-locked: 111292 zero bytes. Type 0, size 0, to the end.
+        (bytes(111292), "hangs", "an all-zero entry"),
+        (b"", "hangs", "an entry the game would stream as a null buffer"),
+        (good, "ends", "a chain that reaches its 0xD header"),
+        # A size that jumps past the end clamps there, and the next read fails for good.
+        (header(0, 10_000) + header(SECTION_END, 0), "hangs", "a size past the end"),
+        (header(0x20, 0), "bails", "a type outside the table -- the walk's own error exit"),
+        # The terminator can arrive in a partial read, which copies what is left.
+        (header(0, 0)[:SECTION_HEADER] + struct.pack("<I", SECTION_END), "ends",
+         "a 0xD header in the last, short read"),
+    ]
+    failed = 0
+    for stream, want, what in cases:
+        got = section_walk(stream)
+        mark = "ok  " if got == want else "FAIL"
+        failed += got != want
+        print(f"  {mark} {what}: {got}")
+    payload = struct.pack("<I", len(good)) + good + b"\0\0\0\0"
+    if entry_stream(payload) != good:
+        print("  FAIL the stream starts past the u32 length and is that long")
+        failed += 1
+    print("ds2-sl2.py selftest:", "OK" if not failed else f"{failed} FAILED")
+    return 1 if failed else 0
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("save")
+    ap.add_argument("save", nargs="?")
+    ap.add_argument("--selftest", action="store_true",
+                    help="check the section-walk emulation against built streams (no save needed)")
     ap.add_argument("-x", "--extract", metavar="DIR", help="write decrypted payloads here")
     ap.add_argument("--key-from-image", metavar="BIN", help="re-derive the key from the game image")
     ap.add_argument("--batches", action="store_true",
@@ -226,6 +344,10 @@ def main():
     ap.add_argument("--key", metavar="HEX",
                     help="use this AES-128 key (32 hex chars) instead of either built-in")
     args = ap.parse_args()
+    if args.selftest:
+        return selftest()
+    if not args.save:
+        ap.error("a save file is required unless --selftest is given")
 
     if args.key and args.vanilla:
         ap.error("--key and --vanilla both choose a key; pass one")

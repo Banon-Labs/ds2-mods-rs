@@ -343,6 +343,24 @@ bash_signal_text(cmd, text) := {
 
 # --- the exact command this change exists to unblock ----------------------
 
+test_worktree_committed_script_is_allowed if {
+	cmd := "python3 /home/banon/projects/ds2-mods-rs-wt-jiy/scripts/ds2-run.py --continue-slot 0"
+	text := concat("\n", [repo_root_fixture, home_fixture, "/home/banon/projects/ds2-mods-rs-wt-jiy"])
+	count(bash_no_python_file_write.deny) == 0 with input as bash_signal_text(cmd, text)
+}
+
+test_path_beside_a_worktree_is_still_denied if {
+	cmd := "python3 /home/banon/projects/ds2-mods-rs-wt-jiy-evil/scripts/x.py"
+	text := concat("\n", [repo_root_fixture, home_fixture, "/home/banon/projects/ds2-mods-rs-wt-jiy"])
+	count(bash_no_python_file_write.deny) == 1 with input as bash_signal_text(cmd, text)
+}
+
+test_a_root_worktree_line_exempts_nothing if {
+	cmd := "python3 /tmp/scripts/x.py"
+	text := concat("\n", [repo_root_fixture, home_fixture, "/"])
+	count(bash_no_python_file_write.deny) == 1 with input as bash_signal_text(cmd, text)
+}
+
 test_absolute_committed_script_launch_is_allowed if {
 	cmd := "cd /home/banon/projects/ds2-mods-rs; python3 /home/banon/projects/ds2-mods-rs/scripts/ds2-run.py --rows load-character-from-file,save-game-to-file"
 	count(bash_no_python_file_write.deny) == 0 with input as bash_in_repo(cmd)
