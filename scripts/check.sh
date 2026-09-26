@@ -350,5 +350,9 @@ echo "  ds2-frida-watch.py: OK"
 # image; it pins the exception-directory bound, the chained-record flag, and the diff's reasons.
 python3 scripts/ds2-arxan-redirects.py --selftest >/dev/null
 echo "  ds2-arxan-redirects.py: OK"
+# The effect bundle reader. Its BND4 entry layout comes from the header's format flags, and the
+# two shipped layouts (36-byte with compression sizes, 28-byte without) are both built here.
+python3 scripts/ds2-ffx.py --selftest >/dev/null
+echo "  ds2-ffx.py: OK"
 
 echo "== OK =="
