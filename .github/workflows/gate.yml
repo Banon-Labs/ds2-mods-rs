@@ -54,6 +54,7 @@ env:
   # Local is 3.14. The runner's system python3 is older, and a script that uses a newer stdlib
   # feature would then fail here and pass locally for no reason worth debugging.
   PYTHON_VERSION: "3.14"
+  BD_VERSION: 1.0.4
 
 jobs:
   gate:
@@ -139,6 +140,21 @@ jobs:
 
       - name: Check cupcake
         run: cupcake --version | grep -qx 'cupcake 0.5.2'
+
+      # scripts/check-allow-debt.py runs `~/.local/bin/bd show <id>` for every `# DEBT: <id>` above an
+      # `#[allow]`, so the gate needs bd AND this repo's issue database, or an allow naming a closed
+      # or invented issue would pass. The database is not in git; `bd bootstrap` clones it from the
+      # `sync.remote` in .beads/config.yaml, a public DoltHub repository, so this needs no secret.
+      # bd is the developer tree's version (`bd version` -> 1.0.4).
+      - name: Install bd and clone the issue database
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 \
+            "https://github.com/gastownhall/beads/releases/download/v${BD_VERSION}/beads_${BD_VERSION}_linux_amd64.tar.gz" \
+            | tar -xz -C "$HOME/.local/bin" bd
+          "$HOME/.local/bin/bd" version | grep -q "bd version ${BD_VERSION} "
+          "$HOME/.local/bin/bd" bootstrap --yes
+          "$HOME/.local/bin/bd" count
 
       - uses: Swatinem/rust-cache@v2
         with:
