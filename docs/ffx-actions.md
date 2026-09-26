@@ -4,7 +4,8 @@ Static RE of `DarkSoulsII.exe` (flat image `darksoulsii-deobf.bin`, base `0x1400
 No game run was involved.
 
 Every claim is tagged **[read]** (read out of the binary: a table, a vtable, a source path, a
-constant) or **[inf]** (inferred: from names, data values, or shape of the code, not proven).
+constant), **[data]** (checked against the shipped `.ffx` files with `scripts/ds2-ffx.py`) or
+**[inf]** (inferred: from names, data values, or shape of the code, not proven).
 
 Tools used: Ghidra MCP daemon (read-only), `scripts/ghidra/query.sh` with the new
 `scripts/ghidra/rt/Ds2DecompAt.java` (creates a function in memory at a VA analysis never defined,
@@ -79,7 +80,7 @@ to get the target `Param*` and forwards the call to it **[read]**. `0x140a11100`
 | scope | resolves to | reading |
 | --- | --- | --- |
 | 1 | `(*[instance+0x50])[index]`: the argument list handed in by the spawner's Param37 | **verified in binary**: `0x140a10f70` stores the 3rd argument of `0x140a08fb0` at `+0x50`, and action 79 (`0x140f4f840`) passes Param37's vtable `+0x58` value there |
-| 2 | `[[instance+0x98]+0x78][index]`: a list owned by the effect id, the same for every instance | **verified in binary**: `0x140a10f70` stores at `+0x98` the object `0x140a08fb0` gets from the cached `FXCreatableEffect`'s vtable `+0x18`; what fills its `+0x78` was not traced |
+| 2 | `[[instance+0x98]+0x78][index]`: the effect file's first root ParamList, the same for every instance of that effect id | **[read]**, see below |
 | 3 | a 16-byte local slot: inline at `instance+0xa0+16*index` while `[instance+0xc0] <= 2`, else in the heap array at `[instance+0xa0]` | **[read]**; the same storage `0x140a10df0` hands to action 118, so actions 21/54/109/111/112/115/118 write the locals these refs read **[inf]** |
 | other | null | **[read]** |
 
@@ -87,6 +88,24 @@ So a child template like 2101 is parameterised by scope-1 references into the ar
 Param37 passes; the arg index is the `i16` at `+0xa`. The data agrees: every reference param in
 f0002101 is `raw 1 N` (scope 1), for example the appearance action at arg 4, and both of its root
 ParamLists are empty. (An earlier version of this table had scopes 1 and 2 the other way round.)
+
+What scope 2 reads **[read]**: `0x140a08fb0` looks the effect id up with `0x140a0a210` (a binary
+search over `[manager+0x1c0]`, keyed on the dword at `+0x8`), calls the hit's vtable `+0x18`, and
+that result goes to `instance+0x98`. The objects in that list are `FFX::FXObjectType` (vtable
+`0x14118c8e8`, ctor `0x140a0faa0`, 0xb0-byte object), whose vtable `+0x18` is `0x140a101b0` =
+`return this`; an `FXObjectTypeCollection` (vtable `0x14127f758`) answers the same slot with
+`0x140f87560`, which picks one of its members. The `FXObjectType` is filled by the
+`FXSerializableEffect` loader `0x140f84110` (reached by the thunk `0x140f86880`, that class's vtable
+`+0x18`): it reads the effect id into `+0x8`, then binds three serializers, `0x140f841ff`
+`lea r8,[r14+0x78]` -> `0x140f89cb0`, `0x140f8420f` `lea r8,[r14+0x50]` -> `0x140f89cb0`,
+`0x140f8421f` `lea r8,[r14+0xa0]` -> `0x140f88b30`, and runs them in that order. So `+0x78` is the
+first root ParamList of the `.ffx` (833: the 15-entry list that matches the sfxparam entry), `+0x50`
+the second, `+0xa0` the StateMap.
+
+Data **[data]**: across `sfx9999.ffxbnd.dcx` no reference param uses scope 2; the scopes in use are
+1 (spawner args), 3 (locals) and 5. Scope 5 falls in the "other -> null" row, so the type-44 and
+type-59 refs that carry `raw 5 0` (by far the most common payload for both types) resolve to
+nothing. The cluster emitters' p0 is a type-44 slot that their compile functions never read.
 
 Other instance fields `0x140a10f70` writes **verified in binary**: `+0x80` the parent instance (the
 spawning instance for action 79), `+0xc8` the object `0x140a0b4b0` built (EmittersStopped reads its
@@ -114,24 +133,24 @@ lists the id. Handler = `table[id]` at `0x1415f9b70` unless noted.
 | 20 | 5 | `FXParticleAppearance_Billboard` (older 24-param layout) | reg `0x140fe186a`, compile `0x141005260` **[read]** |
 | 21 | 9 | write a referenced param (p0 via `+0x58`, p1/p2 ints) | `0x140f4ce90` **[read]**; purpose **[inf]** |
 | 27 | 140 | `FXClusterAppearance_PointSprite` | reg `0x140fe43f8`, compile `0x14100b800` **[read]** |
-| 28 | 1102 | `FXClusterEmitter_Cone` | reg `0x140f7b5b3`, compile `0x140f7b7b0` **[read]** |
-| 29 | 183 | `FXClusterEmitter_Square` | reg `0x140f7c353` **[read]** |
-| 30 | 303 | `FXClusterEmitter_Circle` | reg `0x140f7d093` **[read]** |
-| 31 | 311 | `FXClusterEmitter_Sphere` | reg `0x140f7dfd3` **[read]** |
-| 32 | 111 | `FXClusterEmitter_Box` | reg `0x140f7f073` **[read]** |
-| 33 | 19 | `FXClusterEmitter_EllipticCone` | reg `0x140f81303` **[read]** |
+| 28 | 1102 | `FXClusterEmitter_Cone` (vtable `0x14127e938`) | reg `0x140f7b5b3`, compile `0x140f7b7b0`, emit `0x140f7b020` **[read]**; params section 4.1 |
+| 29 | 183 | `FXClusterEmitter_Square` (vtable `0x14127ea48`) | reg `0x140f7c353`, compile `0x140f7c3d0`, emit `0x140f7baf0` **[read]**; section 4.1 |
+| 30 | 303 | `FXClusterEmitter_Circle` (vtable `0x14127ead8`) | reg `0x140f7d093`, compile `0x140f7d110`, emit `0x140f7c8d0` **[read]**; section 4.1 |
+| 31 | 311 | `FXClusterEmitter_Sphere` (vtable `0x14127eb68`) | reg `0x140f7dfd3`, compile `0x140f7e050`, emit `0x140f7d530` **[read]**; section 4.1 |
+| 32 | 111 | `FXClusterEmitter_Box` (vtable `0x14127ed28`) | reg `0x140f7f073`, compile `0x140f7f0f0`, emit `0x140f7e440` **[read]**; section 4.1 |
+| 33 | 19 | `FXClusterEmitter_EllipticCone` (vtable `0x14127ef58`) | reg `0x140f81303`, compile `0x140f81380`, emit `0x140f80880` **[read]**; section 4.1 |
 | 34 | 56 | `FXMovementRotation` | `0x140f4e430` -> ctor `0x140f7a900` **[read]** |
 | 35 | 1752 | set local transform: translate + rotate (degrees) | `0x140f4e5f0` **[read]** |
 | 36 | 66 | same as 35 plus random jitter on each component | `0x140f4e8d0` **[read]** |
 | 40 | 129 | `FXParticleAppearance_Tracer` | reg `0x140fe20c8`, compile `0x141008c80` **[read]** |
 | 41 | 2 | end instance if a condition param holds | `0x140f4ee70` **[read]** |
 | 43 | 38 | `FXParticleAppearance_Distortion` | reg `0x140fe2f88`, compile `0x14100a510` **[read]** |
-| 45 | 1125 | `FXClusterEmitter_FoursidedPyramid` | reg `0x140f81f93`, compile `0x140f82010` **[read]** |
+| 45 | 1125 | `FXClusterEmitter_FoursidedPyramid` (vtable `0x14127f000`) | reg `0x140f81f93`, compile `0x140f82010`, emit `0x140f81740` **[read]**; section 4.1 |
 | 46 | 2 | adapter call vtbl+0xb0 with 2 ints | `0x140f4eee0` **[read]** |
 | 51 | 17 | `FXElement` state set (`0x140a07180(elem, p0)`) | `0x140f4f0c0` **[read]** |
 | 52, 98 | 1, 4 | conditional action / conditional child spawn (`0x140f528d0`) | `0x140f4f0f0`, `0x140f50000` **[read]** |
 | 54 | 2 | param-ref arithmetic (types 60/44/71/46) | `0x140f4f190` **[unknown detail]** |
-| 55 | 1386 | `FXClusterMovement_Acceleration` | reg `0x140f82693`, compile `0x140f82770` **[read]** |
+| 55 | 1386 | `FXClusterMovement_Acceleration` (vtable `0x14127f0f8`) | reg `0x140f82693`, compile `0x140f82770`, update `0x140f82520` **[read]**; params section 4.2 |
 | 56 / 114 | 4 / 0 | conditional dispatch of an action id | `0x140f4f3e0` **[read]** |
 | 58 | 6 | pick one of 8 child effects at random and spawn it | stub `mov r9d,8; jmp 0x140f51f40`; body draws with `0x140f56470` and spawns via `0x140a08fb0` **[read]**; that p0 holds per-slot weights, as in 7, **[inf]** |
 | 59 | 836 | `FXParticleAppearance_Billboard` (41-param layout) | reg `0x140fe189d`, compile `0x141004620` **[read]** |
@@ -145,19 +164,19 @@ lists the id. Handler = `table[id]` at `0x1415f9b70` unless noted.
 | 80 | 4 | clamp instance time `+0xec` against `+0xf0` when flag 0x20 | `0x140f4f920` **[read]**; meaning **[unknown]** |
 | 82 | 24 | `FXClusterAppearance_Line` | reg `0x140fe5da8`, compile `0x141011f70` **[read]** |
 | 83 | 17 | acceleration movement, same body as 106 but without the element-state reset and without reading p8 | stub `xor r9d,r9d; jmp 0x140f52150`; that body ends in `0x140f52490` (the class chooser of id 1) **[read]** |
-| 84 | 382 | `FXClusterMovement_Yurayura` | reg `0x140f82d63` **[read]** |
+| 84 | 382 | `FXClusterMovement_Yurayura` (vtable `0x14127f1b8`) | reg `0x140f82d63`, compile `0x140f82e70`, update `0x140f82b70` **[read]**; section 4.2 |
 | 85 | 0 | spawn up to 8 child effects (same as 14) | stub -> `0x140f51e90`, default count 7 **[read]** |
 | 87 | 132 | spawn up to 16 child effects | `0x140f4fe40` -> `0x140f51e90`, default count 15 **[read]** |
 | 92 / 95 | 0 / 0 | spawn up to 32 / 64 child effects | stubs -> `0x140f51e90`, default count 31 / 63 **[read]** |
 | 93 / 94 / 96 | 0 | pick one of 32 / 16 / 64 child effects at random (same body as 58) | stubs `mov r9d,0x20/0x10/0x40; jmp 0x140f51f40` **[read]** |
 | 99 | 3 | end instance on condition | `0x140f50180` **[read]** |
-| 105 | 1031 | `FXClusterMovement_PartialFollow` | reg `0x140f838b3`, compile `0x140f83ad0` **[read]** |
+| 105 | 1031 | `FXClusterMovement_PartialFollow` (vtable `0x14127f278`) | reg `0x140f838b3`, compile `0x140f83ad0`, update `0x140f83460` **[read]**; section 4.2 |
 | 106 | 91 | acceleration movement (same `0x140f52490` path as 1): resets the element state to 0, then runs the body shared with 83 with flag 1 (reads p8) | `0x140f50540` -> `0x140a07180(elem,0,0)`, `jmp 0x140f52150` with `r9b = 1` **[read]** |
 | 107 | 0 | `FXParticleAppearance_RadialBlur` | reg `0x140fe3d38`, compile `0x14100b150` **[read]** |
 | 108 | 0 | `FXClusterAppearance_Model` | reg `0x140c0f498`, compile `0x140f76db0` **[read]** |
 | 109, 111, 112, 115 | 6,2,5,1 | param-ref writes (types 44/46/87/71) | `0x140f50590/50630/50890/502c0` **[unknown detail]** |
 | 113 | 195 | `FXMovementCombined` (acceleration + `FXMovementRotation`) | `0x140f508e0` sets `FXMovementCombined::vftable`, calls `0x140f52490` and `0x140f7a900` **[read]** |
-| 117 | 0 | `FXClusterEmitter_EqualDistance` | reg `0x140f80223` **[read]** |
+| 117 | 0 | `FXClusterEmitter_EqualDistance` (vtable `0x14127eec0`) | reg `0x140f80223`, compile `0x140f80300`, emit `0x140f7f6a0` **[read]**; section 4.1 |
 | 118 | 2 | write 3 floats into instance slots `p0, p0+2, p0+4` (`0x140a10df0`) | `0x140f51b10` **[read]** |
 | 11000 / 11001 | 16 / 600 | `SfxFxDrawEntityHostSpotLight` / `SfxFxDrawEntityHostPointLight` | `0x140bef520` -> ctor `0x140c0be90` (vtable `0x1411edbe8`) / `0x140bef460` -> ctor `0x140c0b6e0` (vtable `0x1411edb88`) **[read]**; params in section 7.3 |
 | 15000 | 482 | `SfxFxClusterAppearance_Billboard` | reg `0x140bff87a`, create `0x140bfefb0`, compile `0x140c01220` (`AppFFX\Cluster\SfxFxClusterAppearance_Billboard.cpp`) **[read]** |
@@ -244,30 +263,130 @@ position. So `+0x40` / `+0x50` are width / height and `+0x70` is roll speed in r
 slots are the destructor, a pure-call, `return 0` and `ret`: the textured draw of the block is
 not in this class, and the remaining field names stay **inferred**.
 
-### 28 FXClusterEmitter_Cone **[read]** (compile `0x140f7b7b0`)
-Signature `[44,11,11,82,82,82,1,1,82,19]`. p0 (type 44 arg ref) is not read by the compile.
-Cone-specific block: p1, p2 (curves) -> +0x28, +0x38; p3 (type 82 = curve x float) -> +0x48; p6
-int -> +0x58. Common emitter outputs (written to the caller's struct, i.e. shared FXClusterEmitter
-fields): p4, p5, p8 sequences, p9 colour sequence (only if count > 9), p7 int.
+Resource bind **[read]**: the registration at `0x140fe1879` passes three functions with id `0x3b`:
+`0x140fe18c0` (calls the compile `0x141004620`), `0x140fe18b0` -> `0x140fe13f0` (create: allocates
+`FX4CG::FXCGParticleAppearance_Billboard`, vtable `0x141290940`, whose slot `+0x8` is the same
+bounds update `0x141004480`) and `0x140fe1960`, which binds the block to graphics resources through
+the `FXCGGraphicsResourceManager` interface (vtable `0x141197a68`):
 
-Emit read **verified in binary** (`FXClusterEmitter_Cone` vtable `0x14127e938`, slot `+0x10` =
-`0x140f7b020`; the block is `[this+0x8]`):
+- `+0x30` (p0) and `+0x34` (p12) each go to manager vtable `+0x18` (a texture lookup by id) and
+  land in the draw record's first two slots. So p0 is the texture and p12 a second texture.
+- With no second texture the shader variant asked of vtable `+0x20` is 2 (4 when the block's dword
+  `+0x124` is non-zero), with one it is 3 (5). Which param feeds `+0x124` was not traced.
+- `+0x3c` (p7) goes to vtable `+0x40` = `0x140a3bd10` -> `0x140f56410`, a switch on 0..5:
+  0 -> 2 (the caller's default), 1 -> 0, 2 -> 1, 3 -> 4, 4 -> 2, 5 -> 3, anything else -> 0. The
+  result is stored in the draw record (`+0x18`); vtable `+0x30` (`0x140a3bc70`) is called with the
+  same value and returns vtable `+0x38(1)` when that mapping is non-zero, else `+0x38(0)`. That p7
+  is the blend mode is **[inf]**. Shipped action-59 p7 values are 0, 4 and 2 **[data]**; p12 is 0 in all of them, so no
+  shipped Billboard binds a second texture.
 
-- `+0x28` (p1) is evaluated once per call and converted by `/ 90.0 * pi/2` (`0x1410c9f20`,
-  `0x1410ac6a0`): an **angle in degrees**. That it is the cone's half-angle is **inferred**.
-- `+0x38` (p2) is evaluated once per call; its sign picks between `1 + v` and `1 - v` and flips the
-  sign of the angle term. Meaning **unknown**.
-- `+0x58` (p6) is the **emission type**, 0..3 (`0x140f7b237`); anything else panics with
-  "invalid emission type." from `FXEmitterUtility.inl`. 0 uses the emitter matrix as is, 1 and 2
-  multiply it by the constant matrices at `0x141894bd0` / `0x141894c10`, 3 uses a derived matrix
-  (`0x14012ec30`).
-- `+0x48` (p3) is evaluated once **per particle** (`0x140f7b415`) and handed to the per-particle
-  writer `0x140f7b5f0` with two random numbers; speed or distance is **inferred**, not read.
+### 4.1 Cluster emitters (28-33, 45, 117) **[read]**
 
-Other emitters and the three movement classes were not read at this level (the acceleration
-update `0x140f82520` hands everything to `0x140f54ff0`, not decoded). Emitters 29-33/45/117 follow the same compile shape; their per-class
-indices are in `Ds2DecompAt` output for `0x140f7c3d0 0x140f7d110 0x140f7e050 0x140f7f0f0 0x140f80300
-0x140f81380 0x140f82010`.
+Every emitter class has the same vtable shape: slot `+0x10` is the emit function
+`(this, state, ctx, count)` and slot `+0x18` the shared `0x140f7b590`. The compiled
+block is `[this+0x8]`; `state` is the cluster's particle state, whose arrays at `+0xc8/+0xd0/+0xd8`
+are position x/y/z, `+0xe0/+0xe8/+0xf0` velocity x/y/z and `+0xc0` the emitter time at emission,
+indexed from `[state+0x20]` **[read]**: the movement integrator `0x140f54ff0` adds velocity x dt to
+position and subtracts `+0xc0` from the current time to get particle age. Curves are evaluated
+through the compiled-curve table `0x14127d290` at the emitter's time `[state+0x1c]` unless marked
+per particle.
+
+Conventions shared by all eight **[read]**:
+
+- **Spread angle**, in degrees: converted with `/ 90.0 * pi/2` (`0x1410c9f20`, `0x1410ac6a0`).
+  It is the largest tilt of a particle's velocity away from the emission axis.
+- **Direction bias** `s`: tilt = `A * r^(1+s)` when `s <= 0`, `A - A * r^(1-s)` when `s > 0`,
+  with `A` the spread angle and `r` uniform in 0..1. So 0 spreads the tilt uniformly, positive
+  values pull directions toward the axis, negative toward the rim (a consequence of the formula).
+  The spin about the axis is uniform in -pi..pi.
+- **Speed**: evaluated per particle, then `0x140f7b5f0` rotates `(0, 0, speed)` by the tilt
+  (`0x140007b20`) and spin (`0x1403c2580`), applies the emission matrix and writes the third
+  matrix row x speed into the velocity arrays. FoursidedPyramid builds its own direction and
+  scales the normalised vector by the speed instead.
+- **Emission type** 0..3: 0 uses the emitter matrix as is, 1 and 2 multiply it by the matrices at
+  `0x141894bd0` / `0x141894c10` (zero in the image, filled at runtime), 3 uses the derived matrix
+  from `0x14012ec30`; anything else panics "invalid emission type." (`FXEmitterUtility.inl`).
+- **Common tail**: each compile also writes five values into the caller's struct (slots 0..2 type-82
+  curves x random, slot 3 a colour curve that defaults to `0x140f5e820` when the list is short,
+  slot 4 an int). The consumer of these slots was not traced; which params they are is listed
+  per class below.
+
+p0 of every emitter is a type-44 reference that no compile function reads (section 2.1).
+
+| id / class | block field <- param (meaning) | common tail (slots 0..4) |
+| --- | --- | --- |
+| 28 Cone | `+0x28` p1 spread angle; `+0x38` p2 direction bias; `+0x48` p3 speed (per particle, `0x140f7b415`); `+0x58` p6 emission type | p4, p5, p8, p9, int p7 |
+| 29 Square | `+0x28` p1 width and `+0x38` p12 depth (each x0.5 = half-extent along the matrix's first and second rows; p12 defaults to p1 when the second count is 12 or less); `+0x48` p2 spread angle; `+0x58` p3 direction bias; `+0x68` p10 position concentration `c` (see below); `+0x78` p4 speed; `+0x88` p7 emission type | p5, p6, p9, p11, int p8 |
+| 30 Circle | `+0x28` p1 radius; `+0x38` p2 spread angle; `+0x48` p3 direction bias; `+0x58` p4 speed; `+0x68` p9 radial bias, clamped to -1..1; `+0x6c` p11 area flag (default 1); `+0x70` p7 emission type | p5, p6, p10, p12, int p8 |
+| 31 Sphere | `+0x28` p1 radius; `+0x38` p2 spread angle; `+0x48` p3 direction bias; `+0x58` p4 speed; `+0x68` p7 volume flag; `+0x6c` p10 orientation flag (default 1); no emission type | p5, p6, p9, p11, int p8 |
+| 32 Box | `+0x28/+0x38/+0x48` p1/p2/p3 size per axis (x0.5); `+0x58` p4 spread angle; `+0x68` p5 direction bias; `+0x78` p6 speed; `+0x88` p9 volume flag; `+0x8c` p13 emit type 0..6 (default 0); p11 not read | p7, p8, p12, p14, int p10 |
+| 33 EllipticCone | `+0x28` p1 and `+0x38` p2 spread angles (degrees); `+0x48` p3 direction bias; `+0x58` p4 speed; `+0x68` p8 emission type (`0x140f80b3b`) | p5, p6, p7, p10, int p9 |
+| 45 FoursidedPyramid | `+0x28` p1 and `+0x38` p2 spread angles (degrees), one per axis (`0x140007b20`, `0x140004c00`); `+0x48` p3 direction bias; `+0x58` p4 speed; `+0x68` p8 emission type (`0x140f81a09`) | p5, p6, p7, p10, int p9 |
+| 117 EqualDistance | `+0x58` p4 spread angle; `+0x68` p5 direction bias; `+0x78` p6 speed; `+0x8c` p12 emit type 0..6 as Box (default 0); `+0x90` p13 spacing; p1-p3 (`+0x28/+0x38/+0x48`) and p9 (`+0x88`) are compiled but the emit never reads them | p7, p8, p11, p14, int p10 |
+
+Per-class position rules **[read]**:
+
+- Square: each coordinate is `U(-half, half) * (1 - r^(1 - max(c, 0)))`, with `U` and `r` separate
+  random draws, so `c = 1` collapses everything to the centre.
+- Circle: radial fraction `q` from p9 by the same bias rule as direction (positive toward the
+  centre, negative toward the rim); when p11 is 0, `q = sqrt(q)` (`0x1410ac694` = 0.5 as the
+  exponent), which is what makes a uniform fill of the disc area; position =
+  `radius * q * (cos a, sin a)` on the matrix's first two rows, `a` uniform in -pi..pi.
+- Sphere: a random direction scaled by the radius, times `cbrt(r)` (exponent 0.33333334) when p7 is
+  non-zero and times 1 when it is 0 (the shell). p10 = 0 builds the direction from a full random
+  rotation (`0x140007ac0` with two random angles), non-zero from a spin about one axis
+  (`0x1403c2580`).
+- Box: a face is picked with `rand % 6`; the two in-face coordinates are uniform over the face,
+  the third is the half-size times 1 (p9 = 0, on the face) or times a uniform 0..1 (p9 non-zero,
+  inside). Emit type 0 aims each particle along its face's axis; 1..3 use emission type 1..3 with
+  direction mode 6; 4, 5, 6 use emission type 0 with direction modes 4, 5, 6 (fixed axis swaps);
+  anything else panics "invalid emit type." (`FXClusterEmitter_Box.cpp`).
+- EqualDistance: particle count = `floor(distance moved since the last emit / p13)`, capped by the
+  free slots (`[state+0x10] - [state+0x20]`); particles are placed at equal steps along that segment
+  from the saved last position (`this+0x10`), which then advances. It emits along the path the
+  emitter travelled, not per frame.
+- EllipticCone and FoursidedPyramid write the same per-call value into every particle's position,
+  the emitter origin **[inf]**. Cone's position write was not checked.
+
+Data **[data]** (`sfx9999.ffxbnd.dcx`): the signatures match these indices, for example Cone
+`[44,11,11,82,82,82,1,1,82,19]`, Circle `[44,9,11,11,82,82,82,1,1,7,82,1,19]`, Box
+`[44,11,11,11,11,11,82,82,82,1,1,1,82,1,19]`. The speed slot is type 82 everywhere except a few
+FoursidedPyramid uses that carry a type-13 curve there; common-tail slot 3 is type 19 or 20. Emission types in use: Cone 0/1, Circle 0/1, Square, Pyramid and EllipticCone 0;
+Box emit type 0, 2 or 5. Sphere p7 and p10, Box p9 and Circle p11 are 0 in every shipped use (so
+shipped spheres and boxes emit on the surface, and circles fill the area). Circle p9 is 0, -1 or
+-0.5. No shipped effect uses 117.
+
+### 4.2 Cluster movements (55, 84, 105) **[read]**
+
+All three hand the particle arrays to the same integrator `0x140f54ff0` (the update passes
+position `+0xc8/+0xd0/+0xd8`, velocity `+0xe0/+0xe8/+0xf0`, birth times `+0xc0`, the current and
+previous cluster times `[state+0x1c]` / `[state+0x18]`, and the block fields). With `dt` = current -
+previous:
+
+- `+0x28` (p0) evaluated at the current time, times the unit vector at `0x1418949b0`, which the
+  static initialiser `0x1410a06d0` sets to `(0, -1, 0, 0)` (from `0x1410f5300`): gravity along
+  world -Y, turned into the cluster's frame with the inverse of its matrix (`state+0x80`) and added
+  to velocity x dt.
+- `+0x5c` scales the vector returned by the force manager (global `0x1418949a0`, set by
+  `0x140f563b0`) vtable `+0x28` for the id at `[[[state]+0xc8]+0x38]`, added the same way. Wind
+  **[inf]**.
+- `+0x58` is a force id handed to the same manager's vtable `+0x18`; a non-zero id adds one more
+  term (not decoded).
+- `+0x38` is evaluated per particle at the particle's age, `+0x48` per particle with the birth time
+  as input; `k = v38 * v48 * dt` is added along each particle's own direction of travel, and a
+  particle whose speed would go negative (`|v|^2 + k|k| <= 0`) gets velocity 0. So the product is an
+  acceleration along the path (negative = drag that stops, never reverses).
+
+| id / class | compile: block field <- param | extra behaviour |
+| --- | --- | --- |
+| 55 Acceleration (`0x140f82770`) | `+0x28` p0 gravity; `+0x38` p1 path-acceleration curve; `+0x48` p2 its per-particle factor; `+0x58` p3 force id, `max(p3, 0)`; `+0x5c` p4 wind scale | none: `0x140f82520` calls the integrator directly |
+| 84 Yurayura (`0x140f82e70`) | p0, p1, p2 as 55; `+0x5c` p3 wind scale; `+0x58` = 0 (no force id); `+0x60` p4 sway angle curve; `+0x70` p5 sway interval | `0x140f82b70`: when the counter `this+0x20` exceeds p5, p4 is evaluated and `0x140f55c30` rotates every velocity by two random angles uniform in -p4..+p4 degrees (constants -pi/180 `0x1410bf2f8`, 2 `0x1410acb14`, pi/180 `0x1410ac9f0`), speed unchanged; the counter is reset to 0. What increments it was not traced |
+| 105 PartialFollow (`0x140f83ad0`) | p0-p5 as 84; `+0x78` p6 follow curve; `+0x88` p7 follow mode (0 unless the second count is over 7) | `0x140f83460` first computes the emitter's motion since the last update (saved at `this+0x30..`): p7 = 0 takes the whole transform change, non-zero only the translation (`0x140132260`). `0x140f557e0` then evaluates p6 at each particle's age, `f`, and sets position to `(1-f) * pos + f * moved(pos)` and velocity likewise with the rotation part: p6 is the fraction of the emitter's motion a particle follows. Then the sway of 84, then the integrator |
+
+Data **[data]**: 55 is `[11,11,81,1,7]` in most uses (p2 is a type-81 random range, so the
+per-particle factor is a random pick), p3 is 0 in every use and p4 mostly 0 (else 0.05, 0.1,
+0.25). 84 is `[11,11,81,7,11,1]`, p5 is 5, 10, 15 or 30 in most uses. 105 is
+`[11,12,81,7,11,1,11,1]`; p7 is 0 or 1, p5 mostly 0.
 
 ### 15000 SfxFxClusterAppearance_Billboard **[read, partial]** (compile `0x140c01220`, tag 15000)
 Reads p1-p37 with version gates (p30..p36 only if count > 30..36, defaults -1.0f); also reads a
@@ -317,14 +436,23 @@ converts to **milliseconds** (x1000, +0.5). File values are multiples of 1/30 s 
   `docs/DS2-SFX-REGISTRY.md`. The preprocessor also special-cases `id - 2000 < 200`
   (`0x140f52b70`) and builds descriptors for 2020/2023/2024/2031/2032/2034/2101/2102 (`0x140f52d60`,
   reading arg slots 0,1,2,5,6,7,8,9,11,12,13,15); arg0 tick + arg1 bool feed descriptor type 6
-  **[read]**. The templates read those args through scope-2 reference params (section 2.1).
-- The textured draw that consumes each compiled appearance block was not found; for action 59 only
-  width, height and roll speed are named from a consumer (section 4). The rest are **[inf]** or
-  blank.
-- Reference params: the writer of `instance+0x98` is `0x140a10f70` (section 2.1); what fills
-  `[+0x98]+0x78`, the scope-2 list, was not traced.
-- Emitter/movement per-class field names: Cone p1/p6 named from its emit code (section 4); the other
-  emitters and all movement classes are index -> field only.
+  **[read]**. The templates read those args through scope-1 reference params (section 2.1).
+- The per-particle draw that consumes each compiled appearance block was not found. For action 59
+  width, height, roll speed (bounds update), the two texture ids and the p7 render-state mode
+  (resource bind `0x140fe1960`) are named from consumers (section 4); the rest are **[inf]** or
+  blank, and the other appearance classes are index -> field only.
+- Cluster emitters: the five common-tail slots every emitter compile writes into its caller's
+  struct have no traced consumer, so their meaning is open (types say: three curve-x-random values,
+  a colour, an int). EllipticCone's way of combining its two angles into one direction
+  (`0x140f80880` after `0x140f80b3b`) was not decoded.
+- Cluster movements: the force-manager terms (`+0x58` id via vtable `+0x18`, `+0x5c` via vtable
+  `+0x28`) are named from the call shape only, and the counter that paces the Yurayura sway is
+  incremented somewhere not traced.
+- Shape spawners 8, 9, 10, 18, 26, the param-ref writers 54, 109, 111, 112, 115 and actions 46 / 80
+  still have handler addresses without positional param meanings.
+- `sfxcommon.ffxbnd` was not scanned: its BND4 entries are 28 bytes wide and `scripts/ds2-ffx.py`
+  asserts 36, so its action ids are unchecked. `sfx9999_Append.ffxbnd.dcx` uses no id outside
+  the table in section 3 **[data]**.
 - Field-level meaning of the weight list in 7 and 58 (`vt+0x58(i)` per slot) is read as "weight"
   from how the sum and the draw use it; the file encoding of that list was not checked against
   shipped data.
