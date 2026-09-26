@@ -178,7 +178,7 @@ lazy getter `FUN_140315860` into `[0x1416145d8]`. The base constructor `FUN_1408
 | `PlayerCtrl` | `0x1410e4e58` | `0x4a0` |
 
 The values grow along the chain, and the `CHARACTER_CTRL_*_OFFSET` constants and
-`PLAYER_CTRL_CHR_ASM_CTRL_OFFSET` in `ds2-rva` all sit below the matching size. **[inferred]** that slot 9 is the instance size; nothing here
+`CharacterCtrl::chr_asm_ctrl` (`+0x378`, now in `darksouls2::game::chr`) all sit below the matching size. **[inferred]** that slot 9 is the instance size; nothing here
 decompiled an allocation of `0x480` next to a `CharacterCtrl` constructor.
 
 **No field metadata.** The DLRF template families in the image are `DLRuntimeClassImpl`,

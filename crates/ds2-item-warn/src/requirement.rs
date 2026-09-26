@@ -40,7 +40,7 @@
 //! `shr cx,1` for grip states `2` and `3`, and the `1.5x` belongs to power stance
 //! (`FUN_140350170`, grips `4`, `5`, `6`). The presentation check takes no grip argument, so the
 //! detail pane still prints the full requirement in red. This badge reads the player's live grip
-//! ([`ds2_rva::EQUIP_GRIP_OFFSET`]) and, while two-handing, applies the same halving before the
+//! ([`ChrAsmEquip::grip`]) and, while two-handing, applies the same halving before the
 //! compare -- the X answers "could I swing this the way I am holding my weapon now".
 //!
 //! # There is a cached answer, and it is the wrong shape for this
@@ -62,7 +62,11 @@
 //! their infusion loop with no type check; the `+0x1e <= 1` test only picks which infusion glyph
 //! shows.
 
+use core::mem::offset_of;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+use darksouls2::game::chr::{ChrAsmCtrl, ChrAsmEquip, PlayerCtrl};
+use darksouls2::game::game_manager::GameManagerImp;
 
 use crate::LOG_PREFIX;
 use crate::install::{log, module_base};
@@ -162,14 +166,14 @@ unsafe fn grip(manager: usize) -> Option<i32> {
         follow(
             manager,
             &[
-                ds2_rva::PLAYER_CTRL_OFFSET,
-                ds2_rva::PLAYER_CTRL_CHR_ASM_CTRL_OFFSET,
-                ds2_rva::CHR_ASM_CTRL_EQUIP_OFFSET,
+                offset_of!(GameManagerImp, player_ctrl),
+                offset_of!(PlayerCtrl, base.chr_asm_ctrl),
+                offset_of!(ChrAsmCtrl, equip),
             ],
         )
     }?;
-    // SAFETY: the equip object is live and the grip is the `i32` at `+0x10`.
-    Some(unsafe { ((equip + ds2_rva::EQUIP_GRIP_OFFSET) as *const i32).read_unaligned() })
+    // SAFETY: the equip object is live and the grip is its `i32` field.
+    Some(unsafe { ((equip + offset_of!(ChrAsmEquip, grip)) as *const i32).read_unaligned() })
 }
 
 /// Whether the player fails any of this weapon's four stat requirements.
