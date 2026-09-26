@@ -4394,7 +4394,9 @@ def main() -> int:
             "`turn <degrees>` closes a loop on the camera's own yaw, `block <frames>` blanks "
             "every human input, `probe` reports which pad axis actually moves the camera. "
             "`turn` and `probe` measure against the camera --invasion-path draws through and "
-            "refuse without it. Every command is frame-bounded; the block caps at ten minutes. "
+            "refuse without it. Implies --invasion-path, because the harness ticks from that "
+            "feature's Present hook and reads no command without it; the overlay stays off unless "
+            "--invasion-path-on. Every command is frame-bounded; the block caps at ten minutes. "
             f"Grep the log for `{INPUT_HARNESS_LOG_PREFIX}`."
         ),
     )
@@ -4459,6 +4461,18 @@ def main() -> int:
         print(
             f"[config] --seamless turned [{OFFLINE_SECTION}] off for this run: it fronts the "
             "socket imports a co-op mod needs."
+        )
+
+    # THE HARNESS HAS NO CLOCK OF ITS OWN. It ticks from `ds2-invasion-path`'s `Present` detour,
+    # which installs only when `[invasion_path]` is on. Without it the device detours go in and
+    # nothing ever reads the command file: a run on 2026-09-26 answered not even `status`. The
+    # overlay itself stays off unless --invasion-path-on says otherwise; this only installs the
+    # hook the harness rides on.
+    if args.input_harness and not args.invasion_path:
+        args.invasion_path = True
+        print(
+            f"[config] --input-harness turned [{INVASION_PATH_SECTION}] on for this run: the "
+            "harness ticks from its Present hook and reads no command without it."
         )
 
     if args.selftest:
