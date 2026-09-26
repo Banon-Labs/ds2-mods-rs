@@ -8218,6 +8218,32 @@ pub const MOUSE_DEVICE_DELTA_Y_OFFSET: usize = 0x10c;
 /// Mouse wheel delta. `MouseDevice+0x110`, from `DIMOUSESTATE2.lZ`.
 pub const MOUSE_DEVICE_WHEEL_OFFSET: usize = 0x110;
 
+/// Folds one window-message mouse event into an input block's button word. RVA `0x00b08ef0`.
+///
+/// `fn(block, event)`: `rcx` is the input block, `rdx` the event. Called once per block (two of
+/// them, stride `0x288`) by `FUN_140af41a0`, whose only caller is `KatanaMainApp`'s message handler
+/// `FUN_1402ef110`. This is how mouse clicks reach the game; the DirectInput mouse's buttons do
+/// not. A jump table on the event type, not an Arxan redirect (`scripts/ds2-arxan-chain.py`
+/// stops on it as unknown, and the disassembly is the body).
+///
+/// Prologue: `48 63 02 83 f8` (`movsxd rax,[rdx]`, then `cmp eax,0xa`).
+pub const MOUSE_EVENT_FOLD: u32 = 0x00b0_8ef0;
+
+/// First five bytes at [`MOUSE_EVENT_FOLD`].
+pub const MOUSE_EVENT_FOLD_PROLOGUE: [u8; 5] = [0x48, 0x63, 0x02, 0x83, 0xf8];
+
+/// The event's type, a `u32` at `event+0x00`.
+///
+/// Presses: `0`/`2` left, `3`/`4` right, `6`/`7` middle. Releases: `1` left, `5` right, `8`
+/// middle. `9` is a move (`+0x08`/`+0x0c`), `10` a wheel step (`+0x10`).
+pub const MOUSE_EVENT_TYPE_OFFSET: usize = 0x00;
+
+/// Modifier bits at `event+0x04`; the low four each OR a bit (`0x40`..`0x200`) into the word.
+pub const MOUSE_EVENT_MODIFIERS_OFFSET: usize = 0x04;
+
+/// The wheel step of a type-`10` event, an `i32` at `event+0x10`, added to `block+0x224`.
+pub const MOUSE_EVENT_WHEEL_OFFSET: usize = 0x10;
+
 /// `DLUID::KeyboardDevice<DLKR::DLSingleThreadingPolicy>`'s per-frame poll. RVA `0x00f06dd0`.
 ///
 /// Vtable slot 23 of `0x141271e98`. Body: `GetDeviceState(0x100, this+0xf0)` -- the 256-byte

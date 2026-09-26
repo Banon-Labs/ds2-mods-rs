@@ -529,11 +529,13 @@ pub(crate) fn poll_command_file() {
             if matches!(command, Command::Status) {
                 let counts = fire_counts();
                 harness_log!(
-                    "status: polls pad={} dinput-mouse={} keyboard={} windows-mouse={}",
+                    "status: polls pad={} dinput-mouse={} keyboard={} windows-mouse={} \
+                     clicks-suppressed={}",
                     counts[PAD],
                     counts[DINPUT_MOUSE],
                     counts[KEYBOARD],
                     counts[WINDOWS_MOUSE],
+                    crate::click::suppressed(),
                 );
             }
         }
@@ -626,6 +628,14 @@ pub(crate) unsafe fn install() -> usize {
             "hooked site={} rva=0x{:08x} va=0x{address:016x}",
             site.name,
             site.rva
+        );
+    }
+
+    // SAFETY: `base` is the game image and MinHook was initialised above.
+    if !unsafe { crate::click::install(base) } {
+        harness_log!(
+            "PARTIAL install: mouse clicks are not hooked, so a block does not stop them. Treat \
+             any measurement taken under a block now as open to a click."
         );
     }
 
