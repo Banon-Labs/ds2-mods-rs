@@ -1,0 +1,167 @@
+//! The character controllers: `CharacterCtrlBase`, `CharacterCtrl` and `PlayerCtrl`.
+//!
+//! Each class embeds its parent at offset zero, so a `PlayerCtrl` is a `CharacterCtrl` is a
+//! `CharacterCtrlBase` by field access as well as by DLRF's parent chain. All three are
+//! registered with DLRF, and the size each registration reports is the size the game allocates
+//! before running the matching constructor, which is what the size tests below pin.
+//!
+//! Only the fields a crate in this repo reads are named; the rest is padding named by offset.
+//! These objects are never built or copied here: they are reached as pointers into the game's
+//! memory, the local player's through `GameManagerImp::player_ctrl`.
+
+use core::ffi::c_void;
+use core::ptr::NonNull;
+
+/// `CharacterCtrlBase`, the root of the controller chain.
+///
+/// Source of name: RTTI and DLRF. Nothing past the vtable is read by this repo yet.
+#[repr(C)]
+pub struct CharacterCtrlBase {
+    /// The most derived class's vtable. Comparing it with a class's vtable RVA in `ds2-rva` is an
+    /// exact test of which controller an object is.
+    pub vtable: *const c_void,
+    _unk0008: [u8; 0x50],
+}
+
+/// `CharacterCtrl`, the controller every character in the roster is, or derives from.
+///
+/// Source of name: RTTI and DLRF.
+#[repr(C)]
+pub struct CharacterCtrl {
+    /// The `CharacterCtrlBase` part.
+    pub base: CharacterCtrlBase,
+    _unk0058: [u8; 0x38],
+    /// World position as x, y, z and a `w` nothing here reads. Y is up.
+    ///
+    /// The vtable's position getter copies these four floats and does nothing else; `PlayerCtrl`
+    /// inherits that getter unchanged.
+    pub position: [f32; 4],
+    _unk00a0: [u8; 0x10],
+    /// The phantom block `CharacterCtrl::assignPhantomProperties` allocates and stores, whose
+    /// phantom param id decides whether a player is a person or a replay.
+    pub phantom_block: Option<NonNull<PhantomBlock>>,
+    _unk00b8: [u8; 0x60],
+    /// The factory's label for what it built, such as `Player_000100`.
+    pub name: WString,
+    _unk0138: [u8; 0x240],
+    /// The character's `ChrAsmCtrl`, which owns its equipment.
+    ///
+    /// The vtable getter that returns it is `CharacterCtrl`'s own, inherited by `PlayerCtrl`, so the
+    /// field belongs to this class even though only the local player's is read today.
+    pub chr_asm_ctrl: Option<NonNull<ChrAsmCtrl>>,
+    _unk0380: [u8; 0x100],
+}
+
+/// `PlayerCtrl`, the controller the local player, a remote player and a bloodstain replay share.
+///
+/// Source of name: RTTI and DLRF. Its own fields past the `CharacterCtrl` part are not read by
+/// this repo yet.
+#[repr(C)]
+pub struct PlayerCtrl {
+    /// The `CharacterCtrl` part.
+    pub base: CharacterCtrl,
+    _unk0480: [u8; 0x20],
+}
+
+/// The phantom block a [`CharacterCtrl`] owns. A prefix: only the field this repo reads.
+#[repr(C)]
+pub struct PhantomBlock {
+    _unk00: [u8; 0x3c],
+    /// The phantom param id. The engine's own replay test calls two of its values a replay; they
+    /// are `ds2_rva::REPLAY_PHANTOM_PARAM_IDS`.
+    pub phantom_param_id: u8,
+}
+
+/// `ChrAsmCtrl`. Opaque here: its fields are reached through `ds2-rva` offsets for now.
+///
+/// Source of name: RTTI.
+#[repr(C)]
+pub struct ChrAsmCtrl {
+    _opaque: [u8; 0],
+}
+
+/// The MSVC `std::wstring` the game's CRT uses, with small-string optimisation.
+///
+/// The first field is a union: the characters inline while [`WString::capacity`] is at most
+/// `ds2_rva::WSTRING_SSO_MAX`, a pointer to them above it.
+#[repr(C)]
+pub struct WString {
+    storage: [u8; 0x10],
+    /// Length in `wchar_t`, excluding the terminator.
+    pub len: usize,
+    /// Capacity in `wchar_t`; decides which side of the storage union is live.
+    pub capacity: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use core::mem::{offset_of, size_of};
+
+    use super::{CharacterCtrl, CharacterCtrlBase, PhantomBlock, PlayerCtrl, WString};
+
+    // Sizes: each is the value slot 9 of the class's DLRF runtime-class vtable returns, and the
+    // game's own allocations agree. `FUN_140357920` allocates 0x4a0 and passes it to the PlayerCtrl
+    // constructor `FUN_14037ebe0`, which zeroes 0x480..0x4a0 after running the CharacterCtrl
+    // constructor. `FUN_140355930` and `FUN_1403560a0` allocate 0x480 for `FUN_1403114f0`, the
+    // CharacterCtrl constructor. CharacterCtrlBase has no allocation of its own that was found:
+    // its constructor `FUN_140315a10` writes up to +0x55, and `FUN_1403114f0` writes its first
+    // own field at +0x58 straight after calling it.
+
+    #[test]
+    fn character_ctrl_base_is_0x58() {
+        assert_eq!(size_of::<CharacterCtrlBase>(), 0x58);
+    }
+
+    #[test]
+    fn character_ctrl_is_0x480() {
+        assert_eq!(size_of::<CharacterCtrl>(), 0x480);
+    }
+
+    #[test]
+    fn player_ctrl_is_0x4a0() {
+        assert_eq!(size_of::<PlayerCtrl>(), 0x4a0);
+    }
+
+    // Offsets: each is the value `ds2-rva` holds for the field, read live on 2026-09-26 from the
+    // local player with `scripts/frida/player-ctrl.js` (a PlayerCtrl vtable, a finite position
+    // with w = 1, a non-null phantom block and ChrAsmCtrl, and the name `Player_000100`).
+
+    #[test]
+    fn vtable_is_first() {
+        assert_eq!(offset_of!(CharacterCtrlBase, vtable), 0x00);
+        assert_eq!(offset_of!(CharacterCtrl, base), 0x00);
+        assert_eq!(offset_of!(PlayerCtrl, base), 0x00);
+    }
+
+    #[test]
+    fn character_ctrl_position_is_at_0x90() {
+        assert_eq!(offset_of!(CharacterCtrl, position), 0x90);
+    }
+
+    #[test]
+    fn character_ctrl_phantom_block_is_at_0xb0() {
+        assert_eq!(offset_of!(CharacterCtrl, phantom_block), 0xb0);
+    }
+
+    #[test]
+    fn character_ctrl_name_is_at_0x118() {
+        assert_eq!(offset_of!(CharacterCtrl, name), 0x118);
+    }
+
+    #[test]
+    fn character_ctrl_chr_asm_ctrl_is_at_0x378() {
+        assert_eq!(offset_of!(CharacterCtrl, chr_asm_ctrl), 0x378);
+    }
+
+    #[test]
+    fn phantom_param_id_is_at_0x3c() {
+        assert_eq!(offset_of!(PhantomBlock, phantom_param_id), 0x3c);
+    }
+
+    #[test]
+    fn wstring_len_and_capacity_follow_the_storage() {
+        assert_eq!(offset_of!(WString, len), 0x10);
+        assert_eq!(offset_of!(WString, capacity), 0x18);
+        assert_eq!(size_of::<WString>(), 0x20);
+    }
+}
