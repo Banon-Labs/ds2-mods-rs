@@ -564,7 +564,15 @@ pub(crate) fn poll_command_file() {
     let Some(line) = gate.take(&contents) else {
         return;
     };
+    let skipped = gate.skipped();
     drop(gate);
+    if let Some((first, last)) = skipped {
+        harness_log!(
+            "command LOST: sequence {first}..={last} never ran -- a later write replaced it before \
+             the harness read the file. Wait for each command's own log line before writing the \
+             next."
+        );
+    }
     match crate::command::parse(line) {
         Ok(command) => {
             crate::request(command);
