@@ -127,6 +127,21 @@ Read live on 2026-09-26 with `scripts/frida/soul-guard-inputs.js` (read-only):
 - A character at level 13 (stats summing to 66) held a soul memory of 1650. Summed from level 1 its
   floor is 8192, so a start of 1 would call a fresh character short; summed from 14 it is 0.
 
+### A level-1 verdict after a continue is the slot, not the hook
+
+The first runs with the guard on (`--continue-slot 0`) logged `verdict=supported level=1
+soul_memory=0` and read stats `1,1,1,1,1,1,1,1,1` from `[[GameManagerImp]+0xD0]+0x490` in the
+world. That looked like the hook reading a default-constructed object. It is the save: a read-only
+`scripts/ds2-sl2.py --slots` of both `DS2SOFS0000.sl2` and `.co2` in the save folder those runs used
+lists slot 0 as blank (stats summing to 9, no name) and slot 1 as the only character, `Swornsword
+Ole`, stats summing to 66. The earlier level-13 read (stats summing to 66, soul memory 1650) was
+that slot-1 character, at the same heap address. So `--continue-slot 0` loaded the blank slot, and
+the guard read what was loaded.
+
+`FUN_14038bd70`, the level setter, is not a load path to hook instead (**verified in binary**): its
+only caller is `FUN_1400ee240`, and that function's only call site is `0x1400fdcab` in
+`FeSubStateTitlePlayerInformation` (`0x1400fdc40`), the title screen's character information page.
+
 ## Open
 
 - Whether the game trusts a stored level that disagrees with the stats, once the character is in
