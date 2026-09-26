@@ -26,6 +26,10 @@
 //! code runs while a player is standing in a pause menu; a wrong pointer here is their crash, in
 //! their game, with our name on it.
 
+use core::ptr::NonNull;
+
+use darksouls2::game::chr::PlayerCtrl;
+use darksouls2::game::game_manager::GameManagerImp;
 use ds2_build_import_core::SoulCosts;
 use ds2_game_base::mem::{game_rva, safe_read_u16, safe_read_u32, safe_read_usize};
 
@@ -1010,9 +1014,9 @@ pub(crate) fn covenant_id(name: &str) -> Option<u8> {
 }
 
 /// `PlayerCtrl`, the receiver the covenant setter takes.
-fn player_ctrl() -> Result<usize, GameError> {
-    let manager = game_manager().ok_or(GameError::Unresolved)?;
-    hop(manager, ds2_rva::PLAYER_CTRL_OFFSET).ok_or(GameError::NoCharacter)
+fn player_ctrl() -> Result<NonNull<PlayerCtrl>, GameError> {
+    let manager = GameManagerImp::instance().ok_or(GameError::Unresolved)?;
+    GameManagerImp::player_ctrl(manager).ok_or(GameError::NoCharacter)
 }
 
 /// What one covenant change did, read back.
@@ -1073,8 +1077,8 @@ pub(crate) unsafe fn set_covenant(id: u8) -> Result<CovenantSet, GameError> {
     // SAFETY: the prologue matched, and the signature is the one the disassembly implements --
     // PlayerCtrl in RCX, the id in EDX, an announce flag in R8B, no return.
     unsafe {
-        let set: unsafe extern "system" fn(usize, i32, bool) = core::mem::transmute(site);
-        set(ctrl, i32::from(id), false);
+        let set: unsafe extern "system" fn(*mut PlayerCtrl, i32, bool) = core::mem::transmute(site);
+        set(ctrl.as_ptr(), i32::from(id), false);
     }
 
     Ok(CovenantSet {

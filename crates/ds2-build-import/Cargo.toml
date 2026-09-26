@@ -20,6 +20,7 @@ name = "ds2_build_import"
 ds2-build-import-core.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+darksouls2.workspace = true
 ds2-game-base.workspace = true
 ds2-menu-row.workspace = true
 ds2-rva.workspace = true
