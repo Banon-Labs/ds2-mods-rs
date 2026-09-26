@@ -466,7 +466,9 @@ fn install_offline() {
     // SAFETY: the two code patches are three-byte stubs over leaf functions recorded in `ds2-rva`,
     // each of which re-reads the byte it is about to overwrite and aborts if it is not the one
     // recorded there; both were checked with `scripts/ds2-arxan-chain.py` to sit at their own
-    // prologue rather than behind an Arxan redirect. The socket layer writes pointers into the
+    // prologue rather than behind an Arxan redirect. The login skip checks for the recorded two-byte
+    // `je` before writing its `nop`s, and nothing runs that branch until the title flow exists,
+    // which is after this callback. The socket layer writes pointers into the
     // image's own `.idata` and modifies no code at all.
     let outcome = unsafe {
         ds2_offline::install(ds2_offline::Request {

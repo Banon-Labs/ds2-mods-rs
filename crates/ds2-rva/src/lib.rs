@@ -1744,6 +1744,28 @@ pub const NET_SET_ONLINE_STUB: [u8; 3] = [0xc3, 0x90, 0x90];
 /// constructor's `mov BYTE PTR [rbx+0x3a],0` at `0x140512f5a`.
 pub const NET_ONLINE_FLAG_OFFSET: usize = 0x3a;
 
+/// The `je` in `FeSubStateTitleUserPolicy`'s enter (`0x1400f9040`) that skips the offline boot.
+/// RVA `0x000f9077`, VA `0x1400f9077`.
+///
+/// The instruction before it is `cmp BYTE PTR [rax+0x136e], 0` on the system-data block
+/// `[[[GameManagerImp]+0xa8]+0xd8]`. Non-zero falls through to phase 3, which goes to `0x2a`
+/// (the "playing offline" notice) and then straight to `0x47` `TopMenu`, so `0x38`, `0x39`
+/// `GameServerLogin` and `0x44` Information never run. Zero takes this `je +0x12` to the next
+/// check. `ds2-offline` replaces it with [`USER_POLICY_OFFLINE_BRANCH_STUB`] so the boot always
+/// takes the offline path. It patches the branch rather than the byte because the system-data
+/// writer (`0x14019c77e`) saves `+0x136e` into the save file, and an unmodded launch of that save
+/// would then boot offline too. `docs/DS2-OFFLINE.md` has the disassembly.
+///
+/// Read live on 2026-09-26 with `scripts/frida/offline-switch.js`: the running image holds
+/// `80 b8 6e 13 00 00 00 74 12` at `0x1400f9070`, the same bytes as the file on disk.
+pub const USER_POLICY_OFFLINE_BRANCH: u32 = 0x000f_9077;
+
+/// The two bytes expected at [`USER_POLICY_OFFLINE_BRANCH`]: `je +0x12`.
+pub const USER_POLICY_OFFLINE_BRANCH_EXPECTED: [u8; 2] = [0x74, 0x12];
+
+/// `nop; nop` -- the branch removed, so the boot always falls through to phase 3.
+pub const USER_POLICY_OFFLINE_BRANCH_STUB: [u8; 2] = [0x90, 0x90];
+
 /// Offset of the network service in [`GAME_MANAGER_IMP`] -- the `this` every call to
 /// [`NET_IS_ONLINE`] and [`NET_SET_ONLINE`] is made on.
 ///
