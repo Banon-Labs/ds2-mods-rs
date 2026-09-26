@@ -44,7 +44,6 @@ deny contains decision if {
 }
 
 tmp_script_decision(path) := decision if {
-
 	decision := {
 		"rule_id": "DS2-MODS-NO-TMP-SCRIPTS-GUARD",
 		"severity": "MEDIUM",
@@ -127,23 +126,18 @@ write_indicator_patterns := [
 	# Shell redirection INTO the path: `> /tmp/x.py`, `>> /tmp/x.py`, `2>/tmp/x.py`, `&>/tmp/x.py`,
 	# `>| /tmp/x.py`. This is also what covers a heredoc / `echo` / `printf` redirected into it.
 	`>>?\|?\s*(/tmp/[^\s"'\\;&|<>]+)`,
-
 	# `| tee /tmp/x.sh`, `tee -a /tmp/x.sh`.
 	`(?:^|[\s;&|(])tee(?:\s+-{1,2}[^\s]+)*\s+(/tmp/[^\s"'\\;&|<>]+)`,
-
 	# Download/output flags: `curl -o /tmp/x.js`, `curl --output /tmp/x.js`, `wget -O /tmp/x.js`.
 	`(?:^|[\s;&|(])(?:-o|-O|--output|--output-document)[=\s]*(/tmp/[^\s"'\\;&|<>]+)`,
-
 	# Copy/move/install DESTINATION. The /tmp path must be the LAST argument of its command
 	# segment, which is what separates `cp a /tmp/x.py` (writes into /tmp) from
 	# `cp /tmp/x.py a` and `cp -f /tmp/planner/*.js target/` (both read OUT of /tmp).
 	`(?m)(?:^|[\s;&|(])(?:cp|mv|install|rsync|scp|ln)\s+(?:[^\s;&|<>]+\s+)+?(/tmp/[^\s"'\\;&|<>]+)\s*(?:$|[;&|)])`,
-
 	# In-language writes inside a heredoc / -c snippet: `open('/tmp/x.py', 'w')`. The mode must be
 	# the second positional argument and must contain w/a/x, so a READ -- `open('/tmp/a.js')`, or
 	# `open('/tmp/a.js', encoding='utf-8')` -- does not match.
 	`open\(\s*['"](/tmp/[^'"]+)['"]\s*,\s*['"][^'"]*[wax][^'"]*['"]`,
-
 	# `Path('/tmp/x.py').write_text(...)` / `.write_bytes(...)`.
 	`['"](/tmp/[^'"]+)['"]\s*\)\s*\.\s*write`,
 ]
@@ -153,9 +147,33 @@ tmp_written_script_paths contains path if {
 	# returned undefined and this entire Bash-authoring branch silently never fired (2026-08-22).
 	# regex.find_all_string_submatch_n is compiled into the WASM module itself, and m[1] is the
 	# path captured by the write-indicator pattern's single group.
-	some pattern in write_indicator_patterns
+	some index, pattern in write_indicator_patterns
 	some m in regex.find_all_string_submatch_n(pattern, command, -1)
 	path := m[1]
 	is_script_path(path)
 	not in_current_repo(path)
+	not only_extracted(index, path)
+}
+
+# A READ-ONLY EXTRACT is data, whatever its extension. Measured 2026-09-24, rebasing PR39/42/40:
+# `sed -n ... > $SCRATCH/ours.rs` saved one side of a merge conflict to compare, and was denied as
+# "authoring a script" because the content is Rust and so the file was named .rs. Nothing was
+# authored -- every byte already existed in a tracked file -- and the refusal's own text allows
+# data into /tmp. The pivot (rename to .txt) was cheap; the rule mistaking a copy for a script was
+# the defect.
+#
+# The carve-out is narrow on purpose. The writer must be `sed -n`, `git show`, `head` or `tail`,
+# standing at the START of its command (a `|` in front of it means something else produced the
+# bytes -- `echo 'code' | sed -n p > /tmp/x.py` is still authoring), with no UNQUOTED `<` between
+# it and the redirect, so a heredoc cannot ride along. A quoted one is fine and is the common case:
+# the sed address that extracts a conflict side is `'/<<<<<<< /,/=======/p'`. And it only forgives the redirect pattern
+# (index 0): a path that is ALSO written some other way, or redirected into more times than the
+# extracts account for, is still denied.
+extract_redirect_pattern := `(?:^|[;&(\n])\s*(?:sed\s+-n|git\s+(?:-C\s+[^\s;&|<>]+\s+)?show|head|tail)\s(?:[^;&|<>\n'"]|'[^'\n]*'|"[^"\n]*")*>\s*(/tmp/[^\s"'\\;&|<>]+)`
+
+only_extracted(0, path) if {
+	redirects := [m | some m in regex.find_all_string_submatch_n(write_indicator_patterns[0], command, -1); m[1] == path]
+	extracts := [m | some m in regex.find_all_string_submatch_n(extract_redirect_pattern, command, -1); m[1] == path]
+	count(extracts) > 0
+	count(extracts) == count(redirects)
 }
