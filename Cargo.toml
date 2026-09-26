@@ -90,6 +90,8 @@ ds2-save-block = { path = "crates/ds2-save-block" }
 ds2-seamless = { path = "crates/ds2-seamless" }
 # Logs, per character load, whether soul memory could have paid for the soul level.
 ds2-soul-memory-guard = { path = "crates/ds2-soul-memory-guard" }
+# Caps our weapon levels to the other players' while anyone else is in the world.
+ds2-weapon-sync = { path = "crates/ds2-weapon-sync" }
 
 # Arxan neutering. DS2 SOTFS carries 48 Arxan stubs; every MinHook detour patches a prologue
 # in `.text`, which is what their integrity checks look for. Path dep on the local checkout
