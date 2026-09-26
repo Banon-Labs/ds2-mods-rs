@@ -64,6 +64,11 @@ pub const KEY_FAULT_AFTER_MS: &str = "fault_after_ms";
 /// exception in DARK SOULS II at all -- see [`CrashConfig::reinstall_filter_after_ms`].
 pub const KEY_REINSTALL_FILTER_AFTER_MS: &str = "reinstall_filter_after_ms";
 
+/// Seconds the game's frame counter may stand still before the hang watchdog reports a stall.
+///
+/// Default 30, and `0` turns the watchdog off. See [`CrashConfig::hang_stall_seconds`].
+pub const KEY_HANG_STALL_SECONDS: &str = "hang_stall_seconds";
+
 /// Raised by the deliberate fault: `EXCEPTION_ACCESS_VIOLATION`.
 const FAULT_CODE: u32 = 0xc000_0005;
 
@@ -90,6 +95,12 @@ pub struct CrashConfig {
     /// 5000ms is a deliberately loose bound on "CRT startup is over", not a measurement. It is far
     /// past `_initterm` and far short of anything a player would reach.
     pub reinstall_filter_after_ms: u64,
+    /// Seconds without a frame before the hang watchdog reports a stall; `0` disables it.
+    ///
+    /// On by default for the same reason crash logging is: a freeze raises no exception, so
+    /// without the watchdog the log says nothing about the one failure a player cannot describe
+    /// beyond "it stopped". It is diagnostic and never changes game state.
+    pub hang_stall_seconds: u64,
 }
 
 impl Default for CrashConfig {
@@ -98,6 +109,7 @@ impl Default for CrashConfig {
             enabled: true,
             fault_after_ms: 0,
             reinstall_filter_after_ms: 5_000,
+            hang_stall_seconds: 30,
         }
     }
 }
@@ -125,32 +137,43 @@ impl CrashConfig {
             // launch, so its absence means someone launched the game some other way.
             return (Self::default(), problems);
         };
-        let parsed = KeyValues::parse(&text);
+        let config = Self::from_parsed(&KeyValues::parse(&text), &mut problems);
+        (config, problems)
+    }
+
+    /// Resolve every key of this section from an already-parsed file.
+    fn from_parsed(parsed: &KeyValues, problems: &mut Vec<String>) -> Self {
         let defaults = Self::default();
-        let config = Self {
-            enabled: read_bool(&parsed, KEY_ENABLED, defaults.enabled, &mut problems),
+        Self {
+            enabled: read_bool(parsed, KEY_ENABLED, defaults.enabled, problems),
             fault_after_ms: read_u64(
-                &parsed,
+                parsed,
                 KEY_FAULT_AFTER_MS,
                 defaults.fault_after_ms,
-                &mut problems,
+                problems,
             ),
             reinstall_filter_after_ms: read_u64(
-                &parsed,
+                parsed,
                 KEY_REINSTALL_FILTER_AFTER_MS,
                 defaults.reinstall_filter_after_ms,
-                &mut problems,
+                problems,
             ),
-        };
-        (config, problems)
+            hang_stall_seconds: read_u64(
+                parsed,
+                KEY_HANG_STALL_SECONDS,
+                defaults.hang_stall_seconds,
+                problems,
+            ),
+        }
     }
 
     /// One line, for the attach log, saying what was resolved before anything acts on it.
     pub fn describe(&self) -> String {
         format!(
-            "crash_logging={} reinstall_filter_after_ms={} fault_after_ms={}{}",
+            "crash_logging={} reinstall_filter_after_ms={} hang_stall_seconds={} fault_after_ms={}{}",
             if self.enabled { "on" } else { "off" },
             self.reinstall_filter_after_ms,
+            self.hang_stall_seconds,
             self.fault_after_ms,
             if self.fault_after_ms > 0 {
                 "  *** THIS RUN WILL DELIBERATELY CRASH ***"
@@ -253,6 +276,38 @@ pub fn schedule_filter_reinstall(config: CrashConfig) -> Option<String> {
     ))
 }
 
+/// The watchdog configuration this loader asks for, or `None` when the section turns it off.
+///
+/// File names match the core crate's defaults and are spelled out here for the reason
+/// [`install`] spells its own: they are what a player is asked to send back.
+fn hang_watchdog_config(config: CrashConfig) -> Option<ds2_crash_logging_core::HangWatchdogConfig> {
+    if !config.enabled || config.hang_stall_seconds == 0 {
+        return None;
+    }
+    Some(ds2_crash_logging_core::HangWatchdogConfig {
+        report_file_name: "ds2-crash-hang-latest.txt",
+        minidump_file_name: "ds2-crash-hang-minidump.dmp",
+        stall_seconds: config.hang_stall_seconds,
+    })
+}
+
+/// Start the hang watchdog. Call from the post-Arxan callback, never `DllMain`.
+///
+/// It writes through the crash log, so it needs [`install`] to have run, which `enabled` already
+/// decides. Returns the line to log, or `None` when disabled. Whether it arms is decided later on
+/// its own thread, which logs `hang watchdog armed` or `hang watchdog disarmed reason=...`.
+pub fn start_hang_watchdog(config: CrashConfig) -> Option<String> {
+    let watchdog = hang_watchdog_config(config)?;
+    let started = ds2_crash_logging_core::start_hang_watchdog(watchdog);
+    Some(format!(
+        "hang watchdog {} stall_seconds={} (arms once the frame counter at GameManagerImp+0x{:x} \
+         is seen advancing)",
+        if started { "started" } else { "not started" },
+        watchdog.stall_seconds,
+        ds2_rva::GAME_MANAGER_FRAME_COUNTER_OFFSET,
+    ))
+}
+
 /// Arm the deliberate fault, if configured. Call from the post-Arxan callback, never `DllMain`.
 ///
 /// Returns the thread's description for the log, or `None` when no fault was armed. The caller
@@ -290,25 +345,48 @@ mod tests {
     use super::*;
 
     fn parse(text: &str) -> (CrashConfig, Vec<String>) {
-        let parsed = KeyValues::parse(text);
         let mut problems = Vec::new();
-        let defaults = CrashConfig::default();
-        let config = CrashConfig {
-            enabled: read_bool(&parsed, KEY_ENABLED, defaults.enabled, &mut problems),
-            fault_after_ms: read_u64(
-                &parsed,
-                KEY_FAULT_AFTER_MS,
-                defaults.fault_after_ms,
-                &mut problems,
-            ),
-            reinstall_filter_after_ms: read_u64(
-                &parsed,
-                KEY_REINSTALL_FILTER_AFTER_MS,
-                defaults.reinstall_filter_after_ms,
-                &mut problems,
-            ),
-        };
+        let config = CrashConfig::from_parsed(&KeyValues::parse(text), &mut problems);
         (config, problems)
+    }
+
+    #[test]
+    fn the_hang_watchdog_is_on_by_default_at_thirty_seconds() {
+        let (config, problems) = parse("");
+        assert_eq!(config.hang_stall_seconds, 30);
+        assert!(problems.is_empty());
+        let watchdog = hang_watchdog_config(config).expect("on by default");
+        assert_eq!(watchdog.stall_seconds, 30);
+        assert_eq!(watchdog.report_file_name, "ds2-crash-hang-latest.txt");
+    }
+
+    #[test]
+    fn the_hang_watchdog_turns_off_with_zero() {
+        let (config, problems) = parse("[crash_logging]\nhang_stall_seconds = 0\n");
+        assert!(problems.is_empty());
+        assert_eq!(config.hang_stall_seconds, 0);
+        assert!(hang_watchdog_config(config).is_none());
+        assert_eq!(start_hang_watchdog(config), None);
+    }
+
+    #[test]
+    fn disabling_crash_logging_also_stops_the_hang_watchdog() {
+        let config = CrashConfig {
+            enabled: false,
+            ..CrashConfig::default()
+        };
+        assert!(
+            hang_watchdog_config(config).is_none(),
+            "the watchdog writes through a crash log that was never installed"
+        );
+    }
+
+    #[test]
+    fn a_misspelled_stall_window_is_a_problem() {
+        let (config, problems) = parse("[crash_logging]\nhang_stall_seconds = soon\n");
+        assert_eq!(config.hang_stall_seconds, 30, "falls back to the default");
+        assert_eq!(problems.len(), 1, "and says so: {problems:?}");
+        assert!(problems[0].contains("hang_stall_seconds"));
     }
 
     #[test]

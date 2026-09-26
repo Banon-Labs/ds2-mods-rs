@@ -525,6 +525,7 @@ name = "ds2-crash-logging-core"
 version = "0.1.0"
 dependencies = [
  "ds2-game-base",
+ "ds2-rva",
 ]
 
 [[package]]
