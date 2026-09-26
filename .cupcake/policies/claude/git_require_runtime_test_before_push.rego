@@ -146,6 +146,17 @@ runtime_proven if {
 	field("fresh") == "1"
 	field("dll_match") == "1"
 	field("pending") != "1"
+	field("pushdir") != "0"
+}
+
+# The command moves somewhere before pushing and the signal could not resolve where (ds2-mods-rs-lgor):
+# `cd "$VAR"`, `cd -`, `popd`, pushes from two directories, or a target that is not a work tree. The
+# checkout being pushed is unknown, so neither its game code nor its run can be measured. Gated on
+# its own, not through `game_code`, so a signal that reported this and a wrong `game_code=0` with it
+# still refuses. An absent field -- the format before it existed -- is not "0".
+gated if {
+	signal_readable
+	field("pushdir") == "0"
 }
 
 # A commit chained in front of the push, in one command. Checked first because no run can satisfy
@@ -153,10 +164,13 @@ runtime_proven if {
 # Measured 2026-09-25 -- `git commit -qam ... && git push -u origin launcher-drop-flag` went out
 # carrying scripts/ds2-run.py, because at hook time HEAD was still origin/main and the diff the
 # signal took was empty. The signal now reads the command (scripts/cupcake_push_scope.py).
-why := "This command commits and pushes in one go, so the commit being pushed does not exist yet and no run can have tested it. Commit in its own command, launch that commit, then push." if {
+why := "This command changes directory before pushing (a `cd`, `pushd` or `git -C`), and the guard could not resolve that directory to a checkout, so it cannot tell which checkout's code or run to judge. Use a literal absolute path, or `cd` there in its own command first." if {
+	signal_readable
+	field("pushdir") == "0"
+} else := "This command commits and pushes in one go, so the commit being pushed does not exist yet and no run can have tested it. Commit in its own command, launch that commit, then push." if {
 	signal_readable
 	field("pending") == "1"
-} else := "The game's log has no `ds2-loader: attach` line, so the DLL has never been loaded." if {
+} else :="The game's log has no `ds2-loader: attach` line, so the DLL has never been loaded." if {
 	signal_readable
 	field("attached") != "1"
 } else := "The DLL staged in the game directory is not the one this checkout built, so whatever ran was not this code." if {

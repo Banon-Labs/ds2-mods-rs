@@ -57,8 +57,9 @@
 # it cannot prove which row was pressed. That is the honest ceiling of a filesystem signal, and the
 # alternative -- an agent-written marker -- has no ceiling at all because it is just prose in a file.
 #
-# Emits  RUNTIME|game_code=<0|1>|attached=<0|1>|fresh=<0|1>|dll_match=<0|1>|pending=<0|1>|head=<epoch>|log=<epoch>
-# and nothing when it cannot tell (the policy fails closed on silence).
+# Emits  RUNTIME|game_code=<0|1>|attached=<0|1>|fresh=<0|1>|dll_match=<0|1>|pending=<0|1>|pushdir=<0|1>|head=<epoch>|log=<epoch>
+# and nothing when it cannot tell (the policy fails closed on silence). `pushdir=0` means the
+# command moves to a directory this script cannot resolve before pushing.
 set -uo pipefail
 
 # The regression tests need to drive every combination of the three fields without a game install
@@ -96,12 +97,48 @@ if [ ! -t 0 ]; then
     event="$(cat)"
 fi
 
+# What the command pushes, read before the checkout is chosen because it also says where the push
+# runs (the scope block further down describes the rest of what it reports).
+scope=""
+if [ -n "$event" ] && [ -f "$SCRIPT_REPO/scripts/cupcake_push_scope.py" ]; then
+    scope="$(printf '%s' "$event" | python3 "$SCRIPT_REPO/scripts/cupcake_push_scope.py" 2>/dev/null)" || scope=""
+fi
+pending=0
+case "$scope" in *"COMMIT 1"*) pending=1 ;; esac
+
 REPO="$SCRIPT_REPO"
 script_common="$(git -C "$SCRIPT_REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || script_common=""
 invoked_common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || invoked_common=""
 if [ -n "$script_common" ] && [ "$invoked_common" = "$script_common" ]; then
     invoked_root="$(git rev-parse --show-toplevel 2>/dev/null)" || invoked_root=""
     [ -n "$invoked_root" ] && REPO="$invoked_root"
+fi
+
+# The directory the push runs in, when the command moves it (ds2-mods-rs-lgor, 2026-09-26). Run from
+# the main checkout, `...; cd .claude/worktrees/<wt> && git push -u origin build-url-dialog` was
+# refused with `dll_match=0`: this script hashed the main checkout's `target/`, while the worktree's
+# built DLL and the staged one had the same sha256 and the run postdated its HEAD. The same push run
+# with the session already in the worktree went through. `DIR <path>` from the scope helper is the
+# last `cd`/`pushd` before the push, composed with any `git -C`; that checkout is the one judged,
+# whichever repository it belongs to, because it is the one whose commits leave.
+#
+# `DIR ?` (a `cd "$VAR"`, `cd -`, `popd`, or pushes from two places) and a DIR that is not inside a
+# work tree are refused, with `pushdir=0` so the denial says why instead of blaming the DLL. Falling
+# back to the invoking checkout there is the same bug in its other direction: a checkout that
+# happens to carry no `crates/` diff would wave through a push of one that does.
+pushdir=1
+push_dir="$(printf '%s\n' "$scope" | sed -n 's/^DIR //p' | tail -1)"
+if [ -n "$push_dir" ]; then
+    push_root=""
+    if [ "$push_dir" != "?" ]; then
+        push_root="$(git -C "$push_dir" rev-parse --show-toplevel 2>/dev/null)" || push_root=""
+    fi
+    if [ -n "$push_root" ]; then
+        REPO="$push_root"
+    else
+        printf 'RUNTIME|game_code=1|attached=0|fresh=0|dll_match=0|pending=%d|pushdir=0|head=0|log=0\n' "$pending"
+        exit 0
+    fi
 fi
 cd "$REPO" || exit 0
 
@@ -136,12 +173,6 @@ BUILT_DLL="$REPO/target/x86_64-pc-windows-msvc/release/dinput8.dll"
 #   * each `REF` is diffed against `origin/main` on its own, and `head` is the newest of their
 #     commit times, so `git push origin other-branch` is judged on `other-branch`.
 #   * `ALL 1` (`--all`, `--mirror`) is game code: it pushes every branch and none was measured.
-scope=""
-if [ -n "$event" ] && [ -f "$SCRIPT_REPO/scripts/cupcake_push_scope.py" ]; then
-    scope="$(printf '%s' "$event" | python3 "$SCRIPT_REPO/scripts/cupcake_push_scope.py" 2>/dev/null)" || scope=""
-fi
-pending=0
-case "$scope" in *"COMMIT 1"*) pending=1 ;; esac
 refs="$(printf '%s\n' "$scope" | sed -n 's/^REF //p')"
 [ -n "$refs" ] || refs="HEAD"
 
@@ -218,5 +249,5 @@ if [ -r "$STAGED_DLL" ] && [ -r "$BUILT_DLL" ]; then
     fi
 fi
 
-printf 'RUNTIME|game_code=%d|attached=%d|fresh=%d|dll_match=%d|pending=%d|head=%s|log=%s\n' \
-    "$game_code" "$attached" "$fresh" "$dll_match" "$pending" "$head_time" "$log_time"
+printf 'RUNTIME|game_code=%d|attached=%d|fresh=%d|dll_match=%d|pending=%d|pushdir=%d|head=%s|log=%s\n' \
+    "$game_code" "$attached" "$fresh" "$dll_match" "$pending" "$pushdir" "$head_time" "$log_time"
