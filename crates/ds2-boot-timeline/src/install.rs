@@ -1217,6 +1217,7 @@ pub unsafe fn install() -> Outcome {
     let mut installed = 0;
     for site in &sites {
         let address = base + site.rva as usize;
+        let create_start_us = now_us();
         // SAFETY: the target is an RVA this crate validated against the prologue it expects before
         // reaching here, and the detour is a `'static` fn item of the matching ABI.
         let hook = match unsafe { MhHook::new(address as *mut c_void, site.detour) } {
@@ -1235,8 +1236,12 @@ pub unsafe fn install() -> Outcome {
         // the one ordering mistake in this file that would be fatal rather than merely lossy.
         site.trampoline
             .store(hook.trampoline() as usize, Ordering::Release);
+        // Timed apart from the create: enabling is the step that suspends every other thread in
+        // the process, and the install groups' cost tracked their hook counts.
+        let enable_start_us = now_us();
         // SAFETY: the target is the address `MhHook::new` above already registered with MinHook.
         let status = unsafe { MH_EnableHook(address as *mut c_void) };
+        let enable_end_us = now_us();
         if status != MH_STATUS::MH_OK {
             log(format_args!(
                 "{LOG_PREFIX} hook-failed site={} va=0x{address:016x} stage=MH_EnableHook \
@@ -1249,8 +1254,12 @@ pub unsafe fn install() -> Outcome {
         // of the process, which is what is wanted.
         installed += 1;
         log(format_args!(
-            "{LOG_PREFIX} hooked site={} rva=0x{:08x} va=0x{address:016x}",
-            site.name, site.rva
+            "{LOG_PREFIX} hooked site={} rva=0x{:08x} va=0x{address:016x} create-ms={:.3} \
+             enable-ms={:.3}",
+            site.name,
+            site.rva,
+            enable_start_us.saturating_sub(create_start_us) as f64 / 1000.0,
+            enable_end_us.saturating_sub(enable_start_us) as f64 / 1000.0
         ));
     }
 
