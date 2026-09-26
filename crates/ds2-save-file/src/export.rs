@@ -73,6 +73,9 @@ struct Pending {
     /// The stamp has changed: the save the press asked for has been written.
     flushed: bool,
     ticks: u32,
+    /// The redirect window that was armed before this export's -- a character swap's -- to be put
+    /// back once the save has landed. `None` when nothing was armed.
+    restore: Option<(PathBuf, PathBuf)>,
 }
 
 static PENDING: Mutex<Option<Pending>> = Mutex::new(None);
@@ -233,15 +236,28 @@ pub fn save_to_file() {
     // `ds2-save-redirect` already owns the seam that removes all of it: point the game's own open
     // of the container at the destination, let it write there once, and there is no second
     // operation to get wrong. The window is dropped in `finish` once the write has landed.
+    //
+    // The window may already be someone else's. A character swap keeps it armed for the whole
+    // session, pointing the game's open of the player's own container at the staged copy -- so
+    // `source` above is the staged path, while the path the game actually opens is still its own.
+    // Arming `source` matched nothing the game opened, the save went straight into the player's own
+    // container, and closing the window afterwards sent every later save there too (measured
+    // 2026-09-26: `diverted=0`, the live container rewritten, the picked file never created). So
+    // the export answers for the path the game asks for, and puts the swap's window back when done.
+    let previous = ds2_save_redirect::open_redirect::window();
+    let asked = match &previous {
+        Some((asked, answer)) if same_path(answer, &source) => asked.clone(),
+        _ => source.clone(),
+    };
     let before = game::stamp(&destination);
-    if !ds2_save_redirect::open_redirect::arm(&source, &destination) {
+    if !ds2_save_redirect::open_redirect::arm(&asked, &destination) {
         log_line(format_args!(
             "{LOG_PREFIX} export REFUSED reason=cannot-arm-redirect -- the save was NOT requested"
         ));
         return;
     }
     if !game::request_save(system) {
-        ds2_save_redirect::open_redirect::disarm();
+        restore_window(previous.as_ref());
         return;
     }
     let Ok(mut pending) = PENDING.lock() else {
@@ -262,7 +278,27 @@ pub fn save_to_file() {
         stamp: before,
         flushed: false,
         ticks: 0,
+        restore: previous,
     });
+}
+
+/// Case-insensitive full-path equality, the comparison the redirect itself makes.
+fn same_path(a: &Path, b: &Path) -> bool {
+    a.as_os_str()
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&b.as_os_str().to_string_lossy())
+}
+
+/// Put back the window that was armed before this export's, or close it if there was none.
+fn restore_window(previous: Option<&(PathBuf, PathBuf)>) {
+    match previous {
+        Some((asked, answer)) => {
+            ds2_save_redirect::open_redirect::arm(asked, answer);
+        }
+        None => {
+            ds2_save_redirect::open_redirect::disarm();
+        }
+    }
 }
 
 /// The game-thread half: watch for the save, then copy. Registered with `ds2_menu_row::add_tick`.
@@ -315,9 +351,11 @@ fn finish(pending: &Pending, timed_out: bool) {
     //
     // The refusal above cannot catch this. It compares two paths that genuinely differ, and what
     // makes them one file is a detour underneath both.
-    // Drop the window first, so the next save the game makes goes back to its own container even
-    // if the reporting below were to fail.
+    // Close this export's window first, so the next save the game makes goes back to where it went
+    // before the press -- its own container, or a swap's staged copy -- even if the reporting below
+    // were to fail.
     let diverted = ds2_save_redirect::open_redirect::disarm();
+    restore_window(pending.restore.as_ref());
     let bytes = std::fs::metadata(&pending.destination).map(|meta| meta.len());
     match bytes {
         Ok(bytes) => log_line(format_args!(
