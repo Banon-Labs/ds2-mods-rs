@@ -130,6 +130,8 @@ fn run(thread_id: u32, stack_base: u64) {
     let mut context = Box::new(Context([0; CONTEXT_SIZE]));
     let mut stack = Box::new([0u64; STACK_WORDS]);
     let mut failed = 0u64;
+    let mut no_stack = 0u64;
+    let mut first_rsp = 0u64;
     while !STOP.load(Ordering::Relaxed) && samples.len() < MAX_SAMPLES {
         std::thread::sleep(INTERVAL);
         context.0[CONTEXT_FLAGS_OFFSET..][..4].copy_from_slice(&CONTEXT_CONTROL.to_le_bytes());
@@ -157,6 +159,12 @@ fn run(thread_id: u32, stack_base: u64) {
         // SAFETY: balances the successful suspend above.
         unsafe { ResumeThread(handle) };
         if read {
+            if first_rsp == 0 {
+                first_rsp = context_u64(&context, CONTEXT_RSP_OFFSET);
+            }
+            if words == 0 {
+                no_stack += 1;
+            }
             let caller = first_game_return(&stack[..words], text);
             samples.push((context_u64(&context, CONTEXT_RIP_OFFSET), caller));
         } else {
@@ -165,6 +173,13 @@ fn run(thread_id: u32, stack_base: u64) {
     }
     // SAFETY: the handle opened above, closed once.
     unsafe { CloseHandle(handle) };
+    // Why a caller can be missing: no stack was copied at all (the stopped `Rsp` was outside the
+    // bounds below), or a stack was copied and held no return address into the game's `.text`.
+    log(format_args!(
+        "{LOG_PREFIX} sampler stack first-rsp=0x{first_rsp:016x} stack-base=0x{stack_base:016x} \
+         text=0x{:016x}..0x{:016x} no-stack-copied={no_stack}",
+        text.0, text.1
+    ));
     report(&samples, failed);
 }
 
