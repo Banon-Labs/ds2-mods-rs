@@ -63,12 +63,21 @@ function run(pad) {
   }, SAMPLE_MS);
 }
 
-const finder = Interceptor.attach(POLL, {
-  onEnter(args) {
-    if (args[0].add(0x19c).readS32() < 0) return;
-    const pad = args[0];
-    finder.detach();
-    setTimeout(() => run(pad), 0);
-  },
-});
-console.log('[third-backend] attached poll=' + POLL);
+// `--config-json '{"pad":"0x..."}'` acts on that pad directly -- use the pointer the harness's own
+// `status` line names (`pad=0x...`). Without it the pad is found by hooking the poll, and on
+// 2026-09-26 that found a different object from the one the harness writes.
+const config = globalThis.__ER_FRIDA_CONFIG || {};
+if (config.pad) {
+  setTimeout(() => run(ptr(config.pad)), 0);
+  console.log('[third-backend] using the harness pad ' + config.pad);
+} else {
+  const finder = Interceptor.attach(POLL, {
+    onEnter(args) {
+      if (args[0].add(0x19c).readS32() < 0) return;
+      const pad = args[0];
+      finder.detach();
+      setTimeout(() => run(pad), 0);
+    },
+  });
+  console.log('[third-backend] attached poll=' + POLL);
+}
