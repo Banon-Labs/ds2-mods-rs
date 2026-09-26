@@ -7502,12 +7502,16 @@ pub const KATANA_SFX_NODE_ALIVE_OFFSET: usize = 0x58;
 /// The bit at [`KATANA_SFX_NODE_ALIVE_OFFSET`] that means "still playing". `0x4000_0000`.
 pub const KATANA_SFX_NODE_ALIVE_BIT: u32 = 0x4000_0000;
 
-/// `KatanaSfxSystem -> ids that did not resolve`. `+0x2b8`, an MSVC `std::map`-shaped red-black
-/// tree keyed by `u32`.
+/// `KatanaSfxSystem -> ids that have spawned`, with a count each. `+0x2b8`, an MSVC
+/// `std::map`-shaped red-black tree keyed by `u32`.
 ///
-/// **Membership is the difference between "not in this map" and "spawned and invisible"**, which
-/// is otherwise the same absence on the ground and the most expensive confusion in the whole
-/// feature to resolve by looking.
+/// The constant's name is the old reading, and it was wrong: this tree does not record failed
+/// lookups. Its only writer, `0x140beb400`, is called from the spawn `0x140beb670` (at
+/// `0x140beb8a7`/`0x140beb8bf`) only after `0x140a06580` says the built block is not empty (`jz`
+/// at `0x140beb87f`); an empty spawn goes to `0x140127240` and records nothing. So membership means
+/// "this id has spawned at least once", and the count at [`KATANA_SFX_SPAWNED_COUNT_OFFSET`] is how
+/// many times. Found statically on 2026-09-26, after a self-check reported every stone as "not
+/// resident" while logging each one as spawned.
 ///
 /// `0x140beb400(sys, id)` is the insert, and reading it gives the entire layout. It is a
 /// `lower_bound` descent followed by the usual found-test, so a read-only `contains` is the same
@@ -7520,8 +7524,12 @@ pub const KATANA_SFX_NODE_ALIVE_BIT: u32 = 0x4000_0000;
 /// ```
 ///
 /// A hit bumps a counter at `+0x20` and clears a byte at `+0x24` rather than inserting again, so
-/// the tree records how many times each id was asked for.
+/// the tree records how many times each id has spawned.
 pub const KATANA_SFX_MISSING_IDS_OFFSET: usize = 0x2b8;
+
+/// The `u32` spawn count in a node of the [`KATANA_SFX_MISSING_IDS_OFFSET`] tree. `+0x20`: the
+/// insert writes `1` for a new id (`0x140beb458`) and adds one for a known id (`0x140beb465`).
+pub const KATANA_SFX_SPAWNED_COUNT_OFFSET: usize = 0x20;
 
 /// `_Left` of a node in the [`KATANA_SFX_MISSING_IDS_OFFSET`] tree. `+0x00`.
 pub const KATANA_SFX_MISSING_LEFT_OFFSET: usize = 0x00;

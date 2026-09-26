@@ -396,15 +396,15 @@ pub(crate) unsafe fn spawn_reporting(
     direction: [f32; 3],
 ) -> Attempt {
     let quality = quality(system);
-    let missing_before = id_is_missing(system, sfx_id);
+    let count_before = spawn_count(system, sfx_id);
     // SAFETY: forwarded from this function's own contract.
     let handle = unsafe { spawn(system, sfx_id, position, direction) };
-    let missing_after = id_is_missing(system, sfx_id);
+    let count_after = spawn_count(system, sfx_id);
     Attempt {
         handle,
         quality,
-        missing_before,
-        missing_after,
+        count_before,
+        count_after,
     }
 }
 
@@ -463,31 +463,31 @@ impl Handle {
     }
 }
 
-/// Is `id` in the system's missing-effect tree?
+/// How many times the engine has spawned `id` in this system: `Some(0)` if never.
 ///
 /// `None` means the tree could not be walked -- a torn read or a depth blow-out -- which is a
 /// third answer and must not be reported as either of the other two.
 ///
-/// # What a `true` means
+/// # What the count means
 ///
-/// The engine looked this id up, did not find it, and recorded that. For a self-check this is the
-/// line between **"the effect is not resident in this map"** and **"it spawned and you cannot see
-/// it"**, which look identical on the ground and are the most expensive pair in the whole feature
-/// to separate by walking around.
+/// The tree at [`ds2_rva::KATANA_SFX_MISSING_IDS_OFFSET`] is written only by a spawn that built
+/// something, so a count that rises by one across an attempt is the engine itself saying the
+/// attempt worked. This used to be read as a tree of FAILED lookups, which turned every
+/// successful spawn into a "not resident in this map" line.
 ///
 /// The walk is the `lower_bound` descent out of `0x140beb400` with the insert arm removed, so it
 /// is read-only: no allocation, no engine call, no write. It is bounded by
 /// [`ds2_rva::KATANA_SFX_MISSING_MAX_DEPTH`] because the game is free to rebalance the tree
 /// while this reads it, and a torn read must end the walk rather than spin on the simulation
 /// thread.
-pub(crate) fn id_is_missing(system: usize, id: u32) -> Option<bool> {
+pub(crate) fn spawn_count(system: usize, id: u32) -> Option<u32> {
     // SAFETY: a live `KatanaSfxSystem`; every read below refuses an unmapped page.
     // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
     // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
     // moved or was freed answers None rather than faulting.
     let head = unsafe { safe_read_usize(system + ds2_rva::KATANA_SFX_MISSING_IDS_OFFSET)? };
     if head == 0 {
-        return Some(false);
+        return Some(0);
     }
     // The head is not a node: its `_Parent` is the root, and the tree is empty when that is the
     // head itself.
@@ -495,7 +495,7 @@ pub(crate) fn id_is_missing(system: usize, id: u32) -> Option<bool> {
     // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
     // moved or was freed answers None rather than faulting.
     let mut node = unsafe { safe_read_usize(head + ds2_rva::KATANA_SFX_MISSING_PARENT_OFFSET)? };
-    let mut best: Option<u32> = None;
+    let mut best: Option<(u32, usize)> = None;
     for _ in 0..ds2_rva::KATANA_SFX_MISSING_MAX_DEPTH {
         if node == 0 {
             return None;
@@ -507,7 +507,14 @@ pub(crate) fn id_is_missing(system: usize, id: u32) -> Option<bool> {
         if nil != 0 {
             // Off the bottom of the tree: `best` holds the lower bound, and the id is present
             // only if that bound is the id itself.
-            return Some(best == Some(id));
+            return match best {
+                // SAFETY: `found` is a live node of the tree just walked; the read refuses an
+                // unmapped page.
+                Some((key, found)) if key == id => unsafe {
+                    safe_read_u32(found + ds2_rva::KATANA_SFX_SPAWNED_COUNT_OFFSET)
+                },
+                _ => Some(0),
+            };
         }
         // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
         // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
@@ -519,7 +526,7 @@ pub(crate) fn id_is_missing(system: usize, id: u32) -> Option<bool> {
             // moved or was freed answers None rather than faulting.
             unsafe { safe_read_usize(node + ds2_rva::KATANA_SFX_MISSING_RIGHT_OFFSET)? }
         } else {
-            best = Some(key);
+            best = Some((key, node));
             // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
             // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
             // moved or was freed answers None rather than faulting.
@@ -531,20 +538,17 @@ pub(crate) fn id_is_missing(system: usize, id: u32) -> Option<bool> {
 
 /// Everything one spawn attempt found out, for the self-check's log.
 ///
-/// The three fields beyond the handle are the three ways a spawn can produce nothing while
-/// looking exactly like a success, and they have to be sampled AT the attempt -- the quality
-/// level moves with the frame's load, and the missing-effect tree is written by the attempt
-/// itself.
+/// The fields beyond the handle are sampled around the attempt itself: the quality level moves
+/// with the frame's load, and the spawn count is written by the attempt.
 pub(crate) struct Attempt {
     /// The live effect, or `None` if the block came back empty.
     pub(crate) handle: Option<Handle>,
     /// [`ds2_rva::KATANA_SFX_SYSTEM_QUALITY_OFFSET`] read immediately before the call.
     pub(crate) quality: Option<u32>,
-    /// Was the id already in the missing-effect tree before this attempt?
-    pub(crate) missing_before: Option<bool>,
-    /// Is it in there now? `false -> true` across one attempt is this attempt's own lookup
-    /// failing, which is the strongest evidence available that the id is not in this map.
-    pub(crate) missing_after: Option<bool>,
+    /// The engine's own count of this id's spawns before the attempt. See [`spawn_count`].
+    pub(crate) count_before: Option<u32>,
+    /// The count after it. One higher is the engine recording that this attempt built something.
+    pub(crate) count_after: Option<u32>,
 }
 
 impl Attempt {
@@ -557,15 +561,22 @@ impl Attempt {
         let throttled = self
             .quality
             .is_some_and(|level| level >= ds2_rva::KATANA_SFX_QUALITY_DROP_THRESHOLD);
-        let tree = match (self.missing_before, self.missing_after) {
-            (_, Some(false)) => "the id resolved".to_string(),
-            (Some(false), Some(true)) => {
-                "THIS attempt's lookup failed -- the effect is not resident in this map".to_string()
+        let counted = match (self.count_before, self.count_after) {
+            (Some(before), Some(after)) if after == before + 1 => {
+                format!("the engine counted this spawn ({after} so far)")
             }
-            (Some(true), Some(true)) => {
-                "the id was already recorded as missing before this attempt".to_string()
+            (Some(before), Some(after)) if after == before => {
+                "the engine did not count it -- nothing was built".to_string()
             }
-            _ => "missing-effect tree unreadable".to_string(),
+            _ => "spawn count unreadable".to_string(),
+        };
+        // The handle and the engine's count answer the same question from two sides; a
+        // disagreement is worth a line of its own rather than a guess at which one is right.
+        let rose = matches!((self.count_before, self.count_after), (Some(b), Some(a)) if a > b);
+        let tree = if self.handle.is_some() != rose {
+            format!("{counted}; CONTRADICTION: the handle and the engine's count disagree")
+        } else {
+            counted
         };
         match &self.handle {
             Some(_) => format!("id {id}: spawned, {quality}, {tree}"),
