@@ -94,6 +94,7 @@ pub mod invasion_path;
 pub mod inventory_sort;
 pub mod item_warn;
 pub mod menu_row;
+pub mod message_box;
 pub mod offline;
 pub mod save_block;
 pub mod save_redirect;
@@ -240,6 +241,19 @@ unsafe fn attach(module: *mut c_void) {
     if crash_config.enabled {
         crash_logging::install(module);
     }
+
+    // The message box watch, from `DllMain` and not from the Arxan callback with every other hook.
+    // A mod injected by `ds2-launcher.exe` runs its `DllMain` after this one and before the game's
+    // entry point, so a box it opens during its own initialisation would be gone past a hook
+    // installed at the entry point. See `message_box` for the ordering and the evidence for it.
+    // Unconditional: it changes no call, and `scripts/ds2-run.py` withholds its RUNNING block on
+    // the line it writes, so it is not a feature a config should be able to switch off.
+    //
+    // SAFETY: patches the six `user32` message box exports with detours of their exact
+    // signatures, called once under the `Once` in `DllMain`. `user32` is a static import of this
+    // DLL and is mapped already; nothing is loaded.
+    let watch = unsafe { message_box::install() };
+    log_line(format_args!("{watch}"));
 
     // Read the config file ONCE, here, and log what it resolved to. Everything below branches on
     // this value, so a run that was configured differently from how anyone believed says so in
