@@ -249,23 +249,11 @@ pub const FE_OPERATOR_TITLE_STATE_OFFSET: usize = 0x30;
 /// The title operator's state that waits for the boot fade to finish. `3`.
 pub const FE_OPERATOR_TITLE_STATE_FADE_WAIT: u32 = 3;
 
-/// Offset of the screen-fade object's pointer in `GameManagerImp`. `+0x1160`.
-///
-/// Read by both `0x14039a4d0` (start a fade) and `0x14039ab20` (is a fade running).
-pub const GAME_MANAGER_SCREEN_FADE_OFFSET: usize = 0x1160;
-
-/// The screen fade's current opacity, target opacity and remaining seconds: `+0x00`, `+0x04`,
-/// `+0x08`, all `f32`.
-///
-/// `0x140b23fe0` starts a fade to clear by writing the duration to `+0x08` and `0.0` to `+0x04`,
-/// and when the duration is not positive it also writes `0.0` to `+0x00` at once.
-/// `0x14039ab20` answers "running" while `+0x08 > 0`. Read live on 2026-09-26 in the world with
-/// `scripts/frida/title-fade.js`: `current=0 target=0 remaining=0`, a finished fade.
-pub const SCREEN_FADE_CURRENT_OFFSET: usize = 0x00;
-/// See [`SCREEN_FADE_CURRENT_OFFSET`].
-pub const SCREEN_FADE_TARGET_OFFSET: usize = 0x04;
-/// See [`SCREEN_FADE_CURRENT_OFFSET`].
-pub const SCREEN_FADE_REMAINING_OFFSET: usize = 0x08;
+// The screen fade the title operator waits on -- its pointer at `GameManagerImp+0x1160`, read by
+// `0x14039a4d0` (start a fade) and `0x14039ab20` (is a fade running), and its current, target and
+// remaining floats at `+0x00`, `+0x04`, `+0x08` as `0x140b23fe0` writes them -- is a layout, not
+// an address, so it lives in `darksouls2::game::game_manager` as `GameManagerImp::screen_fade`
+// and `ScreenFade`, pinned there by `offset_of!` tests.
 
 /// Phase-counter offset within `FeSubStateWarningNoCopy` and `FeSubStateTitleUserPolicy`.
 ///
