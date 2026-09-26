@@ -285,12 +285,12 @@ functions            88374
 arxan-redirected     311
 ```
 
-`docs/ARXAN-FOOTPRINT.md` records **286**. The two are not measuring the same population:
-ARXAN-FOOTPRINT counted over 95434 function starts recovered from `.pdata` on the deobfuscated
-image; this counts over the 88374 functions Ghidra has in the obfuscated one. **The delta of 25
-is not reconciled** and I did not reconcile it. What would: emit both lists and diff them
-(`Ds2ArxanStubs list` produces one; ARXAN-FOOTPRINT's scripts, which its own text says live in a
-scratchpad, would produce the other). Filed as follow-up work rather than hand-waved.
+`docs/ARXAN-FOOTPRINT.md` counts over `.pdata` records instead, on an image byte-identical to the
+one Ghidra has, and gets a different number. The difference is method, not bytes, and the two
+lists share fewer than two thirds of their entries: Ghidra sees redirected functions that have no
+unwind record, `.pdata` sees redirects at records Ghidra never made functions -- including
+chained, mid-function fragments. `scripts/ds2-arxan-redirects.py --ghidra` diffs them, and
+ARXAN-FOOTPRINT explains every class of difference. Neither list is the whole set.
 
 The finding that matters for bindings:
 
@@ -460,7 +460,6 @@ $ grep -E '\t(applySpEffect|getPlayerStruct|addSoul|...)$' /tmp/user-syms.tsv
 
 - **The `heapAllocator` `+0x50` question** (section 4). Suggestive, unproven. Settle with
   `Ds2Decomp` on the slots of `DLKRD::HeapAllocator<...>::vftable` at `0x1410d2e28`.
-- **311 vs 286 Arxan redirects** (section 5). Two different function universes, unreconciled.
 - **The MSVC STL version** (section 6d). `_Container_base0` and `_Nil`-padded `_Func_base` point at
   VS2012, but nothing has confirmed `size_of::<DLVector<usize>> == 0x20` on this image.
 - **DS2 paramdefs.** Whether a `tools/param-generator/params/darksouls2` set can be sourced at

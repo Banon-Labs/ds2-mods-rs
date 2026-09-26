@@ -123,10 +123,11 @@ way.
 
 ## The caveat that governs every address here
 
-These addresses come from the deobfuscated image, which is not the byte stream that runs. At the
-286 Arxan-redirected functions the deobf image shows recovered code where the live process has a
-stub. Vtable slots are data and are trustworthy; the function *at* a slot must be checked against
-the Arxan set before it is detoured. See `docs/ARXAN-FOOTPRINT.md`.
+These addresses come from the image on disk, which is not necessarily the byte stream that runs.
+The deobfuscated image is byte-identical to the shipped exe, so at an Arxan-redirected function it
+holds the same five-byte `jmp` into Arxan's section that the file does, not recovered code.
+Vtable slots are data and are trustworthy; the function *at* a slot must have its first bytes
+checked for a redirect before it is detoured. See `docs/ARXAN-FOOTPRINT.md`.
 
 ## The skip, as built
 

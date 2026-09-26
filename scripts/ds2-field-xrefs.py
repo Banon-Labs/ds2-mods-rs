@@ -32,9 +32,10 @@ short enough to actually read:
   `[rsp+disp32]` or an indexed array -- a stack slot, not an object field. `--allow-sib` keeps
   them for the cases where the field really is reached through an index.
 
-THE CAVEAT THAT GOVERNS EVERY ADDRESS HERE, same as its sibling scripts: the deobfuscated image
-is not the byte stream that runs. At the 286 Arxan-redirected entries this image shows recovered
-code where the live process holds a five-byte stub. See `docs/ARXAN-FOOTPRINT.md`.
+THE CAVEAT THAT GOVERNS EVERY ADDRESS HERE, same as its sibling scripts: the image is the file on
+disk, not necessarily the byte stream that runs, and at an Arxan-redirected entry it holds only a
+five-byte `jmp` into Arxan's section -- `darksoulsii-deobf.bin` is byte-identical to the shipped
+exe, redirects included. See `docs/ARXAN-FOOTPRINT.md`.
 """
 
 from __future__ import annotations
