@@ -26,8 +26,10 @@ import rego.v1
 # neither fix announces itself when it is working.
 #
 # The cost of the explicit form is one line per decision-exporting policy, and forgetting that line
-# means the policy is inert. scripts/check-cupcake-wasm-builtins.py exists to catch exactly that:
-# it fails when a policy exports a verb this file does not route. Add the line with the policy.
+# means the policy is inert. scripts/check-cupcake-routed-verbs.py, run by scripts/check.sh, is
+# what catches that: it fails when a policy exports a verb this file does not route. `opa test`
+# and scripts/check-cupcake-wasm-builtins.py both pass on an unrouted policy. Add the line with
+# the policy.
 
 evaluate := {
 	"halts": [decision | some decision in all_halts],
