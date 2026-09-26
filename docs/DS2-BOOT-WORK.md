@@ -863,6 +863,154 @@ The next refinement is small and is what turns this table into a target: record
 `GetCurrentThreadId` alongside the return address and compare against the thread that ran `DllMain`.
 Only sleeps on that thread are on the critical path.
 
+## What the frame loop waits for before the first substate: a two-second fade
+
+Static only. Every claim below is tagged **verified in binary** (with the addresses read) or
+**inferred**.
+
+The sampler put the boot thread in the frame loop's `Present` path for most of the window between
+input init and the first substate. That is the right answer to "where is the thread", and it does
+not say what the loop is waiting *for*. The answer is one state machine, and its slowest step is a
+timer.
+
+### The boot thread is idle in vsync, not blocked on a worker
+
+* `FUN_140af09b0` (main loop wrapper) calls `FUN_140af0090` (per-frame callbacks: Steam callbacks,
+  sound, then `KatanaMainApp`'s update through its vtable) and then `FUN_140aedb60` (draw and
+  present). **Verified in binary.**
+* `FUN_140aedb60` and `FUN_140af02f0` reach `FUN_140aeb990` -> `FUN_140960270` ->
+  `FUN_140f269d0`, which calls the swap chain's vtable slot `+0x40` -- `IDXGISwapChain::Present` --
+  with a sync interval that `FUN_140960270` maps from `[device+0x2bc]`: `1` unless that field
+  selects another mode. **Verified in binary** (the slot is `Present` by COM layout: IUnknown,
+  then IDXGIObject, then `GetDevice` at `+0x38`).
+* So the sampler's "in ntdll under the Present wrapper" is a thread waiting for the next vblank.
+  **Inferred** from the sync interval; it matches the sampled chain.
+* The per-frame delta handed to the scene updates comes from `FUN_140b4a380`: measured frame time,
+  clamped to no less than `1/60` (`0x3c888889`) and no more than `0.05` (`0x3d4ccccd`).
+  **Verified in binary.** Its forwarding from `FUN_140af0090` down to `GameManagerImp`'s update is
+  **inferred** from the parameter passing, not traced register by register through the Arxan-split
+  body at `0x1401c3303`.
+
+The loop is not stuck. It is running frames at the display rate, and something counted in frames
+is holding the title flow back.
+
+### The step that starts the title flow is `FeOperatorTitle::v4`
+
+`FeOperatorTitle` (vtable `0x1410bc578`) is built by the frontend root's setup `0x1405001b0`
+(`0x1405019b1`), which also calls its v1 immediately (`0x1405019e3`). That setup is called from
+`GameManagerImp`'s setup `0x1401c1ab0` at `0x1401c1cd9`. **Verified in binary.**
+
+v1 (`0x1400ef180`) requests two resources and stores their handles: `gamedata:/menu/17.febnd.dcx`
+at `+0x10` (format string at `0x14048b4e0`, argument `0x11`) and `param:/MovieTextParam.param` at
+`+0x20` (`0x14048c820`). It sets the state at `+0x30` to `1`. **Verified in binary.**
+
+v2 (`0x1400ef030`) builds the `FeStateFlow` (`0x1400ef700`, which passes the `FeStateTitle` factory
+`0x1400ef840` to `0x140104440` and stores the flow at `+0x38`). Building it does not start it.
+**Verified in binary.**
+
+v4 (`0x1400ef390`) is the per-frame tick, a switch on `[this+0x30]`:
+
+| state | waits while | then | addresses |
+| --- | --- | --- | --- |
+| `1` | the text repository `[0x141616cb0]` has a pending slot (`0x140504d90`), or either resource handle's `+0x34` is not `2` | calls its own vtable slot, state `2` | `0x1400ef669` -> `0x1400ef890` |
+| `2` | any operator in the frontend root `[GameManagerImp+0x22e0]` reports busy through its slot `+0x28` (`0x140500650`) | `0x14039a4d0(GameManagerImp, [0x1410acb14], 1)`, state `3` | `0x1400ef62e`..`0x1400ef65c` |
+| `3` | `0x14039ab20(GameManagerImp)` is true | `flow->v0(0)` -- **the flow starts at substate `0x00`**, state `4` | `0x1400ef606`..`0x1400ef621` |
+| `4` | -- | ticks the flow dispatcher `0x140104540` every frame | `0x1400ef41e` |
+| `5` | return-to-title path; writes `0x17` into the flow's `+0x48` | state `4` | `0x1400ef3c0` |
+
+All **verified in binary**. `0x00` (`TitleInitBranch`) has no update and branches straight to
+`0x01` on a cold boot, so the first enter of `0x01` follows state 3's exit within a frame
+(**inferred** from the earlier section on the cold-boot chain).
+
+### State 3 is a fade from black, and it lasts two seconds of frames
+
+* `[GameManagerImp+0x1160]` is a three-float fade: `+0x0` current opacity of a black overlay, `+0x4`
+  target, `+0x8` seconds remaining. Constructor `0x140b23fc0` zeroes all three. **Verified in
+  binary.**
+* `GameManagerImp` setup creates it (`0x1401c1d00`, stored at `0x1401c1d12`) and then calls
+  `0x14039a510` with duration `0.0` (`0x1401c1d7c`..`0x1401c1d85`), whose setter `0x140b24000`
+  writes target `1.0` and, for a non-positive duration, opacity `1.0`: **the screen is black from
+  setup.** **Verified in binary.**
+* State 2's exit calls `0x14039a4d0`, whose setter `0x140b23fe0` writes target `0` and remaining =
+  `[0x1410acb14]`, which is **`2.0f`**. **Verified in binary.**
+* The updater `0x140b24170(fade, delta)` subtracts the frame delta from remaining and moves opacity
+  toward target; on the frame remaining reaches zero it writes opacity = target. It is called from
+  `GameManagerImp`'s update (`0x1401c335c`..`0x1401c336b`). **Verified in binary.**
+* State 3's poll `0x14039ab20` is `remaining > 0`. **Verified in binary.**
+
+With the delta clamped at `1/60` or more, the fade is **exactly 120 frames at 60 Hz or faster, and
+longer than two seconds whenever frames take over 50 ms** (the clamp caps each frame's credit at
+`0.05`). Under vsync at 60 Hz that is two seconds of wall time with the boot thread sitting in
+`Present` -- which is what the sampler saw. The two seconds is **inferred** from the code, not
+measured; the ~3.0 s input-init-to-first-substate window is the measurement it would fit inside.
+
+The fade is to a screen with nothing on it yet: the flow, and so the "do not copy" screen, does not
+exist until the fade ends. **Inferred** from state 4 being the only caller of the flow dispatcher
+in v4.
+
+### The worker sleeps are not on this path
+
+* `0x140a63053` is inside `0x140a62e50`, the shared run loop of `DLNRD::Thread`. Its vtable slot is
+  used by `DLNRD::SteamSurveillance`, `DLNRD::EventManager`, `DLNRD::SurveillanceBase`,
+  `DLNRD::SessionManager`, `DLNRD::RankingManager` and `DLNRD::SteamRankingManager` (RTTI owners of
+  the vtables referencing it). The loop ticks the runnable, prints a `"%s haYuan Qi ..."` ("%s is
+  alive") heartbeat on a timer, and sleeps `[this+0x44]` between ticks. **Verified in binary.**
+  These are network-service threads, and several of them sleeping at once is why their total
+  exceeds the window.
+* `0x1409e0296` is inside `0x1409dfef0`, `DLMO::MOFmodSoundManager`'s thread: `FMOD::EventSystem`
+  update, then sleep the remainder of its period. **Verified in binary.**
+* None of the four gates in v4 reads anything these threads own: the gates read the text
+  repository's pending slots, the two resource handles' `+0x34`, the frontend operators' busy
+  slot, and the fade. **Verified in binary** for what the gates read. That no network or sound
+  thread *writes* those fields is **inferred** -- the writer of a resource handle's `+0x34` was not
+  traced, and would be the file-loading side.
+
+So **the 16 ms nap at `0x140a63053` is not on the critical path**: a network thread waking sooner
+would not start the title flow sooner. The same holds for the FMOD thread.
+
+### What a mod could change
+
+The pooled literal must not be touched: `0x1410acb14` is the image's shared `2.0f`, referenced from
+all over the image, the same trap as `1.0f` above.
+
+The cheapest change is a MinHook detour on `FeOperatorTitle::v4` at `0x1400ef390`. The entry holds
+its own prologue (`40 57 48 83 ec 40`), not an Arxan redirect -- **verified** with
+`scripts/ds2-arxan-chain.py`. Before calling the original:
+
+```rust
+// state 3 = waiting for the fade from black; finish it so this same call starts the flow
+if read::<u32>(op + 0x30) == 3 {
+    let gm = read::<usize>(base + 0x0161_48f0);           // GameManagerImp
+    if gm != 0 {
+        let fade = read::<usize>(gm + 0x1160);
+        if fade != 0 {
+            write::<f32>(fade + 0x8, 0.0);                  // remaining
+            write::<f32>(fade + 0x0, read::<f32>(fade + 0x4)); // opacity = target
+        }
+    }
+}
+original(op);
+```
+
+Both writes are required. Zeroing only the remaining time leaves opacity at `1.0`, and the updater
+does nothing once remaining is zero, so the draw path `0x14039a850` would keep painting black over
+the title for good.
+
+Only the timer is removed. States 1 and 2 still wait on the resources, the text repository and the
+frontend operators, so nothing starts before its data is there. State 3 is reached only from state
+2 (`0x1400ef65c` is its only writer in v4); the path into state 5 calls the same setter with `0.0`
+(`0x1400ef581`) and never enters state 3.
+
+**Predicted, not measured:** about two seconds off the ~3.0 s window at 60 Hz, more on a boot
+whose frames run slower than 20 fps. The visible cost is the black screen ending in one frame
+instead of fading over an empty frame.
+
+The runtime check that would confirm the prediction before anyone writes the detour: have the boot
+timeline stamp each change of `[operator+0x30]` (the operator is at `[[GameManagerImp+0x22e0]+0xd0]`
+-- **inferred** that the frontend root built by `0x1405001b0` is the `+0x22e0` object, since state
+2's scan of that object covers the slot `+0x30` where setup also stores the operator). The span from
+3 to 4 is the fade; the span from 1 to 3 is the real loading.
+
 ## The caveat that governs every address here
 
 These come from the deobfuscated image, which is not the byte stream that runs. Vtables and the
