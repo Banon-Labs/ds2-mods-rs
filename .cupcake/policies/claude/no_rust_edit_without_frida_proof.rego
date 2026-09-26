@@ -131,8 +131,12 @@ proven if {
 	proven_for(file_path)
 }
 
+#
+# Keyed on the Frida verdict's own first field, `agent=`, not on the bare word. Since the build
+# instrument (2026-09-26) there are two scoped kinds, and a third added later without a clause here
+# must be refused, not read as the unscoped Frida verdict that opens the whole tree.
 proven_for(_) if {
-	startswith(evidence, "PROVEN")
+	startswith(evidence, "PROVEN agent=")
 	not telemetry_verdict
 }
 
@@ -165,15 +169,26 @@ telemetry_verdict if {
 	startswith(evidence, "PROVEN telemetry")
 }
 
+# The third instrument, 2026-09-26: a failed build. A linker or compiler error is a defect neither
+# Frida nor telemetry can see -- a DLL that does not link never runs -- and the build is what
+# measures it. `scripts/ds2-frida-evidence.py --record-build` writes it only when the quoted line is
+# a whole rustc/lld error line in a failed cargo log, the error's own `-->` / `>>> referenced by`
+# lines name a file under `crates/<crate>/`, and the log is newer than the last committed Rust
+# change. It is scoped exactly as telemetry is, so it shares that rule's name and its one-crate
+# match below.
+telemetry_verdict if {
+	startswith(evidence, "PROVEN build")
+}
+
 # Anchored at the front of the verdict: everything to the right of the crate name is free text
 # from a log, and free text must not be able to impersonate the field that decides scope.
 licensed_crate := name if {
-	matches := regex.find_all_string_submatch_n(`^PROVEN telemetry crate=([A-Za-z0-9_-]+)(?: |$)`, evidence, 1)
+	matches := regex.find_all_string_submatch_n(`^PROVEN (?:telemetry|build) crate=([A-Za-z0-9_-]+)(?: |$)`, evidence, 1)
 	count(matches) == 1
 	name := matches[0][1]
 }
 
-block_reason := "🧁 Cupcake blocked a Rust edit with no Frida measurement behind it. AGENTS.md: \"The order is Frida, then Frida, then Frida, and only then a DLL: prototype with it, run the experiment with it, and fix the thing with it if a hook can. Build a DLL when the mechanism is already known and the code is the product, never to find something out.\"\n\nGo and look first:\n  python3 scripts/ds2-frida-up.py\n  uv run --with frida python3 scripts/ds2-frida-watch.py --agent scripts/frida/<agent>.js\n\nThe watch records what it saw on exit, and `python3 scripts/ds2-frida-evidence.py --check` is what opens this gate. It needs a session that attached to a pid and received at least one message -- a watch that observed nothing did not look at anything. A commit spends the evidence, so the next change needs its own measurement.\n\nIf the mechanism is inside one of OUR DLLs rather than in the game -- an unexported static, a `pub(crate)` seam, which of our functions calls which of our setters -- Frida has nothing to attach to, and the instrument that reaches it is the shell's own in-process telemetry from a live run:\n  python3 scripts/ds2-frida-evidence.py --record-telemetry --crate <crate> --log <the run's log> --line '<a line from it, verbatim>'\nThe line must be in that log word for word and the log must be newer than the last committed Rust change. It opens that ONE crate.\n\nIf neither instrument can reach it, say so in one sentence and say what can. Do not edit around this by narrowing the change until it looks harmless.\n\nEditable without proof: `scripts/`, `.cupcake/`, docs, and every non-Rust file."
+block_reason := "🧁 Cupcake blocked a Rust edit with no Frida measurement behind it. AGENTS.md: \"The order is Frida, then Frida, then Frida, and only then a DLL: prototype with it, run the experiment with it, and fix the thing with it if a hook can. Build a DLL when the mechanism is already known and the code is the product, never to find something out.\"\n\nGo and look first:\n  python3 scripts/ds2-frida-up.py\n  uv run --with frida python3 scripts/ds2-frida-watch.py --agent scripts/frida/<agent>.js\n\nThe watch records what it saw on exit, and `python3 scripts/ds2-frida-evidence.py --check` is what opens this gate. It needs a session that attached to a pid and received at least one message -- a watch that observed nothing did not look at anything. A commit spends the evidence, so the next change needs its own measurement.\n\nIf the mechanism is inside one of OUR DLLs rather than in the game -- an unexported static, a `pub(crate)` seam, which of our functions calls which of our setters -- Frida has nothing to attach to, and the instrument that reaches it is the shell's own in-process telemetry from a live run:\n  python3 scripts/ds2-frida-evidence.py --record-telemetry --crate <crate> --log <the run's log> --line '<a line from it, verbatim>'\nThe line must be in that log word for word and the log must be newer than the last committed Rust change. It opens that ONE crate.\n\nIf the defect is a compiler or linker error -- the DLL does not build, so nothing runs for either instrument to see -- the build is the instrument:\n  python3 scripts/ds2-frida-evidence.py --record-build --crate <crate> --log <the failed cargo build's log> --line '<the error line, whole, e.g. lld-link: error: undefined symbol: X>'\nThe line must be a whole rustc/lld error line of a failed cargo build, its own `-->` / `>>> referenced by` lines must name a file under crates/<crate>/, and the log must be newer than the last committed Rust change. It opens that ONE crate.\n\nIf no instrument can reach it, say so in one sentence and say what can. Do not edit around this by narrowing the change until it looks harmless.\n\nEditable without proof: `scripts/`, `.cupcake/`, docs, and every non-Rust file."
 
 # What the refusal quotes back. The three cases are worth telling apart: a verdict line is the
 # reader answering, an absent signal is nobody having asked, and a failure record is the reader
