@@ -85,6 +85,8 @@ ds2-hp-gauge.workspace = true
 ds2-input-harness.workspace = true
 ds2-hotkey-config.workspace = true
 ds2-seamless.workspace = true
+# Off by default; installed only when `[soul_memory_guard] enabled = true`.
+ds2-soul-memory-guard.workspace = true
 ds2-rva.workspace = true
 dearxan = { workspace = true, features = ["disabler", "rayon"] }
 

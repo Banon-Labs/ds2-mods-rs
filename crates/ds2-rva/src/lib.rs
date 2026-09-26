@@ -5295,6 +5295,68 @@ pub const PLAYER_LEVEL_UP_SOULS_LEVEL_OFFSET: usize = 0x00;
 /// with a nonzero gradient is not a per-level list and must not be read as one.
 pub const PLAYER_LEVEL_UP_SOULS_COST_OFFSET: usize = 0x08;
 
+/// The game's own level-up price. RVA `0x0038d140`. `fn(u32 level) -> i32`.
+///
+/// Returns the souls it costs to go from `level` to `level + 1`, the same number the level-up menu
+/// charges (`FUN_1401fb970`) and refunds (`FUN_1401fb800`). It takes the level in ECX and nothing
+/// else: it loads [`GAME_MANAGER_IMP`] itself, takes `CharacterManager` at
+/// [`GAME_MANAGER_CHARACTER_MANAGER_OFFSET`], and asks [`PARAM_ROW_BY_INDEX`] for rows of the
+/// `PlayerLevelUpSoulsParam` held at [`CHARACTER_MANAGER_LEVEL_UP_SOULS_PARAM_OFFSET`].
+///
+/// Read in full at `0x14038d140`: row `level` is tried first and an exact level match returns its
+/// souls. Otherwise the index is halved until a row exists whose level is at or below the one
+/// asked for, then walked forward while the next row is still below it, and the answer is
+/// `souls + (level - row.level) * [row + 4]`.
+///
+/// # What a caller must check first
+///
+/// It checks nothing on the way in. `[GAME_MANAGER_IMP]`, `+0x18` and `+0x580` are dereferenced
+/// without a null test, and the halving loop only ends on a row whose level is at or below the one
+/// asked for: if row 0 were missing, or above the level, the index would sit at zero and the loop
+/// would never exit. Measured live with `scripts/frida/soul-guard-inputs.js`: row 0 is level 0 with
+/// souls 0, so the loop ends for every level of one or more.
+///
+/// Not Arxan-redirected: `scripts/ds2-arxan-chain.py 0x14038d140` terminates at hop 0.
+pub const PLAYER_LEVEL_UP_SOULS_COST: u32 = 0x0038_d140;
+
+/// The bytes [`PLAYER_LEVEL_UP_SOULS_COST`] begins with.
+///
+/// `mov [rsp+0x10],rbx; mov [rsp+0x18],rbp; push rdi`. Read from the live process by
+/// `scripts/frida/soul-guard-inputs.js`.
+pub const PLAYER_LEVEL_UP_SOULS_COST_PROLOGUE: [u8; 11] = [
+    0x48, 0x89, 0x5c, 0x24, 0x10, 0x48, 0x89, 0x6c, 0x24, 0x18, 0x57,
+];
+
+/// The row accessor [`PLAYER_LEVEL_UP_SOULS_COST`] calls. RVA `0x00358b90`.
+///
+/// `fn(CharacterManager*, i32 index) -> *const Row`. Reads `[CharacterManager + 0x580]`, then the raw file at [`PARAM_FILE_RESOURCE_FILE_OFFSET`] of
+/// that container, and returns the row at position `index`, or null when the file is absent or the
+/// index is not below the `u16` count at [`PARAM_ROW_COUNT_OFFSET`]. The byte at
+/// [`PARAM_FILE_TABLE_SHAPE_OFFSET`] picks the row-index layout: non-zero is the `0x18`-stride
+/// table [`PARAM_ROW_STRIDE`] describes, with a `u64` data offset at [`PARAM_ROW_DATA_OFFSET`];
+/// zero is an 8-stride table with a `u32` offset at `+4`. Recorded here for the precondition
+/// checks a caller of [`PLAYER_LEVEL_UP_SOULS_COST`] makes; nothing calls it directly.
+pub const PARAM_ROW_BY_INDEX: u32 = 0x0035_8b90;
+
+/// `CharacterManager -> PlayerLevelUpSoulsParam` container (a `ParamFileResourceObject`). `+0x580`.
+///
+/// The first load in [`PARAM_ROW_BY_INDEX`] (`mov rdx,[rcx+0x580]`), with `CharacterManager` in RCX
+/// as [`PLAYER_LEVEL_UP_SOULS_COST`] passes it. Live on 2026-09-26 it held the 852-row table.
+pub const CHARACTER_MANAGER_LEVEL_UP_SOULS_PARAM_OFFSET: usize = 0x580;
+
+/// `ParamFileResourceObject -> raw param file`. `+0xD8`.
+///
+/// The container's `Memory` object sits at `+0xC8` and its `mem_ptr` at `+0x10` within it.
+/// [`PARAM_ROW_BY_INDEX`] tests `[container + 0xd8]` for null, then loads the same pointer as
+/// `[container + 0xc8 + 0x10]`.
+pub const PARAM_FILE_RESOURCE_FILE_OFFSET: usize = 0xD8;
+
+/// Byte in a raw param file that picks the row-index layout. `+0x2D`.
+///
+/// `cmp byte [rdx+0x2d],1` in [`PARAM_ROW_BY_INDEX`]: non-zero selects the wide table. Read as `4`
+/// for `PlayerLevelUpSoulsParam` in a live process on 2026-09-26.
+pub const PARAM_FILE_TABLE_SHAPE_OFFSET: usize = 0x2D;
+
 // =================================================================================================
 // GRANTING AN ITEM -- the game's own function
 //
@@ -5864,6 +5926,23 @@ pub const PLAYER_PARAM_ADD_SOULS: u32 = 0x0038_ab40;
 /// not do. It is here so the next reader does not re-derive "there is no such function" from
 /// `AddSouls` alone, which is exactly how the wrong claim got written the first time.
 pub const PLAYER_PARAM_RESTORE_FROM_RECORD: u32 = 0x0038_ad20;
+
+/// The bytes [`PLAYER_PARAM_RESTORE_FROM_RECORD`] begins with.
+///
+/// `push rbp; push rbx; push rdi; mov rbp,rsp; sub rsp,0x20`. Read from the live process by
+/// `scripts/frida/soul-guard-inputs.js`; `scripts/ds2-arxan-chain.py 0x14038ad20` reports the same
+/// bytes at hop 0, so it is not Arxan-redirected.
+///
+/// It returns `mov al,1`; the upper bytes of RAX are whatever the last call left there, so a detour
+/// passes the whole register through rather than widening a byte.
+///
+/// Its stats go in through [`PLAYER_PARAM_SET_ALL_STATS`], whose recompute (`0x14038d6d0`, a thunk
+/// to `0x141b3f700`) ends in `FUN_14038e310` and writes [`PLAYER_PARAM_SOUL_LEVEL_OFFSET`]. So once
+/// it returns, the level is the one derived from the loaded stats and the soul counters are the
+/// record's.
+pub const PLAYER_PARAM_RESTORE_FROM_RECORD_PROLOGUE: [u8; 11] = [
+    0x40, 0x55, 0x53, 0x57, 0x48, 0x8b, 0xec, 0x48, 0x83, 0xec, 0x20,
+];
 
 /// The four bytes [`PLAYER_PARAM_ADD_SOULS`] must begin with. `sub rsp,0x28`, then `mov rax,[rcx]`.
 pub const PLAYER_PARAM_ADD_SOULS_PROLOGUE: [u8; 7] = [0x48, 0x83, 0xec, 0x28, 0x48, 0x8b, 0x01];

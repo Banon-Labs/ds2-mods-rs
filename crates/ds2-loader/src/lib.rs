@@ -98,6 +98,7 @@ pub mod offline;
 pub mod save_block;
 pub mod save_redirect;
 pub mod seamless;
+pub mod soul_memory_guard;
 pub mod title_menu;
 pub mod title_skip;
 pub mod voice_chat;
@@ -334,6 +335,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_hp_gauge();
                 install_invasion_path();
                 install_input_harness();
+                install_soul_memory_guard();
                 arm_fault(crash_config);
             });
         },
@@ -375,6 +377,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_hp_gauge();
                 install_invasion_path();
                 install_input_harness();
+                install_soul_memory_guard();
                 arm_fault(crash_config);
             });
         },
@@ -888,6 +891,30 @@ fn install_invasion_path() {
         log_line(format_args!(
             "{} NOT INSTALLED -- no overlay this session, and the frame is untouched",
             ds2_invasion_path::LOG_PREFIX
+        ));
+    }
+}
+
+/// Judge each loaded character's soul memory against its level, if `<Game>/ds2-mods.toml` asked.
+///
+/// Off unless `[soul_memory_guard] enabled = true`. It logs and changes nothing: see
+/// `ds2-soul-memory-guard` for why a line is the whole feature.
+fn install_soul_memory_guard() {
+    let config = soul_memory_guard::SoulMemoryGuardConfig::load();
+    log_line(format_args!("{}", config.describe()));
+    if !config.enabled {
+        return;
+    }
+    ds2_soul_memory_guard::set_logger(log_line);
+    // SAFETY: the detour target and the called function are recorded in `ds2-rva` with the bytes
+    // they must begin with, `scripts/ds2-arxan-chain.py` reports a clean prologue at both, and the
+    // crate re-reads those bytes and patches nothing on a mismatch. Called from the post-Arxan
+    // position, like every other install here.
+    let outcome = unsafe { ds2_soul_memory_guard::install() };
+    if !outcome.installed {
+        log_line(format_args!(
+            "{} NOT INSTALLED -- no character load is judged this run",
+            ds2_soul_memory_guard::LOG_PREFIX
         ));
     }
 }

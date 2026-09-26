@@ -104,6 +104,29 @@ least `cost(S) + cost(S + 1) + ... + cost(N - 1)` souls, and soul memory
   derived value (HP, stamina, defences, resistances) and looks each one up in
   `PhysicalStatsPerLevelStatValuesParam`. It never touches the soul level.
 
+## The guard as built
+
+`ds2-soul-memory-guard`, switched on by `[soul_memory_guard] enabled = true` (`scripts/ds2-run.py
+--soul-memory-guard`), detours `PlayerParam::RestoreFromRecord` (`0x14038ad20`). That function is
+the gameplay load's only writer of the soul counters (see `docs/DS2-SOUL-MEMORY-ON-LOAD.md`), and
+its first call is `assignAttributes` (`0x14038aca0`), whose recompute ends in `FUN_14038e310`. So
+after it returns, `+0xD0` holds the level derived from the loaded stats and `+0xF4`/`+0xFC` hold
+the record's soul memory (**verified in binary**). The guard then calls `FUN_14038d140` for each
+step from level 14 to the character's level, compares the sum with `+0xF4`, and logs one line. It
+refuses nothing: no safe way to turn a load away from inside the spawn was found.
+
+Read live on 2026-09-26 with `scripts/frida/soul-guard-inputs.js` (read-only):
+
+- `PlayerLevelUpSoulsParam` at `[[GameManagerImp]+0x18]+0x580`, file at `+0xD8`: 852 rows, shape
+  byte `4` (wide table). Row 0 is `{level 0, souls 0}`, row 1 `{1, 500}`, row 2 `{2, 528}`, row 3
+  `{3, 557}`, row 851 `{999, 100000}`. Row 0 at level 0 is what makes `FUN_14038d140`'s halving loop
+  end for every level of one or more.
+- The `i32` at row `+4` read as `1`, `2`, `3` and `999` on those rows, the same as the level, and
+  not `0` as the note on `PLAYER_LEVEL_UP_SOULS_COST_OFFSET` in `ds2-rva` says. It only matters for
+  a level with no exact row, which no level up to 838 is.
+- A character at level 13 (stats summing to 66) held a soul memory of 1650. Summed from level 1 its
+  floor is 8192, so a start of 1 would call a fresh character short; summed from 14 it is 0.
+
 ## Open
 
 - Whether the game trusts a stored level that disagrees with the stats, once the character is in

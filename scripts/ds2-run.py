@@ -315,6 +315,13 @@ KEY_ITEM_WARN_ENABLED = "enabled"
 #: Mirrors `LOG_PREFIX` in `crates/ds2-item-warn/src/lib.rs`. Grep for it when a run disappoints.
 ITEM_WARN_LOG_PREFIX = "ds2-item-warn:"
 
+#: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/soul_memory_guard.rs`. OFF by
+#: default here, matching the DLL; `--soul-memory-guard` turns it on.
+SOUL_MEMORY_GUARD_SECTION = "soul_memory_guard"
+KEY_SOUL_MEMORY_GUARD_ENABLED = "enabled"
+#: Mirrors `LOG_PREFIX` in `crates/ds2-soul-memory-guard/src/lib.rs`.
+SOUL_MEMORY_GUARD_LOG_PREFIX = "ds2-soul-memory-guard:"
+
 #: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/hp_gauge.rs`.
 #:
 #: ON here and off in the DLL: the DLL's default is the game as shipped, and this launcher's is the
@@ -1184,6 +1191,7 @@ def config_text(
     menu_rows_all: bool = False,
     menu_rows_no_save: bool = False,
     launcher_dlls: tuple[str, ...] = (),
+    soul_memory_guard: bool = False,
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
@@ -1723,6 +1731,12 @@ def config_text(
 # Grep the log for `{HP_GAUGE_LOG_PREFIX}`.
 {KEY_HP_GAUGE_ENABLED} = {str(hp_gauge).lower()}
 
+[{SOUL_MEMORY_GUARD_SECTION}]
+# STARTUP-ONLY. On every character load, `ds2-soul-memory-guard` logs whether the character's soul
+# memory could have paid for its soul level. It logs and refuses nothing. OFF unless
+# `--soul-memory-guard`. Grep the log for `{SOUL_MEMORY_GUARD_LOG_PREFIX}`.
+{KEY_SOUL_MEMORY_GUARD_ENABLED} = {str(soul_memory_guard).lower()}
+
 [{SEAMLESS_SECTION}]
 # A SECOND MOD, written by someone else, loaded into this same process.
 #
@@ -1947,6 +1961,7 @@ def write_config(
     menu_rows_all: bool = False,
     menu_rows_no_save: bool = False,
     launcher_dlls: tuple[str, ...] = (),
+    soul_memory_guard: bool = False,
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
@@ -1988,6 +2003,7 @@ def write_config(
         menu_rows_all,
         menu_rows_no_save,
         launcher_dlls,
+        soul_memory_guard=soul_memory_guard,
     )
     path.write_text(text, encoding="utf-8")
     return path, text
@@ -2101,6 +2117,7 @@ def dry_run(
     menu_rows_all: bool = False,
     menu_rows_no_save: bool = False,
     launcher_dlls: tuple[str, ...] = (),
+    soul_memory_guard: bool = False,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
@@ -2160,6 +2177,7 @@ def dry_run(
             menu_rows_all,
             menu_rows_no_save,
             launcher_dlls,
+            soul_memory_guard=soul_memory_guard,
         ):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
         else:
@@ -2215,6 +2233,7 @@ def dry_run(
                 menu_rows_all=menu_rows_all,
                 menu_rows_no_save=menu_rows_no_save,
                 launcher_dlls=launcher_dlls,
+                soul_memory_guard=soul_memory_guard,
             ),
             indent="[dry-run]   | ",
         )
@@ -2701,6 +2720,7 @@ def launch(
     menu_rows_all: bool = False,
     menu_rows_no_save: bool = False,
     launcher_dlls: tuple[str, ...] = (),
+    soul_memory_guard: bool = False,
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
@@ -2755,6 +2775,7 @@ def launch(
         menu_rows_all,
         menu_rows_no_save,
         launcher_dlls,
+        soul_memory_guard=soul_memory_guard,
     )
     print(f"[config] {config_path}")
 
@@ -4228,6 +4249,16 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--soul-memory-guard",
+        dest="soul_memory_guard",
+        action="store_true",
+        help=(
+            "log, on every character load, whether that character's soul memory could have paid "
+            "for its soul level. Logs only; the load is never refused. OFF without this flag, "
+            "matching the DLL."
+        ),
+    )
+    parser.add_argument(
         "--seamless",
         dest="seamless",
         action=argparse.BooleanOptionalAction,
@@ -4546,6 +4577,7 @@ def main() -> int:
             args.menu_rows_all,
             args.menu_rows_no_save,
             tuple(args.launcher_dll),
+            soul_memory_guard=args.soul_memory_guard,
         )
     return launch(
         args.probe,
@@ -4586,6 +4618,7 @@ def main() -> int:
         args.menu_rows_all,
         args.menu_rows_no_save,
         tuple(args.launcher_dll),
+        soul_memory_guard=args.soul_memory_guard,
     )
 
 
