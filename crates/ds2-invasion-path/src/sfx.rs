@@ -134,13 +134,42 @@ type ResourceStart = unsafe extern "system" fn(usize);
 type EffectLookup = unsafe extern "system" fn(usize, u32) -> usize;
 type Invalidate = unsafe extern "system" fn(usize, u32);
 
+/// Whether the resource manager's effect table still holds `id`.
+///
+/// A registration does not outlive the table it went into: after a return to the title and a
+/// load, measured 2026-09-26, the lit Prism Stone copy registered in the first world was refused
+/// on every spawn in the second, 27 times in a row, while the stock stones went on working. So a
+/// cached registration is checked with this before it is spawned. Answers `false` when anything
+/// on the way is unreadable, which makes the caller register again rather than spawn blind.
+///
+/// # Safety
+///
+/// Game thread only, with `system` the live `KatanaSfxSystem`.
+pub(crate) unsafe fn is_registered(system: usize, id: u32) -> bool {
+    // SAFETY: the RVA is the lookup `register_effect` uses, with the prototype of its alias.
+    let Some(lookup) = (unsafe { entry::<EffectLookup>(ds2_rva::SFX_EFFECT_LOOKUP) }) else {
+        return false;
+    };
+    // SAFETY: a plain field of the live system, read through the fault-tolerant reader.
+    let Some(manager) =
+        (unsafe { safe_read_usize(system + ds2_rva::KATANA_SFX_SYSTEM_RESOURCE_MANAGER_OFFSET) })
+            .filter(|p| *p != 0)
+    else {
+        return false;
+    };
+    // SAFETY: game thread; `manager` is the live resource manager, and the lookup only reads it.
+    unsafe { lookup(manager, id) != 0 }
+}
+
 /// Make `id` spawnable from `ffx`, a `DLsE` effect whose own id is already `id`.
 ///
 /// The same calls the engine makes when it builds a bundle member on first use, without the
 /// bundle: allocate and construct an `SfxEffectData`, parse the bytes into it, and construct an
 /// `SfxEffectResourceObject` named `f%07d.ffx` -- the constructor is what inserts `id` into the
 /// resource manager's effect table. Both reference counts on the resource are raised and never
-/// dropped, so nothing on an area change or a purge frees it. Last, the FX core's cached entry
+/// dropped, so a purge does not free it -- but a return to the title and a load leaves the id
+/// unresolvable all the same (measured 2026-09-26), so callers check [`is_registered`] before
+/// trusting an earlier registration. Last, the FX core's cached entry
 /// for `id` is dropped, because a spawn of an id before it existed leaves a permanent "no such
 /// effect" placeholder that registration alone does not clear.
 ///

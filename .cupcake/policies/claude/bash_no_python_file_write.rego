@@ -486,6 +486,13 @@ repo_roots contains root if {
 	root := absolute_dir(object.get(input, "cwd", ""))
 }
 
+# The signal's lines 3 and on: this repository's other git worktrees, from git's own record.
+repo_roots contains root if {
+	some index, line in signal_lines
+	index >= 2
+	root := absolute_dir(line)
+}
+
 # A root usable as a path prefix: absolute, non-empty, not `/` (which would
 # exempt every `/anything/scripts/*.py` on the filesystem), and with any trailing
 # slash removed so `concat(root, "/")` cannot produce `//`.

@@ -29,6 +29,7 @@ fn main() {
             ds2_sl2_core::SlotState::Empty => "empty",
             ds2_sl2_core::SlotState::Blank => "blank",
             ds2_sl2_core::SlotState::Occupied => "occupied",
+            ds2_sl2_core::SlotState::Hollow => "hollow",
         };
         let extra = if slot.state == ds2_sl2_core::SlotState::Empty {
             String::new()

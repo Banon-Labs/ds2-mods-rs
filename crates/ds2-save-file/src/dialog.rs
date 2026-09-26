@@ -219,6 +219,9 @@ pub unsafe fn show(request: &Request<'_>) -> Pick {
         flags_ex: 0,
     };
 
+    // The game thread stops presenting frames until the player answers, on purpose; a watchdog
+    // reading that as a hang is told otherwise for exactly the length of the call.
+    let modal = ds2_game_base::modal::enter();
     // SAFETY: every pointer in `arg` is either null or borrowed from a live local that outlives this
     // call, `file` is `max_file` units long, and `struct_size` is this struct's own size.
     let answered = unsafe {
@@ -227,6 +230,7 @@ pub unsafe fn show(request: &Request<'_>) -> Pick {
             Intent::Save => GetSaveFileNameW(&mut arg),
         }
     };
+    drop(modal);
     // BEFORE ANY RETURN, on every path. A modal dialog owned by the game window disables that window
     // for the length of the call and hands activation to the dialog; when the dialog goes away the
     // activation does not always come back on its own, and a DARK SOULS II that is running but not

@@ -350,7 +350,7 @@ struct Tick {
 /// `Game/sfx/sfx9999.ffxbnd.dcx`, its sparkle child becomes a point light taken from effect 181
 /// in the same bundle and its glow's colour loops ([`crate::stone_effect`]), and the result is
 /// registered under [`crate::stone_effect::stripped_id`]. That is one file read and two inflates
-/// per colour per process, on the game thread, the first time a trail of that colour is laid. Any failure is logged once and that colour keeps the stock stone rather than drawing
+/// per colour per effect table (a return to the title builds a new one), on the game thread, the first time a trail of that colour is laid there. Any failure is logged once and that colour keeps the stock stone rather than drawing
 /// nothing. An id that is not a Prism Stone is returned unchanged.
 fn stripped_stone(
     stripped: &mut std::collections::HashMap<u32, Option<u32>>,
@@ -359,6 +359,18 @@ fn stripped_stone(
 ) -> u32 {
     if !ds2_rva::PRISM_STONE_SFX_IDS.contains(&stock) {
         return stock;
+    }
+    // A registration belongs to one effect table, and a return to the title builds a new one. A
+    // cached id the table no longer holds is dropped here and registered again below.
+    if let Some(Some(id)) = stripped.get(&stock).copied()
+        // SAFETY: game thread, mid-simulation, and `system` is the live `KatanaSfxSystem`.
+        && !unsafe { sfx::is_registered(system, id) }
+    {
+        log(format_args!(
+            "Prism Stone {stock}: effect {id} is no longer in the effect table (a new world \
+             since it was registered) -- registering it again"
+        ));
+        stripped.remove(&stock);
     }
     let resolved = *stripped.entry(stock).or_insert_with(|| {
         let id = crate::stone_effect::stripped_id(stock);
