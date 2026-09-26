@@ -3,17 +3,18 @@
 
 use core::ffi::c_void;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 
+use ds2_hook::{MH_EnableHook, MH_Initialize, MH_STATUS, MhHook};
 use ds2_hotkey_config::chord_name;
 use ds2_hotkey_config::keys::Chord;
 use ds2_hotkey_config::live::AtomicChord;
 use ds2_hotkey_config::reload::{FileChange, HotFile};
 
 use crate::{
-    CONFIG_KEY_EFFECT, CONFIG_KEY_KEYBOARD, CONFIG_SECTION, DEFAULT_EFFECT, DEFAULT_KEY,
-    EffectSetting, KeySetting, LOG_PREFIX, chord_held, default_chord, effect_setting, is_press,
-    key_setting, request_bytes, sp_effect_ctrl,
+    CONFIG_KEY_EFFECT, CONFIG_KEY_KEYBOARD, CONFIG_KEY_NETWORK, CONFIG_SECTION, DEFAULT_EFFECT,
+    DEFAULT_KEY, EffectSetting, KeySetting, LOG_PREFIX, chord_held, default_chord, effect_setting,
+    is_press, key_setting, network_setting, request_bytes, sp_effect_ctrl,
 };
 
 unsafe extern "system" {
@@ -80,6 +81,103 @@ static WAS_DOWN: AtomicBool = AtomicBool::new(false);
 /// the title screen does not fill the log.
 static MISSING_LOGGED: AtomicBool = AtomicBool::new(false);
 
+/// `[net_effects] network`: whether this crate's own applies may reach the session.
+static NETWORK: AtomicBool = AtomicBool::new(false);
+
+/// Set only for the length of this crate's own apply call when [`NETWORK`] is off: the send detour
+/// withholds the `SpEffect` packet while it is set. Everything else the game sends goes out as before.
+static WITHHOLD: AtomicBool = AtomicBool::new(false);
+
+/// Packets withheld so far, reported with each press.
+static WITHHELD: AtomicU64 = AtomicU64::new(0);
+
+/// Trampoline to the original packet builder, or `0` when the detour is not in.
+static SEND_ORIGINAL: AtomicUsize = AtomicUsize::new(0);
+
+/// `ds2_rva::SP_EFFECT_SEND`'s shape for pass-through: eight integer-class arguments. The first four
+/// are in registers and are integers or pointers; the rest sit in stack slots, where a float (the
+/// duration) is passed through bit for bit.
+type SendFn = unsafe extern "system" fn(usize, usize, usize, usize, usize, usize, usize, usize);
+
+/// The packet builder's detour: drop the packet while [`WITHHOLD`] is set, else do nothing new.
+unsafe extern "system" fn send_detour(
+    a: usize,
+    b: usize,
+    c: usize,
+    d: usize,
+    e: usize,
+    f: usize,
+    g: usize,
+    h: usize,
+) {
+    if WITHHOLD.load(Ordering::Relaxed) {
+        WITHHELD.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    let original = SEND_ORIGINAL.load(Ordering::Acquire);
+    if original != 0 {
+        // SAFETY: the trampoline MinHook made for this site, called with the arguments this detour
+        // was given, unchanged.
+        unsafe {
+            let original: SendFn = std::mem::transmute::<usize, SendFn>(original);
+            original(a, b, c, d, e, f, g, h);
+        }
+    }
+}
+
+/// Detour the packet builder, after checking its first bytes. `false` leaves sending as the game
+/// does it, which is logged, and the feature refuses to arm with `network = false` in that case.
+///
+/// # Safety
+///
+/// Patches the game image; must run after `neuter_arxan`.
+unsafe fn install_send_detour(base: usize) -> bool {
+    let site = base + ds2_rva::SP_EFFECT_SEND as usize;
+    let expected = ds2_rva::SP_EFFECT_SEND_PROLOGUE;
+    let mut found = [0u8; 8];
+    // SAFETY: a resolved RVA inside the loaded game image; `read_bytes` faults safely.
+    let read = unsafe { ds2_game_base::mem::read_bytes(site, &mut found) };
+    if !read || found != expected {
+        log(format_args!(
+            "{LOG_PREFIX} install-failed stage=prologue what=sp-effect-send va=0x{site:016x} \
+             read={read} saw={found:02x?} want={expected:02x?}"
+        ));
+        return false;
+    }
+    // SAFETY: MinHook's own initialiser, no arguments. Already initialised by another crate in this
+    // DLL is fine.
+    let status = unsafe { MH_Initialize() };
+    if status != MH_STATUS::MH_OK && status != MH_STATUS::MH_ERROR_ALREADY_INITIALIZED {
+        log(format_args!(
+            "{LOG_PREFIX} install-failed stage=MH_Initialize status={status:?}"
+        ));
+        return false;
+    }
+    // SAFETY: the site matched its recorded prologue, and the detour has the same ABI.
+    match unsafe { MhHook::new(site as *mut c_void, send_detour as *mut c_void) } {
+        Ok(handle) => {
+            SEND_ORIGINAL.store(handle.trampoline() as usize, Ordering::Release);
+            // SAFETY: the address `MhHook::new` just registered.
+            let status = unsafe { MH_EnableHook(site as *mut c_void) };
+            if status != MH_STATUS::MH_OK {
+                log(format_args!(
+                    "{LOG_PREFIX} install-failed stage=MH_EnableHook what=sp-effect-send \
+                     status={status:?}"
+                ));
+                return false;
+            }
+            true
+        }
+        Err(status) => {
+            log(format_args!(
+                "{LOG_PREFIX} install-failed stage=MH_CreateHook what=sp-effect-send \
+                 status={status:?}"
+            ));
+            false
+        }
+    }
+}
+
 /// How often the watcher looks at the config file.
 const POLL_INTERVAL_MS: u64 = 1000;
 
@@ -135,6 +233,11 @@ unsafe fn apply_effect() {
         }
     };
     let request = RequestBuf(request_bytes(id));
+    let network = NETWORK.load(Ordering::Relaxed);
+    let withheld_before = WITHHELD.load(Ordering::Relaxed);
+    // The game sends a local player's applied effect to the session (see `ds2_rva::SP_EFFECT_SEND`);
+    // with `network` off the send detour drops that packet for exactly the length of this call.
+    WITHHOLD.store(!network, Ordering::Relaxed);
     // SAFETY: `apply` is `ds2_rva::SP_EFFECT_APPLY`, checked against its recorded first bytes at
     // install. It takes the controller and a pointer to the sixteen-byte request, exactly what the
     // game's own callers pass, and this is the game thread, which is where they call it from.
@@ -143,8 +246,11 @@ unsafe fn apply_effect() {
         let apply: ApplySpEffect = std::mem::transmute::<usize, ApplySpEffect>(apply);
         apply(ctrl, request.0.as_ptr())
     };
+    WITHHOLD.store(false, Ordering::Relaxed);
+    let withheld = WITHHELD.load(Ordering::Relaxed) - withheld_before;
     log(format_args!(
-        "{LOG_PREFIX} applied effect={id} ctrl=0x{ctrl:016x} returned=0x{returned:x}"
+        "{LOG_PREFIX} applied effect={id} ctrl=0x{ctrl:016x} returned=0x{returned:x} \
+         network={network} packets-withheld={withheld}"
     ));
 }
 
@@ -165,6 +271,17 @@ fn on_frame() {
 /// A value that does not parse leaves the one already in force and says so; falling back to the
 /// default would move the key, or change the effect, to something the player did not ask for.
 fn apply_config(text: &str, first: bool) {
+    let network = network_setting(text);
+    if NETWORK.swap(network, Ordering::Relaxed) != network || first {
+        log(format_args!(
+            "{LOG_PREFIX} {CONFIG_KEY_NETWORK} = {network} -- {}",
+            if network {
+                "an applied effect is sent to the session as the game sends it"
+            } else {
+                "an applied effect stays on this machine"
+            }
+        ));
+    }
     match effect_setting(text) {
         EffectSetting::NotSet => {
             if first {
@@ -271,6 +388,16 @@ pub unsafe fn install(request: &Request) -> Outcome {
         log(format_args!(
             "{LOG_PREFIX} install-failed stage=prologue what=apply-sp-effect va=0x{apply:016x} \
              read={read} saw={found:02x?} want={expected:02x?}"
+        ));
+        return Outcome::default();
+    }
+    // Without the send detour the game would share every press with the session, which is the one
+    // thing this feature promises not to do by default -- so no detour, no key.
+    // SAFETY: after neuter_arxan, per this function's contract.
+    if !unsafe { install_send_detour(base) } {
+        log(format_args!(
+            "{LOG_PREFIX} not armed -- the packet builder could not be detoured, so an applied \
+             effect could not be kept off the network"
         ));
         return Outcome::default();
     }

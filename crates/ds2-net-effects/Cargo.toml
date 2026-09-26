@@ -18,6 +18,7 @@ ds2-rva.workspace = true
 [target.'cfg(windows)'.dependencies]
 ds2-game-base.workspace = true
 ds2-invasion-path.workspace = true
+ds2-hook.workspace = true
 
 [lints]
 workspace = true

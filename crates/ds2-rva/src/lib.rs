@@ -5174,6 +5174,20 @@ pub const SP_EFFECT_APPLY: u32 = 0x0014_bec0;
 /// this name so a caller checks the function it calls rather than an experiment's site.
 pub const SP_EFFECT_APPLY_PROLOGUE: [u8; 5] = [0xe9, 0x1c, 0x0d, 0x9f, 0x01];
 
+/// The SpEffect-sync packet builder `FUN_14051e710(ctx, kind, add_remove, who, id, extra,
+/// duration, via_host)`, which returns nothing. RVA `0x0051_e710`.
+///
+/// Read in the binary: [`SP_EFFECT_APPLY`]'s worker reaches it for the local player through
+/// `0x140228f60` whenever a session is active and the id is not on the game's two skip lists, and it
+/// packs the 0x14-byte packet `0x31` and hands it to `NetP2pPacketSpEffect`'s send slot. So an
+/// effect applied to the local player while online is sent to the session; no field of the request
+/// stops it. Returning without calling the original is how a feature keeps its own apply local. Not
+/// in [`ARXAN_REDIRECTED_DO_NOT_HOOK`]; the entry is ordinary code ([`SP_EFFECT_SEND_PROLOGUE`]).
+pub const SP_EFFECT_SEND: u32 = 0x0051_e710;
+
+/// First eight bytes of [`SP_EFFECT_SEND`]: `push rbx; sub rsp,0x80`.
+pub const SP_EFFECT_SEND_PROLOGUE: [u8; 8] = [0x53, 0x48, 0x81, 0xec, 0x80, 0x00, 0x00, 0x00];
+
 /// `PlayerCtrl -> ChrSpEffectCtrl`. `+0x3e0`.
 ///
 /// Not `PlayerCtrl` itself: `PlayerCtrl`'s vtable slot `0x130` is `mov rax,[rcx+0x3e0]`, the

@@ -135,6 +135,17 @@ pub fn effect_setting(text: &str) -> EffectSetting {
     }
 }
 
+/// Whether an effect this crate applies may be sent to the other players in the session.
+pub const CONFIG_KEY_NETWORK: &str = "network";
+
+/// Read `[net_effects] network` out of a config text. `false` when absent or not exactly `true`:
+/// sending is opt-in, because the game sends a local player's applied effect to the whole session.
+pub fn network_setting(text: &str) -> bool {
+    KeyValues::parse(text)
+        .get(CONFIG_SECTION, CONFIG_KEY_NETWORK)
+        .is_some_and(|raw| scalar(raw) == "true")
+}
+
 /// Strip a trailing `# comment` and the quotes a TOML string carries.
 fn scalar(raw: &str) -> &str {
     let text = raw.split('#').next().unwrap_or(raw).trim();
@@ -227,6 +238,16 @@ pub fn sp_effect_ctrl(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    /// Sending is off unless the file says exactly `true`.
+    #[test]
+    fn network_is_off_unless_asked_for() {
+        assert!(!network_setting(""));
+        assert!(!network_setting("[net_effects]\nnetwork = false\n"));
+        assert!(!network_setting("[net_effects]\nnetwork = yes\n"));
+        assert!(network_setting("[net_effects]\nnetwork = true # send\n"));
+        assert!(!network_setting("[other]\nnetwork = true\n"));
+    }
 
     fn chord(name: &str) -> Chord {
         parse_chord(name).expect("a name the key table knows")
