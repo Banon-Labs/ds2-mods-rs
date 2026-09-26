@@ -3,7 +3,9 @@
 #
 # Needs a running game launched with `--input-harness --invasion-path --invasion-path-on` (the
 # overlay publishes the camera yaw this reads) and in-world. It moves the real pointer across the
-# game window with xdotool and clicks it -- targeted at the game's own X window -- and reads the
+# game window with xdotool and clicks it through XTEST, the path a physical mouse takes (a
+# `--window` click is a synthetic event that never reaches DirectInput), after focusing the game
+# and placing the pointer inside its X window. It reads the
 # harness's own `status` line for the camera yaw and the clicks-suppressed counter at each step:
 #   1  unblocked, pointer motion        -> the control: yaw moves
 #   3  blocked, focused, motion + click -> yaw holds, clicks-suppressed rises
@@ -44,14 +46,14 @@ wiggle() {
 focus_class steam_app_335300; sleep 0.5
 xdotool mousemove --window "$WIN" 1068 602; sleep 0.3
 status "0 unblocked, before"
-wiggle; sleep 0.3
-status "1 unblocked, after motion (control: yaw moves)"
+wiggle; [ "${CONTROL_CLICK:-1}" = 1 ] && xdotool mousemove --window "$WIN" 1068 602 click 1; sleep 0.3
+status "1 unblocked, after motion + click (control: yaw moves, click not suppressed)"
 send "block 3000"
 status "2 blocked"
-wiggle; xdotool click --window "$WIN" 1; sleep 0.3
+wiggle; xdotool mousemove --window "$WIN" 1068 602 click 1; sleep 0.3
 status "3 blocked, focused, motion + click (yaw holds)"
 focus_class kitty; sleep 0.5; focus_class steam_app_335300; sleep 0.2
-wiggle; xdotool click --window "$WIN" 1; sleep 0.3
+wiggle; xdotool mousemove --window "$WIN" 1068 602 click 1; sleep 0.3
 status "4 blocked, focus away and back, motion + click (yaw holds)"
 send unblock
 status "5 unblocked"
