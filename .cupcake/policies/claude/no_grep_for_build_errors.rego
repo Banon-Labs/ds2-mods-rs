@@ -74,7 +74,11 @@ command := object.get(input.tool_input, "command", "")
 # being swept back in.
 build_verbs := "(cargo|rustc|opa|make|ninja|cmake|go|npm|pnpm|yarn|pytest|tsc|[[:alnum:]_.-]*(build|check|test)[[:alnum:]_.-]*\\.(sh|py))"
 
-interpreter_prefix := "((python3?|uv|uvx|bash|sh|zsh|node|deno|bun)[ \t]+(-{1,2}[A-Za-z0-9][^ \t]*[ \t]+)*)?"
+#
+# The optional quote at the end is `bash -c 'cargo build' 2>&1 | grep error`: the payload runs, and
+# its output is what the pipe carries, but the quote stood between the interpreter and the verb, so
+# no build verb was ever seen there (found 2026-09-25 while writing the per-pipeline tests below).
+interpreter_prefix := "((python3?|uv|uvx|bash|sh|zsh|node|deno|bun)[ \t]+(-{1,2}[A-Za-z0-9][^ \t]*[ \t]+)*['\"]?)?"
 
 build_verb_pattern := concat("", [
 	commands.command_position_prefix_pattern,
@@ -91,14 +95,81 @@ build_verb_pattern := concat("", [
 # between the pipe and the matcher. Without it that spelling walks straight past this guard, which
 # is the whole failure mode -- a build whose errors go to stderr is exactly the one that gets piped
 # that way.
-adjudicating_matcher_pattern := "\\|&?[[:space:]]*(/?([[:alnum:]_.-]+/)*)?(grep|egrep|fgrep|rg|ag|ack)($|[[:space:]])"
+#
+# Checked per pipe STAGE below (the stage text after the `|`), so the `&` is optional at its start.
 
-# The pipeline must both start from a build verb and route it into a matcher. Checking the whole
-# command (rather than per-segment) is deliberate: `cargo build 2>&1 | tee log | grep error` and
-# `cargo build |& grep -c error` are the same mistake with more plumbing.
+# The matcher must sit DOWNSTREAM of the build verb, in the SAME pipeline. `cargo build 2>&1 | tee
+# log | grep error` and `cargo build |& grep -c error` are the same mistake with more plumbing, and
+# both still are: the verb is in one pipe stage and the matcher in a later stage of that pipeline.
+#
+# MEASURED 2026-09-25: this rule used to ask the two regexes about the WHOLE command, independently,
+# which is co-presence again -- the defect recorded above for the command-position anchor, and in
+# git_block_no_verify. Two read-only commands were denied for it, and nothing in either was built
+# or adjudicated:
+#
+#     ls scripts/ | grep -i cupcake; command -v opa cupcake
+#
+# `| grep` belonged to the first command and `opa` to the second, which was only LOOKING `opa` up.
+# The other was a for-loop whose quoted word list held the text `'ls scripts/ | grep -i cupcake'`
+# and whose body piped `python3 scripts/cupcake-check-command.py "$c" 2>&1` into head: the `| grep`
+# was a string, and the build-shaped script name was never piped into a matcher at all.
+#
+# So the question is now asked per pipeline. The command is read through commands.executed_texts,
+# which neutralises quoted separators (a quoted `| grep` is prose, not a pipe) and hands back the
+# payload of any `bash -c '...'` as a text of its own, so a build wrapped that way is still seen.
+# Each text is cut into STATEMENTS at `;`, `&&`, `||` and newline -- commands that share no data
+# stream -- and each statement into pipe stages, and a build stage must come BEFORE a matcher
+# stage. A single `&` is deliberately NOT a cut: commands.shell_statements does cut there, and that
+# splits `2>&1` and `|&` down the middle, which is exactly the plumbing a build's stderr takes into
+# grep. The cost is that `a & b` stays joined, which can only deny more.
+#
+# `command -v`, `type`, `which`, `whereis` and `hash` only look a name up; they do not run it. The
+# shared command_position_prefix_pattern lets `command` and then `-v` stand in front of a verb,
+# which is right for `command rm -rf x` and wrong here, so a lookup stage is not a build stage.
+#
+# Grouping is the one shape statement cutting would lose: `{ cargo build; cargo test; } 2>&1 | grep
+# error` and `(cd crates; cargo check) | grep error` put the build before a `;` and the matcher
+# after it, piped from the group's closing bracket. The second greps_a_build body keeps those: a
+# build verb, then later a closing `)`/`}` piped straight into a matcher.
+matcher_names := `(grep|egrep|fgrep|rg|ag|ack)($|[[:space:]])`
+
+matcher_stage_pattern := concat("", [`^&?[[:space:]]*(/?([[:alnum:]_.-]+/)*)?`, matcher_names])
+
+lookup_stage_pattern := `^[[:space:]({]*(command[[:space:]]+-[A-Za-z]*[vV]|type|which|whereis|hash)([[:space:]]|$)`
+
+grouped_build_pattern := concat("", [
+	build_verb_pattern,
+	`[^\n]*[)}][[:space:]]*([0-9]*>&[0-9-]+[[:space:]]*)*\|&?[[:space:]]*(/?([[:alnum:]_.-]+/)*)?`,
+	matcher_names,
+])
+
+pipelines(text) := {statement |
+	no_or := replace(text, "||", "\n")
+	no_and := replace(no_or, "&&", "\n")
+	cut := replace(no_and, ";", "\n")
+	some raw in split(cut, "\n")
+	statement := trim_space(raw)
+	statement != ""
+}
+
+build_stage(stage) if {
+	regex.match(build_verb_pattern, trim_space(stage))
+	not regex.match(lookup_stage_pattern, trim_space(stage))
+}
+
 greps_a_build if {
-	regex.match(build_verb_pattern, command)
-	regex.match(adjudicating_matcher_pattern, command)
+	some text in commands.executed_texts(command)
+	some statement in pipelines(text)
+	stages := split(statement, "|")
+	some i, j
+	build_stage(stages[i])
+	regex.match(matcher_stage_pattern, stages[j])
+	j > i
+}
+
+greps_a_build if {
+	some text in commands.executed_texts(command)
+	regex.match(grouped_build_pattern, text)
 }
 
 deny contains decision if {
