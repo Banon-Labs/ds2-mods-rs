@@ -322,6 +322,9 @@ unsafe fn attach(module: *mut c_void) {
                         "{ARXAN_LINE_PREFIX} status=error error={error}"
                     )),
                 }
+                // Every crate enables its hooks into one batch, applied once below; see
+                // `ds2_hook::begin_boot_batch`.
+                ds2_hook::begin_boot_batch();
                 // One mark per install, so the boot timeline can charge the callback's time to
                 // the crate that spent it rather than to the game's startup that follows.
                 install_probe(probe);
@@ -356,6 +359,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_input_harness();
                 install_soul_memory_guard();
                 arm_fault(crash_config);
+                finish_boot_batch();
                 ds2_boot_timeline::mark("installs-done");
             });
             // Whether `neuter_arxan` did its analysis and patching here, in `DllMain`, or left it
@@ -384,6 +388,7 @@ unsafe fn attach(module: *mut c_void) {
                     "{ARXAN_LINE_PREFIX} status=skipped detected={detected} \
                      blocking_entrypoint={blocking_entrypoint}"
                 ));
+                ds2_hook::begin_boot_batch();
                 install_probe(probe);
                 install_offline();
                 install_save_redirect();
@@ -403,9 +408,23 @@ unsafe fn attach(module: *mut c_void) {
                 install_input_harness();
                 install_soul_memory_guard();
                 arm_fault(crash_config);
+                finish_boot_batch();
             });
         },
     }
+}
+
+/// Apply every hook the crates enabled during the installs, in one patch, and say how it went.
+///
+/// A crate's own "hooked" line reports the enable it asked for; this line is the one that says the
+/// patches landed. It is `MH_ERROR_NOT_INITIALIZED` only when no crate installed anything.
+fn finish_boot_batch() {
+    // SAFETY: every queued target was accepted by `MH_CreateHook` in the crate that queued it, and
+    // this runs at the entry point, before any game code, as each crate's own enable would have.
+    let status = unsafe { ds2_hook::apply_boot_batch() };
+    log_line(format_args!(
+        "ds2-loader: hooks applied in one batch status={status:?}"
+    ));
 }
 
 /// Install the probe, if this run is one. Called from inside whichever Arxan callback ran, so it
