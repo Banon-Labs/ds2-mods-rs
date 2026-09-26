@@ -459,5 +459,8 @@ cheap stand-in is bloom: colour values above 1 (27/28 use 5..10) make the billbo
 3. **sfxparam:** not needed for either. Only add an entry (via `0x140becc90`) to use start-time skip,
    env-light tinting (+0x2c), the constant colour multiplier (+0x30), or wind.
 
-Unproven until a run: that a looping curve on action-59 p1/p8 survives the Billboard compile (it is
-type-generic, but no shipped 59 does it), and that the FFX point light visibly lights the scene.
+A looping colour on action-59 p8 does survive the Billboard compile: the type-20 class's per-channel
+compile `0x140fb8ae0` emits mode `0x10` (looped) with 2+ keys **[read]**. Still unproven until a
+run: that the FFX point light visibly lights the scene. The exact byte changes for the stone's
+derived copy (181's light child spliced over the sparkle child, p8 as a type-20 curve, and the
+enclosing lengths to fix) are in `docs/DS2-STONE-LIGHT-FLICKER.md`.
