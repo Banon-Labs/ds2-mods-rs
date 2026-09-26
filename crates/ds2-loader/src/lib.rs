@@ -336,6 +336,10 @@ unsafe fn attach(module: *mut c_void) {
                 install_input_harness();
                 arm_fault(crash_config);
             });
+            // Whether `neuter_arxan` did its analysis and patching here, in `DllMain`, or left it
+            // for the entry point: the span from `neuter-arxan-begin` to the callback is only
+            // dearxan's cost if this mark sits near the callback rather than near the begin.
+            ds2_boot_timeline::mark("neuter-arxan-returned");
         },
 
         // THE A/B ARM. `neuter_arxan` is not called, so Arxan's 48 stubs are left running and can
