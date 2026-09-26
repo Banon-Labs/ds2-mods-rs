@@ -1094,7 +1094,10 @@ pub unsafe fn install() -> Outcome {
     BOOT_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::Relaxed);
     flush_milestones();
     // Sample the boot thread until the first substate; see `sampler` for why it cannot deadlock it.
-    crate::sampler::start(BOOT_THREAD.load(Ordering::Relaxed));
+    crate::sampler::start(
+        BOOT_THREAD.load(Ordering::Relaxed),
+        crate::sampler::current_stack_base(),
+    );
 
     let base = match ds2_game_base::mem::game_module_base() {
         Ok(base) => base,

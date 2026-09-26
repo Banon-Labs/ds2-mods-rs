@@ -55,7 +55,11 @@ const CONTEXT_CONTROL: u32 = 0x0010_0001;
 /// `CONTEXT.ContextFlags` and `CONTEXT.Rip` in the x64 `CONTEXT`, whose size is `0x4d0`.
 const CONTEXT_FLAGS_OFFSET: usize = 0x30;
 const CONTEXT_RIP_OFFSET: usize = 0xf8;
+/// `CONTEXT.Rsp`, filled by the same `CONTEXT_CONTROL`.
+const CONTEXT_RSP_OFFSET: usize = 0x98;
 const CONTEXT_SIZE: usize = 0x4d0;
+// How much of the stopped thread's stack is copied per sample, in `u64`s (2 KiB).
+const STACK_WORDS: usize = 256;
 /// `SuspendThread`'s failure value.
 const SUSPEND_FAILED: u32 = u32::MAX;
 
@@ -63,10 +67,12 @@ const SUSPEND_FAILED: u32 = u32::MAX;
 #[repr(C, align(16))]
 struct Context([u8; CONTEXT_SIZE]);
 
-/// Time between samples.
-const INTERVAL: Duration = Duration::from_millis(1);
+/// Time between samples. Five milliseconds, not one: a run at one millisecond took the boot from
+/// about 4.2 s to 10.5 s, because under Wine every suspend and resume is a signal round trip that
+/// the stopped thread pays for.
+const INTERVAL: Duration = Duration::from_millis(5);
 /// A cap, so a boot that never reaches a substate stops sampling on its own: twenty seconds.
-const MAX_SAMPLES: usize = 20_000;
+const MAX_SAMPLES: usize = 4_000;
 /// Rows reported, most-sampled first.
 const REPORTED: usize = 20;
 
@@ -78,11 +84,26 @@ pub(crate) fn stop() {
     STOP.store(true, Ordering::Relaxed);
 }
 
-/// Start sampling `thread_id` on a thread of its own.
-pub(crate) fn start(thread_id: u32) {
+/// The calling thread's stack base (the highest address of its stack), from its TEB.
+///
+/// `NT_TIB.StackBase` is at `gs:[0x08]` on x64. Called by `install` on the boot thread itself, so
+/// the sampler knows how far above the stopped thread's `Rsp` it may copy without leaving its
+/// stack -- a plain copy, because `ReadProcessMemory` could wait on a lock the stopped thread
+/// holds.
+pub(crate) fn current_stack_base() -> u64 {
+    let base: u64;
+    // SAFETY: reads one pointer out of this thread's own TEB, which is always mapped.
+    unsafe {
+        core::arch::asm!("mov {}, gs:[0x08]", out(reg) base, options(nostack, readonly, preserves_flags));
+    }
+    base
+}
+
+/// Start sampling `thread_id`, whose stack ends at `stack_base`, on a thread of its own.
+pub(crate) fn start(thread_id: u32, stack_base: u64) {
     let spawned = std::thread::Builder::new()
         .name("ds2-boot-sampler".to_string())
-        .spawn(move || run(thread_id));
+        .spawn(move || run(thread_id, stack_base));
     if let Err(error) = spawned {
         log(format_args!(
             "{LOG_PREFIX} sampler-failed stage=spawn error={error}"
@@ -90,7 +111,11 @@ pub(crate) fn start(thread_id: u32) {
     }
 }
 
-fn run(thread_id: u32) {
+fn context_u64(context: &Context, offset: usize) -> u64 {
+    u64::from_le_bytes(context.0[offset..][..8].try_into().unwrap_or([0; 8]))
+}
+
+fn run(thread_id: u32, stack_base: u64) {
     // SAFETY: plain handle request for a thread id this process owns; null on failure.
     let handle = unsafe { OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, 0, thread_id) };
     if handle.is_null() {
@@ -99,11 +124,13 @@ fn run(thread_id: u32) {
         ));
         return;
     }
-    // Both allocated before the first suspend, and never again while one is in force.
-    let mut pcs: Vec<u64> = Vec::with_capacity(MAX_SAMPLES);
+    let text = ds2_game_base::mem::module_text_range().unwrap_or((0, 0));
+    // All three allocated before the first suspend, and never again while one is in force.
+    let mut samples: Vec<(u64, u64)> = Vec::with_capacity(MAX_SAMPLES);
     let mut context = Box::new(Context([0; CONTEXT_SIZE]));
+    let mut stack = Box::new([0u64; STACK_WORDS]);
     let mut failed = 0u64;
-    while !STOP.load(Ordering::Relaxed) && pcs.len() < MAX_SAMPLES {
+    while !STOP.load(Ordering::Relaxed) && samples.len() < MAX_SAMPLES {
         std::thread::sleep(INTERVAL);
         context.0[CONTEXT_FLAGS_OFFSET..][..4].copy_from_slice(&CONTEXT_CONTROL.to_le_bytes());
         // SAFETY: `handle` was opened with suspend rights and is closed only after the loop.
@@ -114,22 +141,55 @@ fn run(thread_id: u32) {
         // SAFETY: the buffer is a 16-byte-aligned x64 `CONTEXT` with its flags set, and the thread
         // is suspended, which `GetThreadContext` requires for a coherent read.
         let read = unsafe { GetThreadContext(handle, context.0.as_mut_ptr().cast()) } != 0;
+        let mut words = 0;
+        if read {
+            let rsp = context_u64(&context, CONTEXT_RSP_OFFSET);
+            if rsp != 0 && rsp < stack_base && rsp.is_multiple_of(8) {
+                words = (((stack_base - rsp) / 8) as usize).min(STACK_WORDS);
+                // SAFETY: `rsp..rsp + words*8` lies inside the stopped thread's own committed stack
+                // (below its base from the TEB), which cannot change while it is suspended; a plain
+                // copy takes no lock.
+                unsafe {
+                    std::ptr::copy_nonoverlapping(rsp as *const u64, stack.as_mut_ptr(), words);
+                }
+            }
+        }
         // SAFETY: balances the successful suspend above.
         unsafe { ResumeThread(handle) };
         if read {
-            let rip = u64::from_le_bytes(
-                context.0[CONTEXT_RIP_OFFSET..][..8]
-                    .try_into()
-                    .unwrap_or([0; 8]),
-            );
-            pcs.push(rip);
+            let caller = first_game_return(&stack[..words], text);
+            samples.push((context_u64(&context, CONTEXT_RIP_OFFSET), caller));
         } else {
             failed += 1;
         }
     }
     // SAFETY: the handle opened above, closed once.
     unsafe { CloseHandle(handle) };
-    report(&pcs, failed);
+    report(&samples, failed);
+}
+
+/// The first word on a copied stack that is a return address into the game's `.text`: a value in
+/// range whose preceding bytes are a `call`. Zero when there is none.
+///
+/// The call check is what keeps a stray pointer into the image from counting: `e8 rel32` five
+/// bytes back, or an `ff /2` indirect call two, three or six bytes back.
+fn first_game_return(stack: &[u64], (text_start, text_end): (usize, usize)) -> u64 {
+    for &value in stack {
+        let address = value as usize;
+        if address < text_start + 6 || address >= text_end {
+            continue;
+        }
+        // SAFETY: `address - 6 .. address` lies inside the game's mapped `.text`.
+        let before = unsafe { std::slice::from_raw_parts((address - 6) as *const u8, 6) };
+        let direct = before[1] == 0xe8;
+        let indirect = [0usize, 3, 4]
+            .iter()
+            .any(|&at| before[at] == 0xff && (before[at + 1] >> 3) & 7 == 2);
+        if direct || indirect {
+            return value;
+        }
+    }
+    0
 }
 
 /// Where a sample landed: a function of the game image by its start RVA, or a whole module.
@@ -175,18 +235,17 @@ fn module_name(base: u64) -> String {
     full.rsplit(['\\', '/']).next().unwrap_or("?").to_string()
 }
 
-fn report(pcs: &[u64], failed: u64) {
-    let game_base = ds2_game_base::mem::game_module_base().unwrap_or(0) as u64;
-    let mut counts: HashMap<Place, u64> = HashMap::new();
-    for &pc in pcs {
-        *counts.entry(place(pc, game_base)).or_default() += 1;
+fn describe(where_: Place) -> String {
+    match where_ {
+        Place::GameFunction(rva) => format!("DarkSoulsII.exe fn=0x{rva:08x}"),
+        Place::GameUnwound => "DarkSoulsII.exe no-pdata-entry".to_string(),
+        Place::Module(base) => format!("module={}", module_name(base)),
+        Place::Unknown => "no-module".to_string(),
     }
-    let total = pcs.len() as u64;
-    log(format_args!(
-        "{LOG_PREFIX} sampler samples={total} failed={failed} interval-ms={} places={}",
-        INTERVAL.as_millis(),
-        counts.len()
-    ));
+}
+
+/// Log one ranked table: `label` names it, `total` is what the shares are a share of.
+fn log_table(label: &str, counts: HashMap<Place, u64>, total: u64) {
     let mut rows: Vec<(Place, u64)> = counts.into_iter().collect();
     rows.sort_by_key(|row| std::cmp::Reverse(row.1));
     for (rank, (where_, samples)) in rows.into_iter().take(REPORTED).enumerate() {
@@ -195,15 +254,41 @@ fn report(pcs: &[u64], failed: u64) {
         } else {
             samples as f64 * 100.0 / total as f64
         };
-        let name = match where_ {
-            Place::GameFunction(rva) => format!("DarkSoulsII.exe fn=0x{rva:08x}"),
-            Place::GameUnwound => "DarkSoulsII.exe no-pdata-entry".to_string(),
-            Place::Module(base) => format!("module={}", module_name(base)),
-            Place::Unknown => "no-module".to_string(),
-        };
         log(format_args!(
-            "{LOG_PREFIX} sampler rank={} samples={samples} share={share:.1}% {name}",
-            rank + 1
+            "{LOG_PREFIX} sampler {label} rank={} samples={samples} share={share:.1}% {}",
+            rank + 1,
+            describe(where_)
         ));
     }
+}
+
+/// Two tables. `at` is where the instruction pointer was. `waiting-in` is, for samples whose
+/// instruction pointer was outside the game image, the game function nearest the top of the stack
+/// -- the game code that called into the system and was waiting for it to return.
+fn report(samples: &[(u64, u64)], failed: u64) {
+    let game_base = ds2_game_base::mem::game_module_base().unwrap_or(0) as u64;
+    let mut at: HashMap<Place, u64> = HashMap::new();
+    let mut waiting_in: HashMap<Place, u64> = HashMap::new();
+    let mut outside = 0u64;
+    for &(pc, caller) in samples {
+        let here = place(pc, game_base);
+        *at.entry(here).or_default() += 1;
+        let in_game = matches!(here, Place::GameFunction(_) | Place::GameUnwound);
+        if !in_game {
+            outside += 1;
+            let from = if caller == 0 {
+                Place::Unknown
+            } else {
+                place(caller, game_base)
+            };
+            *waiting_in.entry(from).or_default() += 1;
+        }
+    }
+    let total = samples.len() as u64;
+    log(format_args!(
+        "{LOG_PREFIX} sampler samples={total} failed={failed} interval-ms={} outside-game={outside}",
+        INTERVAL.as_millis()
+    ));
+    log_table("at", at, total);
+    log_table("waiting-in", waiting_in, outside);
 }
