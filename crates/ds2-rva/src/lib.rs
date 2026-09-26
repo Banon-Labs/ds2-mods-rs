@@ -1460,6 +1460,51 @@ pub const GAME_MANAGER_IMP: u32 = 0x0161_48f0;
 /// in `SteamLoadSystemData`'s, among others.
 pub const SAVE_LOAD_SYSTEM_OFFSET: usize = 0xb8;
 
+// ============================================================================================
+// Managers reached through the Ghidra project's named accessors.
+//
+// DS2 has no FD4 singleton scan to lean on, so a manager pointer is an RVA read out of an accessor
+// that already has a name. Each one below was read statically (the accessor's own two or three
+// instructions) and then walked in a live process with `scripts/frida/singletons.js` on
+// 2026-09-25, at the title screen with a character loaded behind the continue shortcut. Where the
+// object at the end carries a vtable, its MSVC RTTI name was resolved from the flat image and is
+// quoted; where it does not, the constant says so, because a pointer that is non-null is not yet
+// a pointer of the named type.
+// ============================================================================================
+
+/// `SaveLoadSystem`'s vtable. RVA `0x010da4b8`, RTTI `.?AVSaveLoadSystem@@`.
+///
+/// What `[`[`GAME_MANAGER_IMP`]` + `[`SAVE_LOAD_SYSTEM_OFFSET`]`]` points at, measured live: the
+/// accessor `getSaveLoadSystem` (`0x1401ab6e0`) is `mov rax,[0x1416148f0]; mov rax,[rax+0xb8]`,
+/// and the object it returns carries this vptr.
+pub const SAVE_LOAD_SYSTEM_VTABLE: u32 = 0x010d_a4b8;
+
+/// The global holding a pointer to the `NetSessionManager` pointer. RVA `0x01616cf8`.
+///
+/// Two dereferences, not one: `getNetSessionManager` (`0x1402d85e0`) is
+/// `mov rax,[0x141616cf8]; test; mov rax,[rax]`. Measured live, `[[global]]` is an object whose
+/// vptr is [`NET_SESSION_MANAGER_VTABLE`].
+pub const NET_SESSION_MANAGER_POINTER: u32 = 0x0161_6cf8;
+
+/// `NetSessionManager`'s vtable. RVA `0x010fb878`, RTTI `.?AVNetSessionManager@@`.
+pub const NET_SESSION_MANAGER_VTABLE: u32 = 0x010f_b878;
+
+/// Offset of the map item pack manager in `MapManager`. `+0x1c8`.
+///
+/// `getMapItemPackManager` (`0x1401e6550`) is `[GameManagerImp]` then
+/// [`GAME_MANAGER_MAP_MANAGER_OFFSET`] then `[+0x1c8]`, with a null check after each hop. Live, the
+/// chain resolves to a non-null object, but that object's first qword is a heap pointer (the same
+/// one `MapManager` itself starts with), not a vptr, so its type is taken from the accessor's name
+/// and is not otherwise proven.
+pub const MAP_MANAGER_ITEM_PACK_MANAGER_OFFSET: usize = 0x1c8;
+
+/// `getSpEffectOwner_characterCtrl`. RVA `0x0023c830`.
+///
+/// Not a singleton: `mov rax,[rcx+0x8]; test; mov rax,[rax+0x228]`, relative to its argument. What
+/// the argument is has not been established, so only the accessor is recorded; call it rather than
+/// transcribing its two offsets onto an object of a guessed type.
+pub const GET_SP_EFFECT_OWNER_CHARACTER_CTRL: u32 = 0x0023_c830;
+
 /// `SaveLoadSystem`'s request state word.
 ///
 /// **This is the interlock.** Every start entry point refuses while it is non-zero
