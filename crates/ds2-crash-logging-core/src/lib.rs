@@ -2239,6 +2239,9 @@ mod tests {
         assert_eq!(cfg.report_file_name, "ds2-crash-hang-latest.txt");
         assert_eq!(cfg.minidump_file_name, "ds2-crash-hang-minidump.dmp");
         assert_eq!(cfg.stall_seconds, 30);
+        // Only the host stub is inert. Under the wine pass this is the real entry point, which
+        // spawns its thread and finds no DarkSoulsII.exe from inside it, so it is not called there.
+        #[cfg(not(windows))]
         assert!(!start_hang_watchdog(cfg), "the host stub starts nothing");
     }
 
