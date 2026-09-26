@@ -87,6 +87,8 @@ ds2-hotkey-config.workspace = true
 ds2-seamless.workspace = true
 ds2-rva.workspace = true
 dearxan = { workspace = true, features = ["disabler", "rayon"] }
+# The facade dearxan reports its own analysis and patch timings through; see `DearxanLog`.
+log = "0.4"
 
 [lints]
 workspace = true
