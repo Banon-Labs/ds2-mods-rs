@@ -8218,6 +8218,32 @@ pub const MOUSE_DEVICE_DELTA_Y_OFFSET: usize = 0x10c;
 /// Mouse wheel delta. `MouseDevice+0x110`, from `DIMOUSESTATE2.lZ`.
 pub const MOUSE_DEVICE_WHEEL_OFFSET: usize = 0x110;
 
+/// Folds one window-message mouse event into an input block's button word. RVA `0x00b08ef0`.
+///
+/// `fn(block, event)`: `rcx` is the input block, `rdx` the event. Called once per block (two of
+/// them, stride `0x288`) by `FUN_140af41a0`, whose only caller is `KatanaMainApp`'s message handler
+/// `FUN_1402ef110`. This is how mouse clicks reach the game; the DirectInput mouse's buttons do
+/// not. A jump table on the event type, not an Arxan redirect (`scripts/ds2-arxan-chain.py`
+/// stops on it as unknown, and the disassembly is the body).
+///
+/// Prologue: `48 63 02 83 f8` (`movsxd rax,[rdx]`, then `cmp eax,0xa`).
+pub const MOUSE_EVENT_FOLD: u32 = 0x00b0_8ef0;
+
+/// First five bytes at [`MOUSE_EVENT_FOLD`].
+pub const MOUSE_EVENT_FOLD_PROLOGUE: [u8; 5] = [0x48, 0x63, 0x02, 0x83, 0xf8];
+
+/// The event's type, a `u32` at `event+0x00`.
+///
+/// Presses: `0`/`2` left, `3`/`4` right, `6`/`7` middle. Releases: `1` left, `5` right, `8`
+/// middle. `9` is a move (`+0x08`/`+0x0c`), `10` a wheel step (`+0x10`).
+pub const MOUSE_EVENT_TYPE_OFFSET: usize = 0x00;
+
+/// Modifier bits at `event+0x04`; the low four each OR a bit (`0x40`..`0x200`) into the word.
+pub const MOUSE_EVENT_MODIFIERS_OFFSET: usize = 0x04;
+
+/// The wheel step of a type-`10` event, an `i32` at `event+0x10`, added to `block+0x224`.
+pub const MOUSE_EVENT_WHEEL_OFFSET: usize = 0x10;
+
 /// `DLUID::KeyboardDevice<DLKR::DLSingleThreadingPolicy>`'s per-frame poll. RVA `0x00f06dd0`.
 ///
 /// Vtable slot 23 of `0x141271e98`. Body: `GetDeviceState(0x100, this+0xf0)` -- the 256-byte
@@ -8240,13 +8266,21 @@ pub const KEYBOARD_DEVICE_DIK_TABLE_OFFSET: usize = 0xf0;
 pub const KEYBOARD_DEVICE_DIK_TABLE_BYTES: usize = 0x100;
 
 // ============================================================================================
-// THE CAMERA'S MOUSE-LOOK -- AND THE CORRECTION IT IS
+// The menu pointer's chain, which is not the camera's
 //
-// `MOUSE_DEVICE_POLL` above is a real device and the engine really does read it, but it is NOT
-// what turns this camera. Measured live 2026-09-22: `mouse 120 0 30` written into
-// `DLUID::MouseDevice`'s normalised deltas left the camera's published yaw at exactly 87.13 for
-// thirty frames. The whole chain is elsewhere, it is traced below, and every step of it was read
-// out of the disassembly rather than inferred:
+// Superseded 2026-09-26. The camera's mouse-look is `MOUSE_DEVICE_POLL`'s X/Y floats
+// (`MOUSE_DEVICE_DELTA_X_OFFSET`), mapped into `cursorObj+0x18` and read by the camera stage only
+// while the window is active (`docs/DS2-MOUSE-LOOK.md`). Measured with
+// `scripts/frida/mouse-look-author.js`, window focused: `+20` added there for sixty frames turned
+// the camera about 90 degrees, with zero drift idle. The 2026-09-22 run that saw no turn wrote the
+// same floats into an unfocused window. What follows is the chain that feeds the menu pointer; its
+// conclusions about the camera are wrong and are kept only so the addresses stay explained.
+//
+// The original text follows. `MOUSE_DEVICE_POLL` above is a real device and the engine really
+// does read it, but it is not what turns this camera. Measured live 2026-09-22: `mouse 120 0 30`
+// written into `DLUID::MouseDevice`'s normalised deltas left the camera's published yaw at exactly
+// 87.13 for thirty frames. The whole chain is elsewhere, it is traced below, and every step of it
+// was read out of the disassembly rather than inferred:
 //
 //   FUN_140af42b0                     the per-frame input update
 //     -> parseInput(obj[0], dt)       0x140b08660 -- keyboard/general
