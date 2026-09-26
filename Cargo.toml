@@ -75,6 +75,8 @@ ds2-build-url-core = { path = "crates/ds2-build-url-core" }
 ds2-menu-row = { path = "crates/ds2-menu-row" }
 ds2-inventory-sort = { path = "crates/ds2-inventory-sort" }
 ds2-voice-chat = { path = "crates/ds2-voice-chat" }
+# A key that applies a SpEffect to the local player, the way the game applies its own.
+ds2-net-effects = { path = "crates/ds2-net-effects" }
 ds2-item-warn = { path = "crates/ds2-item-warn" }
 ds2-invasion-path = { path = "crates/ds2-invasion-path" }
 # The floating HP bar and damage number over other characters, resized and centred.
