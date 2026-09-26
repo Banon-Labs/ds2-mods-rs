@@ -96,6 +96,8 @@ all_denials contains decision if { some decision in data.cupcake.policies.builti
 
 all_denials contains decision if { some decision in data.cupcake.policies.claude.bash_no_python_file_write.deny }
 
+all_denials contains decision if { some decision in data.cupcake.policies.claude.bd_notes_append_only.deny }
+
 all_denials contains decision if { some decision in data.cupcake.policies.claude.block_askuserquestion.deny }
 
 all_denials contains decision if { some decision in data.cupcake.policies.claude.block_askuserquestion_reminder.deny }
