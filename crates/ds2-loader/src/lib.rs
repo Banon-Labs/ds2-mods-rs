@@ -300,6 +300,10 @@ unsafe fn attach(module: *mut c_void) {
             // startup it exists to shorten -- which would be worth knowing before claiming any
             // saving. The mark costs a performance-counter read.
             ds2_boot_timeline::mark("neuter-arxan-begin");
+            // Before `neuter_arxan`, so its analysis and patch timings land in the log.
+            if log::set_logger(&DEARXAN_LOG).is_ok() {
+                log::set_max_level(log::LevelFilter::Info);
+            }
             neuter_arxan(move |result: DearxanResult| {
                 ds2_boot_timeline::mark("neuter-arxan-callback");
                 // JOB 2 (second half). Not in `DllMain`: this callback runs at the entry point,
@@ -352,6 +356,10 @@ unsafe fn attach(module: *mut c_void) {
                 arm_fault(crash_config);
                 ds2_boot_timeline::mark("installs-done");
             });
+            // Whether `neuter_arxan` did its analysis and patching here, in `DllMain`, or left it
+            // for the entry point: the span from `neuter-arxan-begin` to the callback is only
+            // dearxan's cost if this mark sits near the callback rather than near the begin.
+            ds2_boot_timeline::mark("neuter-arxan-returned");
         },
 
         // THE A/B ARM. `neuter_arxan` is not called, so Arxan's 48 stubs are left running and can
@@ -1173,6 +1181,33 @@ fn module_file_name(module: *mut c_void) -> Option<PathBuf> {
         }
         capacity *= 2;
     }
+}
+
+/// Forwards what dearxan reports through the `log` facade into this log, info and above.
+///
+/// dearxan times its own stub analysis, patch generation and patch application, and without a
+/// logger those lines go nowhere; they are what says how much of the time before the entry point
+/// is ours.
+struct DearxanLog;
+
+static DEARXAN_LOG: DearxanLog = DearxanLog;
+
+impl log::Log for DearxanLog {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            log_line(format_args!(
+                "ds2-loader: dearxan {} {}",
+                record.level(),
+                record.args()
+            ));
+        }
+    }
+
+    fn flush(&self) {}
 }
 
 /// Append one line to the log next to the game executable, and push it to the OS before
