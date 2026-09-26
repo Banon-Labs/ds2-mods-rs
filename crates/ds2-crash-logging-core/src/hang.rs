@@ -650,6 +650,7 @@ unsafe extern "system" fn watchdog_thread(_parameter: *mut c_void) -> u32 {
     // Set while the pointer is null, so the first value after it is a new baseline rather than a
     // delta across the gap.
     let mut rebaseline = false;
+    let mut paused_for_modal = false;
 
     loop {
         sleep_ms(SAMPLE_INTERVAL_MS);
@@ -676,6 +677,28 @@ unsafe extern "system" fn watchdog_thread(_parameter: *mut c_void) -> u32 {
                 return 0;
             }
         };
+        // One of this workspace's own modal windows holds the game thread on purpose (ds2-save-file's
+        // file dialog). Frames stop for as long as the player takes, which is not a hang: the
+        // clocks restart from the moment it closes.
+        if ds2_game_base::modal::active() {
+            if !paused_for_modal {
+                paused_for_modal = true;
+                append_log(format_args!(
+                    "hang watchdog paused: a modal window of ours holds the game thread"
+                ));
+            }
+            rebaseline = true;
+            if let Some(detector) = framedrop_detector.as_mut() {
+                detector.reset();
+            }
+            continue;
+        }
+        if paused_for_modal {
+            paused_for_modal = false;
+            append_log(format_args!(
+                "hang watchdog resumed: the modal window closed, the stall clock starts again"
+            ));
+        }
         if rebaseline {
             rebaseline = false;
             last_value = value;
