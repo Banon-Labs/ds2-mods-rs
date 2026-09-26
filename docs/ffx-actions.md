@@ -242,20 +242,21 @@ Param index -> compiled field (the draw code that consumes the fields was not tr
 | 1 | 11 | curve, scaled by p3 range -> +0x40: **width** (see below) |
 | 2 | 11 | curve, scaled by p4 -> +0x50: **height**; **ignored when p5 != 0** (default curve used) |
 | 3, 4 | 7 | scale for p1 / p2 (min/max against a constant, `0x140f5d490`) |
-| 5 | 1 | flag bit0 of the block's tail flags word ("square: height follows width" **[inf]**) |
-| 6, 7 | 1 | ints -> +0x38, +0x3c |
-| 8 | 19 | RGBA colour curve, 4 channels compiled separately (833: 1,.251,.251,1 = the red tint) |
-| 9, 10 | 1 | ints -> +0x90, +0x94 |
-| 11 | 6 | int curve -> +0xa8 |
-| 12 | 40 | +0x34 second texture id |
+| 5 | 1 | flag bit0 of `+0x12c`: square quad, the vertex fill uses the width for the height too **[read]** |
+| 6 | 1 | int -> +0x38: orientation type 0..5 (vertex fill below) **[read]** |
+| 7 | 1 | int -> +0x3c (render-state map, see the resource bind below) |
+| 8 | 19 | RGBA colour curve at `+0xd8/+0xe8/+0xf8/+0x108` = R, G, B, A, multiplied by the particle's own colour **[read]** (833: 1,.251,.251,1 = the red tint) |
+| 9, 10 | 1 | ints -> +0x90, +0x94: texture-sheet columns and frame count **[read]** |
+| 11 | 6 | int curve -> +0xa8: frames advanced over the particle's life **[read]** |
+| 12 | 40 | +0x34 second texture id (a normal map **[inf]**, see the vertex fill) |
 | 13, 14, 15 | 1 | ints -> `+0x118`, `+0x11c`, `+0x124`; draw use below |
-| 16 | 11 | curve -> +0x80 |
+| 16 | 11 | curve -> +0x80: distance the quad is moved toward the view position **[read]** |
 | 17 | 7 | float -> +0x28 |
-| 20 | 79 | int range (kind 3) -> +0x98 (random int, e.g. texture-sheet frame **[inf]**) |
+| 20 | 79 | int range (kind 3) -> +0x98: start frame, evaluated once at time 0 **[read]** |
 | 21 | 81 | random range -> +0x60 (833: 0..6.28 = random initial roll in radians **[inf]**) |
 | 22 + 23 | 11 + 81 | curve x range combined -> +0x70: **roll speed, radians per second** (see below) |
 | 24 | 7 | float -> `+0x128`, only if kind 4 and count > 24, default -1.0 (`0x1410ac6a4`); draw use below |
-| 25, 26 | 11 | curves (count > 25 / > 26) |
+| 25, 26 | 11 | curves (count > 25 / > 26) -> +0xb8, +0xc8: U and V scroll when no texture sheet is used **[read]** |
 | 27 | 7 | float -> `+0x120` (count > 27); no reader found in the draw |
 | 29 | 1 | flag bit1 of `+0x12c` (count > 29); draw use below |
 | 18, 19, 28, 30-40 | | not read by the compile function; presumably read by the generic particle path (p28 is a tick, -1/30 in 833 = the "unset/infinite" sentinel **[inf]**) |
@@ -308,6 +309,61 @@ the flags word the compile ORs p5 / p29 into). It reads:
 What the render-context slots do was not traced, so the names stay open. Data **[data]**: p13 and
 p14 are -1 and p24 is -1.0 in every shipped action-59 use (so the indexed path never runs), p27 is
 0, p15 is 1 in most uses and 0 in the rest, p29 is 0 or 1 in about equal shares.
+
+Vertex fill **[read]**: the draw calls `0x141005910(this, vertices, particle, time, view, light,
+light_colours)` at `0x140fe17ae` with a vertex stride of `0x30` bytes (12 floats). `this` is the
+per-particle appearance object, `view` is the matrix at draw context `+0x10`, and `light` and
+`light_colours` are what render-context vtable `+0x98` returned for p14. The block is `[this+0x8]`.
+Constants were read from the image: `0x1410ac420` and `0x141136f60` are identity rows, the byte
+scale is 255.0 (`0x1410ad0cc`), the normal packing is `x * 127 + 127` (`0x1410c9c3c`).
+
+- Orientation (`+0x38`, p6), a switch whose default panics with `FXParticleAppearance_Billboard.cpp`
+  line `0xbc` "invalid orientationType.": 0 identity (world axes); 1 the `view` matrix as is; 2 the
+  particle's own 3x4 matrix at particle `+0x40..+0x6f`; 3 the `view` matrix with row 0 replaced by
+  world X `(1,0,0)`; 4 with row 1 replaced by world Y `(0,1,0)`; 5 with row 0 replaced by world Z
+  `(0,0,1)`. Cases 1 and 3-5 drop the translation row. That 1 is the ordinary camera-facing billboard
+  and 4 the upright one is **[inf]** from `view` being the camera matrix.
+- Roll: the chosen basis is multiplied by a rotation about Z built by `0x1403c2580` from `this+0x10`,
+  the angle the bounds update integrates from `+0x70`. What seeds `this+0x10` from p21 (`+0x60`)
+  was not traced; `+0x60` is not read here.
+- Size: width = `+0x40` curve x particle `+0x78`; height = `+0x50` curve x particle `+0x7c`, or the
+  width when `+0x12c` bit0 (p5) is set. Vertex float 10 carries `(width + height) / 2`.
+- Depth pull: when the `+0x80` curve (p16) is positive, the particle position is moved that far
+  along the unit vector toward row 3 (the translation) of `view`.
+- UVs: when both `+0xb8` and `+0xc8` are curve kind `0x1c` and the frame count `+0x94` (p10) is at
+  least 2, the quad shows one cell of a sheet with `+0x90` (p9) columns and `ceil(frames / columns)`
+  rows. The cell is `floor(+0x98 at time 0 + +0xa8 at the particle's time) mod frames`, so p20 is the
+  start frame and p11 the frames advanced over time. Otherwise `+0xb8` (p25) and `+0xc8` (p26) are
+  evaluated as a U and V offset and the UVs are `offset .. offset + 1` (scrolling). That kind `0x1c`
+  is what an absent p25 / p26 compiles to is **[inf]**: the compile substitutes the static default
+  curve `0x141894a20` (vtable `0x14127de68`, payload 0) when the file lacks them.
+- Colour: channel curves `+0xd8`, `+0xe8`, `+0xf8`, `+0x108` are multiplied by the particle's
+  colour bytes `+0x76`, `+0x75`, `+0x74`, `+0x77` (divided by 255), clamped to 0..1 and packed with R
+  in the low byte and A in the high byte. So p8 is R, G, B, A and the particle stores its colour as
+  B, G, R, A at `+0x74..+0x77`. The draw skips a particle whose alpha byte `+0x77` is 0 when the
+  appearance's `this+0x30` is non-zero.
+- Second texture (`+0x34`, p12, non-zero): each vertex also gets three packed vectors, the cross
+  product of the basis X and Y rows and the two rows themselves, i.e. a normal and tangent frame. That
+  makes the p12 texture a normal map **[inf]**. Without p12 those slots are 0.
+- Vertex count, chosen by p24 (`+0x128`) and p29:
+  - p12 set or p24 < 0, p29 clear: 4 corners at `+-width/2`, `+-height/2`, computed inline.
+  - p12 set or p24 < 0, p29 set: 8 vertices from the table `0x140f5e7f0(8)` = `0x14127d850`
+    (18 floats per entry), an octagon inscribed in the unit quad (corners cut at +-0.207), with the
+    UVs interpolated by the same table. Fewer covered but transparent pixels than the quad is the
+    likely point **[inf]**.
+  - p12 unset and p24 >= 0: 5 vertices computed inline, the particle centre plus four corners, drawn
+    with a six-entry index list. Each gets a normal in the billboard's frame: `-Z` for the centre and
+    `normalize(-Z +-X +-Y)` for the corners (the same values as the 5-entry table `0x14127d6c0`).
+    Each vertex's colour is scaled by `clamp(dot(N, light) * (1 - p24) + p24, 0, 1)` times one
+    `light_colours` term plus two more terms. So p24 >= 0 turns on per-vertex lighting and p24 is the
+    floor the lighting never goes below (wrap lighting). The arithmetic is **[read]**; calling the
+    inputs a light direction and light colours is **[inf]**. Vertex float 9 also carries p24.
+
+`FXClusterAppearance_Billboard` (71) makes the same choice at compile time (`0x14100c880`): its
+block `+0x1a0` is set to 5 when p2 is 0 and p30 >= 0, else 8 when p29 is non-zero, else 4
+(`0x14100d705/718/724`), and `+0x1dc` takes bit0 from the emitter tail and bit1 from p31 **[read]**.
+That p2 and p30 play the roles of 59's p12 and p24 there is **[inf]** from the identical 4 / 5 / 8
+split; the cluster draw was not read.
 
 ### 4.1 Cluster emitters (28-33, 45, 117) **[read]**
 
@@ -549,9 +605,11 @@ converts to **milliseconds** (x1000, +0.5). File values are multiples of 1/30 s 
   **[read]**. The templates read those args through scope-1 reference params (section 2.1).
 - Action 59's draw (`0x140fe14e0`) is read (section 4): p13, p14, p15, p24 and p29 reach
   render-context slots `+0x30/+0x60/+0x68/+0x98` and the vertex setup `0x140fe0eb0`, whose own
-  meaning was not traced, so those names stay open; the vertex fill `0x141005910` (colour curve
-  p8, the `+0x80/+0x90/+0x98/+0xa8` fields) was not read. The other appearance classes are
-  index -> field only.
+  meaning was not traced, so those names stay open. The vertex fill `0x141005910` is read
+  (orientation, sheet animation, UV scroll, colour, depth pull, lighting); still open there are
+  the writer of the initial roll from p21, the consumer of vertex floats 9-11 (shader side), and
+  which render-context call produces the light inputs. The other appearance classes, including the
+  cluster Billboard 71 draw, are index -> field only.
 - Cluster emitters: the common tail is placed by the cluster appearance compiles (section 4.1),
   but what the draw does with those block fields was not followed, so "width / height / colour"
   for the tail slots is inferred from placement; no reader of slot 2 was found.
