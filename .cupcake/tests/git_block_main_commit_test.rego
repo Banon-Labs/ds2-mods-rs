@@ -336,3 +336,186 @@ test_deny_shell_read_heredoc_commit_on_main if {
 	)
 	"DS2-MODS-BLOCK-MAIN-COMMIT" in rule_ids(denials)
 }
+
+# --- Another repository's checkout (2026-09-26, bd ds2-mods-rs-qzd) -----------
+#
+# The session checkout sits on main; the commit targets a checkout of a
+# different repository, whose branch commit_target_branches resolved there.
+
+bash_event_with_targets(cmd, branch, targets) := {
+	"hook_event_name": "PreToolUse",
+	"tool_name": "Bash",
+	"tool_input": {"command": cmd, "timeout": 30000},
+	"signals": {"current_branch": branch, "worktree_branches": worktree_fixture, "commit_target_branches": targets},
+}
+
+other_repo_targets := concat("\n", [
+	"/home/banon/projects/fromsoftware-rs-ds2-paramdefs\tds2-paramdefs",
+	"/home/banon/projects/fromsoftware-rs\tmain",
+	"/home/banon/projects/ds2-mods-rs\tmain",
+])
+
+test_allow_git_c_commit_other_repo_feature_branch_from_main_session if {
+	denials := guard.deny with input as bash_event_with_targets(
+		"git -C /home/banon/projects/fromsoftware-rs-ds2-paramdefs commit -q -F /tmp/msg.txt",
+		"main\n", other_repo_targets,
+	)
+	count(denials) == 0
+}
+
+test_allow_git_c_commit_other_repo_trailing_slash_and_quotes if {
+	denials := guard.deny with input as bash_event_with_targets(
+		`git -C "/home/banon/projects/fromsoftware-rs-ds2-paramdefs/" commit -q -F /tmp/msg.txt`,
+		"main\n", other_repo_targets,
+	)
+	count(denials) == 0
+}
+
+test_allow_cd_then_commit_other_repo_feature_branch_from_main_session if {
+	denials := guard.deny with input as bash_event_with_targets(
+		"cd /home/banon/projects/fromsoftware-rs-ds2-paramdefs && git add -A && git commit -q -F /tmp/msg.txt 2>&1 | tail -3",
+		"main\n", other_repo_targets,
+	)
+	count(denials) == 0
+}
+
+test_allow_cd_semicolon_then_commit_other_repo_feature_branch if {
+	denials := guard.deny with input as bash_event_with_targets(
+		"cd /home/banon/projects/fromsoftware-rs-ds2-paramdefs; git commit -m ok",
+		"main\n", other_repo_targets,
+	)
+	count(denials) == 0
+}
+
+# "Never commit on main" is about the branch, not about this repository.
+test_deny_git_c_commit_other_repo_main if {
+	denials := guard.deny with input as bash_event_with_targets(
+		"git -C /home/banon/projects/fromsoftware-rs commit -m bad",
+		"main\n", other_repo_targets,
+	)
+	"DS2-MODS-BLOCK-MAIN-COMMIT" in rule_ids(denials)
+}
+
+test_deny_cd_then_commit_other_repo_main if {
+	denials := guard.deny with input as bash_event_with_targets(
+		"cd /home/banon/projects/fromsoftware-rs && git commit -m bad",
+		"main\n", other_repo_targets,
+	)
+	"DS2-MODS-BLOCK-MAIN-COMMIT" in rule_ids(denials)
+}
+
+# This repository, resolved in place, is still main.
+test_deny_git_c_commit_this_repo_main_resolved if {
+	denials := guard.deny with input as bash_event_with_targets(
+		"git -C /home/banon/projects/ds2-mods-rs commit -m bad",
+		"main\n", other_repo_targets,
+	)
+	"DS2-MODS-BLOCK-MAIN-COMMIT" in rule_ids(denials)
+}
+
+test_deny_cd_then_commit_this_repo_main_resolved if {
+	denials := guard.deny with input as bash_event_with_targets(
+		"cd /home/banon/projects/ds2-mods-rs && git commit -m bad",
+		"main\n", other_repo_targets,
+	)
+	"DS2-MODS-BLOCK-MAIN-COMMIT" in rule_ids(denials)
+}
+
+# An unresolved target (not in the signal, not a registered worktree) keeps the deny.
+test_deny_cd_then_commit_unresolved_target if {
+	denials := guard.deny with input as bash_event_with_targets(
+		"cd /home/banon/projects/somewhere-else && git commit -m bad",
+		"main\n", other_repo_targets,
+	)
+	"DS2-MODS-BLOCK-MAIN-COMMIT" in rule_ids(denials)
+}
+
+# `||` runs the commit when the cd FAILED, in the session checkout.
+test_deny_cd_or_commit if {
+	denials := guard.deny with input as bash_event_with_targets(
+		"cd /home/banon/projects/fromsoftware-rs-ds2-paramdefs || git commit -m bad",
+		"main\n", other_repo_targets,
+	)
+	"DS2-MODS-BLOCK-MAIN-COMMIT" in rule_ids(denials)
+}
+
+# A cd in a subshell moves nothing for the commit after it.
+test_deny_subshell_cd_then_commit if {
+	denials := guard.deny with input as bash_event_with_targets(
+		"(cd /home/banon/projects/fromsoftware-rs-ds2-paramdefs) && git commit -m bad",
+		"main\n", other_repo_targets,
+	)
+	"DS2-MODS-BLOCK-MAIN-COMMIT" in rule_ids(denials)
+}
+
+# A second directory change could land anywhere.
+test_deny_cd_then_second_cd_then_commit if {
+	denials := guard.deny with input as bash_event_with_targets(
+		"cd /home/banon/projects/fromsoftware-rs-ds2-paramdefs && cd /home/banon/projects/ds2-mods-rs && git commit -m bad",
+		"main\n", other_repo_targets,
+	)
+	"DS2-MODS-BLOCK-MAIN-COMMIT" in rule_ids(denials)
+}
+
+test_deny_cd_then_bare_cd_then_commit if {
+	denials := guard.deny with input as bash_event_with_targets(
+		"cd /home/banon/projects/fromsoftware-rs-ds2-paramdefs;cd;git commit -m bad",
+		"main\n", other_repo_targets,
+	)
+	"DS2-MODS-BLOCK-MAIN-COMMIT" in rule_ids(denials)
+}
+
+test_deny_cd_then_dirstack_then_commit if {
+	denials := guard.deny with input as bash_event_with_targets(
+		"cd /home/banon/projects/fromsoftware-rs-ds2-paramdefs && popd && git commit -m bad",
+		"main\n", other_repo_targets,
+	)
+	"DS2-MODS-BLOCK-MAIN-COMMIT" in rule_ids(denials)
+}
+
+# A cd that is not the first thing in the text is not trusted to scope it.
+test_deny_commit_before_cd if {
+	denials := guard.deny with input as bash_event_with_targets(
+		"git commit -m bad && cd /home/banon/projects/fromsoftware-rs-ds2-paramdefs",
+		"main\n", other_repo_targets,
+	)
+	"DS2-MODS-BLOCK-MAIN-COMMIT" in rule_ids(denials)
+}
+
+# A cd in the outer command does not vouch for a bare commit in a payload.
+test_deny_cd_then_wrapped_bare_commit if {
+	denials := guard.deny with input as bash_event_with_targets(
+		"cd /home/banon/projects/fromsoftware-rs-ds2-paramdefs && bash -c 'git commit -m bad'",
+		"main\n", other_repo_targets,
+	)
+	"DS2-MODS-BLOCK-MAIN-COMMIT" in rule_ids(denials)
+}
+
+# A good target does not vouch for a main target chained after it -- including
+# with no space after the separator, which the old whole-text tally missed.
+test_deny_other_repo_feature_commit_chained_with_main_commit if {
+	denials := guard.deny with input as bash_event_with_targets(
+		"git -C /home/banon/projects/fromsoftware-rs-ds2-paramdefs commit -m ok;git -C /home/banon/projects/fromsoftware-rs commit -m bad",
+		"main\n", other_repo_targets,
+	)
+	"DS2-MODS-BLOCK-MAIN-COMMIT" in rule_ids(denials)
+}
+
+test_deny_worktree_commit_then_unspaced_bare_commit if {
+	denials := guard.deny with input as bash_event_with_worktrees(
+		"git -C /home/banon/projects/er-mods-rs/.worktrees/portrait-stats-crate commit;git commit -m sneak",
+		"main\n", worktree_fixture,
+	)
+	"DS2-MODS-BLOCK-MAIN-COMMIT" in rule_ids(denials)
+}
+
+# The object signal shape resolves the same way.
+test_allow_git_c_commit_other_repo_object_signal if {
+	denials := guard.deny with input as {
+		"hook_event_name": "PreToolUse",
+		"tool_name": "Bash",
+		"tool_input": {"command": "git -C /home/banon/projects/fromsoftware-rs-ds2-paramdefs commit -m ok", "timeout": 30000},
+		"signals": {"current_branch": "main", "commit_target_branches": {"output": other_repo_targets, "exit_code": 0}},
+	}
+	count(denials) == 0
+}
