@@ -133,3 +133,49 @@ test_build_verb_after_a_separator_is_denied if {
 	denied("cd crates && cargo build 2>&1 | grep error")
 	denied("(cargo check) | grep error")
 }
+
+# --- same pipeline, downstream: separate commands do not combine ---------------------------------
+#
+# The 2026-09-25 false positives, verbatim. The matcher was in one command and the build-shaped
+# token in another, and the rule asked whether both were PRESENT rather than whether one was piped
+# into the other.
+test_matcher_in_an_earlier_command_than_a_lookup_is_allowed if {
+	not denied("cd /home/banon/projects/ds2-mods-rs; ls scripts/ | grep -i cupcake; command -v opa cupcake")
+	not denied("command -v cargo; ls | grep x")
+}
+
+test_quoted_pipe_in_a_word_list_is_allowed if {
+	not denied("for c in 'ls scripts/ | grep -i cupcake' 'command -v opa cupcake'; do python3 scripts/cupcake-check-command.py \"$c\" 2>&1 | head -1; done")
+}
+
+test_separators_do_not_join_pipelines if {
+	not denied("cargo build; ls | grep x")
+	not denied("cargo build && ls | grep x")
+	not denied("cargo build || ls | grep x")
+	not denied("cargo build\nls | grep x")
+	not denied("ls | grep x; cargo build")
+}
+
+# Downstream means downstream: a matcher feeding a build is not grepping the build.
+test_matcher_upstream_of_the_build_is_allowed if {
+	not denied("git ls-files | grep -c rs | xargs echo; cargo build")
+	not denied("git ls-files | grep 'rs$' | cargo fmt --check")
+}
+
+# A name lookup does not run the program it names.
+test_lookups_are_not_builds if {
+	not denied("which cargo | grep -c cargo")
+	not denied("type opa | grep -q builtin")
+	not denied("command -V make | grep make")
+}
+
+# The build itself is still seen when a shell wrapper carries it, and when a group pipes it.
+test_bash_c_payload_is_still_denied if {
+	denied("bash -c 'cargo build 2>&1 | grep error'")
+	denied("bash -c 'cargo build' 2>&1 | grep error")
+}
+
+test_grouped_build_piped_into_a_matcher_is_still_denied if {
+	denied("{ cargo build; cargo test -p x; } 2>&1 | grep error")
+	denied("(cd crates; cargo check) | grep error")
+}
