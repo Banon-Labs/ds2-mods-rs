@@ -351,6 +351,10 @@ echo "  ds2-player-kind.py: OK"
 # file this repository never had.
 python3 scripts/ds2-frida-watch.py --selftest >/dev/null
 echo "  ds2-frida-watch.py: OK"
+# The evidence reader the Rust-edit gate opens on. Its selftest pins the three recorders' refusals
+# (Frida, telemetry, build) and the verdict prefix the policy anchors on.
+python3 scripts/ds2-frida-evidence.py --selftest >/dev/null
+echo "  ds2-frida-evidence.py: OK"
 # The Arxan redirect census. Its selftest builds a small PE in both layouts, so it needs no game
 # image; it pins the exception-directory bound, the chained-record flag, and the diff's reasons.
 python3 scripts/ds2-arxan-redirects.py --selftest >/dev/null

@@ -262,6 +262,156 @@ def record_telemetry(repo: pathlib.Path, crate: str, log: str, line: str) -> int
     return 0
 
 
+# --- the third instrument: the build ---------------------------------------------------------
+#
+# Added 2026-09-26 (PR #199, host-tests). A hand-written `extern "system"` block in
+# `ds2-invasion-path` carried no `#[link(name = "user32")]`, and the MSVC test link failed:
+#
+#     lld-link: error: undefined symbol: GetAsyncKeyState
+#     >>> referenced by .../crates/ds2-invasion-path/src/lib.rs:378
+#
+# The defect is in the linker's input. Frida reaches the game and telemetry reaches a running DLL;
+# a DLL that does not link never runs, so neither instrument can see it, and the gate demanded one
+# of them anyway. For that class the instrument is the build, and its measurement is the error it
+# printed. The conditions that keep it a measurement:
+#
+#   * the quoted line is a WHOLE line of the log, not a fragment of one, and it is a compiler or
+#     linker error header (`error[E..]: ...`, `error: ...`, `lld-link: error: ...`);
+#   * the log is a failed cargo build: it carries cargo's own `error: could not compile` footer;
+#   * the error's own location lines (`--> path` from rustc, `>>> referenced by path` from lld),
+#     between it and the next diagnostic, name a `.rs` file under `crates/<crate>/` -- so the crate
+#     it opens is the one the compiler blamed, not the one the agent names;
+#   * the log is newer than the last committed Rust change, as for the other two instruments;
+#   * it opens that one crate and nothing else.
+#
+# What it cannot tell: that the fix the agent then writes is the right one. Neither can the other
+# two. The build that follows the edit is what answers that.
+
+# A diagnostic header, after its indentation and any `= note: ` wrapper are taken off. rustc wraps
+# the linker's stderr in `= note:`, which is where an lld error line actually sits in a cargo log.
+BUILD_ERROR_HEADER = re.compile(
+    r"\A(?:error(?:\[E\d{4}\])?: \S|(?:lld-link|rust-lld|ld\.lld|ld64\.lld|ld): error: \S)"
+)
+# Any diagnostic header, error or not: where one error's block ends.
+ANY_DIAGNOSTIC_HEADER = re.compile(
+    r"\A(?:(?:error|warning)(?:\[[A-Z]\d{4}\])?:|(?:lld-link|rust-lld|ld\.lld|ld64\.lld|ld): (?:error|warning):)"
+)
+# The location lines rustc and lld print under an error, and the path they carry.
+BUILD_LOCATION = re.compile(r"\A(?:-->|>>> referenced by|>>> defined at)\s+(\S+?\.rs)(?::\d+)*\b")
+CARGO_FAILED = "error: could not compile"
+# How far below its header an error's location lines may sit. lld lists a few `>>>` lines; rustc
+# puts `-->` on the next line. Past this it is some other diagnostic's business.
+BUILD_BLOCK_LINES = 12
+
+
+def _diagnostic_text(raw: str) -> str:
+    text = raw.strip()
+    if text.startswith("= note:"):
+        text = text[len("= note:") :].strip()
+    return text
+
+
+def _blamed_crates(lines: list[str], header: int) -> set[str]:
+    """The crates whose `.rs` files the error at `lines[header]` names in its location lines."""
+    crates: set[str] = set()
+    for raw in lines[header + 1 : header + 1 + BUILD_BLOCK_LINES]:
+        text = _diagnostic_text(raw)
+        if ANY_DIAGNOSTIC_HEADER.match(text):
+            break
+        found = BUILD_LOCATION.match(text)
+        if not found:
+            continue
+        parts = pathlib.PurePosixPath(found.group(1).replace("\\", "/")).parts
+        for index, part in enumerate(parts[:-1]):
+            if part == "crates" and index + 1 < len(parts) - 1:
+                crates.add(parts[index + 1])
+                break
+    return crates
+
+
+def record_build(repo: pathlib.Path, crate: str, log: str, line: str) -> int:
+    """Append a build-error record, after proving the compiler blamed a file in `crate`."""
+    if not CRATE_NAME.match(crate):
+        print(f"refused: crate name {crate!r} is not a bare `[A-Za-z0-9_-]+` directory name")
+        return 2
+    crate_dir = repo / "crates" / crate
+    if not crate_dir.is_dir():
+        print(f"refused: {crate_dir} is not a crate in this workspace")
+        return 2
+    if "\n" in line.strip() or "\r" in line:
+        print("refused: quote one line of the log, not several")
+        return 2
+    quoted = _diagnostic_text(line)
+    if len(quoted) < MIN_TELEMETRY_LINE:
+        print(
+            f"refused: the quoted line is {len(quoted)} characters, "
+            f"under the {MIN_TELEMETRY_LINE} a verbatim check needs to mean anything"
+        )
+        return 2
+    if not BUILD_ERROR_HEADER.match(quoted):
+        print(
+            "refused: that is not a compiler or linker error line -- quote the `error: ...`, "
+            "`error[E....]: ...` or `lld-link: error: ...` header itself"
+        )
+        return 2
+
+    log_file = pathlib.Path(log).expanduser()
+    try:
+        body = log_file.read_text(encoding="utf-8", errors="replace")
+    except OSError as err:
+        print(f"refused: cannot read {log_file}: {err}")
+        return 2
+    if CARGO_FAILED not in body:
+        print(f"refused: {log_file} has no `{CARGO_FAILED}` line, so it is not a failed cargo build")
+        return 2
+    lines = body.splitlines()
+    headers = [i for i, raw in enumerate(lines) if _diagnostic_text(raw) == quoted]
+    if not headers:
+        print(
+            f"refused: no line of {log_file} is that line, whole -- quote the error line as the "
+            f"build printed it, not a fragment of it"
+        )
+        return 2
+    blamed: set[str] = set()
+    for header in headers:
+        blamed |= _blamed_crates(lines, header)
+    if crate not in blamed:
+        named = ", ".join(sorted(blamed)) or "no file under crates/"
+        print(
+            f"refused: that error's location lines (`-->` / `>>> referenced by`) name {named}, "
+            f"not crates/{crate}/ -- the build decides which crate it blamed"
+        )
+        return 2
+
+    try:
+        written = int(log_file.stat().st_mtime)
+    except OSError as err:
+        print(f"refused: cannot stat {log_file}: {err}")
+        return 2
+    head = head_commit_time(repo)
+    if head is not None and written <= head:
+        print(
+            f"refused: {log_file} was last written before the newest committed Rust change, "
+            f"so it measured code that is already committed"
+        )
+        return 2
+
+    path = log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    row = {
+        "at": int(time.time()),
+        "kind": "build",
+        "crate": crate,
+        "log": str(log_file),
+        "line": " ".join(quoted.split()),
+        "written": written,
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row) + "\n")
+    print(f"frida-evidence: recorded {row}")
+    return 0
+
+
 def newest_record(path: pathlib.Path) -> dict | None:
     """The last well-formed record, or `None`.
 
@@ -294,7 +444,8 @@ def check(repo: pathlib.Path) -> int:
         return 1
 
     head = head_commit_time(repo)
-    if row.get("kind") == "telemetry":
+    kind = row.get("kind")
+    if kind in ("telemetry", "build"):
         if head is not None and int(row.get("at", 0)) <= head:
             print(
                 "UNPROVEN spent-by-commit the last measurement predates HEAD, so it belongs to "
@@ -305,7 +456,7 @@ def check(repo: pathlib.Path) -> int:
         # there: everything to the right of it is free text that must not be able to impersonate
         # the field that decides which crate this opens.
         print(
-            f"PROVEN telemetry crate={row.get('crate', '?')} "
+            f"PROVEN {kind} crate={row.get('crate', '?')} "
             f"log={row.get('log', '?')} line={row.get('line', '?')!r}"
         )
         return 0
@@ -404,6 +555,117 @@ def selftest() -> int:
             said.startswith("PROVEN telemetry crate=demo-crate "),
         )
 
+        # --- the third instrument: a failed build ----------------------------------------
+        #
+        # Shaped on the PR #199 host-tests log: rustc wraps lld's stderr in `= note:`, and the
+        # file lld blames sits on the `>>> referenced by` line under the error, not in it.
+        (fake_repo / "crates" / "demo-path").mkdir(parents=True)
+        (fake_repo / "crates" / "demo-effects").mkdir(parents=True)
+        lld_error = "lld-link: error: undefined symbol: GetAsyncKeyState"
+        build_log = fake_repo / "build.log"
+        build_log.write_text(
+            "   Compiling demo-effects v0.1.0 (/w/crates/demo-effects)\n"
+            "error: linking with `lld-link` failed: exit status: 1\n"
+            "  |\n"
+            f"  = note: {lld_error}\n"
+            "          >>> referenced by /w/.claude/worktrees/x/crates/demo-path/src/lib.rs:378\n"
+            "          >>>               demo_effects.rcgu.o:(demo_path::poll)\n"
+            "\n"
+            "error: could not compile `demo-effects` (lib test) due to 1 previous error\n",
+            encoding="utf-8",
+        )
+
+        def build(crate: str, line: str, log_file: pathlib.Path = build_log) -> int:
+            with contextlib.redirect_stdout(io.StringIO()):
+                return record_build(fake_repo, crate, str(log_file), line)
+
+        ok(
+            "a build error opens the crate its `>>> referenced by` line names",
+            build("demo-path", lld_error) == 0,
+        )
+        verdict = io.StringIO()
+        with contextlib.redirect_stdout(verdict):
+            code = check(empty)
+        ok(
+            "the build verdict opens with the field the policy anchors on",
+            code == 0 and verdict.getvalue().startswith("PROVEN build crate=demo-path "),
+        )
+        ok(
+            "the crate that was compiling, but not blamed, is refused",
+            build("demo-effects", lld_error) == 2,
+        )
+        ok(
+            "the `= note:` spelling of the same line is the same line",
+            build("demo-path", f"= note: {lld_error}") == 0,
+        )
+        ok(
+            "a fragment of the error line is refused",
+            build("demo-path", "error: undefined symbol: GetAsyncKeyState") == 2,
+        )
+        ok(
+            "a location line is not an error line",
+            build(
+                "demo-path",
+                ">>> referenced by /w/.claude/worktrees/x/crates/demo-path/src/lib.rs:378",
+            )
+            == 2,
+        )
+        ok(
+            "cargo's footer names no file, so it blames no crate",
+            build("demo-effects", "error: could not compile `demo-effects` (lib test) due to 1 previous error") == 2,
+        )
+        ok(
+            "a crate this workspace does not have is refused",
+            build("not-a-crate", lld_error) == 2,
+        )
+        not_a_build = fake_repo / "notes.log"
+        not_a_build.write_text(
+            f"{lld_error}\n>>> referenced by crates/demo-path/src/lib.rs:1\n", encoding="utf-8"
+        )
+        ok(
+            "a log without cargo's `could not compile` footer is not a failed build",
+            build("demo-path", lld_error, not_a_build) == 2,
+        )
+        rustc_log = fake_repo / "rustc.log"
+        rustc_log.write_text(
+            "error[E0425]: cannot find value `x` in this scope\n"
+            " --> crates/demo-path/src/lib.rs:4:5\n"
+            "  |\n"
+            "error: could not compile `demo-path` (lib) due to 1 previous error\n",
+            encoding="utf-8",
+        )
+        ok(
+            "a rustc error opens the crate its `-->` line names",
+            build("demo-path", "error[E0425]: cannot find value `x` in this scope", rustc_log)
+            == 0,
+        )
+        ok(
+            "and not a crate it does not name",
+            build("demo-effects", "error[E0425]: cannot find value `x` in this scope", rustc_log)
+            == 2,
+        )
+
+        # Staleness, against a real git history: a Rust commit dated after the log was written
+        # means the log measured code that is already committed.
+        git_repo = pathlib.Path(tmp) / "gitrepo"
+        (git_repo / "crates" / "demo-path" / "src").mkdir(parents=True)
+        (git_repo / "crates" / "demo-path" / "src" / "lib.rs").write_text("", encoding="utf-8")
+        future = str(int(time.time()) + 86400)
+        git_env = dict(
+            os.environ,
+            GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t",
+            GIT_COMMITTER_EMAIL="t@t", GIT_AUTHOR_DATE=f"@{future} +0000",
+            GIT_COMMITTER_DATE=f"@{future} +0000",
+        )
+        for cmd in (["init", "-q"], ["add", "-A"], ["commit", "-q", "--no-verify", "-m", "x"]):
+            subprocess.run(["git", "-C", str(git_repo), *cmd], env=git_env, check=True,
+                           capture_output=True)
+        stale_log = git_repo / "build.log"
+        stale_log.write_text(build_log.read_text(encoding="utf-8"), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            stale = record_build(git_repo, "demo-path", str(stale_log), lld_error)
+        ok("a build log older than the last committed Rust change is refused", stale == 2)
+
         ok("the log lives outside the repo by default", REPO_ROOT not in state_dir().parents)
         os.environ.pop("DS2_FRIDA_EVIDENCE_LOG", None)
 
@@ -419,7 +681,12 @@ def main(argv: list[str]) -> int:
         action="store_true",
         help="append an in-process-telemetry record, licensing one crate",
     )
-    parser.add_argument("--crate", default="", help="the crate the telemetry record licenses")
+    parser.add_argument(
+        "--record-build",
+        action="store_true",
+        help="append a compiler/linker-error record, licensing the one crate the error blamed",
+    )
+    parser.add_argument("--crate", default="", help="the crate the telemetry/build record licenses")
     parser.add_argument("--log", default="", help="the live run's log file")
     parser.add_argument("--line", default="", help="a line that must be in that log verbatim")
     parser.add_argument("--agent", default="", help="the agent file that ran")
@@ -436,6 +703,8 @@ def main(argv: list[str]) -> int:
         return record(args.agent, args.pid, args.messages, args.seconds)
     if args.record_telemetry:
         return record_telemetry(REPO_ROOT, args.crate, args.log, args.line)
+    if args.record_build:
+        return record_build(REPO_ROOT, args.crate, args.log, args.line)
     if args.check:
         return check(REPO_ROOT)
     parser.print_help()
