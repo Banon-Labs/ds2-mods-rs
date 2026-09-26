@@ -78,6 +78,124 @@ It is a local override of one boolean in one function -- the top-menu builder --
 chain, which calls `0x140513600` directly on its own, never sees it. `0x140513600` is the read it
 was shadowing, and patching that is the superset of setting this byte.
 
+Re-checked with `scripts/ds2-xrefs.py 0x14160de19` and each candidate decoded by hand
+(verified in binary). The script lists six code candidates, but only one of them resolves to this
+byte once the instruction's own immediate is counted:
+
+| site | instruction | real target |
+| --- | --- | --- |
+| `0x1400eff88` | `cmp byte [rip+..], 0` | `0x14160de18` |
+| `0x1400effa5` | `mov byte [rip+..], 0` | `0x14160de18` |
+| `0x1400f011c` | `mov byte [rip+..], 1` | `0x14160de18` |
+| `0x1400f431f` | `cmp byte [rip+..], 0` | **`0x14160de19`** |
+| `0x1400fd938` | `mov byte [rip+..], 1` | `0x14160de1a` (the boot-once flag) |
+| `0x1400febe0` | `mov byte [rip+..], 0` | `0x14160de1a` |
+
+So the byte has one reader and no RIP-relative writer, and nothing connects it to `netService+0x3a`:
+the one site that reads it writes nothing, and the setter `0x140513820` takes its value from `dl`
+at each caller. The two are alternatives inside the top-menu builder and nowhere else. A write
+through a computed pointer is not excluded by this scan (inferred unlikely: the neighbours
+`0x14160de18` and `0x14160de1a` are both written RIP-relative).
+
+## The switch the boot chain does consult: system data `+0x136e`
+
+The flag that takes the network work out of the pre-Continue path is not an online flag at all. It
+is a byte in the system-data block, and the substate that reads it is `0x37 UserPolicy`, which sits
+between the Steam check and the login.
+
+```text
+sys = [[[0x1416148f0] + 0xa8] + 0xd8]     ; the same block 0x05 SteamLoadSystemData fills
+```
+
+`FeSubStateTitleUserPolicy::v1` (enter, `0x1400f9040`, not an Arxan redirect per
+`scripts/ds2-arxan-chain.py`), verified in binary:
+
+```text
+0x1400f9070  cmp byte [sys+0x136e], 0
+0x1400f9077  je  0x1400f908b              ; 74 12
+0x1400f9079  mov dword [this+0x10], 3     ; phase 3
+             ret
+0x1400f908b  ...                          ; zero: test [sys+0x136d] (policy accepted -> phase 4),
+                                          ; else build the policy screen (phase 1)
+```
+
+and `FeSubStateTitleUserPolicy::v5` (`0x1400f9510`) publishes, verified in binary:
+
+| phase | destination |
+| --- | --- |
+| 2 | `0x38` SaveSystemData |
+| 3 | `0x2a` FeSubStateOfflineModeWindow |
+| 4 | `0x39` GameServerLogin |
+
+`0x2a` is the "playing offline" notice, and its one edge goes to `0x47` the top menu -- measured,
+from the `ds2-dialog-skip` line quoted further down (`kind=42 cancel-dest=0x47 confirm-dest=0xffff`),
+and already suppressed by that crate. So with `+0x136e` non-zero the boot runs
+
+```text
+0x05 -> 0x20 -> 0x37 -(phase 3)-> 0x2a -> 0x47
+```
+
+and `0x38`, `0x39` and `0x44` are never entered. This is the game's own route, not a forged one: it
+is the same `0x2a -> 0x47` tail the login-failure prompt takes when it plays offline.
+
+### Where `+0x136e` comes from and who changes it
+
+Every disp32 reference to `+0x136e` in the image, from a raw byte search for `6e 13 00 00` with
+each hit decoded (verified in binary; the three other raw hits are `call`/`jae` displacements):
+
+| site | function | access |
+| --- | --- | --- |
+| `0x1400f9070` | UserPolicy enter | read -- the branch above |
+| `0x1400ff347` | `FeSubStateTitleTopMenu::v3` (`0x1400ff300`) | write `0`, when the menu's phase is 4 |
+| `0x14019bbb1` | `0x14019bb30`, a system-data reader | write, from byte 3 of a 16-byte header read off the stream |
+| `0x14019be38` | `0x14019bd90`, the other system-data reader | write, from the stream |
+| `0x14019c77e` | `0x14019c190`, the system-data writer | read, to serialise it |
+
+The default-initialiser `0x14019b960` writes the dword at `+0x136c` as `0x00000001`, so a fresh
+block has `+0x136e = 0` (verified in binary). Top-menu phase 4 is row 3, "go online" (see
+[`DS2-TITLE-FLOW.md`](DS2-TITLE-FLOW.md)), so choosing to go online clears it.
+
+The reading that fits, inferred: `+0x136e` is a persisted "start in offline mode" setting. It
+reaches memory only from the save file, the game clears it when the player asks to go online, and
+it is written back whenever system data is saved. No writer of a non-zero value was found other
+than the two readers loading it from disk; a bulk copy into the block would not show in this scan.
+
+### `0x20` is not network work
+
+`FeSubStateTitleSteamNetworkCheck::v1` (`0x1400f8fb0`) decides its phase inside `enter` and its
+update is the shared `FeSubStateBase::v3`, a bare `ret` (verified in binary). It asks two
+questions -- `[[0x141616cf8]]->vtable[1]` and whether the `NetSvrManager` state word is `3`
+(`0x1405135a0`) -- and publishes phase 1 to `0x37`, 2 to `0x24`, 3 to `0x29`. Nothing is started and
+nothing is waited on, which matches its measured 9 ms dwell. It stays on the path under either
+change below and costs one frame.
+
+### The two ways to set it, and why one is better
+
+1. **Data write** -- set `[sys+0x136e] = 1` after `0x05` has loaded system data and before `0x37`
+   enters. It uses the game's own branch and patches no code. The catch (inferred from the writer
+   at `0x14019c77e`): the next system-data save persists it, so an unmodded launch afterwards
+   would also boot offline until the player picks "go online".
+2. **Code patch** -- `0x1400f9077`: `74 12` to `90 90`. The `je` falls through, UserPolicy takes
+   phase 3 every time, and nothing is written to the save. Two bytes, in a function that is not an
+   Arxan redirect, gated like the other `ds2-offline` patches.
+
+The code patch is the smaller and safer change. What it also does, verified in binary: it skips
+the policy screen on a profile that has never accepted it (the `+0x136d` test comes after the
+branch), and it skips `0x38 SaveSystemData`, which the measured profile never reached anyway. Both
+are exactly what the game already does when the persisted byte is set.
+
+One more thing it skips, inferred: `NetSvrManager` slot 12 (`0x140290040`) is reached on the boot path
+from the login starter (and otherwise from `FeSubStateTitleSetOfflineMode`), and besides the setter
+it calls `0x140291390` with a fresh state (the body is verified in binary; the caller list is not
+exhaustive). On this route it never runs. The `NetSvrManager` has presumably not left its initial state at that point, but that
+is not traced.
+
+Nothing here is a measurement of the saving. Under the current `ds2-offline` build, `0x44` is
+already off the path -- the refused login raises the `0x3e` prompt and its offline edge goes to
+`0x2a`, not to `0x44` (measured, the dialog-skip lines below). What this change removes is the
+login's start, its failure and that prompt; how long those take with the sockets refused has not
+been measured, and the noise floor is +/-300 ms.
+
 ## The half that a flag patch does not reach
 
 `FeSubStateTitleGameServerLogin::v8` (`0x1400f9820`, vtable slot 8) is the login work starter, and
@@ -290,9 +408,10 @@ reaches a usable menu, offline, with no button presses.
 ## What this does not do
 
 * **It does not touch Steam.** See above.
-* **It does not remove the network boot substates.** `0x20`, `0x39` and `0x44` still run; they now
-  fail early instead of waiting on a server. Removing them is a separate question: whether the network boot chain can go at all.
-  Whatever boot time that saves is a side effect, and this document does not claim a number for it
+* **It does not remove the network boot substates.** `0x20` and `0x39` still run, and `0x39`
+  now fails early instead of waiting on a server; `0x44` is already skipped because the failure
+  prompt's offline edge goes to `0x2a`. Taking `0x39` off the path too is the two-byte UserPolicy
+  patch described above, which is not built. Whatever boot time that saves has not been measured
   -- `DS2-BOOT-WORK.md` measured the noise floor at +/-300 ms, so any such claim needs several
   runs before it is believed.
 * **It does not stop a determined online path.** Four imports are fronted, not all 43. A code path
