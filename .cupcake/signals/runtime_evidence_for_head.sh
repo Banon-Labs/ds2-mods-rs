@@ -209,6 +209,24 @@ if [ -r "$GAME_LOG" ]; then
     log_time="$(stat -c %W "$GAME_LOG" 2>/dev/null || echo 0)"
     case "$log_time" in ''|0|-|*[!0-9]*) log_time="$(stat -c %Y "$GAME_LOG" 2>/dev/null || echo 0)" ;; esac
     [ "$log_time" -ge "$floor" ] 2>/dev/null && fresh=1
+    # Exact provenance when the log has it. ds2-loader's first line names the commit it was built
+    # from (`build git=<sha>`, `-dirty` when crates/ differed). When it is there, times are not
+    # asked at all: the run covers a ref when its commit is an ancestor of the ref and no commit
+    # between them touches game code. A dirty build covers nothing.
+    run_sha="$(head -1 "$GAME_LOG" 2>/dev/null | sed -n 's/.* build git=\([0-9a-f]\{40\}\)\(-dirty\)\{0,1\} .*/\1\2/p')"
+    if [ -n "$run_sha" ]; then
+        fresh=1
+        case "$run_sha" in *-dirty) fresh=0 ;; esac
+        sha="${run_sha%-dirty}"
+        while IFS= read -r ref; do
+            [ -n "$ref" ] || continue
+            git rev-parse --verify --quiet "$ref^{commit}" >/dev/null 2>&1 || ref="HEAD"
+            if ! git merge-base --is-ancestor "$sha" "$ref" 2>/dev/null; then fresh=0; fi
+            if [ -n "$(git log --format=%H "$sha..$ref" -- crates scripts/ds2-run.py 2>/dev/null | head -1)" ]; then fresh=0; fi
+        done <<EOF_RUN_REFS
+$refs
+EOF_RUN_REFS
+    fi
 else
     log_time=0
 fi
