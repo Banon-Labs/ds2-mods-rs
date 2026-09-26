@@ -82,7 +82,7 @@ function tick() {
     const entry = mgr && ptr_(mgr, 0x25830 + i * 8);
     let ok = false;
     try { ok = entry !== null && entry.add(0x25).readU8() >= 0; } catch (e) { ok = false; }
-    invLv.push(!entry ? 'empty' : !ok ? 'unreadable ' + entry : ('id=' + entry.add(0x14).readU32() + ' type=' + entry.add(0x1e).readU8() + ' lvl=' + (entry.add(0x25).readU8() & 0xf) + ' raw25=0x' + entry.add(0x25).readU8().toString(16)));
+    invLv.push(!entry ? 'empty' : !ok ? 'unreadable ' + entry : ('entry=' + entry + ' flags1f=0x' + entry.add(0x1f).readU8().toString(16) + ' id=' + entry.add(0x14).readU32() + ' type=' + entry.add(0x1e).readU8() + ' lvl=' + (entry.add(0x25).readU8() & 0xf) + ' raw25=0x' + entry.add(0x25).readU8().toString(16)));
   }
   lines.push('local ' + name(pc) + ' pc=' + pc + ' inv=' + inv + ' mgr=' + mgr);
   const rec = records(pc) || [];
