@@ -304,6 +304,12 @@ else
   # gate drives the real engine and pins the difference.
   python3 scripts/test-cupcake-delivered-shape.py
 fi
+# The Monitor guard refuses any unthrottled stream and names scripts/monitor-throttle.py as the fix.
+# Until 2026-09-25 that file existed only in er-mods-rs, so the guard's one sanctioned shape could
+# not run here and the workaround was an absolute path into the other repository. Pure python, so
+# it runs whether or not the engine is installed.
+python3 scripts/monitor-throttle.py --selftest >/dev/null
+echo "  monitor-throttle.py: OK"
 
 echo "== launcher selftest =="
 # scripts/ds2-run.py decides whether a runtime run is reported as evidence or as silence, and it
