@@ -21,7 +21,9 @@ TWO GATES read it, via `.cupcake/signals/pr_run_stamp.sh` and the policy
 `.cupcake/policies/claude/pr_requires_run_stamp.rego`:
 
   * `gh pr create` is refused unless the body carries a stamp whose sha is the commit being proposed
-    (`--head <branch>` if given, else HEAD of the invoking checkout) and whose time is fresh.
+    (`--head <branch>` if given, else HEAD of the invoking checkout) and whose time is fresh. The
+    invoking checkout is the event's cwd moved by any `cd` in front of the call; when `--repo` names
+    a repository that checkout has no remote for, the branch is read from GitHub instead.
   * `gh pr ready` is refused unless the LIVE body (`gh pr view --json body,headRefOid,commits`) has a
     stamp whose sha is the PR's current headRefOid, fresh against that commit's time, and the latest
     such stamp says `result=pass`. A push after drafting therefore needs a new run and a new stamp.
@@ -129,7 +131,33 @@ def _strip_heredocs(cmd: str) -> str:
     return "\n".join(out)
 
 
-def gh_invocations(cmd: str) -> list[list[str]]:
+def _cd_target(argv: list[str], here: str | None) -> str | None:
+    """The directory `cd <argv>` lands in, or None when it cannot be known from the text."""
+    if here is None:
+        return None
+    operands = [a for a in argv[1:] if a not in ("-L", "-P", "--")]
+    if not operands:
+        return os.path.expanduser("~")
+    target = operands[0]
+    if target == "-" or "$" in target or "`" in target:
+        return None
+    target = os.path.expanduser(target)
+    if not os.path.isabs(target):
+        if not here:
+            return None
+        target = os.path.join(here, target)
+    return os.path.normpath(target)
+
+
+def gh_invocations(cmd: str, cwd: str = "") -> list[tuple[list[str], str | None]]:
+    """Every `gh` argv in the command, with the directory it runs in.
+
+    The directory is the event's cwd moved by each `cd` in front of the call (bd ds2-mods-rs-3sb):
+    `cd <other checkout> && gh pr create ...` proposes a commit of THAT checkout, and resolving it in
+    the session checkout either fails or names the wrong commit. A `cd` inside `( ... )` only moves
+    the subshell. None means a `cd` the text cannot resolve (`cd -`, `cd "$dir"`), and the caller
+    then resolves nothing rather than guessing.
+    """
     text = _strip_heredocs(cmd)
     try:
         lex = shlex.shlex(text, posix=True, punctuation_chars="();<>|&")
@@ -137,24 +165,39 @@ def gh_invocations(cmd: str) -> list[list[str]]:
         toks = list(lex)
     except ValueError:
         toks = text.split()
-    segs, seg = [], []
+    out: list[tuple[list[str], str | None]] = []
+    here: str | None = cwd
+    stack: list[str | None] = []
+    seg: list[str] = []
+
+    def flush() -> None:
+        nonlocal here
+        i = 0
+        while i < len(seg) and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", seg[i]) or seg[i] in WRAPPERS):
+            i += 1
+        argv = seg[i:]
+        if not argv:
+            return
+        name = os.path.basename(argv[0])
+        if name == "gh":
+            out.append((argv, here))
+        elif name == "cd":
+            here = _cd_target(argv, here)
+        elif name in ("pushd", "popd"):
+            here = None
+
     for t in toks:
         if t and all(c in "();<>|&" for c in t):
-            if seg:
-                segs.append(seg)
+            flush()
             seg = []
+            for c in t:
+                if c == "(":
+                    stack.append(here)
+                elif c == ")" and stack:
+                    here = stack.pop()
         else:
             seg.append(t)
-    if seg:
-        segs.append(seg)
-    out = []
-    for s in segs:
-        i = 0
-        while i < len(s) and (re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", s[i]) or s[i] in WRAPPERS):
-            i += 1
-        argv = s[i:]
-        if argv and os.path.basename(argv[0]) == "gh":
-            out.append(argv)
+    flush()
     return out
 
 
@@ -211,17 +254,80 @@ def _git(cwd: str, *args: str) -> str:
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
-def head_of(cwd: str, head_branch: str | None) -> tuple[str, int]:
-    """(sha, committer epoch) of the commit a `gh pr create` proposes."""
+def _repo_slug(spec: str) -> str:
+    """`owner/name`, lowercased, from `owner/name`, `host/owner/name` or a remote URL."""
+    s = spec.strip().rstrip("/")
+    if s.endswith(".git"):
+        s = s[:-4]
+    parts = [p for p in re.split(r"[/:]", s) if p]
+    return "/".join(parts[-2:]).lower() if len(parts) >= 2 else ""
+
+
+def _remote_for(cwd: str, repo: str) -> str | None:
+    """The name of the remote in `cwd` that points at `repo`, or None when none does."""
+    want = _repo_slug(repo)
+    for line in _git(cwd, "remote", "-v").splitlines():
+        fields = line.split()
+        if len(fields) >= 2 and _repo_slug(fields[1]) == want:
+            return fields[0]
+    return None
+
+
+def _branch_via_api(repo: str, head_branch: str | None, cwd: str) -> tuple[str, int]:
+    """(sha, committer epoch) of a branch as GitHub has it, for a repo with no local checkout here."""
+    slug = _repo_slug(repo)
+    if not slug:
+        return "", 0
+    owner, name = slug.split("/", 1)
+    branch = head_branch or _git(cwd, "branch", "--show-current")
+    if not branch:
+        return "", 0
+    if ":" in branch:
+        owner, branch = branch.split(":", 1)
+    override = os.environ.get("CUPCAKE_PR_STAMP_BRANCH_API_OVERRIDE")
+    try:
+        if override:
+            data = json.loads(override)
+        else:
+            r = subprocess.run(["gh", "api", f"repos/{owner}/{name}/branches/{branch}"],
+                               cwd=cwd or None, capture_output=True, text=True, timeout=15)
+            if r.returncode != 0:
+                return "", 0
+            data = json.loads(r.stdout)
+        sha = (data.get("commit") or {}).get("sha") or ""
+        date = (((data.get("commit") or {}).get("commit") or {}).get("committer") or {}).get("date") or ""
+    except (OSError, ValueError, AttributeError, subprocess.SubprocessError):
+        return "", 0
+    if not re.fullmatch(r"[0-9a-fA-F]{40}", sha) or not date:
+        return "", 0
+    return sha.lower(), _iso_epoch(date)
+
+
+def head_of(cwd: str | None, head_branch: str | None, repo: str | None = None) -> tuple[str, int]:
+    """(sha, committer epoch) of the commit a `gh pr create` proposes.
+
+    Resolved in `cwd`, the directory the call runs in after any leading `cd`. When `--repo` names a
+    repository that checkout has no remote for, the checkout cannot say what that repository's
+    branch holds (bd ds2-mods-rs-3sb: a PR for another repo, created from this session's checkout,
+    was refused as `no-head`), so the branch is read from GitHub instead.
+    """
     override = os.environ.get("CUPCAKE_PR_STAMP_HEAD_OVERRIDE")
     if override:
         sha, epoch = override.split()
         return sha, int(epoch)
+    if cwd is None:
+        return "", 0
+    remote = "origin"
+    if repo:
+        found = _remote_for(cwd, repo)
+        if found is None:
+            return _branch_via_api(repo, head_branch, cwd)
+        remote = found
     rev = "HEAD"
     if head_branch:
         rev = head_branch.split(":", 1)[-1]
         if not _git(cwd, "rev-parse", "--verify", "--quiet", rev + "^{commit}"):
-            rev = "origin/" + rev
+            rev = f"{remote}/{rev}"
     sha = _git(cwd, "rev-parse", "--verify", "--quiet", rev + "^{commit}")
     epoch = _git(cwd, "log", "-1", "--format=%ct", sha) if sha else ""
     return sha, int(epoch or 0)
@@ -260,18 +366,18 @@ def verdict(event: dict) -> str:
     if not isinstance(cmd, str):
         return "RUNSTAMP|verb=none"
     cwd = event.get("cwd") or ""
-    for argv in gh_invocations(cmd):
+    for argv, here in gh_invocations(cmd, cwd):
         low = [a.lower() for a in argv]
         if len(low) >= 3 and low[1] == "pr" and low[2] == "create":
-            body = body_of_create(argv, cmd, cwd)
-            sha, epoch = head_of(cwd, _flag_value(argv, ("--head", "-H")))
+            body = body_of_create(argv, cmd, here or "")
+            sha, epoch = head_of(here, _flag_value(argv, ("--head", "-H")), _flag_value(argv, ("--repo", "-R")))
             if not sha:
                 return "RUNSTAMP|verb=create|ok=0|why=no-head"
             ok, why = judge(body, sha, epoch, _now(), need_pass=False)
             return f"RUNSTAMP|verb=create|ok={int(ok)}|why={why}|sha={sha}"
         if len(low) >= 3 and low[1] == "pr" and low[2] == "ready" and "--undo" not in low:
             try:
-                pr = pr_view(cwd, argv)
+                pr = pr_view(here or "", argv)
             except (OSError, ValueError, subprocess.SubprocessError):
                 pr = {}
             head = (pr.get("headRefOid") or "").lower()

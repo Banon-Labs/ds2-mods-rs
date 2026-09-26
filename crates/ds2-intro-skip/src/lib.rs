@@ -44,6 +44,8 @@
 #![cfg_attr(not(windows), allow(unused))]
 
 #[cfg(windows)]
+mod fade;
+#[cfg(windows)]
 mod install;
 
 #[cfg(windows)]

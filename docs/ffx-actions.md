@@ -58,6 +58,34 @@ sequence/random, `<vec4,7>` const, `<vec4,8>` array, `<vec4,9>` sequence, `FXPla
 sequence, `FXSequenceParamRandomSingleBase<float,6>`) **[inf, from the kind==6 branches that accept
 type-81 slots]**.
 
+### 2.1 Reference params (file types 44, 46, 59, 60, 71, 87)
+
+The param deserializer `0x140f8b860` builds these classes (vtable written by each case, RTTI name
+read at vtable-8) **[read]**:
+
+| file type | case fn | class | vtable |
+| --- | --- | --- | --- |
+| 44 | `0x140f93630` | `FXSingleParamRef<int,1>` | `0x141289688` |
+| 46 | `0x140f92f70` | `FXSequenceParamRef<int,3>` | `0x141289768` |
+| 59 | `0x140f92be0` | `FXCallParamRef<unsigned int,22>` | `0x141289ea8` |
+| 60 | `0x140f92d10` | `FXCallParamRef<unsigned int,23>` | `0x141289f28` |
+| 71 | `0x140f94290` | `FXSingleParamRef<FXTick,36>` | `0x14128a2c8` |
+| 87 | `0x140f93510` | `FXSequenceParamRef<FXTick,37>` | `0x14128a338` |
+
+None holds a value. Each stores `u16 scope` at `+0x8` and `i16 index` at `+0xa`; every evaluate
+slot (e.g. `0x140fbf6c0`, `0x140fbffe0`, `0x140fbf900`) calls `0x140a11100(instance, scope, index)`
+to get the target `Param*` and forwards the call to it **[read]**. `0x140a11100`:
+
+| scope | resolves to | reading |
+| --- | --- | --- |
+| 1 | `(*[instance+0x50])[index]`: a param of the effect's own root ParamList | **[read]**; "root list" **[inf]** from the preprocessor reading the same pointer |
+| 2 | `[[instance+0x98]+0x78][index]` (`0x140a10130`): the argument list handed in by the spawner's Param37 | **[read]** access; "spawner's args" **[inf]** |
+| 3 | a 16-byte local slot: inline at `instance+0xa0+16*index` while `[instance+0xc0] <= 2`, else in the heap array at `[instance+0xa0]` | **[read]**; the same storage `0x140a10df0` hands to action 118, so actions 21/54/109/111/112/115/118 write the locals these refs read **[inf]** |
+| other | null | **[read]** |
+
+So a child template like 2101 is parameterised by scope-2 references into the `{id, args}` its
+parent's Param37 passes; the arg index is the `i16` at `+0xa`.
+
 ## 3. id -> class table
 
 Count = number of shipped effects (of 1778 in `sfx9999.ffxbnd.dcx`) whose ResourceSet 4th vector
@@ -69,9 +97,11 @@ lists the id. Handler = `table[id]` at `0x1415f9b70` unless noted.
 | 3 | 8 | `FXParticleAppearance_Model` | reg `0x140c0db2a`, compile `0x140f75ca0` (`FXParticleAppearance_Model.cpp`) **[read]** |
 | 4 | 41 | spawn N child effects in a cone | handler `0x140f4a140` **[read]** |
 | 5 | 1774 | end this instance (push on FXManager list `+0x78`) | `0x140f4a740` -> `0x140a0ae90` **[read]**; "destroy" **[inf]** |
-| 7, 12 | 1, 2 | no function at table entry (data/obfuscated) | **[read]** |
+| 7 | 1 | weighted random pick of **one child action** from 8 slots, run through the same table (id < 0x7e) or the handler chain `0x140a0aca0` | stub `mov r9d,8; jmp 0x140f52930`; body sums p0's per-slot weights (`vt+0x58(i)`), draws with the RNG `0x140f56470`, dispatches the chosen slot **[read]** |
+| 12 | 2 | `FXElement` state set to 1 if `instance+0x80` is non-null | `0x140f4c2a0` -> `0x140a07180(instance+0xe0, 1, 0)` **[read]** |
+| 13 | 0 | `FXElement` state set to 0 | `0x140f4c2c0` -> `0x140a07180(instance+0xe0, 0, 0)` **[read]** |
 | 8, 9, 10, 18, 26 | 10,22,3,11,27 | spawn N child effects in a shape (RNG + `0x140a08fb0` in a loop; first param = type-59 effect ref) | handlers `0x140f4a990/4b1a0/4b9b0/4c450/4dd50` **[read]**; shapes **[unknown]** |
-| 14 | 1641 | spawn up to 8 child effects (Param37 x8) | `0x140f4c2e0` **[read]** |
+| 14 | 1641 | spawn up to 8 child effects (Param37 x8) | `0x140f4c2e0` -> shared body `0x140f51e90` (slot count = preprocessor count, default 7, plus 1) **[read]** |
 | 16 | 18 | run up to 8 child actions (Param38 x8) through the same table, else external handler | `0x140f4c390` **[read]** |
 | 17 | 1 | no-op | `0x140f4c440` **[read]** |
 | 20 | 5 | `FXParticleAppearance_Billboard` (older 24-param layout) | reg `0x140fe186a`, compile `0x141005260` **[read]** |
@@ -96,7 +126,7 @@ lists the id. Handler = `table[id]` at `0x1415f9b70` unless noted.
 | 54 | 2 | param-ref arithmetic (types 60/44/71/46) | `0x140f4f190` **[unknown detail]** |
 | 55 | 1386 | `FXClusterMovement_Acceleration` | reg `0x140f82693`, compile `0x140f82770` **[read]** |
 | 56 / 114 | 4 / 0 | conditional dispatch of an action id | `0x140f4f3e0` **[read]** |
-| 58 | 6 | pick one of 8 child effects at random (int list weights?) and spawn | `0x140f4f4c0` **[read]**; weights **[inf]** |
+| 58 | 6 | pick one of 8 child effects at random and spawn it | stub `mov r9d,8; jmp 0x140f51f40`; body draws with `0x140f56470` and spawns via `0x140a08fb0` **[read]**; that p0 holds per-slot weights, as in 7, **[inf]** |
 | 59 | 836 | `FXParticleAppearance_Billboard` (41-param layout) | reg `0x140fe189d`, compile `0x141004620` **[read]** |
 | 61 | 268 | `FXParticleAppearance_Model` | reg `0x140c0db5d`, compile `0x140f74f90` **[read]** |
 | 63 | 17 | set instance time from a tick param (`0x140a11280`) | `0x140f4f4d0` **[read]**; "set time" **[inf]** |
@@ -107,27 +137,35 @@ lists the id. Handler = `table[id]` at `0x1415f9b70` unless noted.
 | 79 | 1757 | spawn one child effect (Param37) | `0x140f4f840` -> `0x140a08fb0` **[read]** |
 | 80 | 4 | clamp instance time `+0xec` against `+0xf0` when flag 0x20 | `0x140f4f920` **[read]**; meaning **[unknown]** |
 | 82 | 24 | `FXClusterAppearance_Line` | reg `0x140fe5da8`, compile `0x141011f70` **[read]** |
-| 83 | 17 | table entry not decodable as a function | **[unknown]** |
+| 83 | 17 | acceleration movement, same body as 106 but without the element-state reset and without reading p8 | stub `xor r9d,r9d; jmp 0x140f52150`; that body ends in `0x140f52490` (the class chooser of id 1) **[read]** |
 | 84 | 382 | `FXClusterMovement_Yurayura` | reg `0x140f82d63` **[read]** |
-| 87 | 132 | spawn up to 16 child effects | `0x140f4fe40` **[read]** |
+| 85 | 0 | spawn up to 8 child effects (same as 14) | stub -> `0x140f51e90`, default count 7 **[read]** |
+| 87 | 132 | spawn up to 16 child effects | `0x140f4fe40` -> `0x140f51e90`, default count 15 **[read]** |
+| 92 / 95 | 0 / 0 | spawn up to 32 / 64 child effects | stubs -> `0x140f51e90`, default count 31 / 63 **[read]** |
+| 93 / 94 / 96 | 0 | pick one of 32 / 16 / 64 child effects at random (same body as 58) | stubs `mov r9d,0x20/0x10/0x40; jmp 0x140f51f40` **[read]** |
 | 99 | 3 | end instance on condition | `0x140f50180` **[read]** |
 | 105 | 1031 | `FXClusterMovement_PartialFollow` | reg `0x140f838b3`, compile `0x140f83ad0` **[read]** |
-| 106 | 91 | acceleration movement (same `0x140f52490` path as 1) + element flag | `0x140f50540` **[read]** |
+| 106 | 91 | acceleration movement (same `0x140f52490` path as 1): resets the element state to 0, then runs the body shared with 83 with flag 1 (reads p8) | `0x140f50540` -> `0x140a07180(elem,0,0)`, `jmp 0x140f52150` with `r9b = 1` **[read]** |
 | 107 | 0 | `FXParticleAppearance_RadialBlur` | reg `0x140fe3d38`, compile `0x14100b150` **[read]** |
 | 108 | 0 | `FXClusterAppearance_Model` | reg `0x140c0f498`, compile `0x140f76db0` **[read]** |
 | 109, 111, 112, 115 | 6,2,5,1 | param-ref writes (types 44/46/87/71) | `0x140f50590/50630/50890/502c0` **[unknown detail]** |
 | 113 | 195 | `FXMovementCombined` (acceleration + `FXMovementRotation`) | `0x140f508e0` sets `FXMovementCombined::vftable`, calls `0x140f52490` and `0x140f7a900` **[read]** |
 | 117 | 0 | `FXClusterEmitter_EqualDistance` | reg `0x140f80223` **[read]** |
 | 118 | 2 | write 3 floats into instance slots `p0, p0+2, p0+4` (`0x140a10df0`) | `0x140f51b10` **[read]** |
-| 11000 / 11001 | 16 / 600 | SfxFx game-side actions -> `0x140bef520` / `0x140bef460` | **[read]**; class **[unknown]**, param lists are colour-heavy (lights? **[inf]**) |
+| 11000 / 11001 | 16 / 600 | `SfxFxDrawEntityHostSpotLight` / `SfxFxDrawEntityHostPointLight` | `0x140bef520` -> ctor `0x140c0be90` (vtable `0x1411edbe8`) / `0x140bef460` -> ctor `0x140c0b6e0` (vtable `0x1411edb88`) **[read]**; params in section 7.3 |
 | 15000 | 482 | `SfxFxClusterAppearance_Billboard` | reg `0x140bff87a`, create `0x140bfefb0`, compile `0x140c01220` (`AppFFX\Cluster\SfxFxClusterAppearance_Billboard.cpp`) **[read]** |
 | 15001 | 1444 | `SfxFxClusterAppearance_MultiTextureBillboard` | reg `0x140c03b6a`, create sets vtable `0x1411ed8d0` **[read]** |
 | 15002 | 168 | `SfxFxClusterAppearance_PointSprite` | reg `0x140c0894a`, create `0x140c080b0` **[read]** |
 | 18000 | 67 | `SfxFXParticleAppearance_Tracer` | reg `0x140bfbd4a`, create `0x140bfb810` **[read]** |
-| 20000-20006 | 1,7,96,0,23,345,6 | Katana draw-entity hosts via `0x140bef5e0` + 7 descriptors | **[read]**; which of `SfxFxDrawEntityHost{Blink,Flicker,PointWind,RadialBlur,SwordTracer,Tracer,...}` per id **[unknown]** |
+| 20000-20006 | 1,7,96,0,23,345,6 | Katana draw-entity hosts via `0x140bef5e0` + 7 descriptors | **[read]**: 20000 SwordTracer, 20001 Flicker, 20002 Blink, 20003 Tracer, 20004 PointWind, 20005 RadialBlur, 20006 DirectionalLight (ctor vtables, section 7.3) |
 
 Ids with table entries but no shipped use: 6, 11, 13, 15, 22-25, 48, 49, 67-69, 81, 85, 86, 88,
-92-96, 100-104, 110, 116.
+92-96, 100-104, 110, 116. Of these, 67 and 68 are a bare `ret 0` (no-op) **[read]**.
+
+Shared bodies behind the thin stubs **[read]**: `0x140f51e90` spawn every non-empty child slot
+(14, 85, 87, 92, 95); `0x140f51f40` spawn one child picked at random (58, 93, 94, 96);
+`0x140f52930` run one child action picked by weight (7); `0x140f52150` acceleration movement
+(83, 106). None of the four is Arxan-redirected (`scripts/ds2-arxan-chain.py`).
 
 ## 4. Param meanings (index = position in the action's ParamList)
 
@@ -238,17 +276,23 @@ converts to **milliseconds** (x1000, +0.5). File values are multiples of 1/30 s 
 
 ## 6. Open
 
-- **Child "effects" 2000-2199 (e.g. 2101, 2032, 2023 in 833) are not in any `Game/sfx` bundle**
-  (`sfx9999`, `_Append`, `sfxcommon` = one dummy entry). The preprocessor special-cases
-  `id - 2000 < 200` (`0x140f52b70`) and builds descriptors for 2020/2023/2024/2031/2032/2034/2101/
-  2102 (`0x140f52d60`, reading arg slots 0,1,2,5,6,7,8,9,11,12,13,15). Where their bodies come from
-  is the bundle-registration question (other agent). Until then, what Param37 {2101, args} does with
-  args 0-8 is only partially known: arg0 tick + arg1 bool feed descriptor type 6 **[read]**.
+- **Child templates 2000-2200 are ordinary members of `sfx9999.ffxbnd.dcx`** (an earlier note here
+  said they were in no bundle; that was wrong). `scripts/ds2-ffx.py list` shows f0002020, 2022-2024,
+  2031-2035, 2101, 2102, 2105, 2113, 2115 and 2117-2125. The bundle's on-load handler `0x140bf6330`
+  parses every `.ffx` member whose name-id is in 2000..2200 **eagerly** at load
+  (`iVar - 2000 < 0xc9`); all other ids are parsed lazily on first spawn **[read]**. See
+  `docs/DS2-SFX-REGISTRY.md`. The preprocessor also special-cases `id - 2000 < 200`
+  (`0x140f52b70`) and builds descriptors for 2020/2023/2024/2031/2032/2034/2101/2102 (`0x140f52d60`,
+  reading arg slots 0,1,2,5,6,7,8,9,11,12,13,15); arg0 tick + arg1 bool feed descriptor type 6
+  **[read]**. The templates read those args through scope-2 reference params (section 2.1).
 - The draw/update code that consumes each compiled appearance block was not traced, so most
   appearance field names above are **[inf]** or blank.
-- Type-44/59/60/46/71/87 "arg reference" params: resolution path not traced.
-- Classes behind 11000/11001 and the per-id Katana hosts 20000-20006.
+- Reference params: the class and the scope/index lookup are read (section 2.1); what object sits
+  at `instance+0x98` (the scope-2 owner) was not traced to its writer in `0x140a08fb0`.
 - Emitter/movement per-class field names (only index -> field is known).
+- Field-level meaning of the weight list in 7 and 58 (`vt+0x58(i)` per slot) is read as "weight"
+  from how the sum and the draw use it; the file encoding of that list was not checked against
+  shipped data.
 
 ## 7. Curves over time, flicker, and effect light
 

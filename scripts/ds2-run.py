@@ -3931,6 +3931,44 @@ def selftest() -> int:
         finally:
             GAME_DIR = real_game_dir
 
+    # `--selftest` returns before `main` reaches either of its two dispatches, so an argument
+    # threaded wrongly into `dry_run(...)` or `launch(...)` crashed both modes on startup for at
+    # least one commit while this selftest, and so the gate, stayed green (fixed then in 1338ada;
+    # the hole stayed). Neither can be CALLED here -- both read the real game directory, which a CI
+    # runner does not have -- so each call site in `main` is read out of this file and bound against
+    # the callee's own signature. A positional argument too many, or a keyword the callee does not
+    # take, fails `bind` exactly as it would fail the real call.
+    import ast
+    import inspect
+
+    main_def = next(
+        node
+        for node in ast.parse(Path(__file__).read_text(encoding="utf-8")).body
+        if isinstance(node, ast.FunctionDef) and node.name == "main"
+    )
+    for callee in (dry_run, launch):
+        sites = [
+            node
+            for node in ast.walk(main_def)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == callee.__name__
+        ]
+        check(len(sites) == 1, f"main dispatches to {callee.__name__} from exactly one site")
+        for site in sites:
+            try:
+                inspect.signature(callee).bind(
+                    *([None] * len(site.args)),
+                    **{keyword.arg: None for keyword in site.keywords if keyword.arg},
+                )
+                bound = ""
+            except TypeError as error:
+                bound = f" ({error})"
+            check(
+                not bound,
+                f"main's call to {callee.__name__} (line {site.lineno}) binds to its signature{bound}",
+            )
+
     print("selftest: " + ("OK" if ok else "FAILED"))
     return EXIT_OK if ok else EXIT_ERROR
 
@@ -4356,7 +4394,9 @@ def main() -> int:
             "`turn <degrees>` closes a loop on the camera's own yaw, `block <frames>` blanks "
             "every human input, `probe` reports which pad axis actually moves the camera. "
             "`turn` and `probe` measure against the camera --invasion-path draws through and "
-            "refuse without it. Every command is frame-bounded; the block caps at ten minutes. "
+            "refuse without it. Implies --invasion-path, because the harness ticks from that "
+            "feature's Present hook and reads no command without it; the overlay stays off unless "
+            "--invasion-path-on. Every command is frame-bounded; the block caps at ten minutes. "
             f"Grep the log for `{INPUT_HARNESS_LOG_PREFIX}`."
         ),
     )
@@ -4421,6 +4461,18 @@ def main() -> int:
         print(
             f"[config] --seamless turned [{OFFLINE_SECTION}] off for this run: it fronts the "
             "socket imports a co-op mod needs."
+        )
+
+    # THE HARNESS HAS NO CLOCK OF ITS OWN. It ticks from `ds2-invasion-path`'s `Present` detour,
+    # which installs only when `[invasion_path]` is on. Without it the device detours go in and
+    # nothing ever reads the command file: a run on 2026-09-26 answered not even `status`. The
+    # overlay itself stays off unless --invasion-path-on says otherwise; this only installs the
+    # hook the harness rides on.
+    if args.input_harness and not args.invasion_path:
+        args.invasion_path = True
+        print(
+            f"[config] --input-harness turned [{INVASION_PATH_SECTION}] on for this run: the "
+            "harness ticks from its Present hook and reads no command without it."
         )
 
     if args.selftest:

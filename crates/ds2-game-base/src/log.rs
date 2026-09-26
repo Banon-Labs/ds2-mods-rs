@@ -22,10 +22,9 @@
 //! [`begin_fresh_run`] is the one-shot that enforces it, and [`open_fresh_run_append`] is the
 //! only sanctioned way to open a log for append.
 //!
-//! **In `../er-mods-rs` that rule is executable**: `scripts/check-fresh-run-logs.py` fails the
-//! build on any `.append(...)` opener outside this module. No such check runs in this repo yet,
-//! so here it is a convention and nothing more -- which means it holds until someone forgets.
-//! Tracked as `ds2-mods-rs-gvw`.
+//! **The rule is executable**: `scripts/check-fresh-run-logs.py`, ported from `../er-mods-rs` and
+//! run by `scripts/check.sh`, fails the gate on any `.append(...)` opener in `crates/` outside this
+//! module, unless the file is exempt there with a stated reason.
 //!
 //! # Nothing here knows what game it is logging
 //!

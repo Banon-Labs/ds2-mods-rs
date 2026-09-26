@@ -1,10 +1,14 @@
-//! Record which save slot a load actually used, as the first half of a native continue flow.
+//! Load a configured save slot from the title screen with no input: `[continue] slot = N`.
 //!
-//! The end goal is `[continue] slot = N`: press CONTINUE and land in that character instead of in
-//! the character list. This crate is the half that has to come first, and it **only records**. It
-//! writes nothing into the game and changes no transition.
+//! This crate drives the whole continue, not just the record of one. With a slot configured it
+//! takes the top menu's LOAD GAME edge as soon as the menu is idle (`detour_top_menu` writes
+//! [`ds2_rva::FE_TOP_MENU_ACTION_LOAD_GAME`] into the phase), pre-selects that slot in the
+//! character list (`preselect`), performs the list's own load branch on it (`take_load_branch`),
+//! and keeps the title screen posed hidden and the menu audio muted while it walks past them
+//! (`hide_menus`, `silence`). With `[continue] record = true` it also logs which slot a load used,
+//! which is where it started.
 //!
-//! # Why recording comes before driving
+//! # The path, and why the obvious two writes were not taken
 //!
 //! The static trace in `docs/DS2-CONTINUE.md` establishes the whole path --
 //! `TopMenu 0x47 -> LoadDataList 0x55 -> LoadProfile 0x57 -> 0x6a -> StartIngame 0x6b` -- and
@@ -12,8 +16,10 @@
 //! [`ds2_rva::FE_TITLE_CONTEXT_SLOT_NUM_OFFSET`]. From that alone the continue flow looks like two
 //! writes: set the slot, retarget the phase-2 transition from `0x55` to `0x57`.
 //!
-//! Two things say "looks like" rather than "is", and neither can be settled by reading more
-//! disassembly:
+//! The crate does neither. It takes the transitions the game already registers, with the values
+//! the rows themselves would produce, so every substate still runs its own `enter` and the
+//! ownership gate is applied rather than skipped. The retarget was rejected for the two risks
+//! below, which a recorded real load was needed to price -- that is why recording came first:
 //!
 //! 1. **Skipping `0x55` skips its `enter`.** `FeSubStateTitleLoadDataList::v1` (`0x1400fae80`)
 //!    runs before any of this, and `LoadProfile` may depend on what it set up -- the update reads
@@ -50,8 +56,9 @@
 //!
 //! # Off by default
 //!
-//! Like `ds2-boot-timeline`, and for the same reason: it is an instrument. `[continue]
-//! record = true`, or `ds2-run.py --continue-record`, turns it on for a measurement run.
+//! Nothing is driven unless `[continue] slot` names a slot (`ds2-run.py --continue-slot N`), and
+//! nothing is recorded unless `[continue] record = true` (`ds2-run.py --continue-record`), which
+//! is the measurement instrument this crate began as.
 //!
 //! # Silencing the shortcut
 //!

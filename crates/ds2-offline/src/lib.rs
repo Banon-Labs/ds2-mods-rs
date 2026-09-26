@@ -55,12 +55,11 @@
 //!   the friends list are untouched. That is deliberate -- the target is FromSoftware's game
 //!   servers, not the platform -- but it means this crate is not a firewall and must not be
 //!   described as one.
-//! * **It does not suppress the network boot substates.** `0x20` `SteamNetworkCheck`, `0x39`
-//!   `GameServerLogin` and `0x44` Information still run; they now fail early instead of waiting on
-//!   a server. Their failure is a path the shipped game already has -- it is what produces
-//!   `FeSubStateTitleOnlineCheckFailWarn` and the "could not retrieve information" box, both of
-//!   which `ds2-dialog-skip` already answers. Removing the substates outright is
-//!   `ds2-mods-rs-rk4`'s business, not this crate's.
+//! * **It does not remove `0x20` `SteamNetworkCheck`.** That substate decides everything in its
+//!   enter and its update is a bare `ret`, so it costs one frame. `0x38`, `0x39`
+//!   `GameServerLogin` and `0x44` Information are gone: `boot` removes one `je` in
+//!   `FeSubStateTitleUserPolicy`'s enter, so the boot takes the game's own offline path to `0x2a`
+//!   and then `TopMenu`. That path also skips the policy screen on a profile that never accepted it.
 //! * **It does not block loopback.** `127.0.0.0/8` and `::1` are allowed through, because Proton,
 //!   Wine and the Steam API all use local sockets and breaking those breaks the game rather than
 //!   its matchmaking.
@@ -72,6 +71,8 @@
 // can run at all. The issue is the standing record of that decision.
 #![cfg_attr(not(windows), allow(unused))]
 
+#[cfg(windows)]
+mod boot;
 #[cfg(windows)]
 mod flag;
 #[cfg(windows)]

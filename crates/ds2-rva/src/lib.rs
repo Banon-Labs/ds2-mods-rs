@@ -232,6 +232,41 @@ pub const FE_SUBSTATE_WARNING_NO_COPY_ENTER: u32 = 0x000f_ded0;
 /// minimum, met with nothing to spare.
 pub const FE_SUBSTATE_TITLE_USER_POLICY_ENTER: u32 = 0x000f_9040;
 
+/// `FeOperatorTitle::v4`, the title operator's per-frame update. RVA `0x000ef390`.
+///
+/// A switch on the state at [`FE_OPERATOR_TITLE_STATE_OFFSET`] (`dec ecx; je` chain at
+/// `0x1400ef39c`). State 2 starts a 2.0 s fade from black through `0x14039a4d0` and moves to
+/// state 3; state 3 returns every frame while `0x14039ab20` reports the fade still running, then
+/// starts `FeStateFlow` at substate `0x00` and moves to state 4. So the title flow cannot begin
+/// until a fade over a screen with nothing on it has finished.
+///
+/// Not an Arxan redirect; its prologue is `40 57 48 83 ec 40`, six bytes.
+pub const FE_OPERATOR_TITLE_UPDATE: u32 = 0x000e_f390;
+
+/// Offset of the title operator's state in `FeOperatorTitle`. `+0x30`, `mov ecx,[rcx+0x30]`.
+pub const FE_OPERATOR_TITLE_STATE_OFFSET: usize = 0x30;
+
+/// The title operator's state that waits for the boot fade to finish. `3`.
+pub const FE_OPERATOR_TITLE_STATE_FADE_WAIT: u32 = 3;
+
+/// Offset of the screen-fade object's pointer in `GameManagerImp`. `+0x1160`.
+///
+/// Read by both `0x14039a4d0` (start a fade) and `0x14039ab20` (is a fade running).
+pub const GAME_MANAGER_SCREEN_FADE_OFFSET: usize = 0x1160;
+
+/// The screen fade's current opacity, target opacity and remaining seconds: `+0x00`, `+0x04`,
+/// `+0x08`, all `f32`.
+///
+/// `0x140b23fe0` starts a fade to clear by writing the duration to `+0x08` and `0.0` to `+0x04`,
+/// and when the duration is not positive it also writes `0.0` to `+0x00` at once.
+/// `0x14039ab20` answers "running" while `+0x08 > 0`. Read live on 2026-09-26 in the world with
+/// `scripts/frida/title-fade.js`: `current=0 target=0 remaining=0`, a finished fade.
+pub const SCREEN_FADE_CURRENT_OFFSET: usize = 0x00;
+/// See [`SCREEN_FADE_CURRENT_OFFSET`].
+pub const SCREEN_FADE_TARGET_OFFSET: usize = 0x04;
+/// See [`SCREEN_FADE_CURRENT_OFFSET`].
+pub const SCREEN_FADE_REMAINING_OFFSET: usize = 0x08;
+
 /// Phase-counter offset within `FeSubStateWarningNoCopy` and `FeSubStateTitleUserPolicy`.
 ///
 /// Read from each one's own `v3` (`0x1400ff360` and `0x1400f96f0`), both of which open
@@ -1460,6 +1495,51 @@ pub const GAME_MANAGER_IMP: u32 = 0x0161_48f0;
 /// in `SteamLoadSystemData`'s, among others.
 pub const SAVE_LOAD_SYSTEM_OFFSET: usize = 0xb8;
 
+// ============================================================================================
+// Managers reached through the Ghidra project's named accessors.
+//
+// DS2 has no FD4 singleton scan to lean on, so a manager pointer is an RVA read out of an accessor
+// that already has a name. Each one below was read statically (the accessor's own two or three
+// instructions) and then walked in a live process with `scripts/frida/singletons.js` on
+// 2026-09-25, at the title screen with a character loaded behind the continue shortcut. Where the
+// object at the end carries a vtable, its MSVC RTTI name was resolved from the flat image and is
+// quoted; where it does not, the constant says so, because a pointer that is non-null is not yet
+// a pointer of the named type.
+// ============================================================================================
+
+/// `SaveLoadSystem`'s vtable. RVA `0x010da4b8`, RTTI `.?AVSaveLoadSystem@@`.
+///
+/// What `[`[`GAME_MANAGER_IMP`]` + `[`SAVE_LOAD_SYSTEM_OFFSET`]`]` points at, measured live: the
+/// accessor `getSaveLoadSystem` (`0x1401ab6e0`) is `mov rax,[0x1416148f0]; mov rax,[rax+0xb8]`,
+/// and the object it returns carries this vptr.
+pub const SAVE_LOAD_SYSTEM_VTABLE: u32 = 0x010d_a4b8;
+
+/// The global holding a pointer to the `NetSessionManager` pointer. RVA `0x01616cf8`.
+///
+/// Two dereferences, not one: `getNetSessionManager` (`0x1402d85e0`) is
+/// `mov rax,[0x141616cf8]; test; mov rax,[rax]`. Measured live, `[[global]]` is an object whose
+/// vptr is [`NET_SESSION_MANAGER_VTABLE`].
+pub const NET_SESSION_MANAGER_POINTER: u32 = 0x0161_6cf8;
+
+/// `NetSessionManager`'s vtable. RVA `0x010fb878`, RTTI `.?AVNetSessionManager@@`.
+pub const NET_SESSION_MANAGER_VTABLE: u32 = 0x010f_b878;
+
+/// Offset of the map item pack manager in `MapManager`. `+0x1c8`.
+///
+/// `getMapItemPackManager` (`0x1401e6550`) is `[GameManagerImp]` then
+/// [`GAME_MANAGER_MAP_MANAGER_OFFSET`] then `[+0x1c8]`, with a null check after each hop. Live, the
+/// chain resolves to a non-null object, but that object's first qword is a heap pointer (the same
+/// one `MapManager` itself starts with), not a vptr, so its type is taken from the accessor's name
+/// and is not otherwise proven.
+pub const MAP_MANAGER_ITEM_PACK_MANAGER_OFFSET: usize = 0x1c8;
+
+/// `getSpEffectOwner_characterCtrl`. RVA `0x0023c830`.
+///
+/// Not a singleton: `mov rax,[rcx+0x8]; test; mov rax,[rax+0x228]`, relative to its argument. What
+/// the argument is has not been established, so only the accessor is recorded; call it rather than
+/// transcribing its two offsets onto an object of a guessed type.
+pub const GET_SP_EFFECT_OWNER_CHARACTER_CTRL: u32 = 0x0023_c830;
+
 /// `SaveLoadSystem`'s request state word.
 ///
 /// **This is the interlock.** Every start entry point refuses while it is non-zero
@@ -1716,6 +1796,28 @@ pub const NET_SET_ONLINE_STUB: [u8; 3] = [0xc3, 0x90, 0x90];
 /// Read three ways that agree: the getter's `[rcx+0x3a]`, the setter's `[rcx+0x3a]`, and the
 /// constructor's `mov BYTE PTR [rbx+0x3a],0` at `0x140512f5a`.
 pub const NET_ONLINE_FLAG_OFFSET: usize = 0x3a;
+
+/// The `je` in `FeSubStateTitleUserPolicy`'s enter (`0x1400f9040`) that skips the offline boot.
+/// RVA `0x000f9077`, VA `0x1400f9077`.
+///
+/// The instruction before it is `cmp BYTE PTR [rax+0x136e], 0` on the system-data block
+/// `[[[GameManagerImp]+0xa8]+0xd8]`. Non-zero falls through to phase 3, which goes to `0x2a`
+/// (the "playing offline" notice) and then straight to `0x47` `TopMenu`, so `0x38`, `0x39`
+/// `GameServerLogin` and `0x44` Information never run. Zero takes this `je +0x12` to the next
+/// check. `ds2-offline` replaces it with [`USER_POLICY_OFFLINE_BRANCH_STUB`] so the boot always
+/// takes the offline path. It patches the branch rather than the byte because the system-data
+/// writer (`0x14019c77e`) saves `+0x136e` into the save file, and an unmodded launch of that save
+/// would then boot offline too. `docs/DS2-OFFLINE.md` has the disassembly.
+///
+/// Read live on 2026-09-26 with `scripts/frida/offline-switch.js`: the running image holds
+/// `80 b8 6e 13 00 00 00 74 12` at `0x1400f9070`, the same bytes as the file on disk.
+pub const USER_POLICY_OFFLINE_BRANCH: u32 = 0x000f_9077;
+
+/// The two bytes expected at [`USER_POLICY_OFFLINE_BRANCH`]: `je +0x12`.
+pub const USER_POLICY_OFFLINE_BRANCH_EXPECTED: [u8; 2] = [0x74, 0x12];
+
+/// `nop; nop` -- the branch removed, so the boot always falls through to phase 3.
+pub const USER_POLICY_OFFLINE_BRANCH_STUB: [u8; 2] = [0x90, 0x90];
 
 /// Offset of the network service in [`GAME_MANAGER_IMP`] -- the `this` every call to
 /// [`NET_IS_ONLINE`] and [`NET_SET_ONLINE`] is made on.
@@ -7418,12 +7520,16 @@ pub const KATANA_SFX_NODE_ALIVE_OFFSET: usize = 0x58;
 /// The bit at [`KATANA_SFX_NODE_ALIVE_OFFSET`] that means "still playing". `0x4000_0000`.
 pub const KATANA_SFX_NODE_ALIVE_BIT: u32 = 0x4000_0000;
 
-/// `KatanaSfxSystem -> ids that did not resolve`. `+0x2b8`, an MSVC `std::map`-shaped red-black
-/// tree keyed by `u32`.
+/// `KatanaSfxSystem -> ids that have spawned`, with a count each. `+0x2b8`, an MSVC
+/// `std::map`-shaped red-black tree keyed by `u32`.
 ///
-/// **Membership is the difference between "not in this map" and "spawned and invisible"**, which
-/// is otherwise the same absence on the ground and the most expensive confusion in the whole
-/// feature to resolve by looking.
+/// The constant's name is the old reading, and it was wrong: this tree does not record failed
+/// lookups. Its only writer, `0x140beb400`, is called from the spawn `0x140beb670` (at
+/// `0x140beb8a7`/`0x140beb8bf`) only after `0x140a06580` says the built block is not empty (`jz`
+/// at `0x140beb87f`); an empty spawn goes to `0x140127240` and records nothing. So membership means
+/// "this id has spawned at least once", and the count at [`KATANA_SFX_SPAWNED_COUNT_OFFSET`] is how
+/// many times. Found statically on 2026-09-26, after a self-check reported every stone as "not
+/// resident" while logging each one as spawned.
 ///
 /// `0x140beb400(sys, id)` is the insert, and reading it gives the entire layout. It is a
 /// `lower_bound` descent followed by the usual found-test, so a read-only `contains` is the same
@@ -7436,8 +7542,12 @@ pub const KATANA_SFX_NODE_ALIVE_BIT: u32 = 0x4000_0000;
 /// ```
 ///
 /// A hit bumps a counter at `+0x20` and clears a byte at `+0x24` rather than inserting again, so
-/// the tree records how many times each id was asked for.
+/// the tree records how many times each id has spawned.
 pub const KATANA_SFX_MISSING_IDS_OFFSET: usize = 0x2b8;
+
+/// The `u32` spawn count in a node of the [`KATANA_SFX_MISSING_IDS_OFFSET`] tree. `+0x20`: the
+/// insert writes `1` for a new id (`0x140beb458`) and adds one for a known id (`0x140beb465`).
+pub const KATANA_SFX_SPAWNED_COUNT_OFFSET: usize = 0x20;
 
 /// `_Left` of a node in the [`KATANA_SFX_MISSING_IDS_OFFSET`] tree. `+0x00`.
 pub const KATANA_SFX_MISSING_LEFT_OFFSET: usize = 0x00;

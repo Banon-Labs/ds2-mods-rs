@@ -122,6 +122,15 @@ _EMPHASIS_RE = re.compile(EMPHASIS_PATTERN)
 
 _EMPHASIS_SET = frozenset(EMPHASIS_WORDS)
 
+#: A capitalised IDENTIFIER, which is a name and not volume: three or more capital segments joined
+#: by `-` or `_`, with any surrounding punctuation. A hyphen is a word boundary, so without this a
+#: rule id written in prose -- DS2-MODS-NO-GREP-FOR-BUILD-ERRORS -- inherits FOR from its parts and
+#: halts. Two segments stay judged, so STARTUP-ONLY is still a shout. Dropped a space-separated word
+#: at a time, the same way `docs_no_shouting.rego` does it, because Cupcake's WASM runtime has no
+#: `regex.replace`; the pattern is compared byte for byte by `scripts/test-shouting-signal.py`.
+IDENTIFIER_PATTERN = r"^[^A-Za-z0-9]*[A-Z0-9]+(?:[-_][A-Z0-9]+){2,}[^A-Za-z0-9]*$"
+_IDENTIFIER_RE = re.compile(IDENTIFIER_PATTERN)
+
 #: Markdown doc comments in Rust. Ordinary `//` comments are not documentation and are not judged,
 #: the same scope `docs_no_size_metrics` uses.
 DOC_COMMENT_RE = re.compile(r"^\s*//[!/]")
@@ -154,7 +163,8 @@ def _split_on_balanced(text: str, delimiter: str) -> str:
 def strip_verbatim(text: str) -> str:
     """Remove the spans that are somebody else's words rather than the author's prose.
 
-    Three of them, and each earns its place:
+    Three of them, and each earns its place -- plus capitalised identifiers (`IDENTIFIER_PATTERN`),
+    which are names rather than anybody's words and are dropped last:
       * fenced code blocks, removed across the whole text before it is cut into lines;
       * inline code spans, per line, which is where an identifier or a log line normally sits;
       * double-quoted spans, per line -- a verbatim quotation is a quotation. This is also what
@@ -166,6 +176,7 @@ def strip_verbatim(text: str) -> str:
     for line in text.split("\n"):
         line = _split_on_balanced(line, "`")
         line = _split_on_balanced(line, '"')
+        line = " ".join(word for word in line.split(" ") if not _IDENTIFIER_RE.match(word))
         out.append(line)
     return "\n".join(out)
 
