@@ -44,6 +44,7 @@ pub mod fnv1a;
 pub mod http;
 pub mod log;
 pub mod mem;
+pub mod modal;
 
 /// Tier B: the typed-binding re-export facade. **Empty, and honestly so.**
 ///
