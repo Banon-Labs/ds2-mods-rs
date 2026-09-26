@@ -149,14 +149,14 @@ pub fn set_load_confirmed(notify: LoadConfirmed) {
 /// # Why a flow wants this and not [`set_load_confirmed`]
 ///
 /// The list taking its load branch is not the end of the load. Between that moment and play there
-/// are more of the game's own screens, and one of them is a confirm about the character being
-/// loaded. A flow that tears its own state down at `load_confirmed` is no longer holding
-/// `ds2-dialog-skip` when that confirm arrives, so this build answers it with its only published
-/// edge -- the cancel -- and the player is returned to the title having chosen a character.
+/// are more of the game's own screens, and the load can still fail. A flow that tears its own
+/// state down at `load_confirmed` has nothing left to report that failure against.
 ///
 /// Measured 2026-09-23: `swap done slot=0`, then
 /// `suppressed screen=common-window kind=82 cancel-dest=0x17 confirm-dest=0xffff edge=only-edge`,
-/// then the title sequence again.
+/// then the title sequence again. That was read at the time as a confirm about the character;
+/// kind 82's message is "Failed to save game."
+/// ([`ds2_rva::FE_COMMON_WINDOW_KIND_SAVE_FAILED`]), and `ds2-dialog-skip` now shows it.
 ///
 /// One callback, cleared by [`clear_started_ingame`] rather than fired repeatedly: it reports every
 /// load, including ones the registering flow had nothing to do with.

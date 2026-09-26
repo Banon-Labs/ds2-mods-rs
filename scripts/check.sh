@@ -87,6 +87,12 @@ echo "== fresh-run logs =="
 python3 scripts/check-fresh-run-logs.py --selftest
 python3 scripts/check-fresh-run-logs.py
 
+echo "== ds2-sl2 section walk =="
+# `--slots` marks a slot `hollow` when the game's header walk would spin forever on it, and
+# `ds2-run.py` autoloads by that word. Pure python on built streams; needs no save.
+python3 scripts/ds2-sl2.py --selftest >/dev/null
+echo "  ds2-sl2.py: OK"
+
 echo "== rustfmt =="
 # NOT `cargo fmt --all`. `--all` is documented as "format all packages, AND ALSO THEIR LOCAL
 # PATH-BASED DEPENDENCIES", so the moment a crate here depended on `../dearxan` the gate started

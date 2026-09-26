@@ -76,12 +76,16 @@
 #[cfg(windows)]
 mod hide_menus;
 #[cfg(windows)]
+mod hollow_slot;
+#[cfg(windows)]
 mod install;
 #[cfg(windows)]
 mod silence;
 
 #[cfg(windows)]
 pub use hide_menus::set_enabled as set_hide_menus;
+#[cfg(windows)]
+pub use hollow_slot::install_hollow_slot_guard;
 #[cfg(windows)]
 pub use install::{
     LoadConfirmed, LogFn, Outcome, StartedIngame, TitleGate, TitleStep, clear_started_ingame,

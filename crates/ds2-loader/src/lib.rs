@@ -94,6 +94,7 @@ pub mod invasion_path;
 pub mod inventory_sort;
 pub mod item_warn;
 pub mod menu_row;
+pub mod message_box;
 pub mod offline;
 pub mod save_block;
 pub mod save_redirect;
@@ -240,6 +241,19 @@ unsafe fn attach(module: *mut c_void) {
     if crash_config.enabled {
         crash_logging::install(module);
     }
+
+    // The message box watch, from `DllMain` and not from the Arxan callback with every other hook.
+    // A mod injected by `ds2-launcher.exe` runs its `DllMain` after this one and before the game's
+    // entry point, so a box it opens during its own initialisation would be gone past a hook
+    // installed at the entry point. See `message_box` for the ordering and the evidence for it.
+    // Unconditional: it changes no call, and `scripts/ds2-run.py` withholds its RUNNING block on
+    // the line it writes, so it is not a feature a config should be able to switch off.
+    //
+    // SAFETY: patches the six `user32` message box exports with detours of their exact
+    // signatures, called once under the `Once` in `DllMain`. `user32` is a static import of this
+    // DLL and is mapped already; nothing is loaded.
+    let watch = unsafe { message_box::install() };
+    log_line(format_args!("{watch}"));
 
     // Read the config file ONCE, here, and log what it resolved to. Everything below branches on
     // this value, so a run that was configured differently from how anyone believed says so in
@@ -1427,6 +1441,13 @@ fn system_dinput8_path() -> Option<Vec<u16>> {
 fn install_continue_record() {
     let config = continue_flow::ContinueConfig::load();
     log_line(format_args!("{}", config.describe()));
+    ds2_continue::set_logger(log_line);
+    // On for every run, whatever `[continue]` says: a player picking a hollow slot from the game's
+    // own list hangs the game with or without this crate's shortcut, and the guard changes nothing
+    // but a walk that would never return.
+    // SAFETY: the target's prologue is checked against `ds2-rva` before anything is patched, and
+    // this runs at the same install position as every other detour.
+    unsafe { ds2_continue::install_hollow_slot_guard() };
     // The third reason to patch, and it is not a `[continue]` key at all. The Load Character from
     // File row does its work at the title screen -- point the loads at a staged container, re-read
     // it, open the character list for it -- and the two detours that drive that are this crate's.
@@ -1440,7 +1461,6 @@ fn install_continue_record() {
     if !config.record && config.slot < 0 && !swap_row_wants_it {
         return;
     }
-    ds2_continue::set_logger(log_line);
     ds2_continue::set_preselect_slot(config.slot);
     // Only meaningful alongside a slot: without one there is no shortcut to cover, and muting a
     // run the player is driving by hand would be a bug rather than a feature.

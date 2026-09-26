@@ -675,10 +675,11 @@ fn load_confirmed(slot: i32) {
             |seated| seated.to_string(),
         );
     ds2_continue::clear_title_gate();
-    // THE HOLD SURVIVES THIS, and releasing it here is a bug this run measured. The list taking its
-    // load branch is not the end of the load: the game puts up one more `common-window` about the
-    // character, and with the hold already released this build answered its only published edge --
-    // the cancel -- and returned the player to the title having chosen a save.
+    // The hold survives this, and releasing it here is a bug this run measured. The list taking its
+    // load branch is not the end of the load: the game put up one more `common-window`, and with
+    // the hold already released this build suppressed it and the player landed back at the title.
+    // Kind 82 is "Failed to save game." (`ds2_rva::FE_COMMON_WINDOW_KIND_SAVE_FAILED`), not the
+    // character confirm it was taken for, and `ds2-dialog-skip` now shows it whatever the hold says.
     //
     //   ds2-save-file:   swap done slot=0
     //   ds2-dialog-skip: suppressed screen=common-window kind=82 cancel-dest=0x17
