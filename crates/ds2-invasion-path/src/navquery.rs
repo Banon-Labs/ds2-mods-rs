@@ -44,7 +44,9 @@
 //! So the only caller is `crate::gametick`, which is a detour on `NvNavigationSystem::Update`
 //! itself. `Present` may ask for a route; it may not fetch one.
 
-use ds2_game_base::mem::{game_rva, read_bytes, safe_read_u8, safe_read_u32, safe_read_usize};
+use ds2_game_base::mem::{
+    game_rva, read_bytes, safe_read_u8, safe_read_u16, safe_read_u32, safe_read_usize,
+};
 
 /// A position handed to the engine.
 ///
@@ -699,6 +701,8 @@ impl crate::navpath::Memory for GameMemory {
 pub(crate) struct AuditedNode {
     /// The node as [`crate::navpath::segment_nodes`] found it.
     pub(crate) node: crate::navpath::RouteNode,
+    /// The triangle whose word this is: the id's own index, or one side of the edge it names.
+    pub(crate) triangle: u16,
     /// The attribute word at [`ds2_rva::NV_NAVI_GRAPH_NODE_ATTRS_OFFSET`].
     pub(crate) attrs: u32,
     /// `attrs & 0x78`, the field `0x140baf0d0` switches on.
@@ -732,18 +736,24 @@ pub(crate) struct Audit {
     pub(crate) widest: Option<u32>,
 }
 
-/// The attribute word the engine tests for one packed navi id.
+/// The triangles one packed navi id stands for, each with the attribute word the engine tests.
 ///
-/// The two hops -- hash `id | 0x1ffff` to a graph, then index that graph's `+0x48` table by
-/// `id & 0x7fff` -- are `0x14042ee40`'s, quoted at
+/// The graph is found the way `0x14042ee40` finds it -- hash `id | 0x1ffff` -- quoted at
 /// [`ds2_rva::NV_NAVI_GRAPH_NODE_ATTRS_OFFSET`]. Indexing whichever graph the SNAP happened to
-/// choose instead would read one graph's table with another graph's index, and a wrong `u32`
-/// here reads as a confident verdict rather than as a failure.
+/// choose instead would read one graph's table with another graph's index.
+///
+/// A triangle id indexes the `+0x48` table directly. A route's ids are EDGES
+/// ([`ds2_rva::NAVI_ID_EDGE_FLAG`]), and an edge has no attribute word of its own: it names up to
+/// two triangles, and those are what `0x140bba040` tests. Every index is checked against the
+/// graph's own count first, because an index past the end reads a neighbouring allocation as a
+/// confident verdict rather than failing -- which is exactly what the audit did before.
+///
+/// Returns `None` when the id names nothing readable, never an empty vector.
 ///
 /// # Safety
 ///
 /// Game thread only, and only once the world exists.
-unsafe fn node_attributes(table: usize, id: u32) -> Option<u32> {
+unsafe fn node_attributes(table: usize, id: u32) -> Option<Vec<(u16, u32)>> {
     if id & ds2_rva::NAVI_ID_INDEX_MASK == ds2_rva::NAVI_ID_INDEX_NONE {
         return None;
     }
@@ -762,12 +772,51 @@ unsafe fn node_attributes(table: usize, id: u32) -> Option<u32> {
     // moved or was freed answers None rather than faulting.
     let attrs = unsafe { safe_read_usize(graph + ds2_rva::NV_NAVI_GRAPH_NODE_ATTRS_OFFSET) }
         .filter(|attrs| *attrs != 0)?;
-    let index = (id & ds2_rva::NAVI_ID_INDEX_MASK) as usize;
-    // SAFETY: the table the engine indexes the same way, with the same mask, at the same offset.
-    // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one -- it reads
-    // through `ReadProcessMemory`, which validates the range in the kernel. A game structure that
-    // moved or was freed answers None rather than faulting.
-    unsafe { safe_read_u32(attrs + index * 4) }
+    // SAFETY: as above -- fault-tolerant reads of an engine-owned graph.
+    let triangles = unsafe { read_i16(graph + ds2_rva::NV_NAVI_GRAPH_TRIANGLE_COUNT_OFFSET) }?;
+    let index = (id & ds2_rva::NAVI_ID_INDEX_MASK) as i16;
+    let sides: Vec<i16> = if id & ds2_rva::NAVI_ID_EDGE_FLAG == 0 {
+        vec![index]
+    } else {
+        // SAFETY: as above.
+        let edges = unsafe { read_i16(graph + ds2_rva::NV_NAVI_GRAPH_EDGE_COUNT_OFFSET) }?;
+        if index >= edges {
+            return None;
+        }
+        // SAFETY: as above.
+        let records = unsafe { safe_read_usize(graph + ds2_rva::NV_NAVI_GRAPH_EDGES_OFFSET) }
+            .filter(|records| *records != 0)?;
+        let record = records + index as usize * ds2_rva::NV_NAVI_EDGE_STRIDE;
+        (0..2)
+            // SAFETY: an edge record inside the bound the engine checks the same way.
+            .filter_map(|side| unsafe {
+                read_i16(record + ds2_rva::NV_NAVI_EDGE_TRIANGLES_OFFSET + side * 2)
+            })
+            .collect()
+    };
+    let words: Vec<(u16, u32)> = sides
+        .into_iter()
+        .filter(|&triangle| {
+            triangle >= 0 && triangle as u32 != ds2_rva::NAVI_ID_INDEX_NONE && triangle < triangles
+        })
+        .filter_map(|triangle| {
+            // SAFETY: an index below the graph's own triangle count, into the table the engine
+            // indexes the same way. The reader still fails closed on an unmapped page.
+            unsafe { safe_read_u32(attrs + triangle as usize * 4) }
+                .map(|word| (triangle as u16, word))
+        })
+        .collect();
+    (!words.is_empty()).then_some(words)
+}
+
+/// One `i16` out of game memory, through the fault-tolerant reader.
+///
+/// # Safety
+///
+/// None beyond the reader's own: any address is accepted and an unmapped one answers `None`.
+unsafe fn read_i16(at: usize) -> Option<i16> {
+    // SAFETY: see above.
+    unsafe { safe_read_u16(at) }.map(|word| word as i16)
 }
 
 /// The `f32` `0x140baf0d0` returns when the answer is no.
@@ -840,18 +889,21 @@ pub(crate) unsafe fn audit(route: usize) -> Option<Audit> {
     let mut unreadable = 0usize;
     for node in crate::navpath::segment_nodes(&GameMemory, route)? {
         // SAFETY: game thread, world resolved above.
-        let Some(attrs) = (unsafe { node_attributes(table, node.id) }) else {
+        let Some(words) = (unsafe { node_attributes(table, node.id) }) else {
             unreadable += 1;
             continue;
         };
-        nodes.push(AuditedNode {
-            node,
-            attrs,
-            kind: attrs & ds2_rva::NAVI_NODE_TYPE_MASK,
-            capacity: attrs & 0x7,
-            level: passable(attrs, 0, 0),
-            below: passable(attrs, 0, 1),
-        });
+        for (triangle, attrs) in words {
+            nodes.push(AuditedNode {
+                node,
+                triangle,
+                attrs,
+                kind: attrs & ds2_rva::NAVI_NODE_TYPE_MASK,
+                capacity: attrs & 0x7,
+                level: passable(attrs, 0, 0),
+                below: passable(attrs, 0, 1),
+            });
+        }
     }
     if nodes.is_empty() {
         return None;

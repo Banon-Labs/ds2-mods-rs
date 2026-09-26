@@ -57,3 +57,8 @@
 sync.remote: "https://doltremoteapi.dolthub.com/chozandrias/ds2-mods-rs"
 
 export.git-add: false
+
+# Export on every write. The post-checkout hook imports .beads/issues.jsonl, and with the default
+# 60s throttle a close made less than a minute before a `git switch` was not in the file yet, so the
+# switch reopened it (measured 2026-09-26: close, switch, the issue read open again).
+export.interval: 0s

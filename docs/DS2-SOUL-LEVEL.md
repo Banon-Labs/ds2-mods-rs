@@ -104,6 +104,44 @@ least `cost(S) + cost(S + 1) + ... + cost(N - 1)` souls, and soul memory
   derived value (HP, stamina, defences, resistances) and looks each one up in
   `PhysicalStatsPerLevelStatValuesParam`. It never touches the soul level.
 
+## The guard as built
+
+`ds2-soul-memory-guard`, switched on by `[soul_memory_guard] enabled = true` (`scripts/ds2-run.py
+--soul-memory-guard`), detours `PlayerParam::RestoreFromRecord` (`0x14038ad20`). That function is
+the gameplay load's only writer of the soul counters (see `docs/DS2-SOUL-MEMORY-ON-LOAD.md`), and
+its first call is `assignAttributes` (`0x14038aca0`), whose recompute ends in `FUN_14038e310`. So
+after it returns, `+0xD0` holds the level derived from the loaded stats and `+0xF4`/`+0xFC` hold
+the record's soul memory (**verified in binary**). The guard then calls `FUN_14038d140` for each
+step from level 14 to the character's level, compares the sum with `+0xF4`, and logs one line. It
+refuses nothing: no safe way to turn a load away from inside the spawn was found.
+
+Read live on 2026-09-26 with `scripts/frida/soul-guard-inputs.js` (read-only):
+
+- `PlayerLevelUpSoulsParam` at `[[GameManagerImp]+0x18]+0x580`, file at `+0xD8`: 852 rows, shape
+  byte `4` (wide table). Row 0 is `{level 0, souls 0}`, row 1 `{1, 500}`, row 2 `{2, 528}`, row 3
+  `{3, 557}`, row 851 `{999, 100000}`. Row 0 at level 0 is what makes `FUN_14038d140`'s halving loop
+  end for every level of one or more.
+- The `i32` at row `+4` read as `1`, `2`, `3` and `999` on those rows, the same as the level, and
+  not `0` as the note on `PLAYER_LEVEL_UP_SOULS_COST_OFFSET` in `ds2-rva` says. It only matters for
+  a level with no exact row, which no level up to 838 is.
+- A character at level 13 (stats summing to 66) held a soul memory of 1650. Summed from level 1 its
+  floor is 8192, so a start of 1 would call a fresh character short; summed from 14 it is 0.
+
+### A level-1 verdict after a continue is the slot, not the hook
+
+The first runs with the guard on (`--continue-slot 0`) logged `verdict=supported level=1
+soul_memory=0` and read stats `1,1,1,1,1,1,1,1,1` from `[[GameManagerImp]+0xD0]+0x490` in the
+world. That looked like the hook reading a default-constructed object. It is the save: a read-only
+`scripts/ds2-sl2.py --slots` of both `DS2SOFS0000.sl2` and `.co2` in the save folder those runs used
+lists slot 0 as blank (stats summing to 9, no name) and slot 1 as the only character, `Swornsword
+Ole`, stats summing to 66. The earlier level-13 read (stats summing to 66, soul memory 1650) was
+that slot-1 character, at the same heap address. So `--continue-slot 0` loaded the blank slot, and
+the guard read what was loaded.
+
+`FUN_14038bd70`, the level setter, is not a load path to hook instead (**verified in binary**): its
+only caller is `FUN_1400ee240`, and that function's only call site is `0x1400fdcab` in
+`FeSubStateTitlePlayerInformation` (`0x1400fdc40`), the title screen's character information page.
+
 ## Open
 
 - Whether the game trusts a stored level that disagrees with the stats, once the character is in

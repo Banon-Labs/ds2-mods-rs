@@ -338,19 +338,19 @@ struct Tick {
     said_snap: bool,
     /// How far through a self-check run this is.
     check: Check,
-    /// Stock Prism Stone id -> the sparkle-free copy registered for it, or `None` when building
-    /// or registering that copy failed and the trail falls back to the stock stone. Filled once
-    /// per colour, on first use; see [`stripped_stone`].
+    /// Stock Prism Stone id -> the lit, sparkle-free copy registered for it, or `None` when
+    /// building or registering that copy failed and the trail falls back to the stock stone.
+    /// Filled once per colour, on first use; see [`stripped_stone`].
     stripped: std::collections::HashMap<u32, Option<u32>>,
 }
 
-/// The id to spawn for `stock`: its sparkle-free copy when there is one, else `stock` itself.
+/// The id to spawn for `stock`: its lit, sparkle-free copy when there is one, else `stock` itself.
 ///
 /// The first time a Prism Stone colour is asked for, its `.ffx` is read out of the player's own
-/// `Game/sfx/sfx9999.ffxbnd.dcx`, the sparkle child is cut ([`crate::stone_effect`]), and the
-/// result is registered under [`crate::stone_effect::stripped_id`]. That is one file read and one
-/// inflate per colour per process, on the game thread, the first time a trail of that colour is
-/// laid. Any failure is logged once and that colour keeps the stock stone rather than drawing
+/// `Game/sfx/sfx9999.ffxbnd.dcx`, its sparkle child becomes a point light taken from effect 181
+/// in the same bundle and its glow's colour loops ([`crate::stone_effect`]), and the result is
+/// registered under [`crate::stone_effect::stripped_id`]. That is one file read and two inflates
+/// per colour per process, on the game thread, the first time a trail of that colour is laid. Any failure is logged once and that colour keeps the stock stone rather than drawing
 /// nothing. An id that is not a Prism Stone is returned unchanged.
 fn stripped_stone(
     stripped: &mut std::collections::HashMap<u32, Option<u32>>,
@@ -371,21 +371,31 @@ fn stripped_stone(
                     .join(crate::stone_effect::BUNDLE_RELATIVE_PATH);
                 std::fs::read(&path).map_err(|error| format!("{}: {error}", path.display()))
             })
-            .and_then(|dcx| crate::stone_effect::member_from_bundle(&dcx, stock))
-            .and_then(|ffx| crate::stone_effect::strip_sparkles(&ffx, id))
+            .and_then(|dcx| {
+                let ffx = crate::stone_effect::member_from_bundle(&dcx, stock)?;
+                let donor = crate::stone_effect::member_from_bundle(
+                    &dcx,
+                    crate::stone_effect::LIGHT_DONOR_EFFECT,
+                )?;
+                crate::stone_effect::light_stone(&ffx, &donor, id)
+            })
             // SAFETY: game thread, mid-simulation -- `lay_markers` is only reached from the nav
             // tick -- and `system` is the live `KatanaSfxSystem` that call just resolved.
             .and_then(|bytes| unsafe { sfx::register_effect(system, id, bytes) });
         match built {
             Ok(()) => {
+                let candle = crate::stone_effect::CANDLE;
                 log(format_args!(
-                    "Prism Stone {stock}: laying the sparkle-free copy, registered as effect {id}"
+                    "Prism Stone {stock}: laying the lit copy (no sparkles; point light radius \
+                     {} flicker {}..{} ticks floor {}; glow colour loops), registered as effect \
+                     {id}",
+                    candle.radius, candle.period_min, candle.period_max, candle.floor
                 ));
                 Some(id)
             }
             Err(why) => {
                 log(format_args!(
-                    "Prism Stone {stock}: could not build the sparkle-free copy ({why}); this \
+                    "Prism Stone {stock}: could not build the lit copy ({why}); this \
                      colour keeps the stock stone"
                 ));
                 None
@@ -1361,7 +1371,7 @@ fn lay_markers(state: &mut Tick) -> bool {
             } else {
                 lane.effect_id
             };
-            // The sparkle-free copy of that colour, so the trail is the glow alone.
+            // The lit copy of that colour: the glow and its light, without the sparkles.
             let id = stripped_stone(stripped, system, stock);
             if checking {
                 // SAFETY: game thread, mid-simulation, no engine lock held.
@@ -1533,7 +1543,12 @@ fn describe_audit(report: &navquery::Audit, scope_said: &mut bool) {
         .nodes
         .iter()
         .take(10)
-        .map(|node| format!("0x{:08x}(t{:x}/c{})", node.attrs, node.kind, node.capacity))
+        .map(|node| {
+            format!(
+                "tri {} 0x{:08x}(t{:x}/c{})",
+                node.triangle, node.attrs, node.kind, node.capacity
+            )
+        })
         .collect();
     log(format_args!(
         "tick: route audit -- {} node(s) read{}. Widest agent this route admits: {widest}. The \
@@ -1570,9 +1585,15 @@ fn describe_audit(report: &navquery::Audit, scope_said: &mut bool) {
             .at
             .map_or((f32::NAN, f32::NAN, f32::NAN), |at| (at[0], at[1], at[2]));
         log(format_args!(
-            "tick:   node 0x{:08x} (segment {}{} at {x:.2}, {y:.2}, {z:.2}) attrs 0x{:08x} \
+            "tick:   node 0x{:08x} -> tri {} (segment {}{} at {x:.2}, {y:.2}, {z:.2}) attrs 0x{:08x} \
              type 0x{:x} capacity {} -- {verdict}",
-            node.node.id, node.node.segment, node.node.side, node.attrs, node.kind, node.capacity
+            node.node.id,
+            node.triangle,
+            node.node.segment,
+            node.node.side,
+            node.attrs,
+            node.kind,
+            node.capacity
         ));
     }
     if !*scope_said {

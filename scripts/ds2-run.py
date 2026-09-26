@@ -315,6 +315,19 @@ KEY_ITEM_WARN_ENABLED = "enabled"
 #: Mirrors `LOG_PREFIX` in `crates/ds2-item-warn/src/lib.rs`. Grep for it when a run disappoints.
 ITEM_WARN_LOG_PREFIX = "ds2-item-warn:"
 
+#: Mirrors `CONFIG_SECTION` in `crates/ds2-loader/src/voice_chat.rs`. Off unless `--voice-chat`
+#: asks for it, matching the DLL's own default; without this section no launch could turn it on.
+VOICE_CHAT_SECTION = "voice_chat"
+KEY_VOICE_CHAT_ENABLED = "enabled"
+VOICE_CHAT_LOG_PREFIX = "ds2-voice-chat:"
+
+#: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/soul_memory_guard.rs`. OFF by
+#: default here, matching the DLL; `--soul-memory-guard` turns it on.
+SOUL_MEMORY_GUARD_SECTION = "soul_memory_guard"
+KEY_SOUL_MEMORY_GUARD_ENABLED = "enabled"
+#: Mirrors `LOG_PREFIX` in `crates/ds2-soul-memory-guard/src/lib.rs`.
+SOUL_MEMORY_GUARD_LOG_PREFIX = "ds2-soul-memory-guard:"
+
 #: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/hp_gauge.rs`.
 #:
 #: ON here and off in the DLL: the DLL's default is the game as shipped, and this launcher's is the
@@ -1171,6 +1184,7 @@ def config_text(
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
     item_warn: bool = False,
+    voice_chat: bool = False,
     hp_gauge: bool = True,
     seamless: bool = False,
     seamless_dll: str = SEAMLESS_DEFAULT_DLL,
@@ -1184,6 +1198,7 @@ def config_text(
     menu_rows_all: bool = False,
     menu_rows_no_save: bool = False,
     launcher_dlls: tuple[str, ...] = (),
+    soul_memory_guard: bool = False,
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
@@ -1703,6 +1718,12 @@ def config_text(
 # Grep the log for `{ITEM_WARN_LOG_PREFIX}`; it names every site it patched and every one it refused.
 {KEY_ITEM_WARN_ENABLED} = {str(item_warn).lower()}
 
+[{VOICE_CHAT_SECTION}]
+# STARTUP-ONLY. A keyboard key (default F8) that toggles the game's own Options > Game > Voice chat
+# setting, drawn on the HUD by `ds2-voice-chat`. Off unless `--voice-chat` asked for it. The key is
+# `key` in this section; leaving it out keeps the default. Grep the log for `{VOICE_CHAT_LOG_PREFIX}`.
+{KEY_VOICE_CHAT_ENABLED} = {str(voice_chat).lower()}
+
 [{HP_GAUGE_SECTION}]
 # STARTUP-ONLY. The HP bar and damage number floating over other characters, drawn by
 # `ds2-hp-gauge`: the bar grown and moved to sit centred over the target, and the number grown,
@@ -1722,6 +1743,12 @@ def config_text(
 #
 # Grep the log for `{HP_GAUGE_LOG_PREFIX}`.
 {KEY_HP_GAUGE_ENABLED} = {str(hp_gauge).lower()}
+
+[{SOUL_MEMORY_GUARD_SECTION}]
+# STARTUP-ONLY. On every character load, `ds2-soul-memory-guard` logs whether the character's soul
+# memory could have paid for its soul level. It logs and refuses nothing. OFF unless
+# `--soul-memory-guard`. Grep the log for `{SOUL_MEMORY_GUARD_LOG_PREFIX}`.
+{KEY_SOUL_MEMORY_GUARD_ENABLED} = {str(soul_memory_guard).lower()}
 
 [{SEAMLESS_SECTION}]
 # A SECOND MOD, written by someone else, loaded into this same process.
@@ -1934,6 +1961,7 @@ def write_config(
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
     item_warn: bool = False,
+    voice_chat: bool = False,
     hp_gauge: bool = True,
     seamless: bool = False,
     seamless_dll: str = SEAMLESS_DEFAULT_DLL,
@@ -1947,6 +1975,7 @@ def write_config(
     menu_rows_all: bool = False,
     menu_rows_no_save: bool = False,
     launcher_dlls: tuple[str, ...] = (),
+    soul_memory_guard: bool = False,
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
@@ -1975,6 +2004,7 @@ def write_config(
         inventory_sort_key,
         inventory_sort_pad,
         item_warn,
+        voice_chat,
         hp_gauge,
         seamless,
         seamless_dll,
@@ -1988,6 +2018,7 @@ def write_config(
         menu_rows_all,
         menu_rows_no_save,
         launcher_dlls,
+        soul_memory_guard=soul_memory_guard,
     )
     path.write_text(text, encoding="utf-8")
     return path, text
@@ -2088,6 +2119,7 @@ def dry_run(
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
     item_warn: bool = False,
+    voice_chat: bool = False,
     hp_gauge: bool = True,
     seamless: bool = False,
     seamless_dll: str = SEAMLESS_DEFAULT_DLL,
@@ -2101,6 +2133,7 @@ def dry_run(
     menu_rows_all: bool = False,
     menu_rows_no_save: bool = False,
     launcher_dlls: tuple[str, ...] = (),
+    soul_memory_guard: bool = False,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
@@ -2147,6 +2180,7 @@ def dry_run(
             inventory_sort_key,
             inventory_sort_pad,
             item_warn,
+            voice_chat,
             hp_gauge,
             seamless,
             seamless_dll,
@@ -2160,6 +2194,7 @@ def dry_run(
             menu_rows_all,
             menu_rows_no_save,
             launcher_dlls,
+            soul_memory_guard=soul_memory_guard,
         ):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
         else:
@@ -2202,6 +2237,7 @@ def dry_run(
                 inventory_sort_key=inventory_sort_key,
                 inventory_sort_pad=inventory_sort_pad,
                 item_warn=item_warn,
+                voice_chat=voice_chat,
                 hp_gauge=hp_gauge,
                 seamless=seamless,
                 seamless_dll=seamless_dll,
@@ -2215,6 +2251,7 @@ def dry_run(
                 menu_rows_all=menu_rows_all,
                 menu_rows_no_save=menu_rows_no_save,
                 launcher_dlls=launcher_dlls,
+                soul_memory_guard=soul_memory_guard,
             ),
             indent="[dry-run]   | ",
         )
@@ -2621,6 +2658,61 @@ def hypr(lua: str) -> str | None:
     return None if answer.startswith("error:") else answer
 
 
+#: Where a saved window position that is off [`GAME_MONITOR`] is put back to: the game's own
+#: shipped default, which lands on DP-1.
+WINDOW_HOME = (640, 360)
+
+
+def clamp_saved_window_position() -> None:
+    """Put `App.Window.X/Y` back on [`GAME_MONITOR`] when the saved value is off it.
+
+    The game creates its window at exactly the saved position and never checks it against any
+    monitor (`CreateWindowExW` at `0x1402eb858`; no `MonitorFrom*` import), and its `WM_MOVE`
+    handler saves wherever the window was at a clean exit. So one exit while the window sat off
+    every screen makes every later launch start off every screen (docs/DS2-WINDOW-POSITION.md).
+
+    Measured in Xwayland pixels, which with `force_zero_scaling` are the monitor's physical
+    pixels: DP-1 at `0,0` is the rectangle `[0, width) x [0, height)`.
+    """
+    path = GAME_DIR / "userconfig.properties"
+    if not path.is_file() or shutil.which("hyprctl") is None:
+        return
+    try:
+        monitors = json.loads(
+            subprocess.run(
+                ["hyprctl", "monitors", "-j"], capture_output=True, text=True, timeout=5
+            ).stdout
+        )
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+        return
+    home = next((m for m in monitors if m.get("name") == GAME_MONITOR), None)
+    if home is None or (home.get("x"), home.get("y")) != (0, 0):
+        print(f"[monitor] {GAME_MONITOR} is not at 0,0; saved window position left alone")
+        return
+    text = path.read_text(encoding="utf-8")
+    saved = {
+        axis: int(value)
+        for axis, value in re.findall(r"^App\.Window\.([XY])\s*=\s*(-?\d+)\s*$", text, re.M)
+    }
+    if set(saved) != {"X", "Y"}:
+        return
+    margin = 64
+    inside = (
+        0 <= saved["X"] < home["width"] - margin and 0 <= saved["Y"] < home["height"] - margin
+    )
+    if inside:
+        return
+    for axis, value in zip("XY", WINDOW_HOME):
+        text = re.sub(
+            rf"^(App\.Window\.{axis}\s*=\s*)-?\d+", rf"\g<1>{value}", text, flags=re.M
+        )
+    path.write_text(text, encoding="utf-8")
+    print(
+        f"[monitor] saved window position {saved['X']},{saved['Y']} is off {GAME_MONITOR}; "
+        f"reset to {WINDOW_HOME[0]},{WINDOW_HOME[1]}"
+    )
+
+
 def pin_to_monitor() -> None:
     """Point Hyprland at [`GAME_MONITOR`] so the game's window maps there.
 
@@ -2634,6 +2726,18 @@ def pin_to_monitor() -> None:
     print(f"[monitor] focused {GAME_MONITOR} so the game maps there")
 
 
+def window_monitor() -> str | None:
+    """The name of the monitor the game's window is on, `"no window"`, or `None` without Hyprland.
+
+    Asks for the game's class only, never for the list of windows.
+    """
+    return hypr(
+        "local w = hl.get_windows() "
+        f'for _, x in ipairs(w) do if x.class == "steam_app_{APPID}" then '
+        'return x.monitor and x.monitor.name or "?" end end return "no window"'
+    )
+
+
 def settle_on_monitor() -> None:
     """Move the game's window to [`GAME_MONITOR`] and SAY WHERE IT ACTUALLY ENDED UP.
 
@@ -2644,18 +2748,21 @@ def settle_on_monitor() -> None:
     The check afterwards is the point. A dispatcher that was built and never run fails silently,
     and so does a move to a monitor that has been unplugged; reading the window's monitor back is
     the difference between reporting a pin and having made one.
+
+    No move is sent when the window is already there: a move is the one thing this repo does to
+    the window during boot, so it is not issued when it has nothing to do.
     """
+    where = window_monitor()
+    if where == GAME_MONITOR:
+        print(f"[monitor] game is on {GAME_MONITOR}")
+        return
     moved = hypr(
         "return hl.dispatch(hl.dsp.window.move{ "
         f'monitor = "{GAME_MONITOR}", window = "{GAME_WINDOW_MATCH}" }})'
     )
     if moved is None:
         return
-    where = hypr(
-        "local w = hl.get_windows() "
-        f'for _, x in ipairs(w) do if x.class == "steam_app_{APPID}" then '
-        'return x.monitor and x.monitor.name or "?" end end return "no window"'
-    )
+    where = window_monitor()
     if where == GAME_MONITOR:
         print(f"[monitor] game is on {GAME_MONITOR}")
     else:
@@ -2688,6 +2795,7 @@ def launch(
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
     item_warn: bool = False,
+    voice_chat: bool = False,
     hp_gauge: bool = True,
     seamless: bool = False,
     seamless_dll: str = SEAMLESS_DEFAULT_DLL,
@@ -2701,6 +2809,7 @@ def launch(
     menu_rows_all: bool = False,
     menu_rows_no_save: bool = False,
     launcher_dlls: tuple[str, ...] = (),
+    soul_memory_guard: bool = False,
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
@@ -2742,6 +2851,7 @@ def launch(
         inventory_sort_key,
         inventory_sort_pad,
         item_warn,
+        voice_chat,
         hp_gauge,
         seamless,
         seamless_dll,
@@ -2755,6 +2865,7 @@ def launch(
         menu_rows_all,
         menu_rows_no_save,
         launcher_dlls,
+        soul_memory_guard=soul_memory_guard,
     )
     print(f"[config] {config_path}")
 
@@ -2786,6 +2897,8 @@ def launch(
         print("[launch] REFUSING: the previous session did not die; see the survivors above.")
         return EXIT_ERROR
 
+    # After the teardown, because a clean exit is what writes the position this reads.
+    clamp_saved_window_position()
     pin_to_monitor()
 
     environment = launch_env(probe)
@@ -4216,6 +4329,15 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--voice-chat",
+        dest="voice_chat",
+        action="store_true",
+        help=(
+            "turn on ds2-voice-chat: a keyboard key (F8 unless [voice_chat] key says otherwise) "
+            "toggles the game's own Voice chat option. Off without this flag, matching the DLL."
+        ),
+    )
+    parser.add_argument(
         "--item-warn",
         dest="item_warn",
         action="store_true",
@@ -4225,6 +4347,16 @@ def main() -> int:
             "patches the frontend's layout builder and its cell bind and no run has yet put it on "
             "screen. It answers with the DETAIL PANE's check, except that while two-handing it "
             "halves the Strength requirement the way the game's damage check does."
+        ),
+    )
+    parser.add_argument(
+        "--soul-memory-guard",
+        dest="soul_memory_guard",
+        action="store_true",
+        help=(
+            "log, on every character load, whether that character's soul memory could have paid "
+            "for its soul level. Logs only; the load is never refused. OFF without this flag, "
+            "matching the DLL."
         ),
     )
     parser.add_argument(
@@ -4533,6 +4665,7 @@ def main() -> int:
             args.inventory_sort_key,
             args.inventory_sort_pad,
             args.item_warn,
+            args.voice_chat,
             args.hp_gauge,
             args.seamless,
             args.seamless_dll,
@@ -4546,6 +4679,7 @@ def main() -> int:
             args.menu_rows_all,
             args.menu_rows_no_save,
             tuple(args.launcher_dll),
+            soul_memory_guard=args.soul_memory_guard,
         )
     return launch(
         args.probe,
@@ -4573,6 +4707,7 @@ def main() -> int:
         args.inventory_sort_key,
         args.inventory_sort_pad,
         args.item_warn,
+        args.voice_chat,
         args.hp_gauge,
         args.seamless,
         args.seamless_dll,
@@ -4586,6 +4721,7 @@ def main() -> int:
         args.menu_rows_all,
         args.menu_rows_no_save,
         tuple(args.launcher_dll),
+        soul_memory_guard=args.soul_memory_guard,
     )
 
 

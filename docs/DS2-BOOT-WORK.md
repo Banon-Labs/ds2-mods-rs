@@ -301,6 +301,9 @@ The honest caveat: the chain is a **graph, not a line**. Every step can fork to 
 wrong on any non-happy path. Drive it off a weight table keyed by id, with the weights measured,
 and treat an unexpected id as "hold position" rather than "jump".
 
+The design that follows from this, with the weights and the renderer, is
+[`DS2-LOADING-BAR.md`](DS2-LOADING-BAR.md).
+
 ## What this trace cannot tell you, and the one run that would
 
 **Nothing here is a duration.** Static analysis names the steps and proves the dependency shape; it
@@ -574,9 +577,10 @@ substate is spending its second in an earlier phase and the watch is pointed at 
 waiting on yet. Re-aim it at the phase field first, then at whatever that phase reads.
 
 The destination is a clue the earlier runs already recorded: `0x44` always transitions to `0x46`,
-the "could not retrieve information" message box, never to `0x47` directly. **The information
-fetch fails on every measured boot.** A one-second cost to fail is a timeout, not a floor, and it
-would be removed by a different fix from `0x05`'s.
+never to `0x47` directly. This paragraph originally read `0x46` as a "could not retrieve
+information" box and concluded that the fetch failed on every boot. **That reading was wrong.**
+`0x46` is the box for a fetch that succeeded and returned no announcements; the failure screen is
+`0x45`. See [the information fetch succeeds](#the-information-fetch-succeeds-and-the-second-is-the-server-answering).
 
 ### This mod costs the boot 285 ms
 
@@ -689,15 +693,124 @@ call [r14->vtable+0x28]   ; is the download job still running?
 test al,al; jne return    ; <- THIS is the ~982ms, every run
 ```
 
-So `0x44`'s second is the job itself, not a display floor. It reproduces to 0.14% because it is
-almost certainly a fixed timeout *inside* the job rather than a variable round-trip -- and the
-destination confirms the request never succeeds: `0x44` always transitions to `0x46`, the "could
-not retrieve information" box, and never straight to `0x47`. **A one-second wait to fail.**
+So `0x44`'s second is the job itself, not a display floor. The earlier text in this document
+calling both of them floors was wrong about half of it, and the experiment that would have caught
+it earlier is exactly the one that caught it now: change the thing you believe is responsible and
+see whether the number moves.
 
-That is a different fix from this one and it belongs to whatever owns the job's timeout. The
-earlier text in this document calling both of them floors was wrong about half of it, and the
-experiment that would have caught it earlier is exactly the one that caught it now: change the
-thing you believe is responsible and see whether the number moves.
+This section first went on to call the job a fixed timeout and the destination proof of a failed
+fetch. Both were guesses, and the next section reads the binary and retires them.
+
+## The information fetch succeeds, and the second is the server answering
+
+Static only; nothing here was run. Addresses are **verified in binary** unless tagged otherwise.
+
+### The job is `GetAnnounceMessageList`
+
+`r14` is `[[0x141616cf8] + 0x30]`, a `NetSvrManager` (vtable `0x1410d53a8`, RTTI
+`NetSvrManager`). The four slots phase 1 to phase 3 call all forward to the object at
+`NetSvrManager + 0x60`, a `NetSvrLoginManager` (vtable `0x1410d4a18`):
+
+| slot | function | does |
+| --- | --- | --- |
+| `+0x20` | `0x140290800` -> `0x140289020` | start: builds the job, queues it on the job runner |
+| `+0x28` | `0x14028ffe0` -> `0x1402760b0(this, 1)` | busy: runner entry of type 1 still pending or running |
+| `+0x30` | `0x14028fb80` | first result list, or null if the stored result code is an error |
+| `+0x38` | `0x14028fb70` | second result list, checked the same way |
+
+The start calls `0x1402879d0(loginMgr + 0x40, 10)`, which allocates a
+`NetSvrGetAnnounceMessageListJob` (vtable `0x1410d52a8`, RTTI names it inside
+`NetSvrClientInterface::GetAnnounceMessageList(unsigned int, Frpg2Vector<AnnounceMessage>*,
+Frpg2Vector<AnnounceMessage>*)`). The `10` is phase 1's `mov edx,0xa`, the list size asked for.
+The job's send slot (`0x14028f130`) calls `Frpg2ClientImpl` vtable `+0xb0`,
+`requestGetAnnounceMessageList` (`0x140690b60`), which registers packet id **1004**,
+`RequestGetAnnounceMessageList`, with the RPC layer. Its error string reads "failed to send the
+request for the operator's announcement message list". **So "server information" is the
+operator's announcement list.**
+
+### What `0x46` and `0x45` actually are
+
+The boot builder constructs `0x44` at `0x1400f7f1c` as `0x1400ff470(obj, id 0x44, 0x47, 0x45,
+0x46)`, which stores `+0x14 = 0x47`, `+0x18 = 0x45`, `+0x1c = 0x46`. The transition builder
+`0x1400ff580` maps them:
+
+| phase | destination | reached when (`v3`, `0x1400ff710`) |
+| --- | --- | --- |
+| 5 | `+0x14` = `0x47` top menu | announcements were shown and closed |
+| 6 | `+0x1c` = `0x46` | fetch **succeeded**, zero announcements |
+| 7 | `+0x18` = `0x45` | start refused, or either result list null |
+
+Phase 3 zeroes the count at `+0x20`, fetches both lists, and runs `0x1400ffbb0` on each. That
+function returns false only for a null list and otherwise appends every announcement, capped at
+ten, bumping `+0x20`. A null list sets `bl` and goes to phase 7. Two non-null lists and a count
+of `0` goes to phase 6 (`cmp [rdi+0x20],esi; jle` at `0x1400ff88b`).
+
+`0x45` is built by `0x1400fcfd0`, whose vtable is `FeSubStateTitleInformationFailWarn`. **That is
+the failure screen.** `0x46` is a plain message window built at `0x1400f7f3d`, showing message
+`0x33452` from category `0x19` (phase 1's "retrieving" window uses `0x33451`), with `0x47` as its
+next. That its text means "there is no information" is **inferred** from the edge. The FMG was not
+read.
+
+A list is null only when the stored result code has an error bit (`0x14028f3d0`: `(code & 0x1fe)
+== 0` is success). The runner writes that code into `NetSvrLoginManager + 0x40` when the job
+finishes (`0x1402903e0` -> slot `+0x50`, `0x140288c80`, type 1 -> `0x140287a90`). Every failure
+path sets an error bit:
+
+* RPC timeout: `0x1406c4600` marks expired requests through the request's slot `+0x28`
+  (`0x1406c7c20`), which sets error `3`. The job's update (`0x140284eb0`) turns a non-zero request
+  error into `(err | ...) * 2`, and bit 1 is set.
+* Runner abort (`0x140284e00`) stores `0x203`; a job whose start failed stores `0x202`
+  (`0x14028f2b0`, `0x14028f3a0`). Both have bit 1 set.
+* A refused send: `0x1406c4d10` returns 0 unless the connection's state is 3 or the cache-only
+  flag at `+0x55d` is set. That the zero reaches the job's start as a failure, and so the same
+  `0x202` path, is **inferred**; the return plumbing through `0x140690b60` was not traced.
+
+**So `0x44 -> 0x46` on every measured boot means the fetch returned success and an empty list,
+every time.** The request is not failing. There is no failure here to fix upstream.
+
+### Where the second goes
+
+It is not a timeout. The RPC request timeout is `RPCSystemImpl + 0x560`, set to `30` at
+`0x1406c1497`, in seconds, compared against `_time64` (`0x1406bcf60`). That is 30 s at a
+one-second grain, and an expiry would land on `0x45`, not `0x46`. The RPC thread
+(`0x1406c4b40`) waits `1000` between ticks while requests are outstanding and `100000` when idle
+(microseconds, **inferred** from `0x1408782c0` taking the same unit), and registering a request
+signals its wait (`0x1406c42e0`), so it does not add a fixed second either.
+
+What is left is the round trip: the login session sends packet 1004, the server answers, and the
+job completes. **Inferred**: the ~982 ms is server-side latency plus transport, and the tight
+spread comes from the server, not from a client constant. Nothing in the client code read here
+holds a one-second value on this path. A runtime timestamp on the request send and on the
+response callback (`0x1406aefa0`) would split client from server time. That is a measurement for
+later, not a prerequisite for the conclusion below.
+
+### What a mod can do about it
+
+Nothing that keeps the screen correct. The client does not choose to wait: it has no result
+until the server sends one, and it cannot know in advance whether the list will be empty. The
+acceptance condition, that the information screen still shows when there are announcements, rules
+out every shortcut:
+
+* A shorter timeout makes nothing faster. The timeout never fires; the response arrives first.
+* Forcing the busy check false (`0x14028ffe0`) makes phase 3 read lists that are still empty and
+  land on `0x46` even when announcements are on the way. That fails the acceptance condition and
+  leaves a live job writing into `NetSvrLoginManager` after the substate has gone.
+* Prefetching earlier gains nothing on this boot chain. `0x44` is entered straight from `0x39`'s
+  success, and nothing between them could overlap with the fetch.
+
+The only way to recover the time is to skip the announcements. That is a behaviour change, not a
+fix, and the offline path already does it for an offline profile. If it is ever wanted as an
+opt-in, the smallest version fits in `ds2-dialog-skip`'s existing `enter` detour on
+`0x1400ff570` (the `title-information` floor, already hooked and logging `was=0`). After the
+original runs, write `5u32` to `this + 0x10`. Phase 5's transition (`+0x14` = `0x47`) then fires
+without phase 1 ever starting the job or opening the "retrieving" window, and `v3` does nothing
+in phase 5 (the `dec` chain at `0x1400ff761` falls through to the return). The exit function
+(`0x1400ff6b0`) only acts on phases 2 and 4, so there is no window to close. **Not recommended as
+a default**: it hides any announcement the operator publishes.
+
+On the default Seamless run the question may not arise at all. The latest run in the offline notes
+has `0x39` refused and going to `0x2a`, which never reaches `0x44`. Whether any current default
+run reaches `0x44` is a runtime question; this reading does not settle it.
 
 ## The engine block is sleeping, and it is measured rather than inferred
 
