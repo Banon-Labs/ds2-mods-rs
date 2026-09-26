@@ -338,16 +338,21 @@ pub fn save_to_file() {
 /// Through [`open_redirect::bypass`]: a swap's window may be armed on the player's own container,
 /// and a destination in that folder must not be diverted onto the staged copy the swap is playing.
 fn seed(source: &Path, staging: &Path) -> Result<(), String> {
+    // Read and write rather than `std::fs::copy`. On Windows that is `CopyFileExW`, and the byte
+    // count it returns comes from a progress callback Wine does not call: measured 2026-09-26, a
+    // seed of the 8251680-byte container returned 0 and this refused a copy that had worked. The
+    // size is checked on disk instead, which is the thing the game will read.
     open_redirect::bypass(|| {
-        let copied = std::fs::copy(source, staging).map_err(|error| error.to_string())?;
-        let expected = std::fs::metadata(source)
+        let bytes = std::fs::read(source).map_err(|error| error.to_string())?;
+        std::fs::write(staging, &bytes).map_err(|error| error.to_string())?;
+        let written = std::fs::metadata(staging)
             .map_err(|error| error.to_string())?
             .len();
-        if copied == expected {
+        if written == bytes.len() as u64 {
             Ok(())
         } else {
             let _ = std::fs::remove_file(staging);
-            Err(format!("copied {copied} of {expected} bytes"))
+            Err(format!("wrote {written} of {} bytes", bytes.len()))
         }
     })
 }
