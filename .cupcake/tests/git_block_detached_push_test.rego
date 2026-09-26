@@ -28,6 +28,10 @@ test_deny_setsid_nohup_push if {
 	denied("setsid nohup git push --force-with-lease origin pr435-rebase:refs/heads/feature > log 2>&1 < /dev/null &")
 }
 
+test_deny_nohup_push_of_git_spelled_by_path if {
+	denied("nohup /usr/bin/git push origin feature/x &")
+}
+
 test_deny_nohup_push if {
 	denied("nohup git push origin feature/x &")
 }

@@ -191,7 +191,11 @@ pub(crate) unsafe fn register_effect(system: usize, id: u32, ffx: Vec<u8>) -> Re
         let parsed = unsafe { parse(existing, bytes.as_ptr(), bytes.len(), flag) };
         // SAFETY: the engine's own invalidate for this system, on the game thread.
         unsafe { invalidate(system, id) };
-        return if parsed == 1 { Ok(()) } else { Err(format!("re-parse of {id} returned {parsed}")) };
+        return if parsed == 1 {
+            Ok(())
+        } else {
+            Err(format!("re-parse of {id} returned {parsed}"))
+        };
     }
 
     // SAFETY: as above -- prototypes recorded in `ds2_rva`, none Arxan-redirected.
@@ -200,7 +204,8 @@ pub(crate) unsafe fn register_effect(system: usize, id: u32, ffx: Vec<u8>) -> Re
             entry::<HeapAlloc>(ds2_rva::KATANA_HEAP_ALLOC).ok_or("no game image")?,
             entry::<EffectDataCtor>(ds2_rva::SFX_EFFECT_DATA_CTOR).ok_or("no game image")?,
             entry::<RefAdd>(ds2_rva::SFX_REF_ADD).ok_or("no game image")?,
-            entry::<EffectResourceCtor>(ds2_rva::SFX_EFFECT_RESOURCE_CTOR).ok_or("no game image")?,
+            entry::<EffectResourceCtor>(ds2_rva::SFX_EFFECT_RESOURCE_CTOR)
+                .ok_or("no game image")?,
             entry::<ResourceStart>(ds2_rva::RESOURCE_OBJECT_START).ok_or("no game image")?,
         )
     };
@@ -217,10 +222,16 @@ pub(crate) unsafe fn register_effect(system: usize, id: u32, ffx: Vec<u8>) -> Re
     // SAFETY: `data` is constructed; `bytes` lives for the process.
     let parsed = unsafe { parse(data, bytes.as_ptr(), bytes.len(), flag) };
     if parsed != 1 {
-        return Err(format!("the engine refused the effect bytes for {id} (parse returned {parsed})"));
+        return Err(format!(
+            "the engine refused the effect bytes for {id} (parse returned {parsed})"
+        ));
     }
-    let name: &'static [u16] =
-        Vec::leak(format!("f{id:07}.ffx").encode_utf16().chain([0]).collect::<Vec<u16>>());
+    let name: &'static [u16] = Vec::leak(
+        format!("f{id:07}.ffx")
+            .encode_utf16()
+            .chain([0])
+            .collect::<Vec<u16>>(),
+    );
     // SAFETY: as for `data`.
     let resource = unsafe { alloc(ds2_rva::SFX_EFFECT_RESOURCE_BYTES, 8, allocator) };
     if resource == 0 {
@@ -242,7 +253,9 @@ pub(crate) unsafe fn register_effect(system: usize, id: u32, ffx: Vec<u8>) -> Re
     if unsafe { lookup(manager, id) } == data {
         Ok(())
     } else {
-        Err(format!("{id} was constructed but the resource manager does not resolve it"))
+        Err(format!(
+            "{id} was constructed but the resource manager does not resolve it"
+        ))
     }
 }
 

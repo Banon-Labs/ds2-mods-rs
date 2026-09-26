@@ -42,6 +42,11 @@ test_deny_git_commit_on_main_object_signal if {
 	"DS2-MODS-BLOCK-MAIN-COMMIT" in rule_ids(denials)
 }
 
+test_deny_git_spelled_by_path_commit_on_main if {
+	denials := guard.deny with input as bash_event("/usr/bin/git commit -m bad", "main\n")
+	"DS2-MODS-BLOCK-MAIN-COMMIT" in rule_ids(denials)
+}
+
 test_deny_git_c_commit_on_main if {
 	denials := guard.deny with input as bash_event("git -C \"$repo\" commit -m bad", "main\n")
 	"DS2-MODS-BLOCK-MAIN-COMMIT" in rule_ids(denials)

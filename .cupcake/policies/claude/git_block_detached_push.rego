@@ -62,7 +62,7 @@ executed_texts := commands.executed_texts(input.tool_input.command)
 # git push` is not a push to it -- which is correct there (the detaching words change nothing about
 # which ref is sent) and wrong here, since those words are the entire subject.
 git_push_command_pattern := `(^|[;&|(
-])\s*((setsid|nohup)[ \t]+)*(command\s+)?git([ \t]+((-c|--git-dir|--work-tree|--namespace|--config-env)(=|[ \t]+)("[^"\n]*"|'[^'\n]*'|[^ \t;&|()\n]+)|--(bare|no-pager|paginate|literal-pathspecs|no-replace-objects|exec-path)(=("[^"\n]*"|'[^'\n]*'|[^ \t;&|()\n]+))?))*[ \t]+push([ \t;&|)\n]|$)`
+])\s*((setsid|nohup)[ \t]+)*(command\s+)?(?:[^\s;&|()"']*/)?git([ \t]+((-c|--git-dir|--work-tree|--namespace|--config-env)(=|[ \t]+)("[^"\n]*"|'[^'\n]*'|[^ \t;&|()\n]+)|--(bare|no-pager|paginate|literal-pathspecs|no-replace-objects|exec-path)(=("[^"\n]*"|'[^'\n]*'|[^ \t;&|()\n]+))?))*[ \t]+push([ \t;&|)\n]|$)`
 
 is_git_push(cmd) if {
 	regex.match(git_push_command_pattern, cmd)
