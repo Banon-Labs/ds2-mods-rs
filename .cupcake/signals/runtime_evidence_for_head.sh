@@ -152,7 +152,14 @@ while IFS= read -r ref; do
     [ -n "$ref" ] || continue
     # An unknown ref makes the push fail on its own; measure HEAD rather than nothing.
     git rev-parse --verify --quiet "$ref^{commit}" >/dev/null 2>&1 || ref="HEAD"
-    t="$(git log -1 --format=%ct "$ref" 2>/dev/null)" || t=""
+    # The newest commit on the branch that touches game code, not the ref's own tip: a scripts-only
+    # commit on top of a run does not change what the run loaded, and flooring on the tip refused
+    # that push until a second, pointless launch (2026-09-26). No such commit -> the tip, as before.
+    t=""
+    if [ -n "$upstream" ]; then
+        t="$(git log -1 --format=%ct "origin/main..$ref" -- crates scripts/ds2-run.py 2>/dev/null)" || t=""
+    fi
+    [ -n "$t" ] || t="$(git log -1 --format=%ct "$ref" 2>/dev/null)" || t=""
     [ -n "$t" ] || continue
     if [ -z "$head_time" ] || [ "$t" -gt "$head_time" ]; then head_time="$t"; fi
     if [ -n "$upstream" ]; then
