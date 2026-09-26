@@ -127,6 +127,20 @@ pub fn arm(asked: &Path, answer: &Path) -> bool {
     true
 }
 
+/// The armed window as `(asked, answer)`, or `None` when nothing is armed.
+///
+/// There is one window, so a second user arming it replaces the first. A caller that arms it for
+/// a moment on top of someone else's -- `Save Game to File` inside a character swap -- reads this
+/// first and puts it back when done. Not doing so is how an export once pointed the swap's window
+/// away from the staged copy and then closed it, and every later save in that session went to the
+/// player's own container.
+pub fn window() -> Option<(PathBuf, PathBuf)> {
+    let window = WINDOW.lock().ok()?;
+    window
+        .as_ref()
+        .map(|window| (window.asked.clone(), window.answer.clone()))
+}
+
 /// Stop diverting. Idempotent; returns how many reads were diverted while armed.
 pub fn disarm() -> usize {
     if let Ok(mut window) = WINDOW.lock() {
