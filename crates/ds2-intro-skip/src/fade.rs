@@ -15,6 +15,7 @@
 use core::ffi::c_void;
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
+use darksouls2::game::game_manager::GameManagerImp;
 use ds2_hook::{MH_EnableHook, MH_STATUS, MhHook};
 
 use crate::LOG_PREFIX;
@@ -58,38 +59,26 @@ unsafe fn finish_fade_if_waiting(this: *mut u8) {
     if state != ds2_rva::FE_OPERATOR_TITLE_STATE_FADE_WAIT {
         return;
     }
-    let Ok(base) = ds2_game_base::mem::game_module_base() else {
+    // Guarded reads of the manager global and its fade pointer; `None` on a null or unmapped hop.
+    let Some(manager) = GameManagerImp::instance() else {
         return;
     };
-    // SAFETY: guarded reads of the manager global and its fade pointer; `None` on a null or
-    // unmapped hop.
-    let fade = unsafe {
-        ds2_game_base::mem::safe_read_usize(base + ds2_rva::GAME_MANAGER_IMP as usize)
-            .filter(|&manager| manager != 0)
-            .and_then(|manager| {
-                ds2_game_base::mem::safe_read_usize(
-                    manager + ds2_rva::GAME_MANAGER_SCREEN_FADE_OFFSET,
-                )
-            })
-            .filter(|&fade| fade != 0)
-    };
-    let Some(fade) = fade else {
+    let Some(fade) = GameManagerImp::screen_fade(manager) else {
         return;
     };
-    let fade = fade as *mut f32;
-    // SAFETY: the fade object's three floats, at the offsets `0x140b23fe0` and `0x14039ab20` use;
-    // the game reads and writes them on this same thread every frame.
+    let fade = fade.as_ptr();
+    // SAFETY: the fields of the live screen fade, which the game reads and writes on this same
+    // thread every frame. Each access is a place read or write through the raw pointer; no
+    // reference to the game's object is formed.
     unsafe {
-        let remaining = fade.byte_add(ds2_rva::SCREEN_FADE_REMAINING_OFFSET).read();
+        let remaining = (*fade).remaining;
         if remaining <= 0.0 {
             return;
         }
-        let current = fade.byte_add(ds2_rva::SCREEN_FADE_CURRENT_OFFSET).read();
-        let target = fade.byte_add(ds2_rva::SCREEN_FADE_TARGET_OFFSET).read();
-        fade.byte_add(ds2_rva::SCREEN_FADE_REMAINING_OFFSET)
-            .write(0.0);
-        fade.byte_add(ds2_rva::SCREEN_FADE_CURRENT_OFFSET)
-            .write(target);
+        let current = (*fade).current;
+        let target = (*fade).target;
+        (*fade).remaining = 0.0;
+        (*fade).current = target;
         let n = SKIPPED.fetch_add(1, Ordering::Relaxed) + 1;
         log(format_args!(
             "{LOG_PREFIX} skipped screen=title-fade remaining={remaining:.3}s current={current} \

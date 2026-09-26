@@ -1,0 +1,24 @@
+[package]
+name = "darksouls2"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "darksouls2"
+
+# `ds2-rva` holds the addresses; this crate holds the layouts at those addresses. It depends on
+# the table and does not re-export it, so a crate that reaches the game through these types is
+# not handed a path to a raw address by doing so.
+[dependencies]
+ds2-rva.workspace = true
+
+# Windows only: the fault-safe readers behind the accessors call kernel32, and the layouts and
+# their offset tests need neither, so the crate still builds and tests on the host.
+[target.'cfg(windows)'.dependencies]
+ds2-game-base.workspace = true
+
+[lints]
+workspace = true

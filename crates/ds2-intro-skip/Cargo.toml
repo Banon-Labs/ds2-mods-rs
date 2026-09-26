@@ -7,6 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+darksouls2.workspace = true
 ds2-game-base.workspace = true
 ds2-hook.workspace = true
 ds2-rva.workspace = true
