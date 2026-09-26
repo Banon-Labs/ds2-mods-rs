@@ -305,6 +305,7 @@ pub fn mark_phase(phase: Phase) {
 }
 
 #[cfg(not(windows))]
+/// Host stub: there is no process to stamp a phase into, so this does nothing.
 pub fn mark_phase(_phase: Phase) {}
 
 #[cfg(windows)]
@@ -874,9 +875,11 @@ pub fn note_process_detach() {
 }
 
 #[cfg(not(windows))]
+/// Host stub: there is no DLL to detach, so this does nothing.
 pub fn note_process_detach() {}
 
 #[cfg(not(windows))]
+/// Host stub: keeps the configuration so host tests can read it back, and installs no handler.
 pub fn install(config: CrashLogConfig, _self_module_base: usize) {
     let _ = CONFIG.set(config);
 }
