@@ -232,7 +232,7 @@ Measured extents for the classes DS3 also binds:
 
 | class | vftable VA | slots | DS3's trait | verdict |
 | --- | --- | ---: | ---: | --- |
-| `DLKR::DLAllocator` | `0x1410c0688` | 27 | `DLAllocatorVmt`, 14 | **shape differs** |
+| `DLKR::DLAllocator` | `0x1410c0688` | 26 | `DLAllocatorVmt`, 14 | **shape differs** |
 | `DLKR::DLBackAllocator` | `0x1410c0768` | 26 | -- | -- |
 | `DLIO::DLMemoryInputStream` | `0x14113c7c8` | >=16 | `DLMemoryInputStreamVmt`, 7 | **shape differs** |
 | `DLIO::DLMemoryOutputStream` | `0x14113c9d8` | >=16 | `DLMemoryOutputStreamVmt`, 4 | **shape differs** |
@@ -240,8 +240,9 @@ Measured extents for the classes DS3 also binds:
 | `CharacterCtrl` | `0x1410df218` | 79 | (no DS3 counterpart) | -- |
 
 **This is the central technical finding of the survey.** The class *names* transfer from DS3.
-The *layouts* do not. `DLKR::DLAllocator` has 27 virtual slots in DS2 and 14 in DS3 -- nearly
-twice as many. Copying DS3's `DLAllocatorVmt` into a DS2 crate would compile, would look right,
+The *layouts* do not. `DLKR::DLAllocator` has 26 virtual slots in DS2 and 14 in DS3 -- nearly
+twice as many. (This table first said 27; the 27th qword is zero padding before the next RTTI
+locator, see `docs/DS2-ALLOCATOR.md`.) Copying DS3's `DLAllocatorVmt` into a DS2 crate would compile, would look right,
 and would call the wrong function on every slot past the first few. It is exactly the failure
 `docs/PORTING.md` describes for `vtable_in_game_image`: not a compile error, not a crash, a
 bound that is quietly wrong.
@@ -271,6 +272,12 @@ concrete implementation walked: `DLKRD::HeapAllocator<...>::vftable` at `0x1410d
 
 I am recording this at the level of confidence it actually has, because a bindings crate that
 guesses this offset guesses the foundation every other binding sits on.
+
+**Since settled.** `docs/DS2-ALLOCATOR.md` walks both concrete heap allocators and records the
+slot table: `+0x50` is slot 10, `allocate_aligned(size, align)`, and the argument of
+`heapAllocator` is traced to a `DLKRD::HeapAllocator<DLKR::DLSystemHeapImpl>` at two call sites.
+The forwarder shift above is deliberate rather than a layout mismatch: `DLBackAllocator` maps its
+allocate/realloc/free slots 9 to 13 onto the inner allocator's back-end slots 15 to 19.
 
 ## 5. Arxan: 311 redirected entry points, and `applySpEffect` is one of them
 
