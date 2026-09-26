@@ -17,10 +17,10 @@ name: release
 # `/releases/latest/download/` resolves the newest NON-prerelease release. That single fact is why
 # nothing below passes `--prerelease`, and flipping it silently breaks both URLs above.
 #
-# THIS IS NOT THE GATE, and must never be mistaken for one. `scripts/check.sh` -- rustfmt, clippy
-# against the Windows target, the commit-message check, the docs lint -- still runs only when a
-# human runs it (`ds2-mods-rs-e60`). A release built here is a release built from a commit that
-# nothing checked.
+# THIS IS NOT THE GATE, and must never be mistaken for one. The gate is `scripts/check.sh`, which
+# `.github/workflows/gate.yml` runs on every pull request and every push to main. This workflow does
+# not wait for it: a push to main publishes whether or not that commit's gate run is green, so a
+# release is only as checked as the gate run on the same commit says it is.
 
 on:
   push:
