@@ -2,7 +2,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use crate::{LOG_PREFIX, flag, winsock};
+use crate::{LOG_PREFIX, boot, flag, winsock};
 
 /// A log sink, installed by the loader so this crate writes into the same file as everything else.
 /// Stored as a `usize` because a `fn` pointer is not an `Atomic` type.
@@ -57,13 +57,16 @@ pub struct Outcome {
     /// The online flag as read straight out of the live object, bypassing the getter -- or `None`
     /// when `GameManagerImp` did not exist yet, which is the usual case at install time.
     pub flag_at_install: Option<u8>,
+    /// `UserPolicy`'s offline branch is patched, so the boot skips `GameServerLogin`. Not a
+    /// [`Request`] field: it is applied whenever this crate installs at all.
+    pub login_skipped: bool,
 }
 
 impl Outcome {
     /// Whether anything at all was installed. A caller reporting to a launcher wants one boolean
     /// and the detail underneath it.
     pub fn any(&self) -> bool {
-        self.setter_pinned || self.getter_forced || self.sockets_patched > 0
+        self.setter_pinned || self.getter_forced || self.sockets_patched > 0 || self.login_skipped
     }
 }
 
@@ -95,6 +98,10 @@ pub unsafe fn install(request: Request) -> Outcome {
     // one recorded there, and `flag::apply` reads the result back before reporting success.
     let flags = unsafe { flag::apply(base, request.pin_flag, request.report_offline) };
 
+    // SAFETY: `base` is the live module base, and at this position the title flow does not exist
+    // yet, so nothing is executing the branch while its two bytes are written.
+    let login_skipped = unsafe { boot::skip_login(base) };
+
     let sockets = if request.block_sockets {
         // SAFETY: same position, and this writes `.idata` pointers rather than code.
         unsafe { winsock::install(base) }
@@ -120,13 +127,15 @@ pub unsafe fn install(request: Request) -> Outcome {
             0
         },
         flag_at_install,
+        login_skipped,
     };
 
     log(format_args!(
-        "{LOG_PREFIX} install pin_flag={} report_offline={} sockets={}/{} flag={} \
+        "{LOG_PREFIX} install pin_flag={} report_offline={} skip_login={} sockets={}/{} flag={} \
          found_ws2_32={}",
         outcome.setter_pinned,
         outcome.getter_forced,
+        outcome.login_skipped,
         outcome.sockets_patched,
         outcome.sockets_attempted,
         match outcome.flag_at_install {
