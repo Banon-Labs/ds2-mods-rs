@@ -26,8 +26,10 @@ import rego.v1
 # neither fix announces itself when it is working.
 #
 # The cost of the explicit form is one line per decision-exporting policy, and forgetting that line
-# means the policy is inert. scripts/check-cupcake-wasm-builtins.py exists to catch exactly that:
-# it fails when a policy exports a verb this file does not route. Add the line with the policy.
+# means the policy is inert. scripts/check-cupcake-routed-verbs.py, run by scripts/check.sh, is
+# what catches that: it fails when a policy exports a verb this file does not route. `opa test`
+# and scripts/check-cupcake-wasm-builtins.py both pass on an unrouted policy. Add the line with
+# the policy.
 
 evaluate := {
 	"halts": [decision | some decision in all_halts],
@@ -96,6 +98,8 @@ all_denials contains decision if { some decision in data.cupcake.policies.builti
 
 all_denials contains decision if { some decision in data.cupcake.policies.claude.bash_no_python_file_write.deny }
 
+all_denials contains decision if { some decision in data.cupcake.policies.claude.bd_notes_append_only.deny }
+
 all_denials contains decision if { some decision in data.cupcake.policies.claude.block_askuserquestion.deny }
 
 all_denials contains decision if { some decision in data.cupcake.policies.claude.block_askuserquestion_reminder.deny }
@@ -110,9 +114,13 @@ all_denials contains decision if { some decision in data.cupcake.policies.claude
 
 all_denials contains decision if { some decision in data.cupcake.policies.claude.docs_no_shouting.deny }
 
+all_denials contains decision if { some decision in data.cupcake.policies.claude.script_comments_no_shouting.deny }
+
 all_denials contains decision if { some decision in data.cupcake.policies.claude.ds2_launch_guard.deny }
 
 all_denials contains decision if { some decision in data.cupcake.policies.claude.pr_requires_run_stamp.deny }
+
+all_denials contains decision if { some decision in data.cupcake.policies.claude.no_delete_branch_under_stack.deny }
 
 all_denials contains decision if { some decision in data.cupcake.policies.claude.edit_no_tmp_scripts_guard.deny }
 

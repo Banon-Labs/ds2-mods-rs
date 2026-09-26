@@ -21,7 +21,7 @@ pub fn set_logger(logger: LogFn) {
     LOGGER.store(logger as usize, Ordering::Release);
 }
 
-fn log(args: std::fmt::Arguments<'_>) {
+pub(crate) fn log(args: std::fmt::Arguments<'_>) {
     let raw = LOGGER.load(Ordering::Acquire);
     if raw != 0 {
         // SAFETY: `raw` is only ever a `LogFn` stored by `set_logger` above.
@@ -90,11 +90,16 @@ pub fn mark(label: &'static str) {
     let at_us = now_us();
     if FLUSHED.load(Ordering::Acquire) != 0 {
         let (calls, ms) = sleep_totals();
+        let blocked_us: u64 = BOOT_BLOCKED
+            .iter()
+            .map(|(_, spent)| spent.load(Ordering::Relaxed))
+            .sum();
         log(format_args!(
             "{LOG_PREFIX} milestone label={label} t={:.3}ms sleep-calls={calls} sleep-ms={ms} \
-             frames={}",
+             frames={} blocked-ms={:.1}",
             at_us as f64 / 1000.0,
-            FRAMES.load(Ordering::Relaxed)
+            FRAMES.load(Ordering::Relaxed),
+            blocked_us as f64 / 1000.0
         ));
         return;
     }
@@ -153,6 +158,23 @@ fn flush_milestones() {
 
 unsafe extern "system" {
     fn VirtualProtect(address: *mut c_void, size: usize, new: u32, old: *mut u32) -> i32;
+    fn GetCurrentThreadId() -> u32;
+}
+
+/// The thread [`install`] ran on: the entry-point thread, which is the one that goes on to run
+/// the title flow. Zero until `install` runs.
+///
+/// **This is what makes the sleep table mean anything for the boot.** The process requests over
+/// ten seconds of sleep inside a boot of under five, which is only possible across threads, and a
+/// worker sleeping between polls costs the boot nothing unless the boot is waiting on it. Only
+/// sleeps on this thread are on the critical path, so each caller's row carries them separately.
+static BOOT_THREAD: AtomicU32 = AtomicU32::new(0);
+
+/// Whether the calling thread is [`BOOT_THREAD`]. False before `install` has recorded it.
+fn on_boot_thread() -> bool {
+    let boot = BOOT_THREAD.load(Ordering::Relaxed);
+    // SAFETY: `GetCurrentThreadId` takes nothing and cannot fail.
+    boot != 0 && boot == unsafe { GetCurrentThreadId() }
 }
 const PAGE_READWRITE: u32 = 0x04;
 
@@ -171,8 +193,43 @@ type SleepThunkFn = unsafe extern "system" fn(u32);
 /// attribution was tried first and was wrong twice -- the `Sleep(10)` sites never fire, and neither
 /// frame-limiter candidate is called at all -- which is what makes reading the return address worth
 /// the naked thunk.
-static SLEEP_CALLERS: [(AtomicU64, AtomicU64, AtomicU64); SLEEP_CALLER_SLOTS] =
-    [const { (AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)) }; SLEEP_CALLER_SLOTS];
+static SLEEP_CALLERS: [CallerRow; SLEEP_CALLER_SLOTS] =
+    [const { CallerRow::empty() }; SLEEP_CALLER_SLOTS];
+
+/// One caller's row: its return address, then count and requested milliseconds over every thread,
+/// then the same two for calls made on [`BOOT_THREAD`] alone.
+struct CallerRow {
+    caller: AtomicU64,
+    count: AtomicU64,
+    ms: AtomicU64,
+    boot_count: AtomicU64,
+    boot_ms: AtomicU64,
+}
+
+impl CallerRow {
+    /// A function rather than an associated `const`: a named constant holding atomics would be
+    /// copied fresh at every use, which is what `clippy::declare_interior_mutable_const` refuses.
+    const fn empty() -> Self {
+        Self {
+            caller: AtomicU64::new(0),
+            count: AtomicU64::new(0),
+            ms: AtomicU64::new(0),
+            boot_count: AtomicU64::new(0),
+            boot_ms: AtomicU64::new(0),
+        }
+    }
+
+    fn add(&self, milliseconds: u32, boot_thread: bool) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.ms
+            .fetch_add(u64::from(milliseconds), Ordering::Relaxed);
+        if boot_thread {
+            self.boot_count.fetch_add(1, Ordering::Relaxed);
+            self.boot_ms
+                .fetch_add(u64::from(milliseconds), Ordering::Relaxed);
+        }
+    }
+}
 /// Thirteen call sites in the image, so sixteen slots covers every one with room to notice if a
 /// fourteenth appears from a DLL this counter was not expecting.
 const SLEEP_CALLER_SLOTS: usize = 16;
@@ -184,22 +241,20 @@ static SLEEP_CALLERS_LOST: AtomicU64 = AtomicU64::new(0);
 /// different callers. 2522 yields of `Sleep(0)` cost almost nothing between them -- they mark a
 /// fixed-size workload rather than a cost -- while a few hundred calls asking for tens of
 /// milliseconds each are where the seventeen seconds of requested sleep actually live.
-fn record_caller(caller: u64, milliseconds: u32) {
+fn record_caller(caller: u64, milliseconds: u32, boot_thread: bool) {
     for slot in &SLEEP_CALLERS {
-        let seen = slot.0.load(Ordering::Relaxed);
+        let seen = slot.caller.load(Ordering::Relaxed);
         if seen == caller {
-            slot.1.fetch_add(1, Ordering::Relaxed);
-            slot.2.fetch_add(u64::from(milliseconds), Ordering::Relaxed);
+            slot.add(milliseconds, boot_thread);
             return;
         }
         if seen == 0
             && slot
-                .0
+                .caller
                 .compare_exchange(0, caller, Ordering::Relaxed, Ordering::Relaxed)
                 .is_ok()
         {
-            slot.1.fetch_add(1, Ordering::Relaxed);
-            slot.2.fetch_add(u64::from(milliseconds), Ordering::Relaxed);
+            slot.add(milliseconds, boot_thread);
             return;
         }
     }
@@ -232,7 +287,7 @@ fn sleep_bucket(milliseconds: u32) -> usize {
 /// duration is passed through untouched, because the question is where the boot's time goes and an
 /// instrument that shortened the sleeps would be answering a different one.
 unsafe extern "system" fn detour_sleep(milliseconds: u32, caller: u64) {
-    record_caller(caller, milliseconds);
+    record_caller(caller, milliseconds, on_boot_thread());
     SLEEP_CALLS.fetch_add(1, Ordering::Relaxed);
     SLEEP_REQUESTED_MS.fetch_add(u64::from(milliseconds), Ordering::Relaxed);
     SLEEP_BUCKETS[sleep_bucket(milliseconds)].fetch_add(1, Ordering::Relaxed);
@@ -243,7 +298,7 @@ unsafe extern "system" fn detour_sleep(milliseconds: u32, caller: u64) {
         let original: SleepFn = unsafe { std::mem::transmute::<usize, SleepFn>(original) };
         // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
         // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
-        unsafe { original(milliseconds) };
+        timed(BLOCKED_SLEEP, || unsafe { original(milliseconds) });
     }
 }
 
@@ -320,6 +375,204 @@ unsafe fn hook_sleep_import(base: usize) -> bool {
         ORIGINAL_SLEEP.load(Ordering::Acquire)
     ));
     true
+}
+
+// ============================================================================================
+// BOOT-THREAD BLOCKING. The boot thread requests only about a third of a second of `Sleep` in the
+// three seconds between `DirectInput8Create` returning and the first substate, so the rest of
+// that gap is either work or a wait on something else. These front the three wait imports the
+// image has, plus `Sleep` itself, and add up how long the boot thread actually spent inside each:
+// wall time, not requested time, and only on the boot thread, because a worker waiting costs the
+// boot nothing.
+// ============================================================================================
+
+type WaitSingleFn = unsafe extern "system" fn(*mut c_void, u32) -> u32;
+type WaitMultipleFn = unsafe extern "system" fn(u32, *const *mut c_void, i32, u32) -> u32;
+type MsgWaitFn = unsafe extern "system" fn(u32, *const *mut c_void, i32, u32, u32) -> u32;
+
+static ORIGINAL_WAIT_SINGLE: AtomicUsize = AtomicUsize::new(0);
+static ORIGINAL_WAIT_MULTIPLE: AtomicUsize = AtomicUsize::new(0);
+static ORIGINAL_MSG_WAIT: AtomicUsize = AtomicUsize::new(0);
+
+/// What a wait returns when it could not wait at all. Returned only if a detour runs before its
+/// original was published, which the publish-before-write order below rules out.
+const WAIT_FAILED: u32 = 0xffff_ffff;
+
+/// Which call the boot thread was blocked in, as an index into [`BOOT_BLOCKED`].
+const BLOCKED_SLEEP: usize = 0;
+const BLOCKED_WAIT_SINGLE: usize = 1;
+const BLOCKED_WAIT_MULTIPLE: usize = 2;
+const BLOCKED_MSG_WAIT: usize = 3;
+const BLOCKED_NAMES: [&str; 4] = ["sleep", "wait-single", "wait-multiple", "msg-wait"];
+
+/// Per call kind: calls on the boot thread, and microseconds spent inside them.
+static BOOT_BLOCKED: [(AtomicU64, AtomicU64); 4] =
+    [const { (AtomicU64::new(0), AtomicU64::new(0)) }; 4];
+
+/// Run `call`, and if this is the boot thread, charge its wall time to `kind`.
+fn timed<T>(kind: usize, call: impl FnOnce() -> T) -> T {
+    if !on_boot_thread() {
+        return call();
+    }
+    let start = now_us();
+    let result = call();
+    let spent = now_us().saturating_sub(start);
+    BOOT_BLOCKED[kind].0.fetch_add(1, Ordering::Relaxed);
+    BOOT_BLOCKED[kind].1.fetch_add(spent, Ordering::Relaxed);
+    result
+}
+
+unsafe extern "system" fn detour_wait_single(handle: *mut c_void, milliseconds: u32) -> u32 {
+    let original = ORIGINAL_WAIT_SINGLE.load(Ordering::Acquire);
+    if original == 0 {
+        return WAIT_FAILED;
+    }
+    // SAFETY: read out of the import slot before it was overwritten, so it is whatever the Windows
+    // loader resolved `KERNEL32!WaitForSingleObject` to; the arguments are passed through as given.
+    let original: WaitSingleFn = unsafe { std::mem::transmute::<usize, WaitSingleFn>(original) };
+    timed(BLOCKED_WAIT_SINGLE, || {
+        // SAFETY: the original import, called with exactly the arguments the game passed.
+        unsafe { original(handle, milliseconds) }
+    })
+}
+
+unsafe extern "system" fn detour_wait_multiple(
+    count: u32,
+    handles: *const *mut c_void,
+    wait_all: i32,
+    milliseconds: u32,
+) -> u32 {
+    let original = ORIGINAL_WAIT_MULTIPLE.load(Ordering::Acquire);
+    if original == 0 {
+        return WAIT_FAILED;
+    }
+    // SAFETY: as in `detour_wait_single`, for `KERNEL32!WaitForMultipleObjects`.
+    let original: WaitMultipleFn =
+        unsafe { std::mem::transmute::<usize, WaitMultipleFn>(original) };
+    timed(BLOCKED_WAIT_MULTIPLE, || {
+        // SAFETY: the original import, called with exactly the arguments the game passed.
+        unsafe { original(count, handles, wait_all, milliseconds) }
+    })
+}
+
+unsafe extern "system" fn detour_msg_wait(
+    count: u32,
+    handles: *const *mut c_void,
+    wait_all: i32,
+    milliseconds: u32,
+    wake_mask: u32,
+) -> u32 {
+    let original = ORIGINAL_MSG_WAIT.load(Ordering::Acquire);
+    if original == 0 {
+        return WAIT_FAILED;
+    }
+    // SAFETY: as in `detour_wait_single`, for `USER32!MsgWaitForMultipleObjects`.
+    let original: MsgWaitFn = unsafe { std::mem::transmute::<usize, MsgWaitFn>(original) };
+    timed(BLOCKED_MSG_WAIT, || {
+        // SAFETY: the original import, called with exactly the arguments the game passed.
+        unsafe { original(count, handles, wait_all, milliseconds, wake_mask) }
+    })
+}
+
+/// Point one import slot at `replacement`, publishing the original first. False, logged, on
+/// failure.
+///
+/// # Safety
+///
+/// `base` must be the live game module base and `rva` a pointer-sized import slot in its `.idata`.
+unsafe fn patch_import(
+    base: usize,
+    rva: u32,
+    replacement: usize,
+    original: &AtomicUsize,
+    name: &str,
+) -> bool {
+    let slot = (base + rva as usize) as *mut usize;
+    let mut old_protect = 0u32;
+    // SAFETY: one pointer-sized slot inside the image's own `.idata`.
+    let ok = unsafe {
+        VirtualProtect(
+            slot.cast::<c_void>(),
+            std::mem::size_of::<usize>(),
+            PAGE_READWRITE,
+            &raw mut old_protect,
+        )
+    };
+    if ok == 0 {
+        log(format_args!(
+            "{LOG_PREFIX} import-hook-failed import={name} stage=VirtualProtect slot=0x{:016x}",
+            slot as usize
+        ));
+        return false;
+    }
+    // SAFETY: the slot is now writable and holds the resolved import. The original is published
+    // before the slot changes, so a thread that reaches the detour at once finds it.
+    unsafe {
+        original.store(slot.read(), Ordering::Release);
+        slot.write(replacement);
+        let mut restored = 0u32;
+        VirtualProtect(
+            slot.cast::<c_void>(),
+            std::mem::size_of::<usize>(),
+            old_protect,
+            &raw mut restored,
+        );
+    }
+    log(format_args!(
+        "{LOG_PREFIX} hooked import={name} slot=0x{:016x} original=0x{:016x}",
+        slot as usize,
+        original.load(Ordering::Acquire)
+    ));
+    true
+}
+
+/// Front the three wait imports.
+///
+/// # Safety
+///
+/// `base` must be the live game module base.
+unsafe fn hook_wait_imports(base: usize) {
+    let single: WaitSingleFn = detour_wait_single;
+    let multiple: WaitMultipleFn = detour_wait_multiple;
+    let msg: MsgWaitFn = detour_msg_wait;
+    // SAFETY: each RVA is the named import slot, read by name from the image and checked live.
+    unsafe {
+        patch_import(
+            base,
+            ds2_rva::WAIT_FOR_SINGLE_OBJECT_IAT_THUNK,
+            single as usize,
+            &ORIGINAL_WAIT_SINGLE,
+            "KERNEL32!WaitForSingleObject",
+        );
+        patch_import(
+            base,
+            ds2_rva::WAIT_FOR_MULTIPLE_OBJECTS_IAT_THUNK,
+            multiple as usize,
+            &ORIGINAL_WAIT_MULTIPLE,
+            "KERNEL32!WaitForMultipleObjects",
+        );
+        patch_import(
+            base,
+            ds2_rva::MSG_WAIT_FOR_MULTIPLE_OBJECTS_IAT_THUNK,
+            msg as usize,
+            &ORIGINAL_MSG_WAIT,
+            "USER32!MsgWaitForMultipleObjects",
+        );
+    }
+}
+
+/// One line with what the boot thread has spent blocked so far, per call kind.
+fn log_boot_blocked(at: &str) {
+    let mut fields = String::new();
+    for (index, name) in BLOCKED_NAMES.iter().enumerate() {
+        let calls = BOOT_BLOCKED[index].0.load(Ordering::Relaxed);
+        let us = BOOT_BLOCKED[index].1.load(Ordering::Relaxed);
+        fields.push_str(&format!(" {name}={calls}/{:.1}ms", us as f64 / 1000.0));
+    }
+    log(format_args!(
+        "{LOG_PREFIX} boot-thread-blocked at={at} t={:.3}ms{fields}",
+        now_us() as f64 / 1000.0
+    ));
 }
 
 // ============================================================================================
@@ -442,11 +695,20 @@ unsafe fn describe_once(flow: *const u8) {
         };
         (list, count)
     };
+    // Whether the flow runs on the thread `install` recorded. The boot-thread sleep columns rest
+    // on that being the same thread; this is where it is checked rather than assumed.
     log(format_args!(
-        "{LOG_PREFIX} flow flow=0x{:016x} list=0x{:016x} registered={count}",
-        flow as usize, list as usize
+        "{LOG_PREFIX} flow flow=0x{:016x} list=0x{:016x} registered={count} \
+         on-boot-thread={}",
+        flow as usize,
+        list as usize,
+        on_boot_thread()
     ));
 }
+
+/// Whether the first substate's entry has reported what the boot thread spent blocked before it.
+static FIRST_ENTER_REPORTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// A substate became resident.
 fn on_enter(id: u32, pending: i32) {
@@ -464,7 +726,12 @@ fn on_enter(id: u32, pending: i32) {
         at_us as f64 / 1000.0,
         FRAMES.load(Ordering::Relaxed)
     ));
+    if !FIRST_ENTER_REPORTED.swap(true, Ordering::Relaxed) {
+        log_boot_blocked("first-substate");
+        crate::sampler::stop();
+    }
     if id == ds2_rva::FE_SUBSTATE_ID_TITLE_TOP_MENU {
+        log_boot_blocked("top-menu");
         let (calls, ms) = sleep_totals();
         let h = sleep_histogram();
         log(format_args!(
@@ -482,17 +749,32 @@ fn on_enter(id: u32, pending: i32) {
         // the deobfuscated image directly.
         let base = ds2_game_base::mem::game_module_base().unwrap_or(0);
         for slot in &SLEEP_CALLERS {
-            let caller = slot.0.load(Ordering::Relaxed);
+            let caller = slot.caller.load(Ordering::Relaxed);
             if caller == 0 {
                 continue;
             }
             let rva = (caller as usize).wrapping_sub(base);
             log(format_args!(
-                "{LOG_PREFIX} sleep-caller rva=0x{rva:08x} count={} requested-ms={}",
-                slot.1.load(Ordering::Relaxed),
-                slot.2.load(Ordering::Relaxed)
+                "{LOG_PREFIX} sleep-caller rva=0x{rva:08x} count={} requested-ms={} \
+                 boot-thread-count={} boot-thread-ms={}",
+                slot.count.load(Ordering::Relaxed),
+                slot.ms.load(Ordering::Relaxed),
+                slot.boot_count.load(Ordering::Relaxed),
+                slot.boot_ms.load(Ordering::Relaxed)
             ));
         }
+        let (boot_calls, boot_ms) = SLEEP_CALLERS.iter().fold((0, 0), |(calls, ms), slot| {
+            (
+                calls + slot.boot_count.load(Ordering::Relaxed),
+                ms + slot.boot_ms.load(Ordering::Relaxed),
+            )
+        });
+        log(format_args!(
+            "{LOG_PREFIX} boot-thread-sleep thread={} calls={boot_calls} requested-ms={boot_ms} \
+             -- the sleeps on the thread that runs the title flow, which is the only thread whose \
+             sleeping the boot waits on directly",
+            BOOT_THREAD.load(Ordering::Relaxed)
+        ));
         let lost = SLEEP_CALLERS_LOST.load(Ordering::Relaxed);
         if lost != 0 {
             log(format_args!(
@@ -752,6 +1034,81 @@ unsafe extern "system" fn detour_drop_transitions(
     }
 }
 
+// ============================================================================================
+// BOOT PHASES. The span between the entry point and the first substate, cut at the startup calls
+// `ds2_rva::BOOT_PHASES` lists. Each is wrapped once: a milestone on the first entry and another
+// on that call's return, so the gap between one phase's return and the next one's entry is the
+// code between them in the caller.
+// ============================================================================================
+
+/// The milestone labels for each entry of [`ds2_rva::BOOT_PHASES`], in the same order.
+/// [`mark`] takes `&'static str`, so they are written out rather than formatted.
+const PHASE_MARKS: [(&str, &str); 8] = [
+    ("win-main-enter", "win-main-return"),
+    ("app-setup-enter", "app-setup-return"),
+    ("archive-mounts-enter", "archive-mounts-return"),
+    ("input-devices-enter", "input-devices-return"),
+    ("graphics-init-enter", "graphics-init-return"),
+    ("sound-init-enter", "sound-init-return"),
+    ("katana-init-enter", "katana-init-return"),
+    ("app-frame-enter", "app-frame-return"),
+];
+
+static PHASE_TRAMPOLINES: [AtomicUsize; 8] = [const { AtomicUsize::new(0) }; 8];
+static PHASE_CALLS: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
+
+/// Four integer registers in, `rax` out: enough to pass any of these calls through unchanged,
+/// because none of them reads a stack argument or a vector register (see
+/// [`ds2_rva::BOOT_PHASES`]).
+type PhaseFn = unsafe extern "system" fn(usize, usize, usize, usize) -> usize;
+
+unsafe extern "system" fn detour_phase<const I: usize>(
+    a: usize,
+    b: usize,
+    c: usize,
+    d: usize,
+) -> usize {
+    let first = PHASE_CALLS[I].fetch_add(1, Ordering::Relaxed) == 0;
+    if first {
+        mark(PHASE_MARKS[I].0);
+    }
+    let trampoline = PHASE_TRAMPOLINES[I].load(Ordering::Acquire);
+    // Published before the hook was enabled, so zero cannot be seen here; returning zero rather
+    // than jumping through it is the conservative answer if it ever were.
+    if trampoline == 0 {
+        return 0;
+    }
+    // SAFETY: MinHook published this trampoline for this site, and every site in the table takes
+    // only register arguments, which this passes through untouched.
+    let original: PhaseFn = unsafe { std::mem::transmute::<usize, PhaseFn>(trampoline) };
+    // SAFETY: `original` runs the bytes the detour displaced, with the caller's own arguments.
+    let result = unsafe { original(a, b, c, d) };
+    if first {
+        mark(PHASE_MARKS[I].1);
+    }
+    result
+}
+
+/// One [`Site`] per boot phase.
+fn phase_sites() -> [Site; 8] {
+    let detours: [*mut c_void; 8] = [
+        detour_phase::<0> as *mut c_void,
+        detour_phase::<1> as *mut c_void,
+        detour_phase::<2> as *mut c_void,
+        detour_phase::<3> as *mut c_void,
+        detour_phase::<4> as *mut c_void,
+        detour_phase::<5> as *mut c_void,
+        detour_phase::<6> as *mut c_void,
+        detour_phase::<7> as *mut c_void,
+    ];
+    std::array::from_fn(|i| Site {
+        name: ds2_rva::BOOT_PHASES[i].0,
+        rva: ds2_rva::BOOT_PHASES[i].1,
+        detour: detours[i],
+        trampoline: &PHASE_TRAMPOLINES[i],
+    })
+}
+
 /// One hook site: where it is, what to call it in a log, and the trampoline slot it publishes to.
 struct Site {
     name: &'static str,
@@ -788,7 +1145,7 @@ pub struct Outcome {
 /// Arxan callback. Both sites were checked with `scripts/ds2-arxan-chain.py` and are ordinary
 /// prologues, not Arxan redirects.
 pub unsafe fn install() -> Outcome {
-    let sites: [Site; 3] = [
+    let mut sites: Vec<Site> = vec![
         Site {
             name: "flow-update",
             rva: ds2_rva::FE_STATE_FLOW_UPDATE,
@@ -808,12 +1165,20 @@ pub unsafe fn install() -> Outcome {
             trampoline: &DROP_TRANSITIONS_TRAMPOLINE,
         },
     ];
+    sites.extend(phase_sites());
 
     // FIRST: everything `mark` recorded before there was a sink to write it to. `install` runs
     // from the Arxan callback, which is the entry point, so this is also the milestone that says
     // how much of the boot went by before the game's own code started.
     mark("entry-point");
+    // SAFETY: `GetCurrentThreadId` takes nothing and cannot fail.
+    BOOT_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::Relaxed);
     flush_milestones();
+    // Sample the boot thread until the first substate; see `sampler` for why it cannot deadlock it.
+    crate::sampler::start(
+        BOOT_THREAD.load(Ordering::Relaxed),
+        crate::sampler::current_stack_base(),
+    );
 
     let base = match ds2_game_base::mem::game_module_base() {
         Ok(base) => base,
@@ -845,10 +1210,14 @@ pub unsafe fn install() -> Outcome {
 
     // SAFETY: `base` is the live module base; the RVA names this image's own `Sleep` import slot.
     unsafe { hook_sleep_import(base) };
+    // SAFETY: the same position and the same kind of write -- a pointer in this image's `.idata`
+    // -- for the three wait imports, each read by name from the image and checked live.
+    unsafe { hook_wait_imports(base) };
 
     let mut installed = 0;
     for site in &sites {
         let address = base + site.rva as usize;
+        let create_start_us = now_us();
         // SAFETY: the target is an RVA this crate validated against the prologue it expects before
         // reaching here, and the detour is a `'static` fn item of the matching ABI.
         let hook = match unsafe { MhHook::new(address as *mut c_void, site.detour) } {
@@ -867,8 +1236,12 @@ pub unsafe fn install() -> Outcome {
         // the one ordering mistake in this file that would be fatal rather than merely lossy.
         site.trampoline
             .store(hook.trampoline() as usize, Ordering::Release);
+        // Timed apart from the create: enabling is the step that suspends every other thread in
+        // the process, and the install groups' cost tracked their hook counts.
+        let enable_start_us = now_us();
         // SAFETY: the target is the address `MhHook::new` above already registered with MinHook.
         let status = unsafe { MH_EnableHook(address as *mut c_void) };
+        let enable_end_us = now_us();
         if status != MH_STATUS::MH_OK {
             log(format_args!(
                 "{LOG_PREFIX} hook-failed site={} va=0x{address:016x} stage=MH_EnableHook \
@@ -881,8 +1254,12 @@ pub unsafe fn install() -> Outcome {
         // of the process, which is what is wanted.
         installed += 1;
         log(format_args!(
-            "{LOG_PREFIX} hooked site={} rva=0x{:08x} va=0x{address:016x}",
-            site.name, site.rva
+            "{LOG_PREFIX} hooked site={} rva=0x{:08x} va=0x{address:016x} create-ms={:.3} \
+             enable-ms={:.3}",
+            site.name,
+            site.rva,
+            enable_start_us.saturating_sub(create_start_us) as f64 / 1000.0,
+            enable_end_us.saturating_sub(enable_start_us) as f64 / 1000.0
         ));
     }
 
@@ -905,6 +1282,16 @@ pub unsafe fn install() -> Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The labels are written out by hand beside a table that lives in another crate, so a phase
+    /// added or reordered there would otherwise mark under its neighbour's name.
+    #[test]
+    fn phase_marks_follow_the_rva_table() {
+        for ((name, _), (enter, leave)) in ds2_rva::BOOT_PHASES.iter().zip(PHASE_MARKS) {
+            assert_eq!(enter, format!("{name}-enter"));
+            assert_eq!(leave, format!("{name}-return"));
+        }
+    }
 
     /// The bucket edges ARE the binary's own `Sleep` arguments, so getting them wrong does not
     /// produce an error -- it produces a plausible histogram that attributes a loop to the wrong
@@ -937,21 +1324,37 @@ mod tests {
     /// real return address, which is the only reason a sentinel is safe here at all.
     #[test]
     fn caller_table_accumulates_then_reports_what_it_could_not_hold() {
-        record_caller(0x1000, 5);
-        record_caller(0x1000, 7);
-        record_caller(0x2000, 0);
+        record_caller(0x1000, 5, true);
+        record_caller(0x1000, 7, false);
+        record_caller(0x2000, 0, false);
 
         let read = |caller: u64| {
             SLEEP_CALLERS
                 .iter()
-                .find(|slot| slot.0.load(Ordering::Relaxed) == caller)
+                .find(|slot| slot.caller.load(Ordering::Relaxed) == caller)
                 .map(|slot| {
                     (
-                        slot.1.load(Ordering::Relaxed),
-                        slot.2.load(Ordering::Relaxed),
+                        slot.count.load(Ordering::Relaxed),
+                        slot.ms.load(Ordering::Relaxed),
                     )
                 })
         };
+        let read_boot = |caller: u64| {
+            SLEEP_CALLERS
+                .iter()
+                .find(|slot| slot.caller.load(Ordering::Relaxed) == caller)
+                .map(|slot| {
+                    (
+                        slot.boot_count.load(Ordering::Relaxed),
+                        slot.boot_ms.load(Ordering::Relaxed),
+                    )
+                })
+        };
+        assert_eq!(
+            read_boot(0x1000),
+            Some((1, 5)),
+            "only the call made on the boot thread lands in the boot-thread columns"
+        );
 
         // Count AND milliseconds, separately -- the whole finding was that the caller with the
         // most calls and the caller with the most milliseconds are different callers.
@@ -966,10 +1369,10 @@ mod tests {
         // Fill the rest, then overflow it. A silently dropped row would read as "that call site
         // does not sleep", which is exactly the wrong conclusion.
         for extra in 0..(SLEEP_CALLER_SLOTS - 2) {
-            record_caller(0x3000 + extra as u64, 1);
+            record_caller(0x3000 + extra as u64, 1, false);
         }
         let before = SLEEP_CALLERS_LOST.load(Ordering::Relaxed);
-        record_caller(0xdead_beef, 1);
+        record_caller(0xdead_beef, 1, false);
         assert_eq!(
             SLEEP_CALLERS_LOST.load(Ordering::Relaxed),
             before + 1,

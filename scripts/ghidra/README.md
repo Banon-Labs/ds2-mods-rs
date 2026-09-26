@@ -49,14 +49,16 @@ At the M1 hook site the toolkit independently reproduces three recorded facts:
 So the project's addresses are 1:1 with the RVAs this repo records, and with the live process.
 
 **One caveat that matters.** This project is the **shipped, Arxan-obfuscated** binary -- it has the
-SteamStub `.bind` section. `darksoulsii-deobf.bin` is the dearxan-*deobfuscated* flat image. They
-agree at every site Arxan did not touch, which is why the M1 site matches exactly. They will
-**not** agree at the Arxan-redirected functions. Check before trusting a site: a leading
-`JMP rel32` into the second `.text` block is a redirected stub. `rt/Ds2ArxanStubs.java` answers it
-for a VA or for the whole image, and reports **311** such entry points over Ghidra's 88374
-functions -- where [`docs/ARXAN-FOOTPRINT.md`](../../docs/ARXAN-FOOTPRINT.md) reports 286 over the
-95434 function starts recovered from `.pdata`. Two different populations; the delta of 25 is not
-reconciled.
+SteamStub `.bind` section. `darksoulsii-deobf.bin` is the output of dearxan's `deobfuscate`
+example, and on this build it is the same image: mapped to memory layout the two are
+byte-identical, redirected entries included (`scripts/ds2-arxan-redirects.py --same-image`).
+Check before trusting a site: a leading `JMP rel32` into the second `.text` block is a redirected
+stub. `rt/Ds2ArxanStubs.java` answers it for a VA or for the whole image. The whole-image census
+counts over Ghidra's functions only, so it misses redirects at `.pdata` records Ghidra never made
+functions -- chained mid-function fragments among them -- just as a `.pdata` census misses the
+redirected functions that have no unwind record.
+[`docs/ARXAN-FOOTPRINT.md`](../../docs/ARXAN-FOOTPRINT.md) diffs the two; for one address, ask
+about that address rather than looking it up in either list.
 
 ## Why DS2 is unusually good at this
 
@@ -116,10 +118,9 @@ not the same as "it has no game knowledge."*
 
 Also not ported, because nothing needs them yet:
 
-- **The GhidraMCP daemon stack** (`bootstrap.sh`, `build-ghidramcp.sh`, `mcp-ghidra-daemon.sh`,
-  `MCPServeHeadless.java`, `mcp_query.py`). A warm MCP server pays off when a session makes hundreds
-  of queries; `query.sh` costs ~15s per run, which is fine until it isn't. Revisit when the Fe* menu
-  work makes it hurt.
+- ~~The GhidraMCP daemon stack~~ -- since ported, once the title-flow trace made `query.sh`'s
+  exclusive project lock hurt: `scripts/ghidra/mcp-daemon.sh` serves the DS2 program read-only on
+  port 8766, and `docs/GHIDRA-MCP.md` says why it defaults to read-only and what that costs.
 - **The RF function finder** (`find-functions-rf*.sh`, `FindFunctionStartsRF*.java`). It exists to
   recover function starts a stripped binary lost. This project already has 88780 functions.
 - **`autotranslate-jp.py` / `jp-en-dict.json`.** ER-specific message-table translation.

@@ -301,6 +301,9 @@ The honest caveat: the chain is a **graph, not a line**. Every step can fork to 
 wrong on any non-happy path. Drive it off a weight table keyed by id, with the weights measured,
 and treat an unexpected id as "hold position" rather than "jump".
 
+The design that follows from this, with the weights and the renderer, is
+[`DS2-LOADING-BAR.md`](DS2-LOADING-BAR.md).
+
 ## What this trace cannot tell you, and the one run that would
 
 **Nothing here is a duration.** Static analysis names the steps and proves the dependency shape; it
@@ -574,9 +577,10 @@ substate is spending its second in an earlier phase and the watch is pointed at 
 waiting on yet. Re-aim it at the phase field first, then at whatever that phase reads.
 
 The destination is a clue the earlier runs already recorded: `0x44` always transitions to `0x46`,
-the "could not retrieve information" message box, never to `0x47` directly. **The information
-fetch fails on every measured boot.** A one-second cost to fail is a timeout, not a floor, and it
-would be removed by a different fix from `0x05`'s.
+never to `0x47` directly. This paragraph originally read `0x46` as a "could not retrieve
+information" box and concluded that the fetch failed on every boot. **That reading was wrong.**
+`0x46` is the box for a fetch that succeeded and returned no announcements; the failure screen is
+`0x45`. See [the information fetch succeeds](#the-information-fetch-succeeds-and-the-second-is-the-server-answering).
 
 ### This mod costs the boot 285 ms
 
@@ -689,15 +693,124 @@ call [r14->vtable+0x28]   ; is the download job still running?
 test al,al; jne return    ; <- THIS is the ~982ms, every run
 ```
 
-So `0x44`'s second is the job itself, not a display floor. It reproduces to 0.14% because it is
-almost certainly a fixed timeout *inside* the job rather than a variable round-trip -- and the
-destination confirms the request never succeeds: `0x44` always transitions to `0x46`, the "could
-not retrieve information" box, and never straight to `0x47`. **A one-second wait to fail.**
+So `0x44`'s second is the job itself, not a display floor. The earlier text in this document
+calling both of them floors was wrong about half of it, and the experiment that would have caught
+it earlier is exactly the one that caught it now: change the thing you believe is responsible and
+see whether the number moves.
 
-That is a different fix from this one and it belongs to whatever owns the job's timeout. The
-earlier text in this document calling both of them floors was wrong about half of it, and the
-experiment that would have caught it earlier is exactly the one that caught it now: change the
-thing you believe is responsible and see whether the number moves.
+This section first went on to call the job a fixed timeout and the destination proof of a failed
+fetch. Both were guesses, and the next section reads the binary and retires them.
+
+## The information fetch succeeds, and the second is the server answering
+
+Static only; nothing here was run. Addresses are **verified in binary** unless tagged otherwise.
+
+### The job is `GetAnnounceMessageList`
+
+`r14` is `[[0x141616cf8] + 0x30]`, a `NetSvrManager` (vtable `0x1410d53a8`, RTTI
+`NetSvrManager`). The four slots phase 1 to phase 3 call all forward to the object at
+`NetSvrManager + 0x60`, a `NetSvrLoginManager` (vtable `0x1410d4a18`):
+
+| slot | function | does |
+| --- | --- | --- |
+| `+0x20` | `0x140290800` -> `0x140289020` | start: builds the job, queues it on the job runner |
+| `+0x28` | `0x14028ffe0` -> `0x1402760b0(this, 1)` | busy: runner entry of type 1 still pending or running |
+| `+0x30` | `0x14028fb80` | first result list, or null if the stored result code is an error |
+| `+0x38` | `0x14028fb70` | second result list, checked the same way |
+
+The start calls `0x1402879d0(loginMgr + 0x40, 10)`, which allocates a
+`NetSvrGetAnnounceMessageListJob` (vtable `0x1410d52a8`, RTTI names it inside
+`NetSvrClientInterface::GetAnnounceMessageList(unsigned int, Frpg2Vector<AnnounceMessage>*,
+Frpg2Vector<AnnounceMessage>*)`). The `10` is phase 1's `mov edx,0xa`, the list size asked for.
+The job's send slot (`0x14028f130`) calls `Frpg2ClientImpl` vtable `+0xb0`,
+`requestGetAnnounceMessageList` (`0x140690b60`), which registers packet id **1004**,
+`RequestGetAnnounceMessageList`, with the RPC layer. Its error string reads "failed to send the
+request for the operator's announcement message list". **So "server information" is the
+operator's announcement list.**
+
+### What `0x46` and `0x45` actually are
+
+The boot builder constructs `0x44` at `0x1400f7f1c` as `0x1400ff470(obj, id 0x44, 0x47, 0x45,
+0x46)`, which stores `+0x14 = 0x47`, `+0x18 = 0x45`, `+0x1c = 0x46`. The transition builder
+`0x1400ff580` maps them:
+
+| phase | destination | reached when (`v3`, `0x1400ff710`) |
+| --- | --- | --- |
+| 5 | `+0x14` = `0x47` top menu | announcements were shown and closed |
+| 6 | `+0x1c` = `0x46` | fetch **succeeded**, zero announcements |
+| 7 | `+0x18` = `0x45` | start refused, or either result list null |
+
+Phase 3 zeroes the count at `+0x20`, fetches both lists, and runs `0x1400ffbb0` on each. That
+function returns false only for a null list and otherwise appends every announcement, capped at
+ten, bumping `+0x20`. A null list sets `bl` and goes to phase 7. Two non-null lists and a count
+of `0` goes to phase 6 (`cmp [rdi+0x20],esi; jle` at `0x1400ff88b`).
+
+`0x45` is built by `0x1400fcfd0`, whose vtable is `FeSubStateTitleInformationFailWarn`. **That is
+the failure screen.** `0x46` is a plain message window built at `0x1400f7f3d`, showing message
+`0x33452` from category `0x19` (phase 1's "retrieving" window uses `0x33451`), with `0x47` as its
+next. That its text means "there is no information" is **inferred** from the edge. The FMG was not
+read.
+
+A list is null only when the stored result code has an error bit (`0x14028f3d0`: `(code & 0x1fe)
+== 0` is success). The runner writes that code into `NetSvrLoginManager + 0x40` when the job
+finishes (`0x1402903e0` -> slot `+0x50`, `0x140288c80`, type 1 -> `0x140287a90`). Every failure
+path sets an error bit:
+
+* RPC timeout: `0x1406c4600` marks expired requests through the request's slot `+0x28`
+  (`0x1406c7c20`), which sets error `3`. The job's update (`0x140284eb0`) turns a non-zero request
+  error into `(err | ...) * 2`, and bit 1 is set.
+* Runner abort (`0x140284e00`) stores `0x203`; a job whose start failed stores `0x202`
+  (`0x14028f2b0`, `0x14028f3a0`). Both have bit 1 set.
+* A refused send: `0x1406c4d10` returns 0 unless the connection's state is 3 or the cache-only
+  flag at `+0x55d` is set. That the zero reaches the job's start as a failure, and so the same
+  `0x202` path, is **inferred**; the return plumbing through `0x140690b60` was not traced.
+
+**So `0x44 -> 0x46` on every measured boot means the fetch returned success and an empty list,
+every time.** The request is not failing. There is no failure here to fix upstream.
+
+### Where the second goes
+
+It is not a timeout. The RPC request timeout is `RPCSystemImpl + 0x560`, set to `30` at
+`0x1406c1497`, in seconds, compared against `_time64` (`0x1406bcf60`). That is 30 s at a
+one-second grain, and an expiry would land on `0x45`, not `0x46`. The RPC thread
+(`0x1406c4b40`) waits `1000` between ticks while requests are outstanding and `100000` when idle
+(microseconds, **inferred** from `0x1408782c0` taking the same unit), and registering a request
+signals its wait (`0x1406c42e0`), so it does not add a fixed second either.
+
+What is left is the round trip: the login session sends packet 1004, the server answers, and the
+job completes. **Inferred**: the ~982 ms is server-side latency plus transport, and the tight
+spread comes from the server, not from a client constant. Nothing in the client code read here
+holds a one-second value on this path. A runtime timestamp on the request send and on the
+response callback (`0x1406aefa0`) would split client from server time. That is a measurement for
+later, not a prerequisite for the conclusion below.
+
+### What a mod can do about it
+
+Nothing that keeps the screen correct. The client does not choose to wait: it has no result
+until the server sends one, and it cannot know in advance whether the list will be empty. The
+acceptance condition, that the information screen still shows when there are announcements, rules
+out every shortcut:
+
+* A shorter timeout makes nothing faster. The timeout never fires; the response arrives first.
+* Forcing the busy check false (`0x14028ffe0`) makes phase 3 read lists that are still empty and
+  land on `0x46` even when announcements are on the way. That fails the acceptance condition and
+  leaves a live job writing into `NetSvrLoginManager` after the substate has gone.
+* Prefetching earlier gains nothing on this boot chain. `0x44` is entered straight from `0x39`'s
+  success, and nothing between them could overlap with the fetch.
+
+The only way to recover the time is to skip the announcements. That is a behaviour change, not a
+fix, and the offline path already does it for an offline profile. If it is ever wanted as an
+opt-in, the smallest version fits in `ds2-dialog-skip`'s existing `enter` detour on
+`0x1400ff570` (the `title-information` floor, already hooked and logging `was=0`). After the
+original runs, write `5u32` to `this + 0x10`. Phase 5's transition (`+0x14` = `0x47`) then fires
+without phase 1 ever starting the job or opening the "retrieving" window, and `v3` does nothing
+in phase 5 (the `dec` chain at `0x1400ff761` falls through to the return). The exit function
+(`0x1400ff6b0`) only acts on phases 2 and 4, so there is no window to close. **Not recommended as
+a default**: it hides any announcement the operator publishes.
+
+On the default Seamless run the question may not arise at all. The latest run in the offline notes
+has `0x39` refused and going to `0x2a`, which never reaches `0x44`. Whether any current default
+run reaches `0x44` is a runtime question; this reading does not settle it.
 
 ## The engine block is sleeping, and it is measured rather than inferred
 
@@ -862,6 +975,154 @@ from a background one, so **none of these numbers is yet a saving**.
 The next refinement is small and is what turns this table into a target: record
 `GetCurrentThreadId` alongside the return address and compare against the thread that ran `DllMain`.
 Only sleeps on that thread are on the critical path.
+
+## What the frame loop waits for before the first substate: a two-second fade
+
+Static only. Every claim below is tagged **verified in binary** (with the addresses read) or
+**inferred**.
+
+The sampler put the boot thread in the frame loop's `Present` path for most of the window between
+input init and the first substate. That is the right answer to "where is the thread", and it does
+not say what the loop is waiting *for*. The answer is one state machine, and its slowest step is a
+timer.
+
+### The boot thread is idle in vsync, not blocked on a worker
+
+* `FUN_140af09b0` (main loop wrapper) calls `FUN_140af0090` (per-frame callbacks: Steam callbacks,
+  sound, then `KatanaMainApp`'s update through its vtable) and then `FUN_140aedb60` (draw and
+  present). **Verified in binary.**
+* `FUN_140aedb60` and `FUN_140af02f0` reach `FUN_140aeb990` -> `FUN_140960270` ->
+  `FUN_140f269d0`, which calls the swap chain's vtable slot `+0x40` -- `IDXGISwapChain::Present` --
+  with a sync interval that `FUN_140960270` maps from `[device+0x2bc]`: `1` unless that field
+  selects another mode. **Verified in binary** (the slot is `Present` by COM layout: IUnknown,
+  then IDXGIObject, then `GetDevice` at `+0x38`).
+* So the sampler's "in ntdll under the Present wrapper" is a thread waiting for the next vblank.
+  **Inferred** from the sync interval; it matches the sampled chain.
+* The per-frame delta handed to the scene updates comes from `FUN_140b4a380`: measured frame time,
+  clamped to no less than `1/60` (`0x3c888889`) and no more than `0.05` (`0x3d4ccccd`).
+  **Verified in binary.** Its forwarding from `FUN_140af0090` down to `GameManagerImp`'s update is
+  **inferred** from the parameter passing, not traced register by register through the Arxan-split
+  body at `0x1401c3303`.
+
+The loop is not stuck. It is running frames at the display rate, and something counted in frames
+is holding the title flow back.
+
+### The step that starts the title flow is `FeOperatorTitle::v4`
+
+`FeOperatorTitle` (vtable `0x1410bc578`) is built by the frontend root's setup `0x1405001b0`
+(`0x1405019b1`), which also calls its v1 immediately (`0x1405019e3`). That setup is called from
+`GameManagerImp`'s setup `0x1401c1ab0` at `0x1401c1cd9`. **Verified in binary.**
+
+v1 (`0x1400ef180`) requests two resources and stores their handles: `gamedata:/menu/17.febnd.dcx`
+at `+0x10` (format string at `0x14048b4e0`, argument `0x11`) and `param:/MovieTextParam.param` at
+`+0x20` (`0x14048c820`). It sets the state at `+0x30` to `1`. **Verified in binary.**
+
+v2 (`0x1400ef030`) builds the `FeStateFlow` (`0x1400ef700`, which passes the `FeStateTitle` factory
+`0x1400ef840` to `0x140104440` and stores the flow at `+0x38`). Building it does not start it.
+**Verified in binary.**
+
+v4 (`0x1400ef390`) is the per-frame tick, a switch on `[this+0x30]`:
+
+| state | waits while | then | addresses |
+| --- | --- | --- | --- |
+| `1` | the text repository `[0x141616cb0]` has a pending slot (`0x140504d90`), or either resource handle's `+0x34` is not `2` | calls its own vtable slot, state `2` | `0x1400ef669` -> `0x1400ef890` |
+| `2` | any operator in the frontend root `[GameManagerImp+0x22e0]` reports busy through its slot `+0x28` (`0x140500650`) | `0x14039a4d0(GameManagerImp, [0x1410acb14], 1)`, state `3` | `0x1400ef62e`..`0x1400ef65c` |
+| `3` | `0x14039ab20(GameManagerImp)` is true | `flow->v0(0)` -- **the flow starts at substate `0x00`**, state `4` | `0x1400ef606`..`0x1400ef621` |
+| `4` | -- | ticks the flow dispatcher `0x140104540` every frame | `0x1400ef41e` |
+| `5` | return-to-title path; writes `0x17` into the flow's `+0x48` | state `4` | `0x1400ef3c0` |
+
+All **verified in binary**. `0x00` (`TitleInitBranch`) has no update and branches straight to
+`0x01` on a cold boot, so the first enter of `0x01` follows state 3's exit within a frame
+(**inferred** from the earlier section on the cold-boot chain).
+
+### State 3 is a fade from black, and it lasts two seconds of frames
+
+* `[GameManagerImp+0x1160]` is a three-float fade: `+0x0` current opacity of a black overlay, `+0x4`
+  target, `+0x8` seconds remaining. Constructor `0x140b23fc0` zeroes all three. **Verified in
+  binary.**
+* `GameManagerImp` setup creates it (`0x1401c1d00`, stored at `0x1401c1d12`) and then calls
+  `0x14039a510` with duration `0.0` (`0x1401c1d7c`..`0x1401c1d85`), whose setter `0x140b24000`
+  writes target `1.0` and, for a non-positive duration, opacity `1.0`: **the screen is black from
+  setup.** **Verified in binary.**
+* State 2's exit calls `0x14039a4d0`, whose setter `0x140b23fe0` writes target `0` and remaining =
+  `[0x1410acb14]`, which is **`2.0f`**. **Verified in binary.**
+* The updater `0x140b24170(fade, delta)` subtracts the frame delta from remaining and moves opacity
+  toward target; on the frame remaining reaches zero it writes opacity = target. It is called from
+  `GameManagerImp`'s update (`0x1401c335c`..`0x1401c336b`). **Verified in binary.**
+* State 3's poll `0x14039ab20` is `remaining > 0`. **Verified in binary.**
+
+With the delta clamped at `1/60` or more, the fade is **exactly 120 frames at 60 Hz or faster, and
+longer than two seconds whenever frames take over 50 ms** (the clamp caps each frame's credit at
+`0.05`). Under vsync at 60 Hz that is two seconds of wall time with the boot thread sitting in
+`Present` -- which is what the sampler saw. The two seconds is **inferred** from the code, not
+measured; the ~3.0 s input-init-to-first-substate window is the measurement it would fit inside.
+
+The fade is to a screen with nothing on it yet: the flow, and so the "do not copy" screen, does not
+exist until the fade ends. **Inferred** from state 4 being the only caller of the flow dispatcher
+in v4.
+
+### The worker sleeps are not on this path
+
+* `0x140a63053` is inside `0x140a62e50`, the shared run loop of `DLNRD::Thread`. Its vtable slot is
+  used by `DLNRD::SteamSurveillance`, `DLNRD::EventManager`, `DLNRD::SurveillanceBase`,
+  `DLNRD::SessionManager`, `DLNRD::RankingManager` and `DLNRD::SteamRankingManager` (RTTI owners of
+  the vtables referencing it). The loop ticks the runnable, prints a `"%s haYuan Qi ..."` ("%s is
+  alive") heartbeat on a timer, and sleeps `[this+0x44]` between ticks. **Verified in binary.**
+  These are network-service threads, and several of them sleeping at once is why their total
+  exceeds the window.
+* `0x1409e0296` is inside `0x1409dfef0`, `DLMO::MOFmodSoundManager`'s thread: `FMOD::EventSystem`
+  update, then sleep the remainder of its period. **Verified in binary.**
+* None of the four gates in v4 reads anything these threads own: the gates read the text
+  repository's pending slots, the two resource handles' `+0x34`, the frontend operators' busy
+  slot, and the fade. **Verified in binary** for what the gates read. That no network or sound
+  thread *writes* those fields is **inferred** -- the writer of a resource handle's `+0x34` was not
+  traced, and would be the file-loading side.
+
+So **the 16 ms nap at `0x140a63053` is not on the critical path**: a network thread waking sooner
+would not start the title flow sooner. The same holds for the FMOD thread.
+
+### What a mod could change
+
+The pooled literal must not be touched: `0x1410acb14` is the image's shared `2.0f`, referenced from
+all over the image, the same trap as `1.0f` above.
+
+The cheapest change is a MinHook detour on `FeOperatorTitle::v4` at `0x1400ef390`. The entry holds
+its own prologue (`40 57 48 83 ec 40`), not an Arxan redirect -- **verified** with
+`scripts/ds2-arxan-chain.py`. Before calling the original:
+
+```rust
+// state 3 = waiting for the fade from black; finish it so this same call starts the flow
+if read::<u32>(op + 0x30) == 3 {
+    let gm = read::<usize>(base + 0x0161_48f0);           // GameManagerImp
+    if gm != 0 {
+        let fade = read::<usize>(gm + 0x1160);
+        if fade != 0 {
+            write::<f32>(fade + 0x8, 0.0);                  // remaining
+            write::<f32>(fade + 0x0, read::<f32>(fade + 0x4)); // opacity = target
+        }
+    }
+}
+original(op);
+```
+
+Both writes are required. Zeroing only the remaining time leaves opacity at `1.0`, and the updater
+does nothing once remaining is zero, so the draw path `0x14039a850` would keep painting black over
+the title for good.
+
+Only the timer is removed. States 1 and 2 still wait on the resources, the text repository and the
+frontend operators, so nothing starts before its data is there. State 3 is reached only from state
+2 (`0x1400ef65c` is its only writer in v4); the path into state 5 calls the same setter with `0.0`
+(`0x1400ef581`) and never enters state 3.
+
+**Predicted, not measured:** about two seconds off the ~3.0 s window at 60 Hz, more on a boot
+whose frames run slower than 20 fps. The visible cost is the black screen ending in one frame
+instead of fading over an empty frame.
+
+The runtime check that would confirm the prediction before anyone writes the detour: have the boot
+timeline stamp each change of `[operator+0x30]` (the operator is at `[[GameManagerImp+0x22e0]+0xd0]`
+-- **inferred** that the frontend root built by `0x1405001b0` is the `+0x22e0` object, since state
+2's scan of that object covers the slot `+0x30` where setup also stores the operator). The span from
+3 to 4 is the fade; the span from 1 to 3 is the real loading.
 
 ## The caveat that governs every address here
 

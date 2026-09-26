@@ -299,11 +299,28 @@ pub fn split(contents: &str) -> Option<(u64, &str)> {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SequenceGate {
     last: Option<u64>,
+    /// The numbers the last [`Self::take`] jumped over, first and last, if it jumped at all.
+    skipped: Option<(u64, u64)>,
 }
 
 impl SequenceGate {
     /// Nothing seen yet. Same state [`Default`] produces, in a form a `static` can be built from.
-    pub const NEW: Self = Self { last: None };
+    pub const NEW: Self = Self {
+        last: None,
+        skipped: None,
+    };
+
+    /// The sequence numbers the most recent [`Self::take`] never saw, as `(first, last)`.
+    ///
+    /// The file holds one command, and the harness reads it only every few frames -- about every
+    /// two and a half seconds on an unfocused game. A second write inside that window replaces the
+    /// first, and before this the first simply never ran, with nothing in the log to say so. A
+    /// live session on 2026-09-26 lost a `block` that way and ran a probe with the player's input
+    /// live. Numbering commands consecutively lets the gap be seen; this is where it is reported.
+    #[must_use]
+    pub const fn skipped(&self) -> Option<(u64, u64)> {
+        self.skipped
+    }
 
     /// Hand the gate a file's contents; get back the command to run, if it is a new one.
     ///
@@ -317,6 +334,14 @@ impl SequenceGate {
         if self.last == Some(sequence) {
             return None;
         }
+        // Only a forward jump of more than one is a gap. A number that goes down, or the first
+        // number ever seen, is a caller starting a new count, which `take` has always allowed.
+        self.skipped = match self.last {
+            Some(last) if sequence > last.saturating_add(1) => {
+                Some((last.saturating_add(1), sequence - 1))
+            }
+            _ => None,
+        };
         self.last = Some(sequence);
         Some(command)
     }
@@ -451,6 +476,24 @@ mod tests {
             "the same number must not fire twice -- that is the whole point of the number"
         );
         assert_eq!(gate.take("8\nturn 45\n"), Some("turn 45"));
+    }
+
+    #[test]
+    fn the_gate_names_the_numbers_it_never_saw() {
+        let mut gate = SequenceGate::default();
+        assert_eq!(gate.take("202\nstatus\n"), Some("status"));
+        assert_eq!(gate.skipped(), None, "the first number seen is not a gap");
+        // 203 was written and then replaced by 204 before the harness read the file.
+        assert_eq!(gate.take("204\nprobe 30\n"), Some("probe 30"));
+        assert_eq!(gate.skipped(), Some((203, 203)));
+        assert_eq!(gate.take("205\nstatus\n"), Some("status"));
+        assert_eq!(gate.skipped(), None, "a step of one is not a gap");
+        assert_eq!(gate.take("1\nstatus\n"), Some("status"));
+        assert_eq!(
+            gate.skipped(),
+            None,
+            "counting down is a new count, not a gap"
+        );
     }
 
     #[test]

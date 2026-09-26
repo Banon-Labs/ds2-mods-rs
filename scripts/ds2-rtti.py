@@ -13,10 +13,11 @@ It reads `darksoulsii-deobf.bin`, the dearxan-deobfuscated flat image. Flat mean
 RVA and VA == 0x140000000 + offset; the script asserts the file size matches the PE SizeOfImage
 rather than trusting that.
 
-CAVEAT, the same one that governs every static read in this repo: the deobfuscated image is not
-the bytes that run. At the 286 Arxan-redirected functions the deobf image shows recovered code
-where the live process has a stub. A vtable slot is data, not code, so the slot addresses here
-are trustworthy; whether the FUNCTION at a slot is Arxan-redirected must be checked separately
+CAVEAT, the same one that governs every static read in this repo: the image is the file on disk,
+not necessarily the bytes that run, and at an Arxan-redirected function the file holds only a
+five-byte `jmp` into Arxan's section (`darksoulsii-deobf.bin` is byte-identical to the shipped
+exe, redirects included). A vtable slot is data, not code, so the slot addresses here are
+trustworthy; whether the FUNCTION at a slot is Arxan-redirected must be checked separately
 before hooking it.
 """
 

@@ -3,8 +3,9 @@
 
     python3 scripts/ds2-arxan-chain.py 0x14014bec0
 
-286 (or 311 -- see ds2-mods-rs-46z) of this binary's function entries are not the function.
-They are a five-byte `jmp` into Arxan's second `.text` at 0x141aaf000-0x141d42fff.
+Hundreds of this binary's function entries, and some mid-function blocks, are not the code they
+look like. They are a five-byte `jmp` into Arxan's second `.text` at 0x141aaf000-0x141d42fff.
+`scripts/ds2-arxan-redirects.py` lists them.
 
 WHAT IS ACTUALLY OVER THERE, measured at applySpEffect: not a relocated copy of the function,
 but the function SHATTERED into basic-block fragments scattered across Arxan's section, each

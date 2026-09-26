@@ -71,6 +71,14 @@ STAMP_COMMIT_EPOCH = 1790300000
 STAMP_NOW_EPOCH = STAMP_COMMIT_EPOCH + 3600
 STAMP_FIXTURES = ".cupcake/tests/fixtures"
 
+# no_delete_branch_under_stack: GitHub's answer for `gh pr view` + `gh pr list --base <head>`,
+# pinned for every case so no `gh pr merge` fixture reaches the network.
+STACK_ALONE = json.dumps({"number": 129, "headRefName": "boot-timeline", "baseRefName": "main",
+                          "isCrossRepository": False, "dependents": []})
+STACK_WITH_DEPENDENT = json.dumps({"number": 129, "headRefName": "boot-timeline",
+                                   "baseRefName": "main", "isCrossRepository": False,
+                                   "dependents": [131]})
+
 
 @dataclass(frozen=True)
 class PolicyCase:
@@ -95,6 +103,7 @@ class PolicyCase:
     # refuses the command outright (`gh pr ready` is always refused by the global draft guard), so
     # that an allow here is attributable to the project rule and a deny to its own reason text.
     project_only: bool = False
+    stack_merge: str = STACK_ALONE
 
 
 _FRIDA_DIR = Path(tempfile.mkdtemp(prefix="cupcake-frida-evidence-"))
@@ -112,6 +121,20 @@ def frida_evidence_log(kind: str) -> Path:
                "messages": 3, "seconds": 1.0}
         path.write_text(json.dumps(row) + "\n", encoding="utf-8")
     return path
+
+
+# git_block_main_commit judges a commit into ANOTHER repository by the branch that repository is
+# on (bd ds2-mods-rs-qzd). Two throwaway checkouts outside this repo, one per branch that matters,
+# resolved for real by .cupcake/signals/commit_target_branches.sh -- no override stands in for it.
+_OTHER_REPOS_DIR = Path(tempfile.mkdtemp(prefix="cupcake-other-repos-"))
+OTHER_REPO_FEATURE = _OTHER_REPOS_DIR / "feature"
+OTHER_REPO_MAIN = _OTHER_REPOS_DIR / "main"
+
+
+def make_other_repos() -> None:
+    for path, branch in ((OTHER_REPO_FEATURE, "ds2-paramdefs"), (OTHER_REPO_MAIN, "main")):
+        if not (path / ".git").exists():
+            subprocess.run(["git", "init", "-q", "-b", branch, str(path)], check=True)
 
 
 def pr_view(body_fixture: str, head: str = STAMP_SHA) -> str:
@@ -152,6 +175,7 @@ def run_case(case: PolicyCase) -> None:
         "CUPCAKE_PR_STAMP_HEAD_OVERRIDE": case.pr_stamp_head,
         "CUPCAKE_PR_STAMP_VIEW_OVERRIDE": case.pr_stamp_view,
         "CUPCAKE_PR_STAMP_NOW_OVERRIDE": str(STAMP_NOW_EPOCH),
+        "CUPCAKE_STACK_MERGE_OVERRIDE": case.stack_merge,
         "DS2_FRIDA_EVIDENCE_LOG": str(frida_evidence_log(case.frida_evidence)),
     }
     if case.project_only:
@@ -266,6 +290,31 @@ def cases() -> list[PolicyCase]:
             "allow-commit-on-feature-branch",
             True,
             'git commit -m "wip"',
+        ),
+        # Another repository's checkout, with this one on main (bd ds2-mods-rs-qzd).
+        PolicyCase(
+            "allow-commit-in-other-repo-feature-branch-by-dash-c",
+            True,
+            f"git -C {OTHER_REPO_FEATURE} commit -q -F /tmp/msg.txt",
+            current_branch="main",
+        ),
+        PolicyCase(
+            "allow-commit-in-other-repo-feature-branch-after-cd",
+            True,
+            f"cd {OTHER_REPO_FEATURE} && git commit -q -F /tmp/msg.txt",
+            current_branch="main",
+        ),
+        PolicyCase(
+            "deny-commit-in-other-repo-main-by-dash-c",
+            False,
+            f"git -C {OTHER_REPO_MAIN} commit -m wip",
+            current_branch="main",
+        ),
+        PolicyCase(
+            "deny-commit-in-other-repo-main-after-cd",
+            False,
+            f"cd {OTHER_REPO_MAIN} && git commit -m wip",
+            current_branch="main",
         ),
         # --- git_block_main_push ---------------------------------------------------------------
         PolicyCase("deny-push-origin-main", False, "git push origin main"),
@@ -490,6 +539,35 @@ def cases() -> list[PolicyCase]:
             project_only=True,
         ),
         PolicyCase("allow-pr-ready-undo", True, "gh pr ready 69 --undo", project_only=True),
+        # --- no_delete_branch_under_stack ------------------------------------------------------
+        # Incident 2026-09-26: `--delete-branch` on a stack's base PR closed the PRs based on it.
+        PolicyCase(
+            "deny-merge-delete-branch-with-dependent",
+            False,
+            "gh pr merge 129 --squash --delete-branch",
+            stack_merge=STACK_WITH_DEPENDENT,
+            expected_text="base of open PR(s) #131",
+        ),
+        PolicyCase(
+            "deny-merge-short-d-with-dependent",
+            False,
+            "gh pr merge 129 -s -d",
+            stack_merge=STACK_WITH_DEPENDENT,
+            expected_text="gh pr edit <dep> --base main",
+        ),
+        PolicyCase(
+            "deny-merge-delete-branch-when-github-unreachable",
+            False,
+            "gh pr merge 129 --squash --delete-branch",
+            stack_merge="unreachable",
+            expected_text="Could not check GitHub",
+        ),
+        PolicyCase("allow-merge-delete-branch-without-dependent", True,
+                   "gh pr merge 129 --squash --delete-branch"),
+        PolicyCase("allow-merge-without-delete-branch", True, "gh pr merge 129 --squash",
+                   stack_merge=STACK_WITH_DEPENDENT),
+        PolicyCase("allow-gh-pr-edit-base", True, "gh pr edit 131 --base main",
+                   stack_merge=STACK_WITH_DEPENDENT),
         # --- bash_no_python_file_write ---------------------------------------------------------
         # The committed-script exemption resolves a path against the REAL repo root, which the
         # repo_paths signal supplies from .cupcake/signals/'s own location. That makes it exactly
@@ -608,6 +686,35 @@ def cases() -> list[PolicyCase]:
                 ),
             },
         ),
+        # --- script_comments_no_shouting ---------------------------------------------------------
+        # The same offence in `#` comments of Python and shell scripts. It is here for the reason
+        # the three above are, and one more: the policy imports its patterns and span removal from
+        # docs_no_shouting's package, and only the WASM build proves a cross-package reference
+        # survives compilation rather than going undefined and allowing everything.
+        PolicyCase(
+            "deny-shouted-script-comment",
+            False,
+            tool_name="Edit",
+            tool_input={
+                "file_path": str(REPO_ROOT / "scripts" / "ds2-run.py"),
+                "old_string": "x",
+                "new_string": "    # A LINE IS EVIDENCE ONLY ONCE IT IS TERMINATED.",
+            },
+            expected_text="script comment that shouts",
+        ),
+        PolicyCase(
+            "allow-script-comment-full-of-names",
+            True,
+            tool_name="Edit",
+            tool_input={
+                "file_path": str(REPO_ROOT / "scripts" / "ds2-teardown.py"),
+                "old_string": "x",
+                "new_string": (
+                    "# SteamAppId and STEAM_COMPAT_APP_ID reach every process; the loader prints"
+                    ' "NOT RUN" when the probe is off, and `FUN_1402e67f0` is a DLL symbol.'
+                ),
+            },
+        ),
     ]
 
 
@@ -719,6 +826,7 @@ def main() -> int:
 
     cases_to_run = cases()
     frida_evidence_log("proven")  # written once, before the workers race to it
+    make_other_repos()
 
     max_workers = min(8, max(1, len(cases_to_run)))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:

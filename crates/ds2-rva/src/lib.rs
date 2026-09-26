@@ -232,6 +232,41 @@ pub const FE_SUBSTATE_WARNING_NO_COPY_ENTER: u32 = 0x000f_ded0;
 /// minimum, met with nothing to spare.
 pub const FE_SUBSTATE_TITLE_USER_POLICY_ENTER: u32 = 0x000f_9040;
 
+/// `FeOperatorTitle::v4`, the title operator's per-frame update. RVA `0x000ef390`.
+///
+/// A switch on the state at [`FE_OPERATOR_TITLE_STATE_OFFSET`] (`dec ecx; je` chain at
+/// `0x1400ef39c`). State 2 starts a 2.0 s fade from black through `0x14039a4d0` and moves to
+/// state 3; state 3 returns every frame while `0x14039ab20` reports the fade still running, then
+/// starts `FeStateFlow` at substate `0x00` and moves to state 4. So the title flow cannot begin
+/// until a fade over a screen with nothing on it has finished.
+///
+/// Not an Arxan redirect; its prologue is `40 57 48 83 ec 40`, six bytes.
+pub const FE_OPERATOR_TITLE_UPDATE: u32 = 0x000e_f390;
+
+/// Offset of the title operator's state in `FeOperatorTitle`. `+0x30`, `mov ecx,[rcx+0x30]`.
+pub const FE_OPERATOR_TITLE_STATE_OFFSET: usize = 0x30;
+
+/// The title operator's state that waits for the boot fade to finish. `3`.
+pub const FE_OPERATOR_TITLE_STATE_FADE_WAIT: u32 = 3;
+
+/// Offset of the screen-fade object's pointer in `GameManagerImp`. `+0x1160`.
+///
+/// Read by both `0x14039a4d0` (start a fade) and `0x14039ab20` (is a fade running).
+pub const GAME_MANAGER_SCREEN_FADE_OFFSET: usize = 0x1160;
+
+/// The screen fade's current opacity, target opacity and remaining seconds: `+0x00`, `+0x04`,
+/// `+0x08`, all `f32`.
+///
+/// `0x140b23fe0` starts a fade to clear by writing the duration to `+0x08` and `0.0` to `+0x04`,
+/// and when the duration is not positive it also writes `0.0` to `+0x00` at once.
+/// `0x14039ab20` answers "running" while `+0x08 > 0`. Read live on 2026-09-26 in the world with
+/// `scripts/frida/title-fade.js`: `current=0 target=0 remaining=0`, a finished fade.
+pub const SCREEN_FADE_CURRENT_OFFSET: usize = 0x00;
+/// See [`SCREEN_FADE_CURRENT_OFFSET`].
+pub const SCREEN_FADE_TARGET_OFFSET: usize = 0x04;
+/// See [`SCREEN_FADE_CURRENT_OFFSET`].
+pub const SCREEN_FADE_REMAINING_OFFSET: usize = 0x08;
+
 /// Phase-counter offset within `FeSubStateWarningNoCopy` and `FeSubStateTitleUserPolicy`.
 ///
 /// Read from each one's own `v3` (`0x1400ff360` and `0x1400f96f0`), both of which open
@@ -1460,6 +1495,51 @@ pub const GAME_MANAGER_IMP: u32 = 0x0161_48f0;
 /// in `SteamLoadSystemData`'s, among others.
 pub const SAVE_LOAD_SYSTEM_OFFSET: usize = 0xb8;
 
+// ============================================================================================
+// Managers reached through the Ghidra project's named accessors.
+//
+// DS2 has no FD4 singleton scan to lean on, so a manager pointer is an RVA read out of an accessor
+// that already has a name. Each one below was read statically (the accessor's own two or three
+// instructions) and then walked in a live process with `scripts/frida/singletons.js` on
+// 2026-09-25, at the title screen with a character loaded behind the continue shortcut. Where the
+// object at the end carries a vtable, its MSVC RTTI name was resolved from the flat image and is
+// quoted; where it does not, the constant says so, because a pointer that is non-null is not yet
+// a pointer of the named type.
+// ============================================================================================
+
+/// `SaveLoadSystem`'s vtable. RVA `0x010da4b8`, RTTI `.?AVSaveLoadSystem@@`.
+///
+/// What `[`[`GAME_MANAGER_IMP`]` + `[`SAVE_LOAD_SYSTEM_OFFSET`]`]` points at, measured live: the
+/// accessor `getSaveLoadSystem` (`0x1401ab6e0`) is `mov rax,[0x1416148f0]; mov rax,[rax+0xb8]`,
+/// and the object it returns carries this vptr.
+pub const SAVE_LOAD_SYSTEM_VTABLE: u32 = 0x010d_a4b8;
+
+/// The global holding a pointer to the `NetSessionManager` pointer. RVA `0x01616cf8`.
+///
+/// Two dereferences, not one: `getNetSessionManager` (`0x1402d85e0`) is
+/// `mov rax,[0x141616cf8]; test; mov rax,[rax]`. Measured live, `[[global]]` is an object whose
+/// vptr is [`NET_SESSION_MANAGER_VTABLE`].
+pub const NET_SESSION_MANAGER_POINTER: u32 = 0x0161_6cf8;
+
+/// `NetSessionManager`'s vtable. RVA `0x010fb878`, RTTI `.?AVNetSessionManager@@`.
+pub const NET_SESSION_MANAGER_VTABLE: u32 = 0x010f_b878;
+
+/// Offset of the map item pack manager in `MapManager`. `+0x1c8`.
+///
+/// `getMapItemPackManager` (`0x1401e6550`) is `[GameManagerImp]` then
+/// [`GAME_MANAGER_MAP_MANAGER_OFFSET`] then `[+0x1c8]`, with a null check after each hop. Live, the
+/// chain resolves to a non-null object, but that object's first qword is a heap pointer (the same
+/// one `MapManager` itself starts with), not a vptr, so its type is taken from the accessor's name
+/// and is not otherwise proven.
+pub const MAP_MANAGER_ITEM_PACK_MANAGER_OFFSET: usize = 0x1c8;
+
+/// `getSpEffectOwner_characterCtrl`. RVA `0x0023c830`.
+///
+/// Not a singleton: `mov rax,[rcx+0x8]; test; mov rax,[rax+0x228]`, relative to its argument. What
+/// the argument is has not been established, so only the accessor is recorded; call it rather than
+/// transcribing its two offsets onto an object of a guessed type.
+pub const GET_SP_EFFECT_OWNER_CHARACTER_CTRL: u32 = 0x0023_c830;
+
 /// `SaveLoadSystem`'s request state word.
 ///
 /// **This is the interlock.** Every start entry point refuses while it is non-zero
@@ -1579,6 +1659,24 @@ pub const FE_SUBSTATE_FLOOR_ELAPSED: f32 = 2.0;
 /// two of them are `Sleep(0)` yield loops and one is the `Sleep(1)` pump above.
 pub const SLEEP_IAT_THUNK: u32 = 0x01aa_e314;
 
+/// The import slot `DarkSoulsII.exe` calls `KERNEL32!WaitForSingleObject` through. RVA `0x01aae264`.
+///
+/// Read out of the image on disk (the slot's hint/name entry at `0x1aab8ac` names it) and read live
+/// on 2026-09-26 with `scripts/frida/wait-imports.js`, which found it pointing into
+/// `kernel32.dll`. `ds2-boot-timeline` fronts it to time how long the boot thread spends blocked.
+pub const WAIT_FOR_SINGLE_OBJECT_IAT_THUNK: u32 = 0x01aa_e264;
+
+/// The import slot for `KERNEL32!WaitForMultipleObjects`. RVA `0x01aae05c`.
+///
+/// Same two reads as [`WAIT_FOR_SINGLE_OBJECT_IAT_THUNK`]: hint/name entry `0x1aab3f0`, live target
+/// in `kernel32.dll`.
+pub const WAIT_FOR_MULTIPLE_OBJECTS_IAT_THUNK: u32 = 0x01aa_e05c;
+
+/// The import slot for `USER32!MsgWaitForMultipleObjects`. RVA `0x01aae554`.
+///
+/// Same two reads: hint/name entry `0x1aabf0c`, live target `user32!MsgWaitForMultipleObjects`.
+pub const MSG_WAIT_FOR_MULTIPLE_OBJECTS_IAT_THUNK: u32 = 0x01aa_e554;
+
 /// The frame limiter: "sleep the rest of this frame, or yield if we are already late".
 /// RVA `0x00feb910`.
 ///
@@ -1607,6 +1705,36 @@ pub const SLEEP_IAT_THUNK: u32 = 0x01aa_e314;
 /// at hop 0 on its own prologue, `40 53 48 83 ec 20` (`push rbx; sub rsp,0x20`), which also gives
 /// MinHook six clean bytes to relocate.
 pub const FRAME_LIMITER: u32 = 0x00fe_b910;
+
+/// The boot thread's startup calls, in the order they run, for the boot timeline's phase marks.
+///
+/// Read out of `WinMain` (`0x1402eb630`) and `MainApp::Init` (`0x140aee6f0`), whose own entry is
+/// an Arxan redirect and so is covered by the calls it makes instead. Every entry here was read
+/// live with `scripts/frida/boot-phase-prologues.js` on 2026-09-26 and is the clean prologue the
+/// deobfuscated image shows, and every one takes at most the four register arguments.
+///
+/// | name | RVA | what it does |
+/// |---|---|---|
+/// | `win-main` | `0x002eb630` | `WinMain`; its return is process exit |
+/// | `app-setup` | `0x00aef500` | heaps, `config.properties`, DXGI factory and mode list |
+/// | `archive-mounts` | `0x002ef410` | the `*Ebl.bhd` archives and their keys |
+/// | `input-devices` | `0x002ec290` | the input device list; Steam init runs just before it |
+/// | `graphics-init` | `0x00aead80` | `D3D11CreateDevice` and the first presents |
+/// | `sound-init` | `0x00b049f0` | the sound heaps and FMOD |
+/// | `katana-init` | `0x002eed00` | draw system, job threads, scene manager |
+/// | `app-frame` | `0x00aeeed0` | one main-loop frame; the first call ends `MainApp::Init` |
+///
+/// `DirectInput8Create` falls between `input-devices` and `graphics-init`.
+pub const BOOT_PHASES: [(&str, u32); 8] = [
+    ("win-main", 0x002e_b630),
+    ("app-setup", 0x00ae_f500),
+    ("archive-mounts", 0x002e_f410),
+    ("input-devices", 0x002e_c290),
+    ("graphics-init", 0x00ae_ad80),
+    ("sound-init", 0x00b0_49f0),
+    ("katana-init", 0x002e_ed00),
+    ("app-frame", 0x00ae_eed0),
+];
 
 /// The simpler sibling of [`FRAME_LIMITER`], and **measured never to be called during boot**.
 ///
@@ -1698,6 +1826,28 @@ pub const NET_SET_ONLINE_STUB: [u8; 3] = [0xc3, 0x90, 0x90];
 /// Read three ways that agree: the getter's `[rcx+0x3a]`, the setter's `[rcx+0x3a]`, and the
 /// constructor's `mov BYTE PTR [rbx+0x3a],0` at `0x140512f5a`.
 pub const NET_ONLINE_FLAG_OFFSET: usize = 0x3a;
+
+/// The `je` in `FeSubStateTitleUserPolicy`'s enter (`0x1400f9040`) that skips the offline boot.
+/// RVA `0x000f9077`, VA `0x1400f9077`.
+///
+/// The instruction before it is `cmp BYTE PTR [rax+0x136e], 0` on the system-data block
+/// `[[[GameManagerImp]+0xa8]+0xd8]`. Non-zero falls through to phase 3, which goes to `0x2a`
+/// (the "playing offline" notice) and then straight to `0x47` `TopMenu`, so `0x38`, `0x39`
+/// `GameServerLogin` and `0x44` Information never run. Zero takes this `je +0x12` to the next
+/// check. `ds2-offline` replaces it with [`USER_POLICY_OFFLINE_BRANCH_STUB`] so the boot always
+/// takes the offline path. It patches the branch rather than the byte because the system-data
+/// writer (`0x14019c77e`) saves `+0x136e` into the save file, and an unmodded launch of that save
+/// would then boot offline too. `docs/DS2-OFFLINE.md` has the disassembly.
+///
+/// Read live on 2026-09-26 with `scripts/frida/offline-switch.js`: the running image holds
+/// `80 b8 6e 13 00 00 00 74 12` at `0x1400f9070`, the same bytes as the file on disk.
+pub const USER_POLICY_OFFLINE_BRANCH: u32 = 0x000f_9077;
+
+/// The two bytes expected at [`USER_POLICY_OFFLINE_BRANCH`]: `je +0x12`.
+pub const USER_POLICY_OFFLINE_BRANCH_EXPECTED: [u8; 2] = [0x74, 0x12];
+
+/// `nop; nop` -- the branch removed, so the boot always falls through to phase 3.
+pub const USER_POLICY_OFFLINE_BRANCH_STUB: [u8; 2] = [0x90, 0x90];
 
 /// Offset of the network service in [`GAME_MANAGER_IMP`] -- the `this` every call to
 /// [`NET_IS_ONLINE`] and [`NET_SET_ONLINE`] is made on.
@@ -2279,6 +2429,24 @@ pub const FE_SUBSTATE_TOP_MENU_ENTER: u32 = 0x000f_de90;
 /// Called, never patched, so its Arxan status does not arise.
 pub const FE_SCENE_TITLE_POSE_HIDDEN: u32 = 0x0050_5d40;
 
+/// `FeGroupBase::v1(group, sequence, flag)`: play one sequence on a group, and nothing else.
+/// RVA `0x00505ce0`.
+///
+/// `mov rcx,[rcx+0x8]; test rcx,rcx; jz ret; xorps xmm3,xmm3; jmp 0x140afdb80` -- the same play
+/// [`FE_SCENE_TITLE_POSE_HIDDEN`] makes, with the pose flag left to the caller and the seek zeroed.
+/// `FeSceneTitle` inherits it as vtable slot 1, so the scene pointer is the right receiver. It is
+/// what `ds2-dialog-skip`'s title settle meant to call when it called [`FE_SCENE_TITLE_OPEN`], which
+/// plays the settled sequence only while `+0xf1` is clear -- and by the time the settle runs,
+/// `FeSubStateTitleMain::v1` has already set it -- and then rebuilds the top-menu group on every
+/// call. Real instructions, not an Arxan redirect; called, never patched.
+pub const FE_GROUP_PLAY_SEQUENCE: u32 = 0x0050_5ce0;
+
+/// The title scene's settled sequence, the one the press gate at `0x1400f37f0` waits for. `0x67`.
+///
+/// One of the family [`FE_SCENE_TITLE_SEQUENCE_HIDDEN`] completes: `0x66` open, `0x67` settled,
+/// `0x68` close.
+pub const FE_SCENE_TITLE_SEQUENCE_SETTLED: i32 = 0x67;
+
 /// The sequence [`FE_SCENE_TITLE_POSE_HIDDEN`] plays. `0x65`.
 ///
 /// It completes the family the frontend already had names for -- `0x66` open, `0x67` settled,
@@ -2354,10 +2522,12 @@ pub const FE_SEQUENCE_PLAY_FLAG_POSE: i32 = 1;
 /// `docs/DS2-TITLE-FLOW.md`. A question about the remaining animation, not a reason to drop the
 /// call, whose effect on when the menu becomes usable is real.
 ///
-/// **Not measured:** one boot with `title_settle` on against one with it off, which is what would
-/// say whether the open is still worth making at `0x17` now that it is known to be an open. The
-/// `FeGroupBase::v1` forwarder at `0x140505ce0` plays a sequence on a scene with no side effects
-/// and is the honest replacement if the answer is no.
+/// **No longer called for the settle.** By the time `ds2-dialog-skip`'s title settle ran, the
+/// scene's `+0xf1` open flag was already set, so this open never played `0x67` from there -- it
+/// only rebuilt the top-menu group, again, on every call. The settle now plays
+/// [`FE_SCENE_TITLE_SEQUENCE_SETTLED`] through [`FE_GROUP_PLAY_SEQUENCE`], which has no other side
+/// effects. The "confirmed in-game" effect above was credited to a `0x67` play that did not happen,
+/// so what caused it is open until a boot with the settle on is compared against one with it off.
 ///
 /// # Why this is the site to hook to hide the screen
 ///
@@ -5193,6 +5363,68 @@ pub const PLAYER_LEVEL_UP_SOULS_LEVEL_OFFSET: usize = 0x00;
 /// with a nonzero gradient is not a per-level list and must not be read as one.
 pub const PLAYER_LEVEL_UP_SOULS_COST_OFFSET: usize = 0x08;
 
+/// The game's own level-up price. RVA `0x0038d140`. `fn(u32 level) -> i32`.
+///
+/// Returns the souls it costs to go from `level` to `level + 1`, the same number the level-up menu
+/// charges (`FUN_1401fb970`) and refunds (`FUN_1401fb800`). It takes the level in ECX and nothing
+/// else: it loads [`GAME_MANAGER_IMP`] itself, takes `CharacterManager` at
+/// [`GAME_MANAGER_CHARACTER_MANAGER_OFFSET`], and asks [`PARAM_ROW_BY_INDEX`] for rows of the
+/// `PlayerLevelUpSoulsParam` held at [`CHARACTER_MANAGER_LEVEL_UP_SOULS_PARAM_OFFSET`].
+///
+/// Read in full at `0x14038d140`: row `level` is tried first and an exact level match returns its
+/// souls. Otherwise the index is halved until a row exists whose level is at or below the one
+/// asked for, then walked forward while the next row is still below it, and the answer is
+/// `souls + (level - row.level) * [row + 4]`.
+///
+/// # What a caller must check first
+///
+/// It checks nothing on the way in. `[GAME_MANAGER_IMP]`, `+0x18` and `+0x580` are dereferenced
+/// without a null test, and the halving loop only ends on a row whose level is at or below the one
+/// asked for: if row 0 were missing, or above the level, the index would sit at zero and the loop
+/// would never exit. Measured live with `scripts/frida/soul-guard-inputs.js`: row 0 is level 0 with
+/// souls 0, so the loop ends for every level of one or more.
+///
+/// Not Arxan-redirected: `scripts/ds2-arxan-chain.py 0x14038d140` terminates at hop 0.
+pub const PLAYER_LEVEL_UP_SOULS_COST: u32 = 0x0038_d140;
+
+/// The bytes [`PLAYER_LEVEL_UP_SOULS_COST`] begins with.
+///
+/// `mov [rsp+0x10],rbx; mov [rsp+0x18],rbp; push rdi`. Read from the live process by
+/// `scripts/frida/soul-guard-inputs.js`.
+pub const PLAYER_LEVEL_UP_SOULS_COST_PROLOGUE: [u8; 11] = [
+    0x48, 0x89, 0x5c, 0x24, 0x10, 0x48, 0x89, 0x6c, 0x24, 0x18, 0x57,
+];
+
+/// The row accessor [`PLAYER_LEVEL_UP_SOULS_COST`] calls. RVA `0x00358b90`.
+///
+/// `fn(CharacterManager*, i32 index) -> *const Row`. Reads `[CharacterManager + 0x580]`, then the raw file at [`PARAM_FILE_RESOURCE_FILE_OFFSET`] of
+/// that container, and returns the row at position `index`, or null when the file is absent or the
+/// index is not below the `u16` count at [`PARAM_ROW_COUNT_OFFSET`]. The byte at
+/// [`PARAM_FILE_TABLE_SHAPE_OFFSET`] picks the row-index layout: non-zero is the `0x18`-stride
+/// table [`PARAM_ROW_STRIDE`] describes, with a `u64` data offset at [`PARAM_ROW_DATA_OFFSET`];
+/// zero is an 8-stride table with a `u32` offset at `+4`. Recorded here for the precondition
+/// checks a caller of [`PLAYER_LEVEL_UP_SOULS_COST`] makes; nothing calls it directly.
+pub const PARAM_ROW_BY_INDEX: u32 = 0x0035_8b90;
+
+/// `CharacterManager -> PlayerLevelUpSoulsParam` container (a `ParamFileResourceObject`). `+0x580`.
+///
+/// The first load in [`PARAM_ROW_BY_INDEX`] (`mov rdx,[rcx+0x580]`), with `CharacterManager` in RCX
+/// as [`PLAYER_LEVEL_UP_SOULS_COST`] passes it. Live on 2026-09-26 it held the 852-row table.
+pub const CHARACTER_MANAGER_LEVEL_UP_SOULS_PARAM_OFFSET: usize = 0x580;
+
+/// `ParamFileResourceObject -> raw param file`. `+0xD8`.
+///
+/// The container's `Memory` object sits at `+0xC8` and its `mem_ptr` at `+0x10` within it.
+/// [`PARAM_ROW_BY_INDEX`] tests `[container + 0xd8]` for null, then loads the same pointer as
+/// `[container + 0xc8 + 0x10]`.
+pub const PARAM_FILE_RESOURCE_FILE_OFFSET: usize = 0xD8;
+
+/// Byte in a raw param file that picks the row-index layout. `+0x2D`.
+///
+/// `cmp byte [rdx+0x2d],1` in [`PARAM_ROW_BY_INDEX`]: non-zero selects the wide table. Read as `4`
+/// for `PlayerLevelUpSoulsParam` in a live process on 2026-09-26.
+pub const PARAM_FILE_TABLE_SHAPE_OFFSET: usize = 0x2D;
+
 // =================================================================================================
 // GRANTING AN ITEM -- the game's own function
 //
@@ -5762,6 +5994,23 @@ pub const PLAYER_PARAM_ADD_SOULS: u32 = 0x0038_ab40;
 /// not do. It is here so the next reader does not re-derive "there is no such function" from
 /// `AddSouls` alone, which is exactly how the wrong claim got written the first time.
 pub const PLAYER_PARAM_RESTORE_FROM_RECORD: u32 = 0x0038_ad20;
+
+/// The bytes [`PLAYER_PARAM_RESTORE_FROM_RECORD`] begins with.
+///
+/// `push rbp; push rbx; push rdi; mov rbp,rsp; sub rsp,0x20`. Read from the live process by
+/// `scripts/frida/soul-guard-inputs.js`; `scripts/ds2-arxan-chain.py 0x14038ad20` reports the same
+/// bytes at hop 0, so it is not Arxan-redirected.
+///
+/// It returns `mov al,1`; the upper bytes of RAX are whatever the last call left there, so a detour
+/// passes the whole register through rather than widening a byte.
+///
+/// Its stats go in through [`PLAYER_PARAM_SET_ALL_STATS`], whose recompute (`0x14038d6d0`, a thunk
+/// to `0x141b3f700`) ends in `FUN_14038e310` and writes [`PLAYER_PARAM_SOUL_LEVEL_OFFSET`]. So once
+/// it returns, the level is the one derived from the loaded stats and the soul counters are the
+/// record's.
+pub const PLAYER_PARAM_RESTORE_FROM_RECORD_PROLOGUE: [u8; 11] = [
+    0x40, 0x55, 0x53, 0x57, 0x48, 0x8b, 0xec, 0x48, 0x83, 0xec, 0x20,
+];
 
 /// The four bytes [`PLAYER_PARAM_ADD_SOULS`] must begin with. `sub rsp,0x28`, then `mov rax,[rcx]`.
 pub const PLAYER_PARAM_ADD_SOULS_PROLOGUE: [u8; 7] = [0x48, 0x83, 0xec, 0x28, 0x48, 0x8b, 0x01];
@@ -6818,6 +7067,40 @@ pub const NAVI_ID_INDEX_MASK: u32 = 0x7fff;
 /// 0x7fff`) before it will index anything, and by `0x140bba040` (`psVar16[6] == 0x7fff`).
 pub const NAVI_ID_INDEX_NONE: u32 = 0x7fff;
 
+/// The bit that makes a packed navi id an EDGE rather than a triangle. `0x8000`.
+///
+/// `0x140bab200` is the triangle packer `0x140bab230` plus one `bts eax, 0xf` at `0x140bab21c`,
+/// and it is the packer `0x140bb3f00` uses for a route's portals. So a route segment's ids are
+/// edges, and their index belongs to [`NV_NAVI_GRAPH_EDGES_OFFSET`], not to the per-triangle
+/// table at [`NV_NAVI_GRAPH_NODE_ATTRS_OFFSET`].
+///
+/// Measured live on 2026-09-26 with `scripts/frida/route-edge-ids.js`: every id of a self-check
+/// route carried this bit, and one of them, `0x0002815f`, indexed an edge past the end of its
+/// graph's triangle table -- the word read there was a neighbouring allocation, and it is what
+/// capped the route audit below the widest size class.
+pub const NAVI_ID_EDGE_FLAG: u32 = 0x8000;
+
+/// `i16` triangle count of an `NvNaviGraph`: the bound on [`NV_NAVI_GRAPH_NODE_ATTRS_OFFSET`]'s
+/// table. Read by `0x1404018d0`, `0x140bac070` and `0x140bb3f00`.
+pub const NV_NAVI_GRAPH_TRIANGLE_COUNT_OFFSET: usize = 0x2c;
+
+/// `i16` edge count of an `NvNaviGraph`: the bound on [`NV_NAVI_GRAPH_EDGES_OFFSET`], checked
+/// by `0x140bb4ac0`, `0x140bb9de0` and `0x140bba040` before they index it.
+pub const NV_NAVI_GRAPH_EDGE_COUNT_OFFSET: usize = 0x2e;
+
+/// Pointer to an `NvNaviGraph`'s edge records, [`NV_NAVI_EDGE_STRIDE`] apart.
+pub const NV_NAVI_GRAPH_EDGES_OFFSET: usize = 0x58;
+
+/// Bytes per edge record at [`NV_NAVI_GRAPH_EDGES_OFFSET`].
+pub const NV_NAVI_EDGE_STRIDE: usize = 0x10;
+
+/// Two `i16` triangle indices in an edge record, one per side.
+///
+/// [`NAVI_ID_INDEX_NONE`] means the edge is a border with nothing on that side. `0x140bba040`
+/// reads an edge's attribute word as
+/// `[graph+0x48][edge[6 + side]]`, i.e. through these.
+pub const NV_NAVI_EDGE_TRIANGLES_OFFSET: usize = 0xc;
+
 /// The type field of a node attribute word: bits 3..6, the value `0x140baf0d0` switches on.
 pub const NAVI_NODE_TYPE_MASK: u32 = 0x78;
 
@@ -7400,12 +7683,16 @@ pub const KATANA_SFX_NODE_ALIVE_OFFSET: usize = 0x58;
 /// The bit at [`KATANA_SFX_NODE_ALIVE_OFFSET`] that means "still playing". `0x4000_0000`.
 pub const KATANA_SFX_NODE_ALIVE_BIT: u32 = 0x4000_0000;
 
-/// `KatanaSfxSystem -> ids that did not resolve`. `+0x2b8`, an MSVC `std::map`-shaped red-black
-/// tree keyed by `u32`.
+/// `KatanaSfxSystem -> ids that have spawned`, with a count each. `+0x2b8`, an MSVC
+/// `std::map`-shaped red-black tree keyed by `u32`.
 ///
-/// **Membership is the difference between "not in this map" and "spawned and invisible"**, which
-/// is otherwise the same absence on the ground and the most expensive confusion in the whole
-/// feature to resolve by looking.
+/// The constant's name is the old reading, and it was wrong: this tree does not record failed
+/// lookups. Its only writer, `0x140beb400`, is called from the spawn `0x140beb670` (at
+/// `0x140beb8a7`/`0x140beb8bf`) only after `0x140a06580` says the built block is not empty (`jz`
+/// at `0x140beb87f`); an empty spawn goes to `0x140127240` and records nothing. So membership means
+/// "this id has spawned at least once", and the count at [`KATANA_SFX_SPAWNED_COUNT_OFFSET`] is how
+/// many times. Found statically on 2026-09-26, after a self-check reported every stone as "not
+/// resident" while logging each one as spawned.
 ///
 /// `0x140beb400(sys, id)` is the insert, and reading it gives the entire layout. It is a
 /// `lower_bound` descent followed by the usual found-test, so a read-only `contains` is the same
@@ -7418,8 +7705,12 @@ pub const KATANA_SFX_NODE_ALIVE_BIT: u32 = 0x4000_0000;
 /// ```
 ///
 /// A hit bumps a counter at `+0x20` and clears a byte at `+0x24` rather than inserting again, so
-/// the tree records how many times each id was asked for.
+/// the tree records how many times each id has spawned.
 pub const KATANA_SFX_MISSING_IDS_OFFSET: usize = 0x2b8;
+
+/// The `u32` spawn count in a node of the [`KATANA_SFX_MISSING_IDS_OFFSET`] tree. `+0x20`: the
+/// insert writes `1` for a new id (`0x140beb458`) and adds one for a known id (`0x140beb465`).
+pub const KATANA_SFX_SPAWNED_COUNT_OFFSET: usize = 0x20;
 
 /// `_Left` of a node in the [`KATANA_SFX_MISSING_IDS_OFFSET`] tree. `+0x00`.
 pub const KATANA_SFX_MISSING_LEFT_OFFSET: usize = 0x00;
@@ -7832,6 +8123,17 @@ pub const PAD_DEVICE_BUTTONS_OFFSET: usize = 0x198;
 /// From `mov ecx,DWORD PTR [rdi+0x19c]` / `test ecx,ecx` / `js` at `0x140f05ab0` -- the branch
 /// that chooses the DirectInput arm over the XInput one.
 pub const PAD_DEVICE_XINPUT_PORT_OFFSET: usize = 0x19c;
+
+/// Third-backend selector, `i32`; a value `>= 0` routes button reads to
+/// [`PAD_DEVICE_THIRD_BACKEND_BUTTONS_OFFSET`] instead of [`PAD_DEVICE_BUTTONS_OFFSET`].
+///
+/// `PadDevice` vtable slot 27 (`0x140f04d40`, "is this key down") tests it first. Read live on
+/// 2026-09-26 with `scripts/frida/pad-button-read.js` on an XInput pad: `third=-1 port=0`.
+pub const PAD_DEVICE_THIRD_BACKEND_OFFSET: usize = 0x314;
+
+/// Third-backend button mask, `u32`, read by slot 27 when [`PAD_DEVICE_THIRD_BACKEND_OFFSET`] is
+/// `>= 0`, through the key table at `0x015f6438`.
+pub const PAD_DEVICE_THIRD_BACKEND_BUTTONS_OFFSET: usize = 0x2f8;
 
 /// Base of the six normalised axis floats. `PadDevice+0x1a4`.
 ///
@@ -8742,6 +9044,14 @@ pub const ITEM_ENTRY_TYPE_OFFSET: usize = 0x1e;
 /// Highest item type that can carry an infusion. `1`, from `cmp byte ptr [rax+0x1e],1; jbe`.
 pub const ITEM_ENTRY_TYPE_MAX_INFUSABLE: u8 = 1;
 
+/// Item types `2..=5` are armour, `7` a ring and `9` a spell: `FUN_1401ad2a0` maps the entry's
+/// `+0x1e` to a category, and the category names at `0x14156b070` label 5 as a spell.
+pub const ITEM_ENTRY_TYPE_ARMOUR: core::ops::RangeInclusive<u8> = 2..=5;
+/// See [`ITEM_ENTRY_TYPE_ARMOUR`]. Rings have no stat requirement: their detail pane has no rows.
+pub const ITEM_ENTRY_TYPE_RING: u8 = 7;
+/// See [`ITEM_ENTRY_TYPE_ARMOUR`].
+pub const ITEM_ENTRY_TYPE_SPELL: u8 = 9;
+
 /// The `u8` holding the infusion in its low nibble. `+0x26`.
 pub const ITEM_ENTRY_INFUSION_OFFSET: usize = 0x26;
 
@@ -8791,11 +9101,22 @@ pub const ITEM_ENTRY_INFUSION_MASK: u8 = 0x0f;
 /// function takes no grip argument at all, so the detail pane's requirement numbers ignore both,
 /// and so does anything built on this comparison.
 ///
-/// **Not established: whether the table at [`FRONTEND_ROOT_PLAYER_STATS_OFFSET`] holds base or
-/// modified stats.** Every xref to `FUN_1404ffb20` is a reader and the writer has not been found,
-/// so "rings and spEffects are included" is unproven here, where the gameplay side's
-/// `chrStatus + 0x16` block proves it. See `docs/DS2-ITEM-REQUIREMENTS.md`.
+/// **The table at [`FRONTEND_ROOT_PLAYER_STATS_OFFSET`] holds the effective stats**, read
+/// statically: it is written by [`FRONTEND_STAT_TABLE_WRITER`], called from the frontend root's
+/// update, and entries 4..13 come from the same effective block (`PlayerParam + 0x1e`) the game's
+/// own mechanics requirement check reads. Whether that block includes spEffects as well as ring
+/// bonuses is still open -- the code that builds the modifiers is Arxan-obfuscated past its first
+/// null check -- but this check and the mechanics one agree either way. See
+/// `docs/DS2-ITEM-REQUIREMENTS.md`, "The frontend stat table is that same effective block".
 pub const FE_STAT_ROW_COLOUR: u32 = 0x000b_cde0;
+
+/// `FUN_14003ebe0`: fills the frontend stat table from the effective stat block. RVA `0x0003ebe0`.
+///
+/// Called from the frontend root's update (`FUN_140501c20`, at `0x140501d57`); stores an entry only
+/// when its value changed. Read in-world with `scripts/frida/stat-table.js` on 2026-09-25 every
+/// entry was `1`, which fits a table the frontend fills only while its own screens update rather
+/// than a live copy maintained every frame -- read it with a menu open.
+pub const FRONTEND_STAT_TABLE_WRITER: u32 = 0x0003_ebe0;
 
 /// `FUN_1404ffb20(frontendRoot)` -> the player's stat table. `+0x138`, in full:
 /// `48 8b 81 38 01 00 00 c3` -- `mov rax,[rcx+0x138]; ret`.
@@ -8851,6 +9172,20 @@ pub const FE_ITEM_PARAM_WEAPON_REQUIREMENTS: [u32; 4] = [0x33, 0x34, 0x35, 0x36]
 
 /// The one of [`FE_ITEM_PARAM_WEAPON_REQUIREMENTS`] that a two-handed grip halves: Strength.
 pub const FE_ITEM_PARAM_WEAPON_REQUIRED_STRENGTH: u32 = 0x33;
+
+/// The four `FE_ITEM_PARAM_TYPE` keys that are an armour piece's stat requirements.
+///
+/// `FUN_1400312e0` returns the `u16` at `row + 0x3c`, `+0x3e`, `+0x40`, `+0x42` for them. Read live
+/// on 2026-09-26 with `scripts/frida/stat-row-keys.js`: [`FE_STAT_ROW_TABLE`] maps them to player
+/// stats `8, 9, 10, 11`, the same four the weapon keys use.
+pub const FE_ITEM_PARAM_ARMOUR_REQUIREMENTS: [u32; 4] = [0x11, 0x12, 0x13, 0x14];
+
+/// The two `FE_ITEM_PARAM_TYPE` keys that are a spell's stat requirements (Intelligence, Faith).
+///
+/// `FUN_1400312e0` answers them with the requirement at `row + 0x08`/`+0x0a` less a per-player
+/// reduction (`FUN_14003c160([row+0x7c])`), floored at zero, so the column already says what this
+/// character needs. Read live with the same agent: they map to player stats `10` and `11`.
+pub const FE_ITEM_PARAM_SPELL_REQUIREMENTS: [u32; 2] = [0x42, 0x43];
 
 /// `PlayerCtrl -> ChrAsmCtrl`. `+0x378`.
 ///

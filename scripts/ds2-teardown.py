@@ -10,10 +10,13 @@ Because two `kill` commands is what was tried, on 2026-09-23, and it left `srt-b
 `winedevice.exe` alive while reporting "reaper gone / wineserver gone". Killing the pids you happen
 to have noticed is not a teardown; it is a teardown-shaped sentence.
 
-**The game is invisible to `pgrep`.** Steam launches DS2 through the Steam Linux Runtime, so
-`DarkSoulsII.exe` lives inside a bwrap PID NAMESPACE and does not appear in the host's `/proc` by
-name at all -- `pgrep -x DarkSoulsII.exe` and `pidof DarkSoulsII.exe` both answer "nothing running"
-about a game that is on screen. Measured here the same day.
+**The game can be invisible to `pgrep`.** Steam launches DS2 through the Steam Linux Runtime, and
+on the day this script was written `DarkSoulsII.exe` lived where the host's `/proc` did not show it
+by name -- `pgrep -x DarkSoulsII.exe` and `pidof DarkSoulsII.exe` both answered "nothing running"
+about a game that was on screen. That has not held since: on 2026-09-26 `pgrep -x DarkSoulsII.exe`
+returned the running game's pid after every launch, the same pid this script then listed as
+`DarkSoulsII.exe by=appid`. Which launch path hides it is not pinned down, so the name is not
+trusted as the only rule.
 
 So the classifier that finds everything is the ENVIRONMENT:
 

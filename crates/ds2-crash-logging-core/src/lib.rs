@@ -233,6 +233,124 @@ pub(crate) fn banned_rungs() -> Vec<u32> {
         .unwrap_or_default()
 }
 
+/// The ban list's first line names the `dbghelp` its bans were earned against.
+///
+/// A ban is a statement about one `dbghelp` implementation -- measured on this box, Proton's dies
+/// in rungs 0 and 1 where plain Wine succeeds at rung 0 -- so a list that outlives the
+/// implementation it describes keeps the crash logger on its worst dump forever, silently. The
+/// stamp is what lets a later run notice. [`parse_banned_rungs`] already drops any line that is not
+/// a rung, so a stamped file reads the same to it, and an older reader still works.
+#[cfg(any(windows, test))]
+pub(crate) const BAN_STAMP_PREFIX: &str = "dbghelp ";
+
+/// The stamp a ban list was written with, if it has one.
+#[cfg(any(windows, test))]
+pub(crate) fn parse_ban_stamp(text: &str) -> Option<&str> {
+    text.lines()
+        .find_map(|line| line.strip_prefix(BAN_STAMP_PREFIX))
+        .map(str::trim)
+        .filter(|stamp| !stamp.is_empty())
+}
+
+/// The ban list as written: the stamp line when there is one, then one rung per line.
+#[cfg(any(windows, test))]
+pub(crate) fn format_ban_file(stamp: Option<&str>, rungs: &[u32]) -> String {
+    stamp
+        .map(|stamp| format!("{BAN_STAMP_PREFIX}{stamp}"))
+        .into_iter()
+        .chain(rungs.iter().map(u32::to_string))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// What to do with a ban list, given the stamp it carries and the `dbghelp` in use now.
+#[cfg(any(windows, test))]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum BanListFate {
+    /// Earned against this `dbghelp`, or no way to tell: keep every ban.
+    Keep,
+    /// Written before stamps existed: keep the bans and stamp them with the current `dbghelp`,
+    /// because there is no evidence either way and a discarded ban costs a crash to re-earn.
+    Stamp,
+    /// Earned against a different `dbghelp`: every rung gets one more chance.
+    Discard,
+}
+
+/// The decision, split out so it can be tested without a filesystem.
+#[cfg(any(windows, test))]
+pub(crate) fn ban_list_fate(written_with: Option<&str>, current: Option<&str>) -> BanListFate {
+    match (written_with, current) {
+        (_, None) => BanListFate::Keep,
+        (None, Some(_)) => BanListFate::Stamp,
+        (Some(then), Some(now)) if then == now => BanListFate::Keep,
+        (Some(_), Some(_)) => BanListFate::Discard,
+    }
+}
+
+/// Which `dbghelp` this process would load: the system copy's path, size and modification time.
+///
+/// Read off the FILE rather than the loaded module because `dbghelp` is loaded lazily, at dump
+/// time, and loading it here -- during install, possibly under the loader lock -- is exactly the
+/// kind of work `DllMain` must not do. A Proton or Wine upgrade replaces this file, which changes
+/// its size or its time, and that is the event the stamp exists to notice. `None` when the file
+/// cannot be read, which keeps every ban: no evidence is not evidence of a change.
+#[cfg(windows)]
+pub(crate) fn dbghelp_stamp() -> Option<String> {
+    let root = std::env::var_os("SystemRoot")?;
+    let path = PathBuf::from(root).join("System32").join("dbghelp.dll");
+    let meta = fs::metadata(&path).ok()?;
+    let modified = meta
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    Some(format!(
+        "{} size={} mtime={modified}",
+        path.display(),
+        meta.len()
+    ))
+}
+
+/// Discard or stamp the ban list according to [`ban_list_fate`], and say which.
+#[cfg(windows)]
+pub(crate) fn reconcile_ban_list() {
+    let Ok(text) = fs::read_to_string(banned_rungs_path()) else {
+        return;
+    };
+    let rungs = parse_banned_rungs(&text);
+    let written_with = parse_ban_stamp(&text);
+    let current = dbghelp_stamp();
+    match ban_list_fate(written_with, current.as_deref()) {
+        BanListFate::Keep => {}
+        BanListFate::Stamp => {
+            let _ = fs::write(
+                banned_rungs_path(),
+                format_ban_file(current.as_deref(), &rungs),
+            );
+            append_log(format_args!(
+                "minidump bans stamped with the dbghelp in use -- written before stamps existed. \
+                 dbghelp={}",
+                current.as_deref().unwrap_or("-")
+            ));
+        }
+        BanListFate::Discard => {
+            let removed = fs::remove_file(banned_rungs_path()).is_ok();
+            append_log(format_args!(
+                "minidump bans DISCARDED -- they were earned against a different dbghelp, so \
+                 every rung gets one more chance. was={} now={} discarded_rungs=[{}] removed={removed}",
+                written_with.unwrap_or("-"),
+                current.as_deref().unwrap_or("-"),
+                rungs
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            ));
+        }
+    }
+}
+
 /// Append one line to the run-long record.
 pub fn append_log(args: fmt::Arguments<'_>) {
     ds2_game_base::log::append_line(&path_for(config().log_file_name), args);
@@ -305,6 +423,7 @@ pub fn mark_phase(phase: Phase) {
 }
 
 #[cfg(not(windows))]
+/// Host stub: there is no process to stamp a phase into, so this does nothing.
 pub fn mark_phase(_phase: Phase) {}
 
 #[cfg(windows)]
@@ -737,6 +856,10 @@ pub fn install(new_config: CrashLogConfig, self_module_base: usize) {
         // down for exactly this reason -- "indistinguishable from a captured dump until someone
         // opens it" -- and a 209KB truncated dump is the same trap with a plausible file size on
         // it, which makes it likelier to be collected and sent, not less.
+        //
+        // Before any of that, the ban list is reconciled against the dbghelp in use, so a ban the
+        // sentinel is about to add is stamped with the implementation that actually earned it.
+        reconcile_ban_list();
         if let Some(rung) = surviving_sentinel_tier() {
             let mut banned = banned_rungs();
             if !banned.contains(&rung) {
@@ -748,7 +871,10 @@ pub fn install(new_config: CrashLogConfig, self_module_base: usize) {
                 .map(u32::to_string)
                 .collect::<Vec<_>>()
                 .join("\n");
-            let _ = fs::write(banned_rungs_path(), &list);
+            let _ = fs::write(
+                banned_rungs_path(),
+                format_ban_file(dbghelp_stamp().as_deref(), &banned),
+            );
             let dump = path_for(config().minidump_file_name);
             let removed = fs::remove_file(&dump).is_ok();
             let _ = fs::remove_file(sentinel_path());
@@ -874,9 +1000,11 @@ pub fn note_process_detach() {
 }
 
 #[cfg(not(windows))]
+/// Host stub: there is no DLL to detach, so this does nothing.
 pub fn note_process_detach() {}
 
 #[cfg(not(windows))]
+/// Host stub: keeps the configuration so host tests can read it back, and installs no handler.
 pub fn install(config: CrashLogConfig, _self_module_base: usize) {
     let _ = CONFIG.set(config);
 }
@@ -1980,6 +2108,42 @@ mod sentinel_tests {
             vec![0, 2],
             "junk and out-of-range entries are dropped, the real ones survive"
         );
+    }
+
+    #[test]
+    fn a_stamped_ban_list_reads_the_same_rungs_and_carries_its_stamp() {
+        let text = format_ban_file(
+            Some("C:\\windows\\System32\\dbghelp.dll size=1 mtime=2"),
+            &[0, 2],
+        );
+        assert_eq!(parse_banned_rungs(&text), vec![0, 2]);
+        assert_eq!(
+            parse_ban_stamp(&text),
+            Some("C:\\windows\\System32\\dbghelp.dll size=1 mtime=2")
+        );
+        assert_eq!(
+            parse_ban_stamp("0\n1\n2"),
+            None,
+            "a list from before stamps has none"
+        );
+        assert_eq!(format_ban_file(None, &[1]), "1");
+    }
+
+    #[test]
+    fn bans_are_discarded_only_when_the_dbghelp_is_known_to_have_changed() {
+        assert_eq!(ban_list_fate(Some("a"), Some("a")), BanListFate::Keep);
+        assert_eq!(ban_list_fate(Some("a"), Some("b")), BanListFate::Discard);
+        assert_eq!(
+            ban_list_fate(None, Some("b")),
+            BanListFate::Stamp,
+            "an unstamped list is evidence of nothing: keep it and stamp it"
+        );
+        assert_eq!(
+            ban_list_fate(Some("a"), None),
+            BanListFate::Keep,
+            "an unreadable dbghelp is not a changed one"
+        );
+        assert_eq!(ban_list_fate(None, None), BanListFate::Keep);
     }
 
     #[test]

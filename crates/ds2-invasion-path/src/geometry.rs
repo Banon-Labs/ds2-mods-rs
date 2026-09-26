@@ -27,13 +27,6 @@
 //! and `m33 == 0.0` is not decoration: [`looks_like_a_projection`] uses the whole shape as a
 //! signature to recognise the matrix in memory, which is how the camera is found at all.
 
-// Every non-test consumer of this module is `cfg(windows)`, so on the host it is structurally
-// dead. `dead_code` is still denied on the shipping target, where the windows modules are
-// compiled and every item here has a caller -- so this allow cannot hide an unused item, it only
-// stops the host test run from failing over cross-compiled callers.
-// DEBT: ds2-mods-rs-2rs -- module-wide dead_code, reason not yet recorded.
-#![cfg_attr(not(windows), allow(dead_code))]
-
 /// A 4x4 matrix in the game's storage order: sixteen `f32`, row-major.
 pub type Matrix = [f32; 16];
 

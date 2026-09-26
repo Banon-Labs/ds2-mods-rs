@@ -5,8 +5,11 @@
 //   query.sh scripts/ghidra/rt/Ds2ArxanStubs.java list                  # every redirected function, named
 //   query.sh scripts/ghidra/rt/Ds2ArxanStubs.java 0x14014bec0 0x1402206d0   # verdict per VA
 //
-// WHAT IT LOOKS FOR, and why that is the right test. `docs/PORTING.md` records 48 Arxan stubs and
-// 286 redirected functions. The redirect has one visible shape: the function's first instruction is
+// WHAT IT LOOKS FOR, and why that is the right test. The census covers Ghidra's functions only;
+// `scripts/ds2-arxan-redirects.py --ghidra` diffs it against the `.pdata` records, which catch
+// redirects at addresses Ghidra never made functions.
+//
+// The redirect has one visible shape: the function's first instruction is
 // an unconditional `JMP rel32` whose target is in the image's SECOND `.text` block -- the extra
 // executable block Arxan appends, at 0x141aaf000 here. A function that starts that way has no
 // prologue left to hook: MinHook's five bytes would land on Arxan's own jump, which is a different

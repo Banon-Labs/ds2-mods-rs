@@ -142,7 +142,7 @@ if (( run_host_tests )); then
   # exercised without Windows. A crate belongs on this line only if it has no `cfg(windows)` gate;
   # everything else is covered by the wine pass below.
   cargo test -p ds2-sl2-core -p ds2-hotkey-config -p ds2-safe-input -p ds2-crash-logging-core \
-    -p ds2-build-import-core -p ds2-save-file-core -p ds2-save-picker-core
+    -p ds2-build-import-core -p ds2-save-file-core -p ds2-save-picker-core -p ds2-soul-memory-guard
 
   echo "== windows-target tests (wine) =="
   # THE CRATES THAT MATTER MOST WERE THE ONES WITH NO EXECUTABLE TESTS. `ds2-loader` is
@@ -285,6 +285,9 @@ else
   # And the PR Run-Stamp guard's deciding half: which body earns which verdict at `gh pr create` and
   # `gh pr ready`, and the helper that prints the stamp. `opa test` above pins verdict -> denial.
   python3 scripts/test-run-stamp.py
+  # The stack-merge guard's deciding half: which `gh pr merge` spellings delete the head branch, and
+  # which GitHub answers refuse it. `opa test` above pins verdict -> denial.
+  python3 scripts/cupcake_stack_merge.py --selftest
   # The runtime push guard's deciding half, against throwaway repositories and the real engine. The
   # policy was right on 2026-09-25 and the signal handed it `game_code=0` for a push of the
   # launcher, because `git commit ... && git push` was one command and the commit did not exist yet
@@ -347,5 +350,13 @@ echo "  ds2-player-kind.py: OK"
 # file this repository never had.
 python3 scripts/ds2-frida-watch.py --selftest >/dev/null
 echo "  ds2-frida-watch.py: OK"
+# The Arxan redirect census. Its selftest builds a small PE in both layouts, so it needs no game
+# image; it pins the exception-directory bound, the chained-record flag, and the diff's reasons.
+python3 scripts/ds2-arxan-redirects.py --selftest >/dev/null
+echo "  ds2-arxan-redirects.py: OK"
+# The effect bundle reader. Its BND4 entry layout comes from the header's format flags, and the
+# two shipped layouts (36-byte with compression sizes, 28-byte without) are both built here.
+python3 scripts/ds2-ffx.py --selftest >/dev/null
+echo "  ds2-ffx.py: OK"
 
 echo "== OK =="
