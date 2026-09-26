@@ -355,3 +355,47 @@ test_chained_commit_and_push_of_docs_is_allowed if {
 test_signal_without_pending_field_still_proves if {
 	count(guard.deny) == 0 with input as event("git push -u origin b", proven)
 }
+
+# --- the push runs where the command moved to (ds2-mods-rs-lgor, 2026-09-26) ----------------------
+# Run from the main checkout, this was refused as "not the one this checkout built": the signal
+# hashed the main checkout's target/ while the worktree the command cds into had built exactly the
+# DLL that was staged and run. The signal now resolves the directory the push runs in and reports on
+# that checkout, so the policy sees the worktree's facts -- here, a clean run. The policy half of the
+# fix is what it does when the signal cannot resolve the directory; the resolution itself is pinned
+# by `scripts/cupcake_push_scope.py --selftest` and `scripts/test-runtime-evidence-signal.py`.
+cd_then_push_command := `H=/home/banon/projects/ds2-mods-rs-wt-hk/scripts/ds2-harness.sh; timeout 8 $H 'block 30' 'buttons 0x2000 4' >/dev/null 2>&1; sleep 0.5; timeout 8 $H 'block 30' 'buttons 0x2000 4' >/dev/null 2>&1; cd /home/banon/projects/ds2-mods-rs/.claude/worktrees/agent-a205f2332ce8fcef7 && git push -u origin build-url-dialog 2>&1 | tail -2`
+
+# The signal's answer for the worktree the command moves into, which built and ran the staged DLL.
+proven_in_push_dir := "RUNTIME|game_code=1|attached=1|fresh=1|dll_match=1|pending=0|pushdir=1|head=1758600000|log=1758600900"
+
+# The command moves before pushing and the signal could not say where to. Every other field is set as
+# the signal sets it then, and `game_code=0` in the second shape checks the refusal does not lean on it.
+unresolved_push_dir := "RUNTIME|game_code=1|attached=0|fresh=0|dll_match=0|pending=0|pushdir=0|head=0|log=0"
+
+unresolved_push_dir_no_game_code := "RUNTIME|game_code=0|attached=1|fresh=1|dll_match=1|pending=0|pushdir=0|head=0|log=0"
+
+test_cd_then_push_is_judged_on_the_cd_target if {
+	allowed(cd_then_push_command, proven_in_push_dir)
+	blocked(cd_then_push_command, foreign_binary)
+}
+
+test_git_dash_c_push_is_judged_on_the_dash_c_target if {
+	allowed("git -C /home/banon/projects/ds2-mods-rs/.claude/worktrees/agent-a push -u origin b", proven_in_push_dir)
+}
+
+test_plain_push_is_unchanged if {
+	allowed("git push -u origin build-url-dialog", proven_in_push_dir)
+	allowed("git push -u origin build-url-dialog", proven)
+	blocked("git push -u origin build-url-dialog", foreign_binary)
+}
+
+test_unresolved_push_dir_is_refused_and_says_so if {
+	some d in guard.deny with input as event(`cd "$WT" && git push`, unresolved_push_dir)
+	d.rule_id == "DS2-MODS-REQUIRE-RUNTIME-BEFORE-PUSH"
+	contains(d.reason, "could not resolve that directory")
+}
+
+test_unresolved_push_dir_is_refused_even_when_game_code_reads_zero if {
+	some d in guard.deny with input as event("cd - && git push", unresolved_push_dir_no_game_code)
+	contains(d.reason, "could not resolve that directory")
+}

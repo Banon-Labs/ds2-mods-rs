@@ -187,6 +187,41 @@ def main() -> int:
               w2.signal("git commit -am 'docs: c' && git push"), game_code="0", pending="1")
         check("--all is game code", w2.signal("git push --all origin"), game_code="1")
 
+        # 5b. ds2-mods-rs-lgor: the push runs in a worktree the command cds into, while the hook is
+        #     invoked from the main checkout. The worktree built the staged DLL and ran it after its
+        #     commit; the main checkout's build is a different binary. Judged on the main checkout,
+        #     this was `dll_match=0` -- the false refusal.
+        w4 = World(Path(tmp) / "worktree")
+        wt = w4.repo / ".claude" / "worktrees" / "agent-a"
+        git(w4.repo, "worktree", "add", "-q", "-b", "build-url-dialog", str(wt), env=w4.env)
+        (wt / "crates" / "ds2-x" / "src" / "lib.rs").write_text("// dialog\n")
+        git(wt, "add", "-A", env=w4.env)
+        when = f"@{int(time.time()) - 50} +0000"
+        git(wt, "commit", "-q", "-m", "feat(ds2-x): dialog",
+            env=dict(w4.env, GIT_COMMITTER_DATE=when, GIT_AUTHOR_DATE=when))
+        (wt / BUILT_REL).parent.mkdir(parents=True)
+        (wt / BUILT_REL).write_bytes(b"MZ worktree dll")
+        shutil.copy2(wt / BUILT_REL, w4.game / "dinput8.dll")
+        os.utime(w4.game / "dinput8.dll", (time.time() - 60, time.time() - 60))
+        w4.write_log()
+        verbatim = (
+            "H=/home/banon/projects/ds2-mods-rs-wt-hk/scripts/ds2-harness.sh; timeout 8 $H 'block 30' "
+            "'buttons 0x2000 4' >/dev/null 2>&1; sleep 0.5; timeout 8 $H 'block 30' 'buttons 0x2000 4' "
+            f">/dev/null 2>&1; cd {wt} && git push -u origin build-url-dialog 2>&1 | tail -2"
+        )
+        proven = dict(game_code="1", attached="1", fresh="1", dll_match="1", pending="0", pushdir="1")
+        check("cd into the worktree, then push: judged on the worktree", w4.signal(verbatim), **proven)
+        check("a relative cd resolves against the event's cwd",
+              w4.signal("cd .claude/worktrees/agent-a && git push -u origin build-url-dialog"), **proven)
+        check("git -C <worktree> push: judged on the worktree",
+              w4.signal(f"git -C {wt} push -u origin build-url-dialog"), **proven)
+        check("a plain push from the main checkout is still judged on the main checkout",
+              w4.signal("git push -u origin main"), dll_match="0", pushdir="1")
+        check("a cd the signal cannot resolve is refused, not guessed",
+              w4.signal('cd "$WT" && git push'), game_code="1", pushdir="0")
+        check("a cd into a directory that is not a work tree is refused",
+              w4.signal(f"cd {w4.root} && git push"), game_code="1", pushdir="0")
+
         # 6. The whole path through the real engine: `cupcake eval` over this checkout's .cupcake/,
         #    in a repository shaped like the one the miss happened in. This is what proves cupcake
         #    hands the pending event to the signal on stdin -- if it did not, `pending` would stay
