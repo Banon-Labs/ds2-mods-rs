@@ -9555,6 +9555,113 @@ pub const NET_SESSION_UPDATE_PROLOGUE: [u8; 14] = [
 ];
 
 // ============================================================================================
+// Weapon upgrade levels: the three copies, and the one function that writes the two that are not
+// saved (`ds2-weapon-sync`, docs/DS2-WEAPON-LEVEL-SYNC.md).
+//
+// Read live 2026-09-26 with `scripts/frida/weapon-sync-read.js` on a character holding a +10
+// Dagger (item 1000000) in right hand 1 and a +0 shield (2750000) in left hand 1: the inventory
+// entry, the record table and the live weapon state all answered the same ids and levels, slot for
+// slot, through exactly the hops below.
+// ============================================================================================
+
+/// The local character's weapon update. RVA `0x0037_f890`, VA `0x14037f890`.
+///
+/// `void (PlayerCtrl* rcx, const WeaponUpdateRequest* rdx)`. The request is sixteen bytes:
+///
+/// | offset | type | field |
+/// |---|---|---|
+/// | `+0x00` | `i32` | character-side weapon slot, `0..5` ([`WEAPON_INTERNAL_TO_CHR_SLOT`]) |
+/// | `+0x04` | `u32` | item id (`ItemParam` row) |
+/// | `+0x08` | `f32` | durability |
+/// | `+0x0C` | `u8`  | upgrade level ([`WEAPON_UPDATE_REQUEST_LEVEL_OFFSET`]) |
+/// | `+0x0E` | `u8`  | infusion |
+///
+/// It writes the equipment record table (`0x1403463d0`, which writes only into the table object
+/// it is handed), updates the live weapon state (`0x1403482a0`, `ChrAsmEquip +0x70`) when the same
+/// item already sits in that slot, and then calls `ChrEquipPacket_remoteWeaponChange`
+/// (`0x140162c50`), which sends P2P packet 61 built from the same request. So a level lowered in
+/// the request is both the level our character carries and the level every peer is told.
+///
+/// Its only direct caller is the inventory's slot notifier `0x1401b66a0`, which builds the request
+/// from the inventory entry ([`ITEM_ENTRY_LEVEL_OFFSET`]) and passes `GameManagerImp->PlayerCtrl`.
+/// It never writes the inventory entry. Not Arxan-redirected (`scripts/ds2-arxan-chain.py`).
+pub const CHR_WEAPON_UPDATE: u32 = 0x0037_f890;
+
+/// First fourteen bytes of [`CHR_WEAPON_UPDATE`]: `mov [rsp+0x10],rbx; mov [rsp+0x18],rsi;
+/// mov [rsp+0x20],rdi`.
+pub const CHR_WEAPON_UPDATE_PROLOGUE: [u8; 14] = [
+    0x48, 0x89, 0x5c, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x48, 0x89, 0x7c, 0x24,
+];
+
+/// Size of the request [`CHR_WEAPON_UPDATE`] takes.
+pub const WEAPON_UPDATE_REQUEST_SIZE: usize = 0x10;
+/// `+0x00`, `i32`: the character-side slot.
+pub const WEAPON_UPDATE_REQUEST_SLOT_OFFSET: usize = 0x00;
+/// `+0x04`, `u32`: the item id.
+pub const WEAPON_UPDATE_REQUEST_ITEM_OFFSET: usize = 0x04;
+/// `+0x08`, `f32`: durability, copied from [`ITEM_ENTRY_DURABILITY_OFFSET`].
+pub const WEAPON_UPDATE_REQUEST_DURABILITY_OFFSET: usize = 0x08;
+/// `+0x0C`, `u8`: the upgrade level. `0x1401b66a0` stores it as the low half of a `u16`.
+pub const WEAPON_UPDATE_REQUEST_LEVEL_OFFSET: usize = 0x0C;
+/// `+0x0E`, `u8`: the infusion.
+pub const WEAPON_UPDATE_REQUEST_INFUSION_OFFSET: usize = 0x0E;
+
+/// Inventory weapon slot `i` (`0..5`) -> the character-side slot [`CHR_WEAPON_UPDATE`] takes.
+///
+/// The table at `DAT_1410c44e0`, read out of the image: `1, 0, 3, 2, 5, 4` as `i32`s. It is also
+/// the index into the equipment record table.
+pub const WEAPON_INTERNAL_TO_CHR_SLOT: [i32; 6] = [1, 0, 3, 2, 5, 4];
+
+/// How many weapon slots there are: left and right hand, three each.
+pub const WEAPON_SLOT_COUNT: usize = 6;
+
+/// `BagList + 0x25830`: `ItemEntry*` per equipment slot, null when empty.
+///
+/// `0x1401b66a0` and `0x1401b4330` read `param_1[0x4b06 + slot]` with `param_1` the bag (the
+/// object two [`ITEM_BAG_LIST_OFFSET`] hops below `ItemInventory2`). Weapon slots are `0..5`.
+pub const ITEM_BAG_EQUIPPED_ENTRIES_OFFSET: usize = 0x25830;
+
+/// `ItemEntry + 0x20`, `f32` for weapons: durability. The same four bytes as
+/// [`ITEM_ENTRY_QUANTITY_OFFSET`], read as a float by `0x1401b66a0`.
+pub const ITEM_ENTRY_DURABILITY_OFFSET: usize = 0x20;
+/// `ItemEntry + 0x25`, low nibble: the real upgrade level, which is the one the save keeps.
+pub const ITEM_ENTRY_LEVEL_OFFSET: usize = 0x25;
+/// Item types ([`ITEM_ENTRY_TYPE_OFFSET`]) below this carry a level (`0x1401b66a0`: `if (entry[0x1e] < 6)`).
+pub const ITEM_TYPE_HAS_LEVEL_BELOW: u8 = 6;
+/// Item types below this carry an infusion (`if (entry[0x1e] < 2)`).
+pub const ITEM_TYPE_HAS_INFUSION_BELOW: u8 = 2;
+
+/// `CharacterCtrl + 0x378`: `ChrAsmCtrl*`. Its vtable slot `0x120` on `PlayerCtrl` is
+/// `mov rax,[rcx+0x378]; ret` (`0x1403126b0`).
+pub const CHARACTER_CTRL_CHR_ASM_CTRL_OFFSET: usize = 0x378;
+/// `ChrAsmCtrl + 0x20`: the equipment record table object (vtable slot `0x60`,
+/// `0x140151390` = `mov rax,[rcx+0x20]; ret`).
+pub const CHR_ASM_CTRL_RECORD_TABLE_OFFSET: usize = 0x20;
+/// Record table object `+0x08`: `0x34` records of [`EQUIP_RECORD_STRIDE`] bytes.
+pub const EQUIP_RECORD_ARRAY_OFFSET: usize = 0x08;
+/// Bytes per equipment record.
+pub const EQUIP_RECORD_STRIDE: usize = 0x14;
+/// Record `+0x04`, `u32`: item id. Empty weapon slots hold Fists, [`FISTS_ITEM_ID`].
+pub const EQUIP_RECORD_ITEM_OFFSET: usize = 0x04;
+/// Record `+0x0E`, `u8`: the upgrade level this character carries.
+///
+/// For a remote player it is what that player's packet 61 said (the receiver `0x140162150` case `0x3d` writes it through
+/// `0x1403463d0`, refusing levels above 10).
+pub const EQUIP_RECORD_LEVEL_OFFSET: usize = 0x0E;
+/// `ChrAsmCtrl + 0x28`: the live weapon state (`ChrAsmEquip`, vtable slot `0x70`).
+pub const CHR_ASM_CTRL_EQUIP_OFFSET: usize = 0x28;
+/// `ChrAsmEquip` weapon entry `n` sits at `n * 0x48`.
+pub const CHR_ASM_EQUIP_WEAPON_STRIDE: usize = 0x48;
+/// `ChrAsmEquip` weapon entry `+0x70`, `u8`: the live level.
+pub const CHR_ASM_EQUIP_WEAPON_LEVEL_OFFSET: usize = 0x70;
+
+/// The highest level the packet 61 receiver accepts (`level < 0xb`). Normal weapons stop at +10.
+pub const WEAPON_LEVEL_MAX: u8 = 10;
+
+/// Fists: what an empty weapon slot's record holds (`0x14034a390`).
+pub const FISTS_ITEM_ID: u32 = 3_400_000;
+
+// ============================================================================================
 // The HUD's own voice chat icon, `FeScenePlayerVoiceChatIcon` (`ds2-voice-chat`).
 //
 // Vtable `0x1410fa688`, ctor `0x140506040`, created by `0x140507ea0` as layout document 0 scene 3.
