@@ -1,6 +1,6 @@
 # What is actually in DARK SOULS II, measured
 
-The evidence base for a `darksouls2` bindings crate (`ds2-mods-rs-v5z`). Every number below is
+The evidence base for a `darksouls2` bindings crate, modelled on the DS3 one. Every number below is
 the output of a command reproduced beside it. Where something could not be measured, it says so
 and names the command that would measure it. Nothing here is inferred from Elden Ring or from
 Dark Souls III.
@@ -309,7 +309,7 @@ $ bash scripts/ghidra/query.sh scripts/ghidra/rt/Ds2Disasm.java 0x14014bec0 0x14
 ```
 
 **`applySpEffect` is Arxan-redirected.** It is five bytes long and all five are Arxan's jump.
-That is the primary hook target for `ds2-mods-rs-a1g` (`ds2-net-effects`, the first mod that
+That is the primary hook target for `ds2-net-effects` (the first mod that
 needs real DS2 RE), and it cannot be detoured at its entry. `addSpEffectToList` and
 `getPlayerStruct` are clean MSVC prologues and are usable. Anyone who had written the net-effects
 hook against `applySpEffect` without running this check would have spent the debugging session

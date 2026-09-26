@@ -370,7 +370,7 @@ to about 78 ms. There is nothing left to skip; what remains is work.
   `0x39 GameServerLogin`. `UserPolicy`'s `v5` publishes three edges -- phase 2 to `0x38`, phase 3 to
   `0x2a`, phase 4 to `0x39` -- and this boot took the phase-4 one. The redundant-write finding above
   still describes the code correctly, but on this profile the write does not happen at boot at all,
-  so there is nothing there to save. `ds2-mods-rs-cz6` is moot until a profile is found that takes
+  so there is nothing there to save. Dropping that redundant write is moot until a profile is found that takes
   the phase-2 edge.
 * **66 substates are registered, not 64.** The live count read off the flow's own list
   (`registered=66`) beats the 64 allocation/constructor pairs the static parse of
@@ -394,9 +394,9 @@ network chain   0x20 + 0x39 + 0x44        = 1799.0 ms
                        max(storage, network) = 1799.0 ms
 ```
 
-* **Overlapping the chains (`ds2-mods-rs-7on`) is worth ~1011 ms** -- the storage chain hides
+* **Overlapping the chains is worth ~1011 ms** -- the storage chain hides
   entirely inside the network chain. Boot to menu would go from 6.83 s to about 5.82 s.
-* **Removing the network chain (`ds2-mods-rs-rk4`) is worth ~1799 ms**, and it is the bigger of the
+* **Removing the network chain is worth ~1799 ms**, and it is the bigger of the
   two: 6.83 s to about 5.03 s. Removing work still beats overlapping it.
 * They are not additive. With the network chain gone there is nothing left to overlap the storage
   chain against.
@@ -465,10 +465,10 @@ not, and that reorders everything:
 | --- | --- | --- |
 | the two one-second floors (`0x05`, `0x44`) | **~2.04 s** | mechanism not found; same class of fix already shipped for `0x39` |
 | the engine block | 3.86 s, unknown reducibility | never investigated |
-| `rk4`, remove the network chain | **~0.69 s**, not 1.8 s | `0x44`'s second was a floor, not a fetch |
-| `7on`, overlap storage against network | **~0** | `0x05` is a timer; overlapping a timer buys nothing -- delete it instead |
+| remove the network chain | **~0.69 s**, not 1.8 s | `0x44`'s second was a floor, not a fetch |
+| overlap storage against network | **~0** | `0x05` is a timer; overlapping a timer buys nothing -- delete it instead |
 
-`ds2-mods-rs-7on` is effectively dead as written, and `rk4` is worth a third of what the first run
+Overlapping the chains is effectively dead as written, and removing the network chain is worth a third of what the first run
 suggested. Removing the two floors would take boot-to-menu from ~6.8 s to about **4.8 s**, and it
 is the only item on the list whose fix has a proven precedent in this repo.
 
@@ -564,7 +564,7 @@ work it was waiting for has finished.
 So the floor is **inside `FeSubStateTitleSteamLoadSystemData`**, not below it. Its `update`
 (`0x1400fbdb0`) is a 13-case jump table on `+0x10`, contains no float comparison, and issues no
 further storage request (the interlock stays `0x0` for the whole 890 ms). That is a small, bounded
-place to look, and it is where `ds2-mods-rs-wxl` now points.
+place to look, and it is where the hunt for the one-second floors now points.
 
 ### `0x44` is not the same shape, and the watch was aimed wrong
 

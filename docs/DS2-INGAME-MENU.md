@@ -431,7 +431,7 @@ occurrences of that id sit in records of a different shape; the gaps between the
 (`0x3790..0xbfe0`) is 34896 bytes, which 240 does not divide.
 
 The right way to decode it is to read the game's parser, not to keep diffing byte patterns. That is
-`ds2-mods-rs-glz`.
+the open work of decoding the `.flo` layout record format.
 
 ### The shortcut ER used, which is available here too
 
@@ -575,7 +575,7 @@ Naming is exhausted. The remaining routes, in the order they are worth trying:
    transform layout, which is in-memory structure rather than file format.
 2. **Reach `ace7`.** Five cells with five labels are already authored there. What the namer's
    `FexLayoutSceneProxy` is rooted at, and whether a second proxy exists for `ace7`, is unread.
-3. **The `.flo`** (`ds2-mods-rs-glz`), which is the heaviest and now the least attractive: the
+3. **The `.flo`** (decoding its layout record format), which is the heaviest and now the least attractive: the
    layout is not obviously short of rows, the code's reach into it is.
 
 None of this touches the action, which is finished.
@@ -1442,4 +1442,4 @@ to `-5.90`.
 
 What this does not say anything about: pressing any of the four. The rows draw and they are
 labelled; whether the save, the load and the URL row do what they say is
-`ds2-mods-rs-h4q`'s question and a separate run.
+a question for a live-session test of the save-file rows, and a separate run.

@@ -18,7 +18,7 @@ in 30 MB (section 6c). So: same skeleton, no organs.
 
 ## What the issue says, and what needs correcting
 
-`ds2-mods-rs-v5z` says three things about scale and shape. Two are wrong.
+The issue that proposed this crate says three things about scale and shape. Two are wrong.
 
 | Issue's claim | Verdict |
 | --- | --- |
@@ -156,7 +156,7 @@ They include the exact entry points the first gameplay mod needs: `applySpEffect
 `addSoul`, `applyDamage`, `getWeaponParamRow`, `getItemRow`, `getSaveLoadSystem`,
 `getNetSessionManager`, and 199 named `Frpg2*` request/response methods (section 7).
 
-That changes the shape of the first milestone. `ds2-mods-rs-a1g` (`ds2-net-effects`) is described
+That changes the shape of the first milestone. `ds2-net-effects`, the first mod needing real DS2 RE, is described
 as needing "the DS2 player structure, the apply-SpEffect function, and the SpEffectParam id
 space". Two of those three are already named and addressed. The third is a data question.
 
@@ -206,7 +206,7 @@ Numbered because the dependencies are real, not because a plan looks tidier numb
 
 6. **`game::chr` + `game::speffect`, minimal.** Player pointer, SpEffect list, one apply path.
    This is the smallest possible bet that the bindings are right, and it is exactly what
-   `ds2-mods-rs-a1g` needs. Note that `applySpEffect` itself is unhookable at its entry --
+   `ds2-net-effects` needs. Note that `applySpEffect` itself is unhookable at its entry --
    `addSpEffectToList` (`0x1402206d0`, clean 129-byte prologue) is the usable neighbour.
 
 7. **`dl::rf` investigation.** Can the `DLRF::DLRuntimeClass` registry be enumerated at runtime,

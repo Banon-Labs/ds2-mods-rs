@@ -1,7 +1,7 @@
 # FFX action ids -> runtime classes and param meanings
 
 Static RE of `DarkSoulsII.exe` (flat image `darksoulsii-deobf.bin`, base `0x140000000`), 2026-09-25.
-Tracking issue: `ds2-mods-rs-tup`. No game run was involved.
+No game run was involved.
 
 Every claim is tagged **[read]** (read out of the binary: a table, a vtable, a source path, a
 constant) or **[inf]** (inferred: from names, data values, or shape of the code, not proven).
