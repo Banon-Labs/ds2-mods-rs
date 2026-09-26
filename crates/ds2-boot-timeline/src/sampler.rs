@@ -124,7 +124,9 @@ fn run(thread_id: u32, stack_base: u64) {
         ));
         return;
     }
-    let text = ds2_game_base::mem::module_text_range().unwrap_or((0, 0));
+    // The helper answers `(start, len)`; the scan wants `(start, end)`.
+    let text =
+        ds2_game_base::mem::module_text_range().map_or((0, 0), |(start, len)| (start, start + len));
     // All three allocated before the first suspend, and never again while one is in force.
     let mut samples: Vec<(u64, u64)> = Vec::with_capacity(MAX_SAMPLES);
     let mut context = Box::new(Context([0; CONTEXT_SIZE]));
