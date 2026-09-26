@@ -5185,8 +5185,9 @@ pub const SP_EFFECT_APPLY_PROLOGUE: [u8; 5] = [0xe9, 0x1c, 0x0d, 0x9f, 0x01];
 /// in [`ARXAN_REDIRECTED_DO_NOT_HOOK`]; the entry is ordinary code ([`SP_EFFECT_SEND_PROLOGUE`]).
 pub const SP_EFFECT_SEND: u32 = 0x0051_e710;
 
-/// First eight bytes of [`SP_EFFECT_SEND`]: `push rbx; sub rsp,0x80`.
-pub const SP_EFFECT_SEND_PROLOGUE: [u8; 8] = [0x53, 0x48, 0x81, 0xec, 0x80, 0x00, 0x00, 0x00];
+/// First eight bytes of [`SP_EFFECT_SEND`]: `push rbx` (REX-prefixed, `40 53`) and the start of
+/// `sub rsp,0x80`, read from the live image.
+pub const SP_EFFECT_SEND_PROLOGUE: [u8; 8] = [0x40, 0x53, 0x48, 0x81, 0xec, 0x80, 0x00, 0x00];
 
 /// `PlayerCtrl -> ChrSpEffectCtrl`. `+0x3e0`.
 ///
