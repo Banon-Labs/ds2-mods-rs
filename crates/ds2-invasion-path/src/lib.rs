@@ -190,10 +190,17 @@ mod windows_impl {
     use crate::routes::{Palette, Route, RouteShape};
     use crate::{census, render};
 
+    // Named, not left to whichever other crate happens to pull `user32` into the link: the DLL
+    // gets it from a neighbour, a test executable that links this crate does not.
+    #[link(name = "user32")]
     unsafe extern "system" {
         fn GetAsyncKeyState(key: i32) -> i16;
         fn GetForegroundWindow() -> *mut c_void;
         fn GetWindowThreadProcessId(window: *mut c_void, process: *mut u32) -> u32;
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
         fn GetCurrentProcessId() -> u32;
     }
 
