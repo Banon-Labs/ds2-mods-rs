@@ -174,10 +174,28 @@ doc_lines contains line if {
 # What is left after the inline spans go: backticked code first, then quoted text. A quotation is
 # somebody else's words, and this is also what keeps the game's full title silent -- it is written
 # "DARK SOULS II: SCHOLAR OF THE FIRST SIN", in quotation marks, both times it appears here.
+#
+# Capitalised IDENTIFIERS go too: a rule id or a constant is a name, and its capitals are its
+# spelling. Measured 2026-09-21, porting the er guard policies: a scratch note naming
+# DS2-MODS-NO-FIX-CLAIM-... and DS2-MODS-NO-GREP-FOR-BUILD-ERRORS unquoted was refused as shouting,
+# because `\b` stops at a hyphen, so FOR and WITHOUT inside the ids read as capitalised function
+# words. Three or more segments joined by `-` or `_` is what makes it an identifier: a rule id
+# has five or more, MIN_INTERVAL_SECONDS has three, and a shouted phrase has spaces, not joins.
+# Two segments stay judged, so NOT-ALLOWED is still shouting.
+#
+# Dropped a whitespace-separated word at a time, NOT with regex.replace: that builtin does not
+# execute in Cupcake's WASM runtime (scripts/check-cupcake-wasm-builtins.py, 2026-09-25), so a rule
+# built on it would pass `opa test` and silently never fire live.
+capitalised_identifier_pattern := `^[^A-Za-z0-9]*[A-Z0-9]+(?:[-_][A-Z0-9]+){2,}[^A-Za-z0-9]*$`
+
 judged contains fragment if {
 	some line in doc_lines
 	some uncoded in split(outside(line, "`"), "\n")
-	some fragment in split(outside(uncoded, "\""), "\n")
+	some quoted in split(outside(uncoded, "\""), "\n")
+	fragment := concat(" ", [word |
+		some word in split(quoted, " ")
+		not regex.match(capitalised_identifier_pattern, word)
+	])
 }
 
 violation contains {"kind": "four or more capitalised words in a row", "line": trim_space(fragment)} if {
