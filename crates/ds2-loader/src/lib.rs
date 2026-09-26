@@ -1420,6 +1420,13 @@ fn system_dinput8_path() -> Option<Vec<u16>> {
 fn install_continue_record() {
     let config = continue_flow::ContinueConfig::load();
     log_line(format_args!("{}", config.describe()));
+    ds2_continue::set_logger(log_line);
+    // On for every run, whatever `[continue]` says: a player picking a hollow slot from the game's
+    // own list hangs the game with or without this crate's shortcut, and the guard changes nothing
+    // but a walk that would never return.
+    // SAFETY: the target's prologue is checked against `ds2-rva` before anything is patched, and
+    // this runs at the same install position as every other detour.
+    unsafe { ds2_continue::install_hollow_slot_guard() };
     // The third reason to patch, and it is not a `[continue]` key at all. The Load Character from
     // File row does its work at the title screen -- point the loads at a staged container, re-read
     // it, open the character list for it -- and the two detours that drive that are this crate's.
@@ -1433,7 +1440,6 @@ fn install_continue_record() {
     if !config.record && config.slot < 0 && !swap_row_wants_it {
         return;
     }
-    ds2_continue::set_logger(log_line);
     ds2_continue::set_preselect_slot(config.slot);
     // Only meaningful alongside a slot: without one there is no shortcut to cover, and muting a
     // run the player is driving by hand would be a bug rather than a feature.
