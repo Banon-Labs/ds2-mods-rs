@@ -1,4 +1,4 @@
-//! The detour on the net session update that reads the key, the call into the Game tab's own
+//! The net session update tick that reads the key, the call into the Game tab's own
 //! commit, the watcher that lets the key move while the game runs, and the detour on the HUD voice
 //! chat icon's update that shows the byte.
 
@@ -6,7 +6,7 @@ use core::ffi::c_void;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 
-use ds2_hook::{MH_EnableHook, MH_Initialize, MH_STATUS, MhHook};
+use ds2_hook::{MH_EnableHook, MH_STATUS, MhHook};
 use ds2_hotkey_config::chord_name;
 use ds2_hotkey_config::keys::{Chord, MODIFIER_ALT, MODIFIER_CTRL, MODIFIER_SHIFT};
 use ds2_hotkey_config::live::AtomicChord;
@@ -77,15 +77,8 @@ pub struct Outcome {
     pub hud_icon: bool,
 }
 
-/// `NET_SESSION_UPDATE(this, f32 delta)`. The delta is a float in `xmm1`; declaring it as an
-/// integer would compile and hand the original whatever that register held.
-type NetSessionUpdate = unsafe extern "system" fn(usize, f32);
-
 /// `GAME_OPTION_GAME_TAB_APPLY(options, working_copy)`.
 type GameTabApply = unsafe extern "system" fn(*mut u8, *const u8);
-
-/// Trampoline back to the real net session update.
-static ORIGINAL: AtomicUsize = AtomicUsize::new(0);
 
 /// Resolved address of the Game tab's commit, or `0` before install.
 static APPLY: AtomicUsize = AtomicUsize::new(0);
@@ -224,21 +217,13 @@ unsafe fn toggle_voice_chat() {
     ));
 }
 
-/// The detour. Reads the key, toggles on a fresh press, then runs the original -- which picks the
-/// new byte up in this same frame.
-unsafe extern "system" fn net_session_update_detour(this: usize, delta: f32) {
+/// The tick, registered with `ds2-net-tick` to run before the net session update. Reads the key
+/// and toggles on a fresh press; the original then picks the new byte up in this same frame.
+fn voice_chat_tick(_session: usize) {
     let down = game_has_focus() && KEY_BINDING.load().is_some_and(chord_down);
     if !WAS_DOWN.swap(down, Ordering::Relaxed) && down {
-        // SAFETY: this is the game thread, inside the net session update.
+        // SAFETY: this is the game thread, inside the net session update's shared detour.
         unsafe { toggle_voice_chat() };
-    }
-    let original = ORIGINAL.load(Ordering::Acquire);
-    if original != 0 {
-        // SAFETY: the trampoline MinHook returned for this exact site and ABI.
-        let original: NetSessionUpdate =
-            unsafe { std::mem::transmute::<usize, NetSessionUpdate>(original) };
-        // SAFETY: forwarding the arguments the game passed.
-        unsafe { original(this, delta) };
     }
 }
 
@@ -635,14 +620,6 @@ pub unsafe fn install(request: &Request) -> Outcome {
     ) {
         return Outcome::default();
     }
-    let site = base + ds2_rva::NET_SESSION_UPDATE as usize;
-    if !prologue_matches(
-        site,
-        &ds2_rva::NET_SESSION_UPDATE_PROLOGUE,
-        "net-session-update",
-    ) {
-        return Outcome::default();
-    }
     APPLY.store(apply, Ordering::Release);
     GAME_MANAGER.store(base + ds2_rva::GAME_MANAGER_IMP as usize, Ordering::Release);
 
@@ -661,44 +638,19 @@ pub unsafe fn install(request: &Request) -> Outcome {
         ));
     }
 
-    // MinHook is statically linked into this DLL, so ALREADY_INITIALIZED only means another crate
-    // in it got there first.
-    // SAFETY: MinHook's own initialiser, no arguments.
-    let status = unsafe { MH_Initialize() };
-    if status != MH_STATUS::MH_OK && status != MH_STATUS::MH_ERROR_ALREADY_INITIALIZED {
-        log(format_args!(
-            "{LOG_PREFIX} install-failed stage=MH_Initialize status={status:?}"
-        ));
-        return Outcome::default();
-    }
-    // SAFETY: the site matched its recorded prologue above, and the detour is a `'static` fn of
-    // the same ABI (`this` in rcx, the float delta in xmm1).
-    match unsafe {
-        MhHook::new(
-            site as *mut c_void,
-            net_session_update_detour as *mut c_void,
-        )
-    } {
-        Ok(handle) => {
-            // Published before the site is patched, so a detour that fires at once has somewhere
-            // to go.
-            ORIGINAL.store(handle.trampoline() as usize, Ordering::Release);
-            // SAFETY: the address `MhHook::new` just registered.
-            let status = unsafe { MH_EnableHook(site as *mut c_void) };
-            if status != MH_STATUS::MH_OK {
-                log(format_args!(
-                    "{LOG_PREFIX} install-failed stage=MH_EnableHook status={status:?}"
-                ));
-                return Outcome::default();
-            }
-        }
-        Err(status) => {
+    // The net session update is shared with `ds2-weapon-sync`; `ds2-net-tick` owns its one detour
+    // and runs this before the original.
+    // SAFETY: the loader's post-Arxan install position, which is this function's own contract.
+    let site = match unsafe { ds2_net_tick::register(ds2_net_tick::When::Before, voice_chat_tick) }
+    {
+        Ok(site) => site,
+        Err(error) => {
             log(format_args!(
-                "{LOG_PREFIX} install-failed stage=MH_CreateHook status={status:?}"
+                "{LOG_PREFIX} install-failed stage=net-tick {error}"
             ));
             return Outcome::default();
         }
-    }
+    };
 
     let key = KEY_BINDING
         .load()
