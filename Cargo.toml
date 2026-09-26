@@ -57,6 +57,8 @@ ds2-hook = { path = "crates/ds2-hook" }
 # The address table. Only crates that genuinely claim to know something about DARK SOULS II may
 # depend on this -- `ds2-game-base` deliberately does not, and must not start.
 ds2-rva = { path = "crates/ds2-rva" }
+# Typed layouts over the objects at those addresses. Depends on `ds2-rva`, never re-exports it.
+darksouls2 = { path = "crates/darksouls2" }
 ds2-hotkey-config = { path = "crates/ds2-hotkey-config" }
 ds2-safe-input = { path = "crates/ds2-safe-input" }
 ds2-crash-logging-core = { path = "crates/ds2-crash-logging-core" }
