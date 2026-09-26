@@ -38,10 +38,6 @@
 //! line naming which of the two halves is missing. The setting does something observable from the
 //! day it lands; what it does today is tell you the truth about why your trail is not there.
 
-// Parsed on Windows; the parser and its defaults are proven on the host.
-// DEBT: ds2-mods-rs-24r -- keeps the parser host-parseable so its tests can run.
-#![cfg_attr(not(windows), allow(dead_code))]
-
 use ds2_hotkey_config::keys::Chord;
 use ds2_hotkey_config::kv::KeyValues;
 use ds2_hotkey_config::parse_chord;

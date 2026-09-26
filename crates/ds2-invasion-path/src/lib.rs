@@ -130,7 +130,13 @@
 //! the game image but is not one of its 286 redirected entries, and its prologue is checked
 //! before the detour goes in.
 
-// DEBT: ds2-mods-rs-2rs -- module-wide dead_code, reason not yet recorded.
+// The host-parse idiom, for the whole crate and nowhere else. Every non-test consumer of the
+// route, trail, line and geometry maths is `cfg(windows)`, so on the host those modules are
+// structurally dead; on the shipping target `dead_code` is still denied and every item has a
+// caller (measured 2026-09-25: a Windows-target check with `--force-warn dead_code` reports
+// nothing in this crate). The module-level copies of this allow were redundant with it and are
+// gone, so a module cannot quietly grow an unused item on the target that ships.
+// DEBT: ds2-mods-rs-24r -- keeps the crate host-parseable so its game-free tests can run.
 #![cfg_attr(not(windows), allow(dead_code))]
 
 pub mod camera_yaw;
