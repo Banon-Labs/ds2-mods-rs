@@ -84,14 +84,23 @@ type ParamRowsFn = unsafe extern "system" fn(usize, *mut u8, *const u8) -> u8;
 type ParamColumnFn = unsafe extern "system" fn(usize, u32) -> u64;
 type EntryLookupFn = unsafe extern "system" fn(usize, u16) -> usize;
 
-/// How many decisions to write to the log before going quiet.
+/// How many "could not ask" decisions (`None`) to write to the log before going quiet.
 ///
 /// The bind runs per visible row per refresh, so an uncapped line here is a log that fills a disk
-/// while the player scrolls. Two of each answer is enough to tell "the check ran and said met"
-/// from "the check never ran", which are the two outcomes that look identical on screen.
+/// while the player scrolls. A handful is enough to show the check is being reached.
 const LOGGED_DECISIONS: usize = 8;
 
+/// How many real answers (`Some`) to write before going quiet. Kept separate from the `None` cap
+/// because the equipment screen binds every slot, empty ones first: with one shared cap, a run on
+/// 2026-09-26 spent all of its lines on empty slots and never showed an armour answer.
+const LOGGED_ANSWERS: usize = 48;
+
 static DECISIONS: AtomicUsize = AtomicUsize::new(0);
+static ANSWERS: AtomicUsize = AtomicUsize::new(0);
+/// The item type the last [`unmet`] read, for the decision line; [`NO_KIND`] when it stopped
+/// before reading one.
+static LAST_KIND: AtomicUsize = AtomicUsize::new(NO_KIND);
+const NO_KIND: usize = usize::MAX;
 static MARKED: AtomicUsize = AtomicUsize::new(0);
 
 /// A one-component element id path, in the shape [`ds2_rva::FE_ELEMENT_RESOLVE`] reads.
@@ -216,6 +225,7 @@ unsafe fn unmet(base: usize, item: *const u8) -> Option<bool> {
             .add(ds2_rva::ITEM_ENTRY_TYPE_OFFSET)
             .read()
     };
+    LAST_KIND.store(usize::from(kind), Ordering::Relaxed);
     // Which requirement columns this kind of item has. Weapons and shields use the weapon keys and
     // the two-handed Strength rule; armour and spells have their own keys and no grip rule. Rings
     // and everything else have no stat requirement, so nothing to mark.
@@ -519,8 +529,13 @@ unsafe fn decide(container: *mut u8, item: *const u8, screen: &str) {
     if base == 0 {
         return;
     }
+    LAST_KIND.store(NO_KIND, Ordering::Relaxed);
     // SAFETY: `item` is the game's own and `base` is the live module base.
     let answer = unsafe { unmet(base, item) };
+    let kind = match LAST_KIND.load(Ordering::Relaxed) {
+        NO_KIND => "?".to_string(),
+        kind => kind.to_string(),
+    };
     // A write on every bind, including the binds where the question could not be asked. The scene
     // element outlives the cell view -- the view is a stack temporary, the element is not -- so a
     // bind that returned early would leave the previous item's badge standing over a different
@@ -528,10 +543,18 @@ unsafe fn decide(container: *mut u8, item: *const u8, screen: &str) {
     // entry carrying an infusion nibble the layout does not author would otherwise light the badge
     // up on its own, and after this write it cannot.
     let visible = answer.unwrap_or(false);
-    let n = DECISIONS.fetch_add(1, Ordering::Relaxed) + 1;
-    if n <= LOGGED_DECISIONS {
+    let (n, cap) = if answer.is_some() {
+        (ANSWERS.fetch_add(1, Ordering::Relaxed) + 1, LOGGED_ANSWERS)
+    } else {
+        (
+            DECISIONS.fetch_add(1, Ordering::Relaxed) + 1,
+            LOGGED_DECISIONS,
+        )
+    };
+    if n <= cap {
         log(format_args!(
-            "{LOG_PREFIX} decided screen={screen} unmet={answer:?} shown={visible} decisions={n}"
+            "{LOG_PREFIX} decided screen={screen} kind={kind} unmet={answer:?} shown={visible} \
+             decisions={n}"
         ));
     }
     // SAFETY: `container` is the live accessor the caller took off the game's own bind.
