@@ -93,6 +93,7 @@ pub(crate) fn build_items(build: &ds2_build_import_core::Build) -> Vec<game::Ite
     use ds2_build_import_core::{Infusion, ItemError, id_for, is_empty_slot};
 
     let mut out = Vec::new();
+    let mut asked = std::collections::HashMap::<i32, usize>::new();
     let mut push = |name: &str, infusion: Infusion| {
         let item_id = match id_for(name) {
             Ok(item_id) => item_id,
@@ -125,10 +126,16 @@ pub(crate) fn build_items(build: &ds2_build_import_core::Build) -> Vec<game::Ite
                 return log_line(format_args!("{LOG_PREFIX} skipping {name:?}: {error}"));
             }
         };
-        // DO NOT GRANT WHAT THE CHARACTER ALREADY HAS. Their copy carries their reinforcement,
-        // their infusion and their durability; a minted duplicate carries none of that and would
-        // then be the one equipped. Silence about an item is not a request for another one.
-        if game::already_held(item_id) {
+        // Grant only what the character does not already carry. Their copy carries their
+        // reinforcement, their infusion and their durability; a minted duplicate carries none of
+        // that and would then be the one equipped. Silence about an item is not a request for
+        // another one.
+        //
+        // Counted, not yes or no: a build naming one spell for two attunement positions asks for
+        // two copies, and a player holding one gets exactly one more.
+        let wanted = asked.entry(item_id).or_insert(0);
+        *wanted += 1;
+        if game::held_count(item_id) >= *wanted {
             return;
         }
         out.push(game::ItemSpawn {
