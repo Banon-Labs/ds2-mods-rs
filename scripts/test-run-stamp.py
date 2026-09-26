@@ -7,6 +7,7 @@ by the CUPCAKE_PR_STAMP_* overrides so the result never depends on this checkout
 """
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import subprocess
@@ -120,6 +121,87 @@ check("create no body", create_verdict("gh pr create --draft --fill"), f"RUNSTAM
 # The heredoc's text is not a command: a body mentioning `gh pr create` in a file write is not one.
 check("heredoc mention", create_verdict("cat > /tmp/b.md <<'EOF'\ngh pr create --draft\nEOF"), "RUNSTAMP|verb=none")
 check("quoted mention", create_verdict("git commit -m 'gh pr create needs a stamp'"), "RUNSTAMP|verb=none")
+
+# --- gh pr create for ANOTHER repository (bd ds2-mods-rs-3sb) -------------------------------------
+# Real throwaway checkouts, no HEAD override: `session` stands in for this repository (on main, and
+# carrying a same-named `ds2-paramdefs` branch as a trap), `other` for the fromsoftware-rs worktree.
+GIT_ID = ["-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"]
+
+
+def git(repo: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(repo), *GIT_ID, *args], check=True, capture_output=True,
+                          text=True).stdout.strip()
+
+
+def new_repo(path: Path, branch: str, remote: str, url: str) -> str:
+    subprocess.run(["git", "init", "-q", "-b", branch, str(path)], check=True)
+    git(path, "remote", "add", remote, url)
+    git(path, "commit", "-q", "--allow-empty", "-m", f"{path.name} {branch}")
+    return git(path, "rev-parse", "HEAD")
+
+
+def branch_api(sha: str, epoch: int) -> dict:
+    """The part of `gh api repos/<o>/<r>/branches/<b>` the gate reads."""
+    date = datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {"commit": {"sha": sha, "commit": {"committer": {"date": date}}}}
+
+
+def real_verdict(cmd: str, cwd: str, api: dict | None = None) -> str:
+    env = {"CUPCAKE_PR_STAMP_BRANCH_API_OVERRIDE": json.dumps(api)} if api is not None else {}
+    saved = {k: os.environ.pop(k, None) for k in ("CUPCAKE_PR_STAMP_HEAD_OVERRIDE", "CUPCAKE_PR_STAMP_NOW_OVERRIDE")}
+    try:
+        with with_env(**env):
+            return rs.verdict({"tool_input": {"command": cmd}, "cwd": cwd})
+    finally:
+        for k, v in saved.items():
+            if v is not None:
+                os.environ[k] = v
+
+
+with tempfile.TemporaryDirectory() as d:
+    session, other = Path(d, "session"), Path(d, "other")
+    session_head = new_repo(session, "main", "origin", "https://github.com/Banon-Labs/ds2-mods-rs.git")
+    git(session, "checkout", "-q", "-b", "ds2-paramdefs")
+    git(session, "commit", "-q", "--allow-empty", "-m", "trap")
+    trap = git(session, "rev-parse", "HEAD")
+    git(session, "checkout", "-q", "main")
+    other_head = new_repo(other, "ds2-paramdefs", "fork", "https://github.com/chozandrias76/fromsoftware-rs.git")
+    other_epoch = int(git(other, "log", "-1", "--format=%ct"))
+    session_epoch = int(git(session, "log", "-1", "--format=%ct", "main"))
+    Path(other, "body.txt").write_text(body(stamp(sha=other_head, at=other_epoch + 1)))
+    other_body = str(Path(other, "body.txt"))
+    session_body = Path(d, "session-body.txt")
+    session_body.write_text(body(stamp(sha=session_head, at=session_epoch + 1)))
+    api = branch_api(other_head, other_epoch)
+    create = "gh pr create --draft --repo chozandrias76/fromsoftware-rs --base main --head ds2-paramdefs --title T "
+
+    # The issue's own reproduction: a leading cd into the other checkout, relative body file there.
+    check("cross-repo after cd", real_verdict(f"cd {other} && {create}--body-file body.txt", str(session)),
+          f"RUNSTAMP|verb=create|ok=1|why=ok|sha={other_head}")
+    # Invoked from the other checkout itself: its `fork` remote is the --repo, resolved locally.
+    check("cross-repo from its checkout", real_verdict(create + "--body-file body.txt", str(other)),
+          f"RUNSTAMP|verb=create|ok=1|why=ok|sha={other_head}")
+    # From this checkout with no cd: it has no remote for --repo, so GitHub answers -- and the
+    # same-named local branch (`trap`) is not mistaken for the other repository's.
+    check("cross-repo via api", real_verdict(create + f"--body-file {other_body}", str(session), api),
+          f"RUNSTAMP|verb=create|ok=1|why=ok|sha={other_head}")
+    check("cross-repo branch not on github", real_verdict(create + f"--body-file {other_body}", str(session), {}),
+          "RUNSTAMP|verb=create|ok=0|why=no-head")
+    check("cross-repo stamp for the trap branch", real_verdict(create + f"--body-file {other_body}", str(session),
+          branch_api(trap, other_epoch)),
+          f"RUNSTAMP|verb=create|ok=0|why=wrong-sha|sha={trap}")
+    # This repository, unchanged: HEAD of the invoking checkout, and --head resolved locally.
+    check("this repo HEAD", real_verdict(f"gh pr create --draft --title T --body-file {session_body}", str(session)),
+          f"RUNSTAMP|verb=create|ok=1|why=ok|sha={session_head}")
+    check("this repo --head", real_verdict(f"gh pr create --draft --head main --title T --body-file {session_body}",
+                                           str(session)), f"RUNSTAMP|verb=create|ok=1|why=ok|sha={session_head}")
+    # A cd inside a subshell moves nothing; the local ds2-paramdefs is this checkout's trap branch.
+    check("subshell cd does not move", real_verdict(
+        f"(cd {other}) && gh pr create --draft --head ds2-paramdefs --title T --body-file {other_body}", str(session)),
+        f"RUNSTAMP|verb=create|ok=0|why=wrong-sha|sha={trap}")
+    # A cd the text cannot resolve resolves nothing.
+    check("unresolvable cd", real_verdict(f'cd "$W" && {create}--body-file {other_body}', str(session)),
+          "RUNSTAMP|verb=create|ok=0|why=no-head")
 
 # --- gh pr ready --------------------------------------------------------------------------------
 check("ready good", ready_verdict(body(line)), f"RUNSTAMP|verb=ready|ok=1|why=ok|sha={SHA}")
