@@ -96,10 +96,11 @@ pub fn mark(label: &'static str) {
             .sum();
         log(format_args!(
             "{LOG_PREFIX} milestone label={label} t={:.3}ms sleep-calls={calls} sleep-ms={ms} \
-             frames={} blocked-ms={:.1}",
+             frames={} blocked-ms={:.1} game-frames={}",
             at_us as f64 / 1000.0,
             FRAMES.load(Ordering::Relaxed),
-            blocked_us as f64 / 1000.0
+            blocked_us as f64 / 1000.0,
+            GameFrames(game_frames())
         ));
         return;
     }
@@ -722,9 +723,10 @@ fn on_enter(id: u32, pending: i32) {
     let (calls, ms) = sleep_totals();
     log(format_args!(
         "{LOG_PREFIX} enter seq={seq} id=0x{id:02x} t={:.3}ms pending={pending} \
-         sleep-calls={calls} sleep-ms={ms} frames={}",
+         sleep-calls={calls} sleep-ms={ms} frames={} game-frames={}",
         at_us as f64 / 1000.0,
-        FRAMES.load(Ordering::Relaxed)
+        FRAMES.load(Ordering::Relaxed),
+        GameFrames(game_frames())
     ));
     if !FIRST_ENTER_REPORTED.swap(true, Ordering::Relaxed) {
         log_boot_blocked("first-substate");
@@ -829,6 +831,44 @@ const WATCH_PHASE: usize = 2;
 /// support that conclusion. The substate's own phase can: it says which of the thirteen branches
 /// the 890 ms is spent in, and every branch is a few lines of already-read disassembly.
 const PHASE_WATCHED: [u32; 2] = [0x05, 0x44];
+
+/// The game's own per-frame counter, `[GameManagerImp] + 0x104`, or `None` before the manager
+/// exists.
+///
+/// `frames=` on these lines counts a frame-limiter candidate the game never calls, so it reads 0
+/// all the way to the title and says nothing about whether frames are being presented. This one
+/// advances once per presented frame (measured 2026-09-26), which is what a loading bar drawn at
+/// `Present` needs to know about each stretch of the boot.
+fn game_frames() -> Option<u32> {
+    let base = ds2_game_base::mem::game_module_base().ok()?;
+    // SAFETY: the global slot is inside the mapped image; a null manager is answered, not read
+    // through; a non-null one is the live GameManagerImp, whose +0x104 dword the game increments
+    // every frame.
+    unsafe {
+        let manager = ((base + ds2_rva::GAME_MANAGER_IMP as usize) as *const *const u8).read();
+        if manager.is_null() {
+            return None;
+        }
+        Some(
+            manager
+                .add(ds2_rva::GAME_MANAGER_FRAME_COUNTER_OFFSET)
+                .cast::<u32>()
+                .read_volatile(),
+        )
+    }
+}
+
+/// `game-frames=<n>`, or `game-frames=-` before the manager exists.
+struct GameFrames(Option<u32>);
+
+impl std::fmt::Display for GameFrames {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(n) => write!(f, "{n}"),
+            None => f.write_str("-"),
+        }
+    }
+}
 
 /// Follow `base_rva -> [+first] -> read u32 at +second`, with a null check at every hop.
 ///

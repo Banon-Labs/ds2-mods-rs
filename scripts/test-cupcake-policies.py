@@ -120,6 +120,14 @@ def frida_evidence_log(kind: str) -> Path:
         row = {"at": int(time.time()) + 86400, "agent": "scripts/frida/x.js", "pid": 1,
                "messages": 3, "seconds": 1.0}
         path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    # `build` is a `--record-build` record licensing ds2-menu-row alone. Written directly rather
+    # than through the recorder, because what this proves is the engine reading the verdict; the
+    # recorder's own conditions are pinned by `ds2-frida-evidence.py --selftest`.
+    if kind == "build" and not path.exists():
+        row = {"at": int(time.time()) + 86400, "kind": "build", "crate": "ds2-menu-row",
+               "log": "/tmp/build.log",
+               "line": "lld-link: error: undefined symbol: GetAsyncKeyState", "written": 1}
+        path.write_text(json.dumps(row) + "\n", encoding="utf-8")
     return path
 
 
@@ -458,6 +466,29 @@ def cases() -> list[PolicyCase]:
             "sed -i 's/a/b/' crates/ds2-menu-row/src/lib.rs",
             frida_evidence="none",
             expected_text="Bash spelling of the same edit",
+        ),
+        PolicyCase(
+            "allow-crate-edit-in-the-crate-a-build-error-blamed",
+            True,
+            tool_name="Edit",
+            tool_input={
+                "file_path": str(REPO_ROOT / "crates/ds2-menu-row/src/lib.rs"),
+                "old_string": "a",
+                "new_string": "b",
+            },
+            frida_evidence="build",
+        ),
+        PolicyCase(
+            "deny-crate-edit-outside-the-crate-a-build-error-blamed",
+            False,
+            tool_name="Edit",
+            tool_input={
+                "file_path": str(REPO_ROOT / "crates/ds2-hook/src/lib.rs"),
+                "old_string": "a",
+                "new_string": "b",
+            },
+            frida_evidence="build",
+            expected_text="--record-build",
         ),
         PolicyCase(
             "allow-script-edit-with-no-frida-measurement",
@@ -826,6 +857,7 @@ def main() -> int:
 
     cases_to_run = cases()
     frida_evidence_log("proven")  # written once, before the workers race to it
+    frida_evidence_log("build")
     make_other_repos()
 
     max_workers = min(8, max(1, len(cases_to_run)))

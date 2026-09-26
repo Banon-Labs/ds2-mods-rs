@@ -143,6 +143,36 @@ ATTACH_LINE_PREFIX = "ds2-loader: attach"
 #: about an EXPERIMENT, and a run that only did the first must not be able to read as the second.
 PROBE_LINE_PREFIX = "ds2-probe:"
 
+#: Mirrors `LINE_PREFIX` in `crates/ds2-loader/src/message_box.rs`. The DLL hooks the six user32
+#: message box exports from `DllMain` and writes one of these, synced, before any box opens. One of
+#: them anywhere in this run's log means the game is standing behind a modal dialog, and the
+#: RUNNING block is withheld. See `parse_messagebox_line` for the rest of the line.
+MESSAGEBOX_LINE_PREFIX = "ds2-loader: MESSAGEBOX "
+
+#: Mirrors `INSTALL_PREFIX` there. Says whether the watch above was armed, because a watch that
+#: never installed is silent in exactly the way a run with no dialog is.
+MESSAGEBOX_WATCH_PREFIX = "ds2-loader: messagebox-watch"
+
+#: How long to keep watching after the Arxan line before the RUNNING block is allowed to print.
+#:
+#: The number comes from two measurements. A healthy boot, timed by `ds2-boot-timeline`
+#: (docs/DS2-BOOT-WORK.md and docs/DS2-LOADING-BAR.md): the entry point, where the Arxan line is
+#: written, is at about 0.4s; graphics init and the first present at about 2.1s; the title flow
+#: starts at about 3.9s and reaches the top menu by about 6.6s. So a healthy game is past its first
+#: frame 1.7s after the Arxan line and at its menu about 6.2s after it.
+#:
+#: And the one run that showed the Seamless dialog (2026-09-26 15:21, `ds2-loader.log.prev` of that
+#: session): with `[invasion_path]` on, the log stops at `hooks applied in one batch`. The overlay's
+#: `first frame: the Present detour is running` line, which a healthy run writes right after that
+#: one, never came. The main thread was stopped behind the box before the game's first present --
+#: inside the 1.7s above, not somewhere past the menu.
+#:
+#: Eight seconds covers the whole healthy boot to the top menu, with the 1.7s window where the box
+#: was actually seen inside it several times over, and leaves room for a slow Proton cold start.
+#: It is a bound on the boot and not on the mod's own network version check, which has not been
+#: timed; that is why the same check keeps running for as long as this script tails the log.
+SETTLE_SECONDS = 8.0
+
 #: Mirrors `CONFIG_LINE_PREFIX` in that module. The DLL echoes the config it read back into the
 #: log under this prefix -- the path, whether the file was there at all, and every key verbatim --
 #: before it acts on any of it. `ds2-loader:` rather than `ds2-probe:` because it is written even
@@ -496,6 +526,11 @@ EXIT_NO_PROBE_VERDICT = 4
 #: Distinct from EXIT_ERROR because the run itself was fine -- the logger is what failed.
 EXIT_NO_CRASH_EVIDENCE = 5
 
+#: The DLL loaded and reported, and the game is still not usable: something opened a message box,
+#: or the process went away. Distinct from EXIT_NO_TESTIMONY because the loader did its job; the
+#: thing that failed is the game being up, which is the promise the RUNNING block makes.
+EXIT_NOT_USABLE = 6
+
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -578,6 +613,10 @@ def await_testimony(tail: LogTail) -> dict:
     deadline = time.monotonic() + TESTIMONY_BUDGET_SECONDS
     attach_line: str | None = None
     game_seen = False
+    # Every line read before the Arxan line. The message box watch installs, and a mod injected
+    # ahead of the entry point can open its box, before that line is written; `settle` has to see
+    # both, and this loop is the only thing that read them.
+    before: list[str] = []
     while True:
         chunk = tail.new_text().splitlines()
         for index, line in enumerate(chunk):
@@ -589,9 +628,23 @@ def await_testimony(tail: LogTail) -> dict:
                     "attach_line": attach_line,
                     "waited": TESTIMONY_BUDGET_SECONDS - (deadline - time.monotonic()),
                     "leftover": chunk[index + 1 :],
+                    "before": before,
                 }
             if stripped.startswith(ATTACH_LINE_PREFIX):
                 attach_line = stripped
+            before.append(stripped)
+            # A box opened during a mod's own `DllMain` holds the injecting thread, and with it
+            # the game's main thread, which the launcher resumes only after every injection
+            # returns. The Arxan line cannot come until somebody clicks, so waiting out the
+            # testimony budget for it would report silence over a dialog that is already named.
+            box = parse_messagebox_line(stripped)
+            if box is not None:
+                return {
+                    "status": "messagebox",
+                    "box": box,
+                    "attach_line": attach_line,
+                    "before": before,
+                }
 
         alive = bool(pgrep_exact(GAME_COMM))
         game_seen = game_seen or alive
@@ -627,6 +680,192 @@ def await_testimony(tail: LogTail) -> dict:
                 "game_seen": game_seen,
             }
         time.sleep(POLL_SECONDS)
+
+
+#: The body of a MESSAGEBOX line after its prefix. Each quoted field is written by `quote` in
+#: `crates/ds2-loader/src/message_box.rs`: backslash, quote and control characters escaped, so a
+#: quoted field never contains a bare `"` and the line is always one line.
+_MESSAGEBOX_BODY = re.compile(
+    r"caller=(?P<caller>\S+) api=(?P<api>\S+) "
+    r'caption=(?P<caption>"(?:[^"\\]|\\.)*"|<null>) '
+    r'text=(?P<text>"(?:[^"\\]|\\.)*"|<null>) '
+    r"type=0x(?P<type>[0-9a-fA-F]+)$"
+)
+
+_MESSAGEBOX_ESCAPES = {"\\": "\\", '"': '"', "n": "\n", "r": "\r", "t": "\t"}
+
+
+def _unquote_messagebox_field(field: str) -> str | None:
+    """Undo the DLL's `quote`: `<null>` is None, and a quoted field loses its quotes and escapes."""
+    if field == "<null>":
+        return None
+    body = field[1:-1]
+    out: list[str] = []
+    index = 0
+    while index < len(body):
+        character = body[index]
+        if character != "\\" or index + 1 >= len(body):
+            out.append(character)
+            index += 1
+            continue
+        escaped = body[index + 1]
+        if escaped == "x":
+            try:
+                out.append(chr(int(body[index + 2 : index + 4], 16)))
+                index += 4
+                continue
+            except ValueError:
+                pass
+        out.append(_MESSAGEBOX_ESCAPES.get(escaped, escaped))
+        index += 2
+    return "".join(out)
+
+
+def parse_messagebox_line(line: str) -> dict | None:
+    """The fields of one `ds2-loader: MESSAGEBOX` line, or None when `line` is not one.
+
+    A line that has the prefix and does not parse is still a message box: the DLL wrote the prefix
+    only because a box was opening. It comes back with the raw remainder as its text rather than as
+    None, because treating it as absent would print the RUNNING block over a dialog.
+    """
+    if not line.startswith(MESSAGEBOX_LINE_PREFIX):
+        return None
+    rest = line[len(MESSAGEBOX_LINE_PREFIX) :]
+    match = _MESSAGEBOX_BODY.match(rest)
+    if match is None:
+        return {
+            "caller": "<unparsed>",
+            "module": "<unparsed>",
+            "api": "?",
+            "caption": None,
+            "text": rest,
+            "type": None,
+            "line": line,
+        }
+    caller = match["caller"]
+    return {
+        "caller": caller,
+        "module": caller.split("+", 1)[0],
+        "api": match["api"],
+        "caption": _unquote_messagebox_field(match["caption"]),
+        "text": _unquote_messagebox_field(match["text"]),
+        "type": int(match["type"], 16),
+        "line": line,
+    }
+
+
+def not_usable_block(header: str, detail: list[str]) -> str:
+    """The block printed in place of the RUNNING one when the game is not usable."""
+    lines = ["```", header]
+    lines.extend(f"  {line}" for line in detail)
+    lines += ["=" * len(header), "```"]
+    return "\n".join(lines)
+
+
+def messagebox_block(box: dict, when: str) -> str:
+    """Name the module and its message in the header, where it cannot be skimmed past."""
+    text = box.get("text") or ""
+    flat = " ".join(text.split())
+    shown = flat if len(flat) <= 160 else flat[:157] + "..."
+    kind = box.get("type")
+    header = f'==== GAME IS NOT USABLE: {box["module"]} showed "{shown}" ===='
+    detail = [
+        f"when      {when}",
+        f"caller    {box['caller']}",
+        f"api       {box['api']}",
+        f"caption   {box['caption']!r}",
+        f"text      {text!r}",
+        f"type      {'?' if kind is None else hex(kind)}",
+        "",
+        "The DLL wrote this line from its user32 hook, before the box opened. A message box is",
+        "modal: whatever called it is stopped until somebody answers it, and this one may be",
+        "about to end the process. No RUNNING block was printed for this run.",
+        f"line      {box['line']}",
+    ]
+    return not_usable_block(header, detail)
+
+
+def exited_block(when: str) -> str:
+    """The game process went away while this script was vouching for it."""
+    return not_usable_block(
+        "==== GAME EXITED ====",
+        [
+            f"when      {when}",
+            f"{GAME_COMM} is no longer in the process table, and no message box line was",
+            "written first. Read the tail of the loader log and ds2-crash-latest.txt for why.",
+            "No RUNNING block was printed for this run.",
+        ],
+    )
+
+
+def settle(
+    tail: LogTail,
+    seconds: float,
+    lines_so_far: Sequence[str] = (),
+    watch_alive: bool = True,
+    alive=lambda: bool(pgrep_exact(GAME_COMM)),
+    clock=time.monotonic,
+    sleep=time.sleep,
+) -> dict:
+    """Hold the RUNNING block for `seconds`, watching for a message box and for the game dying.
+
+    See `SETTLE_SECONDS` for where the length comes from. `lines_so_far` is everything
+    `await_testimony` already read out of the tail, before and after the Arxan line, because the
+    watch's install line and a box opened during a mod's `DllMain` are both in there.
+
+    Returns `status` ("ok", "messagebox" or "exited"), the box when there is one, and the watch's
+    install line when there is one. `watch_alive=False` is for `--crash-test`, where the game
+    dying is what was asked for.
+    """
+    state: dict = {"status": "ok", "box": None, "watch": None, "waited": 0.0}
+
+    def absorb(lines: Sequence[str]) -> None:
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith(MESSAGEBOX_WATCH_PREFIX):
+                state["watch"] = stripped
+            box = parse_messagebox_line(stripped)
+            if box is not None and state["box"] is None:
+                state["box"] = box
+
+    absorb(lines_so_far)
+    started = clock()
+    deadline = started + seconds
+    while True:
+        if state["box"] is not None:
+            state["status"] = "messagebox"
+            break
+        if watch_alive and not alive():
+            # The same race `await_testimony` guards: the last line and the exit land together,
+            # and a box line written just before the end is the more useful of the two answers.
+            absorb(tail.new_text().splitlines())
+            state["status"] = "messagebox" if state["box"] is not None else "exited"
+            break
+        if clock() >= deadline:
+            break
+        sleep(POLL_SECONDS)
+        absorb(tail.new_text().splitlines())
+    state["waited"] = clock() - started
+    return state
+
+
+def settle_verdict(state: dict, when: str) -> tuple[str, int] | None:
+    """The block to print instead of RUNNING, and its exit code, or None when the game settled."""
+    if state["status"] == "messagebox":
+        return messagebox_block(state["box"], when), EXIT_NOT_USABLE
+    if state["status"] == "exited":
+        return exited_block(when), EXIT_NOT_USABLE
+    return None
+
+
+def watch_line_summary(watch: str | None) -> str:
+    """One line for the RUNNING block on whether the message box watch was armed."""
+    if watch is None:
+        return (
+            f"not armed -- no `{MESSAGEBOX_WATCH_PREFIX}` line in this run's log, so a dialog "
+            "would have gone unseen"
+        )
+    return watch[len(MESSAGEBOX_WATCH_PREFIX) :].strip()
 
 
 # ================================================================================================
@@ -713,6 +952,7 @@ def new_probe_state() -> dict:
         "detach": None,
         "game_exited": False,
         "observed": 0.0,
+        "messagebox": None,
     }
 
 
@@ -740,14 +980,26 @@ def watch_probe(tail: LogTail, seconds: float, leftover: Sequence[str] = ()) -> 
     enough. It is not: the tail object is shared, but the chunk already read out of it is not.
     """
     state = new_probe_state()
+
+    def absorb(line: str) -> None:
+        absorb_probe_line(line, state)
+        # The settle check, carried on for as long as this tails the log: a box that opens
+        # after the RUNNING block printed ends the window here rather than being averaged into a
+        # verdict about a hook.
+        box = parse_messagebox_line(line)
+        if box is not None and state["messagebox"] is None:
+            state["messagebox"] = box
+
     for line in leftover:
-        absorb_probe_line(line.strip(), state)
+        absorb(line.strip())
     started = time.monotonic()
     deadline = started + seconds
     game_seen = False
     while True:
         for line in tail.new_text().splitlines():
-            absorb_probe_line(line.strip(), state)
+            absorb(line.strip())
+        if state["messagebox"] is not None:
+            break
 
         alive = bool(pgrep_exact(GAME_COMM))
         game_seen = game_seen or alive
@@ -757,7 +1009,7 @@ def watch_probe(tail: LogTail, seconds: float, leftover: Sequence[str] = ()) -> 
             # was orderly. Drain once more before concluding.
             time.sleep(POLL_SECONDS)
             for line in tail.new_text().splitlines():
-                absorb_probe_line(line.strip(), state)
+                absorb(line.strip())
             state["game_exited"] = True
             break
 
@@ -1011,6 +1263,8 @@ def running_block(context: dict) -> str:
     lines += [
         f"  log            {context['log']}",
         f"  waited         {context['waited']:.1f}s",
+        f"  settled        {context['settled']:.1f}s more with no message box and the game alive",
+        f"  dialog watch   {watch_line_summary(context['watch'])}",
         "",
         "  NOT claimed    window visible / menu reached / input working / Arxan actually",
         "                 defeated. This block says the proxy loaded and dearxan reported;",
@@ -1044,18 +1298,64 @@ def stale_sources() -> list[Path]:
     `BUILT_DLL`, and a DLL built from older code is the one failure that produces a confident,
     well-formatted, entirely wrong verdict. `--release` is the profile that gets staged; building
     `dev` leaves this file untouched and is exactly how the mismatch arises.
+
+    Only crates `ds2-loader` actually links are counted. A host-only crate the loader does not
+    depend on (`ds2-build-url-core`, say) can be newer than the DLL after a merge, and a loader
+    build does not relink for it, so counting it refused a launch no rebuild could satisfy.
     """
     if not BUILT_DLL.is_file():
         return []
     built = BUILT_DLL.stat().st_mtime
+    linked = loader_crate_dirs()
     newer = []
     for pattern in SOURCE_GLOBS:
         for path in REPO_ROOT.glob(pattern):
             if "target" in path.parts:
                 continue
+            if linked is not None and path.parts[len(REPO_ROOT.parts)] == "crates":
+                crate_dir = REPO_ROOT / "crates" / path.parts[len(REPO_ROOT.parts) + 1]
+                if crate_dir not in linked:
+                    continue
             if path.is_file() and path.stat().st_mtime > built:
                 newer.append(path)
     return newer
+
+
+def loader_crate_dirs() -> set[Path] | None:
+    """The workspace crate directories in `ds2-loader`'s dependency closure, for the DLL target.
+
+    `None` when cargo cannot answer, and then every crate counts: over-refusing a launch costs a
+    rebuild, while under-counting stages a stale DLL.
+    """
+    try:
+        out = subprocess.run(
+            ["cargo", "metadata", "--format-version", "1",
+             "--filter-platform", "x86_64-pc-windows-msvc"],
+            cwd=REPO_ROOT, capture_output=True, text=True, timeout=60, check=True,
+        ).stdout
+        meta = json.loads(out)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    packages = {p["id"]: p for p in meta["packages"]}
+    nodes = {n["id"]: n for n in (meta.get("resolve") or {}).get("nodes", [])}
+    root = next((i for i, p in packages.items() if p["name"] == "ds2-loader"), None)
+    if root is None or root not in nodes:
+        return None
+    seen: set[str] = set()
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        stack.extend(d["pkg"] for d in nodes.get(current, {}).get("deps", []))
+    crates = (REPO_ROOT / "crates").resolve()
+    dirs = set()
+    for package_id in seen:
+        manifest = Path(packages[package_id]["manifest_path"]).resolve().parent
+        if manifest.parent == crates:
+            dirs.add(REPO_ROOT / "crates" / manifest.name)
+    return dirs
 
 
 def preflight(dry_run: bool) -> list[str]:
@@ -2998,6 +3298,9 @@ def launch(
     # Once the DLL has testified the window exists, so this is the first moment the move can
     # actually land. Before it there is nothing to move.
     settle_on_monitor()
+    if verdict["status"] == "messagebox":
+        print(messagebox_block(verdict["box"], "before the Arxan line -- the boot is held behind it"))
+        return EXIT_NOT_USABLE
     if verdict["status"] != "confirmed":
         if verdict["status"] == "attached-silent":
             reason = "the DLL LOADED but dearxan never reported"
@@ -3027,6 +3330,22 @@ def launch(
         print(failed_block(reason, detail))
         return EXIT_NO_TESTIMONY
 
+    # The Arxan line proves the DLL loaded, not that the game is up. Hold the block until the boot
+    # has had time to reach its menu, and print it only if nothing opened a message box and the
+    # process is still there; see `SETTLE_SECONDS` for the number.
+    print(f"[settle] watching {SETTLE_SECONDS:.0f}s for a message box or an exit before vouching")
+    settled = settle(
+        tail,
+        SETTLE_SECONDS,
+        [*verdict.get("before", ()), *verdict.get("leftover", ())],
+        watch_alive=fault_after_ms <= NO_FAULT_MS,
+    )
+    refused = settle_verdict(settled, f"within {SETTLE_SECONDS:.0f}s of the Arxan line")
+    if refused is not None:
+        block, code = refused
+        print(block)
+        return code
+
     print(
         running_block(
             {
@@ -3040,6 +3359,8 @@ def launch(
                 "game_pids": pgrep_exact(GAME_COMM),
                 "config_path": config_path,
                 "config": config,
+                "settled": settled["waited"],
+                "watch": settled["watch"],
             }
         )
     )
@@ -3065,6 +3386,15 @@ def launch(
     probe_state = watch_probe(tail, observe, verdict.get("leftover", ()))
     block, code = probe_block(probe, probe_state, site if probe != "off" else None)
     print(block)
+    # The RUNNING block above was a claim about the game, and it stops being true the moment a box
+    # opens or the process goes; say so after the probe's own verdict, and do not exit 0 over it.
+    after = f"during the {probe_state['observed']:.0f}s probe window after the RUNNING block"
+    if probe_state["messagebox"] is not None:
+        print(messagebox_block(probe_state["messagebox"], after))
+        return EXIT_NOT_USABLE
+    if probe_state["game_exited"]:
+        print(exited_block(after))
+        return EXIT_NOT_USABLE
     return code
 
 
@@ -3286,6 +3616,143 @@ def selftest() -> int:
             state.get("install") is not None,
             "and watch_probe starts with that install line already absorbed",
         )
+
+        # The message box semaphore. The line below is the one the DLL's own unit test pins in
+        # `crates/ds2-loader/src/message_box.rs`, so the two sides are checked against one string.
+        seamless_line = (
+            f'{MESSAGEBOX_LINE_PREFIX}caller=ds2sc.dll+0x1234 api=MessageBoxA caption="Error" '
+            'text="This version of Dark Souls II seamless co-op (0.0.1) is depreciated and '
+            'requires an update.\\nThe application will now exit." type=0x10'
+        )
+        watch_line = (
+            f"{MESSAGEBOX_WATCH_PREFIX} installed=6/6 -- every message box in this process is "
+            "logged before it opens"
+        )
+        box = parse_messagebox_line(seamless_line)
+        check(
+            box is not None
+            and box["module"] == "ds2sc.dll"
+            and box["api"] == "MessageBoxA"
+            and box["caption"] == "Error"
+            and box["type"] == 0x10
+            and box["text"].endswith("update.\nThe application will now exit."),
+            "a MESSAGEBOX line parses into module, api, caption, unescaped text and type",
+        )
+        escaped = parse_messagebox_line(
+            f'{MESSAGEBOX_LINE_PREFIX}caller=0x7fff0000 api=MessageBoxW caption=<null> '
+            'text="a\\"b\\\\c\\x01" type=0x0'
+        )
+        check(
+            escaped is not None and escaped["caption"] is None and escaped["text"] == 'a"b\\c\x01',
+            "quotes, backslashes, hex escapes and a null caption survive the round trip",
+        )
+        garbled = parse_messagebox_line(f"{MESSAGEBOX_LINE_PREFIX}something the regex never saw")
+        check(
+            garbled is not None,
+            "a prefixed line that does not parse is still a message box, never an absence",
+        )
+        check(parse_messagebox_line(watch_line) is None, "the install line is not a message box")
+
+        def fake_time() -> tuple:
+            now = [0.0]
+            return (lambda: now[0]), (lambda seconds: now.__setitem__(0, now[0] + seconds))
+
+        def withheld(verdict: tuple[str, int] | None, header: str) -> bool:
+            return (
+                verdict is not None
+                and verdict[1] == EXIT_NOT_USABLE
+                and header in verdict[0]
+                and "IS RUNNING" not in verdict[0]
+            )
+
+        clock, sleep = fake_time()
+        early = settle(
+            tail, SETTLE_SECONDS, [watch_line, seamless_line],
+            alive=lambda: True, clock=clock, sleep=sleep,
+        )
+        check(
+            withheld(
+                settle_verdict(early, "test"),
+                'GAME IS NOT USABLE: ds2sc.dll showed "This version of Dark Souls II',
+            ),
+            "the RUNNING block is withheld when a MESSAGEBOX line was already read",
+        )
+
+        clock, sleep = fake_time()
+        with path.open("ab") as handle:
+            handle.write(f"{seamless_line}\n".encode())
+        late = settle(tail, SETTLE_SECONDS, [watch_line], alive=lambda: True, clock=clock, sleep=sleep)
+        check(
+            late["status"] == "messagebox" and late["watch"] == watch_line,
+            "and when the MESSAGEBOX line arrives in the log during the settle window",
+        )
+
+        clock, sleep = fake_time()
+        died = settle(tail, SETTLE_SECONDS, [watch_line], alive=lambda: False, clock=clock, sleep=sleep)
+        check(
+            withheld(settle_verdict(died, "test"), "==== GAME EXITED ===="),
+            "the RUNNING block is withheld when the game process dies during the settle window",
+        )
+
+        clock, sleep = fake_time()
+        quiet = settle(tail, SETTLE_SECONDS, [watch_line], alive=lambda: True, clock=clock, sleep=sleep)
+        check(
+            quiet["status"] == "ok"
+            and settle_verdict(quiet, "test") is None
+            and quiet["waited"] >= SETTLE_SECONDS,
+            "a live game with no box is vouched for, and only after the whole window",
+        )
+        check(
+            watch_line_summary(quiet["watch"]).startswith("installed=6/6")
+            and watch_line_summary(None).startswith("not armed"),
+            "the RUNNING block says whether the watch was armed, including when it was not",
+        )
+
+        clock, sleep = fake_time()
+        crash = settle(
+            tail, SETTLE_SECONDS, [], watch_alive=False,
+            alive=lambda: False, clock=clock, sleep=sleep,
+        )
+        check(
+            crash["status"] == "ok",
+            "--crash-test's deliberate death is not reported as an exit during the window",
+        )
+
+        # A box opened during a mod's own `DllMain` holds the boot before the Arxan line.
+        with path.open("ab") as handle:
+            handle.write(f"{watch_line}\n{seamless_line}\n".encode())
+        held = await_testimony(tail)
+        check(
+            held["status"] == "messagebox" and held["box"]["module"] == "ds2sc.dll",
+            "await_testimony stops on a MESSAGEBOX line instead of waiting out its budget",
+        )
+
+        with path.open("ab") as handle:
+            handle.write(f"{PROBE_LINE_PREFIX} heartbeat n=1\n{seamless_line}\n".encode())
+        probed = watch_probe(tail, 60.0)
+        check(
+            probed["messagebox"] is not None and probed["observed"] < 60.0,
+            "the same check runs after the RUNNING block: watch_probe ends on a MESSAGEBOX line",
+        )
+
+    import inspect
+
+    launch_src = inspect.getsource(launch)
+    check(
+        "refused = settle_verdict(" in launch_src
+        and launch_src.index("refused = settle_verdict(") < launch_src.index("running_block(")
+        and launch_src.index("settle(") < launch_src.index("running_block("),
+        "launch settles and checks the verdict before it can print the RUNNING block",
+    )
+    box_src = (REPO_ROOT / "crates/ds2-loader/src/message_box.rs").read_text()
+    check(
+        f'"{MESSAGEBOX_LINE_PREFIX}"' in box_src and f'"{MESSAGEBOX_WATCH_PREFIX}"' in box_src,
+        "the DLL writes the MESSAGEBOX and messagebox-watch prefixes this reads",
+    )
+    check(
+        "caller=ds2sc.dll+0x1234 api=MessageBoxA caption=\\\"Error\\\"" in box_src,
+        "the Rust formatting test pins the same line this parses",
+    )
 
     check(
         f'name = "{BUILT_DLL.stem}"' in (REPO_ROOT / "crates/ds2-loader/Cargo.toml").read_text(),
