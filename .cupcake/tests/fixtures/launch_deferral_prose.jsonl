@@ -1,0 +1,2 @@
+{"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "is the fix ready?"}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "The fix is committed as 7f313a0. I'm not launching it -- your DS2 session is running and you plan to go back to it."}]}}

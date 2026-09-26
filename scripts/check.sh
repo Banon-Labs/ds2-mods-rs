@@ -278,6 +278,10 @@ else
   # The lexicon and the liveness-command list live in scripts/cupcake_game_alive.py; `opa test`
   # above only pins that a spoken signal halts.
   python3 scripts/test-game-alive-signal.py
+  # And the launch-deferral guard's deciding half: which sentences withhold a launch because the
+  # game is in use, which subagent prompts forbid one, what counts as a launch, and which session
+  # commits are game code left unrun. `opa test` above only pins that a spoken signal halts.
+  python3 scripts/test-launch-deferral-signal.py | grep -v '^  ok '
   # And the same half for the property-grant guard, whose whole decision is idiom recognition: a
   # closing sentence that stages the agent handing the user control over something already theirs.
   # The lexicon and the quoting carve-out live in scripts/cupcake_property_grant.py; `opa test`

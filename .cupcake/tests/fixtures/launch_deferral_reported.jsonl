@@ -1,0 +1,2 @@
+{"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "is the fix ready?"}]}}
+{"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Launched over the running game: ds2-run.py tore down your session first, and the launcher printed its success block after reading the DLL's log line."}]}}
