@@ -1,0 +1,29 @@
+# The Load from URL field's behaviour, as state and text rules with no window behind them.
+#
+# A port of the engine-free half of `../er-mods-rs`'s link field: the editor's open / submit /
+# cancel lifecycle, the rule for what a refused link re-opens with, the bound on re-opens, the
+# stale-latch test, the clipboard gate, and the watchdog that says a queued field was never
+# submitted. What stays in Elden Ring is its Scaleform movie, its SoftwareKeyboard job and its
+# clipboard polling -- DARK SOULS II draws with `.flo` and delivers Ctrl+V as a character.
+#
+# Host-testable by construction: no `cfg(windows)`, no address table, no unsafe (forbidden at the
+# crate root). It sits on `scripts/check.sh`'s host test line beside the core it builds on.
+[package]
+name = "ds2-build-url-core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "ds2_build_url_core"
+
+[dependencies]
+# The character-level editing model (caret, surrogates, control codes, the length bound) and the
+# link grammar (path form accepted, fragment form refused). Neither is duplicated here: this crate
+# is the lifecycle around them.
+ds2-build-import-core = { workspace = true }
+
+[lints]
+workspace = true

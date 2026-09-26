@@ -497,6 +497,13 @@ name = "ds2-build-import-core"
 version = "0.1.0"
 
 [[package]]
+name = "ds2-build-url-core"
+version = "0.1.0"
+dependencies = [
+ "ds2-build-import-core",
+]
+
+[[package]]
 name = "ds2-continue"
 version = "0.1.0"
 dependencies = [

@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Repo gate. Run before pushing a branch.
 #
-# NOTHING ELSE RUNS THIS. There is no `.github/` in this repo, so every green gate here has been
-# someone running it by hand, and a pull request can be merged without any of it (`ds2-mods-rs-e60`).
-# This line used to claim CI ran the same thing, which was never true and is the sort of claim that
-# makes a reviewer skip the check themselves.
+# CI RUNS THIS UNMODIFIED: `.github/workflows/gate.yml` runs it on every pull request and every
+# push to main, twice -- once bare and once with `--host-tests` -- with opa, cupcake and wine
+# installed and neither CUPCAKE_SKIP nor WINE_SKIP set, so a runner missing a tool goes red here
+# exactly as a laptop missing one does. Running it before pushing is still the fast loop; the
+# workflow is what stops a pull request from being merged without it.
 #
 # Everything in `crates/` ships as a Windows DLL or is linked into one, so the MSVC target is
 # the gate that matters and it is the one clippy runs against. Host `cargo test` is a second,
@@ -142,7 +143,7 @@ if (( run_host_tests )); then
   # everything else is covered by the wine pass below.
   cargo test -p ds2-sl2-core -p ds2-hotkey-config -p ds2-safe-input -p ds2-crash-logging-core \
     -p ds2-build-import-core -p ds2-save-file-core -p ds2-save-picker-core -p ds2-soul-memory-guard \
-    -p darksouls2
+    -p ds2-build-url-core -p darksouls2
 
   echo "== windows-target tests (wine) =="
   # THE CRATES THAT MATTER MOST WERE THE ONES WITH NO EXECUTABLE TESTS. `ds2-loader` is
