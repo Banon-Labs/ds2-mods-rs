@@ -98,6 +98,7 @@ pub mod offline;
 pub mod save_block;
 pub mod save_redirect;
 pub mod seamless;
+pub mod soul_memory_guard;
 pub mod title_menu;
 pub mod title_skip;
 pub mod voice_chat;
@@ -300,6 +301,10 @@ unsafe fn attach(module: *mut c_void) {
             // startup it exists to shorten -- which would be worth knowing before claiming any
             // saving. The mark costs a performance-counter read.
             ds2_boot_timeline::mark("neuter-arxan-begin");
+            // Before `neuter_arxan`, so its analysis and patch timings land in the log.
+            if log::set_logger(&DEARXAN_LOG).is_ok() {
+                log::set_max_level(log::LevelFilter::Info);
+            }
             neuter_arxan(move |result: DearxanResult| {
                 ds2_boot_timeline::mark("neuter-arxan-callback");
                 // JOB 2 (second half). Not in `DllMain`: this callback runs at the entry point,
@@ -320,26 +325,47 @@ unsafe fn attach(module: *mut c_void) {
                 // Every crate enables its hooks into one batch, applied once below; see
                 // `ds2_hook::begin_boot_batch`.
                 ds2_hook::begin_boot_batch();
+                // One mark per install, so the boot timeline can charge the callback's time to
+                // the crate that spent it rather than to the game's startup that follows.
                 install_probe(probe);
                 install_offline();
+                ds2_boot_timeline::mark("installed-offline");
                 install_save_redirect();
+                ds2_boot_timeline::mark("installed-save-redirect");
                 install_intro_skip();
+                ds2_boot_timeline::mark("installed-intro-skip");
                 install_dialog_skip();
+                ds2_boot_timeline::mark("installed-dialog-skip");
                 install_title_skip();
+                ds2_boot_timeline::mark("installed-title-skips");
                 install_boot_timeline();
                 install_continue_record();
+                ds2_boot_timeline::mark("installed-continue");
                 install_title_menu();
+                ds2_boot_timeline::mark("installed-title-menu");
                 install_build_import();
+                ds2_boot_timeline::mark("installed-build-import");
                 install_inventory_sort();
+                ds2_boot_timeline::mark("installed-inventory-sort");
                 install_voice_chat();
+                ds2_boot_timeline::mark("installed-voice-chat");
                 install_menu_row();
+                ds2_boot_timeline::mark("installed-menus");
                 install_item_warn();
                 install_hp_gauge();
+                ds2_boot_timeline::mark("installed-hud");
                 install_invasion_path();
+                ds2_boot_timeline::mark("installed-invasion-path");
                 install_input_harness();
+                install_soul_memory_guard();
                 arm_fault(crash_config);
                 finish_boot_batch();
+                ds2_boot_timeline::mark("installs-done");
             });
+            // Whether `neuter_arxan` did its analysis and patching here, in `DllMain`, or left it
+            // for the entry point: the span from `neuter-arxan-begin` to the callback is only
+            // dearxan's cost if this mark sits near the callback rather than near the begin.
+            ds2_boot_timeline::mark("neuter-arxan-returned");
         },
 
         // THE A/B ARM. `neuter_arxan` is not called, so Arxan's 48 stubs are left running and can
@@ -380,6 +406,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_hp_gauge();
                 install_invasion_path();
                 install_input_harness();
+                install_soul_memory_guard();
                 arm_fault(crash_config);
                 finish_boot_batch();
             });
@@ -911,6 +938,30 @@ fn install_invasion_path() {
     }
 }
 
+/// Judge each loaded character's soul memory against its level, if `<Game>/ds2-mods.toml` asked.
+///
+/// Off unless `[soul_memory_guard] enabled = true`. It logs and changes nothing: see
+/// `ds2-soul-memory-guard` for why a line is the whole feature.
+fn install_soul_memory_guard() {
+    let config = soul_memory_guard::SoulMemoryGuardConfig::load();
+    log_line(format_args!("{}", config.describe()));
+    if !config.enabled {
+        return;
+    }
+    ds2_soul_memory_guard::set_logger(log_line);
+    // SAFETY: the detour target and the called function are recorded in `ds2-rva` with the bytes
+    // they must begin with, `scripts/ds2-arxan-chain.py` reports a clean prologue at both, and the
+    // crate re-reads those bytes and patches nothing on a mismatch. Called from the post-Arxan
+    // position, like every other install here.
+    let outcome = unsafe { ds2_soul_memory_guard::install() };
+    if !outcome.installed {
+        log_line(format_args!(
+            "{} NOT INSTALLED -- no character load is judged this run",
+            ds2_soul_memory_guard::LOG_PREFIX
+        ));
+    }
+}
+
 /// Install the agent-driven input harness, if `<Game>/ds2-mods.toml` asked for it.
 ///
 /// **After [`install_invasion_path`]**, and that ordering carries one fact rather than being
@@ -1176,6 +1227,33 @@ fn module_file_name(module: *mut c_void) -> Option<PathBuf> {
         }
         capacity *= 2;
     }
+}
+
+/// Forwards what dearxan reports through the `log` facade into this log, info and above.
+///
+/// dearxan times its own stub analysis, patch generation and patch application, and without a
+/// logger those lines go nowhere; they are what says how much of the time before the entry point
+/// is ours.
+struct DearxanLog;
+
+static DEARXAN_LOG: DearxanLog = DearxanLog;
+
+impl log::Log for DearxanLog {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            log_line(format_args!(
+                "ds2-loader: dearxan {} {}",
+                record.level(),
+                record.args()
+            ));
+        }
+    }
+
+    fn flush(&self) {}
 }
 
 /// Append one line to the log next to the game executable, and push it to the OS before

@@ -64,8 +64,15 @@ independently of the Arxan-shattered body: `0x140bed0a0` runs the sfxparam, rand
 25833 also came back with live node pointers (`spawned`), which the mod reads itself.
 
 **Conclusion, verified in binary:** `0x140beb400` runs only after a spawn produced a non-empty
-block. The map is a per-id count of spawns that worked. An id enters it on its first successful
-spawn and its count goes up on each later one. A spawn that finds nothing never touches it.
+block. An id enters the map on its first successful spawn and its count goes up on each later one.
+A spawn that finds nothing never touches it.
+
+**Correction, verified in binary:** the count also goes down. `0x140beb3a0(sys, id)` subtracts 1
+(never below 0), and its only caller is the `SfxFxObjectRoot` destructor `0x140c0b290`, with the id
+at `root+0x34`. So each node counts the **live roots** of that id, not the spawns so far. Nodes at
+zero are aged and erased by the system update's 5 s purge, which also unloads that id from every
+bundle that materialised it (`docs/DS2-SFX-REGISTRY.md` section 6.1). An id's node can therefore
+disappear and come back, and its count across two spawns can go down as well as up.
 
 So the logged lines mean:
 
@@ -150,8 +157,9 @@ already calls the invalidate afterwards.
 Same invocation as the first run (`--invasion-path --invasion-path-on --invasion-path-self-check
 --invasion-path-markers 833`), with the corrected diagnostic:
 
-- the first 25833 spawn logs `counted this spawn (1 so far)`, and each later one's count is one
-  higher than the last -- the prediction of the old reading was the opposite;
+- the first 25833 spawn logs `counted this spawn (1 so far)`, and each spawn's count is one higher
+  than just before it -- the prediction of the old reading was the opposite. Across spawns the
+  running figure is the number of live roots, so it falls when stones are torn down;
 - no line reports a contradiction between the handle and the count;
 - `Handle::alive` stays true for the placed stones, which is what says they linger.
 
