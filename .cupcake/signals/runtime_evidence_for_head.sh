@@ -98,10 +98,65 @@ fi
 
 REPO="$SCRIPT_REPO"
 script_common="$(git -C "$SCRIPT_REPO" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || script_common=""
-invoked_common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || invoked_common=""
-if [ -n "$script_common" ] && [ "$invoked_common" = "$script_common" ]; then
-    invoked_root="$(git rev-parse --show-toplevel 2>/dev/null)" || invoked_root=""
-    [ -n "$invoked_root" ] && REPO="$invoked_root"
+
+# `<dir>` -> its toplevel when it is a checkout of this same repository, else nothing.
+same_repo_root() {
+    local dir="$1" common
+    [ -n "$dir" ] && [ -n "$script_common" ] && [ -d "$dir" ] || return 1
+    common="$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 1
+    [ "$(realpath -- "$common" 2>/dev/null)" = "$(realpath -- "$script_common" 2>/dev/null)" ] || return 1
+    git -C "$dir" rev-parse --show-toplevel 2>/dev/null
+}
+
+# The shell's directory as the event reports it wins over the hook process's own cwd: the event's
+# `cwd` is where the Bash tool's shell sits, which is where a bare `git push` would run.
+event_cwd=""
+if [ -n "$event" ]; then
+    event_cwd="$(printf '%s' "$event" | python3 -c 'import json,sys
+try:
+    v = json.load(sys.stdin).get("cwd")
+except Exception:
+    v = None
+print(v if isinstance(v, str) else "")' 2>/dev/null)" || event_cwd=""
+fi
+# `base` is the directory a relative `cd` in the command resolves against, so it keeps a subdirectory
+# rather than collapsing to the toplevel.
+base="$SCRIPT_REPO"
+if root="$(same_repo_root "$event_cwd")" && [ -n "$root" ]; then
+    REPO="$root"
+    base="$event_cwd"
+elif root="$(same_repo_root "$PWD")" && [ -n "$root" ]; then
+    REPO="$root"
+    base="$PWD"
+fi
+
+# The `cd` in the command itself (2026-09-26). Resolving from the cwd alone still got this wrong:
+# with the hook sitting in the main checkout,
+#
+#     cd /home/banon/projects/ds2-mods-rs/.claude/worktrees/load-hang && git push -u origin save-file-load-hang
+#
+# was refused with `dll_match=0`, although the staged dinput8.dll and that worktree's built one had
+# the same sha256 and a launch of it had attached. Every field was measured in the main checkout,
+# because the `cd` had not run yet when the hook fired. `head`, `game_code` and `pending` were read
+# from the wrong tree too, and `game_code` is the dangerous one: a docs-only main checkout makes an
+# unrun worktree push of crates/ read as out of jurisdiction.
+#
+# scripts/cupcake_push_target_repo.py walks a leading `cd <dir>`, `git -C <dir>` and `bash -c`
+# wrapper to the directory the push runs in, and only answers `REPO` for a working tree whose
+# git-common-dir is this repository's. `UNKNOWN` (unlexable, a subshell, a heredoc, a foreign or
+# missing directory, two pushes at two trees) and a resolver that is missing or crashes all print
+# nothing here, which the policy refuses: this is the fail-closed direction.
+if [ -n "$event" ]; then
+    target="$(printf '%s' "$event" | python3 "$SCRIPT_REPO/scripts/cupcake_push_target_repo.py" --cwd "$base" 2>/dev/null)" || exit 0
+    case "$target" in
+        SELF) ;;
+        "REPO "*)
+            root="$(same_repo_root "${target#REPO }")" || exit 0
+            [ -n "$root" ] || exit 0
+            REPO="$root"
+            ;;
+        *) exit 0 ;;
+    esac
 fi
 cd "$REPO" || exit 0
 
@@ -130,7 +185,7 @@ BUILT_DLL="$REPO/target/x86_64-pc-windows-msvc/release/dinput8.dll"
 # now says which refs the command pushes and whether it commits first:
 #
 #   * `pending=1` -- a `git commit` runs before the push. The working tree's tracked changes and
-#     untracked files join `changed`, because the commit is made of them, and the policy refuses
+#     untracked files count toward `game_code`, because the commit is made of them, and the policy refuses
 #     outright: the commit that would be pushed does not exist yet, so no run can have tested it.
 #     Commit in one command, run the game, push in another.
 #   * each `REF` is diffed against `origin/main` on its own, and `head` is the newest of their
@@ -145,8 +200,14 @@ case "$scope" in *"COMMIT 1"*) pending=1 ;; esac
 refs="$(printf '%s\n' "$scope" | sed -n 's/^REF //p')"
 [ -n "$refs" ] || refs="HEAD"
 
+#
+# A committed ref whose game-path changes are comments only is not game code (2026-09-26).
+# `scripts/cupcake_comment_only.py` lexes both sides of every changed Rust file and answers `GAME 0`
+# only when the token streams match with comments removed; an added, deleted or non-`.rs` game file,
+# a lex failure, a git error, or the script crashing all count as game code. A pending commit's
+# working-tree changes stay on the plain path test: the policy refuses that shape anyway.
 upstream="$(git rev-parse --verify --quiet origin/main)" || upstream=""
-changed=""
+game_code=0
 head_time=""
 while IFS= read -r ref; do
     [ -n "$ref" ] || continue
@@ -162,28 +223,24 @@ while IFS= read -r ref; do
     [ -n "$t" ] || t="$(git log -1 --format=%ct "$ref" 2>/dev/null)" || t=""
     [ -n "$t" ] || continue
     if [ -z "$head_time" ] || [ "$t" -gt "$head_time" ]; then head_time="$t"; fi
-    if [ -n "$upstream" ]; then
-        changed="$changed
-$(git diff --name-only "origin/main...$ref" 2>/dev/null)"
-    else
-        changed="$changed
-$(git diff --name-only "$ref~1..$ref" 2>/dev/null)"
-    fi
+    if [ -n "$upstream" ]; then diff_base="origin/main"; else diff_base="$ref~1"; fi
+    ref_changed="$(git diff --name-only "$diff_base...$ref" 2>/dev/null)"
+    case "$ref_changed" in
+        *crates/*|*scripts/ds2-run.py*)
+            verdict="$(python3 "$SCRIPT_REPO/scripts/cupcake_comment_only.py" --base "$diff_base" --ref "$ref" 2>/dev/null)" || verdict=""
+            [ "$verdict" = "GAME 0" ] || game_code=1
+            ;;
+    esac
 done <<EOF_REFS
 $refs
 EOF_REFS
 [ -n "$head_time" ] || exit 0
 
 if [ "$pending" = 1 ]; then
-    changed="$changed
-$(git diff --name-only HEAD 2>/dev/null)
-$(git ls-files --others --exclude-standard 2>/dev/null)"
+    case "$(git diff --name-only HEAD 2>/dev/null; git ls-files --others --exclude-standard 2>/dev/null)" in
+        *crates/*|*scripts/ds2-run.py*) game_code=1 ;;
+    esac
 fi
-
-game_code=0
-case "$changed" in
-    *crates/*|*scripts/ds2-run.py*) game_code=1 ;;
-esac
 case "$scope" in *"ALL 1"*) game_code=1 ;; esac
 
 # The staged copy's mtime is the floor `fresh` has to clear as well as HEAD's commit time: a run can

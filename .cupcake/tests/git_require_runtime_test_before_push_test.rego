@@ -355,3 +355,31 @@ test_chained_commit_and_push_of_docs_is_allowed if {
 test_signal_without_pending_field_still_proves if {
 	count(guard.deny) == 0 with input as event("git push -u origin b", proven)
 }
+
+# --- a `cd` or `git -C` into a worktree (2026-09-26) ----------------------------------------------
+# With the hook in the main checkout, `cd <load-hang worktree> && git push -u origin
+# save-file-load-hang` was refused as a foreign binary although the staged DLL was that worktree's
+# build, byte for byte. The signal now measures the checkout the command pushes from
+# (scripts/cupcake_push_target_repo.py; its end-to-end cases are in
+# scripts/test-runtime-evidence-signal.py), so for this command it reports the worktree's facts.
+# The policy half pinned here: a `cd`-prefixed or `-C` push is still a push, allowed on a proven
+# line and refused on the foreign-binary line, and refused when the signal falls silent because the
+# target could not be resolved, which is how an unresolvable redirect reaches the policy.
+worktree_push_cd := "cd /home/banon/projects/ds2-mods-rs/.claude/worktrees/load-hang && git push -u origin save-file-load-hang"
+
+worktree_push_dash_c := "git -C /home/banon/projects/ds2-mods-rs/.claude/worktrees/load-hang push -u origin save-file-load-hang"
+
+test_allow_cd_into_worktree_push_when_the_worktree_is_proven if {
+	allowed(worktree_push_cd, proven)
+	allowed(worktree_push_dash_c, proven)
+}
+
+test_deny_cd_into_worktree_push_when_its_binary_is_foreign if {
+	blocked(worktree_push_cd, foreign_binary)
+	blocked(worktree_push_dash_c, foreign_binary)
+}
+
+test_deny_cd_push_whose_target_could_not_be_resolved if {
+	blocked("cd /nonexistent && git push", silent)
+	blocked("(cd /home/banon/projects/ds2-mods-rs/.claude/worktrees/load-hang && git push)", silent)
+}

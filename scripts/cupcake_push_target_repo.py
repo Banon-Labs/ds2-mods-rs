@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
 """Which checkout a pending `git push` would actually run in.
 
-Read by:
-  * `.cupcake/signals/runtime_evidence_for_head.sh`
-  * `.cupcake/signals/runtime_evidence_note.sh`
+Read by `.cupcake/signals/runtime_evidence_for_head.sh`, which answers a question about one
+specific push -- has the code it carries ever run -- and used to answer it about whichever
+directory the hook process happened to start in.
 
-both of which answer a question about one specific push -- has the code it carries ever run --
-and both of which used to answer it about whichever directory the signal process happened to
-start in.
+# The same defect in this repository, measured 2026-09-26
+
+With the hook's working directory at the main checkout,
+
+    cd /home/banon/projects/ds2-mods-rs/.claude/worktrees/load-hang && git push -u origin save-file-load-hang
+
+was denied with "The DLL staged in the game directory is not the one this checkout built". It
+was: the staged `dinput8.dll` and the load-hang worktree's `target/.../dinput8.dll` had the same
+sha256, and a launch of that build had attached. The signal had hashed the MAIN checkout's
+`target/`. The identical push, run after a separate `cd`, passed. This file was ported from
+er-mods-rs, where the case below was measured first, and sat unused here until then.
 
 # The defect this exists to close, measured 2026-09-13
 
@@ -49,10 +57,10 @@ and the caller branches on it:
     `REPO <path>`   the push runs in <path>, a different working tree of this same repository.
                     Every git read that decides the verdict belongs there.
     `UNKNOWN`       a redirect is present and could not be resolved to a working tree of this
-                    repository. The signals turn this into the `UNKNOWN` verdict, which never
-                    denies -- the policy's own rule is that a guard which cannot see must not
-                    invent one, and `scripts/check-runtime-evidence.sh` in the pre-push hook
-                    still measures the push exactly, from the directory git hands it.
+                    repository. In er-mods-rs this never denies. HERE IT DOES: this repo has
+                    no pre-push hook re-measuring the push, and DS2-MODS-REQUIRE-RUNTIME-BEFORE-PUSH
+                    fails closed, so the signal prints nothing and the policy refuses. Run the
+                    `cd` as its own command and push from there.
 
 `UNKNOWN` covers a deliberate list of shapes rather than a guess: a command whose quoting will
 not lex, a `cd` inside a subshell or a heredoc (where a linear walk cannot say whether the push
@@ -85,10 +93,10 @@ UNRESOLVABLE_MARKERS = ("(", ")", "<<")
 # Wrappers whose argument after `-c` is itself a command. `commands.executed_texts` in
 # `.cupcake/system/commands.rego` decomposes these before the policy matches a push, so the
 # resolution has to follow them or the two halves disagree about the same command.
-SHELL_WRAPPERS = {"bash", "sh", "zsh", "dash", "ksh"}
+SHELL_WRAPPERS = {"bash", "sh", "zsh", "dash", "ksh", "fish"}
 
 # Words that may sit in front of the real verb without changing it.
-TRANSPARENT_PREFIXES = {"command", "builtin", "exec", "nohup", "time", "sudo", "env"}
+TRANSPARENT_PREFIXES = {"command", "builtin", "exec", "nohup", "time", "sudo", "env", "timeout"}
 
 # git's own options that take a value, so the subcommand is not mistaken for one of their
 # operands. Only the value-taking spellings matter here; a flag with no operand cannot swallow
@@ -155,9 +163,27 @@ def strip_prefixes(segment: list[str]) -> list[str]:
             continue
         if Path(word).name in TRANSPARENT_PREFIXES:
             index += 1
+            # `timeout 30 git push`: the duration belongs to the wrapper.
+            if index < len(segment) and segment[index].replace(".", "").rstrip("smhd").isdigit():
+                index += 1
             continue
         break
     return segment[index:]
+
+
+def shell_payload(words: list[str]) -> str | None:
+    """The `-c` string of `bash -c '...'` or `bash -lc '...'`.
+
+    The same reading as `scripts/cupcake_push_scope.py`, so the two never disagree about whether
+    a wrapper pushes.
+    """
+    if not words or Path(words[0]).name not in SHELL_WRAPPERS:
+        return None
+    for index, word in enumerate(words[1:], start=1):
+        if word.startswith("-") and not word.startswith("--") and "c" in word[1:]:
+            if index + 1 < len(words):
+                return words[index + 1]
+    return None
 
 
 def git_c_directories(segment: list[str]) -> tuple[list[str], bool]:
@@ -218,12 +244,11 @@ def push_directories(command: str, cwd: str) -> set[str]:
                 continue
             if operands[0].startswith("-"):
                 raise Unresolvable("`cd -` goes somewhere only the shell's history knows")
-            current = os.path.normpath(os.path.join(current, operands[0]))
+            current = os.path.normpath(os.path.join(current, os.path.expanduser(operands[0])))
             continue
-        if verb in SHELL_WRAPPERS and "-c" in words:
-            payload_index = words.index("-c") + 1
-            if payload_index < len(words):
-                found |= push_directories(words[payload_index], current)
+        payload = shell_payload(words)
+        if payload is not None:
+            found |= push_directories(payload, current)
             continue
         if verb == "git":
             directories, is_push = git_c_directories(words)
@@ -231,7 +256,7 @@ def push_directories(command: str, cwd: str) -> set[str]:
                 continue
             target = current
             for directory in directories:
-                target = os.path.normpath(os.path.join(target, directory))
+                target = os.path.normpath(os.path.join(target, os.path.expanduser(directory)))
             found.add(target)
     return found
 
@@ -341,6 +366,21 @@ def selftest() -> int:
         {"/other"},
     )
     check(
+        "`bash -lc` is a wrapper too",
+        push_directories("bash -lc 'cd /other && git push'", cwd),
+        {"/other"},
+    )
+    check(
+        "a timeout wrapper does not hide `git -C`",
+        push_directories("timeout 30 git -C /other push", cwd),
+        {"/other"},
+    )
+    check(
+        "a cd to ~ is expanded, not joined as a literal",
+        push_directories("cd ~/wt && git push", cwd),
+        {os.path.expanduser("~/wt")},
+    )
+    check(
         "a command with no push at all resolves to SELF",
         resolve("cargo fmt --check", cwd),
         "SELF",
@@ -411,6 +451,11 @@ def selftest() -> int:
         check(
             "a sibling working tree of the same repository is measured there",
             resolve(f"cd {linked} && git push origin HEAD:side", str(main)),
+            f"REPO {linked}",
+        )
+        check(
+            "`git -C <worktree> push` from the main checkout is measured in the worktree",
+            resolve(f"git -C {linked} push -u origin side", str(main)),
             f"REPO {linked}",
         )
         check(
