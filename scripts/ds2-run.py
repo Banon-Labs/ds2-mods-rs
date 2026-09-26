@@ -3931,6 +3931,44 @@ def selftest() -> int:
         finally:
             GAME_DIR = real_game_dir
 
+    # `--selftest` returns before `main` reaches either of its two dispatches, so an argument
+    # threaded wrongly into `dry_run(...)` or `launch(...)` crashed both modes on startup for at
+    # least one commit while this selftest, and so the gate, stayed green (fixed then in 1338ada;
+    # the hole stayed). Neither can be CALLED here -- both read the real game directory, which a CI
+    # runner does not have -- so each call site in `main` is read out of this file and bound against
+    # the callee's own signature. A positional argument too many, or a keyword the callee does not
+    # take, fails `bind` exactly as it would fail the real call.
+    import ast
+    import inspect
+
+    main_def = next(
+        node
+        for node in ast.parse(Path(__file__).read_text(encoding="utf-8")).body
+        if isinstance(node, ast.FunctionDef) and node.name == "main"
+    )
+    for callee in (dry_run, launch):
+        sites = [
+            node
+            for node in ast.walk(main_def)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == callee.__name__
+        ]
+        check(len(sites) == 1, f"main dispatches to {callee.__name__} from exactly one site")
+        for site in sites:
+            try:
+                inspect.signature(callee).bind(
+                    *([None] * len(site.args)),
+                    **{keyword.arg: None for keyword in site.keywords if keyword.arg},
+                )
+                bound = ""
+            except TypeError as error:
+                bound = f" ({error})"
+            check(
+                not bound,
+                f"main's call to {callee.__name__} (line {site.lineno}) binds to its signature{bound}",
+            )
+
     print("selftest: " + ("OK" if ok else "FAILED"))
     return EXIT_OK if ok else EXIT_ERROR
 
