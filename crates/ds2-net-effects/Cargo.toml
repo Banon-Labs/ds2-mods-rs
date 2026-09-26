@@ -1,0 +1,23 @@
+[package]
+name = "ds2-net-effects"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Not target-gated: the key and effect settings, the edge detection and the request bytes are pure
+# code in `lib.rs` that the host tests exercise. `ds2-hotkey-config` has no dependencies of its own
+# and `ds2-rva` is constants.
+[dependencies]
+ds2-hotkey-config.workspace = true
+ds2-rva.workspace = true
+
+# The game-facing half. `ds2-invasion-path` is here for its `Present` clock alone: the key is read
+# and the effect applied from a consumer registered on it, which is the game thread.
+[target.'cfg(windows)'.dependencies]
+ds2-game-base.workspace = true
+ds2-invasion-path.workspace = true
+
+[lints]
+workspace = true

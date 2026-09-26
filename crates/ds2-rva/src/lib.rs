@@ -5144,6 +5144,107 @@ pub const PLAYER_CTRL_OFFSET: usize = 0xD0;
 /// `PlayerCtrl -> PlayerParam`. `+0x490`. From [`PLAYER_PARAM_GET`]'s second hop.
 pub const PLAYER_PARAM_OFFSET: usize = 0x490;
 
+// =================================================================================================
+// Applying a SpEffect to the local player
+//
+// `applySpEffect(ChrSpEffectCtrl* ctrl, const Request* req)`, reached for the local player as
+// `[[[GAME_MANAGER_IMP] + PLAYER_CTRL_OFFSET] + PLAYER_CTRL_SP_EFFECT_CTRL_OFFSET]`, every link of
+// which can be null. Read statically first (the bonfire's own caller at `0x1402027b0` builds the
+// same request and makes the same call), then run live on 2026-09-26: one call from the game
+// thread with id `110000010` raised the player's HP (the `i32` at `PlayerCtrl + 0x168`, max at
+// `+0x170`) from 246 to 1231 of 2461 on the next frame, returned `0xe8`, and did not crash.
+// =================================================================================================
+
+/// `applySpEffect(ChrSpEffectCtrl*, const Request*) -> pointer`. RVA `0x0014bec0`.
+///
+/// `rcx` is the controller at [`PLAYER_CTRL_SP_EFFECT_CTRL_OFFSET`], `rdx` points at the
+/// [`SP_EFFECT_REQUEST_SIZE`]-byte request. No caller in the game reads the return value; the live
+/// call returned `0xe8`.
+///
+/// Its entry is Arxan's jump ([`SP_EFFECT_APPLY_PROLOGUE`]), which runs the stolen prologue and
+/// rejoins the function at entry + `0x14`, so calling it is an ordinary call. It is the same
+/// address as [`ARXAN_PROBE_REDIRECTED_SITE`]; a feature that only calls it has no reason to hook
+/// it, and should not.
+pub const SP_EFFECT_APPLY: u32 = 0x0014_bec0;
+
+/// The five bytes [`SP_EFFECT_APPLY`] begins with: `jmp 0x141b3cbe1`, Arxan's redirect.
+///
+/// The displacement is relative and both ends move together, so these bytes are the same whatever
+/// base the image loads at. Identical to [`ARXAN_PROBE_REDIRECTED_SITE_PROLOGUE`], recorded under
+/// this name so a caller checks the function it calls rather than an experiment's site.
+pub const SP_EFFECT_APPLY_PROLOGUE: [u8; 5] = [0xe9, 0x1c, 0x0d, 0x9f, 0x01];
+
+/// `PlayerCtrl -> ChrSpEffectCtrl`. `+0x3e0`.
+///
+/// Not `PlayerCtrl` itself: `PlayerCtrl`'s vtable slot `0x130` is `mov rax,[rcx+0x3e0]`, the
+/// bonfire caller passes that slot's result to [`SP_EFFECT_APPLY`], and the phantom setup at
+/// `0x140312dd0` allocates the object, stores it with `mov [rdi+0x3e0],rax`, and passes the field
+/// straight to the same call. Its vtable's locator names `.?AVChrSpEffectCtrl@@`. Null if
+/// construction failed; the live call used this field.
+pub const PLAYER_CTRL_SP_EFFECT_CTRL_OFFSET: usize = 0x3e0;
+
+/// Bytes in the request [`SP_EFFECT_APPLY`] reads. `0x10`.
+///
+/// The body copies the dwords at `+0x0`, `+0x4`, `+0x8` and `+0xc` and nothing past them.
+pub const SP_EFFECT_REQUEST_SIZE: usize = 0x10;
+
+/// `i32` at request `+0x00`: the `SpEffect` id, an event id in one of the regulation's
+/// `SpEffect*.emevd` files. There is no `SpEffectParam` in this game.
+pub const SP_EFFECT_REQUEST_ID_OFFSET: usize = 0x00;
+
+/// `i32` at request `+0x04`. Every caller read writes [`SP_EFFECT_REQUEST_COUNT`]; its meaning is
+/// inferred (a count or stack amount), not traced.
+pub const SP_EFFECT_REQUEST_COUNT_OFFSET: usize = 0x04;
+
+/// `f32` at request `+0x08`. Every caller read writes [`SP_EFFECT_REQUEST_DURATION`]; its meaning
+/// is inferred (a duration override where `-1.0` keeps the effect's own), not traced.
+pub const SP_EFFECT_REQUEST_DURATION_OFFSET: usize = 0x08;
+
+/// `u8` at request `+0x0c`: an index into the two-byte slot table at `0x141571490`, not a key.
+/// Callers look the index up from a key; key `0`, which the bonfire uses, is index
+/// [`SP_EFFECT_REQUEST_SLOT`].
+pub const SP_EFFECT_REQUEST_SLOT_OFFSET: usize = 0x0c;
+
+/// `u8` at request `+0x0d`. Callers write `1`, `2` or `3`; what it selects is unknown. The live
+/// call wrote [`SP_EFFECT_REQUEST_KIND`].
+pub const SP_EFFECT_REQUEST_KIND_OFFSET: usize = 0x0d;
+
+/// `u8` at request `+0x0e`. `0` at every call site.
+pub const SP_EFFECT_REQUEST_RESERVED_OFFSET: usize = 0x0e;
+
+/// `u8` at request `+0x0f`. Bit 0 is copied through, and every caller clears it.
+pub const SP_EFFECT_REQUEST_FLAGS_OFFSET: usize = 0x0f;
+
+/// The value every caller read writes at [`SP_EFFECT_REQUEST_COUNT_OFFSET`], and the live call
+/// used.
+pub const SP_EFFECT_REQUEST_COUNT: i32 = 1;
+
+/// The value every caller read writes at [`SP_EFFECT_REQUEST_DURATION_OFFSET`] (the constant at
+/// `0x1410ac6a4`, `0xbf800000`), and the live call used.
+pub const SP_EFFECT_REQUEST_DURATION: f32 = -1.0;
+
+/// The slot index the live call wrote at [`SP_EFFECT_REQUEST_SLOT_OFFSET`]: index 25, which is key
+/// `0` in the slot table, the key the bonfire caller passes.
+pub const SP_EFFECT_REQUEST_SLOT: u8 = 25;
+
+/// The value the live call wrote at [`SP_EFFECT_REQUEST_KIND_OFFSET`]. `1`, as the clean helper at
+/// `0x14023c4e0` writes; the bonfire caller writes `2`.
+pub const SP_EFFECT_REQUEST_KIND: u8 = 1;
+
+/// The value every caller writes at [`SP_EFFECT_REQUEST_RESERVED_OFFSET`].
+pub const SP_EFFECT_REQUEST_RESERVED: u8 = 0;
+
+/// The value the live call wrote at [`SP_EFFECT_REQUEST_FLAGS_OFFSET`]: bit 0 clear, as every
+/// caller leaves it.
+pub const SP_EFFECT_REQUEST_FLAGS: u8 = 0;
+
+/// `SpEffect` `110000010`, resting at a bonfire.
+///
+/// The literal the bonfire caller writes at [`SP_EFFECT_REQUEST_ID_OFFSET`], and an event in
+/// `SpEffectWideUse.emevd`. The id the live call applied: HP went from 246 to 1231 of 2461 on the
+/// next frame.
+pub const SP_EFFECT_BONFIRE_REST: i32 = 110_000_010;
+
 /// The nine levelled stats inside `PlayerParam`, each a `u16`.
 ///
 /// **THE MEMORY ORDER IS NOT THE PLANNER'S ORDER.** soulsplanner emits vigor, endurance, vitality,

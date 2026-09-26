@@ -94,6 +94,7 @@ pub mod invasion_path;
 pub mod inventory_sort;
 pub mod item_warn;
 pub mod menu_row;
+pub mod net_effects;
 pub mod offline;
 pub mod save_block;
 pub mod save_redirect;
@@ -357,6 +358,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_invasion_path();
                 ds2_boot_timeline::mark("installed-invasion-path");
                 install_input_harness();
+                install_net_effects();
                 install_soul_memory_guard();
                 arm_fault(crash_config);
                 finish_boot_batch();
@@ -406,6 +408,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_hp_gauge();
                 install_invasion_path();
                 install_input_harness();
+                install_net_effects();
                 install_soul_memory_guard();
                 arm_fault(crash_config);
                 finish_boot_batch();
@@ -938,6 +941,43 @@ fn install_invasion_path() {
     }
 }
 
+/// Put a key that applies a `SpEffect` to the local player on the `Present` clock, if
+/// `[net_effects] enabled = true`.
+///
+/// After [`install_invasion_path`], whose `Present` detour is the only thing that calls the
+/// clock's consumers: with `[invasion_path]` off the consumer is registered and never runs, and
+/// the line below says so rather than leaving a silent key to explain itself.
+fn install_net_effects() {
+    let config = net_effects::NetEffectsConfig::load();
+    log_line(format_args!("{}", config.describe()));
+    if !config.enabled {
+        return;
+    }
+    ds2_net_effects::set_logger(log_line);
+    let request = ds2_net_effects::Request {
+        config_path: crash_logging::config_file_path(),
+    };
+    // SAFETY: the crate patches nothing. It checks the one function it calls against the bytes
+    // `ds2-rva` recorded for it and refuses on a mismatch, and it calls it only from the `Present`
+    // clock, on the game thread. Called from the post-Arxan position, like every other install
+    // here.
+    let outcome = unsafe { ds2_net_effects::install(&request) };
+    if !outcome.installed {
+        log_line(format_args!(
+            "{} NOT INSTALLED -- the key does nothing this session",
+            ds2_net_effects::LOG_PREFIX
+        ));
+        return;
+    }
+    if !invasion_path::InvasionPathConfig::load().enabled {
+        log_line(format_args!(
+            "{} no clock this session: [invasion_path] is off, so its Present detour never \
+             installs and nothing reads the key. Turn [invasion_path] on.",
+            ds2_net_effects::LOG_PREFIX
+        ));
+    }
+}
+
 /// Judge each loaded character's soul memory against its level, if `<Game>/ds2-mods.toml` asked.
 ///
 /// Off unless `[soul_memory_guard] enabled = true`. It logs and changes nothing: see
@@ -989,7 +1029,13 @@ fn install_input_harness() {
     // that runs whatever is plugged in and whatever has focus. It used to ride a device poll,
     // and a live session proved why that was wrong: the game stopped calling the poll the
     // harness had elected, and the harness went deaf mid-run while the process was still alive.
-    ds2_invasion_path::frame_hook::set_frame_hook(ds2_input_harness::on_present_frame);
+    if !ds2_invasion_path::frame_hook::add_frame_hook(ds2_input_harness::on_present_frame) {
+        log_line(format_args!(
+            "{} NO CLOCK this session: every Present frame-hook slot is already taken, so the \
+             harness's per-frame tick is not registered and no command will be read.",
+            ds2_input_harness::LOG_PREFIX
+        ));
+    }
     if !invasion_path::InvasionPathConfig::load().enabled {
         log_line(format_args!(
             "{} NO CLOCK AND NO CAMERA this session: [invasion_path] is off, so its Present \
