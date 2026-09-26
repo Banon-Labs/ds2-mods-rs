@@ -9,23 +9,101 @@ use ds2_game_base::mem::{
     game_rva, read_bytes, safe_read_u8, safe_read_u16, safe_read_u32, safe_read_usize,
 };
 use ds2_hook::{MH_EnableHook, MH_Initialize, MH_STATUS, MhHook};
+use ds2_hotkey_config::chord_name;
+use ds2_hotkey_config::keys::{Chord, MODIFIER_ALT, MODIFIER_CTRL, MODIFIER_SHIFT};
+use ds2_hotkey_config::live::AtomicChord;
 
 use crate::LOG_PREFIX;
+
+unsafe extern "system" {
+    fn GetAsyncKeyState(key: i32) -> i16;
+    fn GetForegroundWindow() -> *mut c_void;
+    fn GetWindowThreadProcessId(window: *mut c_void, process: *mut u32) -> u32;
+    fn GetCurrentProcessId() -> u32;
+}
+
+/// `VK_CONTROL`, `VK_MENU`, `VK_SHIFT` -- the three modifiers a [`Chord`] can carry.
+const VK_CONTROL: i32 = 0x11;
+const VK_MENU: i32 = 0x12;
+const VK_SHIFT: i32 = 0x10;
+
+/// Whether the foreground window belongs to this process, so a key typed into another window is
+/// not a press. Same check as `ds2-voice-chat`'s.
+fn game_has_focus() -> bool {
+    // SAFETY: a plain Win32 call with no arguments.
+    let foreground = unsafe { GetForegroundWindow() };
+    if foreground.is_null() {
+        return false;
+    }
+    let mut owner = 0u32;
+    // SAFETY: `foreground` is a handle Win32 just returned and `owner` is a live `u32`.
+    unsafe { GetWindowThreadProcessId(foreground, &raw mut owner) };
+    // SAFETY: a plain Win32 call with no arguments.
+    owner != 0 && owner == unsafe { GetCurrentProcessId() }
+}
+
+fn vk_down(vk: i32) -> bool {
+    // SAFETY: a plain Win32 call taking an integer. Only the high bit ("down now") is used.
+    unsafe { GetAsyncKeyState(vk) < 0 }
+}
+
+fn chord_down(chord: Chord) -> bool {
+    if chord.vk == 0 {
+        return false;
+    }
+    for (bit, vk) in [
+        (MODIFIER_CTRL, VK_CONTROL),
+        (MODIFIER_ALT, VK_MENU),
+        (MODIFIER_SHIFT, VK_SHIFT),
+    ] {
+        if chord.modifiers & bit != 0 && !vk_down(vk) {
+            return false;
+        }
+    }
+    i32::try_from(chord.vk).is_ok_and(vk_down)
+}
+
+fn key_name() -> String {
+    KEY_BINDING
+        .load()
+        .filter(|chord| chord.vk != 0)
+        .map_or_else(|| "no key".to_string(), chord_name)
+}
+
+/// Bind the on/off key, or unbind it with `None`. Takes effect on the next frame.
+pub fn set_key(chord: Option<Chord>) {
+    let before = key_name();
+    match chord {
+        Some(chord) => KEY_BINDING.store(chord),
+        None => KEY_BINDING.store(Chord {
+            modifiers: 0,
+            vk: 0,
+            dik: None,
+        }),
+    }
+    let after = key_name();
+    if before != after {
+        log(format_args!("{LOG_PREFIX} key {before} -> {after}"));
+    }
+}
 use crate::policy::{self, Action, RemoteWeapons, Tracker};
 
 /// `CHR_WEAPON_UPDATE(PlayerCtrl*, WeaponUpdateRequest*)`.
 type WeaponUpdate = unsafe extern "system" fn(usize, *mut u8);
 
-/// `NET_SESSION_UPDATE(this, f32 delta)`. The delta is a float in `xmm1`; declaring it as an
-/// integer would compile and hand the original whatever that register held.
-type NetSessionUpdate = unsafe extern "system" fn(usize, f32);
-
 /// Trampoline back to the real weapon update. Also what the push calls, so the push runs the
 /// game's code and not our detour's clamp twice.
 static WEAPON_UPDATE_ORIGINAL: AtomicUsize = AtomicUsize::new(0);
 
-/// Trampoline back to the real net session update.
-static TICK_ORIGINAL: AtomicUsize = AtomicUsize::new(0);
+/// Whether the feature is on. Flipped by the key; starts on, because `[weapon_sync] enabled`
+/// already asked for it.
+static ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// The key that flips [`ENABLED`]. Unset means unbound.
+static KEY_BINDING: AtomicChord = AtomicChord::unset();
+
+/// Whether the key was down last frame, so a hold is one press.
+static WAS_DOWN: AtomicBool = AtomicBool::new(false);
 
 /// `GameManagerImp`'s address (the global that holds the pointer), resolved at install.
 static GAME_MANAGER: AtomicUsize = AtomicUsize::new(0);
@@ -139,25 +217,21 @@ fn checked_site(rva: u32, expected: &[u8], name: &str) -> Option<usize> {
 /// Hook both sites. Nothing is patched unless both prologues match and both hooks are created.
 ///
 /// `test_cap` stands in for a remote player at that level, so the cap can be seen working with
-/// nobody else in the world.
+/// nobody else in the world. `key` turns the feature on and off in game; `None` leaves it unbound.
 ///
 /// # Safety
 ///
 /// Patches executable memory in the loaded game image. Call once, from the loader's post-Arxan
 /// install position.
-pub unsafe fn install(test_cap: Option<u8>) -> Outcome {
+pub unsafe fn install(test_cap: Option<u8>, key: Option<Chord>) -> Outcome {
+    if let Some(chord) = key {
+        KEY_BINDING.store(chord);
+    }
     let refused = Outcome { installed: false };
     let Some(weapon_site) = checked_site(
         ds2_rva::CHR_WEAPON_UPDATE,
         &ds2_rva::CHR_WEAPON_UPDATE_PROLOGUE,
         "CHR_WEAPON_UPDATE",
-    ) else {
-        return refused;
-    };
-    let Some(tick_site) = checked_site(
-        ds2_rva::NET_SESSION_UPDATE,
-        &ds2_rva::NET_SESSION_UPDATE_PROLOGUE,
-        "NET_SESSION_UPDATE",
     ) else {
         return refused;
     };
@@ -183,24 +257,8 @@ pub unsafe fn install(test_cap: Option<u8>) -> Outcome {
         ));
         return refused;
     }
-    // Both hooks are created before either is enabled, so a failure on the second leaves the first
-    // created but never live: the clamp without the tick would lower levels and never restore them.
-    //
-    // The tick goes first because it is the one that can collide: `ds2-voice-chat` detours the same
-    // net session update. MinHook binds one detour per address, and the union in `ds2-hook` cannot
-    // carry this signature (the delta is a float in xmm1).
-    // SAFETY: the site matched its recorded prologue, and the detour has the same ABI.
-    let tick = match unsafe { MhHook::new(tick_site as *mut c_void, tick_detour as *mut c_void) } {
-        Ok(hook) => hook,
-        Err(status) => {
-            log(format_args!(
-                "{LOG_PREFIX} not installed: MH_CreateHook on NET_SESSION_UPDATE said {status:?} \
-                 -- if that is MH_ERROR_ALREADY_CREATED, [voice_chat] owns this site; turn one of \
-                 them off"
-            ));
-            return refused;
-        }
-    };
+    // The clamp goes in first and the tick second. The clamp does nothing until the tick has set a
+    // cap, so if the tick cannot register, the weapon update runs exactly as the game's own.
     // SAFETY: the site matched its recorded prologue, and the detour has the same ABI.
     let weapon = match unsafe {
         MhHook::new(
@@ -216,26 +274,35 @@ pub unsafe fn install(test_cap: Option<u8>) -> Outcome {
             return refused;
         }
     };
-    // Published before the sites are patched, so a detour that fires at once has somewhere to go.
-    TICK_ORIGINAL.store(tick.trampoline() as usize, Ordering::Release);
+    // Published before the site is patched, so a detour that fires at once has somewhere to go.
     WEAPON_UPDATE_ORIGINAL.store(weapon.trampoline() as usize, Ordering::Release);
-    for (site, name) in [
-        (weapon_site, "CHR_WEAPON_UPDATE"),
-        (tick_site, "NET_SESSION_UPDATE"),
-    ] {
-        // SAFETY: an address `MhHook::new` accepted above.
-        let status = unsafe { MH_EnableHook(site as *mut c_void) };
-        if status != MH_STATUS::MH_OK {
+    // SAFETY: an address `MhHook::new` accepted above.
+    let status = unsafe { MH_EnableHook(weapon_site as *mut c_void) };
+    if status != MH_STATUS::MH_OK {
+        log(format_args!(
+            "{LOG_PREFIX} not installed: MH_EnableHook on CHR_WEAPON_UPDATE said {status:?}"
+        ));
+        return refused;
+    }
+    // The net session update is shared with `ds2-voice-chat`; `ds2-net-tick` owns its one detour
+    // and runs this after the original.
+    // SAFETY: the loader's post-Arxan install position, which is this function's own contract.
+    let tick_site = match unsafe { ds2_net_tick::register(ds2_net_tick::When::After, tick) } {
+        Ok(site) => site,
+        Err(error) => {
             log(format_args!(
-                "{LOG_PREFIX} not installed: MH_EnableHook on {name} said {status:?}"
+                "{LOG_PREFIX} not installed: no tick -- {error}. The clamp is in but never has a \
+                 cap, so weapon levels are never changed"
             ));
             return refused;
         }
-    }
+    };
+    let key = key_name();
     log(format_args!(
-        "{LOG_PREFIX} installed weapon-update=0x{weapon_site:016x} tick=0x{tick_site:016x} \
-         test_cap={} -- while another player is in the world, our weapons above their highest \
-         weapon level are lowered to it; the inventory (what the save keeps) is never written",
+        "{LOG_PREFIX} installed weapon-update=0x{weapon_site:016x} tick=0x{tick_site:016x} (shared) \
+         key={key} test_cap={} -- while another player is in the world, our weapons above their \
+         highest weapon level are lowered to it; the inventory (what the save keeps) is never \
+         written",
         show(test_cap)
     ));
     Outcome { installed: true }
@@ -495,26 +562,36 @@ fn clamp_request(player: usize, request: usize) {
 // The tick, and the push.
 // ---------------------------------------------------------------------------------------------
 
-unsafe extern "system" fn tick_detour(this: usize, delta: f32) {
-    let raw = TICK_ORIGINAL.load(Ordering::Acquire);
-    if raw != 0 {
-        // SAFETY: MinHook's trampoline for this exact function and ABI.
-        let original: NetSessionUpdate =
-            unsafe { std::mem::transmute::<usize, NetSessionUpdate>(raw) };
-        // SAFETY: forwarding the game's own arguments.
-        unsafe { original(this, delta) };
+/// Registered with `ds2-net-tick` to run after the net session update, every frame on the game
+/// thread. Whatever the update holds, it has let go of by now.
+///
+/// The key is read every frame, so one press is one toggle. A toggle forces a check in the same
+/// frame, so turning the feature off restores at once and turning it on caps at once.
+fn tick(_session: usize) {
+    let down = game_has_focus() && KEY_BINDING.load().is_some_and(chord_down);
+    let pressed = !WAS_DOWN.swap(down, Ordering::Relaxed) && down;
+    if pressed {
+        let on = !ENABLED.fetch_xor(true, Ordering::AcqRel);
+        let key = key_name();
+        if on {
+            log(format_args!(
+                "{LOG_PREFIX} TOGGLED ON by {key} -- weapons are capped again whenever another \
+                 player is in the world"
+            ));
+        } else {
+            log(format_args!(
+                "{LOG_PREFIX} TOGGLED OFF by {key} -- real weapon levels are restored now and \
+                 nothing is capped until {key} is pressed again"
+            ));
+        }
     }
-    // After the original: whatever the session update holds, it has let go of by now.
-    let _ = std::panic::catch_unwind(check);
+    let frame = FRAME.fetch_add(1, Ordering::Relaxed);
+    if pressed || frame.is_multiple_of(CHECK_EVERY_FRAMES) {
+        check();
+    }
 }
 
 fn check() {
-    if !FRAME
-        .fetch_add(1, Ordering::Relaxed)
-        .is_multiple_of(CHECK_EVERY_FRAMES)
-    {
-        return;
-    }
     let local = local_player().unwrap_or(0);
     if LAST_PLAYER.swap(local, Ordering::AcqRel) != local
         && local != 0
@@ -531,7 +608,8 @@ fn check() {
         remotes(local)
     };
     let test_cap = cap_from_atomic(TEST_CAP.load(Ordering::Acquire));
-    let cap = policy::cap(&remotes, test_cap);
+    let enabled = ENABLED.load(Ordering::Acquire);
+    let cap = policy::effective(enabled, policy::cap(&remotes, test_cap));
     if !FIRST_TICK.swap(true, Ordering::AcqRel) {
         log(format_args!(
             "{LOG_PREFIX} tick live player=0x{local:x} people={} cap={}",
@@ -554,7 +632,8 @@ fn check() {
             .map(|records| show(policy::remote_highest(records)))
             .collect();
         log(format_args!(
-            "{LOG_PREFIX} cap {} -> {} people={} their-highest=[{}] test_cap={} player=0x{local:x}",
+            "{LOG_PREFIX} cap {} -> {} enabled={enabled} people={} their-highest=[{}] test_cap={} \
+             player=0x{local:x}",
             show(previous),
             show(cap),
             remotes.len(),

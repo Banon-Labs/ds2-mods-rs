@@ -24,7 +24,7 @@
 //!
 //! # When the cap changes
 //!
-//! A detour on [`ds2_rva::NET_SESSION_UPDATE`] (game thread, every frame, measured at 60/s in the
+//! A tick after [`ds2_rva::NET_SESSION_UPDATE`] (game thread, every frame, measured at 60/s in the
 //! world with `scripts/frida/tick-count.js`) reads the roster every few frames: every remote
 //! `PlayerCtrl` that is a person (`NetworkPlayer_` name, not a bloodstain replay), and each one's
 //! six weapon records. [`policy::cap`] turns those into the cap, and [`policy::Tracker`] decides
@@ -35,6 +35,13 @@
 //! Inventory weapons are covered by the same detour: a weapon equipped mid-encounter goes through
 //! the weapon update and comes out capped. The pause menu still reads the inventory entry and
 //! shows real levels.
+//!
+//! # The key
+//!
+//! [`DEFAULT_KEY`] (or `[weapon_sync] key`) turns the feature off and on in game. Off restores real
+//! levels in the same frame; on caps in the same frame if another player is in the world. The net
+//! session update is shared with `ds2-voice-chat` through `ds2-net-tick`, which owns its one
+//! detour, so both features run together.
 //!
 //! # Every exit path
 //!
@@ -53,10 +60,15 @@
 /// What every line this crate writes begins with, so its lines can be grepped out of the shared log.
 pub const LOG_PREFIX: &str = "ds2-weapon-sync:";
 
+/// The key that turns the feature on and off in game, unless `[weapon_sync] key` says otherwise.
+///
+/// F7 is inventory sort, F8 voice chat and F9 net effects; nothing in this repo binds F6.
+pub const DEFAULT_KEY: &str = "F6";
+
 pub mod policy;
 
 #[cfg(windows)]
 mod install;
 
 #[cfg(windows)]
-pub use install::{LogFn, Outcome, install, set_logger, set_test_cap};
+pub use install::{LogFn, Outcome, install, set_key, set_logger, set_test_cap};

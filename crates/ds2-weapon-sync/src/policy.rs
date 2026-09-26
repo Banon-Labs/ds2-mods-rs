@@ -43,6 +43,12 @@ pub fn cap(remotes: &[RemoteWeapons], test_cap: Option<u8>) -> Option<u8> {
         .max()
 }
 
+/// The cap after the on/off key: switched off, there is never a cap, whoever is in the world. The
+/// tracker then sees the cap go away and restores, exactly as it does when the last player leaves.
+pub fn effective(enabled: bool, cap: Option<u8>) -> Option<u8> {
+    if enabled { cap } else { None }
+}
+
 /// What one of our levels becomes. Never above the real level, so the cap only ever lowers.
 pub fn clamp(real: u8, cap: Option<u8>) -> u8 {
     match cap {
@@ -263,6 +269,33 @@ mod tests {
     fn a_new_world_that_is_already_capped_pushes_at_its_cap() {
         let mut t = Tracker::new();
         assert_eq!(t.step(0x200, Some(4)), Action::Redrive { cap: Some(4) });
+    }
+
+    #[test]
+    fn switching_off_while_capped_restores_and_switching_on_caps_again() {
+        let mut t = Tracker::new();
+        let remote = Some(3);
+        assert_eq!(
+            t.step(0x100, effective(true, remote)),
+            Action::Redrive { cap: Some(3) }
+        );
+        assert_eq!(
+            t.step(0x100, effective(false, remote)),
+            Action::Redrive { cap: None },
+            "off restores even with the other player still here"
+        );
+        assert_eq!(t.step(0x100, effective(false, remote)), Action::Nothing);
+        assert_eq!(
+            t.step(0x100, effective(true, remote)),
+            Action::Redrive { cap: Some(3) }
+        );
+    }
+
+    #[test]
+    fn switching_on_alone_changes_nothing() {
+        let mut t = Tracker::new();
+        assert_eq!(t.step(0x100, effective(false, None)), Action::Nothing);
+        assert_eq!(t.step(0x100, effective(true, None)), Action::Nothing);
     }
 
     #[test]

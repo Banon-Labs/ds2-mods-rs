@@ -14,6 +14,8 @@ ds2-rva.workspace = true
 [target.'cfg(windows)'.dependencies]
 ds2-game-base.workspace = true
 ds2-hook.workspace = true
+ds2-hotkey-config.workspace = true
+ds2-net-tick.workspace = true
 
 [lints]
 workspace = true
