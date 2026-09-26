@@ -20,7 +20,7 @@ pub fn set_logger(logger: LogFn) {
     LOGGER.store(logger as usize, Ordering::Release);
 }
 
-fn log(args: std::fmt::Arguments<'_>) {
+pub(crate) fn log(args: std::fmt::Arguments<'_>) {
     let raw = LOGGER.load(Ordering::Acquire);
     if raw != 0 {
         // SAFETY: `raw` is only ever a `LogFn` stored by `set_logger` above.
@@ -289,6 +289,11 @@ pub unsafe fn install() -> Outcome {
             screen.name, screen.enter_rva, screen.phase_offset
         ));
     }
+
+    // The fade from black the title waits on before its flow starts. Not a screen with an
+    // `enter`, so it is not in `SCREENS` or the count; its own hooked line says whether it went in.
+    // SAFETY: the same position as the screens above, with MinHook initialised.
+    unsafe { crate::fade::install(base) };
 
     log(format_args!(
         "{LOG_PREFIX} install installed={installed}/{}",
