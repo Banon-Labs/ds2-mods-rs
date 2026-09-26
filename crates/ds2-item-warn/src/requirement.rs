@@ -26,14 +26,13 @@
 //! item is not being held, so there is no grip to ask about, and the number the badge is agreeing
 //! with is the one in the detail pane a player opens to find out why.
 //!
-//! # What that leaves unproven
+//! # Which stats it compares against
 //!
-//! Whether the table at [`ds2_rva::FRONTEND_ROOT_PLAYER_STATS_OFFSET`] holds base or modified
-//! stats. Every cross-reference to `FUN_1404ffb20` is a reader and its writer has not been found,
-//! so whether rings and spEffects are in these numbers is open -- on the gameplay side the
-//! equivalent block is provably `clamp(base + modifiers, 1, 99)`, and this one has no such proof.
-//! A badge computed from base stats would light up on a weapon the player can actually swing while
-//! wearing a Ring of Blades.
+//! The effective ones. The table at [`ds2_rva::FRONTEND_ROOT_PLAYER_STATS_OFFSET`] is written by
+//! [`ds2_rva::FRONTEND_STAT_TABLE_WRITER`] from the same effective block the game's own mechanics
+//! check reads, so a Ring of Blades counts here exactly as it counts when the weapon is swung, and
+//! the badge cannot light up on a weapon the player can actually use. Whether spEffects are in that
+//! block as well as rings is still open; the badge agrees with the game either way.
 //!
 //! # Two-handing, which the detail pane ignores and this badge does not
 //!

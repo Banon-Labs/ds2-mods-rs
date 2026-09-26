@@ -8791,11 +8791,22 @@ pub const ITEM_ENTRY_INFUSION_MASK: u8 = 0x0f;
 /// function takes no grip argument at all, so the detail pane's requirement numbers ignore both,
 /// and so does anything built on this comparison.
 ///
-/// **Not established: whether the table at [`FRONTEND_ROOT_PLAYER_STATS_OFFSET`] holds base or
-/// modified stats.** Every xref to `FUN_1404ffb20` is a reader and the writer has not been found,
-/// so "rings and spEffects are included" is unproven here, where the gameplay side's
-/// `chrStatus + 0x16` block proves it. See `docs/DS2-ITEM-REQUIREMENTS.md`.
+/// **The table at [`FRONTEND_ROOT_PLAYER_STATS_OFFSET`] holds the effective stats**, read
+/// statically: it is written by [`FRONTEND_STAT_TABLE_WRITER`], called from the frontend root's
+/// update, and entries 4..13 come from the same effective block (`PlayerParam + 0x1e`) the game's
+/// own mechanics requirement check reads. Whether that block includes spEffects as well as ring
+/// bonuses is still open -- the code that builds the modifiers is Arxan-obfuscated past its first
+/// null check -- but this check and the mechanics one agree either way. See
+/// `docs/DS2-ITEM-REQUIREMENTS.md`, "The frontend stat table is that same effective block".
 pub const FE_STAT_ROW_COLOUR: u32 = 0x000b_cde0;
+
+/// `FUN_14003ebe0`: fills the frontend stat table from the effective stat block. RVA `0x0003ebe0`.
+///
+/// Called from the frontend root's update (`FUN_140501c20`, at `0x140501d57`); stores an entry only
+/// when its value changed. Read in-world with `scripts/frida/stat-table.js` on 2026-09-25 every
+/// entry was `1`, which fits a table the frontend fills only while its own screens update rather
+/// than a live copy maintained every frame -- read it with a menu open.
+pub const FRONTEND_STAT_TABLE_WRITER: u32 = 0x0003_ebe0;
 
 /// `FUN_1404ffb20(frontendRoot)` -> the player's stat table. `+0x138`, in full:
 /// `48 8b 81 38 01 00 00 c3` -- `mov rax,[rcx+0x138]; ret`.
