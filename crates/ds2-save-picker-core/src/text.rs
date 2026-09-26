@@ -34,6 +34,10 @@ pub const EMPTY_SLOT_TEXT: &str = "[ empty ]";
 /// Marks a slot the game will load that has nothing rolled in it yet -- nine stats of `1`.
 pub const BLANK_SLOT_MARKER: &str = "[ new ]";
 
+/// Marks a slot the list names but whose own data the game cannot load. No level: its stats come
+/// from the list, and the character they describe is not in the file.
+pub const HOLLOW_SLOT_MARKER: &str = "[ no data ]";
+
 /// Shown where a loadable character's name would be when the record carries none.
 pub const UNNAMED_CHARACTER_TEXT: &str = "[ unnamed ]";
 
@@ -66,6 +70,7 @@ pub fn character_text(slot: &SaveSlot) -> String {
             character_name(slot),
             slot.soul_level()
         ),
+        SlotState::Hollow => format!("{}  {HOLLOW_SLOT_MARKER}", character_name(slot)),
     }
 }
 

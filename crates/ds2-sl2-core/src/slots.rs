@@ -95,13 +95,112 @@ pub enum SlotState {
     Blank,
     /// A played character.
     Occupied,
+    /// Listed as blank or occupied, but at least one of its two data entries has no end marker, so
+    /// the game's section walk would run off the end of it and spin. See [`section_walk`].
+    Hollow,
 }
 
 impl SlotState {
-    /// Whether the game has something here to load. [`SlotState::Blank`] counts, measured.
+    /// Whether the game has something here to load. [`SlotState::Blank`] counts, measured;
+    /// [`SlotState::Hollow`] does not, because loading it hangs or fails.
     pub fn is_loadable(self) -> bool {
-        !matches!(self, SlotState::Empty)
+        !matches!(self, SlotState::Empty | SlotState::Hollow)
     }
+}
+
+/// A slot's own data lives in two entries, `USER_DATA(slot+1)` and `USER_DATA(slot+11)`.
+///
+/// The game's pump loads load-content indices slot+8 and slot+0x12, and index 7 is `USER_DATA000`,
+/// so index k is `USER_DATA(k-7)`. Measured on a hung load: slot 1's two streams were exactly the
+/// length words of `USER_DATA002` and `USER_DATA012`. Mirrors `SLOT_DATA_ENTRY_OFFSETS` in
+/// `scripts/ds2-sl2.py`.
+const SLOT_DATA_ENTRY_OFFSETS: [usize; 2] = [1, 11];
+
+/// The walk's header: `u32` type at +0, version at +4, size at +8, in 0x20 bytes.
+///
+/// The same values `ds2-rva` records for the DLL's guard (`SL_SECTION_HEADER_SIZE`,
+/// `SL_SECTION_TYPE_END`); this crate carries no game addresses, so the file format is restated
+/// here rather than depended on.
+const SECTION_HEADER_SIZE: usize = 0x20;
+
+/// The header type that ends the walk.
+const SECTION_TYPE_END: u32 = 0xd;
+
+/// Header types the walk accepts: its table at `0x1410da1f0` has fifteen, `0..=0xe`.
+const SECTION_TYPE_LIMIT: u32 = 0xf;
+
+/// What the game's section walk does with one data entry's stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SectionWalk {
+    /// It reaches an end-marker header.
+    Ends,
+    /// It meets a type outside its table and returns an error; the game survives that.
+    Bails,
+    /// It runs off the end with no end marker and would repeat its last step forever.
+    Hangs,
+}
+
+/// Emulate the game's section walk (`FUN_1402e47f0` over `DLMemoryInputStream`) on one stream.
+///
+/// A read copies whatever is left and fails at the end without touching the header; a seek clamps
+/// to the end. So a walk that reaches the end before an end marker keeps the last header, seeks
+/// nowhere, fails the read again, and never leaves the loop. An all-zero stream gets there because
+/// type 0 is a legal type and a size of 0 is a legal size. Mirrors `section_walk` in
+/// `scripts/ds2-sl2.py`.
+pub fn section_walk(stream: &[u8]) -> SectionWalk {
+    if stream.is_empty() {
+        // The first header would be uninitialised stack. Nothing can be said except unsafe.
+        return SectionWalk::Hangs;
+    }
+    let mut header = [0u8; SECTION_HEADER_SIZE];
+    let mut cursor = 0usize;
+    loop {
+        if cursor >= stream.len() {
+            return SectionWalk::Hangs;
+        }
+        let chunk = &stream[cursor..stream.len().min(cursor + SECTION_HEADER_SIZE)];
+        header[..chunk.len()].copy_from_slice(chunk);
+        cursor += chunk.len();
+        let field = |at: usize| {
+            u32::from_le_bytes([header[at], header[at + 1], header[at + 2], header[at + 3]])
+        };
+        let kind = field(0);
+        let size = field(8);
+        if kind == SECTION_TYPE_END {
+            return SectionWalk::Ends;
+        }
+        if kind >= SECTION_TYPE_LIMIT {
+            return SectionWalk::Bails;
+        }
+        cursor = cursor.saturating_add(size as usize).min(stream.len());
+    }
+}
+
+/// The bytes the game streams from one decrypted entry: past the `u32` length, that long.
+fn entry_stream(plain: &[u8]) -> &[u8] {
+    let Some(word) = plain.get(..4) else {
+        return &[];
+    };
+    let length = u32::from_le_bytes([word[0], word[1], word[2], word[3]]) as usize;
+    let end = plain.len().min(4usize.saturating_add(length));
+    &plain[4..end]
+}
+
+/// Whether loading `slot` would send the game's walk off the end of one of its entries.
+///
+/// A missing entry counts: the game would stream nothing, and the walk's first header would be
+/// uninitialised stack.
+fn slot_hangs(save: &[u8], table: &[Entry], slot: usize) -> Result<bool, Sl2Error> {
+    for delta in SLOT_DATA_ENTRY_OFFSETS {
+        let Some(entry) = table.get(slot + delta) else {
+            return Ok(true);
+        };
+        let plain = plaintext(save, entry)?;
+        if section_walk(entry_stream(&plain)) == SectionWalk::Hangs {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// One character slot, read from the file and from nothing else.
@@ -240,7 +339,13 @@ pub fn slots(save: &[u8]) -> Result<Vec<SaveSlot>, Sl2Error> {
     let table = entries(save)?;
     for entry in &table {
         let plain = plaintext(save, entry)?;
-        if let Some(found) = slots_in_payload(&plain) {
+        if let Some(mut found) = slots_in_payload(&plain) {
+            // The list says who is there; the slot's own entries say whether the game can load it.
+            for slot in &mut found {
+                if slot.state != SlotState::Empty && slot_hangs(save, &table, slot.slot)? {
+                    slot.state = SlotState::Hollow;
+                }
+            }
             return Ok(found);
         }
     }
@@ -375,6 +480,50 @@ mod tests {
         assert_eq!(found[0].stats[0], 1);
         assert_eq!(found[9].slot, 9);
         assert!(found.iter().all(|slot| slot.state == SlotState::Occupied));
+    }
+
+    fn header(kind: u32, size: u32) -> Vec<u8> {
+        let mut out = vec![0u8; SECTION_HEADER_SIZE];
+        out[0..4].copy_from_slice(&kind.to_le_bytes());
+        out[8..12].copy_from_slice(&size.to_le_bytes());
+        out
+    }
+
+    /// The same cases as `scripts/ds2-sl2.py --selftest`, so the two agree on every outcome.
+    #[test]
+    fn the_walk_agrees_with_the_python_classifier() {
+        let good = [
+            header(0, 4),
+            b"abcd".to_vec(),
+            header(5, 0),
+            header(SECTION_TYPE_END, 0),
+        ]
+        .concat();
+        // Slot 1 of the save that hard-locked: 111292 zero bytes, type 0 size 0 to the end.
+        assert_eq!(section_walk(&vec![0u8; 111_292]), SectionWalk::Hangs);
+        assert_eq!(section_walk(&[]), SectionWalk::Hangs);
+        assert_eq!(section_walk(&good), SectionWalk::Ends);
+        // A size past the end clamps there, and the next read fails for good.
+        let past_end = [header(0, 10_000), header(SECTION_TYPE_END, 0)].concat();
+        assert_eq!(section_walk(&past_end), SectionWalk::Hangs);
+        assert_eq!(section_walk(&header(0x20, 0)), SectionWalk::Bails);
+        // The end marker can arrive in a partial read, which copies what is left.
+        let short = [header(0, 0), SECTION_TYPE_END.to_le_bytes().to_vec()].concat();
+        assert_eq!(section_walk(&short), SectionWalk::Ends);
+    }
+
+    #[test]
+    fn the_stream_starts_past_the_length_word_and_is_that_long() {
+        let good = [header(0, 0), header(SECTION_TYPE_END, 0)].concat();
+        let length = u32::try_from(good.len()).expect("small");
+        let payload = [length.to_le_bytes().to_vec(), good.clone(), vec![0u8; 4]].concat();
+        assert_eq!(entry_stream(&payload), good.as_slice());
+        assert_eq!(entry_stream(&[1, 2]), &[] as &[u8]);
+    }
+
+    #[test]
+    fn a_hollow_slot_is_not_loadable() {
+        assert!(!SlotState::Hollow.is_loadable());
     }
 
     #[test]
