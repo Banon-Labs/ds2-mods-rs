@@ -38,6 +38,14 @@ use crate::turn::{Magnitudes, Outcome, Turn};
 /// is the channel to use in a session with a pad. The default stays `mouse-x` for the session
 /// without one; whether the mouse moves the camera at all when no pad is present is still
 /// unmeasured.
+///
+/// **The pad channels work without the window having focus**, so driving the game never needs
+/// to take focus from the person at the desk. A probe with the game window unfocused from launch
+/// to finish turned the yaw 733.33 degrees on `pad3`. The game's own
+/// `Ext.UserInput.CooperativeLevel.SetForeGround.Pad` option (input manager `+0x16e`) read 0
+/// live, so the pad poll does not skip itself when the window is inactive. The keyboard's option
+/// (`+0x16f`) read 1, and its poll stops being called at all while unfocused, so the keyboard
+/// channel cannot drive an unfocused game. `scripts/frida/input-focus.js` reads those bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Channel {
     /// Mouse X. **The default**, because it is the channel whose consumer chain is traced end to
