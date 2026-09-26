@@ -90,11 +90,16 @@ pub fn mark(label: &'static str) {
     let at_us = now_us();
     if FLUSHED.load(Ordering::Acquire) != 0 {
         let (calls, ms) = sleep_totals();
+        let blocked_us: u64 = BOOT_BLOCKED
+            .iter()
+            .map(|(_, spent)| spent.load(Ordering::Relaxed))
+            .sum();
         log(format_args!(
             "{LOG_PREFIX} milestone label={label} t={:.3}ms sleep-calls={calls} sleep-ms={ms} \
-             frames={}",
+             frames={} blocked-ms={:.1}",
             at_us as f64 / 1000.0,
-            FRAMES.load(Ordering::Relaxed)
+            FRAMES.load(Ordering::Relaxed),
+            blocked_us as f64 / 1000.0
         ));
         return;
     }
@@ -1029,6 +1034,81 @@ unsafe extern "system" fn detour_drop_transitions(
     }
 }
 
+// ============================================================================================
+// BOOT PHASES. The span between the entry point and the first substate, cut at the startup calls
+// `ds2_rva::BOOT_PHASES` lists. Each is wrapped once: a milestone on the first entry and another
+// on that call's return, so the gap between one phase's return and the next one's entry is the
+// code between them in the caller.
+// ============================================================================================
+
+/// The milestone labels for each entry of [`ds2_rva::BOOT_PHASES`], in the same order.
+/// [`mark`] takes `&'static str`, so they are written out rather than formatted.
+const PHASE_MARKS: [(&str, &str); 8] = [
+    ("win-main-enter", "win-main-return"),
+    ("app-setup-enter", "app-setup-return"),
+    ("archive-mounts-enter", "archive-mounts-return"),
+    ("input-devices-enter", "input-devices-return"),
+    ("graphics-init-enter", "graphics-init-return"),
+    ("sound-init-enter", "sound-init-return"),
+    ("katana-init-enter", "katana-init-return"),
+    ("app-frame-enter", "app-frame-return"),
+];
+
+static PHASE_TRAMPOLINES: [AtomicUsize; 8] = [const { AtomicUsize::new(0) }; 8];
+static PHASE_CALLS: [AtomicU32; 8] = [const { AtomicU32::new(0) }; 8];
+
+/// Four integer registers in, `rax` out: enough to pass any of these calls through unchanged,
+/// because none of them reads a stack argument or a vector register (see
+/// [`ds2_rva::BOOT_PHASES`]).
+type PhaseFn = unsafe extern "system" fn(usize, usize, usize, usize) -> usize;
+
+unsafe extern "system" fn detour_phase<const I: usize>(
+    a: usize,
+    b: usize,
+    c: usize,
+    d: usize,
+) -> usize {
+    let first = PHASE_CALLS[I].fetch_add(1, Ordering::Relaxed) == 0;
+    if first {
+        mark(PHASE_MARKS[I].0);
+    }
+    let trampoline = PHASE_TRAMPOLINES[I].load(Ordering::Acquire);
+    // Published before the hook was enabled, so zero cannot be seen here; returning zero rather
+    // than jumping through it is the conservative answer if it ever were.
+    if trampoline == 0 {
+        return 0;
+    }
+    // SAFETY: MinHook published this trampoline for this site, and every site in the table takes
+    // only register arguments, which this passes through untouched.
+    let original: PhaseFn = unsafe { std::mem::transmute::<usize, PhaseFn>(trampoline) };
+    // SAFETY: `original` runs the bytes the detour displaced, with the caller's own arguments.
+    let result = unsafe { original(a, b, c, d) };
+    if first {
+        mark(PHASE_MARKS[I].1);
+    }
+    result
+}
+
+/// One [`Site`] per boot phase.
+fn phase_sites() -> [Site; 8] {
+    let detours: [*mut c_void; 8] = [
+        detour_phase::<0> as *mut c_void,
+        detour_phase::<1> as *mut c_void,
+        detour_phase::<2> as *mut c_void,
+        detour_phase::<3> as *mut c_void,
+        detour_phase::<4> as *mut c_void,
+        detour_phase::<5> as *mut c_void,
+        detour_phase::<6> as *mut c_void,
+        detour_phase::<7> as *mut c_void,
+    ];
+    std::array::from_fn(|i| Site {
+        name: ds2_rva::BOOT_PHASES[i].0,
+        rva: ds2_rva::BOOT_PHASES[i].1,
+        detour: detours[i],
+        trampoline: &PHASE_TRAMPOLINES[i],
+    })
+}
+
 /// One hook site: where it is, what to call it in a log, and the trampoline slot it publishes to.
 struct Site {
     name: &'static str,
@@ -1065,7 +1145,7 @@ pub struct Outcome {
 /// Arxan callback. Both sites were checked with `scripts/ds2-arxan-chain.py` and are ordinary
 /// prologues, not Arxan redirects.
 pub unsafe fn install() -> Outcome {
-    let sites: [Site; 3] = [
+    let mut sites: Vec<Site> = vec![
         Site {
             name: "flow-update",
             rva: ds2_rva::FE_STATE_FLOW_UPDATE,
@@ -1085,6 +1165,7 @@ pub unsafe fn install() -> Outcome {
             trampoline: &DROP_TRANSITIONS_TRAMPOLINE,
         },
     ];
+    sites.extend(phase_sites());
 
     // FIRST: everything `mark` recorded before there was a sink to write it to. `install` runs
     // from the Arxan callback, which is the entry point, so this is also the milestone that says
@@ -1192,6 +1273,16 @@ pub unsafe fn install() -> Outcome {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The labels are written out by hand beside a table that lives in another crate, so a phase
+    /// added or reordered there would otherwise mark under its neighbour's name.
+    #[test]
+    fn phase_marks_follow_the_rva_table() {
+        for ((name, _), (enter, leave)) in ds2_rva::BOOT_PHASES.iter().zip(PHASE_MARKS) {
+            assert_eq!(enter, format!("{name}-enter"));
+            assert_eq!(leave, format!("{name}-return"));
+        }
+    }
 
     /// The bucket edges ARE the binary's own `Sleep` arguments, so getting them wrong does not
     /// produce an error -- it produces a plausible histogram that attributes a loop to the wrong
