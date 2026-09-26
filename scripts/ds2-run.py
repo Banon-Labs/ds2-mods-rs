@@ -363,6 +363,10 @@ SOUL_MEMORY_GUARD_LOG_PREFIX = "ds2-soul-memory-guard:"
 WEAPON_SYNC_SECTION = "weapon_sync"
 KEY_WEAPON_SYNC_ENABLED = "enabled"
 KEY_WEAPON_SYNC_TEST_CAP = "test_cap"
+KEY_WEAPON_SYNC_KEY = "key"
+#: Mirrors `DEFAULT_KEY` in `crates/ds2-weapon-sync/src/lib.rs`. F7 is inventory sort, F8 voice chat,
+#: F9 net effects; F6 is bound by nothing in this repo.
+WEAPON_SYNC_DEFAULT_KEY = "F6"
 #: Mirrors `LOG_PREFIX` in `crates/ds2-weapon-sync/src/lib.rs`.
 WEAPON_SYNC_LOG_PREFIX = "ds2-weapon-sync:"
 
@@ -2061,13 +2065,15 @@ def config_text(
 {KEY_SOUL_MEMORY_GUARD_ENABLED} = {str(soul_memory_guard).lower()}
 
 [{WEAPON_SYNC_SECTION}]
-# Startup-only. While another player is in the world, `ds2-weapon-sync` lowers every weapon of ours
-# above the highest weapon level any of them has equipped, and puts them back when they are gone.
-# Only the character's equipment copies change; the inventory, which the save keeps, is never
-# written. It detours the net session update, as `[voice_chat]` does, so only one of the two can
-# be on. Off unless `--weapon-sync`. `test_cap` pretends a remote player at that level is present
-# (`--weapon-sync-test-cap N`), for testing alone. Grep the log for `{WEAPON_SYNC_LOG_PREFIX}`.
+# `enabled` is startup-only. While another player is in the world, `ds2-weapon-sync` lowers every
+# weapon of ours above the highest weapon level any of them has equipped, and puts them back when
+# they are gone. Only the character's equipment copies change; the inventory, which the save keeps,
+# is never written. It shares the net session update with `[voice_chat]`; both can be on. Off
+# unless `--weapon-sync`. `key` turns it on and off in game (default `{WEAPON_SYNC_DEFAULT_KEY}`,
+# live-reloaded). `test_cap` pretends a remote player at that level is present
+# (`--weapon-sync-test-cap N`), also live. Grep the log for `{WEAPON_SYNC_LOG_PREFIX}`.
 {KEY_WEAPON_SYNC_ENABLED} = {str(weapon_sync).lower()}
+{KEY_WEAPON_SYNC_KEY} = "{WEAPON_SYNC_DEFAULT_KEY}"
 {"" if weapon_sync_test_cap is None else f"{KEY_WEAPON_SYNC_TEST_CAP} = {weapon_sync_test_cap}"}
 
 [{SEAMLESS_SECTION}]
@@ -4857,8 +4863,8 @@ def main() -> int:
         help=(
             "while another player is in the world, lower our weapons above the highest weapon "
             "level any of them has equipped, and restore them when they leave. The inventory (what "
-            "the save keeps) is never written. Cannot be combined with --voice-chat: both detour "
-            "the net session update."
+            "the save keeps) is never written. F6 (the [weapon_sync] key) turns it on and off in "
+            "game. Runs alongside --voice-chat: both share one net session update detour."
         ),
     )
     parser.add_argument(
@@ -5110,10 +5116,6 @@ def main() -> int:
 
     if args.weapon_sync_test_cap is not None:
         args.weapon_sync = True
-    # Both detour NET_SESSION_UPDATE and MinHook keeps one detour per address. The DLL refuses the
-    # second one at runtime; refusing here says so before a launch is spent on it.
-    if args.weapon_sync and args.voice_chat:
-        parser.error("--weapon-sync and --voice-chat both detour the net session update; pick one")
 
     # THE INTERLOCK, applied here rather than left to the DLL to refuse at runtime. `[offline]`
     # fronts the socket imports, so a co-op mod under it loads, reports success and never connects
