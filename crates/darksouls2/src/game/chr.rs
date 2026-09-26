@@ -43,7 +43,21 @@ pub struct CharacterCtrl {
     _unk00b8: [u8; 0x60],
     /// The factory's label for what it built, such as `Player_000100`.
     pub name: WString,
-    _unk0138: [u8; 0x240],
+    _unk0138: [u8; 0x30],
+    /// Current HP.
+    ///
+    /// `CharacterCtrl`'s vtable slot `0x1b8`, `0x140312910`, is in full `8b 81 68 01 00 00 c3` --
+    /// `mov eax,[rcx+0x168]; ret` -- and `PlayerCtrl` inherits it. The stat recompute
+    /// `FUN_14038be90` clamps this field between the `i32` at `+0x16c` and [`Self::max_hp`] and
+    /// writes it back.
+    pub hp: i32,
+    _unk016c: [u8; 0x4],
+    /// Maximum HP, as the stat recompute last derived it.
+    ///
+    /// `FUN_14038be90` scales the Vigor-derived value it is handed, stores the result here with
+    /// `mov [r9],r8d` (`r9 = rcx+0x170`), and then clamps [`Self::hp`] to it.
+    pub max_hp: i32,
+    _unk0174: [u8; 0x204],
     /// The character's `ChrAsmCtrl`, which owns its equipment.
     ///
     /// The vtable getter that returns it is `CharacterCtrl`'s own, inherited by `PlayerCtrl`, so the
@@ -51,7 +65,17 @@ pub struct CharacterCtrl {
     /// is vtable slot `0x120`, `0x1403126b0`, in full `48 8b 81 78 03 00 00 c3` --
     /// `mov rax,[rcx+0x378]; ret`.
     pub chr_asm_ctrl: Option<NonNull<ChrAsmCtrl>>,
-    _unk0380: [u8; 0x100],
+    _unk0380: [u8; 0x60],
+    /// The character's `ChrSpEffectCtrl`, the controller `applySpEffect`
+    /// (`ds2_rva::SP_EFFECT_APPLY`) takes as its first argument. Null if its construction failed.
+    ///
+    /// The getter is `CharacterCtrl`'s own vtable slot `0x130`: `0x1410df348` holds the thunk
+    /// `0x140312b80`, `PlayerCtrl`'s `0x1410e4ce8` holds the same thunk, and it jumps to
+    /// `0x1405ba9d0`, `mov rax,[rcx+0x3e0]`. The bonfire caller at `0x1402027b0` passes that
+    /// slot's result to `applySpEffect`, and the phantom setup at `0x140312dd0` allocates the
+    /// object and stores it with `mov [rdi+0x3e0],rax`.
+    pub sp_effect_ctrl: Option<NonNull<ChrSpEffectCtrl>>,
+    _unk03e8: [u8; 0x98],
 }
 
 /// `PlayerCtrl`, the controller the local player, a remote player and a bloodstain replay share.
@@ -86,6 +110,15 @@ pub struct ChrAsmCtrl {
     /// `48 8b 41 28 c3` -- `mov rax,[rcx+0x28]; ret`. The object is built by `FUN_140347970` into
     /// `this[5]` of `FUN_140338e40`, and it is what `FUN_14034a980` walks.
     pub equip: Option<NonNull<ChrAsmEquip>>,
+}
+
+/// `ChrSpEffectCtrl`, which owns a character's active special effects.
+///
+/// Source of name: RTTI, its vtable's locator names `.?AVChrSpEffectCtrl@@`. Opaque: this repo
+/// only hands a pointer to one back to the game and reads none of its fields.
+#[repr(C)]
+pub struct ChrSpEffectCtrl {
+    _opaque: [u8; 0],
 }
 
 /// The equipment state a [`ChrAsmCtrl`] holds. A prefix: only the field this repo reads.
@@ -126,6 +159,25 @@ mod tests {
         CharacterCtrl, CharacterCtrlBase, ChrAsmCtrl, ChrAsmEquip, PhantomBlock, PlayerCtrl,
         WString,
     };
+
+    // HP: read live on 2026-09-26 by `scripts/frida/set-player-hp.js` from the local player (2461
+    // of 2461, and a bonfire-rest SpEffect raised a lowered value), and matched in the binary by
+    // `CharacterCtrl`'s HP getter and the recompute that writes the maximum; see the fields.
+
+    #[test]
+    fn character_ctrl_hp_is_at_0x168_and_max_hp_at_0x170() {
+        assert_eq!(offset_of!(CharacterCtrl, hp), 0x168);
+        assert_eq!(offset_of!(CharacterCtrl, max_hp), 0x170);
+    }
+
+    // The value `ds2-net-effects` read through before this field existed, and the one its live
+    // `applySpEffect` call used on 2026-09-26.
+
+    #[test]
+    fn character_ctrl_sp_effect_ctrl_is_at_0x3e0() {
+        assert_eq!(offset_of!(CharacterCtrl, sp_effect_ctrl), 0x3e0);
+        assert_eq!(offset_of!(PlayerCtrl, base.sp_effect_ctrl), 0x3e0);
+    }
 
     // Sizes: each is the value slot 9 of the class's DLRF runtime-class vtable returns, and the
     // game's own allocations agree. `FUN_140357920` allocates 0x4a0 and passes it to the PlayerCtrl

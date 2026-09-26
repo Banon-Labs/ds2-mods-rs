@@ -5148,16 +5148,16 @@ pub const PLAYER_PARAM_OFFSET: usize = 0x490;
 // Applying a SpEffect to the local player
 //
 // `applySpEffect(ChrSpEffectCtrl* ctrl, const Request* req)`, reached for the local player as
-// `[[[GAME_MANAGER_IMP] + PLAYER_CTRL_OFFSET] + PLAYER_CTRL_SP_EFFECT_CTRL_OFFSET]`, every link of
+// `GAME_MANAGER_IMP -> player_ctrl -> sp_effect_ctrl`, the fields `darksouls2` binds, every link of
 // which can be null. Read statically first (the bonfire's own caller at `0x1402027b0` builds the
 // same request and makes the same call), then run live on 2026-09-26: one call from the game
-// thread with id `110000010` raised the player's HP (the `i32` at `PlayerCtrl + 0x168`, max at
-// `+0x170`) from 246 to 1231 of 2461 on the next frame, returned `0xe8`, and did not crash.
+// thread with id `110000010` raised the player's HP (`darksouls2`'s `CharacterCtrl::hp` and
+// `max_hp`) from 246 to 1231 of 2461 on the next frame, returned `0xe8`, and did not crash.
 // =================================================================================================
 
 /// `applySpEffect(ChrSpEffectCtrl*, const Request*) -> pointer`. RVA `0x0014bec0`.
 ///
-/// `rcx` is the controller at [`PLAYER_CTRL_SP_EFFECT_CTRL_OFFSET`], `rdx` points at the
+/// `rcx` is the controller in `darksouls2`'s `CharacterCtrl::sp_effect_ctrl`, `rdx` points at the
 /// [`SP_EFFECT_REQUEST_SIZE`]-byte request. No caller in the game reads the return value; the live
 /// call returned `0xe8`.
 ///
@@ -5188,15 +5188,6 @@ pub const SP_EFFECT_SEND: u32 = 0x0051_e710;
 /// First eight bytes of [`SP_EFFECT_SEND`]: `push rbx` (REX-prefixed, `40 53`) and the start of
 /// `sub rsp,0x80`, read from the live image.
 pub const SP_EFFECT_SEND_PROLOGUE: [u8; 8] = [0x40, 0x53, 0x48, 0x81, 0xec, 0x80, 0x00, 0x00];
-
-/// `PlayerCtrl -> ChrSpEffectCtrl`. `+0x3e0`.
-///
-/// Not `PlayerCtrl` itself: `PlayerCtrl`'s vtable slot `0x130` is `mov rax,[rcx+0x3e0]`, the
-/// bonfire caller passes that slot's result to [`SP_EFFECT_APPLY`], and the phantom setup at
-/// `0x140312dd0` allocates the object, stores it with `mov [rdi+0x3e0],rax`, and passes the field
-/// straight to the same call. Its vtable's locator names `.?AVChrSpEffectCtrl@@`. Null if
-/// construction failed; the live call used this field.
-pub const PLAYER_CTRL_SP_EFFECT_CTRL_OFFSET: usize = 0x3e0;
 
 /// Bytes in the request [`SP_EFFECT_APPLY`] reads. `0x10`.
 ///
