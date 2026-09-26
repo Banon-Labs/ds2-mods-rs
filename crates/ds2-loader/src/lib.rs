@@ -317,24 +317,33 @@ unsafe fn attach(module: *mut c_void) {
                         "{ARXAN_LINE_PREFIX} status=error error={error}"
                     )),
                 }
+                // One mark per install, so the boot timeline can charge the callback's time to
+                // the crate that spent it rather than to the game's startup that follows.
                 install_probe(probe);
                 install_offline();
+                ds2_boot_timeline::mark("installed-offline");
                 install_save_redirect();
                 install_intro_skip();
                 install_dialog_skip();
                 install_title_skip();
+                ds2_boot_timeline::mark("installed-title-skips");
                 install_boot_timeline();
                 install_continue_record();
+                ds2_boot_timeline::mark("installed-continue");
                 install_title_menu();
                 install_build_import();
                 install_inventory_sort();
                 install_voice_chat();
                 install_menu_row();
+                ds2_boot_timeline::mark("installed-menus");
                 install_item_warn();
                 install_hp_gauge();
+                ds2_boot_timeline::mark("installed-hud");
                 install_invasion_path();
+                ds2_boot_timeline::mark("installed-invasion-path");
                 install_input_harness();
                 arm_fault(crash_config);
+                ds2_boot_timeline::mark("installs-done");
             });
         },
 
