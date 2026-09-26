@@ -57,3 +57,16 @@ if [ -z "$repo_root" ]; then
 fi
 
 printf '%s\n%s' "$repo_root" "${CUPCAKE_HOME_DIR_OVERRIDE:-${HOME:-}}"
+
+# Lines 3 and on: every other git worktree of this same repository. A worktree is this repo's own
+# committed scripts on another branch, exactly as the main checkout is on whichever branch it has
+# out, and refusing its launcher sent a run through a copy-the-DLL workaround (2026-09-26). The
+# list comes from git's own record of the repository's worktrees, which the command being judged
+# cannot write, and a failure here only drops these lines -- the exemption narrows, never widens.
+if [ -z "${CUPCAKE_REPO_ROOT_OVERRIDE:-}" ] && [ -n "$repo_root" ]; then
+	git -C "$repo_root" worktree list --porcelain 2>/dev/null \
+		| sed -n 's/^worktree //p' \
+		| while IFS= read -r tree; do
+			[ "$tree" = "$repo_root" ] || printf '\n%s' "$tree"
+		done
+fi
