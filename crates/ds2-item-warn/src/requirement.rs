@@ -54,12 +54,14 @@
 //! recomputed per cell on both instead. That is a consequence of where the badge lives rather than
 //! an oversight, and it is also why one `unmet` serves two binds.
 //!
-//! # Only weapons and shields
+//! # Weapons, shields, armour and spells
 //!
-//! The gate is the game's own infusion gate -- item type `0` or `1`, from the four instructions at
-//! `0x140034ea9` -- because the badge lives inside the infusion container and only those two types
-//! have one. Armour (`0x11..0x14`) and rings (`0x42`, `0x43`) have requirement columns and stat
-//! indices in the same table and are not marked.
+//! The item type at the entry's `+0x1e` picks the requirement columns: `0`/`1` weapons and shields
+//! (`0x33..0x36`, with the two-handed Strength rule), `2..=5` armour (`0x11..0x14`), `9` spells
+//! (`0x42`, `0x43`). Rings (`7`) have no stat requirement and are never marked. The infusion
+//! container the badge lives in is built for every item cell, not only weapons -- both binds run
+//! their infusion loop with no type check; the `+0x1e <= 1` test only picks which infusion glyph
+//! shows.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -214,10 +216,19 @@ unsafe fn unmet(base: usize, item: *const u8) -> Option<bool> {
             .add(ds2_rva::ITEM_ENTRY_TYPE_OFFSET)
             .read()
     };
-    if kind > ds2_rva::ITEM_ENTRY_TYPE_MAX_INFUSABLE {
-        // Not a weapon or a shield. The game's own infusion reader stops here too.
+    // Which requirement columns this kind of item has. Weapons and shields use the weapon keys and
+    // the two-handed Strength rule; armour and spells have their own keys and no grip rule. Rings
+    // and everything else have no stat requirement, so nothing to mark.
+    let (keys, halves_strength): (&[u32], bool) = if kind <= ds2_rva::ITEM_ENTRY_TYPE_MAX_INFUSABLE
+    {
+        (&ds2_rva::FE_ITEM_PARAM_WEAPON_REQUIREMENTS, true)
+    } else if ds2_rva::ITEM_ENTRY_TYPE_ARMOUR.contains(&kind) {
+        (&ds2_rva::FE_ITEM_PARAM_ARMOUR_REQUIREMENTS, false)
+    } else if kind == ds2_rva::ITEM_ENTRY_TYPE_SPELL {
+        (&ds2_rva::FE_ITEM_PARAM_SPELL_REQUIREMENTS, false)
+    } else {
         return Some(false);
-    }
+    };
 
     let mut descriptor = [0u8; ds2_rva::FE_ITEM_DESCRIPTOR_SIZE];
     // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
@@ -277,7 +288,7 @@ unsafe fn unmet(base: usize, item: *const u8) -> Option<bool> {
     let column: ParamColumnFn = unsafe {
         std::mem::transmute::<usize, ParamColumnFn>(base + ds2_rva::FE_ITEM_PARAM_COLUMN as usize)
     };
-    for key in ds2_rva::FE_ITEM_PARAM_WEAPON_REQUIREMENTS {
+    for &key in keys {
         if key >= ds2_rva::FE_STAT_ROW_TABLE_ENTRIES {
             continue;
         }
@@ -296,7 +307,7 @@ unsafe fn unmet(base: usize, item: *const u8) -> Option<bool> {
         // SAFETY: the row is what the game's own resolver returned and the key is one its switch
         // handles with a plain load; the return is in `RAX` with no allocation behind it.
         let mut required = unsafe { column(row, key) } as u16;
-        if two_handed && key == ds2_rva::FE_ITEM_PARAM_WEAPON_REQUIRED_STRENGTH {
+        if halves_strength && two_handed && key == ds2_rva::FE_ITEM_PARAM_WEAPON_REQUIRED_STRENGTH {
             // The mechanics check's own `shr cx,1`, so an odd requirement rounds down as it does.
             required >>= 1;
         }
@@ -310,8 +321,9 @@ unsafe fn unmet(base: usize, item: *const u8) -> Option<bool> {
             let n = MARKED.fetch_add(1, Ordering::Relaxed) + 1;
             if n <= LOGGED_DECISIONS {
                 log(format_args!(
-                    "{LOG_PREFIX} unmet handle={handle:#06x} key={key:#04x} stat={index} \
-                     required={required} have={have} two_handed={two_handed} marked={n}"
+                    "{LOG_PREFIX} unmet handle={handle:#06x} kind={kind} key={key:#04x} \
+                     stat={index} required={required} have={have} two_handed={two_handed} \
+                     marked={n}"
                 ));
             }
             return Some(true);

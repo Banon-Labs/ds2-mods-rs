@@ -8852,6 +8852,14 @@ pub const ITEM_ENTRY_TYPE_OFFSET: usize = 0x1e;
 /// Highest item type that can carry an infusion. `1`, from `cmp byte ptr [rax+0x1e],1; jbe`.
 pub const ITEM_ENTRY_TYPE_MAX_INFUSABLE: u8 = 1;
 
+/// Item types `2..=5` are armour, `7` a ring and `9` a spell: `FUN_1401ad2a0` maps the entry's
+/// `+0x1e` to a category, and the category names at `0x14156b070` label 5 as a spell.
+pub const ITEM_ENTRY_TYPE_ARMOUR: core::ops::RangeInclusive<u8> = 2..=5;
+/// See [`ITEM_ENTRY_TYPE_ARMOUR`]. Rings have no stat requirement: their detail pane has no rows.
+pub const ITEM_ENTRY_TYPE_RING: u8 = 7;
+/// See [`ITEM_ENTRY_TYPE_ARMOUR`].
+pub const ITEM_ENTRY_TYPE_SPELL: u8 = 9;
+
 /// The `u8` holding the infusion in its low nibble. `+0x26`.
 pub const ITEM_ENTRY_INFUSION_OFFSET: usize = 0x26;
 
@@ -8961,6 +8969,20 @@ pub const FE_ITEM_PARAM_WEAPON_REQUIREMENTS: [u32; 4] = [0x33, 0x34, 0x35, 0x36]
 
 /// The one of [`FE_ITEM_PARAM_WEAPON_REQUIREMENTS`] that a two-handed grip halves: Strength.
 pub const FE_ITEM_PARAM_WEAPON_REQUIRED_STRENGTH: u32 = 0x33;
+
+/// The four `FE_ITEM_PARAM_TYPE` keys that are an armour piece's stat requirements.
+///
+/// `FUN_1400312e0` returns the `u16` at `row + 0x3c`, `+0x3e`, `+0x40`, `+0x42` for them. Read live
+/// on 2026-09-26 with `scripts/frida/stat-row-keys.js`: [`FE_STAT_ROW_TABLE`] maps them to player
+/// stats `8, 9, 10, 11`, the same four the weapon keys use.
+pub const FE_ITEM_PARAM_ARMOUR_REQUIREMENTS: [u32; 4] = [0x11, 0x12, 0x13, 0x14];
+
+/// The two `FE_ITEM_PARAM_TYPE` keys that are a spell's stat requirements (Intelligence, Faith).
+///
+/// `FUN_1400312e0` answers them with the requirement at `row + 0x08`/`+0x0a` less a per-player
+/// reduction (`FUN_14003c160([row+0x7c])`), floored at zero, so the column already says what this
+/// character needs. Read live with the same agent: they map to player stats `10` and `11`.
+pub const FE_ITEM_PARAM_SPELL_REQUIREMENTS: [u32; 2] = [0x42, 0x43];
 
 /// `PlayerCtrl -> ChrAsmCtrl`. `+0x378`.
 ///
