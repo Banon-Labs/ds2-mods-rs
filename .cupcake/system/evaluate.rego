@@ -114,6 +114,8 @@ all_denials contains decision if { some decision in data.cupcake.policies.claude
 
 all_denials contains decision if { some decision in data.cupcake.policies.claude.docs_no_shouting.deny }
 
+all_denials contains decision if { some decision in data.cupcake.policies.claude.script_comments_no_shouting.deny }
+
 all_denials contains decision if { some decision in data.cupcake.policies.claude.ds2_launch_guard.deny }
 
 all_denials contains decision if { some decision in data.cupcake.policies.claude.pr_requires_run_stamp.deny }

@@ -686,6 +686,35 @@ def cases() -> list[PolicyCase]:
                 ),
             },
         ),
+        # --- script_comments_no_shouting ---------------------------------------------------------
+        # The same offence in `#` comments of Python and shell scripts. It is here for the reason
+        # the three above are, and one more: the policy imports its patterns and span removal from
+        # docs_no_shouting's package, and only the WASM build proves a cross-package reference
+        # survives compilation rather than going undefined and allowing everything.
+        PolicyCase(
+            "deny-shouted-script-comment",
+            False,
+            tool_name="Edit",
+            tool_input={
+                "file_path": str(REPO_ROOT / "scripts" / "ds2-run.py"),
+                "old_string": "x",
+                "new_string": "    # A LINE IS EVIDENCE ONLY ONCE IT IS TERMINATED.",
+            },
+            expected_text="script comment that shouts",
+        ),
+        PolicyCase(
+            "allow-script-comment-full-of-names",
+            True,
+            tool_name="Edit",
+            tool_input={
+                "file_path": str(REPO_ROOT / "scripts" / "ds2-teardown.py"),
+                "old_string": "x",
+                "new_string": (
+                    "# SteamAppId and STEAM_COMPAT_APP_ID reach every process; the loader prints"
+                    ' "NOT RUN" when the probe is off, and `FUN_1402e67f0` is a DLL symbol.'
+                ),
+            },
+        ),
     ]
 
 
