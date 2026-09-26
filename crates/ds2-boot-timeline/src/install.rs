@@ -153,6 +153,23 @@ fn flush_milestones() {
 
 unsafe extern "system" {
     fn VirtualProtect(address: *mut c_void, size: usize, new: u32, old: *mut u32) -> i32;
+    fn GetCurrentThreadId() -> u32;
+}
+
+/// The thread [`install`] ran on: the entry-point thread, which is the one that goes on to run
+/// the title flow. Zero until `install` runs.
+///
+/// **This is what makes the sleep table mean anything for the boot.** The process requests over
+/// ten seconds of sleep inside a boot of under five, which is only possible across threads, and a
+/// worker sleeping between polls costs the boot nothing unless the boot is waiting on it. Only
+/// sleeps on this thread are on the critical path, so each caller's row carries them separately.
+static BOOT_THREAD: AtomicU32 = AtomicU32::new(0);
+
+/// Whether the calling thread is [`BOOT_THREAD`]. False before `install` has recorded it.
+fn on_boot_thread() -> bool {
+    let boot = BOOT_THREAD.load(Ordering::Relaxed);
+    // SAFETY: `GetCurrentThreadId` takes nothing and cannot fail.
+    boot != 0 && boot == unsafe { GetCurrentThreadId() }
 }
 const PAGE_READWRITE: u32 = 0x04;
 
@@ -171,8 +188,39 @@ type SleepThunkFn = unsafe extern "system" fn(u32);
 /// attribution was tried first and was wrong twice -- the `Sleep(10)` sites never fire, and neither
 /// frame-limiter candidate is called at all -- which is what makes reading the return address worth
 /// the naked thunk.
-static SLEEP_CALLERS: [(AtomicU64, AtomicU64, AtomicU64); SLEEP_CALLER_SLOTS] =
-    [const { (AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)) }; SLEEP_CALLER_SLOTS];
+static SLEEP_CALLERS: [CallerRow; SLEEP_CALLER_SLOTS] =
+    [const { CallerRow::EMPTY }; SLEEP_CALLER_SLOTS];
+
+/// One caller's row: its return address, then count and requested milliseconds over every thread,
+/// then the same two for calls made on [`BOOT_THREAD`] alone.
+struct CallerRow {
+    caller: AtomicU64,
+    count: AtomicU64,
+    ms: AtomicU64,
+    boot_count: AtomicU64,
+    boot_ms: AtomicU64,
+}
+
+impl CallerRow {
+    const EMPTY: Self = Self {
+        caller: AtomicU64::new(0),
+        count: AtomicU64::new(0),
+        ms: AtomicU64::new(0),
+        boot_count: AtomicU64::new(0),
+        boot_ms: AtomicU64::new(0),
+    };
+
+    fn add(&self, milliseconds: u32, boot_thread: bool) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.ms
+            .fetch_add(u64::from(milliseconds), Ordering::Relaxed);
+        if boot_thread {
+            self.boot_count.fetch_add(1, Ordering::Relaxed);
+            self.boot_ms
+                .fetch_add(u64::from(milliseconds), Ordering::Relaxed);
+        }
+    }
+}
 /// Thirteen call sites in the image, so sixteen slots covers every one with room to notice if a
 /// fourteenth appears from a DLL this counter was not expecting.
 const SLEEP_CALLER_SLOTS: usize = 16;
@@ -184,22 +232,20 @@ static SLEEP_CALLERS_LOST: AtomicU64 = AtomicU64::new(0);
 /// different callers. 2522 yields of `Sleep(0)` cost almost nothing between them -- they mark a
 /// fixed-size workload rather than a cost -- while a few hundred calls asking for tens of
 /// milliseconds each are where the seventeen seconds of requested sleep actually live.
-fn record_caller(caller: u64, milliseconds: u32) {
+fn record_caller(caller: u64, milliseconds: u32, boot_thread: bool) {
     for slot in &SLEEP_CALLERS {
-        let seen = slot.0.load(Ordering::Relaxed);
+        let seen = slot.caller.load(Ordering::Relaxed);
         if seen == caller {
-            slot.1.fetch_add(1, Ordering::Relaxed);
-            slot.2.fetch_add(u64::from(milliseconds), Ordering::Relaxed);
+            slot.add(milliseconds, boot_thread);
             return;
         }
         if seen == 0
             && slot
-                .0
+                .caller
                 .compare_exchange(0, caller, Ordering::Relaxed, Ordering::Relaxed)
                 .is_ok()
         {
-            slot.1.fetch_add(1, Ordering::Relaxed);
-            slot.2.fetch_add(u64::from(milliseconds), Ordering::Relaxed);
+            slot.add(milliseconds, boot_thread);
             return;
         }
     }
@@ -232,7 +278,7 @@ fn sleep_bucket(milliseconds: u32) -> usize {
 /// duration is passed through untouched, because the question is where the boot's time goes and an
 /// instrument that shortened the sleeps would be answering a different one.
 unsafe extern "system" fn detour_sleep(milliseconds: u32, caller: u64) {
-    record_caller(caller, milliseconds);
+    record_caller(caller, milliseconds, on_boot_thread());
     SLEEP_CALLS.fetch_add(1, Ordering::Relaxed);
     SLEEP_REQUESTED_MS.fetch_add(u64::from(milliseconds), Ordering::Relaxed);
     SLEEP_BUCKETS[sleep_bucket(milliseconds)].fetch_add(1, Ordering::Relaxed);
@@ -482,17 +528,32 @@ fn on_enter(id: u32, pending: i32) {
         // the deobfuscated image directly.
         let base = ds2_game_base::mem::game_module_base().unwrap_or(0);
         for slot in &SLEEP_CALLERS {
-            let caller = slot.0.load(Ordering::Relaxed);
+            let caller = slot.caller.load(Ordering::Relaxed);
             if caller == 0 {
                 continue;
             }
             let rva = (caller as usize).wrapping_sub(base);
             log(format_args!(
-                "{LOG_PREFIX} sleep-caller rva=0x{rva:08x} count={} requested-ms={}",
-                slot.1.load(Ordering::Relaxed),
-                slot.2.load(Ordering::Relaxed)
+                "{LOG_PREFIX} sleep-caller rva=0x{rva:08x} count={} requested-ms={} \
+                 boot-thread-count={} boot-thread-ms={}",
+                slot.count.load(Ordering::Relaxed),
+                slot.ms.load(Ordering::Relaxed),
+                slot.boot_count.load(Ordering::Relaxed),
+                slot.boot_ms.load(Ordering::Relaxed)
             ));
         }
+        let (boot_calls, boot_ms) = SLEEP_CALLERS.iter().fold((0, 0), |(calls, ms), slot| {
+            (
+                calls + slot.boot_count.load(Ordering::Relaxed),
+                ms + slot.boot_ms.load(Ordering::Relaxed),
+            )
+        });
+        log(format_args!(
+            "{LOG_PREFIX} boot-thread-sleep thread={} calls={boot_calls} requested-ms={boot_ms} \
+             -- the sleeps on the thread that runs the title flow, which is the only thread whose \
+             sleeping the boot waits on directly",
+            BOOT_THREAD.load(Ordering::Relaxed)
+        ));
         let lost = SLEEP_CALLERS_LOST.load(Ordering::Relaxed);
         if lost != 0 {
             log(format_args!(
@@ -813,6 +874,8 @@ pub unsafe fn install() -> Outcome {
     // from the Arxan callback, which is the entry point, so this is also the milestone that says
     // how much of the boot went by before the game's own code started.
     mark("entry-point");
+    // SAFETY: `GetCurrentThreadId` takes nothing and cannot fail.
+    BOOT_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::Relaxed);
     flush_milestones();
 
     let base = match ds2_game_base::mem::game_module_base() {
@@ -937,21 +1000,37 @@ mod tests {
     /// real return address, which is the only reason a sentinel is safe here at all.
     #[test]
     fn caller_table_accumulates_then_reports_what_it_could_not_hold() {
-        record_caller(0x1000, 5);
-        record_caller(0x1000, 7);
-        record_caller(0x2000, 0);
+        record_caller(0x1000, 5, true);
+        record_caller(0x1000, 7, false);
+        record_caller(0x2000, 0, false);
 
         let read = |caller: u64| {
             SLEEP_CALLERS
                 .iter()
-                .find(|slot| slot.0.load(Ordering::Relaxed) == caller)
+                .find(|slot| slot.caller.load(Ordering::Relaxed) == caller)
                 .map(|slot| {
                     (
-                        slot.1.load(Ordering::Relaxed),
-                        slot.2.load(Ordering::Relaxed),
+                        slot.count.load(Ordering::Relaxed),
+                        slot.ms.load(Ordering::Relaxed),
                     )
                 })
         };
+        let read_boot = |caller: u64| {
+            SLEEP_CALLERS
+                .iter()
+                .find(|slot| slot.caller.load(Ordering::Relaxed) == caller)
+                .map(|slot| {
+                    (
+                        slot.boot_count.load(Ordering::Relaxed),
+                        slot.boot_ms.load(Ordering::Relaxed),
+                    )
+                })
+        };
+        assert_eq!(
+            read_boot(0x1000),
+            Some((1, 5)),
+            "only the call made on the boot thread lands in the boot-thread columns"
+        );
 
         // Count AND milliseconds, separately -- the whole finding was that the caller with the
         // most calls and the caller with the most milliseconds are different callers.
@@ -966,10 +1045,10 @@ mod tests {
         // Fill the rest, then overflow it. A silently dropped row would read as "that call site
         // does not sleep", which is exactly the wrong conclusion.
         for extra in 0..(SLEEP_CALLER_SLOTS - 2) {
-            record_caller(0x3000 + extra as u64, 1);
+            record_caller(0x3000 + extra as u64, 1, false);
         }
         let before = SLEEP_CALLERS_LOST.load(Ordering::Relaxed);
-        record_caller(0xdead_beef, 1);
+        record_caller(0xdead_beef, 1, false);
         assert_eq!(
             SLEEP_CALLERS_LOST.load(Ordering::Relaxed),
             before + 1,
