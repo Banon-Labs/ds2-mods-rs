@@ -47,7 +47,9 @@ pub struct CharacterCtrl {
     /// The character's `ChrAsmCtrl`, which owns its equipment.
     ///
     /// The vtable getter that returns it is `CharacterCtrl`'s own, inherited by `PlayerCtrl`, so the
-    /// field belongs to this class even though only the local player's is read today.
+    /// field belongs to this class even though only the local player's is read today. That getter
+    /// is vtable slot `0x120`, `0x1403126b0`, in full `48 8b 81 78 03 00 00 c3` --
+    /// `mov rax,[rcx+0x378]; ret`.
     pub chr_asm_ctrl: Option<NonNull<ChrAsmCtrl>>,
     _unk0380: [u8; 0x100],
 }
@@ -72,12 +74,35 @@ pub struct PhantomBlock {
     pub phantom_param_id: u8,
 }
 
-/// `ChrAsmCtrl`. Opaque here: its fields are reached through `ds2-rva` offsets for now.
+/// `ChrAsmCtrl`, which owns a character's equipment. A prefix: only the field this repo reads.
 ///
 /// Source of name: RTTI.
 #[repr(C)]
 pub struct ChrAsmCtrl {
-    _opaque: [u8; 0],
+    _unk00: [u8; 0x28],
+    /// The equipment state the requirement check reads.
+    ///
+    /// `ChrAsmCtrl` vtable (`0x1410e0a38`) slot `0x70` is `0x1401513d0`, in full
+    /// `48 8b 41 28 c3` -- `mov rax,[rcx+0x28]; ret`. The object is built by `FUN_140347970` into
+    /// `this[5]` of `FUN_140338e40`, and it is what `FUN_14034a980` walks.
+    pub equip: Option<NonNull<ChrAsmEquip>>,
+}
+
+/// The equipment state a [`ChrAsmCtrl`] holds. A prefix: only the field this repo reads.
+///
+/// Source of name: none. The object has no vtable and no RTTI; it is named for what its owner
+/// uses it for.
+#[repr(C)]
+pub struct ChrAsmEquip {
+    _unk00: [u8; 0x10],
+    /// The grip state: `1` one-handed, `2` and `3` two-handed, `4` to `6` power stance.
+    ///
+    /// `FUN_140347970` stores `1` there at `0x140347994`; `FUN_14034f470` rewrites it from the
+    /// power-stance resolver `FUN_140350170`; `FUN_14034a980` passes it to the mechanics
+    /// requirement check `FUN_14034d3c0`, which halves the Strength requirement (`u16`, `shr cx,1`
+    /// at `0x14034d44c`) when `grip - 2 < 2`. The two-handed values are
+    /// `ds2_rva::EQUIP_GRIP_TWO_HANDED`.
+    pub grip: i32,
 }
 
 /// The MSVC `std::wstring` the game's CRT uses, with small-string optimisation.
@@ -97,7 +122,10 @@ pub struct WString {
 mod tests {
     use core::mem::{offset_of, size_of};
 
-    use super::{CharacterCtrl, CharacterCtrlBase, PhantomBlock, PlayerCtrl, WString};
+    use super::{
+        CharacterCtrl, CharacterCtrlBase, ChrAsmCtrl, ChrAsmEquip, PhantomBlock, PlayerCtrl,
+        WString,
+    };
 
     // Sizes: each is the value slot 9 of the class's DLRF runtime-class vtable returns, and the
     // game's own allocations agree. `FUN_140357920` allocates 0x4a0 and passes it to the PlayerCtrl
@@ -151,6 +179,19 @@ mod tests {
     #[test]
     fn character_ctrl_chr_asm_ctrl_is_at_0x378() {
         assert_eq!(offset_of!(CharacterCtrl, chr_asm_ctrl), 0x378);
+    }
+
+    // Read live on 2026-09-26 by `scripts/frida/player-ctrl.js`: the local player's ChrAsmCtrl had
+    // vtable `0x10e0a38`, a non-null equip pointer at +0x28, and a grip of `3` there at +0x10.
+
+    #[test]
+    fn chr_asm_ctrl_equip_is_at_0x28() {
+        assert_eq!(offset_of!(ChrAsmCtrl, equip), 0x28);
+    }
+
+    #[test]
+    fn chr_asm_equip_grip_is_at_0x10() {
+        assert_eq!(offset_of!(ChrAsmEquip, grip), 0x10);
     }
 
     #[test]

@@ -11,7 +11,8 @@
 //   +0x90   position, four f32               (CharacterCtrl)
 //   +0xb0   phantom block pointer, its +0x3c  (CharacterCtrl)
 //   +0x118  name, an MSVC std::wstring        (CharacterCtrl)
-//   +0x378  ChrAsmCtrl pointer                (PlayerCtrl)
+//   +0x378  ChrAsmCtrl pointer                (CharacterCtrl)
+//           its +0x28 equip pointer, and that object's +0x10 i32 grip state
 //
 // A `null` answer at any hop is printed rather than thrown, so the title screen reports where the
 // chain stops instead of ending the session with nothing.
@@ -57,5 +58,10 @@ if (manager.isNull()) {
     const asm = player.add(0x378).readPointer();
     say('chr asm ctrl +0x378 = ' + asm +
       (asm.isNull() ? '' : ' vtable rva=0x' + asm.readPointer().sub(image.base).toString(16)));
+    if (!asm.isNull()) {
+      const equip = asm.add(0x28).readPointer();
+      say('equip +0x28 = ' + equip +
+        (equip.isNull() ? '' : ' grip +0x10 = ' + equip.add(0x10).readS32()));
+    }
   }
 }
