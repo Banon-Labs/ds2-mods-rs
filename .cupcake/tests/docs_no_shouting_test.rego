@@ -84,6 +84,20 @@ test_allow_screaming_snake_case_constants if {
 	))
 }
 
+# A hyphen, unlike an underscore, IS a word boundary, so a rule id's FOR and WITHOUT used to read as
+# shouted function words. Measured 2026-09-21 on a scratch note naming two guards unquoted.
+test_allow_hyphenated_rule_ids if {
+	not denied(write_event(
+		"/tmp/claude-1000/scratch/notes.md",
+		"The port kept DS2-MODS-NO-FIX-CLAIM-WITHOUT-RUNTIME-EVIDENCE and DS2-MODS-NO-GREP-FOR-BUILD-ERRORS as they were.",
+	))
+}
+
+# The identifier carve-out takes only the identifier. A shout beside one is still a shout.
+test_deny_shout_next_to_a_rule_id if {
+	denied(write_event("docs/x.md", "BUILTIN-GIT-BLOCK-NO-VERIFY is NOT optional."))
+}
+
 # A digit ends the word, so a game file name and a Ghidra placeholder are not capitalised words.
 test_allow_file_names_and_ghidra_symbols if {
 	not denied(edit_event(
