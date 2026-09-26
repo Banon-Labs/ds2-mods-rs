@@ -128,7 +128,7 @@ fn run(thread_id: u32, stack_base: u64) {
     let text =
         ds2_game_base::mem::module_text_range().map_or((0, 0), |(start, len)| (start, start + len));
     // All three allocated before the first suspend, and never again while one is in force.
-    let mut samples: Vec<(u64, u64)> = Vec::with_capacity(MAX_SAMPLES);
+    let mut samples: Vec<(u64, [u64; CHAIN])> = Vec::with_capacity(MAX_SAMPLES);
     let mut context = Box::new(Context([0; CONTEXT_SIZE]));
     let mut stack = Box::new([0u64; STACK_WORDS]);
     let mut failed = 0u64;
@@ -167,8 +167,8 @@ fn run(thread_id: u32, stack_base: u64) {
             if words == 0 {
                 no_stack += 1;
             }
-            let caller = first_game_return(&stack[..words], text);
-            samples.push((context_u64(&context, CONTEXT_RIP_OFFSET), caller));
+            let chain = game_returns(&stack[..words], text);
+            samples.push((context_u64(&context, CONTEXT_RIP_OFFSET), chain));
         } else {
             failed += 1;
         }
@@ -185,13 +185,24 @@ fn run(thread_id: u32, stack_base: u64) {
     report(&samples, failed);
 }
 
-/// The first word on a copied stack that is a return address into the game's `.text`: a value in
-/// range whose preceding bytes are a `call`. Zero when there is none.
+/// Return addresses into the game kept per sample, nearest the top of the stack first.
+const CHAIN: usize = 12;
+
+/// The words on a copied stack that are return addresses into the game's `.text` -- a value in
+/// range whose preceding bytes are a `call` -- in stack order, up to [`CHAIN`], zero-filled.
 ///
 /// The call check is what keeps a stray pointer into the image from counting: `e8 rel32` five
-/// bytes back, or an `ff /2` indirect call two, three or six bytes back.
-fn first_game_return(stack: &[u64], (text_start, text_end): (usize, usize)) -> u64 {
+/// bytes back, or an `ff /2` indirect call two, three or six bytes back. It cannot tell a live
+/// frame's return address from a stale one left in a dead slot by an earlier call, which is why
+/// the report ranks functions by how many samples they appear in anywhere on the chain, not only
+/// by the nearest one.
+fn game_returns(stack: &[u64], (text_start, text_end): (usize, usize)) -> [u64; CHAIN] {
+    let mut found = [0u64; CHAIN];
+    let mut count = 0;
     for &value in stack {
+        if count == CHAIN {
+            break;
+        }
         let address = value as usize;
         if address < text_start + 6 || address >= text_end {
             continue;
@@ -203,10 +214,11 @@ fn first_game_return(stack: &[u64], (text_start, text_end): (usize, usize)) -> u
             .iter()
             .any(|&at| before[at] == 0xff && (before[at + 1] >> 3) & 7 == 2);
         if direct || indirect {
-            return value;
+            found[count] = value;
+            count += 1;
         }
     }
-    0
+    found
 }
 
 /// Where a sample landed: a function of the game image by its start RVA, or a whole module.
@@ -279,26 +291,37 @@ fn log_table(label: &str, counts: HashMap<Place, u64>, total: u64) {
     }
 }
 
-/// Two tables. `at` is where the instruction pointer was. `waiting-in` is, for samples whose
-/// instruction pointer was outside the game image, the game function nearest the top of the stack
-/// -- the game code that called into the system and was waiting for it to return.
-fn report(samples: &[(u64, u64)], failed: u64) {
+/// Three tables. `at` is where the instruction pointer was. `waiting-in` is, for samples whose
+/// instruction pointer was outside the game image, the game function nearest the top of the stack.
+/// `on-stack` counts, over every sample, each game function once if it appears anywhere on the
+/// sample's chain: inclusive time, which a stale slot cannot dominate the way it can the nearest
+/// entry.
+fn report(samples: &[(u64, [u64; CHAIN])], failed: u64) {
     let game_base = ds2_game_base::mem::game_module_base().unwrap_or(0) as u64;
     let mut at: HashMap<Place, u64> = HashMap::new();
     let mut waiting_in: HashMap<Place, u64> = HashMap::new();
+    let mut on_stack: HashMap<Place, u64> = HashMap::new();
     let mut outside = 0u64;
-    for &(pc, caller) in samples {
-        let here = place(pc, game_base);
+    for (pc, chain) in samples {
+        let here = place(*pc, game_base);
         *at.entry(here).or_default() += 1;
         let in_game = matches!(here, Place::GameFunction(_) | Place::GameUnwound);
         if !in_game {
             outside += 1;
-            let from = if caller == 0 {
+            let from = if chain[0] == 0 {
                 Place::Unknown
             } else {
-                place(caller, game_base)
+                place(chain[0], game_base)
             };
             *waiting_in.entry(from).or_default() += 1;
+        }
+        let mut seen: Vec<Place> = Vec::with_capacity(CHAIN);
+        for &address in chain.iter().take_while(|&&address| address != 0) {
+            let function = place(address, game_base);
+            if !seen.contains(&function) {
+                seen.push(function);
+                *on_stack.entry(function).or_default() += 1;
+            }
         }
     }
     let total = samples.len() as u64;
@@ -308,4 +331,5 @@ fn report(samples: &[(u64, u64)], failed: u64) {
     ));
     log_table("at", at, total);
     log_table("waiting-in", waiting_in, outside);
+    log_table("on-stack", on_stack, total);
 }
