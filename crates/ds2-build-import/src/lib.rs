@@ -7,9 +7,11 @@
 //!
 //! 1. **Steam's own text field**, prefilled with `https://soulsplanner.com/darksouls2/`. Correct,
 //!    and absent on a desktop Steam outside Big Picture -- measured, not assumed.
-//! 2. **The clipboard**, if it holds a soulsplanner link. Copy a link in a browser, press the row.
-//! 3. **Typing the id on the row itself**, which is what happens when neither of the others can
-//!    supply one. See `typed` for why it reads ten keys and not a keyboard.
+//! 2. **A small Win32 dialog** with one edit control, owned by the game window. It opens with the
+//!    clipboard's link when the clipboard holds a soulsplanner build link, and with the bare prefix
+//!    otherwise. Enter is OK, Escape is Cancel. See `url_dialog`.
+//! 3. **Typing the id on the row itself**, which is what happens when the dialog cannot be opened.
+//!    See `typed` for why it reads ten keys and not a keyboard.
 //!
 //! # It borrows the game's Steam keyboard rather than drawing its own
 //!
@@ -77,6 +79,8 @@ mod save;
 mod steam;
 #[cfg(windows)]
 mod typed;
+#[cfg(windows)]
+mod url_dialog;
 
 /// Turn a build's named gear into the entries the game's grant function takes.
 ///

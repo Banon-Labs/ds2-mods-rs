@@ -486,6 +486,7 @@ version = "0.1.0"
 dependencies = [
  "darksouls2",
  "ds2-build-import-core",
+ "ds2-build-url-core",
  "ds2-game-base",
  "ds2-menu-row",
  "ds2-rva",
