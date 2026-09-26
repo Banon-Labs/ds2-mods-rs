@@ -53,7 +53,7 @@ pub const SLOW_SPAN_DEGREES: f32 = 30.0;
 /// How hard the controller is allowed to push, in whatever unit its channel takes.
 ///
 /// A pair rather than two constants because the two channels do not share a unit: a pad axis is
-/// a fraction of full deflection and a mouse is pixels of cursor travel per frame. A single
+/// a fraction of full deflection and a mouse is DirectInput counts per frame. A single
 /// `MAX_MAGNITUDE` would have been right for one of them and nonsense for the other.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Magnitudes {
@@ -77,16 +77,14 @@ impl Magnitudes {
         max: ds2_rva::PAD_AXIS_FULL_SCALE,
     };
 
-    /// For the mouse, in pixels of authored cursor travel per frame.
+    /// For the mouse, in DirectInput relative counts per frame.
     ///
-    /// The floor is ONE PIXEL and that one is not a choice: the consumer differences two
-    /// successive cursor positions (`ds2_rva::WINDOWS_MOUSE_DEVICE_POSITION_OFFSET`), so a
-    /// one-pixel step is a real, indivisible mouse movement -- there is no deadzone to clear
-    /// because there is no deadzone in a subtraction.
+    /// The floor is one count, which clears the camera stage's `0.1` threshold
+    /// (`docs/DS2-MOUSE-LOOK.md`) with room to spare.
     ///
-    /// The ceiling IS a choice. Degrees per pixel depends on the player's sensitivity setting,
-    /// which this repo has not measured, so 25 is "brisk but not a spin" rather than a derived
-    /// number. Getting it wrong costs convergence speed and nothing else: the controller eases
+    /// The ceiling is a choice. Measured once at the default sensitivity, `20` a frame for sixty
+    /// frames turned the camera about 90 degrees, so 25 is "brisk but not a spin" rather than a
+    /// derived number. Getting it wrong costs convergence speed and nothing else: the controller eases
     /// off as the goal approaches and stops when the camera's own yaw says it has arrived.
     pub const MOUSE: Self = Self {
         min: 1.0,
@@ -331,8 +329,8 @@ mod tests {
 
     #[test]
     fn the_mouse_channel_lands_with_its_own_unit() {
-        // Pixels per frame, not fractions of a stick: a plant whose gain is 0.2 degrees per
-        // pixel is a plausible mouse sensitivity, and the controller must converge on it
+        // Counts per frame, not fractions of a stick: a plant whose gain is 0.2 degrees per
+        // count is a plausible mouse sensitivity, and the controller must converge on it
         // without knowing that number.
         let mut plant = Plant {
             yaw: 0.0,
@@ -349,16 +347,16 @@ mod tests {
     }
 
     #[test]
-    fn a_one_pixel_floor_is_enough_for_a_mouse() {
-        // The pad floor exists to clear a deadzone. A cursor difference has none, so the mouse
-        // channel must be able to creep the last degree at one pixel a frame rather than
+    fn a_one_count_floor_is_enough_for_a_mouse() {
+        // The pad floor exists to clear a deadzone. The mouse threshold is 0.1 counts, so the mouse
+        // channel must be able to creep the last degree at one count a frame rather than
         // oscillating across it.
         assert_eq!(Magnitudes::MOUSE.min, 1.0);
         let mut plant = Plant {
             yaw: 0.0,
             gain: 0.2,
             sign: 1.0,
-            // Anything at or below one pixel is swallowed -- so ONLY the floor gets through,
+            // Anything below one count is swallowed -- so ONLY the floor gets through,
             // and the turn still has to land.
             deadzone: 0.99,
         };

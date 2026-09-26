@@ -26,7 +26,7 @@
 //! block <frames>              suppress every human input for N frames
 //! unblock                     stop suppressing now
 //! axis <index> <value> <frames>   hold one pad axis at a value
-//! mouse <dx> <dy> <frames>    move the authored cursor N pixels per frame
+//! mouse <dx> <dy> <frames>    add dx/dy DirectInput counts to the mouse each frame
 //! buttons <hex> <frames>      hold a pad button mask for N frames
 //! turn <degrees> [frames]     turn the camera, watching its own yaw (closed loop)
 //! probe [frames]              hold each channel in turn and report the yaw each one moved
@@ -75,15 +75,14 @@ pub enum Command {
         /// For how long.
         frames: u32,
     },
-    /// Move the authored cursor `dx`/`dy` PIXELS PER FRAME for `frames`.
+    /// Add `dx`/`dy` DirectInput counts to the mouse each frame for `frames`.
     ///
-    /// Not a one-off jump: the consumer differences two successive cursor positions, so a
-    /// constant position is a single frame of motion followed by stillness. See
+    /// Relative motion, like a hand on the mouse, and it needs the game window focused. See
     /// [`crate::authored::Authored::mouse`].
     Mouse {
-        /// Pixels per frame, horizontally.
+        /// Counts per frame, horizontally.
         dx: f32,
-        /// Pixels per frame, vertically.
+        /// Counts per frame, vertically.
         dy: f32,
         /// For how long.
         frames: u32,

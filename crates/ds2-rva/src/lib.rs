@@ -8240,13 +8240,21 @@ pub const KEYBOARD_DEVICE_DIK_TABLE_OFFSET: usize = 0xf0;
 pub const KEYBOARD_DEVICE_DIK_TABLE_BYTES: usize = 0x100;
 
 // ============================================================================================
-// THE CAMERA'S MOUSE-LOOK -- AND THE CORRECTION IT IS
+// The menu pointer's chain, which is not the camera's
 //
-// `MOUSE_DEVICE_POLL` above is a real device and the engine really does read it, but it is NOT
-// what turns this camera. Measured live 2026-09-22: `mouse 120 0 30` written into
-// `DLUID::MouseDevice`'s normalised deltas left the camera's published yaw at exactly 87.13 for
-// thirty frames. The whole chain is elsewhere, it is traced below, and every step of it was read
-// out of the disassembly rather than inferred:
+// Superseded 2026-09-26. The camera's mouse-look is `MOUSE_DEVICE_POLL`'s X/Y floats
+// (`MOUSE_DEVICE_DELTA_X_OFFSET`), mapped into `cursorObj+0x18` and read by the camera stage only
+// while the window is active (`docs/DS2-MOUSE-LOOK.md`). Measured with
+// `scripts/frida/mouse-look-author.js`, window focused: `+20` added there for sixty frames turned
+// the camera about 90 degrees, with zero drift idle. The 2026-09-22 run that saw no turn wrote the
+// same floats into an unfocused window. What follows is the chain that feeds the menu pointer; its
+// conclusions about the camera are wrong and are kept only so the addresses stay explained.
+//
+// The original text follows. `MOUSE_DEVICE_POLL` above is a real device and the engine really
+// does read it, but it is not what turns this camera. Measured live 2026-09-22: `mouse 120 0 30`
+// written into `DLUID::MouseDevice`'s normalised deltas left the camera's published yaw at exactly
+// 87.13 for thirty frames. The whole chain is elsewhere, it is traced below, and every step of it
+// was read out of the disassembly rather than inferred:
 //
 //   FUN_140af42b0                     the per-frame input update
 //     -> parseInput(obj[0], dt)       0x140b08660 -- keyboard/general

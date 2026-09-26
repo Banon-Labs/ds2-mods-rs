@@ -80,14 +80,10 @@ pub struct Authored {
     pub buttons: Option<u16>,
     /// Left and right triggers, `0.0..=1.0`.
     pub triggers: [Option<f32>; 2],
-    /// How far to move the authored cursor this frame, in PIXELS of client-space travel.
+    /// How far to move the mouse this frame, in DirectInput relative counts.
     ///
-    /// A delta, not a coordinate, and the distinction is load-bearing. DARK SOULS II's camera
-    /// reads an ABSOLUTE cursor position (`ds2_rva::WINDOWS_MOUSE_DEVICE_POSITION_OFFSET`) and
-    /// `parseCameraInput` differences two successive values of it, so a constant position is one
-    /// frame of motion and then stillness. `crate::device` keeps a virtual cursor and adds this
-    /// to it each frame, which is what turns a delta into the moving position the consumer
-    /// wants.
+    /// `crate::device` adds this to the X/Y floats `DLUID::MouseDevice`'s poll just wrote
+    /// (`ds2_rva::MOUSE_DEVICE_DELTA_X_OFFSET`), which is what the camera's mouse-look reads.
     pub mouse: Option<[f32; 2]>,
 }
 
@@ -116,7 +112,7 @@ impl Authored {
         authored
     }
 
-    /// One frame of mouse motion, in pixels; nothing else touched.
+    /// One frame of mouse motion, in DirectInput counts; nothing else touched.
     #[must_use]
     pub fn mouse_delta(dx: f32, dy: f32) -> Self {
         Self {

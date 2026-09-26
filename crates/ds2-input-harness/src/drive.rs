@@ -48,10 +48,9 @@ use crate::turn::{Magnitudes, Outcome, Turn};
 /// channel cannot drive an unfocused game. `scripts/frida/input-focus.js` reads those bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Channel {
-    /// Mouse X. **The default**, because it is the channel whose consumer chain is traced end to
-    /// end in `ds2-rva`: `WindowsMouseDevice::poll` stores a clamped cursor position, and
-    /// `parseCameraInput` turns the difference between two successive values of it into camera
-    /// motion. It also needs no hardware -- there is always a cursor.
+    /// Mouse X. **The default**: it needs no hardware, and its chain from the DirectInput
+    /// mouse's X float to the camera is traced in `docs/DS2-MOUSE-LOOK.md` and measured with
+    /// `scripts/frida/mouse-look-author.js`. It needs the game window focused; the pad does not.
     MouseX,
     /// Mouse Y. The same chain, the other component; pitch rather than heading, so a yaw loop
     /// driving it should expect `NoResponse`.
@@ -266,7 +265,7 @@ impl Session {
                     frames_left: frames,
                 };
                 harness_log!(
-                    "mouse: moving the authored cursor ({dx}, {dy}) pixels per frame for \
+                    "mouse: adding ({dx}, {dy}) counts per frame to the DirectInput mouse for \
                      {frames} frames"
                 );
             }
@@ -604,7 +603,7 @@ mod tests {
         while session.busy() {
             let frame = session.frame(Some(yaw));
             if let Some([dx, _]) = frame.authored.mouse {
-                // A plant at a fifth of a degree per pixel.
+                // A plant at a fifth of a degree per count.
                 yaw = crate::turn::wrap_degrees(yaw + dx * 0.2);
             }
             frames += 1;
