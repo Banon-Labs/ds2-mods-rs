@@ -27,10 +27,11 @@ So the stone copy replaces the whole 2032 object with 181's 2101 object, byte fo
 - 833..839 and 181 have the **same class table** (the same names in the same order), so the
   copied object's class indices mean the same thing in the stone file (**verified in data**, every
   stone colour and 181). The code must assert this, not assume it.
-- In every stone colour the 2032 object sits at `0x0c30` with length `0xce6` (**verified in data**);
-  839 is `0x38` bytes longer elsewhere, so locate it by pattern (as `strip_sparkles` already does),
-  not by offset.
-- Every enclosing object's i32 length (at object `+6`) grows by `0x37a - 0xce6` = `-0x96c`. In 833
+- In 833..838 the 2032 object sits at `0x0c30` with length `0xce6` (**verified in data**). In 839
+  it is `0xd1e`: the colour's extra bytes are inside the sparkle object itself, which the
+  implementation's host tests found. Locate it by pattern (as `strip_sparkles` already does), not
+  by offset or length, and take the enclosing lengths' delta from the object actually found.
+- Every enclosing object's i32 length (at object `+6`) grows by `0x37a` minus the sparkle object's length (`-0x96c` in 833..838, `-0x9a4` in 839). In 833
   those are `0x019e` Effect, `0x038c` StateMap, `0x039a` State, `0x03ac` Action 79, `0x03ba`
   ParamList, `0x03cc` Param 37 (2101 glow), `0x03de` ParamList, `0x0be8` Param 38 (action 14),
   `0x0bfa` ParamList (**verified in data**). No count changes: a ParamList's two ints count params,
