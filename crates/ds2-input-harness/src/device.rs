@@ -136,6 +136,17 @@ static FIRED: [AtomicU64; SITES.len()] = [const { AtomicU64::new(0) }; SITES.len
 static CURSOR_ENGAGED: AtomicBool = AtomicBool::new(false);
 /// Whether the current button hold has already reported that the pad is not on the XInput arm.
 static WRONG_ARM_SAID: AtomicBool = AtomicBool::new(false);
+/// Pad polls on which an authored button word was written, blanked by a block, or withheld because
+/// the pad was not on the XInput arm. Reported by `status`: Frida probes of the pad path disagreed
+/// with the menu opening on a harness Start (see the third-backend notes), and a count kept by the
+/// code that does the writing cannot be misplaced the way a hook can.
+static PAD_BUTTONS_WRITTEN: AtomicU64 = AtomicU64::new(0);
+static PAD_BLANKED: AtomicU64 = AtomicU64::new(0);
+static PAD_WRONG_ARM: AtomicU64 = AtomicU64::new(0);
+/// The pad object the last pad poll handed this detour, for `status`. An outside probe that wants
+/// to act on the harness's pad needs this exact pointer: one found by hooking the poll from Frida
+/// turned out, on 2026-09-26, not to be it.
+static LAST_PAD: AtomicUsize = AtomicUsize::new(0);
 /// The virtual cursor, as `f32` bits so a fractional push accumulates instead of rounding to
 /// nothing every frame.
 static VIRTUAL_X: AtomicU32 = AtomicU32::new(0);
@@ -187,7 +198,10 @@ unsafe fn poll(index: usize, this: *mut u8) -> u64 {
     // is one that same function wrote.
     unsafe {
         match index {
-            PAD => write_pad(this, blocking, &authored),
+            PAD => {
+                LAST_PAD.store(this as usize, Ordering::Relaxed);
+                write_pad(this, blocking, &authored);
+            }
             DINPUT_MOUSE => write_dinput_mouse(this, blocking),
             KEYBOARD => write_keyboard(this, blocking),
             WINDOWS_MOUSE => write_windows_mouse(this, blocking, &authored),
@@ -252,6 +266,7 @@ unsafe fn zero(base: *mut u8, offset: usize, len: usize) {
 /// `this` is a live `DLUID::PadDevice` whose poll has just run.
 unsafe fn write_pad(this: *mut u8, blocking: bool, authored: &Authored) {
     if blocking {
+        PAD_BLANKED.fetch_add(1, Ordering::Relaxed);
         // The six normalised axes, the button word and both triggers: everything the poll
         // itself writes, so everything downstream can see.
         // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
@@ -317,12 +332,16 @@ unsafe fn write_pad(this: *mut u8, blocking: bool, authored: &Authored) {
                     .cast::<u16>()
                     .write_unaligned(mask);
             }
-        } else if !WRONG_ARM_SAID.swap(true, Ordering::Relaxed) {
-            harness_log!(
-                "buttons: mask 0x{mask:04x} not applied -- this pad is not on the XInput arm \
-                 (third-backend={third} xinput-port={port}), and the game reads its buttons \
-                 elsewhere there"
-            );
+            PAD_BUTTONS_WRITTEN.fetch_add(1, Ordering::Relaxed);
+        } else {
+            PAD_WRONG_ARM.fetch_add(1, Ordering::Relaxed);
+            if !WRONG_ARM_SAID.swap(true, Ordering::Relaxed) {
+                harness_log!(
+                    "buttons: mask 0x{mask:04x} not applied -- this pad is not on the XInput arm \
+                     (third-backend={third} xinput-port={port}), and the game reads its buttons \
+                     elsewhere there"
+                );
+            }
         }
     } else {
         WRONG_ARM_SAID.store(false, Ordering::Relaxed);
@@ -616,6 +635,13 @@ pub(crate) fn poll_command_file() {
                     counts[KEYBOARD],
                     counts[WINDOWS_MOUSE],
                     CURSOR_ENGAGED.load(Ordering::Relaxed)
+                );
+                harness_log!(
+                    "status: pad writes buttons={} blanked={} wrong-arm={} pad=0x{:x}",
+                    PAD_BUTTONS_WRITTEN.load(Ordering::Relaxed),
+                    PAD_BLANKED.load(Ordering::Relaxed),
+                    PAD_WRONG_ARM.load(Ordering::Relaxed),
+                    LAST_PAD.load(Ordering::Relaxed)
                 );
             }
         }
