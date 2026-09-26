@@ -14,6 +14,49 @@ the running process is being held for another investigation.
 - **[inferred]** means it follows from what was read but was not traced to the end. Each one
   says what would prove it.
 
+## Built and run solo: `ds2-weapon-sync` (2026-09-26)
+
+The design below is shipped as `crates/ds2-weapon-sync`, off by default, turned on with
+`scripts/ds2-run.py --weapon-sync` (`--weapon-sync-test-cap N` adds a pretend remote player at
++N). Every run was offline and alone, `--no-seamless`, on slot 1 of the redirected save, with a +10
+Dagger in right hand 1.
+
+**Measured:**
+
+- **The cap works.** With `test_cap = 3` it logged `CAPPED cap=+3 pushed=[s1:1000000+10->+3]
+  after: inventory=[+0,+10] records=[+0,+3] live=[+0,+3]`. `scripts/frida/weapon-sync-read.js`
+  read the same three values independently.
+- **A level-only change is lost unless the item changes first.** The first build pushed the Dagger
+  once at +3. The live state took it and the record table stayed at +10. The record writer
+  `0x1403463d0` builds the new table, then keeps it only when the item id or the `u16` at `+0x0C`
+  differs from the old record (the `u16` is the constant `1`). The level is the byte after that
+  `u16`, so a same-item level change is computed and dropped. The packet 61 receiver writes a
+  peer's copy of us through the same function, so a peer would keep the old level too. The crate
+  now pushes Fists first and then the real item at the new level. [static + runtime]
+- **The in-world restore works.** Removing `test_cap` from the live `ds2-mods.toml` logged
+  `RESTORED ... records=[+0,+10] live=[+0,+10]`. A Frida read afterwards showed the same equipped
+  entries, still flagged equipped (`+0x1f = 0x2`), with levels and infusions intact.
+- **The save keeps the real level.** Run with the cap live on both copies and saves allowed
+  (`--no-save-file-row`), the 300 s autosave rewrote `DS2SOFS0000.sl2` at 16:28:19. Decrypted
+  with `scripts/ds2-sl2.py -x`, every Dagger inventory record in the slot's payload
+  (`USER_DATA002`, `{u32 id, u32, f32 durability, u8 level, u8 infusion}` at `0x9570..0x95f0`)
+  still reads level `0x0a`. The next launch, uncapped, logged
+  `world ... built with: inventory=[+0,+10] records=[+0,+10] live=[+0,+10]`.
+- **The per-frame seam runs.** `NET_SESSION_UPDATE` runs 60 times a second on the game thread in
+  the world (`scripts/frida/tick-count.js`), and at the title too (`tick live player=0x0`).
+
+**Not proven, blocked on a second player (Seamless Co-op is not installed yet):**
+
+- reading another player's weapon levels from their record table;
+- when those records are first filled after a join;
+- the encounter-end trigger with a real player leaving, dying or disconnecting;
+- what a peer's copy of our weapon shows after the Fists-then-item push, and whether the Fists
+  step is visible to them;
+- whether damage reads the capped copy (Q1).
+
+`scripts/frida/weapon-sync-cap.js`, the Frida version of the cap, froze the game on its one
+attach. Its header says why, and says not to attach it as it stands.
+
 ## Verdict: possible, with caveats
 
 It can be built without touching the save. The game already copies a weapon's level from the
