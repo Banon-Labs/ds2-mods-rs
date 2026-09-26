@@ -7943,6 +7943,17 @@ pub const PAD_DEVICE_BUTTONS_OFFSET: usize = 0x198;
 /// that chooses the DirectInput arm over the XInput one.
 pub const PAD_DEVICE_XINPUT_PORT_OFFSET: usize = 0x19c;
 
+/// Third-backend selector, `i32`; a value `>= 0` routes button reads to
+/// [`PAD_DEVICE_THIRD_BACKEND_BUTTONS_OFFSET`] instead of [`PAD_DEVICE_BUTTONS_OFFSET`].
+///
+/// `PadDevice` vtable slot 27 (`0x140f04d40`, "is this key down") tests it first. Read live on
+/// 2026-09-26 with `scripts/frida/pad-button-read.js` on an XInput pad: `third=-1 port=0`.
+pub const PAD_DEVICE_THIRD_BACKEND_OFFSET: usize = 0x314;
+
+/// Third-backend button mask, `u32`, read by slot 27 when [`PAD_DEVICE_THIRD_BACKEND_OFFSET`] is
+/// `>= 0`, through the key table at `0x015f6438`.
+pub const PAD_DEVICE_THIRD_BACKEND_BUTTONS_OFFSET: usize = 0x2f8;
+
 /// Base of the six normalised axis floats. `PadDevice+0x1a4`.
 ///
 /// XInput writes four of them (`movss [rdi+0x1a4]`, `[rdi+0x1a8]`, `[rdi+0x1b0]`, `[rdi+0x1b4]`
