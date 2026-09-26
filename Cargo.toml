@@ -86,6 +86,8 @@ ds2-save-file-core = { path = "crates/ds2-save-file-core" }
 ds2-save-block = { path = "crates/ds2-save-block" }
 # The second mod's configuration, read rather than shipped. See the crate docs.
 ds2-seamless = { path = "crates/ds2-seamless" }
+# Logs, per character load, whether soul memory could have paid for the soul level.
+ds2-soul-memory-guard = { path = "crates/ds2-soul-memory-guard" }
 
 # Arxan neutering. DS2 SOTFS carries 48 Arxan stubs; every MinHook detour patches a prologue
 # in `.text`, which is what their integrity checks look for. Path dep on the local checkout

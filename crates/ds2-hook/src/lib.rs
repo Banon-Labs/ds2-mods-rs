@@ -30,7 +30,7 @@
 use std::ffi::{CStr, c_void};
 use std::ptr::null_mut;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 // ============================================================================
 // LOGGING SEAM. The union and the collision registry both have things worth saying, but a log
@@ -521,11 +521,58 @@ unsafe extern "system" {
         pDetour: *mut c_void,
         ppOriginal: *mut *mut c_void,
     ) -> MH_STATUS;
-    pub fn MH_EnableHook(pTarget: *mut c_void) -> MH_STATUS;
+    /// MinHook's own enable, which [`MH_EnableHook`] calls outside a boot batch.
+    #[link_name = "MH_EnableHook"]
+    fn mh_enable_hook_now(pTarget: *mut c_void) -> MH_STATUS;
     pub fn MH_QueueEnableHook(pTarget: *mut c_void) -> MH_STATUS;
     pub fn MH_DisableHook(pTarget: *mut c_void) -> MH_STATUS;
     pub fn MH_QueueDisableHook(pTarget: *mut c_void) -> MH_STATUS;
     pub fn MH_ApplyQueued() -> MH_STATUS;
+}
+
+/// Set while the loader installs every crate at the entry point; see [`begin_boot_batch`].
+static BOOT_BATCH: AtomicBool = AtomicBool::new(false);
+
+/// Queue enables from here on instead of applying each one.
+///
+/// Every `MH_EnableHook` suspends every other thread in the process and fixes up their contexts,
+/// and under Proton that costs about 6.8 ms per call, measured per hook by `ds2-boot-timeline`.
+/// The loader's Arxan callback enables dozens of hooks one after another at the entry point,
+/// before any game code runs, so none of them has to be live before the last one is. Between
+/// this and [`apply_boot_batch`], [`MH_EnableHook`] queues, and the apply patches them all under
+/// one suspension.
+pub fn begin_boot_batch() {
+    BOOT_BATCH.store(true, Ordering::Release);
+}
+
+/// Patch every enable queued since [`begin_boot_batch`] at once, and stop queueing.
+///
+/// # Safety
+///
+/// Patches every queued target. Each was accepted by `MH_CreateHook` before it was queued.
+pub unsafe fn apply_boot_batch() -> MH_STATUS {
+    BOOT_BATCH.store(false, Ordering::Release);
+    // SAFETY: MinHook applies only records it already holds.
+    unsafe { MH_ApplyQueued() }
+}
+
+/// Enable a created hook: at once, or queued while the loader's boot batch is open.
+///
+/// Same signature and status as MinHook's own, so every crate's install path calls this unchanged.
+/// A queued enable reports `MH_OK` for the queueing; whether the patch landed is the status
+/// [`apply_boot_batch`] returns.
+///
+/// # Safety
+///
+/// `pTarget` must be a target `MH_CreateHook` accepted.
+pub unsafe fn MH_EnableHook(pTarget: *mut c_void) -> MH_STATUS {
+    if BOOT_BATCH.load(Ordering::Acquire) {
+        // SAFETY: the caller's contract.
+        unsafe { MH_QueueEnableHook(pTarget) }
+    } else {
+        // SAFETY: the caller's contract.
+        unsafe { mh_enable_hook_now(pTarget) }
+    }
 }
 
 impl MH_STATUS {
