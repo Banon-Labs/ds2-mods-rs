@@ -293,7 +293,7 @@ unsafe extern "system" fn detour_sleep(milliseconds: u32, caller: u64) {
         let original: SleepFn = unsafe { std::mem::transmute::<usize, SleepFn>(original) };
         // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
         // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
-        unsafe { original(milliseconds) };
+        timed(BLOCKED_SLEEP, || unsafe { original(milliseconds) });
     }
 }
 
@@ -370,6 +370,204 @@ unsafe fn hook_sleep_import(base: usize) -> bool {
         ORIGINAL_SLEEP.load(Ordering::Acquire)
     ));
     true
+}
+
+// ============================================================================================
+// BOOT-THREAD BLOCKING. The boot thread requests only about a third of a second of `Sleep` in the
+// three seconds between `DirectInput8Create` returning and the first substate, so the rest of
+// that gap is either work or a wait on something else. These front the three wait imports the
+// image has, plus `Sleep` itself, and add up how long the boot thread actually spent inside each:
+// wall time, not requested time, and only on the boot thread, because a worker waiting costs the
+// boot nothing.
+// ============================================================================================
+
+type WaitSingleFn = unsafe extern "system" fn(*mut c_void, u32) -> u32;
+type WaitMultipleFn = unsafe extern "system" fn(u32, *const *mut c_void, i32, u32) -> u32;
+type MsgWaitFn = unsafe extern "system" fn(u32, *const *mut c_void, i32, u32, u32) -> u32;
+
+static ORIGINAL_WAIT_SINGLE: AtomicUsize = AtomicUsize::new(0);
+static ORIGINAL_WAIT_MULTIPLE: AtomicUsize = AtomicUsize::new(0);
+static ORIGINAL_MSG_WAIT: AtomicUsize = AtomicUsize::new(0);
+
+/// What a wait returns when it could not wait at all. Returned only if a detour runs before its
+/// original was published, which the publish-before-write order below rules out.
+const WAIT_FAILED: u32 = 0xffff_ffff;
+
+/// Which call the boot thread was blocked in, as an index into [`BOOT_BLOCKED`].
+const BLOCKED_SLEEP: usize = 0;
+const BLOCKED_WAIT_SINGLE: usize = 1;
+const BLOCKED_WAIT_MULTIPLE: usize = 2;
+const BLOCKED_MSG_WAIT: usize = 3;
+const BLOCKED_NAMES: [&str; 4] = ["sleep", "wait-single", "wait-multiple", "msg-wait"];
+
+/// Per call kind: calls on the boot thread, and microseconds spent inside them.
+static BOOT_BLOCKED: [(AtomicU64, AtomicU64); 4] =
+    [const { (AtomicU64::new(0), AtomicU64::new(0)) }; 4];
+
+/// Run `call`, and if this is the boot thread, charge its wall time to `kind`.
+fn timed<T>(kind: usize, call: impl FnOnce() -> T) -> T {
+    if !on_boot_thread() {
+        return call();
+    }
+    let start = now_us();
+    let result = call();
+    let spent = now_us().saturating_sub(start);
+    BOOT_BLOCKED[kind].0.fetch_add(1, Ordering::Relaxed);
+    BOOT_BLOCKED[kind].1.fetch_add(spent, Ordering::Relaxed);
+    result
+}
+
+unsafe extern "system" fn detour_wait_single(handle: *mut c_void, milliseconds: u32) -> u32 {
+    let original = ORIGINAL_WAIT_SINGLE.load(Ordering::Acquire);
+    if original == 0 {
+        return WAIT_FAILED;
+    }
+    // SAFETY: read out of the import slot before it was overwritten, so it is whatever the Windows
+    // loader resolved `KERNEL32!WaitForSingleObject` to; the arguments are passed through as given.
+    let original: WaitSingleFn = unsafe { std::mem::transmute::<usize, WaitSingleFn>(original) };
+    timed(BLOCKED_WAIT_SINGLE, || {
+        // SAFETY: the original import, called with exactly the arguments the game passed.
+        unsafe { original(handle, milliseconds) }
+    })
+}
+
+unsafe extern "system" fn detour_wait_multiple(
+    count: u32,
+    handles: *const *mut c_void,
+    wait_all: i32,
+    milliseconds: u32,
+) -> u32 {
+    let original = ORIGINAL_WAIT_MULTIPLE.load(Ordering::Acquire);
+    if original == 0 {
+        return WAIT_FAILED;
+    }
+    // SAFETY: as in `detour_wait_single`, for `KERNEL32!WaitForMultipleObjects`.
+    let original: WaitMultipleFn =
+        unsafe { std::mem::transmute::<usize, WaitMultipleFn>(original) };
+    timed(BLOCKED_WAIT_MULTIPLE, || {
+        // SAFETY: the original import, called with exactly the arguments the game passed.
+        unsafe { original(count, handles, wait_all, milliseconds) }
+    })
+}
+
+unsafe extern "system" fn detour_msg_wait(
+    count: u32,
+    handles: *const *mut c_void,
+    wait_all: i32,
+    milliseconds: u32,
+    wake_mask: u32,
+) -> u32 {
+    let original = ORIGINAL_MSG_WAIT.load(Ordering::Acquire);
+    if original == 0 {
+        return WAIT_FAILED;
+    }
+    // SAFETY: as in `detour_wait_single`, for `USER32!MsgWaitForMultipleObjects`.
+    let original: MsgWaitFn = unsafe { std::mem::transmute::<usize, MsgWaitFn>(original) };
+    timed(BLOCKED_MSG_WAIT, || {
+        // SAFETY: the original import, called with exactly the arguments the game passed.
+        unsafe { original(count, handles, wait_all, milliseconds, wake_mask) }
+    })
+}
+
+/// Point one import slot at `replacement`, publishing the original first. False, logged, on
+/// failure.
+///
+/// # Safety
+///
+/// `base` must be the live game module base and `rva` a pointer-sized import slot in its `.idata`.
+unsafe fn patch_import(
+    base: usize,
+    rva: u32,
+    replacement: usize,
+    original: &AtomicUsize,
+    name: &str,
+) -> bool {
+    let slot = (base + rva as usize) as *mut usize;
+    let mut old_protect = 0u32;
+    // SAFETY: one pointer-sized slot inside the image's own `.idata`.
+    let ok = unsafe {
+        VirtualProtect(
+            slot.cast::<c_void>(),
+            std::mem::size_of::<usize>(),
+            PAGE_READWRITE,
+            &raw mut old_protect,
+        )
+    };
+    if ok == 0 {
+        log(format_args!(
+            "{LOG_PREFIX} import-hook-failed import={name} stage=VirtualProtect slot=0x{:016x}",
+            slot as usize
+        ));
+        return false;
+    }
+    // SAFETY: the slot is now writable and holds the resolved import. The original is published
+    // before the slot changes, so a thread that reaches the detour at once finds it.
+    unsafe {
+        original.store(slot.read(), Ordering::Release);
+        slot.write(replacement);
+        let mut restored = 0u32;
+        VirtualProtect(
+            slot.cast::<c_void>(),
+            std::mem::size_of::<usize>(),
+            old_protect,
+            &raw mut restored,
+        );
+    }
+    log(format_args!(
+        "{LOG_PREFIX} hooked import={name} slot=0x{:016x} original=0x{:016x}",
+        slot as usize,
+        original.load(Ordering::Acquire)
+    ));
+    true
+}
+
+/// Front the three wait imports.
+///
+/// # Safety
+///
+/// `base` must be the live game module base.
+unsafe fn hook_wait_imports(base: usize) {
+    let single: WaitSingleFn = detour_wait_single;
+    let multiple: WaitMultipleFn = detour_wait_multiple;
+    let msg: MsgWaitFn = detour_msg_wait;
+    // SAFETY: each RVA is the named import slot, read by name from the image and checked live.
+    unsafe {
+        patch_import(
+            base,
+            ds2_rva::WAIT_FOR_SINGLE_OBJECT_IAT_THUNK,
+            single as usize,
+            &ORIGINAL_WAIT_SINGLE,
+            "KERNEL32!WaitForSingleObject",
+        );
+        patch_import(
+            base,
+            ds2_rva::WAIT_FOR_MULTIPLE_OBJECTS_IAT_THUNK,
+            multiple as usize,
+            &ORIGINAL_WAIT_MULTIPLE,
+            "KERNEL32!WaitForMultipleObjects",
+        );
+        patch_import(
+            base,
+            ds2_rva::MSG_WAIT_FOR_MULTIPLE_OBJECTS_IAT_THUNK,
+            msg as usize,
+            &ORIGINAL_MSG_WAIT,
+            "USER32!MsgWaitForMultipleObjects",
+        );
+    }
+}
+
+/// One line with what the boot thread has spent blocked so far, per call kind.
+fn log_boot_blocked(at: &str) {
+    let mut fields = String::new();
+    for (index, name) in BLOCKED_NAMES.iter().enumerate() {
+        let calls = BOOT_BLOCKED[index].0.load(Ordering::Relaxed);
+        let us = BOOT_BLOCKED[index].1.load(Ordering::Relaxed);
+        fields.push_str(&format!(" {name}={calls}/{:.1}ms", us as f64 / 1000.0));
+    }
+    log(format_args!(
+        "{LOG_PREFIX} boot-thread-blocked at={at} t={:.3}ms{fields}",
+        now_us() as f64 / 1000.0
+    ));
 }
 
 // ============================================================================================
@@ -503,6 +701,10 @@ unsafe fn describe_once(flow: *const u8) {
     ));
 }
 
+/// Whether the first substate's entry has reported what the boot thread spent blocked before it.
+static FIRST_ENTER_REPORTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// A substate became resident.
 fn on_enter(id: u32, pending: i32) {
     let at_us = now_us();
@@ -519,7 +721,11 @@ fn on_enter(id: u32, pending: i32) {
         at_us as f64 / 1000.0,
         FRAMES.load(Ordering::Relaxed)
     ));
+    if !FIRST_ENTER_REPORTED.swap(true, Ordering::Relaxed) {
+        log_boot_blocked("first-substate");
+    }
     if id == ds2_rva::FE_SUBSTATE_ID_TITLE_TOP_MENU {
+        log_boot_blocked("top-menu");
         let (calls, ms) = sleep_totals();
         let h = sleep_histogram();
         log(format_args!(
@@ -917,6 +1123,9 @@ pub unsafe fn install() -> Outcome {
 
     // SAFETY: `base` is the live module base; the RVA names this image's own `Sleep` import slot.
     unsafe { hook_sleep_import(base) };
+    // SAFETY: the same position and the same kind of write -- a pointer in this image's `.idata`
+    // -- for the three wait imports, each read by name from the image and checked live.
+    unsafe { hook_wait_imports(base) };
 
     let mut installed = 0;
     for site in &sites {

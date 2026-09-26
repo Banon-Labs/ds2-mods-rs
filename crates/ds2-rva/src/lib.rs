@@ -1579,6 +1579,24 @@ pub const FE_SUBSTATE_FLOOR_ELAPSED: f32 = 2.0;
 /// two of them are `Sleep(0)` yield loops and one is the `Sleep(1)` pump above.
 pub const SLEEP_IAT_THUNK: u32 = 0x01aa_e314;
 
+/// The import slot `DarkSoulsII.exe` calls `KERNEL32!WaitForSingleObject` through. RVA `0x01aae264`.
+///
+/// Read out of the image on disk (the slot's hint/name entry at `0x1aab8ac` names it) and read live
+/// on 2026-09-26 with `scripts/frida/wait-imports.js`, which found it pointing into
+/// `kernel32.dll`. `ds2-boot-timeline` fronts it to time how long the boot thread spends blocked.
+pub const WAIT_FOR_SINGLE_OBJECT_IAT_THUNK: u32 = 0x01aa_e264;
+
+/// The import slot for `KERNEL32!WaitForMultipleObjects`. RVA `0x01aae05c`.
+///
+/// Same two reads as [`WAIT_FOR_SINGLE_OBJECT_IAT_THUNK`]: hint/name entry `0x1aab3f0`, live target
+/// in `kernel32.dll`.
+pub const WAIT_FOR_MULTIPLE_OBJECTS_IAT_THUNK: u32 = 0x01aa_e05c;
+
+/// The import slot for `USER32!MsgWaitForMultipleObjects`. RVA `0x01aae554`.
+///
+/// Same two reads: hint/name entry `0x1aabf0c`, live target `user32!MsgWaitForMultipleObjects`.
+pub const MSG_WAIT_FOR_MULTIPLE_OBJECTS_IAT_THUNK: u32 = 0x01aa_e554;
+
 /// The frame limiter: "sleep the rest of this frame, or yield if we are already late".
 /// RVA `0x00feb910`.
 ///
