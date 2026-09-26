@@ -232,6 +232,41 @@ pub const FE_SUBSTATE_WARNING_NO_COPY_ENTER: u32 = 0x000f_ded0;
 /// minimum, met with nothing to spare.
 pub const FE_SUBSTATE_TITLE_USER_POLICY_ENTER: u32 = 0x000f_9040;
 
+/// `FeOperatorTitle::v4`, the title operator's per-frame update. RVA `0x000ef390`.
+///
+/// A switch on the state at [`FE_OPERATOR_TITLE_STATE_OFFSET`] (`dec ecx; je` chain at
+/// `0x1400ef39c`). State 2 starts a 2.0 s fade from black through `0x14039a4d0` and moves to
+/// state 3; state 3 returns every frame while `0x14039ab20` reports the fade still running, then
+/// starts `FeStateFlow` at substate `0x00` and moves to state 4. So the title flow cannot begin
+/// until a fade over a screen with nothing on it has finished.
+///
+/// Not an Arxan redirect; its prologue is `40 57 48 83 ec 40`, six bytes.
+pub const FE_OPERATOR_TITLE_UPDATE: u32 = 0x000e_f390;
+
+/// Offset of the title operator's state in `FeOperatorTitle`. `+0x30`, `mov ecx,[rcx+0x30]`.
+pub const FE_OPERATOR_TITLE_STATE_OFFSET: usize = 0x30;
+
+/// The title operator's state that waits for the boot fade to finish. `3`.
+pub const FE_OPERATOR_TITLE_STATE_FADE_WAIT: u32 = 3;
+
+/// Offset of the screen-fade object's pointer in `GameManagerImp`. `+0x1160`.
+///
+/// Read by both `0x14039a4d0` (start a fade) and `0x14039ab20` (is a fade running).
+pub const GAME_MANAGER_SCREEN_FADE_OFFSET: usize = 0x1160;
+
+/// The screen fade's current opacity, target opacity and remaining seconds: `+0x00`, `+0x04`,
+/// `+0x08`, all `f32`.
+///
+/// `0x140b23fe0` starts a fade to clear by writing the duration to `+0x08` and `0.0` to `+0x04`,
+/// and when the duration is not positive it also writes `0.0` to `+0x00` at once.
+/// `0x14039ab20` answers "running" while `+0x08 > 0`. Read live on 2026-09-26 in the world with
+/// `scripts/frida/title-fade.js`: `current=0 target=0 remaining=0`, a finished fade.
+pub const SCREEN_FADE_CURRENT_OFFSET: usize = 0x00;
+/// See [`SCREEN_FADE_CURRENT_OFFSET`].
+pub const SCREEN_FADE_TARGET_OFFSET: usize = 0x04;
+/// See [`SCREEN_FADE_CURRENT_OFFSET`].
+pub const SCREEN_FADE_REMAINING_OFFSET: usize = 0x08;
+
 /// Phase-counter offset within `FeSubStateWarningNoCopy` and `FeSubStateTitleUserPolicy`.
 ///
 /// Read from each one's own `v3` (`0x1400ff360` and `0x1400f96f0`), both of which open
