@@ -14,11 +14,12 @@ import rego.v1
 
 import data.cupcake.system.commands
 
-# A push in this repository runs the whole local gate suite and takes ten to fifteen minutes. That
-# is past the harness cap on a backgrounded Bash command, so the obvious move is to detach it --
-# `setsid nohup git push ... &` -- and the obvious move is the one that costs the user half an hour.
+# In er-mods-rs, where this rule comes from, a push runs the whole local gate suite and takes ten
+# to fifteen minutes. That is past the harness cap on a backgrounded Bash command, so the obvious
+# move there was to detach it -- `setsid nohup git push ... &` -- and the obvious move is the one
+# that costs the user half an hour.
 #
-# Measured 2026-09-14. A detached push is severed from the harness: nothing remains to report its
+# Measured there 2026-09-14. A detached push is severed from the harness: nothing remains to report its
 # exit, so the only route back to the result is the agent choosing to go and read a log. It did not
 # choose to. The push failed at 09:29:45 and was noticed at 09:59:07, twenty-nine minutes of a user
 # waiting on a run that was already over. Arming a `Monitor` afterwards does not rescue it either:
@@ -26,10 +27,13 @@ import data.cupcake.system.commands
 # dead file for as long as it is allowed to, which on the terminal looks exactly like a run still
 # in progress.
 #
-# So the rule is about the SHAPE of the invocation, not about intent. `scripts/er-push-watched.sh`
-# runs the push in the foreground of whatever process called it; pointed at by a `Monitor`, the
-# monitor process is the push, stage verdicts arrive as they happen, and the monitor ending is the
-# completion notification. Nothing to poll, nothing to tear down separately.
+# So the rule is about the SHAPE of the invocation, not about intent. er-mods-rs's remedy is
+# `scripts/er-push-watched.sh` under a Monitor, and until 2026-09-25 this refusal named it too --
+# a script this repository never had. It does not need one. Measured that day: `core.hooksPath`
+# here is `.beads/hooks`, whose pre-push is the beads sync alone, so a push finishes in seconds and
+# there is no long gate to watch. The remedy here is the undetached push itself: run it in the
+# foreground and read its exit code, or with the Bash tool's `run_in_background`, which still
+# reports the exit when it ends.
 #
 # Why this is a policy and not a note. `AGENTS.md` is explicit that instruction files and `bd`
 # memories are advisory and can be missed; binding behaviour needs executable enforcement. A memory
@@ -46,11 +50,10 @@ deny contains decision if {
 	lowered := lower(text)
 	is_git_push(lowered)
 	detached(lowered)
-	not is_watched_push(lowered)
 
 	decision := {
 		"rule_id": "DS2-MODS-BLOCK-DETACHED-PUSH",
-		"reason": "Do not detach a push. `setsid`/`nohup`/`&` severs it from the harness, so nothing reports its exit and the result is only found by reading a log by hand -- that cost 29 minutes on 2026-09-14. Run it inside a Monitor instead, where the monitor process is the push and its ending is the notification: Monitor(timeout_ms 3600000) over `bash scripts/er-push-watched.sh <local-ref> <remote-branch> | python3 scripts/monitor-throttle.py 15`.",
+		"reason": "Do not detach a push. `setsid`/`nohup`/`&` severs it from the harness, so nothing reports its exit and the result is only found by reading a log by hand -- that cost 29 minutes in er-mods-rs on 2026-09-14. A push here runs only the beads pre-push hook and finishes in seconds: run `git push ...` in the foreground and read its exit code, or use the Bash tool's run_in_background, which still reports the exit when it ends.",
 		"severity": "HIGH",
 	}
 }
@@ -80,10 +83,4 @@ detached(cmd) if {
 
 detached(cmd) if {
 	regex.match(`(^|[;&|(\s])disown([ \t;&|)\n]|$)`, cmd)
-}
-
-# The sanctioned wrapper is exempt even though a caller may background it: it prints a terminal
-# `push: ok` / `push: failed` line, so a reader of its output always learns the outcome.
-is_watched_push(cmd) if {
-	contains(cmd, "er-push-watched.sh")
 }
