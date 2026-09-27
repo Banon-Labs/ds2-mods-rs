@@ -8,16 +8,9 @@ use super::*;
 const DIR: &str = r"Z:\home\banon\saves";
 
 /// A model over a listing a test chose, with no filesystem underneath it.
-fn files_model(dir: &str, entries: Vec<PickerEntry>) -> SavePickerModel {
-    let mut model = SavePickerModel {
-        current_dir: PathBuf::from(dir),
-        entries,
-        scroll_offset: 0,
-        cursor: 0,
-        row_capacity: DEFAULT_ROW_CAPACITY,
-        status_message: None,
-        stage: Stage::Files,
-    };
+pub(super) fn files_model(dir: &str, entries: Vec<PickerEntry>) -> SavePickerModel {
+    let mut model = SavePickerModel::blank(Path::new(dir), Purpose::Load);
+    model.entries = entries;
     model.cursor = model.first_selectable_row();
     model
 }
@@ -39,7 +32,7 @@ fn dir_entry(dir: &str, name: &str) -> PickerEntry {
 }
 
 /// `count` saves in `dir`, already in the order [`order_entries`] would put them.
-fn listing(dir: &str, count: usize) -> Vec<PickerEntry> {
+pub(super) fn listing(dir: &str, count: usize) -> Vec<PickerEntry> {
     order_entries(Vec::new(), (0..count).map(|i| save_entry(dir, i)).collect())
 }
 

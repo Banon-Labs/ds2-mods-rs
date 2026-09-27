@@ -9,19 +9,23 @@
 //! one they want.
 //!
 //! This crate is the model behind the picker that can. Browse a folder, choose a container,
-//! choose one of its ten slots. It is a port of `../er-mods-rs`'s `er-save-picker-core` ROW MODEL
-//! -- and only that. The overlay it draws itself, its CPU compositor, its comdlg32 surface, its
-//! no-save boot flow and its path autocomplete all stay there, because those are Elden Ring's
-//! menus and Elden Ring's boot. The surfaces here will be different; the rows are the same
-//! problem.
+//! choose one of its ten slots -- or, for Save Game to File, choose where the live container is
+//! copied to. It ports `../er-mods-rs`'s `er-save-picker-core` row model, drive strip, path
+//! completion and destination browser. The overlay it draws itself, its CPU compositor, its
+//! comdlg32 surface and its no-save boot flow stay there, because those are Elden Ring's menus and
+//! Elden Ring's boot. The surface here is an imgui panel in `ds2-save-file` that draws
+//! [`SavePickerModel::view`] and routes every press through [`SavePickerModel::apply`], so every
+//! decision the player can reach is made in this crate and tested on the host.
 //!
 //! # What it is made of
 //!
 //! | module | what it decides |
 //! |---|---|
-//! | [`model`] | what each row means, where the cursor is, what pressing a row does |
+//! | [`model`] | what each row means, where the cursor is, what every press does |
 //! | [`reason`] | why a pick was refused, in words a player can act on |
 //! | [`text`] | what a row says, kept apart from what it means |
+//! | [`summary`] | who lives in a save file, and when it was written |
+//! | [`autocomplete`] | what the path field offers, and what a typed path resolves to |
 //! | [`path`] | the leaf and the parent, found by hand rather than through `Path` |
 //!
 //! # It borrows the two gates instead of rebuilding them
@@ -47,17 +51,24 @@
 
 #![forbid(unsafe_code)]
 
+pub mod autocomplete;
 pub mod model;
 pub mod path;
 pub mod reason;
+pub mod summary;
 pub mod text;
 
 pub use model::{
-    CHARACTER_BACK_ROW, DEFAULT_ROW_CAPACITY, PickerActivation, PickerEntry, PickerRow,
-    SavePickerModel,
+    CHARACTER_BACK_ROW, CONFIRM_KEEP_ROW, CONFIRM_OVERWRITE_ROW, DEFAULT_POSIX_DRIVE,
+    DEFAULT_ROW_CAPACITY, DRIVE_STRIP_MAX_CELLS, DriveCellKind, DriveCellView, EditTarget,
+    FieldView, PickerActivation, PickerEntry, PickerInput, PickerRow, PickerStage, PickerView,
+    RowKind, RowView, SavePickerModel,
 };
-pub use reason::{PickRejection, PickedSource, PickerStatusMessage, accepts_pick};
-pub use text::{character_text, row_text};
+pub use reason::{
+    PickRejection, PickedSource, PickerOpenReason, PickerStatusMessage, accepts_pick,
+};
+pub use summary::FileSummary;
+pub use text::{character_text, drive_strip_text, row_text};
 
 /// A scratch directory this test process owns alone.
 ///

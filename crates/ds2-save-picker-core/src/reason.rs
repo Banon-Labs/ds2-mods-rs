@@ -52,6 +52,23 @@ pub enum PickRejection {
     NoLoadableCharacter = 5,
     /// The path did not round-trip through UTF-8, so nothing downstream can name it.
     PathNotUtf8 = 6,
+    /// The path field was committed with nothing in it.
+    PathEmpty = 7,
+    /// The path field holds something that is not an absolute path, and there is no current
+    /// folder a relative one could honestly be resolved against -- the field shows one path, and
+    /// the player cannot see which folder `saves\x` would have meant.
+    PathNotAbsolute = 8,
+    /// The path field names nothing, or names something that is not a folder.
+    FolderNotFound = 9,
+    /// Save to File was pointed at the container the game is playing from. See
+    /// `ds2_save_file_core::dest::is_live_container` for why that is never a destination.
+    DestinationIsLive = 10,
+    /// A new file name was committed with nothing in it.
+    NameEmpty = 11,
+    /// A new file name carries a separator or a character Windows refuses in a name.
+    NameNotAllowed = 12,
+    /// A new file name is the name of a folder already in this folder.
+    NameIsFolder = 13,
 }
 
 /// User-facing picker text: a headline a surface can put in front of the reason, and one line
@@ -63,6 +80,7 @@ pub enum PickRejection {
 pub struct PickerStatusMessage {
     headline: String,
     detail: String,
+    second_detail: Option<String>,
 }
 
 impl PickerStatusMessage {
@@ -71,7 +89,28 @@ impl PickerStatusMessage {
         Self {
             headline: headline.into(),
             detail: detail.into(),
+            second_detail: None,
         }
+    }
+
+    /// The same message with a third line under the detail -- the path it was about, say. Two
+    /// detail lines is the most a banner carries; a second call replaces the first.
+    #[must_use]
+    pub fn with_second_detail(mut self, line: impl Into<String>) -> Self {
+        self.second_detail = Some(line.into());
+        self
+    }
+
+    /// The optional third line.
+    pub fn second_detail(&self) -> Option<&str> {
+        self.second_detail.as_deref()
+    }
+
+    /// Every line after the headline, in order: one or two.
+    pub fn detail_lines(&self) -> Vec<&str> {
+        std::iter::once(self.detail.as_str())
+            .chain(self.second_detail.as_deref())
+            .collect()
     }
 
     /// The first line: what happened, in the player's terms.
@@ -86,6 +125,24 @@ impl PickerStatusMessage {
 }
 
 impl PickRejection {
+    /// Every refusal, so a test can hold each one to the same rules and a new variant cannot
+    /// slip past them unnoticed.
+    pub const ALL: [PickRejection; 13] = [
+        Self::NotAFile,
+        Self::WrongExtension,
+        Self::Unreadable,
+        Self::NotBnd4,
+        Self::NoLoadableCharacter,
+        Self::PathNotUtf8,
+        Self::PathEmpty,
+        Self::PathNotAbsolute,
+        Self::FolderNotFound,
+        Self::DestinationIsLive,
+        Self::NameEmpty,
+        Self::NameNotAllowed,
+        Self::NameIsFolder,
+    ];
+
     /// The reporting code. 0 is reserved for "nothing was rejected".
     pub const fn as_code(self) -> usize {
         self as usize
@@ -118,6 +175,51 @@ impl PickRejection {
                 "PATH NOT SUPPORTED",
                 "That path cannot be named safely by the save picker. Choose another.",
             ),
+            Self::PathEmpty => {
+                PickerStatusMessage::new("PATH IS EMPTY", "Type a folder, like Z:\\home\\saves.")
+            }
+            Self::PathNotAbsolute => PickerStatusMessage::new(
+                "ABSOLUTE PATH REQUIRED",
+                "Start with a drive, like C:\\ or Z:\\, or with / for a Linux path.",
+            ),
+            Self::FolderNotFound => PickerStatusMessage::new(
+                "FOLDER NOT FOUND",
+                "Nothing is there, or it is a file. Check the path and try again.",
+            ),
+            Self::DestinationIsLive => PickerStatusMessage::new(
+                "THAT IS THE SAVE IN USE",
+                "The game is playing from that file. Choose another name or folder.",
+            ),
+            Self::NameEmpty => {
+                PickerStatusMessage::new("NAME IS EMPTY", "Type a name for the new save.")
+            }
+            Self::NameNotAllowed => PickerStatusMessage::new(
+                "NAME NOT ALLOWED",
+                "A name cannot hold \\ / : * ? \" < > | or end in a dot or a space.",
+            ),
+            Self::NameIsFolder => PickerStatusMessage::new(
+                "A FOLDER HAS THAT NAME",
+                "Choose a name no folder here is using.",
+            ),
+        }
+    }
+}
+
+/// Why the picker is on screen, so the panel can title it without keeping its own flag.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PickerOpenReason {
+    /// Load Character from File: choose a container, then one of its characters.
+    LoadCharacter,
+    /// Save Game to File: choose where the live container is copied to.
+    SaveToFile,
+}
+
+impl PickerOpenReason {
+    /// The panel's title line.
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::LoadCharacter => "LOAD CHARACTER FROM FILE",
+            Self::SaveToFile => "SAVE GAME TO FILE",
         }
     }
 }
@@ -307,16 +409,8 @@ mod tests {
     /// headline is two refusals the player cannot tell apart.
     #[test]
     fn every_refusal_has_its_own_words() {
-        let every = [
-            PickRejection::NotAFile,
-            PickRejection::WrongExtension,
-            PickRejection::Unreadable,
-            PickRejection::NotBnd4,
-            PickRejection::NoLoadableCharacter,
-            PickRejection::PathNotUtf8,
-        ];
         let mut headlines: Vec<String> = Vec::new();
-        for rejection in every {
+        for rejection in PickRejection::ALL {
             let message = rejection.status_message();
             assert!(
                 !message.headline().is_empty(),
@@ -351,17 +445,37 @@ mod tests {
     /// Codes are stable and none of them is 0, which is reserved for "nothing was rejected".
     #[test]
     fn no_refusal_takes_the_code_that_means_no_refusal() {
-        for rejection in [
-            PickRejection::NotAFile,
-            PickRejection::WrongExtension,
-            PickRejection::Unreadable,
-            PickRejection::NotBnd4,
-            PickRejection::NoLoadableCharacter,
-            PickRejection::PathNotUtf8,
-        ] {
-            assert_ne!(rejection.as_code(), 0);
-        }
-        assert_eq!(PickRejection::NotAFile.as_code(), 1);
+        let mut codes: Vec<usize> = PickRejection::ALL
+            .iter()
+            .map(|rejection| rejection.as_code())
+            .collect();
+        assert!(!codes.contains(&0));
+        codes.dedup();
+        assert_eq!(
+            codes,
+            (1..=PickRejection::ALL.len()).collect::<Vec<_>>(),
+            "codes are dense, in order, and listed once each in ALL"
+        );
+    }
+
+    /// A banner has a headline and one or two detail lines, never more.
+    #[test]
+    fn a_banner_carries_at_most_two_detail_lines() {
+        let one = PickRejection::FolderNotFound.status_message();
+        assert_eq!(one.detail_lines().len(), 1);
+        let two = one
+            .with_second_detail("first")
+            .with_second_detail(r"Z:\nowhere");
+        assert_eq!(two.second_detail(), Some(r"Z:\nowhere"));
+        assert_eq!(two.detail_lines().len(), 2);
+    }
+
+    #[test]
+    fn each_reason_to_open_has_its_own_title() {
+        assert_ne!(
+            PickerOpenReason::LoadCharacter.title(),
+            PickerOpenReason::SaveToFile.title()
+        );
     }
 
     /// A path with no name at all is refused by the cheap gate rather than by a `read_dir`.
