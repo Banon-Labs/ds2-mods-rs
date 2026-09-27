@@ -521,63 +521,45 @@ LIGHTING_ENGINE_LOG = "DS2LE.log"
 #: game directory by name, so a rename is the whole switch, and the next launch with path tracing
 #: on renames it back.
 PARKED_DXGI_NAMES: tuple[str, ...] = ("dxgi.dll.ds2-run-off", "dxgi.dll.selector-off")
-#: The texture packs the owner chose on 2026-09-27, unpacked over Second Sin in this order. All
-#: three write `.dds` files into `tex_override/`, the folder the engine's dxgi.dll loads
-#: replacement textures from. Second Sin ships a `tex_override/` of its own, so a Second Sin
-#: reinstall puts its copies back and the packs go on again after it. A pack unpacked again puts
-#: back files a later pack had won, so re-applying one re-applies every pack after it.
+#: The texture packs the owner chose on 2026-09-27, unpacked over Second Sin in this order. Both
+#: write `.dds` files into `tex_override/`, the folder the engine's dxgi.dll loads replacement
+#: textures from. Second Sin ships a `tex_override/` of its own, so a Second Sin reinstall puts its
+#: copies back and the packs go on again after it. A pack unpacked again puts back files a later
+#: pack had won, so re-applying one re-applies every pack after it.
 #:
 #: Where two ship the same file the later one wins. Counted from the archives' own listings:
-#:   Renewal UI (4k UI + 1024px icons, 993 files) over Second Sin (4896): 2, both also in Smooth UI.
-#:   Smooth UI (177) over Renewal: 70 -- 69 of Renewal's 73 4k UI textures and `ico_attributes.dds`.
-#:   DS3 HD Icons Expanded (430) over Renewal: 293 of Renewal's 920 icons.
-#:   Smooth UI and DS3 HD Icons share none; no pack shares a file with the engine archive.
-#: No colliding pair is byte-identical. Renewal is an upscale of the game's own art and covers the
-#: most, so it is the base; the two restyles go over it. Each pin is a file its own pack wins, so
-#: the pins never undo each other, and none is in Second Sin's `SECOND_SIN_PINS`.
+#:   Renewal UI's 1024px icons (920 files) over Second Sin (4896): none.
+#:   Smooth UI (177) over Renewal's icons: 1 (`h_9665382544755262815h_70639759923334822.dds`).
+#: Renewal's 4k UI half is left out: Smooth UI replaces 69 of its 73 textures, so the two are
+#: alternatives, and the owner picked Smooth UI. DS3 HD Icons Expanded is left out too: it redrew
+#: 293 of Renewal's 920 icons in DS3's style and left the other 627 in Renewal's upscale of the
+#: game's own art, so the inventory mixed two styles. Each pin is a file its own pack wins.
 #:
 #: Each entry is `(archive, ((folder in the archive, folder in the game dir), ...), pins)`.
 #: Renewal is a FOMOD: its `ModuleConfig.xml` installs one folder per group into `tex_override`,
-#: and the choices here are "4k Version" for the UI and "1024x1024 Version" for the icons. DS3 HD
-#: Icons has no installer or readme; its folder holds the same `h_<hash>h_<hash>.dds` names
-#: Renewal's installer puts in `tex_override` (293 of them), so it goes there too.
+#: and the choice here is "1024x1024 Version" for the icons, with no UI group.
 RENEWAL_UI_ARCHIVE = Path.home() / "DS2" / "Renewal UI - All In One v1.0-1264-1-0-1759539209.7z"
 SMOOTH_UI_ARCHIVE = Path.home() / "DS2" / "Smooth UI - All in One 2.5-1293-2-5-1769460477.rar"
-DS3_ICONS_ARCHIVE = Path.home() / "DS2" / "DS3 HD Icons Expanded-1174-2-0-1739491777.zip"
 TEXTURE_PACKS: tuple[tuple[Path, tuple[tuple[str, str], ...], dict[str, str]], ...] = (
     (
         RENEWAL_UI_ARCHIVE,
-        (
-            ("ui_renewal_v1_0/fomod/tex_override_ui_4k/", "tex_override/"),
-            ("ui_renewal_v1_0/fomod/tex_override_icons_1024x1024/", "tex_override/"),
-        ),
+        (("ui_renewal_v1_0/fomod/tex_override_icons_1024x1024/", "tex_override/"),),
         {
-            "tex_override/h_1517467930898632909h_14420162430272941563.dds":
-                "3e852294073f12ba248c5cab827b510fa8c02f1dfa8022eb461f92bfb7372f97",
             "tex_override/h_10017916161241197034h_7639370732724436532.dds":
                 "66946fbc13e8a197e2ad56d7e23910c5e02d1a00e4de167b06448547327d4081",
+            "tex_override/h_10030741577560019899h_4671966305893357552.dds":
+                "ffe5c1bffcc4f90ba2e48a626d71ef968fca7e966f899911aa1c69ace699f6df",
         },
     ),
     (
         SMOOTH_UI_ARCHIVE,
         (("tex_override/", "tex_override/"),),
         {
-            # Shipped by Second Sin and Renewal too; Smooth UI's copy is the one that stays.
+            # Shipped by Second Sin too; Smooth UI's copy is the one that stays.
             "tex_override/h_12468555327461286067h_13103369309438574334.dds":
                 "62875bb2b60dc63b3062725153540b0b9e77c87802048646eb62b25babf2f2ef",
             "tex_override/ui_health_bars.dds":
                 "5a04ed381a4dc29cb06ecec66424b5610396bead899312e814d6be985e879409",
-        },
-    ),
-    (
-        DS3_ICONS_ARCHIVE,
-        (("DS3 HD Icons Expanded 2.0/", "tex_override/"),),
-        {
-            # Shipped by Renewal too.
-            "tex_override/h_10009418602651167090h_17673765541661531086.dds":
-                "3c4bbd5c8cfd23015e80f3b992771e18be0b924add690129f4061ba820e2e09b",
-            "tex_override/h_10150967617685352205h_3435705846522460100.dds":
-                "5fee0276dcaf10585dbe48ab42fac8c3a702da9bbf1738c1aa614c8bf891b920",
         },
     ),
 )
