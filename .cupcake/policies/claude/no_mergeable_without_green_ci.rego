@@ -34,7 +34,8 @@
 #     facts, and the exemption is the honest one -- CI passing.
 #       claimed -- the closing prose calls the pull request mergeable / merge-able / MERGEABLE, or
 #                  says the conflicts are gone in a sentence that offers the branch as ready.
-#       green   -- the measured verdict for this branch's PR is PASS.
+#       green   -- the measured verdict is PASS for every PR the claim names (#N, PR N,
+#                  `gh pr ready N`), or for the cwd branch's PR when it names none.
 #     Halts when the word was written and the verdict is anything else: pending, failing, absent, or
 #     unmeasurable. An unmeasured verdict is not a passing one.
 #
@@ -64,7 +65,7 @@ halt contains decision if {
 	}
 }
 
-# Parse MERGEABLECLAIM:<claimed>:<verdict>. A short or untagged value yields no `claim`, so the
+# Parse MERGEABLECLAIM:<claimed>:<verdict>[:<targets>]; the targets are diagnostic. A short or untagged value yields no `claim`, so the
 # policy asserts nothing rather than inventing a verdict -- the no-fabrication contract every
 # signal-backed policy in this package keeps.
 claim := c if {

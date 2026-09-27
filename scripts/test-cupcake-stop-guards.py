@@ -471,6 +471,27 @@ CASES = [
         env=(("CUPCAKE_MERGEABLE_CI_VERDICT_OVERRIDE", "PASS"),),
     ),
     Case(
+        "mergeable_claim_named_pr_green.jsonl",
+        None,
+        "the 2026-09-26 false positive, verbatim: 'PR #216 is ready to merge once you run `gh pr "
+        "ready 216`' with #216 passing, said from a worktree whose own PR #217 was pending -- must "
+        "NOT halt. The claim is about the PR it names, not the cwd branch's",
+        env=(("CUPCAKE_MERGEABLE_CI_VERDICTS_OVERRIDE", "216=PASS,217=PENDING,branch=PENDING"),),
+    ),
+    Case(
+        "mergeable_claim_named_pr_pending.jsonl",
+        "You're a fucking moron.",
+        "the inverse: the named PR #217 pending while the cwd branch's PR passes -- must halt",
+        env=(("CUPCAKE_MERGEABLE_CI_VERDICTS_OVERRIDE", "216=PASS,217=PENDING,branch=PASS"),),
+    ),
+    Case(
+        "mergeable_claim_named_prs_one_pending.jsonl",
+        "You're a fucking moron.",
+        "two PRs named in one claim, #216 passing and #217 pending -- must halt: every PR the "
+        "claim names has to pass",
+        env=(("CUPCAKE_MERGEABLE_CI_VERDICTS_OVERRIDE", "216=PASS,217=PENDING,branch=PASS"),),
+    ),
+    Case(
         "user_own_rule.jsonl",
         "handing the user back a rule they wrote",
         "the er-mods-rs 2026-09-23 closer, verbatim: a draft PR link and then 'It stays draft -- "
