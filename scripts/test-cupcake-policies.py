@@ -22,6 +22,7 @@ reads, so a case that models "on main" does not depend on which branch the check
 """
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import shutil
@@ -143,6 +144,26 @@ def make_other_repos() -> None:
     for path, branch in ((OTHER_REPO_FEATURE, "ds2-paramdefs"), (OTHER_REPO_MAIN, "main")):
         if not (path / ".git").exists():
             subprocess.run(["git", "init", "-q", "-b", branch, str(path)], check=True)
+
+
+# bash_no_python_file_write judges the FILE a `.py` path resolves to, symlinks followed, through
+# .cupcake/signals/python_script_realpaths.sh. Two real links, resolved for real: one outside the
+# repo pointing at the committed launcher (the `~/DS2/ds2-run.py` shape that was denied on
+# 2026-09-27), and one INSIDE scripts/ pointing at a scratch file outside the tree, whose spelling
+# alone used to be exempt. The in-tree link is removed at exit so the checkout is left as found.
+_LINKS_DIR = Path(tempfile.mkdtemp(prefix="cupcake-python-links-"))
+LINK_INTO_SCRIPTS = _LINKS_DIR / "ds2-run.py"
+LINK_SCRATCH_TARGET = _LINKS_DIR / "patch.py"
+LINK_OUT_OF_SCRIPTS = REPO_ROOT / "scripts" / f"cupcake-test-link-{os.getpid()}.py"
+
+
+def make_python_links() -> None:
+    LINK_SCRATCH_TARGET.write_text("print(1)\n", encoding="utf-8")
+    if not LINK_INTO_SCRIPTS.is_symlink():
+        LINK_INTO_SCRIPTS.symlink_to(REPO_ROOT / "scripts" / "ds2-run.py")
+    if not LINK_OUT_OF_SCRIPTS.is_symlink():
+        LINK_OUT_OF_SCRIPTS.symlink_to(LINK_SCRATCH_TARGET)
+    atexit.register(lambda: LINK_OUT_OF_SCRIPTS.unlink(missing_ok=True))
 
 
 def pr_view(body_fixture: str, head: str = STAMP_SHA) -> str:
@@ -666,6 +687,24 @@ def cases() -> list[PolicyCase]:
             False,
             f"python3 {REPO_ROOT}/scripts/ds2-run.py --dry-run && python3 /tmp/patch.py",
         ),
+        # A symlink is judged by the file it names (see make_python_links).
+        PolicyCase(
+            "allow-python-symlink-into-scripts",
+            True,
+            f"python3 {LINK_INTO_SCRIPTS} --dry-run",
+        ),
+        PolicyCase(
+            "deny-python-symlink-under-scripts-out-of-tree",
+            False,
+            f"python3 {LINK_OUT_OF_SCRIPTS}",
+            expected_text="blocked a python file write",
+        ),
+        PolicyCase(
+            "deny-python-symlink-under-scripts-out-of-tree-relative",
+            False,
+            f"python3 scripts/{LINK_OUT_OF_SCRIPTS.name}",
+            expected_text="blocked a python file write",
+        ),
         # The shape the whole guard exists to stop, unchanged by the widening.
         PolicyCase(
             "deny-inline-python-file-write",
@@ -894,6 +933,7 @@ def main() -> int:
     frida_evidence_log("proven")  # written once, before the workers race to it
     frida_evidence_log("build")
     make_other_repos()
+    make_python_links()
 
     max_workers = min(8, max(1, len(cases_to_run)))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
