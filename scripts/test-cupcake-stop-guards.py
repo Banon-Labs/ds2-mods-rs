@@ -501,6 +501,28 @@ CASES = [
         env=(("CUPCAKE_MERGEABLE_CI_VERDICTS_OVERRIDE", "216=PASS,217=PENDING,branch=PASS"),),
     ),
     Case(
+        "mergeable_claim_negated.jsonl",
+        None,
+        "the 2026-09-27 false positive, verbatim: 'PR #228 is up as a draft ... and it is not ready "
+        "to merge until the one unproven step happens' with #228's CI unmeasured -- must NOT halt. "
+        "'not ready to merge' says the opposite of the claim",
+        env=(("CUPCAKE_MERGEABLE_CI_VERDICTS_OVERRIDE", "228=UNKNOWN,branch=UNKNOWN"),),
+    ),
+    Case(
+        "mergeable_claim_negated_variants.jsonl",
+        None,
+        "'isn't mergeable', 'not yet safe to merge', 'won't be ready to merge' in one closer with "
+        "CI pending -- must NOT halt: each phrase is negated",
+        env=(("CUPCAKE_MERGEABLE_CI_VERDICT_OVERRIDE", "PENDING"),),
+    ),
+    Case(
+        "mergeable_claim_negated_then_claimed.jsonl",
+        "You're a fucking moron.",
+        "'was not mergeable' and then 'PR #91 is ready to merge' with CI pending -- must halt. A "
+        "negated phrase no longer excuses a real claim in the same closer",
+        env=(("CUPCAKE_MERGEABLE_CI_VERDICT_OVERRIDE", "PENDING"),),
+    ),
+    Case(
         "user_own_rule.jsonl",
         "handing the user back a rule they wrote",
         "the er-mods-rs 2026-09-23 closer, verbatim: a draft PR link and then 'It stays draft -- "
