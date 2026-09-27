@@ -23,7 +23,10 @@
 #     A committed script under the repo's own `scripts/` tree is exempt by ANY
 #     spelling that resolves there -- repo-relative, absolute,
 #     `$CLAUDE_PROJECT_DIR`-prefixed, `~`-prefixed -- which is what the repo_paths
-#     signal is for. An inline program is not exempt in any spelling.
+#     signal is for. An absolute or `~` path that is a symlink into that tree is
+#     exempt too, and a spelling inside the tree whose symlink points out of it is
+#     not -- the python_script_realpaths signal resolves both. An inline program
+#     is not exempt in any spelling.
 #     A program python reads from STDIN is treated as a script-file invocation
 #     with the path hidden (`cat patch.py | python3 -`) UNLESS its text is on the
 #     command line, which `echo ...` and `printf ...` put there and a file does
@@ -31,7 +34,7 @@
 #   routing:
 #     required_events: ["PreToolUse"]
 #     required_tools: ["Bash"]
-#     required_signals: ["repo_paths"]
+#     required_signals: ["repo_paths", "python_script_realpaths"]
 package cupcake.policies.claude.bash_no_python_file_write
 
 import data.cupcake.system.commands
@@ -403,6 +406,17 @@ uncommitted_script_path if {
 	not committed_script_path(path)
 }
 
+# A path whose SPELLING is inside scripts/ but whose file is not: `scripts/evil.py
+# -> /tmp/patch.py`. Python follows the link, so the spelling arms below vouch
+# for a file they never looked at. When the realpath signal can see the real
+# file, the real file is what is judged.
+uncommitted_script_path if {
+	some path in script_paths
+	some pair in script_realpaths
+	pair[0] == path
+	not real_path_is_committed(pair[1])
+}
+
 # The repo-relative tail a committed script must have, anchored end to end
 # because this now matches a single extracted token rather than hunting inside a
 # whole command line: `scripts/<name>.py` or `scripts/<subdir>/<name>.py`.
@@ -459,6 +473,73 @@ committed_script_path(path) if {
 	startswith(expanded, prefix)
 	committed_tail(trim_prefix(expanded, prefix))
 }
+
+# (e) An absolute or `~` path that is a SYMLINK into the tree (2026-09-27).
+# `python3 /home/banon/DS2/ds2-run.py`, a link to this repo's
+# scripts/ds2-run.py, was denied although the block text promised "any spelling
+# that resolves there": Rego cannot follow a link, so nothing ever resolved it.
+# The python_script_realpaths signal does, and this arm trusts the file it
+# names.
+#
+# Relative spellings do not get this arm: they resolve against whatever
+# directory an earlier `cd` in the same command moved to, which the event's cwd
+# does not know. And a command that also runs a link-rewriting verb (`ln`, `mv`,
+# `cp`, `install`, `rsync`) does not get it either, because the signal read the
+# link BEFORE the command runs and the command can repoint it first.
+committed_script_path(path) if {
+	regex.match(`^(/|~/)`, path)
+	not rewrites_files_in_command
+	some pair in script_realpaths
+	pair[0] == path
+	real_path_is_committed(pair[1])
+}
+
+rewrites_files_in_command if {
+	regex.match(`(^|[^[:alnum:]_./-])(ln|mv|cp|install|rsync)([[:space:]]|$)`, command)
+}
+
+# A real (symlink-free) file path under a known root's scripts/ tree. The roots
+# are the spelling roots plus their real locations from the signal's `root`
+# lines, so a checkout behind a symlinked directory still owns its scripts.
+real_path_is_committed(real) if {
+	some root in resolved_roots
+	prefix := concat("", [root, "/"])
+	startswith(real, prefix)
+	committed_tail(trim_prefix(real, prefix))
+}
+
+resolved_roots contains root if {
+	some root in repo_roots
+}
+
+resolved_roots contains root if {
+	some line in realpath_lines
+	parts := split(line, "\t")
+	count(parts) == 2
+	parts[0] == "root"
+	root := absolute_dir(parts[1])
+}
+
+# [key, realpath] pairs from the signal's `path` lines. A set of pairs rather
+# than an object so a malformed duplicate key cannot turn into a conflict error.
+script_realpaths contains [key, real] if {
+	some line in realpath_lines
+	parts := split(line, "\t")
+	count(parts) == 3
+	parts[0] == "path"
+	key := parts[1]
+	real := absolute_dir(parts[2])
+}
+
+realpath_text := value if {
+	value := input.signals.python_script_realpaths
+	is_string(value)
+} else := value if {
+	value := input.signals.python_script_realpaths.output
+	is_string(value)
+} else := ""
+
+realpath_lines := split(realpath_text, "\n")
 
 # ---------------------------------------------------------------------------
 # Where the repo root comes from.
@@ -534,7 +615,7 @@ signal_home_dir := absolute_dir(signal_lines[1])
 # than this one and this one may not be widened to match it.
 python_token_pattern_followed_by_stdin := "python[0-9.]*[[:space:]]+-($|[[:space:]])"
 
-block_reason := "🧁 Cupcake blocked a python file write from Bash. Editing a file by running a python program hides the change: it never shows up as a reviewable diff, a mismatched `replace` anchor silently no-ops, and composing the program costs a turn that the edit itself does not. Use the Edit tool to change an existing file (it fails loudly when the anchor does not match) and the Write tool to create one. Reading files in python is untouched, and so is shell redirection -- `cmd > file` and a plain heredoc into a file are visible in the command itself. A committed script under this repo's `scripts/` tree is allowed BY ANY SPELLING THAT RESOLVES THERE -- `scripts/<name>.py`, `./scripts/<name>.py`, `$CLAUDE_PROJECT_DIR/scripts/<name>.py`, the absolute path, or `~/<path-to-repo>/scripts/<name>.py` -- so an absolute launch path is not what is being refused here. A script OUTSIDE that tree is not exempt however closely its path resembles one (`/tmp/.../scripts/x.py` included), every `.py` path in the command must be inside it, and an inline program (`-c`, `<<HEREDOC`, `python3 -`) is never exempt. A program python reads from STDIN is refused when its text is not on the command line -- `cat file.py | python3 -` and `python3 - < file.py` are a script-file invocation with the path hidden -- while `echo ... | python3 -` and `printf ... | python3 -` are judged as the inline programs they are, because you can read them here. User directive 2026-09-16: \"We NEED a hook to stop you from using python to write massive files.\""
+block_reason := "🧁 Cupcake blocked a python file write from Bash. Editing a file by running a python program hides the change: it never shows up as a reviewable diff, a mismatched `replace` anchor silently no-ops, and composing the program costs a turn that the edit itself does not. Use the Edit tool to change an existing file (it fails loudly when the anchor does not match) and the Write tool to create one. Reading files in python is untouched, and so is shell redirection -- `cmd > file` and a plain heredoc into a file are visible in the command itself. A committed script under this repo's `scripts/` tree is allowed BY ANY SPELLING THAT RESOLVES THERE -- `scripts/<name>.py`, `./scripts/<name>.py`, `$CLAUDE_PROJECT_DIR/scripts/<name>.py`, the absolute path, or `~/<path-to-repo>/scripts/<name>.py`, or an absolute symlink whose target is in that tree -- so an absolute launch path is not what is being refused here. It is the file that is judged, not the spelling: a link under `scripts/` whose target is outside the tree is refused. A script OUTSIDE that tree is not exempt however closely its path resembles one (`/tmp/.../scripts/x.py` included), every `.py` path in the command must be inside it, and an inline program (`-c`, `<<HEREDOC`, `python3 -`) is never exempt. A program python reads from STDIN is refused when its text is not on the command line -- `cat file.py | python3 -` and `python3 - < file.py` are a script-file invocation with the path hidden -- while `echo ... | python3 -` and `printf ... | python3 -` are judged as the inline programs they are, because you can read them here. User directive 2026-09-16: \"We NEED a hook to stop you from using python to write massive files.\""
 
 deny contains decision if {
 	input.hook_event_name == "PreToolUse"

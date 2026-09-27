@@ -774,3 +774,115 @@ test_var_prefixed_python_dash_c_write_is_denied if {
 		count(bash_no_python_file_write.deny) == 1 with input as bash(cmd)
 	}
 }
+
+# --- symlinks: the FILE is judged, not the spelling (2026-09-27) ----------
+#
+# `python3 /home/banon/DS2/ds2-run.py`, a symlink to scripts/ds2-run.py, was
+# denied; `scripts/evil.py -> /tmp/patch.py` was exempt by spelling alone. The
+# python_script_realpaths signal supplies what Rego cannot stat.
+
+bash_with_realpaths(cmd, realpaths) := {
+	"hook_event_name": "PreToolUse",
+	"tool_name": "Bash",
+	"cwd": repo_root_fixture,
+	"signals": {
+		"repo_paths": concat("\n", [repo_root_fixture, home_fixture]),
+		"python_script_realpaths": realpaths,
+	},
+	"tool_input": {"command": cmd},
+}
+
+link_into_scripts := "path\t/home/banon/DS2/ds2-run.py\t/home/banon/projects/ds2-mods-rs/scripts/ds2-run.py\nroot\t/home/banon/projects/ds2-mods-rs"
+
+test_absolute_symlink_into_scripts_is_allowed if {
+	cmd := "python3 /home/banon/DS2/ds2-run.py"
+	count(bash_no_python_file_write.deny) == 0 with input as bash_with_realpaths(cmd, link_into_scripts)
+}
+
+test_home_relative_symlink_into_scripts_is_allowed if {
+	cmd := "python3 ~/DS2/ds2-run.py --dry-run"
+	text := "path\t~/DS2/ds2-run.py\t/home/banon/projects/ds2-mods-rs/scripts/ds2-run.py"
+	count(bash_no_python_file_write.deny) == 0 with input as bash_with_realpaths(cmd, text)
+}
+
+# The checkout itself behind a symlinked directory: the signal's `root` line is
+# what lets the real path match.
+test_symlink_into_scripts_of_a_symlinked_checkout_is_allowed if {
+	cmd := "python3 /home/banon/DS2/ds2-run.py"
+	text := "path\t/home/banon/DS2/ds2-run.py\t/data/ds2-mods-rs/scripts/ds2-run.py\nroot\t/data/ds2-mods-rs"
+	count(bash_no_python_file_write.deny) == 0 with input as bash_with_realpaths(cmd, text)
+}
+
+# Without the signal the link cannot be resolved and the old deny stands.
+test_absolute_symlink_without_the_signal_is_denied if {
+	cmd := "python3 /home/banon/DS2/ds2-run.py"
+	count(bash_no_python_file_write.deny) == 1 with input as bash_in_repo(cmd)
+}
+
+test_symlink_out_of_scripts_is_denied if {
+	cmd := "python3 /home/banon/DS2/patch.py"
+	text := "path\t/home/banon/DS2/patch.py\t/tmp/patch.py\nroot\t/home/banon/projects/ds2-mods-rs"
+	count(bash_no_python_file_write.deny) == 1 with input as bash_with_realpaths(cmd, text)
+}
+
+# A symlink UNDER scripts/ pointing out of the tree: every spelling of it is
+# refused, although the spelling alone would have been exempt.
+test_symlink_under_scripts_pointing_to_tmp_is_denied if {
+	some cmd in [
+		"python3 scripts/evil.py",
+		"python3 ./scripts/evil.py",
+		"python3 /home/banon/projects/ds2-mods-rs/scripts/evil.py",
+		`python3 "/home/banon/projects/ds2-mods-rs/scripts/evil.py"`,
+		"python3 ~/projects/ds2-mods-rs/scripts/evil.py",
+	]
+	key := trim_left(trim_prefix(cmd, "python3 "), "\"")
+	text := concat("", ["path\t", key, "\t/tmp/patch.py\nroot\t/home/banon/projects/ds2-mods-rs"])
+	count(bash_no_python_file_write.deny) == 1 with input as bash_with_realpaths(cmd, text)
+}
+
+# A symlink under scripts/ into ANOTHER directory of the repo is not a committed
+# script either.
+test_symlink_under_scripts_pointing_into_repo_outside_scripts_is_denied if {
+	cmd := "python3 scripts/evil.py"
+	text := "path\tscripts/evil.py\t/home/banon/projects/ds2-mods-rs/crates/x.py"
+	count(bash_no_python_file_write.deny) == 1 with input as bash_with_realpaths(cmd, text)
+}
+
+# A lookalike tree does not become a root because a link points at it.
+test_symlink_into_a_lookalike_scripts_tree_is_denied if {
+	cmd := "python3 /home/banon/DS2/ds2-run.py"
+	text := "path\t/home/banon/DS2/ds2-run.py\t/tmp/ds2-mods-rs/scripts/ds2-run.py"
+	count(bash_no_python_file_write.deny) == 1 with input as bash_with_realpaths(cmd, text)
+}
+
+# The signal read the link before the command runs; a command that can repoint
+# it first gets no symlink allow.
+test_symlink_allow_is_withdrawn_when_the_command_rewrites_files if {
+	some cmd in [
+		"ln -sfn /tmp/patch.py /home/banon/DS2/ds2-run.py && python3 /home/banon/DS2/ds2-run.py",
+		"mv /tmp/patch.py /home/banon/DS2/ds2-run.py; python3 /home/banon/DS2/ds2-run.py",
+		"cp /tmp/patch.py /home/banon/DS2/ds2-run.py; python3 /home/banon/DS2/ds2-run.py",
+	]
+	count(bash_no_python_file_write.deny) == 1 with input as bash_with_realpaths(cmd, link_into_scripts)
+}
+
+# Relative spellings never get the symlink allow: an earlier `cd` decides what
+# they resolve against.
+test_relative_symlink_outside_scripts_is_denied if {
+	cmd := "python3 DS2/ds2-run.py"
+	text := "path\tDS2/ds2-run.py\t/home/banon/projects/ds2-mods-rs/scripts/ds2-run.py"
+	count(bash_no_python_file_write.deny) == 1 with input as bash_with_realpaths(cmd, text)
+}
+
+# One good link does not launder a scratch script beside it.
+test_symlink_into_scripts_beside_a_scratch_script_is_denied if {
+	cmd := "python3 /home/banon/DS2/ds2-run.py && python3 /tmp/patch.py"
+	count(bash_no_python_file_write.deny) == 1 with input as bash_with_realpaths(cmd, link_into_scripts)
+}
+
+# A committed script that is NOT a link resolves to itself and stays allowed.
+test_non_link_committed_script_with_the_signal_is_allowed if {
+	cmd := "python3 /home/banon/projects/ds2-mods-rs/scripts/ds2-run.py"
+	text := "path\t/home/banon/projects/ds2-mods-rs/scripts/ds2-run.py\t/home/banon/projects/ds2-mods-rs/scripts/ds2-run.py\nroot\t/home/banon/projects/ds2-mods-rs"
+	count(bash_no_python_file_write.deny) == 0 with input as bash_with_realpaths(cmd, text)
+}
