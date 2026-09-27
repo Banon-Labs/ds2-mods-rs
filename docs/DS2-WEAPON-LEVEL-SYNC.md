@@ -45,6 +45,13 @@ Dagger in right hand 1.
 - **The per-frame seam runs.** `NET_SESSION_UPDATE` runs 60 times a second on the game thread in
   the world (`scripts/frida/tick-count.js`), and at the title too (`tick live player=0x0`).
 
+- **The key and voice chat work together.** `ds2-net-tick` owns the one `NET_SESSION_UPDATE`
+  detour, and voice chat (before the original) and weapon sync (after it) register with it. A
+  single `--weapon-sync --voice-chat` run logged both installed on `0x1402c9540`. F6, pressed with
+  `scripts/frida/press-f8.js`, logged `TOGGLED OFF` and then `RESTORED` in the same check, and
+  pressed again logged `TOGGLED ON` and then `CAPPED`. F8 still toggled voice chat both before
+  and after the restore. The key is polled on a thread of its own, not on the game thread.
+
 **Not proven, blocked on a second player (Seamless Co-op is not installed yet):**
 
 - reading another player's weapon levels from their record table;
