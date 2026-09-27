@@ -83,6 +83,15 @@ mod tests {
     }
 
     #[test]
+    fn the_config_in_the_download_turns_it_on() {
+        // User directive 2026-09-26: on by default for the release. The DLL's own default stays
+        // off, so the shipped file is what carries it.
+        let shipped = include_str!("../../../.github/dist-ds2-mods.toml");
+        let config = EstusMaxConfig::from_text(shipped);
+        assert!(config.enabled && !config.reload_test);
+    }
+
+    #[test]
     fn the_reload_test_is_its_own_key_and_off_by_default() {
         let on = EstusMaxConfig::from_text("[estus_max]\nenabled = true\n");
         assert!(on.enabled && !on.reload_test);

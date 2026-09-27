@@ -2,8 +2,8 @@
 # `dinput8.dll` -- both the DLL and `ds2-launcher.exe` read it from there.
 #
 # Every key in here is optional. A missing key means the built-in default, and every feature's
-# built-in default is off -- the game as shipped. This file turns on one thing, `[voice_chat]`,
-# and otherwise says what there is to change.
+# built-in default is off -- the game as shipped. This file turns on two things, `[voice_chat]`
+# and `[estus_max]`, and otherwise says what there is to change.
 
 # ---------------------------------------------------------------------------------------------
 # [launcher] -- only read by `ds2-launcher.exe`, and only for DLLs that cannot be loaded from
@@ -119,3 +119,12 @@ toggle_key = "semicolon"
 # The stone laid at each step. 833 is the Prism Stone, and 833 to 839 are its seven colours; 0
 # lays none. Editing this while the game runs takes effect in about a second.
 marker_effect_id = 833
+
+# ---------------------------------------------------------------------------------------------
+# [estus_max] -- ON. Every time a character loads, your Estus Flask's charges and heal level are
+# raised to the game's maximum (12 and +6 as shipped) through the game's own upgrade setter. Solo:
+# it changes only your flask and reads nothing about other players. Set to false to keep the
+# flask as the save has it. Read at startup.
+# ---------------------------------------------------------------------------------------------
+[estus_max]
+enabled = true
