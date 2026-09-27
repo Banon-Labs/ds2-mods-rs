@@ -160,6 +160,30 @@ reaches memory only from the save file, the game clears it when the player asks 
 it is written back whenever system data is saved. No writer of a non-zero value was found other
 than the two readers loading it from disk; a bulk copy into the block would not show in this scan.
 
+### Where both flags sit in the save
+
+The system-data record is a 16-byte header and a `0x1360`-byte body, in that order. The reader
+`0x14019bb30` copies the body straight into the block and scatters the header's bytes; the writer
+at `0x14019c758` gathers them back into the same positions (both verified in binary):
+
+| header byte | block field | meaning |
+| --- | --- | --- |
+| `0..4` | `+0x1368` | dword |
+| `4..8` | -- | `10`, written as a constant: the record version |
+| `8` | `+0x136c` | |
+| `9` | `+0x136d` | terms accepted |
+| `0xa` | `+0x136f` | |
+| `0xb` | `+0x136e` | start offline |
+| `0xc` | `+0x1370` | |
+| `0xd` | `+0x1371` | |
+
+In a SotFS container this record is in `USER_DATA022`, with its header at payload offset `0x24`,
+so "terms accepted" is decrypted payload byte `0x2d` (measured 2026-09-27 with
+`scripts/ds2-sl2.py -x`: a brand-new Seamless Co-op `.co2` whose terms were then accepted in game
+reads `1` there, the `.sl2` beside it reads `0`, and that is the only byte of the entry that
+differs). A new save starts at `0`, which is why a Seamless Co-op player sees the terms once for
+its own container even after accepting them in the `.sl2`.
+
 ### `0x20` is not network work
 
 `FeSubStateTitleSteamNetworkCheck::v1` (`0x1400f8fb0`) decides its phase inside `enter` and its
