@@ -8,11 +8,13 @@
 //! It builds the sixteen-byte request the game's own callers build ([`request_bytes`]) and calls
 //! `applySpEffect` ([`ds2_rva::SP_EFFECT_APPLY`]) with the local player's `ChrSpEffectCtrl`, reached
 //! as `GameManagerImp` ([`ds2_rva::GAME_MANAGER_IMP`]) -> `PlayerCtrl`
-//! ([`ds2_rva::PLAYER_CTRL_OFFSET`]) -> `ChrSpEffectCtrl`
-//! ([`ds2_rva::PLAYER_CTRL_SP_EFFECT_CTRL_OFFSET`]). Any link of that chain can be null -- on the
-//! title screen, during loads -- and a press then does nothing and says so once in the log
-//! ([`sp_effect_ctrl`]). The default id is [`ds2_rva::SP_EFFECT_BONFIRE_REST`], resting at a
-//! bonfire, because that call has been made live and its result measured.
+//! ([`GameManagerImp::player_ctrl`]) -> `ChrSpEffectCtrl`
+//! ([`darksouls2::game::chr::CharacterCtrl::sp_effect_ctrl`]). Any link of that chain can be
+//! null -- on the title screen, during loads -- and a press then does nothing and says so once in
+//! the log
+//! ([`sp_effect_ctrl`]). The default id is [`ds2_rva::SP_EFFECT_VISUAL_SFX`], an effect that
+//! only draws an sfx, so a press changes nothing about the player. The apply call itself was
+//! first measured live with [`ds2_rva::SP_EFFECT_BONFIRE_REST`], which heals.
 //!
 //! # Where the key is read, and why there
 //!
@@ -44,6 +46,10 @@ mod install;
 #[cfg(windows)]
 pub use install::{LogFn, Outcome, Request, install, set_logger};
 
+use core::mem::offset_of;
+
+use darksouls2::game::chr::PlayerCtrl;
+use darksouls2::game::game_manager::GameManagerImp;
 use ds2_hotkey_config::keys::{
     Chord, KeyParseError, MODIFIER_ALT, MODIFIER_CTRL, MODIFIER_SHIFT, parse_chord,
 };
@@ -66,8 +72,8 @@ pub const DEFAULT_KEY: &str = "F9";
 /// The effect id key.
 pub const CONFIG_KEY_EFFECT: &str = "effect";
 
-/// The id applied when the file does not name one: resting at a bonfire.
-pub const DEFAULT_EFFECT: i32 = ds2_rva::SP_EFFECT_BONFIRE_REST;
+/// The id applied when the file does not name one: an sfx and nothing else.
+pub const DEFAULT_EFFECT: i32 = ds2_rva::SP_EFFECT_VISUAL_SFX;
 
 /// `VK_CONTROL`, `VK_MENU`, `VK_SHIFT` -- the three modifiers a [`Chord`] can carry.
 const VK_CONTROL: i32 = 0x11;
@@ -226,10 +232,10 @@ pub fn sp_effect_ctrl(
     let manager = read(game_manager_global)
         .filter(|p| *p != 0)
         .ok_or(MissingLink::GameManager)?;
-    let player = read(manager + ds2_rva::PLAYER_CTRL_OFFSET)
+    let player = read(manager + offset_of!(GameManagerImp, player_ctrl))
         .filter(|p| *p != 0)
         .ok_or(MissingLink::PlayerCtrl)?;
-    read(player + ds2_rva::PLAYER_CTRL_SP_EFFECT_CTRL_OFFSET)
+    read(player + offset_of!(PlayerCtrl, base.sp_effect_ctrl))
         .filter(|p| *p != 0)
         .ok_or(MissingLink::SpEffectCtrl)
 }
@@ -254,9 +260,9 @@ mod tests {
     }
 
     #[test]
-    fn the_default_is_f9_and_the_bonfire() {
+    fn the_default_is_f9_and_the_visual_sfx() {
         assert_eq!(default_chord(), Some(chord("F9")));
-        assert_eq!(DEFAULT_EFFECT, 110_000_010);
+        assert_eq!(DEFAULT_EFFECT, 140_001_010);
     }
 
     #[test]

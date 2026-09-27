@@ -2033,8 +2033,8 @@ def config_text(
 {KEY_VOICE_CHAT_ENABLED} = {str(voice_chat).lower()}
 
 [{NET_EFFECTS_SECTION}]
-# Read at startup. A keyboard key (default F9) that applies a SpEffect (default 110000010, resting
-# at a bonfire) to the local player through the game's own apply function. Off unless
+# Read at startup. A keyboard key (default F9) that applies a SpEffect (default 140001010, an sfx
+# and nothing else) to the local player through the game's own apply function. Off unless
 # `--net-effects` asked for it. `key` and `effect` in this section move it while the game runs;
 # leaving them out keeps the defaults. The key is read on [{INVASION_PATH_SECTION}]'s Present
 # clock, so `--net-effects` turns that section on too. Grep the log for `{NET_EFFECTS_LOG_PREFIX}`.
@@ -4851,7 +4851,7 @@ def main() -> int:
         action="store_true",
         help=(
             "turn on ds2-net-effects: a keyboard key (F9 unless [net_effects] key says otherwise) "
-            "applies a SpEffect (110000010, bonfire rest, unless [net_effects] effect says "
+            "applies a SpEffect (140001010, an sfx only, unless [net_effects] effect says "
             "otherwise) to the local player. Off without this flag, matching the DLL. Implies "
             "--invasion-path, because the key is read on that feature's Present hook; the overlay "
             "stays off unless --invasion-path-on says otherwise."

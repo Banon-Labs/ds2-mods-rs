@@ -7,9 +7,10 @@ license.workspace = true
 repository.workspace = true
 
 # Not target-gated: the key and effect settings, the edge detection and the request bytes are pure
-# code in `lib.rs` that the host tests exercise. `ds2-hotkey-config` has no dependencies of its own
-# and `ds2-rva` is constants.
+# code in `lib.rs` that the host tests exercise. `ds2-hotkey-config` has no dependencies of its own,
+# `ds2-rva` is constants, and `darksouls2`'s layouts build on the host.
 [dependencies]
+darksouls2.workspace = true
 ds2-hotkey-config.workspace = true
 ds2-rva.workspace = true
 
