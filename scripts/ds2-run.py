@@ -515,6 +515,14 @@ SECOND_SIN_PINS: dict[str, str] = {
     "ds2le_atmosphere_presets/atmospheres_extended.ini":
         "edaf06bb9263ae471b0839b95f1b4d936b5eea4b8077fd920937fb592059129a",
 }
+#: The engine archive's own copy of each Second Sin pin. A pinned file holding this was put back by
+#: an engine unpack and needs Second Sin again; one holding anything else was saved from the
+#: engine's F1 menu. On 2026-09-27 a launch took an owner's saved presets for a broken install and
+#: unpacked Second Sin over them.
+ENGINE_SHIPPED_PRESETS: dict[str, str] = {
+    "ds2le_atmosphere_presets/atmospheres_extended.ini":
+        "8e680e8bd3f836836a6366fe67109a44e10ee056ade6107c01aa162b5c738615",
+}
 #: Where the engine writes its log. A fresh one after a launch is the proof it loaded.
 LIGHTING_ENGINE_LOG = "DS2LE.log"
 #: Names a parked engine `dxgi.dll` goes by. `--no-path-tracing` renames it to the first; the
@@ -2847,7 +2855,14 @@ def ensure_lighting_engine_installed(
     engine_wrong = pins_mismatched(game_dir, LIGHTING_ENGINE_PINS)
     if dxgi != game_dir / "dxgi.dll" or (dxgi.is_file() and sha256(dxgi) == DXGI_NO_F6_SHA256):
         engine_wrong.pop("dxgi.dll", None)
-    presets_wrong = pins_mismatched(game_dir, SECOND_SIN_PINS)
+    # The engine's F1 menu saves preset edits into Second Sin's own file, so a changed preset is
+    # the owner's work, not a broken install. Only a missing file, or the engine's copy of it (which
+    # an engine unpack leaves behind), puts Second Sin back.
+    presets_wrong = {
+        member: why for member, why in pins_mismatched(game_dir, SECOND_SIN_PINS).items()
+        if engine_wrong or why == "missing"
+        or sha256(game_dir / member) == ENGINE_SHIPPED_PRESETS.get(member)
+    }
     steps = []
     if engine_wrong:
         steps.append((
@@ -5241,9 +5256,12 @@ def selftest() -> int:
     else:
         print(f"  skip the pinned hashes: no {SEAMLESS_ARCHIVE} on this machine")
     # The Lighting Engine pair: engine first, presets over it, and nothing when the pins match.
-    global LIGHTING_ENGINE_PINS, SECOND_SIN_PINS, TEXTURE_PACKS  # noqa -- planted, restored below
+    global LIGHTING_ENGINE_PINS, SECOND_SIN_PINS, TEXTURE_PACKS, ENGINE_SHIPPED_PRESETS  # noqa
     real_engine_pins, real_presets_pins = LIGHTING_ENGINE_PINS, SECOND_SIN_PINS
-    real_packs = TEXTURE_PACKS
+    real_packs, real_shipped = TEXTURE_PACKS, ENGINE_SHIPPED_PRESETS
+    ENGINE_SHIPPED_PRESETS = {
+        "ds2le_atmosphere_presets/a.ini": hashlib.sha256(b"engine preset").hexdigest()
+    }
     TEXTURE_PACKS = ()  # the pair alone first; the packs over it are tested after
     try:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5284,6 +5302,16 @@ def selftest() -> int:
             (game / "ds2le_atmosphere_presets/a.ini").write_bytes(b"engine preset")
             ensure_lighting_engine_installed(*args, write=True, run=fake_run)
             check(unpacked == ["presets.zip"], f"lost presets reinstall only the presets: {unpacked}")
+            unpacked.clear()
+            (game / "ds2le_atmosphere_presets/a.ini").write_bytes(b"owner's saved preset")
+            actions, problems = ensure_lighting_engine_installed(*args, write=True, run=fake_run)
+            check(not unpacked and not actions and not problems
+                  and (game / "ds2le_atmosphere_presets/a.ini").read_bytes() == b"owner's saved preset",
+                  f"presets saved from the F1 menu are kept, not reinstalled: {unpacked} {actions}")
+            (game / "ds2le_atmosphere_presets/a.ini").unlink()
+            ensure_lighting_engine_installed(*args, write=True, run=fake_run)
+            check(unpacked == ["presets.zip"], f"a missing preset file reinstalls: {unpacked}")
+            unpacked.clear()
             # --no-path-tracing parks by rename, and the next normal launch renames it back
             # without unpacking anything.
             ensure_lighting_engine_installed(*args, write=True, run=fake_run)
@@ -5394,7 +5422,7 @@ def selftest() -> int:
                   f"a pack whose archive is gone is a refusal naming it: {problems}")
     finally:
         LIGHTING_ENGINE_PINS, SECOND_SIN_PINS = real_engine_pins, real_presets_pins
-        TEXTURE_PACKS = real_packs
+        TEXTURE_PACKS, ENGINE_SHIPPED_PRESETS = real_packs, real_shipped
     check(
         pack_unpack_command(Path("i.zip"), Path("/g"), (("DS3 Icons 2.0/", "tex_override/"),))
         == ["bsdtar", "-x", "-C", "/g", "-f", "i.zip",
