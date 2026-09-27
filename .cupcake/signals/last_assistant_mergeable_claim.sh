@@ -22,8 +22,19 @@
 # nothing about builds or tests. This repo has CI to be green or not: .github/workflows/release.yml
 # builds the shipped DLLs on every pull request.
 #
-# Emits  MERGEABLECLAIM:<claimed>:<verdict>  with verdict PASS / PENDING / FAIL / UNKNOWN, and
-# nothing when the transcript cannot be read or the closing prose makes no claim.
+# Which PR is measured (2026-09-26): the one the claim names, not the one on the branch the
+# session's cwd happens to be on. The instance: a closer said "PR #216 is ready to merge once you
+# run `gh pr ready 216`" with #216's build, check and host-tests all SUCCESS, from a worktree on
+# another branch whose PR #217 was still pending -- and the halt fired on #217's CI. So the PR
+# numbers written in the claiming sentence(s) (#N, PR N, pull request N, `gh pr <verb> N`) are
+# measured and every one of them must be PASS; a number elsewhere in the closer is next; the cwd
+# branch's PR is the fallback only when the closing prose names no number at all. Numbers are read
+# with backtick spans intact, because the `gh pr ready 216` that names the PR is exactly the kind
+# of span the claim scrub removes.
+#
+# Emits  MERGEABLECLAIM:<claimed>:<verdict>:<targets>  with verdict PASS / PENDING / FAIL / UNKNOWN
+# (the worst across the targets) and targets a comma list of PR numbers or `branch`, and nothing
+# when the transcript cannot be read or the closing prose makes no claim.
 set -uo pipefail
 CUPCAKE_SIGNAL_REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")/../.." && pwd)"
 export CUPCAKE_SIGNAL_REPO_ROOT
@@ -52,11 +63,14 @@ if not runs:
     sys.exit(0)
 text = runs[-1]
 
+
 # Quoted spans and code fences are how a policy's own wording, a log line, or `gh` output gets
 # reproduced. Reporting what a tool printed is not the same as adopting it as the verdict.
-scrubbed = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
-scrubbed = re.sub(r"`[^`]*`", " ", scrubbed)
-scrubbed = re.sub(r'"[^"]*"', " ", scrubbed)
+def scrub(t):
+    t = re.sub(r"```.*?```", " ", t, flags=re.DOTALL)
+    t = re.sub(r"`[^`]*`", " ", t)
+    return re.sub(r'"[^"]*"', " ", t)
+
 
 CLAIM_RE = re.compile(
     r"(?<!not\s)(?<!isn't\s)(?<!is\snot\s)\bmerge-?able\b"
@@ -70,25 +84,78 @@ NEGATED_RE = re.compile(
     r"|\bmerge-?able\s+(?:is|was)\s+(?:false|no)\b",
     re.IGNORECASE,
 )
-if CLAIM_RE.search(scrubbed) and not NEGATED_RE.search(scrubbed):
-    print("1")
+PR_RE = re.compile(
+    r"(?<![\w/&])#(\d+)\b"
+    r"|\b(?:PR|pull\s+request)\s+#?(\d+)\b"
+    r"|\bgh\s+pr\s+(?:ready|merge|checks|view)\s+#?(\d+)\b",
+    re.IGNORECASE,
+)
+
+scrubbed = scrub(text)
+if not CLAIM_RE.search(scrubbed) or NEGATED_RE.search(scrubbed):
+    sys.exit(0)
+
+
+def numbers(t):
+    seen = []
+    for m in PR_RE.finditer(t):
+        n = next(g for g in m.groups() if g)
+        if n not in seen:
+            seen.append(n)
+    return seen
+
+
+# Split into sentences with code fences dropped but inline backtick spans kept, so
+# `gh pr ready 216` stays in the sentence that makes the claim.
+unfenced = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
+sentences = [s for s in re.split(r"(?<=[.!?])\s+|\n+", unfenced) if s.strip()]
+claiming = [s for s in sentences if CLAIM_RE.search(scrub(s))]
+targets = numbers(" ".join(claiming)) or numbers(unfenced)
+print(" ".join(["1", *targets]))
 PY
 )"
-[ "$claimed" = "1" ] || exit 0
+case "$claimed" in
+    1|"1 "*) ;;
+    *) exit 0 ;;
+esac
+read -r -a targets <<<"${claimed#1}"
+[ "${#targets[@]}" -gt 0 ] || targets=(branch)
 
-# The regression tests pin the verdict the same way CUPCAKE_RUNTIME_EVIDENCE_OVERRIDE pins the
-# runtime signal, so no case depends on the network or on which PR the checkout happens to have.
-verdict="${CUPCAKE_MERGEABLE_CI_VERDICT_OVERRIDE:-}"
-if [ -z "$verdict" ]; then
-    verdict="UNKNOWN"
-    if command -v gh >/dev/null 2>&1 && command -v git >/dev/null 2>&1; then
-        branch="$(git branch --show-current 2>/dev/null || true)"
-        if [ -n "$branch" ]; then
-            # `gh pr checks` exits non-zero whenever anything is failing or pending, so the exit
-            # code is ignored and the verdict comes from the rows.
-            rows="$(timeout 8 gh pr checks "$branch" --json name,state 2>/dev/null || true)"
-            if [ -n "$rows" ]; then
-                verdict="$(printf '%s' "$rows" | python3 -c '
+# The regression tests pin verdicts the same way CUPCAKE_RUNTIME_EVIDENCE_OVERRIDE pins the runtime
+# signal, so no case depends on the network or on which PR the checkout happens to have:
+#   CUPCAKE_MERGEABLE_CI_VERDICTS_OVERRIDE="216=PASS,217=PENDING,branch=PENDING" answers per target;
+#   CUPCAKE_MERGEABLE_CI_VERDICT_OVERRIDE=<verdict> answers every target the map does not name.
+lookup_override() {
+    local want="$1" pair
+    local IFS=','
+    for pair in ${CUPCAKE_MERGEABLE_CI_VERDICTS_OVERRIDE:-}; do
+        pair="${pair// /}"
+        if [ "${pair%%=*}" = "$want" ] && [ -n "${pair#*=}" ]; then
+            printf '%s' "${pair#*=}"
+            return 0
+        fi
+    done
+    if [ -n "${CUPCAKE_MERGEABLE_CI_VERDICT_OVERRIDE:-}" ]; then
+        printf '%s' "$CUPCAKE_MERGEABLE_CI_VERDICT_OVERRIDE"
+        return 0
+    fi
+    return 1
+}
+
+measure() {
+    local target="$1" ref rows
+    command -v gh >/dev/null 2>&1 || { echo UNKNOWN; return; }
+    if [ "$target" = "branch" ]; then
+        ref="$(git branch --show-current 2>/dev/null || true)"
+        [ -n "$ref" ] || { echo UNKNOWN; return; }
+    else
+        ref="$target"
+    fi
+    # `gh pr checks` exits non-zero whenever anything is failing or pending, so the exit code is
+    # ignored and the verdict comes from the rows.
+    rows="$(timeout 8 gh pr checks "$ref" --json name,state 2>/dev/null || true)"
+    [ -n "$rows" ] || { echo UNKNOWN; return; }
+    printf '%s' "$rows" | python3 -c '
 import json, sys
 try:
     rows = json.load(sys.stdin)
@@ -106,11 +173,20 @@ elif all(s == "SUCCESS" for s in live):
     print("PASS")
 else:
     print("UNKNOWN")
-' 2>/dev/null || true)"
-            fi
-        fi
+' 2>/dev/null || echo UNKNOWN
+}
+
+# Every named PR must pass; the reported verdict is the worst one, FAIL > PENDING > UNKNOWN > PASS.
+# An unrecognised verdict (NOPR, say) ranks with UNKNOWN: not a pass.
+rank() { case "$1" in PASS) echo 0 ;; PENDING) echo 2 ;; FAIL) echo 3 ;; *) echo 1 ;; esac; }
+worst="PASS"
+for t in "${targets[@]}"; do
+    v="$(lookup_override "$t" || measure "$t")"
+    [ -n "$v" ] || v="UNKNOWN"
+    if [ "$(rank "$v")" -gt "$(rank "$worst")" ]; then
+        worst="$v"
     fi
-fi
-[ -n "$verdict" ] || verdict="UNKNOWN"
-printf 'MERGEABLECLAIM:1:%s\n' "$verdict"
+done
+joined="$(IFS=','; printf '%s' "${targets[*]}")"
+printf 'MERGEABLECLAIM:1:%s:%s\n' "$worst" "$joined"
 exit 0

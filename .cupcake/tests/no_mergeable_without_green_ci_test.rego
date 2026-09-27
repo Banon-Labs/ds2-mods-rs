@@ -25,6 +25,15 @@ test_passing_ci_with_the_claim_is_allowed if {
 	count(policy.halt) == 0 with input as stop_input("MERGEABLECLAIM:1:PASS")
 }
 
+# The signal appends the PRs it measured; the policy reads only the verdict before them.
+test_passing_named_prs_are_allowed if {
+	count(policy.halt) == 0 with input as stop_input("MERGEABLECLAIM:1:PASS:216")
+}
+
+test_pending_named_pr_halts if {
+	count(policy.halt) == 1 with input as stop_input("MERGEABLECLAIM:1:PENDING:216,217")
+}
+
 # A turn that never made the claim is untouched, whatever CI says.
 test_no_claim_is_untouched_on_red_ci if {
 	count(policy.halt) == 0 with input as stop_input("MERGEABLECLAIM:0:FAIL")
