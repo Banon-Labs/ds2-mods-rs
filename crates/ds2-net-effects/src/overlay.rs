@@ -19,7 +19,7 @@
 
 use core::ffi::c_void;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use hudhook::imgui::{Context, FontConfig, FontSource, Ui};
 use hudhook::windows::Win32::Graphics::Dxgi::IDXGISwapChain;
@@ -39,6 +39,9 @@ static DRAWS: AtomicU64 = AtomicU64::new(0);
 
 /// Frames on which the bar had something to draw.
 static VISIBLE_DRAWS: AtomicU64 = AtomicU64::new(0);
+
+/// How many lines the last `render` drew; `usize::MAX` before the first.
+static LAST_LINE_COUNT: AtomicUsize = AtomicUsize::new(usize::MAX);
 
 /// `render_shared` failures.
 static ERRORS: AtomicU64 = AtomicU64::new(0);
@@ -89,6 +92,18 @@ impl ImguiRenderLoop for SelectorOverlay {
             ));
         }
         let lines = VIEW.lock().map(|v| v.clone()).unwrap_or_default();
+        // One line whenever what is drawn changes shape (hidden, header only, the list), naming
+        // the highlighted row: the log's proof that the draw followed the keys.
+        if LAST_LINE_COUNT.swap(lines.len(), Ordering::Relaxed) != lines.len() {
+            let cursor = lines
+                .iter()
+                .find(|l| l.kind == LineKind::Cursor)
+                .map_or("", |l| l.text.as_str());
+            log(format_args!(
+                "{LOG_PREFIX} overlay: draw #{draws} now {} lines, cursor row {cursor:?}",
+                lines.len()
+            ));
+        }
         if lines.is_empty() {
             return;
         }
