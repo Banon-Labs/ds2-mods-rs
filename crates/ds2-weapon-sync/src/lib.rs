@@ -43,6 +43,11 @@
 //! session update is shared with `ds2-voice-chat` through `ds2-net-tick`, which owns its one
 //! detour, so both features run together.
 //!
+//! Every press says which way it went, out loud ([`clip`]), and while the feature is on a pair of
+//! crossed swords sits in the top-right corner of the screen ([`glyph`]); off, they are gone. The
+//! swords are one of `ds2-overlay`'s imgui panels, drawn through its one `Present` detour on the
+//! game's own swap chain.
+//!
 //! # Every exit path
 //!
 //! * The encounter ends in the same world (a phantom leaves while we host): the cap goes to
@@ -65,10 +70,57 @@ pub const LOG_PREFIX: &str = "ds2-weapon-sync:";
 /// F7 is inventory sort, F8 voice chat and F9 net effects; nothing in this repo binds F6.
 pub const DEFAULT_KEY: &str = "F6";
 
+/// The spoken line a toggle plays: "Weapon sync, on." or "Weapon sync, off.", 16 kHz 16-bit mono
+/// WAV, rendered with Piper's `en_US-lessac-medium`, the voice `ds2-voice-chat`'s English clips use.
+#[must_use]
+pub const fn clip(on: bool) -> &'static [u8] {
+    if on {
+        include_bytes!("../assets/en-on.wav")
+    } else {
+        include_bytes!("../assets/en-off.wav")
+    }
+}
+
+pub mod glyph;
 pub mod policy;
 
+#[cfg(windows)]
+mod hud;
 #[cfg(windows)]
 mod install;
 
 #[cfg(windows)]
 pub use install::{LogFn, Outcome, install, set_key, set_logger, set_test_cap};
+
+#[cfg(test)]
+mod tests {
+    use super::clip;
+
+    /// The `fmt ` chunk's format tag, channels, sample rate and bits per sample.
+    fn wav_format(wav: &[u8]) -> Option<(u16, u16, u32, u16)> {
+        if wav.get(0..4)? != b"RIFF" || wav.get(8..12)? != b"WAVE" {
+            return None;
+        }
+        let mut at = 12;
+        while at + 8 <= wav.len() {
+            let id = &wav[at..at + 4];
+            let len = u32::from_le_bytes(wav[at + 4..at + 8].try_into().ok()?) as usize;
+            let body = wav.get(at + 8..at + 8 + len)?;
+            if id == b"fmt " {
+                let u16_at = |i: usize| u16::from_le_bytes([body[i], body[i + 1]]);
+                let rate = u32::from_le_bytes(body.get(4..8)?.try_into().ok()?);
+                return Some((u16_at(0), u16_at(2), rate, u16_at(14)));
+            }
+            at += 8 + len + (len & 1);
+        }
+        None
+    }
+
+    #[test]
+    fn both_clips_are_16_khz_16_bit_mono_pcm_like_voice_chats() {
+        for on in [true, false] {
+            assert_eq!(wav_format(clip(on)), Some((1, 1, 16_000, 16)), "on={on}");
+        }
+        assert_ne!(clip(true), clip(false));
+    }
+}
