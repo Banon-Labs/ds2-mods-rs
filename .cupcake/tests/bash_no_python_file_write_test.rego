@@ -728,3 +728,49 @@ test_reading_a_file_stays_allowed_with_roots_resolved if {
 	cmd := `python3 -c "print(open('/home/banon/projects/ds2-mods-rs/Cargo.toml').read())"`
 	count(bash_no_python_file_write.deny) == 0 with input as bash_in_repo(cmd)
 }
+
+# --- an interpreter named through a shell variable (2026-09-26) -------------
+#
+# The exact command that was denied: a read-only pefile scan run by a venv python
+# spelled `$S/venv/bin/python`. The `$S/` prefix hid the interpreter from
+# python_token_pattern, so the stdin arm counted the python stage itself as an
+# opaque program source and denied it.
+var_python_readonly_heredoc := `S=/tmp/claude-1000/-home-banon-projects-ds2-mods-rs/d6f97a6b-44ed-4886-9970-617a2d2f58ea/scratchpad; G="$HOME/.local/share/Steam/steamapps/common/Dark Souls II Scholar of the First Sin/Game"; $S/venv/bin/python - "$G/dxgi.dll" <<'EOF'
+import sys,pefile,struct,re
+pe=pefile.PE(sys.argv[1],fast_load=True); base=pe.OPTIONAL_HEADER.ImageBase
+d=pe.__data__
+def off2rva(o):
+    for s in pe.sections:
+        if s.PointerToRawData<=o<s.PointerToRawData+s.SizeOfRawData: return o-s.PointerToRawData+s.VirtualAddress
+text=[s for s in pe.sections if s.Name.startswith(b'.text')][0]
+tb=text.get_data(); tv=text.VirtualAddress
+targets={}
+for name in [b'\\ds2le_user_settings.ini\0',b'UserAntiAliasingSettings\0']:
+    o=d.find(name); targets[off2rva(o)]=name
+for m in re.finditer(rb'[\x48\x4c]\x8d[\x05\x0d\x15\x1d\x25\x2d\x35\x3d]',tb):
+    i=m.start(); disp=struct.unpack_from('<i',tb,i+3)[0]; rva=tv+i+7+disp
+    if rva in targets: print(hex(base+tv+i), targets[rva])
+EOF`
+
+test_var_prefixed_python_readonly_heredoc_is_allowed if {
+	count(bash_no_python_file_write.deny) == 0 with input as bash(var_python_readonly_heredoc)
+}
+
+# The same program with a real write added still denies.
+test_var_prefixed_python_heredoc_with_write_is_denied if {
+	cmd := replace(var_python_readonly_heredoc, "targets={}\n", "targets={}\nopen(p,'w').write(s)\n")
+	cmd != var_python_readonly_heredoc
+	count(bash_no_python_file_write.deny) == 1 with input as bash(cmd)
+}
+
+# Before the fix a variable- or `~`-prefixed interpreter was not python to this
+# guard at all, so an inline write through it was ALLOWED.
+test_var_prefixed_python_dash_c_write_is_denied if {
+	every cmd in [
+		`$S/venv/bin/python -c "open(p,'w').write(s)"`,
+		`${VENV}/bin/python3 -c "open(p,'w').write(s)"`,
+		`~/.venv/bin/python -c "open(p,'w').write(s)"`,
+	] {
+		count(bash_no_python_file_write.deny) == 1 with input as bash(cmd)
+	}
+}

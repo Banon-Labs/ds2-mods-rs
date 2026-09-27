@@ -43,7 +43,15 @@ command := object.get(input.tool_input, "command", "")
 # separator, optionally path-prefixed (`/usr/bin/python3`, `./python`), and
 # terminated by a non-identifier char. `uv run ... python3` is caught by the
 # same token match because `python3` follows whitespace there too.
-python_token_pattern := "(^|[[:space:];|&('\"`])/?([[:alnum:]_.-]+/)*python[0-9.]*($|[^[:alnum:]_])"
+#
+# The path prefix may also START with a shell variable or `~` -- `$S/venv/bin/python`,
+# `${VENV}/bin/python`, `~/.venv/bin/python` (2026-09-26). Without that, a venv
+# interpreter named through a variable was not python to this guard at all, which
+# failed in BOTH directions: `invokes_python` was false, so `$S/venv/bin/python -c
+# "open(p,'w')..."` was ALLOWED, and in the stdin arm the python stage itself was
+# not skipped as the consumer, so it read as an opaque producer and a read-only
+# `$S/venv/bin/python - <<'EOF' ... EOF` heredoc was DENIED as a hidden script.
+python_token_pattern := "(^|[[:space:];|&('\"`])(\\$\\{?[[:alnum:]_]+\\}?/|~/|/)?([[:alnum:]_.-]+/)*python[0-9.]*($|[^[:alnum:]_])"
 
 invokes_python if {
 	regex.match(python_token_pattern, command)
