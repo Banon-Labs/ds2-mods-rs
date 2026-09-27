@@ -144,6 +144,9 @@ impl ImguiRenderLoop for Panels {
 /// cursor could not be read.
 static MOUSE: AtomicU64 = AtomicU64::new(u64::MAX);
 
+/// Whether the left button was down last frame, for the click diagnostic.
+static LEFT_DOWN: AtomicBool = AtomicBool::new(false);
+
 /// Set once the window and back-buffer sizes have been logged.
 static SIZES_LOGGED: AtomicBool = AtomicBool::new(false);
 
@@ -194,6 +197,36 @@ fn measure_mouse(chain: &IDXGISwapChain) {
     }
     if !read || client_w <= 0 || client_h <= 0 {
         return;
+    }
+    // DIAGNOSTIC, 2026-09-27: the player sees the hover far from the pointer while client and
+    // back buffer measure the same. Every left press logs each coordinate space involved, so the
+    // mapping can be read off two clicks at known places instead of guessed.
+    // SAFETY: `GetAsyncKeyState` takes a virtual-key code and touches no memory of ours.
+    let pressed = unsafe {
+        hudhook::windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x01)
+    } as u16
+        & 0x8000
+        != 0;
+    if pressed && !LEFT_DOWN.swap(true, Ordering::AcqRel) {
+        use hudhook::windows::Win32::UI::WindowsAndMessaging::{
+            GetSystemMetrics, GetWindowRect, SM_CXSCREEN, SM_CYSCREEN,
+        };
+        let mut screen = POINT::default();
+        let mut frame = RECT::default();
+        // SAFETY: out-pointers are locals; `window` is the swap chain's output window.
+        let (cx, cy) = unsafe {
+            let _ = GetCursorPos(&mut screen);
+            let _ = GetWindowRect(window, &mut frame);
+            (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN))
+        };
+        log(format_args!(
+            "panels: click screen=({},{}) client=({},{}) wine-screen={cx}x{cy} \
+             window=({},{})-({},{}) client-size={client_w}x{client_h} buffer={buffer_w}x{buffer_h}",
+            screen.x, screen.y, cursor.x, cursor.y, frame.left, frame.top, frame.right,
+            frame.bottom
+        ));
+    } else if !pressed {
+        LEFT_DOWN.store(false, Ordering::Release);
     }
     let x = cursor.x as f32 * buffer_w as f32 / client_w as f32;
     let y = cursor.y as f32 * buffer_h as f32 / client_h as f32;
