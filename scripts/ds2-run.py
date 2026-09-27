@@ -493,6 +493,16 @@ LIGHTING_ENGINE_PINS: dict[str, str] = {
     "shader/FlverShader_SM5_1.bnd":
         "d42775e811542f92d69269cc5404fbeb77fee182a414e813d6b51ccd3c128699",
 }
+#: The engine's F6 is "reload every shader next pass", hard-coded with no setting to rebind it, and
+#: F6 is also weapon sync's default toggle (`ds2_weapon_sync::DEFAULT_KEY`). On 2026-09-27 one F6
+#: press mid-game rebuilt the shaders, page-faulted the GPU from DarkSoulsII.exe's vkd3d queue,
+#: forced an amdgpu reset and took Hyprland down with it. The check sits in the engine's per-frame
+#: hotkey poll at VA 0x180121a74 (`mov edx,0x75; mov rcx,rbx; call [rax+0x70]; test al,al; je`);
+#: turning that `je` (0x74) into `jmp` (0xEB) skips the reload and its log line, and leaves the
+#: keypress itself alone for the game and our own mods. `DXGI_NO_F6_SHA256` is the patched file.
+DXGI_F6_BRANCH_OFFSET = 0x120E81
+DXGI_PRISTINE_SHA256 = "c3a88fd51368dbe17b4b71311bd47486f0a72d048a8fda64c7f3e567b84181b8"
+DXGI_NO_F6_SHA256 = "c460c777c1c094a2e7f98d1f1fd218a405f5efc692b48818e3e4841df37e5de7"
 #: The archive's own screenshots and notes, which are not game files.
 LIGHTING_ENGINE_SKIP: tuple[str, ...] = (
     "In-Game settings.png", "LE-Menu.png", "ReadMe.txt", "licenses_and_credits.txt",
@@ -2770,10 +2780,10 @@ def ensure_lighting_engine_installed(
             actions.append(f"restored dxgi.dll from {parked.name}")
         else:
             actions.append(f"would restore dxgi.dll from {parked.name}")
-            if sha256(parked) == LIGHTING_ENGINE_PINS.get("dxgi.dll"):
+            if sha256(parked) in (LIGHTING_ENGINE_PINS.get("dxgi.dll"), DXGI_NO_F6_SHA256):
                 dxgi = parked
     engine_wrong = pins_mismatched(game_dir, LIGHTING_ENGINE_PINS)
-    if dxgi != game_dir / "dxgi.dll":
+    if dxgi != game_dir / "dxgi.dll" or (dxgi.is_file() and sha256(dxgi) == DXGI_NO_F6_SHA256):
         engine_wrong.pop("dxgi.dll", None)
     presets_wrong = pins_mismatched(game_dir, SECOND_SIN_PINS)
     steps = []
@@ -2799,6 +2809,18 @@ def ensure_lighting_engine_installed(
             )
         else:
             actions.append(f"unpacked {archive.name} ({why} before)")
+    if dxgi == game_dir / "dxgi.dll" and dxgi.is_file() and not problems:
+        if sha256(dxgi) == DXGI_PRISTINE_SHA256:
+            if write:
+                image = bytearray(dxgi.read_bytes())
+                image[DXGI_F6_BRANCH_OFFSET] = 0xEB
+                dxgi.write_bytes(image)
+                if sha256(dxgi) == DXGI_NO_F6_SHA256:
+                    actions.append("patched out the engine's F6 shader reload in dxgi.dll")
+                else:
+                    problems.append("patching out F6 left dxgi.dll with an unexpected sha256")
+            else:
+                actions.append("would patch out the engine's F6 shader reload in dxgi.dll")
     return actions, problems
 
 
@@ -5191,6 +5213,20 @@ def selftest() -> int:
             ensure_lighting_engine_installed(*args, write=True, run=fake_run)
             check((game / "dxgi.dll").is_file() and not unpacked,
                   "a dxgi.dll parked under the selector's name comes back the same way")
+            real_dxgi = GAME_DIR / "dxgi.dll"
+            if real_dxgi.is_file() and sha256(real_dxgi) in (DXGI_PRISTINE_SHA256, DXGI_NO_F6_SHA256):
+                image = bytearray(real_dxgi.read_bytes())
+                image[DXGI_F6_BRANCH_OFFSET] = 0x74
+                (game / "dxgi.dll").write_bytes(image)
+                LIGHTING_ENGINE_PINS = {"dxgi.dll": DXGI_PRISTINE_SHA256}
+                actions, problems = ensure_lighting_engine_installed(*args, write=True, run=fake_run)
+                check(sha256(game / "dxgi.dll") == DXGI_NO_F6_SHA256 and not unpacked
+                      and not problems, f"the engine's F6 reload is patched out: {actions} {problems}")
+                actions, problems = ensure_lighting_engine_installed(*args, write=True, run=fake_run)
+                check(not actions and not problems and not unpacked,
+                      f"and the patched dxgi.dll counts as a correct install: {actions} {problems}")
+            else:
+                print("  skip the F6 patch: no engine dxgi.dll on this machine")
             (game / "dxgi.dll").unlink()
             _, problems = ensure_lighting_engine_installed(
                 game, root / "gone.rar", root / "presets.zip", write=True, run=fake_run
