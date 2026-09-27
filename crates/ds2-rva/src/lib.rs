@@ -8672,6 +8672,24 @@ pub const CAMERA_INPUT_PULL_FROM_DEVICE: u32 = 0x00b0_d0e0;
 /// only `SetCursorPos`. RVA `0x00af42b0`, VA `0x140af42b0`.
 pub const INPUT_UPDATE: u32 = 0x00af_42b0;
 
+/// First five bytes at [`INPUT_UPDATE`]: `mov [rsp+0x8],rbx`. Not Arxan-redirected
+/// (`scripts/ds2-arxan-chain.py 0x140af42b0`). `this` in RCX (kept in RBX) and a float in XMM1.
+pub const INPUT_UPDATE_PROLOGUE: [u8; 5] = [0x48, 0x89, 0x5c, 0x24, 0x08];
+
+/// Whether the game wants the OS pointer shown: a `u32` at `this+0x66c` of [`INPUT_UPDATE`]'s
+/// object.
+///
+/// Read at `0x140af4473`. Nonzero calls `ShowCursor(TRUE)` until the count stored at
+/// [`INPUT_UPDATE_CURSOR_COUNT_OFFSET`] reaches 0; zero calls `ShowCursor(FALSE)` once when that
+/// count is 0. Those are the image's only two `ShowCursor` calls (`0x140af448a`, `0x140af44aa`),
+/// both through the import slot at `0x141aae3dc`, so this flag is the whole of the game's pointer
+/// visibility.
+pub const INPUT_UPDATE_CURSOR_WANTED_OFFSET: usize = 0x66c;
+
+/// The display count the last `ShowCursor` returned, stored at `this+0x668` by
+/// [`INPUT_UPDATE`] (`0x140af4490`, `0x140af44b0`).
+pub const INPUT_UPDATE_CURSOR_COUNT_OFFSET: usize = 0x668;
+
 /// The import thunk `DarkSoulsII.exe` calls `USER32!GetCursorPos` through. RVA `0x01aae3cc`.
 ///
 /// From `call QWORD PTR [rip+0xf521a2]` at `0x140b5c224`, which resolves to `0x141aae3cc` -- the

@@ -691,6 +691,14 @@ pub(crate) unsafe fn install() -> usize {
         );
     }
 
+    // SAFETY: as for the click hook above.
+    if !unsafe { crate::cursor::install(base) } {
+        harness_log!(
+            "PARTIAL install: the game's pointer is not hidden under a panel, so it may show \
+             beside the panel's own"
+        );
+    }
+
     let path = command_path()
         .map(|path| path.display().to_string())
         .unwrap_or_else(|| "<game directory not resolved>".to_owned());
