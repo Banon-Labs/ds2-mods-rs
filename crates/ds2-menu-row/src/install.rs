@@ -890,8 +890,7 @@ unsafe fn our_item_for(base: usize, tab: *mut u8) -> Option<*mut u8> {
     // its vector was built by `crate::tab` and carries our actions from index 0, so the slot is the
     // index. The identity test there is a pointer compare against the group this crate constructed,
     // which is exact -- it does not need the entry-pattern check the shipped tabs are told apart by.
-    let seventh = crate::tab::group();
-    let shipped = if seventh != 0 && tab as usize == seventh {
+    let shipped = if crate::tab::is_group(tab as usize) {
         0
     } else {
         ds2_rva::FE_INGAME_MENU_SYSTEM_TAB_ITEMS.len()
@@ -1689,14 +1688,13 @@ unsafe extern "system" fn tab_init_detour(tab: *mut u8) {
     // every tab, and raising a cursor bound on a tab whose cells were never added lets its cursor
     // walk onto rows that are not there -- which is what the System tab got on the first run of
     // `crate::tab`, a bound of seven over six drawn cells.
-    let seventh = crate::tab::group();
     // HOW MANY ROWS THIS TAB HAS ALTOGETHER, and the two tabs answer differently. The System tab's
     // is its three shipped rows plus ours; the seventh tab ships nothing, so its total is ours
     // alone. One expression covering both said `shipped + added` for each, which on the seventh tab
     // is three more items than there are cells -- a cursor bound of seven over four drawn rows, and
     // a confirm that resolves an entry the vector does not have.
     let (count, want) = if crate::tab::armed() {
-        if seventh == 0 || tab as usize != seventh {
+        if !crate::tab::is_group(tab as usize) {
             return;
         }
         // SAFETY: our own group, whose vector the game's own constructor filled.
@@ -1994,7 +1992,7 @@ pub unsafe fn install() -> Outcome {
     }
 
     // THE SEVENTH TAB, which is allowed to fail on its own. Its three sites are independent of
-    // everything below: if they do not go in, `crate::tab::group()` stays zero, every detour that
+    // everything below: if they do not go in, `crate::tab::built()` stays false, every detour that
     // asks about it declines, and the rows appear on the System tab exactly as they did before this
     // module existed. That is a worse menu, not a broken one, so it is not grounds for refusing the
     // rows as well.

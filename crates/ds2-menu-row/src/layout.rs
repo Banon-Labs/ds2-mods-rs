@@ -1283,7 +1283,7 @@ unsafe extern "system" fn detour(doc: *mut usize, index: u32) -> *mut u8 {
         // THE TAB STRIP, and only when there is a seventh tab to put a cell under. A strip with an
         // extra cell and no group behind it is a tab the cursor can land on and that answers
         // nothing, which is worse than six tabs.
-        if crate::tab::group() == 0 {
+        if !crate::tab::built() {
             return found;
         }
         // BUILT BEFORE THE STRIP NAMES IT. The strip is walked from the top down, so the record

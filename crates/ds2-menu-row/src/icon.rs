@@ -462,7 +462,7 @@ unsafe extern "system" fn detour(doc: *mut usize, index: u32) -> *mut u8 {
 
     // SAFETY: both arguments are the game's own, passed through unchanged.
     let found = unsafe { original(doc, index) };
-    if index != ds2_rva::FLO_TAB_ARROWS_SHAPE || found.is_null() || crate::tab::group() == 0 {
+    if index != ds2_rva::FLO_TAB_ARROWS_SHAPE || found.is_null() || !crate::tab::built() {
         return found;
     }
     // THE CHEVRONS, and only when there is a seventh tab to make room for. With six tabs the strip
