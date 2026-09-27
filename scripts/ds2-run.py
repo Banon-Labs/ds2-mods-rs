@@ -5530,9 +5530,7 @@ def main() -> int:
             "keep DS2 Lighting Engine PathTracing and Second Sin Pathtracing installed and loaded. "
             "ON BY DEFAULT. --no-path-tracing renames the engine's dxgi.dll to "
             f"{PARKED_DXGI_NAMES[0]} for this run, so Wine loads the system dxgi; the next launch "
-            "without it renames it back. Anything that turns [invasion_path] on (--input-harness, "
-            "--net-effects, --invasion-path) implies --no-path-tracing until ds2-mods-rs-uz64 is "
-            "fixed."
+            "without it renames it back."
         ),
     )
     parser.add_argument(
@@ -5792,17 +5790,6 @@ def main() -> int:
             f"[config] --net-effects turned [{INVASION_PATH_SECTION}] on for this run: the key "
             "is read on its Present hook and does nothing without it."
         )
-    # Until ds2-mods-rs-uz64 is fixed: [invasion_path]'s render install creates a throwaway swap
-    # chain, and the Lighting Engine's dxgi.dll crashes the game when it is released (2026-09-26,
-    # execute at 0x5555872d73e0 under ds2_invasion_path::render::install). Every flag above that
-    # turns [invasion_path] on therefore turns path tracing off for the run.
-    if args.invasion_path and args.path_tracing:
-        args.path_tracing = False
-        print(
-            f"[config] [{INVASION_PATH_SECTION}] is on, so path tracing is OFF for this run: its "
-            "throwaway swap chain crashes the Lighting Engine (ds2-mods-rs-uz64)."
-        )
-
     if args.selftest:
         return selftest()
 
