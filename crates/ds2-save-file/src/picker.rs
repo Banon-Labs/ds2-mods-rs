@@ -179,7 +179,7 @@ pub fn configure(settings: PickerSettings) {
 /// Register the panel's draw function and its clock with `ds2-overlay`. `false` has been logged,
 /// and the rows keep opening the OS dialog.
 pub fn install() -> bool {
-    if !ds2_overlay::panels::add_panel(draw, Some(wants_input)) {
+    if !ds2_overlay::panels::add_panel(draw, is_up, Some(wants_input)) {
         log_line(format_args!(
             "{LOG_PREFIX} picker: every ds2-overlay panel slot is taken"
         ));
@@ -266,6 +266,15 @@ fn open(mode: Mode) -> bool {
         start.display()
     ));
     true
+}
+
+/// Whether the panel is on screen. `ds2-overlay` renders no imgui frame while no panel is.
+fn is_up() -> bool {
+    PANEL.try_lock().ok().is_some_and(|guard| {
+        guard
+            .as_ref()
+            .is_some_and(|panel| !matches!(panel.phase, Phase::Closing(_)))
+    })
 }
 
 /// `ds2-overlay` asks this every frame: while the panel is up, the game window gets no keyboard or

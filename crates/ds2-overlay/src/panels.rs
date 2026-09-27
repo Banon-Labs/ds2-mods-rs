@@ -37,6 +37,21 @@ pub const PANEL_SLOTS: usize = 4;
 /// The draw functions, as plain addresses. `0` is an empty slot.
 static DRAWS: [AtomicUsize; PANEL_SLOTS] = [const { AtomicUsize::new(0) }; PANEL_SLOTS];
 
+/// Signature of a panel's visibility check: `true` while it has something to draw.
+pub type VisibleFn = fn() -> bool;
+
+/// The visibility checks, index-matched to [`DRAWS`].
+static VISIBLE: [AtomicUsize; PANEL_SLOTS] = [const { AtomicUsize::new(0) }; PANEL_SLOTS];
+
+/// Whether any registered panel has something to draw this frame.
+fn any_visible() -> bool {
+    VISIBLE.iter().any(|slot| {
+        let raw = slot.load(Ordering::Acquire);
+        // SAFETY: a nonzero slot only ever holds a `VisibleFn` stored by `add_panel`.
+        raw != 0 && unsafe { core::mem::transmute::<usize, VisibleFn>(raw) }()
+    })
+}
+
 /// The modality checks, index-matched to [`DRAWS`]. `0` means never modal.
 static WANTS_INPUT: [AtomicUsize; PANEL_SLOTS] = [const { AtomicUsize::new(0) }; PANEL_SLOTS];
 
@@ -52,13 +67,20 @@ pub const FONT_SIZE_PX: f32 = 13.0 * 1.25;
 /// Register a panel. `true` when it is registered now, including when `draw` already was;
 /// `false` when every slot holds some other panel.
 ///
+/// `visible` answers whether the panel has anything on screen this frame. No imgui frame is
+/// rendered at all unless one panel says yes, because rendering one touches the back buffer: with
+/// the DS2LE `PathTracing` `dxgi.dll` proxy installed, an empty imgui frame every `Present` froze the
+/// picture on the last frame drawn while the game went on underneath (seen 2026-09-27: the terms
+/// screen still showing over a live title menu).
+///
 /// `wants_input` is `None` for a panel that never needs the game kept away from the mouse and
 /// keyboard, such as a status bar.
-pub fn add_panel(draw: DrawFn, wants_input: Option<WantsInputFn>) -> bool {
+pub fn add_panel(draw: DrawFn, visible: VisibleFn, wants_input: Option<WantsInputFn>) -> bool {
     let raw = draw as usize;
     for (index, slot) in DRAWS.iter().enumerate() {
         match slot.compare_exchange(0, raw, Ordering::AcqRel, Ordering::Acquire) {
             Ok(_) => {
+                VISIBLE[index].store(visible as usize, Ordering::Release);
                 WANTS_INPUT[index].store(wants_input.map_or(0, |f| f as usize), Ordering::Release);
                 return true;
             }
@@ -122,7 +144,7 @@ impl ImguiRenderLoop for Panels {
 /// `Present` detour after the drawers. Does nothing until a panel is registered, so a session
 /// with no panel never builds an imgui pipeline or subclasses the window.
 pub(crate) fn render(swap_chain: *mut c_void) {
-    if swap_chain.is_null() || DRAWS[0].load(Ordering::Acquire) == 0 {
+    if swap_chain.is_null() || !any_visible() {
         return;
     }
     if !LOOP_SET.swap(true, Ordering::AcqRel) {

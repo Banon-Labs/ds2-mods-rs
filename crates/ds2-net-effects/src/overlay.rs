@@ -44,6 +44,12 @@ pub(crate) fn publish(lines: Vec<Line>) {
     }
 }
 
+/// Whether the bar has anything to show. `ds2-overlay` renders no imgui frame at all while no
+/// panel does.
+fn has_lines() -> bool {
+    VIEW.try_lock().is_ok_and(|view| !view.is_empty())
+}
+
 /// The panel's draw function, called by `ds2-overlay` once per frame.
 fn draw_panel(ui: &Ui) {
     let draws = DRAWS.fetch_add(1, Ordering::Relaxed) + 1;
@@ -126,7 +132,7 @@ fn draw(ui: &Ui, display: [f32; 2], lines: &[Line]) {
 /// Register the bar as a `ds2-overlay` panel and make sure the `Present` detour goes in. `false`
 /// is logged.
 pub(crate) fn install() -> bool {
-    if !ds2_overlay::panels::add_panel(draw_panel, None) {
+    if !ds2_overlay::panels::add_panel(draw_panel, has_lines, None) {
         log(format_args!(
             "{LOG_PREFIX} overlay: every ds2-overlay panel slot is taken -- no selector bar"
         ));
