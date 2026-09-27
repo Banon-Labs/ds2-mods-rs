@@ -148,13 +148,39 @@ pub fn set_logger(logger: LogFn) {
     LOGGER.store(logger as usize, Ordering::Release);
 }
 
-fn log(args: std::fmt::Arguments<'_>) {
+/// The sink [`set_logger`] stored, so the HUD can hand `ds2-overlay` the same one.
+pub(crate) fn logger() -> Option<LogFn> {
     let raw = LOGGER.load(Ordering::Acquire);
-    if raw != 0 {
-        // SAFETY: `raw` is only ever a `LogFn` stored by `set_logger` above.
-        let logger: LogFn = unsafe { std::mem::transmute::<usize, LogFn>(raw) };
+    // SAFETY: a nonzero `raw` is only ever a `LogFn` stored by `set_logger` above.
+    (raw != 0).then(|| unsafe { std::mem::transmute::<usize, LogFn>(raw) })
+}
+
+pub(crate) fn log(args: std::fmt::Arguments<'_>) {
+    if let Some(logger) = logger() {
         logger(args);
     }
+}
+
+/// Whether the feature is on right now, for the HUD.
+pub(crate) fn enabled() -> bool {
+    ENABLED.load(Ordering::Acquire)
+}
+
+#[link(name = "winmm")]
+unsafe extern "system" {
+    fn PlaySoundW(sound: *const c_void, module: *mut c_void, flags: u32) -> i32;
+}
+
+/// `SND_ASYNC | SND_NODEFAULT | SND_MEMORY`, the flags `ds2-voice-chat` plays its clips with:
+/// return at once, never fall back to the system beep, and read the WAV from the pointer. A new
+/// clip cuts off one still playing.
+const PLAY_FLAGS: u32 = 0x0001 | 0x0002 | 0x0004;
+
+/// Say which way the key just went. `true` when `winmm` accepted the clip.
+fn announce(on: bool) -> bool {
+    let clip = crate::clip(on);
+    // SAFETY: `clip` is a `'static` WAV compiled into this DLL, so it outlives the async play.
+    unsafe { PlaySoundW(clip.as_ptr().cast(), core::ptr::null_mut(), PLAY_FLAGS) != 0 }
 }
 
 /// What [`install`] managed to do.
@@ -309,6 +335,8 @@ pub unsafe fn install(test_cap: Option<u8>, key: Option<Chord>) -> Outcome {
          written",
         show(test_cap)
     ));
+    // After the detours, and never a reason to refuse: the swords only show the switch.
+    crate::hud::install();
     Outcome { installed: true }
 }
 
@@ -606,6 +634,12 @@ fn tick(_session: usize) {
                  nothing is capped until {key} is pressed again"
             ));
         }
+        let spoken = announce(on);
+        log(format_args!(
+            "{LOG_PREFIX} announce {} played={spoken}",
+            if on { "on" } else { "off" }
+        ));
+        crate::hud::toggled(on);
     }
     let frame = FRAME.fetch_add(1, Ordering::Relaxed);
     if pressed || frame.is_multiple_of(CHECK_EVERY_FRAMES) {

@@ -847,7 +847,9 @@ dependencies = [
  "ds2-hook",
  "ds2-hotkey-config",
  "ds2-net-tick",
+ "ds2-overlay",
  "ds2-rva",
+ "hudhook",
 ]
 
 [[package]]

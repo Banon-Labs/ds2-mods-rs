@@ -414,7 +414,8 @@ pub fn view(
 ///
 /// An id is applied once a character is loaded, and again each time it has been seen on the
 /// player and then leaves -- the toggle's rules, per id. Unmarking one stops re-applying it; what
-/// is on the player runs out by itself.
+/// is on the player runs out by itself. The keeper runs only while net effects is on; turning it
+/// off takes the kept effects off the player, and [`Keeper::restart`] applies them again.
 #[derive(Clone, Debug, Default)]
 pub struct Keeper {
     kept: Vec<Kept>,
@@ -440,6 +441,16 @@ impl Keeper {
                     fresh: true,
                 });
             }
+        }
+    }
+
+    /// Start every kept id over, as if it had just been marked: each is applied at the next
+    /// readable frame and tracked from nothing. Net effects going back on calls this, because
+    /// going off removed the kept effects from the player and stopped watching them.
+    pub fn restart(&mut self) {
+        for k in &mut self.kept {
+            k.toggle = Toggle::new();
+            k.fresh = true;
         }
     }
 
@@ -649,5 +660,28 @@ mod tests {
             .filter(|_| k.frame(Some(&[]))[0].1.apply.is_some())
             .count();
         assert_eq!(applies, 0);
+    }
+
+    /// Going back on applies every kept id again at once, even one that had been seen, one that
+    /// never showed up, and one still waiting for a sighting.
+    #[test]
+    fn a_restart_applies_every_kept_id_again() {
+        let mut k = Keeper::default();
+        k.sync(&[1, 2, 3]);
+        assert!(k.frame(Some(&[])).iter().all(|(_, f)| f.apply.is_some()));
+        k.applied(1);
+        k.applied(2);
+        k.applied(3);
+        assert!(k.frame(Some(&[1])).iter().all(|(_, f)| f.apply.is_none()));
+        for _ in 0..SIGHTING_FRAMES {
+            k.frame(Some(&[1]));
+        }
+        k.restart();
+        let f = k.frame(Some(&[]));
+        assert_eq!(f.len(), 3);
+        assert!(
+            f.iter().all(|(_, f)| f.apply == Some(ApplyReason::Enabled)),
+            "{f:?}"
+        );
     }
 }

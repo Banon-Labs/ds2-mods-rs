@@ -2358,6 +2358,71 @@ pub const FRONTEND_NOW_LOADING_OPERATOR_OFFSET: usize = 0xc8;
 /// (`NowLoading`) and `+0x30` (Title).
 pub const FRONTEND_TITLE_OPERATOR_OFFSET: usize = 0xd0;
 
+// ---------------------------------------------------------------------------------------------
+// The in-game player HUD, and whether the game has it on screen (`ds2_overlay::game_hud_visible`).
+//
+// `FeOperatorFrontend` (vtable `0x1410fa628`, ctor `0x140505d80`, update `0x140507360`) owns every
+// in-world HUD scene; its builder `0x140507ea0` makes them, `FeSceneHpGuage` (the HP/stamina bar)
+// at `+0x398`. Its auto-HUD routine `0x140507a80` moves the HUD's scenes between the states below
+// and records the current one at [`FRONTEND_HUD_STATE_OFFSET`].
+//
+// Measured live 2026-09-27 (`scripts/frida/hud-visible-read.js`, `hud-visible-read2.js`) over
+// world -> in-game menu -> Quit Game -> title -> load -> bonfire: in the world with the bar up,
+// suspended `0`, state `0x66`; with a menu or the bonfire open, suspended `1`, state `0x68`; after
+// Quit Game the operator pointer went null (title screen); while loading back it was there with no
+// `PlayerCtrl` and state `0x68`; `0x66` again about three seconds after `PlayerCtrl` appeared.
+// ---------------------------------------------------------------------------------------------
+
+/// Frontend root -> `FeOperatorFrontend`, the in-world HUD's operator. `0xd8`.
+///
+/// Allocated (`0x470` bytes) and stored by the frontend's lazy factory at `0x14050174b`
+/// (`mov [rsi+0xd8],rax`). Null on the title screen: measured going null the moment Quit Game
+/// reached the title, and back when a save was loaded.
+pub const FRONTEND_HUD_OPERATOR_OFFSET: usize = 0xd8;
+
+/// `FeOperatorFrontend` -> `u8`, nonzero while a menu has suspended the frontend operators.
+///
+/// Written for every operator by the frontend root's two loops `0x1404ffea0` (sets `1`) and
+/// `0x1404ffd90` (sets `0`); callers include `FeGroupTestBonfireTop` (bonfire menu) and the
+/// in-game menu stack at `0x14002a38a`. While it is set, the auto-HUD routine takes its hide branch
+/// and the state becomes [`FRONTEND_HUD_STATE_HIDDEN`].
+pub const FRONTEND_HUD_SUSPENDED_OFFSET: usize = 0x08;
+
+/// `FeOperatorFrontend` -> `u32`, the HUD scenes' current display state. `+0x340`.
+///
+/// Written only with the constants below (`0x1405074ca`, `0x140507c6d`, `0x140507d02`,
+/// `0x140507dbd`, `0x140507e62`), each right after the same state is pushed into every scene of
+/// the HUD's list at `+0x2e8`.
+pub const FRONTEND_HUD_STATE_OFFSET: usize = 0x340;
+
+/// HUD state: shown. Set at `0x140507d02`.
+pub const FRONTEND_HUD_STATE_SHOWN: u32 = 0x66;
+/// HUD state: forced off (the update's one-shot request at `+0x46c`). Set at `0x1405074ca`.
+pub const FRONTEND_HUD_STATE_FORCED_OFF: u32 = 0x67;
+/// HUD state: hidden (suspended, or the auto-hide countdown ran out). Set at `0x140507e62`.
+pub const FRONTEND_HUD_STATE_HIDDEN: u32 = 0x68;
+/// HUD state: fading out after the auto-hide countdown. Set at `0x140507dbd`. Still on screen.
+pub const FRONTEND_HUD_STATE_FADING_OUT: u32 = 0x73;
+/// HUD state: coming back in from [`FRONTEND_HUD_STATE_FADING_OUT`]. Set at `0x140507c6d`.
+pub const FRONTEND_HUD_STATE_FADING_IN: u32 = 0x74;
+
+/// `FeOperatorFrontend` -> `FeSceneHpGuage`, the player's HP/stamina bar. `+0x398`.
+///
+/// Stored by the builder at `0x140507f6f`; the ctor `0x140509780` installs vtable `0x1410fab70`
+/// (read live on this pointer).
+pub const FRONTEND_HUD_HP_GAUGE_OFFSET: usize = 0x398;
+
+/// Any HUD scene -> its `FeLayoutSceneLinked`. `+0x08`, set by `0x140505c50`.
+pub const FE_SCENE_LINKED_OFFSET: usize = 0x08;
+
+/// `FeLayoutSceneLinked` -> `i32` hide count. `+0x18`.
+///
+/// `FeOperatorFrontend` v8 (`0x1405069b0`) hides a masked set of scenes by incrementing it
+/// (`0x140505d30`), v9 (`0x140506930`) shows them by decrementing (`0x140505d20`), and v10
+/// (`0x140506a30`) clears it (`0x140505d00`). Read `0` on the HP bar's scene through every state
+/// measured; above zero means the game has hidden that scene by this other route.
+pub const FE_SCENE_LINKED_HIDE_COUNT_OFFSET: usize = 0x18;
+
 /// `FeOperatorBase` vtable slot 24 (`+0xc0`) -- show or hide one of an operator's screens.
 ///
 /// `void slot24(this, u32 screen_id, bool show, float fade)`. Windows x64 puts those in `rcx`,
@@ -5315,6 +5380,27 @@ pub const SP_EFFECT_APPLY: u32 = 0x0014_bec0;
 /// base the image loads at. Identical to [`ARXAN_PROBE_REDIRECTED_SITE_PROLOGUE`], recorded under
 /// this name so a caller checks the function it calls rather than an experiment's site.
 pub const SP_EFFECT_APPLY_PROLOGUE: [u8; 5] = [0xe9, 0x1c, 0x0d, 0x9f, 0x01];
+
+/// `removeSpEffect(ChrSpEffectCtrl*, i32 id) -> bool`. RVA `0x0014c0e0`.
+///
+/// Takes the same controller as [`SP_EFFECT_APPLY`] and removes every action of `SpEffect` `id`
+/// from the character at once. Read in the binary: the entry is Arxan's jump
+/// ([`SP_EFFECT_REMOVE_PROLOGUE`]) to a stub at `0x141b898c6` that does `mov rcx,[rcx+0x10]` and
+/// jumps to `0x14022f7c0(worker, id)`. That checks the id (`0x14022fb20`), removes through
+/// `0x140230370([worker+0x30], id, 0)`, whose action-list half is `0x1402204c0` -- filter mode 2,
+/// "action slot `0x40` == id", the same field `darksouls2`'s `SpEffectAction::sp_effect_id` names --
+/// and, when something was removed, flushes the removal notices with `0x1402277c0([worker+0x10])`,
+/// which reaches the packet builder [`SP_EFFECT_SEND`] with op `1` in a session. The game's own
+/// callers (`0x140462b90`, `0x140426730`) get the controller from character vtable slot `0x130`
+/// and pass the id in `edx`, exactly as the apply callers do.
+///
+/// Measured 2026-09-27 by `scripts/frida/remove-speffect.js` on the game thread, right after the
+/// game's apply of `140001010`: returned `1`, and the player's actions with that id went from 1
+/// to 0 in the same call, twice.
+pub const SP_EFFECT_REMOVE: u32 = 0x0014_c0e0;
+
+/// The five bytes [`SP_EFFECT_REMOVE`] begins with: `jmp 0x141b898c6`, Arxan's redirect.
+pub const SP_EFFECT_REMOVE_PROLOGUE: [u8; 5] = [0xe9, 0xe1, 0xd7, 0xa3, 0x01];
 
 /// The SpEffect-sync packet builder `FUN_14051e710(ctx, kind, add_remove, who, id, extra,
 /// duration, via_host)`, which returns nothing. RVA `0x0051_e710`.

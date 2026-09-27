@@ -1,4 +1,5 @@
-//! The selector bar on screen: one of `ds2-overlay`'s imgui panels.
+//! The selector bar and the F9 toggle's glyph on screen: one of `ds2-overlay`'s imgui panels.
+//! The glyph is drawn from this same panel rather than a second one, so it takes no panel slot.
 //!
 //! # Why nothing here hooks or renders
 //!
@@ -8,7 +9,7 @@
 //! game thread's frame consumer, which runs earlier in the same `Present`.
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use hudhook::imgui::Ui;
 
@@ -37,6 +38,20 @@ const CURSOR: [f32; 4] = [1.0, 0.85, 0.35, 1.0];
 const HINT: [f32; 4] = [0.70, 0.70, 0.66, 1.0];
 const PADDING: f32 = 8.0;
 
+/// Whether the F9 toggle is on, so the glyph is drawn. Set by the frame consumer on each toggle.
+static GLYPH_ON: AtomicBool = AtomicBool::new(false);
+
+/// What the last panel call did about the glyph, so each change is one log line.
+static GLYPH_DRAWN: AtomicBool = AtomicBool::new(false);
+
+const GLYPH_DISC: [f32; 4] = [0.0, 0.0, 0.0, 0.62];
+const GLYPH_GOLD: [f32; 4] = [1.0, 0.82, 0.30, 1.0];
+
+/// Show or hide the toggle's glyph from the next frame on.
+pub(crate) fn set_glyph(on: bool) {
+    GLYPH_ON.store(on, Ordering::Relaxed);
+}
+
 /// Hand the next frame's lines to the panel.
 pub(crate) fn publish(lines: Vec<Line>) {
     if let Ok(mut view) = VIEW.lock() {
@@ -47,7 +62,52 @@ pub(crate) fn publish(lines: Vec<Line>) {
 /// Whether the bar has anything to show. `ds2-overlay` renders no imgui frame at all while no
 /// panel does.
 fn has_lines() -> bool {
-    VIEW.try_lock().is_ok_and(|view| !view.is_empty())
+    glyph_wanted() || VIEW.try_lock().is_ok_and(|view| !view.is_empty())
+}
+
+/// The toggle is on and the game has its own HUD up ([`ds2_overlay::game_hud_visible`]). The
+/// glyph sits beside the HUD, so it is not drawn on the title screen, while loading, or with a
+/// menu open.
+fn glyph_wanted() -> bool {
+    GLYPH_ON.load(Ordering::Relaxed) && ds2_overlay::game_hud_visible()
+}
+
+/// The toggle's glyph, on top of everything else this panel draws. See `crate::glyph`.
+fn draw_glyph(ui: &Ui, display: [f32; 2]) {
+    let on = glyph_wanted();
+    let g = crate::glyph::layout(display);
+    if GLYPH_DRAWN.swap(on, Ordering::Relaxed) != on {
+        log(format_args!(
+            "{LOG_PREFIX} overlay: glyph {} center=({:.0},{:.0}) radius={:.1} display={:.0}x{:.0}",
+            if on { "shown" } else { "hidden" },
+            g.center[0],
+            g.center[1],
+            g.radius,
+            display[0],
+            display[1]
+        ));
+    }
+    if !on {
+        return;
+    }
+    let list = ui.get_foreground_draw_list();
+    list.add_circle(g.center, g.radius, GLYPH_DISC)
+        .filled(true)
+        .num_segments(32)
+        .build();
+    list.add_circle(g.center, g.radius - g.thickness / 2.0, GLYPH_GOLD)
+        .thickness(g.thickness)
+        .num_segments(32)
+        .build();
+    for ray in g.rays {
+        list.add_line(ray.inner, ray.outer, GLYPH_GOLD)
+            .thickness(g.thickness)
+            .build();
+    }
+    list.add_circle(g.center, g.core, GLYPH_GOLD)
+        .filled(true)
+        .num_segments(16)
+        .build();
 }
 
 /// The panel's draw function, called by `ds2-overlay` once per frame.
@@ -73,6 +133,7 @@ fn draw_panel(ui: &Ui) {
             lines.len()
         ));
     }
+    draw_glyph(ui, display);
     if lines.is_empty() {
         return;
     }

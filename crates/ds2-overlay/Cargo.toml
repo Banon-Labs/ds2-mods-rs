@@ -18,13 +18,14 @@ repository.workspace = true
 
 # The frame-hook and panel tables are plain atomics and are tested on the host.
 [dependencies]
+# Where the game keeps its own swap chain, so the detour is read off it and no throwaway swap
+# chain is ever built, and the HUD fields `game_hud` reads. Constants only, so it is a host
+# dependency too: the host tests of `game_hud::decide` use the state values.
+ds2-rva.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 ds2-game-base.workspace = true
 ds2-hook.workspace = true
-# Where the game keeps its own swap chain, so the detour is read off it and no throwaway swap
-# chain is ever built.
-ds2-rva.workspace = true
 # The vendored copy, whose `set_shared_render_loop`/`render_shared` draw inside this detour
 # instead of hooking `Present` a second time. Its `windows` and `imgui` re-exports are the types
 # every panel agrees on.

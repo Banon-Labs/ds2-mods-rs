@@ -16,6 +16,10 @@ ds2-game-base.workspace = true
 ds2-hook.workspace = true
 ds2-hotkey-config.workspace = true
 ds2-net-tick.workspace = true
+# The on/off swords are one of `ds2-overlay`'s imgui panels, drawn through its `Present` detour on
+# the game's own swap chain; `hudhook` is for the `imgui::Ui` that panel is handed.
+ds2-overlay.workspace = true
+hudhook.workspace = true
 
 [lints]
 workspace = true
