@@ -12,15 +12,17 @@
 //!
 //! # Where the hook goes, and how its address is found
 //!
-//! `Present` is not an export. It is slot 8 of `IDXGISwapChain`'s vtable, and the only supported
-//! way to learn that address is to have Direct3D build one: [`present_address`] creates a
-//! throwaway device and swap chain against a message-only window, reads the slot, and releases
-//! everything. The game's swap chain is a different object but the same class, so it shares the
-//! vtable -- which is what makes one detour cover the real one.
+//! `Present` is not an export. It is slot 8 of `IDXGISwapChain`'s vtable, and it is read off the
+//! game's own swap chain: [`install`] starts a thread that waits for the pointer `ds2-rva` records
+//! at `GRAPHICS_DEVICE`, reads the slot and hooks it. Nothing here creates a device or a swap
+//! chain -- a throwaway one is a whole second renderer to a `dxgi.dll` proxy such as DS2LE
+//! `PathTracing`, and releasing it crashed the game.
 //!
-//! **This hooks a Microsoft DLL, not `DarkSoulsII.exe`.** Everything the workspace has learned
-//! about Arxan (bd `arxan-vs-minhook-answered-properly-2026-08-26`) is about detours inside the
-//! game image, where the integrity checks live. `dxgi.dll` is outside all of that.
+//! **This hooks the DXGI module that owns the swap chain, not `DarkSoulsII.exe`** -- the system
+//! `dxgi.dll`, or a proxy in the game folder when one is installed; the log line names which.
+//! Everything the workspace has learned about Arxan (bd `arxan-vs-minhook-answered-properly-2026-08-26`)
+//! is about detours inside the game image, where the integrity checks live. The hook is outside
+//! all of that; only the pointer walk reads the game image.
 //!
 //! # State is saved and restored, and that is not optional
 //!
@@ -41,38 +43,29 @@
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use ds2_hook::{MH_ApplyQueued, MH_Initialize, MhHook};
-use windows::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, WPARAM};
-use windows::Win32::Graphics::Direct3D::{
-    D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
-};
+use ds2_hook::{MH_Initialize, MhHook};
+use windows::Win32::Foundation::HMODULE;
+use windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_VERTEX_BUFFER, D3D11_BLEND_DESC,
     D3D11_BLEND_INV_SRC_ALPHA, D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD, D3D11_BLEND_SRC_ALPHA,
     D3D11_BUFFER_DESC, D3D11_COLOR_WRITE_ENABLE_ALL, D3D11_CPU_ACCESS_WRITE, D3D11_CULL_NONE,
     D3D11_DEPTH_STENCIL_DESC, D3D11_FILL_SOLID, D3D11_INPUT_ELEMENT_DESC,
     D3D11_INPUT_PER_VERTEX_DATA, D3D11_MAP_WRITE_DISCARD, D3D11_RASTERIZER_DESC,
-    D3D11_RENDER_TARGET_BLEND_DESC, D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA, D3D11_USAGE_DYNAMIC,
-    D3D11_VIEWPORT, D3D11CreateDeviceAndSwapChain, ID3D11BlendState, ID3D11Buffer,
-    ID3D11DepthStencilState, ID3D11DepthStencilView, ID3D11Device, ID3D11DeviceContext,
-    ID3D11InputLayout, ID3D11PixelShader, ID3D11RasterizerState, ID3D11RenderTargetView,
-    ID3D11Texture2D, ID3D11VertexShader,
+    D3D11_RENDER_TARGET_BLEND_DESC, D3D11_SUBRESOURCE_DATA, D3D11_USAGE_DYNAMIC, D3D11_VIEWPORT,
+    ID3D11BlendState, ID3D11Buffer, ID3D11DepthStencilState, ID3D11DepthStencilView, ID3D11Device,
+    ID3D11DeviceContext, ID3D11InputLayout, ID3D11PixelShader, ID3D11RasterizerState,
+    ID3D11RenderTargetView, ID3D11Texture2D, ID3D11VertexShader,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
-    DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_FORMAT_R32G32_FLOAT, DXGI_FORMAT_R32G32B32A32_FLOAT,
-    DXGI_MODE_DESC, DXGI_SAMPLE_DESC,
+    DXGI_FORMAT_R32G32_FLOAT, DXGI_FORMAT_R32G32B32A32_FLOAT,
 };
-use windows::Win32::Graphics::Dxgi::{
-    DXGI_SWAP_CHAIN_DESC, DXGI_USAGE_RENDER_TARGET_OUTPUT, IDXGISwapChain,
+use windows::Win32::Graphics::Dxgi::IDXGISwapChain;
+use windows::Win32::System::LibraryLoader::{
+    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+    GetModuleFileNameW, GetModuleHandleExW, GetProcAddress, LoadLibraryA,
 };
-use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress, LoadLibraryA};
-use windows::Win32::UI::WindowsAndMessaging::{
-    CS_HREDRAW, CS_VREDRAW, CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassExW,
-    UnregisterClassW, WNDCLASSEXW, WS_OVERLAPPEDWINDOW,
-};
-// `Interface` is the trait that gives every COM wrapper its `as_raw`, which is how the vtable is
-// reached in `probe_swap_chain`.
-use windows::core::{BOOL, Interface, PCSTR, PCWSTR, s, w};
+use windows::core::{BOOL, Interface, PCSTR, PCWSTR, s};
 
 use crate::log::log;
 
@@ -786,163 +779,81 @@ unsafe fn install_capture(chain: &IDXGISwapChain) {
     }
 }
 
-/// Find `IDXGISwapChain::Present` by making Direct3D build a swap chain and reading its vtable.
-///
-/// The throwaway window is never shown: `CreateWindowExW` without `WS_VISIBLE` on a class
-/// registered for this purpose, destroyed before this returns along with the class itself. A
-/// leaked window class is the kind of thing that makes a second call to this function fail with
-/// an error nobody connects to the first.
-fn present_address() -> Option<usize> {
-    // SAFETY: the module handle of the running process, which always exists.
-    let instance: HMODULE = unsafe { GetModuleHandleW(None) }.ok()?;
-    let class_name = w!("ds2_invasion_path_probe");
-    let class = WNDCLASSEXW {
-        cbSize: core::mem::size_of::<WNDCLASSEXW>() as u32,
-        style: CS_HREDRAW | CS_VREDRAW,
-        lpfnWndProc: Some(probe_window_proc),
-        hInstance: instance.into(),
-        lpszClassName: class_name,
-        ..Default::default()
-    };
-    // SAFETY: a fully initialised class descriptor with a static name and a real window
-    // procedure.
-    if unsafe { RegisterClassExW(&class) } == 0 {
-        log(format_args!("overlay: could not register the probe class"));
-        return None;
-    }
-
-    let result = probe_swap_chain(class_name, instance);
-
-    // SAFETY: unregistering the class this function registered, after its only window is gone.
-    unsafe {
-        let _ = UnregisterClassW(class_name, Some(instance.into()));
-    }
-    result
-}
-
-/// The probe window's procedure: the default, for every message.
-///
-/// # Safety
-///
-/// Called by `user32` for a window this module created.
-unsafe extern "system" fn probe_window_proc(
-    window: HWND,
-    message: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
-    // SAFETY: forwarding the message unchanged to the default handler.
-    unsafe { DefWindowProcW(window, message, wparam, lparam) }
-}
-
-/// The body of [`present_address`], split out so the class is unregistered on every path.
-fn probe_swap_chain(class_name: PCWSTR, instance: HMODULE) -> Option<usize> {
-    // SAFETY: a window of the class registered immediately above. Not `WS_VISIBLE`, so nothing
-    // appears on screen.
-    let window = unsafe {
-        CreateWindowExW(
-            Default::default(),
-            class_name,
-            w!("ds2-invasion-path"),
-            WS_OVERLAPPEDWINDOW,
-            0,
-            0,
-            64,
-            64,
-            None,
-            None,
-            Some(instance.into()),
-            None,
-        )
-    }
-    .ok()?;
-
-    let description = DXGI_SWAP_CHAIN_DESC {
-        BufferDesc: DXGI_MODE_DESC {
-            Width: 64,
-            Height: 64,
-            Format: DXGI_FORMAT_R8G8B8A8_UNORM,
-            ..Default::default()
-        },
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
-        BufferUsage: DXGI_USAGE_RENDER_TARGET_OUTPUT,
-        BufferCount: 1,
-        OutputWindow: window,
-        Windowed: BOOL(1),
-        ..Default::default()
-    };
-
-    let mut swap_chain: Option<IDXGISwapChain> = None;
-    let mut device: Option<ID3D11Device> = None;
-    let mut context: Option<ID3D11DeviceContext> = None;
-    let levels = [D3D_FEATURE_LEVEL_11_0];
-    // SAFETY: a fully initialised swap chain description over a window created above; every
-    // out-parameter is an owned local.
-    let created = unsafe {
-        D3D11CreateDeviceAndSwapChain(
-            None,
-            D3D_DRIVER_TYPE_HARDWARE,
-            HMODULE::default(),
-            Default::default(),
-            Some(&levels),
-            D3D11_SDK_VERSION,
-            Some(&description),
-            Some(&mut swap_chain),
-            Some(&mut device),
-            None,
-            Some(&mut context),
-        )
-    };
-
-    let address = match created {
-        Ok(()) => swap_chain.as_ref().map(|chain| {
-            // SAFETY: a live COM object -- its first field is a pointer to its vtable, and slot
-            // 8 of `IDXGISwapChain` is `Present`: three `IUnknown` methods, four
-            // `IDXGIObject`, one `IDXGIDeviceSubObject`.
-            unsafe {
-                let raw = chain.as_raw().cast::<*const usize>();
-                *(*raw).add(PRESENT_VTABLE_SLOT)
-            }
-        }),
-        Err(error) => {
-            log(format_args!(
-                "overlay: no probe device (0x{:08x}) -- no overlay this session",
-                error.code().0
-            ));
-            None
-        }
-    };
-
-    // Dropped before the window is destroyed, because a swap chain outliving its output window is
-    // undefined and debug layers say so loudly.
-    drop(context);
-    drop(swap_chain);
-    drop(device);
-    // SAFETY: destroying the window this function created, which nothing else holds.
-    unsafe {
-        let _ = DestroyWindow(window);
-    }
-    address
-}
-
 /// Slot 8 of `IDXGISwapChain`: `QueryInterface`, `AddRef`, `Release`, `SetPrivateData`,
 /// `SetPrivateDataInterface`, `GetPrivateData`, `GetParent`, `GetDevice`, then `Present`.
 const PRESENT_VTABLE_SLOT: usize = 8;
 
-/// Install the `Present` detour. `false` means no overlay this session, already logged.
+/// How often the watcher looks for the game's swap chain before it exists.
+const SWAP_CHAIN_POLL: core::time::Duration = core::time::Duration::from_millis(50);
+
+/// How long the watcher waits before saying, once, that the swap chain has not appeared.
+const SWAP_CHAIN_SLOW: core::time::Duration = core::time::Duration::from_secs(30);
+
+/// The game's own `IDXGISwapChain`, or `None` while `graphics-init` has not finished.
+///
+/// `[GRAPHICS_DEVICE] + 0xd20` is the holder, and its first qword is the chain; the hops and the
+/// disassembly behind them are on the constants in `ds2-rva`. Every read goes through
+/// `safe_read_usize`, so a hop that is not mapped yet is `None` rather than a fault.
+fn game_swap_chain() -> Option<usize> {
+    let global = ds2_game_base::mem::game_rva(ds2_rva::GRAPHICS_DEVICE).ok()?;
+    let non_null = |value: usize| (value != 0).then_some(value);
+    // SAFETY: each read is `ReadProcessMemory` on this process, which answers `None` for an
+    // unmapped address instead of faulting.
+    unsafe {
+        let device = non_null(ds2_game_base::mem::safe_read_usize(global)?)?;
+        let holder = non_null(ds2_game_base::mem::safe_read_usize(
+            device + ds2_rva::GRAPHICS_DEVICE_SWAP_CHAIN_HOLDER_OFFSET,
+        )?)?;
+        non_null(ds2_game_base::mem::safe_read_usize(
+            holder + ds2_rva::SWAP_CHAIN_HOLDER_DXGI_OFFSET,
+        )?)
+    }
+}
+
+/// `Present` off the game's own swap chain's vtable.
+fn present_address(chain: usize) -> Option<usize> {
+    // SAFETY: as in `game_swap_chain` -- guarded reads of a COM object's vtable pointer and one of
+    // its slots.
+    unsafe {
+        let vtable = ds2_game_base::mem::safe_read_usize(chain)?;
+        let present = ds2_game_base::mem::safe_read_usize(
+            vtable + PRESENT_VTABLE_SLOT * core::mem::size_of::<usize>(),
+        )?;
+        (present != 0).then_some(present)
+    }
+}
+
+/// The file name of the module holding `address`, for the log line. `?` when there is none.
+///
+/// With a `dxgi.dll` proxy installed the slot lands in the proxy rather than the system DLL, and
+/// that is worth one line per run: it is what says which `Present` the overlay is drawing through.
+fn owning_module(address: usize) -> String {
+    let mut module = HMODULE::default();
+    // SAFETY: FROM_ADDRESS reads `address` as an address, not a string; UNCHANGED_REFCOUNT takes
+    // no reference, so there is nothing to release.
+    let found = unsafe {
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            PCWSTR(address as *const u16),
+            &mut module,
+        )
+    };
+    if found.is_err() {
+        return String::from("?");
+    }
+    let mut path = [0u16; 260];
+    // SAFETY: a module handle just returned, and a buffer this frame owns.
+    let length = unsafe { GetModuleFileNameW(Some(module), &mut path) } as usize;
+    let path = String::from_utf16_lossy(&path[..length.min(path.len())]);
+    path.rsplit(['\\', '/']).next().unwrap_or("?").to_owned()
+}
+
+/// Detour `present`, once the address is known. `false` has been logged.
 ///
 /// # Safety
 ///
-/// Installs a native code detour. Call once, from the loader's install position.
-pub(crate) unsafe fn install() -> bool {
-    let Some(address) = present_address() else {
-        return false;
-    };
-    // SAFETY: MinHook's own initialiser; idempotent and safe to call when another module in this
-    // DLL has already done it.
+/// `address` must be `Present` on a live swap chain's vtable.
+unsafe fn hook_present(address: usize) -> bool {
     // SAFETY: `MH_Initialize` takes no arguments and is safe to call again on an already-
     // initialised library, which the status below distinguishes.
     let status = unsafe { MH_Initialize() };
@@ -952,11 +863,8 @@ pub(crate) unsafe fn install() -> bool {
         log(format_args!("overlay: MH_Initialize said {status:?}"));
         return false;
     }
-    // SAFETY: `address` is slot 8 of a real `IDXGISwapChain` vtable and `present` matches its
-    // ABI; the trampoline is stored before the hook is enabled, so the detour can never run
-    // without one.
-    // SAFETY: the target is an RVA this crate validated against the prologue it expects before
-    // reaching here, and the detour is a `'static` fn item of the matching ABI.
+    // SAFETY: `address` is slot 8 of the game's own `IDXGISwapChain` vtable and `present` matches
+    // its ABI.
     let hook = match unsafe { MhHook::new(address as *mut c_void, present as *mut c_void) } {
         Ok(hook) => hook,
         Err(status) => {
@@ -964,28 +872,92 @@ pub(crate) unsafe fn install() -> bool {
             return false;
         }
     };
+    // The trampoline is stored before the hook is enabled, so the detour can never run without
+    // one.
     ORIGINAL.store(hook.trampoline() as usize, Ordering::Release);
-    // SAFETY: enabling the hook created immediately above.
-    if let Err(status) = unsafe { hook.queue_enable() } {
-        log(format_args!("overlay: queue_enable said {status:?}"));
+    // `ds2_hook::MH_EnableHook` patches at once, or queues into the loader's boot batch if that is
+    // still open -- it will not be by the time a swap chain exists, but either is correct.
+    // `MhHook` has no `Drop`; the detour belongs to MinHook's table from here on.
+    // SAFETY: the target `MhHook::new` just registered.
+    let status = unsafe { ds2_hook::MH_EnableHook(address as *mut c_void) };
+    if status != ds2_hook::MH_STATUS::MH_OK {
+        log(format_args!("overlay: MH_EnableHook said {status:?}"));
         return false;
     }
-    // SAFETY: applies this DLL's queued hooks. Other features in the loader queue theirs the
-    // same way.
-    if unsafe { MH_ApplyQueued() } != ds2_hook::MH_STATUS::MH_OK {
-        log(format_args!("overlay: MH_ApplyQueued refused"));
-        return false;
-    }
-    // `hook` goes out of scope here and that is FINE, which is worth one sentence because it
-    // looks like a bug. `MhHook` is a handle, not a guard: it has no `Drop`, and the detour it
-    // created is owned by MinHook's own table until `MH_DisableHook` or `MH_Uninitialize`.
-    // Dropping the handle uninstalls nothing. An earlier version wrote `mem::forget` here to
-    // "keep it alive", which clippy correctly called out as a no-op on a type with no destructor
-    // -- and which would have quietly stopped meaning anything if `MhHook` ever grew one.
-    log(format_args!(
-        "overlay: Present hooked at 0x{address:x} -- the overlay can draw"
-    ));
     true
+}
+
+/// Wait for the game's swap chain, then hook its `Present`. Runs on its own thread.
+fn watch_for_swap_chain() {
+    let started = std::time::Instant::now();
+    let mut said_slow = false;
+    let chain = loop {
+        if let Some(chain) = game_swap_chain() {
+            break chain;
+        }
+        if !said_slow && started.elapsed() >= SWAP_CHAIN_SLOW {
+            said_slow = true;
+            log(format_args!(
+                "overlay: no swap chain at [GRAPHICS_DEVICE]+0x{:x} after {}s -- still waiting",
+                ds2_rva::GRAPHICS_DEVICE_SWAP_CHAIN_HOLDER_OFFSET,
+                SWAP_CHAIN_SLOW.as_secs()
+            ));
+        }
+        std::thread::sleep(SWAP_CHAIN_POLL);
+    };
+    let Some(address) = present_address(chain) else {
+        log(format_args!(
+            "overlay: the game's swap chain 0x{chain:x} has no readable Present -- no overlay \
+             this session"
+        ));
+        return;
+    };
+    // SAFETY: `address` was read off the game's own live swap chain just above.
+    if unsafe { hook_present(address) } {
+        log(format_args!(
+            "overlay: Present hooked at 0x{address:x} in {} (the game's own swap chain 0x{chain:x}, \
+             found after {} ms) -- the overlay can draw",
+            owning_module(address),
+            started.elapsed().as_millis()
+        ));
+    } else {
+        log(format_args!(
+            "overlay: not hooked -- no overlay this session"
+        ));
+    }
+}
+
+/// Arm the `Present` detour. `false` means no overlay this session, already logged.
+///
+/// No swap chain is created here. An earlier version built a throwaway device and swap chain to
+/// read slot 8 and released them, and with the DS2LE `PathTracing` `dxgi.dll` proxy installed the
+/// proxy ran its whole D3D12 init on that throwaway and crashed the game when it was released.
+/// The game's own swap chain does not exist yet at the loader's install position, so a thread
+/// watches the pointer `ds2-rva` records for it and hooks `Present` off its vtable once
+/// `graphics-init` has stored it. The frames the game presents inside `graphics-init` go out
+/// without the overlay, which draws nothing that early anyway.
+///
+/// # Safety
+///
+/// Installs a native code detour, later, from another thread. Call once.
+pub(crate) unsafe fn install() -> bool {
+    match std::thread::Builder::new()
+        .name(String::from("ds2-invasion-path-swapchain"))
+        .spawn(watch_for_swap_chain)
+    {
+        Ok(_) => {
+            log(format_args!(
+                "overlay: waiting for the game's own swap chain -- none is created here"
+            ));
+            true
+        }
+        Err(error) => {
+            log(format_args!(
+                "overlay: no watcher thread ({error}) -- no overlay this session"
+            ));
+            false
+        }
+    }
 }
 
 // The screen-space expansion that turns projected points into these vertices lives in
