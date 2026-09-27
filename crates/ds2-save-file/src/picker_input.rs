@@ -41,6 +41,14 @@ pub(crate) enum Press {
     /// Escape or Start: leave the panel, or stop typing.
     Close,
     Char(char),
+    /// Ctrl+A.
+    SelectAll,
+    /// Ctrl+V, or Ctrl+Shift+V.
+    Paste,
+    /// Ctrl+C.
+    Copy,
+    /// Ctrl+X.
+    Cut,
 }
 
 /// Frames a held key waits before it starts repeating, at the game's 60.
@@ -53,6 +61,7 @@ const VK_BACK: i32 = 0x08;
 const VK_TAB: i32 = 0x09;
 const VK_RETURN: i32 = 0x0d;
 const VK_SHIFT: i32 = 0x10;
+const VK_CONTROL: i32 = 0x11;
 const VK_ESCAPE: i32 = 0x1b;
 const VK_SPACE: i32 = 0x20;
 const VK_PRIOR: i32 = 0x21;
@@ -182,18 +191,35 @@ impl Reader {
             );
             step(key_down(vk), press, repeats, &mut self.held);
         }
+        // With Ctrl held a letter is a shortcut, not a character, and Shift does not change which:
+        // Ctrl+Shift+A, C, X and V do what Ctrl+A, C, X and V do, for the hand used to a terminal.
+        let ctrl = key_down(VK_CONTROL);
         for (offset, letter) in ('a'..='z').enumerate() {
+            let down = key_down(0x41 + offset as i32);
+            if ctrl {
+                let shortcut = match letter {
+                    'a' => Some(Press::SelectAll),
+                    'c' => Some(Press::Copy),
+                    'x' => Some(Press::Cut),
+                    'v' => Some(Press::Paste),
+                    _ => None,
+                };
+                // The letter's own slot, so letting go of Ctrl with the letter still down does not
+                // type it as well.
+                step(
+                    down && shortcut.is_some(),
+                    shortcut.unwrap_or(Press::SelectAll),
+                    false,
+                    &mut self.held,
+                );
+                continue;
+            }
             let typed = if shift {
                 letter.to_ascii_uppercase()
             } else {
                 letter
             };
-            step(
-                key_down(0x41 + offset as i32),
-                Press::Char(typed),
-                true,
-                &mut self.held,
-            );
+            step(down, Press::Char(typed), true, &mut self.held);
         }
         for (offset, digit) in ('0'..='9').enumerate() {
             // Shifted digits are symbols no path needs, so they type nothing.

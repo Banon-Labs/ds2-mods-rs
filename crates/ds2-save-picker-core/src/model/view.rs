@@ -100,6 +100,8 @@ pub struct FieldView {
     pub editing: bool,
     /// Whether the strip's focus is on it.
     pub focused: bool,
+    /// Whether Ctrl+A selected the whole text, so the next keystroke replaces it.
+    pub selected: bool,
 }
 
 /// The whole panel.
@@ -241,6 +243,7 @@ impl SavePickerModel {
             ghost: if editing { self.ghost_suffix() } else { None },
             editing,
             focused: editing || (self.path_focused && self.drive_row() == Some(self.cursor)),
+            selected: editing && self.all_selected(),
         })
     }
 
@@ -252,6 +255,7 @@ impl SavePickerModel {
             ghost: None,
             editing: true,
             focused: true,
+            selected: edit.all_selected,
         })
     }
 

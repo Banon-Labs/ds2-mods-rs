@@ -72,6 +72,8 @@ impl Default for PickerSettings {
 }
 
 #[cfg(windows)]
+mod clipboard;
+#[cfg(windows)]
 mod dialog;
 #[cfg(windows)]
 pub mod export;

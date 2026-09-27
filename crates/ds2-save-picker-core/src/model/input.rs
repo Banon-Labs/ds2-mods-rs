@@ -50,6 +50,8 @@ pub enum PickerInput {
     PageUp,
     /// Page Down, likewise.
     PageDown,
+    /// Ctrl+A while typing: select the whole text.
+    SelectAll,
 }
 
 impl SavePickerModel {
@@ -68,6 +70,7 @@ impl SavePickerModel {
         match input {
             PickerInput::Char(typed) => self.type_char(typed),
             PickerInput::Backspace => self.delete_char(),
+            PickerInput::SelectAll => self.select_all(),
             PickerInput::Tab | PickerInput::Right => self.accept_completion(),
             PickerInput::Confirm => self.commit_edit(),
             PickerInput::Back => self.cancel_edit(),
@@ -110,7 +113,7 @@ impl SavePickerModel {
             PickerInput::Confirm => self.activate_cursor(),
             PickerInput::Back | PickerInput::Backspace => self.back(),
             PickerInput::Tab | PickerInput::ClickPathField => self.begin_path_edit(),
-            PickerInput::Char(_) => PickerActivation::Ignored,
+            PickerInput::Char(_) | PickerInput::SelectAll => PickerActivation::Ignored,
             PickerInput::ClickRow(row) => self.click_row(row),
             PickerInput::ClickDriveCell(cell) => self.click_drive_cell(cell),
         }
@@ -129,6 +132,7 @@ impl SavePickerModel {
             | PickerInput::PageDown
             | PickerInput::Tab
             | PickerInput::Char(_)
+            | PickerInput::SelectAll
             | PickerInput::ClickDriveCell(_)
             | PickerInput::ClickPathField => PickerActivation::Ignored,
         }

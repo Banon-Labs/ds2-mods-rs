@@ -422,6 +422,28 @@ fn on_frame() {
                     Press::PageDown => PickerInput::PageDown,
                     Press::Backspace => PickerInput::Backspace,
                     Press::Char(typed) => PickerInput::Char(typed),
+                    Press::SelectAll => PickerInput::SelectAll,
+                    Press::Paste => {
+                        if let Some(text) = crate::clipboard::read()
+                            && panel.model.paste(&text) != PickerActivation::Ignored
+                        {
+                            panel.dirty();
+                        }
+                        continue;
+                    }
+                    Press::Copy => {
+                        if let Some(text) = panel.model.selected_text() {
+                            crate::clipboard::write(text);
+                        }
+                        continue;
+                    }
+                    Press::Cut => {
+                        if let Some(text) = panel.model.cut_selection() {
+                            crate::clipboard::write(&text);
+                            panel.dirty();
+                        }
+                        continue;
+                    }
                 };
                 panel.apply(input);
             }
@@ -501,6 +523,8 @@ const CURRENT: [f32; 4] = [0.55, 0.95, 0.60, 1.0];
 const WARN: [f32; 4] = [1.0, 0.72, 0.30, 1.0];
 const FIELD_BG: [f32; 4] = [0.10, 0.12, 0.16, 1.0];
 const FIELD_EDIT: [f32; 4] = [0.14, 0.18, 0.26, 1.0];
+/// Behind field text Ctrl+A selected.
+const SELECTION: [f32; 4] = [0.20, 0.36, 0.62, 1.0];
 const CELL_BG: [f32; 4] = [0.12, 0.12, 0.13, 1.0];
 const FOCUS_EDGE: [f32; 4] = [0.95, 0.88, 0.66, 1.0];
 const PAD: f32 = 14.0;
@@ -674,8 +698,20 @@ fn draw(ui: &Ui) {
             .rounding(3.0)
             .build();
         let caret = if field.editing { "_" } else { "" };
+        let text_y = min[1] + (row_height - line) * 0.5;
+        if field.selected {
+            let label = ui.calc_text_size("name: ")[0];
+            let typed = ui.calc_text_size(&field.text)[0];
+            list.add_rect(
+                [min[0] + 5.0 + label, text_y - 1.0],
+                [min[0] + 7.0 + label + typed, text_y + line + 1.0],
+                SELECTION,
+            )
+            .filled(true)
+            .build();
+        }
         list.add_text(
-            [min[0] + 6.0, min[1] + (row_height - line) * 0.5],
+            [min[0] + 6.0, text_y],
             TEXT,
             format!("name: {}{caret}", field.text),
         );
@@ -789,8 +825,17 @@ fn draw_drive_strip(
         }
         let space = max[0] - min[0] - 12.0;
         let shown = clip_left(ui, &field.text, space * 0.8);
-        list.add_text([min[0] + 6.0, origin[1]], TEXT, &shown);
         let typed_width = ui.calc_text_size(&shown)[0];
+        if field.selected {
+            list.add_rect(
+                [min[0] + 5.0, origin[1] - 1.0],
+                [min[0] + 7.0 + typed_width, origin[1] + line + 1.0],
+                SELECTION,
+            )
+            .filled(true)
+            .build();
+        }
+        list.add_text([min[0] + 6.0, origin[1]], TEXT, &shown);
         if field.editing {
             let ghost = field.ghost.as_deref().unwrap_or("");
             list.add_text([min[0] + 6.0 + typed_width, origin[1]], DIM, ghost);

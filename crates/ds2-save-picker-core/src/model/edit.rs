@@ -33,6 +33,8 @@ pub enum EditTarget {
 pub(super) struct Edit {
     pub(super) target: EditTarget,
     pub(super) text: String,
+    /// Ctrl+A was pressed: the next keystroke or paste replaces the whole text.
+    pub(super) all_selected: bool,
 }
 
 /// Characters Windows refuses anywhere in a file name.
@@ -65,6 +67,7 @@ impl SavePickerModel {
         self.edit = Some(Edit {
             target: EditTarget::Path,
             text,
+            all_selected: false,
         });
         if self.has_drive_row() {
             self.path_focused = true;
@@ -84,6 +87,7 @@ impl SavePickerModel {
         self.edit = Some(Edit {
             target: EditTarget::FileName,
             text: default_name,
+            all_selected: false,
         });
         if let Some(row) = self.new_file_row() {
             self.cursor = row;
@@ -108,16 +112,73 @@ impl SavePickerModel {
         if typed.is_control() {
             return PickerActivation::Ignored;
         }
+        if std::mem::take(&mut edit.all_selected) {
+            edit.text.clear();
+        }
         edit.text.push(typed);
         PickerActivation::Repopulate
     }
 
-    /// Remove the last character.
+    /// Remove the last character, or everything when the text is selected.
     pub fn delete_char(&mut self) -> PickerActivation {
-        match self.edit.as_mut().and_then(|edit| edit.text.pop()) {
+        let Some(edit) = self.edit.as_mut() else {
+            return PickerActivation::Ignored;
+        };
+        if std::mem::take(&mut edit.all_selected) {
+            edit.text.clear();
+            return PickerActivation::Repopulate;
+        }
+        match edit.text.pop() {
             Some(_) => PickerActivation::Repopulate,
             None => PickerActivation::Ignored,
         }
+    }
+
+    /// Select the whole text, so the next keystroke, Backspace or paste replaces it.
+    pub fn select_all(&mut self) -> PickerActivation {
+        match self.edit.as_mut() {
+            Some(edit) if !edit.text.is_empty() && !edit.all_selected => {
+                edit.all_selected = true;
+                PickerActivation::Repopulate
+            }
+            _ => PickerActivation::Ignored,
+        }
+    }
+
+    /// The selected text, for Ctrl+C. `None` unless Ctrl+A selected it.
+    #[must_use]
+    pub fn selected_text(&self) -> Option<&str> {
+        self.edit
+            .as_ref()
+            .filter(|edit| edit.all_selected)
+            .map(|edit| edit.text.as_str())
+    }
+
+    /// Remove the selected text and hand it back, for Ctrl+X. `None`, and nothing changes,
+    /// unless Ctrl+A selected it.
+    pub fn cut_selection(&mut self) -> Option<String> {
+        let edit = self.edit.as_mut().filter(|edit| edit.all_selected)?;
+        edit.all_selected = false;
+        Some(std::mem::take(&mut edit.text))
+    }
+
+    /// Whether the text is selected, for the panel to draw it highlighted.
+    #[must_use]
+    pub fn all_selected(&self) -> bool {
+        self.edit.as_ref().is_some_and(|edit| edit.all_selected)
+    }
+
+    /// Paste `text` at the end of the field, replacing it when it is selected. Only the first line
+    /// is taken, and control characters are dropped, the same as typing them would.
+    pub fn paste(&mut self, text: &str) -> PickerActivation {
+        let line = text.lines().next().unwrap_or("");
+        if self.edit.is_none() || line.chars().all(char::is_control) {
+            return PickerActivation::Ignored;
+        }
+        for typed in line.chars() {
+            self.type_char(typed);
+        }
+        PickerActivation::Repopulate
     }
 
     /// What completing the path field would add after the typed text, if anything would.
@@ -139,6 +200,7 @@ impl SavePickerModel {
             return PickerActivation::Ignored;
         };
         if let Some(edit) = self.edit.as_mut() {
+            edit.all_selected = false;
             edit.text.push_str(&suffix);
         }
         PickerActivation::Repopulate

@@ -47,6 +47,12 @@ ds2-overlay.workspace = true
 ds2-input-harness.workspace = true
 # The panel's `imgui::Ui`, and the `windows` re-export it reads the keyboard and pad through.
 hudhook.workspace = true
+# The clipboard, for Ctrl+V in the panel.s text field. hudhook.s `windows` is not built with it.
+windows = { version = "0.62", default-features = false, features = [
+  "Win32_Foundation",
+  "Win32_System_DataExchange",
+  "Win32_System_Memory",
+] }
 
 [lints]
 workspace = true
