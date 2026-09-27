@@ -82,6 +82,15 @@ CASES = [
         "the same commit followed by a ds2-run.py launch must NOT halt",
     ),
     Case(
+        "clean.jsonl",
+        "unpushed commit 2f2d0a5b4bd5 on estus-max-default-on",
+        "the 2026-09-26 instance: 2f2d0a5 launched, its build line read from ds2-loader.log, and the "
+        "turn ended unpushed so the teardown hook never ran -- the running build's unspent evidence "
+        "halts whatever the prose says (machine state pinned by the override)",
+        env=(("CUPCAKE_UNSPENT_EVIDENCE_OVERRIDE",
+              "UNSPENTEVIDENCE|branch=estus-max-default-on|sha=2f2d0a5b4bd52163cf2b1d173463ef719b730c11"),),
+    ),
+    Case(
         "unexecuted_promise.jsonl",
         "promise nothing is going to keep",
         "turn ends on 'I'll re-run the gate...' with no tool call, no background work, no handoff",
@@ -705,6 +714,8 @@ def run_hook(
             "CLAUDE_PROJECT_DIR": str(REPO_ROOT),
             # No PR's CI is consulted unless a case pins one.
             "CUPCAKE_MERGEABLE_CI_VERDICT_OVERRIDE": "UNKNOWN",
+            # Nor whether a game happens to be running on this machine: set-but-empty is silence.
+            "CUPCAKE_UNSPENT_EVIDENCE_OVERRIDE": "",
             **dict(extra_env),
         }
         payload = {
