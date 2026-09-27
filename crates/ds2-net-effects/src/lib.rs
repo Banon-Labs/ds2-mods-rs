@@ -7,9 +7,12 @@
 //!
 //! It toggles the effect, as `er-net-effects` does ([`Toggle`]). On: the effect is applied, and
 //! every frame the local player's action list is searched for it ([`sp_effect_active`]); once it
-//! has been seen there and then leaves -- it ran out -- it is applied again. Off: nothing more is
-//! applied, and whatever is on the player runs out by itself. An effect that never leaves the list
-//! is applied once. Each toggle, apply and expiry is one log line. Each toggle also says
+//! has been seen there and then leaves -- it ran out -- it is applied again. The key switches the
+//! whole feature, and it starts off. Off: every effect this crate applied since it went on (this
+//! effect, the selector's kept effects and previews) is taken off the player at once with the
+//! game's `removeSpEffect` ([`ds2_rva::SP_EFFECT_REMOVE`]), the selector bar is not drawn, its
+//! keys do nothing, and nothing is applied or kept. On again: the effect and every kept effect are
+//! applied again. An effect that never leaves the list is applied once. Each toggle, apply and expiry is one log line. Each toggle also says
 //! "Net effects on." or "Net effects off." out loud, and while it is on a sparkle glyph sits at
 //! the top centre of the screen ([`glyph`]).
 //!

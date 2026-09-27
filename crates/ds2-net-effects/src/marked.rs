@@ -15,9 +15,10 @@ pub const MARKED_FILE_NAME: &str = "ds2-net-effects-marked.jsonc";
 pub const FILE_HEADER: &str = "\
 // ds2-net-effects: SpEffect ids marked in the selector to stay applied.
 //
-// Written by the mark keys (Alt+M toggles, numpad + adds, numpad - removes). Every id here is
-// applied to your character once one is loaded, and applied again each time it runs out.
-// Remove a line (or unmark it in game) to stop keeping it.
+// Written by the mark keys (Alt+M toggles, numpad + adds, numpad - removes). While net effects
+// is on (F9), every id here is applied to your character once one is loaded, and applied again
+// each time it runs out; turning net effects off takes them off. Remove a line (or unmark it in
+// game) to stop keeping it.
 ";
 
 /// Read the ids out of a marked file.

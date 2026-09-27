@@ -5381,6 +5381,27 @@ pub const SP_EFFECT_APPLY: u32 = 0x0014_bec0;
 /// this name so a caller checks the function it calls rather than an experiment's site.
 pub const SP_EFFECT_APPLY_PROLOGUE: [u8; 5] = [0xe9, 0x1c, 0x0d, 0x9f, 0x01];
 
+/// `removeSpEffect(ChrSpEffectCtrl*, i32 id) -> bool`. RVA `0x0014c0e0`.
+///
+/// Takes the same controller as [`SP_EFFECT_APPLY`] and removes every action of `SpEffect` `id`
+/// from the character at once. Read in the binary: the entry is Arxan's jump
+/// ([`SP_EFFECT_REMOVE_PROLOGUE`]) to a stub at `0x141b898c6` that does `mov rcx,[rcx+0x10]` and
+/// jumps to `0x14022f7c0(worker, id)`. That checks the id (`0x14022fb20`), removes through
+/// `0x140230370([worker+0x30], id, 0)`, whose action-list half is `0x1402204c0` -- filter mode 2,
+/// "action slot `0x40` == id", the same field `darksouls2`'s `SpEffectAction::sp_effect_id` names --
+/// and, when something was removed, flushes the removal notices with `0x1402277c0([worker+0x10])`,
+/// which reaches the packet builder [`SP_EFFECT_SEND`] with op `1` in a session. The game's own
+/// callers (`0x140462b90`, `0x140426730`) get the controller from character vtable slot `0x130`
+/// and pass the id in `edx`, exactly as the apply callers do.
+///
+/// Measured 2026-09-27 by `scripts/frida/remove-speffect.js` on the game thread, right after the
+/// game's apply of `140001010`: returned `1`, and the player's actions with that id went from 1
+/// to 0 in the same call, twice.
+pub const SP_EFFECT_REMOVE: u32 = 0x0014_c0e0;
+
+/// The five bytes [`SP_EFFECT_REMOVE`] begins with: `jmp 0x141b898c6`, Arxan's redirect.
+pub const SP_EFFECT_REMOVE_PROLOGUE: [u8; 5] = [0xe9, 0xe1, 0xd7, 0xa3, 0x01];
+
 /// The SpEffect-sync packet builder `FUN_14051e710(ctx, kind, add_remove, who, id, extra,
 /// duration, via_host)`, which returns nothing. RVA `0x0051_e710`.
 ///

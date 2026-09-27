@@ -103,6 +103,17 @@ type ApplySpEffect = unsafe extern "system" fn(usize, *const u8) -> usize;
 /// Resolved address of the apply function, or `0` before install.
 static APPLY: AtomicUsize = AtomicUsize::new(0);
 
+/// `removeSpEffect(ChrSpEffectCtrl*, i32 id) -> bool` (`ds2_rva::SP_EFFECT_REMOVE`).
+type RemoveSpEffect = unsafe extern "system" fn(usize, i32) -> u8;
+
+/// Resolved address of the remove function, or `0` before install.
+static REMOVE: AtomicUsize = AtomicUsize::new(0);
+
+/// Every id this crate has applied since net effects last went off: the F9 effect, the kept
+/// effects and the selector's previews. Going off removes these from the player. Only the `Present`
+/// consumer touches it.
+static APPLIED_IDS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+
 /// Resolved address of `GameManagerImp`'s global, or `0` before install.
 static GAME_MANAGER: AtomicUsize = AtomicUsize::new(0);
 
@@ -321,16 +332,92 @@ unsafe fn apply_effect_because(ctrl: usize, id: i32, why: &str) {
     };
     WITHHOLD.store(false, Ordering::Relaxed);
     let withheld = WITHHELD.load(Ordering::Relaxed) - withheld_before;
+    {
+        let mut applied = APPLIED_IDS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !applied.contains(&id) {
+            applied.push(id);
+        }
+    }
     log(format_args!(
         "{LOG_PREFIX} applied effect={id} reason={why} ctrl=0x{ctrl:016x} returned=0x{returned:x} \
          network={network} packets-withheld={withheld}"
     ));
 }
 
-/// The `Present` consumer: the selector and its kept effects, then the F9 toggle.
+/// Take every effect this crate applied off the player, now. Net effects going off calls this.
+///
+/// Each id still on the player is removed with the game's own `removeSpEffect`, which drops every
+/// action of that id at once. An id the game itself also put there (a ring with the same effect)
+/// goes too: the remove takes an id, not an instance. With `network` off the removal packet is
+/// withheld exactly as the apply packet was, so the session never hears of either.
+///
+/// # Safety
+///
+/// Game thread only: called from the `Present` clock's consumer, with a controller it just walked.
+unsafe fn remove_applied(ctrl: Option<usize>) {
+    let ids = std::mem::take(
+        &mut *APPLIED_IDS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    );
+    let remove = REMOVE.load(Ordering::Acquire);
+    let Some(ctrl) = ctrl.filter(|_| remove != 0) else {
+        if !ids.is_empty() {
+            log(format_args!(
+                "{LOG_PREFIX} off: no character loaded -- nothing to remove from ({} ids applied \
+                 earlier: {ids:?})",
+                ids.len()
+            ));
+        }
+        return;
+    };
+    let before = sp_effect_ids(ctrl, read_usize, read_words, read_i32);
+    let network = NETWORK.load(Ordering::Relaxed);
+    // Every id is removed, whether or not the action list shows it: an effect with no action
+    // (`901100` never showed in the list after its apply) may still sit in the controller's other
+    // container, which the same remove clears.
+    for id in ids {
+        let listed = before.as_deref().map_or_else(
+            || "unreadable".to_string(),
+            |on| on.contains(&id).to_string(),
+        );
+        let withheld_before = WITHHELD.load(Ordering::Relaxed);
+        WITHHOLD.store(!network, Ordering::Relaxed);
+        // SAFETY: `remove` is `ds2_rva::SP_EFFECT_REMOVE`, checked against its recorded first bytes
+        // at install. It takes the same controller as the apply and the id in `edx`, as the game's
+        // own callers pass it, and this is the game thread.
+        let removed = unsafe {
+            let remove: RemoveSpEffect = std::mem::transmute::<usize, RemoveSpEffect>(remove);
+            remove(ctrl, id)
+        };
+        WITHHOLD.store(false, Ordering::Relaxed);
+        let withheld = WITHHELD.load(Ordering::Relaxed) - withheld_before;
+        let still_on = sp_effect_active(ctrl, id, read_usize, read_words, read_i32);
+        log(format_args!(
+            "{LOG_PREFIX} removed effect={id} reason=off ctrl=0x{ctrl:016x} returned={removed} \
+             listed-before={listed} still-on-player={} network={network} \
+             packets-withheld={withheld}",
+            still_on.map_or_else(|| "unreadable".to_string(), |on| on.to_string())
+        ));
+    }
+}
+
+/// The `Present` consumer: the F9 key first, because it decides whether the rest runs at all,
+/// then the selector and its kept effects.
 fn on_frame() {
-    selector_frame();
-    toggle_frame();
+    let feature = toggle_frame();
+    selector_frame(feature);
+}
+
+/// What the F9 key left net effects in this frame.
+#[derive(Clone, Copy, Debug, Default)]
+struct Feature {
+    /// Net effects is on: the bar, its keys and the kept effects run.
+    on: bool,
+    /// It went on this frame.
+    turned_on: bool,
 }
 
 /// The selector's state. Only the `Present` consumer touches it.
@@ -344,6 +431,9 @@ struct SelectorState {
     marked_path: Option<PathBuf>,
     ignored_logged: u32,
     missing_logged: bool,
+    /// Selector presses logged as refused because net effects is off, so a held key does not fill
+    /// the log.
+    off_logged: u32,
 }
 
 static SELECTOR: Mutex<Option<SelectorState>> = Mutex::new(None);
@@ -377,7 +467,11 @@ fn write_marked(state: &SelectorState) {
 }
 
 /// One frame of the selector: its keys, the kept effects, and the lines for the overlay.
-fn selector_frame() {
+///
+/// While net effects is off none of that runs: the bar is not drawn, its keys are read only so a
+/// key held across the switch is not a press, and the kept effects are neither applied nor
+/// watched. Going back on starts every kept effect over.
+fn selector_frame(feature: Feature) {
     let mut guard = SELECTOR
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -406,6 +500,26 @@ fn selector_frame() {
             presses.push(*action);
         }
         state.was_down[index] = down;
+    }
+
+    if !feature.on {
+        if !presses.is_empty() && state.off_logged < 8 {
+            state.off_logged += 1;
+            log(format_args!(
+                "{LOG_PREFIX} selector: {presses:?} ignored -- net effects is off (the toggle key \
+                 turns it on)"
+            ));
+        }
+        overlay::publish(Vec::new());
+        return;
+    }
+    if feature.turned_on && !state.keeper.is_empty() {
+        state.keeper.restart();
+        log(format_args!(
+            "{LOG_PREFIX} selector: net effects on -- {} kept effects applied again {:?}",
+            state.marked.len(),
+            state.marked
+        ));
     }
 
     let global = GAME_MANAGER.load(Ordering::Acquire);
@@ -603,12 +717,14 @@ fn arm_selector(game_dir: Option<&std::path::Path>, config_text: Option<&str>) {
         marked_path,
         ignored_logged: 0,
         missing_logged: false,
+        off_logged: 0,
     });
 }
 
-/// The F9 toggle. Reads the key, flips the toggle on a fresh press, and while the toggle is on
-/// looks for the effect on the player and applies it again when it has run out.
-fn toggle_frame() {
+/// The F9 toggle, which switches the whole feature. Reads the key, flips the toggle on a fresh
+/// press, and while the toggle is on looks for the effect on the player and applies it again when
+/// it has run out. Turning it off removes from the player every effect this crate applied.
+fn toggle_frame() -> Feature {
     let held = KEY_BINDING
         .load()
         .is_some_and(|chord| chord_held(chord, vk_down));
@@ -634,11 +750,14 @@ fn toggle_frame() {
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     if !pressed && !toggle.enabled() {
-        return;
+        return Feature::default();
     }
     let global = GAME_MANAGER.load(Ordering::Acquire);
     if global == 0 {
-        return;
+        return Feature {
+            on: toggle.enabled(),
+            turned_on: false,
+        };
     }
     let id = EFFECT.load(Ordering::Relaxed);
     let ctrl = sp_effect_ctrl(global, read_usize);
@@ -667,11 +786,17 @@ fn toggle_frame() {
                  time it runs out, until the key is pressed again"
             ));
         }
-        Some(false) => log(format_args!(
-            "{LOG_PREFIX} ===== TOGGLE OFF ===== effect={id} -- no further re-apply ({} re-applies \
-             this time on)",
-            REAPPLIES.load(Ordering::Relaxed)
-        )),
+        Some(false) => {
+            log(format_args!(
+                "{LOG_PREFIX} ===== TOGGLE OFF ===== effect={id} -- removing what net effects put \
+                 on the player; no apply, no kept effect and no selector key until it is on again \
+                 ({} re-applies this time on)",
+                REAPPLIES.load(Ordering::Relaxed)
+            ));
+            // SAFETY: the `Present` clock runs its consumers on the game thread, and `ctrl` was
+            // walked on this frame.
+            unsafe { remove_applied(ctrl.ok()) };
+        }
         None => {}
     }
     if frame.seen {
@@ -694,6 +819,10 @@ fn toggle_frame() {
         // on this frame.
         unsafe { apply_effect(ctrl, id, reason) };
         toggle.applied();
+    }
+    Feature {
+        on: toggle.enabled(),
+        turned_on: frame.toggled == Some(true),
     }
 }
 
@@ -853,6 +982,22 @@ pub unsafe fn install(request: &Request) -> Outcome {
         return Outcome::default();
     }
     APPLY.store(apply, Ordering::Release);
+    // The remove is checked the same way. Without it the feature still arms, and going off still
+    // stops every apply, but what is already on the player runs out by itself -- which the log says.
+    let remove = base + ds2_rva::SP_EFFECT_REMOVE as usize;
+    let expected = ds2_rva::SP_EFFECT_REMOVE_PROLOGUE;
+    let mut found = [0u8; 5];
+    // SAFETY: a resolved RVA inside the loaded game image; `read_bytes` faults safely.
+    let read = unsafe { ds2_game_base::mem::read_bytes(remove, &mut found) };
+    if read && found == expected {
+        REMOVE.store(remove, Ordering::Release);
+    } else {
+        log(format_args!(
+            "{LOG_PREFIX} remove-sp-effect not armed va=0x{remove:016x} read={read} \
+             saw={found:02x?} want={expected:02x?} -- turning net effects off will not take \
+             effects off the player"
+        ));
+    }
     GAME_MANAGER.store(base + ds2_rva::GAME_MANAGER_IMP as usize, Ordering::Release);
 
     // The defaults are in force before the file is read, so a missing file still leaves a key.
@@ -903,8 +1048,11 @@ pub unsafe fn install(request: &Request) -> Outcome {
         .filter(|chord| chord.vk != 0)
         .map_or_else(|| "none".to_string(), chord_name);
     log(format_args!(
-        "{LOG_PREFIX} armed key={key} effect={} apply=0x{apply:016x} -- read on the Present clock",
-        EFFECT.load(Ordering::Relaxed)
+        "{LOG_PREFIX} armed key={key} effect={} apply=0x{apply:016x} remove=0x{:016x} -- read on \
+         the Present clock; off until the key is pressed, and off means the bar, its keys and the \
+         kept effects too",
+        EFFECT.load(Ordering::Relaxed),
+        REMOVE.load(Ordering::Acquire)
     ));
     Outcome { installed: true }
 }
