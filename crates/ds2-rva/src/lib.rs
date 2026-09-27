@@ -1783,6 +1783,43 @@ pub const BOOT_PHASES: [(&str, u32); 8] = [
     ("app-frame", 0x00ae_eed0),
 ];
 
+// ---------------------------------------------------------------------------------------------
+// The game's own swap chain
+//
+// Three hops from a global to the `IDXGISwapChain` the game presents through, so an overlay can
+// read `Present` off the real object instead of building a throwaway one. Building one is not
+// harmless: with a `dxgi.dll` proxy such as DS2LE PathTracing installed, the proxy runs its whole
+// D3D12 init on the throwaway and faults when it is released.
+//
+// Read out of `darksoulsii-deobf.bin`:
+//
+// - `graphics-init` (`0x140aead80`, [`BOOT_PHASES`]) allocates the graphics device, calls its
+//   init `0x14095f6e0`, and only then stores it: `PTR_1416751f0 = param_1[0x36]`. So the global is
+//   null until the device and its swap chain both exist.
+// - `0x14095f6e0` calls `0x140f26620` and stores what it hands back at `+0xd20`:
+//   `14095f8c1 call 0x140f26620` / `14095f8ce mov rax,[rbp+0x608]` /
+//   `14095f8d5 mov [rdi+0xd20],rax`.
+// - `0x140f26620` is the holder's constructor: `0x140f30580` calls `IDXGIFactory::CreateSwapChain`
+//   (`call [vtable+0x50]` with the device, the description and `param_1`, so the chain lands in
+//   the first qword of a stack block), and `0x140f26770` copies that block to the start of the
+//   `0x3060`-byte heap holder.
+//
+// Read live, read-only through /proc/<pid>/mem, on 2026-09-27 with `scripts/ds2-swapchain-read.py`
+// against a session with DS2LE PathTracing installed: every hop non-null, and slot 8 of the chain's
+// vtable `0x2cfe10` past the base of the proxy `Game/dxgi.dll`, prologue `48 89 5c 24 10 55 56 57`.
+// `ds2-invasion-path` logs the module that owns the slot it hooks, so every run re-checks this.
+
+/// The pointer to the graphics device. RVA `0x016751f0`, VA `0x1416751f0`. Null until
+/// `graphics-init` has created the device and its swap chain.
+pub const GRAPHICS_DEVICE: u32 = 0x0167_51f0;
+
+/// Offset of the swap chain holder in [`GRAPHICS_DEVICE`]. `+0xd20`, a pointer.
+pub const GRAPHICS_DEVICE_SWAP_CHAIN_HOLDER_OFFSET: usize = 0xd20;
+
+/// Offset of the `IDXGISwapChain*` in the swap chain holder. `+0x0`: `CreateSwapChain`'s out
+/// parameter is the first qword of the block the holder is copied from.
+pub const SWAP_CHAIN_HOLDER_DXGI_OFFSET: usize = 0x0;
+
 /// The simpler sibling of [`FRAME_LIMITER`], and **measured never to be called during boot**.
 ///
 /// RVA `0x00feb890`. Same tail -- sleep `[this+0x170]/1000`, or `Sleep(0)` when not positive --

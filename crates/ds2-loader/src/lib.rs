@@ -946,9 +946,9 @@ fn install_invasion_path() {
         config_path: crash_logging::config_file_path(),
     };
     // SAFETY: called once, from the post-Arxan position like every other install here. The crate
-    // detours exactly one function -- `IDXGISwapChain::Present`, whose address it obtains by
-    // having Direct3D build a throwaway swap chain -- and refuses rather than faulting at every
-    // step that can fail.
+    // detours `IDXGISwapChain::Present`, read off the game's own swap chain by a thread that waits
+    // for `graphics-init` to store it -- no throwaway swap chain is built -- and refuses rather
+    // than faulting at every step that can fail.
     let outcome = unsafe { ds2_invasion_path::install(&request) };
     if !outcome.installed {
         log_line(format_args!(
