@@ -2955,6 +2955,33 @@ pub const FE_INGAME_MENU_ACTION_SETTING_SCREEN: u32 = 8;
 /// member. It is the confirm dialog that offers to save on the way to the title screen.
 pub const FE_INGAME_MENU_ACTION_RETURN_TITLE: u32 = 9;
 
+/// `FeGroupInGameReturnTitleCheck` vtable slot 16 (`vtable 0x1410b1768 + 0x80`): what the quit
+/// confirm does on "yes". RVA `0x0006_ec90`. `fn()` -- `rcx` is never read.
+///
+/// Its whole body, read in `darksoulsii-deobf.bin`:
+///
+/// ```text
+/// 0x1404fec90([GameManagerImp + 0x22e0])      ; frontend root: clear bit 1 of +0x3b8, flag [+0xf8]+0xd32
+/// byte [[GameManagerImp + 0x22e0] + 0x30c] = 1
+/// tail-call GameManagerImp->vtable[0x38](GameManagerImp, dl = 0)    ; 0x1401c2cf0
+/// ```
+///
+/// Slot `0x38` of `GameManagerImp` (`0x1401c2cf0`) is the return-to-title request. With bit 2 of
+/// `[gm + 0x24b1]` already set (a request in flight) it returns `1` having done nothing; with
+/// `[gm + 0x24ac]` anything but `0x1e` or `0x1f` (in the world) it returns `0` having done nothing,
+/// so asking at the title or twice is harmless. Otherwise it sets the
+/// transition bits at `+0x24b1`/`+0x24b2`, starts a fade (`+0x24b4 = 2.0f`), tells the player's
+/// controller and the frontend, and returns `1`.
+///
+/// Every input is a global, so it can be called from any game-thread tick. Not an Arxan redirect:
+/// `scripts/ds2-arxan-chain.py 0x14006ec90` ends at hop 0 on its own prologue.
+pub const FE_RETURN_TITLE_CHECK_CONFIRM: u32 = 0x0006_ec90;
+
+/// The first seven bytes of [`FE_RETURN_TITLE_CHECK_CONFIRM`]: `sub rsp,0x28` /
+/// `mov rcx,[rip+...]` (the load of `GameManagerImp`).
+pub const FE_RETURN_TITLE_CHECK_CONFIRM_PROLOGUE: [u8; 7] =
+    [0x48, 0x83, 0xec, 0x28, 0x48, 0x8b, 0x0d];
+
 /// Action `0xd` -- present in the dispatch, listed by **no** tab.
 ///
 /// Its factory branch shares a `case` label with kind 4: `case 4: case 6:` both allocate `0xc68`

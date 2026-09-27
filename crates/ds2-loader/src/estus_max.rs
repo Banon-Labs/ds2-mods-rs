@@ -19,6 +19,9 @@ pub const CONFIG_SECTION: &str = "estus_max";
 /// Whether to register the tick at all.
 pub const KEY_ENABLED: &str = "enabled";
 
+/// Whether to run the one-shot in-process reload test. Only meaningful with `enabled`.
+pub const KEY_RELOAD_TEST: &str = "reload_test";
+
 /// `[estus_max]`, resolved.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct EstusMaxConfig {
@@ -26,6 +29,9 @@ pub struct EstusMaxConfig {
     ///
     /// Off by default, like every feature here: a config that says nothing is the game as shipped.
     pub enabled: bool,
+    /// A test instrument: after the first load reaches max, return to the title once and let
+    /// `ds2-continue` load the same slot once more, so a second load is read inside one process.
+    pub reload_test: bool,
 }
 
 impl EstusMaxConfig {
@@ -42,18 +48,25 @@ impl EstusMaxConfig {
 
     /// The same decision against a config file's text, so it can be tested without one on disk.
     pub fn from_text(text: &str) -> Self {
-        let enabled = KeyValues::parse(text)
-            .get(CONFIG_SECTION, KEY_ENABLED)
-            .is_some_and(|raw| raw.trim().trim_matches('"') == "true");
-        Self { enabled }
+        let values = KeyValues::parse(text);
+        let flag = |key| {
+            values
+                .get(CONFIG_SECTION, key)
+                .is_some_and(|raw| raw.trim().trim_matches('"') == "true")
+        };
+        Self {
+            enabled: flag(KEY_ENABLED),
+            reload_test: flag(KEY_RELOAD_TEST),
+        }
     }
 
     /// One line for the attach log, written before anything acts on it.
     pub fn describe(&self) -> String {
         format!(
-            "{} config [{CONFIG_SECTION}] {KEY_ENABLED}={}",
+            "{} config [{CONFIG_SECTION}] {KEY_ENABLED}={} {KEY_RELOAD_TEST}={}",
             ds2_estus_max::LOG_PREFIX,
-            self.enabled
+            self.enabled,
+            self.reload_test
         )
     }
 }
@@ -67,6 +80,14 @@ mod tests {
         for text in ["", "[estus_max]\n", "[save_block]\nenabled = true\n"] {
             assert!(!EstusMaxConfig::from_text(text).enabled, "{text:?}");
         }
+    }
+
+    #[test]
+    fn the_reload_test_is_its_own_key_and_off_by_default() {
+        let on = EstusMaxConfig::from_text("[estus_max]\nenabled = true\n");
+        assert!(on.enabled && !on.reload_test);
+        let test = EstusMaxConfig::from_text("[estus_max]\nenabled = true\nreload_test = true\n");
+        assert!(test.enabled && test.reload_test);
     }
 
     #[test]

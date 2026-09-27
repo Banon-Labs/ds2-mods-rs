@@ -76,6 +76,22 @@ pub fn set_preselect_slot(slot: i32) {
     PRESELECT_SLOT.store(slot, Ordering::Release);
 }
 
+/// Allow exactly one more autoload in this process: the next time the title's top menu rests, the
+/// configured slot is loaded again, the same way the first one was.
+///
+/// For a test instrument that has just asked the game to return to the title and needs a second
+/// load in the same process (`[estus_max] reload_test`). The once-per-process latches exist to stop
+/// a boot loop, so this re-opens them ONE time per call and the caller owns that: a caller that
+/// re-arms on every arrival at the title rebuilds the loop they were written against.
+pub fn rearm_autoload() {
+    TOP_MENU_FIRED.store(0, Ordering::Release);
+    FIRED.store(0, Ordering::Release);
+    log(format_args!(
+        "{LOG_PREFIX} autoload re-armed once -- the next title top menu loads slot={} again",
+        PRESELECT_SLOT.load(Ordering::Acquire)
+    ));
+}
+
 /// What a registered title gate wants the top menu to do on the frame it was asked.
 ///
 /// The gate is called once per frame for as long as the title's six-row menu is up, which is the

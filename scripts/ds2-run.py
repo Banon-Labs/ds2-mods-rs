@@ -369,6 +369,7 @@ SOUL_MEMORY_GUARD_LOG_PREFIX = "ds2-soul-memory-guard:"
 #: here, matching the DLL; `--estus-max` turns it on.
 ESTUS_MAX_SECTION = "estus_max"
 KEY_ESTUS_MAX_ENABLED = "enabled"
+KEY_ESTUS_MAX_RELOAD_TEST = "reload_test"
 #: Mirrors `LOG_PREFIX` in `crates/ds2-estus-max/src/lib.rs`.
 ESTUS_MAX_LOG_PREFIX = "ds2-estus-max:"
 
@@ -1633,6 +1634,7 @@ def config_text(
     launcher_dlls: tuple[str, ...] = (),
     soul_memory_guard: bool = False,
     estus_max: bool = False,
+    estus_max_reload_test: bool = False,
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
     net_effects: bool = False,
@@ -2201,6 +2203,10 @@ def config_text(
 # as the game reads them back. Solo; it reads nothing about other players. Off unless `--estus-max`.
 # Grep the log for `{ESTUS_MAX_LOG_PREFIX}`.
 {KEY_ESTUS_MAX_ENABLED} = {str(estus_max).lower()}
+# A test instrument, off unless `--estus-max-reload-test`: once the first load is at max, return to
+# the title through the quit confirm's own "yes" and let `[continue]` load the same slot once more,
+# so the second load's line is read in the same process.
+{KEY_ESTUS_MAX_RELOAD_TEST} = {str(estus_max_reload_test).lower()}
 
 [{WEAPON_SYNC_SECTION}]
 # `enabled` is startup-only. While another player is in the world, `ds2-weapon-sync` lowers every
@@ -2441,6 +2447,7 @@ def write_config(
     launcher_dlls: tuple[str, ...] = (),
     soul_memory_guard: bool = False,
     estus_max: bool = False,
+    estus_max_reload_test: bool = False,
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
     net_effects: bool = False,
@@ -2488,6 +2495,7 @@ def write_config(
         launcher_dlls,
         soul_memory_guard=soul_memory_guard,
         estus_max=estus_max,
+        estus_max_reload_test=estus_max_reload_test,
         weapon_sync=weapon_sync,
         weapon_sync_test_cap=weapon_sync_test_cap,
         net_effects=net_effects,
@@ -2849,6 +2857,7 @@ def dry_run(
     launcher_dlls: tuple[str, ...] = (),
     soul_memory_guard: bool = False,
     estus_max: bool = False,
+    estus_max_reload_test: bool = False,
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
     net_effects: bool = False,
@@ -2933,6 +2942,7 @@ def dry_run(
             launcher_dlls,
             soul_memory_guard=soul_memory_guard,
             estus_max=estus_max,
+            estus_max_reload_test=estus_max_reload_test,
             weapon_sync=weapon_sync,
             weapon_sync_test_cap=weapon_sync_test_cap,
             net_effects=net_effects,
@@ -2994,6 +3004,7 @@ def dry_run(
                 launcher_dlls=launcher_dlls,
                 soul_memory_guard=soul_memory_guard,
                 estus_max=estus_max,
+                estus_max_reload_test=estus_max_reload_test,
                 weapon_sync=weapon_sync,
                 weapon_sync_test_cap=weapon_sync_test_cap,
                 net_effects=net_effects,
@@ -3556,6 +3567,7 @@ def launch(
     launcher_dlls: tuple[str, ...] = (),
     soul_memory_guard: bool = False,
     estus_max: bool = False,
+    estus_max_reload_test: bool = False,
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
     net_effects: bool = False,
@@ -3627,6 +3639,7 @@ def launch(
         launcher_dlls,
         soul_memory_guard=soul_memory_guard,
         estus_max=estus_max,
+        estus_max_reload_test=estus_max_reload_test,
         weapon_sync=weapon_sync,
         weapon_sync_test_cap=weapon_sync_test_cap,
         net_effects=net_effects,
@@ -5554,6 +5567,16 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--estus-max-reload-test",
+        dest="estus_max_reload_test",
+        action="store_true",
+        help=(
+            "test instrument: once the first load's flask is at max, return to the title through "
+            "the quit confirm's own 'yes' and autoload the same slot once more, in the same "
+            "process, so the second load's estus line can be read. Implies --estus-max."
+        ),
+    )
+    parser.add_argument(
         "--path-tracing",
         dest="path_tracing",
         action=argparse.BooleanOptionalAction,
@@ -5790,6 +5813,8 @@ def main() -> int:
     if args.crash_test < 0:
         parser.error("--crash-test takes a non-negative number of milliseconds")
 
+    if args.estus_max_reload_test:
+        args.estus_max = True
     if args.weapon_sync_test_cap is not None:
         args.weapon_sync = True
 
@@ -5896,6 +5921,7 @@ def main() -> int:
             tuple(args.launcher_dll),
             soul_memory_guard=args.soul_memory_guard,
             estus_max=args.estus_max,
+            estus_max_reload_test=args.estus_max_reload_test,
             weapon_sync=args.weapon_sync,
             weapon_sync_test_cap=args.weapon_sync_test_cap,
             net_effects=args.net_effects,
@@ -5943,6 +5969,7 @@ def main() -> int:
         tuple(args.launcher_dll),
         soul_memory_guard=args.soul_memory_guard,
         estus_max=args.estus_max,
+        estus_max_reload_test=args.estus_max_reload_test,
         weapon_sync=args.weapon_sync,
         weapon_sync_test_cap=args.weapon_sync_test_cap,
         net_effects=args.net_effects,

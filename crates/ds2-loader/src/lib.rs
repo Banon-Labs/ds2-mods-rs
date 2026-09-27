@@ -1038,6 +1038,10 @@ fn install_estus_max() {
         return;
     }
     ds2_estus_max::set_logger(log_line);
+    if config.reload_test {
+        // The second load is `ds2-continue`'s own autoload, re-opened exactly once.
+        ds2_estus_max::set_reload_test(ds2_continue::rearm_autoload);
+    }
     // SAFETY: every function the crate calls is recorded in `ds2-rva` with the bytes it must begin
     // with, and the crate re-reads those bytes and registers nothing on a mismatch. Called from the
     // post-Arxan position, like every other install here.

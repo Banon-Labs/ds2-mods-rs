@@ -33,11 +33,17 @@ pub const LOG_PREFIX: &str = "ds2-estus-max:";
 /// Ticks of the net session update between checks. It runs at 60/s, so this is twice a second.
 pub const CHECK_EVERY_TICKS: u64 = 30;
 
+/// Ticks between the first load reaching max and the reload test's return to title.
+///
+/// Five seconds: long enough for the load's own saves and fades to settle, short enough that a
+/// run does not idle. Only read with `[estus_max] reload_test`.
+pub const RELOAD_TEST_DELAY_TICKS: u64 = 300;
+
 #[cfg(windows)]
 mod install;
 
 #[cfg(windows)]
-pub use install::{Outcome, install, set_logger};
+pub use install::{Outcome, install, set_logger, set_reload_test};
 
 /// Both levels of the flask, as the game reports them.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

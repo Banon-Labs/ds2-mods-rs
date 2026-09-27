@@ -1,7 +1,7 @@
 //! The tick registration and the calls into the game.
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU8, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
 use ds2_game_base::mem::{game_rva, read_bytes, safe_read_usize};
 
@@ -32,6 +32,28 @@ static EFFECT_INDEX: AtomicU8 = AtomicU8::new(ds2_rva::ESTUS_PROPERTY_NOT_FOUND)
 
 static TICKS: AtomicU64 = AtomicU64::new(0);
 static TRACKER: Mutex<Tracker> = Mutex::new(Tracker::new());
+
+/// `fn()` -- [`ds2_rva::FE_RETURN_TITLE_CHECK_CONFIRM`], the quit confirm's "yes".
+type ReturnTitleFn = unsafe extern "system" fn();
+
+/// The reload test's callback, run just before the return to title is requested.
+///
+/// The loader uses it to re-arm `ds2-continue`'s autoload once. Zero when the test is off.
+static RELOAD_BEFORE: AtomicUsize = AtomicUsize::new(0);
+/// The checked address of the quit confirm, set by [`install`] only when the test is on.
+static RETURN_TITLE: AtomicUsize = AtomicUsize::new(0);
+/// The tick at which to request the return to title; zero until the first load reached max.
+static RELOAD_AT: AtomicU64 = AtomicU64::new(0);
+/// Set once the return to title has been requested. Once per process: the test is one reload.
+static RELOAD_DONE: AtomicBool = AtomicBool::new(false);
+
+/// Turn on the one-shot reload test. Call before [`install`].
+///
+/// Once the first load in this process is at max, it waits [`crate::RELOAD_TEST_DELAY_TICKS`],
+/// calls `before`, then asks the game to return to the title through the quit confirm's own "yes".
+pub fn set_reload_test(before: fn()) {
+    RELOAD_BEFORE.store(before as usize, Ordering::Release);
+}
 
 /// A log sink, installed by the loader so this crate writes into the same file as everything else.
 static LOGGER: AtomicUsize = AtomicUsize::new(0);
@@ -147,6 +169,25 @@ pub unsafe fn install() -> Outcome {
     USES_INDEX.store(uses, Ordering::Release);
     EFFECT_INDEX.store(effect, Ordering::Release);
 
+    if RELOAD_BEFORE.load(Ordering::Acquire) != 0 {
+        match checked_site(
+            ds2_rva::FE_RETURN_TITLE_CHECK_CONFIRM,
+            &ds2_rva::FE_RETURN_TITLE_CHECK_CONFIRM_PROLOGUE,
+            "FE_RETURN_TITLE_CHECK_CONFIRM",
+        ) {
+            Some(quit) => {
+                RETURN_TITLE.store(quit, Ordering::Release);
+                log(format_args!(
+                    "{LOG_PREFIX} reload-test armed: one return to title after the first load \
+                     at max, then one more autoload"
+                ));
+            }
+            None => log(format_args!(
+                "{LOG_PREFIX} reload-test NOT armed -- the feature itself still installs"
+            )),
+        }
+    }
+
     // SAFETY: the loader's post-Arxan install position, which is this function's own contract.
     match unsafe { ds2_net_tick::register(ds2_net_tick::When::After, tick) } {
         Ok(site) => {
@@ -230,6 +271,7 @@ fn tick(_session: usize) {
             levels: unsafe { read(key.0) },
         },
     };
+    let mut at_max_now = matches!(seen, Seen::Character { levels: Some(l), .. } if l.at_max());
     match tracker.observe(seen) {
         Step::Nothing => {}
         Step::Say(note) => log(format_args!("{note}")),
@@ -261,8 +303,50 @@ fn tick(_session: usize) {
             }
             // SAFETY: as for `read` above.
             let after = unsafe { read(inventory) }.unwrap_or(before);
+            at_max_now = after.at_max();
             let note = tracker.raised(before, after);
             log(format_args!("{note}"));
         }
     }
+    drop(tracker);
+    reload_test(at_max_now);
+}
+
+/// The one-shot reload test. Does nothing unless [`set_reload_test`] was called and [`install`]
+/// checked the quit confirm's prologue.
+fn reload_test(at_max_now: bool) {
+    let quit = RETURN_TITLE.load(Ordering::Acquire);
+    if quit == 0 || RELOAD_DONE.load(Ordering::Acquire) {
+        return;
+    }
+    let now = TICKS.load(Ordering::Relaxed);
+    let at = RELOAD_AT.load(Ordering::Acquire);
+    if at == 0 {
+        if at_max_now {
+            RELOAD_AT.store(now + crate::RELOAD_TEST_DELAY_TICKS, Ordering::Release);
+            log(format_args!(
+                "{LOG_PREFIX} reload-test: first load at max -- returning to the title in {} ticks",
+                crate::RELOAD_TEST_DELAY_TICKS
+            ));
+        }
+        return;
+    }
+    if now < at {
+        return;
+    }
+    RELOAD_DONE.store(true, Ordering::Release);
+    let before = RELOAD_BEFORE.load(Ordering::Acquire);
+    if before != 0 {
+        // SAFETY: only ever a `fn()` stored by `set_reload_test`.
+        let before = unsafe { std::mem::transmute::<usize, fn()>(before) };
+        before();
+    }
+    // SAFETY: `quit` is FE_RETURN_TITLE_CHECK_CONFIRM with its prologue checked by `install`. It
+    // reads only globals, ignores RCX, and its request refuses by itself outside the world. Called
+    // on the game thread, where the quit confirm's own "yes" runs.
+    unsafe { std::mem::transmute::<usize, ReturnTitleFn>(quit)() };
+    log(format_args!(
+        "{LOG_PREFIX} reload-test: asked the game to return to the title (the quit confirm's \
+         own yes) -- the next load's line is the re-apply"
+    ));
 }
