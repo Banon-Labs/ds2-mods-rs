@@ -73,6 +73,30 @@ fn kind_allowed(kinds: Kinds, kind: i32) -> bool {
     }
 }
 
+/// Whether this appearance may be suppressed: on the allowlist, or the login-refused notice on a
+/// run that has said it plays under Seamless Co-op.
+fn kind_suppressible(kinds: Kinds, kind: i32, login_refusal_expected: bool) -> bool {
+    kind_allowed(kinds, kind)
+        || (login_refusal_expected
+            && matches!(kinds, Kinds::Only(_))
+            && kind == ds2_rva::FE_COMMON_WINDOW_KIND_LOGIN_REFUSED)
+}
+
+/// Whether the official server's login refusal
+/// ([`ds2_rva::FE_COMMON_WINDOW_KIND_LOGIN_REFUSED`]) may be suppressed.
+///
+/// Off unless the loader turns it on, and it turns it on only for a `[seamless]` run. Under
+/// Seamless Co-op the game still tries the official login at boot, and the refusal is expected:
+/// co-op runs over the mod's own network. The box has one button, and the only way out of it is
+/// the offline window, so suppressing it saves one keypress and does not change where the game goes.
+/// On any other run it stays on the screen, because there a refusal would be news.
+static SUPPRESS_LOGIN_REFUSAL: AtomicBool = AtomicBool::new(false);
+
+/// Allow the login-refused notice to be suppressed. The loader relays `[seamless] enabled`.
+pub fn set_suppress_login_refusal(enabled: bool) {
+    SUPPRESS_LOGIN_REFUSAL.store(enabled, Ordering::Release);
+}
+
 /// The boot dialogs, allowlisted by vtable.
 ///
 /// All four are message boxes the title flow owns, and all four have the inert `ret 0` handlers
@@ -317,7 +341,11 @@ unsafe fn suppress(this: *mut u8) -> bool {
     // every time it appears -- a new message is a line to read, never a box answered unseen.
     // SAFETY: `safe_read_*` accepts any address and fails closed on an unmapped one.
     let kind = unsafe { safe_read_i32(object + ds2_rva::FE_DIALOG_KIND_OFFSET) }.unwrap_or(-1);
-    if !kind_allowed(dialog.kinds, kind) {
+    if !kind_suppressible(
+        dialog.kinds,
+        kind,
+        SUPPRESS_LOGIN_REFUSAL.load(Ordering::Acquire),
+    ) {
         log(format_args!(
             "{LOG_PREFIX} seen screen={} kind={kind} cancel-dest=0x{:02x} confirm-dest=0x{:02x} \
              action=shown reason=kind-not-allowlisted",
@@ -616,6 +644,21 @@ mod tests {
         let kinds = common_window();
         assert!(!kind_allowed(kinds, 90));
         assert!(!kind_allowed(kinds, -1));
+    }
+
+    #[test]
+    fn the_login_refusal_is_suppressed_only_on_a_seamless_run() {
+        let kinds = common_window();
+        let refused = ds2_rva::FE_COMMON_WINDOW_KIND_LOGIN_REFUSED;
+        assert!(!kind_suppressible(kinds, refused, false));
+        assert!(kind_suppressible(kinds, refused, true));
+        // The flag vouches for that one message and nothing else.
+        assert!(!kind_suppressible(
+            kinds,
+            ds2_rva::FE_COMMON_WINDOW_KIND_LOAD_CHARACTER_FAILED,
+            true
+        ));
+        assert!(!kind_suppressible(kinds, 90, true));
     }
 
     #[test]
