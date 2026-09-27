@@ -54,12 +54,35 @@
 //! tab drew its four rows. [`repoint_path`] and the subtree behind it are new and have not been in
 //! front of a running game.
 //!
-//! The piece with no evidence either way is the lifetime: the top select is constructed once per
-//! `FeSceneInGame` and this crate never sees it destroyed, so the group is built once and reused,
-//! and [`TOP_SELECT`] is compared on every lookup so a second scene cannot be served a group built
-//! against the first one's proxy.
+//! # One group per top select, because the layout does not ask which scene it is in
+//!
+//! The top select is constructed once per `FeSceneInGame`, and a session builds more than one. A
+//! player's session on 2026-09-26 logged this line on sixteen pause-menu opens:
+//!
+//! ```text
+//! tab NOT offered to this scene -- the group was built against 0x00007fffd78584a0 and this top select is 0x00007fffd78781f0
+//! ```
+//!
+//! This module used to build one group per process and refuse every later top select, on the
+//! reasoning that a refused scene simply gets the six tabs the game shipped. It does not. The
+//! seventh tab's cell and its panel are added to the tab strip by [`crate::strip`], which runs per
+//! layout document and asks only whether a group exists anywhere. So a refused scene still draws
+//! our panel, and nothing in that scene ever plays a sequence on it.
+//!
+//! A Frida run (`scripts/frida/menu-tab-expand.js`) showed where the fold comes from. Every play
+//! our panel receives is one of our group's own -- `0x65` from the per-tab init
+//! [`strip_init_detour`] runs, `0x66` when the tab is pushed, `0x68` when it is popped -- and each
+//! lands on the panel sprite exactly as it lands on the System tab's. Take the group away and the
+//! panel is never folded: the list stands rolled out on every tab, and the cursor cannot reach the
+//! tab to fold it, because the strip's count is never raised either.
+//!
+//! So every top select gets its own group, built when it is constructed, and each lookup finds the
+//! group of the top select it was asked about -- [`GROUPS`]. A top select constructed again at an
+//! address already in the list replaces that entry rather than inheriting a group whose namer came
+//! from the scene before it.
 
 use core::ffi::c_void;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::LOG_PREFIX;
@@ -96,21 +119,36 @@ static STRIP_NAMER_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 /// The live module base, stored by [`install`] so no detour has to ask for it.
 static MODULE_BASE: AtomicUsize = AtomicUsize::new(0);
 
-/// The top select our group was built against. Zero until the constructor detour has accepted one.
-///
-/// Compared on every [`tab_table_detour`] call rather than assumed, because the group holds that
-/// top select's layout proxy: handing it to a second scene would draw into a freed one.
-static TOP_SELECT: AtomicUsize = AtomicUsize::new(0);
+/// Most top selects remembered at once. A session alternates between a few scenes; the oldest
+/// entry is dropped past this, and its group is leaked rather than destroyed, exactly as a group
+/// the game never sees destroyed always was.
+const MAX_SCENES: usize = 8;
 
-/// Our constructed `FeGroupInGameGroupSelect`. Zero until the construction succeeded.
-static GROUP: AtomicUsize = AtomicUsize::new(0);
+/// `(top select, our group built against it)`, newest last.
+///
+/// Keyed by top select and looked up on every [`tab_table_detour`] and [`strip_init_detour`] call,
+/// because a group holds its own top select's layout proxy: handing it to another scene would draw
+/// into that scene's proxy with the first scene's namer.
+static GROUPS: Mutex<Vec<(usize, usize)>> = Mutex::new(Vec::new());
+
+/// The group built for `top_select`, if one was.
+fn group_for(top_select: usize) -> Option<usize> {
+    let groups = GROUPS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    groups
+        .iter()
+        .rev()
+        .find(|(top, _)| *top == top_select)
+        .map(|(_, group)| *group)
+}
 
 /// How many rows this tab carries, which is every row the registry holds.
 static ROWS: AtomicUsize = AtomicUsize::new(0);
 
 /// Whether the three sites went in, decided once at [`install`] and never again.
 ///
-/// **This, and not [`GROUP`], is what the System tab's own detours ask.** They run inside
+/// **This, and not [`GROUPS`], is what the System tab's own detours ask.** They run inside
 /// `FUN_1400a41b0` -- before its detour's post-step has built anything -- so a group pointer is
 /// still zero when the question is asked and would send every row onto the System tab as well. The
 /// first run of this module did exactly that: the rows appeared on both tabs at once.
@@ -378,22 +416,27 @@ unsafe extern "system" fn ctor_detour(top_select: *mut u8, a: usize, b: usize) -
     let base = MODULE_BASE.load(Ordering::Acquire);
     let entries = crate::install::registered_entries();
     if base != 0 && !entries.is_empty() && sane(top_select as usize) {
-        // ONE GROUP PER PROCESS, and the top select it was built against is remembered with it. A
-        // second `FeSceneInGame` gets no seventh tab rather than one holding a stale proxy -- the
-        // visible failure instead of the invisible one.
-        if GROUP.load(Ordering::Acquire) == 0 {
-            // SAFETY: the game's own constructor has just returned against this pointer.
-            if let Some(group) = unsafe { build_group(base, top_select, &entries) } {
-                ROWS.store(entries.len(), Ordering::Release);
-                GROUP.store(group as usize, Ordering::Release);
-                TOP_SELECT.store(top_select as usize, Ordering::Release);
+        // A group for every top select, because the strip draws our panel in every scene once any
+        // group exists -- see the module docs. A constructor call is a new scene even at an address
+        // seen before, so the entry for that address is replaced, never reused; and a build that
+        // refuses takes the old entry out with it, so no scene is handed a group from another.
+        // SAFETY: the game's own constructor has just returned against this pointer.
+        let built = unsafe { build_group(base, top_select, &entries) };
+        let key = top_select as usize;
+        let mut groups = GROUPS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        groups.retain(|(top, _)| *top != key);
+        if let Some(group) = built {
+            ROWS.store(entries.len(), Ordering::Release);
+            groups.push((key, group as usize));
+            if groups.len() > MAX_SCENES {
+                groups.remove(0);
             }
-        } else if TOP_SELECT.load(Ordering::Acquire) != top_select as usize {
             log(format_args!(
-                "{LOG_PREFIX} tab NOT offered to this scene -- the group was built against \
-                 0x{:016x} and this top select is 0x{:016x}",
-                TOP_SELECT.load(Ordering::Acquire),
-                top_select as usize
+                "{LOG_PREFIX} tab offered to top select 0x{key:016x} group=0x{:016x} scenes={}",
+                group as usize,
+                groups.len()
             ));
         }
     }
@@ -402,16 +445,18 @@ unsafe extern "system" fn ctor_detour(top_select: *mut u8, a: usize, b: usize) -
 
 /// The tab lookup: ours when the cursor is on the seventh tab, the game's otherwise.
 unsafe extern "system" fn tab_table_detour(top_select: *mut u8) -> *mut u8 {
-    let group = GROUP.load(Ordering::Acquire);
     let base = MODULE_BASE.load(Ordering::Acquire);
-    if group != 0 && base != 0 && top_select as usize == TOP_SELECT.load(Ordering::Acquire) {
+    if base != 0 && ARMED.load(Ordering::Acquire) {
         // SAFETY: the RVA is a `.pdata` function start recorded in `ds2-rva`, and the original reads
         // the cursor off this same object one instruction into itself.
         let current: GridCurrentIndexFn =
             unsafe { std::mem::transmute(base + ds2_rva::FE_INGAME_TOP_SELECT_TAB_INDEX as usize) };
         // SAFETY: as above.
         let index = unsafe { current(top_select) };
-        if index >= 0 && index as usize == ds2_rva::FE_INGAME_TOP_SELECT_TABS {
+        if index >= 0
+            && index as usize == ds2_rva::FE_INGAME_TOP_SELECT_TABS
+            && let Some(group) = group_for(top_select as usize)
+        {
             let n = TABS_SERVED.fetch_add(1, Ordering::Relaxed) + 1;
             if n <= 2 {
                 log(format_args!(
@@ -482,11 +527,20 @@ unsafe extern "system" fn strip_init_detour(top_select: *mut u8) {
         // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(top_select) };
     }
-    let group = GROUP.load(Ordering::Acquire);
     let base = MODULE_BASE.load(Ordering::Acquire);
-    if group == 0 || base == 0 || top_select as usize != TOP_SELECT.load(Ordering::Acquire) {
+    if base == 0 || !ARMED.load(Ordering::Acquire) {
         return;
     }
+    let Some(group) = group_for(top_select as usize) else {
+        // The one state the strip cannot survive: our panel is in this scene's strip and nothing
+        // here will ever fold it. Said out loud, because it is the bug this module was fixed for.
+        log(format_args!(
+            "{LOG_PREFIX} tab strip init found no group for top select 0x{:016x} -- the seventh \
+             tab's panel is drawn in this scene and nothing will fold it",
+            top_select as usize
+        ));
+        return;
+    };
     // OUR GROUP GETS THE SAME INIT THE SIX GET, and it gets it before the count is raised: the
     // init is what binds the group's layout and sets its own item count, so a cursor that could
     // reach the tab before it was bound would reach an unbound one.
@@ -588,12 +642,24 @@ pub(crate) fn building() -> bool {
     BUILDING.load(Ordering::Acquire)
 }
 
-/// A pointer to the seventh group, for the detours in [`crate::install`] that have to recognise it.
-///
-/// Zero before the constructor detour has built one, which every caller must treat as "there is no
-/// seventh tab" rather than as an error.
-pub fn group() -> usize {
-    GROUP.load(Ordering::Acquire)
+/// Whether any seventh group has been built, which is what the layout detours ask before they give
+/// the strip a seventh cell.
+pub fn built() -> bool {
+    !GROUPS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .is_empty()
+}
+
+/// Whether `candidate` is one of the seventh groups this module built, for the detours in
+/// [`crate::install`] that are handed a tab and have to tell ours from the game's.
+pub fn is_group(candidate: usize) -> bool {
+    candidate != 0
+        && GROUPS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .any(|(_, group)| *group == candidate)
 }
 
 /// How many rows the seventh tab carries.
