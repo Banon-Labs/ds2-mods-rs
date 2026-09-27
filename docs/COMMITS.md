@@ -72,6 +72,22 @@ with the log line. The commit-msg hook refuses one that says neither. It does no
 claim about behaviour from any other sentence; it asks for the one fact a reader needs to weigh the
 rest. It judges only the commit being made, not a branch's history.
 
+A `fix` is a claim that a symptom is gone, so it carries the proof. Its body needs a line opening
+with `Proven:` or `Verified:` that names what showed the symptom gone -- the run's log line, the test
+that failed before and passes now, or the user's words confirming it -- and a `fix` whose body says
+it has not run, is untested or is unproven is refused whatever else it says. Until the evidence
+exists, commit the change as `refactor`, `feat` or `chore` with a `Candidate:` line saying what it
+is meant to change and what would show it, then reword it to `fix`:
+
+```text
+refactor(ds2-overlay): render no imgui frame while no panel has anything on screen
+
+Candidate: meant to end the frozen terms screen under the PathTracing proxy. A run reaching the
+title menu with the picture moving would show it. Not yet run in the game.
+```
+
+Both the hook and the `--range` gate judge this, so it holds in a checkout with no hooks installed.
+
 Track work in beads and describe the behaviour in the message. A commit body pointing at an issue id
 instead of saying what changed is a dangling reference aimed at a database the reader of a clone does
 not have.
