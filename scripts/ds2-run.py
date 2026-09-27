@@ -486,6 +486,21 @@ SECOND_SIN_PINS: dict[str, str] = {
 }
 #: Where the engine writes its log. A fresh one after a launch is the proof it loaded.
 LIGHTING_ENGINE_LOG = "DS2LE.log"
+#: Names a parked engine `dxgi.dll` goes by. `--no-path-tracing` renames it to the first; the
+#: second is the name another agent's selector used on 2026-09-26. Wine loads `dxgi.dll` out of the
+#: game directory by name, so a rename is the whole switch, and the next launch with path tracing
+#: on renames it back.
+PARKED_DXGI_NAMES: tuple[str, ...] = ("dxgi.dll.ds2-run-off", "dxgi.dll.selector-off")
+
+
+def park_path_tracing(game_dir: Path) -> str | None:
+    """Rename the engine's `dxgi.dll` out of Wine's way for this run. Returns what it did."""
+    dxgi = game_dir / "dxgi.dll"
+    if not dxgi.is_file():
+        return None
+    target = game_dir / PARKED_DXGI_NAMES[0]
+    os.replace(dxgi, target)
+    return f"parked dxgi.dll as {target.name}; the next launch without --no-path-tracing restores it"
 #: The one container name SOTFS builds, and the extension it builds it with.
 SAVE_FILE_STEM = "DS2SOFS0000"
 VANILLA_SAVE_EXTENSION = "sl2"
@@ -2671,7 +2686,22 @@ def ensure_lighting_engine_installed(
     """
     actions: list[str] = []
     problems: list[str] = []
+    # A dxgi.dll parked by `--no-path-tracing` (or by another tool) comes back by rename first.
+    # Unpacking the engine instead would also overwrite Second Sin's presets and force its 19.7 GB
+    # reinstall, all to restore one file that is sitting next to where it belongs.
+    dxgi = game_dir / "dxgi.dll"
+    parked = next((game_dir / n for n in PARKED_DXGI_NAMES if (game_dir / n).is_file()), None)
+    if not dxgi.exists() and parked is not None:
+        if write:
+            os.replace(parked, dxgi)
+            actions.append(f"restored dxgi.dll from {parked.name}")
+        else:
+            actions.append(f"would restore dxgi.dll from {parked.name}")
+            if sha256(parked) == LIGHTING_ENGINE_PINS.get("dxgi.dll"):
+                dxgi = parked
     engine_wrong = pins_mismatched(game_dir, LIGHTING_ENGINE_PINS)
+    if dxgi != game_dir / "dxgi.dll":
+        engine_wrong.pop("dxgi.dll", None)
     presets_wrong = pins_mismatched(game_dir, SECOND_SIN_PINS)
     steps = []
     if engine_wrong:
@@ -2772,6 +2802,7 @@ def dry_run(
     launcher_dlls: tuple[str, ...] = (),
     soul_memory_guard: bool = False,
     net_effects: bool = False,
+    path_tracing: bool = True,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
@@ -2785,14 +2816,17 @@ def dry_run(
         print(f"[dry-run] seamless {action}")
     if not seamless_actions and not seamless_problems:
         print(f"[dry-run] seamless {SEAMLESS_VERSION} installed, every pinned file matches")
-    engine_actions, engine_problems = ensure_lighting_engine_installed(GAME_DIR, write=False)
-    for problem in engine_problems:
-        print(f"[dry-run] WOULD REFUSE: {problem}")
-    problems += engine_problems
-    for action in engine_actions:
-        print(f"[dry-run] lighting-engine {action}")
-    if not engine_actions and not engine_problems:
-        print("[dry-run] lighting-engine PathTracing + Second Sin installed, every pin matches")
+    if not path_tracing:
+        print("[dry-run] lighting-engine OFF for this run: dxgi.dll would be parked, not checked")
+    else:
+        engine_actions, engine_problems = ensure_lighting_engine_installed(GAME_DIR, write=False)
+        for problem in engine_problems:
+            print(f"[dry-run] WOULD REFUSE: {problem}")
+        problems += engine_problems
+        for action in engine_actions:
+            print(f"[dry-run] lighting-engine {action}")
+        if not engine_actions and not engine_problems:
+            print("[dry-run] lighting-engine PathTracing + Second Sin installed, every pin matches")
 
     staged = GAME_DIR / STAGED_DLL_NAME
     if BUILT_DLL.is_file():
@@ -3466,6 +3500,7 @@ def launch(
     launcher_dlls: tuple[str, ...] = (),
     soul_memory_guard: bool = False,
     net_effects: bool = False,
+    path_tracing: bool = True,
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
@@ -3476,8 +3511,9 @@ def launch(
         print(f"[seamless] {problem}")
     if seamless:
         problems += seamless_problems
-    _, engine_problems = ensure_lighting_engine_installed(GAME_DIR, write=False)
-    problems += engine_problems
+    if path_tracing:
+        _, engine_problems = ensure_lighting_engine_installed(GAME_DIR, write=False)
+        problems += engine_problems
     if problems:
         for problem in problems:
             print(f"REFUSING TO LAUNCH: {problem}", file=sys.stderr)
@@ -3568,14 +3604,18 @@ def launch(
     for action in actions:
         print(f"[seamless] {action}")
     print(f"[seamless] {SEAMLESS_VERSION} pinned by sha256 in {GAME_DIR / 'SeamlessCoop'}")
-    actions, engine_problems = ensure_lighting_engine_installed(GAME_DIR, write=True)
-    for action in actions:
-        print(f"[lighting-engine] {action}")
-    if engine_problems:
-        for problem in engine_problems:
-            print(f"[lighting-engine] REFUSING TO LAUNCH: {problem}")
-        return EXIT_ERROR
-    print(f"[lighting-engine] {LIGHTING_ENGINE_ARCHIVE.name} + {SECOND_SIN_ARCHIVE.name} pinned")
+    if path_tracing:
+        actions, engine_problems = ensure_lighting_engine_installed(GAME_DIR, write=True)
+        for action in actions:
+            print(f"[lighting-engine] {action}")
+        if engine_problems:
+            for problem in engine_problems:
+                print(f"[lighting-engine] REFUSING TO LAUNCH: {problem}")
+            return EXIT_ERROR
+        print(f"[lighting-engine] {LIGHTING_ENGINE_ARCHIVE.name} + {SECOND_SIN_ARCHIVE.name} pinned")
+    else:
+        parked = park_path_tracing(GAME_DIR)
+        print(f"[lighting-engine] OFF for this run: {parked or 'no dxgi.dll to park'}")
 
     # After the teardown, because a clean exit is what writes the position this reads.
     clamp_saved_window_position()
@@ -3731,8 +3771,9 @@ def launch(
     # refusal has had time to appear. See `game_dialog_lines`.
     for line in game_dialog_lines():
         print(f"[dialog] {line}")
-    for line in lighting_engine_report(GAME_DIR, started_epoch):
-        print(f"[lighting-engine] {line}")
+    if path_tracing:
+        for line in lighting_engine_report(GAME_DIR, started_epoch):
+            print(f"[lighting-engine] {line}")
 
     if probe == "off":
         return EXIT_OK
@@ -5044,6 +5085,23 @@ def selftest() -> int:
             (game / "ds2le_atmosphere_presets/a.ini").write_bytes(b"engine preset")
             ensure_lighting_engine_installed(*args, write=True, run=fake_run)
             check(unpacked == ["presets.zip"], f"lost presets reinstall only the presets: {unpacked}")
+            # --no-path-tracing parks by rename, and the next normal launch renames it back
+            # without unpacking anything.
+            ensure_lighting_engine_installed(*args, write=True, run=fake_run)
+            unpacked.clear()
+            check(park_path_tracing(game) is not None and not (game / "dxgi.dll").exists()
+                  and (game / PARKED_DXGI_NAMES[0]).is_file(), "--no-path-tracing parks dxgi.dll")
+            check(park_path_tracing(game) is None, "parking twice is a no-op")
+            actions, problems = ensure_lighting_engine_installed(*args, write=False, run=fake_run)
+            check(actions == [f"would restore dxgi.dll from {PARKED_DXGI_NAMES[0]}"] and not problems,
+                  f"a dry check plans the rename, not an unpack: {actions} {problems}")
+            actions, problems = ensure_lighting_engine_installed(*args, write=True, run=fake_run)
+            check((game / "dxgi.dll").read_bytes() == b"engine dxgi" and not unpacked
+                  and not problems, "the next launch renames it back and unpacks nothing")
+            (game / "dxgi.dll").rename(game / PARKED_DXGI_NAMES[1])
+            ensure_lighting_engine_installed(*args, write=True, run=fake_run)
+            check((game / "dxgi.dll").is_file() and not unpacked,
+                  "a dxgi.dll parked under the selector's name comes back the same way")
             (game / "dxgi.dll").unlink()
             _, problems = ensure_lighting_engine_installed(
                 game, root / "gone.rar", root / "presets.zip", write=True, run=fake_run
@@ -5401,6 +5459,20 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--path-tracing",
+        dest="path_tracing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "keep DS2 Lighting Engine PathTracing and Second Sin Pathtracing installed and loaded. "
+            "ON BY DEFAULT. --no-path-tracing renames the engine's dxgi.dll to "
+            f"{PARKED_DXGI_NAMES[0]} for this run, so Wine loads the system dxgi; the next launch "
+            "without it renames it back. Anything that turns [invasion_path] on (--input-harness, "
+            "--net-effects, --invasion-path) implies --no-path-tracing until ds2-mods-rs-uz64 is "
+            "fixed."
+        ),
+    )
+    parser.add_argument(
         "--seamless",
         dest="seamless",
         action=argparse.BooleanOptionalAction,
@@ -5654,6 +5726,16 @@ def main() -> int:
             f"[config] --net-effects turned [{INVASION_PATH_SECTION}] on for this run: the key "
             "is read on its Present hook and does nothing without it."
         )
+    # Until ds2-mods-rs-uz64 is fixed: [invasion_path]'s render install creates a throwaway swap
+    # chain, and the Lighting Engine's dxgi.dll crashes the game when it is released (2026-09-26,
+    # execute at 0x5555872d73e0 under ds2_invasion_path::render::install). Every flag above that
+    # turns [invasion_path] on therefore turns path tracing off for the run.
+    if args.invasion_path and args.path_tracing:
+        args.path_tracing = False
+        print(
+            f"[config] [{INVASION_PATH_SECTION}] is on, so path tracing is OFF for this run: its "
+            "throwaway swap chain crashes the Lighting Engine (ds2-mods-rs-uz64)."
+        )
 
     if args.selftest:
         return selftest()
@@ -5729,6 +5811,7 @@ def main() -> int:
             tuple(args.launcher_dll),
             soul_memory_guard=args.soul_memory_guard,
             net_effects=args.net_effects,
+            path_tracing=args.path_tracing,
         )
     return launch(
         args.probe,
@@ -5772,6 +5855,7 @@ def main() -> int:
         tuple(args.launcher_dll),
         soul_memory_guard=args.soul_memory_guard,
         net_effects=args.net_effects,
+        path_tracing=args.path_tracing,
     )
 
 
