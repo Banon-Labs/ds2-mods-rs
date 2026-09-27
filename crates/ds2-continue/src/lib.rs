@@ -89,8 +89,8 @@ pub use hollow_slot::install_hollow_slot_guard;
 #[cfg(windows)]
 pub use install::{
     LoadConfirmed, LogFn, Outcome, StartedIngame, TitleGate, TitleStep, clear_started_ingame,
-    clear_title_gate, install, rearm_autoload, set_load_confirmed, set_logger, set_preselect_slot,
-    set_started_ingame, set_title_gate,
+    clear_title_gate, install, load_slot_once, rearm_autoload, restore_preselect_slot,
+    set_load_confirmed, set_logger, set_preselect_slot, set_started_ingame, set_title_gate,
 };
 #[cfg(windows)]
 pub use silence::set_enabled as set_silence;

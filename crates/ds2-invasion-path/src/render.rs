@@ -1,4 +1,4 @@
-//! The overlay: one detour on `IDXGISwapChain::Present`, and a few hundred triangles.
+//! The overlay: a few hundred triangles, drawn from `ds2-overlay`'s `Present` detour.
 //!
 //! # Why there is no imgui here
 //!
@@ -9,20 +9,6 @@
 //! line segments, which is a vertex buffer and two four-line shaders. An immediate-mode GUI
 //! library, its font atlas, its input capture and its dependency tree would all be carried to
 //! reach `DrawList::add_line`.
-//!
-//! # Where the hook goes, and how its address is found
-//!
-//! `Present` is not an export. It is slot 8 of `IDXGISwapChain`'s vtable, and it is read off the
-//! game's own swap chain: [`install`] starts a thread that waits for the pointer `ds2-rva` records
-//! at `GRAPHICS_DEVICE`, reads the slot and hooks it. Nothing here creates a device or a swap
-//! chain -- a throwaway one is a whole second renderer to a `dxgi.dll` proxy such as DS2LE
-//! `PathTracing`, and releasing it crashed the game.
-//!
-//! **This hooks the DXGI module that owns the swap chain, not `DarkSoulsII.exe`** -- the system
-//! `dxgi.dll`, or a proxy in the game folder when one is installed; the log line names which.
-//! Everything the workspace has learned about Arxan (bd `arxan-vs-minhook-answered-properly-2026-08-26`)
-//! is about detours inside the game image, where the integrity checks live. The hook is outside
-//! all of that; only the pointer walk reads the game image.
 //!
 //! # State is saved and restored, and that is not optional
 //!
@@ -41,10 +27,8 @@
 //! exception there is a crash in someone's invasion with this mod's name on it.
 
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 
-use ds2_hook::{MH_Initialize, MhHook};
-use windows::Win32::Foundation::HMODULE;
 use windows::Win32::Graphics::Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_VERTEX_BUFFER, D3D11_BLEND_DESC,
@@ -61,11 +45,8 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_R32G32_FLOAT, DXGI_FORMAT_R32G32B32A32_FLOAT,
 };
 use windows::Win32::Graphics::Dxgi::IDXGISwapChain;
-use windows::Win32::System::LibraryLoader::{
-    GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-    GetModuleFileNameW, GetModuleHandleExW, GetProcAddress, LoadLibraryA,
-};
-use windows::core::{BOOL, Interface, PCSTR, PCWSTR, s};
+use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryA};
+use windows::core::{BOOL, Interface, PCSTR, s};
 
 use crate::log::log;
 
@@ -689,69 +670,39 @@ fn resources(device: &ID3D11Device) -> Option<&'static Resources> {
 /// Set once the overlay has refused, so a failure is logged once rather than every frame.
 static DISABLED: AtomicBool = AtomicBool::new(false);
 
-/// The trampoline back to the real `Present`.
-static ORIGINAL: AtomicUsize = AtomicUsize::new(0);
-
-/// `IDXGISwapChain::Present`, as the detour must declare it.
-type PresentFn = unsafe extern "system" fn(*mut c_void, u32, u32) -> windows::core::HRESULT;
-
-/// Our `Present`. Draws, then calls the real one.
+/// This crate's drawer on `ds2_overlay`'s table: the route lines and arrows, drawn before the
+/// imgui panels so every panel is on top of them.
 ///
-/// # Safety
-///
-/// Installed by MinHook over `IDXGISwapChain::Present`, whose ABI this matches. It is called by
-/// Direct3D with a live swap chain.
-unsafe extern "system" fn present(
-    swap_chain: *mut c_void,
-    sync_interval: u32,
-    flags: u32,
-) -> windows::core::HRESULT {
-    let original = ORIGINAL.load(Ordering::Acquire);
-    // The frame is shown whatever happens here. An overlay that can fail must not be able to
-    // fail into a black screen.
-    let call_original = |swap_chain: *mut c_void| {
-        if original == 0 {
-            return windows::core::HRESULT(0);
-        }
-        // SAFETY: the trampoline MinHook produced for `Present`, with its own arguments.
-        unsafe {
-            let real: PresentFn = core::mem::transmute(original);
-            real(swap_chain, sync_interval, flags)
-        }
+/// The `Present` detour lives in `ds2-overlay`, so the save picker and the net-effects selector
+/// can draw without this crate being switched on. What stayed here is this crate's own: the
+/// camera capture, the vertices, and the pipeline that draws them.
+fn draw_lines(swap_chain: *mut c_void) {
+    if DISABLED.load(Ordering::Relaxed) {
+        return;
+    }
+    // SAFETY: a live `IDXGISwapChain` pointer handed on by the `Present` detour, which never
+    // passes null. `from_raw_borrowed` borrows without taking a reference count, which is what a
+    // detour must do -- releasing the game's swap chain would be catastrophic.
+    let Some(chain) = (unsafe { IDXGISwapChain::from_raw_borrowed(&swap_chain) }) else {
+        return;
     };
-
-    if DISABLED.load(Ordering::Relaxed) || swap_chain.is_null() {
-        // The overlay slot does not depend on this crate's own drawing having worked.
-        crate::frame_hook::run_present_overlay(swap_chain);
-        return call_original(swap_chain);
+    // The camera capture installs here, not inside `draw`.
+    //
+    // `draw` returns immediately when there are no vertices, and there are no vertices until
+    // a camera is known, and a camera is not known until the capture has run -- so putting
+    // the install down there made it unreachable by exactly the condition it exists to fix.
+    // A live run found that: the log had no capture line at all.
+    //
+    // SAFETY: a borrowed live swap chain; `install_capture` is idempotent and does nothing
+    // after the first success.
+    unsafe { install_capture(chain) };
+    let vertices = crate::frame(chain);
+    if !draw(chain, &vertices) {
+        DISABLED.store(true, Ordering::Relaxed);
+        log(format_args!(
+            "overlay: disabled for this session -- the frame is untouched from here on"
+        ));
     }
-
-    // SAFETY: a live `IDXGISwapChain` pointer from Direct3D. `from_raw_borrowed` borrows without
-    // taking a reference count, which is what a detour must do -- releasing the game's swap
-    // chain would be catastrophic.
-    let borrowed = unsafe { IDXGISwapChain::from_raw_borrowed(&swap_chain) };
-    if let Some(chain) = borrowed {
-        // THE CAMERA CAPTURE INSTALLS HERE, and it has to be here rather than inside `draw`.
-        //
-        // `draw` returns immediately when there are no vertices, and there are no vertices until
-        // a camera is known, and a camera is not known until the capture has run -- so putting
-        // the install down there made it unreachable by exactly the condition it exists to fix.
-        // A live run found that: the log had no capture line at all.
-        //
-        // SAFETY: a borrowed live swap chain; `install_capture` is idempotent and does nothing
-        // after the first success.
-        unsafe { install_capture(chain) };
-        let vertices = crate::frame(chain);
-        if !draw(chain, &vertices) {
-            DISABLED.store(true, Ordering::Relaxed);
-            log(format_args!(
-                "overlay: disabled for this session -- the frame is untouched from here on"
-            ));
-        }
-    }
-    // Last before the real `Present`, so whatever it draws is on top of the lines above.
-    crate::frame_hook::run_present_overlay(swap_chain);
-    call_original(swap_chain)
 }
 
 /// Set once the constant-buffer capture has been offered the context.
@@ -779,185 +730,16 @@ unsafe fn install_capture(chain: &IDXGISwapChain) {
     }
 }
 
-/// Slot 8 of `IDXGISwapChain`: `QueryInterface`, `AddRef`, `Release`, `SetPrivateData`,
-/// `SetPrivateDataInterface`, `GetPrivateData`, `GetParent`, `GetDevice`, then `Present`.
-const PRESENT_VTABLE_SLOT: usize = 8;
-
-/// How often the watcher looks for the game's swap chain before it exists.
-const SWAP_CHAIN_POLL: core::time::Duration = core::time::Duration::from_millis(50);
-
-/// How long the watcher waits before saying, once, that the swap chain has not appeared.
-const SWAP_CHAIN_SLOW: core::time::Duration = core::time::Duration::from_secs(30);
-
-/// The game's own `IDXGISwapChain`, or `None` while `graphics-init` has not finished.
-///
-/// `[GRAPHICS_DEVICE] + 0xd20` is the holder, and its first qword is the chain; the hops and the
-/// disassembly behind them are on the constants in `ds2-rva`. Every read goes through
-/// `safe_read_usize`, so a hop that is not mapped yet is `None` rather than a fault.
-fn game_swap_chain() -> Option<usize> {
-    let global = ds2_game_base::mem::game_rva(ds2_rva::GRAPHICS_DEVICE).ok()?;
-    let non_null = |value: usize| (value != 0).then_some(value);
-    // SAFETY: each read is `ReadProcessMemory` on this process, which answers `None` for an
-    // unmapped address instead of faulting.
-    unsafe {
-        let device = non_null(ds2_game_base::mem::safe_read_usize(global)?)?;
-        let holder = non_null(ds2_game_base::mem::safe_read_usize(
-            device + ds2_rva::GRAPHICS_DEVICE_SWAP_CHAIN_HOLDER_OFFSET,
-        )?)?;
-        non_null(ds2_game_base::mem::safe_read_usize(
-            holder + ds2_rva::SWAP_CHAIN_HOLDER_DXGI_OFFSET,
-        )?)
-    }
-}
-
-/// `Present` off the game's own swap chain's vtable.
-fn present_address(chain: usize) -> Option<usize> {
-    // SAFETY: as in `game_swap_chain` -- guarded reads of a COM object's vtable pointer and one of
-    // its slots.
-    unsafe {
-        let vtable = ds2_game_base::mem::safe_read_usize(chain)?;
-        let present = ds2_game_base::mem::safe_read_usize(
-            vtable + PRESENT_VTABLE_SLOT * core::mem::size_of::<usize>(),
-        )?;
-        (present != 0).then_some(present)
-    }
-}
-
-/// The file name of the module holding `address`, for the log line. `?` when there is none.
-///
-/// With a `dxgi.dll` proxy installed the slot lands in the proxy rather than the system DLL, and
-/// that is worth one line per run: it is what says which `Present` the overlay is drawing through.
-fn owning_module(address: usize) -> String {
-    let mut module = HMODULE::default();
-    // SAFETY: FROM_ADDRESS reads `address` as an address, not a string; UNCHANGED_REFCOUNT takes
-    // no reference, so there is nothing to release.
-    let found = unsafe {
-        GetModuleHandleExW(
-            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-            PCWSTR(address as *const u16),
-            &mut module,
-        )
-    };
-    if found.is_err() {
-        return String::from("?");
-    }
-    let mut path = [0u16; 260];
-    // SAFETY: a module handle just returned, and a buffer this frame owns.
-    let length = unsafe { GetModuleFileNameW(Some(module), &mut path) } as usize;
-    let path = String::from_utf16_lossy(&path[..length.min(path.len())]);
-    path.rsplit(['\\', '/']).next().unwrap_or("?").to_owned()
-}
-
-/// Detour `present`, once the address is known. `false` has been logged.
-///
-/// # Safety
-///
-/// `address` must be `Present` on a live swap chain's vtable.
-unsafe fn hook_present(address: usize) -> bool {
-    // SAFETY: `MH_Initialize` takes no arguments and is safe to call again on an already-
-    // initialised library, which the status below distinguishes.
-    let status = unsafe { MH_Initialize() };
-    if status != ds2_hook::MH_STATUS::MH_OK
-        && status != ds2_hook::MH_STATUS::MH_ERROR_ALREADY_INITIALIZED
-    {
-        log(format_args!("overlay: MH_Initialize said {status:?}"));
+/// Put [`draw_lines`] on `ds2-overlay`'s drawer table and make sure its `Present` detour goes in.
+/// `false` means no overlay this session, already logged.
+pub(crate) fn install() -> bool {
+    if !ds2_overlay::frame_hook::add_drawer(draw_lines) {
+        log(format_args!(
+            "overlay: every ds2-overlay drawer slot is taken -- no lines this session"
+        ));
         return false;
     }
-    // SAFETY: `address` is slot 8 of the game's own `IDXGISwapChain` vtable and `present` matches
-    // its ABI.
-    let hook = match unsafe { MhHook::new(address as *mut c_void, present as *mut c_void) } {
-        Ok(hook) => hook,
-        Err(status) => {
-            log(format_args!("overlay: MH_CreateHook said {status:?}"));
-            return false;
-        }
-    };
-    // The trampoline is stored before the hook is enabled, so the detour can never run without
-    // one.
-    ORIGINAL.store(hook.trampoline() as usize, Ordering::Release);
-    // `ds2_hook::MH_EnableHook` patches at once, or queues into the loader's boot batch if that is
-    // still open -- it will not be by the time a swap chain exists, but either is correct.
-    // `MhHook` has no `Drop`; the detour belongs to MinHook's table from here on.
-    // SAFETY: the target `MhHook::new` just registered.
-    let status = unsafe { ds2_hook::MH_EnableHook(address as *mut c_void) };
-    if status != ds2_hook::MH_STATUS::MH_OK {
-        log(format_args!("overlay: MH_EnableHook said {status:?}"));
-        return false;
-    }
-    true
-}
-
-/// Wait for the game's swap chain, then hook its `Present`. Runs on its own thread.
-fn watch_for_swap_chain() {
-    let started = std::time::Instant::now();
-    let mut said_slow = false;
-    let chain = loop {
-        if let Some(chain) = game_swap_chain() {
-            break chain;
-        }
-        if !said_slow && started.elapsed() >= SWAP_CHAIN_SLOW {
-            said_slow = true;
-            log(format_args!(
-                "overlay: no swap chain at [GRAPHICS_DEVICE]+0x{:x} after {}s -- still waiting",
-                ds2_rva::GRAPHICS_DEVICE_SWAP_CHAIN_HOLDER_OFFSET,
-                SWAP_CHAIN_SLOW.as_secs()
-            ));
-        }
-        std::thread::sleep(SWAP_CHAIN_POLL);
-    };
-    let Some(address) = present_address(chain) else {
-        log(format_args!(
-            "overlay: the game's swap chain 0x{chain:x} has no readable Present -- no overlay \
-             this session"
-        ));
-        return;
-    };
-    // SAFETY: `address` was read off the game's own live swap chain just above.
-    if unsafe { hook_present(address) } {
-        log(format_args!(
-            "overlay: Present hooked at 0x{address:x} in {} (the game's own swap chain 0x{chain:x}, \
-             found after {} ms) -- the overlay can draw",
-            owning_module(address),
-            started.elapsed().as_millis()
-        ));
-    } else {
-        log(format_args!(
-            "overlay: not hooked -- no overlay this session"
-        ));
-    }
-}
-
-/// Arm the `Present` detour. `false` means no overlay this session, already logged.
-///
-/// No swap chain is created here. An earlier version built a throwaway device and swap chain to
-/// read slot 8 and released them, and with the DS2LE `PathTracing` `dxgi.dll` proxy installed the
-/// proxy ran its whole D3D12 init on that throwaway and crashed the game when it was released.
-/// The game's own swap chain does not exist yet at the loader's install position, so a thread
-/// watches the pointer `ds2-rva` records for it and hooks `Present` off its vtable once
-/// `graphics-init` has stored it. The frames the game presents inside `graphics-init` go out
-/// without the overlay, which draws nothing that early anyway.
-///
-/// # Safety
-///
-/// Installs a native code detour, later, from another thread. Call once.
-pub(crate) unsafe fn install() -> bool {
-    match std::thread::Builder::new()
-        .name(String::from("ds2-invasion-path-swapchain"))
-        .spawn(watch_for_swap_chain)
-    {
-        Ok(_) => {
-            log(format_args!(
-                "overlay: waiting for the game's own swap chain -- none is created here"
-            ));
-            true
-        }
-        Err(error) => {
-            log(format_args!(
-                "overlay: no watcher thread ({error}) -- no overlay this session"
-            ));
-            false
-        }
-    }
+    ds2_overlay::install()
 }
 
 // The screen-space expansion that turns projected points into these vertices lives in

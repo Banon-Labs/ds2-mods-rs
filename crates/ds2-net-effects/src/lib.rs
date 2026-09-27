@@ -24,11 +24,9 @@
 //!
 //! # Where the key is read, and why there
 //!
-//! Inside a consumer on `ds2-invasion-path`'s `Present` clock, which runs on the game thread. The
+//! Inside a consumer on `ds2-overlay`'s `Present` clock, which runs on the game thread. The
 //! apply function reaches into the character's effect list and is not safe from any other thread,
-//! so the key is not read from a thread of this crate's own. The clock exists only while
-//! `[invasion_path]` is on (its `Present` detour is what calls the consumers); the loader says so
-//! when it is off.
+//! so the key is not read from a thread of this crate's own.
 //!
 //! The apply function's entry is an Arxan redirect. Calling it is an ordinary call; this crate
 //! checks those five bytes before it calls and never hooks the function.

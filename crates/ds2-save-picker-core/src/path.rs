@@ -25,7 +25,7 @@ const SEPARATORS: [char; 2] = ['\\', '/'];
 ///
 /// Checked on BYTES so the indexing below stays inside character boundaries -- the prefix is
 /// ASCII by construction, whatever the rest of the path turns out to be.
-fn has_drive_prefix(text: &str) -> bool {
+pub(crate) fn has_drive_prefix(text: &str) -> bool {
     let bytes = text.as_bytes();
     bytes.len() >= 3
         && bytes[0].is_ascii_alphabetic()
@@ -79,9 +79,71 @@ pub fn parent(path: &Path) -> Option<PathBuf> {
     Some(PathBuf::from(&trimmed[..index]))
 }
 
+/// `dir` with `name` appended, joined with the separator `dir` already uses.
+///
+/// Not [`Path::join`]: on a Linux test host that inserts `/` into `Z:\home\saves`, giving a path
+/// no player would type and one a string compare against the game's own path would miss. A folder
+/// spelled with backslashes gets a backslash, one spelled with only forward slashes gets one of
+/// those, and a trailing separator is not doubled.
+pub fn join_leaf(dir: &Path, name: &str) -> PathBuf {
+    let text = dir.to_string_lossy();
+    let separator = if text.contains('\\') { '\\' } else { '/' };
+    let trimmed = text.trim_end_matches(SEPARATORS);
+    PathBuf::from(format!("{trimmed}{separator}{name}"))
+}
+
+/// `path` folded for comparison: lowercase, backslashes only, no trailing separator.
+///
+/// Windows paths are not case-sensitive and accept either separator, so two spellings of one
+/// folder must compare equal -- the rule `ds2_save_file_core::dest::is_live_container` applies to
+/// files.
+pub(crate) fn fold(path: &str) -> String {
+    path.to_lowercase()
+        .replace('/', "\\")
+        .trim_end_matches('\\')
+        .to_owned()
+}
+
+/// Whether `path` is `root` or lies somewhere beneath it, compared the way [`fold`] folds.
+///
+/// The boundary is a separator, so `Z:\home` is not under a root named `Z:\ho`.
+pub(crate) fn is_under(path: &Path, root: &str) -> bool {
+    let path = fold(&path.to_string_lossy());
+    let root = fold(root);
+    path == root
+        || path
+            .strip_prefix(&root)
+            .is_some_and(|rest| rest.starts_with('\\'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_leaf_is_joined_with_the_separator_the_folder_already_uses() {
+        assert_eq!(
+            join_leaf(Path::new(r"Z:\home\saves"), "a.sl2"),
+            PathBuf::from(r"Z:\home\saves\a.sl2")
+        );
+        assert_eq!(
+            join_leaf(Path::new(r"Z:\"), "a.sl2"),
+            PathBuf::from(r"Z:\a.sl2")
+        );
+        assert_eq!(
+            join_leaf(Path::new("/tmp/saves/"), "a.sl2"),
+            PathBuf::from("/tmp/saves/a.sl2")
+        );
+    }
+
+    #[test]
+    fn under_a_root_is_decided_on_a_separator_boundary_and_without_case() {
+        assert!(is_under(Path::new(r"z:\home\banon"), r"Z:\"));
+        assert!(is_under(Path::new(r"Z:\"), r"Z:\"));
+        assert!(is_under(Path::new("Z:/home"), r"Z:\home"));
+        assert!(!is_under(Path::new(r"Z:\home"), r"Z:\ho"));
+        assert!(!is_under(Path::new(r"C:\home"), r"Z:\"));
+    }
 
     /// The whole reason this module is not `Path::file_name`, stated as an assertion.
     ///

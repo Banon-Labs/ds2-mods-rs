@@ -67,6 +67,8 @@ pub mod turn;
 #[cfg(windows)]
 mod click;
 #[cfg(windows)]
+mod cursor;
+#[cfg(windows)]
 mod device;
 
 use std::sync::Mutex;
@@ -168,10 +170,39 @@ pub fn release() {
     request(Command::Release);
 }
 
-/// Is the human's input currently being blanked?
+/// Is the human's input currently being blanked, by a command or by a [`hold`]?
 #[must_use]
 pub fn is_blocking() -> bool {
-    BLOCKING.load(Ordering::Relaxed)
+    BLOCKING.load(Ordering::Relaxed) || HOLD.load(Ordering::Relaxed)
+}
+
+/// Set while a modal panel owns the player's hands. See [`hold`].
+static HOLD: AtomicBool = AtomicBool::new(false);
+
+/// Keep every human input away from the game while `on` is `true`, until it is called with
+/// `false`.
+///
+/// This is the product's block, not the experiment's. The save picker draws a panel over the pause
+/// menu and reads the keyboard, pad and mouse itself; without this the menu underneath would move
+/// with every press meant for the panel. It is unbounded because its owner releases it when the
+/// panel closes, and it needs neither the command file nor the `Present` tick: the device detours
+/// read it directly, so it works with `[input_harness]` switched off as long as [`install`] ran.
+///
+/// It does not count as a `block` for the contamination check, which is about experiments.
+pub fn hold(on: bool) {
+    if HOLD.swap(on, Ordering::Relaxed) != on {
+        log::log(format_args!(
+            "{LOG_PREFIX} hold {} -- a panel {} the player's input",
+            if on { "on" } else { "off" },
+            if on { "owns" } else { "released" }
+        ));
+    }
+}
+
+/// Whether a [`hold`] is in force.
+#[must_use]
+pub fn is_held() -> bool {
+    HOLD.load(Ordering::Relaxed)
 }
 
 /// Camera motion, in degrees on one frame, that counts as somebody's hand on the controls while
@@ -295,12 +326,16 @@ pub fn foreign_motion_frames() -> u64 {
 /// are clean prologues rather than Arxan redirects, and the install re-reads the recorded
 /// prologue bytes and refuses any site whose first five bytes are not the ones `ds2-rva`
 /// records.
+///
+/// Idempotent: the harness and the save picker both want the detours, and only the first call
+/// installs them. Later calls answer the first call's count.
 #[cfg(windows)]
 pub unsafe fn install() -> usize {
+    static INSTALLED: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
     // offset this crate validated before installing. The callee's own contract asks for exactly
     // that live object, and reads inside it go through the fault-tolerant readers.
-    unsafe { device::install() }
+    *INSTALLED.get_or_init(|| unsafe { device::install() })
 }
 
 /// How many times each device poll has run, in the order pad, DirectInput mouse, keyboard,

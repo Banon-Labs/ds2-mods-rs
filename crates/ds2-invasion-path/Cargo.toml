@@ -45,7 +45,9 @@ miniz_oxide.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 ds2-game-base.workspace = true
-# MinHook, for the one detour this crate installs: `IDXGISwapChain::Present`.
+# The `Present` detour, which draws the route lines from its drawer table.
+ds2-overlay.workspace = true
+# MinHook, for the game-tick and constant-buffer capture detours.
 ds2-hook.workspace = true
 # THE FIRST THIRD-PARTY RUNTIME DEPENDENCY IN THIS WORKSPACE THAT IS NOT `dearxan`, and it is
 # worth saying why rather than letting it appear in a manifest.

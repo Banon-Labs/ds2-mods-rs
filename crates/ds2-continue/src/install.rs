@@ -76,6 +76,30 @@ pub fn set_preselect_slot(slot: i32) {
     PRESELECT_SLOT.store(slot, Ordering::Release);
 }
 
+/// Load `slot` the next time the character list opens, once, and answer the slot that was
+/// configured before so the caller can put it back with [`restore_preselect_slot`].
+///
+/// For the save picker, which has already chosen a character in its own panel and opens the list
+/// through a title gate: the list's `enter` points the cursor at `slot` and its update takes the
+/// load branch, exactly as a configured autoload does. The top-menu shortcut is not re-armed --
+/// the caller's gate owns the top menu.
+pub fn load_slot_once(slot: i32) -> i32 {
+    FIRED.store(0, Ordering::Release);
+    let previous = PRESELECT_SLOT.swap(slot, Ordering::AcqRel);
+    log(format_args!(
+        "{LOG_PREFIX} load-slot-once slot={slot} (configured slot {previous} is put back once \
+         it is taken)"
+    ));
+    previous
+}
+
+/// Put back the slot [`load_slot_once`] replaced. Called once the load it asked for has been
+/// taken or abandoned, so the next visit to the title does not load it again.
+pub fn restore_preselect_slot(previous: i32) {
+    PRESELECT_SLOT.store(previous, Ordering::Release);
+    ARMED.store(0, Ordering::Release);
+}
+
 /// Allow exactly one more autoload in this process: the next time the title's top menu rests, the
 /// configured slot is loaded again, the same way the first one was.
 ///

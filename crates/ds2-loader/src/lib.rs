@@ -99,6 +99,7 @@ pub mod message_box;
 pub mod net_effects;
 pub mod offline;
 pub mod save_block;
+pub mod save_picker;
 pub mod save_redirect;
 pub mod seamless;
 pub mod soul_memory_guard;
@@ -948,6 +949,7 @@ fn install_invasion_path() {
     if !config.enabled {
         return;
     }
+    ds2_overlay::set_logger(log_line);
     ds2_invasion_path::set_logger(log_line);
     let request = ds2_invasion_path::Request {
         config_path: crash_logging::config_file_path(),
@@ -968,15 +970,15 @@ fn install_invasion_path() {
 /// Put a key that applies a `SpEffect` to the local player on the `Present` clock, if
 /// `[net_effects] enabled = true`.
 ///
-/// After [`install_invasion_path`], whose `Present` detour is the only thing that calls the
-/// clock's consumers: with `[invasion_path]` off the consumer is registered and never runs, and
-/// the line below says so rather than leaving a silent key to explain itself.
+/// The clock and the selector bar are `ds2-overlay`'s, which this starts; `[invasion_path]` does
+/// not have to be on.
 fn install_net_effects() {
     let config = net_effects::NetEffectsConfig::load();
     log_line(format_args!("{}", config.describe()));
     if !config.enabled {
         return;
     }
+    ds2_overlay::set_logger(log_line);
     ds2_net_effects::set_logger(log_line);
     let request = ds2_net_effects::Request {
         config_path: crash_logging::config_file_path(),
@@ -991,15 +993,14 @@ fn install_net_effects() {
             "{} NOT INSTALLED -- the key does nothing this session",
             ds2_net_effects::LOG_PREFIX
         ));
-        return;
     }
-    if !invasion_path::InvasionPathConfig::load().enabled {
-        log_line(format_args!(
-            "{} no clock this session: [invasion_path] is off, so its Present detour never \
-             installs and nothing reads the key. Turn [invasion_path] on.",
-            ds2_net_effects::LOG_PREFIX
-        ));
-    }
+}
+
+/// Hand `ds2-overlay` the log sink and start its `Present` watcher. Idempotent: every feature
+/// that draws or ticks calls this, and only the first call starts anything.
+fn start_overlay() -> bool {
+    ds2_overlay::set_logger(log_line);
+    ds2_overlay::install()
 }
 
 /// Judge each loaded character's soul memory against its level, if `<Game>/ds2-mods.toml` asked.
@@ -1109,20 +1110,24 @@ fn install_input_harness() {
     // that runs whatever is plugged in and whatever has focus. It used to ride a device poll,
     // and a live session proved why that was wrong: the game stopped calling the poll the
     // harness had elected, and the harness went deaf mid-run while the process was still alive.
-    if !ds2_invasion_path::frame_hook::add_frame_hook(ds2_input_harness::on_present_frame) {
+    if !ds2_overlay::frame_hook::add_frame_hook(ds2_input_harness::on_present_frame) {
         log_line(format_args!(
             "{} NO CLOCK this session: every Present frame-hook slot is already taken, so the \
              harness's per-frame tick is not registered and no command will be read.",
             ds2_input_harness::LOG_PREFIX
         ));
     }
+    if !start_overlay() {
+        log_line(format_args!(
+            "{} NO CLOCK this session: ds2-overlay could not start its Present watcher, so no \
+             command will be read.",
+            ds2_input_harness::LOG_PREFIX
+        ));
+    }
     if !invasion_path::InvasionPathConfig::load().enabled {
         log_line(format_args!(
-            "{} NO CLOCK AND NO CAMERA this session: [invasion_path] is off, so its Present \
-             detour never installs -- nothing calls the harness's per-frame tick and nothing \
-             publishes a camera yaw. The device detours still go in (so a `block` written into \
-             the command file would still be stamped once something ticks), but no command will \
-             be READ, because reading them is part of the tick. Turn [invasion_path] on.",
+            "{} no camera this session: [invasion_path] is off, so nothing publishes a camera \
+             yaw and `turn` commands are refused. Everything else in the harness ticks.",
             ds2_input_harness::LOG_PREFIX
         ));
     }
@@ -1184,9 +1189,18 @@ fn install_menu_row() {
     // registration order, so the list a player writes is the order they see -- which only holds if
     // nothing else registers a row behind this loop's back.
     let mut manual_save_row = false;
+    let mut file_row = false;
     for row in &config.rows {
         let registered = register_row(*row);
         manual_save_row |= registered && *row == menu_row::Row::SaveGameToFile;
+        file_row |= registered
+            && matches!(
+                *row,
+                menu_row::Row::SaveGameToFile | menu_row::Row::LoadCharacterFromFile
+            );
+    }
+    if file_row {
+        install_save_picker();
     }
     // Only when `[save_block] enabled = true` asks for it, and even then gated on that row having
     // registered, not on it being listed. A run whose row was refused -- a full tab, a sealed
@@ -1208,6 +1222,49 @@ fn install_menu_row() {
         log_line(format_args!(
             "{} NOT INSTALLED -- the pause menu is the game's own, and this run measures nothing",
             ds2_menu_row::LOG_PREFIX
+        ));
+    }
+}
+
+/// Give the two save-file rows their picker: the in-game panel, or the OS dialog when
+/// `[save_picker] os_native = true`.
+///
+/// The panel needs three things from elsewhere, and asks for each here rather than from inside
+/// `ds2-save-file`, because the loader is what knows whether they are already installed:
+/// `ds2-overlay`'s `Present` detour to draw and tick from, and the input harness's device detours,
+/// whose `hold` keeps the pause menu underneath from moving with every press meant for the panel.
+fn install_save_picker() {
+    let settings = save_picker::load();
+    log_line(format_args!("{}", save_picker::describe(&settings)));
+    let os_native = settings.os_native;
+    ds2_save_file::configure_picker(settings);
+    if os_native {
+        return;
+    }
+    ds2_input_harness::set_logger(log_line);
+    // SAFETY: called from the post-Arxan position like every other install here. The harness's
+    // install checks each of its sites against the prologue `ds2-rva` records and refuses a moved
+    // one, and it is idempotent, so `install_input_harness` calling it again later is a no-op.
+    let hooked = unsafe { ds2_input_harness::install() };
+    if hooked != INPUT_HARNESS_SITES {
+        log_line(format_args!(
+            "{} save picker: only {hooked}/{INPUT_HARNESS_SITES} input devices can be held -- the \
+             pause menu may move under the panel",
+            ds2_save_file::LOG_PREFIX
+        ));
+    }
+    if !start_overlay() {
+        log_line(format_args!(
+            "{} save picker: ds2-overlay could not start, so the panel cannot draw -- the rows fall \
+             back to the OS dialog",
+            ds2_save_file::LOG_PREFIX
+        ));
+        return;
+    }
+    if !ds2_save_file::install_picker_panel() {
+        log_line(format_args!(
+            "{} save picker: no panel -- the rows fall back to the OS dialog",
+            ds2_save_file::LOG_PREFIX
         ));
     }
 }

@@ -8,16 +8,9 @@ use super::*;
 const DIR: &str = r"Z:\home\banon\saves";
 
 /// A model over a listing a test chose, with no filesystem underneath it.
-fn files_model(dir: &str, entries: Vec<PickerEntry>) -> SavePickerModel {
-    let mut model = SavePickerModel {
-        current_dir: PathBuf::from(dir),
-        entries,
-        scroll_offset: 0,
-        cursor: 0,
-        row_capacity: DEFAULT_ROW_CAPACITY,
-        status_message: None,
-        stage: Stage::Files,
-    };
+pub(super) fn files_model(dir: &str, entries: Vec<PickerEntry>) -> SavePickerModel {
+    let mut model = SavePickerModel::blank(Path::new(dir), Purpose::Load);
+    model.entries = entries;
     model.cursor = model.first_selectable_row();
     model
 }
@@ -39,7 +32,7 @@ fn dir_entry(dir: &str, name: &str) -> PickerEntry {
 }
 
 /// `count` saves in `dir`, already in the order [`order_entries`] would put them.
-fn listing(dir: &str, count: usize) -> Vec<PickerEntry> {
+pub(super) fn listing(dir: &str, count: usize) -> Vec<PickerEntry> {
     order_entries(Vec::new(), (0..count).map(|i| save_entry(dir, i)).collect())
 }
 
@@ -599,4 +592,93 @@ fn no_drawn_row_is_ever_a_mystery() {
             );
         }
     }
+}
+
+#[test]
+fn select_all_then_typing_replaces_the_whole_path() {
+    let mut model = files_model(DIR, Vec::new());
+    model.apply(PickerInput::Tab);
+    assert_eq!(
+        model.apply(PickerInput::SelectAll),
+        PickerActivation::Repopulate
+    );
+    assert!(model.all_selected());
+    model.apply(PickerInput::Char('C'));
+    assert_eq!(model.edit_text(), Some("C"));
+    assert!(!model.all_selected());
+}
+
+#[test]
+fn select_all_then_backspace_empties_the_field() {
+    let mut model = files_model(DIR, Vec::new());
+    model.apply(PickerInput::Tab);
+    model.apply(PickerInput::SelectAll);
+    model.apply(PickerInput::Backspace);
+    assert_eq!(model.edit_text(), Some(""));
+}
+
+#[test]
+fn paste_appends_its_first_line_and_replaces_a_selection() {
+    let mut model = files_model(DIR, Vec::new());
+    model.apply(PickerInput::Tab);
+    model.paste("saves\r\nignored");
+    assert_eq!(model.edit_text(), Some(r"Z:\home\banon\saves\saves"));
+    model.apply(PickerInput::SelectAll);
+    model.paste(r"C:\Users");
+    assert_eq!(model.edit_text(), Some(r"C:\Users"));
+}
+
+#[test]
+fn select_all_and_paste_do_nothing_outside_a_field() {
+    let mut model = files_model(DIR, Vec::new());
+    assert_eq!(
+        model.apply(PickerInput::SelectAll),
+        PickerActivation::Ignored
+    );
+    assert_eq!(model.paste("x"), PickerActivation::Ignored);
+}
+
+#[test]
+fn cut_takes_the_selection_and_leaves_the_field_empty() {
+    let mut model = files_model(DIR, Vec::new());
+    model.apply(PickerInput::Tab);
+    assert_eq!(model.cut_selection(), None);
+    model.apply(PickerInput::SelectAll);
+    assert_eq!(model.selected_text(), Some(r"Z:\home\banon\saves\"));
+    assert_eq!(
+        model.cut_selection().as_deref(),
+        Some(r"Z:\home\banon\saves\")
+    );
+    assert_eq!(model.edit_text(), Some(""));
+    assert!(!model.all_selected());
+}
+
+/// Under Seamless Co-op the game's own container is a `.co2`. It was not listed at all, so the
+/// player's live save was missing from its own folder (2026-09-27).
+#[test]
+fn the_running_games_own_extension_is_listed_in_both_modes() {
+    let dir = std::env::temp_dir().join(format!("picker-co2-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    std::fs::write(dir.join("DS2SOFS0000.co2"), b"x").expect("scratch file");
+    std::fs::write(dir.join("DS2SOFS0000.sl2"), b"x").expect("scratch file");
+    let names = |model: &SavePickerModel| -> Vec<String> {
+        model
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                PickerEntry::File { name, .. } => Some(name.clone()),
+                PickerEntry::Dir { .. } => None,
+            })
+            .collect()
+    };
+    // The panel's order: construct (which lists the folder), then set the extension. No refresh
+    // in between -- the first in-game build passed a test that called one and still hid the file.
+    let mut load = SavePickerModel::open(&dir);
+    assert_eq!(names(&load), vec!["DS2SOFS0000.sl2".to_owned()]);
+    load.set_container_extension(Some("co2"));
+    assert!(names(&load).contains(&"DS2SOFS0000.co2".to_owned()));
+    let mut save = SavePickerModel::open_for_destination(&dir, "DS2SOFS0000.co2");
+    save.set_container_extension(Some("co2"));
+    assert!(names(&save).contains(&"DS2SOFS0000.co2".to_owned()));
+    std::fs::remove_dir_all(&dir).ok();
 }

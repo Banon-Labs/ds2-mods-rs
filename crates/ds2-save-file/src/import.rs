@@ -240,18 +240,23 @@ fn downloads_windows_path(home: &str) -> Option<String> {
 
 /// What pressing the row does. **Game thread, inside the menu's confirm path.**
 pub fn load_from_file() {
-    let Some(handoff_file) = handoff_path() else {
+    if handoff_path().is_none() {
         log_line(format_args!(
             "{LOG_PREFIX} import REFUSED reason=no-game-directory -- there is nowhere to record the \
              pick"
         ));
         return;
-    };
+    }
     if PENDING.lock().map(|state| state.is_some()).unwrap_or(true) {
         log_line(format_args!(
             "{LOG_PREFIX} import REFUSED reason=already-pending -- a pick is already saving before \
              it quits"
         ));
+        return;
+    }
+    // The in-game picker unless the player asked for the OS dialog. It answers through
+    // [`accept`] from [`tick`], a frame or more later, and this press is done.
+    if crate::picker::open_for_load() {
         return;
     }
 
@@ -291,30 +296,66 @@ pub fn load_from_file() {
             return;
         }
     };
+    // Every refusal is already in the log; the dialog has nowhere else to show one.
+    let _ = accept(&picked, None);
+}
 
+/// Why [`accept`] refused a pick, in words for the picker's banner. The log line has the detail.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Refused {
+    /// One short line.
+    pub(crate) headline: &'static str,
+    /// What was wrong, or what to do about it.
+    pub(crate) detail: String,
+}
+
+/// Load `picked` -- and, when the picker chose one, the character in `slot` -- or say why not.
+/// **Game thread, from the row's press or from the pause menu's tick.**
+///
+/// The two gates, then the in-session swap, then the restart route when the swap cannot run.
+pub(crate) fn accept(picked: &Path, slot: Option<usize>) -> Result<(), Refused> {
+    let Some(handoff_file) = handoff_path() else {
+        log_line(format_args!(
+            "{LOG_PREFIX} import REFUSED reason=no-game-directory -- there is nowhere to record the \
+             pick"
+        ));
+        return Err(Refused {
+            headline: "CANNOT LOAD NOW",
+            detail: String::from("the game directory could not be found"),
+        });
+    };
     // GATE ONE: the name. Cheap, and it is what makes the log say "that is not a save" rather than
     // surfacing a decompression error from three layers down.
-    if let Err(rejection) = accepts_with(&picked, Some(session_extension())) {
+    if let Err(rejection) = accepts_with(picked, Some(session_extension())) {
         log_line(format_args!(
             "{LOG_PREFIX} import REFUSED path={} reason={rejection} -- expected one of {}; \
              nothing was recorded",
             picked.display(),
             ds2_save_file_core::offered_with(Some(session_extension()))
         ));
-        return;
+        return Err(Refused {
+            headline: "WRONG FILE TYPE",
+            detail: format!(
+                "expected one of {}",
+                ds2_save_file_core::offered_with(Some(session_extension()))
+            ),
+        });
     }
     // GATE TWO: the CONTENT, which is the one that matters. Unwraps the archive, demands exactly one
     // save inside it, and structurally validates the container. A file that passes gate one and
     // fails here is precisely the renamed-jpeg case, and it is refused while the player is still
     // looking at the menu rather than one launch later.
-    let (kind, entries) = match ds2_save_redirect::validate_source(&picked) {
+    let (kind, entries) = match ds2_save_redirect::validate_source(picked) {
         Ok(found) => found,
         Err(error) => {
             log_line(format_args!(
                 "{LOG_PREFIX} import REFUSED path={} reason={error} -- nothing was recorded",
                 picked.display()
             ));
-            return;
+            return Err(Refused {
+                headline: "SAVE UNREADABLE",
+                detail: error.to_string(),
+            });
         }
     };
 
@@ -326,15 +367,16 @@ pub fn load_from_file() {
     // The fallback below is kept rather than deleted because the in-session route needs the title
     // flow hooked, and a build where that hook did not install should still be able to load a save
     // -- slowly, through a restart -- instead of doing nothing at all. Which one ran is in the log.
-    match swap::begin(&picked) {
+    match swap::begin(picked, slot) {
         Ok(()) => {
             log_line(format_args!(
-                "{LOG_PREFIX} import in-session kind={kind} entries={entries} path={} -- leaving \
-                 the game to choose a character out of it",
-                picked.display()
+                "{LOG_PREFIX} import in-session kind={kind} entries={entries} path={} slot={} -- \
+                 leaving the game to load it",
+                picked.display(),
+                slot.map_or_else(|| String::from("<list>"), |slot| slot.to_string())
             ));
             announce(ROW_CAPTION_LEAVING);
-            return;
+            return Ok(());
         }
         Err(reason) => log_line(format_args!(
             "{LOG_PREFIX} import in-session unavailable reason={reason} -- falling back to the \
@@ -349,7 +391,10 @@ pub fn load_from_file() {
              recorded and nothing will change",
             handoff_file.display()
         ));
-        return;
+        return Err(Refused {
+            headline: "COULD NOT RECORD THE PICK",
+            detail: error.to_string(),
+        });
     }
     log_line(format_args!(
         "{LOG_PREFIX} import recorded kind={kind} entries={entries} path={} file={}",
@@ -367,20 +412,23 @@ pub fn load_from_file() {
             "{LOG_PREFIX} import QUITTING WITHOUT SAVING -- no live save directory is known, so \
              there is nothing to wait for"
         ));
-        return quit();
+        quit();
+        return Ok(());
     };
     let Some(system) = game::save_load_system() else {
         log_line(format_args!(
             "{LOG_PREFIX} import QUITTING WITHOUT SAVING -- the save system could not be reached"
         ));
-        return quit();
+        quit();
+        return Ok(());
     };
     let before = game::stamp(&source);
     if !game::request_save(system) {
         log_line(format_args!(
             "{LOG_PREFIX} import QUITTING WITHOUT SAVING -- the save could not be requested"
         ));
-        return quit();
+        quit();
+        return Ok(());
     }
     if let Ok(mut pending) = PENDING.lock() {
         *pending = Some(Pending {
@@ -396,6 +444,7 @@ pub fn load_from_file() {
         ));
         quit();
     }
+    Ok(())
 }
 
 /// The game-thread half: wait for the save, then quit. Registered with `ds2_menu_row::add_tick`.
@@ -405,6 +454,7 @@ pub fn load_from_file() {
 /// continuing to run: the pause menu updating is what calls it, so a swap that asked the game to
 /// leave and is still being ticked is a swap whose confirm the player declined.
 pub fn tick() {
+    crate::picker::collect();
     crate::swap::pause_tick();
     let Ok(mut guard) = PENDING.lock() else {
         return;

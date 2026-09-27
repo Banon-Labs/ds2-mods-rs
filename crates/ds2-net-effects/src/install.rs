@@ -760,8 +760,7 @@ fn watch(path: PathBuf, initial: Option<String>) {
 
 /// Check the apply function's first bytes, arm the binding, and register the frame consumer.
 ///
-/// Patches nothing. The consumer only runs while `ds2-invasion-path`'s `Present` detour is
-/// installed; the loader reports when it is not.
+/// Patches nothing. The consumer runs from `ds2-overlay`'s `Present` detour, which this starts.
 ///
 /// # Safety
 ///
@@ -830,10 +829,17 @@ pub unsafe fn install(request: &Request) -> Outcome {
         ));
     }
 
-    if !ds2_invasion_path::frame_hook::add_frame_hook(on_frame) {
+    if !ds2_overlay::frame_hook::add_frame_hook(on_frame) {
         log(format_args!(
             "{LOG_PREFIX} install-failed stage=frame-hook -- every Present frame-hook slot is \
              taken"
+        ));
+        return Outcome::default();
+    }
+    if !ds2_overlay::install() {
+        log(format_args!(
+            "{LOG_PREFIX} install-failed stage=present -- ds2-overlay could not start its Present \
+             watcher, so the clock never ticks"
         ));
         return Outcome::default();
     }

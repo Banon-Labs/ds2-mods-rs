@@ -25,7 +25,7 @@
 
 use ds2_sl2_core::{SaveSlot, SlotState};
 
-use crate::model::{PickerRow, SavePickerModel};
+use crate::model::{DriveCellKind, PickerRow, SavePickerModel};
 use crate::path::{leaf, parent};
 
 /// Shown in place of a character on a slot nothing has ever been written to.
@@ -52,6 +52,24 @@ pub const ROOT_ROW_TEXT: &str = "[ root ]";
 
 /// How a soul level is introduced on a row, the way the game's own menus abbreviate it.
 pub const SOUL_LEVEL_PREFIX: &str = "SL";
+
+/// The destination's row for writing a file that does not exist yet.
+///
+/// The same bracket as [`BLANK_SLOT_MARKER`], and never on screen at the same time: this one
+/// lives in the file stage of Save to File, that one in the character stage of Load.
+pub const NEW_FILE_ROW_TEXT: &str = "[ new ]";
+
+/// Put in front of the file the game is playing from.
+pub const CURRENT_CONTAINER_MARKER: &str = "*";
+
+/// The overwrite question's yes row, before the file's name.
+pub const OVERWRITE_ROW_TEXT: &str = "Overwrite";
+
+/// The overwrite question's no row.
+pub const KEEP_FILE_ROW_TEXT: &str = "Keep it";
+
+/// What the drive strip row says when a surface draws it as one line rather than as cells.
+pub const PATH_FIELD_SEPARATOR: &str = "|";
 
 /// One character slot as a line of text: the name, the soul level, and a marker where one is due.
 ///
@@ -109,12 +127,29 @@ pub fn row_text(model: &SavePickerModel, row: usize) -> String {
             // A drive root has no leaf; show the root itself so the row still names where it goes.
             None => path.display().to_string(),
         },
-        PickerRow::File(path) => match leaf(&path) {
-            Some(name) => name.to_owned(),
-            // Unreachable from a listing, which only offers paths with a leaf. Showing the whole
-            // path is the harmless answer; an empty row is not.
-            None => path.display().to_string(),
+        PickerRow::File(path) => {
+            let name = match leaf(&path) {
+                Some(name) => name.to_owned(),
+                // Unreachable from a listing, which only offers paths with a leaf. Showing the
+                // whole path is the harmless answer; an empty row is not.
+                None => path.display().to_string(),
+            };
+            if model.is_current_container(&path) {
+                format!("{CURRENT_CONTAINER_MARKER} {name}")
+            } else {
+                name
+            }
+        }
+        PickerRow::DriveStrip => drive_strip_text(model),
+        PickerRow::NewFile => match model.default_file_name() {
+            Some(name) => format!("{NEW_FILE_ROW_TEXT} {name}"),
+            None => NEW_FILE_ROW_TEXT.to_owned(),
         },
+        PickerRow::Overwrite(path) => match leaf(&path) {
+            Some(name) => format!("{OVERWRITE_ROW_TEXT} {name}"),
+            None => OVERWRITE_ROW_TEXT.to_owned(),
+        },
+        PickerRow::KeepFile => KEEP_FILE_ROW_TEXT.to_owned(),
         PickerRow::Character(slot) => match model.character_slot(slot) {
             Some(found) => character_text(found),
             None => EMPTY_SLOT_TEXT.to_owned(),
@@ -122,6 +157,36 @@ pub fn row_text(model: &SavePickerModel, row: usize) -> String {
         PickerRow::Back => BACK_ROW_TEXT.to_owned(),
         PickerRow::Empty => String::new(),
     }
+}
+
+/// The drive strip as one line, for a surface that does not draw it as cells: `C:  >Z:<  | path`.
+///
+/// The current drive is bracketed with `>` `<`, which is what `er-save-picker-core`'s strip
+/// shows. A surface drawing cells should use `SavePickerModel::view` instead, which says which
+/// cell is current without making the panel parse this.
+pub fn drive_strip_text(model: &SavePickerModel) -> String {
+    let current = model.current_drive();
+    let mut parts: Vec<String> = model
+        .drive_strip_cells()
+        .into_iter()
+        .map(|kind| match kind {
+            DriveCellKind::Drive(index) => {
+                let label = model.drive_label(index).unwrap_or_default();
+                if current == Some(index) {
+                    format!(">{label}<")
+                } else {
+                    label
+                }
+            }
+            DriveCellKind::MoreLeft => "[<]".to_owned(),
+            DriveCellKind::MoreRight => "[>]".to_owned(),
+        })
+        .collect();
+    parts.push(format!(
+        "{PATH_FIELD_SEPARATOR} {}",
+        model.current_dir().display()
+    ));
+    parts.join("  ")
 }
 
 #[cfg(test)]

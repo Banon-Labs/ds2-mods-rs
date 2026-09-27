@@ -77,6 +77,8 @@ ds2-build-import-core = { path = "crates/ds2-build-import-core" }
 # The Load from URL field's lifecycle: submit, cancel, re-open, clipboard gate. Host-only.
 ds2-build-url-core = { path = "crates/ds2-build-url-core" }
 ds2-menu-row = { path = "crates/ds2-menu-row" }
+# The one `Present` detour: the per-frame clock, the drawer table and every imgui panel.
+ds2-overlay = { path = "crates/ds2-overlay" }
 ds2-inventory-sort = { path = "crates/ds2-inventory-sort" }
 ds2-voice-chat = { path = "crates/ds2-voice-chat" }
 # A key that applies a SpEffect to the local player, the way the game applies its own.
@@ -88,6 +90,8 @@ ds2-hp-gauge = { path = "crates/ds2-hp-gauge" }
 # Agent-driven input: writes the device state the engine reads, and blanks the human's.
 ds2-input-harness = { path = "crates/ds2-input-harness" }
 ds2-sl2-core = { path = "crates/ds2-sl2-core" }
+# The save picker's rows and decisions, host-tested. Drawn by `ds2-save-file`'s in-game panel.
+ds2-save-picker-core = { path = "crates/ds2-save-picker-core" }
 ds2-save-file = { path = "crates/ds2-save-file" }
 ds2-save-file-core = { path = "crates/ds2-save-file-core" }
 # Refuses the game's own saves, so the rows above are the only thing that writes the container.

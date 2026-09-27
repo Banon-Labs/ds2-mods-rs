@@ -1,0 +1,39 @@
+# The one `IDXGISwapChain::Present` detour, and everything that draws or ticks from it.
+#
+# It used to live inside `ds2-invasion-path`, which meant nothing could draw or tick unless the
+# invasion arrows were switched on, and only one imgui panel could exist because the render loop
+# belonged to whichever crate took it first. The save picker needed both of those to change: it
+# draws a panel over the pause menu, and it is unrelated to invasions.
+#
+# So this crate owns the detour, the per-frame clock, the drawer table (raw Direct3D painters such
+# as the route lines) and one hudhook render loop that runs every registered imgui panel in turn.
+# An RLIB, like every feature crate here: `ds2-loader` is the one loadable module.
+[package]
+name = "ds2-overlay"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The frame-hook and panel tables are plain atomics and are tested on the host.
+[dependencies]
+
+[target.'cfg(windows)'.dependencies]
+ds2-game-base.workspace = true
+ds2-hook.workspace = true
+# Where the game keeps its own swap chain, so the detour is read off it and no throwaway swap
+# chain is ever built.
+ds2-rva.workspace = true
+# The vendored copy, whose `set_shared_render_loop`/`render_shared` draw inside this detour
+# instead of hooking `Present` a second time. Its `windows` and `imgui` re-exports are the types
+# every panel agrees on.
+hudhook.workspace = true
+windows = { version = "0.62", default-features = false, features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Dxgi",
+  "Win32_System_LibraryLoader",
+] }
+
+[lints]
+workspace = true

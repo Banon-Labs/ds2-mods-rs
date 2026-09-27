@@ -166,6 +166,11 @@ pub fn save_to_file() {
         ));
         return;
     }
+    // The in-game picker unless the player asked for the OS dialog. It answers through
+    // [`commit`] from [`tick`], and this press is done.
+    if crate::picker::open_for_save() {
+        return;
+    }
 
     let filter = dialog_filter();
     // The same folder the load row browses in, and not the container's own. A player saves a
@@ -218,8 +223,27 @@ pub fn save_to_file() {
             return;
         }
     };
+    // Every refusal is already in the log; the dialog has nowhere else to show one.
+    let _ = commit(&picked);
+}
 
-    let destination = with_extension(&picked, ds2_save_file_core::SAVE_EXTENSION);
+/// Write the running character to `picked`, or say why not. **Game thread**, from the row's press
+/// or from the pause menu's tick. An existing file at `picked` is replaced: whoever named it has
+/// already confirmed that.
+pub(crate) fn commit(picked: &Path) -> Result<(), crate::import::Refused> {
+    let refused = |headline: &'static str, detail: &str| {
+        Err(crate::import::Refused {
+            headline,
+            detail: detail.to_owned(),
+        })
+    };
+    let Some(source) = live_container() else {
+        return refused("NOTHING TO SAVE", "the game has not built a save path yet");
+    };
+    if PENDING.lock().map(|state| state.is_some()).unwrap_or(true) {
+        return refused("ALREADY SAVING", "wait for the last save to finish");
+    }
+    let destination = with_extension(picked, ds2_save_file_core::SAVE_EXTENSION);
     // THE ONE REFUSAL THAT PROTECTS A SAVE. Copying a file onto itself truncates it on most
     // platforms, and the dialog opens with the container's own name already filled in -- so a
     // player who browses to the save's folder and presses Save without typing lands here. It used
@@ -237,7 +261,7 @@ pub fn save_to_file() {
             "{LOG_PREFIX} export REFUSED reason=no-save-load-system -- cannot ask the game to \
              persist, so nothing is copied"
         ));
-        return;
+        return refused("CANNOT SAVE NOW", "the save system could not be reached");
     };
     // The seed below copies the live container, and a copy taken while the game is writing it is a
     // torn file the game would then read every other slot out of.
@@ -246,7 +270,10 @@ pub fn save_to_file() {
             "{LOG_PREFIX} export REFUSED reason=save-in-flight -- the game is reading or writing \
              its container right now; nothing was requested"
         ));
-        return;
+        return refused(
+            "CANNOT SAVE NOW",
+            "the game is reading or writing its save right now",
+        );
     }
 
     // Seed the file the game will be pointed at with the live container, so the slots the save does
@@ -262,7 +289,7 @@ pub fn save_to_file() {
             staging.display(),
             destination.display()
         ));
-        return;
+        return refused("COULD NOT WRITE THERE", &reason);
     }
     let target = staging.clone().unwrap_or_else(|| destination.clone());
 
@@ -291,26 +318,33 @@ pub fn save_to_file() {
         Some((asked, answer)) if same_path(answer, &source) => asked.clone(),
         _ => source.clone(),
     };
-    let destination_before = game::stamp(&destination);
+    // Through the bypass, here and at the end: when the destination is the game's own container
+    // name -- DS2SOFS0000.co2 over itself -- a swap's window answers it with the staged copy, and
+    // both stamps measured that instead. The file was replaced and the export reported
+    // `destination-unchanged` (2026-09-27, twice).
+    let destination_before = open_redirect::bypass(|| game::stamp(&destination));
     let before = game::stamp(&target);
     if !open_redirect::arm(&asked, &target) {
         log_line(format_args!(
             "{LOG_PREFIX} export REFUSED reason=cannot-arm-redirect -- the save was NOT requested"
         ));
         discard(staging.as_deref());
-        return;
+        return refused(
+            "CANNOT SAVE NOW",
+            "the save could not be pointed at that file",
+        );
     }
     if !game::request_save(system) {
         restore_window(previous.as_ref());
         discard(staging.as_deref());
-        return;
+        return refused("CANNOT SAVE NOW", "the game refused the save request");
     }
     let Ok(mut pending) = PENDING.lock() else {
         log_line(format_args!(
             "{LOG_PREFIX} export REFUSED reason=poisoned -- the save WAS requested and will happen; \
              only the copy is lost"
         ));
-        return;
+        return Ok(());
     };
     log_line(format_args!(
         "{LOG_PREFIX} export armed route={route:?} source={} destination={} staging={} -- waiting \
@@ -331,6 +365,7 @@ pub fn save_to_file() {
         ticks: 0,
         restore: previous,
     });
+    Ok(())
 }
 
 /// Copy the live container to the staging file, and check the copy is whole.
@@ -389,6 +424,7 @@ fn restore_window(previous: Option<&(PathBuf, PathBuf)>) {
 /// The `expect` inside is unreachable: the same lock guard is checked for `Some` a few lines
 /// above and is not released in between, so the `take` cannot find it empty.
 pub fn tick() {
+    crate::picker::collect();
     let Ok(mut guard) = PENDING.lock() else {
         return;
     };
@@ -460,7 +496,7 @@ fn finish(pending: &Pending, completed: bool) {
             Some(false)
         }
     };
-    let after = game::stamp(&pending.destination);
+    let after = open_redirect::bypass(|| game::stamp(&pending.destination));
     let verdict = export_verdict(
         completed,
         promoted,

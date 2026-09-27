@@ -203,6 +203,27 @@ struct Swap {
     phase: Phase,
     /// Frames spent in the current phase, counted by whichever tick owns that phase.
     frames: u32,
+    /// The character the in-game picker already chose, loaded straight from the list instead of
+    /// waiting for the player to choose again. `None` for an archive, whose characters the picker
+    /// cannot read, and for the OS dialog.
+    slot: Option<usize>,
+}
+
+/// The configured autoload slot [`ds2_continue::load_slot_once`] replaced, or [`NO_PRESELECT`]
+/// when this flow has not replaced it. Put back by [`restore_preselect`].
+static REPLACED_PRESELECT: std::sync::atomic::AtomicI32 =
+    std::sync::atomic::AtomicI32::new(NO_PRESELECT);
+
+/// Nothing replaced. Not a slot anyone configures: `ds2-continue` reads any negative as "off".
+const NO_PRESELECT: i32 = i32::MIN;
+
+/// Hand the configured autoload slot back, if this flow borrowed it. Every path that ends a swap
+/// calls it, so a later visit to the title never loads the picked slot a second time.
+fn restore_preselect() {
+    let previous = REPLACED_PRESELECT.swap(NO_PRESELECT, std::sync::atomic::Ordering::AcqRel);
+    if previous != NO_PRESELECT {
+        ds2_continue::restore_preselect_slot(previous);
+    }
 }
 
 /// The swap in progress, if any.
@@ -289,7 +310,10 @@ fn steam_id() -> Option<String> {
 ///
 /// [`NotBegun`] naming which precondition was absent -- the open redirect not installed, or a
 /// session that is not in a state a swap can be driven from.
-pub fn begin(picked: &Path) -> Result<(), NotBegun> {
+///
+/// `slot` is the character the in-game picker already chose. With one, the list opens and loads
+/// it on its own; without one, the player chooses from the game's list as before.
+pub fn begin(picked: &Path, slot: Option<usize>) -> Result<(), NotBegun> {
     if !ds2_save_redirect::open_redirect::installed() {
         log_line(format_args!(
             "{LOG_PREFIX} swap not attempted for {} -- the open redirect is not installed, so the \
@@ -342,6 +366,7 @@ pub fn begin(picked: &Path) -> Result<(), NotBegun> {
         *guard = Some(Swap {
             staged: directory,
             picked: picked.to_path_buf(),
+            slot,
             phase: Phase::Leaving,
             frames: 0,
         });
@@ -545,6 +570,18 @@ fn title_gate() -> ds2_continue::TitleStep {
                 "{LOG_PREFIX} swap ready -- the character list now describes {}; opening it",
                 swap.staged
             ));
+            // The picker already chose a character, so the list loads it instead of asking again.
+            // `ds2-continue`'s list hooks do what its configured autoload does: point the cursor at
+            // the slot on `enter`, then take the load branch, past the game's own occupancy and
+            // ownership checks. A slot those checks refuse leaves the list up for the player.
+            if let Some(slot) = swap.slot.and_then(|slot| i32::try_from(slot).ok()) {
+                let previous = ds2_continue::load_slot_once(slot);
+                REPLACED_PRESELECT.store(previous, std::sync::atomic::Ordering::Release);
+                log_line(format_args!(
+                    "{LOG_PREFIX} swap will load slot={slot} straight from the list -- the picker \
+                     chose it"
+                ));
+            }
             swap.phase = Phase::Choosing;
             swap.frames = 0;
             TitleStep::TakeLoadGame
@@ -556,6 +593,7 @@ fn title_gate() -> ds2_continue::TitleStep {
             if swap.frames <= HANDOVER_GRACE_FRAMES {
                 return TitleStep::Wait;
             }
+            restore_preselect();
             log_line(format_args!(
                 "{LOG_PREFIX} swap backed out -- no character was chosen, so the staged container \
                  is being taken back out"
@@ -602,6 +640,7 @@ fn abandon(why: &str) {
     // that live object, and reads inside it go through the fault-tolerant readers.
     let save = unsafe { session_dir::SAVE.disarm() };
     ds2_continue::clear_title_gate();
+    restore_preselect();
     ds2_dialog_skip::release();
     // AND THE LABEL, which the press borrowed to say the game was being left. This is the path that
     // reaches a player who declined the confirm: the pause menu is still up, still in front of
@@ -675,6 +714,7 @@ fn load_confirmed(slot: i32) {
             |seated| seated.to_string(),
         );
     ds2_continue::clear_title_gate();
+    restore_preselect();
     // The hold survives this, and releasing it here is a bug this run measured. The list taking its
     // load branch is not the end of the load: the game put up one more `common-window`, and with
     // the hold already released this build suppressed it and the player landed back at the title.
