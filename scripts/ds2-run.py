@@ -521,6 +521,66 @@ LIGHTING_ENGINE_LOG = "DS2LE.log"
 #: game directory by name, so a rename is the whole switch, and the next launch with path tracing
 #: on renames it back.
 PARKED_DXGI_NAMES: tuple[str, ...] = ("dxgi.dll.ds2-run-off", "dxgi.dll.selector-off")
+#: The texture packs the owner chose on 2026-09-27, unpacked over Second Sin in this order. All
+#: three write `.dds` files into `tex_override/`, the folder the engine's dxgi.dll loads
+#: replacement textures from. Second Sin ships a `tex_override/` of its own, so a Second Sin
+#: reinstall puts its copies back and the packs go on again after it. A pack unpacked again puts
+#: back files a later pack had won, so re-applying one re-applies every pack after it.
+#:
+#: Where two ship the same file the later one wins. Counted from the archives' own listings:
+#:   Renewal UI (4k UI + 1024px icons, 993 files) over Second Sin (4896): 2, both also in Smooth UI.
+#:   Smooth UI (177) over Renewal: 70 -- 69 of Renewal's 73 4k UI textures and `ico_attributes.dds`.
+#:   DS3 HD Icons Expanded (430) over Renewal: 293 of Renewal's 920 icons.
+#:   Smooth UI and DS3 HD Icons share none; no pack shares a file with the engine archive.
+#: No colliding pair is byte-identical. Renewal is an upscale of the game's own art and covers the
+#: most, so it is the base; the two restyles go over it. Each pin is a file its own pack wins, so
+#: the pins never undo each other, and none is in Second Sin's `SECOND_SIN_PINS`.
+#:
+#: Each entry is `(archive, ((folder in the archive, folder in the game dir), ...), pins)`.
+#: Renewal is a FOMOD: its `ModuleConfig.xml` installs one folder per group into `tex_override`,
+#: and the choices here are "4k Version" for the UI and "1024x1024 Version" for the icons. DS3 HD
+#: Icons has no installer or readme; its folder holds the same `h_<hash>h_<hash>.dds` names
+#: Renewal's installer puts in `tex_override` (293 of them), so it goes there too.
+RENEWAL_UI_ARCHIVE = Path.home() / "DS2" / "Renewal UI - All In One v1.0-1264-1-0-1759539209.7z"
+SMOOTH_UI_ARCHIVE = Path.home() / "DS2" / "Smooth UI - All in One 2.5-1293-2-5-1769460477.rar"
+DS3_ICONS_ARCHIVE = Path.home() / "DS2" / "DS3 HD Icons Expanded-1174-2-0-1739491777.zip"
+TEXTURE_PACKS: tuple[tuple[Path, tuple[tuple[str, str], ...], dict[str, str]], ...] = (
+    (
+        RENEWAL_UI_ARCHIVE,
+        (
+            ("ui_renewal_v1_0/fomod/tex_override_ui_4k/", "tex_override/"),
+            ("ui_renewal_v1_0/fomod/tex_override_icons_1024x1024/", "tex_override/"),
+        ),
+        {
+            "tex_override/h_1517467930898632909h_14420162430272941563.dds":
+                "3e852294073f12ba248c5cab827b510fa8c02f1dfa8022eb461f92bfb7372f97",
+            "tex_override/h_10017916161241197034h_7639370732724436532.dds":
+                "66946fbc13e8a197e2ad56d7e23910c5e02d1a00e4de167b06448547327d4081",
+        },
+    ),
+    (
+        SMOOTH_UI_ARCHIVE,
+        (("tex_override/", "tex_override/"),),
+        {
+            # Shipped by Second Sin and Renewal too; Smooth UI's copy is the one that stays.
+            "tex_override/h_12468555327461286067h_13103369309438574334.dds":
+                "62875bb2b60dc63b3062725153540b0b9e77c87802048646eb62b25babf2f2ef",
+            "tex_override/ui_health_bars.dds":
+                "5a04ed381a4dc29cb06ecec66424b5610396bead899312e814d6be985e879409",
+        },
+    ),
+    (
+        DS3_ICONS_ARCHIVE,
+        (("DS3 HD Icons Expanded 2.0/", "tex_override/"),),
+        {
+            # Shipped by Renewal too.
+            "tex_override/h_10009418602651167090h_17673765541661531086.dds":
+                "3c4bbd5c8cfd23015e80f3b992771e18be0b924add690129f4061ba820e2e09b",
+            "tex_override/h_10150967617685352205h_3435705846522460100.dds":
+                "5fee0276dcaf10585dbe48ab42fac8c3a702da9bbf1738c1aa614c8bf891b920",
+        },
+    ),
+)
 
 
 def park_path_tracing(game_dir: Path) -> str | None:
@@ -2753,19 +2813,38 @@ def unpack_command(archive: Path, game_dir: Path, skip: Sequence[str] = ()) -> l
     return argv
 
 
+def pack_unpack_command(
+    archive: Path, game_dir: Path, folders: Sequence[tuple[str, str]]
+) -> list[str]:
+    """The argv that unpacks only `folders` of a texture pack, each under its game-dir name.
+
+    bsdtar reads the zip, the rar and the 7z alike. The member patterns keep everything else in
+    the archive (Renewal's installer images, its other resolution) out of the game dir, and each
+    `-s` renames an archive folder to where it goes; the patterns match the names before renaming.
+    """
+    argv = ["bsdtar", "-x", "-C", str(game_dir), "-f", str(archive)]
+    for source, target in folders:
+        if source != target:
+            literal = re.sub(r"([.\[\]*^$\\])", r"\\\1", source)
+            argv += ["-s", f"#^{literal}#{target}#"]
+    return argv + [f"{source}*" for source, _ in folders]
+
+
 def ensure_lighting_engine_installed(
     game_dir: Path,
     engine_archive: Path = LIGHTING_ENGINE_ARCHIVE,
     presets_archive: Path = SECOND_SIN_ARCHIVE,
     write: bool = True,
     run=subprocess.run,
+    packs: Sequence[tuple[Path, tuple[tuple[str, str], ...], dict[str, str]]] | None = None,
 ) -> tuple[list[str], list[str]]:
-    """Make the game directory hold the pinned engine with Second Sin over it. `(actions, problems)`.
+    """Make the game directory hold the pinned engine, Second Sin over it, and the texture packs
+    over both. `(actions, problems)`.
 
     A correct install is hashed and left alone. A wrong one is unpacked again from the owner's own
-    archives, engine first and presets second, because the presets replace files the engine ships.
-    The Second Sin archive is 19.7 GB, so a reinstall of it takes minutes, and it happens only when
-    its pin says the install is gone.
+    archives, engine first, presets second, then `packs` (default `TEXTURE_PACKS`) in order,
+    because each replaces files the ones before it ship. The Second Sin archive is 19.7 GB, so a
+    reinstall of it takes minutes, and it happens only when its pin says the install is gone.
     """
     actions: list[str] = []
     problems: list[str] = []
@@ -2788,12 +2867,33 @@ def ensure_lighting_engine_installed(
     presets_wrong = pins_mismatched(game_dir, SECOND_SIN_PINS)
     steps = []
     if engine_wrong:
-        steps.append((engine_archive, LIGHTING_ENGINE_SKIP, LIGHTING_ENGINE_PINS, engine_wrong))
+        steps.append((
+            engine_archive,
+            unpack_command(engine_archive, game_dir, LIGHTING_ENGINE_SKIP),
+            LIGHTING_ENGINE_PINS,
+            engine_wrong,
+        ))
     if engine_wrong or presets_wrong:
-        steps.append(
-            (presets_archive, (), SECOND_SIN_PINS, presets_wrong or {"presets": "after the engine"})
-        )
-    for archive, skip, pins, wrong in steps:
+        steps.append((
+            presets_archive,
+            unpack_command(presets_archive, game_dir),
+            SECOND_SIN_PINS,
+            presets_wrong or {"presets": "after the engine"},
+        ))
+    # Any unpack under a pack puts back files it had won, so from the first step on, every pack
+    # after it goes on again (see `TEXTURE_PACKS`).
+    again = bool(steps)
+    for archive, folders, pins in TEXTURE_PACKS if packs is None else packs:
+        wrong = pins_mismatched(game_dir, pins)
+        if again or wrong:
+            steps.append((
+                archive,
+                pack_unpack_command(archive, game_dir, folders),
+                pins,
+                wrong or {"tex_override": "after what was unpacked under it"},
+            ))
+            again = True
+    for archive, argv, pins, wrong in steps:
         why = ", ".join(f"{k} {v}" for k, v in wrong.items())
         if not archive.is_file():
             problems.append(f"{why}, and {archive} is not there to reinstall from")
@@ -2801,7 +2901,7 @@ def ensure_lighting_engine_installed(
         if not write:
             actions.append(f"would unpack {archive.name} ({why})")
             continue
-        result = run(unpack_command(archive, game_dir, skip), capture_output=True, text=True)
+        result = run(argv, capture_output=True, text=True)
         still = pins_mismatched(game_dir, pins)
         if result.returncode != 0 or still:
             problems.append(
@@ -2925,7 +3025,8 @@ def dry_run(
         for action in engine_actions:
             print(f"[dry-run] lighting-engine {action}")
         if not engine_actions and not engine_problems:
-            print("[dry-run] lighting-engine PathTracing + Second Sin installed, every pin matches")
+            print("[dry-run] lighting-engine PathTracing + Second Sin + "
+                  f"{len(TEXTURE_PACKS)} texture packs installed, every pin matches")
 
     staged = GAME_DIR / STAGED_DLL_NAME
     if BUILT_DLL.is_file():
@@ -3728,6 +3829,8 @@ def launch(
                 print(f"[lighting-engine] REFUSING TO LAUNCH: {problem}")
             return EXIT_ERROR
         print(f"[lighting-engine] {LIGHTING_ENGINE_ARCHIVE.name} + {SECOND_SIN_ARCHIVE.name} pinned")
+        for archive, _, _ in TEXTURE_PACKS:
+            print(f"[lighting-engine] texture pack {archive.name} pinned")
     else:
         parked = park_path_tracing(GAME_DIR)
         print(f"[lighting-engine] OFF for this run: {parked or 'no dxgi.dll to park'}")
@@ -5155,8 +5258,10 @@ def selftest() -> int:
     else:
         print(f"  skip the pinned hashes: no {SEAMLESS_ARCHIVE} on this machine")
     # The Lighting Engine pair: engine first, presets over it, and nothing when the pins match.
-    global LIGHTING_ENGINE_PINS, SECOND_SIN_PINS  # noqa -- planted archives, restored below
+    global LIGHTING_ENGINE_PINS, SECOND_SIN_PINS, TEXTURE_PACKS  # noqa -- planted, restored below
     real_engine_pins, real_presets_pins = LIGHTING_ENGINE_PINS, SECOND_SIN_PINS
+    real_packs = TEXTURE_PACKS
+    TEXTURE_PACKS = ()  # the pair alone first; the packs over it are tested after
     try:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -5233,8 +5338,107 @@ def selftest() -> int:
             )
             check(bool(problems) and "gone.rar" in problems[0],
                   "a missing engine with no archive is a refusal naming the archive")
+
+        # The texture packs over the pair: in order, after every Second Sin unpack, and each one
+        # re-applied puts every later one back on top. `fake_run` reads `archives` and `game`
+        # when it is called, so rebinding them here points it at this install.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            game = root / "Game"
+            game.mkdir()
+            shared = "tex_override/h_1h_2.dds"
+
+            def digest(data: bytes) -> str:
+                return hashlib.sha256(data).hexdigest()
+
+            # Contents as they land, after bsdtar's renames; the fake does not rename.
+            archives = {
+                root / "engine.rar": {"dxgi.dll": b"engine dxgi"},
+                root / "presets.zip": {
+                    "ds2le_atmosphere_presets/a.ini": b"second sin preset", shared: b"second sin",
+                },
+                root / "renewal.7z": {shared: b"renewal", "tex_override/r.dds": b"renewal only"},
+                root / "smooth.rar": {shared: b"smooth", "tex_override/s.dds": b"smooth only"},
+                root / "icons.zip": {"tex_override/i.dds": b"icons"},
+            }
+            for archive in archives:
+                archive.write_bytes(b"planted")
+            LIGHTING_ENGINE_PINS = {"dxgi.dll": digest(b"engine dxgi")}
+            SECOND_SIN_PINS = {"ds2le_atmosphere_presets/a.ini": digest(b"second sin preset")}
+            TEXTURE_PACKS = (
+                (root / "renewal.7z", (("fomod/ui_4k/", "tex_override/"),),
+                 {"tex_override/r.dds": digest(b"renewal only")}),
+                (root / "smooth.rar", (("tex_override/", "tex_override/"),),
+                 {shared: digest(b"smooth")}),
+                (root / "icons.zip", (("Icons 2.0/", "tex_override/"),),
+                 {"tex_override/i.dds": digest(b"icons")}),
+            )
+            args = (game, root / "engine.rar", root / "presets.zip")
+            unpacked.clear()
+            actions, problems = ensure_lighting_engine_installed(*args, write=False, run=fake_run)
+            check(not unpacked and len(actions) == 5 and not problems,
+                  f"a dry check names the pair and all three packs: {actions} {problems}")
+            actions, problems = ensure_lighting_engine_installed(*args, write=True, run=fake_run)
+            check(unpacked == [a.name for a in archives] and not problems,
+                  f"a fresh install goes engine, presets, then the packs in order: {unpacked}")
+            check((game / shared).read_bytes() == b"smooth",
+                  "a later pack wins a file Second Sin and an earlier pack both ship")
+            unpacked.clear()
+            actions, problems = ensure_lighting_engine_installed(*args, write=True, run=fake_run)
+            check(not unpacked and not actions and not problems,
+                  f"a correct install with the packs unpacks nothing: {actions} {problems}")
+            (game / "ds2le_atmosphere_presets/a.ini").unlink()
+            ensure_lighting_engine_installed(*args, write=True, run=fake_run)
+            check(unpacked == ["presets.zip", "renewal.7z", "smooth.rar", "icons.zip"]
+                  and (game / shared).read_bytes() == b"smooth",
+                  f"a Second Sin reinstall puts every pack back over it: {unpacked}")
+            unpacked.clear()
+            (game / shared).write_bytes(b"renewal")
+            ensure_lighting_engine_installed(*args, write=True, run=fake_run)
+            check(unpacked == ["smooth.rar", "icons.zip"],
+                  f"a lost Smooth UI file re-applies Smooth UI and what is over it: {unpacked}")
+            unpacked.clear()
+            (game / "tex_override/i.dds").unlink()
+            ensure_lighting_engine_installed(*args, write=True, run=fake_run)
+            check(unpacked == ["icons.zip"], f"the last pack alone reinstalls alone: {unpacked}")
+            unpacked.clear()
+            (game / "tex_override/i.dds").unlink()
+            _, problems = ensure_lighting_engine_installed(
+                *args, write=True, run=fake_run,
+                packs=TEXTURE_PACKS[:2] + ((root / "gone.zip", (), TEXTURE_PACKS[2][2]),),
+            )
+            check(bool(problems) and "gone.zip" in problems[0] and not unpacked,
+                  f"a pack whose archive is gone is a refusal naming it: {problems}")
     finally:
         LIGHTING_ENGINE_PINS, SECOND_SIN_PINS = real_engine_pins, real_presets_pins
+        TEXTURE_PACKS = real_packs
+    check(
+        pack_unpack_command(Path("i.zip"), Path("/g"), (("DS3 Icons 2.0/", "tex_override/"),))
+        == ["bsdtar", "-x", "-C", "/g", "-f", "i.zip",
+            "-s", r"#^DS3 Icons 2\.0/#tex_override/#", "DS3 Icons 2.0/*"],
+        "a pack's folder is unpacked alone and renamed to tex_override",
+    )
+    check(
+        pack_unpack_command(Path("s.rar"), Path("/g"), (("tex_override/", "tex_override/"),))
+        == ["bsdtar", "-x", "-C", "/g", "-f", "s.rar", "tex_override/*"],
+        "a pack already laid out as tex_override is unpacked without a rename",
+    )
+    # Against the owner's archives: every pin is in its own pack, as it lands, and in no pack
+    # after it -- a pin a later pack overwrites would reinstall both on every launch.
+    landed: list[set[str]] = []
+    for archive, folders, pins in TEXTURE_PACKS:
+        if not archive.is_file():
+            print(f"  skip the texture pack listings: no {archive} on this machine")
+            break
+        members = subprocess.run(["bsdtar", "-tf", str(archive)], capture_output=True,
+                                 text=True).stdout.splitlines()
+        landed.append({target + m[len(source):] for m in members for source, target in folders
+                       if m.startswith(source) and len(m) > len(source)})
+    else:
+        for index, (archive, _, pins) in enumerate(TEXTURE_PACKS):
+            later = set().union(*landed[index + 1:])
+            check(set(pins) <= landed[index] and not set(pins) & later,
+                  f"{archive.name} ships every one of its pins and no later pack ships one")
     check(
         unpack_command(Path("x.rar"), Path("/g"), ("ReadMe.txt",))
         == ["bsdtar", "-x", "-C", "/g", "-f", "x.rar", "--exclude", "ReadMe.txt"],
