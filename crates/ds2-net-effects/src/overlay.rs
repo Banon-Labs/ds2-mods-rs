@@ -62,12 +62,19 @@ pub(crate) fn publish(lines: Vec<Line>) {
 /// Whether the bar has anything to show. `ds2-overlay` renders no imgui frame at all while no
 /// panel does.
 fn has_lines() -> bool {
-    GLYPH_ON.load(Ordering::Relaxed) || VIEW.try_lock().is_ok_and(|view| !view.is_empty())
+    glyph_wanted() || VIEW.try_lock().is_ok_and(|view| !view.is_empty())
+}
+
+/// The toggle is on and the game has its own HUD up ([`ds2_overlay::game_hud_visible`]). The
+/// glyph sits beside the HUD, so it is not drawn on the title screen, while loading, or with a
+/// menu open.
+fn glyph_wanted() -> bool {
+    GLYPH_ON.load(Ordering::Relaxed) && ds2_overlay::game_hud_visible()
 }
 
 /// The toggle's glyph, on top of everything else this panel draws. See `crate::glyph`.
 fn draw_glyph(ui: &Ui, display: [f32; 2]) {
-    let on = GLYPH_ON.load(Ordering::Relaxed);
+    let on = glyph_wanted();
     let g = crate::glyph::layout(display);
     if GLYPH_DRAWN.swap(on, Ordering::Relaxed) != on {
         log(format_args!(

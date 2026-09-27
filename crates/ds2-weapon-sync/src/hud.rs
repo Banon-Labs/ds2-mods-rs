@@ -45,15 +45,26 @@ pub(crate) fn toggled(on: bool) {
     }
 }
 
-/// `ds2-overlay` asks this before rendering a frame.
+/// `ds2-overlay` asks this before rendering a frame. The swords sit beside the game's HUD, so they
+/// are up only while the game has its own HUD up ([`ds2_overlay::game_hud_visible`]): not on the
+/// title screen, while loading, or with a menu open.
 fn visible() -> bool {
-    enabled()
+    enabled() && ds2_overlay::game_hud_visible()
 }
 
 /// The panel's draw function. `ds2-overlay` calls every panel's whenever any one is visible, so
 /// this checks for itself.
 fn draw(ui: &Ui) {
     if !enabled() {
+        return;
+    }
+    if !ds2_overlay::game_hud_visible() {
+        // Say so again when they come back, so a run's log shows each return to the HUD.
+        if !ANNOUNCE_NEXT_DRAW.swap(true, Ordering::AcqRel) {
+            log(format_args!(
+                "{LOG_PREFIX} hud: swords held back -- the game's HUD is not on screen"
+            ));
+        }
         return;
     }
     let display = ui.io().display_size;

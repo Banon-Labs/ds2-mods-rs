@@ -255,6 +255,9 @@ mod windows_impl {
         said_captured: bool,
         /// Whether the first frame has been reported. See the line it writes.
         said_first_frame: bool,
+        /// Whether the glyph was drawn last frame, so its showing and hiding are logged on the
+        /// edge rather than every frame.
+        glyph_drawn: bool,
         /// Whether the last pass found a camera, so the refusal is logged on the edge rather
         /// than every frame.
         ///
@@ -339,6 +342,7 @@ mod windows_impl {
                 toggle_was_down: false,
                 said_captured: false,
                 said_first_frame: false,
+                glyph_drawn: false,
                 had_camera: true,
                 had_world: true,
                 last_census: None,
@@ -466,10 +470,26 @@ mod windows_impl {
         // The glyph goes first, because the renderer keeps the first `MAX_VERTICES` and drops the
         // rest: a frame full of trail can lose a stone at the far end but never the indicator.
         let mut vertices = Vec::with_capacity(crate::hud::GLYPH_VERTICES + lines.len());
+        // The glyph sits beside the game's HUD, so it is drawn only while the game has its own
+        // HUD up: not on the title screen, while loading, or with a menu open.
+        let mut drawn = false;
         if state.enabled
             && let Some(screen) = state.screen
+            && ds2_overlay::game_hud_visible()
         {
             crate::hud::push_glyph(&mut vertices, screen);
+            drawn = true;
+        }
+        if drawn != state.glyph_drawn {
+            state.glyph_drawn = drawn;
+            log(format_args!(
+                "hud: glyph {}",
+                if drawn {
+                    "on screen"
+                } else {
+                    "hidden -- overlay off or the game's HUD is not on screen"
+                }
+            ));
         }
         vertices.extend(lines);
         vertices

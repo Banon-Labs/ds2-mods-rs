@@ -19,12 +19,14 @@
 //! draws calls it.
 
 pub mod frame_hook;
+pub mod game_hud;
 mod log;
 #[cfg(windows)]
 pub mod panels;
 #[cfg(windows)]
 mod present;
 
+pub use game_hud::game_hud_visible;
 pub use log::{LOG_PREFIX, LogFn, set_logger};
 #[cfg(windows)]
 pub use present::install;
