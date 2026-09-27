@@ -2559,6 +2559,24 @@ def stage() -> tuple[Path, str]:
     return staged, sha256(staged)
 
 
+LAUNCHER_BUILD = [
+    "cargo", "xwin", "build", "--release", "--target", "x86_64-pc-windows-msvc", "-p", "ds2-launcher",
+]
+
+
+def build_launcher() -> bool:
+    """Build our injector in this checkout; `True` when cargo succeeded.
+
+    Every injected run builds it rather than refusing when it is missing: a fresh worktree has
+    only the DLL it was built for, and two launches on 2026-09-27 were refused for exactly that.
+    Cargo is incremental, so an unchanged launcher costs about a second, and a changed one can no
+    longer be staged stale.
+    """
+    print(f"[launcher] building: {' '.join(LAUNCHER_BUILD)}")
+    result = subprocess.run(LAUNCHER_BUILD, cwd=REPO_ROOT, check=False)
+    return result.returncode == 0 and BUILT_LAUNCHER.is_file()
+
+
 def stage_launcher() -> tuple[Path, str]:
     """Copy our injector next to the game; return the staged path and ITS hash.
 
@@ -3709,13 +3727,9 @@ def launch(
         chain, problems = proton_chain()
         for problem in problems:
             print(f"[launcher] {problem}")
-        if not BUILT_LAUNCHER.is_file():
-            problems.append(f"no built launcher at {BUILT_LAUNCHER}")
-            print(
-                f"[launcher] no built launcher at {BUILT_LAUNCHER}\n"
-                "    build it: cargo xwin build --release --target x86_64-pc-windows-msvc "
-                "-p ds2-launcher"
-            )
+        if not problems and not build_launcher():
+            problems.append(f"could not build the launcher at {BUILT_LAUNCHER}")
+            print(f"[launcher] the build above failed; no launcher at {BUILT_LAUNCHER}")
         if problems:
             print(
                 "[launcher] REFUSING TO LAUNCH -- fix the above, or drop --seamless and "
