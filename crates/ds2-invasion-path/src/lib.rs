@@ -141,7 +141,6 @@
 
 pub mod camera_yaw;
 pub mod config;
-pub mod frame_hook;
 pub mod geometry;
 pub mod log;
 pub mod navpath;
@@ -338,8 +337,8 @@ mod windows_impl {
             });
         }
 
-        // SAFETY: the caller's contract, forwarded -- one detour, from the install position.
-        let installed = unsafe { render::install() };
+        // The route lines are a drawer on `ds2-overlay`'s table, whose detour this starts.
+        let installed = render::install();
         // THE SECOND SEAM, AND IT IS NOT OPTIONAL FOR THE ROUTE. `Present` may ask for a route;
         // only the game's own tick may fetch one. `crate::gametick` says why that is a property
         // of the frame rather than of the thread -- DARK SOULS II presents from the simulation
@@ -441,16 +440,6 @@ mod windows_impl {
     /// fails is also an empty frame, which is the correct answer to "another thread is already
     /// in here".
     pub(crate) fn frame(swap_chain: &IDXGISwapChain) -> Vec<Vertex> {
-        // THE CLOCK, AND IT RUNS BEFORE ANYTHING HERE CAN DECLINE TO. `ds2-input-harness`
-        // advances its whole state machine from this call: every countdown, every command
-        // dispatch and the closed camera loop. It used to ride a device poll, and a live session
-        // proved why that was wrong -- the game stopped calling the poll it had elected and the
-        // harness went deaf while the process was still running. `Present` cannot be unplugged.
-        //
-        // Above the `try_lock` and above the `enabled` check on purpose: a consumer's clock must
-        // not stop because the overlay had nothing to draw this frame.
-        crate::frame_hook::run_frame_hook();
-
         let Ok(mut guard) = STATE.try_lock() else {
             return Vec::new();
         };

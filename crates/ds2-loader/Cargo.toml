@@ -71,7 +71,7 @@ ds2-save-block.workspace = true
 ds2-menu-row.workspace = true
 ds2-inventory-sort.workspace = true
 ds2-voice-chat.workspace = true
-# Off by default; registered on `ds2-invasion-path`'s `Present` clock when `[net_effects]` is on.
+# Off by default; registered on `ds2-overlay`'s `Present` clock when `[net_effects]` is on.
 ds2-net-effects.workspace = true
 ds2-item-warn.workspace = true
 # The overlay. It brings the `windows` crate with it -- the first third-party runtime dependency
@@ -81,6 +81,8 @@ ds2-item-warn.workspace = true
 # dependency is paid whether or not a player turns it on.
 ds2-invasion-path.workspace = true
 ds2-hp-gauge.workspace = true
+# The one `Present` detour. The loader hands it the log sink; the features that draw or tick start it.
+ds2-overlay.workspace = true
 # The input harness. It brings `ds2-rva` and `ds2-hook` (already here for the Arxan probe) and
 # nothing else -- it is three MinHook detours and a state machine, with no `windows` dependency
 # of its own. Like the overlay it is off by default and LINKED either way.

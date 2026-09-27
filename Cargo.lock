@@ -618,6 +618,7 @@ dependencies = [
  "ds2-game-base",
  "ds2-hook",
  "ds2-hotkey-config",
+ "ds2-overlay",
  "ds2-rva",
  "miniz_oxide 0.8.9",
  "windows",
@@ -676,6 +677,7 @@ dependencies = [
  "ds2-menu-row",
  "ds2-net-effects",
  "ds2-offline",
+ "ds2-overlay",
  "ds2-rva",
  "ds2-save-block",
  "ds2-save-file",
@@ -704,7 +706,7 @@ dependencies = [
  "ds2-game-base",
  "ds2-hook",
  "ds2-hotkey-config",
- "ds2-invasion-path",
+ "ds2-overlay",
  "ds2-rva",
  "hudhook",
  "serde_json",
@@ -726,6 +728,17 @@ dependencies = [
  "ds2-game-base",
  "ds2-hook",
  "ds2-rva",
+]
+
+[[package]]
+name = "ds2-overlay"
+version = "0.1.0"
+dependencies = [
+ "ds2-game-base",
+ "ds2-hook",
+ "ds2-rva",
+ "hudhook",
+ "windows",
 ]
 
 [[package]]

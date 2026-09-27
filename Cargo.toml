@@ -77,6 +77,8 @@ ds2-build-import-core = { path = "crates/ds2-build-import-core" }
 # The Load from URL field's lifecycle: submit, cancel, re-open, clipboard gate. Host-only.
 ds2-build-url-core = { path = "crates/ds2-build-url-core" }
 ds2-menu-row = { path = "crates/ds2-menu-row" }
+# The one `Present` detour: the per-frame clock, the drawer table and every imgui panel.
+ds2-overlay = { path = "crates/ds2-overlay" }
 ds2-inventory-sort = { path = "crates/ds2-inventory-sort" }
 ds2-voice-chat = { path = "crates/ds2-voice-chat" }
 # A key that applies a SpEffect to the local player, the way the game applies its own.
