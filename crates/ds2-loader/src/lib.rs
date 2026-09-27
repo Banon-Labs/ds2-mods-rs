@@ -525,6 +525,10 @@ fn install_offline() {
     // Gated on `enabled` alone rather than on any of the three layers, because the box is asking
     // the player whether to play offline and `[offline] enabled` is that answer already given.
     ds2_dialog_skip::set_answer_offline_prompt(config.enabled);
+    // Same relay for the other half. A Seamless run leaves `[offline]` off, so the game tries the
+    // official login at boot, and the server's refusal box is expected. It has one button, and the
+    // only way out of it is the offline window. See `ds2_rva::FE_COMMON_WINDOW_KIND_LOGIN_REFUSED`.
+    ds2_dialog_skip::set_suppress_login_refusal(seamless::config().enabled);
     if !config.enabled {
         return;
     }

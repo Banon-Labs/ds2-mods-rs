@@ -81,6 +81,7 @@ mod title;
 #[cfg(windows)]
 pub use install::{
     LogFn, Outcome, held, hold, install, release, set_answer_offline_prompt, set_logger,
+    set_suppress_login_refusal,
 };
 #[cfg(windows)]
 pub use menu::{Outcome as MenuOutcome, install as install_menu};

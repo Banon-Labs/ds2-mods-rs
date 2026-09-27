@@ -586,6 +586,25 @@ pub const FE_COMMON_WINDOW_KIND_NOT_EXITED_PROPERLY: i32 = 6;
 /// confirm-dest=0x2a edge=confirm-goes-offline`.
 pub const FE_COMMON_WINDOW_KIND_SERVICE_UNAVAILABLE: i32 = 62;
 
+/// Kind 58: the game server refused the login. One button.
+///
+/// The text is titleflow `0x1fbd2`, "Your account is currently blocked from accessing the DARK
+/// SOULS II game server services. Please see the following URL for more information: %s".
+///
+/// `FeSubStateTitleGameServerLogin` (ctor `0x1400f8b20`, substate `0x39`) formats that message
+/// into `[0x14160de10]+0x118` at `0x1400f9cf4` when the net manager's login state reads 2, and
+/// returns result one. Its transition builder `0x1400f99a0` sends result one to substate `0x3a`.
+/// `FeStateTitle::v6` builds `0x3a` at `0x1400f7c86` as `ctor(obj, 0x3a, 0x2a, caption 100)` with
+/// the message pointer at `+0x38` = `[0x14160de10]+0x118`. The only edge is cancel to `0x2a`,
+/// [`FE_SUBSTATE_ID_OFFLINE_MODE_WINDOW`]: after this box, the game always goes offline.
+///
+/// Seen at boot under Seamless Co-op 0.0.3, where `[offline]` is off and the game attempts the
+/// official login. The run logged
+/// `seen screen=common-window kind=58 cancel-dest=0x2a confirm-dest=0xffff action=shown
+/// reason=kind-not-allowlisted`, and the player had to press the button to reach the autoload.
+/// In runs with `[offline]` on, the login is never attempted and the box does not appear.
+pub const FE_COMMON_WINDOW_KIND_LOGIN_REFUSED: i32 = 58;
+
 /// Kind 70: "There is no new information." One button.
 ///
 /// Built at `0x1400f7f8b` (message `0x33452`, cancel destination `0x47`, the top menu). Logged as a

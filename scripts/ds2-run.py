@@ -388,9 +388,10 @@ HP_GAUGE_LOG_PREFIX = "ds2-hp-gauge:"
 
 #: `[seamless]` -- loading a SECOND, THIRD-PARTY mod's DLL into the same process.
 #:
-#: Nothing here ships that mod and nothing here copies it. The key is a path; the player installs
-#: the other mod themselves, from its own download, under its own licence, next to
-#: `DarkSoulsII.exe`. If the file is not there the DLL logs that and carries on without it.
+#: Nothing here ships that mod. The key is a path; the player downloads the other mod themselves,
+#: under its own licence. On this machine `ensure_seamless_installed` unpacks the owner's own
+#: download (`SEAMLESS_ARCHIVE`) next to `DarkSoulsII.exe` when the pinned build is not already
+#: there. If the file is not there the DLL logs that and carries on without it.
 #:
 #: OFF by default, and unlike every other feature its key is read as opt-IN: only an exact `true`
 #: arms it, because the failure direction of a typo here is "a foreign binary was loaded into the
@@ -407,6 +408,111 @@ SEAMLESS_LOG_PREFIX = "ds2-seamless:"
 SEAMLESS_SETTINGS_NAME = "ds2sc_settings.ini"
 #: The key in that file that renames the save container. Mirrored in `crates/ds2-seamless`.
 KEY_SEAMLESS_SAVE_EXTENSION = "save_file_extension"
+#: The key whose empty value stops that mod's boot on a dialog.
+KEY_SEAMLESS_PASSWORD = "cooppassword"
+
+#: The Seamless build this machine plays, pinned by hash and reinstalled from the owner's own
+#: download on every launch.
+#:
+#: 0.0.1, the build that sat in the game directory until 2026-09-26, now refuses to boot with
+#: "This version of Dark Souls II seamless co-op (0.0.1) is depreciated and requires an update.
+#: The application will now exit." The refusal comes from the mod's own version check, so an old
+#: DLL left in place fails every co-op run the same way, and nothing on disk says why. Pinning the
+#: files by SHA-256 turns "which build is installed" from a guess into a check.
+#:
+#: Nothing here ships or downloads it. The archive is the one the owner fetched from Nexus into
+#: `~/DS2`; when it is not there, a run with a matching install proceeds and a run without one is
+#: refused with the path it looked for.
+SEAMLESS_VERSION = "0.0.3"
+SEAMLESS_ARCHIVE = (
+    Path.home()
+    / "DS2"
+    / "Dark Souls II SoTFS - Seamless Co-op v0.0.3 1468 0.0.3 2026-09-26T20-00Z xqhNv0FE.zip"
+)
+#: Archive member (which is also the path under the game directory) -> SHA-256 of that member.
+#: `ds2sc_launcher.exe` and `crashpad_handler.exe` are byte-identical to 0.0.1's; the DLL and the
+#: locale file are what changed.
+SEAMLESS_FILES: dict[str, str] = {
+    "SeamlessCoop/ds2sc.dll": "17e4ae0355261308a5e8fdf50131aee3bb18ddb925adadfdf9d6b68c8b8bda8a",
+    "SeamlessCoop/locale/english.json":
+        "f344008b1c9cd631899be6b4e285d6526e4dcebc5f20bbbf0cbd414419ec7945",
+    "SeamlessCoop/crashpad/crashpad_handler.exe":
+        "d799b428ecc200a47b08b27f6b33ed5fe1f1e065136f380f6a6e78088c404649",
+    "ds2sc_launcher.exe": "4fb07cd36e17fba7755597395bc1b44a0809358128e8c8353e8add65583fa88c",
+}
+#: The settings file is merged, never replaced: it holds the owner's `cooppassword`, and 0.0.3's
+#: template ships that key empty -- which is itself a boot-stopping dialog.
+SEAMLESS_SETTINGS_MEMBER = f"SeamlessCoop/{SEAMLESS_SETTINGS_NAME}"
+
+#: Files and directories other people's mods own in the game directory. This script writes none
+#: of them except through `ensure_seamless_installed`, which writes only `SEAMLESS_FILES` and the
+#: merged settings. The selftest checks that nothing this script stages is on this list, so a new
+#: staged file cannot land on top of a graphics mod the owner installed by hand.
+THIRD_PARTY_PATHS: tuple[str, ...] = (
+    "SeamlessCoop",
+    "ds2sc_launcher.exe",
+    # DS2 Lighting Engine PathTracing and the Second Sin Pathtracing presets layered on it.
+    "dxgi.dll",
+    "amd_fidelityfx_denoiser_dx12.dll",
+    "amd_fidelityfx_framegeneration_dx12.dll",
+    "amd_fidelityfx_loader_dx12.dll",
+    "amd_fidelityfx_radiancecache_dx12.dll",
+    "amd_fidelityfx_upscaler_dx12.dll",
+    "nvngx_dlss.dll",
+    "nvngx_dlssd.dll",
+    "nvngx_dlssg.dll",
+    "omm-lib.dll",
+    "shader",
+    "tex_override",
+    "ds2le_atmosphere_presets",
+    "DS2LE.log",
+    "DirectXHook.log",
+)
+
+#: The graphics pair this machine plays, chosen by the owner on 2026-09-26: DS2 Lighting Engine
+#: PathTracing 0.1.1, then Second Sin Pathtracing 0.85 unpacked over it. Order matters: Second Sin
+#: replaces the engine's own `ds2le_atmosphere_presets/` and `tex_override/`, so reinstalling the
+#: engine means reinstalling Second Sin after it.
+#:
+#: Each archive is pinned by a few files that only a complete install has, and is unpacked again
+#: when one of them is missing or different. The shader pin matters most: the engine ships its own
+#: `shader/*_SM5.bnd`, and a Steam file verify puts the vanilla ones back. That was the state of
+#: the 2026-08-30 attempt: the engine's `dxgi.dll` with the game's own shader binders under it (the
+#: binders there matched the depot manifest's SHA-1s, not the engine's).
+LIGHTING_ENGINE_ARCHIVE = Path.home() / "DS2" / "DS2LE PathTracing V_0_1_1-1146-0-1-2-1778648735.rar"
+LIGHTING_ENGINE_PINS: dict[str, str] = {
+    "dxgi.dll": "c3a88fd51368dbe17b4b71311bd47486f0a72d048a8fda64c7f3e567b84181b8",
+    "shader/FlverShader_SM5_1.bnd":
+        "d42775e811542f92d69269cc5404fbeb77fee182a414e813d6b51ccd3c128699",
+}
+#: The archive's own screenshots and notes, which are not game files.
+LIGHTING_ENGINE_SKIP: tuple[str, ...] = (
+    "In-Game settings.png", "LE-Menu.png", "ReadMe.txt", "licenses_and_credits.txt",
+)
+SECOND_SIN_ARCHIVE = (
+    Path.home() / "DS2" / "Second Sin Pathtracing 0.85 1160 0.85 2026-07-28T07-35Z QzM6K23m.zip"
+)
+SECOND_SIN_PINS: dict[str, str] = {
+    "ds2le_atmosphere_presets/atmospheres_extended.ini":
+        "edaf06bb9263ae471b0839b95f1b4d936b5eea4b8077fd920937fb592059129a",
+}
+#: Where the engine writes its log. A fresh one after a launch is the proof it loaded.
+LIGHTING_ENGINE_LOG = "DS2LE.log"
+#: Names a parked engine `dxgi.dll` goes by. `--no-path-tracing` renames it to the first; the
+#: second is the name another agent's selector used on 2026-09-26. Wine loads `dxgi.dll` out of the
+#: game directory by name, so a rename is the whole switch, and the next launch with path tracing
+#: on renames it back.
+PARKED_DXGI_NAMES: tuple[str, ...] = ("dxgi.dll.ds2-run-off", "dxgi.dll.selector-off")
+
+
+def park_path_tracing(game_dir: Path) -> str | None:
+    """Rename the engine's `dxgi.dll` out of Wine's way for this run. Returns what it did."""
+    dxgi = game_dir / "dxgi.dll"
+    if not dxgi.is_file():
+        return None
+    target = game_dir / PARKED_DXGI_NAMES[0]
+    os.replace(dxgi, target)
+    return f"parked dxgi.dll as {target.name}; the next launch without --no-path-tracing restores it"
 #: The one container name SOTFS builds, and the extension it builds it with.
 SAVE_FILE_STEM = "DS2SOFS0000"
 VANILLA_SAVE_EXTENSION = "sl2"
@@ -511,8 +617,9 @@ PROBE_ARMS: dict[str, tuple[dict[str, bool], str | None]] = {
 OBSERVE_SECONDS = 180.0
 
 #: Native first, then builtin. Wine prefers its own `dinput8` without this and the proxy is
-#: simply never mapped.
-DLL_OVERRIDE = "dinput8=n,b"
+#: simply never mapped. `dxgi` is the Lighting Engine's proxy (see `LIGHTING_ENGINE_PINS`); it
+#: loads the system `dxgi` itself, so native-then-builtin is what keeps both in the chain.
+DLL_OVERRIDE = "dinput8=n,b;dxgi=n,b"
 
 #: How long to wait for the DLL to speak. DS2 boots through Proton and dearxan analyses 48 Arxan
 #: stubs single-threaded before its callback runs; neither has been timed on this machine, so
@@ -2441,6 +2548,248 @@ def stage_launcher() -> tuple[Path, str]:
     return staged, sha256(staged)
 
 
+def _ini_entries(text: str) -> dict[tuple[str, str], str]:
+    """`(section, key) -> value` for every `key = value` line, both lowercased for matching."""
+    entries: dict[tuple[str, str], str] = {}
+    section = ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip().lower()
+        elif line and not line.startswith((";", "#")) and "=" in line:
+            key, _, value = line.partition("=")
+            entries[(section, key.strip().lower())] = value.strip()
+    return entries
+
+
+def merge_seamless_settings(template: str, current: str) -> str:
+    """The new build's settings file with every value the owner already set carried over.
+
+    The template decides the layout, the comments and which keys exist, so a key a new build adds
+    (`relative_player_audio` in 0.0.3) arrives with its own explanation. A key the owner has keeps
+    their value, `cooppassword` above all. A key the owner has and the template does not is kept,
+    appended at the end, because a setting a build dropped is not this script's to delete.
+    """
+    mine = _ini_entries(current)
+    newline = "\r\n" if "\r\n" in template else "\n"
+    out: list[str] = []
+    used: set[tuple[str, str]] = set()
+    section = ""
+    for raw in template.splitlines():
+        line = raw.strip()
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip().lower()
+        elif line and not line.startswith((";", "#")) and "=" in line:
+            key = line.partition("=")[0].strip()
+            slot = (section, key.lower())
+            if slot in mine:
+                used.add(slot)
+                out.append(f"{key} = {mine[slot]}")
+                continue
+        out.append(raw)
+    leftover = [slot for slot in mine if slot not in used]
+    if leftover:
+        out.append("")
+        out.append("; kept from the previous install; this build's template does not name them")
+        for section_name, key in leftover:
+            out.append(f"[{section_name.upper()}]")
+            out.append(f"{key} = {mine[(section_name, key)]}")
+    return newline.join(out) + newline
+
+
+def ensure_seamless_installed(
+    game_dir: Path, archive: Path = SEAMLESS_ARCHIVE, write: bool = True
+) -> tuple[list[str], list[str]]:
+    """Make the game directory hold exactly the pinned Seamless build. Returns `(actions, problems)`.
+
+    Every file in `SEAMLESS_FILES` is hashed where it stands. A match is left alone -- no write, so
+    a launch against a correct install touches nothing. A missing file or a wrong hash (0.0.1, a
+    half-copied file) is replaced from `archive`, and the member's own hash is checked before it
+    goes in, so a corrupt download is refused rather than installed. Each file lands through a
+    temporary name and `os.replace`, so nothing ever sees half a DLL.
+
+    The settings file is merged (see `merge_seamless_settings`) and written only when the merge
+    changes it. With `write=False` nothing is written and the actions say what would be.
+    """
+    import zipfile
+
+    actions: list[str] = []
+    problems: list[str] = []
+    wanted: dict[str, str] = {}
+    for member, digest in SEAMLESS_FILES.items():
+        target = game_dir / member
+        have = sha256(target) if target.is_file() else None
+        if have != digest:
+            wanted[member] = "missing" if have is None else f"sha256 {have[:12]}.. is not {SEAMLESS_VERSION}"
+
+    settings_target = game_dir / SEAMLESS_SETTINGS_MEMBER
+    if not wanted and settings_target.is_file() and not archive.is_file():
+        # Installed and pinned, and nothing to merge against: nothing to do and nothing to say.
+        return actions, problems
+    if not archive.is_file():
+        for member, why in wanted.items():
+            problems.append(f"Seamless {SEAMLESS_VERSION} {member} is {why}, and {archive} is not there")
+        if not settings_target.is_file():
+            problems.append(f"no {settings_target}, and {archive} is not there")
+        return actions, problems
+
+    try:
+        with zipfile.ZipFile(archive) as zipped:
+            for member, why in wanted.items():
+                data = zipped.read(member)
+                if hashlib.sha256(data).hexdigest() != SEAMLESS_FILES[member]:
+                    problems.append(f"{archive} member {member} does not match the pinned hash")
+                    continue
+                verb = "would install" if not write else "installed"
+                actions.append(f"{verb} {member} ({why} before)")
+                if write:
+                    target = game_dir / member
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    temporary = target.with_name(target.name + ".ds2-run-new")
+                    temporary.write_bytes(data)
+                    if member.endswith(".exe"):
+                        temporary.chmod(0o755)
+                    os.replace(temporary, target)
+            template = zipped.read(SEAMLESS_SETTINGS_MEMBER).decode("utf-8", errors="replace")
+    except (OSError, KeyError, zipfile.BadZipFile) as error:
+        problems.append(f"cannot read {archive}: {error}")
+        return actions, problems
+
+    current = (
+        settings_target.read_text(encoding="utf-8", errors="replace")
+        if settings_target.is_file()
+        else ""
+    )
+    merged = merge_seamless_settings(template, current)
+    if _ini_entries(merged) != _ini_entries(current):
+        added = sorted(k for _, k in set(_ini_entries(merged)) - set(_ini_entries(current)))
+        verb = "would merge" if not write else "merged"
+        actions.append(f"{verb} {SEAMLESS_SETTINGS_MEMBER}: added {', '.join(added) or 'nothing'}")
+        if write:
+            settings_target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = settings_target.with_name(settings_target.name + ".ds2-run-new")
+            temporary.write_bytes(merged.encode("utf-8"))
+            os.replace(temporary, settings_target)
+    if not _ini_entries(merged).get(("password", KEY_SEAMLESS_PASSWORD)):
+        problems.append(
+            f"{settings_target} has an empty {KEY_SEAMLESS_PASSWORD}; Seamless stops its boot on a "
+            "dialog until one is set"
+        )
+    return actions, problems
+
+
+def pins_mismatched(game_dir: Path, pins: dict[str, str]) -> dict[str, str]:
+    """`{path: why}` for every pinned file that is missing or differs."""
+    wrong: dict[str, str] = {}
+    for member, digest in pins.items():
+        target = game_dir / member
+        have = sha256(target) if target.is_file() else None
+        if have != digest:
+            wrong[member] = "missing" if have is None else f"sha256 {have[:12]}.."
+    return wrong
+
+
+def unpack_command(archive: Path, game_dir: Path, skip: Sequence[str] = ()) -> list[str]:
+    """The argv that unpacks `archive` over `game_dir`, overwriting, leaving out `skip`."""
+    if archive.suffix.lower() == ".zip":
+        return ["unzip", "-o", "-q", str(archive), "-d", str(game_dir), "-x", "tex_override/*.tmp",
+                *skip]
+    argv = ["bsdtar", "-x", "-C", str(game_dir), "-f", str(archive)]
+    for name in skip:
+        argv += ["--exclude", name]
+    return argv
+
+
+def ensure_lighting_engine_installed(
+    game_dir: Path,
+    engine_archive: Path = LIGHTING_ENGINE_ARCHIVE,
+    presets_archive: Path = SECOND_SIN_ARCHIVE,
+    write: bool = True,
+    run=subprocess.run,
+) -> tuple[list[str], list[str]]:
+    """Make the game directory hold the pinned engine with Second Sin over it. `(actions, problems)`.
+
+    A correct install is hashed and left alone. A wrong one is unpacked again from the owner's own
+    archives, engine first and presets second, because the presets replace files the engine ships.
+    The Second Sin archive is 19.7 GB, so a reinstall of it takes minutes, and it happens only when
+    its pin says the install is gone.
+    """
+    actions: list[str] = []
+    problems: list[str] = []
+    # A dxgi.dll parked by `--no-path-tracing` (or by another tool) comes back by rename first.
+    # Unpacking the engine instead would also overwrite Second Sin's presets and force its 19.7 GB
+    # reinstall, all to restore one file that is sitting next to where it belongs.
+    dxgi = game_dir / "dxgi.dll"
+    parked = next((game_dir / n for n in PARKED_DXGI_NAMES if (game_dir / n).is_file()), None)
+    if not dxgi.exists() and parked is not None:
+        if write:
+            os.replace(parked, dxgi)
+            actions.append(f"restored dxgi.dll from {parked.name}")
+        else:
+            actions.append(f"would restore dxgi.dll from {parked.name}")
+            if sha256(parked) == LIGHTING_ENGINE_PINS.get("dxgi.dll"):
+                dxgi = parked
+    engine_wrong = pins_mismatched(game_dir, LIGHTING_ENGINE_PINS)
+    if dxgi != game_dir / "dxgi.dll":
+        engine_wrong.pop("dxgi.dll", None)
+    presets_wrong = pins_mismatched(game_dir, SECOND_SIN_PINS)
+    steps = []
+    if engine_wrong:
+        steps.append((engine_archive, LIGHTING_ENGINE_SKIP, LIGHTING_ENGINE_PINS, engine_wrong))
+    if engine_wrong or presets_wrong:
+        steps.append(
+            (presets_archive, (), SECOND_SIN_PINS, presets_wrong or {"presets": "after the engine"})
+        )
+    for archive, skip, pins, wrong in steps:
+        why = ", ".join(f"{k} {v}" for k, v in wrong.items())
+        if not archive.is_file():
+            problems.append(f"{why}, and {archive} is not there to reinstall from")
+            continue
+        if not write:
+            actions.append(f"would unpack {archive.name} ({why})")
+            continue
+        result = run(unpack_command(archive, game_dir, skip), capture_output=True, text=True)
+        still = pins_mismatched(game_dir, pins)
+        if result.returncode != 0 or still:
+            problems.append(
+                f"unpacking {archive.name} exited {result.returncode} and left {still or 'no pin wrong'}"
+            )
+        else:
+            actions.append(f"unpacked {archive.name} ({why} before)")
+    return actions, problems
+
+
+#: Lines of `DS2LE.log` that say how far the engine got, in the order it writes them.
+LIGHTING_ENGINE_MILESTONES: tuple[str, ...] = (
+    "D3D12 device created successfully",
+    "HWRT Shaders loaded",
+    "All D3D12 resources for lighting engine created successfully",
+    "Init device processed successfully",
+)
+#: Lines that mean something is wrong, counted rather than quoted because they repeat per frame.
+LIGHTING_ENGINE_TROUBLE: tuple[str, ...] = (
+    "Failed to build Skinned Blas",
+    "Rendering errors detected",
+    "| ERROR |",
+)
+
+
+def lighting_engine_report(game_dir: Path, started_epoch: float) -> list[str]:
+    """What this run's `DS2LE.log` says. A log older than the launch is not this run's."""
+    log = game_dir / LIGHTING_ENGINE_LOG
+    if not log.is_file():
+        return [f"no {log} -- the engine's dxgi.dll never ran"]
+    if log.stat().st_mtime < started_epoch:
+        return [f"{log} is older than this launch -- the engine's dxgi.dll did not run this time"]
+    text = log.read_text(encoding="utf-8", errors="replace")
+    lines = [f"{log} written by this run ({len(text.splitlines())} lines)"]
+    for milestone in LIGHTING_ENGINE_MILESTONES:
+        lines.append(f"{'seen   ' if milestone in text else 'MISSING'} {milestone}")
+    for trouble in LIGHTING_ENGINE_TROUBLE:
+        lines.append(f"count  {trouble!r}: {text.count(trouble)}")
+    return lines
+
+
 def dry_run(
     probe: str,
     observe: float,
@@ -2485,12 +2834,31 @@ def dry_run(
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
     net_effects: bool = False,
+    path_tracing: bool = True,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
     problems = preflight(dry_run=True)
+    seamless_actions, seamless_problems = ensure_seamless_installed(GAME_DIR, write=False)
+    if seamless:
+        problems += seamless_problems
     for problem in problems:
         print(f"[dry-run] WOULD REFUSE: {problem}")
+    for action in seamless_actions:
+        print(f"[dry-run] seamless {action}")
+    if not seamless_actions and not seamless_problems:
+        print(f"[dry-run] seamless {SEAMLESS_VERSION} installed, every pinned file matches")
+    if not path_tracing:
+        print("[dry-run] lighting-engine OFF for this run: dxgi.dll would be parked, not checked")
+    else:
+        engine_actions, engine_problems = ensure_lighting_engine_installed(GAME_DIR, write=False)
+        for problem in engine_problems:
+            print(f"[dry-run] WOULD REFUSE: {problem}")
+        problems += engine_problems
+        for action in engine_actions:
+            print(f"[dry-run] lighting-engine {action}")
+        if not engine_actions and not engine_problems:
+            print("[dry-run] lighting-engine PathTracing + Second Sin installed, every pin matches")
 
     staged = GAME_DIR / STAGED_DLL_NAME
     if BUILT_DLL.is_file():
@@ -3170,9 +3538,20 @@ def launch(
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
     net_effects: bool = False,
+    path_tracing: bool = True,
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
+    # Checked before the teardown and written after it: a refusal here must not cost the session
+    # that is running, and the files must not be replaced under a process that has them mapped.
+    _, seamless_problems = ensure_seamless_installed(GAME_DIR, write=False)
+    for problem in seamless_problems:
+        print(f"[seamless] {problem}")
+    if seamless:
+        problems += seamless_problems
+    if path_tracing:
+        _, engine_problems = ensure_lighting_engine_installed(GAME_DIR, write=False)
+        problems += engine_problems
     if problems:
         for problem in problems:
             print(f"REFUSING TO LAUNCH: {problem}", file=sys.stderr)
@@ -3260,6 +3639,24 @@ def launch(
         print("[launch] REFUSING: the previous session did not die; see the survivors above.")
         return EXIT_ERROR
 
+    # After the teardown, so no running game has the DLL mapped while it is replaced.
+    actions, _ = ensure_seamless_installed(GAME_DIR, write=True)
+    for action in actions:
+        print(f"[seamless] {action}")
+    print(f"[seamless] {SEAMLESS_VERSION} pinned by sha256 in {GAME_DIR / 'SeamlessCoop'}")
+    if path_tracing:
+        actions, engine_problems = ensure_lighting_engine_installed(GAME_DIR, write=True)
+        for action in actions:
+            print(f"[lighting-engine] {action}")
+        if engine_problems:
+            for problem in engine_problems:
+                print(f"[lighting-engine] REFUSING TO LAUNCH: {problem}")
+            return EXIT_ERROR
+        print(f"[lighting-engine] {LIGHTING_ENGINE_ARCHIVE.name} + {SECOND_SIN_ARCHIVE.name} pinned")
+    else:
+        parked = park_path_tracing(GAME_DIR)
+        print(f"[lighting-engine] OFF for this run: {parked or 'no dxgi.dll to park'}")
+
     # After the teardown, because a clean exit is what writes the position this reads.
     clamp_saved_window_position()
     pin_to_monitor()
@@ -3307,6 +3704,7 @@ def launch(
             "SteamGameId": APPID,
         }
     started = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    started_epoch = time.time()
     subprocess.Popen(
         argv,
         cwd=workdir,
@@ -3413,6 +3811,9 @@ def launch(
     # refusal has had time to appear. See `game_dialog_lines`.
     for line in game_dialog_lines():
         print(f"[dialog] {line}")
+    if path_tracing:
+        for line in lighting_engine_report(GAME_DIR, started_epoch):
+            print(f"[lighting-engine] {line}")
 
     if probe == "off":
         return EXIT_OK
@@ -4592,6 +4993,184 @@ def selftest() -> int:
         finally:
             GAME_DIR = real_game_dir
 
+    # Seamless is kept at the pinned build, from the owner's own download, without losing their
+    # settings -- and nothing this script stages can land on another mod's files.
+    import zipfile
+
+    global SEAMLESS_FILES  # noqa -- swapped for a planted archive, restored below
+    real_pins = SEAMLESS_FILES
+    template = (
+        "[PASSWORD]\r\n\r\n; Your session password\r\ncooppassword = \r\n\r\n[GAMEPLAY]\r\n"
+        "allow_invaders = 1\r\n\r\n; new in this build\r\nrelative_player_audio = 0\r\n\r\n"
+        "[SAVE]\r\nsave_file_extension = co2\r\n"
+    )
+    mine = (
+        "[PASSWORD]\r\ncooppassword = banon-coop\r\n[GAMEPLAY]\r\nallow_invaders = 0\r\n"
+        "[SAVE]\r\nsave_file_extension = co2\r\n[OLD]\r\ndropped_key = 7\r\n"
+    )
+    merged = merge_seamless_settings(template, mine)
+    entries = _ini_entries(merged)
+    check(entries[("password", "cooppassword")] == "banon-coop", "the owner's cooppassword survives a merge")
+    check(entries[("gameplay", "allow_invaders")] == "0", "and so does every other value they set")
+    check(entries[("gameplay", "relative_player_audio")] == "0", "a key the new build adds arrives")
+    check(entries.get(("old", "dropped_key")) == "7", "a key the new build dropped is kept, not deleted")
+    check(merge_seamless_settings(template, merged) == merged, "merging twice changes nothing")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = root / "seamless.zip"
+            payload = {"SeamlessCoop/ds2sc.dll": b"new dll", "ds2sc_launcher.exe": b"launcher"}
+            with zipfile.ZipFile(archive, "w") as zipped:
+                for member, data in payload.items():
+                    zipped.writestr(member, data)
+                zipped.writestr(SEAMLESS_SETTINGS_MEMBER, template)
+            SEAMLESS_FILES = {m: hashlib.sha256(d).hexdigest() for m, d in payload.items()}
+            game = root / "Game"
+            (game / "SeamlessCoop").mkdir(parents=True)
+            (game / "SeamlessCoop" / "ds2sc.dll").write_bytes(b"0.0.1 dll")
+            (game / SEAMLESS_SETTINGS_MEMBER).write_text(mine, encoding="utf-8")
+            (game / "dxgi.dll").write_bytes(b"someone else's")
+
+            actions, problems = ensure_seamless_installed(game, archive, write=False)
+            check(
+                (game / "SeamlessCoop" / "ds2sc.dll").read_bytes() == b"0.0.1 dll",
+                "a check with write=False writes nothing",
+            )
+            check(len(actions) == 3 and not problems, f"and says what it would do: {actions} {problems}")
+            actions, problems = ensure_seamless_installed(game, archive, write=True)
+            check(
+                (game / "SeamlessCoop" / "ds2sc.dll").read_bytes() == b"new dll"
+                and (game / "ds2sc_launcher.exe").read_bytes() == b"launcher",
+                "an old DLL and a missing launcher are replaced from the archive",
+            )
+            check(
+                _ini_entries((game / SEAMLESS_SETTINGS_MEMBER).read_text(encoding="utf-8"))[
+                    ("password", "cooppassword")
+                ] == "banon-coop",
+                "and the installed settings still hold the owner's password",
+            )
+            check((game / "dxgi.dll").read_bytes() == b"someone else's", "another mod's file is untouched")
+            check(not list(game.rglob("*.ds2-run-new")), "no temporary file is left behind")
+            stamp = (game / "SeamlessCoop" / "ds2sc.dll").stat().st_mtime_ns
+            actions, problems = ensure_seamless_installed(game, archive, write=True)
+            check(
+                not actions and not problems
+                and (game / "SeamlessCoop" / "ds2sc.dll").stat().st_mtime_ns == stamp,
+                "a second launch against a correct install writes nothing",
+            )
+            actions, problems = ensure_seamless_installed(game, root / "absent.zip", write=True)
+            check(not problems, "a correct install needs no archive")
+            (game / "SeamlessCoop" / "ds2sc.dll").unlink()
+            actions, problems = ensure_seamless_installed(game, root / "absent.zip", write=True)
+            check(
+                bool(problems) and "absent.zip" in problems[0],
+                "a missing DLL with no archive is a refusal that names the archive it looked for",
+            )
+            (game / SEAMLESS_SETTINGS_MEMBER).write_text(template, encoding="utf-8")
+            _, problems = ensure_seamless_installed(game, archive, write=True)
+            check(
+                any(KEY_SEAMLESS_PASSWORD in p for p in problems),
+                "an empty cooppassword is reported: the mod stops its boot on a dialog without one",
+            )
+    finally:
+        SEAMLESS_FILES = real_pins
+    if SEAMLESS_ARCHIVE.is_file():
+        with zipfile.ZipFile(SEAMLESS_ARCHIVE) as zipped:
+            for member, digest in SEAMLESS_FILES.items():
+                check(
+                    hashlib.sha256(zipped.read(member)).hexdigest() == digest,
+                    f"the pinned {SEAMLESS_VERSION} hash of {member} matches the owner's archive",
+                )
+    else:
+        print(f"  skip the pinned hashes: no {SEAMLESS_ARCHIVE} on this machine")
+    # The Lighting Engine pair: engine first, presets over it, and nothing when the pins match.
+    global LIGHTING_ENGINE_PINS, SECOND_SIN_PINS  # noqa -- planted archives, restored below
+    real_engine_pins, real_presets_pins = LIGHTING_ENGINE_PINS, SECOND_SIN_PINS
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            game = root / "Game"
+            game.mkdir()
+            engine = {"dxgi.dll": b"engine dxgi", "ds2le_atmosphere_presets/a.ini": b"engine preset"}
+            presets = {"ds2le_atmosphere_presets/a.ini": b"second sin preset"}
+            archives = {root / "engine.rar": engine, root / "presets.zip": presets}
+            LIGHTING_ENGINE_PINS = {"dxgi.dll": hashlib.sha256(b"engine dxgi").hexdigest()}
+            SECOND_SIN_PINS = {
+                "ds2le_atmosphere_presets/a.ini": hashlib.sha256(b"second sin preset").hexdigest()
+            }
+            for archive in archives:
+                archive.write_bytes(b"planted")
+            unpacked: list[str] = []
+
+            def fake_run(argv, **_):
+                archive = next(Path(a) for a in argv if Path(a) in archives)
+                unpacked.append(archive.name)
+                for member, data in archives[archive].items():
+                    (game / member).parent.mkdir(parents=True, exist_ok=True)
+                    (game / member).write_bytes(data)
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            args = (game, root / "engine.rar", root / "presets.zip")
+            actions, problems = ensure_lighting_engine_installed(*args, write=False, run=fake_run)
+            check(not unpacked and len(actions) == 2 and not problems,
+                  f"a dry check unpacks nothing and names both steps: {actions} {problems}")
+            actions, problems = ensure_lighting_engine_installed(*args, write=True, run=fake_run)
+            check(unpacked == ["engine.rar", "presets.zip"] and not problems,
+                  f"a missing engine unpacks the engine, then the presets over it: {unpacked}")
+            check((game / "ds2le_atmosphere_presets/a.ini").read_bytes() == b"second sin preset",
+                  "and the presets win where both ship a file")
+            unpacked.clear()
+            actions, problems = ensure_lighting_engine_installed(*args, write=True, run=fake_run)
+            check(not unpacked and not actions and not problems, "a correct install unpacks nothing")
+            (game / "ds2le_atmosphere_presets/a.ini").write_bytes(b"engine preset")
+            ensure_lighting_engine_installed(*args, write=True, run=fake_run)
+            check(unpacked == ["presets.zip"], f"lost presets reinstall only the presets: {unpacked}")
+            # --no-path-tracing parks by rename, and the next normal launch renames it back
+            # without unpacking anything.
+            ensure_lighting_engine_installed(*args, write=True, run=fake_run)
+            unpacked.clear()
+            check(park_path_tracing(game) is not None and not (game / "dxgi.dll").exists()
+                  and (game / PARKED_DXGI_NAMES[0]).is_file(), "--no-path-tracing parks dxgi.dll")
+            check(park_path_tracing(game) is None, "parking twice is a no-op")
+            actions, problems = ensure_lighting_engine_installed(*args, write=False, run=fake_run)
+            check(actions == [f"would restore dxgi.dll from {PARKED_DXGI_NAMES[0]}"] and not problems,
+                  f"a dry check plans the rename, not an unpack: {actions} {problems}")
+            actions, problems = ensure_lighting_engine_installed(*args, write=True, run=fake_run)
+            check((game / "dxgi.dll").read_bytes() == b"engine dxgi" and not unpacked
+                  and not problems, "the next launch renames it back and unpacks nothing")
+            (game / "dxgi.dll").rename(game / PARKED_DXGI_NAMES[1])
+            ensure_lighting_engine_installed(*args, write=True, run=fake_run)
+            check((game / "dxgi.dll").is_file() and not unpacked,
+                  "a dxgi.dll parked under the selector's name comes back the same way")
+            (game / "dxgi.dll").unlink()
+            _, problems = ensure_lighting_engine_installed(
+                game, root / "gone.rar", root / "presets.zip", write=True, run=fake_run
+            )
+            check(bool(problems) and "gone.rar" in problems[0],
+                  "a missing engine with no archive is a refusal naming the archive")
+    finally:
+        LIGHTING_ENGINE_PINS, SECOND_SIN_PINS = real_engine_pins, real_presets_pins
+    check(
+        unpack_command(Path("x.rar"), Path("/g"), ("ReadMe.txt",))
+        == ["bsdtar", "-x", "-C", "/g", "-f", "x.rar", "--exclude", "ReadMe.txt"],
+        "the engine archive is unpacked with bsdtar over the game dir",
+    )
+    check(unpack_command(Path("x.zip"), Path("/g"))[:6] == ["unzip", "-o", "-q", "x.zip", "-d", "/g"],
+          "the presets zip is unpacked with unzip -o over the game dir")
+    check("dxgi=n,b" in DLL_OVERRIDE.split(";") and "dinput8=n,b" in DLL_OVERRIDE.split(";"),
+          "the launch override loads both proxies native-first")
+
+    staged_names = {STAGED_DLL_NAME, STAGED_LAUNCHER_NAME, CONFIG_NAME, LOG_NAME}
+    check(
+        not {Path(name).parts[0].lower() for name in staged_names}
+        & {name.lower() for name in THIRD_PARTY_PATHS},
+        "nothing this script stages is a file another mod owns",
+    )
+    check(
+        SEAMLESS_DEFAULT_DLL in SEAMLESS_FILES,
+        f"the default --seamless-dll is one of the pinned {SEAMLESS_VERSION} files",
+    )
+
     # `--selftest` returns before `main` reaches either of its two dispatches, so an argument
     # threaded wrongly into `dry_run(...)` or `launch(...)` crashed both modes on startup for at
     # least one commit while this selftest, and so the gate, stayed green (fixed then in 1338ada;
@@ -4943,6 +5522,20 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--path-tracing",
+        dest="path_tracing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "keep DS2 Lighting Engine PathTracing and Second Sin Pathtracing installed and loaded. "
+            "ON BY DEFAULT. --no-path-tracing renames the engine's dxgi.dll to "
+            f"{PARKED_DXGI_NAMES[0]} for this run, so Wine loads the system dxgi; the next launch "
+            "without it renames it back. Anything that turns [invasion_path] on (--input-harness, "
+            "--net-effects, --invasion-path) implies --no-path-tracing until ds2-mods-rs-uz64 is "
+            "fixed."
+        ),
+    )
+    parser.add_argument(
         "--seamless",
         dest="seamless",
         action=argparse.BooleanOptionalAction,
@@ -5199,6 +5792,16 @@ def main() -> int:
             f"[config] --net-effects turned [{INVASION_PATH_SECTION}] on for this run: the key "
             "is read on its Present hook and does nothing without it."
         )
+    # Until ds2-mods-rs-uz64 is fixed: [invasion_path]'s render install creates a throwaway swap
+    # chain, and the Lighting Engine's dxgi.dll crashes the game when it is released (2026-09-26,
+    # execute at 0x5555872d73e0 under ds2_invasion_path::render::install). Every flag above that
+    # turns [invasion_path] on therefore turns path tracing off for the run.
+    if args.invasion_path and args.path_tracing:
+        args.path_tracing = False
+        print(
+            f"[config] [{INVASION_PATH_SECTION}] is on, so path tracing is OFF for this run: its "
+            "throwaway swap chain crashes the Lighting Engine (ds2-mods-rs-uz64)."
+        )
 
     if args.selftest:
         return selftest()
@@ -5276,6 +5879,7 @@ def main() -> int:
             weapon_sync=args.weapon_sync,
             weapon_sync_test_cap=args.weapon_sync_test_cap,
             net_effects=args.net_effects,
+            path_tracing=args.path_tracing,
         )
     return launch(
         args.probe,
@@ -5321,6 +5925,7 @@ def main() -> int:
         weapon_sync=args.weapon_sync,
         weapon_sync_test_cap=args.weapon_sync_test_cap,
         net_effects=args.net_effects,
+        path_tracing=args.path_tracing,
     )
 
 
