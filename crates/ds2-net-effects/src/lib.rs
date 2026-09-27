@@ -5,7 +5,13 @@
 //!
 //! # What a press does
 //!
-//! It builds the sixteen-byte request the game's own callers build ([`request_bytes`]) and calls
+//! It toggles the effect, as `er-net-effects` does ([`Toggle`]). On: the effect is applied, and
+//! every frame the local player's action list is searched for it ([`sp_effect_active`]); once it
+//! has been seen there and then leaves -- it ran out -- it is applied again. Off: nothing more is
+//! applied, and whatever is on the player runs out by itself. An effect that never leaves the list
+//! is applied once. Each toggle, apply and expiry is one log line.
+//!
+//! An apply builds the sixteen-byte request the game's own callers build ([`request_bytes`]) and calls
 //! `applySpEffect` ([`ds2_rva::SP_EFFECT_APPLY`]) with the local player's `ChrSpEffectCtrl`, reached
 //! as `GameManagerImp` ([`ds2_rva::GAME_MANAGER_IMP`]) -> `PlayerCtrl`
 //! ([`GameManagerImp::player_ctrl`]) -> `ChrSpEffectCtrl`
@@ -48,7 +54,10 @@ pub use install::{LogFn, Outcome, Request, install, set_logger};
 
 use core::mem::offset_of;
 
-use darksouls2::game::chr::PlayerCtrl;
+use darksouls2::game::chr::{
+    ChrSpEffectCtrl, PlayerCtrl, SP_EFFECT_ACTION_CAPACITY, SpEffectAction, SpEffectActionHolder,
+    SpEffectActionList,
+};
 use darksouls2::game::game_manager::GameManagerImp;
 use ds2_hotkey_config::keys::{
     Chord, KeyParseError, MODIFIER_ALT, MODIFIER_CTRL, MODIFIER_SHIFT, parse_chord,
@@ -183,7 +192,7 @@ pub fn chord_held(chord: Chord, vk_down: impl Fn(i32) -> bool) -> bool {
 }
 
 /// A press is the frame the chord goes down: held now, not held the frame before. Holding it
-/// applies the effect once.
+/// is one toggle.
 pub const fn is_press(was_down: bool, down: bool) -> bool {
     down && !was_down
 }
@@ -240,10 +249,303 @@ pub fn sp_effect_ctrl(
         .ok_or(MissingLink::SpEffectCtrl)
 }
 
+/// Whether any action in the controller's list belongs to `SpEffect` `id`.
+///
+/// `Some(true)` or `Some(false)` when the list was read, `None` when a hop was null or unreadable
+/// or the count is not one the list can hold -- a load screen, or a controller being torn down --
+/// which says nothing about the effect.
+///
+/// The walk is [`ChrSpEffectCtrl::action_holder`] -> [`SpEffectActionHolder::list`] ->
+/// [`SpEffectActionList::actions`] (the first [`SpEffectActionList::count`]) ->
+/// [`SpEffectAction::sp_effect_id`]. `read` answers a pointer-sized value, `read_words` `n`
+/// consecutive ones (the action array in one read), `read_i32` a 32-bit one. A null slot is
+/// skipped; an action whose id cannot be read is not a match.
+pub fn sp_effect_active(
+    ctrl: usize,
+    id: i32,
+    read: impl Fn(usize) -> Option<usize>,
+    read_words: impl Fn(usize, usize) -> Option<Vec<usize>>,
+    read_i32: impl Fn(usize) -> Option<i32>,
+) -> Option<bool> {
+    let holder = read(ctrl + offset_of!(ChrSpEffectCtrl, action_holder)).filter(|p| *p != 0)?;
+    let list = read(holder + offset_of!(SpEffectActionHolder, list)).filter(|p| *p != 0)?;
+    let count = read(list + offset_of!(SpEffectActionList, count))?;
+    if count > SP_EFFECT_ACTION_CAPACITY {
+        return None;
+    }
+    if count == 0 {
+        return Some(false);
+    }
+    let actions = read_words(list + offset_of!(SpEffectActionList, actions), count)?;
+    Some(
+        actions
+            .into_iter()
+            .filter(|a| *a != 0)
+            .any(|action| read_i32(action + offset_of!(SpEffectAction, sp_effect_id)) == Some(id)),
+    )
+}
+
+/// Frames the effect has to show up on the player after an apply before the toggle stops waiting
+/// for it. About two seconds at 60 fps; the live apply was in the list by the first 50 ms sample.
+pub const SIGHTING_FRAMES: u32 = 120;
+
+/// Why an apply is asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApplyReason {
+    /// The key turned the toggle on.
+    Enabled,
+    /// The effect was seen on the player and has since ended.
+    Expired,
+}
+
+/// What one frame of [`Toggle::frame`] decided. Every field is something the caller logs or does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Frame {
+    /// `Some(on)` on the frame a press flipped the toggle.
+    pub toggled: Option<bool>,
+    /// The effect was seen on the player for the first time since the last apply.
+    pub seen: bool,
+    /// The effect was on the player last frame and is gone now.
+    pub expired: bool,
+    /// Apply now, for this reason. The caller reports back with [`Toggle::applied`].
+    pub apply: Option<ApplyReason>,
+    /// [`SIGHTING_FRAMES`] passed after an apply without the effect showing up. Nothing is
+    /// re-applied until the key is pressed again, so an id the game ignores is not applied every
+    /// frame.
+    pub never_seen: bool,
+}
+
+/// The on/off state of the effect, ported from `er-net-effects`.
+///
+/// A press enables it; while it is enabled, an effect that has been seen on the player and then ends is applied again; a press
+/// disables it and nothing more is applied. An effect that never ends is applied once.
+///
+/// The ER mod's `refresh_call_status` and `reapply_expired_enabled_calls` are the two halves of
+/// [`Toggle::frame`]. One difference: after a re-apply ER keeps its "seen" mark, so an apply the
+/// game ignores is retried every frame; here a re-apply clears it and waits
+/// [`SIGHTING_FRAMES`] for the effect to show up again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Toggle {
+    enabled: bool,
+    seen: bool,
+    pending: Option<ApplyReason>,
+    waiting: u32,
+}
+
+impl Toggle {
+    /// Off, nothing seen, nothing waiting.
+    pub const fn new() -> Self {
+        Self {
+            enabled: false,
+            seen: false,
+            pending: None,
+            waiting: 0,
+        }
+    }
+
+    /// Whether the key has the effect on.
+    pub const fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// One frame. `pressed` is the key's down edge; `active` is [`sp_effect_active`] for the
+    /// effect, `None` when the list could not be read, which neither sees nor expires anything and
+    /// holds a wanted apply until it can be read.
+    pub fn frame(&mut self, pressed: bool, active: Option<bool>) -> Frame {
+        let mut out = Frame::default();
+        if pressed {
+            self.enabled = !self.enabled;
+            self.seen = false;
+            self.waiting = 0;
+            self.pending = self.enabled.then_some(ApplyReason::Enabled);
+            out.toggled = Some(self.enabled);
+        }
+        if !self.enabled {
+            return out;
+        }
+        let Some(active) = active else {
+            return out;
+        };
+        if active {
+            out.seen = !self.seen;
+            self.seen = true;
+            self.waiting = 0;
+        } else if self.seen {
+            self.seen = false;
+            out.expired = true;
+            self.pending = Some(ApplyReason::Expired);
+        } else if self.waiting > 0 {
+            self.waiting -= 1;
+            out.never_seen = self.waiting == 0;
+        }
+        out.apply = self.pending;
+        out
+    }
+
+    /// The apply [`Frame::apply`] asked for was made. Start waiting for the effect to show up.
+    pub fn applied(&mut self) {
+        self.pending = None;
+        self.seen = false;
+        self.waiting = SIGHTING_FRAMES;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    /// The frames the live 140001010 run would produce: press, apply, seen, expired, re-apply,
+    /// seen, expired, re-apply, press off, and then nothing however long the effect is gone.
+    #[test]
+    fn a_toggle_reapplies_after_expiry_until_it_is_turned_off() {
+        let mut t = Toggle::default();
+        let f = t.frame(true, Some(false));
+        assert_eq!(f.toggled, Some(true));
+        assert_eq!(f.apply, Some(ApplyReason::Enabled));
+        t.applied();
+        for _ in 0..2 {
+            let f = t.frame(false, Some(true));
+            assert!(f.seen);
+            assert_eq!(f.apply, None);
+            assert_eq!(
+                t.frame(false, Some(true)),
+                Frame::default(),
+                "still on, nothing to do"
+            );
+            let f = t.frame(false, Some(false));
+            assert!(f.expired);
+            assert_eq!(f.apply, Some(ApplyReason::Expired));
+            t.applied();
+        }
+        let f = t.frame(true, Some(true));
+        assert_eq!(f.toggled, Some(false));
+        assert_eq!(f.apply, None);
+        assert!(!t.enabled());
+        for _ in 0..500 {
+            assert_eq!(t.frame(false, Some(false)), Frame::default());
+        }
+    }
+
+    /// An effect that never leaves the list is applied once and never again.
+    #[test]
+    fn an_effect_that_never_ends_is_applied_once() {
+        let mut t = Toggle::default();
+        assert_eq!(t.frame(true, Some(false)).apply, Some(ApplyReason::Enabled));
+        t.applied();
+        assert!(t.frame(false, Some(true)).seen);
+        for _ in 0..10_000 {
+            assert_eq!(t.frame(false, Some(true)), Frame::default());
+        }
+    }
+
+    /// Not seen yet is not expired: the frames between the apply and the first sighting apply
+    /// nothing, and an apply the game never shows gives up once instead of repeating.
+    #[test]
+    fn an_apply_that_never_shows_up_is_not_repeated() {
+        let mut t = Toggle::default();
+        t.frame(true, Some(false));
+        t.applied();
+        let mut gave_up = 0;
+        for _ in 0..SIGHTING_FRAMES * 3 {
+            let f = t.frame(false, Some(false));
+            assert_eq!(f.apply, None);
+            gave_up += usize::from(f.never_seen);
+        }
+        assert_eq!(gave_up, 1);
+        assert!(t.enabled(), "still on: a press turns it off, not the game");
+    }
+
+    /// An unreadable list (a load screen) neither expires the effect nor loses the wanted apply.
+    #[test]
+    fn an_unreadable_list_holds_everything() {
+        let mut t = Toggle::default();
+        let f = t.frame(true, None);
+        assert_eq!(f.toggled, Some(true));
+        assert_eq!(f.apply, None, "no controller to apply to");
+        assert_eq!(t.frame(false, None).apply, None);
+        assert_eq!(
+            t.frame(false, Some(false)).apply,
+            Some(ApplyReason::Enabled)
+        );
+        t.applied();
+        t.frame(false, Some(true));
+        assert_eq!(
+            t.frame(false, None),
+            Frame::default(),
+            "a load is not an expiry"
+        );
+        assert!(t.frame(false, Some(false)).expired);
+    }
+
+    /// A press while the effect is off and a press while it is on both flip it; turning it off
+    /// drops an apply that was still waiting for the controller.
+    #[test]
+    fn turning_it_off_drops_a_waiting_apply() {
+        let mut t = Toggle::default();
+        t.frame(true, None);
+        assert_eq!(t.frame(true, None).toggled, Some(false));
+        assert_eq!(t.frame(false, Some(false)).apply, None);
+    }
+
+    const LIST_CTRL: usize = 0x10_000;
+    const HOLDER: usize = 0x20_000;
+    const LIST: usize = 0x30_000;
+
+    fn list_heap(count: usize, ids: &[i32]) -> HashMap<usize, u64> {
+        let mut heap = HashMap::new();
+        heap.insert(LIST_CTRL + 0x10, HOLDER as u64);
+        heap.insert(HOLDER + 0x20, LIST as u64);
+        heap.insert(LIST + 0x418, count as u64);
+        for (i, id) in ids.iter().enumerate() {
+            let action = 0x40_000 + i * 0x100;
+            heap.insert(
+                LIST + 0x10 + i * 8,
+                if *id == 0 { 0 } else { action as u64 },
+            );
+            heap.insert(action + 0x10, *id as u32 as u64);
+        }
+        heap
+    }
+
+    fn active(heap: &HashMap<usize, u64>, id: i32) -> Option<bool> {
+        let word = |a: usize| heap.get(&a).map(|v| *v as usize);
+        sp_effect_active(
+            LIST_CTRL,
+            id,
+            word,
+            |a, n| (0..n).map(|i| word(a + i * 8)).collect(),
+            |a| heap.get(&a).map(|v| *v as u32 as i32),
+        )
+    }
+
+    /// The resident actions the live read found, and the sfx effect among them or not.
+    #[test]
+    fn the_list_is_searched_by_id() {
+        let resident = [40_040_002, 41_110_000, 0, 21_660_100];
+        assert_eq!(active(&list_heap(4, &resident), 140_001_010), Some(false));
+        let with = [40_040_002, 41_110_000, 140_001_010];
+        assert_eq!(active(&list_heap(3, &with), 140_001_010), Some(true));
+        assert_eq!(active(&list_heap(0, &[]), 140_001_010), Some(false));
+    }
+
+    /// Only the first `count` slots are live: a stale pointer past it is not a match.
+    #[test]
+    fn slots_past_the_count_are_not_read() {
+        let heap = list_heap(2, &[40_040_002, 41_110_000, 140_001_010]);
+        assert_eq!(active(&heap, 140_001_010), Some(false));
+    }
+
+    /// A missing hop or an impossible count says nothing about the effect.
+    #[test]
+    fn a_broken_list_is_unknown() {
+        assert_eq!(active(&HashMap::new(), 1), None);
+        let mut heap = list_heap(1, &[1]);
+        heap.insert(HOLDER + 0x20, 0);
+        assert_eq!(active(&heap, 1), None);
+        let heap = list_heap(129, &[1]);
+        assert_eq!(active(&heap, 1), None);
+    }
 
     /// Sending is off unless the file says exactly `true`.
     #[test]
