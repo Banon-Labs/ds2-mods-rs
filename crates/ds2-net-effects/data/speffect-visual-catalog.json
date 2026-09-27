@@ -1,0 +1,584 @@
+{
+  "schema_version": 1,
+  "kind": "ds2-speffect-visual-master-catalog",
+  "source": {
+    "param": "SpEffect*.emevd (DS2 has no SpEffectParam)",
+    "binder_version": "enc_regulation.bnd.dcx",
+    "row_count": 899,
+    "regulation_file": "Game/enc_regulation.bnd.dcx",
+    "paramdef_file": "scripts/ds2-speffect-visual.py KNOWN (DarkScript3 ds2scholar-common.emedf.json)",
+    "names_file": "crates/ds2-build-import-core/data/items.tsv"
+  },
+  "field_index": {
+    "file": {
+      "type": "string",
+      "display_name": "SpEffect emevd member",
+      "tags": []
+    },
+    "sfx": {
+      "type": "s32[]",
+      "display_name": "Spawn SFX id",
+      "tags": [
+        "vfx"
+      ]
+    },
+    "fullBodySfxParam": {
+      "type": "s32[]",
+      "display_name": "ChrFullBodySfxParam id",
+      "tags": [
+        "vfx"
+      ]
+    },
+    "dummyPoly": {
+      "type": "u8[]",
+      "display_name": "Spawn SFX dummy poly",
+      "tags": []
+    },
+    "effectEndurance": {
+      "type": "f32?",
+      "display_name": "Set SpEffect Length (s)",
+      "tags": [
+        "duration"
+      ]
+    },
+    "description": {
+      "type": "string",
+      "display_name": "Derived description",
+      "tags": []
+    }
+  },
+  "effects": [
+    {
+      "id": 901100,
+      "name": "AbnormalState: full-body sfx 400010, no length",
+      "row_name": null,
+      "community_name": null,
+      "curated_name": null,
+      "vfx": [],
+      "tags": [
+        "abnormalstate",
+        "avoid",
+        "exe-literal",
+        "no-length"
+      ],
+      "fields": {
+        "file": "SpEffectAbnormalState",
+        "sfx": [],
+        "fullBodySfxParam": [
+          400010
+        ],
+        "dummyPoly": [],
+        "effectEndurance": null,
+        "description": "AbnormalState: full-body sfx 400010, no length"
+      },
+      "applicability": {}
+    },
+    {
+      "id": 3530000,
+      "name": "Bone Fist - sfx 5432 on dummy poly 20/21, 0.95 s",
+      "row_name": null,
+      "community_name": "Bone Fist",
+      "curated_name": null,
+      "vfx": [
+        5432
+      ],
+      "tags": [
+        "weapon",
+        "avoid",
+        "weapon-model"
+      ],
+      "fields": {
+        "file": "SpEffectWeapon",
+        "sfx": [
+          5432
+        ],
+        "fullBodySfxParam": [],
+        "dummyPoly": [
+          20,
+          21
+        ],
+        "effectEndurance": 0.949999988079071,
+        "description": "Weapon: sfx 5432 on dummy poly 20/21, 0.95 s"
+      },
+      "applicability": {}
+    },
+    {
+      "id": 21470120,
+      "name": "Moon Butterfly Hat (item 21470100) - sfx 5425 on dummy poly 249, 3 s",
+      "row_name": null,
+      "community_name": "Moon Butterfly Hat (item 21470100)",
+      "curated_name": null,
+      "vfx": [
+        5425
+      ],
+      "tags": [
+        "armor"
+      ],
+      "fields": {
+        "file": "SpEffectArmor",
+        "sfx": [
+          5425
+        ],
+        "fullBodySfxParam": [],
+        "dummyPoly": [
+          249
+        ],
+        "effectEndurance": 3.0,
+        "description": "Armor: sfx 5425 on dummy poly 249, 3 s"
+      },
+      "applicability": {}
+    },
+    {
+      "id": 32170011,
+      "name": "Soul Appease (item 32170000) - sfx 5216 on dummy poly 249, 2 s",
+      "row_name": null,
+      "community_name": "Soul Appease (item 32170000)",
+      "curated_name": null,
+      "vfx": [
+        5216
+      ],
+      "tags": [
+        "spell"
+      ],
+      "fields": {
+        "file": "SpEffectSpell",
+        "sfx": [
+          5216
+        ],
+        "fullBodySfxParam": [],
+        "dummyPoly": [
+          249
+        ],
+        "effectEndurance": 2.0,
+        "description": "Spell: sfx 5216 on dummy poly 249, 2 s"
+      },
+      "applicability": {}
+    },
+    {
+      "id": 60405030,
+      "name": "Dragon Head Stone (item 60405000) - full-body sfx 500020, 1 s",
+      "row_name": null,
+      "community_name": "Dragon Head Stone (item 60405000)",
+      "curated_name": null,
+      "vfx": [],
+      "tags": [
+        "activeitem",
+        "avoid",
+        "exe-literal"
+      ],
+      "fields": {
+        "file": "SpEffectActiveItem",
+        "sfx": [],
+        "fullBodySfxParam": [
+          500020
+        ],
+        "dummyPoly": [],
+        "effectEndurance": 1.0,
+        "description": "ActiveItem: full-body sfx 500020, 1 s"
+      },
+      "applicability": {}
+    },
+    {
+      "id": 60406030,
+      "name": "Dragon Torso Stone (item 60406000) - full-body sfx 500120, 1 s",
+      "row_name": null,
+      "community_name": "Dragon Torso Stone (item 60406000)",
+      "curated_name": null,
+      "vfx": [],
+      "tags": [
+        "activeitem",
+        "avoid",
+        "exe-literal"
+      ],
+      "fields": {
+        "file": "SpEffectActiveItem",
+        "sfx": [],
+        "fullBodySfxParam": [
+          500120
+        ],
+        "dummyPoly": [],
+        "effectEndurance": 1.0,
+        "description": "ActiveItem: full-body sfx 500120, 1 s"
+      },
+      "applicability": {}
+    },
+    {
+      "id": 62170000,
+      "name": "Seed of a Tree of Giants - sfx 1124 on dummy poly 249, 3600 s",
+      "row_name": null,
+      "community_name": "Seed of a Tree of Giants",
+      "curated_name": null,
+      "vfx": [
+        1124
+      ],
+      "tags": [
+        "activeitem",
+        "avoid",
+        "exe-literal"
+      ],
+      "fields": {
+        "file": "SpEffectActiveItem",
+        "sfx": [
+          1124
+        ],
+        "fullBodySfxParam": [],
+        "dummyPoly": [
+          249
+        ],
+        "effectEndurance": 3600.0,
+        "description": "ActiveItem: sfx 1124 on dummy poly 249, 3600 s"
+      },
+      "applicability": {}
+    },
+    {
+      "id": 91060010,
+      "name": "Enemy: sfx 1972/1973 on dummy poly 220, 60 s",
+      "row_name": null,
+      "community_name": null,
+      "curated_name": null,
+      "vfx": [
+        1972,
+        1973
+      ],
+      "tags": [
+        "enemy",
+        "enemy-band"
+      ],
+      "fields": {
+        "file": "SpEffectEnemy",
+        "sfx": [
+          1972,
+          1973
+        ],
+        "fullBodySfxParam": [],
+        "dummyPoly": [
+          220
+        ],
+        "effectEndurance": 60.0,
+        "description": "Enemy: sfx 1972/1973 on dummy poly 220, 60 s"
+      },
+      "applicability": {}
+    },
+    {
+      "id": 96270000,
+      "name": "Enemy: sfx 3739 on dummy poly 249, 0.5 s",
+      "row_name": null,
+      "community_name": null,
+      "curated_name": null,
+      "vfx": [
+        3739
+      ],
+      "tags": [
+        "enemy",
+        "enemy-band"
+      ],
+      "fields": {
+        "file": "SpEffectEnemy",
+        "sfx": [
+          3739
+        ],
+        "fullBodySfxParam": [],
+        "dummyPoly": [
+          249
+        ],
+        "effectEndurance": 0.5,
+        "description": "Enemy: sfx 3739 on dummy poly 249, 0.5 s"
+      },
+      "applicability": {}
+    },
+    {
+      "id": 96560400,
+      "name": "Enemy: sfx 8346 on dummy poly 249, 5 s",
+      "row_name": null,
+      "community_name": null,
+      "curated_name": null,
+      "vfx": [
+        8346
+      ],
+      "tags": [
+        "enemy",
+        "enemy-band"
+      ],
+      "fields": {
+        "file": "SpEffectEnemy",
+        "sfx": [
+          8346
+        ],
+        "fullBodySfxParam": [],
+        "dummyPoly": [
+          249
+        ],
+        "effectEndurance": 5.0,
+        "description": "Enemy: sfx 8346 on dummy poly 249, 5 s"
+      },
+      "applicability": {}
+    },
+    {
+      "id": 96560410,
+      "name": "Enemy: sfx 8346 on dummy poly 249, 5 s",
+      "row_name": null,
+      "community_name": null,
+      "curated_name": null,
+      "vfx": [
+        8346
+      ],
+      "tags": [
+        "enemy",
+        "enemy-band"
+      ],
+      "fields": {
+        "file": "SpEffectEnemy",
+        "sfx": [
+          8346
+        ],
+        "fullBodySfxParam": [],
+        "dummyPoly": [
+          249
+        ],
+        "effectEndurance": 5.0,
+        "description": "Enemy: sfx 8346 on dummy poly 249, 5 s"
+      },
+      "applicability": {}
+    },
+    {
+      "id": 96560420,
+      "name": "Enemy: sfx 8347 on dummy poly 249, 5 s",
+      "row_name": null,
+      "community_name": null,
+      "curated_name": null,
+      "vfx": [
+        8347
+      ],
+      "tags": [
+        "enemy",
+        "enemy-band"
+      ],
+      "fields": {
+        "file": "SpEffectEnemy",
+        "sfx": [
+          8347
+        ],
+        "fullBodySfxParam": [],
+        "dummyPoly": [
+          249
+        ],
+        "effectEndurance": 5.0,
+        "description": "Enemy: sfx 8347 on dummy poly 249, 5 s"
+      },
+      "applicability": {}
+    },
+    {
+      "id": 96720020,
+      "name": "Enemy: sfx 659 on dummy poly 249, 1.5 s",
+      "row_name": null,
+      "community_name": null,
+      "curated_name": null,
+      "vfx": [
+        659
+      ],
+      "tags": [
+        "enemy",
+        "enemy-band"
+      ],
+      "fields": {
+        "file": "SpEffectEnemy",
+        "sfx": [
+          659
+        ],
+        "fullBodySfxParam": [],
+        "dummyPoly": [
+          249
+        ],
+        "effectEndurance": 1.5,
+        "description": "Enemy: sfx 659 on dummy poly 249, 1.5 s"
+      },
+      "applicability": {}
+    },
+    {
+      "id": 120000010,
+      "name": "WideUse: sfx 3739 on dummy poly 249, 0.5 s",
+      "row_name": null,
+      "community_name": null,
+      "curated_name": null,
+      "vfx": [
+        3739
+      ],
+      "tags": [
+        "wideuse"
+      ],
+      "fields": {
+        "file": "SpEffectWideUse",
+        "sfx": [
+          3739
+        ],
+        "fullBodySfxParam": [],
+        "dummyPoly": [
+          249
+        ],
+        "effectEndurance": 0.5,
+        "description": "WideUse: sfx 3739 on dummy poly 249, 0.5 s"
+      },
+      "applicability": {}
+    },
+    {
+      "id": 120000020,
+      "name": "WideUse: sfx 3739 on dummy poly 249, 0.5 s",
+      "row_name": null,
+      "community_name": null,
+      "curated_name": null,
+      "vfx": [
+        3739
+      ],
+      "tags": [
+        "wideuse"
+      ],
+      "fields": {
+        "file": "SpEffectWideUse",
+        "sfx": [
+          3739
+        ],
+        "fullBodySfxParam": [],
+        "dummyPoly": [
+          249
+        ],
+        "effectEndurance": 0.5,
+        "description": "WideUse: sfx 3739 on dummy poly 249, 0.5 s"
+      },
+      "applicability": {}
+    },
+    {
+      "id": 120000030,
+      "name": "WideUse: sfx 3739 on dummy poly 249, 0.5 s",
+      "row_name": null,
+      "community_name": null,
+      "curated_name": null,
+      "vfx": [
+        3739
+      ],
+      "tags": [
+        "wideuse"
+      ],
+      "fields": {
+        "file": "SpEffectWideUse",
+        "sfx": [
+          3739
+        ],
+        "fullBodySfxParam": [],
+        "dummyPoly": [
+          249
+        ],
+        "effectEndurance": 0.5,
+        "description": "WideUse: sfx 3739 on dummy poly 249, 0.5 s"
+      },
+      "applicability": {}
+    },
+    {
+      "id": 120000110,
+      "name": "WideUse: sfx 3739 on dummy poly 249, 0.5 s",
+      "row_name": null,
+      "community_name": null,
+      "curated_name": null,
+      "vfx": [
+        3739
+      ],
+      "tags": [
+        "wideuse"
+      ],
+      "fields": {
+        "file": "SpEffectWideUse",
+        "sfx": [
+          3739
+        ],
+        "fullBodySfxParam": [],
+        "dummyPoly": [
+          249
+        ],
+        "effectEndurance": 0.5,
+        "description": "WideUse: sfx 3739 on dummy poly 249, 0.5 s"
+      },
+      "applicability": {}
+    },
+    {
+      "id": 120000310,
+      "name": "WideUse: sfx 659 on dummy poly 249, 1.5 s",
+      "row_name": null,
+      "community_name": null,
+      "curated_name": null,
+      "vfx": [
+        659
+      ],
+      "tags": [
+        "wideuse",
+        "recommended",
+        "sfx-resident"
+      ],
+      "fields": {
+        "file": "SpEffectWideUse",
+        "sfx": [
+          659
+        ],
+        "fullBodySfxParam": [],
+        "dummyPoly": [
+          249
+        ],
+        "effectEndurance": 1.5,
+        "description": "WideUse: sfx 659 on dummy poly 249, 1.5 s"
+      },
+      "applicability": {}
+    },
+    {
+      "id": 140001010,
+      "name": "WideUse: sfx 659 on dummy poly 249, 1.5 s",
+      "row_name": null,
+      "community_name": null,
+      "curated_name": null,
+      "vfx": [
+        659
+      ],
+      "tags": [
+        "wideuse",
+        "recommended",
+        "sfx-resident"
+      ],
+      "fields": {
+        "file": "SpEffectWideUse",
+        "sfx": [
+          659
+        ],
+        "fullBodySfxParam": [],
+        "dummyPoly": [
+          249
+        ],
+        "effectEndurance": 1.5,
+        "description": "WideUse: sfx 659 on dummy poly 249, 1.5 s"
+      },
+      "applicability": {}
+    },
+    {
+      "id": 150101000,
+      "name": "WideUse: sfx 3739 on dummy poly 249, 0.5 s",
+      "row_name": null,
+      "community_name": null,
+      "curated_name": null,
+      "vfx": [
+        3739
+      ],
+      "tags": [
+        "wideuse"
+      ],
+      "fields": {
+        "file": "SpEffectWideUse",
+        "sfx": [
+          3739
+        ],
+        "fullBodySfxParam": [],
+        "dummyPoly": [
+          249
+        ],
+        "effectEndurance": 0.5,
+        "description": "WideUse: sfx 3739 on dummy poly 249, 0.5 s"
+      },
+      "applicability": {}
+    }
+  ]
+}

@@ -13,11 +13,15 @@ use ds2_hotkey_config::keys::Chord;
 use ds2_hotkey_config::live::AtomicChord;
 use ds2_hotkey_config::reload::{FileChange, HotFile};
 
+use crate::catalog::{CATALOG_FILE_NAME, CatalogEntry, EMBEDDED_CATALOG, parse_catalog};
+use crate::marked;
+use crate::overlay;
+use crate::selector::{ACTIONS, Bindings, Keeper, Selector, Step, keep_reason, view};
 use crate::{
     ApplyReason, CONFIG_KEY_EFFECT, CONFIG_KEY_KEYBOARD, CONFIG_KEY_NETWORK, CONFIG_SECTION,
     DEFAULT_EFFECT, DEFAULT_KEY, EffectSetting, KeySetting, LOG_PREFIX, Toggle, chord_held,
     default_chord, effect_setting, is_press, key_setting, network_setting, request_bytes,
-    sp_effect_active, sp_effect_ctrl,
+    sp_effect_active, sp_effect_ctrl, sp_effect_ids,
 };
 
 unsafe extern "system" {
@@ -38,7 +42,7 @@ pub fn set_logger(logger: LogFn) {
     LOGGER.store(logger as usize, Ordering::Release);
 }
 
-fn log(args: std::fmt::Arguments<'_>) {
+pub(crate) fn log(args: std::fmt::Arguments<'_>) {
     let raw = LOGGER.load(Ordering::Acquire);
     if raw != 0 {
         // SAFETY: `raw` is only ever a `LogFn` stored by `set_logger` above.
@@ -247,6 +251,25 @@ static REAPPLIES: AtomicU64 = AtomicU64::new(0);
 ///
 /// Game thread only: called from the `Present` clock's consumer, with a controller it just walked.
 unsafe fn apply_effect(ctrl: usize, id: i32, reason: ApplyReason) {
+    let why = match reason {
+        ApplyReason::Enabled => "toggled-on".to_string(),
+        ApplyReason::Expired => {
+            format!(
+                "re-apply #{}",
+                REAPPLIES.fetch_add(1, Ordering::Relaxed) + 1
+            )
+        }
+    };
+    // SAFETY: this function's own contract, passed on.
+    unsafe { apply_effect_because(ctrl, id, &why) };
+}
+
+/// Apply `id` to the controller `ctrl` and log it with `why`.
+///
+/// # Safety
+///
+/// Game thread only: called from the `Present` clock's consumer, with a controller it just walked.
+unsafe fn apply_effect_because(ctrl: usize, id: i32, why: &str) {
     let apply = APPLY.load(Ordering::Acquire);
     if apply == 0 {
         return;
@@ -267,24 +290,294 @@ unsafe fn apply_effect(ctrl: usize, id: i32, reason: ApplyReason) {
     };
     WITHHOLD.store(false, Ordering::Relaxed);
     let withheld = WITHHELD.load(Ordering::Relaxed) - withheld_before;
-    let why = match reason {
-        ApplyReason::Enabled => "toggled-on".to_string(),
-        ApplyReason::Expired => {
-            format!(
-                "re-apply #{}",
-                REAPPLIES.fetch_add(1, Ordering::Relaxed) + 1
-            )
-        }
-    };
     log(format_args!(
         "{LOG_PREFIX} applied effect={id} reason={why} ctrl=0x{ctrl:016x} returned=0x{returned:x} \
          network={network} packets-withheld={withheld}"
     ));
 }
 
-/// The `Present` consumer. Reads the key, flips the toggle on a fresh press, and while the toggle
-/// is on looks for the effect on the player and applies it again when it has run out.
+/// The `Present` consumer: the selector and its kept effects, then the F9 toggle.
 fn on_frame() {
+    selector_frame();
+    toggle_frame();
+}
+
+/// The selector's state. Only the `Present` consumer touches it.
+struct SelectorState {
+    selector: Selector,
+    bindings: Bindings,
+    catalog: Vec<CatalogEntry>,
+    marked: Vec<i32>,
+    keeper: Keeper,
+    was_down: [bool; ACTIONS.len()],
+    marked_path: Option<PathBuf>,
+    ignored_logged: u32,
+    missing_logged: bool,
+}
+
+static SELECTOR: Mutex<Option<SelectorState>> = Mutex::new(None);
+
+/// Selector keys a watcher thread read out of the config, waiting for the frame consumer.
+static PENDING_BINDINGS: Mutex<Option<Bindings>> = Mutex::new(None);
+
+fn write_marked(state: &SelectorState) {
+    let Some(path) = &state.marked_path else {
+        return;
+    };
+    let text = marked::render(state.marked.iter().map(|id| {
+        let name = state
+            .catalog
+            .iter()
+            .find(|e| e.id == *id)
+            .map_or("", |e| e.name.as_str());
+        (*id, name)
+    }));
+    match std::fs::write(path, text) {
+        Ok(()) => log(format_args!(
+            "{LOG_PREFIX} selector: kept list written ({} ids) to {}",
+            state.marked.len(),
+            path.display()
+        )),
+        Err(error) => log(format_args!(
+            "{LOG_PREFIX} selector: could not write {}: {error}",
+            path.display()
+        )),
+    }
+}
+
+/// One frame of the selector: its keys, the kept effects, and the lines for the overlay.
+fn selector_frame() {
+    let mut guard = SELECTOR
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(state) = guard.as_mut() else {
+        return;
+    };
+    if let Some(bindings) = PENDING_BINDINGS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take()
+    {
+        state.bindings = bindings;
+        // A moved binding resets the edges, or a key held during the reload reads as a press.
+        state.was_down = [false; ACTIONS.len()];
+    }
+    let focus = game_has_focus();
+    let mut presses = Vec::new();
+    for (index, action) in ACTIONS.iter().enumerate() {
+        let down = focus
+            && state
+                .bindings
+                .chords(*action)
+                .iter()
+                .any(|chord| chord_held(*chord, vk_down));
+        if is_press(state.was_down[index], down) {
+            presses.push(*action);
+        }
+        state.was_down[index] = down;
+    }
+
+    let global = GAME_MANAGER.load(Ordering::Acquire);
+    let ctrl = (global != 0)
+        .then(|| sp_effect_ctrl(global, read_usize).ok())
+        .flatten();
+    let on_player = ctrl.and_then(|ctrl| sp_effect_ids(ctrl, read_usize, read_words, read_i32));
+
+    let len = state.catalog.len();
+    for action in presses {
+        let outcome = state.selector.act(action, len);
+        let entry = |row: usize| state.catalog.get(row).map(|e| (e.id, e.name.clone()));
+        match outcome {
+            Step::Ignored => {
+                if state.ignored_logged < 8 {
+                    state.ignored_logged += 1;
+                    log(format_args!(
+                        "{LOG_PREFIX} selector: {action:?} ignored -- the bar is not open \
+                         (Alt+9 expands it)"
+                    ));
+                }
+            }
+            Step::Moved(row) => {
+                if let Some((id, name)) = entry(row) {
+                    log(format_args!(
+                        "{LOG_PREFIX} selector: cursor {}/{len} id={id} {name}",
+                        row + 1
+                    ));
+                }
+            }
+            Step::Expanded(on) => log(format_args!(
+                "{LOG_PREFIX} selector: bar {}",
+                if on { "expanded" } else { "collapsed" }
+            )),
+            Step::Shown(on) => log(format_args!(
+                "{LOG_PREFIX} selector: bar {}",
+                if on { "shown" } else { "hidden" }
+            )),
+            Step::Apply(row) => {
+                let Some((id, name)) = entry(row) else {
+                    continue;
+                };
+                match ctrl {
+                    // SAFETY: the `Present` clock runs its consumers on the game thread, and
+                    // `ctrl` was walked on this frame.
+                    Some(ctrl) => unsafe { apply_effect_because(ctrl, id, "selector-preview") },
+                    None => log(format_args!(
+                        "{LOG_PREFIX} selector: apply id={id} ({name}) -- no character loaded, \
+                         nothing applied"
+                    )),
+                }
+            }
+            Step::Mark(row) | Step::KeepAdd(row) | Step::KeepRemove(row) => {
+                let Some((id, name)) = entry(row) else {
+                    continue;
+                };
+                let changed = match outcome {
+                    Step::Mark(_) => {
+                        marked::toggle(&mut state.marked, id);
+                        true
+                    }
+                    Step::KeepAdd(_) => marked::add(&mut state.marked, id),
+                    _ => marked::remove(&mut state.marked, id),
+                };
+                let kept = state.marked.contains(&id);
+                log(format_args!(
+                    "{LOG_PREFIX} selector: {} id={id} ({name}) -- {} kept",
+                    match (changed, kept) {
+                        (true, true) => "marked (kept applied from now)",
+                        (true, false) => "unmarked (no longer re-applied)",
+                        (false, true) => "already marked",
+                        (false, false) => "was not marked",
+                    },
+                    state.marked.len()
+                ));
+                if changed {
+                    state.keeper.sync(&state.marked);
+                    write_marked(state);
+                }
+            }
+        }
+    }
+
+    if !state.keeper.is_empty() {
+        if ctrl.is_none() && !state.missing_logged {
+            state.missing_logged = true;
+            log(format_args!(
+                "{LOG_PREFIX} selector: {} kept effects wait for a character",
+                state.marked.len()
+            ));
+        }
+        for (id, frame) in state.keeper.frame(on_player.as_deref()) {
+            if frame.seen {
+                log(format_args!(
+                    "{LOG_PREFIX} kept effect={id} seen on the player"
+                ));
+            }
+            if frame.expired {
+                log(format_args!(
+                    "{LOG_PREFIX} kept effect={id} expired -- re-applying"
+                ));
+            }
+            if frame.never_seen {
+                log(format_args!(
+                    "{LOG_PREFIX} kept effect={id} was applied but never showed up within {} \
+                     frames -- not re-applying until it is marked again or the game restarts",
+                    crate::SIGHTING_FRAMES
+                ));
+            }
+            if let (Some(reason), Some(ctrl)) = (frame.apply, ctrl) {
+                // SAFETY: the `Present` clock runs its consumers on the game thread, and `ctrl`
+                // was walked on this frame.
+                unsafe { apply_effect_because(ctrl, id, keep_reason(reason)) };
+                state.keeper.applied(id);
+            }
+        }
+    }
+
+    overlay::publish(view(
+        &state.selector,
+        &state.catalog,
+        &state.marked,
+        on_player.as_deref().unwrap_or_default(),
+    ));
+}
+
+/// Load the catalog (the file beside the game in place of the embedded one) and the kept list,
+/// and arm the selector. `game_dir` is where both files live; `None` uses the embedded catalog
+/// and keeps nothing across launches.
+fn arm_selector(game_dir: Option<&std::path::Path>, config_text: Option<&str>) {
+    let override_path = game_dir.map(|dir| dir.join(CATALOG_FILE_NAME));
+    let from_file = override_path
+        .as_ref()
+        .and_then(|path| std::fs::read_to_string(path).ok().map(|text| (path, text)));
+    let catalog = match from_file {
+        Some((path, text)) => match parse_catalog(&text) {
+            Ok(entries) => {
+                log(format_args!(
+                    "{LOG_PREFIX} selector: catalog {} entries from {}",
+                    entries.len(),
+                    path.display()
+                ));
+                entries
+            }
+            Err(error) => {
+                log(format_args!(
+                    "{LOG_PREFIX} selector: {} refused ({error:?}) -- using the built-in catalog",
+                    path.display()
+                ));
+                parse_catalog(EMBEDDED_CATALOG).unwrap_or_default()
+            }
+        },
+        None => {
+            let entries = parse_catalog(EMBEDDED_CATALOG).unwrap_or_default();
+            log(format_args!(
+                "{LOG_PREFIX} selector: catalog {} entries (built in)",
+                entries.len()
+            ));
+            entries
+        }
+    };
+    let marked_path = game_dir.map(|dir| dir.join(marked::MARKED_FILE_NAME));
+    let marked = marked_path
+        .as_ref()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|text| marked::parse(&text))
+        .unwrap_or_default();
+    if let Some(path) = &marked_path {
+        log(format_args!(
+            "{LOG_PREFIX} selector: {} kept ids read from {} {:?}",
+            marked.len(),
+            path.display(),
+            marked
+        ));
+    }
+    let mut bindings = Bindings::default();
+    if let Some(text) = config_text {
+        let mut messages = Vec::new();
+        bindings.apply_config(text, &mut messages);
+        for message in messages {
+            log(format_args!("{LOG_PREFIX} selector: {message}"));
+        }
+    }
+    let mut keeper = Keeper::default();
+    keeper.sync(&marked);
+    *SELECTOR
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(SelectorState {
+        selector: Selector::default(),
+        bindings,
+        catalog,
+        marked,
+        keeper,
+        was_down: [false; ACTIONS.len()],
+        marked_path,
+        ignored_logged: 0,
+        missing_logged: false,
+    });
+}
+
+/// The F9 toggle. Reads the key, flips the toggle on a fresh press, and while the toggle is on
+/// looks for the effect on the player and applies it again when it has run out.
+fn toggle_frame() {
     let down = game_has_focus()
         && KEY_BINDING
             .load()
@@ -429,11 +722,32 @@ fn apply_config(text: &str, first: bool) {
     }
 }
 
-fn watch(path: PathBuf) {
+/// The selector keys a config text binds, from the defaults.
+fn selector_bindings(text: &str) -> (Bindings, Vec<String>) {
+    let mut bindings = Bindings::default();
+    let mut messages = Vec::new();
+    bindings.apply_config(text, &mut messages);
+    (bindings, messages)
+}
+
+fn watch(path: PathBuf, initial: Option<String>) {
     let mut hot = HotFile::with_interval(path, POLL_INTERVAL_MS);
+    let mut bindings = selector_bindings(initial.as_deref().unwrap_or_default()).0;
     loop {
         match hot.poll() {
-            Some(FileChange::Text(text)) => apply_config(&text, false),
+            Some(FileChange::Text(text)) => {
+                apply_config(&text, false);
+                let (fresh, messages) = selector_bindings(&text);
+                if fresh != bindings {
+                    for message in messages {
+                        log(format_args!("{LOG_PREFIX} selector: {message}"));
+                    }
+                    bindings = fresh.clone();
+                    *PENDING_BINDINGS
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(fresh);
+                }
+            }
             Some(FileChange::Missing) => log(format_args!(
                 "{LOG_PREFIX} config file disappeared -- keeping the key and effect already in \
                  force"
@@ -495,11 +809,20 @@ pub unsafe fn install(request: &Request) -> Outcome {
     if let Some(chord) = default_chord() {
         KEY_BINDING.store(chord);
     }
+    let config_text = request
+        .config_path
+        .as_ref()
+        .and_then(|path| std::fs::read_to_string(path).ok());
+    arm_selector(
+        request.config_path.as_ref().and_then(|path| path.parent()),
+        config_text.as_deref(),
+    );
     if let Some(path) = request.config_path.clone() {
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            apply_config(&text, true);
+        if let Some(text) = &config_text {
+            apply_config(text, true);
         }
-        std::thread::spawn(move || watch(path));
+        let initial = config_text.clone();
+        std::thread::spawn(move || watch(path, initial));
     } else {
         log(format_args!(
             "{LOG_PREFIX} no config path -- key {DEFAULT_KEY}, effect {DEFAULT_EFFECT} for this \
@@ -514,6 +837,9 @@ pub unsafe fn install(request: &Request) -> Outcome {
         ));
         return Outcome::default();
     }
+    // The bar is optional: without it the keys, the preview and the kept effects still work, and
+    // the log says why nothing is drawn.
+    overlay::install();
 
     let key = KEY_BINDING
         .load()
