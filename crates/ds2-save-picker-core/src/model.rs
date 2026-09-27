@@ -384,10 +384,19 @@ impl SavePickerModel {
     /// Tell the model the extension the running game uses for its own container, when that is
     /// not `sl2`. Under Seamless Co-op it is `co2`, and without this a `.co2` is not listed at
     /// all: the player's own live save was missing from its own folder (2026-09-27).
+    ///
+    /// The listing depends on it, so a change re-reads the folder: the constructors have already
+    /// listed it, and the panel sets this after constructing (2026-09-27, the `.co2` still
+    /// missing on the first build that knew the extension).
     pub fn set_container_extension(&mut self, extension: Option<&str>) {
-        self.container_extension = extension
+        let extension = extension
             .filter(|extension| !extension.eq_ignore_ascii_case(ds2_save_file_core::SAVE_EXTENSION))
             .map(str::to_ascii_lowercase);
+        if extension != self.container_extension {
+            self.container_extension = extension;
+            self.refresh();
+            self.cursor = self.first_selectable_row();
+        }
     }
 
     /// Whether `path` names a bare save container: `.sl2`, or the running game's own extension.
@@ -876,12 +885,12 @@ impl SavePickerModel {
         }
     }
 
-    /// Destination mode: an existing file was chosen. The live container is refused; anything
-    /// else is asked about before it is replaced.
+    /// Destination mode: an existing file was chosen, and is asked about before it is replaced.
+    ///
+    /// The live container included: saving onto the file the game plays from is an ordinary save,
+    /// which `ds2-save-file`'s export already carries out as one. Refusing it stopped the player
+    /// saving over their own Seamless Co-op `.co2` (2026-09-27).
     fn pick_destination(&mut self, path: PathBuf) -> PickerActivation {
-        if self.is_current_container(&path) {
-            return self.refuse(PickRejection::DestinationIsLive);
-        }
         self.ask_overwrite(path)
     }
 

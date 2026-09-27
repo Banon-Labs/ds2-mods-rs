@@ -729,9 +729,11 @@ fn typing_an_existing_name_asks_the_same_question() {
     );
 }
 
-/// The container the game is playing from is never a destination, by row or by name.
+/// The container the game is playing from is a destination like any other file, by row or by
+/// name: saving onto it is an ordinary save. It used to be refused, which stopped the player
+/// saving over their own Seamless Co-op `.co2` (2026-09-27).
 #[test]
-fn the_live_container_is_refused_as_a_destination() {
+fn the_live_container_is_asked_about_like_any_existing_file() {
     let (root, mut model) = destination("parity-dest-live");
     let live = root.join("existing.sl2");
     model.set_current_container(Some(live.clone()));
@@ -739,27 +741,19 @@ fn the_live_container_is_refused_as_a_destination() {
         &model,
         |row| matches!(row, PickerRow::File(path) if *path == live),
     );
-    assert_eq!(model.activate(row), PickerActivation::Ignored);
-    assert_eq!(
-        headline(&model),
-        expected_headline(PickRejection::DestinationIsLive)
-    );
-    assert_eq!(model.confirming_overwrite(), None);
+    assert_eq!(model.activate(row), PickerActivation::Repopulate);
+    assert_eq!(model.confirming_overwrite(), Some(live.as_path()));
 
+    let (root, mut model) = destination("parity-dest-live-typed");
     model.set_current_container(Some(crate::path::join_leaf(&root, "existing.sl2")));
     model.activate(1);
     clear_field(&mut model);
-    type_text(&mut model, "EXISTING.sl2");
-    assert_eq!(model.apply(PickerInput::Confirm), PickerActivation::Ignored);
+    type_text(&mut model, "existing.sl2");
     assert_eq!(
-        headline(&model),
-        expected_headline(PickRejection::DestinationIsLive)
+        model.apply(PickerInput::Confirm),
+        PickerActivation::Repopulate
     );
-    assert_eq!(
-        model.editing(),
-        Some(EditTarget::FileName),
-        "the name stays to be fixed"
-    );
+    assert!(model.confirming_overwrite().is_some());
 }
 
 #[test]

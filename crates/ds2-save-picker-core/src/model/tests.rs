@@ -671,15 +671,14 @@ fn the_running_games_own_extension_is_listed_in_both_modes() {
             })
             .collect()
     };
-    let mut load = SavePickerModel::blank(&dir, Purpose::Load);
-    load.refresh();
+    // The panel's order: construct (which lists the folder), then set the extension. No refresh
+    // in between -- the first in-game build passed a test that called one and still hid the file.
+    let mut load = SavePickerModel::open(&dir);
     assert_eq!(names(&load), vec!["DS2SOFS0000.sl2".to_owned()]);
     load.set_container_extension(Some("co2"));
-    load.refresh();
     assert!(names(&load).contains(&"DS2SOFS0000.co2".to_owned()));
     let mut save = SavePickerModel::open_for_destination(&dir, "DS2SOFS0000.co2");
     save.set_container_extension(Some("co2"));
-    save.refresh();
     assert!(names(&save).contains(&"DS2SOFS0000.co2".to_owned()));
     std::fs::remove_dir_all(&dir).ok();
 }

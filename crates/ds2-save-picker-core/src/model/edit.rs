@@ -254,9 +254,6 @@ impl SavePickerModel {
             &join_leaf(&self.current_dir, name),
             ds2_save_file_core::SAVE_EXTENSION,
         );
-        if self.is_current_container(&path) {
-            return self.refuse(PickRejection::DestinationIsLive);
-        }
         if path.is_dir() {
             return self.refuse(PickRejection::NameIsFolder);
         }
