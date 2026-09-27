@@ -73,17 +73,35 @@ def scrub(t):
 
 
 CLAIM_RE = re.compile(
-    r"(?<!not\s)(?<!isn't\s)(?<!is\snot\s)\bmerge-?able\b"
+    r"\bmerge-?able\b"
     r"|\bready\s+to\s+merge\b"
     r"|\bsafe\s+to\s+merge\b"
     r"|\bthe\s+conflicts?\s+(?:are|is)\s+gone\b",
     re.IGNORECASE,
 )
-NEGATED_RE = re.compile(
-    r"\b(?:not|never|isn't|is\s+not|no\s+longer|un)\s*merge-?able\b"
-    r"|\bmerge-?able\s+(?:is|was)\s+(?:false|no)\b",
+
+# A negated phrase is the opposite of the claim. Negation is judged per match, from the few words
+# just before it in the same clause, because the 2026-09-27 false positive was the negation the old
+# check did not cover: "...and it is not ready to merge until the one unproven step happens" halted
+# with PR #228 unmeasured. The old lookbehinds guarded `mergeable` alone, and the old whole-text veto
+# (any "not mergeable" anywhere) let a real claim through whenever a negated one sat beside it.
+NEGATOR_RE = re.compile(
+    r"\b(?:not|never|cannot|nor)\b|n['’]t\b|\bno\s+longer\b",
     re.IGNORECASE,
 )
+# `mergeable is false` / `mergeable: no` reads the word back as a no.
+NEGATED_AFTER_RE = re.compile(r"\s*(?:(?:is|was)\s+|:\s*)(?:false|no)\b", re.IGNORECASE)
+CLAUSE_BREAK_RE = re.compile(r"[.!?,;:()\n—–]|\s-{1,2}\s")
+
+
+def negated(t, m):
+    before = CLAUSE_BREAK_RE.split(t[: m.start()])[-1]
+    window = " ".join(before.split()[-4:])
+    return bool(NEGATOR_RE.search(window) or NEGATED_AFTER_RE.match(t, m.end()))
+
+
+def claims(t):
+    return any(not negated(t, m) for m in CLAIM_RE.finditer(t))
 PR_RE = re.compile(
     r"(?<![\w/&])#(\d+)\b"
     r"|\b(?:PR|pull\s+request)\s+#?(\d+)\b"
@@ -92,7 +110,7 @@ PR_RE = re.compile(
 )
 
 scrubbed = scrub(text)
-if not CLAIM_RE.search(scrubbed) or NEGATED_RE.search(scrubbed):
+if not claims(scrubbed):
     sys.exit(0)
 
 
@@ -109,7 +127,7 @@ def numbers(t):
 # `gh pr ready 216` stays in the sentence that makes the claim.
 unfenced = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
 sentences = [s for s in re.split(r"(?<=[.!?])\s+|\n+", unfenced) if s.strip()]
-claiming = [s for s in sentences if CLAIM_RE.search(scrub(s))]
+claiming = [s for s in sentences if claims(scrub(s))]
 targets = numbers(" ".join(claiming)) or numbers(unfenced)
 print(" ".join(["1", *targets]))
 PY

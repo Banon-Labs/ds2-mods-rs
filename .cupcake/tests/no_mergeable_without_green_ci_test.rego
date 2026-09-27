@@ -57,6 +57,16 @@ test_truncated_signal_asserts_nothing if {
 	count(policy.halt) == 0 with input as stop_input("MERGEABLECLAIM:1")
 }
 
+# The 2026-09-27 false positive, verbatim: "PR #228 is up as a draft (...) -- draft because repo
+# policy refuses non-draft PRs, and it is not ready to merge until the one unproven step happens:
+# you launch DS2, press F6 in game, and confirm `DS2LE.log` has no `F6 press detected` line and the
+# GPU does not reset." with #228's CI unmeasured. A negated phrase is not a claim, so the signal prints
+# nothing for it (.cupcake/tests/fixtures/mergeable_claim_negated.jsonl drives that through the real
+# hook); an empty signal must not halt whatever CI says.
+test_negated_not_ready_to_merge_prints_nothing_and_is_allowed if {
+	count(policy.halt) == 0 with input as stop_input("")
+}
+
 # Other events are not this policy's business.
 test_other_events_are_untouched if {
 	count(policy.halt) == 0 with input as {
