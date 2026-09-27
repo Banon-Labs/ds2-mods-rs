@@ -542,14 +542,6 @@ fn draw(ui: &Ui) {
 
     // In back-buffer pixels; imgui's own position is in window pixels here. See `panels::mouse`.
     let mouse = ds2_overlay::panels::mouse().unwrap_or(ui.io().mouse_pos);
-    // DIAGNOSTIC, 2026-09-27: where the panel believes the pointer is. Remove once hover lines up.
-    let marker = [1.0, 0.2, 0.2, 1.0];
-    list.add_line([mouse[0] - 12.0, mouse[1]], [mouse[0] + 12.0, mouse[1]], marker)
-        .thickness(2.0)
-        .build();
-    list.add_line([mouse[0], mouse[1] - 12.0], [mouse[0], mouse[1] + 12.0], marker)
-        .thickness(2.0)
-        .build();
     let inside = |min: [f32; 2], max: [f32; 2]| {
         mouse[0] >= min[0] && mouse[0] < max[0] && mouse[1] >= min[1] && mouse[1] < max[1]
     };

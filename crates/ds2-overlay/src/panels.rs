@@ -147,18 +147,16 @@ static MOUSE: AtomicU64 = AtomicU64::new(u64::MAX);
 /// Set once the stretch decision has been logged.
 static STRETCH_LOGGED: AtomicBool = AtomicBool::new(false);
 
-/// Whether the left button was down last frame, for the click diagnostic.
-static LEFT_DOWN: AtomicBool = AtomicBool::new(false);
-
 /// Set once the window and back-buffer sizes have been logged.
 static SIZES_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// The cursor in the pixels panels draw in, or `None` when it could not be read this frame.
 ///
-/// Use this, not `ui.io().mouse_pos`, for hit tests. hudhook feeds imgui the window-client
-/// position from `WM_MOUSEMOVE`, but sizes the display from the swap chain's back buffer, and in
-/// this game the two differ: the player saw the highlighted row far from the pointer (2026-09-27).
-/// This maps the cursor into the window's client area and scales it by back buffer over client.
+/// Use this, not `ui.io().mouse_pos`, for hit tests. hudhook feeds imgui the cursor Wine reports,
+/// and with the game's window stretched over a larger screen that is short by screen over window:
+/// the player saw the highlighted row at 0.59 of the pointer's position (2026-09-27).
+/// This maps the cursor into the window's client area, undoes a stretched fullscreen window (see
+/// `measure_mouse`), and scales by back buffer over client.
 #[must_use]
 pub fn mouse() -> Option<[f32; 2]> {
     let raw = MOUSE.load(Ordering::Acquire);
@@ -200,42 +198,6 @@ fn measure_mouse(chain: &IDXGISwapChain) {
     }
     if !read || client_w <= 0 || client_h <= 0 {
         return;
-    }
-    // DIAGNOSTIC, 2026-09-27: the player sees the hover far from the pointer while client and
-    // back buffer measure the same. Every left press logs each coordinate space involved, so the
-    // mapping can be read off two clicks at known places instead of guessed.
-    // SAFETY: `GetAsyncKeyState` takes a virtual-key code and touches no memory of ours.
-    let pressed =
-        unsafe { hudhook::windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x01) }
-            as u16
-            & 0x8000
-            != 0;
-    if pressed && !LEFT_DOWN.swap(true, Ordering::AcqRel) {
-        use hudhook::windows::Win32::UI::WindowsAndMessaging::{
-            GetSystemMetrics, GetWindowRect, SM_CXSCREEN, SM_CYSCREEN,
-        };
-        let mut screen = POINT::default();
-        let mut frame = RECT::default();
-        // SAFETY: out-pointers are locals; `window` is the swap chain's output window.
-        let (cx, cy) = unsafe {
-            let _ = GetCursorPos(&mut screen);
-            let _ = GetWindowRect(window, &mut frame);
-            (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN))
-        };
-        log(format_args!(
-            "panels: click screen=({},{}) client=({},{}) wine-screen={cx}x{cy} \
-             window=({},{})-({},{}) client-size={client_w}x{client_h} buffer={buffer_w}x{buffer_h}",
-            screen.x,
-            screen.y,
-            cursor.x,
-            cursor.y,
-            frame.left,
-            frame.top,
-            frame.right,
-            frame.bottom
-        ));
-    } else if !pressed {
-        LEFT_DOWN.store(false, Ordering::Release);
     }
     // STRETCHED FULLSCREEN. Measured 2026-09-27: Wine reported a 3840x2160 screen and the game's
     // window as 2260x1272 at the origin, and that window filled the monitor. The panel's pointer
