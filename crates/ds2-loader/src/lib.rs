@@ -1582,6 +1582,18 @@ impl log::Log for DearxanLog {
 ///
 /// Every failure is swallowed. A read-only game directory must cost lines in a log, never a
 /// panic unwinding out of the loader on the game's startup thread.
+///
+/// # One write per line
+///
+/// The line is formatted into memory first and handed to the file in a single `write_all`.
+/// `writeln!` straight into an unbuffered [`std::fs::File`] issues one `WriteFile` per literal
+/// piece and per argument -- a `{:016x}` alone is its padding and its digits, separately -- and
+/// every crate in this process logs through here from whatever thread it runs on. The 2026-09-27
+/// 15:29 R6025 run shows what that costs: `ds2-menu-row`'s `tab offered ... group=0x00000000`
+/// was cut after the padding, the loader's MESSAGEBOX line landed in the gap from another thread,
+/// and under Wine's append handling bytes of both lines were overwritten, not just interleaved
+/// (`2cfdff80` and `scenes=1` are gone from the file). The one line written as a crash was
+/// happening is exactly the one that must survive intact.
 fn log_line(args: std::fmt::Arguments<'_>) {
     let Some(path) = ds2_game_base::log::game_directory_path().map(|dir| dir.join(LOG_FILE_NAME))
     else {
@@ -1591,8 +1603,10 @@ fn log_line(args: std::fmt::Arguments<'_>) {
     // `.prev` and truncates on this process's first write, so this log describes exactly one
     // process run. `scripts/ds2-run.py` reads the log with an inode+offset tail that survives
     // that rotation.
+    let mut line = args.to_string();
+    line.push('\n');
     if let Some(mut file) = ds2_game_base::log::open_fresh_run_append(&path) {
-        let _ = writeln!(file, "{args}");
+        let _ = file.write_all(line.as_bytes());
         let _ = file.sync_all();
     }
 }
