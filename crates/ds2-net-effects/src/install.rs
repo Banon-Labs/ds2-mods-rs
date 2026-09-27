@@ -31,6 +31,37 @@ unsafe extern "system" {
     fn GetCurrentProcessId() -> u32;
 }
 
+// The same `winmm` declaration and flags `ds2-voice-chat` plays its clips with. Kept here rather
+// than shared because the crates that could hold one shared copy are not this change's to edit.
+#[link(name = "winmm")]
+unsafe extern "system" {
+    fn PlaySoundW(sound: *const c_void, module: *mut c_void, flags: u32) -> i32;
+}
+
+/// `SND_ASYNC | SND_NODEFAULT | SND_MEMORY`: return at once, never fall back to the system beep,
+/// and read the WAV from the pointer. A new clip cuts off one still playing.
+const PLAY_FLAGS: u32 = 0x0001 | 0x0002 | 0x0004;
+
+/// Say the toggle's new state out loud and log whether `PlaySoundW` took the clip.
+fn announce(on: bool) {
+    let clip = crate::glyph::clip(on);
+    // SAFETY: `clip` is a `'static` WAV compiled into this DLL, so it outlives the async play.
+    let played = unsafe { PlaySoundW(clip.as_ptr().cast(), core::ptr::null_mut(), PLAY_FLAGS) };
+    log(format_args!(
+        "{LOG_PREFIX} voice clip \"Net effects {}.\" played={} ({} bytes)",
+        if on { "on" } else { "off" },
+        played != 0,
+        clip.len()
+    ));
+}
+
+/// Times the key was seen held while another window had focus, so each such press is logged
+/// without a held key filling the log.
+static UNFOCUSED_HELD: AtomicU64 = AtomicU64::new(0);
+
+/// Whether the key was held without focus last frame.
+static UNFOCUSED_WAS_DOWN: AtomicBool = AtomicBool::new(false);
+
 /// A log sink, installed by the loader so this crate writes into the same file as everything else.
 static LOGGER: AtomicUsize = AtomicUsize::new(0);
 
@@ -578,10 +609,26 @@ fn arm_selector(game_dir: Option<&std::path::Path>, config_text: Option<&str>) {
 /// The F9 toggle. Reads the key, flips the toggle on a fresh press, and while the toggle is on
 /// looks for the effect on the player and applies it again when it has run out.
 fn toggle_frame() {
-    let down = game_has_focus()
-        && KEY_BINDING
-            .load()
-            .is_some_and(|chord| chord_held(chord, vk_down));
+    let held = KEY_BINDING
+        .load()
+        .is_some_and(|chord| chord_held(chord, vk_down));
+    let down = held && game_has_focus();
+    // A run once logged no toggle for F9 presses the player reported. The key read and the focus
+    // check are the only two gates between a held key and the TOGGLE line, so the log says which
+    // one closed: this line means the key was read held but another window had focus; neither
+    // line means `GetAsyncKeyState` never reported the key held on the game thread.
+    let held_elsewhere = held && !down;
+    if held_elsewhere && !UNFOCUSED_WAS_DOWN.swap(true, Ordering::Relaxed) {
+        let count = UNFOCUSED_HELD.fetch_add(1, Ordering::Relaxed) + 1;
+        if count <= 8 {
+            log(format_args!(
+                "{LOG_PREFIX} key held but the game window does not have focus -- not a press \
+                 (#{count})"
+            ));
+        }
+    } else if !held_elsewhere {
+        UNFOCUSED_WAS_DOWN.store(false, Ordering::Relaxed);
+    }
     let pressed = is_press(WAS_DOWN.swap(down, Ordering::Relaxed), down);
     let mut toggle = TOGGLE
         .lock()
@@ -608,6 +655,10 @@ fn toggle_frame() {
         .ok()
         .and_then(|ctrl| sp_effect_active(ctrl, id, read_usize, read_words, read_i32));
     let frame = toggle.frame(pressed, active);
+    if let Some(on) = frame.toggled {
+        overlay::set_glyph(on);
+        announce(on);
+    }
     match frame.toggled {
         Some(true) => {
             REAPPLIES.store(0, Ordering::Relaxed);

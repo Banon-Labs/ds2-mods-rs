@@ -9,7 +9,9 @@
 //! every frame the local player's action list is searched for it ([`sp_effect_active`]); once it
 //! has been seen there and then leaves -- it ran out -- it is applied again. Off: nothing more is
 //! applied, and whatever is on the player runs out by itself. An effect that never leaves the list
-//! is applied once. Each toggle, apply and expiry is one log line.
+//! is applied once. Each toggle, apply and expiry is one log line. Each toggle also says
+//! "Net effects on." or "Net effects off." out loud, and while it is on a sparkle glyph sits at
+//! the top centre of the screen ([`glyph`]).
 //!
 //! An apply builds the sixteen-byte request the game's own callers build ([`request_bytes`]) and calls
 //! `applySpEffect` ([`ds2_rva::SP_EFFECT_APPLY`]) with the local player's `ChrSpEffectCtrl`, reached
@@ -45,6 +47,7 @@
 //! publishes the chord and the id into atomics the frame consumer loads. Default key `F9`.
 
 pub mod catalog;
+pub mod glyph;
 pub mod marked;
 pub mod selector;
 
