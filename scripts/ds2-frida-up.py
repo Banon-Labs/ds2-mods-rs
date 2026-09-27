@@ -307,6 +307,15 @@ def world_is_up() -> tuple[bool, str]:
     for line in reversed(text.splitlines()):
         if "invasion-path: roster:" in line:
             return True, line.strip()
+    # A witness as strong as the roster line, for the same reason: `ds2-net-effects` writes
+    # `applied effect=... ctrl=0x...` only after it walked `GameManagerImp -> PlayerCtrl ->
+    # ChrSpEffectCtrl` with every link non-null and the game's applySpEffect returned, and no title
+    # screen or load has a local player's effect controller. Added 2026-09-27: a run with the
+    # overlay off, loaded from the menu rather than by `--continue-slot`, was applying effects to
+    # the player every few seconds and was refused as "still loading".
+    for line in reversed(text.splitlines()):
+        if "ds2-net-effects: applied effect=" in line and " ctrl=0x" in line:
+            return True, line.strip()
     # THE SECOND WITNESS, because the first one is only available when the overlay is on.
     #
     # `ds2-continue` detours `FeSubStateTitleStartIngame::v1` and logs `by=start-ingame` from
@@ -618,6 +627,16 @@ def world_gate_selftest() -> list[tuple[str, bool]]:
             ready, detail = world_is_up()
             results.append(
                 ("a log with no roster line refuses", not ready and "roster" in detail)
+            )
+
+            log.write_text(
+                "ds2-net-effects: applied effect=140001010 reason=re-apply #29 "
+                "ctrl=0x00007fffc9685c40 returned=0xd3 network=false packets-withheld=0\n",
+                encoding="utf-8",
+            )
+            ready, detail = world_is_up()
+            results.append(
+                ("a net-effects apply on the player's controller passes", ready and "ctrl=" in detail)
             )
 
             log.unlink()
