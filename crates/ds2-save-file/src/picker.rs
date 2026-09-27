@@ -260,6 +260,12 @@ fn open(mode: Mode) -> bool {
     model.set_posix_drive(Some('Z'));
     model.set_drives(drives());
     model.set_current_container(ds2_save_redirect::live_container());
+    // `co2` under Seamless Co-op: without it the player's own live save is not listed.
+    model.set_container_extension(
+        ds2_save_redirect::active_save_file_name()
+            .rsplit_once('.')
+            .map(|(_, extension)| extension),
+    );
     let mut reader = Reader::new();
     // The Enter or A that pressed the row is still down on this frame.
     reader.swallow_held();

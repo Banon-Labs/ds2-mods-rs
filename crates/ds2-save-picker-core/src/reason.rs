@@ -270,19 +270,33 @@ pub fn accept_slots(slots: Vec<SaveSlot>) -> Result<Vec<SaveSlot>, PickRejection
 /// The [`PickRejection`] for the first check that failed, in that order: `PathNotUtf8`,
 /// `WrongExtension`, `NotAFile`, then whatever reading the container itself produced.
 pub fn accepts_pick(path: &Path) -> Result<PickedSource, PickRejection> {
+    accepts_pick_with(path, None)
+}
+
+/// [`accepts_pick`], with the running game's own container extension -- `co2` under Seamless
+/// Co-op -- read as a bare container too.
+///
+/// # Errors
+///
+/// As [`accepts_pick`].
+pub fn accepts_pick_with(
+    path: &Path,
+    container_extension: Option<&str>,
+) -> Result<PickedSource, PickRejection> {
     if path.to_str().is_none() {
         return Err(PickRejection::PathNotUtf8);
     }
     // The cheap gate, and the hand-parsed one. `accepts` finds the leaf and its dot with
     // `rfind(['\\', '/'])` precisely so a Windows path judged on Linux gets the game's answer.
-    let extension = ds2_save_file_core::accepts(path).map_err(|_| PickRejection::WrongExtension)?;
+    let (extension, own) = ds2_save_file_core::accepts_with(path, container_extension)
+        .map_err(|_| PickRejection::WrongExtension)?;
     if !path.is_file() {
         return Err(PickRejection::NotAFile);
     }
     let Ok(bytes) = std::fs::read(path) else {
         return Err(PickRejection::Unreadable);
     };
-    if extension != ds2_save_file_core::SAVE_EXTENSION {
+    if !own && extension != ds2_save_file_core::SAVE_EXTENSION {
         return Ok(PickedSource::Archive);
     }
     let Ok(found) = slots(&bytes) else {

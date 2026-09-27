@@ -57,7 +57,8 @@ use ds2_sl2_core::{SaveSlot, slots::SLOT_COUNT};
 
 use crate::path::{leaf, parent};
 use crate::reason::{
-    PickRejection, PickedSource, PickerOpenReason, PickerStatusMessage, accept_slots, accepts_pick,
+    PickRejection, PickedSource, PickerOpenReason, PickerStatusMessage, accept_slots,
+    accepts_pick_with,
 };
 use crate::summary::FileSummary;
 
@@ -244,6 +245,9 @@ pub struct SavePickerModel {
     posix_drive: Option<char>,
     /// The container the game is playing from, when the surface said which one that is.
     current_container: Option<PathBuf>,
+    /// The extension the running game gives its own container when it is not `sl2` -- `co2` under
+    /// Seamless Co-op -- so such a file is listed, summarised and picked as a bare container.
+    container_extension: Option<String>,
     /// Per-path file summaries, filled as rows are shown and dropped by every listing.
     summaries: HashMap<PathBuf, FileSummary>,
 }
@@ -265,6 +269,7 @@ impl SavePickerModel {
             edit: None,
             posix_drive: Some(DEFAULT_POSIX_DRIVE),
             current_container: None,
+            container_extension: None,
             summaries: HashMap::new(),
         }
     }
@@ -374,6 +379,22 @@ impl SavePickerModel {
     /// Its row is marked in the listing, and in destination mode it is refused as a target.
     pub fn set_current_container(&mut self, path: Option<PathBuf>) {
         self.current_container = path;
+    }
+
+    /// Tell the model the extension the running game uses for its own container, when that is
+    /// not `sl2`. Under Seamless Co-op it is `co2`, and without this a `.co2` is not listed at
+    /// all: the player's own live save was missing from its own folder (2026-09-27).
+    pub fn set_container_extension(&mut self, extension: Option<&str>) {
+        self.container_extension = extension
+            .filter(|extension| !extension.eq_ignore_ascii_case(ds2_save_file_core::SAVE_EXTENSION))
+            .map(str::to_ascii_lowercase);
+    }
+
+    /// Whether `path` names a bare save container: `.sl2`, or the running game's own extension.
+    fn is_bare_container(&self, path: &Path) -> bool {
+        ds2_save_file_core::accepts_with(path, self.container_extension.as_deref()).is_ok_and(
+            |(extension, extra)| extra || extension == ds2_save_file_core::SAVE_EXTENSION,
+        )
     }
 
     /// The container the game is playing from, as last told.
@@ -818,7 +839,7 @@ impl SavePickerModel {
     /// private, correctly -- so this is where the transition can be exercised against slots a
     /// test chose.
     ///
-    /// Re-runs [`crate::reason::accept_slots`] even when [`accepts_pick`] just did. It is one
+    /// Re-runs [`crate::reason::accept_slots`] even when [`crate::reason::accepts_pick`] just did. It is one
     /// pass over ten records, and one place deciding "these slots are worth showing" is worth
     /// more than the pass it costs.
     ///
@@ -845,7 +866,7 @@ impl SavePickerModel {
     /// A file was chosen. An archive ends the pick; a container opens the character stage; a
     /// refusal leaves the listing alone and says why.
     fn pick_file(&mut self, path: PathBuf) -> PickerActivation {
-        match accepts_pick(&path) {
+        match accepts_pick_with(&path, self.container_extension.as_deref()) {
             Ok(PickedSource::Container(slots)) => match self.show_characters(&path, slots) {
                 Ok(()) => PickerActivation::Repopulate,
                 Err(rejection) => self.refuse(rejection),
@@ -917,7 +938,7 @@ impl SavePickerModel {
     /// listing. `None` for anything the listing would not offer as a container -- an archive, a
     /// folder, a name with the wrong extension.
     pub fn file_summary(&mut self, path: &Path) -> Option<&FileSummary> {
-        if ds2_save_file_core::accepts(path).ok()? != ds2_save_file_core::SAVE_EXTENSION {
+        if !self.is_bare_container(path) {
             return None;
         }
         Some(
@@ -971,9 +992,11 @@ impl SavePickerModel {
                 dirs.push(PickerEntry::Dir { name, path });
                 continue;
             }
-            let offered = ds2_save_file_core::accepts(&path).is_ok_and(|extension| {
-                !destination || extension == ds2_save_file_core::SAVE_EXTENSION
-            });
+            let offered = if destination {
+                self.is_bare_container(&path)
+            } else {
+                ds2_save_file_core::accepts_with(&path, self.container_extension.as_deref()).is_ok()
+            };
             if !offered {
                 continue;
             }

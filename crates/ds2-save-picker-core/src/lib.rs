@@ -66,6 +66,7 @@ pub use model::{
 };
 pub use reason::{
     PickRejection, PickedSource, PickerOpenReason, PickerStatusMessage, accepts_pick,
+    accepts_pick_with,
 };
 pub use summary::FileSummary;
 pub use text::{character_text, drive_strip_text, row_text};

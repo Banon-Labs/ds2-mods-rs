@@ -652,3 +652,34 @@ fn cut_takes_the_selection_and_leaves_the_field_empty() {
     assert_eq!(model.edit_text(), Some(""));
     assert!(!model.all_selected());
 }
+
+/// Under Seamless Co-op the game's own container is a `.co2`. It was not listed at all, so the
+/// player's live save was missing from its own folder (2026-09-27).
+#[test]
+fn the_running_games_own_extension_is_listed_in_both_modes() {
+    let dir = std::env::temp_dir().join(format!("picker-co2-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("scratch dir");
+    std::fs::write(dir.join("DS2SOFS0000.co2"), b"x").expect("scratch file");
+    std::fs::write(dir.join("DS2SOFS0000.sl2"), b"x").expect("scratch file");
+    let names = |model: &SavePickerModel| -> Vec<String> {
+        model
+            .entries()
+            .iter()
+            .filter_map(|entry| match entry {
+                PickerEntry::File { name, .. } => Some(name.clone()),
+                PickerEntry::Dir { .. } => None,
+            })
+            .collect()
+    };
+    let mut load = SavePickerModel::blank(&dir, Purpose::Load);
+    load.refresh();
+    assert_eq!(names(&load), vec!["DS2SOFS0000.sl2".to_owned()]);
+    load.set_container_extension(Some("co2"));
+    load.refresh();
+    assert!(names(&load).contains(&"DS2SOFS0000.co2".to_owned()));
+    let mut save = SavePickerModel::open_for_destination(&dir, "DS2SOFS0000.co2");
+    save.set_container_extension(Some("co2"));
+    save.refresh();
+    assert!(names(&save).contains(&"DS2SOFS0000.co2".to_owned()));
+    std::fs::remove_dir_all(&dir).ok();
+}
