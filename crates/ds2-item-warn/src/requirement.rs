@@ -61,6 +61,22 @@
 //! container the badge lives in is built for every item cell, not only weapons -- both binds run
 //! their infusion loop with no type check; the `+0x1e <= 1` test only picks which infusion glyph
 //! shows.
+//!
+//! # Spells the character has no attunement slots for
+//!
+//! A spell that is not attuned is also marked when it cannot be attuned for want of slots. On the
+//! Attune Spell picker that is the game's own greyed-out decision, which `SpellBookItemList`
+//! leaves in `FeItemData + 5` ([`ds2_rva::FE_SPELLBOOK_LIST_GET_ITEM`]): free slots plus the cost
+//! of the spell in the selected slot, against this spell's cost (column `0x40`). Elsewhere that
+//! byte is zero, and the spell is marked when its cost exceeds the whole budget
+//! ([`ds2_rva::ITEM_INVENTORY_ATTUNEMENT_BUDGET`]). Attuned spells are never marked for slots.
+//!
+//! # The attunement grid
+//!
+//! The Attune Spell screen binds its attuned-spell cells inline, with no infusion loop, so
+//! [`cell_view_detour`] catches the one call of the cell-view builder that grid makes and writes
+//! the badge there -- which is where an attuned spell whose Intelligence or Faith the character
+//! lacks (it can be cast, and nothing happens) gets its X.
 
 use core::mem::offset_of;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -86,6 +102,12 @@ type DescriptorFn = unsafe extern "system" fn(*const u8, *mut u8) -> *mut u8;
 type ParamRowsFn = unsafe extern "system" fn(usize, *mut u8, *const u8) -> u8;
 type ParamColumnFn = unsafe extern "system" fn(usize, u32) -> u64;
 type EntryLookupFn = unsafe extern "system" fn(usize, u16) -> usize;
+type BudgetFn = unsafe extern "system" fn(usize) -> u8;
+type CellViewBuildFn = unsafe extern "system" fn(*mut u8, *mut u8) -> *mut u8;
+
+/// The cell-view builder's own code, published by MinHook before the site is patched. Its detour
+/// acts only for the attunement grid.
+pub(crate) static CELL_VIEW_TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 
 /// How many "could not ask" decisions (`None`) to write to the log before going quiet.
 ///
@@ -176,7 +198,33 @@ unsafe fn grip(manager: usize) -> Option<i32> {
     Some(unsafe { ((equip + offset_of!(ChrAsmEquip, grip)) as *const i32).read_unaligned() })
 }
 
-/// Whether the player fails any of this weapon's four stat requirements.
+/// The character's attunement budget, through the game's own getter; `None` before the inventory
+/// has its inner object.
+///
+/// # Safety
+///
+/// `base` must be the module base and `inventory` the live manager `ITEM_INVENTORY_ENTRY_LOOKUP`
+/// takes.
+unsafe fn attunement_budget(base: usize, inventory: usize) -> Option<u8> {
+    // SAFETY: the hop `FUN_1401ac110` makes at `0x1401ac11d` before calling the getter.
+    let inner = unsafe {
+        follow(
+            inventory,
+            &[ds2_rva::ITEM_INVENTORY_ATTUNEMENT_INNER_OFFSET],
+        )
+    }?;
+    // SAFETY: a three-instruction getter taking that object; the result is the `u8` in `AL`.
+    let budget: BudgetFn = unsafe {
+        std::mem::transmute::<usize, BudgetFn>(
+            base + ds2_rva::ITEM_INVENTORY_ATTUNEMENT_BUDGET as usize,
+        )
+    };
+    // SAFETY: `inner` is the live object the game passes it.
+    Some(unsafe { budget(inner) })
+}
+
+/// Whether the player fails any of this item's stat requirements -- or, for a spell that is not
+/// attuned, cannot attune it for want of slots.
 ///
 /// `None` means the question could not be asked -- no item under the cursor, no inventory entry,
 /// no param row -- which is not the same answer as "met" and is why it is not folded into `false`.
@@ -309,6 +357,41 @@ unsafe fn unmet(base: usize, item: *const u8) -> Option<bool> {
     let column: ParamColumnFn = unsafe {
         std::mem::transmute::<usize, ParamColumnFn>(base + ds2_rva::FE_ITEM_PARAM_COLUMN as usize)
     };
+
+    // A spell that is not attuned can also fail for want of slots. The Attune Spell picker has
+    // already decided that and left it in the item (`FE_ITEM_DATA_GREYED_OFFSET`, written by
+    // `FE_SPELLBOOK_LIST_GET_ITEM`); every other list leaves that byte zero, so there the same
+    // column is compared against the whole budget -- the spell is too expensive for this
+    // character even with every slot empty. An attuned spell already has its slots and is skipped,
+    // which is also what keeps the picker's other reason for greying (already attuned) out.
+    if kind == ds2_rva::ITEM_ENTRY_TYPE_SPELL {
+        // SAFETY: `entry` is the live inventory entry the lookup returned; the flags are its `u8`.
+        let flags = unsafe {
+            (entry as *const u8)
+                .add(ds2_rva::ITEM_ENTRY_FLAGS_OFFSET)
+                .read()
+        };
+        if flags & ds2_rva::ITEM_ENTRY_FLAG_EQUIPPED == 0 {
+            // SAFETY: a `FeItemData` is six bytes and the flag is the last of them.
+            let greyed = unsafe { item.add(ds2_rva::FE_ITEM_DATA_GREYED_OFFSET).read() } != 0;
+            // SAFETY: as for the requirement columns below; key `0x40` is a plain byte load.
+            let cost = unsafe { column(row, ds2_rva::FE_ITEM_PARAM_SPELL_SLOT_COST) } as u16;
+            // SAFETY: `base` is the module base and `inventory` the live manager walked above.
+            let budget = unsafe { attunement_budget(base, inventory) };
+            let over_budget = budget.is_some_and(|budget| cost > u16::from(budget));
+            if greyed || over_budget {
+                let n = MARKED.fetch_add(1, Ordering::Relaxed) + 1;
+                if n <= LOGGED_DECISIONS {
+                    log(format_args!(
+                        "{LOG_PREFIX} unmet handle={handle:#06x} kind={kind} reason=slots \
+                         greyed={greyed} cost={cost} budget={budget:?} marked={n}"
+                    ));
+                }
+                return Some(true);
+            }
+        }
+    }
+
     for &key in keys {
         if key >= ds2_rva::FE_STAT_ROW_TABLE_ENTRIES {
             continue;
@@ -342,7 +425,7 @@ unsafe fn unmet(base: usize, item: *const u8) -> Option<bool> {
             let n = MARKED.fetch_add(1, Ordering::Relaxed) + 1;
             if n <= LOGGED_DECISIONS {
                 log(format_args!(
-                    "{LOG_PREFIX} unmet handle={handle:#06x} kind={kind} key={key:#04x} \
+                    "{LOG_PREFIX} unmet handle={handle:#06x} kind={kind} reason=stat key={key:#04x} \
                      stat={index} required={required} have={have} two_handed={two_handed} \
                      marked={n}"
                 ));
@@ -529,6 +612,71 @@ pub(crate) unsafe extern "system" fn equip_detour(container: *mut u8, item: *con
     unsafe { decide(container, item, "equipment") };
 }
 
+/// The entry the cell-view builder is patched to: the game's return address into `r8` and the
+/// caller's `rsp` at the call into `r9`, then straight on to [`cell_view_detour`].
+///
+/// The builder takes two arguments, so `r8`/`r9` are free, and the caller already reserved the
+/// shadow space the detour's four arguments use. Assembly because no stable Rust expression yields
+/// the current function's return address -- the same reason `ds2-boot-timeline`'s `sleep_thunk`
+/// exists. The attunement grid's slot item lives in the caller's frame, not in either argument.
+#[unsafe(naked)]
+pub(crate) unsafe extern "system" fn cell_view_thunk(_view: *mut u8, _cell: *mut u8) -> *mut u8 {
+    core::arch::naked_asm!(
+        "mov r8, [rsp]",
+        "lea r9, [rsp + 8]",
+        "jmp {detour}",
+        detour = sym cell_view_detour,
+    )
+}
+
+/// The cell-view builder, for the Attune Spell screen's attunement grid.
+///
+/// The grid (`FE_ATTUNE_GRID_REFRESH`) binds each attuned spell's cell inline: icon, name,
+/// highlight -- and no infusion loop, so the badge the container detour built into those cells is
+/// written by nobody else. After the original returns, `view + 0x2d0` is the cell's infusion
+/// container, and the slot's `FeItemData` is at `[caller rsp + 0x20]`, where the grid read it just
+/// before the call. Every other caller is passed through untouched.
+unsafe extern "system" fn cell_view_detour(
+    view: *mut u8,
+    cell: *mut u8,
+    return_address: usize,
+    caller_rsp: usize,
+) -> *mut u8 {
+    let trampoline = CELL_VIEW_TRAMPOLINE.load(Ordering::Acquire);
+    if trampoline == 0 {
+        // Published before the site is patched, so unreachable; there is no view to hand back
+        // either way, and the caller's own null check is all that is left.
+        return std::ptr::null_mut();
+    }
+    // SAFETY: MinHook published this trampoline for exactly this site; the signature is the one
+    // the disassembled body implements (`mov rax,rdi` before `ret` returns the view).
+    let original: CellViewBuildFn =
+        unsafe { std::mem::transmute::<usize, CellViewBuildFn>(trampoline) };
+    // SAFETY: both arguments are the game's own, passed through unchanged.
+    let built = unsafe { original(view, cell) };
+
+    let base = module_base();
+    if base == 0
+        || return_address != base + ds2_rva::FE_ATTUNE_GRID_CELL_RETURN as usize
+        || !crate::mark::armed()
+        || (view as usize) < 0x1_0000
+    {
+        return built;
+    }
+    let item = (caller_rsp + ds2_rva::FE_ATTUNE_GRID_ITEM_OFFSET) as *const u8;
+    // SAFETY: the return address proves the caller is the grid refresh, whose frame holds the
+    // slot's `FeItemData` at this offset for the whole call; `view` is the cell view the original
+    // just filled, and its infusion accessor is the one the inventory bind uses at the same offset.
+    unsafe {
+        decide(
+            view.add(ds2_rva::FE_ITEM_CELL_INFUSION_ACCESSOR_OFFSET),
+            item,
+            "attunement",
+        )
+    };
+    built
+}
+
 /// Ask the question and write the answer onto one cell's badge.
 ///
 /// # Safety
@@ -606,6 +754,22 @@ mod tests {
                 "the badge id has to be one of the ids that loop drives"
             )
         };
+    }
+
+    /// The slot-cost column is inside the column switch's bound and is not a stat requirement.
+    #[test]
+    fn the_slot_cost_column_is_its_own_key() {
+        const {
+            assert!(ds2_rva::FE_ITEM_PARAM_SPELL_SLOT_COST < ds2_rva::FE_STAT_ROW_TABLE_ENTRIES);
+            assert!(
+                ds2_rva::FE_ITEM_DATA_GREYED_OFFSET > ds2_rva::FE_ITEM_DATA_HANDLE_OFFSET + 1,
+                "the greyed flag sits after the u16 handle"
+            );
+        };
+        assert!(
+            !ds2_rva::FE_ITEM_PARAM_SPELL_REQUIREMENTS
+                .contains(&ds2_rva::FE_ITEM_PARAM_SPELL_SLOT_COST)
+        );
     }
 
     /// The path buffer is big enough for the count field the resolver reads.

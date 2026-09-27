@@ -567,3 +567,54 @@ No new hook, no new element, no new fingerprint.
    equipment armour slot; a spell whose Intelligence or Faith requirement exceeds the stat; a ring,
    which must never show the badge. The open question about base versus modified stats in the
    frontend table applies to all of these as it does to weapons.
+
+## Spells: attunement slots, and the Attune Spell screen
+
+Read statically from `darksoulsii-deobf.bin` on 2026-09-27; the live bytes of every site below were
+read back with `scripts/frida/spell-attune-read.js` on a running game and matched. Not yet seen on
+screen.
+
+### Two ways a spell fails
+
+1. **No slots.** The Attune Spell picker greys a spell out and will not attune it.
+2. **No stats.** The spell attunes, but its Intelligence or Faith requirement (columns `0x42`,
+   `0x43`) is above the character's, so casting it does nothing. This was already covered by the
+   spell keys above.
+
+### The game's greyed-out decision
+
+The picker is `FeTestBonfireSpellBookItemSelectMenu`; its item source is `SpellBookItemList`
+(vtable `0x1410ba1b0`), whose `getItem` at `0x1400ceed0` fills each row's `FeItemData` and records
+the decision in byte `+5`:
+
+```text
+available = FUN_1400cf540(selected slot)   ; cost of the spell already in the slot being replaced
+          + FUN_1401ac110(inventory)       ; budget - used: FUN_1401a6790 - FUN_1401a6e60
+out+5 = 1  if equipped(out)                ; FUN_140039560, entry+0x1f bit 1
+out+5 = 1  if available < column(out,0x40) ; 0x1400cef83..0x1400cef94
+```
+
+`column(.., 0x40)` is the slot cost, `movzx eax, byte [row+1]` in both column switches. The budget
+getter `FUN_1401a6790` reads `bag+0x259ec`, the byte `docs/DS2-ATTUNEMENT.md` derives. The list
+rebuild (`FUN_1400bc2b0`) hands this item to the inventory cell bind `FUN_1400bc850`, so the
+existing detour sees the flag. The default list writes `+4` as a zero word, so an inventory row
+never carries it.
+
+`ds2-item-warn` marks a spell for slots when it is not attuned and either `+5` is set (the picker)
+or its cost exceeds the whole budget (every other list). Attuned spells are never marked for
+slots, which also keeps the picker's other reason for greying (already attuned) out.
+
+### The attunement grid binds inline
+
+`FUN_1400cfcf0` refreshes the grid of attuned spells. Per slot it reads the slot's item into its own
+`[rsp+0x20]` (`FUN_140035600`), resolves the cell as `slot / 0x5f5c3e1 / 0x5f5c3e0`, and calls the
+cell-view builder `FUN_1400b7680` at `0x1400cff04` -- and then writes icon, name and highlight
+itself. It has no infusion loop and never calls either bind, so nothing there touched the badge.
+
+`ds2-item-warn` hooks `FUN_1400b7680` through a naked thunk that passes the return address and the
+caller's `rsp`. Only the call returning to `0x1400cff09` is acted on: after the original, the cell's
+infusion container is `view+0x2d0` and the slot item is `[caller rsp+0x20]`. The bonfire layout
+(`/menu/03.febnd.dcx`, `l03_01_Bonfire.flo`) carries the nine-id container in its item cell
+(`def 0x0078` child `[2]`, `def 0x0070`), so the container detour has already built the badge there.
+That cell puts the container at `(41.90, 49.75)` under a `0.948` scale, against `(51.40, 48.15)` in
+the inventory cell, so the X may sit a few units off the corner it has in the inventory.
