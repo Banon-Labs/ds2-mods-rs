@@ -304,6 +304,24 @@ def main() -> int:
         check("a game-code commit after the named build is not covered",
               w5.signal("git push -u origin sha"), fresh="0")
 
+        # 6c. A launcher-only commit changes no DLL byte, so the stamp names its parent. The run
+        #     covers it when the run started after it was committed (ds2-run-builds-launcher,
+        #     2026-09-27: stamp e73635e, HEAD 4bb7302 launcher-only, log born 12 s after the commit).
+        w6 = World(Path(tmp) / "build-sha-launcher")
+        git(w6.repo, "checkout", "-q", "-b", "launcher", env=w6.env)
+        stamped = git(w6.repo, "rev-parse", "HEAD").strip()
+        (w6.repo / "scripts" / "ds2-run.py").write_text("FLAGS = []\n")
+        git(w6.repo, "add", "-A", env=w6.env)
+        w6.commit("feat(scripts): launcher", offset=-60)
+        w6.write_log(build=stamped)
+        check("a launcher commit the run postdates is covered by the parent's stamp",
+              w6.signal("git push -u origin launcher"), game_code="1", fresh="1")
+        (w6.repo / "scripts" / "ds2-run.py").write_text("FLAGS = ['--x']\n")
+        git(w6.repo, "add", "-A", env=w6.env)
+        w6.commit("feat(scripts): launcher again", offset=300)
+        check("a launcher commit made after the run is not covered",
+              w6.signal("git push -u origin launcher"), fresh="0")
+
         # 7. The whole path through the real engine: `cupcake eval` over this checkout's .cupcake/,
         #    in a repository shaped like the one the miss happened in. This is what proves cupcake
         #    hands the pending event to the signal on stdin -- if it did not, `pending` would stay

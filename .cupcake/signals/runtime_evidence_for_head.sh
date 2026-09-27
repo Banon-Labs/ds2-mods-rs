@@ -269,7 +269,17 @@ if [ -r "$GAME_LOG" ]; then
     # Exact provenance when the log has it. ds2-loader's first line names the commit it was built
     # from (`build git=<sha>`, `-dirty` when crates/ differed). When it is there, times are not
     # asked at all: the run covers a ref when its commit is an ancestor of the ref and no commit
-    # between them touches game code. A dirty build covers nothing.
+    # between them touches `crates/`. A dirty build covers nothing.
+    #
+    # The stamp names the DLL's commit, not the launcher's (2026-09-27). `build git=` is what
+    # `crates/ds2-loader/build.rs` saw when the DLL was built, and a commit that changes only
+    # `scripts/ds2-run.py` changes no DLL byte, so the stamp can name its parent while the run was in
+    # fact launched by it. Measured: branch ds2-run-builds-launcher, HEAD 4bb7302 (12:16:16, launcher
+    # only) on e73635e; staged DLL 12:16:22, sha256 equal to the worktree's build, stamped e73635e;
+    # log born 12:16:28 with `ds2-loader: attach`. The time test said fresh, and this arm overrode it
+    # with fresh=0 because 4bb7302 touches the launcher. The launcher is not in the stamp, so for
+    # launcher-only commits after it the clock is the only evidence there is: the run's birth must
+    # postdate the newest of them, which is what the time test demands anyway.
     run_sha="$(head -1 "$GAME_LOG" 2>/dev/null | sed -n 's/.* build git=\([0-9a-f]\{40\}\)\(-dirty\)\{0,1\} .*/\1\2/p')"
     if [ -n "$run_sha" ]; then
         fresh=1
@@ -279,7 +289,9 @@ if [ -r "$GAME_LOG" ]; then
             [ -n "$ref" ] || continue
             git rev-parse --verify --quiet "$ref^{commit}" >/dev/null 2>&1 || ref="HEAD"
             if ! git merge-base --is-ancestor "$sha" "$ref" 2>/dev/null; then fresh=0; fi
-            if [ -n "$(git log --format=%H "$sha..$ref" -- crates scripts/ds2-run.py 2>/dev/null | head -1)" ]; then fresh=0; fi
+            if [ -n "$(git log --format=%H "$sha..$ref" -- crates 2>/dev/null | head -1)" ]; then fresh=0; fi
+            launcher_time="$(git log -1 --format=%ct "$sha..$ref" -- scripts/ds2-run.py 2>/dev/null)" || launcher_time=""
+            if [ -n "$launcher_time" ] && ! [ "$log_time" -ge "$launcher_time" ] 2>/dev/null; then fresh=0; fi
         done <<EOF_RUN_REFS
 $refs
 EOF_RUN_REFS
