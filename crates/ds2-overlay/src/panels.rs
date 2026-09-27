@@ -140,6 +140,69 @@ impl ImguiRenderLoop for Panels {
     }
 }
 
+/// The cursor in back-buffer pixels, as `f32` bits, `x` high and `y` low; `u64::MAX` when the
+/// cursor could not be read.
+static MOUSE: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// Set once the window and back-buffer sizes have been logged.
+static SIZES_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// The cursor in the pixels panels draw in, or `None` when it could not be read this frame.
+///
+/// Use this, not `ui.io().mouse_pos`, for hit tests. hudhook feeds imgui the window-client
+/// position from `WM_MOUSEMOVE`, but sizes the display from the swap chain's back buffer, and in
+/// this game the two differ: the player saw the highlighted row far from the pointer (2026-09-27).
+/// This maps the cursor into the window's client area and scales it by back buffer over client.
+#[must_use]
+pub fn mouse() -> Option<[f32; 2]> {
+    let raw = MOUSE.load(Ordering::Acquire);
+    (raw != u64::MAX).then(|| {
+        [
+            f32::from_bits((raw >> 32) as u32),
+            f32::from_bits(raw as u32),
+        ]
+    })
+}
+
+/// Recompute [`MOUSE`] for this frame from the swap chain's own window.
+fn measure_mouse(chain: &IDXGISwapChain) {
+    use hudhook::windows::Win32::Foundation::{POINT, RECT};
+    use hudhook::windows::Win32::Graphics::Gdi::ScreenToClient;
+    use hudhook::windows::Win32::UI::WindowsAndMessaging::{GetClientRect, GetCursorPos};
+
+    MOUSE.store(u64::MAX, Ordering::Release);
+    // SAFETY: a live swap chain, borrowed for this `Present`.
+    let Ok(desc) = (unsafe { chain.GetDesc() }) else {
+        return;
+    };
+    let window = desc.OutputWindow;
+    let mut client = RECT::default();
+    let mut cursor = POINT::default();
+    // SAFETY: `window` is the swap chain's own output window; both out-pointers are locals.
+    let read = unsafe {
+        GetClientRect(window, &mut client).is_ok()
+            && GetCursorPos(&mut cursor).is_ok()
+            && ScreenToClient(window, &mut cursor).as_bool()
+    };
+    let (client_w, client_h) = (client.right - client.left, client.bottom - client.top);
+    let (buffer_w, buffer_h) = (desc.BufferDesc.Width, desc.BufferDesc.Height);
+    if !SIZES_LOGGED.swap(true, Ordering::AcqRel) {
+        log(format_args!(
+            "panels: window client {client_w}x{client_h}, back buffer {buffer_w}x{buffer_h} -- \
+             the mouse is scaled by the ratio"
+        ));
+    }
+    if !read || client_w <= 0 || client_h <= 0 {
+        return;
+    }
+    let x = cursor.x as f32 * buffer_w as f32 / client_w as f32;
+    let y = cursor.y as f32 * buffer_h as f32 / client_h as f32;
+    MOUSE.store(
+        (u64::from(x.to_bits()) << 32) | u64::from(y.to_bits()),
+        Ordering::Release,
+    );
+}
+
 /// Draw one imgui frame with every panel onto the swap chain being presented. Called by the
 /// `Present` detour after the drawers. Does nothing until a panel is registered, so a session
 /// with no panel never builds an imgui pipeline or subclasses the window.
@@ -161,6 +224,7 @@ pub(crate) fn render(swap_chain: *mut c_void) {
     let Some(chain) = (unsafe { IDXGISwapChain::from_raw_borrowed(&swap_chain) }) else {
         return;
     };
+    measure_mouse(chain);
     // SAFETY: this is the thread presenting `chain`, inside its `Present` detour, which is the
     // contract of `render_shared`.
     if let Err(error) = unsafe { hudhook::hooks::dx11::render_shared(chain) } {

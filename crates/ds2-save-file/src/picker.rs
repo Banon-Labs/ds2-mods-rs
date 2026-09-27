@@ -540,7 +540,8 @@ fn draw(ui: &Ui) {
         .thickness(1.5)
         .build();
 
-    let mouse = ui.io().mouse_pos;
+    // In back-buffer pixels; imgui's own position is in window pixels here. See `panels::mouse`.
+    let mouse = ds2_overlay::panels::mouse().unwrap_or(ui.io().mouse_pos);
     let inside = |min: [f32; 2], max: [f32; 2]| {
         mouse[0] >= min[0] && mouse[0] < max[0] && mouse[1] >= min[1] && mouse[1] < max[1]
     };
