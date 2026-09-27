@@ -51,7 +51,13 @@ _FIX_CLAIM = re.compile(
     r"(?:real\s+|actual\s+|genuine\s+|proper\s+|right\s+|correct\s+|only\s+|true\s+|whole\s+)?fix\b"
     r"|\b(?:the|a|my|our)\s+"
     r"(?:real\s+|actual\s+|genuine\s+|proper\s+|right\s+|correct\s+|only\s+|true\s+|whole\s+)?"
-    r"fix\s+(?:works|worked|holds|holds\s+up|landed|is\s+in\b|is\s+live\b|is\s+done\b)"
+    r"fix\s+(?:works|worked|holds|holds\s+up|landed|is\s+in\b|is\s+live\b|is\s+done\b"
+    r"|committed|pushed|shipped|applied|merged|deployed)"
+    # The noun as the sentence's subject with its verb dropped, the 2026-09-27 escape: "Fix
+    # committed. Relaunching the game with it" -- said before the run that showed it did nothing.
+    # No branch read it, because every other noun branch wants a determiner in front.
+    r"|^\s*fix\s+(?:committed|pushed|landed|shipped|applied|merged|deployed|built|in\b"
+    r"|is\s+(?:in|live|done|committed|pushed)\b)"
     # Naming the mechanism as the answer: "the fix is `CloseAsFailed`". The lookahead is what keeps
     # the honest plan out of it -- "the fix is to gate it, which I have not done yet" is remaining
     # work, and so is "the fix is needed in the loader too". The difference between a plan and a

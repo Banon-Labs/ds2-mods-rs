@@ -90,6 +90,54 @@ RUN_STATUS = re.compile(
 )
 
 
+# `fix` is a claim that a symptom is gone, and a claim carries its evidence in the same message.
+# User, 2026-09-27: "Fixes are proven. You haven't proven anything." The commit that prompted it was
+# `fix(ds2-overlay): render no imgui frame while no panel has anything on screen`, whose body said
+# "Not yet run with the fix." The run-status rule below accepted it, because it asks only whether
+# the code ran, and the change did not remove the symptom. So a `fix` needs a line opening with
+# `Proven:` or `Verified:` that names what showed the symptom gone -- the log line, the test that
+# failed before and passes now, the user's confirmation -- and a `fix` whose body says it has not
+# run or is unproven is refused whatever else it says.
+#
+# Judged in both the hook and `--range`. The range is `merge-base..HEAD`, so only the commits a
+# branch proposes are read, and history on main stays unjudged the same way the header rule's does.
+PROOF_LINE = re.compile(r"^(?:Proven|Verified):[ \t]+\S.{9,}$", re.MULTILINE)
+
+UNPROVEN = re.compile(
+    r"\b(?:not\s+(?:yet\s+)?(?:been\s+)?(?:run|launched|tested|verified|proven|confirmed|observed)"
+    r"|never\s+(?:been\s+)?(?:run|launched|tested)|has\s*n[o']t\s+(?:been\s+)?run"
+    r"|untested|unproven|unverified|unconfirmed|yet\s+to\s+(?:be\s+)?(?:run|proven|verified))\b",
+    re.IGNORECASE,
+)
+
+
+def fix_proof_problem(text: str) -> str | None:
+    """A `fix` commit whose body does not prove the symptom gone, or None."""
+    header = text.split("\n")[0]
+    match = HEADER_PATTERN.match(header)
+    if is_exempt(header) or not match or match.group("type") != "fix":
+        return None
+    body = "\n".join(text.split("\n")[1:])
+    alternative = (
+        " Until something shows the symptom gone it is not a fix: commit it as `refactor`, `feat` "
+        "or `chore` with a `Candidate:` line saying what it is meant to change and what would show "
+        "it, and reword it to `fix` once that evidence exists."
+    )
+    unproven = UNPROVEN.search(body)
+    if unproven:
+        return (
+            f"This is a `fix` whose body says '{unproven.group(0)}'. A fix is proven, and this "
+            "message says it is not." + alternative
+        )
+    if not PROOF_LINE.search(body):
+        return (
+            "This is a `fix` with no proof in its body. Add a line opening with `Proven:` or "
+            "`Verified:` naming what showed the symptom gone: the run's log line, the test that "
+            "failed before and passes now, or the user's words confirming it." + alternative
+        )
+    return None
+
+
 def run_status_problem(message: str, touches_game_code: bool) -> str | None:
     """A behaviour commit to game code that never says whether it ran, or None."""
     if not touches_game_code:
@@ -228,6 +276,10 @@ def check(message: str, scopes: set[str] | None = None) -> list[str]:
             f"The header is longer than {HEADER_LIMIT} characters. Move the detail into the body."
         )
 
+    proof = fix_proof_problem(text)
+    if proof:
+        problems.append(proof)
+
     if len(lines) > 1 and lines[1].strip():
         problems.append("The line after the header is not blank. A body needs a blank line above it.")
 
@@ -312,7 +364,12 @@ SELFTEST_SCOPES = {"ds2-save-block", "ds2-menu-row", "scripts", "docs", "cupcake
 
 SELFTEST_CASES = [
     ("feat(ds2-save-block): stop the game saving by itself while the save row is on", True),
-    ("fix: a matching item id is not an item you own", True),
+    (
+        "fix: a matching item id is not an item you own\n\n"
+        "Proven: importing the reported url now leaves the bag unchanged.",
+        True,
+    ),
+    ("fix: a matching item id is not an item you own", False),
     ("feat(ds2-menu-row)!: a row is registered by name, and the numbers are gone", True),
     ("docs(cupcake): the porting rule, and what it refused", True),
     ("Merge pull request #57 from Banon-Labs/no-default-saving-while-the-save-row-is-on", True),
@@ -324,7 +381,37 @@ SELFTEST_CASES = [
     ("feat(): the scope is empty", False),
     ("feat:no space after the colon", False),
     ("feat(scripts): ", False),
-    ("fix(scripts): the subject ends in a full stop.", False),
+    ("fix(scripts): the subject ends in a full stop.\n\nVerified: the selftest passes now.", False),
+    # A fix carries its proof. The commit that prompted this said "Not yet run with the fix."
+    (
+        "fix(ds2-menu-row): render no frame while no row is on screen\n\n"
+        "Ran in-game before this fix: a frozen picture. Not yet run with the fix.",
+        False,
+    ),
+    (
+        "fix(ds2-menu-row): x\n\nProven: 'menu-row: pressed id=3' in ds2-loader.log.\n"
+        "The second half is untested.",
+        False,
+    ),
+    ("fix(ds2-menu-row): x\n\nProven: yes", False),
+    ("fix(ds2-menu-row): x\n\nThe proof: it works now, trust me.", False),
+    ("fix(ds2-menu-row): x\n\n  Proven: indented, so not a line of its own.", False),
+    ("fix(ds2-menu-row): x\n\nProven: the row works.\nIt hasn't been run since the rebase.", False),
+    (
+        "fix(ds2-menu-row): a row does nothing\n\n"
+        "Verified: the user pressed the row on this build and said 'it works now'.",
+        True,
+    ),
+    (
+        "fix(scripts)!: the gate reads the branch it pushes\n\n"
+        "Proven: the detached-push selftest case failed before this and passes after.",
+        True,
+    ),
+    (
+        "refactor(ds2-menu-row): render no frame while no row is on screen\n\n"
+        "Candidate: meant to end the frozen picture. Not yet run in the game.",
+        True,
+    ),
     ("feat(scripts): " + "x" * HEADER_LIMIT, False),
     ("feat(scripts): a subject\nthe body starts with no blank line above it", False),
     ("feat(scripts): a subject\n\n" + "w " * BODY_LIMIT, False),

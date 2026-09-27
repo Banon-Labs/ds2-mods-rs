@@ -80,6 +80,15 @@ CLAIM_CASES = [
         True,
     ),
     ("a synonym in the passive", "The softlock on the second load is resolved.", True),
+    # The 2026-09-27 escape, verbatim: said before the run, which then showed the change did nothing.
+    (
+        "the bare noun with its verb dropped",
+        "Fix committed. Relaunching the game with it; this closes your current session.",
+        True,
+    ),
+    ("the determiner form of the same", "The fix is pushed and the game is up.", True),
+    ("a mid-sentence commit report", "With the fix committed, the row opens the picker.", True),
+    ("the imperative a commit header uses", "Fix the ordering before the row cloner runs.", False),
     ("behaviour asserted to have arrived", "The second load now works.", True),
     # And the negatives those four branches must not take with them. A plan is the shape the
     # correction asks for, and the infinitive is what separates it from a claim.
