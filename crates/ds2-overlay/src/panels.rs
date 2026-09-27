@@ -1,14 +1,14 @@
 //! Every imgui panel, drawn inside one hudhook frame.
 //!
 //! hudhook holds one render loop per process and subclasses the game window once for its input.
-//! So there is one loop, [`Panels`], and it calls each registered panel's draw function in the
+//! So there is one loop, `Panels`, and it calls each registered panel's draw function in the
 //! order they were added. A panel that draws nothing this frame simply returns.
 //!
 //! # Input
 //!
 //! hudhook's window-procedure subclass feeds mouse and keyboard messages to imgui, which is what
 //! makes hover and click work on a panel. A panel that is modal -- the save picker -- also says so
-//! through its `wants_input` function, and while any panel does, [`Panels::message_filter`]
+//! through its `wants_input` function, and while any panel does, `Panels::message_filter`
 //! holds keyboard, mouse and raw-input messages back from the game's own window procedure. That
 //! stops the pause menu reacting to a click meant for the panel. It does not stop the game's
 //! DirectInput and XInput polls, which do not go through window messages; a modal panel has to
