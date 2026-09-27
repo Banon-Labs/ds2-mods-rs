@@ -104,6 +104,7 @@ pub mod soul_memory_guard;
 pub mod title_menu;
 pub mod title_skip;
 pub mod voice_chat;
+pub mod weapon_sync;
 
 /// `fdwReason` value for the loader's process-attach notification.
 const DLL_PROCESS_ATTACH: u32 = 1;
@@ -374,6 +375,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_input_harness();
                 install_net_effects();
                 install_soul_memory_guard();
+                install_weapon_sync();
                 arm_fault(crash_config);
                 finish_boot_batch();
                 ds2_boot_timeline::mark("installs-done");
@@ -424,6 +426,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_input_harness();
                 install_net_effects();
                 install_soul_memory_guard();
+                install_weapon_sync();
                 arm_fault(crash_config);
                 finish_boot_batch();
             });
@@ -1014,6 +1017,34 @@ fn install_soul_memory_guard() {
             ds2_soul_memory_guard::LOG_PREFIX
         ));
     }
+}
+
+/// Cap our weapon levels to the other players' in multiplayer, if `<Game>/ds2-mods.toml` asked.
+///
+/// Off unless `[weapon_sync] enabled = true`. It shares the net session update with voice chat
+/// through `ds2-net-tick`, which owns the one detour there, so the two run together in either
+/// install order.
+fn install_weapon_sync() {
+    let config = weapon_sync::WeaponSyncConfig::load();
+    log_line(format_args!("{}", config.describe()));
+    if !config.enabled {
+        return;
+    }
+    ds2_weapon_sync::set_logger(log_line);
+    // SAFETY: both detour targets are recorded in `ds2-rva` with the bytes they must begin with,
+    // `scripts/ds2-arxan-chain.py` reports neither redirected, and the crate re-reads those bytes
+    // and patches nothing on a mismatch. Called from the post-Arxan position.
+    let outcome = unsafe { ds2_weapon_sync::install(config.test_cap, config.key) };
+    if !outcome.installed {
+        log_line(format_args!(
+            "{} NOT INSTALLED -- weapon levels are never capped this run",
+            ds2_weapon_sync::LOG_PREFIX
+        ));
+        return;
+    }
+    // `test_cap` and `key` are live. Editing `test_cap` while the game runs is how a pretend player
+    // arrives, changes weapons or leaves, which is the only way to see the in-world restore alone.
+    std::thread::spawn(weapon_sync::watch_live);
 }
 
 /// Install the agent-driven input harness, if `<Game>/ds2-mods.toml` asked for it.
