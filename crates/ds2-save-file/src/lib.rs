@@ -5,9 +5,12 @@
 //! | **Load Character from File** | stages the pick, returns to the title, and opens the game's own character list for it | the same session, once you choose a character |
 //! | **Save Game to File** | asks the game to save, then copies the container out | a few frames later |
 //!
-//! Both open the OS file dialog and neither draws a menu of its own. That is the port decision, and
-//! it is the whole reason this crate is small: `../er-mods-rs` has both an in-game save browser and a
-//! comdlg32 one, and only the second has no game coupling. See `dialog`.
+//! Both open an in-game panel, `picker`: drives, folders, saves with their characters and levels, a
+//! typed path with folder completion, and for loading a character stage that loads the one chosen.
+//! It is `../er-mods-rs`'s in-game picker rebuilt on this engine -- an imgui panel through
+//! `ds2-overlay` rather than a Scaleform movie -- over the host-tested `ds2-save-picker-core` model.
+//! `[save_picker] os_native = true` puts the OS file dialog back (`dialog`), and so does a session
+//! whose panel could not install.
 //!
 //! # The asymmetry is the point
 //!
@@ -31,18 +34,13 @@
 //! The restart route is still in [`import`], reached only when the title flow is not hooked. A row
 //! that can load a save slowly is worth more than a row that reports a missing detour.
 //!
-//! # Choosing a character is the game's job, and the game is good at it
+//! # The character is chosen in the panel, and the game's list loads it
 //!
-//! The list of ten characters with their names, levels and playtimes is the title screen's LOAD
-//! GAME screen, which DS2 has always had. What it lists is built from ten records in memory, so
-//! pointing the loads at a staged container and asking the game to re-read that block is all it
-//! takes to make that screen describe a file the player just picked. No list is drawn here.
-//!
-//! This is where an earlier version of this crate planned to port `er-save-picker-core` -- Elden
-//! Ring's own character picker, which exists there because at a no-save boot ER has no such screen
-//! to borrow. DS2 does, so the port is not needed for this row. The host-testable row model in
-//! `ds2-save-picker-core` remains the answer for a picker that has to name a character without the
-//! game's help, which is a different feature.
+//! The panel reads each container's ten slots itself, so the player picks a character before the
+//! game is left. The swap then opens the title's own LOAD GAME list for the staged container and
+//! `ds2-continue` loads that slot from it, past the game's own occupancy and ownership checks. An
+//! archive's characters cannot be read until staging unwraps it, so picking one opens the game's
+//! list for the player to choose from, as the OS dialog route always did.
 
 // DEBT: ds2-mods-rs-24r -- not debt to be paid: this crate ships as a Windows DLL and the
 // attribute is what keeps its Rust half parseable on the host, so the game-free tests below it
@@ -51,6 +49,27 @@
 
 /// What every line this crate writes begins with, so its lines can be grepped out of the shared log.
 pub const LOG_PREFIX: &str = "ds2-save-file:";
+
+/// How the two rows choose a file: `[save_picker]` in `ds2-mods.toml`, read by the loader.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PickerSettings {
+    /// Open the Windows file dialog instead of the in-game panel.
+    pub os_native: bool,
+    /// Where the panel opens, as the config spelled it. `None` means `~/Downloads`.
+    pub start_dir: Option<String>,
+    /// Whether a pick moves where the panel opens next time.
+    pub remember_dir: bool,
+}
+
+impl Default for PickerSettings {
+    fn default() -> Self {
+        Self {
+            os_native: false,
+            start_dir: None,
+            remember_dir: true,
+        }
+    }
+}
 
 #[cfg(windows)]
 mod dialog;
@@ -61,12 +80,18 @@ mod game;
 #[cfg(windows)]
 pub mod import;
 #[cfg(windows)]
+mod picker;
+#[cfg(windows)]
+mod picker_input;
+#[cfg(windows)]
 pub mod swap;
 
 #[cfg(windows)]
 pub use import::take_handoff;
 #[cfg(windows)]
 pub use install::{LogFn, register_export_row, register_import_row, set_logger};
+#[cfg(windows)]
+pub use picker::{configure as configure_picker, install as install_picker_panel};
 
 #[cfg(windows)]
 pub(crate) use install::log_line;

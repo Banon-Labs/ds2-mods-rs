@@ -765,11 +765,16 @@ dependencies = [
  "ds2-continue",
  "ds2-dialog-skip",
  "ds2-game-base",
+ "ds2-input-harness",
  "ds2-menu-row",
+ "ds2-overlay",
  "ds2-rva",
  "ds2-save-block",
  "ds2-save-file-core",
+ "ds2-save-picker-core",
  "ds2-save-redirect",
+ "ds2-sl2-core",
+ "hudhook",
 ]
 
 [[package]]

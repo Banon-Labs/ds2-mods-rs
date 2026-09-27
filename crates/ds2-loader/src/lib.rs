@@ -99,6 +99,7 @@ pub mod message_box;
 pub mod net_effects;
 pub mod offline;
 pub mod save_block;
+pub mod save_picker;
 pub mod save_redirect;
 pub mod seamless;
 pub mod soul_memory_guard;
@@ -1188,9 +1189,18 @@ fn install_menu_row() {
     // registration order, so the list a player writes is the order they see -- which only holds if
     // nothing else registers a row behind this loop's back.
     let mut manual_save_row = false;
+    let mut file_row = false;
     for row in &config.rows {
         let registered = register_row(*row);
         manual_save_row |= registered && *row == menu_row::Row::SaveGameToFile;
+        file_row |= registered
+            && matches!(
+                *row,
+                menu_row::Row::SaveGameToFile | menu_row::Row::LoadCharacterFromFile
+            );
+    }
+    if file_row {
+        install_save_picker();
     }
     // Only when `[save_block] enabled = true` asks for it, and even then gated on that row having
     // registered, not on it being listed. A run whose row was refused -- a full tab, a sealed
@@ -1212,6 +1222,49 @@ fn install_menu_row() {
         log_line(format_args!(
             "{} NOT INSTALLED -- the pause menu is the game's own, and this run measures nothing",
             ds2_menu_row::LOG_PREFIX
+        ));
+    }
+}
+
+/// Give the two save-file rows their picker: the in-game panel, or the OS dialog when
+/// `[save_picker] os_native = true`.
+///
+/// The panel needs three things from elsewhere, and asks for each here rather than from inside
+/// `ds2-save-file`, because the loader is what knows whether they are already installed:
+/// `ds2-overlay`'s `Present` detour to draw and tick from, and the input harness's device detours,
+/// whose `hold` keeps the pause menu underneath from moving with every press meant for the panel.
+fn install_save_picker() {
+    let settings = save_picker::load();
+    log_line(format_args!("{}", save_picker::describe(&settings)));
+    let os_native = settings.os_native;
+    ds2_save_file::configure_picker(settings);
+    if os_native {
+        return;
+    }
+    ds2_input_harness::set_logger(log_line);
+    // SAFETY: called from the post-Arxan position like every other install here. The harness's
+    // install checks each of its sites against the prologue `ds2-rva` records and refuses a moved
+    // one, and it is idempotent, so `install_input_harness` calling it again later is a no-op.
+    let hooked = unsafe { ds2_input_harness::install() };
+    if hooked != INPUT_HARNESS_SITES {
+        log_line(format_args!(
+            "{} save picker: only {hooked}/{INPUT_HARNESS_SITES} input devices can be held -- the \
+             pause menu may move under the panel",
+            ds2_save_file::LOG_PREFIX
+        ));
+    }
+    if !start_overlay() {
+        log_line(format_args!(
+            "{} save picker: ds2-overlay could not start, so the panel cannot draw -- the rows fall \
+             back to the OS dialog",
+            ds2_save_file::LOG_PREFIX
+        ));
+        return;
+    }
+    if !ds2_save_file::install_picker_panel() {
+        log_line(format_args!(
+            "{} save picker: no panel -- the rows fall back to the OS dialog",
+            ds2_save_file::LOG_PREFIX
         ));
     }
 }

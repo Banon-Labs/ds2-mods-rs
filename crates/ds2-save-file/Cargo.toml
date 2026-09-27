@@ -38,6 +38,15 @@ ds2-rva.workspace = true
 # run nothing. It does not depend on this crate, so the edge is one way.
 ds2-save-block.workspace = true
 ds2-save-redirect.workspace = true
+# The in-game picker panel (`picker.rs`): its rows and every decision about them come from the
+# host-tested model, it draws as one of `ds2-overlay`'s imgui panels, and it keeps the pause menu
+# underneath still with the input harness's `hold`.
+ds2-save-picker-core.workspace = true
+ds2-sl2-core.workspace = true
+ds2-overlay.workspace = true
+ds2-input-harness.workspace = true
+# The panel's `imgui::Ui`, and the `windows` re-export it reads the keyboard and pad through.
+hudhook.workspace = true
 
 [lints]
 workspace = true
