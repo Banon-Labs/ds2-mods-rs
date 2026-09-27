@@ -154,11 +154,72 @@ pub struct ChrAsmCtrl {
 
 /// `ChrSpEffectCtrl`, which owns a character's active special effects.
 ///
-/// Source of name: RTTI, its vtable's locator names `.?AVChrSpEffectCtrl@@`. Opaque: this repo
-/// only hands a pointer to one back to the game and reads none of its fields.
+/// Source of name: RTTI, its vtable's locator names `.?AVChrSpEffectCtrl@@` (vtable
+/// `0x1410bfee0`). A prefix: only the hop to the action list is named.
 #[repr(C)]
 pub struct ChrSpEffectCtrl {
-    _opaque: [u8; 0],
+    _vtable: *const c_void,
+    _unk08: [u8; 0x8],
+    /// The object that owns the action list, embedded in this controller (`this + 0x870` on the
+    /// live player).
+    ///
+    /// Read live on 2026-09-26 by `scripts/frida/speffect-list.js`: `[ctrl + 0x10] + 0x20` is the
+    /// list the game's per-frame update `FUN_14022f820` hands to its action ticker
+    /// `FUN_140220670` as `param_1 + 0x20`.
+    pub action_holder: Option<NonNull<SpEffectActionHolder>>,
+}
+
+/// What [`ChrSpEffectCtrl::action_holder`] points at. A prefix: only the list is named.
+///
+/// Source of name: none; no vtable at its start was checked. Named for the one field read.
+#[repr(C)]
+pub struct SpEffectActionHolder {
+    _unk00: [u8; 0x20],
+    /// The character's live `SpEffect` actions. `FUN_14022f820` reads `[this + 0x20]` and ticks it.
+    pub list: Option<NonNull<SpEffectActionList>>,
+}
+
+/// The actions every `SpEffect` on a character has put on it: a `DLFixedVector` of
+/// [`SP_EFFECT_ACTION_CAPACITY`] reference-counted action pointers.
+///
+/// Source of name: none. Read in the binary: `registerSpEffect` (`0x140221790`) panics with
+/// `DLFixedVector.inl` "out of memory." past 128 entries, `addSpEffectToList` (`0x1402206d0`)
+/// refuses to add at a count of 128, and the ticker `0x140221340` walks `[this + 0x10 + i*8]` while
+/// `i < [this + 0x418]`, calling each action's slot `0x10` and removing the action when it answers
+/// `false`. So an action leaves the list the frame its effect ends.
+///
+/// The array starts at `this + 0x10` rounded up to 8; every heap object here is 8-aligned, so the
+/// rounding is zero, as the live read found.
+#[repr(C)]
+pub struct SpEffectActionList {
+    _unk00: [u8; 0x10],
+    /// The action pointers; the first [`SpEffectActionList::count`] are live.
+    pub actions: [Option<NonNull<SpEffectAction>>; SP_EFFECT_ACTION_CAPACITY],
+    _unk410: [u8; 0x8],
+    /// How many of [`SpEffectActionList::actions`] are live.
+    pub count: u64,
+}
+
+/// Slots in [`SpEffectActionList::actions`]. 128, the bound `registerSpEffect` checks.
+pub const SP_EFFECT_ACTION_CAPACITY: usize = 128;
+
+/// One action of an applied `SpEffect` -- a `SpEffectActionImpl_*`, one per instruction of the
+/// effect's event (an sfx, an icon, a stat change). A prefix: only the id is named.
+///
+/// Source of name: RTTI, e.g. `.?AVSpEffectActionImpl_Basic_Sfx@@`.
+#[repr(C)]
+pub struct SpEffectAction {
+    _vtable: *const c_void,
+    _unk08: [u8; 0x8],
+    /// The `SpEffect` id this action belongs to -- the event id the request named.
+    ///
+    /// Vtable slot `0x40` of every `SpEffectActionImpl_*` is `0x140216180`,
+    /// `mov eax,[rcx+0x10]; ret`, and the list snapshot `0x14021fd40` records it per action. Read
+    /// live on 2026-09-26: after `applySpEffect` with `140001010` an action with this field
+    /// `140001010` (vtable `SpEffectActionImpl_Basic_Sfx`) appeared, and it was gone from the list
+    /// 1.44 s later. The resident actions read `40040002`, `41110000` and `21660100`, event ids;
+    /// `+0x1c` beside it (slot `0x58`) is a small serial, not the id.
+    pub sp_effect_id: i32,
 }
 
 /// The equipment state a [`ChrAsmCtrl`] holds. A prefix: only the field this repo reads.
@@ -196,8 +257,9 @@ mod tests {
     use core::mem::{offset_of, size_of};
 
     use super::{
-        CharacterCtrl, CharacterCtrlBase, ChrAsmCtrl, ChrAsmEquip, PhantomBlock, PlayerCtrl,
-        PlayerParam, WString,
+        CharacterCtrl, CharacterCtrlBase, ChrAsmCtrl, ChrAsmEquip, ChrSpEffectCtrl, PhantomBlock,
+        PlayerCtrl, PlayerParam, SP_EFFECT_ACTION_CAPACITY, SpEffectAction, SpEffectActionHolder,
+        SpEffectActionList, WString,
     };
 
     // HP: read live on 2026-09-26 by `scripts/frida/set-player-hp.js` from the local player (2461
@@ -212,6 +274,27 @@ mod tests {
 
     // The value `ds2-net-effects` read through before this field existed, and the one its live
     // `applySpEffect` call used on 2026-09-26.
+
+    // The action list: the hops `scripts/frida/speffect-list.js` walked on 2026-09-26, and the list
+    // offsets the ticker `0x140221340` and `registerSpEffect` use.
+    #[test]
+    fn the_action_list_is_ctrl_0x10_then_0x20() {
+        assert_eq!(offset_of!(ChrSpEffectCtrl, action_holder), 0x10);
+        assert_eq!(offset_of!(SpEffectActionHolder, list), 0x20);
+    }
+
+    #[test]
+    fn the_list_holds_128_pointers_at_0x10_and_its_count_at_0x418() {
+        assert_eq!(offset_of!(SpEffectActionList, actions), 0x10);
+        assert_eq!(SP_EFFECT_ACTION_CAPACITY, 128);
+        assert_eq!(offset_of!(SpEffectActionList, count), 0x418);
+        assert_eq!(size_of::<Option<core::ptr::NonNull<SpEffectAction>>>(), 8);
+    }
+
+    #[test]
+    fn an_action_names_its_sp_effect_at_0x10() {
+        assert_eq!(offset_of!(SpEffectAction, sp_effect_id), 0x10);
+    }
 
     #[test]
     fn character_ctrl_sp_effect_ctrl_is_at_0x3e0() {
