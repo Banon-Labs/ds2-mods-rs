@@ -96,9 +96,153 @@ pub fn is_live_container(destination: &Path, live: &Path) -> bool {
     normalise(destination) == normalise(live)
 }
 
+/// Appended to a destination to name the file an export is written into before it becomes the
+/// destination.
+///
+/// Not ending in `.sl2` is deliberate: the dialog's save filter does not list it, so a staging file
+/// left behind by a crash is not offered back to the player as a save.
+pub const STAGING_SUFFIX: &str = ".ds2-export";
+
+/// Where an export is written before it replaces `destination`: the same folder, so the final
+/// rename cannot cross a volume, under a name that is not a save.
+///
+/// # Why an export needs a staging file at all
+///
+/// The game's save is a read-modify-write of the whole container. `SLBindOperation`
+/// (`FUN_140a91650`) rebuilds all twenty-three entries on every save, and an in-game save supplies
+/// only four of them: the character list, its mirror, and the loaded slot's two entries. Every other
+/// entry is read back out of the file being saved to (`FUN_140a9302b` mounts it), and when that mount
+/// fails the entry is written as its length word followed by zeros. Measured 2026-09-26: an export to
+/// a name that did not exist logged six diverted read opens answering `handle=-1`, then the write,
+/// and the file it produced had every slot but the loaded one zero-filled while the character list
+/// still named them.
+///
+/// So the file the game is pointed at must already hold the live container when the save starts.
+/// Seeding the destination itself would do that, but it would destroy an existing destination before
+/// the game had written anything, and an export that then never lands would leave the player with
+/// neither their old file nor the new one. A staging file is seeded instead, the game writes that,
+/// and it replaces the destination only once the write has been observed.
+pub fn staging_path(destination: &Path) -> PathBuf {
+    let mut text = destination.as_os_str().to_os_string();
+    text.push(STAGING_SUFFIX);
+    PathBuf::from(text)
+}
+
+/// How an export ended, decided from what is on disk rather than from what was asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExportVerdict {
+    /// The game wrote the file and it is now at the destination, which changed.
+    Written,
+    /// The game never wrote the file it was pointed at before the deadline. Nothing at the
+    /// destination is new.
+    NeverWritten,
+    /// The game wrote the staging file, and it could not be moved over the destination.
+    NotPromoted,
+    /// Every step reported success, and the destination is nevertheless not different from how it
+    /// was before the press. A success line here would be a claim about a write that did not
+    /// happen, so this is a failure of its own.
+    Unchanged,
+}
+
+/// Judge an export. `stamp` is whatever the caller uses to tell two states of a file apart --
+/// length and modified time in the game -- and `None` means the file could not be read.
+///
+/// * `flushed` -- the file the game was pointed at changed after it was seeded.
+/// * `promoted` -- `None` when there was no staging file (the destination is the live container,
+///   so the game was pointed straight at it); otherwise whether the rename onto the destination
+///   succeeded.
+/// * `before` / `after` -- the destination as it was when the row was pressed, and as it is now.
+///
+/// Success needs all three, and the last is not redundant. On 2026-09-26 the row logged an export
+/// with a byte count, and a note that the flush was never observed, for a destination whose mtime
+/// never moved: the line reported the size of a file that was already there. What the player is
+/// promised is that the destination now holds this save, so that is what is checked last.
+pub fn export_verdict<S: PartialEq>(
+    flushed: bool,
+    promoted: Option<bool>,
+    before: Option<&S>,
+    after: Option<&S>,
+) -> ExportVerdict {
+    if !flushed {
+        return ExportVerdict::NeverWritten;
+    }
+    if promoted == Some(false) {
+        return ExportVerdict::NotPromoted;
+    }
+    match after {
+        Some(after) if before != Some(after) => ExportVerdict::Written,
+        _ => ExportVerdict::Unchanged,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The staging file sits beside the destination, keeps its whole name, and is not a save.
+    #[test]
+    fn the_staging_file_is_beside_the_destination_and_not_a_save() {
+        let staged = staging_path(Path::new(r"Z:\saves\mule.sl2"));
+        assert_eq!(staged, PathBuf::from(r"Z:\saves\mule.sl2.ds2-export"));
+        assert!(
+            !staged.to_string_lossy().ends_with(".sl2"),
+            "the dialog's filter would offer it"
+        );
+        assert!(!is_live_container(&staged, Path::new(r"Z:\saves\mule.sl2")));
+    }
+
+    /// A save the game never wrote is never reported as an export, whatever the destination holds.
+    #[test]
+    fn an_unobserved_write_is_never_a_success() {
+        let old = (8_251_680u64, 1u64);
+        // The 2026-09-26 row: the destination existed, nothing moved, and the line said "exported".
+        assert_eq!(
+            export_verdict(false, Some(true), Some(&old), Some(&old)),
+            ExportVerdict::NeverWritten
+        );
+        assert_eq!(
+            export_verdict::<(u64, u64)>(false, None, None, None),
+            ExportVerdict::NeverWritten
+        );
+    }
+
+    /// A written staging file that could not replace the destination is not an export either.
+    #[test]
+    fn a_failed_rename_is_reported_as_such() {
+        assert_eq!(
+            export_verdict(true, Some(false), None, Some(&(1u64, 2u64))),
+            ExportVerdict::NotPromoted
+        );
+    }
+
+    /// The destination has to be different from how it was at the press, and has to exist.
+    #[test]
+    fn success_requires_the_destination_to_have_changed() {
+        let before = (8_251_680u64, 1u64);
+        let after = (8_251_680u64, 2u64);
+        assert_eq!(
+            export_verdict(true, Some(true), Some(&before), Some(&after)),
+            ExportVerdict::Written
+        );
+        // Created: nothing was there before.
+        assert_eq!(
+            export_verdict(true, Some(true), None, Some(&after)),
+            ExportVerdict::Written
+        );
+        // Written straight into the live container, no staging file.
+        assert_eq!(
+            export_verdict(true, None, Some(&before), Some(&after)),
+            ExportVerdict::Written
+        );
+        assert_eq!(
+            export_verdict(true, Some(true), Some(&before), Some(&before)),
+            ExportVerdict::Unchanged
+        );
+        assert_eq!(
+            export_verdict(true, Some(true), Some(&before), None),
+            ExportVerdict::Unchanged
+        );
+    }
 
     /// The route is named by what is there, and only the overwrite destroys.
     #[test]

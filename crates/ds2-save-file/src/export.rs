@@ -21,12 +21,22 @@
 //! both: the `.sl2`'s length-and-mtime stamp has to CHANGE, and then the interlock has to be idle
 //! before a byte is copied. The first says the save landed, the second says nobody is still writing.
 //!
-//! # The deadline copies anyway, and says so
+//! # The game writes a seeded staging file, which then replaces the destination
+//!
+//! The game's save rebuilds the whole container and reads every slot it is not saving out of the
+//! file it is pointed at, so that file has to hold the live container before the save starts, or
+//! every other character is written as zeros. See [`ds2_save_file_core::staging_path`] for the
+//! measurement. The press copies the live container to `<destination>.ds2-export`, points the game
+//! at that, and renames it over the destination once the write has landed. An existing destination
+//! is untouched until then.
+//!
+//! # The deadline fails, and says so
 //!
 //! If the stamp never changes -- the game decided a save was unnecessary, or the request was dropped
-//! -- the wait gives up after `DEADLINE_TICKS` and copies the file that IS there, logging that the
-//! flush was never observed. The alternative is handing the player nothing after they named a
-//! destination, which is worse than handing them their last autosave and saying which it is.
+//! -- the wait gives up after `DEADLINE_TICKS`, deletes the staging file and logs a failure. It used
+//! to log `exported bytes=...` for whatever was already at the destination, which reported a write
+//! that never happened. A success line is written only when
+//! [`ds2_save_file_core::export_verdict`] says the destination itself changed.
 //!
 //! # The tick only runs while the pause menu is up
 //!
@@ -38,7 +48,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::SystemTime;
 
-use ds2_save_file_core::{Route, filter::FilterEntry, filter_string, with_extension};
+use ds2_save_file_core::{
+    ExportVerdict, Route, export_verdict, filter::FilterEntry, filter_string, is_live_container,
+    staging_path, with_extension,
+};
+use ds2_save_redirect::open_redirect;
 
 use crate::dialog::{Intent, Pick, Request};
 use crate::game::{self, Landed};
@@ -60,16 +74,18 @@ const _: () = assert!(DEADLINE_TICKS <= 60 * 30, "half a minute is a hang");
 
 /// An export that has been asked for and not yet written.
 struct Pending {
-    /// Where the game has been pointed, and where its own save will land. Already
-    /// extension-completed.
-    ///
-    /// There is no `source` beside this any more. The row detours the game's open of its container
-    /// to this path rather than letting it write its own and copying afterwards, so one file is
-    /// written by one operation and there is no second path to keep in step.
+    /// The file the player picked. Already extension-completed.
     destination: PathBuf,
-    /// `(length, modified)` of `destination` as it was before the save was requested. `None` when
-    /// the file could not be stat'd, in which case any successful stat counts as a change.
+    /// The seeded copy the game has been pointed at, which replaces `destination` once written.
+    /// `None` when `destination` is the live container itself, in which case the game is pointed
+    /// straight at it: that file already holds every slot.
+    staging: Option<PathBuf>,
+    /// `(length, modified)` of the file the game was pointed at, taken after it was seeded. `None`
+    /// when it could not be stat'd, in which case any successful stat counts as a change.
     stamp: Option<(u64, SystemTime)>,
+    /// `(length, modified)` of `destination` at the press, so the final line can check that the
+    /// destination itself changed.
+    destination_before: Option<(u64, SystemTime)>,
     /// The stamp has changed: the save the press asked for has been written.
     flushed: bool,
     ticks: u32,
@@ -223,6 +239,32 @@ pub fn save_to_file() {
         ));
         return;
     };
+    // The seed below copies the live container, and a copy taken while the game is writing it is a
+    // torn file the game would then read every other slot out of.
+    if !game::interlock_idle(system) {
+        log_line(format_args!(
+            "{LOG_PREFIX} export REFUSED reason=save-in-flight -- the game is reading or writing \
+             its container right now; nothing was requested"
+        ));
+        return;
+    }
+
+    // Seed the file the game will be pointed at with the live container, so the slots the save does
+    // not supply are read back out of it instead of being written as zeros. Not needed when the
+    // destination is the live container: that file already holds them.
+    let staging = (!is_live_container(&destination, &source)).then(|| staging_path(&destination));
+    if let Some(staging) = &staging
+        && let Err(reason) = seed(&source, staging)
+    {
+        log_line(format_args!(
+            "{LOG_PREFIX} export REFUSED reason=seed-failed staging={} error={reason} -- nothing \
+             was requested and {} is untouched",
+            staging.display(),
+            destination.display()
+        ));
+        return;
+    }
+    let target = staging.clone().unwrap_or_else(|| destination.clone());
 
     // Detour the save instead of duplicating it.
     //
@@ -244,20 +286,23 @@ pub fn save_to_file() {
     // container, and closing the window afterwards sent every later save there too (measured
     // 2026-09-26: `diverted=0`, the live container rewritten, the picked file never created). So
     // the export answers for the path the game asks for, and puts the swap's window back when done.
-    let previous = ds2_save_redirect::open_redirect::window();
+    let previous = open_redirect::window();
     let asked = match &previous {
         Some((asked, answer)) if same_path(answer, &source) => asked.clone(),
         _ => source.clone(),
     };
-    let before = game::stamp(&destination);
-    if !ds2_save_redirect::open_redirect::arm(&asked, &destination) {
+    let destination_before = game::stamp(&destination);
+    let before = game::stamp(&target);
+    if !open_redirect::arm(&asked, &target) {
         log_line(format_args!(
             "{LOG_PREFIX} export REFUSED reason=cannot-arm-redirect -- the save was NOT requested"
         ));
+        discard(staging.as_deref());
         return;
     }
     if !game::request_save(system) {
         restore_window(previous.as_ref());
+        discard(staging.as_deref());
         return;
     }
     let Ok(mut pending) = PENDING.lock() else {
@@ -268,18 +313,55 @@ pub fn save_to_file() {
         return;
     };
     log_line(format_args!(
-        "{LOG_PREFIX} export armed route={route:?} source={} destination={} -- waiting for the save \
-         to land",
+        "{LOG_PREFIX} export armed route={route:?} source={} destination={} staging={} -- waiting \
+         for the save to land",
         source.display(),
-        destination.display()
+        destination.display(),
+        staging.as_deref().map_or_else(
+            || "<none: the live container>".to_owned(),
+            |path| { path.display().to_string() }
+        )
     ));
     *pending = Some(Pending {
         destination,
+        staging,
         stamp: before,
+        destination_before,
         flushed: false,
         ticks: 0,
         restore: previous,
     });
+}
+
+/// Copy the live container to the staging file, and check the copy is whole.
+///
+/// Through [`open_redirect::bypass`]: a swap's window may be armed on the player's own container,
+/// and a destination in that folder must not be diverted onto the staged copy the swap is playing.
+fn seed(source: &Path, staging: &Path) -> Result<(), String> {
+    // Read and write rather than `std::fs::copy`. On Windows that is `CopyFileExW`, and the byte
+    // count it returns comes from a progress callback Wine does not call: measured 2026-09-26, a
+    // seed of the 8251680-byte container returned 0 and this refused a copy that had worked. The
+    // size is checked on disk instead, which is the thing the game will read.
+    open_redirect::bypass(|| {
+        let bytes = std::fs::read(source).map_err(|error| error.to_string())?;
+        std::fs::write(staging, &bytes).map_err(|error| error.to_string())?;
+        let written = std::fs::metadata(staging)
+            .map_err(|error| error.to_string())?
+            .len();
+        if written == bytes.len() as u64 {
+            Ok(())
+        } else {
+            let _ = std::fs::remove_file(staging);
+            Err(format!("wrote {written} of {} bytes", bytes.len()))
+        }
+    })
+}
+
+/// Delete a staging file the game was never going to finish writing.
+fn discard(staging: Option<&Path>) {
+    if let Some(staging) = staging {
+        let _ = open_redirect::bypass(|| std::fs::remove_file(staging));
+    }
 }
 
 /// Case-insensitive full-path equality, the comparison the redirect itself makes.
@@ -317,11 +399,15 @@ pub fn tick() {
     // Both signals, and neither alone: the stamp changing says the save landed, which is this row's
     // actual promise, and the interlock going idle says nobody is still writing, which is what stops
     // a torn copy. `game::poll_landed` owns that pair for both rows.
-    // The destination, not the source. The game's own open is diverted, so the bytes land in the
-    // file the player picked and the source may never be touched at all -- watching it would wait
-    // out the deadline on every export.
+    // The file the game was pointed at, not the live container. The game's own open is diverted, so
+    // the bytes land there and the live container may never be touched at all -- watching it would
+    // wait out the deadline on every export.
+    let target = pending
+        .staging
+        .clone()
+        .unwrap_or_else(|| pending.destination.clone());
     let landed = game::poll_landed(
-        &pending.destination,
+        &target,
         pending.stamp,
         &mut pending.flushed,
         pending.ticks,
@@ -332,43 +418,91 @@ pub fn tick() {
     }
     let pending = guard.take().expect("checked above");
     drop(guard);
-    finish(&pending, landed == Landed::TimedOut);
+    finish(&pending, landed == Landed::Yes);
 }
 
-/// Perform the copy and say exactly what happened.
-fn finish(pending: &Pending, timed_out: bool) {
-    let note = if timed_out && !pending.flushed {
-        " -- THE FLUSH WAS NEVER OBSERVED: this is the last save the game wrote, not the state you \
-         pressed the row in"
-    } else {
-        ""
-    };
-    // The copy must not go through the swap's window. That window is armed on the path the game's
-    // directory builder produced, and with `[save_redirect] directory` pointing at the folder the
-    // player exports into, the destination is that same path -- so the destination open was
-    // diverted to the source and `std::fs::copy` truncated the save to nothing. Measured
-    // 2026-09-24: `exported bytes=0`, staged container left empty behind it.
-    //
-    // The refusal above cannot catch this. It compares two paths that genuinely differ, and what
-    // makes them one file is a detour underneath both.
+/// Move the written staging file over the destination, and say exactly what happened.
+///
+/// `completed` is `Landed::Yes`: the file changed and the game's interlock is idle. A deadline
+/// that passed with the file changed but the interlock still busy is not completed -- promoting a
+/// file the game may still be writing would ship a torn container -- so the staging file is left
+/// where it is and named in the log.
+fn finish(pending: &Pending, completed: bool) {
     // Close this export's window first, so the next save the game makes goes back to where it went
     // before the press -- its own container, or a swap's staged copy -- even if the reporting below
     // were to fail.
-    let diverted = ds2_save_redirect::open_redirect::disarm();
+    let diverted = open_redirect::disarm();
     restore_window(pending.restore.as_ref());
-    let bytes = std::fs::metadata(&pending.destination).map(|meta| meta.len());
-    match bytes {
-        Ok(bytes) => log_line(format_args!(
-            "{LOG_PREFIX} exported bytes={bytes} destination={} diverted={diverted} ticks={}{note} \
-             -- written by the game itself, not copied",
-            pending.destination.display(),
-            pending.ticks
+
+    let promoted = match (&pending.staging, completed) {
+        (None, _) => None,
+        (Some(staging), true) => Some(
+            // Through the bypass for the reason `seed` is: the destination may be a path a swap's
+            // window answers with something else.
+            open_redirect::bypass(|| std::fs::rename(staging, &pending.destination))
+                .map_err(|error| {
+                    log_line(format_args!(
+                        "{LOG_PREFIX} export rename failed staging={} destination={} \
+                         error={error}",
+                        staging.display(),
+                        pending.destination.display()
+                    ));
+                })
+                .is_ok(),
+        ),
+        (Some(staging), false) => {
+            // Not written, or not finished: nothing here is the save the player pressed for. A
+            // staging file the game did write, and did not finish, is kept so the bytes are not
+            // lost; one it never touched is only a copy of the live container and is deleted.
+            if !pending.flushed {
+                discard(Some(staging));
+            }
+            Some(false)
+        }
+    };
+    let after = game::stamp(&pending.destination);
+    let verdict = export_verdict(
+        completed,
+        promoted,
+        pending.destination_before.as_ref(),
+        after.as_ref(),
+    );
+    let destination = pending.destination.display();
+    let ticks = pending.ticks;
+    match verdict {
+        ExportVerdict::Written => log_line(format_args!(
+            "{LOG_PREFIX} exported bytes={} destination={destination} diverted={diverted} \
+             ticks={ticks} -- written by the game into a copy of the live container, so every \
+             slot it did not save is the live container's own",
+            after.map_or(0, |(length, _)| length)
         )),
-        Err(error) => log_line(format_args!(
-            "{LOG_PREFIX} export FAILED error={error} destination={} diverted={diverted} \
-             ticks={} -- the game was asked to save there and the file is not readable",
-            pending.destination.display(),
-            pending.ticks
+        ExportVerdict::NeverWritten if pending.flushed => log_line(format_args!(
+            "{LOG_PREFIX} export FAILED reason=save-unfinished destination={destination} \
+             diverted={diverted} ticks={ticks} -- the game started writing and its interlock never \
+             went idle; the partial file is left at {} and {destination} is untouched",
+            pending.staging.as_deref().map_or_else(
+                || "<none: the live container>".to_owned(),
+                |path| path.display().to_string()
+            )
+        )),
+        ExportVerdict::NeverWritten => log_line(format_args!(
+            "{LOG_PREFIX} export FAILED reason=never-written destination={destination} \
+             diverted={diverted} ticks={ticks} -- the game did not write the file it was pointed \
+             at before the deadline, so {destination} is untouched and nothing was exported"
+        )),
+        ExportVerdict::NotPromoted => log_line(format_args!(
+            "{LOG_PREFIX} export FAILED reason=rename destination={destination} \
+             diverted={diverted} ticks={ticks} -- the game wrote the save, and it could not replace \
+             the destination; it is left at {}",
+            pending.staging.as_deref().map_or_else(
+                || "<none: the live container>".to_owned(),
+                |path| path.display().to_string()
+            )
+        )),
+        ExportVerdict::Unchanged => log_line(format_args!(
+            "{LOG_PREFIX} export FAILED reason=destination-unchanged destination={destination} \
+             diverted={diverted} ticks={ticks} -- every step reported success and the \
+             destination's length and modified time are what they were at the press"
         )),
     }
 }
