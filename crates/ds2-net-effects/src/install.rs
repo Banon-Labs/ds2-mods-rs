@@ -2,7 +2,9 @@
 //! the id move while the game runs.
 
 use core::ffi::c_void;
+use core::mem::size_of;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering};
 
 use ds2_hook::{MH_EnableHook, MH_Initialize, MH_STATUS, MhHook};
@@ -12,9 +14,10 @@ use ds2_hotkey_config::live::AtomicChord;
 use ds2_hotkey_config::reload::{FileChange, HotFile};
 
 use crate::{
-    CONFIG_KEY_EFFECT, CONFIG_KEY_KEYBOARD, CONFIG_KEY_NETWORK, CONFIG_SECTION, DEFAULT_EFFECT,
-    DEFAULT_KEY, EffectSetting, KeySetting, LOG_PREFIX, chord_held, default_chord, effect_setting,
-    is_press, key_setting, network_setting, request_bytes, sp_effect_ctrl,
+    ApplyReason, CONFIG_KEY_EFFECT, CONFIG_KEY_KEYBOARD, CONFIG_KEY_NETWORK, CONFIG_SECTION,
+    DEFAULT_EFFECT, DEFAULT_KEY, EffectSetting, KeySetting, LOG_PREFIX, Toggle, chord_held,
+    default_chord, effect_setting, is_press, key_setting, network_setting, request_bytes,
+    sp_effect_active, sp_effect_ctrl,
 };
 
 unsafe extern "system" {
@@ -205,33 +208,49 @@ fn vk_down(vk: i32) -> bool {
     unsafe { GetAsyncKeyState(vk) < 0 }
 }
 
-/// Apply the configured effect to the local player.
+fn read_usize(addr: usize) -> Option<usize> {
+    // SAFETY: a fault-tolerant read; an unmapped address is `None`, not a crash.
+    unsafe { ds2_game_base::mem::safe_read_usize(addr) }
+}
+
+/// `n` consecutive pointer-sized values, in one read.
+fn read_words(addr: usize, n: usize) -> Option<Vec<usize>> {
+    let mut bytes = vec![0u8; n * size_of::<usize>()];
+    // SAFETY: `read_bytes` faults safely; `bytes` is a live buffer of the length it is given.
+    if !unsafe { ds2_game_base::mem::read_bytes(addr, &mut bytes) } {
+        return None;
+    }
+    let (words, _) = bytes.as_chunks::<{ size_of::<usize>() }>();
+    Some(
+        words
+            .iter()
+            .map(|word| usize::from_le_bytes(*word))
+            .collect(),
+    )
+}
+
+fn read_i32(addr: usize) -> Option<i32> {
+    // SAFETY: a fault-tolerant read; an unmapped address is `None`, not a crash.
+    unsafe { ds2_game_base::mem::safe_read_i32(addr) }
+}
+
+/// The toggle. Only the `Present` consumer touches it, on the game thread; the lock is for Rust,
+/// not for a second thread.
+static TOGGLE: Mutex<Toggle> = Mutex::new(Toggle::new());
+
+/// Re-applies since the toggle last went on, reported with each one.
+static REAPPLIES: AtomicU64 = AtomicU64::new(0);
+
+/// Apply `id` to the controller `ctrl`.
 ///
 /// # Safety
 ///
-/// Game thread only: called from the `Present` clock's consumer.
-unsafe fn apply_effect() {
+/// Game thread only: called from the `Present` clock's consumer, with a controller it just walked.
+unsafe fn apply_effect(ctrl: usize, id: i32, reason: ApplyReason) {
     let apply = APPLY.load(Ordering::Acquire);
-    let global = GAME_MANAGER.load(Ordering::Acquire);
-    if apply == 0 || global == 0 {
+    if apply == 0 {
         return;
     }
-    let id = EFFECT.load(Ordering::Relaxed);
-    let ctrl = match sp_effect_ctrl(global, |addr| {
-        // SAFETY: a fault-tolerant read; an unmapped address is `None`, not a crash.
-        unsafe { ds2_game_base::mem::safe_read_usize(addr) }
-    }) {
-        Ok(ctrl) => ctrl,
-        Err(link) => {
-            if !MISSING_LOGGED.swap(true, Ordering::Relaxed) {
-                log(format_args!(
-                    "{LOG_PREFIX} press ignored -- {link:?} is null (no character loaded?); \
-                     later presses like it are not logged"
-                ));
-            }
-            return;
-        }
-    };
     let request = RequestBuf(request_bytes(id));
     let network = NETWORK.load(Ordering::Relaxed);
     let withheld_before = WITHHELD.load(Ordering::Relaxed);
@@ -248,21 +267,89 @@ unsafe fn apply_effect() {
     };
     WITHHOLD.store(false, Ordering::Relaxed);
     let withheld = WITHHELD.load(Ordering::Relaxed) - withheld_before;
+    let why = match reason {
+        ApplyReason::Enabled => "toggled-on".to_string(),
+        ApplyReason::Expired => {
+            format!(
+                "re-apply #{}",
+                REAPPLIES.fetch_add(1, Ordering::Relaxed) + 1
+            )
+        }
+    };
     log(format_args!(
-        "{LOG_PREFIX} applied effect={id} ctrl=0x{ctrl:016x} returned=0x{returned:x} \
+        "{LOG_PREFIX} applied effect={id} reason={why} ctrl=0x{ctrl:016x} returned=0x{returned:x} \
          network={network} packets-withheld={withheld}"
     ));
 }
 
-/// The `Present` consumer. Reads the key and applies the effect on a fresh press.
+/// The `Present` consumer. Reads the key, flips the toggle on a fresh press, and while the toggle
+/// is on looks for the effect on the player and applies it again when it has run out.
 fn on_frame() {
     let down = game_has_focus()
         && KEY_BINDING
             .load()
             .is_some_and(|chord| chord_held(chord, vk_down));
-    if is_press(WAS_DOWN.swap(down, Ordering::Relaxed), down) {
-        // SAFETY: the `Present` clock runs its consumers on the game thread.
-        unsafe { apply_effect() };
+    let pressed = is_press(WAS_DOWN.swap(down, Ordering::Relaxed), down);
+    let mut toggle = TOGGLE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !pressed && !toggle.enabled() {
+        return;
+    }
+    let global = GAME_MANAGER.load(Ordering::Acquire);
+    if global == 0 {
+        return;
+    }
+    let id = EFFECT.load(Ordering::Relaxed);
+    let ctrl = sp_effect_ctrl(global, read_usize);
+    if let Err(link) = ctrl
+        && pressed
+        && !MISSING_LOGGED.swap(true, Ordering::Relaxed)
+    {
+        log(format_args!(
+            "{LOG_PREFIX} {link:?} is null (no character loaded?) -- the toggle still flips, and \
+             the effect is applied once a character is; later presses like it are not logged"
+        ));
+    }
+    let active = ctrl
+        .ok()
+        .and_then(|ctrl| sp_effect_active(ctrl, id, read_usize, read_words, read_i32));
+    let frame = toggle.frame(pressed, active);
+    match frame.toggled {
+        Some(true) => {
+            REAPPLIES.store(0, Ordering::Relaxed);
+            log(format_args!(
+                "{LOG_PREFIX} ===== TOGGLE ON ===== effect={id} -- applying it now and again each \
+                 time it runs out, until the key is pressed again"
+            ));
+        }
+        Some(false) => log(format_args!(
+            "{LOG_PREFIX} ===== TOGGLE OFF ===== effect={id} -- no further re-apply ({} re-applies \
+             this time on)",
+            REAPPLIES.load(Ordering::Relaxed)
+        )),
+        None => {}
+    }
+    if frame.seen {
+        log(format_args!("{LOG_PREFIX} effect={id} seen on the player"));
+    }
+    if frame.expired {
+        log(format_args!(
+            "{LOG_PREFIX} effect={id} expired -- no longer on the player"
+        ));
+    }
+    if frame.never_seen {
+        log(format_args!(
+            "{LOG_PREFIX} effect={id} was applied but never showed up on the player within {} \
+             frames -- not re-applying until the key is pressed again",
+            crate::SIGHTING_FRAMES
+        ));
+    }
+    if let (Some(reason), Ok(ctrl)) = (frame.apply, ctrl) {
+        // SAFETY: the `Present` clock runs its consumers on the game thread, and `ctrl` was walked
+        // on this frame.
+        unsafe { apply_effect(ctrl, id, reason) };
+        toggle.applied();
     }
 }
 
