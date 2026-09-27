@@ -102,8 +102,11 @@ static ENABLED: AtomicBool = AtomicBool::new(true);
 /// The key that flips [`ENABLED`]. Unset means unbound.
 static KEY_BINDING: AtomicChord = AtomicChord::unset();
 
-/// Whether the key was down last frame, so a hold is one press.
+/// Whether the key was down at the last poll, so a hold is one press.
 static WAS_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// A press the key thread saw and the game-thread tick has not acted on yet.
+static PRESSED: AtomicBool = AtomicBool::new(false);
 
 /// `GameManagerImp`'s address (the global that holds the pointer), resolved at install.
 static GAME_MANAGER: AtomicUsize = AtomicUsize::new(0);
@@ -297,6 +300,7 @@ pub unsafe fn install(test_cap: Option<u8>, key: Option<Chord>) -> Outcome {
             return refused;
         }
     };
+    std::thread::spawn(poll_key);
     let key = key_name();
     log(format_args!(
         "{LOG_PREFIX} installed weapon-update=0x{weapon_site:016x} tick=0x{tick_site:016x} (shared) \
@@ -562,14 +566,32 @@ fn clamp_request(player: usize, request: usize) {
 // The tick, and the push.
 // ---------------------------------------------------------------------------------------------
 
+/// How often [`poll_key`] reads the keyboard: a little faster than a frame, so no press is missed.
+const KEY_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// Read the key on a thread of our own and hand fresh presses to the tick through [`PRESSED`].
+///
+/// Not on the game thread. The first build read `GetAsyncKeyState` inside the net session update
+/// tick, and the one Frida attach that hooked `GetAsyncKeyState` in that build froze the game
+/// before it reported attached. Whether the call site caused that is not proven. The game thread
+/// has no need to call into user32 for a key either way.
+fn poll_key() {
+    loop {
+        std::thread::sleep(KEY_POLL);
+        let down = game_has_focus() && KEY_BINDING.load().is_some_and(chord_down);
+        if !WAS_DOWN.swap(down, Ordering::Relaxed) && down {
+            PRESSED.store(true, Ordering::Release);
+        }
+    }
+}
+
 /// Registered with `ds2-net-tick` to run after the net session update, every frame on the game
 /// thread. Whatever the update holds, it has let go of by now.
 ///
-/// The key is read every frame, so one press is one toggle. A toggle forces a check in the same
-/// frame, so turning the feature off restores at once and turning it on caps at once.
+/// A press handed over by [`poll_key`] flips the feature and forces a check in the same frame, so
+/// turning it off restores at once and turning it on caps at once.
 fn tick(_session: usize) {
-    let down = game_has_focus() && KEY_BINDING.load().is_some_and(chord_down);
-    let pressed = !WAS_DOWN.swap(down, Ordering::Relaxed) && down;
+    let pressed = PRESSED.swap(false, Ordering::AcqRel);
     if pressed {
         let on = !ENABLED.fetch_xor(true, Ordering::AcqRel);
         let key = key_name();
