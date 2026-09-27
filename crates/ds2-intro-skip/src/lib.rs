@@ -21,6 +21,13 @@
 //! So this hooks `enter`, lets the original run, and then writes that same terminal phase. The
 //! transition is one the game performs on itself; nothing here invents a state.
 //!
+//! # Except the terms, which the player has to accept once
+//!
+//! The user-policy screen is hooked and logged but never written to. On a profile that accepted
+//! the terms, its own early-out already exits; on one that never did -- a brand-new save, which
+//! for Seamless Co-op is its own `.co2` -- the page is real and waits for the player. Forcing its
+//! phase over the page left the terms drawn on top of a live title menu.
+//!
 //! # Why the original still runs
 //!
 //! Skipping it entirely would be a cleaner "no logo at all", and it is tempting because two of the

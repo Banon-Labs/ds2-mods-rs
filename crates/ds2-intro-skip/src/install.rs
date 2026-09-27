@@ -47,18 +47,17 @@ struct Screen {
     /// `FeSubStateTitleUserPolicy` guards on its phase. Nulling a scene for either of those would
     /// not be matched by their close, so it stays an opt-in per class rather than a shared trick.
     scene_offset: Option<usize>,
-    /// A phase the original `enter` can leave that is already an exit, kept instead of being
-    /// overwritten with [`ds2_rva::TITLE_SUBSTATE_PHASE_DONE`].
+    /// Whatever phase the original `enter` leaves stands; nothing is written over it.
     ///
-    /// Only `FeSubStateTitleUserPolicy` has one: 3 is its offline exit, to `0x2a` and then
-    /// `TopMenu` with no login. `ds2-offline` removes the branch that skips it, so on an offline run
-    /// the original leaves 3. Writing 4 over it put the boot back on the login path, which is
-    /// what a run on 2026-09-26 logged as `left-by-original=3` followed by `0x39`.
-    keep_phase: Option<u32>,
+    /// Only `FeSubStateTitleUserPolicy`, whose skip belongs to the player. When the terms were
+    /// accepted, its own early-outs already exit -- 3 offline (to `0x2a` and `TopMenu` with no
+    /// login), 4 online -- and writing 4 over the 3 put the boot back on the login path (a run on
+    /// 2026-09-26 logged `left-by-original=3` followed by `0x39`). When they were never accepted,
+    /// as on a brand-new Seamless Co-op save, `enter` builds the terms page and leaves 1, and the
+    /// player has to be allowed to accept them. Two runs on 2026-09-27 wrote 4 over that 1, and
+    /// the terms page stayed on screen over a live title menu.
+    leave_phase: bool,
 }
-
-/// `FeSubStateTitleUserPolicy`'s offline exit. See [`Screen::keep_phase`].
-const USER_POLICY_PHASE_OFFLINE: u32 = 3;
 
 /// The three screens, in the order they appear at boot.
 const SCREENS: [Screen; 3] = [
@@ -67,21 +66,21 @@ const SCREENS: [Screen; 3] = [
         enter_rva: ds2_rva::FE_SUBSTATE_WARNING_NO_COPY_ENTER,
         phase_offset: ds2_rva::FE_SUBSTATE_PHASE_OFFSET,
         scene_offset: None,
-        keep_phase: None,
+        leave_phase: false,
     },
     Screen {
         name: "logo",
         enter_rva: ds2_rva::FE_SUBSTATE_TITLE_LOGO_ENTER,
         phase_offset: ds2_rva::FE_SUBSTATE_TITLE_LOGO_PHASE_OFFSET,
         scene_offset: Some(ds2_rva::FE_SUBSTATE_TITLE_LOGO_SCENE_OFFSET),
-        keep_phase: None,
+        leave_phase: false,
     },
     Screen {
         name: "user-policy",
         enter_rva: ds2_rva::FE_SUBSTATE_TITLE_USER_POLICY_ENTER,
         phase_offset: ds2_rva::FE_SUBSTATE_PHASE_OFFSET,
         scene_offset: None,
-        keep_phase: Some(USER_POLICY_PHASE_OFFLINE),
+        leave_phase: true,
     },
 ];
 
@@ -155,16 +154,21 @@ unsafe fn skip(index: usize, this: *mut u8) {
     // SAFETY: the original has just run against this same pointer, so the object is live and at
     // least as large as the phase field the game itself writes at this offset.
     let left_by_original = unsafe { this.add(screen.phase_offset).cast::<u32>().read() };
-    let value = if screen.keep_phase == Some(left_by_original) {
-        left_by_original
-    } else {
-        ds2_rva::TITLE_SUBSTATE_PHASE_DONE
-    };
+    let n = FIRED[index].fetch_add(1, Ordering::Relaxed) + 1;
+    if screen.leave_phase {
+        // 1 is the terms page on screen, waiting for the player; 3 and 4 are the game's own exits.
+        log(format_args!(
+            "{LOG_PREFIX} left to the game screen={} phase-offset=0x{:x} \
+             left-by-original={left_by_original} count={n}",
+            screen.name, screen.phase_offset,
+        ));
+        return;
+    }
+    let value = ds2_rva::TITLE_SUBSTATE_PHASE_DONE;
     // SAFETY: same object, same field, just read successfully above.
     unsafe {
         this.add(screen.phase_offset).cast::<u32>().write(value);
     }
-    let n = FIRED[index].fetch_add(1, Ordering::Relaxed) + 1;
     // The suppressed scene pointer is logged because it is the difference between "the screen was
     // fast-forwarded" and "the screen never played". A zero here on the logo would mean the scene
     // was already null and the animation was never this crate's to stop.
