@@ -79,6 +79,8 @@ all_halts contains decision if { some decision in data.cupcake.policies.claude.n
 
 all_halts contains decision if { some decision in data.cupcake.policies.claude.no_launch_deferral.halt }
 
+all_halts contains decision if { some decision in data.cupcake.policies.claude.no_unspent_run_evidence.halt }
+
 all_halts contains decision if { some decision in data.cupcake.policies.claude.no_shouting_at_turn_end.halt }
 
 all_halts contains decision if { some decision in data.cupcake.policies.claude.no_stall_on_friction.halt }

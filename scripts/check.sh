@@ -292,6 +292,10 @@ else
   # game is in use, which subagent prompts forbid one, what counts as a launch, and which session
   # commits are game code left unrun. `opa test` above only pins that a spoken signal halts.
   python3 scripts/test-launch-deferral-signal.py | grep -v '^  ok '
+  # Which machine states count as unspent run evidence (game alive, clean attached build, on no
+  # remote branch, game code) is decided in scripts/cupcake_unspent_evidence.py; `opa test` above
+  # only pins that a spoken signal halts.
+  python3 scripts/cupcake_unspent_evidence.py --selftest | tail -1
   # And the same half for the property-grant guard, whose whole decision is idiom recognition: a
   # closing sentence that stages the agent handing the user control over something already theirs.
   # The lexicon and the quoting carve-out live in scripts/cupcake_property_grant.py; `opa test`
