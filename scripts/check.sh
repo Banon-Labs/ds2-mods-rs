@@ -93,6 +93,10 @@ echo "== ds2-sl2 section walk =="
 python3 scripts/ds2-sl2.py --selftest >/dev/null
 echo "  ds2-sl2.py: OK"
 
+echo "== teardown after an evidence push =="
+python3 scripts/ds2-teardown-after-evidence-push.py --selftest >/dev/null
+echo "  ds2-teardown-after-evidence-push.py: OK"
+
 echo "== rustfmt =="
 # NOT `cargo fmt --all`. `--all` is documented as "format all packages, AND ALSO THEIR LOCAL
 # PATH-BASED DEPENDENCIES", so the moment a crate here depended on `../dearxan` the gate started

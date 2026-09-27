@@ -23,6 +23,15 @@
             "command": "bash $CLAUDE_PROJECT_DIR/scripts/cupcake-hook.sh"
           }
         ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 $CLAUDE_PROJECT_DIR/scripts/ds2-teardown-after-evidence-push.py"
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
