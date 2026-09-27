@@ -12,7 +12,8 @@
 //!
 //! # Where the key is read, and why there
 //!
-//! In a detour on that same net session update, before the original runs. So the press lands on
+//! On that same net session update, before the original runs, as a callback on the one detour
+//! `ds2-net-tick` owns there (shared with `ds2-weapon-sync`). So the press lands on
 //! the game thread (the commit calls into the sound and input managers and is not safe from
 //! anywhere else), and the original sees the new byte in the same frame the key went down.
 //!

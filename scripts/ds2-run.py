@@ -365,6 +365,18 @@ KEY_SOUL_MEMORY_GUARD_ENABLED = "enabled"
 #: Mirrors `LOG_PREFIX` in `crates/ds2-soul-memory-guard/src/lib.rs`.
 SOUL_MEMORY_GUARD_LOG_PREFIX = "ds2-soul-memory-guard:"
 
+#: Mirrors `CONFIG_SECTION`/`KEY_ENABLED`/`KEY_TEST_CAP` in `crates/ds2-loader/src/weapon_sync.rs`.
+#: OFF by default here, matching the DLL; `--weapon-sync` turns it on.
+WEAPON_SYNC_SECTION = "weapon_sync"
+KEY_WEAPON_SYNC_ENABLED = "enabled"
+KEY_WEAPON_SYNC_TEST_CAP = "test_cap"
+KEY_WEAPON_SYNC_KEY = "key"
+#: Mirrors `DEFAULT_KEY` in `crates/ds2-weapon-sync/src/lib.rs`. F7 is inventory sort, F8 voice chat,
+#: F9 net effects; F6 is bound by nothing in this repo.
+WEAPON_SYNC_DEFAULT_KEY = "F6"
+#: Mirrors `LOG_PREFIX` in `crates/ds2-weapon-sync/src/lib.rs`.
+WEAPON_SYNC_LOG_PREFIX = "ds2-weapon-sync:"
+
 #: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/hp_gauge.rs`.
 #:
 #: ON here and off in the DLL: the DLL's default is the game as shipped, and this launcher's is the
@@ -1506,6 +1518,8 @@ def config_text(
     menu_rows_no_save: bool = False,
     launcher_dlls: tuple[str, ...] = (),
     soul_memory_guard: bool = False,
+    weapon_sync: bool = False,
+    weapon_sync_test_cap: int | None = None,
     net_effects: bool = False,
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
@@ -2066,6 +2080,18 @@ def config_text(
 # `--soul-memory-guard`. Grep the log for `{SOUL_MEMORY_GUARD_LOG_PREFIX}`.
 {KEY_SOUL_MEMORY_GUARD_ENABLED} = {str(soul_memory_guard).lower()}
 
+[{WEAPON_SYNC_SECTION}]
+# `enabled` is startup-only. While another player is in the world, `ds2-weapon-sync` lowers every
+# weapon of ours above the highest weapon level any of them has equipped, and puts them back when
+# they are gone. Only the character's equipment copies change; the inventory, which the save keeps,
+# is never written. It shares the net session update with `[voice_chat]`; both can be on. Off
+# unless `--weapon-sync`. `key` turns it on and off in game (default `{WEAPON_SYNC_DEFAULT_KEY}`,
+# live-reloaded). `test_cap` pretends a remote player at that level is present
+# (`--weapon-sync-test-cap N`), also live. Grep the log for `{WEAPON_SYNC_LOG_PREFIX}`.
+{KEY_WEAPON_SYNC_ENABLED} = {str(weapon_sync).lower()}
+{KEY_WEAPON_SYNC_KEY} = "{WEAPON_SYNC_DEFAULT_KEY}"
+{"" if weapon_sync_test_cap is None else f"{KEY_WEAPON_SYNC_TEST_CAP} = {weapon_sync_test_cap}"}
+
 [{SEAMLESS_SECTION}]
 # A SECOND MOD, written by someone else, loaded into this same process.
 #
@@ -2292,6 +2318,8 @@ def write_config(
     menu_rows_no_save: bool = False,
     launcher_dlls: tuple[str, ...] = (),
     soul_memory_guard: bool = False,
+    weapon_sync: bool = False,
+    weapon_sync_test_cap: int | None = None,
     net_effects: bool = False,
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
@@ -2336,6 +2364,8 @@ def write_config(
         menu_rows_no_save,
         launcher_dlls,
         soul_memory_guard=soul_memory_guard,
+        weapon_sync=weapon_sync,
+        weapon_sync_test_cap=weapon_sync_test_cap,
         net_effects=net_effects,
     )
     path.write_text(text, encoding="utf-8")
@@ -2452,6 +2482,8 @@ def dry_run(
     menu_rows_no_save: bool = False,
     launcher_dlls: tuple[str, ...] = (),
     soul_memory_guard: bool = False,
+    weapon_sync: bool = False,
+    weapon_sync_test_cap: int | None = None,
     net_effects: bool = False,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
@@ -2514,6 +2546,8 @@ def dry_run(
             menu_rows_no_save,
             launcher_dlls,
             soul_memory_guard=soul_memory_guard,
+            weapon_sync=weapon_sync,
+            weapon_sync_test_cap=weapon_sync_test_cap,
             net_effects=net_effects,
         ):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
@@ -2572,6 +2606,8 @@ def dry_run(
                 menu_rows_no_save=menu_rows_no_save,
                 launcher_dlls=launcher_dlls,
                 soul_memory_guard=soul_memory_guard,
+                weapon_sync=weapon_sync,
+                weapon_sync_test_cap=weapon_sync_test_cap,
                 net_effects=net_effects,
             ),
             indent="[dry-run]   | ",
@@ -3131,6 +3167,8 @@ def launch(
     menu_rows_no_save: bool = False,
     launcher_dlls: tuple[str, ...] = (),
     soul_memory_guard: bool = False,
+    weapon_sync: bool = False,
+    weapon_sync_test_cap: int | None = None,
     net_effects: bool = False,
 ) -> int:
     report_environment(probe)
@@ -3188,6 +3226,8 @@ def launch(
         menu_rows_no_save,
         launcher_dlls,
         soul_memory_guard=soul_memory_guard,
+        weapon_sync=weapon_sync,
+        weapon_sync_test_cap=weapon_sync_test_cap,
         net_effects=net_effects,
     )
     print(f"[config] {config_path}")
@@ -4870,6 +4910,29 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--weapon-sync",
+        dest="weapon_sync",
+        action="store_true",
+        help=(
+            "while another player is in the world, lower our weapons above the highest weapon "
+            "level any of them has equipped, and restore them when they leave. The inventory (what "
+            "the save keeps) is never written. F6 (the [weapon_sync] key) turns it on and off in "
+            "game. Runs alongside --voice-chat: both share one net session update detour."
+        ),
+    )
+    parser.add_argument(
+        "--weapon-sync-test-cap",
+        dest="weapon_sync_test_cap",
+        type=int,
+        choices=range(0, 11),
+        metavar="N",
+        default=None,
+        help=(
+            "with --weapon-sync: pretend a remote player whose highest weapon is +N is present, so "
+            "the cap and the restore can be tested alone. Implies --weapon-sync."
+        ),
+    )
+    parser.add_argument(
         "--soul-memory-guard",
         dest="soul_memory_guard",
         action="store_true",
@@ -5104,6 +5167,9 @@ def main() -> int:
     if args.crash_test < 0:
         parser.error("--crash-test takes a non-negative number of milliseconds")
 
+    if args.weapon_sync_test_cap is not None:
+        args.weapon_sync = True
+
     # THE INTERLOCK, applied here rather than left to the DLL to refuse at runtime. `[offline]`
     # fronts the socket imports, so a co-op mod under it loads, reports success and never connects
     # -- and that is indistinguishable on screen from a co-op mod that is simply broken. Turning
@@ -5207,6 +5273,8 @@ def main() -> int:
             args.menu_rows_no_save,
             tuple(args.launcher_dll),
             soul_memory_guard=args.soul_memory_guard,
+            weapon_sync=args.weapon_sync,
+            weapon_sync_test_cap=args.weapon_sync_test_cap,
             net_effects=args.net_effects,
         )
     return launch(
@@ -5250,6 +5318,8 @@ def main() -> int:
         args.menu_rows_no_save,
         tuple(args.launcher_dll),
         soul_memory_guard=args.soul_memory_guard,
+        weapon_sync=args.weapon_sync,
+        weapon_sync_test_cap=args.weapon_sync_test_cap,
         net_effects=args.net_effects,
     )
 

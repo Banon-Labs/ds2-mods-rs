@@ -343,6 +343,12 @@ def main():
                     help="list the ten character slots and which hold a character")
     ap.add_argument("--key", metavar="HEX",
                     help="use this AES-128 key (32 hex chars) instead of either built-in")
+    ap.add_argument("--compare", metavar="OTHER",
+                    help="decrypt OTHER too and say, entry by entry, whether its payload is "
+                         "byte-identical to this save's. Exits 1 if any entry differs. Written to "
+                         "check a Save Game to File export against the container it came from: "
+                         "every entry the game did not rewrite has to be SAME, and an export that "
+                         "zero-filled the other slots shows DIFF with other-nonzero near zero")
     args = ap.parse_args()
     if args.selftest:
         return selftest()
@@ -385,6 +391,28 @@ def main():
             extra = f"  stats={sum(attrs):<4} name={name}" if state != "empty" else ""
             print(f"slot {slot} {state:<11}{extra}")
         return 0
+
+    if args.compare:
+        other = Path(args.compare).read_bytes()
+        assert other[:4] == b"BND4", f"{args.compare} is not a BND4 container"
+        theirs = {name: (off, size) for _i, name, off, size in entries(other)}
+        differ = 0
+        print(f"{'name':<13} {'verdict':<7} {'this-nonzero':>12} {'other-nonzero':>13}")
+        for _i, name, off, size in entries(b):
+            mine = decrypt(b[off + 32 : off + size], b[off + 16 : off + 32], key_hex)
+            if name not in theirs:
+                print(f"{name:<13} MISSING {sum(1 for x in mine if x):12}")
+                differ += 1
+                continue
+            o_off, o_size = theirs[name]
+            yours = decrypt(other[o_off + 32 : o_off + o_size], other[o_off + 16 : o_off + 32],
+                            key_hex)
+            same = mine == yours
+            differ += not same
+            print(f"{name:<13} {'SAME' if same else 'DIFF':<7} {sum(1 for x in mine if x):12} "
+                  f"{sum(1 for x in yours if x):13}")
+        print(f"\nentries that differ: {differ}")
+        return 1 if differ else 0
 
     if args.batches:
         groups = {}

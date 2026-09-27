@@ -673,6 +673,7 @@ dependencies = [
  "ds2-seamless",
  "ds2-soul-memory-guard",
  "ds2-voice-chat",
+ "ds2-weapon-sync",
  "log",
 ]
 
@@ -697,6 +698,15 @@ dependencies = [
  "ds2-rva",
  "hudhook",
  "serde_json",
+]
+
+[[package]]
+name = "ds2-net-tick"
+version = "0.1.0"
+dependencies = [
+ "ds2-game-base",
+ "ds2-hook",
+ "ds2-rva",
 ]
 
 [[package]]
@@ -796,6 +806,18 @@ dependencies = [
  "ds2-game-base",
  "ds2-hook",
  "ds2-hotkey-config",
+ "ds2-net-tick",
+ "ds2-rva",
+]
+
+[[package]]
+name = "ds2-weapon-sync"
+version = "0.1.0"
+dependencies = [
+ "ds2-game-base",
+ "ds2-hook",
+ "ds2-hotkey-config",
+ "ds2-net-tick",
  "ds2-rva",
 ]
 
