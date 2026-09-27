@@ -376,9 +376,10 @@ HP_GAUGE_LOG_PREFIX = "ds2-hp-gauge:"
 
 #: `[seamless]` -- loading a SECOND, THIRD-PARTY mod's DLL into the same process.
 #:
-#: Nothing here ships that mod and nothing here copies it. The key is a path; the player installs
-#: the other mod themselves, from its own download, under its own licence, next to
-#: `DarkSoulsII.exe`. If the file is not there the DLL logs that and carries on without it.
+#: Nothing here ships that mod. The key is a path; the player downloads the other mod themselves,
+#: under its own licence. On this machine `ensure_seamless_installed` unpacks the owner's own
+#: download (`SEAMLESS_ARCHIVE`) next to `DarkSoulsII.exe` when the pinned build is not already
+#: there. If the file is not there the DLL logs that and carries on without it.
 #:
 #: OFF by default, and unlike every other feature its key is read as opt-IN: only an exact `true`
 #: arms it, because the failure direction of a typo here is "a foreign binary was loaded into the
@@ -395,6 +396,60 @@ SEAMLESS_LOG_PREFIX = "ds2-seamless:"
 SEAMLESS_SETTINGS_NAME = "ds2sc_settings.ini"
 #: The key in that file that renames the save container. Mirrored in `crates/ds2-seamless`.
 KEY_SEAMLESS_SAVE_EXTENSION = "save_file_extension"
+#: The key whose empty value stops that mod's boot on a dialog.
+KEY_SEAMLESS_PASSWORD = "cooppassword"
+
+#: The Seamless build this machine plays, pinned by hash and reinstalled from the owner's own
+#: download on every launch.
+#:
+#: 0.0.1, the build that sat in the game directory until 2026-09-26, now refuses to boot with
+#: "This version of Dark Souls II seamless co-op (0.0.1) is depreciated and requires an update.
+#: The application will now exit." The refusal comes from the mod's own version check, so an old
+#: DLL left in place fails every co-op run the same way, and nothing on disk says why. Pinning the
+#: files by SHA-256 turns "which build is installed" from a guess into a check.
+#:
+#: Nothing here ships or downloads it. The archive is the one the owner fetched from Nexus into
+#: `~/DS2`; when it is not there, a run with a matching install proceeds and a run without one is
+#: refused with the path it looked for.
+SEAMLESS_VERSION = "0.0.3"
+SEAMLESS_ARCHIVE = (
+    Path.home()
+    / "DS2"
+    / "Dark Souls II SoTFS - Seamless Co-op v0.0.3 1468 0.0.3 2026-09-26T20-00Z xqhNv0FE.zip"
+)
+#: Archive member (which is also the path under the game directory) -> SHA-256 of that member.
+#: `ds2sc_launcher.exe` and `crashpad_handler.exe` are byte-identical to 0.0.1's; the DLL and the
+#: locale file are what changed.
+SEAMLESS_FILES: dict[str, str] = {
+    "SeamlessCoop/ds2sc.dll": "17e4ae0355261308a5e8fdf50131aee3bb18ddb925adadfdf9d6b68c8b8bda8a",
+    "SeamlessCoop/locale/english.json":
+        "f344008b1c9cd631899be6b4e285d6526e4dcebc5f20bbbf0cbd414419ec7945",
+    "SeamlessCoop/crashpad/crashpad_handler.exe":
+        "d799b428ecc200a47b08b27f6b33ed5fe1f1e065136f380f6a6e78088c404649",
+    "ds2sc_launcher.exe": "4fb07cd36e17fba7755597395bc1b44a0809358128e8c8353e8add65583fa88c",
+}
+#: The settings file is merged, never replaced: it holds the owner's `cooppassword`, and 0.0.3's
+#: template ships that key empty -- which is itself a boot-stopping dialog.
+SEAMLESS_SETTINGS_MEMBER = f"SeamlessCoop/{SEAMLESS_SETTINGS_NAME}"
+
+#: Files and directories other people's mods own in the game directory. This script writes none
+#: of them except through `ensure_seamless_installed`, which writes only `SEAMLESS_FILES` and the
+#: merged settings. The selftest checks that nothing this script stages is on this list, so a new
+#: staged file cannot land on top of a graphics mod the owner installed by hand.
+THIRD_PARTY_PATHS: tuple[str, ...] = (
+    "SeamlessCoop",
+    "ds2sc_launcher.exe",
+    # DS2 Lighting Engine (raster 0.9.x and PathTracing) and the Second Sin presets layered on it.
+    "dxgi.dll",
+    "nvngx_dlss.dll",
+    "nvngx_dlssd.dll",
+    "nvngx_dlssg.dll",
+    "omm-lib.dll",
+    "shader",
+    "tex_override",
+    "ds2le_atmosphere_presets",
+    "DS2LE.log",
+)
 #: The one container name SOTFS builds, and the extension it builds it with.
 SAVE_FILE_STEM = "DS2SOFS0000"
 VANILLA_SAVE_EXTENSION = "sl2"
@@ -2411,6 +2466,136 @@ def stage_launcher() -> tuple[Path, str]:
     return staged, sha256(staged)
 
 
+def _ini_entries(text: str) -> dict[tuple[str, str], str]:
+    """`(section, key) -> value` for every `key = value` line, both lowercased for matching."""
+    entries: dict[tuple[str, str], str] = {}
+    section = ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip().lower()
+        elif line and not line.startswith((";", "#")) and "=" in line:
+            key, _, value = line.partition("=")
+            entries[(section, key.strip().lower())] = value.strip()
+    return entries
+
+
+def merge_seamless_settings(template: str, current: str) -> str:
+    """The new build's settings file with every value the owner already set carried over.
+
+    The template decides the layout, the comments and which keys exist, so a key a new build adds
+    (`relative_player_audio` in 0.0.3) arrives with its own explanation. A key the owner has keeps
+    their value, `cooppassword` above all. A key the owner has and the template does not is kept,
+    appended at the end, because a setting a build dropped is not this script's to delete.
+    """
+    mine = _ini_entries(current)
+    newline = "\r\n" if "\r\n" in template else "\n"
+    out: list[str] = []
+    used: set[tuple[str, str]] = set()
+    section = ""
+    for raw in template.splitlines():
+        line = raw.strip()
+        if line.startswith("[") and line.endswith("]"):
+            section = line[1:-1].strip().lower()
+        elif line and not line.startswith((";", "#")) and "=" in line:
+            key = line.partition("=")[0].strip()
+            slot = (section, key.lower())
+            if slot in mine:
+                used.add(slot)
+                out.append(f"{key} = {mine[slot]}")
+                continue
+        out.append(raw)
+    leftover = [slot for slot in mine if slot not in used]
+    if leftover:
+        out.append("")
+        out.append("; kept from the previous install; this build's template does not name them")
+        for section_name, key in leftover:
+            out.append(f"[{section_name.upper()}]")
+            out.append(f"{key} = {mine[(section_name, key)]}")
+    return newline.join(out) + newline
+
+
+def ensure_seamless_installed(
+    game_dir: Path, archive: Path = SEAMLESS_ARCHIVE, write: bool = True
+) -> tuple[list[str], list[str]]:
+    """Make the game directory hold exactly the pinned Seamless build. Returns `(actions, problems)`.
+
+    Every file in `SEAMLESS_FILES` is hashed where it stands. A match is left alone -- no write, so
+    a launch against a correct install touches nothing. A missing file or a wrong hash (0.0.1, a
+    half-copied file) is replaced from `archive`, and the member's own hash is checked before it
+    goes in, so a corrupt download is refused rather than installed. Each file lands through a
+    temporary name and `os.replace`, so nothing ever sees half a DLL.
+
+    The settings file is merged (see `merge_seamless_settings`) and written only when the merge
+    changes it. With `write=False` nothing is written and the actions say what would be.
+    """
+    import zipfile
+
+    actions: list[str] = []
+    problems: list[str] = []
+    wanted: dict[str, str] = {}
+    for member, digest in SEAMLESS_FILES.items():
+        target = game_dir / member
+        have = sha256(target) if target.is_file() else None
+        if have != digest:
+            wanted[member] = "missing" if have is None else f"sha256 {have[:12]}.. is not {SEAMLESS_VERSION}"
+
+    settings_target = game_dir / SEAMLESS_SETTINGS_MEMBER
+    if not wanted and settings_target.is_file() and not archive.is_file():
+        # Installed and pinned, and nothing to merge against: nothing to do and nothing to say.
+        return actions, problems
+    if not archive.is_file():
+        for member, why in wanted.items():
+            problems.append(f"Seamless {SEAMLESS_VERSION} {member} is {why}, and {archive} is not there")
+        if not settings_target.is_file():
+            problems.append(f"no {settings_target}, and {archive} is not there")
+        return actions, problems
+
+    try:
+        with zipfile.ZipFile(archive) as zipped:
+            for member, why in wanted.items():
+                data = zipped.read(member)
+                if hashlib.sha256(data).hexdigest() != SEAMLESS_FILES[member]:
+                    problems.append(f"{archive} member {member} does not match the pinned hash")
+                    continue
+                verb = "would install" if not write else "installed"
+                actions.append(f"{verb} {member} ({why} before)")
+                if write:
+                    target = game_dir / member
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    temporary = target.with_name(target.name + ".ds2-run-new")
+                    temporary.write_bytes(data)
+                    if member.endswith(".exe"):
+                        temporary.chmod(0o755)
+                    os.replace(temporary, target)
+            template = zipped.read(SEAMLESS_SETTINGS_MEMBER).decode("utf-8", errors="replace")
+    except (OSError, KeyError, zipfile.BadZipFile) as error:
+        problems.append(f"cannot read {archive}: {error}")
+        return actions, problems
+
+    current = (
+        settings_target.read_text(encoding="utf-8", errors="replace")
+        if settings_target.is_file()
+        else ""
+    )
+    merged = merge_seamless_settings(template, current)
+    if _ini_entries(merged) != _ini_entries(current):
+        added = sorted(k for _, k in set(_ini_entries(merged)) - set(_ini_entries(current)))
+        verb = "would merge" if not write else "merged"
+        actions.append(f"{verb} {SEAMLESS_SETTINGS_MEMBER}: added {', '.join(added) or 'nothing'}")
+        if write:
+            settings_target.parent.mkdir(parents=True, exist_ok=True)
+            temporary = settings_target.with_name(settings_target.name + ".ds2-run-new")
+            temporary.write_bytes(merged.encode("utf-8"))
+            os.replace(temporary, settings_target)
+    if not _ini_entries(merged).get(("password", KEY_SEAMLESS_PASSWORD)):
+        problems.append(
+            f"{settings_target} has an empty {KEY_SEAMLESS_PASSWORD}; Seamless stops its boot on a "
+            "dialog until one is set"
+        )
+    return actions, problems
+
+
 def dry_run(
     probe: str,
     observe: float,
@@ -2457,8 +2642,15 @@ def dry_run(
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
     problems = preflight(dry_run=True)
+    seamless_actions, seamless_problems = ensure_seamless_installed(GAME_DIR, write=False)
+    if seamless:
+        problems += seamless_problems
     for problem in problems:
         print(f"[dry-run] WOULD REFUSE: {problem}")
+    for action in seamless_actions:
+        print(f"[dry-run] seamless {action}")
+    if not seamless_actions and not seamless_problems:
+        print(f"[dry-run] seamless {SEAMLESS_VERSION} installed, every pinned file matches")
 
     staged = GAME_DIR / STAGED_DLL_NAME
     if BUILT_DLL.is_file():
@@ -3135,6 +3327,13 @@ def launch(
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
+    # Checked before the teardown and written after it: a refusal here must not cost the session
+    # that is running, and the files must not be replaced under a process that has them mapped.
+    _, seamless_problems = ensure_seamless_installed(GAME_DIR, write=False)
+    for problem in seamless_problems:
+        print(f"[seamless] {problem}")
+    if seamless:
+        problems += seamless_problems
     if problems:
         for problem in problems:
             print(f"REFUSING TO LAUNCH: {problem}", file=sys.stderr)
@@ -3219,6 +3418,12 @@ def launch(
     if torn.returncode != 0:
         print("[launch] REFUSING: the previous session did not die; see the survivors above.")
         return EXIT_ERROR
+
+    # After the teardown, so no running game has the DLL mapped while it is replaced.
+    actions, _ = ensure_seamless_installed(GAME_DIR, write=True)
+    for action in actions:
+        print(f"[seamless] {action}")
+    print(f"[seamless] {SEAMLESS_VERSION} pinned by sha256 in {GAME_DIR / 'SeamlessCoop'}")
 
     # After the teardown, because a clean exit is what writes the position this reads.
     clamp_saved_window_position()
@@ -4551,6 +4756,107 @@ def selftest() -> int:
             check(not required_ok, "a missing text artifact IS a failure")
         finally:
             GAME_DIR = real_game_dir
+
+    # Seamless is kept at the pinned build, from the owner's own download, without losing their
+    # settings -- and nothing this script stages can land on another mod's files.
+    import zipfile
+
+    global SEAMLESS_FILES  # noqa -- swapped for a planted archive, restored below
+    real_pins = SEAMLESS_FILES
+    template = (
+        "[PASSWORD]\r\n\r\n; Your session password\r\ncooppassword = \r\n\r\n[GAMEPLAY]\r\n"
+        "allow_invaders = 1\r\n\r\n; new in this build\r\nrelative_player_audio = 0\r\n\r\n"
+        "[SAVE]\r\nsave_file_extension = co2\r\n"
+    )
+    mine = (
+        "[PASSWORD]\r\ncooppassword = banon-coop\r\n[GAMEPLAY]\r\nallow_invaders = 0\r\n"
+        "[SAVE]\r\nsave_file_extension = co2\r\n[OLD]\r\ndropped_key = 7\r\n"
+    )
+    merged = merge_seamless_settings(template, mine)
+    entries = _ini_entries(merged)
+    check(entries[("password", "cooppassword")] == "banon-coop", "the owner's cooppassword survives a merge")
+    check(entries[("gameplay", "allow_invaders")] == "0", "and so does every other value they set")
+    check(entries[("gameplay", "relative_player_audio")] == "0", "a key the new build adds arrives")
+    check(entries.get(("old", "dropped_key")) == "7", "a key the new build dropped is kept, not deleted")
+    check(merge_seamless_settings(template, merged) == merged, "merging twice changes nothing")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive = root / "seamless.zip"
+            payload = {"SeamlessCoop/ds2sc.dll": b"new dll", "ds2sc_launcher.exe": b"launcher"}
+            with zipfile.ZipFile(archive, "w") as zipped:
+                for member, data in payload.items():
+                    zipped.writestr(member, data)
+                zipped.writestr(SEAMLESS_SETTINGS_MEMBER, template)
+            SEAMLESS_FILES = {m: hashlib.sha256(d).hexdigest() for m, d in payload.items()}
+            game = root / "Game"
+            (game / "SeamlessCoop").mkdir(parents=True)
+            (game / "SeamlessCoop" / "ds2sc.dll").write_bytes(b"0.0.1 dll")
+            (game / SEAMLESS_SETTINGS_MEMBER).write_text(mine, encoding="utf-8")
+            (game / "dxgi.dll").write_bytes(b"someone else's")
+
+            actions, problems = ensure_seamless_installed(game, archive, write=False)
+            check(
+                (game / "SeamlessCoop" / "ds2sc.dll").read_bytes() == b"0.0.1 dll",
+                "a check with write=False writes nothing",
+            )
+            check(len(actions) == 3 and not problems, f"and says what it would do: {actions} {problems}")
+            actions, problems = ensure_seamless_installed(game, archive, write=True)
+            check(
+                (game / "SeamlessCoop" / "ds2sc.dll").read_bytes() == b"new dll"
+                and (game / "ds2sc_launcher.exe").read_bytes() == b"launcher",
+                "an old DLL and a missing launcher are replaced from the archive",
+            )
+            check(
+                _ini_entries((game / SEAMLESS_SETTINGS_MEMBER).read_text(encoding="utf-8"))[
+                    ("password", "cooppassword")
+                ] == "banon-coop",
+                "and the installed settings still hold the owner's password",
+            )
+            check((game / "dxgi.dll").read_bytes() == b"someone else's", "another mod's file is untouched")
+            check(not list(game.rglob("*.ds2-run-new")), "no temporary file is left behind")
+            stamp = (game / "SeamlessCoop" / "ds2sc.dll").stat().st_mtime_ns
+            actions, problems = ensure_seamless_installed(game, archive, write=True)
+            check(
+                not actions and not problems
+                and (game / "SeamlessCoop" / "ds2sc.dll").stat().st_mtime_ns == stamp,
+                "a second launch against a correct install writes nothing",
+            )
+            actions, problems = ensure_seamless_installed(game, root / "absent.zip", write=True)
+            check(not problems, "a correct install needs no archive")
+            (game / "SeamlessCoop" / "ds2sc.dll").unlink()
+            actions, problems = ensure_seamless_installed(game, root / "absent.zip", write=True)
+            check(
+                bool(problems) and "absent.zip" in problems[0],
+                "a missing DLL with no archive is a refusal that names the archive it looked for",
+            )
+            (game / SEAMLESS_SETTINGS_MEMBER).write_text(template, encoding="utf-8")
+            _, problems = ensure_seamless_installed(game, archive, write=True)
+            check(
+                any(KEY_SEAMLESS_PASSWORD in p for p in problems),
+                "an empty cooppassword is reported: the mod stops its boot on a dialog without one",
+            )
+    finally:
+        SEAMLESS_FILES = real_pins
+    if SEAMLESS_ARCHIVE.is_file():
+        with zipfile.ZipFile(SEAMLESS_ARCHIVE) as zipped:
+            for member, digest in SEAMLESS_FILES.items():
+                check(
+                    hashlib.sha256(zipped.read(member)).hexdigest() == digest,
+                    f"the pinned {SEAMLESS_VERSION} hash of {member} matches the owner's archive",
+                )
+    else:
+        print(f"  skip the pinned hashes: no {SEAMLESS_ARCHIVE} on this machine")
+    staged_names = {STAGED_DLL_NAME, STAGED_LAUNCHER_NAME, CONFIG_NAME, LOG_NAME}
+    check(
+        not {Path(name).parts[0].lower() for name in staged_names}
+        & {name.lower() for name in THIRD_PARTY_PATHS},
+        "nothing this script stages is a file another mod owns",
+    )
+    check(
+        SEAMLESS_DEFAULT_DLL in SEAMLESS_FILES,
+        f"the default --seamless-dll is one of the pinned {SEAMLESS_VERSION} files",
+    )
 
     # `--selftest` returns before `main` reaches either of its two dispatches, so an argument
     # threaded wrongly into `dry_run(...)` or `launch(...)` crashed both modes on startup for at
