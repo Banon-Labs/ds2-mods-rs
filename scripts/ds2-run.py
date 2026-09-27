@@ -365,6 +365,13 @@ KEY_SOUL_MEMORY_GUARD_ENABLED = "enabled"
 #: Mirrors `LOG_PREFIX` in `crates/ds2-soul-memory-guard/src/lib.rs`.
 SOUL_MEMORY_GUARD_LOG_PREFIX = "ds2-soul-memory-guard:"
 
+#: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/estus_max.rs`. OFF by default
+#: here, matching the DLL; `--estus-max` turns it on.
+ESTUS_MAX_SECTION = "estus_max"
+KEY_ESTUS_MAX_ENABLED = "enabled"
+#: Mirrors `LOG_PREFIX` in `crates/ds2-estus-max/src/lib.rs`.
+ESTUS_MAX_LOG_PREFIX = "ds2-estus-max:"
+
 #: Mirrors `CONFIG_SECTION`/`KEY_ENABLED`/`KEY_TEST_CAP` in `crates/ds2-loader/src/weapon_sync.rs`.
 #: OFF by default here, matching the DLL; `--weapon-sync` turns it on.
 WEAPON_SYNC_SECTION = "weapon_sync"
@@ -1625,6 +1632,7 @@ def config_text(
     menu_rows_no_save: bool = False,
     launcher_dlls: tuple[str, ...] = (),
     soul_memory_guard: bool = False,
+    estus_max: bool = False,
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
     net_effects: bool = False,
@@ -2187,6 +2195,13 @@ def config_text(
 # `--soul-memory-guard`. Grep the log for `{SOUL_MEMORY_GUARD_LOG_PREFIX}`.
 {KEY_SOUL_MEMORY_GUARD_ENABLED} = {str(soul_memory_guard).lower()}
 
+[{ESTUS_MAX_SECTION}]
+# Read at startup only. On every character load, `ds2-estus-max` raises our Estus Flask's uses and
+# effect levels to the game's maximum through the Emerald Herald's own setter, and logs both levels
+# as the game reads them back. Solo; it reads nothing about other players. Off unless `--estus-max`.
+# Grep the log for `{ESTUS_MAX_LOG_PREFIX}`.
+{KEY_ESTUS_MAX_ENABLED} = {str(estus_max).lower()}
+
 [{WEAPON_SYNC_SECTION}]
 # `enabled` is startup-only. While another player is in the world, `ds2-weapon-sync` lowers every
 # weapon of ours above the highest weapon level any of them has equipped, and puts them back when
@@ -2425,6 +2440,7 @@ def write_config(
     menu_rows_no_save: bool = False,
     launcher_dlls: tuple[str, ...] = (),
     soul_memory_guard: bool = False,
+    estus_max: bool = False,
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
     net_effects: bool = False,
@@ -2471,6 +2487,7 @@ def write_config(
         menu_rows_no_save,
         launcher_dlls,
         soul_memory_guard=soul_memory_guard,
+        estus_max=estus_max,
         weapon_sync=weapon_sync,
         weapon_sync_test_cap=weapon_sync_test_cap,
         net_effects=net_effects,
@@ -2831,6 +2848,7 @@ def dry_run(
     menu_rows_no_save: bool = False,
     launcher_dlls: tuple[str, ...] = (),
     soul_memory_guard: bool = False,
+    estus_max: bool = False,
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
     net_effects: bool = False,
@@ -2914,6 +2932,7 @@ def dry_run(
             menu_rows_no_save,
             launcher_dlls,
             soul_memory_guard=soul_memory_guard,
+            estus_max=estus_max,
             weapon_sync=weapon_sync,
             weapon_sync_test_cap=weapon_sync_test_cap,
             net_effects=net_effects,
@@ -2974,6 +2993,7 @@ def dry_run(
                 menu_rows_no_save=menu_rows_no_save,
                 launcher_dlls=launcher_dlls,
                 soul_memory_guard=soul_memory_guard,
+                estus_max=estus_max,
                 weapon_sync=weapon_sync,
                 weapon_sync_test_cap=weapon_sync_test_cap,
                 net_effects=net_effects,
@@ -3535,6 +3555,7 @@ def launch(
     menu_rows_no_save: bool = False,
     launcher_dlls: tuple[str, ...] = (),
     soul_memory_guard: bool = False,
+    estus_max: bool = False,
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
     net_effects: bool = False,
@@ -3605,6 +3626,7 @@ def launch(
         menu_rows_no_save,
         launcher_dlls,
         soul_memory_guard=soul_memory_guard,
+        estus_max=estus_max,
         weapon_sync=weapon_sync,
         weapon_sync_test_cap=weapon_sync_test_cap,
         net_effects=net_effects,
@@ -5522,6 +5544,16 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--estus-max",
+        dest="estus_max",
+        action="store_true",
+        help=(
+            "on every character load, raise our Estus Flask's uses and effect levels to the "
+            "game's maximum (12 and 6 as shipped) and log both levels as the game reads them "
+            "back. OFF without this flag, matching the DLL."
+        ),
+    )
+    parser.add_argument(
         "--path-tracing",
         dest="path_tracing",
         action=argparse.BooleanOptionalAction,
@@ -5863,6 +5895,7 @@ def main() -> int:
             args.menu_rows_no_save,
             tuple(args.launcher_dll),
             soul_memory_guard=args.soul_memory_guard,
+            estus_max=args.estus_max,
             weapon_sync=args.weapon_sync,
             weapon_sync_test_cap=args.weapon_sync_test_cap,
             net_effects=args.net_effects,
@@ -5909,6 +5942,7 @@ def main() -> int:
         args.menu_rows_no_save,
         tuple(args.launcher_dll),
         soul_memory_guard=args.soul_memory_guard,
+        estus_max=args.estus_max,
         weapon_sync=args.weapon_sync,
         weapon_sync_test_cap=args.weapon_sync_test_cap,
         net_effects=args.net_effects,

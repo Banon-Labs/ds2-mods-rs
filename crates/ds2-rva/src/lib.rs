@@ -6151,6 +6151,29 @@ pub const ESTUS_PROPERTY_EFFECT: u32 = 1;
 /// The comparisons are SIGNED, so this must stay positive; a negative would clamp UP to the minimum.
 pub const ESTUS_LEVEL_ASK: i32 = 99;
 
+/// The uses maximum on the shipped regulation: `12`. **A reference for log lines, never a limit.**
+///
+/// # Where it comes from, read rather than remembered
+///
+/// The setter core `0x1401ae7c0` (behind [`ESTUS_SET_PROPERTY`]'s two thunks) calls `0x1401ad0a0`
+/// for the property's row in the table at `0x14156b030`, takes that row's `+8` key as a param id,
+/// and at `0x1401ae813` looks the id up in `EstusFlaskMaxReinforceParam` (`[[inv + 0x38] + 0x18]`).
+/// `0x1401ae850..0x1401ae86b` is the clamp: below byte `+0` of that row becomes byte `+0`, above
+/// byte `+1` becomes byte `+1`, both compares signed. [`ESTUS_IS_MAX`] ends at `0x1401ae309` in
+/// `cmp dl, [row + 1]; sete al` against the same row, so "at max" means exactly "equals byte `+1`".
+///
+/// `scripts/ds2-regulation.py param EstusFlaskMaxReinforceParam.param --hex` on the installed
+/// `enc_regulation.bnd.dcx`: two rows, stride 4, `id=0  01 0c 00 00` and `id=1  01 06 00 00`. So
+/// uses clamp into `1..=12` and effect into `1..=6`.
+///
+/// Nothing may cap a request at this value -- see [`ESTUS_LEVEL_ASK`]. It exists so a log line can
+/// say what the shipped game's maximum is beside what the game read back.
+pub const ESTUS_USES_MAX_SHIPPED: u8 = 12;
+
+/// The effect maximum on the shipped regulation: `6`. `EstusFlaskMaxReinforceParam` row `1`, byte
+/// `+1`. Evidence and the same warning: [`ESTUS_USES_MAX_SHIPPED`].
+pub const ESTUS_EFFECT_MAX_SHIPPED: u8 = 6;
+
 /// The one Estus Flask a character can hold. `60155000`.
 ///
 /// The three neighbours the item catalogue also calls `Estus Flask` are not upgrade states -- the
