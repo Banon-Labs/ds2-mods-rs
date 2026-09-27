@@ -21,6 +21,11 @@
 #     build (the user's own play sessions), a dirty build, no game, a branch with no game code, and
 #     anything unknown stay silent. The decision is in scripts/cupcake_unspent_evidence.py.
 #
+#     It is also silent while the user hand-tests that worktree's builds (ds2-mods-rs-wdnr,
+#     2026-09-27): the user has written to the session after a launch from the worktree holding the
+#     running commit, and the turn ends within 30 minutes of that message. Without it the halt fired
+#     on every relaunch of an in-game save-picker test, and the push it demands closes the game.
+#
 #     Known gap, shared by every Stop guard here: an interrupted turn fires no Stop event.
 #   routing:
 #     required_events: ["Stop"]
