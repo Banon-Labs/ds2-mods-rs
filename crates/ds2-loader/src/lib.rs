@@ -87,6 +87,7 @@ pub mod build_import;
 pub mod continue_flow;
 pub mod crash_logging;
 pub mod dialog_skip;
+pub mod estus_max;
 pub mod hp_gauge;
 pub mod input_harness;
 pub mod intro_skip;
@@ -376,6 +377,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_net_effects();
                 install_soul_memory_guard();
                 install_weapon_sync();
+                install_estus_max();
                 arm_fault(crash_config);
                 finish_boot_batch();
                 ds2_boot_timeline::mark("installs-done");
@@ -427,6 +429,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_net_effects();
                 install_soul_memory_guard();
                 install_weapon_sync();
+                install_estus_max();
                 arm_fault(crash_config);
                 finish_boot_batch();
             });
@@ -1019,6 +1022,34 @@ fn install_soul_memory_guard() {
         log_line(format_args!(
             "{} NOT INSTALLED -- no character load is judged this run",
             ds2_soul_memory_guard::LOG_PREFIX
+        ));
+    }
+}
+
+/// Keep our Estus Flask at the game's maximum uses and effect levels, if `<Game>/ds2-mods.toml`
+/// asked.
+///
+/// Off unless `[estus_max] enabled = true`. It registers on the net session update through
+/// `ds2-net-tick`, beside voice chat and weapon sync, so install order among them does not matter.
+fn install_estus_max() {
+    let config = estus_max::EstusMaxConfig::load();
+    log_line(format_args!("{}", config.describe()));
+    if !config.enabled {
+        return;
+    }
+    ds2_estus_max::set_logger(log_line);
+    if config.reload_test {
+        // The second load is `ds2-continue`'s own autoload, re-opened exactly once.
+        ds2_estus_max::set_reload_test(ds2_continue::rearm_autoload);
+    }
+    // SAFETY: every function the crate calls is recorded in `ds2-rva` with the bytes it must begin
+    // with, and the crate re-reads those bytes and registers nothing on a mismatch. Called from the
+    // post-Arxan position, like every other install here.
+    let outcome = unsafe { ds2_estus_max::install() };
+    if !outcome.installed {
+        log_line(format_args!(
+            "{} NOT INSTALLED -- the flask is never raised this run",
+            ds2_estus_max::LOG_PREFIX
         ));
     }
 }

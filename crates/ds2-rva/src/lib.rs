@@ -2955,6 +2955,33 @@ pub const FE_INGAME_MENU_ACTION_SETTING_SCREEN: u32 = 8;
 /// member. It is the confirm dialog that offers to save on the way to the title screen.
 pub const FE_INGAME_MENU_ACTION_RETURN_TITLE: u32 = 9;
 
+/// `FeGroupInGameReturnTitleCheck` vtable slot 16 (`vtable 0x1410b1768 + 0x80`): what the quit
+/// confirm does on "yes". RVA `0x0006_ec90`. `fn()` -- `rcx` is never read.
+///
+/// Its whole body, read in `darksoulsii-deobf.bin`:
+///
+/// ```text
+/// 0x1404fec90([GameManagerImp + 0x22e0])      ; frontend root: clear bit 1 of +0x3b8, flag [+0xf8]+0xd32
+/// byte [[GameManagerImp + 0x22e0] + 0x30c] = 1
+/// tail-call GameManagerImp->vtable[0x38](GameManagerImp, dl = 0)    ; 0x1401c2cf0
+/// ```
+///
+/// Slot `0x38` of `GameManagerImp` (`0x1401c2cf0`) is the return-to-title request. With bit 2 of
+/// `[gm + 0x24b1]` already set (a request in flight) it returns `1` having done nothing; with
+/// `[gm + 0x24ac]` anything but `0x1e` or `0x1f` (in the world) it returns `0` having done nothing,
+/// so asking at the title or twice is harmless. Otherwise it sets the
+/// transition bits at `+0x24b1`/`+0x24b2`, starts a fade (`+0x24b4 = 2.0f`), tells the player's
+/// controller and the frontend, and returns `1`.
+///
+/// Every input is a global, so it can be called from any game-thread tick. Not an Arxan redirect:
+/// `scripts/ds2-arxan-chain.py 0x14006ec90` ends at hop 0 on its own prologue.
+pub const FE_RETURN_TITLE_CHECK_CONFIRM: u32 = 0x0006_ec90;
+
+/// The first seven bytes of [`FE_RETURN_TITLE_CHECK_CONFIRM`]: `sub rsp,0x28` /
+/// `mov rcx,[rip+...]` (the load of `GameManagerImp`).
+pub const FE_RETURN_TITLE_CHECK_CONFIRM_PROLOGUE: [u8; 7] =
+    [0x48, 0x83, 0xec, 0x28, 0x48, 0x8b, 0x0d];
+
 /// Action `0xd` -- present in the dispatch, listed by **no** tab.
 ///
 /// Its factory branch shares a `case` label with kind 4: `case 4: case 6:` both allocate `0xc68`
@@ -6150,6 +6177,29 @@ pub const ESTUS_PROPERTY_EFFECT: u32 = 1;
 ///
 /// The comparisons are SIGNED, so this must stay positive; a negative would clamp UP to the minimum.
 pub const ESTUS_LEVEL_ASK: i32 = 99;
+
+/// The uses maximum on the shipped regulation: `12`. **A reference for log lines, never a limit.**
+///
+/// # Where it comes from, read rather than remembered
+///
+/// The setter core `0x1401ae7c0` (behind [`ESTUS_SET_PROPERTY`]'s two thunks) calls `0x1401ad0a0`
+/// for the property's row in the table at `0x14156b030`, takes that row's `+8` key as a param id,
+/// and at `0x1401ae813` looks the id up in `EstusFlaskMaxReinforceParam` (`[[inv + 0x38] + 0x18]`).
+/// `0x1401ae850..0x1401ae86b` is the clamp: below byte `+0` of that row becomes byte `+0`, above
+/// byte `+1` becomes byte `+1`, both compares signed. [`ESTUS_IS_MAX`] ends at `0x1401ae309` in
+/// `cmp dl, [row + 1]; sete al` against the same row, so "at max" means exactly "equals byte `+1`".
+///
+/// `scripts/ds2-regulation.py param EstusFlaskMaxReinforceParam.param --hex` on the installed
+/// `enc_regulation.bnd.dcx`: two rows, stride 4, `id=0  01 0c 00 00` and `id=1  01 06 00 00`. So
+/// uses clamp into `1..=12` and effect into `1..=6`.
+///
+/// Nothing may cap a request at this value -- see [`ESTUS_LEVEL_ASK`]. It exists so a log line can
+/// say what the shipped game's maximum is beside what the game read back.
+pub const ESTUS_USES_MAX_SHIPPED: u8 = 12;
+
+/// The effect maximum on the shipped regulation: `6`. `EstusFlaskMaxReinforceParam` row `1`, byte
+/// `+1`. Evidence and the same warning: [`ESTUS_USES_MAX_SHIPPED`].
+pub const ESTUS_EFFECT_MAX_SHIPPED: u8 = 6;
 
 /// The one Estus Flask a character can hold. `60155000`.
 ///

@@ -89,7 +89,7 @@ pub use hollow_slot::install_hollow_slot_guard;
 #[cfg(windows)]
 pub use install::{
     LoadConfirmed, LogFn, Outcome, StartedIngame, TitleGate, TitleStep, clear_started_ingame,
-    clear_title_gate, install, set_load_confirmed, set_logger, set_preselect_slot,
+    clear_title_gate, install, rearm_autoload, set_load_confirmed, set_logger, set_preselect_slot,
     set_started_ingame, set_title_gate,
 };
 #[cfg(windows)]
