@@ -144,6 +144,9 @@ impl ImguiRenderLoop for Panels {
 /// cursor could not be read.
 static MOUSE: AtomicU64 = AtomicU64::new(u64::MAX);
 
+/// Set once the stretch decision has been logged.
+static STRETCH_LOGGED: AtomicBool = AtomicBool::new(false);
+
 /// Whether the left button was down last frame, for the click diagnostic.
 static LEFT_DOWN: AtomicBool = AtomicBool::new(false);
 
@@ -202,11 +205,11 @@ fn measure_mouse(chain: &IDXGISwapChain) {
     // back buffer measure the same. Every left press logs each coordinate space involved, so the
     // mapping can be read off two clicks at known places instead of guessed.
     // SAFETY: `GetAsyncKeyState` takes a virtual-key code and touches no memory of ours.
-    let pressed = unsafe {
-        hudhook::windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x01)
-    } as u16
-        & 0x8000
-        != 0;
+    let pressed =
+        unsafe { hudhook::windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(0x01) }
+            as u16
+            & 0x8000
+            != 0;
     if pressed && !LEFT_DOWN.swap(true, Ordering::AcqRel) {
         use hudhook::windows::Win32::UI::WindowsAndMessaging::{
             GetSystemMetrics, GetWindowRect, SM_CXSCREEN, SM_CYSCREEN,
@@ -222,14 +225,58 @@ fn measure_mouse(chain: &IDXGISwapChain) {
         log(format_args!(
             "panels: click screen=({},{}) client=({},{}) wine-screen={cx}x{cy} \
              window=({},{})-({},{}) client-size={client_w}x{client_h} buffer={buffer_w}x{buffer_h}",
-            screen.x, screen.y, cursor.x, cursor.y, frame.left, frame.top, frame.right,
+            screen.x,
+            screen.y,
+            cursor.x,
+            cursor.y,
+            frame.left,
+            frame.top,
+            frame.right,
             frame.bottom
         ));
     } else if !pressed {
         LEFT_DOWN.store(false, Ordering::Release);
     }
-    let x = cursor.x as f32 * buffer_w as f32 / client_w as f32;
-    let y = cursor.y as f32 * buffer_h as f32 / client_h as f32;
+    // STRETCHED FULLSCREEN. Measured 2026-09-27: Wine reported a 3840x2160 screen and the game's
+    // window as 2260x1272 at the origin, and that window filled the monitor. The panel's pointer
+    // then sat at 0.59 of the real one on both axes -- 2260/3840 and 1272/2160 -- so the cursor
+    // Wine hands back is short by screen over window. A window at the origin with the screen's
+    // shape is taken to be stretched that way; any other window is used as measured.
+    let (screen_w, screen_h) = {
+        use hudhook::windows::Win32::UI::WindowsAndMessaging::{
+            GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
+        };
+        // SAFETY: `GetSystemMetrics` reads a system value and touches no memory of ours.
+        unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
+    };
+    let mut origin = POINT::default();
+    // SAFETY: `origin` is a local; `window` is the swap chain's output window.
+    let at_origin =
+        unsafe { hudhook::windows::Win32::Graphics::Gdi::ClientToScreen(window, &mut origin) }
+            .as_bool()
+            && origin.x == 0
+            && origin.y == 0;
+    let same_shape =
+        i64::from(screen_w) * i64::from(client_h) - i64::from(screen_h) * i64::from(client_w);
+    let stretched = at_origin
+        && screen_w > client_w
+        && same_shape.unsigned_abs() <= u64::from(screen_w.unsigned_abs().max(1)) * 2;
+    let (stretch_x, stretch_y) = if stretched {
+        (
+            screen_w as f32 / client_w as f32,
+            screen_h as f32 / client_h as f32,
+        )
+    } else {
+        (1.0, 1.0)
+    };
+    if !STRETCH_LOGGED.swap(true, Ordering::AcqRel) {
+        log(format_args!(
+            "panels: screen {screen_w}x{screen_h}, window client {client_w}x{client_h} at the \
+             origin={at_origin} -- stretched={stretched}, cursor x{stretch_x:.3} y{stretch_y:.3}"
+        ));
+    }
+    let x = cursor.x as f32 * stretch_x * buffer_w as f32 / client_w as f32;
+    let y = cursor.y as f32 * stretch_y * buffer_h as f32 / client_h as f32;
     MOUSE.store(
         (u64::from(x.to_bits()) << 32) | u64::from(y.to_bits()),
         Ordering::Release,
