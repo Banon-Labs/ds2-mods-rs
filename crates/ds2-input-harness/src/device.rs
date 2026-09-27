@@ -412,7 +412,33 @@ unsafe fn write_keyboard(this: *mut u8, blocking: bool) {
 /// # Safety
 ///
 /// `this` is a live `WindowsMouseDevice` whose poll has just run.
+/// The Win32 mouse position held while blocking, or [`NOT_FROZEN`].
+static FROZEN_POSITION: AtomicU64 = AtomicU64::new(NOT_FROZEN);
+
+/// No position is held. Not a packed pair the clamp can produce: both halves would be -1.
+const NOT_FROZEN: u64 = u64::MAX;
+
 unsafe fn write_windows_mouse(this: *mut u8, blocking: bool) {
+    // The position stays where it was when blocking began, so a menu under a panel does not
+    // follow a pointer the player is aiming at the panel (2026-09-27: the pause menu's rows
+    // highlighted through the save picker).
+    // SAFETY: `this` is the live device the poll just wrote; the position is the qword at `+0x08`.
+    let position = unsafe {
+        this.add(ds2_rva::WINDOWS_MOUSE_DEVICE_POSITION_OFFSET)
+            .cast::<u64>()
+    };
+    if blocking {
+        let frozen = FROZEN_POSITION.load(Ordering::Acquire);
+        if frozen == NOT_FROZEN {
+            // SAFETY: as above.
+            FROZEN_POSITION.store(unsafe { position.read_unaligned() }, Ordering::Release);
+        } else {
+            // SAFETY: as above.
+            unsafe { position.write_unaligned(frozen) };
+        }
+    } else {
+        FROZEN_POSITION.store(NOT_FROZEN, Ordering::Release);
+    }
     if blocking {
         // Wheel, buttons and the button-edge word. `FUN_140b0d0e0` reads all three, and they
         // are the whole of this device's non-positional contribution.

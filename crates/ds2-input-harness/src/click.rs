@@ -39,6 +39,9 @@ const fn release_of(event_type: u32) -> Option<u32> {
     }
 }
 
+/// Bit `n` set once an event of type `n` has been folded during a block.
+static SEEN_WHILE_BLOCKING: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
 /// The type of a wheel step.
 const WHEEL: u32 = 10;
 
@@ -49,6 +52,14 @@ unsafe extern "system" fn detour_fold(block: *mut u8, event: *mut u8) {
         unsafe {
             let kind = event.add(ds2_rva::MOUSE_EVENT_TYPE_OFFSET).cast::<u32>();
             let current = kind.read_unaligned();
+            // Which event types reach the fold during a block, once each: the record that says
+            // whether pointer movement arrives here as well as through the device poll.
+            if current < 32 && SEEN_WHILE_BLOCKING.fetch_or(1 << current, Ordering::Relaxed)
+                & (1 << current)
+                == 0
+            {
+                crate::log::harness_log!("mouse-event type={current} first seen while blocking");
+            }
             if let Some(release) = release_of(current) {
                 kind.write_unaligned(release);
                 let modifiers = event.add(ds2_rva::MOUSE_EVENT_MODIFIERS_OFFSET);

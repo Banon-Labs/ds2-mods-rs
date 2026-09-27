@@ -222,7 +222,15 @@ pub(crate) fn open_for_save() -> bool {
 }
 
 fn open(mode: Mode) -> bool {
+    // Every press is logged with the overlay's frame count and how long opening took, so "it
+    // took two clicks" can be told apart from "the first click opened slowly".
+    let pressed_at = std::time::Instant::now();
+    let frame = ds2_overlay::frame_hook::ticks();
     if !in_game() {
+        log_line(format_args!(
+            "{LOG_PREFIX} picker press mode={mode:?} frame={frame} -- no panel, the OS dialog \
+             answers"
+        ));
         return false;
     }
     let Ok(mut guard) = PANEL.lock() else {
@@ -234,6 +242,11 @@ fn open(mode: Mode) -> bool {
     {
         // Already up, or still waiting on a pick: the press that reached here came through the
         // hold somehow, and a second panel would have two picks racing for one tick.
+        log_line(format_args!(
+            "{LOG_PREFIX} picker press mode={mode:?} frame={frame} -- ignored, a panel is still \
+             there phase={:?}",
+            guard.as_ref().map(|panel| panel.phase)
+        ));
         return true;
     }
     let start = start_directory();
@@ -262,7 +275,8 @@ fn open(mode: Mode) -> bool {
     drop(guard);
     ds2_input_harness::hold(true);
     log_line(format_args!(
-        "{LOG_PREFIX} picker open mode={mode:?} dir={}",
+        "{LOG_PREFIX} picker open mode={mode:?} frame={frame} took={}ms dir={}",
+        pressed_at.elapsed().as_millis(),
         start.display()
     ));
     true

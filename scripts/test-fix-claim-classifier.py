@@ -338,7 +338,8 @@ def main() -> int:
     check("crates", "a workspace dependency of the loader is reachable", "ds2-menu-row" in crates, True)
     check("crates", "a dependency of a dependency is reachable", "ds2-game-base" in crates, True)
     check("crates", "the injector exe is not", "ds2-launcher" in crates, False)
-    check("crates", "the host-only save picker is not", "ds2-save-picker-core" in crates, False)
+    # The picker model ships in the DLL since `ds2-save-file`'s in-game panel draws it.
+    check("crates", "the picker model the panel draws is reachable", "ds2-save-picker-core" in crates, True)
 
     for name, blocks, want in EVIDENCE_CASES:
         check("evidence", name, runtime_evidence(blocks, crates), want)
