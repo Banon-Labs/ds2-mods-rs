@@ -365,8 +365,8 @@ KEY_SOUL_MEMORY_GUARD_ENABLED = "enabled"
 #: Mirrors `LOG_PREFIX` in `crates/ds2-soul-memory-guard/src/lib.rs`.
 SOUL_MEMORY_GUARD_LOG_PREFIX = "ds2-soul-memory-guard:"
 
-#: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/estus_max.rs`. OFF by default
-#: here, matching the DLL; `--estus-max` turns it on.
+#: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/estus_max.rs`. The DLL's
+#: default is off; here it is ON by default (user directive 2026-09-26), and `--no-estus-max` writes false.
 ESTUS_MAX_SECTION = "estus_max"
 KEY_ESTUS_MAX_ENABLED = "enabled"
 KEY_ESTUS_MAX_RELOAD_TEST = "reload_test"
@@ -1633,7 +1633,7 @@ def config_text(
     menu_rows_no_save: bool = False,
     launcher_dlls: tuple[str, ...] = (),
     soul_memory_guard: bool = False,
-    estus_max: bool = False,
+    estus_max: bool = True,
     estus_max_reload_test: bool = False,
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
@@ -2200,8 +2200,8 @@ def config_text(
 [{ESTUS_MAX_SECTION}]
 # Read at startup only. On every character load, `ds2-estus-max` raises our Estus Flask's uses and
 # effect levels to the game's maximum through the Emerald Herald's own setter, and logs both levels
-# as the game reads them back. Solo; it reads nothing about other players. Off unless `--estus-max`.
-# Grep the log for `{ESTUS_MAX_LOG_PREFIX}`.
+# as the game reads them back. Solo; it reads nothing about other players. ON by default;
+# `--no-estus-max` writes false. Grep the log for `{ESTUS_MAX_LOG_PREFIX}`.
 {KEY_ESTUS_MAX_ENABLED} = {str(estus_max).lower()}
 # A test instrument, off unless `--estus-max-reload-test`: once the first load is at max, return to
 # the title through the quit confirm's own "yes" and let `[continue]` load the same slot once more,
@@ -2446,7 +2446,7 @@ def write_config(
     menu_rows_no_save: bool = False,
     launcher_dlls: tuple[str, ...] = (),
     soul_memory_guard: bool = False,
-    estus_max: bool = False,
+    estus_max: bool = True,
     estus_max_reload_test: bool = False,
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
@@ -2856,7 +2856,7 @@ def dry_run(
     menu_rows_no_save: bool = False,
     launcher_dlls: tuple[str, ...] = (),
     soul_memory_guard: bool = False,
-    estus_max: bool = False,
+    estus_max: bool = True,
     estus_max_reload_test: bool = False,
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
@@ -3566,7 +3566,7 @@ def launch(
     menu_rows_no_save: bool = False,
     launcher_dlls: tuple[str, ...] = (),
     soul_memory_guard: bool = False,
-    estus_max: bool = False,
+    estus_max: bool = True,
     estus_max_reload_test: bool = False,
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
@@ -5557,13 +5557,14 @@ def main() -> int:
         ),
     )
     parser.add_argument(
-        "--estus-max",
+        "--no-estus-max",
         dest="estus_max",
-        action="store_true",
+        action="store_false",
+        default=True,
         help=(
-            "on every character load, raise our Estus Flask's uses and effect levels to the "
-            "game's maximum (12 and 6 as shipped) and log both levels as the game reads them "
-            "back. OFF without this flag, matching the DLL."
+            "leave the Estus Flask as the save has it. By default every character load raises "
+            "its uses and effect levels to the game's maximum (12 and 6 as shipped) and logs both "
+            "levels as the game reads them back."
         ),
     )
     parser.add_argument(
@@ -5573,7 +5574,7 @@ def main() -> int:
         help=(
             "test instrument: once the first load's flask is at max, return to the title through "
             "the quit confirm's own 'yes' and autoload the same slot once more, in the same "
-            "process, so the second load's estus line can be read. Implies --estus-max."
+            "process, so the second load's estus line can be read. Overrides --no-estus-max."
         ),
     )
     parser.add_argument(
