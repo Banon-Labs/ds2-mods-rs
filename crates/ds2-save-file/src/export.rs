@@ -318,7 +318,11 @@ pub(crate) fn commit(picked: &Path) -> Result<(), crate::import::Refused> {
         Some((asked, answer)) if same_path(answer, &source) => asked.clone(),
         _ => source.clone(),
     };
-    let destination_before = game::stamp(&destination);
+    // Through the bypass, here and at the end: when the destination is the game's own container
+    // name -- DS2SOFS0000.co2 over itself -- a swap's window answers it with the staged copy, and
+    // both stamps measured that instead. The file was replaced and the export reported
+    // `destination-unchanged` (2026-09-27, twice).
+    let destination_before = open_redirect::bypass(|| game::stamp(&destination));
     let before = game::stamp(&target);
     if !open_redirect::arm(&asked, &target) {
         log_line(format_args!(
@@ -492,7 +496,7 @@ fn finish(pending: &Pending, completed: bool) {
             Some(false)
         }
     };
-    let after = game::stamp(&pending.destination);
+    let after = open_redirect::bypass(|| game::stamp(&pending.destination));
     let verdict = export_verdict(
         completed,
         promoted,

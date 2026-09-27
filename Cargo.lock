@@ -775,6 +775,7 @@ dependencies = [
  "ds2-save-redirect",
  "ds2-sl2-core",
  "hudhook",
+ "windows",
 ]
 
 [[package]]
