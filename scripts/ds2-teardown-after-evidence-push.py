@@ -80,11 +80,27 @@ def log_build(log_text: str) -> tuple[str, bool] | None:
     return sha, bool(dirty)
 
 
-def decide(*, landed: bool, alive: bool, staged: str | None, built: str | None, attached: bool,
-           build: tuple[str, bool] | None, build_in_head: bool) -> tuple[bool, str]:
+def is_game_code(path: str) -> bool:
+    """The paths DS2-MODS-REQUIRE-RUNTIME-BEFORE-PUSH demands a run for."""
+    return path.startswith("crates/") or path == "scripts/ds2-run.py"
+
+
+def branch_game_code(repo: Path) -> bool:
+    """Whether HEAD changes game code against origin/main. Unknown counts as no: a hook that
+    cannot tell must leave the game alone."""
+    out = git(repo, "diff", "--name-only", "origin/main...HEAD")
+    return out.returncode == 0 and any(is_game_code(p) for p in out.stdout.splitlines())
+
+
+def decide(*, landed: bool, game_code: bool, alive: bool, staged: str | None, built: str | None,
+           attached: bool, build: tuple[str, bool] | None, build_in_head: bool) -> tuple[bool, str]:
     """Whether to tear down, and why not when not. Pure, so the selftest covers every branch."""
     if not landed:
         return False, "the push did not land"
+    # 2026-09-26: a push of scripts/frida/ only tore down a session the user was playing. A push
+    # that carries no game code needed no run, so no run was being spent as its evidence.
+    if not game_code:
+        return False, "the pushed branch changes no game code"
     if not alive:
         return False, "no game is running"
     if not attached:
@@ -115,7 +131,7 @@ def run(event: dict) -> str | None:
     build = log_build(log_text)
     build_in_head = build is not None and git(repo, "merge-base", "--is-ancestor", build[0], head).returncode == 0
     ok, why = decide(
-        landed=landed, alive=game_alive(), staged=sha256(GAME_DIR / "dinput8.dll"),
+        landed=landed, game_code=branch_game_code(repo), alive=game_alive(), staged=sha256(GAME_DIR / "dinput8.dll"),
         built=sha256(repo / BUILT_REL), attached="ds2-loader: attach" in log_text,
         build=build, build_in_head=build_in_head,
     )
@@ -128,10 +144,12 @@ def run(event: dict) -> str | None:
 
 
 def selftest() -> int:
-    base = dict(landed=True, alive=True, staged="a", built="a", attached=True, build=None, build_in_head=False)
+    base = dict(landed=True, game_code=True, alive=True, staged="a", built="a", attached=True,
+                build=None, build_in_head=False)
     cases = [
         ("everything matches", {}, True),
         ("push did not land", {"landed": False}, False),
+        ("branch changes no game code (frida-only push, 2026-09-26)", {"game_code": False}, False),
         ("no game", {"alive": False}, False),
         ("no attach line", {"attached": False}, False),
         ("other checkout's DLL", {"built": "b"}, False),
@@ -153,6 +171,13 @@ def selftest() -> int:
         got = log_build(text)
         bad += got != want
         print(f"  {'ok  ' if got == want else 'FAIL'} log_build {text[:40]!r}")
+    for path, want in (
+        ("crates/ds2-loader/src/lib.rs", True), ("scripts/ds2-run.py", True),
+        ("scripts/frida/estus-sync.js", False), ("docs/a.md", False), ("scripts/ds2-run.pyc", False),
+    ):
+        got = is_game_code(path)
+        bad += got != want
+        print(f"  {'ok  ' if got == want else 'FAIL'} game code {path!r}")
     for command, want in (
         ("git push -u origin x", True), ("cd /w && git push", True), ("git -C /w push", True),
         ("git status", False), ("gh pr create", False), ("echo git; ls push", False),
