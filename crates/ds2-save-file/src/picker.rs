@@ -594,16 +594,14 @@ fn draw(ui: &Ui) {
         }
         let text_y = y + (row_height - line) * 0.5;
         if row.kind == RowKind::DriveStrip {
-            if let Some(input) = draw_drive_strip(
-                ui,
-                &list,
-                &view,
-                [inner_left, text_y],
-                inner_right,
+            let strip = Strip {
+                origin: [inner_left, text_y],
+                right: inner_right,
                 line,
                 mouse,
                 clicked,
-            ) {
+            };
+            if let Some(input) = draw_drive_strip(ui, &list, &view, &strip) {
                 click = Some(input);
             }
         } else {
@@ -694,18 +692,35 @@ fn panel_is_open(phase: Phase) -> bool {
     phase == Phase::Open
 }
 
+/// Where the drive strip goes and what the mouse is doing, for [`draw_drive_strip`].
+#[derive(Clone, Copy)]
+struct Strip {
+    /// Top-left of the first cell's text.
+    origin: [f32; 2],
+    /// Where the path field ends.
+    right: f32,
+    /// The font's line height.
+    line: f32,
+    /// The mouse, in display pixels.
+    mouse: [f32; 2],
+    /// Whether the left button went down this frame.
+    clicked: bool,
+}
+
 /// The drive strip and the path field beside it. Returns the press a click on either made.
-#[allow(clippy::too_many_arguments)] // DEBT: ds2-mods-rs-nama.3 -- one call site, drawing state.
 fn draw_drive_strip(
     ui: &Ui,
     list: &hudhook::imgui::DrawListMut<'_>,
     view: &PickerView,
-    origin: [f32; 2],
-    right: f32,
-    line: f32,
-    mouse: [f32; 2],
-    clicked: bool,
+    strip: &Strip,
 ) -> Option<PickerInput> {
+    let Strip {
+        origin,
+        right,
+        line,
+        mouse,
+        clicked,
+    } = *strip;
     let inside = |min: [f32; 2], max: [f32; 2]| {
         mouse[0] >= min[0] && mouse[0] < max[0] && mouse[1] >= min[1] && mouse[1] < max[1]
     };
