@@ -167,7 +167,7 @@ pub unsafe fn install() -> Outcome {
             base,
             ds2_rva::FE_ITEM_CELL_BIND,
             &ds2_rva::FE_ITEM_CELL_BIND_PROLOGUE,
-            crate::requirement::detour as *mut c_void,
+            crate::requirement::cell_bind_thunk as *mut c_void,
             &crate::requirement::TRAMPOLINE,
             "item-cell-bind",
         )
@@ -199,7 +199,26 @@ pub unsafe fn install() -> Outcome {
             "equip-slot-bind",
         )
     };
+    // The Attune Spell screen's attunement grid, additive in the same way: its cells carry the
+    // badge and bind inline, so this is the only switch they get. A refusal costs that grid its X.
+    // SAFETY: as above.
+    let attune = unsafe {
+        hook_site(
+            base,
+            ds2_rva::FE_CELL_VIEW_BUILD,
+            &ds2_rva::FE_CELL_VIEW_BUILD_PROLOGUE,
+            crate::requirement::cell_view_thunk as *mut c_void,
+            &crate::requirement::CELL_VIEW_TRAMPOLINE,
+            "attune-grid-cell-view",
+        )
+    };
     crate::mark::arm();
+    if !attune {
+        log(format_args!(
+            "{LOG_PREFIX} the attunement grid keeps no X -- its cells carry the badge and nothing \
+             switches it on; both lists are unaffected"
+        ));
+    }
     if !equip {
         log(format_args!(
             "{LOG_PREFIX} the equipment screen keeps no X -- its slot cells carry the badge and \
@@ -207,8 +226,9 @@ pub unsafe fn install() -> Outcome {
         ));
     }
     log(format_args!(
-        "{LOG_PREFIX} installed equipment-screen={equip} -- weapons whose requirements the player \
-         fails get the game's own X (waku_03 {:.2?}) at cell-local ({:.2}, {:.2}), {:.2}x{:.2}",
+        "{LOG_PREFIX} installed equipment-screen={equip} attunement-grid={attune} -- items whose \
+         requirements the player fails, and spells there are no attunement slots for, get the \
+         game's own X (waku_03 {:.2?}) at cell-local ({:.2}, {:.2}), {:.2}x{:.2}",
         ds2_rva::FE_ITEM_WARN_SOURCE,
         ds2_rva::FE_ITEM_CELL_BAR_LEFT,
         ds2_rva::FE_ITEM_CELL_BAR_TOP - ds2_rva::FE_ITEM_WARN_SIZE[1] - ds2_rva::FE_ITEM_WARN_INSET,

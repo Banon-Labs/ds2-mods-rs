@@ -9673,6 +9673,112 @@ pub const FE_ITEM_PARAM_ARMOUR_REQUIREMENTS: [u32; 4] = [0x11, 0x12, 0x13, 0x14]
 /// character needs. Read live with the same agent: they map to player stats `10` and `11`.
 pub const FE_ITEM_PARAM_SPELL_REQUIREMENTS: [u32; 2] = [0x42, 0x43];
 
+/// The `FE_ITEM_PARAM_TYPE` key that is a spell's attunement slot cost. `0x40`.
+///
+/// Both column switches answer it with `movzx eax, byte [row+1]` (`0x14003155b` in
+/// [`FE_ITEM_PARAM_COLUMN`], `0x140031e26` in its sibling `FUN_140031b90`), and
+/// [`FE_SPELLBOOK_LIST_GET_ITEM`] asks for exactly this key before it greys a spell out. The spell
+/// detail pane (`0x141564078`) lists it beside `0x42`/`0x43`.
+pub const FE_ITEM_PARAM_SPELL_SLOT_COST: u32 = 0x40;
+
+// --- attunement: the budget, the game's greyed-out decision, and the attunement grid ---
+
+/// `FUN_1401a6790(inner) -> u8`. RVA `0x001a6790`. The attunement budget.
+///
+/// `mov rax,[rcx+0x10]; movzx eax, byte [rax+0x259ec]; ret`. `inner` is `[inventory + 0x10]`
+/// where `inventory` is the manager [`ITEM_INVENTORY_ENTRY_LOOKUP`] takes -- the hop
+/// `FUN_1401ac110` makes before calling this (`mov rcx,[rcx+0x10]` at `0x1401ac11d`). That caller
+/// subtracts the slots in use (`FUN_1401a6e60`, a sum of each attuned entry's `+0x21`) to get the
+/// free slots [`FE_SPELLBOOK_LIST_GET_ITEM`] compares against.
+///
+/// Read live 2026-09-27 (`scripts/frida/spell-attune-read.js`): a character with one spell of cost
+/// `1` attuned read `budget=1 used=1`.
+pub const ITEM_INVENTORY_ATTUNEMENT_BUDGET: u32 = 0x001a_6790;
+
+/// The hop from the inventory manager to the object [`ITEM_INVENTORY_ATTUNEMENT_BUDGET`] takes.
+/// `+0x10`.
+pub const ITEM_INVENTORY_ATTUNEMENT_INNER_OFFSET: usize = 0x10;
+
+/// `SpellBookItemList::getItem(list, out: *FeItemData, index)`. `FUN_1400ceed0`. RVA `0x000ceed0`.
+///
+/// The Attune Spell picker's item source (`FeTestBonfireSpellBookItemSelectMenu`'s
+/// `SpellBookItemList`, vtable `0x1410ba1b0`, slot 3). It is where the game decides a spell is
+/// greyed out, and it records the answer in the item itself:
+///
+/// ```text
+/// available = cost(spell in the selected attunement slot)   ; FUN_1400cf540
+///           + free slots                                     ; FUN_1401ac110 = budget - used
+/// out = { kind, handle, +4 = 0, +5 = 0 }
+/// if equipped(out)                        -> out+5 = 1        ; FUN_140039560, entry+0x1f bit 1
+/// elif available < column(out, 0x40)      -> out+5 = 1        ; 0x1400cef90 cmp / jae
+/// ```
+///
+/// Nothing hooks it. [`FE_ITEM_CELL_BIND`] is handed the item it filled, so the flag at
+/// [`FE_ITEM_DATA_GREYED_OFFSET`] is read there.
+pub const FE_SPELLBOOK_LIST_GET_ITEM: u32 = 0x000c_eed0;
+
+/// `FeItemData + 5`, `u8`. Nonzero when the list that produced the item greyed it out.
+///
+/// Written `1` by [`FE_SPELLBOOK_LIST_GET_ITEM`] at `0x1400cef94`; the default list
+/// (`0x1400b9cd0`) writes the word at `+4` as zero, so an inventory row never carries it.
+/// `FUN_140039610`, which picks the cell icon's `0x70`/`0x7a` sequence, tests it first.
+pub const FE_ITEM_DATA_GREYED_OFFSET: usize = 0x05;
+
+/// The cell-view builder. `FUN_1400b7680(view, cell) -> view`. RVA `0x000b7680`.
+///
+/// Builds the eight accessors listed at [`FE_ITEM_CELL_INFUSION_ACCESSOR_OFFSET`]'s neighbours
+/// from a cell element. Hooked for one of its four callers only: the attunement grid,
+/// [`FE_ATTUNE_GRID_REFRESH`], which binds each attuned spell's cell inline and never runs an
+/// infusion loop, so nothing else ever touches the badge in those cells.
+///
+/// Prologue `48 89 74 24 10 48 89 7c 24 18 55` -- its own; `scripts/ds2-arxan-chain.py
+/// 0x1400b7680` says it is not redirected, and the live bytes read the same (2026-09-27).
+pub const FE_CELL_VIEW_BUILD: u32 = 0x000b_7680;
+
+/// The bytes at [`FE_CELL_VIEW_BUILD`], re-read before the site is patched.
+pub const FE_CELL_VIEW_BUILD_PROLOGUE: [u8; 11] = [
+    0x48, 0x89, 0x74, 0x24, 0x10, 0x48, 0x89, 0x7c, 0x24, 0x18, 0x55,
+];
+
+/// The Attune Spell screen's grid refresh. `FUN_1400cfcf0(component, highlighted: *FeItemData)`.
+///
+/// For each attunement slot (`vtable[0x110]` of the component counts them) it reads the slot's
+/// item into its own `[rsp+0x20]` (`FUN_140035600`, `0x1400cfe5c`), resolves the slot's cell as
+/// `slot / 0x5f5c3e1 / 0x5f5c3e0`, and calls [`FE_CELL_VIEW_BUILD`] on it at `0x1400cff04`.
+/// Recorded for the return address below; not hooked.
+pub const FE_ATTUNE_GRID_REFRESH: u32 = 0x000c_fcf0;
+
+/// Where [`FE_CELL_VIEW_BUILD`] returns to inside [`FE_ATTUNE_GRID_REFRESH`]. RVA `0x000cff09`.
+///
+/// The one call site whose cells are attunement slots; the builder's detour acts on nothing else.
+pub const FE_ATTUNE_GRID_CELL_RETURN: u32 = 0x000c_ff09;
+
+/// `ItemSelectDialog + 0x148`: the dialog's item list, the object whose `vtable[3]` fills each row.
+///
+/// `FUN_1400bc2b0`, the list rebuild that calls [`FE_ITEM_CELL_BIND`], keeps the dialog in `rbx`
+/// (`mov rbx,rcx` at `0x1400bc2c5`) and reads the list from here at `0x1400bc44f`. `rbx` is still the
+/// dialog when the bind is entered, which is how the bind's detour tells the Attune Spell picker from
+/// every other item list.
+pub const FE_ITEM_SELECT_DIALOG_LIST_OFFSET: usize = 0x148;
+
+/// `SpellBookItemList`'s vtable. RVA `0x010ba1b0`, from its RTTI (`scripts/ds2-rtti.py`).
+///
+/// The Attune Spell picker's list; slot 3 is [`FE_SPELLBOOK_LIST_GET_ITEM`].
+pub const FE_SPELLBOOK_ITEM_LIST_VTABLE: u32 = 0x010b_a1b0;
+
+/// The highlight element every item cell carries. `0x5f5c800`.
+///
+/// Child `[1]` of the inventory cell (`l02_02_Inventory.flo` def `0x007a`) and of both bonfire cells
+/// (`l03_01_Bonfire.flo` defs `0x0078` and `0x00ad`). Used with the icon group's
+/// [`FE_ITEM_CELL_INFUSION_ELEMENT_BASE`] to recognise an item cell.
+pub const FE_ITEM_CELL_HIGHLIGHT_ELEMENT: u32 = 0x05f5_c800;
+
+/// Offset of the slot's `FeItemData` in [`FE_ATTUNE_GRID_REFRESH`]'s frame. `0x20`.
+///
+/// Measured from that function's `rsp` at the call: `lea rdx,[rsp+0x20]` before `FUN_140035600` at `0x1400cfe51`, and the same
+/// `[rsp+0x20]`/`[rsp+0x22]` read back after the builder returns (`0x1400cff40`).
+pub const FE_ATTUNE_GRID_ITEM_OFFSET: usize = 0x20;
+
 /// The grip states `darksouls2::game::chr::ChrAsmEquip::grip` holds while two-handing: the halving
 /// range `2..=3`.
 pub const EQUIP_GRIP_TWO_HANDED: std::ops::RangeInclusive<i32> = 2..=3;
