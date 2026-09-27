@@ -100,7 +100,7 @@ static SERVED: AtomicUsize = AtomicUsize::new(0);
 /// # Safety
 ///
 /// `records` must be a live record array holding at least `count` records.
-unsafe fn is_infusion_container(records: *const u8, count: usize) -> bool {
+pub(crate) unsafe fn is_infusion_container(records: *const u8, count: usize) -> bool {
     if count != SHIPPED_CHILDREN {
         return false;
     }
@@ -124,7 +124,7 @@ unsafe fn is_infusion_container(records: *const u8, count: usize) -> bool {
 /// # Safety
 ///
 /// `definition` must be a live definition.
-unsafe fn children_of(definition: *const u8) -> (usize, *const u8) {
+pub(crate) unsafe fn children_of(definition: *const u8) -> (usize, *const u8) {
     // SAFETY: the caller guarantees a definition, and these are the two fields the builder reads.
     unsafe {
         (
@@ -304,7 +304,16 @@ pub(crate) unsafe extern "system" fn detour(
     let original: BuildContainerFn =
         unsafe { std::mem::transmute::<usize, BuildContainerFn>(trampoline) };
 
-    let substitute = substitution(definition);
+    // A cell that lacks the container gets one first (`crate::cell`); the container itself is
+    // then built through this same detour, where `substitution` adds the badge to it.
+    let substitute = substitution(definition).or_else(|| {
+        if armed() {
+            // SAFETY: `doc` and `definition` are the game's own arguments to its own builder.
+            unsafe { crate::cell::substitution(doc, definition) }
+        } else {
+            None
+        }
+    });
     // SAFETY: every argument is the game's own; only `definition` may have been replaced, and then
     // only by a `Container` this module built by copying the one it replaces.
     // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the

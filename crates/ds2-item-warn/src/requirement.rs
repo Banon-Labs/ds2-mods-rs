@@ -233,7 +233,7 @@ unsafe fn attunement_budget(base: usize, inventory: usize) -> Option<u8> {
 ///
 /// `item` must be the live `FeItemData` the game passed to the cell bind, and `base` the loaded
 /// module base.
-unsafe fn unmet(base: usize, item: *const u8) -> Option<bool> {
+unsafe fn unmet(base: usize, item: *const u8, picker: bool) -> Option<bool> {
     if (item as usize) < 0x1_0000 {
         return None;
     }
@@ -372,8 +372,11 @@ unsafe fn unmet(base: usize, item: *const u8) -> Option<bool> {
                 .read()
         };
         if flags & ds2_rva::ITEM_ENTRY_FLAG_EQUIPPED == 0 {
+            // Read only on the picker: the byte is `SpellBookItemList`'s, and no other list is
+            // known to mean the same thing by it.
             // SAFETY: a `FeItemData` is six bytes and the flag is the last of them.
-            let greyed = unsafe { item.add(ds2_rva::FE_ITEM_DATA_GREYED_OFFSET).read() } != 0;
+            let greyed =
+                picker && unsafe { item.add(ds2_rva::FE_ITEM_DATA_GREYED_OFFSET).read() } != 0;
             // SAFETY: as for the requirement columns below; key `0x40` is a plain byte load.
             let cost = unsafe { column(row, ds2_rva::FE_ITEM_PARAM_SPELL_SLOT_COST) } as u16;
             // SAFETY: `base` is the module base and `inventory` the live manager walked above.
@@ -503,6 +506,32 @@ unsafe fn component_of(accessor: &Accessor) -> usize {
     }
 }
 
+/// Show or hide one element under an infusion container, through the same resolve and
+/// `setVisible` the game's bind loop uses.
+///
+/// # Safety
+///
+/// `container` must be a live infusion-container accessor and `base` the module base.
+unsafe fn set_element_visible(base: usize, container: *mut u8, id: u32, visible: bool) {
+    let mut accessor = Accessor([0; ds2_rva::FE_ELEMENT_ACCESSOR_SIZE]);
+    // SAFETY: the caller's container is the live accessor, and the buffers are the game's sizes.
+    unsafe { resolve_element(base, container, id, &mut accessor) };
+    // SAFETY: the function is the game's own `setVisible`, handed the sub-object all of the bind's
+    // own calls hand it; an accessor that resolved to nothing reports nothing.
+    unsafe {
+        let set_visible = std::mem::transmute::<usize, SetVisibleFn>(
+            base + ds2_rva::FE_ELEMENT_SET_VISIBLE as usize,
+        );
+        set_visible(
+            accessor
+                .0
+                .as_mut_ptr()
+                .add(ds2_rva::FE_ELEMENT_ACCESSOR_VISIBLE_OFFSET),
+            u8::from(visible),
+        );
+    }
+}
+
 /// Show or hide the badge on one cell, given that cell's infusion-container accessor.
 ///
 /// # Safety
@@ -550,7 +579,42 @@ unsafe fn show(base: usize, container: *mut u8, visible: bool) {
     };
 }
 
-pub(crate) unsafe extern "system" fn detour(cell: *mut u8, item: *const u8, show_icon: u8) {
+/// The entry the item-cell bind is patched to: the caller's `rbx` into `r9`, then on to [`detour`].
+///
+/// The bind takes three arguments, so `r9` is free. Its only caller, the list rebuild
+/// `FUN_1400bc2b0`, holds the `ItemSelectDialog` in `rbx` for the whole loop (`mov rbx,rcx` at
+/// `0x1400bc2c5`), and the dialog's list says which list the row came from. Assembly for the same
+/// reason as [`cell_view_thunk`]: no Rust expression reads a callee-saved register on entry.
+#[unsafe(naked)]
+pub(crate) unsafe extern "system" fn cell_bind_thunk(_cell: *mut u8, _item: *const u8, _icon: u8) {
+    core::arch::naked_asm!(
+        "mov r9, rbx",
+        "jmp {detour}",
+        detour = sym detour,
+    )
+}
+
+/// Whether the dialog handed over in `rbx` is the Attune Spell picker: its item list at
+/// `FE_ITEM_SELECT_DIALOG_LIST_OFFSET` carries `SpellBookItemList`'s vtable.
+///
+/// # Safety
+///
+/// `dialog` must be the caller's `rbx` at the bind's entry.
+unsafe fn is_attune_picker(base: usize, dialog: usize) -> bool {
+    if dialog < 0x1_0000 || !dialog.is_multiple_of(8) {
+        return false;
+    }
+    // SAFETY: `rbx` at the bind is the list rebuild's `ItemSelectDialog`, and `+0x148` is the field
+    // that function itself reads the list from; the vtable is the list's first qword.
+    unsafe {
+        let Some(list) = follow(dialog, &[ds2_rva::FE_ITEM_SELECT_DIALOG_LIST_OFFSET]) else {
+            return false;
+        };
+        read_usize(list) == base + ds2_rva::FE_SPELLBOOK_ITEM_LIST_VTABLE as usize
+    }
+}
+
+unsafe extern "system" fn detour(cell: *mut u8, item: *const u8, show_icon: u8, dialog: usize) {
     let trampoline = TRAMPOLINE.load(Ordering::Acquire);
     if trampoline == 0 {
         // Published before the site is patched, so unreachable. There is no original to call and
@@ -573,8 +637,12 @@ pub(crate) unsafe extern "system" fn detour(cell: *mut u8, item: *const u8, show
     }
     // SAFETY: the cell is live, and this is the accessor its own bind loop resolves against.
     let container = unsafe { cell.add(ds2_rva::FE_ITEM_CELL_INFUSION_ACCESSOR_OFFSET) };
+    let base = module_base();
+    // SAFETY: `dialog` is the caller's `rbx`, handed over by `cell_bind_thunk`.
+    let picker = base != 0 && unsafe { is_attune_picker(base, dialog) };
+    let screen = if picker { "attune-picker" } else { "inventory" };
     // SAFETY: `item` is the game's own and `container` is inside the live cell view.
-    unsafe { decide(container, item, "inventory") };
+    unsafe { decide(container, item, screen, picker) };
 }
 
 /// The equipment screen's bind: `fn(container, item)`.
@@ -609,7 +677,7 @@ pub(crate) unsafe extern "system" fn equip_detour(container: *mut u8, item: *con
         return;
     }
     // SAFETY: `container` is the live accessor the game just used sixteen times.
-    unsafe { decide(container, item, "equipment") };
+    unsafe { decide(container, item, "equipment", false) };
 }
 
 /// The entry the cell-view builder is patched to: the game's return address into `r8` and the
@@ -664,16 +732,22 @@ unsafe extern "system" fn cell_view_detour(
         return built;
     }
     let item = (caller_rsp + ds2_rva::FE_ATTUNE_GRID_ITEM_OFFSET) as *const u8;
+    // SAFETY: `view` is the cell view the original just filled.
+    let container = unsafe { view.add(ds2_rva::FE_ITEM_CELL_INFUSION_ACCESSOR_OFFSET) };
+    // The grid has no infusion loop of its own, and its cells' container is one `crate::mark` gave
+    // them, so its nine glyphs would otherwise draw as authored. Hidden here the way the inventory
+    // bind hides them, before the badge is decided.
+    for slot in 0..ds2_rva::FE_ITEM_CELL_INFUSION_SLOTS {
+        let id = ds2_rva::FE_ITEM_CELL_INFUSION_ELEMENT_BASE + slot;
+        if id != ds2_rva::FE_ITEM_WARN_ELEMENT {
+            // SAFETY: as below; an id with no element resolves to nothing and writes nothing.
+            unsafe { set_element_visible(base, container, id, false) };
+        }
+    }
     // SAFETY: the return address proves the caller is the grid refresh, whose frame holds the
     // slot's `FeItemData` at this offset for the whole call; `view` is the cell view the original
     // just filled, and its infusion accessor is the one the inventory bind uses at the same offset.
-    unsafe {
-        decide(
-            view.add(ds2_rva::FE_ITEM_CELL_INFUSION_ACCESSOR_OFFSET),
-            item,
-            "attunement",
-        )
-    };
+    unsafe { decide(container, item, "attunement", false) };
     built
 }
 
@@ -683,14 +757,14 @@ unsafe extern "system" fn cell_view_detour(
 ///
 /// `container` must be a live infusion-container accessor and `item` the `FeItemData` the bind was
 /// called with.
-unsafe fn decide(container: *mut u8, item: *const u8, screen: &str) {
+unsafe fn decide(container: *mut u8, item: *const u8, screen: &str, picker: bool) {
     let base = module_base();
     if base == 0 {
         return;
     }
     LAST_KIND.store(NO_KIND, Ordering::Relaxed);
     // SAFETY: `item` is the game's own and `base` is the live module base.
-    let answer = unsafe { unmet(base, item) };
+    let answer = unsafe { unmet(base, item, picker) };
     let kind = match LAST_KIND.load(Ordering::Relaxed) {
         NO_KIND => "?".to_string(),
         kind => kind.to_string(),

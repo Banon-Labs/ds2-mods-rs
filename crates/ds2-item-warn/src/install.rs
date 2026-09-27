@@ -167,7 +167,7 @@ pub unsafe fn install() -> Outcome {
             base,
             ds2_rva::FE_ITEM_CELL_BIND,
             &ds2_rva::FE_ITEM_CELL_BIND_PROLOGUE,
-            crate::requirement::detour as *mut c_void,
+            crate::requirement::cell_bind_thunk as *mut c_void,
             &crate::requirement::TRAMPOLINE,
             "item-cell-bind",
         )

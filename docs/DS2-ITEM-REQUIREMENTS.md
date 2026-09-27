@@ -613,8 +613,30 @@ itself. It has no infusion loop and never calls either bind, so nothing there to
 
 `ds2-item-warn` hooks `FUN_1400b7680` through a naked thunk that passes the return address and the
 caller's `rsp`. Only the call returning to `0x1400cff09` is acted on: after the original, the cell's
-infusion container is `view+0x2d0` and the slot item is `[caller rsp+0x20]`. The bonfire layout
-(`/menu/03.febnd.dcx`, `l03_01_Bonfire.flo`) carries the nine-id container in its item cell
-(`def 0x0078` child `[2]`, `def 0x0070`), so the container detour has already built the badge there.
-That cell puts the container at `(41.90, 49.75)` under a `0.948` scale, against `(51.40, 48.15)` in
-the inventory cell, so the X may sit a few units off the corner it has in the inventory.
+infusion container is `view+0x2d0` and the slot item is `[caller rsp+0x20]`.
+
+### The Attune Spell cells have no container, so one is copied in
+
+The first build of the above drew nothing on the Attune Spell screen, and a run showed why
+(2026-09-27, `scripts/frida/attune-badge-diag.js`, the picker opened through the input harness):
+
+* every picker row's `view+0x2d0` accessor resolved to nothing;
+* opening the screen built `l03_01_Bonfire.flo` def `0x00ad` 78 times (70 picker rows and the
+  attunement slots) through the container builder, and no nine-id container anywhere;
+* def `0x00ad` holds the icon group `0x5f5c3e0` at `(-7.85, -5.5)`, the highlight `0x5f5c800` and a
+  frame -- and nothing with id `0x5f5c3e2`.
+
+The same document's other item cell, def `0x0078`, has the icon group at the same `(-7.85, -5.5)` and
+the container as child `[2]` (`def 0x0070`, id `0x5f5c3e2`, at `(41.90, 49.75)`). `ds2-item-warn`'s
+`cell.rs` copies that record, whole, onto the end of any cell the builder is about to walk that has
+the icon group and the highlight but no container, when the same document holds such a donor with
+the icon group at the same place. The container is then built through the badge detour like any
+other, and the accessor at `+0x2d0` finds it. The icon sits at the same place relative to the
+container as in the inventory cell (`(-37.35, -58.05)` against `(-36.15, -57.80)`), so the X lands
+in the same corner of the icon.
+
+The grid binds inline with no infusion loop, so its detour now hides the nine glyphs itself before
+deciding the badge. The list bind's detour is entered through a thunk that passes the caller's
+`rbx` -- the `ItemSelectDialog`, held there by `FUN_1400bc2b0` for the whole loop -- and a dialog
+whose list at `+0x148` carries `SpellBookItemList`'s vtable (`0x1410ba1b0`) is the picker: the log
+says `screen=attune-picker`, and only there is the greyed byte read.

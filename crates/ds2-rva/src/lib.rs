@@ -9667,6 +9667,26 @@ pub const FE_ATTUNE_GRID_REFRESH: u32 = 0x000c_fcf0;
 /// The one call site whose cells are attunement slots; the builder's detour acts on nothing else.
 pub const FE_ATTUNE_GRID_CELL_RETURN: u32 = 0x000c_ff09;
 
+/// `ItemSelectDialog + 0x148`: the dialog's item list, the object whose `vtable[3]` fills each row.
+///
+/// `FUN_1400bc2b0`, the list rebuild that calls [`FE_ITEM_CELL_BIND`], keeps the dialog in `rbx`
+/// (`mov rbx,rcx` at `0x1400bc2c5`) and reads the list from here at `0x1400bc44f`. `rbx` is still the
+/// dialog when the bind is entered, which is how the bind's detour tells the Attune Spell picker from
+/// every other item list.
+pub const FE_ITEM_SELECT_DIALOG_LIST_OFFSET: usize = 0x148;
+
+/// `SpellBookItemList`'s vtable. RVA `0x010ba1b0`, from its RTTI (`scripts/ds2-rtti.py`).
+///
+/// The Attune Spell picker's list; slot 3 is [`FE_SPELLBOOK_LIST_GET_ITEM`].
+pub const FE_SPELLBOOK_ITEM_LIST_VTABLE: u32 = 0x010b_a1b0;
+
+/// The highlight element every item cell carries. `0x5f5c800`.
+///
+/// Child `[1]` of the inventory cell (`l02_02_Inventory.flo` def `0x007a`) and of both bonfire cells
+/// (`l03_01_Bonfire.flo` defs `0x0078` and `0x00ad`). Used with the icon group's
+/// [`FE_ITEM_CELL_INFUSION_ELEMENT_BASE`] to recognise an item cell.
+pub const FE_ITEM_CELL_HIGHLIGHT_ELEMENT: u32 = 0x05f5_c800;
+
 /// Offset of the slot's `FeItemData` in [`FE_ATTUNE_GRID_REFRESH`]'s frame. `0x20`.
 ///
 /// Measured from that function's `rsp` at the call: `lea rdx,[rsp+0x20]` before `FUN_140035600` at `0x1400cfe51`, and the same

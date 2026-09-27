@@ -79,6 +79,9 @@
 #![cfg_attr(not(windows), allow(unused))]
 
 #[cfg(windows)]
+mod cell;
+
+#[cfg(windows)]
 mod install;
 
 #[cfg(windows)]
