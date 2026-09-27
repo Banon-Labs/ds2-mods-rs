@@ -44,7 +44,10 @@ pub mod filter;
 pub mod handoff;
 pub mod source;
 
-pub use dest::{Route, with_extension};
+pub use dest::{
+    ExportVerdict, Route, STAGING_SUFFIX, export_verdict, is_live_container, staging_path,
+    with_extension,
+};
 pub use filter::{filter_string, wide_nul};
 pub use handoff::HANDOFF_FILE_NAME;
 pub use source::{

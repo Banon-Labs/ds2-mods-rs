@@ -351,6 +351,13 @@ VOICE_CHAT_SECTION = "voice_chat"
 KEY_VOICE_CHAT_ENABLED = "enabled"
 VOICE_CHAT_LOG_PREFIX = "ds2-voice-chat:"
 
+#: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/net_effects.rs`. Off unless
+#: `--net-effects` asks for it, matching the DLL's own default.
+NET_EFFECTS_SECTION = "net_effects"
+KEY_NET_EFFECTS_ENABLED = "enabled"
+#: Mirrors `LOG_PREFIX` in `crates/ds2-net-effects/src/lib.rs`.
+NET_EFFECTS_LOG_PREFIX = "ds2-net-effects:"
+
 #: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/soul_memory_guard.rs`. OFF by
 #: default here, matching the DLL; `--soul-memory-guard` turns it on.
 SOUL_MEMORY_GUARD_SECTION = "soul_memory_guard"
@@ -1513,6 +1520,7 @@ def config_text(
     soul_memory_guard: bool = False,
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
+    net_effects: bool = False,
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
@@ -2038,6 +2046,14 @@ def config_text(
 # `key` in this section; leaving it out keeps the default. Grep the log for `{VOICE_CHAT_LOG_PREFIX}`.
 {KEY_VOICE_CHAT_ENABLED} = {str(voice_chat).lower()}
 
+[{NET_EFFECTS_SECTION}]
+# Read at startup. A keyboard key (default F9) that applies a SpEffect (default 140001010, an sfx
+# and nothing else) to the local player through the game's own apply function. Off unless
+# `--net-effects` asked for it. `key` and `effect` in this section move it while the game runs;
+# leaving them out keeps the defaults. The key is read on [{INVASION_PATH_SECTION}]'s Present
+# clock, so `--net-effects` turns that section on too. Grep the log for `{NET_EFFECTS_LOG_PREFIX}`.
+{KEY_NET_EFFECTS_ENABLED} = {str(net_effects).lower()}
+
 [{HP_GAUGE_SECTION}]
 # STARTUP-ONLY. The HP bar and damage number floating over other characters, drawn by
 # `ds2-hp-gauge`: the bar grown and moved to sit centred over the target, and the number grown,
@@ -2304,6 +2320,7 @@ def write_config(
     soul_memory_guard: bool = False,
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
+    net_effects: bool = False,
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
@@ -2349,6 +2366,7 @@ def write_config(
         soul_memory_guard=soul_memory_guard,
         weapon_sync=weapon_sync,
         weapon_sync_test_cap=weapon_sync_test_cap,
+        net_effects=net_effects,
     )
     path.write_text(text, encoding="utf-8")
     return path, text
@@ -2466,6 +2484,7 @@ def dry_run(
     soul_memory_guard: bool = False,
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
+    net_effects: bool = False,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
     report_environment(probe)
@@ -2529,6 +2548,7 @@ def dry_run(
             soul_memory_guard=soul_memory_guard,
             weapon_sync=weapon_sync,
             weapon_sync_test_cap=weapon_sync_test_cap,
+            net_effects=net_effects,
         ):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
         else:
@@ -2588,6 +2608,7 @@ def dry_run(
                 soul_memory_guard=soul_memory_guard,
                 weapon_sync=weapon_sync,
                 weapon_sync_test_cap=weapon_sync_test_cap,
+                net_effects=net_effects,
             ),
             indent="[dry-run]   | ",
         )
@@ -3148,6 +3169,7 @@ def launch(
     soul_memory_guard: bool = False,
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
+    net_effects: bool = False,
 ) -> int:
     report_environment(probe)
     problems = preflight(dry_run=False)
@@ -3206,6 +3228,7 @@ def launch(
         soul_memory_guard=soul_memory_guard,
         weapon_sync=weapon_sync,
         weapon_sync_test_cap=weapon_sync_test_cap,
+        net_effects=net_effects,
     )
     print(f"[config] {config_path}")
 
@@ -3963,6 +3986,24 @@ def selftest() -> int:
     check(
         values.get((INTRO_SECTION, KEY_INTRO_ENABLED)) == "true",
         "--boot-timeline leaves every other switch alone",
+    )
+    values, _ = parse_config(config_text("off"))
+    check(
+        values.get((NET_EFFECTS_SECTION, KEY_NET_EFFECTS_ENABLED)) == "false",
+        f"[{NET_EFFECTS_SECTION}] {KEY_NET_EFFECTS_ENABLED} defaults to false, matching the DLL",
+    )
+    values, _ = parse_config(config_text("off", net_effects=True))
+    check(
+        values.get((NET_EFFECTS_SECTION, KEY_NET_EFFECTS_ENABLED)) == "true",
+        f"--net-effects writes [{NET_EFFECTS_SECTION}] {KEY_NET_EFFECTS_ENABLED} = true",
+    )
+    net_effects_src = (REPO_ROOT / "crates/ds2-loader/src/net_effects.rs").read_text(
+        encoding="utf-8"
+    )
+    check(
+        f'CONFIG_SECTION: &str = "{NET_EFFECTS_SECTION}"' in net_effects_src
+        and f'KEY_ENABLED: &str = "{KEY_NET_EFFECTS_ENABLED}"' in net_effects_src,
+        f"[{NET_EFFECTS_SECTION}] {KEY_NET_EFFECTS_ENABLED} is the section and key the loader reads",
     )
     values, _ = parse_config(config_text("off", intro_skip=False))
     check(
@@ -4845,6 +4886,18 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--net-effects",
+        dest="net_effects",
+        action="store_true",
+        help=(
+            "turn on ds2-net-effects: a keyboard key (F9 unless [net_effects] key says otherwise) "
+            "applies a SpEffect (140001010, an sfx only, unless [net_effects] effect says "
+            "otherwise) to the local player. Off without this flag, matching the DLL. Implies "
+            "--invasion-path, because the key is read on that feature's Present hook; the overlay "
+            "stays off unless --invasion-path-on says otherwise."
+        ),
+    )
+    parser.add_argument(
         "--item-warn",
         dest="item_warn",
         action="store_true",
@@ -5139,6 +5192,13 @@ def main() -> int:
             f"[config] --input-harness turned [{INVASION_PATH_SECTION}] on for this run: the "
             "harness ticks from its Present hook and reads no command without it."
         )
+    # Same reason for the SpEffect key: it is read on the same Present clock.
+    if args.net_effects and not args.invasion_path:
+        args.invasion_path = True
+        print(
+            f"[config] --net-effects turned [{INVASION_PATH_SECTION}] on for this run: the key "
+            "is read on its Present hook and does nothing without it."
+        )
 
     if args.selftest:
         return selftest()
@@ -5215,6 +5275,7 @@ def main() -> int:
             soul_memory_guard=args.soul_memory_guard,
             weapon_sync=args.weapon_sync,
             weapon_sync_test_cap=args.weapon_sync_test_cap,
+            net_effects=args.net_effects,
         )
     return launch(
         args.probe,
@@ -5259,6 +5320,7 @@ def main() -> int:
         soul_memory_guard=args.soul_memory_guard,
         weapon_sync=args.weapon_sync,
         weapon_sync_test_cap=args.weapon_sync_test_cap,
+        net_effects=args.net_effects,
     )
 
 
