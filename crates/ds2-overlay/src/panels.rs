@@ -55,6 +55,9 @@ fn any_visible() -> bool {
 /// The modality checks, index-matched to [`DRAWS`]. `0` means never modal.
 static WANTS_INPUT: [AtomicUsize; PANEL_SLOTS] = [const { AtomicUsize::new(0) }; PANEL_SLOTS];
 
+/// Whether the filter the last rendered frame handed hudhook blocks the game's input.
+static FILTER_BLOCKING: AtomicBool = AtomicBool::new(false);
+
 /// Set once the render loop has been handed to hudhook.
 static LOOP_SET: AtomicBool = AtomicBool::new(false);
 
@@ -132,7 +135,9 @@ impl ImguiRenderLoop for Panels {
     }
 
     fn message_filter(&self, _io: &Io) -> MessageFilter {
-        if any_wants_input() {
+        let blocking = any_wants_input();
+        FILTER_BLOCKING.store(blocking, Ordering::Release);
+        if blocking {
             MessageFilter::InputAll
         } else {
             MessageFilter::empty()
@@ -249,7 +254,10 @@ fn measure_mouse(chain: &IDXGISwapChain) {
 /// `Present` detour after the drawers. Does nothing until a panel is registered, so a session
 /// with no panel never builds an imgui pipeline or subclasses the window.
 pub(crate) fn render(swap_chain: *mut c_void) {
-    if swap_chain.is_null() || !any_visible() {
+    // hudhook's window procedure applies whatever filter the last rendered frame stored, so frames
+    // keep rendering while that is still a block. Stopping at the frame the picker closed left
+    // `InputAll` in place, and the game got no left click afterwards (2026-09-27).
+    if swap_chain.is_null() || !(any_visible() || FILTER_BLOCKING.load(Ordering::Acquire)) {
         return;
     }
     if !LOOP_SET.swap(true, Ordering::AcqRel) {
