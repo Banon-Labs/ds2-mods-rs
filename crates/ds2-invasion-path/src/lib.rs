@@ -146,6 +146,7 @@ pub mod log;
 pub mod navpath;
 pub mod routes;
 
+pub(crate) mod hud;
 pub(crate) mod lines;
 pub mod stone_effect;
 pub(crate) mod trail;
@@ -203,6 +204,17 @@ mod windows_impl {
         fn GetCurrentProcessId() -> u32;
     }
 
+    // The same declaration and flags as `ds2-voice-chat`'s. Not shared through `ds2-game-base`
+    // yet: that belongs in one place, and moving it there is a change to every speaking crate.
+    #[link(name = "winmm")]
+    unsafe extern "system" {
+        fn PlaySoundW(sound: *const c_void, module: *mut c_void, flags: u32) -> i32;
+    }
+
+    /// `SND_ASYNC | SND_NODEFAULT | SND_MEMORY`: return at once, never fall back to the system
+    /// beep, and read the WAV from the pointer. A new clip cuts off one still playing.
+    const PLAY_FLAGS: u32 = 0x0001 | 0x0002 | 0x0004;
+
     /// `VK_CONTROL`, `VK_MENU`, `VK_SHIFT` -- the three modifiers a chord can carry.
     const VK_CONTROL: i32 = 0x11;
     const VK_MENU: i32 = 0x12;
@@ -235,6 +247,8 @@ mod windows_impl {
         palette: Palette,
         tracker: Tracker,
         enabled: bool,
+        /// This frame's back buffer size, for the on-state glyph. `None` when it was not read.
+        screen: Option<[f32; 2]>,
         /// The toggle key's state last frame, so a held key is one toggle and not sixty.
         toggle_was_down: bool,
         /// Whether the captured-camera line has been written. See `crate::capture`.
@@ -321,6 +335,7 @@ mod windows_impl {
                 palette: Palette::default(),
                 tracker: Tracker::default(),
                 enabled,
+                screen: None,
                 toggle_was_down: false,
                 said_captured: false,
                 said_first_frame: false,
@@ -446,7 +461,38 @@ mod windows_impl {
         let Some(state) = guard.as_mut() else {
             return Vec::new();
         };
+        state.screen = None;
+        let lines = build(state, swap_chain);
+        // The glyph goes first, because the renderer keeps the first `MAX_VERTICES` and drops the
+        // rest: a frame full of trail can lose a stone at the far end but never the indicator.
+        let mut vertices = Vec::with_capacity(crate::hud::GLYPH_VERTICES + lines.len());
+        if state.enabled
+            && let Some(screen) = state.screen
+        {
+            crate::hud::push_glyph(&mut vertices, screen);
+        }
+        vertices.extend(lines);
+        vertices
+    }
 
+    /// Play the spoken on/off clip for a press. Only a refusal is logged; the press itself is
+    /// already the `overlay on`/`overlay off` line.
+    fn announce(on: bool) {
+        let clip = crate::hud::clip(on);
+        // SAFETY: `clip` is a `'static` WAV compiled into this DLL, so it outlives the async
+        // play, and `SND_MEMORY` reads it as a WAV image rather than a file name.
+        let played = unsafe { PlaySoundW(clip.as_ptr().cast(), core::ptr::null_mut(), PLAY_FLAGS) };
+        if played == 0 {
+            log(format_args!(
+                "voice: winmm refused the \"{}\" clip",
+                if on { "on" } else { "off" }
+            ));
+        }
+    }
+
+    /// Everything [`frame`] draws except the glyph: the config, the key, and the route lines.
+    /// Records the back buffer size in `state.screen` once it has read it.
+    fn build(state: &mut State, swap_chain: &IDXGISwapChain) -> Vec<Vertex> {
         // ONE LINE, THE FIRST TIME THE DETOUR EVER RUNS. Without it "the overlay drew nothing"
         // and "the detour is not being called at all" are the same silence -- which is exactly
         // what the first live run produced, and it cost a second launch to tell them apart.
@@ -469,6 +515,7 @@ mod windows_impl {
                     "overlay {}",
                     if state.enabled { "on" } else { "off" }
                 ));
+                announce(state.enabled);
                 if !state.enabled {
                     // A map change while the overlay is off would otherwise leave a camera
                     // candidate pointing at a freed object.
@@ -495,6 +542,7 @@ mod windows_impl {
         let Some(screen) = back_buffer_size(swap_chain) else {
             return Vec::new();
         };
+        state.screen = Some(screen);
 
         let Some(local) = census::local_position() else {
             if state.had_world {
