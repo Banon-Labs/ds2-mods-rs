@@ -307,6 +307,10 @@ else
   # Which checkout the push runs in: `cd <worktree> && git push` was measured in the main checkout
   # on 2026-09-26 and refused although that worktree's build was the one staged and run.
   python3 scripts/cupcake_push_target_repo.py --selftest | tail -1
+  # Which branch the push sends, resolved in that checkout: the same `cd <worktree> && git push`
+  # shape was refused by DS2-MODS-BLOCK-MAIN-PUSH on 2026-09-27 because it judged the hook's own
+  # branch, main (bd ds2-mods-rs-zmep).
+  python3 scripts/cupcake_push_target_branch.py --selftest | tail -1
   # Whether a ref's crate changes are comments only, by lexing both sides; a lexer that drifts into
   # reading a string literal as a comment would wave real code through.
   python3 scripts/cupcake_comment_only.py --selftest | tail -1

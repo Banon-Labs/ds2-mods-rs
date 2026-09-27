@@ -333,6 +333,41 @@ def cases() -> list[PolicyCase]:
             current_branch="main",
         ),
         PolicyCase("allow-push-feature-branch", True, "git push origin cupcake-policies"),
+        # bd ds2-mods-rs-zmep: the branch the push sends, resolved where the push runs, through
+        # the real push_target_branches signal. Hook cwd on main, target checkout on a feature
+        # branch: allowed. The same forms aimed at a checkout on main: denied.
+        PolicyCase(
+            "allow-cd-feature-checkout-force-with-lease-push-from-main",
+            True,
+            f"cd {OTHER_REPO_FEATURE} && git push -q --force-with-lease origin ds2-paramdefs",
+            current_branch="main",
+        ),
+        PolicyCase(
+            "allow-cd-feature-checkout-bare-push-from-main",
+            True,
+            f"cd {OTHER_REPO_FEATURE} && git push -q",
+            current_branch="main",
+        ),
+        PolicyCase(
+            "deny-cd-main-checkout-bare-push-from-feature",
+            False,
+            f"cd {OTHER_REPO_MAIN} && git push -q",
+            expected_text="Do not push directly to main",
+        ),
+        PolicyCase(
+            "deny-git-c-main-checkout-push-from-feature",
+            False,
+            f"git -C {OTHER_REPO_MAIN} push -q origin",
+            expected_text="Do not push directly to main",
+        ),
+        PolicyCase(
+            "deny-bare-push-on-main",
+            False,
+            "git push",
+            current_branch="main",
+            expected_text="Do not push directly to main",
+        ),
+        PolicyCase("allow-bare-push-on-feature", True, "git push"),
         # --- git_require_fresh_origin_main -----------------------------------------------------
         # Force-pushing a PR branch is allowed only when origin/main was just fetched. The two
         # cases differ ONLY in the pinned OIDs, so a pass here is attributable to that guard and

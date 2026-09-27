@@ -30,6 +30,24 @@ bash_event_no_branch_signal(cmd) := {
 	"signals": {},
 }
 
+# Since 2026-09-27 (bd ds2-mods-rs-zmep) the policy no longer reads
+# current_branch; the helpers above still pass it, and every case built on them
+# is therefore a case with NO push_target_branches signal -- the unresolved,
+# fail-closed path. push_event below pins that signal.
+push_event(cmd, signal) := {
+	"hook_event_name": "PreToolUse",
+	"tool_name": "Bash",
+	"tool_input": {"command": cmd, "timeout": 30000},
+	"signals": {"push_target_branches": signal},
+}
+
+push_event_object_signal(cmd, signal) := {
+	"hook_event_name": "PreToolUse",
+	"tool_name": "Bash",
+	"tool_input": {"command": cmd, "timeout": 30000},
+	"signals": {"push_target_branches": {"output": signal, "exit_code": 0}},
+}
+
 rule_ids(denials) := {d.rule_id | some d in denials}
 
 test_deny_bare_git_push_on_main if {
@@ -443,7 +461,7 @@ test_deny_wrapped_bare_push_on_main if {
 }
 
 test_allow_wrapped_bare_push_on_feature_branch if {
-	denials := guard.deny with input as bash_event("bash -c 'git push'", "feature/no-main-push\n")
+	denials := guard.deny with input as push_event("bash -c 'git push'", "DEST feature/no-main-push\n")
 	count(denials) == 0
 }
 
@@ -592,4 +610,115 @@ test_deny_shell_read_heredoc_push_main if {
 		"feature/no-main-push\n",
 	)
 	"DS2-MODS-BLOCK-MAIN-PUSH" in rule_ids(denials)
+}
+
+# --- push_target_branches: judge the branch the push sends (bd ds2-mods-rs-zmep)
+
+zmep_command := "cd /home/banon/projects/ds2-mods-rs-wt-jiy && git push -q --force-with-lease origin loader-build-sha"
+
+# The reported miss, verbatim: hook cwd on main, worktree and refspec on
+# loader-build-sha. The signal names the destination, so it is allowed.
+test_allow_zmep_cd_worktree_force_with_lease_push if {
+	denials := guard.deny with input as push_event(zmep_command, "DEST loader-build-sha\n")
+	count(denials) == 0
+}
+
+test_allow_zmep_with_object_signal if {
+	denials := guard.deny with input as push_event_object_signal(zmep_command, "DEST loader-build-sha\n")
+	count(denials) == 0
+}
+
+# Fail closed: the same command with no signal, an empty one, or an UNKNOWN.
+test_deny_zmep_command_when_signal_missing if {
+	denials := guard.deny with input as bash_event_no_branch_signal(zmep_command)
+	"DS2-MODS-BLOCK-MAIN-PUSH" in rule_ids(denials)
+}
+
+test_deny_zmep_command_when_signal_empty if {
+	denials := guard.deny with input as push_event(zmep_command, "")
+	"DS2-MODS-BLOCK-MAIN-PUSH" in rule_ids(denials)
+}
+
+test_deny_zmep_command_when_signal_unknown if {
+	denials := guard.deny with input as push_event(zmep_command, "UNKNOWN a subshell or heredoc hides which directory a push inherits\n")
+	"DS2-MODS-BLOCK-MAIN-PUSH" in rule_ids(denials)
+}
+
+# One UNKNOWN among resolved destinations still leaves the command unresolved.
+test_deny_when_any_signal_line_is_unknown if {
+	denials := guard.deny with input as push_event(zmep_command, "DEST loader-build-sha\nUNKNOWN x\n")
+	"DS2-MODS-BLOCK-MAIN-PUSH" in rule_ids(denials)
+}
+
+test_allow_git_c_worktree_bare_push_resolved_to_feature if {
+	denials := guard.deny with input as push_event("git -C /home/banon/projects/ds2-mods-rs-wt-jiy push -q", "DEST loader-build-sha\n")
+	count(denials) == 0
+}
+
+test_allow_bash_lc_cd_worktree_push_resolved_to_feature if {
+	denials := guard.deny with input as push_event(
+		"bash -lc 'cd /home/banon/projects/ds2-mods-rs-wt-jiy && git push --force-with-lease'",
+		"DEST loader-build-sha\n",
+	)
+	count(denials) == 0
+}
+
+# A real push to main stays blocked in every form.
+test_deny_bare_push_resolved_to_main if {
+	denials := guard.deny with input as push_event("git push", "DEST main\n")
+	"DS2-MODS-BLOCK-MAIN-PUSH" in rule_ids(denials)
+}
+
+test_deny_cd_worktree_on_main_bare_push if {
+	denials := guard.deny with input as push_event("cd /home/banon/projects/ds2-mods-rs-wt-main && git push -q", "DEST main\n")
+	"DS2-MODS-BLOCK-MAIN-PUSH" in rule_ids(denials)
+}
+
+test_deny_git_c_worktree_on_main_push if {
+	denials := guard.deny with input as push_event("git -C /home/banon/projects/ds2-mods-rs-wt-main push -q origin", "DEST main\n")
+	"DS2-MODS-BLOCK-MAIN-PUSH" in rule_ids(denials)
+}
+
+# The text rule holds even if the signal were wrong about the destination.
+test_deny_origin_main_even_with_feature_signal if {
+	denials := guard.deny with input as push_event("git push origin main", "DEST loader-build-sha\n")
+	"DS2-MODS-BLOCK-MAIN-PUSH" in rule_ids(denials)
+}
+
+test_deny_head_to_main_even_with_feature_signal if {
+	denials := guard.deny with input as push_event("cd /x && git push origin HEAD:main", "DEST loader-build-sha\n")
+	"DS2-MODS-BLOCK-MAIN-PUSH" in rule_ids(denials)
+}
+
+# `-u origin HEAD` from a main checkout pushes main. The resolved signal says
+# so and denies; unresolved, the -u exception no longer vouches for HEAD or @.
+test_deny_upstream_head_resolved_to_main if {
+	denials := guard.deny with input as push_event("git push -u origin HEAD", "DEST main\n")
+	"DS2-MODS-BLOCK-MAIN-PUSH" in rule_ids(denials)
+}
+
+test_deny_upstream_head_when_signal_missing if {
+	denials := guard.deny with input as bash_event_no_branch_signal("git push -u origin HEAD")
+	"DS2-MODS-BLOCK-MAIN-PUSH" in rule_ids(denials)
+}
+
+test_deny_upstream_at_when_signal_missing if {
+	denials := guard.deny with input as bash_event_no_branch_signal("git push -u origin @")
+	"DS2-MODS-BLOCK-MAIN-PUSH" in rule_ids(denials)
+}
+
+test_deny_any_destination_main_among_several if {
+	denials := guard.deny with input as push_event("git -C /a push && git -C /b push", "DEST loader-build-sha\nDEST main\n")
+	"DS2-MODS-BLOCK-MAIN-PUSH" in rule_ids(denials)
+}
+
+test_deny_destination_spelled_heads_main if {
+	denials := guard.deny with input as push_event("git push", "DEST heads/main\n")
+	"DS2-MODS-BLOCK-MAIN-PUSH" in rule_ids(denials)
+}
+
+# Resolved: the explicit -u exception is not needed and not consulted.
+test_allow_resolved_feature_destination_from_main_checkout if {
+	denials := guard.deny with input as push_event("git push -u origin feat/x", "DEST feat/x\n")
+	count(denials) == 0
 }

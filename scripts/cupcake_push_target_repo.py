@@ -132,9 +132,43 @@ def has_redirect_marker(command: str) -> bool:
     return False
 
 
+def newlines_as_separators(command: str) -> str:
+    """The command with every newline outside quotes followed by a `;`.
+
+    The newline is kept so a `#` comment still ends at it; the `;` after it is what shlex yields as
+    a separator token. A backslash-newline is a line continuation and is left alone.
+    """
+    out: list[str] = []
+    quote = ""
+    escaped = False
+    for character in command:
+        out.append(character)
+        if escaped:
+            escaped = False
+            continue
+        if character == "\\" and quote != "'":
+            escaped = True
+            continue
+        if quote:
+            if character == quote:
+                quote = ""
+            continue
+        if character in "'\"":
+            quote = character
+            continue
+        if character == "\n":
+            out.append(";")
+    return "".join(out)
+
+
 def lex(command: str) -> list[str] | None:
-    """Tokens with shell operators kept as tokens of their own, or `None` if it will not lex."""
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    """Tokens with shell operators kept as tokens of their own, or `None` if it will not lex.
+
+    shlex treats a newline as plain whitespace, so `git push origin feat<newline>git push` would lex
+    as ONE push whose refspecs are `feat git push` -- and the bare second push would vanish. An
+    unquoted newline ends a command in the shell, so it is turned into a `;` token first.
+    """
+    lexer = shlex.shlex(newlines_as_separators(command), posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
     try:
         return list(lexer)
@@ -224,14 +258,27 @@ def push_directories(command: str, cwd: str) -> set[str]:
     Raises `Unresolvable` for the shapes listed in the module docstring. An empty result means
     the command pushes nothing, which is the ordinary case for almost every Bash call.
     """
+    return {directory for directory, _ in push_invocations(command, cwd)}
+
+
+def push_invocations(
+    command: str, cwd: str, *, allow_hiding: bool = False
+) -> list[tuple[str, list[str]]]:
+    """Every `git push` in this command: (the directory it runs in, its words from `git` on).
+
+    The same walk as `push_directories`, keeping each push's own words so a caller can read its
+    refspecs. `scripts/cupcake_push_target_branch.py` is that caller. Raises `Unresolvable` for
+    the same shapes, except that `allow_hiding` skips the subshell/heredoc refusal for a caller
+    that has already established the command contains no redirect for one to hide.
+    """
     tokens = lex(command)
     if tokens is None:
         raise Unresolvable("the command does not lex")
-    if any(marker in command for marker in UNRESOLVABLE_MARKERS):
+    if not allow_hiding and any(marker in command for marker in UNRESOLVABLE_MARKERS):
         raise Unresolvable("a subshell or heredoc hides which directory a push inherits")
 
     current = cwd
-    found: set[str] = set()
+    found: list[tuple[str, list[str]]] = []
     for segment in segments(tokens):
         words = strip_prefixes(segment)
         if not words:
@@ -248,7 +295,7 @@ def push_directories(command: str, cwd: str) -> set[str]:
             continue
         payload = shell_payload(words)
         if payload is not None:
-            found |= push_directories(payload, current)
+            found.extend(push_invocations(payload, current, allow_hiding=allow_hiding))
             continue
         if verb == "git":
             directories, is_push = git_c_directories(words)
@@ -257,7 +304,7 @@ def push_directories(command: str, cwd: str) -> set[str]:
             target = current
             for directory in directories:
                 target = os.path.normpath(os.path.join(target, os.path.expanduser(directory)))
-            found.add(target)
+            found.append((target, words))
     return found
 
 
