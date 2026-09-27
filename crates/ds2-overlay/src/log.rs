@@ -22,7 +22,8 @@ pub fn set_logger(logger: LogFn) {
 pub const LOG_PREFIX: &str = "ds2-overlay:";
 
 /// Write one line, if there is anywhere to write it.
-#[cfg_attr(not(windows), allow(dead_code))] // DEBT: only the Windows detour logs.
+// DEBT: ds2-mods-rs-24r -- keeps the crate host-parseable; only the Windows detour logs.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn log(args: std::fmt::Arguments<'_>) {
     let raw = LOGGER.load(Ordering::Acquire);
     if raw == 0 {
