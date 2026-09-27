@@ -1,14 +1,15 @@
-//! Hiding the game's own pointer while a panel holds the input.
+//! Showing the OS pointer while a panel holds the input.
 //!
 //! The game decides the OS pointer's visibility once a frame, in `ds2_rva::INPUT_UPDATE`, from
 //! the flag at `ds2_rva::INPUT_UPDATE_CURSOR_WANTED_OFFSET`, and calls `ShowCursor` on its own
-//! thread until the display count agrees. So while [`crate::is_held`] is set the detour clears
-//! that flag for the length of the call and puts the game's value back afterwards: the game
-//! hides the pointer itself, on the thread that owns it, and shows it again the first frame after
-//! the hold ends. The panel draws its own pointer meanwhile.
+//! thread until the display count agrees. So while [`crate::is_held`] is set the detour sets that
+//! flag for the length of the call and puts the game's value back afterwards: the game shows the
+//! pointer itself, on the thread that owns it, and goes back to its own choice the first frame
+//! after the hold ends.
 //!
-//! Before this the pointer's visibility under the save picker depended on whatever the game last
-//! wanted: hidden on one run, and on the next shown beside the panel's own (2026-09-27).
+//! Before this the pointer under the save picker depended on whatever the game last wanted:
+//! hidden on one run, shown on the next (2026-09-27). The panel drawing its own arrow as well gave
+//! two pointers, so the panel draws none and this makes the OS one dependable.
 
 use core::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -24,8 +25,8 @@ type UpdateFn = unsafe extern "system" fn(*mut u8, f32) -> u64;
 /// The original update, published before the site is patched.
 static TRAMPOLINE: AtomicUsize = AtomicUsize::new(0);
 
-/// Whether the last call hid the pointer, so the change is logged once each way.
-static HIDING: AtomicBool = AtomicBool::new(false);
+/// Whether the last call forced the pointer on, so the change is logged once each way.
+static SHOWING: AtomicBool = AtomicBool::new(false);
 
 unsafe extern "system" fn detour_update(this: *mut u8, dt: f32) -> u64 {
     let trampoline = TRAMPOLINE.load(Ordering::Acquire);
@@ -34,19 +35,19 @@ unsafe extern "system" fn detour_update(this: *mut u8, dt: f32) -> u64 {
     }
     // SAFETY: MinHook published this trampoline for exactly this site.
     let original = unsafe { std::mem::transmute::<usize, UpdateFn>(trampoline) };
-    let hide = crate::is_held() && !this.is_null();
-    if HIDING.swap(hide, Ordering::AcqRel) != hide {
+    let show = crate::is_held() && !this.is_null();
+    if SHOWING.swap(show, Ordering::AcqRel) != show {
         harness_log!(
             "pointer {} -- {}",
-            if hide { "hidden" } else { "restored" },
-            if hide {
-                "a panel holds the input and draws its own"
+            if show { "shown" } else { "restored" },
+            if show {
+                "a panel holds the input, and the player aims at it with the OS pointer"
             } else {
                 "the game decides again"
             }
         );
     }
-    if !hide {
+    if !show {
         // SAFETY: the game's own arguments, passed through.
         return unsafe { original(this, dt) };
     }
@@ -58,7 +59,7 @@ unsafe extern "system" fn detour_update(this: *mut u8, dt: f32) -> u64 {
     // SAFETY: as above; the update runs on this thread, so nothing else writes it meanwhile.
     let kept = unsafe { wanted.read_unaligned() };
     // SAFETY: as above.
-    unsafe { wanted.write_unaligned(0) };
+    unsafe { wanted.write_unaligned(1) };
     // SAFETY: the game's own arguments, passed through.
     let result = unsafe { original(this, dt) };
     // SAFETY: as above.

@@ -104,49 +104,6 @@ pub fn any_wants_input() -> bool {
     })
 }
 
-/// An arrow pointer with its tip at `at`, drawn over everything while a panel holds the input.
-///
-/// The game draws no pointer of its own there, and the one it drew before the panel opened stops
-/// following the mouse once the input harness holds the position (2026-09-27), so without this
-/// the player aims at the panel blind.
-fn draw_cursor(ui: &Ui, at: [f32; 2]) {
-    const FILL: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
-    const EDGE: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
-    let scale = FONT_SIZE_PX / 13.0;
-    // The classic arrow, tip at the origin, in font-scaled pixels.
-    let shape: [[f32; 2]; 7] = [
-        [0.0, 0.0],
-        [0.0, 17.0],
-        [4.0, 13.0],
-        [7.0, 20.0],
-        [10.0, 19.0],
-        [7.0, 12.0],
-        [12.0, 12.0],
-    ];
-    let points: Vec<[f32; 2]> = shape
-        .iter()
-        .map(|p| [at[0] + p[0] * scale, at[1] + p[1] * scale])
-        .collect();
-    let list = ui.get_foreground_draw_list();
-    // Filled as two convex pieces, since imgui fills only convex polygons: the head, and the tail.
-    list.add_triangle(points[0], points[1], points[6], FILL)
-        .filled(true)
-        .build();
-    list.add_triangle(points[1], points[2], points[6], FILL)
-        .filled(true)
-        .build();
-    list.add_polyline(vec![points[2], points[3], points[4], points[5]], FILL)
-        .filled(true)
-        .build();
-    list.add_polyline(points, EDGE).thickness(1.5).build();
-    list.add_line(
-        [at[0], at[1]],
-        [at[0] + shape[6][0] * scale, at[1] + shape[6][1] * scale],
-        EDGE,
-    )
-    .build();
-}
-
 /// The one render loop hudhook holds.
 struct Panels;
 
@@ -174,11 +131,6 @@ impl ImguiRenderLoop for Panels {
             // SAFETY: a nonzero slot only ever holds a `DrawFn` stored by `add_panel`.
             let draw: DrawFn = unsafe { core::mem::transmute::<usize, DrawFn>(raw) };
             draw(ui);
-        }
-        if any_wants_input()
-            && let Some(at) = mouse()
-        {
-            draw_cursor(ui, at);
         }
     }
 

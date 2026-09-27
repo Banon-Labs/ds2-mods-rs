@@ -694,8 +694,8 @@ pub(crate) unsafe fn install() -> usize {
     // SAFETY: as for the click hook above.
     if !unsafe { crate::cursor::install(base) } {
         harness_log!(
-            "PARTIAL install: the game's pointer is not hidden under a panel, so it may show \
-             beside the panel's own"
+            "PARTIAL install: the OS pointer is not forced on under a panel, so it may be \
+             missing while the player aims at it"
         );
     }
 
