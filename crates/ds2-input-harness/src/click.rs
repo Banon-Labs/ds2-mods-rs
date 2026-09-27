@@ -54,9 +54,9 @@ unsafe extern "system" fn detour_fold(block: *mut u8, event: *mut u8) {
             let current = kind.read_unaligned();
             // Which event types reach the fold during a block, once each: the record that says
             // whether pointer movement arrives here as well as through the device poll.
-            if current < 32 && SEEN_WHILE_BLOCKING.fetch_or(1 << current, Ordering::Relaxed)
-                & (1 << current)
-                == 0
+            if current < 32
+                && SEEN_WHILE_BLOCKING.fetch_or(1 << current, Ordering::Relaxed) & (1 << current)
+                    == 0
             {
                 crate::log::harness_log!("mouse-event type={current} first seen while blocking");
             }
