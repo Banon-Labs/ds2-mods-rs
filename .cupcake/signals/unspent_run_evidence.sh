@@ -18,8 +18,11 @@
 #
 # CUPCAKE_UNSPENT_EVIDENCE_OVERRIDE, when SET (even to empty), replaces the measurement, so the Stop
 # guard tests never depend on whether a game happens to be running on the machine that runs them.
+# CUPCAKE_UNSPENT_EVIDENCE_MACHINE_OVERRIDE=<sha>|<branch>|<worktree> replaces only the machine facts
+# and takes precedence, so the hand-test exemption (the user wrote after a launch from that worktree)
+# is still decided from the real transcript.
 set -uo pipefail
-if [ -n "${CUPCAKE_UNSPENT_EVIDENCE_OVERRIDE+set}" ]; then
+if [ -z "${CUPCAKE_UNSPENT_EVIDENCE_MACHINE_OVERRIDE:-}" ] && [ -n "${CUPCAKE_UNSPENT_EVIDENCE_OVERRIDE+set}" ]; then
     [ -n "$CUPCAKE_UNSPENT_EVIDENCE_OVERRIDE" ] && printf '%s\n' "$CUPCAKE_UNSPENT_EVIDENCE_OVERRIDE"
     exit 0
 fi

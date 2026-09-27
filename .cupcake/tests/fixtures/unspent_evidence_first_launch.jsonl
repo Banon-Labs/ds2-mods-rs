@@ -1,0 +1,4 @@
+{"type": "user", "timestamp": "2026-09-27T04:04:03.000Z", "message": {"role": "user", "content": "make it default on for release and for me"}}
+{"type": "assistant", "timestamp": "2026-09-27T04:10:27.000Z", "cwd": "/home/banon/projects/ds2-mods-rs", "message": {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_l1", "name": "Bash", "input": {"command": "python3 /home/banon/projects/ds2-mods-rs/.claude/worktrees/estus-default/scripts/ds2-run.py --voice-chat > /tmp/run.log 2>&1; tail -3 /tmp/run.log"}}]}}
+{"type": "user", "timestamp": "2026-09-27T04:10:50.000Z", "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_l1", "content": "ds2-run: attached"}]}}
+{"type": "assistant", "timestamp": "2026-09-27T04:11:03.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "Launched 2f2d0a5 with Estus max on by default."}]}}

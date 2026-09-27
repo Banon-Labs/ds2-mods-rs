@@ -91,6 +91,25 @@ CASES = [
               "UNSPENTEVIDENCE|branch=estus-max-default-on|sha=2f2d0a5b4bd52163cf2b1d173463ef719b730c11"),),
     ),
     Case(
+        "unspent_evidence_hand_test.jsonl",
+        None,
+        "ds2-mods-rs-wdnr, 2026-09-27: the user wrote about the picker build after a launch from its "
+        "worktree and the agent relaunched the fix -- a hand test, so no push is demanded (the push "
+        "tears the game down under the user). Machine facts pinned, transcript read for real",
+        env=(("CUPCAKE_UNSPENT_EVIDENCE_MACHINE_OVERRIDE",
+              "44a6fdaa17b9c0de0000000000000000000000aa|save-picker-panel|"
+              "/home/banon/projects/ds2-mods-rs-wt-picker"),),
+    ),
+    Case(
+        "unspent_evidence_first_launch.jsonl",
+        "unpushed commit 2f2d0a5b4bd5 on estus-max-default-on",
+        "the 2026-09-26 turn through the same transcript path: the first launch from the worktree "
+        "and no word from the user since, so the hand-test exemption does not apply and it halts",
+        env=(("CUPCAKE_UNSPENT_EVIDENCE_MACHINE_OVERRIDE",
+              "2f2d0a5b4bd52163cf2b1d173463ef719b730c11|estus-max-default-on|"
+              "/home/banon/projects/ds2-mods-rs/.claude/worktrees/estus-default"),),
+    ),
+    Case(
         "unexecuted_promise.jsonl",
         "promise nothing is going to keep",
         "turn ends on 'I'll re-run the gate...' with no tool call, no background work, no handoff",
