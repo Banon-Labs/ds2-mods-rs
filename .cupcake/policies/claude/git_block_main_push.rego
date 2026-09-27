@@ -8,7 +8,7 @@
 #   routing:
 #     required_events: ["PreToolUse"]
 #     required_tools: ["Bash"]
-#     required_signals: ["current_branch", "worktree_branches"]
+#     required_signals: ["push_target_branches", "worktree_branches"]
 package cupcake.policies.claude.git_block_main_push
 
 import rego.v1
@@ -114,15 +114,32 @@ opaque_push_payload if {
 	contains(lowered, "push")
 }
 
+# Judged by the branch the push SENDS (2026-09-27, bd ds2-mods-rs-zmep). The
+# rule used to read `current_branch`, the branch of the directory the hook runs
+# in. With the main checkout on main,
+#
+#     cd /home/banon/projects/ds2-mods-rs-wt-jiy && git push -q --force-with-lease origin loader-build-sha
+#
+# was refused although the worktree was on loader-build-sha and so was the
+# refspec, and none of the text exceptions below reads `-q --force-with-lease`.
+# The push_target_branches signal (scripts/cupcake_push_target_branch.py) walks
+# `cd <dir> &&`, `git -C <dir>` and `bash -lc 'cd ...'` with the same resolver
+# the runtime-evidence guard uses and names each destination: an explicit
+# refspec wins, otherwise the resolved checkout's own branch.
+#
+# Resolved: denied exactly when a destination is main. The text exceptions do
+# not apply there -- the signal has already read every refspec, including the
+# `HEAD`/`@` forms the `-u` exception cannot see through.
 blocked_push_context if {
-	current_branch == "main"
-	not pushes_target_only_nonmain_worktrees
-	not pushes_target_only_explicit_nonmain_branches
-	not pushes_target_only_explicit_nonmain_refspecs
+	push_target_resolved
+	some destination in push_destinations
+	destination_is_main(destination)
 }
 
+# Unresolved -- an UNKNOWN line, or no signal at all -- fails closed unless
+# every push is one of the text-proven non-main forms below.
 blocked_push_context if {
-	current_branch == ""
+	not push_target_resolved
 	not pushes_target_only_nonmain_worktrees
 	not pushes_target_only_explicit_nonmain_branches
 	not pushes_target_only_explicit_nonmain_refspecs
@@ -168,12 +185,39 @@ push_targets_main(cmd) if {
 # that quoted spans are anchor-neutralised before matching, it does not.
 git_push_main_target_pattern := `(?m)(^|[;&|(]\s*|\n)\s*(command\s+)?(?:[^\s;&|()"']*/)?git(\s+((-c|--git-dir|--work-tree|--namespace|--config-env)(=|\s+)("[^"\n]*"|'[^'\n]*'|[^\s;&|()]+)|--(bare|no-pager|paginate|literal-pathspecs|no-replace-objects|exec-path)(=("[^"\n]*"|'[^'\n]*'|[^\s;&|()]+))?))*\s+push(\s+[^;&|\n]*)?(\s|:)((refs/)?heads/)?main(\s|$|[;&|)\n])`
 
-current_branch := branch if {
-	branch := trim(input.signals.current_branch, " \t\r\n")
-} else := branch if {
-	branch := trim(input.signals.current_branch.output, " \t\r\n")
+# --- push_target_branches signal ---------------------------------------------
+
+push_target_signal := out if {
+	out := input.signals.push_target_branches
+	is_string(out)
+} else := out if {
+	out := input.signals.push_target_branches.output
+	is_string(out)
 } else := "" if {
 	true
+}
+
+push_target_lines := [line |
+	some raw in split(push_target_signal, "\n")
+	line := trim_space(raw)
+	line != ""
+]
+
+# Resolved only when the signal named at least one destination and nothing it
+# printed was UNKNOWN (or anything else it is not known to print).
+push_target_resolved if {
+	count(push_target_lines) > 0
+	every line in push_target_lines {
+		startswith(line, "DEST ")
+	}
+}
+
+push_destinations := {trim_space(trim_prefix(line, "DEST ")) | some line in push_target_lines}
+
+# As wide as refspec_main_destination_pattern below, for the same reason:
+# anything that might be main is treated as main.
+destination_is_main(destination) if {
+	regex.match(refspec_main_destination_pattern, destination)
 }
 
 # --- Worktree-target exception helpers ---------------------------------------
@@ -269,6 +313,10 @@ explicit_nonmain_destination(token) if {
 	destination := trim(token, "\"'")
 	destination != ""
 	not startswith(destination, "-")
+
+	# `HEAD` and `@` name whatever branch is checked out, which may be main;
+	# only the signal can resolve them (2026-09-27).
+	not lower(destination) in {"head", "@"}
 }
 
 # --- Explicit <src>:<dst> refspec exception ----------------------------------
