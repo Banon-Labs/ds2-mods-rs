@@ -81,6 +81,40 @@ pub fn run_frame_hook() {
     }
 }
 
+/// Signature of the one overlay that draws onto the frame: the raw `IDXGISwapChain*` being
+/// presented, borrowed for the call.
+pub type PresentOverlayFn = fn(*mut core::ffi::c_void);
+
+/// The overlay drawn last in the `Present` detour, or `0`.
+///
+/// One slot, because a second imgui context on the same swap chain is a second input subclass
+/// on the same window. `ds2-net-effects`' selector is the one user: it renders hudhook's imgui
+/// frame through this instead of a `Present` hook of its own, which MinHook would refuse on this
+/// address (`MH_ERROR_ALREADY_CREATED`).
+static PRESENT_OVERLAY: AtomicUsize = AtomicUsize::new(0);
+
+/// Put `overlay` in the slot. `true` when it is there now, including when it already was;
+/// `false` when some other function holds the slot.
+pub fn set_present_overlay(overlay: PresentOverlayFn) -> bool {
+    let raw = overlay as usize;
+    match PRESENT_OVERLAY.compare_exchange(0, raw, Ordering::AcqRel, Ordering::Acquire) {
+        Ok(_) => true,
+        Err(existing) => existing == raw,
+    }
+}
+
+/// Call the overlay with the swap chain being presented. Called by the `Present` detour after its
+/// own drawing and immediately before the real `Present`, so the overlay is on top.
+pub fn run_present_overlay(swap_chain: *mut core::ffi::c_void) {
+    let raw = PRESENT_OVERLAY.load(Ordering::Acquire);
+    if raw == 0 || swap_chain.is_null() {
+        return;
+    }
+    // SAFETY: a nonzero slot only ever holds a `PresentOverlayFn` stored by `set_present_overlay`.
+    let overlay: PresentOverlayFn = unsafe { std::mem::transmute::<usize, PresentOverlayFn>(raw) };
+    overlay(swap_chain);
+}
+
 /// How many frames ran at least one consumer. Zero after a session that drew frames means nothing
 /// was ever registered, which is a different problem from a consumer that ran and did nothing.
 #[must_use]
@@ -132,6 +166,38 @@ mod tests {
         FIRST.store(0, Ordering::Relaxed);
         SECOND.store(0, Ordering::Relaxed);
         order().clear();
+    }
+
+    static OVERLAY_SEEN: AtomicUsize = AtomicUsize::new(0);
+
+    fn overlay_a(chain: *mut core::ffi::c_void) {
+        OVERLAY_SEEN.store(chain as usize, Ordering::Relaxed);
+    }
+
+    fn overlay_b(_: *mut core::ffi::c_void) {
+        OVERLAY_SEEN.store(usize::MAX, Ordering::Relaxed);
+    }
+
+    /// One overlay slot: the first holder keeps it, a re-register is a no-op, a null swap chain
+    /// is never handed on.
+    #[test]
+    fn the_present_overlay_slot_has_one_holder() {
+        let _serialized = SERIALIZE.lock().unwrap_or_else(|error| error.into_inner());
+        PRESENT_OVERLAY.store(0, Ordering::Release);
+        run_present_overlay(0x1234 as *mut core::ffi::c_void);
+        assert_eq!(
+            OVERLAY_SEEN.load(Ordering::Relaxed),
+            0,
+            "empty slot calls nothing"
+        );
+        assert!(set_present_overlay(overlay_a));
+        assert!(set_present_overlay(overlay_a));
+        assert!(!set_present_overlay(overlay_b));
+        run_present_overlay(core::ptr::null_mut());
+        assert_eq!(OVERLAY_SEEN.load(Ordering::Relaxed), 0);
+        run_present_overlay(0x1234 as *mut core::ffi::c_void);
+        assert_eq!(OVERLAY_SEEN.load(Ordering::Relaxed), 0x1234);
+        PRESENT_OVERLAY.store(0, Ordering::Release);
     }
 
     #[test]

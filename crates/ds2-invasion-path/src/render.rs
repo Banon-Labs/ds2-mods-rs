@@ -728,6 +728,8 @@ unsafe extern "system" fn present(
     };
 
     if DISABLED.load(Ordering::Relaxed) || swap_chain.is_null() {
+        // The overlay slot does not depend on this crate's own drawing having worked.
+        crate::frame_hook::run_present_overlay(swap_chain);
         return call_original(swap_chain);
     }
 
@@ -754,6 +756,8 @@ unsafe extern "system" fn present(
             ));
         }
     }
+    // Last before the real `Present`, so whatever it draws is on top of the lines above.
+    crate::frame_hook::run_present_overlay(swap_chain);
     call_original(swap_chain)
 }
 

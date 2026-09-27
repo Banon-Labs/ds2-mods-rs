@@ -46,8 +46,14 @@
 //! Same as `ds2-voice-chat`: a watcher thread re-reads the config about once a second and
 //! publishes the chord and the id into atomics the frame consumer loads. Default key `F9`.
 
+pub mod catalog;
+pub mod marked;
+pub mod selector;
+
 #[cfg(windows)]
 mod install;
+#[cfg(windows)]
+mod overlay;
 
 #[cfg(windows)]
 pub use install::{LogFn, Outcome, Request, install, set_logger};
@@ -282,6 +288,36 @@ pub fn sp_effect_active(
             .into_iter()
             .filter(|a| *a != 0)
             .any(|action| read_i32(action + offset_of!(SpEffectAction, sp_effect_id)) == Some(id)),
+    )
+}
+
+/// Every `SpEffect` id in the controller's action list, in list order.
+///
+/// The same walk and the same refusals as [`sp_effect_active`] (`None` for a broken hop or an
+/// impossible count), but one read of the list answers every id the selector and the kept
+/// effects ask about. A null slot is skipped, and so is an action whose id cannot be read.
+pub fn sp_effect_ids(
+    ctrl: usize,
+    read: impl Fn(usize) -> Option<usize>,
+    read_words: impl Fn(usize, usize) -> Option<Vec<usize>>,
+    read_i32: impl Fn(usize) -> Option<i32>,
+) -> Option<Vec<i32>> {
+    let holder = read(ctrl + offset_of!(ChrSpEffectCtrl, action_holder)).filter(|p| *p != 0)?;
+    let list = read(holder + offset_of!(SpEffectActionHolder, list)).filter(|p| *p != 0)?;
+    let count = read(list + offset_of!(SpEffectActionList, count))?;
+    if count > SP_EFFECT_ACTION_CAPACITY {
+        return None;
+    }
+    if count == 0 {
+        return Some(Vec::new());
+    }
+    let actions = read_words(list + offset_of!(SpEffectActionList, actions), count)?;
+    Some(
+        actions
+            .into_iter()
+            .filter(|a| *a != 0)
+            .filter_map(|action| read_i32(action + offset_of!(SpEffectAction, sp_effect_id)))
+            .collect(),
     )
 }
 
@@ -527,6 +563,26 @@ mod tests {
         let with = [40_040_002, 41_110_000, 140_001_010];
         assert_eq!(active(&list_heap(3, &with), 140_001_010), Some(true));
         assert_eq!(active(&list_heap(0, &[]), 140_001_010), Some(false));
+    }
+
+    fn ids(heap: &HashMap<usize, u64>) -> Option<Vec<i32>> {
+        let word = |a: usize| heap.get(&a).map(|v| *v as usize);
+        sp_effect_ids(
+            LIST_CTRL,
+            word,
+            |a, n| (0..n).map(|i| word(a + i * 8)).collect(),
+            |a| heap.get(&a).map(|v| *v as u32 as i32),
+        )
+    }
+
+    /// One read answers every id: nulls skipped, the count respected, a broken hop unknown.
+    #[test]
+    fn the_list_reads_as_all_its_ids() {
+        let heap = list_heap(4, &[40_040_002, 0, 140_001_010, 21_660_100, 7]);
+        assert_eq!(ids(&heap), Some(vec![40_040_002, 140_001_010, 21_660_100]));
+        assert_eq!(ids(&list_heap(0, &[])), Some(vec![]));
+        assert_eq!(ids(&list_heap(129, &[1])), None);
+        assert_eq!(ids(&HashMap::new()), None);
     }
 
     /// Only the first `count` slots are live: a stale pointer past it is not a match.
