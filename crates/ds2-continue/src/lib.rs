@@ -52,7 +52,9 @@
 //! are looking at a character list, not a black screen.
 //!
 //! It refuses to point the cursor anywhere the game would not: same bound as the update's, and the
-//! record must be occupied and not excluded. A configured slot that fails is logged and skipped.
+//! record must be occupied and not excluded. A configured slot that fails is logged and skipped,
+//! and the skip ends the shortcut on the spot: the list is left open, the hide is disarmed and the
+//! sound is given back, so the player picks a character on a screen they can see.
 //!
 //! # Off by default
 //!

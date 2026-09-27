@@ -745,11 +745,9 @@ fn destination(phase: i32) -> &'static str {
 /// a slot the update will refuse is not.
 unsafe extern "system" fn detour_enter(this: *mut u8) {
     let wanted = PRESELECT_SLOT.load(Ordering::Acquire);
-    if wanted >= 0 {
-        // SAFETY: the flow is entering this substate, so the title context and save data the walk
-        // reads are the same ones the update reads one frame later.
-        unsafe { preselect(wanted) };
-    }
+    // SAFETY: the flow is entering this substate, so the title context and save data the walk
+    // reads are the same ones the update reads one frame later.
+    let armed = wanted >= 0 && unsafe { preselect(wanted) };
     let trampoline = ENTER_TRAMPOLINE.load(Ordering::Acquire);
     if trampoline != 0 {
         // SAFETY: MinHook published this trampoline for this site, and the signature is the single
@@ -766,35 +764,58 @@ unsafe extern "system" fn detour_enter(this: *mut u8) {
     // Deliberately NOT also done from the update: `take_load_branch` calls the list's own close on
     // this group, and doing less to the object the working autoload depends on is worth a frame of
     // risk that the menu shows.
-    if wanted >= 0 {
+    //
+    // Only when the preselect armed. A skipped preselect is the shortcut abandoning: nothing will
+    // take the load branch, so the player has to pick a character by hand, and the list is the
+    // screen they pick it on. Closing it anyway -- and leaving the hide and the mute armed until a
+    // `StartIngame` only the player's own click could reach -- is the black, silent screen that
+    // was reported (`preselect skipped slot=0 reason=slot-unusable flags=0x03`, then
+    // `hide-menu data-list close ... called`, then nothing until the player clicked blind).
+    if armed {
         // SAFETY: on the game thread, with the group read the way the original reads it.
         unsafe { crate::hide_menus::close_data_list() };
+    } else if wanted >= 0 {
+        crate::end_shortcut("preselect-skipped");
     }
 }
 
-/// Point the character list at `wanted`, or say why it did not.
+/// Point the character list at `wanted` and arm the load, or say why it did not.
+///
+/// Returns whether the load was armed. `false` is an abandon and the caller must end the shortcut
+/// on it: every early return here leaves [`ARMED`] clear, so `take_load_branch` -- which has its
+/// own abandon paths -- never runs to release anything.
+///
+/// # No fallback to another slot
+///
+/// An unusable configured slot is not replaced by some other usable one. The flags byte says
+/// occupied and excluded, not which character was played last, so a fallback would be a guess --
+/// and loading a character nobody asked for is worse than showing the list the player would have
+/// used anyway.
 ///
 /// # Safety
 ///
 /// Must run on the game thread with the title context live, which `enter` guarantees.
-unsafe fn preselect(wanted: i32) {
+unsafe fn preselect(wanted: i32) -> bool {
     let base = MODULE_BASE.load(Ordering::Acquire);
     if base == 0 {
-        return;
+        log(format_args!(
+            "{LOG_PREFIX} preselect skipped slot={wanted} reason=no-module-base"
+        ));
+        return false;
     }
     // SAFETY: the same two globals the update dereferences.
     let Some(context) = (unsafe { deref_global(base, ds2_rva::FE_TITLE_CONTEXT) }) else {
         log(format_args!(
             "{LOG_PREFIX} preselect skipped slot={wanted} reason=no-title-context"
         ));
-        return;
+        return false;
     };
     if wanted >= ds2_rva::SAVE_SLOT_COUNT {
         log(format_args!(
             "{LOG_PREFIX} preselect skipped slot={wanted} reason=out-of-range limit={}",
             ds2_rva::SAVE_SLOT_COUNT
         ));
-        return;
+        return false;
     }
     // SAFETY: `GAME_MANAGER_IMP` and the two offsets after it are the update's own walk.
     let record = unsafe {
@@ -807,7 +828,7 @@ unsafe fn preselect(wanted: i32) {
         log(format_args!(
             "{LOG_PREFIX} preselect skipped slot={wanted} reason=no-save-data"
         ));
-        return;
+        return false;
     };
     // SAFETY: bounds-checked above against the limit the game applies before its own `imul`.
     let flags = unsafe {
@@ -822,7 +843,7 @@ unsafe fn preselect(wanted: i32) {
         log(format_args!(
             "{LOG_PREFIX} preselect skipped slot={wanted} reason=slot-unusable flags=0x{flags:02x}"
         ));
-        return;
+        return false;
     }
     // SAFETY: `context` is the live title context and this is the field the list lays out from.
     let previous = unsafe {
@@ -837,6 +858,7 @@ unsafe fn preselect(wanted: i32) {
     log(format_args!(
         "{LOG_PREFIX} preselect slot={previous}->{wanted} flags=0x{flags:02x} armed=true"
     ));
+    true
 }
 
 /// What [`install`] managed to do.
