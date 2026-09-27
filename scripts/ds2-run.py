@@ -439,8 +439,13 @@ SEAMLESS_SETTINGS_MEMBER = f"SeamlessCoop/{SEAMLESS_SETTINGS_NAME}"
 THIRD_PARTY_PATHS: tuple[str, ...] = (
     "SeamlessCoop",
     "ds2sc_launcher.exe",
-    # DS2 Lighting Engine (raster 0.9.x and PathTracing) and the Second Sin presets layered on it.
+    # DS2 Lighting Engine PathTracing and the Second Sin Pathtracing presets layered on it.
     "dxgi.dll",
+    "amd_fidelityfx_denoiser_dx12.dll",
+    "amd_fidelityfx_framegeneration_dx12.dll",
+    "amd_fidelityfx_loader_dx12.dll",
+    "amd_fidelityfx_radiancecache_dx12.dll",
+    "amd_fidelityfx_upscaler_dx12.dll",
     "nvngx_dlss.dll",
     "nvngx_dlssd.dll",
     "nvngx_dlssg.dll",
@@ -449,7 +454,38 @@ THIRD_PARTY_PATHS: tuple[str, ...] = (
     "tex_override",
     "ds2le_atmosphere_presets",
     "DS2LE.log",
+    "DirectXHook.log",
 )
+
+#: The graphics pair this machine plays, chosen by the owner on 2026-09-26: DS2 Lighting Engine
+#: PathTracing 0.1.1, then Second Sin Pathtracing 0.85 unpacked over it. Order matters: Second Sin
+#: replaces the engine's own `ds2le_atmosphere_presets/` and `tex_override/`, so reinstalling the
+#: engine means reinstalling Second Sin after it.
+#:
+#: Each archive is pinned by a few files that only a complete install has, and is unpacked again
+#: when one of them is missing or different. The shader pin matters most: the engine ships its own
+#: `shader/*_SM5.bnd`, and a Steam file verify puts the vanilla ones back. That was the state of
+#: the 2026-08-30 attempt: the engine's `dxgi.dll` with the game's own shader binders under it (the
+#: binders there matched the depot manifest's SHA-1s, not the engine's).
+LIGHTING_ENGINE_ARCHIVE = Path.home() / "DS2" / "DS2LE PathTracing V_0_1_1-1146-0-1-2-1778648735.rar"
+LIGHTING_ENGINE_PINS: dict[str, str] = {
+    "dxgi.dll": "c3a88fd51368dbe17b4b71311bd47486f0a72d048a8fda64c7f3e567b84181b8",
+    "shader/FlverShader_SM5_1.bnd":
+        "d42775e811542f92d69269cc5404fbeb77fee182a414e813d6b51ccd3c128699",
+}
+#: The archive's own screenshots and notes, which are not game files.
+LIGHTING_ENGINE_SKIP: tuple[str, ...] = (
+    "In-Game settings.png", "LE-Menu.png", "ReadMe.txt", "licenses_and_credits.txt",
+)
+SECOND_SIN_ARCHIVE = (
+    Path.home() / "DS2" / "Second Sin Pathtracing 0.85 1160 0.85 2026-07-28T07-35Z QzM6K23m.zip"
+)
+SECOND_SIN_PINS: dict[str, str] = {
+    "ds2le_atmosphere_presets/atmospheres_extended.ini":
+        "edaf06bb9263ae471b0839b95f1b4d936b5eea4b8077fd920937fb592059129a",
+}
+#: Where the engine writes its log. A fresh one after a launch is the proof it loaded.
+LIGHTING_ENGINE_LOG = "DS2LE.log"
 #: The one container name SOTFS builds, and the extension it builds it with.
 SAVE_FILE_STEM = "DS2SOFS0000"
 VANILLA_SAVE_EXTENSION = "sl2"
@@ -554,8 +590,9 @@ PROBE_ARMS: dict[str, tuple[dict[str, bool], str | None]] = {
 OBSERVE_SECONDS = 180.0
 
 #: Native first, then builtin. Wine prefers its own `dinput8` without this and the proxy is
-#: simply never mapped.
-DLL_OVERRIDE = "dinput8=n,b"
+#: simply never mapped. `dxgi` is the Lighting Engine's proxy (see `LIGHTING_ENGINE_PINS`); it
+#: loads the system `dxgi` itself, so native-then-builtin is what keeps both in the chain.
+DLL_OVERRIDE = "dinput8=n,b;dxgi=n,b"
 
 #: How long to wait for the DLL to speak. DS2 boots through Proton and dearxan analyses 48 Arxan
 #: stubs single-threaded before its callback runs; neither has been timed on this machine, so
@@ -2596,6 +2633,103 @@ def ensure_seamless_installed(
     return actions, problems
 
 
+def pins_mismatched(game_dir: Path, pins: dict[str, str]) -> dict[str, str]:
+    """`{path: why}` for every pinned file that is missing or differs."""
+    wrong: dict[str, str] = {}
+    for member, digest in pins.items():
+        target = game_dir / member
+        have = sha256(target) if target.is_file() else None
+        if have != digest:
+            wrong[member] = "missing" if have is None else f"sha256 {have[:12]}.."
+    return wrong
+
+
+def unpack_command(archive: Path, game_dir: Path, skip: Sequence[str] = ()) -> list[str]:
+    """The argv that unpacks `archive` over `game_dir`, overwriting, leaving out `skip`."""
+    if archive.suffix.lower() == ".zip":
+        return ["unzip", "-o", "-q", str(archive), "-d", str(game_dir), "-x", "tex_override/*.tmp",
+                *skip]
+    argv = ["bsdtar", "-x", "-C", str(game_dir), "-f", str(archive)]
+    for name in skip:
+        argv += ["--exclude", name]
+    return argv
+
+
+def ensure_lighting_engine_installed(
+    game_dir: Path,
+    engine_archive: Path = LIGHTING_ENGINE_ARCHIVE,
+    presets_archive: Path = SECOND_SIN_ARCHIVE,
+    write: bool = True,
+    run=subprocess.run,
+) -> tuple[list[str], list[str]]:
+    """Make the game directory hold the pinned engine with Second Sin over it. `(actions, problems)`.
+
+    A correct install is hashed and left alone. A wrong one is unpacked again from the owner's own
+    archives, engine first and presets second, because the presets replace files the engine ships.
+    The Second Sin archive is 19.7 GB, so a reinstall of it takes minutes, and it happens only when
+    its pin says the install is gone.
+    """
+    actions: list[str] = []
+    problems: list[str] = []
+    engine_wrong = pins_mismatched(game_dir, LIGHTING_ENGINE_PINS)
+    presets_wrong = pins_mismatched(game_dir, SECOND_SIN_PINS)
+    steps = []
+    if engine_wrong:
+        steps.append((engine_archive, LIGHTING_ENGINE_SKIP, LIGHTING_ENGINE_PINS, engine_wrong))
+    if engine_wrong or presets_wrong:
+        steps.append(
+            (presets_archive, (), SECOND_SIN_PINS, presets_wrong or {"presets": "after the engine"})
+        )
+    for archive, skip, pins, wrong in steps:
+        why = ", ".join(f"{k} {v}" for k, v in wrong.items())
+        if not archive.is_file():
+            problems.append(f"{why}, and {archive} is not there to reinstall from")
+            continue
+        if not write:
+            actions.append(f"would unpack {archive.name} ({why})")
+            continue
+        result = run(unpack_command(archive, game_dir, skip), capture_output=True, text=True)
+        still = pins_mismatched(game_dir, pins)
+        if result.returncode != 0 or still:
+            problems.append(
+                f"unpacking {archive.name} exited {result.returncode} and left {still or 'no pin wrong'}"
+            )
+        else:
+            actions.append(f"unpacked {archive.name} ({why} before)")
+    return actions, problems
+
+
+#: Lines of `DS2LE.log` that say how far the engine got, in the order it writes them.
+LIGHTING_ENGINE_MILESTONES: tuple[str, ...] = (
+    "D3D12 device created successfully",
+    "HWRT Shaders loaded",
+    "All D3D12 resources for lighting engine created successfully",
+    "Init device processed successfully",
+)
+#: Lines that mean something is wrong, counted rather than quoted because they repeat per frame.
+LIGHTING_ENGINE_TROUBLE: tuple[str, ...] = (
+    "Failed to build Skinned Blas",
+    "Rendering errors detected",
+    "| ERROR |",
+)
+
+
+def lighting_engine_report(game_dir: Path, started_epoch: float) -> list[str]:
+    """What this run's `DS2LE.log` says. A log older than the launch is not this run's."""
+    log = game_dir / LIGHTING_ENGINE_LOG
+    if not log.is_file():
+        return [f"no {log} -- the engine's dxgi.dll never ran"]
+    if log.stat().st_mtime < started_epoch:
+        return [f"{log} is older than this launch -- the engine's dxgi.dll did not run this time"]
+    text = log.read_text(encoding="utf-8", errors="replace")
+    lines = [f"{log} written by this run ({len(text.splitlines())} lines)"]
+    for milestone in LIGHTING_ENGINE_MILESTONES:
+        lines.append(f"{'seen   ' if milestone in text else 'MISSING'} {milestone}")
+    for trouble in LIGHTING_ENGINE_TROUBLE:
+        lines.append(f"count  {trouble!r}: {text.count(trouble)}")
+    return lines
+
+
 def dry_run(
     probe: str,
     observe: float,
@@ -2651,6 +2785,14 @@ def dry_run(
         print(f"[dry-run] seamless {action}")
     if not seamless_actions and not seamless_problems:
         print(f"[dry-run] seamless {SEAMLESS_VERSION} installed, every pinned file matches")
+    engine_actions, engine_problems = ensure_lighting_engine_installed(GAME_DIR, write=False)
+    for problem in engine_problems:
+        print(f"[dry-run] WOULD REFUSE: {problem}")
+    problems += engine_problems
+    for action in engine_actions:
+        print(f"[dry-run] lighting-engine {action}")
+    if not engine_actions and not engine_problems:
+        print("[dry-run] lighting-engine PathTracing + Second Sin installed, every pin matches")
 
     staged = GAME_DIR / STAGED_DLL_NAME
     if BUILT_DLL.is_file():
@@ -3334,6 +3476,8 @@ def launch(
         print(f"[seamless] {problem}")
     if seamless:
         problems += seamless_problems
+    _, engine_problems = ensure_lighting_engine_installed(GAME_DIR, write=False)
+    problems += engine_problems
     if problems:
         for problem in problems:
             print(f"REFUSING TO LAUNCH: {problem}", file=sys.stderr)
@@ -3424,6 +3568,14 @@ def launch(
     for action in actions:
         print(f"[seamless] {action}")
     print(f"[seamless] {SEAMLESS_VERSION} pinned by sha256 in {GAME_DIR / 'SeamlessCoop'}")
+    actions, engine_problems = ensure_lighting_engine_installed(GAME_DIR, write=True)
+    for action in actions:
+        print(f"[lighting-engine] {action}")
+    if engine_problems:
+        for problem in engine_problems:
+            print(f"[lighting-engine] REFUSING TO LAUNCH: {problem}")
+        return EXIT_ERROR
+    print(f"[lighting-engine] {LIGHTING_ENGINE_ARCHIVE.name} + {SECOND_SIN_ARCHIVE.name} pinned")
 
     # After the teardown, because a clean exit is what writes the position this reads.
     clamp_saved_window_position()
@@ -3472,6 +3624,7 @@ def launch(
             "SteamGameId": APPID,
         }
     started = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    started_epoch = time.time()
     subprocess.Popen(
         argv,
         cwd=workdir,
@@ -3578,6 +3731,8 @@ def launch(
     # refusal has had time to appear. See `game_dialog_lines`.
     for line in game_dialog_lines():
         print(f"[dialog] {line}")
+    for line in lighting_engine_report(GAME_DIR, started_epoch):
+        print(f"[lighting-engine] {line}")
 
     if probe == "off":
         return EXIT_OK
@@ -4847,6 +5002,66 @@ def selftest() -> int:
                 )
     else:
         print(f"  skip the pinned hashes: no {SEAMLESS_ARCHIVE} on this machine")
+    # The Lighting Engine pair: engine first, presets over it, and nothing when the pins match.
+    global LIGHTING_ENGINE_PINS, SECOND_SIN_PINS  # noqa -- planted archives, restored below
+    real_engine_pins, real_presets_pins = LIGHTING_ENGINE_PINS, SECOND_SIN_PINS
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            game = root / "Game"
+            game.mkdir()
+            engine = {"dxgi.dll": b"engine dxgi", "ds2le_atmosphere_presets/a.ini": b"engine preset"}
+            presets = {"ds2le_atmosphere_presets/a.ini": b"second sin preset"}
+            archives = {root / "engine.rar": engine, root / "presets.zip": presets}
+            LIGHTING_ENGINE_PINS = {"dxgi.dll": hashlib.sha256(b"engine dxgi").hexdigest()}
+            SECOND_SIN_PINS = {
+                "ds2le_atmosphere_presets/a.ini": hashlib.sha256(b"second sin preset").hexdigest()
+            }
+            for archive in archives:
+                archive.write_bytes(b"planted")
+            unpacked: list[str] = []
+
+            def fake_run(argv, **_):
+                archive = next(Path(a) for a in argv if Path(a) in archives)
+                unpacked.append(archive.name)
+                for member, data in archives[archive].items():
+                    (game / member).parent.mkdir(parents=True, exist_ok=True)
+                    (game / member).write_bytes(data)
+                return subprocess.CompletedProcess(argv, 0, "", "")
+
+            args = (game, root / "engine.rar", root / "presets.zip")
+            actions, problems = ensure_lighting_engine_installed(*args, write=False, run=fake_run)
+            check(not unpacked and len(actions) == 2 and not problems,
+                  f"a dry check unpacks nothing and names both steps: {actions} {problems}")
+            actions, problems = ensure_lighting_engine_installed(*args, write=True, run=fake_run)
+            check(unpacked == ["engine.rar", "presets.zip"] and not problems,
+                  f"a missing engine unpacks the engine, then the presets over it: {unpacked}")
+            check((game / "ds2le_atmosphere_presets/a.ini").read_bytes() == b"second sin preset",
+                  "and the presets win where both ship a file")
+            unpacked.clear()
+            actions, problems = ensure_lighting_engine_installed(*args, write=True, run=fake_run)
+            check(not unpacked and not actions and not problems, "a correct install unpacks nothing")
+            (game / "ds2le_atmosphere_presets/a.ini").write_bytes(b"engine preset")
+            ensure_lighting_engine_installed(*args, write=True, run=fake_run)
+            check(unpacked == ["presets.zip"], f"lost presets reinstall only the presets: {unpacked}")
+            (game / "dxgi.dll").unlink()
+            _, problems = ensure_lighting_engine_installed(
+                game, root / "gone.rar", root / "presets.zip", write=True, run=fake_run
+            )
+            check(bool(problems) and "gone.rar" in problems[0],
+                  "a missing engine with no archive is a refusal naming the archive")
+    finally:
+        LIGHTING_ENGINE_PINS, SECOND_SIN_PINS = real_engine_pins, real_presets_pins
+    check(
+        unpack_command(Path("x.rar"), Path("/g"), ("ReadMe.txt",))
+        == ["bsdtar", "-x", "-C", "/g", "-f", "x.rar", "--exclude", "ReadMe.txt"],
+        "the engine archive is unpacked with bsdtar over the game dir",
+    )
+    check(unpack_command(Path("x.zip"), Path("/g"))[:6] == ["unzip", "-o", "-q", "x.zip", "-d", "/g"],
+          "the presets zip is unpacked with unzip -o over the game dir")
+    check("dxgi=n,b" in DLL_OVERRIDE.split(";") and "dinput8=n,b" in DLL_OVERRIDE.split(";"),
+          "the launch override loads both proxies native-first")
+
     staged_names = {STAGED_DLL_NAME, STAGED_LAUNCHER_NAME, CONFIG_NAME, LOG_NAME}
     check(
         not {Path(name).parts[0].lower() for name in staged_names}
