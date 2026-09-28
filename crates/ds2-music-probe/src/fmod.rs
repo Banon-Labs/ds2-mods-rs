@@ -47,7 +47,6 @@ pub(crate) static ORIGINAL_GET_STATE: AtomicUsize = AtomicUsize::new(0);
 
 static GET_INFO: AtomicUsize = AtomicUsize::new(0);
 static GET_CHANNEL_GROUP: AtomicUsize = AtomicUsize::new(0);
-static SET_MUTE: AtomicUsize = AtomicUsize::new(0);
 static GET_EVENT_BY_SYSTEM_ID: AtomicUsize = AtomicUsize::new(0);
 static GET_NUM_EVENTS: AtomicUsize = AtomicUsize::new(0);
 static GROUP_NUM_CHANNELS: AtomicUsize = AtomicUsize::new(0);
@@ -154,7 +153,7 @@ fn load<F: Copy>(slot: &AtomicUsize) -> Option<F> {
 /// `base` must be the live game module base.
 pub(crate) unsafe fn resolve(base: usize) -> Vec<&'static str> {
     let mut missing = Vec::new();
-    let imports: [(&str, u32, &AtomicUsize); 12] = [
+    let imports: [(&str, u32, &AtomicUsize); 11] = [
         (
             "EventSystem::get3DListenerAttributes",
             ds2_rva::FMOD_EVENT_SYSTEM_GET_3D_LISTENER_IAT,
@@ -179,11 +178,6 @@ pub(crate) unsafe fn resolve(base: usize) -> Vec<&'static str> {
             "Event::getChannelGroup",
             ds2_rva::FMOD_EVENT_GET_CHANNEL_GROUP_IAT,
             &GET_CHANNEL_GROUP,
-        ),
-        (
-            "Event::setMute",
-            ds2_rva::FMOD_EVENT_SET_MUTE_IAT,
-            &SET_MUTE,
         ),
         (
             "EventSystem::getEventBySystemID",
@@ -440,15 +434,6 @@ pub(crate) fn sound_length(channel: usize) -> Option<u32> {
         let mut ms = 0u32;
         (get_length(sound, &raw mut ms, ds2_rva::FMOD_TIMEUNIT_MS) == FMOD_OK).then_some(ms)
     }
-}
-
-/// `Event::setMute`. The FMOD result.
-pub(crate) fn set_mute(event: usize, mute: bool) -> i32 {
-    let Some(set_mute) = load::<BoolArgFn>(&SET_MUTE) else {
-        return -1;
-    };
-    // SAFETY: the game's own `Event::setMute` import; FMOD validates the handle.
-    unsafe { set_mute(event, u8::from(mute)) }
 }
 
 /// `Event::start`, straight to FMOD rather than through the fronted slot. The FMOD result.
