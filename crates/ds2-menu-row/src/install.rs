@@ -490,6 +490,156 @@ pub fn return_to_title() -> bool {
     true
 }
 
+/// Whether the shipped Quit Game row's gate refuses right now. `None` when the predicate could not
+/// be checked, which callers treat as a refusal.
+fn quit_gate_refused() -> Option<bool> {
+    let gate_address = ds2_game_base::mem::game_rva(ds2_rva::FE_INGAME_MENU_GATE_EVALUATE).ok()?;
+    let expected = ds2_rva::FE_INGAME_MENU_GATE_EVALUATE_PROLOGUE;
+    let mut prologue = [0u8; 5];
+    // SAFETY: a resolved RVA inside the loaded game image; `read_bytes` faults safely.
+    let read = unsafe { ds2_game_base::mem::read_bytes(gate_address, &mut prologue) };
+    if !read || prologue != expected {
+        return None;
+    }
+    let gate = ds2_rva::FE_INGAME_MENU_GATE_RETURN_TITLE;
+    // SAFETY: the prologue matches the function `ds2-rva` transcribed, the signature is the one its
+    // disassembly implements (one pointer argument, a byte back), and `gate` is a live local for the
+    // duration of the call. The function only reads.
+    Some(unsafe {
+        let evaluate: GateFn = std::mem::transmute::<usize, GateFn>(gate_address);
+        evaluate(&raw const gate) != 0
+    })
+}
+
+/// `void(frontendRoot*)` -- [`ds2_rva::FE_ROOT_LEAVE_INGAME_MENU`].
+type LeaveMenuFn = unsafe extern "system" fn(usize);
+
+/// `bool(GameManagerImp*, u8 without_saving)` -- [`ds2_rva::GAME_MANAGER_REQUEST_RETURN_TITLE`].
+/// `u8` back for the reason [`GateFn`] gives.
+type RequestReturnTitleFn = unsafe extern "system" fn(usize, u8) -> u8;
+
+/// Leave the game for the title screen with no confirm box and no exit save.
+///
+/// This is `FeGroupInGameReturnTitleCheck`'s own "yes" ([`ds2_rva::FE_RETURN_TITLE_CHECK_CONFIRM`])
+/// performed directly, with one argument changed: the request at the end is made with
+/// [`ds2_rva::GAME_MANAGER_RETURN_TITLE_WITHOUT_SAVING`] instead of zero. That argument sets
+/// [`ds2_rva::GAME_MANAGER_RETURN_TITLE_NO_SAVE_BIT`], and the master update's per-frame exit-save
+/// request skips itself when that bit is set. It is the value the game's own forced returns to
+/// title pass. See [`ds2_rva::GAME_MANAGER_REQUEST_RETURN_TITLE`] for the disassembly.
+///
+/// A save somebody else requests on the way out is not stopped by this: the pause menus ask for
+/// [`ds2_rva::SAVE_LOAD_REQUEST_KIND_MENU_CLOSE`] as they close. That is `ds2-save-block`'s job; the
+/// caller arms its refusal first.
+///
+/// Applies the shipped Quit Game row's gate, as [`return_to_title`] does. Returns whether the game
+/// accepted the request; `false` means the game is exactly where it was.
+///
+/// Every input is a global, so it can be called from any game-thread tick in the world.
+pub fn return_to_title_without_saving() -> bool {
+    match quit_gate_refused() {
+        Some(false) => {}
+        Some(true) => {
+            log(format_args!(
+                "{LOG_PREFIX} return-to-title-unsaved REFUSED reason=gate gate={} -- the shipped \
+                 Quit Game row is refused right now too",
+                ds2_rva::FE_INGAME_MENU_GATE_RETURN_TITLE
+            ));
+            return false;
+        }
+        None => {
+            log(format_args!(
+                "{LOG_PREFIX} return-to-title-unsaved REFUSED reason=gate-unchecked -- the gate \
+                 predicate is not at the recorded address, so nothing was requested"
+            ));
+            return false;
+        }
+    }
+    let (Ok(manager_global), Ok(request_expected), Ok(leave_menu)) = (
+        ds2_game_base::mem::game_rva(ds2_rva::GAME_MANAGER_IMP),
+        ds2_game_base::mem::game_rva(ds2_rva::GAME_MANAGER_REQUEST_RETURN_TITLE),
+        ds2_game_base::mem::game_rva(ds2_rva::FE_ROOT_LEAVE_INGAME_MENU),
+    ) else {
+        log(format_args!(
+            "{LOG_PREFIX} return-to-title-unsaved REFUSED reason=no-module-base"
+        ));
+        return false;
+    };
+    // SAFETY: fault-safe reads of a recorded global, the object it points at, and that object's
+    // vtable; each reports an unmapped address rather than faulting.
+    let (manager, root, slot) = unsafe {
+        let manager = ds2_game_base::mem::safe_read_usize(manager_global).unwrap_or(0);
+        let root = if manager == 0 {
+            0
+        } else {
+            ds2_game_base::mem::safe_read_usize(
+                manager + ds2_rva::GAME_MANAGER_FRONTEND_ROOT_OFFSET,
+            )
+            .unwrap_or(0)
+        };
+        let vtable = if manager == 0 {
+            0
+        } else {
+            ds2_game_base::mem::safe_read_usize(manager).unwrap_or(0)
+        };
+        let slot = if vtable == 0 {
+            0
+        } else {
+            ds2_game_base::mem::safe_read_usize(
+                vtable + ds2_rva::GAME_MANAGER_VTABLE_RETURN_TITLE_OFFSET,
+            )
+            .unwrap_or(0)
+        };
+        (manager, root, slot)
+    };
+    // The slot has to hold the function the disassembly was read from, and that function has to
+    // begin with the recorded bytes. An override in the live vtable would be a different function
+    // with a different meaning for its second argument.
+    let mut request_prologue = [0u8; ds2_rva::GAME_MANAGER_REQUEST_RETURN_TITLE_PROLOGUE.len()];
+    let mut leave_prologue = [0u8; ds2_rva::FE_ROOT_LEAVE_INGAME_MENU_PROLOGUE.len()];
+    // SAFETY: resolved RVAs inside the loaded game image; `read_bytes` faults safely.
+    let checked = unsafe {
+        ds2_game_base::mem::read_bytes(request_expected, &mut request_prologue)
+            && ds2_game_base::mem::read_bytes(leave_menu, &mut leave_prologue)
+    };
+    if manager == 0
+        || root == 0
+        || slot != request_expected
+        || !checked
+        || request_prologue != ds2_rva::GAME_MANAGER_REQUEST_RETURN_TITLE_PROLOGUE
+        || leave_prologue != ds2_rva::FE_ROOT_LEAVE_INGAME_MENU_PROLOGUE
+    {
+        log(format_args!(
+            "{LOG_PREFIX} return-to-title-unsaved REFUSED reason=unverified manager=0x{manager:016x} \
+             frontend=0x{root:016x} slot=0x{slot:016x} want=0x{request_expected:016x} \
+             prologues-read={checked} -- nothing was requested"
+        ));
+        return false;
+    }
+    // SAFETY: the confirm's own body, in its own order, on the game thread. `leave_menu` begins
+    // with the recorded bytes and takes the frontend root in RCX; the byte written is the one the
+    // confirm writes on the same object; `slot` is the live vtable's own entry, proved equal to the
+    // recorded function whose prologue matched, called with the manager in RCX and a byte in DL.
+    let accepted = unsafe {
+        std::mem::transmute::<usize, LeaveMenuFn>(leave_menu)(root);
+        ((root + ds2_rva::FE_ROOT_RETURN_TITLE_BYTE_OFFSET) as *mut u8).write_volatile(1);
+        std::mem::transmute::<usize, RequestReturnTitleFn>(slot)(
+            manager,
+            ds2_rva::GAME_MANAGER_RETURN_TITLE_WITHOUT_SAVING,
+        ) != 0
+    };
+    // Read back, so the log says whether the bit the exit save keys on is actually set.
+    // SAFETY: fault-safe read inside the live manager.
+    let flags = unsafe {
+        ds2_game_base::mem::safe_read_u8(manager + ds2_rva::GAME_MANAGER_RETURN_TITLE_FLAGS_OFFSET)
+    };
+    let no_save = flags.is_some_and(|f| f & ds2_rva::GAME_MANAGER_RETURN_TITLE_NO_SAVE_BIT != 0);
+    log(format_args!(
+        "{LOG_PREFIX} return-to-title-unsaved accepted={accepted} no-save-bit={no_save} \
+         flags={flags:02x?} -- no confirm box, and the game's own exit save is skipped"
+    ));
+    accepted
+}
+
 unsafe extern "system" fn dispatch_detour(top_select: *mut u8, action: u32) {
     LAST_TOP_SELECT.store(top_select as usize, Ordering::Release);
     let row = crate::api::row_for_action(action);

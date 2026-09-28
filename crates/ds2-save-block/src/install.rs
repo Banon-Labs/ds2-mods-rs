@@ -131,11 +131,20 @@ pub unsafe fn install() -> Outcome {
         ));
         return refused;
     }
-    log(format_args!(
-        "{LOG_PREFIX} installed at 0x{site:016x} -- this run does not save by itself: no autosave \
-         every {}s, nothing on quit to menu, nothing at a bonfire. Only the menu rows save.",
-        ds2_rva::SAVE_LOAD_SYSTEM_AUTOSAVE_SECONDS
-    ));
+    policy::mark_installed();
+    if policy::mode() == policy::Mode::Open {
+        log(format_args!(
+            "{LOG_PREFIX} installed at 0x{site:016x} for refusals only -- the game saves as it \
+             always did, except while Load Character from File is leaving a character unsaved"
+        ));
+    } else {
+        log(format_args!(
+            "{LOG_PREFIX} installed at 0x{site:016x} -- this run does not save by itself: no \
+             autosave every {}s, nothing on quit to menu, nothing at a bonfire. Only the menu rows \
+             save.",
+            ds2_rva::SAVE_LOAD_SYSTEM_AUTOSAVE_SECONDS
+        ));
+    }
     Outcome { installed: true }
 }
 
@@ -257,7 +266,14 @@ unsafe fn suppress(system: usize) {
                 (elapsed_at as *mut f32).write_volatile(0.0);
             }
             let dropped = policy::dropped_requests();
-            if policy::should_log(dropped) {
+            if policy::refusing() {
+                // Every one, because a refusal is short and each line is the proof that the save
+                // it names was not written.
+                log(format_args!(
+                    "{LOG_PREFIX} refused a save kind={requested} deferred={was_deferred} \
+                     total={dropped} -- leaving the character unsaved, as the load row asked"
+                ));
+            } else if policy::should_log(dropped) {
                 log(format_args!(
                     "{LOG_PREFIX} refused a save kind={requested} deferred={was_deferred} \
                      total={dropped} -- nothing was written; use the Save Game to File row"

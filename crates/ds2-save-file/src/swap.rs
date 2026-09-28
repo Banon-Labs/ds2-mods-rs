@@ -25,10 +25,13 @@
 //! # What the player sees, when this is on
 //!
 //! ```text
-//! press the row -> pick a file -> the game's own "return to title?" confirm
+//! press the row -> pick a file -> straight to the title, no confirm, no save
 //!               -> the title's own LOAD GAME list, showing the picked file's characters
 //!               -> choose one -> you are playing it
 //! ```
+//!
+//! The character being left is not saved. That is the player's request, and the cost is theirs:
+//! progress since the game last saved is gone.
 //!
 //! Every screen in that sequence is the game's. Nothing here draws a menu, and the character list
 //! is the one the title screen has always had -- which is the whole reason this is a few hundred
@@ -56,11 +59,16 @@
 //! native path that does write one is session setup, which nothing asks for directly -- every one
 //! of [`ds2_rva::SL_SESSION_BUILD_SAVE`]'s nine call sites passes kind zero.
 //!
-//! **2. Leaving a game is a shipped action.** The pause menu's own Quit Game row is action
-//! [`ds2_rva::FE_INGAME_MENU_ACTION_RETURN_TITLE`], which opens `FeGroupInGameReturnTitleCheck` --
-//! the confirm that offers to save on the way to the title. `ds2_menu_row::return_to_title` fires
-//! that action, with that row's own gate applied. The character is unloaded by the game, on the
-//! game's terms, and the save that goes with it is the game's own.
+//! **2. Leaving a game is a shipped action, and so is leaving it unsaved.** The pause menu's own
+//! Quit Game row opens `FeGroupInGameReturnTitleCheck`, whose "yes" is
+//! [`ds2_rva::FE_RETURN_TITLE_CHECK_CONFIRM`]: tidy the frontend, then
+//! `GameManagerImp::requestReturnTitle(gm, 0)`. The second argument is "without saving" -- it sets
+//! the bit the master update's per-frame exit-save request skips itself on, and the game's own
+//! forced returns pass `1` ([`ds2_rva::GAME_MANAGER_REQUEST_RETURN_TITLE`]).
+//! `ds2_menu_row::return_to_title_without_saving` performs that "yes" directly with `1`, under the
+//! Quit Game row's own gate, so no box is shown and the exit save is never requested. The pause
+//! menu's close-save is a separate request, and `ds2_save_block::refuse_saves` drops it and any
+//! other save asked for until a character has been chosen at the title.
 //!
 //! **3. The character list is built from memory, not from the file.** `FUN_1400f0f60` walks
 //! `GameManagerImp->GameDataManager->savedata__` -- ten `0x1f0`-byte records -- and keeps the ones
@@ -88,14 +96,17 @@
 //!
 //! | when | worker directory | why it is safe |
 //! |---|---|---|
-//! | the press | the game's own | the character being left has not been saved yet |
+//! | the press | the game's own | saves are refused from here until a character is confirmed |
 //! | at the title | **staged** | no character is loaded, so there is nothing a save could write |
 //! | a character is confirmed | staged | what is about to be played came from there, so its progress belongs there |
 //! | any path that gives up | put back | or the player's own list would describe somebody else's container |
 //!
-//! Staging any earlier writes the player's own character into somebody else's container. The
-//! moment is fact 4, and the put-back is why nothing is staged until the game's own directory has
-//! been observed -- that record is the only way home.
+//! Staging any earlier would let a save of the player's own character land in somebody else's
+//! container. With the exit save skipped and every other save refused from the press on, the
+//! character being left writes nothing anywhere, so that risk now needs both guards to fail; the
+//! staging still waits for the title so it does not rest on them. The moment is fact 4, and the
+//! put-back is why nothing is staged until the game's own directory has been observed -- that
+//! record is the only way home.
 //!
 //! # Nothing here is a substitute for the game leaving the game
 //!
@@ -147,12 +158,12 @@ use crate::{LOG_PREFIX, log_line};
 /// writing this flow's pick over it would pull the file out from under a game already playing it.
 pub const STAGING_DIR_NAME: &str = "ds2-swapped-save";
 
-/// Pause-menu frames to wait for the player to answer the game's own confirm.
+/// Pause-menu frames to wait for the game to leave after the return to title was accepted.
 ///
 /// The pause menu's update is what runs this crate's tick, so a tick that is still running is
-/// itself the evidence that the game was never left -- there is no other signal saying the confirm
-/// was declined. Thirty seconds at 60fps: long enough to read a dialog, short enough that a
-/// declined swap does not refuse the next press for the rest of the session.
+/// itself the evidence that the game was never left. There is no confirm any more, so the game
+/// leaves within a fade; the bound is kept at thirty seconds so a request the game accepted and
+/// then did not act on still ends, and the refusal of saves it armed is lifted.
 const LEAVE_DEADLINE_TICKS: u32 = 1800;
 
 const _: () = assert!(
@@ -354,10 +365,23 @@ pub fn begin(picked: &Path, slot: Option<usize>) -> Result<(), NotBegun> {
     // that accepts a press and does nothing.
     ds2_dialog_skip::hold();
 
+    // Before the leave, so the pause menu's close-save and anything else asked for on the way out
+    // is dropped. The leave itself skips the game's exit save; this is for everyone else's.
+    let refusing = ds2_save_block::refuse_saves();
+    log_line(format_args!(
+        "{LOG_PREFIX} swap refusing saves until a character is chosen -- detour-installed={refusing}{}",
+        if refusing {
+            ""
+        } else {
+            " (not installed: a save requested on the way out would still be written)"
+        }
+    ));
+
     // Last, because it is the irreversible half. Everything above can be abandoned by dropping a
-    // registration; once the game has been asked to leave, the player is watching a confirm dialog
-    // and something had better be waiting for them at the title.
-    if !ds2_menu_row::return_to_title() {
+    // registration; once the game has been asked to leave, something had better be waiting for the
+    // player at the title.
+    if !ds2_menu_row::return_to_title_without_saving() {
+        ds2_save_block::allow_saves();
         ds2_continue::clear_title_gate();
         ds2_dialog_skip::release();
         return Err(NotBegun::CannotLeave);
@@ -396,9 +420,9 @@ pub fn pause_tick() {
     *guard = None;
     drop(guard);
     abandon(&format!(
-        "the game was never left after {LEAVE_DEADLINE_TICKS} menu frames -- the confirm was \
-         declined or left open. Nothing was changed; {picked} is still staged and the row can be \
-         pressed again"
+        "the game was never left after {LEAVE_DEADLINE_TICKS} menu frames although the return to \
+         title was accepted. Nothing was changed; saves are allowed again, {picked} is still \
+         staged and the row can be pressed again"
     ));
 }
 
@@ -417,12 +441,14 @@ fn title_gate() -> ds2_continue::TitleStep {
     swap.frames += 1;
     match swap.phase {
         Phase::Leaving => {
-            // Being called at all means the title's top menu is up, which means the game was left
-            // and the character that was being played has already been written to the player's own
-            // folder by a save side nothing has touched.
+            // Being called at all means the title's top menu is up, which means the game was left.
+            // The character that was being played was not saved: the exit save was skipped and
+            // every other request since the press was refused.
             log_line(format_args!(
-                "{LOG_PREFIX} swap at the title -- the character you left is saved in your own \
-                 folder; pointing the loads at {}",
+                "{LOG_PREFIX} swap at the title -- the character you left was not saved \
+                 (saves-refused={} dropped-so-far={}); pointing the loads at {}",
+                ds2_save_block::refusing(),
+                ds2_save_block::dropped_requests(),
                 swap.staged
             ));
             swap.phase = Phase::Asking { restoring: false };
@@ -562,6 +588,7 @@ fn title_gate() -> ds2_continue::TitleStep {
                     "{LOG_PREFIX} swap put back -- the character list describes your own container \
                      again"
                 ));
+                ds2_save_block::allow_saves();
                 *guard = None;
                 crate::import::restore();
                 return TitleStep::Finished;
@@ -642,6 +669,7 @@ fn abandon(why: &str) {
     ds2_continue::clear_title_gate();
     restore_preselect();
     ds2_dialog_skip::release();
+    ds2_save_block::allow_saves();
     // AND THE LABEL, which the press borrowed to say the game was being left. This is the path that
     // reaches a player who declined the confirm: the pause menu is still up, still in front of
     // them, and the row would otherwise go on announcing a departure that never happened.
@@ -715,6 +743,13 @@ fn load_confirmed(slot: i32) {
         );
     ds2_continue::clear_title_gate();
     restore_preselect();
+    // A character is committed, so saves are this character's again: the one the game makes as
+    // the world starts goes to the container it came out of.
+    let dropped = ds2_save_block::dropped_requests();
+    let was_refusing = ds2_save_block::allow_saves();
+    log_line(format_args!(
+        "{LOG_PREFIX} swap saves allowed again was-refusing={was_refusing} dropped-total={dropped}"
+    ));
     // The hold survives this, and releasing it here is a bug this run measured. The list taking its
     // load branch is not the end of the load: the game put up one more `common-window`, and with
     // the hold already released this build suppressed it and the player landed back at the title.

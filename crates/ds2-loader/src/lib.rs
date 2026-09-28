@@ -1238,10 +1238,12 @@ fn install_menu_row() {
     // registration order, so the list a player writes is the order they see -- which only holds if
     // nothing else registers a row behind this loop's back.
     let mut manual_save_row = false;
+    let mut load_file_row = false;
     let mut file_row = false;
     for row in &config.rows {
         let registered = register_row(*row);
         manual_save_row |= registered && *row == menu_row::Row::SaveGameToFile;
+        load_file_row |= registered && *row == menu_row::Row::LoadCharacterFromFile;
         file_row |= registered
             && matches!(
                 *row,
@@ -1257,7 +1259,12 @@ fn install_menu_row() {
     // take the character's progress with it.
     let save_block = save_block::SaveBlockConfig::load();
     log_line(format_args!("{}", save_block.describe()));
-    if save_block.enabled && manual_save_row {
+    // The load row leaves the character being played without saving it, and the detour is what
+    // drops the saves the game asks for on the way out. So it is installed for that row too --
+    // passing every frame through untouched unless the row has armed a refusal.
+    let blocking = save_block.enabled && manual_save_row;
+    if blocking || load_file_row {
+        ds2_save_block::set_blocking(blocking);
         install_save_block();
     }
 
