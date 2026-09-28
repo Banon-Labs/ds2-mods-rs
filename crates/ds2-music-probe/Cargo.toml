@@ -1,0 +1,17 @@
+[package]
+name = "ds2-music-probe"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Step 1 of the region music playlist (`docs/DS2-REGION-MUSIC-PLAYLIST.md`): log every music event
+# the game starts, pauses and stops, through the FMOD import slots. The name test is plain string
+# work and builds everywhere; only the slot patches and the FMOD calls need Windows.
+[target.'cfg(windows)'.dependencies]
+ds2-game-base.workspace = true
+ds2-rva.workspace = true
+
+[lints]
+workspace = true

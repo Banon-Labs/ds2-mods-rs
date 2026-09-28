@@ -2281,6 +2281,72 @@ pub const SOUND_MANAGER_MASTER_VOLUME_OFFSET: usize = 0x930;
 /// `xmm1`, and the return is an `FMOD_RESULT` (`0` == `FMOD_OK`).
 pub const FMOD_CHANNEL_GROUP_SET_VOLUME_IAT: u32 = 0x01aa_e9b4;
 
+// FMOD event import slots, for `ds2-music-probe` (`docs/DS2-REGION-MUSIC-PLAYLIST.md`). Each was
+// read with `uv run --with pefile python3 scripts/pe-import-callsites.py <exe> fmod`, which walks
+// the import descriptor to the slot, then the slot to its MSVC `jmp [rip]` thunk, then the thunk's
+// call sites. None of them has a direct `call [IAT]` site, so a slot write catches every game call.
+// All are MSVC x64 member functions: `rcx` is the `FMOD::Event*` handle, and the return is an
+// `FMOD_RESULT` (`0` == `FMOD_OK`).
+//
+// Measured with `scripts/frida/fmod-events.js` on 2026-09-27 (Interceptor on the same exports in
+// `fmod_event64.dll`, 26 messages, game kept running): every event is started, then
+// `setPaused(true)`, then `setPaused(false)`, all on one thread; `getInfo` names it with the bare
+// sound id (`s000000157`, `c000001020`, `f100000006`); a looping event reports `lengthms = -1`.
+
+/// Import slot for `FMOD::Event::start()`. RVA `0x01aae764`; 6 call sites through thunk
+/// `0x140a04bb6`.
+pub const FMOD_EVENT_START_IAT: u32 = 0x01aa_e764;
+
+/// Import slot for `FMOD::Event::stop(bool immediate)`. RVA `0x01aae75c`; 2 call sites.
+pub const FMOD_EVENT_STOP_IAT: u32 = 0x01aa_e75c;
+
+/// Import slot for `FMOD::Event::setPaused(bool)`. RVA `0x01aae85c`; 7 call sites.
+pub const FMOD_EVENT_SET_PAUSED_IAT: u32 = 0x01aa_e85c;
+
+/// Import slot for `FMOD::Event::getState(u32*)`. RVA `0x01aae754`; 6 call sites.
+pub const FMOD_EVENT_GET_STATE_IAT: u32 = 0x01aa_e754;
+
+/// Import slot for `FMOD::Event::getInfo(int* index, char** name, FMOD_EVENT_INFO* info)`.
+/// RVA `0x01aae844`; 9 call sites.
+pub const FMOD_EVENT_GET_INFO_IAT: u32 = 0x01aa_e844;
+
+/// Import slot for `FMOD::Event::getChannelGroup(ChannelGroup**)`. RVA `0x01aae74c`.
+pub const FMOD_EVENT_GET_CHANNEL_GROUP_IAT: u32 = 0x01aa_e74c;
+
+/// Import slot for `FMOD::ChannelGroup::getNumChannels(int*)`. RVA `0x01aae9d4`.
+pub const FMOD_CHANNEL_GROUP_GET_NUM_CHANNELS_IAT: u32 = 0x01aa_e9d4;
+
+/// Import slot for `FMOD::ChannelGroup::getChannel(int, Channel**)`. RVA `0x01aae9dc`.
+pub const FMOD_CHANNEL_GROUP_GET_CHANNEL_IAT: u32 = 0x01aa_e9dc;
+
+/// Import slot for `FMOD::ChannelGroup::getNumGroups(int*)`. RVA `0x01aae9ec`.
+pub const FMOD_CHANNEL_GROUP_GET_NUM_GROUPS_IAT: u32 = 0x01aa_e9ec;
+
+/// Import slot for `FMOD::Channel::getCurrentSound(Sound**)`. RVA `0x01aae9cc`.
+pub const FMOD_CHANNEL_GET_CURRENT_SOUND_IAT: u32 = 0x01aa_e9cc;
+
+/// `FMOD_EVENT_INFO` (FMOD Ex 4.44) -> `positionms`, `i32`. `+0x04`.
+pub const FMOD_EVENT_INFO_POSITION_MS_OFFSET: usize = 0x04;
+
+/// `FMOD_EVENT_INFO` -> `lengthms`, `i32`, `-1` for an event with looping sounds. `+0x08`.
+pub const FMOD_EVENT_INFO_LENGTH_MS_OFFSET: usize = 0x08;
+
+/// `FMOD_EVENT_INFO` -> `projectid`, `u32`. `+0x20`.
+pub const FMOD_EVENT_INFO_PROJECT_ID_OFFSET: usize = 0x20;
+
+/// `FMOD_EVENT_INFO` -> `systemid`, `u32`. `+0x24`. The game's own `getInfo` site at
+/// `0x1409f5243` reads this word; the Frida run read values beside `projectid` (`356`/`358`).
+pub const FMOD_EVENT_INFO_SYSTEM_ID_OFFSET: usize = 0x24;
+
+/// Bytes zeroed for an `FMOD_EVENT_INFO` out-parameter. `0x80`.
+///
+/// The 4.44 struct is `0x40`; its `maxwavebanks`, `wavebankinfo`, `numinstances`, `instances` and `guid` fields are inputs, so the
+/// buffer must be zeroed, and it is oversized so a larger layout cannot write past it.
+pub const FMOD_EVENT_INFO_BUFFER_SIZE: usize = 0x80;
+
+/// `FMOD_TIMEUNIT_MS`, the unit `Channel::getPosition` and `Sound::getLength` are asked in. `1`.
+pub const FMOD_TIMEUNIT_MS: u32 = 1;
+
 /// `MOFmodSoundManager::v6`, audio init. RVA `0x009ddbe0`, VA `0x1409ddbe0`.
 ///
 /// The function that *creates* [`SOUND_MANAGER_MASTER_GROUP_OFFSET`]: at `0x1409df157` it does
