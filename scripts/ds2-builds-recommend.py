@@ -202,13 +202,33 @@ class MugenIds:
 
     # MugenMonkey's own misspellings and abbreviations, seen in its build data
     ALIAS = {"sanctumsolidergauntlets": "Sanctum Soldier Gauntlet",
-             "penalstraighjacket": "Penal Straightjacket"}
+             "penalstraighjacket": "Penal Straightjacket",
+             "tightsofjudgement": "Tights of Judgment",
+             "desertsorcesresshood": "Desert Sorceress Hood",
+             "desertsoceressgloves": "Desert Sorceress Gloves",
+             "wanderermanchettes": "Wanderer Manchette",
+             "bonekingarmor": "Bone King Robe",
+             "royalsoliderhelm": "Royal Soldier Helm",
+             "hardleatherleggings": "Hard Leather Boots",
+             "bersekerblade": "Berserker Blade",
+             "creightonshelm": "Creightons Steel Mask",
+             "royalsolidersleggings": "Royal Soldier Leggings",
+             "madwarriorgauntlets": "Mad Warrior Gauntlet",
+             "monastarylonggloves": "Monastery Long Gloves",
+             "prisonerswaistloth": "Prisoners Waistcloth",
+             "astrologistsrobes": "Astrologists Robe",
+             "perserverance": "Perseverance",
+             "hollowsoliderhelm": "Hollow Soldier Helm",
+             "whitepriestheadset": "White Priest Headpiece"}
     ABBREV = [(re.compile(r"\bUGS\b"), "Ultra Greatsword"), (re.compile(r"\bGS\b"), "Greatsword"),
               (re.compile(r"\bGA\b"), "Greataxe")]
 
     def key(self, name):
         if not name or name.strip() in ("No Ring", "No Spell", "Naked", "No Armor") or name.startswith("default"):
             return ""  # "defaulthead" etc. is MugenMonkey's empty armor slot
+        # A trailing note in parentheses is the author's, not the item's: "Ruler's Sword (1mil)",
+        # "Curved Nil Greatsword (NG)", "Prisoner's Tatters (2)".
+        name = re.sub(r"\s*\([^)]*\)\s*$", "", name)
         name = self.ALIAS.get(norm(name), name)
         for pat, full in self.ABBREV:
             name = pat.sub(full, name)
