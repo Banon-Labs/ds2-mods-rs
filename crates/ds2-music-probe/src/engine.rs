@@ -11,9 +11,14 @@
 //!    channel's `getAudibility` is above [`AUDIBLE`]. If ours is not heard within [`CONFIRM_MS`] it
 //!    is stopped and the game's track keeps playing. `Event::setMute` is never used to silence: an
 //!    event mute does not come off the channel again, which left Majula silent.
-//! 2. **Nothing of ours starts during a load.** A region with a playlist waits until the game's own
-//!    track is audible -- the load has finished with it -- before starting a playlist track. An
-//!    instance started at region detection stayed silent through the load.
+//! 2. **Nothing touches the event system during a load.** A region track the game starts is only
+//!    recorded; it is keyed by bank, its playlist started, and the catalog scanned, once the game
+//!    has made it audible (or after [`LOAD_WAIT_MS`]). With the player on, Majula's own event read
+//!    `Event::getVolume` 0 from its first second, before anything of ours played; with the player
+//!    off it read 1, audibility 0.759. Repeating `Event::setMute(false)`, the catalog scan and the
+//!    bank `getInfo` on that event after the load (`scripts/frida/fmod-volume-bisect.js`) left it
+//!    at 1, so what the game resolves to 0 is something done during the load, and the player now
+//!    does nothing then.
 //! 3. **At most one instance of ours exists, and its memory goes back when it stops.** Every stop is
 //!    followed by `EventGroup::freeEventData` on that instance, and a play is refused while FMOD's
 //!    allocations are more than [`MEMORY_HEADROOM`] above the most the game used on its own. Eight
@@ -117,7 +122,6 @@ struct Game {
     handle: usize,
     key: TrackKey,
     map: Option<u32>,
-    started_ms: u64,
     /// The game's channel we muted, or `0`.
     muted_channel: usize,
 }
@@ -156,8 +160,9 @@ struct Engine {
     catalog: Catalog,
     game: Option<Game>,
     playing: Option<Playing>,
-    /// A playlist entry waiting for the load to finish.
-    pending: Option<usize>,
+    /// A region track the game has started and not yet made audible -- a load is in progress --
+    /// and when. Rule 2: nothing is done to it, or to the event system, until it is heard.
+    arriving: Option<(usize, u64)>,
     silent: bool,
     problem: Option<String>,
     /// Tracks that were started and never heard, this session. Skipped by the playlist.
@@ -227,6 +232,10 @@ pub(crate) fn on_paused(event: usize, paused: bool, info: Option<&EventInfo>) {
 /// The game is stopping an event. Called before the original.
 pub(crate) fn on_stop(event: usize, immediate: bool) {
     with_engine(|engine| {
+        if engine.arriving.is_some_and(|(handle, _)| handle == event) {
+            engine.arriving = None;
+            return;
+        }
         let Some(game) = engine.game.clone().filter(|g| g.handle == event) else {
             return;
         };
@@ -237,7 +246,6 @@ pub(crate) fn on_stop(event: usize, immediate: bool) {
         engine.unmute_game();
         engine.game = None;
         engine.playing = None;
-        engine.pending = None;
         engine.silent = false;
     });
 }
@@ -264,7 +272,7 @@ pub(crate) fn tick() {
         }
         engine.scan(SCAN_PER_TICK);
         engine.follow_listener();
-        engine.start_pending(now);
+        engine.settle_arrival(now);
         engine.confirm(now);
         engine.watch(now);
         engine.publish(now);
@@ -295,20 +303,53 @@ impl Engine {
         {
             return;
         }
-        if self.game.as_ref().is_some_and(|g| g.handle == event) {
+        if self.game.as_ref().is_some_and(|g| g.handle == event)
+            || self.arriving.is_some_and(|(handle, _)| handle == event)
+        {
             // The prepare pattern starts, pauses and unpauses the same event; one entry is enough.
             return;
         }
         self.stop_ours(true, "a new region track started");
         self.unmute_game();
-        // Clear any event-level mute an older build of this crate left on the handle.
-        fmod::set_mute(event, false);
-        let full = fmod::event_info(event, true).unwrap_or_else(|| info.clone());
+        self.game = None;
+        self.playing = None;
+        self.silent = false;
+        self.problem = None;
+        // Rule 2: no more than that until the load is done with it. `settle_arrival` does the rest.
+        self.arriving = Some((event, now_ms()));
+        log(format_args!(
+            "{LOG_PREFIX} region arriving name={} handle=0x{event:x} system={} -- keyed once the \
+             game makes it audible",
+            info.name, info.system_id
+        ));
+    }
+
+    /// Once the arriving region track is heard (the load is done with it), or after
+    /// [`LOAD_WAIT_MS`], key it by bank and name and start its playlist, if it has one.
+    fn settle_arrival(&mut self, now: u64) {
+        let Some((event, since)) = self.arriving else {
+            return;
+        };
+        let heard = fmod::channel_of(event)
+            .and_then(fmod::audibility)
+            .filter(|a| *a > AUDIBLE);
+        let waited = now.saturating_sub(since);
+        if heard.is_none() && waited < LOAD_WAIT_MS {
+            return;
+        }
+        self.arriving = None;
+        let Some(full) = fmod::event_info(event, true) else {
+            log(format_args!(
+                "{LOG_PREFIX} region handle=0x{event:x} gone before it was heard"
+            ));
+            return;
+        };
         let key = full.key();
         let map = map_index();
         let managed = managed_region(&key);
         log(format_args!(
-            "{LOG_PREFIX} region key={key} handle=0x{event:x} system={} map={} managed={} {}",
+            "{LOG_PREFIX} region key={key} handle=0x{event:x} system={} map={} managed={} \
+             heard={heard:?} after {waited}ms {}",
             full.system_id,
             map.map_or_else(|| "-".to_owned(), |m| m.to_string()),
             managed.is_some(),
@@ -318,28 +359,22 @@ impl Engine {
             handle: event,
             key: key.clone(),
             map,
-            started_ms: now_ms(),
             muted_channel: 0,
         });
-        self.silent = false;
-        self.problem = None;
         self.follow_game_track(None);
         if let Some(region) = managed {
             let entries = region.entries();
+            if entries.is_empty() {
+                self.go_silent("the region's playlist is empty");
+                return;
+            }
             let index = self
                 .resume
                 .get(&key)
                 .copied()
                 .filter(|i| *i < entries.len())
                 .unwrap_or(0);
-            // Rule 2: not now. `start_pending` starts it once the game's own track is heard.
-            self.pending = Some(index);
-            log(format_args!(
-                "{LOG_PREFIX} waiting for the load: playlist entry {index} starts once the game's \
-                 track is heard"
-            ));
-        } else {
-            self.pending = None;
+            self.play_entry(&entries, index, false, 0);
         }
     }
 
@@ -430,7 +465,6 @@ impl Engine {
         self.stop_ours(true, &why);
         self.unmute_game();
         self.follow_game_track(None);
-        self.pending = None;
         self.silent = false;
         log(format_args!(
             "{LOG_PREFIX} fallback: the game's own track plays -- {why}"
@@ -462,32 +496,6 @@ impl Engine {
                 by_name.next().is_none().then_some(first).flatten()
             })
             .map(|(_, id)| *id)
-    }
-
-    /// Start the waiting playlist entry once the game's own track is heard (the load is done with
-    /// it), or after [`LOAD_WAIT_MS`] regardless.
-    fn start_pending(&mut self, now: u64) {
-        let (Some(index), Some(game)) = (self.pending, self.game.clone()) else {
-            return;
-        };
-        let heard = fmod::channel_of(game.handle)
-            .and_then(fmod::audibility)
-            .filter(|a| *a > AUDIBLE);
-        let waited = now.saturating_sub(game.started_ms);
-        if heard.is_none() && waited < LOAD_WAIT_MS {
-            return;
-        }
-        self.pending = None;
-        log(format_args!(
-            "{LOG_PREFIX} load done: game track audibility={heard:?} after {waited}ms; starting \
-             playlist entry {index}"
-        ));
-        let entries = any_region(&game).entries();
-        if entries.is_empty() {
-            self.go_silent("the region's playlist is empty");
-            return;
-        }
-        self.play_entry(&entries, index.min(entries.len() - 1), false, 0);
     }
 
     /// Play `entries[index]`. `restart` puts the game's own track back to its start when it is the
@@ -683,13 +691,11 @@ impl Engine {
                 let entries = any_region(&game).entries();
                 let current = self.playing.as_ref().and_then(|p| p.index).unwrap_or(0);
                 if let Some(next) = step(entries.len(), current, forward) {
-                    self.pending = None;
                     self.play_entry(&entries, next, true, 0);
                 }
             }
             Command::Play(index) => {
                 let entries = any_region(&game).entries();
-                self.pending = None;
                 // A track the player asks for by name gets another chance to be heard.
                 if let Some(key) = entries.get(index) {
                     self.unheard.remove(key);
@@ -704,7 +710,6 @@ impl Engine {
         let Some(region) = managed_region(&game.key) else {
             // Back to the game's own: its event plays, unmuted, and `watch` puts its loop back.
             self.stop_ours(true, "the region is as shipped again");
-            self.pending = None;
             if fmod::channel_of(game.handle).is_none() {
                 fmod::start(game.handle);
             }
@@ -737,9 +742,6 @@ impl Engine {
             self.go_silent("the region's playlist is empty");
             return;
         }
-        if self.pending.is_some() {
-            return;
-        }
         let still = self
             .playing
             .as_ref()
@@ -759,7 +761,7 @@ impl Engine {
         let Some(game) = self.game.clone() else {
             return;
         };
-        if self.pending.is_some() || self.silent {
+        if self.silent {
             return;
         }
         let region = managed_region(&game.key);
@@ -832,6 +834,12 @@ impl Engine {
     /// Build the catalog a slice at a time: every event the event system knows, by system id, kept
     /// when it is music.
     fn scan(&mut self, budget: u32) {
+        // Rule 2: never while a region track is arriving, and never before one has been heard --
+        // the scan touches every event the system knows, and a load is when the game is setting
+        // them up.
+        if self.game.is_none() || self.arriving.is_some() {
+            return;
+        }
         let Some(system) = fmod::event_system() else {
             return;
         };
@@ -930,7 +938,7 @@ impl Engine {
             position_ms: position,
             length_ms: length,
             silent: self.silent,
-            waiting: self.pending.is_some(),
+            waiting: self.arriving.is_some(),
             problem: self.problem.clone(),
             region: self.game.as_ref().map(|g| g.key.clone()),
             map: self.game.as_ref().and_then(|g| g.map),

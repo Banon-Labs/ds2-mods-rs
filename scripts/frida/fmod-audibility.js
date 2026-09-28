@@ -14,7 +14,7 @@
 
 const cfg = (typeof globalThis.__ER_FRIDA_CONFIG === 'object' && globalThis.__ER_FRIDA_CONFIG) || {};
 const OURS = cfg.ours ? ptr(cfg.ours) : null;
-const GAME = cfg.game ? ptr(cfg.game) : null;
+let GAME = cfg.game ? ptr(cfg.game) : null;
 
 const ev = Process.getModuleByName('fmod_event64.dll');
 const ex = Process.getModuleByName('fmodex64.dll');
@@ -116,14 +116,27 @@ function dump(label, h) {
   return out;
 }
 
+const groupMute = f(ex, '?getMute@ChannelGroup' + Q + 'PEA_N@Z', 0, [P, P]);
+const groupPaused = f(ex, '?getPaused@ChannelGroup' + Q + 'PEA_N@Z', 0, [P, P]);
+const exe = Process.getModuleByName('DarkSoulsII.exe').base;
+// MOFmodSoundManager: +0x9f8 the master ChannelGroup, +0x930 the master volume the game applied.
+function master() {
+  const mgr = exe.add(0x166dfa8).readPointer();
+  const group = mgr.add(0x9f8).readPointer();
+  return { group: group.toString(), game_volume: mgr.add(0x930).readFloat(), volume: f32(groupVolume, group), mute: bool(groupMute, group), paused: bool(groupPaused, group) };
+}
+
 let last = 0;
 let dumps = 0;
 Interceptor.attach(e(ev, '?getState@Event' + Q + 'PEAI@Z'), {
-  onEnter() {
+  onEnter(args) {
+    // With no handle given, the first looping music event the game polls is the region track.
+    if (GAME === null) { const n = name(args[0]); if (n !== null && /^m\d{9}/.test(n)) { const i = Memory.alloc(0x80); a.writePointer(ptr(0)); getInfo(args[0], ptr(0), a, i); if (i.add(8).readS32() === -1) GAME = args[0]; } }
     const now = Date.now();
     if (dumps >= 3 || now - last < 3000) return;
     last = now; dumps += 1;
     try {
+      send({ kind: 'master', master: master() });
       if (OURS) send(dump('ours', OURS));
       if (GAME) send(dump('game', GAME));
     } catch (err) { send({ kind: 'error', error: String(err) }); dumps = 99; }
