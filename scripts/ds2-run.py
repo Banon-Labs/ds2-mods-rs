@@ -298,6 +298,12 @@ SAVE_FILE_HANDOFF_NAME = "ds2-load-next-save.txt"
 SAVE_REDIRECT_SECTION = "save_redirect"
 KEY_SAVE_REDIRECT_DIRECTORY = "directory"
 
+#: Mirrors `CONFIG_SECTION` and the three keys in `crates/ds2-loader/src/save_picker.rs`.
+SAVE_PICKER_SECTION = "save_picker"
+KEY_SAVE_PICKER_OS_NATIVE = "os_native"
+KEY_SAVE_PICKER_START_DIR = "start_dir"
+KEY_SAVE_PICKER_REMEMBER_DIR = "remember_dir"
+
 #: Wine maps `Z:` to `/`, and the DLL runs INSIDE the prefix, so a folder on this machine reaches
 #: the game as `Z:\home\you\...`. `--save-dir` takes either spelling and this is the conversion --
 #: done here rather than asked of the person typing it, because a path that is one backslash wrong
@@ -2219,6 +2225,16 @@ def config_text(
 # a save that had gone missing. A folder that exists but is empty is fine and starts a fresh
 # character there.
 {KEY_SAVE_REDIRECT_DIRECTORY} = "{save_directory}"
+
+[{SAVE_PICKER_SECTION}]
+# Read when a save-file row is pressed: what the "Load character from file" and "Save game to file"
+# rows open. The rows themselves are switched on by `[{MENU_ROW_SECTION}] {KEY_MENU_ROW_ROWS}`.
+# {KEY_SAVE_PICKER_OS_NATIVE}: true opens the Windows file dialog instead of the in-game panel.
+# {KEY_SAVE_PICKER_START_DIR}: the folder the panel opens in; empty means ~/Downloads.
+# {KEY_SAVE_PICKER_REMEMBER_DIR}: whether the panel reopens where the last pick was made.
+{KEY_SAVE_PICKER_OS_NATIVE} = false
+{KEY_SAVE_PICKER_START_DIR} = ""
+{KEY_SAVE_PICKER_REMEMBER_DIR} = true
 
 [{ITEM_WARN_SECTION}]
 # Read at startup. A red X on the icon of any weapon, armour piece or spell whose requirements the
@@ -4926,6 +4942,30 @@ def selftest() -> int:
             "arm -- it is the other half of the legacy branch, and writing either half narrows "
             "the menu to the rows those two keys name",
         )
+    # [save_picker] is written with the DLL's own defaults, and every key it writes is one the DLL
+    # reads, so the file shows each switch rather than leaving it to a default nobody can see.
+    save_picker_src = (REPO_ROOT / "crates/ds2-loader/src/save_picker.rs").read_text(
+        encoding="utf-8"
+    )
+    check(
+        f'"{SAVE_PICKER_SECTION}"' in save_picker_src,
+        f"the DLL reads the section this writes ([{SAVE_PICKER_SECTION}])",
+    )
+    for key, want in (
+        (KEY_SAVE_PICKER_OS_NATIVE, "false"),
+        (KEY_SAVE_PICKER_START_DIR, ""),
+        (KEY_SAVE_PICKER_REMEMBER_DIR, "true"),
+    ):
+        check(
+            f'"{key}"' in save_picker_src,
+            f"the DLL reads {SAVE_PICKER_SECTION}.{key}",
+        )
+        for arm in PROBE_ARMS:
+            values, _ = parse_config(config_text(arm))
+            check(
+                values.get((SAVE_PICKER_SECTION, key)) == want,
+                f"[{SAVE_PICKER_SECTION}] {key} is written as {want!r} in the {arm} arm",
+            )
     build_import_src = (REPO_ROOT / "crates/ds2-loader/src/build_import.rs").read_text(
         encoding="utf-8"
     )
