@@ -370,6 +370,9 @@ struct Query<'a> {
     objective: Objective,
     /// How many rows to keep when not `per_class`.
     top: usize,
+    /// This weapon alone (an index into the file's weapons), every infusion of it, and no
+    /// high-stamina END gate: the script's `weapons_for(weapon=...)`, which `best_infusion` asks.
+    weapon: Option<usize>,
 }
 
 /// A weapon the similar builds carry: how many carry it, and how many carry each infusion of it.
@@ -960,13 +963,22 @@ impl CorpusBackend {
             raw_ar,
             objective,
             top,
+            weapon: only,
         } = *query;
         let bracket = self.bracket(sl);
         let defense = &bracket.defense;
         let class = class.map(norm);
+        // Per weapon: its best three while within WITHIN of its best, or for one weapon asked
+        // about by itself, every infusion.
+        let every = only.is_some();
+        let per_weapon = if every { usize::MAX } else { 3 };
         let mut rows: Vec<Ranked> = Vec::new();
         for (index, weapon) in self.weapons.iter().enumerate() {
-            if EMPTY.contains(&weapon.key.as_str()) || weapon.catalyst || weapon.shield {
+            if EMPTY.contains(&weapon.key.as_str())
+                || weapon.catalyst
+                || weapon.shield
+                || only.is_some_and(|only| only != index)
+            {
                 continue;
             }
             let one = weapon.wieldable(stats, false);
@@ -979,7 +991,7 @@ impl CorpusBackend {
             {
                 continue;
             }
-            if weapon.high_stamina && stats[END] < bracket.floors[4] {
+            if !every && weapon.high_stamina && stats[END] < bracket.floors[4] {
                 continue;
             }
             if objective != Objective::Damage {
@@ -1014,8 +1026,8 @@ impl CorpusBackend {
                 rows.extend(
                     scored
                         .into_iter()
-                        .take(3)
-                        .filter(|row| row.damage >= best * (1.0 - WITHIN)),
+                        .take(per_weapon)
+                        .filter(|row| every || row.damage >= best * (1.0 - WITHIN)),
                 );
                 continue;
             }
@@ -1085,8 +1097,8 @@ impl CorpusBackend {
             rows.extend(
                 scored
                     .into_iter()
-                    .take(3)
-                    .filter(|row| row.damage >= best * (1.0 - WITHIN)),
+                    .take(per_weapon)
+                    .filter(|row| every || row.damage >= best * (1.0 - WITHIN)),
             );
         }
         rows.sort_by(|a, b| b.damage.total_cmp(&a.damage));
@@ -1844,6 +1856,31 @@ impl RecommenderBackend for CorpusBackend {
             raw_ar: opts.raw_ar,
             objective: opts.objective,
             top: WEAPONS_FOR_TOP,
+            weapon: None,
+        };
+        let ranked = self.rank(&to_stats(stats), u32::from(sl), &query);
+        Outcome::Rows(ranked.iter().map(|row| self.result_row(row)).collect())
+    }
+
+    fn best_infusion(
+        &self,
+        weapon: &str,
+        stats: &[u16; STAT_COUNT],
+        sl: u16,
+        opts: &WeaponsForOpts,
+    ) -> Outcome {
+        let Some(index) = self.weapons.iter().position(|row| row.key == weapon) else {
+            return Outcome::Rows(Vec::new());
+        };
+        let query = Query {
+            one_hand: false,
+            class: None,
+            per_class: false,
+            window: window_seconds(opts.window_s),
+            raw_ar: opts.raw_ar,
+            objective: opts.objective,
+            top: usize::MAX,
+            weapon: Some(index),
         };
         let ranked = self.rank(&to_stats(stats), u32::from(sl), &query);
         Outcome::Rows(ranked.iter().map(|row| self.result_row(row)).collect())
@@ -1987,6 +2024,7 @@ impl RecommenderBackend for CorpusBackend {
             raw_ar: false,
             objective: Objective::Damage,
             top: usize::MAX,
+            weapon: None,
         };
         let ranked = self.rank(&stats, u32::from(sl), &query);
         let mut seen: Vec<&str> = vec![primary.name.as_str()];

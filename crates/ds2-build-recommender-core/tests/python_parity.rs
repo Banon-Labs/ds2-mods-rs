@@ -104,6 +104,17 @@ type FlexCases = &'static [(
     &'static [&'static str],
     FlexAnswer,
 )];
+/// infusion code, score, AR by type, grip.
+type InfusionRow = (&'static str, f64, &'static [f64], &'static str);
+type BestInfusionCases = &'static [(
+    &'static str,
+    &'static [u16],
+    u16,
+    f64,
+    bool,
+    &'static str,
+    &'static [InfusionRow],
+)];
 
 mod expected {
     use super::*;
@@ -199,6 +210,39 @@ fn weapons_for_is_the_scripts() {
             assert_eq!(row.counter, (ctr != 0.0).then_some(ctr as f32), "{at}");
         }
     }
+}
+
+#[test]
+fn best_infusion_is_the_scripts() {
+    let mut ranked_some = 0;
+    for &(weapon, st, sl, window, raw_ar, goal, want) in expected::BEST_INFUSION {
+        let opts = WeaponsForOpts {
+            window_s: window as f32,
+            raw_ar,
+            objective: objective(goal),
+            ..WeaponsForOpts::default()
+        };
+        let got = rows(backend().best_infusion(weapon, &stats(st), sl, &opts));
+        let case = format!("{weapon} SL {sl} {goal} window {window}");
+        assert_eq!(got.len(), want.len(), "{case}: row count");
+        for (row, &(code, score, ar, grip)) in got.iter().zip(want) {
+            assert_eq!(row.infusion, infusion(code), "{case}");
+            assert_eq!(row.damage, score as f32, "{case} {code}: score");
+            let ar: Vec<f32> = ar.iter().map(|&value| value as f32).collect();
+            assert_eq!(row.ar_by_type[..], ar[..], "{case} {code}: AR");
+            assert_eq!(row.grip, grip, "{case} {code}");
+        }
+        if want.len() > 1 {
+            ranked_some += 1;
+            let margin = backend::infusion_margin(&got).expect("a runner-up");
+            let want_margin = want[0].1 / want[1].1 - 1.0;
+            assert!(
+                (f64::from(margin) - want_margin).abs() < 1e-5,
+                "{case}: margin {margin} vs {want_margin}"
+            );
+        }
+    }
+    assert!(ranked_some >= 4, "{ranked_some} cases ranked two or more");
 }
 
 #[test]

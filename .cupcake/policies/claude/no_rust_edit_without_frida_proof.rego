@@ -387,11 +387,42 @@ written_crate_paths contains path if {
 	segment_writes(words, index)
 }
 
+# RESOLVING A MERGE CONFLICT (2026-09-28). A rebase that stops on a conflict leaves marker lines
+# in a crate source, and resolving them writes no new code: every line kept came from one of the
+# two commits being combined, each of which already passed this gate. No instrument here can
+# measure that -- Frida has no mechanism to watch, and the crate's telemetry proves nothing about
+# which side of a doc comment survives. So an Edit whose old_string carries all three markers,
+# and whose new_string is made only of lines already in that old_string, is not a guessed change.
+# Anything that adds a line absent from the conflicted hunk still needs its measurement.
+conflict_marker(line) if startswith(line, "<<<<<<< ")
+
+conflict_marker(line) if line == "======="
+
+conflict_marker(line) if startswith(line, ">>>>>>> ")
+
+conflict_resolution_only if {
+	tool_name == "Edit"
+	old := object.get(input.tool_input, "old_string", "")
+	new := object.get(input.tool_input, "new_string", "")
+	old_lines := split(old, "\n")
+	some a in old_lines
+	startswith(a, "<<<<<<< ")
+	some b in old_lines
+	b == "======="
+	some c in old_lines
+	startswith(c, ">>>>>>> ")
+	kept := {line | some line in old_lines; not conflict_marker(line)}
+	every line in split(new, "\n") {
+		kept[line]
+	}
+}
+
 deny contains decision if {
 	input.hook_event_name == "PreToolUse"
 	not read_only_tools[tool_name]
 	rust_under_crates
 	not proven
+	not conflict_resolution_only
 
 	decision := {
 		"rule_id": "DS2-MODS-NO-RUST-EDIT-WITHOUT-FRIDA-PROOF",

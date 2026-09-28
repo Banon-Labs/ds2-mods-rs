@@ -148,6 +148,18 @@ pub trait RecommenderBackend: Sync {
     fn floors(&self, sl: u16) -> [u16; STAT_COUNT];
     /// The weapons `stats` wield best.
     fn weapons_for(&self, stats: &[u16; STAT_COUNT], sl: u16, opts: &WeaponsForOpts) -> Outcome;
+    /// Every infusion `weapon` takes, best first, scored as [`Self::weapons_for`] scores a row
+    /// (the script's `--best-infusion`). No rows when `stats` cannot wield it even two-handed, or
+    /// for bleed/poison when no infusion deals it. The default has no data and ranks nothing.
+    fn best_infusion(
+        &self,
+        _weapon: &str,
+        _stats: &[u16; STAT_COUNT],
+        _sl: u16,
+        _opts: &WeaponsForOpts,
+    ) -> Outcome {
+        Outcome::Rows(Vec::new())
+    }
     /// The stats that make `weapon` hit hardest at `sl`, held in `grip`. `None` when no class can
     /// wield it there that way.
     fn optimize(
@@ -256,6 +268,67 @@ pub fn ask(backend: &dyn RecommenderBackend, state: &PanelState) -> Answer {
             };
             built.map_or(Answer::Nothing("no class can wield it here"), Answer::Build)
         }
+    }
+}
+
+/// Rank every infusion of the panel's weapon by the build Optimize for weapon makes for it: one
+/// [`RecommenderBackend::optimize`] per infusion at the panel's soul level, grip and objective,
+/// best first.
+///
+/// Measured on 5b6c304: this used to score each infusion at the stats in the panel, and those are
+/// Optimize for weapon's output rather than the player's input -- so a weapon the panel's stats
+/// could not wield ranked nothing ("these stats cannot wield it"). Optimizing per infusion asks the
+/// question the button is for: which infusion reaches the most at this soul level. A row's class
+/// column carries the optimized build, since each infusion wants different stats.
+pub fn best_infusion(backend: &dyn RecommenderBackend, state: &PanelState) -> Answer {
+    let Some(weapon) = state.weapon else {
+        return Answer::Nothing("choose a weapon first");
+    };
+    let Some(row) = weapons::by_key(weapon) else {
+        return Answer::Nothing("the chosen weapon is not in the weapon table");
+    };
+    let sl = state.sl();
+    let mut rows: Vec<ResultRow> = row
+        .infusions()
+        .into_iter()
+        .filter_map(|infusion| {
+            let build = backend.optimize(weapon, infusion, sl, state.objective, state.grip)?;
+            Some(ResultRow {
+                weapon: row.name.to_owned(),
+                infusion,
+                damage: build.value,
+                ar_by_type: [0.0; 5],
+                grip: if build.two_handed { "2H" } else { "1H" }.to_owned(),
+                two_hand_only: false,
+                hyperarmor: None,
+                counter: None,
+                class: optimized_stats(&build),
+            })
+        })
+        .collect();
+    if rows.is_empty() {
+        return Answer::Nothing("no infusion to rank: no class can wield it at this soul level");
+    }
+    rows.sort_by(|a, b| b.damage.total_cmp(&a.damage));
+    Answer::Rows(rows)
+}
+
+/// `Deprived SL 74: STR 11 DEX 42 INT 9 FTH 9`, the stats that decide an infusion.
+fn optimized_stats(build: &OptimizedBuild) -> String {
+    let [.., strength, dexterity, _, intelligence, faith] = build.stats;
+    format!(
+        "{} SL {}: STR {strength} DEX {dexterity} INT {intelligence} FTH {faith}",
+        build.class, build.sl
+    )
+}
+
+/// How far the first row's score is ahead of the second's, as a fraction of the second: `0.25`
+/// is 25% more. `None` without a second row or when it scores nothing. The script's
+/// `infusion_margin`.
+pub fn infusion_margin(rows: &[ResultRow]) -> Option<f32> {
+    match rows {
+        [best, second, ..] if second.damage > 0.0 => Some(best.damage / second.damage - 1.0),
+        _ => None,
     }
 }
 
@@ -703,6 +776,49 @@ mod tests {
         );
         let falchion = build.weapons_1h.iter().find(|row| row.weapon == "Falchion");
         assert_eq!(falchion.map(|row| row.infusion), Some(Infusion::Raw));
+    }
+
+    /// The script's `infusion_margin`: best over runner-up as a fraction of the runner-up.
+    #[test]
+    fn the_infusion_margin_is_over_the_runner_up() {
+        let scored = |damage: f32| ResultRow {
+            weapon: "Caestus".to_owned(),
+            infusion: Infusion::None,
+            damage,
+            ar_by_type: [0.0; 5],
+            grip: "1H".to_owned(),
+            two_hand_only: false,
+            hyperarmor: None,
+            counter: None,
+            class: String::new(),
+        };
+        assert_eq!(
+            infusion_margin(&[scored(300.0), scored(200.0), scored(50.0)]),
+            Some(0.5)
+        );
+        assert_eq!(infusion_margin(&[scored(300.0)]), None);
+        assert_eq!(infusion_margin(&[scored(300.0), scored(0.0)]), None);
+    }
+
+    /// It waits for a weapon, then ranks one optimized build per infusion the weapon takes --
+    /// whatever the panel's own stats are, since Optimize for weapon picks those.
+    #[test]
+    fn best_infusion_optimizes_every_infusion_whatever_the_panels_stats() {
+        let mut state = PanelState::default();
+        assert_eq!(
+            best_infusion(&StubBackend, &state),
+            Answer::Nothing("choose a weapon first")
+        );
+        // Measured on 5b6c304: at SL 10 stats this weapon ranked nothing.
+        state.choose_weapon("Dragonslayers_Crescent_Axe");
+        let Answer::Rows(rows) = best_infusion(&StubBackend, &state) else {
+            panic!("no rows for a weapon the stats cannot wield");
+        };
+        assert_eq!(
+            rows.len(),
+            weapons::infusions_for("Dragonslayers_Crescent_Axe").len()
+        );
+        assert!(rows.windows(2).all(|pair| pair[0].damage >= pair[1].damage));
     }
 
     #[test]

@@ -588,3 +588,32 @@ test_allow_the_sed_loop_with_a_frida_verdict if {
 test_deny_the_sed_loop_when_telemetry_licensed_a_different_crate if {
 	denied(bash_event("sed -i 's/a/b/' crates/er-title-flow/src/lib.rs", PROVEN_TELEMETRY))
 }
+
+# A rebase conflict resolved by keeping lines from either side writes nothing new, so it needs no
+# measurement. Adding any line that was not in the conflicted hunk still does.
+conflict_edit(old, new) := {
+	"hook_event_name": "PreToolUse",
+	"tool_name": "Edit",
+	"tool_input": {
+		"file_path": "crates/ds2-build-recommender-core/src/backend.rs",
+		"old_string": old,
+		"new_string": new,
+	},
+	"signals": {"frida_evidence": UNPROVEN_SPENT},
+}
+
+CONFLICT := "<<<<<<< HEAD\n    /// grip doc\n=======\n    fn best_infusion() {}\n    /// old doc\n>>>>>>> 6762901 (feat: x)"
+
+test_conflict_resolution_keeping_existing_lines_is_allowed if {
+	count(guard.deny) == 0 with input as conflict_edit(CONFLICT, "    fn best_infusion() {}\n    /// grip doc")
+}
+
+test_conflict_resolution_adding_a_new_line_is_denied if {
+	some d in guard.deny with input as conflict_edit(CONFLICT, "    fn best_infusion() {}\n    unsafe { poke() }")
+	d.rule_id == RULE
+}
+
+test_edit_without_conflict_markers_is_still_denied if {
+	some d in guard.deny with input as conflict_edit("    /// a\n    /// b", "    /// a")
+	d.rule_id == RULE
+}
