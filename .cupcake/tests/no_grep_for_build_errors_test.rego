@@ -117,6 +117,13 @@ test_running_a_build_script_is_still_denied if {
 	denied("bash scripts/build-all.sh | grep -c error")
 }
 
+# A script whose name merely CONTAINS a verb inside a longer word runs no gate: "builds" is not
+# "build". Its --help piped into grep is a help-text search.
+test_verb_inside_a_longer_word_is_allowed if {
+	not denied("python3 scripts/ds2-builds-recommend.py --help | grep -A2 best-infusion")
+	not denied("scripts/ds2-builds-scrape.py --help | grep rate")
+}
+
 # An interpreter in command position promotes its script argument to the program.
 test_interpreter_invoked_gate_is_still_denied if {
 	denied("python3 scripts/check-cupcake-wasm-builtins.py | grep -i fail")
