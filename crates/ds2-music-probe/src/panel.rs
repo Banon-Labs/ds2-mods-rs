@@ -43,12 +43,24 @@ struct PanelState {
     filter: String,
     /// The slider's value while it is being dragged, in seconds.
     seek_drag: Option<f32>,
+    /// The window's position and size on the last frame drawn.
+    last: Option<([f32; 2], [f32; 2])>,
 }
 
 static STATE: Mutex<PanelState> = Mutex::new(PanelState {
     filter: String::new(),
     seek_drag: None,
+    last: None,
 });
+
+/// Set by opening the panel: the next frame puts the window back at its default position.
+static RESET: AtomicBool = AtomicBool::new(true);
+
+/// The display height the window's width and text size are written for; taller displays scale up.
+const REFERENCE_HEIGHT: f32 = 1080.0;
+
+/// Gap between the window and the display's top-left corner at its default position.
+const MARGIN: f32 = 40.0;
 
 /// Register the panel and its key with `ds2-overlay`. `ds2-overlay` must already be started.
 /// `false` has been logged.
@@ -141,6 +153,7 @@ fn on_frame() {
 fn open() {
     ds2_input_harness::hold(true);
     ds2_overlay::panels::use_overlay_mouse_for_imgui(true);
+    RESET.store(true, Ordering::Release);
     OPEN.store(true, Ordering::Release);
     log(format_args!("{LOG_PREFIX} panel open"));
 }
@@ -165,24 +178,46 @@ fn draw(ui: &Ui) {
     };
     let mut open = true;
     let display = ui.io().display_size;
-    // Sized to its content, and never larger than the screen it is drawn on.
-    ui.window("Music")
-        .position([40.0, 40.0], Condition::FirstUseEver)
-        .size_constraints([WINDOW_WIDTH, 0.0], [WINDOW_WIDTH, display[1] - 80.0])
+    // Text and width follow the display: the render target can be 4K, where 16 px text is tiny.
+    let scale = (display[1] / REFERENCE_HEIGHT).max(1.0);
+    let width = (WINDOW_WIDTH * scale).min(display[0]);
+    // Never lost: opening puts it back at the default, and every frame keeps it inside the display.
+    // The window that prompted this sat at x=1901 of a 1920-wide display, out of reach.
+    let reset = RESET.swap(false, Ordering::AcqRel);
+    let place = if reset {
+        Some([MARGIN * scale, MARGIN * scale])
+    } else {
+        state.last.and_then(|([x, y], [w, h])| {
+            let clamped = [
+                x.clamp(0.0, (display[0] - w).max(0.0)),
+                y.clamp(0.0, (display[1] - h.min(display[1])).max(0.0)),
+            ];
+            (clamped != [x, y]).then_some(clamped)
+        })
+    };
+    let mut window = ui
+        .window("Music")
+        .position([MARGIN * scale, MARGIN * scale], Condition::FirstUseEver)
+        .size_constraints([width, 0.0], [width, display[1] - 2.0 * MARGIN * scale])
         .always_auto_resize(true)
-        .opened(&mut open)
-        .build(|| {
-            let frame = FRAMES.fetch_add(1, Ordering::Relaxed);
-            if frame.is_multiple_of(60) {
-                log(format_args!(
-                    "{LOG_PREFIX} panel window pos={:?} size={:?} display={display:?}",
-                    ui.window_pos(),
-                    ui.window_size()
-                ));
-            }
-            let _wrap = ui.push_text_wrap_pos();
-            body(ui, &snapshot, &mut state);
-        });
+        .opened(&mut open);
+    if let Some(place) = place {
+        window = window.position(place, Condition::Always);
+    }
+    window.build(|| {
+        ui.set_window_font_scale(scale);
+        let (pos, size) = (ui.window_pos(), ui.window_size());
+        state.last = Some((pos, size));
+        let frame = FRAMES.fetch_add(1, Ordering::Relaxed);
+        if frame.is_multiple_of(60) || place.is_some() {
+            log(format_args!(
+                "{LOG_PREFIX} panel window pos={pos:?} size={size:?} display={display:?} \
+                 scale={scale} reset={reset} placed={place:?}"
+            ));
+        }
+        let _wrap = ui.push_text_wrap_pos();
+        body(ui, &snapshot, &mut state);
+    });
     if !open {
         close();
     }
