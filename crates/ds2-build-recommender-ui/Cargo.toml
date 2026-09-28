@@ -1,0 +1,34 @@
+# The PvP build recommender's in-game panel: the Windows half.
+#
+# Draws `ds2-build-recommender-core`'s state as one of `ds2-overlay`'s imgui panels over the pause
+# menu, and hands a generated build to `ds2-build-import` to apply. Every decision the panel makes
+# without a game is the core crate's and is tested on the host; this crate draws, reads the keyboard
+# and pad, and routes presses.
+#
+# Every runtime dependency is target-gated, so a host `cargo test` compiles none of it.
+[package]
+name = "ds2-build-recommender-ui"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "ds2_build_recommender_ui"
+
+[dependencies]
+ds2-build-recommender-core.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+# The grant path: `queue_generated` hands the build to the same `apply` a soulsplanner link uses.
+ds2-build-import.workspace = true
+ds2-build-import-core.workspace = true
+ds2-overlay.workspace = true
+# `hold` keeps the pause menu underneath still while the panel takes the keyboard and pad.
+ds2-input-harness.workspace = true
+# The panel's `imgui::Ui`, and the `windows` re-export it reads the keyboard and pad through.
+hudhook.workspace = true
+
+[lints]
+workspace = true
