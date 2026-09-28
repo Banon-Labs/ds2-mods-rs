@@ -14,7 +14,7 @@
 //! find out from an allocator panic during a menu open; a list refused the third at registration,
 //! with the numbers, before anything was hooked.
 //!
-//! **That ceiling is now [`ds2_menu_row::MAX_ADDED_ROWS`] = 12 and all four rows fit**, because
+//! **That ceiling is now [`ds2_menu_row::MAX_ADDED_ROWS`] = 12 and all five rows fit**, because
 //! `ds2-menu-row` stopped storing its rows in the game's two fixed vectors -- see that crate's
 //! [`api`](ds2_menu_row) docs. The list stays, and so does the refusal: the bound is still the
 //! game's (the grid's layout bind stops looking after fifteen rows), and the next row somebody adds
@@ -61,7 +61,7 @@ pub const KEY_ENABLED: &str = "enabled";
 
 /// A row that can be put on the pause menu's System tab.
 ///
-/// Four variants against what used to be two slots, which is the whole reason [`MenuRowConfig`]
+/// Five variants against what used to be two slots, which is the whole reason [`MenuRowConfig`]
 /// exists -- and they all fit now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Row {
@@ -73,6 +73,8 @@ pub enum Row {
     LoadCharacterFromFile,
     /// Ask the game to save, then copy the container to a file the player names.
     SaveGameToFile,
+    /// Open the `PvP` build recommender panel. See `ds2_build_recommender_ui`.
+    BuildRecommender,
 }
 
 impl Row {
@@ -83,6 +85,7 @@ impl Row {
             Self::LoadBuildFromUrl => "load-build-from-url",
             Self::LoadCharacterFromFile => "load-character-from-file",
             Self::SaveGameToFile => "save-game-to-file",
+            Self::BuildRecommender => "build-recommender",
         }
     }
 }
@@ -98,10 +101,11 @@ impl Row {
 ///
 /// A `rows` list still says otherwise. This is the recommended order, not a policy -- and not the
 /// default: a config that names no rows gets none. See [`Source::default`].
-pub const EVERY_ROW: [Row; 4] = [
+pub const EVERY_ROW: [Row; 5] = [
     Row::LoadBuildFromUrl,
     Row::LoadCharacterFromFile,
     Row::SaveGameToFile,
+    Row::BuildRecommender,
     Row::QuitToDesktop,
 ];
 
@@ -342,13 +346,13 @@ mod tests {
         }
     }
 
-    /// All four rows fit. This test used to assert the opposite -- that naming four rows kept two
+    /// All five rows fit. This test used to assert the opposite -- that naming four rows kept two
     /// and refused two -- and the whole point of raising the ceiling was to stop that being true.
     #[test]
     fn every_row_this_table_knows_fits_at_once() {
         let config = MenuRowConfig::from_text(
             "[menu_row]\nrows = [\"quit-to-desktop\", \"load-build-from-url\", \
-             \"save-game-to-file\", \"load-character-from-file\"]\n",
+             \"save-game-to-file\", \"load-character-from-file\", \"build-recommender\"]\n",
         );
         assert_eq!(
             config.rows,
@@ -357,6 +361,7 @@ mod tests {
                 Row::LoadBuildFromUrl,
                 Row::SaveGameToFile,
                 Row::LoadCharacterFromFile,
+                Row::BuildRecommender,
             ]
         );
         assert!(config.overflow.is_empty());
@@ -488,7 +493,7 @@ mod tests {
     /// Every row the table knows fits on the tab at once, so the shipped list is not truncated.
     #[test]
     fn every_row_fits_under_the_ceiling() {
-        assert_eq!(EVERY_ROW.len(), 4);
+        assert_eq!(EVERY_ROW.len(), 5);
         assert!(EVERY_ROW.len() <= ds2_menu_row::MAX_ADDED_ROWS);
     }
 

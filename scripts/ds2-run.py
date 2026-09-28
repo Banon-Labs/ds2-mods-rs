@@ -185,6 +185,18 @@ CONFIG_LINE_PREFIX = "ds2-loader: config"
 #: Rust source, because a rename on one side alone turns every run into a silent "probe off".
 CONFIG_NAME = "ds2-mods.toml"
 
+#: Mirrors `DATA_FILE_NAME` in `crates/ds2-build-recommender-core/src/corpus.rs`. The Build
+#: Recommender panel reads it from beside the game when it installs, and answers from its stub --
+#: fixed placeholder numbers -- when it is not there. `--selftest` pins the spelling to the crate.
+RECOMMENDER_DATA_NAME = "ds2-build-recommender.dat"
+
+#: Where `scripts/ds2-builds-recommend.py --export-backend` writes that file (its `BACKEND_DATA`),
+#: from the build corpus and item tables cached under `~/.cache`. Staged from here every run.
+RECOMMENDER_DATA_SOURCE = Path.home() / ".cache" / "ds2-builds" / RECOMMENDER_DATA_NAME
+
+#: What writes it when it is missing. `--selftest` checks the script still has the flag.
+RECOMMENDER_EXPORT = ["scripts/ds2-builds-recommend.py", "--export-backend"]
+
 #: The config the release package ships. `--release-config` stages this file verbatim instead of
 #: writing one from the flags, so a run can show a player's game rather than a harness arm.
 RELEASE_CONFIG = REPO_ROOT / ".github" / "dist-ds2-mods.toml"
@@ -253,6 +265,7 @@ MENU_ROW_ROW_NAMES = (
     "load-build-from-url",
     "load-character-from-file",
     "save-game-to-file",
+    "build-recommender",
     "quit-to-desktop",
 )
 
@@ -521,6 +534,14 @@ SECOND_SIN_ARCHIVE = (
 SECOND_SIN_PINS: dict[str, str] = {
     "ds2le_atmosphere_presets/atmospheres_extended.ini":
         "edaf06bb9263ae471b0839b95f1b4d936b5eea4b8077fd920937fb592059129a",
+}
+#: The engine archive's own copy of each Second Sin pin. A pinned file holding this was put back by
+#: an engine unpack and needs Second Sin again; one holding anything else was saved from the
+#: engine's F1 menu. On 2026-09-27 a launch took an owner's saved presets for a broken install and
+#: unpacked Second Sin over them.
+ENGINE_SHIPPED_PRESETS: dict[str, str] = {
+    "ds2le_atmosphere_presets/atmospheres_extended.ini":
+        "8e680e8bd3f836836a6366fe67109a44e10ee056ade6107c01aa162b5c738615",
 }
 #: Where the engine writes its log. A fresh one after a launch is the proof it loaded.
 LIGHTING_ENGINE_LOG = "DS2LE.log"
@@ -2629,6 +2650,27 @@ def stage() -> tuple[Path, str]:
     return staged, sha256(staged)
 
 
+def stage_recommender_data(game_dir: Path) -> str:
+    """Copy the Build Recommender's data file beside the game; return what happened, for the log.
+
+    Missing, it is exported first (about fifteen seconds, from the caches under `~/.cache`). When
+    that cannot be done either, whatever is already staged is left alone and the run says so: the
+    DLL's own `ds2-build-recommender: ... backend=` line is what tells which one the panel read.
+    """
+    staged = game_dir / RECOMMENDER_DATA_NAME
+    if not RECOMMENDER_DATA_SOURCE.is_file():
+        print(f"[stage] no {RECOMMENDER_DATA_SOURCE}; exporting it")
+        export = [sys.executable, str(REPO_ROOT / RECOMMENDER_EXPORT[0]), *RECOMMENDER_EXPORT[1:],
+                  str(RECOMMENDER_DATA_SOURCE)]
+        result = subprocess.run(export, cwd=REPO_ROOT, check=False)
+        if result.returncode != 0 or not RECOMMENDER_DATA_SOURCE.is_file():
+            state = "the one already there" if staged.is_file() else "none, so its stub"
+            return (f"build recommender data NOT staged (the export failed); the panel reads "
+                    f"{state}")
+    shutil.copyfile(RECOMMENDER_DATA_SOURCE, staged)
+    return f"{staged}  sha256 {sha256(staged)}  (from {RECOMMENDER_DATA_SOURCE})"
+
+
 LAUNCHER_BUILD = [
     "cargo", "xwin", "build", "--release", "--target", "x86_64-pc-windows-msvc", "-p", "ds2-launcher",
 ]
@@ -2864,7 +2906,14 @@ def ensure_lighting_engine_installed(
     engine_wrong = pins_mismatched(game_dir, LIGHTING_ENGINE_PINS)
     if dxgi != game_dir / "dxgi.dll" or (dxgi.is_file() and sha256(dxgi) == DXGI_NO_F6_SHA256):
         engine_wrong.pop("dxgi.dll", None)
-    presets_wrong = pins_mismatched(game_dir, SECOND_SIN_PINS)
+    # The engine's F1 menu saves preset edits into Second Sin's own file, so a changed preset is
+    # the owner's work, not a broken install. Only a missing file, or the engine's copy of it (which
+    # an engine unpack leaves behind), puts Second Sin back.
+    presets_wrong = {
+        member: why for member, why in pins_mismatched(game_dir, SECOND_SIN_PINS).items()
+        if engine_wrong or why == "missing"
+        or sha256(game_dir / member) == ENGINE_SHIPPED_PRESETS.get(member)
+    }
     steps = []
     if engine_wrong:
         steps.append((
@@ -3039,6 +3088,12 @@ def dry_run(
             print("[dry-run] staged DLL DIFFERS from the built one; a real run would replace it.")
     else:
         print(f"[dry-run] staged   <absent>  {staged}")
+    data = GAME_DIR / RECOMMENDER_DATA_NAME
+    source = (f"sha256 {sha256(RECOMMENDER_DATA_SOURCE)}" if RECOMMENDER_DATA_SOURCE.is_file()
+              else "<absent>, a real run exports it")
+    print(f"[dry-run] recommender data source {source}  {RECOMMENDER_DATA_SOURCE}")
+    print(f"[dry-run] recommender data staged "
+          f"{'sha256 ' + sha256(data) if data.is_file() else '<absent>'}  {data}")
 
     config_path = GAME_DIR / CONFIG_NAME
     if config_path.is_file():
@@ -3738,6 +3793,7 @@ def launch(
     staged, digest = stage()
     print(f"[stage] {staged}")
     print(f"[stage] sha256 {digest}")
+    print(f"[stage] {stage_recommender_data(GAME_DIR)}")
 
     # BEFORE LAUNCHING, and after staging: the DLL reads this in `DllMain`, so it has to be on
     # disk before the game starts, and it is rewritten every run so a file left over from the
@@ -4785,7 +4841,7 @@ def selftest() -> int:
         f"({MENU_ROW_LOG_PREFIX})",
     )
 
-    # THE ROW LIST. Four names against twelve slots, so the count and every spelling are checked
+    # THE ROW LIST. Five names against twelve slots, so the count and every spelling are checked
     # here rather than discovered in a log after a launch. The rows key is the only key in this file
     # whose value is a LIST, and the reason it started as one was the game's item vector; see
     # `MENU_ROW_MAX_ADDED` for what replaced that ceiling. This script no longer writes it -- the
@@ -5263,9 +5319,12 @@ def selftest() -> int:
     else:
         print(f"  skip the pinned hashes: no {SEAMLESS_ARCHIVE} on this machine")
     # The Lighting Engine pair: engine first, presets over it, and nothing when the pins match.
-    global LIGHTING_ENGINE_PINS, SECOND_SIN_PINS, TEXTURE_PACKS  # noqa -- planted, restored below
+    global LIGHTING_ENGINE_PINS, SECOND_SIN_PINS, TEXTURE_PACKS, ENGINE_SHIPPED_PRESETS  # noqa
     real_engine_pins, real_presets_pins = LIGHTING_ENGINE_PINS, SECOND_SIN_PINS
-    real_packs = TEXTURE_PACKS
+    real_packs, real_shipped = TEXTURE_PACKS, ENGINE_SHIPPED_PRESETS
+    ENGINE_SHIPPED_PRESETS = {
+        "ds2le_atmosphere_presets/a.ini": hashlib.sha256(b"engine preset").hexdigest()
+    }
     TEXTURE_PACKS = ()  # the pair alone first; the packs over it are tested after
     try:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5306,6 +5365,16 @@ def selftest() -> int:
             (game / "ds2le_atmosphere_presets/a.ini").write_bytes(b"engine preset")
             ensure_lighting_engine_installed(*args, write=True, run=fake_run)
             check(unpacked == ["presets.zip"], f"lost presets reinstall only the presets: {unpacked}")
+            unpacked.clear()
+            (game / "ds2le_atmosphere_presets/a.ini").write_bytes(b"owner's saved preset")
+            actions, problems = ensure_lighting_engine_installed(*args, write=True, run=fake_run)
+            check(not unpacked and not actions and not problems
+                  and (game / "ds2le_atmosphere_presets/a.ini").read_bytes() == b"owner's saved preset",
+                  f"presets saved from the F1 menu are kept, not reinstalled: {unpacked} {actions}")
+            (game / "ds2le_atmosphere_presets/a.ini").unlink()
+            ensure_lighting_engine_installed(*args, write=True, run=fake_run)
+            check(unpacked == ["presets.zip"], f"a missing preset file reinstalls: {unpacked}")
+            unpacked.clear()
             # --no-path-tracing parks by rename, and the next normal launch renames it back
             # without unpacking anything.
             ensure_lighting_engine_installed(*args, write=True, run=fake_run)
@@ -5416,7 +5485,7 @@ def selftest() -> int:
                   f"a pack whose archive is gone is a refusal naming it: {problems}")
     finally:
         LIGHTING_ENGINE_PINS, SECOND_SIN_PINS = real_engine_pins, real_presets_pins
-        TEXTURE_PACKS = real_packs
+        TEXTURE_PACKS, ENGINE_SHIPPED_PRESETS = real_packs, real_shipped
     check(
         pack_unpack_command(Path("i.zip"), Path("/g"), (("DS3 Icons 2.0/", "tex_override/"),))
         == ["bsdtar", "-x", "-C", "/g", "-f", "i.zip",
@@ -5454,7 +5523,20 @@ def selftest() -> int:
     check("dxgi=n,b" in DLL_OVERRIDE.split(";") and "dinput8=n,b" in DLL_OVERRIDE.split(";"),
           "the launch override loads both proxies native-first")
 
-    staged_names = {STAGED_DLL_NAME, STAGED_LAUNCHER_NAME, CONFIG_NAME, LOG_NAME}
+    check(
+        f'"{RECOMMENDER_DATA_NAME}"'
+        in (REPO_ROOT / "crates/ds2-build-recommender-core/src/corpus.rs").read_text(encoding="utf-8"),
+        f"the Build Recommender panel reads the data file this stages ({RECOMMENDER_DATA_NAME})",
+    )
+    recommend_src = (REPO_ROOT / RECOMMENDER_EXPORT[0]).read_text(encoding="utf-8")
+    check(
+        f'"{RECOMMENDER_EXPORT[1]}"' in recommend_src
+        and f'BACKEND_DATA_NAME = "{RECOMMENDER_DATA_NAME}"' in recommend_src
+        and 'BACKEND_DATA = Path.home() / ".cache/ds2-builds" / BACKEND_DATA_NAME' in recommend_src
+        and RECOMMENDER_DATA_SOURCE == Path.home() / ".cache/ds2-builds" / RECOMMENDER_DATA_NAME,
+        "the recommender data is staged from where ds2-builds-recommend.py --export-backend writes it",
+    )
+    staged_names = {STAGED_DLL_NAME, STAGED_LAUNCHER_NAME, CONFIG_NAME, LOG_NAME, RECOMMENDER_DATA_NAME}
     check(
         not {Path(name).parts[0].lower() for name in staged_names}
         & {name.lower() for name in THIRD_PARTY_PATHS},

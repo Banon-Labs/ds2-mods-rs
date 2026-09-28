@@ -520,6 +520,25 @@ name = "ds2-build-import-core"
 version = "0.1.0"
 
 [[package]]
+name = "ds2-build-recommender-core"
+version = "0.1.0"
+dependencies = [
+ "ds2-build-import-core",
+]
+
+[[package]]
+name = "ds2-build-recommender-ui"
+version = "0.1.0"
+dependencies = [
+ "ds2-build-import",
+ "ds2-build-import-core",
+ "ds2-build-recommender-core",
+ "ds2-input-harness",
+ "ds2-overlay",
+ "hudhook",
+]
+
+[[package]]
 name = "ds2-build-url-core"
 version = "0.1.0"
 dependencies = [
@@ -661,6 +680,7 @@ dependencies = [
  "dearxan",
  "ds2-boot-timeline",
  "ds2-build-import",
+ "ds2-build-recommender-ui",
  "ds2-continue",
  "ds2-crash-logging-core",
  "ds2-dialog-skip",
