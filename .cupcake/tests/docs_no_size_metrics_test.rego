@@ -154,6 +154,27 @@ test_allow_hex_offsets if {
 	))
 }
 
+# Measured 2026-09-27: a disassembly listing in a doc comment was read as "5 tests" -- the last
+# digit of the hex address, then whitespace, then the x86 `test` mnemonic.
+test_allow_disassembly_test_instruction_after_a_hex_address if {
+	not denied(edit_event(
+		"crates/ds2-rva/src/lib.rs",
+		"/// 0x1401bf9a5  test byte [gm+0x24b2],0x4",
+	))
+}
+
+test_allow_disassembly_test_instruction_on_registers if {
+	not denied(edit_event("crates/ds2-rva/src/lib.rs", "/// +12  test eax,eax"))
+}
+
+test_allow_hex_digit_tail_before_the_word_tests if {
+	not denied(edit_event("crates/ds2-rva/src/lib.rs", "/// see 0xa5 tests in the table at +0x10"))
+}
+
+test_deny_test_count_beside_a_hex_offset if {
+	denied(edit_event("crates/ds2-rva/src/lib.rs", "/// `+0x24b2` is covered by 25 host tests."))
+}
+
 # --------------------------------------------- allow: everything outside docs
 
 test_allow_line_count_in_rust_code if {

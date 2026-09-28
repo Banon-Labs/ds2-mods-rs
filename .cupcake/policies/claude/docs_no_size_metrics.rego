@@ -129,15 +129,32 @@ doc_target := file_path if {
 	authoring_tool
 } else := concat(", ", shell_doc_targets)
 
-# THE FOUR BANNED SHAPES.
+# THE BANNED SHAPES (the test count has its own rule below).
 #
 # Each requires a DIGIT bound to the unit, so "the two rows", "every line of the table" and "the
 # tests below" all stay legal -- the ban is on quantifying an artifact, not on naming one.
 banned_patterns := {
 	"a line count": `(?i)(?:~|about |approximately )?\d[\d,_]*\s*(?:-\s*)?lines?\b`,
 	"a file size": `(?i)\d[\d,._]*\s*(?:KB|MB|GB|TB|KiB|MiB|GiB)\b`,
-	"a test count": `(?i)\d[\d,_]*\s+(?:\w+\s+)?(?:tests?|checks?|assertions?|cases?)\b`,
 	"a beads issue id": `(?i)\bds2-mods-rs-[a-z0-9]{3,}\b`,
+}
+
+# A TEST COUNT is its own rule because it needs two refusals the other shapes do not. Measured
+# 2026-09-27: it blocked a `///` disassembly listing, `0x1401bf9a5  test byte [gm+0x24b2],0x4` --
+# the address's last hex digit, whitespace and the x86 `test` mnemonic read as "5 tests". This repo
+# documents disassembly in doc comments everywhere.
+#   1. The number must stand alone: not preceded by a letter, digit or `_`, so the tail of a hex
+#      literal (`0x...a5`) or of an identifier is never a count.
+#   2. A line carrying an x86 `test` instruction -- `test` followed by an operand size or a
+#      register -- is disassembly, not a claim about a test suite.
+count_of_tests_pattern := `(?i)(?:^|[^0-9a-z_])\d[\d,_]*\s+(?:\w+\s+)?(?:tests?|checks?|assertions?|cases?)\b`
+
+disasm_test_pattern := `(?i)\btest\s+(?:byte|word|dword|qword|xmmword|ptr|[re]?[abcd]x|[abcd][lh]|[re]?(?:si|di|sp|bp)l?|r(?:[89]|1[0-5])[bwd]?)\b`
+
+violation contains {"kind": "a test count", "line": trim_space(line)} if {
+	some line in doc_lines
+	regex.match(count_of_tests_pattern, line)
+	not regex.match(disasm_test_pattern, line)
 }
 
 # `N bytes` is the one shape that is sometimes a real ABI fact (a struct's size, an AES block, a
