@@ -104,6 +104,16 @@ pub fn any_wants_input() -> bool {
     })
 }
 
+/// Whether imgui's own mouse position is replaced by [`mouse`]. Off by default, so the panels that
+/// hit-test [`mouse`] themselves see imgui exactly as before.
+static IMGUI_MOUSE: AtomicBool = AtomicBool::new(false);
+
+/// Make imgui's widgets use the corrected cursor, for a panel drawn with imgui's own sliders and
+/// buttons. The panel turns it on when it opens and off when it closes.
+pub fn use_overlay_mouse_for_imgui(on: bool) {
+    IMGUI_MOUSE.store(on, Ordering::Release);
+}
+
 /// The one render loop hudhook holds.
 struct Panels;
 
@@ -120,6 +130,26 @@ impl ImguiRenderLoop for Panels {
         log(format_args!(
             "panels: hudhook render loop initialized (font {FONT_SIZE_PX}px)"
         ));
+    }
+
+    /// Hand imgui the overlay's cursor while a panel built from imgui widgets asks for it.
+    ///
+    /// hudhook queues the cursor Wine reports, which is short by screen over window on a stretched
+    /// fullscreen window (see [`mouse`]); a panel drawing imgui widgets rather than hit-testing
+    /// [`mouse`] itself would have every slider and button offset. Adding the corrected position
+    /// last makes it the one imgui uses, and turning the trickle queue off applies it on the same
+    /// frame as a button press queued before it, so the press lands where the pointer is.
+    fn before_render<'a>(
+        &'a mut self,
+        ctx: &mut Context,
+        _render_context: &'a mut dyn RenderContext,
+    ) {
+        let on = IMGUI_MOUSE.load(Ordering::Acquire);
+        let io = ctx.io_mut();
+        io.config_input_trickle_event_queue = !on;
+        if on && let Some(position) = mouse() {
+            io.add_mouse_pos_event(position);
+        }
     }
 
     fn render(&mut self, ui: &mut Ui) {
