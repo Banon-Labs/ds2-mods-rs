@@ -331,6 +331,7 @@ impl Panel {
             Control::SimilarK => format!("neighbours={}", state.similar_k),
             Control::Bleed => format!("bleed-only={}", state.status.bleed),
             Control::Poison => format!("poison-only={}", state.status.poison),
+            Control::BestInfusion => format!("best infusion (weapon={})", state.weapon.is_some()),
             Control::Run => format!("run (ready={})", state.ready()),
             Control::Results => format!("results scroll={}", self.results_scroll),
             Control::Generate => "generate build".to_owned(),
@@ -377,6 +378,7 @@ impl Panel {
             Control::TwoHand => Some(Action::ToggleTwoHand),
             Control::Bleed => Some(Action::ToggleBleed),
             Control::Poison => Some(Action::TogglePoison),
+            Control::BestInfusion => self.state.weapon.is_some().then_some(Action::BestInfusion),
             Control::Run => self.state.ready().then_some(Action::Run),
             Control::Results => None,
             Control::Generate => Some(Action::Generate),
@@ -1789,7 +1791,7 @@ fn draw_options(panel: &Panel, canvas: &mut Canvas<'_>, x: f32, y: f32) -> f32 {
                 "Best infusion",
                 false,
                 panel.state.weapon.is_some().then_some(Action::BestInfusion),
-                None,
+                Some(Control::BestInfusion),
             ) + GAP;
             let text = if panel.state.weapon.is_some() {
                 format!(

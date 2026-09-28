@@ -48,6 +48,8 @@ pub enum Control {
     Bleed,
     /// Similar builds: poison only.
     Poison,
+    /// Optimize for weapon: rank every infusion of the chosen weapon.
+    BestInfusion,
     /// Run.
     Run,
     /// The results table, to scroll it.
@@ -118,7 +120,7 @@ pub fn layout(shape: Shape) -> Vec<Vec<Control>> {
             Control::Window,
             Control::RawAr,
         ],
-        Mode::OptimizeForWeapon => Vec::new(),
+        Mode::OptimizeForWeapon => vec![Control::BestInfusion],
         Mode::MinimumForWeapon => vec![Control::TwoHand],
         Mode::SimilarBuilds => vec![Control::SimilarK, Control::Bleed, Control::Poison],
     };
@@ -402,11 +404,14 @@ mod tests {
             walk(&rows, options, &[Dir::Right, Dir::Right, Dir::Right]),
             Control::Run
         );
+        // Measured on c7afba5: in Optimize for weapon, Down from the mode tab went straight to
+        // Run, and the Best infusion button beside it answered to the mouse only.
         let rows = layout(shape(Mode::OptimizeForWeapon));
         assert_eq!(
             step(&rows, Control::Mode(Mode::OptimizeForWeapon), Dir::Down),
-            Control::Run
+            Control::BestInfusion
         );
+        assert_eq!(step(&rows, Control::BestInfusion, Dir::Right), Control::Run);
     }
 
     #[test]
@@ -415,8 +420,9 @@ mod tests {
         assert_eq!(resolve(&rows, Control::Window), Control::Run);
         assert_eq!(resolve(&rows, Control::Results), Control::Run);
         assert_eq!(resolve(&rows, Control::ShowToggle), Control::Generate);
-        // And a step from a vanished control starts from its fallback.
-        assert_eq!(step(&rows, Control::Window, Dir::Down), Control::Generate);
+        // And a step from a vanished control starts from its fallback: Run, the right-hand end of
+        // Optimize for weapon's options row, so Down lands at the right-hand end of the footer.
+        assert_eq!(step(&rows, Control::Window, Dir::Down), Control::Apply);
     }
 
     #[test]
