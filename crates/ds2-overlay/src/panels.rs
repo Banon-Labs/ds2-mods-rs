@@ -18,6 +18,7 @@ use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use hudhook::imgui::{Context, FontConfig, FontSource, Io, Ui};
+use hudhook::windows::Win32::Graphics::Direct3D11::{D3D11_TEXTURE2D_DESC, ID3D11Texture2D};
 use hudhook::windows::Win32::Graphics::Dxgi::IDXGISwapChain;
 use hudhook::windows::core::Interface;
 use hudhook::{ImguiRenderLoop, MessageFilter, RenderContext};
@@ -64,6 +65,9 @@ static LOOP_SET: AtomicBool = AtomicBool::new(false);
 /// `render_shared` failures, for the log's back-off.
 static ERRORS: AtomicU64 = AtomicU64::new(0);
 
+/// Frames drawn with the corrected cursor, for the once-a-second diagnostic line.
+static IMGUI_MOUSE_FRAMES: AtomicU64 = AtomicU64::new(0);
+
 /// imgui's default font rasterises at 13 px; read across a room, it wants 25% more.
 pub const FONT_SIZE_PX: f32 = 13.0 * 1.25;
 
@@ -104,6 +108,16 @@ pub fn any_wants_input() -> bool {
     })
 }
 
+/// Whether imgui's own mouse position is replaced by [`mouse`]. Off by default, so the panels that
+/// hit-test [`mouse`] themselves see imgui exactly as before.
+static IMGUI_MOUSE: AtomicBool = AtomicBool::new(false);
+
+/// Make imgui's widgets use the corrected cursor, for a panel drawn with imgui's own sliders and
+/// buttons. The panel turns it on when it opens and off when it closes.
+pub fn use_overlay_mouse_for_imgui(on: bool) {
+    IMGUI_MOUSE.store(on, Ordering::Release);
+}
+
 /// The one render loop hudhook holds.
 struct Panels;
 
@@ -120,6 +134,44 @@ impl ImguiRenderLoop for Panels {
         log(format_args!(
             "panels: hudhook render loop initialized (font {FONT_SIZE_PX}px)"
         ));
+    }
+
+    /// Hand imgui the overlay's cursor while a panel built from imgui widgets asks for it.
+    ///
+    /// hudhook queues the cursor Wine reports, which is short by screen over window on a stretched
+    /// fullscreen window (see [`mouse`]); a panel drawing imgui widgets rather than hit-testing
+    /// [`mouse`] itself would have every slider and button offset. Adding the corrected position
+    /// last makes it the one imgui uses, and turning the trickle queue off applies it on the same
+    /// frame as a button press queued before it, so the press lands where the pointer is.
+    fn before_render<'a>(
+        &'a mut self,
+        ctx: &mut Context,
+        _render_context: &'a mut dyn RenderContext,
+    ) {
+        let on = IMGUI_MOUSE.load(Ordering::Acquire);
+        let io = ctx.io_mut();
+        io.config_input_trickle_event_queue = !on;
+        // hudhook sizes imgui from the swap chain's description; the texture it draws into can be
+        // larger (see `measure_mouse`), and then imgui's viewport and every window's clip end part
+        // way across the screen. Imgui's display is the render target, and so is `mouse`.
+        if let Some([width, height]) = target_size() {
+            io.display_size = [width as f32, height as f32];
+        }
+        if on {
+            if let Some(position) = mouse() {
+                io.add_mouse_pos_event(position);
+            }
+            let now = IMGUI_MOUSE_FRAMES.fetch_add(1, Ordering::Relaxed);
+            if now.is_multiple_of(60) {
+                log(format_args!(
+                    "panels: imgui display_size={:?} framebuffer_scale={:?} target={:?} mouse={:?}",
+                    io.display_size,
+                    io.display_framebuffer_scale,
+                    target_size(),
+                    mouse()
+                ));
+            }
+        }
     }
 
     fn render(&mut self, ui: &mut Ui) {
@@ -149,19 +201,16 @@ impl ImguiRenderLoop for Panels {
 /// cursor could not be read.
 static MOUSE: AtomicU64 = AtomicU64::new(u64::MAX);
 
-/// Set once the stretch decision has been logged.
-static STRETCH_LOGGED: AtomicBool = AtomicBool::new(false);
-
 /// Set once the window and back-buffer sizes have been logged.
 static SIZES_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// The cursor in the pixels panels draw in, or `None` when it could not be read this frame.
 ///
-/// Use this, not `ui.io().mouse_pos`, for hit tests. hudhook feeds imgui the cursor Wine reports,
-/// and with the game's window stretched over a larger screen that is short by screen over window:
-/// the player saw the highlighted row at 0.59 of the pointer's position (2026-09-27).
-/// This maps the cursor into the window's client area, undoes a stretched fullscreen window (see
-/// `measure_mouse`), and scales by back buffer over client.
+/// Use this, not `ui.io().mouse_pos`, for hit tests. hudhook feeds imgui the cursor in the window's
+/// client pixels, and the render target imgui draws into can be larger than the client area: the
+/// player saw the highlighted row at 0.59 of the pointer's position (2026-09-27), 2260/3840. This
+/// maps the cursor into the client area and scales it by render target over client (see
+/// `measure_mouse`).
 #[must_use]
 pub fn mouse() -> Option<[f32; 2]> {
     let raw = MOUSE.load(Ordering::Acquire);
@@ -195,59 +244,54 @@ fn measure_mouse(chain: &IDXGISwapChain) {
     };
     let (client_w, client_h) = (client.right - client.left, client.bottom - client.top);
     let (buffer_w, buffer_h) = (desc.BufferDesc.Width, desc.BufferDesc.Height);
+    // The texture imgui is drawn into. The swap chain's description is not it: on 2026-09-28 it
+    // said 1920x1080 while the Music window dragged to imgui x=1900 showed at the middle of a
+    // 3840-wide screen, so imgui was drawing 1:1 into the left half of a larger target. This is
+    // also what the 2026-09-27 "0.59 of the pointer" was: 2260/3840, a 2260-wide window over a
+    // 3840-wide target.
+    // SAFETY: a live swap chain, borrowed for this `Present`; `GetBuffer(0)` adds a reference the
+    // returned interface releases when it drops, and `GetDesc` fills a local.
+    let target = unsafe {
+        chain.GetBuffer::<ID3D11Texture2D>(0).ok().map(|texture| {
+            let mut texture_desc = D3D11_TEXTURE2D_DESC::default();
+            texture.GetDesc(&mut texture_desc);
+            [texture_desc.Width, texture_desc.Height]
+        })
+    }
+    .filter(|[w, h]| *w > 0 && *h > 0)
+    .unwrap_or([buffer_w, buffer_h]);
+    TARGET.store(
+        (u64::from(target[0]) << 32) | u64::from(target[1]),
+        Ordering::Release,
+    );
     if !SIZES_LOGGED.swap(true, Ordering::AcqRel) {
         log(format_args!(
-            "panels: window client {client_w}x{client_h}, back buffer {buffer_w}x{buffer_h} -- \
-             the mouse is scaled by the ratio"
+            "panels: window client {client_w}x{client_h}, swap chain says {buffer_w}x{buffer_h}, \
+             render target {}x{} -- imgui's display and the mouse are the render target's",
+            target[0], target[1]
         ));
     }
     if !read || client_w <= 0 || client_h <= 0 {
         return;
     }
-    // STRETCHED FULLSCREEN. Measured 2026-09-27: Wine reported a 3840x2160 screen and the game's
-    // window as 2260x1272 at the origin, and that window filled the monitor. The panel's pointer
-    // then sat at 0.59 of the real one on both axes -- 2260/3840 and 1272/2160 -- so the cursor
-    // Wine hands back is short by screen over window. A window at the origin with the screen's
-    // shape is taken to be stretched that way; any other window is used as measured.
-    let (screen_w, screen_h) = {
-        use hudhook::windows::Win32::UI::WindowsAndMessaging::{
-            GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN,
-        };
-        // SAFETY: `GetSystemMetrics` reads a system value and touches no memory of ours.
-        unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
-    };
-    let mut origin = POINT::default();
-    // SAFETY: `origin` is a local; `window` is the swap chain's output window.
-    let at_origin =
-        unsafe { hudhook::windows::Win32::Graphics::Gdi::ClientToScreen(window, &mut origin) }
-            .as_bool()
-            && origin.x == 0
-            && origin.y == 0;
-    let same_shape =
-        i64::from(screen_w) * i64::from(client_h) - i64::from(screen_h) * i64::from(client_w);
-    let stretched = at_origin
-        && screen_w > client_w
-        && same_shape.unsigned_abs() <= u64::from(screen_w.unsigned_abs().max(1)) * 2;
-    let (stretch_x, stretch_y) = if stretched {
-        (
-            screen_w as f32 / client_w as f32,
-            screen_h as f32 / client_h as f32,
-        )
-    } else {
-        (1.0, 1.0)
-    };
-    if !STRETCH_LOGGED.swap(true, Ordering::AcqRel) {
-        log(format_args!(
-            "panels: screen {screen_w}x{screen_h}, window client {client_w}x{client_h} at the \
-             origin={at_origin} -- stretched={stretched}, cursor x{stretch_x:.3} y{stretch_y:.3}"
-        ));
-    }
-    let x = cursor.x as f32 * stretch_x * buffer_w as f32 / client_w as f32;
-    let y = cursor.y as f32 * stretch_y * buffer_h as f32 / client_h as f32;
+    // The cursor in client coordinates, scaled to the render target: Wine reports it across the
+    // window's own client area however the window is stretched on the monitor.
+    let x = cursor.x as f32 * target[0] as f32 / client_w as f32;
+    let y = cursor.y as f32 * target[1] as f32 / client_h as f32;
     MOUSE.store(
         (u64::from(x.to_bits()) << 32) | u64::from(y.to_bits()),
         Ordering::Release,
     );
+}
+
+/// The render target's size, packed `w << 32 | h`; `0` before the first frame.
+static TARGET: AtomicU64 = AtomicU64::new(0);
+
+/// The size of the texture imgui is drawn into, once a frame has been measured.
+#[must_use]
+pub fn target_size() -> Option<[u32; 2]> {
+    let raw = TARGET.load(Ordering::Acquire);
+    (raw != 0).then_some([(raw >> 32) as u32, raw as u32])
 }
 
 /// Draw one imgui frame with every panel onto the swap chain being presented. Called by the

@@ -197,13 +197,19 @@ impl D3D11RenderEngine {
             for cmd in cl.commands() {
                 match cmd {
                     DrawCmd::Elements { count, cmd_params } => {
+                        // ds2-mods-rs: the clip rect is in display units and the scissor in render
+                        // target pixels, so it is scaled by `framebuffer_scale` exactly as the
+                        // viewport in `setup_render_state` is. Upstream left it unscaled, which on
+                        // a DPI-scaled window (scale 2 on a 3840-wide target) clipped every window
+                        // at the target's horizontal centre.
                         let [cx, cy, cw, ch] = cmd_params.clip_rect;
                         let [x, y] = draw_data.display_pos;
+                        let [sx, sy] = draw_data.framebuffer_scale;
                         let r = RECT {
-                            left: (cx - x) as i32,
-                            top: (cy - y) as i32,
-                            right: (cw - x) as i32,
-                            bottom: (ch - y) as i32,
+                            left: ((cx - x) * sx) as i32,
+                            top: ((cy - y) * sy) as i32,
+                            right: ((cw - x) * sx) as i32,
+                            bottom: ((ch - y) * sy) as i32,
                         };
 
                         if r.right > r.left && r.bottom > r.top {

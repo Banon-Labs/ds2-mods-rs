@@ -105,6 +105,8 @@ ds2-weapon-sync = { path = "crates/ds2-weapon-sync" }
 # The one net session update detour that voice chat and weapon sync share.
 ds2-net-tick = { path = "crates/ds2-net-tick" }
 ds2-estus-max = { path = "crates/ds2-estus-max" }
+# Logs the music events the game starts and stops, through the FMOD import slots.
+ds2-music-probe = { path = "crates/ds2-music-probe" }
 
 # Arxan neutering. DS2 SOTFS carries 48 Arxan stubs; every MinHook detour patches a prologue
 # in `.text`, which is what their integrity checks look for. Path dep on the local checkout

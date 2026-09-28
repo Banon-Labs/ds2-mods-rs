@@ -357,6 +357,14 @@ KEY_NET_EFFECTS_ENABLED = "enabled"
 #: Mirrors `LOG_PREFIX` in `crates/ds2-net-effects/src/lib.rs`.
 NET_EFFECTS_LOG_PREFIX = "ds2-net-effects:"
 
+#: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/music_probe.rs`. The DLL's
+#: default is off; here it is ON while the region music playlist is being built, and
+#: `--no-music-probe` writes false.
+MUSIC_PROBE_SECTION = "music_probe"
+KEY_MUSIC_PROBE_ENABLED = "enabled"
+#: Mirrors `LOG_PREFIX` in `crates/ds2-music-probe/src/lib.rs`.
+MUSIC_PROBE_LOG_PREFIX = "ds2-music-probe:"
+
 #: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/soul_memory_guard.rs`. OFF by
 #: default here, matching the DLL; `--soul-memory-guard` turns it on.
 SOUL_MEMORY_GUARD_SECTION = "soul_memory_guard"
@@ -1697,6 +1705,7 @@ def config_text(
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
     net_effects: bool = False,
+    music_probe: bool = True,
 ) -> str:
     """The exact bytes of `<Game>/ds2-mods.toml` for this arm.
 
@@ -2226,6 +2235,15 @@ def config_text(
 # clock, so `--net-effects` turns that section on too. Grep the log for `{NET_EFFECTS_LOG_PREFIX}`.
 {KEY_NET_EFFECTS_ENABLED} = {str(net_effects).lower()}
 
+[{MUSIC_PROBE_SECTION}]
+# Read at startup only. `ds2-music-probe` is the region music player: F10 (or `key` here) opens the
+# Music panel, which shows the playing track, seeks it, turns its repeat off, and edits each region's
+# playlist from any music track the game ships. The playlists live in `ds2-music-playlist.toml`
+# beside the game, which this script never writes. It also logs every music event the game starts,
+# pauses and stops. It fronts four FMOD import slots. On unless `--no-music-probe`. Grep the log for
+# `{MUSIC_PROBE_LOG_PREFIX}`.
+{KEY_MUSIC_PROBE_ENABLED} = {str(music_probe).lower()}
+
 [{HP_GAUGE_SECTION}]
 # STARTUP-ONLY. The HP bar and damage number floating over other characters, drawn by
 # `ds2-hp-gauge`: the bar grown and moved to sit centred over the target, and the number grown,
@@ -2506,6 +2524,7 @@ def write_config(
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
     net_effects: bool = False,
+    music_probe: bool = True,
 ) -> tuple[Path, str]:
     """Write the config for `probe` into `directory`; return the path and what was written."""
     path = directory / CONFIG_NAME
@@ -2554,6 +2573,7 @@ def write_config(
         weapon_sync=weapon_sync,
         weapon_sync_test_cap=weapon_sync_test_cap,
         net_effects=net_effects,
+        music_probe=music_probe,
     )
     path.write_text(text, encoding="utf-8")
     return path, text
@@ -2993,6 +3013,7 @@ def dry_run(
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
     net_effects: bool = False,
+    music_probe: bool = True,
     path_tracing: bool = True,
 ) -> int:
     print("[dry-run] staging nothing, launching nothing.")
@@ -3079,6 +3100,7 @@ def dry_run(
             weapon_sync=weapon_sync,
             weapon_sync_test_cap=weapon_sync_test_cap,
             net_effects=net_effects,
+            music_probe=music_probe,
         ):
             print(f"[dry-run] config   present and ALREADY MATCHES this arm  {config_path}")
         else:
@@ -3141,6 +3163,7 @@ def dry_run(
                 weapon_sync=weapon_sync,
                 weapon_sync_test_cap=weapon_sync_test_cap,
                 net_effects=net_effects,
+                music_probe=music_probe,
             ),
             indent="[dry-run]   | ",
         )
@@ -3704,6 +3727,7 @@ def launch(
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
     net_effects: bool = False,
+    music_probe: bool = True,
     path_tracing: bool = True,
 ) -> int:
     report_environment(probe)
@@ -3776,6 +3800,7 @@ def launch(
         weapon_sync=weapon_sync,
         weapon_sync_test_cap=weapon_sync_test_cap,
         net_effects=net_effects,
+        music_probe=music_probe,
     )
     print(f"[config] {config_path}")
 
@@ -5771,6 +5796,17 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--no-music-probe",
+        dest="music_probe",
+        action="store_false",
+        default=True,
+        help=(
+            "turn off ds2-music-probe. By default it logs every music event the game starts, "
+            "pauses and stops (name, FMOD handle, map index) and the music channel's position "
+            "every few seconds. It changes no sound. OFF in the DLL without a config."
+        ),
+    )
+    parser.add_argument(
         "--item-warn",
         dest="item_warn",
         action="store_true",
@@ -6190,6 +6226,7 @@ def main() -> int:
             weapon_sync=args.weapon_sync,
             weapon_sync_test_cap=args.weapon_sync_test_cap,
             net_effects=args.net_effects,
+            music_probe=args.music_probe,
             path_tracing=args.path_tracing,
         )
     return launch(
@@ -6238,6 +6275,7 @@ def main() -> int:
         weapon_sync=args.weapon_sync,
         weapon_sync_test_cap=args.weapon_sync_test_cap,
         net_effects=args.net_effects,
+        music_probe=args.music_probe,
         path_tracing=args.path_tracing,
     )
 

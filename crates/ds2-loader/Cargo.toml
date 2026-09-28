@@ -95,6 +95,8 @@ ds2-soul-memory-guard.workspace = true
 ds2-weapon-sync.workspace = true
 # Off by default; registered on `ds2-net-tick` only when `[estus_max] enabled = true`.
 ds2-estus-max.workspace = true
+# Off by default; installed only when `[music_probe] enabled = true`.
+ds2-music-probe.workspace = true
 ds2-rva.workspace = true
 dearxan = { workspace = true, features = ["disabler", "rayon"] }
 # The facade dearxan reports its own analysis and patch timings through; see `DearxanLog`.
