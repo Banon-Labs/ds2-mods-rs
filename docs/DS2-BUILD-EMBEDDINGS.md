@@ -72,6 +72,15 @@ Attack-rating scaling and defense reduction are taken from the executable by sta
 planner sites' JS is a cross-check, not ground truth. Not done yet; the ghidra MCP did not connect
 in the session that wrote this.
 
+## Infusability
+
+REGULATION: ItemParam i32[5] -> WeaponParam `weaponReinforceId` (+0x08) -> WeaponReinforceParam
+`attrSpec` (+0xE8) -> CustomAttrSpecParam bit mask, lowest bit first: No_Infusion, Fire, Magic,
+Lightning, Dark, Poison, Bleed, Raw, Enchanted, Mundane (stone order of CustomAttrCostParam row
+100000); `attrSpec = 0` means not infusable. SoulsPlanner's per-weapon infusion lists equal this
+mask for all 323 name-matched weapons, so the recommender uses the planner's lists unchanged.
+Per-weapon masks: `~/.cache/ds2-builds/infusable.json`. EXE: no extra filter checked.
+
 ## Model
 
 EASE (Steck 2019): a closed-form item-item model fitted on the build x token matrix. It scores
@@ -126,6 +135,36 @@ in the game, so nothing goes in `crates/`.
 | Item id joins, alias table, build filter | `scripts/ds2-builds-corpus.py`, `scripts/ds2-builds-aliases.toml` |
 | Attack rating and defense formulas, after static RE | `scripts/ds2-damage.py` |
 | EASE fit, query, evaluation | `scripts/ds2-builds-recommend.py` |
+
+## Wieldability and minimum builds
+
+Every answer about a weapon or build (a minimum level, a suggested build, a recommendation) must
+satisfy all of these, both when asked in conversation and in the program:
+
+| Rule | Detail |
+| --- | --- |
+| Equip load | the build's weapons fit under **70%** equip load together with the **lightest possible** armor and rings. Ring and armor effects on stats and weight count (e.g. a ring that raises a stat can lower the levels needed; a ring's own weight counts). |
+| Equipment stats | armor and rings can add stats and armor can require stats; both are part of wieldability. |
+| Endurance | matters **only** if the build's weapons sit at the high end of stamina cost, measured by each weapon's lowest-cost basic attack against all weapons. |
+| Agility | required. Adaptability + Attunement give agility up to its hard cap. The target SL comes from the corpus's typical ADP+ATT allotment and the SL needed to reach the cap. |
+| Soul memory | ignored. |
+| Grip | anything with a STR requirement is shown two-handed only (the game halves STR two-handed). |
+| Recommended minimum | the **default answer**: requirement stats at their minimum (cheapest class and gear), and VGR/END/VIT/ATT/ADP each at the **median** of its SL bracket, iterated until the SL stays in the bracket it was floored against. AGL is an output, not a target. END is floored only for high-stamina weapons. |
+| Weapons for stats | `--weapons-for STATS`: every usable weapon+infusion (STR halved when only two-handing makes it usable, flagged "2H only") ranked by damage = sum over types of damage(AR_type, mean DEF_type of the SL bracket's corpus builds). Per weapon: the best infusion, plus the 2nd and 3rd only while within 10% of the best; never more than 3. SL = stat total - 53 (holds for every class). |
+| Options | for each free stat, the top 1/25/50/75% value in the bracket, with the remaining points spread in median proportions; plus each stat's min-max range at the clamped SL (the slider bounds). `--sl` clamps, `--json` emits it. |
+
+Agility (SITE: identical in SoulsPlanner `getAgility` and MugenMonkey `Agility`; agrees with the
+community rule investment = floor(0.75 ADP + 0.25 ATT)): `AGL = 80 + floor((3 ADP + ATT) / 4)` up to
+110, then `110 + floor((3 ADP + ATT - 120) / 28)`; 120 only at 99/99; displayed floor 85. So 110 is
+the practical cap: past it, one AGL costs about 9 ADP. The i-frame breakpoints per AGL are not
+sourced yet.
+
+Brackets (the user's): **SL** 1-20, 21-40, 41-70, 71-100, 101-125, 126-155, 156-200, 201-250,
+251-max. **Each stat** 0-10, 11-20, ..., 81-90, 91-99. Stat neighbours are drawn from the query's SL
+bracket, nearest by per-stat bracket distance.
+
+Mechanics (equip load table, stat/weight effects of every ring and armor piece, agility formula and
+cap, per-weapon stamina) are being researched; values land here once sourced.
 
 ## Soul memory
 
