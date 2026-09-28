@@ -355,6 +355,80 @@ def load(bundle: Path) -> list[tuple[int, str, bytes]]:
     return members(inflate(bundle.read_bytes()))
 
 
+def param_values(block: list[str]) -> list[tuple[str, str]]:
+    """(param type, leaf values) per position of the first ParamList in a `find` block.
+
+    Positions count every `Param type` child of that ParamList in order, extras included (a
+    ParamList's `raw total main` header gives the split; see section 4.5 of docs/ffx-actions.md).
+    """
+    out: list[tuple[str, str]] = []
+    base = None
+    for line in block:
+        indent = len(line) - len(line.lstrip())
+        text = line.strip()
+        if base is None:
+            if text.endswith("ParamList"):
+                base = indent
+            continue
+        if indent <= base:
+            break
+        if indent == base + 2:
+            if "Param type" in text:
+                out.append((text.split()[-1], ""))
+            continue
+        if out:
+            leaf = text.split(" ", 1)[1] if text.startswith("0x") else text
+            out[-1] = (out[-1][0], (out[-1][1] + " | " + leaf) if out[-1][1] else leaf)
+    return out
+
+
+def find_action(bundles: list[Path], action: int, tally: bool = False) -> int:
+    """Print every block that runs `action`: a root `Action id N`, or a nested one.
+
+    `tree` prints a whole member, and a cluster appearance (71, say) never sits at the root: it is
+    a `Param type 38` (an action-valued param) whose first raw is the action id, inside a child
+    template's cluster action. So a tally of shipped values has to walk every member and pick up
+    both spellings. Output: one `===== bundle member-name` header per hit, then the block; with
+    `tally`, instead, per param position the file types seen and the distinct values with counts.
+    """
+    hits = 0
+    counts: dict[int, dict[str, int]] = {}
+    for bundle in bundles:
+        for _ident, name, blob in load(bundle):
+            if blob[:4] != b"DLsE":
+                continue
+            lines = Tree(blob).dump().split("\n")
+            for i, line in enumerate(lines):
+                text = line.strip()
+                nested = (text.endswith("Param type 38") and i + 1 < len(lines)
+                          and lines[i + 1].strip() == f"raw {action}")
+                if not (nested or text.endswith(f"Action id {action}")):
+                    continue
+                indent = len(line) - len(line.lstrip())
+                block = [line]
+                for later in lines[i + 1:]:
+                    if len(later) - len(later.lstrip()) <= indent:
+                        break
+                    block.append(later)
+                hits += 1
+                if tally:
+                    for pos, (kind, value) in enumerate(param_values(block)):
+                        seen = counts.setdefault(pos, {})
+                        seen[f"type {kind}: {value}"] = seen.get(f"type {kind}: {value}", 0) + 1
+                    continue
+                print(f"===== {bundle.name} {name.rsplit(chr(92), 1)[-1]}")
+                print("\n".join(block))
+    for pos in sorted(counts):
+        ranked = sorted(counts[pos].items(), key=lambda kv: -kv[1])
+        print(f"p{pos}: {sum(counts[pos].values())} use(s), {len(ranked)} distinct")
+        for value, n in ranked[:8]:
+            print(f"    {n:5d}  {value}")
+        if len(ranked) > 8:
+            print(f"    ... {len(ranked) - 8} more")
+    print(f"{hits} use(s) of action {action}")
+    return 0
+
+
 def main() -> int:
     if sys.argv[1:] == ["--selftest"]:
         return selftest()
@@ -379,8 +453,17 @@ def main() -> int:
     p.add_argument("--drop-child", dest="drops", action="append", default=[], metavar="OFFSET",
                    help="offset of a `Param type 37` from `tree`: that child effect is not spawned")
     p.add_argument("--out", type=Path, required=True)
+    p = sub.add_parser("find", help="print every use of an action id, root or nested, with its params")
+    p.add_argument("--bundle", type=Path, action="append",
+                   help="default: sfx9999.ffxbnd.dcx and sfx9999_Append.ffxbnd.dcx")
+    p.add_argument("--action", type=int, required=True)
+    p.add_argument("--tally", action="store_true",
+                   help="per param position: file types and distinct values with counts")
     args = ap.parse_args()
 
+    if args.cmd == "find":
+        return find_action(args.bundle or [DEFAULT_BUNDLE, GAME_SFX / "sfx9999_Append.ffxbnd.dcx"],
+                           args.action, args.tally)
     entries = load(args.bundle)
     if args.cmd == "list":
         for ident, name, blob in entries:
