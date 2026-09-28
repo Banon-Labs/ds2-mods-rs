@@ -719,6 +719,74 @@ def _tab(data: Data, name: str, i: int) -> float:
     return t[max(0, min(i, len(t) - 1))] or 0
 
 
+#: WeaponStatsAffectParam row offset of the Enchanted infusion, `statsAffectId + t[8][1]`: the
+#: executable's 10x3 infusion table at 0x1410c3e10 has t[8] = {0, 8, 2} (EXE, read from
+#: darksoulsii-deobf.bin; docs/DS2-DPS-MECHANICS.md "Attack rating").
+ENCHANTED_STATS_AFFECT_OFFSET = 8
+
+
+def apply_regulation(data: Data) -> str:
+    """Replace two SoulsPlanner numbers with the game's, where the executable and regulation were
+    read (docs/DS2-BUILD-MECHANICS.md section 6, docs/DS2-DPS-MECHANICS.md "Attack rating"):
+
+    * `physicalDEFBonus[sum]` becomes PhysicalStatsPerLevelStatValuesParam
+      `row[trunc((END+VIT+STR+DEX)/4)].defense`, the index the stats builder 0x14038d790 uses.
+      SoulsPlanner's table is off by one at 180 of 393 sums.
+    * The Enchanted infusion's STR, DEX and INT (physicalByEnchant) coefficients become
+      WeaponStatsAffectParam[statsAffectId + 8] at the weapon's max reinforce level, times the
+      physical rate the infusion leaves (WeaponReinforceParam physicalRate +
+      addPhysicalRateByEnchanted, / 100). SoulsPlanner rounds them to 2 dp and has the Dagger's STR
+      at 0.06; the regulation says 0.053.
+
+    Weapons join by normalized itemname.fmg name (WeaponParam id == ItemParam id == text id). A
+    weapon whose regulation DEX/INT coefficients do not round to SoulsPlanner's is left alone, as a
+    join that picked the wrong row. Returns a one-line summary; SoulsPlanner's numbers stay when
+    the game's files cannot be read."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("ds2attacks", Path(__file__).parent / "ds2-attacks-extract.py")
+    ex = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ex)
+    reg = ex.load_module("ds2regulation", "ds2-regulation.py")
+    try:
+        d = ex.decode_params(reg.DEFAULT_REGULATION, ex.DEFAULT_DEFS, {
+            "WeaponParam": "WEAPON_PARAM", "WeaponReinforceParam": "WEAPON_REINFORCE_PARAM",
+            "WeaponStatsAffectParam": "WEAPON_STATS_AFFECT_PARAM",
+            "PhysicalStatsPerLevelStatValuesParam": "PHYS_STATS_PER_LEVEL_STAT_PARAM"})
+        names = ex.item_names(reg.GAME_DIR, reg.DEFAULT_REGULATION)
+    except (OSError, SystemExit, KeyError) as e:
+        return f"regulation unreadable ({e}); SoulsPlanner's defense table and Enchanted coefficients kept"
+    rows = d["PhysicalStatsPerLevelStatValuesParam"]
+    top = max(map(int, rows))
+    old = data.sp["physicalDEFBonus"]
+    new = [None if s < 4 else rows[str(min(top, s // 4))]["defense"] for s in range(len(old))]
+    moved = sum(1 for a, b in zip(old, new) if b is not None and a != b)
+    data.sp["physicalDEFBonus"] = new
+    by_name: dict[str, dict] = {}
+    for wid, w in d["WeaponParam"].items():
+        by_name.setdefault(norm(names.get(wid, "")), w)
+    fixed, refused = 0, 0
+    for key, w in data.weapons.items():
+        row = (w.get("infusions") or {}).get("Enchanted")
+        sc = (row or {}).get("atkScale")
+        wp = by_name.get(norm(w.get("name", key)))
+        if not sc or not wp:
+            continue
+        r = d["WeaponReinforceParam"].get(str(wp["weaponReinforceId"]))
+        c = r and d["WeaponStatsAffectParam"].get(str(r["statsAffectId"] + ENCHANTED_STATS_AFFECT_OFFSET))
+        if not c:
+            continue
+        lv, rate = r["maxLevel"], (r["physicalRate"] + r["addPhysicalRateByEnchanted"]) / 100
+        game = {"strength": c[f"physicalByStrength{lv}"] * rate, "dexterity": c[f"physicalByDexterity{lv}"] * rate,
+                "magic": c[f"physicalByEnchant{lv}"] * rate}
+        if any(abs(round(game[k], 2) - sc.get(k, 0)) > 0.011 for k in ("dexterity", "magic")):
+            refused += 1
+            continue
+        sc.update({k: round(v, 4) for k, v in game.items()})
+        fixed += 1
+    return (f"regulation: physical stat defense from the game's table ({moved} sums moved), Enchanted "
+            f"coefficients from WeaponStatsAffectParam for {fixed} weapons ({refused} left: join disagreed)")
+
+
 def attack_rating(data: Data, weapon: str, inf: str, eff: dict) -> dict:
     """Per-type attack rating at full upgrade: SoulsPlanner's getPhysicalATK/getMagicATK/... (SITE),
     without ring bonuses. Physical scales STR and DEX off one table; fire reads INT+FTH, dark
@@ -842,11 +910,13 @@ def attack_hits(a: dict | None) -> int:
 
 
 def chain_timeline(attacks: dict, name: str, two_hand: bool, kind: str = "Normal", horizon: float = 3.0,
-                   distinct: bool = False) -> list[tuple[float, float, str, int]]:
+                   distinct: bool = False, with_start: bool = False) -> list[tuple]:
     """(seconds from input, motion value, physical type, damage floor) of every hit a repeated
     attack lands, alternating its 1st and 2nd chain attacks: `kind` "Normal" is the R1 chain,
     "Strong" the R2 chain. Play speed is the mean of start/end speeds (where one hands over to
-    the other is unknown); re-hitting hitboxes add a tick per interval. `distinct`: see live_hits."""
+    the other is unknown); re-hitting hitboxes add a tick per interval. `distinct`: see live_hits.
+    `with_start` appends the second its attack began, which is what `horizon` cuts on: the hits of
+    a longer horizon whose attack began before a shorter one are exactly the shorter one's hits."""
     g = "Single2Hand" if two_hand else "Single1Hand"
     seq = [attacks.get((norm(name), g + kind + "1st")), attacks.get((norm(name), g + kind + "2nd"))]
     if not seq[0]:
@@ -860,7 +930,7 @@ def chain_timeline(attacks: dict, name: str, two_hand: bool, kind: str = "Normal
             n = max(1, h.get("n") or 1)
             for i in range(n):
                 out.append((t0 + (h["start"] / 30 + i * (h.get("interval") or 0)) / spd, h["rate"],
-                            h.get("type") or "physical", h.get("lower", 0)))
+                            h.get("type") or "physical", h.get("lower", 0)) + ((t0,) if with_start else ()))
         step = chain_open(a["anim"])
         if not step or step <= 0:
             break
@@ -1565,7 +1635,10 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 
 BACKEND_DATA_NAME = "ds2-build-recommender.dat"
 BACKEND_DATA = Path.home() / ".cache/ds2-builds" / BACKEND_DATA_NAME
-BACKEND_FORMAT = "ds2-build-recommender-data 2"
+BACKEND_FORMAT = "ds2-build-recommender-data 3"
+#: How far the exported R1/R2 chains run, in seconds: the panel clamps its window to 10.0
+#: (crates/ds2-build-recommender-ui/src/panel.rs), and status_hits runs to max(3, window).
+STATUS_HORIZON = 10.0
 #: Mirrors `infusion_for_code` in crates/ds2-build-recommender-core/src/weapons.rs; `?` is
 #: MugenMonkey's unrecorded infusion.
 INFUSION_CODE = {"No_Infusion": "N", "Magic": "M", "Fire": "F", "Lightning": "L", "Dark": "D", "Poison": "P",
@@ -1620,6 +1693,19 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
             if tl:
                 out.append("\t".join(["L", "2" if two else "1", " ".join(
                     f"{_num(t)}:{_num(mv)}:{HIT_CODE.get(ty, 'p')}:{_num(lo)}" for t, mv, ty, lo in tl)]))
+        # status_hits' inputs, per grip and R1/R2 chain, one row per name it would try (in its order,
+        # repeats of one normalized name dropped): the hits of one attack, and every hit of the
+        # repeated chain out to STATUS_HORIZON as `attack start:hit time`, so a window up to the
+        # panel's cap cuts it as the script's own max(3, window) horizon does.
+        for two in (False, True):
+            for kind, tag in (("Normal", "R1"), ("Strong", "R2")):
+                for nm in dict.fromkeys([w["name"], key.replace("_", " ")], None):
+                    first = attacks.get((norm(nm), ("Single2Hand" if two else "Single1Hand") + kind + "1st"))
+                    if first is None or (nm != w["name"] and norm(nm) == norm(w["name"])):
+                        continue
+                    tl = chain_timeline(attacks, nm, two, kind, STATUS_HORIZON, distinct=True, with_start=True)
+                    out.append("\t".join(["S", "2" if two else "1", tag, str(attack_hits(first)),
+                                          " ".join(f"{_num(h[4])}:{_num(h[0])}" for h in tl) or "-"]))
     floors = bracket_floors(data, corpus, r1)
     for i, (lo, _) in enumerate(SL_BRACKETS):
         dfn, _ = bracket_defense(data, corpus, lo)
@@ -1665,12 +1751,16 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
 
 # The questions the Rust tests ask both sides. Stats in STATS order.
 EXPECT_WEAPONS_FOR = [
-    # stats, sl, one_hand, weapon_class, per_class, window, raw_ar
-    ([20, 20, 15, 10, 40, 15, 15, 9, 9], 100, False, None, False, 0.0, False),
-    ([20, 20, 15, 10, 40, 15, 15, 9, 9], 100, False, None, False, 1.5, False),
-    ([20, 20, 15, 10, 40, 15, 15, 9, 9], 100, True, None, False, 0.0, True),
-    ([25, 20, 15, 12, 12, 40, 15, 9, 20], 150, False, None, True, 0.0, False),
-    ([25, 20, 15, 12, 12, 40, 15, 9, 20], 150, False, "Katana", False, 2.0, False),
+    # stats, sl, one_hand, weapon_class, per_class, window, raw_ar, objective
+    ([20, 20, 15, 10, 40, 15, 15, 9, 9], 100, False, None, False, 0.0, False, "damage"),
+    ([20, 20, 15, 10, 40, 15, 15, 9, 9], 100, False, None, False, 1.5, False, "damage"),
+    ([20, 20, 15, 10, 40, 15, 15, 9, 9], 100, True, None, False, 0.0, True, "damage"),
+    ([25, 20, 15, 12, 12, 40, 15, 9, 20], 150, False, None, True, 0.0, False, "damage"),
+    ([25, 20, 15, 12, 12, 40, 15, 9, 20], 150, False, "Katana", False, 2.0, False, "damage"),
+    ([25, 20, 15, 12, 12, 40, 15, 9, 20], 150, False, None, False, 0.0, False, "bleed"),
+    ([25, 20, 15, 12, 12, 40, 15, 9, 20], 150, False, None, False, 2.0, False, "bleed"),
+    ([25, 20, 15, 12, 12, 40, 15, 9, 20], 150, False, None, True, 5.0, False, "bleed"),
+    ([20, 20, 15, 10, 20, 30, 30, 9, 9], 100, True, None, False, 0.0, False, "poison"),
 ]
 EXPECT_BUILDS = [  # weapon key, infusion, sl, objective: --optimize and --generate
     ("Demons_Great_Hammer", "Raw", 100, "damage"),
@@ -1731,9 +1821,9 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
            "// script's own answers for the questions in its EXPECT_* lists, over the fixture corpus.", ""]
 
     rows_out = []
-    for st, sl, one, cls, per, window, raw in EXPECT_WEAPONS_FOR:
+    for st, sl, one, cls, per, window, raw, objective in EXPECT_WEAPONS_FOR:
         rows, _, _ = weapons_for(data, as_dict(st), sl, corpus, raw_ar=raw, one_hand=one, weapon_class=cls,
-                                 per_class=per, window=window)
+                                 per_class=per, window=window, objective=objective)
         got = []
         for dmg, name, inf, ar, label in rows:
             key = data.key_by_name[name]
@@ -1744,9 +1834,9 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
             ctr = (crit.get(norm(name)) or {}).get("counter") or 0
             got.append((name, INFUSION_CODE[inf], float(dmg), [float(ar.get(k, 0)) for k in DMG], base,
                         float(ha), float(ctr), wclass))
-        rows_out.append((st, sl, one, cls or "", per, window, raw, got))
-    out.append("// stats, sl, one_hand, class, per_class, window, raw_ar, rows: weapon, infusion, damage,")
-    out.append("// ar by type, grip, hyperarmor, counter, class.")
+        rows_out.append((st, sl, one, cls or "", per, window, raw, objective, got))
+    out.append("// stats, sl, one_hand, class, per_class, window, raw_ar, objective, rows: weapon, infusion,")
+    out.append("// damage (build-up x hits for bleed/poison), ar by type, grip, hyperarmor, counter, class.")
     out.append(f"pub const WEAPONS_FOR: WeaponsForCases = {_rs(rows_out)};\n")
 
     opt, gen = [], []
@@ -1923,6 +2013,9 @@ def main() -> int:
     ap.add_argument("--sl", type=int, help="with --minimum: clamp SL here and show how free stats can spread")
     ap.add_argument("--json", action="store_true", help="with --minimum: also print the options as JSON")
     ap.add_argument("--lam", type=float, default=50.0, help="EASE L2 penalty")
+    ap.add_argument("--site-numbers", action="store_true",
+                    help="keep SoulsPlanner's physical stat defense and Enchanted coefficients instead of the "
+                         "game's (apply_regulation), to compare against the planner")
     ap.add_argument("--tables", type=Path, default=CACHE / "site-tables", help="where site JS/JSON is cached")
     a = ap.parse_args()
     if a.selftest:
@@ -1931,6 +2024,8 @@ def main() -> int:
     a.tables.mkdir(parents=True, exist_ok=True)
     sp_json, mm_json = dump_site_tables(a.tables)
     data = Data(json.loads(sp_json.read_text()), json.loads(mm_json.read_text()))
+    if not a.site_numbers:
+        print(apply_regulation(data), file=sys.stderr)
     if a.export_backend:
         corpus, _ = load_corpus(data)
         corpus = corpus[::max(1, a.corpus_every)]

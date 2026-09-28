@@ -106,11 +106,12 @@ def layout(defs: Path, name: str) -> tuple[int, list]:
     return off, fields
 
 
-def decode_params(regulation: Path, defs: Path) -> dict[str, dict[str, dict]]:
+def decode_params(regulation: Path, defs: Path, params: dict[str, str] | None = None) -> dict[str, dict[str, dict]]:
+    """`{member: {row id: {field: value}}}` for `params` (member -> paramdef), default PARAMS."""
     reg = load_module("ds2regulation", "ds2-regulation.py")
     members = reg.load(regulation, reg.REGULATION_KEY_HEX)
     out = {}
-    for member, def_name in PARAMS.items():
+    for member, def_name in (params or PARAMS).items():
         size, fields = layout(defs, def_name)
         p = reg.Param(member, members[f"{member}.param"])
         if p.stride != size:
