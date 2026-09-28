@@ -737,7 +737,18 @@ impl Panel {
     }
 
     fn generate(&mut self) {
-        match backend::generate(backend(), &self.state) {
+        // The live character's class, when there is one: the game has no class change, so a build
+        // to apply has to start from that class's base. Measured 2026-09-28: without this a
+        // Sorcerer's panel generated a Warrior, and the apply took ATT 12 -> 6 and INT 14 -> 5.
+        let class = ds2_build_import::character_class();
+        log_line(format_args!(
+            "{LOG_PREFIX} generating for class {}",
+            class.map_or_else(
+                || "any (no character class read)".to_owned(),
+                |c| c.to_string()
+            )
+        ));
+        match backend::generate(backend(), &self.state, class) {
             Ok(build) => {
                 log_line(format_args!(
                     "{LOG_PREFIX} generated {} SL {} primary={:?} {} STR {} (grip asked {:?}) stub={}",
@@ -777,6 +788,28 @@ impl Panel {
         let Some(generated) = &self.generated else {
             return;
         };
+        // A build generated for another class -- before a character was loaded, or on another
+        // character -- is regenerated for this one and shown, not applied: soul memory cannot be
+        // lowered, so the player confirms the build that will actually go on.
+        if let Some(class) = ds2_build_import::character_class()
+            && !generated.class.eq_ignore_ascii_case(class.key())
+        {
+            log_line(format_args!(
+                "{LOG_PREFIX} apply held: the build is a {} and the character is a {class} -- \
+                 regenerating for the character's class",
+                generated.class
+            ));
+            self.generate();
+            self.status = Some(if self.generated.is_some() {
+                format!(
+                    "Regenerated for your {} -- check it, then Apply again",
+                    class.key()
+                )
+            } else {
+                format!("Not applied: no {} build for this weapon here", class.key())
+            });
+            return;
+        }
         let (build, extras) = backend::to_import(generated);
         log_line(format_args!(
             "{LOG_PREFIX} apply confirmed: {} SL {} with {} extra grants -- handed to \
@@ -874,17 +907,26 @@ impl Panel {
             }
             Action::Run => self.run(),
             Action::BestInfusion => self.best_infusion(),
-            Action::UseCharacter => match backend().current_character_stats() {
-                Some(stats) => {
+            // Read from the game, not the backend: the corpus backend has no game to read, and
+            // asking it made this button do nothing (ds2-mods-rs-fynp).
+            Action::UseCharacter => match ds2_build_import::character_stats() {
+                Some(game) => {
+                    let stats = backend::planner_order(&game);
+                    log_line(format_args!(
+                        "{LOG_PREFIX} use my character's stats: {stats:?} (class {})",
+                        ds2_build_import::character_class()
+                            .map_or_else(|| "unread".to_owned(), |c| c.to_string())
+                    ));
                     self.state.stats = stats;
                     self.changed();
-                    self.status = Some(if backend().is_stub() {
-                        "Stats filled in -- the stub's fixed character, not yours yet".to_owned()
-                    } else {
-                        "Stats read from your character".to_owned()
-                    });
+                    self.status = Some("Stats read from your character".to_owned());
                 }
-                None => self.status = Some("Could not read the character's stats".to_owned()),
+                None => {
+                    log_line(format_args!(
+                        "{LOG_PREFIX} use my character's stats: no character to read"
+                    ));
+                    self.status = Some("Could not read the character's stats".to_owned());
+                }
             },
             Action::Generate => self.generate(),
             Action::Show(shown) => self.shown = shown,

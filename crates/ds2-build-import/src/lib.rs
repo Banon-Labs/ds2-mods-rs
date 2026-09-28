@@ -49,7 +49,9 @@
 //! the mark. Nothing is announced to the network.
 //!
 //! **What is still not applied**: the hand `grip` the planner records, and the `class` and `gender`
-//! it names -- a character already exists by the time this runs, so those are read and ignored.
+//! it names -- a character already exists by the time this runs, and the game has no class change.
+//! The class is checked instead: a build for another class, or with any stat under the character's
+//! class base, has its stats refused and logged, and its gear applied.
 //!
 //! # The three failure modes worth knowing before reading the log
 //!
@@ -196,6 +198,25 @@ pub(crate) fn build_items(
 
 #[cfg(windows)]
 pub use flow::queue_generated;
+
+/// The live character's starting class, or `None` with no character loaded or an id no class has.
+///
+/// For a caller building something to hand [`queue_generated`]: the game has no class change, so a
+/// build for a live character has to be for this class, and the apply refuses the stats of any
+/// other.
+#[cfg(windows)]
+pub fn character_class() -> Option<ds2_build_import_core::StartingClass> {
+    ds2_build_import_core::StartingClass::from_game_id(save::live_character_class_id()?)
+}
+
+/// The live character's nine stats, in the game's order
+/// (`ds2_build_import_core::class::GAME_ORDER_NAMES`), or `None` with no character loaded.
+///
+/// Every read is fault-safe, so this may be asked from the frame thread.
+#[cfg(windows)]
+pub fn character_stats() -> Option<[u16; 9]> {
+    game::read_stats(game::player_param().ok()?)
+}
 #[cfg(windows)]
 pub use install::{LogFn, register, register_apply_tick};
 
@@ -396,5 +417,14 @@ mod stat_order {
         // computed from a wrong permutation still looks right.
         let scrambled: u16 = stats.each().iter().map(|(_, value)| value).sum();
         assert_eq!(scrambled, stats.in_game_order().iter().sum::<u16>());
+    }
+
+    /// The class bases the apply checks against are in the order the live stats are read in.
+    #[test]
+    fn the_class_bases_are_in_the_games_order() {
+        assert_eq!(
+            ds2_build_import_core::class::GAME_ORDER_NAMES,
+            ds2_rva::PLAYER_PARAM_STAT_NAMES
+        );
     }
 }

@@ -337,7 +337,15 @@ fn apply(
     // abandoning the gear, the spells and the covenant as well -- and none of those care what
     // level anyone is. One inapplicable part of a build is not grounds for dropping the rest.
     let levellable = wanted_points >= current_points;
-    if levellable {
+    // A build for another class, or under this class's base, costs it its stats and nothing else.
+    // The game has no class change, so stats counted from another class's base are ones this
+    // character cannot have: measured 2026-09-28, a Warrior build written onto a Sorcerer took
+    // attunement 12 -> 6 and intelligence 14 -> 5, and every attunement slot with them.
+    let class_fits = class_fits(build, &wanted);
+    let levellable = levellable && class_fits;
+    if !class_fits {
+        say("Wrong class -- gear only");
+    } else if levellable {
         log_line(format_args!(
             "{LOG_PREFIX} build {} is level {target} (from {level}, +{} points)",
             build.id,
@@ -426,6 +434,47 @@ fn apply(
     equip_everything(build);
     join_covenant(build);
     fill_estus();
+}
+
+/// Whether `build`'s stats (`wanted`, game order) may go on the live character: the build names
+/// the character's own starting class and no stat is under that class's base. Every refusal is
+/// logged with the numbers, and so is the class the character has.
+///
+/// An unreadable class refuses too. Without it there is no base to check against, and writing
+/// stats blind is what this exists to stop.
+fn class_fits(build: &ds2_build_import_core::Build, wanted: &[u16; 9]) -> bool {
+    let Some(id) = crate::save::live_character_class_id() else {
+        log_line(format_args!(
+            "{LOG_PREFIX} REFUSED the stats of build {}: the character's starting class could not \
+             be read, so there is no base to check them against -- the stats are LEFT ALONE, the \
+             gear is applied",
+            build.id
+        ));
+        return false;
+    };
+    let Some(class) = ds2_build_import_core::StartingClass::from_game_id(id) else {
+        log_line(format_args!(
+            "{LOG_PREFIX} REFUSED the stats of build {}: the character's starting class id is \
+             {id}, which names no class -- the stats are LEFT ALONE, the gear is applied",
+            build.id
+        ));
+        return false;
+    };
+    log_line(format_args!(
+        "{LOG_PREFIX} character class: {class}, base {:?}",
+        class.base()
+    ));
+    match ds2_build_import_core::check_build(&build.class, class, wanted) {
+        Ok(()) => true,
+        Err(refusal) => {
+            log_line(format_args!(
+                "{LOG_PREFIX} REFUSED the stats of build {} (class {:?}, {wanted:?}): {refusal} -- \
+                 the stats are LEFT ALONE, the gear is applied",
+                build.id, build.class
+            ));
+            false
+        }
+    }
 }
 
 /// **Take the Estus Flask to the maximum, every time, through the game's own upgrade path.**

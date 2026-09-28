@@ -19,7 +19,7 @@
 //! * **A generated build never carries an Agape Ring.** Its place among the suggestions goes to
 //!   the ring the nearest builds wear most that the build does not already wear in any upgrade.
 
-use ds2_build_import_core::{Build, Infusion, Stats};
+use ds2_build_import_core::{Build, Infusion, StartingClass, Stats, check_build};
 
 use crate::model::{
     Grip, Mode, Objective, PanelState, STAT_COUNT, STAT_LABELS, StatusFilter, WeaponsForOpts,
@@ -178,8 +178,14 @@ pub trait RecommenderBackend: Sync {
     fn similar(&self, stats: &[u16; STAT_COUNT], sl: u16, k: u16, status: StatusFilter) -> Outcome;
     /// How far the damage model agrees with real builds.
     fn calibration(&self) -> Calibration;
-    /// A whole build for `weapon` held in `grip`, in armour unless `allow_naked`. `None` when no
-    /// class can wield it at `sl` that way.
+    /// A whole build for `weapon` held in `grip`, in armour unless `allow_naked`, from the starting
+    /// class `class` names (`sorcerer`) or, with `None`, whichever class does best. `None` when no
+    /// such class can wield it at `sl` that way.
+    ///
+    /// A build for a live character must name its class: the game has no class change, and a
+    /// build counted from another class's base can put stats under the character's own.
+    // DEBT: ds2-mods-rs-59p7 -- the class made this eight arguments; bundle the per-build options.
+    #[allow(clippy::too_many_arguments)]
     fn generate_build(
         &self,
         weapon: &str,
@@ -188,9 +194,8 @@ pub trait RecommenderBackend: Sync {
         objective: Objective,
         allow_naked: bool,
         grip: Grip,
+        class: Option<&str>,
     ) -> Option<GeneratedBuild>;
-    /// The live character's nine stats, when they can be read.
-    fn current_character_stats(&self) -> Option<[u16; STAT_COUNT]>;
     /// How many weapons `stats` wield, where that sits among the builds nearest them at `sl`, and
     /// the load `armor` (head to legs) and `rings`, by name, leave for weapons. `None` when this
     /// backend cannot say, which is the default: the stub has no neighbours to rank against.
@@ -336,13 +341,18 @@ pub fn infusion_margin(rows: &[ResultRow]) -> Option<f32> {
 
 /// Generate a build for the panel's weapon, refusing one under its own floors.
 ///
+/// `class` is the live character's starting class, when there is one: the build is generated for
+/// that class alone, and a build that comes back for another class, or with a stat under that
+/// class's base, is refused here whatever the backend did. `None` lets any class win.
+///
 /// # Errors
 ///
-/// The reason as lines for the panel: no weapon chosen, no build possible, or each floor the
-/// backend's build is under.
+/// The reason as lines for the panel: no weapon chosen, no build possible, a build for the wrong
+/// class or under its base, or each floor the backend's build is under.
 pub fn generate(
     backend: &dyn RecommenderBackend,
     state: &PanelState,
+    class: Option<StartingClass>,
 ) -> Result<GeneratedBuild, Vec<String>> {
     let Some(weapon) = state.weapon else {
         return Err(vec!["choose a weapon first".to_owned()]);
@@ -354,15 +364,62 @@ pub fn generate(
         state.objective,
         state.allow_naked,
         state.grip,
+        class.map(StartingClass::key),
     ) else {
-        return Err(vec!["no class can wield it at this soul level".to_owned()]);
+        return Err(vec![match class {
+            Some(class) => format!("a {} cannot wield it at this soul level", class.key()),
+            None => "no class can wield it at this soul level".to_owned(),
+        }]);
     };
+    if let Some(class) = class
+        && let Err(refusal) = check_build(&build.class, class, &game_order(&build.stats))
+    {
+        return Err(vec![refusal.to_string()]);
+    }
     let violations = floor_violations(&build.stats, &backend.floors(build.sl));
     if violations.is_empty() {
         Ok(build)
     } else {
         Err(violations)
     }
+}
+
+/// Nine stats in [`STAT_LABELS`] order, in the game's order instead
+/// (`ds2_build_import_core::class::GAME_ORDER_NAMES`): adaptability moves from seventh to last.
+pub fn game_order(stats: &[u16; STAT_COUNT]) -> [u16; STAT_COUNT] {
+    to_stats(stats).in_game_order()
+}
+
+/// Nine stats in [`STAT_LABELS`] order, in the planner [`Stats`] a [`Build`] carries.
+fn to_stats(stats: &[u16; STAT_COUNT]) -> Stats {
+    let [
+        vigor,
+        endurance,
+        vitality,
+        attunement,
+        strength,
+        dexterity,
+        adaptability,
+        intelligence,
+        faith,
+    ] = *stats;
+    Stats {
+        vigor,
+        endurance,
+        vitality,
+        attunement,
+        strength,
+        dexterity,
+        adaptability,
+        intelligence,
+        faith,
+    }
+}
+
+/// Nine stats in the game's order, in [`STAT_LABELS`] order instead: [`game_order`] undone.
+pub fn planner_order(game: &[u16; STAT_COUNT]) -> [u16; STAT_COUNT] {
+    let [vig, end, vit, att, str_, dex, int, fth, adp] = *game;
+    [vig, end, vit, att, str_, dex, adp, int, fth]
 }
 
 /// Split a ranking into the one-handable and two-hand-only lists a generated build carries.
@@ -438,28 +495,7 @@ const NO_COVENANT: &str = "No_Covenant";
 /// granted through the same per-name count as the build's own gear, so a player who already holds
 /// a copy is given one fewer.
 pub fn to_import(generated: &GeneratedBuild) -> (Build, Vec<(String, Infusion)>) {
-    let [
-        vigor,
-        endurance,
-        vitality,
-        attunement,
-        strength,
-        dexterity,
-        adaptability,
-        intelligence,
-        faith,
-    ] = generated.stats;
-    let stats = Stats {
-        vigor,
-        endurance,
-        vitality,
-        attunement,
-        strength,
-        dexterity,
-        adaptability,
-        intelligence,
-        faith,
-    };
+    let stats = to_stats(&generated.stats);
     let (primary, infusion) = &generated.primary;
     // `LH1, RH1, LH2, RH2, LH3, RH3`, each followed by its infusion: the primary is RH1.
     let mut hands = vec![
@@ -692,7 +728,12 @@ impl RecommenderBackend for StubBackend {
         _objective: Objective,
         allow_naked: bool,
         grip: Grip,
+        class: Option<&str>,
     ) -> Option<GeneratedBuild> {
+        // The stub's one build is a Deprived's; it has nothing to offer any other class.
+        if class.is_some_and(|class| !class.eq_ignore_ascii_case("deprived")) {
+            return None;
+        }
         let primary = weapons::by_key("Moonlight_Greatsword")?;
         let (weapons_1h, weapons_2h_only) = split_weapons(&Self::ranking(), primary.name);
         let suggested_rings: Vec<String> = ["Dexterity Ring", "Ring of Knowledge", "Strength Ring"]
@@ -719,10 +760,6 @@ impl RecommenderBackend for StubBackend {
             stub: true,
         })
     }
-
-    fn current_character_stats(&self) -> Option<[u16; STAT_COUNT]> {
-        Some(STUB_STATS)
-    }
 }
 
 #[cfg(test)]
@@ -734,7 +771,7 @@ mod tests {
             weapon: Some("Moonlight_Greatsword"),
             ..PanelState::default()
         };
-        generate(&StubBackend, &state).expect("the stub build is valid")
+        generate(&StubBackend, &state, None).expect("the stub build is valid")
     }
 
     #[test]
@@ -927,11 +964,9 @@ mod tests {
                 o: Objective,
                 n: bool,
                 g: Grip,
+                c: Option<&str>,
             ) -> Option<GeneratedBuild> {
-                StubBackend.generate_build(w, i, sl, o, n, g)
-            }
-            fn current_character_stats(&self) -> Option<[u16; STAT_COUNT]> {
-                None
+                StubBackend.generate_build(w, i, sl, o, n, g, c)
             }
         }
         fn rows_of(outcome: Outcome) -> Vec<ResultRow> {
@@ -994,23 +1029,160 @@ mod tests {
                 o: Objective,
                 naked: bool,
                 g: Grip,
+                c: Option<&str>,
             ) -> Option<GeneratedBuild> {
-                StubBackend.generate_build(w, i, sl, o, naked, g)
-            }
-            fn current_character_stats(&self) -> Option<[u16; STAT_COUNT]> {
-                None
+                StubBackend.generate_build(w, i, sl, o, naked, g, c)
             }
         }
         let state = PanelState {
             weapon: Some("Moonlight_Greatsword"),
             ..PanelState::default()
         };
-        let refused = generate(&Strict, &state).expect_err("under every floor");
+        let refused = generate(&Strict, &state, None).expect_err("under every floor");
         assert_eq!(refused.len(), FLOOR_STATS.len());
         assert!(
-            generate(&StubBackend, &PanelState::default()).is_err(),
+            generate(&StubBackend, &PanelState::default(), None).is_err(),
             "no weapon"
         );
+    }
+
+    /// The measured case: a Sorcerer's panel generated a Warrior at SL 90 and the apply wrote it,
+    /// ATT 12 -> 6 and INT 14 -> 5. A backend that ignores the class asked for is overruled here.
+    #[test]
+    fn a_build_for_another_class_is_refused_for_a_live_character() {
+        struct Careless;
+        impl RecommenderBackend for Careless {
+            fn is_stub(&self) -> bool {
+                false
+            }
+            fn floors(&self, _sl: u16) -> [u16; STAT_COUNT] {
+                [0; STAT_COUNT]
+            }
+            fn weapons_for(&self, s: &[u16; STAT_COUNT], sl: u16, o: &WeaponsForOpts) -> Outcome {
+                StubBackend.weapons_for(s, sl, o)
+            }
+            fn optimize(
+                &self,
+                w: &str,
+                i: Infusion,
+                sl: u16,
+                o: Objective,
+                g: Grip,
+            ) -> Option<OptimizedBuild> {
+                StubBackend.optimize(w, i, sl, o, g)
+            }
+            fn minimum(&self, w: &str, i: Infusion, t: bool) -> Option<OptimizedBuild> {
+                StubBackend.minimum(w, i, t)
+            }
+            fn similar(&self, s: &[u16; STAT_COUNT], sl: u16, k: u16, f: StatusFilter) -> Outcome {
+                StubBackend.similar(s, sl, k, f)
+            }
+            fn calibration(&self) -> Calibration {
+                StubBackend.calibration()
+            }
+            fn generate_build(
+                &self,
+                w: &str,
+                i: Infusion,
+                sl: u16,
+                o: Objective,
+                naked: bool,
+                g: Grip,
+                _class: Option<&str>,
+            ) -> Option<GeneratedBuild> {
+                let mut build = StubBackend.generate_build(w, i, sl, o, naked, g, None)?;
+                // The log's Warrior: game order [22, 6, 11, 6, 28, 42, 5, 5, 18].
+                build.class = "Warrior".to_owned();
+                build.stats = planner_order(&[22, 6, 11, 6, 28, 42, 5, 5, 18]);
+                build.sl = crate::model::soul_level(&build.stats);
+                Some(build)
+            }
+        }
+        let state = PanelState {
+            weapon: Some("Moonlight_Greatsword"),
+            ..PanelState::default()
+        };
+        let generated = generate(&Careless, &state, None).expect("any class, when none is live");
+        assert_eq!(generated.sl, 90);
+        let refused = generate(&Careless, &state, Some(StartingClass::Sorcerer))
+            .expect_err("a Warrior for a Sorcerer");
+        assert!(
+            refused[0].contains("warrior") && refused[0].contains("sorcerer"),
+            "{refused:?}"
+        );
+        // Named a Sorcerer, the same spread is still under the Sorcerer's base.
+        struct Relabelled;
+        impl RecommenderBackend for Relabelled {
+            fn is_stub(&self) -> bool {
+                false
+            }
+            fn floors(&self, _sl: u16) -> [u16; STAT_COUNT] {
+                [0; STAT_COUNT]
+            }
+            fn weapons_for(&self, s: &[u16; STAT_COUNT], sl: u16, o: &WeaponsForOpts) -> Outcome {
+                StubBackend.weapons_for(s, sl, o)
+            }
+            fn optimize(
+                &self,
+                w: &str,
+                i: Infusion,
+                sl: u16,
+                o: Objective,
+                g: Grip,
+            ) -> Option<OptimizedBuild> {
+                StubBackend.optimize(w, i, sl, o, g)
+            }
+            fn minimum(&self, w: &str, i: Infusion, t: bool) -> Option<OptimizedBuild> {
+                StubBackend.minimum(w, i, t)
+            }
+            fn similar(&self, s: &[u16; STAT_COUNT], sl: u16, k: u16, f: StatusFilter) -> Outcome {
+                StubBackend.similar(s, sl, k, f)
+            }
+            fn calibration(&self) -> Calibration {
+                StubBackend.calibration()
+            }
+            fn generate_build(
+                &self,
+                w: &str,
+                i: Infusion,
+                sl: u16,
+                o: Objective,
+                naked: bool,
+                g: Grip,
+                class: Option<&str>,
+            ) -> Option<GeneratedBuild> {
+                let mut build = Careless.generate_build(w, i, sl, o, naked, g, class)?;
+                build.class = "Sorcerer".to_owned();
+                Some(build)
+            }
+        }
+        let refused = generate(&Relabelled, &state, Some(StartingClass::Sorcerer))
+            .expect_err("under the Sorcerer base");
+        assert!(
+            refused[0].contains("attunement 6 < 12") && refused[0].contains("intelligence 5 < 14"),
+            "{refused:?}"
+        );
+    }
+
+    /// The stub has only a Deprived build, and offers it to no other class.
+    #[test]
+    fn the_stub_generates_for_a_deprived_only() {
+        let state = PanelState {
+            weapon: Some("Moonlight_Greatsword"),
+            ..PanelState::default()
+        };
+        assert!(generate(&StubBackend, &state, Some(StartingClass::Deprived)).is_ok());
+        let refused = generate(&StubBackend, &state, Some(StartingClass::Sorcerer))
+            .expect_err("no Sorcerer build");
+        assert_eq!(refused, ["a sorcerer cannot wield it at this soul level"]);
+    }
+
+    /// The two stat orders are each other's inverse, and adaptability is what moves.
+    #[test]
+    fn the_stat_orders_round_trip() {
+        let planner = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+        assert_eq!(game_order(&planner), [1, 2, 3, 4, 5, 6, 8, 9, 7]);
+        assert_eq!(planner_order(&game_order(&planner)), planner);
     }
 
     #[test]

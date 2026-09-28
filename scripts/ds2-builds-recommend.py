@@ -1198,12 +1198,17 @@ GRIP_TRIES = {"two": (True,), "one": (False,)}
 
 
 def optimize_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, objective: str,
-                   grip: str = "two", flex_weight: float | None = None):
+                   grip: str = "two", flex_weight: float | None = None, only_class: str | None = None):
     """A valid build at `sl` that maximizes `objective` for weapon+infusion: floors first (bracket
     medians, END only for a high-stamina weapon), then requirements (STR halved for grip "two",
     in full for "one"; see GRIP_TRIES), then every remaining point where it raises the objective
     most, plus `flex_weight` (default FLEX_WEIGHT) per weapon the point lets the build wield: a soft
-    term, never a filter (see FLEX_WEIGHT)."""
+    term, never a filter (see FLEX_WEIGHT).
+
+    `only_class` (a class key, `sorcerer`) tries that starting class alone. A build for a character
+    that already exists has to be: the game offers no class change after creation, so a build from
+    another class's base is one the character cannot have -- measured 2026-09-28, a Sorcerer given
+    a Warrior build lost 6 attunement and 9 intelligence below its own starting stats."""
     if flex_weight is None:
         flex_weight = FLEX_WEIGHT
     flex = (lambda s_: sum(flex_counts(data, s_))) if flex_weight else None
@@ -1212,6 +1217,8 @@ def optimize_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
     req = data.weapons[weapon].get("require") or {}
     best = None
     for cls, base in data.classes.items():
+        if only_class is not None and cls != only_class.lower():
+            continue
         for two in GRIP_TRIES[grip]:
             st = {s: int(base[s]) for s in STATS}
             for s in FLOOR_STATS:
@@ -1631,15 +1638,17 @@ def generate_armor(data: Data, corpus: list[Build], weapon: str, inf: str, two: 
 
 def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, objective: str = "damage",
                    window: float = 1.5, k: int = 50, allow_naked: bool = False,
-                   grip: str = "two", flex_weight: float | None = None) -> dict | None:
+                   grip: str = "two", flex_weight: float | None = None,
+                   only_class: str | None = None) -> dict | None:
     """A whole valid build for weapon+infusion at `sl`: optimize_build's class and stats with the
     weapon as primary; the top 15 one-handable and top 5 two-hand-only other weapons for those
     stats (damage over `window` seconds); 3 copies of each of the 4 rings the nearest-stat builds
     wear most (suggest_rings: no NO_USE_RINGS ring), plus one of every other ring at least
     COMMON_RING of all builds wear; and armour, the
     best_armor set under 70% load with the primary and those four rings carried. `allow_naked`
-    skips the armour, as every generated build did before it had any."""
-    best, floors = optimize_build(data, corpus, weapon, inf, sl, objective, grip, flex_weight)
+    skips the armour, as every generated build did before it had any. `only_class` is
+    optimize_build's: the build for a character that already has a class."""
+    best, floors = optimize_build(data, corpus, weapon, inf, sl, objective, grip, flex_weight, only_class)
     if best is None:
         return None
     val, cls, two, stats = best
@@ -1987,6 +1996,11 @@ EXPECT_ONE_HANDED = [  # --optimize and --generate with --grip one
     ("Demons_Great_Hammer", "Raw", 100, "damage"),
     ("Uchigatana", "Bleed", 150, "bleed"),
 ]
+EXPECT_AS_CLASS = [  # class key, weapon key, infusion, sl, objective: --generate --class
+    ("sorcerer", "Demons_Great_Hammer", "Raw", 90, "damage"),  # the SL 90 Sorcerer given a Warrior
+    ("sorcerer", "Moonlight_Greatsword", "No_Infusion", 90, "damage"),
+    ("sorcerer", "Demons_Great_Hammer", "Raw", 20, "damage"),
+]
 EXPECT_MINIMUM = [("Demons_Great_Hammer", True), ("Moonlight_Greatsword", False), ("Uchigatana", False)]
 EXPECT_SIMILAR = [  # stats, sl, k, status
     ([20, 20, 15, 10, 40, 15, 15, 9, 9], 100, 50, None),
@@ -2083,6 +2097,12 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
     out.append("// The same two questions with the grip forced one-handed (--grip one).")
     out.append(f"pub const OPTIMIZE_ONE_HANDED: OptimizeCases = {_rs(opt_one)};\n")
     out.append(f"pub const GENERATE_ONE_HANDED: GenerateCases = {_rs(gen_one)};\n")
+    gen_class = []
+    for cls, weapon, inf, sl, objective in EXPECT_AS_CLASS:
+        _, got = expect_builds(data, corpus, mix, [(weapon, inf, sl, objective)], [], "two", only_class=cls)
+        gen_class.append((cls, got[0]))
+    out.append("// class key, then a GENERATE case asked of that starting class alone (--class).")
+    out.append(f"pub const GENERATE_AS_CLASS: ClassGenerateCases = {_rs(gen_class)};\n")
 
     mins = []
     for weapon, two in EXPECT_MINIMUM:
@@ -2096,18 +2116,19 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
 
 
 def expect_builds(data: Data, corpus: list[Build], mix, cases: list, naked_cases: list, grip: str,
-                  flexes: list | None = None):
+                  flexes: list | None = None, only_class: str | None = None):
     """The script's --optimize and --generate answers for `cases` (plus `naked_cases` generated with
-    --allow-naked) at `grip`, as fixture tuples."""
+    --allow-naked) at `grip`, and for `only_class` alone when given, as fixture tuples."""
     arr = lambda d: [int(d[s]) for s in STATS]
     opt, gen = [], []
     for weapon, inf, sl, objective in cases:
-        best, _ = optimize_build(data, corpus, weapon, inf, sl, objective, grip)
+        best, _ = optimize_build(data, corpus, weapon, inf, sl, objective, grip, only_class=only_class)
         opt.append((weapon, INFUSION_CODE[inf], sl, objective,
                     None if best is None else _Some((data.classes[best[1]]["name"], best[2], arr(best[3]),
                                                      float(best[0])))))
     for weapon, inf, sl, objective, naked in [(*case, False) for case in cases] + naked_cases:
-        g = generate_build(data, corpus, weapon, inf, sl, objective, allow_naked=naked, grip=grip)
+        g = generate_build(data, corpus, weapon, inf, sl, objective, allow_naked=naked, grip=grip,
+                           only_class=only_class)
         if g is None:
             gen.append((weapon, INFUSION_CODE[inf], sl, objective, naked, None))
             continue
@@ -2345,6 +2366,9 @@ def main() -> int:
                     help="with --optimize/--generate: 'two' (default) halves the STR requirement even when "
                          "one-handing would fit, 'one' needs it in full. Damage is scored the same for "
                          "either grip (a two-handed STR multiplier is unproven)")
+    ap.add_argument("--class", dest="start_class", metavar="CLASS",
+                    help="with --optimize/--generate: this starting class only (sorcerer, warrior, ...), as a "
+                         "build for an existing character must be -- the game has no class change")
     ap.add_argument("--allow-naked", action="store_true",
                     help="with --generate: no armour (by default the best set under 70%% load is chosen)")
     ap.add_argument("--objective", choices=["damage", "bleed", "poison"], default="damage",
@@ -2397,6 +2421,8 @@ def main() -> int:
     data = Data(json.loads(sp_json.read_text()), json.loads(mm_json.read_text()))
     if not a.site_numbers:
         print(apply_regulation(data), file=sys.stderr)
+    if a.start_class and a.start_class.lower() not in data.classes:
+        ap.error(f"unknown class {a.start_class!r}: one of {', '.join(data.classes)}")
     if a.export_backend:
         corpus, _ = load_corpus(data)
         corpus = corpus[::max(1, a.corpus_every)]
@@ -2442,9 +2468,10 @@ def main() -> int:
             ap.error(f"unknown weapon {name!r}")
         corpus, _ = load_corpus(data)
         g = generate_build(data, corpus, weapon, inf.replace(" ", "_") or "No_Infusion", a.sl, a.objective,
-                           a.window or 1.5, a.k, a.allow_naked, a.grip, a.flex_weight)
+                           a.window or 1.5, a.k, a.allow_naked, a.grip, a.flex_weight, a.start_class)
         if g is None:
-            print(f"no valid SL {a.sl} build wields {data.weapons[weapon]['name']} (grip {a.grip})")
+            print(f"no valid SL {a.sl} {a.start_class or ''} build wields {data.weapons[weapon]['name']} "
+                  f"(grip {a.grip})")
             return 2
         if a.json:
             print(json.dumps(g, indent=1))
@@ -2518,9 +2545,10 @@ def main() -> int:
             ap.error(f"unknown weapon {name!r}")
         inf = inf.replace(" ", "_") or "No_Infusion"
         corpus, _ = load_corpus(data)
-        best, floors = optimize_build(data, corpus, weapon, inf, a.sl, a.objective, a.grip, a.flex_weight)
+        best, floors = optimize_build(data, corpus, weapon, inf, a.sl, a.objective, a.grip, a.flex_weight,
+                                      a.start_class)
         if best is None:
-            print(f"no valid SL {a.sl} build wields {data.weapons[weapon]['name']} (grip {a.grip}) with the "
+            print(f"no valid SL {a.sl} {a.start_class or ''} build wields {data.weapons[weapon]['name']} (grip {a.grip}) with the "
                   "bracket floors "
                   + " ".join(f"{s[:3].upper()} {v}" for s, v in floors.items()))
             return 2

@@ -167,6 +167,18 @@ pub(crate) fn live_character_name() -> Option<String> {
     String::from_utf16(&units).ok()
 }
 
+/// The live character's starting class id -- the game's own number, `7` for a Sorcerer.
+///
+/// `player_data + 0x64` ([`ds2_rva::PLAYER_DATA_CLASS_OFFSET`]), read as the `u32` the profile
+/// loader writes there. `None` with no character loaded; the id is returned raw so a caller can log
+/// one that names no class rather than lose it.
+pub(crate) fn live_character_class_id() -> Option<u32> {
+    let player = live_player_data()?;
+    // SAFETY: inside the block the pointer chain produced; `safe_read_u32` fails closed on an
+    // unmapped page rather than faulting.
+    unsafe { ds2_game_base::mem::safe_read_u32(player + ds2_rva::PLAYER_DATA_CLASS_OFFSET) }
+}
+
 /// `Some(pointer)` unless it is null.
 const fn non_null(pointer: usize) -> Option<usize> {
     if pointer == 0 { None } else { Some(pointer) }

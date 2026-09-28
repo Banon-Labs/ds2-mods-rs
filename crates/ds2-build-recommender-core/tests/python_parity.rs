@@ -67,14 +67,17 @@ type Generated = (
     bool,
     bool,
 );
-type GenerateCases = &'static [(
+type GenerateCase = (
     &'static str,
     &'static str,
     u16,
     &'static str,
     bool,
     Option<Generated>,
-)];
+);
+type GenerateCases = &'static [GenerateCase];
+/// A class key, and a generate case asked of that starting class alone.
+type ClassGenerateCases = &'static [(&'static str, GenerateCase)];
 type MinimumCases = &'static [(
     &'static str,
     bool,
@@ -300,15 +303,34 @@ fn generate_build_is_the_scripts() {
     let (mut requirements_bound, mut load_bound, mut armored) = (false, false, 0);
     let cases = expected::GENERATE
         .iter()
-        .map(|case| (case, Grip::TwoHanded))
+        .map(|case| (case, Grip::TwoHanded, None))
         .chain(
             expected::GENERATE_ONE_HANDED
                 .iter()
-                .map(|case| (case, Grip::OneHanded)),
+                .map(|case| (case, Grip::OneHanded, None)),
+        )
+        .chain(
+            expected::GENERATE_AS_CLASS
+                .iter()
+                .map(|(class, case)| (case, Grip::TwoHanded, Some(*class))),
         );
-    for (&(weapon, code, sl, goal, naked, want), grip) in cases {
-        let got =
-            backend().generate_build(weapon, infusion(code), sl, objective(goal), naked, grip);
+    for (&(weapon, code, sl, goal, naked, want), grip, only) in cases {
+        let got = backend().generate_build(
+            weapon,
+            infusion(code),
+            sl,
+            objective(goal),
+            naked,
+            grip,
+            only,
+        );
+        if let (Some(only), Some(got)) = (only, &got) {
+            assert!(
+                got.class.eq_ignore_ascii_case(only),
+                "{weapon} SL {sl}: asked for a {only}, got a {}",
+                got.class
+            );
+        }
         let (got, want) = match (got, want) {
             (None, None) => continue,
             (Some(got), Some(want)) => (got, want),
@@ -447,7 +469,7 @@ fn the_panel_generates_at_its_override_for_its_weapon() {
     state.choose_weapon("Demons_Great_Hammer");
     assert!(state.choose_infusion(Infusion::Raw));
     state.set_sl_override(Some(100));
-    let build = backend::generate(backend(), &state).expect("a SL 100 build");
+    let build = backend::generate(backend(), &state, None).expect("a SL 100 build");
     assert_eq!(build.sl, 100);
     assert_eq!(ds2_build_import_core::level::soul_level(&build.stats), 100);
     assert_eq!(
@@ -470,7 +492,7 @@ fn the_panel_generates_at_its_override_for_its_weapon() {
         import.armor
     );
     state.allow_naked = true;
-    let naked = backend::generate(backend(), &state).expect("a SL 100 build");
+    let naked = backend::generate(backend(), &state, None).expect("a SL 100 build");
     assert!(naked.armor.is_empty() && naked.armor_note.is_none());
 }
 
@@ -486,6 +508,7 @@ fn every_generated_grant_names_a_real_item() {
             objective(goal),
             naked,
             Grip::TwoHanded,
+            None,
         ) else {
             continue;
         };
@@ -576,5 +599,75 @@ fn a_file_without_neighbour_counts_has_no_flexibility() {
         backend
             .flexibility(&[10, 6, 7, 6, 6, 20, 9, 6, 18], 35, &[], &[])
             .is_none()
+    );
+}
+
+/// soulsplanner's class table in the data file is the game's `PlayerStatusParam`, which is what
+/// `StartingClass` carries: two sources for the same eight spreads, held together.
+#[test]
+fn the_data_files_classes_are_the_games() {
+    use ds2_build_import_core::StartingClass;
+    let mut seen = 0;
+    for line in include_str!("fixtures/corpus-sample.dat").lines() {
+        let Some(rest) = line.strip_prefix("C\t") else {
+            continue;
+        };
+        let fields: Vec<&str> = rest.split('\t').collect();
+        let class = StartingClass::from_key(fields[0])
+            .unwrap_or_else(|| panic!("{:?} is no starting class", fields[0]));
+        let level: u32 = fields[2].parse().expect("a level");
+        let spread: Vec<u16> = fields[3..12]
+            .iter()
+            .map(|field| field.parse().expect("a stat"))
+            .collect();
+        let spread: [u16; STAT_COUNT] = spread.try_into().expect("nine stats");
+        assert_eq!(level, class.level(), "{class}");
+        assert_eq!(backend::game_order(&spread), class.base(), "{class}");
+        seen += 1;
+    }
+    assert_eq!(seen, StartingClass::ALL.len());
+}
+
+/// The measured case, end to end on the corpus: a Sorcerer's SL 90 panel. Unrestricted, another
+/// class wins and the build is under the Sorcerer's base -- the shape of the build that was
+/// applied. Asked for the character's class, every stat is at or above it.
+#[test]
+fn a_sorcerers_build_is_a_sorcerers() {
+    use ds2_build_import_core::{StartingClass, check_build};
+    let state = PanelState {
+        weapon: Some("Demons_Great_Hammer"),
+        infusion: Infusion::Raw,
+        sl_override: Some(90),
+        ..PanelState::default()
+    };
+    let any = backend::generate(backend(), &state, None).expect("some class wields it");
+    assert_ne!(
+        any.class, "Sorcerer",
+        "the case only means something if another class wins"
+    );
+    assert!(
+        check_build(
+            "sorcerer",
+            StartingClass::Sorcerer,
+            &backend::game_order(&any.stats)
+        )
+        .is_err()
+    );
+    let own = backend::generate(backend(), &state, Some(StartingClass::Sorcerer))
+        .expect("a Sorcerer wields it at SL 90");
+    assert_eq!(own.class, "Sorcerer");
+    assert_eq!(own.sl, 90);
+    assert_eq!(
+        check_build(
+            &own.class,
+            StartingClass::Sorcerer,
+            &backend::game_order(&own.stats)
+        ),
+        Ok(())
+    );
+    let (import, _) = backend::to_import(&own);
+    assert_eq!(
+        import.class, "sorcerer",
+        "the import sees the class it checks"
     );
 }

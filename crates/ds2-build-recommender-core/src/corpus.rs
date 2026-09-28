@@ -207,6 +207,8 @@ struct Tables {
 /// A starting class.
 #[derive(Clone, Debug)]
 struct Class {
+    /// soulsplanner's key, `sorcerer`: what a class restriction names.
+    key: String,
     name: String,
     level: i32,
     base: Stats,
@@ -560,11 +562,16 @@ impl CorpusBackend {
             "" => {}
             tag if tag.starts_with('#') => {}
             "C" => {
-                next("class key")?;
+                let key = next("class key")?.to_owned();
                 let name = next("class name")?.to_owned();
                 let level = int(Some(next("level")?), line)?;
                 let base = stats(&mut fields, line)?;
-                self.classes.push(Class { name, level, base });
+                self.classes.push(Class {
+                    key,
+                    name,
+                    level,
+                    base,
+                });
             }
             "T" => {
                 let name = next("table name")?;
@@ -1241,7 +1248,8 @@ impl CorpusBackend {
     }
 
     /// The script's `optimize_build`: `(value, class, two-handed, stats)`, or `None` when no class
-    /// fits the floors and requirements into `sl`.
+    /// fits the floors and requirements into `sl`. `only_class` is the script's: that class key
+    /// alone, for a character that already has one.
     fn optimize_build(
         &self,
         weapon: &Weapon,
@@ -1249,6 +1257,7 @@ impl CorpusBackend {
         sl: u32,
         objective: Objective,
         grip: Grip,
+        only_class: Option<&str>,
     ) -> Option<(f64, usize, bool, Stats)> {
         #[derive(Clone, Copy, PartialEq)]
         enum Curve {
@@ -1288,6 +1297,9 @@ impl CorpusBackend {
         let sl = i32::try_from(sl).unwrap_or(i32::MAX - 53);
         let mut best: Option<(f64, usize, bool, Stats)> = None;
         for (class_index, class) in self.classes.iter().enumerate() {
+            if only_class.is_some_and(|only| !class.key.eq_ignore_ascii_case(only)) {
+                continue;
+            }
             // The script's GRIP_TRIES: one grip, never a fallback to the other.
             {
                 let two = grip.two_handed();
@@ -1966,7 +1978,7 @@ impl RecommenderBackend for CorpusBackend {
     ) -> Option<OptimizedBuild> {
         let weapon = self.weapon_by_key(weapon)?;
         let (value, class, two_handed, stats) =
-            self.optimize_build(weapon, infusion, u32::from(sl), objective, grip)?;
+            self.optimize_build(weapon, infusion, u32::from(sl), objective, grip, None)?;
         Some(OptimizedBuild {
             class: self.classes[class].name.clone(),
             sl,
@@ -2082,10 +2094,11 @@ impl RecommenderBackend for CorpusBackend {
         objective: Objective,
         allow_naked: bool,
         grip: Grip,
+        class: Option<&str>,
     ) -> Option<GeneratedBuild> {
         let primary = self.weapon_by_key(weapon)?;
         let (_, class, two_handed, stats) =
-            self.optimize_build(primary, infusion, u32::from(sl), objective, grip)?;
+            self.optimize_build(primary, infusion, u32::from(sl), objective, grip, class)?;
         let query = Query {
             one_hand: false,
             class: None,
@@ -2150,11 +2163,6 @@ impl RecommenderBackend for CorpusBackend {
             armor_note,
             stub: false,
         })
-    }
-
-    /// The backend has no game to read; the panel falls back to the typed stats.
-    fn current_character_stats(&self) -> Option<[u16; STAT_COUNT]> {
-        None
     }
 
     fn flexibility(
