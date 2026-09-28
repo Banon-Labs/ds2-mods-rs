@@ -2403,6 +2403,42 @@ pub const FMOD_WAVEBANK_INFO_STRIDE_BOUND: usize = 0x400;
 /// What `Channel::isPlaying` answered on a channel that had played to its end, in the run above.
 pub const FMOD_ERR_INVALID_HANDLE: i32 = 36;
 
+// Silence and memory, measured with `scripts/frida/fmod-audibility.js` and
+// `scripts/frida/fmod-unmute-test.js` on 2026-09-27 against a player-managed Majula:
+//
+// * The game's `m100400001` is a 3D event with properties `playDistance = 14`, `stopDistance = 14`
+//   and a `(distance)` parameter over 0..14. The game calls `Event::set3DAttributes` on it with the
+//   listener's own position (both read `[2.23, 8.26, -18.03]`), so it is heard at distance 0. An
+//   instance started by a mod sits at `[0, 0, 0]` and is silent wherever the player is not.
+// * `Event::setMute(false)` on that event returned 0 and `Event::getMute` read 0, but its channel's
+//   `Channel::getMute` stayed 1 and `Channel::getAudibility` 0 for the 600 ms watched: an event mute
+//   does not come off the channel. The game's own single `setMute` call (`0x1409f8484`) only ever
+//   passes `false`.
+// * The game's FMOD allocations go to its own heap through `FMOD_Memory_Initialize` callbacks
+//   (`0x1409fda40`, at `0x1409de0eb`), and it raises a fatal "memory allocation failed" box from
+//   `MOFmodCallback.cpp` line 914 when that heap is full. Starting instances from eight banks in one
+//   session did that.
+
+/// Import slot for `FMOD::EventSystem::get3DListenerAttributes(int, FMOD_VECTOR* pos, vel, forward,
+/// up)`. RVA `0x01aae76c`.
+pub const FMOD_EVENT_SYSTEM_GET_3D_LISTENER_IAT: u32 = 0x01aa_e76c;
+
+/// Import slot for `FMOD::Event::set3DAttributes(const FMOD_VECTOR* pos, vel, orientation)`.
+/// RVA `0x01aae784`; the game's 2 call sites keep its region music at the listener.
+pub const FMOD_EVENT_SET_3D_ATTRIBUTES_IAT: u32 = 0x01aa_e784;
+
+/// Import slot for `FMOD::Event::getParentGroup(EventGroup**)`. RVA `0x01aae824`.
+pub const FMOD_EVENT_GET_PARENT_GROUP_IAT: u32 = 0x01aa_e824;
+
+/// `FMOD::EventGroup` vtable slot of `freeEventData(Event* event, bool waituntilready)`. `2`.
+///
+/// `EventGroup` is an interface with no exported members; the object behind the pointer is an
+/// `EventGroupI`. `scripts/pe-vtable-slot.py <fmod_event64.dll> freeEventData@EventGroupI` finds
+/// its vtable at `0x18005bcb0` in `fmod_event64.dll` 4.44.50 and lists slots 0..4 as `getInfo`,
+/// `loadEventData`, `freeEventData`, `getGroup`, `getGroupByIndex` -- the declaration order of
+/// `fmod_event.hpp`.
+pub const FMOD_EVENT_GROUP_FREE_EVENT_DATA_SLOT: usize = 2;
+
 /// `MOFmodSoundManager::v6`, audio init. RVA `0x009ddbe0`, VA `0x1409ddbe0`.
 ///
 /// The function that *creates* [`SOUND_MANAGER_MASTER_GROUP_OFFSET`]: at `0x1409df157` it does
