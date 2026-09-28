@@ -1375,16 +1375,20 @@ fn draw_build(canvas: &mut Canvas<'_>, build: &GeneratedBuild, (min, max): ([f32
     };
     canvas.text([min[0], y], TEXT, &format!("Armor: {armor}"));
     y += step;
-    let suggested = build
-        .suggested_rings
-        .iter()
-        .map(|ring| format!("{ring} x{}", backend::SUGGESTED_RING_COPIES))
+    // The four ring slots as Apply equips them; the spare copies are Apply's business, not this line's.
+    let equipped = (0..backend::SUGGESTED_RINGS)
+        .map(|slot| {
+            build
+                .suggested_rings
+                .get(slot)
+                .map_or("empty", String::as_str)
+        })
         .collect::<Vec<_>>()
         .join(", ");
     canvas.text(
         [min[0], y],
         TEXT,
-        &clip(canvas.ui, &format!("Rings: {suggested}"), max[0] - min[0]),
+        &clip(canvas.ui, &format!("Rings: {equipped}"), max[0] - min[0]),
     );
     y += step;
     if !build.common_rings.is_empty() {
