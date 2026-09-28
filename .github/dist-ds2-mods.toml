@@ -131,3 +131,11 @@ marker_effect_id = 833
 # ---------------------------------------------------------------------------------------------
 [estus_max]
 enabled = true
+
+# ---------------------------------------------------------------------------------------------
+# [item_warn] -- ON. A red X on the icon of any weapon, armour piece or spell your stats cannot
+# use, and on spells there are no attunement slots for. Display only: it changes no item and
+# reads nothing about other players. Set to false to hide the marks. Read at startup.
+# ---------------------------------------------------------------------------------------------
+[item_warn]
+enabled = true

@@ -154,7 +154,7 @@ if (( run_host_tests )); then
   cargo test -p ds2-sl2-core -p ds2-hotkey-config -p ds2-safe-input -p ds2-crash-logging-core \
     -p ds2-build-import-core -p ds2-save-file-core -p ds2-save-picker-core -p ds2-soul-memory-guard \
     -p ds2-build-url-core -p darksouls2 -p ds2-weapon-sync -p ds2-net-tick -p ds2-estus-max \
-    -p ds2-build-recommender-core
+    -p ds2-build-recommender-core -p ds2-music-probe
 
   echo "== windows-target tests (wine) =="
   # THE CRATES THAT MATTER MOST WERE THE ONES WITH NO EXECUTABLE TESTS. `ds2-loader` is
@@ -320,6 +320,9 @@ else
   # shape was refused by DS2-MODS-BLOCK-MAIN-PUSH on 2026-09-27 because it judged the hook's own
   # branch, main (bd ds2-mods-rs-zmep).
   python3 scripts/cupcake_push_target_branch.py --selftest | tail -1
+  # Which ds2-run.py a launch runs and whether it keeps F1-saved presets: stale worktree launchers
+  # overwrote the user's atmosphere presets twice on 2026-09-28.
+  python3 scripts/cupcake_ds2_run_presets.py --selftest | tail -1
   # Whether a ref's crate changes are comments only, by lexing both sides; a lexer that drifts into
   # reading a string literal as a comment would wave real code through.
   python3 scripts/cupcake_comment_only.py --selftest | tail -1

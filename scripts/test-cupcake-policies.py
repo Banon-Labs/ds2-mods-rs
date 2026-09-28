@@ -166,6 +166,20 @@ def make_python_links() -> None:
     atexit.register(lambda: LINK_OUT_OF_SCRIPTS.unlink(missing_ok=True))
 
 
+# ds2_run_preset_guard judges the ds2-run.py FILE a launch runs, through
+# .cupcake/signals/ds2_run_presets.sh. A launcher from before ENGINE_SHIPPED_PRESETS, written for
+# real inside scripts/ so bash_no_python_file_write does not refuse the case first, and removed at
+# exit so the checkout is left as found.
+STALE_LAUNCHER_DIR = REPO_ROOT / "scripts" / f"cupcake-test-stale-launcher-{os.getpid()}"
+STALE_LAUNCHER = STALE_LAUNCHER_DIR / "ds2-run.py"
+
+
+def make_stale_launcher() -> None:
+    STALE_LAUNCHER_DIR.mkdir(exist_ok=True)
+    STALE_LAUNCHER.write_text("SECOND_SIN_PINS = {}\n", encoding="utf-8")
+    atexit.register(lambda: shutil.rmtree(STALE_LAUNCHER_DIR, ignore_errors=True))
+
+
 def pr_view(body_fixture: str, head: str = STAMP_SHA) -> str:
     text = (REPO_ROOT / STAMP_FIXTURES / body_fixture).read_text(encoding="utf-8")
     return json.dumps({
@@ -301,6 +315,23 @@ def cases() -> list[PolicyCase]:
             False,
             "bash <<'EOF'\nsteam -applaunch 335300\nEOF",
         ),
+        # --- ds2_run_preset_guard ------------------------------------------------------------
+        # 2026-09-28: launchers from worktrees cut before ENGINE_SHIPPED_PRESETS overwrote the
+        # user's F1-saved lighting presets, twice. The signal reads the real files.
+        PolicyCase(
+            "deny-launch-of-a-launcher-without-engine-shipped-presets",
+            False,
+            f"python3 {STALE_LAUNCHER}",
+            expected_text="Merge origin/main into that branch first",
+        ),
+        PolicyCase(
+            "deny-stale-launcher-after-cd",
+            False,
+            f"cd {STALE_LAUNCHER_DIR} && python3 ds2-run.py --no-substate-floors",
+            expected_text="predates ENGINE_SHIPPED_PRESETS",
+        ),
+        PolicyCase("allow-stale-launcher-dry-run", True, f"python3 {STALE_LAUNCHER} --dry-run"),
+        PolicyCase("allow-current-launcher-launch", True, "python3 scripts/ds2-run.py"),
         # --- block_pgrep_full_match ---------------------------------------------------------
         # -f matched the agent's own command line twice in one session: once producing a
         # fabricated ALIVE claim, once killing the agent's own shell. -x cannot self-match.
@@ -308,6 +339,27 @@ def cases() -> list[PolicyCase]:
         PolicyCase("deny-pkill-full-match", False, "pkill -f ds2-run.py"),
         PolicyCase("allow-pgrep-exact-name", True, "pgrep -x DarkSoulsII.exe"),
         PolicyCase("allow-unrelated-grep-f", True, "grep -f patterns.txt haystack.txt"),
+        # --- block_compositor_input_injection -------------------------------------------------
+        # 2026-09-27: a python heredoc editing a script, whose body declared a field named after
+        # the tool, was refused. The tool name only counts in command position. Multi-line
+        # shapes that need the hook shim live in test-cupcake-delivered-shape.py's SHIM_CASES.
+        PolicyCase(
+            "allow-python-heredoc-naming-the-injector-as-a-variable",
+            True,
+            "python3 - <<'PY'\nsrc = 1\n    wtype: str | None = None\nprint(a.type)\nPY",
+        ),
+        PolicyCase(
+            "deny-injector-in-command-position",
+            False,
+            "hyprctl activewindow && sudo wtype -k F3",
+            expected_text="names no target window",
+        ),
+        PolicyCase(
+            "deny-injector-in-a-shell-wrapper-payload",
+            False,
+            "bash -c \"sleep 1; ydotool key 61:1 61:0\"",
+            expected_text="names no target window",
+        ),
         # --- git_block_main_commit -------------------------------------------------------------
         PolicyCase(
             "deny-commit-on-main",
@@ -934,6 +986,7 @@ def main() -> int:
     frida_evidence_log("build")
     make_other_repos()
     make_python_links()
+    make_stale_launcher()
 
     max_workers = min(8, max(1, len(cases_to_run)))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:

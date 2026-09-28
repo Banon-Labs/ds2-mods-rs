@@ -96,6 +96,7 @@ pub mod inventory_sort;
 pub mod item_warn;
 pub mod menu_row;
 pub mod message_box;
+pub mod music_probe;
 pub mod net_effects;
 pub mod offline;
 pub mod save_block;
@@ -379,6 +380,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_soul_memory_guard();
                 install_weapon_sync();
                 install_estus_max();
+                install_music_probe();
                 arm_fault(crash_config);
                 finish_boot_batch();
                 ds2_boot_timeline::mark("installs-done");
@@ -431,6 +433,7 @@ unsafe fn attach(module: *mut c_void) {
                 install_soul_memory_guard();
                 install_weapon_sync();
                 install_estus_max();
+                install_music_probe();
                 arm_fault(crash_config);
                 finish_boot_batch();
             });
@@ -1055,6 +1058,52 @@ fn install_estus_max() {
     }
 }
 
+/// Log the music events the game starts, pauses and stops, if `<Game>/ds2-mods.toml` asked.
+///
+/// Off unless `[music_probe] enabled = true`. It fronts four FMOD import slots in `.idata` and
+/// changes no call; `ds2-continue` fronts a different FMOD slot (`ChannelGroup::setVolume`).
+fn install_music_probe() {
+    let config = music_probe::MusicProbeConfig::load();
+    log_line(format_args!("{}", config.describe()));
+    if !config.enabled {
+        return;
+    }
+    ds2_music_probe::set_logger(log_line);
+    // SAFETY: the four slots are import slots recorded in `ds2-rva`, read out of the image's
+    // import descriptors. Called once, from the post-Arxan position, before any sound has started.
+    let outcome = unsafe { ds2_music_probe::install() };
+    if !outcome.installed {
+        log_line(format_args!(
+            "{} NOT INSTALLED -- no music event is logged this run",
+            ds2_music_probe::LOG_PREFIX
+        ));
+        return;
+    }
+    // The Music panel. Same two needs as the save picker's: `ds2-overlay`'s `Present` detour to
+    // draw and tick from, and the input harness, whose `hold` keeps the game still while the panel
+    // has the mouse and keyboard.
+    ds2_input_harness::set_logger(log_line);
+    // SAFETY: called from the post-Arxan position like every other install here. The harness's
+    // install checks each of its sites against the prologue `ds2-rva` records and refuses a moved
+    // one, and it is idempotent.
+    let hooked = unsafe { ds2_input_harness::install() };
+    if hooked != INPUT_HARNESS_SITES {
+        log_line(format_args!(
+            "{} only {hooked}/{INPUT_HARNESS_SITES} input devices can be held -- the game may \
+             move under the Music panel",
+            ds2_music_probe::LOG_PREFIX
+        ));
+    }
+    if !start_overlay() {
+        log_line(format_args!(
+            "{} ds2-overlay could not start, so there is no Music panel this run",
+            ds2_music_probe::LOG_PREFIX
+        ));
+        return;
+    }
+    ds2_music_probe::install_panel(&config.key);
+}
+
 /// Cap our weapon levels to the other players' in multiplayer, if `<Game>/ds2-mods.toml` asked.
 ///
 /// Off unless `[weapon_sync] enabled = true`. It shares the net session update with voice chat
@@ -1189,12 +1238,14 @@ fn install_menu_row() {
     // registration order, so the list a player writes is the order they see -- which only holds if
     // nothing else registers a row behind this loop's back.
     let mut manual_save_row = false;
+    let mut load_file_row = false;
     let mut file_row = false;
     let mut recommender_row = false;
     for row in &config.rows {
         let registered = register_row(*row);
         manual_save_row |= registered && *row == menu_row::Row::SaveGameToFile;
         recommender_row |= registered && *row == menu_row::Row::BuildRecommender;
+        load_file_row |= registered && *row == menu_row::Row::LoadCharacterFromFile;
         file_row |= registered
             && matches!(
                 *row,
@@ -1213,7 +1264,12 @@ fn install_menu_row() {
     // take the character's progress with it.
     let save_block = save_block::SaveBlockConfig::load();
     log_line(format_args!("{}", save_block.describe()));
-    if save_block.enabled && manual_save_row {
+    // The load row leaves the character being played without saving it, and the detour is what
+    // drops the saves the game asks for on the way out. So it is installed for that row too --
+    // passing every frame through untouched unless the row has armed a refusal.
+    let blocking = save_block.enabled && manual_save_row;
+    if blocking || load_file_row {
+        ds2_save_block::set_blocking(blocking);
         install_save_block();
     }
 

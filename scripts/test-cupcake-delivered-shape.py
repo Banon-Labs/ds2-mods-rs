@@ -620,6 +620,21 @@ def check_dead_logic_inventory() -> list[str]:
 # `cupcake eval` harness in test-cupcake-policies.py cannot model any of them,
 # because the newline rewrite that makes line 2 visible happens in the shim.
 SHIM_CASES = [
+    # ds2_run_preset_guard (2026-09-28). Its own commit was refused: the engine collapsed the
+    # heredoc onto one line, the signal looked for the terminator on a line of its own, never
+    # found it, and read the body's apostrophe as an unclosed quote.
+    (
+        "a commit message heredoc naming a launcher, with an apostrophe, is data",
+        "git commit -q -F - <<'EOF'\nfeat: the user's python3 old/scripts/ds2-run.py\nEOF\necho ok",
+        True,
+        "",
+    ),
+    (
+        "the line after that heredoc is a command again, and an unresolvable launch is refused",
+        "git commit -q -F - <<'EOF'\nfeat: the user's note\nEOF\npython3 $W/scripts/ds2-run.py",
+        False,
+        "the guard cannot tell which file that is",
+    ),
     (
         "two-line command whose SECOND line is guarded",
         f"echo hi\n{PUSH_MAIN}",
@@ -670,6 +685,26 @@ SHIM_CASES = [
         f"echo hi\n{ROOT_DELETE}",
         False,
         "would be affected by operation on",
+    ),
+    # block_compositor_input_injection, 2026-09-27: the input-injection tool name is a command only
+    # in command position, so a python heredoc that merely names it as a variable is data.
+    (
+        "a python heredoc naming the injector as a variable executes nothing",
+        "python3 - <<'PY'\nsrc = 1\n    wtype: str | None = None\nprint(a.type)\nPY",
+        True,
+        "",
+    ),
+    (
+        "the line after a python heredoc runs the injector",
+        "python3 - <<'PY'\n    wtype: str | None = None\nPY\nwtype -k F3",
+        False,
+        "names no target window",
+    ),
+    (
+        "an injector in a heredoc a SHELL reads runs",
+        "bash <<'EOF'\nydotool key 61:1 61:0\nEOF",
+        False,
+        "names no target window",
     ),
     (
         "a trailing backslash JOINS lines and must not become a separator",

@@ -5,7 +5,7 @@
 //! that has begun, kind 14's one-frame deferral -- be tested on the machine the code is written on
 //! rather than in a session with a character in it.
 
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 /// Frames a permit stays open, once armed: 600, which is ten seconds at 60 fps.
 ///
@@ -53,6 +53,79 @@ pub fn dropped_requests() -> u64 {
     DROPPED.load(Ordering::Acquire)
 }
 
+/// Whether the game's own saves are refused by default -- the `[save_block] enabled = true`
+/// feature. `true` unless the loader says otherwise, so a build that installs the detour for the
+/// feature and never calls [`set_blocking`] behaves as it always did.
+static BLOCKING: AtomicBool = AtomicBool::new(true);
+
+/// A refusal armed by [`refuse_saves`]: every save is erased, permits included, until
+/// [`allow_saves`].
+static REFUSING: AtomicBool = AtomicBool::new(false);
+
+/// Whether the detour is live. Set by the install; read by [`refuse_saves`] so its caller can say
+/// whether the refusal means anything.
+static INSTALLED: AtomicBool = AtomicBool::new(false);
+
+/// Choose whether the installed detour refuses the game's own saves by default. `false` installs it
+/// only for [`refuse_saves`]: every frame passes through untouched unless a refusal is armed.
+pub fn set_blocking(blocking: bool) {
+    BLOCKING.store(blocking, Ordering::Release);
+}
+
+/// Refuse every save the game asks for, from the next frame until [`allow_saves`].
+///
+/// For `ds2-save-file`'s Load Character from File, which leaves the character being played without
+/// saving it. Returns whether the detour is installed; `false` means the call changed nothing and
+/// the game will save as it otherwise would.
+pub fn refuse_saves() -> bool {
+    REFUSING.store(true, Ordering::Release);
+    PERMIT.store(0, Ordering::Release);
+    INSTALLED.load(Ordering::Acquire)
+}
+
+/// End a refusal armed by [`refuse_saves`]. Returns whether one was armed.
+pub fn allow_saves() -> bool {
+    REFUSING.swap(false, Ordering::AcqRel)
+}
+
+/// Whether a refusal is armed.
+pub fn refusing() -> bool {
+    REFUSING.load(Ordering::Acquire)
+}
+
+/// Whether the detour is installed.
+pub fn installed() -> bool {
+    INSTALLED.load(Ordering::Acquire)
+}
+
+/// Record that the detour is live. Called once by this crate's install; public only so the host
+/// build, which has no install, does not see it as unused.
+pub fn mark_installed() {
+    INSTALLED.store(true, Ordering::Release);
+}
+
+/// What the detour is doing this frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// Installed only for refusals, and none is armed: the game saves as it always did.
+    Open,
+    /// `[save_block] enabled = true`: refuse unless a row's permit is open.
+    Blocking,
+    /// A refusal is armed: refuse everything, permits included.
+    Refusing,
+}
+
+/// The mode the live flags describe.
+pub fn mode() -> Mode {
+    if REFUSING.load(Ordering::Acquire) {
+        Mode::Refusing
+    } else if BLOCKING.load(Ordering::Acquire) {
+        Mode::Blocking
+    } else {
+        Mode::Open
+    }
+}
+
 /// The five fields of `SaveLoadSystem` this feature reads, as they were at the top of one frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Frame {
@@ -88,21 +161,34 @@ pub enum Decision {
 /// frame `in_flight` is set and both request flags are clear -- exactly the state the game leaves
 /// behind when it starts a save. Without that, a permit armed for one save would stay open for the
 /// rest of its ten seconds and let the next bonfire through with it.
-pub fn decide(frame: Frame, permit: u32) -> (Decision, u32) {
+///
+/// In [`Mode::Refusing`] the permit is ignored and closed: a refusal is a promise that nothing is
+/// written, and a row pressed during one does not get to break it. In [`Mode::Open`] nothing is
+/// erased and the permit only runs down.
+pub fn decide(frame: Frame, permit: u32, mode: Mode) -> (Decision, u32) {
+    match mode {
+        Mode::Refusing => return (erase_or_hold(frame), 0),
+        Mode::Open => return (Decision::Pass, permit.saturating_sub(1)),
+        Mode::Blocking => {}
+    }
     if permit == 0 {
-        let decision = if frame.wanted || frame.deferred {
-            Decision::Erase {
-                kind: frame.kind,
-                deferred: frame.deferred,
-            }
-        } else {
-            Decision::HoldTimer
-        };
-        return (decision, 0);
+        return (erase_or_hold(frame), 0);
     }
     let started = frame.in_flight && !frame.wanted && !frame.deferred;
     let remaining = if started { 0 } else { permit - 1 };
     (Decision::Pass, remaining)
+}
+
+/// Erase a pending request, or hold the timer when there is none.
+fn erase_or_hold(frame: Frame) -> Decision {
+    if frame.wanted || frame.deferred {
+        Decision::Erase {
+            kind: frame.kind,
+            deferred: frame.deferred,
+        }
+    } else {
+        Decision::HoldTimer
+    }
 }
 
 /// Run [`decide`] against the live permit counter and store what it becomes.
@@ -110,7 +196,7 @@ pub fn decide(frame: Frame, permit: u32) -> (Decision, u32) {
 /// Separate from `decide` so the state machine stays a function of its arguments: this is the only
 /// place the counter is read and written on the game thread.
 pub fn step(frame: Frame) -> Decision {
-    let (decision, remaining) = decide(frame, PERMIT.load(Ordering::Acquire));
+    let (decision, remaining) = decide(frame, PERMIT.load(Ordering::Acquire), mode());
     PERMIT.store(remaining, Ordering::Release);
     if matches!(decision, Decision::Erase { .. }) {
         DROPPED.fetch_add(1, Ordering::AcqRel);
@@ -148,9 +234,47 @@ mod tests {
         15
     }
 
+    /// The configured feature's decision, which is what every test below `refusing_*` is about.
+    fn blocking(frame: Frame, permit: u32) -> (Decision, u32) {
+        decide(frame, permit, Mode::Blocking)
+    }
+
+    const WANTED: Frame = Frame {
+        wanted: true,
+        deferred: false,
+        in_flight: false,
+        kind: 10,
+    };
+
+    /// A refusal erases the save on the way out of a game even with a row's permit open.
+    #[test]
+    fn refusing_erases_through_an_open_permit() {
+        assert_eq!(
+            decide(WANTED, PERMIT_FRAMES, Mode::Refusing),
+            (
+                Decision::Erase {
+                    kind: 10,
+                    deferred: false
+                },
+                0
+            )
+        );
+        assert_eq!(
+            decide(IDLE, PERMIT_FRAMES, Mode::Refusing),
+            (Decision::HoldTimer, 0)
+        );
+    }
+
+    /// Installed only for refusals and none armed: the game saves exactly as it always did.
+    #[test]
+    fn open_passes_everything_through() {
+        assert_eq!(decide(WANTED, 0, Mode::Open), (Decision::Pass, 0));
+        assert_eq!(decide(IDLE, 3, Mode::Open), (Decision::Pass, 2));
+    }
+
     #[test]
     fn nothing_pending_only_holds_the_timer() {
-        assert_eq!(decide(IDLE, 0), (Decision::HoldTimer, 0));
+        assert_eq!(blocking(IDLE, 0), (Decision::HoldTimer, 0));
     }
 
     #[test]
@@ -161,7 +285,7 @@ mod tests {
             ..IDLE
         };
         assert_eq!(
-            decide(frame, 0),
+            blocking(frame, 0),
             (
                 Decision::Erase {
                     kind: 2,
@@ -180,7 +304,7 @@ mod tests {
             ..IDLE
         };
         assert_eq!(
-            decide(frame, 0),
+            blocking(frame, 0),
             (
                 Decision::Erase {
                     kind: 14,
@@ -199,7 +323,7 @@ mod tests {
             ..IDLE
         };
         assert_eq!(
-            decide(frame, PERMIT_FRAMES),
+            blocking(frame, PERMIT_FRAMES),
             (Decision::Pass, PERMIT_FRAMES - 1)
         );
     }
@@ -210,7 +334,7 @@ mod tests {
             in_flight: true,
             ..IDLE
         };
-        assert_eq!(decide(started, PERMIT_FRAMES), (Decision::Pass, 0));
+        assert_eq!(blocking(started, PERMIT_FRAMES), (Decision::Pass, 0));
     }
 
     #[test]
@@ -221,7 +345,7 @@ mod tests {
             kind: 2,
             ..IDLE
         };
-        assert_eq!(decide(frame, 10), (Decision::Pass, 9));
+        assert_eq!(blocking(frame, 10), (Decision::Pass, 9));
     }
 
     #[test]
@@ -231,9 +355,12 @@ mod tests {
             kind: 2,
             ..IDLE
         };
-        let (decision, remaining) = decide(frame, 1);
+        let (decision, remaining) = blocking(frame, 1);
         assert_eq!((decision, remaining), (Decision::Pass, 0));
-        assert!(matches!(decide(frame, remaining).0, Decision::Erase { .. }));
+        assert!(matches!(
+            blocking(frame, remaining).0,
+            Decision::Erase { .. }
+        ));
     }
 
     #[test]
