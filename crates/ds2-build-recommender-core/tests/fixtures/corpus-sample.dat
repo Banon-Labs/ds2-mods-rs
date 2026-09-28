@@ -1,4 +1,4 @@
-ds2-build-recommender-data 4
+ds2-build-recommender-data 5
 # 5289 builds; written by scripts/ds2-builds-recommend.py --export-backend
 C	warrior	Warrior	12	7	6	6	5	15	11	5	5	5
 C	knight	Knight	13	12	6	7	4	11	8	9	3	6
@@ -16,6 +16,149 @@ T	darkATKBonus	0	50	54	56	59	61	63	65	68	70	72	76	81	85	90	94	99	103	108	112	117
 T	auxATKBonus	0	0	0	0	50	50	50	50	51	51	51	51	52	52	52	52	53	53	53	53	53	53	53	53	54	54	54	54	55	55	55	55	56	56	56	56	56	56	56	56	57	57	57	57	61	61	61	61	66	66	66	66	70	70	70	70	75	75	75	75	79	79	79	79	84	84	84	84	88	88	88	88	93	93	93	93	97	97	97	97	102	102	102	102	105	105	105	105	108	108	108	108	111	111	111	111	114	114	114	114	117	117	117	117	120	120	120	120	123	123	123	123	126	126	126	126	129	129	129	129	132	132	132	132	133	133	133	133	135	135	135	135	136	136	136	136	138	138	138	138	139	139	139	139	141	141	141	141	142	142	142	142	144	144	144	144	145	145	145	145	147	147	147	147	147	147	147	147	148	148	148	148	149	149	149	149	150	150	150	150	151	151	151	151	151	151	151	151	152	152	152	152	153	153	153	153	154	154	154	154	155	155	155	155	155	155	155	155	156	156	156	156	157	157	157	157	158	158	158	158	158	158	158	158	159	159	159	159	160	160	160	160	161	161	161	161	161	161	161	161	162	162	162	162	162	162	162	162	163	163	163	163	164	164	164	164	165	165	165	165	166	166	166	166	166	166	166	166	167	167	167	167	168	168	168	168	169	169	169	169	170	170	170	170	171	171	171	171	173	173	173	173	174	174	174	174	176	176	176	176	177	177	177	177	179	179	179	179	180	180	180	180	182	182	182	182	183	183	183	183	185	185	185	185	185	185	185	185	186	186	186	186	187	187	187	187	188	188	188	188	188	188	188	188	189	189	189	189	190	190	190	190	191	191	191	191	191	191	191	191	192	192	192	192	192	192	192	192	193	193	193	193	194	194	194	194	195	195	195	195	196	196	196	196	197	197	197	197	198	198	198	198	199	199	199	199	200
 T	mundaneATKBonus	0	50	62	68	74	80	86	92	98	104	110	116	122	128	134	140	146	152	158	164	170	173	176	179	182	185	188	191	194	197	200	201	202	203	204	205	206	207	208	209	210	211	213	214	216	217	219	220	222	223	225	225	226	226	227	227	228	228	229	229	230	230	231	231	232	232	233	233	234	234	235	235	236	236	237	237	238	238	239	239	240	240	241	241	242	242	243	243	244	244	245	245	246	246	247	247	248	248	249	250
 T	equipmentLoad	0	40	41.5	43	44.5	46	47.5	49	50.5	52	53.5	55	56.5	58	59.5	61	62.5	64	65.5	67	68.5	70	71.5	73	74.5	76	77.5	79	80.5	82	83	84	85	86	87	88	89	90	91	92	93	94	95	96	97	98	99	100	101	102	102.5	103	103.5	104	104.5	105	105.5	106	106.5	107	107.5	108	108.5	109	109.5	110	110.5	111	111.5	112	112.5	112.5	113	113	113.5	113.5	114	114	114.5	114.5	115	115	115.5	115.5	116	116	116.5	116.5	117	117	117.5	117.5	118	118	118.5	118.5	119	119	119.5	120
+T	attunementSlots	0	0	0	0	0	0	0	0	0	0	1	1	1	2	2	2	3	3	3	3	4	4	4	4	4	5	5	5	5	5	6	6	6	6	6	6	6	6	6	6	7	7	7	7	7	7	7	7	7	7	8	8	8	8	8	8	8	8	8	8	9	9	9	9	9	9	9	9	9	9	9	9	9	9	9	10	10	10	10	10	10	10	10	10	10	10	10	10	10	10	10	10	10	10	10	10	10	10	10	10
+T	castMagic	0	50	50	51	51	51	52	52	53	53	53	58	63	68	74	79	84	90	95	100	106	106	106	107	107	108	108	108	109	109	110	113	116	119	122	125	128	131	134	137	140	141	143	144	146	147	149	150	152	153	155	155	156	157	158	158	159	160	161	161	162	162	163	164	165	166	166	167	168	169	170	171	173	174	176	177	179	180	182	183	185	185	186	187	188	188	189	190	191	191	192	192	193	194	195	196	197	198	199	200
+T	castFire	0	50	54	56	59	61	63	65	68	70	72	76	81	85	90	94	99	103	108	112	117	120	123	126	129	132	135	138	141	144	147	147	148	149	150	151	151	152	153	154	155	155	156	157	158	158	159	160	161	161	162	162	163	164	165	166	166	167	168	169	170	170	171	172	173	173	174	175	176	176	177	177	178	179	180	181	181	182	183	184	185	185	186	187	188	188	189	190	191	191	192	192	193	194	195	196	197	198	199	200
+T	castLightning	0	50	51	52	53	53	54	55	56	56	57	59	61	63	66	68	70	73	75	77	80	82	84	86	89	91	93	95	98	100	102	105	109	113	117	121	124	128	132	136	140	141	143	144	146	147	149	150	152	153	155	155	156	157	158	158	159	160	161	161	162	162	163	164	165	166	166	167	168	169	170	171	173	174	176	177	179	180	182	183	185	185	186	187	188	188	189	190	191	191	192	192	193	194	195	196	197	198	199	200
+T	castDark	0	50	54	56	59	61	63	65	68	70	72	76	81	85	90	94	99	103	108	112	117	121	126	130	135	139	144	148	153	157	162	162	163	164	165	166	166	167	168	169	170	170	171	172	173	173	174	175	176	176	177	177	178	179	180	181	181	182	183	184	185	185	185	186	186	186	187	187	188	188	188	188	188	189	189	190	190	191	191	192	192	192	192	193	193	194	194	194	195	195	196	196	196	197	197	198	198	199	199	200
+Z	Heal	Heal	1	1	7:0,8:12
+Z	Med_Heal	Med Heal	1	1	7:0,8:18
+Z	Great_Heal_Excerpt	Great Heal Excerpt	1	1	7:0,8:14
+Z	Great_Heal	Great Heal	1	1	7:0,8:28
+Z	Soothing_Sunlight	Soothing Sunlight	2	1	7:0,8:52
+Z	Replenishment	Replenishment	1	1	7:0,8:16
+Z	Resplendent_Life	Resplendent Life	2	1	7:0,8:25
+Z	Bountiful_Sunlight	Bountiful Sunlight	3	1	7:0,8:38
+Z	Caressing_Prayer	Caressing Prayer	1	1	7:0,8:15
+Z	Force	Force	1	1	7:0,8:12
+Z	Wrath_of_the_Gods	Wrath of the Gods	1	1	7:0,8:30
+Z	Emit_Force	Emit Force	1	1	7:0,8:20
+Z	Heavenly_Thunder	Heavenly Thunder	1	1	7:0,8:17
+Z	Lightning_Spear	Lightning Spear	1	1	7:0,8:22
+Z	Great_Lightning_Spear	Great Lightning Spear	1	1	7:0,8:42
+Z	Sunlight_Spear	Sunlight Spear	2	1	7:0,8:55
+Z	Soul_Appease	Soul Appease	1	1	7:0,8:19
+Z	Blinding_Bolt	Blinding Bolt	1	1	7:0,8:65
+Z	Magic_Barrier	Magic Barrier	1	1	7:0,8:14
+Z	Great_Magic_Barrier	Great Magic Barrier	1	1	7:0,8:28
+Z	Homeward	Homeward	1	1	7:0,8:18
+Z	Guidance	Guidance	1	1	7:0,8:12
+Z	Sacred_Oath	Sacred Oath	4	1	7:0,8:25
+Z	Unveil	Unveil	1	1	7:0,8:13
+Z	Perseverance	Perseverance	1	1	7:0,8:15
+Z	Sunlight_Blade	Sunlight Blade	1	1	7:0,8:36
+Z	Denial	Denial	3	1	7:0,8:24
+Z	Splintering_Lightning_Spear	Splintering Lightning Spear	1	1	7:0,8:50
+Z	Soul_Arrow	Soul Arrow	1	0	7:10,8:0
+Z	Great_Soul_Arrow	Great Soul Arrow	1	0	7:14,8:0
+Z	Heavy_Soul_Arrow	Heavy Soul Arrow	1	0	7:12,8:0
+Z	Great_Heavy_Soul_Arrow	Great Heavy Soul Arrow	1	0	7:16,8:0
+Z	Homing_Soul_Arrow	Homing Soul Arrow	1	0	7:25,8:0
+Z	Heavy_Homing_Soul_Arrow	Heavy Homing Soul Arrow	1	0	7:35,8:0
+Z	Homing_Soul_Mass	Homing Soulmass	1	0	7:24,8:0
+Z	Homing_Crystal_Soul_Mass	Homing Crystal Soulmass	1	0	7:32,8:0
+Z	Soul_Spear	Soul Spear	1	0	7:40,8:0
+Z	Crystal_Soul_Spear	Crystal Soul Spear	2	0	7:53,8:0
+Z	Shockwave	Shockwave	1	0	7:13,8:0
+Z	Soul_Spear_Barrage	Soul Spear Barrage	1	0	7:17,8:0
+Z	Soul_Shower	Soul Shower	1	0	7:22,8:0
+Z	Soul_Greatsword	Soul Greatsword	1	0	7:27,8:0
+Z	Soul_Vortex	Soul Vortex	1	0	7:37,8:0
+Z	Soul_Bolt	Soul Bolt	1	0	7:45,8:0
+Z	Soul_Geyser	Soul Geyser	1	0	7:64,8:0
+Z	Magic_Weapon	Magic Weapon	1	0	7:10,8:0
+Z	Great_Magic_Weapon	Great Magic Weapon	1	0	7:18,8:0
+Z	Crystal_Magic_Weapon	Crystal Magic Weapon	1	0	7:28,8:0
+Z	Strong_Magic_Shield	Strong Magic Shield	1	0	7:18,8:0
+Z	Yearn	Yearn	1	0	7:19,8:0
+Z	Hush	Hush	1	0	7:15,8:0
+Z	Fall_Control	Fall Control	1	0	7:15,8:0
+Z	Hidden_Weapon	Hidden Weapon	1	0	7:14,8:0
+Z	Repair	Repair	1	0	7:15,8:0
+Z	Cast_Light	Cast Light	1	0	7:14,8:0
+Z	Chameleon	Chameleon	1	0	7:14,8:0
+Z	Unleash_Magic	Unleash Magic	3	0	7:58,8:0
+Z	Focus_Souls	Focus Souls	2	0	7:60,8:0
+Z	Soul_Flash	Soul Flash	1	0	7:28,8:0
+Z	Fireball	Fireball	1	2	7:0,8:0
+Z	Fire_Orb	Fire Orb	1	2	7:0,8:0
+Z	Great_Fireball	Great Fireball	1	2	7:0,8:0
+Z	Great_Chaos_Fireball	Great Chaos Fireball	2	2	7:0,8:0
+Z	Firestorm	Firestorm	1	2	7:0,8:0
+Z	Fire_Tempest	Fire Tempest	1	2	7:0,8:0
+Z	Chaos_Storm	Chaos Storm	1	2	7:0,8:0
+Z	Combustion	Combustion	1	2	7:0,8:0
+Z	Great_Combustion	Great Combustion	1	2	7:0,8:0
+Z	Fire_Whip	Fire Whip	1	2	7:0,8:0
+Z	Poison_Mist	Poison Mist	1	2	7:0,8:0
+Z	Toxic_Mist	Toxic Mist	1	2	7:0,8:0
+Z	Acid_Surge	Acid Surge	1	2	7:0,8:0
+Z	Lingering_Flame	Lingering Flame	2	2	7:0,8:0
+Z	Flame_Swathe	Flame Swathe	1	2	7:0,8:0
+Z	Forbidden_Sun	Forbidden Sun	3	2	7:0,8:0
+Z	Flame_Weapon	Flame Weapon	1	2	7:0,8:0
+Z	Flash_Sweat	Flash Sweat	1	2	7:0,8:0
+Z	Iron_Flesh	Iron Flesh	1	2	7:0,8:0
+Z	Warmth	Warmth	1	2	7:0,8:0
+Z	Immolation	Immolation	1	2	7:0,8:0
+Z	Outcry	Outcry	2	2	7:0,8:0
+Z	Dance_of_Fire	Dance of Fire	1	2	7:0,8:0
+Z	Fire_Snake	Fire Snake	2	2	7:0,8:0
+Z	Dark_Orb	Dark Orb	1	3	7:12,8:10
+Z	Dark_Hail	Dark Hail	2	3	7:19,8:12
+Z	Dark_Fog	Dark Fog	2	3	7:25,8:14
+Z	Affinity	Affinity	3	3	7:40,8:24
+Z	Dead_Again	Dead Again	2	3	7:22,8:20
+Z	Dark_Weapon	Dark Weapon	1	3	7:16,8:14
+Z	Whisper_of_Despair	Whisper of Despair	1	3	7:24,8:18
+Z	Repel	Repel	3	3	7:35,8:27
+Z	Twisted_Barricade	Twisted Barricade	2	3	7:38,8:25
+Z	Numbness	Numbness	2	3	7:42,8:30
+Z	Scraps_of_Life	Scraps of Life	1	4	7:8,8:12
+Z	Darkstorm	Darkstorm	2	4	7:12,8:21
+Z	Resonant_Soul	Resonant Soul	2	4	7:10,8:18
+Z	Great_Resonant_Soul	Great Resonant Soul	2	4	7:13,8:26
+Z	Climax	Climax	4	4	7:30,8:47
+Z	Resonant_Flesh	Resonant Flesh	1	4	7:11,8:19
+Z	Resonant_Weapon	Resonant Weapon	2	4	7:15,8:24
+Z	Lifedrain_Patch	Lifedrain Patch	1	4	7:20,8:35
+Z	Profound_Still	Profound Still	2	4	7:20,8:42
+Z	Dark_Greatsword	Dark Greatsword	2	3	7:55,8:29
+Z	Promised_Walk_of_Peace	Promised Walk of Peace	2	4	7:30,8:40
+Z	Recollection	Recollection	1	3	7:35,8:30
+Z	Dark_Dance	Dark Dance	2	4	7:22,8:60
+Y	Mace_of_the_Insolent	Mace of the Insolent	14	4:15,5:10,8:10	0.0:0.0	0.0:0.0	90.0:0.1	160.0:0.2
+Y	Pilgrims_Spontoon	Pilgrim's Spontoon	03	4:11,5:12,7:30,8:30	180.0:0.4	0.0:0.0	0.0:0.0	180.0:0.4
+Y	Blue_Flame	Blue Flame	0	4:13,5:15,7:12	180.0:0.4	0.0:0.0	0.0:0.0	0.0:0.0
+Y	Sorcerers_Twinblade	Sorcerer's Twinblade	0	4:11,5:20,7:20,8:6	100.0:0.35	0.0:0.0	0.0:0.0	100.0:0.0
+Y	Sanctum_Shield	Sanctum Shield	0134	4:6,5:7,7:18,8:18	180.0:0.4	0.0:0.0	120.0:0.4	180.0:0.4
+Y	Pyromancy_Flame	Pyromancy Flame	2	-	0.0:0.0	250.0:1.3	0.0:0.0	0.0:0.0
+Y	Dark_Pyromancy_Flame	Dark Pyromancy Flame	2	-	0.0:0.0	300.0:1.1	0.0:0.0	0.0:0.0
+Y	Archdrake_Staff	Archdrake Staff	03	7:18,8:15	190.0:0.8	0.0:0.0	0.0:0.0	230.0:0.8
+Y	Azals_Staff	Azal's Staff	03	7:35,8:18	160.0:2.7	0.0:0.0	0.0:0.0	160.0:2.7
+Y	Black_Witchs_Staff	Black Witch's Staff	0134	7:20,8:20	220.0:0.95	220.0:0.5	220.0:0.55	220.0:0.95
+Y	Bat_Staff	Bat Staff	03	7:25	205.0:0.55	0.0:0.0	0.0:0.0	205.0:0.8
+Y	Bone_Staff	Bone Staff	03	7:20	190.0:0.35	0.0:0.0	0.0:0.0	190.0:1.0
+Y	Lizard_Staff	Lizard Staff	03	7:18	220.0:1.0	0.0:0.0	0.0:0.0	200.0:0.55
+Y	Olenfords_Staff	Olenford's Staff	03	7:40	210.0:0.678	0.0:0.0	0.0:0.0	250.0:0.978
+Y	Retainer_Staff	Retainer Staff	03	7:18	300.0:0.0	0.0:0.0	0.0:0.0	300.0:0.0
+Y	Sorcerers_Staff	Sorcerer's Staff	03	7:10	225.0:0.55	0.0:0.0	0.0:0.0	225.0:0.55
+Y	Staff_of_Amana	Staff of Amana	03	7:35	230.0:1.05	0.0:0.0	0.0:0.0	230.0:0.55
+Y	Staff_of_Wisdom	Staff of Wisdom	0	7:50	270.0:1.15	0.0:0.0	0.0:0.0	0.0:0.0
+Y	Sunset_Staff	Sunset Staff	03	7:22,8:18	160.0:0.9	0.0:0.0	0.0:0.0	290.0:1.15
+Y	Transgressors_Staff	Transgressor's Staff	03	7:15,8:12	160.0:0.7	0.0:0.0	0.0:0.0	210.0:1.0
+Y	Witchtree_Branch	Witchtree Branch	03	7:16	250.0:0.55	0.0:0.0	0.0:0.0	250.0:0.8
+Y	Archdrake_Chime	Archdrake Chime	14	8:22	0.0:0.0	0.0:0.0	210.0:0.7	210.0:0.7
+Y	Caithas_Chime	Caitha's Chime	4	7:18,8:22	0.0:0.0	0.0:0.0	0.0:0.0	250.0:1.0
+Y	Chime_of_Screams	Chime of Screams	14	8:26	0.0:0.0	0.0:0.0	190.0:0.65	190.0:0.65
+Y	Chime_of_Want	Chime of Want	14	7:15,8:40	0.0:0.0	0.0:0.0	210.0:0.85	250.0:1.3
+Y	Clerics_Sacred_Chime	Cleric's Sacred Chime	14	8:10	0.0:0.0	0.0:0.0	180.0:0.75	160.0:0.55
+Y	Disc_Chime	Disc Chime	14	8:18	0.0:0.0	0.0:0.0	180.0:0.8	180.0:0.15
+Y	Dragon_Chime	Dragon Chime	14	8:50	0.0:0.0	0.0:0.0	250.0:1.05	200.0:0.8
+Y	Idols_Chime	Idol's Chime	14	8:25	0.0:0.0	0.0:0.0	220.0:0.35	225.0:0.85
+Y	Priests_Chime	Priest's Chime	14	8:18	0.0:0.0	0.0:0.0	190.0:1.0	190.0:0.35
+Y	Protective_Chime	Protective Chime	14	8:25	0.0:0.0	0.0:0.0	220.0:0.55	220.0:0.5
+Y	Witchtree_Bellvine	Witchtree Bellvine	14	8:15	0.0:0.0	0.0:0.0	200.0:0.9	200.0:0.55
 W	Bare_Fists	Bare Fists	Fists	-	0	-	0.0	0.0	0
 I	N	10	0	0	0	0	0	0	0.5	0.15	0	0	0	0	0	0	1
 W	Bandit_Axe	Bandit Axe	Axe	-	5	4:18,5:5	0.0	0.0	1.2

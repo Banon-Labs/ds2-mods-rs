@@ -24,8 +24,8 @@ use std::path::Path;
 use ds2_build_import_core::Infusion;
 
 use crate::backend::{
-    Calibration, GeneratedBuild, OptimizedBuild, Outcome, RecommenderBackend, ResultRow,
-    WEAPONS_1H_TOP, WEAPONS_2H_ONLY_TOP,
+    Calibration, CatalystPick, GeneratedBuild, OptimizedBuild, Outcome, RecommenderBackend,
+    ResultRow, SpellRow, WEAPONS_1H_TOP, WEAPONS_2H_ONLY_TOP,
 };
 use crate::model::{Grip, Objective, STAT_COUNT, StatusFilter, WeaponsForOpts};
 use crate::weapons;
@@ -34,7 +34,7 @@ use crate::weapons;
 pub const DATA_FILE_NAME: &str = "ds2-build-recommender.dat";
 
 /// The file's first line. A different one is a file this port does not read.
-pub const FORMAT: &str = "ds2-build-recommender-data 4";
+pub const FORMAT: &str = "ds2-build-recommender-data 5";
 
 /// Nine stats as the script computes with them, in [`crate::model::STAT_LABELS`] order.
 type Stats = [i32; STAT_COUNT];
@@ -192,7 +192,43 @@ struct Tables {
     aux: Table,
     mundane: Table,
     equip_load: Table,
+    /// Attunement slots per ATT: the script's `att_slots`.
+    attunement_slots: Table,
+    /// Per-stat cast-power bonus, magic, fire, lightning, dark: the script's `cast_bonus`.
+    cast: [Table; 4],
 }
+
+/// A spell the file lists: the script's `data.spells` row with its `spell_req`.
+#[derive(Clone, Debug)]
+struct Spell {
+    key: String,
+    name: String,
+    slots: i32,
+    /// `SpellParam.spellCategory`, `-1` when the script did not read it.
+    category: i32,
+    require: Vec<(usize, i32)>,
+}
+
+/// A catalyst the file lists: the script's `data.catalysts` row.
+#[derive(Clone, Debug)]
+struct Catalyst {
+    name: String,
+    /// The spell categories it casts.
+    categories: Vec<i32>,
+    require: Vec<(usize, i32)>,
+    /// Per element, magic, fire, lightning, dark: base and scale.
+    power: [(f64, f64); 4],
+}
+
+/// The script's `SPELL_SCHOOLS`: per spell category, its label and the element (an index into
+/// [`Catalyst::power`]) its cast power is read in.
+const SPELL_SCHOOLS: [(&str, usize); 5] = [
+    ("sorcery", 0),
+    ("miracle", 2),
+    ("pyromancy", 1),
+    ("hex", 3),
+    ("hex", 3),
+];
 
 /// A starting class.
 #[derive(Clone, Debug)]
@@ -421,6 +457,8 @@ pub struct CorpusBackend {
     calibration: Option<Calibration>,
     /// Rings at least a tenth of all builds wear, most worn first, as indices into `rings`.
     common: Vec<usize>,
+    spells: Vec<Spell>,
+    catalysts: Vec<Catalyst>,
     corpus: Vec<CorpusBuild>,
 }
 
@@ -567,6 +605,11 @@ impl CorpusBackend {
                     "auxATKBonus" => &mut tables.aux,
                     "mundaneATKBonus" => &mut tables.mundane,
                     "equipmentLoad" => &mut tables.equip_load,
+                    "attunementSlots" => &mut tables.attunement_slots,
+                    "castMagic" => &mut tables.cast[0],
+                    "castFire" => &mut tables.cast[1],
+                    "castLightning" => &mut tables.cast[2],
+                    "castDark" => &mut tables.cast[3],
                     _ => return Ok(()),
                 };
                 *slot = Table(values);
@@ -787,6 +830,49 @@ impl CorpusBackend {
                     .ok_or_else(|| bad(line, "a common ring that is not a ring"))?;
                 self.common.push(index);
             }
+            "Z" => {
+                let key = next("spell key")?.to_owned();
+                let name = next("spell name")?.to_owned();
+                let slots = int(Some(next("slots")?), line)?;
+                let category = int(Some(next("category")?), line)?;
+                let require = stat_pairs(fields.next(), line)?;
+                self.spells.push(Spell {
+                    key,
+                    name,
+                    slots,
+                    category,
+                    require,
+                });
+            }
+            "Y" => {
+                next("catalyst key")?;
+                let name = next("catalyst name")?.to_owned();
+                let categories = next("categories")?
+                    .chars()
+                    .map(|digit| {
+                        digit
+                            .to_digit(10)
+                            .and_then(|digit| i32::try_from(digit).ok())
+                            .filter(|&category| usize::try_from(category).unwrap_or(9) < 5)
+                            .ok_or_else(|| bad(line, "spell category"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let require = stat_pairs(fields.next(), line)?;
+                let mut power = [(0.0, 0.0); 4];
+                for terms in &mut power {
+                    let (base, scale) = fields
+                        .next()
+                        .and_then(|pair| pair.split_once(':'))
+                        .ok_or_else(|| bad(line, "base:scale"))?;
+                    *terms = (float(Some(base), line)?, float(Some(scale), line)?);
+                }
+                self.catalysts.push(Catalyst {
+                    name,
+                    categories,
+                    require,
+                    power,
+                });
+            }
             "X" => {
                 let bracket = usize::try_from(int(Some(next("bracket")?), line)?)
                     .ok()
@@ -850,6 +936,7 @@ impl CorpusBackend {
             ("auxATKBonus", &tables.aux),
             ("mundaneATKBonus", &tables.mundane),
             ("equipmentLoad", &tables.equip_load),
+            ("attunementSlots", &tables.attunement_slots),
         ] {
             if table.0.is_empty() {
                 return Err(format!("no {name} table"));
@@ -1210,8 +1297,100 @@ impl CorpusBackend {
         }
     }
 
+    /// The script's `spell_floors`: the least each stat may be for `spells` (indices into
+    /// `self.spells`) to be attuned and cast -- each requirement at the highest any needs, ATT at the
+    /// least whose slots hold their summed cost, every other stat 0. `None` when no ATT holds them.
+    fn spell_floors(&self, spells: &[usize]) -> Option<Stats> {
+        let mut need = [0; STAT_COUNT];
+        for &spell in spells {
+            for &(stat, value) in &self.spells[spell].require {
+                need[stat] = need[stat].max(value);
+            }
+        }
+        let cost: i32 = spells.iter().map(|&spell| self.spells[spell].slots).sum();
+        let slots = &self.tables.attunement_slots.0;
+        let att = slots.iter().position(|&n| n >= f64::from(cost))?;
+        need[ATT] = i32::try_from(att).ok()?;
+        Some(need)
+    }
+
+    /// The script's `slots_of`: the attunement slots `stats`' ATT gives.
+    fn slots_of(&self, stats: &Stats) -> i32 {
+        self.tables.attunement_slots.at(stats[ATT]) as i32
+    }
+
+    /// The script's `cast_power`: `catalyst`'s full-upgrade cast power in `element` (an index into
+    /// [`Catalyst::power`]) at `stats`.
+    fn cast_power(&self, catalyst: &Catalyst, element: usize, stats: &Stats) -> f64 {
+        let (base, scale) = catalyst.power[element];
+        let (int, fth) = (stats[INT], stats[FTH]);
+        let at = match element {
+            0 => int,
+            1 => (int + fth).div_euclid(2),
+            2 => fth,
+            _ => int.min(fth),
+        };
+        base + scale * self.tables.cast[element].at(at)
+    }
+
+    /// The script's `best_catalysts`: for each spell category `spells` need, in category order,
+    /// the catalyst with the most cast power there at `stats` among those that cast it and whose
+    /// requirements `stats` meet, first in file order on a tie.
+    fn best_catalysts(&self, spells: &[usize], stats: &Stats) -> Vec<CatalystPick> {
+        let mut categories: Vec<i32> = spells
+            .iter()
+            .map(|&spell| self.spells[spell].category)
+            .filter(|&category| category >= 0)
+            .collect();
+        categories.sort_unstable();
+        categories.dedup();
+        let mut out = Vec::new();
+        for category in categories {
+            let Some(&(school, element)) = usize::try_from(category)
+                .ok()
+                .and_then(|at| SPELL_SCHOOLS.get(at))
+            else {
+                continue;
+            };
+            // The best wieldable, and the best whether or not it is: what was passed over.
+            let mut best: Option<(&Catalyst, f64)> = None;
+            let mut top: Option<(&Catalyst, f64)> = None;
+            for catalyst in &self.catalysts {
+                if !catalyst.categories.contains(&category) {
+                    continue;
+                }
+                let power = self.cast_power(catalyst, element, stats);
+                if top.is_none_or(|(_, most)| power > most) {
+                    top = Some((catalyst, power));
+                }
+                if catalyst
+                    .require
+                    .iter()
+                    .any(|&(stat, value)| stats[stat] < value)
+                {
+                    continue;
+                }
+                if best.is_none_or(|(_, most)| power > most) {
+                    best = Some((catalyst, power));
+                }
+            }
+            if let Some((catalyst, power)) = best {
+                out.push(CatalystPick {
+                    school: school.to_owned(),
+                    name: catalyst.name.clone(),
+                    power: power as f32,
+                    passed_over: top
+                        .filter(|&(_, most)| most > power)
+                        .map(|(over, _)| over.name.clone()),
+                });
+            }
+        }
+        out
+    }
+
     /// The script's `optimize_build`: `(value, class, two-handed, stats)`, or `None` when no class
-    /// fits the floors and requirements into `sl`.
+    /// fits the floors, the weapon's requirements and what `spells` (indices into `self.spells`)
+    /// need into `sl`.
     fn optimize_build(
         &self,
         weapon: &Weapon,
@@ -1219,7 +1398,9 @@ impl CorpusBackend {
         sl: u32,
         objective: Objective,
         grip: Grip,
+        spells: &[usize],
     ) -> Option<(f64, usize, bool, Stats)> {
+        let spell_need = self.spell_floors(spells)?;
         #[derive(Clone, Copy, PartialEq)]
         enum Curve {
             Objective,
@@ -1275,6 +1456,9 @@ impl CorpusBackend {
                         need
                     };
                     st[stat] = st[stat].max(need);
+                }
+                for (stat, &least) in spell_need.iter().enumerate() {
+                    st[stat] = st[stat].max(least);
                 }
                 let mut free = sl + 53 - st.iter().sum::<i32>();
                 if free < 0 {
@@ -1847,7 +2031,7 @@ impl RecommenderBackend for CorpusBackend {
     ) -> Option<OptimizedBuild> {
         let weapon = self.weapon_by_key(weapon)?;
         let (value, class, two_handed, stats) =
-            self.optimize_build(weapon, infusion, u32::from(sl), objective, grip)?;
+            self.optimize_build(weapon, infusion, u32::from(sl), objective, grip, &[])?;
         Some(OptimizedBuild {
             class: self.classes[class].name.clone(),
             sl,
@@ -1963,10 +2147,19 @@ impl RecommenderBackend for CorpusBackend {
         objective: Objective,
         allow_naked: bool,
         grip: Grip,
+        spells: &[String],
     ) -> Option<GeneratedBuild> {
         let primary = self.weapon_by_key(weapon)?;
+        let spells = spells
+            .iter()
+            .map(|key| self.spells.iter().position(|spell| spell.key == *key))
+            .collect::<Option<Vec<usize>>>()?;
         let (_, class, two_handed, stats) =
-            self.optimize_build(primary, infusion, u32::from(sl), objective, grip)?;
+            self.optimize_build(primary, infusion, u32::from(sl), objective, grip, &spells)?;
+        let slots_used: i32 = spells.iter().map(|&spell| self.spells[spell].slots).sum();
+        let slots = self.slots_of(&stats);
+        debug_assert!(slots_used <= slots, "the optimizer fits the spells' slots");
+        let catalysts = self.best_catalysts(&spells, &stats);
         let query = Query {
             one_hand: false,
             class: None,
@@ -2029,8 +2222,39 @@ impl RecommenderBackend for CorpusBackend {
                 .collect(),
             armor,
             armor_note,
+            spells: spells
+                .iter()
+                .map(|&spell| self.spells[spell].key.clone())
+                .collect(),
+            spell_names: spells
+                .iter()
+                .map(|&spell| self.spells[spell].name.clone())
+                .collect(),
+            slots_used: u16::try_from(slots_used).unwrap_or(0),
+            slots: u16::try_from(slots).unwrap_or(0),
+            catalysts,
             stub: false,
         })
+    }
+
+    fn spells(&self) -> Vec<SpellRow> {
+        let requirement = |spell: &Spell, stat: usize| {
+            spell
+                .require
+                .iter()
+                .find(|&&(at, _)| at == stat)
+                .map_or(0, |&(_, value)| u16::try_from(value).unwrap_or(0))
+        };
+        self.spells
+            .iter()
+            .map(|spell| SpellRow {
+                key: spell.key.clone(),
+                name: spell.name.clone(),
+                slots: u16::try_from(spell.slots).unwrap_or(0),
+                intelligence: requirement(spell, INT),
+                faith: requirement(spell, FTH),
+            })
+            .collect()
     }
 
     /// The backend has no game to read; the panel falls back to the typed stats.

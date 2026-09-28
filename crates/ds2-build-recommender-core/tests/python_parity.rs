@@ -75,6 +75,26 @@ type GenerateCases = &'static [(
     bool,
     Option<Generated>,
 )];
+/// school, catalyst, cast power, the catalyst passed over for its requirements (`""` for none).
+type CatalystRow = (&'static str, &'static str, f64, &'static str);
+/// class, two-handed, stats, spell names, slots used, slots given, catalysts.
+type SpellBuild = (
+    &'static str,
+    bool,
+    &'static [u16],
+    &'static [&'static str],
+    u16,
+    u16,
+    &'static [CatalystRow],
+);
+type SpellCases = &'static [(
+    &'static str,
+    &'static str,
+    u16,
+    &'static str,
+    &'static [&'static str],
+    Option<SpellBuild>,
+)];
 type MinimumCases = &'static [(
     &'static str,
     bool,
@@ -298,8 +318,15 @@ fn generate_build_is_the_scripts() {
                 .map(|case| (case, Grip::OneHanded)),
         );
     for (&(weapon, code, sl, goal, naked, want), grip) in cases {
-        let got =
-            backend().generate_build(weapon, infusion(code), sl, objective(goal), naked, grip);
+        let got = backend().generate_build(
+            weapon,
+            infusion(code),
+            sl,
+            objective(goal),
+            naked,
+            grip,
+            &[],
+        );
         let (got, want) = match (got, want) {
             (None, None) => continue,
             (Some(got), Some(want)) => (got, want),
@@ -386,6 +413,112 @@ fn generate_build_is_the_scripts() {
     );
 }
 
+/// Spells constrain a generated build as a weapon's requirements do: their INT/FTH are met, their
+/// summed slot cost fits the ATT's slots, and a build that cannot fit them is refused. Each school
+/// of them gets the wieldable catalyst with the most cast power, and one that would cast harder but
+/// whose requirements are unmet is passed over, not picked.
+#[test]
+fn generate_build_with_spells_is_the_scripts() {
+    let (mut raised, mut forced_att, mut refused, mut passed_over, mut schools) =
+        (false, false, 0, 0, Vec::new());
+    let spell_rows = backend().spells();
+    for &(weapon, code, sl, goal, spells, want) in expected::GENERATE_SPELLS {
+        let asked: Vec<String> = spells.iter().map(|&key| key.to_owned()).collect();
+        let case = format!("{weapon} SL {sl} {spells:?}");
+        let got = backend().generate_build(
+            weapon,
+            infusion(code),
+            sl,
+            objective(goal),
+            false,
+            Grip::TwoHanded,
+            &asked,
+        );
+        let (got, want) = match (got, want) {
+            (None, None) => {
+                refused += 1;
+                continue;
+            }
+            (Some(got), Some(want)) => (got, want),
+            (got, want) => panic!("{case}: {got:?} vs {want:?}"),
+        };
+        let (class, two, st, names, used, slots, catalysts) = want;
+        assert_eq!(got.class, class, "{case}");
+        assert_eq!(got.two_handed, two, "{case}");
+        assert_eq!(got.stats, stats(st), "{case}");
+        assert_eq!(soul_level(&got.stats), sl, "{case}: the stats make the SL");
+        assert_eq!(got.spells, asked, "{case}");
+        assert_eq!(got.spell_names, names, "{case}");
+        assert_eq!((got.slots_used, got.slots), (used, slots), "{case}");
+        assert!(got.slots_used <= got.slots, "{case}: the spells fit");
+        let picks: Vec<(&str, &str, f32, &str)> = got
+            .catalysts
+            .iter()
+            .map(|pick| {
+                (
+                    pick.school.as_str(),
+                    pick.name.as_str(),
+                    pick.power,
+                    pick.passed_over.as_deref().unwrap_or(""),
+                )
+            })
+            .collect();
+        let want_picks: Vec<(&str, &str, f32, &str)> = catalysts
+            .iter()
+            .map(|&(school, name, power, over)| (school, name, power as f32, over))
+            .collect();
+        assert_eq!(picks, want_picks, "{case}");
+        passed_over += picks.iter().filter(|pick| !pick.3.is_empty()).count();
+        schools.extend(picks.iter().map(|pick| pick.0.to_owned()));
+        // Every requirement met, from the spell table the panel's picker lists.
+        for key in &asked {
+            let row = spell_rows
+                .iter()
+                .find(|row| row.key == *key)
+                .unwrap_or_else(|| panic!("{case}: {key} is not in the spell table"));
+            assert!(got.stats[7] >= row.intelligence, "{case}: {key} INT");
+            assert!(got.stats[8] >= row.faith, "{case}: {key} FTH");
+            raised |= got.stats[7] == row.intelligence || got.stats[8] == row.faith;
+        }
+        forced_att |= used > 1 && got.stats[3] > backend().floors(sl)[3];
+        // Apply attunes the spells and grants the catalysts.
+        let (import, extras) = backend::to_import(&got);
+        assert_eq!(import.spells, asked, "{case}");
+        for pick in &got.catalysts {
+            assert!(
+                extras.contains(&(pick.name.clone(), Infusion::None)),
+                "{case}: {} granted",
+                pick.name
+            );
+        }
+    }
+    assert!(raised, "no case where a spell's requirement set INT or FTH");
+    assert!(forced_att, "no case where the spells' slots raised ATT");
+    assert!(refused >= 2, "{refused} refused cases");
+    assert!(passed_over >= 2, "{passed_over} catalysts passed over");
+    for school in ["sorcery", "miracle", "pyromancy", "hex"] {
+        assert!(
+            schools.iter().any(|seen| seen == school),
+            "no {school} catalyst"
+        );
+    }
+}
+
+/// An unknown spell key gets no build rather than one that ignores it.
+#[test]
+fn an_unknown_spell_gets_no_build() {
+    let got = backend().generate_build(
+        "Demons_Great_Hammer",
+        Infusion::Raw,
+        100,
+        Objective::Damage,
+        false,
+        Grip::TwoHanded,
+        &["Not_A_Spell".to_owned()],
+    );
+    assert!(got.is_none());
+}
+
 #[test]
 fn minimum_is_the_scripts() {
     for &(weapon, two, (class, sl, st, gear)) in expected::MINIMUM {
@@ -469,7 +602,18 @@ fn the_panel_generates_at_its_override_for_its_weapon() {
 #[test]
 fn every_generated_grant_names_a_real_item() {
     use ds2_build_import_core::{ItemError, id_for, is_empty_slot};
-    for &(weapon, code, sl, goal, naked, _) in expected::GENERATE {
+    let cases = expected::GENERATE
+        .iter()
+        .map(|&(weapon, code, sl, goal, naked, _)| (weapon, code, sl, goal, naked, &[][..]))
+        .chain(
+            expected::GENERATE_SPELLS
+                .iter()
+                .map(|&(weapon, code, sl, goal, spells, _)| {
+                    (weapon, code, sl, goal, false, spells)
+                }),
+        );
+    for (weapon, code, sl, goal, naked, spells) in cases {
+        let spells: Vec<String> = spells.iter().map(|&key| key.to_owned()).collect();
         let Some(build) = backend().generate_build(
             weapon,
             infusion(code),
@@ -477,6 +621,7 @@ fn every_generated_grant_names_a_real_item() {
             objective(goal),
             naked,
             Grip::TwoHanded,
+            &spells,
         ) else {
             continue;
         };
@@ -487,6 +632,7 @@ fn every_generated_grant_names_a_real_item() {
             .map(|pair| pair[0].clone())
             .chain(import.armor.iter().cloned())
             .chain(import.rings.iter().cloned())
+            .chain(import.spells.iter().cloned())
             .chain(extras.into_iter().map(|(name, _)| name));
         for name in names {
             if is_empty_slot(&name) {
