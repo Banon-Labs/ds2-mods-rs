@@ -1029,7 +1029,8 @@ def status_hits(attacks: dict, names: list[str], grips: list[bool], window: floa
 
 def weapons_for(data: Data, stats: dict, sl: int, corpus: list[Build], top: int = 25, within: float = 0.10,
                 raw_ar: bool = False, one_hand: bool = False, weapon_class: str | None = None, per_class: bool = False,
-                window: float = 0.0, objective: str = "damage"):
+                window: float = 0.0, objective: str = "damage", weapon: str | None = None,
+                every_infusion: bool = False):
     """Weapons (per infusion) ranked by expected damage against the average defender at this SL,
     or with `objective` "bleed"/"poison" by status build-up: build-up per hit (objective_value,
     SITE formula) times the hits of the weapon's best R1/R2 chain attack (status_hits; within
@@ -1038,7 +1039,11 @@ def weapons_for(data: Data, stats: dict, sl: int, corpus: list[Build], top: int 
     code was not traced (docs/DS2-DPS-MECHANICS.md section 4). The defender's resistance and the
     proc's damage are not modelled.
     Usable only: requirements met (STR halved when that is what makes it usable, flagged 2H).
-    Per weapon: the best infusion, plus the 2nd and 3rd only while within `within` of the best."""
+    Per weapon: the best infusion, plus the 2nd and 3rd only while within `within` of the best.
+    `every_infusion`: every infusion of every weapon instead, and no `top` cut (infusion_gaps).
+    `weapon` (a key): that weapon alone, every infusion, and no high-stamina END gate -- the
+    question is which infusion, not whether to carry it (best_infusion)."""
+    every_infusion = every_infusion or weapon is not None
     dfn, n = bracket_defense(data, corpus, sl)
     floors, r1, cut = build_floors(data, corpus, sl)
     attacks = load_attacks()
@@ -1048,7 +1053,7 @@ def weapons_for(data: Data, stats: dict, sl: int, corpus: list[Build], top: int 
     crit = {norm(k): v for k, v in json.loads(CRIT.read_text()).items()} if CRIT.exists() else {}
     rows, skipped = [], []
     for key, w in data.weapons.items():
-        if key in EMPTY or CATALYST.search(key) or w.get("isShield"):
+        if key in EMPTY or CATALYST.search(key) or w.get("isShield") or (weapon and key != weapon):
             continue
         req = w.get("require") or {}
         one = all(stats.get(s, 0) >= v for s, v in req.items())
@@ -1057,7 +1062,7 @@ def weapons_for(data: Data, stats: dict, sl: int, corpus: list[Build], top: int 
             continue
         if weapon_class and norm(data.weapon_class.get(key) or "") != norm(weapon_class):
             continue
-        if r1.get(key, 0) >= cut and stats["endurance"] < floors.get("endurance", 0):
+        if not weapon and r1.get(key, 0) >= cut and stats["endurance"] < floors.get("endurance", 0):
             continue  # a high-stamina weapon needs END at the bracket median of builds that carry one
         lines = {}
         if objective in ("bleed", "poison"):
@@ -1073,7 +1078,7 @@ def weapons_for(data: Data, stats: dict, sl: int, corpus: list[Build], top: int 
                     scored.append((per * hits, inf, attack_rating(data, key, inf, stats),
                                    hlabel + ("" if one or hlabel.startswith("1H") else " (2H only)")))
             scored.sort(key=lambda s: -s[0])
-            for s in [s for s in scored[:3] if scored and s[0] >= scored[0][0] * (1 - within)]:
+            for s in scored if every_infusion else [s for s in scored[:3] if s[0] >= scored[0][0] * (1 - within)]:
                 rows.append((s[0], w["name"], *s[1:]))
             continue
         if window:  # R1 chain hits landing within `window` seconds, per grip the build can use
@@ -1102,7 +1107,7 @@ def weapons_for(data: Data, stats: dict, sl: int, corpus: list[Build], top: int 
         scored.sort(key=lambda s: -s[0])
         if not scored:
             continue
-        keep = [s for s in scored[:3] if s[0] >= scored[0][0] * (1 - within)]
+        keep = scored if every_infusion else [s for s in scored[:3] if s[0] >= scored[0][0] * (1 - within)]
         for dmg, inf, ar, label in keep:
             rows.append((dmg, w["name"], inf, ar, label))
     rows.sort(key=lambda r: -r[0])
@@ -1114,7 +1119,45 @@ def weapons_for(data: Data, stats: dict, sl: int, corpus: list[Build], top: int 
         for r in rows:
             best.setdefault(data.weapon_class.get(data.key_by_name[r[1]]) or "?", r)
         return [(*r[:4], f"{r[4]:8} {c}") for c, r in best.items()], dfn, n
-    return rows[:top], dfn, n
+    return (rows if every_infusion else rows[:top]), dfn, n
+
+
+def infusion_margin(values: list[float]) -> float | None:
+    """How far the best of `values` (best first) is ahead of the runner-up, as a fraction of the
+    runner-up: 0.25 is 25% more. None with no runner-up or a runner-up of 0."""
+    if len(values) < 2 or values[1] <= 0:
+        return None
+    return values[0] / values[1] - 1
+
+
+def best_infusion(data: Data, weapon: str, stats: dict, sl: int, corpus: list[Build], raw_ar: bool = False,
+                  window: float = 0.0, objective: str = "damage"):
+    """Every infusion `weapon` takes, best first, by weapons_for's own score at these stats and SL
+    (the rows it ranks, uncut). Empty when the stats cannot wield it even two-handed, or for
+    bleed/poison when no infusion deals it or the weapon has no attack timing. Full upgrade only:
+    attack_rating reads the planner's max-level rows, so the upgrade level is not modelled."""
+    return weapons_for(data, stats, sl, corpus, raw_ar=raw_ar, window=window, objective=objective, weapon=weapon)
+
+
+def infusion_gaps(data: Data, stats: dict, sl: int, corpus: list[Build], raw_ar: bool = False,
+                  window: float = 0.0, objective: str = "damage", one_hand: bool = False,
+                  weapon_class: str | None = None, top: int = 25):
+    """The reverse of best_infusion: across the weapon table, the weapons whose best infusion is
+    furthest ahead of their runner-up at these stats. Rows: (margin, weapon name, best row,
+    runner-up row, infusions scored), a row being weapons_for's (score, name, infusion, ar, grip)."""
+    rows, dfn, n = weapons_for(data, stats, sl, corpus, raw_ar=raw_ar, one_hand=one_hand,
+                               weapon_class=weapon_class, window=window, objective=objective,
+                               every_infusion=True)
+    by = {}
+    for r in rows:  # best first overall, so each weapon's own rows are best first too
+        by.setdefault(r[1], []).append(r)
+    out = []
+    for name, rs in by.items():
+        m = infusion_margin([r[0] for r in rs])
+        if m is not None:
+            out.append((m, name, rs[0], rs[1], len(rs)))
+    out.sort(key=lambda g: -g[0])
+    return out[:top], dfn, n
 
 
 def build_floors(data: Data, corpus: list[Build], sl: int) -> tuple[dict, dict, float]:
@@ -1799,6 +1842,15 @@ EXPECT_SIMILAR = [  # stats, sl, k, status
     ([12, 10, 8, 10, 14, 14, 10, 8, 8], 40, 50, ["bleed", "poison"]),
 ]
 EXPECT_FLOOR_SLS = [1, 33, 60, 100, 150, 200, 838]
+EXPECT_BEST_INFUSION = [  # weapon key, stats, sl, window, raw_ar, objective: --best-infusion
+    ("Caestus", [20, 20, 15, 10, 40, 40, 15, 9, 9], 125, 0.0, False, "damage"),
+    ("Drakeblood_Greatsword", [20, 20, 15, 10, 20, 20, 15, 9, 40], 116, 0.0, False, "damage"),
+    ("Drakeblood_Greatsword", [20, 20, 15, 10, 20, 20, 15, 9, 40], 116, 1.5, False, "damage"),
+    ("Uchigatana", [25, 20, 15, 12, 12, 40, 15, 9, 20], 150, 0.0, True, "damage"),
+    ("Uchigatana", [25, 20, 15, 12, 12, 40, 15, 9, 20], 150, 0.0, False, "bleed"),
+    ("Dagger", [20, 20, 15, 10, 20, 30, 30, 9, 9], 100, 2.0, False, "poison"),
+    ("Greatsword", [20, 20, 15, 10, 10, 10, 15, 9, 9], 80, 0.0, False, "damage"),  # STR 10 < 28/2: no rows
+]
 
 
 class _Some:
@@ -1939,6 +1991,17 @@ def backend_expectations_rest(data: Data, corpus: list[Build], out: list[str], m
     fl = [(sl, [int(floors[sl_bracket(sl)].get(s, 0)) for s in FLOOR_STATS]) for sl in EXPECT_FLOOR_SLS]
     out.append("// sl -> VIG, VIT, ADP, ATT floors.")
     out.append(f"pub const FLOORS: FloorCases = {_rs(fl)};\n")
+
+    best = []
+    for weapon, st, sl, window, raw, objective in EXPECT_BEST_INFUSION:
+        rows, _, _ = best_infusion(data, weapon, as_dict(st), sl, corpus, raw_ar=raw, window=window,
+                                   objective=objective)
+        best.append((weapon, st, sl, window, raw, objective,
+                     [(INFUSION_CODE[inf], float(v), [float(ar.get(k, 0)) for k in DMG],
+                       re.sub(r" (HA|ctr) x\S+", "", grip).strip()) for v, _, inf, ar, grip in rows]))
+    out.append("// weapon, stats, sl, window, raw_ar, objective -> rows best first: infusion, score, AR by type,")
+    out.append("// grip.")
+    out.append(f"pub const BEST_INFUSION: BestInfusionCases = {_rs(best)};\n")
     c = calibrate_infusions(data, corpus)
     out.append(f"pub const CALIBRATION: (u32, f64, f64) = {_rs((c['n'], float(c['top1']), float(c['top2'])))};")
     return "\n".join(out) + "\n"
@@ -1990,6 +2053,12 @@ def selftest() -> int:
         # tick (23/30 + 2 * 0.15 s) has too
         ("trident in 0.5 s: R1 only", status_hits(A, ["Channeler's Trident"], [False], 0.5), (1, "1H R1 1 hit")),
         ("trident in 1.5 s: R2", status_hits(A, ["Channeler's Trident"], [False], 1.5), (4, "1H R2 4 hits")),
+        # best-infusion margin: best over runner-up, as a fraction of the runner-up
+        ("margin 300 over 200", infusion_margin([300.0, 200.0, 50.0]), 0.5),
+        ("margin needs a runner-up", infusion_margin([300.0]), None),
+        ("margin over a zero runner-up is none", infusion_margin([300.0, 0.0]), None),
+        ("stats parse into STATS order", list(parse_stats("STR=40,VGR=20,ADP=15").values()),
+         [20, 0, 0, 0, 40, 0, 15, 0, 0]),
     ]
     if ATTACKS.exists():  # the real extracted rows agree with the copies above
         real = load_attacks()
@@ -2002,6 +2071,17 @@ def selftest() -> int:
             print(f"  FAIL {what}: got {got!r}, want {want!r}")
     print(f"selftest: {len(cases) - bad}/{len(cases)} pass" + ("" if ATTACKS.exists() else f" ({ATTACKS} absent)"))
     return 1 if bad else 0
+
+
+def parse_stats(text: str) -> dict:
+    """ "VGR=10,END=16,..." -> every stat in STATS order, 0 where not given."""
+    abbr = {s[:3].upper(): s for s in STATS} | {"VGR": "vigor", "ADP": "adaptability", "FTH": "faith",
+                                               "ATN": "attunement"}
+    stats = {s: 0 for s in STATS}
+    for part in text.split(","):
+        k, v = part.split("=")
+        stats[abbr[k.strip().upper()[:3]]] = int(v)
+    return stats
 
 
 def main() -> int:
@@ -2041,6 +2121,12 @@ def main() -> int:
                          "attack, or hits landed within --window seconds")
     g.add_argument("--weapons-for", metavar="STATS",
                    help='rank weapons for these stats, e.g. "VGR=10,END=16,VIT=7,ATT=9,STR=20,DEX=12,ADP=8,INT=12,FTH=12"')
+    g.add_argument("--best-infusion", metavar="WEAPON",
+                   help="every infusion WEAPON takes, ranked by --objective at --stats (full upgrade), with the "
+                        "best one's margin over the runner-up")
+    g.add_argument("--infusion-gaps", action="store_true",
+                   help="the weapons whose best infusion is furthest ahead of their runner-up at --stats")
+    ap.add_argument("--stats", metavar="STATS", help="with --best-infusion / --infusion-gaps: as --weapons-for takes")
     ap.add_argument("--raw-ar", action="store_true", help="with --weapons-for: rank by total attack rating, before defenses")
     ap.add_argument("--neighbours", action="store_true",
                     help="with --weapons-for: weapons carried by corpus builds with the nearest stats, usable only")
@@ -2156,13 +2242,43 @@ def main() -> int:
               + " ".join(f"{s[:3].upper()} {stats[s]}" for s in STATS)
               + "\n  floors (bracket medians): " + " ".join(f"{s[:3].upper()} {v}" for s, v in floors.items()))
         a.weapons_for = ",".join(f"{s[:3].upper()}={stats[s]}" for s in STATS)
+    if a.best_infusion or a.infusion_gaps:
+        if not a.stats:
+            ap.error("--best-infusion and --infusion-gaps need --stats")
+        stats = parse_stats(a.stats)
+        sl = a.sl or sum(stats.values()) - 53
+        corpus, _ = load_corpus(data)
+        what = {"damage": "raw AR" if a.raw_ar else "damage"}.get(a.objective, f"{a.objective} x hits")
+        if a.window:
+            what += f" in {a.window:g}s"
+        print(f"stats {' '.join(f'{s[:3].upper()} {v}' for s, v in stats.items())}  ->  SL {sl}; by {what}, "
+              "full upgrade")
+        if a.best_infusion:
+            weapon = data.sp_key.get(norm(a.best_infusion))
+            if weapon not in data.weapons:
+                ap.error(f"unknown weapon {a.best_infusion!r}")
+            rows, _, _ = best_infusion(data, weapon, stats, sl, corpus, raw_ar=a.raw_ar, window=a.window,
+                                       objective=a.objective)
+            if not rows:
+                print(f"{data.weapons[weapon]['name']}: nothing to rank (these stats cannot wield it, or no "
+                      f"infusion deals {a.objective})")
+                return 2
+            m = infusion_margin([r[0] for r in rows])
+            print(f"{data.weapons[weapon]['name']}: best {rows[0][2].replace('_', ' ')}"
+                  + (f", {m:+.1%} over {rows[1][2].replace('_', ' ')}" if m is not None else ", no runner-up"))
+            for v, _, inf, ar, grip in rows:
+                print(f"  {inf.replace('_', ' '):12} {v:8.1f}  {v / rows[0][0]:6.1%}   "
+                      f"{' '.join(f'{k[:4]} {x}' for k, x in ar.items()):34} {grip}")
+            return 0
+        gaps, _, _ = infusion_gaps(data, stats, sl, corpus, raw_ar=a.raw_ar, window=a.window,
+                                   objective=a.objective, one_hand=a.one_hand, weapon_class=a.weapon_class)
+        print(f"\n  {'weapon':32} {'best':12} {'runner-up':12} {'margin':>7}   of")
+        for m, name, best, second, count in gaps:
+            print(f"  {name:32} {best[2].replace('_', ' '):12} {second[2].replace('_', ' '):12} {m:+7.1%}   "
+                  f"{count}  ({best[0]:.0f} vs {second[0]:.0f})")
+        return 0
     if a.weapons_for:
-        abbr = {s[:3].upper(): s for s in STATS} | {"VGR": "vigor", "ADP": "adaptability", "FTH": "faith",
-                                                   "ATN": "attunement"}
-        stats = {s: 0 for s in STATS}
-        for part in a.weapons_for.split(","):
-            k, v = part.split("=")
-            stats[abbr[k.strip().upper()[:3]]] = int(v)
+        stats = parse_stats(a.weapons_for)
         sl = a.sl or sum(stats.values()) - 53  # every DS2 class satisfies level = stat total - 53
         corpus, _ = load_corpus(data)
         floors, r1, cut = build_floors(data, corpus, sl)
