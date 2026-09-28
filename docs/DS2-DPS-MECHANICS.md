@@ -229,6 +229,150 @@ are DamageAdjustParam +0x158..+0x16C, read as integers by `PlayerGameParamCalcul
 `0x140380ed0`). A player's elemental defense entries are always 0 (`0x140380070`), so the 6.0 cancels and
 elemental defense acts only through `cut`, clamped to [0, 1] and capped at PlayerCommonParam+0x18C (99.0).
 `DEF_type` is the hit's slash/strike/thrust defense (`DamageCtrlParam.attackType`, REGULATION).
-`damageLower` is `PlayerDamageParam.damageLower` (70 on 1742 of 3082 rows). Unresolved: whether the displayed
-elemental defense D maps to `cut = (D + 100) / 1000` or `D / 1000`; the stat-resistance writer is obfuscated.
-Not traced: whether remote PvP hits take this same path.
+`damageLower` is `PlayerDamageParam.damageLower` (70 on 1742 of 3082 rows). The elemental `cut` is
+resolved below: it is `(D + 100) / 1000` for the defense D that SoulsPlanner shows. Not traced: whether
+remote PvP hits take this same path.
+
+## Elemental cut: where the +100 comes from (EXE)
+
+The defender's arrays are filled next to each other at `0x140137b20`..`0x140137b8a`:
+`PlayerGameParamCalculator` slot 58 (`0x140380070`, via `call [rax+0x1d0]` at `0x140137b48`) writes the
+13-float DEF array, and slot 59 (`0x140381350`, via `call [rax+0x1d8]` at `0x140137b58`) writes the
+13-float cut array. `calculateDamage_defense` multiplies each element by `clamp(1 - cut)`. Slot 59 does this:
+
+```
+for each armor piece (4):                                   loop 0x1403814c0..
+    v = lerp(ArmorReinforceParam.min*, max*, reinforceLv / maxLevel)     0x14034dda0 (row +0x0c.. / +0x3c..)
+    v = v * 0.01                                                         0x14034f7b0
+    v += 0.01 * SpEffect vector (kind 7)                                 0x14038148e, 0x14034c7d0, 0x140381510
+    v *= lack-of-stats factor (PlayerLackOfStatsParam row 0x10 / 0x11)   0x140381c20
+cut[magic]     = sum + statblock+0x98 (magicResistance     * 0.01)      FUN_14038d270(.,0)
+cut[lightning] = sum + statblock+0xa0 (lightningResistance * 0.01)      FUN_14038d270(.,2)
+cut[fire]      = sum + statblock+0x9c (flameResistance     * 0.01)      FUN_14038d270(.,1)
+cut[dark]      = sum + statblock+0xa4 (darkResistance      * 0.01)      FUN_14038d270(.,3)
+vfunc +0x250 (0x14038179d), clamp every entry to [0, 1] (0x140381824..); cap each element at
+FUN_140164af0 (0x140381871) = PlayerCommonParam+0x18c * 0.01 (99.0 -> 0.99)
+```
+
+The stat terms come from the stats builder `0x14038d790`. It is called with `lea rcx,[rsi+0x2c]`
+(`0x14038d63d`), so its `rdi+X` is the block's `+X+0x2c`. It stores
+`PhysicalStatsPerLevelStatValuesParam` row fields times 0.01 (the constant at `0x1410acb08`, loaded at
+`0x14038dd4f`). Each row is picked by a stat:
+
+| cut term | row index | row field | store |
+|---|---|---|---|
+| magic | INT | `magicResistance` +0x58 | `0x14038deae` |
+| fire | trunc((INT+FTH)/2) | `flameResistance` +0x5c | `0x14038deef` |
+| lightning | FTH | `lightningResistance` +0x60 | `0x14038df31` |
+| dark | min(INT, FTH) | `darkResistance` +0x64 | `0x14038df79` |
+
+The row values run from 10.0 at stat 1 to 30.0 at stat 99. So a naked character with 1 INT already has a 0.10 magic cut.
+
+**The +100.** In SoulsPlanner's stat tables, `magicDEFBonus`, `lightningDEFBonus` and `darkDEFBonus` equal
+`10 * resistance - 100` for all 99 rows, and `fireDEFBonus[s]` equals `10 * flameResistance[trunc(s/2)] - 100`
+for all 197 sums (checked against the decrypted regulation, not against memory). An armor piece's
+elemental D is `round(ArmorReinforceParam max% * menuResistanceScale)`, where menuResistanceScale is
+10.0 on 475 of 502 rows. That holds for 262 of the 278 SoulsPlanner pieces that map to exactly one
+reinforce row. The 16 misses are single-field disagreements, like Black Witch Veil magic 14 vs 55.
+So with D = stat part + armor part as the planner shows it:
+
+```
+cut = (res% + sum armor%) / 100 = ((D_stat + 100) + D_armor) / 1000 = (D + 100) / 1000
+```
+
+The +100 is the 10% floor of the stat table, which the displayed number leaves out. The in-game menu's
+own display formula was not traced. `menuResistanceScale` is the likely scale it uses (INFERRED).
+
+Still unresolved:
+- FUN_140164af0 applies the 0.99 cap only when `thunk_FUN_141b8b72f(CharacterManager, 8) > 25`, and
+  returns 1.0 otherwise. What that lookup returns is not traced.
+- `0x14034f2c0`, called on each piece's vector, is Arxan-chained and was not read. The xorps
+  `xmm1,0` at `0x1400399c4` suggests a floor at 0.
+- The SpEffect term is added inside the per-piece loop (`0x140381510`). Whether that really counts a
+  ring's elemental bonus once per armor slot needs runtime proof.
+- Slot 60 (`call [rax+0x1e0]` at `0x140137b8a`) runs only when `[r12+0xc] == 2`, and its array feeds the
+  `(1 - atk+0x34) * def+0x68` factor in `calculateDamage_defense`. Guard absorption is the likely
+  meaning (INFERRED), not read.
+
+## Attack rating: stat scaling (EXE)
+
+Where it comes from: the only caller of the scaling function (`0x1403920bc`) and the helpers it calls.
+Most of this code is Arxan-shattered, with no Ghidra function and no `.pdata`. It was read with
+`scripts/ds2-arxan-trace.py`, which follows the fragments and prints only real instructions. Every
+address below is a real instruction in `darksoulsii-deobf.bin`.
+
+**Stat bonus per stat** (the SoulsPlanner `*ATKBonus` tables). The same builder `0x14038d790` stores
+integer `PhysicalStatsPerLevelStatValuesParam` fields in the stat block. `0x14038d260` (-> `0x1406d5760`,
+`mov eax,[rcx+rax*4+0x50]`) reads them back by index:
+
+| idx | row index | row field | store |
+|---|---|---|---|
+| 0 | STR | `physicalAttackByStrength` +0x0c | `0x14038da44` |
+| 1 | DEX | `physicalAttackByDexterity` +0x10 | `0x14038da79` |
+| 2 | min of the 9 stats (loop `0x14038da80`, skips words 9-10) | `physicalAttackByAbyss` +0x8c | `0x14038dac8` |
+| 3 | INT | `magicAttack` +0x14 | `0x14038daf8` |
+| 4 | trunc((INT+FTH)/2) (`0x14038dafb`..`0x14038db08`) | `flameAttack` +0x18 | `0x14038db31` |
+| 5 | FTH | `lightningAttack` +0x1c | `0x14038db66` |
+| 6,7,8 | min(INT, FTH) (`cmovge`) | `darkAttack` +0x20 | `0x14038dbb0/dbfa/dc42` |
+
+The stat block's words are `[rbx + 2*(id-1)]` (jump table `0x14038e280`: 1 VGR, 2 END, 3 VIT, 4 ATT,
+5 STR, 6 DEX, 7 INT, 8 FTH, 9 ADP). Physical stat defense is stored the same way:
+`row[trunc((END+VIT+STR+DEX)/4)].defense` goes to `+0x48` (`0x14038d97b`..`0x14038d9c6`), which slot 58 reads.
+SoulsPlanner's `physicalATKBonus`, `magicATKBonus`, `lightningATKBonus`, `darkATKBonus`, `mundaneATKBonus`
+and `fireATKBonus[INT+FTH]` equal these regulation columns with these indices at every entry. Its
+`physicalDEFBonus[sum]` does not match: it is off by one at 180 of 393 sums (row 3 is 63 in the regulation
+and 62 in the planner).
+
+**Scaling function `0x1403903b0`** (Arxan entry, body from `0x141cf33c8`). Arguments are `(this, ws, out[10])`.
+`ws+0x30` is the reinforce level, `ws+0x31` the infusion index, `ws+0x40` the WeaponStatsAffectParam row.
+`rsi = 0x140397c40(row, level) = row + 8 + level * 0x24`: the 9 coefficients for that upgrade level.
+
+```
+infusion 9 (Mundane):  out[0] = bonus[2] * coef(ws+0x50)      0x141bf101e, 0x141b73fdf
+otherwise:             out[0] = bonus[0]*c[0] + bonus[1]*c[1]    0x141b499a4, 0x141c61b8e
+    infusion 8 (Enchanted) also adds bonus[3]*c[8]               0x141c61b97, 0x1406dcfc2
+out[1] magic     = bonus[3] * c[2]                              0x141c6752f
+out[2] lightning = bonus[5] * c[3]                              0x141aff3b7
+out[3] fire      = bonus[4] * c[4]                              0x141b580be
+out[4] dark      = bonus[6|7|8] * c[5]  (index by ws+0x70)       0x141c37eb3
+out[5], out[6]   = status bonus (0x14038d240) * c[6], c[7]       0x141ca3259, 0x141cf178c
+```
+
+`c[]` is `WeaponStatsAffectParam` `physicalByStrength, physicalByDexterity, magic, thunder, fire, dark,
+poison, bleeding, physicalByEnchant` for that level. The row is `WeaponReinforceParam.statsAffectId + t[inf][1]`
+(`0x14034ec60`: `movzx edx,[rax+1]; add edx,[rbx+0x4c]`). `t` is the 10x3 byte table at `0x1410c3e10`.
+The Mundane coefficient (`0x1401641c0`) is `byte[obj+0x13a] * 0.01` of the row at `ws+0x50`, or 1.0 when
+`thunk 0x140358de0(CharacterManager, 0x14) < 25`. Which param that row belongs to is not established.
+
+**Base, rates and the sum.** Loop `0x141b8ba3d`..`0x141b8ba7f`, over 10 damage types:
+
+```
+AR[i] = max(0, ((bonus[i] + base[i]) * rate[i] + D[i]) * k)
+base  = lerp(WRP.min[i], WRP.max[i], clamp(level / WRP.maxLevel)) * WSA.baseValueScale   0x14034e820, 0x141b11a0b..a1c
+rate  = WRP.physicalRate.. (+0xa0), with the infusion's add rate moved in, * 0.01, floored at 0
+        add rate = WRP[+0xc4 magic,+0xc8 thunder,+0xcc fire,+0xd0 dark,+0xd4 poison,+0xd8 bleed,
+                   +0xdc crude,+0xe0 enchanted,+0xe4 abyss] picked by infusion   0x14034fe10
+        target element t[inf][0] += add (cap 1000); every other nonzero element -= add / count   0x14034fed0, 0x14034ff74
+bonus = the scaling function above, plus SpEffect weapon-attack adds (0x14038f3b0, kind 5/6 per hand; 0x140391020)
+```
+
+The infusion indices follow from the add-rate offsets and the target elements: 0 none, 1 Fire, 2 Magic, 3 Lightning,
+4 Dark, 5 Poison, 6 Bleed, 7 Raw, 8 Enchanted, 9 Mundane. For the Dagger (+10, reinforce 1000,
+statsAffectId 1005030), this model gives base 115 / 80.5+80.5 / 132.25 / 57.5 for
+Standard / elemental / Raw / Mundane. Coefficients come out as 0.15/0.45, then 0.0565/0.169/0.3, then 0.038/0.113.
+SoulsPlanner has 115 / 80+80 / 132 / 57 and 0.15/0.45, 0.06/0.17/0.3, 0.04/0.11, so it truncates base to an integer and
+rounds coefficients to 2 dp. SoulsPlanner's Enchanted STR 0.06 is not the regulation's 0.053.
+
+Not read: `D` (`0x14038fee0`), the extra rate edits (`0x14038f440`, and `0x1403910f0` when `sil`), and
+`k` = `0x14038f6a0(...) * [ws+0x50 row +0x54|+0x60] * [[rbx]+0x38]+0xd8`. So this loop is proven for the
+scaling structure, not for everything a hit multiplies in. That this path is the one the status menu
+shows is also not established: `0x1403903b0` has exactly one static caller.
+
+**Delta vs `scripts/ds2-builds-recommend.py`** (`attack_rating`, `hit_damage`, `damage`, `build_defense`):
+- AR: the same `(base + sum bonus*coef) * rate` structure, but SoulsPlanner folds `rate` into its
+  `atk`/`atkScale` with rounding. The error is a fraction of an AR point per stat, larger for Enchanted STR.
+  Mundane uses SoulsPlanner's `modifier`, and the EXE coefficient source above is unresolved.
+- Elemental cut `min(0.99, (D+100)/1000)` matches. Not modelled: the lack-of-stats factor on armor, and the
+  cap gate.
+- Physical stat defense: the planner's table is off by one at 180 of 393 sums. The game uses
+  `row[trunc(sum/4)].defense`.

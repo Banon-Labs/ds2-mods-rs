@@ -244,6 +244,27 @@ Two-handing halves the STR requirement (`shr 1`); power stance needs `1.5 x max(
 Repo-verified (crates/ds2-item-warn/src/requirement.rs, docs/DS2-ITEM-REQUIREMENTS.md), not
 re-derived.
 
+## 6. Stat scaling and elemental defense (EXE)
+
+These were read from the executable. Full traces with addresses are in
+[`DS2-DPS-MECHANICS.md`](DS2-DPS-MECHANICS.md), under "Elemental cut" and "Attack rating".
+
+- All stat curves live in the regulation: `PhysicalStatsPerLevelStatValuesParam`, one row per stat
+  value. The builder `0x14038d790` picks a row by a stat for each column:
+  - STR, DEX, INT and FTH index their own columns.
+  - Fire uses `trunc((INT+FTH)/2)`.
+  - Dark uses `min(INT, FTH)`.
+  - Mundane uses the minimum of all nine stats.
+  - Physical defense uses `trunc((END+VIT+STR+DEX)/4)`.
+  - Elemental resistance uses the same indices as the matching attack column, stored times 0.01.
+- Weapon AR per damage type: `(lerp(min, max, level/maxLevel) * baseValueScale + sum stat_bonus * coef) * rate`.
+  - `min`, `max`, `maxLevel` and `rate` come from `WeaponReinforceParam`.
+  - `coef` is `WeaponStatsAffectParam[statsAffectId + infusion offset]` at the reinforce level.
+  - The infusion moves its `add*Rate` into the target element and takes it out of the others.
+- Elemental cut = `(stat resistance % + sum armor %) / 100`. In the planner's displayed defense D that is
+  `(D + 100) / 1000`, and the +100 is the stat table's 10% floor.
+- Stamina (section 4) and the agility index (section 3) come from the same builder.
+
 ## Not established
 
 - Whether burden == 70.0% exactly is heavy, and whether roll behavior between tiers is interpolated.
