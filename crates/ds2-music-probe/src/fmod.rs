@@ -60,9 +60,44 @@ static CHANNEL_SET_POSITION: AtomicUsize = AtomicUsize::new(0);
 static CHANNEL_SET_LOOP_COUNT: AtomicUsize = AtomicUsize::new(0);
 static CHANNEL_IS_PLAYING: AtomicUsize = AtomicUsize::new(0);
 static SOUND_GET_LENGTH: AtomicUsize = AtomicUsize::new(0);
+static CHANNEL_SET_MUTE: AtomicUsize = AtomicUsize::new(0);
+static CHANNEL_GET_AUDIBILITY: AtomicUsize = AtomicUsize::new(0);
+static MEMORY_GET_STATS: AtomicUsize = AtomicUsize::new(0);
+static GET_3D_LISTENER: AtomicUsize = AtomicUsize::new(0);
+static SET_3D_ATTRIBUTES: AtomicUsize = AtomicUsize::new(0);
+static GET_PARENT_GROUP: AtomicUsize = AtomicUsize::new(0);
+
+type ListenerFn = unsafe extern "system" fn(
+    usize,
+    i32,
+    *mut [f32; 3],
+    *mut [f32; 3],
+    *mut [f32; 3],
+    *mut [f32; 3],
+) -> i32;
+type Set3dFn =
+    unsafe extern "system" fn(usize, *const [f32; 3], *const [f32; 3], *const [f32; 3]) -> i32;
+type AudibilityFn = unsafe extern "system" fn(usize, *mut f32) -> i32;
+type MemoryStatsFn = unsafe extern "C" fn(*mut i32, *mut i32, i32) -> i32;
+type FreeEventDataFn = unsafe extern "system" fn(usize, usize, u8) -> i32;
 
 /// Exports the game never imports, by their MSVC decorated names.
-const FMODEX_EXPORTS: [(&str, &[u8], &AtomicUsize); 5] = [
+const FMODEX_EXPORTS: [(&str, &[u8], &AtomicUsize); 8] = [
+    (
+        "Channel::setMute",
+        b"?setMute@Channel@FMOD@@QEAA?AW4FMOD_RESULT@@_N@Z\0",
+        &CHANNEL_SET_MUTE,
+    ),
+    (
+        "Channel::getAudibility",
+        b"?getAudibility@Channel@FMOD@@QEAA?AW4FMOD_RESULT@@PEAM@Z\0",
+        &CHANNEL_GET_AUDIBILITY,
+    ),
+    (
+        "FMOD_Memory_GetStats",
+        b"FMOD_Memory_GetStats\0",
+        &MEMORY_GET_STATS,
+    ),
     (
         "ChannelGroup::getGroup",
         b"?getGroup@ChannelGroup@FMOD@@QEAA?AW4FMOD_RESULT@@HPEAPEAV12@@Z\0",
@@ -119,7 +154,22 @@ fn load<F: Copy>(slot: &AtomicUsize) -> Option<F> {
 /// `base` must be the live game module base.
 pub(crate) unsafe fn resolve(base: usize) -> Vec<&'static str> {
     let mut missing = Vec::new();
-    let imports: [(&str, u32, &AtomicUsize); 9] = [
+    let imports: [(&str, u32, &AtomicUsize); 12] = [
+        (
+            "EventSystem::get3DListenerAttributes",
+            ds2_rva::FMOD_EVENT_SYSTEM_GET_3D_LISTENER_IAT,
+            &GET_3D_LISTENER,
+        ),
+        (
+            "Event::set3DAttributes",
+            ds2_rva::FMOD_EVENT_SET_3D_ATTRIBUTES_IAT,
+            &SET_3D_ATTRIBUTES,
+        ),
+        (
+            "Event::getParentGroup",
+            ds2_rva::FMOD_EVENT_GET_PARENT_GROUP_IAT,
+            &GET_PARENT_GROUP,
+        ),
         (
             "Event::getInfo",
             ds2_rva::FMOD_EVENT_GET_INFO_IAT,
@@ -464,4 +514,102 @@ pub(crate) fn num_events(system: usize) -> Option<i32> {
     let mut count = 0i32;
     // SAFETY: `fmod_event64!EventSystem::getNumEvents` on the game's event system.
     (unsafe { get(system, &raw mut count) } == FMOD_OK).then_some(count)
+}
+
+/// `Channel::setMute`. The FMOD result.
+///
+/// This, and not `Event::setMute`, is how the game's own track is silenced: an event mute does not
+/// come off the channel again (see `ds2_rva::FMOD_EVENT_GROUP_FREE_EVENT_DATA_SLOT`'s section).
+pub(crate) fn channel_set_mute(channel: usize, mute: bool) -> i32 {
+    let Some(set_mute) = load::<BoolArgFn>(&CHANNEL_SET_MUTE) else {
+        return -1;
+    };
+    // SAFETY: `fmodex64!Channel::setMute`; FMOD validates channel handles.
+    unsafe { set_mute(channel, u8::from(mute)) }
+}
+
+/// `Channel::getAudibility`: the volume the channel is actually heard at, after every mute, fade,
+/// group volume and 3D attenuation. `None` when FMOD cannot say.
+pub(crate) fn audibility(channel: usize) -> Option<f32> {
+    let get: AudibilityFn = load(&CHANNEL_GET_AUDIBILITY)?;
+    let mut value = 0.0f32;
+    // SAFETY: `fmodex64!Channel::getAudibility`, with an out-parameter this frame owns.
+    (unsafe { get(channel, &raw mut value) } == FMOD_OK).then_some(value)
+}
+
+/// `FMOD_Memory_GetStats`: bytes FMOD has allocated now, and the most it ever has.
+pub(crate) fn memory_stats() -> Option<(i32, i32)> {
+    let get: MemoryStatsFn = load(&MEMORY_GET_STATS)?;
+    let (mut current, mut max) = (0i32, 0i32);
+    // SAFETY: the `fmodex64` C export, with two out-parameters this frame owns; `blocking = 0`
+    // takes no lock the game could be holding.
+    (unsafe { get(&raw mut current, &raw mut max, 0) } == FMOD_OK).then_some((current, max))
+}
+
+/// Listener 0's position, which is where the game keeps its region music.
+pub(crate) fn listener_position(system: usize) -> Option<[f32; 3]> {
+    let get: ListenerFn = load(&GET_3D_LISTENER)?;
+    let mut position = [0.0f32; 3];
+    let (mut velocity, mut forward, mut up) = ([0.0f32; 3], [0.0f32; 3], [0.0f32; 3]);
+    // SAFETY: the game's own import on its event system, with four out-parameters this frame owns.
+    let rc = unsafe {
+        get(
+            system,
+            0,
+            &raw mut position,
+            &raw mut velocity,
+            &raw mut forward,
+            &raw mut up,
+        )
+    };
+    (rc == FMOD_OK).then_some(position)
+}
+
+/// Put an event at `position`, still. The FMOD result; a 2D event answers an error, harmlessly.
+pub(crate) fn set_3d_position(event: usize, position: [f32; 3]) -> i32 {
+    let Some(set) = load::<Set3dFn>(&SET_3D_ATTRIBUTES) else {
+        return -1;
+    };
+    let still = [0.0f32; 3];
+    // SAFETY: the game's own import; two vectors this frame owns and a null orientation, which
+    // FMOD documents as "leave it".
+    unsafe {
+        set(
+            event,
+            &raw const position,
+            &raw const still,
+            core::ptr::null(),
+        )
+    }
+}
+
+/// Free the memory a stopped instance of ours holds, through its event group's `freeEventData`.
+/// The FMOD result of the free.
+pub(crate) fn free_event_data(event: usize) -> i32 {
+    let Some(get_group) = load::<OutPointerFn>(&GET_PARENT_GROUP) else {
+        return -1;
+    };
+    let mut group = 0usize;
+    // SAFETY: the game's own `Event::getParentGroup` import, with an out-parameter this frame
+    // owns. FMOD validates the handle.
+    if unsafe { get_group(event, &raw mut group) } != FMOD_OK || group == 0 {
+        return -2;
+    }
+    // SAFETY: `group` is a live `EventGroupI` FMOD just returned; its vtable pointer is its first
+    // field, and slot `FMOD_EVENT_GROUP_FREE_EVENT_DATA_SLOT` is `freeEventData`, read out of
+    // `fmod_event64.dll`'s own vtable. The reads are fault-safe.
+    let Some(free) = (unsafe {
+        safe_read_usize(group)
+            .and_then(|vtable| {
+                safe_read_usize(vtable + ds2_rva::FMOD_EVENT_GROUP_FREE_EVENT_DATA_SLOT * 8)
+            })
+            .filter(|f| *f != 0)
+    }) else {
+        return -3;
+    };
+    // SAFETY: `free` is `EventGroupI::freeEventData(Event* event, bool waituntilready)`, called on
+    // its own group with our stopped instance; not waiting, so the sound thread is never blocked.
+    let free: FreeEventDataFn = unsafe { std::mem::transmute::<usize, FreeEventDataFn>(free) };
+    // SAFETY: as above.
+    unsafe { free(group, event, 0) }
 }

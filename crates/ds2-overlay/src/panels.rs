@@ -67,6 +67,9 @@ static LOOP_SET: AtomicBool = AtomicBool::new(false);
 /// `render_shared` failures, for the log's back-off.
 static ERRORS: AtomicU64 = AtomicU64::new(0);
 
+/// Frames drawn with the corrected cursor, for the once-a-second diagnostic line.
+static IMGUI_MOUSE_FRAMES: AtomicU64 = AtomicU64::new(0);
+
 /// imgui's default font rasterises at 13 px; read across a room, it wants 25% more.
 pub const FONT_SIZE_PX: f32 = 13.0 * 1.25;
 
@@ -150,8 +153,27 @@ impl ImguiRenderLoop for Panels {
         let on = IMGUI_MOUSE.load(Ordering::Acquire);
         let io = ctx.io_mut();
         io.config_input_trickle_event_queue = !on;
-        if on && let Some(position) = mouse() {
-            io.add_mouse_pos_event(position);
+        let raw_mouse = io.mouse_pos;
+        let hudhook_scale = io.display_framebuffer_scale;
+        if on {
+            if let Some(position) = mouse() {
+                io.add_mouse_pos_event(position);
+            }
+            // hudhook sets the framebuffer scale from the window's DPI, and its dx11 backend
+            // multiplies the viewport by it but not the scissor rects. At a scale of 2 the widgets
+            // are drawn twice their size while each window's clip stays at its unscaled rect, which
+            // cuts the window's content off at an edge that is not the window's own. Imgui units
+            // and back-buffer pixels are the same thing here, so the scale is 1.
+            io.display_framebuffer_scale = [1.0, 1.0];
+            let now = IMGUI_MOUSE_FRAMES.fetch_add(1, Ordering::Relaxed);
+            if now.is_multiple_of(60) {
+                log(format_args!(
+                    "panels: imgui display_size={:?} hudhook framebuffer_scale={hudhook_scale:?} \
+                     (drawn at 1) raw mouse={raw_mouse:?} corrected mouse={:?}",
+                    io.display_size,
+                    mouse()
+                ));
+            }
         }
     }
 

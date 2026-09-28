@@ -23,6 +23,12 @@ use crate::{DEFAULT_KEY, LOG_PREFIX, minutes_seconds};
 
 const VK_ESCAPE: u32 = 0x1b;
 
+/// The Music window's width, in back-buffer pixels. Its height follows its content.
+const WINDOW_WIDTH: f32 = 640.0;
+
+/// Frames the panel has drawn, for the once-a-second geometry line.
+static FRAMES: AtomicU32 = AtomicU32::new(0);
+
 /// Catalog rows drawn at most, after the filter.
 const CATALOG_ROWS: usize = 500;
 
@@ -158,11 +164,25 @@ fn draw(ui: &Ui) {
         return;
     };
     let mut open = true;
+    let display = ui.io().display_size;
+    // Sized to its content, and never larger than the screen it is drawn on.
     ui.window("Music")
-        .size([620.0, 700.0], Condition::FirstUseEver)
-        .position([80.0, 80.0], Condition::FirstUseEver)
+        .position([40.0, 40.0], Condition::FirstUseEver)
+        .size_constraints([WINDOW_WIDTH, 0.0], [WINDOW_WIDTH, display[1] - 80.0])
+        .always_auto_resize(true)
         .opened(&mut open)
-        .build(|| body(ui, &snapshot, &mut state));
+        .build(|| {
+            let frame = FRAMES.fetch_add(1, Ordering::Relaxed);
+            if frame.is_multiple_of(60) {
+                log(format_args!(
+                    "{LOG_PREFIX} panel window pos={:?} size={:?} display={display:?}",
+                    ui.window_pos(),
+                    ui.window_size()
+                ));
+            }
+            let _wrap = ui.push_text_wrap_pos();
+            body(ui, &snapshot, &mut state);
+        });
     if !open {
         close();
     }
@@ -183,6 +203,15 @@ fn body(ui: &Ui, snapshot: &Snapshot, state: &mut PanelState) {
             ui.text("Stopped: repeat is off and the playlist has played out.");
         }
         None => ui.text("Nothing playing."),
+    }
+    if snapshot.waiting {
+        ui.text_disabled("The playlist starts once the game's own track is heard after the load.");
+    }
+    if let Some(problem) = &snapshot.problem {
+        ui.text_colored(
+            [1.0, 0.6, 0.4, 1.0],
+            format!("Playing the region's own track: {problem}"),
+        );
     }
     if let (Some(position), Some(length)) = (snapshot.position_ms, snapshot.length_ms) {
         let mut seconds = state.seek_drag.unwrap_or(position as f32 / 1000.0);

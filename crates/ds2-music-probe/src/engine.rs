@@ -1,7 +1,28 @@
 //! The player. Runs only on the game's sound thread, inside the fronted FMOD calls; the panel talks
 //! to it through [`push`] and reads it through [`SNAPSHOT`].
+//!
+//! # Three rules that keep the music audible and the game alive
+//!
+//! Each is the answer to something a run showed (the evidence is in `ds2-rva` beside the FMOD
+//! constants):
+//!
+//! 1. **The game's own track is silenced last, at its channel, and only once ours is heard.** Ours
+//!    starts while the game's plays; the game's channel is muted (`Channel::setMute`) only when our
+//!    channel's `getAudibility` is above [`AUDIBLE`]. If ours is not heard within [`CONFIRM_MS`] it
+//!    is stopped and the game's track keeps playing. `Event::setMute` is never used to silence: an
+//!    event mute does not come off the channel again, which left Majula silent.
+//! 2. **Nothing of ours starts during a load.** A region with a playlist waits until the game's own
+//!    track is audible -- the load has finished with it -- before starting a playlist track. An
+//!    instance started at region detection stayed silent through the load.
+//! 3. **At most one instance of ours exists, and its memory goes back when it stops.** Every stop is
+//!    followed by `EventGroup::freeEventData` on that instance, and a play is refused while FMOD's
+//!    allocations are more than [`MEMORY_HEADROOM`] above the most the game used on its own. Eight
+//!    banks' instances left alive filled the game's FMOD heap and killed it.
+//!
+//! Ours is also kept at the listener's position every tick, as the game keeps its own region music:
+//! some music events are 3D, and one left at the origin is silent everywhere else.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -44,6 +65,10 @@ pub(crate) struct Snapshot {
     pub(crate) length_ms: Option<u32>,
     /// Repeat is off and the playlist ran out.
     pub(crate) silent: bool,
+    /// A playlist track is waiting for the load to finish.
+    pub(crate) waiting: bool,
+    /// Why the last track could not be played, if it could not.
+    pub(crate) problem: Option<String>,
     /// The region: the looping track the game started last.
     pub(crate) region: Option<TrackKey>,
     pub(crate) map: Option<u32>,
@@ -63,8 +88,19 @@ const TICK_MS: u64 = 100;
 /// A position this far below the last one is the loop going round, not jitter.
 const WRAP_MS: u32 = 2_000;
 
-/// A track that has no channel this long after it was started never will.
-const NO_CHANNEL_MS: u64 = 6_000;
+/// `Channel::getAudibility` above this is heard.
+const AUDIBLE: f32 = 0.01;
+
+/// How long a started track of ours has to become audible before the game's is kept instead.
+const CONFIRM_MS: u64 = 4_000;
+
+/// How long a playlist waits for the game's own track to be heard after a load before starting
+/// anyway (the game's track stays unmuted until ours is heard, so this can never be silence).
+const LOAD_WAIT_MS: u64 = 20_000;
+
+/// Bytes FMOD may have allocated beyond the most the game has used without us, before a play is
+/// refused. The game's FMOD heap size is not known, so this is kept small: one streamed track.
+const MEMORY_HEADROOM: i32 = 8 * 1024 * 1024;
 
 /// System ids read per tick while the catalog is being built.
 const SCAN_PER_TICK: u32 = 256;
@@ -80,11 +116,13 @@ static LAST_TICK: AtomicU64 = AtomicU64::new(0);
 struct Game {
     handle: usize,
     key: TrackKey,
-    system_id: u32,
     map: Option<u32>,
+    started_ms: u64,
+    /// The game's channel we muted, or `0`.
+    muted_channel: usize,
 }
 
-/// The track that is audible.
+/// The track that is playing.
 #[derive(Clone, Debug)]
 struct Playing {
     handle: usize,
@@ -93,8 +131,9 @@ struct Playing {
     ours: bool,
     index: Option<usize>,
     started_ms: u64,
-    channel: usize,
     had_channel: bool,
+    /// Ours has been heard, and the game's track is muted.
+    confirmed: bool,
     /// The channel `setLoopCount(0)` was applied to, or `0`.
     loop_cleared: usize,
     last_position: Option<u32>,
@@ -117,10 +156,16 @@ struct Engine {
     catalog: Catalog,
     game: Option<Game>,
     playing: Option<Playing>,
+    /// A playlist entry waiting for the load to finish.
+    pending: Option<usize>,
     silent: bool,
+    problem: Option<String>,
+    /// Tracks that were started and never heard, this session. Skipped by the playlist.
+    unheard: HashSet<TrackKey>,
     /// Where each region's playlist was when the game last left it.
     resume: HashMap<TrackKey, usize>,
-    failures: usize,
+    /// The most FMOD had allocated at any tick when no instance of ours was alive.
+    game_peak: i32,
     last_sample: u64,
 }
 
@@ -130,6 +175,17 @@ fn with_engine(f: impl FnOnce(&mut Engine)) {
     if let Ok(mut guard) = ENGINE.lock() {
         f(guard.get_or_insert_with(Engine::default));
     }
+}
+
+fn ms(value: Option<u32>) -> String {
+    value.map_or_else(|| "-".to_owned(), |v| format!("{v}ms"))
+}
+
+fn memory() -> String {
+    fmod::memory_stats().map_or_else(
+        || "fmod-mem=?".to_owned(),
+        |(current, max)| format!("fmod-mem={}KiB peak={}KiB", current / 1024, max / 1024),
+    )
 }
 
 /// The game started an event. Called after the original, with its `getInfo`.
@@ -161,13 +217,8 @@ pub(crate) fn on_paused(event: usize, paused: bool, info: Option<&EventInfo>) {
         if let Some(playing) = engine.playing.as_ref().filter(|p| p.ours) {
             let rc = fmod::set_paused(playing.handle, paused);
             log(format_args!(
-                "{LOG_PREFIX} follow pause={paused} region={} ours={} handle=0x{:x} rc={rc}",
-                engine
-                    .game
-                    .as_ref()
-                    .map_or_else(String::new, |g| g.key.to_string()),
-                playing.key,
-                playing.handle
+                "{LOG_PREFIX} follow pause={paused} ours={} handle=0x{:x} rc={rc}",
+                playing.key, playing.handle
             ));
         }
     });
@@ -179,20 +230,14 @@ pub(crate) fn on_stop(event: usize, immediate: bool) {
         let Some(game) = engine.game.clone().filter(|g| g.handle == event) else {
             return;
         };
-        if let Some(playing) = engine.playing.take() {
-            if playing.ours {
-                let rc = fmod::stop(playing.handle, immediate);
-                log(format_args!(
-                    "{LOG_PREFIX} follow stop region={} ours={} handle=0x{:x} immediate={immediate} \
-                     rc={rc}",
-                    game.key, playing.key, playing.handle
-                ));
-            }
-            if let Some(index) = playing.index {
-                engine.resume.insert(game.key.clone(), index);
-            }
+        if let Some(index) = engine.playing.as_ref().and_then(|p| p.index) {
+            engine.resume.insert(game.key.clone(), index);
         }
+        engine.stop_ours(immediate, "the game stopped the region's track");
+        engine.unmute_game();
         engine.game = None;
+        engine.playing = None;
+        engine.pending = None;
         engine.silent = false;
     });
 }
@@ -213,10 +258,14 @@ pub(crate) fn tick() {
         .map(|mut queue| std::mem::take(&mut *queue))
         .unwrap_or_default();
     with_engine(|engine| {
+        engine.track_memory();
         for command in commands {
             engine.command(command);
         }
         engine.scan(SCAN_PER_TICK);
+        engine.follow_listener();
+        engine.start_pending(now);
+        engine.confirm(now);
         engine.watch(now);
         engine.publish(now);
     });
@@ -250,42 +299,47 @@ impl Engine {
             // The prepare pattern starts, pauses and unpauses the same event; one entry is enough.
             return;
         }
-        // A mute can only be ours, and it must never outlive the start it was for.
+        self.stop_ours(true, "a new region track started");
+        self.unmute_game();
+        // Clear any event-level mute an older build of this crate left on the handle.
         fmod::set_mute(event, false);
-        self.stop_ours(true);
         let full = fmod::event_info(event, true).unwrap_or_else(|| info.clone());
         let key = full.key();
         let map = map_index();
+        let managed = managed_region(&key);
         log(format_args!(
-            "{LOG_PREFIX} region key={key} handle=0x{event:x} system={} map={} managed={}",
+            "{LOG_PREFIX} region key={key} handle=0x{event:x} system={} map={} managed={} {}",
             full.system_id,
             map.map_or_else(|| "-".to_owned(), |m| m.to_string()),
-            managed_region(&key).is_some()
+            managed.is_some(),
+            memory()
         ));
         self.game = Some(Game {
             handle: event,
             key: key.clone(),
-            system_id: full.system_id,
             map,
+            started_ms: now_ms(),
+            muted_channel: 0,
         });
         self.silent = false;
-        self.failures = 0;
-        match managed_region(&key) {
-            None => self.follow_game_track(None),
-            Some(region) => {
-                let entries = region.entries();
-                if entries.is_empty() {
-                    self.go_silent("the region's playlist is empty");
-                    return;
-                }
-                let index = self
-                    .resume
-                    .get(&key)
-                    .copied()
-                    .filter(|i| *i < entries.len())
-                    .unwrap_or(0);
-                self.play_entry(&entries, index, false);
-            }
+        self.problem = None;
+        self.follow_game_track(None);
+        if let Some(region) = managed {
+            let entries = region.entries();
+            let index = self
+                .resume
+                .get(&key)
+                .copied()
+                .filter(|i| *i < entries.len())
+                .unwrap_or(0);
+            // Rule 2: not now. `start_pending` starts it once the game's own track is heard.
+            self.pending = Some(index);
+            log(format_args!(
+                "{LOG_PREFIX} waiting for the load: playlist entry {index} starts once the game's \
+                 track is heard"
+            ));
+        } else {
+            self.pending = None;
         }
     }
 
@@ -300,31 +354,97 @@ impl Engine {
             ours: false,
             index,
             started_ms: now_ms(),
-            channel: 0,
             had_channel: false,
+            confirmed: true,
             loop_cleared: 0,
             last_position: None,
         });
     }
 
-    fn stop_ours(&mut self, immediate: bool) {
-        if let Some(playing) = self.playing.take_if(|p| p.ours) {
-            let rc = fmod::stop(playing.handle, immediate);
+    /// Mute the game's channel. Rule 1: only called once ours is heard, or for a chosen silence.
+    fn mute_game(&mut self) {
+        let Some(game) = self.game.as_mut() else {
+            return;
+        };
+        let Some(channel) = fmod::channel_of(game.handle) else {
+            return;
+        };
+        if game.muted_channel == channel {
+            return;
+        }
+        let rc = fmod::channel_set_mute(channel, true);
+        game.muted_channel = channel;
+        log(format_args!(
+            "{LOG_PREFIX} game track muted key={} channel=0x{channel:x} rc={rc}",
+            game.key
+        ));
+    }
+
+    fn unmute_game(&mut self) {
+        let Some(game) = self.game.as_mut() else {
+            return;
+        };
+        let channel = fmod::channel_of(game.handle);
+        let mut rcs = Vec::new();
+        for c in [Some(game.muted_channel), channel].into_iter().flatten() {
+            if c != 0 {
+                rcs.push(fmod::channel_set_mute(c, false));
+            }
+        }
+        let was = std::mem::replace(&mut game.muted_channel, 0);
+        let audibility = channel.and_then(fmod::audibility);
+        if was != 0 {
             log(format_args!(
-                "{LOG_PREFIX} stop ours={} handle=0x{:x} rc={rc}",
-                playing.key, playing.handle
+                "{LOG_PREFIX} game track unmuted key={} channel=0x{was:x} rc={rcs:?} \
+                 audibility={audibility:?}",
+                game.key
             ));
         }
     }
 
+    fn stop_ours(&mut self, immediate: bool, why: &str) {
+        let Some(playing) = self.playing.take_if(|p| p.ours) else {
+            return;
+        };
+        let rc = fmod::stop(playing.handle, immediate);
+        let freed = fmod::free_event_data(playing.handle);
+        log(format_args!(
+            "{LOG_PREFIX} stop ours={} handle=0x{:x} rc={rc} freeEventData-rc={freed} -- {why}; {}",
+            playing.key,
+            playing.handle,
+            memory()
+        ));
+    }
+
+    /// Rule 1 for a chosen silence: the playlist has run out with repeat off.
     fn go_silent(&mut self, why: &str) {
-        self.stop_ours(true);
-        if let Some(game) = &self.game {
-            fmod::set_mute(game.handle, true);
-        }
-        self.playing = None;
+        self.stop_ours(true, why);
+        self.follow_game_track(None);
+        self.mute_game();
         self.silent = true;
         log(format_args!("{LOG_PREFIX} silence -- {why}"));
+    }
+
+    /// Back to the game's own track, audible, after something of ours failed.
+    fn fall_back(&mut self, why: String) {
+        self.stop_ours(true, &why);
+        self.unmute_game();
+        self.follow_game_track(None);
+        self.pending = None;
+        self.silent = false;
+        log(format_args!(
+            "{LOG_PREFIX} fallback: the game's own track plays -- {why}"
+        ));
+        self.problem = Some(why);
+    }
+
+    fn track_memory(&mut self) {
+        if self.playing.as_ref().is_some_and(|p| p.ours) {
+            return;
+        }
+        if let Some((current, _)) = fmod::memory_stats() {
+            self.game_peak = self.game_peak.max(current);
+        }
     }
 
     fn lookup(&mut self, key: &TrackKey) -> Option<u32> {
@@ -344,25 +464,52 @@ impl Engine {
             .map(|(_, id)| *id)
     }
 
+    /// Start the waiting playlist entry once the game's own track is heard (the load is done with
+    /// it), or after [`LOAD_WAIT_MS`] regardless.
+    fn start_pending(&mut self, now: u64) {
+        let (Some(index), Some(game)) = (self.pending, self.game.clone()) else {
+            return;
+        };
+        let heard = fmod::channel_of(game.handle)
+            .and_then(fmod::audibility)
+            .filter(|a| *a > AUDIBLE);
+        let waited = now.saturating_sub(game.started_ms);
+        if heard.is_none() && waited < LOAD_WAIT_MS {
+            return;
+        }
+        self.pending = None;
+        log(format_args!(
+            "{LOG_PREFIX} load done: game track audibility={heard:?} after {waited}ms; starting \
+             playlist entry {index}"
+        ));
+        let entries = any_region(&game).entries();
+        if entries.is_empty() {
+            self.go_silent("the region's playlist is empty");
+            return;
+        }
+        self.play_entry(&entries, index.min(entries.len() - 1), false, 0);
+    }
+
     /// Play `entries[index]`. `restart` puts the game's own track back to its start when it is the
-    /// one chosen; at the region's entry it has only just been started.
-    fn play_entry(&mut self, entries: &[TrackKey], index: usize, restart: bool) {
+    /// one chosen. `tries` counts entries skipped on the way, so a playlist of unplayable tracks
+    /// ends in the fallback rather than a loop.
+    fn play_entry(&mut self, entries: &[TrackKey], index: usize, restart: bool, tries: usize) {
         let Some(game) = self.game.clone() else {
             return;
         };
+        if tries >= entries.len() {
+            self.fall_back("no track in the playlist could be played".to_owned());
+            return;
+        }
         let Some(key) = entries.get(index).cloned() else {
-            self.go_silent("no such playlist entry");
+            self.fall_back("no such playlist entry".to_owned());
             return;
         };
-        self.stop_ours(true);
+        let next = (index + 1) % entries.len().max(1);
+        self.stop_ours(true, "another track was chosen");
         self.silent = false;
         self.resume.insert(game.key.clone(), index);
-        let system_id = if key == game.key {
-            Some(game.system_id)
-        } else {
-            self.lookup(&key)
-        };
-        if system_id == Some(game.system_id) {
+        if key == game.key {
             let channel = fmod::channel_of(game.handle);
             let how = match channel {
                 Some(channel) if restart => {
@@ -371,26 +518,48 @@ impl Engine {
                 Some(_) => "as-is".to_owned(),
                 None => format!("start rc={}", fmod::start(game.handle)),
             };
-            let rc = fmod::set_mute(game.handle, false);
+            self.unmute_game();
             log(format_args!(
-                "{LOG_PREFIX} play index={index} key={key} the-game's-own handle=0x{:x} {how} \
-                 unmute-rc={rc}",
+                "{LOG_PREFIX} play index={index} key={key} the-game's-own handle=0x{:x} {how}",
                 game.handle
             ));
             self.follow_game_track(Some(index));
+            self.problem = None;
             return;
         }
-        let Some(system_id) = system_id else {
+        if self.unheard.contains(&key) {
+            log(format_args!(
+                "{LOG_PREFIX} play index={index} key={key} skipped: it was not heard when it was \
+                 last started"
+            ));
+            self.play_entry(entries, next, restart, tries + 1);
+            return;
+        }
+        let Some(system_id) = self.lookup(&key) else {
             log(format_args!(
                 "{LOG_PREFIX} play index={index} key={key} FAILED: not among the {} music events \
                  the event system knows",
                 self.catalog.tracks.len()
             ));
-            self.fail_next(entries, index);
+            self.play_entry(entries, next, restart, tries + 1);
             return;
         };
+        // Rule 3: refuse rather than run the game's FMOD heap out.
+        if let Some((current, _)) = fmod::memory_stats()
+            && self.game_peak > 0
+            && current > self.game_peak + MEMORY_HEADROOM
+        {
+            self.fall_back(format!(
+                "refused {key}: FMOD has {}KiB allocated, more than {}KiB over the game's own peak \
+                 of {}KiB",
+                current / 1024,
+                MEMORY_HEADROOM / 1024,
+                self.game_peak / 1024
+            ));
+            return;
+        }
         let Some(system) = fmod::event_system() else {
-            self.fail_next(entries, index);
+            self.fall_back("no event system".to_owned());
             return;
         };
         match fmod::event_by_system_id(system, system_id, ds2_rva::FMOD_EVENT_MODE_DEFAULT) {
@@ -399,27 +568,31 @@ impl Engine {
                     "{LOG_PREFIX} play index={index} key={key} system={system_id} FAILED: \
                      getEventBySystemID rc={rc}"
                 ));
-                self.fail_next(entries, index);
+                self.play_entry(entries, next, restart, tries + 1);
             }
             Ok(handle) => {
-                let mute_rc = fmod::set_mute(game.handle, true);
+                let placed = fmod::listener_position(system)
+                    .map_or(-1, |p| fmod::set_3d_position(handle, p));
                 let rc = fmod::start(handle);
                 log(format_args!(
                     "{LOG_PREFIX} play index={index} key={key} system={system_id} ours \
-                     handle=0x{handle:x} start-rc={rc} game-track-muted-rc={mute_rc}"
+                     handle=0x{handle:x} start-rc={rc} at-listener-rc={placed} {}",
+                    memory()
                 ));
                 if rc != FMOD_OK {
-                    self.fail_next(entries, index);
+                    fmod::free_event_data(handle);
+                    self.play_entry(entries, next, restart, tries + 1);
                     return;
                 }
+                self.problem = None;
                 self.playing = Some(Playing {
                     handle,
                     key,
                     ours: true,
                     index: Some(index),
                     started_ms: now_ms(),
-                    channel: 0,
                     had_channel: false,
+                    confirmed: false,
                     loop_cleared: 0,
                     last_position: None,
                 });
@@ -427,14 +600,49 @@ impl Engine {
         }
     }
 
-    fn fail_next(&mut self, entries: &[TrackKey], index: usize) {
-        self.failures += 1;
-        if self.failures >= entries.len() {
-            self.go_silent("no track in the playlist could be played");
+    /// Keep ours at the listener, as the game keeps its own region music.
+    fn follow_listener(&mut self) {
+        let Some(playing) = self.playing.as_ref().filter(|p| p.ours) else {
+            return;
+        };
+        if let Some(system) = fmod::event_system()
+            && let Some(position) = fmod::listener_position(system)
+        {
+            fmod::set_3d_position(playing.handle, position);
+        }
+    }
+
+    /// Rule 1: mute the game's track once ours is heard; give up on ours if it is not.
+    fn confirm(&mut self, now: u64) {
+        let Some(playing) = self.playing.clone().filter(|p| p.ours) else {
+            return;
+        };
+        let audibility = fmod::channel_of(playing.handle).and_then(fmod::audibility);
+        if playing.confirmed {
+            // Keep the game's track muted, including a new channel it may have made.
+            self.mute_game();
             return;
         }
-        let next = (index + 1) % entries.len();
-        self.play_entry(entries, next, true);
+        if audibility.is_some_and(|a| a > AUDIBLE) {
+            log(format_args!(
+                "{LOG_PREFIX} heard key={} audibility={:.3} after {}ms",
+                playing.key,
+                audibility.unwrap_or(0.0),
+                now.saturating_sub(playing.started_ms)
+            ));
+            if let Some(p) = self.playing.as_mut() {
+                p.confirmed = true;
+            }
+            self.mute_game();
+            return;
+        }
+        if now.saturating_sub(playing.started_ms) >= CONFIRM_MS {
+            self.unheard.insert(playing.key.clone());
+            self.fall_back(format!(
+                "{} was not heard in {CONFIRM_MS}ms (audibility {audibility:?})",
+                playing.key
+            ));
+        }
     }
 
     fn command(&mut self, command: Command) {
@@ -445,25 +653,27 @@ impl Engine {
             return;
         };
         match command {
-            Command::Seek(ms) => {
+            Command::Seek(to) => {
                 let Some(playing) = &self.playing else {
                     return;
                 };
                 let Some(channel) = fmod::channel_of(playing.handle) else {
                     log(format_args!(
-                        "{LOG_PREFIX} seek to={ms}ms ignored: {} has no channel",
+                        "{LOG_PREFIX} seek to={to}ms ignored: {} has no channel",
                         playing.key
                     ));
                     return;
                 };
                 let before = fmod::position(channel);
-                let rc = fmod::set_position(channel, ms);
+                let rc = fmod::set_position(channel, to);
                 let after = fmod::position(channel);
                 log(format_args!(
-                    "{LOG_PREFIX} seek key={} from={} to={ms}ms read-back={} rc={rc}",
+                    "{LOG_PREFIX} seek key={} from={} to={to}ms read-back={} rc={rc} \
+                     audibility={:?}",
                     playing.key,
-                    before.map_or_else(|| "-".to_owned(), |v| format!("{v}ms")),
-                    after.map_or_else(|| "-".to_owned(), |v| format!("{v}ms"))
+                    ms(before),
+                    ms(after),
+                    fmod::audibility(channel)
                 ));
                 if let Some(playing) = &mut self.playing {
                     playing.last_position = after;
@@ -473,14 +683,18 @@ impl Engine {
                 let entries = any_region(&game).entries();
                 let current = self.playing.as_ref().and_then(|p| p.index).unwrap_or(0);
                 if let Some(next) = step(entries.len(), current, forward) {
-                    self.failures = 0;
-                    self.play_entry(&entries, next, true);
+                    self.pending = None;
+                    self.play_entry(&entries, next, true, 0);
                 }
             }
             Command::Play(index) => {
                 let entries = any_region(&game).entries();
-                self.failures = 0;
-                self.play_entry(&entries, index, true);
+                self.pending = None;
+                // A track the player asks for by name gets another chance to be heard.
+                if let Some(key) = entries.get(index) {
+                    self.unheard.remove(key);
+                }
+                self.play_entry(&entries, index, true, 0);
             }
             Command::RegionChanged => self.region_changed(&game),
         }
@@ -488,13 +702,13 @@ impl Engine {
 
     fn region_changed(&mut self, game: &Game) {
         let Some(region) = managed_region(&game.key) else {
-            // Back to the game's own: its event plays, unmuted, and the tick puts its loop back.
-            self.stop_ours(true);
-            let channel = fmod::channel_of(game.handle);
-            if channel.is_none() {
+            // Back to the game's own: its event plays, unmuted, and `watch` puts its loop back.
+            self.stop_ours(true, "the region is as shipped again");
+            self.pending = None;
+            if fmod::channel_of(game.handle).is_none() {
                 fmod::start(game.handle);
             }
-            fmod::set_mute(game.handle, false);
+            self.unmute_game();
             self.silent = false;
             let loop_cleared = self
                 .playing
@@ -523,6 +737,9 @@ impl Engine {
             self.go_silent("the region's playlist is empty");
             return;
         }
+        if self.pending.is_some() {
+            return;
+        }
         let still = self
             .playing
             .as_ref()
@@ -533,10 +750,7 @@ impl Engine {
                     playing.index = Some(index);
                 }
             }
-            None => {
-                self.failures = 0;
-                self.play_entry(&entries, 0, true);
-            }
+            None => self.play_entry(&entries, 0, true, 0),
         }
     }
 
@@ -545,6 +759,9 @@ impl Engine {
         let Some(game) = self.game.clone() else {
             return;
         };
+        if self.pending.is_some() || self.silent {
+            return;
+        }
         let region = managed_region(&game.key);
         let repeat = region.as_ref().is_none_or(|r| r.repeat);
         let Some(playing) = self.playing.as_mut() else {
@@ -553,8 +770,6 @@ impl Engine {
         let ended = match fmod::channel_of(playing.handle) {
             Some(channel) => {
                 playing.had_channel = true;
-                playing.channel = channel;
-                self.failures = 0;
                 if !repeat && playing.loop_cleared != channel {
                     let rc = fmod::set_loop_count(channel, 0);
                     playing.loop_cleared = channel;
@@ -588,10 +803,10 @@ impl Engine {
                 }
             }
             None if playing.had_channel => Some("the channel played out"),
-            None if now.saturating_sub(playing.started_ms) > NO_CHANNEL_MS => {
-                Some("it never got a channel")
+            None => {
+                let _ = now;
+                None
             }
-            None => None,
         };
         let Some(reason) = ended else {
             return;
@@ -603,21 +818,14 @@ impl Engine {
         );
         log(format_args!(
             "{LOG_PREFIX} ended key={key} reason=\"{reason}\" last-pos={}",
-            last.map_or_else(|| "-".to_owned(), |v| format!("{v}ms"))
+            ms(last)
         ));
         let region = region.unwrap_or_else(|| Region::new(game.key.clone(), game.map));
         let entries = region.entries();
         match after_end(entries.len(), index, region.repeat) {
-            AfterEnd::Loop => {
-                // Only a track that never started ends with repeat on; try the next one.
-                if reason == "it never got a channel" {
-                    self.fail_next(&entries, index);
-                } else {
-                    self.playing = None;
-                }
-            }
+            AfterEnd::Loop => {}
             AfterEnd::Silence => self.go_silent("repeat is off and the playlist has one track"),
-            AfterEnd::Play(next) => self.play_entry(&entries, next, true),
+            AfterEnd::Play(next) => self.play_entry(&entries, next, true, 0),
         }
     }
 
@@ -710,17 +918,20 @@ impl Engine {
         if let Some(game) = self.game.as_mut().filter(|g| g.map.is_none()) {
             game.map = map_index();
         }
-        let (position, length) = self
+        let channel = self
             .playing
             .as_ref()
-            .and_then(|p| fmod::channel_of(p.handle))
-            .map_or((None, None), |c| (fmod::position(c), fmod::sound_length(c)));
+            .and_then(|p| fmod::channel_of(p.handle));
+        let (position, length) =
+            channel.map_or((None, None), |c| (fmod::position(c), fmod::sound_length(c)));
         let snapshot = Snapshot {
             now: self.playing.as_ref().map(|p| p.key.clone()),
             ours: self.playing.as_ref().is_some_and(|p| p.ours),
             position_ms: position,
             length_ms: length,
             silent: self.silent,
+            waiting: self.pending.is_some(),
+            problem: self.problem.clone(),
             region: self.game.as_ref().map(|g| g.key.clone()),
             map: self.game.as_ref().and_then(|g| g.map),
             index: self.playing.as_ref().and_then(|p| p.index),
@@ -731,21 +942,28 @@ impl Engine {
             && let Some(playing) = &self.playing
         {
             self.last_sample = now;
+            let game_audibility = self
+                .game
+                .as_ref()
+                .and_then(|g| fmod::channel_of(g.handle))
+                .and_then(fmod::audibility);
             log(format_args!(
                 "{LOG_PREFIX} sample key={} ours={} handle=0x{:x} channel-pos={} sound-len={} \
-                 region={} map={}",
+                 audibility={:?} game-audibility={game_audibility:?} region={} map={} {}",
                 playing.key,
                 playing.ours,
                 playing.handle,
-                position.map_or_else(|| "-".to_owned(), |v| format!("{v}ms")),
-                length.map_or_else(|| "-".to_owned(), |v| format!("{v}ms")),
+                ms(position),
+                ms(length),
+                channel.and_then(fmod::audibility),
                 snapshot
                     .region
                     .as_ref()
                     .map_or_else(|| "-".to_owned(), ToString::to_string),
                 snapshot
                     .map
-                    .map_or_else(|| "-".to_owned(), |m| m.to_string())
+                    .map_or_else(|| "-".to_owned(), |m| m.to_string()),
+                memory()
             ));
         }
         if let Ok(mut guard) = SNAPSHOT.lock() {
