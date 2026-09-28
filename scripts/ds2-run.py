@@ -337,9 +337,8 @@ KEY_BUILD_IMPORT_ENABLED = "enabled"
 
 #: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/item_warn.rs`.
 #:
-#: OFF by default here, matching the DLL's own default, and for the DLL's own reason: the badge
-#: patches the frontend's layout builder and its cell bind and has never been in front of a running
-#: game. `--item-warn` is how a run turns it on, which is also the only way to change that.
+#: The DLL's default is off; here it is ON by default (user directive 2026-09-27), and
+#: `--no-item-warn` writes false.
 ITEM_WARN_SECTION = "item_warn"
 KEY_ITEM_WARN_ENABLED = "enabled"
 #: Mirrors `LOG_PREFIX` in `crates/ds2-item-warn/src/lib.rs`. Grep for it when a run disappoints.
@@ -1669,7 +1668,7 @@ def config_text(
     inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
-    item_warn: bool = False,
+    item_warn: bool = True,
     voice_chat: bool = False,
     hp_gauge: bool = True,
     seamless: bool = False,
@@ -2192,13 +2191,9 @@ def config_text(
 {KEY_SAVE_REDIRECT_DIRECTORY} = "{save_directory}"
 
 [{ITEM_WARN_SECTION}]
-# STARTUP-ONLY. A red badge on the icon of any weapon whose stat requirements the character does
-# not meet, in the bottom-left of the cell, drawn by `ds2-item-warn`.
-#
-# OFF unless `--item-warn` asked for it, and the default is not taste. This feature patches the
-# frontend's layout builder and its cell bind, and the case that it is safe is a case from static
-# reading alone -- no run has put it on screen. `inventory_sort` above defaults ON because three
-# runs put its dialog there; this has no such line to point at.
+# Read at startup. A red X on the icon of any weapon, armour piece or spell whose requirements the
+# character does not meet, and on spells there are no attunement slots for, drawn by
+# `ds2-item-warn`. On by default (user directive 2026-09-27); `--no-item-warn` writes false.
 #
 # The check it uses is the PRESENTATION one (`FUN_1400bcde0`, the detail pane's), not the mechanics
 # one (`FUN_14034d3c0`). The two disagree and share no predicate: the mechanics check honours grip
@@ -2482,7 +2477,7 @@ def write_config(
     inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
-    item_warn: bool = False,
+    item_warn: bool = True,
     voice_chat: bool = False,
     hp_gauge: bool = True,
     seamless: bool = False,
@@ -2962,7 +2957,7 @@ def dry_run(
     inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
-    item_warn: bool = False,
+    item_warn: bool = True,
     voice_chat: bool = False,
     hp_gauge: bool = True,
     seamless: bool = False,
@@ -3673,7 +3668,7 @@ def launch(
     inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
-    item_warn: bool = False,
+    item_warn: bool = True,
     voice_chat: bool = False,
     hp_gauge: bool = True,
     seamless: bool = False,
@@ -5751,12 +5746,17 @@ def main() -> int:
         "--item-warn",
         dest="item_warn",
         action="store_true",
+        default=True,
+        help="the default, kept so old command lines still parse: the red X on unusable items.",
+    )
+    parser.add_argument(
+        "--no-item-warn",
+        dest="item_warn",
+        action="store_false",
         help=(
-            "put a red badge in the bottom-left of any weapon icon whose stat requirements this "
-            "character does not meet. OFF without this flag, matching the DLL, because the feature "
-            "patches the frontend's layout builder and its cell bind and no run has yet put it on "
-            "screen. It answers with the DETAIL PANE's check, except that while two-handing it "
-            "halves the Strength requirement the way the game's damage check does."
+            "leave off the red X that `ds2-item-warn` draws on weapons, armour and spells whose "
+            "requirements this character does not meet, and on spells with no attunement slot. ON "
+            "by default (user directive 2026-09-27)."
         ),
     )
     parser.add_argument(
