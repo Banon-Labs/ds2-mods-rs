@@ -1771,6 +1771,12 @@ impl RecommenderBackend for CorpusBackend {
             .take(crate::backend::SUGGESTED_RINGS)
             .map(|&(ring, _)| ring)
             .collect();
+        let levelled = stats.map(|value| u16::try_from(value).unwrap_or(0));
+        debug_assert_eq!(
+            crate::model::soul_level(&levelled),
+            sl,
+            "the optimizer spends exactly the points `sl` has"
+        );
         let name = |ring: &usize| self.rings[*ring].1.clone();
         let (armor, armor_note) = if allow_naked {
             (Vec::new(), None)
@@ -1780,7 +1786,7 @@ impl RecommenderBackend for CorpusBackend {
         Some(GeneratedBuild {
             class: self.classes[class].name.clone(),
             sl,
-            stats: stats.map(|value| u16::try_from(value).unwrap_or(0)),
+            stats: levelled,
             primary: (primary.key.clone(), infusion),
             two_handed,
             weapons_1h,

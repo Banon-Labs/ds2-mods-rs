@@ -19,7 +19,7 @@ use ds2_build_import_core::Infusion;
 use ds2_build_recommender_core::backend::{self, Outcome, RecommenderBackend, ResultRow};
 use ds2_build_recommender_core::corpus::CorpusBackend;
 use ds2_build_recommender_core::model::{
-    Mode, Objective, PanelState, STAT_COUNT, StatusFilter, WeaponsForOpts,
+    Mode, Objective, PanelState, STAT_COUNT, StatusFilter, WeaponsForOpts, soul_level,
 };
 use ds2_build_recommender_core::weapons;
 
@@ -201,6 +201,11 @@ fn optimize_is_the_scripts() {
                 assert_eq!(got.two_handed, two, "{weapon} SL {sl}");
                 assert_eq!(got.stats, stats(st), "{weapon} SL {sl}");
                 assert_eq!(got.sl, sl);
+                assert_eq!(
+                    soul_level(&got.stats),
+                    sl,
+                    "{weapon}: the stats make the SL"
+                );
                 assert_eq!(got.value, value as f32, "{weapon} SL {sl}");
             }
             (got, want) => panic!("{weapon} SL {sl}: {got:?} vs {want:?}"),
@@ -222,6 +227,11 @@ fn generate_build_is_the_scripts() {
             want;
         assert_eq!(got.class, class, "{weapon} SL {sl}");
         assert_eq!(got.sl, sl, "the build is at the soul level asked for");
+        assert_eq!(
+            soul_level(&got.stats),
+            sl,
+            "{weapon}: the stats make the SL"
+        );
         assert_eq!(got.two_handed, two, "{weapon} SL {sl}");
         assert_eq!(got.stats, stats(st), "{weapon} SL {sl}");
         assert_eq!(got.primary, (weapon.to_owned(), infusion(code)));
@@ -286,6 +296,11 @@ fn minimum_is_the_scripts() {
             .unwrap_or_else(|| panic!("{weapon}: no minimum"));
         assert_eq!(got.class, class, "{weapon}");
         assert_eq!(got.sl, sl, "{weapon}");
+        assert_eq!(
+            soul_level(&got.stats),
+            sl,
+            "{weapon}: the stats make the SL"
+        );
         assert_eq!(got.stats, stats(st), "{weapon}");
         assert_eq!(got.two_handed, two, "{weapon}");
         assert_eq!(got.gear, gear, "{weapon}");

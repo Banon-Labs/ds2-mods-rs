@@ -1285,9 +1285,9 @@ fn draw_answer(panel: &mut Panel, canvas: &mut Canvas<'_>, (min, max): ([f32; 2]
                 [min[0], y],
                 TITLE,
                 &format!(
-                    "{}, SL {}{}",
+                    "{}, {}{}",
                     build.class,
-                    build.sl,
+                    sl_label(&build.stats, build.sl),
                     if build.two_handed { ", two-handed" } else { "" }
                 ),
             );
@@ -1413,6 +1413,17 @@ fn draw_table(
 }
 
 /// The generated build.
+/// The soul level the shown stats make, which is what a header says; the level asked for only
+/// beside it, when the two differ: `SL 33 (asked for 100)`.
+fn sl_label(stats: &[u16; STAT_COUNT], asked: u16) -> String {
+    let made = ds2_build_recommender_core::model::soul_level(stats);
+    if made == asked {
+        format!("SL {made}")
+    } else {
+        format!("SL {made} (asked for {asked})")
+    }
+}
+
 fn draw_build(canvas: &mut Canvas<'_>, build: &GeneratedBuild, (min, max): ([f32; 2], [f32; 2])) {
     let line = canvas.line;
     let step = line + 4.0;
@@ -1423,9 +1434,9 @@ fn draw_build(canvas: &mut Canvas<'_>, build: &GeneratedBuild, (min, max): ([f32
         [min[0], y],
         TITLE,
         &format!(
-            "{}, SL {} -- {} ({}), {}{}",
+            "{}, {} -- {} ({}), {}{}",
             build.class,
-            build.sl,
+            sl_label(&build.stats, build.sl),
             primary,
             weapons::display_name(*infusion),
             if build.two_handed {
