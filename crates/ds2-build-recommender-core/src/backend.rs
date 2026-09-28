@@ -1,8 +1,9 @@
 //! What the panel asks, who answers, and the rules that hold whoever answers.
 //!
-//! [`RecommenderBackend`] is the contract. [`StubBackend`] answers it with fixed data so the panel
-//! can be drawn, clicked and applied before the ranking in `scripts/ds2-builds-recommend.py` is
-//! ported. Its numbers are placeholders and the panel says so, from [`RecommenderBackend::is_stub`].
+//! [`RecommenderBackend`] is the contract. [`crate::corpus::CorpusBackend`] answers it with the
+//! ranking in `scripts/ds2-builds-recommend.py`, ported, over the data file the script exports.
+//! [`StubBackend`] answers it with fixed data, for a game folder with no data file; its numbers are
+//! placeholders and the panel says so, from [`RecommenderBackend::is_stub`].
 //!
 //! The rules live OUTSIDE the trait, in [`ask`], [`generate`], [`split_weapons`], [`ring_grants`]
 //! and [`to_import`], so a real backend cannot forget them:
@@ -90,8 +91,11 @@ pub struct OptimizedBuild {
     pub stats: [u16; STAT_COUNT],
     /// Whether the weapon is two-handed to meet its strength.
     pub two_handed: bool,
-    /// The objective's value at these stats.
+    /// The objective's value at these stats; `0` for a minimum build, which has no objective.
     pub value: f32,
+    /// Armour and rings the stats count on, by display name: a minimum build meets its
+    /// requirements with their stat bonuses and cannot wield the weapon without them.
+    pub gear: Vec<String>,
 }
 
 /// How often the damage model's best infusion is the one real builds chose.
@@ -494,6 +498,7 @@ impl StubBackend {
             stats: STUB_STATS,
             two_handed,
             value: 410.0,
+            gear: Vec::new(),
         }
     }
 }
