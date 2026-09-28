@@ -579,7 +579,7 @@ never reads p0, p33 or p34):
 | --- | --- | --- |
 | 1 | `+0x40` int | texture id: the bind looks it up through manager vtable `+0x18` into the record's first slot (`this+0x38`) **[read]** |
 | 2 | `+0x44` int | second texture id, into the record's second slot (`this+0x40`), a normal map **[inf]** as in 59; also picks the vertex body below **[read]** |
-| 3 | range -> `+0x28`, `+0x2c`, `+0x30` | `+0x28` = (min + max) / 2, `+0x2c` = min / mid, `+0x30` = (max - min) / mid; 0 and 1 when the mid is within 1.19e-7 of 0 (`0x1410af2e4`). No reader found in the draw |
+| 3 | range -> `+0x28`, `+0x2c`, `+0x30` | `+0x28` = (min + max) / 2, `+0x2c` = min / mid, `+0x30` = (max - min) / mid; 0 and 1 when the mid is within 1.19e-7 of 0 (`0x1410af2e4`). **Particle lifetime in seconds** (min..max, one draw per particle), read by the cluster update, not the draw (section 4.6) **[read]** |
 | 4 | `+0x48` int | orientation type 0..5, the same six cases as 59's p6 (panic `FXClusterAppearance_Billboard.cpp` line `0x14e` "invalid orientationType.") **[read]**; case 2 takes the cluster's own matrix at state `+0x50..+0x7f` |
 | 5 | `+0x4c` int | render-state map: bind calls manager vtable `+0x40` and `+0x30` with it, as 59 does with p7 **[read]**; blend mode **[inf]** |
 | 6, 7 | `+0xf8`, `+0xfc` ints | texture-sheet columns and frame count **[read]** (rows = `ceil(p7 / p6)`, the divisor of `1.0` at `0x1410ac698`) |
@@ -588,17 +588,17 @@ never reads p0, p33 or p34):
 | 12 + 13 | curve x range -> `+0x160/+0x170/+0x180/+0x190` | colour R, G, B, A over the particle's normalised age **[read]** |
 | 14, 15, 16 | curves `+0x98`, `+0xa8`, `+0xb8` | initial pitch, yaw, roll in radians, evaluated once per particle at emission **[read]** |
 | 17 + 18, 19 + 20, 21 + 22 | range x curve -> `+0xc8`, `+0xd8`, `+0xe8` | pitch, yaw, roll speed in radians per second **[read]** |
-| 23 | `+0x34` int | no reader found in the draw |
+| 23 | `+0x34` int | particle frame: 0 identity (particles stored in world space), 1 the owner's matrix, 2 the parent's matrix; read by the cluster update (section 4.6) **[read]**; the names "world / local / parent space" are **[inf]** |
 | 24 | `+0x1c4` int | first argument of render-context vtable `+0x68` (59's p13) |
 | 25 | `+0x1c8` int | argument of render-context vtable `+0x38` and of the light query vtable `+0x98` (59's p14) |
-| 26 | `+0x1cc` int | no reader found in the draw |
+| 26 | `+0x1cc` int | no reader found (round 7 scanned the appearance, FX4CG entity and Sfx render code ranges, section 4.6); -1 in all 185 shipped uses |
 | 27 | `+0x1d4` int | shader variant switch (59's p15): the bind asks vtable `+0x20` for 2 / 3 when it is 0, 4 / 5 otherwise, and the draw's `0x140bf2700` test falls back to `this+0x4c` **[read]** |
 | 28 | `+0x50` int | draw order: non-zero sorts the particles before writing indices (below) **[read]** |
 | 29 | via `+0x1a0` | vertex count: 5 (lit centre fan) when p2 = 0 and p30 >= 0, else 8 (59's octagon) when p29 is set, else 4 **[read]** |
 | 30 | `+0x1d8` float | lighting floor (59's p24): >= 0 with no second texture turns on the lit vertex body **[read]** |
 | 31 | `+0x1dc` bit1 | swaps the width and height values before they reach the quad **[read]**; which axis each lands on was not traced |
-| 32 | `+0x38` float | no reader found in the draw |
-| 35 | `+0x1d0` float, only when the list has more than 35 entries, else 0.0 | no reader found in the draw |
+| 32 | `+0x38` float | returned by the cluster draw entity's vtable `+0x28` (`0x140a381f0`) and handed with the culled box to the draw collector's vtable `+0x60` (section 4.6) **[read]**; 59's p17 fills the same slot for single particles. Draw-order bias is **[inf]** |
+| 35 | `+0x1d0` float, only when the list has more than 35 entries, else 0.0 | no reader found (same scan as p26); 0.0 in all 185 shipped uses |
 
 From the emitter's common tail (section 4.1), now **[read]** at the consumer: slot 0 -> `+0x58`
 is a width scale, slot 1 -> `+0x68` a height scale, slot 4 -> `+0x1dc` bit0 makes the height use
@@ -654,16 +654,109 @@ Inside the plain body `0x140f6ee80` **[read]**:
   sr*sp*cy - cr*sy`, row 2 `cp*sy, -sp, cp*cy`). So a cluster billboard can tumble in 3D, where 59
   only rolls. How that matrix composes with the orientation basis was not followed through the
   vector code.
-- Normalised age = `(t - emission time) / (a + b * r)`, with `r` in 0..1 from the particle's seed
-  and `a`, `b` the floats at `+0x2c` / `+0x30` of the object at state `+0x8`. That object was not
-  identified; 71's own `+0x2c` / `+0x30` (from p3) have the same min / range shape, so p3 as
-  particle lifetime is a lead **[inf]**, not a finding.
+- Curve time = `(t - emission time) / (a + b * r)`, with `r` in 0..1 from the particle's seed
+  and `a`, `b` the floats at `+0x2c` / `+0x30` of the object at state `+0x8`. Round 7: that object
+  is 71's own block, so `a + b * r` = this particle's lifetime / mid lifetime, and the curve time is
+  the age in seconds stretched onto the mid lifetime, not a 0..1 fraction (section 4.6). Where this
+  section says "normalised age", read that.
 - Colour: each channel is tail colour (at emission time) x p12/p13 colour (at normalised age).
 - Sheet: `cell = floor(p8 + p9) mod p7`, then row and column of that cell in a sheet of p6
   columns; the reciprocal factors used for the column and row steps are **[inf]** from their use.
 
-Shipped param values for 71 were not tallied: `scripts/ds2-ffx.py tree` prints only the root
-effect's actions, and cluster appearances sit inside child templates.
+Shipped param values for 71 are tallied in section 4.6 (`scripts/ds2-ffx.py find --action 71
+--tally`).
+
+### 4.6 Round 7 (static, 2026-09-28): 71's lifetime, particle frame, p32, lighting and shipped values
+
+Ghidra 11.3.1 headless (`scripts/ghidra/query.sh` + `rt/Ds2DecompAt.java`, `rt/Ds2Xrefs.java`),
+`scripts/ds2-disasm.py` and objdump over `darksoulsii-deobf.bin`, and a new
+`scripts/ds2-ffx.py find --action N [--tally]`. No game run.
+
+**FFX::FXCluster, and what "state" is [read].** The appearance draw's `param_3` ("state") is
+`FXCluster + 0x40`:
+
+- Constructor `0x140f53e80` (one caller, `0x140a37f9a` in `0x140a378d0`, which builds the
+  `FX4CG::FXCGClusterDrawEntity`): allocates `0x140` bytes with vtable `FFX::FXCluster`
+  (`0x14127d170`, RTTI name read), stores the owner at `+0x40`, the **cluster appearance block** at
+  `+0x48` and the particle capacity at `+0x50`, and carves seven arrays of `capacity` dwords at
+  `+0x100..+0x130`, plus an eighth at `+0x138` **only when block `+0x30` != 0.0**.
+- The draw-entity getter `0x140f544a0` is `lea rax,[rcx+0x40]; ret`, so state `+0x8` = block,
+  state `+0x1c` = cluster `+0x5c` (current time), state `+0x20` = `+0x60` (live count), state
+  `+0x80` = `+0xc0` (frame matrix, below), state `+0xc0..+0xd8` = the emission-time and x/y/z
+  position arrays at `+0x100..+0x118`, state `+0xf8` = the seed array at `+0x138`. Every offset
+  the 71 draw uses lines up with this.
+- The update `0x140f54850` (reached by the jump at `0x140a380d9` from the draw entity's vtable
+  slot 1) needs emitter `+0x28`, movement `+0x30` and appearance `+0x38` all non-null, and calls
+  their vtable `+0x10` with `rdx = cluster + 0x40`.
+
+**p3 is the particle lifetime [read]**, in `0x140f54850`:
+
+- `0x140f549cd` loads block `+0x28` (mid); if it is below 0 (`comiss` / `jb 0x140f54bcb`) no
+  particle is ever retired by age.
+- `0x140f54a75` / `0x140f54a7a`: `min = mid * [+0x2c]`, `range = mid * [+0x30]`.
+- Per particle: with a seed array, `r` = the seed run through xorshift (`shl 13 / shr 17 / shl 5`)
+  with its low 23 bits put under the exponent of 1.0, minus 1.0 (`0x1410ac698`), so `r` is in
+  0..1; lifetime = `min + range * r`, else `min`. At `0x140f54aed` it compares the cluster time
+  `+0x5c` with emission time + lifetime; when the time has reached it, the particle is removed by
+  copying the last live particle into its slot (the array copies from `0x140f54b11`, then emitter,
+  movement and appearance vtable `+0x8`, the compaction slot round 6 named).
+- The seed array exists only when `range != 0` (constructor test above), so a fixed lifetime
+  costs no seeds.
+- The appearance bodies (plain `0x140f6ee80`, read here at decompiled line 2689) use
+  `(t - emission) * rcp(b * r + a)` as curve time, `a`, `b` = block `+0x2c` / `+0x30`. That is age
+  x mid / lifetime: curves are authored over 0..mid seconds and each particle's life is stretched
+  onto that. With min = max (every shipped 71, below) it is simply the age in seconds.
+- Data: p3 is file type 85, an FXTick pair (seconds, section 5), in all 185 shipped uses.
+
+**p23 picks the particle frame [read]**, block `+0x34`, read at `0x140f54941` in the update and
+in the constructor: 0 -> identity (`0x1401321d0`); 1 -> the 3x4 matrix at the update's `rdx`
+(`[r14+0x0..+0x2f]`, the owner transform the update also copies to `+0x90`); 2 -> the matrix
+after it (`[r14+0x30..+0x5f]`; in the constructor, the owner's `[[+0xc8]+0x10]+0x20`, the parent
+**[inf]**). The result lands at cluster `+0xc0` = state `+0x80`, which the 71 draw passes to the
+vertex bodies and to the depth sort `0x14100daf0`. And `0x140f5455b` (calls emitter vtable
+`+0x20`, movement and appearance `+0x28` with a matrix) re-transforms every stored position and
+the second xyz triple (`+0x120..+0x130`) by that matrix **only when p23 = 0**
+(`0x140f545b9 cmp dword [rax+0x34],0`), so world-space particles are the ones that must be moved
+by hand. The names world / owner / parent space are **[inf]**. Shipped: 0 in all 185 uses.
+
+**p32 [read] as far as the draw collector.** Block `+0x38` is read by exactly one place found:
+`FXCGClusterDrawEntity` (vtable `0x141197178`) slot 5, `+0x28` = `0x140a381f0`:
+`mov rcx,[rcx+0x30]; call 0x140f544a0; mov rcx,[rax+0x8]; movss xmm0,[rcx+0x38]` (0.0 without a
+cluster). The particle entity `FXCGParticleDrawEntity` (`0x1411970c8`) slot 5 = `0x140a37e10`
+returns its block `+0x28` instead, which is 59's p17; the base `FXCGDrawEntity` returns 0.0
+(`0x1404ce210`). The consumer is `0x140a35ab0`, called per element adapter (`element + 0xe0`) from
+`FXCGManagerBase::0x140a38c70`: it gets the entity's bounds (vtable `+0x20`), re-centres them on
+the adapter position, asks the collector `rdx` to cull the box (vtable `+0x78`), and if visible
+calls collector vtable `+0x60` with (entity, `[adapter+0x3c]`, &box, **this float**). The
+collector's class and its `+0x60` were not identified, so what the float does there is open;
+draw-order / depth bias is **[inf]** (shipped 71: -10.0 x135, 0.0 x45, -20.0 x4, -15.0 x1).
+
+**p26, p35: still no reader.** No load of `+0x1cc` or `+0x1d0` from an appearance block in
+`0x140fe0000-0x141012000` (every appearance compile, bind and draw), `0x140a00000-0x140a40000`
+(FX4CG entities, cluster draw entity) or `0x140bf0000-0x140c10000` (Sfx render); the only access
+is the compile's stores at `0x14100d66e` / `0x14100d6cb`. Both are constant in shipped data (-1,
+0.0), so no shipped effect depends on them.
+
+**Lit body `0x140f71530` [read, partial].** Its extra arguments are `param_20` (a vec3) and
+`param_21` (three vec3 rows at float indices 0-2, 4-6, 8-10), the light query outputs the draw
+copied from render-context vtable `+0x98`, plus p30. Per vertex (decompiled lines ~5264-5300):
+`s = clamp(dot(N, param_20) * (1 - p30) + p30, 0, 1)` with N the vertex normal through the
+particle rotation, then each channel = `s x` light colour row + a normal-dependent term built from
+the `param_21` rows, times the template colour (floats 12-15) and the particle colour. So 71 lights
+exactly as 59 does (section 4, p24). Which light the query returns, and the exact role of each
+`param_21` row, were not traced. **Normal-mapped body `0x140f60f80`**: p30 is splatted into row 1
+of a 4x4 that is transposed (`0x14000eff0`) and written into per-vertex data (decompiled line
+~6569), i.e. it goes to the shader as a vertex attribute; the shader side is not in the exe.
+
+**Shipped 71 values [data]**, `scripts/ds2-ffx.py find --action 71 --tally`: 185 uses across
+`sfx9999.ffxbnd.dcx` and `sfx9999_Append.ffxbnd.dcx`. ParamList header `raw 48 37` in 135 and
+`raw 46 37` in 50: 37 positional params plus 11 or 9 extras (the tally's p37-p47). Constant everywhere: p0 `5 0`, p2 0 (no
+normal map, so the normal-mapped body never runs on shipped data), p4 1 (orientation 1, view
+matrix), p13 white x white, p14 = p15 = 0..0, p23 0, p24 = p25 = p26 = -1, p27 = p28 = 0, p30 -1.0
+(lit body never runs either), p33 = p34 = 0, p35 0.0. Varying: p1 texture (70 x116, 72 x40, 29
+x25, four singles), p3 lifetime 4 s x69, 2 s x59, 1 s x30, 6 s x22 (min = max in all), p5 2 x182
+/ 4 x3, sheet p6 x p7 mostly 8 x 4 / 4 x 8 / 8 x 32, p16 initial roll 0..6.28 in 182, p21 roll
+speed curves up to 52.36 rad/s, p29 octagon in 43, p31 1 in 114, p32 as above.
 
 ### 15000 SfxFxClusterAppearance_Billboard **[read, partial]** (compile `0x140c01220`, tag 15000)
 Reads p1-p37 with version gates (p30..p36 only if count > 30..36, defaults -1.0f); also reads a
@@ -720,12 +813,14 @@ converts to **milliseconds** (x1000, +0.5). File values are multiples of 1/30 s 
   (orientation, sheet animation, UV scroll, colour, depth pull, lighting), and the initial roll
   writer `0x1410058b0` is read; still open there are the consumer of vertex floats 9-11 (shader
   side) and which render-context call produces the light inputs.
-- Cluster Billboard 71's draw is read (section 4.5). Open there: the object at state `+0x8` whose
-  `+0x2c/+0x30` give the particle lifetime (and so whether p3 is the lifetime), readers of p23,
-  p26, p32 and p35, how the yaw-pitch-roll matrix composes with the orientation basis, and the
-  normal-mapped and lit bodies `0x140f60f80` / `0x140f71530` beyond their selection. The other
-  appearance classes (Tracer, Distortion, PointSprite, MultiTextureBillboard, Model, RadialBlur,
-  Line) are index -> field only.
+- Cluster Billboard 71's draw is read (section 4.5), and round 7 (section 4.6) settled p3 (particle
+  lifetime), p23 (particle frame) and the state `+0x8` object (71's own block, via `FXCluster`).
+  Still open there: no reader of p26 or p35 exists in the scanned code (both constant in shipped
+  data); p32 is traced to the draw collector's vtable `+0x60` but that collector's class is not
+  identified; which light the render-context `+0x98` query returns and the role of each of its
+  three rows in the lit body; how the yaw-pitch-roll matrix composes with the orientation basis.
+  The other appearance classes (Tracer, Distortion, PointSprite, MultiTextureBillboard, Model,
+  RadialBlur, Line) are index -> field only.
 - Cluster emitters: the common tail's slots 0, 1, 3 and 4 are read at the Billboard 71 consumer;
   no reader of slot 2 was found.
 - Cluster movements: the force-manager terms (`+0x58` id via vtable `+0x18`, `+0x5c` via vtable
