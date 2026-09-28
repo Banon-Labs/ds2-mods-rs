@@ -259,26 +259,55 @@ pub fn ask(backend: &dyn RecommenderBackend, state: &PanelState) -> Answer {
     }
 }
 
-/// Rank every infusion of the panel's weapon at the panel's stats and soul level, by its objective.
+/// Rank every infusion of the panel's weapon by the build Optimize for weapon makes for it: one
+/// [`RecommenderBackend::optimize`] per infusion at the panel's soul level, grip and objective,
+/// best first.
 ///
-/// Not gated on the floors, unlike [`ask`]: this picks an infusion for a weapon the player already
-/// carries at the stats they already have, and recommends no build. Window and raw AR stay off --
-/// they are [`Mode::WeaponsForStats`] options the weapon modes do not show.
+/// Measured on 5b6c304: this used to score each infusion at the stats in the panel, and those are
+/// Optimize for weapon's output rather than the player's input -- so a weapon the panel's stats
+/// could not wield ranked nothing ("these stats cannot wield it"). Optimizing per infusion asks the
+/// question the button is for: which infusion reaches the most at this soul level. A row's class
+/// column carries the optimized build, since each infusion wants different stats.
 pub fn best_infusion(backend: &dyn RecommenderBackend, state: &PanelState) -> Answer {
     let Some(weapon) = state.weapon else {
         return Answer::Nothing("choose a weapon first");
     };
-    let opts = WeaponsForOpts {
-        objective: state.objective,
-        ..WeaponsForOpts::default()
+    let Some(row) = weapons::by_key(weapon) else {
+        return Answer::Nothing("the chosen weapon is not in the weapon table");
     };
-    match backend.best_infusion(weapon, &state.stats, state.sl(), &opts) {
-        Outcome::Rows(rows) if rows.is_empty() => {
-            Answer::Nothing("no infusion to rank: these stats cannot wield it, or none deals this")
-        }
-        Outcome::Rows(rows) => Answer::Rows(rows),
-        Outcome::FloorViolations(lines) => Answer::FloorViolations(lines),
+    let sl = state.sl();
+    let mut rows: Vec<ResultRow> = row
+        .infusions()
+        .into_iter()
+        .filter_map(|infusion| {
+            let build = backend.optimize(weapon, infusion, sl, state.objective, state.grip)?;
+            Some(ResultRow {
+                weapon: row.name.to_owned(),
+                infusion,
+                damage: build.value,
+                ar_by_type: [0.0; 5],
+                grip: if build.two_handed { "2H" } else { "1H" }.to_owned(),
+                two_hand_only: false,
+                hyperarmor: None,
+                counter: None,
+                class: optimized_stats(&build),
+            })
+        })
+        .collect();
+    if rows.is_empty() {
+        return Answer::Nothing("no infusion to rank: no class can wield it at this soul level");
     }
+    rows.sort_by(|a, b| b.damage.total_cmp(&a.damage));
+    Answer::Rows(rows)
+}
+
+/// `Deprived SL 74: STR 11 DEX 42 INT 9 FTH 9`, the stats that decide an infusion.
+fn optimized_stats(build: &OptimizedBuild) -> String {
+    let [.., strength, dexterity, _, intelligence, faith] = build.stats;
+    format!(
+        "{} SL {}: STR {strength} DEX {dexterity} INT {intelligence} FTH {faith}",
+        build.class, build.sl
+    )
 }
 
 /// How far the first row's score is ahead of the second's, as a fraction of the second: `0.25`
@@ -759,19 +788,25 @@ mod tests {
         assert_eq!(infusion_margin(&[scored(300.0), scored(0.0)]), None);
     }
 
-    /// No data, nothing to rank: the stub says so rather than showing an empty table.
+    /// It waits for a weapon, then ranks one optimized build per infusion the weapon takes --
+    /// whatever the panel's own stats are, since Optimize for weapon picks those.
     #[test]
-    fn best_infusion_waits_for_a_weapon_and_says_when_there_is_nothing() {
+    fn best_infusion_optimizes_every_infusion_whatever_the_panels_stats() {
         let mut state = PanelState::default();
         assert_eq!(
             best_infusion(&StubBackend, &state),
             Answer::Nothing("choose a weapon first")
         );
-        state.choose_weapon("Moonlight_Greatsword");
-        assert!(matches!(
-            best_infusion(&StubBackend, &state),
-            Answer::Nothing(_)
-        ));
+        // Measured on 5b6c304: at SL 10 stats this weapon ranked nothing.
+        state.choose_weapon("Dragonslayers_Crescent_Axe");
+        let Answer::Rows(rows) = best_infusion(&StubBackend, &state) else {
+            panic!("no rows for a weapon the stats cannot wield");
+        };
+        assert_eq!(
+            rows.len(),
+            weapons::infusions_for("Dragonslayers_Crescent_Axe").len()
+        );
+        assert!(rows.windows(2).all(|pair| pair[0].damage >= pair[1].damage));
     }
 
     #[test]
