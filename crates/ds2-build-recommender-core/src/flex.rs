@@ -62,18 +62,12 @@ pub fn flex_load_line(flex: &Flexibility) -> String {
     )
 }
 
-/// Python's `round`, which rounds a half to the even neighbour: 12.5 is 12 and 13.5 is 14.
+/// Python's `round`, which rounds a half to the even neighbour: 12.5 is 12 and 13.5 is 14. Read
+/// back through its decimal text rather than cast, so no float-to-integer cast needs allowing.
 fn round_half_even(value: f64) -> i64 {
-    let floor = value.floor();
-    let diff = value - floor;
-    // The percentile is at most 100, so the cast cannot truncate.
-    #[allow(clippy::cast_possible_truncation)]
-    let floor_int = floor as i64;
-    if diff > 0.5 || (diff == 0.5 && floor_int % 2 != 0) {
-        floor_int + 1
-    } else {
-        floor_int
-    }
+    format!("{:.0}", value.round_ties_even())
+        .parse()
+        .unwrap_or(0)
 }
 
 /// 1st, 2nd, 3rd, 4th, 11th, 12th, 13th, 21st.
