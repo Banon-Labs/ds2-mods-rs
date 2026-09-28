@@ -2403,6 +2403,12 @@ pub const FMOD_WAVEBANK_INFO_STRIDE_BOUND: usize = 0x400;
 /// What `Channel::isPlaying` answered on a channel that had played to its end, in the run above.
 pub const FMOD_ERR_INVALID_HANDLE: i32 = 36;
 
+/// `FMOD_ERR_NOTREADY`. `54`.
+///
+/// What `EventGroup::freeEventData(event, false)` answered straight after `Event::stop` on that
+/// instance, in the qa run at 8535a80: the instance is still winding down.
+pub const FMOD_ERR_NOTREADY: i32 = 54;
+
 // Silence and memory, measured with `scripts/frida/fmod-audibility.js` and
 // `scripts/frida/fmod-unmute-test.js` on 2026-09-27 against a player-managed Majula:
 //
