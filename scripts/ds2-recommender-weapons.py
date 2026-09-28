@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """Write the build recommender panel's weapon table: name, class, kind and allowed infusions.
 
-    scripts/ds2-recommender-weapons.py --out scripts/data/ds2-recommender-weapons.tsv
+    scripts/ds2-recommender-weapons.py --out crates/ds2-build-recommender-core/data/weapons.tsv
+
+The table is compiled into `ds2-build-recommender-core` (`include_str!`), so regenerating it is
+the whole update: rebuild and the panel lists the new rows.
 
 The in-game panel needs three things per weapon to draw its two dropdowns and its class filter,
 and nothing else: the SoulsPlanner key and display name, the weapon class, and which infusions

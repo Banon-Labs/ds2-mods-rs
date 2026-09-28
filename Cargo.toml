@@ -74,6 +74,9 @@ ds2-offline = { path = "crates/ds2-offline" }
 ds2-save-redirect = { path = "crates/ds2-save-redirect" }
 ds2-build-import = { path = "crates/ds2-build-import" }
 ds2-build-import-core = { path = "crates/ds2-build-import-core" }
+# The PvP build recommender panel: its model and backend contract (host-tested), and the panel.
+ds2-build-recommender-core = { path = "crates/ds2-build-recommender-core" }
+ds2-build-recommender-ui = { path = "crates/ds2-build-recommender-ui" }
 # The Load from URL field's lifecycle: submit, cancel, re-open, clipboard gate. Host-only.
 ds2-build-url-core = { path = "crates/ds2-build-url-core" }
 ds2-menu-row = { path = "crates/ds2-menu-row" }
