@@ -19,6 +19,7 @@ use ds2_build_recommender_core::weapons;
 use hudhook::imgui::{DrawListMut, MouseButton, Ui};
 
 use crate::input::{Press, Reader};
+use crate::session::{Opened, Phase, Session};
 use crate::{LOG_PREFIX, LogFn};
 
 static LOGGER: AtomicUsize = AtomicUsize::new(0);
@@ -137,15 +138,6 @@ enum Shown {
     Build,
 }
 
-/// Where the panel is in its life.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Phase {
-    /// Taking presses.
-    Open,
-    /// Gone from the screen, holding input until every key is up. Frames waited so far.
-    Closing(u32),
-}
-
 /// Something a click asked for.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Action {
@@ -178,11 +170,14 @@ enum Action {
 
 struct Panel {
     state: PanelState,
-    phase: Phase,
+    /// A press or click asked to close; the session takes it off the screen after this frame.
+    wants_close: bool,
     reader: Reader,
     focus: Option<Field>,
     /// What has been typed into the focused field since it was focused.
     edit: String,
+    /// The weapon search as last typed, put back into the field when it is focused again.
+    search: String,
     /// Whether anything was typed, so focusing and leaving a field changes nothing.
     edited: bool,
     list: Option<List>,
@@ -210,10 +205,11 @@ impl Panel {
     fn new(reader: Reader) -> Self {
         Self {
             state: PanelState::default(),
-            phase: Phase::Open,
+            wants_close: false,
             reader,
             focus: None,
             edit: String::new(),
+            search: String::new(),
             edited: false,
             list: None,
             list_scroll: 0,
@@ -483,7 +479,48 @@ impl Panel {
 
     fn close(&mut self, why: &str) {
         log_line(format_args!("{LOG_PREFIX} panel closed -- {why}"));
-        self.phase = Phase::Closing(0);
+        self.wants_close = true;
+    }
+
+    /// Show a kept panel again. Everything the player set stays -- stats, override, mode,
+    /// objective, weapon, infusion, class, window, neighbours, search text, the answer and its
+    /// scroll, the generated build, the cursor. Only the layers a close backed out of are shut: a
+    /// field half-typed is kept as typed, an open list and the Apply confirm are closed.
+    fn reopen(&mut self, reader: Reader) {
+        self.commit_focus();
+        self.reader = reader;
+        self.wants_close = false;
+        self.list = None;
+        self.confirming = false;
+        self.scrolling_results = false;
+    }
+
+    /// One line saying what came back, so a reopen that lost something shows in the log.
+    fn log_restored(&self) {
+        let state = &self.state;
+        log_line(format_args!(
+            "{LOG_PREFIX} panel restored: mode={:?} objective={:?} stats={:?} sl-override={:?} \
+             weapon={} infusion={} class={} window={:.1}s neighbours={} search={:?} answer={} \
+             results-scroll={} generated={} cursor={:?}",
+            state.mode,
+            state.objective,
+            state.stats,
+            state.sl_override,
+            state.weapon.unwrap_or("none"),
+            weapons::display_name(state.infusion),
+            state.weapons_for.class.as_deref().unwrap_or("all"),
+            state.weapons_for.window_s,
+            state.similar_k,
+            self.search,
+            match &self.answer {
+                Some(Answer::Rows(rows)) => format!("{} rows", rows.len()),
+                Some(_) => "yes".to_owned(),
+                None => "none".to_owned(),
+            },
+            self.results_scroll,
+            self.generated.is_some(),
+            self.cursor,
+        ));
     }
 
     fn focus(&mut self, field: Field) {
@@ -496,6 +533,8 @@ impl Panel {
         self.edit.clear();
         self.edited = false;
         if field == Field::Search {
+            // The search as it was left, so the list comes back filtered the same way.
+            self.edit = self.search.clone();
             self.list = Some(List::Weapon);
             self.list_scroll = 0;
             self.list_cursor = 0;
@@ -508,6 +547,7 @@ impl Panel {
             return;
         };
         if field == Field::Search {
+            self.search = self.edit.clone();
             if self.list == Some(List::Weapon) {
                 self.list = None;
             }
@@ -905,8 +945,9 @@ impl Panel {
     }
 }
 
-/// The panel, while it is on screen or releasing its hold.
-static PANEL: Mutex<Option<Panel>> = Mutex::new(None);
+/// The panel, built on the first open and kept for the rest of the game session: a close hides it
+/// and the next open shows it again as it was left. See `crate::session`.
+static PANEL: Mutex<Session<Panel>> = Mutex::new(Session::new());
 
 /// Set once the panel and its clock are registered with `ds2-overlay`.
 static INSTALLED: AtomicBool = AtomicBool::new(false);
@@ -960,10 +1001,7 @@ pub fn open() {
     let Ok(mut guard) = PANEL.lock() else {
         return;
     };
-    if guard
-        .as_ref()
-        .is_some_and(|panel| panel.phase == Phase::Open)
-    {
+    if guard.phase() == Phase::Open {
         log_line(format_args!(
             "{LOG_PREFIX} press frame={frame} -- ignored, the panel is already up"
         ));
@@ -972,24 +1010,50 @@ pub fn open() {
     let mut reader = Reader::new();
     // The Enter or A that pressed the row is still down on this frame.
     reader.swallow_held();
-    *guard = Some(Panel::new(reader));
+    let mut fresh_reader = Some(reader);
+    let opened = guard.open(|| Panel::new(fresh_reader.take().unwrap_or_else(Reader::new)));
+    if opened == Opened::Restored
+        && let Some(panel) = guard.value_mut()
+        && let Some(reader) = fresh_reader.take()
+    {
+        panel.reopen(reader);
+        panel.log_restored();
+    }
     drop(guard);
     ds2_input_harness::hold(true);
-    log_line(format_args!("{LOG_PREFIX} panel open frame={frame}"));
+    log_line(format_args!(
+        "{LOG_PREFIX} panel open frame={frame} ({})",
+        if opened == Opened::Restored {
+            "restored as it was left"
+        } else {
+            "fresh, first open this session"
+        }
+    ));
 }
 
 /// Whether the panel is on screen. `ds2-overlay` renders no imgui frame while no panel is.
 fn is_up() -> bool {
-    PANEL.try_lock().ok().is_some_and(|guard| {
-        guard
-            .as_ref()
-            .is_some_and(|panel| panel.phase == Phase::Open)
-    })
+    PANEL
+        .try_lock()
+        .ok()
+        .is_some_and(|guard| guard.phase() == Phase::Open)
 }
 
-/// While the panel exists, closing included, the game window gets no keyboard or mouse message.
+/// While the panel is up or releasing its hold, the game window gets no keyboard or mouse message.
 fn wants_input() -> bool {
-    PANEL.try_lock().ok().is_some_and(|guard| guard.is_some())
+    PANEL
+        .try_lock()
+        .ok()
+        .is_some_and(|guard| matches!(guard.phase(), Phase::Open | Phase::Closing(_)))
+}
+
+/// Hand a close a press or click asked for to the session. The panel itself stays.
+fn settle_close(session: &mut Session<Panel>) {
+    if let Some(panel) = session.value_mut()
+        && std::mem::take(&mut panel.wants_close)
+    {
+        session.close();
+    }
 }
 
 /// One frame: keys and pad into the panel, and the hold's release after it closes.
@@ -997,27 +1061,28 @@ fn on_frame() {
     let Ok(mut guard) = PANEL.lock() else {
         return;
     };
-    let Some(panel) = guard.as_mut() else {
-        return;
-    };
-    match panel.phase {
-        Phase::Closing(frames) => {
-            if !panel.reader.anything_down() || frames >= RELEASE_DEADLINE_FRAMES {
-                *guard = None;
+    match guard.phase() {
+        Phase::Closing(_) => {
+            let released = guard
+                .value_mut()
+                .is_none_or(|panel| !panel.reader.anything_down());
+            if guard.tick_closing(released, RELEASE_DEADLINE_FRAMES) {
                 drop(guard);
                 ds2_input_harness::hold(false);
-            } else {
-                panel.phase = Phase::Closing(frames + 1);
             }
         }
         Phase::Open => {
-            for press in panel.reader.poll() {
-                if panel.phase != Phase::Open {
-                    break;
+            if let Some(panel) = guard.value_mut() {
+                for press in panel.reader.poll() {
+                    if panel.wants_close {
+                        break;
+                    }
+                    panel.press(press);
                 }
-                panel.press(press);
             }
+            settle_close(&mut guard);
         }
+        Phase::Unopened | Phase::Closed => {}
     }
 }
 
@@ -1217,12 +1282,18 @@ fn draw(ui: &Ui) {
     let Ok(mut guard) = PANEL.try_lock() else {
         return;
     };
-    let Some(panel) = guard.as_mut() else {
-        return;
-    };
-    if panel.phase != Phase::Open {
+    if guard.phase() != Phase::Open {
         return;
     }
+    if let Some(panel) = guard.value_mut() {
+        draw_panel(panel, ui);
+    }
+    // The close button's click.
+    settle_close(&mut guard);
+}
+
+/// Draw the panel, and turn this frame's mouse clicks into actions.
+fn draw_panel(panel: &mut Panel, ui: &Ui) {
     let display = ui.io().display_size;
     let line = ui.current_font_size();
     let row = line + 8.0;

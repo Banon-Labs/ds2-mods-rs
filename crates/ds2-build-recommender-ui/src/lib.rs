@@ -12,7 +12,7 @@
 //!
 //! | who | when | what it does here |
 //! |---|---|---|
-//! | the row's press | the pause menu's confirm | [`open`]: fresh state, take the input hold |
+//! | the row's press | the pause menu's confirm | [`open`]: the panel as it was left (fresh the first time), take the input hold |
 //! | `on_frame` | `ds2-overlay`'s clock, every `Present` | keys and pad into the focused field, release the hold after closing |
 //! | `draw` | `ds2-overlay`'s panel table, the same `Present` | draw, and turn mouse clicks into actions |
 //!
@@ -40,6 +40,7 @@ pub type LogFn = fn(std::fmt::Arguments<'_>);
 mod input;
 #[cfg(windows)]
 mod panel;
+mod session;
 
 #[cfg(windows)]
 pub use panel::{install, open};
