@@ -95,6 +95,15 @@ type SimilarCases = &'static [(
     &'static [SimilarRow],
 )];
 type FloorCases = &'static [(u16, &'static [u16])];
+/// 1H, 2H, total, below, equal, neighbours, percentile, spare load, fits.
+type FlexAnswer = (u32, u32, u32, u32, u32, u32, f64, f64, u32);
+type FlexCases = &'static [(
+    &'static [u16],
+    u16,
+    &'static [&'static str],
+    &'static [&'static str],
+    FlexAnswer,
+)];
 /// infusion code, score, AR by type, grip.
 type InfusionRow = (&'static str, f64, &'static [f64], &'static str);
 type BestInfusionCases = &'static [(
@@ -498,4 +507,74 @@ fn every_generated_grant_names_a_real_item() {
             }
         }
     }
+}
+
+/// Weapon flexibility, for hand-picked stat lines and for every build the script generated, asked
+/// with the names the panel holds: counts, the neighbour ranking, the spare load, and the words.
+#[test]
+fn flexibility_is_the_scripts() {
+    use ds2_build_recommender_core::flex::{flex_line, flex_load_line};
+    assert_eq!(expected::FLEXIBILITY.len(), expected::FLEX_LINES.len());
+    for (&(st, sl, armor, rings, want), &(line, load)) in
+        expected::FLEXIBILITY.iter().zip(expected::FLEX_LINES)
+    {
+        let armor: Vec<String> = armor.iter().map(|name| (*name).to_owned()).collect();
+        let rings: Vec<String> = rings.iter().map(|name| (*name).to_owned()).collect();
+        let got = backend()
+            .flexibility(&stats(st), sl, &armor, &rings)
+            .expect("the fixture carries neighbour counts");
+        let (one, two, total, below, equal, n, percentile, spare, fits) = want;
+        assert_eq!(
+            (got.one_handed, got.two_handed, got.total),
+            (one, two, total),
+            "{st:?}"
+        );
+        assert_eq!(
+            (got.below, got.equal, got.neighbours),
+            (below, equal, n),
+            "{st:?}"
+        );
+        assert_eq!(got.percentile.to_bits(), percentile.to_bits(), "{st:?}");
+        assert_eq!(
+            got.spare_load.to_bits(),
+            spare.to_bits(),
+            "{st:?} {armor:?} {rings:?}"
+        );
+        assert_eq!(got.fits, fits, "{st:?}");
+        assert_eq!(flex_line(&got), line);
+        assert_eq!(flex_load_line(&got), load);
+    }
+}
+
+/// The SL 35 DEX/FTH character the metric was written for wields 28 of 324 weapons one-handed and
+/// 110 two-handed, as measured on the full corpus: the counts do not depend on the sample.
+#[test]
+fn the_sl35_character_wields_what_was_measured() {
+    let got = backend()
+        .flexibility(&[10, 6, 7, 6, 6, 20, 9, 6, 18], 35, &[], &[])
+        .expect("neighbour counts");
+    assert_eq!((got.one_handed, got.two_handed, got.total), (28, 110, 324));
+}
+
+/// A data file written before the script exported neighbour counts still reads, and says it has
+/// no flexibility to rank rather than ranking against nothing.
+#[test]
+fn a_file_without_neighbour_counts_has_no_flexibility() {
+    let old: String = include_str!("fixtures/corpus-sample.dat")
+        .lines()
+        .map(|line| {
+            if line.starts_with("X\t") {
+                line.rsplit_once('\t').map_or(line, |(head, _)| head)
+            } else {
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let backend = CorpusBackend::parse(&old).expect("an older file parses");
+    assert!(
+        backend
+            .flexibility(&[10, 6, 7, 6, 6, 20, 9, 6, 18], 35, &[], &[])
+            .is_none()
+    );
 }
