@@ -208,6 +208,12 @@ Old Whip is a special case: every attack has two hitboxes at once in different d
 so whether both hit one target needs runtime proof. Treat overlapping windows with different groups as
 "possibly 2", and repeat ticks or disjoint windows as real extra hits.
 
+**Used by** `scripts/ds2-builds-recommend.py --weapons-for ... --objective bleed|poison` (`attack_hits`,
+`status_hits`): build-up per hit times the hits of the weapon's best R1/R2 attack, or the hits landed
+within `--window` seconds of repeating that chain. A hitbox that repeats another's exact window, tick
+count and interval (the Old Whip pair) counts once; overlapping windows like the trident's count
+separately. Per-tick build-up is the INFERRED part above; resistance and proc damage are not modelled.
+
 ## 5. What remains unverified
 - That `hit+0x74` is `poiseDamageScalePlayer`, and the other terms in the poise formula.
 - That the regen dt is in seconds.
