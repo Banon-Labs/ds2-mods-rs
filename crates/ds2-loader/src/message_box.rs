@@ -71,6 +71,14 @@ pub const LINE_PREFIX: &str = "ds2-loader: MESSAGEBOX ";
 /// because a watch that never installed reports the same silence as a run with no dialog.
 pub const INSTALL_PREFIX: &str = "ds2-loader: messagebox-watch";
 
+/// The line written right after each MESSAGEBOX line: the thread that opened the box and its stack.
+/// Deliberately not [`LINE_PREFIX`], so `scripts/ds2-run.py` still counts one box per box.
+pub const STACK_PREFIX: &str = "ds2-loader: messagebox-stack ";
+
+/// How many frames [`backtrace`] asks for. Enough to reach from a CRT box, through `_amsg_exit`
+/// and `_purecall`, past the virtual call site and into the loop that called it.
+const MAX_BACKTRACE_FRAMES: usize = 48;
+
 /// The most UTF-16 units or bytes read out of one caption or message. A message box's text is a
 /// sentence or a paragraph; this bound exists so a pointer to an unterminated buffer costs one
 /// truncated line rather than a walk off the end of the caller's memory.
@@ -86,6 +94,7 @@ unsafe extern "system" {
     fn GetModuleHandleExW(flags: u32, address: *const c_void, module: *mut *mut c_void) -> i32;
     fn GetModuleFileNameW(module: *mut c_void, filename: *mut u16, size: u32) -> u32;
     fn GetProcAddress(module: *mut c_void, name: *const u8) -> *mut c_void;
+    fn GetCurrentThreadId() -> u32;
     fn RtlCaptureStackBackTrace(
         frames_to_skip: u32,
         frames_to_capture: u32,
@@ -216,6 +225,16 @@ pub fn format_line(
     )
 }
 
+/// The stack line for one call. `thread` is decimal, as the Lighting Engine's `DS2LE.log` prints
+/// its thread ids (`[00788]`), so the two logs can be lined up by thread.
+pub fn stack_line(thread: u32, frames: &[String]) -> String {
+    format!(
+        "{STACK_PREFIX}thread={thread} frames={} [{}]",
+        frames.len(),
+        frames.join(",")
+    )
+}
+
 /// `name+0xoffset` for an address inside a loaded module, or the bare address when it is in none
 /// -- which is itself worth knowing: code running out of an anonymous allocation.
 pub fn format_caller(address: usize, module: Option<(&str, usize)>) -> String {
@@ -295,6 +314,37 @@ fn caller() -> String {
     if captured == 0 || frame.is_null() {
         return "<unknown>".to_owned();
     }
+    describe(frame)
+}
+
+/// The caller's whole stack from the API's caller outwards, each frame as `module+0xoffset`.
+///
+/// Same frame count as [`caller`]: frame 0 is here, 1 is [`report`], 2 the detour, and 3 the
+/// caller. The caller alone says only who drew the box; for a CRT box that is the CRT's own
+/// `__crtMessageBoxW` (`DarkSoulsII.exe+0xc4fd72` for R6025), and the frame that matters -- the
+/// virtual call that landed on `_purecall`, the allocation that failed -- is several frames out.
+/// The 2026-09-27 15:29 R6025 had no stack at all; this is so the next one names its frame.
+#[inline(never)]
+fn backtrace() -> Vec<String> {
+    let mut frames = [core::ptr::null_mut::<c_void>(); MAX_BACKTRACE_FRAMES];
+    // SAFETY: `frames` is a live local of exactly the length passed; the return value is how
+    // many of its slots were written.
+    let captured = unsafe {
+        RtlCaptureStackBackTrace(
+            3,
+            MAX_BACKTRACE_FRAMES as u32,
+            frames.as_mut_ptr(),
+            core::ptr::null_mut(),
+        )
+    };
+    frames[..usize::from(captured).min(MAX_BACKTRACE_FRAMES)]
+        .iter()
+        .map(|&frame| describe(frame))
+        .collect()
+}
+
+/// `module+0xoffset` for any code address, or the bare address when no module holds it.
+fn describe(frame: *mut c_void) -> String {
     let address = frame as usize;
     let mut module: *mut c_void = core::ptr::null_mut();
     // SAFETY: `FROM_ADDRESS` takes any address and fails with zero when no module holds it, and
@@ -325,8 +375,12 @@ fn caller() -> String {
 #[inline(never)]
 fn report(api: &str, caption: Option<String>, text: Option<String>, kind: u32) {
     let caller = caller();
+    let frames = backtrace();
     let line = format_line(api, &caller, caption.as_deref(), text.as_deref(), kind);
     crate::log_line(format_args!("{line}"));
+    // SAFETY: takes no argument.
+    let thread = unsafe { GetCurrentThreadId() };
+    crate::log_line(format_args!("{}", stack_line(thread, &frames)));
 }
 
 fn original(index: usize) -> usize {
@@ -569,6 +623,26 @@ mod tests {
             format_caller(0x10, Some(("x.dll", 0x20))),
             "0x10",
             "an address below the base is not in that module"
+        );
+    }
+
+    #[test]
+    fn the_stack_line_names_the_thread_and_every_frame_and_is_not_a_box_line() {
+        let frames = [
+            "DarkSoulsII.exe+0xc4fd72".to_owned(),
+            "DarkSoulsII.exe+0xc2e21e".to_owned(),
+            "0x7fff0000".to_owned(),
+        ];
+        let line = stack_line(788, &frames);
+        assert_eq!(
+            line,
+            "ds2-loader: messagebox-stack thread=788 frames=3 \
+             [DarkSoulsII.exe+0xc4fd72,DarkSoulsII.exe+0xc2e21e,0x7fff0000]"
+        );
+        assert!(!line.starts_with(LINE_PREFIX), "{line}");
+        assert_eq!(
+            stack_line(1, &[]),
+            "ds2-loader: messagebox-stack thread=1 frames=0 []"
         );
     }
 
