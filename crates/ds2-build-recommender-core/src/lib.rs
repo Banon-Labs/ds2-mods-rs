@@ -5,6 +5,7 @@
 //!
 //! * [`weapons`] -- the compiled-in weapon table, its search filter, and each weapon's infusions.
 //! * [`model`] -- the panel's state: nine stats, the soul level they make, the mode and its options.
+//! * [`nav`] -- the panel without a mouse: the D-pad cursor's grid, and Left/Right on a number.
 //! * [`backend`] -- the [`backend::RecommenderBackend`] contract the panel asks, the
 //!   [`backend::StubBackend`] that answers it when there is no data file, and the rules that hold
 //!   whichever backend answers: results are never shown for a build under its floors, a generated
@@ -20,6 +21,7 @@
 pub mod backend;
 pub mod corpus;
 pub mod model;
+pub mod nav;
 pub mod weapons;
 
 pub use backend::{

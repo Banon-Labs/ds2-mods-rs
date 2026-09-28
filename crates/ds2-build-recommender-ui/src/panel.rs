@@ -14,6 +14,7 @@ use ds2_build_recommender_core::backend::{
 };
 use ds2_build_recommender_core::corpus::{self, CorpusBackend};
 use ds2_build_recommender_core::model::{Mode, Objective, PanelState, STAT_COUNT, STAT_LABELS};
+use ds2_build_recommender_core::nav::{self, Control, Dir, Nudge, Shape};
 use ds2_build_recommender_core::weapons;
 use hudhook::imgui::{DrawListMut, MouseButton, Ui};
 
@@ -100,7 +101,24 @@ impl Field {
             _ => None,
         }
     }
+
+    /// The cursor's name for this field.
+    const fn control(self) -> Control {
+        match self {
+            Field::Stat(index) => Control::Stat(index),
+            Field::SlOverride => Control::SlOverride,
+            Field::Search => Control::Weapon,
+            Field::Window => Control::Window,
+            Field::SimilarK => Control::SimilarK,
+        }
+    }
 }
+
+/// Rows a drop-down list shows at once.
+const LIST_VISIBLE: usize = 12;
+
+/// Rows LB and RB move the results table.
+const RESULTS_PAGE: usize = 10;
 
 /// A drop-down list.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -169,6 +187,8 @@ struct Panel {
     edited: bool,
     list: Option<List>,
     list_scroll: usize,
+    /// The highlighted row of the open list, which A chooses.
+    list_cursor: usize,
     answer: Option<Answer>,
     results_scroll: usize,
     generated: Option<GeneratedBuild>,
@@ -176,8 +196,14 @@ struct Panel {
     refused: Vec<String>,
     shown: Shown,
     confirming: bool,
+    /// In the Apply confirm, whether the cursor is on Apply rather than Cancel. Starts on Cancel.
+    confirm_on_apply: bool,
     status: Option<String>,
     calibration: Calibration,
+    /// The control the D-pad and arrow keys are on.
+    cursor: Control,
+    /// A was pressed on the results table: Up and Down scroll it until B or A.
+    scrolling_results: bool,
 }
 
 impl Panel {
@@ -191,21 +217,266 @@ impl Panel {
             edited: false,
             list: None,
             list_scroll: 0,
+            list_cursor: 0,
             answer: None,
             results_scroll: 0,
             generated: None,
             refused: Vec::new(),
             shown: Shown::Answer,
             confirming: false,
+            confirm_on_apply: false,
             status: None,
             calibration: backend().calibration(),
+            cursor: Control::Stat(0),
+            scrolling_results: false,
         }
+    }
+
+    /// What decides the cursor's grid this frame.
+    fn shape(&self) -> Shape {
+        Shape {
+            mode: self.state.mode,
+            results: self.shown == Shown::Answer
+                && self.refused.is_empty()
+                && matches!(&self.answer, Some(Answer::Rows(rows)) if !rows.is_empty()),
+            generated: self.generated.is_some(),
+        }
+    }
+
+    /// The rows `list` offers, with what choosing each does. The same rows the list draws.
+    fn list_rows(&self, list: List) -> Vec<(String, Action)> {
+        match list {
+            List::Weapon => {
+                let filter = if self.focus == Some(Field::Search) {
+                    self.edit.as_str()
+                } else {
+                    ""
+                };
+                weapons::search(filter)
+                    .into_iter()
+                    .map(|row| {
+                        let label = if row.class.is_empty() {
+                            row.name.to_owned()
+                        } else {
+                            format!("{}  ({})", row.name, row.class)
+                        };
+                        (label, Action::ChooseWeapon(row.key))
+                    })
+                    .collect()
+            }
+            List::Infusion => self
+                .state
+                .weapon
+                .map(weapons::infusions_for)
+                .unwrap_or_else(|| {
+                    "NMFLDPBREU"
+                        .chars()
+                        .filter_map(weapons::infusion_for_code)
+                        .collect()
+                })
+                .into_iter()
+                .map(|infusion| {
+                    (
+                        weapons::display_name(infusion).to_owned(),
+                        Action::ChooseInfusion(infusion),
+                    )
+                })
+                .collect(),
+            List::Class => std::iter::once(("All classes".to_owned(), Action::ChooseClass(None)))
+                .chain(
+                    weapons::weapon_classes()
+                        .into_iter()
+                        .map(|class| (class.to_owned(), Action::ChooseClass(Some(class)))),
+                )
+                .collect(),
+        }
+    }
+
+    /// What `control` holds right now, for the log: `VIG 12`, `mode=SimilarBuilds`, `bleed=true`.
+    fn describe(&self, control: Control) -> String {
+        let state = &self.state;
+        let opts = &state.weapons_for;
+        match control {
+            Control::Close => "close".to_owned(),
+            Control::Stat(index) => format!(
+                "{} {}",
+                STAT_LABELS.get(index).copied().unwrap_or("?"),
+                state.stats.get(index).copied().unwrap_or(0)
+            ),
+            Control::SlOverride => format!(
+                "sl-override={} (runs at SL {})",
+                state
+                    .sl_override
+                    .map_or_else(|| "none".to_owned(), |sl| sl.to_string()),
+                state.sl()
+            ),
+            Control::UseCharacter => "use my character's stats".to_owned(),
+            Control::Weapon => format!("weapon={}", state.weapon.unwrap_or("none")),
+            Control::Infusion => format!("infusion={}", weapons::display_name(state.infusion)),
+            Control::Objective(objective) => {
+                format!("objective {objective:?} (selected {:?})", state.objective)
+            }
+            Control::Mode(mode) => format!("mode tab {mode:?} (selected {:?})", state.mode),
+            Control::OneHand => format!("one-hand={}", opts.one_hand),
+            Control::Class => format!("class={}", opts.class.as_deref().unwrap_or("all")),
+            Control::PerClass => format!("per-class={}", opts.per_class),
+            Control::Window => format!("window={:.1}s", opts.window_s),
+            Control::RawAr => format!("raw-ar={}", opts.raw_ar),
+            Control::TwoHand => format!("two-hand={}", state.two_hand),
+            Control::SimilarK => format!("neighbours={}", state.similar_k),
+            Control::Bleed => format!("bleed-only={}", state.status.bleed),
+            Control::Poison => format!("poison-only={}", state.status.poison),
+            Control::Run => format!("run (ready={})", state.ready()),
+            Control::Results => format!("results scroll={}", self.results_scroll),
+            Control::Generate => "generate build".to_owned(),
+            Control::AllowNaked => format!("allow-no-armor={}", state.allow_naked),
+            Control::ShowToggle => format!("showing {:?}", self.shown),
+            Control::Apply => format!("apply (build ready={})", self.generated.is_some()),
+        }
+    }
+
+    /// Move the cursor one step, and say where it landed.
+    fn move_cursor(&mut self, dir: Dir) {
+        let rows = nav::layout(self.shape());
+        let next = nav::step(&rows, self.cursor, dir);
+        if next != self.cursor {
+            self.cursor = next;
+            log_line(format_args!(
+                "{LOG_PREFIX} cursor {dir:?} -> {next:?} [{}]",
+                self.describe(next)
+            ));
+        }
+    }
+
+    /// A (or Enter) on the control under the cursor.
+    fn activate(&mut self) {
+        let rows = nav::layout(self.shape());
+        self.cursor = nav::resolve(&rows, self.cursor);
+        let control = self.cursor;
+        let action = match control {
+            Control::Close => Some(Action::Close),
+            Control::Stat(index) => Some(Action::Focus(Field::Stat(index))),
+            Control::SlOverride => Some(Action::Focus(Field::SlOverride)),
+            Control::Window => Some(Action::Focus(Field::Window)),
+            Control::SimilarK => Some(Action::Focus(Field::SimilarK)),
+            Control::Weapon => Some(Action::Focus(Field::Search)),
+            Control::UseCharacter => Some(Action::UseCharacter),
+            Control::Infusion => Some(Action::OpenList(List::Infusion)),
+            Control::Class => Some(Action::OpenList(List::Class)),
+            Control::Objective(objective) => Some(Action::SetObjective(objective)),
+            Control::Mode(mode) => Some(Action::SetMode(mode)),
+            Control::OneHand => Some(Action::ToggleOneHand),
+            Control::PerClass => Some(Action::TogglePerClass),
+            Control::RawAr => Some(Action::ToggleRawAr),
+            Control::TwoHand => Some(Action::ToggleTwoHand),
+            Control::Bleed => Some(Action::ToggleBleed),
+            Control::Poison => Some(Action::TogglePoison),
+            Control::Run => self.state.ready().then_some(Action::Run),
+            Control::Results => None,
+            Control::Generate => Some(Action::Generate),
+            Control::AllowNaked => Some(Action::ToggleAllowNaked),
+            Control::ShowToggle => Some(Action::Show(if self.shown == Shown::Build {
+                Shown::Answer
+            } else {
+                Shown::Build
+            })),
+            Control::Apply => self.generated.is_some().then_some(Action::AskApply),
+        };
+        match (control, action) {
+            (Control::Results, _) => {
+                self.scrolling_results = true;
+                log_line(format_args!(
+                    "{LOG_PREFIX} press A on Results -- Up/Down scroll, LB/RB page, B leaves"
+                ));
+            }
+            (_, None) => log_line(format_args!(
+                "{LOG_PREFIX} press A on {control:?} -- disabled [{}]",
+                self.describe(control)
+            )),
+            (_, Some(action)) => {
+                self.act(action);
+                if control.is_numeric() {
+                    log_line(format_args!(
+                        "{LOG_PREFIX} press A on {control:?} -- adjusting [{}]: Left/Right step \
+                         one, Up/Down step ten, A or B keeps",
+                        self.describe(control)
+                    ));
+                } else {
+                    log_line(format_args!(
+                        "{LOG_PREFIX} press A on {control:?} -> [{}]{}",
+                        self.describe(control),
+                        if self.list.is_some() {
+                            " -- list open"
+                        } else if self.confirming {
+                            " -- confirm open"
+                        } else {
+                            ""
+                        }
+                    ));
+                }
+            }
+        }
+    }
+
+    /// Up/Down/LB/RB in the open list: move the highlighted row, keeping it in view.
+    fn move_in_list(&mut self, list: List, delta: isize) {
+        let rows = self.list_rows(list);
+        self.list_cursor = nav::move_in_list(self.list_cursor, delta, rows.len());
+        self.list_scroll =
+            nav::scroll_to(self.list_cursor, self.list_scroll, LIST_VISIBLE, rows.len());
+        log_line(format_args!(
+            "{LOG_PREFIX} list {list:?} row {}/{} [{}]",
+            self.list_cursor + 1,
+            rows.len(),
+            rows.get(self.list_cursor)
+                .map_or("empty", |(label, _)| label.as_str())
+        ));
+    }
+
+    /// A in the open list: choose the highlighted row. An empty list just closes.
+    fn choose_in_list(&mut self, list: List) {
+        let rows = self.list_rows(list);
+        match rows.get(self.list_cursor) {
+            Some((label, action)) => {
+                log_line(format_args!(
+                    "{LOG_PREFIX} list {list:?} chose row {} [{label}]",
+                    self.list_cursor + 1
+                ));
+                let action = *action;
+                self.act(action);
+            }
+            None => {
+                self.commit_focus();
+                self.list = None;
+            }
+        }
+    }
+
+    /// Where the highlight starts when `list` opens: on what is chosen now, or the top.
+    fn open_list_cursor(&mut self, list: List) {
+        let rows = self.list_rows(list);
+        let current = match list {
+            List::Weapon => None,
+            List::Infusion => rows
+                .iter()
+                .position(|(_, action)| *action == Action::ChooseInfusion(self.state.infusion)),
+            List::Class => {
+                let class = self.state.weapons_for.class.clone();
+                rows.iter().position(|(label, action)| match &class {
+                    None => *action == Action::ChooseClass(None),
+                    Some(class) => label == class,
+                })
+            }
+        };
+        self.list_cursor = current.unwrap_or(0);
+        self.list_scroll = nav::scroll_to(self.list_cursor, 0, LIST_VISIBLE, rows.len());
     }
 
     /// The inputs changed: an answer for the old ones is not shown for the new.
     fn changed(&mut self) {
         self.answer = None;
         self.results_scroll = 0;
+        self.scrolling_results = false;
         self.refused.clear();
         self.status = None;
     }
@@ -221,11 +492,13 @@ impl Panel {
         }
         self.commit_focus();
         self.focus = Some(field);
+        self.cursor = field.control();
         self.edit.clear();
         self.edited = false;
         if field == Field::Search {
             self.list = Some(List::Weapon);
             self.list_scroll = 0;
+            self.list_cursor = 0;
         }
     }
 
@@ -272,7 +545,10 @@ impl Panel {
                     self.changed();
                 }
             }
-            Field::Search => self.list_scroll = 0,
+            Field::Search => {
+                self.list_scroll = 0;
+                self.list_cursor = 0;
+            }
         }
     }
 
@@ -299,19 +575,6 @@ impl Panel {
         self.edit.pop();
         self.edited = true;
         self.apply_edit(field);
-    }
-
-    /// Enter in a field: the search takes its first match, anything else is kept.
-    fn confirm_field(&mut self) {
-        if self.focus == Some(Field::Search)
-            && let Some(first) = weapons::search(&self.edit).first()
-        {
-            let key = first.key;
-            self.commit_focus();
-            self.choose_weapon(key);
-            return;
-        }
-        self.commit_focus();
     }
 
     fn choose_weapon(&mut self, key: &'static str) {
@@ -408,6 +671,9 @@ impl Panel {
                     Some(list)
                 };
                 self.list_scroll = 0;
+                if self.list.is_some() {
+                    self.open_list_cursor(list);
+                }
             }
             Action::ChooseWeapon(key) => self.choose_weapon(key),
             Action::ChooseInfusion(infusion) => {
@@ -470,49 +736,172 @@ impl Panel {
             },
             Action::Generate => self.generate(),
             Action::Show(shown) => self.shown = shown,
-            Action::AskApply => self.confirming = self.generated.is_some(),
+            Action::AskApply => {
+                self.confirming = self.generated.is_some();
+                self.confirm_on_apply = false;
+            }
             Action::ConfirmApply => self.apply(),
             Action::CancelApply => self.confirming = false,
         }
     }
 
     /// One press from the keyboard or pad.
+    ///
+    /// Four layers, innermost first: the Apply confirm, an open list, a field being typed into or
+    /// adjusted, and the results table being scrolled. With none of them up the D-pad moves the
+    /// cursor, A presses what it is on, and B or Start closes the panel.
     fn press(&mut self, press: Press) {
         if self.confirming {
-            // Apply is a click. A key can only back out of it.
-            if matches!(press, Press::Close | Press::Back) {
-                self.confirming = false;
-            }
-            return;
-        }
-        if self.focus.is_some() {
+            self.press_confirm(press);
+        } else if let Some(list) = self.list
+            && matches!(self.focus, None | Some(Field::Search))
+        {
+            self.press_list(list, press);
+        } else if let Some(field) = self.focus {
+            self.press_field(field, press);
+        } else if self.scrolling_results {
+            self.press_results(press);
+        } else {
             match press {
-                Press::Char(typed) => self.type_char(typed),
-                Press::Backspace => self.backspace(),
-                Press::Confirm => self.confirm_field(),
-                Press::Tab => {
-                    let next = self.focus.and_then(Field::next);
-                    self.commit_focus();
-                    if let Some(next) = next {
-                        self.focus(next);
+                Press::Up => self.move_cursor(Dir::Up),
+                Press::Down => self.move_cursor(Dir::Down),
+                Press::Left => self.move_cursor(Dir::Left),
+                Press::Right => self.move_cursor(Dir::Right),
+                Press::Confirm => self.activate(),
+                Press::Close | Press::Back => self.close("closed by the player"),
+                Press::Tab => self.focus(Field::Stat(0)),
+                Press::PageUp => self.scroll_results(-(RESULTS_PAGE as isize)),
+                Press::PageDown => self.scroll_results(RESULTS_PAGE as isize),
+                Press::Backspace | Press::Char(_) => {}
+            }
+        }
+    }
+
+    /// The Apply confirm: any direction swaps Apply and Cancel, A presses the one highlighted, B
+    /// cancels. The cursor starts on Cancel, so a stray A does not raise soul memory.
+    fn press_confirm(&mut self, press: Press) {
+        match press {
+            Press::Up | Press::Down | Press::Left | Press::Right | Press::Tab => {
+                self.confirm_on_apply ^= true;
+                log_line(format_args!(
+                    "{LOG_PREFIX} confirm cursor -> {}",
+                    if self.confirm_on_apply {
+                        "Apply"
+                    } else {
+                        "Cancel"
                     }
-                }
-                Press::Close | Press::Back => self.commit_focus(),
-                Press::Up | Press::PageUp => self.list_scroll = self.list_scroll.saturating_sub(1),
-                Press::Down | Press::PageDown => self.list_scroll += 1,
+                ));
+            }
+            Press::Confirm if self.confirm_on_apply => {
+                log_line(format_args!("{LOG_PREFIX} press A on confirm Apply"));
+                self.act(Action::ConfirmApply);
+            }
+            Press::Confirm | Press::Close | Press::Back => {
+                log_line(format_args!(
+                    "{LOG_PREFIX} apply cancelled from the pad or keys"
+                ));
+                self.act(Action::CancelApply);
+            }
+            Press::PageUp | Press::PageDown | Press::Backspace | Press::Char(_) => {}
+        }
+    }
+
+    /// An open list: Up/Down move the highlight, LB/RB a page, A chooses, B closes. Typing still
+    /// filters the weapon list while its search field is focused.
+    fn press_list(&mut self, list: List, press: Press) {
+        let page = LIST_VISIBLE as isize;
+        match press {
+            Press::Up => self.move_in_list(list, -1),
+            Press::Down => self.move_in_list(list, 1),
+            Press::PageUp => self.move_in_list(list, -page),
+            Press::PageDown => self.move_in_list(list, page),
+            Press::Confirm => self.choose_in_list(list),
+            Press::Close | Press::Back => {
+                log_line(format_args!("{LOG_PREFIX} list {list:?} closed"));
+                self.commit_focus();
+                self.list = None;
+            }
+            Press::Char(typed) => self.type_char(typed),
+            Press::Backspace => self.backspace(),
+            Press::Left | Press::Right | Press::Tab => {}
+        }
+    }
+
+    /// A field: typing replaces its number, the D-pad steps it, A or B keeps it.
+    fn press_field(&mut self, field: Field, press: Press) {
+        let dir = match press {
+            Press::Up => Some(Dir::Up),
+            Press::Down => Some(Dir::Down),
+            Press::Left => Some(Dir::Left),
+            Press::Right => Some(Dir::Right),
+            _ => None,
+        };
+        if let Some(dir) = dir {
+            let control = field.control();
+            let before = self.describe(control);
+            if nav::nudge(&mut self.state, control, Nudge::from_dir(dir)) {
+                self.edit.clear();
+                self.edited = false;
+                self.changed();
+                log_line(format_args!(
+                    "{LOG_PREFIX} adjust {control:?} {dir:?}: [{before}] -> [{}]",
+                    self.describe(control)
+                ));
             }
             return;
         }
         match press {
-            Press::Close | Press::Back if self.list.is_some() => self.list = None,
-            Press::Close | Press::Back => self.close("closed by the player"),
-            Press::Tab => self.focus(Field::Stat(0)),
-            Press::Up => self.results_scroll = self.results_scroll.saturating_sub(1),
-            Press::Down => self.results_scroll += 1,
-            Press::PageUp => self.results_scroll = self.results_scroll.saturating_sub(10),
-            Press::PageDown => self.results_scroll += 10,
-            Press::Confirm | Press::Backspace | Press::Char(_) => {}
+            Press::Char(typed) => self.type_char(typed),
+            Press::Backspace => self.backspace(),
+            Press::Tab => {
+                let next = self.focus.and_then(Field::next);
+                self.commit_focus();
+                if let Some(next) = next {
+                    self.focus(next);
+                }
+            }
+            Press::Confirm | Press::Close | Press::Back => {
+                self.commit_focus();
+                log_line(format_args!(
+                    "{LOG_PREFIX} kept {:?} [{}]",
+                    field.control(),
+                    self.describe(field.control())
+                ));
+            }
+            _ => {}
         }
+    }
+
+    /// The results table after A on it: Up/Down a row, LB/RB a page, A or B leaves.
+    fn press_results(&mut self, press: Press) {
+        match press {
+            Press::Up => self.scroll_results(-1),
+            Press::Down => self.scroll_results(1),
+            Press::PageUp => self.scroll_results(-(RESULTS_PAGE as isize)),
+            Press::PageDown => self.scroll_results(RESULTS_PAGE as isize),
+            Press::Confirm | Press::Close | Press::Back => {
+                self.scrolling_results = false;
+                log_line(format_args!("{LOG_PREFIX} left the results table"));
+            }
+            _ => {}
+        }
+    }
+
+    /// Move the results table by `delta` rows, never past its last row. The draw then clamps it
+    /// again to what fits on screen.
+    fn scroll_results(&mut self, delta: isize) {
+        let rows = match &self.answer {
+            Some(Answer::Rows(rows)) => rows.len(),
+            _ => 0,
+        };
+        self.results_scroll = self
+            .results_scroll
+            .saturating_add_signed(delta)
+            .min(rows.saturating_sub(1));
+        log_line(format_args!(
+            "{LOG_PREFIX} results scroll {delta:+} -> first row {} of {rows}",
+            self.results_scroll + 1
+        ));
     }
 }
 
@@ -653,6 +1042,9 @@ const CELL_HOVER: [f32; 4] = [0.20, 0.20, 0.22, 1.0];
 const LIST_BG: [f32; 4] = [0.07, 0.08, 0.10, 0.98];
 const ROW_HOVER: [f32; 4] = [1.0, 1.0, 1.0, 0.08];
 const FOCUS_EDGE: [f32; 4] = [0.95, 0.88, 0.66, 1.0];
+/// The D-pad cursor's ring, and the highlighted row of an open list.
+const CURSOR_EDGE: [f32; 4] = [0.45, 0.80, 1.0, 1.0];
+const LIST_CURSOR: [f32; 4] = [0.45, 0.80, 1.0, 0.22];
 const PAD: f32 = 14.0;
 const GAP: f32 = 8.0;
 
@@ -664,9 +1056,26 @@ struct Canvas<'ui> {
     line: f32,
     row: f32,
     targets: Vec<([f32; 2], [f32; 2], Action)>,
+    /// The control the D-pad cursor is on, ringed wherever it is drawn.
+    cursor: Control,
 }
 
 impl Canvas<'_> {
+    /// Ring `min..max` if `control` is the one under the cursor.
+    fn mark(&self, min: [f32; 2], max: [f32; 2], control: Option<Control>) {
+        if control == Some(self.cursor) {
+            self.list
+                .add_rect(
+                    [min[0] - 3.0, min[1] - 3.0],
+                    [max[0] + 3.0, max[1] + 3.0],
+                    CURSOR_EDGE,
+                )
+                .rounding(4.0)
+                .thickness(2.5)
+                .build();
+        }
+    }
+
     fn width(&self, text: &str) -> f32 {
         self.ui.calc_text_size(text)[0]
     }
@@ -696,10 +1105,19 @@ impl Canvas<'_> {
             .build();
     }
 
-    /// A clickable cell. Returns its right edge.
-    fn button(&mut self, x: f32, y: f32, label: &str, on: bool, action: Option<Action>) -> f32 {
+    /// A clickable cell, which the cursor rings when it is `control`. Returns its right edge.
+    fn button(
+        &mut self,
+        x: f32,
+        y: f32,
+        label: &str,
+        on: bool,
+        action: Option<Action>,
+        control: Option<Control>,
+    ) -> f32 {
         let min = [x, y];
         let max = [x + self.width(label) + 16.0, y + self.row];
+        self.mark(min, max, control);
         let hovered = action.is_some() && self.inside(min, max);
         let fill = if on {
             CELL_ON
@@ -721,9 +1139,17 @@ impl Canvas<'_> {
     }
 
     /// `[x] label`. Returns its right edge.
-    fn check(&mut self, x: f32, y: f32, label: &str, checked: bool, action: Action) -> f32 {
+    fn check(
+        &mut self,
+        x: f32,
+        y: f32,
+        label: &str,
+        checked: bool,
+        action: Action,
+        control: Control,
+    ) -> f32 {
         let text = format!("[{}] {label}", if checked { "x" } else { " " });
-        self.button(x, y, &text, false, Some(action))
+        self.button(x, y, &text, false, Some(action), Some(control))
     }
 
     /// A text field of `width`, showing `typed` while focused and `value` otherwise. Returns its
@@ -731,6 +1157,7 @@ impl Canvas<'_> {
     fn field(&mut self, x: f32, y: f32, width: f32, spec: FieldSpec<'_>) -> f32 {
         let min = [x, y];
         let max = [x + width, y + self.row];
+        self.mark(min, max, Some(spec.field.control()));
         self.rect(min, max, if spec.focused { FIELD_EDIT } else { FIELD_BG });
         if spec.focused || self.inside(min, max) {
             self.edge(min, max, FOCUS_EDGE);
@@ -745,9 +1172,11 @@ impl Canvas<'_> {
                 .add_line([caret, text_y], [caret, text_y + self.line], TITLE)
                 .build();
             if spec.typed.is_empty() {
+                // The value itself while it is being stepped with the D-pad; a hint when it is a
+                // placeholder.
                 self.text(
                     [caret + 4.0, text_y],
-                    DISABLED,
+                    if spec.placeholder { DISABLED } else { TEXT },
                     &clip(self.ui, spec.value, space - 8.0),
                 );
             }
@@ -806,6 +1235,9 @@ fn draw(ui: &Ui) {
     let right = left + width - PAD;
     let inner = left + PAD;
 
+    // A control that left the grid (a mode's option, a results table that was cleared) hands the
+    // cursor to its fallback before anything is ringed.
+    panel.cursor = nav::resolve(&nav::layout(panel.shape()), panel.cursor);
     let mut canvas = Canvas {
         ui,
         list: ui.get_foreground_draw_list(),
@@ -814,6 +1246,7 @@ fn draw(ui: &Ui) {
         line,
         row,
         targets: Vec::new(),
+        cursor: panel.cursor,
     };
     canvas.rect([0.0, 0.0], display, DIM_COVER);
     canvas
@@ -833,7 +1266,14 @@ fn draw(ui: &Ui) {
     canvas.text([inner, y], TITLE, "Build Recommender");
     let close = "[ close ]";
     let close_x = right - canvas.width(close) - 16.0;
-    canvas.button(close_x, y - 4.0, close, false, Some(Action::Close));
+    canvas.button(
+        close_x,
+        y - 4.0,
+        close,
+        false,
+        Some(Action::Close),
+        Some(Control::Close),
+    );
     y += line + 4.0;
     if backend().is_stub() {
         canvas.text(
@@ -884,6 +1324,7 @@ fn draw(ui: &Ui) {
         "use my character's stats",
         false,
         Some(Action::UseCharacter),
+        Some(Control::UseCharacter),
     );
     y += row + GAP;
 
@@ -895,7 +1336,7 @@ fn draw(ui: &Ui) {
         .state
         .weapon
         .and_then(weapons::by_key)
-        .map_or("click and type to search", |row| row.name);
+        .map_or("A or click, then pick or type", |row| row.name);
     let weapon_field_x = x;
     let weapon_field_w = (width * 0.30).max(260.0);
     let spec = panel.spec(Field::Search, weapon_name, panel.state.weapon.is_none());
@@ -911,6 +1352,7 @@ fn draw(ui: &Ui) {
         &infusion_label,
         panel.list == Some(List::Infusion),
         Some(Action::OpenList(List::Infusion)),
+        Some(Control::Infusion),
     ) + GAP * 2.0;
     canvas.text([x, y + 4.0], DIM, "Objective");
     x += canvas.width("Objective") + 4.0;
@@ -921,6 +1363,7 @@ fn draw(ui: &Ui) {
             objective.label(),
             panel.state.objective == objective,
             Some(Action::SetObjective(objective)),
+            Some(Control::Objective(objective)),
         ) + 4.0;
     }
     y += row + GAP * 1.5;
@@ -934,6 +1377,7 @@ fn draw(ui: &Ui) {
             mode.label(),
             panel.state.mode == mode,
             Some(Action::SetMode(mode)),
+            Some(Control::Mode(mode)),
         ) + 4.0;
     }
     y += row + GAP;
@@ -948,6 +1392,7 @@ fn draw(ui: &Ui) {
         run_label,
         false,
         panel.state.ready().then_some(Action::Run),
+        Some(Control::Run),
     );
     let class_list_y = y + row + 2.0;
     y += row + GAP;
@@ -984,6 +1429,10 @@ fn draw(ui: &Ui) {
         .build();
 
     let results_rect = ([inner, content_top], [right, content_bottom]);
+    canvas.mark(results_rect.0, results_rect.1, Some(Control::Results));
+    if panel.scrolling_results {
+        canvas.edge(results_rect.0, results_rect.1, CURSOR_EDGE);
+    }
     if panel.shown == Shown::Build
         && let Some(build) = panel.generated.clone()
     {
@@ -994,13 +1443,21 @@ fn draw(ui: &Ui) {
 
     // Footer.
     let mut x = inner;
-    x = canvas.button(x, footer_y, "Generate Build", false, Some(Action::Generate)) + GAP;
+    x = canvas.button(
+        x,
+        footer_y,
+        "Generate Build",
+        false,
+        Some(Action::Generate),
+        Some(Control::Generate),
+    ) + GAP;
     x = canvas.check(
         x,
         footer_y,
         "Allow no armor",
         panel.state.allow_naked,
         Action::ToggleAllowNaked,
+        Control::AllowNaked,
     ) + GAP;
     if panel.generated.is_some() {
         let (label, shown) = if panel.shown == Shown::Build {
@@ -1008,7 +1465,14 @@ fn draw(ui: &Ui) {
         } else {
             ("Show build", Shown::Build)
         };
-        x = canvas.button(x, footer_y, label, false, Some(Action::Show(shown))) + GAP;
+        x = canvas.button(
+            x,
+            footer_y,
+            label,
+            false,
+            Some(Action::Show(shown)),
+            Some(Control::ShowToggle),
+        ) + GAP;
     }
     x = canvas.button(
         x,
@@ -1016,6 +1480,7 @@ fn draw(ui: &Ui) {
         "Apply to character...",
         false,
         panel.generated.is_some().then_some(Action::AskApply),
+        Some(Control::Apply),
     ) + GAP * 2.0;
     if let Some(status) = &panel.status {
         canvas.text([x, footer_y + 4.0], GOOD, &clip(ui, status, right - x));
@@ -1025,91 +1490,44 @@ fn draw(ui: &Ui) {
         DIM,
         &clip(
             ui,
-            "Click a field and type; Tab moves through the stats, Enter keeps, Esc leaves the \
-             field, then the panel. Up/Down scroll the results.",
+            "D-pad/arrows move, A/Enter presses; on a number Left/Right step 1, Up/Down 10; in a \
+             list Up/Down, LB/RB page; B/Esc backs out, then closes. Keys can also type a weapon \
+             name.",
             right - inner,
         ),
     );
 
     // The open list, over everything else.
     let mut list_rect = None;
-    match panel.list {
-        Some(List::Weapon) => {
-            let filter = if panel.focus == Some(Field::Search) {
-                panel.edit.clone()
-            } else {
-                String::new()
-            };
-            let rows: Vec<(String, Action)> = weapons::search(&filter)
-                .into_iter()
-                .map(|row| {
-                    let label = if row.class.is_empty() {
-                        row.name.to_owned()
-                    } else {
-                        format!("{}  ({})", row.name, row.class)
-                    };
-                    (label, Action::ChooseWeapon(row.key))
-                })
-                .collect();
-            list_rect = Some(draw_list(
-                &mut canvas,
+    if let Some(list) = panel.list {
+        let rows = panel.list_rows(list);
+        let (at, list_width, empty) = match list {
+            List::Weapon => (
                 [weapon_field_x, weapon_list_y],
                 weapon_field_w,
-                &rows,
-                &mut panel.list_scroll,
                 "no weapon matches",
-            ));
-        }
-        Some(List::Infusion) => {
-            let offered = panel
-                .state
-                .weapon
-                .map(weapons::infusions_for)
-                .unwrap_or_else(|| {
-                    "NMFLDPBREU"
-                        .chars()
-                        .filter_map(weapons::infusion_for_code)
-                        .collect()
-                });
-            let rows: Vec<(String, Action)> = offered
-                .into_iter()
-                .map(|infusion| {
-                    (
-                        weapons::display_name(infusion).to_owned(),
-                        Action::ChooseInfusion(infusion),
-                    )
-                })
-                .collect();
-            let list_width = canvas.width("Enchanted") + 60.0;
-            list_rect = Some(draw_list(
-                &mut canvas,
+            ),
+            List::Infusion => (
                 [infusion_x, weapon_list_y],
-                list_width,
-                &rows,
-                &mut panel.list_scroll,
+                canvas.width("Enchanted") + 60.0,
                 "",
-            ));
-        }
-        Some(List::Class) => {
-            let rows: Vec<(String, Action)> =
-                std::iter::once(("All classes".to_owned(), Action::ChooseClass(None)))
-                    .chain(
-                        weapons::weapon_classes()
-                            .into_iter()
-                            .map(|class| (class.to_owned(), Action::ChooseClass(Some(class)))),
-                    )
-                    .collect();
-            let list_width = canvas.width("Curved Greatsword") + 60.0;
-            list_rect = Some(draw_list(
-                &mut canvas,
+            ),
+            List::Class => (
                 [class_x, class_list_y],
-                list_width,
-                &rows,
-                &mut panel.list_scroll,
+                canvas.width("Curved Greatsword") + 60.0,
                 "",
-            ));
-        }
-        None => {}
+            ),
+        };
+        let highlighted = panel.list_cursor;
+        list_rect = Some(draw_list(
+            &mut canvas,
+            at,
+            list_width,
+            &rows,
+            &mut panel.list_scroll,
+            highlighted,
+            empty,
+        ));
     }
 
     // The confirm, over everything: only its own two buttons can be clicked.
@@ -1117,7 +1535,7 @@ fn draw(ui: &Ui) {
         && let Some(build) = &panel.generated
     {
         canvas.targets.clear();
-        draw_confirm(&mut canvas, build, display);
+        draw_confirm(&mut canvas, build, display, panel.confirm_on_apply);
     }
 
     // Mouse.
@@ -1175,6 +1593,7 @@ fn draw_options(panel: &Panel, canvas: &mut Canvas<'_>, x: f32, y: f32) -> f32 {
                 "one-handed only",
                 opts.one_hand,
                 Action::ToggleOneHand,
+                Control::OneHand,
             ) + GAP;
             class_x = x;
             let class = format!("{} v", opts.class.as_deref().unwrap_or("All classes"));
@@ -1184,6 +1603,7 @@ fn draw_options(panel: &Panel, canvas: &mut Canvas<'_>, x: f32, y: f32) -> f32 {
                 &class,
                 panel.list == Some(List::Class),
                 Some(Action::OpenList(List::Class)),
+                Some(Control::Class),
             ) + GAP;
             x = canvas.check(
                 x,
@@ -1191,13 +1611,21 @@ fn draw_options(panel: &Panel, canvas: &mut Canvas<'_>, x: f32, y: f32) -> f32 {
                 "best per class",
                 opts.per_class,
                 Action::TogglePerClass,
+                Control::PerClass,
             ) + GAP;
             canvas.text([x, y + 4.0], DIM, "R1 window s");
             x += canvas.width("R1 window s") + 4.0;
             let window = format!("{:.1}", opts.window_s);
             let spec = panel.spec(Field::Window, &window, false);
             x = canvas.field(x, y, canvas.width("10.0") + 20.0, spec) + GAP;
-            canvas.check(x, y, "raw AR", opts.raw_ar, Action::ToggleRawAr);
+            canvas.check(
+                x,
+                y,
+                "raw AR",
+                opts.raw_ar,
+                Action::ToggleRawAr,
+                Control::RawAr,
+            );
         }
         Mode::OptimizeForWeapon => {
             let text = if panel.state.weapon.is_some() {
@@ -1217,6 +1645,7 @@ fn draw_options(panel: &Panel, canvas: &mut Canvas<'_>, x: f32, y: f32) -> f32 {
                 "may two-hand for strength",
                 panel.state.two_hand,
                 Action::ToggleTwoHand,
+                Control::TwoHand,
             ) + GAP;
             if panel.state.weapon.is_none() {
                 canvas.text([x, y + 4.0], DIM, "choose a weapon above");
@@ -1234,6 +1663,7 @@ fn draw_options(panel: &Panel, canvas: &mut Canvas<'_>, x: f32, y: f32) -> f32 {
                 "bleed only",
                 panel.state.status.bleed,
                 Action::ToggleBleed,
+                Control::Bleed,
             ) + GAP;
             canvas.check(
                 x,
@@ -1241,6 +1671,7 @@ fn draw_options(panel: &Panel, canvas: &mut Canvas<'_>, x: f32, y: f32) -> f32 {
                 "poison only",
                 panel.state.status.poison,
                 Action::TogglePoison,
+                Control::Poison,
             );
         }
     }
@@ -1562,7 +1993,12 @@ fn draw_build(canvas: &mut Canvas<'_>, build: &GeneratedBuild, (min, max): ([f32
 }
 
 /// The question Apply asks before anything happens to the character.
-fn draw_confirm(canvas: &mut Canvas<'_>, build: &GeneratedBuild, display: [f32; 2]) {
+fn draw_confirm(
+    canvas: &mut Canvas<'_>,
+    build: &GeneratedBuild,
+    display: [f32; 2],
+    on_apply: bool,
+) {
     let line = canvas.line;
     let (import, extras) = backend::to_import(build);
     let grants = import
@@ -1628,22 +2064,25 @@ fn draw_confirm(canvas: &mut Canvas<'_>, build: &GeneratedBuild, display: [f32; 
         min[0] + PAD,
         y,
         "Apply, and raise soul memory",
-        false,
+        on_apply,
         Some(Action::ConfirmApply),
+        None,
     ) + GAP;
-    canvas.button(x, y, "Cancel", false, Some(Action::CancelApply));
+    canvas.button(x, y, "Cancel", !on_apply, Some(Action::CancelApply), None);
 }
 
-/// A drop-down list hanging from `at`, scrolled to `scroll`. Returns its rectangle.
+/// A drop-down list hanging from `at`, scrolled to `scroll`, with row `highlighted` marked as the
+/// one A chooses. Returns its rectangle.
 fn draw_list(
     canvas: &mut Canvas<'_>,
     at: [f32; 2],
     width: f32,
     rows: &[(String, Action)],
     scroll: &mut usize,
+    highlighted: usize,
     empty: &str,
 ) -> ([f32; 2], [f32; 2]) {
-    const VISIBLE: usize = 12;
+    const VISIBLE: usize = LIST_VISIBLE;
     let step = canvas.line + 6.0;
     *scroll = (*scroll).min(rows.len().saturating_sub(VISIBLE));
     let shown = rows.len().clamp(1, VISIBLE);
@@ -1662,10 +2101,13 @@ fn draw_list(
         return (min, max);
     }
     let mut y = at[1] + 4.0;
-    for (label, action) in rows.iter().skip(*scroll).take(VISIBLE) {
+    for (index, (label, action)) in rows.iter().enumerate().skip(*scroll).take(VISIBLE) {
         let row_min = [at[0] + 2.0, y - 1.0];
         let row_max = [at[0] + width - 2.0, y + step - 1.0];
-        if canvas.inside(row_min, row_max) {
+        if index == highlighted {
+            canvas.rect(row_min, row_max, LIST_CURSOR);
+            canvas.edge(row_min, row_max, CURSOR_EDGE);
+        } else if canvas.inside(row_min, row_max) {
             canvas.rect(row_min, row_max, ROW_HOVER);
         }
         canvas.text(
