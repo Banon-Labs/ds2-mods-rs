@@ -64,6 +64,7 @@ ds2-continue.workspace = true
 ds2-offline.workspace = true
 ds2-save-redirect.workspace = true
 ds2-build-import.workspace = true
+ds2-build-recommender-ui.workspace = true
 ds2-save-file.workspace = true
 # Installed only when `[save_block] enabled = true` and the `save-game-to-file` row registers;
 # see `install_save_block`.

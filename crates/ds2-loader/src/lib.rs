@@ -1190,9 +1190,11 @@ fn install_menu_row() {
     // nothing else registers a row behind this loop's back.
     let mut manual_save_row = false;
     let mut file_row = false;
+    let mut recommender_row = false;
     for row in &config.rows {
         let registered = register_row(*row);
         manual_save_row |= registered && *row == menu_row::Row::SaveGameToFile;
+        recommender_row |= registered && *row == menu_row::Row::BuildRecommender;
         file_row |= registered
             && matches!(
                 *row,
@@ -1201,6 +1203,9 @@ fn install_menu_row() {
     }
     if file_row {
         install_save_picker();
+    }
+    if recommender_row {
+        install_build_recommender();
     }
     // Only when `[save_block] enabled = true` asks for it, and even then gated on that row having
     // registered, not on it being listed. A run whose row was refused -- a full tab, a sealed
@@ -1269,6 +1274,51 @@ fn install_save_picker() {
     }
 }
 
+/// The Build Recommender row's caption.
+const BUILD_RECOMMENDER_CAPTION: &str = "Build Recommender";
+
+/// The Build Recommender row's tint: a green, apart from Load from URL's blue and quit's hue.
+const BUILD_RECOMMENDER_HUE: [u8; 3] = [0x78, 0xdc, 0x8c];
+
+/// Give the Build Recommender row its panel, and the tick that applies what the panel generates.
+///
+/// Only in a run whose `build-recommender` row registered, and before `ds2_menu_row::install`
+/// seals the tick table. Needs the same two things the save picker's panel does, for the same
+/// reasons: `ds2-overlay`'s `Present` detour to draw and tick from, and the input harness, whose
+/// `hold` keeps the pause menu underneath still while the panel has the keyboard.
+fn install_build_recommender() {
+    // The tick first: it is the half that has to be in place before the registry is sealed, and it
+    // costs nothing on a frame with no build waiting.
+    if !ds2_build_import::register_apply_tick(log_line) {
+        log_line(format_args!(
+            "{} build recommender: no apply tick -- Apply will queue a build nothing applies",
+            ds2_build_recommender_ui::LOG_PREFIX
+        ));
+    }
+    ds2_input_harness::set_logger(log_line);
+    // SAFETY: called from the post-Arxan position like every other install here. The harness's
+    // install checks each of its sites against the prologue `ds2-rva` records and refuses a moved
+    // one, and it is idempotent, so a second call from the save picker or `install_input_harness`
+    // is a no-op.
+    let hooked = unsafe { ds2_input_harness::install() };
+    if hooked != INPUT_HARNESS_SITES {
+        log_line(format_args!(
+            "{} build recommender: only {hooked}/{INPUT_HARNESS_SITES} input devices can be held \
+             -- the pause menu may move under the panel",
+            ds2_build_recommender_ui::LOG_PREFIX
+        ));
+    }
+    if !start_overlay() {
+        log_line(format_args!(
+            "{} build recommender: ds2-overlay could not start, so the panel cannot draw and the \
+             row opens nothing",
+            ds2_build_recommender_ui::LOG_PREFIX
+        ));
+        return;
+    }
+    ds2_build_recommender_ui::install(log_line);
+}
+
 /// Register one selected row, through whichever crate owns it.
 ///
 /// EVERY ROW GOES THROUGH THE PUBLIC API, including the one `ds2-menu-row` itself supplies the
@@ -1278,22 +1328,38 @@ fn install_save_picker() {
 ///
 /// Returns whether the row is on the menu, which is what [`install_save_block`] is gated on.
 fn register_row(row: menu_row::Row) -> bool {
-    let registered = match row {
-        // The tint is the one three runs settled -- see `ds2_rva::FLO_ADDED_ROW_TINT_STRENGTH` for
-        // the ramp and what each value looked like on screen.
-        menu_row::Row::QuitToDesktop => ds2_menu_row::add_row(ds2_menu_row::RowSpec {
+    // The two rows whose spec is written here rather than in a feature crate. One `add_row` call
+    // for both, so `scripts/ds2-run.py --selftest` can still say registration has one site. The
+    // tint strength is the one three runs settled -- see `ds2_rva::FLO_ADDED_ROW_TINT_STRENGTH` for
+    // the ramp and what each value looked like on screen.
+    let own_row = |caption: &'static str, rgb: [u8; 3], on_confirm: fn()| {
+        ds2_menu_row::add_row(ds2_menu_row::RowSpec {
             tab: ds2_menu_row::Tab::Quit,
-            caption: "Quit Game",
+            caption,
             icon: ds2_rva::FLO_QUIT_ICON_DEFINITION,
             tint: Some(ds2_menu_row::Tint {
-                rgb: ds2_rva::FLO_ADDED_ROW_HUE,
+                rgb,
                 strength: ds2_rva::FLO_ADDED_ROW_TINT_STRENGTH,
             }),
-            on_confirm: ds2_menu_row::quit_to_desktop,
-        }),
+            on_confirm,
+        })
+    };
+    let registered = match row {
+        menu_row::Row::QuitToDesktop => own_row(
+            "Quit Game",
+            ds2_rva::FLO_ADDED_ROW_HUE,
+            ds2_menu_row::quit_to_desktop,
+        ),
         menu_row::Row::LoadBuildFromUrl => ds2_build_import::register(log_line),
         menu_row::Row::LoadCharacterFromFile => ds2_save_file::register_import_row(log_line),
         menu_row::Row::SaveGameToFile => ds2_save_file::register_export_row(log_line),
+        // Its own hue, for the reason the Load from URL row gives: every glyph in the document
+        // already means something, so the colour is what tells the rows apart.
+        menu_row::Row::BuildRecommender => own_row(
+            BUILD_RECOMMENDER_CAPTION,
+            BUILD_RECOMMENDER_HUE,
+            ds2_build_recommender_ui::open,
+        ),
     };
     match registered {
         Ok(id) => {

@@ -253,6 +253,7 @@ MENU_ROW_ROW_NAMES = (
     "load-build-from-url",
     "load-character-from-file",
     "save-game-to-file",
+    "build-recommender",
     "quit-to-desktop",
 )
 
@@ -4762,7 +4763,7 @@ def selftest() -> int:
         f"({MENU_ROW_LOG_PREFIX})",
     )
 
-    # THE ROW LIST. Four names against twelve slots, so the count and every spelling are checked
+    # THE ROW LIST. Five names against twelve slots, so the count and every spelling are checked
     # here rather than discovered in a log after a launch. The rows key is the only key in this file
     # whose value is a LIST, and the reason it started as one was the game's item vector; see
     # `MENU_ROW_MAX_ADDED` for what replaced that ceiling. This script no longer writes it -- the
