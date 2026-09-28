@@ -48,4 +48,28 @@ Interceptor.attach(e(ev, '?setVolume@Event' + Q + 'M@Z'), {
     send(out);
   },
 });
+// Every 2 s, the volume FMOD holds for each looping music event the game polls, so a load can be
+// watched from start to finish.
+const tracked = new Map();
+let lastDump = 0;
+Interceptor.attach(e(ev, '?getState@Event' + Q + 'PEAI@Z'), { onEnter(args) {
+  const k = args[0].toString();
+  if (!tracked.has(k)) {
+    const n = nameOf(args[0]);
+    tracked.set(k, n !== null && /^m\d{9}/.test(n) && info.add(8).readS32() === -1 ? n : null);
+  }
+  const now = Date.now();
+  if (now - lastDump < 2000) return;
+  lastDump = now;
+  const out = {};
+  for (const [h, n] of tracked) {
+    if (n === null) continue;
+    out[n + '@' + h] = evVolume(ptr(h), v) === 0 ? Math.round(v.readFloat() * 1000) / 1000 : 'gone';
+  }
+  send({ kind: 'volumes', t: now, volumes: out });
+} });
+Interceptor.attach(e(ev, '?start@Event' + Q + 'XZ'), { onEnter(args) {
+  const n = nameOf(args[0]);
+  if (n !== null && /^m/.test(n)) send({ kind: 'start', name: n, handle: args[0].toString(), volume_at_start: evVolume(args[0], v) === 0 ? v.readFloat() : null });
+} });
 send({ kind: 'ready' });
