@@ -29,22 +29,19 @@
 //! # The route below it, kept because a hook can fail to install
 //!
 //! ```text
-//! pick -> validate -> record the handoff -> request a save -> wait for it to land -> quit
+//! pick -> validate -> record the handoff -> refuse saves -> quit
 //! ```
 //!
-//! This is what the row used to do always, and it now runs only when [`crate::swap::begin`] refuses
-//! -- which in practice means the title flow is not hooked, so nothing can drive the character list.
-//! A row that loads a save slowly beats a row that reports a missing detour, and the log says which
-//! of the two ran.
+//! This runs only when [`crate::swap::begin`] refuses -- which in practice means the title flow is
+//! not hooked, so nothing can drive the character list. A row that loads a save slowly beats a row
+//! that reports a missing detour, and the log says which of the two ran.
 //!
-//! The save comes first and the quit waits for it, because the quit this route uses is the game's own
-//! one-byte shutdown -- `FeSubStateTitleShutdown`'s write, polled by the master update -- and that
-//! path does not save and does not ask. Quitting without the save would silently cost the player
-//! every step since their last bonfire, which is not a price a row labelled "load" gets to charge.
-//!
-//! And the save lands in the player's own directory, because no redirect is armed on this route: the
-//! handoff is a file on disk that the loader reads on the next launch, so nothing in this session is
-//! pointing anywhere new.
+//! It does not save the character being left, and neither does the swap. The player asked for that
+//! and accepted the cost: progress since the game last saved is gone. The quit is the game's own
+//! one-byte shutdown -- `FeSubStateTitleShutdown`'s write, polled by the master update -- which
+//! asks nothing itself, but a measured run saw a save requested on the way out
+//! (`ds2-save-block: refused a save kind=10`), so `ds2_save_block::refuse_saves` is armed first and
+//! drops it.
 //!
 //! # Why this used to be the only route, and what changed
 //!
@@ -66,52 +63,23 @@
 //! answers the same question without a flag having to be read.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::time::SystemTime;
 
 use ds2_save_file_core::{
     HANDOFF_FILE_NAME, accepts_with, filter::FilterEntry, filter_string, handoff,
 };
 
 use crate::dialog::{Intent, Pick, Request};
-use crate::game::{self, Landed};
 use crate::swap;
 use crate::{LOG_PREFIX, log_line};
 
 /// The row's caption.
 pub const ROW_CAPTION: &str = "Load Character from File";
 
-/// The caption while the row is saving before it quits, so the player can see why nothing has
-/// happened yet.
-pub const ROW_CAPTION_SAVING: &str = "Saving, then quitting...";
-
 /// The caption once the in-session swap has asked the game to leave.
 ///
-/// The player is about to be looking at the game's own confirm dialog, so this is the last frame
-/// the row is on screen -- but it is on screen while that dialog is up, which is exactly when
-/// somebody wonders whether the row did anything.
+/// The game is leaving for the title during the frames this is on screen, so it answers whether the
+/// row did anything.
 pub const ROW_CAPTION_LEAVING: &str = "Returning to the title to pick a character...";
-
-/// Menu frames to wait for the save to land before quitting anyway.
-///
-/// The pause menu ticks with the game, so this is about five seconds at 60 fps. On the deadline the
-/// row quits regardless and SAYS the save was not observed -- a player who asked to load a different
-/// character is not served by a mod that refuses to do anything because a save was slow.
-const DEADLINE_TICKS: u32 = 300;
-
-const _: () = assert!(DEADLINE_TICKS >= 60, "under a second is not a save");
-const _: () = assert!(DEADLINE_TICKS <= 60 * 30, "half a minute is a hang");
-
-/// A recorded pick, waiting for the game to finish saving before it quits.
-struct Pending {
-    /// The container the game is writing right now -- the player's own, not the pick.
-    source: PathBuf,
-    stamp: Option<(u64, SystemTime)>,
-    flushed: bool,
-    ticks: u32,
-}
-
-static PENDING: Mutex<Option<Pending>> = Mutex::new(None);
 
 /// Where the handoff file goes: next to `DarkSoulsII.exe`, beside the loader's own log.
 fn handoff_path() -> Option<PathBuf> {
@@ -247,13 +215,6 @@ pub fn load_from_file() {
         ));
         return;
     }
-    if PENDING.lock().map(|state| state.is_some()).unwrap_or(true) {
-        log_line(format_args!(
-            "{LOG_PREFIX} import REFUSED reason=already-pending -- a pick is already saving before \
-             it quits"
-        ));
-        return;
-    }
     // The in-game picker unless the player asked for the OS dialog. It answers through
     // [`accept`] from [`tick`], a frame or more later, and this press is done.
     if crate::picker::open_for_load() {
@@ -360,7 +321,8 @@ pub(crate) fn accept(picked: &Path, slot: Option<usize>) -> Result<(), Refused> 
     };
 
     // The in-session route first, and it is the whole feature: [`crate::swap`] stages the pick,
-    // asks the game to return to the title the way its own Quit Game row does, points the loads at
+    // asks the game to return to the title as its Quit Game row's "yes" does, but with no confirm
+    // box and no save of the character being left, points the loads at
     // the staged copy, and hands the player the game's own character list for it. No restart, and
     // no handoff file.
     //
@@ -402,97 +364,27 @@ pub(crate) fn accept(picked: &Path, slot: Option<usize>) -> Result<(), Refused> 
         handoff_file.display()
     ));
 
-    // Save the character the player is leaving, and quit only once it has landed. Which file
-    // that lands in is `ds2-save-redirect`'s answer and not this module's guess: press this row a
-    // second time in one session and the character being left is a swapped-in one, whose save goes
-    // to the staged copy through the open redirect. Watching the player's own container there would
-    // watch a file nothing writes, and the wait would run its deadline out on every swap.
-    let Some(source) = ds2_save_redirect::live_container() else {
-        log_line(format_args!(
-            "{LOG_PREFIX} import QUITTING WITHOUT SAVING -- no live save directory is known, so \
-             there is nothing to wait for"
-        ));
-        quit();
-        return Ok(());
-    };
-    let Some(system) = game::save_load_system() else {
-        log_line(format_args!(
-            "{LOG_PREFIX} import QUITTING WITHOUT SAVING -- the save system could not be reached"
-        ));
-        quit();
-        return Ok(());
-    };
-    let before = game::stamp(&source);
-    if !game::request_save(system) {
-        log_line(format_args!(
-            "{LOG_PREFIX} import QUITTING WITHOUT SAVING -- the save could not be requested"
-        ));
-        quit();
-        return Ok(());
-    }
-    if let Ok(mut pending) = PENDING.lock() {
-        *pending = Some(Pending {
-            source,
-            stamp: before,
-            flushed: false,
-            ticks: 0,
-        });
-        announce(ROW_CAPTION_SAVING);
-    } else {
-        log_line(format_args!(
-            "{LOG_PREFIX} import QUITTING WITHOUT WAITING -- the pending lock is poisoned"
-        ));
-        quit();
-    }
+    // No save of the character being left: the player asked to leave it unsaved. The refusal is
+    // armed before the quit so a save the shutdown path asks for is dropped too, and it is never
+    // lifted -- the process is ending.
+    let refusing = ds2_save_block::refuse_saves();
+    log_line(format_args!(
+        "{LOG_PREFIX} import quitting without saving -- detour-installed={refusing}; the next \
+         launch loads the file you picked"
+    ));
+    quit();
     Ok(())
 }
 
-/// The game-thread half: wait for the save, then quit. Registered with `ds2_menu_row::add_tick`.
+/// The pause-menu tick. Registered with `ds2_menu_row::add_tick`.
 ///
-/// It carries the in-session swap's pause-menu half too, because both want the same thing from the
-/// same place and the tick registry has a slot count. What that half watches for is this tick
-/// continuing to run: the pause menu updating is what calls it, so a swap that asked the game to
-/// leave and is still being ticked is a swap whose confirm the player declined.
+/// It carries the in-session swap's pause-menu half, because both want the same place and the tick
+/// registry has a slot count. What that half watches for is this tick continuing to run: the pause
+/// menu updating is what calls it, so a swap that asked the game to leave and is still being ticked
+/// is a swap the game never acted on.
 pub fn tick() {
     crate::picker::collect();
     crate::swap::pause_tick();
-    let Ok(mut guard) = PENDING.lock() else {
-        return;
-    };
-    let Some(pending) = guard.as_mut() else {
-        return;
-    };
-    pending.ticks += 1;
-    let landed = game::poll_landed(
-        &pending.source,
-        pending.stamp,
-        &mut pending.flushed,
-        pending.ticks,
-        DEADLINE_TICKS,
-    );
-    match landed {
-        Landed::Waiting => {}
-        Landed::Yes => {
-            let ticks = pending.ticks;
-            let _ = guard.take();
-            drop(guard);
-            log_line(format_args!(
-                "{LOG_PREFIX} import saved after {ticks} ticks -- quitting; the next launch loads \
-                 the file you picked"
-            ));
-            quit();
-        }
-        Landed::TimedOut => {
-            let ticks = pending.ticks;
-            let _ = guard.take();
-            drop(guard);
-            log_line(format_args!(
-                "{LOG_PREFIX} import THE SAVE WAS NEVER OBSERVED after {ticks} ticks -- quitting \
-                 anyway; progress since the last save may be lost"
-            ));
-            quit();
-        }
-    }
 }
 
 /// Quit to desktop through the game's own shutdown, which the master update polls.
@@ -631,12 +523,5 @@ mod tests {
         assert_eq!(downloads_windows_path("/"), None);
         assert_eq!(downloads_windows_path("C:\\users\\steamuser"), None);
         assert_eq!(downloads_windows_path("relative/home"), None);
-    }
-
-    /// A save is waited for before the quit, and the wait is bounded.
-    #[test]
-    fn the_wait_is_bounded_and_longer_than_a_save() {
-        // Asserted where the constant is, as a `const _`; this test names the property in words.
-        assert_eq!(DEADLINE_TICKS, 300);
     }
 }
