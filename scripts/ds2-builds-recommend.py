@@ -1143,16 +1143,29 @@ def objective_value(data: Data, weapon: str, inf: str, st: dict, objective: str,
     return sum(damage(k, v, dfn[k]) for k, v in attack_rating(data, weapon, inf, st).items())
 
 
-def optimize_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, objective: str):
+#: The grip optimize_build builds for, per `--grip`. "two" (the default) halves the STR requirement,
+#: even when one-handing would fit; "one" needs the full requirement. The old behaviour -- one-handed
+#: whenever it fits, two-handed only when it does not -- is gone: it made a two-handed build
+#: unreachable for any weapon the stats could one-hand, and trying two-handed first is the same as
+#: always two-handing, since a halved requirement fits whenever the full one does.
+#: The objective is scored the same for either grip: AR (or status build-up per hit) does not depend
+#: on the grip in this model. The 1.5x STR a two-handed grip is said to give is unproven here
+#: (docs/DS2-DPS-MECHANICS.md section 1), so it is not applied.
+GRIP_TRIES = {"two": (True,), "one": (False,)}
+
+
+def optimize_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, objective: str,
+                   grip: str = "two"):
     """A valid build at `sl` that maximizes `objective` for weapon+infusion: floors first (bracket
-    medians, END only for a high-stamina weapon), then requirements (STR halved only when that is
-    the only way to wield it), then every remaining point where it raises the objective most."""
+    medians, END only for a high-stamina weapon), then requirements (STR halved for grip "two",
+    in full for "one"; see GRIP_TRIES), then every remaining point where it raises the objective
+    most."""
     floors, r1, cut = build_floors(data, corpus, sl)
     dfn, _ = bracket_defense(data, corpus, sl)
     req = data.weapons[weapon].get("require") or {}
     best = None
     for cls, base in data.classes.items():
-        for two in (False, True):
+        for two in GRIP_TRIES[grip]:
             st = {s: int(base[s]) for s in STATS}
             for s in FLOOR_STATS:
                 st[s] = max(st[s], floors.get(s, 0))
@@ -1194,7 +1207,7 @@ def optimize_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
             val = objective_value(data, weapon, inf, st, objective, dfn)
             if best is None or val > best[0]:
                 best = (val, cls, two, st)
-            break  # one-handed works: never prefer the two-handed variant
+            break  # one grip per class
     return best, floors
 
 
@@ -1442,14 +1455,15 @@ def generate_armor(data: Data, corpus: list[Build], weapon: str, inf: str, two: 
 
 
 def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, objective: str = "damage",
-                   window: float = 1.5, k: int = 50, allow_naked: bool = False) -> dict | None:
+                   window: float = 1.5, k: int = 50, allow_naked: bool = False,
+                   grip: str = "two") -> dict | None:
     """A whole valid build for weapon+infusion at `sl`: optimize_build's class and stats with the
     weapon as primary; the top 15 one-handable and top 5 two-hand-only other weapons for those
     stats (damage over `window` seconds); 3 copies of each of the 4 rings the nearest-stat builds
     wear most, plus one of every ring at least COMMON_RING of all builds wear; and armour, the
     best_armor set under 70% load with the primary and those four rings carried. `allow_naked`
     skips the armour, as every generated build did before it had any."""
-    best, floors = optimize_build(data, corpus, weapon, inf, sl, objective)
+    best, floors = optimize_build(data, corpus, weapon, inf, sl, objective, grip)
     if best is None:
         return None
     val, cls, two, stats = best
@@ -1772,6 +1786,12 @@ EXPECT_BUILDS = [  # weapon key, infusion, sl, objective: --optimize and --gener
     ("Dagger", "Poison", 60, "poison"),
 ]
 EXPECT_NAKED = [("Demons_Great_Hammer", "Raw", 100, "damage", True)]  # --generate --allow-naked
+EXPECT_ONE_HANDED = [  # --optimize and --generate with --grip one
+    ("Murakumo", "Dark", 74, "damage"),
+    ("Demons_Great_Hammer", "Raw", 20, "damage"),
+    ("Demons_Great_Hammer", "Raw", 100, "damage"),
+    ("Uchigatana", "Bleed", 150, "bleed"),
+]
 EXPECT_MINIMUM = [("Demons_Great_Hammer", True), ("Moonlight_Greatsword", False), ("Uchigatana", False)]
 EXPECT_SIMILAR = [  # stats, sl, k, status
     ([20, 20, 15, 10, 40, 15, 15, 9, 9], 100, 50, None),
@@ -1839,15 +1859,42 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
     out.append("// damage (build-up x hits for bleed/poison), ar by type, grip, hyperarmor, counter, class.")
     out.append(f"pub const WEAPONS_FOR: WeaponsForCases = {_rs(rows_out)};\n")
 
+    mix = threat_mix(data, corpus)
+    opt, gen = expect_builds(data, corpus, mix, EXPECT_BUILDS, EXPECT_NAKED, "two")
+    opt_one, gen_one = expect_builds(data, corpus, mix, EXPECT_ONE_HANDED, [], "one")
+    out.append("// weapon, infusion, sl, objective -> class, two-handed, stats, value.")
+    out.append(f"pub const OPTIMIZE: OptimizeCases = {_rs(opt)};\n")
+    out.append("// weapon, infusion, sl, objective, allow naked -> class, two-handed, stats, 1H rows, 2H-only")
+    out.append("// rows (name, infusion, rounded damage), suggested rings, common rings, armour, armour note,")
+    out.append("// whether armour requirements bound the choice, whether the load cap did.")
+    out.append(f"pub const GENERATE: GenerateCases = {_rs(gen)};\n")
+    out.append("// The same two questions with the grip forced one-handed (--grip one).")
+    out.append(f"pub const OPTIMIZE_ONE_HANDED: OptimizeCases = {_rs(opt_one)};\n")
+    out.append(f"pub const GENERATE_ONE_HANDED: GenerateCases = {_rs(gen_one)};\n")
+
+    mins = []
+    for weapon, two in EXPECT_MINIMUM:
+        m = recommended_minimum(data, corpus, weapon, two)
+        _, cls, (_, _, arm, rs, _, _) = m["hard"][0]
+        mid = m["presets"][0]
+        gear = [data.armor[s][p]["name"] for s, p in zip(ARMOR_SLOTS, arm) if p != "Naked"] \
+            + [data.rings[r]["name"] for r in rs]
+        mins.append((weapon, two, (data.classes[cls]["name"], m["target_sl"], arr(mid["stats"]), gear)))
+    return backend_expectations_rest(data, corpus, out, mins)
+
+
+def expect_builds(data: Data, corpus: list[Build], mix, cases: list, naked_cases: list, grip: str):
+    """The script's --optimize and --generate answers for `cases` (plus `naked_cases` generated with
+    --allow-naked) at `grip`, as fixture tuples."""
+    arr = lambda d: [int(d[s]) for s in STATS]
     opt, gen = [], []
-    for weapon, inf, sl, objective in EXPECT_BUILDS:
-        best, _ = optimize_build(data, corpus, weapon, inf, sl, objective)
+    for weapon, inf, sl, objective in cases:
+        best, _ = optimize_build(data, corpus, weapon, inf, sl, objective, grip)
         opt.append((weapon, INFUSION_CODE[inf], sl, objective,
                     None if best is None else _Some((data.classes[best[1]]["name"], best[2], arr(best[3]),
                                                      float(best[0])))))
-    mix = threat_mix(data, corpus)
-    for weapon, inf, sl, objective, naked in [(*case, False) for case in EXPECT_BUILDS] + EXPECT_NAKED:
-        g = generate_build(data, corpus, weapon, inf, sl, objective, allow_naked=naked)
+    for weapon, inf, sl, objective, naked in [(*case, False) for case in cases] + naked_cases:
+        g = generate_build(data, corpus, weapon, inf, sl, objective, allow_naked=naked, grip=grip)
         if g is None:
             gen.append((weapon, INFUSION_CODE[inf], sl, objective, naked, None))
             continue
@@ -1870,21 +1917,12 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
             [(n, INFUSION_CODE[i], d) for n, i, d in g["weapons_1h"]],
             [(n, INFUSION_CODE[i], d) for n, i, d in g["weapons_2h_only"]], suggested, rings,
             g["armor"], g["armor_note"] and _Some(g["armor_note"]), binds[0], binds[1]))))
-    out.append("// weapon, infusion, sl, objective -> class, two-handed, stats, value.")
-    out.append(f"pub const OPTIMIZE: OptimizeCases = {_rs(opt)};\n")
-    out.append("// weapon, infusion, sl, objective, allow naked -> class, two-handed, stats, 1H rows, 2H-only")
-    out.append("// rows (name, infusion, rounded damage), suggested rings, common rings, armour, armour note,")
-    out.append("// whether armour requirements bound the choice, whether the load cap did.")
-    out.append(f"pub const GENERATE: GenerateCases = {_rs(gen)};\n")
+    return opt, gen
 
-    mins = []
-    for weapon, two in EXPECT_MINIMUM:
-        m = recommended_minimum(data, corpus, weapon, two)
-        _, cls, (_, _, arm, rs, _, _) = m["hard"][0]
-        mid = m["presets"][0]
-        gear = [data.armor[s][p]["name"] for s, p in zip(ARMOR_SLOTS, arm) if p != "Naked"] \
-            + [data.rings[r]["name"] for r in rs]
-        mins.append((weapon, two, (data.classes[cls]["name"], m["target_sl"], arr(mid["stats"]), gear)))
+
+def backend_expectations_rest(data: Data, corpus: list[Build], out: list[str], mins: list) -> str:
+    """backend_expectations from MINIMUM on."""
+    as_dict = lambda st: dict(zip(STATS, st))
     out.append("// weapon, two-handed -> class, sl, stats, gear.")
     out.append(f"pub const MINIMUM: MinimumCases = {_rs(mins)};\n")
 
@@ -1991,6 +2029,10 @@ def main() -> int:
     ap.add_argument("--expect", type=Path, metavar="PATH",
                     help="with --export-backend: also write this script's answers to the EXPECT_* questions "
                          "over the same corpus, as the Rust fixture CorpusBackend is tested against")
+    ap.add_argument("--grip", choices=list(GRIP_TRIES), default="two",
+                    help="with --optimize/--generate: 'two' (default) halves the STR requirement even when "
+                         "one-handing would fit, 'one' needs it in full. Damage is scored the same for "
+                         "either grip (a two-handed STR multiplier is unproven)")
     ap.add_argument("--allow-naked", action="store_true",
                     help="with --generate: no armour (by default the best set under 70%% load is chosen)")
     ap.add_argument("--objective", choices=["damage", "bleed", "poison"], default="damage",
@@ -2071,9 +2113,9 @@ def main() -> int:
             ap.error(f"unknown weapon {name!r}")
         corpus, _ = load_corpus(data)
         g = generate_build(data, corpus, weapon, inf.replace(" ", "_") or "No_Infusion", a.sl, a.objective,
-                           a.window or 1.5, a.k, a.allow_naked)
+                           a.window or 1.5, a.k, a.allow_naked, a.grip)
         if g is None:
-            print(f"no valid SL {a.sl} build wields {data.weapons[weapon]['name']}")
+            print(f"no valid SL {a.sl} build wields {data.weapons[weapon]['name']} (grip {a.grip})")
             return 2
         if a.json:
             print(json.dumps(g, indent=1))
@@ -2102,9 +2144,10 @@ def main() -> int:
             ap.error(f"unknown weapon {name!r}")
         inf = inf.replace(" ", "_") or "No_Infusion"
         corpus, _ = load_corpus(data)
-        best, floors = optimize_build(data, corpus, weapon, inf, a.sl, a.objective)
+        best, floors = optimize_build(data, corpus, weapon, inf, a.sl, a.objective, a.grip)
         if best is None:
-            print(f"no valid SL {a.sl} build wields {data.weapons[weapon]['name']} with the bracket floors "
+            print(f"no valid SL {a.sl} build wields {data.weapons[weapon]['name']} (grip {a.grip}) with the "
+                  "bracket floors "
                   + " ".join(f"{s[:3].upper()} {v}" for s, v in floors.items()))
             return 2
         val, cls, two, stats = best

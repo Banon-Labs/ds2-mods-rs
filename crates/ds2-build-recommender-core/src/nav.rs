@@ -7,7 +7,7 @@
 //! that is not on screen. The keyboard is only needed to type a weapon name; every other control is
 //! reached here and changed with a press.
 
-use crate::model::{Mode, Objective, PanelState, SL_MAX, STAT_COUNT, STAT_MAX, STAT_MIN};
+use crate::model::{Grip, Mode, Objective, PanelState, SL_MAX, STAT_COUNT, STAT_MAX, STAT_MIN};
 
 /// One thing the cursor can sit on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,6 +24,8 @@ pub enum Control {
     Weapon,
     /// The infusion drop-down.
     Infusion,
+    /// One grip button: what Optimize for weapon and Generate Build build for.
+    Grip(Grip),
     /// One objective button.
     Objective(Objective),
     /// One mode tab.
@@ -103,6 +105,7 @@ pub fn layout(shape: Shape) -> Vec<Vec<Control>> {
         vec![Control::SlOverride, Control::UseCharacter],
         [Control::Weapon, Control::Infusion]
             .into_iter()
+            .chain(Grip::ALL.map(Control::Grip))
             .chain(Objective::ALL.map(Control::Objective))
             .collect(),
         Mode::ALL.map(Control::Mode).to_vec(),
@@ -349,6 +352,19 @@ mod tests {
                 assert!(seen.contains(control), "{mode:?}: {control:?} unreachable");
             }
         }
+    }
+
+    #[test]
+    fn the_grip_sits_between_the_infusion_and_the_objective() {
+        let rows = layout(shape(Mode::OptimizeForWeapon));
+        assert_eq!(
+            walk(&rows, Control::Infusion, &[Dir::Right, Dir::Right]),
+            Control::Grip(Grip::TwoHanded)
+        );
+        assert_eq!(
+            step(&rows, Control::Grip(Grip::TwoHanded), Dir::Right),
+            Control::Objective(Objective::Damage)
+        );
     }
 
     #[test]

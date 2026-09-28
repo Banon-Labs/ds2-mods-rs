@@ -96,6 +96,39 @@ impl Objective {
     }
 }
 
+/// Which grip Optimize for weapon and Generate Build build for: the script's `--grip`.
+///
+/// Two-handed halves the STR requirement even when one-handing would fit; one-handed needs it in
+/// full. Damage is scored the same for either: that two-handing multiplies the STR attack rating
+/// scales from is not proven, so no multiplier is applied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Grip {
+    /// The default. Trying two-handed first is the same as always two-handing, because a halved
+    /// requirement fits whenever the full one does.
+    #[default]
+    TwoHanded,
+    /// Meet the full STR requirement.
+    OneHanded,
+}
+
+impl Grip {
+    /// Every grip, in the order the panel offers them.
+    pub const ALL: [Grip; 2] = [Grip::OneHanded, Grip::TwoHanded];
+
+    /// The button's caption.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Grip::OneHanded => "1H",
+            Grip::TwoHanded => "2H",
+        }
+    }
+
+    /// Whether this grip is two-handed.
+    pub const fn two_handed(self) -> bool {
+        matches!(self, Grip::TwoHanded)
+    }
+}
+
 /// Options for [`Mode::WeaponsForStats`], after `weapons_for` in `scripts/ds2-builds-recommend.py`.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct WeaponsForOpts {
@@ -151,6 +184,8 @@ pub struct PanelState {
     pub infusion: Infusion,
     /// What [`Mode::OptimizeForWeapon`] and Generate Build optimize for.
     pub objective: Objective,
+    /// The grip [`Mode::OptimizeForWeapon`] and Generate Build build for.
+    pub grip: Grip,
     /// Whether [`Mode::MinimumForWeapon`] may two-hand to meet strength.
     pub two_hand: bool,
     /// Whether Generate Build may leave the armour off. Off by default: a generated build wears
@@ -173,6 +208,7 @@ impl Default for PanelState {
             weapon: None,
             infusion: Infusion::None,
             objective: Objective::default(),
+            grip: Grip::default(),
             two_hand: false,
             allow_naked: false,
             similar_k: SIMILAR_K_DEFAULT,

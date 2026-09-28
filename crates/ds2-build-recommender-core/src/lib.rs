@@ -29,5 +29,5 @@ pub use backend::{
     StubBackend, ask, generate, to_import,
 };
 pub use corpus::CorpusBackend;
-pub use model::{Mode, Objective, PanelState, STAT_COUNT, STAT_LABELS, StatusFilter};
+pub use model::{Grip, Mode, Objective, PanelState, STAT_COUNT, STAT_LABELS, StatusFilter};
 pub use weapons::{WeaponKind, WeaponRow};

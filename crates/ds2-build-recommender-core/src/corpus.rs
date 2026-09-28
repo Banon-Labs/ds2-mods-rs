@@ -27,7 +27,7 @@ use crate::backend::{
     Calibration, GeneratedBuild, OptimizedBuild, Outcome, RecommenderBackend, ResultRow,
     WEAPONS_1H_TOP, WEAPONS_2H_ONLY_TOP,
 };
-use crate::model::{Objective, STAT_COUNT, StatusFilter, WeaponsForOpts};
+use crate::model::{Grip, Objective, STAT_COUNT, StatusFilter, WeaponsForOpts};
 use crate::weapons;
 
 /// What the file is called beside `DarkSoulsII.exe`.
@@ -1173,6 +1173,7 @@ impl CorpusBackend {
         infusion: Infusion,
         sl: u32,
         objective: Objective,
+        grip: Grip,
     ) -> Option<(f64, usize, bool, Stats)> {
         #[derive(Clone, Copy, PartialEq)]
         enum Curve {
@@ -1212,7 +1213,9 @@ impl CorpusBackend {
         let sl = i32::try_from(sl).unwrap_or(i32::MAX - 53);
         let mut best: Option<(f64, usize, bool, Stats)> = None;
         for (class_index, class) in self.classes.iter().enumerate() {
-            for two in [false, true] {
+            // The script's GRIP_TRIES: one grip, never a fallback to the other.
+            {
+                let two = grip.two_handed();
                 let mut st = class.base;
                 for (at, stat) in FLOOR_STATS.into_iter().enumerate() {
                     st[stat] = st[stat].max(bracket.floors[at]);
@@ -1276,8 +1279,6 @@ impl CorpusBackend {
                 if best.is_none_or(|(top, ..)| val > top) {
                     best = Some((val, class_index, two, st));
                 }
-                // One-handed works: never prefer the two-handed variant.
-                break;
             }
         }
         best
@@ -1735,10 +1736,11 @@ impl RecommenderBackend for CorpusBackend {
         infusion: Infusion,
         sl: u16,
         objective: Objective,
+        grip: Grip,
     ) -> Option<OptimizedBuild> {
         let weapon = self.weapon_by_key(weapon)?;
         let (value, class, two_handed, stats) =
-            self.optimize_build(weapon, infusion, u32::from(sl), objective)?;
+            self.optimize_build(weapon, infusion, u32::from(sl), objective, grip)?;
         Some(OptimizedBuild {
             class: self.classes[class].name.clone(),
             sl,
@@ -1853,10 +1855,11 @@ impl RecommenderBackend for CorpusBackend {
         sl: u16,
         objective: Objective,
         allow_naked: bool,
+        grip: Grip,
     ) -> Option<GeneratedBuild> {
         let primary = self.weapon_by_key(weapon)?;
         let (_, class, two_handed, stats) =
-            self.optimize_build(primary, infusion, u32::from(sl), objective)?;
+            self.optimize_build(primary, infusion, u32::from(sl), objective, grip)?;
         let query = Query {
             one_hand: false,
             class: None,

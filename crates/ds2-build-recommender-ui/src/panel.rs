@@ -13,7 +13,12 @@ use ds2_build_recommender_core::backend::{
     StubBackend,
 };
 use ds2_build_recommender_core::corpus::{self, CorpusBackend};
-use ds2_build_recommender_core::model::{Mode, Objective, PanelState, STAT_COUNT, STAT_LABELS};
+use ds2_build_recommender_core::model::{
+    Grip, Mode, Objective, PanelState, STAT_COUNT, STAT_LABELS,
+};
+
+/// STR's place in the nine stats, for the log lines that say what a grip did to it.
+const STR_INDEX: usize = 4;
 use ds2_build_recommender_core::nav::{self, Control, Dir, Nudge, Shape};
 use ds2_build_recommender_core::weapons;
 use hudhook::imgui::{DrawListMut, MouseButton, Ui};
@@ -150,6 +155,7 @@ enum Action {
     ChooseInfusion(Infusion),
     ChooseClass(Option<&'static str>),
     SetObjective(Objective),
+    SetGrip(Grip),
     SetMode(Mode),
     ToggleOneHand,
     TogglePerClass,
@@ -312,6 +318,7 @@ impl Panel {
             Control::Objective(objective) => {
                 format!("objective {objective:?} (selected {:?})", state.objective)
             }
+            Control::Grip(grip) => format!("grip {grip:?} (selected {:?})", state.grip),
             Control::Mode(mode) => format!("mode tab {mode:?} (selected {:?})", state.mode),
             Control::OneHand => format!("one-hand={}", opts.one_hand),
             Control::Class => format!("class={}", opts.class.as_deref().unwrap_or("all")),
@@ -360,6 +367,7 @@ impl Panel {
             Control::Infusion => Some(Action::OpenList(List::Infusion)),
             Control::Class => Some(Action::OpenList(List::Class)),
             Control::Objective(objective) => Some(Action::SetObjective(objective)),
+            Control::Grip(grip) => Some(Action::SetGrip(grip)),
             Control::Mode(mode) => Some(Action::SetMode(mode)),
             Control::OneHand => Some(Action::ToggleOneHand),
             Control::PerClass => Some(Action::TogglePerClass),
@@ -632,7 +640,17 @@ impl Panel {
             self.state.sl(),
             match &answer {
                 Answer::Rows(rows) => format!("{} rows", rows.len()),
-                Answer::Build(_) => "a build".to_owned(),
+                Answer::Build(build) => format!(
+                    "a build: {} {} STR {} (grip asked {:?})",
+                    build.class,
+                    if build.two_handed {
+                        "two-handed"
+                    } else {
+                        "one-handed"
+                    },
+                    build.stats[STR_INDEX],
+                    self.state.grip
+                ),
                 Answer::FloorViolations(lines) => format!("under floors: {}", lines.join(", ")),
                 Answer::Nothing(why) => (*why).to_owned(),
             }
@@ -646,8 +664,18 @@ impl Panel {
         match backend::generate(backend(), &self.state) {
             Ok(build) => {
                 log_line(format_args!(
-                    "{LOG_PREFIX} generated {} SL {} primary={:?} stub={}",
-                    build.class, build.sl, build.primary, build.stub
+                    "{LOG_PREFIX} generated {} SL {} primary={:?} {} STR {} (grip asked {:?}) stub={}",
+                    build.class,
+                    build.sl,
+                    build.primary,
+                    if build.two_handed {
+                        "two-handed"
+                    } else {
+                        "one-handed"
+                    },
+                    build.stats[STR_INDEX],
+                    self.state.grip,
+                    build.stub
                 ));
                 self.generated = Some(build);
                 self.refused.clear();
@@ -725,6 +753,10 @@ impl Panel {
             Action::ChooseClass(class) => {
                 self.state.weapons_for.class = class.map(str::to_owned);
                 self.list = None;
+                self.changed();
+            }
+            Action::SetGrip(grip) => {
+                self.state.grip = grip;
                 self.changed();
             }
             Action::SetObjective(objective) => {
@@ -1425,6 +1457,19 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
         Some(Action::OpenList(List::Infusion)),
         Some(Control::Infusion),
     ) + GAP * 2.0;
+    canvas.text([x, y + 4.0], DIM, "Grip");
+    x += canvas.width("Grip") + 4.0;
+    for grip in Grip::ALL {
+        x = canvas.button(
+            x,
+            y,
+            grip.label(),
+            panel.state.grip == grip,
+            Some(Action::SetGrip(grip)),
+            Some(Control::Grip(grip)),
+        ) + 4.0;
+    }
+    x += GAP;
     canvas.text([x, y + 4.0], DIM, "Objective");
     x += canvas.width("Objective") + 4.0;
     for objective in Objective::ALL {
@@ -1701,7 +1746,12 @@ fn draw_options(panel: &Panel, canvas: &mut Canvas<'_>, x: f32, y: f32) -> f32 {
         Mode::OptimizeForWeapon => {
             let text = if panel.state.weapon.is_some() {
                 format!(
-                    "the weapon, infusion and objective above, at SL {}",
+                    "the weapon, infusion, objective and grip above ({}), at SL {}",
+                    if panel.state.grip.two_handed() {
+                        "two-handed: STR requirement halved"
+                    } else {
+                        "one-handed: full STR requirement"
+                    },
                     panel.state.sl()
                 )
             } else {
@@ -1790,7 +1840,11 @@ fn draw_answer(panel: &mut Panel, canvas: &mut Canvas<'_>, (min, max): ([f32; 2]
                     "{}, {}{}",
                     build.class,
                     sl_label(&build.stats, build.sl),
-                    if build.two_handed { ", two-handed" } else { "" }
+                    if build.two_handed {
+                        ", two-handed"
+                    } else {
+                        ", one-handed"
+                    }
                 ),
             );
             y += line + 4.0;
