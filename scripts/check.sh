@@ -319,6 +319,9 @@ else
   # shape was refused by DS2-MODS-BLOCK-MAIN-PUSH on 2026-09-27 because it judged the hook's own
   # branch, main (bd ds2-mods-rs-zmep).
   python3 scripts/cupcake_push_target_branch.py --selftest | tail -1
+  # Which ds2-run.py a launch runs and whether it keeps F1-saved presets: stale worktree launchers
+  # overwrote the user's atmosphere presets twice on 2026-09-28.
+  python3 scripts/cupcake_ds2_run_presets.py --selftest | tail -1
   # Whether a ref's crate changes are comments only, by lexing both sides; a lexer that drifts into
   # reading a string literal as a comment would wave real code through.
   python3 scripts/cupcake_comment_only.py --selftest | tail -1
