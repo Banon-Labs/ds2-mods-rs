@@ -208,12 +208,47 @@ fn close_typing() -> Option<String> {
 /// a TLS handshake and must not be near the game thread; the grant calls INTO the game and must not
 /// be anywhere else. `ds2-menu-row`'s per-frame tick is the only place that is both recurring and
 /// correctly threaded, so the worker leaves the build here and the tick collects it.
-static PENDING: Mutex<Option<ds2_build_import_core::Build>> = Mutex::new(None);
+///
+/// The build recommender's panel leaves its generated builds here too, through
+/// [`queue_generated`], for the same reason: its Apply is pressed on the frame thread, and the grant
+/// belongs to the pause menu's tick.
+static PENDING: Mutex<Option<Pending>> = Mutex::new(None);
+
+/// A build waiting for the game thread, and the grants its slots cannot hold.
+struct Pending {
+    build: ds2_build_import_core::Build,
+    /// Extra items to grant, each counted with the build's own gear by [`crate::build_items`].
+    /// Empty for a soulsplanner link.
+    extras: Vec<(String, ds2_build_import_core::Infusion)>,
+}
 
 /// Hand a fetched build to the game thread.
 fn hand_over(build: ds2_build_import_core::Build) {
     if let Ok(mut pending) = PENDING.lock() {
-        *pending = Some(build);
+        *pending = Some(Pending {
+            build,
+            extras: Vec::new(),
+        });
+    }
+}
+
+/// Hand a build some other crate generated to the game thread, with the extra items to grant.
+///
+/// Applied by the next pause-menu tick exactly as a soulsplanner link is: soul memory, stats, the
+/// grant (the build's gear and `extras`, each item counted against what the character already
+/// holds), the equip, the covenant and the Estus Flask. **Raising soul memory cannot be undone.**
+/// A build already waiting is replaced.
+pub fn queue_generated(
+    build: ds2_build_import_core::Build,
+    extras: Vec<(String, ds2_build_import_core::Infusion)>,
+) {
+    log_line(format_args!(
+        "{LOG_PREFIX} generated build queued: class={} {} extra grants",
+        build.class,
+        extras.len()
+    ));
+    if let Ok(mut pending) = PENDING.lock() {
+        *pending = Some(Pending { build, extras });
     }
 }
 
@@ -225,14 +260,23 @@ pub(crate) fn apply_tick() {
     // The typing field lives on this same tick. It is first because it is the interactive half:
     // a frame that also has a build to apply should still show the digit that was just typed.
     typing_tick();
-    let Some(build) = PENDING.lock().ok().and_then(|mut pending| pending.take()) else {
+    drain_tick();
+}
+
+/// Apply a waiting build and do nothing else. **Runs on the game thread**, from the tick
+/// [`crate::install::register_apply_tick`] adds for a run whose Load from URL row may be absent.
+pub(crate) fn drain_tick() {
+    let Some(pending) = PENDING.lock().ok().and_then(|mut pending| pending.take()) else {
         return;
     };
-    apply(&build);
+    apply(&pending.build, &pending.extras);
 }
 
 /// Put a build on the live character, as far as this crate honestly can.
-fn apply(build: &ds2_build_import_core::Build) {
+fn apply(
+    build: &ds2_build_import_core::Build,
+    extras: &[(String, ds2_build_import_core::Infusion)],
+) {
     // WHAT THE CHARACTER IS NOW, read before anything changes, so the log can say what happened
     // rather than what was asked for.
     let param = match crate::game::player_param() {
@@ -341,7 +385,7 @@ fn apply(build: &ds2_build_import_core::Build) {
     }
 
     // THE ITEMS, THROUGH THE GAME'S OWN FUNCTION.
-    let spawns = crate::build_items(build);
+    let spawns = crate::build_items(build, extras);
     // AN EMPTY GRANT LIST IS NOT AN EMPTY JOB, and treating it as one cost a whole run. Once the
     // grant started skipping items the character already holds, a well-stocked character produced
     // no spawns at all -- and this returned early, so nothing was equipped and no covenant was
