@@ -18,6 +18,8 @@ package cupcake.policies.claude.block_compositor_input_injection
 
 import rego.v1
 
+import data.cupcake.system.commands
+
 # The defect is UNTARGETED input, not input.
 #
 # Measured 2026-09-09 with `scripts/frida/keystate-probe.js` while the game polled
@@ -49,81 +51,55 @@ command := object.get(input.tool_input, "command", "")
 # named -- `xdotool search`, `getactivewindow` and `getwindowclassname` are how a window is
 # identified in the first place and stay allowed.
 #
-# The token must sit at command start or after a shell separator, and quotes count as separators,
-# so a `bash -c '...'` wrapper is caught. An optional path prefix covers `/usr/bin/<tool>`.
+# COMMAND POSITION ONLY (2026-09-27). The first version matched the token after ANY whitespace or
+# quote, and refused a `python3 - <<'PY'` edit of a script whose body declared a Python field
+# `wtype: str | None = None` -- nothing was executed, the word was data. The engine's
+# whitespace_normalization welds a heredoc body onto the command reading it, so "after a space"
+# is true of every word in the body.
 #
-# A hyphen or dot AFTER the token ends it too, so a script whose file name merely begins with the
-# tool's name is not an invocation of it -- the same reasoning as the leading identifier char.
-untargeted_tool_pattern := `(^|[[:space:];|&('"\x60])/?([[:alnum:]_.-]+/)*(wtype|ydotool)($|[^[:alnum:]_.-])`
+# So this reads the command the way the other program-name guards here do, through the shared
+# helpers in .cupcake/system/commands.rego:
+#   * commands.executed_texts yields every shell text the command runs -- the command itself with
+#     quoted operands and non-shell heredoc bodies neutralised, plus the payload of any
+#     `bash -c '...'` / `eval '...'` as a text of its own; a heredoc a SHELL reads stays raw;
+#   * commands.command_position_prefix_pattern anchors the tool at text start or after `;`, `&&`,
+#     `||`, `|`, `&`, `(`, a newline, optionally behind `sudo`, `env`, `exec`, `command`, `nohup`,
+#     `timeout`, their options, and `VAR=value` assignments;
+#   * commands.path_prefix_pattern covers `/usr/bin/<tool>` and `./<tool>`.
+# A program a shell executes is in command position by definition, so nothing that runs is lost.
+# That also retires the old bd / git-commit text exemptions: quoted text is neutralised for every
+# command now, not only for those two.
+#
+# The trailing class is the shared one, so a script whose file name merely begins with the tool's
+# name (`<tool>-notes.sh`) is not an invocation of it.
+tool_end := `([ \t\n;&|(){}]|$)`
 
-xdotool_input_pattern := `(^|[[:space:];|&('"\x60])/?([[:alnum:]_.-]+/)*xdotool[[:space:]]+(key|keydown|keyup|type|click|mousedown|mouseup|mousemove|mousemove_relative)($|[^[:alnum:]_.-])`
+untargeted_tool_pattern := concat("", [
+	commands.command_position_prefix_pattern,
+	commands.path_prefix_pattern,
+	`(wtype|ydotool)`,
+	tool_end,
+])
+
+xdotool_input_pattern := concat("", [
+	commands.command_position_prefix_pattern,
+	commands.path_prefix_pattern,
+	`xdotool[ \t]+(key|keydown|keyup|type|click|mousedown|mouseup|mousemove|mousemove_relative)`,
+	tool_end,
+])
+
+executed := commands.executed_texts(command)
 
 injection_detected if {
-	regex.match(untargeted_tool_pattern, command)
-	not text_mention_only
+	some text in executed
+	regex.match(untargeted_tool_pattern, text)
 }
 
 injection_detected if {
-	regex.match(xdotool_input_pattern, command)
+	some text in executed
+	regex.match(xdotool_input_pattern, text)
 	not regex.match(`--window([[:space:]]|=)`, command)
-	not text_mention_only
 }
-
-# --- text exemptions ---------------------------------------------------------
-#
-# The same shape the pgrep guard uses, and needed for the same reason: the memory recording this
-# lesson names all three tools, and a raw scan would refuse the sentence that documents the rule.
-# Fail-closed -- a single, non-chained text-recording command whose token appears only inside
-# quotes.
-
-text_mention_only if {
-	bd_text_command
-	not regex.match(untargeted_tool_pattern, unquoted_command)
-	not regex.match(xdotool_input_pattern, unquoted_command)
-}
-
-text_mention_only if {
-	git_commit_text_command
-	not regex.match(untargeted_tool_pattern, unquoted_command)
-	not regex.match(xdotool_input_pattern, unquoted_command)
-}
-
-bd_text_command if {
-	regex.match(`^[[:space:]]*((\$HOME|\$\{HOME\}|~|/home/[[:alnum:]._-]+|/root|/Users/[[:alnum:]._-]+)/\.local/bin/)?bd[[:space:]]+(create|update|comment|comments|remember|close)([[:space:]]|$)`, command)
-	single_command
-}
-
-git_commit_text_command if {
-	regex.match(`^[[:space:]]*(command[[:space:]]+)?git[[:space:]]+commit([[:space:]]|$)`, command)
-	single_command
-}
-
-# No second command may ride along, and no substitution may execute from inside the quotes the
-# exemption is trusting.
-single_command if {
-	not regex.match(`[;|&()<>\x60\n\r]`, unquoted_command)
-	not contains(command, "$(")
-	not regex.match(`\x60`, command)
-}
-
-# Keep only the text OUTSIDE quoted spans: escaped quotes first, then double, then single.
-escapes_stripped := replace(replace(command, `\"`, ""), `\'`, "")
-
-double_parts := split(escapes_stripped, `"`)
-
-outside_double := concat(" ", [double_parts[idx] |
-	some idx
-	double_parts[idx]
-	idx % 2 == 0
-])
-
-single_parts := split(outside_double, "'")
-
-unquoted_command := concat(" ", [single_parts[idx] |
-	some idx
-	single_parts[idx]
-	idx % 2 == 0
-])
 
 block_reason := concat("", [
 	"This press names no target window, so it goes wherever focus is. On 2026-09-09 that put two ",

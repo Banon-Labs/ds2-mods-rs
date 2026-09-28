@@ -337,9 +337,8 @@ KEY_BUILD_IMPORT_ENABLED = "enabled"
 
 #: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/item_warn.rs`.
 #:
-#: OFF by default here, matching the DLL's own default, and for the DLL's own reason: the badge
-#: patches the frontend's layout builder and its cell bind and has never been in front of a running
-#: game. `--item-warn` is how a run turns it on, which is also the only way to change that.
+#: The DLL's default is off; here it is ON by default (user directive 2026-09-27), and
+#: `--no-item-warn` writes false.
 ITEM_WARN_SECTION = "item_warn"
 KEY_ITEM_WARN_ENABLED = "enabled"
 #: Mirrors `LOG_PREFIX` in `crates/ds2-item-warn/src/lib.rs`. Grep for it when a run disappoints.
@@ -513,6 +512,14 @@ SECOND_SIN_ARCHIVE = (
 SECOND_SIN_PINS: dict[str, str] = {
     "ds2le_atmosphere_presets/atmospheres_extended.ini":
         "edaf06bb9263ae471b0839b95f1b4d936b5eea4b8077fd920937fb592059129a",
+}
+#: The engine archive's own copy of each Second Sin pin. A pinned file holding this was put back by
+#: an engine unpack and needs Second Sin again; one holding anything else was saved from the
+#: engine's F1 menu. On 2026-09-27 a launch took an owner's saved presets for a broken install and
+#: unpacked Second Sin over them.
+ENGINE_SHIPPED_PRESETS: dict[str, str] = {
+    "ds2le_atmosphere_presets/atmospheres_extended.ini":
+        "8e680e8bd3f836836a6366fe67109a44e10ee056ade6107c01aa162b5c738615",
 }
 #: Where the engine writes its log. A fresh one after a launch is the proof it loaded.
 LIGHTING_ENGINE_LOG = "DS2LE.log"
@@ -1669,7 +1676,7 @@ def config_text(
     inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
-    item_warn: bool = False,
+    item_warn: bool = True,
     voice_chat: bool = False,
     hp_gauge: bool = True,
     seamless: bool = False,
@@ -2192,13 +2199,9 @@ def config_text(
 {KEY_SAVE_REDIRECT_DIRECTORY} = "{save_directory}"
 
 [{ITEM_WARN_SECTION}]
-# STARTUP-ONLY. A red badge on the icon of any weapon whose stat requirements the character does
-# not meet, in the bottom-left of the cell, drawn by `ds2-item-warn`.
-#
-# OFF unless `--item-warn` asked for it, and the default is not taste. This feature patches the
-# frontend's layout builder and its cell bind, and the case that it is safe is a case from static
-# reading alone -- no run has put it on screen. `inventory_sort` above defaults ON because three
-# runs put its dialog there; this has no such line to point at.
+# Read at startup. A red X on the icon of any weapon, armour piece or spell whose requirements the
+# character does not meet, and on spells there are no attunement slots for, drawn by
+# `ds2-item-warn`. On by default (user directive 2026-09-27); `--no-item-warn` writes false.
 #
 # The check it uses is the PRESENTATION one (`FUN_1400bcde0`, the detail pane's), not the mechanics
 # one (`FUN_14034d3c0`). The two disagree and share no predicate: the mechanics check honours grip
@@ -2482,7 +2485,7 @@ def write_config(
     inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
-    item_warn: bool = False,
+    item_warn: bool = True,
     voice_chat: bool = False,
     hp_gauge: bool = True,
     seamless: bool = False,
@@ -2846,7 +2849,14 @@ def ensure_lighting_engine_installed(
     engine_wrong = pins_mismatched(game_dir, LIGHTING_ENGINE_PINS)
     if dxgi != game_dir / "dxgi.dll" or (dxgi.is_file() and sha256(dxgi) == DXGI_NO_F6_SHA256):
         engine_wrong.pop("dxgi.dll", None)
-    presets_wrong = pins_mismatched(game_dir, SECOND_SIN_PINS)
+    # The engine's F1 menu saves preset edits into Second Sin's own file, so a changed preset is
+    # the owner's work, not a broken install. Only a missing file, or the engine's copy of it (which
+    # an engine unpack leaves behind), puts Second Sin back.
+    presets_wrong = {
+        member: why for member, why in pins_mismatched(game_dir, SECOND_SIN_PINS).items()
+        if engine_wrong or why == "missing"
+        or sha256(game_dir / member) == ENGINE_SHIPPED_PRESETS.get(member)
+    }
     steps = []
     if engine_wrong:
         steps.append((
@@ -2962,7 +2972,7 @@ def dry_run(
     inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
-    item_warn: bool = False,
+    item_warn: bool = True,
     voice_chat: bool = False,
     hp_gauge: bool = True,
     seamless: bool = False,
@@ -3673,7 +3683,7 @@ def launch(
     inventory_sort: bool = True,
     inventory_sort_key: str = "F7",
     inventory_sort_pad: str = "lthumb",
-    item_warn: bool = False,
+    item_warn: bool = True,
     voice_chat: bool = False,
     hp_gauge: bool = True,
     seamless: bool = False,
@@ -5240,9 +5250,12 @@ def selftest() -> int:
     else:
         print(f"  skip the pinned hashes: no {SEAMLESS_ARCHIVE} on this machine")
     # The Lighting Engine pair: engine first, presets over it, and nothing when the pins match.
-    global LIGHTING_ENGINE_PINS, SECOND_SIN_PINS, TEXTURE_PACKS  # noqa -- planted, restored below
+    global LIGHTING_ENGINE_PINS, SECOND_SIN_PINS, TEXTURE_PACKS, ENGINE_SHIPPED_PRESETS  # noqa
     real_engine_pins, real_presets_pins = LIGHTING_ENGINE_PINS, SECOND_SIN_PINS
-    real_packs = TEXTURE_PACKS
+    real_packs, real_shipped = TEXTURE_PACKS, ENGINE_SHIPPED_PRESETS
+    ENGINE_SHIPPED_PRESETS = {
+        "ds2le_atmosphere_presets/a.ini": hashlib.sha256(b"engine preset").hexdigest()
+    }
     TEXTURE_PACKS = ()  # the pair alone first; the packs over it are tested after
     try:
         with tempfile.TemporaryDirectory() as tmp:
@@ -5283,6 +5296,16 @@ def selftest() -> int:
             (game / "ds2le_atmosphere_presets/a.ini").write_bytes(b"engine preset")
             ensure_lighting_engine_installed(*args, write=True, run=fake_run)
             check(unpacked == ["presets.zip"], f"lost presets reinstall only the presets: {unpacked}")
+            unpacked.clear()
+            (game / "ds2le_atmosphere_presets/a.ini").write_bytes(b"owner's saved preset")
+            actions, problems = ensure_lighting_engine_installed(*args, write=True, run=fake_run)
+            check(not unpacked and not actions and not problems
+                  and (game / "ds2le_atmosphere_presets/a.ini").read_bytes() == b"owner's saved preset",
+                  f"presets saved from the F1 menu are kept, not reinstalled: {unpacked} {actions}")
+            (game / "ds2le_atmosphere_presets/a.ini").unlink()
+            ensure_lighting_engine_installed(*args, write=True, run=fake_run)
+            check(unpacked == ["presets.zip"], f"a missing preset file reinstalls: {unpacked}")
+            unpacked.clear()
             # --no-path-tracing parks by rename, and the next normal launch renames it back
             # without unpacking anything.
             ensure_lighting_engine_installed(*args, write=True, run=fake_run)
@@ -5393,7 +5416,7 @@ def selftest() -> int:
                   f"a pack whose archive is gone is a refusal naming it: {problems}")
     finally:
         LIGHTING_ENGINE_PINS, SECOND_SIN_PINS = real_engine_pins, real_presets_pins
-        TEXTURE_PACKS = real_packs
+        TEXTURE_PACKS, ENGINE_SHIPPED_PRESETS = real_packs, real_shipped
     check(
         pack_unpack_command(Path("i.zip"), Path("/g"), (("DS3 Icons 2.0/", "tex_override/"),))
         == ["bsdtar", "-x", "-C", "/g", "-f", "i.zip",
@@ -5751,12 +5774,17 @@ def main() -> int:
         "--item-warn",
         dest="item_warn",
         action="store_true",
+        default=True,
+        help="the default, kept so old command lines still parse: the red X on unusable items.",
+    )
+    parser.add_argument(
+        "--no-item-warn",
+        dest="item_warn",
+        action="store_false",
         help=(
-            "put a red badge in the bottom-left of any weapon icon whose stat requirements this "
-            "character does not meet. OFF without this flag, matching the DLL, because the feature "
-            "patches the frontend's layout builder and its cell bind and no run has yet put it on "
-            "screen. It answers with the DETAIL PANE's check, except that while two-handing it "
-            "halves the Strength requirement the way the game's damage check does."
+            "leave off the red X that `ds2-item-warn` draws on weapons, armour and spells whose "
+            "requirements this character does not meet, and on spells with no attunement slot. ON "
+            "by default (user directive 2026-09-27)."
         ),
     )
     parser.add_argument(

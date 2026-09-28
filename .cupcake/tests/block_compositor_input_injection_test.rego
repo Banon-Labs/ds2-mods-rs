@@ -116,9 +116,111 @@ test_deny_a_bd_command_with_a_second_command_attached if {
 	denied(sprintf("$HOME/.local/bin/bd remember --key k \"note\" ; %s -k F3", [WT]))
 }
 
-# ...and an unquoted token inside an otherwise-exempt command keeps the guard on.
-test_deny_a_bd_command_whose_token_is_unquoted if {
-	denied(sprintf("$HOME/.local/bin/bd remember --key k note %s -k F3", [WT]))
+# An unquoted token that is an ARGUMENT, not a command, runs nothing. (This was a deny test while
+# the guard matched the token after any whitespace; command position is the rule now.)
+test_allow_a_bd_command_whose_token_is_an_unquoted_argument if {
+	not denied(sprintf("$HOME/.local/bin/bd remember --key k note %s -k F3", [WT]))
+}
+
+# --- command position (2026-09-27 false positive) ------------------------------
+#
+# A python heredoc that edits a script and declares a field named after the tool ran nothing.
+
+PY_EDIT := concat("\n", [
+	"python3 - <<'PY'",
+	"import re, pathlib",
+	"p = pathlib.Path('scripts/drive.py')",
+	"src = p.read_text()",
+	sprintf("src = src.replace('key: str', '%s: str | None = None')", [WT]),
+	sprintf("    %s: str | None = None", [WT]),
+	"print(a.type)",
+	"p.write_text(src)",
+	"PY",
+])
+
+test_allow_the_python_heredoc_that_names_the_tool_as_a_variable if {
+	not denied(PY_EDIT)
+}
+
+test_allow_a_heredoc_line_that_starts_with_the_tool_name if {
+	not denied(concat("\n", ["cat > notes.txt <<EOF", sprintf("%s -k F3 is banned", [WT]), "EOF"]))
+}
+
+test_allow_a_python_c_string_that_names_the_tool if {
+	not denied(sprintf("python3 -c \"x = 1; %s = None; print(x)\"", [WT]))
+}
+
+test_allow_a_quoted_grep_pattern_that_names_the_tool if {
+	not denied(sprintf("grep -n -e foo \"\\|%s\" scripts/a.py", [WT]))
+}
+
+test_allow_an_argument_that_names_the_tool if {
+	not denied(sprintf("rg -n %s scripts/", [WT]))
+}
+
+# ...and what command position must still catch.
+
+test_deny_the_tool_behind_sudo if {
+	denied(sprintf("sudo %s key 61:1 61:0", [YD]))
+}
+
+test_deny_the_tool_behind_env_assignments if {
+	denied(sprintf("env WAYLAND_DISPLAY=wayland-1 %s -k F3", [WT]))
+}
+
+test_deny_the_tool_behind_a_bare_assignment if {
+	denied(sprintf("DISPLAY=:0 %s key F3", [XD]))
+}
+
+test_deny_the_tool_behind_exec if {
+	denied(sprintf("exec %s -k F3", [WT]))
+}
+
+test_deny_the_tool_after_a_pipe if {
+	denied(sprintf("echo F3 | %s -", [WT]))
+}
+
+test_deny_the_tool_after_or if {
+	denied(sprintf("false || %s -k F3", [WT]))
+}
+
+test_deny_the_tool_on_a_later_line if {
+	denied(sprintf("sleep 1\n%s -k F3", [WT]))
+}
+
+test_deny_the_tool_later_in_a_shell_wrapper if {
+	denied(sprintf("bash -c \"sleep 1; %s -k F3\"", [WT]))
+}
+
+test_deny_the_tool_in_a_substitution_inside_double_quotes if {
+	denied(sprintf("echo \"$(%s -k F3)\"", [WT]))
+}
+
+test_deny_the_tool_in_a_heredoc_fed_to_a_shell if {
+	denied(concat("\n", ["bash <<'EOF'", sprintf("%s -k F3", [WT]), "EOF"]))
+}
+
+test_deny_the_uinput_tool_in_a_quoted_heredoc_fed_to_a_shell if {
+	denied(concat("\n", ["bash <<'EOF'", sprintf("%s key 61:1 61:0", [YD]), "EOF"]))
+}
+
+test_deny_the_tool_after_an_unterminated_heredoc if {
+	denied(concat("\n", ["cat <<EOF", sprintf("%s -k F3", [WT])]))
+}
+
+test_deny_the_tool_after_a_python_heredoc if {
+	denied(concat("\n", [PY_EDIT, sprintf("%s -k F3", [WT])]))
+}
+
+# The shapes the policy actually receives. The engine collapses unquoted newlines to spaces, and
+# scripts/cupcake-hook.sh rewrites the newline after a heredoc terminator to `; `.
+
+test_allow_the_python_heredoc_as_the_engine_delivers_it if {
+	not denied(replace(PY_EDIT, "\n", " "))
+}
+
+test_deny_the_tool_after_a_python_heredoc_as_the_shim_delivers_it if {
+	denied(concat("", [replace(PY_EDIT, "\n", " "), sprintf("; %s -k F3", [WT])]))
 }
 
 # --- non-vacuity --------------------------------------------------------------

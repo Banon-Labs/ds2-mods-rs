@@ -671,6 +671,26 @@ SHIM_CASES = [
         False,
         "would be affected by operation on",
     ),
+    # block_compositor_input_injection, 2026-09-27: the input-injection tool name is a command only
+    # in command position, so a python heredoc that merely names it as a variable is data.
+    (
+        "a python heredoc naming the injector as a variable executes nothing",
+        "python3 - <<'PY'\nsrc = 1\n    wtype: str | None = None\nprint(a.type)\nPY",
+        True,
+        "",
+    ),
+    (
+        "the line after a python heredoc runs the injector",
+        "python3 - <<'PY'\n    wtype: str | None = None\nPY\nwtype -k F3",
+        False,
+        "names no target window",
+    ),
+    (
+        "an injector in a heredoc a SHELL reads runs",
+        "bash <<'EOF'\nydotool key 61:1 61:0\nEOF",
+        False,
+        "names no target window",
+    ),
     (
         "a trailing backslash JOINS lines and must not become a separator",
         "echo one \\\n  two",
