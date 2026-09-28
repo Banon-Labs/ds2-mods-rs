@@ -19,7 +19,7 @@ use ds2_build_import_core::Infusion;
 use ds2_build_recommender_core::backend::{self, Outcome, RecommenderBackend, ResultRow};
 use ds2_build_recommender_core::corpus::CorpusBackend;
 use ds2_build_recommender_core::model::{
-    Mode, Objective, PanelState, STAT_COUNT, StatusFilter, WeaponsForOpts, soul_level,
+    Grip, Mode, Objective, PanelState, STAT_COUNT, StatusFilter, WeaponsForOpts, soul_level,
 };
 use ds2_build_recommender_core::weapons;
 
@@ -42,6 +42,7 @@ type WeaponsForCases = &'static [(
     bool,
     f64,
     bool,
+    &'static str,
     &'static [ForRow],
 )];
 type OptimizeCases = &'static [(
@@ -159,7 +160,7 @@ fn calibration_is_the_scripts() {
 
 #[test]
 fn weapons_for_is_the_scripts() {
-    for (case, &(st, sl, one_hand, class, per_class, window, raw_ar, want)) in
+    for (case, &(st, sl, one_hand, class, per_class, window, raw_ar, goal, want)) in
         expected::WEAPONS_FOR.iter().enumerate()
     {
         let opts = WeaponsForOpts {
@@ -168,6 +169,7 @@ fn weapons_for_is_the_scripts() {
             per_class,
             window_s: window as f32,
             raw_ar,
+            objective: objective(goal),
         };
         let got = rows(backend().weapons_for(&stats(st), sl, &opts));
         assert_eq!(got.len(), want.len(), "case {case}: row count");
@@ -192,13 +194,22 @@ fn weapons_for_is_the_scripts() {
 
 #[test]
 fn optimize_is_the_scripts() {
-    for &(weapon, code, sl, goal, want) in expected::OPTIMIZE {
-        let got = backend().optimize(weapon, infusion(code), sl, objective(goal));
+    let cases = expected::OPTIMIZE
+        .iter()
+        .map(|case| (case, Grip::TwoHanded))
+        .chain(
+            expected::OPTIMIZE_ONE_HANDED
+                .iter()
+                .map(|case| (case, Grip::OneHanded)),
+        );
+    for (&(weapon, code, sl, goal, want), grip) in cases {
+        let got = backend().optimize(weapon, infusion(code), sl, objective(goal), grip);
         match (got, want) {
             (None, None) => {}
             (Some(got), Some((class, two, st, value))) => {
-                assert_eq!(got.class, class, "{weapon} SL {sl}");
+                assert_eq!(got.class, class, "{weapon} SL {sl} {grip:?}");
                 assert_eq!(got.two_handed, two, "{weapon} SL {sl}");
+                assert_eq!(got.two_handed, grip.two_handed(), "the grip asked for");
                 assert_eq!(got.stats, stats(st), "{weapon} SL {sl}");
                 assert_eq!(got.sl, sl);
                 assert_eq!(
@@ -213,11 +224,38 @@ fn optimize_is_the_scripts() {
     }
 }
 
+/// The report that asked for the grip: at SL 74 a Dark Murakumo was always optimized one-handed,
+/// because one-handing fit and the optimizer only two-handed when it did not.
+#[test]
+fn a_weapon_the_stats_can_one_hand_still_optimizes_two_handed() {
+    let ask = |grip| {
+        backend()
+            .optimize("Murakumo", Infusion::Dark, 74, Objective::Damage, grip)
+            .unwrap_or_else(|| panic!("{grip:?}: no build"))
+    };
+    let (two, one) = (ask(Grip::TwoHanded), ask(Grip::OneHanded));
+    assert!(
+        two.two_handed,
+        "two-handed when asked, though one-handing fits"
+    );
+    assert!(!one.two_handed);
+    assert_eq!(Grip::default(), Grip::TwoHanded, "two-handed first");
+}
+
 #[test]
 fn generate_build_is_the_scripts() {
     let (mut requirements_bound, mut load_bound, mut armored) = (false, false, 0);
-    for &(weapon, code, sl, goal, naked, want) in expected::GENERATE {
-        let got = backend().generate_build(weapon, infusion(code), sl, objective(goal), naked);
+    let cases = expected::GENERATE
+        .iter()
+        .map(|case| (case, Grip::TwoHanded))
+        .chain(
+            expected::GENERATE_ONE_HANDED
+                .iter()
+                .map(|case| (case, Grip::OneHanded)),
+        );
+    for (&(weapon, code, sl, goal, naked, want), grip) in cases {
+        let got =
+            backend().generate_build(weapon, infusion(code), sl, objective(goal), naked, grip);
         let (got, want) = match (got, want) {
             (None, None) => continue,
             (Some(got), Some(want)) => (got, want),
@@ -372,9 +410,14 @@ fn the_panel_generates_at_its_override_for_its_weapon() {
 fn every_generated_grant_names_a_real_item() {
     use ds2_build_import_core::{ItemError, id_for, is_empty_slot};
     for &(weapon, code, sl, goal, naked, _) in expected::GENERATE {
-        let Some(build) =
-            backend().generate_build(weapon, infusion(code), sl, objective(goal), naked)
-        else {
+        let Some(build) = backend().generate_build(
+            weapon,
+            infusion(code),
+            sl,
+            objective(goal),
+            naked,
+            Grip::TwoHanded,
+        ) else {
             continue;
         };
         let (import, extras) = backend::to_import(&build);

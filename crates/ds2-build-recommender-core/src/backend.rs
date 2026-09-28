@@ -20,7 +20,7 @@
 use ds2_build_import_core::{Build, Infusion, Stats};
 
 use crate::model::{
-    Mode, Objective, PanelState, STAT_COUNT, STAT_LABELS, StatusFilter, WeaponsForOpts,
+    Grip, Mode, Objective, PanelState, STAT_COUNT, STAT_LABELS, StatusFilter, WeaponsForOpts,
 };
 use crate::weapons;
 
@@ -148,13 +148,15 @@ pub trait RecommenderBackend: Sync {
     fn floors(&self, sl: u16) -> [u16; STAT_COUNT];
     /// The weapons `stats` wield best.
     fn weapons_for(&self, stats: &[u16; STAT_COUNT], sl: u16, opts: &WeaponsForOpts) -> Outcome;
-    /// The stats that make `weapon` hit hardest at `sl`. `None` when no class can wield it there.
+    /// The stats that make `weapon` hit hardest at `sl`, held in `grip`. `None` when no class can
+    /// wield it there that way.
     fn optimize(
         &self,
         weapon: &str,
         infusion: Infusion,
         sl: u16,
         objective: Objective,
+        grip: Grip,
     ) -> Option<OptimizedBuild>;
     /// The least a character needs to wield `weapon`. `None` when the weapon is unknown.
     fn minimum(&self, weapon: &str, infusion: Infusion, two_hand: bool) -> Option<OptimizedBuild>;
@@ -162,8 +164,8 @@ pub trait RecommenderBackend: Sync {
     fn similar(&self, stats: &[u16; STAT_COUNT], sl: u16, k: u16, status: StatusFilter) -> Outcome;
     /// How far the damage model agrees with real builds.
     fn calibration(&self) -> Calibration;
-    /// A whole build for `weapon`, in armour unless `allow_naked`. `None` when no class can wield
-    /// it at `sl`.
+    /// A whole build for `weapon` held in `grip`, in armour unless `allow_naked`. `None` when no
+    /// class can wield it at `sl` that way.
     fn generate_build(
         &self,
         weapon: &str,
@@ -171,6 +173,7 @@ pub trait RecommenderBackend: Sync {
         sl: u16,
         objective: Objective,
         allow_naked: bool,
+        grip: Grip,
     ) -> Option<GeneratedBuild>;
     /// The live character's nine stats, when they can be read.
     fn current_character_stats(&self) -> Option<[u16; STAT_COUNT]>;
@@ -221,7 +224,11 @@ pub fn ask(backend: &dyn RecommenderBackend, state: &PanelState) -> Answer {
                 return Answer::FloorViolations(violations);
             }
             gate(if state.mode == Mode::WeaponsForStats {
-                backend.weapons_for(&state.stats, sl, &state.weapons_for)
+                let opts = WeaponsForOpts {
+                    objective: state.objective,
+                    ..state.weapons_for.clone()
+                };
+                backend.weapons_for(&state.stats, sl, &opts)
             } else {
                 backend.similar(&state.stats, sl, state.similar_k, state.status)
             })
@@ -231,7 +238,7 @@ pub fn ask(backend: &dyn RecommenderBackend, state: &PanelState) -> Answer {
                 return Answer::Nothing("choose a weapon first");
             };
             let built = if state.mode == Mode::OptimizeForWeapon {
-                backend.optimize(weapon, state.infusion, sl, state.objective)
+                backend.optimize(weapon, state.infusion, sl, state.objective, state.grip)
             } else {
                 backend.minimum(weapon, state.infusion, state.two_hand)
             };
@@ -259,6 +266,7 @@ pub fn generate(
         state.sl(),
         state.objective,
         state.allow_naked,
+        state.grip,
     ) else {
         return Err(vec!["no class can wield it at this soul level".to_owned()]);
     };
@@ -546,8 +554,9 @@ impl RecommenderBackend for StubBackend {
         _infusion: Infusion,
         sl: u16,
         _objective: Objective,
+        grip: Grip,
     ) -> Option<OptimizedBuild> {
-        weapons::by_key(weapon).map(|_| Self::stub_build(sl, true))
+        weapons::by_key(weapon).map(|_| Self::stub_build(sl, grip.two_handed()))
     }
 
     fn minimum(&self, weapon: &str, _infusion: Infusion, two_hand: bool) -> Option<OptimizedBuild> {
@@ -595,6 +604,7 @@ impl RecommenderBackend for StubBackend {
         _sl: u16,
         _objective: Objective,
         allow_naked: bool,
+        grip: Grip,
     ) -> Option<GeneratedBuild> {
         let primary = weapons::by_key("Moonlight_Greatsword")?;
         let (weapons_1h, weapons_2h_only) = split_weapons(&Self::ranking(), primary.name);
@@ -602,7 +612,7 @@ impl RecommenderBackend for StubBackend {
             .map(str::to_owned)
             .to_vec();
         let common_rings = common_rings(&STUB_RINGS_WORN, STUB_CORPUS, &suggested_rings);
-        let built = Self::stub_build(crate::model::soul_level(&STUB_STATS), true);
+        let built = Self::stub_build(crate::model::soul_level(&STUB_STATS), grip.two_handed());
         Some(GeneratedBuild {
             class: built.class,
             sl: built.sl,
@@ -743,6 +753,76 @@ mod tests {
         }
     }
 
+    /// Weapons for stats ranks by the panel's objective: Bleed there reaches the backend as Bleed.
+    #[test]
+    fn weapons_for_stats_is_asked_for_the_panels_objective() {
+        struct Echo;
+        impl RecommenderBackend for Echo {
+            fn is_stub(&self) -> bool {
+                true
+            }
+            fn floors(&self, _sl: u16) -> [u16; STAT_COUNT] {
+                [0; STAT_COUNT]
+            }
+            fn weapons_for(&self, s: &[u16; STAT_COUNT], sl: u16, o: &WeaponsForOpts) -> Outcome {
+                let mut rows = rows_of(StubBackend.weapons_for(s, sl, o));
+                rows.truncate(1);
+                rows[0].grip = o.objective.label().to_owned();
+                Outcome::Rows(rows)
+            }
+            fn optimize(
+                &self,
+                w: &str,
+                i: Infusion,
+                sl: u16,
+                o: Objective,
+                g: Grip,
+            ) -> Option<OptimizedBuild> {
+                StubBackend.optimize(w, i, sl, o, g)
+            }
+            fn minimum(&self, w: &str, i: Infusion, t: bool) -> Option<OptimizedBuild> {
+                StubBackend.minimum(w, i, t)
+            }
+            fn similar(&self, s: &[u16; STAT_COUNT], sl: u16, k: u16, f: StatusFilter) -> Outcome {
+                StubBackend.similar(s, sl, k, f)
+            }
+            fn calibration(&self) -> Calibration {
+                StubBackend.calibration()
+            }
+            fn generate_build(
+                &self,
+                w: &str,
+                i: Infusion,
+                sl: u16,
+                o: Objective,
+                n: bool,
+                g: Grip,
+            ) -> Option<GeneratedBuild> {
+                StubBackend.generate_build(w, i, sl, o, n, g)
+            }
+            fn current_character_stats(&self) -> Option<[u16; STAT_COUNT]> {
+                None
+            }
+        }
+        fn rows_of(outcome: Outcome) -> Vec<ResultRow> {
+            match outcome {
+                Outcome::Rows(rows) => rows,
+                Outcome::FloorViolations(lines) => panic!("under floors: {lines:?}"),
+            }
+        }
+        let mut state = PanelState {
+            mode: Mode::WeaponsForStats,
+            ..PanelState::default()
+        };
+        for objective in Objective::ALL {
+            state.objective = objective;
+            match ask(&Echo, &state) {
+                Answer::Rows(rows) => assert_eq!(rows[0].grip, objective.label()),
+                other => panic!("{objective:?} answered {other:?}"),
+            }
+        }
+    }
+
     /// A generated build under its own floors is refused, whatever the backend says.
     #[test]
     fn a_generated_build_under_its_floors_is_refused() {
@@ -763,8 +843,9 @@ mod tests {
                 i: Infusion,
                 sl: u16,
                 o: Objective,
+                g: Grip,
             ) -> Option<OptimizedBuild> {
-                StubBackend.optimize(w, i, sl, o)
+                StubBackend.optimize(w, i, sl, o, g)
             }
             fn minimum(&self, w: &str, i: Infusion, t: bool) -> Option<OptimizedBuild> {
                 StubBackend.minimum(w, i, t)
@@ -782,8 +863,9 @@ mod tests {
                 sl: u16,
                 o: Objective,
                 naked: bool,
+                g: Grip,
             ) -> Option<GeneratedBuild> {
-                StubBackend.generate_build(w, i, sl, o, naked)
+                StubBackend.generate_build(w, i, sl, o, naked, g)
             }
             fn current_character_stats(&self) -> Option<[u16; STAT_COUNT]> {
                 None

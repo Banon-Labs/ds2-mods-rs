@@ -133,6 +133,10 @@ static WRONG_ARM_SAID: AtomicBool = AtomicBool::new(false);
 static PAD_BUTTONS_WRITTEN: AtomicU64 = AtomicU64::new(0);
 static PAD_BLANKED: AtomicU64 = AtomicU64::new(0);
 static PAD_WRONG_ARM: AtomicU64 = AtomicU64::new(0);
+/// Pad polls on which an authored button word was kept from the game because a panel held the
+/// input, and whether the current button hold has said so.
+static PAD_HELD_FOR_PANEL: AtomicU64 = AtomicU64::new(0);
+static HELD_SAID: AtomicBool = AtomicBool::new(false);
 /// The pad object the last pad poll handed this detour, for `status`. An outside probe that wants
 /// to act on the harness's pad needs this exact pointer: one found by hooking the poll from Frida
 /// turned out, on 2026-09-26, not to be it.
@@ -298,7 +302,19 @@ unsafe fn write_pad(this: *mut u8, blocking: bool, authored: &Authored) {
             }
         }
     }
-    if let Some(mask) = authored.buttons {
+    if authored.buttons.is_some() && crate::is_held() {
+        // A panel owns the pad, and reads the harness's mask itself (the Build Recommender's
+        // reader ORs `Authored::current().buttons` into its own). Stamping it here as well would
+        // press the same button in the pause menu underneath -- a D-pad walk of the panel would
+        // walk the menu too, and an A would choose a row in it.
+        PAD_HELD_FOR_PANEL.fetch_add(1, Ordering::Relaxed);
+        if !HELD_SAID.swap(true, Ordering::Relaxed) {
+            harness_log!(
+                "buttons: a panel holds the input, so the mask goes to the panel and not to the game"
+            );
+        }
+    } else if let Some(mask) = authored.buttons {
+        HELD_SAID.store(false, Ordering::Relaxed);
         // The game's key test reads `+0x198` only on the XInput arm: no third backend, and an
         // XInput port. On any other arm the word would be written and never read, so say so once
         // per hold instead of reporting a press the game cannot see.
@@ -328,6 +344,7 @@ unsafe fn write_pad(this: *mut u8, blocking: bool, authored: &Authored) {
         }
     } else {
         WRONG_ARM_SAID.store(false, Ordering::Relaxed);
+        HELD_SAID.store(false, Ordering::Relaxed);
     }
     if let Some(value) = authored.triggers[0] {
         // SAFETY: every pointer here is one the game handed this detour, or is derived from it by an
@@ -583,10 +600,12 @@ pub(crate) fn poll_command_file() {
                     crate::click::suppressed(),
                 );
                 harness_log!(
-                    "status: pad writes buttons={} blanked={} wrong-arm={} pad=0x{:x}",
+                    "status: pad writes buttons={} blanked={} wrong-arm={} held-for-panel={} \
+                     pad=0x{:x}",
                     PAD_BUTTONS_WRITTEN.load(Ordering::Relaxed),
                     PAD_BLANKED.load(Ordering::Relaxed),
                     PAD_WRONG_ARM.load(Ordering::Relaxed),
+                    PAD_HELD_FOR_PANEL.load(Ordering::Relaxed),
                     LAST_PAD.load(Ordering::Relaxed)
                 );
             }

@@ -6,6 +6,11 @@
 //! `XINPUT1_3.dll` the game already has loaded -- because while the panel is up the input harness's
 //! `hold` blanks every device the game reads, and that blanking must not blind the panel as well.
 //!
+//! Pad 0 through `XInputGetState` is where the player's pad is. Measured 2026-09-28 with
+//! `scripts/frida/pad-arm-census.js` on a session with a controller in: one `PadDevice`, XInput
+//! port 0, third backend -1 (the XInput arm), and `XInputGetState` answering `ERROR_SUCCESS` for
+//! user 0 and `ERROR_DEVICE_NOT_CONNECTED` for users 1 to 3.
+//!
 //! A copy rather than a shared module because the picker's is private to its crate and carries
 //! clipboard shortcuts this panel has no use for; the key table is fixed rather than layout-aware
 //! for the reason given there.
@@ -25,6 +30,10 @@ use hudhook::windows::core::s;
 pub(crate) enum Press {
     Up,
     Down,
+    /// D-pad left or the left arrow: the previous control, or a number down one.
+    Left,
+    /// D-pad right or the right arrow: the next control, or a number up one.
+    Right,
     PageUp,
     PageDown,
     /// Enter or A: finish typing.
@@ -54,7 +63,9 @@ const VK_ESCAPE: i32 = 0x1b;
 const VK_SPACE: i32 = 0x20;
 const VK_PRIOR: i32 = 0x21;
 const VK_NEXT: i32 = 0x22;
+const VK_LEFT: i32 = 0x25;
 const VK_UP: i32 = 0x26;
+const VK_RIGHT: i32 = 0x27;
 const VK_DOWN: i32 = 0x28;
 const VK_OEM_MINUS: i32 = 0xbd;
 const VK_OEM_PERIOD: i32 = 0xbe;
@@ -63,9 +74,11 @@ const VK_DECIMAL: i32 = 0x6e;
 const VK_NUMPAD0: i32 = 0x60;
 
 /// The navigation keys and what each one means.
-const NAV_KEYS: [(i32, Press); 9] = [
+const NAV_KEYS: [(i32, Press); 11] = [
     (VK_UP, Press::Up),
     (VK_DOWN, Press::Down),
+    (VK_LEFT, Press::Left),
+    (VK_RIGHT, Press::Right),
     (VK_RETURN, Press::Confirm),
     (VK_ESCAPE, Press::Close),
     (VK_TAB, Press::Tab),
@@ -82,6 +95,8 @@ const SYMBOL_KEYS: [(i32, char); 3] =
 /// XInput's button bits, from `XINPUT_GAMEPAD`.
 const PAD_UP: u16 = 0x0001;
 const PAD_DOWN: u16 = 0x0002;
+const PAD_LEFT: u16 = 0x0004;
+const PAD_RIGHT: u16 = 0x0008;
 const PAD_LB: u16 = 0x0100;
 const PAD_RB: u16 = 0x0200;
 const PAD_A: u16 = 0x1000;
@@ -89,9 +104,11 @@ const PAD_B: u16 = 0x2000;
 const PAD_START: u16 = 0x0010;
 
 /// The pad buttons and what each one means.
-const PAD_BUTTONS: [(u16, Press); 7] = [
+const PAD_BUTTONS: [(u16, Press); 9] = [
     (PAD_UP, Press::Up),
     (PAD_DOWN, Press::Down),
+    (PAD_LEFT, Press::Left),
+    (PAD_RIGHT, Press::Right),
     (PAD_A, Press::Confirm),
     (PAD_B, Press::Back),
     (PAD_LB, Press::PageUp),
@@ -210,15 +227,22 @@ impl Reader {
             || (VK_NUMPAD0..=VK_DECIMAL).any(key_down)
     }
 
+    /// The pad's button word: pad 0's through `XInputGetState`, plus whatever the input harness is
+    /// holding. The harness writes its mask into the game's own `PadDevice`, which this reader
+    /// never looks at, and while a panel holds the input it stops writing it there at all -- so
+    /// without this an agent driving the harness could not press anything in the panel.
     fn pad_buttons(&self) -> u16 {
+        let authored = ds2_input_harness::authored::Authored::current()
+            .buttons
+            .unwrap_or(0);
         let Some(get_state) = self.xinput else {
-            return 0;
+            return authored;
         };
         let mut state = XInputState::default();
         // SAFETY: `XInputGetState` from the loaded `XINPUT1_3.dll`, with pad 0 and a live
         // `XINPUT_STATE`-shaped out-parameter this frame owns.
         let status = unsafe { get_state(0, &mut state) };
-        if status == 0 { state.buttons } else { 0 }
+        authored | if status == 0 { state.buttons } else { 0 }
     }
 }
 

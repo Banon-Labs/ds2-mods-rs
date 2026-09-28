@@ -11,7 +11,8 @@
 //!
 //! * **Precomputed by the script**, because they depend only on the corpus: each SL bracket's floors
 //!   and average defender, the infusion calibration, the rings common to all builds, and each
-//!   weapon's R1 hit timeline, hyperarmor and counter multipliers.
+//!   weapon's R1 hit timeline, hyperarmor and counter multipliers, and its R1/R2 hits per attack
+//!   and chain hit times for the bleed/poison ranking.
 //! * **Computed here**, because they depend on the question: attack rating and damage for any
 //!   stats, the ranking, the stat optimizer, the minimum-build search, and the nearest builds.
 //!
@@ -26,14 +27,14 @@ use crate::backend::{
     Calibration, GeneratedBuild, OptimizedBuild, Outcome, RecommenderBackend, ResultRow,
     WEAPONS_1H_TOP, WEAPONS_2H_ONLY_TOP,
 };
-use crate::model::{Objective, STAT_COUNT, StatusFilter, WeaponsForOpts};
+use crate::model::{Grip, Objective, STAT_COUNT, StatusFilter, WeaponsForOpts};
 use crate::weapons;
 
 /// What the file is called beside `DarkSoulsII.exe`.
 pub const DATA_FILE_NAME: &str = "ds2-build-recommender.dat";
 
 /// The file's first line. A different one is a file this port does not read.
-pub const FORMAT: &str = "ds2-build-recommender-data 2";
+pub const FORMAT: &str = "ds2-build-recommender-data 3";
 
 /// Nine stats as the script computes with them, in [`crate::model::STAT_LABELS`] order.
 type Stats = [i32; STAT_COUNT];
@@ -237,7 +238,23 @@ struct Weapon {
     infusions: Vec<InfusionRow>,
     /// The R1 chain one- and two-handed, empty where there is no timing.
     timeline: [Vec<Hit>; 2],
+    /// What the script's `status_hits` reads, by grip (1H, 2H) and chain (R1, R2): one entry per
+    /// name it tries, in its order.
+    status: [[Vec<StatusChain>; 2]; 2],
 }
+
+/// One attack chain as the bleed/poison ranking counts it.
+#[derive(Clone, Debug, Default)]
+struct StatusChain {
+    /// How many times one attack of it hits one target.
+    per_attack: u32,
+    /// Every hit of the repeated chain out to the script's `STATUS_HORIZON`, as `(second its attack
+    /// began, second it lands)`.
+    hits: Vec<(f64, f64)>,
+}
+
+/// The labels the script's `status_hits` gives a chain.
+const STATUS_CHAINS: [&str; 2] = ["R1", "R2"];
 
 impl Weapon {
     fn infusion(&self, infusion: Infusion) -> Option<&InfusionRow> {
@@ -335,6 +352,8 @@ struct Query<'a> {
     window: f64,
     /// Rank by total attack rating rather than damage.
     raw_ar: bool,
+    /// Damage, or bleed/poison build-up times hits per attack.
+    objective: Objective,
     /// How many rows to keep when not `per_class`.
     top: usize,
 }
@@ -555,6 +574,7 @@ impl CorpusBackend {
                     counter,
                     infusions: Vec::new(),
                     timeline: [Vec::new(), Vec::new()],
+                    status: Default::default(),
                 });
             }
             "I" => {
@@ -611,6 +631,37 @@ impl CorpusBackend {
                     .last_mut()
                     .ok_or_else(|| bad(line, "a timeline before any weapon"))?
                     .timeline[grip] = hits;
+            }
+            "S" => {
+                let grip = match next("grip")? {
+                    "1" => 0,
+                    "2" => 1,
+                    _ => return Err(bad(line, "grip is 1 or 2")),
+                };
+                let tag = next("chain")?;
+                let chain = STATUS_CHAINS
+                    .iter()
+                    .position(|&chain| chain == tag)
+                    .ok_or_else(|| bad(line, "chain is R1 or R2"))?;
+                let per_attack = u32::try_from(int(Some(next("hits per attack")?), line)?)
+                    .map_err(|_| bad(line, "hits per attack"))?;
+                let hits = match next("hits")? {
+                    "-" => Vec::new(),
+                    list => list
+                        .split(' ')
+                        .filter(|hit| !hit.is_empty())
+                        .map(|hit| {
+                            let (start, at) =
+                                hit.split_once(':').ok_or_else(|| bad(line, "start:time"))?;
+                            Ok((float(Some(start), line)?, float(Some(at), line)?))
+                        })
+                        .collect::<Result<Vec<_>, String>>()?,
+                };
+                self.weapons
+                    .last_mut()
+                    .ok_or_else(|| bad(line, "a status chain before any weapon"))?
+                    .status[grip][chain]
+                    .push(StatusChain { per_attack, hits });
             }
             "B" => {
                 let index = int(Some(next("bracket")?), line)?;
@@ -877,6 +928,7 @@ impl CorpusBackend {
             per_class,
             window,
             raw_ar,
+            objective,
             top,
         } = *query;
         let bracket = self.bracket(sl);
@@ -898,6 +950,43 @@ impl CorpusBackend {
                 continue;
             }
             if weapon.high_stamina && stats[END] < bracket.floors[4] {
+                continue;
+            }
+            if objective != Objective::Damage {
+                // Build-up per hit times the hits of the best R1/R2 attack (or chain within the
+                // window), the script's bleed/poison branch.
+                let (hits, label) = Self::status_hits(weapon, one, window);
+                if hits == 0 {
+                    continue;
+                }
+                let label = if one || label.starts_with("1H") {
+                    label
+                } else {
+                    format!("{label} (2H only)")
+                };
+                let mut scored: Vec<Ranked> = Vec::new();
+                for row in &weapon.infusions {
+                    let per = self.objective_value(weapon, row.infusion, stats, objective, defense);
+                    if per > 0.0 {
+                        scored.push(Ranked {
+                            damage: per * f64::from(hits),
+                            weapon: index,
+                            infusion: row.infusion,
+                            ar: self.attack_rating(Some(row), stats),
+                            label: label.clone(),
+                        });
+                    }
+                }
+                scored.sort_by(|a, b| b.damage.total_cmp(&a.damage));
+                let Some(best) = scored.first().map(|row| row.damage) else {
+                    continue;
+                };
+                rows.extend(
+                    scored
+                        .into_iter()
+                        .take(3)
+                        .filter(|row| row.damage >= best * (1.0 - WITHIN)),
+                );
                 continue;
             }
             // The R1 hits landing within the window, per grip these stats can use.
@@ -987,6 +1076,47 @@ impl CorpusBackend {
         rows
     }
 
+    /// The script's `status_hits`: the most hits one target takes from the weapon's R1 or R2, and
+    /// its label. Without a window, the hits of one attack; with one, the hits of the repeated
+    /// chain landing within it, over the chain's attacks begun before `max(3, window)` (the
+    /// script's horizon). Ties keep 1H over 2H and R1 over R2.
+    fn status_hits(weapon: &Weapon, one: bool, window: f64) -> (u32, String) {
+        let (mut best, mut label) = (0, String::new());
+        for two_hand in [false, true] {
+            if !two_hand && !one {
+                continue;
+            }
+            for (chain, tag) in STATUS_CHAINS.iter().enumerate() {
+                let mut hits = 0;
+                for candidate in &weapon.status[usize::from(two_hand)][chain] {
+                    hits = if window == 0.0 {
+                        candidate.per_attack
+                    } else {
+                        let horizon = py_max(3.0, window);
+                        let landed = candidate
+                            .hits
+                            .iter()
+                            .filter(|&&(start, at)| start < horizon && at <= window)
+                            .count();
+                        u32::try_from(landed).unwrap_or(u32::MAX)
+                    };
+                    if hits != 0 {
+                        break;
+                    }
+                }
+                if hits > best {
+                    best = hits;
+                    label = format!(
+                        "{} {tag} {hits} hit{}",
+                        if two_hand { "2H" } else { "1H" },
+                        if hits > 1 { "s" } else { "" }
+                    );
+                }
+            }
+        }
+        (best, label)
+    }
+
     /// A weapon's class, `?` where `MugenMonkey` has none, as the script tags a per-class row.
     fn class_of(&self, weapon: usize) -> &str {
         let class = self.weapons[weapon].class.as_str();
@@ -1043,6 +1173,7 @@ impl CorpusBackend {
         infusion: Infusion,
         sl: u32,
         objective: Objective,
+        grip: Grip,
     ) -> Option<(f64, usize, bool, Stats)> {
         #[derive(Clone, Copy, PartialEq)]
         enum Curve {
@@ -1082,7 +1213,9 @@ impl CorpusBackend {
         let sl = i32::try_from(sl).unwrap_or(i32::MAX - 53);
         let mut best: Option<(f64, usize, bool, Stats)> = None;
         for (class_index, class) in self.classes.iter().enumerate() {
-            for two in [false, true] {
+            // The script's GRIP_TRIES: one grip, never a fallback to the other.
+            {
+                let two = grip.two_handed();
                 let mut st = class.base;
                 for (at, stat) in FLOOR_STATS.into_iter().enumerate() {
                     st[stat] = st[stat].max(bracket.floors[at]);
@@ -1146,8 +1279,6 @@ impl CorpusBackend {
                 if best.is_none_or(|(top, ..)| val > top) {
                     best = Some((val, class_index, two, st));
                 }
-                // One-handed works: never prefer the two-handed variant.
-                break;
             }
         }
         best
@@ -1592,6 +1723,7 @@ impl RecommenderBackend for CorpusBackend {
             per_class: opts.per_class,
             window: window_seconds(opts.window_s),
             raw_ar: opts.raw_ar,
+            objective: opts.objective,
             top: WEAPONS_FOR_TOP,
         };
         let ranked = self.rank(&to_stats(stats), u32::from(sl), &query);
@@ -1604,10 +1736,11 @@ impl RecommenderBackend for CorpusBackend {
         infusion: Infusion,
         sl: u16,
         objective: Objective,
+        grip: Grip,
     ) -> Option<OptimizedBuild> {
         let weapon = self.weapon_by_key(weapon)?;
         let (value, class, two_handed, stats) =
-            self.optimize_build(weapon, infusion, u32::from(sl), objective)?;
+            self.optimize_build(weapon, infusion, u32::from(sl), objective, grip)?;
         Some(OptimizedBuild {
             class: self.classes[class].name.clone(),
             sl,
@@ -1722,16 +1855,18 @@ impl RecommenderBackend for CorpusBackend {
         sl: u16,
         objective: Objective,
         allow_naked: bool,
+        grip: Grip,
     ) -> Option<GeneratedBuild> {
         let primary = self.weapon_by_key(weapon)?;
         let (_, class, two_handed, stats) =
-            self.optimize_build(primary, infusion, u32::from(sl), objective)?;
+            self.optimize_build(primary, infusion, u32::from(sl), objective, grip)?;
         let query = Query {
             one_hand: false,
             class: None,
             per_class: false,
             window: GENERATE_WINDOW,
             raw_ar: false,
+            objective: Objective::Damage,
             top: usize::MAX,
         };
         let ranked = self.rank(&stats, u32::from(sl), &query);
