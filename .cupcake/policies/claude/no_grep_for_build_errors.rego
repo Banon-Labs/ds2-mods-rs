@@ -72,7 +72,12 @@ command := object.get(input.tool_input, "command", "")
 # Only OPTION tokens may stand between the interpreter and the script, which is what stops
 # `bash -c 'grep x scripts/test-y.py' | grep z` -- where the script is again just text -- from
 # being swept back in.
-build_verbs := "(cargo|rustc|opa|make|ninja|cmake|go|npm|pnpm|yarn|pytest|tsc|[[:alnum:]_.-]*(build|check|test)[[:alnum:]_.-]*\\.(sh|py))"
+#
+# In a script name the verb must be a whole WORD, delimited by `-`, `_` or `.` (or the name's
+# edge): `check.sh`, `check-rust-build.sh`, `test-cupcake-policies.py`. A bare substring also
+# matched `ds2-builds-recommend.py`, whose `--help` piped into grep was denied although nothing is
+# built -- "builds" merely contains "build".
+build_verbs := "(cargo|rustc|opa|make|ninja|cmake|go|npm|pnpm|yarn|pytest|tsc|([[:alnum:]_.-]*[-_.])?(build|check|test)([-_.][[:alnum:]_.-]*)?\\.(sh|py))"
 
 #
 # The optional quote at the end is `bash -c 'cargo build' 2>&1 | grep error`: the payload runs, and
