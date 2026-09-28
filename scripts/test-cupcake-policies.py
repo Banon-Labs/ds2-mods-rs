@@ -308,6 +308,27 @@ def cases() -> list[PolicyCase]:
         PolicyCase("deny-pkill-full-match", False, "pkill -f ds2-run.py"),
         PolicyCase("allow-pgrep-exact-name", True, "pgrep -x DarkSoulsII.exe"),
         PolicyCase("allow-unrelated-grep-f", True, "grep -f patterns.txt haystack.txt"),
+        # --- block_compositor_input_injection -------------------------------------------------
+        # 2026-09-27: a python heredoc editing a script, whose body declared a field named after
+        # the tool, was refused. The tool name only counts in command position. Multi-line
+        # shapes that need the hook shim live in test-cupcake-delivered-shape.py's SHIM_CASES.
+        PolicyCase(
+            "allow-python-heredoc-naming-the-injector-as-a-variable",
+            True,
+            "python3 - <<'PY'\nsrc = 1\n    wtype: str | None = None\nprint(a.type)\nPY",
+        ),
+        PolicyCase(
+            "deny-injector-in-command-position",
+            False,
+            "hyprctl activewindow && sudo wtype -k F3",
+            expected_text="names no target window",
+        ),
+        PolicyCase(
+            "deny-injector-in-a-shell-wrapper-payload",
+            False,
+            "bash -c \"sleep 1; ydotool key 61:1 61:0\"",
+            expected_text="names no target window",
+        ),
         # --- git_block_main_commit -------------------------------------------------------------
         PolicyCase(
             "deny-commit-on-main",
