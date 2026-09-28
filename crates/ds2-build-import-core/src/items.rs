@@ -53,6 +53,16 @@ const EMPTY_SLOTS: [&str; 8] = [
     "none",
 ];
 
+/// Planner names the catalogue spells differently: the planner's, normalised, and the catalogue's.
+///
+/// Found when the build recommender's armour search picked `Wanderer_Manchette` and the catalogue
+/// had no such row: every `SoulsPlanner` armour key was checked against it, and these are the two
+/// that name one real item under another spelling. The planner's singular is the game's plural.
+const PLANNER_SPELLINGS: [(&str, &str); 2] = [
+    ("wanderermanchette", "Wanderer Manchettes"),
+    ("madwarriorgauntlet", "Mad Warrior Gauntlets"),
+];
+
 /// Why a name did not become an id.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ItemError {
@@ -218,6 +228,10 @@ pub fn id_for(name: &str) -> Result<i32, ItemError> {
         return Err(ItemError::EmptySlot);
     }
     let key = normalise(name);
+    let key = PLANNER_SPELLINGS
+        .iter()
+        .find(|(planner, _)| *planner == key)
+        .map_or(key, |(_, catalogue_name)| normalise(catalogue_name));
     let Some(entries) = catalogue().get(&key).filter(|rows| !rows.is_empty()) else {
         return Err(ItemError::Unknown {
             name: name.to_owned(),
@@ -318,6 +332,16 @@ mod tests {
     fn the_catalogue_is_populated() {
         const EXTRACTED: usize = 1236;
         assert_eq!(catalogue_size(), EXTRACTED - NOT_INVENTORY_ITEMS.len());
+    }
+
+    /// The planner's singular spellings reach the catalogue's plural rows, key or display name.
+    #[test]
+    fn planner_spellings_resolve() {
+        for name in ["Wanderer_Manchette", "Wanderer Manchette"] {
+            assert_eq!(id_for(name), Ok(21_030_102), "{name}");
+        }
+        assert_eq!(id_for("Mad_Warrior_Gauntlet"), Ok(27_550_102));
+        assert_eq!(id_for("Mad Warrior Gauntlets"), Ok(27_550_102));
     }
 
     /// EVERY ITEM IN BUILD 253 RESOLVES.
