@@ -33,7 +33,10 @@ pub type DrawFn = fn(&Ui);
 pub type WantsInputFn = fn() -> bool;
 
 /// How many panels can be registered.
-pub const PANEL_SLOTS: usize = 4;
+///
+/// Eight: three were taken before the build recommender added a fourth, and a table that is full
+/// on the day a panel is added leaves the next one failing at registration.
+pub const PANEL_SLOTS: usize = 8;
 
 /// The draw functions, as plain addresses. `0` is an empty slot.
 static DRAWS: [AtomicUsize; PANEL_SLOTS] = [const { AtomicUsize::new(0) }; PANEL_SLOTS];

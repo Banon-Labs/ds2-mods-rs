@@ -73,8 +73,11 @@ block_sockets = true
 # ---------------------------------------------------------------------------------------------
 [menu_row]
 
-# Which rows appear, in this order. All four, in the order they read best:
-#   rows = ["load-build-from-url", "load-character-from-file", "save-game-to-file", "quit-to-desktop"]
+# Which rows appear, in this order. All five, in the order they read best:
+#   rows = ["load-build-from-url", "load-character-from-file", "save-game-to-file", "build-recommender", "quit-to-desktop"]
+# `build-recommender` opens the PvP build recommender panel. Its Apply puts a generated build on
+# the character you are playing, and like Load from URL it raises soul memory, which cannot be
+# undone; the panel asks before it does.
 # Keep it on one line. The reader is a line-based key-value parser, not a TOML parser: an array
 # split across lines parses as `rows = [` and every continuation line is discarded.
 rows = []

@@ -1,0 +1,25 @@
+# The PvP build recommender panel's model: its state, the weapon table, and the backend contract.
+#
+# Host-tested, with no `cfg(windows)` anywhere. Everything the in-game panel decides without a game --
+# what soul level nine stats make, which infusions a weapon takes, which results may be shown, how a
+# generated build becomes the thing `ds2-build-import` grants -- lives here, so it runs under
+# `cargo test` on Linux. The panel that draws it is `ds2-build-recommender-ui`.
+#
+# The one dependency is `ds2-build-import-core`, for the `Build` a generated build is turned into
+# and the `Infusion` the grant path already speaks.
+[package]
+name = "ds2-build-recommender-core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "ds2_build_recommender_core"
+
+[dependencies]
+ds2-build-import-core.workspace = true
+
+[lints]
+workspace = true

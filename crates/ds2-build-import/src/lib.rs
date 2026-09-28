@@ -92,8 +92,15 @@ mod url_dialog;
 /// Anything that does not resolve is SKIPPED and logged rather than failing the whole build: one
 /// unrecognised name should cost the player that item, not the other thirty. A name carried by
 /// SEVERAL ids is not in that category -- see the comment on the collision arm below.
+///
+/// `extras` are further `(name, infusion)` grants a generated build carries beyond its slots -- the
+/// second and third copy of a ring, the weapons it recommends. They go through the same count, so a
+/// name the build already names asks for one more copy, not a fresh one.
 #[cfg(windows)]
-pub(crate) fn build_items(build: &ds2_build_import_core::Build) -> Vec<game::ItemSpawn> {
+pub(crate) fn build_items(
+    build: &ds2_build_import_core::Build,
+    extras: &[(String, ds2_build_import_core::Infusion)],
+) -> Vec<game::ItemSpawn> {
     use ds2_build_import_core::{Infusion, ItemError, id_for, is_empty_slot};
 
     let mut out = Vec::new();
@@ -150,7 +157,12 @@ pub(crate) fn build_items(build: &ds2_build_import_core::Build) -> Vec<game::Ite
             // `ds2_rva::ITEM_SPAWN_DURABILITY_MAX`.
             durability: ds2_rva::ITEM_SPAWN_DURABILITY_MAX,
             quantity: 1,
-            reinforce: 0,
+            // The item's own maximum, from the regulation (`ds2_build_import_core::reinforce`):
+            // +10 or +5 for a weapon, the piece's own for armour, 0 for the few that cannot be
+            // reinforced and for everything that is not a weapon or armour. The recommender ranks
+            // weapons and armour at full upgrade, so this is the item it ranked. A copy the
+            // character already holds is left as it is -- the count above never mints a second.
+            reinforce: ds2_build_import_core::max_reinforce(item_id).unwrap_or(0),
             infusion: infusion.byte(),
         });
     };
@@ -176,11 +188,16 @@ pub(crate) fn build_items(build: &ds2_build_import_core::Build) -> Vec<game::Ite
     {
         push(name, Infusion::None);
     }
+    for (name, infusion) in extras {
+        push(name, *infusion);
+    }
     out
 }
 
 #[cfg(windows)]
-pub use install::{LogFn, register};
+pub use flow::queue_generated;
+#[cfg(windows)]
+pub use install::{LogFn, register, register_apply_tick};
 
 #[cfg(windows)]
 mod install {
@@ -249,6 +266,26 @@ mod install {
             }
         }
         registered
+    }
+
+    /// Point this crate's logging at the loader's file and add the tick that applies a build
+    /// [`crate::queue_generated`] left -- without registering the Load from URL row.
+    ///
+    /// For a run that lists the build recommender's row and not this crate's. The tick only drains
+    /// the mailbox; the typing field belongs to the row and is not read. Calling this as well as
+    /// [`register`] is harmless: whichever tick runs first takes the build and the other finds the
+    /// mailbox empty. Call before `ds2_menu_row::install`, which seals the tick table.
+    ///
+    /// Returns whether the tick was added.
+    pub fn register_apply_tick(logger: LogFn) -> bool {
+        LOGGER.store(logger as usize, Ordering::Release);
+        let added = ds2_menu_row::add_tick(crate::flow::drain_tick);
+        if !added {
+            log_line(format_args!(
+                "{LOG_PREFIX} no tick -- a generated build will be queued but never applied"
+            ));
+        }
+        added
     }
 
     /// What pressing the row does. **Runs on the game thread, with the menu still up.**

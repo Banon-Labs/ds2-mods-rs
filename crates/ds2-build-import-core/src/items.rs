@@ -53,6 +53,36 @@ const EMPTY_SLOTS: [&str; 8] = [
     "none",
 ];
 
+/// Planner names the catalogue spells differently: the planner's, normalised, and the catalogue's.
+///
+/// Found when the build recommender's armour search picked `Wanderer_Manchette` and the catalogue
+/// had no such row: every `SoulsPlanner` armour key was checked against it, and these are the two
+/// that name one real item under another spelling. The planner's singular is the game's plural.
+const PLANNER_SPELLINGS: [(&str, &str); 2] = [
+    ("wanderermanchette", "Wanderer Manchettes"),
+    ("madwarriorgauntlet", "Mad Warrior Gauntlets"),
+];
+
+/// Planner names the catalogue cannot tell apart by name: the planner's, normalised, and the id.
+///
+/// The catalogue has two sets called "... of Aurous", 21360100-03 and 21361100-03. The
+/// regulation says which is which (`scripts/ds2-reinforce-max.py --survey`): `ArmorParam` +0x34,
+/// the weight, is 1.2/3.2/1.2/2.0 on 2136010x and 3.8/10.1/3.2/5.8 on 2136110x, and the maximum
+/// defense in `ArmorReinforceParam` +0x3C is 43/115/43/72 against 69/183/58/105. The planner's
+/// "(Transparent)" pieces carry the first numbers exactly and its plain ones the second, so the
+/// lower ids are the transparent set -- the one the lowest-id rule for a shared name used to grant
+/// for the plain pieces.
+const PLANNER_IDS: [(&str, i32); 8] = [
+    ("helmofauroustransparent", 21_360_100),
+    ("armorofauroustransparent", 21_360_101),
+    ("gauntletsofauroustransparent", 21_360_102),
+    ("leggingsofauroustransparent", 21_360_103),
+    ("helmofaurous", 21_361_100),
+    ("armorofaurous", 21_361_101),
+    ("gauntletsofaurous", 21_361_102),
+    ("leggingsofaurous", 21_361_103),
+];
+
 /// Why a name did not become an id.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum ItemError {
@@ -218,6 +248,13 @@ pub fn id_for(name: &str) -> Result<i32, ItemError> {
         return Err(ItemError::EmptySlot);
     }
     let key = normalise(name);
+    if let Some(&(_, id)) = PLANNER_IDS.iter().find(|(planner, _)| *planner == key) {
+        return Ok(id);
+    }
+    let key = PLANNER_SPELLINGS
+        .iter()
+        .find(|(planner, _)| *planner == key)
+        .map_or(key, |(_, catalogue_name)| normalise(catalogue_name));
     let Some(entries) = catalogue().get(&key).filter(|rows| !rows.is_empty()) else {
         return Err(ItemError::Unknown {
             name: name.to_owned(),
@@ -318,6 +355,25 @@ mod tests {
     fn the_catalogue_is_populated() {
         const EXTRACTED: usize = 1236;
         assert_eq!(catalogue_size(), EXTRACTED - NOT_INVENTORY_ITEMS.len());
+    }
+
+    /// The planner's singular spellings reach the catalogue's plural rows, key or display name.
+    #[test]
+    fn planner_spellings_resolve() {
+        for name in ["Wanderer_Manchette", "Wanderer Manchette"] {
+            assert_eq!(id_for(name), Ok(21_030_102), "{name}");
+        }
+        assert_eq!(id_for("Mad_Warrior_Gauntlet"), Ok(27_550_102));
+        assert_eq!(id_for("Mad Warrior Gauntlets"), Ok(27_550_102));
+    }
+
+    /// The two Aurous sets, told apart by the regulation's weights rather than by the lowest id.
+    #[test]
+    fn the_aurous_sets_are_the_regulations() {
+        assert_eq!(id_for("Helm_of_Aurous_Transparent"), Ok(21_360_100));
+        assert_eq!(id_for("Leggings of Aurous (Transparent)"), Ok(21_360_103));
+        assert_eq!(id_for("Armor_of_Aurous"), Ok(21_361_101));
+        assert_eq!(id_for("Gauntlets of Aurous"), Ok(21_361_102));
     }
 
     /// EVERY ITEM IN BUILD 253 RESOLVES.
@@ -421,6 +477,8 @@ mod tests {
                 (name, spawnable)
             })
             .filter(|(_, spawnable)| *spawnable > 1)
+            // The Aurous names are settled by the regulation, in `PLANNER_IDS`.
+            .filter(|(name, _)| !PLANNER_IDS.iter().any(|(planner, _)| planner == name))
             .collect();
         assert!(
             !colliding.is_empty(),

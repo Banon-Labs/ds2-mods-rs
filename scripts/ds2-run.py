@@ -185,6 +185,18 @@ CONFIG_LINE_PREFIX = "ds2-loader: config"
 #: Rust source, because a rename on one side alone turns every run into a silent "probe off".
 CONFIG_NAME = "ds2-mods.toml"
 
+#: Mirrors `DATA_FILE_NAME` in `crates/ds2-build-recommender-core/src/corpus.rs`. The Build
+#: Recommender panel reads it from beside the game when it installs, and answers from its stub --
+#: fixed placeholder numbers -- when it is not there. `--selftest` pins the spelling to the crate.
+RECOMMENDER_DATA_NAME = "ds2-build-recommender.dat"
+
+#: Where `scripts/ds2-builds-recommend.py --export-backend` writes that file (its `BACKEND_DATA`),
+#: from the build corpus and item tables cached under `~/.cache`. Staged from here every run.
+RECOMMENDER_DATA_SOURCE = Path.home() / ".cache" / "ds2-builds" / RECOMMENDER_DATA_NAME
+
+#: What writes it when it is missing. `--selftest` checks the script still has the flag.
+RECOMMENDER_EXPORT = ["scripts/ds2-builds-recommend.py", "--export-backend"]
+
 #: The config the release package ships. `--release-config` stages this file verbatim instead of
 #: writing one from the flags, so a run can show a player's game rather than a harness arm.
 RELEASE_CONFIG = REPO_ROOT / ".github" / "dist-ds2-mods.toml"
@@ -253,6 +265,7 @@ MENU_ROW_ROW_NAMES = (
     "load-build-from-url",
     "load-character-from-file",
     "save-game-to-file",
+    "build-recommender",
     "quit-to-desktop",
 )
 
@@ -2634,6 +2647,27 @@ def stage() -> tuple[Path, str]:
     return staged, sha256(staged)
 
 
+def stage_recommender_data(game_dir: Path) -> str:
+    """Copy the Build Recommender's data file beside the game; return what happened, for the log.
+
+    Missing, it is exported first (about fifteen seconds, from the caches under `~/.cache`). When
+    that cannot be done either, whatever is already staged is left alone and the run says so: the
+    DLL's own `ds2-build-recommender: ... backend=` line is what tells which one the panel read.
+    """
+    staged = game_dir / RECOMMENDER_DATA_NAME
+    if not RECOMMENDER_DATA_SOURCE.is_file():
+        print(f"[stage] no {RECOMMENDER_DATA_SOURCE}; exporting it")
+        export = [sys.executable, str(REPO_ROOT / RECOMMENDER_EXPORT[0]), *RECOMMENDER_EXPORT[1:],
+                  str(RECOMMENDER_DATA_SOURCE)]
+        result = subprocess.run(export, cwd=REPO_ROOT, check=False)
+        if result.returncode != 0 or not RECOMMENDER_DATA_SOURCE.is_file():
+            state = "the one already there" if staged.is_file() else "none, so its stub"
+            return (f"build recommender data NOT staged (the export failed); the panel reads "
+                    f"{state}")
+    shutil.copyfile(RECOMMENDER_DATA_SOURCE, staged)
+    return f"{staged}  sha256 {sha256(staged)}  (from {RECOMMENDER_DATA_SOURCE})"
+
+
 LAUNCHER_BUILD = [
     "cargo", "xwin", "build", "--release", "--target", "x86_64-pc-windows-msvc", "-p", "ds2-launcher",
 ]
@@ -3051,6 +3085,12 @@ def dry_run(
             print("[dry-run] staged DLL DIFFERS from the built one; a real run would replace it.")
     else:
         print(f"[dry-run] staged   <absent>  {staged}")
+    data = GAME_DIR / RECOMMENDER_DATA_NAME
+    source = (f"sha256 {sha256(RECOMMENDER_DATA_SOURCE)}" if RECOMMENDER_DATA_SOURCE.is_file()
+              else "<absent>, a real run exports it")
+    print(f"[dry-run] recommender data source {source}  {RECOMMENDER_DATA_SOURCE}")
+    print(f"[dry-run] recommender data staged "
+          f"{'sha256 ' + sha256(data) if data.is_file() else '<absent>'}  {data}")
 
     config_path = GAME_DIR / CONFIG_NAME
     if config_path.is_file():
@@ -3750,6 +3790,7 @@ def launch(
     staged, digest = stage()
     print(f"[stage] {staged}")
     print(f"[stage] sha256 {digest}")
+    print(f"[stage] {stage_recommender_data(GAME_DIR)}")
 
     # BEFORE LAUNCHING, and after staging: the DLL reads this in `DllMain`, so it has to be on
     # disk before the game starts, and it is rewritten every run so a file left over from the
@@ -4797,7 +4838,7 @@ def selftest() -> int:
         f"({MENU_ROW_LOG_PREFIX})",
     )
 
-    # THE ROW LIST. Four names against twelve slots, so the count and every spelling are checked
+    # THE ROW LIST. Five names against twelve slots, so the count and every spelling are checked
     # here rather than discovered in a log after a launch. The rows key is the only key in this file
     # whose value is a LIST, and the reason it started as one was the game's item vector; see
     # `MENU_ROW_MAX_ADDED` for what replaced that ceiling. This script no longer writes it -- the
@@ -5479,7 +5520,20 @@ def selftest() -> int:
     check("dxgi=n,b" in DLL_OVERRIDE.split(";") and "dinput8=n,b" in DLL_OVERRIDE.split(";"),
           "the launch override loads both proxies native-first")
 
-    staged_names = {STAGED_DLL_NAME, STAGED_LAUNCHER_NAME, CONFIG_NAME, LOG_NAME}
+    check(
+        f'"{RECOMMENDER_DATA_NAME}"'
+        in (REPO_ROOT / "crates/ds2-build-recommender-core/src/corpus.rs").read_text(encoding="utf-8"),
+        f"the Build Recommender panel reads the data file this stages ({RECOMMENDER_DATA_NAME})",
+    )
+    recommend_src = (REPO_ROOT / RECOMMENDER_EXPORT[0]).read_text(encoding="utf-8")
+    check(
+        f'"{RECOMMENDER_EXPORT[1]}"' in recommend_src
+        and f'BACKEND_DATA_NAME = "{RECOMMENDER_DATA_NAME}"' in recommend_src
+        and 'BACKEND_DATA = Path.home() / ".cache/ds2-builds" / BACKEND_DATA_NAME' in recommend_src
+        and RECOMMENDER_DATA_SOURCE == Path.home() / ".cache/ds2-builds" / RECOMMENDER_DATA_NAME,
+        "the recommender data is staged from where ds2-builds-recommend.py --export-backend writes it",
+    )
+    staged_names = {STAGED_DLL_NAME, STAGED_LAUNCHER_NAME, CONFIG_NAME, LOG_NAME, RECOMMENDER_DATA_NAME}
     check(
         not {Path(name).parts[0].lower() for name in staged_names}
         & {name.lower() for name in THIRD_PARTY_PATHS},

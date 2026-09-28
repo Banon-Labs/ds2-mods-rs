@@ -1,0 +1,325 @@
+#key	name	class	kind	infusions	N=No_Infusion M=Magic F=Fire L=Lightning D=Dark P=Poison B=Bleed R=Raw E=Enchanted U=Mundane
+Bandit_Axe	Bandit Axe	Axe	W	NMFLDPBREU
+Battle_Axe	Battle Axe	Axe	W	NMFLDPBREU
+Bound_Hand_Axe	Bound Hand Axe	Axe	W	NMFLDPBREU
+Butchers_Knife	Butcher's Knife	Axe	W	NMFLDPBREU
+Dragonslayers_Crescent_Axe	Dragonslayer's Crescent Axe	Axe	W	NMFLDPBREU
+Gyrm_Axe	Gyrm Axe	Axe	W	NMFLDPBREU
+Hand_Axe	Hand Axe	Axe	W	NMFLDPBREU
+Infantry_Axe	Infantry Axe	Axe	W	NMFLDPBREU
+Bell_Keeper_Bow	Bell Keeper Bow	Bow	W	NMFLDREU
+Bow_of_Want	Bow of Want	Bow	W	NMFLDREU
+Composite_Bow	Composite Bow	Bow	W	NMFLDREU
+Dragonrider_Bow	Dragonrider Bow	Bow	W	NMFLDREU
+Hunters_Blackbow	Hunter's Blackbow	Bow	W	NMFLDREU
+Long_Bow	Long Bow	Bow	W	NMFLDREU
+Sea_Bow	Sea Bow	Bow	W	NMFLDREU
+Short_Bow	Short Bow	Bow	W	NMFLDREU
+Claws	Claws	Claw	W	NMFLDPBREU
+Malformed_Claws	Malformed Claws	Claw	W	NMFLDPBREU
+Manikin_Claws	Manikin Claws	Claw	W	NMFLDPBREU
+Work_Hook	Work Hook	Claw	W	NMFLDPBREU
+Avelyn	Avelyn	Crossbow	W	NMFLDREU
+Heavy_Crossbow	Heavy Crossbow	Crossbow	W	NMFLDREU
+Light_Crossbow	Light_Crossbow	Crossbow	W	NMFLDREU
+Sanctum_Crossbow	Sanctum Crossbow	Crossbow	W	NMFLDREU
+Sanctum_Repeating_Crossbow	Sanctum Repeating Crossbow	Crossbow	W	NMFLDREU
+Shield_Crossbow	Shield Crossbow	Crossbow	W	NMFLDREU
+Eleum_Loyce	Eleum Loyce	Curved Sword	W	NMFLDPBREU
+Falchion	Falchion	Curved Sword	W	NMFLDPBREU
+Manikin_Sabre	Manikin Sabre	Curved Sword	W	NMFLDPBREU
+Melu_Scimitar	Melu Scimitar	Curved Sword	W	NMFLDPBREU
+Monastery_Scimitar	Monastery Scimitar	Curved Sword	W	NMFLDPBREU
+Red_Rust_Scimitar	Red Rust Scimitar	Curved Sword	W	NMFLDPBREU
+Scimitar	Scimitar	Curved Sword	W	NMFLDPBREU
+Shotel	Shotel	Curved Sword	W	NMFLDPBREU
+Spider_Fang	Spider Fang	Curved Sword	W	NMFLDPBREU
+Warped_Sword	Warped Sword	Curved Sword	W	NMFLDPBREU
+Arced_Sword	Arced Sword	Curved Greatsword	W	NMFLDPBREU
+Curved_Dragon_Greatsword	Curved Dragon Greatsword	Curved Greatsword	W	NMFLDPBREU
+Curved_Nil_Greatsword	Curved Nil Greatsword		W	NMFLDPBREU
+Murakumo	Murakumo	Curved Greatsword	W	NMFLDPBREU
+Bandits_Knife	Bandit's Knife	Dagger	W	NMFLDPBREU
+Black_Flamestone_Dagger	Black Flamestone Dagge	Dagger	W	NMFLDPBREU
+Blue_Dagger	Blue Dagger	Dagger	W	NMFLDPBREU
+Broken_Thief_Sword	Broken Thief Sword	Dagger	W	NMFLDPBREU
+Dagger	Dagger	Dagger	W	NMFLDPBREU
+Manikin_Knife	Manikin Knife	Dagger	W	NMFLDPBREU
+Mythas_Bent_Blade	Mytha's Bent Blade	Dagger	W	N
+Parrying_Dagger	Parrying Dagger	Dagger	W	NMFLDPBREU
+Retainers_Short_Sword	Retainer's Short Sword	Dagger	W	NMFLDPBREU
+Royal_Dirk	Royal Dirk	Dagger	W	NMFLDPBREU
+Shadow_Dagger	Shadow Dagger	Dagger	W	NMFLDPBREU
+Thief_Dagger	Thief Dagger	Dagger	W	NMFLDPBREU
+Umbral_Dagger	Umbral Dagger	Dagger	W	N
+Bone_Fist	Bone Fist	Fists	W	NMFLDPREU
+Caestus	Caestus	Fists	W	NMFLDPREU
+Bandit_Greataxe	Bandit Greataxe	Great Axe	W	NMFLDPBREU
+Black_Dragon_Greataxe	Black Dragon Greataxe	Great Axe	W	NMFLDPBREU
+Black_Knight_Greataxe	Black Knight Greataxe	Great Axe	W	NMFLDPBREU
+Crescent_Axe	Crescent Axe	Great Axe	W	NMFLDPBREU
+Drakekeepers_Greataxe	Drakekeeper's Greataxe	Great Axe	W	NMFLDPBREU
+Greataxe	Greataxe	Great Axe	W	NMFLDPBREU
+Giant_Stone_Axe	Giant Stone Axe	Great Axe	W	NMFLDPBREU
+Gyrm_Greataxe	Gyrm Greataxe	Great Axe	W	NMFLDPBREU
+Lion_Greataxe	Lion Greataxe	Great Axe	W	NMFLDPBREU
+Alonne_Greatbow	Alonne Greatbow	Greatbow	W	NMFLDREU
+Dragonslayer_Greatbow	Dragonslayer Greatbow	Greatbow	W	NMFLDREU
+Possessed_Armor_Greatbow	Possessed Armor Greatbow	Greatbow	W	NMFLDREU
+Twinheaded_Greatbow	Twin-headed Greatbow	Greatbow	W	NMFLDREU
+Archdrake_Mace	Archdrake Mace	Great Hammer	W	NMFLDPREU
+Demons_Great_Hammer	Demon's Great Hammer	Great Hammer	W	NMFLDPREU
+Dragon_Tooth	Dragon Tooth	Great Hammer	W	NMFLDPREU
+Drakekeepers_Great_Hammer	Drakekeeper's Great Hammer	Great Hammer	W	NMFLDPREU
+Drakekeepers_Warpick	Drakekeeper's Warpick	Great Hammer	W	NMFLDPBREU
+Giant_Warrior_Club	Giant Warrior Club	Great Hammer	W	NMFLDPREU
+Great_Club	Great Club	Great Hammer	W	NMFLDPREU
+Gyrm_Great_Hammer	Gyrm Great Hammer	Great Hammer	W	NMFLDPREU
+Iron_King_Hammer	Iron King Hammer	Great Hammer	W	NMFLDPREU
+Large_Club	Large Club	Great Hammer	W	NMFLDPREU
+Malformed_Shell	Malformed Shell	Great Hammer	W	NMFLDPREU
+Malformed_Skull	Malformed Skull	Great Hammer	W	NMFLDPREU
+Old_Knight_Hammer	Old Knight Hammer	Great Hammer	W	NMFLDPREU
+Pickaxe	Pickaxe	Great Hammer	W	NMFLDPREU
+Sacred_Chime_Hammer	Sacred Chime Hammer	Great Hammer	C	NMFLDPREU
+Sanctum_Mace	Sanctum Mace	Great Hammer	W	NMFLDPREU
+Smelter_Hammer	Smelter Hammer	Great Hammer	W	NMFLDPREU
+Bastard_Sword	Bastard Sword	Greatsword	W	NMFLDPBREU
+Black_Dragon_Greatsword	Black Dragon Greatsword	Greatsword	W	NMFLDPBREU
+Black_Knight_Greatsword	Black Knight Greatsword	Greatsword	W	NMFLDPBREU
+Bluemoon_Greatsword	Bluemoon Greatsword	Greatsword	W	NMFLDPBREU
+Charred_Loyce_Greatsword	Charred Loyce Greatsword	Greatsword	W	NMFLDPBREU
+Claymore	Claymore	Greatsword	W	NMFLDPBREU
+Defender_Greatsword	Defender Greatsword	Greatsword	W	NMFLDPBREU
+Drakeblood_Greatsword	Drakeblood Greatsword	Greatsword	W	NMFLDPBREU
+Drangleic_Sword	Drangleic Sword	Greatsword	W	NMFLDPBREU
+Flamberge	Flamberge	Greatsword	W	NMFLDPBREU
+Greatsword_of_the_Forlorn	Greatsword of the Forlorn		W	NMFLDPBREU
+Key_to_the_Embedded	Key to the Embedded	Greatsword	W	N
+Loyce_Greatsword	Loyce Greatsword	Greatsword	W	NMFLDPBREU
+Majestic_Greatsword	Majestic Greatsword	Greatsword	W	NMFLDPBREU
+Mastodon_Greatsword	Mastodon Greatsword	Greatsword	W	NMFLDPBREU
+Mirrah_Greatsword	Mirrah Greatsword	Greatsword	W	NMFLDPBREU
+Moonlight_Greatsword	Moonlight Greatsword	Greatsword	W	NMFLDPBREU
+Old_Knight_Greatsword	Old Knight Greatsword	Greatsword	W	NMFLDPBREU
+Old_Mirrah_Greatsword	Old Mirrah Greatsword	Greatsword	W	NMFLDPBREU
+Royal_Greatsword	Royal Greatsword	Greatsword	W	NMFLDPBREU
+Rulers_Sword	Ruler's Sword		W	NMFLDPBREU
+Thorned_Greatsword	Thorned Greatsword	Greatsword	W	NMFLDPBREU
+Watcher_Greatsword	Watcher Greatsword	Greatsword	W	NMFLDPBREU
+Black_Knight_Halberd	Black Knight Halberd	Halberd	W	NMFLDPBREU
+Blue_Knights_Halberd	Blue Knight's Halberd	Halberd	W	NMFLDPBREU
+Dragonriders_Halberd	Dragonrider's Halberd	Halberd	W	NMFLDPBREU
+Halberd	Halberd	Halberd	W	NMFLDPBREU
+Helix_Halberd	Helix Halberd	Halberd	W	NMFLDPBREU
+Lucerne	Lucerne	Halberd	W	NMFLDPBREU
+Mastodon_Halberd	Mastodon Halberd	Halberd	W	NMFLDPBREU
+Old_Knight_Halberd	Old Knight Halberd	Halberd	W	NMFLDPBREU
+Old_Knight_Pike	Old Knight Pike	Halberd	W	NMFLDPBREU
+Roaring_Halberd	Roaring Halberd	Halberd	W	NMFLDPBREU
+Santiers_Spear	Santier's Spear	Halberd	W	NMFLDPBREU
+Santiers_Spear_Broken	Santier's Spear (broken)		W	NMFLDPBREU
+Scythe	Scythe	Halberd	W	NMFLDPBREU
+Syans_Halberd	Syan's Halberd	Halberd	W	NMFLDPBREU
+Wrathful_Axe	Wrathful Axe	Halberd	W	NMFLDPBREU
+Aldia_Hammer	Aldia Hammer	Hammer	W	NMFLDPREU
+Barbed_Club	Barbed Club	Hammer	W	NMFLDPREU
+Blacksmiths_Hammer	Blacksmith's Hammer	Hammer	W	NMFLDPREU
+Black_Dragon_Warpick	Black Dragon Warpick	Hammer	W	NMFLDPREU
+Club	Club	Hammer	W	NMFLDPREU
+Craftsmans_Hammer	Craftsman's Hammer	Hammer	W	NMFLDPREU
+Handmaids_Ladle	Handmaid's Ladle	Hammer	W	NMFLDPREU
+Homunculus_Mace	Homunculus Mace	Hammer	W	NMFLDPREU
+Mace	Mace	Hammer	W	NMFLDPREU
+Mace_of_the_Insolent	Mace of the Insolent	Hammer	W	NMFLDPREU
+Morning_Star	Morning Star	Hammer	W	NMFLDPREU
+Reinforced_Club	Reinforced Club	Hammer	W	NMFLDPREU
+Berserker_Blade	Berserker Blade		W	NMFLDPBREU
+Bewitched_Alonne_Sword	Bewitched Alonne Sword	Katana	W	NMFLDPBREU
+Blacksteel_Katana	Blacksteel Katana	Katana	W	NMFLDPBREU
+Chaos_Blade	Chaos Blade	Katana	W	NMFLDPBREU
+Darkdrift	Darkdrift	Katana	W	NMFLDPBREU
+Manslayer	Manslayer	Katana	W	NMFLDPBREU
+Uchigatana	Uchigatana	Katana	W	NMFLDPBREU
+Washing_Pole	Washing Pole	Katana	W	NMFLDPBREU
+Chariot_Lance	Chariot Lance	Lance	W	N
+Grand_Lance	Grand Lance	Lance	W	NMFLDPBREU
+Heide_Greatlance	Heide Greatlance	Lance	W	NMFLDPBREU
+Heide_Lance	Heide Lance	Lance	W	NMFLDPBREU
+Rampart_Golem_Lance	Rampart Golem Lance	Lance	W	NMFLDPBREU
+Bone_Scythe	Bone Scythe	Reaper	W	NMFLDPBREU
+Crescent_Sickle	Crescent Sickle	Reaper	W	NMFLDPBREU
+Full_Moon_Sickle	Full Moon Sickle	Reaper	W	NMFLDPBREU
+Great_Machete	Great Machete	Reaper	W	NMFLDPBREU
+Great_Scythe	Great Scythe	Reaper	W	NMFLDPBREU
+Scythe_of_the_Forlorn	Scythe of the Forlorn		W	NMFLDPBREU
+Scythe_of_Nahr_Alma	Scythe of Nahr Alma	Reaper	W	NMFLDPBREU
+Scythe_of_Want	Scythe of Want	Reaper	W	N
+Silverblack_Sickle	Silverblack Sickle	Reaper	W	NMFLDPBREU
+Channelers_Trident	Channeler's Trident	Spear	W	NMFLDPBREU
+Dragonslayer_Spear	Dragonslayer Spear	Spear	W	N
+Gargoyle_Bident	Gargoyle Bident	Spear	W	NMFLDPBREU
+Heide_Spear	Heide Spear	Spear	W	NMFLDPBREU
+Partizan	Partizan	Spear	W	NMFLDPBREU
+Pates_Spear	Pate's Spear	Spear	W	NMFLDPBREU
+Pike	Pike	Spear	W	NMFLDPBREU
+Pilgrims_Spontoon	Pilgrim's Spontoon	Spear	W	NMD
+Silverblack_Spear	Silverblack Spear	Spear	W	NMFLDPBREU
+Spear	Spear	Spear	W	NMFLDPBREU
+Spitfire_Spear	Spitfire Spear	Spear	W	NMFLDPBREU
+Stone_Soldier_Spear	Stone Soldier Spear	Spear	W	NMFLDPBREU
+Winged_Spear	Winged Spear	Spear	W	NMFLDPBREU
+Yorghs_Spear	Yorgh's Spear	Spear	W	NMFLDPBREU
+Ashen_Warrior_Sword	Ashen Warrior Sword	Straight Sword	W	NMFLDPBREU
+Black_Dragon_Sword	Black Dragon Sword	Straight Sword	W	NMFLDPBREU
+Blue_Flame	Blue Flame	Straight Sword	W	NMFLDPBREU
+Broadsword	Broadsword	Straight Sword	W	NMFLDPBREU
+Broken_Straight_Sword	Broken Straight Sword	Straight Sword	W	NMFLDPBREU
+Drakekeepers_Sword	Drakekeeper's Sword	Straight Sword	W	NMFLDPBREU
+Foot_Soldier_Sword	Foot Soldier Sword	Straight Sword	W	NMFLDPBREU
+Fume_Sword	Fume Sword	Straight Sword	W	NMFLDPBREU
+Heide_Knight_Sword	Heide Knight Sword	Straight Sword	W	NMFLDPBREU
+Ivory_Straight_Sword	Ivory Straight Sword	Straight Sword	W	N
+Longsword	Longsword	Straight Sword	W	NMFLDPBREU
+Possessed_Armor_Sword	Possessed Armor Sword	Straight Sword	W	NMFLDPBREU
+Puzzling_Stone_Sword	Puzzling Stone Sword	Straight Sword	W	NMFLDPBREU
+Red_Rust_Sword	Red Rust Sword	Straight Sword	W	NMFLDPBREU
+Shortsword	Shortsword	Straight Sword	W	NMFLDPBREU
+Sun_Sword	Sun Sword	Straight Sword	W	NMFLDPBREU
+Varangian_Sword	Varangian Sword	Straight Sword	W	NMFLDPBREU
+Yellow_Quartz_Longsword	Yellow Quartz Longsword	Straight Sword	W	NMFLDPBREU
+Black_Scorpion_Stinger	Black Scorpion Stinger	Thrusting Sword	W	NMFLDPBREU
+Chaos_Rapier	Chaos Rapier	Thrusting Sword	W	NMFLDPBREU
+Espada_Ropera	Espada Ropera	Thrusting Sword	W	NMFLDPBREU
+Estoc	Estoc	Thrusting Sword	W	NMFLDPBREU
+Ice_Rapier	Ice Rapier	Thrusting Sword	W	NMFLDPBREU
+Mail_Breaker	Mail Breaker	Thrusting Sword	W	NMFLDPBREU
+Rapier	Rapier	Thrusting Sword	W	NMFLDPBREU
+Ricards_Rapier	Ricard's Rapier	Thrusting Sword	W	NMFLDPBREU
+Spiders_Silk	Spider's Silk	Thrusting Sword	W	NMFLDPBREU
+Curved_Twinblade	Curved Twinblade	Twinblade	W	NMFLDPBREU
+Dragonrider_Twinblade	Dragonrider Twinblade	Twinblade	W	NMFLDPBREU
+Red_Iron_Twinblade	Red Iron Twinblade	Twinblade	W	NMFLDPBREU
+Sorcerers_Twinblade	Sorcerer's Twinblade	Twinblade	W	NMD
+Stone_Twinblade	Stone Twinblade	Twinblade	W	NMFLDPBREU
+Twinblade	Twinblade	Twinblade	W	NMFLDPBREU
+Aged_Smelter_Sword	Aged Smelter Sword	Ultra Greatsword	W	N
+Black_Knight_Ultra_Greatsword	Black Knight Ultra Greatsword	Ultra Greatsword	W	NMFLDPBREU
+Crypt_Blacksword	Crypt Blacksword	Ultra Greatsword	W	NMFLDPBREU
+Drakekeepers_Ultra_Greatsword	Drakekeeper's Ultra Greatsword	Ultra Greatsword	W	NMFLDPBREU
+Drakewing_Ultra_Greatsword	Drakewing Ultra Greatsword	Ultra Greatsword	W	NMFLDPBREU
+Fume_Ultra_Greatsword	Fume Ultra Greatsword	Ultra Greatsword	W	NMFLDPBREU
+Greatsword	Greatsword	Ultra Greatsword	W	NMFLDPBREU
+Ivory_King_Ultra_Greatsword	Ivory King Ultra Greatsword	Ultra Greatsword	W	NMFLDPBREU
+Kings_Ultra_Greatsword	King's Ultra Greatsword	Ultra Greatsword	W	NMFLDPBREU
+Lost_Sinners_Sword	Lost Sinner's Sword	Ultra Greatsword	W	NMFLDPBREU
+Old_Knight_Ultra_Greatsword	Old Knight Ultra Greatsword	Ultra Greatsword	W	NMFLDPBREU
+Pursuers_Ultra_Greatsword	Pursuer's Ultra Greatsword	Ultra Greatsword	W	NMFLDPBREU
+Smelter_Sword	Smelter Sword	Ultra Greatsword	W	N
+Zweihander	Zweihander	Ultra Greatsword	W	NMFLDPBREU
+Bloodied_Whip	Bloodied Whip	Whip	W	NMFLDPBREU
+Notched_Whip	Notched Whip	Whip	W	N
+Old_Whip	Old Whip	Whip	W	NMFLDPBREU
+Spotted_Whip	Spotted Whip	Whip	W	NMFLDPBREU
+Whip	Whip	Whip	W	NMFLDPBREU
+Benharts_Parma	Benhart's Parma	Small Shield	S	NMFLDPB
+Buckler	Buckler	Small Shield	S	NMFLDPB
+Clerics_Parma	Cleric's Parma	Small Shield	S	NMFLDPB
+Clerics_Small_Shield	Cleric's Small Shield	Small Shield	S	NMFLDPB
+Crimson_Parma	Crimson Parma	Small Shield	S	NMFLDPB
+Cursed_Bone_Shield	Cursed Bone Shield	Small Shield	S	NMFLDPB
+Foot_Soldier_Shield	Foot Soldier Shield	Small Shield	S	NMFLDPB
+Golden_Falcon_Shield	Golden Falcon Shield	Small Shield	S	NMFLDPB
+Iron_Parma	Iron Parma	Small Shield	S	NMFLDPB
+Llewellyn_Shield	Llewellyn Shield	Small Shield	S	NMFLDPB
+Magic_Shield	Magic Shield	Small Shield	S	NMFLDPB
+Manikin_Shield	Manikin Shield	Small Shield	S	NMFLDPB
+Phoenix_Parma	Phoenix Parma	Small Shield	S	NMFLDPB
+Sanctum_Shield	Sanctum Shield	Normal Shield	S	NLD
+Small_Leather_Shield	Small Leather Shield	Small Shield	S	NMFLDPB
+Sunlight_Parma	Sunlight Parma	Small Shield	S	NMFLDPB
+Target_Shield	Target Shield	Small Shield	S	NMFLDPB
+Transgressors_Leather_Shield	Transgressor's Leather Shield	Small Shield	S	NMFLDPB
+Varangian_Shield	Varangian Shield	Small Shield	S	NMFLDPB
+Watchers_Shield	Watcher's Shield	Small Shield	S	NMFLDPB
+Archdrake_Shield	Archdrake Shield	Normal Shield	S	NMFLDPB
+Bell_Keeper_Shield	Bell Keeper Shield	Normal Shield	S	NMFLDPB
+Black_Dragon_Shield	Black Dragon Shield	Normal Shield	S	NMFLDPB
+Black_Flamestone_Parma	Black Flamestone Parma	Normal Shield	S	NMFLDPB
+Blossom_Kite_Shield	Blossom Kite Shield	Normal Shield	S	NMFLDPB
+Blue_Wooden_Shield	Blue Wooden Shield	Normal Shield	S	NMFLDPB
+Bone_Shield	Bone Shield	Normal Shield	S	NMFLDPB
+Bound_Wooden_Shield	Bound Wooden Shield	Normal Shield	S	NMFLDPB
+Chaos_Shield	Chaos Shield	Normal Shield	S	NMFLDPB
+Charred_Loyce_Shield	Charred Loyce Shield	Normal Shield	S	NMFLDPB
+Defenders_Shield	Defender's Shield	Normal Shield	S	NMFLDPB
+Drakekeepers_Shield	Drakekeeper's Shield	Normal Shield	S	NMFLDPB
+Drangleic_Shield	Drangleic Shield	Normal Shield	S	NMFLDPB
+Golden_Wing_Shield	Golden Wing Shield	Normal Shield	S	NMFLDPB
+Grand_Spirit_Tree_Shield	Grand Spirit Tree Shield	Normal Shield	S	NMFLDPB
+Hollow_Soldier_Shield	Hollow Soldier Shield	Normal Shield	S	NMFLDPB
+Homunculus_Wooden_Shield	Homunculus Wooden Shield	Normal Shield	S	NMFLDPB
+Kings_Shield	King's Shield	Normal Shield	S	N
+Large_Leather_Shield	Large Leather Shield	Normal Shield	S	NMFLDPB
+Lion_Clan_Shield	Lion Clan Shield	Normal Shield	S	NMFLDPB
+Loyce_Shield	Loyce Shield	Normal Shield	S	NMFLDPB
+Mirrah_Shield	Mirrah Shield	Normal Shield	S	NMFLDPB
+Moon_Butterfly_Shield	Moon Butterfly Shield	Normal Shield	S	NMFLDPB
+Old_Knights_Shield	Old Knight's Shield	Normal Shield	S	NMFLDPB
+Porcine_Shield	Porcine Shield	Normal Shield	S	NMFLDPB
+Rampart_Golem_Shield	Rampart Golem Shield	Normal Shield	S	NMFLDPB
+Red_Rust_Shield	Red Rust Shield	Normal Shield	S	NMFLDPB
+Royal_Kite_Shield	Royal Kite Shield	Normal Shield	S	NMFLDPB
+Shield_of_the_Insolent	Shield of the Insolent	Normal Shield	S	NMFLDPB
+Silver_Eagle_Kite_Shield	Silver Eagle Kite Shield	Normal Shield	S	NMFLDPB
+Silverblack_Shield	Silverblack Shield	Normal Shield	S	NMFLDPB
+Slumbering_Dragon_Shield	Slumbering Dragon Shield	Normal Shield	S	NMFLDPB
+Spirit_Tree_Shield	Spirit Tree Shield	Normal Shield	S	NMFLDPB
+Stone_Parma	Stone Parma	Normal Shield	S	NMFLDPB
+Vessel_Shield	Vessel Shield	Normal Shield	S	NMFLDPB
+Watchdragon_Parma	Watchdragon Parma	Normal Shield	S	NMFLDPB
+Wooden_Shield	Wooden Shield	Normal Shield	S	NMFLDPB
+Yellow_Quartz_Shield	Yellow Quartz Shield	Normal Shield	S	NMFLDPB
+Dragonrider_Greatshield	Dragonrider Greatshield	Greatshield	S	NMFLDPB
+Drakekeepers_Greatshield	Drakekeeper's Greatshield	Greatshield	S	NMFLDPB
+Greatshield_of_Glory	Greatshield of Glory	Greatshield	S	NMFLDPB
+Gyrm_Greatshield	Gyrm Greatshield	Greatshield	S	NMFLDPB
+Havels_Greatshield	Havel's Greatshield	Greatshield	S	NMFLDPB
+Kings_Mirror	King's Mirror	Greatshield	S	NMFLDPB
+Mastodon_Greatshield	Mastodon Greatshield	Greatshield	S	NMFLDPB
+Old_Knight_Greatshield	Old Knight Greatshield	Greatshield	S	NMFLDPB
+Ormas_Greatshield	Orma's Greatshield	Greatshield	S	NMFLDPB
+Pates_Shield	Pate's Shield	Greatshield	S	NMFLDPB
+Pursuers_Greatshield	Pursuer's Greatshield	Greatshield	S	NMFLDPB
+Rebels_Greatshield	Rebel's Greatshield	Greatshield	S	NMFLDPB
+Reeves_Greatshield	Reeve's Greatshield	Greatshield	S	NMFLDPB
+Tower_Shield	Tower Shield	Greatshield	S	NMFLDPB
+Twin_Dragon_Greatshield	Twin Dragon Greatshield	Greatshield	S	NMFLDPB
+Wicked_Eye_Greatshield	Wicked Eye Greatshield	Greatshield	S	NMFLDPB
+Pyromancy_Flame	Pyromancy Flame	Flame	C	N
+Dark_Pyromancy_Flame	Dark Pyromancy Flame	Flame	C	N
+Archdrake_Staff	Archdrake Staff	Staff	C	NMD
+Azals_Staff	Azal's Staff	Staff	C	N
+Black_Witchs_Staff	Black Witch's Staff	Chime	C	NMD
+Bat_Staff	Bat Staff	Staff	C	NMD
+Bone_Staff	Bone Staff	Staff	C	NMD
+Lizard_Staff	Lizard Staff	Staff	C	NMD
+Olenfords_Staff	Olenford's Staff	Staff	C	NMD
+Retainer_Staff	Retainer Staff	Staff	C	NMD
+Sorcerers_Staff	Sorcerer's Staff	Staff	C	NMD
+Staff_of_Amana	Staff of Amana	Staff	C	NMD
+Staff_of_Wisdom	Staff of Wisdom	Staff	C	NMD
+Sunset_Staff	Sunset Staff	Staff	C	NMD
+Transgressors_Staff	Transgressor's Staff	Staff	C	NMD
+Witchtree_Branch	Witchtree Branch	Staff	C	NMD
+Archdrake_Chime	Archdrake Chime	Chime	C	NLD
+Caithas_Chime	Caitha's Chime	Chime	C	NLD
+Chime_of_Screams	Chime of Screams	Chime	C	NLD
+Chime_of_Want	Chime of Want	Chime	C	NLD
+Clerics_Sacred_Chime	Cleric's Sacred Chime	Chime	C	NLD
+Disc_Chime	Disc Chime	Chime	C	NLD
+Dragon_Chime	Dragon Chime	Chime	C	NLD
+Idols_Chime	Idol's Chime	Chime	C	NLD
+Priests_Chime	Priest's Chime	Chime	C	NLD
+Protective_Chime	Protective Chime	Chime	C	NLD
+Witchtree_Bellvine	Witchtree Bellvine	Chime	C	NLD

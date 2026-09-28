@@ -202,13 +202,33 @@ class MugenIds:
 
     # MugenMonkey's own misspellings and abbreviations, seen in its build data
     ALIAS = {"sanctumsolidergauntlets": "Sanctum Soldier Gauntlet",
-             "penalstraighjacket": "Penal Straightjacket"}
+             "penalstraighjacket": "Penal Straightjacket",
+             "tightsofjudgement": "Tights of Judgment",
+             "desertsorcesresshood": "Desert Sorceress Hood",
+             "desertsoceressgloves": "Desert Sorceress Gloves",
+             "wanderermanchettes": "Wanderer Manchette",
+             "bonekingarmor": "Bone King Robe",
+             "royalsoliderhelm": "Royal Soldier Helm",
+             "hardleatherleggings": "Hard Leather Boots",
+             "bersekerblade": "Berserker Blade",
+             "creightonshelm": "Creightons Steel Mask",
+             "royalsolidersleggings": "Royal Soldier Leggings",
+             "madwarriorgauntlets": "Mad Warrior Gauntlet",
+             "monastarylonggloves": "Monastery Long Gloves",
+             "prisonerswaistloth": "Prisoners Waistcloth",
+             "astrologistsrobes": "Astrologists Robe",
+             "perserverance": "Perseverance",
+             "hollowsoliderhelm": "Hollow Soldier Helm",
+             "whitepriestheadset": "White Priest Headpiece"}
     ABBREV = [(re.compile(r"\bUGS\b"), "Ultra Greatsword"), (re.compile(r"\bGS\b"), "Greatsword"),
               (re.compile(r"\bGA\b"), "Greataxe")]
 
     def key(self, name):
         if not name or name.strip() in ("No Ring", "No Spell", "Naked", "No Armor") or name.startswith("default"):
             return ""  # "defaulthead" etc. is MugenMonkey's empty armor slot
+        # A trailing note in parentheses is the author's, not the item's: "Ruler's Sword (1mil)",
+        # "Curved Nil Greatsword (NG)", "Prisoner's Tatters (2)".
+        name = re.sub(r"\s*\([^)]*\)\s*$", "", name)
         name = self.ALIAS.get(norm(name), name)
         for pat, full in self.ABBREV:
             name = pat.sub(full, name)
@@ -1076,7 +1096,9 @@ def neighbour_weapons(data: Data, stats: dict, sl: int, corpus: list[Build], k: 
                     atk = (data.weapons[w]["infusions"].get("No_Infusion" if inf == "?" else inf) or {}).get("atk") or {}
                     if not any(atk.get(s) for s in status):
                         continue
-                mine.setdefault(w, set()).add(inf)
+                # dict, not set: a set of strings iterates in hash order, which Python randomizes per
+                # process, so infusions tied on count below ranked differently from run to run
+                mine.setdefault(w, {})[inf] = None
         for w, fs in mine.items():  # a build counts once per weapon, however many copies it carries
             used[w] += 1
             for inf in fs:
@@ -1100,12 +1122,31 @@ def nearest_builds(data: Data, stats: dict, sl: int, corpus: list[Build], k: int
 COMMON_RING = 0.10  # a ring worn by at least this share of every corpus build counts as common to all builds
 
 
+def generate_armor(data: Data, corpus: list[Build], weapon: str, inf: str, two: bool, stats: dict,
+                   rings: list[str]) -> tuple[list[str], str | None]:
+    """The generated build's armour: best_armor's top set for a build holding only the primary and
+    wearing `rings`, as display names head/chest/hands/legs ("Naked" for a slot left bare), and a
+    note when the load cap left a slot bare or left no set at all -- never a silent naked build."""
+    wearer = Build("", stats, ["Naked"] * 4, [(weapon, inf)], int(two), rings, [])
+    cap, carried, sets = best_armor(data, wearer, dict(stats), threat_mix(data, corpus), top=1)
+    if not sets:
+        return [], (f"no armor fits: the weapon and rings weigh {carried:.1f}, over the {cap:.1f} a "
+                    f"{EQUIP_CAP:.0%} load allows at VIT {stats['vitality']}")
+    pieces = sets[0][2]
+    bare = [s for s, p in zip(ARMOR_SLOTS, pieces) if p == "Naked"]
+    note = (f"{', '.join(bare)} left bare: nothing wearable there fits the {cap - carried:.1f} of load "
+            f"left under {EQUIP_CAP:.0%}") if bare else None
+    return [data.armor[s][p]["name"] for s, p in zip(ARMOR_SLOTS, pieces)], note
+
+
 def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, objective: str = "damage",
-                   window: float = 1.5, k: int = 50) -> dict | None:
+                   window: float = 1.5, k: int = 50, allow_naked: bool = False) -> dict | None:
     """A whole valid build for weapon+infusion at `sl`: optimize_build's class and stats with the
     weapon as primary; the top 15 one-handable and top 5 two-hand-only other weapons for those
     stats (damage over `window` seconds); 3 copies of each of the 4 rings the nearest-stat builds
-    wear most, plus one of every ring at least COMMON_RING of all builds wear."""
+    wear most, plus one of every ring at least COMMON_RING of all builds wear; and armour, the
+    best_armor set under 70% load with the primary and those four rings carried. `allow_naked`
+    skips the armour, as every generated build did before it had any."""
     best, floors = optimize_build(data, corpus, weapon, inf, sl, objective)
     if best is None:
         return None
@@ -1117,14 +1158,19 @@ def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
             continue
         seen.add(name)
         (only2 if "2H only" in label else one).append((name, winf, round(dmg)))
-    near = Counter(r for b in nearest_builds(data, stats, sl, corpus, k) for r in set(b.rings) if r and r in data.rings)
-    every = Counter(r for b in corpus for r in set(b.rings) if r and r in data.rings)
+    # dict.fromkeys, not set: most_common breaks ties by first-seen order, and a set of strings
+    # iterates in the per-process hash order, so tied rings came out differently on every run
+    near = Counter(r for b in nearest_builds(data, stats, sl, corpus, k) for r in dict.fromkeys(b.rings)
+                   if r and r in data.rings)
+    every = Counter(r for b in corpus for r in dict.fromkeys(b.rings) if r and r in data.rings)
     suggested = [r for r, _ in near.most_common(4)]
     common = [r for r, c in every.most_common() if c >= COMMON_RING * len(corpus) and r not in suggested]
+    armor, armor_note = ([], None) if allow_naked else generate_armor(data, corpus, weapon, inf, two, stats,
+                                                                     suggested)
     return {"class": cls, "sl": sl, "stats": stats, "two_handed": two, "objective": objective, "value": round(val),
             "primary": (data.weapons[weapon]["name"], inf), "weapons_1h": one[:15], "weapons_2h_only": only2[:5],
             "rings": [data.rings[r]["name"] for r in suggested for _ in range(3)]
-            + [data.rings[r]["name"] for r in common]}
+            + [data.rings[r]["name"] for r in common], "armor": armor, "armor_note": armor_note}
 
 
 def gear_bonus(data: Data, arm: list, rs: list) -> tuple[Counter, float]:
@@ -1238,6 +1284,306 @@ def spread(data: Data, cls: str, hard: dict, bonus: Counter, mul: float, load: f
     return left, ranges, out
 
 
+def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool, agl: int = 0,
+                        sl: int | None = None) -> dict:
+    """--minimum's answer: the cheapest class's hard minimum (requirements and 70% load, gear
+    allowed), clamped at `sl` or else at that class's corpus-typical SL, and the free stats spread
+    there. `presets[0]` ("corpus-typical") is the recommended build."""
+    r1 = stamina_r1(data)
+    cut = high_stamina_cut(r1)
+    high = r1.get(weapon, 0) >= cut
+    floors = bracket_floors(data, corpus, r1)
+    hard = minimum_build(data, weapon, two, agl)
+    typical = minimum_build(data, weapon, two, agl, floors, high)
+    typ = {cls: s for s, cls, _ in typical}
+    _, cls, (_, stats, arm, rs, load, mul) = hard[0]
+    target_sl = sl or typ[cls]
+    bonus, mul = gear_bonus(data, arm, rs)
+    left, ranges, presets = spread(data, cls, stats, bonus, mul, load, target_sl, floors, high, agl,
+                                   bracket_values(data, corpus, r1))
+    return {"r1": r1, "cut": cut, "high": high, "hard": hard, "typ": typ, "target_sl": target_sl,
+            "bonus": bonus, "left": left, "ranges": ranges, "presets": presets}
+
+
+# --------------------------------------------------------------------------------------------
+# the in-game panel's data file
+#
+# `--export-backend PATH` writes everything `CorpusBackend` in crates/ds2-build-recommender-core
+# needs to answer the panel the way this script answers the command line: the weapon tables, each
+# weapon's R1 timeline, the per-bracket floors and average defender, the gear --minimum searches,
+# and the corpus cut down to what nearest_builds and the ring counts read. Line-oriented text, one
+# record per line, tab-separated, tagged by its first field. Floats are written with repr, which is
+# the shortest text that parses back to the same double, so the Rust side computes on the same bits.
+#
+#   C key name level vig end vit att str dex adp int fth      a starting class, in the table's order
+#   T table v0 v1 ...                                         an attack-bonus or equip-load table
+#   W key name class flags weight require ha1h ha2h counter   a weapon; flags: S shield, C catalyst,
+#                                                             H high-stamina R1; require: stat:value,..
+#   I code atk(7) scale(9)                                    one infusion of the last W
+#   L grip t:mv:type:lower ...                                the last W's R1 chain, grip 1 or 2
+#   B bracket floors(5) defense(8)                            one SL bracket
+#   R key name weight                                         a ring
+#   E ring weight mul add(9)                                  a ring --minimum may wear
+#   A slot key name weight alter(9) require                   armour --minimum may wear
+#   P slot key name weight def(5) require                     every armour piece, for best_armor
+#   H physical magic fire lightning dark                      the corpus threat mix (threat_mix)
+#   K n top1 top2                                             calibrate_infusions
+#   M ring count                                              a ring worn by >= COMMON_RING of builds
+#   X bracket stat-brackets ring,ring.. weapon:code,..        one corpus build
+
+BACKEND_DATA_NAME = "ds2-build-recommender.dat"
+BACKEND_DATA = Path.home() / ".cache/ds2-builds" / BACKEND_DATA_NAME
+BACKEND_FORMAT = "ds2-build-recommender-data 2"
+#: Mirrors `infusion_for_code` in crates/ds2-build-recommender-core/src/weapons.rs; `?` is
+#: MugenMonkey's unrecorded infusion.
+INFUSION_CODE = {"No_Infusion": "N", "Magic": "M", "Fire": "F", "Lightning": "L", "Dark": "D", "Poison": "P",
+                 "Bleed": "B", "Raw": "R", "Enchanted": "E", "Mundane": "U", "?": "?"}
+#: A hit's physical type; anything else (none, "standard") is read against general physical defense.
+HIT_CODE = {"slash": "s", "strike": "k", "thrust": "t"}
+ATK_KEYS = ["physical", "magic", "fire", "lightning", "dark", "bleed", "poison"]
+SCALE_KEYS = ["strength", "dexterity", "magic", "fire", "lightning", "dark", "bleed", "poison", "modifier"]
+BACKEND_TABLES = ["physicalATKBonus", "magicATKBonus", "fireATKBonus", "lightningATKBonus", "darkATKBonus",
+                  "auxATKBonus", "mundaneATKBonus"]
+
+
+def _num(v) -> str:
+    if isinstance(v, float):
+        return repr(v)
+    assert isinstance(v, int) and not isinstance(v, bool), v
+    return str(v)
+
+
+def _stat_pairs(d: dict) -> str:
+    """`index:value,...` over STATS, in the dict's own order (key presence matters to --minimum)."""
+    assert all(s in STATS for s in d), d
+    return ",".join(f"{STATS.index(s)}:{_num(v)}" for s, v in d.items())
+
+
+def export_backend(data: Data, corpus: list[Build]) -> str:
+    attacks = load_attacks()
+    rates = json.loads(HYPERARMOR.read_text()) if HYPERARMOR.exists() else {}
+    crit = {norm(k): v for k, v in json.loads(CRIT.read_text()).items()} if CRIT.exists() else {}
+    r1 = stamina_r1(data)
+    cut = high_stamina_cut(r1)
+    out = [BACKEND_FORMAT, f"# {len(corpus)} builds; written by scripts/ds2-builds-recommend.py --export-backend"]
+    for key, c in data.classes.items():
+        out.append("\t".join(["C", key, c["name"], _num(c["level"]), *(_num(c[s]) for s in STATS)]))
+    for t in BACKEND_TABLES:
+        out.append("\t".join(["T", t, *(_num(v or 0) for v in data.sp[t])]))
+    out.append("\t".join(["T", "equipmentLoad", *(_num(v or 0) for v in data.equip_load)]))
+    for key, w in data.weapons.items():
+        flags = ("S" if w.get("isShield") else "") + ("C" if CATALYST.search(key) else "") \
+            + ("H" if r1.get(key, 0) >= cut else "")
+        ctr = (crit.get(norm(w["name"])) or {}).get("counter") or 0
+        out.append("\t".join(["W", key, w["name"], data.weapon_class.get(key) or "", flags or "-",
+                              _num(w.get("weight", 0)), _stat_pairs(w.get("require") or {}) or "-",
+                              _num(float(hyperarmor(attacks, rates, w["name"], False))),
+                              _num(float(hyperarmor(attacks, rates, w["name"], True))), _num(ctr)]))
+        for inf, row in w["infusions"].items():
+            atk, sc = row.get("atk") or {}, row.get("atkScale") or {}
+            out.append("\t".join(["I", INFUSION_CODE[inf], *(_num(atk.get(k, 0)) for k in ATK_KEYS),
+                                  *(_num(sc.get(k, 1 if k == "modifier" else 0)) for k in SCALE_KEYS)]))
+        for two in (False, True):
+            tl = r1_timeline(attacks, w["name"], two) or r1_timeline(attacks, key.replace("_", " "), two)
+            if tl:
+                out.append("\t".join(["L", "2" if two else "1", " ".join(
+                    f"{_num(t)}:{_num(mv)}:{HIT_CODE.get(ty, 'p')}:{_num(lo)}" for t, mv, ty, lo in tl)]))
+    floors = bracket_floors(data, corpus, r1)
+    for i, (lo, _) in enumerate(SL_BRACKETS):
+        dfn, _ = bracket_defense(data, corpus, lo)
+        f = floors[i]
+        out.append("\t".join(["B", str(i), *(_num(f.get(s, 0)) for s in FLOOR_STATS + ["endurance"]),
+                              *(_num(float(dfn[k])) for k in DMG + PHYS_TYPES)]))
+    ring_ix = {k: i for i, k in enumerate(data.rings)}
+    for key, r in data.rings.items():
+        out.append("\t".join(["R", key, r.get("name", key), _num(r.get("weight", 0))]))
+    for slot in ARMOR_SLOTS:
+        for key, v in data.armor[slot].items():
+            out.append("\t".join(["P", slot, key, v.get("name", key), _num(v.get("weight", 0)),
+                                  *(_num(v.get(k + "DEF", 0)) for k in DMG),
+                                  _stat_pairs(v.get("require") or {}) or "-"]))
+    mix = threat_mix(data, corpus)
+    out.append("\t".join(["H", *(_num(float(mix[k])) for k in DMG)]))
+    for key, (weight, add, mul) in sorted(ring_effects(data).items()):
+        out.append("\t".join(["E", key, _num(weight), _num(float(mul)), *(_num(add.get(s, 0)) for s in STATS)]))
+    helpful = {"strength", "dexterity", "intelligence", "faith", "vitality", "adaptability", "attunement"}
+    for slot in ARMOR_SLOTS:
+        for key, v in data.armor[slot].items():
+            alt = {s: x for s, x in (v.get("alter") or {}).items() if isinstance(x, (int, float))}
+            # minimum_build offers a piece only when it raises a stat it can use: a superset of that
+            if key == "Naked" or not any(s in helpful and x > 0 for s, x in alt.items()):
+                continue
+            out.append("\t".join(["A", slot, key, v.get("name", key), _num(float(v["weight"])),
+                                  *(_num(alt.get(s, 0)) for s in STATS), _stat_pairs(v.get("require") or {}) or "-"]))
+    c = calibrate_infusions(data, corpus)
+    out.append("\t".join(["K", str(c["n"]), _num(float(c["top1"])), _num(float(c["top2"]))]))
+    every = Counter(r for b in corpus for r in dict.fromkeys(b.rings) if r and r in data.rings)
+    for r, n in every.most_common():
+        if n >= COMMON_RING * len(corpus):
+            out.append("\t".join(["M", r, str(n)]))
+    weapon_ix = {k: i for i, k in enumerate(data.weapons)}
+    for b in corpus:
+        eff = effective(data, b)
+        out.append("\t".join(["X", str(sl_bracket(soul_level(data, b))),
+                              "".join(str(stat_bracket(eff[s])) for s in STATS),
+                              ",".join(str(ring_ix[r]) for r in b.rings if r and r in data.rings) or "-",
+                              ",".join(f"{weapon_ix[w]}:{INFUSION_CODE[inf]}" for w, inf in b.weapons()) or "-"]))
+    return "\n".join(out) + "\n"
+
+
+# The questions the Rust tests ask both sides. Stats in STATS order.
+EXPECT_WEAPONS_FOR = [
+    # stats, sl, one_hand, weapon_class, per_class, window, raw_ar
+    ([20, 20, 15, 10, 40, 15, 15, 9, 9], 100, False, None, False, 0.0, False),
+    ([20, 20, 15, 10, 40, 15, 15, 9, 9], 100, False, None, False, 1.5, False),
+    ([20, 20, 15, 10, 40, 15, 15, 9, 9], 100, True, None, False, 0.0, True),
+    ([25, 20, 15, 12, 12, 40, 15, 9, 20], 150, False, None, True, 0.0, False),
+    ([25, 20, 15, 12, 12, 40, 15, 9, 20], 150, False, "Katana", False, 2.0, False),
+]
+EXPECT_BUILDS = [  # weapon key, infusion, sl, objective: --optimize and --generate
+    ("Demons_Great_Hammer", "Raw", 100, "damage"),
+    ("Moonlight_Greatsword", "No_Infusion", 33, "damage"),
+    ("Demons_Great_Hammer", "Raw", 20, "damage"),
+    ("Demons_Great_Hammer", "Raw", 70, "damage"),
+    ("Moonlight_Greatsword", "No_Infusion", 90, "damage"),
+    ("Uchigatana", "Bleed", 150, "bleed"),
+    ("Dagger", "Poison", 60, "poison"),
+]
+EXPECT_NAKED = [("Demons_Great_Hammer", "Raw", 100, "damage", True)]  # --generate --allow-naked
+EXPECT_MINIMUM = [("Demons_Great_Hammer", True), ("Moonlight_Greatsword", False), ("Uchigatana", False)]
+EXPECT_SIMILAR = [  # stats, sl, k, status
+    ([20, 20, 15, 10, 40, 15, 15, 9, 9], 100, 50, None),
+    ([25, 20, 15, 12, 12, 40, 15, 9, 20], 150, 30, ["bleed"]),
+    ([12, 10, 8, 10, 14, 14, 10, 8, 8], 40, 50, ["bleed", "poison"]),
+]
+EXPECT_FLOOR_SLS = [1, 33, 60, 100, 150, 200, 838]
+
+
+class _Some:
+    """A fixture value Rust reads as `Option::Some`."""
+
+    def __init__(self, value):
+        self.value = value
+
+
+def _rs(v) -> str:
+    """A Rust literal for a fixture value."""
+    if v is None:
+        return "None"
+    if isinstance(v, _Some):
+        return "Some(" + _rs(v.value) + ")"
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, str):
+        return json.dumps(v, ensure_ascii=False)
+    if isinstance(v, float):
+        r = repr(v)
+        return r if ("." in r or "e" in r) else r + ".0"
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, tuple):
+        return "(" + ", ".join(_rs(x) for x in v) + ("," if len(v) == 1 else "") + ")"
+    if isinstance(v, list):
+        return "&[" + ", ".join(_rs(x) for x in v) + "]"
+    raise TypeError(v)
+
+
+def backend_expectations(data: Data, corpus: list[Build]) -> str:
+    """This script's own answers to EXPECT_*, as the Rust fixture `CorpusBackend` is tested against."""
+    attacks = load_attacks()
+    rates = json.loads(HYPERARMOR.read_text()) if HYPERARMOR.exists() else {}
+    crit = {norm(k): v for k, v in json.loads(CRIT.read_text()).items()} if CRIT.exists() else {}
+    as_dict = lambda st: dict(zip(STATS, st))
+    arr = lambda d: [int(d[s]) for s in STATS]
+    out = ["// @generated by `scripts/ds2-builds-recommend.py --export-backend ... --expect ...`: the",
+           "// script's own answers for the questions in its EXPECT_* lists, over the fixture corpus.", ""]
+
+    rows_out = []
+    for st, sl, one, cls, per, window, raw in EXPECT_WEAPONS_FOR:
+        rows, _, _ = weapons_for(data, as_dict(st), sl, corpus, raw_ar=raw, one_hand=one, weapon_class=cls,
+                                 per_class=per, window=window)
+        got = []
+        for dmg, name, inf, ar, label in rows:
+            key = data.key_by_name[name]
+            wclass = data.weapon_class.get(key) or "?"
+            base = label[:-(len(wclass) + 1)] if per else label  # per_class appends " <class>"
+            base = re.sub(r" (HA|ctr) x\S+", "", base).strip()
+            ha = hyperarmor(attacks, rates, name, base.startswith("2H"))
+            ctr = (crit.get(norm(name)) or {}).get("counter") or 0
+            got.append((name, INFUSION_CODE[inf], float(dmg), [float(ar.get(k, 0)) for k in DMG], base,
+                        float(ha), float(ctr), wclass))
+        rows_out.append((st, sl, one, cls or "", per, window, raw, got))
+    out.append("// stats, sl, one_hand, class, per_class, window, raw_ar, rows: weapon, infusion, damage,")
+    out.append("// ar by type, grip, hyperarmor, counter, class.")
+    out.append(f"pub const WEAPONS_FOR: WeaponsForCases = {_rs(rows_out)};\n")
+
+    opt, gen = [], []
+    for weapon, inf, sl, objective in EXPECT_BUILDS:
+        best, _ = optimize_build(data, corpus, weapon, inf, sl, objective)
+        opt.append((weapon, INFUSION_CODE[inf], sl, objective,
+                    None if best is None else _Some((data.classes[best[1]]["name"], best[2], arr(best[3]),
+                                                     float(best[0])))))
+    mix = threat_mix(data, corpus)
+    for weapon, inf, sl, objective, naked in [(*case, False) for case in EXPECT_BUILDS] + EXPECT_NAKED:
+        g = generate_build(data, corpus, weapon, inf, sl, objective, allow_naked=naked)
+        if g is None:
+            gen.append((weapon, INFUSION_CODE[inf], sl, objective, naked, None))
+            continue
+        rings, suggested = g["rings"], []
+        while len(rings) >= 3 and rings[0] == rings[1] == rings[2]:
+            suggested.append(rings[0])
+            rings = rings[3:]
+        # Whether the armour's requirements and the load cap each changed the chosen set: the same
+        # search with every other stat at 99, and with VIT at 99, picks differently.
+        binds = (False, False)
+        if not naked:
+            worn = [data.sp_key[norm(r)] for r in suggested]
+            wearer = Build("", g["stats"], ["Naked"] * 4, [(weapon, inf)], 0, worn, [])
+            top = lambda eff: (best_armor(data, wearer, eff, mix, top=1)[2] or [None])[0]
+            chosen = top(dict(g["stats"]))
+            binds = (chosen != top({**{s: 99 for s in STATS}, "vitality": g["stats"]["vitality"]}),
+                     chosen != top({**g["stats"], "vitality": 99}))
+        gen.append((weapon, INFUSION_CODE[inf], sl, objective, naked, _Some((
+            data.classes[g["class"]]["name"], g["two_handed"], arr(g["stats"]),
+            [(n, INFUSION_CODE[i], d) for n, i, d in g["weapons_1h"]],
+            [(n, INFUSION_CODE[i], d) for n, i, d in g["weapons_2h_only"]], suggested, rings,
+            g["armor"], g["armor_note"] and _Some(g["armor_note"]), binds[0], binds[1]))))
+    out.append("// weapon, infusion, sl, objective -> class, two-handed, stats, value.")
+    out.append(f"pub const OPTIMIZE: OptimizeCases = {_rs(opt)};\n")
+    out.append("// weapon, infusion, sl, objective, allow naked -> class, two-handed, stats, 1H rows, 2H-only")
+    out.append("// rows (name, infusion, rounded damage), suggested rings, common rings, armour, armour note,")
+    out.append("// whether armour requirements bound the choice, whether the load cap did.")
+    out.append(f"pub const GENERATE: GenerateCases = {_rs(gen)};\n")
+
+    mins = []
+    for weapon, two in EXPECT_MINIMUM:
+        m = recommended_minimum(data, corpus, weapon, two)
+        _, cls, (_, _, arm, rs, _, _) = m["hard"][0]
+        mid = m["presets"][0]
+        gear = [data.armor[s][p]["name"] for s, p in zip(ARMOR_SLOTS, arm) if p != "Naked"] \
+            + [data.rings[r]["name"] for r in rs]
+        mins.append((weapon, two, (data.classes[cls]["name"], m["target_sl"], arr(mid["stats"]), gear)))
+    out.append("// weapon, two-handed -> class, sl, stats, gear.")
+    out.append(f"pub const MINIMUM: MinimumCases = {_rs(mins)};\n")
+
+    sim = []
+    for st, sl, k, status in EXPECT_SIMILAR:
+        rows, _, _ = neighbour_weapons(data, as_dict(st), sl, corpus, k=k, status=status)
+        sim.append((st, sl, k, status or [], [(c, name, [(INFUSION_CODE[i], m) for i, m in infs], grip)
+                                             for c, name, infs, grip in rows]))
+    out.append("// stats, sl, k, status -> rows: count, weapon, top infusions with counts, grip.")
+    out.append(f"pub const SIMILAR: SimilarCases = {_rs(sim)};\n")
+
+    r1 = stamina_r1(data)
+    floors = bracket_floors(data, corpus, r1)
+    fl = [(sl, [int(floors[sl_bracket(sl)].get(s, 0)) for s in FLOOR_STATS]) for sl in EXPECT_FLOOR_SLS]
+    out.append("// sl -> VIG, VIT, ADP, ATT floors.")
+    out.append(f"pub const FLOORS: FloorCases = {_rs(fl)};\n")
+    c = calibrate_infusions(data, corpus)
+    out.append(f"pub const CALIBRATION: (u32, f64, f64) = {_rs((c['n'], float(c['top1']), float(c['top2'])))};")
+    return "\n".join(out) + "\n"
+
+
 def pretty(t: str, data: Data) -> str:
     kind, rest = t.split(":", 1)
     if kind == "WI":
@@ -1260,6 +1606,16 @@ def main() -> int:
                    help="the valid build at --sl that maximizes --objective for this weapon, then --weapons-for on it")
     g.add_argument("--generate", metavar="WEAPON:INFUSION",
                    help="a whole build at --sl: stats, primary weapon, 15 one-handed + 5 two-hand-only weapons, rings")
+    g.add_argument("--export-backend", metavar="PATH", type=Path,
+                   help=f"write the in-game panel's data file (install it beside DarkSoulsII.exe as "
+                        f"{BACKEND_DATA_NAME}; scripts/ds2-run.py stages {BACKEND_DATA})")
+    ap.add_argument("--corpus-every", type=int, default=1, metavar="N",
+                    help="with --export-backend: keep every Nth corpus build (the Rust tests' small fixture)")
+    ap.add_argument("--expect", type=Path, metavar="PATH",
+                    help="with --export-backend: also write this script's answers to the EXPECT_* questions "
+                         "over the same corpus, as the Rust fixture CorpusBackend is tested against")
+    ap.add_argument("--allow-naked", action="store_true",
+                    help="with --generate: no armour (by default the best set under 70%% load is chosen)")
     ap.add_argument("--objective", choices=["damage", "bleed", "poison"], default="damage",
                     help="with --optimize: what the free points maximize")
     g.add_argument("--weapons-for", metavar="STATS",
@@ -1284,6 +1640,17 @@ def main() -> int:
     a.tables.mkdir(parents=True, exist_ok=True)
     sp_json, mm_json = dump_site_tables(a.tables)
     data = Data(json.loads(sp_json.read_text()), json.loads(mm_json.read_text()))
+    if a.export_backend:
+        corpus, _ = load_corpus(data)
+        corpus = corpus[::max(1, a.corpus_every)]
+        text = export_backend(data, corpus)
+        a.export_backend.parent.mkdir(parents=True, exist_ok=True)
+        a.export_backend.write_text(text, encoding="utf-8")
+        print(f"{a.export_backend}: {len(text.encode()):,} bytes, {len(corpus)} builds")
+        if a.expect:
+            a.expect.write_text(backend_expectations(data, corpus), encoding="utf-8")
+            print(f"{a.expect}: this script's answers over the same {len(corpus)} builds")
+        return 0
     if a.calibrate:
         c = calibrate_infusions(data, load_corpus(data)[0])
         print(f"{c['n']} real weapon+infusion choices: model's best infusion matches {c['top1']:.1%}, "
@@ -1300,7 +1667,7 @@ def main() -> int:
             ap.error(f"unknown weapon {name!r}")
         corpus, _ = load_corpus(data)
         g = generate_build(data, corpus, weapon, inf.replace(" ", "_") or "No_Infusion", a.sl, a.objective,
-                           a.window or 1.5, a.k)
+                           a.window or 1.5, a.k, a.allow_naked)
         if g is None:
             print(f"no valid SL {a.sl} build wields {data.weapons[weapon]['name']}")
             return 2
@@ -1315,6 +1682,12 @@ def main() -> int:
             for n, i, d in g[key]:
                 print(f"    {d:6}  {n} ({i.replace('_', ' ')})")
         print("  rings: " + ", ".join(g["rings"]))
+        if a.allow_naked:
+            print("  armor: none (--allow-naked)")
+        else:
+            print("  armor: " + (" / ".join(g["armor"]) or "none"))
+        if g["armor_note"]:
+            print(f"  armor: {g['armor_note']}")
         return 0
     if a.optimize:
         if not a.sl:
@@ -1376,25 +1749,18 @@ def main() -> int:
         print(f"{w['name']}: requires {w.get('require')}, weight {w['weight']}; AGL floor {a.agl or 'none'}; "
               f"weapon + armor + rings under {EQUIP_CAP:.0%} load; naked/empty slots allowed")
         corpus, _ = load_corpus(data)
-        r1 = stamina_r1(data)
-        cut = high_stamina_cut(r1)
-        high = r1.get(weapon, 0) >= cut
-        floors = bracket_floors(data, corpus, r1)
-        print(f"  R1 stamina {r1.get(weapon, '?')} vs high-end cut {cut:.1f} -> Endurance "
-              f"{'floored to bracket median' if high else 'left at class base'}; VGR/VIT/ADP/ATT floored to "
-              f"the corpus median of the build's SL bracket")
         # A STR requirement is always met cheaper two-handed (the game halves it), so that is the
         # only grip shown for it. Weapons without STR show one-handed.
         two = bool((w.get("require") or {}).get("strength"))
-        hard = minimum_build(data, weapon, two, a.agl)
-        typical = minimum_build(data, weapon, two, a.agl, floors, high)
+        m = recommended_minimum(data, corpus, weapon, two, a.agl, a.sl)
+        r1, cut, high = m["r1"], m["cut"], m["high"]
+        print(f"  R1 stamina {r1.get(weapon, '?')} vs high-end cut {cut:.1f} -> Endurance "
+              f"{'floored to bracket median' if high else 'left at class base'}; VGR/VIT/ADP/ATT floored to "
+              f"the corpus median of the build's SL bracket")
+        hard, typ, target_sl = m["hard"], m["typ"], m["target_sl"]
         grip = "two-handed" if two else "one-handed"
-        typ = {cls: sl for sl, cls, _ in typical}
         sl0, cls, (_, stats, arm, rs, load, mul) = hard[0]
-        target_sl = a.sl or typ[cls]
-        bonus, mul = gear_bonus(data, arm, rs)
-        left, ranges, presets = spread(data, cls, stats, bonus, mul, load, target_sl, floors, high, a.agl,
-                                       bracket_values(data, corpus, r1))
+        bonus, left, ranges, presets = m["bonus"], m["left"], m["ranges"], m["presets"]
         if left < 0:
             print(f"\n  SL {target_sl} is below the hard minimum SL {sl0}; nothing is wieldable")
             return 0
