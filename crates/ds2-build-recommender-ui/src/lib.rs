@@ -6,8 +6,9 @@
 //! with Apply, behind a confirm that says soul memory is raised for good.
 //!
 //! Every decision is `ds2-build-recommender-core`'s and is tested on the host; the answers come from
-//! its `StubBackend` until the ranking is ported. This crate draws, reads the keyboard and pad, and
-//! routes presses, the way `ds2-save-file`'s picker does:
+//! its `CorpusBackend`, over `ds2-build-recommender.dat` beside the game, or from its `StubBackend`
+//! when that file is missing or unreadable, which the log and the panel both say. This crate draws,
+//! reads the keyboard and pad, and routes presses, the way `ds2-save-file`'s picker does:
 //!
 //! | who | when | what it does here |
 //! |---|---|---|

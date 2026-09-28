@@ -4,14 +4,15 @@
 //! presents from its simulation thread, so [`open`], `on_frame` and `draw` all run on one thread and
 //! the lock is never contended.
 
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use ds2_build_import_core::Infusion;
 use ds2_build_recommender_core::backend::{
     self, Answer, Calibration, DAMAGE_TYPES, GeneratedBuild, RecommenderBackend, ResultRow,
     StubBackend,
 };
+use ds2_build_recommender_core::corpus::{self, CorpusBackend};
 use ds2_build_recommender_core::model::{Mode, Objective, PanelState, STAT_COUNT, STAT_LABELS};
 use ds2_build_recommender_core::weapons;
 use hudhook::imgui::{DrawListMut, MouseButton, Ui};
@@ -31,11 +32,48 @@ fn log_line(args: std::fmt::Arguments<'_>) {
     }
 }
 
-/// Who answers. The stub until the ranking in `scripts/ds2-builds-recommend.py` is ported.
-static BACKEND: StubBackend = StubBackend;
+/// Who answers: the ported ranking over the data file beside the game, once [`install`] has read
+/// it. Until then, or when there is no file to read, [`STUB`].
+static CORPUS: OnceLock<CorpusBackend> = OnceLock::new();
+
+/// The fixed answers the panel falls back to without a data file. The panel says they are.
+static STUB: StubBackend = StubBackend;
 
 fn backend() -> &'static dyn RecommenderBackend {
-    &BACKEND
+    match CORPUS.get() {
+        Some(corpus) => corpus,
+        None => &STUB,
+    }
+}
+
+/// Read `<Game>/ds2-build-recommender.dat`, beside the running executable, into [`CORPUS`], and
+/// say in the log which backend the panel answers with and why.
+fn load_backend() {
+    let path = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(corpus::DATA_FILE_NAME)));
+    let Some(path) = path else {
+        log_line(format_args!(
+            "{LOG_PREFIX} no game directory to read {} from -- backend=stub",
+            corpus::DATA_FILE_NAME
+        ));
+        return;
+    };
+    match CorpusBackend::load(&path) {
+        Ok(loaded) => {
+            let builds = loaded.corpus_len();
+            if CORPUS.set(loaded).is_ok() {
+                log_line(format_args!(
+                    "{LOG_PREFIX} backend=corpus builds={builds} data={}",
+                    path.display()
+                ));
+            }
+        }
+        Err(error) => log_line(format_args!(
+            "{LOG_PREFIX} {} unreadable ({error}) -- backend=stub, every number a placeholder",
+            path.display()
+        )),
+    }
 }
 
 /// A field that takes typing.
@@ -502,10 +540,15 @@ pub fn install(logger: LogFn) -> bool {
         ));
         return false;
     }
+    load_backend();
     INSTALLED.store(true, Ordering::Release);
     log_line(format_args!(
         "{LOG_PREFIX} panel installed, backend={}",
-        if backend().is_stub() { "stub" } else { "real" }
+        if backend().is_stub() {
+            "stub"
+        } else {
+            "corpus"
+        }
     ));
     true
 }
@@ -793,7 +836,8 @@ fn draw(ui: &Ui) {
         canvas.text(
             [inner, y],
             WARN,
-            "Stub backend: every number here is a placeholder until the ranking is ported.",
+            "Stub backend: no ds2-build-recommender.dat beside the game, so every number here is a \
+             placeholder.",
         );
         y += line + 6.0;
     }
@@ -1240,11 +1284,28 @@ fn draw_answer(panel: &mut Panel, canvas: &mut Canvas<'_>, (min, max): ([f32; 2]
             y += line + 4.0;
             canvas.text([min[0], y], TEXT, &stats_line(&build.stats));
             y += line + 4.0;
-            canvas.text(
-                [min[0], y],
-                DIM,
-                &format!("objective value {:.0}", build.value),
-            );
+            if !build.gear.is_empty() {
+                canvas.text(
+                    [min[0], y],
+                    TEXT,
+                    &clip(
+                        canvas.ui,
+                        &format!(
+                            "Wearing (its stat bonuses count): {}",
+                            build.gear.join(", ")
+                        ),
+                        max[0] - min[0],
+                    ),
+                );
+                y += line + 4.0;
+            }
+            if panel.state.mode == Mode::OptimizeForWeapon {
+                canvas.text(
+                    [min[0], y],
+                    DIM,
+                    &format!("objective value {:.0}", build.value),
+                );
+            }
         }
         Some(Answer::Rows(rows)) => {
             let rows = rows.clone();
