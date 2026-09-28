@@ -342,13 +342,33 @@ unsafe extern "system" fn detour_start(event: usize) -> i32 {
     // SAFETY: the import the Windows loader resolved, with the game's own argument.
     let rc = unsafe { original(event) };
     let info = report("start", event, format_args!(" rc={rc}"));
-    if info.is_some_and(|i| is_music_name(&i.name)) {
-        CURRENT_MUSIC.store(event, Ordering::Relaxed);
-        LAST_SAMPLE_MS.store(now_ms(), Ordering::Relaxed);
-    }
+    claim(event, info.as_ref());
     maybe_sample();
     rc
 }
+
+/// Make `event` the one [`maybe_sample`] follows, if it is the background track.
+///
+/// Only a looping music event (`lengthms = -1`) takes over from one that is already followed. The
+/// first run showed why: at the title the looping theme `m000000002` starts, then the two-second
+/// jingle `m000000013` starts and stops, and following the latest start meant the jingle's stop
+/// left nothing followed while the theme played on, so no position line was ever written.
+fn claim(event: usize, info: Option<&EventInfo>) {
+    let Some(info) = info else {
+        return;
+    };
+    if !is_music_name(&info.name) {
+        return;
+    }
+    let looping = info.length_ms == LENGTH_LOOPING;
+    if looping || CURRENT_MUSIC.load(Ordering::Relaxed) == 0 {
+        CURRENT_MUSIC.store(event, Ordering::Relaxed);
+        LAST_SAMPLE_MS.store(now_ms(), Ordering::Relaxed);
+    }
+}
+
+/// `FMOD_EVENT_INFO::lengthms` for an event with looping sounds.
+const LENGTH_LOOPING: i32 = -1;
 
 unsafe extern "system" fn detour_stop(event: usize, immediate: u8) -> i32 {
     let Some(original) = load::<BoolArgFn>(&ORIGINAL_STOP) else {
@@ -369,11 +389,14 @@ unsafe extern "system" fn detour_set_paused(event: usize, paused: u8) -> i32 {
     };
     // SAFETY: the import the Windows loader resolved, with the game's own arguments.
     let rc = unsafe { original(event, paused) };
-    report(
+    let info = report(
         "setPaused",
         event,
         format_args!(" paused={} rc={rc}", paused != 0),
     );
+    if paused == 0 {
+        claim(event, info.as_ref());
+    }
     maybe_sample();
     rc
 }
