@@ -1478,6 +1478,28 @@ def nearest_builds(data: Data, stats: dict, sl: int, corpus: list[Build], k: int
 
 
 COMMON_RING = 0.10  # a ring worn by at least this share of every corpus build counts as common to all builds
+#: Rings a generated build never suggests or grants, however many builds wear them. Agape Ring
+#: ("Absorbs souls.") is worn by 15.8% of the corpus to hold soul memory down, not for a fight.
+NO_USE_RINGS = ("Agape_Ring",)
+
+
+def suggest_rings(data: Data, near: Counter, every: Counter | None = None, n: int = 4) -> list[str]:
+    """The `n` rings `near` counts most, except that each NO_USE_RINGS ring's place goes, in
+    place, to the ring the nearest builds wear most (then all builds) that is neither a no-use
+    ring nor in the upgrade group of a ring already in the list: never a second Ring of Blades."""
+    top = [r for r, _ in near.most_common(n)]
+    group = lambda r: data.rings[r].get("group", r)
+    taken = {group(r) for r in top if r not in NO_USE_RINGS}
+    out = []
+    for r in top:
+        if r in NO_USE_RINGS:
+            r = next((c for c, _ in [*near.most_common(), *(every or Counter()).most_common()]
+                      if c not in NO_USE_RINGS and group(c) not in taken), None)
+            if r is None:
+                continue
+            taken.add(group(r))
+        out.append(r)
+    return out
 
 
 def generate_armor(data: Data, corpus: list[Build], weapon: str, inf: str, two: bool, stats: dict,
@@ -1503,7 +1525,8 @@ def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
     """A whole valid build for weapon+infusion at `sl`: optimize_build's class and stats with the
     weapon as primary; the top 15 one-handable and top 5 two-hand-only other weapons for those
     stats (damage over `window` seconds); 3 copies of each of the 4 rings the nearest-stat builds
-    wear most, plus one of every ring at least COMMON_RING of all builds wear; and armour, the
+    wear most (suggest_rings: no NO_USE_RINGS ring), plus one of every other ring at least
+    COMMON_RING of all builds wear; and armour, the
     best_armor set under 70% load with the primary and those four rings carried. `allow_naked`
     skips the armour, as every generated build did before it had any."""
     best, floors = optimize_build(data, corpus, weapon, inf, sl, objective, grip)
@@ -1522,8 +1545,9 @@ def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
     near = Counter(r for b in nearest_builds(data, stats, sl, corpus, k) for r in dict.fromkeys(b.rings)
                    if r and r in data.rings)
     every = Counter(r for b in corpus for r in dict.fromkeys(b.rings) if r and r in data.rings)
-    suggested = [r for r, _ in near.most_common(4)]
-    common = [r for r, c in every.most_common() if c >= COMMON_RING * len(corpus) and r not in suggested]
+    suggested = suggest_rings(data, near, every)
+    common = [r for r, c in every.most_common() if c >= COMMON_RING * len(corpus) and r not in suggested
+              and r not in NO_USE_RINGS]
     armor, armor_note = ([], None) if allow_naked else generate_armor(data, corpus, weapon, inf, two, stats,
                                                                      suggested)
     return {"class": cls, "sl": sl, "stats": stats, "two_handed": two, "objective": objective, "value": round(val),
@@ -1681,7 +1705,8 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 #   I code atk(7) scale(9)                                    one infusion of the last W
 #   L grip t:mv:type:lower ...                                the last W's R1 chain, grip 1 or 2
 #   B bracket floors(5) defense(8)                            one SL bracket
-#   R key name weight                                         a ring
+#   R key name weight group                                   a ring; group: its upgrade line
+#   N key                                                     a ring in NO_USE_RINGS
 #   E ring weight mul add(9)                                  a ring --minimum may wear
 #   A slot key name weight alter(9) require                   armour --minimum may wear
 #   P slot key name weight def(5) require                     every armour piece, for best_armor
@@ -1692,7 +1717,7 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 
 BACKEND_DATA_NAME = "ds2-build-recommender.dat"
 BACKEND_DATA = Path.home() / ".cache/ds2-builds" / BACKEND_DATA_NAME
-BACKEND_FORMAT = "ds2-build-recommender-data 3"
+BACKEND_FORMAT = "ds2-build-recommender-data 4"
 #: How far the exported R1/R2 chains run, in seconds: the panel clamps its window to 10.0
 #: (crates/ds2-build-recommender-ui/src/panel.rs), and status_hits runs to max(3, window).
 STATUS_HORIZON = 10.0
@@ -1771,7 +1796,8 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
                               *(_num(float(dfn[k])) for k in DMG + PHYS_TYPES)]))
     ring_ix = {k: i for i, k in enumerate(data.rings)}
     for key, r in data.rings.items():
-        out.append("\t".join(["R", key, r.get("name", key), _num(r.get("weight", 0))]))
+        out.append("\t".join(["R", key, r.get("name", key), _num(r.get("weight", 0)), r.get("group", key)]))
+    out.extend("\t".join(["N", key]) for key in NO_USE_RINGS if key in data.rings)
     for slot in ARMOR_SLOTS:
         for key, v in data.armor[slot].items():
             out.append("\t".join(["P", slot, key, v.get("name", key), _num(v.get("weight", 0)),
@@ -2040,6 +2066,9 @@ SELFTEST_ATTACKS = {
 def selftest() -> int:
     """Offline checks of the hits-per-attack model (no site tables, no corpus)."""
     A = SELFTEST_ATTACKS
+    RINGS = type("Rings", (), {"rings": {k: {"group": g} for k, g in [
+        ("Third_Dragon_Ring", "Dragon_Ring"), ("Agape_Ring", "Agape_Ring"), ("Ring_of_Blades", "Ring_of_Blades"),
+        ("Ring_of_Blades_2", "Ring_of_Blades"), ("Flynns_Ring", "Flynns_Ring"), ("Life_Ring", "Life_Ring")]}})
     cases = [
         ("trident R2 = opening hit + 3 spin ticks", attack_hits(A[("channelerstrident", "Single1HandStrong1st")]), 4),
         ("trident R1 = one hit", attack_hits(A[("channelerstrident", "Single1HandNormal1st")]), 1),
@@ -2059,6 +2088,16 @@ def selftest() -> int:
         ("margin over a zero runner-up is none", infusion_margin([300.0, 0.0]), None),
         ("stats parse into STATS order", list(parse_stats("STR=40,VGR=20,ADP=15").values()),
          [20, 0, 0, 0, 40, 0, 15, 0, 0]),
+        # Agape's place goes to the next ring worn, skipping one already worn in another upgrade
+        ("agape replaced in place", suggest_rings(RINGS, Counter({"Third_Dragon_Ring": 9, "Agape_Ring": 8,
+                                                                  "Ring_of_Blades": 7, "Flynns_Ring": 6,
+                                                                  "Ring_of_Blades_2": 5, "Life_Ring": 4})),
+         ["Third_Dragon_Ring", "Life_Ring", "Ring_of_Blades", "Flynns_Ring"]),
+        ("agape falls back to all builds", suggest_rings(RINGS, Counter({"Agape_Ring": 2, "Flynns_Ring": 1}),
+                                                         Counter({"Flynns_Ring": 9, "Life_Ring": 3})),
+         ["Life_Ring", "Flynns_Ring"]),
+        ("no agape, no change", suggest_rings(RINGS, Counter({"Flynns_Ring": 2, "Ring_of_Blades_2": 1})),
+         ["Flynns_Ring", "Ring_of_Blades_2"]),
     ]
     if ATTACKS.exists():  # the real extracted rows agree with the copies above
         real = load_attacks()

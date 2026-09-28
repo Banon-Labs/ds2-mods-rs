@@ -2647,20 +2647,40 @@ def stage() -> tuple[Path, str]:
     return staged, sha256(staged)
 
 
+def recommender_header(path: Path) -> str | None:
+    """The data file's first line, its format; `None` when there is no file to read."""
+    try:
+        with path.open(encoding="utf-8") as f:
+            return f.readline().rstrip("\n")
+    except OSError:
+        return None
+
+
+def recommender_format() -> str | None:
+    """The `BACKEND_FORMAT` the exporter in this checkout writes, read from its source."""
+    found = re.search(r'^BACKEND_FORMAT = "([^"]+)"', (REPO_ROOT / RECOMMENDER_EXPORT[0]).read_text(),
+                      re.M)
+    return found.group(1) if found else None
+
+
 def stage_recommender_data(game_dir: Path) -> str:
     """Copy the Build Recommender's data file beside the game; return what happened, for the log.
 
-    Missing, it is exported first (about fifteen seconds, from the caches under `~/.cache`). When
-    that cannot be done either, whatever is already staged is left alone and the run says so: the
+    Missing, or of another format than the exporter now writes, it is exported first (about
+    fifteen seconds, from the caches under `~/.cache`). When that cannot be done either, whatever is already staged is left alone and the run says so: the
     DLL's own `ds2-build-recommender: ... backend=` line is what tells which one the panel read.
     """
     staged = game_dir / RECOMMENDER_DATA_NAME
-    if not RECOMMENDER_DATA_SOURCE.is_file():
-        print(f"[stage] no {RECOMMENDER_DATA_SOURCE}; exporting it")
+    want = recommender_format()
+    have = recommender_header(RECOMMENDER_DATA_SOURCE)
+    if have is None or have != want:
+        # A file from before a format bump is one the DLL refuses, and the panel falls to its stub.
+        why = "no such file" if have is None else f"it is {have!r}, the exporter writes {want!r}"
+        print(f"[stage] exporting {RECOMMENDER_DATA_SOURCE}: {why}")
         export = [sys.executable, str(REPO_ROOT / RECOMMENDER_EXPORT[0]), *RECOMMENDER_EXPORT[1:],
                   str(RECOMMENDER_DATA_SOURCE)]
         result = subprocess.run(export, cwd=REPO_ROOT, check=False)
-        if result.returncode != 0 or not RECOMMENDER_DATA_SOURCE.is_file():
+        if result.returncode != 0 or recommender_header(RECOMMENDER_DATA_SOURCE) != want:
             state = "the one already there" if staged.is_file() else "none, so its stub"
             return (f"build recommender data NOT staged (the export failed); the panel reads "
                     f"{state}")
