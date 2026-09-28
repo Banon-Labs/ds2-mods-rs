@@ -705,6 +705,11 @@ impl Engine {
     }
 
     fn publish(&mut self, now: u64) {
+        // The region track starts during the load, before the player's map entity exists, so the
+        // map index read then is the sentinel. Fill it in once it resolves.
+        if let Some(game) = self.game.as_mut().filter(|g| g.map.is_none()) {
+            game.map = map_index();
+        }
         let (position, length) = self
             .playing
             .as_ref()
