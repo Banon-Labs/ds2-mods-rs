@@ -784,7 +784,8 @@ def bracket_defense(data: Data, corpus: list[Build], sl: int) -> tuple[dict, int
 def damage(kind: str, ar: float, df: float) -> float:
     """Damage one type deals to a player defender, motion value and hand 1 (COMMUNITY formula,
     darksouls2.wiki.gg/wiki/Defense; the 10 and 12 match DamageAdjustParam row 0
-    pcAttributeAdjustNormalMul/Div in the regulation, the elemental curve is unverified).
+    pcAttributeAdjustNormalMul/Div in the regulation; the elemental cut (DEF + 100) / 1000 is
+    confirmed from the EXE, docs/DS2-DPS-MECHANICS.md "Elemental cut").
     physical: (AR*10 - DEF) / 12;  elemental: AR * (1 - min(0.99, (DEF + 100) / 1000))."""
     if not ar:
         return 0.0
@@ -890,7 +891,8 @@ def hit_damage(ar: dict, dfn: dict, mv: float, kind: str = "physical", lower: in
     docs/DS2-DPS-MECHANICS.md): physical max(AR*10 - DEF_type, lower) / 12, each element
     max(AR*6, lower) / 6 * (1 - cut), summed, times MV. DEF_type is the hit's slash/strike/thrust
     defense (general physical when it has none), `lower` is PlayerDamageParam.damageLower, and
-    cut = min(0.99, (DEF + 100) / 1000); whether the displayed defense carries that +100 is unresolved."""
+    cut = min(0.99, (DEF + 100) / 1000); the +100 is the stat table's 10% resistance floor that the
+    displayed defense leaves out (EXE, docs/DS2-DPS-MECHANICS.md "Elemental cut")."""
     tot = 0.0
     for k, v in ar.items():
         if not v:
