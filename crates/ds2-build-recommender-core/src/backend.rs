@@ -221,7 +221,11 @@ pub fn ask(backend: &dyn RecommenderBackend, state: &PanelState) -> Answer {
                 return Answer::FloorViolations(violations);
             }
             gate(if state.mode == Mode::WeaponsForStats {
-                backend.weapons_for(&state.stats, sl, &state.weapons_for)
+                let opts = WeaponsForOpts {
+                    objective: state.objective,
+                    ..state.weapons_for.clone()
+                };
+                backend.weapons_for(&state.stats, sl, &opts)
             } else {
                 backend.similar(&state.stats, sl, state.similar_k, state.status)
             })
@@ -740,6 +744,74 @@ mod tests {
             state.stats = STUB_STATS;
             assert!(matches!(ask(&StubBackend, &state), Answer::Rows(rows) if !rows.is_empty()));
             state.stats = [6; STAT_COUNT];
+        }
+    }
+
+    /// Weapons for stats ranks by the panel's objective: Bleed there reaches the backend as Bleed.
+    #[test]
+    fn weapons_for_stats_is_asked_for_the_panels_objective() {
+        struct Echo;
+        impl RecommenderBackend for Echo {
+            fn is_stub(&self) -> bool {
+                true
+            }
+            fn floors(&self, _sl: u16) -> [u16; STAT_COUNT] {
+                [0; STAT_COUNT]
+            }
+            fn weapons_for(&self, s: &[u16; STAT_COUNT], sl: u16, o: &WeaponsForOpts) -> Outcome {
+                let mut rows = rows_of(StubBackend.weapons_for(s, sl, o));
+                rows.truncate(1);
+                rows[0].grip = o.objective.label().to_owned();
+                Outcome::Rows(rows)
+            }
+            fn optimize(
+                &self,
+                w: &str,
+                i: Infusion,
+                sl: u16,
+                o: Objective,
+            ) -> Option<OptimizedBuild> {
+                StubBackend.optimize(w, i, sl, o)
+            }
+            fn minimum(&self, w: &str, i: Infusion, t: bool) -> Option<OptimizedBuild> {
+                StubBackend.minimum(w, i, t)
+            }
+            fn similar(&self, s: &[u16; STAT_COUNT], sl: u16, k: u16, f: StatusFilter) -> Outcome {
+                StubBackend.similar(s, sl, k, f)
+            }
+            fn calibration(&self) -> Calibration {
+                StubBackend.calibration()
+            }
+            fn generate_build(
+                &self,
+                w: &str,
+                i: Infusion,
+                sl: u16,
+                o: Objective,
+                n: bool,
+            ) -> Option<GeneratedBuild> {
+                StubBackend.generate_build(w, i, sl, o, n)
+            }
+            fn current_character_stats(&self) -> Option<[u16; STAT_COUNT]> {
+                None
+            }
+        }
+        fn rows_of(outcome: Outcome) -> Vec<ResultRow> {
+            match outcome {
+                Outcome::Rows(rows) => rows,
+                Outcome::FloorViolations(lines) => panic!("under floors: {lines:?}"),
+            }
+        }
+        let mut state = PanelState {
+            mode: Mode::WeaponsForStats,
+            ..PanelState::default()
+        };
+        for objective in Objective::ALL {
+            state.objective = objective;
+            match ask(&Echo, &state) {
+                Answer::Rows(rows) => assert_eq!(rows[0].grip, objective.label()),
+                other => panic!("{objective:?} answered {other:?}"),
+            }
         }
     }
 

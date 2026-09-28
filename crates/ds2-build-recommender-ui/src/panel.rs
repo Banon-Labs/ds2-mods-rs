@@ -1321,6 +1321,9 @@ fn draw_answer(panel: &mut Panel, canvas: &mut Canvas<'_>, (min, max): ([f32; 2]
             let rows = rows.clone();
             let score = match panel.state.mode {
                 Mode::SimilarBuilds => "builds",
+                // Build-up per hit times hits per attack (or within the window).
+                _ if panel.state.objective == Objective::Bleed => "bleed x hits",
+                _ if panel.state.objective == Objective::Poison => "poison x hits",
                 _ if panel.state.weapons_for.raw_ar => "AR",
                 _ => "damage",
             };

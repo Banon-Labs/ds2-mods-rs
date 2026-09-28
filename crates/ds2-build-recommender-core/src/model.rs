@@ -109,6 +109,10 @@ pub struct WeaponsForOpts {
     pub window_s: f32,
     /// Rank by attack rating rather than damage against the bracket's defence.
     pub raw_ar: bool,
+    /// What to rank by. Bleed and poison rank by build-up per hit times the hits of the weapon's
+    /// best R1 or R2 (within `window_s` when it is set), as the script's `--objective` does.
+    /// [`crate::backend::ask`] fills it from [`PanelState::objective`].
+    pub objective: Objective,
 }
 
 /// Which status a similar build's weapon must deal to be counted.

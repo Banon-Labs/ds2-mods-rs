@@ -42,6 +42,7 @@ type WeaponsForCases = &'static [(
     bool,
     f64,
     bool,
+    &'static str,
     &'static [ForRow],
 )];
 type OptimizeCases = &'static [(
@@ -159,7 +160,7 @@ fn calibration_is_the_scripts() {
 
 #[test]
 fn weapons_for_is_the_scripts() {
-    for (case, &(st, sl, one_hand, class, per_class, window, raw_ar, want)) in
+    for (case, &(st, sl, one_hand, class, per_class, window, raw_ar, goal, want)) in
         expected::WEAPONS_FOR.iter().enumerate()
     {
         let opts = WeaponsForOpts {
@@ -168,6 +169,7 @@ fn weapons_for_is_the_scripts() {
             per_class,
             window_s: window as f32,
             raw_ar,
+            objective: objective(goal),
         };
         let got = rows(backend().weapons_for(&stats(st), sl, &opts));
         assert_eq!(got.len(), want.len(), "case {case}: row count");
