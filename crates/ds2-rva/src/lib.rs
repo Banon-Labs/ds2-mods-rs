@@ -3169,6 +3169,81 @@ pub const FE_RETURN_TITLE_CHECK_CONFIRM: u32 = 0x0006_ec90;
 pub const FE_RETURN_TITLE_CHECK_CONFIRM_PROLOGUE: [u8; 7] =
     [0x48, 0x83, 0xec, 0x28, 0x48, 0x8b, 0x0d];
 
+/// The first call in [`FE_RETURN_TITLE_CHECK_CONFIRM`]: `void(frontendRoot*)`, RVA `0x004f_ec90`,
+/// called on `[GameManagerImp + `[`GAME_MANAGER_FRONTEND_ROOT_OFFSET`]`]`. Its whole body:
+///
+/// ```text
+/// mov rax,[rcx+0xf8] ; test rax,rax ; je ret
+/// and dword [rcx+0x3b8],0xfffffffd
+/// mov byte [rax+0xd32],1
+/// ret
+/// ```
+///
+/// Its own prologue, not an Arxan `jmp`: the first instruction is the `mov` above.
+pub const FE_ROOT_LEAVE_INGAME_MENU: u32 = 0x004f_ec90;
+
+/// The first seven bytes of [`FE_ROOT_LEAVE_INGAME_MENU`]: `mov rax,[rcx+0xf8]`.
+pub const FE_ROOT_LEAVE_INGAME_MENU_PROLOGUE: [u8; 7] = [0x48, 0x8b, 0x81, 0xf8, 0x00, 0x00, 0x00];
+
+/// The frontend-root byte [`FE_RETURN_TITLE_CHECK_CONFIRM`] sets to `1` between its two calls.
+///
+/// `mov byte [[GameManagerImp + 0x22e0] + 0x30c], 1` at `0x14006ecb7`. Named for where it is
+/// written; nothing in this project reads it.
+pub const FE_ROOT_RETURN_TITLE_BYTE_OFFSET: usize = 0x30c;
+
+/// `GameManagerImp` vtable byte offset of the return-to-title request: the `jmp [rax+0x38]` that
+/// [`FE_RETURN_TITLE_CHECK_CONFIRM`] ends in. The slot holds [`GAME_MANAGER_REQUEST_RETURN_TITLE`].
+pub const GAME_MANAGER_VTABLE_RETURN_TITLE_OFFSET: usize = 0x38;
+
+/// `bool requestReturnTitle(GameManagerImp*, u8 without_saving)`, RVA `0x001c_2cf0`.
+///
+/// What [`GAME_MANAGER_VTABLE_RETURN_TITLE_OFFSET`] holds. See [`FE_RETURN_TITLE_CHECK_CONFIRM`]
+/// for the refusals (a request already in flight, not in the world). Not an Arxan redirect:
+/// `scripts/ds2-arxan-chain.py 0x1401c2cf0` finds its own prologue.
+///
+/// **The second argument is "leave without saving".** Read at `0x1401c2d53`..`0x1401c2d69`:
+/// `(dl & 1) << 2` is OR-ed into [`GAME_MANAGER_RETURN_TITLE_FLAGS_OFFSET`], which is
+/// [`GAME_MANAGER_RETURN_TITLE_NO_SAVE_BIT`]. The master update's per-frame exit-save request
+/// tests exactly that bit and skips itself when it is set:
+///
+/// ```text
+/// 0x1401bf99c: test byte [gm+0x24b1],0x4
+/// 0x1401bf9a3: je   0x1401bf9b5
+/// 0x1401bf9a5: test byte [gm+0x24b2],0x4
+/// 0x1401bf9ac: jne  0x1401bf9b5
+/// 0x1401bf9ae: mov  edx,0x1
+/// 0x1401bf9cf: call SaveLoadSystem::RequestSave
+/// ```
+///
+/// The same bit also skips `0x14044e980` at `0x1401bf972` and `0x1401c30d0` at `0x1401bf9d9`.
+/// The shipped Quit Game confirm passes zero (`xor edx,edx` at `0x14006ecae`); the game's own
+/// forced returns pass one (`mov dl,0x1` at `0x14005306b` and `0x14050270b`), so both values are
+/// ones the engine produces itself.
+pub const GAME_MANAGER_REQUEST_RETURN_TITLE: u32 = 0x001c_2cf0;
+
+/// The first ten bytes of [`GAME_MANAGER_REQUEST_RETURN_TITLE`]: `mov [rsp+8],rbx` / `push rdi` /
+/// `sub rsp,0x20`.
+pub const GAME_MANAGER_REQUEST_RETURN_TITLE_PROLOGUE: [u8; 10] =
+    [0x48, 0x89, 0x5c, 0x24, 0x08, 0x57, 0x48, 0x83, 0xec, 0x20];
+
+/// The value of [`GAME_MANAGER_REQUEST_RETURN_TITLE`]'s second argument that leaves without the
+/// exit save.
+pub const GAME_MANAGER_RETURN_TITLE_WITHOUT_SAVING: u8 = 1;
+
+/// `GameManagerImp` byte holding the no-save bit for the return to title in flight.
+pub const GAME_MANAGER_RETURN_TITLE_FLAGS_OFFSET: usize = 0x24b2;
+
+/// The bit of [`GAME_MANAGER_RETURN_TITLE_FLAGS_OFFSET`] a without-saving request sets.
+pub const GAME_MANAGER_RETURN_TITLE_NO_SAVE_BIT: u8 = 0x4;
+
+/// `SaveLoadSystem::RequestSave` kind the pause menus ask for as they close.
+///
+/// `mov edx,0xa` before the call at `0x1400bf625` and `0x1400d2915` (each right after `0x1404fe920`, a menu close),
+/// and at `0x14002a4b3`, `0x140096d5f`, `0x1400999ea`. The kind ds2-save-block logged refusing
+/// on the way out of a game (`refused a save kind=10`). Not suppressed by
+/// [`GAME_MANAGER_RETURN_TITLE_NO_SAVE_BIT`], which only gates the master update's own request.
+pub const SAVE_LOAD_REQUEST_KIND_MENU_CLOSE: u32 = 10;
+
 /// Action `0xd` -- present in the dispatch, listed by **no** tab.
 ///
 /// Its factory branch shares a `case` label with kind 4: `case 4: case 6:` both allocate `0xc68`

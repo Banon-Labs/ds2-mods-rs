@@ -10,7 +10,16 @@
 //! | bonfire, item, souls, level-up, quit to menu, new cycle (23 call sites) | `SaveLoadSystem::RequestSave` sets `+0x1a2` | erased on the next frame, before the update reads it |
 //! | the periodic autosave | the update's own timer at `+0x64` crosses 300.0 | the accumulator is held at zero, so it never crosses |
 //! | kind 14 | `RequestSave` sets `+0x1a9` alone, deferring by a frame | erased with the rest |
-//! | `Save Game to File`, `Load Character from File` | [`permit_save`], then `RequestSave` | passes through untouched |
+//! | `Save Game to File` | [`permit_save`], then `RequestSave` | passes through untouched |
+//!
+//! # The refusal, which `Load Character from File` arms
+//!
+//! [`refuse_saves`] erases every request -- permits included -- until [`allow_saves`]. The load
+//! row arms it before it leaves the character being played, so the pause menu's close-save
+//! (`ds2_rva::SAVE_LOAD_REQUEST_KIND_MENU_CLOSE`) and anything else asked for on the way out is
+//! dropped. With `[save_block] enabled = false` the loader still installs the detour when that
+//! row is registered, with [`set_blocking`]`(false)`: every frame then passes through untouched
+//! unless a refusal is armed, which is [`Mode::Open`].
 //!
 //! # One detour, on the consumer
 //!
@@ -58,7 +67,10 @@ pub const LOG_PREFIX: &str = "ds2-save-block:";
 
 pub mod policy;
 
-pub use policy::{dropped_requests, permit_remaining, permit_save};
+pub use policy::{
+    Mode, allow_saves, dropped_requests, installed, mode, permit_remaining, permit_save,
+    refuse_saves, refusing, set_blocking,
+};
 
 #[cfg(windows)]
 mod install;
