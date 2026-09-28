@@ -166,6 +166,8 @@ enum Action {
     ToggleBleed,
     TogglePoison,
     Run,
+    /// Rank every infusion of the chosen weapon at the panel's stats.
+    BestInfusion,
     UseCharacter,
     Generate,
     Show(Shown),
@@ -660,6 +662,41 @@ impl Panel {
         self.shown = Shown::Answer;
     }
 
+    /// The chosen weapon's infusions, best first, with the winner's margin over the runner-up in
+    /// the status line.
+    fn best_infusion(&mut self) {
+        let answer = backend::best_infusion(backend(), &self.state);
+        let summary = match &answer {
+            Answer::Rows(rows) => {
+                let name = |row: &ResultRow| weapons::display_name(row.infusion);
+                match (rows.first(), rows.get(1), backend::infusion_margin(rows)) {
+                    (Some(best), Some(second), Some(margin)) => format!(
+                        "Best infusion: {}, {:+.1}% over {}",
+                        name(best),
+                        margin * 100.0,
+                        name(second)
+                    ),
+                    (Some(best), ..) => {
+                        format!("Best infusion: {} (nothing to compare)", name(best))
+                    }
+                    _ => "Best infusion: nothing ranked".to_owned(),
+                }
+            }
+            Answer::Nothing(why) => format!("Best infusion: {why}"),
+            _ => "Best infusion: nothing ranked".to_owned(),
+        };
+        log_line(format_args!(
+            "{LOG_PREFIX} best infusion weapon={:?} sl={} objective={:?} -> {summary}",
+            self.state.weapon,
+            self.state.sl(),
+            self.state.objective
+        ));
+        self.answer = Some(answer);
+        self.results_scroll = 0;
+        self.shown = Shown::Answer;
+        self.status = Some(summary);
+    }
+
     fn generate(&mut self) {
         match backend::generate(backend(), &self.state) {
             Ok(build) => {
@@ -794,6 +831,7 @@ impl Panel {
                 self.changed();
             }
             Action::Run => self.run(),
+            Action::BestInfusion => self.best_infusion(),
             Action::UseCharacter => match backend().current_character_stats() {
                 Some(stats) => {
                     self.state.stats = stats;
@@ -1744,6 +1782,15 @@ fn draw_options(panel: &Panel, canvas: &mut Canvas<'_>, x: f32, y: f32) -> f32 {
             );
         }
         Mode::OptimizeForWeapon => {
+            // Every infusion of the chosen weapon at the stats above, by the objective.
+            x = canvas.button(
+                x,
+                y,
+                "Best infusion",
+                false,
+                panel.state.weapon.is_some().then_some(Action::BestInfusion),
+                None,
+            ) + GAP;
             let text = if panel.state.weapon.is_some() {
                 format!(
                     "the weapon, infusion, objective and grip above ({}), at SL {}",
@@ -1880,7 +1927,8 @@ fn draw_answer(panel: &mut Panel, canvas: &mut Canvas<'_>, (min, max): ([f32; 2]
                 // Build-up per hit times hits per attack (or within the window).
                 _ if panel.state.objective == Objective::Bleed => "bleed x hits",
                 _ if panel.state.objective == Objective::Poison => "poison x hits",
-                _ if panel.state.weapons_for.raw_ar => "AR",
+                // Best infusion ranks by damage whatever the Weapons-for-stats tab's raw AR says.
+                Mode::WeaponsForStats if panel.state.weapons_for.raw_ar => "AR",
                 _ => "damage",
             };
             draw_table(canvas, &rows, score, &mut panel.results_scroll, (min, max));

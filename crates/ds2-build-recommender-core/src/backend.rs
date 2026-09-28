@@ -148,6 +148,18 @@ pub trait RecommenderBackend: Sync {
     fn floors(&self, sl: u16) -> [u16; STAT_COUNT];
     /// The weapons `stats` wield best.
     fn weapons_for(&self, stats: &[u16; STAT_COUNT], sl: u16, opts: &WeaponsForOpts) -> Outcome;
+    /// Every infusion `weapon` takes, best first, scored as [`Self::weapons_for`] scores a row
+    /// (the script's `--best-infusion`). No rows when `stats` cannot wield it even two-handed, or
+    /// for bleed/poison when no infusion deals it. The default has no data and ranks nothing.
+    fn best_infusion(
+        &self,
+        _weapon: &str,
+        _stats: &[u16; STAT_COUNT],
+        _sl: u16,
+        _opts: &WeaponsForOpts,
+    ) -> Outcome {
+        Outcome::Rows(Vec::new())
+    }
     /// The stats that make `weapon` hit hardest at `sl`, held in `grip`. `None` when no class can
     /// wield it there that way.
     fn optimize(
@@ -244,6 +256,38 @@ pub fn ask(backend: &dyn RecommenderBackend, state: &PanelState) -> Answer {
             };
             built.map_or(Answer::Nothing("no class can wield it here"), Answer::Build)
         }
+    }
+}
+
+/// Rank every infusion of the panel's weapon at the panel's stats and soul level, by its objective.
+///
+/// Not gated on the floors, unlike [`ask`]: this picks an infusion for a weapon the player already
+/// carries at the stats they already have, and recommends no build. Window and raw AR stay off --
+/// they are [`Mode::WeaponsForStats`] options the weapon modes do not show.
+pub fn best_infusion(backend: &dyn RecommenderBackend, state: &PanelState) -> Answer {
+    let Some(weapon) = state.weapon else {
+        return Answer::Nothing("choose a weapon first");
+    };
+    let opts = WeaponsForOpts {
+        objective: state.objective,
+        ..WeaponsForOpts::default()
+    };
+    match backend.best_infusion(weapon, &state.stats, state.sl(), &opts) {
+        Outcome::Rows(rows) if rows.is_empty() => {
+            Answer::Nothing("no infusion to rank: these stats cannot wield it, or none deals this")
+        }
+        Outcome::Rows(rows) => Answer::Rows(rows),
+        Outcome::FloorViolations(lines) => Answer::FloorViolations(lines),
+    }
+}
+
+/// How far the first row's score is ahead of the second's, as a fraction of the second: `0.25`
+/// is 25% more. `None` without a second row or when it scores nothing. The script's
+/// `infusion_margin`.
+pub fn infusion_margin(rows: &[ResultRow]) -> Option<f32> {
+    match rows {
+        [best, second, ..] if second.damage > 0.0 => Some(best.damage / second.damage - 1.0),
+        _ => None,
     }
 }
 
@@ -691,6 +735,43 @@ mod tests {
         );
         let falchion = build.weapons_1h.iter().find(|row| row.weapon == "Falchion");
         assert_eq!(falchion.map(|row| row.infusion), Some(Infusion::Raw));
+    }
+
+    /// The script's `infusion_margin`: best over runner-up as a fraction of the runner-up.
+    #[test]
+    fn the_infusion_margin_is_over_the_runner_up() {
+        let scored = |damage: f32| ResultRow {
+            weapon: "Caestus".to_owned(),
+            infusion: Infusion::None,
+            damage,
+            ar_by_type: [0.0; 5],
+            grip: "1H".to_owned(),
+            two_hand_only: false,
+            hyperarmor: None,
+            counter: None,
+            class: String::new(),
+        };
+        assert_eq!(
+            infusion_margin(&[scored(300.0), scored(200.0), scored(50.0)]),
+            Some(0.5)
+        );
+        assert_eq!(infusion_margin(&[scored(300.0)]), None);
+        assert_eq!(infusion_margin(&[scored(300.0), scored(0.0)]), None);
+    }
+
+    /// No data, nothing to rank: the stub says so rather than showing an empty table.
+    #[test]
+    fn best_infusion_waits_for_a_weapon_and_says_when_there_is_nothing() {
+        let mut state = PanelState::default();
+        assert_eq!(
+            best_infusion(&StubBackend, &state),
+            Answer::Nothing("choose a weapon first")
+        );
+        state.choose_weapon("Moonlight_Greatsword");
+        assert!(matches!(
+            best_infusion(&StubBackend, &state),
+            Answer::Nothing(_)
+        ));
     }
 
     #[test]
