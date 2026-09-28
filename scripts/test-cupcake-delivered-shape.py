@@ -620,6 +620,21 @@ def check_dead_logic_inventory() -> list[str]:
 # `cupcake eval` harness in test-cupcake-policies.py cannot model any of them,
 # because the newline rewrite that makes line 2 visible happens in the shim.
 SHIM_CASES = [
+    # ds2_run_preset_guard (2026-09-28). Its own commit was refused: the engine collapsed the
+    # heredoc onto one line, the signal looked for the terminator on a line of its own, never
+    # found it, and read the body's apostrophe as an unclosed quote.
+    (
+        "a commit message heredoc naming a launcher, with an apostrophe, is data",
+        "git commit -q -F - <<'EOF'\nfeat: the user's python3 old/scripts/ds2-run.py\nEOF\necho ok",
+        True,
+        "",
+    ),
+    (
+        "the line after that heredoc is a command again, and an unresolvable launch is refused",
+        "git commit -q -F - <<'EOF'\nfeat: the user's note\nEOF\npython3 $W/scripts/ds2-run.py",
+        False,
+        "the guard cannot tell which file that is",
+    ),
     (
         "two-line command whose SECOND line is guarded",
         f"echo hi\n{PUSH_MAIN}",
