@@ -814,12 +814,40 @@ def chain_open(anim: int) -> float | None:
     return _chain_cache[anim]
 
 
-def r1_timeline(attacks: dict, name: str, two_hand: bool, horizon: float = 3.0) -> list[tuple[float, float, str, int]]:
-    """(seconds from input, motion value, physical type, damage floor) of every hit an R1 chain lands, alternating the 1st and
-    2nd chain attacks. Play speed is the mean of start/end speeds (where one hands over to the
-    other is unknown); re-hitting hitboxes add a tick per interval."""
+def live_hits(a: dict, distinct: bool = False) -> list[dict]:
+    """An attack's hitboxes that can hurt a player: a live TAE 2200 window with a motion value.
+    `distinct` drops a hitbox whose window, tick count and interval repeat an earlier one's on a
+    different damage row -- the Old Whip's 1.0 + 0.35 pair on frames 16-20, two damageGroups on one
+    swing, which docs/DS2-DPS-MECHANICS.md section 4 leaves at "possibly 2" until runtime proof. Windows
+    that only overlap (Channeler's Trident R2: opening hit 19-24, spin 23-35) stay separate hits."""
+    hs = [h for h in a.get("hits") or [] if h.get("live") and h.get("rate")]
+    if not distinct:
+        return hs
+    seen, out = set(), []
+    for h in hs:
+        k = (h["start"], h["end"], max(1, h.get("n") or 1), h.get("interval") or 0)
+        if k not in seen:
+            seen.add(k)
+            out.append(h)
+    return out
+
+
+def attack_hits(a: dict | None) -> int:
+    """How many times one attack can hit one target: each distinct live hitbox times its repeat
+    ticks. REGULATION + TAE via attacks.json: a tick is PlayerDamageParam.hitDistance (INFERRED a
+    re-hit interval in seconds) across its 2200 window, n = floor(window / interval) + 1 -- Channeler's
+    Trident 1H R2 is its opening hit plus 3 spin ticks = 4 (docs/DS2-DPS-MECHANICS.md section 4)."""
+    return sum(max(1, h.get("n") or 1) for h in live_hits(a, distinct=True)) if a else 0
+
+
+def chain_timeline(attacks: dict, name: str, two_hand: bool, kind: str = "Normal", horizon: float = 3.0,
+                   distinct: bool = False) -> list[tuple[float, float, str, int]]:
+    """(seconds from input, motion value, physical type, damage floor) of every hit a repeated
+    attack lands, alternating its 1st and 2nd chain attacks: `kind` "Normal" is the R1 chain,
+    "Strong" the R2 chain. Play speed is the mean of start/end speeds (where one hands over to
+    the other is unknown); re-hitting hitboxes add a tick per interval. `distinct`: see live_hits."""
     g = "Single2Hand" if two_hand else "Single1Hand"
-    seq = [attacks.get((norm(name), g + "Normal1st")), attacks.get((norm(name), g + "Normal2nd"))]
+    seq = [attacks.get((norm(name), g + kind + "1st")), attacks.get((norm(name), g + kind + "2nd"))]
     if not seq[0]:
         return []
     seq[1] = seq[1] or seq[0]
@@ -827,9 +855,7 @@ def r1_timeline(attacks: dict, name: str, two_hand: bool, horizon: float = 3.0) 
     while t0 < horizon:
         a = seq[k % 2]
         spd = sum(a.get("spd") or [1.0, 1.0]) / 2
-        for h in a.get("hits") or []:
-            if not h.get("live") or not h.get("rate"):
-                continue
+        for h in live_hits(a, distinct):
             n = max(1, h.get("n") or 1)
             for i in range(n):
                 out.append((t0 + (h["start"] / 30 + i * (h.get("interval") or 0)) / spd, h["rate"],
@@ -844,6 +870,11 @@ def r1_timeline(attacks: dict, name: str, two_hand: bool, horizon: float = 3.0) 
         t0 += step / spd
         k += 1
     return sorted(out)
+
+
+def r1_timeline(attacks: dict, name: str, two_hand: bool, horizon: float = 3.0) -> list[tuple[float, float, str, int]]:
+    """The R1 chain's hits (chain_timeline); what `--window` and the exported backend rank by."""
+    return chain_timeline(attacks, name, two_hand, "Normal", horizon)
 
 
 HYPERARMOR = Path.home() / ".cache/ds2-builds/hyperarmor.json"  # weapon name -> WeaponParam.uninterruptibleRate
@@ -904,10 +935,37 @@ def hit_damage(ar: dict, dfn: dict, mv: float, kind: str = "physical", lower: in
     return tot * mv
 
 
+def status_hits(attacks: dict, names: list[str], grips: list[bool], window: float = 0.0) -> tuple[int, str]:
+    """The most hits one target takes from a weapon's R1 or R2 chain, and a label for it. With
+    `window`: hits landed within that many seconds of repeating the chain (chain_timeline, so the
+    attack's length counts -- a 4-hit R2 that takes twice as long as an R1 gains nothing). Without:
+    hits of one attack (attack_hits). Ties keep 1H over 2H and R1 over R2. (0, "") without data."""
+    best, label = 0, ""
+    for two_hand in grips:
+        for kind, tag in (("Normal", "R1"), ("Strong", "R2")):
+            for nm in names:
+                if window:
+                    tl = chain_timeline(attacks, nm, two_hand, kind, max(3.0, window), distinct=True)
+                    n = sum(1 for t, *_ in tl if t <= window)
+                else:
+                    n = attack_hits(attacks.get((norm(nm), ("Single2Hand" if two_hand else "Single1Hand") + kind + "1st")))
+                if n:
+                    break
+            if n > best:
+                best, label = n, f"{'2H' if two_hand else '1H'} {tag} {n} hit{'s' if n > 1 else ''}"
+    return best, label
+
+
 def weapons_for(data: Data, stats: dict, sl: int, corpus: list[Build], top: int = 25, within: float = 0.10,
                 raw_ar: bool = False, one_hand: bool = False, weapon_class: str | None = None, per_class: bool = False,
-                window: float = 0.0):
-    """Weapons (per infusion) ranked by expected damage against the average defender at this SL.
+                window: float = 0.0, objective: str = "damage"):
+    """Weapons (per infusion) ranked by expected damage against the average defender at this SL,
+    or with `objective` "bleed"/"poison" by status build-up: build-up per hit (objective_value,
+    SITE formula) times the hits of the weapon's best R1/R2 chain attack (status_hits; within
+    `window` seconds when given). That every hit and every re-hit tick applies the weapon's full
+    build-up is INFERRED: DamageParam has no status field (REGULATION) and the exe's status
+    code was not traced (docs/DS2-DPS-MECHANICS.md section 4). The defender's resistance and the
+    proc's damage are not modelled.
     Usable only: requirements met (STR halved when that is what makes it usable, flagged 2H).
     Per weapon: the best infusion, plus the 2nd and 3rd only while within `within` of the best."""
     dfn, n = bracket_defense(data, corpus, sl)
@@ -931,6 +989,22 @@ def weapons_for(data: Data, stats: dict, sl: int, corpus: list[Build], top: int 
         if r1.get(key, 0) >= cut and stats["endurance"] < floors.get("endurance", 0):
             continue  # a high-stamina weapon needs END at the bracket median of builds that carry one
         lines = {}
+        if objective in ("bleed", "poison"):
+            hits, hlabel = status_hits(attacks, [w["name"], key.replace("_", " ")], ([False] if one else []) + [True],
+                                       window)
+            if not hits:
+                skipped.append(w["name"])
+                continue
+            scored = []
+            for inf in w["infusions"]:
+                per = objective_value(data, key, inf, stats, objective, dfn)
+                if per > 0:
+                    scored.append((per * hits, inf, attack_rating(data, key, inf, stats),
+                                   hlabel + ("" if one or hlabel.startswith("1H") else " (2H only)")))
+            scored.sort(key=lambda s: -s[0])
+            for s in [s for s in scored[:3] if scored and s[0] >= scored[0][0] * (1 - within)]:
+                rows.append((s[0], w["name"], *s[1:]))
+            continue
         if window:  # R1 chain hits landing within `window` seconds, per grip the build can use
             for two_hand in ([False] if one else []) + [True]:
                 tl = r1_timeline(attacks, w["name"], two_hand) or r1_timeline(attacks, key.replace("_", " "), two_hand)
@@ -1750,9 +1824,61 @@ def pretty(t: str, data: Data) -> str:
     return table.get(rest, {}).get("name", rest)
 
 
+def _hit(start, end, rate, n=1, interval=0.0, dmg=1, live=1):
+    return {"start": start, "end": end, "rate": rate, "n": n, "interval": interval, "dmg": dmg, "live": live}
+
+
+# Rows as ~/.cache/ds2-builds/attacks.json holds them (TAE 2200 windows in 30 fps frames, REGULATION
+# damage rows); anim -1 has no TAE file, so chain_open ends each chain after its first attack.
+SELFTEST_ATTACKS = {
+    ("channelerstrident", "Single1HandNormal1st"):
+        {"anim": -1, "spd": [0.8, 1.5], "hits": [_hit(14, 20, 0.96, dmg=10017820)]},
+    ("channelerstrident", "Single1HandStrong1st"):
+        {"anim": -1, "spd": [1.0, 1.0], "hits": [_hit(19, 24, 0.576, dmg=10018240),
+                                                   _hit(19, 30, None, dmg=0, live=False),
+                                                   _hit(23, 35, 0.2688, 3, 0.15, dmg=10018241)]},
+    ("oldwhip", "Single1HandNormal1st"):
+        {"anim": -1, "spd": [1.0, 1.0], "hits": [_hit(16, 20, 1.0, dmg=10011000), _hit(16, 20, 0.35, dmg=3660000)]},
+    ("twinblade", "Single2HandStrong2nd"):
+        {"anim": -1, "spd": [1.0, 1.0], "hits": [_hit(10, 19, 1.2096, dmg=10016400), _hit(28, 35, 1.2096, dmg=10016400)]},
+    ("dagger", "Single1HandNormal1st"): {"anim": -1, "spd": [1.1, 1.2], "hits": [_hit(8, 15, 1.0, dmg=10004100)]},
+}
+
+
+def selftest() -> int:
+    """Offline checks of the hits-per-attack model (no site tables, no corpus)."""
+    A = SELFTEST_ATTACKS
+    cases = [
+        ("trident R2 = opening hit + 3 spin ticks", attack_hits(A[("channelerstrident", "Single1HandStrong1st")]), 4),
+        ("trident R1 = one hit", attack_hits(A[("channelerstrident", "Single1HandNormal1st")]), 1),
+        ("old whip same-window pair counts once", attack_hits(A[("oldwhip", "Single1HandNormal1st")]), 1),
+        ("old whip pair still both in the damage timeline", len(r1_timeline(A, "Old Whip", False)), 2),
+        ("twinblade 2H R2 chain: one row, two windows", attack_hits(A[("twinblade", "Single2HandStrong2nd")]), 2),
+        ("no row, no hits", attack_hits(A.get(("dagger", "Single1HandStrong1st"))), 0),
+        ("trident per attack: R2 wins", status_hits(A, ["Channeler's Trident"], [False]), (4, "1H R2 4 hits")),
+        ("dagger per attack: R1", status_hits(A, ["Dagger"], [False]), (1, "1H R1 1 hit")),
+        # timing: in 0.5 s only the R1 (14/30 s at speed 1.15) has landed; by 1.5 s the spin's last
+        # tick (23/30 + 2 * 0.15 s) has too
+        ("trident in 0.5 s: R1 only", status_hits(A, ["Channeler's Trident"], [False], 0.5), (1, "1H R1 1 hit")),
+        ("trident in 1.5 s: R2", status_hits(A, ["Channeler's Trident"], [False], 1.5), (4, "1H R2 4 hits")),
+    ]
+    if ATTACKS.exists():  # the real extracted rows agree with the copies above
+        real = load_attacks()
+        for key in [k for k in A if k in real]:
+            cases.append((f"attacks.json {key}", attack_hits(real[key]), attack_hits(A[key])))
+    bad = 0
+    for what, got, want in cases:
+        if got != want:
+            bad += 1
+            print(f"  FAIL {what}: got {got!r}, want {want!r}")
+    print(f"selftest: {len(cases) - bad}/{len(cases)} pass" + ("" if ATTACKS.exists() else f" ({ATTACKS} absent)"))
+    return 1 if bad else 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     g = ap.add_mutually_exclusive_group(required=True)
+    g.add_argument("--selftest", action="store_true", help="offline checks of the hits-per-attack model")
     g.add_argument("--mugen", type=int, help="MugenMonkey DS2 build id to recommend for")
     g.add_argument("--soulsplanner", type=int, help="SoulsPlanner DS2 build id (from the cache)")
     g.add_argument("--eval", action="store_true", help="leave-one-out recall@10, EASE vs popularity")
@@ -1777,7 +1903,9 @@ def main() -> int:
     ap.add_argument("--allow-naked", action="store_true",
                     help="with --generate: no armour (by default the best set under 70%% load is chosen)")
     ap.add_argument("--objective", choices=["damage", "bleed", "poison"], default="damage",
-                    help="with --optimize: what the free points maximize")
+                    help="with --optimize: what the free points maximize. With --weapons-for (and the list "
+                         "--optimize prints): bleed/poison rank by build-up per hit x hits of the best R1/R2 "
+                         "attack, or hits landed within --window seconds")
     g.add_argument("--weapons-for", metavar="STATS",
                    help='rank weapons for these stats, e.g. "VGR=10,END=16,VIT=7,ATT=9,STR=20,DEX=12,ADP=8,INT=12,FTH=12"')
     ap.add_argument("--raw-ar", action="store_true", help="with --weapons-for: rank by total attack rating, before defenses")
@@ -1796,6 +1924,8 @@ def main() -> int:
     ap.add_argument("--lam", type=float, default=50.0, help="EASE L2 penalty")
     ap.add_argument("--tables", type=Path, default=CACHE / "site-tables", help="where site JS/JSON is cached")
     a = ap.parse_args()
+    if a.selftest:
+        return selftest()
 
     a.tables.mkdir(parents=True, exist_ok=True)
     sp_json, mm_json = dump_site_tables(a.tables)
@@ -1912,11 +2042,14 @@ def main() -> int:
             for c, name, inf, grip in rows:
                 print(f"  {c:3}/{n}  {name:32} {grip:8} " + ", ".join(f"{i.replace('_', ' ')} {m}" for i, m in inf))
             return 0
-        rows, dfn, n = weapons_for(data, stats, sl, corpus, raw_ar=a.raw_ar, one_hand=a.one_hand, weapon_class=a.weapon_class, per_class=a.per_class, window=a.window)
+        rows, dfn, n = weapons_for(data, stats, sl, corpus, raw_ar=a.raw_ar, one_hand=a.one_hand, weapon_class=a.weapon_class, per_class=a.per_class, window=a.window, objective=a.objective)
         print(f"stats {' '.join(f'{s[:3].upper()} {v}' for s, v in stats.items())}  ->  SL {sl}")
         print(f"average defender at this SL ({n} builds): "
               + " ".join(f"{k} {v:.0f}" for k, v in dfn.items()))
-        print(f"\n  {'weapon (infusion)':44} {'total AR' if a.raw_ar else (f'dmg/{a.window:g}s' if a.window else 'damage'):>8}   AR by type                         grip")
+        what = {"damage": "dmg"}.get(a.objective, a.objective)
+        head = "total AR" if a.raw_ar and a.objective == "damage" else f"{what}/{a.window:g}s" if a.window else (
+            "damage" if a.objective == "damage" else f"{what}/atk")
+        print(f"\n  {'weapon (infusion)':44} {head:>8}   AR by type                         grip")
         for dmg, name, inf, ar, grip in rows:
             print(f"  {name + ' (' + inf.replace('_', ' ') + ')':44} {dmg:7.0f}   "
                   f"{' '.join(f'{k[:4]} {v}' for k, v in ar.items()):34} {grip}")
