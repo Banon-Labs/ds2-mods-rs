@@ -157,7 +157,12 @@ pub(crate) fn build_items(
             // `ds2_rva::ITEM_SPAWN_DURABILITY_MAX`.
             durability: ds2_rva::ITEM_SPAWN_DURABILITY_MAX,
             quantity: 1,
-            reinforce: 0,
+            // The item's own maximum, from the regulation (`ds2_build_import_core::reinforce`):
+            // +10 or +5 for a weapon, the piece's own for armour, 0 for the few that cannot be
+            // reinforced and for everything that is not a weapon or armour. The recommender ranks
+            // weapons and armour at full upgrade, so this is the item it ranked. A copy the
+            // character already holds is left as it is -- the count above never mints a second.
+            reinforce: ds2_build_import_core::max_reinforce(item_id).unwrap_or(0),
             infusion: infusion.byte(),
         });
     };
