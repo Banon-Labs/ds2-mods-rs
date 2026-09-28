@@ -107,6 +107,9 @@ const LOAD_WAIT_MS: u64 = 20_000;
 /// refused. The game's FMOD heap size is not known, so this is kept small: one streamed track.
 const MEMORY_HEADROOM: i32 = 8 * 1024 * 1024;
 
+/// Ticks a stopped instance's `freeEventData` is retried while FMOD answers "not ready": 10 s.
+const FREE_TRIES: u32 = 100;
+
 /// System ids read per tick while the catalog is being built.
 const SCAN_PER_TICK: u32 = 256;
 
@@ -171,6 +174,8 @@ struct Engine {
     resume: HashMap<TrackKey, usize>,
     /// The most FMOD had allocated at any tick when no instance of ours was alive.
     game_peak: i32,
+    /// Stopped instances of ours whose memory has not been given back yet, with the ticks tried.
+    to_free: Vec<(usize, TrackKey, u32)>,
     last_sample: u64,
 }
 
@@ -267,6 +272,7 @@ pub(crate) fn tick() {
         .unwrap_or_default();
     with_engine(|engine| {
         engine.track_memory();
+        engine.free_stopped();
         for command in commands {
             engine.command(command);
         }
@@ -442,13 +448,35 @@ impl Engine {
             return;
         };
         let rc = fmod::stop(playing.handle, immediate);
-        let freed = fmod::free_event_data(playing.handle);
         log(format_args!(
-            "{LOG_PREFIX} stop ours={} handle=0x{:x} rc={rc} freeEventData-rc={freed} -- {why}; {}",
+            "{LOG_PREFIX} stop ours={} handle=0x{:x} rc={rc} -- {why}; {}",
             playing.key,
             playing.handle,
             memory()
         ));
+        // Freed on the ticks that follow: straight after a stop, freeEventData answers
+        // FMOD_ERR_NOTREADY (54, measured in the qa run at 8535a80) while the instance winds down.
+        self.to_free.push((playing.handle, playing.key, 0));
+    }
+
+    /// Rule 3: give back the memory of every stopped instance of ours, retrying while FMOD says it
+    /// is not ready yet.
+    fn free_stopped(&mut self) {
+        let mut still = Vec::new();
+        for (handle, key, tries) in std::mem::take(&mut self.to_free) {
+            let rc = fmod::free_event_data(handle);
+            if rc == ds2_rva::FMOD_ERR_NOTREADY && tries < FREE_TRIES {
+                still.push((handle, key, tries + 1));
+                continue;
+            }
+            log(format_args!(
+                "{LOG_PREFIX} freeEventData ours={key} handle=0x{handle:x} rc={rc} after {} ticks; \
+                 {}",
+                tries + 1,
+                memory()
+            ));
+        }
+        self.to_free = still;
     }
 
     /// Rule 1 for a chosen silence: the playlist has run out with repeat off.
