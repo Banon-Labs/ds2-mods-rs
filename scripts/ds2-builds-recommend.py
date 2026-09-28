@@ -1155,11 +1155,15 @@ GRIP_TRIES = {"two": (True,), "one": (False,)}
 
 
 def optimize_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, objective: str,
-                   grip: str = "two"):
+                   grip: str = "two", flex_weight: float | None = None):
     """A valid build at `sl` that maximizes `objective` for weapon+infusion: floors first (bracket
     medians, END only for a high-stamina weapon), then requirements (STR halved for grip "two",
     in full for "one"; see GRIP_TRIES), then every remaining point where it raises the objective
-    most."""
+    most, plus `flex_weight` (default FLEX_WEIGHT) per weapon the point lets the build wield: a soft
+    term, never a filter (see FLEX_WEIGHT)."""
+    if flex_weight is None:
+        flex_weight = FLEX_WEIGHT
+    flex = (lambda s_: sum(flex_counts(data, s_))) if flex_weight else None
     floors, r1, cut = build_floors(data, corpus, sl)
     dfn, _ = bracket_defense(data, corpus, sl)
     req = data.weapons[weapon].get("require") or {}
@@ -1196,8 +1200,13 @@ def optimize_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
                 pick, best_w = None, 0.0
                 for s, f in curves.items():
                     cur = f(st)
+                    # Only a requirement stat changes what the build wields; the term is left off
+                    # the rest rather than added as a zero, so a weight of 0 is the old optimizer.
+                    fcur = flex(st) if flex and s in REQ_STATS else None
                     for n in range(1, min(free, 99 - st[s], 8) + 1):  # look past table plateaus
                         w = (f({**st, s: st[s] + n}) - cur) / n / peak[s]
+                        if fcur is not None:
+                            w += flex_weight * (flex({**st, s: st[s] + n}) - fcur) / n
                         if w > best_w + 1e-12:
                             pick, best_w = (s, n), w
                 if pick is None:  # every curve is flat: the points go to vigor
@@ -1434,6 +1443,107 @@ def nearest_builds(data: Data, stats: dict, sl: int, corpus: list[Build], k: int
     return [same[i] for i in np.argsort(dist, kind="stable")[:k]]
 
 
+# --------------------------------------------------------------------------------------------
+# weapon flexibility: how many weapons a stat line can wield, against its stat neighbours
+
+#: How many nearest-stat corpus builds a build's flexibility is ranked among (nearest_builds' k).
+FLEX_K = 50
+
+#: The optimizer's soft flexibility term, per weapon unlocked (one-handed and two-handed each count
+#: once) per point spent: a step of `n` points that raises the build's 1H+2H count by `d` gains
+#: FLEX_WEIGHT * d / n on top of its objective weight, which is itself the objective's gain per point
+#: over the curve's early rate (see optimize_build). So at weight w, unlocking 1/w weapons is worth
+#: one point of early-rate damage. Never a filter: a point that raises nothing but flexibility is
+#: still outbid by one that raises the objective enough. `--flex-weight` overrides it.
+#:
+#: 0.02, from `--flex-sweep 0,0.01,0.02,0.05,0.1,0.2` over the EXPECT_BUILDS/EXPECT_ONE_HANDED cases
+#: (2026-09-28, full corpus). At 0.02 two of the nine buildable cases move and none gets worse
+#: flexibility: Uchigatana (Bleed) SL 150 bleed 221 -> 217 (-1.9%) for 26/116 -> 194/258 1H/2H
+#: (percentile 0 -> 93); Dagger (Poison) SL 60 poison 198 -> 198 for 64/161 -> 130/224 (33 -> 69).
+#: 0.05 already made Demon's Great Hammer (Raw) SL 70 *less* flexible (percentile 49 -> 26, the
+#: greedy's path changing), and 0.1 cost the Uchigatana 4.0%.
+FLEX_WEIGHT = 0.02
+
+#: Flynn's Ring's physical bonus falls as equip load rises (MugenMonkey: "Damage increases with lower
+#: equip load"). The curve is not modelled, so the spare load is shown and this is said beside it.
+FLYNN_NOTE = "Flynn's Ring's bonus falls as load rises"
+
+
+def flex_pool(data: Data) -> tuple[list[str], np.ndarray, np.ndarray, np.ndarray]:
+    """Every weapon a hand can hold (EMPTY keys such as Bare_Fists left out; shields and catalysts
+    in), as (keys, requirement matrix over REQ_STATS, the same with STR halved as weapon_ok halves
+    it for two hands, weights). Cached on `data`: optimize_build asks per candidate point."""
+    pool = getattr(data, "_flex_pool", None)
+    if pool is None:
+        keys = [k for k in data.weapons if k not in EMPTY]
+        req = np.array([[int((data.weapons[k].get("require") or {}).get(s, 0)) for s in REQ_STATS]
+                        for k in keys], dtype=np.int64).reshape(len(keys), len(REQ_STATS))
+        two = req.copy()
+        two[:, REQ_STATS.index("strength")] //= 2
+        weight = np.array([float(data.weapons[k].get("weight", 0)) for k in keys])
+        pool = (keys, req, two, weight)
+        data._flex_pool = pool
+    return pool
+
+
+def flex_counts(data: Data, stats: dict) -> tuple[int, int]:
+    """How many weapons `stats` wield one-handed and two-handed (weapon_ok, STR halved for 2H). A
+    weapon wieldable one-handed is wieldable two-handed too, so the second count includes the first."""
+    _, req, two, _ = flex_pool(data)
+    have = np.array([stats.get(s, 0) for s in REQ_STATS])
+    return int((req <= have).all(axis=1).sum()), int((two <= have).all(axis=1).sum())
+
+
+def flexibility(data: Data, corpus: list[Build], stats: dict, sl: int, armor: list[str] | None = None,
+                rings: list[str] | None = None, k: int = FLEX_K) -> dict:
+    """A stat line's weapon flexibility and where it sits among its stat neighbours.
+
+    `one`/`two`: weapons wieldable one-handed / two-handed at the levelled stats (armour stat bonuses
+    are not counted, for the build or for its neighbours). `score` = one + two. `below`/`equal`: how
+    many of the k nearest_builds score below / the same, over their own levelled stats; `percentile`
+    = 100 * (below + equal / 2) / n, the mid-rank percentile, so a build tied with every neighbour
+    sits at 50. `spare`: equip load left under EQUIP_CAP at the build's VIT after `armor` (piece
+    keys head/chest/hands/legs, "Naked" for none) and `rings` (keys, each worn once) -- the weapon
+    weight the build can still carry; `fits`: how many weapons it wields in either grip that weigh
+    no more than that on their own."""
+    one, two = flex_counts(data, stats)
+    score = one + two
+    scores = [sum(flex_counts(data, b.stats)) for b in nearest_builds(data, stats, sl, corpus, k)]
+    below = sum(1 for s in scores if s < score)
+    equal = sum(1 for s in scores if s == score)
+    n = len(scores)
+    cap = data.equip_load[min(stats["vitality"], len(data.equip_load) - 1)] * EQUIP_CAP
+    # Added one at a time, not with sum(): Python 3.12's sum() of floats is compensated, so it
+    # rounds differently from the plain running total the Rust port keeps.
+    spare = cap
+    for slot, p in zip(ARMOR_SLOTS, armor or []):
+        spare -= float(data.armor[slot].get(p, {}).get("weight", 0))
+    for r in rings or []:
+        spare -= float(data.rings.get(r, {}).get("weight", 0))
+    keys, _, halved, weight = flex_pool(data)
+    have = np.array([stats.get(s, 0) for s in REQ_STATS])
+    fits = int(((halved <= have).all(axis=1) & (weight <= spare)).sum())
+    return {"one": one, "two": two, "total": len(keys), "score": score, "below": below, "equal": equal,
+            "n": n, "percentile": 100.0 * (below + equal / 2) / n if n else 50.0, "spare": spare, "fits": fits}
+
+
+def flex_line(f: dict) -> str:
+    """The panel's flexibility line, word for word (`flex_line` in ds2-build-recommender-core)."""
+    return (f"wields {f['one']}/{f['total']} 1H, {f['two']} 2H -- {ordinal(round(f['percentile']))} "
+            f"percentile of {f['n']} similar builds")
+
+
+def flex_load_line(f: dict) -> str:
+    """The panel's load line under the flexibility line, word for word."""
+    return f"{f['spare']:.1f} weight left for weapons under {EQUIP_CAP:.0%} load, {f['fits']} fit -- {FLYNN_NOTE}"
+
+
+def ordinal(n: int) -> str:
+    """1st, 2nd, 3rd, 4th, 11th, 12th, 13th, 21st."""
+    suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
 COMMON_RING = 0.10  # a ring worn by at least this share of every corpus build counts as common to all builds
 
 
@@ -1456,14 +1566,14 @@ def generate_armor(data: Data, corpus: list[Build], weapon: str, inf: str, two: 
 
 def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, objective: str = "damage",
                    window: float = 1.5, k: int = 50, allow_naked: bool = False,
-                   grip: str = "two") -> dict | None:
+                   grip: str = "two", flex_weight: float | None = None) -> dict | None:
     """A whole valid build for weapon+infusion at `sl`: optimize_build's class and stats with the
     weapon as primary; the top 15 one-handable and top 5 two-hand-only other weapons for those
     stats (damage over `window` seconds); 3 copies of each of the 4 rings the nearest-stat builds
     wear most, plus one of every ring at least COMMON_RING of all builds wear; and armour, the
     best_armor set under 70% load with the primary and those four rings carried. `allow_naked`
     skips the armour, as every generated build did before it had any."""
-    best, floors = optimize_build(data, corpus, weapon, inf, sl, objective, grip)
+    best, floors = optimize_build(data, corpus, weapon, inf, sl, objective, grip, flex_weight)
     if best is None:
         return None
     val, cls, two, stats = best
@@ -1486,7 +1596,17 @@ def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
     return {"class": cls, "sl": sl, "stats": stats, "two_handed": two, "objective": objective, "value": round(val),
             "primary": (data.weapons[weapon]["name"], inf), "weapons_1h": one[:15], "weapons_2h_only": only2[:5],
             "rings": [data.rings[r]["name"] for r in suggested for _ in range(3)]
-            + [data.rings[r]["name"] for r in common], "armor": armor, "armor_note": armor_note}
+            + [data.rings[r]["name"] for r in common], "armor": armor, "armor_note": armor_note,
+            "flex": flexibility(data, corpus, stats, sl, armor_keys(data, armor), suggested)}
+
+
+def armor_keys(data: Data, names: list[str]) -> list[str]:
+    """Armour display names, head/chest/hands/legs, back to keys: the first piece of the slot with
+    that name, as the Rust port looks one up."""
+    out = []
+    for slot, name in zip(ARMOR_SLOTS, names):
+        out.append(next((k for k, v in data.armor[slot].items() if v.get("name", k) == name), "Naked"))
+    return out
 
 
 def gear_bonus(data: Data, arm: list, rs: list) -> tuple[Counter, float]:
@@ -1756,10 +1876,16 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
     weapon_ix = {k: i for i, k in enumerate(data.weapons)}
     for b in corpus:
         eff = effective(data, b)
+        # The trailing `one:two` is flex_counts over the build's levelled stats, which the file does
+        # not otherwise carry: what a neighbour scores in flexibility(). Added without a format bump:
+        # a reader that predates it stops at the weapons field, and one that has it treats a file
+        # without it as having no flexibility to rank against.
+        one, two = flex_counts(data, b.stats)
         out.append("\t".join(["X", str(sl_bracket(soul_level(data, b))),
                               "".join(str(stat_bracket(eff[s])) for s in STATS),
                               ",".join(str(ring_ix[r]) for r in b.rings if r and r in data.rings) or "-",
-                              ",".join(f"{weapon_ix[w]}:{INFUSION_CODE[inf]}" for w, inf in b.weapons()) or "-"]))
+                              ",".join(f"{weapon_ix[w]}:{INFUSION_CODE[inf]}" for w, inf in b.weapons()) or "-",
+                              f"{one}:{two}"]))
     return "\n".join(out) + "\n"
 
 
@@ -1799,6 +1925,13 @@ EXPECT_SIMILAR = [  # stats, sl, k, status
     ([12, 10, 8, 10, 14, 14, 10, 8, 8], 40, 50, ["bleed", "poison"]),
 ]
 EXPECT_FLOOR_SLS = [1, 33, 60, 100, 150, 200, 838]
+EXPECT_FLEX = [  # stats, sl, armour names, ring names: flexibility(); the generated builds are added
+    ([10, 6, 7, 6, 6, 20, 9, 6, 18], 35, [], []),  # the SL 35 DEX/FTH character this was written for
+    ([10, 6, 7, 6, 6, 20, 9, 6, 18], 35, ["Alva Helm", "Alva Armor", "Alva Gauntlets", "Alva Leggings"],
+     ["Flynn's Ring", "Chloranthy Ring + 2"]),
+    ([20, 20, 15, 10, 40, 15, 15, 9, 9], 100, ["Naked", "Drangleic Mail", "Naked", "Naked"], []),
+    ([25, 20, 15, 12, 12, 40, 15, 9, 20], 150, [], ["Third Dragon Ring"]),
+]
 
 
 class _Some:
@@ -1860,8 +1993,9 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
     out.append(f"pub const WEAPONS_FOR: WeaponsForCases = {_rs(rows_out)};\n")
 
     mix = threat_mix(data, corpus)
-    opt, gen = expect_builds(data, corpus, mix, EXPECT_BUILDS, EXPECT_NAKED, "two")
-    opt_one, gen_one = expect_builds(data, corpus, mix, EXPECT_ONE_HANDED, [], "one")
+    flexes: list = []  # the generated builds, as flexibility() questions: filled by expect_builds
+    opt, gen = expect_builds(data, corpus, mix, EXPECT_BUILDS, EXPECT_NAKED, "two", flexes)
+    opt_one, gen_one = expect_builds(data, corpus, mix, EXPECT_ONE_HANDED, [], "one", flexes)
     out.append("// weapon, infusion, sl, objective -> class, two-handed, stats, value.")
     out.append(f"pub const OPTIMIZE: OptimizeCases = {_rs(opt)};\n")
     out.append("// weapon, infusion, sl, objective, allow naked -> class, two-handed, stats, 1H rows, 2H-only")
@@ -1880,10 +2014,11 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
         gear = [data.armor[s][p]["name"] for s, p in zip(ARMOR_SLOTS, arm) if p != "Naked"] \
             + [data.rings[r]["name"] for r in rs]
         mins.append((weapon, two, (data.classes[cls]["name"], m["target_sl"], arr(mid["stats"]), gear)))
-    return backend_expectations_rest(data, corpus, out, mins)
+    return backend_expectations_rest(data, corpus, out, mins, flexes)
 
 
-def expect_builds(data: Data, corpus: list[Build], mix, cases: list, naked_cases: list, grip: str):
+def expect_builds(data: Data, corpus: list[Build], mix, cases: list, naked_cases: list, grip: str,
+                  flexes: list | None = None):
     """The script's --optimize and --generate answers for `cases` (plus `naked_cases` generated with
     --allow-naked) at `grip`, as fixture tuples."""
     arr = lambda d: [int(d[s]) for s in STATS]
@@ -1902,6 +2037,10 @@ def expect_builds(data: Data, corpus: list[Build], mix, cases: list, naked_cases
         while len(rings) >= 3 and rings[0] == rings[1] == rings[2]:
             suggested.append(rings[0])
             rings = rings[3:]
+        if flexes is not None:  # the panel asks with the build's names: armour and suggested rings
+            flexes.append((arr(g["stats"]), sl, g["armor"], suggested,
+                           flexibility(data, corpus, g["stats"], sl, armor_keys(data, g["armor"]),
+                                       [data.sp_key[norm(r)] for r in suggested])))
         # Whether the armour's requirements and the load cap each changed the chosen set: the same
         # search with every other stat at 99, and with VIT at 99, picks differently.
         binds = (False, False)
@@ -1920,7 +2059,7 @@ def expect_builds(data: Data, corpus: list[Build], mix, cases: list, naked_cases
     return opt, gen
 
 
-def backend_expectations_rest(data: Data, corpus: list[Build], out: list[str], mins: list) -> str:
+def backend_expectations_rest(data: Data, corpus: list[Build], out: list[str], mins: list, flexes: list) -> str:
     """backend_expectations from MINIMUM on."""
     as_dict = lambda st: dict(zip(STATS, st))
     out.append("// weapon, two-handed -> class, sl, stats, gear.")
@@ -1941,6 +2080,19 @@ def backend_expectations_rest(data: Data, corpus: list[Build], out: list[str], m
     out.append(f"pub const FLOORS: FloorCases = {_rs(fl)};\n")
     c = calibrate_infusions(data, corpus)
     out.append(f"pub const CALIBRATION: (u32, f64, f64) = {_rs((c['n'], float(c['top1']), float(c['top2'])))};")
+
+    rows = []
+    for st, sl, armor, rings in EXPECT_FLEX:
+        keys = [data.sp_key[norm(r)] for r in rings]
+        f = flexibility(data, corpus, as_dict(st), sl, armor_keys(data, armor), keys)
+        rows.append((st, sl, armor, rings, f))
+    rows += flexes
+    out.append("")
+    out.append("// stats, sl, armour names, ring names -> weapons wielded 1H, 2H, of how many, neighbours")
+    out.append("// scoring below, the same, how many neighbours, percentile, spare load, weapons that fit it.")
+    out.append(f"pub const FLEXIBILITY: FlexCases = {_rs([(st, sl, armor, rings, (f['one'], f['two'], f['total'], f['below'], f['equal'], f['n'], float(f['percentile']), float(f['spare']), f['fits'])) for st, sl, armor, rings, f in rows])};")
+    out.append("")
+    out.append(f"pub const FLEX_LINES: &[(&str, &str)] = {_rs([(flex_line(f), flex_load_line(f)) for *_, f in rows])};")
     return "\n".join(out) + "\n"
 
 
@@ -1974,6 +2126,46 @@ SELFTEST_ATTACKS = {
 }
 
 
+def flex_selftest_cases() -> list:
+    """flex_counts/flexibility over a four-weapon table and a five-build corpus, no site tables."""
+    from types import SimpleNamespace
+    weapons = {
+        "Bare_Fists": {"name": "Bare Fists", "weight": 0.0},  # EMPTY: never counted
+        "Dagger": {"name": "Dagger", "weight": 1.0, "require": {"strength": 5, "dexterity": 8}},
+        "Club": {"name": "Club", "weight": 6.0, "require": {"strength": 20}},  # 2H needs STR 10
+        "Chime": {"name": "Chime", "weight": 2.5, "require": {"strength": 3, "faith": 18}},
+        "Greataxe": {"name": "Greataxe", "weight": 20.0, "require": {"strength": 31}},  # 2H needs 15
+    }
+    base = dict.fromkeys(STATS, 5)
+    data = SimpleNamespace(
+        weapons=weapons, classes={"x": {"level": 156, **base}},  # every build in SL bracket 156-200
+        armor={s: {"Naked": {"name": "Naked", "weight": 0.0}, "Plate": {"name": "Plate", "weight": 10.0}}
+               for s in ARMOR_SLOTS},
+        rings={"Flynns_Ring": {"name": "Flynn's Ring", "weight": 0.5}},
+        equip_load=[None] + [40.0 + 1.5 * i for i in range(99)])
+    st = lambda **kw: {**base, **{s: kw.get(s[:3], base[s]) for s in STATS}}
+    user = st(str=10, dex=8, fai=18, vit=10)  # Dagger, Chime 1H; Club too 2H: 2 + 3 = 5
+    corpus = [Build("x", st(str=s_, dex=d, fai=f), [], [], 0, [], [], label=str(i))
+              for i, (s_, d, f) in enumerate([(5, 5, 5), (5, 8, 5), (10, 8, 18), (31, 8, 18), (20, 8, 5)])]
+    f = flexibility(data, corpus, user, 180, ["Plate", "Naked", "Naked", "Naked"], ["Flynns_Ring"], k=5)  # sl in that bracket
+    # corpus scores: 0+0, 1+1, 2+3, 4+4, 2+3 -> 2 below 5, 2 equal -> 100 * (2 + 1) / 5 = 60
+    return [
+        ("flex: Bare_Fists is no weapon", len(flex_pool(data)[0]), 4),
+        ("flex: STR 10 two-hands a STR 20 club, not one", flex_counts(data, st(str=10)), (0, 1)),
+        ("flex: STR 9 wields neither", flex_counts(data, st(str=9)), (0, 0)),
+        ("flex: halving floors, STR 15 two-hands a STR 31 axe", flex_counts(data, st(str=15))[1], 2),
+        ("flex: counts", (f["one"], f["two"], f["total"], f["score"]), (2, 3, 4, 5)),
+        ("flex: neighbours below/equal", (f["below"], f["equal"], f["n"]), (2, 2, 5)),
+        ("flex: mid-rank percentile", f["percentile"], 60.0),
+        # VIT 10 -> 40 + 1.5 * 9 = 53.5, * 0.7 = 37.45, less 10 plate and 0.5 ring = 26.95: all three fit
+        ("flex: spare load after armour and rings", round(f["spare"], 2), 26.95),
+        ("flex: fits", f["fits"], 3),
+        ("flex: the panel's line", flex_line(f), "wields 2/4 1H, 3 2H -- 60th percentile of 5 similar builds"),
+        ("flex: ordinals", [ordinal(n) for n in (1, 2, 3, 4, 11, 12, 13, 21, 22, 100)],
+         ["1st", "2nd", "3rd", "4th", "11th", "12th", "13th", "21st", "22nd", "100th"]),
+    ]
+
+
 def selftest() -> int:
     """Offline checks of the hits-per-attack model (no site tables, no corpus)."""
     A = SELFTEST_ATTACKS
@@ -1991,6 +2183,7 @@ def selftest() -> int:
         ("trident in 0.5 s: R1 only", status_hits(A, ["Channeler's Trident"], [False], 0.5), (1, "1H R1 1 hit")),
         ("trident in 1.5 s: R2", status_hits(A, ["Channeler's Trident"], [False], 1.5), (4, "1H R2 4 hits")),
     ]
+    cases += flex_selftest_cases()
     if ATTACKS.exists():  # the real extracted rows agree with the copies above
         real = load_attacks()
         for key in [k for k in A if k in real]:
@@ -2002,6 +2195,17 @@ def selftest() -> int:
             print(f"  FAIL {what}: got {got!r}, want {want!r}")
     print(f"selftest: {len(cases) - bad}/{len(cases)} pass" + ("" if ATTACKS.exists() else f" ({ATTACKS} absent)"))
     return 1 if bad else 0
+
+
+def parse_stat_line(text: str) -> dict:
+    """ "VGR=10,END=16,..." into a STATS dict, stats left out at 0."""
+    abbr = {s[:3].upper(): s for s in STATS} | {"VGR": "vigor", "ADP": "adaptability", "FTH": "faith",
+                                               "ATN": "attunement"}
+    stats = {s: 0 for s in STATS}
+    for part in text.split(","):
+        k, v = part.split("=")
+        stats[abbr[k.strip().upper()[:3]]] = int(v)
+    return stats
 
 
 def main() -> int:
@@ -2041,6 +2245,17 @@ def main() -> int:
                          "attack, or hits landed within --window seconds")
     g.add_argument("--weapons-for", metavar="STATS",
                    help='rank weapons for these stats, e.g. "VGR=10,END=16,VIT=7,ATT=9,STR=20,DEX=12,ADP=8,INT=12,FTH=12"')
+    g.add_argument("--flexibility", metavar="STATS",
+                   help="how many weapons these stats wield 1H/2H, the weapon weight left under 70%% load after "
+                        "--armor, and the build's percentile among its --k nearest stat-neighbour builds")
+    g.add_argument("--flex-sweep", metavar="W,W,...",
+                   help="--optimize every EXPECT_BUILDS/EXPECT_ONE_HANDED case at each flexibility weight and "
+                        "print the objective and the flexibility it gives: how FLEX_WEIGHT was chosen")
+    ap.add_argument("--armor", metavar="HEAD/CHEST/HANDS/LEGS",
+                    help="with --flexibility: the armour worn, names or keys, '/'-separated (Naked for none)")
+    ap.add_argument("--flex-weight", type=float, default=None, metavar="W",
+                    help=f"with --optimize/--generate: the soft flexibility term per weapon unlocked per point "
+                         f"(default {FLEX_WEIGHT}; 0 is the optimizer without it)")
     ap.add_argument("--raw-ar", action="store_true", help="with --weapons-for: rank by total attack rating, before defenses")
     ap.add_argument("--neighbours", action="store_true",
                     help="with --weapons-for: weapons carried by corpus builds with the nearest stats, usable only")
@@ -2113,7 +2328,7 @@ def main() -> int:
             ap.error(f"unknown weapon {name!r}")
         corpus, _ = load_corpus(data)
         g = generate_build(data, corpus, weapon, inf.replace(" ", "_") or "No_Infusion", a.sl, a.objective,
-                           a.window or 1.5, a.k, a.allow_naked, a.grip)
+                           a.window or 1.5, a.k, a.allow_naked, a.grip, a.flex_weight)
         if g is None:
             print(f"no valid SL {a.sl} build wields {data.weapons[weapon]['name']} (grip {a.grip})")
             return 2
@@ -2134,6 +2349,51 @@ def main() -> int:
             print("  armor: " + (" / ".join(g["armor"]) or "none"))
         if g["armor_note"]:
             print(f"  armor: {g['armor_note']}")
+        print(f"  flexibility: {flex_line(g['flex'])}")
+        print(f"  load: {flex_load_line(g['flex'])}")
+        return 0
+    if a.flex_sweep:
+        weights = [float(w) for w in a.flex_sweep.split(",")]
+        corpus, _ = load_corpus(data)
+        print("weapon (infusion) SL objective grip: per weight, objective (change) 1H/2H percentile")
+        for grip, cases in (("two", EXPECT_BUILDS), ("one", EXPECT_ONE_HANDED)):
+            for weapon, inf, sl, objective in cases:
+                cells, base = [], None
+                for w in weights:
+                    best, _ = optimize_build(data, corpus, weapon, inf, sl, objective, grip, w)
+                    if best is None:
+                        cells.append("none")
+                        continue
+                    f = flexibility(data, corpus, best[3], sl)
+                    base = best[0] if base is None else base
+                    cells.append(f"w={w:g}: {best[0]:.0f} ({(best[0] / base - 1) if base else 0:+.1%}) "
+                                 f"{f['one']}/{f['two']} p{round(f['percentile'])} "
+                                 + "".join(f"{s[:3].upper()}{best[3][s]}" for s in REQ_STATS))
+                print(f"{data.weapons[weapon]['name']} ({inf}) SL {sl} {objective} {grip}")
+                for c in cells:
+                    print(f"    {c}")
+        return 0
+    if a.flexibility:
+        stats = parse_stat_line(a.flexibility)
+        sl = a.sl or sum(stats.values()) - 53
+        armor = []
+        for slot, name in zip(ARMOR_SLOTS, (a.armor or "").split("/") if a.armor else []):
+            name = name.strip()
+            key = name if name in data.armor[slot] else next(
+                (k for k, v in data.armor[slot].items() if v.get("name", k) == name), "Naked")
+            if name not in ("", "Naked") and key == "Naked":
+                ap.error(f"unknown {slot} armour {name!r}")
+            armor.append(key)
+        corpus, _ = load_corpus(data)
+        f = flexibility(data, corpus, stats, sl, armor, [], a.k)
+        if a.json:
+            print(json.dumps(f, indent=1))
+            return 0
+        print(f"stats {' '.join(f'{s[:3].upper()} {v}' for s, v in stats.items())}  ->  SL {sl}")
+        print(f"  {flex_line(f)}")
+        print(f"    score {f['score']} (1H + 2H): {f['below']} of the {f['n']} nearest builds score below, "
+              f"{f['equal']} the same")
+        print(f"  {flex_load_line(f)}")
         return 0
     if a.optimize:
         if not a.sl:
@@ -2144,7 +2404,7 @@ def main() -> int:
             ap.error(f"unknown weapon {name!r}")
         inf = inf.replace(" ", "_") or "No_Infusion"
         corpus, _ = load_corpus(data)
-        best, floors = optimize_build(data, corpus, weapon, inf, a.sl, a.objective, a.grip)
+        best, floors = optimize_build(data, corpus, weapon, inf, a.sl, a.objective, a.grip, a.flex_weight)
         if best is None:
             print(f"no valid SL {a.sl} build wields {data.weapons[weapon]['name']} (grip {a.grip}) with the "
                   "bracket floors "
@@ -2155,15 +2415,11 @@ def main() -> int:
               f" {'two-handed' if two else 'one-handed'}\n  "
               + " ".join(f"{s[:3].upper()} {stats[s]}" for s in STATS)
               + "\n  floors (bracket medians): " + " ".join(f"{s[:3].upper()} {v}" for s, v in floors.items()))
+        print(f"  flexibility: {flex_line(flexibility(data, corpus, stats, a.sl))}")
         a.weapons_for = ",".join(f"{s[:3].upper()}={stats[s]}" for s in STATS)
     if a.weapons_for:
-        abbr = {s[:3].upper(): s for s in STATS} | {"VGR": "vigor", "ADP": "adaptability", "FTH": "faith",
-                                                   "ATN": "attunement"}
-        stats = {s: 0 for s in STATS}
-        for part in a.weapons_for.split(","):
-            k, v = part.split("=")
-            stats[abbr[k.strip().upper()[:3]]] = int(v)
-        sl = a.sl or sum(stats.values()) - 53  # every DS2 class satisfies level = stat total - 53
+        stats = parse_stat_line(a.weapons_for)
+        sl =a.sl or sum(stats.values()) - 53  # every DS2 class satisfies level = stat total - 53
         corpus, _ = load_corpus(data)
         floors, r1, cut = build_floors(data, corpus, sl)
         bad = floor_violations(stats, floors)
