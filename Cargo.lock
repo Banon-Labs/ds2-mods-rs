@@ -704,7 +704,11 @@ name = "ds2-music-probe"
 version = "0.1.0"
 dependencies = [
  "ds2-game-base",
+ "ds2-hotkey-config",
+ "ds2-input-harness",
+ "ds2-overlay",
  "ds2-rva",
+ "hudhook",
 ]
 
 [[package]]
