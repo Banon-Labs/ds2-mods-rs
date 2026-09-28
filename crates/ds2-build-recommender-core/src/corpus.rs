@@ -33,7 +33,7 @@ use crate::weapons;
 pub const DATA_FILE_NAME: &str = "ds2-build-recommender.dat";
 
 /// The file's first line. A different one is a file this port does not read.
-pub const FORMAT: &str = "ds2-build-recommender-data 1";
+pub const FORMAT: &str = "ds2-build-recommender-data 2";
 
 /// Nine stats as the script computes with them, in [`crate::model::STAT_LABELS`] order.
 type Stats = [i32; STAT_COUNT];
@@ -286,6 +286,17 @@ struct ArmorPiece {
     require: Vec<(usize, i32)>,
 }
 
+/// An armour piece, as `best_armor` reads it.
+#[derive(Clone, Debug)]
+struct Wearable {
+    key: String,
+    name: String,
+    weight: f64,
+    /// physical, magic, fire, lightning, dark.
+    defense: [f64; 5],
+    require: Vec<(usize, i32)>,
+}
+
 /// One corpus build, as nearest-build search reads it.
 #[derive(Clone, Debug)]
 struct CorpusBuild {
@@ -350,11 +361,17 @@ pub struct CorpusBackend {
     tables: Tables,
     weapons: Vec<Weapon>,
     brackets: Vec<Bracket>,
-    /// `(key, name)`.
-    rings: Vec<(String, String)>,
+    /// `(key, name, weight)`.
+    rings: Vec<(String, String, f64)>,
     ring_effects: Vec<RingEffect>,
     /// head, chest, hands, legs.
     armor: [Vec<ArmorPiece>; 4],
+    /// Every armour piece, `Naked` among them, head, chest, hands, legs: what `best_armor` picks
+    /// from.
+    wearable: [Vec<Wearable>; 4],
+    /// The share of damage the corpus's weapons deal per type, physical, magic, fire, lightning,
+    /// dark: what `best_armor` weights each defense by.
+    threat_mix: [f64; 5],
     calibration: Option<Calibration>,
     /// Rings at least a tenth of all builds wear, most worn first, as indices into `rings`.
     common: Vec<usize>,
@@ -416,6 +433,16 @@ fn infusion_code(code: &str, line: usize) -> Result<Option<Infusion>, String> {
             .ok_or_else(|| bad(line, "unknown infusion code")),
         _ => Err(bad(line, "bad infusion code")),
     }
+}
+
+/// head, chest, hands, legs: the script's `ARMOR_SLOTS`, by index.
+const ARMOR_SLOTS: [&str; 4] = ["head", "chest", "hands", "legs"];
+
+fn armor_slot(name: &str, line: usize) -> Result<usize, String> {
+    ARMOR_SLOTS
+        .iter()
+        .position(|&slot| slot == name)
+        .ok_or_else(|| bad(line, "armour slot"))
 }
 
 fn indices(field: Option<&str>, line: usize) -> Result<Vec<usize>, String> {
@@ -603,8 +630,32 @@ impl CorpusBackend {
             "R" => {
                 let key = next("ring key")?.to_owned();
                 let name = next("ring name")?.to_owned();
+                let weight = float(Some(next("weight")?), line)?;
                 ring_index.insert(key.clone(), self.rings.len());
-                self.rings.push((key, name));
+                self.rings.push((key, name, weight));
+            }
+            "P" => {
+                let slot = armor_slot(next("armour slot")?, line)?;
+                let key = next("armour key")?.to_owned();
+                let name = next("armour name")?.to_owned();
+                let weight = float(Some(next("weight")?), line)?;
+                let mut defense = [0.0; 5];
+                for value in &mut defense {
+                    *value = float(fields.next(), line)?;
+                }
+                let require = stat_pairs(fields.next(), line)?;
+                self.wearable[slot].push(Wearable {
+                    key,
+                    name,
+                    weight,
+                    defense,
+                    require,
+                });
+            }
+            "H" => {
+                for value in &mut self.threat_mix {
+                    *value = float(fields.next(), line)?;
+                }
             }
             "E" => {
                 let key = next("ring key")?.to_owned();
@@ -619,13 +670,7 @@ impl CorpusBackend {
                 });
             }
             "A" => {
-                let slot = match next("armour slot")? {
-                    "head" => 0,
-                    "chest" => 1,
-                    "hands" => 2,
-                    "legs" => 3,
-                    _ => return Err(bad(line, "armour slot")),
-                };
+                let slot = armor_slot(next("armour slot")?, line)?;
                 next("armour key")?;
                 let name = next("armour name")?.to_owned();
                 let weight = float(Some(next("weight")?), line)?;
@@ -1356,8 +1401,8 @@ impl CorpusBackend {
             let key = &self.ring_effects[ring].key;
             self.rings
                 .iter()
-                .find(|(ring_key, _)| ring_key == key)
-                .map(|(_, name)| name.clone())
+                .find(|(ring_key, ..)| ring_key == key)
+                .map(|(_, name, _)| name.clone())
         });
         Some(OptimizedBuild {
             class: class.name.clone(),
@@ -1367,6 +1412,133 @@ impl CorpusBackend {
             value: 0.0,
             gear: pick.armor.iter().cloned().chain(ring_names).collect(),
         })
+    }
+}
+
+impl CorpusBackend {
+    /// The script's `best_armor` with `top=1`: the equip-load cap, what the weapon and rings
+    /// carry, and the set, head to legs, whose defense weighted by the corpus threat mix is
+    /// highest among those these stats can wear under the cap. `None` when nothing fits, which
+    /// only happens when the weapon and rings alone are over it: `Naked` is a piece in every slot.
+    fn best_armor(
+        &self,
+        stats: &Stats,
+        weapon: &Weapon,
+        rings: &[usize],
+    ) -> (f64, f64, Option<[&Wearable; 4]>) {
+        let cap = self.tables.equip_load.at(stats[VIT]) * EQUIP_CAP;
+        let ring_weight = rings
+            .iter()
+            .map(|&ring| self.rings[ring].2)
+            .fold(0.0, |total, weight| total + weight);
+        let carried = weapon.weight + ring_weight;
+        let budget = cap - carried;
+        let value = |piece: &Wearable| {
+            piece
+                .defense
+                .iter()
+                .zip(self.threat_mix)
+                .fold(0.0, |total, (defense, share)| total + share * defense)
+        };
+        // Per slot, only the pieces that beat every lighter one.
+        let fronts: Vec<Vec<(f64, f64, &Wearable)>> = self
+            .wearable
+            .iter()
+            .map(|slot| {
+                let mut candidates: Vec<(f64, f64, &Wearable)> = slot
+                    .iter()
+                    .filter(|piece| {
+                        piece
+                            .require
+                            .iter()
+                            .all(|&(stat, need)| need <= stats[stat])
+                    })
+                    .map(|piece| (piece.weight, value(piece), piece))
+                    .collect();
+                candidates.sort_by(|a, b| a.0.total_cmp(&b.0).then(b.1.total_cmp(&a.1)));
+                let mut front = Vec::new();
+                let mut best = -1.0;
+                for candidate in candidates {
+                    if candidate.1 > best {
+                        best = candidate.1;
+                        front.push(candidate);
+                    }
+                }
+                front
+            })
+            .collect();
+        fn keys<'a>(set: &[&'a Wearable; 4]) -> [&'a str; 4] {
+            set.map(|piece| piece.key.as_str())
+        }
+        let mut top: Option<(f64, f64, [&Wearable; 4])> = None;
+        for h in &fronts[0] {
+            for c in &fronts[1] {
+                if h.0 + c.0 > budget {
+                    break;
+                }
+                for g in &fronts[2] {
+                    if h.0 + c.0 + g.0 > budget {
+                        break;
+                    }
+                    for l in &fronts[3] {
+                        let weight = h.0 + c.0 + g.0 + l.0;
+                        if weight > budget {
+                            break;
+                        }
+                        let set = (h.1 + c.1 + g.1 + l.1, weight, [h.2, c.2, g.2, l.2]);
+                        // Python's descending sort of `(value, weight, keys)`, first place.
+                        let better = top.as_ref().is_none_or(|best| {
+                            set.0
+                                .total_cmp(&best.0)
+                                .then(set.1.total_cmp(&best.1))
+                                .then_with(|| keys(&set.2).cmp(&keys(&best.2)))
+                                .is_gt()
+                        });
+                        if better {
+                            top = Some(set);
+                        }
+                    }
+                }
+            }
+        }
+        (cap, carried, top.map(|(_, _, set)| set))
+    }
+
+    /// The script's `generate_armor`: the pieces' names head to legs, `Naked` for a slot left
+    /// bare, and the note that says why a slot or the whole set is bare.
+    fn generate_armor(
+        &self,
+        stats: &Stats,
+        weapon: &Weapon,
+        rings: &[usize],
+    ) -> (Vec<String>, Option<String>) {
+        let (cap, carried, set) = self.best_armor(stats, weapon, rings);
+        let percent = EQUIP_CAP * 100.0;
+        let Some(set) = set else {
+            return (
+                Vec::new(),
+                Some(format!(
+                    "no armor fits: the weapon and rings weigh {carried:.1}, over the {cap:.1} a \
+                     {percent:.0}% load allows at VIT {}",
+                    stats[VIT]
+                )),
+            );
+        };
+        let bare: Vec<&str> = ARMOR_SLOTS
+            .iter()
+            .zip(set)
+            .filter(|(_, piece)| piece.key == "Naked")
+            .map(|(slot, _)| *slot)
+            .collect();
+        let note = (!bare.is_empty()).then(|| {
+            format!(
+                "{} left bare: nothing wearable there fits the {:.1} of load left under \
+                 {percent:.0}%",
+                bare.join(", "),
+                cap - carried
+            )
+        });
+        (set.iter().map(|piece| piece.name.clone()).collect(), note)
     }
 }
 
@@ -1549,6 +1721,7 @@ impl RecommenderBackend for CorpusBackend {
         infusion: Infusion,
         sl: u16,
         objective: Objective,
+        allow_naked: bool,
     ) -> Option<GeneratedBuild> {
         let primary = self.weapon_by_key(weapon)?;
         let (_, class, two_handed, stats) =
@@ -1599,6 +1772,11 @@ impl RecommenderBackend for CorpusBackend {
             .map(|&(ring, _)| ring)
             .collect();
         let name = |ring: &usize| self.rings[*ring].1.clone();
+        let (armor, armor_note) = if allow_naked {
+            (Vec::new(), None)
+        } else {
+            self.generate_armor(&stats, primary, &suggested)
+        };
         Some(GeneratedBuild {
             class: self.classes[class].name.clone(),
             sl,
@@ -1614,8 +1792,8 @@ impl RecommenderBackend for CorpusBackend {
                 .filter(|ring| !suggested.contains(ring))
                 .map(name)
                 .collect(),
-            // The script chooses no armour for a generated build yet.
-            armor: Vec::new(),
+            armor,
+            armor_note,
             stub: false,
         })
     }
