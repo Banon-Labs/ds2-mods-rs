@@ -1078,6 +1078,161 @@ def calibrate_infusions(data: Data, corpus: list[Build]) -> dict:
     return {"n": total, "top1": hit / max(total, 1), "top2": top2 / max(total, 1), "confusions": miss.most_common(8)}
 
 
+# --------------------------------------------------------------------------------------------
+# MugenMonkey infusion inference (docs/DS2-BUILD-EMBEDDINGS.md "MugenMonkey infusion inference")
+#
+# MugenMonkey records no infusion. A conditional-logit model picks one per weapon from what a
+# MugenMonkey build does record: the build's effective STR/DEX/INT/FTH (per infusion, so "INT high"
+# can mean Magic), the damage model's score for each infusion, and how often SoulsPlanner builds
+# chose each infusion on that same weapon. It is fitted on SoulsPlanner builds and measured on
+# SoulsPlanner builds whose infusion is hidden (`--infusion-eval`, split by build).
+
+INFUSIONS = ["No_Infusion", "Fire", "Magic", "Lightning", "Dark", "Poison", "Bleed", "Raw", "Enchanted", "Mundane"]
+INF_STATS = ["strength", "dexterity", "intelligence", "faith"]
+
+
+def infusion_cases(data: Data, corpus: list[Build], recorded: bool = True,
+                   builds: list[Build] | None = None) -> list[dict]:
+    """One case per distinct weapon of a build in `builds` (default: the corpus): the population
+    calibrate_infusions scores (no shields, no catalysts, at least two infusions). recorded=True:
+    SoulsPlanner weapons, with the chosen infusion as the label; False: MugenMonkey's '?' weapons,
+    unlabelled. Defenses are the corpus's bracket averages; "build" is the index into `builds`."""
+    by_sl, cases = {}, []
+    for bi, b in enumerate(corpus if builds is None else builds):
+        ws = [(w, inf) for w, inf in dict.fromkeys(b.weapons())
+              if (inf != "?") == recorded and w in data.weapons and not data.weapons[w].get("isShield")
+              and not CATALYST.search(w) and len(data.weapons[w]["infusions"]) >= 2
+              and (not recorded or inf in data.weapons[w]["infusions"])]
+        if not ws:
+            continue
+        sl = soul_level(data, b)
+        i = sl_bracket(sl)
+        if i not in by_sl:
+            by_sl[i] = bracket_defense(data, corpus, sl)[0]
+        dfn, eff = by_sl[i], effective(data, b)
+        for w, inf in ws:
+            infs = list(data.weapons[w]["infusions"])
+            dmg = [sum(damage(k, v, dfn[k]) for k, v in attack_rating(data, w, f, eff).items()) for f in infs]
+            cases.append({"build": bi, "weapon": w, "infusion": inf if recorded else None, "candidates": infs,
+                          "damage": dmg, "stats": [eff[s] / 99 for s in INF_STATS]})
+    return cases
+
+
+class InfusionModel:
+    """Conditional logit over a weapon's own infusions. Features of candidate f: one-hot f;
+    one-hot f x effective STR/DEX/INT/FTH / 99; log smoothed share of f among SoulsPlanner builds
+    carrying this weapon (leave-one-out while fitting, so a case never sees its own label); the
+    damage model's score for f relative to the weapon's best; whether f is the damage model's best."""
+
+    def __init__(self, cases: list[dict], prior: bool = True, alpha: float = 2.0, l2: float = 1e-3,
+                 steps: int = 600, lr: float = 0.5):
+        self.use_prior, self.alpha = prior, alpha
+        self.count = Counter((c["weapon"], c["infusion"]) for c in cases)
+        self.total = Counter(c["weapon"] for c in cases)
+        g = Counter(c["infusion"] for c in cases)
+        self.base = {f: (g[f] + 1) / (len(cases) + len(INFUSIONS)) for f in INFUSIONS}
+        F, y, starts = self._matrix(cases, loo=True)
+        self.theta = np.zeros(F.shape[1])
+        m, v = np.zeros_like(self.theta), np.zeros_like(self.theta)
+        for t in range(1, steps + 1):  # Adam on the mean negative log-likelihood + L2
+            p = self._softmax(F @ self.theta, starts)
+            grad = F.T @ (p - y) / len(starts) + l2 * self.theta
+            m = 0.9 * m + 0.1 * grad
+            v = 0.999 * v + 0.001 * grad * grad
+            self.theta -= lr * 0.1 * (m / (1 - 0.9 ** t)) / (np.sqrt(v / (1 - 0.999 ** t)) + 1e-8)
+
+    def _rows(self, c: dict, loo: bool) -> np.ndarray:
+        best = max(c["damage"]) or 1.0
+        top = int(np.argmax(c["damage"]))
+        n_w = self.total[c["weapon"]] - (1 if loo else 0)
+        out = []
+        for j, f in enumerate(c["candidates"]):
+            x = np.zeros(len(INFUSIONS) * (1 + len(INF_STATS)) + 3)
+            k = INFUSIONS.index(f)
+            x[k] = 1.0
+            x[len(INFUSIONS) + k * len(INF_STATS): len(INFUSIONS) + (k + 1) * len(INF_STATS)] = c["stats"]
+            if self.use_prior:
+                n_wf = self.count[(c["weapon"], f)] - (1 if loo and f == c["infusion"] else 0)
+                x[-3] = np.log((n_wf + self.alpha * self.base[f]) / (n_w + self.alpha))
+            x[-2] = c["damage"][j] / best
+            x[-1] = float(j == top)
+            out.append(x)
+        return np.array(out)
+
+    def _matrix(self, cases: list[dict], loo: bool):
+        rows, y, starts = [], [], []
+        for c in cases:
+            starts.append(sum(len(r) for r in rows))
+            rows.append(self._rows(c, loo))
+            y.extend(float(f == c["infusion"]) for f in c["candidates"])
+        return np.vstack(rows), np.array(y), np.array(starts)
+
+    @staticmethod
+    def _softmax(s: np.ndarray, starts: np.ndarray) -> np.ndarray:
+        s = s - np.repeat(np.maximum.reduceat(s, starts), np.diff(np.append(starts, len(s))))
+        e = np.exp(s)
+        return e / np.repeat(np.add.reduceat(e, starts), np.diff(np.append(starts, len(s))))
+
+    def predict(self, c: dict) -> list[tuple[float, str]]:
+        """(probability, infusion), most likely first."""
+        s = self._rows(c, loo=False) @ self.theta
+        p = np.exp(s - s.max())
+        p /= p.sum()
+        return sorted(zip(p.tolist(), c["candidates"]), reverse=True)
+
+
+def evaluate_infusion_inference(data: Data, corpus: list[Build], folds: int = 5, seed: int = 0) -> dict:
+    """Hide each SoulsPlanner weapon's infusion and predict it from what MugenMonkey would also have,
+    `folds`-fold split by build. Baselines are fitted on the same training folds."""
+    cases = infusion_cases(data, corpus)
+    builds = sorted({c["build"] for c in cases})
+    fold_of = dict(zip(np.random.default_rng(seed).permutation(builds).tolist(), range(len(builds))))
+    names = ["majority class", "per-weapon majority", "damage model best", "logit, stats + damage only",
+             "logit (shipped)"]
+    hits, top2, conf = Counter(), Counter(), Counter()
+    cal = []  # (predicted probability, correct) of the shipped model, for the confidence table
+    for k in range(folds):
+        train = [c for c in cases if fold_of[c["build"]] % folds != k]
+        test = [c for c in cases if fold_of[c["build"]] % folds == k]
+        glob = Counter(c["infusion"] for c in train)
+        per_w: dict = {}
+        for c in train:
+            per_w.setdefault(c["weapon"], Counter())[c["infusion"]] += 1
+        ablate, full = InfusionModel(train, prior=False), InfusionModel(train)
+        for c in test:
+            maj = max(c["candidates"], key=lambda f: glob[f])
+            pw = per_w.get(c["weapon"])
+            wmaj = max(c["candidates"], key=lambda f: (pw[f], glob[f])) if pw else maj
+            dm = c["candidates"][int(np.argmax(c["damage"]))]
+            pa, pf = ablate.predict(c), full.predict(c)
+            for name, guess in zip(names, [maj, wmaj, dm, pa[0][1], pf[0][1]]):
+                hits[name] += guess == c["infusion"]
+            top2["logit (shipped)"] += c["infusion"] in (pf[0][1], pf[1][1])
+            cal.append((pf[0][0], pf[0][1] == c["infusion"]))
+            if pf[0][1] != c["infusion"]:
+                conf[(c["infusion"], pf[0][1])] += 1
+    n = len(cases)
+    bands = []
+    for lo, hi in ((0.0, 0.5), (0.5, 0.7), (0.7, 0.9), (0.9, 1.01)):
+        sel = [ok for p, ok in cal if lo <= p < hi]
+        bands.append((lo, min(hi, 1.0), len(sel), sum(sel) / max(len(sel), 1)))
+    return {"n": n, "builds": len(builds), "folds": folds, "acc": {m: hits[m] / max(n, 1) for m in names},
+            "top2": top2["logit (shipped)"] / max(n, 1), "bands": bands,
+            "labels": Counter(c["infusion"] for c in cases).most_common(), "confusions": conf.most_common(8)}
+
+
+def infer_mugen_infusions(data: Data, corpus: list[Build], builds: list[Build]) -> list[list[tuple[str, str, float]]]:
+    """Per build in `builds` (MugenMonkey, infusions '?'): (weapon, most likely infusion, its
+    probability) for every weapon the model covers, from an InfusionModel fitted on every labelled
+    corpus weapon. Defenses are the corpus's bracket averages."""
+    model = InfusionModel(infusion_cases(data, corpus))
+    out = [[] for _ in builds]
+    for c in infusion_cases(data, corpus, recorded=False, builds=builds):
+        p, f = model.predict(c)[0]
+        out[c["build"]].append((c["weapon"], f, p))
+    return out
+
+
 def neighbour_weapons(data: Data, stats: dict, sl: int, corpus: list[Build], k: int = 50, top: int = 15,
                       status: list[str] | None = None):
     """Weapons carried by the k corpus builds in `sl`'s bracket nearest `stats` (per-stat bracket
@@ -1602,6 +1757,9 @@ def main() -> int:
     g.add_argument("--minimum", metavar="WEAPON", help="lowest SL per class to wield WEAPON (SoulsPlanner key or name)")
     g.add_argument("--calibrate", action="store_true",
                    help="how often the damage model's best infusion matches real SoulsPlanner builds' choice")
+    g.add_argument("--infusion-eval", action="store_true",
+                   help="MugenMonkey infusion inference, measured on SoulsPlanner builds with their infusion hidden "
+                        "(5-fold by build) against majority-class baselines")
     g.add_argument("--optimize", metavar="WEAPON:INFUSION",
                    help="the valid build at --sl that maximizes --objective for this weapon, then --weapons-for on it")
     g.add_argument("--generate", metavar="WEAPON:INFUSION",
@@ -1657,6 +1815,24 @@ def main() -> int:
               f"top two {c['top2']:.1%}")
         for (real, model), k in c["confusions"]:
             print(f"  {k:5}  chose {real:12} model says {model}")
+        return 0
+    if a.infusion_eval:
+        corpus = load_corpus(data)[0]
+        e = evaluate_infusion_inference(data, corpus)
+        print(f"{e['n']} SoulsPlanner weapons ({e['builds']} builds), infusion hidden, {e['folds']}-fold by build")
+        print("  labels: " + ", ".join(f"{f} {k}" for f, k in e["labels"]))
+        for name, acc in e["acc"].items():
+            print(f"  {acc:6.1%}  {name}")
+        print(f"  {e['top2']:6.1%}  logit (shipped), top two")
+        print("  shipped model by its own confidence:")
+        for lo, hi, n, acc in e["bands"]:
+            print(f"    p {lo:.1f}-{hi:.1f}: {n:5} weapons, {acc:6.1%} right")
+        for (real, guess), k in e["confusions"]:
+            print(f"  {k:5}  chose {real:12} inferred {guess}")
+        mm = [b for b in corpus if any(i == "?" for _, i in b.weapons())]
+        guessed = Counter(f for rows in infer_mugen_infusions(data, corpus, mm) for _, f, _ in rows)
+        print(f"  inferred over {len(mm)} MugenMonkey corpus builds: "
+              + ", ".join(f"{f} {k}" for f, k in guessed.most_common()))
         return 0
     if a.generate:
         if not a.sl:
@@ -1815,6 +1991,9 @@ def main() -> int:
     print(f"\n{b.label}")
     print("  effective stats:", " ".join(f"{s[:3].upper()} {eff[s]}" for s in STATS))
     print("  has:", ", ".join(pretty(t, data) for t in sorted(tokens(b))))
+    if a.mugen:  # display only: inferred infusions do not enter the item model (see --infusion-eval)
+        for w, f, p in infer_mugen_infusions(data, corpus, [b])[0]:
+            print(f"  inferred infusion: {data.weapons[w]['name']} -> {f.replace('_', ' ')} (p {p:.2f})")
     for bucket, rows in out.items():
         print(f"\n  {bucket}s  (score = EASE + stat-neighbours + scaling fit)")
         for t, sc, e, nb, f in rows:

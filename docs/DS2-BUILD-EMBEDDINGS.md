@@ -61,10 +61,31 @@ not the planner sites.
 
 ## MugenMonkey infusion inference
 
-MugenMonkey stores no infusion, so it is inferred: at **full upgrade** (+10, +5 for twinkling/boss
-weapons), the infusion with the highest expected damage against a reference defender wins. The
-reference defender's defense for each damage type is the corpus average, including armor, rings and
-stat-derived defense. The build's own damage rings (e.g. Dark Clutch) apply.
+MugenMonkey stores no infusion, so it is inferred. The first design -- the infusion with the highest
+expected damage against the corpus-average defender -- matches SoulsPlanner builds' real choice only
+41.0% of the time (`--calibrate`), below the 51.8% of always guessing No_Infusion.
+
+What ships (`InfusionModel` in `scripts/ds2-builds-recommend.py`) is a conditional logit over the
+weapon's own infusions, fitted on SoulsPlanner builds, using only what a MugenMonkey build also
+records: effective STR/DEX/INT/FTH (per infusion), the damage model's score per infusion, and the
+share of SoulsPlanner builds carrying that weapon that chose each infusion. `--infusion-eval` hides
+the infusion of 5965 SoulsPlanner weapons (3373 builds, 5-fold split by build):
+
+| Predictor | Accuracy |
+|---|---|
+| Majority class (No_Infusion) | 51.8% |
+| Per-weapon majority | 62.4% |
+| Damage model best | 41.0% |
+| Logit, stats + damage only (no per-weapon prior) | 63.3% |
+| **Logit (shipped)** | **68.3%** (top two 84.7%) |
+
+Its probability is usable as confidence: 91.9% right when p >= 0.9 (1042 weapons), 43.5% when
+p < 0.5 (1744). Most errors are an elemental choice inferred as No_Infusion.
+
+Not proven: that SoulsPlanner's labels transfer to MugenMonkey builders (No_Infusion is also the
+planner's default, so some of the 51.8% may be builds whose author never picked one). Inferred
+infusions are shown by `--mugen` only; they do not yet enter the item model or the panel's data
+file, so MugenMonkey weapons still contribute only the plain weapon token.
 
 ## Formula source
 
@@ -110,7 +131,9 @@ has. How the three are weighted is set by the offline evaluation.
 - Must beat "most popular item per slot among builds with similar stats", or that baseline ships
   instead.
 - MugenMonkey infusion inference is validated first, on SoulsPlanner builds with their infusion
-  hidden. Until its accuracy is measured, MugenMonkey weapons contribute only the plain weapon token.
+  hidden: 68.3% vs 51.8% majority class (`--infusion-eval`, see above). MugenMonkey weapons still
+  contribute only the plain weapon token until the item model's own evaluation shows the inferred
+  weapon+infusion tokens help.
 
 ## Armor
 
