@@ -2254,10 +2254,12 @@ def config_text(
 {KEY_NET_EFFECTS_ENABLED} = {str(net_effects).lower()}
 
 [{MUSIC_PROBE_SECTION}]
-# Read at startup only. `ds2-music-probe` logs every music event the game starts, pauses and stops
-# -- the FMOD event name (m100400001 is Majula), its handle and the map index -- and the music
-# channel's position and length every few seconds. It fronts four FMOD import slots and changes no
-# sound. On unless `--no-music-probe`. Grep the log for `{MUSIC_PROBE_LOG_PREFIX}`.
+# Read at startup only. `ds2-music-probe` is the region music player: F10 (or `key` here) opens the
+# Music panel, which shows the playing track, seeks it, turns its repeat off, and edits each region's
+# playlist from any music track the game ships. The playlists live in `ds2-music-playlist.toml`
+# beside the game, which this script never writes. It also logs every music event the game starts,
+# pauses and stops. It fronts four FMOD import slots. On unless `--no-music-probe`. Grep the log for
+# `{MUSIC_PROBE_LOG_PREFIX}`.
 {KEY_MUSIC_PROBE_ENABLED} = {str(music_probe).lower()}
 
 [{HP_GAUGE_SECTION}]

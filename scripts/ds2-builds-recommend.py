@@ -1102,12 +1102,31 @@ def nearest_builds(data: Data, stats: dict, sl: int, corpus: list[Build], k: int
 COMMON_RING = 0.10  # a ring worn by at least this share of every corpus build counts as common to all builds
 
 
+def generate_armor(data: Data, corpus: list[Build], weapon: str, inf: str, two: bool, stats: dict,
+                   rings: list[str]) -> tuple[list[str], str | None]:
+    """The generated build's armour: best_armor's top set for a build holding only the primary and
+    wearing `rings`, as display names head/chest/hands/legs ("Naked" for a slot left bare), and a
+    note when the load cap left a slot bare or left no set at all -- never a silent naked build."""
+    wearer = Build("", stats, ["Naked"] * 4, [(weapon, inf)], int(two), rings, [])
+    cap, carried, sets = best_armor(data, wearer, dict(stats), threat_mix(data, corpus), top=1)
+    if not sets:
+        return [], (f"no armor fits: the weapon and rings weigh {carried:.1f}, over the {cap:.1f} a "
+                    f"{EQUIP_CAP:.0%} load allows at VIT {stats['vitality']}")
+    pieces = sets[0][2]
+    bare = [s for s, p in zip(ARMOR_SLOTS, pieces) if p == "Naked"]
+    note = (f"{', '.join(bare)} left bare: nothing wearable there fits the {cap - carried:.1f} of load "
+            f"left under {EQUIP_CAP:.0%}") if bare else None
+    return [data.armor[s][p]["name"] for s, p in zip(ARMOR_SLOTS, pieces)], note
+
+
 def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, objective: str = "damage",
-                   window: float = 1.5, k: int = 50) -> dict | None:
+                   window: float = 1.5, k: int = 50, allow_naked: bool = False) -> dict | None:
     """A whole valid build for weapon+infusion at `sl`: optimize_build's class and stats with the
     weapon as primary; the top 15 one-handable and top 5 two-hand-only other weapons for those
     stats (damage over `window` seconds); 3 copies of each of the 4 rings the nearest-stat builds
-    wear most, plus one of every ring at least COMMON_RING of all builds wear."""
+    wear most, plus one of every ring at least COMMON_RING of all builds wear; and armour, the
+    best_armor set under 70% load with the primary and those four rings carried. `allow_naked`
+    skips the armour, as every generated build did before it had any."""
     best, floors = optimize_build(data, corpus, weapon, inf, sl, objective)
     if best is None:
         return None
@@ -1126,10 +1145,12 @@ def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
     every = Counter(r for b in corpus for r in dict.fromkeys(b.rings) if r and r in data.rings)
     suggested = [r for r, _ in near.most_common(4)]
     common = [r for r, c in every.most_common() if c >= COMMON_RING * len(corpus) and r not in suggested]
+    armor, armor_note = ([], None) if allow_naked else generate_armor(data, corpus, weapon, inf, two, stats,
+                                                                     suggested)
     return {"class": cls, "sl": sl, "stats": stats, "two_handed": two, "objective": objective, "value": round(val),
             "primary": (data.weapons[weapon]["name"], inf), "weapons_1h": one[:15], "weapons_2h_only": only2[:5],
             "rings": [data.rings[r]["name"] for r in suggested for _ in range(3)]
-            + [data.rings[r]["name"] for r in common]}
+            + [data.rings[r]["name"] for r in common], "armor": armor, "armor_note": armor_note}
 
 
 def gear_bonus(data: Data, arm: list, rs: list) -> tuple[Counter, float]:
@@ -1281,16 +1302,18 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 #   I code atk(7) scale(9)                                    one infusion of the last W
 #   L grip t:mv:type:lower ...                                the last W's R1 chain, grip 1 or 2
 #   B bracket floors(5) defense(8)                            one SL bracket
-#   R key name                                                a ring
+#   R key name weight                                         a ring
 #   E ring weight mul add(9)                                  a ring --minimum may wear
 #   A slot key name weight alter(9) require                   armour --minimum may wear
+#   P slot key name weight def(5) require                     every armour piece, for best_armor
+#   H physical magic fire lightning dark                      the corpus threat mix (threat_mix)
 #   K n top1 top2                                             calibrate_infusions
 #   M ring count                                              a ring worn by >= COMMON_RING of builds
 #   X bracket stat-brackets ring,ring.. weapon:code,..        one corpus build
 
 BACKEND_DATA_NAME = "ds2-build-recommender.dat"
 BACKEND_DATA = Path.home() / ".cache/ds2-builds" / BACKEND_DATA_NAME
-BACKEND_FORMAT = "ds2-build-recommender-data 1"
+BACKEND_FORMAT = "ds2-build-recommender-data 2"
 #: Mirrors `infusion_for_code` in crates/ds2-build-recommender-core/src/weapons.rs; `?` is
 #: MugenMonkey's unrecorded infusion.
 INFUSION_CODE = {"No_Infusion": "N", "Magic": "M", "Fire": "F", "Lightning": "L", "Dark": "D", "Poison": "P",
@@ -1353,7 +1376,14 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
                               *(_num(float(dfn[k])) for k in DMG + PHYS_TYPES)]))
     ring_ix = {k: i for i, k in enumerate(data.rings)}
     for key, r in data.rings.items():
-        out.append("\t".join(["R", key, r.get("name", key)]))
+        out.append("\t".join(["R", key, r.get("name", key), _num(r.get("weight", 0))]))
+    for slot in ARMOR_SLOTS:
+        for key, v in data.armor[slot].items():
+            out.append("\t".join(["P", slot, key, v.get("name", key), _num(v.get("weight", 0)),
+                                  *(_num(v.get(k + "DEF", 0)) for k in DMG),
+                                  _stat_pairs(v.get("require") or {}) or "-"]))
+    mix = threat_mix(data, corpus)
+    out.append("\t".join(["H", *(_num(float(mix[k])) for k in DMG)]))
     for key, (weight, add, mul) in sorted(ring_effects(data).items()):
         out.append("\t".join(["E", key, _num(weight), _num(float(mul)), *(_num(add.get(s, 0)) for s in STATS)]))
     helpful = {"strength", "dexterity", "intelligence", "faith", "vitality", "adaptability", "attunement"}
@@ -1399,6 +1429,7 @@ EXPECT_BUILDS = [  # weapon key, infusion, sl, objective: --optimize and --gener
     ("Uchigatana", "Bleed", 150, "bleed"),
     ("Dagger", "Poison", 60, "poison"),
 ]
+EXPECT_NAKED = [("Demons_Great_Hammer", "Raw", 100, "damage", True)]  # --generate --allow-naked
 EXPECT_MINIMUM = [("Demons_Great_Hammer", True), ("Moonlight_Greatsword", False), ("Uchigatana", False)]
 EXPECT_SIMILAR = [  # stats, sl, k, status
     ([20, 20, 15, 10, 40, 15, 15, 9, 9], 100, 50, None),
@@ -1408,8 +1439,11 @@ EXPECT_SIMILAR = [  # stats, sl, k, status
 EXPECT_FLOOR_SLS = [1, 33, 60, 100, 150, 200, 838]
 
 
-class _Some(tuple):
+class _Some:
     """A fixture value Rust reads as `Option::Some`."""
+
+    def __init__(self, value):
+        self.value = value
 
 
 def _rs(v) -> str:
@@ -1417,7 +1451,7 @@ def _rs(v) -> str:
     if v is None:
         return "None"
     if isinstance(v, _Some):
-        return "Some(" + _rs(tuple(v)) + ")"
+        return "Some(" + _rs(v.value) + ")"
     if isinstance(v, bool):
         return "true" if v else "false"
     if isinstance(v, str):
@@ -1469,22 +1503,36 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
         opt.append((weapon, INFUSION_CODE[inf], sl, objective,
                     None if best is None else _Some((data.classes[best[1]]["name"], best[2], arr(best[3]),
                                                      float(best[0])))))
-        g = generate_build(data, corpus, weapon, inf, sl, objective)
+    mix = threat_mix(data, corpus)
+    for weapon, inf, sl, objective, naked in [(*case, False) for case in EXPECT_BUILDS] + EXPECT_NAKED:
+        g = generate_build(data, corpus, weapon, inf, sl, objective, allow_naked=naked)
         if g is None:
-            gen.append((weapon, INFUSION_CODE[inf], sl, objective, None))
+            gen.append((weapon, INFUSION_CODE[inf], sl, objective, naked, None))
             continue
         rings, suggested = g["rings"], []
         while len(rings) >= 3 and rings[0] == rings[1] == rings[2]:
             suggested.append(rings[0])
             rings = rings[3:]
-        gen.append((weapon, INFUSION_CODE[inf], sl, objective, _Some((
+        # Whether the armour's requirements and the load cap each changed the chosen set: the same
+        # search with every other stat at 99, and with VIT at 99, picks differently.
+        binds = (False, False)
+        if not naked:
+            worn = [data.sp_key[norm(r)] for r in suggested]
+            wearer = Build("", g["stats"], ["Naked"] * 4, [(weapon, inf)], 0, worn, [])
+            top = lambda eff: (best_armor(data, wearer, eff, mix, top=1)[2] or [None])[0]
+            chosen = top(dict(g["stats"]))
+            binds = (chosen != top({**{s: 99 for s in STATS}, "vitality": g["stats"]["vitality"]}),
+                     chosen != top({**g["stats"], "vitality": 99}))
+        gen.append((weapon, INFUSION_CODE[inf], sl, objective, naked, _Some((
             data.classes[g["class"]]["name"], g["two_handed"], arr(g["stats"]),
             [(n, INFUSION_CODE[i], d) for n, i, d in g["weapons_1h"]],
-            [(n, INFUSION_CODE[i], d) for n, i, d in g["weapons_2h_only"]], suggested, rings))))
+            [(n, INFUSION_CODE[i], d) for n, i, d in g["weapons_2h_only"]], suggested, rings,
+            g["armor"], g["armor_note"] and _Some(g["armor_note"]), binds[0], binds[1]))))
     out.append("// weapon, infusion, sl, objective -> class, two-handed, stats, value.")
     out.append(f"pub const OPTIMIZE: OptimizeCases = {_rs(opt)};\n")
-    out.append("// weapon, infusion, sl, objective -> class, two-handed, stats, 1H rows, 2H-only rows (name,")
-    out.append("// infusion, rounded damage), suggested rings, common rings.")
+    out.append("// weapon, infusion, sl, objective, allow naked -> class, two-handed, stats, 1H rows, 2H-only")
+    out.append("// rows (name, infusion, rounded damage), suggested rings, common rings, armour, armour note,")
+    out.append("// whether armour requirements bound the choice, whether the load cap did.")
     out.append(f"pub const GENERATE: GenerateCases = {_rs(gen)};\n")
 
     mins = []
@@ -1546,6 +1594,8 @@ def main() -> int:
     ap.add_argument("--expect", type=Path, metavar="PATH",
                     help="with --export-backend: also write this script's answers to the EXPECT_* questions "
                          "over the same corpus, as the Rust fixture CorpusBackend is tested against")
+    ap.add_argument("--allow-naked", action="store_true",
+                    help="with --generate: no armour (by default the best set under 70%% load is chosen)")
     ap.add_argument("--objective", choices=["damage", "bleed", "poison"], default="damage",
                     help="with --optimize: what the free points maximize")
     g.add_argument("--weapons-for", metavar="STATS",
@@ -1597,7 +1647,7 @@ def main() -> int:
             ap.error(f"unknown weapon {name!r}")
         corpus, _ = load_corpus(data)
         g = generate_build(data, corpus, weapon, inf.replace(" ", "_") or "No_Infusion", a.sl, a.objective,
-                           a.window or 1.5, a.k)
+                           a.window or 1.5, a.k, a.allow_naked)
         if g is None:
             print(f"no valid SL {a.sl} build wields {data.weapons[weapon]['name']}")
             return 2
@@ -1612,6 +1662,12 @@ def main() -> int:
             for n, i, d in g[key]:
                 print(f"    {d:6}  {n} ({i.replace('_', ' ')})")
         print("  rings: " + ", ".join(g["rings"]))
+        if a.allow_naked:
+            print("  armor: none (--allow-naked)")
+        else:
+            print("  armor: " + (" / ".join(g["armor"]) or "none"))
+        if g["armor_note"]:
+            print(f"  armor: {g['armor_note']}")
         return 0
     if a.optimize:
         if not a.sl:

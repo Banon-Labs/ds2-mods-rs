@@ -406,6 +406,14 @@ fn apply(
                     spawns.len(),
                     build.id
                 ));
+                let at = |level: u8| spawns.iter().filter(|s| s.reinforce == level).count();
+                log_line(format_args!(
+                    "{LOG_PREFIX} reinforcement asked for: +10 x{} +5 x{} +0 x{} ({} other levels)",
+                    at(10),
+                    at(5),
+                    at(0),
+                    spawns.len() - at(10) - at(5) - at(0)
+                ));
                 say(&format!("Gave {granted} items"));
             }
             Err(error) => {

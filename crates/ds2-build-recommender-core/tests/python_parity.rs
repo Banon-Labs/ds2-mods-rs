@@ -19,7 +19,7 @@ use ds2_build_import_core::Infusion;
 use ds2_build_recommender_core::backend::{self, Outcome, RecommenderBackend, ResultRow};
 use ds2_build_recommender_core::corpus::CorpusBackend;
 use ds2_build_recommender_core::model::{
-    Mode, Objective, PanelState, STAT_COUNT, StatusFilter, WeaponsForOpts,
+    Mode, Objective, PanelState, STAT_COUNT, StatusFilter, WeaponsForOpts, soul_level,
 };
 use ds2_build_recommender_core::weapons;
 
@@ -61,12 +61,17 @@ type Generated = (
     &'static [GenRow],
     &'static [&'static str],
     &'static [&'static str],
+    &'static [&'static str],
+    Option<&'static str>,
+    bool,
+    bool,
 );
 type GenerateCases = &'static [(
     &'static str,
     &'static str,
     u16,
     &'static str,
+    bool,
     Option<Generated>,
 )];
 type MinimumCases = &'static [(
@@ -196,6 +201,11 @@ fn optimize_is_the_scripts() {
                 assert_eq!(got.two_handed, two, "{weapon} SL {sl}");
                 assert_eq!(got.stats, stats(st), "{weapon} SL {sl}");
                 assert_eq!(got.sl, sl);
+                assert_eq!(
+                    soul_level(&got.stats),
+                    sl,
+                    "{weapon}: the stats make the SL"
+                );
                 assert_eq!(got.value, value as f32, "{weapon} SL {sl}");
             }
             (got, want) => panic!("{weapon} SL {sl}: {got:?} vs {want:?}"),
@@ -205,16 +215,23 @@ fn optimize_is_the_scripts() {
 
 #[test]
 fn generate_build_is_the_scripts() {
-    for &(weapon, code, sl, goal, want) in expected::GENERATE {
-        let got = backend().generate_build(weapon, infusion(code), sl, objective(goal));
+    let (mut requirements_bound, mut load_bound, mut armored) = (false, false, 0);
+    for &(weapon, code, sl, goal, naked, want) in expected::GENERATE {
+        let got = backend().generate_build(weapon, infusion(code), sl, objective(goal), naked);
         let (got, want) = match (got, want) {
             (None, None) => continue,
             (Some(got), Some(want)) => (got, want),
             (got, want) => panic!("{weapon} SL {sl}: {got:?} vs {want:?}"),
         };
-        let (class, two, st, one_rows, two_rows, suggested, common) = want;
+        let (class, two, st, one_rows, two_rows, suggested, common, armor, note, by_req, by_load) =
+            want;
         assert_eq!(got.class, class, "{weapon} SL {sl}");
         assert_eq!(got.sl, sl, "the build is at the soul level asked for");
+        assert_eq!(
+            soul_level(&got.stats),
+            sl,
+            "{weapon}: the stats make the SL"
+        );
         assert_eq!(got.two_handed, two, "{weapon} SL {sl}");
         assert_eq!(got.stats, stats(st), "{weapon} SL {sl}");
         assert_eq!(got.primary, (weapon.to_owned(), infusion(code)));
@@ -243,7 +260,32 @@ fn generate_build_is_the_scripts() {
         }
         assert_eq!(got.suggested_rings, suggested, "{weapon} SL {sl}");
         assert_eq!(got.common_rings, common, "{weapon} SL {sl}");
+        assert_eq!(got.armor, armor, "{weapon} SL {sl} naked={naked}");
+        assert_eq!(got.armor_note.as_deref(), note, "{weapon} SL {sl}");
+        if naked {
+            assert!(got.armor.is_empty(), "allow naked wears nothing");
+        } else {
+            assert_eq!(
+                got.armor.len(),
+                4,
+                "{weapon} SL {sl}: a piece or Naked per slot"
+            );
+            armored += 1;
+        }
+        requirements_bound |= by_req;
+        load_bound |= by_load;
     }
+    // The armour search was exercised where it matters: the script's own check says the pieces'
+    // stat requirements and the 70% load cap each changed the set it chose, and Rust chose the same.
+    assert!(armored >= 5, "{armored} armoured builds");
+    assert!(
+        requirements_bound,
+        "no case where armour requirements bound the choice"
+    );
+    assert!(
+        load_bound,
+        "no case where the equip-load cap bound the choice"
+    );
 }
 
 #[test]
@@ -254,6 +296,11 @@ fn minimum_is_the_scripts() {
             .unwrap_or_else(|| panic!("{weapon}: no minimum"));
         assert_eq!(got.class, class, "{weapon}");
         assert_eq!(got.sl, sl, "{weapon}");
+        assert_eq!(
+            soul_level(&got.stats),
+            sl,
+            "{weapon}: the stats make the SL"
+        );
         assert_eq!(got.stats, stats(st), "{weapon}");
         assert_eq!(got.two_handed, two, "{weapon}");
         assert_eq!(got.gear, gear, "{weapon}");
@@ -301,14 +348,32 @@ fn the_panel_generates_at_its_override_for_its_weapon() {
         ("Demons_Great_Hammer".to_owned(), Infusion::Raw)
     );
     assert!(!build.stub);
+
+    // Armour by default, worn by the import in its four slots; none only when asked.
+    assert!(!state.allow_naked, "the panel starts with armour required");
+    assert_eq!(build.armor.len(), 4);
+    let (import, _) = backend::to_import(&build);
+    assert_eq!(import.armor, build.armor);
+    assert!(
+        import
+            .armor
+            .iter()
+            .all(|piece| !ds2_build_import_core::is_empty_slot(piece)),
+        "{:?}",
+        import.armor
+    );
+    state.allow_naked = true;
+    let naked = backend::generate(backend(), &state).expect("a SL 100 build");
+    assert!(naked.armor.is_empty() && naked.armor_note.is_none());
 }
 
 /// Everything Apply would grant from a real build resolves in the item catalogue.
 #[test]
 fn every_generated_grant_names_a_real_item() {
     use ds2_build_import_core::{ItemError, id_for, is_empty_slot};
-    for &(weapon, code, sl, goal, _) in expected::GENERATE {
-        let Some(build) = backend().generate_build(weapon, infusion(code), sl, objective(goal))
+    for &(weapon, code, sl, goal, naked, _) in expected::GENERATE {
+        let Some(build) =
+            backend().generate_build(weapon, infusion(code), sl, objective(goal), naked)
         else {
             continue;
         };
@@ -317,6 +382,7 @@ fn every_generated_grant_names_a_real_item() {
             .weapons
             .chunks(2)
             .map(|pair| pair[0].clone())
+            .chain(import.armor.iter().cloned())
             .chain(import.rings.iter().cloned())
             .chain(extras.into_iter().map(|(name, _)| name));
         for name in names {

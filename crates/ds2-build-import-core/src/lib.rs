@@ -27,12 +27,14 @@ pub mod equip;
 pub mod field;
 pub mod items;
 pub mod level;
+pub mod reinforce;
 pub mod saved_build;
 pub mod url;
 
 pub use field::{Field, MAX_UNITS, Reaction};
 pub use items::{Infusion, ItemError, id_for, is_empty_slot, normalise};
 pub use level::{LevelChange, LevelError, MAX_LEVEL, SoulCosts, StatSpread, level_from_stats};
+pub use reinforce::max_reinforce;
 pub use saved_build::{Build, MAX_STAT, ParseError, Stats};
 pub use url::{
     BUILD_HOST, BUILD_URL_PREFIX, BUILD_URL_ROW_HELP, UrlRejection, build_id_from_url, build_path,

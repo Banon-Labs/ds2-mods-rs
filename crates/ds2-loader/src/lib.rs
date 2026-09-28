@@ -1077,7 +1077,31 @@ fn install_music_probe() {
             "{} NOT INSTALLED -- no music event is logged this run",
             ds2_music_probe::LOG_PREFIX
         ));
+        return;
     }
+    // The Music panel. Same two needs as the save picker's: `ds2-overlay`'s `Present` detour to
+    // draw and tick from, and the input harness, whose `hold` keeps the game still while the panel
+    // has the mouse and keyboard.
+    ds2_input_harness::set_logger(log_line);
+    // SAFETY: called from the post-Arxan position like every other install here. The harness's
+    // install checks each of its sites against the prologue `ds2-rva` records and refuses a moved
+    // one, and it is idempotent.
+    let hooked = unsafe { ds2_input_harness::install() };
+    if hooked != INPUT_HARNESS_SITES {
+        log_line(format_args!(
+            "{} only {hooked}/{INPUT_HARNESS_SITES} input devices can be held -- the game may \
+             move under the Music panel",
+            ds2_music_probe::LOG_PREFIX
+        ));
+    }
+    if !start_overlay() {
+        log_line(format_args!(
+            "{} ds2-overlay could not start, so there is no Music panel this run",
+            ds2_music_probe::LOG_PREFIX
+        ));
+        return;
+    }
+    ds2_music_probe::install_panel(&config.key);
 }
 
 /// Cap our weapon levels to the other players' in multiplayer, if `<Game>/ds2-mods.toml` asked.

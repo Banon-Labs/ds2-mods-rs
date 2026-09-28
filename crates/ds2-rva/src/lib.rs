@@ -2347,6 +2347,62 @@ pub const FMOD_EVENT_INFO_BUFFER_SIZE: usize = 0x80;
 /// `FMOD_TIMEUNIT_MS`, the unit `Channel::getPosition` and `Sound::getLength` are asked in. `1`.
 pub const FMOD_TIMEUNIT_MS: u32 = 1;
 
+// Step 2: seek, repeat off and a playlist. Measured with `scripts/frida/fmod-seek-loop.js` on
+// 2026-09-27 against `m100400001` in Majula, on the game's sound thread inside its own
+// `Event::getState` call: `Channel::setPosition(186299, MS)` returned 0 and read back 186299, and
+// 300 ms later 186597. `Channel::getLoopPoints` said 14278..198299 ms, loop count -1. After
+// `Channel::setLoopCount(0)` the track played to 198117 ms and the channel was gone
+// (`isPlaying` -> 36, `FMOD_ERR_INVALID_HANDLE`); the event itself stayed alive with its position
+// still counting, and in the next 8 s (and the next 60 s of `ds2-music-probe` samples) the game
+// neither stopped nor restarted it. Left alone the same channel wraps at 198.3 s to 14.3 s plus the
+// overshoot (195733 -> 16725 in the samples), so the loop is the channel's, not a retrigger.
+
+/// `MOFmodSoundManager` -> the `FMOD::EventSystem*`. `0x9d8`.
+///
+/// `MOFmodSoundManager::v6` (`0x1409ddbe0`) does `lea r12,[r15+0x9d8]` and hands it to
+/// `FMOD_EventSystem_Create` at `0x1409de1e4`, so FMOD itself writes the event system here.
+pub const SOUND_MANAGER_EVENT_SYSTEM_OFFSET: usize = 0x9d8;
+
+/// Import slot for `FMOD::EventSystem::getEventBySystemID(u32 id, u32 mode, Event**)`.
+/// RVA `0x01aae83c`; 1 call site, in the game's sound-id resolver `0x1409f5120`.
+pub const FMOD_EVENT_SYSTEM_GET_EVENT_BY_SYSTEM_ID_IAT: u32 = 0x01aa_e83c;
+
+/// Import slot for `FMOD::Event::setMute(bool)`. RVA `0x01aae82c`; 1 call site.
+pub const FMOD_EVENT_SET_MUTE_IAT: u32 = 0x01aa_e82c;
+
+/// Import slot for `FMOD::Channel::setPosition(u32 position, u32 unit)`. RVA `0x01aae9c4`.
+pub const FMOD_CHANNEL_SET_POSITION_IAT: u32 = 0x01aa_e9c4;
+
+/// `FMOD_EVENT_DEFAULT`: a playable instance. `0`.
+pub const FMOD_EVENT_MODE_DEFAULT: u32 = 0;
+
+/// `FMOD_EVENT_INFOONLY`: a handle for reading an event's definition, never played. `4`.
+///
+/// The value the game's own resolver passes at `0x1409f5178`.
+pub const FMOD_EVENT_MODE_INFOONLY: u32 = 4;
+
+/// `FMOD_EVENT_INFO` -> `maxwavebanks`, `i32`: in, the `wavebankinfo` array's length. `+0x14`.
+///
+/// Out: how many entries FMOD filled.
+pub const FMOD_EVENT_INFO_MAX_WAVEBANKS_OFFSET: usize = 0x14;
+
+/// `FMOD_EVENT_INFO` -> `wavebankinfo`, `FMOD_EVENT_WAVEBANKINFO*`. `+0x18`.
+pub const FMOD_EVENT_INFO_WAVEBANK_INFO_OFFSET: usize = 0x18;
+
+/// `FMOD_EVENT_WAVEBANKINFO` -> `name`, `char[256]`, first in the struct. `+0x00`.
+pub const FMOD_WAVEBANK_INFO_NAME_OFFSET: usize = 0x00;
+
+/// Bytes allowed per `FMOD_EVENT_WAVEBANKINFO` entry. `0x400`.
+///
+/// The struct is a 256-byte name and a handful of counters, so an entry this size cannot be
+/// outgrown and a buffer of `maxwavebanks * 0x400` holds whatever FMOD writes.
+pub const FMOD_WAVEBANK_INFO_STRIDE_BOUND: usize = 0x400;
+
+/// `FMOD_ERR_INVALID_HANDLE`. `36`.
+///
+/// What `Channel::isPlaying` answered on a channel that had played to its end, in the run above.
+pub const FMOD_ERR_INVALID_HANDLE: i32 = 36;
+
 /// `MOFmodSoundManager::v6`, audio init. RVA `0x009ddbe0`, VA `0x1409ddbe0`.
 ///
 /// The function that *creates* [`SOUND_MANAGER_MASTER_GROUP_OFFSET`]: at `0x1409df157` it does

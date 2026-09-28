@@ -6,12 +6,21 @@ publish.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# Step 1 of the region music playlist (`docs/DS2-REGION-MUSIC-PLAYLIST.md`): log every music event
-# the game starts, pauses and stops, through the FMOD import slots. The name test is plain string
-# work and builds everywhere; only the slot patches and the FMOD calls need Windows.
+# The region music player (`docs/DS2-REGION-MUSIC-PLAYLIST.md`): the Music panel, seek, repeat off
+# and a playlist per region, through the FMOD import slots. The playlist rules and the file format
+# build everywhere and are tested on the host; the slot patches, the FMOD calls and the panel need
+# Windows.
 [target.'cfg(windows)'.dependencies]
 ds2-game-base.workspace = true
 ds2-rva.workspace = true
+# The panel draws on its `Present` clock and imgui frame.
+ds2-overlay.workspace = true
+# `hold` keeps the game still while the panel has the mouse and keyboard.
+ds2-input-harness.workspace = true
+# The panel key's name, e.g. `F10`.
+ds2-hotkey-config.workspace = true
+# The panel's `imgui::Ui`, and the `windows` re-export it reads the keyboard through.
+hudhook.workspace = true
 
 [lints]
 workspace = true

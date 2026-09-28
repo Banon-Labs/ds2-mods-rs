@@ -130,8 +130,12 @@ pub struct GeneratedBuild {
     pub suggested_rings: Vec<String>,
     /// Rings common to all builds that are not already suggested.
     pub common_rings: Vec<String>,
-    /// Head, chest, hands, legs, by item name; fewer than four leaves the rest bare.
+    /// Head, chest, hands, legs, by item name, `Naked` for a slot left bare; empty for a build
+    /// that wears none, which only [`PanelState::allow_naked`] asks for.
     pub armor: Vec<String>,
+    /// Why the armour is not four pieces, when it is not: the load cap left a slot, or every slot,
+    /// bare. Never silent.
+    pub armor_note: Option<String>,
     /// Whether this came from [`StubBackend`], so the panel can say its numbers mean nothing.
     pub stub: bool,
 }
@@ -158,13 +162,15 @@ pub trait RecommenderBackend: Sync {
     fn similar(&self, stats: &[u16; STAT_COUNT], sl: u16, k: u16, status: StatusFilter) -> Outcome;
     /// How far the damage model agrees with real builds.
     fn calibration(&self) -> Calibration;
-    /// A whole build for `weapon`. `None` when no class can wield it at `sl`.
+    /// A whole build for `weapon`, in armour unless `allow_naked`. `None` when no class can wield
+    /// it at `sl`.
     fn generate_build(
         &self,
         weapon: &str,
         infusion: Infusion,
         sl: u16,
         objective: Objective,
+        allow_naked: bool,
     ) -> Option<GeneratedBuild>;
     /// The live character's nine stats, when they can be read.
     fn current_character_stats(&self) -> Option<[u16; STAT_COUNT]>;
@@ -247,8 +253,13 @@ pub fn generate(
     let Some(weapon) = state.weapon else {
         return Err(vec!["choose a weapon first".to_owned()]);
     };
-    let Some(build) = backend.generate_build(weapon, state.infusion, state.sl(), state.objective)
-    else {
+    let Some(build) = backend.generate_build(
+        weapon,
+        state.infusion,
+        state.sl(),
+        state.objective,
+        state.allow_naked,
+    ) else {
         return Err(vec!["no class can wield it at this soul level".to_owned()]);
     };
     let violations = floor_violations(&build.stats, &backend.floors(build.sl));
@@ -583,6 +594,7 @@ impl RecommenderBackend for StubBackend {
         _infusion: Infusion,
         _sl: u16,
         _objective: Objective,
+        allow_naked: bool,
     ) -> Option<GeneratedBuild> {
         let primary = weapons::by_key("Moonlight_Greatsword")?;
         let (weapons_1h, weapons_2h_only) = split_weapons(&Self::ranking(), primary.name);
@@ -601,7 +613,12 @@ impl RecommenderBackend for StubBackend {
             weapons_2h_only,
             suggested_rings,
             common_rings,
-            armor: vec!["Desert Sorceress Hood".to_owned()],
+            armor: if allow_naked {
+                Vec::new()
+            } else {
+                vec!["Desert Sorceress Hood".to_owned()]
+            },
+            armor_note: None,
             stub: true,
         })
     }
@@ -764,8 +781,9 @@ mod tests {
                 i: Infusion,
                 sl: u16,
                 o: Objective,
+                naked: bool,
             ) -> Option<GeneratedBuild> {
-                StubBackend.generate_build(w, i, sl, o)
+                StubBackend.generate_build(w, i, sl, o, naked)
             }
             fn current_character_stats(&self) -> Option<[u16; STAT_COUNT]> {
                 None

@@ -149,6 +149,9 @@ pub struct PanelState {
     pub objective: Objective,
     /// Whether [`Mode::MinimumForWeapon`] may two-hand to meet strength.
     pub two_hand: bool,
+    /// Whether Generate Build may leave the armour off. Off by default: a generated build wears
+    /// the best set its stats can carry under 70% load.
+    pub allow_naked: bool,
     /// How many neighbours [`Mode::SimilarBuilds`] reads.
     pub similar_k: u16,
     /// Which statuses [`Mode::SimilarBuilds`] insists on.
@@ -167,6 +170,7 @@ impl Default for PanelState {
             infusion: Infusion::None,
             objective: Objective::default(),
             two_hand: false,
+            allow_naked: false,
             similar_k: SIMILAR_K_DEFAULT,
             status: StatusFilter::default(),
         }
