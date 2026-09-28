@@ -16,6 +16,8 @@
 //!   one row per weapon, never the primary again.
 //! * **Rings are granted three to a suggestion**, plus one of every ring at least a tenth of all
 //!   builds wear that is not already suggested.
+//! * **A generated build never carries an Agape Ring.** Its place among the suggestions goes to
+//!   the ring the nearest builds wear most that the build does not already wear in any upgrade.
 
 use ds2_build_import_core::{Build, Infusion, Stats};
 

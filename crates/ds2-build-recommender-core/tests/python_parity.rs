@@ -351,6 +351,22 @@ fn generate_build_is_the_scripts() {
         }
         assert_eq!(got.suggested_rings, suggested, "{weapon} SL {sl}");
         assert_eq!(got.common_rings, common, "{weapon} SL {sl}");
+        // Agape Ring is common enough to top the nearest builds' rings; its place is taken, by a
+        // ring the build does not already wear in any upgrade.
+        assert!(
+            !got.suggested_rings
+                .iter()
+                .chain(&got.common_rings)
+                .any(|ring| ring == "Agape Ring"),
+            "{weapon} SL {sl}: {:?} {:?}",
+            got.suggested_rings,
+            got.common_rings
+        );
+        assert_eq!(
+            got.suggested_rings.len(),
+            4,
+            "{weapon} SL {sl}: a ring per slot"
+        );
         assert_eq!(got.armor, armor, "{weapon} SL {sl} naked={naked}");
         assert_eq!(got.armor_note.as_deref(), note, "{weapon} SL {sl}");
         if naked {

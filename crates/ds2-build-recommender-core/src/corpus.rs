@@ -35,7 +35,7 @@ use crate::weapons;
 pub const DATA_FILE_NAME: &str = "ds2-build-recommender.dat";
 
 /// The file's first line. A different one is a file this port does not read.
-pub const FORMAT: &str = "ds2-build-recommender-data 3";
+pub const FORMAT: &str = "ds2-build-recommender-data 4";
 
 /// Nine stats as the script computes with them, in [`crate::model::STAT_LABELS`] order.
 type Stats = [i32; STAT_COUNT];
@@ -105,6 +105,25 @@ const FLEX_WEIGHT: f64 = 0.02;
 /// The requirement stats, the only ones that change what a build wields: the script's
 /// `REQ_STATS`.
 const REQ_STATS: [usize; 4] = [STR, DEX, INT, FTH];
+
+/// The rings `builds` wear, a build counted once per ring, most worn first and ties first seen
+/// first: the script's `Counter(...).most_common()`.
+fn ring_counts<'a>(builds: impl IntoIterator<Item = &'a CorpusBuild>) -> Vec<(usize, u32)> {
+    let mut worn: Vec<(usize, u32)> = Vec::new();
+    for build in builds {
+        for (at, &ring) in build.rings.iter().enumerate() {
+            if build.rings[..at].contains(&ring) {
+                continue;
+            }
+            match worn.iter_mut().find(|(seen, _)| *seen == ring) {
+                Some((_, count)) => *count += 1,
+                None => worn.push((ring, 1)),
+            }
+        }
+    }
+    worn.sort_by_key(|&(_, count)| std::cmp::Reverse(count));
+    worn
+}
 
 /// The index of `sl`'s bracket.
 fn sl_bracket(sl: u32) -> usize {
@@ -399,6 +418,11 @@ pub struct CorpusBackend {
     brackets: Vec<Bracket>,
     /// `(key, name, weight)`.
     rings: Vec<(String, String, f64)>,
+    /// Each ring's upgrade line, beside `rings`: Ring of Blades + 2's is `Ring_of_Blades`.
+    ring_groups: Vec<String>,
+    /// Rings a generated build never suggests or grants (the script's `NO_USE_RINGS`), as indices
+    /// into `rings`.
+    no_use: Vec<usize>,
     ring_effects: Vec<RingEffect>,
     /// head, chest, hands, legs.
     armor: [Vec<ArmorPiece>; 4],
@@ -699,8 +723,17 @@ impl CorpusBackend {
                 let key = next("ring key")?.to_owned();
                 let name = next("ring name")?.to_owned();
                 let weight = float(Some(next("weight")?), line)?;
+                let group = next("ring group")?.to_owned();
                 ring_index.insert(key.clone(), self.rings.len());
                 self.rings.push((key, name, weight));
+                self.ring_groups.push(group);
+            }
+            "N" => {
+                let key = next("ring key")?;
+                let index = *ring_index
+                    .get(key)
+                    .ok_or_else(|| bad(line, "a no-use ring that is not a ring"))?;
+                self.no_use.push(index);
             }
             "P" => {
                 let slot = armor_slot(next("armour slot")?, line)?;
@@ -1766,6 +1799,43 @@ impl CorpusBackend {
         (cap, carried, top.map(|(_, _, set)| set))
     }
 
+    /// The script's `suggest_rings`: the [`crate::backend::SUGGESTED_RINGS`] rings `near` counts
+    /// most, each no-use ring's place going, in place, to the ring the nearest builds wear most
+    /// (then all builds) that is neither a no-use ring nor in the upgrade group of one already in
+    /// the list.
+    fn suggest_rings(&self, near: &[(usize, u32)]) -> Vec<usize> {
+        let top: Vec<usize> = near
+            .iter()
+            .take(crate::backend::SUGGESTED_RINGS)
+            .map(|&(ring, _)| ring)
+            .collect();
+        let group = |ring: usize| self.ring_groups[ring].as_str();
+        let mut taken: Vec<&str> = top
+            .iter()
+            .filter(|ring| !self.no_use.contains(ring))
+            .map(|&ring| group(ring))
+            .collect();
+        let every = ring_counts(&self.corpus);
+        let mut out = Vec::with_capacity(top.len());
+        for ring in top {
+            if !self.no_use.contains(&ring) {
+                out.push(ring);
+                continue;
+            }
+            let Some(instead) = near
+                .iter()
+                .chain(&every)
+                .map(|&(candidate, _)| candidate)
+                .find(|&c| !self.no_use.contains(&c) && !taken.contains(&group(c)))
+            else {
+                continue;
+            };
+            taken.push(group(instead));
+            out.push(instead);
+        }
+        out
+    }
+
     /// The script's `generate_armor`: the pieces' names head to legs, `Naked` for a slot left
     /// bare, and the note that says why a slot or the whole set is bare.
     fn generate_armor(
@@ -2044,25 +2114,11 @@ impl RecommenderBackend for CorpusBackend {
         weapons_1h.truncate(WEAPONS_1H_TOP);
         weapons_2h_only.truncate(WEAPONS_2H_ONLY_TOP);
 
-        // The rings the nearest builds wear, a build counted once per ring, first seen first.
-        let mut worn: Vec<(usize, u32)> = Vec::new();
-        for build in self.nearest(&stats, u32::from(sl), GENERATE_K) {
-            for (at, &ring) in build.rings.iter().enumerate() {
-                if build.rings[..at].contains(&ring) {
-                    continue;
-                }
-                match worn.iter_mut().find(|(seen, _)| *seen == ring) {
-                    Some((_, count)) => *count += 1,
-                    None => worn.push((ring, 1)),
-                }
-            }
-        }
-        worn.sort_by_key(|&(_, count)| std::cmp::Reverse(count));
-        let suggested: Vec<usize> = worn
-            .iter()
-            .take(crate::backend::SUGGESTED_RINGS)
-            .map(|&(ring, _)| ring)
-            .collect();
+        let suggested = self.suggest_rings(&ring_counts(self.nearest(
+            &stats,
+            u32::from(sl),
+            GENERATE_K,
+        )));
         let levelled = stats.map(|value| u16::try_from(value).unwrap_or(0));
         debug_assert_eq!(
             crate::model::soul_level(&levelled),
@@ -2087,7 +2143,7 @@ impl RecommenderBackend for CorpusBackend {
             common_rings: self
                 .common
                 .iter()
-                .filter(|ring| !suggested.contains(ring))
+                .filter(|ring| !suggested.contains(ring) && !self.no_use.contains(ring))
                 .map(name)
                 .collect(),
             armor,
