@@ -794,6 +794,7 @@ def damage(kind: str, ar: float, df: float) -> float:
     return ar * (1 - min(0.99, (df + 100) / 1000))
 
 
+# Both written by scripts/ds2-attacks-extract.py (--unpack-tae for TAE_DIR, then a plain run).
 ATTACKS = Path.home() / ".cache/ds2-builds/attacks.json"  # per weapon attack: hitbox frames, motion values
 TAE_DIR = Path.home() / ".cache/ds2-builds/tae"  # c000100_pl.tae unpacked, one XML per animation
 _chain_cache: dict = {}
