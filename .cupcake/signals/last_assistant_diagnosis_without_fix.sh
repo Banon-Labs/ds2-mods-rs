@@ -6,7 +6,7 @@
 #
 #   DIAGFACTS|diagnosis=..|fixed=..|asked=..|blocked=..|promise=..|edited=..|handback=..
 #            |handbackkind=..|userneed=..|didwork=..|extblocked=..|carried=..|unread=..
-#            |consulted=..|future=..|deferral=..
+#            |consulted=..|future=..|deferral=..|delegated=..|oneline=..
 #
 # Emitted when either shape was found; a clean turn emits empty (fail-open).
 #
@@ -214,6 +214,48 @@ fixed = bool(hit) and any(
 edited = any(kind == "tool" and is_edit(block) for kind, block in turn.blocks)
 
 message = scrub(turn.text)
+
+# --- (2a) the fix was handed to a subagent -----------------------------------------------------
+# Launching a subagent whose job is the fix is acting on the diagnosis, not stalling on it: the
+# edit is being made, in another worktree, by something real. Measured 2026-09-28 -- a turn read
+# the game log, closed "The log confirms the cause; handing the fix to a second background agent",
+# and launched that agent (isolation: worktree, run_in_background) in the same turn. It was halted
+# for changing no file, and so was its one-line retry, because the edit it was told to make here
+# would have collided with the agent already making it.
+#
+# Read over the logical turn, not `turn`. `split_turns` treats the harness's "Stop hook feedback:"
+# event (a `user` event, isMeta) as a new prompt, so the reply to a halt is its own turn and cannot
+# see the Agent call that preceded the halt -- which is exactly the retry measured above. The
+# logical turn runs back to the last prompt the user actually typed.
+DELEGATE_TOOLS = {"agent", "task"}
+
+
+def is_harness_feedback(ev):
+    if ev.get("isMeta"):
+        return True
+    content = ev.get("message", {}).get("content")
+    if isinstance(content, str):
+        return content.lstrip().startswith("Stop hook feedback:")
+    return False
+
+
+delegated = False
+try:
+    for ev in events:
+        if scan.is_real_user_prompt(ev) and not is_harness_feedback(ev):
+            delegated = False
+            continue
+        if ev.get("type") != "assistant":
+            continue
+        for block in ev.get("message", {}).get("content", []) or []:
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "tool_use"
+                and str(block.get("name") or "").strip().lower() in DELEGATE_TOOLS
+            ):
+                delegated = True
+except Exception:
+    delegated = False
 
 # --- (2b) the promissory closer ----------------------------------------------------------------
 # The shape, verbatim from the turn that prompted it: "Fixing both: bypass the union so the naked
@@ -770,6 +812,38 @@ try:
 except Exception:
     blocked = bool(BLOCKER_RE.search(message))
 
+# --- (4b) the one-line blocker the halt reason asks for ------------------------------------------
+# Every reason this package emits ends "say in one line what blocks it", and before 2026-09-28 that
+# sentence could not be said: `BLOCKER_RE` knows only a fixed verb list after "can't", so the
+# measured retry "The fix is being made by the background agent in its own worktree, so I can't edit
+# those same files here without the two colliding. I'll report its result when it finishes." was
+# halted for doing exactly what the halt told it to. An escape hatch the guard does not honour teaches
+# the agent that no reply satisfies it.
+#
+# Honoured when the closing prose is short and on one line -- the shape the reason names -- and the
+# agent says that it, the agent, cannot act: a first-person inability, or something blocking the
+# work. A third-person "it can't parse the header" is a diagnosis, not a blocker, and does not
+# qualify, so a one-line defect report with no blocker still halts.
+ONE_LINE_MAX = 320
+AGENT_BLOCK_RE = re.compile(
+    r"\b(?:i|we)\s+(?:can(?:no|')?t|cannot|am\s+unable\s+to|are\s+unable\s+to|could\s*n[o']t)\b"
+    r"|\b(?:i'?m|i\s+am|we'?re|we\s+are)\s+blocked\b"
+    r"|\bblock(?:s|ed|ing)\s+(?:it|this|that|the\s+(?:fix|edit|change))\b"
+    r"|\bblocked\s+(?:on|by)\b"
+    r"|\bblocker\b"
+    r"|\bwaiting\s+(?:on|for)\b",
+    re.IGNORECASE,
+)
+oneline = False
+if runs:
+    closing_line = scrub(runs[-1]).strip()
+    oneline = (
+        bool(closing_line)
+        and "\n" not in closing_line
+        and len(closing_line) <= ONE_LINE_MAX
+        and bool(AGENT_BLOCK_RE.search(closing_line))
+    )
+
 # --- (5) work already in flight -----------------------------------------------------------------
 # Read by the zero-information-stop arm. A turn that says "nothing to do until they report" while a
 # subagent or a backgrounded build is genuinely running has not handed anything back: the work
@@ -786,7 +860,7 @@ if not hit and not promise and not handback and not unread and not deferral:
 print(
     "DIAGFACTS|diagnosis={}|fixed={}|asked={}|blocked={}|promise={}|edited={}"
     "|handback={}|handbackkind={}|userneed={}|didwork={}|extblocked={}|carried={}"
-    "|unread={}|consulted={}|future={}|deferral={}".format(
+    "|unread={}|consulted={}|future={}|deferral={}|delegated={}|oneline={}".format(
         hit or "",
         int(fixed),
         int(asked),
@@ -803,6 +877,8 @@ print(
         int(consulted),
         int(future),
         deferral,
+        int(delegated),
+        int(oneline),
     )
 )
 PY
