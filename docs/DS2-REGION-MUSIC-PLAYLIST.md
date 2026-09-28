@@ -283,3 +283,29 @@ Still needs a runtime check:
    game's fade and stop handling (boss arenas, bonfire warp, cutscenes).
 6. The `0x80` = stream-from-disk reading of the FEV bank flag, and the meaning of the MSB sound
    region's u32 before the sound ID.
+
+## Runtime results (2026-09-27)
+
+Items 1 to 4 above are settled; 5 is partly settled.
+
+1. **Settled.** `Event::start` fires through the import slot for every music event, and `getInfo` names
+   it with the bare id: `start name=m100400001 handle=0x29d40001 ... system=5354 event-len=-1ms`.
+   The title plays `frpg2_smain/m000000002` (looping), plus the jingles `m000000013` (2002 ms) and
+   `m000000014` (12501 ms). Every event starts, is paused, then is unpaused, all on thread 784.
+2. **Settled.** Walking `getEventBySystemID(id, INFOONLY)` over every system id, with the wave bank
+   read from `getInfo`'s `wavebankinfo`, gives 10689 events and 63 music tracks in 27 banks,
+   including the DLC banks `frpg2_sm5035`..`5038`, while standing in Majula. The event count is 2 at
+   install and 10689 once the projects load. A track from another map's bank (`frpg2_sm1016/m101600001`)
+   starts with `getEventBySystemID(6711, DEFAULT)` + `start`, gets a channel and plays in Majula.
+   No `EventSystem::load` was needed.
+3. **Settled** (`scripts/frida/fmod-seek-loop.js`). The channel sits directly under the event's
+   channel group. `Channel::setPosition(186299, MS)` read back 186299, then 186597 after 300 ms.
+4. **Settled.** `setLoopCount(0)` plays the track to its end (198117 of 198299 ms). The channel is
+   then gone (`isPlaying` -> 36), and the game neither stops nor restarts the event. Left alone, the
+   channel loops from 198.3 s back to 14.3 s by itself.
+5. **Partly settled.** With the game's event muted and our own instance playing, the game's stop
+   (`stop name=m100400001 ... immediate=false`, and again `immediate=true` on a reload) is followed
+   by stopping ours. The region restarts from its playlist when the game starts its track again.
+   Boss arenas and cutscenes have not been watched.
+
+The player is `crates/ds2-music-probe`. Its panel opens on F10.
