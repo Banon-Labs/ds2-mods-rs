@@ -14,6 +14,52 @@ the running process is being held for another investigation.
 - **[inferred]** means it follows from what was read but was not traced to the end. Each one
   says what would prove it.
 
+## The whole inventory is capped, and the save still keeps real levels (2026-09-28)
+
+User requirement: whenever any weapon changes for any reason, every weapon has to be rescaled;
+then: cap every weapon in the inventory, equipped or not, so anything swapped in is already capped
+and the menu shows the capped level. This replaced "the inventory is never written" below.
+
+- **Every weapon entry is lowered.** Each check (four a second) with a cap on reads the bag's whole
+  entry array (3840 entries, pack and box alike) and lowers every weapon and shield (item type
+  `0`/`1`) above the cap in `+0x25`. `policy::Ledger` keeps each one's real level, keyed by entry
+  index and item id; a level the game writes itself (a reload, an upgrade) is taken as the real one.
+  When the cap goes, every lowered entry is written back.
+- **Any change to the equipped slots is a resweep of all six.** `policy::Watch` compares all six
+  slots (inventory entry, record, live level) against how the last resweep left them. Any
+  difference, whatever caused it, pushes every slot whose copies do not match and logs
+  `equipped changed under cap=...: before=[...] now=[...] resweep slots=[...] pushed=[...]
+  after=[...] all-within-cap=...`.
+- **The save reads a separate block.** `SaveDataItemInventory2` vtable slot 2
+  (`ds2_rva::SAVE_DATA_ITEM_INVENTORY_WRITE`, `0x1402e53f0`) streams `0x100bc` bytes from
+  `[ItemInventory2 + 0x10] + 0x30` and nothing from the bag. That block is one 16-byte record per
+  entry index, read live with `scripts/frida/weapon-sync-save-block.js`: entries 3, 355, 1152, 1159
+  and 1262 had their records at `index * 0x10`, same item id, durability and level. The detour on
+  that writer gives every lowered weapon's record its real level before the stream write; the
+  entries stay lowered.
+
+Measured 2026-09-28, build `1d0dd42`, on a copy of the user's save (`--save-dir`), slot 2:
+
+- Load: `inventory weapons by level: total=1012 [+0:6 +5:335 +10:671]`, then
+  `inventory cap=+0 changed=1006 lowered=1006 ... weapons=1012 still-lowered=1006` and
+  `CAPPED cap=+0 ... after: inventory=[+0,+0,+0,+0,-,-] records=[+0,+0,+0,+0,+0,+0] live=[+0,...]`.
+- A real three-person session followed (`people=3 their-highest=[+2,+0,+0]`, cap `+2`), with F6
+  off (`restored=1006`) and on again (`lowered=1006`).
+- Six saves while capped, each `save #N: ... lowered=1006 weapons; their save records carry the
+  real level (fixed=0 already-real=1006)`. `fixed=0` every time: the game never copied a lowered
+  entry level into the block in this session.
+- `scripts/ds2-sl2.py -x` then `scripts/ds2-sl2-weapon-levels.py` on the payload before and after:
+  `same item, level changed: 0` for all 2041 records, after the first, second and sixth save.
+- Four swaps through the game's own `SetEquip` on the game thread
+  (`scripts/frida/weapon-sync-swap.js`) logged four `equipped changed under cap=+2` lines, one per
+  swap, each `all-within-cap=true` and `resweep slots=[]`: the swapped-in weapon was already `+2`
+  because its entry was.
+- Relaunch of the same container: `inventory weapons by level: total=1012 [+0:6 +5:335 +10:671]`,
+  identical to before the capped session.
+
+Known gap: upgrading a weapon at a blacksmith while capped starts from the capped level; the game
+then writes that new level, and the ledger takes it as the real one.
+
 ## Built and run solo: `ds2-weapon-sync` (2026-09-26)
 
 The design below is shipped as `crates/ds2-weapon-sync`, off by default, turned on with
