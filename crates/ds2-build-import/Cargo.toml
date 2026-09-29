@@ -28,6 +28,12 @@ ds2-menu-row.workspace = true
 ds2-rva.workspace = true
 ds2-save-redirect.workspace = true
 ds2-sl2-core.workspace = true
+# The in-game link panel (`panel.rs`): it draws as one of `ds2-overlay`'s imgui panels and keeps
+# the pause menu underneath still with the input harness's `hold`, as the save picker does.
+ds2-overlay.workspace = true
+ds2-input-harness.workspace = true
+# The panel's `imgui::Ui`, and the `windows` re-export it reads the keyboard and pad through.
+hudhook.workspace = true
 
 # HOST-ONLY, and only for one test. `ds2-rva` is a constants crate with no dependencies of its
 # own, so it compiles on Linux even though the runtime half of this crate does not. It is here so
