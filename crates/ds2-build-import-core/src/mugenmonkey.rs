@@ -105,8 +105,8 @@ const CATALOGUE_QUIRKS: [(&str, &str); 3] = [
     ("Perserverance", "Perseverance"),
 ];
 
-/// The catalogue's spelling of a planner name: [`SPELLINGS`] and [`CATALOGUE_QUIRKS`] first, then
-/// [`SUFFIXES`], then the name unchanged.
+/// The catalogue's spelling of a planner name: the whole-name corrections first, then the
+/// `GS`/`UGS`/`GA` suffix expansions, then the name unchanged.
 pub fn catalogue_name(planner: &str) -> String {
     if let Some((_, fixed)) = SPELLINGS
         .iter()
