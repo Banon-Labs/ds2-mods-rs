@@ -82,9 +82,50 @@
 
 #[cfg(windows)]
 mod install;
+#[cfg(windows)]
+mod up_enter;
 
 #[cfg(windows)]
 pub use install::{LogFn, Outcome, Request, install, set_logger};
+
+/// Where UP from the category strip puts the item list's cursor: the bottom row, in the cursor's
+/// column, or on the last item when that column has no cell in the bottom row.
+///
+/// `current` is the list's cursor as it was left (entering does not reset it), `count` the item
+/// count and `cols` the row width; `count` and `cols` are at least 1. A stale cursor outside
+/// `0..count` is clamped first.
+pub fn bottom_row_index(current: i32, count: i32, cols: i32) -> i32 {
+    let last = count - 1;
+    let column = current.clamp(0, last) % cols;
+    (column + cols * (last / cols)).min(last)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bottom_row_index;
+
+    #[test]
+    fn two_rows_of_ten_with_seventeen_items() {
+        assert_eq!(bottom_row_index(0, 17, 10), 10);
+        assert_eq!(bottom_row_index(6, 17, 10), 16);
+        // Columns 7..9 stop short of the bottom row, so they land on the last item.
+        assert_eq!(bottom_row_index(8, 17, 10), 16);
+        // Starting in the bottom row keeps the column.
+        assert_eq!(bottom_row_index(13, 17, 10), 13);
+    }
+
+    #[test]
+    fn single_row_and_single_item() {
+        assert_eq!(bottom_row_index(3, 5, 10), 3);
+        assert_eq!(bottom_row_index(0, 1, 10), 0);
+    }
+
+    #[test]
+    fn stale_cursor_outside_the_list_is_clamped() {
+        assert_eq!(bottom_row_index(40, 17, 10), 16);
+        assert_eq!(bottom_row_index(-1, 17, 10), 10);
+    }
+}
 
 /// Prefix on every line this crate writes to the loader log.
 pub const LOG_PREFIX: &str = "ds2-inventory-sort:";
