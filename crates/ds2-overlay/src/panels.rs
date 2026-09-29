@@ -282,58 +282,66 @@ pub fn sprite(
     true
 }
 
-/// Draw the game's own window frame around `min`-`max`, at the game's UI scale for a back buffer
-/// `display_height` pixels tall. Answers `false`, drawing nothing, when the atlas did not load.
+/// Draw the panels' window frame around `min`-`max`, at the game's UI scale for a back buffer
+/// `display_height` pixels tall. Always draws, and answers `true`.
 ///
-/// The pieces are the `waku` atlas's (`l02_01_In-Game.flo` shape `0x008b` builds the pause
-/// menu's window from them): a top-left and a bottom-left corner piece, mirrored for the right,
-/// whose 6 px line runs at atlas rows 13-18 (top), 108-113 (bottom) and columns 5-10 (side). The
-/// game never scales those pieces; it lays copies of edge strips end to end. Here the corners are
-/// drawn at the game's scale (back-buffer height / 720) and the stretch of line between them is a
-/// slice that is flat along its length, so stretching it draws what the copies would.
+/// Our own, in the manner of the game's `waku` frame rather than its pixels: the player found the
+/// game's pieces, stretched to a panel, heavier than the panel (2026-09-29). What it keeps from
+/// them is a bronze line with a dark line under it, and corners that stand out past the edge --
+/// here thin L brackets, set off the line by a gap.
 pub fn frame(
     list: &hudhook::imgui::DrawListMut<'_>,
     min: [f32; 2],
     max: [f32; 2],
     display_height: f32,
 ) -> bool {
-    // Atlas pixels. The corner piece is taken 32 square; the line's centre sits 8 in from its
-    // left edge and 15.5 down from its top (top pieces) or 14.5 down (bottom pieces).
-    const CORNER: f32 = 32.0;
-    const SIDE_IN: f32 = 8.0;
-    const TOP_IN: f32 = 15.5;
-    const BOTTOM_IN: f32 = 14.5;
-    const TOP: [f32; 4] = [0.0, 0.0, CORNER, CORNER];
-    const BOTTOM: [f32; 4] = [0.0, 96.0, CORNER, 128.0];
-    // Flat along x in both corner pieces (columns 65-290), and flat along y in the side line
-    // (rows 27-38 of the top piece).
-    const TOP_RUN: [f32; 4] = [65.0, 0.0, 290.0, CORNER];
-    const BOTTOM_RUN: [f32; 4] = [65.0, 96.0, 290.0, 128.0];
-    const SIDE_RUN: [f32; 4] = [0.0, 27.0, CORNER, 38.0];
-    const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+    use crate::style::{BRONZE, BRONZE_DIM, rgba};
+    // In the game's 720-line canvas pixels.
+    const LINE: f32 = 0.67;
+    const GAP: f32 = 3.0;
+    const ARM: f32 = 11.0;
 
     let s = (display_height / 720.0).max(1.0);
-    let c = CORNER * s;
-    // Where the corner pieces' outer corners go, so the line lands on the panel's edge.
-    let left = min[0] - SIDE_IN * s;
-    let right = max[0] + SIDE_IN * s;
-    let top = min[1] - TOP_IN * s;
-    let bottom = max[1] + BOTTOM_IN * s;
-    let flip = |r: [f32; 4]| [r[2], r[1], r[0], r[3]];
-    let mut drawn = true;
-    let mut piece = |src: [f32; 4], a: [f32; 2], b: [f32; 2]| {
-        drawn &= sprite(list, Atlas::Waku, src, a, b, WHITE);
+    let t = (LINE * s).round().max(1.0);
+    let rect = |a: [f32; 2], b: [f32; 2], colour: [f32; 4]| {
+        list.add_rect(a, b, colour).filled(true).build();
     };
-    // Edges first, corners over their ends.
-    piece(TOP_RUN, [left + c, top], [right - c, top + c]);
-    piece(BOTTOM_RUN, [left + c, bottom - c], [right - c, bottom]);
-    piece(SIDE_RUN, [left, top + c], [left + c, bottom - c]);
-    piece(flip(SIDE_RUN), [right - c, top + c], [right, bottom - c]);
-    piece(TOP, [left, top], [left + c, top + c]);
-    piece(flip(TOP), [right - c, top], [right, top + c]);
-    piece(BOTTOM, [left, bottom - c], [left + c, bottom]);
-    piece(flip(BOTTOM), [right - c, bottom - c], [right, bottom]);
-    drawn
+    // The line on the panel's edge, and its shadow just inside.
+    let shadow = rgba(0x00_00_00, 0.6);
+    let [l, tp, r, b] = [min[0], min[1], max[0], max[1]];
+    rect([l + t, tp + t], [r - t, tp + t * 2.0], shadow);
+    rect([l + t, b - t * 2.0], [r - t, b - t], shadow);
+    rect([l + t, tp + t], [l + t * 2.0, b - t], shadow);
+    rect([r - t * 2.0, tp + t], [r - t, b - t], shadow);
+    rect([l, tp], [r, tp + t], BRONZE_DIM);
+    rect([l, b - t], [r, b], BRONZE_DIM);
+    rect([l, tp], [l + t, b], BRONZE_DIM);
+    rect([r - t, tp], [r, b], BRONZE_DIM);
+
+    // A bracket outside each corner: `x`/`y` the bracket's corner, `dx`/`dy` which way its arms run.
+    let (gap, arm) = ((GAP * s).round(), (ARM * s).round());
+    for (x, y, dx, dy) in [
+        (l - gap, tp - gap, 1.0, 1.0),
+        (r + gap, tp - gap, -1.0, 1.0),
+        (l - gap, b + gap, 1.0, -1.0),
+        (r + gap, b + gap, -1.0, -1.0),
+    ] {
+        let (x0, x1) = if dx > 0.0 {
+            (x - t, x + arm)
+        } else {
+            (x - arm, x + t)
+        };
+        let (y0, y1) = if dy > 0.0 { (y - t, y) } else { (y, y + t) };
+        rect([x0, y0], [x1, y1], BRONZE);
+        let (y0, y1) = if dy > 0.0 {
+            (y - t, y + arm)
+        } else {
+            (y - arm, y + t)
+        };
+        let (x0, x1) = if dx > 0.0 { (x - t, x) } else { (x, x + t) };
+        rect([x0, y0], [x1, y1], BRONZE);
+    }
+    true
 }
 
 /// Draw the game's own red X, `size` pixels square at `at`. Answers the width it took.
