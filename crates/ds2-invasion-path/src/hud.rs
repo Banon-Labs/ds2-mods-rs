@@ -1,34 +1,37 @@
-//! What the toggle key shows and says: a small glyph in the top-left corner while the overlay is
-//! on, and a spoken "Invasion path, on." / "Invasion path, off." on each press.
+//! What the toggle key shows and says: a glyph on its tile in the status strip while the overlay
+//! is on, and a spoken "Invasion path, on." / "Invasion path, off." on each press.
 //!
 //! Both are this crate's own. The glyph is drawn from segments with [`push_segment`], through the
 //! same vertex list and the same pipeline as the route lines -- no game texture, no second
-//! `Present` hook, no imgui panel slot. It is a trail of three dashes rising to an arrowhead:
-//! amber over a dark outline, so it reads on snow and in a dark crypt alike.
+//! `Present` hook, no imgui panel slot. It is a trail of three dashes rising to an arrowhead, in
+//! the strip's bronze over a dark outline, on the strip's square tile.
 //!
 //! **Off is hidden, not dimmed.** While the overlay is off this crate hands the renderer no
 //! vertices at all and the frame is untouched, and a dimmed glyph would end that for every player
 //! who has the feature installed and switched off. The spoken clip is what says "off".
 //!
-//! **Top-left**, because weapon sync's crossed swords sit in the top-right corner.
+//! **In the strip, top right** ([`Slot::InvasionPath`], leftmost of the four signs). It used to
+//! sit top-left, which is where the game draws health and stamina. This pipeline draws no text,
+//! so unlike the other signs it does not show its name under the tile; the spoken clip says it.
 //!
 //! Pixels and bytes only, so `cargo test` on the host proves the placement, the scale and the
 //! clips' format.
 
+use ds2_overlay::status_strip::{self, Slot};
+
 use crate::lines::{Vertex, push_segment};
 
-/// The glyph's square edge as a fraction of the back buffer's height: about 50 px at 1440p.
-pub(crate) const GLYPH_SIZE_FRACTION: f32 = 0.035;
-/// Its distance from the top and left edges, the same way.
-pub(crate) const GLYPH_MARGIN_FRACTION: f32 = 0.03;
+/// The glyph's square inside its tile, as a share of the tile's side: the rest is margin.
+const GLYPH_OF_TILE: f32 = 0.72;
 
 /// The stroke, in glyph units (one unit is the square's edge).
 const STROKE: f32 = 0.12;
 /// The dark border around each stroke, in glyph units per side.
 const OUTLINE: f32 = 0.05;
 
-const AMBER: [f32; 4] = [1.0, 0.76, 0.22, 0.95];
-const SHADOW: [f32; 4] = [0.0, 0.0, 0.0, 0.75];
+const INK: [f32; 4] = status_strip::INK;
+const SHADOW: [f32; 4] = status_strip::SHADOW;
+const TILE: [f32; 4] = status_strip::TILE;
 
 /// The strokes in glyph units, origin top-left and `y` down: three dashes of a trail climbing
 /// from the bottom-left, a shaft, and the two barbs of an arrowhead pointing up and to the right.
@@ -41,8 +44,13 @@ const STROKES: [([f32; 2], [f32; 2]); 6] = [
     ([0.93, 0.07], [0.93, 0.45]),
 ];
 
-/// Vertices the glyph adds: every stroke twice (outline, then colour), six vertices each.
-pub(crate) const GLYPH_VERTICES: usize = STROKES.len() * 2 * crate::lines::VERTICES_PER_SEGMENT;
+/// Segments the tile takes: one wide segment for the fill, four for the frame.
+const TILE_SEGMENTS: usize = 5;
+
+/// Vertices the glyph adds: the tile, then every stroke twice (outline, then colour), six vertices
+/// a segment.
+pub(crate) const GLYPH_VERTICES: usize =
+    (TILE_SEGMENTS + STROKES.len() * 2) * crate::lines::VERTICES_PER_SEGMENT;
 
 /// Append the on-state glyph for a back buffer of `screen` pixels.
 ///
@@ -52,9 +60,12 @@ pub(crate) fn push_glyph(out: &mut Vec<Vertex>, screen: [f32; 2]) {
     if !(height.is_finite() && height > 0.0 && screen[0].is_finite() && screen[0] > 0.0) {
         return;
     }
-    let size = height * GLYPH_SIZE_FRACTION;
-    let margin = height * GLYPH_MARGIN_FRACTION;
-    let at = |p: [f32; 2]| [margin + p[0] * size, margin + p[1] * size];
+    let tile = status_strip::tile(screen, Slot::InvasionPath);
+    push_tile(out, &tile);
+    let size = tile.size * GLYPH_OF_TILE;
+    let inset = (tile.size - size) / 2.0;
+    let origin = [tile.min[0] + inset, tile.min[1] + inset];
+    let at = |p: [f32; 2]| [origin[0] + p[0] * size, origin[1] + p[1] * size];
     // Outlines first, then every coloured stroke, so no outline is painted over a stroke where the
     // arrowhead's three strokes meet.
     for (from, to) in STROKES {
@@ -62,9 +73,26 @@ pub(crate) fn push_glyph(out: &mut Vec<Vertex>, screen: [f32; 2]) {
         push_segment(out, a, b, (STROKE + 2.0 * OUTLINE) * size, SHADOW);
     }
     for (from, to) in STROKES {
-        push_segment(out, at(from), at(to), STROKE * size, AMBER);
+        push_segment(out, at(from), at(to), STROKE * size, INK);
     }
 }
+
+/// The strip's tile from segments, the only primitive this pipeline has: one segment as wide as
+/// the tile is tall fills it, and four hairlines frame it.
+fn push_tile(out: &mut Vec<Vertex>, tile: &status_strip::Tile) {
+    let [x0, y0] = tile.min;
+    let [x1, y1] = tile.max;
+    let mid = (y0 + y1) / 2.0;
+    push_segment(out, [x0, mid], [x1, mid], tile.size, TILE);
+    let half = FRAME / 2.0;
+    push_segment(out, [x0, y0 + half], [x1, y0 + half], FRAME, INK);
+    push_segment(out, [x0, y1 - half], [x1, y1 - half], FRAME, INK);
+    push_segment(out, [x0 + half, y0], [x0 + half, y1], FRAME, INK);
+    push_segment(out, [x1 - half, y0], [x1 - half, y1], FRAME, INK);
+}
+
+/// The frame's hairline, in pixels.
+const FRAME: f32 = ds2_overlay::style::FRAME_PX;
 
 /// Lengthen a segment by `by` pixels at each end, so the outline caps the stroke's ends as well
 /// as its sides.
@@ -108,45 +136,49 @@ mod tests {
         )
     }
 
+    /// The tile's vertices come first, then the outlines, then the coloured strokes.
+    fn strokes(out: &[Vertex]) -> &[Vertex] {
+        &out[TILE_SEGMENTS * crate::lines::VERTICES_PER_SEGMENT..]
+    }
+
     #[test]
     fn every_stroke_is_drawn_with_its_outline() {
         let mut out = Vec::new();
         push_glyph(&mut out, SCREEN);
         assert_eq!(out.len(), GLYPH_VERTICES);
-        let amber = out.iter().filter(|v| v.color == AMBER).count();
-        assert_eq!(amber, GLYPH_VERTICES / 2);
+        let ink = strokes(&out).iter().filter(|v| v.color == INK).count();
+        assert_eq!(ink, STROKES.len() * crate::lines::VERTICES_PER_SEGMENT);
     }
 
     #[test]
     fn the_outline_is_drawn_before_the_colour() {
         let mut out = Vec::new();
         push_glyph(&mut out, SCREEN);
-        let first_amber = out.iter().position(|v| v.color == AMBER).unwrap();
-        assert!(out[..first_amber].iter().all(|v| v.color == SHADOW));
-        assert!(out[first_amber..].iter().all(|v| v.color == AMBER));
+        let s = strokes(&out);
+        let first_ink = s.iter().position(|v| v.color == INK).unwrap();
+        assert!(s[..first_ink].iter().all(|v| v.color == SHADOW));
+        assert!(s[first_ink..].iter().all(|v| v.color == INK));
     }
 
+    /// It is the leftmost sign of the strip, top right, off the game's bars in the top left.
     #[test]
-    fn it_sits_in_the_top_left_corner_clear_of_the_top_right() {
-        let mut out = Vec::new();
-        push_glyph(&mut out, SCREEN);
-        let [x0, y0, x1, y1] = bounds(&out);
-        assert!(x0 > 0.0 && y0 > 0.0, "clipped by the edge: {x0} {y0}");
-        assert!(x1 < SCREEN[0] * 0.1 && y1 < SCREEN[1] * 0.1, "{x1} {y1}");
-    }
-
-    #[test]
-    fn it_is_about_fifty_pixels_at_1440p_and_scales_with_height() {
-        let mut big = Vec::new();
-        push_glyph(&mut big, SCREEN);
-        let [x0, _, x1, _] = bounds(&big);
-        let width = x1 - x0;
-        assert!((45.0..65.0).contains(&width), "{width}");
-
-        let mut small = Vec::new();
-        push_glyph(&mut small, [1280.0, 720.0]);
-        let [a, _, b, _] = bounds(&small);
-        assert!(((b - a) * 2.0 - width).abs() < 0.5, "{} vs {width}", b - a);
+    fn it_sits_on_its_strip_tile() {
+        for screen in [SCREEN, [1920.0, 1080.0], [1280.0, 720.0]] {
+            let mut out = Vec::new();
+            push_glyph(&mut out, screen);
+            let tile = status_strip::tile(screen, Slot::InvasionPath);
+            let [x0, y0, x1, y1] = bounds(&out);
+            let slack = 0.5;
+            assert!(
+                x0 >= tile.min[0] - slack && y0 >= tile.min[1] - slack,
+                "{screen:?}"
+            );
+            assert!(
+                x1 <= tile.max[0] + slack && y1 <= tile.max[1] + slack,
+                "{screen:?}"
+            );
+            assert!(tile.min[0] > screen[0] * 0.5, "{screen:?}");
+        }
     }
 
     #[test]
