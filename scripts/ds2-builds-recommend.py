@@ -158,6 +158,9 @@ class Data:
         self.spell_category = {}  # spell key -> SpellParam.spellCategory
         self.catalysts = {}  # weapon key -> see regulation_catalysts
         self.cast_bonus = {}  # element -> PhysicalStatsPerLevelStatValuesParam column, rows 0-99
+        # PhysicalStatsPerLevelStatValuesParam.staminaMax by END, rows 0-99: what a Dragon ring's
+        # stamina factor is weighed against (ring_lift); empty when the regulation is not read.
+        self.stamina_max = []
         # weapon class (Dagger, Greatsword, ...): MugenMonkey only, joined by normalized name
         mm_w = {}
         for k, v in mm["darkSouls2WeaponDetails"].items():
@@ -301,22 +304,110 @@ def spell_ok(data: Data, spell: str, eff: dict) -> bool:
     return req is not None and all(v <= eff.get(s, 0) for s, v in req.items())
 
 
-def slots_of(data: Data, eff: dict) -> int:
-    return data.att_slots[min(eff["attunement"], len(data.att_slots) - 1)]
+def slots_of(data: Data, eff: dict, rings=()) -> int:
+    """The attunement slots `eff`'s ATT gives, plus the worn `rings`' (ring_gear)."""
+    return data.att_slots[min(eff["attunement"], len(data.att_slots) - 1)] + ring_slots(data, rings)
 
 
-def spell_floors(data: Data, spells) -> dict | None:
+#: mechanics.json's names for the stats a ring's op 1000 effect adds to.
+GEAR_STATS = {"vigor", "endurance", "vitality", "strength", "dexterity", "adaptability", "intelligence", "faith"}
+
+
+def ring_gear(data: Data) -> dict:
+    """SoulsPlanner ring key -> what wearing it does in place of stat points, from the GAME:
+    mechanics.json `rings`, decoded from SpEffectRing.emevd op 1000 (event id = item id;
+    docs/DS2-BUILD-MECHANICS.md section 2), joined by normalized name. `add` {stat: n}: a flat stat
+    bonus (Strength, Dexterity, Knowledge, Prayer, Simpleton's); `scaled` [(stat, low, high,
+    bonus at or below low, bonus at or above high)]: Ring of the Embedded's VGR/END/VIT bonus by
+    the stat's own value (scaled_bonus); `slots`: attunement slots added (Southern Ritual Band
+    +1/+2/+3); `hp`, `load`, `stamina`: max HP, max equip load and max stamina factors (Life Ring,
+    Blue Seal, Northern Ritual Band, Royal Soldier's Ring, the Dragon rings). How two factors on
+    one quantity combine is not established (mechanics.json `multipliers_source`); they are
+    multiplied, as SoulsPlanner does. Poise is left out: nothing here floors it. A ring with none
+    of these is not in the table. Cached on `data`."""
+    gear = getattr(data, "_ring_gear", None)
+    if gear is not None:
+        return gear
+    gear = {}
+    rings = json.loads(MECHANICS.read_text())["rings"] if MECHANICS.exists() else []
+    for r in rings:
+        key = data.sp_key.get(norm(r["name"]))
+        if key not in data.rings:
+            continue
+        e = {"add": {}, "scaled": [], "slots": 0, "hp": 1.0, "load": 1.0, "stamina": 1.0}
+        for x in r["effects"]:
+            if x["kind"] == "add" and x["stat"] in GEAR_STATS:
+                e["add"][x["stat"]] = e["add"].get(x["stat"], 0) + int(x["value"])
+            elif x["kind"] == "add" and x["stat"] == "attunement_slots":
+                e["slots"] += int(x["value"])
+            elif x["kind"] == "scaled_add" and x["stat"] in GEAR_STATS:
+                e["scaled"].append((x["stat"], int(x["low_stat"]), int(x["high_stat"]),
+                                    int(x["bonus_at_or_below_low"]), int(x["bonus_at_or_above_high"])))
+            elif x["kind"] == "mul" and x["stat"] in ("max_hp", "max_equip_load", "max_stamina"):
+                what = {"max_hp": "hp", "max_equip_load": "load", "max_stamina": "stamina"}[x["stat"]]
+                e[what] *= float(x["value"])
+        if e["add"] or e["scaled"] or e["slots"] or e["hp"] != 1.0 or e["load"] != 1.0 or e["stamina"] != 1.0:
+            gear[key] = e
+    data._ring_gear = gear
+    return gear
+
+
+def scaled_bonus(s: int, low: int, high: int, at_low: int, at_high: int) -> int:
+    """A scaled ring bonus at stat value `s` (docs/DS2-BUILD-MECHANICS.md section 2; the byte
+    values are the game's, the interpolation is inferred and reproduces SoulsPlanner's Embedded
+    table): `at_low` at or below `low`, `at_high` at or above `high`, floored linear between."""
+    if s <= low:
+        return at_low
+    if s >= high:
+        return at_high
+    return at_low + (at_high - at_low) * (s - low) // (high - low)
+
+
+def gear_stats(data: Data, st: dict, rings=()) -> dict:
+    """`st` with the worn `rings`' stat bonuses (ring_gear `add` and `scaled`, a scaled bonus read
+    at the stat `st` gives), each stat a ring raised capped at 99. `st` itself when no ring adds a
+    stat."""
+    gear = ring_gear(data)
+    out = None
+    for r in rings:
+        e = gear.get(r)
+        if e is None or not (e["add"] or e["scaled"]):
+            continue
+        if out is None:
+            out = dict(st)
+        for s, v in e["add"].items():
+            out[s] = min(99, out[s] + v)
+        for s, lo, hi, at_lo, at_hi in e["scaled"]:
+            out[s] = min(99, out[s] + scaled_bonus(st[s], lo, hi, at_lo, at_hi))
+    return st if out is None else out
+
+
+def ring_slots(data: Data, rings=()) -> int:
+    gear = ring_gear(data)
+    return sum(gear[r]["slots"] for r in rings if r in gear)
+
+
+def ring_factor(data: Data, rings, what: str) -> float:
+    """The product of the worn `rings`' `what` ("hp", "load", "stamina") factors, in ring order."""
+    gear = ring_gear(data)
+    f = 1.0
+    for r in rings:
+        if r in gear:
+            f *= gear[r][what]
+    return f
+
+
+def spell_floors(data: Data, spells, extra_slots: int = 0) -> dict | None:
     """The least each stat may be for a build to attune and cast `spells` (keys; a repeat is a
     second copy, which costs its slots again): each requirement stat at the highest any of them
-    needs, and ATT at the least whose attunement slots hold their summed slot cost. None when no
-    ATT holds them. Slots come from ATT alone: a Southern Ritual Band's extra slots are not
-    counted, as optimize_build counts no ring's stat bonus either."""
+    needs, and ATT at the least whose attunement slots, plus `extra_slots` from worn rings, hold
+    their summed slot cost. None when no ATT holds them."""
     need = {}
     for s in spells:
         for stat, v in data.spell_req[s].items():
             need[stat] = max(need.get(stat, 0), v)
     cost = sum(data.spells[s]["slots"] for s in spells)
-    att = next((a for a, n in enumerate(data.att_slots) if n >= cost), None)
+    att = next((a for a, n in enumerate(data.att_slots) if n + extra_slots >= cost), None)
     if att is None:
         return None
     need["attunement"] = att
@@ -334,7 +425,9 @@ def keep(data: Data, b: Build) -> str | None:
     base = data.classes.get(b.cls, {})
     if all(b.stats[s] == base.get(s) for s in STATS) or b.level == 1:
         return "untouched class stats / SL1"
-    eff = effective(data, b)
+    # The worn rings count as the game counts them: a stat ring's bonus toward every requirement,
+    # a Southern Ritual Band's slots toward the spells (ring_gear).
+    eff = gear_stats(data, effective(data, b), b.rings)
     for idx, (w, _) in enumerate(b.hands):
         if w in EMPTY:
             continue
@@ -353,7 +446,7 @@ def keep(data: Data, b: Build) -> str | None:
             return "unknown spell"
         if any(not spell_ok(data, s, eff) for s in b.spells):
             return "spell requirement unmet"
-        if sum(data.spells[s]["slots"] for s in b.spells) > slots_of(data, eff):
+        if sum(data.spells[s]["slots"] for s in b.spells) > slots_of(data, eff, b.rings):
             return "too many spell slots"
     return None
 
@@ -442,12 +535,22 @@ def threat_mix(data: Data, corpus: list[Build]) -> dict:
     return {k: tot[k] / s for k in DMG}
 
 
+def max_load(data: Data, eff: dict, rings=()) -> float:
+    """Max equip load at `eff` wearing `rings`: equipLoadMax at VIT plus the rings' bonus (Ring of
+    the Embedded), times the rings' load factor (ring_gear)."""
+    vit = gear_stats(data, eff, rings)["vitality"]
+    return data.equip_load[min(vit, len(data.equip_load) - 1)] * ring_factor(data, rings, "load")
+
+
 def best_armor(data: Data, b: Build, eff: dict, mix: dict, top: int = 3, scarcity: float = 0.0):
     """The `top` armour sets `eff` can wear under EQUIP_CAP beside what `b` carries, best first by
     threat-weighted defense. `scarcity` (load_scarcity, 0..1) trades defense for weight: a set scores
     its defense less `scarcity` x LOAD_PRICE x the best set's own defense per weight x its weight, so
-    a build that wields few weapons takes a lighter set of similar defense over the heaviest one."""
-    cap = data.equip_load[min(eff["vitality"], len(data.equip_load) - 1)] * EQUIP_CAP
+    a build that wields few weapons takes a lighter set of similar defense over the heaviest one.
+    The rings `b` wears count (max_load, and their stat bonuses toward the armour's requirements)."""
+    worn = [r for r in b.rings if r in data.rings]
+    cap = max_load(data, eff, worn) * EQUIP_CAP
+    eff = gear_stats(data, eff, worn)
     carried = sum(data.weapons.get(w, {}).get("weight", 0) for w, _ in b.weapons())
     carried += sum(data.rings.get(r, {}).get("weight", 0) for r in b.rings if r in data.rings)
     budget = cap - carried
@@ -830,6 +933,7 @@ def regulation_spells(data: Data, d: dict, names: dict) -> str:
     the site's numbers and is counted."""
     rows = d["PhysicalStatsPerLevelStatValuesParam"]
     data.att_slots = [0] + [rows[str(a)]["spellSlot"] for a in range(1, max(map(int, rows)) + 1)]
+    data.stamina_max = [0] + [rows[str(a)]["staminaMax"] for a in range(1, max(map(int, rows)) + 1)]
     by_name = {}
     for sid, s in d["SpellParam"].items():
         by_name.setdefault(norm(names.get(sid, "")), s)
@@ -1353,7 +1457,7 @@ GRIP_TRIES = {"two": (True,), "one": (False,)}
 
 def optimize_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, objective: str,
                    grip: str = "two", flex_weight: float | None = None, spells=(),
-                   only_class: str | None = None, use_floors: bool = True):
+                   only_class: str | None = None, use_floors: bool = True, rings=None):
     """A valid build at `sl` that maximizes `objective` for weapon+infusion: floors first (bracket
     medians, END only for a high-stamina weapon), then requirements (STR halved for grip "two",
     in full for "one"; see GRIP_TRIES), then what `spells` need (spell_floors: their INT/FTH, and
@@ -1368,73 +1472,222 @@ def optimize_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
     a Warrior build lost 6 attunement and 9 intelligence below its own starting stats.
 
     `use_floors` False drops the floors (they are the medians of real builds, not a game rule), and
-    the floors returned are then empty: the panel's "ignore typical-build minimums"."""
+    the floors returned are then empty: the panel's "ignore typical-build minimums".
+
+    Rings count as stat points (ring_gear, ring_lift): the build may wear rings that stand in for
+    points the floors, the requirements or the spells' slots would otherwise take -- a Southern
+    Ritual Band's slots for ATT, a Royal Soldier's Ring's load for VIT, a Life Ring's HP for VIG, a
+    stat ring's +5 for a requirement. `rings` None chooses them (choose_rings); a list wears
+    exactly those. The best is (value, class, two-handed, levelled stats, worn rings); the
+    objective is scored at the stats the worn rings give."""
     if flex_weight is None:
         flex_weight = FLEX_WEIGHT
-    flex = (lambda s_: sum(flex_counts(data, s_))) if flex_weight else None
     floors, r1, cut = build_floors(data, corpus, sl)
     if not use_floors:
         floors = {}
-    dfn, _ = bracket_defense(data, corpus, sl)
-    req = data.weapons[weapon].get("require") or {}
-    need = spell_floors(data, spells)
-    if need is None:
-        return None, floors
-    best = None
-    for cls, base in data.classes.items():
-        if only_class is not None and cls != only_class.lower():
+    need_floors = {s: floors.get(s, 0) for s in FLOOR_STATS}
+    if r1.get(weapon, 0) >= cut:
+        need_floors["endurance"] = floors.get("endurance", 0)
+    classes = [c for c in data.classes if only_class is None or c == only_class.lower()]
+    two = GRIP_TRIES[grip][0]
+    req = _grip_req(data, weapon, two)
+    run = lambda rs: _optimize_with(data, corpus, weapon, inf, sl, objective, two, flex_weight, spells,
+                                    classes, need_floors, req, rs)
+    if rings is not None:
+        return run(list(rings)), floors
+    return choose_rings(data, classes, need_floors, req, spells, run), floors
+
+
+#: A ring worn in place of stat points must free at least this many to take a ring slot: one slot
+#: as a stat ring buys +5 of one stat (Strength Ring, Ring of Knowledge and the rest; ring_gear),
+#: so a ring that frees fewer points is worth less than the stat ring the slot could hold. What an
+#: offensive ring (Ring of Blades, Flynn's Ring, ...) would do in that slot has no decoded effect to
+#: weigh against it.
+RING_SLOT_POINTS = 5
+
+
+def sub_rings(data: Data) -> list[str]:
+    """The rings optimize_build may wear in place of stat points: per ring upgrade group
+    (data.rings `group`), the ring_gear ring with the highest item id -- the strongest tier, as
+    Southern Ritual Band+2 over +1 -- when none of its factors is below 1 (a Northern Ritual Band's
+    HP loss), never a NO_USE_RINGS ring; in ring_gear order (mechanics.json's, item id)."""
+    by_group = {}
+    for r, e in ring_gear(data).items():
+        if r in NO_USE_RINGS or min(e["hp"], e["load"], e["stamina"]) < 1.0:
             continue
-        for two in GRIP_TRIES[grip]:
-            st = {s: int(base[s]) for s in STATS}
-            for s in FLOOR_STATS:
-                st[s] = max(st[s], floors.get(s, 0))
-            if r1.get(weapon, 0) >= cut:
-                st["endurance"] = max(st["endurance"], floors.get("endurance", 0))
-            for s, v in req.items():
-                st[s] = max(st[s], (v + 1) // 2 if (two and s == "strength") else v)
-            for s, v in need.items():
-                st[s] = max(st[s], v)
-            free = sl + 53 - sum(st.values())
-            if free < 0:
-                continue
-            # A stat is weighted by its own curve: gain per point at the current value over the
-            # curve's early rate (its mean gain per point from 5 to 25, before any soft cap). Past
-            # a soft cap the weight falls (DEX past 40, VGR past 20 and 50, ADP past AGL 110), so
-            # points go to a stat still under its cap. VIT is left at its floor: equip load is
-            # the armor search's job, not a damage or survival curve.
-            obj = lambda s_: objective_value(data, weapon, inf, s_, objective, dfn)
-            agl = lambda s_: agility(s_["adaptability"], s_["attunement"])
-            curves = {s: obj for s in ("strength", "dexterity", "intelligence", "faith")}
-            curves["adaptability"] = obj if objective == "poison" else agl
-            curves["vigor"] = lambda s_: hit_points(s_["vigor"])
-            curves["attunement"] = agl  # a third of ADP's agility per point; slots only matter with spells
-            peak = {}
+        by_group[data.rings[r].get("group", r)] = r
+    return list(by_group.values())
+
+
+def ring_lift(data: Data, st: dict, floors: dict, req: dict, spells, rings=()) -> dict | None:
+    """`st` (a class's base) raised to what a build wearing `rings` must level to: each `floors`
+    stat until what it gives matches what the floor gives with no ring -- VIG by max HP
+    (hit_points, the game's hpMax), VIT by max equip load (equipLoadMax), END by max stamina
+    (staminaMax), each read at the stat plus the rings' bonus and times the rings' factor; ADP and
+    ATT by the stat plus bonus --; each `req` stat and the spells' INT/FTH until the stat plus the
+    rings' bonus meets it; ATT to the least whose slots plus the rings' hold the spells
+    (spell_floors). The columns are indexed by those stats per RelatePhysicalStatToLevelStatParam
+    row 0 (hpMax 1 VGR, staminaMax 2 END, equipLoadMax 3 VIT, spellSlot 4 ATT; read 2026-09-28).
+    None when no ATT holds the spells. With no ring it is the old arithmetic: each stat the most of
+    its base, its floor, its requirement."""
+    need = spell_floors(data, spells, ring_slots(data, rings))
+    if need is None:
+        return None
+    out = dict(st)
+    gear = ring_gear(data)
+    worn = [gear[r] for r in rings if r in gear]
+    touched = {s for e in worn for s in [*e["add"], *(x[0] for x in e["scaled"])]}
+
+    def eff(s, v):
+        if s not in touched:
+            return v
+        e_ = gear_stats(data, {**out, s: v}, rings)
+        return e_[s]
+
+    def least(s, ok):
+        v = out[s]
+        while v < 99 and not ok(v):
+            v += 1
+        out[s] = v
+
+    curves = {"vigor": (hit_points, ring_factor(data, rings, "hp")),
+              "vitality": (lambda v: data.equip_load[min(v, len(data.equip_load) - 1)] or 0,
+                           ring_factor(data, rings, "load")),
+              "endurance": ((lambda v: data.stamina_max[min(v, len(data.stamina_max) - 1)])
+                            if data.stamina_max else None, ring_factor(data, rings, "stamina"))}
+    for s, f in floors.items():
+        tab, fac = curves.get(s, (None, 1.0))
+        if tab is not None and (fac != 1.0 or s in touched):
+            target = tab(f)
+            least(s, lambda v: tab(eff(s, v)) * fac >= target)
+        else:
+            least(s, lambda v: eff(s, v) >= f)
+    for s, x in [*req.items(), *((s, x) for s, x in need.items() if s != "attunement")]:
+        least(s, lambda v: eff(s, v) >= x)
+    out["attunement"] = max(out["attunement"], need["attunement"])
+    return out
+
+
+#: A lift no class can reach: a set of rings whose spells no ATT holds.
+UNREACHABLE = 10 ** 6
+
+
+def lift_points(data: Data, classes: list[str], floors: dict, req: dict, spells, rings) -> list[int]:
+    """Per class, the points ring_lift raises its base by wearing `rings` (UNREACHABLE when no ATT
+    holds the spells)."""
+    out = []
+    for c in classes:
+        base = {s: int(data.classes[c][s]) for s in STATS}
+        up = ring_lift(data, base, floors, req, spells, rings)
+        out.append(UNREACHABLE if up is None else sum(up.values()) - sum(base.values()))
+    return out
+
+
+def next_ring(data: Data, classes: list[str], floors: dict, req: dict, spells, worn: list[str]) -> str | None:
+    """The sub_rings ring, not in the group of one `worn` and with fewer than four worn, that frees
+    the most points beside `worn` -- the most any class's lift_points falls, first in sub_rings
+    order on a tie -- when it frees RING_SLOT_POINTS or more; else None."""
+    if len(worn) >= 4:
+        return None
+    group = lambda r: data.rings[r].get("group", r)
+    taken = {group(r) for r in worn}
+    now = lift_points(data, classes, floors, req, spells, worn)
+    pick = None
+    for r in sub_rings(data):
+        if group(r) in taken:
+            continue
+        freed = max(a - b for a, b in zip(now, lift_points(data, classes, floors, req, spells, worn + [r])))
+        if freed >= RING_SLOT_POINTS and (pick is None or freed > pick[0]):
+            pick = (freed, r)
+    return pick and pick[1]
+
+
+def choose_rings(data: Data, classes: list[str], floors: dict, req: dict, spells, run):
+    """optimize_build's rings, one next_ring at a time. While no build fits, the ring is worn and
+    the next tried; once one fits, it is worn only when `run` (optimize_build at those rings)
+    scores the objective higher. Returns `run`'s best with the rings worn, or None."""
+    worn, best = [], run([])
+    while (r := next_ring(data, classes, floors, req, spells, worn)) is not None:
+        got = run(worn + [r])
+        if best is not None and (got is None or got[0] <= best[0]):
+            break
+        worn.append(r)
+        best = got
+    return best
+
+
+def least_sl_with_rings(data: Data, classes: list[str], floors: dict, req: dict, spells) -> int | None:
+    """The least soul level at which optimize_build finds a build under `floors`, in choose_rings'
+    arithmetic: while nothing fits it wears each next_ring in turn, and a build exists as soon as
+    one class's lift_points fit the `sl + 53 - sum(base)` points the level gives. None when no
+    ring sequence fits any level (no ATT holds the spells)."""
+    worn, best = [], None
+    while True:
+        for c, pts in zip(classes, lift_points(data, classes, floors, req, spells, worn)):
+            if pts < UNREACHABLE:
+                sl = pts - 53 + sum(int(data.classes[c][s]) for s in STATS)
+                best = sl if best is None else min(best, sl)
+        r = next_ring(data, classes, floors, req, spells, worn)
+        if r is None:
+            return best
+        worn.append(r)
+
+
+def _optimize_with(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, objective: str,
+                   two: bool, flex_weight: float, spells, classes: list[str], floors: dict, req: dict,
+                   rings: list[str]):
+    """optimize_build's search at one set of worn `rings`: per class the base lifted by ring_lift,
+    then the free points spent. The best (value, class, two, stats, rings), or None."""
+    flex = (lambda s_: sum(flex_counts(data, s_))) if flex_weight else None
+    dfn, _ = bracket_defense(data, corpus, sl)
+    E = (lambda s_: gear_stats(data, s_, rings)) if rings else (lambda s_: s_)
+    best = None
+    for cls in classes:
+        base = data.classes[cls]
+        st = ring_lift(data, {s: int(base[s]) for s in STATS}, floors, req, spells, rings)
+        if st is None:
+            return None
+        free = sl + 53 - sum(st.values())
+        if free < 0:
+            continue
+        # A stat is weighted by its own curve: gain per point at the current value over the
+        # curve's early rate (its mean gain per point from 5 to 25, before any soft cap). Past
+        # a soft cap the weight falls (DEX past 40, VGR past 20 and 50, ADP past AGL 110), so
+        # points go to a stat still under its cap. VIT is left at its floor: equip load is
+        # the armor search's job, not a damage or survival curve. Every curve reads the stats the
+        # worn rings give (E); the flexibility term reads the levelled stats, as flexibility does.
+        obj = lambda s_: objective_value(data, weapon, inf, E(s_), objective, dfn)
+        agl = lambda s_: (lambda e: agility(e["adaptability"], e["attunement"]))(E(s_))
+        curves = {s: obj for s in ("strength", "dexterity", "intelligence", "faith")}
+        curves["adaptability"] = obj if objective == "poison" else agl
+        curves["vigor"] = lambda s_: hit_points(E(s_)["vigor"])
+        curves["attunement"] = agl  # a third of ADP's agility per point; slots only matter with spells
+        peak = {}
+        for s, f in curves.items():
+            peak[s] = max((f({**st, s: 25}) - f({**st, s: 5})) / 20, 1e-9)
+        if curves["adaptability"] is agl:
+            peak["attunement"] = peak["adaptability"]
+        while free > 0:
+            pick, best_w = None, 0.0
             for s, f in curves.items():
-                peak[s] = max((f({**st, s: 25}) - f({**st, s: 5})) / 20, 1e-9)
-            if curves["adaptability"] is agl:
-                peak["attunement"] = peak["adaptability"]
-            while free > 0:
-                pick, best_w = None, 0.0
-                for s, f in curves.items():
-                    cur = f(st)
-                    # Only a requirement stat changes what the build wields; the term is left off
-                    # the rest rather than added as a zero, so a weight of 0 is the old optimizer.
-                    fcur = flex(st) if flex and s in REQ_STATS else None
-                    for n in range(1, min(free, 99 - st[s], 8) + 1):  # look past table plateaus
-                        w = (f({**st, s: st[s] + n}) - cur) / n / peak[s]
-                        if fcur is not None:
-                            w += flex_weight * (flex({**st, s: st[s] + n}) - fcur) / n
-                        if w > best_w + 1e-12:
-                            pick, best_w = (s, n), w
-                if pick is None:  # every curve is flat: the points go to vigor
-                    pick = (next(s for s in ("vigor", "vitality", "endurance", "attunement") if st[s] < 99), 1)
-                st[pick[0]] += pick[1]
-                free -= pick[1]
-            val = objective_value(data, weapon, inf, st, objective, dfn)
-            if best is None or val > best[0]:
-                best = (val, cls, two, st)
-            break  # one grip per class
-    return best, floors
+                cur = f(st)
+                # Only a requirement stat changes what the build wields; the term is left off
+                # the rest rather than added as a zero, so a weight of 0 is the old optimizer.
+                fcur = flex(st) if flex and s in REQ_STATS else None
+                for n in range(1, min(free, 99 - st[s], 8) + 1):  # look past table plateaus
+                    w = (f({**st, s: st[s] + n}) - cur) / n / peak[s]
+                    if fcur is not None:
+                        w += flex_weight * (flex({**st, s: st[s] + n}) - fcur) / n
+                    if w > best_w + 1e-12:
+                        pick, best_w = (s, n), w
+            if pick is None:  # every curve is flat: the points go to vigor
+                pick = (next(s for s in ("vigor", "vitality", "endurance", "attunement") if st[s] < 99), 1)
+            st[pick[0]] += pick[1]
+            free -= pick[1]
+        val = objective_value(data, weapon, inf, E(st), objective, dfn)
+        if best is None or val > best[0]:
+            best = (val, cls, two, st, list(rings))
+    return best
 
 
 #: The highest soul level the game allows: where the search for the least SL that fits stops.
@@ -1504,6 +1757,16 @@ def refusal(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, obj
     classes = [c for c in data.classes if only_class is None or c == only_class.lower()]
     need = spell_floors(data, spells)
     lines, fixes = [], []
+    # No ATT alone holds the spells, but the ring with the most slots (sub_rings) makes one that
+    # does: the arithmetic below is then the one with that ring worn, as optimize_build wears it.
+    band = max(sub_rings(data), key=lambda r: ring_gear(data)[r]["slots"], default=None)
+    band_slots = ring_slots(data, [band]) if band else 0
+    band_note = None
+    if need is None and band_slots:
+        need = spell_floors(data, spells, band_slots)
+        if need is not None:
+            band_note = (f"no attunement alone holds {spell_list}; wearing a {data.rings[band]['name']} "
+                         f"({ring_effect_text(data, band)}) does")
 
     def cost(cls, sl_, layer):
         """Points above `cls`'s base the layers up to `layer` need at `sl_` (1 weapon, 2 +spells, 3 +floors)."""
@@ -1520,13 +1783,14 @@ def refusal(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, obj
         return tot
 
     have = lambda cls, sl_: sl_ + 53 - sum(int(data.classes[cls][s]) for s in STATS)
-    fits = lambda sl_: need is not None and any(cost(c, sl_, 3) <= have(c, sl_) for c in classes)
 
     if need is None:
         total = sum(data.spells[s]["slots"] for s in spells)
         kind, cls, short = "slots", None, None
         lines.append(f"no attunement holds {spell_list}: they cost {total} slots, and ATT 99 gives "
-                     f"{max(data.att_slots)}")
+                     f"{max(data.att_slots)}"
+                     + (f", {max(data.att_slots) + band_slots} with a {data.rings[band]['name']}"
+                        if band_slots else ""))
     else:
         kind = next((k for k, layer in (("weapon", 1), ("spells", 2), ("floors", 3))
                      if all(cost(c, sl, layer) > have(c, sl) for c in classes)), "floors")
@@ -1544,6 +1808,8 @@ def refusal(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, obj
         }[kind])
         if only_class is not None:
             lines[0] = f"as a {cname}: {lines[0]}"
+        if band_note:
+            lines.append(band_note)
         raises = _raises(data, cls, floors_at(sl), hs, req, need)
         groups = []
         for src, label in (("floors", "floors"), ("spells", spell_list), ("weapon", "weapon")):
@@ -1556,7 +1822,17 @@ def refusal(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, obj
         src_name = {"floors": "floor", "spells": spell_list, "weapon": "weapon"}
         lines.append("most from " + ", ".join(f"{LABEL[s]} +{r} ({src_name[x]})" for s, r, v, x in top))
 
-    # 1. the least soul level that fits, nothing else changed
+    # 1. the least soul level that fits, nothing else changed, wearing what rings optimize_build
+    # would (least_sl_with_rings: per floors bracket, the least SL any class's lift fits under)
+    least = {}
+
+    def fits(sl_):
+        i = sl_bracket(sl_)
+        if i not in least:
+            fl = {s: _floors_at(floors_at(sl_), s, hs) for s in FLOOR_STATS + (["endurance"] if hs else [])}
+            least[i] = least_sl_with_rings(data, classes, fl, req, spells)
+        return least[i] is not None and sl_ >= least[i]
+
     up = next((s_ for s_ in range(sl + 1, SL_MAX + 1) if fits(s_)), None)
     if up is not None and run(sl_=up) is not None:
         fixes.append(("sl", up, f"Raise SL to {up}"))
@@ -1582,7 +1858,9 @@ def refusal(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, obj
     # 4. another class, when a class was asked for
     if only_class is not None:
         best = run(cls_=None)
-        if best is not None:
+        # checked as that class alone too: the rings chosen for any class can differ from the
+        # rings chosen for one (next_ring counts the classes it is given)
+        if best is not None and run(cls_=best[1]) is not None:
             fixes.append(("class", best[1], f"Use a {data.classes[best[1]]['name']} instead"))
     return {"kind": kind, "class": cls and data.classes[cls]["name"], "short": short, "lines": lines,
             "fixes": fixes}
@@ -1961,7 +2239,8 @@ def flexibility(data: Data, corpus: list[Build], stats: dict, sl: int, armor: li
     are not counted, for the build or for its neighbours). `score` = one + two. `below`/`equal`: how
     many of the k nearest_builds score below / the same, over their own levelled stats; `percentile`
     = 100 * (below + equal / 2) / n, the mid-rank percentile, so a build tied with every neighbour
-    sits at 50. `spare`: equip load left under EQUIP_CAP at the build's VIT after `armor` (piece
+    sits at 50. `spare`: equip load left under EQUIP_CAP at the build's VIT (max_load: with the
+    rings' load factor and VIT bonus) after `armor` (piece
     keys head/chest/hands/legs, "Naked" for none) and `rings` (keys, each worn once) -- the weapon
     weight the build can still carry; `fits`: how many weapons it wields in either grip that weigh
     no more than that on their own."""
@@ -1971,7 +2250,7 @@ def flexibility(data: Data, corpus: list[Build], stats: dict, sl: int, armor: li
     below = sum(1 for s in scores if s < score)
     equal = sum(1 for s in scores if s == score)
     n = len(scores)
-    cap = data.equip_load[min(stats["vitality"], len(data.equip_load) - 1)] * EQUIP_CAP
+    cap = max_load(data, stats, [r for r in rings or [] if r in data.rings]) * EQUIP_CAP
     # Added one at a time, not with sum(): Python 3.12's sum() of floats is compensated, so it
     # rounds differently from the plain running total the Rust port keeps.
     spare = cap
@@ -2009,13 +2288,18 @@ COMMON_RING = 0.10  # a ring worn by at least this share of every corpus build c
 NO_USE_RINGS = ("Agape_Ring",)
 
 
-def suggest_rings(data: Data, near: Counter, every: Counter | None = None, n: int = 4) -> list[str]:
+def suggest_rings(data: Data, near: Counter, every: Counter | None = None, n: int = 4,
+                  worn: list[str] = ()) -> list[str]:
     """The `n` rings `near` counts most, except that each NO_USE_RINGS ring's place goes, in
     place, to the ring the nearest builds wear most (then all builds) that is neither a no-use
-    ring nor in the upgrade group of a ring already in the list: never a second Ring of Blades."""
-    top = [r for r, _ in near.most_common(n)]
+    ring nor in the upgrade group of a ring already in the list: never a second Ring of Blades.
+    A ring in the group of one already `worn` (optimize_build's) is left out, as a no-use ring is."""
     group = lambda r: data.rings[r].get("group", r)
-    taken = {group(r) for r in top if r not in NO_USE_RINGS}
+    held = {group(r) for r in worn}
+    near = Counter({r: c for r, c in near.items() if group(r) not in held})
+    every = every and Counter({r: c for r, c in every.items() if group(r) not in held})
+    top = [r for r, _ in near.most_common(n)]
+    taken = {group(r) for r in top if r not in NO_USE_RINGS} | held
     out = []
     for r in top:
         if r in NO_USE_RINGS:
@@ -2060,16 +2344,22 @@ def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
     COMMON_RING of all builds wear; and armour, the
     best_armor set under 70% load with the primary and those four rings carried. `allow_naked`
     skips the armour, as every generated build did before it had any. `only_class` is
-    optimize_build's: the build for a character that already has a class."""
+    optimize_build's: the build for a character that already has a class.
+
+    The rings optimize_build wears in place of stat points come first, each in the place of one of
+    the four (suggest_rings fills the rest), and `ring_trades` says what each stood in for
+    (ring_trades). The weapons, the catalysts and the armour's requirements are read at the stats
+    those rings give; `slots` counts their attunement slots."""
     best, floors = optimize_build(data, corpus, weapon, inf, sl, objective, grip, flex_weight, spells,
                                   only_class, use_floors)
     if best is None:
         return None
-    val, cls, two, stats = best
-    assert all(spell_ok(data, s, stats) for s in spells)
-    slots = (sum(data.spells[s]["slots"] for s in spells), slots_of(data, stats))
+    val, cls, two, stats, worn = best
+    eff = gear_stats(data, stats, worn)
+    assert all(spell_ok(data, s, eff) for s in spells)
+    slots = (sum(data.spells[s]["slots"] for s in spells), slots_of(data, eff, worn))
     assert slots[0] <= slots[1]
-    rows, _, _ = weapons_for(data, stats, sl, corpus, top=10_000, window=window)
+    rows, _, _ = weapons_for(data, eff, sl, corpus, top=10_000, window=window)
     one, only2, seen = [], [], {data.weapons[weapon]["name"]}
     for dmg, name, winf, ar, label in rows:
         if name in seen:
@@ -2081,7 +2371,7 @@ def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
     near = Counter(r for b in nearest_builds(data, stats, sl, corpus, k) for r in dict.fromkeys(b.rings)
                    if r and r in data.rings)
     every = Counter(r for b in corpus for r in dict.fromkeys(b.rings) if r and r in data.rings)
-    suggested = suggest_rings(data, near, every)
+    suggested = worn + suggest_rings(data, near, every, 4 - len(worn), worn)
     common = [r for r, c in every.most_common() if c >= COMMON_RING * len(corpus) and r not in suggested
               and r not in NO_USE_RINGS]
     armor, armor_note = ([], None) if allow_naked else generate_armor(data, corpus, weapon, inf, two, stats,
@@ -2092,8 +2382,57 @@ def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
             + [data.rings[r]["name"] for r in common], "armor": armor, "armor_note": armor_note,
             "flex": flexibility(data, corpus, stats, sl, armor_keys(data, armor), suggested),
             "spells": [data.spells[s]["name"] for s in spells], "slots": slots,
+            "ring_trades": ring_trades(data, corpus, weapon, sl, grip, spells, cls, use_floors, worn),
             "catalysts": [(label, data.weapons[c]["name"], p, over and data.weapons[over]["name"])
-                          for label, c, p, over in best_catalysts(data, spells, stats)]}
+                          for label, c, p, over in best_catalysts(data, spells, eff)]}
+
+
+def ring_effect_text(data: Data, ring: str) -> str:
+    """What `ring` does, from ring_gear: "attunement slots +3", "STR +5", "equip load x1.2", ..."""
+    e = ring_gear(data)[ring]
+    out = [f"{LABEL[s]} +{v}" for s, v in e["add"].items()]
+    if e["scaled"]:
+        _, _, _, lo, hi = e["scaled"][0]
+        out.append("/".join(LABEL[x[0]] for x in e["scaled"]) + f" +{lo} to +{hi} by the stat")
+    if e["slots"]:
+        out.append(f"attunement slots +{e['slots']}")
+    for what, name in (("hp", "max HP"), ("load", "equip load"), ("stamina", "max stamina")):
+        if e[what] != 1.0:
+            out.append(f"{name} x{e[what]!r}")
+    return ", ".join(out)
+
+
+def ring_trades(data: Data, corpus: list[Build], weapon: str, sl: int, grip: str, spells, cls: str,
+                use_floors: bool, worn: list[str]) -> list[tuple[str, str, list[tuple[str, int, int]]]]:
+    """Per ring optimize_build wore in place of stat points: (its name, ring_effect_text, the stats
+    class `cls` levels less for it, as (label, without the ring, with it)) -- ring_lift with every
+    worn ring against the same without that one."""
+    floors, r1, cut = build_floors(data, corpus, sl)
+    if not use_floors:
+        floors = {}
+    need_floors = {s: floors.get(s, 0) for s in FLOOR_STATS}
+    if r1.get(weapon, 0) >= cut:
+        need_floors["endurance"] = floors.get("endurance", 0)
+    req = _grip_req(data, weapon, GRIP_TRIES[grip][0])
+    base = {s: int(data.classes[cls][s]) for s in STATS}
+    lift = lambda rs: ring_lift(data, base, need_floors, req, spells, rs)
+    with_all = lift(worn)
+    out = []
+    for r in worn:
+        without = lift([x for x in worn if x != r])
+        # None: without it no ATT holds the spells
+        moved = None if without is None else [(LABEL[s], without[s], with_all[s]) for s in STATS
+                                               if without[s] != with_all[s]]
+        out.append((data.rings[r]["name"], ring_effect_text(data, r), moved))
+    return out
+
+
+def trade_line(t: tuple) -> str:
+    """One ring_trades entry as the panel shows it, word for word."""
+    name, effect, moved = t
+    if moved is None:
+        return f"{name}: {effect} -> no ATT holds the spells without it"
+    return f"{name}: {effect} -> " + (", ".join(f"{s} {a} -> {b}" for s, a, b in moved) or "no stat lowered")
 
 
 def armor_keys(data: Data, names: list[str]) -> list[str]:
@@ -2249,7 +2588,8 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 #
 #   C key name level vig end vit att str dex adp int fth      a starting class, in the table's order
 #   T table v0 v1 ...                                         an attack-bonus, equip-load,
-#                                                             attunement-slots or cast-bonus table
+#                                                             attunement-slots, max-stamina or
+#                                                             cast-bonus table
 #   W key name class flags weight require ha1h ha2h counter   a weapon; flags: S shield, C catalyst,
 #                                                             H high-stamina R1; require: stat:value,..
 #   I code atk(7) scale(9)                                    one infusion of the last W
@@ -2258,6 +2598,9 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 #   R key name weight group                                   a ring; group: its upgrade line
 #   N key                                                     a ring in NO_USE_RINGS
 #   E ring weight mul add(9)                                  a ring --minimum may wear
+#   G ring slots hp load stamina add(9) scaled                ring_gear, in its order: a ring
+#                                                             optimize_build counts; scaled is
+#                                                             stat:low:high:bonusLow:bonusHigh,..
 #   A slot key name weight alter(9) require                   armour --minimum may wear
 #   P slot key name weight def(5) require                     every armour piece, for best_armor
 #   H physical magic fire lightning dark                      the corpus threat mix (threat_mix)
@@ -2274,7 +2617,7 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 
 BACKEND_DATA_NAME = "ds2-build-recommender.dat"
 BACKEND_DATA = Path.home() / ".cache/ds2-builds" / BACKEND_DATA_NAME
-BACKEND_FORMAT = "ds2-build-recommender-data 5"
+BACKEND_FORMAT = "ds2-build-recommender-data 6"
 #: How far the exported R1/R2 chains run, in seconds: the panel clamps its window to 10.0
 #: (crates/ds2-build-recommender-ui/src/panel.rs), and status_hits runs to max(3, window).
 STATUS_HORIZON = 10.0
@@ -2316,6 +2659,8 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
         out.append("\t".join(["T", t, *(_num(v or 0) for v in data.sp[t])]))
     out.append("\t".join(["T", "equipmentLoad", *(_num(v or 0) for v in data.equip_load)]))
     out.append("\t".join(["T", "attunementSlots", *(_num(v) for v in data.att_slots)]))
+    if data.stamina_max:
+        out.append("\t".join(["T", "staminaMax", *(_num(v) for v in data.stamina_max)]))
     for e, col in data.cast_bonus.items():
         out.append("\t".join(["T", "cast" + e.capitalize(), *(_num(v) for v in col)]))
     for key, s in data.spells.items():
@@ -2375,6 +2720,11 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
     out.append("\t".join(["H", *(_num(float(mix[k])) for k in DMG)]))
     for key, (weight, add, mul) in sorted(ring_effects(data).items()):
         out.append("\t".join(["E", key, _num(weight), _num(float(mul)), *(_num(add.get(s, 0)) for s in STATS)]))
+    for key, e in ring_gear(data).items():
+        out.append("\t".join(["G", key, _num(e["slots"]), _num(float(e["hp"])), _num(float(e["load"])),
+                              _num(float(e["stamina"])), *(_num(e["add"].get(s, 0)) for s in STATS),
+                              ",".join(f"{STATS.index(s)}:{lo}:{hi}:{a}:{b}" for s, lo, hi, a, b in e["scaled"])
+                              or "-"]))
     helpful = {"strength", "dexterity", "intelligence", "faith", "vitality", "adaptability", "attunement"}
     for slot in ARMOR_SLOTS:
         for key, v in data.armor[slot].items():
@@ -2453,7 +2803,11 @@ EXPECT_SPELLS = [  # weapon key, infusion, sl, objective, spell keys: --generate
     ("Demons_Great_Hammer", "Raw", 200, "damage", ["Heal", "Heal"]),  # a second copy costs its slot again
     ("Demons_Great_Hammer", "Raw", 120, "damage", ["Resonant_Soul", "Dark_Orb", "Fireball"]),  # hex x2 + pyromancy
     ("Demons_Great_Hammer", "Raw", 20, "damage", ["Great_Lightning_Spear"]),  # FTH 42 does not fit SL 20
-    ("Demons_Great_Hammer", "Raw", 200, "damage", ["Climax", "Climax", "Sacred_Oath"]),  # 12 slots: no ATT holds them
+    # 12 slots: no ATT alone holds them (ATT 99 gives 10), a Southern Ritual Band+2 does (+3)
+    ("Demons_Great_Hammer", "Raw", 200, "damage", ["Climax", "Climax", "Sacred_Oath"]),
+    # soulsplanner 16581's SL and spell: the floors and Climax's ATT 20 do not fit SL 98 without the
+    # rings; Ring of the Embedded stands in for VIG/VIT and the band for ATT
+    ("Dagger", "Dark", 98, "damage", ["Climax"]),
 ]
 #: --optimize --spells, as Optimize for weapon asks now that it honours the chosen spells; the last
 #: field is whether the floors apply (False: --no-floors, the panel's "ignore typical-build minimums").
@@ -2461,6 +2815,10 @@ EXPECT_OPTIMIZE_SPELLS = [(*case, True) for case in EXPECT_SPELLS] + [
     ("Dagger", "No_Infusion", 120, "damage", ["Climax"], True),  # the user's refusal: no build
     ("Dagger", "No_Infusion", 120, "damage", ["Climax"], False),  # the same without the floors: a build
     ("Roaring_Halberd", "No_Infusion", 120, "damage", ["Climax"], False),
+    # no ring: SL 78 is the least that fits; SL 72 fits with the band alone (ATT 20 -> 10); SL 60
+    # with the band, Ring of Knowledge and Ring of Prayer
+    ("Dagger", "No_Infusion", 72, "damage", ["Climax"], False),
+    ("Dagger", "No_Infusion", 60, "damage", ["Climax"], False),
 ]
 EXPECT_REFUSALS = [  # weapon key, infusion, sl, objective, grip, spells, class, floors: refusal()
     ("Dagger", "No_Infusion", 120, "damage", "two", ["Climax"], None, True),  # the user's case: floors
@@ -2471,6 +2829,14 @@ EXPECT_REFUSALS = [  # weapon key, infusion, sl, objective, grip, spells, class,
     ("Giant_Stone_Axe", "No_Infusion", 10, "damage", "one", [], None, True),  # STR 45 one-handed
     ("Demons_Great_Hammer", "Raw", 40, "damage", "two", [], "sorcerer", True),  # the class is the blocker
     ("Demons_Great_Hammer", "Raw", 100, "damage", "two", [], None, True),  # a build: no refusal
+    ("Dagger", "No_Infusion", 50, "damage", "two", ["Climax"], None, False),  # the least SL counts the rings
+    # SL 120 above builds now, wearing rings in place of points; SL 60 still refuses
+    ("Dagger", "No_Infusion", 60, "damage", "two", ["Climax"], None, True),
+    ("Roaring_Halberd", "No_Infusion", 60, "damage", "two", ["Climax"], None, True),
+    ("Demons_Great_Hammer", "Raw", 20, "damage", "two", [], "sorcerer", True),  # the class is the blocker
+    ("Dagger", "No_Infusion", 40, "damage", "two", ["Climax"], "sorcerer", True),
+    # 16 slots: not even ATT 99 with a Southern Ritual Band+2 (13)
+    ("Demons_Great_Hammer", "Raw", 200, "damage", "two", ["Climax", "Climax", "Climax", "Climax"], None, True),
 ]
 EXPECT_MINIMUM = [("Demons_Great_Hammer", True), ("Moonlight_Greatsword", False), ("Uchigatana", False)]
 EXPECT_SIMILAR = [  # stats, sl, k, status
@@ -2585,18 +2951,21 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
         g = generate_build(data, corpus, weapon, inf, sl, objective, spells=spells)
         spell_gen.append((weapon, INFUSION_CODE[inf], sl, objective, spells, None if g is None else _Some((
             data.classes[g["class"]]["name"], g["two_handed"], arr(g["stats"]), g["spells"], g["slots"][0],
-            g["slots"][1], [(label, name, float(p), over or "") for label, name, p, over in g["catalysts"]]))))
+            g["slots"][1], [(label, name, float(p), over or "") for label, name, p, over in g["catalysts"]],
+            [trade_line(t) for t in g["ring_trades"]]))))
     out.append("// weapon, infusion, sl, objective, spells -> class, two-handed, stats, spell names, slots the")
-    out.append("// spells cost, slots the build's ATT gives, catalysts: school, name, cast power, the catalyst")
-    out.append("// passed over for its requirements (\"\" for none).")
+    out.append("// spells cost, slots the build's ATT and rings give, catalysts: school, name, cast power, the")
+    out.append("// catalyst passed over for its requirements (\"\" for none), the rings worn in place of points.")
     out.append(f"pub const GENERATE_SPELLS: SpellCases = {_rs(spell_gen)};\n")
     opt_spells = []
     for weapon, inf, sl, objective, spells, use_floors in EXPECT_OPTIMIZE_SPELLS:
         best, _ = optimize_build(data, corpus, weapon, inf, sl, objective, spells=spells, use_floors=use_floors)
         opt_spells.append((weapon, INFUSION_CODE[inf], sl, objective, spells, use_floors,
                            None if best is None else _Some((data.classes[best[1]]["name"], best[2],
-                                                            arr(best[3]), float(best[0])))))
-    out.append("// weapon, infusion, sl, objective, spells, floors apply -> class, two-handed, stats, value.")
+                                                            arr(best[3]), float(best[0]),
+                                                            [data.rings[r]["name"] for r in best[4]]))))
+    out.append("// weapon, infusion, sl, objective, spells, floors apply -> class, two-handed, stats, value,")
+    out.append("// the rings worn in place of points.")
     out.append(f"pub const OPTIMIZE_SPELLS: OptimizeSpellCases = {_rs(opt_spells)};\n")
     refusals = []
     for weapon, inf, sl, objective, grip, spells, cls, use_floors in EXPECT_REFUSALS:
@@ -2660,7 +3029,8 @@ def expect_builds(data: Data, corpus: list[Build], mix, cases: list, naked_cases
             data.classes[g["class"]]["name"], g["two_handed"], arr(g["stats"]),
             [(n, INFUSION_CODE[i], d) for n, i, d in g["weapons_1h"]],
             [(n, INFUSION_CODE[i], d) for n, i, d in g["weapons_2h_only"]], suggested, rings,
-            g["armor"], g["armor_note"] and _Some(g["armor_note"]), binds[0], binds[1]))))
+            g["armor"], g["armor_note"] and _Some(g["armor_note"]), binds[0], binds[1],
+            [trade_line(t) for t in g["ring_trades"]]))))
     return opt, gen
 
 
@@ -2768,7 +3138,8 @@ def flex_selftest_cases() -> list:
         armor={s: {"Naked": {"name": "Naked", "weight": 0.0}, "Plate": {"name": "Plate", "weight": 10.0}}
                for s in ARMOR_SLOTS},
         rings={"Flynns_Ring": {"name": "Flynn's Ring", "weight": 0.5}},
-        equip_load=[None] + [40.0 + 1.5 * i for i in range(99)])
+        equip_load=[None] + [40.0 + 1.5 * i for i in range(99)],
+        _ring_gear={})  # Flynn's Ring changes no stat, load, HP or slot count
     st = lambda **kw: {**base, **{s: kw.get(s[:3], base[s]) for s in STATS}}
     user = st(str=10, dex=8, fai=18, vit=10)  # Dagger, Chime 1H; Club too 2H: 2 + 3 = 5
     corpus = [Build("x", st(str=s_, dex=d, fai=f), [], [], 0, [], [], label=str(i))
@@ -3022,6 +3393,8 @@ def main() -> int:
             for n, i, d in g[key]:
                 print(f"    {d:6}  {n} ({i.replace('_', ' ')})")
         print("  rings: " + ", ".join(g["rings"]))
+        for t in g["ring_trades"]:
+            print(f"  ring in place of points: {trade_line(t)}")
         if g["spells"]:
             print(f"  spells: {', '.join(g['spells'])} ({g['slots'][0]} of {g['slots'][1]} attunement slots)")
             for label, name, p, over in g["catalysts"]:
@@ -3106,13 +3479,16 @@ def main() -> int:
             print_refusal(refusal(data, corpus, weapon, inf, a.sl, a.objective, a.grip, spells, a.start_class,
                                   not a.no_floors))
             return 2
-        val, cls, two, stats = best
+        val, cls, two, stats, worn = best
         print(f"{data.weapons[weapon]['name']} ({inf.replace('_', ' ')}), {a.objective} {val:.0f}: {cls} SL {a.sl}"
               f" {'two-handed' if two else 'one-handed'}\n  "
               + " ".join(f"{s[:3].upper()} {stats[s]}" for s in STATS)
               + "\n  floors (bracket medians): " + " ".join(f"{s[:3].upper()} {v}" for s, v in floors.items()))
+        for t in ring_trades(data, corpus, weapon, a.sl, a.grip, spells, cls, not a.no_floors, worn):
+            print(f"  ring: {trade_line(t)}")
         print(f"  flexibility: {flex_line(flexibility(data, corpus, stats, a.sl))}")
-        a.weapons_for = ",".join(f"{s[:3].upper()}={stats[s]}" for s in STATS)
+        eff = gear_stats(data, stats, worn)  # the weapons below are read at what the rings give
+        a.weapons_for = ",".join(f"{s[:3].upper()}={eff[s]}" for s in STATS)
     if a.best_infusion or a.infusion_gaps:
         if not a.stats:
             ap.error("--best-infusion and --infusion-gaps need --stats")

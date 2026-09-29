@@ -96,7 +96,8 @@ pub struct OptimizedBuild {
     /// The objective's value at these stats; `0` for a minimum build, which has no objective.
     pub value: f32,
     /// Armour and rings the stats count on, by display name: a minimum build meets its
-    /// requirements with their stat bonuses and cannot wield the weapon without them.
+    /// requirements with their stat bonuses and cannot wield the weapon without them; an optimized
+    /// build wears these rings in place of stat points.
     pub gear: Vec<String>,
 }
 
@@ -145,10 +146,16 @@ pub struct GeneratedBuild {
     pub spell_names: Vec<String>,
     /// The attunement slots the spells cost together.
     pub slots_used: u16,
-    /// The attunement slots the build's ATT gives.
+    /// The attunement slots the build's ATT gives, plus a worn Southern Ritual Band's.
     pub slots: u16,
     /// The best catalyst for each school of the spells, in spell-category order.
     pub catalysts: Vec<CatalystPick>,
+    /// Per ring worn in place of stat points (the first of `suggested_rings`), what it does and
+    /// the stats it lowered: `Southern Ritual Band + 2: attunement slots +3 -> ATT 20 -> 10`.
+    pub ring_trades: Vec<String>,
+    /// Per stat, in [`STAT_LABELS`] order, whether those rings let the build level it less than
+    /// its floor or requirement: a floor such a stat is under is met by the ring, not missed.
+    pub ring_lowered: [bool; STAT_COUNT],
     /// Whether this came from [`StubBackend`], so the panel can say its numbers mean nothing.
     pub stub: bool,
 }
@@ -603,10 +610,17 @@ pub fn generate(
     {
         return Err(Refusal::plain(vec![refusal.to_string()]));
     }
+    // A floor a worn ring stands in for (a Life Ring's HP for VIG, ...) is met by the ring.
     let violations = if state.ignore_floors {
         Vec::new()
     } else {
-        floor_violations(&build.stats, &backend.floors(build.sl))
+        let mut floors = backend.floors(build.sl);
+        for (floor, &lowered) in floors.iter_mut().zip(&build.ring_lowered) {
+            if lowered {
+                *floor = 0;
+            }
+        }
+        floor_violations(&build.stats, &floors)
     };
     if violations.is_empty() {
         Ok(build)
@@ -1017,6 +1031,8 @@ impl RecommenderBackend for StubBackend {
             slots_used: 0,
             slots: 1,
             catalysts: Vec::new(),
+            ring_trades: Vec::new(),
+            ring_lowered: [false; STAT_COUNT],
             stub: true,
         })
     }

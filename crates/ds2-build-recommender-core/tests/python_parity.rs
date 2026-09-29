@@ -68,6 +68,7 @@ type Generated = (
     Option<&'static str>,
     bool,
     bool,
+    &'static [&'static str],
 );
 type GenerateCase = (
     &'static str,
@@ -82,7 +83,7 @@ type GenerateCases = &'static [GenerateCase];
 type ClassGenerateCases = &'static [(&'static str, GenerateCase)];
 /// school, catalyst, cast power, the catalyst passed over for its requirements (`""` for none).
 type CatalystRow = (&'static str, &'static str, f64, &'static str);
-/// class, two-handed, stats, spell names, slots used, slots given, catalysts.
+/// class, two-handed, stats, spell names, slots used, slots given, catalysts, ring trades.
 type SpellBuild = (
     &'static str,
     bool,
@@ -91,6 +92,7 @@ type SpellBuild = (
     u16,
     u16,
     &'static [CatalystRow],
+    &'static [&'static str],
 );
 type SpellCases = &'static [(
     &'static str,
@@ -107,7 +109,13 @@ type OptimizeSpellCases = &'static [(
     &'static str,
     &'static [&'static str],
     bool,
-    Option<(&'static str, bool, &'static [u16], f64)>,
+    Option<(
+        &'static str,
+        bool,
+        &'static [u16],
+        f64,
+        &'static [&'static str],
+    )>,
 )];
 /// kind, closest class, points short, reason lines, fixes: what, value, label.
 type RefusalAnswer = (
@@ -373,6 +381,7 @@ fn a_weapon_the_stats_can_one_hand_still_optimizes_two_handed() {
 #[test]
 fn generate_build_is_the_scripts() {
     let (mut requirements_bound, mut load_bound, mut armored) = (false, false, 0);
+    let mut traded = false;
     let cases = expected::GENERATE
         .iter()
         .map(|case| (case, Grip::TwoHanded, None))
@@ -411,8 +420,22 @@ fn generate_build_is_the_scripts() {
             (Some(got), Some(want)) => (got, want),
             (got, want) => panic!("{weapon} SL {sl}: {got:?} vs {want:?}"),
         };
-        let (class, two, st, one_rows, two_rows, suggested, common, armor, note, by_req, by_load) =
-            want;
+        let (
+            class,
+            two,
+            st,
+            one_rows,
+            two_rows,
+            suggested,
+            common,
+            armor,
+            note,
+            by_req,
+            by_load,
+            trades,
+        ) = want;
+        assert_eq!(got.ring_trades, trades, "{weapon} SL {sl}");
+        traded |= !trades.is_empty();
         assert_eq!(got.class, class, "{weapon} SL {sl}");
         assert_eq!(got.sl, sl, "the build is at the soul level asked for");
         assert_eq!(
@@ -490,6 +513,7 @@ fn generate_build_is_the_scripts() {
         load_bound,
         "no case where the equip-load cap bound the choice"
     );
+    assert!(traded, "no case wore a ring in place of stat points");
 }
 
 /// Spells constrain a generated build as a weapon's requirements do: their INT/FTH are met, their
@@ -500,6 +524,7 @@ fn generate_build_is_the_scripts() {
 fn generate_build_with_spells_is_the_scripts() {
     let (mut raised, mut forced_att, mut refused, mut passed_over, mut schools) =
         (false, false, 0, 0, Vec::new());
+    let mut banded = false;
     let spell_rows = backend().spells();
     for &(weapon, code, sl, goal, spells, want) in expected::GENERATE_SPELLS {
         let asked: Vec<String> = spells.iter().map(|&key| key.to_owned()).collect();
@@ -524,7 +549,9 @@ fn generate_build_with_spells_is_the_scripts() {
             (Some(got), Some(want)) => (got, want),
             (got, want) => panic!("{case}: {got:?} vs {want:?}"),
         };
-        let (class, two, st, names, used, slots, catalysts) = want;
+        let (class, two, st, names, used, slots, catalysts, trades) = want;
+        assert_eq!(got.ring_trades, trades, "{case}");
+        banded |= trades.iter().any(|t| t.contains("attunement slots"));
         assert_eq!(got.class, class, "{case}");
         assert_eq!(got.two_handed, two, "{case}");
         assert_eq!(got.stats, stats(st), "{case}");
@@ -558,8 +585,16 @@ fn generate_build_with_spells_is_the_scripts() {
                 .iter()
                 .find(|row| row.key == *key)
                 .unwrap_or_else(|| panic!("{case}: {key} is not in the spell table"));
-            assert!(got.stats[7] >= row.intelligence, "{case}: {key} INT");
-            assert!(got.stats[8] >= row.faith, "{case}: {key} FTH");
+            // A worn ring's bonus counts toward the requirement, and its trade line says so.
+            let ring_for = |label: &str| got.ring_trades.iter().any(|t| t.contains(label));
+            assert!(
+                got.stats[7] >= row.intelligence || ring_for("INT +"),
+                "{case}: {key} INT"
+            );
+            assert!(
+                got.stats[8] >= row.faith || ring_for("FTH +"),
+                "{case}: {key} FTH"
+            );
             raised |= got.stats[7] == row.intelligence || got.stats[8] == row.faith;
         }
         forced_att |= used > 1 && got.stats[3] > backend().floors(sl)[3];
@@ -576,7 +611,11 @@ fn generate_build_with_spells_is_the_scripts() {
     }
     assert!(raised, "no case where a spell's requirement set INT or FTH");
     assert!(forced_att, "no case where the spells' slots raised ATT");
-    assert!(refused >= 2, "{refused} refused cases");
+    assert!(refused >= 1, "{refused} refused cases");
+    assert!(
+        banded,
+        "no case wore a Southern Ritual Band for the spells' slots"
+    );
     assert!(passed_over >= 2, "{passed_over} catalysts passed over");
     for school in ["sorcery", "miracle", "pyromancy", "hex"] {
         assert!(
@@ -655,11 +694,12 @@ fn optimize_with_spells_is_the_scripts() {
         let case = format!("{weapon} SL {sl} {spells:?} floors {floors}");
         match (got, want) {
             (None, None) => {}
-            (Some(got), Some((class, two, st, value))) => {
+            (Some(got), Some((class, two, st, value, rings))) => {
                 assert_eq!(got.class, class, "{case}");
                 assert_eq!(got.two_handed, two, "{case}");
                 assert_eq!(got.stats, stats(st), "{case}");
                 assert_eq!(got.value, value as f32, "{case}");
+                assert_eq!(got.gear, rings, "{case}: the rings worn in place of points");
             }
             (got, want) => panic!("{case}: {got:?} vs {want:?}"),
         }
@@ -744,9 +784,11 @@ fn refusal_is_the_scripts_and_every_fix_builds() {
     assert!(fixed >= 8, "the cases exercise the fixes: {fixed}");
 }
 
-/// The user's panel: SL 120, Climax chosen, a Dagger and then a Roaring Halberd. Optimize for
-/// weapon and Generate Build now refuse alike, with the arithmetic, and each fix button's change
-/// made to the panel makes both of them build.
+/// The user's panel: Climax chosen, a Dagger and then a Roaring Halberd. At SL 120, where both were
+/// refused before rings counted, both build now, wearing a Southern Ritual Band for Climax's slots
+/// and passing the floor check the rings stand in for. At SL 60 Optimize for weapon and Generate
+/// Build refuse alike, with the arithmetic, and each fix button's change made to the panel makes
+/// both of them build.
 #[test]
 fn the_climax_panel_refuses_alike_and_every_fix_builds() {
     for weapon in ["Dagger", "Roaring_Halberd"] {
@@ -757,10 +799,25 @@ fn the_climax_panel_refuses_alike_and_every_fix_builds() {
         };
         state.choose_weapon(weapon);
         state.set_sl_override(Some(120));
-        let refused = backend::generate(backend(), &state, None).expect_err("no class fits");
-        assert_eq!(refused.kind, RefusalKind::Floors, "{weapon}");
+        let built = backend::generate(backend(), &state, None)
+            .unwrap_or_else(|why| panic!("{weapon} SL 120 with rings: {why:?}"));
         assert!(
-            refused.lines[1].starts_with("SL 120 is "),
+            built
+                .ring_trades
+                .iter()
+                .any(|t| t.starts_with("Southern Ritual Band + 2: attunement slots +3")),
+            "{weapon}: {:?}",
+            built.ring_trades
+        );
+        assert!(
+            built.slots_used <= built.slots,
+            "{weapon}: the band's slots count"
+        );
+        state.set_sl_override(Some(60));
+        let refused = backend::generate(backend(), &state, None).expect_err("no class fits");
+        assert_eq!(refused.kind, RefusalKind::Spells, "{weapon}");
+        assert!(
+            refused.lines[1].starts_with("SL 60 is "),
             "{:?}",
             refused.lines
         );
@@ -770,7 +827,7 @@ fn the_climax_panel_refuses_alike_and_every_fix_builds() {
             "Optimize for weapon refuses as Generate Build does"
         );
         let labels: Vec<&str> = refused.fixes.iter().map(|fix| fix.label.as_str()).collect();
-        assert_eq!(labels.len(), 3, "{weapon}: {labels:?}");
+        assert!(labels.len() >= 2, "{weapon}: {labels:?}");
         for fix in &refused.fixes {
             let mut fixed = state.clone();
             assert!(fix.change.apply(&mut fixed), "{}", fix.label);
