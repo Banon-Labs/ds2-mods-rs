@@ -2316,6 +2316,7 @@ impl CorpusBackend {
     }
 
     /// The script's `_optimize_with`: the search at one set of worn `rings`.
+    // DEBT: ds2-mods-rs-59p7 -- optimize's arguments plus the rings; bundle the per-build options.
     #[allow(clippy::too_many_arguments)]
     fn optimize_with(
         &self,
