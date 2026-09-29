@@ -1176,7 +1176,7 @@ def status_hits(attacks: dict, names: list[str], grips: list[bool], window: floa
 def weapons_for(data: Data, stats: dict, sl: int, corpus: list[Build], top: int = 25, within: float = 0.10,
                 raw_ar: bool = False, one_hand: bool = False, weapon_class: str | None = None, per_class: bool = False,
                 window: float = 0.0, objective: str = "damage", weapon: str | None = None,
-                every_infusion: bool = False):
+                every_infusion: bool = False, use_floors: bool = True):
     """Weapons (per infusion) ranked by expected damage against the average defender at this SL,
     or with `objective` "bleed"/"poison" by status build-up: build-up per hit (objective_value,
     SITE formula) times the hits of the weapon's best R1/R2 chain attack (status_hits; within
@@ -1188,7 +1188,8 @@ def weapons_for(data: Data, stats: dict, sl: int, corpus: list[Build], top: int 
     Per weapon: the best infusion, plus the 2nd and 3rd only while within `within` of the best.
     `every_infusion`: every infusion of every weapon instead, and no `top` cut (infusion_gaps).
     `weapon` (a key): that weapon alone, every infusion, and no high-stamina END gate -- the
-    question is which infusion, not whether to carry it (best_infusion)."""
+    question is which infusion, not whether to carry it (best_infusion). `use_floors` False
+    (--no-floors) drops that END gate as well: it is a floor, not a game rule."""
     every_infusion = every_infusion or weapon is not None
     dfn, n = bracket_defense(data, corpus, sl)
     floors, r1, cut = build_floors(data, corpus, sl)
@@ -1208,7 +1209,7 @@ def weapons_for(data: Data, stats: dict, sl: int, corpus: list[Build], top: int 
             continue
         if weapon_class and norm(data.weapon_class.get(key) or "") != norm(weapon_class):
             continue
-        if not weapon and r1.get(key, 0) >= cut and stats["endurance"] < floors.get("endurance", 0):
+        if use_floors and not weapon and r1.get(key, 0) >= cut and stats["endurance"] < floors.get("endurance", 0):
             continue  # a high-stamina weapon needs END at the bracket median of builds that carry one
         lines = {}
         if objective in ("bleed", "poison"):
@@ -2783,7 +2784,7 @@ def main() -> int:
                          "their summed slot cost raises ATT, as a weapon's requirements do; no build when they "
                          "do not fit the SL")
     ap.add_argument("--no-floors", action="store_true",
-                    help="with --optimize/--generate: drop the SL bracket floors (VIG/VIT/ADP/ATT, END for a "
+                    help="with --optimize/--generate/--weapons-for: drop the SL bracket floors (VIG/VIT/ADP/ATT, END for a "
                          "high-stamina weapon): they are the medians of real builds, not a game rule")
     ap.add_argument("--allow-naked", action="store_true",
                     help="with --generate: no armour (by default the best set under 70%% load is chosen)")
@@ -3036,11 +3037,11 @@ def main() -> int:
         sl = a.sl or sum(stats.values()) - 53  # every DS2 class satisfies level = stat total - 53
         corpus, _ = load_corpus(data)
         floors, r1, cut = build_floors(data, corpus, sl)
-        bad = floor_violations(stats, floors)
+        bad = floor_violations(stats, floors) if not a.no_floors else []
         if bad and not a.neighbours:  # never rank for a build that is not a valid one; --neighbours
             # only reports what real builds near these stats carry, so a real build below a floor may query it
             print(f"not a valid SL {sl} build: {', '.join(bad)} (VGR/VIT/ADP/ATT floor at the bracket median; "
-                  "use --optimize to get one)", file=sys.stderr)
+                  "use --optimize to get one, or --no-floors to rank these stats anyway)", file=sys.stderr)
             return 2
         if a.neighbours:
             status = a.status.split(",") if a.status else None
@@ -3051,7 +3052,7 @@ def main() -> int:
             for c, name, inf, grip in rows:
                 print(f"  {c:3}/{n}  {name:32} {grip:8} " + ", ".join(f"{i.replace('_', ' ')} {m}" for i, m in inf))
             return 0
-        rows, dfn, n = weapons_for(data, stats, sl, corpus, raw_ar=a.raw_ar, one_hand=a.one_hand, weapon_class=a.weapon_class, per_class=a.per_class, window=a.window, objective=a.objective)
+        rows, dfn, n = weapons_for(data, stats, sl, corpus, raw_ar=a.raw_ar, one_hand=a.one_hand, weapon_class=a.weapon_class, per_class=a.per_class, window=a.window, objective=a.objective, use_floors=not a.no_floors)
         print(f"stats {' '.join(f'{s[:3].upper()} {v}' for s, v in stats.items())}  ->  SL {sl}")
         print(f"average defender at this SL ({n} builds): "
               + " ".join(f"{k} {v:.0f}" for k, v in dfn.items()))
