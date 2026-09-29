@@ -30,7 +30,7 @@ pub const BUILD_URL_ROW_HELP: &str = "Enter a soulsplanner.com build link";
 pub enum UrlRejection {
     /// Nothing was entered, or the prefix was accepted unchanged with no id after it.
     Empty,
-    /// The link is not a soulsplanner Dark Souls 2 link at all.
+    /// The link is not a soulsplanner or MugenMonkey Dark Souls 2 link at all.
     NotSoulsplanner,
     /// The `/darksouls2/#253` form. Fetchable, and always empty -- see the module docs.
     FragmentForm,
@@ -45,7 +45,9 @@ impl UrlRejection {
     pub const fn indicator(self) -> &'static str {
         match self {
             UrlRejection::Empty => "Enter a build id after the last slash",
-            UrlRejection::NotSoulsplanner => "That is not a soulsplanner.com/darksouls2 link",
+            UrlRejection::NotSoulsplanner => {
+                "That is not a soulsplanner.com or mugenmonkey.com darksouls2 link"
+            }
             UrlRejection::FragmentForm => "Drop the # -- use /darksouls2/253, not /darksouls2/#253",
             UrlRejection::IdNotNumeric => "The build id must be digits only",
             UrlRejection::IdTooLarge => "That build id is too large to be real",
@@ -59,7 +61,69 @@ impl std::fmt::Display for UrlRejection {
     }
 }
 
-/// The build id in a soulsplanner link, or why there is not one.
+/// Which planner a link belongs to.
+///
+/// Both serve a build at `/darksouls2/<id>` over HTTPS and inline it into that page; what differs
+/// is the host and what the page carries, so the caller picks the parser by this.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Site {
+    /// `soulsplanner.com`: a `savedBuild={...}` literal with the gear by name. See
+    /// [`crate::saved_build`].
+    Soulsplanner,
+    /// `mugenmonkey.com`: `gon.savedStats={...}` JSON with the gear by the planner's own ids. See
+    /// [`crate::mugenmonkey`].
+    MugenMonkey,
+}
+
+impl Site {
+    /// The host to fetch from.
+    pub const fn host(self) -> &'static str {
+        match self {
+            Site::Soulsplanner => BUILD_HOST,
+            Site::MugenMonkey => MUGENMONKEY_HOST,
+        }
+    }
+
+    /// The site's name, for the row and the log.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Site::Soulsplanner => "soulsplanner",
+            Site::MugenMonkey => "mugenmonkey",
+        }
+    }
+}
+
+/// A build link that passed [`build_link_from_url`]: which planner, and which build on it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct BuildLink {
+    /// Where the build lives.
+    pub site: Site,
+    /// The build id from the path.
+    pub id: u32,
+}
+
+impl BuildLink {
+    /// The path to GET, on [`Site::host`].
+    pub fn path(self) -> String {
+        build_path(self.id)
+    }
+}
+
+/// The host MugenMonkey serves its builds from.
+pub const MUGENMONKEY_HOST: &str = "mugenmonkey.com";
+
+/// The build id in a soulsplanner or MugenMonkey link, or why there is not one.
+///
+/// [`build_link_from_url`] with the site dropped, for a caller that only needs to know the link is
+/// good.
+/// # Errors
+///
+/// Whatever [`build_link_from_url`] refused it with.
+pub fn build_id_from_url(url: &str) -> Result<u32, UrlRejection> {
+    build_link_from_url(url).map(|link| link.id)
+}
+
+/// The planner and build id in a soulsplanner or MugenMonkey link, or why there is not one.
 ///
 /// Accepts the link with or without a scheme and with or without `www.`, because a link copied out
 /// of a browser's address bar has the scheme and one recited from memory does not. Trailing
@@ -69,21 +133,32 @@ impl std::fmt::Display for UrlRejection {
 ///
 /// The [`UrlRejection`] naming which way the link failed -- empty, a fragment form, the wrong
 /// host, or no build id where one should be.
-pub fn build_id_from_url(url: &str) -> Result<u32, UrlRejection> {
+pub fn build_link_from_url(url: &str) -> Result<BuildLink, UrlRejection> {
     let trimmed = url.trim();
     if trimmed.is_empty() {
         return Err(UrlRejection::Empty);
     }
 
-    // THE HOST IS MATCHED WITHOUT ITS SCHEME so that one function handles both what a browser
+    // The host is matched without its scheme, so that one function handles both what a browser
     // copies and what a player types. Everything after the game segment is the id.
     let rest = strip_prefix_ignore_ascii_case(trimmed, "https://")
         .or_else(|| strip_prefix_ignore_ascii_case(trimmed, "http://"))
         .unwrap_or(trimmed);
     let rest = strip_prefix_ignore_ascii_case(rest, "www.").unwrap_or(rest);
-    let Some(rest) = strip_prefix_ignore_ascii_case(rest, "soulsplanner.com/") else {
+    let (site, rest) = if let Some(rest) = strip_prefix_ignore_ascii_case(rest, "soulsplanner.com/")
+    {
+        (Site::Soulsplanner, rest)
+    } else if let Some(rest) = strip_prefix_ignore_ascii_case(rest, "mugenmonkey.com/") {
+        (Site::MugenMonkey, rest)
+    } else {
         return Err(UrlRejection::NotSoulsplanner);
     };
+    let id = id_after_host(rest)?;
+    Ok(BuildLink { site, id })
+}
+
+/// The id in what follows a planner's host: `darksouls2/<id>`, and nothing else.
+fn id_after_host(rest: &str) -> Result<u32, UrlRejection> {
     let Some(rest) = strip_prefix_ignore_ascii_case(rest, "darksouls2") else {
         return Err(UrlRejection::NotSoulsplanner);
     };
@@ -139,6 +214,43 @@ fn strip_prefix_ignore_ascii_case<'a>(text: &'a str, prefix: &str) -> Option<&'a
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A MugenMonkey link is the same path on another host, and says which site it came from.
+    #[test]
+    fn a_mugenmonkey_link_is_accepted_and_named() {
+        for link in [
+            "https://mugenmonkey.com/darksouls2/181062",
+            "mugenmonkey.com/darksouls2/181062/",
+            "http://www.MugenMonkey.com/darksouls2/181062?x=1",
+        ] {
+            assert_eq!(
+                build_link_from_url(link),
+                Ok(BuildLink {
+                    site: Site::MugenMonkey,
+                    id: 181_062
+                }),
+                "{link}"
+            );
+        }
+        assert_eq!(
+            build_link_from_url("https://soulsplanner.com/darksouls2/253").map(|link| link.site),
+            Ok(Site::Soulsplanner)
+        );
+        assert_eq!(
+            build_link_from_url("https://mugenmonkey.com/darksouls2/#181062"),
+            Err(UrlRejection::FragmentForm)
+        );
+        assert_eq!(
+            build_link_from_url("https://mugenmonkey.com/darksouls/181062"),
+            Err(UrlRejection::NotSoulsplanner),
+            "Dark Souls 1 builds live one segment over"
+        );
+        let link = build_link_from_url("mugenmonkey.com/darksouls2/181062").unwrap();
+        assert_eq!(
+            (link.site.host(), link.path().as_str()),
+            ("mugenmonkey.com", "/darksouls2/181062")
+        );
+    }
 
     /// The prefill is a prefix of a real link, and on its own it is not one yet.
     #[test]

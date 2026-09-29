@@ -28,6 +28,7 @@ pub mod equip;
 pub mod field;
 pub mod items;
 pub mod level;
+pub mod mugenmonkey;
 pub mod reinforce;
 pub mod saved_build;
 pub mod url;
@@ -39,7 +40,8 @@ pub use level::{LevelChange, LevelError, MAX_LEVEL, SoulCosts, StatSpread, level
 pub use reinforce::max_reinforce;
 pub use saved_build::{Build, MAX_STAT, ParseError, Stats};
 pub use url::{
-    BUILD_HOST, BUILD_URL_PREFIX, BUILD_URL_ROW_HELP, UrlRejection, build_id_from_url, build_path,
+    BUILD_HOST, BUILD_URL_PREFIX, BUILD_URL_ROW_HELP, BuildLink, MUGENMONKEY_HOST, Site,
+    UrlRejection, build_id_from_url, build_link_from_url, build_path,
 };
 
 /// The caption on the pause-menu row that opens the field.

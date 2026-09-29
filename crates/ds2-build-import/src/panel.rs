@@ -1,4 +1,5 @@
-//! The in-game link panel: a field over the pause menu that takes a soulsplanner build link.
+//! The in-game link panel: a field over the pause menu that takes a soulsplanner or MugenMonkey build
+//! link.
 //!
 //! This replaces what the row used to open on a desktop Steam -- a modal Win32 dialog, measured
 //! 2026-09-29 as `no Steam field (the Steam overlay is disabled ...) -- opening the link dialog
@@ -80,6 +81,8 @@ impl Panel {
                 log_line(format_args!(
                     "{LOG_PREFIX} panel submitted \"{url}\" (build {build_id})"
                 ));
+                let host = ds2_build_import_core::build_link_from_url(&url)
+                    .map_or("the planner", |link| link.site.host());
                 let job = crate::flow::Job::Link {
                     text: url.clone(),
                     source: crate::flow::Source::Panel,
@@ -88,7 +91,7 @@ impl Panel {
                     self.phase = Phase::Fetching;
                     self.status = Some(Status {
                         headline: "FETCHING".to_owned(),
-                        detail: format!("build {build_id} from soulsplanner.com"),
+                        detail: format!("build {build_id} from {host}"),
                         warn: false,
                     });
                 } else {
@@ -317,7 +320,7 @@ const FOCUS_EDGE: [f32; 4] = [0.95, 0.88, 0.66, 1.0];
 const PAD: f32 = 14.0;
 
 const PANEL_TITLE: &str = "Load Build from URL";
-const PANEL_SUBTITLE: &str = "Paste or type a soulsplanner.com build link";
+const PANEL_SUBTITLE: &str = "Paste or type a soulsplanner.com or mugenmonkey.com build link";
 const KEY_HINT: &str = "Enter load   Esc close   Ctrl+V paste   Ctrl+Backspace clear";
 const PAD_HINT: &str = "pad: A load   B close   Y paste   X clear";
 
