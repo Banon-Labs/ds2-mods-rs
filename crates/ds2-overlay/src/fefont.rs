@@ -147,7 +147,7 @@ fn usize_of(v: u64) -> Result<usize> {
 }
 
 /// Unwrap a `DCX`/`DFLT` container.
-fn dcx(bytes: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn dcx(bytes: &[u8]) -> Result<Vec<u8>> {
     if bytes.get(..4) != Some(b"DCX\0") || bytes.get(0x28..0x2c) != Some(b"DFLT") {
         return Err(Error::Format("not a DCX/DFLT container"));
     }
@@ -165,7 +165,7 @@ fn dcx(bytes: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// The members of a single-byte-name `BND4`, as `(name, bytes)`.
-fn bnd4(data: &[u8]) -> Result<Vec<(String, &[u8])>> {
+pub(crate) fn bnd4(data: &[u8]) -> Result<Vec<(String, &[u8])>> {
     if data.get(..4) != Some(b"BND4") || data.get(0x30) != Some(&0) {
         return Err(Error::Format("not a single-byte-name BND4"));
     }
@@ -235,7 +235,7 @@ fn ccm(b: &[u8]) -> Result<(u16, Vec<Glyph>)> {
 }
 
 /// The DDS inside a single-texture `.tpf`: `(width, height, fourcc, block data)`.
-fn tpf(b: &[u8]) -> Result<(usize, usize, [u8; 4], &[u8])> {
+pub(crate) fn tpf(b: &[u8]) -> Result<(usize, usize, [u8; 4], &[u8])> {
     if b.get(..4) != Some(b"TPF\0") {
         return Err(Error::Format("not a TPF"));
     }
@@ -265,7 +265,7 @@ fn rgb565(v: u16) -> [u8; 3] {
 }
 
 /// Decode a DXT3 or DXT5 surface to RGBA8.
-fn decode(width: usize, height: usize, fourcc: [u8; 4], blocks: &[u8]) -> Result<Page> {
+pub(crate) fn decode(width: usize, height: usize, fourcc: [u8; 4], blocks: &[u8]) -> Result<Page> {
     let dxt5 = match &fourcc {
         b"DXT5" => true,
         b"DXT3" => false,

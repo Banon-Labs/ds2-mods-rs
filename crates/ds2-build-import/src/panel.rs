@@ -414,11 +414,22 @@ fn draw(ui: &Ui) {
     // The banner: why a link was refused, or that one is being fetched.
     let banner_top = y;
     if let Some(status) = &panel.status {
-        let colour = if status.warn { WARN } else { TITLE };
+        // A refusal stands beside the game's own red X, in body text: the red alone is too dark
+        // to read. Without the atlas it falls back to the warning colour.
+        let mark = if status.warn {
+            ds2_overlay::panels::refusal_mark(&list, [inner_left, y], line)
+        } else {
+            0.0
+        };
+        let colour = match (status.warn, mark > 0.0) {
+            (true, true) => TEXT,
+            (true, false) => WARN,
+            (false, _) => TITLE,
+        };
         list.add_text(
-            [inner_left, y],
+            [inner_left + mark, y],
             colour,
-            clip(ui, &status.headline, inner_right - inner_left),
+            clip(ui, &status.headline, inner_right - inner_left - mark),
         );
         y += line;
         list.add_text(

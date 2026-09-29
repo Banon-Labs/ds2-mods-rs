@@ -23,6 +23,7 @@ use hudhook::windows::Win32::Graphics::Dxgi::IDXGISwapChain;
 use hudhook::windows::core::Interface;
 use hudhook::{ImguiRenderLoop, MessageFilter, RenderContext};
 
+use crate::atlas::Atlas;
 use crate::fefont::{self, FaceName};
 use crate::log::log;
 
@@ -215,6 +216,77 @@ pub fn hint_bar(
     line + 2.0
 }
 
+/// Each [`Atlas`]'s imgui texture id and its size, or `0` for none, in [`atlas_slot`] order.
+static ATLAS_TEXTURES: [AtomicUsize; 2] = [const { AtomicUsize::new(0) }; 2];
+static ATLAS_SIZES: [AtomicUsize; 2] = [const { AtomicUsize::new(0) }; 2];
+
+const fn atlas_slot(atlas: Atlas) -> usize {
+    match atlas {
+        Atlas::Waku03 => 0,
+        Atlas::InGame01 => 1,
+    }
+}
+
+/// Decode the game's menu atlases out of `GameDataEbl` and hand them to the renderer as textures,
+/// so a panel can draw the game's own frames and marks with [`sprite`].
+fn install_game_atlases(render: &mut dyn RenderContext) -> Result<(), String> {
+    let dir = game_dir().ok_or("no executable path")?;
+    let archive = crate::ebl::Archive::open(&dir).map_err(|e| e.to_string())?;
+    for which in [Atlas::Waku03, Atlas::InGame01] {
+        let page = crate::atlas::load(&archive, which).map_err(|e| format!("{which:?}: {e}"))?;
+        let (w, h) = (page.width as u32, page.height as u32);
+        let id = render
+            .load_texture(&page.rgba, w, h)
+            .map_err(|e| format!("{which:?}: {e:?}"))?;
+        let slot = atlas_slot(which);
+        ATLAS_SIZES[slot].store((page.width << 16) | page.height, Ordering::Release);
+        ATLAS_TEXTURES[slot].store(id.id(), Ordering::Release);
+    }
+    Ok(())
+}
+
+/// Draw `src` (`x1, y1, x2, y2` in the atlas's pixels) of `atlas` into `min`-`max`, multiplied by
+/// `tint`. Answers `false`, drawing nothing, when the atlas did not load.
+pub fn sprite(
+    list: &hudhook::imgui::DrawListMut<'_>,
+    atlas: Atlas,
+    src: [f32; 4],
+    min: [f32; 2],
+    max: [f32; 2],
+    tint: [f32; 4],
+) -> bool {
+    let slot = atlas_slot(atlas);
+    let id = ATLAS_TEXTURES[slot].load(Ordering::Acquire);
+    let size = ATLAS_SIZES[slot].load(Ordering::Acquire);
+    if id == 0 || size == 0 {
+        return false;
+    }
+    let (w, h) = ((size >> 16) as f32, (size & 0xffff) as f32);
+    list.add_image(hudhook::imgui::TextureId::new(id), min, max)
+        .uv_min([src[0] / w, src[1] / h])
+        .uv_max([src[2] / w, src[3] / h])
+        .col(tint)
+        .build();
+    true
+}
+
+/// Draw the game's own red X, `size` pixels square at `at`. Answers the width it took.
+///
+/// It is the `waku_03` mark `ds2-item-warn` puts on unusable items, for a refusal headline to
+/// stand beside: the colour alone does not read as text (docs/DS2-UI-DESIGN.md). Answers `0.0`
+/// when the atlas did not load.
+pub fn refusal_mark(list: &hudhook::imgui::DrawListMut<'_>, at: [f32; 2], size: f32) -> f32 {
+    let drawn = sprite(
+        list,
+        Atlas::Waku03,
+        ds2_rva::FE_ITEM_WARN_SOURCE,
+        at,
+        [at[0] + size, at[1] + size],
+        [1.0, 1.0, 1.0, 1.0],
+    );
+    if drawn { size + size * 0.3 } else { 0.0 }
+}
+
 /// The folder holding `DarkSoulsII.exe`, which is this process's executable.
 fn game_dir() -> Option<std::path::PathBuf> {
     std::env::current_exe().ok()?.parent().map(Into::into)
@@ -365,7 +437,16 @@ pub fn use_overlay_mouse_for_imgui(on: bool) {
 struct Panels;
 
 impl ImguiRenderLoop for Panels {
-    fn initialize<'a>(&'a mut self, ctx: &mut Context, _render_context: &'a mut dyn RenderContext) {
+    fn initialize<'a>(&'a mut self, ctx: &mut Context, render_context: &'a mut dyn RenderContext) {
+        match install_game_atlases(render_context) {
+            Ok(()) => log(format_args!(
+                "panels: the game's waku_03 and In-game_01 atlases are loaded for sprites"
+            )),
+            Err(why) => log(format_args!(
+                "panels: the game's menu atlases did not load, so panels draw without its art: \
+                 {why}"
+            )),
+        }
         match install_game_fonts(ctx) {
             Ok(glyphs) => log(format_args!(
                 "panels: hudhook render loop initialized (the game's FeFont_Small 28px default, \
