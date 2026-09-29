@@ -164,6 +164,11 @@ impl StatusFilter {
     }
 }
 
+/// The most spells the panel lets Generate Build ask for. Every spell costs at least one slot and
+/// ATT gives at most ten (`PhysicalStatsPerLevelStatValuesParam.spellSlot`), so an eleventh could
+/// never fit.
+pub const MAX_SPELLS: usize = 10;
+
 /// The default neighbourhood for [`Mode::SimilarBuilds`], as the script's `k`.
 pub const SIMILAR_K_DEFAULT: u16 = 50;
 
@@ -195,6 +200,9 @@ pub struct PanelState {
     pub similar_k: u16,
     /// Which statuses [`Mode::SimilarBuilds`] insists on.
     pub status: StatusFilter,
+    /// The spells Generate Build must be able to attune and cast, by soulsplanner key, in the
+    /// order they were chosen. Empty by default: a build with no spells.
+    pub spells: Vec<String>,
 }
 
 impl Default for PanelState {
@@ -213,6 +221,7 @@ impl Default for PanelState {
             allow_naked: false,
             similar_k: SIMILAR_K_DEFAULT,
             status: StatusFilter::default(),
+            spells: Vec::new(),
         }
     }
 }
@@ -267,6 +276,20 @@ impl PanelState {
             self.infusion = infusion;
         }
         allowed
+    }
+
+    /// Add `key` to the spells Generate Build casts, or take it out when it is already there.
+    /// Returns whether it is chosen now. Once [`MAX_SPELLS`] are chosen, adding is refused.
+    pub fn toggle_spell(&mut self, key: &str) -> bool {
+        if let Some(at) = self.spells.iter().position(|chosen| chosen == key) {
+            self.spells.remove(at);
+            false
+        } else if self.spells.len() < MAX_SPELLS {
+            self.spells.push(key.to_owned());
+            true
+        } else {
+            false
+        }
     }
 
     /// Whether the current mode has what it needs to run.
@@ -339,6 +362,23 @@ mod tests {
         assert_eq!(state.infusion, Infusion::None);
         state.choose_weapon("Not_A_Weapon");
         assert_eq!(state.weapon, None);
+    }
+
+    #[test]
+    fn a_spell_toggles_in_and_out_and_stops_at_ten() {
+        let mut state = PanelState::default();
+        assert!(state.toggle_spell("Soul_Spear"));
+        assert!(state.toggle_spell("Heal"));
+        assert_eq!(state.spells, ["Soul_Spear", "Heal"]);
+        assert!(
+            !state.toggle_spell("Soul_Spear"),
+            "chosen again is taken out"
+        );
+        assert_eq!(state.spells, ["Heal"]);
+        for n in 0..20 {
+            state.toggle_spell(&format!("Spell_{n}"));
+        }
+        assert_eq!(state.spells.len(), MAX_SPELLS);
     }
 
     #[test]

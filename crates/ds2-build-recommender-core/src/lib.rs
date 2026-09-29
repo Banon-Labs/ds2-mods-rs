@@ -28,8 +28,8 @@ pub mod nav;
 pub mod weapons;
 
 pub use backend::{
-    Answer, Calibration, GeneratedBuild, OptimizedBuild, Outcome, RecommenderBackend, ResultRow,
-    StubBackend, ask, generate, to_import,
+    Answer, Calibration, CatalystPick, GeneratedBuild, OptimizedBuild, Outcome, RecommenderBackend,
+    ResultRow, SpellRow, StubBackend, ask, generate, to_import,
 };
 pub use corpus::CorpusBackend;
 pub use model::{Grip, Mode, Objective, PanelState, STAT_COUNT, STAT_LABELS, StatusFilter};

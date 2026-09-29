@@ -58,6 +58,8 @@ pub enum Control {
     Generate,
     /// Generate Build may leave the armour off.
     AllowNaked,
+    /// The spells Generate Build must cast: the list to choose them from.
+    Spells,
     /// Show build / Show results.
     ShowToggle,
     /// Apply to character.
@@ -129,7 +131,7 @@ pub fn layout(shape: Shape) -> Vec<Vec<Control>> {
     if shape.results {
         rows.push(vec![Control::Results]);
     }
-    let mut footer = vec![Control::Generate, Control::AllowNaked];
+    let mut footer = vec![Control::Generate, Control::AllowNaked, Control::Spells];
     if shape.generated {
         footer.push(Control::ShowToggle);
     }
@@ -438,9 +440,14 @@ mod tests {
             walk(
                 &rows,
                 Control::Generate,
-                &[Dir::Right, Dir::Right, Dir::Right]
+                &[Dir::Right, Dir::Right, Dir::Right, Dir::Right]
             ),
             Control::Apply
+        );
+        assert_eq!(
+            walk(&rows, Control::Generate, &[Dir::Right, Dir::Right]),
+            Control::Spells,
+            "the spell list sits beside the armour check"
         );
         assert_eq!(step(&rows, Control::Apply, Dir::Down), Control::Apply);
     }
