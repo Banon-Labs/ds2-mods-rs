@@ -1,7 +1,9 @@
-//! Reading `[weapon_sync]` out of `<Game>/ds2-mods.toml`: whether to cap our weapon levels to the
-//! other players' in multiplayer, and the key that turns it on and off in game.
+//! Reading `[weapon_sync]` and `[armor_sync]` out of `<Game>/ds2-mods.toml`: whether to cap our
+//! weapon levels, and our armour levels, to the other players' in multiplayer, and the key that
+//! turns each on and off in game. The two sections are read the same way and are independent:
+//! either feature can be on without the other.
 //!
-//! The feature lives in `ds2-weapon-sync`; this is only the switch, kept here for the same reason
+//! Both features live in `ds2-weapon-sync`; this is only the switch, kept here for the same reason
 //! every other feature's is -- the config file belongs to the loader.
 //!
 //! ```toml
@@ -12,15 +14,25 @@
 //! # Optional. A pretend remote player at this level, so the cap can be tested solo.
 //! # Re-read once a second while the game runs; delete the line to make the player leave.
 //! test_cap = 3
+//!
+//! [armor_sync]
+//! enabled = true
+//! # Absent means F5.
+//! key = "F5"
+//! test_cap = 3
 //! ```
 
 use ds2_hotkey_config::keys::{Chord, parse_chord};
 use ds2_hotkey_config::kv::KeyValues;
+use ds2_weapon_sync::Kind;
 
 use crate::crash_logging::config_file_path;
 
-/// The section this module reads. Mirrored in `scripts/ds2-run.py`.
+/// The weapon section. Mirrored in `scripts/ds2-run.py`.
 pub const CONFIG_SECTION: &str = "weapon_sync";
+
+/// The armour section. Mirrored in `scripts/ds2-run.py`.
+pub const ARMOR_CONFIG_SECTION: &str = "armor_sync";
 
 /// Whether to install the detours at all.
 pub const KEY_ENABLED: &str = "enabled";
@@ -31,9 +43,40 @@ pub const KEY_TEST_CAP: &str = "test_cap";
 /// The on/off key, a chord such as `"F6"` or `"ctrl+F6"`, or `"none"`.
 pub const KEY_KEY: &str = "key";
 
-/// `[weapon_sync]`, resolved.
+/// Which feature's section, default key and log prefix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Section {
+    /// The feature in `ds2-weapon-sync`.
+    pub kind: Kind,
+    /// The TOML section.
+    pub name: &'static str,
+    /// The key used when the section does not name one.
+    pub default_key: &'static str,
+    /// The feature's log prefix.
+    pub prefix: &'static str,
+}
+
+/// `[weapon_sync]`.
+pub const WEAPONS: Section = Section {
+    kind: Kind::Weapon,
+    name: CONFIG_SECTION,
+    default_key: ds2_weapon_sync::DEFAULT_KEY,
+    prefix: ds2_weapon_sync::LOG_PREFIX,
+};
+
+/// `[armor_sync]`.
+pub const ARMOR: Section = Section {
+    kind: Kind::Armor,
+    name: ARMOR_CONFIG_SECTION,
+    default_key: ds2_weapon_sync::ARMOR_DEFAULT_KEY,
+    prefix: ds2_weapon_sync::ARMOR_LOG_PREFIX,
+};
+
+/// One section, resolved.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WeaponSyncConfig {
+    /// Which section this was read from.
+    pub section: Section,
     /// Install the clamp and the per-frame check. Off by default.
     pub enabled: bool,
     /// A pretend remote player at this level. Only for testing the mechanism alone.
@@ -44,45 +87,42 @@ pub struct WeaponSyncConfig {
     pub key_error: Option<String>,
 }
 
-impl Default for WeaponSyncConfig {
-    fn default() -> Self {
+impl WeaponSyncConfig {
+    /// A section with nothing in it: off, with the default key.
+    pub fn default_for(section: Section) -> Self {
         Self {
+            section,
             enabled: false,
             test_cap: None,
-            key: default_key(),
+            key: parse_chord(section.default_key).ok(),
             key_error: None,
         }
     }
-}
 
-fn default_key() -> Option<Chord> {
-    parse_chord(ds2_weapon_sync::DEFAULT_KEY).ok()
-}
-
-impl WeaponSyncConfig {
-    /// Read the section. A missing file or a missing key means [`Default`].
-    pub fn load() -> Self {
+    /// Read one section. A missing file or a missing key means [`WeaponSyncConfig::default_for`].
+    pub fn load(section: Section) -> Self {
         let Some(path) = config_file_path() else {
-            return Self::default();
+            return Self::default_for(section);
         };
         let Ok(text) = std::fs::read_to_string(&path) else {
-            return Self::default();
+            return Self::default_for(section);
         };
-        Self::from_text(&text)
+        Self::from_text(section, &text)
     }
 
     /// The same decision against a config file's text, so it can be tested without one on disk.
-    pub fn from_text(text: &str) -> Self {
+    pub fn from_text(section: Section, text: &str) -> Self {
         let values = KeyValues::parse(text);
         let enabled = values
-            .get(CONFIG_SECTION, KEY_ENABLED)
+            .get(section.name, KEY_ENABLED)
             .is_some_and(|raw| raw.trim().trim_matches('"') == "true");
         let test_cap = values
-            .get(CONFIG_SECTION, KEY_TEST_CAP)
+            .get(section.name, KEY_TEST_CAP)
             .and_then(|raw| raw.trim().trim_matches('"').parse::<u8>().ok())
-            .filter(|level| *level <= ds2_rva::WEAPON_LEVEL_MAX);
+            .filter(|level| *level <= section.kind.level_max());
+        let default_key = || parse_chord(section.default_key).ok();
         let (key, key_error) = match values
-            .get(CONFIG_SECTION, KEY_KEY)
+            .get(section.name, KEY_KEY)
             .map(|raw| raw.trim().trim_matches('"').trim())
         {
             None => (default_key(), None),
@@ -93,12 +133,13 @@ impl WeaponSyncConfig {
                     default_key(),
                     Some(format!(
                         "{KEY_KEY} = {raw:?} is not a key ({error:?}); using {}",
-                        ds2_weapon_sync::DEFAULT_KEY
+                        section.default_key
                     )),
                 ),
             },
         };
         Self {
+            section,
             enabled,
             test_cap,
             key,
@@ -106,11 +147,21 @@ impl WeaponSyncConfig {
         }
     }
 
+    /// The settings `ds2_weapon_sync::install` takes, or `None` when the section is off.
+    #[cfg(windows)]
+    pub fn settings(&self) -> Option<ds2_weapon_sync::Settings> {
+        self.enabled.then_some(ds2_weapon_sync::Settings {
+            test_cap: self.test_cap,
+            key: self.key,
+        })
+    }
+
     /// One line for the attach log, written before anything acts on it.
     pub fn describe(&self) -> String {
         format!(
-            "{} config [{CONFIG_SECTION}] {KEY_ENABLED}={} {KEY_KEY}={} {KEY_TEST_CAP}={}{}",
-            ds2_weapon_sync::LOG_PREFIX,
+            "{} config [{}] {KEY_ENABLED}={} {KEY_KEY}={} {KEY_TEST_CAP}={}{}",
+            self.section.prefix,
+            self.section.name,
             self.enabled,
             self.key
                 .map_or_else(|| "none".to_string(), ds2_hotkey_config::chord_name),
@@ -126,20 +177,21 @@ impl WeaponSyncConfig {
 /// How often [`watch_live`] re-reads the file.
 const WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
-/// Re-read `test_cap` and `key` once a second for the life of the process and hand every change to
-/// the crate. `enabled` is not re-read: the detours are installed once, at startup.
-pub fn watch_live() {
-    let first = WeaponSyncConfig::load();
+/// Re-read one section's `test_cap` and `key` once a second for the life of the process and hand
+/// every change to the crate. `enabled` is not re-read: the detours are installed once, at startup.
+#[cfg(windows)]
+pub fn watch_live(section: Section) {
+    let first = WeaponSyncConfig::load(section);
     let (mut test_cap, mut key) = (first.test_cap, first.key);
     loop {
         std::thread::sleep(WATCH_INTERVAL);
-        let now = WeaponSyncConfig::load();
+        let now = WeaponSyncConfig::load(section);
         if now.test_cap != test_cap {
-            ds2_weapon_sync::set_test_cap(now.test_cap);
+            ds2_weapon_sync::set_test_cap(section.kind, now.test_cap);
             test_cap = now.test_cap;
         }
         if now.key != key {
-            ds2_weapon_sync::set_key(now.key);
+            ds2_weapon_sync::set_key(section.kind, now.key);
             key = now.key;
         }
     }
@@ -149,32 +201,53 @@ pub fn watch_live() {
 mod tests {
     use super::*;
 
+    fn weapons(text: &str) -> WeaponSyncConfig {
+        WeaponSyncConfig::from_text(WEAPONS, text)
+    }
+
     #[test]
     fn an_absent_section_leaves_it_off_with_the_default_key() {
         for text in ["", "[weapon_sync]\n", "[save_block]\nenabled = true\n"] {
-            let config = WeaponSyncConfig::from_text(text);
-            assert_eq!(config, WeaponSyncConfig::default());
+            let config = weapons(text);
+            assert_eq!(config, WeaponSyncConfig::default_for(WEAPONS));
             assert_eq!(config.key, parse_chord("F6").ok());
         }
+        let armor = WeaponSyncConfig::from_text(ARMOR, "");
+        assert!(!armor.enabled);
+        assert_eq!(armor.key, parse_chord("F5").ok());
     }
 
     #[test]
     fn only_an_exact_true_turns_it_on() {
-        assert!(WeaponSyncConfig::from_text("[weapon_sync]\nenabled = true\n").enabled);
+        assert!(weapons("[weapon_sync]\nenabled = true\n").enabled);
         for value in ["false", "1", "yes", "TRUE", ""] {
             let text = format!("[weapon_sync]\nenabled = {value}\n");
-            assert!(!WeaponSyncConfig::from_text(&text).enabled, "{value:?}");
+            assert!(!weapons(&text).enabled, "{value:?}");
         }
     }
 
     #[test]
+    fn the_two_sections_are_read_independently() {
+        let text = "[weapon_sync]\nenabled = true\nkey = \"F6\"\ntest_cap = 2\n\
+                    [armor_sync]\nenabled = false\nkey = \"ctrl+F5\"\ntest_cap = 7\n";
+        let w = WeaponSyncConfig::from_text(WEAPONS, text);
+        let a = WeaponSyncConfig::from_text(ARMOR, text);
+        assert!(w.enabled && !a.enabled);
+        assert_eq!((w.test_cap, a.test_cap), (Some(2), Some(7)));
+        assert_eq!(a.key, parse_chord("ctrl+F5").ok());
+        let only_armor = "[armor_sync]\nenabled = true\n";
+        assert!(!WeaponSyncConfig::from_text(WEAPONS, only_armor).enabled);
+        assert!(WeaponSyncConfig::from_text(ARMOR, only_armor).enabled);
+        assert!(
+            WeaponSyncConfig::from_text(ARMOR, only_armor)
+                .describe()
+                .starts_with("ds2-armor-sync: config [armor_sync] enabled=true key=F5")
+        );
+    }
+
+    #[test]
     fn test_cap_is_a_level_or_nothing() {
-        let read = |value: &str| {
-            WeaponSyncConfig::from_text(&format!(
-                "[weapon_sync]\nenabled = true\ntest_cap = {value}\n"
-            ))
-            .test_cap
-        };
+        let read = |value: &str| weapons(&format!("[weapon_sync]\nenabled = true\ntest_cap = {value}\n")).test_cap;
         assert_eq!(read("3"), Some(3));
         assert_eq!(read("0"), Some(0));
         assert_eq!(read("10"), Some(10));
@@ -185,8 +258,7 @@ mod tests {
 
     #[test]
     fn the_key_is_a_chord_none_or_the_default_with_a_reason() {
-        let read =
-            |value: &str| WeaponSyncConfig::from_text(&format!("[weapon_sync]\nkey = {value}\n"));
+        let read = |value: &str| weapons(&format!("[weapon_sync]\nkey = {value}\n"));
         assert_eq!(read("\"F10\"").key, parse_chord("F10").ok());
         assert_eq!(read("ctrl+F6").key, parse_chord("ctrl+F6").ok());
         assert_eq!(read("\"none\"").key, None);

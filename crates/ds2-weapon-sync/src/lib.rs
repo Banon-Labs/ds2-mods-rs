@@ -71,22 +71,61 @@
 //! Which copy the damage code reads, whether the server-side status upload reads the inventory or
 //! the equipment copy, and when a joining player's records are first filled. See the doc.
 
-/// What every line this crate writes begins with, so its lines can be grepped out of the shared log.
+//!
+//! # Armour sync
+//!
+//! The same machinery, run a second time over armour: while another player is in the world, every
+//! armour piece we carry (head, chest, hands, legs; worn, in the pack or in the box) above the
+//! highest armour reinforcement level any of them wears is lowered to it, and put back when they
+//! are gone. It is its own feature: `[armor_sync]` in the config, [`ARMOR_DEFAULT_KEY`], its own
+//! spoken lines, its own tile on screen (a helm, beside the swords), and `ds2-armor-sync:` in the
+//! log. Either feature runs without the other.
+//!
+//! Armour's copies are the weapon's, one table over (docs/DS2-WEAPON-LEVEL-SYNC.md, "Armour"): the
+//! inventory entry `+0x25`, the save block record, equipment records 6..9, and the live entry at
+//! `ChrAsmEquip + 0x290 + piece * 0x30`, whose level byte at `+0x18` is what the defense code
+//! reads. The game's armour update, [`ds2_rva::CHR_ARMOR_UPDATE`], is the weapon update's twin and
+//! sends packet 62, whose receiver writes another player's records 6..9; those are read for the
+//! cap. The cap is the highest single piece any other player wears ([`policy::cap_for`] says why).
+
+/// What every line of weapon sync begins with, so its lines can be grepped out of the shared log.
 pub const LOG_PREFIX: &str = "ds2-weapon-sync:";
 
-/// The key that turns the feature on and off in game, unless `[weapon_sync] key` says otherwise.
+/// What every line of armour sync begins with.
+pub const ARMOR_LOG_PREFIX: &str = "ds2-armor-sync:";
+
+/// The key that turns weapon sync on and off in game, unless `[weapon_sync] key` says otherwise.
 ///
 /// F7 is inventory sort, F8 voice chat and F9 net effects; nothing in this repo binds F6.
 pub const DEFAULT_KEY: &str = "F6";
 
-/// The spoken line a toggle plays: "Weapon sync, on." or "Weapon sync, off.", 16 kHz 16-bit mono
-/// WAV, rendered with Piper's `en_US-lessac-medium`, the voice `ds2-voice-chat`'s English clips use.
+/// The key that turns armour sync on and off in game, unless `[armor_sync] key` says otherwise.
+///
+/// F6 is weapon sync, F7 inventory sort, F8 voice chat, F9 net effects, F10 the music probe, F11
+/// its fallback. The DS2 Lighting Engine's `dxgi.dll` polls F1, F2, F3 and F6
+/// (`mov edx,0x70/0x71/0x72/0x75` before its key-state call); nothing polls F5.
+pub const ARMOR_DEFAULT_KEY: &str = "F5";
+
+pub use policy::Kind;
+
+/// The spoken line a weapon sync toggle plays: "Weapon sync, on." or "Weapon sync, off.", 16 kHz
+/// 16-bit mono WAV, rendered with Piper's `en_US-lessac-medium`, the voice `ds2-voice-chat`'s
+/// English clips use.
 #[must_use]
 pub const fn clip(on: bool) -> &'static [u8] {
-    if on {
-        include_bytes!("../assets/en-on.wav")
-    } else {
-        include_bytes!("../assets/en-off.wav")
+    clip_for(Kind::Weapon, on)
+}
+
+/// The spoken line a toggle of either feature plays. Armour's are "Armor sync, on." and "Armor
+/// sync, off.", rendered the same way (`piper -m en_US-lessac-medium`, then `ffmpeg -ar 16000 -ac 1
+/// -c:a pcm_s16le`).
+#[must_use]
+pub const fn clip_for(kind: Kind, on: bool) -> &'static [u8] {
+    match (kind, on) {
+        (Kind::Weapon, true) => include_bytes!("../assets/en-on.wav"),
+        (Kind::Weapon, false) => include_bytes!("../assets/en-off.wav"),
+        (Kind::Armor, true) => include_bytes!("../assets/armor-en-on.wav"),
+        (Kind::Armor, false) => include_bytes!("../assets/armor-en-off.wav"),
     }
 }
 
@@ -99,11 +138,27 @@ mod hud;
 mod install;
 
 #[cfg(windows)]
-pub use install::{LogFn, Outcome, install, set_key, set_logger, set_test_cap};
+pub use install::{LogFn, Outcome, Settings, install, set_key, set_logger, set_test_cap};
 
 #[cfg(test)]
 mod tests {
-    use super::clip;
+    use super::{Kind, clip, clip_for};
+
+    #[test]
+    fn four_distinct_clips_one_per_feature_and_direction() {
+        let all = [
+            clip_for(Kind::Weapon, true),
+            clip_for(Kind::Weapon, false),
+            clip_for(Kind::Armor, true),
+            clip_for(Kind::Armor, false),
+        ];
+        for (i, a) in all.iter().enumerate() {
+            assert_eq!(wav_format(a), Some((1, 1, 16_000, 16)), "clip {i}");
+            for b in &all[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+    }
 
     /// The `fmt ` chunk's format tag, channels, sample rate and bits per sample.
     fn wav_format(wav: &[u8]) -> Option<(u16, u16, u32, u16)> {

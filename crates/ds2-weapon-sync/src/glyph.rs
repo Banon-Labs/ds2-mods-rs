@@ -70,10 +70,7 @@ pub fn size_for(display_height: f32) -> f32 {
 /// both edges.
 #[must_use]
 pub fn layout(display: [f32; 2]) -> Glyph {
-    let size = size_for(display[1]);
-    let margin = size * 0.5;
-    let min = [display[0] - margin - size, margin];
-    let max = [min[0] + size, min[1] + size];
+    let (min, max, size) = tile(display, 0);
     let at = |unit: [f32; 2]| [min[0] + unit[0] * size, min[1] + unit[1] * size];
     let across = GUARD_HALF * core::f32::consts::FRAC_1_SQRT_2;
     // The guard lies across the blade: along (1, 1) for a blade along (1, -1).
@@ -119,9 +116,131 @@ pub fn layout(display: [f32; 2]) -> Glyph {
     }
 }
 
+/// Tile `index` counted leftwards from the top-right corner: tile 0 half a tile in from both
+/// edges, each next one a tile and a quarter further left. Answers `(min, max, side)`.
+fn tile(display: [f32; 2], index: usize) -> ([f32; 2], [f32; 2], f32) {
+    let size = size_for(display[1]);
+    let margin = size * 0.5;
+    #[allow(clippy::cast_precision_loss)]
+    let shift = index as f32 * size * 1.25;
+    let min = [display[0] - margin - size - shift, margin];
+    let max = [min[0] + size, min[1] + size];
+    (min, max, size)
+}
+
+/// The helm, in unit coordinates: a dome from the left cheek over the top to the right cheek, a
+/// brim across, a nose guard down the middle, cheek plates, and a crest rivet.
+const HELM_CENTRE: [f32; 2] = [0.5, 0.50];
+const HELM_RADIUS: f32 = 0.30;
+/// How many straight strokes approximate the dome.
+const HELM_DOME_SEGMENTS: usize = 10;
+const HELM_CHEEK_BOTTOM: f32 = 0.82;
+const HELM_CHEEK_IN: f32 = 0.06;
+const HELM_NOSE_BOTTOM: f32 = 0.74;
+const HELM_STROKE: f32 = 0.07;
+const HELM_NOSE: f32 = 0.06;
+const HELM_RIVET: f32 = 0.045;
+
+/// The armour sync glyph: a helm on its own tile, one tile left of the swords, so each feature's
+/// sign is shown and hidden on its own.
+#[must_use]
+pub fn helm_layout(display: [f32; 2]) -> Glyph {
+    let (min, max, size) = tile(display, 1);
+    let at = |unit: [f32; 2]| [min[0] + unit[0] * size, min[1] + unit[1] * size];
+    let width = HELM_STROKE * size;
+    let mut strokes = Vec::with_capacity(HELM_DOME_SEGMENTS + 4);
+    let point = |step: usize| {
+        #[allow(clippy::cast_precision_loss)]
+        let angle = core::f32::consts::PI * (1.0 + step as f32 / HELM_DOME_SEGMENTS as f32);
+        [
+            HELM_CENTRE[0] + HELM_RADIUS * angle.cos(),
+            HELM_CENTRE[1] + HELM_RADIUS * angle.sin(),
+        ]
+    };
+    for step in 0..HELM_DOME_SEGMENTS {
+        strokes.push(Stroke {
+            from: at(point(step)),
+            to: at(point(step + 1)),
+            width,
+        });
+    }
+    let left = HELM_CENTRE[0] - HELM_RADIUS;
+    let right = HELM_CENTRE[0] + HELM_RADIUS;
+    // The brim, across the bottom of the dome.
+    strokes.push(Stroke {
+        from: at([left, HELM_CENTRE[1]]),
+        to: at([right, HELM_CENTRE[1]]),
+        width,
+    });
+    // The cheek plates, down and slightly in.
+    strokes.push(Stroke {
+        from: at([left, HELM_CENTRE[1]]),
+        to: at([left + HELM_CHEEK_IN, HELM_CHEEK_BOTTOM]),
+        width,
+    });
+    strokes.push(Stroke {
+        from: at([right, HELM_CENTRE[1]]),
+        to: at([right - HELM_CHEEK_IN, HELM_CHEEK_BOTTOM]),
+        width,
+    });
+    // The nose guard.
+    strokes.push(Stroke {
+        from: at(HELM_CENTRE),
+        to: at([HELM_CENTRE[0], HELM_NOSE_BOTTOM]),
+        width: HELM_NOSE * size,
+    });
+    let dots = vec![Dot {
+        centre: at([HELM_CENTRE[0], HELM_CENTRE[1] - HELM_RADIUS]),
+        radius: HELM_RIVET * size,
+    }];
+    Glyph {
+        min,
+        max,
+        rounding: size * 0.18,
+        strokes,
+        dots,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_helm_stays_on_its_own_tile_left_of_the_swords_and_is_symmetric() {
+        for display in [
+            [1280.0, 720.0],
+            [2260.0, 1272.0],
+            [3840.0, 2160.0],
+            [640.0, 480.0],
+        ] {
+            let swords = layout(display);
+            let helm = helm_layout(display);
+            assert!(helm.max[0] < swords.min[0], "{display:?}: the tiles overlap");
+            assert!(helm.min[0] > display[0] / 2.0, "{display:?}");
+            assert!((helm.min[1] - swords.min[1]).abs() < 1e-3, "same row");
+            for stroke in &helm.strokes {
+                let pad = stroke.width / 2.0;
+                assert!(inside(&helm, stroke.from, pad), "{display:?} {stroke:?}");
+                assert!(inside(&helm, stroke.to, pad), "{display:?} {stroke:?}");
+            }
+            for dot in &helm.dots {
+                assert!(inside(&helm, dot.centre, dot.radius), "{display:?} {dot:?}");
+            }
+            // Mirror every stroke end across the tile's middle: it lands on another stroke end.
+            let centre = (helm.min[0] + helm.max[0]) / 2.0;
+            let ends: Vec<[f32; 2]> = helm.strokes.iter().flat_map(|s| [s.from, s.to]).collect();
+            for end in &ends {
+                let mirrored = [2.0 * centre - end[0], end[1]];
+                assert!(
+                    ends.iter()
+                        .any(|e| (e[0] - mirrored[0]).abs() < 1e-2
+                            && (e[1] - mirrored[1]).abs() < 1e-2),
+                    "{display:?}: {end:?} has no mirror"
+                );
+            }
+        }
+    }
 
     fn inside(glyph: &Glyph, point: [f32; 2], pad: f32) -> bool {
         point[0] >= glyph.min[0] + pad

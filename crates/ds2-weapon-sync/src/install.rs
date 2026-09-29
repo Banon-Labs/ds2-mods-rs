@@ -1,5 +1,12 @@
-//! The two detours: the clamp on the game's weapon update, and the per-frame check on the net
-//! session update that decides when to push our weapons through it again.
+//! The detours: the clamp on the game's weapon update and on its armour update, the fix on the
+//! inventory save writer, and the per-frame check on the net session update that decides when to
+//! push our equipment through the updates again.
+//!
+//! Two features run on this machinery, each a [`Feature`] with its own switch, key, cap, ledger,
+//! tracker and watch: weapon sync (`ds2-weapon-sync:` in the log) and armour sync
+//! (`ds2-armor-sync:`). Either can be installed without the other. What they share is only what
+//! the game has once: the save writer (one detour fixes the records both ledgers lowered), the net
+//! session tick (one registration checks both), and the thread that polls the keys.
 
 use std::ffi::c_void;
 use std::sync::Mutex;
@@ -13,7 +20,7 @@ use ds2_hotkey_config::chord_name;
 use ds2_hotkey_config::keys::{Chord, MODIFIER_ALT, MODIFIER_CTRL, MODIFIER_SHIFT};
 use ds2_hotkey_config::live::AtomicChord;
 
-use crate::LOG_PREFIX;
+use crate::policy::{self, Action, Equipped, Held, Kind, Ledger, Remote, Slot, Tracker, Watch};
 
 unsafe extern "system" {
     fn GetAsyncKeyState(key: i32) -> i16;
@@ -63,46 +70,201 @@ fn chord_down(chord: Chord) -> bool {
     i32::try_from(chord.vk).is_ok_and(vk_down)
 }
 
-fn key_name() -> String {
-    KEY_BINDING
-        .load()
-        .filter(|chord| chord.vk != 0)
-        .map_or_else(|| "no key".to_string(), chord_name)
+// ---------------------------------------------------------------------------------------------
+// The two features.
+// ---------------------------------------------------------------------------------------------
+
+/// One feature's switches and state. Everything a press, a cap or a restore touches is here, so
+/// the two features never share a flag.
+pub(crate) struct Feature {
+    kind: Kind,
+    /// What every line of this feature begins with.
+    pub(crate) prefix: &'static str,
+    /// "weapon sync" or "armor sync", for the log lines that say what was toggled.
+    name: &'static str,
+    /// What the feature lowers, plural, for the log.
+    things: &'static str,
+    /// Whether [`install`] put this feature in.
+    installed: AtomicBool,
+    /// Flipped by the key; starts on, because the config's `enabled` already asked for it.
+    enabled: AtomicBool,
+    /// The key that flips [`Feature::enabled`]. Unset means unbound.
+    key: AtomicChord,
+    /// Whether the key was down at the last poll, so a hold is one press.
+    was_down: AtomicBool,
+    /// A press the key thread saw and the game-thread tick has not acted on yet.
+    pressed: AtomicBool,
+    /// The cap the clamp applies: [`NO_CAP`], or a level.
+    current_cap: AtomicU32,
+    /// A remote player at this level, for testing solo. [`NO_CAP`] when not configured.
+    test_cap: AtomicU32,
+    /// Trampoline back to the game's update for this feature's items. Also what the push calls,
+    /// so the push runs the game's code and not our clamp twice.
+    update_original: AtomicUsize,
+    /// Every inventory entry this feature lowered, with its real level. The tick sweeps it and the
+    /// save writer reads it, so it is behind a lock; neither holds it across a call into the game.
+    ledger: Mutex<Ledger>,
+    /// The equipped slots as the last resweep left them. Game thread only.
+    watch: Mutex<Watch>,
+    /// Which cap the equipment was last pushed at. Game thread only.
+    tracker: Mutex<Tracker>,
+    /// The local `PlayerCtrl` the last check saw, so a new world gets one line of what it was
+    /// built with.
+    last_player: AtomicUsize,
+    /// Whether the first check has been logged.
+    first_tick: AtomicBool,
 }
 
-/// Bind the on/off key, or unbind it with `None`. Takes effect on the next frame.
-pub fn set_key(chord: Option<Chord>) {
-    let before = key_name();
+impl Feature {
+    const fn new(
+        kind: Kind,
+        prefix: &'static str,
+        name: &'static str,
+        things: &'static str,
+    ) -> Self {
+        Self {
+            kind,
+            prefix,
+            name,
+            things,
+            installed: AtomicBool::new(false),
+            enabled: AtomicBool::new(true),
+            key: AtomicChord::unset(),
+            was_down: AtomicBool::new(false),
+            pressed: AtomicBool::new(false),
+            current_cap: AtomicU32::new(NO_CAP),
+            test_cap: AtomicU32::new(NO_CAP),
+            update_original: AtomicUsize::new(0),
+            ledger: Mutex::new(Ledger::new()),
+            watch: Mutex::new(Watch::new()),
+            tracker: Mutex::new(Tracker::new()),
+            last_player: AtomicUsize::new(0),
+            first_tick: AtomicBool::new(false),
+        }
+    }
+
+    fn installed(&self) -> bool {
+        self.installed.load(Ordering::Acquire)
+    }
+
+    fn key_name(&self) -> String {
+        self.key
+            .load()
+            .filter(|chord| chord.vk != 0)
+            .map_or_else(|| "no key".to_string(), chord_name)
+    }
+
+    /// The slot count, and for slot `i` (`0..slots`): the bag's equip slot, the character-side
+    /// slot the update takes, and the equipment record's index.
+    fn inventory_slot(&self, slot: usize) -> usize {
+        match self.kind {
+            Kind::Weapon => slot,
+            Kind::Armor => ds2_rva::ARMOR_INVENTORY_SLOT_FIRST + slot,
+        }
+    }
+
+    fn request_slot(&self, slot: usize) -> i32 {
+        match self.kind {
+            Kind::Weapon => ds2_rva::WEAPON_INTERNAL_TO_CHR_SLOT[slot],
+            // `0x1401b66a0` passes `DAT_1410c44a8[slot - 6]` = 0, 1, 2, 3.
+            Kind::Armor => i32::try_from(slot).unwrap_or(0),
+        }
+    }
+
+    fn record_index(&self, slot: usize) -> usize {
+        match self.kind {
+            Kind::Weapon => ds2_rva::WEAPON_INTERNAL_TO_CHR_SLOT[slot] as usize,
+            Kind::Armor => ds2_rva::ARMOR_RECORD_FIRST + slot,
+        }
+    }
+
+    /// Where the live level of slot `slot` sits in `ChrAsmEquip`.
+    fn live_level_offset(&self, slot: usize) -> usize {
+        match self.kind {
+            Kind::Weapon => {
+                live_index(self.record_index(slot)) * ds2_rva::CHR_ASM_EQUIP_WEAPON_STRIDE
+                    + ds2_rva::CHR_ASM_EQUIP_WEAPON_LEVEL_OFFSET
+            }
+            Kind::Armor => {
+                ds2_rva::CHR_ASM_EQUIP_ARMOR_OFFSET
+                    + slot * ds2_rva::CHR_ASM_EQUIP_ARMOR_STRIDE
+                    + ds2_rva::CHR_ASM_EQUIP_ARMOR_LEVEL_OFFSET
+            }
+        }
+    }
+
+    /// The id the update and the record carry for an inventory item: the item id for a weapon,
+    /// the ArmorParam id for armour (`ItemParam +0x18`, which is the item id minus
+    /// [`ds2_rva::ARMOR_PARAM_ID_FROM_ITEM_ID`] for every armour row).
+    fn request_item(&self, item: u32) -> u32 {
+        match self.kind {
+            Kind::Weapon => item,
+            Kind::Armor => item.wrapping_sub(ds2_rva::ARMOR_PARAM_ID_FROM_ITEM_ID),
+        }
+    }
+
+    /// A record's id as the inventory item it came from, so the two compare.
+    fn record_item(&self, id: u32) -> u32 {
+        match self.kind {
+            Kind::Weapon => id,
+            Kind::Armor if id == 0 || id == u32::MAX => id,
+            Kind::Armor => id.wrapping_add(ds2_rva::ARMOR_PARAM_ID_FROM_ITEM_ID),
+        }
+    }
+
+    /// What the first of the two pushes puts in a slot so the second is a change of item, which
+    /// the record writer keeps: Fists for a weapon, "no piece" for armour.
+    fn placeholder(&self) -> u32 {
+        match self.kind {
+            Kind::Weapon => ds2_rva::FISTS_ITEM_ID,
+            Kind::Armor => ds2_rva::ARMOR_EMPTY_ITEM_ID,
+        }
+    }
+}
+
+/// Weapon sync.
+pub(crate) static WEAPONS: Feature =
+    Feature::new(Kind::Weapon, crate::LOG_PREFIX, "weapon sync", "weapons");
+
+/// Armour sync.
+pub(crate) static ARMOR: Feature =
+    Feature::new(Kind::Armor, crate::ARMOR_LOG_PREFIX, "armor sync", "armor pieces");
+
+pub(crate) fn feature(kind: Kind) -> &'static Feature {
+    match kind {
+        Kind::Weapon => &WEAPONS,
+        Kind::Armor => &ARMOR,
+    }
+}
+
+const FEATURES: [&Feature; 2] = [&WEAPONS, &ARMOR];
+
+/// Bind a feature's on/off key, or unbind it with `None`. Takes effect on the next frame.
+pub fn set_key(kind: Kind, chord: Option<Chord>) {
+    let f = feature(kind);
+    let before = f.key_name();
     match chord {
-        Some(chord) => KEY_BINDING.store(chord),
-        None => KEY_BINDING.store(Chord {
+        Some(chord) => f.key.store(chord),
+        None => f.key.store(Chord {
             modifiers: 0,
             vk: 0,
             dik: None,
         }),
     }
-    let after = key_name();
+    let after = f.key_name();
     if before != after {
-        log(format_args!("{LOG_PREFIX} key {before} -> {after}"));
+        log(format_args!("{} key {before} -> {after}", f.prefix));
     }
 }
-use crate::policy::{self, Action, Equipped, Held, Ledger, RemoteWeapons, Slot, Tracker, Watch};
 
-/// `CHR_WEAPON_UPDATE(PlayerCtrl*, WeaponUpdateRequest*)`.
-type WeaponUpdate = unsafe extern "system" fn(usize, *mut u8);
+/// `CHR_WEAPON_UPDATE` / `CHR_ARMOR_UPDATE`: `(PlayerCtrl*, UpdateRequest*)`.
+type EquipUpdate = unsafe extern "system" fn(usize, *mut u8);
 
 /// `SAVE_DATA_ITEM_INVENTORY_WRITE(this, stream*, enabled)`.
 type SaveWrite = unsafe extern "system" fn(usize, usize, u32) -> usize;
 
 /// Trampoline back to the real inventory save writer.
 static SAVE_WRITE_ORIGINAL: AtomicUsize = AtomicUsize::new(0);
-
-/// Every inventory weapon the cap lowered, with its real level. The tick sweeps it and the save
-/// writer reads it, so it is behind a lock; neither holds it across a call into the game.
-static LEDGER: Mutex<Ledger> = Mutex::new(Ledger::new());
-
-/// The equipped slots as the last resweep left them. Game thread only.
-static WATCH: Mutex<Watch> = Mutex::new(Watch::new());
 
 unsafe extern "system" {
     fn WriteProcessMemory(
@@ -134,50 +296,20 @@ fn safe_write_u8(address: usize, value: u8) -> bool {
     ok != 0 && written == 1
 }
 
-/// Trampoline back to the real weapon update. Also what the push calls, so the push runs the
-/// game's code and not our detour's clamp twice.
-static WEAPON_UPDATE_ORIGINAL: AtomicUsize = AtomicUsize::new(0);
-
-/// Whether the feature is on. Flipped by the key; starts on, because `[weapon_sync] enabled`
-/// already asked for it.
-static ENABLED: AtomicBool = AtomicBool::new(true);
-
-/// The key that flips [`ENABLED`]. Unset means unbound.
-static KEY_BINDING: AtomicChord = AtomicChord::unset();
-
-/// Whether the key was down at the last poll, so a hold is one press.
-static WAS_DOWN: AtomicBool = AtomicBool::new(false);
-
-/// A press the key thread saw and the game-thread tick has not acted on yet.
-static PRESSED: AtomicBool = AtomicBool::new(false);
-
 /// `GameManagerImp`'s address (the global that holds the pointer), resolved at install.
 static GAME_MANAGER: AtomicUsize = AtomicUsize::new(0);
 
 /// `PlayerCtrl`'s vtable, resolved at install. A roster entry is a player only if it has this.
 static PLAYER_CTRL_VTABLE: AtomicUsize = AtomicUsize::new(0);
 
-/// The cap the clamp applies: [`NO_CAP`], or a level `0..=10`.
-static CURRENT_CAP: AtomicU32 = AtomicU32::new(NO_CAP);
 const NO_CAP: u32 = u32::MAX;
 
-/// A remote player at this level, for testing solo. [`NO_CAP`] when not configured.
-static TEST_CAP: AtomicU32 = AtomicU32::new(NO_CAP);
-
-/// The local `PlayerCtrl` the last check saw, so a new world gets one line of what it was built
-/// with. That line is the evidence that a load came back with real levels.
-static LAST_PLAYER: AtomicUsize = AtomicUsize::new(0);
-
-/// Frames since the last check, and the first-tick flag.
+/// Frames since the last check.
 static FRAME: AtomicU32 = AtomicU32::new(0);
-static FIRST_TICK: AtomicBool = AtomicBool::new(false);
 
 /// How often the roster is read. Four times a second is well inside how long a peer's packet 61
-/// takes to matter and keeps the fault-safe reads off every frame.
+/// or 62 takes to matter and keeps the fault-safe reads off every frame.
 const CHECK_EVERY_FRAMES: u32 = 15;
-
-/// The tracker. Only the game thread touches it (the tick detour), so the lock is uncontended.
-static TRACKER: Mutex<Tracker> = Mutex::new(Tracker::new());
 
 /// A log sink, installed by the loader so this crate writes into the same file as everything else.
 /// Stored as a `usize` because a `fn` pointer is not an `Atomic` type.
@@ -204,9 +336,10 @@ pub(crate) fn log(args: std::fmt::Arguments<'_>) {
     }
 }
 
-/// Whether the feature is on right now, for the HUD.
-pub(crate) fn enabled() -> bool {
-    ENABLED.load(Ordering::Acquire)
+/// Whether a feature is installed and on right now, for the HUD.
+pub(crate) fn enabled(kind: Kind) -> bool {
+    let f = feature(kind);
+    f.installed() && f.enabled.load(Ordering::Acquire)
 }
 
 #[link(name = "winmm")]
@@ -219,29 +352,42 @@ unsafe extern "system" {
 /// clip cuts off one still playing.
 const PLAY_FLAGS: u32 = 0x0001 | 0x0002 | 0x0004;
 
-/// Say which way the key just went. `true` when `winmm` accepted the clip.
-fn announce(on: bool) -> bool {
-    let clip = crate::clip(on);
+/// Say which way the key just went, in the feature's own words. `true` when `winmm` accepted it.
+fn announce(kind: Kind, on: bool) -> bool {
+    let clip = crate::clip_for(kind, on);
     // SAFETY: `clip` is a `'static` WAV compiled into this DLL, so it outlives the async play.
     unsafe { PlaySoundW(clip.as_ptr().cast(), core::ptr::null_mut(), PLAY_FLAGS) != 0 }
 }
 
-/// What [`install`] managed to do.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Outcome {
-    /// Whether both detours are live. When this is `false` nothing was patched.
-    pub installed: bool,
+/// One feature's configuration, as the loader read it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Settings {
+    /// A pretend remote player at this level, so the cap can be seen working alone.
+    pub test_cap: Option<u8>,
+    /// The on/off key. `None` leaves it unbound.
+    pub key: Option<Chord>,
 }
 
-/// Change the pretend remote player's level while the game runs, or remove it with `None`.
+/// What [`install`] managed to do, per feature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Outcome {
+    /// Weapon sync is live. `false` when it was not asked for or could not go in.
+    pub weapons: bool,
+    /// Armour sync is live.
+    pub armor: bool,
+}
+
+/// Change a feature's pretend remote player while the game runs, or remove it with `None`.
 ///
 /// The next check (within a quarter second) picks it up exactly as it would a real player
-/// arriving, changing weapons or leaving, so removing it exercises the in-world restore.
-pub fn set_test_cap(test_cap: Option<u8>) {
-    let previous = TEST_CAP.swap(cap_to_atomic(test_cap), Ordering::AcqRel);
+/// arriving, changing equipment or leaving, so removing it exercises the in-world restore.
+pub fn set_test_cap(kind: Kind, test_cap: Option<u8>) {
+    let f = feature(kind);
+    let previous = f.test_cap.swap(cap_to_atomic(test_cap), Ordering::AcqRel);
     if previous != cap_to_atomic(test_cap) {
         log(format_args!(
-            "{LOG_PREFIX} test_cap {} -> {}",
+            "{} test_cap {} -> {}",
+            f.prefix,
             show(cap_from_atomic(previous)),
             show(test_cap)
         ));
@@ -261,12 +407,12 @@ fn show(cap: Option<u8>) -> String {
 }
 
 /// The resolved address of `rva` if it holds `expected`, logged either way it fails.
-fn checked_site(rva: u32, expected: &[u8], name: &str) -> Option<usize> {
+fn checked_site(prefix: &str, rva: u32, expected: &[u8], name: &str) -> Option<usize> {
     let site = match game_rva(rva) {
         Ok(site) => site,
         Err(error) => {
             log(format_args!(
-                "{LOG_PREFIX} not installed reason=no-module-base what={name} -- {error}"
+                "{prefix} not installed reason=no-module-base what={name} -- {error}"
             ));
             return None;
         }
@@ -277,7 +423,7 @@ fn checked_site(rva: u32, expected: &[u8], name: &str) -> Option<usize> {
     let read = unsafe { read_bytes(site, &mut found) };
     if !read || found != expected {
         log(format_args!(
-            "{LOG_PREFIX} not installed reason=prologue what={name} va=0x{site:016x} read={read} \
+            "{prefix} not installed reason=prologue what={name} va=0x{site:016x} read={read} \
              saw={found:02x?} want={expected:02x?} -- that address is not {name} on this build, so \
              nothing was patched"
         ));
@@ -286,109 +432,146 @@ fn checked_site(rva: u32, expected: &[u8], name: &str) -> Option<usize> {
     Some(site)
 }
 
-/// Hook both sites. Nothing is patched unless both prologues match and both hooks are created.
+/// Create and enable one MinHook detour, logging under `prefix` if it fails.
+fn hook(prefix: &str, site: usize, detour: *mut c_void, name: &str) -> Option<usize> {
+    // SAFETY: the caller checked the site's recorded prologue, and the detour has the same ABI.
+    let created = unsafe { MhHook::new(site as *mut c_void, detour) };
+    let hook = match created {
+        Ok(hook) => hook,
+        Err(status) => {
+            log(format_args!(
+                "{prefix} not installed: MH_CreateHook on {name} said {status:?}"
+            ));
+            return None;
+        }
+    };
+    let trampoline = hook.trampoline() as usize;
+    Some(trampoline)
+}
+
+fn enable(prefix: &str, site: usize, name: &str) -> bool {
+    // SAFETY: an address `MhHook::new` accepted.
+    let status = unsafe { MH_EnableHook(site as *mut c_void) };
+    if status != MH_STATUS::MH_OK {
+        log(format_args!(
+            "{prefix} not installed: MH_EnableHook on {name} said {status:?}"
+        ));
+        return false;
+    }
+    true
+}
+
+/// The update detour's site, its prologue, its detour and its name, per feature.
+fn update_site(kind: Kind) -> (u32, &'static [u8], *mut c_void, &'static str) {
+    match kind {
+        Kind::Weapon => (
+            ds2_rva::CHR_WEAPON_UPDATE,
+            &ds2_rva::CHR_WEAPON_UPDATE_PROLOGUE,
+            weapon_update_detour as *mut c_void,
+            "CHR_WEAPON_UPDATE",
+        ),
+        Kind::Armor => (
+            ds2_rva::CHR_ARMOR_UPDATE,
+            &ds2_rva::CHR_ARMOR_UPDATE_PROLOGUE,
+            armor_update_detour as *mut c_void,
+            "CHR_ARMOR_UPDATE",
+        ),
+    }
+}
+
+/// Install weapon sync, armour sync, or both. Each goes in only if its settings are given, and a
+/// feature that cannot go in is logged and left out without taking the other with it.
 ///
-/// `test_cap` stands in for a remote player at that level, so the cap can be seen working with
-/// nobody else in the world. `key` turns the feature on and off in game; `None` leaves it unbound.
+/// Both lower inventory entries, so neither is installed without the save writer's fix, which is
+/// put in first and shared. The clamp on each feature's update goes in before the tick; the tick
+/// is registered once for whichever features are in.
 ///
 /// # Safety
 ///
 /// Patches executable memory in the loaded game image. Call once, from the loader's post-Arxan
 /// install position.
-pub unsafe fn install(test_cap: Option<u8>, key: Option<Chord>) -> Outcome {
-    if let Some(chord) = key {
-        KEY_BINDING.store(chord);
-    }
-    let refused = Outcome { installed: false };
-    let Some(weapon_site) = checked_site(
-        ds2_rva::CHR_WEAPON_UPDATE,
-        &ds2_rva::CHR_WEAPON_UPDATE_PROLOGUE,
-        "CHR_WEAPON_UPDATE",
-    ) else {
-        return refused;
+pub unsafe fn install(weapons: Option<Settings>, armor: Option<Settings>) -> Outcome {
+    let none = Outcome {
+        weapons: false,
+        armor: false,
     };
-    // The cap writes the inventory, so it is never installed without the hook that keeps the real
-    // levels in the save.
+    let wanted: Vec<(&'static Feature, Settings)> = [(&WEAPONS, weapons), (&ARMOR, armor)]
+        .into_iter()
+        .filter_map(|(f, settings)| settings.map(|s| (f, s)))
+        .collect();
+    if wanted.is_empty() {
+        return none;
+    }
+    let refuse_all = |why: &str| {
+        for (f, _) in &wanted {
+            log(format_args!("{} not installed: {why}", f.prefix));
+        }
+        none
+    };
+    let prefix = wanted[0].0.prefix;
     let Some(save_site) = checked_site(
+        prefix,
         ds2_rva::SAVE_DATA_ITEM_INVENTORY_WRITE,
         &ds2_rva::SAVE_DATA_ITEM_INVENTORY_WRITE_PROLOGUE,
         "SAVE_DATA_ITEM_INVENTORY_WRITE",
     ) else {
-        return refused;
+        return refuse_all("the save writer is not where it should be");
     };
     let (Ok(manager), Ok(vtable)) = (
         game_rva(ds2_rva::GAME_MANAGER_IMP),
         game_rva(ds2_rva::PLAYER_CTRL_VTABLE),
     ) else {
-        log(format_args!(
-            "{LOG_PREFIX} not installed reason=no-module-base"
-        ));
-        return refused;
+        return refuse_all("reason=no-module-base");
     };
     GAME_MANAGER.store(manager, Ordering::Release);
     PLAYER_CTRL_VTABLE.store(vtable, Ordering::Release);
-    TEST_CAP.store(cap_to_atomic(test_cap), Ordering::Release);
 
     // SAFETY: MinHook's own initialiser, no arguments; ALREADY_INITIALIZED means another crate in
     // this DLL got there first.
     let status = unsafe { MH_Initialize() };
     if status != MH_STATUS::MH_OK && status != MH_STATUS::MH_ERROR_ALREADY_INITIALIZED {
-        log(format_args!(
-            "{LOG_PREFIX} not installed: MH_Initialize said {status:?}"
-        ));
-        return refused;
+        return refuse_all(&format!("MH_Initialize said {status:?}"));
     }
-    // The save fix goes in first: until the tick lowers something it changes nothing, and nothing
+    // The save fix goes in first: until a tick lowers something it changes nothing, and nothing
     // may be lowered before it is live.
-    // SAFETY: the site matched its recorded prologue, and the detour has the same ABI.
-    let save = match unsafe {
-        MhHook::new(save_site as *mut c_void, save_write_detour as *mut c_void)
-    } {
-        Ok(hook) => hook,
-        Err(status) => {
-            log(format_args!(
-                "{LOG_PREFIX} not installed: MH_CreateHook on SAVE_DATA_ITEM_INVENTORY_WRITE said \
-                 {status:?}"
-            ));
-            return refused;
-        }
+    let Some(save_trampoline) = hook(
+        prefix,
+        save_site,
+        save_write_detour as *mut c_void,
+        "SAVE_DATA_ITEM_INVENTORY_WRITE",
+    ) else {
+        return refuse_all("no save writer hook");
     };
-    SAVE_WRITE_ORIGINAL.store(save.trampoline() as usize, Ordering::Release);
-    // SAFETY: an address `MhHook::new` accepted above.
-    let status = unsafe { MH_EnableHook(save_site as *mut c_void) };
-    if status != MH_STATUS::MH_OK {
-        log(format_args!(
-            "{LOG_PREFIX} not installed: MH_EnableHook on SAVE_DATA_ITEM_INVENTORY_WRITE said \
-             {status:?}"
-        ));
-        return refused;
+    SAVE_WRITE_ORIGINAL.store(save_trampoline, Ordering::Release);
+    if !enable(prefix, save_site, "SAVE_DATA_ITEM_INVENTORY_WRITE") {
+        return refuse_all("the save writer hook would not enable");
     }
-    // The clamp goes in next and the tick last. The clamp does nothing until the tick has set a
-    // cap, so if the tick cannot register, the weapon update runs exactly as the game's own.
-    // SAFETY: the site matched its recorded prologue, and the detour has the same ABI.
-    let weapon = match unsafe {
-        MhHook::new(
-            weapon_site as *mut c_void,
-            weapon_update_detour as *mut c_void,
-        )
-    } {
-        Ok(hook) => hook,
-        Err(status) => {
-            log(format_args!(
-                "{LOG_PREFIX} not installed: MH_CreateHook on CHR_WEAPON_UPDATE said {status:?}"
-            ));
-            return refused;
+
+    // Each feature's clamp. It does nothing until the tick sets a cap, so a feature whose tick
+    // never runs leaves its update exactly as the game's own.
+    let mut live = Vec::new();
+    for (f, settings) in &wanted {
+        let (rva, prologue, detour, name) = update_site(f.kind);
+        let Some(site) = checked_site(f.prefix, rva, prologue, name) else {
+            continue;
+        };
+        let Some(trampoline) = hook(f.prefix, site, detour, name) else {
+            continue;
+        };
+        // Published before the site is patched, so a detour that fires at once has somewhere to go.
+        f.update_original.store(trampoline, Ordering::Release);
+        if !enable(f.prefix, site, name) {
+            continue;
         }
-    };
-    // Published before the site is patched, so a detour that fires at once has somewhere to go.
-    WEAPON_UPDATE_ORIGINAL.store(weapon.trampoline() as usize, Ordering::Release);
-    // SAFETY: an address `MhHook::new` accepted above.
-    let status = unsafe { MH_EnableHook(weapon_site as *mut c_void) };
-    if status != MH_STATUS::MH_OK {
-        log(format_args!(
-            "{LOG_PREFIX} not installed: MH_EnableHook on CHR_WEAPON_UPDATE said {status:?}"
-        ));
-        return refused;
+        if let Some(chord) = settings.key {
+            f.key.store(chord);
+        }
+        f.test_cap
+            .store(cap_to_atomic(settings.test_cap), Ordering::Release);
+        live.push((*f, site, settings.test_cap));
+    }
+    if live.is_empty() {
+        return none;
     }
     // The net session update is shared with `ds2-voice-chat`; `ds2-net-tick` owns its one detour
     // and runs this after the original.
@@ -396,25 +579,38 @@ pub unsafe fn install(test_cap: Option<u8>, key: Option<Chord>) -> Outcome {
     let tick_site = match unsafe { ds2_net_tick::register(ds2_net_tick::When::After, tick) } {
         Ok(site) => site,
         Err(error) => {
-            log(format_args!(
-                "{LOG_PREFIX} not installed: no tick -- {error}. The clamp is in but never has a \
-                 cap, so weapon levels are never changed"
-            ));
-            return refused;
+            for (f, _, _) in &live {
+                log(format_args!(
+                    "{} not installed: no tick -- {error}. The clamp is in but never has a cap, so \
+                     no level is ever changed",
+                    f.prefix
+                ));
+            }
+            return none;
         }
     };
-    std::thread::spawn(poll_key);
-    let key = key_name();
-    log(format_args!(
-        "{LOG_PREFIX} installed weapon-update=0x{weapon_site:016x} \
-         save-write=0x{save_site:016x} tick=0x{tick_site:016x} (shared) key={key} test_cap={} -- \
-         while another player is in the world, every weapon in the inventory above their highest \
-         weapon level is lowered to it, equipped or not; the save always gets the real levels",
-        show(test_cap)
-    ));
-    // After the detours, and never a reason to refuse: the swords only show the switch.
-    crate::hud::install();
-    Outcome { installed: true }
+    for (f, site, test_cap) in &live {
+        f.installed.store(true, Ordering::Release);
+        log(format_args!(
+            "{} installed update=0x{site:016x} save-write=0x{save_site:016x} (shared) \
+             tick=0x{tick_site:016x} (shared) key={} test_cap={} -- while another player is in \
+             the world, every one of our {} in the inventory above the highest level any of them \
+             has equipped is lowered to it, equipped or not; the save always gets the real levels",
+            f.prefix,
+            f.key_name(),
+            show(*test_cap),
+            f.things
+        ));
+    }
+    std::thread::spawn(poll_keys);
+    // After the detours, and never a reason to refuse: the tiles only show the switches.
+    for (f, _, _) in &live {
+        crate::hud::install(f.kind);
+    }
+    Outcome {
+        weapons: WEAPONS.installed(),
+        armor: ARMOR.installed(),
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -457,13 +653,13 @@ fn entry_address(bag: usize, index: u16) -> usize {
     bag + ds2_rva::ITEM_ENTRY_ARRAY_OFFSET + usize::from(index) * ds2_rva::ITEM_ENTRY_STRIDE
 }
 
-/// Every weapon and shield in the bag's entry array, pack and box alike, or `None` when the array
-/// could not be read in one piece. A partial read is never answered, because the ledger takes an
-/// entry missing from the answer to be gone.
+/// Every entry in the bag's array that belongs to `kind` (weapons and shields, or armour), pack
+/// and box alike, or `None` when the array could not be read in one piece. A partial read is never
+/// answered, because the ledger takes an entry missing from the answer to be gone.
 ///
-/// An entry counts when its type carries an infusion (weapons and shields), its item id is set,
-/// and its handle is its own index, which is what makes the index the save block's index too.
-fn held_weapons(bag: usize) -> Option<Vec<Held>> {
+/// An entry counts when its type is the feature's, its item id is set, and its handle is its own
+/// index, which is what makes the index the save block's index too.
+fn held(bag: usize, kind: Kind) -> Option<Vec<Held>> {
     let mut raw = vec![0u8; ds2_rva::ITEM_ENTRY_COUNT * ds2_rva::ITEM_ENTRY_STRIDE];
     // SAFETY: one fault-safe bulk read; nothing is interpreted unless it all came back.
     if !unsafe { read_bytes(bag + ds2_rva::ITEM_ENTRY_ARRAY_OFFSET, &mut raw) } {
@@ -478,11 +674,11 @@ fn held_weapons(bag: usize) -> Option<Vec<Held>> {
             entry[ds2_rva::ITEM_ENTRY_HANDLE_OFFSET],
             entry[ds2_rva::ITEM_ENTRY_HANDLE_OFFSET + 1],
         ]);
-        let kind = entry[ds2_rva::ITEM_ENTRY_TYPE_OFFSET];
+        let item_type = entry[ds2_rva::ITEM_ENTRY_TYPE_OFFSET];
         let Ok(index) = u16::try_from(index) else {
             break;
         };
-        if item == 0 || item == u32::MAX || handle != index || kind >= ITEM_TYPE_WEAPON_BELOW {
+        if item == 0 || item == u32::MAX || handle != index || !kind.holds(item_type) {
             continue;
         }
         out.push(Held {
@@ -493,9 +689,6 @@ fn held_weapons(bag: usize) -> Option<Vec<Held>> {
     }
     Some(out)
 }
-
-/// Item types below this are weapons and shields: the types that carry an infusion.
-const ITEM_TYPE_WEAPON_BELOW: u8 = ds2_rva::ITEM_TYPE_HAS_INFUSION_BELOW;
 
 /// Put `to` in the low nibble of a level byte at `address` if the entry still holds `item` at
 /// `from`. `item_at` is where that entry or record keeps its item id.
@@ -545,9 +738,9 @@ fn fix_save_block(manager: usize, ledger: &Ledger) -> (usize, usize) {
     (fixed, already)
 }
 
-/// One of our weapons as the inventory holds it: the real level.
+/// One equipped item as the inventory holds it: the real level.
 #[derive(Clone, Copy, Debug)]
-struct InventoryWeapon {
+struct InventoryItem {
     item: u32,
     /// The entry's handle, which is its index in the bag and the ledger's key.
     handle: u16,
@@ -556,9 +749,10 @@ struct InventoryWeapon {
     infusion: u8,
 }
 
-/// Inventory weapon slot `slot`, read the way `0x1401b66a0` reads it. `None` for an empty slot.
-fn inventory_weapon(bag: usize, slot: usize) -> Option<InventoryWeapon> {
-    let entry = read_ptr(bag + ds2_rva::ITEM_BAG_EQUIPPED_ENTRIES_OFFSET + slot * 8)?;
+/// The inventory entry in the bag's equip slot `inventory_slot`, read the way `0x1401b66a0` reads
+/// it. `None` for an empty slot.
+fn inventory_item(bag: usize, inventory_slot: usize) -> Option<InventoryItem> {
+    let entry = read_ptr(bag + ds2_rva::ITEM_BAG_EQUIPPED_ENTRIES_OFFSET + inventory_slot * 8)?;
     // SAFETY: fault-safe reads of an entry the bag points at.
     let (kind, item, handle, durability_bits, level, infusion) = unsafe {
         (
@@ -570,7 +764,7 @@ fn inventory_weapon(bag: usize, slot: usize) -> Option<InventoryWeapon> {
             safe_read_u8(entry + ds2_rva::ITEM_ENTRY_INFUSION_OFFSET)?,
         )
     };
-    Some(InventoryWeapon {
+    Some(InventoryItem {
         item,
         handle,
         durability_bits,
@@ -587,18 +781,21 @@ fn inventory_weapon(bag: usize, slot: usize) -> Option<InventoryWeapon> {
     })
 }
 
-/// A character's six weapon records, `(item id, level byte)`, indexed by character-side slot.
-fn weapon_records(character: usize) -> Option<RemoteWeapons> {
+/// How many equipment records the weapon and armour features read: weapons 0..5, armour 6..9.
+const RECORDS_READ: usize = ds2_rva::ARMOR_RECORD_FIRST + ds2_rva::ARMOR_SLOT_COUNT;
+
+/// A character's first ten equipment records, `(item id, level byte)`, by record index.
+fn records(character: usize) -> Option<[(u32, u8); RECORDS_READ]> {
     let asm = read_ptr(character + ds2_rva::CHARACTER_CTRL_CHR_ASM_CTRL_OFFSET)?;
     let table = read_ptr(asm + ds2_rva::CHR_ASM_CTRL_RECORD_TABLE_OFFSET)?;
-    let mut raw = [0u8; ds2_rva::WEAPON_SLOT_COUNT * ds2_rva::EQUIP_RECORD_STRIDE];
+    let mut raw = [0u8; RECORDS_READ * ds2_rva::EQUIP_RECORD_STRIDE];
     // SAFETY: one fault-safe bulk read; nothing is interpreted unless it all came back.
     if !unsafe { read_bytes(table + ds2_rva::EQUIP_RECORD_ARRAY_OFFSET, &mut raw) } {
         return None;
     }
-    let mut out = [(0u32, 0u8); 6];
-    for (slot, record) in out.iter_mut().enumerate() {
-        let base = slot * ds2_rva::EQUIP_RECORD_STRIDE;
+    let mut out = [(0u32, 0u8); RECORDS_READ];
+    for (index, record) in out.iter_mut().enumerate() {
+        let base = index * ds2_rva::EQUIP_RECORD_STRIDE;
         let item = &raw[base + ds2_rva::EQUIP_RECORD_ITEM_OFFSET..][..4];
         *record = (
             u32::from_le_bytes([item[0], item[1], item[2], item[3]]),
@@ -617,22 +814,14 @@ const fn live_index(chr_slot: usize) -> usize {
     (chr_slot % 2) * 3 + chr_slot / 2
 }
 
-/// A character's live weapon levels, `ChrAsmEquip +0x70` per weapon entry.
-fn live_levels(character: usize) -> Option<[u8; 6]> {
+/// A character's live levels for one feature's slots, inventory slot order.
+fn live_levels(f: &Feature, character: usize) -> Option<Vec<u8>> {
     let asm = read_ptr(character + ds2_rva::CHARACTER_CTRL_CHR_ASM_CTRL_OFFSET)?;
     let equip = read_ptr(asm + ds2_rva::CHR_ASM_CTRL_EQUIP_OFFSET)?;
-    let mut out = [0u8; 6];
-    for (n, level) in out.iter_mut().enumerate() {
+    (0..f.kind.slots())
         // SAFETY: fault-safe read.
-        *level = unsafe {
-            safe_read_u8(
-                equip
-                    + n * ds2_rva::CHR_ASM_EQUIP_WEAPON_STRIDE
-                    + ds2_rva::CHR_ASM_EQUIP_WEAPON_LEVEL_OFFSET,
-            )?
-        };
-    }
-    Some(out)
+        .map(|slot| unsafe { safe_read_u8(equip + f.live_level_offset(slot)) })
+        .collect()
 }
 
 const NAME_LIMIT: usize = 64;
@@ -681,8 +870,10 @@ fn is_person(character: usize) -> bool {
 /// Most roster entries one check walks, so a torn begin/end pair cannot become a long scan.
 const ROSTER_LIMIT: usize = 512;
 
-/// Every other person's weapon records.
-fn remotes(local: usize) -> Vec<RemoteWeapons> {
+/// Every other person's weapon and armour records: records 0..5 (packet 61 writes them) and
+/// 6..9 (packet 62, the receiver `0x140162150` case `0x3e`, writes them through the same
+/// `0x1403463d0` at index `piece + 6`).
+fn remotes(local: usize) -> Vec<Remote> {
     let mut out = Vec::new();
     let Some(manager) = read_ptr(GAME_MANAGER.load(Ordering::Acquire)) else {
         return out;
@@ -710,34 +901,54 @@ fn remotes(local: usize) -> Vec<RemoteWeapons> {
         if unsafe { safe_read_usize(character) } != Some(vtable) || !is_person(character) {
             continue;
         }
-        if let Some(records) = weapon_records(character) {
-            out.push(records);
+        if let Some(records) = records(character) {
+            let mut remote = Remote {
+                weapons: [(0, 0); 6],
+                armor: [(0, 0); 4],
+            };
+            remote
+                .weapons
+                .copy_from_slice(&records[..ds2_rva::WEAPON_SLOT_COUNT]);
+            remote
+                .armor
+                .copy_from_slice(&records[ds2_rva::ARMOR_RECORD_FIRST..]);
+            out.push(remote);
         }
     }
     out
 }
 
 // ---------------------------------------------------------------------------------------------
-// The clamp.
+// The clamps.
 // ---------------------------------------------------------------------------------------------
 
-/// The weapon update detour: lower the request's level to the cap, then run the game's code.
-///
-/// Only for the local character (the only caller passes it, and this checks), and only for the
-/// six weapon slots. Never panics across the boundary.
+/// The weapon update detour: lower the request's level to weapon sync's cap, then run the game's
+/// code. Never panics across the boundary.
 unsafe extern "system" fn weapon_update_detour(player: usize, request: *mut u8) {
-    let _ = std::panic::catch_unwind(|| clamp_request(player, request as usize));
-    let raw = WEAPON_UPDATE_ORIGINAL.load(Ordering::Acquire);
+    let _ = std::panic::catch_unwind(|| clamp_request(&WEAPONS, player, request as usize));
+    forward(&WEAPONS, player, request);
+}
+
+/// The armour update detour, the same for armour sync's cap.
+unsafe extern "system" fn armor_update_detour(player: usize, request: *mut u8) {
+    let _ = std::panic::catch_unwind(|| clamp_request(&ARMOR, player, request as usize));
+    forward(&ARMOR, player, request);
+}
+
+fn forward(f: &Feature, player: usize, request: *mut u8) {
+    let raw = f.update_original.load(Ordering::Acquire);
     if raw != 0 {
         // SAFETY: MinHook's trampoline for this exact function and ABI.
-        let original: WeaponUpdate = unsafe { std::mem::transmute::<usize, WeaponUpdate>(raw) };
+        let original: EquipUpdate = unsafe { std::mem::transmute::<usize, EquipUpdate>(raw) };
         // SAFETY: forwarding the game's own arguments.
         unsafe { original(player, request) };
     }
 }
 
-fn clamp_request(player: usize, request: usize) {
-    let Some(cap) = cap_from_atomic(CURRENT_CAP.load(Ordering::Acquire)) else {
+/// Only for the local character (the only caller passes it, and this checks), and only for the
+/// feature's own slots.
+fn clamp_request(f: &Feature, player: usize, request: usize) {
+    let Some(cap) = cap_from_atomic(f.current_cap.load(Ordering::Acquire)) else {
         return;
     };
     if request == 0 || local_player() != Some(player) {
@@ -753,7 +964,7 @@ fn clamp_request(player: usize, request: usize) {
     ) else {
         return;
     };
-    if slot as usize >= ds2_rva::WEAPON_SLOT_COUNT {
+    if slot as usize >= f.kind.slots() {
         return;
     }
     let lowered = policy::clamp(level, Some(cap));
@@ -765,8 +976,8 @@ fn clamp_request(player: usize, request: usize) {
     // game state that outlives it.
     unsafe { *((request + ds2_rva::WEAPON_UPDATE_REQUEST_LEVEL_OFFSET) as *mut u8) = lowered };
     log(format_args!(
-        "{LOG_PREFIX} clamped the game's own weapon update slot={slot} item={item} +{level} -> \
-         +{lowered}"
+        "{} clamped the game's own update slot={slot} item={item} +{level} -> +{lowered}",
+        f.prefix
     ));
 }
 
@@ -777,10 +988,10 @@ fn clamp_request(player: usize, request: usize) {
 /// How many times the inventory save writer has run, for the log.
 static SAVES: AtomicU32 = AtomicU32::new(0);
 
-/// The inventory save writer's detour: before the game streams the save block, every record the
-/// cap lowered gets its real level back, so no save ever keeps a lowered level. The entries the
-/// pause menu and the equip path read stay lowered: the block is a separate copy, and it is the
-/// only thing the writer streams.
+/// The inventory save writer's detour: before the game streams the save block, every record
+/// either feature lowered gets its real level back, so no save ever keeps a lowered level. The
+/// entries the pause menu and the equip path read stay lowered: the block is a separate copy, and
+/// it is the only thing the writer streams.
 unsafe extern "system" fn save_write_detour(this: usize, stream: usize, enabled: u32) -> usize {
     if enabled != 0 {
         let _ = std::panic::catch_unwind(before_save);
@@ -797,38 +1008,44 @@ unsafe extern "system" fn save_write_detour(this: usize, stream: usize, enabled:
 
 fn before_save() {
     let save = SAVES.fetch_add(1, Ordering::Relaxed) + 1;
-    let ledger = LEDGER.lock().unwrap_or_else(|poison| poison.into_inner());
-    let Some(manager) = inventory_manager() else {
+    let manager = inventory_manager();
+    for f in FEATURES.iter().filter(|f| f.installed()) {
+        let ledger = f.ledger.lock().unwrap_or_else(|poison| poison.into_inner());
+        let Some(manager) = manager else {
+            log(format_args!(
+                "{} save #{save}: the inventory is being written but its manager is unreadable; \
+                 lowered={}",
+                f.prefix,
+                ledger.len()
+            ));
+            continue;
+        };
+        let (fixed, already) = fix_save_block(manager, &ledger);
         log(format_args!(
-            "{LOG_PREFIX} save #{save}: the inventory is being written but its manager is \
-             unreadable; lowered={}",
-            ledger.len()
+            "{} save #{save}: the inventory is being written with lowered={} {}; their save \
+             records carry the real level (fixed={fixed} already-real={already})",
+            f.prefix,
+            ledger.len(),
+            f.things
         ));
-        return;
-    };
-    let (fixed, already) = fix_save_block(manager, &ledger);
-    log(format_args!(
-        "{LOG_PREFIX} save #{save}: the inventory is being written with lowered={} weapons; their \
-         save records carry the real level (fixed={fixed} already-real={already})",
-        ledger.len()
-    ));
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
 // The whole inventory, and the equipped slots.
 // ---------------------------------------------------------------------------------------------
 
-/// One pass of the ledger over every weapon in the inventory at `cap`, and the writes it asks
-/// for. A restore also puts the real level in that entry's save record, in case the game copied
-/// the lowered one there while it was lowered.
-fn sweep_inventory(cap: Option<u8>) {
+/// One pass of a feature's ledger over its items in the inventory at `cap`, and the writes it
+/// asks for. A restore also puts the real level in that entry's save record, in case the game
+/// copied the lowered one there while it was lowered.
+fn sweep_inventory(f: &Feature, cap: Option<u8>) {
     let (Some(manager), Some(bag)) = (inventory_manager(), bag()) else {
         return;
     };
-    let Some(held) = held_weapons(bag) else {
+    let Some(held) = held(bag, f.kind) else {
         return;
     };
-    let mut ledger = LEDGER.lock().unwrap_or_else(|poison| poison.into_inner());
+    let mut ledger = f.ledger.lock().unwrap_or_else(|poison| poison.into_inner());
     if cap.is_none() && ledger.is_empty() {
         return;
     }
@@ -866,10 +1083,12 @@ fn sweep_inventory(cap: Option<u8>) {
         }
     }
     log(format_args!(
-        "{LOG_PREFIX} inventory cap={} changed={} lowered={lowered} restored={restored} \
-         failed={failed} weapons={} still-lowered={} [{}{}]",
+        "{} inventory cap={} changed={} lowered={lowered} restored={restored} failed={failed} \
+         {}={} still-lowered={} [{}{}]",
+        f.prefix,
         show(cap),
         lowered + restored,
+        f.things.replace(' ', "-"),
         held.len(),
         ledger.len(),
         sample.join(" "),
@@ -877,15 +1096,16 @@ fn sweep_inventory(cap: Option<u8>) {
     ));
 }
 
-/// How many weapons the inventory holds at each level, `+0:12 +10:40`, so two loads of the same
-/// character can be compared: before a capped session and after it has saved and reloaded.
-fn level_census(bag: usize) -> String {
-    let Some(held) = held_weapons(bag) else {
+/// How many of a feature's items the inventory holds at each level, `+0:12 +10:40`, so two loads
+/// of the same character can be compared: before a capped session and after it has saved and
+/// reloaded.
+fn level_census(bag: usize, kind: Kind) -> String {
+    let Some(held) = held(bag, kind) else {
         return "unreadable".to_string();
     };
     let mut counts = [0usize; 16];
-    for weapon in &held {
-        counts[usize::from(weapon.level & 0x0f)] += 1;
+    for item in &held {
+        counts[usize::from(item.level & 0x0f)] += 1;
     }
     let parts: Vec<String> = counts
         .iter()
@@ -899,22 +1119,25 @@ fn level_census(bag: usize) -> String {
 /// How many entries an inventory line names before it says "...".
 const SAMPLE: usize = 8;
 
-/// The six equipped slots in inventory slot order: the inventory entry, and the two copies the
-/// character carries.
-fn equipped(bag: usize, player: usize) -> Equipped {
-    let records = weapon_records(player);
-    let live = live_levels(player);
-    let mut out = [Slot::default(); 6];
-    for (slot, out) in out.iter_mut().enumerate() {
-        let chr_slot = ds2_rva::WEAPON_INTERNAL_TO_CHR_SLOT[slot] as usize;
-        out.inventory = inventory_weapon(bag, slot).map(|weapon| (weapon.item, weapon.level));
-        out.record = records.map(|records| (records[chr_slot].0, records[chr_slot].1 & 0x0f));
-        out.live = live.map(|live| live[live_index(chr_slot)]);
-    }
-    out
+/// A feature's equipped slots in inventory slot order: the inventory entry, and the two copies
+/// the character carries (the record's id given back as the item id it came from).
+fn equipped(f: &Feature, bag: usize, player: usize) -> Equipped {
+    let records = records(player);
+    let live = live_levels(f, player);
+    (0..f.kind.slots())
+        .map(|slot| Slot {
+            inventory: inventory_item(bag, f.inventory_slot(slot))
+                .map(|item| (item.item, item.level)),
+            record: records.map(|records| {
+                let (id, level) = records[f.record_index(slot)];
+                (f.record_item(id), level & 0x0f)
+            }),
+            live: live.as_ref().map(|live| live[slot]),
+        })
+        .collect()
 }
 
-fn show_slots(slots: &Equipped) -> String {
+fn show_slots(slots: &[Slot]) -> String {
     slots
         .iter()
         .enumerate()
@@ -940,149 +1163,180 @@ fn show_slots(slots: &Equipped) -> String {
 // The tick, and the push.
 // ---------------------------------------------------------------------------------------------
 
-/// How often [`poll_key`] reads the keyboard: a little faster than a frame, so no press is missed.
+/// How often [`poll_keys`] reads the keyboard: a little faster than a frame, so no press is missed.
 const KEY_POLL: std::time::Duration = std::time::Duration::from_millis(10);
 
-/// Read the key on a thread of our own and hand fresh presses to the tick through [`PRESSED`].
+/// Read both features' keys on a thread of our own and hand fresh presses to the tick through
+/// each feature's `pressed`.
 ///
 /// Not on the game thread. The first build read `GetAsyncKeyState` inside the net session update
 /// tick, and the one Frida attach that hooked `GetAsyncKeyState` in that build froze the game
 /// before it reported attached. Whether the call site caused that is not proven. The game thread
 /// has no need to call into user32 for a key either way.
-fn poll_key() {
+fn poll_keys() {
     loop {
         std::thread::sleep(KEY_POLL);
-        let down = game_has_focus() && KEY_BINDING.load().is_some_and(chord_down);
-        if !WAS_DOWN.swap(down, Ordering::Relaxed) && down {
-            PRESSED.store(true, Ordering::Release);
+        let focus = game_has_focus();
+        for f in FEATURES.iter().filter(|f| f.installed()) {
+            let down = focus && f.key.load().is_some_and(chord_down);
+            if !f.was_down.swap(down, Ordering::Relaxed) && down {
+                f.pressed.store(true, Ordering::Release);
+            }
         }
     }
+}
+
+/// A press handed over by [`poll_keys`]: flip the feature, say so, and show it.
+fn toggle(f: &Feature) {
+    let on = !f.enabled.fetch_xor(true, Ordering::AcqRel);
+    let key = f.key_name();
+    if on {
+        log(format_args!(
+            "{} TOGGLED ON by {key} -- {} are capped again whenever another player is in the world",
+            f.prefix, f.things
+        ));
+    } else {
+        log(format_args!(
+            "{} TOGGLED OFF by {key} -- real {} levels are restored now and nothing is capped \
+             until {key} is pressed again",
+            f.prefix, f.things
+        ));
+    }
+    let spoken = announce(f.kind, on);
+    log(format_args!(
+        "{} announce {} played={spoken} ({})",
+        f.prefix,
+        if on { "on" } else { "off" },
+        f.name
+    ));
+    crate::hud::toggled(f.kind, on);
 }
 
 /// Registered with `ds2-net-tick` to run after the net session update, every frame on the game
 /// thread. Whatever the update holds, it has let go of by now.
 ///
-/// A press handed over by [`poll_key`] flips the feature and forces a check in the same frame, so
-/// turning it off restores at once and turning it on caps at once.
+/// A press flips its feature and forces a check in the same frame, so turning it off restores at
+/// once and turning it on caps at once. The other feature is checked on its own schedule.
 fn tick(_session: usize) {
-    let pressed = PRESSED.swap(false, Ordering::AcqRel);
-    if pressed {
-        let on = !ENABLED.fetch_xor(true, Ordering::AcqRel);
-        let key = key_name();
-        if on {
-            log(format_args!(
-                "{LOG_PREFIX} TOGGLED ON by {key} -- weapons are capped again whenever another \
-                 player is in the world"
-            ));
-        } else {
-            log(format_args!(
-                "{LOG_PREFIX} TOGGLED OFF by {key} -- real weapon levels are restored now and \
-                 nothing is capped until {key} is pressed again"
-            ));
+    let mut forced = [false; 2];
+    for (index, f) in FEATURES.iter().enumerate() {
+        if f.installed() && f.pressed.swap(false, Ordering::AcqRel) {
+            toggle(f);
+            forced[index] = true;
         }
-        let spoken = announce(on);
-        log(format_args!(
-            "{LOG_PREFIX} announce {} played={spoken}",
-            if on { "on" } else { "off" }
-        ));
-        crate::hud::toggled(on);
     }
     let frame = FRAME.fetch_add(1, Ordering::Relaxed);
-    if pressed || frame.is_multiple_of(CHECK_EVERY_FRAMES) {
-        check();
+    let scheduled = frame.is_multiple_of(CHECK_EVERY_FRAMES);
+    if !scheduled && !forced.contains(&true) {
+        return;
     }
-}
-
-fn check() {
     let local = local_player().unwrap_or(0);
-    if LAST_PLAYER.swap(local, Ordering::AcqRel) != local
-        && local != 0
-        && let Some(bag) = bag()
-    {
-        log(format_args!(
-            "{LOG_PREFIX} world player=0x{local:x} built with: {} inventory weapons by level: {}",
-            copies(bag, local),
-            level_census(bag)
-        ));
-    }
     let remotes = if local == 0 {
         Vec::new()
     } else {
         remotes(local)
     };
-    let test_cap = cap_from_atomic(TEST_CAP.load(Ordering::Acquire));
-    let enabled = ENABLED.load(Ordering::Acquire);
-    let cap = policy::effective(enabled, policy::cap(&remotes, test_cap));
-    if !FIRST_TICK.swap(true, Ordering::AcqRel) {
+    for (index, f) in FEATURES.iter().enumerate() {
+        if f.installed() && (scheduled || forced[index]) {
+            check(f, local, &remotes);
+        }
+    }
+}
+
+fn check(f: &Feature, local: usize, remotes: &[Remote]) {
+    if f.last_player.swap(local, Ordering::AcqRel) != local
+        && local != 0
+        && let Some(bag) = bag()
+    {
         log(format_args!(
-            "{LOG_PREFIX} tick live player=0x{local:x} people={} cap={}",
+            "{} world player=0x{local:x} built with: {} inventory {} by level: {}",
+            f.prefix,
+            copies(f, bag, local),
+            f.things,
+            level_census(bag, f.kind)
+        ));
+    }
+    let test_cap = cap_from_atomic(f.test_cap.load(Ordering::Acquire));
+    let enabled = f.enabled.load(Ordering::Acquire);
+    let cap = policy::effective(enabled, policy::cap_for(f.kind, remotes, test_cap));
+    if !f.first_tick.swap(true, Ordering::AcqRel) {
+        log(format_args!(
+            "{} tick live player=0x{local:x} people={} cap={}",
+            f.prefix,
             remotes.len(),
             show(cap)
         ));
     }
     let (action, previous) = {
-        let mut tracker = TRACKER.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut tracker = f.tracker.lock().unwrap_or_else(|poison| poison.into_inner());
         let previous = tracker.applied();
         (tracker.step(local, cap), previous)
     };
     let cap = if local == 0 { None } else { cap };
-    CURRENT_CAP.store(cap_to_atomic(cap), Ordering::Release);
-    // Every weapon in the inventory first, so whatever is equipped next, by anything, is already
-    // at the cap, and the push below reads capped entries.
-    sweep_inventory(cap);
+    f.current_cap.store(cap_to_atomic(cap), Ordering::Release);
+    // Every item of this feature in the inventory first, so whatever is equipped next, by
+    // anything, is already at the cap, and the push below reads capped entries.
+    sweep_inventory(f, cap);
     let redrive = matches!(action, Action::Redrive { .. });
     if local != 0
         && !redrive
         && let Some(bag) = bag()
     {
-        resweep_if_changed(bag, local, cap);
+        resweep_if_changed(f, bag, local, cap);
     }
     if let Action::Redrive { cap } = action {
         let highest: Vec<String> = remotes
             .iter()
-            .map(|records| show(policy::remote_highest(records)))
+            .map(|remote| {
+                show(match f.kind {
+                    Kind::Weapon => policy::remote_highest(&remote.weapons),
+                    Kind::Armor => policy::remote_armor_highest(&remote.armor, &remote.weapons),
+                })
+            })
             .collect();
         log(format_args!(
-            "{LOG_PREFIX} cap {} -> {} enabled={enabled} people={} their-highest=[{}] test_cap={} \
+            "{} cap {} -> {} enabled={enabled} people={} their-highest=[{}] test_cap={} \
              player=0x{local:x}",
+            f.prefix,
             show(previous),
             show(cap),
             remotes.len(),
             highest.join(","),
             show(test_cap)
         ));
-        push(local, cap);
+        push(f, local, cap);
     }
 }
 
-/// The cap moved: push every equipped weapon, log all three copies of every slot, and remember
-/// the slots as settled so the watch asks again only when they change.
-fn push(player: usize, cap: Option<u8>) {
+/// The cap moved: push every equipped slot, log all three copies of every slot, and remember the
+/// slots as settled so the watch asks again only when they change.
+fn push(f: &Feature, player: usize, cap: Option<u8>) {
     let Some(bag) = bag() else {
-        log(format_args!("{LOG_PREFIX} push skipped: no inventory bag"));
+        log(format_args!("{} push skipped: no inventory bag", f.prefix));
         return;
     };
-    let pushed = push_slots(bag, player, cap);
+    let pushed = push_slots(f, bag, player, cap);
     let verb = if cap.is_some() { "CAPPED" } else { "RESTORED" };
     log(format_args!(
-        "{LOG_PREFIX} {verb} cap={} pushed=[{}] after: {}",
+        "{} {verb} cap={} pushed=[{}] after: {}",
+        f.prefix,
         show(cap),
         pushed.join(" "),
-        copies(bag, player)
+        copies(f, bag, player)
     ));
-    let mut watch = WATCH.lock().unwrap_or_else(|poison| poison.into_inner());
+    let mut watch = f.watch.lock().unwrap_or_else(|poison| poison.into_inner());
     if cap.is_some() {
-        watch.settle(equipped(bag, player));
+        watch.settle(equipped(f, bag, player));
     } else {
-        let _ = watch.changed(&equipped(bag, player), None);
+        let _ = watch.changed(&equipped(f, bag, player), None);
     }
 }
 
-/// The equipped slots changed while a cap is on, for whatever reason: resweep all six, and log
-/// one line with the slots before, now, what was pushed and what the character carries after.
-fn resweep_if_changed(bag: usize, player: usize, cap: Option<u8>) {
-    let now = equipped(bag, player);
-    let mut watch = WATCH.lock().unwrap_or_else(|poison| poison.into_inner());
+/// The equipped slots changed while a cap is on, for whatever reason: resweep all of them, and
+/// log one line with the slots before, now, what was pushed and what the character carries after.
+fn resweep_if_changed(f: &Feature, bag: usize, player: usize, cap: Option<u8>) {
+    let now = equipped(f, bag, player);
+    let mut watch = f.watch.lock().unwrap_or_else(|poison| poison.into_inner());
     let Some(before) = watch.changed(&now, cap) else {
         return;
     };
@@ -1090,19 +1344,19 @@ fn resweep_if_changed(bag: usize, player: usize, cap: Option<u8>) {
     let pushed = if slots.is_empty() {
         Vec::new()
     } else {
-        push_slots(bag, player, cap)
+        push_slots(f, bag, player, cap)
     };
-    let after = equipped(bag, player);
-    watch.settle(after);
+    let after = equipped(f, bag, player);
+    let limit = cap.unwrap_or(f.kind.level_max());
     let over = after.iter().any(|slot| {
-        let limit = cap.unwrap_or(ds2_rva::WEAPON_LEVEL_MAX);
         slot.inventory.is_some()
             && (slot.record.is_some_and(|(_, level)| level > limit)
                 || slot.live.is_some_and(|level| level > limit))
     });
     log(format_args!(
-        "{LOG_PREFIX} equipped changed under cap={}: before=[{}] now=[{}] resweep slots={slots:?} \
+        "{} equipped changed under cap={}: before=[{}] now=[{}] resweep slots={slots:?} \
          pushed=[{}] after=[{}] all-within-cap={}",
+        f.prefix,
         show(cap),
         before.map_or_else(|| "first look".to_string(), |before| show_slots(&before)),
         show_slots(&now),
@@ -1110,92 +1364,83 @@ fn resweep_if_changed(bag: usize, player: usize, cap: Option<u8>) {
         show_slots(&after),
         !over
     ));
+    watch.settle(after);
 }
 
-/// Push every equipped weapon whose character copies differ from `clamp(inventory level, cap)`
-/// through the game's weapon update, all six slots checked. Answers what was pushed.
-fn push_slots(bag: usize, player: usize, cap: Option<u8>) -> Vec<String> {
-    let raw = WEAPON_UPDATE_ORIGINAL.load(Ordering::Acquire);
+/// Push every equipped slot whose character copies differ from `clamp(inventory level, cap)`
+/// through the game's own update for this feature, all slots checked. Answers what was pushed.
+fn push_slots(f: &Feature, bag: usize, player: usize, cap: Option<u8>) -> Vec<String> {
+    let raw = f.update_original.load(Ordering::Acquire);
     if raw == 0 {
         return Vec::new();
     }
     // SAFETY: MinHook's trampoline for this exact function and ABI. Calling the trampoline rather
     // than the patched entry runs the game's code only; the clamp has already been applied to the
     // request by `policy::clamp` below.
-    let update: WeaponUpdate = unsafe { std::mem::transmute::<usize, WeaponUpdate>(raw) };
-    let records = weapon_records(player);
-    let live = live_levels(player);
+    let update: EquipUpdate = unsafe { std::mem::transmute::<usize, EquipUpdate>(raw) };
+    let now = equipped(f, bag, player);
     let mut pushed = Vec::new();
-    for slot in 0..ds2_rva::WEAPON_SLOT_COUNT {
-        let Some(weapon) = inventory_weapon(bag, slot) else {
+    for slot in 0..f.kind.slots() {
+        let Some(item) = inventory_item(bag, f.inventory_slot(slot)) else {
             continue;
         };
-        let level = policy::clamp(weapon.level, cap);
-        let chr_slot = ds2_rva::WEAPON_INTERNAL_TO_CHR_SLOT[slot];
-        let carried = records.map(|records| records[chr_slot as usize]);
-        let live_level = live.map(|live| live[live_index(chr_slot as usize)]);
-        if carried == Some((weapon.item, level)) && live_level == Some(level) {
+        let level = policy::clamp(item.level, cap);
+        if now[slot].record == Some((item.item, level)) && now[slot].live == Some(level) {
             continue;
         }
         // Two calls, not one, and the first is what makes the second land. The record table's
         // writer (0x1403463d0) keeps a new record only when the item id or the u16 at +0x0C
         // differs from the old one, and the level sits in the byte after that u16: a level-only
-        // change with the same item is computed and thrown away. Measured: one push left the
-        // record at +10 while the live state took +3. The packet 61 receiver on every peer
-        // writes through the same function, so a peer would keep our old level too. Fists first
-        // changes the id; the real item at the new level then lands, here and on every peer.
-        for (item, item_level, infusion) in [
-            (ds2_rva::FISTS_ITEM_ID, 0, 0),
-            (weapon.item, level, weapon.infusion),
+        // change with the same item is computed and thrown away. Measured for weapons: one push
+        // left the record at +10 while the live state took +3; the armour update writes through
+        // the same function. The packet 61/62 receiver on every peer writes through it too, so a
+        // peer would keep our old level as well. A placeholder first (Fists, or no armour piece,
+        // the value the game itself sends for an empty slot) changes the id; the real item at the
+        // new level then lands, here and on every peer.
+        for (id, item_level, infusion) in [
+            (f.placeholder(), 0, 0),
+            (f.request_item(item.item), level, item.infusion),
         ] {
             let mut request = Request([0u8; ds2_rva::WEAPON_UPDATE_REQUEST_SIZE]);
             request.0[ds2_rva::WEAPON_UPDATE_REQUEST_SLOT_OFFSET..][..4]
-                .copy_from_slice(&chr_slot.to_le_bytes());
+                .copy_from_slice(&f.request_slot(slot).to_le_bytes());
             request.0[ds2_rva::WEAPON_UPDATE_REQUEST_ITEM_OFFSET..][..4]
-                .copy_from_slice(&item.to_le_bytes());
+                .copy_from_slice(&id.to_le_bytes());
             request.0[ds2_rva::WEAPON_UPDATE_REQUEST_DURABILITY_OFFSET..][..4]
-                .copy_from_slice(&weapon.durability_bits.to_le_bytes());
+                .copy_from_slice(&item.durability_bits.to_le_bytes());
             request.0[ds2_rva::WEAPON_UPDATE_REQUEST_LEVEL_OFFSET] = item_level;
             request.0[ds2_rva::WEAPON_UPDATE_REQUEST_INFUSION_OFFSET] = infusion;
             // SAFETY: game thread, after the net session update returned; `player` is the local
             // PlayerCtrl read this frame, and the request is laid out exactly as `0x1401b66a0`
-            // lays out the one it passes (ds2-rva CHR_WEAPON_UPDATE).
+            // lays out the one it passes (ds2-rva CHR_WEAPON_UPDATE, CHR_ARMOR_UPDATE).
             unsafe { update(player, request.0.as_mut_ptr()) };
         }
-        let real = LEDGER
+        let real = f
+            .ledger
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
-            .real(weapon.handle, weapon.item)
-            .unwrap_or(weapon.level);
-        pushed.push(format!("s{slot}:{}+{real}->+{level}", weapon.item));
+            .real(item.handle, item.item)
+            .unwrap_or(item.level);
+        pushed.push(format!("s{slot}:{}+{real}->+{level}", item.item));
     }
     pushed
 }
 
-/// All three copies of every weapon slot's level, inventory slot order.
-fn copies(bag: usize, player: usize) -> String {
-    let inventory: Vec<String> = (0..ds2_rva::WEAPON_SLOT_COUNT)
-        .map(|slot| {
-            inventory_weapon(bag, slot).map_or_else(|| "-".to_string(), |w| format!("+{}", w.level))
-        })
-        .collect();
-    let records: Vec<String> = weapon_records(player).map_or_else(Vec::new, |records| {
-        ds2_rva::WEAPON_INTERNAL_TO_CHR_SLOT
+/// All three copies of every slot's level, inventory slot order.
+fn copies(f: &Feature, bag: usize, player: usize) -> String {
+    let slots = equipped(f, bag, player);
+    let column = |pick: &dyn Fn(&Slot) -> Option<u8>| {
+        slots
             .iter()
-            .map(|chr| format!("+{}", records[*chr as usize].1 & 0x0f))
-            .collect()
-    });
-    let live: Vec<String> = live_levels(player).map_or_else(Vec::new, |live| {
-        ds2_rva::WEAPON_INTERNAL_TO_CHR_SLOT
-            .iter()
-            .map(|chr| format!("+{}", live[live_index(*chr as usize)]))
-            .collect()
-    });
+            .map(|slot| pick(slot).map_or_else(|| "-".to_string(), |level| format!("+{level}")))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
     format!(
         "inventory=[{}] records=[{}] live=[{}] (inventory slot order)",
-        inventory.join(","),
-        records.join(","),
-        live.join(",")
+        column(&|slot| slot.inventory.map(|(_, level)| level)),
+        column(&|slot| slot.record.map(|(_, level)| level)),
+        column(&|slot| slot.live),
     )
 }
 

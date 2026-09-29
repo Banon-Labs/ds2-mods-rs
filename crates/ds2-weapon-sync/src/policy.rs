@@ -3,25 +3,74 @@
 //!
 //! Everything here is arithmetic over numbers the Windows half reads, so it builds and is tested
 //! on the machine the code is written on.
+//!
+//! The same machinery serves two features that are switched, logged and announced separately:
+//! weapon sync and armour sync ([`Kind`]). Each has its own [`Tracker`], [`Ledger`] and [`Watch`];
+//! nothing here lets one feature's state touch the other's.
 
 /// The highest level the packet 61 receiver accepts. A byte above it is not a level.
 pub const WEAPON_LEVEL_MAX: u8 = ds2_rva::WEAPON_LEVEL_MAX;
 
+/// The highest level the packet 62 receiver accepts.
+pub const ARMOR_LEVEL_MAX: u8 = ds2_rva::ARMOR_LEVEL_MAX;
+
+/// Which feature a piece of state belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// Weapons and shields: item types `0` and `1`, six equip slots.
+    Weapon,
+    /// Head, chest, hands and legs: item types `2..=5`, four equip slots.
+    Armor,
+}
+
+impl Kind {
+    /// Whether an inventory entry of item type `item_type` (`ItemEntry +0x1e`) belongs to this
+    /// feature.
+    pub const fn holds(self, item_type: u8) -> bool {
+        match self {
+            Self::Weapon => item_type < ds2_rva::ITEM_TYPE_HAS_INFUSION_BELOW,
+            Self::Armor => {
+                item_type >= ds2_rva::ITEM_TYPE_ARMOR_FIRST
+                    && item_type <= ds2_rva::ITEM_TYPE_ARMOR_LAST
+            }
+        }
+    }
+
+    /// How many equip slots the feature watches.
+    pub const fn slots(self) -> usize {
+        match self {
+            Self::Weapon => ds2_rva::WEAPON_SLOT_COUNT,
+            Self::Armor => ds2_rva::ARMOR_SLOT_COUNT,
+        }
+    }
+
+    /// The highest real level.
+    pub const fn level_max(self) -> u8 {
+        match self {
+            Self::Weapon => WEAPON_LEVEL_MAX,
+            Self::Armor => ARMOR_LEVEL_MAX,
+        }
+    }
+}
+
 /// One remote player's six weapon records, as `(item id, level byte)`.
 pub type RemoteWeapons = [(u32, u8); 6];
 
-/// The highest weapon level any one remote player has equipped, or `None` when this player's
-/// records say nothing yet.
+/// One remote player's four armour records (records 6..9: head, chest, hands, legs), as
+/// `(ArmorParam id, level byte)`.
+pub type RemoteArmor = [(u32, u8); 4];
+
+/// The highest level among one remote player's records, or `None` when they say nothing yet.
 ///
-/// A record with item id `0` or `u32::MAX` is unset, not a +0 weapon. A player whose six records
-/// are all unset is left out of the cap rather than counted as +0: the join data has not been
-/// traced (docs/DS2-WEAPON-LEVEL-SYNC.md, Q2), and reading "not arrived yet" as "+0" would lower
-/// every weapon to +0 for however long it takes to arrive. Fists count, at their own level `0`,
-/// because an empty hand is a real answer.
+/// A record with item id `0` or `u32::MAX` is unset, not a +0 item. A player whose records are all
+/// unset is left out of the cap rather than counted as +0: the join data has not been traced
+/// (docs/DS2-WEAPON-LEVEL-SYNC.md, Q2), and reading "not arrived yet" as "+0" would lower
+/// everything to +0 for however long it takes to arrive. Fists, and the naked armour pieces, count
+/// at their own level `0`, because an empty hand is a real answer.
 ///
-/// Level bytes are masked to the low nibble (the receiver stores the nibble) and anything above
-/// [`WEAPON_LEVEL_MAX`] is ignored.
-pub fn remote_highest(records: &RemoteWeapons) -> Option<u8> {
+/// Level bytes are masked to the low nibble (both receivers store the nibble) and anything above
+/// [`WEAPON_LEVEL_MAX`] (which is also [`ARMOR_LEVEL_MAX`]) is ignored.
+pub fn remote_highest(records: &[(u32, u8)]) -> Option<u8> {
     records
         .iter()
         .filter(|(item, _)| *item != 0 && *item != u32::MAX)
@@ -30,15 +79,59 @@ pub fn remote_highest(records: &RemoteWeapons) -> Option<u8> {
         .max()
 }
 
+/// The highest armour level one remote player has equipped.
+///
+/// An empty armour slot is item `-1` in the request the game builds and in the packet 62 it sends,
+/// so a record of `-1` is ambiguous: "not arrived yet" or "wears nothing there". The weapon records
+/// settle it. Once a player's weapon records have arrived, their equipment has, and four empty
+/// armour slots are a naked player, whose highest armour is +0.
+pub fn remote_armor_highest(armor: &RemoteArmor, weapons: &RemoteWeapons) -> Option<u8> {
+    remote_highest(armor).or_else(|| remote_highest(weapons).map(|_| 0))
+}
+
 /// The cap: the highest level among every other player, or `None` when nobody else is in the
 /// world (or nobody else's records have arrived).
 ///
 /// `test_cap` stands in for a remote player at that level, so the mechanism can be exercised solo.
 /// It takes part in the maximum like any other player: it is not an override.
 pub fn cap(remotes: &[RemoteWeapons], test_cap: Option<u8>) -> Option<u8> {
-    remotes
-        .iter()
-        .filter_map(remote_highest)
+    highest_of(remotes.iter().filter_map(|records| remote_highest(records)), test_cap)
+}
+
+/// Every other player's equipment, weapons and armour, as one check read it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Remote {
+    /// Records 0..5, character-side slot order.
+    pub weapons: RemoteWeapons,
+    /// Records 6..9.
+    pub armor: RemoteArmor,
+}
+
+/// The cap for one feature: weapons against the others' weapons, armour against their armour.
+///
+/// The armour cap is the highest level of any single piece any other player has equipped, not a
+/// cap per slot. Defense is four independent terms, one per piece, each
+/// `base + (max - base) * level / maxLevel` (`0x14034dbb0`, `0x14034dda0`), summed; nothing pairs
+/// our helm with their helm, and a per-slot rule would let a bare or unupgraded slot of theirs
+/// (a fashion choice, item `-1` on the wire) put the same slot of ours to +0. It is also the rule
+/// weapons use, across hands and slots.
+pub fn cap_for(kind: Kind, remotes: &[Remote], test_cap: Option<u8>) -> Option<u8> {
+    match kind {
+        Kind::Weapon => highest_of(
+            remotes.iter().filter_map(|r| remote_highest(&r.weapons)),
+            test_cap,
+        ),
+        Kind::Armor => highest_of(
+            remotes
+                .iter()
+                .filter_map(|r| remote_armor_highest(&r.armor, &r.weapons)),
+            test_cap,
+        ),
+    }
+}
+
+fn highest_of(levels: impl Iterator<Item = u8>, test_cap: Option<u8>) -> Option<u8> {
+    levels
         .chain(test_cap.map(|level| level.min(WEAPON_LEVEL_MAX)))
         .max()
 }
@@ -265,8 +358,9 @@ impl Ledger {
 // The equipped slots.
 // -------------------------------------------------------------------------------------------------
 
-/// One equipped weapon slot, in inventory slot order: what the inventory entry says, and the two
-/// copies the character carries.
+/// One equipped slot, in inventory slot order: what the inventory entry says, and the two copies
+/// the character carries. For armour the record's ArmorParam id is given back as the item id it
+/// came from, so the three compare directly.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Slot {
     /// The equipped inventory entry's `(item, level)`, `None` when the slot is empty.
@@ -288,12 +382,12 @@ impl Slot {
     }
 }
 
-/// The six equipped weapon slots at one check.
-pub type Equipped = [Slot; 6];
+/// The equipped slots of one feature at one check: six weapon slots, or four armour pieces.
+pub type Equipped = Vec<Slot>;
 
 /// The slots a resweep pushes: every slot whose character copies do not match its inventory
-/// entry, over all six, whichever one changed.
-pub fn resweep(equipped: &Equipped) -> Vec<usize> {
+/// entry, over all of them, whichever one changed.
+pub fn resweep(equipped: &[Slot]) -> Vec<usize> {
     (0..equipped.len())
         .filter(|slot| !equipped[*slot].carried())
         .collect()
@@ -317,14 +411,14 @@ impl Watch {
     /// `now` differs from them, which is the caller's cue to resweep and then [`Watch::settle`].
     /// The first check under a cap answers `None` for the before, and still asks for a resweep.
     /// With no cap it forgets, so the next cap starts from a fresh look.
-    pub fn changed(&mut self, now: &Equipped, cap: Option<u8>) -> Option<Option<Equipped>> {
+    pub fn changed(&mut self, now: &[Slot], cap: Option<u8>) -> Option<Option<Equipped>> {
         if cap.is_none() {
             self.settled = None;
             return None;
         }
-        match self.settled {
-            Some(settled) if settled == *now => None,
-            before => Some(before),
+        match &self.settled {
+            Some(settled) if settled.as_slice() == now => None,
+            before => Some(before.clone()),
         }
     }
 
@@ -597,7 +691,7 @@ mod tests {
         }
 
         fn slots(&self) -> Equipped {
-            let mut out = [Slot::default(); 6];
+            let mut out = vec![Slot::default(); 6];
             for (slot, out) in out.iter_mut().enumerate() {
                 out.inventory = self.equipped[slot].map(|index| self.bag[&index]);
                 out.record = self.carried[slot].map(|(item, level, _)| (item, level));
@@ -907,17 +1001,449 @@ mod tests {
     #[test]
     fn the_watch_asks_once_per_change_and_never_without_a_cap() {
         let mut watch = Watch::new();
-        let mut slots = [Slot::default(); 6];
+        let mut slots = vec![Slot::default(); 6];
         assert_eq!(watch.changed(&slots, None), None);
         assert_eq!(watch.changed(&slots, Some(0)), Some(None));
-        watch.settle(slots);
+        watch.settle(slots.clone());
         assert_eq!(watch.changed(&slots, Some(0)), None);
-        let before = slots;
+        let before = slots.clone();
         slots[1].inventory = Some((DAGGER, 0));
         assert_eq!(watch.changed(&slots, Some(0)), Some(Some(before)));
-        watch.settle(slots);
+        watch.settle(slots.clone());
         assert_eq!(watch.changed(&slots, Some(0)), None);
         assert_eq!(watch.changed(&slots, None), None);
         assert_eq!(watch.changed(&slots, Some(0)), Some(None));
+    }
+}
+
+// -------------------------------------------------------------------------------------------------
+// Weapon sync and armour sync side by side, each switched on its own, against a pretend game.
+// -------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod both_features {
+    use std::collections::BTreeMap;
+
+    use super::*;
+
+    const DAGGER: u32 = 1_000_000;
+    const CLUB: u32 = 1_500_000;
+    const SHIELD: u32 = 2_750_000;
+    const FISTS: u32 = 3_400_000;
+    // The four pieces the live read showed on the test character, and some spares.
+    const HELM: u32 = 22_182_100;
+    const CHEST: u32 = 21_500_101;
+    const GLOVES: u32 = 22_230_102;
+    const LEGS: u32 = 27_700_103;
+    const SPARE_HELM: u32 = 21_010_100;
+    const SPARE_CHEST: u32 = 21_010_101;
+    const BOXED_LEGS: u32 = 21_010_103;
+    const PICKED_UP_GLOVES: u32 = 21_020_102;
+    const NAKED_HEAD: u32 = 11_001_100;
+
+    const WEAPON: u8 = 0;
+    const T_SHIELD: u8 = 1;
+    const T_HEAD: u8 = 2;
+    const T_CHEST: u8 = 3;
+    const T_HANDS: u8 = 4;
+    const T_LEGS: u8 = 5;
+
+    const PLAYER: usize = 0x100;
+
+    /// One feature's half of the game and of our state: its equip slots, what the character
+    /// carries in them, the clamp its update detour applies, and its own tracker, ledger and watch.
+    struct Side {
+        kind: Kind,
+        enabled: bool,
+        equipped: Vec<Option<u16>>,
+        /// Per slot: (item, record level, live level).
+        carried: Vec<Option<(u32, u8, u8)>>,
+        detour_cap: Option<u8>,
+        ledger: Ledger,
+        watch: Watch,
+        tracker: Tracker,
+        resweeps: usize,
+    }
+
+    impl Side {
+        fn new(kind: Kind, enabled: bool) -> Self {
+            Self {
+                kind,
+                enabled,
+                equipped: vec![None; kind.slots()],
+                carried: vec![None; kind.slots()],
+                detour_cap: None,
+                ledger: Ledger::new(),
+                watch: Watch::new(),
+                tracker: Tracker::new(),
+                resweeps: 0,
+            }
+        }
+
+        /// What the inventory and the character say for each slot, given the bag.
+        fn slots(&self, bag: &BTreeMap<u16, (u32, u8, u8)>) -> Equipped {
+            (0..self.kind.slots())
+                .map(|slot| Slot {
+                    inventory: self.equipped[slot].map(|index| {
+                        let (item, _, level) = bag[&index];
+                        (item, level)
+                    }),
+                    record: self.carried[slot].map(|(item, level, _)| (item, level)),
+                    live: self.carried[slot].map(|(_, _, live)| live),
+                })
+                .collect()
+        }
+    }
+
+    /// One bag shared by both features, the save block, and the two sides.
+    struct World {
+        /// Entry index -> (item, item type, level the entry holds now).
+        bag: BTreeMap<u16, (u32, u8, u8)>,
+        truth: BTreeMap<u16, u8>,
+        block: BTreeMap<u16, (u32, u8)>,
+        weapons: Side,
+        armor: Side,
+    }
+
+    impl World {
+        fn new(weapons: bool, armor: bool) -> Self {
+            Self {
+                bag: BTreeMap::new(),
+                truth: BTreeMap::new(),
+                block: BTreeMap::new(),
+                weapons: Side::new(Kind::Weapon, weapons),
+                armor: Side::new(Kind::Armor, armor),
+            }
+        }
+
+        fn side(&self, kind: Kind) -> &Side {
+            match kind {
+                Kind::Weapon => &self.weapons,
+                Kind::Armor => &self.armor,
+            }
+        }
+
+        fn side_mut(&mut self, kind: Kind) -> &mut Side {
+            match kind {
+                Kind::Weapon => &mut self.weapons,
+                Kind::Armor => &mut self.armor,
+            }
+        }
+
+        fn pick_up(&mut self, index: u16, item: u32, item_type: u8, level: u8) {
+            self.bag.insert(index, (item, item_type, level));
+            self.truth.insert(index, level);
+            self.block.insert(index, (item, level));
+        }
+
+        /// The game equips through its own update (weapon or armour), which our detour clamps, and
+        /// copies the entry's level into the save block, the worst case for the save.
+        fn equip(&mut self, kind: Kind, slot: usize, index: u16) {
+            let (item, _, entry_level) = self.bag[&index];
+            let side = self.side_mut(kind);
+            let level = clamp(entry_level, side.detour_cap);
+            side.equipped[slot] = Some(index);
+            side.carried[slot] = Some((item, level, level));
+            self.block.insert(index, (item, entry_level));
+        }
+
+        /// Something equips around the update, at the real level.
+        fn equip_around_the_update(&mut self, kind: Kind, slot: usize, index: u16) {
+            let (item, _, _) = self.bag[&index];
+            let real = self.truth[&index];
+            let side = self.side_mut(kind);
+            side.equipped[slot] = Some(index);
+            side.carried[slot] = Some((item, real, real));
+        }
+
+        fn unequip(&mut self, kind: Kind, slot: usize) {
+            let side = self.side_mut(kind);
+            side.equipped[slot] = None;
+            side.carried[slot] = None;
+        }
+
+        /// One check: each feature on its own, in the tick's order.
+        fn check(&mut self, remotes: &[Remote]) {
+            for kind in [Kind::Weapon, Kind::Armor] {
+                let cap = effective(self.side(kind).enabled, cap_for(kind, remotes, None));
+                let held: Vec<Held> = self
+                    .bag
+                    .iter()
+                    .filter(|(_, (_, item_type, _))| kind.holds(*item_type))
+                    .map(|(index, (item, _, level))| Held {
+                        index: *index,
+                        item: *item,
+                        level: *level,
+                    })
+                    .collect();
+                let side = self.side_mut(kind);
+                let redrive = side.tracker.step(PLAYER, cap) != Action::Nothing;
+                side.detour_cap = cap;
+                let writes = side.ledger.sweep(&held, cap);
+                for write in writes {
+                    let entry = self.bag.get_mut(&write.index).unwrap();
+                    assert_eq!(entry.0, write.item);
+                    assert!(kind.holds(entry.1), "{kind:?} wrote another feature's entry");
+                    entry.2 = write.to;
+                    if write.restores() {
+                        self.block.insert(write.index, (write.item, write.to));
+                    }
+                }
+                let now = self.side(kind).slots(&self.bag);
+                let side = self.side_mut(kind);
+                if side.watch.changed(&now, cap).is_some() || redrive {
+                    side.resweeps += 1;
+                    for slot in resweep(&now) {
+                        let (item, level) = now[slot].inventory.unwrap();
+                        side.carried[slot] = Some((item, level, level));
+                    }
+                    let after = self.side(kind).slots(&self.bag);
+                    self.side_mut(kind).watch.settle(after);
+                }
+            }
+        }
+
+        /// The one save writer detour, fixing records from both ledgers.
+        fn save(&mut self) -> BTreeMap<u16, (u32, u8)> {
+            for (index, record) in &mut self.block {
+                let real = self
+                    .weapons
+                    .ledger
+                    .saved_level(*index, record.0, record.1)
+                    .or_else(|| self.armor.ledger.saved_level(*index, record.0, record.1));
+                if let Some(real) = real {
+                    record.1 = real;
+                }
+            }
+            self.block.clone()
+        }
+
+        fn assert_capped(&self, kind: Kind, cap: u8, step: &str) {
+            for (index, (_, item_type, level)) in &self.bag {
+                if kind.holds(*item_type) {
+                    assert!(
+                        *level <= cap,
+                        "{step}: {kind:?} entry {index} at +{level} over +{cap}"
+                    );
+                }
+            }
+            for (slot, carried) in self.side(kind).carried.iter().enumerate() {
+                if let Some((_, record, live)) = carried {
+                    assert!(
+                        *record <= cap && *live <= cap,
+                        "{step}: {kind:?} slot {slot} carries +{record}/+{live} over +{cap}"
+                    );
+                }
+            }
+        }
+
+        fn assert_real(&self, kind: Kind, step: &str) {
+            for (index, (_, item_type, level)) in &self.bag {
+                if kind.holds(*item_type) {
+                    assert_eq!(*level, self.truth[index], "{step}: {kind:?} entry {index}");
+                }
+            }
+            let side = self.side(kind);
+            for slot in 0..kind.slots() {
+                if let Some(index) = side.equipped[slot] {
+                    let real = self.truth[&index];
+                    let (_, record, live) = side.carried[slot].unwrap();
+                    assert_eq!(
+                        (record, live),
+                        (real, real),
+                        "{step}: {kind:?} slot {slot}"
+                    );
+                }
+            }
+        }
+
+        fn assert_saved_real(&mut self, step: &str) {
+            let saved = self.save();
+            for (index, (_, level)) in &saved {
+                assert_eq!(*level, self.truth[index], "{step}: saved record {index}");
+            }
+        }
+
+        /// A character with weapons and armour, pack and box, equipped and not.
+        fn stocked(weapons: bool, armor: bool) -> Self {
+            let mut w = Self::new(weapons, armor);
+            w.pick_up(0, DAGGER, WEAPON, 10);
+            w.pick_up(1, SHIELD, T_SHIELD, 5);
+            w.pick_up(2, CLUB, WEAPON, 10);
+            w.pick_up(10, HELM, T_HEAD, 10);
+            w.pick_up(11, CHEST, T_CHEST, 5);
+            w.pick_up(12, GLOVES, T_HANDS, 10);
+            w.pick_up(13, LEGS, T_LEGS, 5);
+            w.pick_up(14, SPARE_HELM, T_HEAD, 7); // in the pack, never worn before the cap
+            w.pick_up(15, SPARE_CHEST, T_CHEST, 10);
+            w.pick_up(16, BOXED_LEGS, T_LEGS, 10); // put away in the box
+            w.pick_up(17, SPARE_CHEST + 100, T_CHEST, 0); // already +0: never touched
+            w.equip(Kind::Weapon, 1, 0);
+            w.equip(Kind::Weapon, 0, 1);
+            for (piece, index) in [(0, 10), (1, 11), (2, 12), (3, 13)] {
+                w.equip(Kind::Armor, piece, index);
+            }
+            w
+        }
+    }
+
+    /// Another player with weapons at `weapon` and armour at `armor`, head to legs.
+    fn remote(weapon: u8, armor: [u8; 4]) -> Remote {
+        let param = |item: u32| item - ds2_rva::ARMOR_PARAM_ID_FROM_ITEM_ID;
+        Remote {
+            weapons: [
+                (DAGGER, weapon),
+                (FISTS, 0),
+                (FISTS, 0),
+                (FISTS, 0),
+                (FISTS, 0),
+                (FISTS, 0),
+            ],
+            armor: [
+                (param(HELM), armor[0]),
+                (param(CHEST), armor[1]),
+                (param(GLOVES), armor[2]),
+                (param(LEGS), armor[3]),
+            ],
+        }
+    }
+
+    #[test]
+    fn the_armour_cap_is_the_highest_single_piece_any_other_player_wears() {
+        let host = remote(10, [0, 2, 0, 1]);
+        let phantom = remote(0, [0, 0, 3, 0]);
+        assert_eq!(cap_for(Kind::Armor, &[host, phantom], None), Some(3));
+        assert_eq!(
+            cap_for(Kind::Weapon, &[host, phantom], None),
+            Some(10),
+            "the weapon cap never reads armour"
+        );
+        assert_eq!(cap_for(Kind::Armor, &[], None), None);
+        assert_eq!(cap_for(Kind::Armor, &[], Some(4)), Some(4));
+    }
+
+    #[test]
+    fn a_naked_player_is_plus_zero_armour_once_their_equipment_has_arrived() {
+        let mut naked = remote(5, [0; 4]);
+        naked.armor = [(ds2_rva::ARMOR_EMPTY_ITEM_ID, 0); 4];
+        assert_eq!(remote_armor_highest(&naked.armor, &naked.weapons), Some(0));
+        let mut not_arrived = naked;
+        not_arrived.weapons = [(0, 0); 6];
+        assert_eq!(cap_for(Kind::Armor, &[not_arrived], None), None);
+        // A naked slot the way an NPC's record holds it counts at its own +0.
+        let mut bare_head = remote(0, [0, 6, 0, 0]);
+        bare_head.armor[0] = (NAKED_HEAD, 0);
+        assert_eq!(cap_for(Kind::Armor, &[bare_head], None), Some(6));
+    }
+
+    #[test]
+    fn armour_is_capped_through_every_swap_and_the_save_and_every_piece_comes_back() {
+        let mut w = World::stocked(false, true);
+        w.check(&[]);
+        w.assert_real(Kind::Armor, "alone");
+        w.assert_real(Kind::Weapon, "alone");
+
+        let them = [remote(10, [0, 3, 1, 0])];
+        w.check(&them);
+        w.assert_capped(Kind::Armor, 3, "cap on");
+        w.assert_real(Kind::Weapon, "weapon sync is off: weapons untouched");
+        assert_eq!(
+            w.armor.ledger.len(),
+            7,
+            "every armour piece above +3 is lowered, worn or in the pack or the box"
+        );
+
+        w.equip(Kind::Armor, 0, 14);
+        w.check(&them);
+        w.assert_capped(Kind::Armor, 3, "swap the head to a pack helm");
+
+        w.equip_around_the_update(Kind::Armor, 1, 15);
+        assert!(
+            w.armor.carried[1].unwrap().1 > 3,
+            "the worst case really was over the cap"
+        );
+        w.check(&them);
+        w.assert_capped(Kind::Armor, 3, "swap the chest around the armour update");
+
+        w.unequip(Kind::Armor, 2);
+        w.check(&them);
+        w.assert_capped(Kind::Armor, 3, "take the gloves off");
+
+        w.equip_around_the_update(Kind::Armor, 0, 10);
+        w.check(&them);
+        w.assert_capped(Kind::Armor, 3, "the first helm back on");
+
+        w.pick_up(18, PICKED_UP_GLOVES, T_HANDS, 9);
+        w.check(&them);
+        w.assert_capped(Kind::Armor, 3, "gloves picked up mid-cap, never worn");
+
+        w.assert_saved_real("a save while capped");
+        w.assert_capped(Kind::Armor, 3, "a save does not lift the cap in the game");
+
+        w.check(&[]);
+        w.assert_real(Kind::Armor, "they left");
+        assert!(w.armor.ledger.is_empty());
+        w.assert_saved_real("a save after they left");
+        assert!(
+            w.armor.resweeps >= 5,
+            "every change was resweept: {}",
+            w.armor.resweeps
+        );
+        assert_eq!(w.weapons.resweeps, 0, "weapon sync off never pushed anything");
+        w.check(&[]);
+        w.assert_real(Kind::Armor, "steady after the restore");
+    }
+
+    #[test]
+    fn each_feature_caps_only_its_own_items_on_or_off_in_every_combination() {
+        let them = [remote(3, [2, 0, 0, 0])];
+        for (weapons, armor) in [(false, false), (true, false), (false, true), (true, true)] {
+            let step = format!("weapons={weapons} armor={armor}");
+            let mut w = World::stocked(weapons, armor);
+            w.check(&them);
+            if weapons {
+                w.assert_capped(Kind::Weapon, 3, &step);
+            } else {
+                w.assert_real(Kind::Weapon, &step);
+            }
+            if armor {
+                w.assert_capped(Kind::Armor, 2, &step);
+            } else {
+                w.assert_real(Kind::Armor, &step);
+            }
+            w.assert_saved_real(&step);
+            w.check(&[]);
+            w.assert_real(Kind::Weapon, &step);
+            w.assert_real(Kind::Armor, &step);
+            w.assert_saved_real(&step);
+        }
+    }
+
+    #[test]
+    fn switching_one_off_restores_only_that_one() {
+        let them = [remote(3, [2, 0, 0, 0])];
+        let mut w = World::stocked(true, true);
+        w.check(&them);
+        w.armor.enabled = false;
+        w.check(&them);
+        w.assert_real(Kind::Armor, "armour sync off");
+        w.assert_capped(Kind::Weapon, 3, "weapon sync still on");
+        w.armor.enabled = true;
+        w.weapons.enabled = false;
+        w.check(&them);
+        w.assert_capped(Kind::Armor, 2, "armour sync on again");
+        w.assert_real(Kind::Weapon, "weapon sync off");
+        w.assert_saved_real("both ledgers feed the one save");
+    }
+
+    #[test]
+    fn the_kinds_split_the_item_types_between_them() {
+        for item_type in 0..=10u8 {
+            let weapon = Kind::Weapon.holds(item_type);
+            let armor = Kind::Armor.holds(item_type);
+            assert!(!(weapon && armor), "type {item_type} is claimed twice");
+            assert_eq!(weapon, item_type < 2, "type {item_type}");
+            assert_eq!(armor, (2..=5).contains(&item_type), "type {item_type}");
+        }
     }
 }

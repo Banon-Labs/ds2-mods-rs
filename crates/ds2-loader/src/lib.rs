@@ -1109,27 +1109,43 @@ fn install_music_probe() {
 /// Off unless `[weapon_sync] enabled = true`. It shares the net session update with voice chat
 /// through `ds2-net-tick`, which owns the one detour there, so the two run together in either
 /// install order.
+///
+/// Armour sync is the same, from `[armor_sync]`, and independent of it: each section switches its
+/// own feature, and the crate installs whichever are asked for in one call because the two share
+/// the inventory save writer's detour.
 fn install_weapon_sync() {
-    let config = weapon_sync::WeaponSyncConfig::load();
-    log_line(format_args!("{}", config.describe()));
-    if !config.enabled {
+    let weapons = weapon_sync::WeaponSyncConfig::load(weapon_sync::WEAPONS);
+    let armor = weapon_sync::WeaponSyncConfig::load(weapon_sync::ARMOR);
+    log_line(format_args!("{}", weapons.describe()));
+    log_line(format_args!("{}", armor.describe()));
+    if !weapons.enabled && !armor.enabled {
         return;
     }
     ds2_weapon_sync::set_logger(log_line);
-    // SAFETY: both detour targets are recorded in `ds2-rva` with the bytes they must begin with,
-    // `scripts/ds2-arxan-chain.py` reports neither redirected, and the crate re-reads those bytes
-    // and patches nothing on a mismatch. Called from the post-Arxan position.
-    let outcome = unsafe { ds2_weapon_sync::install(config.test_cap, config.key) };
-    if !outcome.installed {
-        log_line(format_args!(
-            "{} NOT INSTALLED -- weapon levels are never capped this run",
-            ds2_weapon_sync::LOG_PREFIX
-        ));
-        return;
+    // SAFETY: every detour target is recorded in `ds2-rva` with the bytes it must begin with,
+    // `scripts/ds2-arxan-chain.py` reports none redirected, and the crate re-reads those bytes and
+    // patches nothing on a mismatch. Called from the post-Arxan position.
+    let outcome = unsafe { ds2_weapon_sync::install(weapons.settings(), armor.settings()) };
+    for (config, installed, what) in [
+        (&weapons, outcome.weapons, "weapon"),
+        (&armor, outcome.armor, "armor"),
+    ] {
+        if !config.enabled {
+            continue;
+        }
+        if !installed {
+            log_line(format_args!(
+                "{} NOT INSTALLED -- {what} levels are never capped this run",
+                config.section.prefix
+            ));
+            continue;
+        }
+        // `test_cap` and `key` are live. Editing `test_cap` while the game runs is how a pretend
+        // player arrives, changes equipment or leaves, the only way to see the in-world restore
+        // alone.
+        let section = config.section;
+        std::thread::spawn(move || weapon_sync::watch_live(section));
     }
-    // `test_cap` and `key` are live. Editing `test_cap` while the game runs is how a pretend player
-    // arrives, changes weapons or leaves, which is the only way to see the in-world restore alone.
-    std::thread::spawn(weapon_sync::watch_live);
 }
 
 /// Install the agent-driven input harness, if `<Game>/ds2-mods.toml` asked for it.
