@@ -411,6 +411,20 @@ WEAPON_SYNC_DEFAULT_KEY = "F6"
 #: Mirrors `LOG_PREFIX` in `crates/ds2-weapon-sync/src/lib.rs`.
 WEAPON_SYNC_LOG_PREFIX = "ds2-weapon-sync:"
 
+#: Mirrors `ARMOR_CONFIG_SECTION` and the same three keys in `crates/ds2-loader/src/weapon_sync.rs`.
+#: A feature of its own: OFF by default here, matching the DLL; `--armor-sync` turns it on, with or
+#: without `--weapon-sync`.
+ARMOR_SYNC_SECTION = "armor_sync"
+KEY_ARMOR_SYNC_ENABLED = "enabled"
+KEY_ARMOR_SYNC_TEST_CAP = "test_cap"
+KEY_ARMOR_SYNC_KEY = "key"
+#: Mirrors `ARMOR_DEFAULT_KEY` in `crates/ds2-weapon-sync/src/lib.rs`. F6 is weapon sync, F7
+#: inventory sort, F8 voice chat, F9 net effects, F10/F11 the music probe; the Lighting Engine's
+#: dxgi.dll polls F1, F2, F3 and F6 and not F5.
+ARMOR_SYNC_DEFAULT_KEY = "F5"
+#: Mirrors `ARMOR_LOG_PREFIX` in `crates/ds2-weapon-sync/src/lib.rs`.
+ARMOR_SYNC_LOG_PREFIX = "ds2-armor-sync:"
+
 #: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/hp_gauge.rs`.
 #:
 #: ON here and off in the DLL: the DLL's default is the game as shipped, and this launcher's is the
@@ -1723,6 +1737,8 @@ def config_text(
     estus_max_reload_test: bool = False,
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
+    armor_sync: bool = False,
+    armor_sync_test_cap: int | None = None,
     net_effects: bool = False,
     music_probe: bool = True,
 ) -> str:
@@ -2313,14 +2329,27 @@ def config_text(
 [{WEAPON_SYNC_SECTION}]
 # `enabled` is startup-only. While another player is in the world, `ds2-weapon-sync` lowers every
 # weapon of ours above the highest weapon level any of them has equipped, and puts them back when
-# they are gone. Only the character's equipment copies change; the inventory, which the save keeps,
-# is never written. It shares the net session update with `[voice_chat]`; both can be on. Off
+# they are gone: every weapon in the inventory, pack and box, and what is equipped. The save always
+# gets the real levels: the save writer is detoured to put them back in what it writes. It shares the net session update with `[voice_chat]`; both can be on. Off
 # unless `--weapon-sync`. `key` turns it on and off in game (default `{WEAPON_SYNC_DEFAULT_KEY}`,
 # live-reloaded). `test_cap` pretends a remote player at that level is present
 # (`--weapon-sync-test-cap N`), also live. Grep the log for `{WEAPON_SYNC_LOG_PREFIX}`.
 {KEY_WEAPON_SYNC_ENABLED} = {str(weapon_sync).lower()}
 {KEY_WEAPON_SYNC_KEY} = "{WEAPON_SYNC_DEFAULT_KEY}"
 {"" if weapon_sync_test_cap is None else f"{KEY_WEAPON_SYNC_TEST_CAP} = {weapon_sync_test_cap}"}
+
+[{ARMOR_SYNC_SECTION}]
+# A feature of its own, on or off regardless of `[{WEAPON_SYNC_SECTION}]`. `enabled` is
+# startup-only. While another player is in the world, `ds2-weapon-sync`'s armour half lowers every
+# armour piece of ours (head, chest, hands, legs; worn, pack and box) above the highest armour
+# reinforcement level any of them wears, and puts them back when they are gone. The save always
+# gets the real levels. Off unless `--armor-sync`. `key` turns it on and off in game (default
+# `{ARMOR_SYNC_DEFAULT_KEY}`, live-reloaded). `test_cap` pretends a remote player whose best piece is
+# at that level is present (`--armor-sync-test-cap N`), also live. Grep the log for
+# `{ARMOR_SYNC_LOG_PREFIX}`.
+{KEY_ARMOR_SYNC_ENABLED} = {str(armor_sync).lower()}
+{KEY_ARMOR_SYNC_KEY} = "{ARMOR_SYNC_DEFAULT_KEY}"
+{"" if armor_sync_test_cap is None else f"{KEY_ARMOR_SYNC_TEST_CAP} = {armor_sync_test_cap}"}
 
 [{SEAMLESS_SECTION}]
 # A SECOND MOD, written by someone else, loaded into this same process.
@@ -2552,6 +2581,8 @@ def write_config(
     estus_max_reload_test: bool = False,
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
+    armor_sync: bool = False,
+    armor_sync_test_cap: int | None = None,
     net_effects: bool = False,
     music_probe: bool = True,
 ) -> tuple[Path, str]:
@@ -2601,6 +2632,8 @@ def write_config(
         estus_max_reload_test=estus_max_reload_test,
         weapon_sync=weapon_sync,
         weapon_sync_test_cap=weapon_sync_test_cap,
+        armor_sync=armor_sync,
+        armor_sync_test_cap=armor_sync_test_cap,
         net_effects=net_effects,
         music_probe=music_probe,
     )
@@ -3082,6 +3115,8 @@ def dry_run(
     estus_max_reload_test: bool = False,
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
+    armor_sync: bool = False,
+    armor_sync_test_cap: int | None = None,
     net_effects: bool = False,
     music_probe: bool = True,
     path_tracing: bool = True,
@@ -3175,6 +3210,8 @@ def dry_run(
             estus_max_reload_test=estus_max_reload_test,
             weapon_sync=weapon_sync,
             weapon_sync_test_cap=weapon_sync_test_cap,
+            armor_sync=armor_sync,
+            armor_sync_test_cap=armor_sync_test_cap,
             net_effects=net_effects,
             music_probe=music_probe,
         ):
@@ -3238,6 +3275,8 @@ def dry_run(
                 estus_max_reload_test=estus_max_reload_test,
                 weapon_sync=weapon_sync,
                 weapon_sync_test_cap=weapon_sync_test_cap,
+                armor_sync=armor_sync,
+                armor_sync_test_cap=armor_sync_test_cap,
                 net_effects=net_effects,
                 music_probe=music_probe,
             ),
@@ -3802,6 +3841,8 @@ def launch(
     estus_max_reload_test: bool = False,
     weapon_sync: bool = False,
     weapon_sync_test_cap: int | None = None,
+    armor_sync: bool = False,
+    armor_sync_test_cap: int | None = None,
     net_effects: bool = False,
     music_probe: bool = True,
     path_tracing: bool = True,
@@ -3876,6 +3917,8 @@ def launch(
         estus_max_reload_test=estus_max_reload_test,
         weapon_sync=weapon_sync,
         weapon_sync_test_cap=weapon_sync_test_cap,
+        armor_sync=armor_sync,
+        armor_sync_test_cap=armor_sync_test_cap,
         net_effects=net_effects,
         music_probe=music_probe,
     )
@@ -4674,6 +4717,61 @@ def selftest() -> int:
         and f'KEY_ENABLED: &str = "{KEY_NET_EFFECTS_ENABLED}"' in net_effects_src,
         f"[{NET_EFFECTS_SECTION}] {KEY_NET_EFFECTS_ENABLED} is the section and key the loader reads",
     )
+
+    # Weapon sync and armour sync are two switches. Every key the loader reads for either is
+    # written, each flag reaches only its own section, and the sections, keys, default keys and log
+    # prefixes are the ones the Rust names.
+    sync_loader_src = (REPO_ROOT / "crates/ds2-loader/src/weapon_sync.rs").read_text(
+        encoding="utf-8"
+    )
+    sync_crate_src = (REPO_ROOT / "crates/ds2-weapon-sync/src/lib.rs").read_text(encoding="utf-8")
+    check(
+        f'CONFIG_SECTION: &str = "{WEAPON_SYNC_SECTION}"' in sync_loader_src
+        and f'ARMOR_CONFIG_SECTION: &str = "{ARMOR_SYNC_SECTION}"' in sync_loader_src
+        and f'KEY_ENABLED: &str = "{KEY_WEAPON_SYNC_ENABLED}"' in sync_loader_src
+        and f'KEY_TEST_CAP: &str = "{KEY_WEAPON_SYNC_TEST_CAP}"' in sync_loader_src
+        and f'KEY_KEY: &str = "{KEY_WEAPON_SYNC_KEY}"' in sync_loader_src
+        and (KEY_ARMOR_SYNC_ENABLED, KEY_ARMOR_SYNC_TEST_CAP, KEY_ARMOR_SYNC_KEY)
+        == (KEY_WEAPON_SYNC_ENABLED, KEY_WEAPON_SYNC_TEST_CAP, KEY_WEAPON_SYNC_KEY),
+        f"[{WEAPON_SYNC_SECTION}] and [{ARMOR_SYNC_SECTION}] are the sections and keys the loader reads",
+    )
+    check(
+        f'DEFAULT_KEY: &str = "{WEAPON_SYNC_DEFAULT_KEY}"' in sync_crate_src
+        and f'ARMOR_DEFAULT_KEY: &str = "{ARMOR_SYNC_DEFAULT_KEY}"' in sync_crate_src
+        and f'LOG_PREFIX: &str = "{WEAPON_SYNC_LOG_PREFIX}"' in sync_crate_src
+        and f'ARMOR_LOG_PREFIX: &str = "{ARMOR_SYNC_LOG_PREFIX}"' in sync_crate_src
+        and WEAPON_SYNC_DEFAULT_KEY != ARMOR_SYNC_DEFAULT_KEY,
+        "the two features' default keys and log prefixes match the crate, and the keys differ",
+    )
+    for weapon_on, armor_on in ((False, False), (True, False), (False, True), (True, True)):
+        values, unusable = parse_config(
+            config_text(
+                "off",
+                weapon_sync=weapon_on,
+                weapon_sync_test_cap=4 if weapon_on else None,
+                armor_sync=armor_on,
+                armor_sync_test_cap=2 if armor_on else None,
+            )
+        )
+        arm = f"weapon_sync={weapon_on} armor_sync={armor_on}"
+        check(not unusable, f"{arm} writes a file with no unusable lines")
+        check(
+            values.get((WEAPON_SYNC_SECTION, KEY_WEAPON_SYNC_ENABLED)) == str(weapon_on).lower()
+            and values.get((ARMOR_SYNC_SECTION, KEY_ARMOR_SYNC_ENABLED)) == str(armor_on).lower(),
+            f"{arm} writes each section's {KEY_WEAPON_SYNC_ENABLED} on its own",
+        )
+        check(
+            values.get((WEAPON_SYNC_SECTION, KEY_WEAPON_SYNC_KEY)) == WEAPON_SYNC_DEFAULT_KEY
+            and values.get((ARMOR_SYNC_SECTION, KEY_ARMOR_SYNC_KEY)) == ARMOR_SYNC_DEFAULT_KEY,
+            f"{arm} writes both keys",
+        )
+        check(
+            values.get((WEAPON_SYNC_SECTION, KEY_WEAPON_SYNC_TEST_CAP))
+            == ("4" if weapon_on else None)
+            and values.get((ARMOR_SYNC_SECTION, KEY_ARMOR_SYNC_TEST_CAP))
+            == ("2" if armor_on else None),
+            f"{arm} writes each test_cap only into its own section",
+        )
     values, _ = parse_config(config_text("off", intro_skip=False))
     check(
         values.get((INTRO_SECTION, KEY_INTRO_ENABLED)) == "false",
@@ -5942,9 +6040,9 @@ def main() -> int:
         dest="weapon_sync",
         action="store_true",
         help=(
-            "while another player is in the world, lower our weapons above the highest weapon "
-            "level any of them has equipped, and restore them when they leave. The inventory (what "
-            "the save keeps) is never written. F6 (the [weapon_sync] key) turns it on and off in "
+            "while another player is in the world, lower every weapon in our inventory above the "
+            "highest weapon level any of them has equipped, and restore them when they leave. A "
+            "save made while capped keeps the real levels. F6 (the [weapon_sync] key) turns it on and off in "
             "game. Runs alongside --voice-chat: both share one net session update detour."
         ),
     )
@@ -5958,6 +6056,30 @@ def main() -> int:
         help=(
             "with --weapon-sync: pretend a remote player whose highest weapon is +N is present, so "
             "the cap and the restore can be tested alone. Implies --weapon-sync."
+        ),
+    )
+    parser.add_argument(
+        "--armor-sync",
+        dest="armor_sync",
+        action="store_true",
+        help=(
+            "a feature of its own, with or without --weapon-sync: while another player is in the "
+            "world, lower every armour piece in our inventory (worn or not) above the highest "
+            "armour reinforcement level any of them wears, and restore them when they leave. A "
+            f"save made while capped keeps the real levels. {ARMOR_SYNC_DEFAULT_KEY} (the "
+            f"[{ARMOR_SYNC_SECTION}] key) turns it on and off in game."
+        ),
+    )
+    parser.add_argument(
+        "--armor-sync-test-cap",
+        dest="armor_sync_test_cap",
+        type=int,
+        choices=range(0, 11),
+        metavar="N",
+        default=None,
+        help=(
+            "with --armor-sync: pretend a remote player whose best armour piece is +N is present, "
+            "so the cap and the restore can be tested alone. Implies --armor-sync."
         ),
     )
     parser.add_argument(
@@ -6232,6 +6354,8 @@ def main() -> int:
         args.estus_max = True
     if args.weapon_sync_test_cap is not None:
         args.weapon_sync = True
+    if args.armor_sync_test_cap is not None:
+        args.armor_sync = True
 
     # THE INTERLOCK, applied here rather than left to the DLL to refuse at runtime. `[offline]`
     # fronts the socket imports, so a co-op mod under it loads, reports success and never connects
@@ -6339,6 +6463,8 @@ def main() -> int:
             estus_max_reload_test=args.estus_max_reload_test,
             weapon_sync=args.weapon_sync,
             weapon_sync_test_cap=args.weapon_sync_test_cap,
+            armor_sync=args.armor_sync,
+            armor_sync_test_cap=args.armor_sync_test_cap,
             net_effects=args.net_effects,
             music_probe=args.music_probe,
             path_tracing=args.path_tracing,
@@ -6388,6 +6514,8 @@ def main() -> int:
         estus_max_reload_test=args.estus_max_reload_test,
         weapon_sync=args.weapon_sync,
         weapon_sync_test_cap=args.weapon_sync_test_cap,
+        armor_sync=args.armor_sync,
+        armor_sync_test_cap=args.armor_sync_test_cap,
         net_effects=args.net_effects,
         music_probe=args.music_probe,
         path_tracing=args.path_tracing,

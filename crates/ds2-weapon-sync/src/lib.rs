@@ -6,21 +6,27 @@
 //!
 //! # Where the level is lowered, and where it is not
 //!
-//! A weapon's level exists three times (docs/DS2-WEAPON-LEVEL-SYNC.md, Q1):
+//! A weapon's level exists four times (docs/DS2-WEAPON-LEVEL-SYNC.md, Q1):
 //!
 //! | copy | written by this crate | saved |
 //! |---|---|---|
-//! | the inventory entry, `ItemEntry +0x25` | never, only read | yes |
+//! | the inventory entry, `ItemEntry +0x25` | lowered while capped, every weapon | no |
+//! | the save block record, `[ItemInventory2 + 0x10] + 0x30 + index * 0x10`, `+0x0C` | only ever given the real level | yes |
 //! | the equipment record table, `ChrAsmCtrl +0x20` | through the game's weapon update | no |
 //! | the live weapon state, `ChrAsmEquip +0x70` | through the game's weapon update | no |
+//!
+//! While a cap is on, every weapon and shield in the inventory (pack and box: one entry array)
+//! above it is lowered in its entry, so the pause menu shows the capped level and anything
+//! equipped mid-encounter is capped before it is equipped. A [`policy::Ledger`] keeps each one's
+//! real level. The save does not read the entries: [`ds2_rva::SAVE_DATA_ITEM_INVENTORY_WRITE`]
+//! streams the separate save block, and its detour gives every record the ledger lowered its real
+//! level just before it is streamed, so a save made while capped keeps the real levels.
 //!
 //! The game copies inventory -> record table -> live state in one function,
 //! [`ds2_rva::CHR_WEAPON_UPDATE`], and the same function sends P2P packet 61, which is how every
 //! peer learns our level. This crate detours that function and lowers the level in the request it
-//! is handed. Nothing else is written. So the character and every peer carry the capped level,
-//! while the inventory entry, the thing the save serialises (`SaveDataItemInventory2` writes the
-//! inventory manager's own block, `0x1402e53f0`), keeps the real one. There is no restore-before-save
-//! step because there is nothing to restore in what is saved.
+//! is handed, which with the inventory already lowered is a backstop. Any change to the equipped
+//! slots while capped, whatever caused it, is a resweep of all six ([`policy::Watch`]).
 //!
 //! # When the cap changes
 //!
@@ -32,9 +38,9 @@
 //! the original update has returned, from native code: the game's own weapon update, called with
 //! a request built from our inventory entry exactly the way `0x1401b66a0` builds it.
 //!
-//! Inventory weapons are covered by the same detour: a weapon equipped mid-encounter goes through
-//! the weapon update and comes out capped. The pause menu still reads the inventory entry and
-//! shows real levels.
+//! The same check sweeps the whole inventory against the cap first ([`policy::Ledger::sweep`]):
+//! a weapon picked up mid-encounter is lowered within a quarter second, and when the cap goes
+//! every lowered entry, and its save record, gets its real level back.
 //!
 //! # The key
 //!
@@ -55,6 +61,9 @@
 //! * We die, the host dies, we are sent home, we quit to the title, we disconnect: the world is
 //!   torn down and rebuilt from the inventory. The tracker sees the character change and pushes
 //!   real levels in case the rebuild met the clamp.
+//!   Leaving the world is a check with no character, whose cap is `None`, so the whole inventory
+//!   is restored at the first check of the load screen.
+//! * Any save while capped: the save writer's detour puts the real levels in the save block.
 //! * The process dies: nothing capped was ever in the save.
 //!
 //! # What has not been proven
@@ -62,22 +71,64 @@
 //! Which copy the damage code reads, whether the server-side status upload reads the inventory or
 //! the equipment copy, and when a joining player's records are first filled. See the doc.
 
-/// What every line this crate writes begins with, so its lines can be grepped out of the shared log.
+//!
+//! # Armour sync
+//!
+//! The same machinery, run a second time over armour: while another player is in the world, every
+//! armour piece we carry (head, chest, hands, legs; worn, in the pack or in the box) above the
+//! highest armour reinforcement level any of them wears is lowered to it, and put back when they
+//! are gone. It is its own feature: `[armor_sync]` in the config, [`ARMOR_DEFAULT_KEY`], its own
+//! spoken lines, its own tile on screen (a helm, beside the swords), and `ds2-armor-sync:` in the
+//! log. Either feature runs without the other.
+//!
+//! Armour's copies are the weapon's, one table over (docs/DS2-WEAPON-LEVEL-SYNC.md, "Armour"): the
+//! inventory entry `+0x25`, the save block record, equipment records 6..9, and the live entry at
+//! `ChrAsmEquip + 0x290 + piece * 0x30`, whose level byte at `+0x18` is what the defense code
+//! reads. The game's armour update, [`ds2_rva::CHR_ARMOR_UPDATE`], is the weapon update's twin and
+//! sends packet 62, whose receiver writes another player's records 6..9; those are read for the
+//! cap. The cap is the highest single piece any other player wears ([`policy::cap_for`] says why).
+
+/// What every line of weapon sync begins with, so its lines can be grepped out of the shared log.
 pub const LOG_PREFIX: &str = "ds2-weapon-sync:";
 
-/// The key that turns the feature on and off in game, unless `[weapon_sync] key` says otherwise.
+/// What every line of armour sync begins with.
+pub const ARMOR_LOG_PREFIX: &str = "ds2-armor-sync:";
+
+/// The key that turns weapon sync on and off in game, unless `[weapon_sync] key` says otherwise.
 ///
 /// F7 is inventory sort, F8 voice chat and F9 net effects; nothing in this repo binds F6.
 pub const DEFAULT_KEY: &str = "F6";
 
-/// The spoken line a toggle plays: "Weapon sync, on." or "Weapon sync, off.", 16 kHz 16-bit mono
-/// WAV, rendered with Piper's `en_US-lessac-medium`, the voice `ds2-voice-chat`'s English clips use.
+/// The key that turns armour sync on and off in game, unless `[armor_sync] key` says otherwise.
+///
+/// F6 is weapon sync, F7 inventory sort, F8 voice chat, F9 net effects, F10 the music probe, F11
+/// its fallback. The DS2 Lighting Engine's `dxgi.dll` polls F1, F2, F3 and F6
+/// (`mov edx,0x70/0x71/0x72/0x75` before its key-state call); nothing polls F5.
+pub const ARMOR_DEFAULT_KEY: &str = "F5";
+
+pub use policy::Kind;
+
+/// The spoken line a weapon sync toggle plays.
+///
+/// "Weapon sync, on." or "Weapon sync, off.", 16 kHz 16-bit mono WAV, rendered with Piper's
+/// `en_US-lessac-medium`, the voice `ds2-voice-chat`'s English clips use.
 #[must_use]
 pub const fn clip(on: bool) -> &'static [u8] {
-    if on {
-        include_bytes!("../assets/en-on.wav")
-    } else {
-        include_bytes!("../assets/en-off.wav")
+    clip_for(Kind::Weapon, on)
+}
+
+/// The spoken line a toggle of either feature plays.
+///
+/// Armour's are "Armor sync, on." and "Armor
+/// sync, off.", rendered the same way (`piper -m en_US-lessac-medium`, then `ffmpeg -ar 16000 -ac 1
+/// -c:a pcm_s16le`).
+#[must_use]
+pub const fn clip_for(kind: Kind, on: bool) -> &'static [u8] {
+    match (kind, on) {
+        (Kind::Weapon, true) => include_bytes!("../assets/en-on.wav"),
+        (Kind::Weapon, false) => include_bytes!("../assets/en-off.wav"),
+        (Kind::Armor, true) => include_bytes!("../assets/armor-en-on.wav"),
+        (Kind::Armor, false) => include_bytes!("../assets/armor-en-off.wav"),
     }
 }
 
@@ -90,11 +141,27 @@ mod hud;
 mod install;
 
 #[cfg(windows)]
-pub use install::{LogFn, Outcome, install, set_key, set_logger, set_test_cap};
+pub use install::{LogFn, Outcome, Settings, install, set_key, set_logger, set_test_cap};
 
 #[cfg(test)]
 mod tests {
-    use super::clip;
+    use super::{Kind, clip, clip_for};
+
+    #[test]
+    fn four_distinct_clips_one_per_feature_and_direction() {
+        let all = [
+            clip_for(Kind::Weapon, true),
+            clip_for(Kind::Weapon, false),
+            clip_for(Kind::Armor, true),
+            clip_for(Kind::Armor, false),
+        ];
+        for (i, a) in all.iter().enumerate() {
+            assert_eq!(wav_format(a), Some((1, 1, 16_000, 16)), "clip {i}");
+            for b in &all[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+    }
 
     /// The `fmt ` chunk's format tag, channels, sample rate and bits per sample.
     fn wav_format(wav: &[u8]) -> Option<(u16, u16, u32, u16)> {

@@ -3,25 +3,74 @@
 //!
 //! Everything here is arithmetic over numbers the Windows half reads, so it builds and is tested
 //! on the machine the code is written on.
+//!
+//! The same machinery serves two features that are switched, logged and announced separately:
+//! weapon sync and armour sync ([`Kind`]). Each has its own [`Tracker`], [`Ledger`] and [`Watch`];
+//! nothing here lets one feature's state touch the other's.
 
 /// The highest level the packet 61 receiver accepts. A byte above it is not a level.
 pub const WEAPON_LEVEL_MAX: u8 = ds2_rva::WEAPON_LEVEL_MAX;
 
+/// The highest level the packet 62 receiver accepts.
+pub const ARMOR_LEVEL_MAX: u8 = ds2_rva::ARMOR_LEVEL_MAX;
+
+/// Which feature a piece of state belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// Weapons and shields: item types `0` and `1`, six equip slots.
+    Weapon,
+    /// Head, chest, hands and legs: item types `2..=5`, four equip slots.
+    Armor,
+}
+
+impl Kind {
+    /// Whether an inventory entry of item type `item_type` (`ItemEntry +0x1e`) belongs to this
+    /// feature.
+    pub const fn holds(self, item_type: u8) -> bool {
+        match self {
+            Self::Weapon => item_type < ds2_rva::ITEM_TYPE_HAS_INFUSION_BELOW,
+            Self::Armor => {
+                item_type >= ds2_rva::ITEM_TYPE_ARMOR_FIRST
+                    && item_type <= ds2_rva::ITEM_TYPE_ARMOR_LAST
+            }
+        }
+    }
+
+    /// How many equip slots the feature watches.
+    pub const fn slots(self) -> usize {
+        match self {
+            Self::Weapon => ds2_rva::WEAPON_SLOT_COUNT,
+            Self::Armor => ds2_rva::ARMOR_SLOT_COUNT,
+        }
+    }
+
+    /// The highest real level.
+    pub const fn level_max(self) -> u8 {
+        match self {
+            Self::Weapon => WEAPON_LEVEL_MAX,
+            Self::Armor => ARMOR_LEVEL_MAX,
+        }
+    }
+}
+
 /// One remote player's six weapon records, as `(item id, level byte)`.
 pub type RemoteWeapons = [(u32, u8); 6];
 
-/// The highest weapon level any one remote player has equipped, or `None` when this player's
-/// records say nothing yet.
+/// One remote player's four armour records (records 6..9: head, chest, hands, legs), as
+/// `(ArmorParam id, level byte)`.
+pub type RemoteArmor = [(u32, u8); 4];
+
+/// The highest level among one remote player's records, or `None` when they say nothing yet.
 ///
-/// A record with item id `0` or `u32::MAX` is unset, not a +0 weapon. A player whose six records
-/// are all unset is left out of the cap rather than counted as +0: the join data has not been
-/// traced (docs/DS2-WEAPON-LEVEL-SYNC.md, Q2), and reading "not arrived yet" as "+0" would lower
-/// every weapon to +0 for however long it takes to arrive. Fists count, at their own level `0`,
-/// because an empty hand is a real answer.
+/// A record with item id `0` or `u32::MAX` is unset, not a +0 item. A player whose records are all
+/// unset is left out of the cap rather than counted as +0: the join data has not been traced
+/// (docs/DS2-WEAPON-LEVEL-SYNC.md, Q2), and reading "not arrived yet" as "+0" would lower
+/// everything to +0 for however long it takes to arrive. Fists, and the naked armour pieces, count
+/// at their own level `0`, because an empty hand is a real answer.
 ///
-/// Level bytes are masked to the low nibble (the receiver stores the nibble) and anything above
-/// [`WEAPON_LEVEL_MAX`] is ignored.
-pub fn remote_highest(records: &RemoteWeapons) -> Option<u8> {
+/// Level bytes are masked to the low nibble (both receivers store the nibble) and anything above
+/// [`WEAPON_LEVEL_MAX`] (which is also [`ARMOR_LEVEL_MAX`]) is ignored.
+pub fn remote_highest(records: &[(u32, u8)]) -> Option<u8> {
     records
         .iter()
         .filter(|(item, _)| *item != 0 && *item != u32::MAX)
@@ -30,15 +79,62 @@ pub fn remote_highest(records: &RemoteWeapons) -> Option<u8> {
         .max()
 }
 
+/// The highest armour level one remote player has equipped.
+///
+/// An empty armour slot is item `-1` in the request the game builds and in the packet 62 it sends,
+/// so a record of `-1` is ambiguous: "not arrived yet" or "wears nothing there". The weapon records
+/// settle it. Once a player's weapon records have arrived, their equipment has, and four empty
+/// armour slots are a naked player, whose highest armour is +0.
+pub fn remote_armor_highest(armor: &RemoteArmor, weapons: &RemoteWeapons) -> Option<u8> {
+    remote_highest(armor).or_else(|| remote_highest(weapons).map(|_| 0))
+}
+
 /// The cap: the highest level among every other player, or `None` when nobody else is in the
 /// world (or nobody else's records have arrived).
 ///
 /// `test_cap` stands in for a remote player at that level, so the mechanism can be exercised solo.
 /// It takes part in the maximum like any other player: it is not an override.
 pub fn cap(remotes: &[RemoteWeapons], test_cap: Option<u8>) -> Option<u8> {
-    remotes
-        .iter()
-        .filter_map(remote_highest)
+    highest_of(
+        remotes.iter().filter_map(|records| remote_highest(records)),
+        test_cap,
+    )
+}
+
+/// Every other player's equipment, weapons and armour, as one check read it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Remote {
+    /// Records 0..5, character-side slot order.
+    pub weapons: RemoteWeapons,
+    /// Records 6..9.
+    pub armor: RemoteArmor,
+}
+
+/// The cap for one feature: weapons against the others' weapons, armour against their armour.
+///
+/// The armour cap is the highest level of any single piece any other player has equipped, not a
+/// cap per slot. Defense is four independent terms, one per piece, each
+/// `base + (max - base) * level / maxLevel` (`0x14034dbb0`, `0x14034dda0`), summed; nothing pairs
+/// our helm with their helm, and a per-slot rule would let a bare or unupgraded slot of theirs
+/// (a fashion choice, item `-1` on the wire) put the same slot of ours to +0. It is also the rule
+/// weapons use, across hands and slots.
+pub fn cap_for(kind: Kind, remotes: &[Remote], test_cap: Option<u8>) -> Option<u8> {
+    match kind {
+        Kind::Weapon => highest_of(
+            remotes.iter().filter_map(|r| remote_highest(&r.weapons)),
+            test_cap,
+        ),
+        Kind::Armor => highest_of(
+            remotes
+                .iter()
+                .filter_map(|r| remote_armor_highest(&r.armor, &r.weapons)),
+            test_cap,
+        ),
+    }
+}
+
+fn highest_of(levels: impl Iterator<Item = u8>, test_cap: Option<u8>) -> Option<u8> {
+    levels
         .chain(test_cap.map(|level| level.min(WEAPON_LEVEL_MAX)))
         .max()
 }
@@ -122,6 +218,219 @@ impl Tracker {
         }
         self.applied = cap;
         Action::Redrive { cap }
+    }
+}
+
+// -------------------------------------------------------------------------------------------------
+// The whole inventory.
+// -------------------------------------------------------------------------------------------------
+
+/// One weapon or shield in the inventory's entry array, as a check read it.
+///
+/// The entry's index is also its handle and its record's index in the save block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Held {
+    /// The entry's index in the bag's array.
+    pub index: u16,
+    /// `ItemParam` row id.
+    pub item: u32,
+    /// The level the entry holds now, low nibble.
+    pub level: u8,
+}
+
+/// One level the check has to write into an inventory entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Write {
+    /// The entry's index.
+    pub index: u16,
+    /// The item the entry held when it was read. The writer checks it again before writing.
+    pub item: u32,
+    /// The level the entry holds.
+    pub from: u8,
+    /// The level it is to hold.
+    pub to: u8,
+}
+
+impl Write {
+    /// Whether this write puts a real level back. The cap only lowers, so a raise is a restore.
+    pub const fn restores(&self) -> bool {
+        self.to > self.from
+    }
+}
+
+/// What the ledger remembers about one entry it lowered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Kept {
+    item: u32,
+    real: u8,
+    written: u8,
+}
+
+/// Every inventory entry the cap has lowered, with its real level, so the restore and the save
+/// know what the entry really is.
+///
+/// Keyed by the entry's index, and trusted only while the entry still holds the same item at the
+/// level this ledger wrote. Anything else means the game wrote the entry itself since -- a
+/// different weapon in the slot, a reload from the save, an upgrade -- and what the game wrote is
+/// the real level from then on.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Ledger {
+    kept: std::collections::BTreeMap<u16, Kept>,
+}
+
+impl Ledger {
+    /// A ledger that has lowered nothing.
+    pub const fn new() -> Self {
+        Self {
+            kept: std::collections::BTreeMap::new(),
+        }
+    }
+
+    /// Whether nothing in the inventory is lowered.
+    pub fn is_empty(&self) -> bool {
+        self.kept.is_empty()
+    }
+
+    /// How many entries are lowered.
+    pub fn len(&self) -> usize {
+        self.kept.len()
+    }
+
+    /// The real level of entry `index`, if the ledger lowered it and it still holds `item`.
+    pub fn real(&self, index: u16, item: u32) -> Option<u8> {
+        self.kept
+            .get(&index)
+            .filter(|kept| kept.item == item)
+            .map(|kept| kept.real)
+    }
+
+    /// One pass over every weapon in the inventory: lower each one above `cap` to it, put back
+    /// every one the ledger lowered that `cap` no longer lowers (all of them when `cap` is
+    /// `None`), and forget entries that are gone. Idempotent: a second pass over what the first
+    /// one left writes nothing.
+    ///
+    /// `held` must be a complete read of the array. An entry missing from it is taken to be gone
+    /// (dropped, sold, replaced), so a failed read must not be passed in as an empty one.
+    pub fn sweep(&mut self, held: &[Held], cap: Option<u8>) -> Vec<Write> {
+        let mut writes = Vec::new();
+        let mut next = std::collections::BTreeMap::new();
+        for entry in held {
+            let real = match self.kept.get(&entry.index) {
+                Some(kept) if kept.item == entry.item && kept.written == entry.level => kept.real,
+                _ => entry.level,
+            };
+            let target = clamp(real, cap);
+            if target != entry.level {
+                writes.push(Write {
+                    index: entry.index,
+                    item: entry.item,
+                    from: entry.level,
+                    to: target,
+                });
+            }
+            if target != real {
+                next.insert(
+                    entry.index,
+                    Kept {
+                        item: entry.item,
+                        real,
+                        written: target,
+                    },
+                );
+            }
+        }
+        self.kept = next;
+        writes
+    }
+
+    /// The level the save must write for block record `index`, when it holds `item` at `level`:
+    /// the real one, if the ledger lowered that entry and the record does not already carry it.
+    pub fn saved_level(&self, index: u16, item: u32, level: u8) -> Option<u8> {
+        self.real(index, item).filter(|real| *real != level)
+    }
+
+    /// Every entry the ledger lowered, as `(index, item, real level)`.
+    pub fn lowered(&self) -> impl Iterator<Item = (u16, u32, u8)> + '_ {
+        self.kept
+            .iter()
+            .map(|(index, kept)| (*index, kept.item, kept.real))
+    }
+}
+
+// -------------------------------------------------------------------------------------------------
+// The equipped slots.
+// -------------------------------------------------------------------------------------------------
+
+/// One equipped slot, in inventory slot order: the inventory entry and the character's two copies.
+///
+/// For armour the record's `ArmorParam` id is given back as the item id it came from, so the three
+/// compare directly.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Slot {
+    /// The equipped inventory entry's `(item, level)`, `None` when the slot is empty.
+    pub inventory: Option<(u32, u8)>,
+    /// The equipment record's `(item, level)`.
+    pub record: Option<(u32, u8)>,
+    /// The live weapon state's level.
+    pub live: Option<u8>,
+}
+
+impl Slot {
+    /// Whether the character carries exactly what the inventory entry says. An empty slot is
+    /// never pushed: the game puts Fists there itself, and there is nothing to cap.
+    pub fn carried(&self) -> bool {
+        match self.inventory {
+            None => true,
+            Some((item, level)) => self.record == Some((item, level)) && self.live == Some(level),
+        }
+    }
+}
+
+/// The equipped slots of one feature at one check: six weapon slots, or four armour pieces.
+pub type Equipped = Vec<Slot>;
+
+/// The slots a resweep pushes: every slot whose character copies do not match its inventory
+/// entry, over all of them, whichever one changed.
+pub fn resweep(equipped: &[Slot]) -> Vec<usize> {
+    (0..equipped.len())
+        .filter(|slot| !equipped[*slot].carried())
+        .collect()
+}
+
+/// Watches the equipped slots while a cap is on, and says when they changed since the last
+/// resweep, for any reason: a swap from the inventory, an unequip, the game's own weapon update,
+/// a load.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Watch {
+    settled: Option<Equipped>,
+}
+
+impl Watch {
+    /// A watch that has seen nothing.
+    pub const fn new() -> Self {
+        Self { settled: None }
+    }
+
+    /// One check. With a cap on, answers the slots as they were after the last resweep when
+    /// `now` differs from them, which is the caller's cue to resweep and then [`Watch::settle`].
+    /// The first check under a cap answers `None` for the before, and still asks for a resweep.
+    /// With no cap it forgets, so the next cap starts from a fresh look.
+    pub fn changed(&mut self, now: &[Slot], cap: Option<u8>) -> Option<Option<Equipped>> {
+        if cap.is_none() {
+            self.settled = None;
+            return None;
+        }
+        match &self.settled {
+            Some(settled) if settled.as_slice() == now => None,
+            before => Some(before.clone()),
+        }
+    }
+
+    /// Remember what the slots look like after a resweep, so only a later change asks again. A
+    /// slot the resweep could not bring into line is not retried until something changes, so a
+    /// copy that refuses a level is one push, not a push every check.
+    pub fn settle(&mut self, after: Equipped) {
+        self.settled = Some(after);
     }
 }
 
@@ -303,5 +612,844 @@ mod tests {
         let mut t = Tracker::new();
         t.step(0x100, None);
         assert_eq!(t.step(0x200, None), Action::Nothing);
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // The whole inventory and the equipped slots, against a pretend game.
+    // ---------------------------------------------------------------------------------------------
+
+    use std::collections::BTreeMap;
+
+    /// A game with an inventory, a save block, six weapon slots, and the two ways a slot can
+    /// change: through the game's weapon update (which our detour clamps), and a path that skips
+    /// it and carries the entry's real level, the worst case the resweep has to catch.
+    struct Game {
+        /// Entry index -> (item, level the entry holds now).
+        bag: BTreeMap<u16, (u32, u8)>,
+        /// Entry index -> the real level, as the test knows it.
+        truth: BTreeMap<u16, u8>,
+        /// The save block's record per entry: (item, level).
+        block: BTreeMap<u16, (u32, u8)>,
+        /// Which entry each inventory weapon slot holds.
+        equipped: [Option<u16>; 6],
+        /// What the character carries per slot: (item, record level, live level).
+        carried: [Option<(u32, u8, u8)>; 6],
+        /// The cap the weapon update detour applies.
+        detour_cap: Option<u8>,
+        /// Whether the game copies an entry's level into its save record whenever it equips it,
+        /// which would carry a lowered level into the save if the save were not fixed.
+        leaks_into_block: bool,
+        ledger: Ledger,
+        watch: Watch,
+        tracker: Tracker,
+        resweeps: usize,
+    }
+
+    const PLAYER: usize = 0x100;
+
+    impl Game {
+        fn new() -> Self {
+            Self {
+                bag: BTreeMap::new(),
+                truth: BTreeMap::new(),
+                block: BTreeMap::new(),
+                equipped: [None; 6],
+                carried: [None; 6],
+                detour_cap: None,
+                leaks_into_block: true,
+                ledger: Ledger::new(),
+                watch: Watch::new(),
+                tracker: Tracker::new(),
+                resweeps: 0,
+            }
+        }
+
+        fn pick_up(&mut self, index: u16, item: u32, level: u8) {
+            self.bag.insert(index, (item, level));
+            self.truth.insert(index, level);
+            self.block.insert(index, (item, level));
+        }
+
+        /// The game equips `index` into `slot` through its own weapon update.
+        fn equip(&mut self, slot: usize, index: u16) {
+            let (item, level) = self.bag[&index];
+            let level = clamp(level, self.detour_cap);
+            self.equipped[slot] = Some(index);
+            self.carried[slot] = Some((item, level, level));
+            if self.leaks_into_block {
+                self.block.insert(index, (item, self.bag[&index].1));
+            }
+        }
+
+        /// Something equips `index` into `slot` without the weapon update, at its real level.
+        fn equip_around_the_update(&mut self, slot: usize, index: u16) {
+            let (item, _) = self.bag[&index];
+            let real = self.truth[&index];
+            self.equipped[slot] = Some(index);
+            self.carried[slot] = Some((item, real, real));
+        }
+
+        fn unequip(&mut self, slot: usize) {
+            self.equipped[slot] = None;
+            self.carried[slot] = None;
+        }
+
+        fn slots(&self) -> Equipped {
+            let mut out = vec![Slot::default(); 6];
+            for (slot, out) in out.iter_mut().enumerate() {
+                out.inventory = self.equipped[slot].map(|index| self.bag[&index]);
+                out.record = self.carried[slot].map(|(item, level, _)| (item, level));
+                out.live = self.carried[slot].map(|(_, _, live)| live);
+            }
+            out
+        }
+
+        /// One check, in the order the tick runs it.
+        fn check(&mut self, cap: Option<u8>) {
+            let redrive = self.tracker.step(PLAYER, cap) != Action::Nothing;
+            self.detour_cap = cap;
+            let held: Vec<Held> = self
+                .bag
+                .iter()
+                .map(|(index, (item, level))| Held {
+                    index: *index,
+                    item: *item,
+                    level: *level,
+                })
+                .collect();
+            for write in self.ledger.sweep(&held, cap) {
+                let entry = self.bag.get_mut(&write.index).unwrap();
+                assert_eq!(entry.0, write.item);
+                entry.1 = write.to;
+                if write.restores() {
+                    self.block.insert(write.index, (write.item, write.to));
+                }
+            }
+            let now = self.slots();
+            let watched = self.watch.changed(&now, cap).is_some();
+            if redrive || watched {
+                self.resweeps += 1;
+                for slot in resweep(&now) {
+                    let (item, level) = now[slot].inventory.unwrap();
+                    self.carried[slot] = Some((item, level, level));
+                }
+                let after = self.slots();
+                self.watch.settle(after);
+            }
+        }
+
+        /// The save: what `SaveDataItemInventory2` streams, after the detour fixed the block.
+        fn save(&mut self) -> BTreeMap<u16, (u32, u8)> {
+            for (index, record) in &mut self.block {
+                if let Some(real) = self.ledger.saved_level(*index, record.0, record.1) {
+                    record.1 = real;
+                }
+            }
+            self.block.clone()
+        }
+
+        fn assert_capped(&self, cap: u8, step: &str) {
+            for (index, (_, level)) in &self.bag {
+                assert!(
+                    *level <= cap,
+                    "{step}: inventory entry {index} at +{level} over +{cap}"
+                );
+            }
+            for (slot, carried) in self.carried.iter().enumerate() {
+                if let Some((_, record, live)) = carried {
+                    assert!(
+                        *record <= cap && *live <= cap,
+                        "{step}: slot {slot} carries +{record}/+{live} over +{cap}"
+                    );
+                }
+            }
+        }
+
+        fn assert_real(&self, step: &str) {
+            for (index, (_, level)) in &self.bag {
+                assert_eq!(*level, self.truth[index], "{step}: inventory entry {index}");
+            }
+            for slot in 0..6 {
+                if let Some(index) = self.equipped[slot] {
+                    let (item, record, live) = self.carried[slot].unwrap();
+                    let real = self.truth[&index];
+                    assert_eq!(
+                        (item, record, live),
+                        (self.bag[&index].0, real, real),
+                        "{step}: slot {slot}"
+                    );
+                }
+            }
+        }
+
+        fn assert_saved_real(saved: &BTreeMap<u16, (u32, u8)>, truth: &BTreeMap<u16, u8>) {
+            for (index, (_, level)) in saved {
+                assert_eq!(*level, truth[index], "saved record {index}");
+            }
+        }
+    }
+
+    const CLUB: u32 = 1_500_000;
+    const LONGSWORD: u32 = 1_140_000;
+    const STAFF: u32 = 3_800_000;
+    const RAPIER: u32 = 1_010_000;
+
+    #[test]
+    fn every_weapon_is_capped_through_every_swap_and_every_one_comes_back() {
+        let mut g = Game::new();
+        g.pick_up(0, DAGGER, 10);
+        g.pick_up(1, SHIELD, 5);
+        g.pick_up(2, CLUB, 3);
+        g.pick_up(3, LONGSWORD, 10);
+        g.pick_up(4, STAFF, 7); // in the pack, never equipped before the cap
+        g.pick_up(5, RAPIER, 10); // put away in the box
+        g.pick_up(6, FISTS - 1, 0); // already at +0: never touched
+        for (slot, index) in [(0, 0), (1, 1), (2, 2), (3, 3)] {
+            g.equip(slot, index);
+        }
+        g.check(None);
+        g.assert_real("alone");
+        assert_eq!(g.save(), g.block, "nothing lowered, nothing to fix");
+
+        let cap = Some(0);
+        g.check(cap);
+        g.assert_capped(0, "cap on");
+        assert_eq!(
+            g.ledger.len(),
+            6,
+            "every weapon above +0 is lowered, equipped or not"
+        );
+
+        g.equip(1, 4);
+        g.check(cap);
+        g.assert_capped(0, "swap slot 1 to a pack weapon");
+
+        g.equip_around_the_update(3, 5);
+        g.assert_eq_before_check_is_over_cap(0);
+        g.check(cap);
+        g.assert_capped(0, "swap slot 3 around the weapon update");
+
+        g.unequip(0);
+        g.check(cap);
+        g.assert_capped(0, "unequip slot 0");
+
+        g.equip_around_the_update(2, 0);
+        g.check(cap);
+        g.assert_capped(0, "swap slot 2 to the weapon slot 0 held");
+
+        g.pick_up(7, DAGGER + 1, 9);
+        g.check(cap);
+        g.assert_capped(0, "a weapon picked up mid-cap");
+
+        let saved = g.save();
+        Game::assert_saved_real(&saved, &g.truth);
+        g.assert_capped(0, "a save does not lift the cap in the game");
+
+        g.check(None);
+        g.assert_real("cap off");
+        assert!(g.ledger.is_empty());
+        Game::assert_saved_real(&g.save(), &g.truth);
+        assert!(g.resweeps >= 6, "every change was resweept: {}", g.resweeps);
+
+        g.check(None);
+        g.assert_real("steady after the restore");
+    }
+
+    impl Game {
+        /// The worst case really did carry a level over the cap before the check caught it.
+        fn assert_eq_before_check_is_over_cap(&self, cap: u8) {
+            assert!(
+                self.carried
+                    .iter()
+                    .flatten()
+                    .any(|(_, record, _)| *record > cap),
+                "the scripted swap should have carried a level over the cap"
+            );
+        }
+    }
+
+    #[test]
+    fn a_sweep_twice_writes_nothing_the_second_time() {
+        let mut ledger = Ledger::new();
+        let mut held = vec![
+            Held {
+                index: 0,
+                item: DAGGER,
+                level: 10,
+            },
+            Held {
+                index: 1,
+                item: SHIELD,
+                level: 2,
+            },
+        ];
+        let writes = ledger.sweep(&held, Some(3));
+        assert_eq!(
+            writes,
+            vec![Write {
+                index: 0,
+                item: DAGGER,
+                from: 10,
+                to: 3
+            }]
+        );
+        held[0].level = 3;
+        assert!(ledger.sweep(&held, Some(3)).is_empty());
+        assert_eq!(ledger.real(0, DAGGER), Some(10));
+        let back = ledger.sweep(&held, None);
+        assert_eq!(
+            back,
+            vec![Write {
+                index: 0,
+                item: DAGGER,
+                from: 3,
+                to: 10
+            }]
+        );
+        assert!(back[0].restores());
+        assert!(ledger.is_empty());
+    }
+
+    #[test]
+    fn a_level_the_game_wrote_itself_is_the_real_one_from_then_on() {
+        // A reload rebuilds the entry from the save at its real level while the cap is still on.
+        let mut ledger = Ledger::new();
+        let at = |level| {
+            [Held {
+                index: 9,
+                item: DAGGER,
+                level,
+            }]
+        };
+        ledger.sweep(&at(10), Some(3));
+        let writes = ledger.sweep(&at(8), Some(3));
+        assert_eq!(writes[0].to, 3);
+        assert_eq!(ledger.real(9, DAGGER), Some(8));
+        assert_eq!(ledger.sweep(&at(3), None)[0].to, 8);
+    }
+
+    #[test]
+    fn a_different_weapon_in_a_lowered_entry_is_not_given_the_old_ones_level() {
+        let mut ledger = Ledger::new();
+        ledger.sweep(
+            &[Held {
+                index: 4,
+                item: DAGGER,
+                level: 10,
+            }],
+            Some(0),
+        );
+        let replaced = [Held {
+            index: 4,
+            item: SHIELD,
+            level: 0,
+        }];
+        assert!(ledger.sweep(&replaced, None).is_empty());
+        assert_eq!(ledger.real(4, DAGGER), None);
+        assert_eq!(ledger.saved_level(4, SHIELD, 0), None);
+    }
+
+    #[test]
+    fn a_dropped_weapon_is_forgotten() {
+        let mut ledger = Ledger::new();
+        ledger.sweep(
+            &[Held {
+                index: 4,
+                item: DAGGER,
+                level: 10,
+            }],
+            Some(0),
+        );
+        assert!(ledger.sweep(&[], Some(0)).is_empty());
+        assert!(ledger.is_empty());
+    }
+
+    #[test]
+    fn the_save_gets_the_real_level_only_for_a_record_that_lost_it() {
+        let mut ledger = Ledger::new();
+        ledger.sweep(
+            &[Held {
+                index: 2,
+                item: DAGGER,
+                level: 10,
+            }],
+            Some(1),
+        );
+        assert_eq!(ledger.saved_level(2, DAGGER, 1), Some(10));
+        assert_eq!(ledger.saved_level(2, DAGGER, 10), None);
+        assert_eq!(ledger.saved_level(2, SHIELD, 1), None);
+        assert_eq!(ledger.lowered().collect::<Vec<_>>(), vec![(2, DAGGER, 10)]);
+    }
+
+    #[test]
+    fn a_resweep_covers_every_slot_not_just_the_one_that_changed() {
+        let mut slots = [Slot::default(); 6];
+        slots[0] = Slot {
+            inventory: Some((DAGGER, 3)),
+            record: Some((DAGGER, 10)),
+            live: Some(10),
+        };
+        slots[3] = Slot {
+            inventory: Some((SHIELD, 0)),
+            record: Some((SHIELD, 0)),
+            live: Some(5),
+        };
+        slots[4] = Slot {
+            inventory: Some((CLUB, 2)),
+            record: Some((CLUB, 2)),
+            live: Some(2),
+        };
+        assert_eq!(resweep(&slots), vec![0, 3]);
+    }
+
+    #[test]
+    fn the_watch_asks_once_per_change_and_never_without_a_cap() {
+        let mut watch = Watch::new();
+        let mut slots = vec![Slot::default(); 6];
+        assert_eq!(watch.changed(&slots, None), None);
+        assert_eq!(watch.changed(&slots, Some(0)), Some(None));
+        watch.settle(slots.clone());
+        assert_eq!(watch.changed(&slots, Some(0)), None);
+        let before = slots.clone();
+        slots[1].inventory = Some((DAGGER, 0));
+        assert_eq!(watch.changed(&slots, Some(0)), Some(Some(before)));
+        watch.settle(slots.clone());
+        assert_eq!(watch.changed(&slots, Some(0)), None);
+        assert_eq!(watch.changed(&slots, None), None);
+        assert_eq!(watch.changed(&slots, Some(0)), Some(None));
+    }
+}
+
+// -------------------------------------------------------------------------------------------------
+// Weapon sync and armour sync side by side, each switched on its own, against a pretend game.
+// -------------------------------------------------------------------------------------------------
+
+#[cfg(test)]
+mod both_features {
+    use std::collections::BTreeMap;
+
+    use super::*;
+
+    const DAGGER: u32 = 1_000_000;
+    const CLUB: u32 = 1_500_000;
+    const SHIELD: u32 = 2_750_000;
+    const FISTS: u32 = 3_400_000;
+    // The four pieces the live read showed on the test character, and some spares.
+    const HELM: u32 = 22_182_100;
+    const CHEST: u32 = 21_500_101;
+    const GLOVES: u32 = 22_230_102;
+    const LEGS: u32 = 27_700_103;
+    const SPARE_HELM: u32 = 21_010_100;
+    const SPARE_CHEST: u32 = 21_010_101;
+    const BOXED_LEGS: u32 = 21_010_103;
+    const PICKED_UP_GLOVES: u32 = 21_020_102;
+    const NAKED_HEAD: u32 = 11_001_100;
+
+    const WEAPON: u8 = 0;
+    const T_SHIELD: u8 = 1;
+    const T_HEAD: u8 = 2;
+    const T_CHEST: u8 = 3;
+    const T_HANDS: u8 = 4;
+    const T_LEGS: u8 = 5;
+
+    const PLAYER: usize = 0x100;
+
+    /// One feature's half of the game and of our state: its equip slots, what the character
+    /// carries in them, the clamp its update detour applies, and its own tracker, ledger and watch.
+    struct Side {
+        kind: Kind,
+        enabled: bool,
+        equipped: Vec<Option<u16>>,
+        /// Per slot: (item, record level, live level).
+        carried: Vec<Option<(u32, u8, u8)>>,
+        detour_cap: Option<u8>,
+        ledger: Ledger,
+        watch: Watch,
+        tracker: Tracker,
+        resweeps: usize,
+    }
+
+    impl Side {
+        fn new(kind: Kind, enabled: bool) -> Self {
+            Self {
+                kind,
+                enabled,
+                equipped: vec![None; kind.slots()],
+                carried: vec![None; kind.slots()],
+                detour_cap: None,
+                ledger: Ledger::new(),
+                watch: Watch::new(),
+                tracker: Tracker::new(),
+                resweeps: 0,
+            }
+        }
+
+        /// What the inventory and the character say for each slot, given the bag.
+        fn slots(&self, bag: &BTreeMap<u16, (u32, u8, u8)>) -> Equipped {
+            (0..self.kind.slots())
+                .map(|slot| Slot {
+                    inventory: self.equipped[slot].map(|index| {
+                        let (item, _, level) = bag[&index];
+                        (item, level)
+                    }),
+                    record: self.carried[slot].map(|(item, level, _)| (item, level)),
+                    live: self.carried[slot].map(|(_, _, live)| live),
+                })
+                .collect()
+        }
+    }
+
+    /// One bag shared by both features, the save block, and the two sides.
+    struct World {
+        /// Entry index -> (item, item type, level the entry holds now).
+        bag: BTreeMap<u16, (u32, u8, u8)>,
+        truth: BTreeMap<u16, u8>,
+        block: BTreeMap<u16, (u32, u8)>,
+        weapons: Side,
+        armor: Side,
+    }
+
+    impl World {
+        fn new(weapons: bool, armor: bool) -> Self {
+            Self {
+                bag: BTreeMap::new(),
+                truth: BTreeMap::new(),
+                block: BTreeMap::new(),
+                weapons: Side::new(Kind::Weapon, weapons),
+                armor: Side::new(Kind::Armor, armor),
+            }
+        }
+
+        fn side(&self, kind: Kind) -> &Side {
+            match kind {
+                Kind::Weapon => &self.weapons,
+                Kind::Armor => &self.armor,
+            }
+        }
+
+        fn side_mut(&mut self, kind: Kind) -> &mut Side {
+            match kind {
+                Kind::Weapon => &mut self.weapons,
+                Kind::Armor => &mut self.armor,
+            }
+        }
+
+        fn pick_up(&mut self, index: u16, item: u32, item_type: u8, level: u8) {
+            self.bag.insert(index, (item, item_type, level));
+            self.truth.insert(index, level);
+            self.block.insert(index, (item, level));
+        }
+
+        /// The game equips through its own update (weapon or armour), which our detour clamps, and
+        /// copies the entry's level into the save block, the worst case for the save.
+        fn equip(&mut self, kind: Kind, slot: usize, index: u16) {
+            let (item, _, entry_level) = self.bag[&index];
+            let side = self.side_mut(kind);
+            let level = clamp(entry_level, side.detour_cap);
+            side.equipped[slot] = Some(index);
+            side.carried[slot] = Some((item, level, level));
+            self.block.insert(index, (item, entry_level));
+        }
+
+        /// Something equips around the update, at the real level.
+        fn equip_around_the_update(&mut self, kind: Kind, slot: usize, index: u16) {
+            let (item, _, _) = self.bag[&index];
+            let real = self.truth[&index];
+            let side = self.side_mut(kind);
+            side.equipped[slot] = Some(index);
+            side.carried[slot] = Some((item, real, real));
+        }
+
+        fn unequip(&mut self, kind: Kind, slot: usize) {
+            let side = self.side_mut(kind);
+            side.equipped[slot] = None;
+            side.carried[slot] = None;
+        }
+
+        /// One check: each feature on its own, in the tick's order.
+        fn check(&mut self, remotes: &[Remote]) {
+            for kind in [Kind::Weapon, Kind::Armor] {
+                let cap = effective(self.side(kind).enabled, cap_for(kind, remotes, None));
+                let held: Vec<Held> = self
+                    .bag
+                    .iter()
+                    .filter(|(_, (_, item_type, _))| kind.holds(*item_type))
+                    .map(|(index, (item, _, level))| Held {
+                        index: *index,
+                        item: *item,
+                        level: *level,
+                    })
+                    .collect();
+                let side = self.side_mut(kind);
+                let redrive = side.tracker.step(PLAYER, cap) != Action::Nothing;
+                side.detour_cap = cap;
+                let writes = side.ledger.sweep(&held, cap);
+                for write in writes {
+                    let entry = self.bag.get_mut(&write.index).unwrap();
+                    assert_eq!(entry.0, write.item);
+                    assert!(
+                        kind.holds(entry.1),
+                        "{kind:?} wrote another feature's entry"
+                    );
+                    entry.2 = write.to;
+                    if write.restores() {
+                        self.block.insert(write.index, (write.item, write.to));
+                    }
+                }
+                let now = self.side(kind).slots(&self.bag);
+                let side = self.side_mut(kind);
+                if side.watch.changed(&now, cap).is_some() || redrive {
+                    side.resweeps += 1;
+                    for slot in resweep(&now) {
+                        let (item, level) = now[slot].inventory.unwrap();
+                        side.carried[slot] = Some((item, level, level));
+                    }
+                    let after = self.side(kind).slots(&self.bag);
+                    self.side_mut(kind).watch.settle(after);
+                }
+            }
+        }
+
+        /// The one save writer detour, fixing records from both ledgers.
+        fn save(&mut self) -> BTreeMap<u16, (u32, u8)> {
+            for (index, record) in &mut self.block {
+                let real = self
+                    .weapons
+                    .ledger
+                    .saved_level(*index, record.0, record.1)
+                    .or_else(|| self.armor.ledger.saved_level(*index, record.0, record.1));
+                if let Some(real) = real {
+                    record.1 = real;
+                }
+            }
+            self.block.clone()
+        }
+
+        fn assert_capped(&self, kind: Kind, cap: u8, step: &str) {
+            for (index, (_, item_type, level)) in &self.bag {
+                if kind.holds(*item_type) {
+                    assert!(
+                        *level <= cap,
+                        "{step}: {kind:?} entry {index} at +{level} over +{cap}"
+                    );
+                }
+            }
+            for (slot, carried) in self.side(kind).carried.iter().enumerate() {
+                if let Some((_, record, live)) = carried {
+                    assert!(
+                        *record <= cap && *live <= cap,
+                        "{step}: {kind:?} slot {slot} carries +{record}/+{live} over +{cap}"
+                    );
+                }
+            }
+        }
+
+        fn assert_real(&self, kind: Kind, step: &str) {
+            for (index, (_, item_type, level)) in &self.bag {
+                if kind.holds(*item_type) {
+                    assert_eq!(*level, self.truth[index], "{step}: {kind:?} entry {index}");
+                }
+            }
+            let side = self.side(kind);
+            for slot in 0..kind.slots() {
+                if let Some(index) = side.equipped[slot] {
+                    let real = self.truth[&index];
+                    let (_, record, live) = side.carried[slot].unwrap();
+                    assert_eq!((record, live), (real, real), "{step}: {kind:?} slot {slot}");
+                }
+            }
+        }
+
+        fn assert_saved_real(&mut self, step: &str) {
+            let saved = self.save();
+            for (index, (_, level)) in &saved {
+                assert_eq!(*level, self.truth[index], "{step}: saved record {index}");
+            }
+        }
+
+        /// A character with weapons and armour, pack and box, equipped and not.
+        fn stocked(weapons: bool, armor: bool) -> Self {
+            let mut w = Self::new(weapons, armor);
+            w.pick_up(0, DAGGER, WEAPON, 10);
+            w.pick_up(1, SHIELD, T_SHIELD, 5);
+            w.pick_up(2, CLUB, WEAPON, 10);
+            w.pick_up(10, HELM, T_HEAD, 10);
+            w.pick_up(11, CHEST, T_CHEST, 5);
+            w.pick_up(12, GLOVES, T_HANDS, 10);
+            w.pick_up(13, LEGS, T_LEGS, 5);
+            w.pick_up(14, SPARE_HELM, T_HEAD, 7); // in the pack, never worn before the cap
+            w.pick_up(15, SPARE_CHEST, T_CHEST, 10);
+            w.pick_up(16, BOXED_LEGS, T_LEGS, 10); // put away in the box
+            w.pick_up(17, SPARE_CHEST + 100, T_CHEST, 0); // already +0: never touched
+            w.equip(Kind::Weapon, 1, 0);
+            w.equip(Kind::Weapon, 0, 1);
+            for (piece, index) in [(0, 10), (1, 11), (2, 12), (3, 13)] {
+                w.equip(Kind::Armor, piece, index);
+            }
+            w
+        }
+    }
+
+    /// Another player with weapons at `weapon` and armour at `armor`, head to legs.
+    fn remote(weapon: u8, armor: [u8; 4]) -> Remote {
+        let param = |item: u32| item - ds2_rva::ARMOR_PARAM_ID_FROM_ITEM_ID;
+        Remote {
+            weapons: [
+                (DAGGER, weapon),
+                (FISTS, 0),
+                (FISTS, 0),
+                (FISTS, 0),
+                (FISTS, 0),
+                (FISTS, 0),
+            ],
+            armor: [
+                (param(HELM), armor[0]),
+                (param(CHEST), armor[1]),
+                (param(GLOVES), armor[2]),
+                (param(LEGS), armor[3]),
+            ],
+        }
+    }
+
+    #[test]
+    fn the_armour_cap_is_the_highest_single_piece_any_other_player_wears() {
+        let host = remote(10, [0, 2, 0, 1]);
+        let phantom = remote(0, [0, 0, 3, 0]);
+        assert_eq!(cap_for(Kind::Armor, &[host, phantom], None), Some(3));
+        assert_eq!(
+            cap_for(Kind::Weapon, &[host, phantom], None),
+            Some(10),
+            "the weapon cap never reads armour"
+        );
+        assert_eq!(cap_for(Kind::Armor, &[], None), None);
+        assert_eq!(cap_for(Kind::Armor, &[], Some(4)), Some(4));
+    }
+
+    #[test]
+    fn a_naked_player_is_plus_zero_armour_once_their_equipment_has_arrived() {
+        let mut naked = remote(5, [0; 4]);
+        naked.armor = [(ds2_rva::ARMOR_EMPTY_ITEM_ID, 0); 4];
+        assert_eq!(remote_armor_highest(&naked.armor, &naked.weapons), Some(0));
+        let mut not_arrived = naked;
+        not_arrived.weapons = [(0, 0); 6];
+        assert_eq!(cap_for(Kind::Armor, &[not_arrived], None), None);
+        // A naked slot the way an NPC's record holds it counts at its own +0.
+        let mut bare_head = remote(0, [0, 6, 0, 0]);
+        bare_head.armor[0] = (NAKED_HEAD, 0);
+        assert_eq!(cap_for(Kind::Armor, &[bare_head], None), Some(6));
+    }
+
+    #[test]
+    fn armour_is_capped_through_every_swap_and_the_save_and_every_piece_comes_back() {
+        let mut w = World::stocked(false, true);
+        w.check(&[]);
+        w.assert_real(Kind::Armor, "alone");
+        w.assert_real(Kind::Weapon, "alone");
+
+        let them = [remote(10, [0, 3, 1, 0])];
+        w.check(&them);
+        w.assert_capped(Kind::Armor, 3, "cap on");
+        w.assert_real(Kind::Weapon, "weapon sync is off: weapons untouched");
+        assert_eq!(
+            w.armor.ledger.len(),
+            7,
+            "every armour piece above +3 is lowered, worn or in the pack or the box"
+        );
+
+        w.equip(Kind::Armor, 0, 14);
+        w.check(&them);
+        w.assert_capped(Kind::Armor, 3, "swap the head to a pack helm");
+
+        w.equip_around_the_update(Kind::Armor, 1, 15);
+        assert!(
+            w.armor.carried[1].unwrap().1 > 3,
+            "the worst case really was over the cap"
+        );
+        w.check(&them);
+        w.assert_capped(Kind::Armor, 3, "swap the chest around the armour update");
+
+        w.unequip(Kind::Armor, 2);
+        w.check(&them);
+        w.assert_capped(Kind::Armor, 3, "take the gloves off");
+
+        w.equip_around_the_update(Kind::Armor, 0, 10);
+        w.check(&them);
+        w.assert_capped(Kind::Armor, 3, "the first helm back on");
+
+        w.pick_up(18, PICKED_UP_GLOVES, T_HANDS, 9);
+        w.check(&them);
+        w.assert_capped(Kind::Armor, 3, "gloves picked up mid-cap, never worn");
+
+        w.assert_saved_real("a save while capped");
+        w.assert_capped(Kind::Armor, 3, "a save does not lift the cap in the game");
+
+        w.check(&[]);
+        w.assert_real(Kind::Armor, "they left");
+        assert!(w.armor.ledger.is_empty());
+        w.assert_saved_real("a save after they left");
+        assert!(
+            w.armor.resweeps >= 5,
+            "every change was resweept: {}",
+            w.armor.resweeps
+        );
+        assert_eq!(
+            w.weapons.resweeps, 0,
+            "weapon sync off never pushed anything"
+        );
+        w.check(&[]);
+        w.assert_real(Kind::Armor, "steady after the restore");
+    }
+
+    #[test]
+    fn each_feature_caps_only_its_own_items_on_or_off_in_every_combination() {
+        let them = [remote(3, [2, 0, 0, 0])];
+        for (weapons, armor) in [(false, false), (true, false), (false, true), (true, true)] {
+            let step = format!("weapons={weapons} armor={armor}");
+            let mut w = World::stocked(weapons, armor);
+            w.check(&them);
+            if weapons {
+                w.assert_capped(Kind::Weapon, 3, &step);
+            } else {
+                w.assert_real(Kind::Weapon, &step);
+            }
+            if armor {
+                w.assert_capped(Kind::Armor, 2, &step);
+            } else {
+                w.assert_real(Kind::Armor, &step);
+            }
+            w.assert_saved_real(&step);
+            w.check(&[]);
+            w.assert_real(Kind::Weapon, &step);
+            w.assert_real(Kind::Armor, &step);
+            w.assert_saved_real(&step);
+        }
+    }
+
+    #[test]
+    fn switching_one_off_restores_only_that_one() {
+        let them = [remote(3, [2, 0, 0, 0])];
+        let mut w = World::stocked(true, true);
+        w.check(&them);
+        w.armor.enabled = false;
+        w.check(&them);
+        w.assert_real(Kind::Armor, "armour sync off");
+        w.assert_capped(Kind::Weapon, 3, "weapon sync still on");
+        w.armor.enabled = true;
+        w.weapons.enabled = false;
+        w.check(&them);
+        w.assert_capped(Kind::Armor, 2, "armour sync on again");
+        w.assert_real(Kind::Weapon, "weapon sync off");
+        w.assert_saved_real("both ledgers feed the one save");
+    }
+
+    #[test]
+    fn the_kinds_split_the_item_types_between_them() {
+        for item_type in 0..=10u8 {
+            let weapon = Kind::Weapon.holds(item_type);
+            let armor = Kind::Armor.holds(item_type);
+            assert!(!(weapon && armor), "type {item_type} is claimed twice");
+            assert_eq!(weapon, item_type < 2, "type {item_type}");
+            assert_eq!(armor, (2..=5).contains(&item_type), "type {item_type}");
+        }
     }
 }
