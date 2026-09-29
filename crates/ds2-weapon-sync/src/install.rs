@@ -86,10 +86,53 @@ pub fn set_key(chord: Option<Chord>) {
         log(format_args!("{LOG_PREFIX} key {before} -> {after}"));
     }
 }
-use crate::policy::{self, Action, RemoteWeapons, Tracker};
+use crate::policy::{self, Action, Equipped, Held, Ledger, RemoteWeapons, Slot, Tracker, Watch};
 
 /// `CHR_WEAPON_UPDATE(PlayerCtrl*, WeaponUpdateRequest*)`.
 type WeaponUpdate = unsafe extern "system" fn(usize, *mut u8);
+
+/// `SAVE_DATA_ITEM_INVENTORY_WRITE(this, stream*, enabled)`.
+type SaveWrite = unsafe extern "system" fn(usize, usize, u32) -> usize;
+
+/// Trampoline back to the real inventory save writer.
+static SAVE_WRITE_ORIGINAL: AtomicUsize = AtomicUsize::new(0);
+
+/// Every inventory weapon the cap lowered, with its real level. The tick sweeps it and the save
+/// writer reads it, so it is behind a lock; neither holds it across a call into the game.
+static LEDGER: Mutex<Ledger> = Mutex::new(Ledger::new());
+
+/// The equipped slots as the last resweep left them. Game thread only.
+static WATCH: Mutex<Watch> = Mutex::new(Watch::new());
+
+unsafe extern "system" {
+    fn WriteProcessMemory(
+        process: isize,
+        address: *mut c_void,
+        buffer: *const c_void,
+        size: usize,
+        written: *mut usize,
+    ) -> i32;
+}
+
+/// `GetCurrentProcess()`'s constant pseudo handle.
+const CURRENT_PROCESS: isize = -1;
+
+/// Write one byte, answering `false` instead of faulting on an unmapped or read-only page.
+fn safe_write_u8(address: usize, value: u8) -> bool {
+    let mut written = 0usize;
+    // SAFETY: the source is a local byte; `WriteProcessMemory` checks the destination in the
+    // kernel and answers FALSE for a page it cannot write.
+    let ok = unsafe {
+        WriteProcessMemory(
+            CURRENT_PROCESS,
+            address as *mut c_void,
+            (&raw const value).cast(),
+            1,
+            &raw mut written,
+        )
+    };
+    ok != 0 && written == 1
+}
 
 /// Trampoline back to the real weapon update. Also what the push calls, so the push runs the
 /// game's code and not our detour's clamp twice.
@@ -264,6 +307,15 @@ pub unsafe fn install(test_cap: Option<u8>, key: Option<Chord>) -> Outcome {
     ) else {
         return refused;
     };
+    // The cap writes the inventory, so it is never installed without the hook that keeps the real
+    // levels in the save.
+    let Some(save_site) = checked_site(
+        ds2_rva::SAVE_DATA_ITEM_INVENTORY_WRITE,
+        &ds2_rva::SAVE_DATA_ITEM_INVENTORY_WRITE_PROLOGUE,
+        "SAVE_DATA_ITEM_INVENTORY_WRITE",
+    ) else {
+        return refused;
+    };
     let (Ok(manager), Ok(vtable)) = (
         game_rva(ds2_rva::GAME_MANAGER_IMP),
         game_rva(ds2_rva::PLAYER_CTRL_VTABLE),
@@ -286,7 +338,32 @@ pub unsafe fn install(test_cap: Option<u8>, key: Option<Chord>) -> Outcome {
         ));
         return refused;
     }
-    // The clamp goes in first and the tick second. The clamp does nothing until the tick has set a
+    // The save fix goes in first: until the tick lowers something it changes nothing, and nothing
+    // may be lowered before it is live.
+    // SAFETY: the site matched its recorded prologue, and the detour has the same ABI.
+    let save = match unsafe {
+        MhHook::new(save_site as *mut c_void, save_write_detour as *mut c_void)
+    } {
+        Ok(hook) => hook,
+        Err(status) => {
+            log(format_args!(
+                "{LOG_PREFIX} not installed: MH_CreateHook on SAVE_DATA_ITEM_INVENTORY_WRITE said \
+                 {status:?}"
+            ));
+            return refused;
+        }
+    };
+    SAVE_WRITE_ORIGINAL.store(save.trampoline() as usize, Ordering::Release);
+    // SAFETY: an address `MhHook::new` accepted above.
+    let status = unsafe { MH_EnableHook(save_site as *mut c_void) };
+    if status != MH_STATUS::MH_OK {
+        log(format_args!(
+            "{LOG_PREFIX} not installed: MH_EnableHook on SAVE_DATA_ITEM_INVENTORY_WRITE said \
+             {status:?}"
+        ));
+        return refused;
+    }
+    // The clamp goes in next and the tick last. The clamp does nothing until the tick has set a
     // cap, so if the tick cannot register, the weapon update runs exactly as the game's own.
     // SAFETY: the site matched its recorded prologue, and the detour has the same ABI.
     let weapon = match unsafe {
@@ -329,10 +406,10 @@ pub unsafe fn install(test_cap: Option<u8>, key: Option<Chord>) -> Outcome {
     std::thread::spawn(poll_key);
     let key = key_name();
     log(format_args!(
-        "{LOG_PREFIX} installed weapon-update=0x{weapon_site:016x} tick=0x{tick_site:016x} (shared) \
-         key={key} test_cap={} -- while another player is in the world, our weapons above their \
-         highest weapon level are lowered to it; the inventory (what the save keeps) is never \
-         written",
+        "{LOG_PREFIX} installed weapon-update=0x{weapon_site:016x} \
+         save-write=0x{save_site:016x} tick=0x{tick_site:016x} (shared) key={key} test_cap={} -- \
+         while another player is in the world, every weapon in the inventory above their highest \
+         weapon level is lowered to it, equipped or not; the save always gets the real levels",
         show(test_cap)
     ));
     // After the detours, and never a reason to refuse: the swords only show the switch.
@@ -358,21 +435,122 @@ fn local_player() -> Option<usize> {
     read_ptr(manager + ds2_rva::PLAYER_CTRL_OFFSET)
 }
 
-/// The bag: `[[[GameManagerImp + 0xA8] + 0x10] + 0x10] + 0x10`, two bag hops.
-fn bag() -> Option<usize> {
+/// The inventory's manager, `[ItemInventory2 + 0x10]`: the first bag hop, and the object whose
+/// `+0x30` is the save block.
+fn inventory_manager() -> Option<usize> {
     let manager = read_ptr(GAME_MANAGER.load(Ordering::Acquire))?;
     let data = read_ptr(manager + ds2_rva::GAME_DATA_MANAGER_OFFSET)?;
-    let mut at = read_ptr(data + ds2_rva::ITEM_INVENTORY_OFFSET)?;
-    for _ in 0..ds2_rva::ITEM_BAG_LIST_HOPS {
+    let inventory = read_ptr(data + ds2_rva::ITEM_INVENTORY_OFFSET)?;
+    read_ptr(inventory + ds2_rva::ITEM_BAG_LIST_OFFSET)
+}
+
+/// The bag: `[[[GameManagerImp + 0xA8] + 0x10] + 0x10] + 0x10`, two bag hops.
+fn bag() -> Option<usize> {
+    let mut at = inventory_manager()?;
+    for _ in 1..ds2_rva::ITEM_BAG_LIST_HOPS {
         at = read_ptr(at + ds2_rva::ITEM_BAG_LIST_OFFSET)?;
     }
     Some(at)
+}
+
+fn entry_address(bag: usize, index: u16) -> usize {
+    bag + ds2_rva::ITEM_ENTRY_ARRAY_OFFSET + usize::from(index) * ds2_rva::ITEM_ENTRY_STRIDE
+}
+
+/// Every weapon and shield in the bag's entry array, pack and box alike, or `None` when the array
+/// could not be read in one piece. A partial read is never answered, because the ledger takes an
+/// entry missing from the answer to be gone.
+///
+/// An entry counts when its type carries an infusion (weapons and shields), its item id is set,
+/// and its handle is its own index, which is what makes the index the save block's index too.
+fn held_weapons(bag: usize) -> Option<Vec<Held>> {
+    let mut raw = vec![0u8; ds2_rva::ITEM_ENTRY_COUNT * ds2_rva::ITEM_ENTRY_STRIDE];
+    // SAFETY: one fault-safe bulk read; nothing is interpreted unless it all came back.
+    if !unsafe { read_bytes(bag + ds2_rva::ITEM_ENTRY_ARRAY_OFFSET, &mut raw) } {
+        return None;
+    }
+    let mut out = Vec::new();
+    let (entries, _) = raw.as_chunks::<{ ds2_rva::ITEM_ENTRY_STRIDE }>();
+    for (index, entry) in entries.iter().enumerate() {
+        let id = ds2_rva::ITEM_ENTRY_ITEM_ID_OFFSET;
+        let item = u32::from_le_bytes([entry[id], entry[id + 1], entry[id + 2], entry[id + 3]]);
+        let handle = u16::from_le_bytes([
+            entry[ds2_rva::ITEM_ENTRY_HANDLE_OFFSET],
+            entry[ds2_rva::ITEM_ENTRY_HANDLE_OFFSET + 1],
+        ]);
+        let kind = entry[ds2_rva::ITEM_ENTRY_TYPE_OFFSET];
+        let Ok(index) = u16::try_from(index) else {
+            break;
+        };
+        if item == 0 || item == u32::MAX || handle != index || kind >= ITEM_TYPE_WEAPON_BELOW {
+            continue;
+        }
+        out.push(Held {
+            index,
+            item,
+            level: entry[ds2_rva::ITEM_ENTRY_LEVEL_OFFSET] & 0x0f,
+        });
+    }
+    Some(out)
+}
+
+/// Item types below this are weapons and shields: the types that carry an infusion.
+const ITEM_TYPE_WEAPON_BELOW: u8 = ds2_rva::ITEM_TYPE_HAS_INFUSION_BELOW;
+
+/// Put `to` in the low nibble of a level byte at `address` if the entry still holds `item` at
+/// `from`. `item_at` is where that entry or record keeps its item id.
+fn write_level(item_at: usize, level_at: usize, item: u32, from: Option<u8>, to: u8) -> bool {
+    // SAFETY: fault-safe reads.
+    let (Some(found), Some(byte)) = (unsafe { safe_read_u32(item_at) }, unsafe {
+        safe_read_u8(level_at)
+    }) else {
+        return false;
+    };
+    if found != item || from.is_some_and(|from| byte & 0x0f != from) {
+        return false;
+    }
+    safe_write_u8(level_at, (byte & 0xf0) | (to & 0x0f))
+}
+
+/// The save block record for entry `index`: where its item id and its level byte are.
+fn save_record(manager: usize, index: u16) -> (usize, usize) {
+    let record = manager
+        + ds2_rva::ITEM_INVENTORY_SAVE_BLOCK_OFFSET
+        + usize::from(index) * ds2_rva::ITEM_SAVE_RECORD_STRIDE;
+    (
+        record + ds2_rva::ITEM_SAVE_RECORD_ITEM_OFFSET,
+        record + ds2_rva::ITEM_SAVE_RECORD_LEVEL_OFFSET,
+    )
+}
+
+/// Give every save record the ledger lowered its real level back. Answers `(fixed, already real)`.
+fn fix_save_block(manager: usize, ledger: &Ledger) -> (usize, usize) {
+    let (mut fixed, mut already) = (0, 0);
+    for (index, item, real) in ledger.lowered() {
+        let (item_at, level_at) = save_record(manager, index);
+        // SAFETY: fault-safe reads.
+        let (Some(found), Some(level)) = (unsafe { safe_read_u32(item_at) }, unsafe {
+            safe_read_u8(level_at)
+        }) else {
+            continue;
+        };
+        match ledger.saved_level(index, found, level & 0x0f) {
+            Some(real_level) if write_level(item_at, level_at, item, None, real_level) => {
+                fixed += 1;
+            }
+            None if found == item && level & 0x0f == real => already += 1,
+            _ => {}
+        }
+    }
+    (fixed, already)
 }
 
 /// One of our weapons as the inventory holds it: the real level.
 #[derive(Clone, Copy, Debug)]
 struct InventoryWeapon {
     item: u32,
+    /// The entry's handle, which is its index in the bag and the ledger's key.
+    handle: u16,
     durability_bits: u32,
     level: u8,
     infusion: u8,
@@ -382,10 +560,11 @@ struct InventoryWeapon {
 fn inventory_weapon(bag: usize, slot: usize) -> Option<InventoryWeapon> {
     let entry = read_ptr(bag + ds2_rva::ITEM_BAG_EQUIPPED_ENTRIES_OFFSET + slot * 8)?;
     // SAFETY: fault-safe reads of an entry the bag points at.
-    let (kind, item, durability_bits, level, infusion) = unsafe {
+    let (kind, item, handle, durability_bits, level, infusion) = unsafe {
         (
             safe_read_u8(entry + ds2_rva::ITEM_ENTRY_TYPE_OFFSET)?,
             safe_read_u32(entry + ds2_rva::ITEM_ENTRY_ITEM_ID_OFFSET)?,
+            safe_read_u16(entry + ds2_rva::ITEM_ENTRY_HANDLE_OFFSET)?,
             safe_read_u32(entry + ds2_rva::ITEM_ENTRY_DURABILITY_OFFSET)?,
             safe_read_u8(entry + ds2_rva::ITEM_ENTRY_LEVEL_OFFSET)?,
             safe_read_u8(entry + ds2_rva::ITEM_ENTRY_INFUSION_OFFSET)?,
@@ -393,6 +572,7 @@ fn inventory_weapon(bag: usize, slot: usize) -> Option<InventoryWeapon> {
     };
     Some(InventoryWeapon {
         item,
+        handle,
         durability_bits,
         level: if kind < ds2_rva::ITEM_TYPE_HAS_LEVEL_BELOW {
             level & 0x0f
@@ -591,6 +771,172 @@ fn clamp_request(player: usize, request: usize) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The save.
+// ---------------------------------------------------------------------------------------------
+
+/// How many times the inventory save writer has run, for the log.
+static SAVES: AtomicU32 = AtomicU32::new(0);
+
+/// The inventory save writer's detour: before the game streams the save block, every record the
+/// cap lowered gets its real level back, so no save ever keeps a lowered level. The entries the
+/// pause menu and the equip path read stay lowered: the block is a separate copy, and it is the
+/// only thing the writer streams.
+unsafe extern "system" fn save_write_detour(this: usize, stream: usize, enabled: u32) -> usize {
+    if enabled != 0 {
+        let _ = std::panic::catch_unwind(before_save);
+    }
+    let raw = SAVE_WRITE_ORIGINAL.load(Ordering::Acquire);
+    if raw == 0 {
+        return 0;
+    }
+    // SAFETY: MinHook's trampoline for this exact function and ABI.
+    let original: SaveWrite = unsafe { std::mem::transmute::<usize, SaveWrite>(raw) };
+    // SAFETY: forwarding the game's own arguments.
+    unsafe { original(this, stream, enabled) }
+}
+
+fn before_save() {
+    let save = SAVES.fetch_add(1, Ordering::Relaxed) + 1;
+    let ledger = LEDGER.lock().unwrap_or_else(|poison| poison.into_inner());
+    let Some(manager) = inventory_manager() else {
+        log(format_args!(
+            "{LOG_PREFIX} save #{save}: the inventory is being written but its manager is \
+             unreadable; lowered={}",
+            ledger.len()
+        ));
+        return;
+    };
+    let (fixed, already) = fix_save_block(manager, &ledger);
+    log(format_args!(
+        "{LOG_PREFIX} save #{save}: the inventory is being written with lowered={} weapons; their \
+         save records carry the real level (fixed={fixed} already-real={already})",
+        ledger.len()
+    ));
+}
+
+// ---------------------------------------------------------------------------------------------
+// The whole inventory, and the equipped slots.
+// ---------------------------------------------------------------------------------------------
+
+/// One pass of the ledger over every weapon in the inventory at `cap`, and the writes it asks
+/// for. A restore also puts the real level in that entry's save record, in case the game copied
+/// the lowered one there while it was lowered.
+fn sweep_inventory(cap: Option<u8>) {
+    let (Some(manager), Some(bag)) = (inventory_manager(), bag()) else {
+        return;
+    };
+    let Some(held) = held_weapons(bag) else {
+        return;
+    };
+    let mut ledger = LEDGER.lock().unwrap_or_else(|poison| poison.into_inner());
+    if cap.is_none() && ledger.is_empty() {
+        return;
+    }
+    let writes = ledger.sweep(&held, cap);
+    if writes.is_empty() {
+        return;
+    }
+    let (mut lowered, mut restored, mut failed) = (0usize, 0usize, 0usize);
+    let mut sample = Vec::new();
+    for write in &writes {
+        let entry = entry_address(bag, write.index);
+        let wrote = write_level(
+            entry + ds2_rva::ITEM_ENTRY_ITEM_ID_OFFSET,
+            entry + ds2_rva::ITEM_ENTRY_LEVEL_OFFSET,
+            write.item,
+            Some(write.from),
+            write.to,
+        );
+        if !wrote {
+            failed += 1;
+            continue;
+        }
+        if write.restores() {
+            restored += 1;
+            let (item_at, level_at) = save_record(manager, write.index);
+            write_level(item_at, level_at, write.item, None, write.to);
+        } else {
+            lowered += 1;
+        }
+        if sample.len() < SAMPLE {
+            sample.push(format!(
+                "#{}:{}+{}->+{}",
+                write.index, write.item, write.from, write.to
+            ));
+        }
+    }
+    log(format_args!(
+        "{LOG_PREFIX} inventory cap={} changed={} lowered={lowered} restored={restored} \
+         failed={failed} weapons={} still-lowered={} [{}{}]",
+        show(cap),
+        lowered + restored,
+        held.len(),
+        ledger.len(),
+        sample.join(" "),
+        if writes.len() > SAMPLE { " ..." } else { "" }
+    ));
+}
+
+/// How many weapons the inventory holds at each level, `+0:12 +10:40`, so two loads of the same
+/// character can be compared: before a capped session and after it has saved and reloaded.
+fn level_census(bag: usize) -> String {
+    let Some(held) = held_weapons(bag) else {
+        return "unreadable".to_string();
+    };
+    let mut counts = [0usize; 16];
+    for weapon in &held {
+        counts[usize::from(weapon.level & 0x0f)] += 1;
+    }
+    let parts: Vec<String> = counts
+        .iter()
+        .enumerate()
+        .filter(|(_, count)| **count > 0)
+        .map(|(level, count)| format!("+{level}:{count}"))
+        .collect();
+    format!("total={} [{}]", held.len(), parts.join(" "))
+}
+
+/// How many entries an inventory line names before it says "...".
+const SAMPLE: usize = 8;
+
+/// The six equipped slots in inventory slot order: the inventory entry, and the two copies the
+/// character carries.
+fn equipped(bag: usize, player: usize) -> Equipped {
+    let records = weapon_records(player);
+    let live = live_levels(player);
+    let mut out = [Slot::default(); 6];
+    for (slot, out) in out.iter_mut().enumerate() {
+        let chr_slot = ds2_rva::WEAPON_INTERNAL_TO_CHR_SLOT[slot] as usize;
+        out.inventory = inventory_weapon(bag, slot).map(|weapon| (weapon.item, weapon.level));
+        out.record = records.map(|records| (records[chr_slot].0, records[chr_slot].1 & 0x0f));
+        out.live = live.map(|live| live[live_index(chr_slot)]);
+    }
+    out
+}
+
+fn show_slots(slots: &Equipped) -> String {
+    slots
+        .iter()
+        .enumerate()
+        .map(|(slot, s)| {
+            let inventory = s.inventory.map_or_else(
+                || "-".to_string(),
+                |(item, level)| format!("{item}+{level}"),
+            );
+            let record = s.record.map_or_else(
+                || "?".to_string(),
+                |(item, level)| format!("{item}+{level}"),
+            );
+            let live = s
+                .live
+                .map_or_else(|| "?".to_string(), |level| format!("+{level}"));
+            format!("s{slot}:{inventory}/rec {record}/live {live}")
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+// ---------------------------------------------------------------------------------------------
 // The tick, and the push.
 // ---------------------------------------------------------------------------------------------
 
@@ -654,8 +1000,9 @@ fn check() {
         && let Some(bag) = bag()
     {
         log(format_args!(
-            "{LOG_PREFIX} world player=0x{local:x} built with: {}",
-            copies(bag, local)
+            "{LOG_PREFIX} world player=0x{local:x} built with: {} inventory weapons by level: {}",
+            copies(bag, local),
+            level_census(bag)
         ));
     }
     let remotes = if local == 0 {
@@ -678,10 +1025,18 @@ fn check() {
         let previous = tracker.applied();
         (tracker.step(local, cap), previous)
     };
-    CURRENT_CAP.store(
-        cap_to_atomic(if local == 0 { None } else { cap }),
-        Ordering::Release,
-    );
+    let cap = if local == 0 { None } else { cap };
+    CURRENT_CAP.store(cap_to_atomic(cap), Ordering::Release);
+    // Every weapon in the inventory first, so whatever is equipped next, by anything, is already
+    // at the cap, and the push below reads capped entries.
+    sweep_inventory(cap);
+    let redrive = matches!(action, Action::Redrive { .. });
+    if local != 0
+        && !redrive
+        && let Some(bag) = bag()
+    {
+        resweep_if_changed(bag, local, cap);
+    }
     if let Action::Redrive { cap } = action {
         let highest: Vec<String> = remotes
             .iter()
@@ -700,17 +1055,69 @@ fn check() {
     }
 }
 
-/// Push every equipped weapon through the game's weapon update at `clamp(real, cap)`, then read
-/// all three copies back and log them, so the line says what the character carries and that the
-/// inventory did not move.
+/// The cap moved: push every equipped weapon, log all three copies of every slot, and remember
+/// the slots as settled so the watch asks again only when they change.
 fn push(player: usize, cap: Option<u8>) {
-    let raw = WEAPON_UPDATE_ORIGINAL.load(Ordering::Acquire);
     let Some(bag) = bag() else {
         log(format_args!("{LOG_PREFIX} push skipped: no inventory bag"));
         return;
     };
-    if raw == 0 {
+    let pushed = push_slots(bag, player, cap);
+    let verb = if cap.is_some() { "CAPPED" } else { "RESTORED" };
+    log(format_args!(
+        "{LOG_PREFIX} {verb} cap={} pushed=[{}] after: {}",
+        show(cap),
+        pushed.join(" "),
+        copies(bag, player)
+    ));
+    let mut watch = WATCH.lock().unwrap_or_else(|poison| poison.into_inner());
+    if cap.is_some() {
+        watch.settle(equipped(bag, player));
+    } else {
+        let _ = watch.changed(&equipped(bag, player), None);
+    }
+}
+
+/// The equipped slots changed while a cap is on, for whatever reason: resweep all six, and log
+/// one line with the slots before, now, what was pushed and what the character carries after.
+fn resweep_if_changed(bag: usize, player: usize, cap: Option<u8>) {
+    let now = equipped(bag, player);
+    let mut watch = WATCH.lock().unwrap_or_else(|poison| poison.into_inner());
+    let Some(before) = watch.changed(&now, cap) else {
         return;
+    };
+    let slots = policy::resweep(&now);
+    let pushed = if slots.is_empty() {
+        Vec::new()
+    } else {
+        push_slots(bag, player, cap)
+    };
+    let after = equipped(bag, player);
+    watch.settle(after);
+    let over = after.iter().any(|slot| {
+        let limit = cap.unwrap_or(ds2_rva::WEAPON_LEVEL_MAX);
+        slot.inventory.is_some()
+            && (slot.record.is_some_and(|(_, level)| level > limit)
+                || slot.live.is_some_and(|level| level > limit))
+    });
+    log(format_args!(
+        "{LOG_PREFIX} equipped changed under cap={}: before=[{}] now=[{}] resweep slots={slots:?} \
+         pushed=[{}] after=[{}] all-within-cap={}",
+        show(cap),
+        before.map_or_else(|| "first look".to_string(), |before| show_slots(&before)),
+        show_slots(&now),
+        pushed.join(" "),
+        show_slots(&after),
+        !over
+    ));
+}
+
+/// Push every equipped weapon whose character copies differ from `clamp(inventory level, cap)`
+/// through the game's weapon update, all six slots checked. Answers what was pushed.
+fn push_slots(bag: usize, player: usize, cap: Option<u8>) -> Vec<String> {
+    let raw = WEAPON_UPDATE_ORIGINAL.load(Ordering::Acquire);
+    if raw == 0 {
+        return Vec::new();
     }
     // SAFETY: MinHook's trampoline for this exact function and ABI. Calling the trampoline rather
     // than the patched entry runs the game's code only; the clamp has already been applied to the
@@ -755,18 +1162,14 @@ fn push(player: usize, cap: Option<u8>) {
             // lays out the one it passes (ds2-rva CHR_WEAPON_UPDATE).
             unsafe { update(player, request.0.as_mut_ptr()) };
         }
-        pushed.push(format!(
-            "s{slot}:{}+{}->+{level}",
-            weapon.item, weapon.level
-        ));
+        let real = LEDGER
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .real(weapon.handle, weapon.item)
+            .unwrap_or(weapon.level);
+        pushed.push(format!("s{slot}:{}+{real}->+{level}", weapon.item));
     }
-    let verb = if cap.is_some() { "CAPPED" } else { "RESTORED" };
-    log(format_args!(
-        "{LOG_PREFIX} {verb} cap={} pushed=[{}] after: {}",
-        show(cap),
-        pushed.join(" "),
-        copies(bag, player)
-    ));
+    pushed
 }
 
 /// All three copies of every weapon slot's level, inventory slot order.

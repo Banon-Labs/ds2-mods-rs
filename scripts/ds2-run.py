@@ -2313,8 +2313,8 @@ def config_text(
 [{WEAPON_SYNC_SECTION}]
 # `enabled` is startup-only. While another player is in the world, `ds2-weapon-sync` lowers every
 # weapon of ours above the highest weapon level any of them has equipped, and puts them back when
-# they are gone. Only the character's equipment copies change; the inventory, which the save keeps,
-# is never written. It shares the net session update with `[voice_chat]`; both can be on. Off
+# they are gone: every weapon in the inventory, pack and box, and what is equipped. The save always
+# gets the real levels: the save writer is detoured to put them back in what it writes. It shares the net session update with `[voice_chat]`; both can be on. Off
 # unless `--weapon-sync`. `key` turns it on and off in game (default `{WEAPON_SYNC_DEFAULT_KEY}`,
 # live-reloaded). `test_cap` pretends a remote player at that level is present
 # (`--weapon-sync-test-cap N`), also live. Grep the log for `{WEAPON_SYNC_LOG_PREFIX}`.
@@ -5942,9 +5942,9 @@ def main() -> int:
         dest="weapon_sync",
         action="store_true",
         help=(
-            "while another player is in the world, lower our weapons above the highest weapon "
-            "level any of them has equipped, and restore them when they leave. The inventory (what "
-            "the save keeps) is never written. F6 (the [weapon_sync] key) turns it on and off in "
+            "while another player is in the world, lower every weapon in our inventory above the "
+            "highest weapon level any of them has equipped, and restore them when they leave. A "
+            "save made while capped keeps the real levels. F6 (the [weapon_sync] key) turns it on and off in "
             "game. Runs alongside --voice-chat: both share one net session update detour."
         ),
     )

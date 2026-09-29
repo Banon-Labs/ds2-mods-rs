@@ -10508,6 +10508,43 @@ pub const ITEM_TYPE_HAS_LEVEL_BELOW: u8 = 6;
 /// Item types below this carry an infusion (`if (entry[0x1e] < 2)`).
 pub const ITEM_TYPE_HAS_INFUSION_BELOW: u8 = 2;
 
+/// `SaveDataItemInventory2`'s write (vtable `0x1410da418` slot 2). RVA `0x002e53f0`.
+///
+/// `fn(this, stream*, u32 enabled)`. When `enabled` is nonzero it walks
+/// `[[GameManagerImp + 0xA8] + 0x10]` (`ItemInventory2`), calls `0x1401aba20` -> `0x1401a6020`,
+/// which answers `[ItemInventory2 + 0x10]` plus [`ITEM_INVENTORY_SAVE_BLOCK_OFFSET`], and streams
+/// [`ITEM_INVENTORY_SAVE_BLOCK_SIZE`] bytes from there with `stream->vtable[0x18]`. That block is
+/// everything the save keeps of the inventory; the bag entries are not read here.
+/// Hop 0 is real code, not an Arxan redirect (`scripts/ds2-arxan-chain.py`).
+pub const SAVE_DATA_ITEM_INVENTORY_WRITE: u32 = 0x002e_53f0;
+
+/// The first ten bytes of [`SAVE_DATA_ITEM_INVENTORY_WRITE`]: `test r8d,r8d; je +0x56; push rdi;
+/// sub rsp,0x20`.
+pub const SAVE_DATA_ITEM_INVENTORY_WRITE_PROLOGUE: [u8; 10] =
+    [0x45, 0x85, 0xc0, 0x74, 0x56, 0x57, 0x48, 0x83, 0xec, 0x20];
+
+/// `[ItemInventory2 + 0x10] + 0x30`: the inventory's save block, one
+/// [`ITEM_SAVE_RECORD_STRIDE`]-byte record per bag entry, indexed by the entry's index (its handle
+/// at [`ITEM_ENTRY_HANDLE_OFFSET`]).
+///
+/// A separate copy from the bag entries, not a view of them. Read live 2026-09-28
+/// (`scripts/frida/weapon-sync-save-block.js`): entries 3, 355, 1152, 1159 and 1262 had their
+/// records at block `+0x30`, `+0x1630`, `+0x4800`, `+0x4870` and `+0x4ee0`, `index * 0x10` each,
+/// with the same item id, durability and level.
+pub const ITEM_INVENTORY_SAVE_BLOCK_OFFSET: usize = 0x30;
+
+/// Bytes [`SAVE_DATA_ITEM_INVENTORY_WRITE`] streams from the save block. `0x100bc`.
+pub const ITEM_INVENTORY_SAVE_BLOCK_SIZE: usize = 0x100bc;
+
+/// Bytes per save block record: `{u32 item, u32, f32 durability, u8 level, u8 infusion, u16}`.
+pub const ITEM_SAVE_RECORD_STRIDE: usize = 0x10;
+
+/// A save block record's `u32` item id. `+0x00`.
+pub const ITEM_SAVE_RECORD_ITEM_OFFSET: usize = 0x00;
+
+/// A save block record's level byte, the value the next load puts in the entry's `+0x25`. `+0x0C`.
+pub const ITEM_SAVE_RECORD_LEVEL_OFFSET: usize = 0x0c;
+
 /// `CharacterCtrl + 0x378`: `ChrAsmCtrl*`. Its vtable slot `0x120` on `PlayerCtrl` is
 /// `mov rax,[rcx+0x378]; ret` (`0x1403126b0`).
 pub const CHARACTER_CTRL_CHR_ASM_CTRL_OFFSET: usize = 0x378;
