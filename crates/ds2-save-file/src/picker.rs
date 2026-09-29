@@ -540,9 +540,14 @@ const CELL_BG: [f32; 4] = style::INK_1;
 const FOCUS_EDGE: [f32; 4] = style::BRONZE;
 /// The bronze rule down the left edge of the row the cursor is on.
 const FOCUS_RULE: f32 = 3.0;
-const PAD: f32 = 14.0;
+/// The list keeps room for this many rows however few a folder has, so the panel does not jump
+/// in size between folders.
+const MIN_ROWS: usize = 6;
 
 /// The panel's draw function, called by `ds2-overlay` once per frame.
+///
+/// Every gap is a fraction of the font's line, not a pixel count: on the 3840x2160 back buffer
+/// the game renders into (2026-09-29), fixed pixels read as touching lines.
 fn draw(ui: &Ui) {
     let Ok(mut guard) = PANEL.try_lock() else {
         return;
@@ -555,19 +560,23 @@ fn draw(ui: &Ui) {
     }
     let display = ui.io().display_size;
     let line = ui.current_font_size();
-    let row_height = line + 8.0;
-    let width = (display[0] * 0.62)
-        .clamp(560.0, 1100.0)
-        .min(display[0] - 32.0);
-    let height = (display[1] * 0.78).min(display[1] - 32.0);
-    let left = (display[0] - width) * 0.5;
-    let top = (display[1] - height) * 0.5;
+    let pad = line;
+    let row_height = (line * 1.6).round();
+    let title_gap = (line * 0.35).round();
+    let section_gap = (line * 0.8).round();
+    let strip_gap = (line * 0.5).round();
+    let width = (line * 56.0).clamp(560.0, display[0] * 0.9);
+    let max_height = (display[1] * 0.78).min(display[1] - 32.0);
 
-    // Rows the list area holds: the height, less the header (a title in the game's big face and a
-    // subtitle), the banner and the footer.
+    // The fixed parts: the header (a title in the game's big face and a subtitle), the drive
+    // strip's extra gap and the footer. The banner is reserved at its largest for the capacity,
+    // so a refusal appearing does not change how many rows the model pages by.
     let title_line = ds2_overlay::panels::title_height(ui);
-    let reserved = PAD * 2.0 + title_line + line + 10.0 + (line * 3.0 + 12.0) + (line + 10.0);
-    let capacity = (((height - reserved) / row_height).floor() as usize).clamp(4, 30);
+    let header = pad + title_line + title_gap + line + section_gap;
+    let footer = section_gap + line + pad;
+    let banner_max = line * 3.0 + section_gap;
+    let reserved = header + banner_max + strip_gap + row_height + footer;
+    let capacity = (((max_height - reserved) / row_height).floor() as usize).clamp(4, 30);
     if capacity != panel.capacity {
         panel.capacity = capacity;
         panel.model.set_row_capacity(capacity);
@@ -579,6 +588,22 @@ fn draw(ui: &Ui) {
     let Some(view) = panel.view.clone() else {
         return;
     };
+
+    // As tall as what is on it.
+    let banner = view.status.as_ref().map_or(0.0, |s| {
+        line * (1 + s.detail_lines().len()) as f32 + section_gap
+    });
+    let has_strip = view.rows.iter().any(|r| r.kind == RowKind::DriveStrip);
+    let rows =
+        view.rows.len().max(MIN_ROWS) as f32 * row_height + if has_strip { strip_gap } else { 0.0 };
+    let name = if view.name_field.is_some() {
+        row_height + 4.0
+    } else {
+        0.0
+    };
+    let height = (header + banner + rows + name + footer).min(display[1] - 32.0);
+    let left = (display[0] - width) * 0.5;
+    let top = (display[1] - height) * 0.5;
 
     let list = ui.get_foreground_draw_list();
     list.add_rect([0.0, 0.0], display, DIM_COVER)
@@ -605,9 +630,9 @@ fn draw(ui: &Ui) {
     let mut click: Option<PickerInput> = None;
 
     // Header: title, then where.
-    let mut y = top + PAD;
-    let inner_left = left + PAD;
-    let inner_right = left + width - PAD;
+    let mut y = top + pad;
+    let inner_left = left + pad;
+    let inner_right = left + width - pad;
     let title_line = ds2_overlay::panels::title(ui, &list, [inner_left, y], TITLE, &view.title);
     let close_label = "Close";
     let close_width = ui.calc_text_size(close_label)[0];
@@ -619,13 +644,13 @@ fn draw(ui: &Ui) {
         if close_hover { TITLE } else { DIM },
         close_label,
     );
-    y += title_line + 2.0;
+    y += title_line + title_gap;
     list.add_text(
         [inner_left, y],
         DIM,
         clip(ui, &view.subtitle, inner_right - inner_left),
     );
-    y += line + 10.0;
+    y += line + section_gap;
 
     // The banner: why a pick was refused, or what is happening.
     let banner_top = y;
@@ -640,7 +665,7 @@ fn draw(ui: &Ui) {
             );
         }
     }
-    y = banner_top + line * 3.0 + 12.0;
+    y = banner_top + banner;
 
     // The rows.
     for row in &view.rows {
@@ -719,6 +744,9 @@ fn draw(ui: &Ui) {
             }
         }
         y += row_height;
+        if row.kind == RowKind::DriveStrip {
+            y += strip_gap;
+        }
     }
 
     // The new file's name, while it is typed.
@@ -750,7 +778,7 @@ fn draw(ui: &Ui) {
     }
 
     // The footer: each control's button for the device the player is on, and a word.
-    let footer_y = top + height - PAD - line;
+    let footer_y = top + height - pad - line;
     let pad = panel.reader.pad_last();
     let hints: Vec<(&str, &str)> = view
         .hint
@@ -832,12 +860,15 @@ fn draw_drive_strip(
     let inside = |min: [f32; 2], max: [f32; 2]| {
         mouse[0] >= min[0] && mouse[0] < max[0] && mouse[1] >= min[1] && mouse[1] < max[1]
     };
+    // Room around a cell's text, in lines like the rest of the panel.
+    let px = (line * 0.35).round();
+    let py = (line * 0.2).round();
     let mut x = origin[0];
     let mut press = None;
     for (index, cell) in view.drives.iter().enumerate() {
-        let width = ui.calc_text_size(&cell.label)[0] + 12.0;
-        let min = [x, origin[1] - 3.0];
-        let max = [x + width, origin[1] + line + 3.0];
+        let width = ui.calc_text_size(&cell.label)[0] + px * 2.0;
+        let min = [x, origin[1] - py];
+        let max = [x + width, origin[1] + line + py];
         list.add_rect(min, max, CELL_BG)
             .filled(true)
             .rounding(style::ROUNDING)
@@ -849,18 +880,18 @@ fn draw_drive_strip(
                 .build();
         }
         list.add_text(
-            [x + 6.0, origin[1]],
+            [x + px, origin[1]],
             if cell.current { CURRENT } else { TEXT },
             &cell.label,
         );
         if clicked && inside(min, max) {
             press = Some(PickerInput::ClickDriveCell(index));
         }
-        x += width + 6.0;
+        x += width + py;
     }
     if let Some(field) = &view.path_field {
-        let min = [x + 6.0, origin[1] - 3.0];
-        let max = [right, origin[1] + line + 3.0];
+        let min = [x + py, origin[1] - py];
+        let max = [right, origin[1] + line + py];
         list.add_rect(min, max, if field.editing { FIELD_EDIT } else { FIELD_BG })
             .filled(true)
             .rounding(style::ROUNDING)
@@ -871,23 +902,23 @@ fn draw_drive_strip(
                 .thickness(1.5)
                 .build();
         }
-        let space = max[0] - min[0] - 12.0;
+        let space = max[0] - min[0] - px * 2.0;
         let shown = clip_left(ui, &field.text, space * 0.8);
         let typed_width = ui.calc_text_size(&shown)[0];
         if field.selected {
             list.add_rect(
-                [min[0] + 5.0, origin[1] - 1.0],
-                [min[0] + 7.0 + typed_width, origin[1] + line + 1.0],
+                [min[0] + px - 1.0, origin[1] - 1.0],
+                [min[0] + px + 1.0 + typed_width, origin[1] + line + 1.0],
                 SELECTION,
             )
             .filled(true)
             .build();
         }
-        list.add_text([min[0] + 6.0, origin[1]], TEXT, &shown);
+        list.add_text([min[0] + px, origin[1]], TEXT, &shown);
         if field.editing {
             let ghost = field.ghost.as_deref().unwrap_or("");
-            list.add_text([min[0] + 6.0 + typed_width, origin[1]], DIM, ghost);
-            let caret_x = min[0] + 6.0 + typed_width;
+            list.add_text([min[0] + px + typed_width, origin[1]], DIM, ghost);
+            let caret_x = min[0] + px + typed_width;
             list.add_line([caret_x, origin[1]], [caret_x, origin[1] + line], TITLE)
                 .build();
         }

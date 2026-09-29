@@ -224,7 +224,10 @@ pub fn hint_bar(
     line + 2.0
 }
 
-/// Each [`Atlas`]'s imgui texture id and its size, or `0` for none, in [`atlas_slot`] order.
+/// Each [`Atlas`]'s imgui texture id PLUS ONE and its size, or `0` for none, in [`atlas_slot`]
+/// order. Plus one because the atlases are the renderer's first textures: hudhook runs
+/// `initialize` before `setup_fonts` (`vendor/hudhook/src/renderer/pipeline.rs`), so `waku` is id
+/// 0, and storing it bare read as "not loaded" -- every panel drew without its frame (2026-09-29).
 static ATLAS_TEXTURES: [AtomicUsize; 3] = [const { AtomicUsize::new(0) }; 3];
 static ATLAS_SIZES: [AtomicUsize; 3] = [const { AtomicUsize::new(0) }; 3];
 
@@ -249,7 +252,7 @@ fn install_game_atlases(render: &mut dyn RenderContext) -> Result<(), String> {
             .map_err(|e| format!("{which:?}: {e:?}"))?;
         let slot = atlas_slot(which);
         ATLAS_SIZES[slot].store((page.width << 16) | page.height, Ordering::Release);
-        ATLAS_TEXTURES[slot].store(id.id(), Ordering::Release);
+        ATLAS_TEXTURES[slot].store(id.id() + 1, Ordering::Release);
     }
     Ok(())
 }
@@ -271,7 +274,7 @@ pub fn sprite(
         return false;
     }
     let (w, h) = ((size >> 16) as f32, (size & 0xffff) as f32);
-    list.add_image(hudhook::imgui::TextureId::new(id), min, max)
+    list.add_image(hudhook::imgui::TextureId::new(id - 1), min, max)
         .uv_min([src[0] / w, src[1] / h])
         .uv_max([src[2] / w, src[3] / h])
         .col(tint)
