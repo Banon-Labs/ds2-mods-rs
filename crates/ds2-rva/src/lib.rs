@@ -7161,6 +7161,66 @@ pub const FE_INVENTORY_GROUP_UPDATE: u32 = 0x000b_bea0;
 /// The five bytes [`FE_INVENTORY_GROUP_UPDATE`] must begin with. `push rbp; push rbx; push rdi`.
 pub const FE_INVENTORY_GROUP_UPDATE_PROLOGUE: [u8; 5] = [0x40, 0x55, 0x53, 0x57, 0x48];
 
+// =================================================================================================
+// The Inventory tab's category strip, and the one direction it answers
+//
+// Read out of the binary 2026-09-29 and confirmed with scripts/frida/pad-press-observe.js. The
+// update above takes `(this, f32 delta, event*, ?)`; the event is the frontend's 0x1c-byte input
+// record, `+0` pressed this frame, `+4` fire (press, then repeat), `+8` held, bits 1/2/4/8 =
+// up/down/left/right (built by `0x14010bc50` from action bits 33..36). Its tail `0x1400bc160` gives
+// the event to the category tab grid while the focus stack below is empty, and then
+// `test byte [event], 2` -> vtable `+0x168`: DOWN enters the item list. There is no branch for UP.
+// =================================================================================================
+
+/// The inventory group's focus stack, `this + 0x70`.
+///
+/// A `DLFixedVector` of focused children whose storage starts at `this + 0x70` rounded up to 8.
+/// Empty, or a null top entry, means the category strip has focus. Read at
+/// `0x1400bc167..0x1400bc1a6`.
+pub const FE_INVENTORY_FOCUS_STACK_OFFSET: usize = 0x70;
+
+/// The focus stack's element count, `this + 0xb8`.
+pub const FE_INVENTORY_FOCUS_STACK_COUNT_OFFSET: usize = 0xb8;
+
+/// The category tab grid, a `FexGridControl` embedded at `this + 0x1f78`. Its cursor indexes the
+/// tab list; the category getter (vtable `+0x140`, `0x1400ba9c0`) reads it.
+pub const FE_INVENTORY_TAB_GRID_OFFSET: usize = 0x1f78;
+
+/// The item grid, a `FexGridControl` embedded at `this + 0x20b0`. Pushed onto the focus stack by
+/// vtable `+0x80` (`0x1400be730`) when the list is entered; entering does not reset its cursor.
+pub const FE_INVENTORY_ITEM_GRID_OFFSET: usize = 0x20b0;
+
+/// Vtable slot `+0x168`, `0x1400be670`: enter the item list from the category strip. `fn(this)`.
+///
+/// Builds the current tab's list (`+0x178`, `0x1400744d0`) and, when it is empty, plays the
+/// refusal cue (`0x140040e70(0x5f5e119)`) and changes nothing. Otherwise it unfocuses the tab grid
+/// (`0x140021ad0`), queues the menu sound (`0x140040f90({2, 0x80000000})`) and pushes the item grid.
+/// This is exactly what a DOWN press on the strip runs.
+pub const FE_INVENTORY_ENTER_LIST_SLOT: usize = 0x168;
+
+/// `[this + 0x2040] == 1` sends the strip's post-input step to `0x140105b00` instead of the DOWN
+/// test, so the list is not entered in that state. Mirrored, not interpreted.
+pub const FE_INVENTORY_STRIP_ALT_MODE_OFFSET: usize = 0x2040;
+
+/// Frontend input event: the "pressed this frame" word, `+0`.
+pub const FE_MENU_EVENT_PRESSED_OFFSET: usize = 0x0;
+
+/// Frontend input event bit for UP. DOWN is `0x2`, LEFT `0x4`, RIGHT `0x8`.
+pub const FE_MENU_EVENT_UP: u32 = 0x1;
+
+/// `FUN_1400230f0(grid, index) -> int` -- set a `FexGridControl`'s cursor. RVA `0x000230f0`.
+///
+/// The setter the D-pad step (`0x140022c90`) and the wrap (`0x140022540`) both call: it scrolls
+/// the index into view and writes `+0xcc`/`+0xd0` (`0x1400231e8`, `0x140023200`). Returns 1 when it
+/// took the index as-is.
+pub const FEX_GRID_SET_CURSOR: u32 = 0x0002_30f0;
+
+/// The five bytes [`FEX_GRID_SET_CURSOR`] must begin with. `mov [rsp+0x10],edx; push rbx`.
+pub const FEX_GRID_SET_CURSOR_PROLOGUE: [u8; 5] = [0x89, 0x54, 0x24, 0x10, 0x53];
+
+/// The five bytes [`FEX_GRID_CURRENT_INDEX`] must begin with. `cmp byte [rcx+0x1e],0; jne`.
+pub const FEX_GRID_CURRENT_INDEX_PROLOGUE: [u8; 5] = [0x80, 0x79, 0x1e, 0x00, 0x75];
+
 /// `FeIngameItemSelectMenu::v18` -- the equip picker's own per-frame update. RVA `0x0009_2f00`.
 ///
 /// Slot index 2 of [`FE_EQUIP_GROUP_VTABLE`]. The name differs from the Inventory tab's because

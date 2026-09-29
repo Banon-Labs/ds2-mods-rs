@@ -48,12 +48,20 @@ fn log(args: std::fmt::Arguments<'_>) {
     }
 }
 
+/// The same sink, for the crate's other modules.
+pub(crate) fn log_line(args: std::fmt::Arguments<'_>) {
+    log(args);
+}
+
 /// What the loader asks for.
 #[derive(Clone, Debug, Default)]
 pub struct Request {
     /// The config file to watch for the binding. `None` disables live rebinding and leaves the
     /// built-in defaults in force -- which is a degraded mode, not the normal one.
     pub config_path: Option<PathBuf>,
+    /// Arm the sort button (`[inventory_sort] enabled`). The menu detours, and UP-enters-list with
+    /// them, install either way.
+    pub sort_button: bool,
 }
 
 /// What [`install`] managed to do.
@@ -356,6 +364,15 @@ unsafe extern "system" fn equip_dtor_detour(this: *mut u8, flags: u32) -> *mut u
 ///
 /// Called by the game on its own thread with its own arguments, forwarded unaltered.
 unsafe fn update_detour(slot: usize, this: *mut u8, delta: f32, third: usize, fourth: usize) {
+    // The Inventory update's third argument is the frontend input event; UP on the category strip
+    // is read from it before the original can change the focus it depends on.
+    let up = (slot == INVENTORY).then(|| {
+        crate::up_enter::before(
+            this,
+            TRACKED[INVENTORY].vtable.load(Ordering::Acquire),
+            third,
+        )
+    });
     let trampoline = trampoline_of(slot, |tracked| &tracked.update);
     if trampoline != 0 {
         // SAFETY: MinHook published this trampoline for this site. All FOUR arguments are the
@@ -364,6 +381,10 @@ unsafe fn update_detour(slot: usize, this: *mut u8, delta: f32, third: usize, fo
         // SAFETY: `original` is the trampoline MinHook produced for this target, so calling it runs the
         // bytes the detour displaced. The arguments are this detour's own, passed through untouched.
         unsafe { original(this, delta, third, fourth) };
+    }
+    if let Some(up) = up {
+        // SAFETY: the game thread, inside this group's own update, with the `before` taken above.
+        unsafe { crate::up_enter::after(this, up) };
     }
     // This IS the game thread, inside the list's own per-frame update -- the moment the whole
     // crate exists to act on.
@@ -927,6 +948,10 @@ pub unsafe fn install(request: &Request) -> Outcome {
     // ONE MENU IS ENOUGH TO BE USEFUL. The Inventory tab and the equip picker are independent
     // findings on independent addresses; if the equip pair ever stops matching its prologue on some
     // other build, the Inventory button should keep working rather than the whole feature vanish.
+    // Independent of the sort button: a failed prologue check here disarms only UP-enters-list.
+    if inventory {
+        crate::up_enter::install(base);
+    }
     if !inventory && !equip {
         DIALOG_OPEN.store(0, Ordering::Release);
         log(format_args!(
@@ -934,6 +959,16 @@ pub unsafe fn install(request: &Request) -> Outcome {
              open the dialog on"
         ));
         return Outcome::default();
+    }
+
+    // UP-enters-list rides on the detours above and is always on; `[inventory_sort] enabled`
+    // governs the sort button alone, which is everything below.
+    if !request.sort_button {
+        log(format_args!(
+            "{LOG_PREFIX} armed inventory={inventory} equip={equip} -- sort button off by config; \
+             UP-enters-list stays on"
+        ));
+        return Outcome { installed: true };
     }
 
     // The default is in force before the file is read, so a missing or unreadable config still
