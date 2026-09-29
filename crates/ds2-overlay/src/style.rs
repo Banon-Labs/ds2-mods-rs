@@ -39,22 +39,22 @@ pub const fn with_alpha(c: [f32; 4], alpha: f32) -> [f32; 4] {
 
 // ---- measured: the game's own atlases ----
 
-/// Panel fill. In-game_01's second-largest cluster.
+/// Panel fill. `In-game_01`'s second-largest cluster.
 pub const INK_0: [f32; 4] = rgb(0x10_0f_0e);
-/// Raised fill: cells, buttons, a hovered row. In-game_01.
+/// Raised fill: cells, buttons, a hovered row. `In-game_01`.
 pub const INK_1: [f32; 4] = rgb(0x1f_1e_1c);
-/// Focus fill: the row or cell the cursor is on. In-game_01's largest cluster.
+/// Focus fill: the row or cell the cursor is on. `In-game_01`'s largest cluster.
 pub const INK_2: [f32; 4] = rgb(0x34_2f_2b);
 /// Frames, focus edges and secondary text -- except on [`INK_2`], where it only reaches 4.37:1
-/// and secondary text is drawn in [`TEXT`] instead. waku_03's frame art.
+/// and secondary text is drawn in [`TEXT`] instead. `waku_03`'s frame art.
 pub const BRONZE: [f32; 4] = rgb(0xa7_91_71);
-/// Dividers and rules. In-game_01.
+/// Dividers and rules. `In-game_01`.
 pub const BRONZE_DIM: [f32; 4] = rgb(0x81_6f_56);
-/// Disabled text. waku_03.
+/// Disabled text. `waku_03`.
 pub const ASH: [f32; 4] = rgb(0x60_57_4c);
-/// Text-field fill. waku_03.
+/// Text-field fill. `waku_03`.
 pub const SLATE: [f32; 4] = rgb(0x20_2d_33);
-/// Warning fill: a tag's background, never text. waku_03.
+/// Warning fill: a tag's background, never text. `waku_03`.
 pub const RUST: [f32; 4] = rgb(0x5c_36_23);
 /// The game's own X. For a glyph beside a refusal, never for text: 3.04:1 on [`INK_0`].
 pub const BLOOD: [f32; 4] = rgb(0xb5_2c_10);
