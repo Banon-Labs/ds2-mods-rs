@@ -20,6 +20,7 @@ doc-valid-idents = [
     "DualShock",     # Sony's controller, spelled by Sony
     "FromSoftware",  # the company
     "MinHook",       # the detour library this workspace vendors
+    "MugenMonkey",   # the build-planner site, spelled by its owner
     "SteamID64",     # Valve's name for the 64-bit account id format
     "SteamStub",     # Valve's DRM wrapper, spelled by Valve
     "WinHTTP",       # Microsoft's API, spelled by Microsoft

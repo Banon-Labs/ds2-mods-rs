@@ -1,0 +1,1016 @@
+# MugenMonkey Dark Souls 2 planner ids. kind	id	name, tab-separated, in table order.
+# Armor rows carry their slot (head, chest, hands, legs) as the kind; id 0 is that slot empty.
+# Extracted by scripts/ds2-mugenmonkey-tables.py from ds2application-c66f4ac909d3873c76ae3f111169b027999cebf4100ce350e06396ad064d1b11.js
+# The ids are the planner's own, not the game's. Names join to game ids through
+# ds2_build_import_core::id_for, like a soulsplanner name.
+weapon	0	Bare Fists
+weapon	1	Dagger
+weapon	2	Parrying Dagger
+weapon	3	Bandit's Knife
+weapon	4	Shadow Dagger
+weapon	5	Thief Dagger
+weapon	6	Broken Thief Sword
+weapon	7	Manikin Knife
+weapon	8	Royal Dirk
+weapon	9	Mytha's Bent Blade
+weapon	10	Black Flamestone Dagger
+weapon	11	Blue Dagger
+weapon	12	Umbral Dagger
+weapon	13	Retainer's Short Sword
+weapon	14	Shortsword
+weapon	15	Longsword
+weapon	16	Broken Straight Sword
+weapon	17	Broadsword
+weapon	18	Foot Soldier Sword
+weapon	19	Varangian Sword
+weapon	20	Blue Flame
+weapon	21	Heide Knight Sword
+weapon	22	Red Rust Sword
+weapon	23	Sun Sword
+weapon	24	Drakekeeper's Sword
+weapon	25	Black Dragon Sword
+weapon	26	Yellow Quartz Longsword
+weapon	27	Possessed Armor Sword
+weapon	28	Ashen Warrior Sword
+weapon	29	Puzzling Stone Sword
+weapon	30	Fume Sword
+weapon	31	Ivory Straight Sword
+weapon	32	Bastard Sword
+weapon	33	Flamberge
+weapon	34	Claymore
+weapon	35	Royal GS
+weapon	36	Old Knight GS
+weapon	37	Mastodon GS
+weapon	38	Drangleic Sword
+weapon	39	Mirrah GS
+weapon	40	Old Mirrah GS
+weapon	41	Bluemoon GS
+weapon	42	Moonlight GS
+weapon	43	Black Knight GS
+weapon	44	Thorned GS
+weapon	45	Defender GS
+weapon	46	Watcher GS
+weapon	47	Ruler's Sword (1mil)
+weapon	48	Ruler's Sword (400k)
+weapon	49	Ruler's Sword (0)
+weapon	50	Black Dragon GS
+weapon	51	Key to the Embedded
+weapon	53	Majestic GS
+weapon	54	Drakeblood GS
+weapon	55	Loyce GS
+weapon	56	Charred Loyce GS
+weapon	57	Zweihander
+weapon	58	Greatsword
+weapon	59	Old Knight UGS
+weapon	60	Drakekeeper's UGS
+weapon	61	Black Knight UGS
+weapon	62	Smelter Sword
+weapon	63	Lost Sinner's Sword
+weapon	64	Pursuer's UGS
+weapon	65	Drakewing UGS
+weapon	66	King's UGS
+weapon	67	Crypt Blacksword
+weapon	68	Fume UGS
+weapon	69	Aged Smelter Sword
+weapon	70	Ivory King UGS
+weapon	71	Falchion
+weapon	72	Shotel
+weapon	73	Scimitar
+weapon	74	Manikin Sabre
+weapon	75	Monastery Scimitar
+weapon	75	Melu Scimitar
+weapon	76	Red Rust Scimitar
+weapon	77	Warped Sword
+weapon	78	Spider Fang
+weapon	79	Eleum Loyce
+weapon	80	Murakumo
+weapon	81	Arced Sword
+weapon	82	Curved Dragon GS
+weapon	83	Curved Nil GS (NG)
+weapon	84	Uchigatana
+weapon	85	Washing Pole
+weapon	86	Blacksteel Katana
+weapon	87	Chaos Blade
+weapon	88	Manslayer
+weapon	89	Berseker Blade
+weapon	90	Darkdrift
+weapon	91	Bewitched Alonne Sword
+weapon	92	Estoc
+weapon	93	Rapier
+weapon	94	Mail Breaker
+weapon	95	Ricard's Rapier
+weapon	96	Chaos Rapier
+weapon	97	Espada Ropera
+weapon	98	Black Scorpion Stinger
+weapon	99	Spider's Silk
+weapon	100	Ice Rapier
+weapon	101	Hand Axe
+weapon	102	Battle Axe
+weapon	103	Butcher's Knife
+weapon	104	Infantry Axe
+weapon	105	Bandit Axe
+weapon	106	Gyrm Axe
+weapon	107	Dragonslayer's Crescent Axe
+weapon	108	Bound Hand Axe
+weapon	109	Crescent Axe
+weapon	110	Greataxe
+weapon	111	Bandit GA
+weapon	112	Lion GA
+weapon	113	Gyrm GA
+weapon	114	Drakekeeper's GA
+weapon	115	Black Knight GA
+weapon	116	Giant Stone Axe
+weapon	117	Black Dragon GA
+weapon	118	Club
+weapon	119	Mace
+weapon	120	Morning Star
+weapon	121	Reinforced Club
+weapon	122	Craftsman's Hammer
+weapon	123	Aldia Hammer
+weapon	124	Handmaid's Ladle
+weapon	125	Blacksmith's Hammer
+weapon	126	Mace of the Insolent
+weapon	127	Barbed Club
+weapon	128	Black Dragon Warpick
+weapon	129	Homunculus Mace
+weapon	130	Large Club
+weapon	131	Great Club
+weapon	132	Pickaxe
+weapon	133	Old Knight Hammer
+weapon	134	Archdrake Mace
+weapon	135	Giant Warrior Club
+weapon	136	Malformed Skull
+weapon	137	Gyrm Great Hammer
+weapon	138	Drakekeeper's Great Hammer
+weapon	139	Drakekeeper's Warpick
+weapon	140	Demon's Great Hammer
+weapon	141	Dragon Tooth
+weapon	142	Malformed Shell
+weapon	143	Sacred Chime Hammer
+weapon	144	Iron King Hammer
+weapon	145	Sanctum Mace
+weapon	146	Smelter Hammer
+weapon	147	Spear
+weapon	148	Winged Spear
+weapon	149	Pike
+weapon	150	Partizan
+weapon	151	Stone Soldier Spear
+weapon	152	Silverblack Spear
+weapon	153	Heide Spear
+weapon	154	Pate's Spear
+weapon	155	Channeler's Trident
+weapon	156	Spitfire Spear
+weapon	157	Dragonslayer Spear
+weapon	158	Gargoyle Bident
+weapon	159	Yorgh's Spear
+weapon	160	Pilgrim's Spontoon
+weapon	161	Lucerne
+weapon	162	Scythe
+weapon	163	Halberd
+weapon	164	Mastodon Halberd
+weapon	165	Santier's Spear
+weapon	166	Dragonrider's Halberd
+weapon	167	Blue Knight's Halberd
+weapon	168	Old Knight Halberd
+weapon	169	Old Knight Pike
+weapon	170	Syan's Halberd
+weapon	171	Black Knight Halberd
+weapon	172	Roaring Halberd
+weapon	173	Helix Halberd
+weapon	174	Wrathful Axe
+weapon	175	Great Scythe
+weapon	176	Silverblack Sickle
+weapon	177	Great Machete
+weapon	178	Full Moon Sickle
+weapon	179	Crescent Sickle
+weapon	180	Scythe of Nahr Alma
+weapon	181	Bone Scythe
+weapon	182	Scythe of Want
+weapon	183	Heide Lance
+weapon	184	Heide Greatlance
+weapon	185	Grand Lance
+weapon	186	Chariot Lance
+weapon	187	Rampart Golem Lance
+weapon	188	Twinblade
+weapon	189	Curved Twinblade
+weapon	190	Stone Twinblade
+weapon	191	Red Iron Twinblade
+weapon	192	Dragonrider Twinblade
+weapon	193	Sorcerer's Twinblade
+weapon	194	Whip
+weapon	195	Notched Whip
+weapon	196	Bloodied Whip
+weapon	197	Spotted Whip
+weapon	198	Old Whip
+weapon	199	Claws
+weapon	200	Malformed Claws
+weapon	201	Manikin Claws
+weapon	202	Work Hook
+weapon	203	Caestus
+weapon	204	Bone Fist
+weapon	206	Short Bow
+weapon	207	Long Bow
+weapon	208	Composite Bow
+weapon	209	Sea Bow
+weapon	210	Bell Keeper Bow
+weapon	211	Hunter's Blackbow
+weapon	212	Dragonrider Bow
+weapon	213	Bow of Want
+weapon	214	Alonne Greatbow
+weapon	215	Dragonslayer Greatbow
+weapon	216	Possessed Armor Greatbow
+weapon	217	Twin-headed Greatbow
+weapon	218	Light Crossbow
+weapon	219	Heavy Crossbow
+weapon	220	Avelyn
+weapon	221	Shield Crossbow
+weapon	222	Sanctum Crossbow
+weapon	223	Sanctum Repeating Crossbow
+weapon	224	Pyromancy Flame
+weapon	225	Dark Pyromancy Flame
+weapon	226	Archdrake Staff
+weapon	227	Azal's Staff
+weapon	245	Black Witch's Staff
+weapon	229	Bat Staff
+weapon	231	Bone Staff
+weapon	232	Lizard Staff
+weapon	233	Olenford's Staff
+weapon	235	Retainer Staff
+weapon	237	Sorcerer's Staff
+weapon	239	Staff of Amana
+weapon	240	Staff of Wisdom
+weapon	241	Sunset Staff
+weapon	242	Transgressor's Staff
+weapon	243	Witchtree Branch
+weapon	244	Archdrake Chime
+weapon	246	Caitha's Chime
+weapon	247	Chime of Screams
+weapon	248	Chime of Want
+weapon	249	Cleric's Sacred Chime
+weapon	250	Disc Chime
+weapon	251	Dragon Chime
+weapon	252	Idol's Chime
+weapon	254	Priest's Chime
+weapon	255	Protective Chime
+weapon	257	Witchtree Bellvine
+weapon	258	Benhart's Parma
+weapon	259	Buckler
+weapon	260	Cleric's Parma
+weapon	261	Cleric's Small Shield
+weapon	262	Crimson Parma
+weapon	263	Cursed Bone Shield
+weapon	264	Foot Soldier Shield
+weapon	265	Golden Falcon Shield
+weapon	266	Iron Parma
+weapon	267	Llewellyn Shield
+weapon	268	Magic Shield
+weapon	269	Manikin Shield
+weapon	270	Phoenix Parma
+weapon	271	Small Leather Shield
+weapon	272	Sunlight Parma
+weapon	273	Target Shield
+weapon	274	Transgressor's Leather Shield
+weapon	275	Varangian Shield
+weapon	276	Watcher's Shield
+weapon	277	Archdrake Shield
+weapon	278	Bell Keeper Shield
+weapon	279	Black Dragon Shield
+weapon	280	Black Flamestone Parma
+weapon	281	Blossom Kite Shield
+weapon	282	Blue Wooden Shield
+weapon	283	Bone Shield
+weapon	284	Bound Wooden Shield
+weapon	285	Chaos Shield
+weapon	286	Charred Loyce Shield
+weapon	287	Defender's Shield
+weapon	288	Drakekeeper's Shield
+weapon	289	Drangleic Shield
+weapon	290	Golden Wing Shield
+weapon	291	Grand Spirit Tree Shield
+weapon	292	Hollow Soldier Shield
+weapon	293	Homunculus Wooden Shield
+weapon	294	King's Shield
+weapon	295	Large Leather Shield
+weapon	296	Lion Clan Shield
+weapon	297	Loyce Shield
+weapon	298	Mirrah Shield
+weapon	299	Moon Butterfly Shield
+weapon	300	Old Knight's Shield
+weapon	301	Porcine Shield
+weapon	302	Rampart Golem Shield
+weapon	303	Red Rust Shield
+weapon	304	Royal Kite Shield
+weapon	305	Sanctum Shield
+weapon	306	Shield Of The Insolent
+weapon	307	Silver Eagle Kite Shield
+weapon	308	Silverblack Shield
+weapon	309	Slumbering Dragon Shield
+weapon	310	Spirit Tree Shield
+weapon	311	Stone Parma
+weapon	312	Vessel Shield
+weapon	313	Watchdragon Parma
+weapon	314	Wooden Shield
+weapon	315	Yellow Quartz Shield
+weapon	316	Dragonrider Greatshield
+weapon	317	Drakekeeper's Greatshield
+weapon	318	Greatshield Of Glory
+weapon	319	Gyrm Greatshield
+weapon	320	Havel's Greatshield
+weapon	321	King's Mirror
+weapon	322	Mastodon Greatshield
+weapon	323	Old Knight Greatshield
+weapon	324	Orma's Greatshield
+weapon	325	Pate's Shield
+weapon	326	Pursuer's Greatshield
+weapon	327	Rebel's Greatshield
+weapon	328	Reeve's Greatshield
+weapon	329	Tower Shield
+weapon	330	Twin Dragon Greatshield
+weapon	331	Wicked Eye Greatshield
+head	1	Minotaur Helm
+head	2	Gyrm Warrior Greathelm
+head	3	Gyrm Warrior Helm
+head	4	Gyrm Helm
+head	5	Rusted Mastodon Helm
+head	6	Havel's Helm
+head	8	Looking Glass Mask
+head	9	Smelter Demon Helm
+head	10	Dragonrider Helm
+head	11	Old Knight Helm
+head	12	Ironclad Helm
+head	13	Vengarl's Helm
+head	14	Mastodon Helm
+head	15	Drakekeeper Helm
+head	16	Steel Helm
+head	17	Alonne Captain Helm
+head	18	Velstadt's Helm
+head	19	Benhart's Knight Helm
+head	20	Heide Knight Greathelm
+head	21	Heide Knight Iron Mask
+head	22	Old Ironclad Helm
+head	23	Imperious Helm
+head	24	Syan's Helm
+head	25	Drangleic Helm
+head	26	Raime's Helm
+head	29	Sanctum Knight Helm
+head	28	Mad Warrior Mask
+head	30	Alonne Knight Helm
+head	31	Faraam Helm
+head	32	Catarina Helm
+head	33	Throne Defender Helm
+head	34	Elite Knight Helm
+head	35	Ruin Helm
+head	36	Knight Helm
+head	37	Alonne's Helm
+head	38	Archdrake Helm
+head	39	Drakeblood Helm
+head	40	Royal Swordsman Helm
+head	41	Falconer Helm
+head	42	Insolent Helm
+head	43	Royal Solider Helm
+head	44	Creighton's Helm
+head	45	Alva Helm
+head	46	Helm of Aurous
+head	47	Dark Mask
+head	48	Fume Sorcerer Mask
+head	49	Targray's Helm
+head	50	Varangian Helm
+head	51	Bell Keeper Helmet
+head	52	Penal Mask
+head	53	Standard Helm
+head	54	Pate's Helm
+head	55	Executioner Helm
+head	56	Throne Watcher Helm
+head	57	Hollow Solider Helm
+head	58	Pharros Mask
+head	59	Warlock Mask
+head	60	Spiked Bandit Helm
+head	61	King's Crown
+head	62	Xanthous Crown
+head	63	Cale's Helm
+head	64	Infantry Helm
+head	65	Crown of the Old Iron King
+head	66	Mask of Judgment
+head	67	Crown of the Sunken King
+head	68	Manikin Mask
+head	69	Jester's Cap
+head	70	White Hollow Mage Hood
+head	71	Black Hollow Mage Hood
+head	72	Hollow Infantry Helm
+head	73	Shadow Mask
+head	74	Moon Hat
+head	75	Traveling Merchant Hat
+head	76	Dragon Sage Hood
+head	77	Lucatiel's Mask
+head	78	Wanderer Hood
+head	79	Bone Crown
+head	80	White Priest Headset
+head	81	Dragon Acolyte Mask
+head	82	Priestess Headpiece
+head	83	Brigand Hood
+head	84	Helm of Aurous (Transparent)
+head	85	Thief Mask
+head	86	Tattered Cloth Hood
+head	87	Moon Butterfly Hat
+head	88	Nahr Alma Hood
+head	89	Durgo's Hat
+head	90	Sanctum Priestess Tiara
+head	91	Black Hood
+head	92	Chaos Hood
+head	93	Hexer's Hood
+head	94	Saint's Hood
+head	95	Hunter's Hat
+head	96	Imported Hood
+head	97	Black Witch Hat
+head	98	Leydia Black Hood
+head	99	Dingy Hood
+head	100	Leydia White Hood
+head	101	Rogue Hood
+head	102	Lion Warrior Helm
+head	103	Monastery Headcloth
+head	104	Tseldora Cap
+head	105	Desert Sorcesress Hood
+head	106	Peasant Hat
+head	107	Black Witch Veil
+head	108	Black Witch Domino Mask
+head	109	Hollow Skin
+head	110	Grave Warden Mask
+head	111	Prisoner's Hood
+chest	112	Havel's Armor
+chest	113	Dragonrider Armor
+chest	114	Old Knight Armor
+chest	115	Looking Glass Armor
+chest	116	Smelter Demon Armor
+chest	117	Alonne Knight Armor
+chest	118	Alonne Captain Armor
+chest	119	Drakekeeper Armor
+chest	120	Mastodon Armor
+chest	121	Vengarl's Armor
+chest	122	Steel Armor
+chest	123	Ironclad Armor
+chest	124	Imperious Armor
+chest	125	Drangleic Mail
+chest	126	Velstadt's Armor
+chest	127	Rusted Mastodon Armor
+chest	128	Old Ironclad Armor
+chest	129	Gyrm Armor
+chest	130	Gyrm Warrior Armor
+chest	131	Catarina Armor
+chest	132	Mad Warrior Armor
+chest	133	Throne Defender Armor
+chest	134	Faraam Armor
+chest	135	Syan's Armor
+chest	136	Drakeblood Armor
+chest	137	Heide Knight Chainmail
+chest	138	Knight Armor
+chest	139	Armor of Aurous
+chest	140	Ruin Armor
+chest	141	Benhart's Armor
+chest	142	Royal Swordsman Armor
+chest	143	Targray's Armor
+chest	144	King's Armor
+chest	145	Royal Soldier Armor
+chest	146	Dark Armor
+chest	147	Insolent Armor
+chest	148	Throne Watcher Armor
+chest	149	Alva Armor
+chest	150	Elite Knight Armor
+chest	151	Creighton's Chainmail
+chest	152	Archdrake Robes
+chest	153	Falconer Armor
+chest	154	Sanctum Knight Armor
+chest	155	Executioner Armor
+chest	156	Hollow Soldier Armor
+chest	157	Bandit Armor
+chest	158	Chaos Robe
+chest	159	Moon Butterfly Wings
+chest	160	Black Robes
+chest	161	Hexer's Robes
+chest	162	Saint's Dress
+chest	163	Red Lion Warrior Cape
+chest	164	Lion Mage Robe
+chest	165	Priestess Robe
+chest	166	White Hollow Mage Robe
+chest	167	Monastery Longshirt
+chest	168	Manikin Top
+chest	169	Desert Sorceress Top
+chest	170	Shadow Top
+chest	171	Black Hollow Mage Robe
+chest	172	Tattered Cloth Robe
+chest	173	Dingy Robe
+chest	174	White Priest Robe
+chest	175	Lion Warrior Cape
+chest	176	Black Witch Robe
+chest	177	Brigand Armor
+chest	178	Leydia Black Robe
+chest	179	Bone King Armor
+chest	180	Armor of Aurous (Transparent)
+chest	181	Leydia White Robe
+chest	182	Black Leather Armor
+chest	183	Wanderer Coat
+chest	184	Singer's Dress
+chest	185	Dragon Acolyte Robe
+chest	186	Rogue Armor
+chest	187	Nahr Alma Robes
+chest	188	Robe of Judgment
+chest	189	Lucatiel's Vest
+chest	210	Grave Warden Top
+chest	191	Agdayne's Black Robe
+chest	211	Astrologist's Robes
+chest	193	Fume Sorcerer Robes
+chest	194	Leather Armor
+chest	195	Jester's Robes
+chest	196	Varangian Armor
+chest	197	Llewellyn Armor
+chest	198	Cale's Leather Armor
+chest	199	Xanthous Overcoat
+chest	200	Pate's Armor
+chest	201	Bell Keeper Bellyband
+chest	202	Penal Straighjacket
+chest	203	Traveling Merchant Coat
+chest	204	Hard Leather Armor
+chest	205	Prisoner's Tatters (2)
+chest	206	Prisoner's Tatters
+chest	207	Infantry Armor
+chest	208	Tseldora Robe
+chest	209	Peasant Attire
+chest	212	Imported Tunic
+chest	213	Hollow Infantry Armor
+hands	214	Throne Watcher Gauntlets
+hands	215	Havel's Gauntlets
+hands	216	Velstadt's Gauntlets
+hands	217	Faraam Gauntlets
+hands	218	Looking Glass Gauntlets
+hands	219	Gyrm Gloves
+hands	220	Gyrm Warrior Gloves
+hands	221	Smelter Demon Gauntlets
+hands	222	Ironclad Gauntlets
+hands	223	Targray's Manifers
+hands	224	Mastodon Gauntlets
+hands	225	King's Gauntlets
+hands	226	Drakeblood Gauntlets
+hands	227	Old Knight Gauntlets
+hands	228	Steel Gauntlets
+hands	229	Creighton's Chain Gloves
+hands	230	Old Ironclad Gauntlets
+hands	231	Throne Defender Gauntlets
+hands	232	Archdrake Gloves
+hands	233	Gauntlets of Aurous
+hands	234	Catarina Gauntlets
+hands	235	Syan's Gauntlets
+hands	236	Alonne Knight Gauntlets
+hands	237	Knight Gauntlets
+hands	238	Imperious Gloves
+hands	239	Drakekeeper Gauntlets
+hands	240	Rusted Mastodon Gauntlets
+hands	241	Benhart's Gauntlets
+hands	242	Royal Swordsman Gloves
+hands	243	Mad Warrior Gauntlets
+hands	244	Ruin Gauntlets
+hands	245	Dragonrider Gauntlets
+hands	246	Drangleic Gauntlets
+hands	247	Royal Soldier Gauntlets
+hands	248	Dark Gauntlets
+hands	249	Insolent Gloves
+hands	250	Vengarl's Gloves
+hands	251	Sanctum Knight Gauntlets
+hands	252	Executioner Gauntlets
+hands	253	Heide Knight Gauntlets
+hands	254	Sanctum Solider Gauntlets
+hands	255	Alva Gauntlets
+hands	256	Bandit Gauntlets
+hands	257	Falconer Gloves
+hands	258	Hollow Soldier Gauntlets
+hands	259	Elite Knight Gloves
+hands	260	Chaos Gloves
+hands	261	Moon Butterfly Cuffs
+hands	262	Black Gloves
+hands	263	Hexer's Gloves
+hands	264	Saint's Long Gloves
+hands	265	Lion Mage Cuffs
+hands	266	Priestess Gloves
+hands	267	Monastary Long Gloves
+hands	268	Manikin Gloves
+hands	269	Desert Soceress Gloves
+hands	270	Shadow Gauntlets
+hands	271	Black Witch Gloves
+hands	272	Tattered Cloth Manchettes
+hands	273	Dingy Cuffs
+hands	274	White Priest Gloves
+hands	275	Lion Warrior Cuffs
+hands	276	Brigand Gauntlets
+hands	277	Bone King Cuffs
+hands	278	Gauntlets of Aurous (transparent)
+hands	279	Leydia Gauntlets
+hands	280	Black Leather Gloves
+hands	281	Wanderer Manchettes
+hands	282	Dragon Acolyte Gloves
+hands	283	Rogue Gauntlets
+hands	284	Manchettes of Judgment
+hands	285	Lucatiel's Gloves
+hands	286	Agdayne's Cuffs
+hands	287	Grave Warden Cuffs
+hands	288	Astrologist's Gauntlets
+hands	289	Leather Gloves
+hands	290	Jester's Gloves
+hands	291	Llewellyn Gloves
+hands	292	Xanthous Gloves
+hands	293	Pate's Gloves
+hands	294	Bell Keeper Cuffs
+hands	295	Hard Leather Gauntlets
+hands	296	Traveling Merchant Gloves
+hands	297	Varangian Cuffs
+hands	298	Penal Handcuffs
+hands	299	Infantry Gloves
+hands	300	Prisoner's Gloves
+hands	301	Tseldora Manchettes
+hands	302	Peasant Long Gloves
+hands	303	Imported Manchettes
+hands	304	Hollow Infantry Gloves
+hands	305	Engraved Gauntlets
+legs	306	Havel's Leggings
+legs	307	Looking Glass Leggings
+legs	308	Mastodon Leggings
+legs	309	Smelter Demon Leggings
+legs	310	Alonne Knight Leggings
+legs	311	Old Ironclad Leggings
+legs	312	Ironclad Leggings
+legs	313	Rusted Mastodon Leggings
+legs	314	Old Knight Leggings
+legs	315	Steel Leggings
+legs	316	Gyrm Boots
+legs	317	Gyrm Warrior Boots
+legs	318	Velstadt's Leggings
+legs	319	Imperious Leggings
+legs	320	Vengarl's Boots
+legs	321	Drakekeeper Boots
+legs	322	Catarina Leggings
+legs	323	Throne Defender Leggings
+legs	324	Ruin Leggings
+legs	325	Knight Leggings
+legs	326	Throne Watcher Leggings
+legs	327	Syan's Leggings
+legs	328	Dragonrider Leggings
+legs	329	Mad Warrior Leggings
+legs	330	Drangleic Leggings
+legs	331	Benhart's Boots
+legs	332	Faraam Boots
+legs	333	Leggings of Aurous
+legs	334	Targray's Leggings
+legs	335	Royal Swordsman Leggings
+legs	336	Heide Knight Leggings
+legs	337	King's Leggings
+legs	338	Sanctum Knight Leggings
+legs	339	Alva Leggings
+legs	340	Dark Leggings
+legs	341	Insolent Boots
+legs	342	Elite Knight Leggings
+legs	343	Drakeblood Leggings
+legs	344	Royal Soliders Leggings
+legs	345	Falconer Boots
+legs	346	Creighton's Chain Leggings
+legs	347	Archdrake Boots
+legs	348	Executioner Leggings
+legs	349	Bandit Boots
+legs	350	Cale's Shoes
+legs	351	Penal Skirt
+legs	352	Hollow Infantry Boots
+legs	353	Infantry Boots
+legs	354	Bell Keeper Trousers
+legs	355	Lucatiel's Trousers
+legs	356	Monastery Skirt
+legs	357	Xanthous Waistcloth
+legs	358	Astrologist's Bottoms
+legs	359	Grave Warden Bottoms
+legs	360	Hard Leather Leggings
+legs	361	Traveling Merchant Boots
+legs	362	Imported Trousers
+legs	363	Pate's Trousers
+legs	364	Llewellyn Shoes
+legs	365	Agdayne's Kilt
+legs	366	Bone King Skirt
+legs	367	Leather Boots
+legs	368	Tights of Judgement
+legs	369	Jester's Tights
+legs	370	Peasant Trousers
+legs	371	Blood-Stained Skirt
+legs	372	Rogue Leggings
+legs	373	Desert Sorceress Skirt
+legs	374	Dragon Acolyte Boots
+legs	375	Varangian Leggings
+legs	376	White Priest Skirt
+legs	377	Black Leather Boots
+legs	378	Wanderer Boots
+legs	379	Black Boots
+legs	380	Chaos Boots
+legs	381	Flying Feline Boots
+legs	382	Hexer's Boots
+legs	383	Leggings of Aurous (transparent)
+legs	384	Saint's Trousers
+legs	385	Tseldora Trousers
+legs	386	Priestess Skirt
+legs	387	Brigand Trousers
+legs	388	Hollow Soldier Leggings
+legs	389	Black Witch Trousers
+legs	390	Flower Skirt
+legs	391	Heavy Boots
+legs	392	Manikin Boots
+legs	393	Shadow Leggings
+legs	394	Lion Mage Skirt
+legs	395	Lion Warrior Skirt
+legs	396	Moon Butterfly Skirt
+legs	397	Prisoner's Waistloth
+head	0	defaulthead
+chest	0	defaultchest
+hands	0	defaulthands
+legs	0	defaultlegs
+head	398	Crown of the Ivory King
+head	399	Mirrah Hat
+head	400	Old Bell Helm
+chest	401	Retainer Robe
+head	402	Symbol of Avarice
+head	403	Charred Loyce Helm
+chest	404	Charred Loyce Armor
+hands	405	Charred Loyce Gauntlets
+legs	406	Charred Loyce Leggings
+head	407	Ivory King Helm
+chest	408	Ivory King Armor
+hands	409	Ivory King Gauntlets
+legs	410	Ivory King Leggings
+head	411	Loyce Helm
+chest	412	Loyce Armor
+hands	413	Loyce Gauntlets
+legs	414	Loyce Leggings
+head	415	Northwarder Hood
+chest	416	Northwarder Robe
+hands	417	Northwarder Manchettes
+legs	418	Northwarder Trousers
+head	419	Rampart Golem Helm
+chest	420	Rampart Golem Armor
+legs	421	Rampart Golem Leggings
+hands	422	Rampart Golem Gauntlets
+chest	423	Alonne's Armor
+hands	424	Alonne's Gauntlets
+legs	425	Alonne's Leggings
+chest	426	Raime's Armor
+hands	427	Raime's Gauntlets
+legs	428	Raime's Leggings
+head	429	Hood of the Forlorn
+chest	430	Armor of the Forlorn
+hands	431	Gauntlets of the Forlorn
+legs	432	Leggings of the Forlorn
+hands	433	Fume Sorcerer Gloves
+legs	434	Fume Sorcerer Boots
+ring	0	No Ring
+ring	1	Abyss Seal
+ring	2	Ancient Dragon Seal
+ring	3	Ash Knuckle Ring
+ring	4	Baneful Bird Ring
+ring	5	Bell Keeper's Seal
+ring	6	Bloodbite Ring
+ring	7	Blue Seal
+ring	8	Blue Tearstone Ring
+ring	9	Bracing Knuckle Ring
+ring	10	Chloranthy Ring
+ring	11	Clear Bluestone Ring
+ring	12	Covetous Gold Serpent Ring
+ring	13	Covetous Silver Serpent Ring
+ring	14	Crest of Blood
+ring	15	Crest of the Rat
+ring	16	Cursebite Ring
+ring	17	Dark Clutch Ring
+ring	18	Dark Quartz Ring
+ring	19	Delicate String
+ring	20	Dexterity Ring
+ring	21	Dispelling Ring
+ring	22	Fire Clutch Ring
+ring	23	First Dragon Ring
+ring	24	Flame Quartz Ring
+ring	25	Flynn's Ring
+ring	26	Gower's Ring of Protection
+ring	27	Guardian's Seal
+ring	28	Hawk Ring
+ring	29	Illusory Ring of a Conqueror
+ring	30	Illusory Ring of the Exalted
+ring	31	Ivory Warrior Ring
+ring	32	King's Ring
+ring	33	Life Ring
+ring	34	Lightning Clutch Ring
+ring	35	Lingering Dragoncrest Ring
+ring	36	Name-Engraved Ring
+ring	37	Northern Ritual Band
+ring	38	Old Leo Ring
+ring	39	Old Sun Ring
+ring	40	Poisonbite Ring
+ring	41	Redeye Ring
+ring	42	Red Tearstone Ring
+ring	43	Ring of Binding
+ring	44	Ring of Blades
+ring	45	Ring of Giants
+ring	46	Ring of Knowledge
+ring	47	Ring of Life Protection
+ring	48	Ring of Prayer
+ring	49	Ring of Resistance
+ring	50	Ring of Restoration
+ring	51	Ring of Soul Protection
+ring	52	Ring of Steel Protection
+ring	53	Ring of the Dead
+ring	54	Ring of the Living
+ring	55	Ring of the Embedded
+ring	56	Ring of the Evil Eye
+ring	57	Ring of Thorns
+ring	58	Ring of Whispers
+ring	59	Royal Soldier's Ring
+ring	60	Second Dragon Ring
+ring	61	Silvercat Ring
+ring	62	Simpleton's Ring
+ring	63	Slumbering Dragoncrest Ring
+ring	64	Sorcery Clutch Ring
+ring	65	Southern Ritual Band
+ring	66	Spell Quartz Ring
+ring	67	Stone Ring
+ring	68	Strength Ring
+ring	69	Sun Seal
+ring	70	Third Dragon Ring
+ring	71	Thunder Quartz Ring
+ring	72	Vanquisher's Seal
+ring	73	White Ring
+ring	74	Yorgh's Ring
+ring	75	Agape Ring
+spell	0	No Spell
+spell	1	Affinity
+spell	2	Climax
+spell	3	Darkstorm
+spell	4	Dark Dance
+spell	5	Dark Fog
+spell	6	Dark Greatsword
+spell	7	Dark Hail
+spell	8	Dark Orb
+spell	9	Dark Weapon
+spell	10	Dead Again
+spell	11	Great Resonant Soul
+spell	12	Lifedrain Patch
+spell	13	Numbness
+spell	14	Profound Still
+spell	15	Promised Walk of Peace
+spell	16	Recollection
+spell	17	Repel
+spell	18	Resonant Flesh
+spell	19	Resonant Soul
+spell	20	Resonant Weapon
+spell	21	Scraps of Life
+spell	22	Twisted Barricade
+spell	23	Whisper of Despair
+spell	24	Acid Surge
+spell	25	Chaos Storm
+spell	26	Combustion
+spell	27	Dance of Fire
+spell	28	Fireball
+spell	29	Fire Orb
+spell	30	Fire Snake
+spell	31	Firestorm
+spell	32	Fire Tempest
+spell	33	Fire Whip
+spell	34	Flame Swathe
+spell	35	Flame Weapon
+spell	36	Flash Sweat
+spell	37	Forbidden Sun
+spell	38	Great Chaos Fireball
+spell	39	Great Combustion
+spell	40	Great Fireball
+spell	41	Immolation
+spell	42	Iron Flesh
+spell	43	Lingering Flame
+spell	44	Outcry
+spell	45	Poison Mist
+spell	46	Toxic Mist
+spell	47	Warmth
+spell	48	Cast Light
+spell	49	Chameleon
+spell	50	Crystal Magic Weapon
+spell	51	Crystal Soul Spear
+spell	52	Fall Control
+spell	53	Focus Souls
+spell	54	Great Heavy Soul Arrow
+spell	55	Great Magic Weapon
+spell	56	Great Soul Arrow
+spell	57	Heavy Homing Soul Arrow
+spell	58	Heavy Soul Arrow
+spell	59	Hidden Weapon
+spell	60	Homing Crystal Soulmass
+spell	61	Homing Soul Arrow
+spell	62	Homing Soulmass
+spell	63	Hush
+spell	64	Magic Weapon
+spell	65	Repair
+spell	66	Shockwave
+spell	67	Soul Arrow
+spell	68	Soul Bolt
+spell	69	Soul Flash
+spell	70	Soul Geyser
+spell	71	Soul Greatsword
+spell	72	Soul Shower
+spell	73	Soul Spear
+spell	74	Soul Spear Barrage
+spell	75	Soul Vortex
+spell	76	Strong Magic Shield
+spell	77	Unleash Magic
+spell	78	Yearn
+spell	79	Blinding Bolt
+spell	80	Bountiful Sunlight
+spell	81	Caressing Prayer
+spell	82	Denial
+spell	83	Emit Force
+spell	84	Force
+spell	85	Great Heal
+spell	86	Great Heal Excerpt
+spell	87	Great Lightning Spear
+spell	88	Great Magic Barrier
+spell	89	Guidance
+spell	90	Heal
+spell	91	Heavenly Thunder
+spell	92	Homeward
+spell	93	Lightning Spear
+spell	94	Magic Barrier
+spell	95	Med Heal
+spell	96	Perserverance
+spell	97	Replenishment
+spell	98	Resplendent Life
+spell	99	Sacred Oath
+spell	100	Soothing Sunlight
+spell	101	Soul Appease
+spell	102	Splintering Lightning Spear
+spell	103	Sunlight Blade
+spell	104	Sunlight Spear
+spell	105	Unveil
+spell	106	Wrath of the Gods
+item	-1	No Item
+item	0	Estus Flask
+item	1	Human Effigy
+item	2	Lifegem
+item	3	Radiant Lifegem
+item	4	Old Radiant Lifegem
+item	5	Elizabeth Mushroom
+item	6	Amber Herb
+item	8	Twilight Herb
+item	9	Wilted Dusk Herb
+item	10	Poison Moss
+item	11	Monastery Charm
+item	12	Dragon Charm
+item	13	Divine Blessing
+item	14	Green Blossom
+item	15	Dark Troches
+item	16	Common Fruit
+item	17	Triclops Snake Troches
+item	18	Red Leech Troches
+item	19	Repair Powder
+item	20	Rouge Water
+item	21	Crimson Water
+item	22	Small Blue Burr
+item	23	Small Yellow Burr
+item	24	Small Orange Burr
+item	25	Dried Root
+item	26	Old Growth Balm
+item	27	Goldenfruit Balm
+item	28	Blackweed Balm
+item	29	Vine Balm
+item	30	Brightbug
+item	31	Firebomb
+item	32	Black Firebomb
+item	33	Witching Urn
+item	34	Lightning Urn
+item	35	Hexing Urn
+item	36	Holy Water Urn
+item	37	Corrosive Urn
+item	38	Throwing Knife
+item	39	Lacerating Knife
+item	40	Poison Throwing Knife
+item	41	Dung Pie
+item	42	Aromatic Ooze
+item	43	Gold Pine Resin
+item	44	Charcoal Pine Resin
+item	45	Dark Pine Resin
+item	46	Rotten Pine Resin
+item	47	Bleeding Serum
+item	48	Alluring Skull
+item	49	Lloyd's Talisman
+item	50	Dragon Head Stone
+item	51	Dragon Torso Stone
+item	52	Homeward Bone
+item	53	Aged Feather
+item	54	Darksign
+item	55	Flame Butterfly
+item	56	Silver Talisman
+item	57	Rusted Coin
+item	58	Bonfire Ascetic
+item	59	Rubbish
+item	60	Simpleton's Spice
+item	61	Skeptic's Spice
+item	62	Crushed Eye Orb
+item	63	Pharros' Lockstone
+item	64	Fragrant Branch of Yore
+item	65	Prism Stone
+item	66	Small Smooth & Silky Stone
+item	67	Smooth & Silky Stone
+item	68	Petrified Something
+item	69	Soul Vessel

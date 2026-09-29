@@ -25,7 +25,7 @@
 //! the player closing the menu.
 
 use ds2_build_import_core::{
-    BUILD_HOST, BUILD_URL_PREFIX, UrlRejection, build_id_from_url, build_path,
+    BUILD_URL_PREFIX, Site, UrlRejection, build_link_from_url,
     field::{Field, Reaction},
 };
 
@@ -1150,8 +1150,8 @@ fn load(text: &str, source: Source) {
 /// Validate, fetch and parse, and hand a build to the tick. What the row should say afterwards:
 /// `Ok` when a build was handed over, `Err` with the reason when not.
 fn fetch(text: &str, source: Source) -> Result<String, String> {
-    let build_id = match build_id_from_url(text) {
-        Ok(id) => id,
+    let link = match build_link_from_url(text) {
+        Ok(link) => link,
         Err(rejection) => {
             log_line(format_args!(
                 "{LOG_PREFIX} rejected \"{text}\" from {}: {rejection}",
@@ -1163,20 +1163,27 @@ fn fetch(text: &str, source: Source) -> Result<String, String> {
             return Err(short_rejection(rejection).to_owned());
         }
     };
+    let build_id = link.id;
     log_line(format_args!(
-        "{LOG_PREFIX} fetching build {build_id} from {}",
+        "{LOG_PREFIX} fetching {} build {build_id} from {}",
+        link.site.name(),
         source.describe()
     ));
     say(&format!("Fetching build {build_id}..."));
 
-    let page = match ds2_game_base::http::get(BUILD_HOST, &build_path(build_id), USER_AGENT) {
+    let page = match ds2_game_base::http::get(link.site.host(), &link.path(), USER_AGENT) {
         Ok(page) => page,
         Err(error) => {
             log_line(format_args!("{LOG_PREFIX} fetch failed: {error:?}"));
-            return Err("Could not reach soulsplanner".to_owned());
+            return Err(format!("Could not reach {}", link.site.name()));
         }
     };
-    match ds2_build_import_core::saved_build::parse(&page, build_id) {
+    // Both sites' parsers produce the same `Build`; everything after this line is site-blind.
+    let parsed = match link.site {
+        Site::Soulsplanner => ds2_build_import_core::saved_build::parse(&page, build_id),
+        Site::MugenMonkey => ds2_build_import_core::mugenmonkey::parse(&page, build_id),
+    };
+    match parsed {
         Ok(build) => {
             log_line(format_args!(
                 "{LOG_PREFIX} build {} loaded: {} / {} / {} armour, {} rings, {} spells",
@@ -1230,7 +1237,7 @@ fn fetch(text: &str, source: Source) -> Result<String, String> {
 pub(crate) const fn short_rejection(rejection: UrlRejection) -> &'static str {
     match rejection {
         UrlRejection::Empty => "No build id in that link",
-        UrlRejection::NotSoulsplanner => "Not a soulsplanner link",
+        UrlRejection::NotSoulsplanner => "Not a build link",
         UrlRejection::FragmentForm => "Drop the # from the link",
         UrlRejection::IdNotNumeric => "Build id must be digits",
         UrlRejection::IdTooLarge => "That build id is too big",
