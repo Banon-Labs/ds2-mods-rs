@@ -337,7 +337,15 @@ fn apply(
     // abandoning the gear, the spells and the covenant as well -- and none of those care what
     // level anyone is. One inapplicable part of a build is not grounds for dropping the rest.
     let levellable = wanted_points >= current_points;
-    if levellable {
+    // The stats and the class they were counted from go on together. A build for another class
+    // changes the class first; one no class can explain costs it its stats and nothing else.
+    // Measured 2026-09-28: a Warrior build written onto a character left a Sorcerer took
+    // attunement 12 -> 6 and intelligence 14 -> 5, and every attunement slot with them.
+    let plan = class_plan(build, &wanted);
+    let levellable = levellable && plan.is_some();
+    if plan.is_none() {
+        say("Wrong class -- gear only");
+    } else if levellable {
         log_line(format_args!(
             "{LOG_PREFIX} build {} is level {target} (from {level}, +{} points)",
             build.id,
@@ -361,6 +369,34 @@ fn apply(
              {implied} -- its level has been written by hand"
         ));
     }
+
+    // The class, before anything the stats depend on. A class that could not be written leaves the
+    // stats alone too: stats without their class are the bug this exists for.
+    let levellable = levellable
+        && match plan {
+            Some(ds2_build_import_core::ClassPlan::Change { from, to }) => {
+                match crate::save::write_character_class(to) {
+                    Ok(()) => {
+                        log_line(format_args!(
+                            "{LOG_PREFIX} class changed: {from} -> {to} (player_data and the \
+                             character list's record)"
+                        ));
+                        true
+                    }
+                    Err(what) => {
+                        log_line(format_args!(
+                            "{LOG_PREFIX} REFUSED the stats of build {}: the class could not be \
+                             changed {from} -> {to} ({what}) -- the stats are LEFT ALONE, the gear \
+                             is applied",
+                            build.id
+                        ));
+                        say("Class unchanged -- gear only");
+                        false
+                    }
+                }
+            }
+            _ => true,
+        };
 
     if levellable {
         // SOUL MEMORY FIRST. This is the user's rule and the whole reason `LevelChange` exists:
@@ -426,6 +462,51 @@ fn apply(
     equip_everything(build);
     join_covenant(build);
     fill_estus();
+}
+
+/// What `build`'s stats (`wanted`, game order) do to the live character's class: keep it, or
+/// change it to the build's. `None` refuses the stats -- a build naming no class, or with a stat
+/// under its own class's base. Every refusal is logged with the numbers, and so is the class the
+/// character has.
+///
+/// An unreadable class refuses too. Without it there is nothing to change from, and writing
+/// stats blind is what this exists to stop.
+fn class_plan(
+    build: &ds2_build_import_core::Build,
+    wanted: &[u16; 9],
+) -> Option<ds2_build_import_core::ClassPlan> {
+    let Some(id) = crate::save::live_character_class_id() else {
+        log_line(format_args!(
+            "{LOG_PREFIX} REFUSED the stats of build {}: the character's starting class could not \
+             be read, so there is no base to check them against -- the stats are LEFT ALONE, the \
+             gear is applied",
+            build.id
+        ));
+        return None;
+    };
+    let Some(class) = ds2_build_import_core::StartingClass::from_game_id(id) else {
+        log_line(format_args!(
+            "{LOG_PREFIX} REFUSED the stats of build {}: the character's starting class id is \
+             {id}, which names no class -- the stats are LEFT ALONE, the gear is applied",
+            build.id
+        ));
+        return None;
+    };
+    log_line(format_args!(
+        "{LOG_PREFIX} character class: {class}, base {:?}",
+        class.base()
+    ));
+    match ds2_build_import_core::plan_class(&build.class, class, wanted) {
+        Ok(plan) => Some(plan),
+        Err(refusal) => {
+            log_line(format_args!(
+                "{LOG_PREFIX} REFUSED the stats of build {} (class {:?}, {wanted:?}): {refusal} -- \
+                 the stats are LEFT ALONE, the gear is applied",
+                build.id, build.class
+            ));
+            None
+        }
+    }
 }
 
 /// **Take the Estus Flask to the maximum, every time, through the game's own upgrade path.**

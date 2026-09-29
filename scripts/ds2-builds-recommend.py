@@ -1344,14 +1344,20 @@ GRIP_TRIES = {"two": (True,), "one": (False,)}
 
 
 def optimize_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, objective: str,
-                   grip: str = "two", flex_weight: float | None = None, spells=()):
+                   grip: str = "two", flex_weight: float | None = None, spells=(),
+                   only_class: str | None = None):
     """A valid build at `sl` that maximizes `objective` for weapon+infusion: floors first (bracket
     medians, END only for a high-stamina weapon), then requirements (STR halved for grip "two",
     in full for "one"; see GRIP_TRIES), then what `spells` need (spell_floors: their INT/FTH, and
     the ATT whose slots hold them), then every remaining point where it raises the objective
     most, plus `flex_weight` (default FLEX_WEIGHT) per weapon the point lets the build wield: a soft
     term, never a filter (see FLEX_WEIGHT). None when no class fits the floors, requirements and
-    spells into `sl`."""
+    spells into `sl`.
+
+    `only_class` (a class key, `sorcerer`) tries that starting class alone. A build for a character
+    that already exists has to be: the game offers no class change after creation, so a build from
+    another class's base is one the character cannot have -- measured 2026-09-28, a Sorcerer given
+    a Warrior build lost 6 attunement and 9 intelligence below its own starting stats."""
     if flex_weight is None:
         flex_weight = FLEX_WEIGHT
     flex = (lambda s_: sum(flex_counts(data, s_))) if flex_weight else None
@@ -1363,6 +1369,8 @@ def optimize_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
         return None, floors
     best = None
     for cls, base in data.classes.items():
+        if only_class is not None and cls != only_class.lower():
+            continue
         for two in GRIP_TRIES[grip]:
             st = {s: int(base[s]) for s in STATS}
             for s in FLOOR_STATS:
@@ -1784,7 +1792,8 @@ def generate_armor(data: Data, corpus: list[Build], weapon: str, inf: str, two: 
 
 def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, objective: str = "damage",
                    window: float = 1.5, k: int = 50, allow_naked: bool = False,
-                   grip: str = "two", flex_weight: float | None = None, spells=()) -> dict | None:
+                   grip: str = "two", flex_weight: float | None = None, spells=(),
+                   only_class: str | None = None) -> dict | None:
     """A whole valid build for weapon+infusion at `sl`: optimize_build's class and stats with the
     weapon as primary, able to attune and cast every one of `spells` (their names come back with
     the slots they cost and the slots the build's ATT gives, and the catalyst best_catalysts picks
@@ -1794,8 +1803,10 @@ def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
     wear most (suggest_rings: no NO_USE_RINGS ring), plus one of every other ring at least
     COMMON_RING of all builds wear; and armour, the
     best_armor set under 70% load with the primary and those four rings carried. `allow_naked`
-    skips the armour, as every generated build did before it had any."""
-    best, floors = optimize_build(data, corpus, weapon, inf, sl, objective, grip, flex_weight, spells)
+    skips the armour, as every generated build did before it had any. `only_class` is
+    optimize_build's: the build for a character that already has a class."""
+    best, floors = optimize_build(data, corpus, weapon, inf, sl, objective, grip, flex_weight, spells,
+                                  only_class)
     if best is None:
         return None
     val, cls, two, stats = best
@@ -2168,6 +2179,11 @@ EXPECT_ONE_HANDED = [  # --optimize and --generate with --grip one
     ("Demons_Great_Hammer", "Raw", 100, "damage"),
     ("Uchigatana", "Bleed", 150, "bleed"),
 ]
+EXPECT_AS_CLASS = [  # class key, weapon key, infusion, sl, objective: --generate --class
+    ("sorcerer", "Demons_Great_Hammer", "Raw", 90, "damage"),  # the SL 90 Sorcerer given a Warrior
+    ("sorcerer", "Moonlight_Greatsword", "No_Infusion", 90, "damage"),
+    ("sorcerer", "Demons_Great_Hammer", "Raw", 20, "damage"),
+]
 EXPECT_SPELLS = [  # weapon key, infusion, sl, objective, spell keys: --generate --spells
     ("Demons_Great_Hammer", "Raw", 100, "damage", []),  # the same build EXPECT_BUILDS generates
     # FTH 42 (miracle): Dragon Chime casts harder but needs FTH 50, so the next chime is picked
@@ -2279,6 +2295,12 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
     out.append("// The same two questions with the grip forced one-handed (--grip one).")
     out.append(f"pub const OPTIMIZE_ONE_HANDED: OptimizeCases = {_rs(opt_one)};\n")
     out.append(f"pub const GENERATE_ONE_HANDED: GenerateCases = {_rs(gen_one)};\n")
+    gen_class = []
+    for cls, weapon, inf, sl, objective in EXPECT_AS_CLASS:
+        _, got = expect_builds(data, corpus, mix, [(weapon, inf, sl, objective)], [], "two", only_class=cls)
+        gen_class.append((cls, got[0]))
+    out.append("// class key, then a GENERATE case asked of that starting class alone (--class).")
+    out.append(f"pub const GENERATE_AS_CLASS: ClassGenerateCases = {_rs(gen_class)};\n")
     spell_gen = []
     for weapon, inf, sl, objective, spells in EXPECT_SPELLS:
         g = generate_build(data, corpus, weapon, inf, sl, objective, spells=spells)
@@ -2302,18 +2324,19 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
 
 
 def expect_builds(data: Data, corpus: list[Build], mix, cases: list, naked_cases: list, grip: str,
-                  flexes: list | None = None):
+                  flexes: list | None = None, only_class: str | None = None):
     """The script's --optimize and --generate answers for `cases` (plus `naked_cases` generated with
-    --allow-naked) at `grip`, as fixture tuples."""
+    --allow-naked) at `grip`, and for `only_class` alone when given, as fixture tuples."""
     arr = lambda d: [int(d[s]) for s in STATS]
     opt, gen = [], []
     for weapon, inf, sl, objective in cases:
-        best, _ = optimize_build(data, corpus, weapon, inf, sl, objective, grip)
+        best, _ = optimize_build(data, corpus, weapon, inf, sl, objective, grip, only_class=only_class)
         opt.append((weapon, INFUSION_CODE[inf], sl, objective,
                     None if best is None else _Some((data.classes[best[1]]["name"], best[2], arr(best[3]),
                                                      float(best[0])))))
     for weapon, inf, sl, objective, naked in [(*case, False) for case in cases] + naked_cases:
-        g = generate_build(data, corpus, weapon, inf, sl, objective, allow_naked=naked, grip=grip)
+        g = generate_build(data, corpus, weapon, inf, sl, objective, allow_naked=naked, grip=grip,
+                           only_class=only_class)
         if g is None:
             gen.append((weapon, INFUSION_CODE[inf], sl, objective, naked, None))
             continue
@@ -2551,6 +2574,9 @@ def main() -> int:
                     help="with --optimize/--generate: 'two' (default) halves the STR requirement even when "
                          "one-handing would fit, 'one' needs it in full. Damage is scored the same for "
                          "either grip (a two-handed STR multiplier is unproven)")
+    ap.add_argument("--class", dest="start_class", metavar="CLASS",
+                    help="with --optimize/--generate: this starting class only (sorcerer, warrior, ...), as a "
+                         "build for an existing character must be -- the game has no class change")
     ap.add_argument("--spells", metavar="SPELL,SPELL",
                     help="with --optimize/--generate: spells the build must attune and cast (SoulsPlanner keys or "
                          "names; repeat one for a second copy). Their INT/FTH requirements raise those stats and "
@@ -2608,6 +2634,8 @@ def main() -> int:
     data = Data(json.loads(sp_json.read_text()), json.loads(mm_json.read_text()))
     if not a.site_numbers:
         print(apply_regulation(data), file=sys.stderr)
+    if a.start_class and a.start_class.lower() not in data.classes:
+        ap.error(f"unknown class {a.start_class!r}: one of {', '.join(data.classes)}")
     spells = []
     for name in (a.spells or "").split(","):
         if name.strip():
@@ -2660,9 +2688,10 @@ def main() -> int:
             ap.error(f"unknown weapon {name!r}")
         corpus, _ = load_corpus(data)
         g = generate_build(data, corpus, weapon, inf.replace(" ", "_") or "No_Infusion", a.sl, a.objective,
-                           a.window or 1.5, a.k, a.allow_naked, a.grip, a.flex_weight, spells)
+                           a.window or 1.5, a.k, a.allow_naked, a.grip, a.flex_weight, spells, a.start_class)
         if g is None:
-            print(f"no valid SL {a.sl} build wields {data.weapons[weapon]['name']} (grip {a.grip})"
+            print(f"no valid SL {a.sl} {a.start_class or ''} build wields {data.weapons[weapon]['name']} "
+                  f"(grip {a.grip})"
                   + (f" and casts {', '.join(data.spells[s]['name'] for s in spells)}" if spells else ""))
             return 2
         if a.json:
@@ -2744,9 +2773,10 @@ def main() -> int:
             ap.error(f"unknown weapon {name!r}")
         inf = inf.replace(" ", "_") or "No_Infusion"
         corpus, _ = load_corpus(data)
-        best, floors = optimize_build(data, corpus, weapon, inf, a.sl, a.objective, a.grip, a.flex_weight, spells)
+        best, floors = optimize_build(data, corpus, weapon, inf, a.sl, a.objective, a.grip, a.flex_weight, spells,
+                                      a.start_class)
         if best is None:
-            print(f"no valid SL {a.sl} build wields {data.weapons[weapon]['name']} (grip {a.grip})"
+            print(f"no valid SL {a.sl} {a.start_class or ''} build wields {data.weapons[weapon]['name']} (grip {a.grip})"
                   + (f" and casts {', '.join(data.spells[s]['name'] for s in spells)}" if spells else "")
                   + " with the bracket floors "
                   + " ".join(f"{s[:3].upper()} {v}" for s, v in floors.items()))

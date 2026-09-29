@@ -23,6 +23,7 @@
 //! workspace gains no dependency for a grammar one level deep. Build `253` fetched on 2026-08-28
 //! is the fixture both agree on.
 
+pub mod class;
 pub mod equip;
 pub mod field;
 pub mod items;
@@ -31,6 +32,7 @@ pub mod reinforce;
 pub mod saved_build;
 pub mod url;
 
+pub use class::{ClassPlan, ClassRefusal, StartingClass, check_build, plan_class};
 pub use field::{Field, MAX_UNITS, Reaction};
 pub use items::{Infusion, ItemError, id_for, is_empty_slot, normalise};
 pub use level::{LevelChange, LevelError, MAX_LEVEL, SoulCosts, StatSpread, level_from_stats};

@@ -775,7 +775,10 @@ impl Panel {
     }
 
     fn generate(&mut self) {
-        match backend::generate(backend(), &self.state) {
+        // Any class may win: applying a build for another class changes the character's class to
+        // it (ds2-build-import writes the class before the stats), so the best build is offered
+        // whatever the character started as.
+        match backend::generate(backend(), &self.state, None) {
             Ok(build) => {
                 log_line(format_args!(
                     "{LOG_PREFIX} generated {} SL {} primary={:?} {} STR {} (grip asked {:?}) stub={}",
@@ -827,19 +830,27 @@ impl Panel {
         let Some(generated) = &self.generated else {
             return;
         };
+        let current = ds2_build_import::character_class();
         let (build, extras) = backend::to_import(generated);
         log_line(format_args!(
-            "{LOG_PREFIX} apply confirmed: {} SL {} with {} extra grants -- handed to \
+            "{LOG_PREFIX} apply confirmed: {} SL {} with {} extra grants onto a {} -- handed to \
              ds2-build-import",
             generated.class,
             generated.sl,
-            extras.len()
+            extras.len(),
+            current.map_or_else(|| "character of unread class".to_owned(), |c| c.to_string())
         ));
         ds2_build_import::queue_generated(build, extras);
-        self.status = Some(
-            "Queued: the pause menu applies it on its next frame -- the log says what changed"
+        self.status = Some(match current {
+            Some(class) if !generated.class.eq_ignore_ascii_case(class.key()) => format!(
+                "Queued: your {} becomes a {} on the pause menu's next frame -- the log says what \
+                 changed",
+                class.key(),
+                generated.class
+            ),
+            _ => "Queued: the pause menu applies it on its next frame -- the log says what changed"
                 .to_owned(),
-        );
+        });
     }
 
     fn act(&mut self, action: Action) {
@@ -941,17 +952,26 @@ impl Panel {
             }
             Action::Run => self.run(),
             Action::BestInfusion => self.best_infusion(),
-            Action::UseCharacter => match backend().current_character_stats() {
-                Some(stats) => {
+            // Read from the game, not the backend: the corpus backend has no game to read, and
+            // asking it made this button do nothing (ds2-mods-rs-fynp).
+            Action::UseCharacter => match ds2_build_import::character_stats() {
+                Some(game) => {
+                    let stats = backend::planner_order(&game);
+                    log_line(format_args!(
+                        "{LOG_PREFIX} use my character's stats: {stats:?} (class {})",
+                        ds2_build_import::character_class()
+                            .map_or_else(|| "unread".to_owned(), |c| c.to_string())
+                    ));
                     self.state.stats = stats;
                     self.changed();
-                    self.status = Some(if backend().is_stub() {
-                        "Stats filled in -- the stub's fixed character, not yours yet".to_owned()
-                    } else {
-                        "Stats read from your character".to_owned()
-                    });
+                    self.status = Some("Stats read from your character".to_owned());
                 }
-                None => self.status = Some("Could not read the character's stats".to_owned()),
+                None => {
+                    log_line(format_args!(
+                        "{LOG_PREFIX} use my character's stats: no character to read"
+                    ));
+                    self.status = Some("Could not read the character's stats".to_owned());
+                }
             },
             Action::Generate => self.generate(),
             Action::Show(shown) => self.shown = shown,
@@ -2402,8 +2422,11 @@ fn draw_confirm(
         ),
         (
             TEXT,
-            "The nine stats are rewritten; a build below this character keeps its stats."
-                .to_owned(),
+            format!(
+                "The nine stats are rewritten and the starting class becomes {}; a build below \
+                 this character keeps both.",
+                build.class
+            ),
         ),
         (
             TEXT,

@@ -167,6 +167,77 @@ pub(crate) fn live_character_name() -> Option<String> {
     String::from_utf16(&units).ok()
 }
 
+/// The live character's starting class id -- the game's own number, `7` for a Sorcerer.
+///
+/// `player_data + 0x64` ([`ds2_rva::PLAYER_DATA_CLASS_OFFSET`]), read as the `u32` the profile
+/// loader writes there. `None` with no character loaded; the id is returned raw so a caller can log
+/// one that names no class rather than lose it.
+pub(crate) fn live_character_class_id() -> Option<u32> {
+    let player = live_player_data()?;
+    // SAFETY: inside the block the pointer chain produced; `safe_read_u32` fails closed on an
+    // unmapped page rather than faulting.
+    unsafe { ds2_game_base::mem::safe_read_u32(player + ds2_rva::PLAYER_DATA_CLASS_OFFSET) }
+}
+
+/// The character-list record of the character the game has loaded: `[GameDataManager + 0xD8]`
+/// plus the current slot (`+0x1368`) times `0x1F0`. `None` with no list or a slot out of `0..10`.
+fn live_slot_record() -> Option<usize> {
+    let address = ds2_game_base::mem::game_rva(ds2_rva::GAME_MANAGER_IMP).ok()?;
+    // SAFETY: a resolved RVA, then pointer hops each null-checked and read fault-safe.
+    unsafe {
+        let manager = non_null(ds2_game_base::mem::safe_read_usize(address)?)?;
+        let data = non_null(ds2_game_base::mem::safe_read_usize(
+            manager + ds2_rva::GAME_DATA_MANAGER_OFFSET,
+        )?)?;
+        let list = non_null(ds2_game_base::mem::safe_read_usize(
+            data + ds2_rva::GAME_DATA_SLOT_LIST_OFFSET,
+        )?)?;
+        let slot = ds2_game_base::mem::safe_read_i32(list + ds2_rva::SLOT_LIST_CURRENT_OFFSET)?;
+        if !(0..ds2_rva::SLOT_RECORD_COUNT).contains(&slot) {
+            return None;
+        }
+        Some(list + slot as usize * ds2_rva::SLOT_RECORD_STRIDE)
+    }
+}
+
+/// Make the live character `class`, in both places the game keeps it.
+///
+/// The character list's record (`+0x1D6`, `u16`) is what a reload restores the class from, and
+/// `player_data + 0x64` (`u32`) is what the running game reads -- the level-up menu's stat floors
+/// and the class name. The game has no function that sets either after creation; its own profile
+/// loader and character creation store them directly, and so does this. Both are read back.
+///
+/// **Game thread only**, from the apply tick.
+///
+/// # Errors
+///
+/// Which copy could not be located, or did not read back what was written.
+pub(crate) fn write_character_class(
+    class: ds2_build_import_core::StartingClass,
+) -> Result<(), &'static str> {
+    let record = live_slot_record().ok_or("the character list's current record")?;
+    let player = live_player_data().ok_or("player_data")?;
+    let record_field = record + ds2_rva::SLOT_RECORD_CLASS_OFFSET;
+    let player_field = player + ds2_rva::PLAYER_DATA_CLASS_OFFSET;
+    let id = class.game_id();
+    // SAFETY: both fields were just located through fault-safe reads of the game's own pointers,
+    // and are read once more below before anything is written; the writes are the same widths the
+    // game's own loader stores there (`u16` in the record, `u32` in player_data).
+    unsafe {
+        ds2_game_base::mem::safe_read_u16(record_field).ok_or("the record's class")?;
+        ds2_game_base::mem::safe_read_u32(player_field).ok_or("player_data's class")?;
+        core::ptr::write_volatile(record_field as *mut u16, id as u16);
+        core::ptr::write_volatile(player_field as *mut u32, id);
+        if ds2_game_base::mem::safe_read_u16(record_field) != Some(id as u16) {
+            return Err("the record's class did not read back");
+        }
+        if ds2_game_base::mem::safe_read_u32(player_field) != Some(id) {
+            return Err("player_data's class did not read back");
+        }
+    }
+    Ok(())
+}
+
 /// `Some(pointer)` unless it is null.
 const fn non_null(pointer: usize) -> Option<usize> {
     if pointer == 0 { None } else { Some(pointer) }
