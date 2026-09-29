@@ -60,6 +60,18 @@
 #     description above says every carve-out is a door and the failure it exists to stop
 #     was the agent walking through the door it argued for itself; this one nobody argued
 #     for.
+#
+#     A FOURTH INSTRUMENT, 2026-09-29 (bd ds2-mods-rs-we2q, PR #273): the repo gate
+#     itself. CI failed `scripts/check.sh` on `crates/ds2-build-recommender-core/src/
+#     corpus.rs:2319: allow with no `# DEBT: <issue>` comment above it`, and the fix --
+#     one comment line above the allow -- was refused `spent-by-commit`. A CI gate failure
+#     is a measurement the gate itself takes, and a comment the gate demands has no build
+#     and no run for Frida, telemetry or the build instrument to measure, so the gate
+#     demanded an instrument that cannot see the defect. `--record-check` accepts the
+#     gate's own printed line: a whole line of a failed check.sh log (section header above
+#     it, no later section, a failure summary or nonzero exit after it, no `== OK ==`),
+#     naming a path under `crates/<crate>/`, newer than the last committed Rust change.
+#     It exempts no file and opens that one crate, like the telemetry and build paths.
 #   routing:
 #     required_events: ["PreToolUse"]
 #     required_tools: ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"]
@@ -180,15 +192,24 @@ telemetry_verdict if {
 	startswith(evidence, "PROVEN build")
 }
 
+# The fourth instrument, 2026-09-29: a failed `scripts/check.sh` run. A gate failure such as an
+# allow with no `// DEBT:` comment is measured by the gate, and the comment it demands changes no
+# build and no run, so none of the other three can see it. `--record-check` writes it only when the
+# quoted line is a whole line of a failed check.sh log inside the section that failed and names a
+# path under `crates/<crate>/`. Scoped exactly as telemetry and build are.
+telemetry_verdict if {
+	startswith(evidence, "PROVEN check")
+}
+
 # Anchored at the front of the verdict: everything to the right of the crate name is free text
 # from a log, and free text must not be able to impersonate the field that decides scope.
 licensed_crate := name if {
-	matches := regex.find_all_string_submatch_n(`^PROVEN (?:telemetry|build) crate=([A-Za-z0-9_-]+)(?: |$)`, evidence, 1)
+	matches := regex.find_all_string_submatch_n(`^PROVEN (?:telemetry|build|check) crate=([A-Za-z0-9_-]+)(?: |$)`, evidence, 1)
 	count(matches) == 1
 	name := matches[0][1]
 }
 
-block_reason := "🧁 Cupcake blocked a Rust edit with no Frida measurement behind it. AGENTS.md: \"The order is Frida, then Frida, then Frida, and only then a DLL: prototype with it, run the experiment with it, and fix the thing with it if a hook can. Build a DLL when the mechanism is already known and the code is the product, never to find something out.\"\n\nGo and look first:\n  python3 scripts/ds2-frida-up.py\n  uv run --with frida python3 scripts/ds2-frida-watch.py --agent scripts/frida/<agent>.js\n\nThe watch records what it saw on exit, and `python3 scripts/ds2-frida-evidence.py --check` is what opens this gate. It needs a session that attached to a pid and received at least one message -- a watch that observed nothing did not look at anything. A commit spends the evidence, so the next change needs its own measurement.\n\nIf the mechanism is inside one of OUR DLLs rather than in the game -- an unexported static, a `pub(crate)` seam, which of our functions calls which of our setters -- Frida has nothing to attach to, and the instrument that reaches it is the shell's own in-process telemetry from a live run:\n  python3 scripts/ds2-frida-evidence.py --record-telemetry --crate <crate> --log <the run's log> --line '<a line from it, verbatim>'\nThe line must be in that log word for word and the log must be newer than the last committed Rust change. It opens that ONE crate.\n\nIf the defect is a compiler or linker error -- the DLL does not build, so nothing runs for either instrument to see -- the build is the instrument:\n  python3 scripts/ds2-frida-evidence.py --record-build --crate <crate> --log <the failed cargo build's log> --line '<the error line, whole, e.g. lld-link: error: undefined symbol: X>'\nThe line must be a whole rustc/lld error line of a failed cargo build, its own `-->` / `>>> referenced by` lines must name a file under crates/<crate>/, and the log must be newer than the last committed Rust change. It opens that ONE crate.\n\nIf no instrument can reach it, say so in one sentence and say what can. Do not edit around this by narrowing the change until it looks harmless.\n\nEditable without proof: `scripts/`, `.cupcake/`, docs, and every non-Rust file."
+block_reason := "🧁 Cupcake blocked a Rust edit with no Frida measurement behind it. AGENTS.md: \"The order is Frida, then Frida, then Frida, and only then a DLL: prototype with it, run the experiment with it, and fix the thing with it if a hook can. Build a DLL when the mechanism is already known and the code is the product, never to find something out.\"\n\nGo and look first:\n  python3 scripts/ds2-frida-up.py\n  uv run --with frida python3 scripts/ds2-frida-watch.py --agent scripts/frida/<agent>.js\n\nThe watch records what it saw on exit, and `python3 scripts/ds2-frida-evidence.py --check` is what opens this gate. It needs a session that attached to a pid and received at least one message -- a watch that observed nothing did not look at anything. A commit spends the evidence, so the next change needs its own measurement.\n\nIf the mechanism is inside one of OUR DLLs rather than in the game -- an unexported static, a `pub(crate)` seam, which of our functions calls which of our setters -- Frida has nothing to attach to, and the instrument that reaches it is the shell's own in-process telemetry from a live run:\n  python3 scripts/ds2-frida-evidence.py --record-telemetry --crate <crate> --log <the run's log> --line '<a line from it, verbatim>'\nThe line must be in that log word for word and the log must be newer than the last committed Rust change. It opens that ONE crate.\n\nIf the defect is a compiler or linker error -- the DLL does not build, so nothing runs for either instrument to see -- the build is the instrument:\n  python3 scripts/ds2-frida-evidence.py --record-build --crate <crate> --log <the failed cargo build's log> --line '<the error line, whole, e.g. lld-link: error: undefined symbol: X>'\nThe line must be a whole rustc/lld error line of a failed cargo build, its own `-->` / `>>> referenced by` lines must name a file under crates/<crate>/, and the log must be newer than the last committed Rust change. It opens that ONE crate.\n\nIf the defect is a scripts/check.sh gate failure -- e.g. `allow with no # DEBT: <issue> comment above it` -- the gate is the instrument:\n  python3 scripts/ds2-frida-evidence.py --record-check --crate <crate> --log <the failed check.sh log, local or `gh run view <id> --log-failed`> --line '<the line check.sh printed, whole>'\nThe line must be a whole line of a failed check.sh run, inside the section that failed, and name a path under crates/<crate>/; the log must be newer than the last committed Rust change. It opens that ONE crate.\n\nIf no instrument can reach it, say so in one sentence and say what can. Do not edit around this by narrowing the change until it looks harmless.\n\nEditable without proof: `scripts/`, `.cupcake/`, docs, and every non-Rust file."
 
 # What the refusal quotes back. The three cases are worth telling apart: a verdict line is the
 # reader answering, an absent signal is nobody having asked, and a failure record is the reader

@@ -489,6 +489,47 @@ test_allow_the_bash_spelling_inside_the_build_licensed_crate if {
 	not denied(bash_event("sed -i 's/a/b/' crates/ds2-invasion-path/src/lib.rs", PROVEN_BUILD))
 }
 
+# --- the fourth instrument: a failed check.sh run, scoped to the crate its line named ----------
+#
+# PR #273: check.sh refused an allow with no `// DEBT:` comment, and the comment it demands has no
+# build or run to measure. Verdict copied from the evidence reader's format string, which its
+# selftest pins.
+PROVEN_CHECK := "PROVEN check crate=ds2-build-recommender-core log=/tmp/ci.log line='crates/ds2-build-recommender-core/src/corpus.rs:2319: allow with no `# DEBT: <issue>` comment above it'"
+
+test_allow_the_crate_the_check_failure_named if {
+	count(guard.deny) == 0 with input as edit_event(
+		"/home/banon/projects/ds2-mods-rs/crates/ds2-build-recommender-core/src/corpus.rs",
+		PROVEN_CHECK,
+	)
+}
+
+test_deny_a_different_crate_on_the_same_check_failure if {
+	denied(edit_event("crates/ds2-net-effects/src/lib.rs", PROVEN_CHECK))
+}
+
+test_deny_a_crate_whose_name_extends_the_check_licensed_one if {
+	denied(edit_event("crates/ds2-build-recommender-core-x/src/lib.rs", PROVEN_CHECK))
+}
+
+test_deny_a_check_verdict_with_no_crate_field if {
+	denied(edit_event("crates/ds2-build-recommender-core/src/corpus.rs", "PROVEN check log=/tmp/ci.log"))
+}
+
+test_deny_when_a_second_crate_field_appears_in_the_quoted_check_line if {
+	denied(edit_event(
+		"crates/ds2-net-effects/src/lib.rs",
+		"PROVEN check crate=ds2-build-recommender-core log=/x.log line='x crate=ds2-net-effects y'",
+	))
+}
+
+test_deny_the_bash_spelling_outside_the_check_licensed_crate if {
+	denied(bash_event("sed -i 's/a/b/' crates/ds2-net-effects/src/lib.rs", PROVEN_CHECK))
+}
+
+test_allow_the_bash_spelling_inside_the_check_licensed_crate if {
+	not denied(bash_event("sed -i 's/a/b/' crates/ds2-build-recommender-core/src/corpus.rs", PROVEN_CHECK))
+}
+
 # The unscoped path opens on the Frida verdict's own `agent=` field, not on the bare word, so a
 # PROVEN kind this policy has no clause for opens nothing instead of the whole tree.
 test_deny_an_unknown_proven_kind if {
