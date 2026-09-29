@@ -13,6 +13,7 @@ use ds2_build_recommender_core::backend::{
     StubBackend,
 };
 use ds2_build_recommender_core::corpus::{self, CorpusBackend};
+use ds2_build_recommender_core::flex::{Flexibility, flex_line, flex_load_line};
 use ds2_build_recommender_core::model::{
     Grip, Mode, Objective, PanelState, STAT_COUNT, STAT_LABELS,
 };
@@ -51,6 +52,29 @@ fn backend() -> &'static dyn RecommenderBackend {
         Some(corpus) => corpus,
         None => &STUB,
     }
+}
+
+/// Ask the backend how flexible a build is, and say in the log what it answered: the panel's line
+/// word for word, or why there is none.
+fn ask_flexibility(
+    stats: &[u16; STAT_COUNT],
+    sl: u16,
+    armor: &[String],
+    rings: &[String],
+) -> Option<Flexibility> {
+    let flex = backend().flexibility(stats, sl, armor, rings);
+    match &flex {
+        Some(flex) => log_line(format_args!(
+            "{LOG_PREFIX} flexibility SL {sl}: {} | {}",
+            flex_line(flex),
+            flex_load_line(flex)
+        )),
+        None => log_line(format_args!(
+            "{LOG_PREFIX} flexibility SL {sl}: none -- the stub, or a data file without neighbour \
+             counts"
+        )),
+    }
+    flex
 }
 
 /// Read `<Game>/ds2-build-recommender.dat`, beside the running executable, into [`CORPUS`], and
@@ -201,6 +225,11 @@ struct Panel {
     answer: Option<Answer>,
     results_scroll: usize,
     generated: Option<GeneratedBuild>,
+    /// The weapon flexibility of the build in [`Self::answer`], asked once when it arrived: the
+    /// neighbour search reads the whole corpus, which is not a per-frame cost.
+    answer_flex: Option<Flexibility>,
+    /// The same for [`Self::generated`], in its armour and rings.
+    generated_flex: Option<Flexibility>,
     /// Why the last Generate Build was refused.
     refused: Vec<String>,
     shown: Shown,
@@ -231,6 +260,8 @@ impl Panel {
             answer: None,
             results_scroll: 0,
             generated: None,
+            answer_flex: None,
+            generated_flex: None,
             refused: Vec::new(),
             shown: Shown::Answer,
             confirming: false,
@@ -521,6 +552,7 @@ impl Panel {
     /// The inputs changed: an answer for the old ones is not shown for the new.
     fn changed(&mut self) {
         self.answer = None;
+        self.answer_flex = None;
         self.results_scroll = 0;
         self.scrolling_results = false;
         self.refused.clear();
@@ -697,6 +729,11 @@ impl Panel {
                 Answer::Nothing(why) => (*why).to_owned(),
             }
         ));
+        // An optimized or minimum build wears nothing the answer names, so its load is all spare.
+        self.answer_flex = match &answer {
+            Answer::Build(build) => ask_flexibility(&build.stats, build.sl, &[], &[]),
+            _ => None,
+        };
         self.answer = Some(answer);
         self.results_scroll = 0;
         self.shown = Shown::Answer;
@@ -766,6 +803,8 @@ impl Panel {
                         build.catalysts
                     ));
                 }
+                self.generated_flex =
+                    ask_flexibility(&build.stats, build.sl, &build.armor, &build.suggested_rings);
                 self.generated = Some(build);
                 self.refused.clear();
                 self.shown = Shown::Build;
@@ -776,6 +815,7 @@ impl Panel {
                     lines.join(", ")
                 ));
                 self.generated = None;
+                self.generated_flex = None;
                 self.refused = lines;
                 self.shown = Shown::Answer;
             }
@@ -1659,7 +1699,8 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
     if panel.shown == Shown::Build
         && let Some(build) = panel.generated.clone()
     {
-        draw_build(&mut canvas, &build, results_rect);
+        let flex = panel.generated_flex.clone();
+        draw_build(&mut canvas, &build, flex.as_ref(), results_rect);
     } else {
         draw_answer(panel, &mut canvas, results_rect);
     }
@@ -1986,6 +2027,9 @@ fn draw_answer(panel: &mut Panel, canvas: &mut Canvas<'_>, (min, max): ([f32; 2]
             y += line + 4.0;
             canvas.text([min[0], y], TEXT, &stats_line(&build.stats));
             y += line + 4.0;
+            if let Some(flex) = &panel.answer_flex {
+                y = draw_flexibility(canvas, flex, [min[0], y], max[0] - min[0]);
+            }
             if !build.gear.is_empty() {
                 canvas.text(
                     [min[0], y],
@@ -2120,7 +2164,29 @@ fn sl_label(stats: &[u16; STAT_COUNT], asked: u16) -> String {
     }
 }
 
-fn draw_build(canvas: &mut Canvas<'_>, build: &GeneratedBuild, (min, max): ([f32; 2], [f32; 2])) {
+/// The two flexibility lines at `at`: how many weapons the build wields and its percentile among
+/// the builds nearest it, then the load it leaves for weapons. Returns the `y` below them.
+fn draw_flexibility(canvas: &mut Canvas<'_>, flex: &Flexibility, at: [f32; 2], width: f32) -> f32 {
+    let step = canvas.line + 4.0;
+    canvas.text(
+        at,
+        TEXT,
+        &clip(canvas.ui, &format!("Weapons: {}", flex_line(flex)), width),
+    );
+    canvas.text(
+        [at[0], at[1] + step],
+        DIM,
+        &clip(canvas.ui, &format!("Load: {}", flex_load_line(flex)), width),
+    );
+    at[1] + 2.0 * step
+}
+
+fn draw_build(
+    canvas: &mut Canvas<'_>,
+    build: &GeneratedBuild,
+    flex: Option<&Flexibility>,
+    (min, max): ([f32; 2], [f32; 2]),
+) {
     let line = canvas.line;
     let step = line + 4.0;
     let mut y = min[1];
@@ -2146,6 +2212,9 @@ fn draw_build(canvas: &mut Canvas<'_>, build: &GeneratedBuild, (min, max): ([f32
     y += step;
     canvas.text([min[0], y], TEXT, &stats_line(&build.stats));
     y += step;
+    if let Some(flex) = flex {
+        y = draw_flexibility(canvas, flex, [min[0], y], max[0] - min[0]);
+    }
     // The four armour slots as Apply equips them, head to legs.
     let armor = if build.armor.is_empty() {
         "none (Allow no armor)".to_owned()

@@ -242,6 +242,18 @@ pub trait RecommenderBackend: Sync {
     }
     /// The live character's nine stats, when they can be read.
     fn current_character_stats(&self) -> Option<[u16; STAT_COUNT]>;
+    /// How many weapons `stats` wield, where that sits among the builds nearest them at `sl`, and
+    /// the load `armor` (head to legs) and `rings`, by name, leave for weapons. `None` when this
+    /// backend cannot say, which is the default: the stub has no neighbours to rank against.
+    fn flexibility(
+        &self,
+        _stats: &[u16; STAT_COUNT],
+        _sl: u16,
+        _armor: &[String],
+        _rings: &[String],
+    ) -> Option<crate::flex::Flexibility> {
+        None
+    }
 }
 
 /// Each floor `stats` is under, as `VIG 5 < 12`.

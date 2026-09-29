@@ -301,13 +301,19 @@ offending := clause if {
 	edited == "0"
 	field("asked") == "0"
 	field("blocked") == "0"
+	delegated == "0"
+	oneline == "0"
 }
 
+# The promissory reason itself says "start it (a backgrounded command or a subagent) so something
+# real is carrying it" and "say in one line what blocks it", so both are honoured here too.
 promissory := clause if {
 	clause := field("promise")
 	clause != ""
 	edited == "0"
 	blocked == "0"
+	delegated == "0"
+	oneline == "0"
 }
 
 unread := clause if {
@@ -324,6 +330,7 @@ deferred := clause if {
 	clause != ""
 	edited == "0"
 	blocked == "0"
+	oneline == "0"
 	userneed == "0"
 	future == "0"
 }
@@ -396,4 +403,18 @@ consulted := value if {
 
 future := value if {
 	value := field("future")
+} else := "0"
+
+# A subagent (Agent / Task tool_use) launched since the user's last real prompt. Handing the fix to a
+# subagent is acting on the diagnosis; measured 2026-09-28, a turn that launched the fixing agent in
+# a worktree was halted twice for changing no file here. Fail-closed default like the rest.
+delegated := value if {
+	value := field("delegated")
+} else := "0"
+
+# The closing prose is the one-line blocker every reason in this package asks for: short, a single
+# line, and the agent saying it cannot act. Before this fact existed that escape hatch was
+# unreachable -- the measured one-line retry was halted for saying exactly what the halt asked.
+oneline := value if {
+	value := field("oneline")
 } else := "0"

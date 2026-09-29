@@ -145,6 +145,10 @@ def promissory_verdict(parsed: dict[str, str]) -> tuple[str, str] | None:
         return ("exempt-edited", promise)
     if parsed.get("blocked", "0") != "0":
         return ("exempt-blocked", promise)
+    if parsed.get("delegated", "0") != "0":
+        return ("exempt-delegated", promise)
+    if parsed.get("oneline", "0") != "0":
+        return ("exempt-oneline", promise)
     return ("halt", promise)
 
 
@@ -213,6 +217,8 @@ def deferral_verdict(parsed: dict[str, str]) -> tuple[str, str] | None:
         return ("exempt-userneed", clause)
     if parsed.get("future", "0") != "0":
         return ("exempt-future", clause)
+    if parsed.get("oneline", "0") != "0":
+        return ("exempt-oneline", clause)
     return ("halt", clause)
 
 

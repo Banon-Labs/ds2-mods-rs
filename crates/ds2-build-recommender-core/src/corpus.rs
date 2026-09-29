@@ -27,6 +27,7 @@ use crate::backend::{
     Calibration, CatalystPick, GeneratedBuild, OptimizedBuild, Outcome, RecommenderBackend,
     ResultRow, SpellRow, WEAPONS_1H_TOP, WEAPONS_2H_ONLY_TOP,
 };
+use crate::flex::{FLEX_K, Flexibility};
 use crate::model::{Grip, Objective, STAT_COUNT, StatusFilter, WeaponsForOpts};
 use crate::weapons;
 
@@ -95,6 +96,15 @@ const GENERATE_K: usize = 50;
 
 /// The R1 window a generated build's weapons are ranked over, in seconds.
 const GENERATE_WINDOW: f64 = 1.5;
+
+/// The optimizer's soft flexibility term: the script's `FLEX_WEIGHT`, whose comment carries the
+/// sweep it was chosen from. A step of `n` points that lets the build wield `d` more weapons (one-
+/// and two-handed each counted) gains `FLEX_WEIGHT * d / n` on top of its objective weight.
+const FLEX_WEIGHT: f64 = 0.02;
+
+/// The requirement stats, the only ones that change what a build wields: the script's
+/// `REQ_STATS`.
+const REQ_STATS: [usize; 4] = [STR, DEX, INT, FTH];
 
 /// The rings `builds` wear, a build counted once per ring, most worn first and ties first seen
 /// first: the script's `Counter(...).most_common()`.
@@ -379,6 +389,10 @@ struct CorpusBuild {
     /// Indices into the file's weapons with the infusion; `None` is `MugenMonkey`'s unrecorded
     /// one.
     weapons: Vec<(usize, Option<Infusion>)>,
+    /// How many weapons its levelled stats wield one- and two-handed, what it scores when it is a
+    /// neighbour in [`CorpusBackend::flexibility`]. `None` in a file written before the script
+    /// exported it.
+    flex: Option<(u32, u32)>,
 }
 
 /// Attack rating per type, physical, magic, fire, lightning, dark; `None` where the weapon has none.
@@ -903,11 +917,27 @@ impl CorpusBackend {
                         })
                         .collect::<Result<Vec<_>, String>>()?,
                 };
+                // `one:two`, trailing and optional: added without a format bump, so a file from
+                // before it still reads, with no flexibility to rank against.
+                let flex = match fields.next() {
+                    None => None,
+                    Some(pair) => {
+                        let (one, two) = pair
+                            .split_once(':')
+                            .ok_or_else(|| bad(line, "flexibility one:two"))?;
+                        let count = |text: &str| {
+                            text.parse::<u32>()
+                                .map_err(|_| bad(line, "flexibility count"))
+                        };
+                        Some((count(one)?, count(two)?))
+                    }
+                };
                 self.corpus.push(CorpusBuild {
                     bracket,
                     stat_brackets,
                     rings,
                     weapons: carried,
+                    flex,
                 });
             }
             other => return Err(bad(line, &format!("unknown record {other:?}"))),
@@ -1481,10 +1511,17 @@ impl CorpusBackend {
                     let mut best_w = 0.0;
                     for (at, &(stat, curve)) in curves.iter().enumerate() {
                         let current = value(curve, &st);
+                        // Only a requirement stat changes what the build wields; the term is left
+                        // off the rest rather than added as a zero, as the script leaves it.
+                        let flex_now = (FLEX_WEIGHT != 0.0 && REQ_STATS.contains(&stat))
+                            .then(|| self.flex_score(&st));
                         for n in 1..=free.min(99 - st[stat]).min(8) {
-                            let w = (value(curve, &with(&st, stat, st[stat] + n)) - current)
-                                / f64::from(n)
-                                / peak[at];
+                            let next = with(&st, stat, st[stat] + n);
+                            let mut w = (value(curve, &next) - current) / f64::from(n) / peak[at];
+                            if let Some(now) = flex_now {
+                                w += FLEX_WEIGHT * f64::from(self.flex_score(&next) - now)
+                                    / f64::from(n);
+                            }
                             if w > best_w + 1e-12 {
                                 pick = Some((stat, n));
                                 best_w = w;
@@ -1533,6 +1570,88 @@ impl CorpusBackend {
             .collect();
         same.sort_by_key(|&(distance, _)| distance);
         same.into_iter().take(k).map(|(_, build)| build).collect()
+    }
+
+    /// Every weapon a hand can hold: the script's `flex_pool`, `Bare_Fists` and the other empty
+    /// keys left out, shields and catalysts in.
+    fn flex_pool(&self) -> impl Iterator<Item = &Weapon> {
+        self.weapons
+            .iter()
+            .filter(|weapon| !EMPTY.contains(&weapon.key.as_str()))
+    }
+
+    /// The script's `flex_counts`: how many weapons `stats` wield one-handed and two-handed.
+    fn flex_counts(&self, stats: &Stats) -> (u32, u32) {
+        let mut counts = (0, 0);
+        for weapon in self.flex_pool() {
+            counts.0 += u32::from(weapon.wieldable(stats, false));
+            counts.1 += u32::from(weapon.wieldable(stats, true));
+        }
+        counts
+    }
+
+    /// One-handed plus two-handed: what the optimizer's flexibility term and the neighbour ranking
+    /// compare.
+    fn flex_score(&self, stats: &Stats) -> i32 {
+        let (one, two) = self.flex_counts(stats);
+        i32::try_from(one + two).unwrap_or(i32::MAX)
+    }
+
+    /// The script's `flexibility`, with the armour and rings named rather than keyed: a piece is
+    /// the first of its slot with that name, a ring the first with that name, and a name that is
+    /// neither weighs nothing, as the script's `Naked` does. `None` when the data file carries no
+    /// neighbour counts.
+    fn flex(
+        &self,
+        stats: &Stats,
+        sl: u32,
+        armor: &[String],
+        rings: &[String],
+    ) -> Option<Flexibility> {
+        let (one, two) = self.flex_counts(stats);
+        let score = one + two;
+        let mut scores = Vec::new();
+        for build in self.nearest(stats, sl, FLEX_K) {
+            let (a, b) = build.flex?;
+            scores.push(a + b);
+        }
+        let below = scores.iter().filter(|&&s| s < score).count();
+        let equal = scores.iter().filter(|&&s| s == score).count();
+        let count = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        let n = scores.len();
+        let percentile = if n == 0 {
+            50.0
+        } else {
+            100.0 * (f64::from(count(below)) + f64::from(count(equal)) / 2.0) / f64::from(count(n))
+        };
+        // Taken off one at a time, in the script's order: the script does not use `sum()`, whose
+        // compensated float total would round differently.
+        let mut spare = self.tables.equip_load.at(stats[VIT]) * EQUIP_CAP;
+        for (name, slot) in armor.iter().zip(&self.wearable) {
+            if let Some(piece) = slot.iter().find(|piece| piece.name == *name) {
+                spare -= piece.weight;
+            }
+        }
+        for name in rings {
+            if let Some(ring) = self.rings.iter().find(|ring| ring.1 == *name) {
+                spare -= ring.2;
+            }
+        }
+        let fits = self
+            .flex_pool()
+            .filter(|weapon| weapon.wieldable(stats, true) && weapon.weight <= spare)
+            .count();
+        Some(Flexibility {
+            one_handed: one,
+            two_handed: two,
+            total: count(self.flex_pool().count()),
+            below: count(below),
+            equal: count(equal),
+            neighbours: count(n),
+            percentile,
+            spare_load: spare,
+            fits: count(fits),
+        })
     }
 
     /// The script's `minimum_build` with no AGL target: per class, the lowest SL that wields
@@ -2260,6 +2379,16 @@ impl RecommenderBackend for CorpusBackend {
     /// The backend has no game to read; the panel falls back to the typed stats.
     fn current_character_stats(&self) -> Option<[u16; STAT_COUNT]> {
         None
+    }
+
+    fn flexibility(
+        &self,
+        stats: &[u16; STAT_COUNT],
+        sl: u16,
+        armor: &[String],
+        rings: &[String],
+    ) -> Option<Flexibility> {
+        self.flex(&to_stats(stats), u32::from(sl), armor, rings)
     }
 }
 

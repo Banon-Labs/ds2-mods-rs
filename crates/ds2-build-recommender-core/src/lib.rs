@@ -13,6 +13,8 @@
 //!   to a suggestion.
 //! * [`corpus`] -- [`corpus::CorpusBackend`], the ranking in `scripts/ds2-builds-recommend.py`
 //!   ported, over the data file its `--export-backend` writes.
+//! * [`flex`] -- a build's weapon flexibility, how it ranks among its stat neighbours, and the
+//!   line the panel shows for it.
 //!
 //! [`backend::to_import`] is the seam to `ds2-build-import`: a generated build becomes the same
 //! [`ds2_build_import_core::Build`] a soulsplanner link does, plus the extra copies the planner's
@@ -20,6 +22,7 @@
 
 pub mod backend;
 pub mod corpus;
+pub mod flex;
 pub mod model;
 pub mod nav;
 pub mod weapons;
