@@ -58,7 +58,7 @@ pub(crate) const IDLE_CAPTION: &str = ds2_build_import_core::ROW_CAPTION;
 ///
 /// Only sound on the GAME thread -- it pushes straight into the scene. Off-thread callers must use
 /// [`say`] and let the per-frame tick pick it up.
-unsafe fn say_now(text: &str) {
+pub(crate) unsafe fn say_now(text: &str) {
     ds2_menu_row::set_row_caption(crate::row_id(), text);
     // SAFETY: forwarded to the caller, who is promising the game thread with the menu up.
     unsafe { ds2_menu_row::refresh_row_captions() };
@@ -147,7 +147,7 @@ fn typing_tick() {
     if confirmed {
         // SAFETY: the tick runs on the game thread, with the menu up.
         match unsafe { take_typed() } {
-            Typed::Job(job) => crate::install::submit(job),
+            Typed::Job(job) => drop(crate::install::submit(job)),
             Typed::Cancelled | Typed::NotTyping => {}
         }
     }
@@ -926,6 +926,8 @@ pub(crate) enum Source {
     Dialog,
     /// The player typed the build id on the row itself.
     Typed,
+    /// The player pressed Enter in the in-game panel (`crate::panel`).
+    Panel,
 }
 
 impl Source {
@@ -934,6 +936,7 @@ impl Source {
             Source::SteamField => "the Steam field",
             Source::Dialog => "the link dialog",
             Source::Typed => "the row",
+            Source::Panel => "the in-game panel",
         }
     }
 }
@@ -1134,6 +1137,19 @@ fn wait_for_dismissal(claim: &KeyboardClaim) -> Option<i32> {
 
 /// Validate the link, fetch the page, and say what it holds.
 fn load(text: &str, source: Source) {
+    let result = fetch(text, source);
+    match &result {
+        Ok(caption) | Err(caption) => say(caption),
+    }
+    // The panel that submitted this, if one did, closes on a build and re-opens on anything else.
+    if source == Source::Panel {
+        crate::panel::finished(&result, text);
+    }
+}
+
+/// Validate, fetch and parse, and hand a build to the tick. What the row should say afterwards:
+/// `Ok` when a build was handed over, `Err` with the reason when not.
+fn fetch(text: &str, source: Source) -> Result<String, String> {
     let build_id = match build_id_from_url(text) {
         Ok(id) => id,
         Err(rejection) => {
@@ -1141,11 +1157,10 @@ fn load(text: &str, source: Source) {
                 "{LOG_PREFIX} rejected \"{text}\" from {}: {rejection}",
                 source.describe()
             ));
-            // THE REJECTION'S OWN WORDS, not a generic failure. Each variant of `UrlRejection` is a
+            // The rejection's own words, not a generic failure. Each variant of `UrlRejection` is a
             // different thing the player can do about it, and "that did not work" is the one
             // message that helps with none of them.
-            say(short_rejection(rejection));
-            return;
+            return Err(short_rejection(rejection).to_owned());
         }
     };
     log_line(format_args!(
@@ -1158,8 +1173,7 @@ fn load(text: &str, source: Source) {
         Ok(page) => page,
         Err(error) => {
             log_line(format_args!("{LOG_PREFIX} fetch failed: {error:?}"));
-            say("Could not reach soulsplanner");
-            return;
+            return Err("Could not reach soulsplanner".to_owned());
         }
     };
     match ds2_build_import_core::saved_build::parse(&page, build_id) {
@@ -1187,15 +1201,16 @@ fn load(text: &str, source: Source) {
             match crate::save::record(&build) {
                 Ok(path) => {
                     log_line(format_args!("{LOG_PREFIX} wrote {}", path.display()));
-                    say(&format!("{}: {}", build.id, build.class));
+                    let caption = format!("{}: {}", build.id, build.class);
                     // The game thread takes it from here -- see `apply_tick`.
                     hand_over(build);
+                    Ok(caption)
                 }
                 Err(error) => {
                     log_line(format_args!(
                         "{LOG_PREFIX} could not record the build: {error}"
                     ));
-                    say(&format!("Read {} but could not save it", build.id));
+                    Err(format!("Read {} but could not save it", build.id))
                 }
             }
         }
@@ -1203,7 +1218,7 @@ fn load(text: &str, source: Source) {
             log_line(format_args!(
                 "{LOG_PREFIX} build {build_id} could not be read: {error}"
             ));
-            say(&format!("Build {build_id} is not readable"));
+            Err(format!("Build {build_id} is not readable"))
         }
     }
 }
@@ -1212,7 +1227,7 @@ fn load(text: &str, source: Source) {
 ///
 /// [`UrlRejection::indicator`] is written for a log line and a wider field; the row is narrow, and
 /// a caption that runs off the end says less than a shorter one that fits.
-const fn short_rejection(rejection: UrlRejection) -> &'static str {
+pub(crate) const fn short_rejection(rejection: UrlRejection) -> &'static str {
     match rejection {
         UrlRejection::Empty => "No build id in that link",
         UrlRejection::NotSoulsplanner => "Not a soulsplanner link",

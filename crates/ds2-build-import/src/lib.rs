@@ -78,6 +78,10 @@ mod flow;
 #[cfg(windows)]
 mod game;
 #[cfg(windows)]
+mod panel;
+#[cfg(windows)]
+mod panel_input;
+#[cfg(windows)]
 mod save;
 #[cfg(windows)]
 mod steam;
@@ -220,7 +224,7 @@ pub fn character_stats() -> Option<[u16; 9]> {
     game::read_stats(game::player_param().ok()?)
 }
 #[cfg(windows)]
-pub use install::{LogFn, register, register_apply_tick};
+pub use install::{LogFn, install_panel, register, register_apply_tick};
 
 #[cfg(windows)]
 mod install {
@@ -319,6 +323,20 @@ mod install {
     /// the table. Only the WAIT is handed off, because the wait is unbounded and the fetch that
     /// follows it is a blocking TLS handshake.
     fn open_field() {
+        // The in-game panel, when `ds2-overlay` could take it. It holds no session until the
+        // player submits a link, so a fetch still running from a previous press is no reason not
+        // to open it; the submit is what waits its turn.
+        if crate::panel::installed() {
+            match crate::save::require_live_character() {
+                Ok(_) => crate::panel::open(),
+                Err(reason) => {
+                    log_line(format_args!("{LOG_PREFIX} refused: {reason}"));
+                    // SAFETY: the row's confirm -- game thread, menu up.
+                    unsafe { crate::flow::say_now(reason.caption()) };
+                }
+            }
+            return;
+        }
         if SESSION_OPEN.swap(true, Ordering::AcqRel) {
             return log_line(format_args!("{LOG_PREFIX} a field is already open"));
         }
@@ -339,11 +357,24 @@ mod install {
     /// own press arrives here's sibling and finds the flag already claimed. If the row wins, it
     /// submits through the same `take_typed`, and the tick then finds no session to confirm. One
     /// press, one job, in either order.
-    pub(crate) fn submit(job: crate::flow::Job) {
+    ///
+    /// Returns whether the job was taken; `false` when another one already holds the session.
+    pub(crate) fn submit(job: crate::flow::Job) -> bool {
         if SESSION_OPEN.swap(true, Ordering::AcqRel) {
-            return log_line(format_args!("{LOG_PREFIX} a field is already open"));
+            log_line(format_args!("{LOG_PREFIX} a field is already open"));
+            return false;
         }
         hand_to_worker(job);
+        true
+    }
+
+    /// Give the Load from URL row the in-game panel.
+    ///
+    /// It replaces the Steam field and the Win32 dialog. Needs `ds2-overlay`'s `Present` detour
+    /// started and the input harness installed, which the loader does first. `false` has been
+    /// logged, and the row keeps the old chain.
+    pub fn install_panel() -> bool {
+        crate::panel::install()
     }
 
     /// Put a claimed job on a worker thread. **[`SESSION_OPEN`] must already be claimed.**

@@ -154,11 +154,61 @@ impl Editor {
 
     /// Insert clipboard text at the caret, cleaned by [`normalise_paste`] and cut at the length
     /// bound.
+    ///
+    /// **A paste that is a whole build link REPLACES the field.** The field opens on the prefix, so
+    /// a player pasting the link they copied from the site would otherwise get the prefix twice --
+    /// `https://soulsplanner.com/darksouls2/https://soulsplanner.com/darksouls2/253` -- which is
+    /// refused for a reason that is not theirs. Anything else, a bare `253` included, goes in at the
+    /// caret.
     pub fn paste(&mut self, clipboard: &str) -> Event {
         if !self.is_open() {
             return Event::Closed;
         }
-        self.field.paste(&normalise_paste(clipboard));
+        let cleaned = normalise_paste(clipboard);
+        if crate::build_id(&cleaned).is_some() {
+            self.field.set_text(&cleaned);
+        } else {
+            self.field.paste(&cleaned);
+        }
+        Event::Editing
+    }
+
+    /// Delete the character after the caret.
+    pub fn delete(&mut self) -> Event {
+        self.edit(Field::delete)
+    }
+
+    /// Step the caret one character left.
+    pub fn move_left(&mut self) -> Event {
+        self.edit(Field::move_left)
+    }
+
+    /// Step the caret one character right.
+    pub fn move_right(&mut self) -> Event {
+        self.edit(Field::move_right)
+    }
+
+    /// Put the caret before the first character.
+    pub fn move_home(&mut self) -> Event {
+        self.edit(Field::move_home)
+    }
+
+    /// Put the caret after the last character.
+    pub fn move_end(&mut self) -> Event {
+        self.edit(Field::move_end)
+    }
+
+    /// Empty the field. Ctrl+Backspace, or a pad's way of starting over.
+    pub fn clear(&mut self) -> Event {
+        self.edit(|field| field.set_text(""))
+    }
+
+    /// Apply `change` to the field while it is open.
+    fn edit(&mut self, change: impl FnOnce(&mut Field)) -> Event {
+        if !self.is_open() {
+            return Event::Closed;
+        }
+        change(&mut self.field);
         Event::Editing
     }
 
@@ -356,6 +406,65 @@ mod tests {
         }
         assert_eq!(editor.text(), "x");
         assert!(editor.is_open());
+    }
+
+    /// The field opens on the prefix, and the link a player copies from the site carries it too.
+    #[test]
+    fn a_pasted_link_replaces_the_prefix_instead_of_following_it() {
+        let mut editor = Editor::new();
+        editor.paste("https://soulsplanner.com/darksouls2/253\n");
+        assert_eq!(editor.text(), "https://soulsplanner.com/darksouls2/253");
+        assert_eq!(editor.caret(), editor.text().chars().count());
+    }
+
+    /// Only a link that names a build replaces; the fragment form is text for the caret.
+    #[test]
+    fn a_paste_that_is_not_a_build_link_goes_in_at_the_caret() {
+        let mut after_prefix = Editor::new();
+        after_prefix.paste("#253");
+        assert_eq!(after_prefix.text(), format!("{BUILD_URL_PREFIX}#253"));
+        let mut empty = Editor::with_text("");
+        empty.paste("https://soulsplanner.com/darksouls2/#253");
+        assert_eq!(empty.text(), "https://soulsplanner.com/darksouls2/#253");
+    }
+
+    #[test]
+    fn the_caret_moves_and_edits_happen_where_it_is() {
+        let mut editor = Editor::with_text("2x3");
+        editor.move_left();
+        assert_eq!(editor.caret(), 2);
+        editor.backspace();
+        assert_eq!(editor.text(), "23");
+        editor.insert_char('5');
+        assert_eq!(editor.text(), "253");
+        editor.move_home();
+        editor.delete();
+        assert_eq!(editor.text(), "53");
+        editor.move_end();
+        editor.move_right();
+        assert_eq!(editor.caret(), 2, "the caret stops at the end");
+        editor.move_home();
+        editor.move_left();
+        assert_eq!(editor.caret(), 0, "and at the start");
+    }
+
+    #[test]
+    fn clear_empties_the_field_and_nothing_edits_a_closed_one() {
+        let mut editor = Editor::new();
+        assert_eq!(editor.clear(), Event::Editing);
+        assert_eq!(editor.text(), "");
+        assert!(editor.is_open());
+        editor.escape();
+        for event in [
+            editor.clear(),
+            editor.delete(),
+            editor.move_left(),
+            editor.move_right(),
+            editor.move_home(),
+            editor.move_end(),
+        ] {
+            assert_eq!(event, Event::Closed);
+        }
     }
 
     #[test]

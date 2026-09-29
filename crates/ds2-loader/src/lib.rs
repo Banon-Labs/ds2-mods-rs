@@ -1257,10 +1257,12 @@ fn install_menu_row() {
     let mut load_file_row = false;
     let mut file_row = false;
     let mut recommender_row = false;
+    let mut url_row = false;
     for row in &config.rows {
         let registered = register_row(*row);
         manual_save_row |= registered && *row == menu_row::Row::SaveGameToFile;
         recommender_row |= registered && *row == menu_row::Row::BuildRecommender;
+        url_row |= registered && *row == menu_row::Row::LoadBuildFromUrl;
         load_file_row |= registered && *row == menu_row::Row::LoadCharacterFromFile;
         file_row |= registered
             && matches!(
@@ -1273,6 +1275,9 @@ fn install_menu_row() {
     }
     if recommender_row {
         install_build_recommender();
+    }
+    if url_row {
+        install_build_import_panel();
     }
     // Only when `[save_block] enabled = true` asks for it, and even then gated on that row having
     // registered, not on it being listed. A run whose row was refused -- a full tab, a sealed
@@ -1342,6 +1347,42 @@ fn install_save_picker() {
         log_line(format_args!(
             "{} save picker: no panel -- the rows fall back to the OS dialog",
             ds2_save_file::LOG_PREFIX
+        ));
+    }
+}
+
+/// Give the Load from URL row its in-game panel, in place of the Steam field and the Win32 dialog
+/// it opened before.
+///
+/// Same two needs as the save picker's panel, asked for here for the same reason: `ds2-overlay`'s
+/// `Present` detour to draw and tick from, and the input harness, whose `hold` keeps the pause menu
+/// underneath still while the panel has the keyboard. Without either the row keeps the old chain.
+fn install_build_import_panel() {
+    ds2_input_harness::set_logger(log_line);
+    // SAFETY: called from the post-Arxan position like every other install here. The harness's
+    // install checks each of its sites against the prologue `ds2-rva` records and refuses a moved
+    // one, and it is idempotent, so a second call from the save picker or the recommender is a
+    // no-op.
+    let hooked = unsafe { ds2_input_harness::install() };
+    if hooked != INPUT_HARNESS_SITES {
+        log_line(format_args!(
+            "{} panel: only {hooked}/{INPUT_HARNESS_SITES} input devices can be held -- the pause \
+             menu may move under the panel",
+            ds2_build_import::LOG_PREFIX
+        ));
+    }
+    if !start_overlay() {
+        log_line(format_args!(
+            "{} panel: ds2-overlay could not start, so the row keeps the Steam field and the link \
+             dialog",
+            ds2_build_import::LOG_PREFIX
+        ));
+        return;
+    }
+    if !ds2_build_import::install_panel() {
+        log_line(format_args!(
+            "{} panel: not installed -- the row keeps the Steam field and the link dialog",
+            ds2_build_import::LOG_PREFIX
         ));
     }
 }

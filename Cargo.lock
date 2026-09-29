@@ -509,10 +509,13 @@ dependencies = [
  "ds2-build-import-core",
  "ds2-build-url-core",
  "ds2-game-base",
+ "ds2-input-harness",
  "ds2-menu-row",
+ "ds2-overlay",
  "ds2-rva",
  "ds2-save-redirect",
  "ds2-sl2-core",
+ "hudhook",
 ]
 
 [[package]]
