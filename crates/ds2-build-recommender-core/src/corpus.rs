@@ -24,11 +24,14 @@ use std::path::Path;
 use ds2_build_import_core::Infusion;
 
 use crate::backend::{
-    Calibration, CatalystPick, GeneratedBuild, OptimizedBuild, Outcome, RecommenderBackend,
-    ResultRow, SpellRow, WEAPONS_1H_TOP, WEAPONS_2H_ONLY_TOP,
+    Calibration, CatalystPick, Change, Fix, GeneratedBuild, Limits, OptimizedBuild, Outcome,
+    RecommenderBackend, Refusal, RefusalKind, ResultRow, SpellRow, WEAPONS_1H_TOP,
+    WEAPONS_2H_ONLY_TOP,
 };
 use crate::flex::{FLEX_K, Flexibility};
-use crate::model::{Grip, Objective, STAT_COUNT, StatusFilter, WeaponsForOpts};
+use crate::model::{
+    Grip, Objective, SL_MAX, STAT_COUNT, STAT_LABELS, StatusFilter, WeaponsForOpts,
+};
 use crate::weapons;
 
 /// What the file is called beside `DarkSoulsII.exe`.
@@ -1351,6 +1354,13 @@ impl CorpusBackend {
         Some(need)
     }
 
+    /// Spell keys as indices into `self.spells`; `None` when one is unknown.
+    fn spell_indices(&self, keys: &[String]) -> Option<Vec<usize>> {
+        keys.iter()
+            .map(|key| self.spells.iter().position(|spell| spell.key == *key))
+            .collect()
+    }
+
     /// The script's `slots_of`: the attunement slots `stats`' ATT gives.
     fn slots_of(&self, stats: &Stats) -> i32 {
         self.tables.attunement_slots.at(stats[ATT]) as i32
@@ -1425,10 +1435,327 @@ impl CorpusBackend {
         out
     }
 
+    /// The script's `_floors_at` for every stat: the least `optimize_build` lifts each to at
+    /// `bracket` -- VIG, VIT, ADP and ATT always, END for a high-stamina weapon -- or all `0` when
+    /// the floors are off.
+    fn floor_stats(bracket: &Bracket, weapon: &Weapon, floors: bool) -> Stats {
+        let mut out = [0; STAT_COUNT];
+        if floors {
+            for (at, stat) in FLOOR_STATS.into_iter().enumerate() {
+                out[stat] = bracket.floors[at];
+            }
+            if weapon.high_stamina {
+                out[END] = bracket.floors[4];
+            }
+        }
+        out
+    }
+
+    /// The script's `_grip_req`: the weapon's requirements with STR halved (rounded up) two-handed.
+    fn grip_require(weapon: &Weapon, two: bool) -> Stats {
+        let mut out = [0; STAT_COUNT];
+        for &(stat, need) in &weapon.require {
+            out[stat] = if two && stat == STR {
+                (need + 1).div_euclid(2)
+            } else {
+                need
+            };
+        }
+        out
+    }
+
+    /// The script's `refusal`: why `optimize_build` finds nothing for these arguments, and each
+    /// fix that, run through `optimize_build`, finds something. `None` when it finds a build.
+    // DEBT: ds2-mods-rs-59p7 -- optimize_build's arguments, which want bundling as it does.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn refusal_of(
+        &self,
+        weapon: &Weapon,
+        infusion: Infusion,
+        sl: u16,
+        objective: Objective,
+        grip: Grip,
+        spells: &[usize],
+        only_class: Option<&str>,
+        floors: bool,
+    ) -> Option<Refusal> {
+        let run = |sl: u16, spells: &[usize], class: Option<&str>, floors: bool| {
+            self.optimize_build(
+                weapon,
+                infusion,
+                u32::from(sl),
+                objective,
+                grip,
+                spells,
+                class,
+                floors,
+            )
+        };
+        if run(sl, spells, only_class, floors).is_some() {
+            return None;
+        }
+        let mut names: Vec<&str> = Vec::new();
+        for &spell in spells {
+            let name = self.spells[spell].name.as_str();
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+        let spell_list = names.join(", ");
+        let two = grip.two_handed();
+        let require = Self::grip_require(weapon, two);
+        let floors_at = |sl: u16| Self::floor_stats(self.bracket(u32::from(sl)), weapon, floors);
+        let classes: Vec<usize> = (0..self.classes.len())
+            .filter(|&at| {
+                only_class.is_none_or(|only| self.classes[at].key.eq_ignore_ascii_case(only))
+            })
+            .collect();
+        let need = self.spell_floors(spells);
+        // Points above `class`'s base the layers up to `layer` need at `sl`: 1 the weapon,
+        // 2 and the spells, 3 and the floors.
+        let cost = |class: usize, sl: u16, layer: u8| -> i32 {
+            let base = &self.classes[class].base;
+            let (need, floor) = (need.unwrap_or([0; STAT_COUNT]), floors_at(sl));
+            (0..STAT_COUNT)
+                .map(|stat| {
+                    let mut value = base[stat].max(require[stat]);
+                    if layer >= 2 {
+                        value = value.max(need[stat]);
+                    }
+                    if layer >= 3 {
+                        value = value.max(floor[stat]);
+                    }
+                    value - base[stat]
+                })
+                .sum()
+        };
+        let have = |class: usize, sl: u16| -> i32 {
+            i32::from(sl) + 53 - self.classes[class].base.iter().sum::<i32>()
+        };
+        let fits = |sl: u16| {
+            need.is_some()
+                && classes
+                    .iter()
+                    .any(|&class| cost(class, sl, 3) <= have(class, sl))
+        };
+        // Per stat: (raise over the base, the value, what lifted it) -- the script's `_raises`.
+        let raises = |class: usize, need: &Stats| -> Vec<(usize, i32, i32, &'static str)> {
+            let base = &self.classes[class].base;
+            let floor = floors_at(sl);
+            (0..STAT_COUNT)
+                .map(|stat| {
+                    let (mut value, mut source) = (base[stat], "");
+                    for (name, least) in [
+                        ("spells", need[stat]),
+                        ("weapon", require[stat]),
+                        ("floors", floor[stat]),
+                    ] {
+                        if least > value {
+                            (value, source) = (least, name);
+                        }
+                    }
+                    (stat, value - base[stat], value, source)
+                })
+                .collect()
+        };
+        let label = |stat: usize| STAT_LABELS[stat];
+        let (mut lines, mut fixes) = (Vec::new(), Vec::new());
+        let (kind, closest, short) = match need {
+            None => {
+                let total: i32 = spells.iter().map(|&spell| self.spells[spell].slots).sum();
+                let most = self
+                    .tables
+                    .attunement_slots
+                    .0
+                    .iter()
+                    .copied()
+                    .fold(0.0, f64::max);
+                lines.push(format!(
+                    "no attunement holds {spell_list}: they cost {total} slots, and ATT 99 gives {}",
+                    most as i64
+                ));
+                (RefusalKind::Slots, None, 0)
+            }
+            Some(need) => {
+                let kind = [
+                    (RefusalKind::Weapon, 1),
+                    (RefusalKind::Spells, 2),
+                    (RefusalKind::Floors, 3),
+                ]
+                .into_iter()
+                .find(|&(_, layer)| {
+                    classes
+                        .iter()
+                        .all(|&class| cost(class, sl, layer) > have(class, sl))
+                })
+                .map_or(RefusalKind::Floors, |(kind, _)| kind);
+                // The least short class; the first in data order on a tie.
+                let mut closest = *classes.first()?;
+                for &class in &classes {
+                    if cost(class, sl, 3) - have(class, sl)
+                        < cost(closest, sl, 3) - have(closest, sl)
+                    {
+                        closest = class;
+                    }
+                }
+                let short = cost(closest, sl, 3) - have(closest, sl);
+                let class_name = &self.classes[closest].name;
+                let wname = &weapon.name;
+                let grip_word = if two { "two-handed" } else { "one-handed" };
+                let mut head = match kind {
+                    RefusalKind::Weapon => {
+                        format!("{wname} cannot be wielded {grip_word} at SL {sl}")
+                    }
+                    RefusalKind::Spells => format!(
+                        "{wname} can be wielded at SL {sl}, but not while casting {spell_list}"
+                    ),
+                    _ => format!(
+                        "{wname}{} SL {sl}, but not above its typical-build minimums (the median \
+                         VIG/VIT/ADP/ATT of real builds at this level; not a game rule)",
+                        if spells.is_empty() {
+                            " fits".to_owned()
+                        } else {
+                            format!(" and {spell_list} fit")
+                        }
+                    ),
+                };
+                if only_class.is_some() {
+                    head = format!("as a {class_name}: {head}");
+                }
+                lines.push(head);
+                let lifted = raises(closest, &need);
+                let mut groups = Vec::new();
+                for (source, name) in [
+                    ("floors", "floors"),
+                    ("spells", spell_list.as_str()),
+                    ("weapon", "weapon"),
+                ] {
+                    let got: Vec<String> = lifted
+                        .iter()
+                        .filter(|&&(_, raise, _, from)| from == source && raise > 0)
+                        .map(|&(stat, _, value, _)| format!("{} {value}", label(stat)))
+                        .collect();
+                    if !got.is_empty() {
+                        groups.push(format!("{name} {}", got.join(" ")));
+                    }
+                }
+                lines.push(format!(
+                    "SL {sl} is {short} points short for a {class_name}: {} need {} points above \
+                     its base, SL {sl} gives {}",
+                    groups.join(" + "),
+                    cost(closest, sl, 3),
+                    have(closest, sl)
+                ));
+                let mut top: Vec<_> = lifted.iter().filter(|r| r.1 > 0).copied().collect();
+                top.sort_by_key(|r| -r.1);
+                let source_name = |from: &str| match from {
+                    "floors" => "floor".to_owned(),
+                    "spells" => spell_list.clone(),
+                    _ => "weapon".to_owned(),
+                };
+                lines.push(format!(
+                    "most from {}",
+                    top.iter()
+                        .take(3)
+                        .map(|&(stat, raise, _, from)| format!(
+                            "{} +{raise} ({})",
+                            label(stat),
+                            source_name(from)
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                (kind, Some(closest), short)
+            }
+        };
+        // 1. The least soul level that fits, nothing else changed.
+        let up = (sl.saturating_add(1)..=SL_MAX).find(|&at| fits(at));
+        match up {
+            Some(up) if run(up, spells, only_class, floors).is_some() => {
+                fixes.push(Fix {
+                    change: Change::RaiseSl(up),
+                    label: format!("Raise SL to {up}"),
+                });
+                let (then, now) = (floors_at(sl), floors_at(up));
+                if floors
+                    && self.bracket(u32::from(sl)).floors != self.bracket(u32::from(up)).floors
+                {
+                    let shown = |floor: &Stats| {
+                        FLOOR_STATS
+                            .iter()
+                            .map(|&stat| format!("{} {}", label(stat), floor[stat]))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    };
+                    lines.push(format!(
+                        "the least SL that fits is {up}: the floors change with soul level ({} at \
+                         SL {sl}, {} at SL {up})",
+                        shown(&then),
+                        shown(&now)
+                    ));
+                } else {
+                    lines.push(format!("the least SL that fits is {up}"));
+                }
+            }
+            _ if need.is_some() => lines.push(format!("no soul level up to {SL_MAX} fits it")),
+            _ => {}
+        }
+        // 2. One spell fewer.
+        let mut tried: Vec<usize> = Vec::new();
+        for &spell in spells {
+            if tried.contains(&spell) {
+                continue;
+            }
+            tried.push(spell);
+            let mut rest = spells.to_vec();
+            if let Some(at) = rest.iter().position(|&s| s == spell) {
+                rest.remove(at);
+            }
+            if run(sl, &rest, only_class, floors).is_some() {
+                fixes.push(Fix {
+                    change: Change::RemoveSpell(self.spells[spell].key.clone()),
+                    label: format!("Remove {}", self.spells[spell].name),
+                });
+            }
+        }
+        // 3. No floors.
+        if floors
+            && let (Some(need), Some(closest)) = (need, closest)
+            && run(sl, spells, only_class, false).is_some()
+        {
+            let binding: Vec<String> = raises(closest, &need)
+                .into_iter()
+                .filter(|&(_, raise, _, from)| from == "floors" && raise > 0)
+                .map(|(stat, _, value, _)| format!("{} {value}", label(stat)))
+                .collect();
+            fixes.push(Fix {
+                change: Change::IgnoreFloors,
+                label: format!("Ignore typical-build minimums ({})", binding.join(" ")),
+            });
+        }
+        // 4. Another class, when a class was asked for.
+        if only_class.is_some()
+            && let Some((_, class, ..)) = run(sl, spells, None, floors)
+        {
+            fixes.push(Fix {
+                change: Change::Class(self.classes[class].key.clone()),
+                label: format!("Use a {} instead", self.classes[class].name),
+            });
+        }
+        Some(Refusal {
+            kind,
+            class: closest.map(|class| self.classes[class].name.clone()),
+            short,
+            lines,
+            fixes,
+        })
+    }
+
     /// The script's `optimize_build`: `(value, class, two-handed, stats)`, or `None` when no class
     /// fits the floors, the weapon's requirements and what `spells` (indices into `self.spells`)
     /// need into `sl`. `only_class` is the script's: that class key alone, for a character that
     /// already has one.
+    /// `floors` false is the script's `use_floors=False`: the bracket floors are not applied.
     // DEBT: ds2-mods-rs-59p7 -- the class made this eight arguments; bundle the per-build options.
     #[allow(clippy::too_many_arguments)]
     fn optimize_build(
@@ -1440,6 +1767,7 @@ impl CorpusBackend {
         grip: Grip,
         spells: &[usize],
         only_class: Option<&str>,
+        floors: bool,
     ) -> Option<(f64, usize, bool, Stats)> {
         let spell_need = self.spell_floors(spells)?;
         #[derive(Clone, Copy, PartialEq)]
@@ -1487,11 +1815,11 @@ impl CorpusBackend {
             {
                 let two = grip.two_handed();
                 let mut st = class.base;
-                for (at, stat) in FLOOR_STATS.into_iter().enumerate() {
-                    st[stat] = st[stat].max(bracket.floors[at]);
-                }
-                if weapon.high_stamina {
-                    st[END] = st[END].max(bracket.floors[4]);
+                for (stat, least) in Self::floor_stats(bracket, weapon, floors)
+                    .into_iter()
+                    .enumerate()
+                {
+                    st[stat] = st[stat].max(least);
                 }
                 for &(stat, need) in &weapon.require {
                     let need = if two && stat == STR {
@@ -2161,10 +2489,20 @@ impl RecommenderBackend for CorpusBackend {
         sl: u16,
         objective: Objective,
         grip: Grip,
+        limits: &Limits<'_>,
     ) -> Option<OptimizedBuild> {
         let weapon = self.weapon_by_key(weapon)?;
-        let (value, class, two_handed, stats) =
-            self.optimize_build(weapon, infusion, u32::from(sl), objective, grip, &[], None)?;
+        let spells = self.spell_indices(limits.spells)?;
+        let (value, class, two_handed, stats) = self.optimize_build(
+            weapon,
+            infusion,
+            u32::from(sl),
+            objective,
+            grip,
+            &spells,
+            limits.class,
+            limits.floors,
+        )?;
         Some(OptimizedBuild {
             class: self.classes[class].name.clone(),
             sl,
@@ -2173,6 +2511,29 @@ impl RecommenderBackend for CorpusBackend {
             value: value as f32,
             gear: Vec::new(),
         })
+    }
+
+    fn refusal(
+        &self,
+        weapon: &str,
+        infusion: Infusion,
+        sl: u16,
+        objective: Objective,
+        grip: Grip,
+        limits: &Limits<'_>,
+    ) -> Option<Refusal> {
+        let weapon = self.weapon_by_key(weapon)?;
+        let spells = self.spell_indices(limits.spells)?;
+        self.refusal_of(
+            weapon,
+            infusion,
+            sl,
+            objective,
+            grip,
+            &spells,
+            limits.class,
+            limits.floors,
+        )
     }
 
     fn minimum(&self, weapon: &str, _infusion: Infusion, two_hand: bool) -> Option<OptimizedBuild> {
@@ -2280,14 +2641,10 @@ impl RecommenderBackend for CorpusBackend {
         objective: Objective,
         allow_naked: bool,
         grip: Grip,
-        spells: &[String],
-        class: Option<&str>,
+        limits: &Limits<'_>,
     ) -> Option<GeneratedBuild> {
         let primary = self.weapon_by_key(weapon)?;
-        let spells = spells
-            .iter()
-            .map(|key| self.spells.iter().position(|spell| spell.key == *key))
-            .collect::<Option<Vec<usize>>>()?;
+        let spells = self.spell_indices(limits.spells)?;
         let (_, class, two_handed, stats) = self.optimize_build(
             primary,
             infusion,
@@ -2295,7 +2652,8 @@ impl RecommenderBackend for CorpusBackend {
             objective,
             grip,
             &spells,
-            class,
+            limits.class,
+            limits.floors,
         )?;
         let slots_used: i32 = spells.iter().map(|&spell| self.spells[spell].slots).sum();
         let slots = self.slots_of(&stats);

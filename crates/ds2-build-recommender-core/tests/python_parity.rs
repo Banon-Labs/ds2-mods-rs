@@ -16,7 +16,9 @@
 use std::sync::OnceLock;
 
 use ds2_build_import_core::Infusion;
-use ds2_build_recommender_core::backend::{self, Outcome, RecommenderBackend, ResultRow};
+use ds2_build_recommender_core::backend::{
+    self, Change, Limits, Outcome, RecommenderBackend, RefusalKind, ResultRow,
+};
 use ds2_build_recommender_core::corpus::CorpusBackend;
 use ds2_build_recommender_core::model::{
     Grip, Mode, Objective, PanelState, STAT_COUNT, StatusFilter, WeaponsForOpts, soul_level,
@@ -97,6 +99,34 @@ type SpellCases = &'static [(
     &'static str,
     &'static [&'static str],
     Option<SpellBuild>,
+)];
+type OptimizeSpellCases = &'static [(
+    &'static str,
+    &'static str,
+    u16,
+    &'static str,
+    &'static [&'static str],
+    bool,
+    Option<(&'static str, bool, &'static [u16], f64)>,
+)];
+/// kind, closest class, points short, reason lines, fixes: what, value, label.
+type RefusalAnswer = (
+    &'static str,
+    &'static str,
+    i32,
+    &'static [&'static str],
+    &'static [(&'static str, &'static str, &'static str)],
+);
+type RefusalCases = &'static [(
+    &'static str,
+    &'static str,
+    u16,
+    &'static str,
+    &'static str,
+    &'static [&'static str],
+    &'static str,
+    bool,
+    Option<RefusalAnswer>,
 )];
 type MinimumCases = &'static [(
     &'static str,
@@ -279,7 +309,14 @@ fn optimize_is_the_scripts() {
                 .map(|case| (case, Grip::OneHanded)),
         );
     for (&(weapon, code, sl, goal, want), grip) in cases {
-        let got = backend().optimize(weapon, infusion(code), sl, objective(goal), grip);
+        let got = backend().optimize(
+            weapon,
+            infusion(code),
+            sl,
+            objective(goal),
+            grip,
+            &Limits::NONE,
+        );
         match (got, want) {
             (None, None) => {}
             (Some(got), Some((class, two, st, value))) => {
@@ -306,7 +343,14 @@ fn optimize_is_the_scripts() {
 fn a_weapon_the_stats_can_one_hand_still_optimizes_two_handed() {
     let ask = |grip| {
         backend()
-            .optimize("Murakumo", Infusion::Dark, 74, Objective::Damage, grip)
+            .optimize(
+                "Murakumo",
+                Infusion::Dark,
+                74,
+                Objective::Damage,
+                grip,
+                &Limits::NONE,
+            )
             .unwrap_or_else(|| panic!("{grip:?}: no build"))
     };
     let (two, one) = (ask(Grip::TwoHanded), ask(Grip::OneHanded));
@@ -342,8 +386,10 @@ fn generate_build_is_the_scripts() {
             objective(goal),
             naked,
             grip,
-            &[],
-            only,
+            &Limits {
+                class: only,
+                ..Limits::NONE
+            },
         );
         if let (Some(only), Some(got)) = (only, &got) {
             assert!(
@@ -457,8 +503,10 @@ fn generate_build_with_spells_is_the_scripts() {
             objective(goal),
             false,
             Grip::TwoHanded,
-            &asked,
-            None,
+            &Limits {
+                spells: &asked,
+                ..Limits::NONE
+            },
         );
         let (got, want) = match (got, want) {
             (None, None) => {
@@ -540,10 +588,172 @@ fn an_unknown_spell_gets_no_build() {
         Objective::Damage,
         false,
         Grip::TwoHanded,
-        &["Not_A_Spell".to_owned()],
-        None,
+        &Limits {
+            spells: &["Not_A_Spell".to_owned()],
+            ..Limits::NONE
+        },
     );
     assert!(got.is_none());
+}
+
+fn keys(spells: &[&str]) -> Vec<String> {
+    spells.iter().map(|&key| key.to_owned()).collect()
+}
+
+/// Optimize for weapon honours the spells (and the floors setting) exactly as the script's
+/// `optimize_build` does: measured 2026-09-28, it passed none, so at SL 120 with Climax chosen it
+/// showed a Sorcerer build that Generate Build then refused.
+#[test]
+fn optimize_with_spells_is_the_scripts() {
+    for &(weapon, code, sl, goal, spells, floors, want) in expected::OPTIMIZE_SPELLS {
+        let asked = keys(spells);
+        let limits = Limits {
+            spells: &asked,
+            floors,
+            ..Limits::NONE
+        };
+        let got = backend().optimize(
+            weapon,
+            infusion(code),
+            sl,
+            objective(goal),
+            Grip::TwoHanded,
+            &limits,
+        );
+        let case = format!("{weapon} SL {sl} {spells:?} floors {floors}");
+        match (got, want) {
+            (None, None) => {}
+            (Some(got), Some((class, two, st, value))) => {
+                assert_eq!(got.class, class, "{case}");
+                assert_eq!(got.two_handed, two, "{case}");
+                assert_eq!(got.stats, stats(st), "{case}");
+                assert_eq!(got.value, value as f32, "{case}");
+            }
+            (got, want) => panic!("{case}: {got:?} vs {want:?}"),
+        }
+    }
+}
+
+/// The refusal's words, arithmetic and fixes are the script's, and every fix it offers builds:
+/// each one made, `generate_build` returns a build.
+#[test]
+fn refusal_is_the_scripts_and_every_fix_builds() {
+    let mut fixed = 0;
+    for &(weapon, code, sl, goal, grip, spells, class, floors, want) in expected::REFUSALS {
+        let asked = keys(spells);
+        let grip = if grip == "one" {
+            Grip::OneHanded
+        } else {
+            Grip::TwoHanded
+        };
+        let class = (!class.is_empty()).then_some(class);
+        let limits = Limits {
+            spells: &asked,
+            class,
+            floors,
+        };
+        let (infusion, objective) = (infusion(code), objective(goal));
+        let case = format!("{weapon} SL {sl} {spells:?} {class:?}");
+        let got = backend().refusal(weapon, infusion, sl, objective, grip, &limits);
+        let (got, (kind, closest, short, lines, fixes)) = match (got, want) {
+            (None, None) => {
+                assert!(
+                    backend()
+                        .optimize(weapon, infusion, sl, objective, grip, &limits)
+                        .is_some(),
+                    "{case}: no refusal, so a build"
+                );
+                continue;
+            }
+            (Some(got), Some(want)) => (got, want),
+            (got, want) => panic!("{case}: {got:?} vs {want:?}"),
+        };
+        assert_eq!(got.kind, RefusalKind::from_name(kind).unwrap(), "{case}");
+        assert_eq!(got.class.as_deref().unwrap_or(""), closest, "{case}");
+        assert_eq!(got.short, short, "{case}");
+        assert_eq!(got.lines, lines, "{case}");
+        let offered: Vec<(&str, String, &str)> = got
+            .fixes
+            .iter()
+            .map(|fix| match &fix.change {
+                Change::RaiseSl(sl) => ("sl", sl.to_string(), fix.label.as_str()),
+                Change::RemoveSpell(key) => ("spell", key.clone(), fix.label.as_str()),
+                Change::IgnoreFloors => ("floors", String::new(), fix.label.as_str()),
+                Change::Class(key) => ("class", key.clone(), fix.label.as_str()),
+            })
+            .collect();
+        let want: Vec<(&str, String, &str)> = fixes
+            .iter()
+            .map(|&(what, value, label)| (what, value.to_owned(), label))
+            .collect();
+        assert_eq!(offered, want, "{case}");
+        for fix in &got.fixes {
+            let (mut sl, mut spells, mut class, mut floors) = (sl, asked.clone(), class, floors);
+            match &fix.change {
+                Change::RaiseSl(to) => sl = *to,
+                Change::RemoveSpell(key) => {
+                    let at = spells.iter().position(|spell| spell == key).unwrap();
+                    spells.remove(at);
+                }
+                Change::IgnoreFloors => floors = false,
+                Change::Class(key) => class = Some(key.as_str()),
+            }
+            let limits = Limits {
+                spells: &spells,
+                class,
+                floors,
+            };
+            let build =
+                backend().generate_build(weapon, infusion, sl, objective, false, grip, &limits);
+            assert!(build.is_some(), "{case}: {} builds nothing", fix.label);
+            fixed += 1;
+        }
+    }
+    assert!(fixed >= 8, "the cases exercise the fixes: {fixed}");
+}
+
+/// The user's panel: SL 120, Climax chosen, a Dagger and then a Roaring Halberd. Optimize for
+/// weapon and Generate Build now refuse alike, with the arithmetic, and each fix button's change
+/// made to the panel makes both of them build.
+#[test]
+fn the_climax_panel_refuses_alike_and_every_fix_builds() {
+    for weapon in ["Dagger", "Roaring_Halberd"] {
+        let mut state = PanelState {
+            mode: Mode::OptimizeForWeapon,
+            spells: vec!["Climax".to_owned()],
+            ..PanelState::default()
+        };
+        state.choose_weapon(weapon);
+        state.set_sl_override(Some(120));
+        let refused = backend::generate(backend(), &state, None).expect_err("no class fits");
+        assert_eq!(refused.kind, RefusalKind::Floors, "{weapon}");
+        assert!(
+            refused.lines[1].starts_with("SL 120 is "),
+            "{:?}",
+            refused.lines
+        );
+        assert_eq!(
+            backend::ask(backend(), &state),
+            backend::Answer::Refused(refused.clone()),
+            "Optimize for weapon refuses as Generate Build does"
+        );
+        let labels: Vec<&str> = refused.fixes.iter().map(|fix| fix.label.as_str()).collect();
+        assert_eq!(labels.len(), 3, "{weapon}: {labels:?}");
+        for fix in &refused.fixes {
+            let mut fixed = state.clone();
+            assert!(fix.change.apply(&mut fixed), "{}", fix.label);
+            let build = backend::generate(backend(), &fixed, None)
+                .unwrap_or_else(|why| panic!("{weapon}: {} still refused: {why:?}", fix.label));
+            assert!(
+                matches!(backend::ask(backend(), &fixed), backend::Answer::Build(_)),
+                "{weapon}: {} optimizes",
+                fix.label
+            );
+            if let Change::RaiseSl(sl) = fix.change {
+                assert_eq!(build.sl, sl);
+            }
+        }
+    }
 }
 
 #[test]
@@ -648,8 +858,10 @@ fn every_generated_grant_names_a_real_item() {
             objective(goal),
             naked,
             Grip::TwoHanded,
-            &spells,
-            None,
+            &Limits {
+                spells: &spells,
+                ..Limits::NONE
+            },
         ) else {
             continue;
         };

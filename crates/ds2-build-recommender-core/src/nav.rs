@@ -58,6 +58,10 @@ pub enum Control {
     Generate,
     /// Generate Build may leave the armour off.
     AllowNaked,
+    /// Optimize for weapon and Generate Build drop the soul level's floors.
+    IgnoreFloors,
+    /// One of a refusal's fix buttons, by index into its fixes.
+    Fix(usize),
     /// The spells Generate Build must cast: the list to choose them from.
     Spells,
     /// Show build / Show results.
@@ -99,6 +103,8 @@ pub struct Shape {
     pub results: bool,
     /// Generate Build has produced a build.
     pub generated: bool,
+    /// How many fix buttons a refusal on screen offers.
+    pub fixes: usize,
 }
 
 /// The controls, row by row, as the panel draws them.
@@ -131,7 +137,15 @@ pub fn layout(shape: Shape) -> Vec<Vec<Control>> {
     if shape.results {
         rows.push(vec![Control::Results]);
     }
-    let mut footer = vec![Control::Generate, Control::AllowNaked, Control::Spells];
+    if shape.fixes > 0 {
+        rows.push((0..shape.fixes).map(Control::Fix).collect());
+    }
+    let mut footer = vec![
+        Control::Generate,
+        Control::AllowNaked,
+        Control::Spells,
+        Control::IgnoreFloors,
+    ];
     if shape.generated {
         footer.push(Control::ShowToggle);
     }
@@ -157,7 +171,7 @@ pub fn resolve(rows: &[Vec<Control>], cursor: Control) -> Control {
         return cursor;
     }
     match cursor {
-        Control::ShowToggle | Control::Apply => Control::Generate,
+        Control::ShowToggle | Control::Apply | Control::Fix(_) => Control::Generate,
         _ => Control::Run,
     }
 }
@@ -324,6 +338,7 @@ mod tests {
             mode,
             results: false,
             generated: false,
+            fixes: 0,
         }
     }
 
@@ -339,6 +354,7 @@ mod tests {
                 mode,
                 results: true,
                 generated: true,
+                fixes: 2,
             });
             // A breadth-first walk over the four directions.
             let mut seen = vec![Control::Stat(0)];
@@ -433,6 +449,7 @@ mod tests {
             mode: Mode::WeaponsForStats,
             results: true,
             generated: true,
+            fixes: 0,
         });
         assert_eq!(step(&rows, Control::Run, Dir::Down), Control::Results);
         assert_eq!(step(&rows, Control::Results, Dir::Down), Control::Generate);
@@ -440,7 +457,7 @@ mod tests {
             walk(
                 &rows,
                 Control::Generate,
-                &[Dir::Right, Dir::Right, Dir::Right, Dir::Right]
+                &[Dir::Right, Dir::Right, Dir::Right, Dir::Right, Dir::Right]
             ),
             Control::Apply
         );
@@ -450,6 +467,29 @@ mod tests {
             "the spell list sits beside the armour check"
         );
         assert_eq!(step(&rows, Control::Apply, Dir::Down), Control::Apply);
+    }
+
+    /// A refusal's fix buttons are a row of their own just above the footer, so Down from Run
+    /// reaches them and Down again reaches Generate Build.
+    #[test]
+    fn the_fix_buttons_sit_above_the_footer() {
+        let rows = layout(Shape {
+            fixes: 3,
+            ..shape(Mode::OptimizeForWeapon)
+        });
+        assert_eq!(
+            rows[rows.len() - 2],
+            (0..3).map(Control::Fix).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            step(&rows, Control::BestInfusion, Dir::Down),
+            Control::Fix(0)
+        );
+        assert_eq!(step(&rows, Control::Fix(0), Dir::Down), Control::Generate);
+        assert_eq!(
+            resolve(&layout(shape(Mode::OptimizeForWeapon)), Control::Fix(2)),
+            Control::Generate
+        );
     }
 
     #[test]
