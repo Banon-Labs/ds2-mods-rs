@@ -128,6 +128,14 @@ type RefusalCases = &'static [(
     bool,
     Option<RefusalAnswer>,
 )];
+/// weapon, stats -> load scarcity, armour keys at scarcity 0, the same at that scarcity.
+type ArmorScarcityCases = &'static [(
+    &'static str,
+    &'static [u16],
+    f64,
+    &'static [&'static str],
+    &'static [&'static str],
+)];
 type MinimumCases = &'static [(
     &'static str,
     bool,
@@ -594,6 +602,30 @@ fn an_unknown_spell_gets_no_build() {
         },
     );
     assert!(got.is_none());
+}
+
+/// A build that wields few weapons one-handed takes lighter armour of similar defense: the
+/// script's `load_scarcity` and its `best_armor` trade, set for set.
+#[test]
+fn armor_trades_defense_for_weight_as_the_script_does() {
+    let mut changed = 0;
+    for &(weapon, st, scarcity, plain, scarce) in expected::ARMOR_SCARCITY {
+        let stats = stats(st);
+        let at = |scarcity| {
+            backend()
+                .armor_for(weapon, &stats, scarcity)
+                .expect("a set fits")
+        };
+        assert_eq!(at(Some(0.0)), plain, "{weapon} {st:?} at 0");
+        assert_eq!(at(Some(scarcity)), scarce, "{weapon} {st:?} at {scarcity}");
+        assert_eq!(
+            at(None),
+            scarce,
+            "{weapon} {st:?}: the build's own scarcity is {scarcity}"
+        );
+        changed += usize::from(plain != scarce);
+    }
+    assert!(changed >= 1, "a case where the trade picks a lighter set");
 }
 
 fn keys(spells: &[&str]) -> Vec<String> {

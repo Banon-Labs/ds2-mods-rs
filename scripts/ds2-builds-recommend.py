@@ -442,7 +442,11 @@ def threat_mix(data: Data, corpus: list[Build]) -> dict:
     return {k: tot[k] / s for k in DMG}
 
 
-def best_armor(data: Data, b: Build, eff: dict, mix: dict, top: int = 3):
+def best_armor(data: Data, b: Build, eff: dict, mix: dict, top: int = 3, scarcity: float = 0.0):
+    """The `top` armour sets `eff` can wear under EQUIP_CAP beside what `b` carries, best first by
+    threat-weighted defense. `scarcity` (load_scarcity, 0..1) trades defense for weight: a set scores
+    its defense less `scarcity` x LOAD_PRICE x the best set's own defense per weight x its weight, so
+    a build that wields few weapons takes a lighter set of similar defense over the heaviest one."""
     cap = data.equip_load[min(eff["vitality"], len(data.equip_load) - 1)] * EQUIP_CAP
     carried = sum(data.weapons.get(w, {}).get("weight", 0) for w, _ in b.weapons())
     carried += sum(data.rings.get(r, {}).get("weight", 0) for r in b.rings if r in data.rings)
@@ -475,6 +479,9 @@ def best_armor(data: Data, b: Build, eff: dict, mix: dict, top: int = 3):
                         break
                     sets.append((h[1] + c[1] + g[1] + l[1], w, (h[2], c[2], g[2], l[2])))
     sets.sort(reverse=True)
+    if scarcity > 0 and sets:
+        price = sets[0][0] / sets[0][1] if sets[0][1] > 0 else 0.0
+        sets.sort(key=lambda s_: (s_[0] - scarcity * LOAD_PRICE * price * s_[1], s_[0], s_[1], s_[2]), reverse=True)
     return cap, carried, sets[:top]
 
 
@@ -1864,6 +1871,88 @@ def flex_counts(data: Data, stats: dict) -> tuple[int, int]:
     return int((req <= have).all(axis=1).sum()), int((two <= have).all(axis=1).sum())
 
 
+#: Below this many weapons wielded one-handed, armour weight starts to count against defense. Measured
+#: with --load-evidence over the corpus (21155 builds): builds wielding 81 or more 1H carry a
+#: median load of 59% at VIT 20 in 23.7 of armour; 41-80, 41% at VIT 10 in 15.2; 11-40, 27-28% at
+#: VIT 6 in about 11. The load falls across 80..40 and is flat below, so the term rises linearly
+#: from 0 at LOAD_SCARCE_FROM to its full weight at LOAD_SCARCE_FULL.
+LOAD_SCARCE_FROM = 80
+LOAD_SCARCE_FULL = 40
+#: The fraction of the best set's defense per weight a unit of armour weight costs at full scarcity.
+#: Chosen from --load-evidence's sweep over the VIT 30 STR/DEX 8 case, whose best set is 551 defense
+#: at 41.2 weight: 0.50 keeps it; 0.55-0.60 take 454 at 27.7 (0.67 of the weight, 0.82 of the
+#: defense); 0.65-0.70 take 363 at 16.9; 0.90 takes 257.5 at 6.3. The corpus's builds wielding
+#: 41-80 weapons one-handed wear 0.64 of a normal build's armour weight (15.2 against 23.7), and a
+#: "similar defense" is the 0.82 set, not the half-defense one: 0.6.
+LOAD_PRICE = 0.6
+
+
+def load_scarcity(data: Data, stats: dict) -> float:
+    """How far `stats` fall short of wielding a normal build's share of weapons, 0..1: 0 at
+    LOAD_SCARCE_FROM or more one-handed (flex_counts), 1 at LOAD_SCARCE_FULL or fewer."""
+    one = flex_counts(data, stats)[0]
+    return min(1.0, max(0.0, (LOAD_SCARCE_FROM - one) / (LOAD_SCARCE_FROM - LOAD_SCARCE_FULL)))
+
+
+def load_evidence(data: Data, corpus: list[Build], spell: str = "Climax") -> list[str]:
+    """What real builds do with equip load against how many weapons their stats wield: the
+    measurement behind the load weighting. Per group (every build, builds attuning `spell`, and
+    builds whose INT/FTH meet `spell`'s requirements -- a proxy, for builds that record no spells),
+    how many weapons the stats wield 1H and 2H (flex_counts, mean and median); then, per band of the
+    1H count, the median VIT, armour weight, and load used (armour + weapons over the VIT's full
+    equip load)."""
+    def med(xs):
+        return float(np.median(xs)) if xs else float("nan")
+
+    def mean(xs):
+        return float(np.mean(xs)) if xs else float("nan")
+
+    counts = {id(b): flex_counts(data, b.stats) for b in corpus}
+    req = data.spell_req.get(spell, {})
+    groups = [("all builds", corpus),
+              ("recording any spell", [b for b in corpus if b.spells]),
+              (f"attuning {data.spells[spell]['name']}", [b for b in corpus if spell in b.spells]),
+              (f"proxy: stats meet {data.spells[spell]['name']}'s "
+               + " ".join(f"{LABEL[s]} {v}" for s, v in req.items()),
+               [b for b in corpus if all(b.stats[s] >= v for s, v in req.items())])]
+    out = [f"weapon pool {len(flex_pool(data)[0])}; wielded = flex_counts at the build's own stats"]
+    for name, bs in groups:
+        one = [counts[id(b)][0] for b in bs]
+        two = [counts[id(b)][1] for b in bs]
+        out.append(f"{name}: n {len(bs)}, 1H mean {mean(one):.1f} median {med(one):.0f}, "
+                   f"2H mean {mean(two):.1f} median {med(two):.0f}, "
+                   f"1H <= 5: {sum(1 for x in one if x <= 5)}")
+    bands = [(0, 5), (6, 10), (11, 20), (21, 40), (41, 80), (81, 10**6)]
+    out.append("by 1H count: n, median VIT, median armour weight, median load used")
+    for lo, hi in bands:
+        bs = [b for b in corpus if lo <= counts[id(b)][0] <= hi]
+        vit = [b.stats["vitality"] for b in bs]
+        arm = [sum(float(data.armor[s].get(p, {}).get("weight", 0)) for s, p in zip(ARMOR_SLOTS, b.armor))
+               for b in bs]
+        used = [(a + sum(float(data.weapons.get(w, {}).get("weight", 0)) for w, _ in b.weapons()))
+                / data.equip_load[min(max(b.stats["vitality"], 1), len(data.equip_load) - 1)] for a, b in zip(arm, bs)]
+        out.append(f"  {lo}-{hi if hi < 10**6 else 'max'}: n {len(bs)}, VIT {med(vit):.0f}, armour {med(arm):.1f}, "
+                   f"load {med(used):.0%}")
+    out.append("armour at scarcity 0 -> at load_scarcity (EXPECT_ARMOR_SCARCITY): defense, weight, set")
+    mix = threat_mix(data, corpus)
+    for weapon, st in EXPECT_ARMOR_SCARCITY:
+        stats = dict(zip(STATS, st))
+        wearer = Build("", stats, ["Naked"] * 4, [(weapon, "No_Infusion")], 0, [], [])
+        s = load_scarcity(data, stats)
+        got = [(best_armor(data, wearer, stats, mix, top=1, scarcity=sc)[2] or [None])[0] for sc in (0.0, s)]
+        show = lambda t: "none" if t is None else f"{t[0]:.1f} {t[1]:.1f} {'/'.join(t[2])}"
+        out.append(f"  {data.weapons[weapon]['name']} {st} wields {flex_counts(data, stats)[0]} 1H, scarcity {s:.2f}: "
+                   f"{show(got[0])} -> {show(got[1])}")
+    weapon, st = EXPECT_ARMOR_SCARCITY[0]
+    stats = dict(zip(STATS, st))
+    wearer = Build("", stats, ["Naked"] * 4, [(weapon, "No_Infusion")], 0, [], [])
+    out.append(f"effective price (scarcity x LOAD_PRICE) against the first case's set: defense, weight")
+    for k in (0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.9, 1.0):
+        t = (best_armor(data, wearer, stats, mix, top=1, scarcity=k / LOAD_PRICE)[2] or [None])[0]
+        out.append(f"  {k:.2f}: {t[0]:.1f} {t[1]:.1f}")
+    return out
+
+
 def flexibility(data: Data, corpus: list[Build], stats: dict, sl: int, armor: list[str] | None = None,
                 rings: list[str] | None = None, k: int = FLEX_K) -> dict:
     """A stat line's weapon flexibility and where it sits among its stat neighbours.
@@ -1945,7 +2034,8 @@ def generate_armor(data: Data, corpus: list[Build], weapon: str, inf: str, two: 
     wearing `rings`, as display names head/chest/hands/legs ("Naked" for a slot left bare), and a
     note when the load cap left a slot bare or left no set at all -- never a silent naked build."""
     wearer = Build("", stats, ["Naked"] * 4, [(weapon, inf)], int(two), rings, [])
-    cap, carried, sets = best_armor(data, wearer, dict(stats), threat_mix(data, corpus), top=1)
+    cap, carried, sets = best_armor(data, wearer, dict(stats), threat_mix(data, corpus), top=1,
+                                     scarcity=load_scarcity(data, stats))
     if not sets:
         return [], (f"no armor fits: the weapon and rings weigh {carried:.1f}, over the {cap:.1f} a "
                     f"{EQUIP_CAP:.0%} load allows at VIT {stats['vitality']}")
@@ -2389,6 +2479,12 @@ EXPECT_SIMILAR = [  # stats, sl, k, status
     ([12, 10, 8, 10, 14, 14, 10, 8, 8], 40, 50, ["bleed", "poison"]),
 ]
 EXPECT_FLOOR_SLS = [1, 33, 60, 100, 150, 200, 838]
+#: best_armor for a build holding `weapon`, wearing no rings: at scarcity 0 and at load_scarcity.
+EXPECT_ARMOR_SCARCITY = [  # weapon key, stats
+    ("Dagger", [20, 10, 30, 5, 8, 8, 10, 5, 5]),  # VIT 30, STR/DEX 8: few weapons, room for heavy armour
+    ("Dagger", [15, 10, 20, 8, 10, 12, 10, 8, 8]),
+    ("Demons_Great_Hammer", [22, 20, 14, 6, 44, 11, 26, 5, 5]),  # many weapons: scarcity 0, no change
+]
 EXPECT_FLEX = [  # stats, sl, armour names, ring names: flexibility(); the generated builds are added
     ([10, 6, 7, 6, 6, 20, 9, 6, 18], 35, [], []),  # the SL 35 DEX/FTH character this was written for
     ([10, 6, 7, 6, 6, 20, 9, 6, 18], 35, ["Alva Helm", "Alva Armor", "Alva Gauntlets", "Alva Leggings"],
@@ -2555,7 +2651,8 @@ def expect_builds(data: Data, corpus: list[Build], mix, cases: list, naked_cases
         if not naked:
             worn = [data.sp_key[norm(r)] for r in suggested]
             wearer = Build("", g["stats"], ["Naked"] * 4, [(weapon, inf)], 0, worn, [])
-            top = lambda eff: (best_armor(data, wearer, eff, mix, top=1)[2] or [None])[0]
+            scarce = load_scarcity(data, g["stats"])
+            top = lambda eff: (best_armor(data, wearer, eff, mix, top=1, scarcity=scarce)[2] or [None])[0]
             chosen = top(dict(g["stats"]))
             binds = (chosen != top({**{s: 99 for s in STATS}, "vitality": g["stats"]["vitality"]}),
                      chosen != top({**g["stats"], "vitality": 99}))
@@ -2612,6 +2709,16 @@ def backend_expectations_rest(data: Data, corpus: list[Build], out: list[str], m
     out.append(f"pub const FLEXIBILITY: FlexCases = {_rs([(st, sl, armor, rings, (f['one'], f['two'], f['total'], f['below'], f['equal'], f['n'], float(f['percentile']), float(f['spare']), f['fits'])) for st, sl, armor, rings, f in rows])};")
     out.append("")
     out.append(f"pub const FLEX_LINES: &[(&str, &str)] = {_rs([(flex_line(f), flex_load_line(f)) for *_, f in rows])};")
+    armor_rows = []
+    for weapon, st in EXPECT_ARMOR_SCARCITY:
+        wearer = Build("", as_dict(st), ["Naked"] * 4, [(weapon, "No_Infusion")], 0, [], [])
+        s = load_scarcity(data, as_dict(st))
+        pick = lambda sc: list((best_armor(data, wearer, as_dict(st), threat_mix(data, corpus), top=1, scarcity=sc)[2]
+                                 or [(0, 0, ["", "", "", ""])])[0][2])
+        armor_rows.append((weapon, st, float(s), pick(0.0), pick(s)))
+    out.append("")
+    out.append("// weapon, stats -> load scarcity, armour keys head to legs at scarcity 0, the same at that scarcity.")
+    out.append(f"pub const ARMOR_SCARCITY: ArmorScarcityCases = {_rs(armor_rows)};")
     return "\n".join(out) + "\n"
 
 
@@ -2797,6 +2904,9 @@ def main() -> int:
     g.add_argument("--flexibility", metavar="STATS",
                    help="how many weapons these stats wield 1H/2H, the weapon weight left under 70%% load after "
                         "--armor, and the build's percentile among its --k nearest stat-neighbour builds")
+    g.add_argument("--load-evidence", metavar="SPELL", nargs="?", const="Climax",
+                   help="how many weapons real builds wield (all, attuning SPELL, and a stat proxy for it) "
+                        "and their VIT, armour weight and load by that count: the load weighting's measurement")
     g.add_argument("--flex-sweep", metavar="W,W,...",
                    help="--optimize every EXPECT_BUILDS/EXPECT_ONE_HANDED case at each flexibility weight and "
                         "print the objective and the flexibility it gives: how FLEX_WEIGHT was chosen")
@@ -2927,6 +3037,12 @@ def main() -> int:
             print(f"  armor: {g['armor_note']}")
         print(f"  flexibility: {flex_line(g['flex'])}")
         print(f"  load: {flex_load_line(g['flex'])}")
+        return 0
+    if a.load_evidence:
+        spell = data.sp_key.get(norm(a.load_evidence), a.load_evidence)
+        if spell not in data.spells:
+            ap.error(f"unknown spell {a.load_evidence!r}")
+        print("\n".join(load_evidence(data, load_corpus(data)[0], spell)))
         return 0
     if a.flex_sweep:
         weights = [float(w) for w in a.flex_sweep.split(",")]

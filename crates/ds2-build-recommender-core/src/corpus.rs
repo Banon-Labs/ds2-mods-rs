@@ -105,6 +105,16 @@ const GENERATE_WINDOW: f64 = 1.5;
 /// and two-handed each counted) gains `FLEX_WEIGHT * d / n` on top of its objective weight.
 const FLEX_WEIGHT: f64 = 0.02;
 
+/// The script's `LOAD_SCARCE_FROM` and `LOAD_SCARCE_FULL`: armour weight starts to count against
+/// defense below the first number of weapons wielded one-handed, fully at the second. Measured by
+/// the script's `--load-evidence` over the corpus: builds wielding fewer weapons carry less load.
+const LOAD_SCARCE_FROM: i32 = 80;
+const LOAD_SCARCE_FULL: i32 = 40;
+
+/// The script's `LOAD_PRICE`: the fraction of the best set's defense per weight that a unit of
+/// armour weight costs at full scarcity.
+const LOAD_PRICE: f64 = 0.6;
+
 /// The requirement stats, the only ones that change what a build wields: the script's
 /// `REQ_STATS`.
 const REQ_STATS: [usize; 4] = [STR, DEX, INT, FTH];
@@ -1923,6 +1933,31 @@ impl CorpusBackend {
     }
 
     /// The script's `flex_counts`: how many weapons `stats` wield one-handed and two-handed.
+    /// The script's `load_scarcity`: 0 at [`LOAD_SCARCE_FROM`] or more weapons wielded one-handed,
+    /// 1 at [`LOAD_SCARCE_FULL`] or fewer, linear between.
+    fn load_scarcity(&self, stats: &Stats) -> f64 {
+        let one = i32::try_from(self.flex_counts(stats).0).unwrap_or(i32::MAX);
+        (f64::from(LOAD_SCARCE_FROM - one) / f64::from(LOAD_SCARCE_FROM - LOAD_SCARCE_FULL))
+            .clamp(0.0, 1.0)
+    }
+
+    /// The armour keys, head to legs, a build holding `weapon` alone and no rings wears at `stats`
+    /// and `scarcity` (the build's own load scarcity when `None`), for the parity tests. `None` for
+    /// an unknown weapon or when nothing fits.
+    #[doc(hidden)]
+    pub fn armor_for(
+        &self,
+        weapon: &str,
+        stats: &[u16; STAT_COUNT],
+        scarcity: Option<f64>,
+    ) -> Option<[String; 4]> {
+        let stats = to_stats(stats);
+        let weapon = self.weapon_by_key(weapon)?;
+        let scarcity = scarcity.unwrap_or_else(|| self.load_scarcity(&stats));
+        let (_, _, set) = self.best_armor(&stats, weapon, &[], scarcity);
+        set.map(|set| set.map(|piece| piece.key.clone()))
+    }
+
     fn flex_counts(&self, stats: &Stats) -> (u32, u32) {
         let mut counts = (0, 0);
         for weapon in self.flex_pool() {
@@ -2236,16 +2271,22 @@ impl CorpusBackend {
     }
 }
 
+/// One armour set: its threat-weighted defense, its weight, and its pieces head to legs.
+type ArmorSet<'a> = (f64, f64, [&'a Wearable; 4]);
+
 impl CorpusBackend {
     /// The script's `best_armor` with `top=1`: the equip-load cap, what the weapon and rings
     /// carry, and the set, head to legs, whose defense weighted by the corpus threat mix is
     /// highest among those these stats can wear under the cap. `None` when nothing fits, which
     /// only happens when the weapon and rings alone are over it: `Naked` is a piece in every slot.
+    /// `scarcity` is the script's: above 0, a set scores its defense less `scarcity` x
+    /// [`LOAD_PRICE`] x the best set's defense per weight x its weight.
     fn best_armor(
         &self,
         stats: &Stats,
         weapon: &Weapon,
         rings: &[usize],
+        scarcity: f64,
     ) -> (f64, f64, Option<[&Wearable; 4]>) {
         let cap = self.tables.equip_load.at(stats[VIT]) * EQUIP_CAP;
         let ring_weight = rings
@@ -2291,7 +2332,7 @@ impl CorpusBackend {
         fn keys<'a>(set: &[&'a Wearable; 4]) -> [&'a str; 4] {
             set.map(|piece| piece.key.as_str())
         }
-        let mut top: Option<(f64, f64, [&Wearable; 4])> = None;
+        let mut sets: Vec<ArmorSet<'_>> = Vec::new();
         for h in &fronts[0] {
             for c in &fronts[1] {
                 if h.0 + c.0 > budget {
@@ -2306,21 +2347,30 @@ impl CorpusBackend {
                         if weight > budget {
                             break;
                         }
-                        let set = (h.1 + c.1 + g.1 + l.1, weight, [h.2, c.2, g.2, l.2]);
-                        // Python's descending sort of `(value, weight, keys)`, first place.
-                        let better = top.as_ref().is_none_or(|best| {
-                            set.0
-                                .total_cmp(&best.0)
-                                .then(set.1.total_cmp(&best.1))
-                                .then_with(|| keys(&set.2).cmp(&keys(&best.2)))
-                                .is_gt()
-                        });
-                        if better {
-                            top = Some(set);
-                        }
+                        sets.push((h.1 + c.1 + g.1 + l.1, weight, [h.2, c.2, g.2, l.2]));
                     }
                 }
             }
+        }
+        // Python's descending sort of `(value, weight, keys)`, first place.
+        let first = |score: &dyn Fn(&ArmorSet<'_>) -> f64| {
+            sets.iter()
+                .max_by(|a, b| {
+                    score(a)
+                        .total_cmp(&score(b))
+                        .then(a.0.total_cmp(&b.0))
+                        .then(a.1.total_cmp(&b.1))
+                        .then_with(|| keys(&a.2).cmp(&keys(&b.2)))
+                })
+                .copied()
+        };
+        let mut top = first(&|set| set.0);
+        if scarcity > 0.0
+            && let Some((value, weight, _)) = top
+        {
+            // The script's re-sort by `(value - scarcity * LOAD_PRICE * price * weight, value, ...)`.
+            let price = if weight > 0.0 { value / weight } else { 0.0 };
+            top = first(&|set| set.0 - scarcity * LOAD_PRICE * price * set.1);
         }
         (cap, carried, top.map(|(_, _, set)| set))
     }
@@ -2370,7 +2420,7 @@ impl CorpusBackend {
         weapon: &Weapon,
         rings: &[usize],
     ) -> (Vec<String>, Option<String>) {
-        let (cap, carried, set) = self.best_armor(stats, weapon, rings);
+        let (cap, carried, set) = self.best_armor(stats, weapon, rings, self.load_scarcity(stats));
         let percent = EQUIP_CAP * 100.0;
         let Some(set) = set else {
             return (
