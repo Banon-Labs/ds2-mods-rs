@@ -14,6 +14,109 @@ the running process is being held for another investigation.
 - **[inferred]** means it follows from what was read but was not traced to the end. Each one
   says what would prove it.
 
+## Armour: the same machinery, a feature of its own (2026-09-28)
+
+User requirement: "we want to match our armor level like we match weapon levels", as a separate
+feature with its own switch, key, spoken lines and sign on screen. It is `[armor_sync]`
+(`--armor-sync`, key F5, `ds2-armor-sync:` in the log, a gold helm one tile left of the swords).
+It runs the same `policy` types as weapon sync on its own instances: its own tracker, ledger and
+watch, so turning one off restores only its own items.
+
+**Where our armour levels live.** Static, from `0x1401b66a0` (Ghidra daemon): internal equip slots
+6..9 go to the armour update `0x14037f640` (`ds2_rva::CHR_ARMOR_UPDATE`), which is the weapon
+update with record category 1, record index `piece + 6` and packet 62. The item in the request is
+`ItemParam +0x18`, the ArmorParam id. Read live with `scripts/frida/armor-sync-read.js` on the test
+character (22182100+10, 21500101+5, 22230102+10, 27700103+5):
+
+| copy | where | read live |
+| --- | --- | --- |
+| inventory entry | `[bag + 0x25830 + (6+k)*8] + 0x25`, low nibble; every armour entry is type 2..5 | 439 armour entries, `+10`/`+5` |
+| save block record | `[ItemInventory2 + 0x10] + 0x30 + index*0x10 + 0x0C`, the same block as weapons | (weapon side measured; same writer) |
+| equipment record | `[[PlayerCtrl+0x378]+0x20] + 8 + (6+k)*0x14`, `+0x04` ArmorParam id, `+0x0E` level | `12182100+10 11500101+5 12230102+10 17700103+5` |
+| live entry | `[[PlayerCtrl+0x378]+0x28] + 0x290 + k*0x30`: `+0x00` id, `+0x18` level, `+0x20` reinforce row | same ids and levels, row max `10/5/10/5` |
+
+`ItemParam +0x18` equals the item id minus 10000000 for all 461 armour rows in the regulation
+(`scripts/ds2-armor-sync-data.py`), which is how the crate compares an inventory entry with its
+record.
+
+**What defense reads.** `PlayerGameParamCalculator` `0x140380070` (physical) and `0x140381350`
+(elemental cut) take each piece's level and reinforce row from `0x1403486b0`, which reads the live
+entry's `+0x18` and `+0x20`. The physical read `0x14034dbb0` returns
+`base + (max - base) * clamp(level / row[+0x60], 0, 1)` from ArmorReinforceParam (`+0x00..+0x0C`
+base, `+0x30..+0x3C` max); `0x14034dda0` does the same for the elemental values. From the
+regulation: Wanderer Manchettes (max +10) standard defense 35 at +0, 52 at +5, 69 at +10; Agdayne's
+Black Robe (max +5) 93, 111.4 at +2, 139 at +5; Black Dragon Helm has base equal to max, so its
+level changes nothing. Max levels over all rows: 10 (312), 5 (165), 0 (25). So a capped level lowers
+defense in proportion, and, as with weapons, the raw number is compared: a +5 armour piece at +5 is
+fully upgraded.
+
+**Where the other players' armour levels live.** The packet 62 receiver (`0x140162150` case
+`0x3e`) accepts `piece < 4`, level nibble `< 0xb`, an item of `-1` or of the right piece type, and
+writes the remote character's record `piece + 6` through the same `0x1403463d0`. So their armour
+is `[[remote PlayerCtrl+0x378]+0x20] + 8 + (6+k)*0x14 + 0x0E`, read beside their weapons. The live
+read showed NPCs' records holding naked pieces (`11001100`) at +0; no second player was in the
+world, so a remote player's armour records have not been read live yet.
+
+**The cap basis: the highest single piece.** Not per slot. Defense is four independent terms, one
+per piece, summed; nothing matches our helm against their helm. A per-slot rule would also let a
+bare slot of theirs (item `-1` on the wire) or an unupgraded fashion piece pin that slot of ours to
++0. Weapons already use the highest over all slots. A player whose four armour records are empty
+but whose weapon records have arrived is naked, and counts as +0.
+
+**The push.** The record writer drops a same-item level change for armour exactly as for weapons,
+so a push is two calls to the armour update: no piece (`-1`, what the game sends for an empty
+slot), then the piece at the capped level. The live entry is updated by the second call because
+its id is still the piece's.
+
+Not proven yet, blocked on a second player: another player's armour records after they join, and
+what their copy of us shows after the two-call push.
+
+## The whole inventory is capped, and the save still keeps real levels (2026-09-28)
+
+User requirement: whenever any weapon changes for any reason, every weapon has to be rescaled;
+then: cap every weapon in the inventory, equipped or not, so anything swapped in is already capped
+and the menu shows the capped level. This replaced "the inventory is never written" below.
+
+- **Every weapon entry is lowered.** Each check (four a second) with a cap on reads the bag's whole
+  entry array (3840 entries, pack and box alike) and lowers every weapon and shield (item type
+  `0`/`1`) above the cap in `+0x25`. `policy::Ledger` keeps each one's real level, keyed by entry
+  index and item id; a level the game writes itself (a reload, an upgrade) is taken as the real one.
+  When the cap goes, every lowered entry is written back.
+- **Any change to the equipped slots is a resweep of all six.** `policy::Watch` compares all six
+  slots (inventory entry, record, live level) against how the last resweep left them. Any
+  difference, whatever caused it, pushes every slot whose copies do not match and logs
+  `equipped changed under cap=...: before=[...] now=[...] resweep slots=[...] pushed=[...]
+  after=[...] all-within-cap=...`.
+- **The save reads a separate block.** `SaveDataItemInventory2` vtable slot 2
+  (`ds2_rva::SAVE_DATA_ITEM_INVENTORY_WRITE`, `0x1402e53f0`) streams `0x100bc` bytes from
+  `[ItemInventory2 + 0x10] + 0x30` and nothing from the bag. That block is one 16-byte record per
+  entry index, read live with `scripts/frida/weapon-sync-save-block.js`: entries 3, 355, 1152, 1159
+  and 1262 had their records at `index * 0x10`, same item id, durability and level. The detour on
+  that writer gives every lowered weapon's record its real level before the stream write; the
+  entries stay lowered.
+
+Measured 2026-09-28, build `1d0dd42`, on a copy of the user's save (`--save-dir`), slot 2:
+
+- Load: `inventory weapons by level: total=1012 [+0:6 +5:335 +10:671]`, then
+  `inventory cap=+0 changed=1006 lowered=1006 ... weapons=1012 still-lowered=1006` and
+  `CAPPED cap=+0 ... after: inventory=[+0,+0,+0,+0,-,-] records=[+0,+0,+0,+0,+0,+0] live=[+0,...]`.
+- A real three-person session followed (`people=3 their-highest=[+2,+0,+0]`, cap `+2`), with F6
+  off (`restored=1006`) and on again (`lowered=1006`).
+- Six saves while capped, each `save #N: ... lowered=1006 weapons; their save records carry the
+  real level (fixed=0 already-real=1006)`. `fixed=0` every time: the game never copied a lowered
+  entry level into the block in this session.
+- `scripts/ds2-sl2.py -x` then `scripts/ds2-sl2-weapon-levels.py` on the payload before and after:
+  `same item, level changed: 0` for all 2041 records, after the first, second and sixth save.
+- Four swaps through the game's own `SetEquip` on the game thread
+  (`scripts/frida/weapon-sync-swap.js`) logged four `equipped changed under cap=+2` lines, one per
+  swap, each `all-within-cap=true` and `resweep slots=[]`: the swapped-in weapon was already `+2`
+  because its entry was.
+- Relaunch of the same container: `inventory weapons by level: total=1012 [+0:6 +5:335 +10:671]`,
+  identical to before the capped session.
+
+Known gap: upgrading a weapon at a blacksmith while capped starts from the capped level; the game
+then writes that new level, and the ledger takes it as the real one.
+
 ## Built and run solo: `ds2-weapon-sync` (2026-09-26)
 
 The design below is shipped as `crates/ds2-weapon-sync`, off by default, turned on with

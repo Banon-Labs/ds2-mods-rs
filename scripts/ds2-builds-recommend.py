@@ -442,7 +442,11 @@ def threat_mix(data: Data, corpus: list[Build]) -> dict:
     return {k: tot[k] / s for k in DMG}
 
 
-def best_armor(data: Data, b: Build, eff: dict, mix: dict, top: int = 3):
+def best_armor(data: Data, b: Build, eff: dict, mix: dict, top: int = 3, scarcity: float = 0.0):
+    """The `top` armour sets `eff` can wear under EQUIP_CAP beside what `b` carries, best first by
+    threat-weighted defense. `scarcity` (load_scarcity, 0..1) trades defense for weight: a set scores
+    its defense less `scarcity` x LOAD_PRICE x the best set's own defense per weight x its weight, so
+    a build that wields few weapons takes a lighter set of similar defense over the heaviest one."""
     cap = data.equip_load[min(eff["vitality"], len(data.equip_load) - 1)] * EQUIP_CAP
     carried = sum(data.weapons.get(w, {}).get("weight", 0) for w, _ in b.weapons())
     carried += sum(data.rings.get(r, {}).get("weight", 0) for r in b.rings if r in data.rings)
@@ -475,6 +479,9 @@ def best_armor(data: Data, b: Build, eff: dict, mix: dict, top: int = 3):
                         break
                     sets.append((h[1] + c[1] + g[1] + l[1], w, (h[2], c[2], g[2], l[2])))
     sets.sort(reverse=True)
+    if scarcity > 0 and sets:
+        price = sets[0][0] / sets[0][1] if sets[0][1] > 0 else 0.0
+        sets.sort(key=lambda s_: (s_[0] - scarcity * LOAD_PRICE * price * s_[1], s_[0], s_[1], s_[2]), reverse=True)
     return cap, carried, sets[:top]
 
 
@@ -1176,7 +1183,7 @@ def status_hits(attacks: dict, names: list[str], grips: list[bool], window: floa
 def weapons_for(data: Data, stats: dict, sl: int, corpus: list[Build], top: int = 25, within: float = 0.10,
                 raw_ar: bool = False, one_hand: bool = False, weapon_class: str | None = None, per_class: bool = False,
                 window: float = 0.0, objective: str = "damage", weapon: str | None = None,
-                every_infusion: bool = False):
+                every_infusion: bool = False, use_floors: bool = True):
     """Weapons (per infusion) ranked by expected damage against the average defender at this SL,
     or with `objective` "bleed"/"poison" by status build-up: build-up per hit (objective_value,
     SITE formula) times the hits of the weapon's best R1/R2 chain attack (status_hits; within
@@ -1188,7 +1195,8 @@ def weapons_for(data: Data, stats: dict, sl: int, corpus: list[Build], top: int 
     Per weapon: the best infusion, plus the 2nd and 3rd only while within `within` of the best.
     `every_infusion`: every infusion of every weapon instead, and no `top` cut (infusion_gaps).
     `weapon` (a key): that weapon alone, every infusion, and no high-stamina END gate -- the
-    question is which infusion, not whether to carry it (best_infusion)."""
+    question is which infusion, not whether to carry it (best_infusion). `use_floors` False
+    (--no-floors) drops that END gate as well: it is a floor, not a game rule."""
     every_infusion = every_infusion or weapon is not None
     dfn, n = bracket_defense(data, corpus, sl)
     floors, r1, cut = build_floors(data, corpus, sl)
@@ -1208,7 +1216,7 @@ def weapons_for(data: Data, stats: dict, sl: int, corpus: list[Build], top: int 
             continue
         if weapon_class and norm(data.weapon_class.get(key) or "") != norm(weapon_class):
             continue
-        if not weapon and r1.get(key, 0) >= cut and stats["endurance"] < floors.get("endurance", 0):
+        if use_floors and not weapon and r1.get(key, 0) >= cut and stats["endurance"] < floors.get("endurance", 0):
             continue  # a high-stamina weapon needs END at the bracket median of builds that carry one
         lines = {}
         if objective in ("bleed", "poison"):
@@ -1345,7 +1353,7 @@ GRIP_TRIES = {"two": (True,), "one": (False,)}
 
 def optimize_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, objective: str,
                    grip: str = "two", flex_weight: float | None = None, spells=(),
-                   only_class: str | None = None):
+                   only_class: str | None = None, use_floors: bool = True):
     """A valid build at `sl` that maximizes `objective` for weapon+infusion: floors first (bracket
     medians, END only for a high-stamina weapon), then requirements (STR halved for grip "two",
     in full for "one"; see GRIP_TRIES), then what `spells` need (spell_floors: their INT/FTH, and
@@ -1357,11 +1365,16 @@ def optimize_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
     `only_class` (a class key, `sorcerer`) tries that starting class alone. A build for a character
     that already exists has to be: the game offers no class change after creation, so a build from
     another class's base is one the character cannot have -- measured 2026-09-28, a Sorcerer given
-    a Warrior build lost 6 attunement and 9 intelligence below its own starting stats."""
+    a Warrior build lost 6 attunement and 9 intelligence below its own starting stats.
+
+    `use_floors` False drops the floors (they are the medians of real builds, not a game rule), and
+    the floors returned are then empty: the panel's "ignore typical-build minimums"."""
     if flex_weight is None:
         flex_weight = FLEX_WEIGHT
     flex = (lambda s_: sum(flex_counts(data, s_))) if flex_weight else None
     floors, r1, cut = build_floors(data, corpus, sl)
+    if not use_floors:
+        floors = {}
     dfn, _ = bracket_defense(data, corpus, sl)
     req = data.weapons[weapon].get("require") or {}
     need = spell_floors(data, spells)
@@ -1422,6 +1435,166 @@ def optimize_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
                 best = (val, cls, two, st)
             break  # one grip per class
     return best, floors
+
+
+#: The highest soul level the game allows: where the search for the least SL that fits stops.
+SL_MAX = 838
+
+#: The short names refusals print, in STATS order; the panel's STAT_LABELS.
+LABEL = dict(zip(STATS, ["VIG", "END", "VIT", "ATT", "STR", "DEX", "ADP", "INT", "FTH"]))
+
+
+def _floors_at(floors: dict, s: str, high_stamina: bool) -> int:
+    """The floor optimize_build applies to stat `s`: FLOOR_STATS always, END for a high-stamina weapon."""
+    if s in FLOOR_STATS or (s == "endurance" and high_stamina):
+        return int(floors.get(s, 0))
+    return 0
+
+
+def _raises(data: Data, cls: str, floors: dict, high_stamina: bool, req: dict, need: dict) -> list:
+    """Per stat in STATS order, what optimize_build lifts class `cls`'s base to before spending any
+    free point, and what lifted it: (stat, raise, value, source), source "spells", "weapon" or
+    "floors" -- the game's rules before the floors on a tie, since the floors are not one."""
+    out = []
+    for s in STATS:
+        base = int(data.classes[cls][s])
+        v, src = base, None
+        for name, x in (("spells", need.get(s, 0)), ("weapon", req.get(s, 0)),
+                        ("floors", _floors_at(floors, s, high_stamina))):
+            if x > v:
+                v, src = x, name
+        out.append((s, v - base, v, src))
+    return out
+
+
+def _grip_req(data: Data, weapon: str, two: bool) -> dict:
+    req = data.weapons[weapon].get("require") or {}
+    return {s: ((v + 1) // 2 if (two and s == "strength") else v) for s, v in req.items()}
+
+
+def refusal(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, objective: str = "damage",
+            grip: str = "two", spells=(), only_class: str | None = None, use_floors: bool = True) -> dict | None:
+    """Why optimize_build finds no build, and what would make one: None when it finds one.
+
+    The arithmetic is optimize_build's own: a class's base lifted to the floors, the weapon's
+    requirements and the spells' (spell_floors), and a build exists only when that costs no more
+    than the `sl + 53 - sum(base)` points the level gives above the base. `kind` says which layer
+    no class clears: "slots" (no ATT holds the spells), "weapon" (its requirements alone), "spells"
+    (with the spells), "floors" (only with the typical-build floors). The closest class -- the
+    least short -- is the one the arithmetic line is about.
+
+    `fixes` are (what, value, label), each one checked by running optimize_build with it applied:
+    ("sl", N) the least soul level above `sl` that fits with nothing else changed; ("spell", key)
+    per spell whose removal (one copy) fits at `sl`; ("floors", None) when dropping the floors fits;
+    ("class", key) when `only_class` is the blocker and another class fits."""
+    wname = data.weapons[weapon]["name"]
+    run = lambda sl_=sl, spells_=spells, cls_=only_class, fl_=use_floors: optimize_build(
+        data, corpus, weapon, inf, sl_, objective, grip, None, spells_, cls_, fl_)[0]
+    if run() is not None:
+        return None
+    names = list(dict.fromkeys(data.spells[s]["name"] for s in spells))
+    spell_list = ", ".join(names)
+    two = GRIP_TRIES[grip][0]
+    req = _grip_req(data, weapon, two)
+    r1 = stamina_r1(data)
+    cut = high_stamina_cut(r1)
+    hs = r1.get(weapon, 0) >= cut
+    table = bracket_floors(data, corpus, r1)
+    floors_at = lambda sl_: table[sl_bracket(sl_)] if use_floors else {}
+    classes = [c for c in data.classes if only_class is None or c == only_class.lower()]
+    need = spell_floors(data, spells)
+    lines, fixes = [], []
+
+    def cost(cls, sl_, layer):
+        """Points above `cls`'s base the layers up to `layer` need at `sl_` (1 weapon, 2 +spells, 3 +floors)."""
+        base = data.classes[cls]
+        tot = 0
+        for s in STATS:
+            v = int(base[s])
+            v = max(v, req.get(s, 0))
+            if layer >= 2:
+                v = max(v, need.get(s, 0))
+            if layer >= 3:
+                v = max(v, _floors_at(floors_at(sl_), s, hs))
+            tot += v - int(base[s])
+        return tot
+
+    have = lambda cls, sl_: sl_ + 53 - sum(int(data.classes[cls][s]) for s in STATS)
+    fits = lambda sl_: need is not None and any(cost(c, sl_, 3) <= have(c, sl_) for c in classes)
+
+    if need is None:
+        total = sum(data.spells[s]["slots"] for s in spells)
+        kind, cls, short = "slots", None, None
+        lines.append(f"no attunement holds {spell_list}: they cost {total} slots, and ATT 99 gives "
+                     f"{max(data.att_slots)}")
+    else:
+        kind = next((k for k, layer in (("weapon", 1), ("spells", 2), ("floors", 3))
+                     if all(cost(c, sl, layer) > have(c, sl) for c in classes)), "floors")
+        # the least short class; the first in data order on a tie
+        cls = min(classes, key=lambda c: cost(c, sl, 3) - have(c, sl))
+        short = cost(cls, sl, 3) - have(cls, sl)
+        cname = data.classes[cls]["name"]
+        grip_word = "two-handed" if two else "one-handed"
+        lines.append({
+            "weapon": f"{wname} cannot be wielded {grip_word} at SL {sl}",
+            "spells": f"{wname} can be wielded at SL {sl}, but not while casting {spell_list}",
+            "floors": f"{wname}{' and ' + spell_list + ' fit' if spells else ' fits'} SL {sl}, but not above its "
+                      "typical-build minimums (the median VIG/VIT/ADP/ATT of real builds at this level; "
+                      "not a game rule)",
+        }[kind])
+        if only_class is not None:
+            lines[0] = f"as a {cname}: {lines[0]}"
+        raises = _raises(data, cls, floors_at(sl), hs, req, need)
+        groups = []
+        for src, label in (("floors", "floors"), ("spells", spell_list), ("weapon", "weapon")):
+            got = [f"{LABEL[s]} {v}" for s, r, v, x in raises if x == src and r > 0]
+            if got:
+                groups.append(f"{label} {' '.join(got)}")
+        lines.append(f"SL {sl} is {short} points short for a {cname}: {' + '.join(groups)} need "
+                     f"{cost(cls, sl, 3)} points above its base, SL {sl} gives {have(cls, sl)}")
+        top = sorted((r for r in raises if r[1] > 0), key=lambda r: -r[1])[:3]
+        src_name = {"floors": "floor", "spells": spell_list, "weapon": "weapon"}
+        lines.append("most from " + ", ".join(f"{LABEL[s]} +{r} ({src_name[x]})" for s, r, v, x in top))
+
+    # 1. the least soul level that fits, nothing else changed
+    up = next((s_ for s_ in range(sl + 1, SL_MAX + 1) if fits(s_)), None)
+    if up is not None and run(sl_=up) is not None:
+        fixes.append(("sl", up, f"Raise SL to {up}"))
+        if use_floors and floors_at(up) != floors_at(sl):
+            fl = lambda sl_: " ".join(f"{LABEL[s]} {floors_at(sl_).get(s, 0)}" for s in FLOOR_STATS)
+            lines.append(f"the least SL that fits is {up}: the floors change with soul level "
+                         f"({fl(sl)} at SL {sl}, {fl(up)} at SL {up})")
+        else:
+            lines.append(f"the least SL that fits is {up}")
+    elif need is not None:
+        lines.append(f"no soul level up to {SL_MAX} fits it")
+    # 2. one spell fewer
+    for key in dict.fromkeys(spells):
+        rest = list(spells)
+        rest.remove(key)
+        if run(spells_=rest) is not None:
+            fixes.append(("spell", key, f"Remove {data.spells[key]['name']}"))
+    # 3. no floors
+    if use_floors and need is not None and run(fl_=False) is not None:
+        binding = " ".join(f"{LABEL[s]} {v}" for s, r, v, x in _raises(data, cls, floors_at(sl), hs, req, need)
+                           if x == "floors" and r > 0)
+        fixes.append(("floors", None, f"Ignore typical-build minimums ({binding})"))
+    # 4. another class, when a class was asked for
+    if only_class is not None:
+        best = run(cls_=None)
+        if best is not None:
+            fixes.append(("class", best[1], f"Use a {data.classes[best[1]]['name']} instead"))
+    return {"kind": kind, "class": cls and data.classes[cls]["name"], "short": short, "lines": lines,
+            "fixes": fixes}
+
+
+def print_refusal(r: dict) -> None:
+    """--optimize/--generate's failure: the reason lines, then each verified fix."""
+    for line in r["lines"]:
+        print(f"  {line}")
+    print("  fixes (each checked to build):" if r["fixes"] else "  no single change makes it build")
+    for _, _, label in r["fixes"]:
+        print(f"    {label}")
 
 
 def calibrate_infusions(data: Data, corpus: list[Build]) -> dict:
@@ -1698,6 +1871,88 @@ def flex_counts(data: Data, stats: dict) -> tuple[int, int]:
     return int((req <= have).all(axis=1).sum()), int((two <= have).all(axis=1).sum())
 
 
+#: Below this many weapons wielded one-handed, armour weight starts to count against defense. Measured
+#: with --load-evidence over the corpus (21155 builds): builds wielding 81 or more 1H carry a
+#: median load of 59% at VIT 20 in 23.7 of armour; 41-80, 41% at VIT 10 in 15.2; 11-40, 27-28% at
+#: VIT 6 in about 11. The load falls across 80..40 and is flat below, so the term rises linearly
+#: from 0 at LOAD_SCARCE_FROM to its full weight at LOAD_SCARCE_FULL.
+LOAD_SCARCE_FROM = 80
+LOAD_SCARCE_FULL = 40
+#: The fraction of the best set's defense per weight a unit of armour weight costs at full scarcity.
+#: Chosen from --load-evidence's sweep over the VIT 30 STR/DEX 8 case, whose best set is 551 defense
+#: at 41.2 weight: 0.50 keeps it; 0.55-0.60 take 454 at 27.7 (0.67 of the weight, 0.82 of the
+#: defense); 0.65-0.70 take 363 at 16.9; 0.90 takes 257.5 at 6.3. The corpus's builds wielding
+#: 41-80 weapons one-handed wear 0.64 of a normal build's armour weight (15.2 against 23.7), and a
+#: "similar defense" is the 0.82 set, not the half-defense one: 0.6.
+LOAD_PRICE = 0.6
+
+
+def load_scarcity(data: Data, stats: dict) -> float:
+    """How far `stats` fall short of wielding a normal build's share of weapons, 0..1: 0 at
+    LOAD_SCARCE_FROM or more one-handed (flex_counts), 1 at LOAD_SCARCE_FULL or fewer."""
+    one = flex_counts(data, stats)[0]
+    return min(1.0, max(0.0, (LOAD_SCARCE_FROM - one) / (LOAD_SCARCE_FROM - LOAD_SCARCE_FULL)))
+
+
+def load_evidence(data: Data, corpus: list[Build], spell: str = "Climax") -> list[str]:
+    """What real builds do with equip load against how many weapons their stats wield: the
+    measurement behind the load weighting. Per group (every build, builds attuning `spell`, and
+    builds whose INT/FTH meet `spell`'s requirements -- a proxy, for builds that record no spells),
+    how many weapons the stats wield 1H and 2H (flex_counts, mean and median); then, per band of the
+    1H count, the median VIT, armour weight, and load used (armour + weapons over the VIT's full
+    equip load)."""
+    def med(xs):
+        return float(np.median(xs)) if xs else float("nan")
+
+    def mean(xs):
+        return float(np.mean(xs)) if xs else float("nan")
+
+    counts = {id(b): flex_counts(data, b.stats) for b in corpus}
+    req = data.spell_req.get(spell, {})
+    groups = [("all builds", corpus),
+              ("recording any spell", [b for b in corpus if b.spells]),
+              (f"attuning {data.spells[spell]['name']}", [b for b in corpus if spell in b.spells]),
+              (f"proxy: stats meet {data.spells[spell]['name']}'s "
+               + " ".join(f"{LABEL[s]} {v}" for s, v in req.items()),
+               [b for b in corpus if all(b.stats[s] >= v for s, v in req.items())])]
+    out = [f"weapon pool {len(flex_pool(data)[0])}; wielded = flex_counts at the build's own stats"]
+    for name, bs in groups:
+        one = [counts[id(b)][0] for b in bs]
+        two = [counts[id(b)][1] for b in bs]
+        out.append(f"{name}: n {len(bs)}, 1H mean {mean(one):.1f} median {med(one):.0f}, "
+                   f"2H mean {mean(two):.1f} median {med(two):.0f}, "
+                   f"1H <= 5: {sum(1 for x in one if x <= 5)}")
+    bands = [(0, 5), (6, 10), (11, 20), (21, 40), (41, 80), (81, 10**6)]
+    out.append("by 1H count: n, median VIT, median armour weight, median load used")
+    for lo, hi in bands:
+        bs = [b for b in corpus if lo <= counts[id(b)][0] <= hi]
+        vit = [b.stats["vitality"] for b in bs]
+        arm = [sum(float(data.armor[s].get(p, {}).get("weight", 0)) for s, p in zip(ARMOR_SLOTS, b.armor))
+               for b in bs]
+        used = [(a + sum(float(data.weapons.get(w, {}).get("weight", 0)) for w, _ in b.weapons()))
+                / data.equip_load[min(max(b.stats["vitality"], 1), len(data.equip_load) - 1)] for a, b in zip(arm, bs)]
+        out.append(f"  {lo}-{hi if hi < 10**6 else 'max'}: n {len(bs)}, VIT {med(vit):.0f}, armour {med(arm):.1f}, "
+                   f"load {med(used):.0%}")
+    out.append("armour at scarcity 0 -> at load_scarcity (EXPECT_ARMOR_SCARCITY): defense, weight, set")
+    mix = threat_mix(data, corpus)
+    for weapon, st in EXPECT_ARMOR_SCARCITY:
+        stats = dict(zip(STATS, st))
+        wearer = Build("", stats, ["Naked"] * 4, [(weapon, "No_Infusion")], 0, [], [])
+        s = load_scarcity(data, stats)
+        got = [(best_armor(data, wearer, stats, mix, top=1, scarcity=sc)[2] or [None])[0] for sc in (0.0, s)]
+        show = lambda t: "none" if t is None else f"{t[0]:.1f} {t[1]:.1f} {'/'.join(t[2])}"
+        out.append(f"  {data.weapons[weapon]['name']} {st} wields {flex_counts(data, stats)[0]} 1H, scarcity {s:.2f}: "
+                   f"{show(got[0])} -> {show(got[1])}")
+    weapon, st = EXPECT_ARMOR_SCARCITY[0]
+    stats = dict(zip(STATS, st))
+    wearer = Build("", stats, ["Naked"] * 4, [(weapon, "No_Infusion")], 0, [], [])
+    out.append(f"effective price (scarcity x LOAD_PRICE) against the first case's set: defense, weight")
+    for k in (0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.9, 1.0):
+        t = (best_armor(data, wearer, stats, mix, top=1, scarcity=k / LOAD_PRICE)[2] or [None])[0]
+        out.append(f"  {k:.2f}: {t[0]:.1f} {t[1]:.1f}")
+    return out
+
+
 def flexibility(data: Data, corpus: list[Build], stats: dict, sl: int, armor: list[str] | None = None,
                 rings: list[str] | None = None, k: int = FLEX_K) -> dict:
     """A stat line's weapon flexibility and where it sits among its stat neighbours.
@@ -1779,7 +2034,8 @@ def generate_armor(data: Data, corpus: list[Build], weapon: str, inf: str, two: 
     wearing `rings`, as display names head/chest/hands/legs ("Naked" for a slot left bare), and a
     note when the load cap left a slot bare or left no set at all -- never a silent naked build."""
     wearer = Build("", stats, ["Naked"] * 4, [(weapon, inf)], int(two), rings, [])
-    cap, carried, sets = best_armor(data, wearer, dict(stats), threat_mix(data, corpus), top=1)
+    cap, carried, sets = best_armor(data, wearer, dict(stats), threat_mix(data, corpus), top=1,
+                                     scarcity=load_scarcity(data, stats))
     if not sets:
         return [], (f"no armor fits: the weapon and rings weigh {carried:.1f}, over the {cap:.1f} a "
                     f"{EQUIP_CAP:.0%} load allows at VIT {stats['vitality']}")
@@ -1793,7 +2049,7 @@ def generate_armor(data: Data, corpus: list[Build], weapon: str, inf: str, two: 
 def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, objective: str = "damage",
                    window: float = 1.5, k: int = 50, allow_naked: bool = False,
                    grip: str = "two", flex_weight: float | None = None, spells=(),
-                   only_class: str | None = None) -> dict | None:
+                   only_class: str | None = None, use_floors: bool = True) -> dict | None:
     """A whole valid build for weapon+infusion at `sl`: optimize_build's class and stats with the
     weapon as primary, able to attune and cast every one of `spells` (their names come back with
     the slots they cost and the slots the build's ATT gives, and the catalyst best_catalysts picks
@@ -1806,7 +2062,7 @@ def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
     skips the armour, as every generated build did before it had any. `only_class` is
     optimize_build's: the build for a character that already has a class."""
     best, floors = optimize_build(data, corpus, weapon, inf, sl, objective, grip, flex_weight, spells,
-                                  only_class)
+                                  only_class, use_floors)
     if best is None:
         return None
     val, cls, two, stats = best
@@ -2199,6 +2455,23 @@ EXPECT_SPELLS = [  # weapon key, infusion, sl, objective, spell keys: --generate
     ("Demons_Great_Hammer", "Raw", 20, "damage", ["Great_Lightning_Spear"]),  # FTH 42 does not fit SL 20
     ("Demons_Great_Hammer", "Raw", 200, "damage", ["Climax", "Climax", "Sacred_Oath"]),  # 12 slots: no ATT holds them
 ]
+#: --optimize --spells, as Optimize for weapon asks now that it honours the chosen spells; the last
+#: field is whether the floors apply (False: --no-floors, the panel's "ignore typical-build minimums").
+EXPECT_OPTIMIZE_SPELLS = [(*case, True) for case in EXPECT_SPELLS] + [
+    ("Dagger", "No_Infusion", 120, "damage", ["Climax"], True),  # the user's refusal: no build
+    ("Dagger", "No_Infusion", 120, "damage", ["Climax"], False),  # the same without the floors: a build
+    ("Roaring_Halberd", "No_Infusion", 120, "damage", ["Climax"], False),
+]
+EXPECT_REFUSALS = [  # weapon key, infusion, sl, objective, grip, spells, class, floors: refusal()
+    ("Dagger", "No_Infusion", 120, "damage", "two", ["Climax"], None, True),  # the user's case: floors
+    ("Roaring_Halberd", "No_Infusion", 120, "damage", "two", ["Climax"], None, True),
+    ("Dagger", "No_Infusion", 130, "damage", "two", ["Climax"], None, True),  # past the bracket edge
+    ("Demons_Great_Hammer", "Raw", 20, "damage", "two", ["Great_Lightning_Spear"], None, True),
+    ("Demons_Great_Hammer", "Raw", 200, "damage", "two", ["Climax", "Climax", "Sacred_Oath"], None, True),
+    ("Giant_Stone_Axe", "No_Infusion", 10, "damage", "one", [], None, True),  # STR 45 one-handed
+    ("Demons_Great_Hammer", "Raw", 40, "damage", "two", [], "sorcerer", True),  # the class is the blocker
+    ("Demons_Great_Hammer", "Raw", 100, "damage", "two", [], None, True),  # a build: no refusal
+]
 EXPECT_MINIMUM = [("Demons_Great_Hammer", True), ("Moonlight_Greatsword", False), ("Uchigatana", False)]
 EXPECT_SIMILAR = [  # stats, sl, k, status
     ([20, 20, 15, 10, 40, 15, 15, 9, 9], 100, 50, None),
@@ -2206,6 +2479,12 @@ EXPECT_SIMILAR = [  # stats, sl, k, status
     ([12, 10, 8, 10, 14, 14, 10, 8, 8], 40, 50, ["bleed", "poison"]),
 ]
 EXPECT_FLOOR_SLS = [1, 33, 60, 100, 150, 200, 838]
+#: best_armor for a build holding `weapon`, wearing no rings: at scarcity 0 and at load_scarcity.
+EXPECT_ARMOR_SCARCITY = [  # weapon key, stats
+    ("Dagger", [20, 10, 30, 5, 8, 8, 10, 5, 5]),  # VIT 30, STR/DEX 8: few weapons, room for heavy armour
+    ("Dagger", [15, 10, 20, 8, 10, 12, 10, 8, 8]),
+    ("Demons_Great_Hammer", [22, 20, 14, 6, 44, 11, 26, 5, 5]),  # many weapons: scarcity 0, no change
+]
 EXPECT_FLEX = [  # stats, sl, armour names, ring names: flexibility(); the generated builds are added
     ([10, 6, 7, 6, 6, 20, 9, 6, 18], 35, [], []),  # the SL 35 DEX/FTH character this was written for
     ([10, 6, 7, 6, 6, 20, 9, 6, 18], 35, ["Alva Helm", "Alva Armor", "Alva Gauntlets", "Alva Leggings"],
@@ -2311,6 +2590,24 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
     out.append("// spells cost, slots the build's ATT gives, catalysts: school, name, cast power, the catalyst")
     out.append("// passed over for its requirements (\"\" for none).")
     out.append(f"pub const GENERATE_SPELLS: SpellCases = {_rs(spell_gen)};\n")
+    opt_spells = []
+    for weapon, inf, sl, objective, spells, use_floors in EXPECT_OPTIMIZE_SPELLS:
+        best, _ = optimize_build(data, corpus, weapon, inf, sl, objective, spells=spells, use_floors=use_floors)
+        opt_spells.append((weapon, INFUSION_CODE[inf], sl, objective, spells, use_floors,
+                           None if best is None else _Some((data.classes[best[1]]["name"], best[2],
+                                                            arr(best[3]), float(best[0])))))
+    out.append("// weapon, infusion, sl, objective, spells, floors apply -> class, two-handed, stats, value.")
+    out.append(f"pub const OPTIMIZE_SPELLS: OptimizeSpellCases = {_rs(opt_spells)};\n")
+    refusals = []
+    for weapon, inf, sl, objective, grip, spells, cls, use_floors in EXPECT_REFUSALS:
+        r = refusal(data, corpus, weapon, inf, sl, objective, grip, spells, cls, use_floors)
+        refusals.append((weapon, INFUSION_CODE[inf], sl, objective, grip, spells, cls or "", use_floors,
+                         None if r is None else _Some((
+                             r["kind"], r["class"] or "", r["short"] or 0, r["lines"],
+                             [(what, "" if v is None else str(v), label) for what, v, label in r["fixes"]]))))
+    out.append("// weapon, infusion, sl, objective, grip, spells, class (\"\" any), floors apply -> kind, closest")
+    out.append("// class, points short, the reason lines, fixes: what, its value (\"\" for none), label.")
+    out.append(f"pub const REFUSALS: RefusalCases = {_rs(refusals)};\n")
 
     mins = []
     for weapon, two in EXPECT_MINIMUM:
@@ -2354,7 +2651,8 @@ def expect_builds(data: Data, corpus: list[Build], mix, cases: list, naked_cases
         if not naked:
             worn = [data.sp_key[norm(r)] for r in suggested]
             wearer = Build("", g["stats"], ["Naked"] * 4, [(weapon, inf)], 0, worn, [])
-            top = lambda eff: (best_armor(data, wearer, eff, mix, top=1)[2] or [None])[0]
+            scarce = load_scarcity(data, g["stats"])
+            top = lambda eff: (best_armor(data, wearer, eff, mix, top=1, scarcity=scarce)[2] or [None])[0]
             chosen = top(dict(g["stats"]))
             binds = (chosen != top({**{s: 99 for s in STATS}, "vitality": g["stats"]["vitality"]}),
                      chosen != top({**g["stats"], "vitality": 99}))
@@ -2411,6 +2709,16 @@ def backend_expectations_rest(data: Data, corpus: list[Build], out: list[str], m
     out.append(f"pub const FLEXIBILITY: FlexCases = {_rs([(st, sl, armor, rings, (f['one'], f['two'], f['total'], f['below'], f['equal'], f['n'], float(f['percentile']), float(f['spare']), f['fits'])) for st, sl, armor, rings, f in rows])};")
     out.append("")
     out.append(f"pub const FLEX_LINES: &[(&str, &str)] = {_rs([(flex_line(f), flex_load_line(f)) for *_, f in rows])};")
+    armor_rows = []
+    for weapon, st in EXPECT_ARMOR_SCARCITY:
+        wearer = Build("", as_dict(st), ["Naked"] * 4, [(weapon, "No_Infusion")], 0, [], [])
+        s = load_scarcity(data, as_dict(st))
+        pick = lambda sc: list((best_armor(data, wearer, as_dict(st), threat_mix(data, corpus), top=1, scarcity=sc)[2]
+                                 or [(0, 0, ["", "", "", ""])])[0][2])
+        armor_rows.append((weapon, st, float(s), pick(0.0), pick(s)))
+    out.append("")
+    out.append("// weapon, stats -> load scarcity, armour keys head to legs at scarcity 0, the same at that scarcity.")
+    out.append(f"pub const ARMOR_SCARCITY: ArmorScarcityCases = {_rs(armor_rows)};")
     return "\n".join(out) + "\n"
 
 
@@ -2582,6 +2890,9 @@ def main() -> int:
                          "names; repeat one for a second copy). Their INT/FTH requirements raise those stats and "
                          "their summed slot cost raises ATT, as a weapon's requirements do; no build when they "
                          "do not fit the SL")
+    ap.add_argument("--no-floors", action="store_true",
+                    help="with --optimize/--generate/--weapons-for: drop the SL bracket floors (VIG/VIT/ADP/ATT, END for a "
+                         "high-stamina weapon): they are the medians of real builds, not a game rule")
     ap.add_argument("--allow-naked", action="store_true",
                     help="with --generate: no armour (by default the best set under 70%% load is chosen)")
     ap.add_argument("--objective", choices=["damage", "bleed", "poison"], default="damage",
@@ -2593,6 +2904,9 @@ def main() -> int:
     g.add_argument("--flexibility", metavar="STATS",
                    help="how many weapons these stats wield 1H/2H, the weapon weight left under 70%% load after "
                         "--armor, and the build's percentile among its --k nearest stat-neighbour builds")
+    g.add_argument("--load-evidence", metavar="SPELL", nargs="?", const="Climax",
+                   help="how many weapons real builds wield (all, attuning SPELL, and a stat proxy for it) "
+                        "and their VIT, armour weight and load by that count: the load weighting's measurement")
     g.add_argument("--flex-sweep", metavar="W,W,...",
                    help="--optimize every EXPECT_BUILDS/EXPECT_ONE_HANDED case at each flexibility weight and "
                         "print the objective and the flexibility it gives: how FLEX_WEIGHT was chosen")
@@ -2688,11 +3002,14 @@ def main() -> int:
             ap.error(f"unknown weapon {name!r}")
         corpus, _ = load_corpus(data)
         g = generate_build(data, corpus, weapon, inf.replace(" ", "_") or "No_Infusion", a.sl, a.objective,
-                           a.window or 1.5, a.k, a.allow_naked, a.grip, a.flex_weight, spells, a.start_class)
+                           a.window or 1.5, a.k, a.allow_naked, a.grip, a.flex_weight, spells, a.start_class,
+                           not a.no_floors)
         if g is None:
             print(f"no valid SL {a.sl} {a.start_class or ''} build wields {data.weapons[weapon]['name']} "
                   f"(grip {a.grip})"
                   + (f" and casts {', '.join(data.spells[s]['name'] for s in spells)}" if spells else ""))
+            print_refusal(refusal(data, corpus, weapon, inf.replace(" ", "_") or "No_Infusion", a.sl, a.objective,
+                                  a.grip, spells, a.start_class, not a.no_floors))
             return 2
         if a.json:
             print(json.dumps(g, indent=1))
@@ -2720,6 +3037,12 @@ def main() -> int:
             print(f"  armor: {g['armor_note']}")
         print(f"  flexibility: {flex_line(g['flex'])}")
         print(f"  load: {flex_load_line(g['flex'])}")
+        return 0
+    if a.load_evidence:
+        spell = data.sp_key.get(norm(a.load_evidence), a.load_evidence)
+        if spell not in data.spells:
+            ap.error(f"unknown spell {a.load_evidence!r}")
+        print("\n".join(load_evidence(data, load_corpus(data)[0], spell)))
         return 0
     if a.flex_sweep:
         weights = [float(w) for w in a.flex_sweep.split(",")]
@@ -2774,12 +3097,14 @@ def main() -> int:
         inf = inf.replace(" ", "_") or "No_Infusion"
         corpus, _ = load_corpus(data)
         best, floors = optimize_build(data, corpus, weapon, inf, a.sl, a.objective, a.grip, a.flex_weight, spells,
-                                      a.start_class)
+                                      a.start_class, not a.no_floors)
         if best is None:
             print(f"no valid SL {a.sl} {a.start_class or ''} build wields {data.weapons[weapon]['name']} (grip {a.grip})"
                   + (f" and casts {', '.join(data.spells[s]['name'] for s in spells)}" if spells else "")
                   + " with the bracket floors "
                   + " ".join(f"{s[:3].upper()} {v}" for s, v in floors.items()))
+            print_refusal(refusal(data, corpus, weapon, inf, a.sl, a.objective, a.grip, spells, a.start_class,
+                                  not a.no_floors))
             return 2
         val, cls, two, stats = best
         print(f"{data.weapons[weapon]['name']} ({inf.replace('_', ' ')}), {a.objective} {val:.0f}: {cls} SL {a.sl}"
@@ -2828,11 +3153,11 @@ def main() -> int:
         sl = a.sl or sum(stats.values()) - 53  # every DS2 class satisfies level = stat total - 53
         corpus, _ = load_corpus(data)
         floors, r1, cut = build_floors(data, corpus, sl)
-        bad = floor_violations(stats, floors)
+        bad = floor_violations(stats, floors) if not a.no_floors else []
         if bad and not a.neighbours:  # never rank for a build that is not a valid one; --neighbours
             # only reports what real builds near these stats carry, so a real build below a floor may query it
             print(f"not a valid SL {sl} build: {', '.join(bad)} (VGR/VIT/ADP/ATT floor at the bracket median; "
-                  "use --optimize to get one)", file=sys.stderr)
+                  "use --optimize to get one, or --no-floors to rank these stats anyway)", file=sys.stderr)
             return 2
         if a.neighbours:
             status = a.status.split(",") if a.status else None
@@ -2843,7 +3168,7 @@ def main() -> int:
             for c, name, inf, grip in rows:
                 print(f"  {c:3}/{n}  {name:32} {grip:8} " + ", ".join(f"{i.replace('_', ' ')} {m}" for i, m in inf))
             return 0
-        rows, dfn, n = weapons_for(data, stats, sl, corpus, raw_ar=a.raw_ar, one_hand=a.one_hand, weapon_class=a.weapon_class, per_class=a.per_class, window=a.window, objective=a.objective)
+        rows, dfn, n = weapons_for(data, stats, sl, corpus, raw_ar=a.raw_ar, one_hand=a.one_hand, weapon_class=a.weapon_class, per_class=a.per_class, window=a.window, objective=a.objective, use_floors=not a.no_floors)
         print(f"stats {' '.join(f'{s[:3].upper()} {v}' for s, v in stats.items())}  ->  SL {sl}")
         print(f"average defender at this SL ({n} builds): "
               + " ".join(f"{k} {v:.0f}" for k, v in dfn.items()))

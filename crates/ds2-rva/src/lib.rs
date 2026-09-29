@@ -10508,6 +10508,43 @@ pub const ITEM_TYPE_HAS_LEVEL_BELOW: u8 = 6;
 /// Item types below this carry an infusion (`if (entry[0x1e] < 2)`).
 pub const ITEM_TYPE_HAS_INFUSION_BELOW: u8 = 2;
 
+/// `SaveDataItemInventory2`'s write (vtable `0x1410da418` slot 2). RVA `0x002e53f0`.
+///
+/// `fn(this, stream*, u32 enabled)`. When `enabled` is nonzero it walks
+/// `[[GameManagerImp + 0xA8] + 0x10]` (`ItemInventory2`), calls `0x1401aba20` -> `0x1401a6020`,
+/// which answers `[ItemInventory2 + 0x10]` plus [`ITEM_INVENTORY_SAVE_BLOCK_OFFSET`], and streams
+/// [`ITEM_INVENTORY_SAVE_BLOCK_SIZE`] bytes from there with `stream->vtable[0x18]`. That block is
+/// everything the save keeps of the inventory; the bag entries are not read here.
+/// Hop 0 is real code, not an Arxan redirect (`scripts/ds2-arxan-chain.py`).
+pub const SAVE_DATA_ITEM_INVENTORY_WRITE: u32 = 0x002e_53f0;
+
+/// The first ten bytes of [`SAVE_DATA_ITEM_INVENTORY_WRITE`]: `test r8d,r8d; je +0x56; push rdi;
+/// sub rsp,0x20`.
+pub const SAVE_DATA_ITEM_INVENTORY_WRITE_PROLOGUE: [u8; 10] =
+    [0x45, 0x85, 0xc0, 0x74, 0x56, 0x57, 0x48, 0x83, 0xec, 0x20];
+
+/// `[ItemInventory2 + 0x10] + 0x30`: the inventory's save block, one
+/// [`ITEM_SAVE_RECORD_STRIDE`]-byte record per bag entry, indexed by the entry's index (its handle
+/// at [`ITEM_ENTRY_HANDLE_OFFSET`]).
+///
+/// A separate copy from the bag entries, not a view of them. Read live 2026-09-28
+/// (`scripts/frida/weapon-sync-save-block.js`): entries 3, 355, 1152, 1159 and 1262 had their
+/// records at block `+0x30`, `+0x1630`, `+0x4800`, `+0x4870` and `+0x4ee0`, `index * 0x10` each,
+/// with the same item id, durability and level.
+pub const ITEM_INVENTORY_SAVE_BLOCK_OFFSET: usize = 0x30;
+
+/// Bytes [`SAVE_DATA_ITEM_INVENTORY_WRITE`] streams from the save block. `0x100bc`.
+pub const ITEM_INVENTORY_SAVE_BLOCK_SIZE: usize = 0x100bc;
+
+/// Bytes per save block record: `{u32 item, u32, f32 durability, u8 level, u8 infusion, u16}`.
+pub const ITEM_SAVE_RECORD_STRIDE: usize = 0x10;
+
+/// A save block record's `u32` item id. `+0x00`.
+pub const ITEM_SAVE_RECORD_ITEM_OFFSET: usize = 0x00;
+
+/// A save block record's level byte, the value the next load puts in the entry's `+0x25`. `+0x0C`.
+pub const ITEM_SAVE_RECORD_LEVEL_OFFSET: usize = 0x0c;
+
 /// `CharacterCtrl + 0x378`: `ChrAsmCtrl*`. Its vtable slot `0x120` on `PlayerCtrl` is
 /// `mov rax,[rcx+0x378]; ret` (`0x1403126b0`).
 pub const CHARACTER_CTRL_CHR_ASM_CTRL_OFFSET: usize = 0x378;
@@ -10537,6 +10574,89 @@ pub const WEAPON_LEVEL_MAX: u8 = 10;
 
 /// Fists: what an empty weapon slot's record holds (`0x14034a390`).
 pub const FISTS_ITEM_ID: u32 = 3_400_000;
+
+// ============================================================================================
+// Armour reinforcement levels: the same three copies as a weapon's, and the armour twin of the
+// weapon update (`ds2-weapon-sync`'s armour half, `ds2-armor-sync:` in the log;
+// docs/DS2-WEAPON-LEVEL-SYNC.md "Armour").
+//
+// Static (Ghidra daemon, 2026-09-28): `0x1401b66a0` handles internal equip slots 6..9
+// (`FUN_1401b8870`: `slot - 6 < 4`) by building the same 16-byte request as for a weapon, with the
+// item id taken from `ItemParam +0x18` (the ArmorParam id) and the level from the entry's `+0x25`,
+// and passing it to [`CHR_ARMOR_UPDATE`]. Read live the same day with
+// `scripts/frida/armor-sync-read.js` on a character wearing 22182100+10, 21500101+5, 22230102+10
+// and 27700103+5: the equipped entries at `bag + 0x25830 + (6+k)*8`, the records `6+k` and the
+// live entries `k` answered the same pieces and levels, the record and live ids being the item id
+// minus [`ARMOR_PARAM_ID_FROM_ITEM_ID`].
+// ============================================================================================
+
+/// The local character's armour update. RVA `0x0037_f640`, VA `0x14037f640`.
+///
+/// `void (PlayerCtrl* rcx, const ArmourUpdateRequest* rdx)`, the request laid out exactly as
+/// [`CHR_WEAPON_UPDATE`]'s (`+0x00` piece `0..3` head chest hands legs, `+0x04` `ArmorParam` id or
+/// `-1` for an empty slot, `+0x08` durability, `+0x0C` level). The body is the weapon update's
+/// with three differences: the record's category byte is 1, the record index is
+/// `FUN_14034e2e0(piece)` = `piece + 6` ([`ARMOR_RECORD_FIRST`]), and the packet is
+/// `ChrEquipPacket_remoteArmorChange` (`0x140162a70`, P2P packet 62). It writes the record table
+/// through `0x1403463d0`, which drops a same-item level change exactly as for weapons, and the live
+/// state through `0x1403482a0` only when the live piece is already this item (category 2:
+/// `0x140349a80` reloads the piece's rows, then the level byte lands at
+/// [`CHR_ASM_EQUIP_ARMOR_LEVEL_OFFSET`]).
+///
+/// Its only direct caller is `0x1401b66a0` (xrefs: that call at `0x1401b6882` and one `.pdata`
+/// entry). Not Arxan-redirected (`scripts/ds2-arxan-chain.py`: hop 0 clean prologue).
+pub const CHR_ARMOR_UPDATE: u32 = 0x0037_f640;
+
+/// First fourteen bytes of [`CHR_ARMOR_UPDATE`], the same as [`CHR_WEAPON_UPDATE_PROLOGUE`] (read
+/// out of the image).
+pub const CHR_ARMOR_UPDATE_PROLOGUE: [u8; 14] = CHR_WEAPON_UPDATE_PROLOGUE;
+
+/// How many armour pieces there are: head, chest, hands, legs.
+pub const ARMOR_SLOT_COUNT: usize = 4;
+
+/// The equipment record of armour piece `k` is record `ARMOR_RECORD_FIRST + k`: the table at
+/// `0x141568be0` names records 6..9 `Helmet`, `Armor`, `Guntlet`, `Leggings`, category 2.
+pub const ARMOR_RECORD_FIRST: usize = 6;
+
+/// The inventory's equip slot of armour piece `k` is `ITEM_SLOT_ARMOUR_BASE + k`; this is that
+/// base as an index into [`ITEM_BAG_EQUIPPED_ENTRIES_OFFSET`]'s array.
+pub const ARMOR_INVENTORY_SLOT_FIRST: usize = 6;
+
+/// `ChrAsmEquip + 0x290 + k * 0x30`: armour piece `k`'s live entry.
+///
+/// `+0x00` is its `ArmorParam` id (`0x140349a80` stores it, falling back to the naked pieces
+/// `11001100..11001103` when the id has no row), `+0x08` the `ArmorParam` row, `+0x18` the level,
+/// `+0x20` the `ArmorReinforceParam` row.
+pub const CHR_ASM_EQUIP_ARMOR_OFFSET: usize = 0x290;
+/// Bytes per live armour entry.
+pub const CHR_ASM_EQUIP_ARMOR_STRIDE: usize = 0x30;
+/// Live armour entry `+0x18` (`ChrAsmEquip + 0x2a8 + k * 0x30`), `u8`: what defense reads.
+///
+/// `0x1403486b0` hands it, with the reinforce row at `+0x20`, to the physical defense read
+/// `0x14034dbb0` (from `0x140380070`) and the elemental cut read `0x14034dda0` (from
+/// `0x140381350`); both answer `base + (max - base) * clamp(level / row[+0x60], 0, 1)`.
+pub const CHR_ASM_EQUIP_ARMOR_LEVEL_OFFSET: usize = 0x18;
+
+/// An armour item's `ArmorParam` id is its `ItemParam` id minus this.
+///
+/// `ItemParam +0x18` is exactly that for all 461 armour rows of the shipped regulation (`scripts/ds2-armor-sync-data.py`), and
+/// the live read above showed it for four equipped pieces.
+pub const ARMOR_PARAM_ID_FROM_ITEM_ID: u32 = 10_000_000;
+
+/// What the inventory notifier sends for an empty armour slot (`local_14 = 0xffffffff`), and what
+/// the packet 62 receiver accepts as "no piece".
+pub const ARMOR_EMPTY_ITEM_ID: u32 = u32::MAX;
+
+/// The naked pieces, head to legs: what a live entry, or an NPC's record, holds for an empty slot.
+pub const ARMOR_NAKED_IDS: [u32; 4] = [11_001_100, 11_001_101, 11_001_102, 11_001_103];
+
+/// The highest level the packet 62 receiver accepts (`level < 0xb`). Normal armour stops at +10.
+pub const ARMOR_LEVEL_MAX: u8 = 10;
+
+/// Item types ([`ITEM_ENTRY_TYPE_OFFSET`]) that are armour. See [`ITEM_ENTRY_TYPE_ARMOUR`].
+pub const ITEM_TYPE_ARMOR_FIRST: u8 = 2;
+/// The last armour item type.
+pub const ITEM_TYPE_ARMOR_LAST: u8 = 5;
 
 // ============================================================================================
 // The HUD's own voice chat icon, `FeScenePlayerVoiceChatIcon` (`ds2-voice-chat`).
