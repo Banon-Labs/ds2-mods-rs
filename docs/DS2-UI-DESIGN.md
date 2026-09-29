@@ -35,14 +35,20 @@ decision; **open** = not yet established.
 | `FeFont_Big` | 41 | Panel titles, and the one headline of a status banner |
 | `FeFont_Small` | 28 | Everything else |
 
-**Open:** the unit of those heights. The `.flo` coordinates this repo has measured span a
-1280x720 canvas, so the working assumption is 720p units scaled by `viewport_h / 720`. A runtime
-read of the game's own text quad heights settles it before the tokens are frozen.
+**Measured 2026-09-29** (`scripts/frida/ui-scale.js`): the float at `0x1410ae458`, which
+`docs/DS2-HP-GAUGE.md` names as the UI scale's source, holds `720.0`. It is the divisor, so the
+game's UI is authored on a 720-pixel-tall canvas and scaled by back-buffer height / 720. That run's
+back buffer was 3840x2160 in a 1920x1080 client, so the scale comes from the back buffer, not the
+window. The `.ccm` heights are the glyph atlas's own pixels. The panels draw them unscaled, since
+a bitmap face blurs when it is scaled. Whether the game draws its menu text at 1x or at the full
+canvas scale is **open**.
 
-**Rule:** the fonts are loaded at run time from the player's own install, never shipped. The
-loader turns the `.ccm` glyph records plus the decoded pages into an imgui font atlas
-(`FontSource` custom glyphs, or a pre-built RGBA atlas with `add_custom_rect`). If the files are
-missing, fall back to imgui's default font and log it once.
+**Built** (`crates/ds2-overlay/src/fefont.rs`, `panels::install_game_fonts`): the fonts are loaded
+at run time from the player's own install, never shipped. Each `.ccm` glyph becomes an imgui
+custom-rect glyph, and the decoded DXT pixels are copied into the atlas before hudhook uploads it.
+`FeFont_Small` is every panel's default font. `panels::title` draws in `FeFont_Big`. If the files
+are missing or do not parse, the panels fall back to imgui's default font and log why.
+`scripts/ds2-fefont.py check` verifies the layout against the files.
 
 ## Palette
 
@@ -59,7 +65,7 @@ missing, fall back to imgui's default font and log it once.
 | `ASH` disabled | `#60574c` | waku_03 |
 | `SLATE` field / input fill | `#202d33` | waku_03 |
 | `RUST` warning | `#5c3623` | waku_03 |
-| `BLOOD` refusal / cannot-use | `rgb(181,44,16)` | the game's own X, see `DS2-ITEM-REQUIREMENTS.md` |
+| `BLOOD` refusal / cannot-use | `rgb(181,44,16)` | the game's own X, see `DS2-ITEM-REQUIREMENTS.md`. 3.04:1 on `INK_0`: glyph only, never text |
 | `TEXT` | **open** | the font pages are white and tinted at draw time; read the tint from a `.flo` text record |
 
 **Rule:** these replace the hand-copied sets in `ds2-save-file/src/picker.rs`,
@@ -98,7 +104,7 @@ is found, it draws a bracketed short name such as `[A]`) followed by a one-word 
 |---|---|---|
 | Net Effects selector | `"DS2 NET EFFECTS [-]/[+] n kept"`. Rows like `"> [K] * 123456789 name"`. Hint: `"Up/Down row Left/Right page Alt+' apply Alt+M keep/unkeep Alt+9 collapse"` | Title `Effects`, with the kept count as a number on the right. Rows show the name only: a kept mark glyph, an "on you" dot and the id dimmed on the right. Hint bar: `Move * Page * Apply * Keep * Close`. |
 | Net Effects sparkle, weapon/armor signs, invasion-path glyph | Each sits in its own corner, some permanently, drawn with different shapes and golds. The invasion glyph sits on top of the game's HP bars. | One status strip in one safe corner, not over the HP bars. The glyphs are `BRONZE` on `INK_0`, all the same size. A toggle shows its glyph and its name in Small for 2 s, then only the glyph stays (the net-effects sparkle included). The option to hide persistent glyphs entirely goes in the TOML. |
-| Save picker | Title `"LOAD CHARACTER FROM FILE"`, eight all-caps prose hint lines, and refusals written as sentences, e.g. `"That path is missing, or it is not a file. Choose another."` | Title `Load Character` / `Save Character`. The path is a dim subtitle. Hint bar: `Open * Back * Page * Type Path`. Refusals become a `BLOOD` headline in Title Case (`Save Not Found`) plus at most one short line, and only where the headline is not enough (`Name Not Allowed` -> `\ / : * ? " < > \|`). Row markers: `[ empty ]` -> dim `Empty`; `[..]`/`[ back ]` -> one `..` row. |
+| Save picker | Title `"LOAD CHARACTER FROM FILE"`, eight all-caps prose hint lines, and refusals written as sentences, e.g. `"That path is missing, or it is not a file. Choose another."` | Title `Load Character` / `Save Game` (built as `Save Game`: the row copies the whole container, all ten slots, so `Save Character` would be wrong). The path is a dim subtitle. Hint bar: `Open * Back * Page * Type Path`. Refusals become a `BLOOD` headline in Title Case (`Save Not Found`) plus at most one short line, and only where the headline is not enough (`Name Not Allowed` -> `\ / : * ? " < > \|`). Row markers: `[ empty ]` -> dim `Empty`; `[..]`/`[ back ]` -> one `..` row. |
 | Load Build from URL | `"Paste or type a soulsplanner.com or mugenmonkey.com build link"`, plus two hint lines, one for the keyboard and one for the pad | Title `Load Build`. The field placeholder is `soulsplanner / mugenmonkey link`. Hint bar: `Load * Paste * Clear * Close`, with the device's glyph. Status headlines stay (`Fetching`, `Busy`). Details shrink to their noun: `build 123 from soulsplanner.com` stays; `a build is still being fetched -- try again in a moment` goes. |
 | Build Recommender | A 35-word hint sentence. Checkbox labels such as `"the weapon, infusion, objective and grip above (two-handed: STR requirement halved\|one-handed: full STR requirement), at SL n"`. A stub warning sentence. Calibration prose. | Title `Recommender`. Mode tabs become `Weapons * Optimize * Minimum * Similar`. Delete the long checkbox explanation; the fields above already show that state. The stub warning becomes a `RUST` tag, `Placeholder data`. Calibration moves behind a hold-to-expand detail. Hint bar: `Move * Select * Step * Page * Back`. The confirm dialog keeps its single irreversible warning (`Soul memory rises. This cannot be undone.`) and drops the other two sentences into a detail list. |
 | Music panel | A default imgui window with a title bar, a close X and the ProggyClean font | Restyle it to the `panel` helper: frame, fonts, no title-bar chrome. `"F10 or Esc closes this window."` goes into the hint bar. The `(playlist track\|the game's own track)` suffix becomes a small glyph. |

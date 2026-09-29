@@ -480,7 +480,7 @@ fn a_linux_path_is_tried_on_the_wine_drive() {
     type_text(&mut model, "/definitely/not/here");
     model.apply(PickerInput::Confirm);
     let message = model.status_message().expect("refused");
-    assert_eq!(message.headline(), "FOLDER NOT FOUND");
+    assert_eq!(message.headline(), "Folder Not Found");
     assert_eq!(message.second_detail(), Some(r"Z:\definitely\not\here"));
 }
 
@@ -693,7 +693,7 @@ fn an_existing_file_is_asked_about_before_it_is_replaced() {
     );
     assert!(
         view.status
-            .is_some_and(|banner| banner.headline().contains("OVERWRITE"))
+            .is_some_and(|banner| banner.headline().contains("Overwrite"))
     );
 
     assert_eq!(model.apply(PickerInput::Back), PickerActivation::Repopulate);

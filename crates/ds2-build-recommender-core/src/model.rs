@@ -54,13 +54,13 @@ impl Mode {
         Mode::SimilarBuilds,
     ];
 
-    /// The tab's caption.
+    /// The tab's caption: one word, the game's way (docs/DS2-UI-DESIGN.md).
     pub const fn label(self) -> &'static str {
         match self {
-            Mode::WeaponsForStats => "Weapons for stats",
-            Mode::OptimizeForWeapon => "Optimize for weapon",
-            Mode::MinimumForWeapon => "Minimum for weapon",
-            Mode::SimilarBuilds => "Similar builds",
+            Mode::WeaponsForStats => "Weapons",
+            Mode::OptimizeForWeapon => "Optimize",
+            Mode::MinimumForWeapon => "Minimum",
+            Mode::SimilarBuilds => "Similar",
         }
     }
 

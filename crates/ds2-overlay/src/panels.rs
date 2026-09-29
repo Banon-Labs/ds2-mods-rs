@@ -17,12 +17,13 @@
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-use hudhook::imgui::{Context, FontConfig, FontSource, Io, Ui};
+use hudhook::imgui::{Context, FontConfig, FontGlyphRanges, FontId, FontSource, Io, Ui};
 use hudhook::windows::Win32::Graphics::Direct3D11::{D3D11_TEXTURE2D_DESC, ID3D11Texture2D};
 use hudhook::windows::Win32::Graphics::Dxgi::IDXGISwapChain;
 use hudhook::windows::core::Interface;
 use hudhook::{ImguiRenderLoop, MessageFilter, RenderContext};
 
+use crate::fefont::{self, FaceName};
 use crate::log::log;
 
 /// Signature of a panel's draw function. Called once per frame with the frame's `Ui`.
@@ -71,8 +72,247 @@ static ERRORS: AtomicU64 = AtomicU64::new(0);
 /// Frames drawn with the corrected cursor, for the once-a-second diagnostic line.
 static IMGUI_MOUSE_FRAMES: AtomicU64 = AtomicU64::new(0);
 
-/// imgui's default font rasterises at 13 px; read across a room, it wants 25% more.
+/// imgui's default font rasterises at 13 px; read across a room, it wants 25% more. Only used when
+/// the game's own fonts cannot be read (see `install_game_fonts`).
 pub const FONT_SIZE_PX: f32 = 13.0 * 1.25;
+
+/// Where `FeFont_Big` sits in the atlas's font list, or `usize::MAX` while the game's fonts are
+/// not loaded. `FeFont_Small` is font 0, the default every panel draws with.
+static BIG_FONT: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+/// `FeFont_Big`, the game's title face, for a panel to push around its title. `None` when the
+/// panels fell back to imgui's default font.
+#[must_use]
+pub fn big_font(ui: &Ui) -> Option<FontId> {
+    let index = BIG_FONT.load(Ordering::Acquire);
+    ui.fonts().fonts().get(index).copied()
+}
+
+/// The game's palette and square corners, pushed onto imgui's own widgets for as long as this
+/// lives. For a panel built from imgui windows and widgets rather than the draw list.
+pub struct GameStyle<'ui> {
+    _colors: Vec<hudhook::imgui::ColorStackToken<'ui>>,
+    _vars: Vec<hudhook::imgui::StyleStackToken<'ui>>,
+}
+
+/// Push [`GameStyle`]: `ds2_overlay::style`'s colours on every imgui widget colour a panel uses,
+/// and no rounding anywhere.
+#[must_use]
+pub fn game_style(ui: &Ui) -> GameStyle<'_> {
+    use crate::style::{
+        ASH, BRONZE, BRONZE_DIM, INK_1, INK_2, PANEL_BG, SLATE, SLATE_EDIT, TEXT, with_alpha,
+    };
+    use hudhook::imgui::{StyleColor as C, StyleVar as V};
+    let colors = [
+        (C::WindowBg, PANEL_BG),
+        (C::ChildBg, with_alpha(INK_1, 0.0)),
+        (C::PopupBg, PANEL_BG),
+        (C::Border, BRONZE),
+        (C::TitleBg, INK_1),
+        (C::TitleBgActive, INK_2),
+        (C::TitleBgCollapsed, INK_1),
+        (C::Text, TEXT),
+        (C::TextDisabled, BRONZE),
+        (C::FrameBg, SLATE),
+        (C::FrameBgHovered, SLATE_EDIT),
+        (C::FrameBgActive, SLATE_EDIT),
+        (C::Button, INK_1),
+        (C::ButtonHovered, INK_2),
+        (C::ButtonActive, INK_2),
+        (C::Header, INK_2),
+        (C::HeaderHovered, INK_2),
+        (C::HeaderActive, INK_2),
+        (C::CheckMark, BRONZE),
+        (C::SliderGrab, BRONZE_DIM),
+        (C::SliderGrabActive, BRONZE),
+        (C::ScrollbarBg, with_alpha(INK_1, 0.6)),
+        (C::ScrollbarGrab, BRONZE_DIM),
+        (C::ScrollbarGrabHovered, BRONZE),
+        (C::ScrollbarGrabActive, BRONZE),
+        (C::Separator, BRONZE_DIM),
+        (C::TextSelectedBg, crate::style::TEXT_SELECTION),
+        (C::ResizeGrip, with_alpha(ASH, 0.4)),
+    ];
+    let vars = [
+        V::WindowRounding(0.0),
+        V::ChildRounding(0.0),
+        V::FrameRounding(0.0),
+        V::PopupRounding(0.0),
+        V::ScrollbarRounding(0.0),
+        V::GrabRounding(0.0),
+        V::WindowBorderSize(crate::style::FRAME_PX),
+    ];
+    GameStyle {
+        _colors: colors
+            .into_iter()
+            .map(|(which, colour)| ui.push_style_color(which, colour))
+            .collect(),
+        _vars: vars.into_iter().map(|v| ui.push_style_var(v)).collect(),
+    }
+}
+
+/// How tall [`title`] draws, for a panel laying out before it draws.
+#[must_use]
+pub fn title_height(ui: &Ui) -> f32 {
+    let _big = big_font(ui).map(|id| ui.push_font(id));
+    ui.current_font_size()
+}
+
+/// How wide [`title`] draws `text`.
+#[must_use]
+pub fn title_width(ui: &Ui, text: &str) -> f32 {
+    let _big = big_font(ui).map(|id| ui.push_font(id));
+    ui.calc_text_size(text)[0]
+}
+
+/// Draw a panel title at `pos` in `FeFont_Big` (the default font when the game's fonts did not
+/// load). Answers the height it took, so the caller can move down by it.
+pub fn title(
+    ui: &Ui,
+    list: &hudhook::imgui::DrawListMut<'_>,
+    pos: [f32; 2],
+    colour: [f32; 4],
+    text: &str,
+) -> f32 {
+    let _big = big_font(ui).map(|id| ui.push_font(id));
+    list.add_text(pos, colour, text);
+    ui.current_font_size()
+}
+
+/// Draw a key-help bar from `origin`, stopping before `right`. Answers the height it took.
+///
+/// Each entry is a framed button name, then its verb: the player reads a button and a word, not a
+/// sentence (docs/DS2-UI-DESIGN.md).
+pub fn hint_bar(
+    ui: &Ui,
+    list: &hudhook::imgui::DrawListMut<'_>,
+    origin: [f32; 2],
+    right: f32,
+    entries: &[(&str, &str)],
+) -> f32 {
+    let line = ui.current_font_size();
+    let pad = (line * 0.2).round();
+    let gap = (line * 0.9).round();
+    let mut x = origin[0];
+    for (button, verb) in entries {
+        let button_w = ui.calc_text_size(button)[0] + pad * 2.0;
+        let verb_w = ui.calc_text_size(verb)[0];
+        if x + button_w + pad + verb_w > right {
+            break;
+        }
+        list.add_rect(
+            [x, origin[1] - 1.0],
+            [x + button_w, origin[1] + line + 1.0],
+            crate::style::BRONZE,
+        )
+        .thickness(crate::style::FRAME_PX)
+        .build();
+        list.add_text([x + pad, origin[1]], crate::style::BRONZE, button);
+        x += button_w + pad;
+        list.add_text([x, origin[1]], crate::style::TEXT, verb);
+        x += verb_w + gap;
+    }
+    line + 2.0
+}
+
+/// The folder holding `DarkSoulsII.exe`, which is this process's executable.
+fn game_dir() -> Option<std::path::PathBuf> {
+    std::env::current_exe().ok()?.parent().map(Into::into)
+}
+
+/// Load `FeFont_Small` then `FeFont_Big` into imgui's atlas, so every panel draws in the game's
+/// typeface at its own sizes (line heights 28 and 41). Answers how many glyphs went in, or why
+/// nothing did; on failure the atlas is left as it was.
+///
+/// Each face is an imgui font with an empty glyph range, filled with one custom-rect glyph per
+/// game glyph (imgui 1.89's `AddCustomRectFontGlyph`). The atlas is built here, and the game's
+/// pixels are copied into the RGBA32 buffer that hudhook's `setup_fonts` then uploads as it is:
+/// `build_rgba32_texture` does not rebuild an atlas that already has its pixels.
+fn install_game_fonts(ctx: &mut Context) -> Result<usize, String> {
+    use hudhook::imgui::internal::RawCast;
+    use hudhook::imgui::sys;
+
+    /// A range holding only the space, so the placeholder font imgui builds under each face
+    /// rasterises one glyph; the custom glyphs replace even that one.
+    static SPACE_ONLY: [u32; 3] = [0x20, 0x20, 0];
+
+    let dir = game_dir().ok_or("no executable path")?;
+    let small =
+        fefont::load(&dir, FaceName::Small, fefont::latin).map_err(|e| format!("Small: {e}"))?;
+    let big = fefont::load(&dir, FaceName::Big, fefont::latin).map_err(|e| format!("Big: {e}"))?;
+
+    let fonts = ctx.fonts();
+    let mut ids = Vec::with_capacity(2);
+    for face in [&small, &big] {
+        ids.push(fonts.add_font(&[FontSource::DefaultFontData {
+            config: Some(FontConfig {
+                size_pixels: f32::from(face.line_height),
+                glyph_ranges: FontGlyphRanges::from_slice(&SPACE_ONLY),
+                ..FontConfig::default()
+            }),
+        }]));
+    }
+    // SAFETY: `fonts` is the context's live atlas; imgui-rs's `FontAtlas` and `Font` are
+    // `RawCast` views of the same `ImFontAtlas`/`ImFont`, which the calls below take by pointer.
+    let atlas: *mut sys::ImFontAtlas = unsafe { fonts.raw_mut() };
+    let mut rects = Vec::new();
+    for (face, id) in [&small, &big].into_iter().zip(&ids) {
+        let font = fonts.get_font(*id).ok_or("font vanished from the atlas")?;
+        // SAFETY: as above; the pointer is only handed back to imgui.
+        let raw = unsafe { font.raw() as *const sys::ImFont as *mut sys::ImFont };
+        for glyph in &face.glyphs {
+            // SAFETY: `atlas` and `raw` are live; imgui copies the arguments.
+            let rect = unsafe {
+                sys::ImFontAtlas_AddCustomRectFontGlyph(
+                    atlas,
+                    raw,
+                    glyph.code,
+                    i32::from(glyph.width()),
+                    i32::from(glyph.height()),
+                    glyph.pen_step() as f32,
+                    sys::ImVec2 {
+                        x: f32::from(glyph.pre_space),
+                        y: 0.0,
+                    },
+                )
+            };
+            rects.push((rect, face, *glyph));
+        }
+    }
+    // SAFETY: a live atlas with every font and custom rect registered.
+    if !unsafe { sys::ImFontAtlas_Build(atlas) } {
+        return Err("ImFontAtlas_Build failed".into());
+    }
+    let (mut pixels, mut width, mut height, mut bpp) = (core::ptr::null_mut(), 0, 0, 0);
+    // SAFETY: the atlas is built; imgui hands back its own RGBA32 buffer.
+    unsafe {
+        sys::ImFontAtlas_GetTexDataAsRGBA32(atlas, &mut pixels, &mut width, &mut height, &mut bpp);
+    }
+    if pixels.is_null() || bpp != 4 {
+        return Err(format!("atlas pixels unavailable (bpp {bpp})"));
+    }
+    let (width, height) = (width as usize, height as usize);
+    // SAFETY: imgui owns `width * height * 4` bytes at `pixels` until the atlas is cleared.
+    let atlas_px = unsafe { core::slice::from_raw_parts_mut(pixels, width * height * 4) };
+    for (index, face, glyph) in &rects {
+        // SAFETY: `index` came from `AddCustomRectFontGlyph` on this atlas.
+        let rect = unsafe { &*sys::ImFontAtlas_GetCustomRectByIndex(atlas, *index) };
+        let page = &face.pages[glyph.page];
+        let (gw, gh) = (usize::from(glyph.width()), usize::from(glyph.height()));
+        let (dx, dy) = (usize::from(rect.X), usize::from(rect.Y));
+        if dx + gw > width || dy + gh > height {
+            return Err("a packed glyph lies outside the atlas".into());
+        }
+        for row in 0..gh {
+            let src =
+                ((usize::from(glyph.rect[1]) + row) * page.width + usize::from(glyph.rect[0])) * 4;
+            let dst = ((dy + row) * width + dx) * 4;
+            atlas_px[dst..dst + gw * 4].copy_from_slice(&page.rgba[src..src + gw * 4]);
+        }
+    }
+    BIG_FONT.store(1, Ordering::Release);
+    Ok(rects.len())
+}
 
 /// Register a panel. `true` when it is registered now, including when `draw` already was;
 /// `false` when every slot holds some other panel.
@@ -126,17 +366,27 @@ struct Panels;
 
 impl ImguiRenderLoop for Panels {
     fn initialize<'a>(&'a mut self, ctx: &mut Context, _render_context: &'a mut dyn RenderContext) {
-        ctx.fonts().add_font(&[FontSource::DefaultFontData {
-            config: Some(FontConfig {
-                size_pixels: FONT_SIZE_PX,
-                ..FontConfig::default()
-            }),
-        }]);
+        match install_game_fonts(ctx) {
+            Ok(glyphs) => log(format_args!(
+                "panels: hudhook render loop initialized (the game's FeFont_Small 28px default, \
+                 FeFont_Big 41px for titles, {glyphs} glyphs)"
+            )),
+            Err(why) => {
+                ctx.fonts().clear();
+                ctx.fonts().add_font(&[FontSource::DefaultFontData {
+                    config: Some(FontConfig {
+                        size_pixels: FONT_SIZE_PX,
+                        ..FontConfig::default()
+                    }),
+                }]);
+                log(format_args!(
+                    "panels: hudhook render loop initialized (imgui's default font {FONT_SIZE_PX}px: \
+                     the game's fonts did not load: {why})"
+                ));
+            }
+        }
         // Keep imgui's `imgui.ini` out of the game directory.
         ctx.set_ini_filename(None);
-        log(format_args!(
-            "panels: hudhook render loop initialized (font {FONT_SIZE_PX}px)"
-        ));
     }
 
     /// Hand imgui the overlay's cursor while a panel built from imgui widgets asks for it.

@@ -91,7 +91,7 @@ impl Panel {
                 if crate::install::submit(job) {
                     self.phase = Phase::Fetching;
                     self.status = Some(Status {
-                        headline: "FETCHING".to_owned(),
+                        headline: "Fetching".to_owned(),
                         detail: format!("build {build_id} from {host}"),
                         warn: false,
                     });
@@ -99,9 +99,8 @@ impl Panel {
                     // Another fetch holds the session. Put the link back rather than lose it.
                     self.editor = Editor::with_text(&url);
                     self.status = Some(Status {
-                        headline: "BUSY".to_owned(),
-                        detail: "a build is still being fetched -- try again in a moment"
-                            .to_owned(),
+                        headline: "Busy".to_owned(),
+                        detail: "Another build is still being fetched.".to_owned(),
                         warn: true,
                     });
                 }
@@ -113,7 +112,7 @@ impl Panel {
                 ));
                 self.editor = Editor::with_text(&text);
                 self.status = Some(Status {
-                    headline: crate::flow::short_rejection(rejection).to_uppercase(),
+                    headline: crate::flow::short_rejection(rejection).to_owned(),
                     detail: rejection.to_string(),
                     warn: true,
                 });
@@ -252,8 +251,8 @@ pub(crate) fn finished(result: &Result<String, String>, link: &str) {
             panel.editor = Editor::with_text(link);
             panel.phase = Phase::Open;
             panel.status = Some(Status {
-                headline: reason.to_uppercase(),
-                detail: "fix the link and press Enter, or close".to_owned(),
+                headline: reason.to_string(),
+                detail: String::new(),
                 warn: true,
             });
         }
@@ -320,10 +319,21 @@ const CELL_BG: [f32; 4] = style::INK_1;
 const FOCUS_EDGE: [f32; 4] = style::BRONZE;
 const PAD: f32 = 14.0;
 
-const PANEL_TITLE: &str = "Load Build from URL";
-const PANEL_SUBTITLE: &str = "Paste or type a soulsplanner.com or mugenmonkey.com build link";
-const KEY_HINT: &str = "Enter load   Esc close   Ctrl+V paste   Ctrl+Backspace clear";
-const PAD_HINT: &str = "pad: A load   B close   Y paste   X clear";
+const PANEL_TITLE: &str = "Load Build";
+const PANEL_SUBTITLE: &str = "soulsplanner or mugenmonkey link";
+/// The key help, one button and one word each, for the keyboard and for the pad.
+const KEY_HINT: [(&str, &str); 4] = [
+    ("Enter", "Load"),
+    ("Ctrl+V", "Paste"),
+    ("Ctrl+Backspace", "Clear"),
+    ("Esc", "Close"),
+];
+const PAD_HINT: [(&str, &str); 4] = [
+    ("A", "Load"),
+    ("Y", "Paste"),
+    ("X", "Clear"),
+    ("B", "Close"),
+];
 
 /// The panel's draw function, called by `ds2-overlay` once per frame.
 fn draw(ui: &Ui) {
@@ -342,16 +352,19 @@ fn draw(ui: &Ui) {
     let width = (display[0] * 0.5)
         .clamp(560.0, 960.0)
         .min(display[0] - 32.0);
-    // Title, subtitle, banner (two lines), field, buttons, two hint lines.
+    // Title (the game's big face), subtitle, banner (two lines), field, buttons, the hint bar.
+    let title_line = ds2_overlay::panels::title_height(ui);
     let height = PAD * 2.0
-        + line * 2.0
+        + title_line
+        + line
         + 10.0
         + (line * 2.0 + 12.0)
         + field_height
         + 14.0
         + (line + 10.0)
         + 12.0
-        + line * 2.0;
+        + line
+        + 2.0;
     let left = (display[0] - width) * 0.5;
     let top = (display[1] - height) * 0.5;
 
@@ -380,8 +393,8 @@ fn draw(ui: &Ui) {
     let inner_left = left + PAD;
     let inner_right = left + width - PAD;
     let mut y = top + PAD;
-    list.add_text([inner_left, y], TITLE, PANEL_TITLE);
-    let close_label = "[ close ]";
+    let title_line = ds2_overlay::panels::title(ui, &list, [inner_left, y], TITLE, PANEL_TITLE);
+    let close_label = "Close";
     let close_width = ui.calc_text_size(close_label)[0];
     let close_min = [inner_right - close_width, y];
     let close_max = [inner_right, y + line];
@@ -394,7 +407,7 @@ fn draw(ui: &Ui) {
     if close_hover && clicked {
         press = Some(Press::Close);
     }
-    y += line + 2.0;
+    y += title_line + 2.0;
     list.add_text([inner_left, y], DIM, PANEL_SUBTITLE);
     y += line + 10.0;
 
@@ -487,17 +500,13 @@ fn draw(ui: &Ui) {
     }
     y += line + 10.0 + 12.0;
 
-    // The footer.
-    list.add_text(
-        [inner_left, y],
-        DIM,
-        clip(ui, KEY_HINT, inner_right - inner_left),
-    );
-    list.add_text(
-        [inner_left, y + line],
-        DIM,
-        clip(ui, PAD_HINT, inner_right - inner_left),
-    );
+    // The footer: the buttons of the device the player is on.
+    let hints = if panel.reader.pad_last() {
+        &PAD_HINT
+    } else {
+        &KEY_HINT
+    };
+    ds2_overlay::panels::hint_bar(ui, &list, [inner_left, y], inner_right, hints);
 
     if ui.is_mouse_clicked(MouseButton::Right) {
         press = Some(Press::Close);

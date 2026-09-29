@@ -774,6 +774,7 @@ dependencies = [
  "ds2-hook",
  "ds2-rva",
  "hudhook",
+ "miniz_oxide 0.8.9",
  "windows",
 ]
 

@@ -18,6 +18,7 @@
 //! switched off nor draw beside the selector. [`install`] is idempotent and every feature that
 //! draws calls it.
 
+pub mod fefont;
 pub mod frame_hook;
 pub mod game_hud;
 mod log;

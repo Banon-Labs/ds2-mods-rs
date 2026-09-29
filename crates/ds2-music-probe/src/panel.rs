@@ -195,6 +195,8 @@ fn draw(ui: &Ui) {
             (clamped != [x, y]).then_some(clamped)
         })
     };
+    // The game's palette and square corners on every widget below (docs/DS2-UI-DESIGN.md).
+    let _style = ds2_overlay::panels::game_style(ui);
     let mut window = ui
         .window("Music")
         .position([MARGIN * scale, MARGIN * scale], Condition::FirstUseEver)
@@ -205,7 +207,7 @@ fn draw(ui: &Ui) {
         window = window.position(place, Condition::Always);
     }
     window.build(|| {
-        ui.set_window_font_scale(scale);
+        // No font scale: the panels draw the game's own FeFont at its own size.
         let (pos, size) = (ui.window_pos(), ui.window_size());
         state.last = Some((pos, size));
         let frame = FRAMES.fetch_add(1, Ordering::Relaxed);
@@ -224,7 +226,7 @@ fn draw(ui: &Ui) {
 }
 
 fn body(ui: &Ui, snapshot: &Snapshot, state: &mut PanelState) {
-    ui.text_disabled("F10 or Esc closes this window.");
+    ui.text_disabled("F10 or Esc: Close");
     match &snapshot.now {
         Some(key) => ui.text(format!(
             "Now playing: {key}  ({})",

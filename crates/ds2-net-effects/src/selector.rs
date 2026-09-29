@@ -308,7 +308,7 @@ impl Selector {
 }
 
 /// The title on the bar's header.
-pub const TITLE: &str = "DS2 NET EFFECTS";
+pub const TITLE: &str = "Net Effects";
 
 /// One line of the bar, with how it should be coloured.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -359,7 +359,7 @@ pub fn view(
     }
     if catalog.is_empty() {
         lines.push(Line {
-            text: "(the catalog is empty)".to_string(),
+            text: "No effects in the catalog".to_string(),
             kind: LineKind::Hint,
         });
         return lines;
@@ -403,8 +403,7 @@ pub fn view(
         kind: LineKind::Hint,
     });
     lines.push(Line {
-        text: "Up/Down row  Left/Right page  Alt+' apply  Alt+M keep/unkeep  Alt+9 collapse"
-            .to_string(),
+        text: "Up/Down Row   Left/Right Page   Alt+' Apply   Alt+M Keep   Alt+9 Fold".to_string(),
         kind: LineKind::Hint,
     });
     lines

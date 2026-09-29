@@ -106,10 +106,12 @@ impl PickerStatusMessage {
         self.second_detail.as_deref()
     }
 
-    /// Every line after the headline, in order: one or two.
+    /// Every line after the headline, in order: none, one or two. An empty detail is no line --
+    /// most refusals are said in full by their headline (docs/DS2-UI-DESIGN.md).
     pub fn detail_lines(&self) -> Vec<&str> {
         std::iter::once(self.detail.as_str())
             .chain(self.second_detail.as_deref())
+            .filter(|line| !line.is_empty())
             .collect()
     }
 
@@ -151,56 +153,29 @@ impl PickRejection {
     /// What the picker puts on screen when this refusal happens.
     pub fn status_message(self) -> PickerStatusMessage {
         match self {
-            Self::NotAFile => PickerStatusMessage::new(
-                "SAVE NOT FOUND",
-                "That path is missing, or it is not a file. Choose another.",
-            ),
+            // Headlines in Title Case, the way the game words its own. A detail line only where
+            // the headline cannot be acted on alone (docs/DS2-UI-DESIGN.md).
+            Self::NotAFile => PickerStatusMessage::new("Save Not Found", ""),
             Self::WrongExtension => PickerStatusMessage::new(
-                "WRONG FILE TYPE",
-                format!("Choose a save: {}.", ds2_save_file_core::source::offered()),
+                "Wrong File Type",
+                format!("Saves: {}", ds2_save_file_core::source::offered()),
             ),
-            Self::Unreadable => PickerStatusMessage::new(
-                "SAVE UNREADABLE",
-                "The file is there, and it could not be read. Choose another.",
-            ),
-            Self::NotBnd4 => PickerStatusMessage::new(
-                "NOT A DARK SOULS II SAVE",
-                "That file is not a save container this can read. Choose another.",
-            ),
-            Self::NoLoadableCharacter => PickerStatusMessage::new(
-                "NO CHARACTER IN THAT SAVE",
-                "Every slot in that save is empty. Choose a save with a character in it.",
-            ),
-            Self::PathNotUtf8 => PickerStatusMessage::new(
-                "PATH NOT SUPPORTED",
-                "That path cannot be named safely by the save picker. Choose another.",
-            ),
-            Self::PathEmpty => {
-                PickerStatusMessage::new("PATH IS EMPTY", "Type a folder, like Z:\\home\\saves.")
+            Self::Unreadable => PickerStatusMessage::new("Save Unreadable", ""),
+            Self::NotBnd4 => PickerStatusMessage::new("Not a Dark Souls II Save", ""),
+            Self::NoLoadableCharacter => PickerStatusMessage::new("No Character in That Save", ""),
+            Self::PathNotUtf8 => PickerStatusMessage::new("Path Not Supported", ""),
+            Self::PathEmpty => PickerStatusMessage::new("Path Is Empty", "e.g. Z:\\home\\saves"),
+            Self::PathNotAbsolute => {
+                PickerStatusMessage::new("Absolute Path Required", "Start with C:\\, Z:\\ or /")
             }
-            Self::PathNotAbsolute => PickerStatusMessage::new(
-                "ABSOLUTE PATH REQUIRED",
-                "Start with a drive, like C:\\ or Z:\\, or with / for a Linux path.",
-            ),
-            Self::FolderNotFound => PickerStatusMessage::new(
-                "FOLDER NOT FOUND",
-                "Nothing is there, or it is a file. Check the path and try again.",
-            ),
-            Self::DestinationIsLive => PickerStatusMessage::new(
-                "THAT IS THE SAVE IN USE",
-                "The game is playing from that file. Choose another name or folder.",
-            ),
-            Self::NameEmpty => {
-                PickerStatusMessage::new("NAME IS EMPTY", "Type a name for the new save.")
-            }
+            Self::FolderNotFound => PickerStatusMessage::new("Folder Not Found", ""),
+            Self::DestinationIsLive => PickerStatusMessage::new("That Is the Save in Use", ""),
+            Self::NameEmpty => PickerStatusMessage::new("Name Is Empty", ""),
             Self::NameNotAllowed => PickerStatusMessage::new(
-                "NAME NOT ALLOWED",
-                "A name cannot hold \\ / : * ? \" < > | or end in a dot or a space.",
+                "Name Not Allowed",
+                "No \\ / : * ? \" < > |, and no dot or space at the end",
             ),
-            Self::NameIsFolder => PickerStatusMessage::new(
-                "A FOLDER HAS THAT NAME",
-                "Choose a name no folder here is using.",
-            ),
+            Self::NameIsFolder => PickerStatusMessage::new("A Folder Has That Name", ""),
         }
     }
 }
@@ -218,8 +193,9 @@ impl PickerOpenReason {
     /// The panel's title line.
     pub fn title(self) -> &'static str {
         match self {
-            Self::LoadCharacter => "LOAD CHARACTER FROM FILE",
-            Self::SaveToFile => "SAVE GAME TO FILE",
+            Self::LoadCharacter => "Load Character",
+            // The whole container is copied, all ten slots: a game, not one character.
+            Self::SaveToFile => "Save Game",
         }
     }
 }
@@ -420,7 +396,8 @@ mod tests {
     }
 
     /// Every refusal has to say something, and say something DIFFERENT -- two refusals sharing a
-    /// headline is two refusals the player cannot tell apart.
+    /// headline is two refusals the player cannot tell apart. And it says it briefly: a headline
+    /// of at most six words, a detail of at most twelve (docs/DS2-UI-DESIGN.md).
     #[test]
     fn every_refusal_has_its_own_words() {
         let mut headlines: Vec<String> = Vec::new();
@@ -430,7 +407,22 @@ mod tests {
                 !message.headline().is_empty(),
                 "{rejection:?} has no headline"
             );
-            assert!(!message.detail().is_empty(), "{rejection:?} has no detail");
+            // Words, not the symbols a name may not hold.
+            let words = |text: &str| {
+                text.split_whitespace()
+                    .filter(|w| w.chars().any(char::is_alphabetic))
+                    .count()
+            };
+            assert!(
+                words(message.headline()) <= 6,
+                "{rejection:?}: {}",
+                message.headline()
+            );
+            assert!(
+                words(message.detail()) <= 12,
+                "{rejection:?}: {}",
+                message.detail()
+            );
             headlines.push(message.headline().to_owned());
         }
         let mut unique = headlines.clone();
@@ -472,10 +464,16 @@ mod tests {
         );
     }
 
-    /// A banner has a headline and one or two detail lines, never more.
+    /// A banner has a headline and at most two detail lines. An empty detail is no line at all.
     #[test]
     fn a_banner_carries_at_most_two_detail_lines() {
-        let one = PickRejection::FolderNotFound.status_message();
+        assert!(
+            PickRejection::FolderNotFound
+                .status_message()
+                .detail_lines()
+                .is_empty()
+        );
+        let one = PickRejection::PathEmpty.status_message();
         assert_eq!(one.detail_lines().len(), 1);
         let two = one
             .with_second_detail("first")

@@ -34,7 +34,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use ds2_overlay::style;
 use ds2_save_picker_core::{
-    PickerActivation, PickerInput, PickerStatusMessage, PickerView, RowKind, SavePickerModel,
+    HintKey, PickerActivation, PickerInput, PickerStatusMessage, PickerView, RowKind,
+    SavePickerModel,
 };
 use hudhook::imgui::{MouseButton, Ui};
 
@@ -135,10 +136,10 @@ impl Panel {
         log_line(format_args!("{LOG_PREFIX} picker chose {outcome:?}"));
         self.model.set_status_message(PickerStatusMessage::new(
             match self.mode {
-                Mode::Load => "LOADING",
-                Mode::Save => "SAVING",
+                Mode::Load => "Loading",
+                Mode::Save => "Saving",
             },
-            "one moment",
+            "",
         ));
         self.outcome = Some(outcome);
         self.phase = Phase::Committing(0);
@@ -398,8 +399,8 @@ fn on_frame() {
                 panel.outcome = None;
                 panel.phase = Phase::Open;
                 panel.model.set_status_message(PickerStatusMessage::new(
-                    "NOTHING HAPPENED",
-                    "the pause menu closed before the pick reached it -- choose again",
+                    "Nothing Happened",
+                    "The pause menu closed first. Choose again.",
                 ));
                 panel.dirty();
             } else {
@@ -561,8 +562,10 @@ fn draw(ui: &Ui) {
     let left = (display[0] - width) * 0.5;
     let top = (display[1] - height) * 0.5;
 
-    // Rows the list area holds: the height, less the header, the banner and the footer.
-    let reserved = PAD * 2.0 + line * 2.0 + 10.0 + (line * 3.0 + 12.0) + (line + 10.0);
+    // Rows the list area holds: the height, less the header (a title in the game's big face and a
+    // subtitle), the banner and the footer.
+    let title_line = ds2_overlay::panels::title_height(ui);
+    let reserved = PAD * 2.0 + title_line + line + 10.0 + (line * 3.0 + 12.0) + (line + 10.0);
     let capacity = (((height - reserved) / row_height).floor() as usize).clamp(4, 30);
     if capacity != panel.capacity {
         panel.capacity = capacity;
@@ -601,8 +604,8 @@ fn draw(ui: &Ui) {
     let mut y = top + PAD;
     let inner_left = left + PAD;
     let inner_right = left + width - PAD;
-    list.add_text([inner_left, y], TITLE, &view.title);
-    let close_label = "[ close ]";
+    let title_line = ds2_overlay::panels::title(ui, &list, [inner_left, y], TITLE, &view.title);
+    let close_label = "Close";
     let close_width = ui.calc_text_size(close_label)[0];
     let close_min = [inner_right - close_width, y];
     let close_max = [inner_right, y + line];
@@ -612,7 +615,7 @@ fn draw(ui: &Ui) {
         if close_hover { TITLE } else { DIM },
         close_label,
     );
-    y += line + 2.0;
+    y += title_line + 2.0;
     list.add_text(
         [inner_left, y],
         DIM,
@@ -738,13 +741,15 @@ fn draw(ui: &Ui) {
         );
     }
 
-    // The footer.
+    // The footer: each control's button for the device the player is on, and a word.
     let footer_y = top + height - PAD - line;
-    list.add_text(
-        [inner_left, footer_y],
-        DIM,
-        clip(ui, view.hint, inner_right - inner_left),
-    );
+    let pad = panel.reader.pad_last();
+    let hints: Vec<(&str, &str)> = view
+        .hint
+        .iter()
+        .map(|h| (button_name(h.key, pad), h.verb))
+        .collect();
+    ds2_overlay::panels::hint_bar(ui, &list, [inner_left, footer_y], inner_right, &hints);
 
     if !panel_is_open(panel.phase) {
         return;
@@ -766,6 +771,20 @@ fn draw(ui: &Ui) {
     }
     if let Some(input) = click {
         panel.apply(input);
+    }
+}
+
+/// What a hint's control is called on the pad (`picker_input`'s `PAD_BUTTONS`) or the keyboard.
+fn button_name(key: HintKey, pad: bool) -> &'static str {
+    match (key, pad) {
+        (HintKey::Confirm, true) => "A",
+        (HintKey::Back, true) => "B",
+        (HintKey::LeftRight, true) => "D-pad",
+        (HintKey::Tab, true) => "Y",
+        (HintKey::Confirm, false) => "Enter",
+        (HintKey::Back, false) => "Backspace",
+        (HintKey::LeftRight, false) => "Left/Right",
+        (HintKey::Tab, false) => "Tab",
     }
 }
 

@@ -1601,8 +1601,9 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
 
     // Header.
     let mut y = top + PAD;
-    canvas.text([inner, y], TITLE, "Build Recommender");
-    let close = "[ close ]";
+    let title = "Recommender";
+    let title_line = ds2_overlay::panels::title(ui, &canvas.list, [inner, y], TITLE, title);
+    let close = "Close";
     let close_x = right - canvas.width(close) - 16.0;
     canvas.button(
         close_x,
@@ -1612,16 +1613,26 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
         Some(Action::Close),
         Some(Control::Close),
     );
-    y += line + 4.0;
+    // No `ds2-build-recommender.dat` beside the game: every number is the stub's placeholder.
     if backend().is_stub() {
-        canvas.text(
-            [inner, y],
-            WARN,
-            "Stub backend: no ds2-build-recommender.dat beside the game, so every number here is a \
-             placeholder.",
-        );
-        y += line + 6.0;
+        let tag = "Placeholder data";
+        let at = [
+            inner + ds2_overlay::panels::title_width(ui, title) + GAP * 2.0,
+            y + (title_line - line) * 0.5,
+        ];
+        let size = [canvas.width(tag) + 16.0, line + 4.0];
+        canvas
+            .list
+            .add_rect(
+                [at[0], at[1] - 2.0],
+                [at[0] + size[0], at[1] + size[1] - 2.0],
+                style::RUST,
+            )
+            .filled(true)
+            .build();
+        canvas.text([at[0] + 8.0, at[1]], TEXT, tag);
     }
+    y += title_line + 4.0;
 
     // The nine stats.
     let number_width = canvas.width("999") + 16.0;
@@ -1751,12 +1762,10 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
     // Calibration.
     let calibration = panel.calibration;
     let calibration_text = if calibration.n == 0 {
-        "calibration: none yet -- the stub has no corpus to check its infusion picks against"
-            .to_owned()
+        "Infusion picks: not yet checked against real builds".to_owned()
     } else {
         format!(
-            "calibration: the best infusion matched real builds {:.0}% of the time, top two {:.0}% \
-             (n={})",
+            "Infusion picks match real builds: {:.0}%, top two {:.0}% (n={})",
             calibration.top1 * 100.0,
             calibration.top2 * 100.0,
             calibration.n
@@ -1855,17 +1864,28 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
     if let Some(status) = &panel.status {
         canvas.text([x, footer_y + 4.0], GOOD, &clip(ui, status, right - x));
     }
-    canvas.text(
-        [inner, hint_y],
-        DIM,
-        &clip(
-            ui,
-            "D-pad/arrows move, A/Enter presses; on a number Left/Right step 1, Up/Down 10; in a \
-             list Up/Down, LB/RB page; B/Esc backs out, then closes. Keys can also type a weapon \
-             name.",
-            right - inner,
-        ),
-    );
+    // Key help, one button and one word each, for the device the player is on. Letters type a
+    // weapon name too; that is what the weapon field's placeholder says.
+    const PAD_HINT: [(&str, &str); 5] = [
+        ("D-pad", "Move"),
+        ("A", "Select"),
+        ("Left/Right", "Step 1"),
+        ("LB RB", "Page"),
+        ("B", "Back"),
+    ];
+    const KEY_HINT: [(&str, &str); 5] = [
+        ("Arrows", "Move"),
+        ("Enter", "Select"),
+        ("Left/Right", "Step 1"),
+        ("PgUp PgDn", "Page"),
+        ("Esc", "Back"),
+    ];
+    let hints = if panel.reader.pad_last() {
+        &PAD_HINT
+    } else {
+        &KEY_HINT
+    };
+    ds2_overlay::panels::hint_bar(ui, &canvas.list, [inner, hint_y], right, hints);
 
     // The open list, over everything else.
     let mut list_rect = None;
@@ -2017,20 +2037,18 @@ fn draw_options(panel: &Panel, canvas: &mut Canvas<'_>, x: f32, y: f32) -> f32 {
                 panel.state.weapon.is_some().then_some(Action::BestInfusion),
                 Some(Control::BestInfusion),
             ) + GAP;
+            // The fields above already say which weapon, infusion, objective and grip; only the
+            // grip's effect on strength is not on screen.
             let text = if panel.state.weapon.is_some() {
-                format!(
-                    "the weapon, infusion, objective and grip above ({}), at SL {}",
-                    if panel.state.grip.two_handed() {
-                        "two-handed: STR requirement halved"
-                    } else {
-                        "one-handed: full STR requirement"
-                    },
-                    panel.state.sl()
-                )
+                if panel.state.grip.two_handed() {
+                    "2H: STR requirement halved"
+                } else {
+                    "1H: full STR requirement"
+                }
             } else {
-                "choose a weapon above".to_owned()
+                "Choose a weapon above"
             };
-            canvas.text([x, y + 4.0], DIM, &text);
+            canvas.text([x, y + 4.0], DIM, text);
         }
         Mode::MinimumForWeapon => {
             x = canvas.check(
@@ -2144,7 +2162,7 @@ fn draw_answer(panel: &mut Panel, canvas: &mut Canvas<'_>, (min, max): ([f32; 2]
             let refusal = refusal.clone();
             draw_refusal(
                 canvas,
-                "Optimize for weapon found no build:",
+                "Optimize found no build:",
                 &refusal.lines,
                 &refusal.fixes,
                 (min, max),
@@ -2547,34 +2565,24 @@ fn draw_confirm(
         .count()
         + extras.len();
     let lines = [
-        (
-            TITLE,
-            format!(
-                "Apply {} SL {} to the character you are playing?",
-                build.class, build.sl
-            ),
-        ),
+        (TITLE, format!("Apply {} SL {}?", build.class, build.sl)),
         (
             WARN,
             format!(
-                "Soul memory is raised to what soul level {} needs. That cannot be undone.",
+                "Soul memory rises to SL {}. This cannot be undone.",
                 build.sl
             ),
         ),
         (
             TEXT,
             format!(
-                "The nine stats are rewritten and the starting class becomes {}; a build below \
-                 this character keeps both.",
+                "Stats and class become {}'s, unless the build is lower.",
                 build.class
             ),
         ),
         (
             TEXT,
-            format!(
-                "Up to {grants} items are granted and the build's gear is equipped; what you \
-                 already hold is not granted again."
-            ),
+            format!("Grants up to {grants} items you lack, and equips the gear."),
         ),
     ];
     let width = lines
