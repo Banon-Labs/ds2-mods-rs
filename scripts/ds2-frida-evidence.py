@@ -15,6 +15,14 @@ names that log and the crate whose line it quotes:
         --log "$GAME/ds2-loader.log" \
         --line "<a line ds2-menu-row wrote in this run, verbatim>"
 
+A failed `scripts/check.sh` run (the fourth instrument, 2026-09-29 -- see `record_check`) names
+its log and the line the gate printed:
+
+    python3 scripts/ds2-frida-evidence.py --record-check \
+        --crate ds2-build-recommender-core \
+        --log <a failed check.sh log, local or `gh run view <id> --log-failed`> \
+        --line "crates/ds2-build-recommender-core/src/corpus.rs:2319: allow with no ..."
+
 # Why this exists
 
 User directive 2026-09-16, after the agent tore the game down twice and ran two build/relaunch
@@ -412,6 +420,174 @@ def record_build(repo: pathlib.Path, crate: str, log: str, line: str) -> int:
     return 0
 
 
+# --- the fourth instrument: the repo gate ----------------------------------------------------
+#
+# Added 2026-09-29 (PR #273, fix/ring-slots). CI failed in `scripts/check.sh`'s "lint allows"
+# section on
+#
+#     crates/ds2-build-recommender-core/src/corpus.rs:2319: allow with no `# DEBT: <issue>` comment above it
+#
+# and the fix is one comment line above the allow. Frida reaches the game, telemetry reaches a
+# running DLL, the build reaches the compiler; none of them measures a gate failure, and a comment
+# the gate demands changes no build and no run, so there is nothing for them to see. The gate
+# itself is the instrument, and its measurement is the line it printed. The conditions:
+#
+#   * the quoted line is a WHOLE line of the log (after a GitHub Actions `job<TAB>step<TAB>time `
+#     prefix is taken off, so a `gh run view --log-failed` download works as it came);
+#   * that line sits under a `== <section> ==` header check.sh printed, in the same job, and no
+#     later section header follows it -- check.sh is `set -e`, so the section that failed is the
+#     last one it started;
+#   * the log proves the run failed: after the line, in the same job, a failure summary a check.sh
+#     step prints only on its way to a nonzero exit, or the Actions runner's own
+#     `##[error]Process completed with exit code N` -- and no `== OK ==` anywhere in that job;
+#   * the line names a path under `crates/<crate>/`, so the crate it opens is the one the gate
+#     blamed, not the one the agent names;
+#   * the log is newer than the last committed Rust change, as for the other three instruments;
+#   * it opens that one crate and nothing else.
+
+# `job<TAB>step<TAB>2026-09-29T02:11:48.7819539Z ` -- the prefix `gh run view --log` puts on a line.
+ACTIONS_PREFIX = re.compile(r"\A([^\t\n]*)\t([^\t\n]*)\t\d{4}-\d\d-\d\dT[\d:.]+Z ?")
+CHECK_SECTION = re.compile(r"\A== (.+) ==\Z")
+CHECK_PASSED = "== OK =="
+# What a check.sh step prints only when it is about to fail the gate, and the runner's own verdict.
+CHECK_FAILED = re.compile(
+    r"\A(?:"
+    r"##\[error\]Process completed with exit code [1-9]\d*\.?"
+    r"|\d+ unaccounted lint allow\(s\)"
+    r"|\[check-fresh-run-logs\] FAIL:"
+    r"|FAILED: \S"
+    r"|error: could not compile"
+    r"|error(?:\[E\d{4}\])?: \S"
+    r"|Diff in \S"
+    r"|\S+ is named in a comment and does not exist"
+    r")"
+)
+
+
+def _check_lines(body: str) -> list[tuple[str, str]]:
+    """Each line as (stream, text): the Actions job/step it came from ("" locally), stripped."""
+    out: list[tuple[str, str]] = []
+    for raw in body.splitlines():
+        found = ACTIONS_PREFIX.match(raw)
+        if found:
+            out.append((f"{found.group(1)}\t{found.group(2)}", raw[found.end() :].strip()))
+        else:
+            out.append(("", raw.strip()))
+    return out
+
+
+def _named_crates(text: str) -> set[str]:
+    """The crates a line names by a `crates/<crate>/...` path."""
+    return set(re.findall(r"(?<![\w.-])crates/([A-Za-z0-9_-]+)/\S", text))
+
+
+def record_check(repo: pathlib.Path, crate: str, log: str, line: str) -> int:
+    """Append a gate-failure record, after proving a failed check.sh run blamed a file in `crate`."""
+    if not CRATE_NAME.match(crate):
+        print(f"refused: crate name {crate!r} is not a bare `[A-Za-z0-9_-]+` directory name")
+        return 2
+    crate_dir = repo / "crates" / crate
+    if not crate_dir.is_dir():
+        print(f"refused: {crate_dir} is not a crate in this workspace")
+        return 2
+    if "\n" in line.strip() or "\r" in line:
+        print("refused: quote one line of the log, not several")
+        return 2
+    quoted = line.strip()
+    prefix = ACTIONS_PREFIX.match(quoted)
+    if prefix:
+        quoted = quoted[prefix.end() :].strip()
+    if len(quoted) < MIN_TELEMETRY_LINE:
+        print(
+            f"refused: the quoted line is {len(quoted)} characters, "
+            f"under the {MIN_TELEMETRY_LINE} a verbatim check needs to mean anything"
+        )
+        return 2
+    if CHECK_SECTION.match(quoted) or CHECK_FAILED.match(quoted):
+        print("refused: quote the line that names the defect, not a section header or a summary")
+        return 2
+    named = _named_crates(quoted)
+    if crate not in named:
+        print(
+            f"refused: that line names {', '.join(sorted(named)) or 'no path under crates/'}, "
+            f"not crates/{crate}/ -- the gate decides which crate it blamed"
+        )
+        return 2
+
+    log_file = pathlib.Path(log).expanduser()
+    try:
+        body = log_file.read_text(encoding="utf-8", errors="replace")
+    except OSError as err:
+        print(f"refused: cannot read {log_file}: {err}")
+        return 2
+    lines = _check_lines(body)
+    hits = [i for i, (_, text) in enumerate(lines) if text == quoted]
+    if not hits:
+        print(
+            f"refused: no line of {log_file} is that line, whole -- quote it as check.sh "
+            f"printed it, not a fragment of it"
+        )
+        return 2
+
+    why = ""
+    failed_run = False
+    for hit in hits:
+        stream = lines[hit][0]
+        same = [(i, text) for i, (s, text) in enumerate(lines) if s == stream]
+        if any(text == CHECK_PASSED for _, text in same):
+            why = f"that job printed `{CHECK_PASSED}`, so check.sh passed"
+            continue
+        sections = [i for i, text in same if CHECK_SECTION.match(text)]
+        if not any(i < hit for i in sections):
+            why = "the line sits under no `== <section> ==` header, so check.sh did not print it"
+            continue
+        if any(i > hit for i in sections):
+            why = (
+                "a later `== <section> ==` header follows it, so the section it is in passed "
+                "(check.sh is `set -e` and stops at the section that fails)"
+            )
+            continue
+        if not any(i > hit and CHECK_FAILED.match(text) for i, text in same):
+            why = (
+                "nothing after it says the run failed -- no failure summary and no "
+                "`##[error]Process completed with exit code N`"
+            )
+            continue
+        failed_run = True
+        break
+    if not failed_run:
+        print(f"refused: {log_file} is not a failed check.sh run blaming that line: {why}")
+        return 2
+
+    try:
+        written = int(log_file.stat().st_mtime)
+    except OSError as err:
+        print(f"refused: cannot stat {log_file}: {err}")
+        return 2
+    head = head_commit_time(repo)
+    if head is not None and written <= head:
+        print(
+            f"refused: {log_file} was last written before the newest committed Rust change, "
+            f"so it measured code that is already committed"
+        )
+        return 2
+
+    path = log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    row = {
+        "at": int(time.time()),
+        "kind": "check",
+        "crate": crate,
+        "log": str(log_file),
+        "line": " ".join(quoted.split()),
+        "written": written,
+    }
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row) + "\n")
+    print(f"frida-evidence: recorded {row}")
+    return 0
+
+
 def newest_record(path: pathlib.Path) -> dict | None:
     """The last well-formed record, or `None`.
 
@@ -445,7 +621,7 @@ def check(repo: pathlib.Path) -> int:
 
     head = head_commit_time(repo)
     kind = row.get("kind")
-    if kind in ("telemetry", "build"):
+    if kind in ("telemetry", "build", "check"):
         if head is not None and int(row.get("at", 0)) <= head:
             print(
                 "UNPROVEN spent-by-commit the last measurement predates HEAD, so it belongs to "
@@ -666,6 +842,104 @@ def selftest() -> int:
             stale = record_build(git_repo, "demo-path", str(stale_log), lld_error)
         ok("a build log older than the last committed Rust change is refused", stale == 2)
 
+        # --- the fourth instrument: a failed check.sh run --------------------------------
+        #
+        # Shaped on PR #273's CI log, as `gh run view --log-failed` printed it.
+        (fake_repo / "crates" / "demo-core").mkdir(parents=True)
+        (fake_repo / "crates" / "demo").mkdir(parents=True)
+        allow_line = (
+            "crates/demo-core/src/corpus.rs:2319: allow with no `# DEBT: <issue>` comment above it"
+        )
+        summary = "1 unaccounted lint allow(s) -- docs/COMMENTS.md"
+        pre = "check\tscripts/check.sh \t2026-09-29T02:11:48.7819539Z "
+        ci_log = fake_repo / "ci.log"
+        ci_log.write_text(
+            f"{pre}== commit messages ==\n"
+            f"{pre}  ok\n"
+            f"{pre}== lint allows ==\n"
+            f"{pre}  selftest: 9 cases\n"
+            f"{pre}  {allow_line}\n"
+            f"{pre}  {summary}\n"
+            f"{pre}##[error]Process completed with exit code 1.\n",
+            encoding="utf-8",
+        )
+
+        def gate(crate: str, line: str, log_file: pathlib.Path = ci_log) -> int:
+            with contextlib.redirect_stdout(io.StringIO()):
+                return record_check(fake_repo, crate, str(log_file), line)
+
+        def check_log(name: str, text: str) -> pathlib.Path:
+            path = fake_repo / name
+            path.write_text(text, encoding="utf-8")
+            return path
+
+        ok("a check.sh failure opens the crate its line names", gate("demo-core", allow_line) == 0)
+        verdict = io.StringIO()
+        with contextlib.redirect_stdout(verdict):
+            code = check(empty)
+        ok(
+            "the check verdict opens with the field the policy anchors on",
+            code == 0 and verdict.getvalue().startswith("PROVEN check crate=demo-core "),
+        )
+        ok("the line quoted with its indentation is the same line", gate("demo-core", f"  {allow_line}") == 0)
+        ok("a crate the line does not name is refused", gate("demo-path", allow_line) == 2)
+        ok("a crate that is a prefix of the named one is refused", gate("demo", allow_line) == 2)
+        ok("a fragment of the line is refused", gate("demo-core", allow_line[:-6]) == 2)
+        ok("the summary line is not the defect", gate("demo-core", summary) == 2)
+        ok(
+            "a local check.sh log whose section printed its failure summary counts",
+            gate("demo-core", allow_line, check_log(
+                "local.log", f"== lint allows ==\n  {allow_line}\n  {summary}\n"
+            )) == 0,
+        )
+        ok(
+            "a log that never says the run failed is refused",
+            gate("demo-core", allow_line, check_log(
+                "nofail.log", f"== lint allows ==\n  {allow_line}\n"
+            )) == 2,
+        )
+        ok(
+            "a log that printed `== OK ==` is refused",
+            gate("demo-core", allow_line, check_log(
+                "passed.log", f"== lint allows ==\n  {allow_line}\n  {summary}\n== OK ==\n"
+            )) == 2,
+        )
+        ok(
+            "a line whose section was followed by another section is refused",
+            gate("demo-core", allow_line, check_log(
+                "later.log",
+                f"== lint allows ==\n  {allow_line}\n== rustfmt ==\nerror: could not compile `x`\n",
+            )) == 2,
+        )
+        ok(
+            "a log with no check.sh section header is refused",
+            gate("demo-core", allow_line, check_log("headless.log", f"  {allow_line}\n  {summary}\n"))
+            == 2,
+        )
+        ok(
+            "another job's failure does not prove this job's line",
+            gate("demo-core", allow_line, check_log(
+                "otherjob.log",
+                f"a\tscripts/check.sh\t2026-09-29T02:11:46.0Z == lint allows ==\n"
+                f"a\tscripts/check.sh\t2026-09-29T02:11:46.0Z   {allow_line}\n"
+                f"a\tscripts/check.sh\t2026-09-29T02:11:46.0Z == OK ==\n"
+                f"b\tscripts/check.sh\t2026-09-29T02:11:46.0Z ##[error]Process completed with exit code 1.\n",
+            )) == 2,
+        )
+        ok(
+            "exit code 0 is not a failure",
+            gate("demo-core", allow_line, check_log(
+                "exit0.log",
+                f"== lint allows ==\n  {allow_line}\n##[error]Process completed with exit code 0.\n",
+            )) == 2,
+        )
+        (git_repo / "crates" / "demo-core").mkdir(parents=True)
+        stale_check = git_repo / "ci.log"
+        stale_check.write_text(ci_log.read_text(encoding="utf-8"), encoding="utf-8")
+        with contextlib.redirect_stdout(io.StringIO()):
+            stale = record_check(git_repo, "demo-core", str(stale_check), allow_line)
+        ok("a check log older than the last committed Rust change is refused", stale == 2)
+
         ok("the log lives outside the repo by default", REPO_ROOT not in state_dir().parents)
         os.environ.pop("DS2_FRIDA_EVIDENCE_LOG", None)
 
@@ -686,7 +960,14 @@ def main(argv: list[str]) -> int:
         action="store_true",
         help="append a compiler/linker-error record, licensing the one crate the error blamed",
     )
-    parser.add_argument("--crate", default="", help="the crate the telemetry/build record licenses")
+    parser.add_argument(
+        "--record-check",
+        action="store_true",
+        help="append a failed-scripts/check.sh record, licensing the one crate its line names",
+    )
+    parser.add_argument(
+        "--crate", default="", help="the crate the telemetry/build/check record licenses"
+    )
     parser.add_argument("--log", default="", help="the live run's log file")
     parser.add_argument("--line", default="", help="a line that must be in that log verbatim")
     parser.add_argument("--agent", default="", help="the agent file that ran")
@@ -705,6 +986,8 @@ def main(argv: list[str]) -> int:
         return record_telemetry(REPO_ROOT, args.crate, args.log, args.line)
     if args.record_build:
         return record_build(REPO_ROOT, args.crate, args.log, args.line)
+    if args.record_check:
+        return record_check(REPO_ROOT, args.crate, args.log, args.line)
     if args.check:
         return check(REPO_ROOT)
     parser.print_help()
