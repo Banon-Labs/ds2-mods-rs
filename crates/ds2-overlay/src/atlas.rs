@@ -11,26 +11,32 @@ use crate::fefont::{self, Error, Page};
 /// An atlas the panels know how to find.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Atlas {
-    /// Frames, the item-warn X and the infusion glyphs. 1024x256.
+    /// The menu window frame: corners, crests and edge strips. 512x128.
+    Waku,
+    /// Bars, gauges, the item-warn X and the infusion glyphs. 1024x256.
     Waku03,
     /// The pause menu's tab glyphs and panels. 1024x1024.
     InGame01,
 }
 
 impl Atlas {
+    /// Every atlas, in the order the panels upload them.
+    pub const ALL: [Self; 3] = [Self::Waku, Self::Waku03, Self::InGame01];
+
     /// The `.tpf` member's name inside its container.
     const fn member(self) -> &'static str {
         match self {
+            Self::Waku => "waku.tpf",
             Self::Waku03 => "waku_03.tpf",
             Self::InGame01 => "In-game_01.tpf",
         }
     }
 
     /// The `GameDataEbl` path hash of the container holding [`Self::member`], from
-    /// `scripts/ds2-tpf.py index` on this game build.
+    /// `scripts/ds2-tpf.py index` on this game build. `waku` and `waku_03` share one.
     const fn container(self) -> u32 {
         match self {
-            Self::Waku03 => 0xb1fa_153f,
+            Self::Waku | Self::Waku03 => 0xb1fa_153f,
             Self::InGame01 => 0x903a_400d,
         }
     }
@@ -84,6 +90,15 @@ mod tests {
         assert_eq!((waku.width, waku.height), (1024, 256));
         let ingame = load(&archive, Atlas::InGame01).expect("In-game_01");
         assert_eq!((ingame.width, ingame.height), (1024, 1024));
+        let frame = load(&archive, Atlas::Waku).expect("waku");
+        assert_eq!((frame.width, frame.height), (512, 128));
+        // The frame's 6 px line crosses the top-left corner piece at rows 13-18, columns 5-10.
+        let line = (15 * frame.width + 40) * 4;
+        assert!(
+            frame.rgba[line + 3] > 128,
+            "{:?}",
+            &frame.rgba[line..line + 4]
+        );
         // The X's ink box is (745,169)-(767,191); its centre is solidly inked.
         let o = (180 * waku.width + 756) * 4;
         let px = &waku.rgba[o..o + 4];

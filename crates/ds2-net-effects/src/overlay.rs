@@ -39,7 +39,7 @@ const CURSOR_BAND: [f32; 4] = style::INK_2;
 const TITLE: [f32; 4] = style::TEXT;
 const ROW: [f32; 4] = style::TEXT;
 const CURSOR: [f32; 4] = style::TEXT;
-const HINT: [f32; 4] = style::BRONZE;
+const HINT: [f32; 4] = style::TEXT_DIM;
 const PADDING: f32 = 8.0;
 
 /// Whether the F9 toggle is on, so the glyph is drawn. Set by the frame consumer on each toggle.

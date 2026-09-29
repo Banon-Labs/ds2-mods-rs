@@ -32,6 +32,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use ds2_overlay::fefont::{Button, button};
 use ds2_overlay::style;
 use ds2_save_picker_core::{
     HintKey, PickerActivation, PickerInput, PickerStatusMessage, PickerView, RowKind,
@@ -526,8 +527,8 @@ const HIGHLIGHT: [f32; 4] = style::INK_2;
 const HOVER: [f32; 4] = style::INK_1;
 const TITLE: [f32; 4] = style::TEXT;
 const TEXT: [f32; 4] = style::TEXT;
-const DIM: [f32; 4] = style::BRONZE;
-const DISABLED: [f32; 4] = style::ASH;
+const DIM: [f32; 4] = style::TEXT_DIM;
+const DISABLED: [f32; 4] = style::TEXT_DISABLED;
 const FOLDER: [f32; 4] = style::TEXT;
 const CURRENT: [f32; 4] = style::BRONZE;
 const WARN: [f32; 4] = style::WARN_TEXT;
@@ -587,10 +588,13 @@ fn draw(ui: &Ui) {
         .filled(true)
         .rounding(style::ROUNDING)
         .build();
-    list.add_rect([left, top], [left + width, top + height], PANEL_EDGE)
-        .rounding(style::ROUNDING)
-        .thickness(style::FRAME_PX)
-        .build();
+    // The game's own window frame; a plain bronze line when its atlas did not load.
+    if !ds2_overlay::panels::frame(&list, [left, top], [left + width, top + height], display[1]) {
+        list.add_rect([left, top], [left + width, top + height], PANEL_EDGE)
+            .rounding(style::ROUNDING)
+            .thickness(style::FRAME_PX)
+            .build();
+    }
 
     // In back-buffer pixels; imgui's own position is in window pixels here. See `panels::mouse`.
     let mouse = ds2_overlay::panels::mouse().unwrap_or(ui.io().mouse_pos);
@@ -657,8 +661,12 @@ fn draw(ui: &Ui) {
                 .rounding(style::ROUNDING)
                 .build();
         }
-        // Bronze reads 4.37:1 on the focus fill, under body text's 4.5.
-        let secondary = if row.highlighted { TEXT } else { DIM };
+        // The game's grey sub-label tint is under 4.5:1 on the hover and focus fills.
+        let secondary = if row.highlighted || (hovered && row.selectable) {
+            TEXT
+        } else {
+            DIM
+        };
         let text_y = y + (row_height - line) * 0.5;
         if row.kind == RowKind::DriveStrip {
             let strip = Strip {
@@ -777,10 +785,10 @@ fn draw(ui: &Ui) {
 /// What a hint's control is called on the pad (`picker_input`'s `PAD_BUTTONS`) or the keyboard.
 fn button_name(key: HintKey, pad: bool) -> &'static str {
     match (key, pad) {
-        (HintKey::Confirm, true) => "A",
-        (HintKey::Back, true) => "B",
-        (HintKey::LeftRight, true) => "D-pad",
-        (HintKey::Tab, true) => "Y",
+        (HintKey::Confirm, true) => button(Button::A),
+        (HintKey::Back, true) => button(Button::B),
+        (HintKey::LeftRight, true) => button(Button::DPadLeftRight),
+        (HintKey::Tab, true) => button(Button::Y),
         (HintKey::Confirm, false) => "Enter",
         (HintKey::Back, false) => "Backspace",
         (HintKey::LeftRight, false) => "Left/Right",

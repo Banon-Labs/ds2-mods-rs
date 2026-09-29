@@ -59,13 +59,24 @@ pub const RUST: [f32; 4] = rgb(0x5c_36_23);
 /// The game's own X. For a glyph beside a refusal, never for text: 3.04:1 on [`INK_0`].
 pub const BLOOD: [f32; 4] = rgb(0xb5_2c_10);
 
-// ---- not measured yet ----
+// ---- measured: the game's text tints ----
+//
+// FeFont's glyphs are a light grey fill (about 200) inside a dark outline, and a text component
+// multiplies them by its tint (`FeComponentTextField`, colour packed at `+0x6c` by
+// `0x140b6daa0`). These are the tints the menu `.flo` text records carry; what reaches the screen
+// is the tint times the fill, [`on_screen`].
 
-/// Body text. The game's font pages are white and tinted at draw time, and the tint a `.flo` text
-/// record carries has not been read, so this is a warm ivory stand-in.
-pub const TEXT: [f32; 4] = rgb(0xe8_e0_cf);
+/// Body text: every menu text record's tint is white, so it is drawn the grey of the glyph fill.
+pub const TEXT: [f32; 4] = rgb(0xff_ff_ff);
+/// Secondary labels: the Inventory and Equipment sub-label records (`0x003e`, `0x0039`).
+pub const TEXT_DIM: [f32; 4] = rgb(0xa0_a0_a0);
+/// A row that cannot be used: the pause menu's second-state records (`0x0051`, `0x0059`).
+pub const TEXT_DISABLED: [f32; 4] = rgb(0x96_96_96);
+
+// ---- not measured ----
+
 /// Warning text: [`RUST`] lightened until it reads on every ink fill. Derived, not measured.
-pub const WARN_TEXT: [f32; 4] = rgb(0xc8_84_60);
+pub const WARN_TEXT: [f32; 4] = rgb(0xe0_94_6c);
 /// A text field while it is being typed in: [`SLATE`] one step lighter. Derived.
 pub const SLATE_EDIT: [f32; 4] = rgb(0x2b_3c_44);
 
@@ -84,6 +95,13 @@ pub const TEXT_SELECTION: [f32; 4] = with_alpha(BRONZE_DIM, 0.55);
 pub const ROUNDING: f32 = 0.0;
 /// Frame stroke.
 pub const FRAME_PX: f32 = 1.0;
+
+/// What a text `tint` looks like on screen: the tint times the `FeFont` glyph fill (about 200 of 255).
+#[must_use]
+pub fn on_screen(tint: [f32; 4]) -> [f32; 4] {
+    const FILL: f32 = 200.0 / 255.0;
+    [tint[0] * FILL, tint[1] * FILL, tint[2] * FILL, tint[3]]
+}
 
 /// WCAG relative luminance of an sRGB colour.
 #[must_use]
@@ -110,7 +128,8 @@ pub fn contrast(a: [f32; 4], b: [f32; 4]) -> f32 {
 mod tests {
     use super::*;
 
-    /// Body-size text has to reach 4.5:1 on every fill it is drawn over.
+    /// Body-size text has to reach 4.5:1 on every fill it is drawn over, as it lands on screen:
+    /// the tint times the glyph fill.
     #[test]
     fn text_reads_on_every_fill() {
         for (fill_name, fill) in [
@@ -121,21 +140,21 @@ mod tests {
             ("SLATE_EDIT", SLATE_EDIT),
             ("RUST", RUST),
         ] {
-            let ratio = contrast(TEXT, fill);
+            let ratio = contrast(on_screen(TEXT), fill);
             assert!(ratio >= 4.5, "TEXT on {fill_name} is {ratio:.2}:1");
         }
-        for (name, fg) in [("BRONZE", BRONZE), ("WARN_TEXT", WARN_TEXT)] {
-            for (fill_name, fill) in [("INK_0", INK_0), ("INK_1", INK_1)] {
-                let ratio = contrast(fg, fill);
-                assert!(ratio >= 4.5, "{name} on {fill_name} is {ratio:.2}:1");
-            }
+        for (name, fg) in [("TEXT_DIM", TEXT_DIM), ("WARN_TEXT", WARN_TEXT)] {
+            let ratio = contrast(on_screen(fg), INK_0);
+            assert!(ratio >= 4.5, "{name} on INK_0 is {ratio:.2}:1");
         }
     }
 
-    /// Measured 4.37:1: secondary text on the focused row is drawn in TEXT, not BRONZE.
+    /// Secondary text on a hovered or focused row is drawn in TEXT: the game's own grey sub-label
+    /// tint measures 4.07:1 on the raised fill and less on the focus fill.
     #[test]
-    fn bronze_is_not_text_on_the_focus_fill() {
-        assert!(contrast(BRONZE, INK_2) < 4.5);
+    fn dim_text_is_only_for_the_panel_fill() {
+        assert!(contrast(on_screen(TEXT_DIM), INK_1) < 4.5);
+        assert!(contrast(on_screen(TEXT_DIM), INK_2) < 4.5);
     }
 
     /// Measured 3.04:1: enough for the X glyph, not for body text.

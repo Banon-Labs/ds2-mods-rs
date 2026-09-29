@@ -22,6 +22,7 @@ use ds2_build_recommender_core::model::{
 const STR_INDEX: usize = 4;
 use ds2_build_recommender_core::nav::{self, Control, Dir, Nudge, Shape};
 use ds2_build_recommender_core::weapons;
+use ds2_overlay::fefont::{Button, button};
 use ds2_overlay::style;
 use hudhook::imgui::{DrawListMut, MouseButton, Ui};
 
@@ -1361,8 +1362,8 @@ const PANEL_EDGE: [f32; 4] = style::BRONZE;
 const DIM_COVER: [f32; 4] = style::DIM_COVER;
 const TITLE: [f32; 4] = style::TEXT;
 const TEXT: [f32; 4] = style::TEXT;
-const DIM: [f32; 4] = style::BRONZE;
-const DISABLED: [f32; 4] = style::ASH;
+const DIM: [f32; 4] = style::TEXT_DIM;
+const DISABLED: [f32; 4] = style::TEXT_DISABLED;
 const WARN: [f32; 4] = style::WARN_TEXT;
 const GOOD: [f32; 4] = style::BRONZE;
 const FIELD_BG: [f32; 4] = style::SLATE;
@@ -1593,7 +1594,15 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
         .filled(true)
         .rounding(style::ROUNDING)
         .build();
-    canvas.edge([left, top], [left + width, top + height], PANEL_EDGE);
+    // The game's own window frame; a plain bronze line when its atlas did not load.
+    if !ds2_overlay::panels::frame(
+        &canvas.list,
+        [left, top],
+        [left + width, top + height],
+        display[1],
+    ) {
+        canvas.edge([left, top], [left + width, top + height], PANEL_EDGE);
+    }
     // The panel's own surface swallows clicks, so a click on empty panel space is not "outside".
     canvas
         .targets
@@ -1867,11 +1876,11 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
     // Key help, one button and one word each, for the device the player is on. Letters type a
     // weapon name too; that is what the weapon field's placeholder says.
     const PAD_HINT: [(&str, &str); 5] = [
-        ("D-pad", "Move"),
-        ("A", "Select"),
-        ("Left/Right", "Step 1"),
-        ("LB RB", "Page"),
-        ("B", "Back"),
+        (button(Button::DPad), "Move"),
+        (button(Button::A), "Select"),
+        (button(Button::DPadLeftRight), "Step 1"),
+        (button(Button::Bumpers), "Page"),
+        (button(Button::B), "Back"),
     ];
     const KEY_HINT: [(&str, &str); 5] = [
         ("Arrows", "Move"),

@@ -113,7 +113,7 @@ pub fn game_style(ui: &Ui) -> GameStyle<'_> {
         (C::TitleBgActive, INK_2),
         (C::TitleBgCollapsed, INK_1),
         (C::Text, TEXT),
-        (C::TextDisabled, BRONZE),
+        (C::TextDisabled, crate::style::TEXT_DIM),
         (C::FrameBg, SLATE),
         (C::FrameBgHovered, SLATE_EDIT),
         (C::FrameBgActive, SLATE_EDIT),
@@ -196,19 +196,27 @@ pub fn hint_bar(
     let gap = (line * 0.9).round();
     let mut x = origin[0];
     for (button, verb) in entries {
-        let button_w = ui.calc_text_size(button)[0] + pad * 2.0;
+        // A pad button is the game's own glyph (`fefont::button`), drawn untinted as its key guide
+        // draws it; a keyboard key is a word, framed so it reads as a key.
+        let glyph = !button.is_ascii();
+        let frame_pad = if glyph { 0.0 } else { pad };
+        let button_w = ui.calc_text_size(button)[0] + frame_pad * 2.0;
         let verb_w = ui.calc_text_size(verb)[0];
         if x + button_w + pad + verb_w > right {
             break;
         }
-        list.add_rect(
-            [x, origin[1] - 1.0],
-            [x + button_w, origin[1] + line + 1.0],
-            crate::style::BRONZE,
-        )
-        .thickness(crate::style::FRAME_PX)
-        .build();
-        list.add_text([x + pad, origin[1]], crate::style::BRONZE, button);
+        if glyph {
+            list.add_text([x, origin[1]], [1.0, 1.0, 1.0, 1.0], button);
+        } else {
+            list.add_rect(
+                [x, origin[1] - 1.0],
+                [x + button_w, origin[1] + line + 1.0],
+                crate::style::BRONZE,
+            )
+            .thickness(crate::style::FRAME_PX)
+            .build();
+            list.add_text([x + pad, origin[1]], crate::style::TEXT_DIM, button);
+        }
         x += button_w + pad;
         list.add_text([x, origin[1]], crate::style::TEXT, verb);
         x += verb_w + gap;
@@ -217,13 +225,14 @@ pub fn hint_bar(
 }
 
 /// Each [`Atlas`]'s imgui texture id and its size, or `0` for none, in [`atlas_slot`] order.
-static ATLAS_TEXTURES: [AtomicUsize; 2] = [const { AtomicUsize::new(0) }; 2];
-static ATLAS_SIZES: [AtomicUsize; 2] = [const { AtomicUsize::new(0) }; 2];
+static ATLAS_TEXTURES: [AtomicUsize; 3] = [const { AtomicUsize::new(0) }; 3];
+static ATLAS_SIZES: [AtomicUsize; 3] = [const { AtomicUsize::new(0) }; 3];
 
 const fn atlas_slot(atlas: Atlas) -> usize {
     match atlas {
-        Atlas::Waku03 => 0,
-        Atlas::InGame01 => 1,
+        Atlas::Waku => 0,
+        Atlas::Waku03 => 1,
+        Atlas::InGame01 => 2,
     }
 }
 
@@ -232,7 +241,7 @@ const fn atlas_slot(atlas: Atlas) -> usize {
 fn install_game_atlases(render: &mut dyn RenderContext) -> Result<(), String> {
     let dir = game_dir().ok_or("no executable path")?;
     let archive = crate::ebl::Archive::open(&dir).map_err(|e| e.to_string())?;
-    for which in [Atlas::Waku03, Atlas::InGame01] {
+    for which in Atlas::ALL {
         let page = crate::atlas::load(&archive, which).map_err(|e| format!("{which:?}: {e}"))?;
         let (w, h) = (page.width as u32, page.height as u32);
         let id = render
@@ -268,6 +277,60 @@ pub fn sprite(
         .col(tint)
         .build();
     true
+}
+
+/// Draw the game's own window frame around `min`-`max`, at the game's UI scale for a back buffer
+/// `display_height` pixels tall. Answers `false`, drawing nothing, when the atlas did not load.
+///
+/// The pieces are the `waku` atlas's (`l02_01_In-Game.flo` shape `0x008b` builds the pause
+/// menu's window from them): a top-left and a bottom-left corner piece, mirrored for the right,
+/// whose 6 px line runs at atlas rows 13-18 (top), 108-113 (bottom) and columns 5-10 (side). The
+/// game never scales those pieces; it lays copies of edge strips end to end. Here the corners are
+/// drawn at the game's scale (back-buffer height / 720) and the stretch of line between them is a
+/// slice that is flat along its length, so stretching it draws what the copies would.
+pub fn frame(
+    list: &hudhook::imgui::DrawListMut<'_>,
+    min: [f32; 2],
+    max: [f32; 2],
+    display_height: f32,
+) -> bool {
+    // Atlas pixels. The corner piece is taken 32 square; the line's centre sits 8 in from its
+    // left edge and 15.5 down from its top (top pieces) or 14.5 down (bottom pieces).
+    const CORNER: f32 = 32.0;
+    const SIDE_IN: f32 = 8.0;
+    const TOP_IN: f32 = 15.5;
+    const BOTTOM_IN: f32 = 14.5;
+    const TOP: [f32; 4] = [0.0, 0.0, CORNER, CORNER];
+    const BOTTOM: [f32; 4] = [0.0, 96.0, CORNER, 128.0];
+    // Flat along x in both corner pieces (columns 65-290), and flat along y in the side line
+    // (rows 27-38 of the top piece).
+    const TOP_RUN: [f32; 4] = [65.0, 0.0, 290.0, CORNER];
+    const BOTTOM_RUN: [f32; 4] = [65.0, 96.0, 290.0, 128.0];
+    const SIDE_RUN: [f32; 4] = [0.0, 27.0, CORNER, 38.0];
+    const WHITE: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
+
+    let s = (display_height / 720.0).max(1.0);
+    let c = CORNER * s;
+    // Where the corner pieces' outer corners go, so the line lands on the panel's edge.
+    let left = min[0] - SIDE_IN * s;
+    let right = max[0] + SIDE_IN * s;
+    let top = min[1] - TOP_IN * s;
+    let bottom = max[1] + BOTTOM_IN * s;
+    let flip = |r: [f32; 4]| [r[2], r[1], r[0], r[3]];
+    let mut drawn = true;
+    let mut piece = |src: [f32; 4], a: [f32; 2], b: [f32; 2]| {
+        drawn &= sprite(list, Atlas::Waku, src, a, b, WHITE);
+    };
+    // Edges first, corners over their ends.
+    piece(TOP_RUN, [left + c, top], [right - c, top + c]);
+    piece(BOTTOM_RUN, [left + c, bottom - c], [right - c, bottom]);
+    piece(SIDE_RUN, [left, top + c], [left + c, bottom - c]);
+    piece(flip(SIDE_RUN), [right - c, top + c], [right, bottom - c]);
+    piece(TOP, [left, top], [left + c, top + c]);
+    piece(flip(TOP), [right - c, top], [right, top + c]);
+    piece(BOTTOM, [left, bottom - c], [left + c, bottom]);
+    piece(flip(BOTTOM), [right - c, bottom - c], [right, bottom]);
+    drawn
 }
 
 /// Draw the game's own red X, `size` pixels square at `at`. Answers the width it took.
@@ -440,7 +503,7 @@ impl ImguiRenderLoop for Panels {
     fn initialize<'a>(&'a mut self, ctx: &mut Context, render_context: &'a mut dyn RenderContext) {
         match install_game_atlases(render_context) {
             Ok(()) => log(format_args!(
-                "panels: the game's waku_03 and In-game_01 atlases are loaded for sprites"
+                "panels: the game's waku, waku_03 and In-game_01 atlases are loaded for sprites and frames"
             )),
             Err(why) => log(format_args!(
                 "panels: the game's menu atlases did not load, so panels draw without its art: \

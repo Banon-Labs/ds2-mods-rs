@@ -403,10 +403,54 @@ pub fn load(game: &Path, name: FaceName, keep: impl Fn(u32) -> bool) -> Result<F
     parse(name, &bytes, keep)
 }
 
-/// The glyphs the panels ask for: Basic Latin and Latin-1, which is all imgui's default range is.
+/// The glyphs the panels ask for: Basic Latin, Latin-1, and the circled numbers the game draws its
+/// controller buttons with (see [`button`]).
 #[must_use]
 pub fn latin(code: u32) -> bool {
-    (0x20..=0xff).contains(&code)
+    (0x20..=0xff).contains(&code) || (0x2460..=0x2473).contains(&code)
+}
+
+/// A controller button, as the game's own key guide draws it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Button {
+    /// A: confirm.
+    A,
+    /// B: back.
+    B,
+    /// X.
+    X,
+    /// Y.
+    Y,
+    /// The d-pad, all directions: move.
+    DPad,
+    /// The d-pad, left and right: step a value.
+    DPadLeftRight,
+    /// Both bumpers: page.
+    Bumpers,
+    /// Start.
+    Start,
+}
+
+/// The character the game's font draws `button` as.
+///
+/// The game's key-guide strings put a circled number before each action (`ingamemenu.fmg`
+/// 2209001: `⑤：Select ⑲：Confirm ⑳：Back ...`), and page 0 of `FeFont` holds the button art at
+/// those code points, not a digit in a circle. A, B, X and Y were told apart by the average colour
+/// of each glyph's saturated pixels (green, red, blue, orange); the d-pad, Start and the bumpers
+/// by what the game's text uses them for. Which of the bumper pair is left is not established,
+/// so both are drawn together.
+#[must_use]
+pub const fn button(button: Button) -> &'static str {
+    match button {
+        Button::A => "\u{2463}",
+        Button::B => "\u{2462}",
+        Button::X => "\u{2461}",
+        Button::Y => "\u{2460}",
+        Button::DPad => "\u{2464}",
+        Button::DPadLeftRight => "\u{246d}",
+        Button::Bumpers => "\u{2468}\u{2466}",
+        Button::Start => "\u{246f}",
+    }
 }
 
 #[cfg(test)]
@@ -485,6 +529,62 @@ mod tests {
             }
         }
         assert!(light > 20 && dark > 20, "light {light} dark {dark}");
+    }
+
+    /// Every button the panels name is a glyph both faces actually carry, and the face buttons
+    /// have the colours that identified them.
+    #[test]
+    fn every_button_is_a_glyph_both_faces_carry() {
+        let Some(game) = game() else {
+            return;
+        };
+        let all = [
+            Button::A,
+            Button::B,
+            Button::X,
+            Button::Y,
+            Button::DPad,
+            Button::DPadLeftRight,
+            Button::Bumpers,
+            Button::Start,
+        ];
+        for name in [FaceName::Big, FaceName::Small] {
+            let face = load(&game, name, latin).unwrap();
+            for b in all {
+                for c in button(b).chars() {
+                    assert!(
+                        face.glyphs.iter().any(|g| g.code == u32::from(c)),
+                        "{name:?} lacks {b:?} ({c})"
+                    );
+                }
+            }
+            // A is green, B red, X blue: the mean of each glyph's saturated, opaque pixels.
+            let hue = |b: Button| {
+                let c = u32::from(button(b).chars().next().unwrap());
+                let g = face.glyphs.iter().find(|g| g.code == c).unwrap();
+                let page = &face.pages[g.page];
+                let mut sum = [0u64; 3];
+                for y in usize::from(g.rect[1])..usize::from(g.rect[3]) {
+                    for x in usize::from(g.rect[0])..usize::from(g.rect[2]) {
+                        let o = (y * page.width + x) * 4;
+                        let p = &page.rgba[o..o + 4];
+                        let (hi, lo) = (p[0].max(p[1]).max(p[2]), p[0].min(p[1]).min(p[2]));
+                        if p[3] > 128 && hi - lo > 40 {
+                            for k in 0..3 {
+                                sum[k] += u64::from(p[k]);
+                            }
+                        }
+                    }
+                }
+                sum
+            };
+            let [r, g, b] = hue(Button::A);
+            assert!(g > r && g > b, "{name:?} A is not green: {r} {g} {b}");
+            let [r, g, b] = hue(Button::B);
+            assert!(r > g && r > b, "{name:?} B is not red: {r} {g} {b}");
+            let [r, g, b] = hue(Button::X);
+            assert!(b > r && b > g, "{name:?} X is not blue: {r} {g} {b}");
+        }
     }
 
     #[test]

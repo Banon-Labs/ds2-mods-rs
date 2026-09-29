@@ -37,6 +37,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use ds2_build_url_core::{Editor, Event, Session, Verdict};
+use ds2_overlay::fefont::{Button, button};
 use ds2_overlay::style;
 use hudhook::imgui::{MouseButton, Ui};
 
@@ -310,8 +311,8 @@ const PANEL_EDGE: [f32; 4] = style::BRONZE;
 const DIM_COVER: [f32; 4] = style::DIM_COVER;
 const TITLE: [f32; 4] = style::TEXT;
 const TEXT: [f32; 4] = style::TEXT;
-const DIM: [f32; 4] = style::BRONZE;
-const DISABLED: [f32; 4] = style::ASH;
+const DIM: [f32; 4] = style::TEXT_DIM;
+const DISABLED: [f32; 4] = style::TEXT_DISABLED;
 const WARN: [f32; 4] = style::WARN_TEXT;
 const FIELD_BG: [f32; 4] = style::SLATE;
 const FIELD_EDIT: [f32; 4] = style::SLATE_EDIT;
@@ -328,11 +329,12 @@ const KEY_HINT: [(&str, &str); 4] = [
     ("Ctrl+Backspace", "Clear"),
     ("Esc", "Close"),
 ];
+/// The pad's are the game's own button glyphs (`ds2_overlay::fefont::button`).
 const PAD_HINT: [(&str, &str); 4] = [
-    ("A", "Load"),
-    ("Y", "Paste"),
-    ("X", "Clear"),
-    ("B", "Close"),
+    (button(Button::A), "Load"),
+    (button(Button::Y), "Paste"),
+    (button(Button::X), "Clear"),
+    (button(Button::B), "Close"),
 ];
 
 /// The panel's draw function, called by `ds2-overlay` once per frame.
@@ -376,10 +378,13 @@ fn draw(ui: &Ui) {
         .filled(true)
         .rounding(style::ROUNDING)
         .build();
-    list.add_rect([left, top], [left + width, top + height], PANEL_EDGE)
-        .rounding(style::ROUNDING)
-        .thickness(style::FRAME_PX)
-        .build();
+    // The game's own window frame; a plain bronze line when its atlas did not load.
+    if !ds2_overlay::panels::frame(&list, [left, top], [left + width, top + height], display[1]) {
+        list.add_rect([left, top], [left + width, top + height], PANEL_EDGE)
+            .rounding(style::ROUNDING)
+            .thickness(style::FRAME_PX)
+            .build();
+    }
 
     // In back-buffer pixels; imgui's own position is in window pixels here. See `panels::mouse`.
     let mouse = ds2_overlay::panels::mouse().unwrap_or(ui.io().mouse_pos);

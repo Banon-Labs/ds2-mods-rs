@@ -66,7 +66,7 @@ are missing or do not parse, the panels fall back to imgui's default font and lo
 | `SLATE` field / input fill | `#202d33` | waku_03 |
 | `RUST` warning | `#5c3623` | waku_03 |
 | `BLOOD` refusal / cannot-use | `rgb(181,44,16)` | the game's own X, see `DS2-ITEM-REQUIREMENTS.md`. 3.04:1 on `INK_0`: glyph only, never text |
-| `TEXT` | **open** | the font pages are white and tinted at draw time; read the tint from a `.flo` text record |
+| `TEXT` / `TEXT_DIM` / `TEXT_DISABLED` | `#ffffff` / `#a0a0a0` / `#969696` tints | **measured**: the menu `.flo` text records (`FeComponentTextField`, colour at `+0x6c`). Tints multiply `FeFont`'s ~200 grey fill, so white text lands at about `#c8c8c8`. Grey sub-labels only on the panel fill: they measure 4.07:1 on `INK_1` |
 
 **Rule:** these replace the hand-copied sets in `ds2-save-file/src/picker.rs`,
 `ds2-build-import/src/panel.rs` and `ds2-build-recommender-ui/src/panel.rs`. The off-palette
@@ -78,7 +78,7 @@ marks focus with a lit frame and a warmer fill, not a hue.
 | Rule | Value |
 |---|---|
 | Corner rounding | 0. The current 4 to 6 px rounding is a web look. |
-| Panel frame | 1 px `BRONZE`. Later, the `waku_03` frame pieces drawn as a nine-slice. |
+| Panel frame | **built**: the game's own `waku` atlas (512x128), the corner pieces the pause menu window (`l02_01_In-Game.flo` shape `0x008b`) is made of, at the game's scale, mirrored for the right, with the flat line between them stretched. 1 px `BRONZE` is the fallback |
 | Dim cover | Black at 0.55 |
 | Focus | `INK_2` fill and a `BRONZE` left rule. No glow and no second colour. |
 | Spacing | 4-unit grid in 720p units: 4, 8, 12, 16, 24 |
@@ -118,5 +118,5 @@ is found, it draws a bracketed short name such as `[A]`) followed by a one-word 
 2. The FeFont loader. Make it the default overlay font and settle the **open** unit question.
 3. `hint_bar` with bracketed names, then cut the text in every panel per the table.
 4. The status strip replaces the four corner glyphs.
-5. Find the game's pad-glyph atlas and swap `[A]` for real glyphs.
-6. The `waku_03` nine-slice frame.
+5. **Built**: pad buttons are `FeFont` page-0 characters (U+2460..U+2473, the circled numbers the game's key-guide strings use), so the hint bar writes the real A/B/X/Y glyphs as text. Which bumper is left is not established.
+6. **Built**: the `waku` frame (not `waku_03`, which holds bars and gauges).
