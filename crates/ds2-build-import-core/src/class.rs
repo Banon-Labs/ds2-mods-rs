@@ -1,16 +1,20 @@
 //! A character's starting class, and the stats no build may take it below.
 //!
-//! # Why a build has to be for the character's own class
+//! # Why the stats and the class have to agree
 //!
-//! DARK SOULS II has no class change after creation. A character's starting class fixes the stat
-//! spread its levels are counted from, and nothing the game offers -- not a level-up, not a Soul
-//! Vessel respec -- puts a stat below that spread. So a build computed from another class's base is
-//! one the character cannot have, and writing it anyway makes a character the game could never
-//! produce.
+//! A character's starting class fixes the stat spread its levels are counted from, and nothing
+//! the game offers -- not a level-up, not a Soul Vessel respec -- puts a stat below that spread:
+//! the level-up menu floors each stat at the class's `PlayerStatusParam` row. So stats counted from
+//! one class's base, written onto a character of another class, make a character the game could
+//! never produce.
 //!
 //! Measured 2026-09-28 from `ds2-loader.log`: a Sorcerer (ATT 12, INT 14) was given a generated
 //! Warrior build, and the import wrote ATT 6 and INT 5 -- below the Sorcerer's own starting stats,
-//! and with them every attunement slot. [`check_build`] is the rule that refuses that.
+//! and with them every attunement slot -- while the character stayed a Sorcerer.
+//!
+//! The game has no class change after creation, so the import makes one: [`plan_class`] says the
+//! class moves to the build's, and `ds2-build-import` writes it where the game keeps it before it
+//! writes the stats. [`check_build`] is the stricter rule for a caller that must keep the class.
 //!
 //! # Where the numbers come from
 //!
@@ -242,6 +246,58 @@ pub fn check_build(
     }
 }
 
+/// What applying a build does to the character's class.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ClassPlan {
+    /// The build is for the class the character already has.
+    Keep(StartingClass),
+    /// The build is for another class, and the character becomes it.
+    Change {
+        /// The class the character has now.
+        from: StartingClass,
+        /// The class the build names, and the character's after the apply.
+        to: StartingClass,
+    },
+}
+
+impl ClassPlan {
+    /// The class the character has once the build is on.
+    pub const fn target(self) -> StartingClass {
+        match self {
+            Self::Keep(class) | Self::Change { to: class, .. } => class,
+        }
+    }
+}
+
+/// What a build for `build_class` with stats `wanted` (game order) does to a `character`'s class.
+///
+/// A build for another class changes the class to the build's, so that the stats and the base they
+/// were counted from agree. What is still refused is a build no class can explain: one naming no
+/// class, or one with a stat under its own class's base.
+///
+/// # Errors
+///
+/// [`ClassRefusal::UnknownBuildClass`] or [`ClassRefusal::BelowBase`], the latter measured against
+/// the build's class, which is the one the character is about to have.
+pub fn plan_class(
+    build_class: &str,
+    character: StartingClass,
+    wanted: &StatSpread,
+) -> Result<ClassPlan, ClassRefusal> {
+    let Some(build) = StartingClass::from_key(build_class) else {
+        return Err(ClassRefusal::UnknownBuildClass(build_class.to_owned()));
+    };
+    check_build(build_class, build, wanted)?;
+    Ok(if build == character {
+        ClassPlan::Keep(character)
+    } else {
+        ClassPlan::Change {
+            from: character,
+            to: build,
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,6 +330,44 @@ mod tests {
         let text = refusal.to_string();
         assert!(text.contains("attunement 6 < 12"), "{text}");
         assert!(text.contains("intelligence 5 < 14"), "{text}");
+    }
+
+    /// The measured build, applied: the Sorcerer becomes a Warrior, and the Warrior spread is at
+    /// or above the Warrior base, so nothing is refused.
+    #[test]
+    fn a_warrior_build_makes_a_sorcerer_a_warrior() {
+        let written: StatSpread = [22, 6, 11, 6, 28, 42, 5, 5, 18];
+        let plan = plan_class("warrior", StartingClass::Sorcerer, &written).expect("a Warrior");
+        assert_eq!(
+            plan,
+            ClassPlan::Change {
+                from: StartingClass::Sorcerer,
+                to: StartingClass::Warrior,
+            }
+        );
+        assert_eq!(plan.target(), StartingClass::Warrior);
+        assert_eq!(
+            plan_class(
+                "sorcerer",
+                StartingClass::Sorcerer,
+                &StartingClass::Sorcerer.base()
+            ),
+            Ok(ClassPlan::Keep(StartingClass::Sorcerer))
+        );
+    }
+
+    /// A class change does not excuse a spread under the new class's base: a "Warrior" with
+    /// Sorcerer strength is no Warrior.
+    #[test]
+    fn a_change_is_checked_against_the_new_base() {
+        let refusal = plan_class(
+            "warrior",
+            StartingClass::Sorcerer,
+            &StartingClass::Sorcerer.base(),
+        )
+        .expect_err("STR 3 < 15");
+        assert!(refusal.to_string().contains("strength 3 < 15"), "{refusal}");
+        assert!(plan_class("", StartingClass::Sorcerer, &[99; 9]).is_err());
     }
 
     /// A Sorcerer build that keeps every stat at or above the Sorcerer base goes through.

@@ -32,7 +32,7 @@ pub mod reinforce;
 pub mod saved_build;
 pub mod url;
 
-pub use class::{ClassRefusal, StartingClass, check_build};
+pub use class::{ClassPlan, ClassRefusal, StartingClass, check_build, plan_class};
 pub use field::{Field, MAX_UNITS, Reaction};
 pub use items::{Infusion, ItemError, id_for, is_empty_slot, normalise};
 pub use level::{LevelChange, LevelError, MAX_LEVEL, SoulCosts, StatSpread, level_from_stats};

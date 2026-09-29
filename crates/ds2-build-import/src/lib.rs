@@ -49,9 +49,11 @@
 //! the mark. Nothing is announced to the network.
 //!
 //! **What is still not applied**: the hand `grip` the planner records, and the `class` and `gender`
-//! it names -- a character already exists by the time this runs, and the game has no class change.
-//! The class is checked instead: a build for another class, or with any stat under the character's
-//! class base, has its stats refused and logged, and its gear applied.
+//! it names. The class is applied: the game has no class change after creation, so a build for
+//! another class writes the class where the game keeps it (`player_data + 0x64` and the character
+//! list's record) before the stats, which were counted from that class's base. A build naming no
+//! class, or with a stat under its own class's base, has its stats refused and logged, and its gear
+//! applied.
 //!
 //! # The three failure modes worth knowing before reading the log
 //!
@@ -201,9 +203,9 @@ pub use flow::queue_generated;
 
 /// The live character's starting class, or `None` with no character loaded or an id no class has.
 ///
-/// For a caller building something to hand [`queue_generated`]: the game has no class change, so a
-/// build for a live character has to be for this class, and the apply refuses the stats of any
-/// other.
+/// For a caller building something to hand [`queue_generated`]: a build for another class changes
+/// the character to that class when it is applied, and a caller that means to keep the class
+/// generates for this one.
 #[cfg(windows)]
 pub fn character_class() -> Option<ds2_build_import_core::StartingClass> {
     ds2_build_import_core::StartingClass::from_game_id(save::live_character_class_id()?)

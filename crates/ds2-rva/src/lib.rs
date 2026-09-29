@@ -5860,8 +5860,42 @@ pub const PLAYER_CTRL_SET_COVENANT_PROLOGUE: [u8; 5] = [0x48, 0x85, 0xc9, 0x74, 
 /// for every value under 256 and would corrupt the upper three bytes on a write.
 ///
 /// `1` Warrior, `2` Knight, `4` Bandit, `6` Cleric, `7` Sorcerer, `8` Explorer, `9` Swordsman,
-/// `10` Deprived. The gaps are the game's.
+/// `10` Deprived. The gaps are the game's, and the game's own `0x140203e80` settles the mapping:
+/// it turns this id into the class's `PlayerStatusParam` row, 1 -> 20, 2 -> 30, 4 -> 50, 6 -> 70,
+/// 7 -> 80, 8 -> 90, 9 -> 100, 10 -> 110, and 3 and 5 to the default row 10.
+///
+/// Read fresh by the level-up menu (`0x1401fb68e` -> `0x140203e80` -> the row that floors a stat)
+/// and by the class-name text (`0x140100850`, `+0xa7ffd0` into the message table). Nothing caches
+/// it, and no game function sets it: the profile loader and character creation (`0x1400e1b3f`)
+/// both store it directly. Measured 2026-09-28 with `scripts/frida/class-read.js` on a loaded
+/// Sorcerer: `class(+0x64)=7`, the list record's copy `7`, and `0x140203e80(7)` = row 80.
 pub const PLAYER_DATA_CLASS_OFFSET: usize = 0x64;
+
+/// `GameDataManager` -> the character list, ten records of [`SLOT_RECORD_STRIDE`]. `+0xD8`.
+///
+/// `mov rbp,[rcx+0xd8]` at `0x1400fc2b0`, where `rcx` is the `GameDataManager`; the profile loader
+/// then indexes it by the slot being loaded. Its records are the section-4 records of the save's
+/// global entry, which is where a character's class survives a reload.
+pub const GAME_DATA_SLOT_LIST_OFFSET: usize = 0xD8;
+
+/// The character list's current slot, an `i32` in `0..10`. `+0x1368` into the list.
+///
+/// Written by the profile loader (`mov [rbp+0x1368],esi` at `0x1400fc2f0`) with the slot it loads,
+/// and read back the same way by the save path (`0x1402e343d`).
+pub const SLOT_LIST_CURRENT_OFFSET: usize = 0x1368;
+
+/// Bytes per character-list record (`imul rbx,rbx,0x1f0` at `0x1400fc2cf`).
+pub const SLOT_RECORD_STRIDE: usize = 0x1F0;
+
+/// Records in the character list.
+pub const SLOT_RECORD_COUNT: i32 = 10;
+
+/// The class in a character-list record, a `u16`.
+///
+/// The profile loader copies it to [`PLAYER_DATA_CLASS_OFFSET`] (`movzx eax,WORD PTR [rbx+0x1d6]` at `0x1400fc311`), so this is the
+/// copy a reload restores. On disk it is `+0x1EA` of the record, the way the name is `+0x19E` there
+/// and `+0x18A` here.
+pub const SLOT_RECORD_CLASS_OFFSET: usize = 0x1D6;
 
 // =================================================================================================
 // THE PARAM TABLES, AT RUNTIME

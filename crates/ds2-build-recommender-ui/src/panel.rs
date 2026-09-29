@@ -737,18 +737,10 @@ impl Panel {
     }
 
     fn generate(&mut self) {
-        // The live character's class, when there is one: the game has no class change, so a build
-        // to apply has to start from that class's base. Measured 2026-09-28: without this a
-        // Sorcerer's panel generated a Warrior, and the apply took ATT 12 -> 6 and INT 14 -> 5.
-        let class = ds2_build_import::character_class();
-        log_line(format_args!(
-            "{LOG_PREFIX} generating for class {}",
-            class.map_or_else(
-                || "any (no character class read)".to_owned(),
-                |c| c.to_string()
-            )
-        ));
-        match backend::generate(backend(), &self.state, class) {
+        // Any class may win: applying a build for another class changes the character's class to
+        // it (ds2-build-import writes the class before the stats), so the best build is offered
+        // whatever the character started as.
+        match backend::generate(backend(), &self.state, None) {
             Ok(build) => {
                 log_line(format_args!(
                     "{LOG_PREFIX} generated {} SL {} primary={:?} {} STR {} (grip asked {:?}) stub={}",
@@ -788,41 +780,27 @@ impl Panel {
         let Some(generated) = &self.generated else {
             return;
         };
-        // A build generated for another class -- before a character was loaded, or on another
-        // character -- is regenerated for this one and shown, not applied: soul memory cannot be
-        // lowered, so the player confirms the build that will actually go on.
-        if let Some(class) = ds2_build_import::character_class()
-            && !generated.class.eq_ignore_ascii_case(class.key())
-        {
-            log_line(format_args!(
-                "{LOG_PREFIX} apply held: the build is a {} and the character is a {class} -- \
-                 regenerating for the character's class",
-                generated.class
-            ));
-            self.generate();
-            self.status = Some(if self.generated.is_some() {
-                format!(
-                    "Regenerated for your {} -- check it, then Apply again",
-                    class.key()
-                )
-            } else {
-                format!("Not applied: no {} build for this weapon here", class.key())
-            });
-            return;
-        }
+        let current = ds2_build_import::character_class();
         let (build, extras) = backend::to_import(generated);
         log_line(format_args!(
-            "{LOG_PREFIX} apply confirmed: {} SL {} with {} extra grants -- handed to \
+            "{LOG_PREFIX} apply confirmed: {} SL {} with {} extra grants onto a {} -- handed to \
              ds2-build-import",
             generated.class,
             generated.sl,
-            extras.len()
+            extras.len(),
+            current.map_or_else(|| "character of unread class".to_owned(), |c| c.to_string())
         ));
         ds2_build_import::queue_generated(build, extras);
-        self.status = Some(
-            "Queued: the pause menu applies it on its next frame -- the log says what changed"
+        self.status = Some(match current {
+            Some(class) if !generated.class.eq_ignore_ascii_case(class.key()) => format!(
+                "Queued: your {} becomes a {} on the pause menu's next frame -- the log says what \
+                 changed",
+                class.key(),
+                generated.class
+            ),
+            _ => "Queued: the pause menu applies it on its next frame -- the log says what changed"
                 .to_owned(),
-        );
+        });
     }
 
     fn act(&mut self, action: Action) {
@@ -2313,8 +2291,11 @@ fn draw_confirm(
         ),
         (
             TEXT,
-            "The nine stats are rewritten; a build below this character keeps its stats."
-                .to_owned(),
+            format!(
+                "The nine stats are rewritten and the starting class becomes {}; a build below \
+                 this character keeps both.",
+                build.class
+            ),
         ),
         (
             TEXT,
