@@ -134,25 +134,38 @@ pub(crate) unsafe fn after(this: *mut u8, before: Before) {
     let Some(enter) = read_usize(vtable + ds2_rva::FE_INVENTORY_ENTER_LIST_SLOT) else {
         return;
     };
+
+    // The cursor moves before the list takes focus, the same order DOWN sees: entering highlights
+    // whatever cell the list's cursor already holds. Moving it after the entry left the entry's
+    // highlight on the retained cell and put a second one on the bottom row -- the first in-game
+    // run, 2026-09-29, showed two highlighted cells. An empty category has no bottom row and is
+    // left for the entry to refuse with its own cue.
+    let grid = this as usize + ds2_rva::FE_INVENTORY_ITEM_GRID_OFFSET;
+    let moved = bottom_of_column(grid).map(|target| {
+        let set = SET_CURSOR.load(Ordering::Acquire);
+        // SAFETY: the prologue-checked cursor setter, called on the item grid embedded in the live
+        // group, on the game thread -- the same call the D-pad step makes.
+        let took =
+            unsafe { std::mem::transmute::<usize, SetCursorFn>(set)(grid as *mut u8, target) };
+        (target, took)
+    });
+
     // SAFETY: `enter` is the live group's own vtable slot +0x168 (the vtable identity was checked in
     // `before`), called with that group on the game thread -- exactly the call DOWN makes at
     // 0x1400bc246.
     unsafe { std::mem::transmute::<usize, EnterListFn>(enter)(this) };
 
-    let grid = this as usize + ds2_rva::FE_INVENTORY_ITEM_GRID_OFFSET;
-    if focused_child(this as usize) != Some(grid) {
-        // The game refused (an empty category) and has already said so with its own cue.
-        return;
-    }
-    let Some(target) = bottom_of_column(grid) else { return };
-    let set = SET_CURSOR.load(Ordering::Acquire);
-    // SAFETY: the prologue-checked cursor setter, called on the item grid embedded in the live
-    // group, on the game thread -- the same call the D-pad step makes.
-    let took = unsafe { std::mem::transmute::<usize, SetCursorFn>(set)(grid as *mut u8, target) };
+    let entered = focused_child(this as usize) == Some(grid);
     if LOGGED.fetch_add(1, Ordering::Relaxed) < LOG_CAP {
-        log_line(format_args!(
-            "{LOG_PREFIX} up-enter entered the list at index {target} (setter returned {took})"
-        ));
+        match moved {
+            Some((target, took)) => log_line(format_args!(
+                "{LOG_PREFIX} up-enter cursor set to index {target} before entry (setter returned \
+                 {took}); entered={entered}"
+            )),
+            None => log_line(format_args!(
+                "{LOG_PREFIX} up-enter empty list, cursor untouched; entered={entered}"
+            )),
+        }
     }
 }
 
