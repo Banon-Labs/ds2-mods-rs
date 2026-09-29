@@ -32,6 +32,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use ds2_overlay::style;
 use ds2_save_picker_core::{
     PickerActivation, PickerInput, PickerStatusMessage, PickerView, RowKind, SavePickerModel,
 };
@@ -515,24 +516,28 @@ fn drives() -> Vec<String> {
 // Drawing
 // ---------------------------------------------------------------------------------------------
 
-const PANEL_BG: [f32; 4] = [0.04, 0.04, 0.05, 0.94];
-const PANEL_EDGE: [f32; 4] = [0.55, 0.48, 0.34, 0.9];
-const DIM_COVER: [f32; 4] = [0.0, 0.0, 0.0, 0.45];
-const HIGHLIGHT: [f32; 4] = [0.95, 0.88, 0.66, 0.18];
-const HOVER: [f32; 4] = [1.0, 1.0, 1.0, 0.06];
-const TITLE: [f32; 4] = [0.95, 0.88, 0.66, 1.0];
-const TEXT: [f32; 4] = [0.93, 0.92, 0.88, 1.0];
-const DIM: [f32; 4] = [0.62, 0.61, 0.58, 1.0];
-const DISABLED: [f32; 4] = [0.42, 0.42, 0.40, 1.0];
-const FOLDER: [f32; 4] = [0.60, 0.78, 1.0, 1.0];
-const CURRENT: [f32; 4] = [0.55, 0.95, 0.60, 1.0];
-const WARN: [f32; 4] = [1.0, 0.72, 0.30, 1.0];
-const FIELD_BG: [f32; 4] = [0.10, 0.12, 0.16, 1.0];
-const FIELD_EDIT: [f32; 4] = [0.14, 0.18, 0.26, 1.0];
+// The game's own palette (`ds2_overlay::style`, docs/DS2-UI-DESIGN.md), under this panel's names.
+// Folders and the save in use are told apart by their `/` and `*` markers, not by a hue.
+const PANEL_BG: [f32; 4] = style::PANEL_BG;
+const PANEL_EDGE: [f32; 4] = style::BRONZE;
+const DIM_COVER: [f32; 4] = style::DIM_COVER;
+const HIGHLIGHT: [f32; 4] = style::INK_2;
+const HOVER: [f32; 4] = style::INK_1;
+const TITLE: [f32; 4] = style::TEXT;
+const TEXT: [f32; 4] = style::TEXT;
+const DIM: [f32; 4] = style::BRONZE;
+const DISABLED: [f32; 4] = style::ASH;
+const FOLDER: [f32; 4] = style::TEXT;
+const CURRENT: [f32; 4] = style::BRONZE;
+const WARN: [f32; 4] = style::WARN_TEXT;
+const FIELD_BG: [f32; 4] = style::SLATE;
+const FIELD_EDIT: [f32; 4] = style::SLATE_EDIT;
 /// Behind field text Ctrl+A selected.
-const SELECTION: [f32; 4] = [0.20, 0.36, 0.62, 1.0];
-const CELL_BG: [f32; 4] = [0.12, 0.12, 0.13, 1.0];
-const FOCUS_EDGE: [f32; 4] = [0.95, 0.88, 0.66, 1.0];
+const SELECTION: [f32; 4] = style::TEXT_SELECTION;
+const CELL_BG: [f32; 4] = style::INK_1;
+const FOCUS_EDGE: [f32; 4] = style::BRONZE;
+/// The bronze rule down the left edge of the row the cursor is on.
+const FOCUS_RULE: f32 = 3.0;
 const PAD: f32 = 14.0;
 
 /// The panel's draw function, called by `ds2-overlay` once per frame.
@@ -577,11 +582,11 @@ fn draw(ui: &Ui) {
         .build();
     list.add_rect([left, top], [left + width, top + height], PANEL_BG)
         .filled(true)
-        .rounding(6.0)
+        .rounding(style::ROUNDING)
         .build();
     list.add_rect([left, top], [left + width, top + height], PANEL_EDGE)
-        .rounding(6.0)
-        .thickness(1.5)
+        .rounding(style::ROUNDING)
+        .thickness(style::FRAME_PX)
         .build();
 
     // In back-buffer pixels; imgui's own position is in window pixels here. See `panels::mouse`.
@@ -638,14 +643,19 @@ fn draw(ui: &Ui) {
         if row.highlighted {
             list.add_rect(row_min, row_max, HIGHLIGHT)
                 .filled(true)
-                .rounding(3.0)
+                .rounding(style::ROUNDING)
+                .build();
+            list.add_rect(row_min, [row_min[0] + FOCUS_RULE, row_max[1]], FOCUS_EDGE)
+                .filled(true)
                 .build();
         } else if hovered && row.selectable {
             list.add_rect(row_min, row_max, HOVER)
                 .filled(true)
-                .rounding(3.0)
+                .rounding(style::ROUNDING)
                 .build();
         }
+        // Bronze reads 4.37:1 on the focus fill, under body text's 4.5.
+        let secondary = if row.highlighted { TEXT } else { DIM };
         let text_y = y + (row_height - line) * 0.5;
         if row.kind == RowKind::DriveStrip {
             let strip = Strip {
@@ -666,6 +676,11 @@ fn draw(ui: &Ui) {
                 RowKind::Overwrite => WARN,
                 _ => TEXT,
             };
+            let color = if row.highlighted && color == CURRENT {
+                TEXT
+            } else {
+                color
+            };
             let modified_width = row
                 .modified
                 .as_deref()
@@ -680,13 +695,13 @@ fn draw(ui: &Ui) {
             if let Some(detail) = &row.detail {
                 list.add_text(
                     [inner_left + text_space + 8.0, text_y],
-                    DIM,
+                    secondary,
                     clip(ui, detail, text_space - 8.0),
                 );
             }
             if let Some(modified) = &row.modified {
                 let modified_x = inner_right - ui.calc_text_size(modified)[0];
-                list.add_text([modified_x, text_y], DIM, modified);
+                list.add_text([modified_x, text_y], secondary, modified);
             }
             if hovered && clicked && row.selectable {
                 click = Some(PickerInput::ClickRow(row.row));
@@ -701,7 +716,7 @@ fn draw(ui: &Ui) {
         let max = [inner_right, y + 4.0 + row_height];
         list.add_rect(min, max, if field.editing { FIELD_EDIT } else { FIELD_BG })
             .filled(true)
-            .rounding(3.0)
+            .rounding(style::ROUNDING)
             .build();
         let caret = if field.editing { "_" } else { "" };
         let text_y = min[1] + (row_height - line) * 0.5;
@@ -798,11 +813,11 @@ fn draw_drive_strip(
         let max = [x + width, origin[1] + line + 3.0];
         list.add_rect(min, max, CELL_BG)
             .filled(true)
-            .rounding(3.0)
+            .rounding(style::ROUNDING)
             .build();
         if cell.focused {
             list.add_rect(min, max, FOCUS_EDGE)
-                .rounding(3.0)
+                .rounding(style::ROUNDING)
                 .thickness(1.5)
                 .build();
         }
@@ -821,11 +836,11 @@ fn draw_drive_strip(
         let max = [right, origin[1] + line + 3.0];
         list.add_rect(min, max, if field.editing { FIELD_EDIT } else { FIELD_BG })
             .filled(true)
-            .rounding(3.0)
+            .rounding(style::ROUNDING)
             .build();
         if field.focused || field.editing {
             list.add_rect(min, max, FOCUS_EDGE)
-                .rounding(3.0)
+                .rounding(style::ROUNDING)
                 .thickness(1.5)
                 .build();
         }

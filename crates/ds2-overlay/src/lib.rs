@@ -25,6 +25,7 @@ mod log;
 pub mod panels;
 #[cfg(windows)]
 mod present;
+pub mod style;
 
 pub use game_hud::game_hud_visible;
 pub use log::{LOG_PREFIX, LogFn, set_logger};

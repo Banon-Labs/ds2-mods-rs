@@ -154,7 +154,7 @@ if (( run_host_tests )); then
   cargo test -p ds2-sl2-core -p ds2-hotkey-config -p ds2-safe-input -p ds2-crash-logging-core \
     -p ds2-build-import-core -p ds2-save-file-core -p ds2-save-picker-core -p ds2-soul-memory-guard \
     -p ds2-build-url-core -p darksouls2 -p ds2-weapon-sync -p ds2-net-tick -p ds2-estus-max \
-    -p ds2-build-recommender-core -p ds2-music-probe
+    -p ds2-build-recommender-core -p ds2-music-probe -p ds2-overlay
 
   echo "== windows-target tests (wine) =="
   # THE CRATES THAT MATTER MOST WERE THE ONES WITH NO EXECUTABLE TESTS. `ds2-loader` is

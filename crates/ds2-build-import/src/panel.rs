@@ -37,6 +37,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use ds2_build_url_core::{Editor, Event, Session, Verdict};
+use ds2_overlay::style;
 use hudhook::imgui::{MouseButton, Ui};
 
 use crate::panel_input::{Press, Reader};
@@ -302,21 +303,21 @@ fn on_frame() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Drawing. The palette is the save picker's, value for value, so the two read as one family.
+// Drawing, in the game's own palette (`ds2_overlay::style`, docs/DS2-UI-DESIGN.md).
 // ---------------------------------------------------------------------------------------------
 
-const PANEL_BG: [f32; 4] = [0.04, 0.04, 0.05, 0.94];
-const PANEL_EDGE: [f32; 4] = [0.55, 0.48, 0.34, 0.9];
-const DIM_COVER: [f32; 4] = [0.0, 0.0, 0.0, 0.45];
-const TITLE: [f32; 4] = [0.95, 0.88, 0.66, 1.0];
-const TEXT: [f32; 4] = [0.93, 0.92, 0.88, 1.0];
-const DIM: [f32; 4] = [0.62, 0.61, 0.58, 1.0];
-const DISABLED: [f32; 4] = [0.42, 0.42, 0.40, 1.0];
-const WARN: [f32; 4] = [1.0, 0.72, 0.30, 1.0];
-const FIELD_BG: [f32; 4] = [0.10, 0.12, 0.16, 1.0];
-const FIELD_EDIT: [f32; 4] = [0.14, 0.18, 0.26, 1.0];
-const CELL_BG: [f32; 4] = [0.12, 0.12, 0.13, 1.0];
-const FOCUS_EDGE: [f32; 4] = [0.95, 0.88, 0.66, 1.0];
+const PANEL_BG: [f32; 4] = style::PANEL_BG;
+const PANEL_EDGE: [f32; 4] = style::BRONZE;
+const DIM_COVER: [f32; 4] = style::DIM_COVER;
+const TITLE: [f32; 4] = style::TEXT;
+const TEXT: [f32; 4] = style::TEXT;
+const DIM: [f32; 4] = style::BRONZE;
+const DISABLED: [f32; 4] = style::ASH;
+const WARN: [f32; 4] = style::WARN_TEXT;
+const FIELD_BG: [f32; 4] = style::SLATE;
+const FIELD_EDIT: [f32; 4] = style::SLATE_EDIT;
+const CELL_BG: [f32; 4] = style::INK_1;
+const FOCUS_EDGE: [f32; 4] = style::BRONZE;
 const PAD: f32 = 14.0;
 
 const PANEL_TITLE: &str = "Load Build from URL";
@@ -360,11 +361,11 @@ fn draw(ui: &Ui) {
         .build();
     list.add_rect([left, top], [left + width, top + height], PANEL_BG)
         .filled(true)
-        .rounding(6.0)
+        .rounding(style::ROUNDING)
         .build();
     list.add_rect([left, top], [left + width, top + height], PANEL_EDGE)
-        .rounding(6.0)
-        .thickness(1.5)
+        .rounding(style::ROUNDING)
+        .thickness(style::FRAME_PX)
         .build();
 
     // In back-buffer pixels; imgui's own position is in window pixels here. See `panels::mouse`.
@@ -425,11 +426,11 @@ fn draw(ui: &Ui) {
         if open { FIELD_EDIT } else { FIELD_BG },
     )
     .filled(true)
-    .rounding(3.0)
+    .rounding(style::ROUNDING)
     .build();
     if open {
         list.add_rect(field_min, field_max, FOCUS_EDGE)
-            .rounding(3.0)
+            .rounding(style::ROUNDING)
             .thickness(1.5)
             .build();
     }
@@ -466,11 +467,11 @@ fn draw(ui: &Ui) {
         let hovered = open && inside(min, max);
         list.add_rect(min, max, CELL_BG)
             .filled(true)
-            .rounding(3.0)
+            .rounding(style::ROUNDING)
             .build();
         if hovered {
             list.add_rect(min, max, FOCUS_EDGE)
-                .rounding(3.0)
+                .rounding(style::ROUNDING)
                 .thickness(1.5)
                 .build();
         }

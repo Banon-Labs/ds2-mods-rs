@@ -22,6 +22,7 @@ use ds2_build_recommender_core::model::{
 const STR_INDEX: usize = 4;
 use ds2_build_recommender_core::nav::{self, Control, Dir, Nudge, Shape};
 use ds2_build_recommender_core::weapons;
+use ds2_overlay::style;
 use hudhook::imgui::{DrawListMut, MouseButton, Ui};
 
 use crate::input::{Press, Reader};
@@ -1355,26 +1356,27 @@ fn on_frame() {
 // Drawing
 // ---------------------------------------------------------------------------------------------
 
-const PANEL_BG: [f32; 4] = [0.04, 0.04, 0.05, 0.95];
-const PANEL_EDGE: [f32; 4] = [0.55, 0.48, 0.34, 0.9];
-const DIM_COVER: [f32; 4] = [0.0, 0.0, 0.0, 0.45];
-const TITLE: [f32; 4] = [0.95, 0.88, 0.66, 1.0];
-const TEXT: [f32; 4] = [0.93, 0.92, 0.88, 1.0];
-const DIM: [f32; 4] = [0.62, 0.61, 0.58, 1.0];
-const DISABLED: [f32; 4] = [0.42, 0.42, 0.40, 1.0];
-const WARN: [f32; 4] = [1.0, 0.72, 0.30, 1.0];
-const GOOD: [f32; 4] = [0.55, 0.95, 0.60, 1.0];
-const FIELD_BG: [f32; 4] = [0.10, 0.12, 0.16, 1.0];
-const FIELD_EDIT: [f32; 4] = [0.14, 0.18, 0.26, 1.0];
-const CELL_BG: [f32; 4] = [0.12, 0.12, 0.13, 1.0];
-const CELL_ON: [f32; 4] = [0.30, 0.26, 0.16, 1.0];
-const CELL_HOVER: [f32; 4] = [0.20, 0.20, 0.22, 1.0];
-const LIST_BG: [f32; 4] = [0.07, 0.08, 0.10, 0.98];
-const ROW_HOVER: [f32; 4] = [1.0, 1.0, 1.0, 0.08];
-const FOCUS_EDGE: [f32; 4] = [0.95, 0.88, 0.66, 1.0];
+const PANEL_BG: [f32; 4] = style::PANEL_BG;
+const PANEL_EDGE: [f32; 4] = style::BRONZE;
+const DIM_COVER: [f32; 4] = style::DIM_COVER;
+const TITLE: [f32; 4] = style::TEXT;
+const TEXT: [f32; 4] = style::TEXT;
+const DIM: [f32; 4] = style::BRONZE;
+const DISABLED: [f32; 4] = style::ASH;
+const WARN: [f32; 4] = style::WARN_TEXT;
+const GOOD: [f32; 4] = style::BRONZE;
+const FIELD_BG: [f32; 4] = style::SLATE;
+const FIELD_EDIT: [f32; 4] = style::SLATE_EDIT;
+const CELL_BG: [f32; 4] = style::INK_1;
+const CELL_ON: [f32; 4] = style::INK_2;
+/// Between [`style::INK_1`] and [`style::INK_2`], so a hovered cell differs from a chosen one. Derived.
+const CELL_HOVER: [f32; 4] = style::rgb(0x29_27_24);
+const LIST_BG: [f32; 4] = style::PANEL_BG;
+const ROW_HOVER: [f32; 4] = style::INK_1;
+const FOCUS_EDGE: [f32; 4] = style::BRONZE;
 /// The D-pad cursor's ring, and the highlighted row of an open list.
-const CURSOR_EDGE: [f32; 4] = [0.45, 0.80, 1.0, 1.0];
-const LIST_CURSOR: [f32; 4] = [0.45, 0.80, 1.0, 0.22];
+const CURSOR_EDGE: [f32; 4] = style::BRONZE;
+const LIST_CURSOR: [f32; 4] = style::INK_2;
 const PAD: f32 = 14.0;
 const GAP: f32 = 8.0;
 
@@ -1400,7 +1402,7 @@ impl Canvas<'_> {
                     [max[0] + 3.0, max[1] + 3.0],
                     CURSOR_EDGE,
                 )
-                .rounding(4.0)
+                .rounding(style::ROUNDING)
                 .thickness(2.5)
                 .build();
         }
@@ -1423,14 +1425,14 @@ impl Canvas<'_> {
         self.list
             .add_rect(min, max, color)
             .filled(true)
-            .rounding(3.0)
+            .rounding(style::ROUNDING)
             .build();
     }
 
     fn edge(&self, min: [f32; 2], max: [f32; 2], color: [f32; 4]) {
         self.list
             .add_rect(min, max, color)
-            .rounding(3.0)
+            .rounding(style::ROUNDING)
             .thickness(1.5)
             .build();
     }
@@ -1589,7 +1591,7 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
         .list
         .add_rect([left, top], [left + width, top + height], PANEL_BG)
         .filled(true)
-        .rounding(6.0)
+        .rounding(style::ROUNDING)
         .build();
     canvas.edge([left, top], [left + width, top + height], PANEL_EDGE);
     // The panel's own surface swallows clicks, so a click on empty panel space is not "outside".
@@ -2587,7 +2589,7 @@ fn draw_confirm(
         .list
         .add_rect(min, max, LIST_BG)
         .filled(true)
-        .rounding(6.0)
+        .rounding(style::ROUNDING)
         .build();
     canvas.edge(min, max, WARN);
     canvas.targets.push((min, max, Action::Nothing));
@@ -2629,7 +2631,7 @@ fn draw_list(
         .list
         .add_rect(min, max, LIST_BG)
         .filled(true)
-        .rounding(3.0)
+        .rounding(style::ROUNDING)
         .build();
     canvas.edge(min, max, PANEL_EDGE);
     canvas.targets.push((min, max, Action::Nothing));
