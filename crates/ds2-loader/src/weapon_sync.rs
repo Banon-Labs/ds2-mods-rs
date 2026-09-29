@@ -1,7 +1,8 @@
-//! Reading `[weapon_sync]` and `[armor_sync]` out of `<Game>/ds2-mods.toml`: whether to cap our
-//! weapon levels, and our armour levels, to the other players' in multiplayer, and the key that
-//! turns each on and off in game. The two sections are read the same way and are independent:
-//! either feature can be on without the other.
+//! Reading `[weapon_sync]` and `[armor_sync]` out of `<Game>/ds2-mods.toml`.
+//!
+//! Whether to cap our weapon levels, and our armour levels, to the other players' in multiplayer,
+//! and the key that turns each on and off in game. The two sections are read the same way and are
+//! independent: either feature can be on without the other.
 //!
 //! Both features live in `ds2-weapon-sync`; this is only the switch, kept here for the same reason
 //! every other feature's is -- the config file belongs to the loader.
@@ -247,7 +248,12 @@ mod tests {
 
     #[test]
     fn test_cap_is_a_level_or_nothing() {
-        let read = |value: &str| weapons(&format!("[weapon_sync]\nenabled = true\ntest_cap = {value}\n")).test_cap;
+        let read = |value: &str| {
+            weapons(&format!(
+                "[weapon_sync]\nenabled = true\ntest_cap = {value}\n"
+            ))
+            .test_cap
+        };
         assert_eq!(read("3"), Some(3));
         assert_eq!(read("0"), Some(0));
         assert_eq!(read("10"), Some(10));

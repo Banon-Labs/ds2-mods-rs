@@ -95,7 +95,10 @@ pub fn remote_armor_highest(armor: &RemoteArmor, weapons: &RemoteWeapons) -> Opt
 /// `test_cap` stands in for a remote player at that level, so the mechanism can be exercised solo.
 /// It takes part in the maximum like any other player: it is not an override.
 pub fn cap(remotes: &[RemoteWeapons], test_cap: Option<u8>) -> Option<u8> {
-    highest_of(remotes.iter().filter_map(|records| remote_highest(records)), test_cap)
+    highest_of(
+        remotes.iter().filter_map(|records| remote_highest(records)),
+        test_cap,
+    )
 }
 
 /// Every other player's equipment, weapons and armour, as one check read it.
@@ -358,9 +361,10 @@ impl Ledger {
 // The equipped slots.
 // -------------------------------------------------------------------------------------------------
 
-/// One equipped slot, in inventory slot order: what the inventory entry says, and the two copies
-/// the character carries. For armour the record's ArmorParam id is given back as the item id it
-/// came from, so the three compare directly.
+/// One equipped slot, in inventory slot order: the inventory entry and the character's two copies.
+///
+/// For armour the record's `ArmorParam` id is given back as the item id it came from, so the three
+/// compare directly.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Slot {
     /// The equipped inventory entry's `(item, level)`, `None` when the slot is empty.
@@ -1183,7 +1187,10 @@ mod both_features {
                 for write in writes {
                     let entry = self.bag.get_mut(&write.index).unwrap();
                     assert_eq!(entry.0, write.item);
-                    assert!(kind.holds(entry.1), "{kind:?} wrote another feature's entry");
+                    assert!(
+                        kind.holds(entry.1),
+                        "{kind:?} wrote another feature's entry"
+                    );
                     entry.2 = write.to;
                     if write.restores() {
                         self.block.insert(write.index, (write.item, write.to));
@@ -1248,11 +1255,7 @@ mod both_features {
                 if let Some(index) = side.equipped[slot] {
                     let real = self.truth[&index];
                     let (_, record, live) = side.carried[slot].unwrap();
-                    assert_eq!(
-                        (record, live),
-                        (real, real),
-                        "{step}: {kind:?} slot {slot}"
-                    );
+                    assert_eq!((record, live), (real, real), "{step}: {kind:?} slot {slot}");
                 }
             }
         }
@@ -1389,7 +1392,10 @@ mod both_features {
             "every change was resweept: {}",
             w.armor.resweeps
         );
-        assert_eq!(w.weapons.resweeps, 0, "weapon sync off never pushed anything");
+        assert_eq!(
+            w.weapons.resweeps, 0,
+            "weapon sync off never pushed anything"
+        );
         w.check(&[]);
         w.assert_real(Kind::Armor, "steady after the restore");
     }

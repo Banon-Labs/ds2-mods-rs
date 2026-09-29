@@ -118,11 +118,10 @@ pub fn layout(display: [f32; 2]) -> Glyph {
 
 /// Tile `index` counted leftwards from the top-right corner: tile 0 half a tile in from both
 /// edges, each next one a tile and a quarter further left. Answers `(min, max, side)`.
-fn tile(display: [f32; 2], index: usize) -> ([f32; 2], [f32; 2], f32) {
+fn tile(display: [f32; 2], index: u8) -> ([f32; 2], [f32; 2], f32) {
     let size = size_for(display[1]);
     let margin = size * 0.5;
-    #[allow(clippy::cast_precision_loss)]
-    let shift = index as f32 * size * 1.25;
+    let shift = f32::from(index) * size * 1.25;
     let min = [display[0] - margin - size - shift, margin];
     let max = [min[0] + size, min[1] + size];
     (min, max, size)
@@ -133,7 +132,7 @@ fn tile(display: [f32; 2], index: usize) -> ([f32; 2], [f32; 2], f32) {
 const HELM_CENTRE: [f32; 2] = [0.5, 0.50];
 const HELM_RADIUS: f32 = 0.30;
 /// How many straight strokes approximate the dome.
-const HELM_DOME_SEGMENTS: usize = 10;
+const HELM_DOME_SEGMENTS: u8 = 10;
 const HELM_CHEEK_BOTTOM: f32 = 0.82;
 const HELM_CHEEK_IN: f32 = 0.06;
 const HELM_NOSE_BOTTOM: f32 = 0.74;
@@ -148,10 +147,9 @@ pub fn helm_layout(display: [f32; 2]) -> Glyph {
     let (min, max, size) = tile(display, 1);
     let at = |unit: [f32; 2]| [min[0] + unit[0] * size, min[1] + unit[1] * size];
     let width = HELM_STROKE * size;
-    let mut strokes = Vec::with_capacity(HELM_DOME_SEGMENTS + 4);
-    let point = |step: usize| {
-        #[allow(clippy::cast_precision_loss)]
-        let angle = core::f32::consts::PI * (1.0 + step as f32 / HELM_DOME_SEGMENTS as f32);
+    let mut strokes = Vec::with_capacity(usize::from(HELM_DOME_SEGMENTS) + 4);
+    let point = |step: u8| {
+        let angle = core::f32::consts::PI * (1.0 + f32::from(step) / f32::from(HELM_DOME_SEGMENTS));
         [
             HELM_CENTRE[0] + HELM_RADIUS * angle.cos(),
             HELM_CENTRE[1] + HELM_RADIUS * angle.sin(),
@@ -216,7 +214,10 @@ mod tests {
         ] {
             let swords = layout(display);
             let helm = helm_layout(display);
-            assert!(helm.max[0] < swords.min[0], "{display:?}: the tiles overlap");
+            assert!(
+                helm.max[0] < swords.min[0],
+                "{display:?}: the tiles overlap"
+            );
             assert!(helm.min[0] > display[0] / 2.0, "{display:?}");
             assert!((helm.min[1] - swords.min[1]).abs() < 1e-3, "same row");
             for stroke in &helm.strokes {

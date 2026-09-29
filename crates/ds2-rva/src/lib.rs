@@ -10593,7 +10593,7 @@ pub const FISTS_ITEM_ID: u32 = 3_400_000;
 /// The local character's armour update. RVA `0x0037_f640`, VA `0x14037f640`.
 ///
 /// `void (PlayerCtrl* rcx, const ArmourUpdateRequest* rdx)`, the request laid out exactly as
-/// [`CHR_WEAPON_UPDATE`]'s (`+0x00` piece `0..3` head chest hands legs, `+0x04` ArmorParam id or
+/// [`CHR_WEAPON_UPDATE`]'s (`+0x00` piece `0..3` head chest hands legs, `+0x04` `ArmorParam` id or
 /// `-1` for an empty slot, `+0x08` durability, `+0x0C` level). The body is the weapon update's
 /// with three differences: the record's category byte is 1, the record index is
 /// `FUN_14034e2e0(piece)` = `piece + 6` ([`ARMOR_RECORD_FIRST`]), and the packet is
@@ -10622,20 +10622,24 @@ pub const ARMOR_RECORD_FIRST: usize = 6;
 /// base as an index into [`ITEM_BAG_EQUIPPED_ENTRIES_OFFSET`]'s array.
 pub const ARMOR_INVENTORY_SLOT_FIRST: usize = 6;
 
-/// `ChrAsmEquip + 0x290 + k * 0x30`: armour piece `k`'s live entry. `+0x00` is its ArmorParam id
-/// (`0x140349a80` stores it, falling back to the naked pieces `11001100..11001103` when the id has
-/// no row), `+0x08` the ArmorParam row, `+0x18` the level, `+0x20` the ArmorReinforceParam row.
+/// `ChrAsmEquip + 0x290 + k * 0x30`: armour piece `k`'s live entry.
+///
+/// `+0x00` is its `ArmorParam` id (`0x140349a80` stores it, falling back to the naked pieces
+/// `11001100..11001103` when the id has no row), `+0x08` the `ArmorParam` row, `+0x18` the level,
+/// `+0x20` the `ArmorReinforceParam` row.
 pub const CHR_ASM_EQUIP_ARMOR_OFFSET: usize = 0x290;
 /// Bytes per live armour entry.
 pub const CHR_ASM_EQUIP_ARMOR_STRIDE: usize = 0x30;
-/// Live armour entry `+0x18` (`ChrAsmEquip + 0x2a8 + k * 0x30`), `u8`: the level the defense code
-/// reads. `0x1403486b0` hands it, with the reinforce row at `+0x20`, to the physical defense read
+/// Live armour entry `+0x18` (`ChrAsmEquip + 0x2a8 + k * 0x30`), `u8`: what defense reads.
+///
+/// `0x1403486b0` hands it, with the reinforce row at `+0x20`, to the physical defense read
 /// `0x14034dbb0` (from `0x140380070`) and the elemental cut read `0x14034dda0` (from
 /// `0x140381350`); both answer `base + (max - base) * clamp(level / row[+0x60], 0, 1)`.
 pub const CHR_ASM_EQUIP_ARMOR_LEVEL_OFFSET: usize = 0x18;
 
-/// An armour item's ArmorParam id is its ItemParam id minus this. `ItemParam +0x18` is exactly
-/// that for all 461 armour rows of the shipped regulation (`scripts/ds2-armor-sync-data.py`), and
+/// An armour item's `ArmorParam` id is its `ItemParam` id minus this.
+///
+/// `ItemParam +0x18` is exactly that for all 461 armour rows of the shipped regulation (`scripts/ds2-armor-sync-data.py`), and
 /// the live read above showed it for four equipped pieces.
 pub const ARMOR_PARAM_ID_FROM_ITEM_ID: u32 = 10_000_000;
 

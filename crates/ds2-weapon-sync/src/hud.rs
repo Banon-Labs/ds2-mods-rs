@@ -29,6 +29,11 @@ const SHADOW: [f32; 4] = [0.0, 0.0, 0.0, 0.85];
 /// How much wider the outline is than the stroke it sits under, in pixels.
 const SHADOW_EXTRA: f32 = 2.0;
 
+/// A panel's draw function, as `ds2-overlay` takes it.
+type DrawFn = fn(&Ui);
+/// A panel's visibility check.
+type VisibleFn = fn() -> bool;
+
 /// One feature's sign: what it is called in the log, how it is laid out, and its counters.
 struct Sign {
     kind: Kind,
@@ -119,13 +124,7 @@ fn draw(s: &Sign, ui: &Ui) {
     if s.announce_next_draw.swap(false, Ordering::AcqRel) {
         log(format_args!(
             "{prefix} hud: {} on screen (draw #{draws}) display={:.0}x{:.0} tile=({:.0},{:.0})-({:.0},{:.0})",
-            s.name,
-            display[0],
-            display[1],
-            glyph.min[0],
-            glyph.min[1],
-            glyph.max[0],
-            glyph.max[1]
+            s.name, display[0], display[1], glyph.min[0], glyph.min[1], glyph.max[0], glyph.max[1]
         ));
     }
     paint(ui, &glyph);
@@ -171,7 +170,7 @@ pub(crate) fn install(kind: Kind) -> bool {
     if let Some(sink) = logger() {
         ds2_overlay::set_logger(sink);
     }
-    let (draw, visible): (fn(&Ui), fn() -> bool) = match kind {
+    let (draw, visible): (DrawFn, VisibleFn) = match kind {
         Kind::Weapon => (draw_swords, visible_swords),
         Kind::Armor => (draw_helm, visible_helm),
     };

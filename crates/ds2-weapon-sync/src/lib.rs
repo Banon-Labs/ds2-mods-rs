@@ -108,15 +108,18 @@ pub const ARMOR_DEFAULT_KEY: &str = "F5";
 
 pub use policy::Kind;
 
-/// The spoken line a weapon sync toggle plays: "Weapon sync, on." or "Weapon sync, off.", 16 kHz
-/// 16-bit mono WAV, rendered with Piper's `en_US-lessac-medium`, the voice `ds2-voice-chat`'s
-/// English clips use.
+/// The spoken line a weapon sync toggle plays.
+///
+/// "Weapon sync, on." or "Weapon sync, off.", 16 kHz 16-bit mono WAV, rendered with Piper's
+/// `en_US-lessac-medium`, the voice `ds2-voice-chat`'s English clips use.
 #[must_use]
 pub const fn clip(on: bool) -> &'static [u8] {
     clip_for(Kind::Weapon, on)
 }
 
-/// The spoken line a toggle of either feature plays. Armour's are "Armor sync, on." and "Armor
+/// The spoken line a toggle of either feature plays.
+///
+/// Armour's are "Armor sync, on." and "Armor
 /// sync, off.", rendered the same way (`piper -m en_US-lessac-medium`, then `ffmpeg -ar 16000 -ac 1
 /// -c:a pcm_s16le`).
 #[must_use]

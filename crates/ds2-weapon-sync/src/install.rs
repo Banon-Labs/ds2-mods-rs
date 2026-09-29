@@ -194,7 +194,7 @@ impl Feature {
     }
 
     /// The id the update and the record carry for an inventory item: the item id for a weapon,
-    /// the ArmorParam id for armour (`ItemParam +0x18`, which is the item id minus
+    /// the `ArmorParam` id for armour (`ItemParam +0x18`, which is the item id minus
     /// [`ds2_rva::ARMOR_PARAM_ID_FROM_ITEM_ID`] for every armour row).
     fn request_item(&self, item: u32) -> u32 {
         match self.kind {
@@ -227,8 +227,12 @@ pub(crate) static WEAPONS: Feature =
     Feature::new(Kind::Weapon, crate::LOG_PREFIX, "weapon sync", "weapons");
 
 /// Armour sync.
-pub(crate) static ARMOR: Feature =
-    Feature::new(Kind::Armor, crate::ARMOR_LOG_PREFIX, "armor sync", "armor pieces");
+pub(crate) static ARMOR: Feature = Feature::new(
+    Kind::Armor,
+    crate::ARMOR_LOG_PREFIX,
+    "armor sync",
+    "armor pieces",
+);
 
 pub(crate) fn feature(kind: Kind) -> &'static Feature {
     match kind {
@@ -1268,7 +1272,10 @@ fn check(f: &Feature, local: usize, remotes: &[Remote]) {
         ));
     }
     let (action, previous) = {
-        let mut tracker = f.tracker.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut tracker = f
+            .tracker
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let previous = tracker.applied();
         (tracker.step(local, cap), previous)
     };
@@ -1380,12 +1387,12 @@ fn push_slots(f: &Feature, bag: usize, player: usize, cap: Option<u8>) -> Vec<St
     let update: EquipUpdate = unsafe { std::mem::transmute::<usize, EquipUpdate>(raw) };
     let now = equipped(f, bag, player);
     let mut pushed = Vec::new();
-    for slot in 0..f.kind.slots() {
+    for (slot, carried) in now.iter().enumerate() {
         let Some(item) = inventory_item(bag, f.inventory_slot(slot)) else {
             continue;
         };
         let level = policy::clamp(item.level, cap);
-        if now[slot].record == Some((item.item, level)) && now[slot].live == Some(level) {
+        if carried.record == Some((item.item, level)) && carried.live == Some(level) {
             continue;
         }
         // Two calls, not one, and the first is what makes the second land. The record table's
