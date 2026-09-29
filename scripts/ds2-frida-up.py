@@ -39,6 +39,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import shutil
 import signal
 import socket
@@ -276,6 +277,10 @@ def clear_staged_agent() -> bool:
     return not staged.exists()
 
 
+# `ds2-weapon-sync: world player=0x7fffd9599a40 built with: ...`, and the armor sibling's twin.
+WORLD_PLAYER_WITNESS = re.compile(r"ds2-(?:weapon|armor)-sync: world player=0x([0-9a-fA-F]+)")
+
+
 def world_is_up() -> tuple[bool, str]:
     """Whether the game has a player in a world yet.
 
@@ -315,6 +320,17 @@ def world_is_up() -> tuple[bool, str]:
     # the player every few seconds and was refused as "still loading".
     for line in reversed(text.splitlines()):
         if "ds2-net-effects: applied effect=" in line and " ctrl=0x" in line:
+            return True, line.strip()
+    # A witness as strong as the net-effects one, for the same reason: `ds2-weapon-sync` (and
+    # `ds2-armor-sync`, same shape) writes `world player=0x... built with: ...` from `check()` only
+    # after it read a non-null `GameManagerImp -> PlayerCtrl` and walked that player's inventory
+    # bag, and no title screen or load has a local player to read. `player=0x0` is refused: a zero
+    # pointer is the one value that proves nothing. Added 2026-09-28: a `--weapon-sync` run
+    # autoloaded by `ds2-continue` (`dest=0x57-LoadProfile`, no `by=start-ingame`) was standing in
+    # a world with this line in the log and was refused as "still loading".
+    for line in reversed(text.splitlines()):
+        match = WORLD_PLAYER_WITNESS.search(line)
+        if match and int(match.group(1), 16) != 0:
             return True, line.strip()
     # THE SECOND WITNESS, because the first one is only available when the overlay is on.
     #
@@ -638,6 +654,48 @@ def world_gate_selftest() -> list[tuple[str, bool]]:
             results.append(
                 ("a net-effects apply on the player's controller passes", ready and "ctrl=" in detail)
             )
+
+            weapon_line = (
+                "ds2-weapon-sync: world player=0x7fffd9599a40 built with: "
+                "inventory=[+10,+5,+5,+10,-,-]\n"
+            )
+            log.write_text(weapon_line, encoding="utf-8")
+            ready, detail = world_is_up()
+            results.append(
+                (
+                    "a weapon-sync world line with a nonzero player passes",
+                    ready and "weapon-sync" in detail,
+                )
+            )
+
+            log.write_text(
+                "ds2-armor-sync: world player=0x7fffd9599a40 built with: head=-\n", encoding="utf-8"
+            )
+            ready, detail = world_is_up()
+            results.append(
+                (
+                    "an armor-sync world line with a nonzero player passes",
+                    ready and "armor-sync" in detail,
+                )
+            )
+
+            log.write_text(
+                "ds2-weapon-sync: world player=0x0 built with: inventory=[-,-,-,-,-,-]\n"
+                "ds2-armor-sync: world player=0x0000000000000000 built with: head=-\n",
+                encoding="utf-8",
+            )
+            ready, detail = world_is_up()
+            results.append(
+                ("a world line with player=0x0 refuses", not ready and "roster" in detail)
+            )
+
+            globals_["game_pid"] = lambda: None
+            log.write_text(weapon_line, encoding="utf-8")
+            ready, detail = world_is_up()
+            results.append(
+                ("a dead game beats a weapon-sync world line", not ready and "running" in detail)
+            )
+            globals_["game_pid"] = lambda: 1
 
             log.unlink()
             ready, detail = world_is_up()
