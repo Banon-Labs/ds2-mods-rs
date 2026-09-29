@@ -620,6 +620,32 @@ CASES = [
         "that named a defect and changed nothing",
     ),
     Case(
+        "diagnosis_delegated_to_subagent.jsonl",
+        None,
+        "2026-09-28: the turn named the cause and launched a worktree subagent to make the fix -- "
+        "must NOT halt. Handing the fix to an agent that is making it is acting on the diagnosis, "
+        "and an edit here would have collided with that agent's",
+    ),
+    Case(
+        "diagnosis_delegated_then_halted_retry.jsonl",
+        None,
+        "the same turn, halted once under the old rule, replying across the Stop-hook feedback: "
+        "`split_turns` reads that feedback as a new prompt, so the delegation has to be read over "
+        "the logical turn back to the user's last typed prompt or the reply can never pass",
+    ),
+    Case(
+        "diagnosis_one_line_blocker.jsonl",
+        None,
+        "the verbatim one-line retry the halt reason asks for ('say in one line what blocks it'), "
+        "with no subagent in the turn -- must NOT halt, or the rule's own escape hatch is unreachable",
+    ),
+    Case(
+        "diagnosis_no_fix_no_delegation.jsonl",
+        "the diagnosis is not the deliverable",
+        "the negative: a defect named across two lines, nothing written, no subagent, no blocker -- "
+        "still halts",
+    ),
+    Case(
         "status_table.jsonl",
         "table of your OWN PROGRESS",
         "the turn closes on the save-picker table of 2026-09-23 -- `done, host-testable` / "

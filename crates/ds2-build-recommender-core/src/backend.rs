@@ -138,8 +138,47 @@ pub struct GeneratedBuild {
     /// Why the armour is not four pieces, when it is not: the load cap left a slot, or every slot,
     /// bare. Never silent.
     pub armor_note: Option<String>,
+    /// The spells the build was asked to cast, by soulsplanner key, in the order asked: what Apply
+    /// attunes. Its stats meet every one's requirements and its ATT holds their slots.
+    pub spells: Vec<String>,
+    /// The same spells by display name.
+    pub spell_names: Vec<String>,
+    /// The attunement slots the spells cost together.
+    pub slots_used: u16,
+    /// The attunement slots the build's ATT gives.
+    pub slots: u16,
+    /// The best catalyst for each school of the spells, in spell-category order.
+    pub catalysts: Vec<CatalystPick>,
     /// Whether this came from [`StubBackend`], so the panel can say its numbers mean nothing.
     pub stub: bool,
+}
+
+/// A spell a generated build can be asked to cast: the script's `--spells`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpellRow {
+    /// The soulsplanner key, `Soul_Spear`: what a build names and what Apply attunes.
+    pub key: String,
+    /// The display name.
+    pub name: String,
+    /// The attunement slots it costs.
+    pub slots: u16,
+    /// Its intelligence requirement.
+    pub intelligence: u16,
+    /// Its faith requirement.
+    pub faith: u16,
+}
+
+/// The catalyst a generated build is recommended for one school of its spells.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CatalystPick {
+    /// `sorcery`, `miracle`, `pyromancy` or `hex`.
+    pub school: String,
+    /// The catalyst's display name.
+    pub name: String,
+    /// Its full-upgrade cast power in the school's element at the build's stats.
+    pub power: f32,
+    /// The catalyst that would have cast harder had the build met its requirements, when one would.
+    pub passed_over: Option<String>,
 }
 
 /// The questions the panel asks. Every answer is for the soul level the caller passes.
@@ -178,12 +217,11 @@ pub trait RecommenderBackend: Sync {
     fn similar(&self, stats: &[u16; STAT_COUNT], sl: u16, k: u16, status: StatusFilter) -> Outcome;
     /// How far the damage model agrees with real builds.
     fn calibration(&self) -> Calibration;
-    /// A whole build for `weapon` held in `grip`, in armour unless `allow_naked`, from the starting
-    /// class `class` names (`sorcerer`) or, with `None`, whichever class does best. `None` when no
-    /// such class can wield it at `sl` that way.
-    ///
-    /// A build for a live character must name its class: the game has no class change, and a
-    /// build counted from another class's base can put stats under the character's own.
+    /// A whole build for `weapon` held in `grip`, in armour unless `allow_naked`, that can attune
+    /// and cast every one of `spells` (soulsplanner keys; a repeat is a second copy). `None` when
+    /// no class can wield it and meet the spells' requirements and slots at `sl` that way, or a
+    /// spell is unknown. The build is from the starting class `class` names (`sorcerer`) or, with
+    /// `None`, whichever class does best.
     // DEBT: ds2-mods-rs-59p7 -- the class made this eight arguments; bundle the per-build options.
     #[allow(clippy::too_many_arguments)]
     fn generate_build(
@@ -194,8 +232,14 @@ pub trait RecommenderBackend: Sync {
         objective: Objective,
         allow_naked: bool,
         grip: Grip,
+        spells: &[String],
         class: Option<&str>,
     ) -> Option<GeneratedBuild>;
+    /// The spells [`Self::generate_build`] can be asked for, in the data's order. The default has
+    /// no spell data and offers none.
+    fn spells(&self) -> Vec<SpellRow> {
+        Vec::new()
+    }
     /// How many weapons `stats` wield, where that sits among the builds nearest them at `sl`, and
     /// the load `armor` (head to legs) and `rings`, by name, leave for weapons. `None` when this
     /// backend cannot say, which is the default: the stub has no neighbours to rank against.
@@ -364,11 +408,18 @@ pub fn generate(
         state.objective,
         state.allow_naked,
         state.grip,
+        &state.spells,
         class.map(StartingClass::key),
     ) else {
-        return Err(vec![match class {
-            Some(class) => format!("a {} cannot wield it at this soul level", class.key()),
-            None => "no class can wield it at this soul level".to_owned(),
+        let who = class.map_or_else(
+            || "no class".to_owned(),
+            |class| format!("a {}", class.key()),
+        );
+        let can = if class.is_some() { "cannot" } else { "can" };
+        return Err(vec![if state.spells.is_empty() {
+            format!("{who} {can} wield it at this soul level")
+        } else {
+            format!("{who} {can} wield it and cast the chosen spells at this soul level")
         }]);
     };
     if let Some(class) = class
@@ -489,9 +540,10 @@ const NO_COVENANT: &str = "No_Covenant";
 /// Turn a generated build into what `ds2-build-import` applies: a planner [`Build`], plus the extra
 /// grants its fixed slots cannot hold.
 ///
-/// The build wears the suggested rings, holds the primary in the right hand, and wears the armour.
-/// The extras are everything else the build lists: the second and third copy of each suggested
-/// ring, one of each common ring, and every recommended weapon at its ranked infusion. They are
+/// The build wears the suggested rings, holds the primary in the right hand, wears the armour and
+/// attunes its spells. The extras are everything else the build lists: the second and third copy
+/// of each suggested ring, one of each common ring, every recommended weapon at its ranked
+/// infusion, and each recommended catalyst uninfused. They are
 /// granted through the same per-name count as the build's own gear, so a player who already holds
 /// a copy is given one fewer.
 pub fn to_import(generated: &GeneratedBuild) -> (Build, Vec<(String, Infusion)>) {
@@ -527,7 +579,7 @@ pub fn to_import(generated: &GeneratedBuild) -> (Build, Vec<(String, Infusion)>)
         armor,
         weapons: hands,
         rings,
-        spells: Vec::new(),
+        spells: generated.spells.clone(),
         items: Vec::new(),
         stats,
     };
@@ -548,6 +600,12 @@ pub fn to_import(generated: &GeneratedBuild) -> (Build, Vec<(String, Infusion)>)
         .chain(&generated.weapons_2h_only)
     {
         extras.push((row.weapon.clone(), row.infusion));
+    }
+    for pick in &generated.catalysts {
+        let catalyst = (pick.name.clone(), Infusion::None);
+        if !extras.contains(&catalyst) {
+            extras.push(catalyst);
+        }
     }
     (build, extras)
 }
@@ -728,8 +786,14 @@ impl RecommenderBackend for StubBackend {
         _objective: Objective,
         allow_naked: bool,
         grip: Grip,
+        spells: &[String],
         class: Option<&str>,
     ) -> Option<GeneratedBuild> {
+        // The stub offers no spells (`spells` is the trait's empty default), so none can be asked
+        // of it; a caller that asks anyway gets no build rather than one that ignores them.
+        if !spells.is_empty() {
+            return None;
+        }
         // The stub's one build is a Deprived's; it has nothing to offer any other class.
         if class.is_some_and(|class| !class.eq_ignore_ascii_case("deprived")) {
             return None;
@@ -757,6 +821,11 @@ impl RecommenderBackend for StubBackend {
                 vec!["Desert Sorceress Hood".to_owned()]
             },
             armor_note: None,
+            spells: Vec::new(),
+            spell_names: Vec::new(),
+            slots_used: 0,
+            slots: 1,
+            catalysts: Vec::new(),
             stub: true,
         })
     }
@@ -964,9 +1033,10 @@ mod tests {
                 o: Objective,
                 n: bool,
                 g: Grip,
+                s: &[String],
                 c: Option<&str>,
             ) -> Option<GeneratedBuild> {
-                StubBackend.generate_build(w, i, sl, o, n, g, c)
+                StubBackend.generate_build(w, i, sl, o, n, g, s, c)
             }
         }
         fn rows_of(outcome: Outcome) -> Vec<ResultRow> {
@@ -1029,9 +1099,10 @@ mod tests {
                 o: Objective,
                 naked: bool,
                 g: Grip,
+                s: &[String],
                 c: Option<&str>,
             ) -> Option<GeneratedBuild> {
-                StubBackend.generate_build(w, i, sl, o, naked, g, c)
+                StubBackend.generate_build(w, i, sl, o, naked, g, s, c)
             }
         }
         let state = PanelState {
@@ -1088,9 +1159,10 @@ mod tests {
                 o: Objective,
                 naked: bool,
                 g: Grip,
+                s: &[String],
                 _class: Option<&str>,
             ) -> Option<GeneratedBuild> {
-                let mut build = StubBackend.generate_build(w, i, sl, o, naked, g, None)?;
+                let mut build = StubBackend.generate_build(w, i, sl, o, naked, g, s, None)?;
                 // The log's Warrior: game order [22, 6, 11, 6, 28, 42, 5, 5, 18].
                 build.class = "Warrior".to_owned();
                 build.stats = planner_order(&[22, 6, 11, 6, 28, 42, 5, 5, 18]);
@@ -1149,9 +1221,10 @@ mod tests {
                 o: Objective,
                 naked: bool,
                 g: Grip,
+                s: &[String],
                 class: Option<&str>,
             ) -> Option<GeneratedBuild> {
-                let mut build = Careless.generate_build(w, i, sl, o, naked, g, class)?;
+                let mut build = Careless.generate_build(w, i, sl, o, naked, g, s, class)?;
                 build.class = "Sorcerer".to_owned();
                 Some(build)
             }

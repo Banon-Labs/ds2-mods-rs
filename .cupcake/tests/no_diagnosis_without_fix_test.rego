@@ -528,3 +528,71 @@ test_deferral_reason_quotes_the_clause_and_demands_the_step if {
 	contains(d.reason, "Take that step now, in this turn")
 	contains(d.reason, "blocks it")
 }
+
+# --- delegation and the one-line blocker (2026-09-28) -------------------------------------------
+
+diag_line(o) := concat("", [
+	"DIAGFACTS|diagnosis=", object.get(o, "diagnosis", ""),
+	"|fixed=0|asked=0|blocked=0",
+	"|promise=", object.get(o, "promise", ""),
+	"|edited=0|handback=|handbackkind=|userneed=0|didwork=1|extblocked=0|carried=0",
+	"|unread=|consulted=0|future=0",
+	"|deferral=", object.get(o, "deferral", ""),
+	"|delegated=", object.get(o, "delegated", "0"),
+	"|oneline=", object.get(o, "oneline", "0"),
+])
+
+handed_off := "The log confirms the cause; handing the fix to a second background agent."
+
+one_line_blocker := "The fix is being made by the background agent in its own worktree, so I can't edit those same files here without the two colliding ..."
+
+# Verbatim: the turn named the cause and launched a worktree subagent to fix it. Launching the
+# fixing agent is acting on the diagnosis; it was halted for changing no file here.
+test_allow_when_the_fix_was_handed_to_a_subagent if {
+	halts := guard.halt with input as stop_event(diag_line({"diagnosis": handed_off, "delegated": "1"}))
+	count(halts) == 0
+}
+
+# Verbatim: the one-line retry the halt reason asked for. It must pass, or the escape hatch the
+# reason names is unreachable and no reply can satisfy the guard.
+test_allow_the_one_line_blocker_the_reason_asks_for if {
+	halts := guard.halt with input as stop_event(diag_line({"diagnosis": one_line_blocker, "oneline": "1"}))
+	count(halts) == 0
+}
+
+# The negative: a defect named, nothing written, no subagent, no blocker. Still halts.
+test_halt_when_no_edit_no_delegation_and_no_blocker if {
+	halts := guard.halt with input as stop_event(diag_line({"diagnosis": handed_off}))
+	"DS2-MODS-NO-DIAGNOSIS-WITHOUT-FIX" in rule_ids(halts)
+}
+
+# A line missing the two new fields beside a diagnosis is degraded: it halts rather than buys
+# silence, like every other fact here.
+test_halt_when_delegated_and_oneline_are_missing if {
+	halts := guard.halt with input as stop_event(facts(handed_off, "0", "0", "0"))
+	"DS2-MODS-NO-DIAGNOSIS-WITHOUT-FIX" in rule_ids(halts)
+}
+
+# The promissory reason tells the agent to start a subagent when the work is too large for the
+# turn, so doing that must clear it.
+test_allow_a_promissory_closer_carried_by_a_subagent if {
+	halts := guard.halt with input as stop_event(diag_line({"promise": "Fixing both: apply and import.", "delegated": "1"}))
+	count(halts) == 0
+}
+
+test_halt_a_promissory_closer_with_no_subagent if {
+	halts := guard.halt with input as stop_event(diag_line({"promise": "Fixing both: apply and import."}))
+	"DS2-MODS-NO-PROMISSORY-CLOSER" in rule_ids(halts)
+}
+
+# The deferral reason also offers the one-line blocker.
+test_allow_a_deferral_said_as_a_one_line_blocker if {
+	halts := guard.halt with input as stop_event(diag_line({"deferral": "the next step is blocked on the run.", "oneline": "1"}))
+	count(halts) == 0
+}
+
+# A subagent does not excuse a deferred investigation: the read is one tool call away here.
+test_halt_a_deferral_even_with_a_subagent if {
+	halts := guard.halt with input as stop_event(diag_line({"deferral": "which is where I look next.", "delegated": "1"}))
+	"DS2-MODS-NO-DEFERRED-INVESTIGATION" in rule_ids(halts)
+}

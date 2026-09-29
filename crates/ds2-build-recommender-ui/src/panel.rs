@@ -156,6 +156,8 @@ enum List {
     Weapon,
     Infusion,
     Class,
+    /// The spells Generate Build must cast. Choosing a row toggles it and leaves the list open.
+    Spell,
 }
 
 /// What the lower half shows.
@@ -187,6 +189,10 @@ enum Action {
     ToggleTwoHand,
     /// Generate Build: whether the build may leave the armour off.
     ToggleAllowNaked,
+    /// Generate Build: add or take out one spell, by index into the backend's spell table.
+    ToggleSpell(usize),
+    /// Generate Build: no spells.
+    ClearSpells,
     ToggleBleed,
     TogglePoison,
     Run,
@@ -324,6 +330,36 @@ impl Panel {
                         .map(|class| (class.to_owned(), Action::ChooseClass(Some(class)))),
                 )
                 .collect(),
+            List::Spell => {
+                let spells = backend().spells();
+                if spells.is_empty() {
+                    return Vec::new();
+                }
+                let chosen = &self.state.spells;
+                std::iter::once((
+                    format!("No spells ({} chosen)", chosen.len()),
+                    Action::ClearSpells,
+                ))
+                .chain(spells.iter().enumerate().map(|(index, spell)| {
+                    let mark = if chosen.contains(&spell.key) {
+                        "[x]"
+                    } else {
+                        "[ ]"
+                    };
+                    (
+                        format!(
+                            "{mark} {}  {} slot{}  INT {} FTH {}",
+                            spell.name,
+                            spell.slots,
+                            if spell.slots == 1 { "" } else { "s" },
+                            spell.intelligence,
+                            spell.faith
+                        ),
+                        Action::ToggleSpell(index),
+                    )
+                }))
+                .collect()
+            }
         }
     }
 
@@ -367,6 +403,7 @@ impl Panel {
             Control::Results => format!("results scroll={}", self.results_scroll),
             Control::Generate => "generate build".to_owned(),
             Control::AllowNaked => format!("allow-no-armor={}", state.allow_naked),
+            Control::Spells => format!("spells={:?}", state.spells),
             Control::ShowToggle => format!("showing {:?}", self.shown),
             Control::Apply => format!("apply (build ready={})", self.generated.is_some()),
         }
@@ -414,6 +451,7 @@ impl Panel {
             Control::Results => None,
             Control::Generate => Some(Action::Generate),
             Control::AllowNaked => Some(Action::ToggleAllowNaked),
+            Control::Spells => Some(Action::OpenList(List::Spell)),
             Control::ShowToggle => Some(Action::Show(if self.shown == Shown::Build {
                 Shown::Answer
             } else {
@@ -495,7 +533,7 @@ impl Panel {
     fn open_list_cursor(&mut self, list: List) {
         let rows = self.list_rows(list);
         let current = match list {
-            List::Weapon => None,
+            List::Weapon | List::Spell => None,
             List::Infusion => rows
                 .iter()
                 .position(|(_, action)| *action == Action::ChooseInfusion(self.state.infusion)),
@@ -756,6 +794,18 @@ impl Panel {
                     self.state.grip,
                     build.stub
                 ));
+                if !build.spells.is_empty() {
+                    log_line(format_args!(
+                        "{LOG_PREFIX} generated spells={:?} slots {}/{} INT {} FTH {} \
+                         catalysts={:?}",
+                        build.spells,
+                        build.slots_used,
+                        build.slots,
+                        build.stats[7],
+                        build.stats[8],
+                        build.catalysts
+                    ));
+                }
                 self.generated_flex =
                     ask_flexibility(&build.stats, build.sl, &build.armor, &build.suggested_rings);
                 self.generated = Some(build);
@@ -814,6 +864,8 @@ impl Panel {
                 | Action::ChooseWeapon(_)
                 | Action::ChooseInfusion(_)
                 | Action::ChooseClass(_)
+                | Action::ToggleSpell(_)
+                | Action::ClearSpells
                 | Action::Nothing
         ) {
             self.list = None;
@@ -871,6 +923,21 @@ impl Panel {
                 self.changed();
             }
             Action::ToggleAllowNaked => self.state.allow_naked ^= true,
+            Action::ToggleSpell(index) => {
+                if let Some(spell) = backend().spells().get(index) {
+                    let chosen = self.state.toggle_spell(&spell.key);
+                    log_line(format_args!(
+                        "{LOG_PREFIX} spell {} {} -> spells={:?}",
+                        spell.key,
+                        if chosen { "chosen" } else { "not chosen" },
+                        self.state.spells
+                    ));
+                }
+            }
+            Action::ClearSpells => {
+                self.state.spells.clear();
+                log_line(format_args!("{LOG_PREFIX} spells cleared"));
+            }
             Action::ToggleTwoHand => {
                 self.state.two_hand ^= true;
                 self.changed();
@@ -1676,6 +1743,16 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
         Action::ToggleAllowNaked,
         Control::AllowNaked,
     ) + GAP;
+    let spells_x = x;
+    let spells_label = format!("Spells ({}) v", panel.state.spells.len());
+    x = canvas.button(
+        x,
+        footer_y,
+        &spells_label,
+        panel.list == Some(List::Spell),
+        Some(Action::OpenList(List::Spell)),
+        Some(Control::Spells),
+    ) + GAP;
     if panel.generated.is_some() {
         let (label, shown) = if panel.shown == Shown::Build {
             ("Show results", Shown::Answer)
@@ -1734,6 +1811,16 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
                 canvas.width("Curved Greatsword") + 60.0,
                 "",
             ),
+            // Above the footer, which sits at the bottom: as tall as `draw_list` will draw it.
+            List::Spell => {
+                let shown = rows.len().clamp(1, LIST_VISIBLE) as f32;
+                let list_height = (line + 6.0) * shown + 8.0;
+                (
+                    [spells_x, footer_y - 2.0 - list_height],
+                    canvas.width("[x] Promised Walk of Peace  2 slots  INT 30 FTH 40") + 40.0,
+                    "no spell data: the stub backend offers none",
+                )
+            }
         };
         let highlighted = panel.list_cursor;
         list_rect = Some(draw_list(
@@ -2204,6 +2291,49 @@ fn draw_build(
         );
         y += step;
     }
+    // The spells Apply attunes, the slots they take of what ATT gives, and what to cast them with.
+    if !build.spells.is_empty() {
+        canvas.text(
+            [min[0], y],
+            TEXT,
+            &clip(
+                canvas.ui,
+                &format!(
+                    "Spells: {} ({} of {} attunement slots)",
+                    build.spell_names.join(", "),
+                    build.slots_used,
+                    build.slots
+                ),
+                max[0] - min[0],
+            ),
+        );
+        y += step;
+        let catalysts = if build.catalysts.is_empty() {
+            "none these stats can wield casts them".to_owned()
+        } else {
+            build
+                .catalysts
+                .iter()
+                .map(|pick| {
+                    let over = pick.passed_over.as_ref().map_or(String::new(), |over| {
+                        format!(" ({over} casts harder; stats too low)")
+                    });
+                    format!("{} {} {:.0}{over}", pick.school, pick.name, pick.power)
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        canvas.text(
+            [min[0], y],
+            TEXT,
+            &clip(
+                canvas.ui,
+                &format!("Catalyst: {catalysts}"),
+                max[0] - min[0],
+            ),
+        );
+        y += step;
+    }
     y += 4.0;
     let half = (max[0] - min[0]) * 0.5;
     let weapon_text = |row: &ResultRow| {
@@ -2271,6 +2401,7 @@ fn draw_confirm(
         .map(|pair| &pair[0])
         .chain(&import.armor)
         .chain(&import.rings)
+        .chain(&import.spells)
         .filter(|name| !ds2_build_import_core::is_empty_slot(name))
         .count()
         + extras.len();

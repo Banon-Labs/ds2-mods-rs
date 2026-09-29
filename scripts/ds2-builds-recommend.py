@@ -152,6 +152,12 @@ class Data:
             if m:
                 self.spell_req[key] = {"intelligence": int(m["intReq"] or 0), "faith": int(m["faithReq"] or 0)}
         self.mm = mm
+        # Filled from the regulation by apply_regulation (regulation_spells, regulation_catalysts);
+        # empty when it is unreadable or --site-numbers keeps the site's, and then no build is
+        # recommended a catalyst.
+        self.spell_category = {}  # spell key -> SpellParam.spellCategory
+        self.catalysts = {}  # weapon key -> see regulation_catalysts
+        self.cast_bonus = {}  # element -> PhysicalStatsPerLevelStatValuesParam column, rows 0-99
         # weapon class (Dagger, Greatsword, ...): MugenMonkey only, joined by normalized name
         mm_w = {}
         for k, v in mm["darkSouls2WeaponDetails"].items():
@@ -297,6 +303,24 @@ def spell_ok(data: Data, spell: str, eff: dict) -> bool:
 
 def slots_of(data: Data, eff: dict) -> int:
     return data.att_slots[min(eff["attunement"], len(data.att_slots) - 1)]
+
+
+def spell_floors(data: Data, spells) -> dict | None:
+    """The least each stat may be for a build to attune and cast `spells` (keys; a repeat is a
+    second copy, which costs its slots again): each requirement stat at the highest any of them
+    needs, and ATT at the least whose attunement slots hold their summed slot cost. None when no
+    ATT holds them. Slots come from ATT alone: a Southern Ritual Band's extra slots are not
+    counted, as optimize_build counts no ring's stat bonus either."""
+    need = {}
+    for s in spells:
+        for stat, v in data.spell_req[s].items():
+            need[stat] = max(need.get(stat, 0), v)
+    cost = sum(data.spells[s]["slots"] for s in spells)
+    att = next((a for a, n in enumerate(data.att_slots) if n >= cost), None)
+    if att is None:
+        return None
+    need["attunement"] = att
+    return need
 
 
 def keep(data: Data, b: Build) -> str | None:
@@ -751,7 +775,8 @@ def apply_regulation(data: Data) -> str:
         d = ex.decode_params(reg.DEFAULT_REGULATION, ex.DEFAULT_DEFS, {
             "WeaponParam": "WEAPON_PARAM", "WeaponReinforceParam": "WEAPON_REINFORCE_PARAM",
             "WeaponStatsAffectParam": "WEAPON_STATS_AFFECT_PARAM",
-            "PhysicalStatsPerLevelStatValuesParam": "PHYS_STATS_PER_LEVEL_STAT_PARAM"})
+            "PhysicalStatsPerLevelStatValuesParam": "PHYS_STATS_PER_LEVEL_STAT_PARAM",
+            "SpellParam": "SPELL_PARAM", "WeaponTypeParam": "WEAPON_TYPE_PARAM"})
         names = ex.item_names(reg.GAME_DIR, reg.DEFAULT_REGULATION)
     except (OSError, SystemExit, KeyError) as e:
         return f"regulation unreadable ({e}); SoulsPlanner's defense table and Enchanted coefficients kept"
@@ -784,7 +809,128 @@ def apply_regulation(data: Data) -> str:
         sc.update({k: round(v, 4) for k, v in game.items()})
         fixed += 1
     return (f"regulation: physical stat defense from the game's table ({moved} sums moved), Enchanted "
-            f"coefficients from WeaponStatsAffectParam for {fixed} weapons ({refused} left: join disagreed)")
+            f"coefficients from WeaponStatsAffectParam for {fixed} weapons ({refused} left: join disagreed); "
+            + regulation_spells(data, d, names))
+
+
+def regulation_spells(data: Data, d: dict, names: dict) -> str:
+    """Spell slot costs and INT/FTH requirements from SpellParam (equipSlotNum, intelligence,
+    faith; SpellParam id == ItemParam id, joined by normalized itemname.fmg name), and attunement
+    slots per ATT from PhysicalStatsPerLevelStatValuesParam.spellSlot (rows 1-99; the row the
+    stats builder 0x14038d790 writes to PlayerParam+0x36, docs/DS2-ATTUNEMENT.md). Measured
+    2026-09-28: all 106 SoulsPlanner spells and all 99 slot rows equal the site's numbers, so this
+    changes no answer today; it makes the game the source. A spell with no SpellParam row keeps
+    the site's numbers and is counted."""
+    rows = d["PhysicalStatsPerLevelStatValuesParam"]
+    data.att_slots = [0] + [rows[str(a)]["spellSlot"] for a in range(1, max(map(int, rows)) + 1)]
+    by_name = {}
+    for sid, s in d["SpellParam"].items():
+        by_name.setdefault(norm(names.get(sid, "")), s)
+    moved, missing = 0, 0
+    for key, row in data.spells.items():
+        s = by_name.get(norm(row.get("name", key)))
+        if s is None:
+            missing += 1
+            continue
+        game = {"intelligence": s["intelligence"], "faith": s["faith"]}
+        moved += game != data.spell_req.get(key) or s["equipSlotNum"] != row["slots"]
+        data.spell_req[key] = game
+        row["slots"] = s["equipSlotNum"]
+        data.spell_category[key] = s["spellCategory"]
+    return (f"spell slots and INT/FTH from SpellParam for {len(data.spells) - missing} spells ({moved} "
+            f"differed from the site, {missing} unmatched), attunement slots from spellSlot; "
+            + regulation_catalysts(data, d, names))
+
+
+#: SpellParam.spellCategory -> (label, the WeaponTypeParam flag that lets a catalyst cast it, the
+#: element its cast power is read in). The categories against MugenMonkey's spell types, measured
+#: 2026-09-28 over every joined spell: 0 is its 31 sorceries, 1 its 27 miracles, 2 its 24
+#: pyromancies, 3 and 4 its 23 hexes, split 12/11. The flags are the paramdef's five allow* bytes
+#: in the categories' order; that 3 is the staff hexes and 4 the chime hexes is read off which
+#: catalysts carry which flag (staves allowDarkMagic, chimes allowDarkMiracle), not off the binary.
+SPELL_SCHOOLS = {0: ("sorcery", "allowMagic", "magic"), 1: ("miracle", "allowMiracle", "lightning"),
+                 2: ("pyromancy", "allowPyromancy", "fire"), 3: ("hex", "allowDarkMagic", "dark"),
+                 4: ("hex", "allowDarkMiracle", "dark")}
+#: element -> (WeaponReinforceParam base/rate field stem, WeaponStatsAffectParam field stem,
+#: PhysicalStatsPerLevelStatValuesParam column).
+CAST_ELEMENTS = {"magic": ("Magic", "magic", "magicAttack"), "fire": ("Fire", "fire", "flameAttack"),
+                 "lightning": ("Thunder", "thunder", "lightningAttack"), "dark": ("Dark", "dark", "darkAttack")}
+
+
+def regulation_catalysts(data: Data, d: dict, names: dict) -> str:
+    """Every SoulsPlanner weapon the game lets cast a spell category, from the regulation: which
+    categories (WeaponTypeParam allow* of its weaponTypeId), its requirements (WeaponParam
+    required*), and per element its full-upgrade cast power terms -- base = WeaponReinforceParam
+    maximum<Elem> x <elem>Rate / 100, scale = WeaponStatsAffectParam <elem><maxLevel> x <elem>Rate
+    / 100. The per-stat bonus a scale multiplies is PhysicalStatsPerLevelStatValuesParam's
+    magicAttack/flameAttack/lightningAttack/darkAttack column (data.cast_bonus); cast_power says
+    which stat indexes it. Measured 2026-09-28 against SoulsPlanner: all 32 catalysts' requirements
+    equal its require; 30 have its uninfused atk/atkScale exactly, Olenford's Staff scales 0.678
+    where the site rounds to 0.675, and Sanctum Shield has no elemental row on the site at all. The
+    magic, lightning and dark columns equal its tables at every stat, and fire equals its INT+FTH
+    table at (INT+FTH)//2."""
+    rows = d["PhysicalStatsPerLevelStatValuesParam"]
+    top = max(map(int, rows))
+    data.cast_bonus = {e: [0] + [rows[str(i)][col] for i in range(1, top + 1)]
+                       for e, (_, _, col) in CAST_ELEMENTS.items()}
+    by_name = {}
+    for wid, w in d["WeaponParam"].items():
+        by_name.setdefault(norm(names.get(wid, "")), w)
+    data.catalysts = {}
+    for key, w in data.weapons.items():
+        wp = by_name.get(norm(w.get("name", key)))
+        t = wp and d["WeaponTypeParam"].get(str(wp["weaponTypeId"]))
+        cats = [c for c, (_, flag, _) in SPELL_SCHOOLS.items() if t and t.get(flag)]
+        r = cats and d["WeaponReinforceParam"].get(str(wp["weaponReinforceId"]))
+        a = r and d["WeaponStatsAffectParam"].get(str(r["statsAffectId"]))
+        if not a:
+            continue
+        power = {}
+        for e, (stem, sa, _) in CAST_ELEMENTS.items():
+            rate = r[f"{sa}Rate"] / 100
+            power[e] = (r[f"maximum{stem}"] * rate, a[f"{sa}{r['maxLevel']}"] * rate)
+        req = {s: wp[f"required{s.capitalize()}"] for s in REQ_STATS if wp[f"required{s.capitalize()}"]}
+        data.catalysts[key] = {"categories": cats, "require": req, "power": power}
+    return f"{len(data.catalysts)} catalysts from WeaponParam/WeaponTypeParam/WeaponReinforceParam"
+
+
+def cast_power(data: Data, catalyst: str, element: str, stats: dict) -> float:
+    """A catalyst's full-upgrade cast power in `element` at `stats`: base + scale x the element's
+    per-stat bonus, the bonus indexed as SoulsPlanner's getMagicATK/... index it (SITE: magic by
+    INT, lightning by FTH, dark by min(INT, FTH), fire by (INT+FTH)//2 -- the halving is where its
+    INT+FTH fire table meets the game's 99-row column). The attack-rating shape attack_rating uses;
+    how the game turns this into a spell's damage is not read here."""
+    base, scale = data.catalysts[catalyst]["power"][element]
+    i, f = stats["intelligence"], stats["faith"]
+    at = {"magic": i, "lightning": f, "dark": min(i, f), "fire": (i + f) // 2}[element]
+    col = data.cast_bonus[element]
+    return base + scale * col[max(0, min(at, len(col) - 1))]
+
+
+def best_catalysts(data: Data, spells, stats: dict) -> list[tuple[str, str, float, str | None]]:
+    """For each spell category `spells` need, in category order, the catalyst with the most cast
+    power in that category's element at `stats` among those that cast it and whose every
+    requirement `stats` meet (in full: a catalyst is held one-handed), first in table order on a
+    tie: (school label, catalyst key, power, passed over), where passed over is the catalyst that
+    would have cast harder had its requirements been met, or None. A category no wieldable
+    catalyst covers is left out."""
+    out = []
+    for c in sorted({data.spell_category[s] for s in spells if s in data.spell_category}):
+        label, _, element = SPELL_SCHOOLS[c]
+        best, top = None, None
+        for key, cat in data.catalysts.items():
+            if c not in cat["categories"]:
+                continue
+            p = cast_power(data, key, element, stats)
+            if top is None or p > top[1]:
+                top = (key, p)
+            if any(stats[s] < v for s, v in cat["require"].items()):
+                continue
+            if best is None or p > best[1]:
+                best = (key, p)
+        if best is not None:
+            out.append((label, best[0], best[1], top[0] if top[1] > best[1] else None))
+    return out
 
 
 def attack_rating(data: Data, weapon: str, inf: str, eff: dict) -> dict:
@@ -1198,12 +1344,15 @@ GRIP_TRIES = {"two": (True,), "one": (False,)}
 
 
 def optimize_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, objective: str,
-                   grip: str = "two", flex_weight: float | None = None, only_class: str | None = None):
+                   grip: str = "two", flex_weight: float | None = None, spells=(),
+                   only_class: str | None = None):
     """A valid build at `sl` that maximizes `objective` for weapon+infusion: floors first (bracket
     medians, END only for a high-stamina weapon), then requirements (STR halved for grip "two",
-    in full for "one"; see GRIP_TRIES), then every remaining point where it raises the objective
+    in full for "one"; see GRIP_TRIES), then what `spells` need (spell_floors: their INT/FTH, and
+    the ATT whose slots hold them), then every remaining point where it raises the objective
     most, plus `flex_weight` (default FLEX_WEIGHT) per weapon the point lets the build wield: a soft
-    term, never a filter (see FLEX_WEIGHT).
+    term, never a filter (see FLEX_WEIGHT). None when no class fits the floors, requirements and
+    spells into `sl`.
 
     `only_class` (a class key, `sorcerer`) tries that starting class alone. A build for a character
     that already exists has to be: the game offers no class change after creation, so a build from
@@ -1215,6 +1364,9 @@ def optimize_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
     floors, r1, cut = build_floors(data, corpus, sl)
     dfn, _ = bracket_defense(data, corpus, sl)
     req = data.weapons[weapon].get("require") or {}
+    need = spell_floors(data, spells)
+    if need is None:
+        return None, floors
     best = None
     for cls, base in data.classes.items():
         if only_class is not None and cls != only_class.lower():
@@ -1227,6 +1379,8 @@ def optimize_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
                 st["endurance"] = max(st["endurance"], floors.get("endurance", 0))
             for s, v in req.items():
                 st[s] = max(st[s], (v + 1) // 2 if (two and s == "strength") else v)
+            for s, v in need.items():
+                st[s] = max(st[s], v)
             free = sl + 53 - sum(st.values())
             if free < 0:
                 continue
@@ -1638,20 +1792,27 @@ def generate_armor(data: Data, corpus: list[Build], weapon: str, inf: str, two: 
 
 def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, objective: str = "damage",
                    window: float = 1.5, k: int = 50, allow_naked: bool = False,
-                   grip: str = "two", flex_weight: float | None = None,
+                   grip: str = "two", flex_weight: float | None = None, spells=(),
                    only_class: str | None = None) -> dict | None:
     """A whole valid build for weapon+infusion at `sl`: optimize_build's class and stats with the
-    weapon as primary; the top 15 one-handable and top 5 two-hand-only other weapons for those
+    weapon as primary, able to attune and cast every one of `spells` (their names come back with
+    the slots they cost and the slots the build's ATT gives, and the catalyst best_catalysts picks
+    to cast each category of them with); the top 15 one-handable and top 5
+    two-hand-only other weapons for those
     stats (damage over `window` seconds); 3 copies of each of the 4 rings the nearest-stat builds
     wear most (suggest_rings: no NO_USE_RINGS ring), plus one of every other ring at least
     COMMON_RING of all builds wear; and armour, the
     best_armor set under 70% load with the primary and those four rings carried. `allow_naked`
     skips the armour, as every generated build did before it had any. `only_class` is
     optimize_build's: the build for a character that already has a class."""
-    best, floors = optimize_build(data, corpus, weapon, inf, sl, objective, grip, flex_weight, only_class)
+    best, floors = optimize_build(data, corpus, weapon, inf, sl, objective, grip, flex_weight, spells,
+                                  only_class)
     if best is None:
         return None
     val, cls, two, stats = best
+    assert all(spell_ok(data, s, stats) for s in spells)
+    slots = (sum(data.spells[s]["slots"] for s in spells), slots_of(data, stats))
+    assert slots[0] <= slots[1]
     rows, _, _ = weapons_for(data, stats, sl, corpus, top=10_000, window=window)
     one, only2, seen = [], [], {data.weapons[weapon]["name"]}
     for dmg, name, winf, ar, label in rows:
@@ -1673,7 +1834,10 @@ def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
             "primary": (data.weapons[weapon]["name"], inf), "weapons_1h": one[:15], "weapons_2h_only": only2[:5],
             "rings": [data.rings[r]["name"] for r in suggested for _ in range(3)]
             + [data.rings[r]["name"] for r in common], "armor": armor, "armor_note": armor_note,
-            "flex": flexibility(data, corpus, stats, sl, armor_keys(data, armor), suggested)}
+            "flex": flexibility(data, corpus, stats, sl, armor_keys(data, armor), suggested),
+            "spells": [data.spells[s]["name"] for s in spells], "slots": slots,
+            "catalysts": [(label, data.weapons[c]["name"], p, over and data.weapons[over]["name"])
+                          for label, c, p, over in best_catalysts(data, spells, stats)]}
 
 
 def armor_keys(data: Data, names: list[str]) -> list[str]:
@@ -1828,7 +1992,8 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 # the shortest text that parses back to the same double, so the Rust side computes on the same bits.
 #
 #   C key name level vig end vit att str dex adp int fth      a starting class, in the table's order
-#   T table v0 v1 ...                                         an attack-bonus or equip-load table
+#   T table v0 v1 ...                                         an attack-bonus, equip-load,
+#                                                             attunement-slots or cast-bonus table
 #   W key name class flags weight require ha1h ha2h counter   a weapon; flags: S shield, C catalyst,
 #                                                             H high-stamina R1; require: stat:value,..
 #   I code atk(7) scale(9)                                    one infusion of the last W
@@ -1842,11 +2007,18 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 #   H physical magic fire lightning dark                      the corpus threat mix (threat_mix)
 #   K n top1 top2                                             calibrate_infusions
 #   M ring count                                              a ring worn by >= COMMON_RING of builds
+#   Z key name slots category require                         a spell: its attunement slot cost,
+#                                                             SpellParam category (-1 unread) and
+#                                                             INT/FTH requirements (spell_floors)
+#   Y key name categories require base:scale(4)               a catalyst (regulation_catalysts):
+#                                                             the categories it casts, one digit
+#                                                             each, and magic fire lightning dark
+#                                                             cast power terms
 #   X bracket stat-brackets ring,ring.. weapon:code,..        one corpus build
 
 BACKEND_DATA_NAME = "ds2-build-recommender.dat"
 BACKEND_DATA = Path.home() / ".cache/ds2-builds" / BACKEND_DATA_NAME
-BACKEND_FORMAT = "ds2-build-recommender-data 4"
+BACKEND_FORMAT = "ds2-build-recommender-data 5"
 #: How far the exported R1/R2 chains run, in seconds: the panel clamps its window to 10.0
 #: (crates/ds2-build-recommender-ui/src/panel.rs), and status_hits runs to max(3, window).
 STATUS_HORIZON = 10.0
@@ -1887,6 +2059,17 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
     for t in BACKEND_TABLES:
         out.append("\t".join(["T", t, *(_num(v or 0) for v in data.sp[t])]))
     out.append("\t".join(["T", "equipmentLoad", *(_num(v or 0) for v in data.equip_load)]))
+    out.append("\t".join(["T", "attunementSlots", *(_num(v) for v in data.att_slots)]))
+    for e, col in data.cast_bonus.items():
+        out.append("\t".join(["T", "cast" + e.capitalize(), *(_num(v) for v in col)]))
+    for key, s in data.spells.items():
+        if key in data.spell_req:  # spell_ok refuses a spell with no requirements row
+            out.append("\t".join(["Z", key, s["name"], _num(s["slots"]), _num(data.spell_category.get(key, -1)),
+                                  _stat_pairs(data.spell_req[key]) or "-"]))
+    for key, c in data.catalysts.items():
+        out.append("\t".join(["Y", key, data.weapons[key]["name"], "".join(map(str, c["categories"])),
+                              _stat_pairs(c["require"]) or "-",
+                              *(f"{_num(float(b))}:{_num(float(s))}" for b, s in c["power"].values())]))
     for key, w in data.weapons.items():
         flags = ("S" if w.get("isShield") else "") + ("C" if CATALYST.search(key) else "") \
             + ("H" if r1.get(key, 0) >= cut else "")
@@ -2001,6 +2184,21 @@ EXPECT_AS_CLASS = [  # class key, weapon key, infusion, sl, objective: --generat
     ("sorcerer", "Moonlight_Greatsword", "No_Infusion", 90, "damage"),
     ("sorcerer", "Demons_Great_Hammer", "Raw", 20, "damage"),
 ]
+EXPECT_SPELLS = [  # weapon key, infusion, sl, objective, spell keys: --generate --spells
+    ("Demons_Great_Hammer", "Raw", 100, "damage", []),  # the same build EXPECT_BUILDS generates
+    # FTH 42 (miracle): Dragon Chime casts harder but needs FTH 50, so the next chime is picked
+    ("Demons_Great_Hammer", "Raw", 200, "damage", ["Great_Lightning_Spear"]),
+    # INT 40 (sorcery): Staff of Wisdom casts harder but needs INT 50, so the next staff is picked
+    ("Uchigatana", "Bleed", 150, "bleed", ["Soul_Spear"]),
+    ("Moonlight_Greatsword", "No_Infusion", 200, "damage", ["Soul_Geyser"]),  # INT 64: Staff of Wisdom wieldable
+    ("Demons_Great_Hammer", "Raw", 200, "damage", ["Blinding_Bolt"]),  # FTH 65: Dragon Chime wieldable
+    ("Moonlight_Greatsword", "No_Infusion", 90, "damage", ["Soul_Arrow"]),
+    ("Moonlight_Greatsword", "No_Infusion", 200, "damage", ["Sacred_Oath", "Denial", "Great_Heal"]),  # 8 slots: ATT 50
+    ("Demons_Great_Hammer", "Raw", 200, "damage", ["Heal", "Heal"]),  # a second copy costs its slot again
+    ("Demons_Great_Hammer", "Raw", 120, "damage", ["Resonant_Soul", "Dark_Orb", "Fireball"]),  # hex x2 + pyromancy
+    ("Demons_Great_Hammer", "Raw", 20, "damage", ["Great_Lightning_Spear"]),  # FTH 42 does not fit SL 20
+    ("Demons_Great_Hammer", "Raw", 200, "damage", ["Climax", "Climax", "Sacred_Oath"]),  # 12 slots: no ATT holds them
+]
 EXPECT_MINIMUM = [("Demons_Great_Hammer", True), ("Moonlight_Greatsword", False), ("Uchigatana", False)]
 EXPECT_SIMILAR = [  # stats, sl, k, status
     ([20, 20, 15, 10, 40, 15, 15, 9, 9], 100, 50, None),
@@ -2103,6 +2301,16 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
         gen_class.append((cls, got[0]))
     out.append("// class key, then a GENERATE case asked of that starting class alone (--class).")
     out.append(f"pub const GENERATE_AS_CLASS: ClassGenerateCases = {_rs(gen_class)};\n")
+    spell_gen = []
+    for weapon, inf, sl, objective, spells in EXPECT_SPELLS:
+        g = generate_build(data, corpus, weapon, inf, sl, objective, spells=spells)
+        spell_gen.append((weapon, INFUSION_CODE[inf], sl, objective, spells, None if g is None else _Some((
+            data.classes[g["class"]]["name"], g["two_handed"], arr(g["stats"]), g["spells"], g["slots"][0],
+            g["slots"][1], [(label, name, float(p), over or "") for label, name, p, over in g["catalysts"]]))))
+    out.append("// weapon, infusion, sl, objective, spells -> class, two-handed, stats, spell names, slots the")
+    out.append("// spells cost, slots the build's ATT gives, catalysts: school, name, cast power, the catalyst")
+    out.append("// passed over for its requirements (\"\" for none).")
+    out.append(f"pub const GENERATE_SPELLS: SpellCases = {_rs(spell_gen)};\n")
 
     mins = []
     for weapon, two in EXPECT_MINIMUM:
@@ -2369,6 +2577,11 @@ def main() -> int:
     ap.add_argument("--class", dest="start_class", metavar="CLASS",
                     help="with --optimize/--generate: this starting class only (sorcerer, warrior, ...), as a "
                          "build for an existing character must be -- the game has no class change")
+    ap.add_argument("--spells", metavar="SPELL,SPELL",
+                    help="with --optimize/--generate: spells the build must attune and cast (SoulsPlanner keys or "
+                         "names; repeat one for a second copy). Their INT/FTH requirements raise those stats and "
+                         "their summed slot cost raises ATT, as a weapon's requirements do; no build when they "
+                         "do not fit the SL")
     ap.add_argument("--allow-naked", action="store_true",
                     help="with --generate: no armour (by default the best set under 70%% load is chosen)")
     ap.add_argument("--objective", choices=["damage", "bleed", "poison"], default="damage",
@@ -2423,6 +2636,13 @@ def main() -> int:
         print(apply_regulation(data), file=sys.stderr)
     if a.start_class and a.start_class.lower() not in data.classes:
         ap.error(f"unknown class {a.start_class!r}: one of {', '.join(data.classes)}")
+    spells = []
+    for name in (a.spells or "").split(","):
+        if name.strip():
+            key = data.sp_key.get(norm(name))
+            if key not in data.spells or key not in data.spell_req:
+                ap.error(f"unknown spell {name!r}")
+            spells.append(key)
     if a.export_backend:
         corpus, _ = load_corpus(data)
         corpus = corpus[::max(1, a.corpus_every)]
@@ -2468,10 +2688,11 @@ def main() -> int:
             ap.error(f"unknown weapon {name!r}")
         corpus, _ = load_corpus(data)
         g = generate_build(data, corpus, weapon, inf.replace(" ", "_") or "No_Infusion", a.sl, a.objective,
-                           a.window or 1.5, a.k, a.allow_naked, a.grip, a.flex_weight, a.start_class)
+                           a.window or 1.5, a.k, a.allow_naked, a.grip, a.flex_weight, spells, a.start_class)
         if g is None:
             print(f"no valid SL {a.sl} {a.start_class or ''} build wields {data.weapons[weapon]['name']} "
-                  f"(grip {a.grip})")
+                  f"(grip {a.grip})"
+                  + (f" and casts {', '.join(data.spells[s]['name'] for s in spells)}" if spells else ""))
             return 2
         if a.json:
             print(json.dumps(g, indent=1))
@@ -2484,6 +2705,13 @@ def main() -> int:
             for n, i, d in g[key]:
                 print(f"    {d:6}  {n} ({i.replace('_', ' ')})")
         print("  rings: " + ", ".join(g["rings"]))
+        if g["spells"]:
+            print(f"  spells: {', '.join(g['spells'])} ({g['slots'][0]} of {g['slots'][1]} attunement slots)")
+            for label, name, p, over in g["catalysts"]:
+                print(f"  {label} catalyst: {name} (cast power {p:.1f} at these stats, full upgrade)"
+                      + (f"; {over} casts harder but these stats do not meet its requirements" if over else ""))
+            if not g["catalysts"]:
+                print("  catalyst: none -- the regulation was not read, or nothing these stats wield casts them")
         if a.allow_naked:
             print("  armor: none (--allow-naked)")
         else:
@@ -2545,11 +2773,12 @@ def main() -> int:
             ap.error(f"unknown weapon {name!r}")
         inf = inf.replace(" ", "_") or "No_Infusion"
         corpus, _ = load_corpus(data)
-        best, floors = optimize_build(data, corpus, weapon, inf, a.sl, a.objective, a.grip, a.flex_weight,
+        best, floors = optimize_build(data, corpus, weapon, inf, a.sl, a.objective, a.grip, a.flex_weight, spells,
                                       a.start_class)
         if best is None:
-            print(f"no valid SL {a.sl} {a.start_class or ''} build wields {data.weapons[weapon]['name']} (grip {a.grip}) with the "
-                  "bracket floors "
+            print(f"no valid SL {a.sl} {a.start_class or ''} build wields {data.weapons[weapon]['name']} (grip {a.grip})"
+                  + (f" and casts {', '.join(data.spells[s]['name'] for s in spells)}" if spells else "")
+                  + " with the bracket floors "
                   + " ".join(f"{s[:3].upper()} {v}" for s, v in floors.items()))
             return 2
         val, cls, two, stats = best
