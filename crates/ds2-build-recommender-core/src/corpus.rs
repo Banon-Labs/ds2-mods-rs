@@ -38,7 +38,7 @@ use crate::weapons;
 pub const DATA_FILE_NAME: &str = "ds2-build-recommender.dat";
 
 /// The file's first line. A different one is a file this port does not read.
-pub const FORMAT: &str = "ds2-build-recommender-data 5";
+pub const FORMAT: &str = "ds2-build-recommender-data 6";
 
 /// Nine stats as the script computes with them, in [`crate::model::STAT_LABELS`] order.
 type Stats = [i32; STAT_COUNT];
@@ -217,6 +217,8 @@ struct Tables {
     equip_load: Table,
     /// Attunement slots per ATT: the script's `att_slots`.
     attunement_slots: Table,
+    /// Max stamina per END: the script's `stamina_max`, empty when it did not read the regulation.
+    stamina_max: Table,
     /// Per-stat cast-power bonus, magic, fire, lightning, dark: the script's `cast_bonus`.
     cast: [Table; 4],
 }
@@ -374,6 +376,60 @@ struct RingEffect {
     add: Stats,
 }
 
+/// What wearing a ring does in place of stat points: the script's `ring_gear` row.
+#[derive(Clone, Debug)]
+struct RingGear {
+    /// An index into the file's rings.
+    ring: usize,
+    /// Attunement slots it adds.
+    slots: i32,
+    /// Max HP, max equip load and max stamina factors.
+    hp: f64,
+    load: f64,
+    stamina: f64,
+    /// Flat stat bonuses.
+    add: Stats,
+    /// `(stat, low, high, bonus at or below low, bonus at or above high)`: Ring of the Embedded's.
+    scaled: Vec<(usize, i32, i32, i32, i32)>,
+}
+
+impl RingGear {
+    /// Whether it raises `stat` itself, not only what the stat gives.
+    fn touches(&self, stat: usize) -> bool {
+        self.add[stat] != 0 || self.scaled.iter().any(|x| x.0 == stat)
+    }
+}
+
+/// The script's `scaled_bonus`: `at_low` at or below `low`, `at_high` at or above `high`, floored
+/// linear between.
+fn scaled_bonus(s: i32, low: i32, high: i32, at_low: i32, at_high: i32) -> i32 {
+    if s <= low {
+        at_low
+    } else if s >= high {
+        at_high
+    } else {
+        at_low + ((at_high - at_low) * (s - low)).div_euclid(high - low)
+    }
+}
+
+/// Which of a ring's factors: the script's `"hp"`, `"load"`, `"stamina"`.
+#[derive(Clone, Copy)]
+enum Factor {
+    Hp,
+    Load,
+    Stamina,
+}
+
+/// The script's `RING_SLOT_POINTS`: a ring worn in place of stat points must free at least this
+/// many, what one ring slot buys as a stat ring (+5).
+const RING_SLOT_POINTS: i32 = 5;
+
+/// The script's `UNREACHABLE`: the lift of a class whose spells no ATT holds.
+const UNREACHABLE: i32 = 1_000_000;
+
+/// A best build: `(value, class, two-handed, levelled stats, worn rings)`.
+type Best = (f64, usize, bool, Stats, Vec<usize>);
+
 /// A piece of armour the minimum search may wear.
 #[derive(Clone, Debug)]
 struct ArmorPiece {
@@ -475,6 +531,8 @@ pub struct CorpusBackend {
     /// into `rings`.
     no_use: Vec<usize>,
     ring_effects: Vec<RingEffect>,
+    /// The script's `ring_gear`, in its order: every ring the optimizer counts.
+    gear: Vec<RingGear>,
     /// head, chest, hands, legs.
     armor: [Vec<ArmorPiece>; 4],
     /// Every armour piece, `Naked` among them, head, chest, hands, legs: what `best_armor` picks
@@ -640,6 +698,7 @@ impl CorpusBackend {
                     "mundaneATKBonus" => &mut tables.mundane,
                     "equipmentLoad" => &mut tables.equip_load,
                     "attunementSlots" => &mut tables.attunement_slots,
+                    "staminaMax" => &mut tables.stamina_max,
                     "castMagic" => &mut tables.cast[0],
                     "castFire" => &mut tables.cast[1],
                     "castLightning" => &mut tables.cast[2],
@@ -831,6 +890,53 @@ impl CorpusBackend {
                     weight,
                     load_mul,
                     add,
+                });
+            }
+            "G" => {
+                let key = next("ring key")?;
+                let ring = *ring_index
+                    .get(key)
+                    .ok_or_else(|| bad(line, "ring gear for a ring that is not a ring"))?;
+                let slots = int(Some(next("slots")?), line)?;
+                let hp = float(Some(next("hp factor")?), line)?;
+                let load = float(Some(next("load factor")?), line)?;
+                let stamina = float(Some(next("stamina factor")?), line)?;
+                let add = stats(&mut fields, line)?;
+                let scaled = match fields.next() {
+                    Some("-") | None => Vec::new(),
+                    Some(list) => list
+                        .split(',')
+                        .map(|entry| {
+                            let parts: Vec<i32> = entry
+                                .split(':')
+                                .map(|part| part.parse().map_err(|_| bad(line, "scaled bonus")))
+                                .collect::<Result<_, _>>()?;
+                            match parts[..] {
+                                [stat, low, high, at_low, at_high]
+                                    if usize::try_from(stat).is_ok_and(|s| s < STAT_COUNT)
+                                        && high > low =>
+                                {
+                                    Ok((
+                                        usize::try_from(stat).unwrap_or(0),
+                                        low,
+                                        high,
+                                        at_low,
+                                        at_high,
+                                    ))
+                                }
+                                _ => Err(bad(line, "scaled bonus is stat:low:high:low:high")),
+                            }
+                        })
+                        .collect::<Result<Vec<_>, String>>()?,
+                };
+                self.gear.push(RingGear {
+                    ring,
+                    slots,
+                    hp,
+                    load,
+                    stamina,
+                    add,
+                    scaled,
                 });
             }
             "A" => {
@@ -1349,8 +1455,9 @@ impl CorpusBackend {
 
     /// The script's `spell_floors`: the least each stat may be for `spells` (indices into
     /// `self.spells`) to be attuned and cast -- each requirement at the highest any needs, ATT at the
-    /// least whose slots hold their summed cost, every other stat 0. `None` when no ATT holds them.
-    fn spell_floors(&self, spells: &[usize]) -> Option<Stats> {
+    /// least whose slots plus `extra_slots` (from worn rings) hold their summed cost, every other
+    /// stat 0. `None` when no ATT holds them.
+    fn spell_floors(&self, spells: &[usize], extra_slots: i32) -> Option<Stats> {
         let mut need = [0; STAT_COUNT];
         for &spell in spells {
             for &(stat, value) in &self.spells[spell].require {
@@ -1359,9 +1466,233 @@ impl CorpusBackend {
         }
         let cost: i32 = spells.iter().map(|&spell| self.spells[spell].slots).sum();
         let slots = &self.tables.attunement_slots.0;
-        let att = slots.iter().position(|&n| n >= f64::from(cost))?;
+        let att = slots
+            .iter()
+            .position(|&n| n + f64::from(extra_slots) >= f64::from(cost))?;
         need[ATT] = i32::try_from(att).ok()?;
         Some(need)
+    }
+
+    /// The ring gear of an index into the file's rings, when the ring has any.
+    fn gear_of(&self, ring: usize) -> Option<&RingGear> {
+        self.gear.iter().find(|gear| gear.ring == ring)
+    }
+
+    /// The script's `gear_stats`: `st` with the worn `rings`' stat bonuses, each stat a ring
+    /// raised capped at 99.
+    fn gear_stats(&self, st: &Stats, rings: &[usize]) -> Stats {
+        let mut out = *st;
+        for &ring in rings {
+            let Some(gear) = self.gear_of(ring) else {
+                continue;
+            };
+            for (stat, &add) in gear.add.iter().enumerate() {
+                if add != 0 {
+                    out[stat] = (out[stat] + add).min(99);
+                }
+            }
+            for &(stat, low, high, at_low, at_high) in &gear.scaled {
+                out[stat] =
+                    (out[stat] + scaled_bonus(st[stat], low, high, at_low, at_high)).min(99);
+            }
+        }
+        out
+    }
+
+    /// The script's `ring_slots`.
+    fn ring_slots(&self, rings: &[usize]) -> i32 {
+        rings
+            .iter()
+            .filter_map(|&ring| self.gear_of(ring))
+            .map(|gear| gear.slots)
+            .sum()
+    }
+
+    /// The script's `ring_factor`: the product of the worn rings' factors, in ring order.
+    fn ring_factor(&self, rings: &[usize], what: Factor) -> f64 {
+        let mut f = 1.0;
+        for gear in rings.iter().filter_map(|&ring| self.gear_of(ring)) {
+            f *= match what {
+                Factor::Hp => gear.hp,
+                Factor::Load => gear.load,
+                Factor::Stamina => gear.stamina,
+            };
+        }
+        f
+    }
+
+    /// The script's `max_load`: equipLoadMax at VIT plus the rings' bonus, times their load factor.
+    fn max_load(&self, eff: &Stats, rings: &[usize]) -> f64 {
+        let vit = self.gear_stats(eff, rings)[VIT];
+        self.tables.equip_load.at(vit) * self.ring_factor(rings, Factor::Load)
+    }
+
+    /// The script's `sub_rings`: per ring upgrade group, the ring gear ring with the highest item id
+    /// (the last in file order), when none of its factors is below 1, never a no-use ring.
+    fn sub_rings(&self) -> Vec<usize> {
+        let mut by_group: Vec<(&str, usize)> = Vec::new();
+        for gear in &self.gear {
+            if self.no_use.contains(&gear.ring)
+                || py_min(py_min(gear.hp, gear.load), gear.stamina) < 1.0
+            {
+                continue;
+            }
+            let group = self.ring_groups[gear.ring].as_str();
+            match by_group.iter_mut().find(|(seen, _)| *seen == group) {
+                Some(entry) => entry.1 = gear.ring,
+                None => by_group.push((group, gear.ring)),
+            }
+        }
+        by_group.into_iter().map(|(_, ring)| ring).collect()
+    }
+
+    /// The script's `ring_effect_text`: what `ring` does, "attunement slots +3", "STR +5", ...
+    fn ring_effect_text(&self, ring: usize) -> String {
+        let Some(gear) = self.gear_of(ring) else {
+            return String::new();
+        };
+        let mut out: Vec<String> = gear
+            .add
+            .iter()
+            .enumerate()
+            .filter(|&(_, &add)| add != 0)
+            .map(|(stat, add)| format!("{} +{add}", STAT_LABELS[stat]))
+            .collect();
+        if let Some(&(_, _, _, low, high)) = gear.scaled.first() {
+            let stats: Vec<&str> = gear.scaled.iter().map(|x| STAT_LABELS[x.0]).collect();
+            out.push(format!("{} +{low} to +{high} by the stat", stats.join("/")));
+        }
+        if gear.slots != 0 {
+            out.push(format!("attunement slots +{}", gear.slots));
+        }
+        for (factor, name) in [
+            (gear.hp, "max HP"),
+            (gear.load, "equip load"),
+            (gear.stamina, "max stamina"),
+        ] {
+            if factor != 1.0 {
+                out.push(format!("{name} x{factor}"));
+            }
+        }
+        out.join(", ")
+    }
+
+    /// The script's `ring_trades` as `trade_line`s: per worn ring, its name, what it does, and the
+    /// stats `class` levels less for it -- `ring_lift` with every worn ring against the same
+    /// without that one.
+    fn ring_trades(
+        &self,
+        class: usize,
+        floors: &[(usize, i32)],
+        require: &[(usize, i32)],
+        spells: &[usize],
+        worn: &[usize],
+    ) -> Vec<String> {
+        let base = &self.classes[class].base;
+        let lift = |rings: &[usize]| self.ring_lift(base, floors, require, spells, rings);
+        let with_all = lift(worn);
+        worn.iter()
+            .map(|&ring| {
+                let rest: Vec<usize> = worn.iter().copied().filter(|&r| r != ring).collect();
+                let head = format!(
+                    "{}: {} -> ",
+                    self.rings[ring].1,
+                    self.ring_effect_text(ring)
+                );
+                match (lift(&rest), with_all) {
+                    (Some(without), Some(with)) => {
+                        let moved: Vec<String> = (0..STAT_COUNT)
+                            .filter(|&stat| without[stat] != with[stat])
+                            .map(|stat| {
+                                format!("{} {} -> {}", STAT_LABELS[stat], without[stat], with[stat])
+                            })
+                            .collect();
+                        if moved.is_empty() {
+                            format!("{head}no stat lowered")
+                        } else {
+                            format!("{head}{}", moved.join(", "))
+                        }
+                    }
+                    _ => format!("{head}no ATT holds the spells without it"),
+                }
+            })
+            .collect()
+    }
+
+    /// The script's `ring_lift`: `base` raised to what a build wearing `rings` must level to --
+    /// each `floors` stat until what it gives matches what the floor gives with no ring (VIG by HP,
+    /// VIT by max load, END by max stamina, each at the stat plus the rings' bonus times their
+    /// factor; the rest by the stat plus bonus), each `require` stat and the spells' INT/FTH until
+    /// the stat plus the rings' bonus meets it, ATT to the least whose slots plus the rings' hold
+    /// the spells. `None` when no ATT holds them.
+    fn ring_lift(
+        &self,
+        base: &Stats,
+        floors: &[(usize, i32)],
+        require: &[(usize, i32)],
+        spells: &[usize],
+        rings: &[usize],
+    ) -> Option<Stats> {
+        let need = self.spell_floors(spells, self.ring_slots(rings))?;
+        let mut out = *base;
+        let worn: Vec<&RingGear> = rings
+            .iter()
+            .filter_map(|&ring| self.gear_of(ring))
+            .collect();
+        let touched = |stat: usize| worn.iter().any(|gear| gear.touches(stat));
+        let eff = |out: &Stats, stat: usize, v: i32| -> i32 {
+            if !touched(stat) {
+                return v;
+            }
+            let mut at = *out;
+            at[stat] = v;
+            self.gear_stats(&at, rings)[stat]
+        };
+        let least = |out: &mut Stats, stat: usize, ok: &dyn Fn(&Stats, i32) -> bool| {
+            let mut v = out[stat];
+            while v < 99 && !ok(out, v) {
+                v += 1;
+            }
+            out[stat] = v;
+        };
+        let stamina = &self.tables.stamina_max;
+        // What a floor stat gives, VIG HP, VIT max load, END max stamina: the curve a ring's
+        // factor is weighed against.
+        let tab = |stat: usize, v: i32| -> f64 {
+            match stat {
+                VIG => f64::from(hit_points(v)),
+                VIT => self.tables.equip_load.at(v),
+                _ => stamina.at(v),
+            }
+        };
+        for &(stat, floor) in floors {
+            let curve = match stat {
+                VIG => Some(self.ring_factor(rings, Factor::Hp)),
+                VIT => Some(self.ring_factor(rings, Factor::Load)),
+                END if !stamina.0.is_empty() => Some(self.ring_factor(rings, Factor::Stamina)),
+                _ => None,
+            };
+            match curve {
+                Some(factor) if factor != 1.0 || touched(stat) => {
+                    let tab = |v: i32| tab(stat, v);
+                    let target = tab(floor);
+                    least(&mut out, stat, &|out, v| {
+                        tab(eff(out, stat, v)) * factor >= target
+                    });
+                }
+                _ => least(&mut out, stat, &|out, v| eff(out, stat, v) >= floor),
+            }
+        }
+        let spell_need = need
+            .iter()
+            .enumerate()
+            .filter(|&(stat, _)| stat != ATT)
+            .map(|(stat, &value)| (stat, value));
+        for (stat, value) in require.iter().copied().chain(spell_need) {
+            least(&mut out, stat, &|out, v| eff(out, stat, v) >= value);
+        }
+        out[ATT] = out[ATT].max(need[ATT]);
+        Some(out)
     }
 
     /// Spell keys as indices into `self.spells`; `None` when one is unknown.
@@ -1520,7 +1851,31 @@ impl CorpusBackend {
                 only_class.is_none_or(|only| self.classes[at].key.eq_ignore_ascii_case(only))
             })
             .collect();
-        let need = self.spell_floors(spells);
+        let mut need = self.spell_floors(spells, 0);
+        // No ATT alone holds the spells but the sub ring with the most slots makes one that does:
+        // the arithmetic is then the one with it worn, as the optimizer wears it.
+        let band =
+            self.sub_rings()
+                .into_iter()
+                .fold(None, |most: Option<usize>, ring| match most {
+                    Some(top) if self.ring_slots(&[ring]) <= self.ring_slots(&[top]) => Some(top),
+                    _ => Some(ring),
+                });
+        let band_slots = band.map_or(0, |ring| self.ring_slots(&[ring]));
+        let mut band_note = None;
+        if need.is_none()
+            && band_slots != 0
+            && let Some(ring) = band
+        {
+            need = self.spell_floors(spells, band_slots);
+            if need.is_some() {
+                band_note = Some(format!(
+                    "no attunement alone holds {spell_list}; wearing a {} ({}) does",
+                    self.rings[ring].1,
+                    self.ring_effect_text(ring)
+                ));
+            }
+        }
         // Points above `class`'s base the layers up to `layer` need at `sl`: 1 the weapon,
         // 2 and the spells, 3 and the floors.
         let cost = |class: usize, sl: u16, layer: u8| -> i32 {
@@ -1542,11 +1897,16 @@ impl CorpusBackend {
         let have = |class: usize, sl: u16| -> i32 {
             i32::from(sl) + 53 - self.classes[class].base.iter().sum::<i32>()
         };
-        let fits = |sl: u16| {
-            need.is_some()
-                && classes
-                    .iter()
-                    .any(|&class| cost(class, sl, 3) <= have(class, sl))
+        // The least SL a build fits at, per floors bracket, wearing the rings the optimizer would.
+        let lift_require = Self::grip_require_pairs(weapon, two);
+        let mut least: Vec<Option<Option<i32>>> = vec![None; SL_BRACKETS];
+        let mut fits = |sl: u16| {
+            let at = sl_bracket(u32::from(sl));
+            let bound = *least[at].get_or_insert_with(|| {
+                let floor = self.lift_floors(self.bracket(u32::from(sl)), weapon, floors);
+                self.least_sl_with_rings(&classes, &floor, &lift_require, spells)
+            });
+            bound.is_some_and(|bound| i32::from(sl) >= bound)
         };
         // Per stat: (raise over the base, the value, what lifted it) -- the script's `_raises`.
         let raises = |class: usize, need: &Stats| -> Vec<(usize, i32, i32, &'static str)> {
@@ -1580,8 +1940,17 @@ impl CorpusBackend {
                     .iter()
                     .copied()
                     .fold(0.0, f64::max);
+                let with_band = band
+                    .filter(|_| band_slots != 0)
+                    .map_or(String::new(), |ring| {
+                        format!(
+                            ", {} with a {}",
+                            most as i64 + i64::from(band_slots),
+                            self.rings[ring].1
+                        )
+                    });
                 lines.push(format!(
-                    "no attunement holds {spell_list}: they cost {total} slots, and ATT 99 gives {}",
+                    "no attunement holds {spell_list}: they cost {total} slots, and ATT 99 gives {}{with_band}",
                     most as i64
                 ));
                 (RefusalKind::Slots, None, 0)
@@ -1633,6 +2002,9 @@ impl CorpusBackend {
                     head = format!("as a {class_name}: {head}");
                 }
                 lines.push(head);
+                if let Some(note) = band_note.take() {
+                    lines.push(note);
+                }
                 let lifted = raises(closest, &need);
                 let mut groups = Vec::new();
                 for (source, name) in [
@@ -1744,8 +2116,11 @@ impl CorpusBackend {
             });
         }
         // 4. Another class, when a class was asked for.
+        // Checked as that class alone too: the rings chosen for any class can differ from the
+        // rings chosen for one.
         if only_class.is_some()
             && let Some((_, class, ..)) = run(sl, spells, None, floors)
+            && run(sl, spells, Some(self.classes[class].key.as_str()), floors).is_some()
         {
             fixes.push(Fix {
                 change: Change::Class(self.classes[class].key.clone()),
@@ -1761,9 +2136,10 @@ impl CorpusBackend {
         })
     }
 
-    /// The script's `optimize_build`: `(value, class, two-handed, stats)`, or `None` when no class
-    /// fits the floors, the weapon's requirements and what `spells` (indices into `self.spells`)
-    /// need into `sl`. `only_class` is the script's: that class key alone, for a character that
+    /// The script's `optimize_build`: `(value, class, two-handed, stats, worn rings)`, or `None`
+    /// when no class fits the floors, the weapon's requirements and what `spells` (indices into
+    /// `self.spells`) need into `sl`, wearing what rings [`Self::choose_rings`] picks in place of
+    /// stat points. `only_class` is the script's: that class key alone, for a character that
     /// already has one.
     /// `floors` false is the script's `use_floors=False`: the bracket floors are not applied.
     // DEBT: ds2-mods-rs-59p7 -- the class made this eight arguments; bundle the per-build options.
@@ -1778,8 +2154,191 @@ impl CorpusBackend {
         spells: &[usize],
         only_class: Option<&str>,
         floors: bool,
-    ) -> Option<(f64, usize, bool, Stats)> {
-        let spell_need = self.spell_floors(spells)?;
+    ) -> Option<Best> {
+        let classes = self.class_indices(only_class);
+        let floor = self.lift_floors(self.bracket(sl), weapon, floors);
+        let require = Self::grip_require_pairs(weapon, grip.two_handed());
+        let run = |rings: &[usize]| {
+            self.optimize_with(
+                weapon, infusion, sl, objective, grip, spells, &classes, &floor, &require, rings,
+            )
+        };
+        self.choose_rings(&classes, &floor, &require, spells, &run)
+    }
+
+    /// The classes `only_class` allows, as indices, in file order.
+    fn class_indices(&self, only_class: Option<&str>) -> Vec<usize> {
+        (0..self.classes.len())
+            .filter(|&at| {
+                only_class.is_none_or(|only| self.classes[at].key.eq_ignore_ascii_case(only))
+            })
+            .collect()
+    }
+
+    /// The floors `ring_lift` lifts to, in the script's `need_floors` order: VIG, VIT, ADP, ATT,
+    /// then END for a high-stamina weapon; each `0` when the floors are off.
+    fn lift_floors(&self, bracket: &Bracket, weapon: &Weapon, floors: bool) -> Vec<(usize, i32)> {
+        let at = Self::floor_stats(bracket, weapon, floors);
+        let mut out: Vec<(usize, i32)> = FLOOR_STATS.iter().map(|&stat| (stat, at[stat])).collect();
+        if weapon.high_stamina {
+            out.push((END, at[END]));
+        }
+        out
+    }
+
+    /// The script's `_grip_req` as `(stat, value)` pairs in the weapon's order.
+    fn grip_require_pairs(weapon: &Weapon, two: bool) -> Vec<(usize, i32)> {
+        weapon
+            .require
+            .iter()
+            .map(|&(stat, need)| {
+                (
+                    stat,
+                    if two && stat == STR {
+                        (need + 1).div_euclid(2)
+                    } else {
+                        need
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// The script's `lift_points`: per class, the points `ring_lift` raises its base by.
+    fn lift_points(
+        &self,
+        classes: &[usize],
+        floors: &[(usize, i32)],
+        require: &[(usize, i32)],
+        spells: &[usize],
+        rings: &[usize],
+    ) -> Vec<i32> {
+        classes
+            .iter()
+            .map(|&class| {
+                let base = &self.classes[class].base;
+                self.ring_lift(base, floors, require, spells, rings)
+                    .map_or(UNREACHABLE, |up| {
+                        up.iter().sum::<i32>() - base.iter().sum::<i32>()
+                    })
+            })
+            .collect()
+    }
+
+    /// The script's `next_ring`: the sub ring, outside the groups of those `worn` and with fewer
+    /// than four worn, that frees the most points (first on a tie), when it frees at least
+    /// [`RING_SLOT_POINTS`].
+    fn next_ring(
+        &self,
+        classes: &[usize],
+        floors: &[(usize, i32)],
+        require: &[(usize, i32)],
+        spells: &[usize],
+        worn: &[usize],
+    ) -> Option<usize> {
+        if worn.len() >= 4 {
+            return None;
+        }
+        let taken: Vec<&str> = worn.iter().map(|&r| self.ring_groups[r].as_str()).collect();
+        let now = self.lift_points(classes, floors, require, spells, worn);
+        let mut pick: Option<(i32, usize)> = None;
+        for ring in self.sub_rings() {
+            if taken.contains(&self.ring_groups[ring].as_str()) {
+                continue;
+            }
+            let mut with = worn.to_vec();
+            with.push(ring);
+            let freed = now
+                .iter()
+                .zip(self.lift_points(classes, floors, require, spells, &with))
+                .map(|(a, b)| a - b)
+                .max()?;
+            if freed >= RING_SLOT_POINTS && pick.is_none_or(|(most, _)| freed > most) {
+                pick = Some((freed, ring));
+            }
+        }
+        pick.map(|(_, ring)| ring)
+    }
+
+    /// The script's `choose_rings`: one `next_ring` at a time, worn while no build fits, and once
+    /// one does, only when `run` scores the objective higher with it.
+    fn choose_rings(
+        &self,
+        classes: &[usize],
+        floors: &[(usize, i32)],
+        require: &[(usize, i32)],
+        spells: &[usize],
+        run: &dyn Fn(&[usize]) -> Option<Best>,
+    ) -> Option<Best> {
+        let mut worn: Vec<usize> = Vec::new();
+        let mut best = run(&worn);
+        while let Some(ring) = self.next_ring(classes, floors, require, spells, &worn) {
+            let mut with = worn.clone();
+            with.push(ring);
+            let got = run(&with);
+            if let Some((top, ..)) = best
+                && got.as_ref().is_none_or(|(value, ..)| *value <= top)
+            {
+                break;
+            }
+            worn = with;
+            best = got;
+        }
+        best
+    }
+
+    /// The script's `least_sl_with_rings`: the least soul level at which a build fits under
+    /// `floors`, wearing each `next_ring` in turn while none does.
+    fn least_sl_with_rings(
+        &self,
+        classes: &[usize],
+        floors: &[(usize, i32)],
+        require: &[(usize, i32)],
+        spells: &[usize],
+    ) -> Option<i32> {
+        let mut worn: Vec<usize> = Vec::new();
+        let mut best: Option<i32> = None;
+        loop {
+            for (&class, points) in classes
+                .iter()
+                .zip(self.lift_points(classes, floors, require, spells, &worn))
+            {
+                if points < UNREACHABLE {
+                    let sl = points - 53 + self.classes[class].base.iter().sum::<i32>();
+                    best = Some(best.map_or(sl, |least| least.min(sl)));
+                }
+            }
+            match self.next_ring(classes, floors, require, spells, &worn) {
+                Some(ring) => worn.push(ring),
+                None => return best,
+            }
+        }
+    }
+
+    /// The script's `_optimize_with`: the search at one set of worn `rings`.
+    // DEBT: ds2-mods-rs-59p7 -- optimize's arguments plus the rings; bundle the per-build options.
+    #[allow(clippy::too_many_arguments)]
+    fn optimize_with(
+        &self,
+        weapon: &Weapon,
+        infusion: Infusion,
+        sl: u32,
+        objective: Objective,
+        grip: Grip,
+        spells: &[usize],
+        classes: &[usize],
+        floor: &[(usize, i32)],
+        require: &[(usize, i32)],
+        rings: &[usize],
+    ) -> Option<Best> {
+        // What the worn rings give: every curve reads it, the flexibility term the levelled stats.
+        let worn = |st: &Stats| -> Stats {
+            if rings.is_empty() {
+                *st
+            } else {
+                self.gear_stats(st, rings)
+            }
+        };
         #[derive(Clone, Copy, PartialEq)]
         enum Curve {
             Objective,
@@ -1804,8 +2363,9 @@ impl CorpusBackend {
             (ATT, Curve::Agility),
         ];
         let value = |curve: Curve, st: &Stats| -> f64 {
+            let st = worn(st);
             match curve {
-                Curve::Objective => self.objective_value(weapon, infusion, st, objective, defense),
+                Curve::Objective => self.objective_value(weapon, infusion, &st, objective, defense),
                 Curve::Agility => f64::from(agility(st[ADP], st[ATT])),
                 Curve::HitPoints => f64::from(hit_points(st[VIG])),
             }
@@ -1816,32 +2376,13 @@ impl CorpusBackend {
             next
         };
         let sl = i32::try_from(sl).unwrap_or(i32::MAX - 53);
-        let mut best: Option<(f64, usize, bool, Stats)> = None;
-        for (class_index, class) in self.classes.iter().enumerate() {
-            if only_class.is_some_and(|only| !class.key.eq_ignore_ascii_case(only)) {
-                continue;
-            }
+        let mut best: Option<Best> = None;
+        for &class_index in classes {
+            let class = &self.classes[class_index];
             // The script's GRIP_TRIES: one grip, never a fallback to the other.
             {
                 let two = grip.two_handed();
-                let mut st = class.base;
-                for (stat, least) in Self::floor_stats(bracket, weapon, floors)
-                    .into_iter()
-                    .enumerate()
-                {
-                    st[stat] = st[stat].max(least);
-                }
-                for &(stat, need) in &weapon.require {
-                    let need = if two && stat == STR {
-                        (need + 1).div_euclid(2)
-                    } else {
-                        need
-                    };
-                    st[stat] = st[stat].max(need);
-                }
-                for (stat, &least) in spell_need.iter().enumerate() {
-                    st[stat] = st[stat].max(least);
-                }
+                let mut st = self.ring_lift(&class.base, floor, require, spells, rings)?;
                 let mut free = sl + 53 - st.iter().sum::<i32>();
                 if free < 0 {
                     continue;
@@ -1893,9 +2434,9 @@ impl CorpusBackend {
                     st[stat] += n;
                     free -= n;
                 }
-                let val = self.objective_value(weapon, infusion, &st, objective, defense);
-                if best.is_none_or(|(top, ..)| val > top) {
-                    best = Some((val, class_index, two, st));
+                let val = self.objective_value(weapon, infusion, &worn(&st), objective, defense);
+                if best.as_ref().is_none_or(|(top, ..)| val > *top) {
+                    best = Some((val, class_index, two, st, rings.to_vec()));
                 }
             }
         }
@@ -2003,7 +2544,11 @@ impl CorpusBackend {
         };
         // Taken off one at a time, in the script's order: the script does not use `sum()`, whose
         // compensated float total would round differently.
-        let mut spare = self.tables.equip_load.at(stats[VIT]) * EQUIP_CAP;
+        let worn: Vec<usize> = rings
+            .iter()
+            .filter_map(|name| self.rings.iter().position(|ring| ring.1 == *name))
+            .collect();
+        let mut spare = self.max_load(stats, &worn) * EQUIP_CAP;
         for (name, slot) in armor.iter().zip(&self.wearable) {
             if let Some(piece) = slot.iter().find(|piece| piece.name == *name) {
                 spare -= piece.weight;
@@ -2288,7 +2833,10 @@ impl CorpusBackend {
         rings: &[usize],
         scarcity: f64,
     ) -> (f64, f64, Option<[&Wearable; 4]>) {
-        let cap = self.tables.equip_load.at(stats[VIT]) * EQUIP_CAP;
+        // The rings count: their load factor and VIT bonus in the cap, their stat bonuses toward
+        // the armour's requirements.
+        let cap = self.max_load(stats, rings) * EQUIP_CAP;
+        let stats = &self.gear_stats(stats, rings);
         let ring_weight = rings
             .iter()
             .map(|&ring| self.rings[ring].2)
@@ -2378,20 +2926,31 @@ impl CorpusBackend {
     /// The script's `suggest_rings`: the [`crate::backend::SUGGESTED_RINGS`] rings `near` counts
     /// most, each no-use ring's place going, in place, to the ring the nearest builds wear most
     /// (then all builds) that is neither a no-use ring nor in the upgrade group of one already in
-    /// the list.
-    fn suggest_rings(&self, near: &[(usize, u32)]) -> Vec<usize> {
+    /// the list. Rings in the group of one already `worn` are left out, and only the slots `worn`
+    /// leaves are filled.
+    fn suggest_rings(&self, near: &[(usize, u32)], worn: &[usize]) -> Vec<usize> {
+        let group = |ring: usize| self.ring_groups[ring].as_str();
+        let held: Vec<&str> = worn.iter().map(|&ring| group(ring)).collect();
+        let near: Vec<(usize, u32)> = near
+            .iter()
+            .copied()
+            .filter(|&(ring, _)| !held.contains(&group(ring)))
+            .collect();
         let top: Vec<usize> = near
             .iter()
-            .take(crate::backend::SUGGESTED_RINGS)
+            .take(crate::backend::SUGGESTED_RINGS.saturating_sub(worn.len()))
             .map(|&(ring, _)| ring)
             .collect();
-        let group = |ring: usize| self.ring_groups[ring].as_str();
         let mut taken: Vec<&str> = top
             .iter()
             .filter(|ring| !self.no_use.contains(ring))
             .map(|&ring| group(ring))
             .collect();
-        let every = ring_counts(&self.corpus);
+        taken.extend(&held);
+        let every: Vec<(usize, u32)> = ring_counts(&self.corpus)
+            .into_iter()
+            .filter(|&(ring, _)| !held.contains(&group(ring)))
+            .collect();
         let mut out = Vec::with_capacity(top.len());
         for ring in top {
             if !self.no_use.contains(&ring) {
@@ -2543,7 +3102,7 @@ impl RecommenderBackend for CorpusBackend {
     ) -> Option<OptimizedBuild> {
         let weapon = self.weapon_by_key(weapon)?;
         let spells = self.spell_indices(limits.spells)?;
-        let (value, class, two_handed, stats) = self.optimize_build(
+        let (value, class, two_handed, stats, worn) = self.optimize_build(
             weapon,
             infusion,
             u32::from(sl),
@@ -2559,7 +3118,10 @@ impl RecommenderBackend for CorpusBackend {
             stats: stats.map(|value| u16::try_from(value).unwrap_or(0)),
             two_handed,
             value: value as f32,
-            gear: Vec::new(),
+            gear: worn
+                .iter()
+                .map(|&ring| self.rings[ring].1.clone())
+                .collect(),
         })
     }
 
@@ -2695,7 +3257,7 @@ impl RecommenderBackend for CorpusBackend {
     ) -> Option<GeneratedBuild> {
         let primary = self.weapon_by_key(weapon)?;
         let spells = self.spell_indices(limits.spells)?;
-        let (_, class, two_handed, stats) = self.optimize_build(
+        let (_, class, two_handed, stats, worn) = self.optimize_build(
             primary,
             infusion,
             u32::from(sl),
@@ -2705,10 +3267,26 @@ impl RecommenderBackend for CorpusBackend {
             limits.class,
             limits.floors,
         )?;
+        // The weapons, the catalysts and the slots are read at what the worn rings give.
+        let eff = self.gear_stats(&stats, &worn);
         let slots_used: i32 = spells.iter().map(|&spell| self.spells[spell].slots).sum();
-        let slots = self.slots_of(&stats);
+        let slots = self.slots_of(&eff) + self.ring_slots(&worn);
         debug_assert!(slots_used <= slots, "the optimizer fits the spells' slots");
-        let catalysts = self.best_catalysts(&spells, &stats);
+        let catalysts = self.best_catalysts(&spells, &eff);
+        let lift_floors = self.lift_floors(self.bracket(u32::from(sl)), primary, limits.floors);
+        let lift_require = Self::grip_require_pairs(primary, grip.two_handed());
+        let ring_trades = self.ring_trades(class, &lift_floors, &lift_require, &spells, &worn);
+        let mut ring_lowered = [false; STAT_COUNT];
+        let base = &self.classes[class].base;
+        if let (Some(with), without) = (
+            self.ring_lift(base, &lift_floors, &lift_require, &spells, &worn),
+            self.ring_lift(base, &lift_floors, &lift_require, &spells, &[]),
+        ) {
+            for (stat, lowered) in ring_lowered.iter_mut().enumerate() {
+                // No ATT alone holds the spells: the band stands in for all of it.
+                *lowered = without.is_none_or(|without| with[stat] < without[stat]);
+            }
+        }
         let query = Query {
             one_hand: false,
             class: None,
@@ -2719,7 +3297,7 @@ impl RecommenderBackend for CorpusBackend {
             top: usize::MAX,
             weapon: None,
         };
-        let ranked = self.rank(&stats, u32::from(sl), &query);
+        let ranked = self.rank(&eff, u32::from(sl), &query);
         let mut seen: Vec<&str> = vec![primary.name.as_str()];
         let (mut weapons_1h, mut weapons_2h_only) = (Vec::new(), Vec::new());
         for row in &ranked {
@@ -2737,11 +3315,11 @@ impl RecommenderBackend for CorpusBackend {
         weapons_1h.truncate(WEAPONS_1H_TOP);
         weapons_2h_only.truncate(WEAPONS_2H_ONLY_TOP);
 
-        let suggested = self.suggest_rings(&ring_counts(self.nearest(
-            &stats,
-            u32::from(sl),
-            GENERATE_K,
-        )));
+        let mut suggested = worn.clone();
+        suggested.extend(self.suggest_rings(
+            &ring_counts(self.nearest(&stats, u32::from(sl), GENERATE_K)),
+            &worn,
+        ));
         let levelled = stats.map(|value| u16::try_from(value).unwrap_or(0));
         debug_assert_eq!(
             crate::model::soul_level(&levelled),
@@ -2782,6 +3360,8 @@ impl RecommenderBackend for CorpusBackend {
             slots_used: u16::try_from(slots_used).unwrap_or(0),
             slots: u16::try_from(slots).unwrap_or(0),
             catalysts,
+            ring_trades,
+            ring_lowered,
             stub: false,
         })
     }
