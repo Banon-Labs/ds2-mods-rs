@@ -181,6 +181,141 @@ pub struct CatalystPick {
     pub passed_over: Option<String>,
 }
 
+/// What a build must meet besides its weapon.
+///
+/// [`RecommenderBackend::optimize`], [`RecommenderBackend::generate_build`] and
+/// [`RecommenderBackend::refusal`] all take it, so Optimize for weapon and Generate Build answer
+/// the same question and cannot disagree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits<'a> {
+    /// Spells it must attune and cast, by soulsplanner key; a repeat is a second copy.
+    pub spells: &'a [String],
+    /// The starting class it must be (`sorcerer`), or `None` for whichever class does best.
+    pub class: Option<&'a str>,
+    /// Whether the soul level's floors apply. They are the medians of real builds, not a game
+    /// rule, so the panel can drop them ("ignore typical-build minimums").
+    pub floors: bool,
+}
+
+impl Limits<'static> {
+    /// No spells, any class, the floors applied.
+    pub const NONE: Self = Self {
+        spells: &[],
+        class: None,
+        floors: true,
+    };
+}
+
+impl<'a> Limits<'a> {
+    /// The panel's: its chosen spells and floors setting, any class.
+    pub fn of(state: &'a PanelState) -> Self {
+        Self {
+            spells: &state.spells,
+            class: None,
+            floors: !state.ignore_floors,
+        }
+    }
+}
+
+/// Which layer of a build no class can fit into its soul level: the script's `refusal` kinds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefusalKind {
+    /// No attunement holds the spells' slots at all.
+    Slots,
+    /// The weapon's requirements alone do not fit.
+    Weapon,
+    /// The weapon fits, but not with the spells.
+    Spells,
+    /// The weapon and spells fit, but not above the floors.
+    Floors,
+    /// Anything else: a build refused after it was made, or a backend that cannot say.
+    Other,
+}
+
+impl RefusalKind {
+    /// The script's name for it.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "slots" => Self::Slots,
+            "weapon" => Self::Weapon,
+            "spells" => Self::Spells,
+            "floors" => Self::Floors,
+            _ => return None,
+        })
+    }
+}
+
+/// One change to the panel that makes a refused build possible.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Change {
+    /// Build at this soul level instead: the least above the asked one that fits.
+    RaiseSl(u16),
+    /// Take out one copy of this spell (soulsplanner key).
+    RemoveSpell(String),
+    /// Drop the floors.
+    IgnoreFloors,
+    /// Build as this starting class (key) instead of the one asked for. Only offered when a class
+    /// was asked for, which the panel's own Generate never does.
+    Class(String),
+}
+
+impl Change {
+    /// Make the change to `state`. `false` when `state` has nothing it applies to: a class, which
+    /// the panel does not hold.
+    pub fn apply(&self, state: &mut PanelState) -> bool {
+        match self {
+            Change::RaiseSl(sl) => state.set_sl_override(Some(*sl)),
+            Change::RemoveSpell(key) => {
+                let Some(at) = state.spells.iter().position(|spell| spell == key) else {
+                    return false;
+                };
+                state.spells.remove(at);
+            }
+            Change::IgnoreFloors => state.ignore_floors = true,
+            Change::Class(_) => return false,
+        }
+        true
+    }
+}
+
+/// A fix the backend checked: with [`Self::change`] made, its optimizer finds a build.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Fix {
+    /// What to change.
+    pub change: Change,
+    /// The button's caption: `Raise SL to 139`, `Remove Climax`.
+    pub label: String,
+}
+
+/// Why no build came back, and what would make one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Refusal {
+    /// Which layer did not fit.
+    pub kind: RefusalKind,
+    /// The class the arithmetic is about, the least short one; `None` when there is none.
+    pub class: Option<String>,
+    /// How many points that class is short; `0` when there is no class.
+    pub short: i32,
+    /// The reason, a line each: what does not fit, the arithmetic, the biggest contributors, and
+    /// the least soul level that fits.
+    pub lines: Vec<String>,
+    /// Each change that was checked to produce a build, in the script's order.
+    pub fixes: Vec<Fix>,
+}
+
+impl Refusal {
+    /// A refusal that is only its reason lines.
+    pub fn plain(lines: Vec<String>) -> Self {
+        Self {
+            kind: RefusalKind::Other,
+            class: None,
+            short: 0,
+            lines,
+            fixes: Vec::new(),
+        }
+    }
+}
+
 /// The questions the panel asks. Every answer is for the soul level the caller passes.
 pub trait RecommenderBackend: Sync {
     /// Whether the answers are placeholders.
@@ -201,8 +336,8 @@ pub trait RecommenderBackend: Sync {
     ) -> Outcome {
         Outcome::Rows(Vec::new())
     }
-    /// The stats that make `weapon` hit hardest at `sl`, held in `grip`. `None` when no class can
-    /// wield it there that way.
+    /// The stats that make `weapon` hit hardest at `sl`, held in `grip`, meeting `limits` as
+    /// [`Self::generate_build`] does. `None` when no class can.
     fn optimize(
         &self,
         weapon: &str,
@@ -210,7 +345,21 @@ pub trait RecommenderBackend: Sync {
         sl: u16,
         objective: Objective,
         grip: Grip,
+        limits: &Limits<'_>,
     ) -> Option<OptimizedBuild>;
+    /// Why [`Self::optimize`] finds nothing for these arguments, and the fixes that were checked to
+    /// find something. `None` when it finds a build, or when this backend cannot say (the default).
+    fn refusal(
+        &self,
+        _weapon: &str,
+        _infusion: Infusion,
+        _sl: u16,
+        _objective: Objective,
+        _grip: Grip,
+        _limits: &Limits<'_>,
+    ) -> Option<Refusal> {
+        None
+    }
     /// The least a character needs to wield `weapon`. `None` when the weapon is unknown.
     fn minimum(&self, weapon: &str, infusion: Infusion, two_hand: bool) -> Option<OptimizedBuild>;
     /// The weapons the `k` builds nearest `stats` carry.
@@ -218,11 +367,11 @@ pub trait RecommenderBackend: Sync {
     /// How far the damage model agrees with real builds.
     fn calibration(&self) -> Calibration;
     /// A whole build for `weapon` held in `grip`, in armour unless `allow_naked`, that can attune
-    /// and cast every one of `spells` (soulsplanner keys; a repeat is a second copy). `None` when
-    /// no class can wield it and meet the spells' requirements and slots at `sl` that way, or a
-    /// spell is unknown. The build is from the starting class `class` names (`sorcerer`) or, with
-    /// `None`, whichever class does best.
-    // DEBT: ds2-mods-rs-59p7 -- the class made this eight arguments; bundle the per-build options.
+    /// and cast every one of `limits.spells`. `None` when no class can wield it and meet the
+    /// spells' requirements and slots (and the floors, when `limits.floors`) at `sl` that way, or a
+    /// spell is unknown. The build is from the starting class `limits.class` names (`sorcerer`)
+    /// or, with `None`, whichever class does best.
+    // DEBT: ds2-mods-rs-59p7 -- bundle the remaining per-build options into `Limits` as well.
     #[allow(clippy::too_many_arguments)]
     fn generate_build(
         &self,
@@ -232,8 +381,7 @@ pub trait RecommenderBackend: Sync {
         objective: Objective,
         allow_naked: bool,
         grip: Grip,
-        spells: &[String],
-        class: Option<&str>,
+        limits: &Limits<'_>,
     ) -> Option<GeneratedBuild>;
     /// The spells [`Self::generate_build`] can be asked for, in the data's order. The default has
     /// no spell data and offers none.
@@ -279,6 +427,8 @@ pub enum Answer {
     FloorViolations(Vec<String>),
     /// The mode could not run, and why.
     Nothing(&'static str),
+    /// Optimize for weapon found no build: why, and the fixes that were checked to find one.
+    Refused(Refusal),
 }
 
 /// Run the panel's current mode against `backend`.
@@ -312,12 +462,22 @@ pub fn ask(backend: &dyn RecommenderBackend, state: &PanelState) -> Answer {
             let Some(weapon) = state.weapon else {
                 return Answer::Nothing("choose a weapon first");
             };
-            let built = if state.mode == Mode::OptimizeForWeapon {
-                backend.optimize(weapon, state.infusion, sl, state.objective, state.grip)
-            } else {
-                backend.minimum(weapon, state.infusion, state.two_hand)
-            };
-            built.map_or(Answer::Nothing("no class can wield it here"), Answer::Build)
+            if state.mode == Mode::MinimumForWeapon {
+                return backend
+                    .minimum(weapon, state.infusion, state.two_hand)
+                    .map_or(Answer::Nothing("no class can wield it here"), Answer::Build);
+            }
+            let limits = Limits::of(state);
+            let (infusion, objective, grip) = (state.infusion, state.objective, state.grip);
+            match backend.optimize(weapon, infusion, sl, objective, grip, &limits) {
+                Some(build) => Answer::Build(build),
+                None => backend
+                    .refusal(weapon, infusion, sl, objective, grip, &limits)
+                    .map_or(
+                        Answer::Nothing("no class can wield it here"),
+                        Answer::Refused,
+                    ),
+            }
         }
     }
 }
@@ -343,7 +503,14 @@ pub fn best_infusion(backend: &dyn RecommenderBackend, state: &PanelState) -> An
         .infusions()
         .into_iter()
         .filter_map(|infusion| {
-            let build = backend.optimize(weapon, infusion, sl, state.objective, state.grip)?;
+            let build = backend.optimize(
+                weapon,
+                infusion,
+                sl,
+                state.objective,
+                state.grip,
+                &Limits::of(state),
+            )?;
             Some(ResultRow {
                 weapon: row.name.to_owned(),
                 infusion,
@@ -391,47 +558,60 @@ pub fn infusion_margin(rows: &[ResultRow]) -> Option<f32> {
 ///
 /// # Errors
 ///
-/// The reason as lines for the panel: no weapon chosen, no build possible, a build for the wrong
-/// class or under its base, or each floor the backend's build is under.
+/// The reason as lines for the panel: no weapon chosen, no build possible (with the backend's
+/// [`RecommenderBackend::refusal`] -- its arithmetic and checked fixes -- when it has one), a
+/// build for the wrong class or under its base, or each floor the backend's build is under, unless
+/// the panel ignores the floors.
 pub fn generate(
     backend: &dyn RecommenderBackend,
     state: &PanelState,
     class: Option<StartingClass>,
-) -> Result<GeneratedBuild, Vec<String>> {
+) -> Result<GeneratedBuild, Refusal> {
     let Some(weapon) = state.weapon else {
-        return Err(vec!["choose a weapon first".to_owned()]);
+        return Err(Refusal::plain(vec!["choose a weapon first".to_owned()]));
     };
+    let limits = Limits {
+        class: class.map(StartingClass::key),
+        ..Limits::of(state)
+    };
+    let (infusion, sl, objective, grip) = (state.infusion, state.sl(), state.objective, state.grip);
     let Some(build) = backend.generate_build(
         weapon,
-        state.infusion,
-        state.sl(),
-        state.objective,
+        infusion,
+        sl,
+        objective,
         state.allow_naked,
-        state.grip,
-        &state.spells,
-        class.map(StartingClass::key),
+        grip,
+        &limits,
     ) else {
+        if let Some(refusal) = backend.refusal(weapon, infusion, sl, objective, grip, &limits) {
+            return Err(refusal);
+        }
         let who = class.map_or_else(
             || "no class".to_owned(),
             |class| format!("a {}", class.key()),
         );
         let can = if class.is_some() { "cannot" } else { "can" };
-        return Err(vec![if state.spells.is_empty() {
+        return Err(Refusal::plain(vec![if state.spells.is_empty() {
             format!("{who} {can} wield it at this soul level")
         } else {
             format!("{who} {can} wield it and cast the chosen spells at this soul level")
-        }]);
+        }]));
     };
     if let Some(class) = class
         && let Err(refusal) = check_build(&build.class, class, &game_order(&build.stats))
     {
-        return Err(vec![refusal.to_string()]);
+        return Err(Refusal::plain(vec![refusal.to_string()]));
     }
-    let violations = floor_violations(&build.stats, &backend.floors(build.sl));
+    let violations = if state.ignore_floors {
+        Vec::new()
+    } else {
+        floor_violations(&build.stats, &backend.floors(build.sl))
+    };
     if violations.is_empty() {
         Ok(build)
     } else {
-        Err(violations)
+        Err(Refusal::plain(violations))
     }
 }
 
@@ -736,7 +916,16 @@ impl RecommenderBackend for StubBackend {
         sl: u16,
         _objective: Objective,
         grip: Grip,
+        limits: &Limits<'_>,
     ) -> Option<OptimizedBuild> {
+        // As `generate_build`: no spells to offer, and a Deprived's build only.
+        if !limits.spells.is_empty()
+            || limits
+                .class
+                .is_some_and(|class| !class.eq_ignore_ascii_case("deprived"))
+        {
+            return None;
+        }
         weapons::by_key(weapon).map(|_| Self::stub_build(sl, grip.two_handed()))
     }
 
@@ -786,16 +975,18 @@ impl RecommenderBackend for StubBackend {
         _objective: Objective,
         allow_naked: bool,
         grip: Grip,
-        spells: &[String],
-        class: Option<&str>,
+        limits: &Limits<'_>,
     ) -> Option<GeneratedBuild> {
         // The stub offers no spells (`spells` is the trait's empty default), so none can be asked
         // of it; a caller that asks anyway gets no build rather than one that ignores them.
-        if !spells.is_empty() {
+        if !limits.spells.is_empty() {
             return None;
         }
         // The stub's one build is a Deprived's; it has nothing to offer any other class.
-        if class.is_some_and(|class| !class.eq_ignore_ascii_case("deprived")) {
+        if limits
+            .class
+            .is_some_and(|class| !class.eq_ignore_ascii_case("deprived"))
+        {
             return None;
         }
         let primary = weapons::by_key("Moonlight_Greatsword")?;
@@ -1013,8 +1204,9 @@ mod tests {
                 sl: u16,
                 o: Objective,
                 g: Grip,
+                l: &Limits<'_>,
             ) -> Option<OptimizedBuild> {
-                StubBackend.optimize(w, i, sl, o, g)
+                StubBackend.optimize(w, i, sl, o, g, l)
             }
             fn minimum(&self, w: &str, i: Infusion, t: bool) -> Option<OptimizedBuild> {
                 StubBackend.minimum(w, i, t)
@@ -1033,10 +1225,9 @@ mod tests {
                 o: Objective,
                 n: bool,
                 g: Grip,
-                s: &[String],
-                c: Option<&str>,
+                l: &Limits<'_>,
             ) -> Option<GeneratedBuild> {
-                StubBackend.generate_build(w, i, sl, o, n, g, s, c)
+                StubBackend.generate_build(w, i, sl, o, n, g, l)
             }
         }
         fn rows_of(outcome: Outcome) -> Vec<ResultRow> {
@@ -1079,8 +1270,9 @@ mod tests {
                 sl: u16,
                 o: Objective,
                 g: Grip,
+                l: &Limits<'_>,
             ) -> Option<OptimizedBuild> {
-                StubBackend.optimize(w, i, sl, o, g)
+                StubBackend.optimize(w, i, sl, o, g, l)
             }
             fn minimum(&self, w: &str, i: Infusion, t: bool) -> Option<OptimizedBuild> {
                 StubBackend.minimum(w, i, t)
@@ -1099,10 +1291,9 @@ mod tests {
                 o: Objective,
                 naked: bool,
                 g: Grip,
-                s: &[String],
-                c: Option<&str>,
+                l: &Limits<'_>,
             ) -> Option<GeneratedBuild> {
-                StubBackend.generate_build(w, i, sl, o, naked, g, s, c)
+                StubBackend.generate_build(w, i, sl, o, naked, g, l)
             }
         }
         let state = PanelState {
@@ -1110,7 +1301,15 @@ mod tests {
             ..PanelState::default()
         };
         let refused = generate(&Strict, &state, None).expect_err("under every floor");
-        assert_eq!(refused.len(), FLOOR_STATS.len());
+        assert_eq!(refused.lines.len(), FLOOR_STATS.len());
+        let ignoring = PanelState {
+            ignore_floors: true,
+            ..state.clone()
+        };
+        assert!(
+            generate(&Strict, &ignoring, None).is_ok(),
+            "the floors are dropped when the panel ignores them"
+        );
         assert!(
             generate(&StubBackend, &PanelState::default(), None).is_err(),
             "no weapon"
@@ -1139,8 +1338,9 @@ mod tests {
                 sl: u16,
                 o: Objective,
                 g: Grip,
+                l: &Limits<'_>,
             ) -> Option<OptimizedBuild> {
-                StubBackend.optimize(w, i, sl, o, g)
+                StubBackend.optimize(w, i, sl, o, g, l)
             }
             fn minimum(&self, w: &str, i: Infusion, t: bool) -> Option<OptimizedBuild> {
                 StubBackend.minimum(w, i, t)
@@ -1159,10 +1359,10 @@ mod tests {
                 o: Objective,
                 naked: bool,
                 g: Grip,
-                s: &[String],
-                _class: Option<&str>,
+                l: &Limits<'_>,
             ) -> Option<GeneratedBuild> {
-                let mut build = StubBackend.generate_build(w, i, sl, o, naked, g, s, None)?;
+                let any = Limits { class: None, ..*l };
+                let mut build = StubBackend.generate_build(w, i, sl, o, naked, g, &any)?;
                 // The log's Warrior: game order [22, 6, 11, 6, 28, 42, 5, 5, 18].
                 build.class = "Warrior".to_owned();
                 build.stats = planner_order(&[22, 6, 11, 6, 28, 42, 5, 5, 18]);
@@ -1179,7 +1379,7 @@ mod tests {
         let refused = generate(&Careless, &state, Some(StartingClass::Sorcerer))
             .expect_err("a Warrior for a Sorcerer");
         assert!(
-            refused[0].contains("warrior") && refused[0].contains("sorcerer"),
+            refused.lines[0].contains("warrior") && refused.lines[0].contains("sorcerer"),
             "{refused:?}"
         );
         // Named a Sorcerer, the same spread is still under the Sorcerer's base.
@@ -1201,8 +1401,9 @@ mod tests {
                 sl: u16,
                 o: Objective,
                 g: Grip,
+                l: &Limits<'_>,
             ) -> Option<OptimizedBuild> {
-                StubBackend.optimize(w, i, sl, o, g)
+                StubBackend.optimize(w, i, sl, o, g, l)
             }
             fn minimum(&self, w: &str, i: Infusion, t: bool) -> Option<OptimizedBuild> {
                 StubBackend.minimum(w, i, t)
@@ -1221,10 +1422,9 @@ mod tests {
                 o: Objective,
                 naked: bool,
                 g: Grip,
-                s: &[String],
-                class: Option<&str>,
+                l: &Limits<'_>,
             ) -> Option<GeneratedBuild> {
-                let mut build = Careless.generate_build(w, i, sl, o, naked, g, s, class)?;
+                let mut build = Careless.generate_build(w, i, sl, o, naked, g, l)?;
                 build.class = "Sorcerer".to_owned();
                 Some(build)
             }
@@ -1232,7 +1432,8 @@ mod tests {
         let refused = generate(&Relabelled, &state, Some(StartingClass::Sorcerer))
             .expect_err("under the Sorcerer base");
         assert!(
-            refused[0].contains("attunement 6 < 12") && refused[0].contains("intelligence 5 < 14"),
+            refused.lines[0].contains("attunement 6 < 12")
+                && refused.lines[0].contains("intelligence 5 < 14"),
             "{refused:?}"
         );
     }
@@ -1247,7 +1448,30 @@ mod tests {
         assert!(generate(&StubBackend, &state, Some(StartingClass::Deprived)).is_ok());
         let refused = generate(&StubBackend, &state, Some(StartingClass::Sorcerer))
             .expect_err("no Sorcerer build");
-        assert_eq!(refused, ["a sorcerer cannot wield it at this soul level"]);
+        assert_eq!(
+            refused.lines,
+            ["a sorcerer cannot wield it at this soul level"]
+        );
+    }
+
+    /// Each fix makes the change its label names, to the panel state Generate reads.
+    #[test]
+    fn a_fix_changes_the_panel_as_its_label_says() {
+        let mut state = PanelState {
+            spells: ["Climax", "Heal", "Climax"].map(str::to_owned).to_vec(),
+            ..PanelState::default()
+        };
+        assert!(Change::RaiseSl(139).apply(&mut state));
+        assert_eq!(state.sl(), 139);
+        assert!(Change::RemoveSpell("Climax".to_owned()).apply(&mut state));
+        assert_eq!(state.spells, ["Heal", "Climax"], "one copy, the first");
+        assert!(!Change::RemoveSpell("Soul_Arrow".to_owned()).apply(&mut state));
+        assert!(Change::IgnoreFloors.apply(&mut state));
+        assert!(state.ignore_floors);
+        assert!(
+            !Change::Class("knight".to_owned()).apply(&mut state),
+            "the panel holds no class"
+        );
     }
 
     /// The two stat orders are each other's inverse, and adaptability is what moves.

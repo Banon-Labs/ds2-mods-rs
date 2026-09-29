@@ -9,8 +9,8 @@ use std::sync::{Mutex, OnceLock};
 
 use ds2_build_import_core::Infusion;
 use ds2_build_recommender_core::backend::{
-    self, Answer, Calibration, DAMAGE_TYPES, GeneratedBuild, RecommenderBackend, ResultRow,
-    StubBackend,
+    self, Answer, Calibration, DAMAGE_TYPES, Fix, GeneratedBuild, RecommenderBackend, Refusal,
+    ResultRow, StubBackend,
 };
 use ds2_build_recommender_core::corpus::{self, CorpusBackend};
 use ds2_build_recommender_core::flex::{Flexibility, flex_line, flex_load_line};
@@ -189,6 +189,10 @@ enum Action {
     ToggleTwoHand,
     /// Generate Build: whether the build may leave the armour off.
     ToggleAllowNaked,
+    /// Optimize for weapon and Generate Build: whether the soul level's floors are dropped.
+    ToggleIgnoreFloors,
+    /// Make one of the refusal's checked fixes, by index into [`Panel::fixes`], and ask again.
+    Fix(usize),
     /// Generate Build: add or take out one spell, by index into the backend's spell table.
     ToggleSpell(usize),
     /// Generate Build: no spells.
@@ -232,6 +236,11 @@ struct Panel {
     generated_flex: Option<Flexibility>,
     /// Why the last Generate Build was refused.
     refused: Vec<String>,
+    /// The fixes the last refusal offered, Optimize for weapon's or Generate Build's: each was
+    /// checked by the backend to produce a build. Empty when nothing is refused.
+    fixes: Vec<Fix>,
+    /// What a fix asks again after it is made: [`Action::Run`] or [`Action::Generate`].
+    fix_then: Action,
     shown: Shown,
     confirming: bool,
     /// In the Apply confirm, whether the cursor is on Apply rather than Cancel. Starts on Cancel.
@@ -263,6 +272,8 @@ impl Panel {
             answer_flex: None,
             generated_flex: None,
             refused: Vec::new(),
+            fixes: Vec::new(),
+            fix_then: Action::Generate,
             shown: Shown::Answer,
             confirming: false,
             confirm_on_apply: false,
@@ -281,6 +292,11 @@ impl Panel {
                 && self.refused.is_empty()
                 && matches!(&self.answer, Some(Answer::Rows(rows)) if !rows.is_empty()),
             generated: self.generated.is_some(),
+            fixes: if self.shown == Shown::Answer {
+                self.fixes.len()
+            } else {
+                0
+            },
         }
     }
 
@@ -403,6 +419,13 @@ impl Panel {
             Control::Results => format!("results scroll={}", self.results_scroll),
             Control::Generate => "generate build".to_owned(),
             Control::AllowNaked => format!("allow-no-armor={}", state.allow_naked),
+            Control::IgnoreFloors => format!("ignore-floors={}", state.ignore_floors),
+            Control::Fix(index) => format!(
+                "fix {index}: {}",
+                self.fixes
+                    .get(index)
+                    .map_or("none", |fix| fix.label.as_str())
+            ),
             Control::Spells => format!("spells={:?}", state.spells),
             Control::ShowToggle => format!("showing {:?}", self.shown),
             Control::Apply => format!("apply (build ready={})", self.generated.is_some()),
@@ -451,6 +474,8 @@ impl Panel {
             Control::Results => None,
             Control::Generate => Some(Action::Generate),
             Control::AllowNaked => Some(Action::ToggleAllowNaked),
+            Control::IgnoreFloors => Some(Action::ToggleIgnoreFloors),
+            Control::Fix(index) => (index < self.fixes.len()).then_some(Action::Fix(index)),
             Control::Spells => Some(Action::OpenList(List::Spell)),
             Control::ShowToggle => Some(Action::Show(if self.shown == Shown::Build {
                 Shown::Answer
@@ -556,6 +581,7 @@ impl Panel {
         self.results_scroll = 0;
         self.scrolling_results = false;
         self.refused.clear();
+        self.fixes.clear();
         self.status = None;
     }
 
@@ -727,8 +753,14 @@ impl Panel {
                 ),
                 Answer::FloorViolations(lines) => format!("under floors: {}", lines.join(", ")),
                 Answer::Nothing(why) => (*why).to_owned(),
+                Answer::Refused(refusal) => format!("refused: {}", refusal_summary(refusal)),
             }
         ));
+        self.fixes = match &answer {
+            Answer::Refused(refusal) => refusal.fixes.clone(),
+            _ => Vec::new(),
+        };
+        self.fix_then = Action::Run;
         // An optimized or minimum build wears nothing the answer names, so its load is all spare.
         self.answer_flex = match &answer {
             Answer::Build(build) => ask_flexibility(&build.stats, build.sl, &[], &[]),
@@ -743,6 +775,7 @@ impl Panel {
     /// the status line.
     fn best_infusion(&mut self) {
         let answer = backend::best_infusion(backend(), &self.state);
+        self.fixes.clear();
         let summary = match &answer {
             Answer::Rows(rows) => {
                 let name = |row: &ResultRow| weapons::display_name(row.infusion);
@@ -810,19 +843,43 @@ impl Panel {
                     ask_flexibility(&build.stats, build.sl, &build.armor, &build.suggested_rings);
                 self.generated = Some(build);
                 self.refused.clear();
+                if self.fix_then == Action::Generate {
+                    self.fixes.clear();
+                }
                 self.shown = Shown::Build;
             }
-            Err(lines) => {
+            Err(refusal) => {
                 log_line(format_args!(
                     "{LOG_PREFIX} generate refused: {}",
-                    lines.join(", ")
+                    refusal_summary(&refusal)
                 ));
                 self.generated = None;
                 self.generated_flex = None;
-                self.refused = lines;
+                self.refused = refusal.lines;
+                self.fixes = refusal.fixes;
+                self.fix_then = Action::Generate;
                 self.shown = Shown::Answer;
             }
         }
+    }
+
+    /// Make the refusal's fix `index` to the panel's inputs and ask the same question again, so
+    /// one press turns a refusal into a build.
+    fn fix(&mut self, index: usize) {
+        let Some(fix) = self.fixes.get(index).cloned() else {
+            return;
+        };
+        let applied = fix.change.apply(&mut self.state);
+        log_line(format_args!(
+            "{LOG_PREFIX} fix \"{}\" applied={applied} -> sl={} spells={:?} ignore_floors={}",
+            fix.label,
+            self.state.sl(),
+            self.state.spells,
+            self.state.ignore_floors
+        ));
+        let then = self.fix_then;
+        self.changed();
+        self.act(then);
     }
 
     fn apply(&mut self) {
@@ -923,6 +980,15 @@ impl Panel {
                 self.changed();
             }
             Action::ToggleAllowNaked => self.state.allow_naked ^= true,
+            Action::ToggleIgnoreFloors => {
+                self.state.ignore_floors ^= true;
+                log_line(format_args!(
+                    "{LOG_PREFIX} ignore floors -> {}",
+                    self.state.ignore_floors
+                ));
+                self.changed();
+            }
+            Action::Fix(index) => self.fix(index),
             Action::ToggleSpell(index) => {
                 if let Some(spell) = backend().spells().get(index) {
                     let chosen = self.state.toggle_spell(&spell.key);
@@ -1753,6 +1819,14 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
         Some(Action::OpenList(List::Spell)),
         Some(Control::Spells),
     ) + GAP;
+    x = canvas.check(
+        x,
+        footer_y,
+        "Ignore typical minimums",
+        panel.state.ignore_floors,
+        Action::ToggleIgnoreFloors,
+        Control::IgnoreFloors,
+    ) + GAP;
     if panel.generated.is_some() {
         let (label, shown) = if panel.shown == Shown::Build {
             ("Show results", Shown::Answer)
@@ -1996,19 +2070,84 @@ fn draw_options(panel: &Panel, canvas: &mut Canvas<'_>, x: f32, y: f32) -> f32 {
     class_x
 }
 
+/// A refusal for the log: its lines, then the fixes it offers.
+fn refusal_summary(refusal: &Refusal) -> String {
+    let fixes: Vec<&str> = refusal.fixes.iter().map(|fix| fix.label.as_str()).collect();
+    format!("{} | fixes: {}", refusal.lines.join("; "), fixes.join(", "))
+}
+
+/// A refusal's lines under `title`, then one button per checked fix. Returns the y under them.
+fn draw_refusal(
+    canvas: &mut Canvas<'_>,
+    title: &str,
+    lines: &[String],
+    fixes: &[Fix],
+    (min, max): ([f32; 2], [f32; 2]),
+) -> f32 {
+    let line = canvas.line;
+    let mut y = min[1];
+    canvas.text([min[0], y], WARN, title);
+    for reason in lines {
+        for part in wrap(canvas.ui, reason, max[0] - min[0] - 24.0) {
+            y += line + 2.0;
+            canvas.text([min[0] + 12.0, y], TEXT, &part);
+        }
+    }
+    if fixes.is_empty() {
+        return y + line;
+    }
+    y += line + 8.0;
+    canvas.text(
+        [min[0], y],
+        TEXT,
+        "Make it build (each was checked to give a build):",
+    );
+    y += line + 4.0;
+    let mut x = min[0] + 12.0;
+    for (index, fix) in fixes.iter().enumerate() {
+        let width = canvas.width(&fix.label) + 16.0;
+        if x + width > max[0] && x > min[0] + 12.0 {
+            x = min[0] + 12.0;
+            y += canvas.row + 4.0;
+        }
+        x = canvas.button(
+            x,
+            y,
+            &fix.label,
+            false,
+            Some(Action::Fix(index)),
+            Some(Control::Fix(index)),
+        ) + 8.0;
+    }
+    y + canvas.row
+}
+
 /// The answer to the last Run, or why there is none.
 fn draw_answer(panel: &mut Panel, canvas: &mut Canvas<'_>, (min, max): ([f32; 2], [f32; 2])) {
     let line = canvas.line;
     let mut y = min[1];
     if !panel.refused.is_empty() {
-        canvas.text([min[0], y], WARN, "Generate Build refused:");
-        for reason in &panel.refused {
-            y += line + 2.0;
-            canvas.text([min[0] + 12.0, y], TEXT, reason);
-        }
+        let (lines, fixes) = (panel.refused.clone(), panel.fixes.clone());
+        draw_refusal(
+            canvas,
+            "Generate Build refused:",
+            &lines,
+            &fixes,
+            (min, max),
+        );
         return;
     }
     match &panel.answer {
+        Some(Answer::Refused(refusal)) => {
+            let refusal = refusal.clone();
+            draw_refusal(
+                canvas,
+                "Optimize for weapon found no build:",
+                &refusal.lines,
+                &refusal.fixes,
+                (min, max),
+            );
+        }
         None => {
             let text = if panel.state.ready() {
                 "Press Run to ask."
@@ -2548,6 +2687,27 @@ fn clip(ui: &Ui, text: &str, width: f32) -> String {
         }
     }
     String::new()
+}
+
+/// `text` broken at spaces into lines that each fit `width`; a word wider than `width` gets a line
+/// of its own.
+fn wrap(ui: &Ui, text: &str, width: f32) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in text.split(' ') {
+        let candidate = if current.is_empty() {
+            word.to_owned()
+        } else {
+            format!("{current} {word}")
+        };
+        if current.is_empty() || ui.calc_text_size(&candidate)[0] <= width {
+            current = candidate;
+        } else {
+            out.push(std::mem::replace(&mut current, word.to_owned()));
+        }
+    }
+    out.push(current);
+    out
 }
 
 /// `text`, cut at the left to fit, so the end being typed stays in view.

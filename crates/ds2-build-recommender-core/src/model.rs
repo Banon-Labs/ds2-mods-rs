@@ -203,6 +203,10 @@ pub struct PanelState {
     /// The spells Generate Build must be able to attune and cast, by soulsplanner key, in the
     /// order they were chosen. Empty by default: a build with no spells.
     pub spells: Vec<String>,
+    /// Whether Optimize for weapon and Generate Build drop the soul level's floors: they are the
+    /// medians of real builds, not a game rule. Off by default; a refusal's "ignore typical-build
+    /// minimums" fix turns it on.
+    pub ignore_floors: bool,
 }
 
 impl Default for PanelState {
@@ -222,6 +226,7 @@ impl Default for PanelState {
             similar_k: SIMILAR_K_DEFAULT,
             status: StatusFilter::default(),
             spells: Vec::new(),
+            ignore_floors: false,
         }
     }
 }
