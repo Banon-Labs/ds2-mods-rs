@@ -77,7 +77,8 @@ pub(crate) fn install(base: usize) -> bool {
 fn read_i32(address: usize) -> Option<i32> {
     let mut bytes = [0u8; 4];
     // SAFETY: `read_bytes` probes rather than trusting; an unmapped address is `false`.
-    unsafe { ds2_game_base::mem::read_bytes(address, &mut bytes) }.then(|| i32::from_le_bytes(bytes))
+    unsafe { ds2_game_base::mem::read_bytes(address, &mut bytes) }
+        .then(|| i32::from_le_bytes(bytes))
 }
 
 fn read_usize(address: usize) -> Option<usize> {
@@ -130,7 +131,9 @@ pub(crate) unsafe fn after(this: *mut u8, before: Before) {
     if !before.armed || focused_child(this as usize) != Some(0) {
         return;
     }
-    let Some(vtable) = read_usize(this as usize) else { return };
+    let Some(vtable) = read_usize(this as usize) else {
+        return;
+    };
     let Some(enter) = read_usize(vtable + ds2_rva::FE_INVENTORY_ENTER_LIST_SLOT) else {
         return;
     };
@@ -182,7 +185,11 @@ fn bottom_of_column(grid: usize) -> Option<i32> {
     }
     let extent = read_i32(grid + ds2_rva::FEX_GRID_COL_EXTENT_OFFSET)?;
     let rows_mode = read_i32(grid + ds2_rva::FEX_GRID_ROW_EXTENT_OFFSET)?;
-    let cols = if rows_mode == 1 { extent.max(count).max(1) } else { extent.max(1) };
+    let cols = if rows_mode == 1 {
+        extent.max(count).max(1)
+    } else {
+        extent.max(1)
+    };
     let current_index = CURRENT_INDEX.load(Ordering::Acquire);
     // SAFETY: the prologue-checked pure getter, on the live item grid.
     let current =

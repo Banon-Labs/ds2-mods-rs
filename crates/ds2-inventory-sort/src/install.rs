@@ -59,6 +59,9 @@ pub struct Request {
     /// The config file to watch for the binding. `None` disables live rebinding and leaves the
     /// built-in defaults in force -- which is a degraded mode, not the normal one.
     pub config_path: Option<PathBuf>,
+    /// Arm the sort button (`[inventory_sort] enabled`). The menu detours, and UP-enters-list with
+    /// them, install either way.
+    pub sort_button: bool,
 }
 
 /// What [`install`] managed to do.
@@ -364,7 +367,11 @@ unsafe fn update_detour(slot: usize, this: *mut u8, delta: f32, third: usize, fo
     // The Inventory update's third argument is the frontend input event; UP on the category strip
     // is read from it before the original can change the focus it depends on.
     let up = (slot == INVENTORY).then(|| {
-        crate::up_enter::before(this, TRACKED[INVENTORY].vtable.load(Ordering::Acquire), third)
+        crate::up_enter::before(
+            this,
+            TRACKED[INVENTORY].vtable.load(Ordering::Acquire),
+            third,
+        )
     });
     let trampoline = trampoline_of(slot, |tracked| &tracked.update);
     if trampoline != 0 {
@@ -952,6 +959,16 @@ pub unsafe fn install(request: &Request) -> Outcome {
              open the dialog on"
         ));
         return Outcome::default();
+    }
+
+    // UP-enters-list rides on the detours above and is always on; `[inventory_sort] enabled`
+    // governs the sort button alone, which is everything below.
+    if !request.sort_button {
+        log(format_args!(
+            "{LOG_PREFIX} armed inventory={inventory} equip={equip} -- sort button off by config; \
+             UP-enters-list stays on"
+        ));
+        return Outcome { installed: true };
     }
 
     // The default is in force before the file is read, so a missing or unreadable config still

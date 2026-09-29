@@ -100,6 +100,19 @@ pub fn bottom_row_index(current: i32, count: i32, cols: i32) -> i32 {
     (column + cols * (last / cols)).min(last)
 }
 
+/// Prefix on every line this crate writes to the loader log.
+pub const LOG_PREFIX: &str = "ds2-inventory-sort:";
+
+/// The config section this crate reads its binding out of. Mirrored in `scripts/ds2-run.py`.
+pub const CONFIG_SECTION: &str = "inventory_sort";
+
+/// The keyboard binding key. A name from [`ds2_hotkey_config::keys`], e.g. `"F7"`, `"]"`, `"KP_5"`.
+pub const CONFIG_KEY_KEYBOARD: &str = "key";
+
+/// The controller binding key. An XInput button name, e.g. `"Y"`, `"X"`, `"LThumb"`. See
+/// `install::PAD_BUTTONS`.
+pub const CONFIG_KEY_PAD: &str = "pad";
+
 #[cfg(test)]
 mod tests {
     use super::bottom_row_index;
@@ -126,16 +139,3 @@ mod tests {
         assert_eq!(bottom_row_index(-1, 17, 10), 10);
     }
 }
-
-/// Prefix on every line this crate writes to the loader log.
-pub const LOG_PREFIX: &str = "ds2-inventory-sort:";
-
-/// The config section this crate reads its binding out of. Mirrored in `scripts/ds2-run.py`.
-pub const CONFIG_SECTION: &str = "inventory_sort";
-
-/// The keyboard binding key. A name from [`ds2_hotkey_config::keys`], e.g. `"F7"`, `"]"`, `"KP_5"`.
-pub const CONFIG_KEY_KEYBOARD: &str = "key";
-
-/// The controller binding key. An XInput button name, e.g. `"Y"`, `"X"`, `"LThumb"`. See
-/// `install::PAD_BUTTONS`.
-pub const CONFIG_KEY_PAD: &str = "pad";
