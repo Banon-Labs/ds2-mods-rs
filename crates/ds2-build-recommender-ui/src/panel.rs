@@ -10,7 +10,7 @@ use std::sync::{Mutex, OnceLock};
 use ds2_build_import_core::Infusion;
 use ds2_build_recommender_core::backend::{
     self, Answer, Calibration, DAMAGE_TYPES, Fix, GeneratedBuild, RecommenderBackend, Refusal,
-    ResultRow, StubBackend,
+    ResultRow, StubBackend, WeaponCard, Wield,
 };
 use ds2_build_recommender_core::corpus::{self, CorpusBackend};
 use ds2_build_recommender_core::flex::{Flexibility, flex_line, flex_load_line};
@@ -21,8 +21,9 @@ use ds2_build_recommender_core::model::{
 /// STR's place in the nine stats, for the log lines that say what a grip did to it.
 const STR_INDEX: usize = 4;
 use ds2_build_recommender_core::nav::{self, Control, Dir, Nudge, Shape};
-use ds2_build_recommender_core::weapons;
+use ds2_build_recommender_core::weapons::{self, WeaponRow};
 use ds2_overlay::fefont::{Button, button};
+use ds2_overlay::panels::IconDraw;
 use ds2_overlay::style;
 use hudhook::imgui::{DrawListMut, MouseButton, Ui};
 
@@ -149,6 +150,10 @@ impl Field {
 /// Rows a drop-down list shows at once.
 const LIST_VISIBLE: usize = 12;
 
+/// Rows the weapon picker shows at once until its first draw has measured the screen: the design's
+/// three, which fit a 1920x1080 screen.
+const PICKER_ROWS: usize = 3;
+
 /// Rows LB and RB move the results table.
 const RESULTS_PAGE: usize = 10;
 
@@ -205,6 +210,8 @@ enum Action {
     ClearSpells,
     ToggleBleed,
     TogglePoison,
+    /// Close the open list, keeping what was typed into its filter.
+    CloseList,
     Run,
     /// Rank every infusion of the chosen weapon at the panel's stats.
     BestInfusion,
@@ -232,6 +239,12 @@ struct Panel {
     list_scroll: usize,
     /// The highlighted row of the open list, which A chooses.
     list_cursor: usize,
+    /// Rows the weapon picker showed on its last draw, which LB and RB page by.
+    picker_rows: usize,
+    /// How many buttons the footer had when the log last said whether they fit.
+    footer_logged: usize,
+    /// Whether the log has said how the weapon picker opened this time.
+    picker_logged: bool,
     answer: Option<Answer>,
     results_scroll: usize,
     /// The highlighted row of the results table, whose breakdown is drawn under it.
@@ -274,6 +287,9 @@ impl Panel {
             list: None,
             list_scroll: 0,
             list_cursor: 0,
+            picker_rows: PICKER_ROWS,
+            footer_logged: 0,
+            picker_logged: false,
             answer: None,
             results_scroll: 0,
             results_cursor: 0,
@@ -309,27 +325,39 @@ impl Panel {
         }
     }
 
+    /// The weapons the picker lists: every one whose name matches what its filter holds.
+    fn weapon_rows(&self) -> Vec<&'static WeaponRow> {
+        let filter = if self.focus == Some(Field::Search) {
+            self.edit.as_str()
+        } else {
+            ""
+        };
+        weapons::search(filter)
+    }
+
+    /// Rows `list` shows at once, which LB and RB page by.
+    fn list_visible(&self, list: List) -> usize {
+        match list {
+            List::Weapon => self.picker_rows,
+            List::Infusion | List::Class | List::Spell => LIST_VISIBLE,
+        }
+    }
+
     /// The rows `list` offers, with what choosing each does. The same rows the list draws.
     fn list_rows(&self, list: List) -> Vec<(String, Action)> {
         match list {
-            List::Weapon => {
-                let filter = if self.focus == Some(Field::Search) {
-                    self.edit.as_str()
-                } else {
-                    ""
-                };
-                weapons::search(filter)
-                    .into_iter()
-                    .map(|row| {
-                        let label = if row.class.is_empty() {
-                            row.name.to_owned()
-                        } else {
-                            format!("{}  ({})", row.name, row.class)
-                        };
-                        (label, Action::ChooseWeapon(row.key))
-                    })
-                    .collect()
-            }
+            List::Weapon => self
+                .weapon_rows()
+                .into_iter()
+                .map(|row| {
+                    let label = if row.class.is_empty() {
+                        row.name.to_owned()
+                    } else {
+                        format!("{}  ({})", row.name, row.class)
+                    };
+                    (label, Action::ChooseWeapon(row.key))
+                })
+                .collect(),
             List::Infusion => self
                 .state
                 .weapon
@@ -422,7 +450,6 @@ impl Panel {
             Control::Bleed => format!("bleed-only={}", state.status.bleed),
             Control::Poison => format!("poison-only={}", state.status.poison),
             Control::BestInfusion => format!("best infusion (weapon={})", state.weapon.is_some()),
-            Control::Run => format!("run (ready={})", state.ready()),
             Control::Results => format!("results row={}", self.results_cursor + 1),
             Control::Generate => "generate build".to_owned(),
             Control::AllowNaked => format!("allow-no-armor={}", state.allow_naked),
@@ -477,7 +504,6 @@ impl Panel {
             Control::Bleed => Some(Action::ToggleBleed),
             Control::Poison => Some(Action::TogglePoison),
             Control::BestInfusion => self.state.weapon.is_some().then_some(Action::BestInfusion),
-            Control::Run => self.state.ready().then_some(Action::Run),
             Control::Results => None,
             Control::Generate => Some(Action::Generate),
             Control::AllowNaked => Some(Action::ToggleAllowNaked),
@@ -531,8 +557,12 @@ impl Panel {
     fn move_in_list(&mut self, list: List, delta: isize) {
         let rows = self.list_rows(list);
         self.list_cursor = nav::move_in_list(self.list_cursor, delta, rows.len());
-        self.list_scroll =
-            nav::scroll_to(self.list_cursor, self.list_scroll, LIST_VISIBLE, rows.len());
+        self.list_scroll = nav::scroll_to(
+            self.list_cursor,
+            self.list_scroll,
+            self.list_visible(list),
+            rows.len(),
+        );
         log_line(format_args!(
             "{LOG_PREFIX} list {list:?} row {}/{} [{}]",
             self.list_cursor + 1,
@@ -578,7 +608,7 @@ impl Panel {
             }
         };
         self.list_cursor = current.unwrap_or(0);
-        self.list_scroll = nav::scroll_to(self.list_cursor, 0, LIST_VISIBLE, rows.len());
+        self.list_scroll = nav::scroll_to(self.list_cursor, 0, self.list_visible(list), rows.len());
     }
 
     /// The inputs changed: an answer for the old ones is not shown for the new.
@@ -654,6 +684,7 @@ impl Panel {
             self.list = Some(List::Weapon);
             self.list_scroll = 0;
             self.list_cursor = 0;
+            self.picker_logged = false;
         }
     }
 
@@ -1043,6 +1074,8 @@ impl Panel {
                 self.state.status.poison ^= true;
                 self.changed();
             }
+            // Leaving the field and closing the list is what every action but a choice does, above.
+            Action::CloseList => log_line(format_args!("{LOG_PREFIX} list closed by a click")),
             Action::Run => self.run(),
             Action::BestInfusion => self.best_infusion(),
             // Read from the game, not the backend: the corpus backend has no game to read, and
@@ -1104,20 +1137,21 @@ impl Panel {
                 Press::Tab => self.focus(Field::Stat(0)),
                 Press::PageUp => self.scroll_results(-(RESULTS_PAGE as isize)),
                 Press::PageDown => self.scroll_results(RESULTS_PAGE as isize),
-                Press::Run => self.run_pressed(),
+                // No field takes typing here, so R is free to be the keyboard's X.
+                Press::Run | Press::Char('r' | 'R') => self.run_pressed(),
                 Press::Backspace | Press::Char(_) => {}
             }
         }
     }
 
-    /// X: Run, whichever control the cursor is on.
+    /// X or R: Run, whichever control the cursor is on. There is no Run button to walk to.
     fn run_pressed(&mut self) {
         if self.state.ready() {
-            log_line(format_args!("{LOG_PREFIX} press X -> run"));
+            log_line(format_args!("{LOG_PREFIX} press Run (X or R) -> run"));
             self.act(Action::Run);
         } else {
             log_line(format_args!(
-                "{LOG_PREFIX} press X -- disabled, no weapon chosen"
+                "{LOG_PREFIX} press Run (X or R) -- disabled, no weapon chosen"
             ));
         }
     }
@@ -1154,7 +1188,7 @@ impl Panel {
     /// An open list: Up/Down move the highlight, LB/RB a page, A chooses, B closes. Typing still
     /// filters the weapon list while its search field is focused.
     fn press_list(&mut self, list: List, press: Press) {
-        let page = LIST_VISIBLE as isize;
+        let page = self.list_visible(list) as isize;
         match press {
             Press::Up => self.move_in_list(list, -1),
             Press::Down => self.move_in_list(list, 1),
@@ -1224,7 +1258,7 @@ impl Panel {
             Press::Down => self.scroll_results(1),
             Press::PageUp => self.scroll_results(-(RESULTS_PAGE as isize)),
             Press::PageDown => self.scroll_results(RESULTS_PAGE as isize),
-            Press::Run => self.run_pressed(),
+            Press::Run | Press::Char('r' | 'R') => self.run_pressed(),
             Press::Confirm | Press::Close | Press::Back => {
                 self.scrolling_results = false;
                 log_line(format_args!("{LOG_PREFIX} left the results table"));
@@ -1423,6 +1457,100 @@ const PAD: f32 = 14.0;
 const GAP: f32 = 8.0;
 /// Inside a [`Canvas::pair`], either side of its text.
 const PAIR_PAD: f32 = 8.0;
+/// Between two parameters' boxes, which puts [`PARAMS_GAP`] between their text.
+const PAIR_BOX_GAP: f32 = PARAMS_GAP - PAIR_PAD * 2.0;
+
+// The panel's spacing, from its design (the Build Recommender Layout canvas, 2026-09-30), in
+// back-buffer pixels. Each is the space around a section's TEXT; where a control draws a box around
+// its text the box's own padding is taken out of it.
+
+/// Left and right of the panel's text.
+const INSET: f32 = 28.0;
+/// Above and below the title.
+const HEADER_TOP: f32 = 18.0;
+const HEADER_BOTTOM: f32 = 14.0;
+/// Between "Use my stats" and Close.
+const HEADER_GAP: f32 = 32.0;
+/// Left and right of the stats strip, which runs wider than the text.
+const STATS_INSET: f32 = 12.0;
+/// Above a stat's label, between the label and the value, and below the value.
+const STAT_TOP: f32 = 14.0;
+const STAT_GAP: f32 = 6.0;
+const STAT_BOTTOM: f32 = 12.0;
+/// Above the mode tabs, between two tabs' text, and between a tab's text and the line under the
+/// chosen one.
+const TABS_TOP: f32 = 34.0;
+const TAB_GAP: f32 = 46.0;
+const TAB_LINE_GAP: f32 = 10.0;
+/// The weapon's parameters and the mode's options: above them, between their two lines, below
+/// them, where their text starts, and between two parameters' text.
+const PARAMS_TOP: f32 = 24.0;
+const PARAMS_ROW_GAP: f32 = 14.0;
+const PARAMS_BOTTOM: f32 = 20.0;
+const PARAMS_INSET: f32 = 36.0;
+const PARAMS_GAP: f32 = 36.0;
+/// Above and below the answer.
+const CONTENT_TOP: f32 = 16.0;
+const CONTENT_BOTTOM: f32 = 18.0;
+/// Above the footer's buttons, and between them and the key bar's rule.
+const FOOTER_TOP: f32 = 22.0;
+const FOOTER_GAP: f32 = 24.0;
+/// Above and below the key bar.
+const KEYS_TOP: f32 = 22.0;
+const KEYS_BOTTOM: f32 = 28.0;
+/// Inside a button: left and right of its label, and above and below it.
+const BUTTON_PAD_X: f32 = 14.0;
+const BUTTON_PAD_Y: f32 = 7.0;
+/// Between two footer buttons.
+const BUTTON_GAP: f32 = 12.0;
+
+// The weapon picker, from the same design.
+
+/// As wide as the picker gets; a narrower screen gets a narrower one.
+const PICKER_W: f32 = 1216.0;
+/// Above the picker's title, below it, and between its filter and the rule under it.
+const PICKER_TITLE_TOP: f32 = 30.0;
+const PICKER_TITLE_BOTTOM: f32 = 22.0;
+const PICKER_FILTER_BOTTOM: f32 = 22.0;
+/// The filter's box: its height, and the space between its label and it.
+const FILTER_H: f32 = 44.0;
+const FILTER_GAP: f32 = 16.0;
+/// Left of the rows, which start further out than the text so the highlight's bar has room.
+const PICKER_ROWS_INSET: f32 = 24.0;
+/// One row, and the icon's box in it.
+const PICKER_ROW_H: f32 = 248.0;
+const PICKER_ICON: f32 = 216.0;
+/// Inside a row: its highlight's bar, the space after the bar, above and below its contents, and
+/// between the icon, the text and the attack.
+const PICKER_BAR: f32 = 3.0;
+const PICKER_ROW_PAD_X: f32 = 21.0;
+const PICKER_ROW_PAD_Y: f32 = 16.0;
+const PICKER_ROW_GAP: f32 = 28.0;
+/// Between the icon and its box's edge.
+const PICKER_ICON_MARGIN: f32 = 16.0;
+/// A row's text: below the class, the label column's width and the gap after it, between two
+/// lines of the grid, and between two requirements.
+const PICKER_GRID_TOP: f32 = 20.0;
+const PICKER_LABEL_W: f32 = 120.0;
+const PICKER_LABEL_GAP: f32 = 16.0;
+const PICKER_GRID_GAP: f32 = 9.0;
+const PICKER_REQ_GAP: f32 = 24.0;
+/// The attack column's width.
+const PICKER_ATTACK_W: f32 = 230.0;
+/// The scroll bar's width, and its gap from the rows.
+const PICKER_SCROLL_W: f32 = 6.0;
+const PICKER_SCROLL_GAP: f32 = 12.0;
+/// Above and below the picker's key bar.
+const PICKER_KEYS_TOP: f32 = 22.0;
+const PICKER_KEYS_BOTTOM: f32 = 28.0;
+/// The picker's distance from the screen's top and bottom at least.
+const PICKER_MARGIN: f32 = 44.0;
+/// The icon box's edge.
+const ICON_EDGE: [f32; 4] = style::rgb(0x3a_34_2d);
+/// The "2H only" tag's text, light on `RUST`.
+const TAG_TEXT: [f32; 4] = style::rgb(0xea_df_d2);
+/// A damage type's name in the picker, in [`DAMAGE_TYPES`] order.
+const ATTACK_NAMES: [&str; 5] = ["Physical", "Magic", "Fire", "Lightning", "Dark"];
 
 /// A frame's drawing surface and the clickable rectangles laid on it, in draw order.
 struct Canvas<'ui> {
@@ -1434,6 +1562,9 @@ struct Canvas<'ui> {
     targets: Vec<([f32; 2], [f32; 2], Action)>,
     /// The control the D-pad cursor is on, ringed wherever it is drawn.
     cursor: Control,
+    /// Left and right of a button's label: the design's [`BUTTON_PAD_X`], or [`PAIR_PAD`] on a
+    /// frame whose footer would not fit the panel at the design's.
+    button_pad: f32,
 }
 
 impl Canvas<'_> {
@@ -1602,6 +1733,36 @@ impl Canvas<'_> {
             .build();
     }
 
+    /// How tall [`Self::button`] draws.
+    fn button_h(&self) -> f32 {
+        self.line + BUTTON_PAD_Y * 2.0
+    }
+
+    /// `text` in the title face at `at`, cut at the right to fit `width`.
+    fn big_text(&self, at: [f32; 2], color: [f32; 4], text: &str, width: f32) {
+        let _big = ds2_overlay::panels::big_font(self.ui).map(|id| self.ui.push_font(id));
+        self.list.add_text(at, color, clip(self.ui, text, width));
+    }
+
+    /// The game's own red X, `size` pixels square at `at`, or two `BLOOD` strokes when its atlas
+    /// did not load. Returns the width it took.
+    fn cross(&self, at: [f32; 2], size: f32) -> f32 {
+        let drawn = ds2_overlay::panels::refusal_mark(&self.list, at, size);
+        if drawn > 0.0 {
+            return drawn;
+        }
+        let far = [at[0] + size, at[1] + size];
+        self.list
+            .add_line(at, far, style::BLOOD)
+            .thickness(2.5)
+            .build();
+        self.list
+            .add_line([far[0], at[1]], [at[0], far[1]], style::BLOOD)
+            .thickness(2.5)
+            .build();
+        size + size * 0.3
+    }
+
     /// A clickable cell, which the cursor rings when it is `control`. Returns its right edge.
     fn button(
         &mut self,
@@ -1613,7 +1774,10 @@ impl Canvas<'_> {
         control: Option<Control>,
     ) -> f32 {
         let min = [x, y];
-        let max = [x + self.width(label) + 16.0, y + self.row];
+        let max = [
+            x + self.width(label) + self.button_pad * 2.0,
+            y + self.button_h(),
+        ];
         let hovered = action.is_some() && self.inside(min, max);
         let fill = if on {
             CELL_ON
@@ -1628,26 +1792,17 @@ impl Canvas<'_> {
             self.edge(min, max, FOCUS_EDGE);
         }
         let color = if action.is_some() { TEXT } else { DISABLED };
-        self.text([x + 8.0, y + (self.row - self.line) * 0.5], color, label);
+        self.text([x + self.button_pad, y + BUTTON_PAD_Y], color, label);
         if let Some(action) = action {
             self.targets.push((min, max, action));
         }
         max[0]
     }
+}
 
-    /// `[x] label`. Returns its right edge.
-    fn check(
-        &mut self,
-        x: f32,
-        y: f32,
-        label: &str,
-        checked: bool,
-        action: Action,
-        control: Control,
-    ) -> f32 {
-        let text = format!("[{}] {label}", if checked { "x" } else { " " });
-        self.button(x, y, &text, false, Some(action), Some(control))
-    }
+/// `[x] label`, a check button's label.
+fn checked(label: &str, on: bool) -> String {
+    format!("[{}] {label}", if on { "x" } else { " " })
 }
 
 /// What a [`Canvas::field`] shows.
@@ -1697,39 +1852,55 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
         .clamp(760.0, 1500.0)
         .min(display[0] - 32.0);
     let left = (display[0] - width) * 0.5;
-    let right = left + width - PAD;
-    let inner = left + PAD;
+    let right = left + width - INSET;
+    let inner = left + INSET;
     let title_h = ds2_overlay::panels::title_height(ui);
+    let button_h = line + BUTTON_PAD_Y * 2.0;
+    // A control drawn as a `row`-tall box around a line of text puts its text this far down it.
+    let lift = (row - line) * 0.5;
     // A stat's cell: its label over its value.
-    let stat_h = line * 2.0 + 16.0;
+    let stat_h = STAT_TOP + line + STAT_GAP + line + STAT_BOTTOM;
 
-    // Every section's top, from the panel's top, in the order they are drawn. The panel is as tall
-    // as its sections and what the lower half has to show -- no taller -- and is centred on that.
-    let header_at = PAD;
-    let stats_rule_at = header_at + title_h + GAP;
-    let stats_at = stats_rule_at + GAP;
-    let tabs_rule_at = stats_at + stat_h + GAP;
-    let tabs_at = tabs_rule_at + GAP;
-    let params_at = tabs_at + row + 4.0 + GAP;
-    let options_at = params_at + row + 4.0;
-    let content_rule_at = options_at + row + GAP;
-    let content_at = content_rule_at + GAP;
-    let below_content = GAP + GAP + row + GAP + line + PAD;
-    let wanted = content_height(panel, ui, right - inner, line, row);
+    // Every section's top, from the panel's top, in the order they are drawn: the design's space
+    // around each section's text, and a rule between sections. The panel is as tall as its
+    // sections and what the lower half has to show -- no taller -- and is centred on that.
+    let title_at = HEADER_TOP;
+    let stats_rule_at = title_at + title_h + HEADER_BOTTOM;
+    let stats_at = stats_rule_at + 1.0;
+    let tabs_rule_at = stats_at + stat_h;
+    let tabs_at = tabs_rule_at + 1.0 + TABS_TOP;
+    let params_at = tabs_at + line + TAB_LINE_GAP + 2.0 + PARAMS_TOP;
+    let options_at = params_at + line + PARAMS_ROW_GAP;
+    let content_rule_at = options_at + line + PARAMS_BOTTOM;
+    let content_at = content_rule_at + 1.0 + CONTENT_TOP;
+    // The answer's space, its rule, the buttons, the key bar's rule and the key bar.
+    let below_content = CONTENT_BOTTOM
+        + 1.0
+        + FOOTER_TOP
+        + button_h
+        + FOOTER_GAP
+        + 1.0
+        + KEYS_TOP
+        + line
+        + KEYS_BOTTOM;
+    let wanted = content_height(panel, ui, right - inner, line);
     let room = display[1] - 32.0 - content_at - below_content;
     let content_h = wanted.min(room).max(line);
     let height = content_at + content_h + below_content;
     let top = ((display[1] - height) * 0.5).max(0.0);
 
-    let header_y = top + header_at;
+    let title_y = top + title_at;
     let stats_y = top + stats_at;
     let tabs_y = top + tabs_at;
-    let params_y = top + params_at;
-    let options_y = top + options_at;
+    // The parameters and options are boxes around their text.
+    let params_y = top + params_at - lift;
+    let options_y = top + options_at - lift;
     let content_top = top + content_at;
     let content_bottom = content_top + content_h;
-    let footer_y = content_bottom + GAP + GAP;
-    let hint_y = footer_y + row + GAP;
+    let footer_rule_y = content_bottom + CONTENT_BOTTOM;
+    let footer_y = footer_rule_y + 1.0 + FOOTER_TOP;
+    let keys_rule_y = footer_y + button_h + FOOTER_GAP;
+    let hint_y = keys_rule_y + 1.0 + KEYS_TOP;
 
     // A control that left the grid (a mode's option, a results table that was cleared) hands the
     // cursor to its fallback before anything is drawn under it.
@@ -1743,6 +1914,7 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
         row,
         targets: Vec::new(),
         cursor: panel.cursor,
+        button_pad: BUTTON_PAD_X,
     };
     canvas.rect([0.0, 0.0], display, DIM_COVER);
     canvas
@@ -1765,16 +1937,22 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
         .targets
         .push(([left, top], [left + width, top + height], Action::Nothing));
     let (rule_left, rule_right) = (left + 1.0, left + width - 1.0);
-    for at in [stats_rule_at, tabs_rule_at, content_rule_at] {
-        canvas.rule(rule_left, rule_right, top + at);
+    for y in [
+        top + stats_rule_at,
+        top + tabs_rule_at,
+        top + content_rule_at,
+        footer_rule_y,
+        keys_rule_y,
+    ] {
+        canvas.rule(rule_left, rule_right, y);
     }
-    canvas.rule(rule_left, rule_right, content_bottom + GAP);
 
     // Header: the title, and at the right the placeholder tag, the character's stats and Close.
-    ds2_overlay::panels::title(ui, &canvas.list, [inner, header_y], TITLE, "Recommender");
-    let pair_y = header_y + (title_h - row) * 0.5;
+    ds2_overlay::panels::title(ui, &canvas.list, [inner, title_y], TITLE, "Recommender");
+    let pair_y = title_y + (title_h - row) * 0.5;
     let pair_w = |canvas: &Canvas<'_>, value: &str| canvas.width(value) + PAIR_PAD * 2.0;
-    let close_x = right - pair_w(&canvas, "Close");
+    // Close's text ends at the inset; its box runs past it.
+    let close_x = right + PAIR_PAD - pair_w(&canvas, "Close");
     canvas.pair(
         close_x,
         pair_y,
@@ -1784,7 +1962,7 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
         Some(Control::Close),
     );
     let use_label = "Use my stats";
-    let use_x = close_x - GAP - pair_w(&canvas, use_label);
+    let use_x = close_x - (HEADER_GAP - PAIR_PAD * 2.0) - pair_w(&canvas, use_label);
     canvas.pair(
         use_x,
         pair_y,
@@ -1802,8 +1980,9 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
         canvas.text([min[0] + 8.0, pair_y + (row - line) * 0.5], TEXT, tag);
     }
 
-    // The soul level and the nine stats: ten columns, a label over a value.
-    let cell_w = (right - inner) / (STAT_COUNT + 1) as f32;
+    // The soul level and the nine stats: ten columns, a label over a value, edge to edge.
+    let strip_left = left + STATS_INSET;
+    let cell_w = (width - STATS_INSET * 2.0) / (STAT_COUNT + 1) as f32;
     let computed = panel.state.computed_sl();
     let overridden = panel.state.sl_override.is_some() && panel.state.sl() != computed;
     let mut cells = vec![(
@@ -1823,8 +2002,8 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
         ));
     }
     for (column, (label, value, field)) in cells.iter().enumerate() {
-        let min = [inner + cell_w * column as f32, stats_y];
-        let max = [min[0] + cell_w - 4.0, stats_y + stat_h];
+        let min = [strip_left + cell_w * column as f32, stats_y];
+        let max = [min[0] + cell_w, stats_y + stat_h];
         let spec = panel.spec(*field, value, false);
         let lit = spec.focused || canvas.on(Some(field.control()));
         if lit {
@@ -1834,7 +2013,7 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
         }
         let centre = (min[0] + max[0]) * 0.5;
         canvas.text(
-            [centre - canvas.width(label) * 0.5, min[1] + 6.0],
+            [centre - canvas.width(label) * 0.5, min[1] + STAT_TOP],
             if lit { TEXT } else { DIM },
             label,
         );
@@ -1846,7 +2025,10 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
             TEXT
         };
         canvas.field_text(
-            [centre - canvas.width(&shown) * 0.5, min[1] + 10.0 + line],
+            [
+                centre - canvas.width(&shown) * 0.5,
+                min[1] + STAT_TOP + line + STAT_GAP,
+            ],
             &spec,
             &shown,
             color,
@@ -1855,11 +2037,12 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
     }
 
     // The mode tabs: the chosen one bright over a bronze line, the others in bronze.
-    let mut x = inner;
+    let mut x = inner + 4.0;
     for mode in Mode::ALL {
         let label = mode.label();
-        let min = [x, tabs_y];
-        let max = [x + canvas.width(label) + PAIR_PAD * 2.0, tabs_y + row];
+        let label_w = canvas.width(label);
+        let min = [x - PAIR_PAD, tabs_y - lift];
+        let max = [x + label_w + PAIR_PAD, tabs_y - lift + row];
         let control = Some(Control::Mode(mode));
         let chosen = panel.state.mode == mode;
         if canvas.on(control) {
@@ -1872,25 +2055,35 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
         } else {
             VALUE
         };
-        canvas.text([x + PAIR_PAD, tabs_y + (row - line) * 0.5], color, label);
+        canvas.text([x, tabs_y], color, label);
         if chosen {
-            canvas.rect([min[0], max[1] + 2.0], [max[0], max[1] + 4.0], CURSOR_EDGE);
+            let under = tabs_y + line + TAB_LINE_GAP;
+            canvas.rect(
+                [x - 4.0, under],
+                [x + label_w + 4.0, under + 2.0],
+                CURSOR_EDGE,
+            );
         }
         canvas.targets.push((min, max, Action::SetMode(mode)));
-        x = max[0] + GAP * 2.0;
+        x += label_w + TAB_GAP;
     }
 
-    // The weapon's parameters, which every tab reads: each a label and a value, no boxes.
+    // The weapon's parameters, which every tab reads: each a label and a value, no boxes. The
+    // weapon opens the picker, which has the filter; here is only what is chosen.
+    let params_x = left + PARAMS_INSET - PAIR_PAD;
     let weapon_name = panel
         .state
         .weapon
         .and_then(weapons::by_key)
         .map_or("[choose]", |row| row.name);
-    let spec = panel.spec(Field::Search, weapon_name, panel.state.weapon.is_none());
-    let (x, weapon_field_x) = canvas.field_pair(inner, params_y, "Weapon", &spec, 0.0);
-    let weapon_field_w = (width * 0.30).max(260.0);
-    let weapon_list_y = params_y + row + 2.0;
-    let x = x + GAP;
+    let x = canvas.pair(
+        params_x,
+        params_y,
+        "Weapon",
+        weapon_name,
+        Some(Action::Focus(Field::Search)),
+        Some(Control::Weapon),
+    ) + PAIR_BOX_GAP;
     let infusion_x = x + PAIR_PAD + canvas.width("Infusion") + canvas.width(" ");
     let x = canvas.pair(
         x,
@@ -1899,7 +2092,7 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
         weapons::display_name(panel.state.infusion),
         Some(Action::OpenList(List::Infusion)),
         Some(Control::Infusion),
-    ) + GAP;
+    ) + PAIR_BOX_GAP;
     let x = canvas.pair(
         x,
         params_y,
@@ -1907,7 +2100,7 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
         panel.state.grip.label(),
         Some(Action::CycleGrip),
         Some(Control::Grip),
-    ) + GAP;
+    ) + PAIR_BOX_GAP;
     canvas.pair(
         x,
         params_y,
@@ -1916,17 +2109,10 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
         Some(Action::CycleObjective),
         Some(Control::Objective),
     );
+    let infusion_list_y = params_y + row + 2.0;
 
-    // The mode's options, and Run at the right.
-    let class_x = draw_options(panel, &mut canvas, inner, options_y);
-    canvas.pair(
-        right - pair_w(&canvas, "Run"),
-        options_y,
-        "",
-        "Run",
-        panel.state.ready().then_some(Action::Run),
-        Some(Control::Run),
-    );
+    // The mode's options. Run is X or R from anywhere, and has no button (the design, 2026-09-30).
+    let class_x = draw_options(panel, &mut canvas, params_x, options_y);
     let class_list_y = options_y + row + 2.0;
 
     let results_rect = ([inner, content_top], [right, content_bottom]);
@@ -1939,82 +2125,97 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
         draw_answer(panel, &mut canvas, results_rect);
     }
 
-    // Footer.
-    let mut x = inner;
-    x = canvas.button(
-        x,
-        footer_y,
-        "Generate Build",
-        false,
-        Some(Action::Generate),
-        Some(Control::Generate),
-    ) + GAP;
-    x = canvas.check(
-        x,
-        footer_y,
-        "Allow no armor",
-        panel.state.allow_naked,
-        Action::ToggleAllowNaked,
-        Control::AllowNaked,
-    ) + GAP;
-    let spells_x = x;
-    let spells_label = format!("Spells ({}) v", panel.state.spells.len());
-    x = canvas.button(
-        x,
-        footer_y,
-        &spells_label,
-        panel.list == Some(List::Spell),
-        Some(Action::OpenList(List::Spell)),
-        Some(Control::Spells),
-    ) + GAP;
-    x = canvas.check(
-        x,
-        footer_y,
-        "Ignore typical minimums",
-        panel.state.ignore_floors,
-        Action::ToggleIgnoreFloors,
-        Control::IgnoreFloors,
-    ) + GAP;
+    // Footer: its buttons in a row, as the design pads them, or tighter when they would not fit.
+    let mut footer = vec![
+        (
+            "Generate Build".to_owned(),
+            false,
+            Some(Action::Generate),
+            Control::Generate,
+        ),
+        (
+            checked("Allow no armor", panel.state.allow_naked),
+            false,
+            Some(Action::ToggleAllowNaked),
+            Control::AllowNaked,
+        ),
+        (
+            format!("Spells ({}) v", panel.state.spells.len()),
+            panel.list == Some(List::Spell),
+            Some(Action::OpenList(List::Spell)),
+            Control::Spells,
+        ),
+        (
+            checked("Ignore typical minimums", panel.state.ignore_floors),
+            false,
+            Some(Action::ToggleIgnoreFloors),
+            Control::IgnoreFloors,
+        ),
+    ];
     if panel.generated.is_some() {
         let (label, shown) = if panel.shown == Shown::Build {
             ("Show results", Shown::Answer)
         } else {
             ("Show build", Shown::Build)
         };
-        x = canvas.button(
-            x,
-            footer_y,
-            label,
+        footer.push((
+            label.to_owned(),
             false,
             Some(Action::Show(shown)),
-            Some(Control::ShowToggle),
-        ) + GAP;
+            Control::ShowToggle,
+        ));
     }
-    x = canvas.button(
-        x,
-        footer_y,
-        "Apply to character...",
+    footer.push((
+        "Apply to character...".to_owned(),
         false,
         panel.generated.is_some().then_some(Action::AskApply),
-        Some(Control::Apply),
-    ) + GAP * 2.0;
-    if let Some(status) = &panel.status {
-        canvas.text([x, footer_y + 4.0], GOOD, &clip(ui, status, right - x));
+        Control::Apply,
+    ));
+    let labels_w: f32 = footer.iter().map(|(label, ..)| canvas.width(label)).sum();
+    let gaps_w = BUTTON_GAP * (footer.len() - 1) as f32;
+    let needed = labels_w + gaps_w + BUTTON_PAD_X * 2.0 * footer.len() as f32;
+    if needed > right - inner {
+        canvas.button_pad = PAIR_PAD;
     }
-    // Key help, one button and one word each, for the device the player is on. Letters type a
-    // weapon name too; that is what the weapon field's placeholder says.
+    if std::mem::replace(&mut panel.footer_logged, footer.len()) != footer.len() {
+        log_line(format_args!(
+            "{LOG_PREFIX} footer: {} buttons need {needed:.0}px of {:.0}px -- padded {}",
+            footer.len(),
+            right - inner,
+            canvas.button_pad
+        ));
+    }
+    let mut x = inner;
+    let mut spells_x = inner;
+    for (label, on, action, control) in &footer {
+        if *control == Control::Spells {
+            spells_x = x;
+        }
+        x = canvas.button(x, footer_y, label, *on, *action, Some(*control)) + BUTTON_GAP;
+    }
+    x += BUTTON_GAP;
+    if let Some(status) = &panel.status {
+        canvas.text(
+            [x, footer_y + BUTTON_PAD_Y],
+            GOOD,
+            &clip(ui, status, right - x),
+        );
+    }
+    // Key help, one button and one word each, for the device the player is on: the panel's own
+    // binds (`input.rs`), which are not the game's key config.
     const PAD_HINT: [(&str, &str); 6] = [
         (button(Button::DPad), "Move"),
         (button(Button::A), "Select"),
         (button(Button::DPadLeftRight), "Step 1"),
-        (button(Button::Bumpers), "Page"),
         (button(Button::X), "Run"),
+        (button(Button::Bumpers), "Page"),
         (button(Button::B), "Back"),
     ];
-    const KEY_HINT: [(&str, &str); 5] = [
+    const KEY_HINT: [(&str, &str); 6] = [
         ("Arrows", "Move"),
         ("Enter", "Select"),
         ("Left/Right", "Step 1"),
+        ("R", "Run"),
         ("PgUp PgDn", "Page"),
         ("Esc", "Back"),
     ];
@@ -2025,37 +2226,39 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
     };
     ds2_overlay::panels::hint_bar(ui, &canvas.list, [inner, hint_y], right, hints);
 
-    // The open list, over everything else.
+    // The open list, over everything else: the weapon picker in a window of its own, the others
+    // hanging from what opened them.
     let mut list_rect = None;
-    if let Some(list) = panel.list {
+    let mut picker_rect = None;
+    let hanging = match panel.list {
+        Some(List::Weapon) => {
+            picker_rect = Some(draw_picker(panel, &mut canvas, display));
+            None
+        }
+        Some(List::Infusion) => Some((
+            [infusion_x, infusion_list_y],
+            canvas.width("Enchanted") + 60.0,
+            "",
+        )),
+        Some(List::Class) => Some((
+            [class_x, class_list_y],
+            canvas.width("Curved Greatsword") + 60.0,
+            "",
+        )),
+        // Above the footer, which sits at the bottom: as tall as `draw_list` will draw it.
+        Some(List::Spell) => {
+            let shown = panel.list_rows(List::Spell).len().clamp(1, LIST_VISIBLE) as f32;
+            let list_height = (line + 6.0) * shown + 8.0;
+            Some((
+                [spells_x, footer_y - 2.0 - list_height],
+                canvas.width("[x] Promised Walk of Peace  2 slots  INT 30 FTH 40") + 40.0,
+                "no spell data: the stub backend offers none",
+            ))
+        }
+        None => None,
+    };
+    if let (Some(list), Some((at, list_width, empty))) = (panel.list, hanging) {
         let rows = panel.list_rows(list);
-        let (at, list_width, empty) = match list {
-            List::Weapon => (
-                [weapon_field_x, weapon_list_y],
-                weapon_field_w,
-                "no weapon matches",
-            ),
-            List::Infusion => (
-                [infusion_x, weapon_list_y],
-                canvas.width("Enchanted") + 60.0,
-                "",
-            ),
-            List::Class => (
-                [class_x, class_list_y],
-                canvas.width("Curved Greatsword") + 60.0,
-                "",
-            ),
-            // Above the footer, which sits at the bottom: as tall as `draw_list` will draw it.
-            List::Spell => {
-                let shown = rows.len().clamp(1, LIST_VISIBLE) as f32;
-                let list_height = (line + 6.0) * shown + 8.0;
-                (
-                    [spells_x, footer_y - 2.0 - list_height],
-                    canvas.width("[x] Promised Walk of Peace  2 slots  INT 30 FTH 40") + 40.0,
-                    "no spell data: the stub backend offers none",
-                )
-            }
-        };
         let highlighted = panel.list_cursor;
         list_rect = Some(draw_list(
             &mut canvas,
@@ -2083,7 +2286,12 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
         let scroll = |value: &mut usize| {
             *value = value.saturating_add_signed(steps);
         };
-        if let Some((min, max)) = list_rect
+        if let Some((min, max)) = picker_rect
+            && canvas.inside(min, max)
+        {
+            // A row a notch, the picker's rows being tall; the next draw keeps it in range.
+            panel.list_scroll = panel.list_scroll.saturating_add_signed(steps.signum());
+        } else if let Some((min, max)) = list_rect
             && canvas.inside(min, max)
         {
             scroll(&mut panel.list_scroll);
@@ -2150,7 +2358,7 @@ fn draw_options(panel: &Panel, canvas: &mut Canvas<'_>, x: f32, y: f32) -> f32 {
                 on_off(opts.one_hand),
                 Some(Action::ToggleOneHand),
                 Some(Control::OneHand),
-            ) + GAP;
+            ) + PAIR_BOX_GAP;
             class_x = value_x(canvas, x, "Class");
             x = canvas.pair(
                 x,
@@ -2159,7 +2367,7 @@ fn draw_options(panel: &Panel, canvas: &mut Canvas<'_>, x: f32, y: f32) -> f32 {
                 opts.class.as_deref().unwrap_or("All"),
                 Some(Action::OpenList(List::Class)),
                 Some(Control::Class),
-            ) + GAP;
+            ) + PAIR_BOX_GAP;
             x = canvas.pair(
                 x,
                 y,
@@ -2167,10 +2375,10 @@ fn draw_options(panel: &Panel, canvas: &mut Canvas<'_>, x: f32, y: f32) -> f32 {
                 on_off(opts.per_class),
                 Some(Action::TogglePerClass),
                 Some(Control::PerClass),
-            ) + GAP;
+            ) + PAIR_BOX_GAP;
             let window = format!("{:.1}s", opts.window_s);
             let spec = panel.spec(Field::Window, &window, false);
-            x = canvas.field_pair(x, y, "R1 window", &spec, 0.0).0 + GAP;
+            x = canvas.field_pair(x, y, "R1 window", &spec, 0.0).0 + PAIR_BOX_GAP;
             canvas.pair(
                 x,
                 y,
@@ -2189,7 +2397,7 @@ fn draw_options(panel: &Panel, canvas: &mut Canvas<'_>, x: f32, y: f32) -> f32 {
                 "Best infusion",
                 panel.state.weapon.is_some().then_some(Action::BestInfusion),
                 Some(Control::BestInfusion),
-            ) + GAP;
+            ) + PAIR_BOX_GAP;
             // The parameters above already say which weapon, infusion, goal and grip; only the
             // grip's effect on strength is not on screen.
             let text = if panel.state.weapon.is_some() {
@@ -2211,7 +2419,7 @@ fn draw_options(panel: &Panel, canvas: &mut Canvas<'_>, x: f32, y: f32) -> f32 {
                 on_off(panel.state.two_hand),
                 Some(Action::ToggleTwoHand),
                 Some(Control::TwoHand),
-            ) + GAP;
+            ) + PAIR_BOX_GAP;
             if panel.state.weapon.is_none() {
                 canvas.text(
                     [x, y + (canvas.row - canvas.line) * 0.5],
@@ -2223,7 +2431,7 @@ fn draw_options(panel: &Panel, canvas: &mut Canvas<'_>, x: f32, y: f32) -> f32 {
         Mode::SimilarBuilds => {
             let k = panel.state.similar_k.to_string();
             let spec = panel.spec(Field::SimilarK, &k, false);
-            x = canvas.field_pair(x, y, "Neighbours", &spec, 0.0).0 + GAP;
+            x = canvas.field_pair(x, y, "Neighbours", &spec, 0.0).0 + PAIR_BOX_GAP;
             x = canvas.pair(
                 x,
                 y,
@@ -2231,7 +2439,7 @@ fn draw_options(panel: &Panel, canvas: &mut Canvas<'_>, x: f32, y: f32) -> f32 {
                 on_off(panel.state.status.bleed),
                 Some(Action::ToggleBleed),
                 Some(Control::Bleed),
-            ) + GAP;
+            ) + PAIR_BOX_GAP;
             canvas.pair(
                 x,
                 y,
@@ -2280,10 +2488,10 @@ fn draw_refusal(
     y += line + 4.0;
     let mut x = min[0] + 12.0;
     for (index, fix) in fixes.iter().enumerate() {
-        let width = canvas.width(&fix.label) + 16.0;
+        let width = canvas.width(&fix.label) + canvas.button_pad * 2.0;
         if x + width > max[0] && x > min[0] + 12.0 {
             x = min[0] + 12.0;
-            y += canvas.row + 4.0;
+            y += canvas.button_h() + 4.0;
         }
         x = canvas.button(
             x,
@@ -2294,7 +2502,7 @@ fn draw_refusal(
             Some(Control::Fix(index)),
         ) + 8.0;
     }
-    y + canvas.row
+    y + canvas.button_h()
 }
 
 /// The answer to the last Run, or why there is none.
@@ -2323,19 +2531,8 @@ fn draw_answer(panel: &mut Panel, canvas: &mut Canvas<'_>, (min, max): ([f32; 2]
                 (min, max),
             );
         }
-        None => {
-            let text = if panel.state.ready() {
-                "Press Run to ask."
-            } else {
-                "Choose a weapon, then press Run."
-            };
-            canvas.text([min[0], y], DIM, text);
-            canvas.text(
-                [min[0], y + line + 4.0],
-                DIM,
-                &calibration_line(panel.calibration),
-            );
-        }
+        // Nothing asked yet: the key bar says how to ask, so only the calibration is left.
+        None => canvas.text([min[0], y], DIM, &calibration_line(panel.calibration)),
         Some(Answer::Nothing(why)) => canvas.text([min[0], y], DIM, why),
         Some(Answer::FloorViolations(lines)) => {
             canvas.text(
@@ -2564,8 +2761,9 @@ fn draw_table(
 
 /// How tall the lower half has to be for what it shows now, so the panel is no taller than its
 /// content: the table's rows, the build's lines, the refusal's reasons. `width` is the half's.
-fn content_height(panel: &Panel, ui: &Ui, width: f32, line: f32, row: f32) -> f32 {
+fn content_height(panel: &Panel, ui: &Ui, width: f32, line: f32) -> f32 {
     let lines = |n: usize| n as f32 * (line + 4.0);
+    let button_h = line + BUTTON_PAD_Y * 2.0;
     let refusal = |reasons: &[String], fixes: usize| {
         let wrapped: usize = reasons
             .iter()
@@ -2575,7 +2773,7 @@ fn content_height(panel: &Panel, ui: &Ui, width: f32, line: f32, row: f32) -> f3
             0.0
         } else {
             // The heading, then the buttons, which wrap onto a second row when many.
-            8.0 + line + 4.0 + 2.0 * (row + 4.0)
+            8.0 + line + 4.0 + 2.0 * (button_h + 4.0)
         };
         line + wrapped as f32 * (line + 2.0) + fix_rows + line
     };
@@ -2610,7 +2808,7 @@ fn content_height(panel: &Panel, ui: &Ui, width: f32, line: f32, row: f32) -> f3
         Some(Answer::FloorViolations(violations)) => {
             (violations.len() + 1) as f32 * (line + 2.0) + line + 8.0 + line
         }
-        Some(Answer::Nothing(_)) | None => lines(2),
+        Some(Answer::Nothing(_)) | None => lines(1),
     }
 }
 
@@ -2873,7 +3071,7 @@ fn draw_confirm(
         .map(|(_, text)| canvas.width(text))
         .fold(0.0_f32, f32::max)
         + PAD * 2.0;
-    let height = PAD * 2.0 + (line + 6.0) * lines.len() as f32 + canvas.row + GAP;
+    let height = PAD * 2.0 + (line + 6.0) * lines.len() as f32 + canvas.button_h() + GAP;
     let min = [(display[0] - width) * 0.5, (display[1] - height) * 0.5];
     let max = [min[0] + width, min[1] + height];
     canvas
@@ -2899,6 +3097,315 @@ fn draw_confirm(
         None,
     ) + GAP;
     canvas.button(x, y, "Cancel", !on_apply, Some(Action::CancelApply), None);
+}
+
+/// The weapon picker: a window over the panel listing every weapon its filter matches, each with
+/// the game's own icon and what the panel's stats make of it. Only its own controls take a click;
+/// one outside it closes it. Returns its rectangle.
+fn draw_picker(
+    panel: &mut Panel,
+    canvas: &mut Canvas<'_>,
+    display: [f32; 2],
+) -> ([f32; 2], [f32; 2]) {
+    let ui = canvas.ui;
+    let line = canvas.line;
+    let title_h = ds2_overlay::panels::title_height(ui);
+    // The title, the filter and the rule under it; the rule over the key bar and the bar.
+    let head_h =
+        PICKER_TITLE_TOP + title_h + PICKER_TITLE_BOTTOM + FILTER_H + PICKER_FILTER_BOTTOM + 1.0;
+    let foot_h = 1.0 + PICKER_KEYS_TOP + line + PICKER_KEYS_BOTTOM;
+    let fit = (display[1] - PICKER_MARGIN * 2.0 - head_h - foot_h) / PICKER_ROW_H;
+    let visible = (fit.floor().max(1.0) as usize).min(LIST_VISIBLE);
+    panel.picker_rows = visible;
+    let width = PICKER_W.min(display[0] - 64.0);
+    let height = head_h + PICKER_ROW_H * visible as f32 + foot_h;
+    let min = [
+        ((display[0] - width) * 0.5).round(),
+        ((display[1] - height) * 0.5).max(0.0).round(),
+    ];
+    let max = [min[0] + width, min[1] + height];
+    let (inner, right) = (min[0] + INSET, max[0] - INSET);
+
+    canvas.targets.clear();
+    canvas.rect([0.0, 0.0], display, DIM_COVER);
+    canvas
+        .targets
+        .push(([0.0, 0.0], display, Action::CloseList));
+    canvas.rect(min, max, PANEL_BG);
+    if !ds2_overlay::panels::frame(&canvas.list, min, max, display[1]) {
+        canvas.edge(min, max, PANEL_EDGE);
+    }
+    canvas.targets.push((min, max, Action::Nothing));
+
+    let title_y = min[1] + PICKER_TITLE_TOP;
+    ds2_overlay::panels::title(ui, &canvas.list, [inner, title_y], TITLE, "Weapon");
+    let close_w = canvas.width("Close") + PAIR_PAD * 2.0;
+    canvas.pair(
+        right + PAIR_PAD - close_w,
+        title_y + (title_h - canvas.row) * 0.5,
+        "",
+        "Close",
+        Some(Action::CloseList),
+        None,
+    );
+
+    // The filter: what is typed, which the list narrows to as it is typed.
+    let filter_y = title_y + title_h + PICKER_TITLE_BOTTOM;
+    let text_y = filter_y + (FILTER_H - line) * 0.5;
+    canvas.text([inner, text_y], DIM, "Filter");
+    let box_min = [inner + canvas.width("Filter") + FILTER_GAP, filter_y];
+    let box_max = [right, filter_y + FILTER_H];
+    canvas.rect(box_min, box_max, style::SLATE);
+    canvas.rect([box_min[0], box_max[1] - 2.0], box_max, CURSOR_EDGE);
+    let spec = panel.spec(Field::Search, "type part of a name", true);
+    let shown = canvas.field_shown(&spec, box_max[0] - box_min[0] - BUTTON_PAD_X * 2.0);
+    canvas.field_text([box_min[0] + BUTTON_PAD_X, text_y], &spec, &shown, TEXT);
+    let rule_y = box_max[1] + PICKER_FILTER_BOTTOM;
+    canvas.rule(min[0] + 1.0, max[0] - 1.0, rule_y);
+
+    let rows = panel.weapon_rows();
+    let total = rows.len();
+    panel.list_scroll = panel.list_scroll.min(total.saturating_sub(visible));
+    if !std::mem::replace(&mut panel.picker_logged, true) {
+        log_line(format_args!(
+            "{LOG_PREFIX} weapon picker open: {visible} rows of {PICKER_ROW_H}px on a {:.0}x{:.0} \
+             target, {total} weapons match {:?}, cards from the {} backend",
+            display[0],
+            display[1],
+            panel.edit,
+            if backend().is_stub() {
+                "stub"
+            } else {
+                "corpus"
+            }
+        ));
+    }
+    let rows_top = rule_y + 1.0;
+    let rows_h = PICKER_ROW_H * visible as f32;
+    let rows_left = min[0] + PICKER_ROWS_INSET;
+    let rows_right = right - PICKER_SCROLL_W - PICKER_SCROLL_GAP;
+    if rows.is_empty() {
+        canvas.text(
+            [inner, rows_top + PICKER_ROW_PAD_Y],
+            DIM,
+            "No weapon matches",
+        );
+    }
+    let (stats, infusion) = (panel.state.stats, panel.state.infusion);
+    for (index, row) in rows
+        .iter()
+        .enumerate()
+        .skip(panel.list_scroll)
+        .take(visible)
+    {
+        let y = rows_top + PICKER_ROW_H * (index - panel.list_scroll) as f32;
+        let card = backend().weapon_card(row.key, infusion, &stats);
+        draw_picker_row(
+            canvas,
+            row,
+            card.as_ref(),
+            [rows_left, y],
+            rows_right,
+            index == panel.list_cursor,
+        );
+        canvas.targets.push((
+            [rows_left, y],
+            [rows_right, y + PICKER_ROW_H],
+            Action::ChooseWeapon(row.key),
+        ));
+    }
+
+    // Where the rows shown sit in the whole list.
+    let track = [rows_right + PICKER_SCROLL_GAP, rows_top];
+    canvas.rect(
+        track,
+        [track[0] + PICKER_SCROLL_W, rows_top + rows_h],
+        CELL_BG,
+    );
+    if total > visible {
+        let thumb_h = (rows_h * visible as f32 / total as f32).max(24.0);
+        let thumb_y =
+            rows_top + (rows_h - thumb_h) * panel.list_scroll as f32 / (total - visible) as f32;
+        canvas.rect(
+            [track[0], thumb_y],
+            [track[0] + PICKER_SCROLL_W, thumb_y + thumb_h],
+            style::BRONZE_DIM,
+        );
+    }
+
+    // The list's own keys, and which row of how many is highlighted.
+    let keys_rule_y = rows_top + rows_h;
+    canvas.rule(min[0] + 1.0, max[0] - 1.0, keys_rule_y);
+    let hint_y = keys_rule_y + 1.0 + PICKER_KEYS_TOP;
+    const PAD_HINT: [(&str, &str); 4] = [
+        (button(Button::DPad), "Move"),
+        (button(Button::A), "Select"),
+        (button(Button::Bumpers), "Page"),
+        (button(Button::B), "Back"),
+    ];
+    const KEY_HINT: [(&str, &str); 4] = [
+        ("Up/Down", "Move"),
+        ("Enter", "Select"),
+        ("PgUp PgDn", "Page"),
+        ("Esc", "Back"),
+    ];
+    let hints: &[(&str, &str)] = if panel.reader.pad_last() {
+        &PAD_HINT
+    } else {
+        &KEY_HINT
+    };
+    let count = if total == 0 {
+        String::new()
+    } else {
+        format!("{}/{total}", panel.list_cursor.min(total - 1) + 1)
+    };
+    let count_x = right - canvas.width(&count);
+    ds2_overlay::panels::hint_bar(ui, &canvas.list, [inner, hint_y], count_x - GAP, hints);
+    canvas.text([count_x, hint_y], DIM, &count);
+    (min, max)
+}
+
+/// One row of the weapon picker, from `at` to `right`: the icon, the name and class, what the
+/// weapon asks for and weighs and how the stats can hold it, and what it hits for. Without a
+/// `card` -- the stub backend has none -- only the icon, the name and the class.
+fn draw_picker_row(
+    canvas: &Canvas<'_>,
+    row: &WeaponRow,
+    card: Option<&WeaponCard>,
+    at: [f32; 2],
+    right: f32,
+    highlighted: bool,
+) {
+    let line = canvas.line;
+    let bottom = at[1] + PICKER_ROW_H;
+    if highlighted {
+        canvas.rect(at, [right, bottom], CELL_ON);
+        canvas.rect(at, [at[0] + PICKER_BAR, bottom], CURSOR_EDGE);
+    } else if canvas.inside(at, [right, bottom]) {
+        canvas.rect(at, [right, bottom], ROW_HOVER);
+    }
+    canvas.rule(at[0], right, bottom - 1.0);
+
+    // The icon in its box, or the class's name there when the game has no icon for it.
+    let icon_min = [
+        at[0] + PICKER_BAR + PICKER_ROW_PAD_X,
+        at[1] + PICKER_ROW_PAD_Y,
+    ];
+    let icon_max = [icon_min[0] + PICKER_ICON, icon_min[1] + PICKER_ICON];
+    canvas.rect(icon_min, icon_max, CELL_BG);
+    canvas
+        .list
+        .add_rect(icon_min, icon_max, ICON_EDGE)
+        .thickness(1.0)
+        .build();
+    let inset = PICKER_ICON_MARGIN;
+    let drawn = weapons::item_id(row.key).map_or(IconDraw::Missing, |id| {
+        ds2_overlay::panels::item_icon(
+            &canvas.list,
+            id,
+            [icon_min[0] + inset, icon_min[1] + inset],
+            [icon_max[0] - inset, icon_max[1] - inset],
+        )
+    });
+    if drawn == IconDraw::Missing {
+        let class = if row.class.is_empty() {
+            "No icon"
+        } else {
+            row.class
+        };
+        let text = clip(canvas.ui, class, PICKER_ICON - inset * 2.0);
+        canvas.text(
+            [
+                (icon_min[0] + icon_max[0] - canvas.width(&text)) * 0.5,
+                (icon_min[1] + icon_max[1] - line) * 0.5,
+            ],
+            DIM,
+            &text,
+        );
+    }
+
+    // The attack by type, at the right, unless the stats cannot hold the weapon at all.
+    let attack_right = right - PICKER_ROW_GAP;
+    let attack: Vec<String> = card
+        .filter(|card| card.wield != Wield::Neither)
+        .map(|card| {
+            ATTACK_NAMES
+                .iter()
+                .zip(card.attack)
+                .filter_map(|(name, value)| value.map(|value| format!("{name} {value:.0}")))
+                .collect()
+        })
+        .unwrap_or_default();
+    if !attack.is_empty() {
+        let step = line + 6.0;
+        let mut y = at[1] + (PICKER_ROW_H - step * attack.len() as f32 - line) * 0.5;
+        canvas.text([attack_right - canvas.width("Attack"), y], DIM, "Attack");
+        for text in &attack {
+            y += step;
+            canvas.text([attack_right - canvas.width(text), y], TEXT, text);
+        }
+    }
+
+    // The name, the class, then what it asks for, what it weighs and how it can be held.
+    let text_x = icon_max[0] + PICKER_ROW_GAP;
+    let text_w = attack_right - PICKER_ATTACK_W - PICKER_ROW_GAP - text_x;
+    let title_h = ds2_overlay::panels::title_height(canvas.ui);
+    let grid_h = if card.is_some() {
+        PICKER_GRID_TOP + line * 3.0 + PICKER_GRID_GAP * 2.0
+    } else {
+        0.0
+    };
+    let mut y = at[1] + (PICKER_ROW_H - (title_h + 2.0 + line + grid_h)) * 0.5;
+    canvas.big_text([text_x, y], TITLE, row.name, text_w);
+    y += title_h + 2.0;
+    canvas.text([text_x, y], DIM, &clip(canvas.ui, row.class, text_w));
+    let Some(card) = card else {
+        return;
+    };
+    let value_x = text_x + PICKER_LABEL_W + PICKER_LABEL_GAP;
+    let mark = (line * 0.6).round();
+    let mark_y = |y: f32| y + (line - mark) * 0.5;
+
+    y += line + PICKER_GRID_TOP;
+    canvas.text([text_x, y], DIM, "Requires");
+    let mut x = value_x;
+    for req in &card.requirements {
+        let text = format!(
+            "{} {}",
+            STAT_LABELS.get(req.stat).copied().unwrap_or("?"),
+            req.value
+        );
+        canvas.text([x, y], TEXT, &text);
+        x += canvas.width(&text);
+        if !req.met {
+            x += 7.0 + canvas.cross([x + 7.0, mark_y(y)], mark);
+        }
+        x += PICKER_REQ_GAP;
+    }
+    if card.requirements.is_empty() {
+        canvas.text([value_x, y], DIM, "None");
+    }
+
+    y += line + PICKER_GRID_GAP;
+    canvas.text([text_x, y], DIM, "Weight");
+    canvas.text([value_x, y], TEXT, &format!("{:.1}", card.weight));
+
+    y += line + PICKER_GRID_GAP;
+    canvas.text([text_x, y], DIM, "Grip");
+    match card.wield {
+        Wield::Both => canvas.text([value_x, y], TEXT, "1H / 2H"),
+        // Not colour alone: the tag says it in words.
+        Wield::TwoHandedOnly => {
+            let text = "2H only";
+            let tag_w = canvas.width(text) + 20.0;
+            canvas.rect([value_x, y], [value_x + tag_w, y + line], style::RUST);
+            canvas.text([value_x + 10.0, y], TAG_TEXT, text);
+        }
+        Wield::Neither => {
+            let mark_w = canvas.cross([value_x, mark_y(y)], mark);
+            canvas.text([value_x + mark_w, y], TEXT, "Can't wield");
+        }
+    }
 }
 
 /// A drop-down list hanging from `at`, scrolled to `scroll`, with row `highlighted` marked as the

@@ -1114,3 +1114,95 @@ fn a_sorcerers_build_is_a_sorcerers() {
         "the import sees the class it checks"
     );
 }
+
+/// The weapon picker's card says what the ranking says: for every row the script ranked, the card
+/// for that weapon, infusion and stats carries the row's attack by type, and it is two-handed only
+/// exactly when the row is.
+#[test]
+fn a_weapons_card_is_its_ranked_row() {
+    use ds2_build_recommender_core::backend::Wield;
+    let mut checked = 0;
+    for &(st, sl, one_hand, class, per_class, window, raw_ar, goal, _) in expected::WEAPONS_FOR {
+        let opts = WeaponsForOpts {
+            one_hand,
+            class: (!class.is_empty()).then(|| class.to_owned()),
+            per_class,
+            window_s: window as f32,
+            raw_ar,
+            objective: objective(goal),
+        };
+        let stats = stats(st);
+        for row in rows(backend().weapons_for(&stats, sl, &opts)) {
+            let key = weapons::all()
+                .iter()
+                .find(|weapon| weapon.name == row.weapon)
+                .map(|weapon| weapon.key)
+                .expect("a ranked weapon is in the table");
+            let card = backend()
+                .weapon_card(key, row.infusion, &stats)
+                .expect("a ranked weapon has a card");
+            assert_eq!(card.infusion, row.infusion, "{key}");
+            assert_eq!(
+                card.attack.map(|value| value.unwrap_or(0.0)),
+                row.ar_by_type,
+                "{key} {:?} at {st:?}",
+                row.infusion
+            );
+            let wield = if row.two_hand_only {
+                Wield::TwoHandedOnly
+            } else {
+                Wield::Both
+            };
+            assert_eq!(card.wield, wield, "{key} at {st:?}: {}", row.grip);
+            assert!(card.requirements.iter().all(|req| req.met), "{key}");
+            checked += 1;
+        }
+    }
+    assert!(checked > 100, "only {checked} rows checked");
+}
+
+/// Stats that cannot hold a weapon mark the requirements that stop them, and an infusion the
+/// weapon does not take falls back to uninfused, as choosing the weapon does.
+#[test]
+fn a_card_marks_what_the_stats_miss() {
+    use ds2_build_recommender_core::backend::Wield;
+    let low = backend()
+        .weapon_card("Greatsword", Infusion::None, &[1; STAT_COUNT])
+        .expect("the Greatsword has a card");
+    assert_eq!(low.wield, Wield::Neither);
+    assert!(!low.requirements.is_empty());
+    assert!(low.requirements.iter().all(|req| req.value > 0));
+    assert!(
+        low.requirements
+            .iter()
+            .filter(|req| req.value > 1)
+            .all(|req| !req.met),
+        "{:?}",
+        low.requirements
+    );
+    let high = backend()
+        .weapon_card("Greatsword", Infusion::Raw, &[99; STAT_COUNT])
+        .expect("the Greatsword has a card");
+    assert_eq!(high.wield, Wield::Both);
+    assert!(high.requirements.iter().all(|req| req.met));
+    assert!(high.weight > 0.0);
+    let takes_raw = weapons::by_key("Greatsword").is_some_and(|row| row.takes(Infusion::Raw));
+    assert_eq!(
+        high.infusion,
+        if takes_raw {
+            Infusion::Raw
+        } else {
+            Infusion::None
+        }
+    );
+    assert!(
+        backend()
+            .weapon_card("No_Such_Weapon", Infusion::None, &[99; STAT_COUNT])
+            .is_none()
+    );
+    assert!(
+        backend::StubBackend
+            .weapon_card("Greatsword", Infusion::None, &[99; STAT_COUNT])
+            .is_none()
+    );
+}

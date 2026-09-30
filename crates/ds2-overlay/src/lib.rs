@@ -23,6 +23,7 @@ pub mod ebl;
 pub mod fefont;
 pub mod frame_hook;
 pub mod game_hud;
+pub mod item_icon;
 mod log;
 #[cfg(windows)]
 pub mod panels;

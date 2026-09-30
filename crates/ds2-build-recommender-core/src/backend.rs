@@ -72,6 +72,47 @@ pub struct ResultRow {
     pub class: String,
 }
 
+/// How some stats can hold a weapon: the weapon picker's Grip line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wield {
+    /// One-handed, and so two-handed as well.
+    Both,
+    /// Only two-handed, which is what lets the stats meet its strength.
+    TwoHandedOnly,
+    /// Not at all: a requirement is unmet in either grip.
+    Neither,
+}
+
+/// One of a weapon's requirements, against some stats.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Requirement {
+    /// The stat, by index into [`STAT_LABELS`].
+    pub stat: usize,
+    /// What the weapon asks for one-handed.
+    pub value: u16,
+    /// Whether the stats meet it in the grip that helps it most, two-handed for strength, by the
+    /// same rule [`Wield`] is decided by.
+    pub met: bool,
+}
+
+/// A weapon as the weapon picker's row shows it at some stats: what it asks for, what it weighs,
+/// how the stats can hold it, and what it hits for.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WeaponCard {
+    /// Its requirements in the data's order, the zero ones left out.
+    pub requirements: Vec<Requirement>,
+    /// Its weight.
+    pub weight: f32,
+    /// How the stats can hold it.
+    pub wield: Wield,
+    /// The infusion [`Self::attack`] is for: the one asked about when the weapon takes it,
+    /// uninfused otherwise.
+    pub infusion: Infusion,
+    /// Attack rating by type at full upgrade, in [`DAMAGE_TYPES`] order, `None` for a type it does
+    /// not deal: the numbers a ranking's row carries for the same weapon, infusion and stats.
+    pub attack: [Option<f32>; 5],
+}
+
 /// What a ranking came back as.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Outcome {
@@ -405,6 +446,17 @@ pub trait RecommenderBackend: Sync {
         _armor: &[String],
         _rings: &[String],
     ) -> Option<crate::flex::Flexibility> {
+        None
+    }
+    /// `weapon`, a soulsplanner key, as the weapon picker shows it at `stats`: with `infusion` when
+    /// it takes that one, which is what choosing it keeps, and uninfused otherwise. `None` when the
+    /// backend has no row for it, which is the default: the stub has none for any weapon.
+    fn weapon_card(
+        &self,
+        _weapon: &str,
+        _infusion: Infusion,
+        _stats: &[u16; STAT_COUNT],
+    ) -> Option<WeaponCard> {
         None
     }
 }

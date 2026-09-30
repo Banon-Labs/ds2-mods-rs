@@ -30,5 +30,10 @@ ds2-input-harness.workspace = true
 # The panel's `imgui::Ui`, and the `windows` re-export it reads the keyboard and pad through.
 hudhook.workspace = true
 
+[dev-dependencies]
+# `tests/weapon_icons.rs`: every weapon the picker lists has an icon where the game is installed.
+# The archive and icon readers compile on the host.
+ds2-overlay.workspace = true
+
 [lints]
 workspace = true

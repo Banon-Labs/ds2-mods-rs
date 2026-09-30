@@ -137,6 +137,21 @@ pub fn by_key(key: &str) -> Option<&'static WeaponRow> {
     all().iter().find(|row| row.key == key)
 }
 
+/// The item id the game knows the weapon `key` by, which is what its icon is found under.
+///
+/// A weapon the catalogue flags unsafe to spawn still has one: showing it is not spawning it.
+/// `None` for a key the catalogue has no single item for.
+pub fn item_id(key: &str) -> Option<u32> {
+    let id = match ds2_build_import_core::id_for(key) {
+        Ok(id) => id,
+        Err(ds2_build_import_core::ItemError::UnsafeToSpawn { ids, .. }) if ids.len() == 1 => {
+            ids[0]
+        }
+        Err(_) => return None,
+    };
+    u32::try_from(id).ok()
+}
+
 /// The infusions the weapon `key` names takes; empty for a key the table does not have.
 pub fn infusions_for(key: &str) -> Vec<Infusion> {
     by_key(key).map(WeaponRow::infusions).unwrap_or_default()
@@ -277,5 +292,19 @@ mod tests {
         assert!(classes.contains(&"Greatsword"));
         assert!(!classes.contains(&"Normal Shield"));
         assert!(classes.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    /// Every weapon the picker lists has an item to show the icon of, the one the catalogue
+    /// flags unsafe to spawn included.
+    #[test]
+    fn every_weapon_has_an_item_id() {
+        let missing: Vec<&str> = all()
+            .iter()
+            .filter(|row| item_id(row.key).is_none())
+            .map(|row| row.key)
+            .collect();
+        assert!(missing.is_empty(), "{missing:?}");
+        assert_eq!(item_id("Longsword"), Some(1_220_000));
+        assert_eq!(item_id("Santiers_Spear_Broken"), Some(3_251_000));
     }
 }

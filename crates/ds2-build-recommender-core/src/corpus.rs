@@ -25,8 +25,8 @@ use ds2_build_import_core::Infusion;
 
 use crate::backend::{
     Calibration, CatalystPick, Change, Fix, GeneratedBuild, Limits, OptimizedBuild, Outcome,
-    RecommenderBackend, Refusal, RefusalKind, ResultRow, SpellRow, WEAPONS_1H_TOP,
-    WEAPONS_2H_ONLY_TOP,
+    RecommenderBackend, Refusal, RefusalKind, Requirement, ResultRow, SpellRow, WEAPONS_1H_TOP,
+    WEAPONS_2H_ONLY_TOP, WeaponCard, Wield,
 };
 use crate::flex::{FLEX_K, Flexibility};
 use crate::model::{
@@ -351,14 +351,20 @@ impl Weapon {
 
     /// The script's `weapon_ok` over these stats, with no armour.
     fn wieldable(&self, stats: &Stats, two_hand: bool) -> bool {
-        self.require.iter().all(|&(stat, value)| {
-            let need = if two_hand && stat == STR {
-                value.div_euclid(2)
-            } else {
-                value
-            };
-            need <= stats[stat]
-        })
+        self.require
+            .iter()
+            .all(|&(stat, value)| Self::meets(stats, stat, value, two_hand))
+    }
+
+    /// Whether `stats` meet one requirement of `value` in `stat`: strength's is halved
+    /// two-handed.
+    fn meets(stats: &Stats, stat: usize, value: i32, two_hand: bool) -> bool {
+        let need = if two_hand && stat == STR {
+            value.div_euclid(2)
+        } else {
+            value
+        };
+        need <= stats[stat]
     }
 }
 
@@ -3415,6 +3421,45 @@ impl RecommenderBackend for CorpusBackend {
         rings: &[String],
     ) -> Option<Flexibility> {
         self.flex(&to_stats(stats), u32::from(sl), armor, rings)
+    }
+
+    fn weapon_card(
+        &self,
+        weapon: &str,
+        infusion: Infusion,
+        stats: &[u16; STAT_COUNT],
+    ) -> Option<WeaponCard> {
+        let weapon = self.weapon_by_key(weapon)?;
+        let stats = to_stats(stats);
+        let row = weapon
+            .infusion(infusion)
+            .or_else(|| weapon.infusion(Infusion::None));
+        let wield = if weapon.wieldable(&stats, false) {
+            Wield::Both
+        } else if weapon.wieldable(&stats, true) {
+            Wield::TwoHandedOnly
+        } else {
+            Wield::Neither
+        };
+        let requirements = weapon
+            .require
+            .iter()
+            .filter(|&&(_, value)| value > 0)
+            .map(|&(stat, value)| Requirement {
+                stat,
+                value: u16::try_from(value).unwrap_or(u16::MAX),
+                met: Weapon::meets(&stats, stat, value, true),
+            })
+            .collect();
+        Some(WeaponCard {
+            requirements,
+            weight: weapon.weight as f32,
+            wield,
+            infusion: row.map_or(Infusion::None, |row| row.infusion),
+            attack: self
+                .attack_rating(row, &stats)
+                .map(|value| value.map(|value| value as f32)),
+        })
     }
 }
 
