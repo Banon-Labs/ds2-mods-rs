@@ -45,6 +45,8 @@ pub(crate) enum Press {
     Backspace,
     /// Escape or Start: leave a field or a list, then the panel.
     Close,
+    /// X: Run, from anywhere a press moves the cursor.
+    Run,
     Char(char),
 }
 
@@ -101,16 +103,18 @@ const PAD_LB: u16 = 0x0100;
 const PAD_RB: u16 = 0x0200;
 const PAD_A: u16 = 0x1000;
 const PAD_B: u16 = 0x2000;
+const PAD_X: u16 = 0x4000;
 const PAD_START: u16 = 0x0010;
 
 /// The pad buttons and what each one means.
-const PAD_BUTTONS: [(u16, Press); 9] = [
+const PAD_BUTTONS: [(u16, Press); 10] = [
     (PAD_UP, Press::Up),
     (PAD_DOWN, Press::Down),
     (PAD_LEFT, Press::Left),
     (PAD_RIGHT, Press::Right),
     (PAD_A, Press::Confirm),
     (PAD_B, Press::Back),
+    (PAD_X, Press::Run),
     (PAD_LB, Press::PageUp),
     (PAD_RB, Press::PageDown),
     (PAD_START, Press::Close),
@@ -214,7 +218,10 @@ impl Reader {
             );
         }
         for (bit, press) in PAD_BUTTONS {
-            let repeats = !matches!(press, Press::Confirm | Press::Back | Press::Close);
+            let repeats = !matches!(
+                press,
+                Press::Confirm | Press::Back | Press::Close | Press::Run
+            );
             step(buttons & bit != 0, press, repeats, &mut self.held);
         }
         // A press this frame with a pad button down came from the pad; any other, the keyboard.
