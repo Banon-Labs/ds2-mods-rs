@@ -795,6 +795,40 @@ def cases() -> list[PolicyCase]:
                 "content": "print(1)\n",
             },
         ),
+        # --- docs_no_size_metrics ----------------------------------------------------------------
+        # A display's height is not a line count. The exemption reads capture groups out of
+        # `regex.find_all_string_submatch_n`, and only this layer shows the WASM runtime hands them
+        # back the way the interpreter does: a group it reported differently would refuse the edit
+        # the rule was narrowed to let through, while `opa test` stayed green. The allow is the
+        # whole Edit that was refused on 2026-09-30.
+        PolicyCase(
+            "allow-doc-comment-naming-a-vertical-resolution",
+            True,
+            tool_name="Edit",
+            tool_input={
+                "file_path": str(
+                    REPO_ROOT / "crates" / "ds2-build-recommender-ui" / "src" / "panel.rs"
+                ),
+                "old_string": "x",
+                "new_string": (
+                    "/// Rows the weapon picker shows at once until its first draw has measured"
+                    " the screen: the design's\n"
+                    "/// three, which fit a 1080-line one.\n"
+                    "const PICKER_ROWS: usize = 3;"
+                ),
+            },
+        ),
+        PolicyCase(
+            "deny-resolution-number-on-a-line-naming-a-module",
+            False,
+            tool_name="Edit",
+            tool_input={
+                "file_path": str(REPO_ROOT / "crates" / "ds2-overlay" / "src" / "lib.rs"),
+                "old_string": "x",
+                "new_string": "/// A 1080-line module.",
+            },
+            expected_text="documentation carrying a line count",
+        ),
         # --- docs_no_shouting --------------------------------------------------------------------
         # The PreToolUse arm of the 2026-09-23 directive on capitals. These three are here rather
         # than only in `opa test` because the policy's span stripping leans on `%`, which `opa fmt`
