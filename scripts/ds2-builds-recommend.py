@@ -1371,7 +1371,10 @@ def regulation_spell_hits(data: Data, d: dict, names: dict) -> str:
     """data.spell_hits: spell key -> the hits one cast can deal (bullet_hits from SpellParam
     baseSpellBulletId / baseSpellDamageId as inherited_hits lands them, joined by normalized name
     as regulation_spells joins). A spell with no damaging hit (a heal, a buff, a status mist) has
-    none. The SCRIPTED_SPELL_BULLET hits keep their own rows' damage: no parent bullet spawns them."""
+    none. The SCRIPTED_SPELL_BULLET hits keep their own rows' damage: no parent bullet spawns them.
+    A soul-consuming spell (Climax, the Resonant hexes) is taken at its own ids, which EXE
+    0x140390050 uses only while the caster holds at least SpellSoulConsumeParam.consumeSoul souls
+    (5,000 for Climax; fewer souls pick a weaker pair, docs/DS2-DPS-MECHANICS.md)."""
     by_name = {}
     for sid, s in d["SpellParam"].items():
         by_name.setdefault(norm(names.get(sid, "")), (int(sid), s))

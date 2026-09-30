@@ -503,9 +503,30 @@ row's type and flat damage. Four do not:
 The three spells whose damage an SpEffect event spawns (`SCRIPTED_SPELL_BULLET`) have no parent
 bullet, and how their attack is built was not read.
 
+**Soul-consuming spells** (read 2026-09-30). `0x140390050`, which hands the builder a spell's bullet
+and damage ids, looks up `SpellParam.soulConsumeParamId` (`+0xfc`) in `SpellSoulConsumeParam`
+(`CharacterManager+0x550`, `0x140359000`). A spell with such a row does not use its own ids. It
+takes one of five `bulletAndDamageId0N` pairs (the `Left` set for the left hand) by
+`r = (consumeSoul - souls held) / consumeSoul`, where souls held is `[chr+0x490]+0xec`:
+
+| `r` | Souls held | Pair |
+|---|---|---|
+| r <= 0 | at least `consumeSoul` | 01 |
+| 0 < r <= 0.2 (`0x1410ad5e0`) | at least 80% | 02 |
+| 0.2 < r <= 0.6 (`0x1410e548c`) | at least 40% | 03 |
+| 0.6 < r < 1 | some | 04 |
+| r >= 1 | none | 05 |
+
+Climax (`consumeSoul` 5000) has pairs 35050000..35050004 at damageRate 6.75 / 6.0 / 4.0 / 2.5 /
+0.15, and its own `baseSpellDamageId` is pair 01. So the regulation's spell row, which the model
+uses, is the damage of a caster holding at least 5,000 souls. Every soul-consuming spell's own row
+is its pair 01. The thresholds are Resonant Soul 100, Great Resonant Soul 500, Resonant Flesh and
+Resonant Weapon 2,000, Lifedrain Patch 3,000, and Dark Dance and Climax 5,000. Climax alone has
+`consumeType` 1, which is read beside `r` but does not pick the pair.
+
 Not read: the inputs of the stat-penalty descriptor (`0x14031fd10`, `0x140333790`, `0x14038fb10`),
-the writers of `flags+0x420`, `+0x428` and `+0x48c..+0x49c`, the soul-consume path, and the
-Arxan-wrapped lookups `0x1403b56d0` / `0x1403b5500`.
+the writers of `flags+0x420`, `+0x428` and `+0x48c..+0x49c`, what `consumeType` and a cast do to the
+souls held, and the Arxan-wrapped lookups `0x1403b56d0` / `0x1403b5500`.
 
 ### Which catalyst casts it
 
