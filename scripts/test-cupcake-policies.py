@@ -360,6 +360,36 @@ def cases() -> list[PolicyCase]:
             "bash -c \"sleep 1; ydotool key 61:1 61:0\"",
             expected_text="names no target window",
         ),
+        # --- no_grep_for_build_errors ----------------------------------------------------------
+        # 2026-09-30: counting a dependency with `cargo tree ... | grep -c` was refused as a
+        # grepped build. A cargo subcommand that compiles nothing is exempt; a compiling one is
+        # not. This file calls `cupcake eval` without the hook shim, so the two-line case arrives
+        # with its newline turned into a space: the second line's `cargo` is then a word of the
+        # first line's stage, and the policy's word check is what refuses it.
+        PolicyCase(
+            "allow-cargo-tree-counted-with-grep",
+            True,
+            "cargo tree -p ds2-loader --target x86_64-pc-windows-msvc -e normal 2>/dev/null"
+            " | grep -c \"ds2-build-recommender-core\"",
+        ),
+        PolicyCase(
+            "allow-cargo-metadata-piped-into-grep",
+            True,
+            "cargo metadata --format-version 1 --no-deps | grep ds2-loader",
+        ),
+        PolicyCase(
+            "deny-cargo-xwin-build-piped-into-grep",
+            False,
+            "cargo xwin build --release --target x86_64-pc-windows-msvc -p ds2-loader 2>&1"
+            " | grep error",
+            expected_text="as its EXIT CODE",
+        ),
+        PolicyCase(
+            "deny-build-on-the-line-after-a-cargo-tree",
+            False,
+            "cargo tree -p ds2-loader > tree.txt\ncargo xwin build -p ds2-loader 2>&1 | grep error",
+            expected_text="as its EXIT CODE",
+        ),
         # --- git_block_main_commit -------------------------------------------------------------
         PolicyCase(
             "deny-commit-on-main",
