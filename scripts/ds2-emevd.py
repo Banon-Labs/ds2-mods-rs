@@ -112,9 +112,11 @@ class Event:
 
 
 class Emevd:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, data: bytes | None = None):
+        """`data` is the file's bytes when they come from somewhere other than `path`, such as a
+        regulation member read in memory; `path` then only names it in errors."""
         self.path = path
-        self.data = path.read_bytes()
+        self.data = path.read_bytes() if data is None else data
         d = self.data
         if d[:4] != b"EVD\0":
             raise SystemExit(f"{path}: not an emevd (magic {d[:4]!r})")

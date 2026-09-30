@@ -84,8 +84,9 @@ p < 0.5 (1744). Most errors are an elemental choice inferred as No_Infusion.
 
 Not proven: that SoulsPlanner's labels transfer to MugenMonkey builders (No_Infusion is also the
 planner's default, so some of the 51.8% may be builds whose author never picked one). Inferred
-infusions are shown by `--mugen` only; they do not yet enter the item model or the panel's data
-file, so MugenMonkey weapons still contribute only the plain weapon token.
+infusions do not enter the item model, where MugenMonkey weapons contribute only the plain weapon
+token. They do enter the armour threat mix (see Armor), as the mean attack rating over the model's
+probabilities.
 
 ## Formula source
 
@@ -139,10 +140,31 @@ has. How the three are weighted is set by the offline evaluation.
 
 Not learned, and not in the item model: nothing can say what looks good. Armor is computed. The
 candidates are pieces the build can wear within its equip-load limit (weapons, shields and rings
-counted) and meets the stat requirements of. They are ranked by expected damage taken, where the
-threat mix is the per-type share of damage (physical, magic, fire, lightning, dark) that the
-corpus's weapons+infusions and spells actually deal, computed with the same executable-derived
-formulas.
+counted) and meets the stat requirements of. A set scores its per-type defense weighted by the
+threat mix: what one point of each defense (physical, magic, fire, lightning, dark) takes off one
+hit of the average opponent (`threat_mix`, exported as the `H` line of the panel's data file).
+
+The per-hit formula is the executable's (docs/DS2-DPS-MECHANICS.md "Damage per hit against a
+player" and "Spell and buff attack"). A point of physical defense takes `damageRate / 12` off any
+hit that carries physical attack; a point of an element's defense takes `damageRate x attack /
+1000` off a hit carrying that element. So an elemental point is worth more the bigger the hit,
+while a physical point is worth the same on every hit.
+
+Opponents are every unique build on both mirrors that can hit (46,988 in September 2026): not only
+the complete builds the item model trains on, because an empty ring slot does not change what a
+build hits with. Each one lands:
+
+- **melee hits**: its first usable melee weapon's R1 (damageRate 1.0). A MugenMonkey weapon's attack
+  is the mean over the infusion model's probabilities (see MugenMonkey infusion inference). A weapon
+  buff the build can cast is on it: `(the weapon's own elemental base + coefficient x stat bonus +
+  flat) x X / 100` in the buff's element.
+- **spell hits**: each attack spell it can cast (requirements met, a carried catalyst of that school
+  it can wield), with equal odds. A spell hit is its biggest damage row, with attack = the best
+  carried catalyst's attack rating in that element + the row's flat damage.
+
+How often a build that can do both casts rather than swings is not in any build: `SPELL_HIT_SHARE`
+(0.5) is a stated assumption, and `threat_weights` gives the mix at any share. The sums behind the
+mix take about a minute to compute and are cached in `~/.cache/ds2-builds/threat-sums.json`.
 
 Equip-load cap: **below 70%**, to stay out of the heavy-roll tier (the user's rule; the in-game
 threshold is still to be confirmed statically).
