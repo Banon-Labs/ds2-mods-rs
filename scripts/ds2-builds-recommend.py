@@ -13,11 +13,13 @@ design in ways that are said out loud here rather than hidden:
   requirements from MugenMonkey's `ds2application-*.js` (SoulsPlanner has none). Both are dumped to
   JSON by `--sp-data` / `--mm-data` (see `dump_site_tables`). The design wants regulation params
   and executable-derived formulas; neither is wired in yet.
-* ARMOR DAMAGE MODEL IS LINEAR. A piece's value is its per-type defense weighted by the share of
-  each damage type the corpus's weapons deal. The game's defense curve is not linear; the
-  executable's formula replaces this once it is recovered.
-* CORPUS IS SOULSPLANNER ONLY: the mirror at ~/.cache/soulsplanner (6618 builds, the whole public
-  list). MugenMonkey builds can be queried but are not in the training set yet.
+* ARMOR IS SCORED PER POINT OF DEFENSE. A piece's value is its per-type defense weighted by what
+  one point of that defense takes off one hit of the average opponent (threat_mix): the
+  executable's per-hit formula, over every unique build on both mirrors that can hit, with
+  MugenMonkey infusions inferred, spells and weapon buffs included. How often a build that can
+  both swing and cast does each is not in any build (SPELL_HIT_SHARE).
+* CORPUS IS BOTH MIRRORS: SoulsPlanner (~/.cache/soulsplanner, 6618 builds) and MugenMonkey
+  (~/.cache/mugenmonkey, 66052 public builds), filtered to complete, usable, unique builds.
 * Ring stat bonuses (Ring of the Embedded etc.) are ignored: the site encodes them as functions of
   the build. Armor stat bonuses are counted.
 
@@ -30,6 +32,7 @@ Armor is chosen separately by the defense optimizer under a 70% equip-load cap.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
@@ -158,6 +161,9 @@ class Data:
         self.spell_category = {}  # spell key -> SpellParam.spellCategory
         self.catalysts = {}  # weapon key -> see regulation_catalysts
         self.cast_bonus = {}  # element -> PhysicalStatsPerLevelStatValuesParam column, rows 0-99
+        self.spell_hits = {}  # spell key -> the hits one cast deals (regulation_spell_hits)
+        self.buffs = {}  # spell key -> the weapon buff it casts (regulation_buffs)
+        self.weapon_elements = {}  # weapon key -> element -> (base, coefficient) (regulation_weapon_elements)
         # PhysicalStatsPerLevelStatValuesParam.staminaMax by END, rows 0-99: what a Dragon ring's
         # stamina factor is weighed against (ring_lift); empty when the regulation is not read.
         self.stamina_max = []
@@ -524,15 +530,196 @@ class Model:
 # --------------------------------------------------------------------------------------------
 # armor
 
-def threat_mix(data: Data, corpus: list[Build]) -> dict:
-    tot = Counter()
-    for b in corpus:
-        for w, inf in b.weapons():
-            atk = (data.weapons[w]["infusions"].get(inf) or {}).get("atk") or {}
-            for k in DMG:
-                tot[k] += atk.get(k, 0)
+#: The share of an opponent's hits that are spells, for a build that can both swing and cast
+#: (one that can only do one lands only that). Not measured: no build records how often its owner
+#: casts rather than swings, and only fight data can say. threat_weights takes it as an argument
+#: so its effect can be shown at 0 and 1 as well.
+SPELL_HIT_SHARE = 0.5
+#: The hand slot a build's melee hits come from: the first usable melee weapon in this order.
+MELEE_ORDER = ["rh1", "rh2", "rh3", "lh1", "lh2", "lh3"]
+_threat_cache: dict = {}
+
+
+def spell_attack(power: float, hit: dict) -> float:
+    """A spell hit's attack rating in its element, the number damageRate multiplies: the casting
+    catalyst's cast power in that element (cast_power) plus the hit's flat damage, which on a
+    child bullet's hit is still the spell row's (inherited_hits). EXE
+    (docs/DS2-DPS-MECHANICS.md "Spell and buff attack"): the per-hand attack builder 0x140391fe0
+    prepares the bullet's attack as ((stat bonus + base) x rate + damage of that type) x k per
+    type, with the catalyst's rate masked to the types the spell's damage row lists; k (stat
+    penalty, WeaponTypeParam right damage scale, ChrParam damageAdjustRate) is 1 for a catalyst
+    whose requirements are met, and every catalyst's damageScale is 1.0 (REGULATION)."""
+    return power + hit["flat"]
+
+
+def buff_attack(data: Data, buff: dict, weapon: str, stats: dict) -> float:
+    """The attack rating a weapon buff adds to `weapon` in its element. EXE (same builder): the
+    buff's 100080[1] adds scale/100 to the weapon's rate in that element and its 100090[2] adds
+    flat to that element's stat bonus, so the weapon gains (its own elemental base + coefficient x
+    stat bonus + flat) x scale / 100 -- WeaponReinforceParam maximum<Elem> and
+    WeaponStatsAffectParam coefficient of the weapon's uninfused row (weapon_elements), not
+    anything of the catalyst's. For an infused weapon the infused row's base and coefficient would
+    apply; the uninfused row stands in for them."""
+    base, coef = data.weapon_elements.get(weapon, {}).get(buff["type"], (0.0, 0.0))
+    return (base + coef * element_bonus(data, buff["type"], stats) + buff["flat"]) * buff["scale"] / 100
+
+
+def threat_opponents(data: Data, corpus: list[Build]) -> list[tuple[dict, list[dict]]]:
+    """Every unique build on both mirrors that can hit (a usable melee weapon, or an attack spell
+    it can cast with a catalyst it carries and can wield), as (melee attack rating by type, spell
+    hits it can cast). Unique: one of each (tokens, stats), as load_corpus dedupes. Unlike the
+    recommender's corpus, an incomplete armour set or an empty ring slot does not drop a build:
+    what it wears does not change what it hits with.
+
+    MugenMonkey records no infusion, so a MugenMonkey weapon's attack rating is the mean over the
+    InfusionModel's probabilities (fitted on `corpus`'s SoulsPlanner builds; 68.3% right when
+    measured, docs/DS2-BUILD-EMBEDDINGS.md). The mean rather than the most likely infusion: most of
+    the model's misses are an elemental infusion guessed as No_Infusion, and its top guess alone
+    would carry that bias into every MugenMonkey weapon. A buff the build can cast is on its melee
+    weapon (the strongest one, when it can cast several).
+
+    A catalyst casts at its infusion's rates (regulation_catalysts). The model covers no catalyst,
+    so a MugenMonkey catalyst's cast power is the mean over the infusions SoulsPlanner builds
+    record for that catalyst, weighted by how often (standard when none carries it)."""
+    raw, seen = [], set()
+    for _, b in raw_builds(data, True):
+        sig = (frozenset(tokens(b)), tuple(b.stats[s] for s in STATS))
+        if sig not in seen:
+            seen.add(sig)
+            raw.append(b)
+    mm = [b for b in raw if any(inf == "?" for _, inf in b.hands)]
+    model = InfusionModel(infusion_cases(data, corpus))
+    dist = {}
+    for c in infusion_cases(data, corpus, recorded=False, builds=mm):
+        dist[(id(mm[c["build"]]), c["weapon"])] = {f: p for p, f in model.predict(c)}
+    cat_seen: dict[str, Counter] = {}
+    for b in raw:
+        for w, inf in dict.fromkeys(b.weapons()):
+            if w in data.catalysts and inf != "?" and inf in data.catalysts[w]["infused"]:
+                cat_seen.setdefault(w, Counter())[inf] += 1
+    cat_dist = {w: {f: n / sum(c.values()) for f, n in c.items()} for w, c in cat_seen.items()}
+    out = []
+    for b in raw:
+        try:
+            eff = gear_stats(data, effective(data, b), [r for r in b.rings if r in data.rings])
+        except KeyError:
+            continue
+        melee, main = {}, None
+        for slot in MELEE_ORDER:
+            w, inf = b.hands[HAND_SLOTS.index(slot)]
+            if (w in EMPTY or w not in data.weapons or data.weapons[w].get("isShield") or CATALYST.search(w)
+                    or not weapon_ok(data, w, eff, two_hand=(b.grip == 1 and slot == "rh1"))):
+                continue
+            infs = data.weapons[w]["infusions"]
+            ps = ({inf: 1.0} if inf != "?" else dist.get((id(b), w))
+                  or {("No_Infusion" if "No_Infusion" in infs else next(iter(infs))): 1.0})
+            for f, p in ps.items():
+                for k, v in attack_rating(data, w, f, eff).items():
+                    melee[k] = melee.get(k, 0.0) + p * v
+            main = w
+            break
+        power = {}  # (spell category, element) -> the most cast power among wieldable carried catalysts
+        for c, inf in dict.fromkeys((w, inf) for w, inf in b.weapons() if w in data.catalysts):
+            cat = data.catalysts[c]
+            if any(eff[s] < v for s, v in cat["require"].items()):
+                continue
+            ps = cat_dist.get(c, {"No_Infusion": 1.0}) if inf == "?" else {inf: 1.0}
+            for k in cat["categories"]:
+                for e in ELEMENTS:
+                    p = sum(q * cast_power(data, c, e, eff, f) for f, q in ps.items())
+                    power[(k, e)] = max(power.get((k, e), 0.0), p)
+        castable = [s for s in b.spells if s in data.spell_category and spell_ok(data, s, eff)
+                    and any(k == data.spell_category[s] for k, _ in power)]
+        spells = []  # per castable attack spell: its biggest hit's damageRate and attack per type
+        for s in castable:
+            if s in data.spell_hits:
+                top = max(data.spell_hits[s], key=lambda h: h["rate"])
+                k = data.spell_category[s]
+                spells.append({"rate": top["rate"], "attack": {
+                    h["type"]: spell_attack(power.get((k, h["type"]), 0.0), h)
+                    for h in data.spell_hits[s] if h["row"] == top["row"]}})
+        buffs = [(data.buffs[s]["type"], buff_attack(data, data.buffs[s], main, eff))
+                 for s in castable if s in data.buffs] if melee else []
+        if buffs:
+            k, v = max(buffs, key=lambda t: t[1])
+            melee[k] = melee.get(k, 0.0) + v
+        if melee or spells:
+            out.append((melee, spells))
+    return out
+
+
+def threat_sums(opponents: list[tuple[dict, list[dict]]]) -> dict:
+    """What one point of each defense takes off one hit, summed over `opponents` in four groups:
+    "melee" (builds that only swing), "spell" (only cast), and "both_melee" / "both_spell" (the
+    swing and the cast of builds that do both). EXE (docs/DS2-DPS-MECHANICS.md "Damage per hit
+    against a player"): a hit deals damageRate x max(attack x 10 - physical DEF, floor) / 12
+    physical and damageRate x attack x (1 - (D + 100) / 1000) of an element, so a physical point is
+    worth damageRate / 12 on any hit that carries physical attack and an element's point damageRate
+    x attack / 1000. Floors and the 0.99 cap are left out (the linear range). A melee hit is an R1
+    (damageRate 1.0, the median one-handed R1); a spell hit is the spell's biggest hit, each
+    castable attack spell as likely."""
+    sums = {g: {k: 0.0 for k in DMG} for g in ("melee", "spell", "both_melee", "both_spell")}
+    for melee, spells in opponents:
+        if melee:
+            g = sums["both_melee" if spells else "melee"]
+            g["physical"] += 1 / 12 if melee.get("physical", 0) > 0 else 0
+            for e in ELEMENTS:
+                g[e] += melee.get(e, 0) / 1000
+        for sp in spells:
+            g = sums["both_spell" if melee else "spell"]
+            for t, attack in sp["attack"].items():
+                g[t] += sp["rate"] * (1 / 12 if t == "physical" else attack / 1000) / len(spells)
+    return sums
+
+
+def threat_weights(sums: dict, spell_share: float) -> dict:
+    """threat_sums as per-type shares that sum to 1, when builds that both swing and cast land
+    `spell_share` of their hits as spells."""
+    tot = {k: sums["melee"][k] + sums["spell"][k] + (1 - spell_share) * sums["both_melee"][k]
+           + spell_share * sums["both_spell"][k] for k in DMG}
     s = sum(tot.values()) or 1
     return {k: tot[k] / s for k in DMG}
+
+
+THREAT_CACHE = Path.home() / ".cache/ds2-builds/threat-sums.json"
+
+
+def threat_key(data: Data, corpus: list[Build]) -> str:
+    """What threat_sums depends on: this script and the ones it loads, the mirrors, the item and
+    regulation data it read, and the corpus the infusion model is fitted on."""
+    h = hashlib.sha256()
+    here = Path(__file__).parent
+    for f in ("ds2-builds-recommend.py", "ds2-attacks-extract.py", "ds2-emevd.py", "ds2-regulation.py"):
+        h.update((here / f).read_bytes())
+    for p in (CACHE / "builds-darksouls2.json", CACHE / "index-darksouls2.json",
+              MUGEN_CACHE / "builds.jsonl", MUGEN_CACHE / "index.jsonl"):
+        st = p.stat() if p.exists() else None
+        h.update(repr((str(p), st and st.st_size, st and st.st_mtime_ns)).encode())
+    h.update(json.dumps([data.sp, data.mm, data.spell_hits, data.buffs, data.catalysts, data.cast_bonus,
+                         data.spell_category, data.weapon_elements], sort_keys=True, default=str).encode())
+    h.update(repr([(b.cls, b.stats, b.hands, b.spells, b.rings, b.armor) for b in corpus]).encode())
+    return h.hexdigest()
+
+
+def threat_mix(data: Data, corpus: list[Build]) -> dict:
+    """Per-type weight of one point of armour defense, for best_armor: threat_weights at
+    SPELL_HIT_SHARE. threat_opponents costs about half a minute, so its sums are kept in
+    THREAT_CACHE under threat_key and in memory for the run."""
+    if id(corpus) not in _threat_cache:
+        key, sums = threat_key(data, corpus), None
+        try:
+            cached = json.loads(THREAT_CACHE.read_text())
+            sums = cached["sums"] if cached.get("key") == key else None
+        except (OSError, ValueError, KeyError):
+            pass
+        if sums is None:
+            sums = threat_sums(threat_opponents(data, corpus))
+            try:
+                THREAT_CACHE.write_text(json.dumps({"key": key, "sums": sums}))
+            except OSError:
+                pass
+        _threat_cache[id(corpus)] = threat_weights(sums, SPELL_HIT_SHARE)
+    return _threat_cache[id(corpus)]
 
 
 def max_load(data: Data, eff: dict, rings=()) -> float:
@@ -886,8 +1073,12 @@ def apply_regulation(data: Data) -> str:
             "WeaponParam": "WEAPON_PARAM", "WeaponReinforceParam": "WEAPON_REINFORCE_PARAM",
             "WeaponStatsAffectParam": "WEAPON_STATS_AFFECT_PARAM",
             "PhysicalStatsPerLevelStatValuesParam": "PHYS_STATS_PER_LEVEL_STAT_PARAM",
-            "SpellParam": "SPELL_PARAM", "WeaponTypeParam": "WEAPON_TYPE_PARAM"})
+            "SpellParam": "SPELL_PARAM", "WeaponTypeParam": "WEAPON_TYPE_PARAM",
+            "PlayerDamageParam": "DAMAGE_PARAM", "SystemDamageParam": "DAMAGE_PARAM",
+            "BulletParam": "BULLET_PARAM", "SystemBulletParam": "BULLET_PARAM"})
         names = ex.item_names(reg.GAME_DIR, reg.DEFAULT_REGULATION)
+        members = reg.load(reg.DEFAULT_REGULATION, reg.REGULATION_KEY_HEX)
+        emevd = ex.load_module("ds2emevd", "ds2-emevd.py")
     except (OSError, SystemExit, KeyError) as e:
         return f"regulation unreadable ({e}); SoulsPlanner's defense table and Enchanted coefficients kept"
     rows = d["PhysicalStatsPerLevelStatValuesParam"]
@@ -920,7 +1111,8 @@ def apply_regulation(data: Data) -> str:
         fixed += 1
     return (f"regulation: physical stat defense from the game's table ({moved} sums moved), Enchanted "
             f"coefficients from WeaponStatsAffectParam for {fixed} weapons ({refused} left: join disagreed); "
-            + regulation_spells(data, d, names))
+            + regulation_spells(data, d, names) + "; " + regulation_spell_hits(data, d, names) + "; "
+            + regulation_buffs(data, emevd, members, d, names) + "; " + regulation_weapon_elements(data, d, names))
 
 
 def regulation_spells(data: Data, d: dict, names: dict) -> str:
@@ -956,9 +1148,10 @@ def regulation_spells(data: Data, d: dict, names: dict) -> str:
 #: SpellParam.spellCategory -> (label, the WeaponTypeParam flag that lets a catalyst cast it, the
 #: element its cast power is read in). The categories against MugenMonkey's spell types, measured
 #: 2026-09-28 over every joined spell: 0 is its 31 sorceries, 1 its 27 miracles, 2 its 24
-#: pyromancies, 3 and 4 its 23 hexes, split 12/11. The flags are the paramdef's five allow* bytes
-#: in the categories' order; that 3 is the staff hexes and 4 the chime hexes is read off which
-#: catalysts carry which flag (staves allowDarkMagic, chimes allowDarkMiracle), not off the binary.
+#: pyromancies, 3 and 4 its 23 hexes, split 12/11. EXE, read 2026-09-30: the cast check 0x140397a30
+#: switches on spellCategory and returns the hand's WeaponTypeParam byte +0x0, +0x1, +0x2, +0x3 or
+#: +0x53 for 0..4 (any other category: no cast), which are these five flags; the cast request and
+#: the HUD's spell icon both go through it (docs/DS2-DPS-MECHANICS.md "Which catalyst casts it").
 SPELL_SCHOOLS = {0: ("sorcery", "allowMagic", "magic"), 1: ("miracle", "allowMiracle", "lightning"),
                  2: ("pyromancy", "allowPyromancy", "fire"), 3: ("hex", "allowDarkMagic", "dark"),
                  4: ("hex", "allowDarkMiracle", "dark")}
@@ -966,20 +1159,55 @@ SPELL_SCHOOLS = {0: ("sorcery", "allowMagic", "magic"), 1: ("miracle", "allowMir
 #: PhysicalStatsPerLevelStatValuesParam column).
 CAST_ELEMENTS = {"magic": ("Magic", "magic", "magicAttack"), "fire": ("Fire", "fire", "flameAttack"),
                  "lightning": ("Thunder", "thunder", "lightningAttack"), "dark": ("Dark", "dark", "darkAttack")}
+#: WeaponReinforceParam's rates, in the slot order the executable moves an infusion's add rate in.
+RATE_FIELDS = ["physicalRate", "magicRate", "thunderRate", "fireRate", "darkRate", "poisonRate", "bleedingRate",
+               "petrifactionRate", "curseRate"]
+#: Infusion -> (the WeaponReinforceParam add rate it moves, the RATE_FIELDS slot it moves it into,
+#: its WeaponStatsAffectParam row's offset from statsAffectId). EXE: the 10x3 byte table at
+#: 0x1410c3e10 holds slot and offset per infusion index (INFUSIONS order), and 0x14034fe10 picks the
+#: add rate (docs/DS2-DPS-MECHANICS.md "Base, rates and the sum").
+INFUSION_MOVE = {"No_Infusion": (None, 0, 0), "Fire": ("addFireRate", 3, 3), "Magic": ("addMagicRate", 1, 1),
+                 "Lightning": ("addThunderRate", 2, 2), "Dark": ("addDarkRate", 4, 4),
+                 "Poison": ("addPoisonRate", 5, 5), "Bleed": ("addBleedRate", 6, 6),
+                 "Raw": ("addPhysicalRateByCrude", 0, 7), "Enchanted": ("addPhysicalRateByEnchanted", 0, 8),
+                 "Mundane": ("addPhysicalRateByAbyss", 0, 9)}
+
+
+def infused_rates(r: dict, inf: str) -> list[float]:
+    """A WeaponReinforceParam row's rates in percent, per RATE_FIELDS slot, after infusion `inf`
+    moves its add rate. EXE, the attack builder's path (0x14034c580 -> 0x14034c760 -> 0x14034c5c0):
+    the add rate times 1.0; the target slot gains it, up to 1000 (0x1410ad5f0); every other slot
+    with a nonzero rate loses add / (how many such slots there are) (0x14034fed0); then every rate
+    is floored at 0. A Magic Staff of Wisdom goes from magic 100 to 110, a Lightning one to magic
+    90 and lightning 10."""
+    rates = [r[f] for f in RATE_FIELDS]
+    field, target, _ = INFUSION_MOVE[inf]
+    add = r[field] if field else 0.0
+    if add <= 0:
+        return rates
+    others = sum(1 for i, v in enumerate(rates) if i != target and v != 0)
+    out = list(rates)
+    if rates[target] < 1000:
+        out[target] = min(rates[target] + add, 1000.0)
+    for i, v in enumerate(rates):
+        if i != target and v > 0:
+            out[i] = v - add / others
+    return [max(0.0, v) for v in out]
 
 
 def regulation_catalysts(data: Data, d: dict, names: dict) -> str:
     """Every SoulsPlanner weapon the game lets cast a spell category, from the regulation: which
     categories (WeaponTypeParam allow* of its weaponTypeId), its requirements (WeaponParam
-    required*), and per element its full-upgrade cast power terms -- base = WeaponReinforceParam
-    maximum<Elem> x <elem>Rate / 100, scale = WeaponStatsAffectParam <elem><maxLevel> x <elem>Rate
-    / 100. The per-stat bonus a scale multiplies is PhysicalStatsPerLevelStatValuesParam's
-    magicAttack/flameAttack/lightningAttack/darkAttack column (data.cast_bonus); cast_power says
-    which stat indexes it. Measured 2026-09-28 against SoulsPlanner: all 32 catalysts' requirements
-    equal its require; 30 have its uninfused atk/atkScale exactly, Olenford's Staff scales 0.678
-    where the site rounds to 0.675, and Sanctum Shield has no elemental row on the site at all. The
-    magic, lightning and dark columns equal its tables at every stat, and fire equals its INT+FTH
-    table at (INT+FTH)//2."""
+    required*), and per infusion and element its full-upgrade cast power terms -- base =
+    WeaponReinforceParam maximum<Elem> x the infusion's WeaponStatsAffectParam baseValueScale x
+    rate / 100, scale = that row's <elem><maxLevel> x rate / 100, rate as infused_rates moves it.
+    "power" is the standard catalyst's, "infused" every infusion's. The per-stat bonus a scale
+    multiplies is PhysicalStatsPerLevelStatValuesParam's magicAttack/flameAttack/lightningAttack/
+    darkAttack column (data.cast_bonus); cast_power says which stat indexes it. Measured 2026-09-28
+    against SoulsPlanner: all 32 catalysts' requirements equal its require; 30 have its uninfused
+    atk/atkScale exactly, Olenford's Staff scales 0.678 where the site rounds to 0.675, and Sanctum
+    Shield has no elemental row on the site at all. The magic, lightning and dark columns equal its
+    tables at every stat, and fire equals its INT+FTH table at (INT+FTH)//2."""
     rows = d["PhysicalStatsPerLevelStatValuesParam"]
     top = max(map(int, rows))
     data.cast_bonus = {e: [0] + [rows[str(i)][col] for i in range(1, top + 1)]
@@ -996,26 +1224,63 @@ def regulation_catalysts(data: Data, d: dict, names: dict) -> str:
         a = r and d["WeaponStatsAffectParam"].get(str(r["statsAffectId"]))
         if not a:
             continue
-        power = {}
-        for e, (stem, sa, _) in CAST_ELEMENTS.items():
-            rate = r[f"{sa}Rate"] / 100
-            power[e] = (r[f"maximum{stem}"] * rate, a[f"{sa}{r['maxLevel']}"] * rate)
+        infused = {}
+        for inf, (_, _, offset) in INFUSION_MOVE.items():
+            row = d["WeaponStatsAffectParam"].get(str(r["statsAffectId"] + offset))
+            if not row:
+                continue
+            rates = infused_rates(r, inf)
+            infused[inf] = {}
+            for e, (stem, sa, _) in CAST_ELEMENTS.items():
+                rate = rates[RATE_FIELDS.index(f"{sa}Rate")] / 100
+                infused[inf][e] = (r[f"maximum{stem}"] * row["baseValueScale"] * rate,
+                                   row[f"{sa}{r['maxLevel']}"] * rate)
         req = {s: wp[f"required{s.capitalize()}"] for s in REQ_STATS if wp[f"required{s.capitalize()}"]}
-        data.catalysts[key] = {"categories": cats, "require": req, "power": power}
+        data.catalysts[key] = {"categories": cats, "require": req, "power": infused["No_Infusion"],
+                               "infused": infused}
     return f"{len(data.catalysts)} catalysts from WeaponParam/WeaponTypeParam/WeaponReinforceParam"
 
 
-def cast_power(data: Data, catalyst: str, element: str, stats: dict) -> float:
-    """A catalyst's full-upgrade cast power in `element` at `stats`: base + scale x the element's
-    per-stat bonus, the bonus indexed as SoulsPlanner's getMagicATK/... index it (SITE: magic by
-    INT, lightning by FTH, dark by min(INT, FTH), fire by (INT+FTH)//2 -- the halving is where its
-    INT+FTH fire table meets the game's 99-row column). The attack-rating shape attack_rating uses;
-    how the game turns this into a spell's damage is not read here."""
-    base, scale = data.catalysts[catalyst]["power"][element]
+def regulation_weapon_elements(data: Data, d: dict, names: dict) -> str:
+    """data.weapon_elements: weapon key -> element -> (base, coefficient) of its uninfused row at
+    full upgrade, before any rate: WeaponReinforceParam maximum<Elem> x WeaponStatsAffectParam
+    baseValueScale, and WeaponStatsAffectParam <elem><maxLevel>. A standard weapon's elemental
+    rates are 0, so these are what a weapon buff's rate multiplies (buff_attack). Every uninfused
+    row's baseValueScale is 1.0 (measured 2026-09-29, 322 rows). Joined by name as
+    regulation_catalysts joins."""
+    by_name = {}
+    for wid, w in d["WeaponParam"].items():
+        by_name.setdefault(norm(names.get(wid, "")), w)
+    data.weapon_elements = {}
+    for key, w in data.weapons.items():
+        wp = by_name.get(norm(w.get("name", key)))
+        r = wp and d["WeaponReinforceParam"].get(str(wp["weaponReinforceId"]))
+        a = r and d["WeaponStatsAffectParam"].get(str(r["statsAffectId"]))
+        if a:
+            data.weapon_elements[key] = {e: (r[f"maximum{stem}"] * a["baseValueScale"], a[f"{sa}{r['maxLevel']}"])
+                                         for e, (stem, sa, _) in CAST_ELEMENTS.items()}
+    return f"elemental base and scaling for {len(data.weapon_elements)} weapons"
+
+
+def cast_power(data: Data, catalyst: str, element: str, stats: dict, inf: str = "No_Infusion") -> float:
+    """A catalyst's full-upgrade cast power in `element` at `stats`, infused with `inf` (standard
+    when the regulation has no row for it): base + scale x the element's per-stat bonus, the bonus
+    indexed as SoulsPlanner's getMagicATK/... index it (SITE: magic by INT, lightning by FTH, dark
+    by min(INT, FTH), fire by (INT+FTH)//2 -- the halving is where its INT+FTH fire table meets the
+    game's 99-row column). The attack-rating shape attack_rating uses, and the executable's: a spell
+    cast with this catalyst attacks with this plus its damage row's flat damage (spell_attack)."""
+    cat = data.catalysts[catalyst]
+    base, scale = cat.get("infused", {}).get(inf, cat["power"])[element]
+    return base + scale * element_bonus(data, element, stats)
+
+
+def element_bonus(data: Data, element: str, stats: dict) -> float:
+    """The per-stat bonus an elemental scaling coefficient multiplies: data.cast_bonus[element] at
+    INT (magic), FTH (lightning), min(INT, FTH) (dark) or (INT+FTH)//2 (fire), as cast_power says."""
     i, f = stats["intelligence"], stats["faith"]
     at = {"magic": i, "lightning": f, "dark": min(i, f), "fire": (i + f) // 2}[element]
     col = data.cast_bonus[element]
-    return base + scale * col[max(0, min(at, len(col) - 1))]
+    return col[max(0, min(at, len(col) - 1))]
 
 
 def best_catalysts(data: Data, spells, stats: dict) -> list[tuple[str, str, float, str | None]]:
@@ -1042,6 +1307,126 @@ def best_catalysts(data: Data, spells, stats: dict) -> list[tuple[str, str, floa
         if best is not None:
             out.append((label, best[0], best[1], top[0] if top[1] > best[1] else None))
     return out
+
+
+#: DAMAGE_PARAM damageType -> DMG key. 5 is no damage and 6 and up are status build-ups
+#: (DAMAGE_ATTRIBUTE in the DS2S paramdefs), which no point of armour defense reduces.
+DAMAGE_TYPE = {0: "physical", 1: "magic", 2: "lightning", 3: "fire", 4: "dark"}
+#: SpellParam ids whose SpEffect event spawns their damage (`100120[3]`) instead of a bullet child;
+#: the damaging bullet is the spell id + 10, which is also its PlayerDamageParam row (INFERRED from
+#: the id pattern: 31070010, 31080010 and 34040010 are the only magic/dark rows next to these ids).
+SCRIPTED_SPELL_BULLET = {31070000: 31070010, 31080000: 31080010, 34040000: 34040010}
+
+
+def bullet_hits(d: dict, bullet: int, dmg: int, depth: int = 0, seen: set | None = None) -> list[dict]:
+    """Every hit a player bullet deals, depth first: the damage row it names and the rows its
+    child bullets name (BulletParam childeBulletId/childeDamageId 01..03), where a row counts when
+    it deals physical or elemental damage with a positive damageRate. A row is PlayerDamageParam,
+    or SystemDamageParam when PlayerDamageParam has no such id; bullets likewise from BulletParam,
+    then SystemBulletParam. Each hit: its damage type and flat damage (damage01..03 of that type),
+    damageRate and damageLower. REGULATION."""
+    seen = set() if seen is None else seen
+    if (bullet, dmg) in seen or depth > 8:
+        return []
+    seen.add((bullet, dmg))
+    out = []
+    row = d["PlayerDamageParam"].get(str(dmg)) or d["SystemDamageParam"].get(str(dmg))
+    if row and row["damageRate"] > 0:
+        for n in (1, 2, 3):
+            kind = DAMAGE_TYPE.get(row[f"damageType0{n}"])
+            if kind:
+                out.append({"type": kind, "flat": row[f"damage0{n}"], "rate": row["damageRate"],
+                            "lower": row["damageLower"], "row": dmg})
+    b = d["BulletParam"].get(str(bullet)) or d["SystemBulletParam"].get(str(bullet)) or {}
+    for sfx in ("", "02", "03"):
+        child, child_dmg = b.get("childeBulletId" + sfx), b.get("childeDamageId" + sfx)
+        if child or child_dmg:
+            out += bullet_hits(d, child, child_dmg, depth + 1, seen)
+    return out
+
+
+def inherited_hits(hits: list[dict], root: dict) -> list[dict]:
+    """`hits` (bullet_hits of one spell's bullet tree) as a player's spell lands them: every hit
+    row keeps its damageRate and damageLower, but its types and flat damage are the spell's own
+    damage row's (`root`, SpellParam baseSpellDamageId), summed per type. EXE: the attack block is
+    built once from that row (0x1403936a0 -> 0x140391fe0), and a child bullet of a player-type
+    owner copies its parent's block whole (0x140445ec0; only slot 5 comes from the child row);
+    only a non-player owner's child gets its own row's damage01..03. So Wrath of the Gods'
+    damaging child row (lightning, flat 0) hits with the spell row's lightning 300."""
+    types: dict[str, float] = {}
+    for n in (1, 2, 3):
+        kind = DAMAGE_TYPE.get(root[f"damageType0{n}"])
+        if kind:
+            types[kind] = types.get(kind, 0) + root[f"damage0{n}"]
+    out, rows = [], set()
+    for h in hits:
+        if h["row"] not in rows:
+            rows.add(h["row"])
+            out += [{"type": t, "flat": f, "rate": h["rate"], "lower": h["lower"], "row": h["row"]}
+                    for t, f in types.items()]
+    return out
+
+
+def regulation_spell_hits(data: Data, d: dict, names: dict) -> str:
+    """data.spell_hits: spell key -> the hits one cast can deal (bullet_hits from SpellParam
+    baseSpellBulletId / baseSpellDamageId as inherited_hits lands them, joined by normalized name
+    as regulation_spells joins). A spell with no damaging hit (a heal, a buff, a status mist) has
+    none. The SCRIPTED_SPELL_BULLET hits keep their own rows' damage: no parent bullet spawns them.
+    A soul-consuming spell (Climax, the Resonant hexes) is taken at its own ids, which EXE
+    0x140390050 uses only while the caster holds at least SpellSoulConsumeParam.consumeSoul souls
+    (5,000 for Climax; fewer souls pick a weaker pair, docs/DS2-DPS-MECHANICS.md)."""
+    by_name = {}
+    for sid, s in d["SpellParam"].items():
+        by_name.setdefault(norm(names.get(sid, "")), (int(sid), s))
+    data.spell_hits = {}
+    for key, row in data.spells.items():
+        sid, s = by_name.get(norm(row.get("name", key)), (None, None))
+        if s is None:
+            continue
+        hits = bullet_hits(d, s["baseSpellBulletId"], s["baseSpellDamageId"])
+        dmg = str(s["baseSpellDamageId"])
+        root = d["PlayerDamageParam"].get(dmg) or d["SystemDamageParam"].get(dmg)
+        if root:
+            hits = inherited_hits(hits, root)
+        if sid in SCRIPTED_SPELL_BULLET:
+            hits += bullet_hits(d, SCRIPTED_SPELL_BULLET[sid], SCRIPTED_SPELL_BULLET[sid])
+        if hits:
+            data.spell_hits[key] = hits
+    return f"{len(data.spell_hits)} damaging spells from PlayerDamageParam/BulletParam"
+
+
+#: A weapon buff in its spell's SpEffect event (SpEffectSpell.emevd, event id == SpellParam id):
+#: `100080[1] [seconds f32, element, scale f32]` and `100090[2] [seconds f32, flat << 16 | element]`,
+#: element as DAMAGE_TYPE. REGULATION for the numbers; what the game does with them is below.
+BUFF_SCALED, BUFF_FLAT = (100080, 1), (100090, 2)
+
+
+def regulation_buffs(data: Data, emevd, members: dict, d: dict, names: dict) -> str:
+    """data.buffs: spell key -> {"type", "scale", "flat", "seconds"} for every spell whose own
+    SpEffect event carries a weapon-attack instruction (BUFF_SCALED or BUFF_FLAT) in an element.
+    A physical attack add is left out: it multiplies the weapon's own physical rate, which
+    buff_attack does not model (no spell's own event has one today). `emevd` is
+    scripts/ds2-emevd.py, `members` the regulation's files."""
+    events = {e.id: e for e in emevd.Emevd(Path("SpEffectSpell.emevd"), members["SpEffectSpell.emevd"]).events}
+    by_name = {}
+    for sid in d["SpellParam"]:
+        by_name.setdefault(norm(names.get(sid, "")), int(sid))
+    data.buffs = {}
+    for key, row in data.spells.items():
+        ev = events.get(by_name.get(norm(row.get("name", key)), -1))
+        if ev is None:
+            continue
+        buff = {}
+        for ins in ev.instructions:
+            w = ins.words()
+            if (ins.bank, ins.index) == BUFF_SCALED and len(w) >= 3:
+                buff.update(type=DAMAGE_TYPE.get(w[1][0]), scale=w[2][1], seconds=w[0][1])
+            elif (ins.bank, ins.index) == BUFF_FLAT and len(w) >= 2:
+                buff.setdefault("type", DAMAGE_TYPE.get(w[1][2] & 0xFFFF))
+                buff.update(flat=w[1][2] >> 16, seconds=w[0][1])
+        if buff.get("type") in ELEMENTS:
+            data.buffs[key] = {"scale": 0.0, "flat": 0, **buff}
+    return f"{len(data.buffs)} weapon buffs from SpEffectSpell.emevd"
 
 
 def attack_rating(data: Data, weapon: str, inf: str, eff: dict) -> dict:
@@ -3199,6 +3584,30 @@ def selftest() -> int:
         ("no agape, no change", suggest_rings(RINGS, Counter({"Flynns_Ring": 2, "Ring_of_Blades_2": 1})),
          ["Flynns_Ring", "Ring_of_Blades_2"]),
     ]
+    # an infusion's rate move (EXE 0x14034fed0), on regulation rows: the Dagger gives half its
+    # physical rate to the element; a catalyst whose target is already nonzero only gains
+    wrp = dict.fromkeys(RATE_FIELDS, 0.0) | dict.fromkeys([f for f, _, _ in INFUSION_MOVE.values() if f], 0.0)
+    dagger = wrp | {"physicalRate": 100.0, "addMagicRate": 50.0, "addPhysicalRateByCrude": 0.0}
+    wisdom = wrp | {"magicRate": 100.0, "addMagicRate": 10.0, "addThunderRate": 10.0}
+    chime = wrp | {"thunderRate": 100.0, "darkRate": 100.0, "addThunderRate": 15.0, "addMagicRate": 15.0}
+    cases += [
+        ("magic dagger: physical 50, magic 50", infused_rates(dagger, "Magic")[:2], [50.0, 50.0]),
+        ("raw dagger with no crude rate: unchanged", infused_rates(dagger, "Raw")[:2], [100.0, 0.0]),
+        ("magic staff of wisdom: magic 110", infused_rates(wisdom, "Magic")[:3], [0.0, 110.0, 0.0]),
+        ("lightning staff of wisdom: magic 90, lightning 10", infused_rates(wisdom, "Lightning")[:3],
+         [0.0, 90.0, 10.0]),
+        ("lightning dragon chime: lightning 115, dark 85", infused_rates(chime, "Lightning")[:5],
+         [0.0, 0.0, 115.0, 0.0, 85.0]),
+        ("magic dragon chime: 15 split over lightning and dark", infused_rates(chime, "Magic")[:5],
+         [0.0, 15.0, 92.5, 0.0, 92.5]),
+    ]
+    # a player's child bullet hits with the spell row's types and flat damage (EXE 0x140445ec0),
+    # at its own row's damageRate; Outcry's row is fire 0 + dark 100
+    root = {"damageType01": 3, "damage01": 0, "damageType02": 4, "damage02": 100, "damageType03": 5, "damage03": 7}
+    child = [{"type": "fire", "flat": 0, "rate": 1.75, "lower": 0.0, "row": 33320040}]
+    cases.append(("child hit takes the spell row's fire + dark", inherited_hits(child, root),
+                  [{"type": "fire", "flat": 0, "rate": 1.75, "lower": 0.0, "row": 33320040},
+                   {"type": "dark", "flat": 100, "rate": 1.75, "lower": 0.0, "row": 33320040}]))
     cases += flex_selftest_cases()
     if ATTACKS.exists():  # the real extracted rows agree with the copies above
         real = load_attacks()

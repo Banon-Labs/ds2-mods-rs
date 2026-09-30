@@ -78,6 +78,7 @@ FORMATS = {"u8": "B", "s8": "b", "u16": "H", "s16": "h", "u32": "I", "s32": "i",
 def load_module(name: str, file: str):
     spec = importlib.util.spec_from_file_location(name, HERE / file)
     module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module  # a @dataclass looks its own module up while the module runs
     spec.loader.exec_module(module)
     return module
 

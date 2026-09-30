@@ -239,6 +239,35 @@ elemental defense acts only through `cut`, clamped to [0, 1] and capped at Playe
 resolved below: it is `(D + 100) / 1000` for the defense D that SoulsPlanner shows. Not traced: whether
 remote PvP hits take this same path.
 
+**Where the attack and the motion value enter** (read 2026-09-29 through the Ghidra daemon). The
+per-hit function on the defender is `ChrDamageActionCtrl::FUN_1401345c0(this, out, sAr *attack)`.
+It calls `calculateDamage_attack` (`0x1401373b0`, vtable slot 13) and then the defense side, which
+ends in `calculateDamage_defense` (`0x140138d50`, slot 32):
+
+```
+attack[i]  = (live[i] + sAr.ar[i]) * sAr[+0xb4] * MUL[i]                     0x1401373b0
+damage[i]  = max(attack[i] - DEF[i], lower) * clamp(1 - cut[i]) / DIV[i]
+             * DAMAGE_PARAM.damageRate * sAr[+0xb8] * bullet[i]              0x140138d50
+lower      = DAMAGE_PARAM.damageLower when attack[i] > 0, else 0
+bullet[i]  = 1.0, or for a bullet hit the defender calculator's slot +0x1a8, which
+             PlayerGameParamCalculator (0x140380ea0) sets to 1.0 for every type
+```
+
+- `sAr` is the incoming attack (Ghidra struct `sAr`, 0xd0 bytes): `+0x0` damage param id, `+0x45` hand,
+  `+0x48` physical, `+0x4c` magic, `+0x50` lightning, `+0x54` fire, `+0x58` dark, `+0x5c` flat. A PvP
+  hit reaches the victim as packet 28 (`PlayerDamageActionCtrl::ChrDamagePacket_pvpDamage`
+  `0x1401f7c10`, struct `sDamagePacket`), which carries the same five attack ratings.
+- `live` is the attacker's own weapon attack, `PlayerGameParamCalculator` slot 56 (`0x140380dd0`, vtable
+  `0x1410e4ec8` +0x1c0) for hand 1 or 2. It is added only when the attacker is not a bullet: the hit
+  context built by `0x140136ab0` sets `+0x85` when the attacker's class is `BulletObject` (class id via
+  `0x140448050`), and `calculateDamage_attack` skips slot 56 when `+0x85` is set. A spell therefore hits
+  with only the attack ratings its bullet carries.
+- `damageRate` (the motion value) multiplies after the defense is subtracted. So one point of physical
+  defense takes `damageRate / 12` off a hit whatever its attack, and one point of an element's defense
+  `damageRate * attack * sAr[+0xb4] / 1000`; their ratio does not depend on the motion value.
+- Not read here: what `sAr[+0xb4]` and `sAr[+0xb8]` hold, and where a bullet's `sAr` attack ratings are
+  filled on the caster's side.
+
 ## Elemental cut: where the +100 comes from (EXE)
 
 The defender's arrays are filled next to each other at `0x140137b20`..`0x140137b8a`:
@@ -348,7 +377,8 @@ out[5], out[6]   = status bonus (0x14038d240) * c[6], c[7]       0x141ca3259, 0x
 poison, bleeding, physicalByEnchant` for that level. The row is `WeaponReinforceParam.statsAffectId + t[inf][1]`
 (`0x14034ec60`: `movzx edx,[rax+1]; add edx,[rbx+0x4c]`). `t` is the 10x3 byte table at `0x1410c3e10`.
 The Mundane coefficient (`0x1401641c0`) is `byte[obj+0x13a] * 0.01` of the row at `ws+0x50`, or 1.0 when
-`thunk 0x140358de0(CharacterManager, 0x14) < 25`. Which param that row belongs to is not established.
+`thunk 0x140358de0(CharacterManager, 0x14) < 25`. That row is the weapon's `WeaponTypeParam`, and `+0x13a` is its
+`abyssRate` (read 2026-09-29).
 
 **Base, rates and the sum.** Loop `0x141b8ba3d`..`0x141b8ba7f`, over 10 damage types:
 
@@ -362,6 +392,20 @@ rate  = WRP.physicalRate.. (+0xa0), with the infusion's add rate moved in, * 0.0
 bonus = the scaling function above, plus SpEffect weapon-attack adds (0x14038f3b0, kind 5/6 per hand; 0x140391020)
 ```
 
+The move, read 2026-09-30. The builder reaches it as `0x14034c580` -> `0x14034c760` -> `0x14034c5c0`,
+and `0x14034c760` passes `1.0` as the factor `0x14034fe10` multiplies the add rate by. `count` is the
+number of nonzero rates other than the target. The target gains `add` only while it is under the cap
+(1000.0 at `0x1410ad5f0`), and only rates above zero lose `add / count`. `0x14034c580` then floors all
+ten at 0. A second caller passes a computed factor (`0x14034f94e`, not read).
+
+On a catalyst this is the whole infusion. The elemental rows `statsAffectId + 1..4` repeat the
+standard row's `baseValueScale` (1.0) and coefficients. So a Magic Staff of Wisdom casts sorceries at
+magic rate 110 (add 10). A Lightning one goes to magic 90 and lightning 10, and a Lightning Dragon
+Chime to lightning 115 and dark 85. Checked against SoulsPlanner's stored infused catalysts
+(`scripts/ds2-builds-recommend.py` `infused_rates`): 192 of 194 base and scaling terms agree (base
+within its integer truncation, scaling within 0.011). The two misses are the Blue Flame's Lightning
+and Dark scaling, 0.15 here against the site's 0.135.
+
 The infusion indices follow from the add-rate offsets and the target elements: 0 none, 1 Fire, 2 Magic, 3 Lightning,
 4 Dark, 5 Poison, 6 Bleed, 7 Raw, 8 Enchanted, 9 Mundane. For the Dagger (+10, reinforce 1000,
 statsAffectId 1005030), this model gives base 115 / 80.5+80.5 / 132.25 / 57.5 for
@@ -369,10 +413,161 @@ Standard / elemental / Raw / Mundane. Coefficients come out as 0.15/0.45, then 0
 SoulsPlanner has 115 / 80+80 / 132 / 57 and 0.15/0.45, 0.06/0.17/0.3, 0.04/0.11, so it truncates base to an integer and
 rounds coefficients to 2 dp. SoulsPlanner's Enchanted STR 0.06 is not the regulation's 0.053.
 
-Not read: `D` (`0x14038fee0`), the extra rate edits (`0x14038f440`, and `0x1403910f0` when `sil`), and
-`k` = `0x14038f6a0(...) * [ws+0x50 row +0x54|+0x60] * [[rbx]+0x38]+0xd8`. So this loop is proven for the
-scaling structure, not for everything a hit multiplies in. That this path is the one the status menu
-shows is also not established: `0x1403903b0` has exactly one static caller.
+This loop is inside `0x140391fe0`, the attack builder for every player attack (melee, arrows and spells;
+see "Spell and buff attack" below), so it is the path a hit takes, not a menu-only path. `D[i]` is the
+attack's damage row `damage01..03` of type `i` (`0x14038fee0` / `0x14038f2d0`). `k` = (1 - the
+PlayerLackOfStatsParam penalty, `0x14038f6a0` -> calculator slot 13 = 1 - slot 9 `0x1403811f0`) x
+`WeaponTypeParam.rightDamageScale` or `leftDamageScale` x `ChrParam.damageAdjustRate`. Over the 334 named
+weapons in the regulation, the right-hand scale is 1.0 for 315 (0.9 for 18, 0.865 for one) and the left-hand
+one 0.9 for 303; every catalyst's right-hand scale is 1.0, and `ChrParam.damageAdjustRate` is 1.0. Not read:
+the extra rate edit at `0x14038f440` beyond the buff below.
+
+## Spell and buff attack (EXE)
+
+Read 2026-09-29 through the Ghidra daemon and `scripts/ds2-arxan-trace.py`. A spell's attack is built
+once, when the cast is prepared, by the same per-hand builder as a melee attack, and is carried by its
+bullet unchanged to the hit:
+
+- A per-frame update (`0x14038f200` -> `0x140393a30`) calls `0x140393c00` per hand. Its case 12 (spell)
+  calls `0x1403936a0`, which takes the bullet and damage ids from `SpellParam` `+0xc`/`+0x10` (or the
+  left-hand ids) through `0x140390050`, then `0x140391bf0`, which calls the builder `0x140391fe0` for
+  player-type characters (byte 3 of the table at `0x1410bfff0` for the type at `chr+0x54`) with the
+  rate mask on. `0x1403747b0` stores the result in `ChrAttackDamageCtrl +0x760 + slot*0xc4`; the TAE 2300
+  event copies it into the bullet (`0x1403740e0` -> `0x140373880`). Nothing is recomputed at the hit.
+- In the builder, per type `e`: the catalyst's rate `rate[e]` is kept only when `e` is one of the spell
+  row's `damageType01..03` (`0x1403910f0`), so no physical attack leaks into a magic spell. The attack is
+  then the loop above, `((bonus + base) * rate + D) * k`, with the catalyst's base, scaling and rate and the
+  spell row's `damage01..03` as `D`. Every catalyst's `WeaponParam.damageScale` and right-hand
+  `WeaponTypeParam` scale is 1.0 in the regulation, so a catalyst whose requirements are met casts with
+  `k = 1`: **a spell's attack in its element is the catalyst's attack rating in that element plus the
+  row's flat damage**, and its damage is that times `damageRate` after the defense
+  ("Where the attack and the motion value enter" above).
+- The attack block's `+0x6c` (`sAr+0xb4`, which `calculateDamage_attack` multiplies in) is
+  `ChrStatus_Rate[25]` (`flags+0x420`). Its `+0x70` (`sAr+0xb8`, multiplied in after the defense) is
+  `flags+0x48c + 4*spellCategory` times the catalyst's `damageScale`. Their writers were not read; both
+  are 1.0 unless an effect changes them. That the block lands at `sAr+0x48` is INFERRED from every
+  field lining up; the copy itself was not read.
+
+A weapon buff goes through the same builder. Its `100090[2]` (`SpEffectActionImpl_ChangeAtkDef` slot 19,
+`0x14021b230`, mode 1) adds `flat` to the element's stat bonus (`100090[3]` subtracts; `[4]` and `[5]`
+are defense). Its `100080[1]` (handler `0x14022c4c0`) stores `X * m1` in a `SpEffectEach_Property`
+slot, and `0x14014bb90` -> `0x1402259f0` adds it to the weapon's rate in that element as `X / 100`; `m1`
+comes from an active `100080[2]` and is 1 without one. A standard weapon's elemental rates are 0, so a
+buffed weapon gains `(its own elemental base + coefficient * stat bonus + flat) * X / 100` in the buff's
+element -- the weapon's `WeaponReinforceParam maximum<Elem>` and `WeaponStatsAffectParam` coefficient,
+nothing of the catalyst's. For a +10 Dagger (base 115 in every element, coefficient 0.4) that is about 22
+magic from Magic Weapon (X 15, flat 30) and 39 from Crystal Magic Weapon (X 30, flat 15) before the
+INT term. Which hand a buff lands on depends on a key byte at `+0x2e`; where that key comes from is
+INFERRED. Resins were not read.
+
+Buffs in the regulation (`SpEffectSpell.emevd`, event id = spell id):
+
+| Spell | Element | X (100080[1]) | flat (100090[2]) | Seconds |
+|---|---|---|---|---|
+| Magic Weapon | magic | 15 | 30 | 90 |
+| Great Magic Weapon | magic | 20 | 30 | 90 |
+| Crystal Magic Weapon | magic | 30 | 15 | 90 |
+| Sunlight Blade | lightning | 30 | 15 | 90 |
+| Flame Weapon | fire | 20 | 15 | 90 |
+| Dark Weapon | dark | 30 | 15 | 90 |
+| Resonant Weapon | dark | 35 | 0 | 60 |
+
+**Child bullets** (read 2026-09-30). `0x140445ec0` spawns a bullet's children. It reads
+`BulletParam` `childeBulletId`/`childeDamageId` at `+0xd4`/`+0xd8`, `+0xdc`/`+0xe0` and
+`+0xe4`/`+0xe8`, and builds each child's spawn request with a copy of the parent's attack block
+(parent `+0x80..+0x118`, request `+0x30`) and the child's damage id. What happens to that block
+depends on the owner:
+
+- **A player-type character** (owner handle type 2, and byte 3 of the `0x1410bfff0` table set, the
+  same test as the builder above). The child keeps the parent's block whole. Only slot 5 is replaced,
+  by the child row's `damage0n` of type 5.
+- **Anyone else.** The block's first 0x34 bytes are zeroed, and each of the child row's `damage01..03`
+  is added into the slot of its `damageType0n`.
+
+That second path writes the child row's damage into the same slots, by damage type, that the player
+path copies from the parent. So those slots are the per-type attack the hit reads. A player's child
+bullet therefore hits with the attack built at the cast: the catalyst's rating plus the spell row's
+flat damage (`SpellParam.baseSpellDamageId`), in that row's types. The child's own row supplies
+only what is read at the hit, its `damageRate` and `damageLower`.
+
+For 33 of the 55 damaging spells the biggest hit is on a child row. Most child rows repeat the spell
+row's type and flat damage. Four do not:
+
+| Spell | Spell row | Child row the model used before |
+|---|---|---|
+| Wrath of the Gods | lightning 300 | lightning 0 |
+| Combustion | fire 50 | fire 0 |
+| Great Combustion | fire 50 | fire 0 |
+| Outcry | fire 0 + dark 100 | fire 0 |
+
+The three spells whose damage an SpEffect event spawns (`SCRIPTED_SPELL_BULLET`) have no parent
+bullet, and how their attack is built was not read.
+
+**Soul-consuming spells** (read 2026-09-30). `0x140390050`, which hands the builder a spell's bullet
+and damage ids, looks up `SpellParam.soulConsumeParamId` (`+0xfc`) in `SpellSoulConsumeParam`
+(`CharacterManager+0x550`, `0x140359000`). A spell with such a row does not use its own ids. It
+takes one of five `bulletAndDamageId0N` pairs (the `Left` set for the left hand) by
+`r = (consumeSoul - souls held) / consumeSoul`, where souls held is `[chr+0x490]+0xec`:
+
+| `r` | Souls held | Pair |
+|---|---|---|
+| r <= 0 | at least `consumeSoul` | 01 |
+| 0 < r <= 0.2 (`0x1410ad5e0`) | at least 80% | 02 |
+| 0.2 < r <= 0.6 (`0x1410e548c`) | at least 40% | 03 |
+| 0.6 < r < 1 | some | 04 |
+| r >= 1 | none | 05 |
+
+Climax (`consumeSoul` 5000) has pairs 35050000..35050004 at damageRate 6.75 / 6.0 / 4.0 / 2.5 /
+0.15, and its own `baseSpellDamageId` is pair 01. So the regulation's spell row, which the model
+uses, is the damage of a caster holding at least 5,000 souls. Every soul-consuming spell's own row
+is its pair 01. The thresholds are Resonant Soul 100, Great Resonant Soul 500, Resonant Flesh and
+Resonant Weapon 2,000, Lifedrain Patch 3,000, and Dark Dance and Climax 5,000. Climax alone has
+`consumeType` 1, which is read beside `r` but does not pick the pair.
+
+Not read: the inputs of the stat-penalty descriptor (`0x14031fd10`, `0x140333790`, `0x14038fb10`),
+the writers of `flags+0x420`, `+0x428` and `+0x48c..+0x49c`, what `consumeType` and a cast do to the
+souls held, and the Arxan-wrapped lookups `0x1403b56d0` / `0x1403b5500`.
+
+### Which catalyst casts it
+
+Read 2026-09-30. `0x140397a30(spell, weaponType)` is the whole check: it returns false for a null row,
+switches on the spell row's first int (`SpellParam.spellCategory`) and returns whether one byte of the
+WeaponTypeParam row is nonzero. Any category outside 0..4 cannot be cast.
+
+| `spellCategory` | WeaponTypeParam byte | Paramdef name | Catalysts in the regulation with it |
+|---|---|---|---|
+| 0 | `+0x0` | `allowMagic` | 13 staves (Pilgrim's Spontoon among them), Staff of Wisdom, Blue Flame, Sorcerer's Twinblade, Black Witch's Staff, Sanctum Shield |
+| 1 | `+0x1` | `allowMiracle` | 11 chimes (Mace of the Insolent among them; not Caitha's Chime), Black Witch's Staff, Sanctum Shield |
+| 2 | `+0x2` | `allowPyromancy` | Pyromancy Flame, Dark Pyromancy Flame |
+| 3 | `+0x3` | `allowDarkMagic` | the 13 staves, Black Witch's Staff, Sanctum Shield |
+| 4 | `+0x53` | `allowDarkMiracle` | the 11 chimes, Caitha's Chime, Black Witch's Staff, Sanctum Shield |
+
+So hexes come in two lists that only the Black Witch's Staff and Sanctum Shield both cast. Caitha's
+Chime casts only category 4, and the Staff of Wisdom, Blue Flame and Sorcerer's Twinblade cast no hex.
+Of SpellParam's rows, 25 are category 3 and 22 category 4.
+
+The following reads show which rows the two arguments are:
+
+- The weapon row is the hand's `[equip + slot*0x48 + 0x218]`. `0x140349fc5` stores there what
+  `0x140359210` returns, and `0x140359210` looks the id up in `CharacterManager+0x450`, the
+  WeaponTypeParam container. The per-hand getter `0x140349360` -> `0x14014cbeb` reads it back.
+- The spell row is the attuned slot `0x140348eb0` returns. Its `+0x8` and `+0xa` are checked against
+  stats 6 and 7 as INT and FTH (`0x1403978c0`), and its `+0x4` is read as `isDual2HandedSpellAllowed`
+  (`0x140395930`), which is SpellParam's layout.
+
+Two paths reach the check:
+
+- **Casting.** `0x140395930` handles the per-hand attack kind 12, the same spell case as the builder
+  above. It calls `0x140396ba0` -> `0x1403963b0`, which checks casts left (`0x1403487c0`), INT/FTH
+  (`0x1403978c0`), then the hand's catalyst (`0x140396510` -> `0x140397a30`, calling `0x140395f40`
+  when it fails), then `0x140397a00`.
+- **The HUD's spell icon.** `FeScenePanelLEquip` `0x14050c940` -> `0x1401ffeb0` runs the same checks
+  for one hand, then the other.
+
+`0x140347e00` returns a two-bit mask of the hands whose weapon type has any of the five bytes set.
+`scripts/ds2-builds-recommend.py` `SPELL_SCHOOLS` is this table.
+Not read: `0x140397a00` (`0x1401a46a0`), and the two bytes from `0x14019e110` that `0x1403978c0`
+subtracts from the INT and FTH requirements.
 
 **Delta vs `scripts/ds2-builds-recommend.py`** (`attack_rating`, `hit_damage`, `damage`, `build_defense`):
 - AR: the same `(base + sum bonus*coef) * rate` structure, but SoulsPlanner folds `rate` into its
