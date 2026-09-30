@@ -186,3 +186,61 @@ test_grouped_build_piped_into_a_matcher_is_still_denied if {
 	denied("{ cargo build; cargo test -p x; } 2>&1 | grep error")
 	denied("(cd crates; cargo check) | grep error")
 }
+
+# --- cargo subcommands that compile nothing ------------------------------------------------------
+#
+# The 2026-09-30 false positive: counting whether ds2-loader depends on ds2-build-recommender-core.
+# The report elided the scratch path and the `ls` operands, so those two are stand-ins.
+test_counting_a_dependency_with_cargo_tree_is_allowed if {
+	not denied("cd /home/banon/projects/ds2-mods-rs && tail -3 /tmp/scratchpad/build.log; cargo tree -p ds2-loader --target x86_64-pc-windows-msvc -e normal 2>/dev/null | grep -c \"ds2-build-recommender-core\"; ls -la target")
+	not denied("cargo tree -p ds2-loader -e normal | grep -c ds2-build-recommender-core")
+}
+
+test_cargo_metadata_piped_into_grep_is_allowed if {
+	not denied("cargo metadata --format-version 1 --no-deps | grep ds2-loader")
+	not denied("cargo metadata --format-version 1 2>&1 | tee meta.json | grep -c '\"name\"'")
+}
+
+test_other_subcommands_that_compile_nothing_are_allowed if {
+	not denied("cargo pkgid -p ds2-loader | grep -o 'ds2-loader@.*'")
+	not denied("cargo locate-project --workspace | grep -c Cargo.toml")
+	not denied("cargo search frida-gum | grep -i gum")
+	not denied("cargo --version | grep -q 1.98")
+	not denied("cargo -V | grep nightly")
+	not denied("cargo --list | grep xwin")
+}
+
+test_toolchain_timeout_and_path_spellings_are_allowed if {
+	not denied("cargo +nightly tree -e normal | grep -c syn")
+	not denied("timeout 28 cargo tree -i windows-sys | grep -c ds2")
+	not denied("~/.cargo/bin/cargo tree -p ds2-loader |& grep -c ds2")
+}
+
+# ... and a cargo that compiles is still a build, however the pipeline is plumbed.
+test_cargo_that_compiles_is_still_denied if {
+	denied("cargo xwin build --release --target x86_64-pc-windows-msvc -p ds2-loader 2>&1 | grep error")
+	denied("cargo +nightly build -p ds2-loader 2>&1 | tee build.log | grep -c error")
+	denied("cargo clippy -p ds2-loader 2>&1 | grep -c warning")
+	denied("cargo run -p ds2-loader |& grep panicked")
+}
+
+# The carve-out excuses one command, never a stage that also runs a build. A stage holding `&` or a
+# substitution is not read at all, so the build is refused even where the word check cannot name
+# it: `\cargo` runs cargo, and a build that opens a backtick substitution is glued to the backtick.
+# `-C tree` is a global option's value; `build` is the subcommand.
+test_a_query_cannot_excuse_a_build_beside_it if {
+	denied("cargo tree & cargo build 2>&1 | grep error")
+	denied("cargo tree & \\cargo build 2>&1 | grep error")
+	denied("cargo tree -p `cargo build 2>&1 | grep -o ds2-loader`")
+	denied("cargo tree; cargo build 2>&1 | grep error")
+	denied("cargo -C tree build | grep error")
+}
+
+# Two LINES as the engine delivers them when the hook shim has not restored the break (it leaves a
+# command with an unresolvable heredoc alone): every unquoted newline becomes a space, so the build
+# on the second line arrives as more words of the first line's query.
+test_a_build_on_the_next_line_is_still_denied if {
+	denied("cargo tree -p ds2-loader > tree.txt cargo xwin build -p ds2-loader 2>&1 | grep error")
+	denied("cargo tree -p ds2-loader > tree.txt timeout 28 make -j8 2>&1 | grep Error")
+	denied("cargo metadata --format-version 1 > meta.json bash -c 'cargo build' 2>&1 | grep error")
+}

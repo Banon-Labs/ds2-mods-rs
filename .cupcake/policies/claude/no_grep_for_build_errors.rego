@@ -27,8 +27,10 @@
 #     pytest, tsc, or one of this repo's own build scripts) piped into grep/rg/egrep/fgrep/ag/ack.
 #     WHAT IS NOT: piping into head/tail/sed/awk/wc/jq/sort/uniq/cut/tr/less/python, which shape or
 #     excerpt output rather than adjudicating it; grep ANYWHERE else, including over a build LOG FILE
-#     already on disk, which is reading evidence after the exit code has already been believed; and
-#     any pipeline whose matcher is not deciding pass/fail because the exit code was captured first.
+#     already on disk, which is reading evidence after the exit code has already been believed; any
+#     pipeline whose matcher is not deciding pass/fail because the exit code was captured first; and
+#     a cargo subcommand that compiles nothing (`tree`, `metadata`, `pkgid`, `locate-project`,
+#     `search`, `--version`/`-V`, `--list`), which has no build verdict to guess at.
 #
 #     THE HAPPY PATH is simply to run the command and let a non-zero exit speak, then read the tail
 #     for the message -- `cmd; echo "exit=$?"`, or `cmd || tail -40 build.log`. For a background
@@ -160,6 +162,69 @@ pipelines(text) := {statement |
 build_stage(stage) if {
 	regex.match(build_verb_pattern, trim_space(stage))
 	not regex.match(lookup_stage_pattern, trim_space(stage))
+	not cargo_query_stage(stage)
+}
+
+# A cargo subcommand that compiles nothing has no build verdict for a grep to stand in for.
+#
+# MEASURED 2026-09-30: counting whether one crate depends on another was denied --
+#
+#     cargo tree -p ds2-loader --target x86_64-pc-windows-msvc -e normal 2>/dev/null \
+#       | grep -c "ds2-build-recommender-core"
+#
+# -- because build_verbs matches bare `cargo`, so every subcommand was a build. `tree`,
+# `metadata`, `pkgid`, `locate-project` and `search` read the manifest, the lock file or the
+# registry and compile nothing. `-V`/`--version` and `--list` print and exit whatever follows them
+# (cargo 1.98: `cargo --version build` prints the version and exits 0).
+#
+# Read as the TOKENS of one stage rather than folded into build_verbs. RE2 has no negative
+# lookahead, so "cargo, but not cargo tree" has no readable regex spelling, and a new regex is what
+# this rulebook's WASM runtime can least afford (teardown_must_relaunch.rego records the
+# compiled-regex cache that crashed every policy at once). Whatever could put a second program in
+# the stage keeps it a build stage, which can only deny more:
+#   * `(`, `)` or a backtick: a subshell or a substitution;
+#   * an `&` that is not part of `>&1`/`>&2`: `cargo tree & cargo build`;
+#   * any word after the subcommand that build_verb_pattern, asked about that word alone, reads as
+#     a build program. A second LINE can arrive as more words of the first: scripts/cupcake-hook.sh
+#     turns each unquoted newline into `; `, but leaves a command whose heredoc it cannot resolve
+#     untouched, and the engine then turns every newline into a space. `cargo tree > t.txt` with
+#     `cargo build 2>&1 | grep error` on the next line arrives as one stage, and the second
+#     `cargo` keeps it denied.
+# Only `cargo` or a path to it is read as the program, behind an optional `timeout <duration>`,
+# with an optional rustup `+toolchain` before the subcommand. Any other wrapper, or a global flag
+# before the subcommand (`cargo -C tree build`), keeps the stage a build.
+cargo_query_subcommands := {"tree", "metadata", "pkgid", "locate-project", "search", "-V", "--version", "--list"}
+
+cargo_query_stage(stage) if {
+	not contains(stage, "(")
+	not contains(stage, ")")
+	not contains(stage, "`")
+	not contains(replace(replace(stage, ">&1", ""), ">&2", ""), "&")
+	words := after_timeout([word |
+		some word in split(replace(trim_space(stage), "\t", " "), " ")
+		word != ""
+	])
+	cargo_program(words[0])
+	args := after_toolchain(array.slice(words, 1, count(words)))
+	args[0] in cargo_query_subcommands
+	not names_a_build(array.slice(args, 1, count(args)))
+}
+
+cargo_program("cargo")
+
+cargo_program(word) if endswith(word, "/cargo")
+
+after_timeout(words) := array.slice(words, 2, count(words)) if {
+	words[0] == "timeout"
+} else := words
+
+after_toolchain(args) := array.slice(args, 1, count(args)) if {
+	startswith(args[0], "+")
+} else := args
+
+names_a_build(words) if {
+	some word in words
+	regex.match(build_verb_pattern, replace(replace(word, "'", ""), `"`, ""))
 }
 
 greps_a_build if {
