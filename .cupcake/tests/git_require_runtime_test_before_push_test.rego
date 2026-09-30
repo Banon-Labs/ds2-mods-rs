@@ -126,6 +126,16 @@ test_allow_push_with_no_game_code_and_no_runtime_evidence_at_all if {
 	allowed("git push origin cupcake-guard-layer-port", no_game_code)
 }
 
+# A push in another repository: the resolver answered FOREIGN, and the signal says so with no
+# runtime fields at all. Refused as unproven until 2026-09-30, when the push was a guard fix to the
+# global cupcake config (bd ds2-mods-rs-4dt0).
+in_another_repository := "RUNTIME|game_code=0|foreign=1"
+
+test_allow_push_in_another_repository if {
+	allowed("cd /home/banon/.config/cupcake && git push -u origin pr-body-comma", in_another_repository)
+	allowed("git -C /home/banon/.config/cupcake push -u origin pr-body-comma", in_another_repository)
+}
+
 # --- Fail closed on anything it cannot read ----------------------------------
 
 test_deny_push_when_signal_key_is_absent if {

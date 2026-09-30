@@ -56,17 +56,25 @@ and the caller branches on it:
                     common answer, and the pre-change behaviour.
     `REPO <path>`   the push runs in <path>, a different working tree of this same repository.
                     Every git read that decides the verdict belongs there.
-    `UNKNOWN`       a redirect is present and could not be resolved to a working tree of this
-                    repository. In er-mods-rs this never denies. HERE IT DOES: this repo has
-                    no pre-push hook re-measuring the push, and DS2-MODS-REQUIRE-RUNTIME-BEFORE-PUSH
-                    fails closed, so the signal prints nothing and the policy refuses. Run the
-                    `cd` as its own command and push from there.
+    `FOREIGN <path>` the push runs in <path>, a working tree of a different repository. None of
+                    this repository's commits can be in that push, so it carries none of its game
+                    code, and DS2-MODS-REQUIRE-RUNTIME-BEFORE-PUSH has nothing to judge.
+    `UNKNOWN`       a redirect is present and could not be resolved to a working tree. In
+                    er-mods-rs this never denies. HERE IT DOES: this repo has no pre-push hook
+                    re-measuring the push, and DS2-MODS-REQUIRE-RUNTIME-BEFORE-PUSH fails closed,
+                    so the signal prints nothing and the policy refuses. Run the `cd` as its own
+                    command and push from there.
 
 `UNKNOWN` covers a deliberate list of shapes rather than a guess: a command whose quoting will
 not lex, a `cd` inside a subshell or a heredoc (where a linear walk cannot say whether the push
-inherited it), a target that is not a git working tree, a target belonging to some other
-repository, and two pushes aimed at two different checkouts -- one verdict cannot describe two
-repositories, and the honest answer to "which repository" is then "more than one".
+inherited it), a target that is not a git working tree, and two pushes aimed at two different
+checkouts -- one verdict cannot describe two repositories, and the honest answer to "which
+repository" is then "more than one".
+
+`FOREIGN` was `UNKNOWN` until 2026-09-30, when it refused a push of guard fixes to the global
+cupcake config (Banon-Labs/cupcake-config) as "game code that has not been run". A resolved
+directory in another repository is not uncertain: git itself says it shares no objects with
+this one (bd ds2-mods-rs-4dt0).
 """
 from __future__ import annotations
 
@@ -344,14 +352,16 @@ def resolve(command: str, cwd: str) -> str:
     if not toplevel:
         return "UNKNOWN"
 
-    # The same repository, or a stranger. Every consumer of this answer goes on to read commits
-    # and refs through the caller's own object store, which is shared between the working trees
-    # of one repository and holds nothing at all of another's, so a foreign checkout would be
-    # measured against objects it does not contain.
+    # The same repository, or a stranger. Every consumer of `REPO` goes on to read commits and
+    # refs through the caller's own object store, which is shared between the working trees of
+    # one repository and holds nothing at all of another's, so a foreign checkout is never
+    # measured here. It is named instead: `FOREIGN` tells the caller the push is outside it.
     here = git_read(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")
     there = git_read(target, "rev-parse", "--path-format=absolute", "--git-common-dir")
-    if not here or not there or os.path.realpath(here) != os.path.realpath(there):
+    if not here or not there:
         return "UNKNOWN"
+    if os.path.realpath(here) != os.path.realpath(there):
+        return f"FOREIGN {toplevel}"
 
     own = git_read(cwd, "rev-parse", "--show-toplevel")
     if own and os.path.realpath(own) == os.path.realpath(toplevel):
@@ -363,7 +373,7 @@ def selftest() -> int:
     """Cases that need no repository, plus two that build throwaway ones.
 
     The parsing half is what a regression would land in, so it is asserted against strings; the
-    two git-shaped answers (`REPO` for a sibling working tree, `UNKNOWN` for a stranger) need
+    two git-shaped answers (`REPO` for a sibling working tree, `FOREIGN` for a stranger) need
     real repositories and get them.
     """
     failures = 0
@@ -506,9 +516,14 @@ def selftest() -> int:
             f"REPO {linked}",
         )
         check(
-            "an unrelated repository is not this guard's to judge",
+            "an unrelated repository is named, not judged",
             resolve(f"cd {stranger} && git push", str(main)),
-            "UNKNOWN",
+            f"FOREIGN {stranger}",
+        )
+        check(
+            "`git -C <stranger> push` names the stranger too",
+            resolve(f"git -C {stranger} push -u origin side", str(main)),
+            f"FOREIGN {stranger}",
         )
         check(
             "a cd back to the caller's own tree is SELF",

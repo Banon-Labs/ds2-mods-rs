@@ -280,6 +280,15 @@ def main() -> int:
             print(f"  {'ok  ' if ok else 'FAIL'} fails closed (silent): {command.replace(str(w4.root), '<tmp>')}"
                   + ("" if ok else f": {out!r}"))
 
+        # 6a. A push in another repository (the global cupcake config, 2026-09-30) is named, not
+        #     measured: none of this repository's commits can be in it. `foreign` tells it apart
+        #     from a fallthrough that measured the main checkout.
+        stranger = w4.root / "stranger"
+        subprocess.run(["git", "init", "-q", "-b", "main", str(stranger)], check=True)
+        for command in (f"cd {stranger} && git push -u origin side", f"git -C {stranger} push -u origin side"):
+            check(f"another repository is out of jurisdiction: {command.replace(str(stranger), '<stranger>')}",
+                  w4.signal(command), game_code="0", foreign="1")
+
         # 6b. A log naming its build commit is judged by commits, not times.
         w5 = World(Path(tmp) / "build-sha")
         git(w5.repo, "checkout", "-q", "-b", "sha", env=w5.env)
