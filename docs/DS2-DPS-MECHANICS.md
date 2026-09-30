@@ -322,6 +322,36 @@ Not read: the collision step that moves the block from the active hitbox list in
 the writers of the `flags` rates, `flags+0x309`, `flags+0x630` and `flags+0x79c`, the non-player builder
 `0x140391e60`, and what `thunk_FUN_141b8b72f(CharacterManager, 8)` returns.
 
+### Status build-up per hit (EXE)
+
+Read 2026-09-30. The attack builder computes a status attack exactly as it does a damage type's
+("Base, rates and the sum" below): `(bonus + base) * rate + D`, with base `WeaponReinforceParam`
+`maximum<Status>` x the infusion row's `baseValueScale` and bonus the status bonus x the row's
+`poison`/`bleeding` coefficient. It then scales the block's status entries (+0x18..+0x30: poison, bleed,
+durability, curse, burn, toxic, petrify) by `100.0 / X` (`0x140299115`..`0x141b3831f`, the 100.0 at
+`0x1410acb18`). X comes from `0x14038b9a0` -> `0x14038d290`, which fills every stat with 99 and returns
+the max-HP formula, `hpMax[99]` + `additionalHp[99]` over eight stats: 1945 + 8 x 70 = 2505 (REGULATION).
+
+On the victim, `calculateDamage_attack` multiplies each status by `sAr+0xb4` and by
+`DamageAdjustParam.pcAttributeAdjust<Status>` (6.0, which `0x140137f90` divides back out). Status defense
+is 0 (slot 58 writes only physical). What lands is
+
+```
+build-up = status x (1 - cut) x guard factor (1 unguarded) x ChrMultiplayParam factor (1 with no row)
+cut      = armour <status> resistance (ArmorReinforceParam, x 0.01 per piece)
+           + poisonResistance[trunc((3*ADP + VIT)/4)] or bleedingResistance[trunc((3*ADP + FTH)/4)] x 0.01
+           + SpEffect, clamped to [0, 1]
+```
+
+`applyStatusDamage` (`0x140145c60`) adds it to the gauge at `+0x1c4 + 12*id` and procs at 100.0: SpEffect
+900100 (poison) or 900200 (bleed), and the gauge drops by 100 (`0x140146430`). So a Bandit Axe (Poison)
++10 builds `(700 + 1.05 x aux) x 100 / 2505` = 27.94 + 0.0419 x aux points per hit before the cut.
+SoulsPlanner's `140 + 0.525 x aux` is not this: its base is the builder's / 5 and its coefficient / 2,
+so it weighs the status stats 2.5 times too heavily against the base.
+
+Not read: the writers of the gauge's bounds (`+0x1c8`/`+0x1cc`), the source of `live` for statuses,
+the row behind the guard factor, and whether a player victim has a `ChrMultiplayParam` row.
+
 ## Elemental cut: where the +100 comes from (EXE)
 
 The defender's arrays are filled next to each other at `0x140137b20`..`0x140137b8a`:
@@ -436,8 +466,9 @@ site's Mundane modifier agrees with `abyssRate x 0.01 x` the Mundane physical ra
 weapons. Many other terms do not agree: 509 physical bases and 433 STR coefficients, among them weapons
 with an innate element or special scaling (Heide Lance Dark: site lightning 60 and dark 90, this model 90
 and 60). Every poison and bleed term disagrees: the site's base is this model's divided by 5 and its
-coefficient this model's divided by 2 (Bandit Axe Poison: 140 and 0.525, against 700 and 1.05). Which
-side is right is not settled; for the status terms it needs the build-up code, which was not read.
+coefficient this model's divided by 2 (Bandit Axe Poison: 140 and 0.525, against 700 and 1.05). For the
+status terms the builder's are the ones a hit carries ("Status build-up per hit" above). For the rest,
+which side is right is not settled.
 
 **Scaling function `0x1403903b0`** (Arxan entry, body from `0x141cf33c8`). Arguments are `(this, ws, out[10])`.
 `ws+0x30` is the reinforce level, `ws+0x31` the infusion index, `ws+0x40` the WeaponStatsAffectParam row.
@@ -711,7 +742,9 @@ subtracts from the INT and FTH requirements.
   the game's formula on many weapons with an innate element or special scaling, and on every status term
   ("Base and coefficients against SoulsPlanner", above).
 - Bleed and poison scaling: the site's table and its `3*DEX + FTH` / `3*DEX + ADP` index are the game's
-  ("Status bonus per stat", above).
+  ("Status bonus per stat", above). The base and coefficient they combine with are the regulation's,
+  in gauge points per hit (`regulation_status`, "Status build-up per hit"); the victim's resistance is
+  not modelled.
 - Elemental cut `min(0.99, (D+100)/1000)` matches. Not modelled: the lack-of-stats factor on armor, and the
   cap gate.
 - Physical stat defense: the planner's table is off by one at 180 of 393 sums. The game uses

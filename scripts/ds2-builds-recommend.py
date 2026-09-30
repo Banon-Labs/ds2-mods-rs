@@ -1117,7 +1117,7 @@ def apply_regulation(data: Data) -> str:
             + regulation_spells(data, d, names) + "; " + regulation_spell_hits(data, d, names) + "; "
             + regulation_hit_flat(data, d) + "; "
             + regulation_buffs(data, emevd, members, d, names) + "; " + regulation_weapon_elements(data, d, names)
-            + "; " + regulation_damage_scale(data, d, names))
+            + "; " + regulation_damage_scale(data, d, names) + "; " + regulation_status(data, d, names))
 
 
 def regulation_spells(data: Data, d: dict, names: dict) -> str:
@@ -1282,6 +1282,51 @@ def regulation_damage_scale(data: Data, d: dict, names: dict) -> str:
         if wp and wp["damageScale"] != 1.0:
             data.damage_scale[key] = wp["damageScale"]
     return f"damageScale off 1.0 on {len(data.damage_scale)} weapons"
+
+
+#: Status -> (RATE_FIELDS slot, WeaponReinforceParam maximum<...> stem, WeaponStatsAffectParam stem).
+STATUS_TERMS = {"poison": (5, "Poison", "poison"), "bleed": (6, "Bleeding", "bleeding")}
+
+
+def regulation_status(data: Data, d: dict, names: dict) -> str:
+    """Every weapon infusion's poison and bleed terms from the regulation, in place of the site's,
+    in gauge points per hit before the victim's resistance (a gauge procs at 100). EXE
+    (docs/DS2-DPS-MECHANICS.md "Status build-up per hit"): the attack builder computes a status
+    attack as it does a damage type's -- WeaponReinforceParam maximum<Status> x the infusion's
+    WeaponStatsAffectParam baseValueScale, plus the status bonus x the row's <status><maxLevel>, all
+    x the moved rate / 100 (infused_rates) -- and multiplies the block's status entries by 100 / X
+    before the hit leaves (0x140299115), where X is the max-HP formula at every stat 99
+    (0x14038b9a0 -> 0x14038d290): hpMax[99] + 8 x additionalHp[99], 2505. So `atk` holds the base
+    term and `atkScale` the coefficient of the status bonus, both times 100 / X. The site's terms
+    are not this (its base is the builder's / 5 and its coefficient / 2) and are dropped where the
+    regulation has no row, as numbers in other units. Joined by name as regulation_catalysts joins."""
+    rows = d["PhysicalStatsPerLevelStatValuesParam"]
+    top = str(max(map(int, rows)))
+    unit = 100 / (rows[top]["hpMax"] + 8 * rows[top]["additionalHp"])
+    by_name = {}
+    for wid, w in d["WeaponParam"].items():
+        by_name.setdefault(norm(names.get(wid, "")), w)
+    done, dropped = 0, 0
+    for key, w in data.weapons.items():
+        wp = by_name.get(norm(w.get("name", key)))
+        r = wp and d["WeaponReinforceParam"].get(str(wp["weaponReinforceId"]))
+        for inf, row in (w.get("infusions") or {}).items():
+            atk, sc = row.setdefault("atk", {}), row.setdefault("atkScale", {})
+            a = r and d["WeaponStatsAffectParam"].get(str(r["statsAffectId"] + INFUSION_MOVE[inf][2]))
+            if not a:
+                had = [atk.pop(s, None) for s in STATUS_TERMS] + [sc.pop(s, None) for s in STATUS_TERMS]
+                dropped += any(had)
+                continue
+            rates = infused_rates(r, inf)
+            for s, (slot, stem, sa) in STATUS_TERMS.items():
+                base = r[f"maximum{stem}"] * a["baseValueScale"] * rates[slot] / 100 * unit
+                coef = a[f"{sa}{r['maxLevel']}"] * rates[slot] / 100 * unit
+                atk.pop(s, None), sc.pop(s, None)
+                if base or coef:
+                    atk[s], sc[s] = base, coef
+            done += 1
+    return (f"poison and bleed from the regulation for {done} weapon infusions, x 100/"
+            f"{round(100 / unit)} ({dropped} with no row lost the site's)")
 
 
 def cast_power(data: Data, catalyst: str, element: str, stats: dict, inf: str = "No_Infusion") -> float:
@@ -1735,12 +1780,13 @@ def weapons_for(data: Data, stats: dict, sl: int, corpus: list[Build], top: int 
                 window: float = 0.0, objective: str = "damage", weapon: str | None = None,
                 every_infusion: bool = False, use_floors: bool = True):
     """Weapons (per infusion) ranked by expected damage against the average defender at this SL,
-    or with `objective` "bleed"/"poison" by status build-up: build-up per hit (objective_value,
-    SITE formula) times the hits of the weapon's best R1/R2 chain attack (status_hits; within
-    `window` seconds when given). That every hit and every re-hit tick applies the weapon's full
-    build-up is INFERRED: DamageParam has no status field (REGULATION) and the exe's status
-    code was not traced (docs/DS2-DPS-MECHANICS.md section 4). The defender's resistance and the
-    proc's damage are not modelled.
+    or with `objective` "bleed"/"poison" by status build-up: build-up per hit (objective_value, in
+    gauge points before the victim's resistance; regulation_status) times the hits of the weapon's
+    best R1/R2 chain attack (status_hits; within `window` seconds when given). Each hit carries the
+    build-up its attack block holds (EXE, docs/DS2-DPS-MECHANICS.md "Status build-up per hit"); that
+    a re-hit tick carries the whole of it again is INFERRED. The victim's resistance multiplies
+    every weapon's build-up of one status alike, so it is left out; the proc's damage is not
+    modelled.
     Usable only: requirements met (STR halved when that is what makes it usable, flagged 2H).
     Per weapon: the best infusion, plus the 2nd and 3rd only while within `within` of the best.
     `every_infusion`: every infusion of every weapon instead, and no `top` cut (infusion_gaps).
@@ -1887,10 +1933,10 @@ def objective_value(data: Data, weapon: str, inf: str, st: dict, objective: str,
     row = data.weapons[weapon]["infusions"].get(inf) or {}
     atk, sc = row.get("atk") or {}, row.get("atkScale") or {}
     if objective in ("bleed", "poison"):
-        # SoulsPlanner getBleedATK / getPoisonATK. Its auxATKBonus table at this index is the game's
-        # bleeding/poisonAdditionalEffect at row trunc(i / 4) (EXE 0x14038dcaf / 0x14038dcef); its base
-        # and coefficient are the site's and disagree with the game's formula (docs/DS2-DPS-MECHANICS.md
-        # "Base and coefficients against SoulsPlanner").
+        # Build-up per hit in gauge points before the victim's resistance: the base and coefficient
+        # regulation_status puts in place of the site's, times the status bonus. The site's auxATKBonus
+        # at this index is the game's bleeding/poisonAdditionalEffect at row trunc(i / 4) (EXE
+        # 0x14038dcaf / 0x14038dcef).
         i = 3 * st["dexterity"] + (st["faith"] if objective == "bleed" else st["adaptability"])
         return (atk.get(objective) or 0) + sc.get(objective, 0) * _tab(data, "auxATKBonus", i)
     return (sum(damage(k, v, dfn[k]) for k, v in attack_rating(data, weapon, inf, st).items())
@@ -3074,7 +3120,7 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 
 BACKEND_DATA_NAME = "ds2-build-recommender.dat"
 BACKEND_DATA = Path.home() / ".cache/ds2-builds" / BACKEND_DATA_NAME
-BACKEND_FORMAT = "ds2-build-recommender-data 7"
+BACKEND_FORMAT = "ds2-build-recommender-data 8"
 #: How far the exported R1/R2 chains run, in seconds: the panel clamps its window to 10.0
 #: (crates/ds2-build-recommender-ui/src/panel.rs), and status_hits runs to max(3, window).
 STATUS_HORIZON = 10.0
@@ -4031,6 +4077,8 @@ def main() -> int:
         print(f"stats {' '.join(f'{s[:3].upper()} {v}' for s, v in stats.items())}  ->  SL {sl}")
         print(f"average defender at this SL ({n} builds): "
               + " ".join(f"{k} {v:.0f}" for k, v in dfn.items()))
+        if a.objective != "damage":
+            print(f"{a.objective}: gauge points before the defender's resistance; a gauge procs at 100")
         what = {"damage": "dmg"}.get(a.objective, a.objective)
         head = "total AR" if a.raw_ar and a.objective == "damage" else f"{what}/{a.window:g}s" if a.window else (
             "damage" if a.objective == "damage" else f"{what}/atk")
