@@ -392,6 +392,20 @@ rate  = WRP.physicalRate.. (+0xa0), with the infusion's add rate moved in, * 0.0
 bonus = the scaling function above, plus SpEffect weapon-attack adds (0x14038f3b0, kind 5/6 per hand; 0x140391020)
 ```
 
+The move, read 2026-09-30. The builder reaches it as `0x14034c580` -> `0x14034c760` -> `0x14034c5c0`,
+and `0x14034c760` passes `1.0` as the factor `0x14034fe10` multiplies the add rate by. `count` is the
+number of nonzero rates other than the target. The target gains `add` only while it is under the cap
+(1000.0 at `0x1410ad5f0`), and only rates above zero lose `add / count`. `0x14034c580` then floors all
+ten at 0. A second caller passes a computed factor (`0x14034f94e`, not read).
+
+On a catalyst this is the whole infusion. The elemental rows `statsAffectId + 1..4` repeat the
+standard row's `baseValueScale` (1.0) and coefficients. So a Magic Staff of Wisdom casts sorceries at
+magic rate 110 (add 10). A Lightning one goes to magic 90 and lightning 10, and a Lightning Dragon
+Chime to lightning 115 and dark 85. Checked against SoulsPlanner's stored infused catalysts
+(`scripts/ds2-builds-recommend.py` `infused_rates`): 192 of 194 base and scaling terms agree (base
+within its integer truncation, scaling within 0.011). The two misses are the Blue Flame's Lightning
+and Dark scaling, 0.15 here against the site's 0.135.
+
 The infusion indices follow from the add-rate offsets and the target elements: 0 none, 1 Fire, 2 Magic, 3 Lightning,
 4 Dark, 5 Poison, 6 Bleed, 7 Raw, 8 Enchanted, 9 Mundane. For the Dagger (+10, reinforce 1000,
 statsAffectId 1005030), this model gives base 115 / 80.5+80.5 / 132.25 / 57.5 for

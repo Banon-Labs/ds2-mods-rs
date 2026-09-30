@@ -575,7 +575,11 @@ def threat_opponents(data: Data, corpus: list[Build]) -> list[tuple[dict, list[d
     measured, docs/DS2-BUILD-EMBEDDINGS.md). The mean rather than the most likely infusion: most of
     the model's misses are an elemental infusion guessed as No_Infusion, and its top guess alone
     would carry that bias into every MugenMonkey weapon. A buff the build can cast is on its melee
-    weapon (the strongest one, when it can cast several)."""
+    weapon (the strongest one, when it can cast several).
+
+    A catalyst casts at its infusion's rates (regulation_catalysts). The model covers no catalyst,
+    so a MugenMonkey catalyst's cast power is the mean over the infusions SoulsPlanner builds
+    record for that catalyst, weighted by how often (standard when none carries it)."""
     raw, seen = [], set()
     for _, b in raw_builds(data, True):
         sig = (frozenset(tokens(b)), tuple(b.stats[s] for s in STATS))
@@ -587,6 +591,12 @@ def threat_opponents(data: Data, corpus: list[Build]) -> list[tuple[dict, list[d
     dist = {}
     for c in infusion_cases(data, corpus, recorded=False, builds=mm):
         dist[(id(mm[c["build"]]), c["weapon"])] = {f: p for p, f in model.predict(c)}
+    cat_seen: dict[str, Counter] = {}
+    for b in raw:
+        for w, inf in dict.fromkeys(b.weapons()):
+            if w in data.catalysts and inf != "?" and inf in data.catalysts[w]["infused"]:
+                cat_seen.setdefault(w, Counter())[inf] += 1
+    cat_dist = {w: {f: n / sum(c.values()) for f, n in c.items()} for w, c in cat_seen.items()}
     out = []
     for b in raw:
         try:
@@ -608,13 +618,15 @@ def threat_opponents(data: Data, corpus: list[Build]) -> list[tuple[dict, list[d
             main = w
             break
         power = {}  # (spell category, element) -> the most cast power among wieldable carried catalysts
-        for c in {w for w, _ in b.weapons() if w in data.catalysts}:
+        for c, inf in dict.fromkeys((w, inf) for w, inf in b.weapons() if w in data.catalysts):
             cat = data.catalysts[c]
             if any(eff[s] < v for s, v in cat["require"].items()):
                 continue
+            ps = cat_dist.get(c, {"No_Infusion": 1.0}) if inf == "?" else {inf: 1.0}
             for k in cat["categories"]:
                 for e in ELEMENTS:
-                    power[(k, e)] = max(power.get((k, e), 0.0), cast_power(data, c, e, eff))
+                    p = sum(q * cast_power(data, c, e, eff, f) for f, q in ps.items())
+                    power[(k, e)] = max(power.get((k, e), 0.0), p)
         castable = [s for s in b.spells if s in data.spell_category and spell_ok(data, s, eff)
                     and any(k == data.spell_category[s] for k, _ in power)]
         spells = []
@@ -1143,20 +1155,55 @@ SPELL_SCHOOLS = {0: ("sorcery", "allowMagic", "magic"), 1: ("miracle", "allowMir
 #: PhysicalStatsPerLevelStatValuesParam column).
 CAST_ELEMENTS = {"magic": ("Magic", "magic", "magicAttack"), "fire": ("Fire", "fire", "flameAttack"),
                  "lightning": ("Thunder", "thunder", "lightningAttack"), "dark": ("Dark", "dark", "darkAttack")}
+#: WeaponReinforceParam's rates, in the slot order the executable moves an infusion's add rate in.
+RATE_FIELDS = ["physicalRate", "magicRate", "thunderRate", "fireRate", "darkRate", "poisonRate", "bleedingRate",
+               "petrifactionRate", "curseRate"]
+#: Infusion -> (the WeaponReinforceParam add rate it moves, the RATE_FIELDS slot it moves it into,
+#: its WeaponStatsAffectParam row's offset from statsAffectId). EXE: the 10x3 byte table at
+#: 0x1410c3e10 holds slot and offset per infusion index (INFUSIONS order), and 0x14034fe10 picks the
+#: add rate (docs/DS2-DPS-MECHANICS.md "Base, rates and the sum").
+INFUSION_MOVE = {"No_Infusion": (None, 0, 0), "Fire": ("addFireRate", 3, 3), "Magic": ("addMagicRate", 1, 1),
+                 "Lightning": ("addThunderRate", 2, 2), "Dark": ("addDarkRate", 4, 4),
+                 "Poison": ("addPoisonRate", 5, 5), "Bleed": ("addBleedRate", 6, 6),
+                 "Raw": ("addPhysicalRateByCrude", 0, 7), "Enchanted": ("addPhysicalRateByEnchanted", 0, 8),
+                 "Mundane": ("addPhysicalRateByAbyss", 0, 9)}
+
+
+def infused_rates(r: dict, inf: str) -> list[float]:
+    """A WeaponReinforceParam row's rates in percent, per RATE_FIELDS slot, after infusion `inf`
+    moves its add rate. EXE, the attack builder's path (0x14034c580 -> 0x14034c760 -> 0x14034c5c0):
+    the add rate times 1.0; the target slot gains it, up to 1000 (0x1410ad5f0); every other slot
+    with a nonzero rate loses add / (how many such slots there are) (0x14034fed0); then every rate
+    is floored at 0. A Magic Staff of Wisdom goes from magic 100 to 110, a Lightning one to magic
+    90 and lightning 10."""
+    rates = [r[f] for f in RATE_FIELDS]
+    field, target, _ = INFUSION_MOVE[inf]
+    add = r[field] if field else 0.0
+    if add <= 0:
+        return rates
+    others = sum(1 for i, v in enumerate(rates) if i != target and v != 0)
+    out = list(rates)
+    if rates[target] < 1000:
+        out[target] = min(rates[target] + add, 1000.0)
+    for i, v in enumerate(rates):
+        if i != target and v > 0:
+            out[i] = v - add / others
+    return [max(0.0, v) for v in out]
 
 
 def regulation_catalysts(data: Data, d: dict, names: dict) -> str:
     """Every SoulsPlanner weapon the game lets cast a spell category, from the regulation: which
     categories (WeaponTypeParam allow* of its weaponTypeId), its requirements (WeaponParam
-    required*), and per element its full-upgrade cast power terms -- base = WeaponReinforceParam
-    maximum<Elem> x <elem>Rate / 100, scale = WeaponStatsAffectParam <elem><maxLevel> x <elem>Rate
-    / 100. The per-stat bonus a scale multiplies is PhysicalStatsPerLevelStatValuesParam's
-    magicAttack/flameAttack/lightningAttack/darkAttack column (data.cast_bonus); cast_power says
-    which stat indexes it. Measured 2026-09-28 against SoulsPlanner: all 32 catalysts' requirements
-    equal its require; 30 have its uninfused atk/atkScale exactly, Olenford's Staff scales 0.678
-    where the site rounds to 0.675, and Sanctum Shield has no elemental row on the site at all. The
-    magic, lightning and dark columns equal its tables at every stat, and fire equals its INT+FTH
-    table at (INT+FTH)//2."""
+    required*), and per infusion and element its full-upgrade cast power terms -- base =
+    WeaponReinforceParam maximum<Elem> x the infusion's WeaponStatsAffectParam baseValueScale x
+    rate / 100, scale = that row's <elem><maxLevel> x rate / 100, rate as infused_rates moves it.
+    "power" is the standard catalyst's, "infused" every infusion's. The per-stat bonus a scale
+    multiplies is PhysicalStatsPerLevelStatValuesParam's magicAttack/flameAttack/lightningAttack/
+    darkAttack column (data.cast_bonus); cast_power says which stat indexes it. Measured 2026-09-28
+    against SoulsPlanner: all 32 catalysts' requirements equal its require; 30 have its uninfused
+    atk/atkScale exactly, Olenford's Staff scales 0.678 where the site rounds to 0.675, and Sanctum
+    Shield has no elemental row on the site at all. The magic, lightning and dark columns equal its
+    tables at every stat, and fire equals its INT+FTH table at (INT+FTH)//2."""
     rows = d["PhysicalStatsPerLevelStatValuesParam"]
     top = max(map(int, rows))
     data.cast_bonus = {e: [0] + [rows[str(i)][col] for i in range(1, top + 1)]
@@ -1173,12 +1220,20 @@ def regulation_catalysts(data: Data, d: dict, names: dict) -> str:
         a = r and d["WeaponStatsAffectParam"].get(str(r["statsAffectId"]))
         if not a:
             continue
-        power = {}
-        for e, (stem, sa, _) in CAST_ELEMENTS.items():
-            rate = r[f"{sa}Rate"] / 100
-            power[e] = (r[f"maximum{stem}"] * rate, a[f"{sa}{r['maxLevel']}"] * rate)
+        infused = {}
+        for inf, (_, _, offset) in INFUSION_MOVE.items():
+            row = d["WeaponStatsAffectParam"].get(str(r["statsAffectId"] + offset))
+            if not row:
+                continue
+            rates = infused_rates(r, inf)
+            infused[inf] = {}
+            for e, (stem, sa, _) in CAST_ELEMENTS.items():
+                rate = rates[RATE_FIELDS.index(f"{sa}Rate")] / 100
+                infused[inf][e] = (r[f"maximum{stem}"] * row["baseValueScale"] * rate,
+                                   row[f"{sa}{r['maxLevel']}"] * rate)
         req = {s: wp[f"required{s.capitalize()}"] for s in REQ_STATS if wp[f"required{s.capitalize()}"]}
-        data.catalysts[key] = {"categories": cats, "require": req, "power": power}
+        data.catalysts[key] = {"categories": cats, "require": req, "power": infused["No_Infusion"],
+                               "infused": infused}
     return f"{len(data.catalysts)} catalysts from WeaponParam/WeaponTypeParam/WeaponReinforceParam"
 
 
@@ -1203,14 +1258,15 @@ def regulation_weapon_elements(data: Data, d: dict, names: dict) -> str:
     return f"elemental base and scaling for {len(data.weapon_elements)} weapons"
 
 
-def cast_power(data: Data, catalyst: str, element: str, stats: dict) -> float:
-    """A catalyst's full-upgrade cast power in `element` at `stats`: base + scale x the element's
-    per-stat bonus, the bonus indexed as SoulsPlanner's getMagicATK/... index it (SITE: magic by
-    INT, lightning by FTH, dark by min(INT, FTH), fire by (INT+FTH)//2 -- the halving is where its
-    INT+FTH fire table meets the game's 99-row column). The attack-rating shape attack_rating uses,
-    and the executable's: a spell cast with this catalyst attacks with this plus its damage row's
-    flat damage (spell_attack)."""
-    base, scale = data.catalysts[catalyst]["power"][element]
+def cast_power(data: Data, catalyst: str, element: str, stats: dict, inf: str = "No_Infusion") -> float:
+    """A catalyst's full-upgrade cast power in `element` at `stats`, infused with `inf` (standard
+    when the regulation has no row for it): base + scale x the element's per-stat bonus, the bonus
+    indexed as SoulsPlanner's getMagicATK/... index it (SITE: magic by INT, lightning by FTH, dark
+    by min(INT, FTH), fire by (INT+FTH)//2 -- the halving is where its INT+FTH fire table meets the
+    game's 99-row column). The attack-rating shape attack_rating uses, and the executable's: a spell
+    cast with this catalyst attacks with this plus its damage row's flat damage (spell_attack)."""
+    cat = data.catalysts[catalyst]
+    base, scale = cat.get("infused", {}).get(inf, cat["power"])[element]
     return base + scale * element_bonus(data, element, stats)
 
 
@@ -3493,6 +3549,23 @@ def selftest() -> int:
          ["Life_Ring", "Flynns_Ring"]),
         ("no agape, no change", suggest_rings(RINGS, Counter({"Flynns_Ring": 2, "Ring_of_Blades_2": 1})),
          ["Flynns_Ring", "Ring_of_Blades_2"]),
+    ]
+    # an infusion's rate move (EXE 0x14034fed0), on regulation rows: the Dagger gives half its
+    # physical rate to the element; a catalyst whose target is already nonzero only gains
+    wrp = dict.fromkeys(RATE_FIELDS, 0.0) | dict.fromkeys([f for f, _, _ in INFUSION_MOVE.values() if f], 0.0)
+    dagger = wrp | {"physicalRate": 100.0, "addMagicRate": 50.0, "addPhysicalRateByCrude": 0.0}
+    wisdom = wrp | {"magicRate": 100.0, "addMagicRate": 10.0, "addThunderRate": 10.0}
+    chime = wrp | {"thunderRate": 100.0, "darkRate": 100.0, "addThunderRate": 15.0, "addMagicRate": 15.0}
+    cases += [
+        ("magic dagger: physical 50, magic 50", infused_rates(dagger, "Magic")[:2], [50.0, 50.0]),
+        ("raw dagger with no crude rate: unchanged", infused_rates(dagger, "Raw")[:2], [100.0, 0.0]),
+        ("magic staff of wisdom: magic 110", infused_rates(wisdom, "Magic")[:3], [0.0, 110.0, 0.0]),
+        ("lightning staff of wisdom: magic 90, lightning 10", infused_rates(wisdom, "Lightning")[:3],
+         [0.0, 90.0, 10.0]),
+        ("lightning dragon chime: lightning 115, dark 85", infused_rates(chime, "Lightning")[:5],
+         [0.0, 0.0, 115.0, 0.0, 85.0]),
+        ("magic dragon chime: 15 split over lightning and dark", infused_rates(chime, "Magic")[:5],
+         [0.0, 15.0, 92.5, 0.0, 92.5]),
     ]
     cases += flex_selftest_cases()
     if ATTACKS.exists():  # the real extracted rows agree with the copies above

@@ -160,7 +160,10 @@ build hits with. Each one lands:
   flat) x X / 100` in the buff's element.
 - **spell hits**: each attack spell it can cast (requirements met, a carried catalyst of that school
   it can wield), with equal odds. A spell hit is its biggest damage row, with attack = the best
-  carried catalyst's attack rating in that element + the row's flat damage.
+  carried catalyst's attack rating in that element + the row's flat damage. The catalyst's rating
+  is at its infusion's rates (a Lightning Dragon Chime casts miracles at 115%). A MugenMonkey
+  catalyst has no recorded infusion, and the infusion model covers no catalyst, so its rating is the
+  mean over the infusions SoulsPlanner builds record for that catalyst, weighted by count.
 
 How often a build that can do both casts rather than swings is not in any build: `SPELL_HIT_SHARE`
 (0.5) is a stated assumption, and `threat_weights` gives the mix at any share. The sums behind the
