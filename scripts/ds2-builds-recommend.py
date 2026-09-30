@@ -1132,9 +1132,10 @@ def regulation_spells(data: Data, d: dict, names: dict) -> str:
 #: SpellParam.spellCategory -> (label, the WeaponTypeParam flag that lets a catalyst cast it, the
 #: element its cast power is read in). The categories against MugenMonkey's spell types, measured
 #: 2026-09-28 over every joined spell: 0 is its 31 sorceries, 1 its 27 miracles, 2 its 24
-#: pyromancies, 3 and 4 its 23 hexes, split 12/11. The flags are the paramdef's five allow* bytes
-#: in the categories' order; that 3 is the staff hexes and 4 the chime hexes is read off which
-#: catalysts carry which flag (staves allowDarkMagic, chimes allowDarkMiracle), not off the binary.
+#: pyromancies, 3 and 4 its 23 hexes, split 12/11. EXE, read 2026-09-30: the cast check 0x140397a30
+#: switches on spellCategory and returns the hand's WeaponTypeParam byte +0x0, +0x1, +0x2, +0x3 or
+#: +0x53 for 0..4 (any other category: no cast), which are these five flags; the cast request and
+#: the HUD's spell icon both go through it (docs/DS2-DPS-MECHANICS.md "Which catalyst casts it").
 SPELL_SCHOOLS = {0: ("sorcery", "allowMagic", "magic"), 1: ("miracle", "allowMiracle", "lightning"),
                  2: ("pyromancy", "allowPyromancy", "fire"), 3: ("hex", "allowDarkMagic", "dark"),
                  4: ("hex", "allowDarkMiracle", "dark")}

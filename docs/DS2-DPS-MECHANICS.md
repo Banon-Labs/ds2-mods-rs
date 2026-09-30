@@ -463,6 +463,47 @@ stat-penalty descriptor (`0x14031fd10`, `0x140333790`, `0x14038fb10`), the write
 `+0x428` and `+0x48c..+0x49c`, the soul-consume path, and the Arxan-wrapped lookups `0x1403b56d0` /
 `0x1403b5500`.
 
+### Which catalyst casts it
+
+Read 2026-09-30. `0x140397a30(spell, weaponType)` is the whole check: it returns false for a null row,
+switches on the spell row's first int (`SpellParam.spellCategory`) and returns whether one byte of the
+WeaponTypeParam row is nonzero. Any category outside 0..4 cannot be cast.
+
+| `spellCategory` | WeaponTypeParam byte | Paramdef name | Catalysts in the regulation with it |
+|---|---|---|---|
+| 0 | `+0x0` | `allowMagic` | 13 staves (Pilgrim's Spontoon among them), Staff of Wisdom, Blue Flame, Sorcerer's Twinblade, Black Witch's Staff, Sanctum Shield |
+| 1 | `+0x1` | `allowMiracle` | 11 chimes (Mace of the Insolent among them; not Caitha's Chime), Black Witch's Staff, Sanctum Shield |
+| 2 | `+0x2` | `allowPyromancy` | Pyromancy Flame, Dark Pyromancy Flame |
+| 3 | `+0x3` | `allowDarkMagic` | the 13 staves, Black Witch's Staff, Sanctum Shield |
+| 4 | `+0x53` | `allowDarkMiracle` | the 11 chimes, Caitha's Chime, Black Witch's Staff, Sanctum Shield |
+
+So hexes come in two lists that only the Black Witch's Staff and Sanctum Shield both cast. Caitha's
+Chime casts only category 4, and the Staff of Wisdom, Blue Flame and Sorcerer's Twinblade cast no hex.
+Of SpellParam's rows, 25 are category 3 and 22 category 4.
+
+The following reads show which rows the two arguments are:
+
+- The weapon row is the hand's `[equip + slot*0x48 + 0x218]`. `0x140349fc5` stores there what
+  `0x140359210` returns, and `0x140359210` looks the id up in `CharacterManager+0x450`, the
+  WeaponTypeParam container. The per-hand getter `0x140349360` -> `0x14014cbeb` reads it back.
+- The spell row is the attuned slot `0x140348eb0` returns. Its `+0x8` and `+0xa` are checked against
+  stats 6 and 7 as INT and FTH (`0x1403978c0`), and its `+0x4` is read as `isDual2HandedSpellAllowed`
+  (`0x140395930`), which is SpellParam's layout.
+
+Two paths reach the check:
+
+- **Casting.** `0x140395930` handles the per-hand attack kind 12, the same spell case as the builder
+  above. It calls `0x140396ba0` -> `0x1403963b0`, which checks casts left (`0x1403487c0`), INT/FTH
+  (`0x1403978c0`), then the hand's catalyst (`0x140396510` -> `0x140397a30`, calling `0x140395f40`
+  when it fails), then `0x140397a00`.
+- **The HUD's spell icon.** `FeScenePanelLEquip` `0x14050c940` -> `0x1401ffeb0` runs the same checks
+  for one hand, then the other.
+
+`0x140347e00` returns a two-bit mask of the hands whose weapon type has any of the five bytes set.
+`scripts/ds2-builds-recommend.py` `SPELL_SCHOOLS` is this table.
+Not read: `0x140397a00` (`0x1401a46a0`), and the two bytes from `0x14019e110` that `0x1403978c0`
+subtracts from the INT and FTH requirements.
+
 **Delta vs `scripts/ds2-builds-recommend.py`** (`attack_rating`, `hit_damage`, `damage`, `build_defense`):
 - AR: the same `(base + sum bonus*coef) * rate` structure, but SoulsPlanner folds `rate` into its
   `atk`/`atkScale` with rounding. The error is a fraction of an AR point per stat, larger for Enchanted STR.
