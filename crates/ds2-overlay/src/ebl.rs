@@ -318,6 +318,16 @@ impl Archive {
     }
 }
 
+/// The archive's hash of a path: `h = h * 37 + byte` over the lowercased path, wrapping at 32 bits
+/// (`path_hash` in `scripts/ds2-ebl.py`).
+#[must_use]
+pub fn path_hash(path: &str) -> u32 {
+    path.bytes().fold(0u32, |hash, byte| {
+        hash.wrapping_mul(37)
+            .wrapping_add(u32::from(byte.to_ascii_lowercase()))
+    })
+}
+
 /// The raw bytes of the `GameDataEbl` entry whose path hash is `hash`, from the game directory.
 ///
 /// # Errors
@@ -338,6 +348,15 @@ mod tests {
             ".local/share/Steam/steamapps/common/Dark Souls II Scholar of the First Sin/Game",
         );
         dir.join("GameDataEbl.bhd").is_file().then_some(dir)
+    }
+
+    /// The hash `scripts/ds2-ebl.py extract /menu/tex/icon/ic_0001220000.tpf` printed, whatever the
+    /// case of the path.
+    #[test]
+    fn a_path_hashes_as_the_script_hashes_it() {
+        assert_eq!(path_hash("/menu/tex/icon/ic_0001220000.tpf"), 0x0cc1_5707);
+        assert_eq!(path_hash("/menu/tex/Icon/IC_0001220000.tpf"), 0x0cc1_5707);
+        assert_eq!(path_hash(""), 0);
     }
 
     /// The Montgomery path against plain arithmetic, on a modulus small enough to check by hand.

@@ -50,8 +50,6 @@ pub enum Control {
     Poison,
     /// Optimize for weapon: rank every infusion of the chosen weapon.
     BestInfusion,
-    /// Run.
-    Run,
     /// The results table, to scroll it.
     Results,
     /// Generate Build.
@@ -107,8 +105,15 @@ pub struct Shape {
     pub fixes: usize,
 }
 
+/// Where the mode's options are in [`layout`]'s rows: under the header, the stats, the mode tabs and
+/// the weapon's parameters.
+const OPTIONS_ROW: usize = 4;
+
 /// The controls, row by row, as the panel draws them: the header's two buttons, the soul level and
 /// the nine stats in one row, the mode tabs, the weapon's parameters, then the mode's options.
+///
+/// Run is not among them. It is a press, X on the pad and R on the keyboard, from wherever the
+/// cursor is, so it has no place of its own to walk to.
 pub fn layout(shape: Shape) -> Vec<Vec<Control>> {
     let mut rows = vec![
         vec![Control::UseCharacter, Control::Close],
@@ -123,7 +128,7 @@ pub fn layout(shape: Shape) -> Vec<Vec<Control>> {
             Control::Objective,
         ],
     ];
-    let mut options = match shape.mode {
+    let options = match shape.mode {
         Mode::WeaponsForStats => vec![
             Control::OneHand,
             Control::Class,
@@ -135,7 +140,6 @@ pub fn layout(shape: Shape) -> Vec<Vec<Control>> {
         Mode::MinimumForWeapon => vec![Control::TwoHand],
         Mode::SimilarBuilds => vec![Control::SimilarK, Control::Bleed, Control::Poison],
     };
-    options.push(Control::Run);
     rows.push(options);
     if shape.results {
         rows.push(vec![Control::Results]);
@@ -167,15 +171,21 @@ pub fn locate(rows: &[Vec<Control>], control: Control) -> Option<(usize, usize)>
     })
 }
 
-/// `cursor` if it is still on screen, or the control nearest to where it was: the options row's
-/// Run for a mode option or the results table that went away, Generate Build for a footer button.
+/// `cursor` if it is still on screen, or the control nearest to where it was.
+///
+/// That is the right-hand end of the options row for a mode option or the results table that went
+/// away, and Generate Build for a footer button.
 pub fn resolve(rows: &[Vec<Control>], cursor: Control) -> Control {
     if locate(rows, cursor).is_some() {
         return cursor;
     }
     match cursor {
         Control::ShowToggle | Control::Apply | Control::Fix(_) => Control::Generate,
-        _ => Control::Run,
+        _ => rows
+            .get(OPTIONS_ROW)
+            .and_then(|options| options.last())
+            .copied()
+            .unwrap_or(Control::Generate),
     }
 }
 
@@ -446,13 +456,19 @@ mod tests {
     }
 
     #[test]
-    fn the_parameters_lead_to_that_modes_options_and_run() {
+    fn the_parameters_lead_to_that_modes_options() {
         let rows = layout(shape(Mode::SimilarBuilds));
+        assert_eq!(rows[OPTIONS_ROW][0], Control::SimilarK);
         let options = walk(&rows, Control::Weapon, &[Dir::Down]);
         assert_eq!(options, Control::SimilarK);
         assert_eq!(
+            walk(&rows, options, &[Dir::Right, Dir::Right]),
+            Control::Poison
+        );
+        assert_eq!(
             walk(&rows, options, &[Dir::Right, Dir::Right, Dir::Right]),
-            Control::Run
+            Control::SimilarK,
+            "the row wraps: Run is a press, not a place"
         );
         // Measured on c7afba5: in Optimize for weapon, Down went straight to Run, and the Best
         // infusion button beside it answered to the mouse only.
@@ -461,18 +477,23 @@ mod tests {
             step(&rows, Control::Weapon, Dir::Down),
             Control::BestInfusion
         );
-        assert_eq!(step(&rows, Control::BestInfusion, Dir::Right), Control::Run);
+        assert_eq!(
+            step(&rows, Control::BestInfusion, Dir::Right),
+            Control::BestInfusion
+        );
     }
 
     #[test]
-    fn a_control_the_new_layout_lacks_falls_back_to_run_or_generate() {
+    fn a_control_the_new_layout_lacks_falls_back_to_the_options_or_generate() {
         let rows = layout(shape(Mode::OptimizeForWeapon));
-        assert_eq!(resolve(&rows, Control::Window), Control::Run);
-        assert_eq!(resolve(&rows, Control::Results), Control::Run);
+        assert_eq!(resolve(&rows, Control::Window), Control::BestInfusion);
+        assert_eq!(resolve(&rows, Control::Results), Control::BestInfusion);
         assert_eq!(resolve(&rows, Control::ShowToggle), Control::Generate);
-        // And a step from a vanished control starts from its fallback: Run, the right-hand end of
-        // Optimize for weapon's options row, so Down lands at the right-hand end of the footer.
-        assert_eq!(step(&rows, Control::Window, Dir::Down), Control::Apply);
+        // And a step from a vanished control starts from its fallback: the right-hand end of
+        // Weapons for stats' options row, so Down lands at the right-hand end of the footer.
+        let rows = layout(shape(Mode::WeaponsForStats));
+        assert_eq!(resolve(&rows, Control::SimilarK), Control::RawAr);
+        assert_eq!(step(&rows, Control::SimilarK, Dir::Down), Control::Apply);
     }
 
     #[test]
@@ -483,7 +504,7 @@ mod tests {
             generated: true,
             fixes: 0,
         });
-        assert_eq!(step(&rows, Control::Run, Dir::Down), Control::Results);
+        assert_eq!(step(&rows, Control::RawAr, Dir::Down), Control::Results);
         assert_eq!(step(&rows, Control::Results, Dir::Down), Control::Generate);
         assert_eq!(
             walk(
@@ -501,8 +522,8 @@ mod tests {
         assert_eq!(step(&rows, Control::Apply, Dir::Down), Control::Apply);
     }
 
-    /// A refusal's fix buttons are a row of their own just above the footer, so Down from Run
-    /// reaches them and Down again reaches Generate Build.
+    /// A refusal's fix buttons are a row of their own just above the footer, so Down from the
+    /// options reaches them and Down again reaches Generate Build.
     #[test]
     fn the_fix_buttons_sit_above_the_footer() {
         let rows = layout(Shape {
@@ -566,7 +587,7 @@ mod tests {
         assert!(!nudge(&mut state, Control::SimilarK, Nudge::Down));
         assert!(nudge(&mut state, Control::SimilarK, Nudge::UpBig));
         assert_eq!(state.similar_k, SIMILAR_K_MIN + 10);
-        assert!(!nudge(&mut state, Control::Run, Nudge::Up));
+        assert!(!nudge(&mut state, Control::Generate, Nudge::Up));
     }
 
     #[test]

@@ -29,6 +29,28 @@ component anywhere in the derivation. `FUN_14002fa50` (`FeIconTexManager`, named
 string `"..\\..\\Source\\Frontend\\FeIconTexManager.cpp"` / `"pIcon == NULL!"`) then turns that
 name into a `FeIconProxy`, and `FUN_1400bc850` binds it onto the cell's icon element.
 
+### Where the file is, and whose id names it (2026-09-30, read from the install)
+
+`icon:` is not spelled out anywhere in the executable, so the file was found by hash:
+`scripts/ds2-item-icons.py locate` tries spellings of the path against every `*Ebl` archive, and
+the only one that exists is `/menu/tex/icon/ic_<10 digits>.tpf` in `GameDataEbl`. Each is a bare
+`TPF`, not wrapped in `DCX`, holding one DXT5 texture; the Longsword's is 128x256 and is named
+`HQ_WP_IC_0001220000` inside.
+
+The id in the name is **`ItemParam` field 0**, which `scripts/ds2-regulation.py items` calls the
+row's own id because it usually is. Where it is not, it names another item, and that item has the
+file: the Old Mirrah Greatsword (1911000) has no `ic_0001911000.tpf`, its field 0 is 1910000, and
+`ic_0001910000.tpf` is the Mirrah Greatsword's icon; most keys point at 64000000 the same way.
+Four rows carry 0, which names nothing, and the one of them with an icon has it under its own id.
+`scripts/ds2-item-icons.py table` checks every pair against the archive -- the named id has a
+file, the row's own id has none -- and writes them to `crates/ds2-overlay/data/item-icons.tsv`,
+which the weapon picker's icons are looked up through. Only a static read of both files: nothing
+here was measured in the running game.
+
+`FUN_14003c8c0`, the step between the inventory entry and the path, is not a table lookup: it
+swaps one id for another when a float argument is under a threshold, which reads like a broken
+weapon's icon standing in for the whole one. Not traced further.
+
 ## The infusion mark is nine sibling elements, and the bind switches one on
 
 `FUN_1400bc850` at `0x1400bc850` is the item-cell bind -- one call per visible row per refresh,

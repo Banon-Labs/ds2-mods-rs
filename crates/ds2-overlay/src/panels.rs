@@ -16,8 +16,11 @@
 
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
 
-use hudhook::imgui::{Context, FontConfig, FontGlyphRanges, FontId, FontSource, Io, Ui};
+use hudhook::imgui::{
+    Context, DrawListMut, FontConfig, FontGlyphRanges, FontId, FontSource, Io, TextureId, Ui,
+};
 use hudhook::windows::Win32::Graphics::Direct3D11::{D3D11_TEXTURE2D_DESC, ID3D11Texture2D};
 use hudhook::windows::Win32::Graphics::Dxgi::IDXGISwapChain;
 use hudhook::windows::core::Interface;
@@ -239,6 +242,10 @@ const fn atlas_slot(atlas: Atlas) -> usize {
     }
 }
 
+/// `GameDataEbl` with its header decrypted, kept from the atlases' load for the item icons panels
+/// ask for later. Unset when the atlases did not load, and then every icon is missing.
+static ARCHIVE: OnceLock<crate::ebl::Archive> = OnceLock::new();
+
 /// Decode the game's menu atlases out of `GameDataEbl` and hand them to the renderer as textures,
 /// so a panel can draw the game's own frames and marks with [`sprite`].
 fn install_game_atlases(render: &mut dyn RenderContext) -> Result<(), String> {
@@ -254,7 +261,195 @@ fn install_game_atlases(render: &mut dyn RenderContext) -> Result<(), String> {
         ATLAS_SIZES[slot].store((page.width << 16) | page.height, Ordering::Release);
         ATLAS_TEXTURES[slot].store(id.id() + 1, Ordering::Release);
     }
+    let _ = ARCHIVE.set(archive);
     Ok(())
+}
+
+/// Item icons on the GPU at once. A weapon picker shows three or four rows; the other slots hold
+/// the rows scrolled past most recently, so scrolling back does not read the archive again.
+const ICON_SLOTS: usize = 24;
+
+/// Every icon slot is a texture this many pixels square, so one slot takes any icon: a weapon's
+/// is 128x256. An icon sits in the slot's top-left corner and is drawn from there.
+const ICON_CANVAS: usize = 256;
+
+/// Icons read from the archive in one frame at most, so a fast scroll spreads its reads out.
+const ICON_LOADS_PER_FRAME: usize = 2;
+
+/// One icon on the GPU.
+struct IconSlot {
+    item: u32,
+    texture: TextureId,
+    /// The icon's own size inside the slot's [`ICON_CANVAS`] square.
+    size: [usize; 2],
+    /// The frame it was last drawn on: the slot drawn longest ago is the one reused.
+    drawn: u64,
+}
+
+/// The icon cache: what is on the GPU, what panels asked for, and what the game has no icon for.
+struct Icons {
+    slots: Vec<IconSlot>,
+    /// Asked for on the last frame and not on the GPU, first asked first.
+    wanted: Vec<u32>,
+    /// Items with no icon in the archive, or one that did not load: never read again.
+    missing: Vec<u32>,
+    /// Counts the frames [`load_icons`] ran on.
+    frame: u64,
+}
+
+static ICONS: Mutex<Icons> = Mutex::new(Icons {
+    slots: Vec::new(),
+    wanted: Vec::new(),
+    missing: Vec::new(),
+    frame: 0,
+});
+
+/// What [`item_icon`] did with an item's icon this frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IconDraw {
+    /// It is drawn.
+    Drawn,
+    /// It is being read from the archive and draws on a later frame.
+    Loading,
+    /// The game has no icon for the item, or the archive did not open: none will come.
+    Missing,
+}
+
+/// Draw item `id`'s inventory icon inside `min`-`max`, centred, as large as its shape allows.
+///
+/// Only `crop` of it is drawn (`x0, y0, x1, y1` in the texture's pixels, such as
+/// [`crate::item_icon::WEAPON_ART`]) when the texture holds all of it, and the whole texture
+/// otherwise. A box the crop's own size draws it one texture pixel to one screen pixel.
+///
+/// An icon not yet on the GPU is read from the archive before the next frame, and until then this
+/// answers [`IconDraw::Loading`] and draws nothing.
+pub fn item_icon(
+    list: &DrawListMut<'_>,
+    id: u32,
+    min: [f32; 2],
+    max: [f32; 2],
+    crop: Option<[f32; 4]>,
+) -> IconDraw {
+    let Ok(mut icons) = ICONS.lock() else {
+        return IconDraw::Missing;
+    };
+    if ARCHIVE.get().is_none() || icons.missing.contains(&id) {
+        return IconDraw::Missing;
+    }
+    let frame = icons.frame;
+    if let Some(slot) = icons.slots.iter_mut().find(|slot| slot.item == id) {
+        slot.drawn = frame;
+        let (w, h) = (slot.size[0] as f32, slot.size[1] as f32);
+        let [x0, y0, x1, y1] = crop
+            .filter(|crop| crop[0] >= 0.0 && crop[1] >= 0.0 && crop[2] <= w && crop[3] <= h)
+            .unwrap_or([0.0, 0.0, w, h]);
+        let (src_w, src_h) = (x1 - x0, y1 - y0);
+        let (box_w, box_h) = (max[0] - min[0], max[1] - min[1]);
+        let scale = (box_w / src_w).min(box_h / src_h);
+        let (draw_w, draw_h) = (src_w * scale, src_h * scale);
+        let at = [
+            min[0] + (box_w - draw_w) * 0.5,
+            min[1] + (box_h - draw_h) * 0.5,
+        ];
+        let canvas = ICON_CANVAS as f32;
+        list.add_image(slot.texture, at, [at[0] + draw_w, at[1] + draw_h])
+            .uv_min([x0 / canvas, y0 / canvas])
+            .uv_max([x1 / canvas, y1 / canvas])
+            .build();
+        return IconDraw::Drawn;
+    }
+    if !icons.wanted.contains(&id) {
+        icons.wanted.push(id);
+    }
+    IconDraw::Loading
+}
+
+/// Put up to [`ICON_LOADS_PER_FRAME`] of the icons asked for on the last frame on the GPU: a new
+/// texture while a slot is free, then over the slot drawn longest ago. What was asked for and not
+/// read now is forgotten; a panel still showing it asks again.
+fn load_icons(render: &mut dyn RenderContext) {
+    let Some(archive) = ARCHIVE.get() else {
+        return;
+    };
+    let Ok(mut icons) = ICONS.lock() else {
+        return;
+    };
+    icons.frame += 1;
+    let frame = icons.frame;
+    let take = icons.wanted.len().min(ICON_LOADS_PER_FRAME);
+    let batch: Vec<u32> = icons.wanted.drain(..take).collect();
+    icons.wanted.clear();
+    for id in batch {
+        let page = match crate::item_icon::load(archive, id) {
+            Ok(page) if page.width <= ICON_CANVAS && page.height <= ICON_CANVAS => page,
+            Ok(page) => {
+                log(format_args!(
+                    "panels: item {id}'s icon is {}x{}, larger than a {ICON_CANVAS}px slot -- its \
+                     row draws without one",
+                    page.width, page.height
+                ));
+                icons.missing.push(id);
+                continue;
+            }
+            Err(why) => {
+                log(format_args!(
+                    "panels: item {id} has no icon ({why}) -- its row draws without one"
+                ));
+                icons.missing.push(id);
+                continue;
+            }
+        };
+        let mut canvas = vec![0u8; ICON_CANVAS * ICON_CANVAS * 4];
+        for (row, pixels) in page.rgba.chunks_exact(page.width * 4).enumerate() {
+            let at = row * ICON_CANVAS * 4;
+            canvas[at..at + pixels.len()].copy_from_slice(pixels);
+        }
+        let side = ICON_CANVAS as u32;
+        let size = [page.width, page.height];
+        let placed = if icons.slots.len() < ICON_SLOTS {
+            render.load_texture(&canvas, side, side).map(|texture| {
+                icons.slots.push(IconSlot {
+                    item: id,
+                    texture,
+                    size,
+                    drawn: frame,
+                });
+                icons.slots.len() - 1
+            })
+        } else {
+            // Drawn two or more frames ago, so not on screen; with every slot on screen, which
+            // takes more rows than any panel shows, the icon waits for a later frame.
+            let Some((index, slot)) = icons
+                .slots
+                .iter_mut()
+                .enumerate()
+                .filter(|(_, slot)| slot.drawn + 1 < frame)
+                .min_by_key(|(_, slot)| slot.drawn)
+            else {
+                continue;
+            };
+            render
+                .replace_texture(slot.texture, &canvas, side, side)
+                .map(|()| {
+                    slot.item = id;
+                    slot.size = size;
+                    slot.drawn = frame;
+                    index
+                })
+        };
+        match placed {
+            Ok(slot) => log(format_args!(
+                "panels: item {id}'s icon ({}x{}) is on the GPU in slot {slot} of {ICON_SLOTS}",
+                size[0], size[1]
+            )),
+            Err(why) => {
+                log(format_args!(
+                    "panels: item {id}'s icon did not upload ({why:?}) -- its row draws without one"
+                ));
+                icons.missing.push(id);
+            }
+        }
+    }
 }
 
 /// Draw `src` (`x1, y1, x2, y2` in the atlas's pixels) of `atlas` into `min`-`max`, multiplied by
@@ -544,7 +739,8 @@ impl ImguiRenderLoop for Panels {
         ctx.set_ini_filename(None);
     }
 
-    /// Hand imgui the overlay's cursor while a panel built from imgui widgets asks for it.
+    /// Put the item icons panels asked for on the GPU (see [`item_icon`]), and hand imgui the
+    /// overlay's cursor while a panel built from imgui widgets asks for it.
     ///
     /// hudhook queues the cursor Wine reports, which is short by screen over window on a stretched
     /// fullscreen window (see [`mouse`]); a panel drawing imgui widgets rather than hit-testing
@@ -554,8 +750,9 @@ impl ImguiRenderLoop for Panels {
     fn before_render<'a>(
         &'a mut self,
         ctx: &mut Context,
-        _render_context: &'a mut dyn RenderContext,
+        render_context: &'a mut dyn RenderContext,
     ) {
+        load_icons(render_context);
         let on = IMGUI_MOUSE.load(Ordering::Acquire);
         let io = ctx.io_mut();
         io.config_input_trickle_event_queue = !on;
