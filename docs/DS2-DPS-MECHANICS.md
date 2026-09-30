@@ -472,10 +472,40 @@ Buffs in the regulation (`SpEffectSpell.emevd`, event id = spell id):
 | Dark Weapon | dark | 30 | 15 | 90 |
 | Resonant Weapon | dark | 35 | 0 | 60 |
 
-Not read: how child bullets (Lightning Spear's `32140010`) get their attack block, the inputs of the
-stat-penalty descriptor (`0x14031fd10`, `0x140333790`, `0x14038fb10`), the writers of `flags+0x420`,
-`+0x428` and `+0x48c..+0x49c`, the soul-consume path, and the Arxan-wrapped lookups `0x1403b56d0` /
-`0x1403b5500`.
+**Child bullets** (read 2026-09-30). `0x140445ec0` spawns a bullet's children. It reads
+`BulletParam` `childeBulletId`/`childeDamageId` at `+0xd4`/`+0xd8`, `+0xdc`/`+0xe0` and
+`+0xe4`/`+0xe8`, and builds each child's spawn request with a copy of the parent's attack block
+(parent `+0x80..+0x118`, request `+0x30`) and the child's damage id. What happens to that block
+depends on the owner:
+
+- **A player-type character** (owner handle type 2, and byte 3 of the `0x1410bfff0` table set, the
+  same test as the builder above). The child keeps the parent's block whole. Only slot 5 is replaced,
+  by the child row's `damage0n` of type 5.
+- **Anyone else.** The block's first 0x34 bytes are zeroed, and each of the child row's `damage01..03`
+  is added into the slot of its `damageType0n`.
+
+That second path writes the child row's damage into the same slots, by damage type, that the player
+path copies from the parent. So those slots are the per-type attack the hit reads. A player's child
+bullet therefore hits with the attack built at the cast: the catalyst's rating plus the spell row's
+flat damage (`SpellParam.baseSpellDamageId`), in that row's types. The child's own row supplies
+only what is read at the hit, its `damageRate` and `damageLower`.
+
+For 33 of the 55 damaging spells the biggest hit is on a child row. Most child rows repeat the spell
+row's type and flat damage. Four do not:
+
+| Spell | Spell row | Child row the model used before |
+|---|---|---|
+| Wrath of the Gods | lightning 300 | lightning 0 |
+| Combustion | fire 50 | fire 0 |
+| Great Combustion | fire 50 | fire 0 |
+| Outcry | fire 0 + dark 100 | fire 0 |
+
+The three spells whose damage an SpEffect event spawns (`SCRIPTED_SPELL_BULLET`) have no parent
+bullet, and how their attack is built was not read.
+
+Not read: the inputs of the stat-penalty descriptor (`0x14031fd10`, `0x140333790`, `0x14038fb10`),
+the writers of `flags+0x420`, `+0x428` and `+0x48c..+0x49c`, the soul-consume path, and the
+Arxan-wrapped lookups `0x1403b56d0` / `0x1403b5500`.
 
 ### Which catalyst casts it
 

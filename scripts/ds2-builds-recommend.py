@@ -542,7 +542,8 @@ _threat_cache: dict = {}
 
 def spell_attack(power: float, hit: dict) -> float:
     """A spell hit's attack rating in its element, the number damageRate multiplies: the casting
-    catalyst's cast power in that element (cast_power) plus the hit's flat damage. EXE
+    catalyst's cast power in that element (cast_power) plus the hit's flat damage, which on a
+    child bullet's hit is still the spell row's (inherited_hits). EXE
     (docs/DS2-DPS-MECHANICS.md "Spell and buff attack"): the per-hand attack builder 0x140391fe0
     prepares the bullet's attack as ((stat bonus + base) x rate + damage of that type) x k per
     type, with the catalyst's rate masked to the types the spell's damage row lists; k (stat
@@ -629,12 +630,14 @@ def threat_opponents(data: Data, corpus: list[Build]) -> list[tuple[dict, list[d
                     power[(k, e)] = max(power.get((k, e), 0.0), p)
         castable = [s for s in b.spells if s in data.spell_category and spell_ok(data, s, eff)
                     and any(k == data.spell_category[s] for k, _ in power)]
-        spells = []
+        spells = []  # per castable attack spell: its biggest hit's damageRate and attack per type
         for s in castable:
             if s in data.spell_hits:
-                hit = max(data.spell_hits[s], key=lambda h: h["rate"])
-                p = power.get((data.spell_category[s], hit["type"]), 0.0)
-                spells.append({"type": hit["type"], "rate": hit["rate"], "attack": spell_attack(p, hit)})
+                top = max(data.spell_hits[s], key=lambda h: h["rate"])
+                k = data.spell_category[s]
+                spells.append({"rate": top["rate"], "attack": {
+                    h["type"]: spell_attack(power.get((k, h["type"]), 0.0), h)
+                    for h in data.spell_hits[s] if h["row"] == top["row"]}})
         buffs = [(data.buffs[s]["type"], buff_attack(data, data.buffs[s], main, eff))
                  for s in castable if s in data.buffs] if melee else []
         if buffs:
@@ -664,7 +667,8 @@ def threat_sums(opponents: list[tuple[dict, list[dict]]]) -> dict:
                 g[e] += melee.get(e, 0) / 1000
         for sp in spells:
             g = sums["both_spell" if melee else "spell"]
-            g[sp["type"]] += sp["rate"] * (1 / 12 if sp["type"] == "physical" else sp["attack"] / 1000) / len(spells)
+            for t, attack in sp["attack"].items():
+                g[t] += sp["rate"] * (1 / 12 if t == "physical" else attack / 1000) / len(spells)
     return sums
 
 
@@ -1341,10 +1345,33 @@ def bullet_hits(d: dict, bullet: int, dmg: int, depth: int = 0, seen: set | None
     return out
 
 
+def inherited_hits(hits: list[dict], root: dict) -> list[dict]:
+    """`hits` (bullet_hits of one spell's bullet tree) as a player's spell lands them: every hit
+    row keeps its damageRate and damageLower, but its types and flat damage are the spell's own
+    damage row's (`root`, SpellParam baseSpellDamageId), summed per type. EXE: the attack block is
+    built once from that row (0x1403936a0 -> 0x140391fe0), and a child bullet of a player-type
+    owner copies its parent's block whole (0x140445ec0; only slot 5 comes from the child row);
+    only a non-player owner's child gets its own row's damage01..03. So Wrath of the Gods'
+    damaging child row (lightning, flat 0) hits with the spell row's lightning 300."""
+    types: dict[str, float] = {}
+    for n in (1, 2, 3):
+        kind = DAMAGE_TYPE.get(root[f"damageType0{n}"])
+        if kind:
+            types[kind] = types.get(kind, 0) + root[f"damage0{n}"]
+    out, rows = [], set()
+    for h in hits:
+        if h["row"] not in rows:
+            rows.add(h["row"])
+            out += [{"type": t, "flat": f, "rate": h["rate"], "lower": h["lower"], "row": h["row"]}
+                    for t, f in types.items()]
+    return out
+
+
 def regulation_spell_hits(data: Data, d: dict, names: dict) -> str:
     """data.spell_hits: spell key -> the hits one cast can deal (bullet_hits from SpellParam
-    baseSpellBulletId / baseSpellDamageId, joined by normalized name as regulation_spells joins).
-    A spell with no damaging hit (a heal, a buff, a status mist) has none."""
+    baseSpellBulletId / baseSpellDamageId as inherited_hits lands them, joined by normalized name
+    as regulation_spells joins). A spell with no damaging hit (a heal, a buff, a status mist) has
+    none. The SCRIPTED_SPELL_BULLET hits keep their own rows' damage: no parent bullet spawns them."""
     by_name = {}
     for sid, s in d["SpellParam"].items():
         by_name.setdefault(norm(names.get(sid, "")), (int(sid), s))
@@ -1354,6 +1381,10 @@ def regulation_spell_hits(data: Data, d: dict, names: dict) -> str:
         if s is None:
             continue
         hits = bullet_hits(d, s["baseSpellBulletId"], s["baseSpellDamageId"])
+        dmg = str(s["baseSpellDamageId"])
+        root = d["PlayerDamageParam"].get(dmg) or d["SystemDamageParam"].get(dmg)
+        if root:
+            hits = inherited_hits(hits, root)
         if sid in SCRIPTED_SPELL_BULLET:
             hits += bullet_hits(d, SCRIPTED_SPELL_BULLET[sid], SCRIPTED_SPELL_BULLET[sid])
         if hits:
@@ -3567,6 +3598,13 @@ def selftest() -> int:
         ("magic dragon chime: 15 split over lightning and dark", infused_rates(chime, "Magic")[:5],
          [0.0, 15.0, 92.5, 0.0, 92.5]),
     ]
+    # a player's child bullet hits with the spell row's types and flat damage (EXE 0x140445ec0),
+    # at its own row's damageRate; Outcry's row is fire 0 + dark 100
+    root = {"damageType01": 3, "damage01": 0, "damageType02": 4, "damage02": 100, "damageType03": 5, "damage03": 7}
+    child = [{"type": "fire", "flat": 0, "rate": 1.75, "lower": 0.0, "row": 33320040}]
+    cases.append(("child hit takes the spell row's fire + dark", inherited_hits(child, root),
+                  [{"type": "fire", "flat": 0, "rate": 1.75, "lower": 0.0, "row": 33320040},
+                   {"type": "dark", "flat": 100, "rate": 1.75, "lower": 0.0, "row": 33320040}]))
     cases += flex_selftest_cases()
     if ATTACKS.exists():  # the real extracted rows agree with the copies above
         real = load_attacks()

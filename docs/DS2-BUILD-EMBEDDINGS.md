@@ -160,7 +160,9 @@ build hits with. Each one lands:
   flat) x X / 100` in the buff's element.
 - **spell hits**: each attack spell it can cast (requirements met, a carried catalyst of that school
   it can wield), with equal odds. A spell hit is its biggest damage row, with attack = the best
-  carried catalyst's attack rating in that element + the row's flat damage. The catalyst's rating
+  carried catalyst's attack rating in that element + the spell row's flat damage. A child bullet's
+  hit keeps the spell row's types and flat damage at its own damage rate: Wrath of the Gods' hits
+  carry the spell row's lightning 300, though their own row lists 0. The catalyst's rating
   is at its infusion's rates (a Lightning Dragon Chime casts miracles at 115%). A MugenMonkey
   catalyst has no recorded infusion, and the infusion model covers no catalyst, so its rating is the
   mean over the infusions SoulsPlanner builds record for that catalyst, weighted by count.
