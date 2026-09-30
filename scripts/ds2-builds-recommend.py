@@ -11,9 +11,9 @@ design in ways that are said out loud here rather than hidden:
 * MOST ITEM DATA IS THE PLANNER SITES', NOT THE GAME'S. Weapon/armor requirements, armor defenses
   and weights come from SoulsPlanner's `ds2planner.min.js`, dumped to JSON by `--sp-data` /
   `--mm-data` (see `dump_site_tables`) with MugenMonkey's tables. The regulation replaces the
-  physical stat defense table, every infusion's attack and scaling (shields aside), bleed and
-  poison, and the spells' requirements and slots, and alone supplies catalysts, spell hits, weapon
-  buffs and weapon elements (apply_regulation).
+  physical stat defense table, max HP, every infusion's attack and scaling (shields aside), bleed
+  and poison, and the spells' requirements and slots, and alone supplies catalysts, spell hits,
+  weapon buffs and weapon elements (apply_regulation).
 * ARMOR IS SCORED PER POINT OF DEFENSE. A piece's value is its per-type defense weighted by what
   one point of that defense takes off one hit of the average opponent (threat_mix): the
   executable's per-hit formula, over every unique build on both mirrors that can hit, with
@@ -171,6 +171,10 @@ class Data:
         # PhysicalStatsPerLevelStatValuesParam.staminaMax by END, rows 0-99: what a Dragon ring's
         # stamina factor is weighed against (ring_lift); empty when the regulation is not read.
         self.stamina_max = []
+        # PhysicalStatsPerLevelStatValuesParam.hpMax and additionalHp, rows 0-99 (row 0 unread): the
+        # max-HP formula's two columns (hit_points); empty when the regulation is not read.
+        self.hp_max = []
+        self.additional_hp = []
         # weapon class (Dagger, Greatsword, ...): MugenMonkey only, joined by normalized name
         mm_w = {}
         for k, v in mm["darkSouls2WeaponDetails"].items():
@@ -1052,6 +1056,7 @@ def apply_regulation(data: Data) -> str:
     * `physicalDEFBonus[sum]` becomes PhysicalStatsPerLevelStatValuesParam
       `row[trunc((END+VIT+STR+DEX)/4)].defense`, the index the stats builder 0x14038d790 uses.
       SoulsPlanner's table is off by one at 180 of 393 sums.
+    * Max HP (hit_points) reads the same param's hpMax and additionalHp columns.
     * Every infusion's attack bases and coefficients (regulation_attack), bleed and poison
       (regulation_status), and the rest of the regulation_* readers below.
 
@@ -1081,7 +1086,10 @@ def apply_regulation(data: Data) -> str:
     new = [None if s < 4 else rows[str(min(top, s // 4))]["defense"] for s in range(len(old))]
     moved = sum(1 for a, b in zip(old, new) if b is not None and a != b)
     data.sp["physicalDEFBonus"] = new
+    data.hp_max = [0] + [rows[str(v)]["hpMax"] for v in range(1, top + 1)]
+    data.additional_hp = [0] + [rows[str(v)]["additionalHp"] for v in range(1, top + 1)]
     return (f"regulation: physical stat defense from the game's table ({moved} sums moved); "
+            "max HP from hpMax and every other stat's additionalHp; "
             + regulation_spells(data, d, names) + "; " + regulation_spell_hits(data, d, names) + "; "
             + regulation_hit_flat(data, d) + "; "
             + regulation_buffs(data, emevd, members, d, names) + "; " + regulation_weapon_elements(data, d, names)
@@ -1976,10 +1984,23 @@ def build_floors(data: Data, corpus: list[Build], sl: int) -> tuple[dict, dict, 
     return bracket_floors(data, corpus, r1)[sl_bracket(sl)], r1, high_stamina_cut(r1)
 
 
-def hit_points(vgr: int) -> int:
-    """HP from VGR (SoulsPlanner getHP, SITE): 30 per point to 20, 20 to 50, 5 after. The small
-    per-point HP from the other stats is left out."""
-    return 500 + 30 * min(vgr, 20) + 20 * max(0, min(vgr, 50) - 20) + 5 * max(0, vgr - 50)
+#: The stats whose additionalHp the max-HP formula adds to VGR's hpMax: words 1-8 of the stat block,
+#: END to ADP (0x14038e1e0 skips words 9 and 10; the ids are 0x14038e280's jump table).
+HP_STATS = ["endurance", "vitality", "attunement", "strength", "dexterity", "intelligence", "faith",
+            "adaptability"]
+
+
+def hit_points(data: Data, st: dict) -> int:
+    """Max HP of the effective stats `st` (EXE 0x14038e1e0, which the stats builder 0x14038d790
+    calls first and stores at its block's +0x0): PhysicalStatsPerLevelStatValuesParam hpMax at VGR
+    plus additionalHp at each of HP_STATS, a stat outside 1-99 read at row 1. hpMax equals
+    SoulsPlanner's getHP at every VGR; additionalHp (2 per point to 20, then 1 to 50, then 70) is
+    what the site leaves out. Without the regulation it is getHP from VGR alone (SITE)."""
+    if not data.hp_max:
+        vgr = st["vigor"]
+        return 500 + 30 * min(vgr, 20) + 20 * max(0, min(vgr, 50) - 20) + 5 * max(0, vgr - 50)
+    row = lambda v: v if 1 <= v <= 99 else 1
+    return data.hp_max[row(st["vigor"])] + sum(data.additional_hp[row(st[s])] for s in HP_STATS)
 
 
 def floor_violations(stats: dict, floors: dict) -> list[str]:
@@ -2078,9 +2099,10 @@ def sub_rings(data: Data) -> list[str]:
 def ring_lift(data: Data, st: dict, floors: dict, req: dict, spells, rings=()) -> dict | None:
     """`st` (a class's base) raised to what a build wearing `rings` must level to: each `floors`
     stat until what it gives matches what the floor gives with no ring -- VIG by max HP
-    (hit_points, the game's hpMax), VIT by max equip load (equipLoadMax), END by max stamina
-    (staminaMax), each read at the stat plus the rings' bonus and times the rings' factor; ADP and
-    ATT by the stat plus bonus --; each `req` stat and the spells' INT/FTH until the stat plus the
+    (hit_points: hpMax at VGR plus the other stats' additionalHp, read at the stats `out` holds when
+    VIG is lifted), VIT by max equip load (equipLoadMax), END by max stamina (staminaMax), each read
+    at the stats plus the rings' bonus and times the rings' factor; ADP and ATT by the stat plus
+    bonus --; each `req` stat and the spells' INT/FTH until the stat plus the
     rings' bonus meets it; ATT to the least whose slots plus the rings' hold the spells
     (spell_floors). The columns are indexed by those stats per RelatePhysicalStatToLevelStatParam
     row 0 (hpMax 1 VGR, staminaMax 2 END, equipLoadMax 3 VIT, spellSlot 4 ATT; read 2026-09-28).
@@ -2106,16 +2128,18 @@ def ring_lift(data: Data, st: dict, floors: dict, req: dict, spells, rings=()) -
             v += 1
         out[s] = v
 
-    curves = {"vigor": (hit_points, ring_factor(data, rings, "hp")),
-              "vitality": (lambda v: data.equip_load[min(v, len(data.equip_load) - 1)] or 0,
-                           ring_factor(data, rings, "load")),
-              "endurance": ((lambda v: data.stamina_max[min(v, len(data.stamina_max) - 1)])
-                            if data.stamina_max else None, ring_factor(data, rings, "stamina"))}
+    # What a floor stat gives, read off a whole stat block, the rings' factor on it, and the stats
+    # it reads: max HP reads VGR and every HP_STATS stat, so a ring raising any of them counts.
+    curves = {"vigor": (lambda e: hit_points(data, e), ring_factor(data, rings, "hp"), {"vigor", *HP_STATS}),
+              "vitality": (lambda e: data.equip_load[min(e["vitality"], len(data.equip_load) - 1)] or 0,
+                           ring_factor(data, rings, "load"), {"vitality"}),
+              "endurance": ((lambda e: data.stamina_max[min(e["endurance"], len(data.stamina_max) - 1)])
+                            if data.stamina_max else None, ring_factor(data, rings, "stamina"), {"endurance"})}
     for s, f in floors.items():
-        tab, fac = curves.get(s, (None, 1.0))
-        if tab is not None and (fac != 1.0 or s in touched):
-            target = tab(f)
-            least(s, lambda v: tab(eff(s, v)) * fac >= target)
+        tab, fac, reads = curves.get(s, (None, 1.0, {s}))
+        if tab is not None and (fac != 1.0 or touched & reads):
+            target = tab({**out, s: f})
+            least(s, lambda v: tab(gear_stats(data, {**out, s: v}, rings)) * fac >= target)
         else:
             least(s, lambda v: eff(s, v) >= f)
     for s, x in [*req.items(), *((s, x) for s, x in need.items() if s != "attunement")]:
@@ -2216,7 +2240,10 @@ def _optimize_with(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
         agl = lambda s_: (lambda e: agility(e["adaptability"], e["attunement"]))(E(s_))
         curves = {s: obj for s in ("strength", "dexterity", "intelligence", "faith")}
         curves["adaptability"] = obj if objective == "poison" else agl
-        curves["vigor"] = lambda s_: hit_points(E(s_)["vigor"])
+        # Max HP of the whole block. Only VGR's step moves it here, so the other stats'
+        # additionalHp cancels out of VGR's weight and is credited to no stat: nothing here
+        # weighs a point of HP against a point of damage.
+        curves["vigor"] = lambda s_: hit_points(data, E(s_))
         curves["attunement"] = agl  # a third of ADP's agility per point; slots only matter with spells
         peak = {}
         for s, f in curves.items():
@@ -3177,7 +3204,7 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 
 BACKEND_DATA_NAME = "ds2-build-recommender.dat"
 BACKEND_DATA = Path.home() / ".cache/ds2-builds" / BACKEND_DATA_NAME
-BACKEND_FORMAT = "ds2-build-recommender-data 9"
+BACKEND_FORMAT = "ds2-build-recommender-data 10"
 #: How far the exported R1/R2 chains run, in seconds: the panel clamps its window to 10.0
 #: (crates/ds2-build-recommender-ui/src/panel.rs), and status_hits runs to max(3, window).
 STATUS_HORIZON = 10.0
@@ -3221,6 +3248,9 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
     out.append("\t".join(["T", "attunementSlots", *(_num(v) for v in data.att_slots)]))
     if data.stamina_max:
         out.append("\t".join(["T", "staminaMax", *(_num(v) for v in data.stamina_max)]))
+    if data.hp_max:
+        out.append("\t".join(["T", "hpMax", *(_num(v) for v in data.hp_max)]))
+        out.append("\t".join(["T", "additionalHp", *(_num(v) for v in data.additional_hp)]))
     for e, col in data.cast_bonus.items():
         out.append("\t".join(["T", "cast" + e.capitalize(), *(_num(v) for v in col)]))
     for key, s in data.spells.items():
@@ -3785,6 +3815,17 @@ def selftest() -> int:
     cases.append(("child hit takes the spell row's fire + dark", inherited_hits(child, root),
                   [{"type": "fire", "flat": 0, "rate": 1.75, "lower": 0.0, "row": 33320040},
                    {"type": "dark", "flat": 100, "rate": 1.75, "lower": 0.0, "row": 33320040}]))
+    # max HP (EXE 0x14038e1e0) over made-up columns: hpMax at VGR plus the other eight stats'
+    # additionalHp, a stat outside 1-99 at row 1; with no columns, the site's getHP from VGR alone
+    tables = type("HP", (), {"hp_max": [0] + [1000 + v for v in range(1, 100)],
+                             "additional_hp": [0] + [2 * v for v in range(1, 100)]})
+    ten = dict.fromkeys(STATS, 10)
+    cases += [
+        ("max HP: hpMax at VGR + 8 x additionalHp", hit_points(tables, {**ten, "vigor": 30}), 1030 + 8 * 20),
+        ("max HP: FTH 0 reads row 1", hit_points(tables, {**ten, "faith": 0}), 1010 + 7 * 20 + 2),
+        ("max HP without the regulation: getHP", hit_points(type("Site", (), {"hp_max": []}), {**ten, "vigor": 30}),
+         500 + 30 * 20 + 20 * 10),
+    ]
     cases += flex_selftest_cases()
     if ATTACKS.exists():  # the real extracted rows agree with the copies above
         real = load_attacks()
