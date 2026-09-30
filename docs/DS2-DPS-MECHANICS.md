@@ -463,12 +463,21 @@ The stores after `0x14038e08d` were not read.
 **Base and coefficients against SoulsPlanner** (REGULATION, measured 2026-09-30, over 2623 weapon and
 infusion rows joined by name). Computed as the scaling function and the rate move below compute them, the
 site's Mundane modifier agrees with `abyssRate x 0.01 x` the Mundane physical rate for all 209 Mundane
-weapons. Many other terms do not agree: 509 physical bases and 433 STR coefficients, among them weapons
-with an innate element or special scaling (Heide Lance Dark: site lightning 60 and dark 90, this model 90
-and 60). Every poison and bleed term disagrees: the site's base is this model's divided by 5 and its
+weapons. Every poison and bleed term disagrees: the site's base is this model's divided by 5 and its
 coefficient this model's divided by 2 (Bandit Axe Poison: 140 and 0.525, against 700 and 1.05). For the
-status terms the builder's are the ones a hit carries ("Status build-up per hit" above). For the rest,
-which side is right is not settled.
+status terms the builder's are the ones a hit carries ("Status build-up per hit" above).
+
+The damage terms mostly agree. An earlier count of 509 disagreeing physical bases and 433 STR coefficients
+included shields, which the site gives no attack. Without shields, and with Mundane given no STR/DEX term
+as the scaling function gives it none, 84 of 2115 infusion rows differ by more than the site's rounding
+(a base by 1 or more, a coefficient by more than 0.011). The rate move is now read to the end ("The count", below),
+and where the site disagrees its own rows contradict it. Heide Lance Dark has lightning 60 and dark 90
+where this model has 90 and 60, while the site's Lightning row matches this model. The Ivory King Ultra
+Greatsword Fire row has this model's magic 65 and bleed 114, but physical 217, the Magic row's (217.5),
+where the move gives 245. Murakumo's uninfused STR/DEX are 0.07/0.51 against the regulation's 0.15/0.59,
+and its name has one `WeaponReinforceParam` row. So `scripts/ds2-builds-recommend.py` takes every
+infusion's base and coefficients from the regulation (`regulation_attack`). Shields and names with no
+regulation row keep the site's.
 
 **Scaling function `0x1403903b0`** (Arxan entry, body from `0x141cf33c8`). Arguments are `(this, ws, out[10])`.
 `ws+0x30` is the reinforce level, `ws+0x31` the infusion index, `ws+0x40` the WeaponStatsAffectParam row.
@@ -508,7 +517,19 @@ The move, read 2026-09-30. The builder reaches it as `0x14034c580` -> `0x14034c7
 and `0x14034c760` passes `1.0` as the factor `0x14034fe10` multiplies the add rate by. `count` is the
 number of nonzero rates other than the target. The target gains `add` only while it is under the cap
 (1000.0 at `0x1410ad5f0`), and only rates above zero lose `add / count`. `0x14034c580` then floors all
-ten at 0. A second caller passes a computed factor (`0x14034f94e`, not read).
+ten at 0.
+
+The count, read 2026-09-30. `0x14034c5c0` (body at `0x141c4f18a`) copies the nine rates into ten slots,
+with slot 7 (durability) set to 0 (`0x141c4f1b9`..`0x141c4f1fd`). It counts the slots that are not 0.0
+(loop at `0x141c5f5da`) and passes that count to the move (`0x141b75f8e`). So `count` includes the
+poison, bleed, petrify and curse rates as well as the five damage types.
+
+`0x14034c5c0` has two other callers, `0x14034f8c4` and `0x14034f94e`. Both are in one function, and it
+moves `WeaponReinforceParam+0x50`, the nine per-type values ahead of the stability rates, not `+0xa0`.
+It then pushes each value toward 100: `x + (100 - x) * (level term + stat terms)`, where the stat terms
+are six calls to `0x14034fd40`. Each call uses one of this level's STR, DEX, INT (physicalByEnchant for
+Enchanted), FTH, fire and dark coefficients. So the attack rates have one move, and
+`scripts/ds2-builds-recommend.py` `infused_rates` is it.
 
 On a catalyst this is the whole infusion. The elemental rows `statsAffectId + 1..4` repeat the
 standard row's `baseValueScale` (1.0) and coefficients. So a Magic Staff of Wisdom casts sorceries at
@@ -736,11 +757,11 @@ Not read: `0x140397a00` (`0x1401a46a0`), and the two bytes from `0x14019e110` th
 subtracts from the INT and FTH requirements.
 
 **Delta vs `scripts/ds2-builds-recommend.py`** (`attack_rating`, `hit_damage`, `damage`, `build_defense`):
-- AR: the same `(base + sum bonus*coef) * rate` structure, but SoulsPlanner folds `rate` into its
-  `atk`/`atkScale` with rounding. The error is a fraction of an AR point per stat, larger for Enchanted STR.
-  Mundane's `modifier` is the game's (`abyssRate`, above). The site's base and coefficients disagree with
-  the game's formula on many weapons with an innate element or special scaling, and on every status term
-  ("Base and coefficients against SoulsPlanner", above).
+- AR: the same `(base + sum bonus*coef) * rate` structure, with `rate` folded into `atk`/`atkScale` as
+  the regulation gives it, unrounded (`regulation_attack`). Mundane's `modifier` is the game's
+  (`abyssRate`, above). Shields and weapons with no regulation row keep SoulsPlanner's numbers
+  ("Base and coefficients against SoulsPlanner", above). An Enchanted weapon that also deals magic scales
+  that magic by its physical INT coefficient, because the port has one `magic` key for both.
 - Bleed and poison scaling: the site's table and its `3*DEX + FTH` / `3*DEX + ADP` index are the game's
   ("Status bonus per stat", above). The base and coefficient they combine with are the regulation's,
   in gauge points per hit (`regulation_status`, "Status build-up per hit"); the victim's resistance is
