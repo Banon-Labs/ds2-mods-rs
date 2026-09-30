@@ -1088,8 +1088,10 @@ def apply_regulation(data: Data) -> str:
     data.sp["physicalDEFBonus"] = new
     data.hp_max = [0] + [rows[str(v)]["hpMax"] for v in range(1, top + 1)]
     data.additional_hp = [0] + [rows[str(v)]["additionalHp"] for v in range(1, top + 1)]
+    # First, so every join below finds the weapons it renames.
+    renamed = regulation_weapon_names(data, d, names)
     return (f"regulation: physical stat defense from the game's table ({moved} sums moved); "
-            "max HP from hpMax and every other stat's additionalHp; "
+            "max HP from hpMax and every other stat's additionalHp; " + renamed + "; "
             + regulation_spells(data, d, names) + "; " + regulation_spell_hits(data, d, names) + "; "
             + regulation_hit_flat(data, d) + "; "
             + regulation_buffs(data, emevd, members, d, names) + "; " + regulation_weapon_elements(data, d, names)
@@ -1348,6 +1350,27 @@ def _terms_differ(game: tuple[dict, dict], site: tuple[dict, dict]) -> bool:
     (ga, gs), (sa, ss) = game, site
     return (any(abs(ga.get(k, 0) - sa.get(k, 0)) >= 1 for k in DAMAGE_TERMS)
             or any(abs(gs.get(k, 0) - ss.get(k, 0)) > 0.011 for k in DAMAGE_SCALES))
+
+
+def regulation_weapon_names(data: Data, d: dict, names: dict) -> str:
+    """The game's own name (itemname.fmg) for each weapon whose SoulsPlanner name joins no
+    WeaponParam row but whose key does. Every regulation_* reader joins by name, so such a weapon
+    kept the site's numbers: SoulsPlanner spells the Black Flamestone Dagger `Black Flamestone
+    Dagge`, and the game `Black Flamestone Dagger`, its key's spelling. A name that joins is left as
+    the site spells it, and one that joins by neither -- the site's `Santier's Spear (broken)`,
+    which the game names `Santier's Spear` like the whole one -- keeps the site's."""
+    by_name = {}
+    for wid in d["WeaponParam"]:
+        by_name.setdefault(norm(names.get(wid, "")), wid)
+    renamed = []
+    for key, w in data.weapons.items():
+        name = w.get("name", key)
+        if norm(name) not in by_name and norm(key) in by_name:
+            w["name"] = names[by_name[norm(key)]]
+            # Rows carry the name, and the ranking finds a row's weapon by it.
+            data.key_by_name[w["name"]] = key
+            renamed.append(f"{name} -> {w['name']}")
+    return f"{len(renamed)} weapon names from the game's text" + (f" ({', '.join(renamed)})" if renamed else "")
 
 
 def regulation_attack(data: Data, d: dict, names: dict) -> str:
