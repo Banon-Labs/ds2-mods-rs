@@ -1502,7 +1502,11 @@ impl Canvas<'_> {
         value_w: f32,
     ) -> (f32, f32) {
         let label_w = self.width(label) + self.width(" ");
-        let shown = self.field_shown(spec, value_w.max(self.width(spec.value)));
+        // As wide as what is typed: a search longer than the name it replaces is not cut.
+        let room = value_w
+            .max(self.width(spec.value))
+            .max(self.width(spec.typed) + 1.0);
+        let shown = self.field_shown(spec, room);
         let min = [x, y];
         let value_x = x + PAIR_PAD + label_w;
         let max = [
