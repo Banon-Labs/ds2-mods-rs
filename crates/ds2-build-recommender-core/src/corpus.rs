@@ -2454,6 +2454,18 @@ impl CorpusBackend {
                         1e-9,
                     );
                 }
+                // The stats that feed the objective share one unit, the steepest of their early
+                // rates: a point of damage is a point of damage whichever stat buys it.
+                let shared = curves
+                    .iter()
+                    .zip(peak)
+                    .filter(|&(&(_, curve), _)| curve == Curve::Objective)
+                    .fold(f64::NEG_INFINITY, |most, (_, rate)| py_max(most, rate));
+                for (at, &(_, curve)) in curves.iter().enumerate() {
+                    if curve == Curve::Objective {
+                        peak[at] = shared;
+                    }
+                }
                 if adaptability == Curve::Agility {
                     peak[6] = peak[4];
                 }

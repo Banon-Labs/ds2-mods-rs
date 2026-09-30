@@ -2271,6 +2271,15 @@ def _optimize_with(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
         peak = {}
         for s, f in curves.items():
             peak[s] = max((f({**st, s: 25}) - f({**st, s: 5})) / 20, 1e-9)
+        # The stats that feed the objective (STR/DEX/INT/FTH, and ADP when the objective is poison)
+        # share one unit, the steepest of their early rates: a point of damage is a point of damage
+        # whichever stat buys it. Each over its own rate inflated a stat with almost no scaling to
+        # parity with the real one -- measured 2026-09-30, Uchigatana Lightning, Bandit, SL 155, no
+        # floors: STR 45 at an early rate of 0.083 beside DEX's 0.375.
+        shared = max(peak[s] for s, f in curves.items() if f is obj)
+        for s, f in curves.items():
+            if f is obj:
+                peak[s] = shared
         if curves["adaptability"] is agl:
             peak["attunement"] = peak["adaptability"]
         while free > 0:
