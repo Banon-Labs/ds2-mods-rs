@@ -32,8 +32,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use ds2_overlay::fefont::{Button, button};
+use ds2_overlay::style;
 use ds2_save_picker_core::{
-    PickerActivation, PickerInput, PickerStatusMessage, PickerView, RowKind, SavePickerModel,
+    HintKey, PickerActivation, PickerInput, PickerStatusMessage, PickerView, RowKind,
+    SavePickerModel,
 };
 use hudhook::imgui::{MouseButton, Ui};
 
@@ -134,10 +137,10 @@ impl Panel {
         log_line(format_args!("{LOG_PREFIX} picker chose {outcome:?}"));
         self.model.set_status_message(PickerStatusMessage::new(
             match self.mode {
-                Mode::Load => "LOADING",
-                Mode::Save => "SAVING",
+                Mode::Load => "Loading",
+                Mode::Save => "Saving",
             },
-            "one moment",
+            "",
         ));
         self.outcome = Some(outcome);
         self.phase = Phase::Committing(0);
@@ -397,8 +400,8 @@ fn on_frame() {
                 panel.outcome = None;
                 panel.phase = Phase::Open;
                 panel.model.set_status_message(PickerStatusMessage::new(
-                    "NOTHING HAPPENED",
-                    "the pause menu closed before the pick reached it -- choose again",
+                    "Nothing Happened",
+                    "The pause menu closed first. Choose again.",
                 ));
                 panel.dirty();
             } else {
@@ -515,27 +518,36 @@ fn drives() -> Vec<String> {
 // Drawing
 // ---------------------------------------------------------------------------------------------
 
-const PANEL_BG: [f32; 4] = [0.04, 0.04, 0.05, 0.94];
-const PANEL_EDGE: [f32; 4] = [0.55, 0.48, 0.34, 0.9];
-const DIM_COVER: [f32; 4] = [0.0, 0.0, 0.0, 0.45];
-const HIGHLIGHT: [f32; 4] = [0.95, 0.88, 0.66, 0.18];
-const HOVER: [f32; 4] = [1.0, 1.0, 1.0, 0.06];
-const TITLE: [f32; 4] = [0.95, 0.88, 0.66, 1.0];
-const TEXT: [f32; 4] = [0.93, 0.92, 0.88, 1.0];
-const DIM: [f32; 4] = [0.62, 0.61, 0.58, 1.0];
-const DISABLED: [f32; 4] = [0.42, 0.42, 0.40, 1.0];
-const FOLDER: [f32; 4] = [0.60, 0.78, 1.0, 1.0];
-const CURRENT: [f32; 4] = [0.55, 0.95, 0.60, 1.0];
-const WARN: [f32; 4] = [1.0, 0.72, 0.30, 1.0];
-const FIELD_BG: [f32; 4] = [0.10, 0.12, 0.16, 1.0];
-const FIELD_EDIT: [f32; 4] = [0.14, 0.18, 0.26, 1.0];
+// The game's own palette (`ds2_overlay::style`, docs/DS2-UI-DESIGN.md), under this panel's names.
+// Folders and the save in use are told apart by their `/` and `*` markers, not by a hue.
+const PANEL_BG: [f32; 4] = style::PANEL_BG;
+const PANEL_EDGE: [f32; 4] = style::BRONZE;
+const DIM_COVER: [f32; 4] = style::DIM_COVER;
+const HIGHLIGHT: [f32; 4] = style::INK_2;
+const HOVER: [f32; 4] = style::INK_1;
+const TITLE: [f32; 4] = style::TEXT;
+const TEXT: [f32; 4] = style::TEXT;
+const DIM: [f32; 4] = style::TEXT_DIM;
+const DISABLED: [f32; 4] = style::TEXT_DISABLED;
+const FOLDER: [f32; 4] = style::TEXT;
+const CURRENT: [f32; 4] = style::BRONZE;
+const WARN: [f32; 4] = style::WARN_TEXT;
+const FIELD_BG: [f32; 4] = style::SLATE;
+const FIELD_EDIT: [f32; 4] = style::SLATE_EDIT;
 /// Behind field text Ctrl+A selected.
-const SELECTION: [f32; 4] = [0.20, 0.36, 0.62, 1.0];
-const CELL_BG: [f32; 4] = [0.12, 0.12, 0.13, 1.0];
-const FOCUS_EDGE: [f32; 4] = [0.95, 0.88, 0.66, 1.0];
-const PAD: f32 = 14.0;
+const SELECTION: [f32; 4] = style::TEXT_SELECTION;
+const CELL_BG: [f32; 4] = style::INK_1;
+const FOCUS_EDGE: [f32; 4] = style::BRONZE;
+/// The bronze rule down the left edge of the row the cursor is on.
+const FOCUS_RULE: f32 = 3.0;
+/// The list keeps room for this many rows however few a folder has, so the panel does not jump
+/// in size between folders.
+const MIN_ROWS: usize = 6;
 
 /// The panel's draw function, called by `ds2-overlay` once per frame.
+///
+/// Every gap is a fraction of the font's line, not a pixel count: on the 3840x2160 back buffer
+/// the game renders into (2026-09-29), fixed pixels read as touching lines.
 fn draw(ui: &Ui) {
     let Ok(mut guard) = PANEL.try_lock() else {
         return;
@@ -548,17 +560,23 @@ fn draw(ui: &Ui) {
     }
     let display = ui.io().display_size;
     let line = ui.current_font_size();
-    let row_height = line + 8.0;
-    let width = (display[0] * 0.62)
-        .clamp(560.0, 1100.0)
-        .min(display[0] - 32.0);
-    let height = (display[1] * 0.78).min(display[1] - 32.0);
-    let left = (display[0] - width) * 0.5;
-    let top = (display[1] - height) * 0.5;
+    let pad = line;
+    let row_height = (line * 1.6).round();
+    let title_gap = (line * 0.35).round();
+    let section_gap = (line * 0.8).round();
+    let strip_gap = (line * 0.5).round();
+    let width = (line * 56.0).clamp(560.0, display[0] * 0.9);
+    let max_height = (display[1] * 0.78).min(display[1] - 32.0);
 
-    // Rows the list area holds: the height, less the header, the banner and the footer.
-    let reserved = PAD * 2.0 + line * 2.0 + 10.0 + (line * 3.0 + 12.0) + (line + 10.0);
-    let capacity = (((height - reserved) / row_height).floor() as usize).clamp(4, 30);
+    // The fixed parts: the header (a title in the game's big face and a subtitle), the drive
+    // strip's extra gap and the footer. The banner is reserved at its largest for the capacity,
+    // so a refusal appearing does not change how many rows the model pages by.
+    let title_line = ds2_overlay::panels::title_height(ui);
+    let header = pad + title_line + title_gap + line + section_gap;
+    let footer = section_gap + line + pad;
+    let banner_max = line * 3.0 + section_gap;
+    let reserved = header + banner_max + strip_gap + row_height + footer;
+    let capacity = (((max_height - reserved) / row_height).floor() as usize).clamp(4, 30);
     if capacity != panel.capacity {
         panel.capacity = capacity;
         panel.model.set_row_capacity(capacity);
@@ -571,18 +589,37 @@ fn draw(ui: &Ui) {
         return;
     };
 
+    // As tall as what is on it.
+    let banner = view.status.as_ref().map_or(0.0, |s| {
+        line * (1 + s.detail_lines().len()) as f32 + section_gap
+    });
+    let has_strip = view.rows.iter().any(|r| r.kind == RowKind::DriveStrip);
+    let rows =
+        view.rows.len().max(MIN_ROWS) as f32 * row_height + if has_strip { strip_gap } else { 0.0 };
+    let name = if view.name_field.is_some() {
+        row_height + 4.0
+    } else {
+        0.0
+    };
+    let height = (header + banner + rows + name + footer).min(display[1] - 32.0);
+    let left = (display[0] - width) * 0.5;
+    let top = (display[1] - height) * 0.5;
+
     let list = ui.get_foreground_draw_list();
     list.add_rect([0.0, 0.0], display, DIM_COVER)
         .filled(true)
         .build();
     list.add_rect([left, top], [left + width, top + height], PANEL_BG)
         .filled(true)
-        .rounding(6.0)
+        .rounding(style::ROUNDING)
         .build();
-    list.add_rect([left, top], [left + width, top + height], PANEL_EDGE)
-        .rounding(6.0)
-        .thickness(1.5)
-        .build();
+    // The game's own window frame; a plain bronze line when its atlas did not load.
+    if !ds2_overlay::panels::frame(&list, [left, top], [left + width, top + height], display[1]) {
+        list.add_rect([left, top], [left + width, top + height], PANEL_EDGE)
+            .rounding(style::ROUNDING)
+            .thickness(style::FRAME_PX)
+            .build();
+    }
 
     // In back-buffer pixels; imgui's own position is in window pixels here. See `panels::mouse`.
     let mouse = ds2_overlay::panels::mouse().unwrap_or(ui.io().mouse_pos);
@@ -593,11 +630,11 @@ fn draw(ui: &Ui) {
     let mut click: Option<PickerInput> = None;
 
     // Header: title, then where.
-    let mut y = top + PAD;
-    let inner_left = left + PAD;
-    let inner_right = left + width - PAD;
-    list.add_text([inner_left, y], TITLE, &view.title);
-    let close_label = "[ close ]";
+    let mut y = top + pad;
+    let inner_left = left + pad;
+    let inner_right = left + width - pad;
+    let title_line = ds2_overlay::panels::title(ui, &list, [inner_left, y], TITLE, &view.title);
+    let close_label = "Close";
     let close_width = ui.calc_text_size(close_label)[0];
     let close_min = [inner_right - close_width, y];
     let close_max = [inner_right, y + line];
@@ -607,13 +644,13 @@ fn draw(ui: &Ui) {
         if close_hover { TITLE } else { DIM },
         close_label,
     );
-    y += line + 2.0;
+    y += title_line + title_gap;
     list.add_text(
         [inner_left, y],
         DIM,
         clip(ui, &view.subtitle, inner_right - inner_left),
     );
-    y += line + 10.0;
+    y += line + section_gap;
 
     // The banner: why a pick was refused, or what is happening.
     let banner_top = y;
@@ -628,7 +665,7 @@ fn draw(ui: &Ui) {
             );
         }
     }
-    y = banner_top + line * 3.0 + 12.0;
+    y = banner_top + banner;
 
     // The rows.
     for row in &view.rows {
@@ -638,14 +675,23 @@ fn draw(ui: &Ui) {
         if row.highlighted {
             list.add_rect(row_min, row_max, HIGHLIGHT)
                 .filled(true)
-                .rounding(3.0)
+                .rounding(style::ROUNDING)
+                .build();
+            list.add_rect(row_min, [row_min[0] + FOCUS_RULE, row_max[1]], FOCUS_EDGE)
+                .filled(true)
                 .build();
         } else if hovered && row.selectable {
             list.add_rect(row_min, row_max, HOVER)
                 .filled(true)
-                .rounding(3.0)
+                .rounding(style::ROUNDING)
                 .build();
         }
+        // The game's grey sub-label tint is under 4.5:1 on the hover and focus fills.
+        let secondary = if row.highlighted || (hovered && row.selectable) {
+            TEXT
+        } else {
+            DIM
+        };
         let text_y = y + (row_height - line) * 0.5;
         if row.kind == RowKind::DriveStrip {
             let strip = Strip {
@@ -666,6 +712,11 @@ fn draw(ui: &Ui) {
                 RowKind::Overwrite => WARN,
                 _ => TEXT,
             };
+            let color = if row.highlighted && color == CURRENT {
+                TEXT
+            } else {
+                color
+            };
             let modified_width = row
                 .modified
                 .as_deref()
@@ -680,19 +731,22 @@ fn draw(ui: &Ui) {
             if let Some(detail) = &row.detail {
                 list.add_text(
                     [inner_left + text_space + 8.0, text_y],
-                    DIM,
+                    secondary,
                     clip(ui, detail, text_space - 8.0),
                 );
             }
             if let Some(modified) = &row.modified {
                 let modified_x = inner_right - ui.calc_text_size(modified)[0];
-                list.add_text([modified_x, text_y], DIM, modified);
+                list.add_text([modified_x, text_y], secondary, modified);
             }
             if hovered && clicked && row.selectable {
                 click = Some(PickerInput::ClickRow(row.row));
             }
         }
         y += row_height;
+        if row.kind == RowKind::DriveStrip {
+            y += strip_gap;
+        }
     }
 
     // The new file's name, while it is typed.
@@ -701,7 +755,7 @@ fn draw(ui: &Ui) {
         let max = [inner_right, y + 4.0 + row_height];
         list.add_rect(min, max, if field.editing { FIELD_EDIT } else { FIELD_BG })
             .filled(true)
-            .rounding(3.0)
+            .rounding(style::ROUNDING)
             .build();
         let caret = if field.editing { "_" } else { "" };
         let text_y = min[1] + (row_height - line) * 0.5;
@@ -723,13 +777,15 @@ fn draw(ui: &Ui) {
         );
     }
 
-    // The footer.
-    let footer_y = top + height - PAD - line;
-    list.add_text(
-        [inner_left, footer_y],
-        DIM,
-        clip(ui, view.hint, inner_right - inner_left),
-    );
+    // The footer: each control's button for the device the player is on, and a word.
+    let footer_y = top + height - pad - line;
+    let pad = panel.reader.pad_last();
+    let hints: Vec<(&str, &str)> = view
+        .hint
+        .iter()
+        .map(|h| (button_name(h.key, pad), h.verb))
+        .collect();
+    ds2_overlay::panels::hint_bar(ui, &list, [inner_left, footer_y], inner_right, &hints);
 
     if !panel_is_open(panel.phase) {
         return;
@@ -751,6 +807,23 @@ fn draw(ui: &Ui) {
     }
     if let Some(input) = click {
         panel.apply(input);
+    }
+}
+
+/// What a hint's control is called on the pad (`picker_input`'s `PAD_BUTTONS`) or the keyboard.
+fn button_name(key: HintKey, pad: bool) -> &'static str {
+    match (key, pad) {
+        (HintKey::Confirm, true) => button(Button::A),
+        (HintKey::Back, true) => button(Button::B),
+        (HintKey::LeftRight, true) => button(Button::DPadLeftRight),
+        (HintKey::Tab, true) => button(Button::Y),
+        // Start is the pad's pause button, which closes the panel as Escape does.
+        (HintKey::Close, true) => button(Button::Start),
+        (HintKey::Close, false) => "Esc",
+        (HintKey::Confirm, false) => "Enter",
+        (HintKey::Back, false) => "Backspace",
+        (HintKey::LeftRight, false) => "Left/Right",
+        (HintKey::Tab, false) => "Tab",
     }
 }
 
@@ -790,62 +863,65 @@ fn draw_drive_strip(
     let inside = |min: [f32; 2], max: [f32; 2]| {
         mouse[0] >= min[0] && mouse[0] < max[0] && mouse[1] >= min[1] && mouse[1] < max[1]
     };
+    // Room around a cell's text, in lines like the rest of the panel.
+    let px = (line * 0.35).round();
+    let py = (line * 0.2).round();
     let mut x = origin[0];
     let mut press = None;
     for (index, cell) in view.drives.iter().enumerate() {
-        let width = ui.calc_text_size(&cell.label)[0] + 12.0;
-        let min = [x, origin[1] - 3.0];
-        let max = [x + width, origin[1] + line + 3.0];
+        let width = ui.calc_text_size(&cell.label)[0] + px * 2.0;
+        let min = [x, origin[1] - py];
+        let max = [x + width, origin[1] + line + py];
         list.add_rect(min, max, CELL_BG)
             .filled(true)
-            .rounding(3.0)
+            .rounding(style::ROUNDING)
             .build();
         if cell.focused {
             list.add_rect(min, max, FOCUS_EDGE)
-                .rounding(3.0)
+                .rounding(style::ROUNDING)
                 .thickness(1.5)
                 .build();
         }
         list.add_text(
-            [x + 6.0, origin[1]],
+            [x + px, origin[1]],
             if cell.current { CURRENT } else { TEXT },
             &cell.label,
         );
         if clicked && inside(min, max) {
             press = Some(PickerInput::ClickDriveCell(index));
         }
-        x += width + 6.0;
+        x += width + py;
     }
     if let Some(field) = &view.path_field {
-        let min = [x + 6.0, origin[1] - 3.0];
-        let max = [right, origin[1] + line + 3.0];
+        let min = [x + py, origin[1] - py];
+        let max = [right, origin[1] + line + py];
         list.add_rect(min, max, if field.editing { FIELD_EDIT } else { FIELD_BG })
             .filled(true)
-            .rounding(3.0)
+            .rounding(style::ROUNDING)
             .build();
         if field.focused || field.editing {
             list.add_rect(min, max, FOCUS_EDGE)
-                .rounding(3.0)
+                .rounding(style::ROUNDING)
                 .thickness(1.5)
                 .build();
         }
-        let space = max[0] - min[0] - 12.0;
+        let space = max[0] - min[0] - px * 2.0;
         let shown = clip_left(ui, &field.text, space * 0.8);
         let typed_width = ui.calc_text_size(&shown)[0];
         if field.selected {
             list.add_rect(
-                [min[0] + 5.0, origin[1] - 1.0],
-                [min[0] + 7.0 + typed_width, origin[1] + line + 1.0],
+                [min[0] + px - 1.0, origin[1] - 1.0],
+                [min[0] + px + 1.0 + typed_width, origin[1] + line + 1.0],
                 SELECTION,
             )
             .filled(true)
             .build();
         }
-        list.add_text([min[0] + 6.0, origin[1]], TEXT, &shown);
+        list.add_text([min[0] + px, origin[1]], TEXT, &shown);
         if field.editing {
             let ghost = field.ghost.as_deref().unwrap_or("");
-            list.add_text([min[0] + 6.0 + typed_width, origin[1]], DIM, ghost);
-            let caret_x = min[0] + 6.0 + typed_width;
+            list.add_text([min[0] + px + typed_width, origin[1]], DIM, ghost);
+            let caret_x = min[0] + px + typed_width;
             list.add_line([caret_x, origin[1]], [caret_x, origin[1] + line], TITLE)
                 .build();
         }

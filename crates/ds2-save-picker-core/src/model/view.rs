@@ -123,8 +123,37 @@ pub struct PickerView {
     pub rows: Vec<RowView>,
     /// A headline and one or two detail lines, when there is something to say.
     pub status: Option<PickerStatusMessage>,
-    /// The key help line for the bottom of the panel.
-    pub hint: &'static str,
+    /// The key help for the bottom of the panel: one button and one verb each.
+    pub hint: &'static [Hint],
+}
+
+/// Which control a hint names. The panel shows the button for the device the player is on, so the
+/// model names the job, not the key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HintKey {
+    /// Enter, or the pad's A.
+    Confirm,
+    /// Backspace, or the pad's B.
+    Back,
+    /// Left and Right, which page the list and move along the drive strip.
+    LeftRight,
+    /// Tab, or the pad's Y.
+    Tab,
+    /// Escape, or the pad's Start: leave the panel for the pause menu.
+    Close,
+}
+
+/// One entry of the key help: a control and what it does, in a word or two.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Hint {
+    /// The control.
+    pub key: HintKey,
+    /// What it does here.
+    pub verb: &'static str,
+}
+
+const fn hint(key: HintKey, verb: &'static str) -> Hint {
+    Hint { key, verb }
 }
 
 impl SavePickerModel {
@@ -270,37 +299,73 @@ impl SavePickerModel {
         let name = crate::path::leaf(path).unwrap_or_default();
         Some(
             PickerStatusMessage::new(
-                "OVERWRITE THIS SAVE?",
+                "Overwrite This Save?",
                 format!("{name} is already there. Its characters are replaced by yours."),
             )
             .with_second_detail(path.to_string_lossy()),
         )
     }
 
-    /// The key help for where the player is.
-    pub fn hint(&self) -> &'static str {
+    /// The key help for where the player is. Every stage but typing ends with Escape or Start,
+    /// which leaves the panel; while typing, Escape only stops the typing.
+    pub fn hint(&self) -> &'static [Hint] {
+        use HintKey::{Back, Close, Confirm, LeftRight, Tab};
+        const EDIT_PATH: &[Hint] = &[
+            hint(Tab, "Complete"),
+            hint(Confirm, "Go"),
+            hint(Back, "Cancel"),
+        ];
+        const EDIT_NAME: &[Hint] = &[hint(Confirm, "Save"), hint(Back, "Cancel")];
+        const CHARACTERS: &[Hint] = &[
+            hint(Confirm, "Load"),
+            hint(Back, "Files"),
+            hint(Close, "Back"),
+        ];
+        const OVERWRITE: &[Hint] = &[
+            hint(Confirm, "Answer"),
+            hint(Back, "Keep File"),
+            hint(Close, "Back"),
+        ];
+        const DRIVE_PATH: &[Hint] = &[
+            hint(Confirm, "Type Path"),
+            hint(LeftRight, "Drive"),
+            hint(Back, "Up"),
+            hint(Close, "Back"),
+        ];
+        const DRIVE: &[Hint] = &[
+            hint(LeftRight, "Drive"),
+            hint(Confirm, "Open"),
+            hint(Back, "Up"),
+            hint(Close, "Back"),
+        ];
+        const DESTINATION: &[Hint] = &[
+            hint(Confirm, "Choose"),
+            hint(Back, "Up"),
+            hint(LeftRight, "Page"),
+            hint(Tab, "Type Path"),
+            hint(Close, "Back"),
+        ];
+        const FILES: &[Hint] = &[
+            hint(Confirm, "Open"),
+            hint(Back, "Up"),
+            hint(LeftRight, "Page"),
+            hint(Tab, "Type Path"),
+            hint(Close, "Back"),
+        ];
         match (self.editing(), &self.stage) {
-            (Some(EditTarget::Path), _) => {
-                "TYPE A FOLDER   TAB COMPLETES   ENTER GOES THERE   BACK CANCELS"
-            }
-            (Some(EditTarget::FileName), _) => "TYPE A NAME   ENTER SAVES   BACK CANCELS",
-            (None, Stage::Characters { .. }) => {
-                "ENTER LOADS THAT CHARACTER   BACK RETURNS TO FILES"
-            }
-            (None, Stage::ConfirmOverwrite { .. }) => "ENTER ANSWERS   BACK KEEPS THE FILE",
+            (Some(EditTarget::Path), _) => EDIT_PATH,
+            (Some(EditTarget::FileName), _) => EDIT_NAME,
+            (None, Stage::Characters { .. }) => CHARACTERS,
+            (None, Stage::ConfirmOverwrite { .. }) => OVERWRITE,
             (None, Stage::Files) if self.drive_row() == Some(self.cursor) => {
                 if self.path_focused {
-                    "ENTER TYPES A PATH   LEFT/RIGHT CHANGES DRIVE   BACK GOES UP"
+                    DRIVE_PATH
                 } else {
-                    "LEFT/RIGHT CHANGES DRIVE   ENTER OPENS ITS ROOT   BACK GOES UP"
+                    DRIVE
                 }
             }
-            (None, Stage::Files) if self.is_destination() => {
-                "ENTER CHOOSES   BACK GOES UP   LEFT/RIGHT PAGES   TAB TYPES A PATH"
-            }
-            (None, Stage::Files) => {
-                "ENTER OPENS   BACK GOES UP   LEFT/RIGHT PAGES   TAB TYPES A PATH"
-            }
+            (None, Stage::Files) if self.is_destination() => DESTINATION,
+            (None, Stage::Files) => FILES,
         }
     }
 }

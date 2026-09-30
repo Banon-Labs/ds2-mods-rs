@@ -18,6 +18,9 @@
 //! switched off nor draw beside the selector. [`install`] is idempotent and every feature that
 //! draws calls it.
 
+pub mod atlas;
+pub mod ebl;
+pub mod fefont;
 pub mod frame_hook;
 pub mod game_hud;
 mod log;
@@ -25,6 +28,8 @@ mod log;
 pub mod panels;
 #[cfg(windows)]
 mod present;
+pub mod status_strip;
+pub mod style;
 
 pub use game_hud::game_hud_visible;
 pub use log::{LOG_PREFIX, LogFn, set_logger};

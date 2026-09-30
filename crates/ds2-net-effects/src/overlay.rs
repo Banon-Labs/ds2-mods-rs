@@ -10,7 +10,9 @@
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::time::Instant;
 
+use ds2_overlay::{status_strip, style};
 use hudhook::imgui::Ui;
 
 use crate::LOG_PREFIX;
@@ -30,12 +32,14 @@ static VISIBLE_DRAWS: AtomicU64 = AtomicU64::new(0);
 /// How many lines the last draw drew; `usize::MAX` before the first.
 static LAST_LINE_COUNT: AtomicUsize = AtomicUsize::new(usize::MAX);
 
-const PANEL: [f32; 4] = [0.0, 0.0, 0.0, 0.68];
-const CURSOR_BAND: [f32; 4] = [1.0, 1.0, 1.0, 0.14];
-const TITLE: [f32; 4] = [0.95, 0.90, 0.78, 1.0];
-const ROW: [f32; 4] = [0.96, 0.94, 0.88, 1.0];
-const CURSOR: [f32; 4] = [1.0, 0.85, 0.35, 1.0];
-const HINT: [f32; 4] = [0.70, 0.70, 0.66, 1.0];
+// The game's own palette (`ds2_overlay::style`). The cursor row is told by its band and its `>`,
+// and is drawn in TEXT: bronze does not reach 4.5:1 on the band.
+const PANEL: [f32; 4] = style::with_alpha(style::INK_0, 0.85);
+const CURSOR_BAND: [f32; 4] = style::INK_2;
+const TITLE: [f32; 4] = style::TEXT;
+const ROW: [f32; 4] = style::TEXT;
+const CURSOR: [f32; 4] = style::TEXT;
+const HINT: [f32; 4] = style::TEXT_DIM;
 const PADDING: f32 = 8.0;
 
 /// Whether the F9 toggle is on, so the glyph is drawn. Set by the frame consumer on each toggle.
@@ -44,12 +48,18 @@ static GLYPH_ON: AtomicBool = AtomicBool::new(false);
 /// What the last panel call did about the glyph, so each change is one log line.
 static GLYPH_DRAWN: AtomicBool = AtomicBool::new(false);
 
-const GLYPH_DISC: [f32; 4] = [0.0, 0.0, 0.0, 0.62];
-const GLYPH_GOLD: [f32; 4] = [1.0, 0.82, 0.30, 1.0];
+/// When the glyph's name started showing under its tile; `None` once it has had its seconds.
+static NAME_SINCE: Mutex<Option<Instant>> = Mutex::new(None);
+
+/// The name the strip shows under the sparkle after the toggle is switched on.
+const NAME: &str = "Net Effects";
 
 /// Show or hide the toggle's glyph from the next frame on.
 pub(crate) fn set_glyph(on: bool) {
     GLYPH_ON.store(on, Ordering::Relaxed);
+    if let Ok(mut since) = NAME_SINCE.lock() {
+        *since = on.then(Instant::now);
+    }
 }
 
 /// Hand the next frame's lines to the panel.
@@ -91,23 +101,36 @@ fn draw_glyph(ui: &Ui, display: [f32; 2]) {
         return;
     }
     let list = ui.get_foreground_draw_list();
-    list.add_circle(g.center, g.radius, GLYPH_DISC)
+    list.add_rect(g.tile.min, g.tile.max, status_strip::TILE)
         .filled(true)
-        .num_segments(32)
         .build();
-    list.add_circle(g.center, g.radius - g.thickness / 2.0, GLYPH_GOLD)
-        .thickness(g.thickness)
-        .num_segments(32)
+    list.add_rect(g.tile.min, g.tile.max, status_strip::INK)
+        .thickness(style::FRAME_PX)
         .build();
-    for ray in g.rays {
-        list.add_line(ray.inner, ray.outer, GLYPH_GOLD)
-            .thickness(g.thickness)
+    for (colour, extra) in [(status_strip::SHADOW, 2.0), (status_strip::INK, 0.0)] {
+        for ray in g.rays {
+            list.add_line(ray.inner, ray.outer, colour)
+                .thickness(g.thickness + extra)
+                .build();
+        }
+        list.add_circle(g.center, g.core + extra / 2.0, colour)
+            .filled(true)
+            .num_segments(16)
             .build();
     }
-    list.add_circle(g.center, g.core, GLYPH_GOLD)
-        .filled(true)
-        .num_segments(16)
-        .build();
+    let Ok(mut since) = NAME_SINCE.lock() else {
+        return;
+    };
+    let Some(started) = *since else {
+        return;
+    };
+    if !status_strip::shows_name(started.elapsed().as_secs_f32()) {
+        *since = None;
+        return;
+    }
+    let at = status_strip::name_origin(&g.tile, ui.calc_text_size(NAME)[0]);
+    list.add_text([at[0] + 1.0, at[1] + 1.0], status_strip::SHADOW, NAME);
+    list.add_text(at, style::TEXT, NAME);
 }
 
 /// The panel's draw function, called by `ds2-overlay` once per frame.

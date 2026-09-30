@@ -2,14 +2,16 @@
 //!
 //! # The glyph
 //!
-//! A sparkle, drawn from imgui vector primitives and nothing of the game's: a dark disc with a
-//! gold rim, a gold dot in the middle and eight gold rays around it. It sits at the top centre of
-//! the screen -- the top left is the game's health and stamina, the top right is
-//! `ds2-weapon-sync`'s swords, and the selector bar is on the left under the health bars. It is
-//! drawn while the toggle is on and not at all while it is off.
+//! A sparkle, drawn from imgui vector primitives and nothing of the game's: a dot in the middle
+//! and eight rays around it, on its tile in the status strip (`ds2_overlay::status_strip`,
+//! [`Slot::NetEffects`]) top right, beside `ds2-weapon-sync`'s swords and helm. It used to sit
+//! alone at the top centre on a round disc. It is drawn while the toggle is on and not at all
+//! while it is off.
 //!
 //! Everything here is geometry and bytes, so the host tests reach it; the drawing is in
 //! `overlay.rs`.
+
+use ds2_overlay::status_strip::{self, Slot, Tile};
 
 /// One ray of the sparkle: from `inner` to `outer`, in screen pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -23,9 +25,11 @@ pub struct Ray {
 /// Where and how large the glyph is on a screen of a given size.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Glyph {
-    /// Centre of the disc.
+    /// The strip tile the sparkle is drawn on.
+    pub tile: Tile,
+    /// Centre of the tile.
     pub center: [f32; 2],
-    /// Radius of the disc and its rim.
+    /// How far the longest ray may reach from the centre.
     pub radius: f32,
     /// Radius of the dot in the middle.
     pub core: f32,
@@ -38,19 +42,14 @@ pub struct Glyph {
 /// How many rays the sparkle has.
 pub const RAYS: usize = 8;
 
-/// The glyph's radius as a share of the screen height: 28 px at 1272, 24 px at 1080.
-pub const RADIUS_OF_HEIGHT: f32 = 0.022;
-
-/// The smallest radius drawn, so a small window still gets a readable glyph.
-pub const MIN_RADIUS: f32 = 12.0;
-
-/// Gap between the top of the screen and the top of the disc, in radii.
-pub const TOP_MARGIN_RADII: f32 = 0.9;
+/// The sparkle's reach as a share of the tile's side.
+pub const RADIUS_OF_TILE: f32 = 0.45;
 
 /// Lay the glyph out on a `display` of `[width, height]` pixels.
 pub fn layout(display: [f32; 2]) -> Glyph {
-    let radius = (display[1] * RADIUS_OF_HEIGHT).max(MIN_RADIUS);
-    let center = [display[0] * 0.5, radius * (1.0 + TOP_MARGIN_RADII)];
+    let tile = status_strip::tile(display, Slot::NetEffects);
+    let radius = tile.size * RADIUS_OF_TILE;
+    let center = tile.centre();
     let rays = core::array::from_fn(|i| {
         let angle = i as f32 * core::f32::consts::TAU / RAYS as f32;
         // Clockwise from straight up, in screen coordinates (y grows downwards).
@@ -64,6 +63,7 @@ pub fn layout(display: [f32; 2]) -> Glyph {
         }
     });
     Glyph {
+        tile,
         center,
         radius,
         core: radius * 0.24,
@@ -91,29 +91,20 @@ mod tests {
     }
 
     #[test]
-    fn the_glyph_sits_at_the_top_centre_clear_of_both_top_corners() {
-        let display = [2260.0, 1272.0];
-        let g = layout(display);
-        assert!((g.center[0] - 1130.0).abs() < 0.01);
-        assert!(g.center[1] - g.radius > 0.0, "the disc is wholly on screen");
-        assert!(
-            g.center[1] + g.radius < display[1] * 0.1,
-            "it stays in the top tenth"
-        );
-        // The top-right quarter is weapon sync's; the top-left is the game's bars.
-        assert!(g.center[0] + g.radius < display[0] * 0.75);
-        assert!(g.center[0] - g.radius > display[0] * 0.25);
+    fn the_glyph_sits_in_its_strip_tile_off_the_game_bars() {
+        for display in [[2260.0, 1272.0], [1920.0, 1080.0], [1280.0, 720.0]] {
+            let g = layout(display);
+            let t = g.tile;
+            assert_eq!(t, status_strip::tile(display, Slot::NetEffects));
+            assert!(g.center[0] - g.radius >= t.min[0] && g.center[0] + g.radius <= t.max[0]);
+            assert!(g.center[1] - g.radius >= t.min[1] && g.center[1] + g.radius <= t.max[1]);
+            // The top-left is the game's health and stamina.
+            assert!(t.min[0] > display[0] * 0.5, "{display:?}");
+        }
     }
 
     #[test]
-    fn the_radius_follows_the_height_and_never_drops_below_the_floor() {
-        assert!((layout([2260.0, 1272.0]).radius - 27.984).abs() < 0.01);
-        assert!((layout([1920.0, 1080.0]).radius - 23.76).abs() < 0.01);
-        assert!((layout([320.0, 240.0]).radius - MIN_RADIUS).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn every_ray_is_inside_the_disc_and_outside_the_dot() {
+    fn every_ray_is_inside_the_reach_and_outside_the_dot() {
         let g = layout([1920.0, 1080.0]);
         for ray in g.rays {
             let inner = distance(ray.inner, g.center);

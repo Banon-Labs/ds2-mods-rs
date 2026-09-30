@@ -22,6 +22,9 @@ repository.workspace = true
 # chain is ever built, and the HUD fields `game_hud` reads. Constants only, so it is a host
 # dependency too: the host tests of `game_hud::decide` use the state values.
 ds2-rva.workspace = true
+# Inflates the game's own FeFont bundles (`fefont.rs`) so the panels draw in DARK SOULS II's typeface
+# without shipping it. Pure Rust, host-testable.
+miniz_oxide.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 ds2-game-base.workspace = true

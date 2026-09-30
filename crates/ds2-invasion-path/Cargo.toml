@@ -42,11 +42,12 @@ ds2-hotkey-config.workspace = true
 # Inflates the game's own effect bundle so `stone_effect` can build the lit Prism Stone
 # from the player's install instead of shipping a copy of game data. Pure Rust, host-testable.
 miniz_oxide.workspace = true
+# The status strip's tile geometry and the palette, which `hud`'s glyph is laid out in. Host code,
+# and on Windows it is also the `Present` detour the route lines draw from.
+ds2-overlay.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 ds2-game-base.workspace = true
-# The `Present` detour, which draws the route lines from its drawer table.
-ds2-overlay.workspace = true
 # MinHook, for the game-tick and constant-buffer capture detours.
 ds2-hook.workspace = true
 # THE FIRST THIRD-PARTY RUNTIME DEPENDENCY IN THIS WORKSPACE THAT IS NOT `dearxan`, and it is

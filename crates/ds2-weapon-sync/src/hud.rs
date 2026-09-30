@@ -13,19 +13,22 @@
 //! frame at all, so the frame the game drew goes out untouched.
 
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::time::Instant;
 
+use ds2_overlay::status_strip;
+use ds2_overlay::style;
 use hudhook::imgui::Ui;
 
 use crate::glyph::{self, Glyph};
 use crate::install::{enabled, feature, log, logger};
 use crate::policy::Kind;
 
-/// The tile behind the sign: dark enough to read it over a bright sky.
-const TILE: [f32; 4] = [0.0, 0.0, 0.0, 0.55];
-/// The tile's rim and the sign, in the gold the net-effects bar uses for its cursor.
-const GOLD: [f32; 4] = [1.0, 0.85, 0.35, 1.0];
-/// A dark outline under every stroke, so the gold keeps its edge against the tile's corners.
-const SHADOW: [f32; 4] = [0.0, 0.0, 0.0, 0.85];
+/// The tile behind the sign, the rim and strokes, and the outline under them: the status strip's
+/// colours, so every feature sign in the corner reads as one set.
+const TILE: [f32; 4] = status_strip::TILE;
+const INK: [f32; 4] = status_strip::INK;
+const SHADOW: [f32; 4] = status_strip::SHADOW;
 /// How much wider the outline is than the stroke it sits under, in pixels.
 const SHADOW_EXTRA: f32 = 2.0;
 
@@ -38,28 +41,41 @@ type VisibleFn = fn() -> bool;
 struct Sign {
     kind: Kind,
     name: &'static str,
+    /// What the player reads under the tile for `status_strip::NAME_SECONDS` after switching it on.
+    title: &'static str,
     layout: fn([f32; 2]) -> Glyph,
     /// Frames on which it was drawn.
     draws: AtomicU64,
     /// Set when the feature is turned on, cleared by the next draw, so the log says the sign came
     /// back on screen and not only that the key was pressed.
     announce_next_draw: AtomicBool,
+    /// Set when the feature is turned on; the next draw starts the name's clock from it. Kept
+    /// apart from `announce_next_draw`, which also re-arms on every return from a menu.
+    name_pending: AtomicBool,
+    /// When the name started showing.
+    name_since: Mutex<Option<Instant>>,
 }
 
 static SWORDS: Sign = Sign {
     kind: Kind::Weapon,
     name: "swords",
+    title: "Weapon Sync",
     layout: glyph::layout,
     draws: AtomicU64::new(0),
     announce_next_draw: AtomicBool::new(true),
+    name_pending: AtomicBool::new(true),
+    name_since: Mutex::new(None),
 };
 
 static HELM: Sign = Sign {
     kind: Kind::Armor,
     name: "helm",
+    title: "Armor Sync",
     layout: glyph::helm_layout,
     draws: AtomicU64::new(0),
     announce_next_draw: AtomicBool::new(true),
+    name_pending: AtomicBool::new(true),
+    name_since: Mutex::new(None),
 };
 
 fn sign(kind: Kind) -> &'static Sign {
@@ -74,6 +90,7 @@ pub(crate) fn toggled(kind: Kind, on: bool) {
     let s = sign(kind);
     if on {
         s.announce_next_draw.store(true, Ordering::Release);
+        s.name_pending.store(true, Ordering::Release);
     } else {
         log(format_args!(
             "{} hud: {} hidden -- nothing is drawn while it is off",
@@ -128,6 +145,34 @@ fn draw(s: &Sign, ui: &Ui) {
         ));
     }
     paint(ui, &glyph);
+    paint_name(s, ui, display);
+}
+
+/// The feature's name under its tile, for `status_strip::NAME_SECONDS` after it was switched on.
+fn paint_name(s: &Sign, ui: &Ui, display: [f32; 2]) {
+    let Ok(mut since) = s.name_since.lock() else {
+        return;
+    };
+    if s.name_pending.swap(false, Ordering::AcqRel) {
+        *since = Some(Instant::now());
+    }
+    let Some(started) = *since else {
+        return;
+    };
+    let seconds = started.elapsed().as_secs_f32();
+    if !status_strip::shows_name(seconds) {
+        *since = None;
+        return;
+    }
+    let slot = match s.kind {
+        Kind::Weapon => status_strip::Slot::WeaponSync,
+        Kind::Armor => status_strip::Slot::ArmorSync,
+    };
+    let tile = status_strip::tile(display, slot);
+    let at = status_strip::name_origin(&tile, ui.calc_text_size(s.title)[0]);
+    let list = ui.get_foreground_draw_list();
+    list.add_text([at[0] + 1.0, at[1] + 1.0], SHADOW, s.title);
+    list.add_text(at, style::TEXT, s.title);
 }
 
 fn paint(ui: &Ui, glyph: &Glyph) {
@@ -136,9 +181,9 @@ fn paint(ui: &Ui, glyph: &Glyph) {
         .filled(true)
         .rounding(glyph.rounding)
         .build();
-    list.add_rect(glyph.min, glyph.max, GOLD)
+    list.add_rect(glyph.min, glyph.max, INK)
         .rounding(glyph.rounding)
-        .thickness(1.5)
+        .thickness(style::FRAME_PX)
         .build();
     for stroke in &glyph.strokes {
         list.add_line(stroke.from, stroke.to, SHADOW)
@@ -151,12 +196,12 @@ fn paint(ui: &Ui, glyph: &Glyph) {
             .build();
     }
     for stroke in &glyph.strokes {
-        list.add_line(stroke.from, stroke.to, GOLD)
+        list.add_line(stroke.from, stroke.to, INK)
             .thickness(stroke.width)
             .build();
     }
     for dot in &glyph.dots {
-        list.add_circle(dot.centre, dot.radius, GOLD)
+        list.add_circle(dot.centre, dot.radius, INK)
             .filled(true)
             .build();
     }

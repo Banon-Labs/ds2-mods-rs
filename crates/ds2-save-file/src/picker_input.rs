@@ -143,6 +143,8 @@ type XInputGetStateFn = unsafe extern "system" fn(u32, *mut XInputState) -> u32;
 pub(crate) struct Reader {
     held: Vec<u32>,
     xinput: Option<XInputGetStateFn>,
+    /// Whether the last press came from the pad, so the key help names pad buttons.
+    pad_last: bool,
 }
 
 impl Reader {
@@ -151,7 +153,13 @@ impl Reader {
         Self {
             held: vec![0; NAV_KEYS.len() + 26 + 10 + SYMBOL_KEYS.len() + PAD_BUTTONS.len()],
             xinput: xinput_get_state(),
+            pad_last: false,
         }
+    }
+
+    /// Whether the player last pressed something on the pad rather than the keyboard.
+    pub(crate) fn pad_last(&self) -> bool {
+        self.pad_last
     }
 
     /// Everything pressed since the last call, in a fixed order. Nothing while another window has
@@ -242,6 +250,10 @@ impl Reader {
                 Press::Confirm | Press::Back | Press::Tab | Press::Close
             );
             step(buttons & bit != 0, press, repeats, &mut self.held);
+        }
+        // A press this frame with a pad button down came from the pad; any other, the keyboard.
+        if !pressed.is_empty() {
+            self.pad_last = PAD_BUTTONS.iter().any(|(bit, _)| buttons & bit != 0);
         }
         pressed
     }

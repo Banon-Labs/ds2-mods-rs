@@ -45,6 +45,8 @@ pub(crate) enum Press {
     Backspace,
     /// Escape or Start: leave a field or a list, then the panel.
     Close,
+    /// X: Run, from anywhere a press moves the cursor.
+    Run,
     Char(char),
 }
 
@@ -101,16 +103,18 @@ const PAD_LB: u16 = 0x0100;
 const PAD_RB: u16 = 0x0200;
 const PAD_A: u16 = 0x1000;
 const PAD_B: u16 = 0x2000;
+const PAD_X: u16 = 0x4000;
 const PAD_START: u16 = 0x0010;
 
 /// The pad buttons and what each one means.
-const PAD_BUTTONS: [(u16, Press); 9] = [
+const PAD_BUTTONS: [(u16, Press); 10] = [
     (PAD_UP, Press::Up),
     (PAD_DOWN, Press::Down),
     (PAD_LEFT, Press::Left),
     (PAD_RIGHT, Press::Right),
     (PAD_A, Press::Confirm),
     (PAD_B, Press::Back),
+    (PAD_X, Press::Run),
     (PAD_LB, Press::PageUp),
     (PAD_RB, Press::PageDown),
     (PAD_START, Press::Close),
@@ -133,6 +137,8 @@ type XInputGetStateFn = unsafe extern "system" fn(u32, *mut XInputState) -> u32;
 pub(crate) struct Reader {
     held: Vec<u32>,
     xinput: Option<XInputGetStateFn>,
+    /// Whether the last press came from the pad, so the key help names pad buttons.
+    pad_last: bool,
 }
 
 impl Reader {
@@ -141,7 +147,13 @@ impl Reader {
         Self {
             held: vec![0; NAV_KEYS.len() + 26 + 10 + 10 + SYMBOL_KEYS.len() + PAD_BUTTONS.len()],
             xinput: xinput_get_state(),
+            pad_last: false,
         }
+    }
+
+    /// Whether the player last pressed something on the pad rather than the keyboard.
+    pub(crate) fn pad_last(&self) -> bool {
+        self.pad_last
     }
 
     /// Everything pressed since the last call, in a fixed order. Nothing while another window has
@@ -206,8 +218,15 @@ impl Reader {
             );
         }
         for (bit, press) in PAD_BUTTONS {
-            let repeats = !matches!(press, Press::Confirm | Press::Back | Press::Close);
+            let repeats = !matches!(
+                press,
+                Press::Confirm | Press::Back | Press::Close | Press::Run
+            );
             step(buttons & bit != 0, press, repeats, &mut self.held);
+        }
+        // A press this frame with a pad button down came from the pad; any other, the keyboard.
+        if !pressed.is_empty() {
+            self.pad_last = PAD_BUTTONS.iter().any(|(bit, _)| buttons & bit != 0);
         }
         pressed
     }

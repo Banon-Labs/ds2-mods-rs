@@ -7,7 +7,7 @@
 //! that is not on screen. The keyboard is only needed to type a weapon name; every other control is
 //! reached here and changed with a press.
 
-use crate::model::{Grip, Mode, Objective, PanelState, SL_MAX, STAT_COUNT, STAT_MAX, STAT_MIN};
+use crate::model::{Mode, PanelState, SL_MAX, STAT_COUNT, STAT_MAX, STAT_MIN};
 
 /// One thing the cursor can sit on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,10 +24,10 @@ pub enum Control {
     Weapon,
     /// The infusion drop-down.
     Infusion,
-    /// One grip button: what Optimize for weapon and Generate Build build for.
-    Grip(Grip),
-    /// One objective button.
-    Objective(Objective),
+    /// The grip, which A cycles: what Optimize for weapon and Generate Build build for.
+    Grip,
+    /// The goal (objective), which A cycles.
+    Objective,
     /// One mode tab.
     Mode(Mode),
     /// Weapons for stats: one-handed only.
@@ -107,18 +107,21 @@ pub struct Shape {
     pub fixes: usize,
 }
 
-/// The controls, row by row, as the panel draws them.
+/// The controls, row by row, as the panel draws them: the header's two buttons, the soul level and
+/// the nine stats in one row, the mode tabs, the weapon's parameters, then the mode's options.
 pub fn layout(shape: Shape) -> Vec<Vec<Control>> {
     let mut rows = vec![
-        vec![Control::Close],
-        (0..STAT_COUNT).map(Control::Stat).collect(),
-        vec![Control::SlOverride, Control::UseCharacter],
-        [Control::Weapon, Control::Infusion]
-            .into_iter()
-            .chain(Grip::ALL.map(Control::Grip))
-            .chain(Objective::ALL.map(Control::Objective))
+        vec![Control::UseCharacter, Control::Close],
+        std::iter::once(Control::SlOverride)
+            .chain((0..STAT_COUNT).map(Control::Stat))
             .collect(),
         Mode::ALL.map(Control::Mode).to_vec(),
+        vec![
+            Control::Weapon,
+            Control::Infusion,
+            Control::Grip,
+            Control::Objective,
+        ],
     ];
     let mut options = match shape.mode {
         Mode::WeaponsForStats => vec![
@@ -178,7 +181,8 @@ pub fn resolve(rows: &[Vec<Control>], cursor: Control) -> Control {
 
 /// Where one press of `dir` takes the cursor.
 ///
-/// Left and Right stop at a row's ends; Up and Down stop at the top and bottom rows, and land at
+/// Left and Right wrap from a row's one end to its other; Up and Down stop at the top and bottom
+/// rows, and land at
 /// the same fraction of the way along the new row, so going down from the ninth stat lands at the
 /// right-hand end of the row below rather than its start.
 pub fn step(rows: &[Vec<Control>], cursor: Control, dir: Dir) -> Control {
@@ -187,8 +191,11 @@ pub fn step(rows: &[Vec<Control>], cursor: Control, dir: Dir) -> Control {
         return cursor;
     };
     let target_row = match dir {
-        Dir::Left => return rows[row][column.saturating_sub(1)],
-        Dir::Right => return rows[row][(column + 1).min(rows[row].len() - 1)],
+        Dir::Left => {
+            let len = rows[row].len();
+            return rows[row][(column + len - 1) % len];
+        }
+        Dir::Right => return rows[row][(column + 1) % rows[row].len()],
         Dir::Up if row == 0 => return cursor,
         Dir::Up => row - 1,
         Dir::Down if row + 1 == rows.len() => return cursor,
@@ -375,58 +382,83 @@ mod tests {
     }
 
     #[test]
-    fn the_grip_sits_between_the_infusion_and_the_objective() {
+    fn the_grip_sits_between_the_infusion_and_the_goal() {
         let rows = layout(shape(Mode::OptimizeForWeapon));
-        assert_eq!(
-            walk(&rows, Control::Infusion, &[Dir::Right, Dir::Right]),
-            Control::Grip(Grip::TwoHanded)
-        );
-        assert_eq!(
-            step(&rows, Control::Grip(Grip::TwoHanded), Dir::Right),
-            Control::Objective(Objective::Damage)
-        );
+        assert_eq!(step(&rows, Control::Infusion, Dir::Right), Control::Grip);
+        assert_eq!(step(&rows, Control::Grip, Dir::Right), Control::Objective);
     }
 
+    /// The player asked for it on 2026-09-29: a direction off a row's end comes back at its other
+    /// end rather than stopping.
     #[test]
-    fn left_and_right_walk_the_stats_and_stop_at_the_ends() {
+    fn left_and_right_walk_the_level_and_stats_and_wrap_at_the_ends() {
         let rows = layout(shape(Mode::WeaponsForStats));
-        assert_eq!(step(&rows, Control::Stat(0), Dir::Left), Control::Stat(0));
+        assert_eq!(
+            step(&rows, Control::SlOverride, Dir::Left),
+            Control::Stat(8)
+        );
+        assert_eq!(
+            step(&rows, Control::SlOverride, Dir::Right),
+            Control::Stat(0)
+        );
         assert_eq!(step(&rows, Control::Stat(0), Dir::Right), Control::Stat(1));
-        assert_eq!(step(&rows, Control::Stat(8), Dir::Right), Control::Stat(8));
+        assert_eq!(
+            step(&rows, Control::Stat(8), Dir::Right),
+            Control::SlOverride
+        );
+        assert_eq!(
+            step(&rows, Control::Close, Dir::Right),
+            Control::UseCharacter
+        );
+        // A row of one stays where it is.
+        let rows = layout(Shape {
+            results: true,
+            ..shape(Mode::WeaponsForStats)
+        });
+        assert_eq!(step(&rows, Control::Results, Dir::Left), Control::Results);
     }
 
+    /// Measured on 22cafa3: Down from the weapon went to the mode tabs, which were drawn under the
+    /// weapon's parameters although those parameters belong to the tab. The tabs now come first.
     #[test]
     fn up_and_down_keep_the_place_along_the_row() {
         let rows = layout(shape(Mode::WeaponsForStats));
-        // Ninth of nine stats -> the right-hand end of [override, use character].
+        // The header's two buttons sit over the two ends of the stats row.
+        assert_eq!(step(&rows, Control::Stat(8), Dir::Up), Control::Close);
         assert_eq!(
-            step(&rows, Control::Stat(8), Dir::Down),
+            step(&rows, Control::SlOverride, Dir::Up),
             Control::UseCharacter
         );
-        assert_eq!(
-            step(&rows, Control::Stat(0), Dir::Down),
-            Control::SlOverride
-        );
-        // Close sits alone above the stats and lands on the first.
-        assert_eq!(step(&rows, Control::Close, Dir::Down), Control::Stat(0));
-        assert_eq!(step(&rows, Control::Stat(4), Dir::Up), Control::Close);
+        assert_eq!(step(&rows, Control::Close, Dir::Down), Control::Stat(8));
         assert_eq!(step(&rows, Control::Close, Dir::Up), Control::Close);
+        assert_eq!(
+            step(&rows, Control::SlOverride, Dir::Down),
+            Control::Mode(Mode::WeaponsForStats)
+        );
+        assert_eq!(
+            step(&rows, Control::Mode(Mode::WeaponsForStats), Dir::Down),
+            Control::Weapon
+        );
+        assert_eq!(
+            step(&rows, Control::Mode(Mode::SimilarBuilds), Dir::Down),
+            Control::Objective
+        );
     }
 
     #[test]
-    fn the_mode_tabs_lead_to_that_modes_options_and_run() {
+    fn the_parameters_lead_to_that_modes_options_and_run() {
         let rows = layout(shape(Mode::SimilarBuilds));
-        let options = walk(&rows, Control::Mode(Mode::WeaponsForStats), &[Dir::Down]);
+        let options = walk(&rows, Control::Weapon, &[Dir::Down]);
         assert_eq!(options, Control::SimilarK);
         assert_eq!(
             walk(&rows, options, &[Dir::Right, Dir::Right, Dir::Right]),
             Control::Run
         );
-        // Measured on c7afba5: in Optimize for weapon, Down from the mode tab went straight to
-        // Run, and the Best infusion button beside it answered to the mouse only.
+        // Measured on c7afba5: in Optimize for weapon, Down went straight to Run, and the Best
+        // infusion button beside it answered to the mouse only.
         let rows = layout(shape(Mode::OptimizeForWeapon));
         assert_eq!(
-            step(&rows, Control::Mode(Mode::OptimizeForWeapon), Dir::Down),
+            step(&rows, Control::Weapon, Dir::Down),
             Control::BestInfusion
         );
         assert_eq!(step(&rows, Control::BestInfusion, Dir::Right), Control::Run);

@@ -61,8 +61,8 @@ pub mod text;
 pub use model::{
     CHARACTER_BACK_ROW, CONFIRM_KEEP_ROW, CONFIRM_OVERWRITE_ROW, DEFAULT_POSIX_DRIVE,
     DEFAULT_ROW_CAPACITY, DRIVE_STRIP_MAX_CELLS, DriveCellKind, DriveCellView, EditTarget,
-    FieldView, PickerActivation, PickerEntry, PickerInput, PickerRow, PickerStage, PickerView,
-    RowKind, RowView, SavePickerModel,
+    FieldView, Hint, HintKey, PickerActivation, PickerEntry, PickerInput, PickerRow, PickerStage,
+    PickerView, RowKind, RowView, SavePickerModel,
 };
 pub use reason::{
     PickRejection, PickedSource, PickerOpenReason, PickerStatusMessage, accepts_pick,

@@ -682,3 +682,21 @@ fn the_running_games_own_extension_is_listed_in_both_modes() {
     assert!(names(&save).contains(&"DS2SOFS0000.co2".to_owned()));
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/// Escape or Start leaves the panel from every stage but typing, and the key help says so: the
+/// player asked for it on both Load Character and Save Game (2026-09-29).
+#[test]
+fn every_stage_but_typing_names_the_way_back_to_the_pause_menu() {
+    let close = |model: &SavePickerModel| {
+        model
+            .hint()
+            .iter()
+            .any(|hint| hint.key == HintKey::Close && hint.verb == "Back")
+    };
+    assert!(close(&files_model(DIR, listing(DIR, 3))));
+    assert!(close(&character_model(&[0])));
+    let mut typing = files_model(DIR, listing(DIR, 3));
+    typing.apply(PickerInput::Tab);
+    assert!(typing.editing().is_some(), "Tab starts typing a path");
+    assert!(!close(&typing));
+}

@@ -70,7 +70,9 @@ mod view;
 pub use drives::{DRIVE_STRIP_MAX_CELLS, DriveCellKind};
 pub use edit::EditTarget;
 pub use input::PickerInput;
-pub use view::{DriveCellView, FieldView, PickerStage, PickerView, RowKind, RowView};
+pub use view::{
+    DriveCellView, FieldView, Hint, HintKey, PickerStage, PickerView, RowKind, RowView,
+};
 
 /// Rows a surface is assumed to be able to draw until it says otherwise.
 ///

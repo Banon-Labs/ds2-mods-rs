@@ -1,9 +1,12 @@
-//! The on-screen sign that weapon sync is on: two crossed swords on a dark tile, top right.
+//! The on-screen sign that weapon sync is on: two crossed swords on a tile in the status strip.
 //!
 //! Drawn from code, not from a game texture: this module is only the geometry, lines and dots in
 //! back-buffer pixels, so it is tested on the host. `hud.rs` hands it to imgui's draw list. While
 //! the feature is off nothing is drawn at all -- the tile disappears, and `ds2-overlay` renders no
 //! imgui frame for it.
+
+use ds2_overlay::status_strip::{self, Slot};
+use ds2_overlay::style;
 
 /// A straight stroke from `from` to `to`, `width` pixels thick.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -40,13 +43,6 @@ pub struct Glyph {
     pub dots: Vec<Dot>,
 }
 
-/// The tile's side as a share of the back buffer's height.
-const SIZE_OF_HEIGHT: f32 = 0.045;
-
-/// The tile's side is never smaller or larger than this, in pixels.
-const SIZE_MIN: f32 = 32.0;
-const SIZE_MAX: f32 = 96.0;
-
 /// One sword in unit coordinates (0..1 across the tile, `y` down), pointing up and right: pommel,
 /// where the grip meets the guard, the tip, and the guard's half length.
 const POMMEL: [f32; 2] = [0.18, 0.82];
@@ -60,17 +56,11 @@ const GUARD_WIDTH: f32 = 0.065;
 const GRIP_WIDTH: f32 = 0.055;
 const POMMEL_RADIUS: f32 = 0.05;
 
-/// The tile's side, in pixels, for a back buffer this tall.
-#[must_use]
-pub fn size_for(display_height: f32) -> f32 {
-    (display_height * SIZE_OF_HEIGHT).clamp(SIZE_MIN, SIZE_MAX)
-}
-
 /// The glyph for a back buffer of `display` pixels, in its top-right corner half a tile in from
 /// both edges.
 #[must_use]
 pub fn layout(display: [f32; 2]) -> Glyph {
-    let (min, max, size) = tile(display, 0);
+    let (min, max, size) = tile(display, Slot::WeaponSync);
     let at = |unit: [f32; 2]| [min[0] + unit[0] * size, min[1] + unit[1] * size];
     let across = GUARD_HALF * core::f32::consts::FRAC_1_SQRT_2;
     // The guard lies across the blade: along (1, 1) for a blade along (1, -1).
@@ -110,21 +100,17 @@ pub fn layout(display: [f32; 2]) -> Glyph {
     Glyph {
         min,
         max,
-        rounding: size * 0.18,
+        rounding: style::ROUNDING,
         strokes,
         dots,
     }
 }
 
-/// Tile `index` counted leftwards from the top-right corner: tile 0 half a tile in from both
-/// edges, each next one a tile and a quarter further left. Answers `(min, max, side)`.
-fn tile(display: [f32; 2], index: u8) -> ([f32; 2], [f32; 2], f32) {
-    let size = size_for(display[1]);
-    let margin = size * 0.5;
-    let shift = f32::from(index) * size * 1.25;
-    let min = [display[0] - margin - size - shift, margin];
-    let max = [min[0] + size, min[1] + size];
-    (min, max, size)
+/// `slot`'s tile in the shared status strip (`ds2_overlay::status_strip`), top right. Answers
+/// `(min, max, side)`.
+fn tile(display: [f32; 2], slot: Slot) -> ([f32; 2], [f32; 2], f32) {
+    let t = status_strip::tile(display, slot);
+    (t.min, t.max, t.size)
 }
 
 /// The helm, in unit coordinates: a dome from the left cheek over the top to the right cheek, a
@@ -144,7 +130,7 @@ const HELM_RIVET: f32 = 0.045;
 /// sign is shown and hidden on its own.
 #[must_use]
 pub fn helm_layout(display: [f32; 2]) -> Glyph {
-    let (min, max, size) = tile(display, 1);
+    let (min, max, size) = tile(display, Slot::ArmorSync);
     let at = |unit: [f32; 2]| [min[0] + unit[0] * size, min[1] + unit[1] * size];
     let width = HELM_STROKE * size;
     let mut strokes = Vec::with_capacity(usize::from(HELM_DOME_SEGMENTS) + 4);
@@ -194,7 +180,7 @@ pub fn helm_layout(display: [f32; 2]) -> Glyph {
     Glyph {
         min,
         max,
-        rounding: size * 0.18,
+        rounding: style::ROUNDING,
         strokes,
         dots,
     }
@@ -280,13 +266,6 @@ mod tests {
             assert!(glyph.min[0] > display[0] / 2.0 && glyph.max[0] < display[0]);
             assert!(glyph.min[1] > 0.0 && glyph.max[1] < display[1] / 4.0);
         }
-    }
-
-    #[test]
-    fn the_size_follows_the_height_within_bounds() {
-        assert_eq!(size_for(100.0), SIZE_MIN);
-        assert_eq!(size_for(10_000.0), SIZE_MAX);
-        assert!((size_for(1272.0) - 57.24).abs() < 0.01);
     }
 
     #[test]
