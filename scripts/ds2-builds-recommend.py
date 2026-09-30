@@ -8,11 +8,12 @@
 Design: docs/DS2-BUILD-EMBEDDINGS.md. This is the first working cut, and it deviates from that
 design in ways that are said out loud here rather than hidden:
 
-* ITEM DATA IS THE PLANNER SITES', NOT THE GAME'S. Weapon/armor requirements, infusion attack and
-  scaling, armor defenses and weights come from SoulsPlanner's `ds2planner.min.js`; spell INT/FTH
-  requirements from MugenMonkey's `ds2application-*.js` (SoulsPlanner has none). Both are dumped to
-  JSON by `--sp-data` / `--mm-data` (see `dump_site_tables`). The design wants regulation params
-  and executable-derived formulas; neither is wired in yet.
+* MOST ITEM DATA IS THE PLANNER SITES', NOT THE GAME'S. Weapon/armor requirements, armor defenses
+  and weights come from SoulsPlanner's `ds2planner.min.js`, dumped to JSON by `--sp-data` /
+  `--mm-data` (see `dump_site_tables`) with MugenMonkey's tables. The regulation replaces the
+  physical stat defense table, every infusion's attack and scaling (shields aside), bleed and
+  poison, and the spells' requirements and slots, and alone supplies catalysts, spell hits, weapon
+  buffs and weapon elements (apply_regulation).
 * ARMOR IS SCORED PER POINT OF DEFENSE. A piece's value is its per-type defense weighted by what
   one point of that defense takes off one hit of the average opponent (threat_mix): the
   executable's per-hit formula, over every unique build on both mirrors that can hit, with
@@ -1043,29 +1044,18 @@ def _tab(data: Data, name: str, i: int) -> float:
     return t[max(0, min(i, len(t) - 1))] or 0
 
 
-#: WeaponStatsAffectParam row offset of the Enchanted infusion, `statsAffectId + t[8][1]`: the
-#: executable's 10x3 infusion table at 0x1410c3e10 has t[8] = {0, 8, 2} (EXE, read from
-#: darksoulsii-deobf.bin; docs/DS2-DPS-MECHANICS.md "Attack rating").
-ENCHANTED_STATS_AFFECT_OFFSET = 8
-
-
 def apply_regulation(data: Data) -> str:
-    """Replace two SoulsPlanner numbers with the game's, where the executable and regulation were
+    """Replace SoulsPlanner numbers with the game's, where the executable and regulation were
     read (docs/DS2-BUILD-MECHANICS.md section 6, docs/DS2-DPS-MECHANICS.md "Attack rating"):
 
     * `physicalDEFBonus[sum]` becomes PhysicalStatsPerLevelStatValuesParam
       `row[trunc((END+VIT+STR+DEX)/4)].defense`, the index the stats builder 0x14038d790 uses.
       SoulsPlanner's table is off by one at 180 of 393 sums.
-    * The Enchanted infusion's STR, DEX and INT (physicalByEnchant) coefficients become
-      WeaponStatsAffectParam[statsAffectId + 8] at the weapon's max reinforce level, times the
-      physical rate the infusion leaves (WeaponReinforceParam physicalRate +
-      addPhysicalRateByEnchanted, / 100). SoulsPlanner rounds them to 2 dp and has the Dagger's STR
-      at 0.06; the regulation says 0.053.
+    * Every infusion's attack bases and coefficients (regulation_attack), bleed and poison
+      (regulation_status), and the rest of the regulation_* readers below.
 
-    Weapons join by normalized itemname.fmg name (WeaponParam id == ItemParam id == text id). A
-    weapon whose regulation DEX/INT coefficients do not round to SoulsPlanner's is left alone, as a
-    join that picked the wrong row. Returns a one-line summary; SoulsPlanner's numbers stay when
-    the game's files cannot be read."""
+    Weapons join by normalized itemname.fmg name (WeaponParam id == ItemParam id == text id).
+    Returns a one-line summary; SoulsPlanner's numbers stay when the game's files cannot be read."""
     import importlib.util
     spec = importlib.util.spec_from_file_location("ds2attacks", Path(__file__).parent / "ds2-attacks-extract.py")
     ex = importlib.util.module_from_spec(spec)
@@ -1083,41 +1073,19 @@ def apply_regulation(data: Data) -> str:
         members = reg.load(reg.DEFAULT_REGULATION, reg.REGULATION_KEY_HEX)
         emevd = ex.load_module("ds2emevd", "ds2-emevd.py")
     except (OSError, SystemExit, KeyError) as e:
-        return f"regulation unreadable ({e}); SoulsPlanner's defense table and Enchanted coefficients kept"
+        return f"regulation unreadable ({e}); SoulsPlanner's numbers kept"
     rows = d["PhysicalStatsPerLevelStatValuesParam"]
     top = max(map(int, rows))
     old = data.sp["physicalDEFBonus"]
     new = [None if s < 4 else rows[str(min(top, s // 4))]["defense"] for s in range(len(old))]
     moved = sum(1 for a, b in zip(old, new) if b is not None and a != b)
     data.sp["physicalDEFBonus"] = new
-    by_name: dict[str, dict] = {}
-    for wid, w in d["WeaponParam"].items():
-        by_name.setdefault(norm(names.get(wid, "")), w)
-    fixed, refused = 0, 0
-    for key, w in data.weapons.items():
-        row = (w.get("infusions") or {}).get("Enchanted")
-        sc = (row or {}).get("atkScale")
-        wp = by_name.get(norm(w.get("name", key)))
-        if not sc or not wp:
-            continue
-        r = d["WeaponReinforceParam"].get(str(wp["weaponReinforceId"]))
-        c = r and d["WeaponStatsAffectParam"].get(str(r["statsAffectId"] + ENCHANTED_STATS_AFFECT_OFFSET))
-        if not c:
-            continue
-        lv, rate = r["maxLevel"], (r["physicalRate"] + r["addPhysicalRateByEnchanted"]) / 100
-        game = {"strength": c[f"physicalByStrength{lv}"] * rate, "dexterity": c[f"physicalByDexterity{lv}"] * rate,
-                "magic": c[f"physicalByEnchant{lv}"] * rate}
-        if any(abs(round(game[k], 2) - sc.get(k, 0)) > 0.011 for k in ("dexterity", "magic")):
-            refused += 1
-            continue
-        sc.update({k: round(v, 4) for k, v in game.items()})
-        fixed += 1
-    return (f"regulation: physical stat defense from the game's table ({moved} sums moved), Enchanted "
-            f"coefficients from WeaponStatsAffectParam for {fixed} weapons ({refused} left: join disagreed); "
+    return (f"regulation: physical stat defense from the game's table ({moved} sums moved); "
             + regulation_spells(data, d, names) + "; " + regulation_spell_hits(data, d, names) + "; "
             + regulation_hit_flat(data, d) + "; "
             + regulation_buffs(data, emevd, members, d, names) + "; " + regulation_weapon_elements(data, d, names)
-            + "; " + regulation_damage_scale(data, d, names) + "; " + regulation_status(data, d, names))
+            + "; " + regulation_damage_scale(data, d, names) + "; " + regulation_status(data, d, names)
+            + "; " + regulation_attack(data, d, names))
 
 
 def regulation_spells(data: Data, d: dict, names: dict) -> str:
@@ -1329,6 +1297,93 @@ def regulation_status(data: Data, d: dict, names: dict) -> str:
             f"{round(100 / unit)} ({dropped} with no row lost the site's)")
 
 
+#: Damage type -> (RATE_FIELDS slot, WeaponReinforceParam maximum<...> stem, atkScale key ->
+#: WeaponStatsAffectParam stem). Physical scales off STR and DEX, each element off its own stem.
+DAMAGE_TERMS = {"physical": (0, "Physical", {"strength": "physicalByStrength", "dexterity": "physicalByDexterity"}),
+                "magic": (1, "Magic", {"magic": "magic"}), "lightning": (2, "Thunder", {"lightning": "thunder"}),
+                "fire": (3, "Fire", {"fire": "fire"}), "dark": (4, "Dark", {"dark": "dark"})}
+#: The atkScale keys regulation_attack owns; "modifier" (Mundane) and the status keys are not.
+DAMAGE_SCALES = ["strength", "dexterity", "magic", "fire", "lightning", "dark"]
+
+
+def infusion_attack(d: dict, r: dict, inf: str) -> tuple[dict, dict] | None:
+    """The damage terms of WeaponReinforceParam row `r` infused with `inf`, keyed as the site keys
+    them: `atk` type -> base, `atkScale` stat -> coefficient. None when the regulation has no
+    WeaponStatsAffectParam row for the infusion. Enchanted's INT term is physicalByEnchant x the
+    physical rate under "magic", which attack_rating adds to physical; Mundane has no STR or DEX
+    term."""
+    a = d["WeaponStatsAffectParam"].get(str(r["statsAffectId"] + INFUSION_MOVE[inf][2]))
+    if not a:
+        return None
+    rates, lv = infused_rates(r, inf), r["maxLevel"]
+    atk, sc = {}, {}
+    for k, (slot, stem, stems) in DAMAGE_TERMS.items():
+        rate = rates[slot] / 100
+        if r[f"maximum{stem}"] * rate:
+            atk[k] = r[f"maximum{stem}"] * a["baseValueScale"] * rate
+        for s, sa in stems.items():
+            if a[f"{sa}{lv}"] * rate:
+                sc[s] = a[f"{sa}{lv}"] * rate
+    if inf == "Enchanted":
+        sc["magic"] = a[f"physicalByEnchant{lv}"] * rates[0] / 100
+    if inf == "Mundane":
+        # The scaling function's physical term for infusion 9 is the Mundane modifier alone, in
+        # place of STR and DEX (docs/DS2-DPS-MECHANICS.md "Scaling function", 0x141bf101e).
+        sc.pop("strength", None), sc.pop("dexterity", None)
+    return atk, sc
+
+
+def _terms_differ(game: tuple[dict, dict], site: tuple[dict, dict]) -> bool:
+    """Whether the game's terms and the site's differ by more than the site's rounding: a base by
+    1 or more (it keeps whole numbers), a coefficient by more than 0.011 (two decimals)."""
+    (ga, gs), (sa, ss) = game, site
+    return (any(abs(ga.get(k, 0) - sa.get(k, 0)) >= 1 for k in DAMAGE_TERMS)
+            or any(abs(gs.get(k, 0) - ss.get(k, 0)) > 0.011 for k in DAMAGE_SCALES))
+
+
+def regulation_attack(data: Data, d: dict, names: dict) -> str:
+    """Every weapon infusion's attack bases and coefficients from the regulation, in place of the
+    site's (infusion_attack): base = WeaponReinforceParam maximum<Type> x the infusion's
+    WeaponStatsAffectParam baseValueScale x the moved rate / 100, coefficient = that row's
+    <stat><maxLevel> x the rate / 100. EXE (docs/DS2-DPS-MECHANICS.md "Base, rates and the sum"):
+    the attack builder moves the rates as infused_rates does, and nothing else moves them; the rate
+    move's two other callers build guard cut. Mundane's modifier stays the site's, which equals the
+    game's for every weapon.
+
+    Kept as the site has them: shields, which the site gives no attack (the game gives them a
+    bash), and weapons with no regulation row by name. Where the uninfused rows disagree, each name
+    has one WeaponReinforceParam row, so the site is the one off: Murakumo STR/DEX 0.07/0.51 against
+    0.15/0.59, Foot Soldier Sword STR 0.55 against 0.35, and Ruler's Sword 1.32 x the regulation's
+    scaling (its soul bonus is not in these numbers either way). An Enchanted row that also deals
+    magic scales that magic by the INT term too, as attack_rating always has (one "magic" key).
+    Joined by name as regulation_catalysts joins."""
+    by_name = {}
+    for wid, w in d["WeaponParam"].items():
+        by_name.setdefault(norm(names.get(wid, "")), w)
+    done, moved, kept, both = 0, 0, 0, 0
+    for key, w in data.weapons.items():
+        wp = not w.get("isShield") and by_name.get(norm(w.get("name", key)))
+        r = wp and d["WeaponReinforceParam"].get(str(wp["weaponReinforceId"]))
+        for inf, row in (w.get("infusions") or {}).items():
+            game = r and infusion_attack(d, r, inf)
+            if not game:
+                kept += 1
+                continue
+            atk, sc = row.setdefault("atk", {}), row.setdefault("atkScale", {})
+            moved += _terms_differ(game, (atk, sc))
+            both += inf == "Enchanted" and "magic" in game[0]
+            for k in DAMAGE_TERMS:
+                atk.pop(k, None)
+            for k in DAMAGE_SCALES:
+                sc.pop(k, None)
+            atk.update(game[0])
+            sc.update(game[1])
+            done += 1
+    return (f"attack from the regulation for {done} weapon infusions ({moved} differ from the site's by more "
+            f"than its rounding; {kept} kept the site's: shields and unjoined names; {both} Enchanted rows "
+            f"also deal magic)")
+
+
 def cast_power(data: Data, catalyst: str, element: str, stats: dict, inf: str = "No_Infusion") -> float:
     """A catalyst's full-upgrade cast power in `element` at `stats`, infused with `inf` (standard
     when the regulation has no row for it): base + scale x the element's per-stat bonus, the bonus
@@ -1517,7 +1572,8 @@ def regulation_buffs(data: Data, emevd, members: dict, d: dict, names: dict) -> 
 
 
 def attack_rating(data: Data, weapon: str, inf: str, eff: dict) -> dict:
-    """Per-type attack rating at full upgrade: SoulsPlanner's getPhysicalATK/getMagicATK/... (SITE),
+    """Per-type attack rating at full upgrade, combined as SoulsPlanner's getPhysicalATK/
+    getMagicATK/... combine it (the bases and coefficients are the regulation's, regulation_attack),
     without ring bonuses. Physical scales STR and DEX off one table; fire reads INT+FTH, dark
     min(INT, FTH)."""
     row = data.weapons[weapon]["infusions"].get(inf) or {}
@@ -3120,7 +3176,7 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 
 BACKEND_DATA_NAME = "ds2-build-recommender.dat"
 BACKEND_DATA = Path.home() / ".cache/ds2-builds" / BACKEND_DATA_NAME
-BACKEND_FORMAT = "ds2-build-recommender-data 8"
+BACKEND_FORMAT = "ds2-build-recommender-data 9"
 #: How far the exported R1/R2 chains run, in seconds: the panel clamps its window to 10.0
 #: (crates/ds2-build-recommender-ui/src/panel.rs), and status_hits runs to max(3, window).
 STATUS_HORIZON = 10.0
@@ -3836,7 +3892,7 @@ def main() -> int:
     ap.add_argument("--json", action="store_true", help="with --minimum: also print the options as JSON")
     ap.add_argument("--lam", type=float, default=50.0, help="EASE L2 penalty")
     ap.add_argument("--site-numbers", action="store_true",
-                    help="keep SoulsPlanner's physical stat defense and Enchanted coefficients instead of the "
+                    help="keep SoulsPlanner's stat defense, weapon attack and status numbers instead of the "
                          "game's (apply_regulation), to compare against the planner")
     ap.add_argument("--tables", type=Path, default=CACHE / "site-tables", help="where site JS/JSON is cached")
     a = ap.parse_args()
