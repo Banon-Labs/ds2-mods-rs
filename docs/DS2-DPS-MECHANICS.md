@@ -412,6 +412,33 @@ and `fireATKBonus[INT+FTH]` equal these regulation columns with these indices at
 `physicalDEFBonus[sum]` does not match: it is off by one at 180 of 393 sums (row 3 is 63 in the regulation
 and 62 in the planner).
 
+**Status bonus per stat** (read 2026-09-30). `0x14038d240` is `mov eax,[rcx+rdx*4+0x74]` on the same
+stat block, and the builder fills that array (its `rdi+0x48..+0x54`) from the same param:
+
+| idx | row index | row field | store |
+|---|---|---|---|
+| 0 | the stat `RelatePhysicalStatToLevelStat` byte +0xb names | `weaponBreakAdditionalEffect` +0x24 | `0x14038dc72` |
+| 1 | trunc((3*DEX + FTH)/4) | `bleedingAdditionalEffect` +0x28 | `0x14038dcaf` |
+| 2 | trunc((3*DEX + ADP)/4) | `poisonAdditionalEffect` +0x2c | `0x14038dcef` |
+| 3 | the stat byte +0xe names | `curseAdditionalEffect` +0x30 | `0x14038dd22` |
+
+The scaling function multiplies idx 2 by the poison coefficient into `out[5]` and idx 1 by the bleeding
+coefficient into `out[6]` (calls at `0x14039054e`, `0x14039056d`). SoulsPlanner's `auxATKBonus[3*DEX + FTH]`
+and `auxATKBonus[3*DEX + ADP]` equal these columns at `row[trunc(sum/4)]` for every sum, and the bleeding
+and poison columns are identical (REGULATION). The same builder reads the agility row the same way:
+`row[trunc((3*ADP + ATT)/4)]`'s `changeEquipSpeedScale` (+0x74) goes to `rdi+0x88` (`0x14038e08d`). That row
+also holds `stepInvincibleTimeRate`, `rollingInvincibleTimeRate` and `jumpInvincibleTimeRate` (+0x68..+0x70).
+The stores after `0x14038e08d` were not read.
+
+**Base and coefficients against SoulsPlanner** (REGULATION, measured 2026-09-30, over 2623 weapon and
+infusion rows joined by name). Computed as the scaling function and the rate move below compute them, the
+site's Mundane modifier agrees with `abyssRate x 0.01 x` the Mundane physical rate for all 209 Mundane
+weapons. Many other terms do not agree: 509 physical bases and 433 STR coefficients, among them weapons
+with an innate element or special scaling (Heide Lance Dark: site lightning 60 and dark 90, this model 90
+and 60). Every poison and bleed term disagrees: the site's base is this model's divided by 5 and its
+coefficient this model's divided by 2 (Bandit Axe Poison: 140 and 0.525, against 700 and 1.05). Which
+side is right is not settled; for the status terms it needs the build-up code, which was not read.
+
 **Scaling function `0x1403903b0`** (Arxan entry, body from `0x141cf33c8`). Arguments are `(this, ws, out[10])`.
 `ws+0x30` is the reinforce level, `ws+0x31` the infusion index, `ws+0x40` the WeaponStatsAffectParam row.
 `rsi = 0x140397c40(row, level) = row + 8 + level * 0x24`: the 9 coefficients for that upgrade level.
@@ -680,7 +707,11 @@ subtracts from the INT and FTH requirements.
 **Delta vs `scripts/ds2-builds-recommend.py`** (`attack_rating`, `hit_damage`, `damage`, `build_defense`):
 - AR: the same `(base + sum bonus*coef) * rate` structure, but SoulsPlanner folds `rate` into its
   `atk`/`atkScale` with rounding. The error is a fraction of an AR point per stat, larger for Enchanted STR.
-  Mundane uses SoulsPlanner's `modifier`, and the EXE coefficient source above is unresolved.
+  Mundane's `modifier` is the game's (`abyssRate`, above). The site's base and coefficients disagree with
+  the game's formula on many weapons with an innate element or special scaling, and on every status term
+  ("Base and coefficients against SoulsPlanner", above).
+- Bleed and poison scaling: the site's table and its `3*DEX + FTH` / `3*DEX + ADP` index are the game's
+  ("Status bonus per stat", above).
 - Elemental cut `min(0.99, (D+100)/1000)` matches. Not modelled: the lack-of-stats factor on armor, and the
   cap gate.
 - Physical stat defense: the planner's table is off by one at 180 of 393 sums. The game uses

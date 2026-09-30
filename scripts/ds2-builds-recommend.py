@@ -1886,7 +1886,11 @@ def floor_violations(stats: dict, floors: dict) -> list[str]:
 def objective_value(data: Data, weapon: str, inf: str, st: dict, objective: str, dfn: dict) -> float:
     row = data.weapons[weapon]["infusions"].get(inf) or {}
     atk, sc = row.get("atk") or {}, row.get("atkScale") or {}
-    if objective in ("bleed", "poison"):  # SoulsPlanner getBleedATK / getPoisonATK (SITE)
+    if objective in ("bleed", "poison"):
+        # SoulsPlanner getBleedATK / getPoisonATK. Its auxATKBonus table at this index is the game's
+        # bleeding/poisonAdditionalEffect at row trunc(i / 4) (EXE 0x14038dcaf / 0x14038dcef); its base
+        # and coefficient are the site's and disagree with the game's formula (docs/DS2-DPS-MECHANICS.md
+        # "Base and coefficients against SoulsPlanner").
         i = 3 * st["dexterity"] + (st["faith"] if objective == "bleed" else st["adaptability"])
         return (atk.get(objective) or 0) + sc.get(objective, 0) * _tab(data, "auxATKBonus", i)
     return (sum(damage(k, v, dfn[k]) for k, v in attack_rating(data, weapon, inf, st).items())
