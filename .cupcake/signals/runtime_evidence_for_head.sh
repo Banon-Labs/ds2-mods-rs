@@ -58,7 +58,8 @@
 # alternative -- an agent-written marker -- has no ceiling at all because it is just prose in a file.
 #
 # Emits  RUNTIME|game_code=<0|1>|attached=<0|1>|fresh=<0|1>|dll_match=<0|1>|pending=<0|1>|head=<epoch>|log=<epoch>
-# and nothing when it cannot tell (the policy fails closed on silence).
+# RUNTIME|game_code=0|foreign=1 for a push in another repository, and nothing when it cannot tell
+# (the policy fails closed on silence).
 set -uo pipefail
 
 # The regression tests need to drive every combination of the three fields without a game install
@@ -143,9 +144,10 @@ fi
 #
 # scripts/cupcake_push_target_repo.py walks a leading `cd <dir>`, `git -C <dir>` and `bash -c`
 # wrapper to the directory the push runs in, and only answers `REPO` for a working tree whose
-# git-common-dir is this repository's. `UNKNOWN` (unlexable, a subshell, a heredoc, a foreign or
-# missing directory, two pushes at two trees) and a resolver that is missing or crashes all print
-# nothing here, which the policy refuses: this is the fail-closed direction.
+# git-common-dir is this repository's. `FOREIGN` is a working tree of another repository, which
+# carries none of this one's game code. `UNKNOWN` (unlexable, a subshell, a heredoc, a missing
+# directory, two pushes at two trees) and a resolver that is missing or crashes all print nothing
+# here, which the policy refuses: this is the fail-closed direction.
 if [ -n "$event" ]; then
     target="$(printf '%s' "$event" | python3 "$SCRIPT_REPO/scripts/cupcake_push_target_repo.py" --cwd "$base" 2>/dev/null)" || exit 0
     case "$target" in
@@ -154,6 +156,13 @@ if [ -n "$event" ]; then
             root="$(same_repo_root "${target#REPO }")" || exit 0
             [ -n "$root" ] || exit 0
             REPO="$root"
+            ;;
+        "FOREIGN "*)
+            # A push in another repository (the resolver compared git-common-dirs) carries none
+            # of this one's commits, so none of its game code: out of jurisdiction, not unproven.
+            # Refused as unproven until 2026-09-30 (bd ds2-mods-rs-4dt0).
+            printf 'RUNTIME|game_code=0|foreign=1\n'
+            exit 0
             ;;
         *) exit 0 ;;
     esac
