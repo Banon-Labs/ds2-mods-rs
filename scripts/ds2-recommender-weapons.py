@@ -17,6 +17,10 @@ weapons owns those, so this file stays a few kilobytes of names.
   `scripts/ds2-builds-recommend.py` (`dump_site_tables`). `infusions` is one letter per infusion
   the weapon takes, in that table's own order; `INFUSION_CODES` below is the legend, and the
   header line repeats it so the file reads on its own.
+* `name` is the game's own (itemname.fmg, read from the install) where SoulsPlanner's name
+  matches no weapon's in the game but its key does: the site spells the Black Flamestone Dagger
+  `Black Flamestone Dagge`. The same rule as the recommender's `regulation_weapon_names`, so both
+  say one name for it.
 * `class`: MugenMonkey's `darkSouls2WeaponDetails[*].type`, joined by normalized name after the
   same abbreviation expansion `ds2-builds-recommend.py`'s `Data.weapon_class` does (`UGS`, `GS`,
   `GA`). Empty where MugenMonkey has no row for the weapon; the count is printed.
@@ -58,7 +62,33 @@ def norm(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", name.lower())
 
 
-def rows(sp: dict, mm: dict) -> tuple[list[tuple[str, str, str, str, str]], list[str]]:
+def game_names() -> dict[str, str] | None:
+    """Normalized name -> the game's own name, for every ItemParam row naming a WeaponParam row
+    (weapons, shields and catalysts). None when the install cannot be read."""
+    import importlib.util
+    import struct
+
+    spec = importlib.util.spec_from_file_location(
+        "ds2attacks", Path(__file__).parent / "ds2-attacks-extract.py")
+    ex = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(ex)
+    reg = ex.load_module("ds2regulation", "ds2-regulation.py")
+    try:
+        names = ex.item_names(reg.GAME_DIR, reg.DEFAULT_REGULATION)
+        items = reg.Param("ItemParam.param",
+                          reg.load(reg.DEFAULT_REGULATION, reg.REGULATION_KEY_HEX)["ItemParam.param"])
+    except (OSError, SystemExit, KeyError) as e:
+        print(f"the game's item names are unreadable ({e}); SoulsPlanner's names kept", file=sys.stderr)
+        return None
+    out = {}
+    for index, item in enumerate(items.ids):
+        if struct.unpack_from("<21i", items.row(index), 0)[5] != -1:
+            out.setdefault(norm(names[str(item)]), names[str(item)])
+    return out
+
+
+def rows(sp: dict, mm: dict, game: dict[str, str] | None = None
+         ) -> tuple[list[tuple[str, str, str, str, str]], list[str]]:
     by_name = {}
     for k, v in mm["darkSouls2WeaponDetails"].items():
         for pat, full in ABBREV:
@@ -69,6 +99,9 @@ def rows(sp: dict, mm: dict) -> tuple[list[tuple[str, str, str, str, str]], list
         if key in SKIP:
             continue
         name = w.get("name", key)
+        if game and norm(name) not in game and norm(key) in game:
+            print(f"name from the game: {name!r} -> {game[norm(key)]!r}", file=sys.stderr)
+            name = game[norm(key)]
         cls = by_name.get(norm(name)) or by_name.get(norm(key)) or ""
         if not cls:
             unclassed.append(name)
@@ -91,7 +124,7 @@ def main() -> int:
     a = ap.parse_args()
     sp = json.loads((a.tables / "sp-tables.json").read_text())
     mm = json.loads((a.tables / "mm-tables.json").read_text())
-    table, unclassed = rows(sp, mm)
+    table, unclassed = rows(sp, mm, game_names())
     text = HEADER + "\n" + "".join("\t".join(r) + "\n" for r in table)
     if a.out:
         a.out.parent.mkdir(parents=True, exist_ok=True)
