@@ -38,7 +38,7 @@ use crate::weapons;
 pub const DATA_FILE_NAME: &str = "ds2-build-recommender.dat";
 
 /// The file's first line. A different one is a file this port does not read.
-pub const FORMAT: &str = "ds2-build-recommender-data 10";
+pub const FORMAT: &str = "ds2-build-recommender-data 11";
 
 /// Nine stats as the script computes with them, in [`crate::model::STAT_LABELS`] order.
 type Stats = [i32; STAT_COUNT];
@@ -299,6 +299,9 @@ struct InfusionRow {
     infusion: Infusion,
     atk: [f64; 7],
     scale: [f64; 9],
+    /// The moved rates, physical, magic, fire, lightning, dark: what a ring's flat attack add is
+    /// multiplied by (the script's `ring_attack_add`); `0` where the regulation was not read.
+    rate: [f64; 5],
 }
 
 /// One hit of an R1 chain.
@@ -447,7 +450,9 @@ enum Factor {
 }
 
 /// The script's `RING_SLOT_POINTS`: a ring worn in place of stat points must free at least this
-/// many, what one ring slot buys as a stat ring (+5).
+/// many, what one ring slot buys as a stat ring (+5). An offensive ring in the slot is weighed by
+/// the objective instead (`choose_rings`); a stat ring is not run, and needs no run: five free
+/// points gain at least what +5 in one stat does.
 const RING_SLOT_POINTS: i32 = 5;
 
 /// The script's `UNREACHABLE`: the lift of a class whose spells no ATT holds.
@@ -556,6 +561,9 @@ pub struct CorpusBackend {
     /// Rings a generated build never suggests or grants (the script's `NO_USE_RINGS`), as indices
     /// into `rings`.
     no_use: Vec<usize>,
+    /// The script's `data.ring_attack`, in its order: a ring (an index into `rings`) and its flat
+    /// attack adds, physical, magic, fire, lightning, dark.
+    ring_attack: Vec<(usize, [f64; 5])>,
     ring_effects: Vec<RingEffect>,
     /// The script's `ring_gear`, in its order: every ring the optimizer counts.
     gear: Vec<RingGear>,
@@ -781,6 +789,10 @@ impl CorpusBackend {
                 for value in &mut scale {
                     *value = float(fields.next(), line)?;
                 }
+                let mut rate = [0.0; 5];
+                for value in &mut rate {
+                    *value = float(fields.next(), line)?;
+                }
                 self.weapons
                     .last_mut()
                     .ok_or_else(|| bad(line, "an infusion before any weapon"))?
@@ -789,6 +801,7 @@ impl CorpusBackend {
                         infusion,
                         atk,
                         scale,
+                        rate,
                     });
             }
             "L" => {
@@ -897,6 +910,17 @@ impl CorpusBackend {
                     .get(key)
                     .ok_or_else(|| bad(line, "a no-use ring that is not a ring"))?;
                 self.no_use.push(index);
+            }
+            "O" => {
+                let key = next("ring key")?;
+                let ring = *ring_index
+                    .get(key)
+                    .ok_or_else(|| bad(line, "a ring attack add for a ring that is not a ring"))?;
+                let mut add = [0.0; 5];
+                for value in &mut add {
+                    *value = float(fields.next(), line)?;
+                }
+                self.ring_attack.push((ring, add));
             }
             "P" => {
                 let slot = armor_slot(next("armour slot")?, line)?;
@@ -1165,16 +1189,80 @@ impl CorpusBackend {
         &self.brackets[sl_bracket(sl).min(self.brackets.len() - 1)]
     }
 
-    /// The script's `attack_rating`: per-type attack rating at full upgrade.
-    fn attack_rating(&self, row: Option<&InfusionRow>, eff: &Stats) -> Ar {
+    /// The script's `ring_attack_add`: what the worn `rings` add to `row`'s attack rating per type,
+    /// physical, magic, fire, lightning, dark -- each ring's flat add times the row's rate in that
+    /// type, only in a type the row has a base in.
+    fn ring_attack_add(&self, row: &InfusionRow, rings: &[usize]) -> [f64; 5] {
+        let mut out = [0.0; 5];
+        for (kind, total) in out.iter_mut().enumerate() {
+            if row.atk[kind] == 0.0 {
+                continue;
+            }
+            for &ring in rings {
+                let flat = self
+                    .ring_attack
+                    .iter()
+                    .find(|(at, _)| *at == ring)
+                    .map_or(0.0, |(_, add)| add[kind]);
+                if flat != 0.0 {
+                    *total += flat * row.rate[kind];
+                }
+            }
+        }
+        out
+    }
+
+    /// The script's `offense_rings`: per ring upgrade group the last ring with an attack add,
+    /// never a no-use ring, when it adds some attack to `weapon`'s `infusion`; most attack added
+    /// first, file order on a tie. None for bleed or poison.
+    fn offense_rings(
+        &self,
+        weapon: &Weapon,
+        infusion: Infusion,
+        objective: Objective,
+    ) -> Vec<usize> {
+        if objective != Objective::Damage {
+            return Vec::new();
+        }
+        let mut by_group: Vec<(&str, usize)> = Vec::new();
+        for &(ring, _) in &self.ring_attack {
+            if self.no_use.contains(&ring) {
+                continue;
+            }
+            let group = self.ring_groups[ring].as_str();
+            match by_group.iter_mut().find(|(seen, _)| *seen == group) {
+                Some(entry) => entry.1 = ring,
+                None => by_group.push((group, ring)),
+            }
+        }
+        let row = weapon.infusion(infusion);
+        let mut ranked: Vec<(f64, usize)> = by_group
+            .into_iter()
+            .map(|(_, ring)| {
+                let gain = row.map_or(0.0, |row| {
+                    self.ring_attack_add(row, &[ring]).iter().sum::<f64>()
+                });
+                (gain, ring)
+            })
+            .filter(|&(gain, _)| gain > 0.0)
+            .collect();
+        ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+        ranked.into_iter().map(|(_, ring)| ring).collect()
+    }
+
+    /// The script's `attack_rating`: per-type attack rating at full upgrade, with what the worn
+    /// `rings` add.
+    fn attack_rating(&self, row: Option<&InfusionRow>, eff: &Stats, rings: &[usize]) -> Ar {
         let mut out = [None; 5];
         let Some(row) = row else {
             return out;
         };
         let (atk, sc) = (&row.atk, &row.scale);
+        let add = self.ring_attack_add(row, rings);
         let t = &self.tables;
         if atk[ATK_PHYSICAL] != 0.0 {
             let mut v = atk[ATK_PHYSICAL]
+                + add[ATK_PHYSICAL]
                 + sc[SCALE_STR] * t.physical.at(eff[STR])
                 + sc[SCALE_DEX] * t.physical.at(eff[DEX]);
             if row.infusion == Infusion::Enchanted && sc[SCALE_MAGIC] != 0.0 {
@@ -1195,7 +1283,8 @@ impl CorpusBackend {
         for (element, (table, index)) in feed.into_iter().enumerate() {
             let base = atk[1 + element];
             if base != 0.0 {
-                out[1 + element] = Some((base + sc[2 + element] * table.at(index)).trunc());
+                out[1 + element] =
+                    Some((base + add[1 + element] + sc[2 + element] * table.at(index)).trunc());
             }
         }
         out
@@ -1294,13 +1383,14 @@ impl CorpusBackend {
                 };
                 let mut scored: Vec<Ranked> = Vec::new();
                 for row in &weapon.infusions {
-                    let per = self.objective_value(weapon, row.infusion, stats, objective, defense);
+                    let per =
+                        self.objective_value(weapon, row.infusion, stats, objective, defense, &[]);
                     if per > 0.0 {
                         scored.push(Ranked {
                             damage: per * f64::from(hits),
                             weapon: index,
                             infusion: row.infusion,
-                            ar: self.attack_rating(Some(row), stats),
+                            ar: self.attack_rating(Some(row), stats, &[]),
                             label: label.clone(),
                         });
                     }
@@ -1335,7 +1425,7 @@ impl CorpusBackend {
             }
             let mut scored: Vec<Ranked> = Vec::new();
             for row in &weapon.infusions {
-                let ar = self.attack_rating(Some(row), stats);
+                let ar = self.attack_rating(Some(row), stats, &[]);
                 if ar.iter().all(Option::is_none) {
                     continue;
                 }
@@ -1468,7 +1558,7 @@ impl CorpusBackend {
         }
     }
 
-    /// The script's `objective_value`.
+    /// The script's `objective_value`, the worn `rings`' attack adds counted.
     fn objective_value(
         &self,
         weapon: &Weapon,
@@ -1476,6 +1566,7 @@ impl CorpusBackend {
         stats: &Stats,
         objective: Objective,
         defense: &Defense,
+        rings: &[usize],
     ) -> f64 {
         let row = weapon.infusion(infusion);
         match objective {
@@ -1491,7 +1582,7 @@ impl CorpusBackend {
                 row.atk[atk] + row.scale[scale] * self.tables.aux.at(3 * stats[DEX] + second)
             }
             Objective::Damage => {
-                Self::damage(&self.attack_rating(row, stats), defense) * weapon.damage_scale
+                Self::damage(&self.attack_rating(row, stats, rings), defense) * weapon.damage_scale
             }
         }
     }
@@ -1641,7 +1732,7 @@ impl CorpusBackend {
 
     /// The script's `ring_trades` as `trade_line`s: per worn ring, its name, what it does, and the
     /// stats `class` levels less for it -- `ring_lift` with every worn ring against the same
-    /// without that one.
+    /// without that one. An offensive ring stands in for nothing and is not listed.
     fn ring_trades(
         &self,
         class: usize,
@@ -1654,6 +1745,7 @@ impl CorpusBackend {
         let lift = |rings: &[usize]| self.ring_lift(base, floors, require, spells, rings);
         let with_all = lift(worn);
         worn.iter()
+            .filter(|&&ring| self.gear_of(ring).is_some())
             .map(|&ring| {
                 let rest: Vec<usize> = worn.iter().copied().filter(|&r| r != ring).collect();
                 let head = format!(
@@ -2242,7 +2334,8 @@ impl CorpusBackend {
                 weapon, infusion, sl, objective, grip, spells, &classes, &floor, &require, rings,
             )
         };
-        self.choose_rings(&classes, &floor, &require, spells, &run)
+        let offense = self.offense_rings(weapon, infusion, objective);
+        self.choose_rings(&classes, &floor, &require, spells, &run, &offense)
     }
 
     /// The classes `only_class` allows, as indices, in file order.
@@ -2348,8 +2441,10 @@ impl CorpusBackend {
         pick.map(|(_, ring)| ring)
     }
 
-    /// The script's `choose_rings`: one `next_ring` at a time, worn while no build fits, and once
-    /// one does, only when `run` scores the objective higher with it.
+    /// The script's `choose_rings`: one `next_ring` at a time, each set run with the slots it
+    /// leaves holding the first of `offense`; worn while no build fits, and once one does, only
+    /// when `run` scores the objective higher with it -- so a stand-in that takes an offensive
+    /// ring's slot has to beat that ring.
     fn choose_rings(
         &self,
         classes: &[usize],
@@ -2357,13 +2452,19 @@ impl CorpusBackend {
         require: &[(usize, i32)],
         spells: &[usize],
         run: &dyn Fn(&[usize]) -> Option<Best>,
+        offense: &[usize],
     ) -> Option<Best> {
+        let fill = |rings: &[usize]| -> Vec<usize> {
+            let mut out = rings.to_vec();
+            out.extend(offense.iter().take(4usize.saturating_sub(rings.len())));
+            out
+        };
         let mut worn: Vec<usize> = Vec::new();
-        let mut best = run(&worn);
+        let mut best = run(&fill(&worn));
         while let Some(ring) = self.next_ring(classes, floors, require, spells, &worn) {
             let mut with = worn.clone();
             with.push(ring);
-            let got = run(&with);
+            let got = run(&fill(&with));
             if let Some((top, ..)) = best
                 && got.as_ref().is_none_or(|(value, ..)| *value <= top)
             {
@@ -2461,7 +2562,9 @@ impl CorpusBackend {
         let value = |curve: Curve, st: &Stats| -> f64 {
             let st = worn(st);
             match curve {
-                Curve::Objective => self.objective_value(weapon, infusion, &st, objective, defense),
+                Curve::Objective => {
+                    self.objective_value(weapon, infusion, &st, objective, defense, rings)
+                }
                 Curve::Agility => f64::from(agility(st[ADP], st[ATT])),
                 Curve::HitPoints => self.hit_points(&st),
                 Curve::Stamina => self.tables.stamina_max.at(st[END]),
@@ -2549,7 +2652,8 @@ impl CorpusBackend {
                     st[stat] += n;
                     free -= n;
                 }
-                let val = self.objective_value(weapon, infusion, &worn(&st), objective, defense);
+                let val =
+                    self.objective_value(weapon, infusion, &worn(&st), objective, defense, rings);
                 if best.as_ref().is_none_or(|(top, ..)| val > *top) {
                     best = Some((val, class_index, two, st, rings.to_vec()));
                 }
@@ -3546,7 +3650,7 @@ impl RecommenderBackend for CorpusBackend {
             wield,
             infusion: row.map_or(Infusion::None, |row| row.infusion),
             attack: self
-                .attack_rating(row, &stats)
+                .attack_rating(row, &stats, &[])
                 .map(|value| value.map(|value| value as f32)),
         })
     }

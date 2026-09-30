@@ -168,6 +168,7 @@ class Data:
         self.weapon_elements = {}  # weapon key -> element -> (base, coefficient) (regulation_weapon_elements)
         self.hit_flat = {}  # PlayerDamageParam row -> DMG key -> flat attack (regulation_hit_flat)
         self.damage_scale = {}  # weapon key -> WeaponParam.damageScale where not 1.0 (regulation_damage_scale)
+        self.ring_attack = {}  # ring key -> DMG key -> flat attack add (regulation_ring_attack)
         # PhysicalStatsPerLevelStatValuesParam.staminaMax by END, rows 0-99: what a Dragon ring's
         # stamina factor is weighed against (ring_lift); empty when the regulation is not read.
         self.stamina_max = []
@@ -1110,7 +1111,8 @@ def apply_regulation(data: Data) -> str:
             "max HP from hpMax and every other stat's additionalHp; " + renamed + "; "
             + regulation_spells(data, d, names) + "; " + regulation_spell_hits(data, d, names) + "; "
             + regulation_hit_flat(data, d) + "; "
-            + regulation_buffs(data, emevd, members, d, names) + "; " + regulation_weapon_elements(data, d, names)
+            + regulation_buffs(data, emevd, members, d, names) + "; " + regulation_ring_attack(data, emevd, members, names)
+            + "; " + regulation_weapon_elements(data, d, names)
             + "; " + regulation_damage_scale(data, d, names) + "; " + regulation_status(data, d, names)
             + "; " + regulation_attack(data, d, names))
 
@@ -1426,6 +1428,9 @@ def regulation_attack(data: Data, d: dict, names: dict) -> str:
                 sc.pop(k, None)
             atk.update(game[0])
             sc.update(game[1])
+            # The moved rates themselves, what a ring's flat add is multiplied by (ring_attack_add).
+            rates = infused_rates(r, inf)
+            row["rate"] = {k: rates[slot] / 100 for k, (slot, _, _) in DAMAGE_TERMS.items() if rates[slot]}
             done += 1
     return (f"attack from the regulation for {done} weapon infusions ({moved} differ from the site's by more "
             f"than its rounding; {kept} kept the site's: shields and unjoined names; {both} Enchanted rows "
@@ -1619,16 +1624,83 @@ def regulation_buffs(data: Data, emevd, members: dict, d: dict, names: dict) -> 
     return f"{len(data.buffs)} weapon buffs from SpEffectSpell.emevd"
 
 
-def attack_rating(data: Data, weapon: str, inf: str, eff: dict) -> dict:
+#: The icon a ring's SpEffect event shows while it is worn, `100130[2]` (docs/DS2-SPEFFECT-VISUAL.md,
+#: "Display Icon"): no effect on a stat or an attack.
+RING_ICON = (100130, 2)
+
+
+def regulation_ring_attack(data: Data, emevd, members: dict, names: dict) -> str:
+    """data.ring_attack: ring key -> DMG key -> flat attack add, for every ring whose SpEffect event
+    (SpEffectRing.emevd, event id == item id, joined to the ring by its itemname.fmg name) is
+    nothing but BUFF_FLAT adds in a damage type (DAMAGE_TYPE) and its icon. BUFF_FLAT is the
+    weapon buff's instruction, and what the game does with it is the builder's (buff_attack): it
+    adds `flat` to that type's stat bonus, so the weapon gains flat x its rate in the type
+    (ring_attack_add). REGULATION, read 2026-09-30 (`scripts/ds2-emevd.py events`):
+
+    | ring (event) | instruction | add |
+    |---|---|---|
+    | Ring of Blades (40160000) | `100090[2] [0, 20 << 16 | 0]` | physical +20 |
+    | Ring of Blades+1 (40160001) | `100090[2] [0, 35 << 16 | 0]` | physical +35 |
+    | Ring of Blades+2 (40160002) | `100090[2] [0, 50 << 16 | 0]` | physical +50 |
+    | King's Ring (40510000) | `100090[2] [0, 5 << 16 | 3]` | fire +5 |
+
+    Left out, each for an instruction beside the add: the Sorcery/Lightning/Fire/Dark Clutch Rings
+    (41040000-41070000) add 30 to magic/lightning/fire/dark but also carry `100090[5] [0, 80 << 16 |
+    0]`, a physical defense change nothing here weighs against the attack; Crest of the Rat
+    (40700000, type 5, poison) is gated on `100180[2]`, which is not decoded; Crest of Blood
+    (40730000) adds to type 6, bleed, which no damage objective reads. Old Leo Ring's `1000[1]`
+    kind 11 and Flynn's Ring's `1000[18]` are kinds no one here has decoded (docs/DS2-BUILD-MECHANICS.md
+    "Not established"), so they have no number at all. In event id order: a ring upgrade group's
+    last is its strongest tier, as ring_gear's is."""
+    events = {e.id: e for e in emevd.Emevd(Path("SpEffectRing.emevd"), members["SpEffectRing.emevd"]).events}
+    data.ring_attack = {}
+    for eid in sorted(events):
+        key = data.sp_key.get(norm(names.get(str(eid), "")))
+        if key not in data.rings:
+            continue
+        add, other = {}, False
+        for ins in events[eid].instructions:
+            w = ins.words()
+            kind = DAMAGE_TYPE.get(w[1][2] & 0xFFFF) if (ins.bank, ins.index) == BUFF_FLAT and len(w) >= 2 else None
+            if kind is not None:
+                add[kind] = add.get(kind, 0) + (w[1][2] >> 16)
+            elif (ins.bank, ins.index) != RING_ICON:
+                other = True
+        if add and not other:
+            data.ring_attack[key] = add
+    return f"{len(data.ring_attack)} rings' attack adds from SpEffectRing.emevd"
+
+
+def ring_attack_add(data: Data, row: dict, rings) -> dict:
+    """What the worn `rings` add to a weapon infusion `row`'s attack rating, per DMG key: each
+    ring's flat (regulation_ring_attack) times the row's rate in that type (regulation_attack), in
+    DMG order. EXE (docs/DS2-DPS-MECHANICS.md "Base, rates and the sum"): `AR = (bonus + base) x
+    rate`, and the add is in `bonus`. Only a type the row has a base in: attack_rating builds no
+    other."""
+    atk, rate = row.get("atk") or {}, row.get("rate") or {}
+    out = {}
+    for k in DMG:
+        if not atk.get(k):
+            continue
+        for r in rings:
+            flat = data.ring_attack.get(r, {}).get(k)
+            if flat:
+                out[k] = out.get(k, 0.0) + flat * rate.get(k, 0.0)
+    return out
+
+
+def attack_rating(data: Data, weapon: str, inf: str, eff: dict, rings=()) -> dict:
     """Per-type attack rating at full upgrade, combined as SoulsPlanner's getPhysicalATK/
     getMagicATK/... combine it (the bases and coefficients are the regulation's, regulation_attack),
-    without ring bonuses. Physical scales STR and DEX off one table; fire reads INT+FTH, dark
-    min(INT, FTH)."""
+    plus what the worn `rings` add (ring_attack_add; none by default). Physical scales STR and DEX
+    off one table; fire reads INT+FTH, dark min(INT, FTH)."""
     row = data.weapons[weapon]["infusions"].get(inf) or {}
     atk, sc = row.get("atk") or {}, row.get("atkScale") or {}
+    add = ring_attack_add(data, row, rings) if rings else {}
     out = {}
     if atk.get("physical"):
-        v = (atk["physical"] + sc.get("strength", 0) * _tab(data, "physicalATKBonus", eff["strength"])
+        v = (atk["physical"] + add.get("physical", 0)
+             + sc.get("strength", 0) * _tab(data, "physicalATKBonus", eff["strength"])
              + sc.get("dexterity", 0) * _tab(data, "physicalATKBonus", eff["dexterity"]))
         if inf == "Enchanted" and sc.get("magic"):
             v += sc["magic"] * _tab(data, "magicATKBonus", eff["intelligence"])
@@ -1641,7 +1713,7 @@ def attack_rating(data: Data, weapon: str, inf: str, eff: dict) -> dict:
             "dark": ("darkATKBonus", min(eff["intelligence"], eff["faith"]))}
     for k, (tab, i) in feed.items():
         if atk.get(k):
-            out[k] = int(atk[k] + sc.get(k, 0) * _tab(data, tab, i))
+            out[k] = int(atk[k] + add.get(k, 0) + sc.get(k, 0) * _tab(data, tab, i))
     return out
 
 
@@ -2048,7 +2120,11 @@ def floor_violations(stats: dict, floors: dict, spells=()) -> list[str]:
             if stats[s] < floors.get(s, 0)]
 
 
-def objective_value(data: Data, weapon: str, inf: str, st: dict, objective: str, dfn: dict) -> float:
+def objective_value(data: Data, weapon: str, inf: str, st: dict, objective: str, dfn: dict,
+                    rings=()) -> float:
+    """`objective` for weapon+infusion at stats `st`: build-up per hit for "bleed" and "poison",
+    else one hit's damage against defense `dfn`, the worn `rings`' attack adds counted
+    (attack_rating; no ring adds a status build-up here, regulation_ring_attack)."""
     row = data.weapons[weapon]["infusions"].get(inf) or {}
     atk, sc = row.get("atk") or {}, row.get("atkScale") or {}
     if objective in ("bleed", "poison"):
@@ -2058,7 +2134,7 @@ def objective_value(data: Data, weapon: str, inf: str, st: dict, objective: str,
         # 0x14038dcaf / 0x14038dcef).
         i = 3 * st["dexterity"] + (st["faith"] if objective == "bleed" else st["adaptability"])
         return (atk.get(objective) or 0) + sc.get(objective, 0) * _tab(data, "auxATKBonus", i)
-    return (sum(damage(k, v, dfn[k]) for k, v in attack_rating(data, weapon, inf, st).items())
+    return (sum(damage(k, v, dfn[k]) for k, v in attack_rating(data, weapon, inf, st, rings).items())
             * data.damage_scale.get(weapon, 1.0))
 
 
@@ -2095,9 +2171,10 @@ def optimize_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
     Rings count as stat points (ring_gear, ring_lift): the build may wear rings that stand in for
     points the floors, the requirements or the spells' slots would otherwise take -- a Southern
     Ritual Band's slots for ATT, a Royal Soldier's Ring's load for VIT, a Life Ring's HP for VIG, a
-    stat ring's +5 for a requirement. `rings` None chooses them (choose_rings); a list wears
-    exactly those. The best is (value, class, two-handed, levelled stats, worn rings); the
-    objective is scored at the stats the worn rings give."""
+    stat ring's +5 for a requirement -- and the slots they leave hold offensive rings
+    (offense_rings), which a stand-in ring has to beat. `rings` None chooses them (choose_rings); a
+    list wears exactly those. The best is (value, class, two-handed, levelled stats, worn rings);
+    the objective is scored at the stats the worn rings give, with their attack adds."""
     if flex_weight is None:
         flex_weight = FLEX_WEIGHT
     floors, r1, cut = build_floors(data, corpus, sl)
@@ -2113,15 +2190,36 @@ def optimize_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
                                     classes, need_floors, req, rs)
     if rings is not None:
         return run(list(rings)), floors
-    return choose_rings(data, classes, need_floors, req, spells, run), floors
+    return choose_rings(data, classes, need_floors, req, spells, run,
+                        offense_rings(data, weapon, inf, objective)), floors
 
 
 #: A ring worn in place of stat points must free at least this many to take a ring slot: one slot
 #: as a stat ring buys +5 of one stat (Strength Ring, Ring of Knowledge and the rest; ring_gear),
-#: so a ring that frees fewer points is worth less than the stat ring the slot could hold. What an
-#: offensive ring (Ring of Blades, Flynn's Ring, ...) would do in that slot has no decoded effect to
-#: weigh against it.
+#: so a ring that frees fewer points is worth less than the stat ring the slot could hold. Still
+#: needed now that an offensive ring's effect is decoded: choose_rings weighs a stand-in against
+#: the offensive ring it displaces by the objective, but a slot holds a stat ring as well, and
+#: that alternative is not run. It needs no run: five free points go where the objective gains
+#: most, which is at least what +5 in one stat gains, so a ring freeing five or more beats every
+#: stat ring and one freeing fewer loses to one.
 RING_SLOT_POINTS = 5
+
+
+def offense_rings(data: Data, weapon: str, inf: str, objective: str) -> list[str]:
+    """The rings that raise `objective` for weapon+infusion by their attack add alone
+    (regulation_ring_attack): per ring upgrade group the last, its strongest tier, never a
+    NO_USE_RINGS ring, when ring_attack_add gives the infusion some attack; most attack added first
+    (summed over DMG), in data.ring_attack order on a tie. None for "bleed" or "poison": no decoded
+    ring adds to a build-up."""
+    if objective != "damage":
+        return []
+    row = data.weapons[weapon]["infusions"].get(inf) or {}
+    by_group = {}
+    for r in data.ring_attack:
+        if r not in NO_USE_RINGS:
+            by_group[data.rings[r].get("group", r)] = r
+    gain = {r: sum(ring_attack_add(data, row, [r]).values()) for r in by_group.values()}
+    return sorted((r for r in by_group.values() if gain[r] > 0), key=lambda r: -gain[r])
 
 
 def sub_rings(data: Data) -> list[str]:
@@ -2223,13 +2321,16 @@ def next_ring(data: Data, classes: list[str], floors: dict, req: dict, spells, w
     return pick and pick[1]
 
 
-def choose_rings(data: Data, classes: list[str], floors: dict, req: dict, spells, run):
-    """optimize_build's rings, one next_ring at a time. While no build fits, the ring is worn and
-    the next tried; once one fits, it is worn only when `run` (optimize_build at those rings)
-    scores the objective higher. Returns `run`'s best with the rings worn, or None."""
-    worn, best = [], run([])
+def choose_rings(data: Data, classes: list[str], floors: dict, req: dict, spells, run, offense=()):
+    """optimize_build's rings, one next_ring at a time, each set run with the slots it leaves
+    holding the first of `offense` (offense_rings). While no build fits, the ring is worn and the
+    next tried; once one fits, it is worn only when `run` (optimize_build at those rings) scores the
+    objective higher -- so a stand-in that takes an offensive ring's slot is kept only when what its
+    freed points buy beats what that ring adds. Returns `run`'s best with the rings worn, or None."""
+    fill = lambda rs: rs + list(offense[:4 - len(rs)])
+    worn, best = [], run(fill([]))
     while (r := next_ring(data, classes, floors, req, spells, worn)) is not None:
-        got = run(worn + [r])
+        got = run(fill(worn + [r]))
         if best is not None and (got is None or got[0] <= best[0]):
             break
         worn.append(r)
@@ -2276,7 +2377,7 @@ def _optimize_with(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
         # a soft cap the weight falls (DEX past 40, VGR past 20 and 50, ADP past AGL 110), so
         # points go to a stat still under its cap. Every curve reads the stats the worn rings give
         # (E); the flexibility term reads the levelled stats, as flexibility does.
-        obj = lambda s_: objective_value(data, weapon, inf, E(s_), objective, dfn)
+        obj = lambda s_: objective_value(data, weapon, inf, E(s_), objective, dfn, rings)
         agl = lambda s_: (lambda e: agility(e["adaptability"], e["attunement"]))(E(s_))
         curves = {s: obj for s in ("strength", "dexterity", "intelligence", "faith")}
         curves["adaptability"] = obj if objective == "poison" else agl
@@ -2327,7 +2428,7 @@ def _optimize_with(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
                 pick = (next(s for s in ("vigor", "vitality", "endurance", "attunement") if st[s] < 99), 1)
             st[pick[0]] += pick[1]
             free -= pick[1]
-        val = objective_value(data, weapon, inf, E(st), objective, dfn)
+        val = objective_value(data, weapon, inf, E(st), objective, dfn, rings)
         if best is None or val > best[0]:
             best = (val, cls, two, st, list(rings))
     return best
@@ -3052,7 +3153,8 @@ def ring_trades(data: Data, corpus: list[Build], weapon: str, sl: int, grip: str
                 use_floors: bool, worn: list[str]) -> list[tuple[str, str, list[tuple[str, int, int]]]]:
     """Per ring optimize_build wore in place of stat points: (its name, ring_effect_text, the stats
     class `cls` levels less for it, as (label, without the ring, with it)) -- ring_lift with every
-    worn ring against the same without that one."""
+    worn ring against the same without that one. An offensive ring (offense_rings) stands in for
+    nothing and is not listed."""
     floors, r1, cut = build_floors(data, corpus, sl)
     if not use_floors:
         floors = {}
@@ -3064,7 +3166,7 @@ def ring_trades(data: Data, corpus: list[Build], weapon: str, sl: int, grip: str
     lift = lambda rs: ring_lift(data, base, need_floors, req, spells, rs)
     with_all = lift(worn)
     out = []
-    for r in worn:
+    for r in [x for x in worn if x in ring_gear(data)]:
         without = lift([x for x in worn if x != r])
         # None: without it no ATT holds the spells
         moved = None if without is None else [(LABEL[s], without[s], with_all[s]) for s in STATS
@@ -3239,7 +3341,8 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 #   W key name class flags weight require ha1h ha2h counter   a weapon; flags: S shield, C catalyst,
 #     damagescale                                             H high-stamina R1; require: stat:value,..;
 #                                                             damagescale: WeaponParam.damageScale
-#   I code atk(7) scale(9)                                    one infusion of the last W
+#   I code atk(7) scale(9) rate(5)                            one infusion of the last W; rate: its
+#                                                             moved rates in DMG order (0 unread)
 #   L grip t:mv:type:lower[:flat(5)] ...                      the last W's R1 chain, grip 1 or 2;
 #                                                             flat: the hit's damage row's flat
 #                                                             attack in DMG order, comma-separated,
@@ -3247,6 +3350,8 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 #   B bracket floors(5) defense(8)                            one SL bracket
 #   R key name weight group                                   a ring; group: its upgrade line
 #   N key                                                     a ring in NO_USE_RINGS
+#   O ring add(5)                                             data.ring_attack, in its order: a
+#                                                             ring's flat attack adds in DMG order
 #   E ring weight mul add(9)                                  a ring --minimum may wear
 #   G ring slots hp load stamina add(9) scaled                ring_gear, in its order: a ring
 #                                                             optimize_build counts; scaled is
@@ -3267,7 +3372,7 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 
 BACKEND_DATA_NAME = "ds2-build-recommender.dat"
 BACKEND_DATA = Path.home() / ".cache/ds2-builds" / BACKEND_DATA_NAME
-BACKEND_FORMAT = "ds2-build-recommender-data 10"
+BACKEND_FORMAT = "ds2-build-recommender-data 11"
 #: How far the exported R1/R2 chains run, in seconds: the panel clamps its window to 10.0
 #: (crates/ds2-build-recommender-ui/src/panel.rs), and status_hits runs to max(3, window).
 STATUS_HORIZON = 10.0
@@ -3335,8 +3440,10 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
                               _num(float(data.damage_scale.get(key, 1.0)))]))
         for inf, row in w["infusions"].items():
             atk, sc = row.get("atk") or {}, row.get("atkScale") or {}
+            rate = row.get("rate") or {}
             out.append("\t".join(["I", INFUSION_CODE[inf], *(_num(atk.get(k, 0)) for k in ATK_KEYS),
-                                  *(_num(sc.get(k, 1 if k == "modifier" else 0)) for k in SCALE_KEYS)]))
+                                  *(_num(sc.get(k, 1 if k == "modifier" else 0)) for k in SCALE_KEYS),
+                                  *(_num(float(rate.get(k, 0.0))) for k in DMG)]))
         for two in (False, True):
             tl = r1_timeline(attacks, w["name"], two) or r1_timeline(attacks, key.replace("_", " "), two)
             if tl:
@@ -3366,6 +3473,8 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
     for key, r in data.rings.items():
         out.append("\t".join(["R", key, r.get("name", key), _num(r.get("weight", 0)), r.get("group", key)]))
     out.extend("\t".join(["N", key]) for key in NO_USE_RINGS if key in data.rings)
+    for key, add in data.ring_attack.items():
+        out.append("\t".join(["O", key, *(_num(add.get(k, 0)) for k in DMG)]))
     for slot in ARMOR_SLOTS:
         for key, v in data.armor[slot].items():
             out.append("\t".join(["P", slot, key, v.get("name", key), _num(v.get("weight", 0)),
@@ -4181,6 +4290,10 @@ def main() -> int:
               + "\n  floors (bracket medians): " + " ".join(f"{s[:3].upper()} {v}" for s, v in floors.items()))
         for t in ring_trades(data, corpus, weapon, a.sl, a.grip, spells, cls, not a.no_floors, worn):
             print(f"  ring: {trade_line(t)}")
+        for r in worn:
+            if r in data.ring_attack:  # an offensive ring (offense_rings): it stands in for nothing
+                print(f"  ring: {data.rings[r]['name']}: "
+                      + ", ".join(f"{k} attack +{v}" for k, v in data.ring_attack[r].items()))
         print(f"  flexibility: {flex_line(flexibility(data, corpus, stats, a.sl))}")
         eff = gear_stats(data, stats, worn)  # the weapons below are read at what the rings give
         a.weapons_for = ",".join(f"{s[:3].upper()}={eff[s]}" for s in STATS)
