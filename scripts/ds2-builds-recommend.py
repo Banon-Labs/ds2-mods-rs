@@ -933,6 +933,15 @@ MECHANICS = Path.home() / ".cache/ds2-builds/mechanics.json"
 FLOOR_STATS = ["vigor", "vitality", "adaptability", "attunement"]
 
 
+def floor_stats(spells) -> list[str]:
+    """The FLOOR_STATS a build casting `spells` is held to: ATT only when it casts something.
+    Without spells ATT buys nothing but agility, which ADP buys three times as fast (agility's
+    x is 3*ADP + ATT), so the median ATT of real builds -- most attune something -- is no floor
+    for one that does not. Measured 2026-09-30: SL 155's median ATT 6 levelled +4 ATT onto
+    no-spell builds from classes that start at ATT 2."""
+    return FLOOR_STATS if spells else [s for s in FLOOR_STATS if s != "attunement"]
+
+
 def stamina_r1(data: Data) -> dict:
     """SoulsPlanner weapon key -> one-handed R1 stamina cost (game data, via the mechanics dump)."""
     m = json.loads(MECHANICS.read_text())
@@ -2002,7 +2011,8 @@ def infusion_gaps(data: Data, stats: dict, sl: int, corpus: list[Build], raw_ar:
 
 def build_floors(data: Data, corpus: list[Build], sl: int) -> tuple[dict, dict, float]:
     """The floors every build output must meet at `sl`: VGR/VIT/ADP/ATT at the corpus median of
-    the SL bracket, END at the high-stamina builds' median (applies only to high-stamina weapons)."""
+    the SL bracket, END at the high-stamina builds' median (applies only to high-stamina weapons).
+    ATT applies only to a build with spells (floor_stats)."""
     r1 = stamina_r1(data)
     return bracket_floors(data, corpus, r1)[sl_bracket(sl)], r1, high_stamina_cut(r1)
 
@@ -2026,8 +2036,9 @@ def hit_points(data: Data, st: dict) -> int:
     return data.hp_max[row(st["vigor"])] + sum(data.additional_hp[row(st[s])] for s in HP_STATS)
 
 
-def floor_violations(stats: dict, floors: dict) -> list[str]:
-    return [f"{s[:3].upper()} {stats[s]} < {floors[s]}" for s in FLOOR_STATS if stats[s] < floors.get(s, 0)]
+def floor_violations(stats: dict, floors: dict, spells=()) -> list[str]:
+    return [f"{s[:3].upper()} {stats[s]} < {floors[s]}" for s in floor_stats(spells)
+            if stats[s] < floors.get(s, 0)]
 
 
 def objective_value(data: Data, weapon: str, inf: str, st: dict, objective: str, dfn: dict) -> float:
@@ -2085,7 +2096,7 @@ def optimize_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
     floors, r1, cut = build_floors(data, corpus, sl)
     if not use_floors:
         floors = {}
-    need_floors = {s: floors.get(s, 0) for s in FLOOR_STATS}
+    need_floors = {s: floors.get(s, 0) for s in floor_stats(spells)}
     if r1.get(weapon, 0) >= cut:
         need_floors["endurance"] = floors.get("endurance", 0)
     classes = [c for c in data.classes if only_class is None or c == only_class.lower()]
@@ -2312,14 +2323,15 @@ SL_MAX = 838
 LABEL = dict(zip(STATS, ["VIG", "END", "VIT", "ATT", "STR", "DEX", "ADP", "INT", "FTH"]))
 
 
-def _floors_at(floors: dict, s: str, high_stamina: bool) -> int:
-    """The floor optimize_build applies to stat `s`: FLOOR_STATS always, END for a high-stamina weapon."""
-    if s in FLOOR_STATS or (s == "endurance" and high_stamina):
+def _floors_at(floors: dict, s: str, high_stamina: bool, spells) -> int:
+    """The floor optimize_build applies to stat `s`: floor_stats(spells) always (ATT only with
+    spells), END for a high-stamina weapon."""
+    if s in floor_stats(spells) or (s == "endurance" and high_stamina):
         return int(floors.get(s, 0))
     return 0
 
 
-def _raises(data: Data, cls: str, floors: dict, high_stamina: bool, req: dict, need: dict) -> list:
+def _raises(data: Data, cls: str, floors: dict, high_stamina: bool, req: dict, need: dict, spells) -> list:
     """Per stat in STATS order, what optimize_build lifts class `cls`'s base to before spending any
     free point, and what lifted it: (stat, raise, value, source), source "spells", "weapon" or
     "floors" -- the game's rules before the floors on a tie, since the floors are not one."""
@@ -2328,7 +2340,7 @@ def _raises(data: Data, cls: str, floors: dict, high_stamina: bool, req: dict, n
         base = int(data.classes[cls][s])
         v, src = base, None
         for name, x in (("spells", need.get(s, 0)), ("weapon", req.get(s, 0)),
-                        ("floors", _floors_at(floors, s, high_stamina))):
+                        ("floors", _floors_at(floors, s, high_stamina, spells))):
             if x > v:
                 v, src = x, name
         out.append((s, v - base, v, src))
@@ -2393,7 +2405,7 @@ def refusal(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, obj
             if layer >= 2:
                 v = max(v, need.get(s, 0))
             if layer >= 3:
-                v = max(v, _floors_at(floors_at(sl_), s, hs))
+                v = max(v, _floors_at(floors_at(sl_), s, hs, spells))
             tot += v - int(base[s])
         return tot
 
@@ -2418,14 +2430,14 @@ def refusal(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, obj
             "weapon": f"{wname} cannot be wielded {grip_word} at SL {sl}",
             "spells": f"{wname} can be wielded at SL {sl}, but not while casting {spell_list}",
             "floors": f"{wname}{' and ' + spell_list + ' fit' if spells else ' fits'} SL {sl}, but not above its "
-                      "typical-build minimums (the median VIG/VIT/ADP/ATT of real builds at this level; "
-                      "not a game rule)",
+                      f"typical-build minimums (the median {'/'.join(LABEL[s] for s in floor_stats(spells))} "
+                      "of real builds at this level; not a game rule)",
         }[kind])
         if only_class is not None:
             lines[0] = f"as a {cname}: {lines[0]}"
         if band_note:
             lines.append(band_note)
-        raises = _raises(data, cls, floors_at(sl), hs, req, need)
+        raises = _raises(data, cls, floors_at(sl), hs, req, need, spells)
         groups = []
         for src, label in (("floors", "floors"), ("spells", spell_list), ("weapon", "weapon")):
             got = [f"{LABEL[s]} {v}" for s, r, v, x in raises if x == src and r > 0]
@@ -2444,15 +2456,17 @@ def refusal(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, obj
     def fits(sl_):
         i = sl_bracket(sl_)
         if i not in least:
-            fl = {s: _floors_at(floors_at(sl_), s, hs) for s in FLOOR_STATS + (["endurance"] if hs else [])}
+            fl = {s: _floors_at(floors_at(sl_), s, hs, spells)
+                  for s in floor_stats(spells) + (["endurance"] if hs else [])}
             least[i] = least_sl_with_rings(data, classes, fl, req, spells)
         return least[i] is not None and sl_ >= least[i]
 
     up = next((s_ for s_ in range(sl + 1, SL_MAX + 1) if fits(s_)), None)
     if up is not None and run(sl_=up) is not None:
         fixes.append(("sl", up, f"Raise SL to {up}"))
-        if use_floors and floors_at(up) != floors_at(sl):
-            fl = lambda sl_: " ".join(f"{LABEL[s]} {floors_at(sl_).get(s, 0)}" for s in FLOOR_STATS)
+        # the floors this build is held to (floor_stats: no ATT without spells), as they read
+        fl = lambda sl_: " ".join(f"{LABEL[s]} {floors_at(sl_).get(s, 0)}" for s in floor_stats(spells))
+        if use_floors and fl(up) != fl(sl):
             lines.append(f"the least SL that fits is {up}: the floors change with soul level "
                          f"({fl(sl)} at SL {sl}, {fl(up)} at SL {up})")
         else:
@@ -2467,7 +2481,7 @@ def refusal(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, obj
             fixes.append(("spell", key, f"Remove {data.spells[key]['name']}"))
     # 3. no floors
     if use_floors and need is not None and run(fl_=False) is not None:
-        binding = " ".join(f"{LABEL[s]} {v}" for s, r, v, x in _raises(data, cls, floors_at(sl), hs, req, need)
+        binding = " ".join(f"{LABEL[s]} {v}" for s, r, v, x in _raises(data, cls, floors_at(sl), hs, req, need, spells)
                            if x == "floors" and r > 0)
         fixes.append(("floors", None, f"Ignore typical-build minimums ({binding})"))
     # 4. another class, when a class was asked for
@@ -3025,7 +3039,7 @@ def ring_trades(data: Data, corpus: list[Build], weapon: str, sl: int, grip: str
     floors, r1, cut = build_floors(data, corpus, sl)
     if not use_floors:
         floors = {}
-    need_floors = {s: floors.get(s, 0) for s in FLOOR_STATS}
+    need_floors = {s: floors.get(s, 0) for s in floor_stats(spells)}
     if r1.get(weapon, 0) >= cut:
         need_floors["endurance"] = floors.get("endurance", 0)
     req = _grip_req(data, weapon, GRIP_TRIES[grip][0])
@@ -3921,8 +3935,8 @@ def main() -> int:
                          "their summed slot cost raises ATT, as a weapon's requirements do; no build when they "
                          "do not fit the SL")
     ap.add_argument("--no-floors", action="store_true",
-                    help="with --optimize/--generate/--weapons-for: drop the SL bracket floors (VIG/VIT/ADP/ATT, END for a "
-                         "high-stamina weapon): they are the medians of real builds, not a game rule")
+                    help="with --optimize/--generate/--weapons-for: drop the SL bracket floors (VIG/VIT/ADP, ATT with "
+                         "--spells, END for a high-stamina weapon): they are the medians of real builds, not a game rule")
     ap.add_argument("--allow-naked", action="store_true",
                     help="with --generate: no armour (by default the best set under 70%% load is chosen)")
     ap.add_argument("--objective", choices=["damage", "bleed", "poison"], default="damage",
@@ -4188,10 +4202,11 @@ def main() -> int:
         sl = a.sl or sum(stats.values()) - 53  # every DS2 class satisfies level = stat total - 53
         corpus, _ = load_corpus(data)
         floors, r1, cut = build_floors(data, corpus, sl)
-        bad = floor_violations(stats, floors) if not a.no_floors else []
+        bad = floor_violations(stats, floors, spells) if not a.no_floors else []
         if bad and not a.neighbours:  # never rank for a build that is not a valid one; --neighbours
             # only reports what real builds near these stats carry, so a real build below a floor may query it
-            print(f"not a valid SL {sl} build: {', '.join(bad)} (VGR/VIT/ADP/ATT floor at the bracket median; "
+            shown = "/".join(LABEL[s] for s in floor_stats(spells))
+            print(f"not a valid SL {sl} build: {', '.join(bad)} ({shown} floor at the bracket median; "
                   "use --optimize to get one, or --no-floors to rank these stats anyway)", file=sys.stderr)
             return 2
         if a.neighbours:

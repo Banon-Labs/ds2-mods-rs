@@ -56,6 +56,17 @@ const FTH: usize = 8;
 /// The script's `FLOOR_STATS`, in its order: VIG, VIT, ADP, ATT.
 const FLOOR_STATS: [usize; 4] = [VIG, VIT, ADP, ATT];
 
+/// The script's `floor_stats`: the [`FLOOR_STATS`] a build casting `spells` is held to, ATT only
+/// when it casts something. Without spells ATT buys nothing but agility, which ADP buys three
+/// times as fast.
+fn floored(spells: &[usize]) -> &'static [usize] {
+    if spells.is_empty() {
+        &FLOOR_STATS[..3]
+    } else {
+        &FLOOR_STATS
+    }
+}
+
 /// The script's `FREE_STATS`, with the names its tie-breaks compare.
 const FREE_STATS: [(usize, &str); 5] = [
     (VIG, "vigor"),
@@ -1835,12 +1846,12 @@ impl CorpusBackend {
     }
 
     /// The script's `_floors_at` for every stat: the least `optimize_build` lifts each to at
-    /// `bracket` -- VIG, VIT, ADP and ATT always, END for a high-stamina weapon -- or all `0` when
-    /// the floors are off.
-    fn floor_stats(bracket: &Bracket, weapon: &Weapon, floors: bool) -> Stats {
+    /// `bracket` -- VIG, VIT and ADP always, ATT with `spells` ([`floored`]), END for a
+    /// high-stamina weapon -- or all `0` when the floors are off.
+    fn floor_stats(bracket: &Bracket, weapon: &Weapon, floors: bool, spells: &[usize]) -> Stats {
         let mut out = [0; STAT_COUNT];
         if floors {
-            for (at, stat) in FLOOR_STATS.into_iter().enumerate() {
+            for (at, &stat) in floored(spells).iter().enumerate() {
                 out[stat] = bracket.floors[at];
             }
             if weapon.high_stamina {
@@ -1903,7 +1914,8 @@ impl CorpusBackend {
         let spell_list = names.join(", ");
         let two = grip.two_handed();
         let require = Self::grip_require(weapon, two);
-        let floors_at = |sl: u16| Self::floor_stats(self.bracket(u32::from(sl)), weapon, floors);
+        let floors_at =
+            |sl: u16| Self::floor_stats(self.bracket(u32::from(sl)), weapon, floors, spells);
         let classes: Vec<usize> = (0..self.classes.len())
             .filter(|&at| {
                 only_class.is_none_or(|only| self.classes[at].key.eq_ignore_ascii_case(only))
@@ -1961,7 +1973,7 @@ impl CorpusBackend {
         let mut fits = |sl: u16| {
             let at = sl_bracket(u32::from(sl));
             let bound = *least[at].get_or_insert_with(|| {
-                let floor = self.lift_floors(self.bracket(u32::from(sl)), weapon, floors);
+                let floor = self.lift_floors(self.bracket(u32::from(sl)), weapon, floors, spells);
                 self.least_sl_with_rings(&classes, &floor, &lift_require, spells)
             });
             bound.is_some_and(|bound| i32::from(sl) >= bound)
@@ -2048,12 +2060,17 @@ impl CorpusBackend {
                     ),
                     _ => format!(
                         "{wname}{} SL {sl}, but not above its typical-build minimums (the median \
-                         VIG/VIT/ADP/ATT of real builds at this level; not a game rule)",
+                         {} of real builds at this level; not a game rule)",
                         if spells.is_empty() {
                             " fits".to_owned()
                         } else {
                             format!(" and {spell_list} fit")
-                        }
+                        },
+                        floored(spells)
+                            .iter()
+                            .map(|&stat| label(stat))
+                            .collect::<Vec<_>>()
+                            .join("/")
                     ),
                 };
                 if only_class.is_some() {
@@ -2116,22 +2133,19 @@ impl CorpusBackend {
                     change: Change::RaiseSl(up),
                     label: format!("Raise SL to {up}"),
                 });
-                let (then, now) = (floors_at(sl), floors_at(up));
-                if floors
-                    && self.bracket(u32::from(sl)).floors != self.bracket(u32::from(up)).floors
-                {
-                    let shown = |floor: &Stats| {
-                        FLOOR_STATS
-                            .iter()
-                            .map(|&stat| format!("{} {}", label(stat), floor[stat]))
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    };
+                // The floors this build is held to (no ATT without spells), as they read.
+                let shown = |floor: &Stats| {
+                    floored(spells)
+                        .iter()
+                        .map(|&stat| format!("{} {}", label(stat), floor[stat]))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                };
+                let (then, now) = (shown(&floors_at(sl)), shown(&floors_at(up)));
+                if floors && then != now {
                     lines.push(format!(
-                        "the least SL that fits is {up}: the floors change with soul level ({} at \
-                         SL {sl}, {} at SL {up})",
-                        shown(&then),
-                        shown(&now)
+                        "the least SL that fits is {up}: the floors change with soul level ({then} \
+                         at SL {sl}, {now} at SL {up})"
                     ));
                 } else {
                     lines.push(format!("the least SL that fits is {up}"));
@@ -2214,7 +2228,7 @@ impl CorpusBackend {
         floors: bool,
     ) -> Option<Best> {
         let classes = self.class_indices(only_class);
-        let floor = self.lift_floors(self.bracket(sl), weapon, floors);
+        let floor = self.lift_floors(self.bracket(sl), weapon, floors, spells);
         let require = Self::grip_require_pairs(weapon, grip.two_handed());
         let run = |rings: &[usize]| {
             self.optimize_with(
@@ -2233,11 +2247,20 @@ impl CorpusBackend {
             .collect()
     }
 
-    /// The floors `ring_lift` lifts to, in the script's `need_floors` order: VIG, VIT, ADP, ATT,
-    /// then END for a high-stamina weapon; each `0` when the floors are off.
-    fn lift_floors(&self, bracket: &Bracket, weapon: &Weapon, floors: bool) -> Vec<(usize, i32)> {
-        let at = Self::floor_stats(bracket, weapon, floors);
-        let mut out: Vec<(usize, i32)> = FLOOR_STATS.iter().map(|&stat| (stat, at[stat])).collect();
+    /// The floors `ring_lift` lifts to, in the script's `need_floors` order: VIG, VIT, ADP, ATT
+    /// with `spells`, then END for a high-stamina weapon; each `0` when the floors are off.
+    fn lift_floors(
+        &self,
+        bracket: &Bracket,
+        weapon: &Weapon,
+        floors: bool,
+        spells: &[usize],
+    ) -> Vec<(usize, i32)> {
+        let at = Self::floor_stats(bracket, weapon, floors, spells);
+        let mut out: Vec<(usize, i32)> = floored(spells)
+            .iter()
+            .map(|&stat| (stat, at[stat]))
+            .collect();
         if weapon.high_stamina {
             out.push((END, at[END]));
         }
@@ -3343,7 +3366,8 @@ impl RecommenderBackend for CorpusBackend {
         let slots = self.slots_of(&eff) + self.ring_slots(&worn);
         debug_assert!(slots_used <= slots, "the optimizer fits the spells' slots");
         let catalysts = self.best_catalysts(&spells, &eff);
-        let lift_floors = self.lift_floors(self.bracket(u32::from(sl)), primary, limits.floors);
+        let lift_floors =
+            self.lift_floors(self.bracket(u32::from(sl)), primary, limits.floors, &spells);
         let lift_require = Self::grip_require_pairs(primary, grip.two_handed());
         let ring_trades = self.ring_trades(class, &lift_floors, &lift_require, &spells, &worn);
         let mut ring_lowered = [false; STAT_COUNT];
