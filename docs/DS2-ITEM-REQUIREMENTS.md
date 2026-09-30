@@ -421,7 +421,9 @@ question as the badge's corner.
   "The frontend stat table is that same effective block"), so the badge agrees with the game's own
   requirement check either way. Which sources feed the modifier handle -- ring stat bonuses,
   spEffects, or both -- is past an Arxan-threaded builder and has not been traced. A run with a
-  Ring of Blades on, reading `PlayerParam + 0x10` against `+0x26`, would settle it.
+  Ring of Blades on, reading `PlayerParam + 0x10` against `+0x26`, would settle it. The handle's
+  shape says SpEffects, and a ring's stat bonus is itself a SpEffect event (`SpEffectRing.emevd`):
+  see "Two-handing" in `docs/DS2-DPS-MECHANICS.md`, which infers it from that shape.
 * **That style `0x98` renders red.** It is not a `FeColorSetParam` row -- that param's ids are
   `1`, `2`, `100`, `101`, `10000..10009`, `20000..20002`, `30000..30003` -- so the style-id space
   is FeLayout element states inside `.flo` payloads, which `scripts/ds2-flo.py` does not decode.

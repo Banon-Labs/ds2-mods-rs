@@ -1835,8 +1835,8 @@ def objective_value(data: Data, weapon: str, inf: str, st: dict, objective: str,
 #: unreachable for any weapon the stats could one-hand, and trying two-handed first is the same as
 #: always two-handing, since a halved requirement fits whenever the full one does.
 #: The objective is scored the same for either grip: AR (or status build-up per hit) does not depend
-#: on the grip in this model. The 1.5x STR a two-handed grip is said to give is unproven here
-#: (docs/DS2-DPS-MECHANICS.md section 1), so it is not applied.
+#: on the grip once the requirement is met. The game has no two-handed Strength multiplier
+#: (docs/DS2-DPS-MECHANICS.md, "Two-handing").
 GRIP_TRIES = {"two": (True,), "one": (False,)}
 
 

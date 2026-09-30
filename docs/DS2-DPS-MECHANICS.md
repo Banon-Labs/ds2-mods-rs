@@ -41,7 +41,7 @@ A slot value of `1` means the slot is unused (for example, guard attacks on a da
   the 1H ones (dagger R2 1.176 -> 2H R2 1.4112).
 - `styleRateType` indexes DamageStyleRateParam: 0 = 1.0, 1 = 1.5, 2 = 0.8. 2H rows carry 1.
   `attackTypeRateType` indexes DamageAttackTypeRateParam: 1.0/1.15/1.3/1.5; R2s carry 1 and jump attacks 2.
-  REGULATION. What these multiply was not traced. The 1.5 is consistent with the 2H 1.5x STR, but that is unverified.
+  REGULATION for the values. Both multiply the hit's knockback, not its damage (EXE, "Two-handing" below).
 - **Poise damage (base)** = `DamageCtrlParam.poiseDamage`, row `PlayerDamageParam.damageCategory`.
   Weapon factor = `WeaponParam.poiseDamageScalePlayer`. See section 2 for the EXE formula.
 - **Stamina cost** = `WeaponParam.meleeAttackBaseCost * WeaponStaminaCostParam[costCategoryId].<slot> / 10`.
@@ -220,7 +220,6 @@ separately. Per-tick build-up is the INFERRED part above; resistance and proc da
 - The damageMotion -> stagger animation mapping and its length, which decides true combos.
 - Where startPlaySpeed switches to endPlaySpeed.
 - That 111500 is the chain window.
-- What styleRate and attackTypeRate multiply.
 - That hitDistance is a time interval.
 - Per-tick status build-up.
 - 278 attack slots point at animations missing from c000100_pl.tae (7 anim ids, for example 20510540 and 40030030),
@@ -421,6 +420,51 @@ PlayerLackOfStatsParam penalty, `0x14038f6a0` -> calculator slot 13 = 1 - slot 9
 weapons in the regulation, the right-hand scale is 1.0 for 315 (0.9 for 18, 0.865 for one) and the left-hand
 one 0.9 for 303; every catalyst's right-hand scale is 1.0, and `ChrParam.damageAdjustRate` is 1.0. Not read:
 the extra rate edit at `0x14038f440` beyond the buff below.
+
+### Two-handing (EXE)
+
+Read 2026-09-30. Two-handing does not multiply Strength for attack rating. What it does change:
+
+| Two-handing | Read at |
+|---|---|
+| halves the weapon's Strength requirement (`shr cx,1` for grip 2 or 3), which reaches the attack only through the lack-of-stats factor `k` | `FUN_14034a980` -> `0x14034d3c0`, `0x14034ce60`; the attack reads the cached ratios through `0x14031fcb0` |
+| attacks from the two-handed `atkId` slots, with their own damage rows (section 1) | REGULATION |
+| guards with `WeaponTypeParam.stabilityAddRateSingle2Handed` (`+0xd4`) | `0x14034d6c8` |
+| multiplies knockback by `DamageStyleRateParam.rate`, 1.5 on the two-handed rows (`styleRateType` 1) | `FUN_1403eee20`, `FUN_1403ee840` |
+
+Why no Strength multiplier can reach the attack:
+
+- The scaling function `0x1403903b0` reads the Strength bonus from the one player stat object,
+  `[chr+0x490]` -> `0x14038b990` (`+8`), at `+0x50` (`0x14038d260`). Its only compares are on the
+  infusion (`ws+0x31` = 8 or 9), and it adds the Strength and Dexterity terms into one physical value,
+  so nothing after it can scale Strength alone.
+- That bonus is `physicalAttackByStrength` of the `PhysicalStatsPerLevelStatValuesParam` row for the
+  effective Strength (`chrStatus+0x16`). The stat builder `0x14038d790` writes it, and all three of its
+  calls (`0x14038d644`, `0x14038d6f4`, `0x14038c1b5`) pass that block. The row lookup `0x140358b60` is
+  called only by the builder and its stat-1 and stat-99 helpers: every `scripts/ds2-xrefs.py` hit is in
+  `0x14038c2ab`..`0x14038e24f`.
+- The effective block is `clamp(base + modifier, 1, 99)` (`0x1401ffcc0`), and it is what the attributes
+  menu shows (`docs/DS2-ITEM-REQUIREMENTS.md`). The modifier's eleven signed bytes (`source+0x30b`..
+  `+0x315`, read by `0x14014cfe0`) line up one for one with the SpEffect `1000[0]` stat kinds 6 to 16.
+  The handle comes from `0x14014bb40`, which sits among `ChrSpEffectCtrl`'s methods (vtable
+  `0x1410bfee0`) and reads the same `+0x10` member as that class's destructor. That the modifier is the
+  SpEffect stat total is inferred from this shape, not read from the code that fills it.
+- No SpEffect raises Strength when the grip changes. Across the eleven `SpEffect*.emevd` scripts,
+  `1000[0]` kind 10 (Strength) is in five events, all items: ring 41010000, armour 21650100 and
+  21650110, weapon 11320000 and active item 60235000. No `1000[19]` scales Strength. The grip writer
+  `FUN_14034f470` sets two dirty flags and sends `ChrEquipPacket_weaponStance` (`FUN_1401628d0`), and
+  applies no SpEffect.
+- The attack builder `0x140391fe0` and the functions it calls make no ChrAsmCtrl (`PlayerCtrl` slot
+  `0x120`) or equip-object (`ChrAsmCtrl` slot `0x70`) call. The equip-object getters that `0x14031fcb0`
+  uses (`0x1403491e0`, `0x140349100`, `0x140349170`) return the cached lack-of-stats ratios.
+
+**`styleRateType` and `attackTypeRateType` scale knockback.** `FUN_1403edc70` reads `DamageParam`
+`+0x41` (directionType), `+0x5e` (movementPowerType), `+0x5f` and `+0x60`. `FUN_1403edee0` builds a
+normalised direction for the directionType. `FUN_1403eee20` multiplies it by the `rate` of
+`DamageMovementPowerParam`, `DamageAttackTypeRateParam` and `DamageStyleRateParam` (lookups
+`0x1403b5640`, `0x1403b54d0` and `0x1403b5780` on `DamageMan`) and by `FUN_1403ee490`, then hands it to
+`FUN_1403efc30`. When a hit breaks an object, `FUN_1403ee840` uses the three params' `break_rate`
+instead (`FUN_1403ee320`, `FUN_1403ee2e0`, `FUN_1403ee360`). Nothing else calls the three lookups.
 
 ## Spell and buff attack (EXE)
 
