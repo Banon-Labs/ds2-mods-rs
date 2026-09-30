@@ -423,6 +423,31 @@ pub fn floor_violations(stats: &[u16; STAT_COUNT], floors: &[u16; STAT_COUNT]) -
         .collect()
 }
 
+/// Raise every floored stat that is under its floor up to it, at the level `state` runs at, and
+/// answer whether any stat moved: what Run does a second time after it answered
+/// [`Answer::FloorViolations`].
+///
+/// Without an override, a raised stat raises the level the stats make, and the floors with it, so
+/// this repeats until nothing is under a floor. Stats only rise and are capped, so it ends.
+pub fn raise_to_floors(backend: &dyn RecommenderBackend, state: &mut PanelState) -> bool {
+    let mut raised = false;
+    loop {
+        let floors = backend.floors(state.sl());
+        let mut moved = false;
+        for &index in &FLOOR_STATS {
+            let before = state.stats[index];
+            if before < floors[index] {
+                state.set_stat(index, floors[index]);
+                moved |= state.stats[index] != before;
+            }
+        }
+        if !moved {
+            return raised;
+        }
+        raised = true;
+    }
+}
+
 /// What the panel shows for one press of Run.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Answer {
@@ -1194,6 +1219,77 @@ mod tests {
             assert!(matches!(ask(&StubBackend, &state), Answer::Rows(rows) if !rows.is_empty()));
             state.stats = [6; STAT_COUNT];
         }
+    }
+
+    /// Run's second press after a floor refusal: every floored stat reaches its floor, and floors
+    /// that rise with the level the raise makes are chased until none is left unmet.
+    #[test]
+    fn raising_to_the_floors_clears_every_violation() {
+        let mut state = PanelState {
+            stats: [6; STAT_COUNT],
+            ..PanelState::default()
+        };
+        assert!(!floor_violations(&state.stats, &StubBackend.floors(state.sl())).is_empty());
+        assert!(raise_to_floors(&StubBackend, &mut state));
+        assert!(floor_violations(&state.stats, &StubBackend.floors(state.sl())).is_empty());
+        // Stats already over their floors are left as they are.
+        assert_eq!(state.stats[1], 6);
+        assert!(!raise_to_floors(&StubBackend, &mut state));
+
+        /// VIG's floor is a third of the level, so raising VIG raises its own floor.
+        struct Rising;
+        impl RecommenderBackend for Rising {
+            fn is_stub(&self) -> bool {
+                true
+            }
+            fn floors(&self, sl: u16) -> [u16; STAT_COUNT] {
+                let mut floors = [0; STAT_COUNT];
+                floors[0] = sl / 3;
+                floors
+            }
+            fn weapons_for(&self, s: &[u16; STAT_COUNT], sl: u16, o: &WeaponsForOpts) -> Outcome {
+                StubBackend.weapons_for(s, sl, o)
+            }
+            fn optimize(
+                &self,
+                w: &str,
+                i: Infusion,
+                sl: u16,
+                o: Objective,
+                g: Grip,
+                l: &Limits<'_>,
+            ) -> Option<OptimizedBuild> {
+                StubBackend.optimize(w, i, sl, o, g, l)
+            }
+            fn minimum(&self, w: &str, i: Infusion, t: bool) -> Option<OptimizedBuild> {
+                StubBackend.minimum(w, i, t)
+            }
+            fn similar(&self, s: &[u16; STAT_COUNT], sl: u16, k: u16, f: StatusFilter) -> Outcome {
+                StubBackend.similar(s, sl, k, f)
+            }
+            fn calibration(&self) -> Calibration {
+                StubBackend.calibration()
+            }
+            fn generate_build(
+                &self,
+                w: &str,
+                i: Infusion,
+                sl: u16,
+                o: Objective,
+                n: bool,
+                g: Grip,
+                l: &Limits<'_>,
+            ) -> Option<GeneratedBuild> {
+                StubBackend.generate_build(w, i, sl, o, n, g, l)
+            }
+        }
+        let mut state = PanelState {
+            stats: [20; STAT_COUNT],
+            ..PanelState::default()
+        };
+        state.stats[0] = 1;
+        assert!(raise_to_floors(&Rising, &mut state));
+        assert!(floor_violations(&state.stats, &Rising.floors(state.sl())).is_empty());
     }
 
     /// Weapons for stats ranks by the panel's objective: Bleed there reaches the backend as Bleed.

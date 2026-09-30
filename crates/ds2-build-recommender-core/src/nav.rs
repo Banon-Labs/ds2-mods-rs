@@ -181,7 +181,8 @@ pub fn resolve(rows: &[Vec<Control>], cursor: Control) -> Control {
 
 /// Where one press of `dir` takes the cursor.
 ///
-/// Left and Right stop at a row's ends; Up and Down stop at the top and bottom rows, and land at
+/// Left and Right wrap from a row's one end to its other; Up and Down stop at the top and bottom
+/// rows, and land at
 /// the same fraction of the way along the new row, so going down from the ninth stat lands at the
 /// right-hand end of the row below rather than its start.
 pub fn step(rows: &[Vec<Control>], cursor: Control, dir: Dir) -> Control {
@@ -190,8 +191,11 @@ pub fn step(rows: &[Vec<Control>], cursor: Control, dir: Dir) -> Control {
         return cursor;
     };
     let target_row = match dir {
-        Dir::Left => return rows[row][column.saturating_sub(1)],
-        Dir::Right => return rows[row][(column + 1).min(rows[row].len() - 1)],
+        Dir::Left => {
+            let len = rows[row].len();
+            return rows[row][(column + len - 1) % len];
+        }
+        Dir::Right => return rows[row][(column + 1) % rows[row].len()],
         Dir::Up if row == 0 => return cursor,
         Dir::Up => row - 1,
         Dir::Down if row + 1 == rows.len() => return cursor,
@@ -384,19 +388,34 @@ mod tests {
         assert_eq!(step(&rows, Control::Grip, Dir::Right), Control::Objective);
     }
 
+    /// The player asked for it on 2026-09-29: a direction off a row's end comes back at its other
+    /// end rather than stopping.
     #[test]
-    fn left_and_right_walk_the_level_and_stats_and_stop_at_the_ends() {
+    fn left_and_right_walk_the_level_and_stats_and_wrap_at_the_ends() {
         let rows = layout(shape(Mode::WeaponsForStats));
         assert_eq!(
             step(&rows, Control::SlOverride, Dir::Left),
-            Control::SlOverride
+            Control::Stat(8)
         );
         assert_eq!(
             step(&rows, Control::SlOverride, Dir::Right),
             Control::Stat(0)
         );
         assert_eq!(step(&rows, Control::Stat(0), Dir::Right), Control::Stat(1));
-        assert_eq!(step(&rows, Control::Stat(8), Dir::Right), Control::Stat(8));
+        assert_eq!(
+            step(&rows, Control::Stat(8), Dir::Right),
+            Control::SlOverride
+        );
+        assert_eq!(
+            step(&rows, Control::Close, Dir::Right),
+            Control::UseCharacter
+        );
+        // A row of one stays where it is.
+        let rows = layout(Shape {
+            results: true,
+            ..shape(Mode::WeaponsForStats)
+        });
+        assert_eq!(step(&rows, Control::Results, Dir::Left), Control::Results);
     }
 
     /// Measured on 22cafa3: Down from the weapon went to the mode tabs, which were drawn under the

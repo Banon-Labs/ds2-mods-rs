@@ -139,6 +139,8 @@ pub enum HintKey {
     LeftRight,
     /// Tab, or the pad's Y.
     Tab,
+    /// Escape, or the pad's Start: leave the panel for the pause menu.
+    Close,
 }
 
 /// One entry of the key help: a control and what it does, in a word or two.
@@ -304,38 +306,51 @@ impl SavePickerModel {
         )
     }
 
-    /// The key help for where the player is.
+    /// The key help for where the player is. Every stage but typing ends with Escape or Start,
+    /// which leaves the panel; while typing, Escape only stops the typing.
     pub fn hint(&self) -> &'static [Hint] {
-        use HintKey::{Back, Confirm, LeftRight, Tab};
+        use HintKey::{Back, Close, Confirm, LeftRight, Tab};
         const EDIT_PATH: &[Hint] = &[
             hint(Tab, "Complete"),
             hint(Confirm, "Go"),
             hint(Back, "Cancel"),
         ];
         const EDIT_NAME: &[Hint] = &[hint(Confirm, "Save"), hint(Back, "Cancel")];
-        const CHARACTERS: &[Hint] = &[hint(Confirm, "Load"), hint(Back, "Files")];
-        const OVERWRITE: &[Hint] = &[hint(Confirm, "Answer"), hint(Back, "Keep File")];
+        const CHARACTERS: &[Hint] = &[
+            hint(Confirm, "Load"),
+            hint(Back, "Files"),
+            hint(Close, "Back"),
+        ];
+        const OVERWRITE: &[Hint] = &[
+            hint(Confirm, "Answer"),
+            hint(Back, "Keep File"),
+            hint(Close, "Back"),
+        ];
         const DRIVE_PATH: &[Hint] = &[
             hint(Confirm, "Type Path"),
             hint(LeftRight, "Drive"),
             hint(Back, "Up"),
+            hint(Close, "Back"),
         ];
         const DRIVE: &[Hint] = &[
             hint(LeftRight, "Drive"),
             hint(Confirm, "Open"),
             hint(Back, "Up"),
+            hint(Close, "Back"),
         ];
         const DESTINATION: &[Hint] = &[
             hint(Confirm, "Choose"),
             hint(Back, "Up"),
             hint(LeftRight, "Page"),
             hint(Tab, "Type Path"),
+            hint(Close, "Back"),
         ];
         const FILES: &[Hint] = &[
             hint(Confirm, "Open"),
             hint(Back, "Up"),
             hint(LeftRight, "Page"),
             hint(Tab, "Type Path"),
+            hint(Close, "Back"),
         ];
         match (self.editing(), &self.stage) {
             (Some(EditTarget::Path), _) => EDIT_PATH,

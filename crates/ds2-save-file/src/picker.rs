@@ -817,6 +817,9 @@ fn button_name(key: HintKey, pad: bool) -> &'static str {
         (HintKey::Back, true) => button(Button::B),
         (HintKey::LeftRight, true) => button(Button::DPadLeftRight),
         (HintKey::Tab, true) => button(Button::Y),
+        // Start is the pad's pause button, which closes the panel as Escape does.
+        (HintKey::Close, true) => button(Button::Start),
+        (HintKey::Close, false) => "Esc",
         (HintKey::Confirm, false) => "Enter",
         (HintKey::Back, false) => "Backspace",
         (HintKey::LeftRight, false) => "Left/Right",

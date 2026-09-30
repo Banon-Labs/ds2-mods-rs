@@ -741,6 +741,19 @@ impl Panel {
     }
 
     fn run(&mut self) {
+        // The last Run was refused for floors and nothing has changed since (a change clears the
+        // answer): this Run raises the stats to them first, as the refusal offered.
+        if matches!(self.answer, Some(Answer::FloorViolations(_))) {
+            let before = self.state.stats;
+            if backend::raise_to_floors(backend(), &mut self.state) {
+                log_line(format_args!(
+                    "{LOG_PREFIX} raised to the floors at SL {}: {before:?} -> {:?}",
+                    self.state.sl(),
+                    self.state.stats
+                ));
+                self.changed();
+            }
+        }
         let answer = backend::ask(backend(), &self.state);
         log_line(format_args!(
             "{LOG_PREFIX} run mode={:?} sl={} -> {}",
@@ -2334,6 +2347,12 @@ fn draw_answer(panel: &mut Panel, canvas: &mut Canvas<'_>, (min, max): ([f32; 2]
                 y += line + 2.0;
                 canvas.text([min[0] + 12.0, y], TEXT, violation);
             }
+            y += line + 8.0;
+            canvas.text(
+                [min[0], y],
+                TEXT,
+                "Run again to raise them to the floors and ask.",
+            );
         }
         Some(Answer::Build(build)) => {
             canvas.text(
@@ -2587,7 +2606,10 @@ fn content_height(panel: &Panel, ui: &Ui, width: f32, line: f32, row: f32) -> f3
         }
         Some(Answer::Refused(refused)) => refusal(&refused.lines, refused.fixes.len()),
         Some(Answer::Build(_)) => lines(6),
-        Some(Answer::FloorViolations(violations)) => (violations.len() + 1) as f32 * (line + 2.0),
+        // The heading, the violations, and the line offering the second Run.
+        Some(Answer::FloorViolations(violations)) => {
+            (violations.len() + 1) as f32 * (line + 2.0) + line + 8.0 + line
+        }
         Some(Answer::Nothing(_)) | None => lines(2),
     }
 }
