@@ -235,8 +235,10 @@ are DamageAdjustParam +0x158..+0x16C, read as integers by `PlayerGameParamCalcul
 elemental defense acts only through `cut`, clamped to [0, 1] and capped at PlayerCommonParam+0x18C (99.0).
 `DEF_type` is the hit's slash/strike/thrust defense (`DamageCtrlParam.attackType`, REGULATION).
 `damageLower` is `PlayerDamageParam.damageLower` (70 on 1742 of 3082 rows). The elemental `cut` is
-resolved below: it is `(D + 100) / 1000` for the defense D that SoulsPlanner shows. Not traced: whether
-remote PvP hits take this same path.
+resolved below: it is `(D + 100) / 1000` for the defense D that SoulsPlanner shows. A remote PvP hit
+carries the same factors: `0x140160ee0` packs the damage buffer's `+0x78`/`+0x7c`/`+0x80` into packet 28
+and `0x140161370` unpacks them to the same offsets on the victim's side (read 2026-09-30; "What else a
+hit carries" below).
 
 **Where the attack and the motion value enter** (read 2026-09-29 through the Ghidra daemon). The
 per-hit function on the defender is `ChrDamageActionCtrl::FUN_1401345c0(this, out, sAr *attack)`.
@@ -256,16 +258,69 @@ bullet[i]  = 1.0, or for a bullet hit the defender calculator's slot +0x1a8, whi
   `+0x48` physical, `+0x4c` magic, `+0x50` lightning, `+0x54` fire, `+0x58` dark, `+0x5c` flat. A PvP
   hit reaches the victim as packet 28 (`PlayerDamageActionCtrl::ChrDamagePacket_pvpDamage`
   `0x1401f7c10`, struct `sDamagePacket`), which carries the same five attack ratings.
-- `live` is the attacker's own weapon attack, `PlayerGameParamCalculator` slot 56 (`0x140380dd0`, vtable
-  `0x1410e4ec8` +0x1c0) for hand 1 or 2. It is added only when the attacker is not a bullet: the hit
-  context built by `0x140136ab0` sets `+0x85` when the attacker's class is `BulletObject` (class id via
-  `0x140448050`), and `calculateDamage_attack` skips slot 56 when `+0x85` is set. A spell therefore hits
-  with only the attack ratings its bullet carries.
+- `sAr.ar` is the attack builder's own attack block, whole: the per-hand builder `0x140391fe0` (see
+  "Attack rating" below) fills a 0x9c-byte block, and `checkCollisionForDamage` (`0x140314520`) copies
+  156 bytes of it to `sAr+0x48`. So the weapon's attack rating, with its damage row's flat damage, is in
+  `sAr.ar`.
+- `live` is `PlayerGameParamCalculator` slot 56 (`0x140380dd0`, vtable `0x1410e4ec8` +0x1c0): kind 5 for
+  hand 1 or kind 6 for hand 2, read by `0x141c4cd4e` -> `0x14022e200` -> `0x14014ce10`. That is the
+  handle the stat modifiers are read through ("Two-handing" below), so it is the hand's attack add
+  (SpEffect-shaped, INFERRED as the stat modifiers are), not the weapon's attack. Whether the builder's
+  own kind 5/6 add (`0x14038f3b0`, below) and this one both reach a melee hit was not read. `live` is
+  added only when the attacker is not a bullet: the hit context built by `0x140136ab0` sets `+0x85` when
+  the attacker's class is `BulletObject` (class id via `0x140448050`), and `calculateDamage_attack`
+  skips slot 56 when `+0x85` is set. A spell therefore hits with only the attack ratings its bullet
+  carries.
 - `damageRate` (the motion value) multiplies after the defense is subtracted. So one point of physical
   defense takes `damageRate / 12` off a hit whatever its attack, and one point of an element's defense
   `damageRate * attack * sAr[+0xb4] / 1000`; their ratio does not depend on the motion value.
-- Not read here: what `sAr[+0xb4]` and `sAr[+0xb8]` hold, and where a bullet's `sAr` attack ratings are
-  filled on the caster's side.
+- Not read here: where a bullet's `sAr` attack ratings are filled on the caster's side.
+
+### What else a hit carries (EXE)
+
+Read 2026-09-30. The attack block's constructor `0x1403ada20` sets its `+0x6c`, `+0x70` and `+0x74` to
+1.0; they arrive as `sAr+0xb4`, `+0xb8` and `+0xbc`. The builder then writes them:
+
+| field | writer | value | when |
+|---|---|---|---|
+| `+0xb4` | `0x141c59b4a` -> `0x141c38f32` | the attacker's `flags+0x420` | every player attack |
+| `+0xb4` | `0x140027533` | x `flags+0x428` | `chr+0x228` set, HP% (`0x14016a440`) at or below s8 `flags+0x309`, not a spell |
+| `+0xb8` | `0x141c5ccfc`, `0x141c5cd09` | `WeaponParam.damageScale` (+0x80) | not a spell |
+| `+0xb8` | `0x14005ed12`, `0x141b11453`, `0x141ca8114`, `0x141b9d7cb` | `flags+0x48c/+0x490/+0x494/+0x49c` | a spell, by `spellCategory` 0, 1, 2, 4 (3 is behind an unresolved stub) |
+| `+0xbc` | `0x141c5cd14`, `0x141c5cd19` | `WeaponTypeParam.counterDamageScale` (+0x6c) | always |
+| `+0xbc` | `0x1404c6084` | x `flags+0x3e8` | `DamageCtrlParam.attackType` 1 (thrust) |
+
+- `calculateDamage_attack` multiplies the five typed attacks and the seven status build-ups by
+  `+0xb4`, and `calculateDamage_defense` multiplies each typed damage by `+0xb8` after the defense
+  (`0x140138f8a`). Neither touches `sAr+0x5c`.
+- **Counter hit** (`0x140138fc9`): damage x `DamageParam.counterDamageRate` (+0x20) x `+0xbc`, when the
+  victim's `flags+0x630` is nonzero or bit 0x20 of `[chr+0xc0]+0xf4` is set (TAE 111600 sets that bit,
+  section 3). `counterDamageRate` is 1.0, 0.91 or 0.8 per row (REGULATION).
+- **Critical hit** (`0x14013904c`, when the hit context's `+0x83` is set): damage x
+  `ChrCommonParam.grabDamageRate<type>` (0.8 for every type in its one row, 100) x the `PlayerCommonParam`
+  backstab 0.8, riposte 0.9 or guard-break stab 1.0, chosen by the victim's grab category / 10000 and
+  applied when `thunk_FUN_141b8b72f(CharacterManager, 8) > 24` x the victim's `flags+0x79c`.
+- Grip, power stance, jump and running attacks are read by none of these writers.
+- `damageScale` is not 1.0 on nine weapons (REGULATION): Light, Heavy, Shield and Sanctum Crossbow 1.25;
+  Scythe of Want 0.8; Silverblack Sickle, Stone Twinblade and Dragonrider Bow 0.85; Dragonrider
+  Twinblade 0.875. `counterDamageScale` runs from 1.0 to 1.6.
+- Physical damage also passes slot 37 (`0x140139a40`), `ChrCommonParam.receiveSlash/Thrust/StrikeDamageRate`,
+  all 1.0.
+
+The `flags` rates look like SpEffect `1000[1]` kind k stored at `flags+0x3bc+4k` (INFERRED: five offsets
+each match the effect their items describe; the writer was not read):
+
+| kind | offset | effect | items (REGULATION) |
+|---|---|---|---|
+| 11 | `+0x3e8` | thrust counter | Old Leo Ring 1.125 |
+| 25 | `+0x420` | attack | Drakeblood Greatsword 1.05, Dragon Torso Stone 1.15 |
+| 26 | `+0x424` | damage taken | Ring of the Embedded 1.085, Iron Flesh 0.6, Numbness 0.85 |
+| 27 | `+0x428` | attack at low HP | Red Tearstone Ring 1.2 |
+| 28 | `+0x42c` | damage taken at low HP | Blue Tearstone Ring 0.65 |
+
+Not read: the collision step that moves the block from the active hitbox list into `sLastHitboxData`,
+the writers of the `flags` rates, `flags+0x309`, `flags+0x630` and `flags+0x79c`, the non-player builder
+`0x140391e60`, and what `thunk_FUN_141b8b72f(CharacterManager, 8)` returns.
 
 ## Elemental cut: where the +100 comes from (EXE)
 
@@ -414,7 +469,16 @@ rounds coefficients to 2 dp. SoulsPlanner's Enchanted STR 0.06 is not the regula
 
 This loop is inside `0x140391fe0`, the attack builder for every player attack (melee, arrows and spells;
 see "Spell and buff attack" below), so it is the path a hit takes, not a menu-only path. `D[i]` is the
-attack's damage row `damage01..03` of type `i` (`0x14038fee0` / `0x14038f2d0`). `k` = (1 - the
+attack's damage row `damage01..03` of type `i` (`0x14038fee0` / `0x14038f2d0`). `0x14038fee0` zeroes ten
+floats, converts each `damage0n` (+0xc, +0x10, +0x14) to float and hands it with its `damageType0n` byte
+(+0x19, +0x1a, +0x1b) to `0x14038f2d0`, then adds the ten into the attack. `0x14038f2d0` is a jump table
+at `0x14038f370`: types 0-4 (physical, magic, lightning, fire, dark) add to slots 0-4, 6 poison to slot 5,
+7 bleed to 6, 8 durability to 7, 12 petrify to 8 and 9 curse to 9. Types 5, 10 and 11 (toxic) are
+dropped, so a row's toxic add reaches no attack. In the regulation, 71 damage rows of named weapons'
+live hits add physical attack this way (Santier's Spear two-handed R1 +130 on one of its two
+WeaponParam rows, Smelter Hammer +100, Bone Fist up to +120, Ricard's Rapier R2 +40 and +90, Syan's
+Halberd one-handed R1 +30), the Bat Staff's R2s add 700-1000 poison, and Mytha's Bent Blade's +300 is
+toxic. `k` = (1 - the
 PlayerLackOfStatsParam penalty, `0x14038f6a0` -> calculator slot 13 = 1 - slot 9 `0x1403811f0`) x
 `WeaponTypeParam.rightDamageScale` or `leftDamageScale` x `ChrParam.damageAdjustRate`. Over the 334 named
 weapons in the regulation, the right-hand scale is 1.0 for 315 (0.9 for 18, 0.865 for one) and the left-hand
@@ -621,3 +685,7 @@ subtracts from the INT and FTH requirements.
   cap gate.
 - Physical stat defense: the planner's table is off by one at 180 of 393 sums. The game uses
   `row[trunc(sum/4)].defense`.
+- Per hit: the damage row's flat attack (`regulation_hit_flat`, added before the defense) and
+  `WeaponParam.damageScale` (`regulation_damage_scale`, after it) are modelled. Not modelled: the
+  attacker's `flags` rates on `sAr+0xb4` (1.0 without a SpEffect), the counter and critical-hit
+  factors, and the hand's `live` add.

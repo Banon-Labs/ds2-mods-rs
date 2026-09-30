@@ -164,6 +164,8 @@ class Data:
         self.spell_hits = {}  # spell key -> the hits one cast deals (regulation_spell_hits)
         self.buffs = {}  # spell key -> the weapon buff it casts (regulation_buffs)
         self.weapon_elements = {}  # weapon key -> element -> (base, coefficient) (regulation_weapon_elements)
+        self.hit_flat = {}  # PlayerDamageParam row -> DMG key -> flat attack (regulation_hit_flat)
+        self.damage_scale = {}  # weapon key -> WeaponParam.damageScale where not 1.0 (regulation_damage_scale)
         # PhysicalStatsPerLevelStatValuesParam.staminaMax by END, rows 0-99: what a Dragon ring's
         # stamina factor is weighed against (ring_lift); empty when the regulation is not read.
         self.stamina_max = []
@@ -644,11 +646,11 @@ def threat_opponents(data: Data, corpus: list[Build]) -> list[tuple[dict, list[d
             k, v = max(buffs, key=lambda t: t[1])
             melee[k] = melee.get(k, 0.0) + v
         if melee or spells:
-            out.append((melee, spells))
+            out.append((melee, spells, data.damage_scale.get(main, 1.0)))
     return out
 
 
-def threat_sums(opponents: list[tuple[dict, list[dict]]]) -> dict:
+def threat_sums(opponents: list[tuple[dict, list[dict], float]]) -> dict:
     """What one point of each defense takes off one hit, summed over `opponents` in four groups:
     "melee" (builds that only swing), "spell" (only cast), and "both_melee" / "both_spell" (the
     swing and the cast of builds that do both). EXE (docs/DS2-DPS-MECHANICS.md "Damage per hit
@@ -656,15 +658,16 @@ def threat_sums(opponents: list[tuple[dict, list[dict]]]) -> dict:
     physical and damageRate x attack x (1 - (D + 100) / 1000) of an element, so a physical point is
     worth damageRate / 12 on any hit that carries physical attack and an element's point damageRate
     x attack / 1000. Floors and the 0.99 cap are left out (the linear range). A melee hit is an R1
-    (damageRate 1.0, the median one-handed R1); a spell hit is the spell's biggest hit, each
-    castable attack spell as likely."""
+    (damageRate 1.0, the median one-handed R1), times its weapon's WeaponParam.damageScale
+    (threat_opponents' third field; regulation_damage_scale); a spell hit is the spell's biggest
+    hit, each castable attack spell as likely."""
     sums = {g: {k: 0.0 for k in DMG} for g in ("melee", "spell", "both_melee", "both_spell")}
-    for melee, spells in opponents:
+    for melee, spells, scale in opponents:
         if melee:
             g = sums["both_melee" if spells else "melee"]
-            g["physical"] += 1 / 12 if melee.get("physical", 0) > 0 else 0
+            g["physical"] += scale / 12 if melee.get("physical", 0) > 0 else 0
             for e in ELEMENTS:
-                g[e] += melee.get(e, 0) / 1000
+                g[e] += scale * melee.get(e, 0) / 1000
         for sp in spells:
             g = sums["both_spell" if melee else "spell"]
             for t, attack in sp["attack"].items():
@@ -1112,7 +1115,9 @@ def apply_regulation(data: Data) -> str:
     return (f"regulation: physical stat defense from the game's table ({moved} sums moved), Enchanted "
             f"coefficients from WeaponStatsAffectParam for {fixed} weapons ({refused} left: join disagreed); "
             + regulation_spells(data, d, names) + "; " + regulation_spell_hits(data, d, names) + "; "
-            + regulation_buffs(data, emevd, members, d, names) + "; " + regulation_weapon_elements(data, d, names))
+            + regulation_hit_flat(data, d) + "; "
+            + regulation_buffs(data, emevd, members, d, names) + "; " + regulation_weapon_elements(data, d, names)
+            + "; " + regulation_damage_scale(data, d, names))
 
 
 def regulation_spells(data: Data, d: dict, names: dict) -> str:
@@ -1262,6 +1267,23 @@ def regulation_weapon_elements(data: Data, d: dict, names: dict) -> str:
     return f"elemental base and scaling for {len(data.weapon_elements)} weapons"
 
 
+def regulation_damage_scale(data: Data, d: dict, names: dict) -> str:
+    """data.damage_scale: weapon key -> WeaponParam.damageScale, where it is not 1.0. EXE
+    (docs/DS2-DPS-MECHANICS.md "What else a hit carries"): for every attack that is not a spell the
+    attack builder stores 1.0 x WeaponParam +0x80 in the attack block (0x141c5ccfc, 0x141c5cd09),
+    the block reaches the defender as sAr+0xb8, and calculateDamage_defense multiplies each type's
+    damage by it after the defense (0x140138f8a). Joined by name as regulation_catalysts joins."""
+    by_name = {}
+    for wid, w in d["WeaponParam"].items():
+        by_name.setdefault(norm(names.get(wid, "")), w)
+    data.damage_scale = {}
+    for key, w in data.weapons.items():
+        wp = by_name.get(norm(w.get("name", key)))
+        if wp and wp["damageScale"] != 1.0:
+            data.damage_scale[key] = wp["damageScale"]
+    return f"damageScale off 1.0 on {len(data.damage_scale)} weapons"
+
+
 def cast_power(data: Data, catalyst: str, element: str, stats: dict, inf: str = "No_Infusion") -> float:
     """A catalyst's full-upgrade cast power in `element` at `stats`, infused with `inf` (standard
     when the regulation has no row for it): base + scale x the element's per-stat bonus, the bonus
@@ -1393,6 +1415,26 @@ def regulation_spell_hits(data: Data, d: dict, names: dict) -> str:
         if hits:
             data.spell_hits[key] = hits
     return f"{len(data.spell_hits)} damaging spells from PlayerDamageParam/BulletParam"
+
+
+def regulation_hit_flat(data: Data, d: dict) -> str:
+    """data.hit_flat: PlayerDamageParam row -> {DMG key: flat attack} for every row whose damage01..03
+    add physical or elemental attack. EXE (docs/DS2-DPS-MECHANICS.md "Base, rates and the sum"): the
+    attack builder adds a hit's row's damage0n to that type's attack before the defender's side
+    (0x14038fee0 -> 0x14038f2d0, whose jump table sends damageType 0-4 to physical, magic,
+    lightning, fire and dark). Its poison and bleed adds are left out: among weapon attacks only the
+    Bat Staff's R2s carry one, and the ranking skips catalysts. The jump table drops type 11 (toxic),
+    so Mytha's Bent Blade's and the Umbral Dagger's toxic adds reach no attack."""
+    data.hit_flat = {}
+    for rid, row in d["PlayerDamageParam"].items():
+        flat: dict[str, float] = {}
+        for n in (1, 2, 3):
+            kind = DAMAGE_TYPE.get(row[f"damageType0{n}"])
+            if kind and row[f"damage0{n}"]:
+                flat[kind] = flat.get(kind, 0) + row[f"damage0{n}"]
+        if flat:
+            data.hit_flat[rid] = flat
+    return f"flat attack on {len(data.hit_flat)} PlayerDamageParam rows"
 
 
 #: A weapon buff in its spell's SpEffect event (SpEffectSpell.emevd, event id == SpellParam id):
@@ -1553,12 +1595,14 @@ def attack_hits(a: dict | None) -> int:
 
 def chain_timeline(attacks: dict, name: str, two_hand: bool, kind: str = "Normal", horizon: float = 3.0,
                    distinct: bool = False, with_start: bool = False) -> list[tuple]:
-    """(seconds from input, motion value, physical type, damage floor) of every hit a repeated
-    attack lands, alternating its 1st and 2nd chain attacks: `kind` "Normal" is the R1 chain,
-    "Strong" the R2 chain. Play speed is the mean of start/end speeds (where one hands over to
-    the other is unknown); re-hitting hitboxes add a tick per interval. `distinct`: see live_hits.
-    `with_start` appends the second its attack began, which is what `horizon` cuts on: the hits of
-    a longer horizon whose attack began before a shorter one are exactly the shorter one's hits."""
+    """(seconds from input, motion value, physical type, damage floor, flat attack) of every hit a
+    repeated attack lands, alternating its 1st and 2nd chain attacks: `kind` "Normal" is the R1
+    chain, "Strong" the R2 chain. Play speed is the mean of start/end speeds (where one hands over
+    to the other is unknown); re-hitting hitboxes add a tick per interval. `distinct`: see
+    live_hits. The flat attack is the hit's damage row's, per DMG type (NO_FLAT for none; see
+    load_attacks). `with_start` puts the second its attack began before the flat attack, which is
+    what `horizon` cuts on: the hits of a longer horizon whose attack began before a shorter one are
+    exactly the shorter one's hits."""
     g = "Single2Hand" if two_hand else "Single1Hand"
     seq = [attacks.get((norm(name), g + kind + "1st")), attacks.get((norm(name), g + kind + "2nd"))]
     if not seq[0]:
@@ -1572,7 +1616,8 @@ def chain_timeline(attacks: dict, name: str, two_hand: bool, kind: str = "Normal
             n = max(1, h.get("n") or 1)
             for i in range(n):
                 out.append((t0 + (h["start"] / 30 + i * (h.get("interval") or 0)) / spd, h["rate"],
-                            h.get("type") or "physical", h.get("lower", 0)) + ((t0,) if with_start else ()))
+                            h.get("type") or "physical", h.get("lower", 0)) + ((t0,) if with_start else ())
+                           + (h.get("flat") or NO_FLAT,))
         step = chain_open(a["anim"])
         if not step or step <= 0:
             break
@@ -1585,7 +1630,8 @@ def chain_timeline(attacks: dict, name: str, two_hand: bool, kind: str = "Normal
     return sorted(out)
 
 
-def r1_timeline(attacks: dict, name: str, two_hand: bool, horizon: float = 3.0) -> list[tuple[float, float, str, int]]:
+def r1_timeline(attacks: dict, name: str, two_hand: bool,
+                horizon: float = 3.0) -> list[tuple[float, float, str, int, tuple]]:
     """The R1 chain's hits (chain_timeline); what `--window` and the exported backend rank by."""
     return chain_timeline(attacks, name, two_hand, "Normal", horizon)
 
@@ -1613,11 +1659,18 @@ ATTACK_TYPES = Path.home() / ".cache/ds2-builds/attack-type.json"  # per weapon 
 DAMAGE_LOWER = Path.home() / ".cache/ds2-builds/damage-lower.json"  # PlayerDamageParam row -> damageLower
 
 
-def load_attacks() -> dict:
+#: A hit whose damage row adds no flat attack: one zero per DMG type.
+NO_FLAT = (0, 0, 0, 0, 0)
+
+
+def load_attacks(data: Data | None = None) -> dict:
     """Attacks by (weapon, slot). Each hit gets its physical type from DamageCtrlParam.attackType
-    (REGULATION, docs/DS2-DPS-MECHANICS.md) when the per-slot hit lists line up."""
+    (REGULATION, docs/DS2-DPS-MECHANICS.md) when the per-slot hit lists line up, and, given `data`
+    that read the regulation, its damage row's flat attack as a tuple in DMG order when the row has
+    any (regulation_hit_flat)."""
     types = {norm(k): v for k, v in json.loads(ATTACK_TYPES.read_text()).items()} if ATTACK_TYPES.exists() else {}
     lower = json.loads(DAMAGE_LOWER.read_text()) if DAMAGE_LOWER.exists() else {}
+    flat = data.hit_flat if data is not None else {}
     by = {}
     for a in json.loads(ATTACKS.read_text()):
         tl = (types.get(norm(a["name"]), {}).get(a["slot"]) or {}).get("hits") or []
@@ -1626,19 +1679,27 @@ def load_attacks() -> dict:
                 h["type"] = t
         for h in a.get("hits") or []:
             h["lower"] = lower.get(str(h.get("dmg")), 0)
+            f = flat.get(str(h.get("dmg")))
+            if f:
+                h["flat"] = tuple(f.get(k, 0) for k in DMG)
         by.setdefault((norm(a["name"]), a["slot"]), a)
     return by
 
 
-def hit_damage(ar: dict, dfn: dict, mv: float, kind: str = "physical", lower: int = 0) -> float:
+def hit_damage(ar: dict, dfn: dict, mv: float, kind: str = "physical", lower: int = 0,
+               flat: tuple = NO_FLAT) -> float:
     """One hit's damage against a player (EXE, ChrDamageActionCtrl slot 32 0x140138d50; notes in
     docs/DS2-DPS-MECHANICS.md): physical max(AR*10 - DEF_type, lower) / 12, each element
     max(AR*6, lower) / 6 * (1 - cut), summed, times MV. DEF_type is the hit's slash/strike/thrust
     defense (general physical when it has none), `lower` is PlayerDamageParam.damageLower, and
     cut = min(0.99, (DEF + 100) / 1000); the +100 is the stat table's 10% resistance floor that the
-    displayed defense leaves out (EXE, docs/DS2-DPS-MECHANICS.md "Elemental cut")."""
+    displayed defense leaves out (EXE, docs/DS2-DPS-MECHANICS.md "Elemental cut"). AR is the
+    weapon's attack plus `flat`, the hit's damage row's flat attack per DMG type, which the attack
+    builder adds before the defense (EXE, regulation_hit_flat): a type the weapon has no attack in
+    still hits when the row adds some."""
     tot = 0.0
-    for k, v in ar.items():
+    for k, f in zip(DMG, flat):
+        v = ar.get(k, 0) + f
         if not v:
             continue
         if k == "physical":
@@ -1689,7 +1750,7 @@ def weapons_for(data: Data, stats: dict, sl: int, corpus: list[Build], top: int 
     every_infusion = every_infusion or weapon is not None
     dfn, n = bracket_defense(data, corpus, sl)
     floors, r1, cut = build_floors(data, corpus, sl)
-    attacks = load_attacks()
+    attacks = load_attacks(data)
     rates = json.loads(HYPERARMOR.read_text()) if HYPERARMOR.exists() else {}
     # counter-hit multiplier: WeaponTypeParam.counterDamageScale (REGULATION; equals the menu's
     # Counter Strength for 202 of 204 weapons). Crits are left out: their tick count is unsettled.
@@ -1728,21 +1789,23 @@ def weapons_for(data: Data, stats: dict, sl: int, corpus: list[Build], top: int 
             for two_hand in ([False] if one else []) + [True]:
                 tl = r1_timeline(attacks, w["name"], two_hand) or r1_timeline(attacks, key.replace("_", " "), two_hand)
                 if tl:
-                    lines["2H" if two_hand else "1H"] = [(mv, ty, lo) for t, mv, ty, lo in tl if t <= window]
+                    lines["2H" if two_hand else "1H"] = [(mv, ty, lo, fl) for t, mv, ty, lo, fl in tl if t <= window]
             if not lines:
                 skipped.append(w["name"])
                 continue
         scored = []
+        scale = data.damage_scale.get(key, 1.0)  # after the defense, so not in raw AR (regulation_damage_scale)
         for inf in w["infusions"]:
             ar = attack_rating(data, key, inf, stats)
             if not ar:
                 continue
             if window:
-                grip, mvs = max(lines.items(), key=lambda g: sum(hit_damage(ar, dfn, mv, ty, lo) for mv, ty, lo in g[1]))
-                dmg = sum(hit_damage(ar, dfn, mv, ty, lo) for mv, ty, lo in mvs)
+                grip, mvs = max(lines.items(),
+                                key=lambda g: sum(hit_damage(ar, dfn, mv, ty, lo, fl) for mv, ty, lo, fl in g[1]))
+                dmg = sum(hit_damage(ar, dfn, mv, ty, lo, fl) for mv, ty, lo, fl in mvs) * scale
                 label = f"{grip} {len(mvs)} hits" + ("" if one or grip == "1H" else " (2H only)")
             else:
-                dmg = sum(ar.values()) if raw_ar else sum(damage(k, v, dfn[k]) for k, v in ar.items())
+                dmg = sum(ar.values()) if raw_ar else sum(damage(k, v, dfn[k]) for k, v in ar.items()) * scale
                 label = "1H" if one else "2H only"
             ha = hyperarmor(attacks, rates, w["name"], label.startswith("2H"))
             ctr = (crit.get(norm(w["name"])) or {}).get("counter")
@@ -1826,7 +1889,8 @@ def objective_value(data: Data, weapon: str, inf: str, st: dict, objective: str,
     if objective in ("bleed", "poison"):  # SoulsPlanner getBleedATK / getPoisonATK (SITE)
         i = 3 * st["dexterity"] + (st["faith"] if objective == "bleed" else st["adaptability"])
         return (atk.get(objective) or 0) + sc.get(objective, 0) * _tab(data, "auxATKBonus", i)
-    return sum(damage(k, v, dfn[k]) for k, v in attack_rating(data, weapon, inf, st).items())
+    return (sum(damage(k, v, dfn[k]) for k, v in attack_rating(data, weapon, inf, st).items())
+            * data.damage_scale.get(weapon, 1.0))
 
 
 #: The grip optimize_build builds for, per `--grip`. "two" (the default) halves the STR requirement,
@@ -2976,9 +3040,13 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 #                                                             attunement-slots, max-stamina or
 #                                                             cast-bonus table
 #   W key name class flags weight require ha1h ha2h counter   a weapon; flags: S shield, C catalyst,
-#                                                             H high-stamina R1; require: stat:value,..
+#     damagescale                                             H high-stamina R1; require: stat:value,..;
+#                                                             damagescale: WeaponParam.damageScale
 #   I code atk(7) scale(9)                                    one infusion of the last W
-#   L grip t:mv:type:lower ...                                the last W's R1 chain, grip 1 or 2
+#   L grip t:mv:type:lower[:flat(5)] ...                      the last W's R1 chain, grip 1 or 2;
+#                                                             flat: the hit's damage row's flat
+#                                                             attack in DMG order, comma-separated,
+#                                                             only when a value is nonzero
 #   B bracket floors(5) defense(8)                            one SL bracket
 #   R key name weight group                                   a ring; group: its upgrade line
 #   N key                                                     a ring in NO_USE_RINGS
@@ -3002,7 +3070,7 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 
 BACKEND_DATA_NAME = "ds2-build-recommender.dat"
 BACKEND_DATA = Path.home() / ".cache/ds2-builds" / BACKEND_DATA_NAME
-BACKEND_FORMAT = "ds2-build-recommender-data 6"
+BACKEND_FORMAT = "ds2-build-recommender-data 7"
 #: How far the exported R1/R2 chains run, in seconds: the panel clamps its window to 10.0
 #: (crates/ds2-build-recommender-ui/src/panel.rs), and status_hits runs to max(3, window).
 STATUS_HORIZON = 10.0
@@ -3032,7 +3100,7 @@ def _stat_pairs(d: dict) -> str:
 
 
 def export_backend(data: Data, corpus: list[Build]) -> str:
-    attacks = load_attacks()
+    attacks = load_attacks(data)
     rates = json.loads(HYPERARMOR.read_text()) if HYPERARMOR.exists() else {}
     crit = {norm(k): v for k, v in json.loads(CRIT.read_text()).items()} if CRIT.exists() else {}
     r1 = stamina_r1(data)
@@ -3063,7 +3131,8 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
         out.append("\t".join(["W", key, w["name"], data.weapon_class.get(key) or "", flags or "-",
                               _num(w.get("weight", 0)), _stat_pairs(w.get("require") or {}) or "-",
                               _num(float(hyperarmor(attacks, rates, w["name"], False))),
-                              _num(float(hyperarmor(attacks, rates, w["name"], True))), _num(ctr)]))
+                              _num(float(hyperarmor(attacks, rates, w["name"], True))), _num(ctr),
+                              _num(float(data.damage_scale.get(key, 1.0)))]))
         for inf, row in w["infusions"].items():
             atk, sc = row.get("atk") or {}, row.get("atkScale") or {}
             out.append("\t".join(["I", INFUSION_CODE[inf], *(_num(atk.get(k, 0)) for k in ATK_KEYS),
@@ -3072,7 +3141,8 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
             tl = r1_timeline(attacks, w["name"], two) or r1_timeline(attacks, key.replace("_", " "), two)
             if tl:
                 out.append("\t".join(["L", "2" if two else "1", " ".join(
-                    f"{_num(t)}:{_num(mv)}:{HIT_CODE.get(ty, 'p')}:{_num(lo)}" for t, mv, ty, lo in tl)]))
+                    f"{_num(t)}:{_num(mv)}:{HIT_CODE.get(ty, 'p')}:{_num(lo)}"
+                    + (":" + ",".join(map(_num, fl)) if any(fl) else "") for t, mv, ty, lo, fl in tl)]))
         # status_hits' inputs, per grip and R1/R2 chain, one row per name it would try (in its order,
         # repeats of one normalized name dropped): the hits of one attack, and every hit of the
         # repeated chain out to STATUS_HORIZON as `attack start:hit time`, so a window up to the
@@ -3285,7 +3355,7 @@ def _rs(v) -> str:
 
 def backend_expectations(data: Data, corpus: list[Build]) -> str:
     """This script's own answers to EXPECT_*, as the Rust fixture `CorpusBackend` is tested against."""
-    attacks = load_attacks()
+    attacks = load_attacks(data)
     rates = json.loads(HYPERARMOR.read_text()) if HYPERARMOR.exists() else {}
     crit = {norm(k): v for k, v in json.loads(CRIT.read_text()).items()} if CRIT.exists() else {}
     as_dict = lambda st: dict(zip(STATS, st))
