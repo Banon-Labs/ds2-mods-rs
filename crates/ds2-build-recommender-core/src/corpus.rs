@@ -38,7 +38,7 @@ use crate::weapons;
 pub const DATA_FILE_NAME: &str = "ds2-build-recommender.dat";
 
 /// The file's first line. A different one is a file this port does not read.
-pub const FORMAT: &str = "ds2-build-recommender-data 6";
+pub const FORMAT: &str = "ds2-build-recommender-data 8";
 
 /// Nine stats as the script computes with them, in [`crate::model::STAT_LABELS`] order.
 type Stats = [i32; STAT_COUNT];
@@ -298,6 +298,9 @@ struct Hit {
     defense: usize,
     /// `PlayerDamageParam.damageLower`.
     lower: f64,
+    /// The damage row's flat attack per type, in [`Ar`] order, which the attack builder adds to
+    /// the weapon's before the defense: the script's `regulation_hit_flat`.
+    flat: [f64; 5],
 }
 
 /// A weapon, with everything the ranking reads.
@@ -317,6 +320,9 @@ struct Weapon {
     hyperarmor: [f64; 2],
     /// The counter-hit multiplier, `0` for none.
     counter: f64,
+    /// `WeaponParam.damageScale`, which every hit's damage is multiplied by after the defense:
+    /// the script's `regulation_damage_scale`.
+    damage_scale: f64,
     infusions: Vec<InfusionRow>,
     /// The R1 chain one- and two-handed, empty where there is no timing.
     timeline: [Vec<Hit>; 2],
@@ -724,6 +730,7 @@ impl CorpusBackend {
                     float(Some(next("hyperarmor")?), line)?,
                 ];
                 let counter = float(Some(next("counter")?), line)?;
+                let damage_scale = float(Some(next("damage scale")?), line)?;
                 self.weapons.push(Weapon {
                     key,
                     name,
@@ -735,6 +742,7 @@ impl CorpusBackend {
                     require,
                     hyperarmor,
                     counter,
+                    damage_scale,
                     infusions: Vec::new(),
                     timeline: [Vec::new(), Vec::new()],
                     status: Default::default(),
@@ -782,11 +790,22 @@ impl CorpusBackend {
                             _ => return Err(bad(line, "hit type")),
                         };
                         let lower = float(parts.next(), line)?;
+                        let mut flat = [0.0; 5];
+                        if let Some(text) = parts.next() {
+                            let mut values = text.split(',');
+                            for slot in &mut flat {
+                                *slot = float(values.next(), line)?;
+                            }
+                            if values.next().is_some() {
+                                return Err(bad(line, "five flat attacks"));
+                            }
+                        }
                         Ok(Hit {
                             at,
                             motion_value,
                             defense,
                             lower,
+                            flat,
                         })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -1179,13 +1198,12 @@ impl CorpusBackend {
         total
     }
 
-    /// The script's `hit_damage`: one timed hit against the bracket's defender.
+    /// The script's `hit_damage`: one timed hit against the bracket's defender, the hit's flat
+    /// attack added to the weapon's.
     fn hit_damage(ar: &Ar, defense: &Defense, hit: &Hit) -> f64 {
         let mut total = 0.0;
         for (kind, value) in ar.iter().enumerate() {
-            let Some(value) = *value else {
-                continue;
-            };
+            let value = value.unwrap_or(0.0) + hit.flat[kind];
             if value == 0.0 {
                 continue;
             }
@@ -1303,7 +1321,7 @@ impl CorpusBackend {
                     let damage = if raw_ar {
                         ar.iter().flatten().fold(0.0, |total, value| total + value)
                     } else {
-                        Self::damage(&ar, defense)
+                        Self::damage(&ar, defense) * weapon.damage_scale
                     };
                     (damage, if one { "1H" } else { "2H only" }.to_owned())
                 } else {
@@ -1321,6 +1339,7 @@ impl CorpusBackend {
                     let Some((grip, hits, damage)) = best else {
                         continue;
                     };
+                    let damage = damage * weapon.damage_scale;
                     let only = if one || grip == "1H" {
                         ""
                     } else {
@@ -1449,7 +1468,9 @@ impl CorpusBackend {
                 };
                 row.atk[atk] + row.scale[scale] * self.tables.aux.at(3 * stats[DEX] + second)
             }
-            Objective::Damage => Self::damage(&self.attack_rating(row, stats), defense),
+            Objective::Damage => {
+                Self::damage(&self.attack_rating(row, stats), defense) * weapon.damage_scale
+            }
         }
     }
 
