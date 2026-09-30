@@ -317,9 +317,19 @@ pub enum IconDraw {
 
 /// Draw item `id`'s inventory icon inside `min`-`max`, centred, as large as its shape allows.
 ///
+/// Only `crop` of it is drawn (`x0, y0, x1, y1` in the texture's pixels, such as
+/// [`crate::item_icon::WEAPON_ART`]) when the texture holds all of it, and the whole texture
+/// otherwise. A box the crop's own size draws it one texture pixel to one screen pixel.
+///
 /// An icon not yet on the GPU is read from the archive before the next frame, and until then this
 /// answers [`IconDraw::Loading`] and draws nothing.
-pub fn item_icon(list: &DrawListMut<'_>, id: u32, min: [f32; 2], max: [f32; 2]) -> IconDraw {
+pub fn item_icon(
+    list: &DrawListMut<'_>,
+    id: u32,
+    min: [f32; 2],
+    max: [f32; 2],
+    crop: Option<[f32; 4]>,
+) -> IconDraw {
     let Ok(mut icons) = ICONS.lock() else {
         return IconDraw::Missing;
     };
@@ -330,16 +340,21 @@ pub fn item_icon(list: &DrawListMut<'_>, id: u32, min: [f32; 2], max: [f32; 2]) 
     if let Some(slot) = icons.slots.iter_mut().find(|slot| slot.item == id) {
         slot.drawn = frame;
         let (w, h) = (slot.size[0] as f32, slot.size[1] as f32);
+        let [x0, y0, x1, y1] = crop
+            .filter(|crop| crop[0] >= 0.0 && crop[1] >= 0.0 && crop[2] <= w && crop[3] <= h)
+            .unwrap_or([0.0, 0.0, w, h]);
+        let (src_w, src_h) = (x1 - x0, y1 - y0);
         let (box_w, box_h) = (max[0] - min[0], max[1] - min[1]);
-        let scale = (box_w / w).min(box_h / h);
-        let (draw_w, draw_h) = (w * scale, h * scale);
+        let scale = (box_w / src_w).min(box_h / src_h);
+        let (draw_w, draw_h) = (src_w * scale, src_h * scale);
         let at = [
             min[0] + (box_w - draw_w) * 0.5,
             min[1] + (box_h - draw_h) * 0.5,
         ];
         let canvas = ICON_CANVAS as f32;
         list.add_image(slot.texture, at, [at[0] + draw_w, at[1] + draw_h])
-            .uv_max([w / canvas, h / canvas])
+            .uv_min([x0 / canvas, y0 / canvas])
+            .uv_max([x1 / canvas, y1 / canvas])
             .build();
         return IconDraw::Drawn;
     }

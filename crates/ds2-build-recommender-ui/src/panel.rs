@@ -1517,20 +1517,23 @@ const FILTER_H: f32 = 44.0;
 const FILTER_GAP: f32 = 16.0;
 /// Left of the rows, which start further out than the text so the highlight's bar has room.
 const PICKER_ROWS_INSET: f32 = 24.0;
-/// One row, and the icon's box in it.
-const PICKER_ROW_H: f32 = 248.0;
-const PICKER_ICON: f32 = 216.0;
-/// Inside a row: its highlight's bar, the space after the bar, above and below its contents, and
+/// The part of a weapon's icon a row shows, and its size: the band of the texture the art is
+/// drawn in, one texture pixel to one screen pixel. Everything else in a row is laid out against
+/// it (the design's "Weapon icon at its real size" board).
+const ICON_CROP: [f32; 4] = ds2_overlay::item_icon::WEAPON_ART;
+const ICON_W: f32 = ICON_CROP[2] - ICON_CROP[0];
+const ICON_H: f32 = ICON_CROP[3] - ICON_CROP[1];
+/// Inside a row: its highlight's bar, the space after the bar, above and below the icon, and
 /// between the icon, the text and the attack.
 const PICKER_BAR: f32 = 3.0;
 const PICKER_ROW_PAD_X: f32 = 21.0;
 const PICKER_ROW_PAD_Y: f32 = 16.0;
 const PICKER_ROW_GAP: f32 = 28.0;
-/// Between the icon and its box's edge.
-const PICKER_ICON_MARGIN: f32 = 16.0;
-/// A row's text: below the class, the label column's width and the gap after it, between two
-/// lines of the grid, and between two requirements.
-const PICKER_GRID_TOP: f32 = 20.0;
+/// One row: the icon and the space above and below it.
+const PICKER_ROW_H: f32 = PICKER_ROW_PAD_Y * 2.0 + ICON_H;
+/// A row's text, whose top is the icon's top and whose last line ends at the icon's bottom: the
+/// label column's width and the gap after it, between two lines of the grid, and between two
+/// requirements.
 const PICKER_LABEL_W: f32 = 120.0;
 const PICKER_LABEL_GAP: f32 = 16.0;
 const PICKER_GRID_GAP: f32 = 9.0;
@@ -1545,7 +1548,7 @@ const PICKER_KEYS_TOP: f32 = 22.0;
 const PICKER_KEYS_BOTTOM: f32 = 28.0;
 /// The picker's distance from the screen's top and bottom at least.
 const PICKER_MARGIN: f32 = 44.0;
-/// The icon box's edge.
+/// The edge of the icon's frame.
 const ICON_EDGE: [f32; 4] = style::rgb(0x3a_34_2d);
 /// The "2H only" tag's text, light on `RUST`.
 const TAG_TEXT: [f32; 4] = style::rgb(0xea_df_d2);
@@ -3265,9 +3268,10 @@ fn draw_picker(
     (min, max)
 }
 
-/// One row of the weapon picker, from `at` to `right`: the icon, the name and class, what the
-/// weapon asks for and weighs and how the stats can hold it, and what it hits for. Without a
-/// `card` -- the stub backend has none -- only the icon, the name and the class.
+/// One row of the weapon picker, from `at` to `right`, laid out against its icon: the art at the
+/// texture's own size, the name level with the art's top, the stats grid ending level with its
+/// bottom, and each attack line on a line of that grid. Without a `card` -- the stub backend has
+/// none -- only the icon, the name and the class.
 fn draw_picker_row(
     canvas: &Canvas<'_>,
     row: &WeaponRow,
@@ -3286,26 +3290,16 @@ fn draw_picker_row(
     }
     canvas.rule(at[0], right, bottom - 1.0);
 
-    // The icon in its box, or the class's name there when the game has no icon for it.
+    // The icon: the band of its texture the art is in, in a frame that fits the band exactly. The
+    // class's name stands in where the game has no icon.
     let icon_min = [
         at[0] + PICKER_BAR + PICKER_ROW_PAD_X,
         at[1] + PICKER_ROW_PAD_Y,
     ];
-    let icon_max = [icon_min[0] + PICKER_ICON, icon_min[1] + PICKER_ICON];
+    let icon_max = [icon_min[0] + ICON_W, icon_min[1] + ICON_H];
     canvas.rect(icon_min, icon_max, CELL_BG);
-    canvas
-        .list
-        .add_rect(icon_min, icon_max, ICON_EDGE)
-        .thickness(1.0)
-        .build();
-    let inset = PICKER_ICON_MARGIN;
     let drawn = weapons::item_id(row.key).map_or(IconDraw::Missing, |id| {
-        ds2_overlay::panels::item_icon(
-            &canvas.list,
-            id,
-            [icon_min[0] + inset, icon_min[1] + inset],
-            [icon_max[0] - inset, icon_max[1] - inset],
-        )
+        ds2_overlay::panels::item_icon(&canvas.list, id, icon_min, icon_max, Some(ICON_CROP))
     });
     if drawn == IconDraw::Missing {
         let class = if row.class.is_empty() {
@@ -3313,18 +3307,31 @@ fn draw_picker_row(
         } else {
             row.class
         };
-        let text = clip(canvas.ui, class, PICKER_ICON - inset * 2.0);
-        canvas.text(
-            [
-                (icon_min[0] + icon_max[0] - canvas.width(&text)) * 0.5,
-                (icon_min[1] + icon_max[1] - line) * 0.5,
-            ],
-            DIM,
-            &text,
-        );
+        let room = ICON_W - 20.0;
+        let lines = wrap(canvas.ui, class, room);
+        let step = line + 2.0;
+        let mut y = (icon_min[1] + icon_max[1] - step * lines.len() as f32) * 0.5;
+        for text in &lines {
+            let text = clip(canvas.ui, text, room);
+            let x = (icon_min[0] + icon_max[0] - canvas.width(&text)) * 0.5;
+            canvas.text([x, y], DIM, &text);
+            y += step;
+        }
     }
+    canvas
+        .list
+        .add_rect(icon_min, icon_max, ICON_EDGE)
+        .thickness(1.0)
+        .build();
 
-    // The attack by type, at the right, unless the stats cannot hold the weapon at all.
+    // The top of each of the grid's three lines, the last ending at the icon's bottom.
+    let grid_y = |index: usize| {
+        icon_max[1] - line - (2usize.saturating_sub(index)) as f32 * (line + PICKER_GRID_GAP)
+    };
+
+    // The attack by type, right-aligned, unless the stats cannot hold the weapon at all: its last
+    // line on the grid's last, each one above on the line above, closer only when there are more
+    // types than the icon is tall for.
     let attack_right = right - PICKER_ROW_GAP;
     let attack: Vec<String> = card
         .filter(|card| card.wield != Wield::Neither)
@@ -3337,28 +3344,30 @@ fn draw_picker_row(
         })
         .unwrap_or_default();
     if !attack.is_empty() {
-        let step = line + 6.0;
-        let mut y = at[1] + (PICKER_ROW_H - step * attack.len() as f32 - line) * 0.5;
-        canvas.text([attack_right - canvas.width("Attack"), y], DIM, "Attack");
-        for text in &attack {
-            y += step;
+        let step = (line + PICKER_GRID_GAP).min((ICON_H - line) / attack.len() as f32);
+        let heading_y = grid_y(2) - step * attack.len() as f32;
+        canvas.text(
+            [attack_right - canvas.width("Attack"), heading_y],
+            DIM,
+            "Attack",
+        );
+        for (index, text) in attack.iter().enumerate() {
+            let y = heading_y + step * (index + 1) as f32;
             canvas.text([attack_right - canvas.width(text), y], TEXT, text);
         }
     }
 
-    // The name, the class, then what it asks for, what it weighs and how it can be held.
+    // The name level with the icon's top and the class under it, then what the weapon asks for,
+    // what it weighs and how it can be held.
     let text_x = icon_max[0] + PICKER_ROW_GAP;
     let text_w = attack_right - PICKER_ATTACK_W - PICKER_ROW_GAP - text_x;
     let title_h = ds2_overlay::panels::title_height(canvas.ui);
-    let grid_h = if card.is_some() {
-        PICKER_GRID_TOP + line * 3.0 + PICKER_GRID_GAP * 2.0
-    } else {
-        0.0
-    };
-    let mut y = at[1] + (PICKER_ROW_H - (title_h + 2.0 + line + grid_h)) * 0.5;
-    canvas.big_text([text_x, y], TITLE, row.name, text_w);
-    y += title_h + 2.0;
-    canvas.text([text_x, y], DIM, &clip(canvas.ui, row.class, text_w));
+    canvas.big_text([text_x, icon_min[1]], TITLE, row.name, text_w);
+    canvas.text(
+        [text_x, icon_min[1] + title_h + 2.0],
+        DIM,
+        &clip(canvas.ui, row.class, text_w),
+    );
     let Some(card) = card else {
         return;
     };
@@ -3366,7 +3375,7 @@ fn draw_picker_row(
     let mark = (line * 0.6).round();
     let mark_y = |y: f32| y + (line - mark) * 0.5;
 
-    y += line + PICKER_GRID_TOP;
+    let mut y = grid_y(0);
     canvas.text([text_x, y], DIM, "Requires");
     let mut x = value_x;
     for req in &card.requirements {
@@ -3386,11 +3395,11 @@ fn draw_picker_row(
         canvas.text([value_x, y], DIM, "None");
     }
 
-    y += line + PICKER_GRID_GAP;
+    y = grid_y(1);
     canvas.text([text_x, y], DIM, "Weight");
     canvas.text([value_x, y], TEXT, &format!("{:.1}", card.weight));
 
-    y += line + PICKER_GRID_GAP;
+    y = grid_y(2);
     canvas.text([text_x, y], DIM, "Grip");
     match card.wield {
         Wield::Both => canvas.text([value_x, y], TEXT, "1H / 2H"),

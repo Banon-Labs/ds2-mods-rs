@@ -3,6 +3,13 @@
 
     python3 scripts/ds2-item-icons.py locate [--id 1220000 ...]
     python3 scripts/ds2-item-icons.py table [--out crates/ds2-overlay/data/item-icons.tsv]
+    uv run --with pillow python3 scripts/ds2-item-icons.py measure [--id 1620000 ...]
+    uv run --with pillow python3 scripts/ds2-item-icons.py png --id 1220000 --out <dir>
+
+`measure` reads every weapon's icon (every `ItemParam` row with a `WeaponParam` id: weapons,
+shields and catalysts) and says how big the texture is and where its ink is -- the box around the
+pixels at least an eighth opaque -- so a layout can be sized to the art rather than to a guess.
+`png` writes icons at their own size, for a design canvas to show the real thing.
 
 The executable builds an item icon's path as `icon:/tex/Icon/` + `IC_%010d.tpf`
 (docs/DS2-ITEM-REQUIREMENTS.md). `GameDataEbl` keys its entries by a hash of the archive path, not
@@ -126,17 +133,114 @@ def table(ebl, out: Path) -> int:
     return 0
 
 
+#: A pixel counts as ink from this alpha up: an eighth opaque, so a soft glow's fringe does not
+#: stretch the box.
+INK_ALPHA = 32
+
+
+def weapon_icons(ebl):
+    """`(item, icon id, RGBA image)` for every `ItemParam` row with a `WeaponParam` id."""
+    import io
+
+    from PIL import Image
+
+    reg = load_module("ds2_regulation", "ds2-regulation.py")
+    tpf = load_module("ds2_tpf", "ds2-tpf.py")
+    members = reg.load(reg.DEFAULT_REGULATION, reg.REGULATION_KEY_HEX)
+    items = reg.Param("ItemParam.param", members["ItemParam.param"])
+    _archive, bdt, header = next(headers(ebl))
+    for index, item in enumerate(items.ids):
+        fields = struct.unpack_from("<21i", items.row(index), 0)
+        if fields[5] == -1:
+            continue
+        icon = fields[0] or item
+        path = ICON_PATH.format(id=icon)
+        entry = header.entries.get(ebl.path_hash(path))
+        if entry is None:
+            yield item, icon, None
+            continue
+        size, offset, aes, _bucket = entry
+        blob = ebl.dcx_decompress(ebl.read_entry(bdt, size, offset, aes, path))
+        texture = tpf.textures(blob)[0]
+        yield item, icon, Image.open(io.BytesIO(texture["payload"])).convert("RGBA")
+
+
+def ink_box(image) -> tuple[int, int, int, int] | None:
+    """The box around the pixels at least [`INK_ALPHA`] opaque, `(x0, y0, x1, y1)`."""
+    return image.getchannel("A").point(lambda a: 255 if a >= INK_ALPHA else 0).getbbox()
+
+
+def spread(values: list[int]) -> str:
+    """min, tenth, median, ninetieth and max of `values`."""
+    ordered = sorted(values)
+    pick = lambda share: ordered[min(len(ordered) - 1, int(share * len(ordered)))]
+    return (
+        f"min {ordered[0]}  p10 {pick(0.1)}  median {pick(0.5)}  p90 {pick(0.9)}  "
+        f"max {ordered[-1]}"
+    )
+
+
+def measure(ebl, ids: list[int]) -> int:
+    from collections import Counter
+
+    sizes: Counter = Counter()
+    boxes: dict[tuple[int, int], list[tuple[int, int, int, int]]] = {}
+    missing = []
+    for item, icon, image in weapon_icons(ebl):
+        if image is None:
+            missing.append(item)
+            continue
+        box = ink_box(image)
+        sizes[image.size] += 1
+        if box:
+            boxes.setdefault(image.size, []).append(box)
+        if item in ids:
+            print(f"  {item} (icon {icon}): texture {image.size[0]}x{image.size[1]}, ink {box}"
+                  + (f" = {box[2] - box[0]}x{box[3] - box[1]}" if box else ""))
+    print(f"weapon icons by texture size: {dict(sizes)}; no icon: {missing}")
+    for size, found in boxes.items():
+        print(f"{size[0]}x{size[1]}, {len(found)} icons with ink:")
+        print(f"  ink width   {spread([b[2] - b[0] for b in found])}")
+        print(f"  ink height  {spread([b[3] - b[1] for b in found])}")
+        print(f"  ink left    {spread([b[0] for b in found])}")
+        print(f"  ink top     {spread([b[1] for b in found])}")
+        print(f"  ink right   {spread([b[2] for b in found])}")
+        print(f"  ink bottom  {spread([b[3] for b in found])}")
+        union = (min(b[0] for b in found), min(b[1] for b in found),
+                 max(b[2] for b in found), max(b[3] for b in found))
+        print(f"  every icon's ink inside {union}")
+    return 0 if sizes else 1
+
+
+def png(ebl, ids: list[int], out: Path) -> int:
+    out.mkdir(parents=True, exist_ok=True)
+    written = 0
+    for item, icon, image in weapon_icons(ebl):
+        if item in ids and image is not None:
+            target = out / f"ic_{item:010d}.png"
+            image.save(target)
+            written += 1
+            print(f"{item} (icon {icon}) {image.size[0]}x{image.size[1]} -> {target}")
+    return 0 if written == len(set(ids)) else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("action", choices=["locate", "table"])
+    parser.add_argument("action", choices=["locate", "table", "measure", "png"])
     parser.add_argument("--id", type=int, action="append", dest="ids")
     parser.add_argument("--out", type=Path, default=DEFAULT_TABLE)
     args = parser.parse_args()
     ebl = load_module("ds2_ebl", "ds2-ebl.py")
     if args.action == "table":
         return table(ebl, args.out)
+    if args.action == "measure":
+        return measure(ebl, args.ids or [])
+    if args.action == "png":
+        if not args.ids or args.out == DEFAULT_TABLE:
+            parser.error("png needs --id and an --out directory")
+        return png(ebl, args.ids, args.out)
     return locate(ebl, args.ids or DEFAULT_IDS)
 
 

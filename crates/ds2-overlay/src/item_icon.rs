@@ -20,6 +20,17 @@ use crate::fefont::{self, Error, Page};
 /// 0 (`scripts/ds2-item-icons.py table`).
 const REMAPS: &str = include_str!("../data/item-icons.tsv");
 
+/// A weapon icon's texture, width then height: every weapon's but one small one is this size
+/// (`scripts/ds2-item-icons.py measure`).
+pub const WEAPON_TEXTURE: [f32; 2] = [128.0, 256.0];
+
+/// The part of a [`WEAPON_TEXTURE`] a weapon's art is drawn in, `x0, y0, x1, y1`.
+///
+/// Every weapon icon's ink lies in rows 29 to 219 (`scripts/ds2-item-icons.py measure`), and this
+/// keeps a row either side. The rest of the texture is empty, so a picker that shows only this
+/// band shows the art at the texture's own size in the smallest box that holds any of it.
+pub const WEAPON_ART: [f32; 4] = [0.0, 28.0, 128.0, 220.0];
+
 /// The id item `item`'s icon is filed under.
 #[must_use]
 pub fn icon_id(item: u32) -> u32 {
@@ -79,6 +90,27 @@ mod tests {
     #[test]
     fn the_path_is_ten_digits() {
         assert_eq!(path(1_220_000), "/menu/tex/icon/ic_0001220000.tpf");
+    }
+
+    /// The Longsword's ink lies inside the band a picker shows, which lies inside its texture.
+    #[test]
+    fn a_weapons_art_is_inside_the_band() {
+        let [x0, y0, x1, y1] = WEAPON_ART;
+        assert!(x0 >= 0.0 && y0 >= 0.0 && x1 <= WEAPON_TEXTURE[0] && y1 <= WEAPON_TEXTURE[1]);
+        let Some(game) = game() else {
+            eprintln!("no DARK SOULS II install here; skipped");
+            return;
+        };
+        let archive = Archive::open(&game).expect("archive");
+        let icon = load(&archive, 1_220_000).expect("the Longsword has an icon");
+        assert_eq!([icon.width as f32, icon.height as f32], WEAPON_TEXTURE);
+        let inked = |x: usize, y: usize| icon.rgba[(y * icon.width + x) * 4 + 3] >= 32;
+        for y in (0..icon.height).filter(|&y| (y as f32) < y0 || (y as f32) >= y1) {
+            assert!(
+                (0..icon.width).all(|x| !inked(x, y)),
+                "the Longsword has ink in row {y}, outside the band"
+            );
+        }
     }
 
     /// The table parses whole, and an item it does not list keeps its own id.
