@@ -2425,6 +2425,8 @@ impl CorpusBackend {
             Objective,
             Agility,
             HitPoints,
+            Stamina,
+            Load,
         }
         let bracket = self.bracket(sl);
         let defense = &bracket.defense;
@@ -2433,22 +2435,30 @@ impl CorpusBackend {
         } else {
             Curve::Agility
         };
-        // The script's `curves`, in its order.
-        let curves = [
+        // The script's `curves`, in its order. END by max stamina and VIT by max equip load, each
+        // over its own early rate as VIG is, so leftover points past VIG's soft cap do not all
+        // pile into VIG; END has no curve without the regulation's stamina table.
+        let mut curves = vec![
             (STR, Curve::Objective),
             (DEX, Curve::Objective),
             (INT, Curve::Objective),
             (FTH, Curve::Objective),
             (ADP, adaptability),
             (VIG, Curve::HitPoints),
-            (ATT, Curve::Agility),
         ];
+        if !self.tables.stamina_max.0.is_empty() {
+            curves.push((END, Curve::Stamina));
+        }
+        curves.push((VIT, Curve::Load));
+        curves.push((ATT, Curve::Agility));
         let value = |curve: Curve, st: &Stats| -> f64 {
             let st = worn(st);
             match curve {
                 Curve::Objective => self.objective_value(weapon, infusion, &st, objective, defense),
                 Curve::Agility => f64::from(agility(st[ADP], st[ATT])),
                 Curve::HitPoints => self.hit_points(&st),
+                Curve::Stamina => self.tables.stamina_max.at(st[END]),
+                Curve::Load => self.tables.equip_load.at(st[VIT]),
             }
         };
         let with = |st: &Stats, stat: usize, to: i32| {
@@ -2469,19 +2479,22 @@ impl CorpusBackend {
                     continue;
                 }
                 // Each stat weighted by its own curve's early rate, from 5 to 25.
-                let mut peak = [0.0; 7];
-                for (at, &(stat, curve)) in curves.iter().enumerate() {
-                    peak[at] = py_max(
-                        (value(curve, &with(&st, stat, 25)) - value(curve, &with(&st, stat, 5)))
-                            / 20.0,
-                        1e-9,
-                    );
-                }
+                let mut peak: Vec<f64> = curves
+                    .iter()
+                    .map(|&(stat, curve)| {
+                        py_max(
+                            (value(curve, &with(&st, stat, 25))
+                                - value(curve, &with(&st, stat, 5)))
+                                / 20.0,
+                            1e-9,
+                        )
+                    })
+                    .collect();
                 // The stats that feed the objective share one unit, the steepest of their early
                 // rates: a point of damage is a point of damage whichever stat buys it.
                 let shared = curves
                     .iter()
-                    .zip(peak)
+                    .zip(peak.iter().copied())
                     .filter(|&(&(_, curve), _)| curve == Curve::Objective)
                     .fold(f64::NEG_INFINITY, |most, (_, rate)| py_max(most, rate));
                 for (at, &(_, curve)) in curves.iter().enumerate() {
@@ -2490,7 +2503,9 @@ impl CorpusBackend {
                     }
                 }
                 if adaptability == Curve::Agility {
-                    peak[6] = peak[4];
+                    // ATT is the last curve and ADP the fifth, in the script's order.
+                    let last = peak.len() - 1;
+                    peak[last] = peak[4];
                 }
                 while free > 0 {
                     let mut pick: Option<(usize, i32)> = None;

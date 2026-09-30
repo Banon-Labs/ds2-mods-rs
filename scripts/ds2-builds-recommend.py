@@ -2267,9 +2267,8 @@ def _optimize_with(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
         # A stat is weighted by its own curve: gain per point at the current value over the
         # curve's early rate (its mean gain per point from 5 to 25, before any soft cap). Past
         # a soft cap the weight falls (DEX past 40, VGR past 20 and 50, ADP past AGL 110), so
-        # points go to a stat still under its cap. VIT is left at its floor: equip load is
-        # the armor search's job, not a damage or survival curve. Every curve reads the stats the
-        # worn rings give (E); the flexibility term reads the levelled stats, as flexibility does.
+        # points go to a stat still under its cap. Every curve reads the stats the worn rings give
+        # (E); the flexibility term reads the levelled stats, as flexibility does.
         obj = lambda s_: objective_value(data, weapon, inf, E(s_), objective, dfn)
         agl = lambda s_: (lambda e: agility(e["adaptability"], e["attunement"]))(E(s_))
         curves = {s: obj for s in ("strength", "dexterity", "intelligence", "faith")}
@@ -2278,6 +2277,17 @@ def _optimize_with(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
         # additionalHp cancels out of VGR's weight and is credited to no stat: nothing here
         # weighs a point of HP against a point of damage.
         curves["vigor"] = lambda s_: hit_points(data, E(s_))
+        # END by max stamina (staminaMax) and VIT by max equip load (equipLoadMax), each over its
+        # own early rate as VGR is: without them a weapon whose damage stops rising (the Black
+        # Dragon Greataxe scales with nothing) put every leftover point into VGR -- VGR 99 at SL
+        # 155 against a corpus median of 50 -- where real builds spend past VGR's soft cap on
+        # END and VIT. VIT's curve is the capacity itself, not the headroom percentage the 70%
+        # rule is written in: headroom depends on the armour, which generate_armor picks after
+        # the stats are set, and a curve over the capacity alone falls past VIT's soft cap as
+        # the capacity's own gain does. Without the regulation's stamina table END has no curve.
+        if data.stamina_max:
+            curves["endurance"] = lambda s_: data.stamina_max[min(E(s_)["endurance"], len(data.stamina_max) - 1)]
+        curves["vitality"] = lambda s_: data.equip_load[min(E(s_)["vitality"], len(data.equip_load) - 1)] or 0
         curves["attunement"] = agl  # a third of ADP's agility per point; slots only matter with spells
         peak = {}
         for s, f in curves.items():

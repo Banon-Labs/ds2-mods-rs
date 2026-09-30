@@ -785,8 +785,10 @@ fn refusal_is_the_scripts_and_every_fix_builds() {
 }
 
 /// The user's panel: Climax chosen, a Dagger and then a Roaring Halberd. At SL 120, where both were
-/// refused before rings counted, both build now, wearing a Southern Ritual Band for Climax's slots
-/// and passing the floor check the rings stand in for. At SL 60 Optimize for weapon and Generate
+/// refused before rings counted, both build now, wearing rings in place of points (the Dagger a
+/// Southern Ritual Band for Climax's slots; the Halberd, since END and VIT have curves, an Embedded
+/// and a Third Dragon Ring for VIG and VIT, its ATT holding Climax itself) and passing the floor
+/// check the rings stand in for. At SL 60 Optimize for weapon and Generate
 /// Build refuse alike, with the arithmetic, and each fix button's change made to the panel makes
 /// both of them build.
 #[test]
@@ -801,11 +803,14 @@ fn the_climax_panel_refuses_alike_and_every_fix_builds() {
         state.set_sl_override(Some(120));
         let built = backend::generate(backend(), &state, None)
             .unwrap_or_else(|why| panic!("{weapon} SL 120 with rings: {why:?}"));
+        let band = weapon == "Dagger";
         assert!(
-            built
-                .ring_trades
-                .iter()
-                .any(|t| t.starts_with("Southern Ritual Band + 2: attunement slots +3")),
+            !built.ring_trades.is_empty()
+                && (!band
+                    || built
+                        .ring_trades
+                        .iter()
+                        .any(|t| t.starts_with("Southern Ritual Band + 2: attunement slots +3"))),
             "{weapon}: {:?}",
             built.ring_trades
         );
