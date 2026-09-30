@@ -129,14 +129,57 @@ doc_target := file_path if {
 	authoring_tool
 } else := concat(", ", shell_doc_targets)
 
-# THE BANNED SHAPES (the test count has its own rule below).
+# THE BANNED SHAPES (the line count and the test count have their own rules below).
 #
 # Each requires a DIGIT bound to the unit, so "the two rows", "every line of the table" and "the
 # tests below" all stay legal -- the ban is on quantifying an artifact, not on naming one.
 banned_patterns := {
-	"a line count": `(?i)(?:~|about |approximately )?\d[\d,_]*\s*(?:-\s*)?lines?\b`,
 	"a file size": `(?i)\d[\d,._]*\s*(?:KB|MB|GB|TB|KiB|MiB|GiB)\b`,
 	"a beads issue id": `(?i)\bds2-mods-rs-[a-z0-9]{3,}\b`,
+}
+
+# A LINE COUNT is its own rule because one shape of it is not a size. Measured 2026-09-30: it
+# refused `/// three, which fit a 1080-line one.` on the weapon picker's row budget, where
+# "1080-line" is a screen 1080 pixel rows tall. A display's height does not go stale when the code
+# changes.
+#
+# Every count on a line is judged on its own, so a real line count beside a resolution is still
+# refused. A count is a display's height when it is written bare -- digits only, no thousands
+# separator, no `~`, `about` or `roughly` in front -- nothing on its line names code, and
+#   1. it is a standard vertical resolution, which is all that says "screen" in `a 1080-line one`:
+#      the screen was named on the line before, and an Edit need not carry that line; or
+#   2. the words right after it name the display: `a 1050-line monitor`, `600 lines tall`.
+# A line naming code -- a file, crate, module, function, test, a `*.rs` name, a `ds2-*` crate --
+# keeps every count on it refused, so `a 1080-line module` is still a size.
+#
+# The three groups always take part in a match, empty or not, so no verdict depends on how the WASM
+# runtime reports a group that did not match.
+line_count_pattern := `(?i)((?:~\s*|\b(?:about|approximately|roughly|nearly|around|almost|over|under)\s+)?)(\d[\d,_]*)\s*(?:-\s*)?lines?\b((?:\s+[a-z]+){0,2})`
+
+vertical_resolutions := {"480", "540", "720", "768", "900", "1080", "1200", "1440", "1600", "2160"}
+
+display_words_pattern := `(?i)^\s+(?:screens?|displays?|monitors?|resolutions?|back\s*buffers?|frame\s*buffers?|swap\s*chains?|viewports?|render\s+targets?|tall)\b`
+
+names_code_pattern := `(?i)\b(?:files?|crates?|modules?|functions?|fns?|methods?|impls?|implementations?|sources?|code|scripts?|shims?|tests?|patch(?:es)?|diffs?|commits?|librar(?:y|ies)|libs?|programs?|binar(?:y|ies)|dlls?|drivers?|class(?:es)?|structs?|traits?|macros?|polic(?:y|ies)|docs?|documents?|readmes?|repos?|repositor(?:y|ies)|logs?|rust|python|rego)\b|\w\.(?:rs|py|rego|md|sh|toml|ya?ml|json|txt|c|h|cpp|hpp)\b|\b(?:ds2|er)-[a-z0-9]`
+
+violation contains {"kind": "a line count", "line": trim_space(line)} if {
+	some line in doc_lines
+	some m in regex.find_all_string_submatch_n(line_count_pattern, line, -1)
+	not display_height(m, line)
+}
+
+# `m` is [the match, the hedge in front, the number, up to two words after it].
+display_height(m, line) if {
+	m[1] == ""
+	m[2] in vertical_resolutions
+	not regex.match(names_code_pattern, line)
+}
+
+display_height(m, line) if {
+	m[1] == ""
+	regex.match(`^\d+$`, m[2])
+	regex.match(display_words_pattern, m[3])
+	not regex.match(names_code_pattern, line)
 }
 
 # A TEST COUNT is its own rule because it needs two refusals the other shapes do not. Measured
@@ -193,7 +236,7 @@ deny contains decision if {
 			"🧁 Cupcake blocked documentation carrying ", kinds, " in ", doc_target,
 			"\n\n  ", examples,
 			"\n\nWhy: a size is a fact about a snapshot, and documentation outlives the snapshot. This repo's own doc comment refused to port the save picker because a crate was \"29,000 lines\" -- the number was real, the crate was the wrong one, and no reader could check either without leaving the document. Test counts go stale on the next test. Beads IDs point at a Dolt database that gets squashed and renumbered, and that a reader of the published crate does not have.",
-			"\n\nHappy path: say what the code DOES and what is MISSING, in behaviour. Instead of \"er-quit-menu-core is 29,000 lines\" write \"the picker's menu chrome is Elden Ring's and does not port\"; instead of \"25 host tests\" write what they cover; instead of \"see ds2-mods-rs-v3f\" describe the missing behaviour and leave the tracking in beads. Sizes that a reader must act on -- a struct's ABI size, a block length -- belong in a plain `//` comment beside the code that depends on them, which this rule does not touch.",
+			"\n\nHappy path: say what the code DOES and what is MISSING, in behaviour. Instead of \"er-quit-menu-core is 29,000 lines\" write \"the picker's menu chrome is Elden Ring's and does not port\"; instead of \"25 host tests\" write what they cover; instead of \"see ds2-mods-rs-v3f\" describe the missing behaviour and leave the tracking in beads. Sizes that a reader must act on -- a struct's ABI size, a block length -- belong in a plain `//` comment beside the code that depends on them, which this rule does not touch. A display's height is not a size: `a 1080-line screen` passes, written bare on a line that names no code.",
 		]),
 	}
 }

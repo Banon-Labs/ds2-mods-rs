@@ -58,6 +58,67 @@ test_deny_approximate_line_count if {
 	denied(write_event("README.md", "Roughly ~960 lines of tests live here."))
 }
 
+# ------------------------------------------------- a display's height is not a line count
+
+# Measured 2026-09-30: the whole Edit this rule refused on the weapon picker's row budget, where
+# "1080-line" is a screen 1080 pixel rows tall and the screen is named on the line before.
+test_allow_vertical_resolution_the_rule_refused if {
+	not denied(edit_event(
+		"crates/ds2-build-recommender-ui/src/panel.rs",
+		concat("\n", [
+			"/// Rows the weapon picker shows at once until its first draw has measured the screen: the design's",
+			"/// three, which fit a 1080-line one.",
+			"const PICKER_ROWS: usize = 3;",
+		]),
+	))
+}
+
+# An Edit need not carry the line that named the screen.
+test_allow_vertical_resolution_alone_on_its_line if {
+	not denied(edit_event("crates/ds2-build-recommender-ui/src/panel.rs", "/// three, which fit a 1080-line one."))
+}
+
+test_allow_vertical_resolution_in_markdown if {
+	not denied(write_event("docs/DS2-OVERLAY.md", "The picker keeps three rows on a 1440-line screen."))
+}
+
+test_allow_any_height_the_next_word_calls_a_display if {
+	not denied(edit_event("crates/ds2-overlay/src/lib.rs", "/// Legible on a 1050-line monitor."))
+}
+
+test_allow_any_height_measured_as_tall if {
+	not denied(edit_event("crates/ds2-overlay/src/lib.rs", "/// The panel is 600 lines tall at most."))
+}
+
+# The nearby true positive: the same number, on a line that names code.
+test_deny_resolution_number_on_a_line_naming_a_module if {
+	denied(edit_event("crates/ds2-overlay/src/lib.rs", "/// A 1080-line module."))
+}
+
+test_deny_resolution_number_beside_a_crate_name if {
+	denied(edit_event("crates/ds2-overlay/src/lib.rs", "//! `ds2-overlay` is 1080 lines."))
+}
+
+test_deny_resolution_number_beside_a_file_name if {
+	denied(edit_event("crates/ds2-overlay/src/lib.rs", "/// `panel.rs` is 1080 lines."))
+}
+
+test_deny_display_word_on_a_line_naming_a_driver if {
+	denied(edit_event("crates/ds2-overlay/src/lib.rs", "/// A 600-line display driver."))
+}
+
+test_deny_hedged_resolution_number if {
+	denied(edit_event("crates/ds2-overlay/src/lib.rs", "/// About 1080 lines of layout."))
+}
+
+test_deny_grouped_resolution_number if {
+	denied(edit_event("crates/ds2-overlay/src/lib.rs", "/// The overlay is 1,080 lines."))
+}
+
+test_deny_line_count_beside_a_resolution if {
+	denied(edit_event("crates/ds2-overlay/src/lib.rs", "/// Fits a 1080-line screen; the layout is 500 lines."))
+}
+
 # ---------------------------------------------------------------- file sizes
 
 test_deny_megabyte_size if {
