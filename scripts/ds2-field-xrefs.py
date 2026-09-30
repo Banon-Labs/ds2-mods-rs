@@ -4,6 +4,7 @@
     python3 scripts/ds2-field-xrefs.py 0x198            # every width
     python3 scripts/ds2-field-xrefs.py 0x198 --width 2  # 16-bit only
     python3 scripts/ds2-field-xrefs.py 0x148 --width 4 --limit 40
+    python3 scripts/ds2-field-xrefs.py 0x53 --width 1   # a byte flag below 0x80
 
 WHY THIS EXISTS AND WHY IT IS NOT `ds2-xrefs.py`. That script answers "who reads this GLOBAL"
 by solving the RIP-relative displacement equation, and a struct field has no absolute address to
@@ -18,6 +19,11 @@ displacement immediately after the ModRM (and after a SIB byte when `rm == 100`)
 position. This scans for those bytes and then walks BACKWARDS over an optional SIB, the ModRM,
 an optional REX prefix and an optional operand-size prefix to see whether a plausible
 `mov`-family opcode is sitting where one would have to be.
+
+A field from -0x80 to 0x7f is encoded the short way instead: `mod=01`, one displacement byte. The
+compiler always picks that form when the field fits, so a disp32-only scan finds nothing at all
+for `+0x53`. For such a field this scans the one-byte form too; the single needle byte is
+everywhere, so the opcode walk is doing all the filtering and the list is noisier.
 
 NOTHING HERE DECODES FORWARD FROM A KNOWN INSTRUCTION BOUNDARY, which is the same caveat
 `ds2-xrefs.py` carries and it bites harder here: four bytes that merely look like a displacement
@@ -50,43 +56,58 @@ IMAGE_BASE = 0x1_4000_0000
 REPO_ROOT = Path(__file__).resolve().parents[1]
 IMAGE_PATH = REPO_ROOT / "darksoulsii-deobf.bin"
 
-#: Opcodes that move a value to or from `[reg+disp32]`, keyed by operand size in bytes.
+#: Opcodes that move a value to or from `[reg+disp]`, keyed by operand size in bytes.
 #:
-#: Each entry is (opcode bytes, needs the 0x66 operand-size prefix, human name). The 16-bit forms
-#: are the ones that matter for a button bitmask; the others are here because the same question
-#: gets asked about pointers and floats and it would be a worse tool without them.
-OPCODES: dict[int, list[tuple[bytes, bool, str]]] = {
+#: Each entry is (opcode bytes, needs the 0x66 operand-size prefix, human name, ModRM reg field or
+#: None). The reg field matters only for the group opcodes, where it picks the operation (`80 /7`
+#: is cmp, `80 /1` is or). The 16-bit forms are the ones that matter for a button bitmask; the
+#: byte forms for a param's u8 flag; the others because the same question gets asked about
+#: pointers and floats and it would be a worse tool without them.
+OPCODES: dict[int, list[tuple[bytes, bool, str, int | None]]] = {
+    1: [
+        (b"\x0f\xb6", False, "movzx r32,[m8]", None),
+        (b"\x0f\xbe", False, "movsx r32,[m8]", None),
+        (b"\x8a", False, "mov r8,[m8]", None),
+        (b"\x88", False, "mov [m8],r8", None),
+        (b"\x80", False, "cmp [m8],imm8", 7),
+        (b"\x38", False, "cmp [m8],r8", None),
+        (b"\x3a", False, "cmp r8,[m8]", None),
+        (b"\xf6", False, "test [m8],imm8", 0),
+        (b"\x84", False, "test [m8],r8", None),
+        (b"\xc6", False, "mov [m8],imm8", 0),
+    ],
     2: [
-        (b"\x0f\xb7", False, "movzx r32,[m16]"),
-        (b"\x0f\xbf", False, "movsx r32,[m16]"),
-        (b"\x8b", True, "mov r16,[m16]"),
-        (b"\x89", True, "mov [m16],r16"),
+        (b"\x0f\xb7", False, "movzx r32,[m16]", None),
+        (b"\x0f\xbf", False, "movsx r32,[m16]", None),
+        (b"\x8b", True, "mov r16,[m16]", None),
+        (b"\x89", True, "mov [m16],r16", None),
     ],
     4: [
-        (b"\x8b", False, "mov r32,[m32]"),
-        (b"\x89", False, "mov [m32],r32"),
-        (b"\x63", False, "movsxd r64,[m32]"),
+        (b"\x8b", False, "mov r32,[m32]", None),
+        (b"\x89", False, "mov [m32],r32", None),
+        (b"\x63", False, "movsxd r64,[m32]", None),
     ],
     8: [
-        (b"\x8b", False, "mov r64,[m64]"),
-        (b"\x89", False, "mov [m64],r64"),
-        (b"\x8d", False, "lea r64,[m]"),
+        (b"\x8b", False, "mov r64,[m64]", None),
+        (b"\x89", False, "mov [m64],r64", None),
+        (b"\x8d", False, "lea r64,[m]", None),
     ],
 }
 
 #: A REX prefix is any byte in this range, and it sits immediately before the opcode.
 REX_RANGE = range(0x40, 0x50)
 
-#: `mod=10` ModRM bytes: the displacement that follows is 32-bit. `mod=00`/`01`/`11` cannot carry
-#: a 4-byte displacement, so they can never encode the field being searched for.
+#: `mod=10` ModRM bytes: the displacement that follows is 32-bit. `mod=01` ones: it is one signed
+#: byte. `mod=00`/`11` carry no displacement, so they can never encode the field searched for.
 MODRM_DISP32 = range(0x80, 0xC0)
+MODRM_DISP8 = range(0x40, 0x80)
 
 #: Bytes of context printed per hit, so the candidate can be disassembled backwards by eye.
 CONTEXT = 8
 
 
 def register_name(modrm: int, rex: int | None) -> str:
-    """Name the base register of a `mod=10` ModRM, honouring REX.B."""
+    """Name the base register of a `mod=10` or `mod=01` ModRM, honouring REX.B."""
     names = ["rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi"]
     high = ["r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"]
     index = modrm & 0x07
@@ -96,60 +117,71 @@ def register_name(modrm: int, rex: int | None) -> str:
 
 
 def scan(image: bytes, field: int, width: int | None, allow_sib: bool) -> list[dict]:
-    """Every candidate instruction whose `mod=10` displacement equals `field`."""
-    needle = struct.pack("<i", field)
+    """Every candidate instruction whose `mod=10` displacement, or `mod=01` one for a field that
+    fits a signed byte, equals `field`."""
     widths = [width] if width else sorted(OPCODES)
     found: dict[int, dict] = {}
+    forms = [(struct.pack("<i", field), MODRM_DISP32)]
+    if -0x80 <= field < 0x80:
+        forms.append((struct.pack("<b", field), MODRM_DISP8))
 
-    for match in re.finditer(re.escape(needle), image):
-        disp = match.start()
-        # The ModRM is one byte before the displacement, or two when a SIB sits between them.
-        for sib_present in (False, True):
-            modrm_at = disp - (2 if sib_present else 1)
-            if modrm_at < 4:
-                continue
-            modrm = image[modrm_at]
-            if modrm not in MODRM_DISP32:
-                continue
-            has_sib = (modrm & 0x07) == 0x04
-            if has_sib != sib_present:
-                continue
-            if has_sib and not allow_sib:
-                continue
-
-            for size in widths:
-                for opcode, needs_66, name in OPCODES[size]:
-                    start = modrm_at - len(opcode)
-                    if start < 2:
-                        continue
-                    if image[start : start + len(opcode)] != opcode:
-                        continue
-                    rex = None
-                    if image[start - 1] in REX_RANGE:
-                        rex = image[start - 1]
-                        start -= 1
-                    # A 16-bit `mov` is only 16-bit because of the 0x66 prefix; a 64-bit one is
-                    # only 64-bit because of REX.W. Demanding the right one is the whole reason
-                    # `--width 2` produces a readable list instead of a dump.
-                    if needs_66:
-                        if start < 1 or image[start - 1] != 0x66:
-                            continue
-                        start -= 1
-                    elif size == 8 and not (rex is not None and rex & 0x08):
-                        continue
-                    elif size == 4 and rex is not None and rex & 0x08:
-                        continue
-
-                    found[start] = {
-                        "va": IMAGE_BASE + start,
-                        "name": name,
-                        "base": register_name(modrm, rex),
-                        "size": size,
-                        "sib": has_sib,
-                        "bytes": image[start : disp + 4],
-                        "context": image[max(0, start - CONTEXT) : disp + 4 + CONTEXT],
-                    }
+    for needle, modrm_range in forms:
+        for match in re.finditer(re.escape(needle), image):
+            _candidates(image, match.start(), len(needle), modrm_range, widths, allow_sib, found)
     return [found[key] for key in sorted(found)]
+
+
+def _candidates(image: bytes, disp: int, disp_len: int, modrm_range: range, widths: list[int],
+                allow_sib: bool, found: dict[int, dict]) -> None:
+    """Record in `found` every opcode that could own a `disp_len`-byte displacement at `disp`."""
+    # The ModRM is one byte before the displacement, or two when a SIB sits between them.
+    for sib_present in (False, True):
+        modrm_at = disp - (2 if sib_present else 1)
+        if modrm_at < 4:
+            continue
+        modrm = image[modrm_at]
+        if modrm not in modrm_range:
+            continue
+        has_sib = (modrm & 0x07) == 0x04
+        if has_sib != sib_present:
+            continue
+        if has_sib and not allow_sib:
+            continue
+
+        for size in widths:
+            for opcode, needs_66, name, reg_field in OPCODES[size]:
+                start = modrm_at - len(opcode)
+                if start < 2:
+                    continue
+                if image[start : start + len(opcode)] != opcode:
+                    continue
+                if reg_field is not None and (modrm >> 3) & 0x07 != reg_field:
+                    continue
+                rex = None
+                if image[start - 1] in REX_RANGE:
+                    rex = image[start - 1]
+                    start -= 1
+                # A 16-bit `mov` is only 16-bit because of the 0x66 prefix; a 64-bit one is
+                # only 64-bit because of REX.W. Demanding the right one is the whole reason
+                # `--width 2` produces a readable list instead of a dump.
+                if needs_66:
+                    if start < 1 or image[start - 1] != 0x66:
+                        continue
+                    start -= 1
+                elif size == 8 and not (rex is not None and rex & 0x08):
+                    continue
+                elif size == 4 and rex is not None and rex & 0x08:
+                    continue
+
+                found[start] = {
+                    "va": IMAGE_BASE + start,
+                    "name": name,
+                    "base": register_name(modrm, rex),
+                    "size": size,
+                    "sib": has_sib,
+                    "bytes": image[start : disp + disp_len],
+                    "context": image[max(0, start - CONTEXT) : disp + disp_len + CONTEXT],
+                }
 
 
 def main(argv: list[str]) -> int:
