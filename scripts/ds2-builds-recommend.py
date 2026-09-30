@@ -8,11 +8,12 @@
 Design: docs/DS2-BUILD-EMBEDDINGS.md. This is the first working cut, and it deviates from that
 design in ways that are said out loud here rather than hidden:
 
-* ITEM DATA IS THE PLANNER SITES', NOT THE GAME'S. Weapon/armor requirements, infusion attack and
-  scaling, armor defenses and weights come from SoulsPlanner's `ds2planner.min.js`; spell INT/FTH
-  requirements from MugenMonkey's `ds2application-*.js` (SoulsPlanner has none). Both are dumped to
-  JSON by `--sp-data` / `--mm-data` (see `dump_site_tables`). The design wants regulation params
-  and executable-derived formulas; neither is wired in yet.
+* MOST ITEM DATA IS THE PLANNER SITES', NOT THE GAME'S. Weapon/armor requirements, infusion attack
+  and scaling, armor defenses and weights come from SoulsPlanner's `ds2planner.min.js`, dumped to
+  JSON by `--sp-data` / `--mm-data` (see `dump_site_tables`) with MugenMonkey's tables. The
+  regulation replaces the physical stat defense table, the Enchanted coefficients and the spells'
+  requirements and slots, and alone supplies catalysts, spell hits, weapon buffs and weapon
+  elements (apply_regulation).
 * ARMOR IS SCORED PER POINT OF DEFENSE. A piece's value is its per-type defense weighted by what
   one point of that defense takes off one hit of the average opponent (threat_mix): the
   executable's per-hit formula, over every unique build on both mirrors that can hit, with
@@ -20,8 +21,9 @@ design in ways that are said out loud here rather than hidden:
   both swing and cast does each is not in any build (SPELL_HIT_SHARE).
 * CORPUS IS BOTH MIRRORS: SoulsPlanner (~/.cache/soulsplanner, 6618 builds) and MugenMonkey
   (~/.cache/mugenmonkey, 66052 public builds), filtered to complete, usable, unique builds.
-* Ring stat bonuses (Ring of the Embedded etc.) are ignored: the site encodes them as functions of
-  the build. Armor stat bonuses are counted.
+* Ring and armor stat bonuses are counted: a ring's from the game's SpEffectRing.emevd (ring_gear),
+  except in the corpus's defense average, which reads MugenMonkey's ring table (ring_effects). A
+  ring's attack and defense effects are not.
 
 Pipeline: filter the corpus (complete, not untouched class stats, every item usable) -> dedupe ->
 fit EASE over {weapon, weapon|infusion, ring, spell} tokens -> for the query, score candidates by
@@ -3781,7 +3783,7 @@ def main() -> int:
     ap.add_argument("--grip", choices=list(GRIP_TRIES), default="two",
                     help="with --optimize/--generate: 'two' (default) halves the STR requirement even when "
                          "one-handing would fit, 'one' needs it in full. Damage is scored the same for "
-                         "either grip (a two-handed STR multiplier is unproven)")
+                         "either grip: the game has no two-handed STR multiplier")
     ap.add_argument("--class", dest="start_class", metavar="CLASS",
                     help="with --optimize/--generate: this starting class only (sorcerer, warrior, ...), as a "
                          "build for an existing character must be -- the game has no class change")
