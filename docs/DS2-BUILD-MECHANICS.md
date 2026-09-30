@@ -265,6 +265,27 @@ These were read from the executable. Full traces with addresses are in
   `(D + 100) / 1000`, and the +100 is the stat table's 10% floor.
 - Stamina (section 4) and the agility index (section 3) come from the same builder.
 
+## 7. Max HP (EXE)
+
+Read 2026-09-30. The stats builder `0x14038d790` first calls `0x14038e1e0` on the effective stat
+block and stores the u16 it returns at its output's `+0x0`:
+
+```
+maxHP = hpMax[VGR] + additionalHp[END] + additionalHp[VIT] + additionalHp[ATT] + additionalHp[STR]
+      + additionalHp[DEX] + additionalHp[INT] + additionalHp[FTH] + additionalHp[ADP]
+```
+
+- Both columns are `PhysicalStatsPerLevelStatValuesParam`'s: `hpMax` (s16 at `+0x4`) and
+  `additionalHp` (u8 at `+0x8a`).
+- `0x14038e1e0` loops over the block's 11 words. It reads `hpMax` for word 0 and `additionalHp`
+  for words 1-8, and skips words 9 and 10. A word outside 1-99 reads row 1.
+- The words are VGR, END, VIT, ATT, STR, DEX, INT, FTH, ADP by the id jump table `0x14038e280`.
+- `hpMax` equals SoulsPlanner's `getHP` at every VGR from 1 to 99.
+- `additionalHp` is 2 per point to 20, then 1 per point to 50, then 70. The site leaves it out, so
+  a build with the other eight stats at 20 has 320 more HP than the site shows.
+- Two siblings compute the same sum with every word set to one value: `0x14038d290` at 99 (2505,
+  the unit status build-up is scaled by) and `0x14038d370` at 1.
+
 ## Not established
 
 - Whether burden == 70.0% exactly is heavy, and whether roll behavior between tiers is interpolated.
@@ -273,5 +294,7 @@ These were read from the executable. Full traces with addresses are in
   (Ring of the Embedded, Chime of Screams). The rule above matches SoulsPlanner but is not traced.
 - Units of `evasionInvincibleTime`, and roll i-frames in frames.
 - That the displayed AGL is read from MenuStatsParam by the same index (it matches exactly).
+- Whether a ring's max-HP factor multiplies the whole of section 7's sum. The recommender assumes
+  it does.
 - That stamina cost is literally base x multiplier / 10 (field names plus scale, not code).
 - SpEffect kinds not needed here (e.g. kinds 2-5, 18, 21-29) were left undecoded.

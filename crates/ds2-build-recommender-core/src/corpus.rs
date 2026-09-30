@@ -38,7 +38,7 @@ use crate::weapons;
 pub const DATA_FILE_NAME: &str = "ds2-build-recommender.dat";
 
 /// The file's first line. A different one is a file this port does not read.
-pub const FORMAT: &str = "ds2-build-recommender-data 9";
+pub const FORMAT: &str = "ds2-build-recommender-data 10";
 
 /// Nine stats as the script computes with them, in [`crate::model::STAT_LABELS`] order.
 type Stats = [i32; STAT_COUNT];
@@ -169,10 +169,8 @@ pub fn agility(adp: i32, att: i32) -> i32 {
     agl.max(85)
 }
 
-/// HP from VGR alone, as the script counts it.
-fn hit_points(vgr: i32) -> i32 {
-    500 + 30 * vgr.min(20) + 20 * (vgr.min(50) - 20).max(0) + 5 * (vgr - 50).max(0)
-}
+/// The stats whose `additionalHp` max HP adds to VGR's `hpMax`: the script's `HP_STATS`.
+const HP_STATS: [usize; 8] = [END, VIT, ATT, STR, DEX, INT, FTH, ADP];
 
 /// The script's `norm`: lowercase, letters and digits only.
 fn norm(name: &str) -> String {
@@ -219,6 +217,10 @@ struct Tables {
     attunement_slots: Table,
     /// Max stamina per END: the script's `stamina_max`, empty when it did not read the regulation.
     stamina_max: Table,
+    /// Max HP's two columns, `hpMax` per VGR and `additionalHp` per other stat: the script's
+    /// `hp_max` and `additional_hp`, empty when it did not read the regulation.
+    hp_max: Table,
+    additional_hp: Table,
     /// Per-stat cast-power bonus, magic, fire, lightning, dark: the script's `cast_bonus`.
     cast: [Table; 4],
 }
@@ -705,6 +707,8 @@ impl CorpusBackend {
                     "equipmentLoad" => &mut tables.equip_load,
                     "attunementSlots" => &mut tables.attunement_slots,
                     "staminaMax" => &mut tables.stamina_max,
+                    "hpMax" => &mut tables.hp_max,
+                    "additionalHp" => &mut tables.additional_hp,
                     "castMagic" => &mut tables.cast[0],
                     "castFire" => &mut tables.cast[1],
                     "castLightning" => &mut tables.cast[2],
@@ -1548,6 +1552,25 @@ impl CorpusBackend {
         self.tables.equip_load.at(vit) * self.ring_factor(rings, Factor::Load)
     }
 
+    /// The script's `hit_points`: max HP of the effective stats `st`, `hpMax` at VGR plus
+    /// `additionalHp` at each [`HP_STATS`] stat, a stat outside 1-99 read at row 1. Without the
+    /// regulation's columns it is the planner site's `getHP` from VGR alone.
+    fn hit_points(&self, st: &Stats) -> f64 {
+        let t = &self.tables;
+        if t.hp_max.0.is_empty() {
+            let vgr = st[VIG];
+            return f64::from(
+                500 + 30 * vgr.min(20) + 20 * (vgr.min(50) - 20).max(0) + 5 * (vgr - 50).max(0),
+            );
+        }
+        let row = |v: i32| if (1..=99).contains(&v) { v } else { 1 };
+        t.hp_max.at(row(st[VIG]))
+            + HP_STATS
+                .iter()
+                .map(|&stat| t.additional_hp.at(row(st[stat])))
+                .sum::<f64>()
+    }
+
     /// The script's `sub_rings`: per ring upgrade group, the ring gear ring with the highest item id
     /// (the last in file order), when none of its factors is below 1, never a no-use ring.
     fn sub_rings(&self) -> Vec<usize> {
@@ -1677,14 +1700,19 @@ impl CorpusBackend {
             out[stat] = v;
         };
         let stamina = &self.tables.stamina_max;
-        // What a floor stat gives, VIG HP, VIT max load, END max stamina: the curve a ring's
-        // factor is weighed against.
-        let tab = |stat: usize, v: i32| -> f64 {
+        // What a floor stat gives, read off a whole stat block -- VIG max HP, VIT max load, END max
+        // stamina: the curve a ring's factor is weighed against.
+        let tab = |stat: usize, st: &Stats| -> f64 {
             match stat {
-                VIG => f64::from(hit_points(v)),
-                VIT => self.tables.equip_load.at(v),
-                _ => stamina.at(v),
+                VIG => self.hit_points(st),
+                VIT => self.tables.equip_load.at(st[VIT]),
+                _ => stamina.at(st[END]),
             }
+        };
+        // Whether a worn ring raises a stat the curve reads: max HP reads VGR and every
+        // `HP_STATS` stat.
+        let reads = |stat: usize| -> bool {
+            touched(stat) || (stat == VIG && HP_STATS.iter().any(|&s| touched(s)))
         };
         for &(stat, floor) in floors {
             let curve = match stat {
@@ -1694,11 +1722,14 @@ impl CorpusBackend {
                 _ => None,
             };
             match curve {
-                Some(factor) if factor != 1.0 || touched(stat) => {
-                    let tab = |v: i32| tab(stat, v);
-                    let target = tab(floor);
+                Some(factor) if factor != 1.0 || reads(stat) => {
+                    let mut at = out;
+                    at[stat] = floor;
+                    let target = tab(stat, &at);
                     least(&mut out, stat, &|out, v| {
-                        tab(eff(out, stat, v)) * factor >= target
+                        let mut at = *out;
+                        at[stat] = v;
+                        tab(stat, &self.gear_stats(&at, rings)) * factor >= target
                     });
                 }
                 _ => least(&mut out, stat, &|out, v| eff(out, stat, v) >= floor),
@@ -2388,7 +2419,7 @@ impl CorpusBackend {
             match curve {
                 Curve::Objective => self.objective_value(weapon, infusion, &st, objective, defense),
                 Curve::Agility => f64::from(agility(st[ADP], st[ATT])),
-                Curve::HitPoints => f64::from(hit_points(st[VIG])),
+                Curve::HitPoints => self.hit_points(&st),
             }
         };
         let with = |st: &Stats, stat: usize, to: i32| {
@@ -3442,6 +3473,35 @@ mod tests {
         assert_eq!(agility(99, 99), 120);
         assert_eq!(agility(40, 0), 110);
         assert_eq!(agility(1, 1), 85);
+    }
+
+    /// The script's selftest cases for `hit_points`, over the same made-up columns.
+    #[test]
+    fn hit_points_is_the_scripts() {
+        let mut backend = CorpusBackend::default();
+        let ten = [10; STAT_COUNT];
+        let with = |stat: usize, v: i32| {
+            let mut st = ten;
+            st[stat] = v;
+            st
+        };
+        assert_eq!(
+            backend.hit_points(&with(VIG, 30)),
+            1300.0,
+            "getHP without the columns"
+        );
+        backend.tables.hp_max = Table(
+            (0..100)
+                .map(|v| if v == 0 { 0.0 } else { 1000.0 + f64::from(v) })
+                .collect(),
+        );
+        backend.tables.additional_hp = Table((0..100).map(|v| f64::from(2 * v)).collect());
+        assert_eq!(backend.hit_points(&with(VIG, 30)), 1030.0 + 8.0 * 20.0);
+        assert_eq!(
+            backend.hit_points(&with(FTH, 0)),
+            1010.0 + 7.0 * 20.0 + 2.0,
+            "FTH 0 reads row 1"
+        );
     }
 
     /// `itertools.combinations(range(4), 2)`.
