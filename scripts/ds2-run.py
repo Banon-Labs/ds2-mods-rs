@@ -2712,6 +2712,31 @@ def recommender_format() -> str | None:
     return found.group(1) if found else None
 
 
+def dll_recommender_format(dll: Path) -> str | None:
+    """The data format the built DLL will accept: its compiled-in `corpus::FORMAT` string.
+
+    Read off the binary, not the checkout's source, because a DLL built before a format bump
+    still carries the old one, and the exporter's `BACKEND_FORMAT` cannot say what was compiled.
+    A run on 2026-09-30 staged a `data 12` file beside a DLL that wanted `data 11`; the panel
+    fell to its stub and showed the same placeholder number for every infusion.
+    """
+    try:
+        found = re.search(rb"ds2-build-recommender-data \d+", dll.read_bytes())
+    except OSError:
+        return None
+    return found.group(0).decode() if found else None
+
+
+def recommender_format_mismatch(dll: Path, staged: Path) -> str | None:
+    """Why the staged data file is one the staged DLL will refuse, or `None` when they agree."""
+    want, have = dll_recommender_format(dll), recommender_header(staged)
+    if want is None or have == want:
+        return None
+    return (f"the staged DLL reads {want!r} but {staged} is {have!r}: the panel would fall to "
+            f"its stub and every number would be a placeholder. Rebuild the DLL from this "
+            f"checkout, or export data in the DLL's format")
+
+
 def stage_recommender_data(game_dir: Path) -> str:
     """Copy the Build Recommender's data file beside the game; return what happened, for the log.
 
@@ -3868,6 +3893,10 @@ def launch(
     print(f"[stage] {staged}")
     print(f"[stage] sha256 {digest}")
     print(f"[stage] {stage_recommender_data(GAME_DIR)}")
+    mismatch = recommender_format_mismatch(staged, GAME_DIR / RECOMMENDER_DATA_NAME)
+    if mismatch:
+        print(f"REFUSING TO LAUNCH: {mismatch}", file=sys.stderr)
+        return EXIT_ERROR
 
     # BEFORE LAUNCHING, and after staging: the DLL reads this in `DllMain`, so it has to be on
     # disk before the game starts, and it is rewritten every run so a file left over from the
