@@ -92,6 +92,9 @@ echo "== ds2-sl2 section walk =="
 # `ds2-run.py` autoloads by that word. Pure python on built streams; needs no save.
 python3 scripts/ds2-sl2.py --selftest >/dev/null
 echo "  ds2-sl2.py: OK"
+# The dump's flag bit order, map-group arithmetic and section offsets. Needs no save either.
+python3 scripts/ds2-sl2-dump.py --selftest >/dev/null
+echo "  ds2-sl2-dump.py: OK"
 
 echo "== teardown after an evidence push =="
 python3 scripts/ds2-teardown-after-evidence-push.py --selftest >/dev/null
