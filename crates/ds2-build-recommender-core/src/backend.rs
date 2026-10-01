@@ -198,8 +198,10 @@ pub struct BestWeaponRow {
     pub metrics: WeaponMetrics,
 }
 
-/// What a Best weapons row measures besides its score, each `None` where the data cannot say: the
-/// script's `r1_metrics`, at the row's own stats, rings and grip. A launcher has none of them.
+/// What a Best weapons row measures besides its score, each `None` where the data cannot say.
+///
+/// The script's `r1_metrics` and `poise_metrics`, at the row's own stats, rings and grip. A
+/// launcher has none of them but the defender's poise.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct WeaponMetrics {
     /// Metres the R1's hitbox extends along the weapon.
@@ -213,6 +215,24 @@ pub struct WeaponMetrics {
     /// The R1 chain repeated for five seconds, every hit landed by then, against the defender's
     /// numbers before any answer.
     pub damage_per_5s: Option<f64>,
+    /// The share of the R1's windup and active frames inside its hyperarmor window; `0` when its
+    /// rate is `0`, as then the window does nothing.
+    pub hyperarmor: Option<f64>,
+    /// `WeaponParam.uninterruptibleRate`: the factor on poise damage the attacker takes inside the
+    /// window.
+    pub hyperarmor_rate: Option<f64>,
+    /// The share of the bracket's counter-hits (each build's one-handed R1) that do not stagger the
+    /// attacker inside the window, the attacker's poise taken as the defender's; `None` without
+    /// hyperarmor.
+    pub hyperarmor_holds: Option<f64>,
+    /// The R1's first hit's poise damage to a player.
+    pub poise_damage_per_hit: Option<f64>,
+    /// That hit's `DamageCtrlParam.armorBreak`: 1 and 2 stagger whatever the poise.
+    pub armor_break: Option<i32>,
+    /// R1 chain hits until the defender staggers, `None` if not within ten seconds.
+    pub hits_to_stagger: Option<u32>,
+    /// The defender's max poise: the bracket's mean, or the chosen set's.
+    pub defender_poise: f64,
 }
 
 /// How some stats can hold a weapon: the weapon picker's Grip line.

@@ -133,6 +133,7 @@ impl CorpusBackend {
             );
             None
         };
+        self.poise_metrics(index, two, ask.sl, ask.against.worn, &mut metrics);
         Some(BestWeaponRow {
             score,
             weapon: weapon.key.clone(),

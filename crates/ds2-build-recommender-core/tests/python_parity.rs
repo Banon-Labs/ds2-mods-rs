@@ -1327,13 +1327,14 @@ fn the_sl35_character_wields_what_was_measured() {
 /// no flexibility to rank rather than ranking against nothing.
 #[test]
 fn a_file_without_neighbour_counts_has_no_flexibility() {
+    // A build's record up to its weapons, the trailing fields from the neighbour counts on cut.
     let old: String = include_str!("fixtures/corpus-sample.dat")
         .lines()
         .map(|line| {
             if line.starts_with("X\t") {
-                line.rsplit_once('\t').map_or(line, |(head, _)| head)
+                line.split('\t').take(5).collect::<Vec<_>>().join("\t")
             } else {
-                line
+                line.to_owned()
             }
         })
         .collect::<Vec<_>>()
@@ -1529,7 +1530,7 @@ fn rank(name: &str) -> Rank {
 /// launchers' ammunition and the R1's reach, timing and five-second damage.
 #[test]
 fn best_weapons_is_the_scripts() {
-    let (mut compared, mut launchers, mut timed) = (0, 0, 0);
+    let (mut compared, mut launchers, mut timed, mut poised) = (0, 0, 0, 0);
     for &(code, sl, goal, grip, class, window, by, with_status, keys, who, want) in
         expected::BEST_WEAPONS
     {
@@ -1561,7 +1562,7 @@ fn best_weapons_is_the_scripts() {
         let case = format!("{code} SL {sl} {goal} {class} window {window} {by} {who}");
         assert_eq!(got.len(), want.len(), "{case}: rows");
         for (row, want) in got.iter().zip(want) {
-            let (score, key, value, class, two, st, rings, label, ammo, r1, ..) = *want;
+            let (score, key, value, class, two, st, rings, label, ammo, r1, poise, ..) = *want;
             let at = format!("{case}: {key}");
             assert_eq!(row.weapon, key, "{case}");
             assert_eq!(row.score as f32, score as f32, "{at}: score");
@@ -1590,13 +1591,27 @@ fn best_weapons_is_the_scripts() {
                 r1,
                 "{at}: R1 metrics"
             );
+            assert_eq!(
+                (
+                    m.hyperarmor,
+                    m.hyperarmor_rate,
+                    m.hyperarmor_holds,
+                    m.poise_damage_per_hit,
+                    m.armor_break.map(i64::from),
+                    m.hits_to_stagger.map(i64::from),
+                    m.defender_poise
+                ),
+                poise,
+                "{at}: poise metrics"
+            );
             compared += 1;
             launchers += usize::from(ammo.is_some());
             timed += usize::from(r1.4.is_some());
+            poised += usize::from(poise.3.is_some());
         }
     }
     assert!(
-        compared >= 20 && launchers >= 4 && timed >= 10,
-        "{compared} rows, {launchers} launchers, {timed} with 5 s damage"
+        compared >= 20 && launchers >= 4 && timed >= 10 && poised >= 10,
+        "{compared} rows, {launchers} launchers, {timed} with 5 s damage, {poised} with poise data"
     );
 }

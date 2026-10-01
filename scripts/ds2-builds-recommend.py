@@ -2863,19 +2863,21 @@ def bracket_poise(data: Data, corpus: list[Build], sl: int, attacks: dict, defen
     builds = bracket_builds(data, corpus, sl)
     poise = (armor_poise(data, defender) if defender else
              float(np.mean([armor_poise(data, b.armor, b.rings) for b in builds])) if builds else 0.0)
-    counters = []
-    for b in builds:
-        w = next((w for w in (b.hands[HAND_SLOTS.index(s)][0] for s in MELEE_ORDER)
-                  if w not in EMPTY and w in data.weapons and not data.weapons[w].get("isShield")
-                  and not CATALYST.search(w) and w not in data.ranged), None)
-        a = r1_attack(attacks, [data.weapons[w]["name"], w.replace("_", " ")], False) if w else None
-        hs = live_hits(a) if a else []
-        hp = hit_poise(data, w, hs[0].get("dmg")) if hs else None
-        if hp:
-            counters.append(hp)
+    counters = [hp for hp in (build_counter(data, attacks, b) for b in builds) if hp]
     out = {"poise": poise, "counters": counters, "n": len(builds)}
     _bracket_poise_memo[key] = (data, corpus, out)
     return out
+
+
+def build_counter(data: Data, attacks: dict, b: Build) -> tuple[float, int] | None:
+    """The counter-hit bracket_poise weighs hyperarmor against for one build: (poise damage,
+    armorBreak) of its melee weapon's (adoption's pick) 1H R1 first hit; None without one."""
+    w = next((w for w in (b.hands[HAND_SLOTS.index(s)][0] for s in MELEE_ORDER)
+              if w not in EMPTY and w in data.weapons and not data.weapons[w].get("isShield")
+              and not CATALYST.search(w) and w not in data.ranged), None)
+    a = r1_attack(attacks, [data.weapons[w]["name"], w.replace("_", " ")], False) if w else None
+    hs = live_hits(a) if a else []
+    return hit_poise(data, w, hs[0].get("dmg")) if hs else None
 
 
 _bracket_poise_memo: dict = {}
@@ -4798,10 +4800,16 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 #                                                             flat(5, comma-separated, or "-");
 #                                                             the 2nd attack's fields "-" when it
 #                                                             has none, so the 1st repeats
+#   PO grip rate cover t:poise:break ..                       the last W's poise_metrics inputs: the
+#                                                             R1's uninterruptibleRate and
+#                                                             hyperarmor_cover, and its chain's hits
+#                                                             out to 10 s with poise data
+#   and, trailing: B its bracket_poise mean poise; P the piece's poise; X the build's counter-hit
+#   (build_counter) as poise:break, "-" for none
 
 BACKEND_DATA_NAME = "ds2-build-recommender.dat"
 BACKEND_DATA = Path.home() / ".cache/ds2-builds" / BACKEND_DATA_NAME
-BACKEND_FORMAT = "ds2-build-recommender-data 15"
+BACKEND_FORMAT = "ds2-build-recommender-data 16"
 #: How far the exported R1/R2 chains run, in seconds: the panel clamps its window to 10.0
 #: (crates/ds2-build-recommender-ui/src/panel.rs), and status_hits runs to max(3, window).
 STATUS_HORIZON = 10.0
@@ -4871,6 +4879,28 @@ def _chain_records(data: Data, attacks: dict, key: str, name: str) -> list[str]:
     return out
 
 
+def _poise_records(data: Data, attacks: dict, key: str, name: str) -> list[str]:
+    """export_backend's PO records for one weapon: per grip, what poise_metrics reads that no
+    build changes -- the R1's hyperarmor rate and cover, and its chain's hits out to 10 s as
+    (seconds, poise damage, armorBreak) -- when the chain has a hit with poise data."""
+    out = []
+    names = [name, key.replace("_", " ")]
+    for two in (False, True):
+        a = r1_attack(attacks, names, two)
+        if not a:
+            continue
+        tl = next((t for t in (chain_timeline(attacks, nm, two, "Normal", 10.0, with_row=True) for nm in names)
+                   if t), None)
+        hits = [(t[0], *hp) for t in tl or [] if (hp := hit_poise(data, key, t[-1]))]
+        if not hits:
+            continue
+        rate = data.weapon_poise[key][1]
+        cover = hyperarmor_cover(a) if rate > 0 else 0.0
+        out.append("\t".join(["PO", "2" if two else "1", _num(float(rate)), _num(float(cover)),
+                              " ".join(f"{_num(t)}:{_num(float(pd))}:{_num(int(ab))}" for t, pd, ab in hits)]))
+    return out
+
+
 def export_backend(data: Data, corpus: list[Build]) -> str:
     attacks = load_attacks(data)
     rates = json.loads(HYPERARMOR.read_text()) if HYPERARMOR.exists() else {}
@@ -4933,8 +4963,9 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
                     tl = chain_timeline(attacks, nm, two, kind, STATUS_HORIZON, distinct=True, with_start=True)
                     out.append("\t".join(["S", "2" if two else "1", tag, str(attack_hits(first)),
                                           " ".join(f"{_num(h[4])}:{_num(h[0])}" for h in tl) or "-"]))
-        if key not in data.ranged:  # what row_metrics reads; a launcher's row has none
+        if key not in data.ranged:  # what row_metrics and poise_metrics read; a launcher has none
             out.extend(_chain_records(data, attacks, key, w["name"]))
+            out.extend(_poise_records(data, attacks, key, w["name"]))
         r = data.ranged.get(key)
         if r:
             out.append("\t".join(["RG", _num(r["ammo"]), r["kind"], _num(float(r["hand"])),
@@ -4952,7 +4983,8 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
         st, _ = bracket_stats(data, corpus, lo)
         f = floors[i]
         out.append("\t".join(["B", str(i), *(_num(f.get(s, 0)) for s in FLOOR_STATS + ["endurance"]),
-                              *(_num(float(dfn[k])) for k in DMG + PHYS_TYPES), *(_num(st[s]) for s in STATS)]))
+                              *(_num(float(dfn[k])) for k in DMG + PHYS_TYPES), *(_num(st[s]) for s in STATS),
+                              _num(float(bracket_poise(data, corpus, lo, attacks)["poise"]))]))
     ring_ix = {k: i for i, k in enumerate(data.rings)}
     for key, r in data.rings.items():
         out.append("\t".join(["R", key, r.get("name", key), _num(r.get("weight", 0)), r.get("group", key)]))
@@ -4975,7 +5007,8 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
                                   *(_num(v.get(k + "DEF", 0)) for k in DMG),
                                   _stat_pairs(v.get("require") or {}) or "-",
                                   *(_num(v.get(t + "DEF", v.get("physicalDEF", 0))) for t in PHYS_TYPES),
-                                  _num(v.get("physicalDEFBonus", 0)), *(_num(alt.get(s, 0)) for s in STATS)]))
+                                  _num(v.get("physicalDEFBonus", 0)), *(_num(alt.get(s, 0)) for s in STATS),
+                                  _num(v.get("poise", 0))]))
     mix = threat_mix(data, corpus)
     out.append("\t".join(["H", *(_num(float(mix[k])) for k in DMG)]))
     for key, (weight, add, mul) in sorted(ring_effects(data).items()):
@@ -5008,11 +5041,12 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
         # a reader that predates it stops at the weapons field, and one that has it treats a file
         # without it as having no flexibility to rank against.
         one, two = flex_counts(data, b.stats)
+        hp = build_counter(data, attacks, b)  # what bracket_poise counts as its counter-hit
         out.append("\t".join(["X", str(sl_bracket(soul_level(data, b))),
                               "".join(str(stat_bracket(eff[s])) for s in STATS),
                               ",".join(str(ring_ix[r]) for r in b.rings if r and r in data.rings) or "-",
                               ",".join(f"{weapon_ix[w]}:{INFUSION_CODE[inf]}" for w, inf in b.weapons()) or "-",
-                              f"{one}:{two}"]))
+                              f"{one}:{two}", f"{_num(float(hp[0]))}:{_num(int(hp[1]))}" if hp else "-"]))
     return "\n".join(out) + "\n"
 
 

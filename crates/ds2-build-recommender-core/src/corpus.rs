@@ -40,13 +40,14 @@ use crate::weapons;
 mod adaptive;
 mod best;
 mod chain;
+mod poise;
 mod ranged;
 
 /// What the file is called beside `DarkSoulsII.exe`.
 pub const DATA_FILE_NAME: &str = "ds2-build-recommender.dat";
 
 /// The file's first line. A different one is a file this port does not read.
-pub const FORMAT: &str = "ds2-build-recommender-data 15";
+pub const FORMAT: &str = "ds2-build-recommender-data 16";
 
 /// Nine stats as the script computes with them, in [`crate::model::STAT_LABELS`] order.
 type Stats = [i32; STAT_COUNT];
@@ -366,6 +367,8 @@ struct Weapon {
     /// Per grip, the script's `r1_metrics` reach, startup, recovery and first-hit seconds, which
     /// no build changes.
     r1: [[Option<f64>; 4]; 2],
+    /// Per grip, what the script's `poise_metrics` reads that no build changes.
+    poise: [Option<poise::Poise>; 2],
 }
 
 /// One attack chain as the bleed/poison ranking counts it.
@@ -489,6 +492,8 @@ struct Bracket {
     /// The median levelled stats of the builds `defense` averages over: the script's
     /// `bracket_stats`, what a chosen defender's armour is worn at.
     stats: Stats,
+    /// The mean max poise of the same builds: the script's `bracket_poise`.
+    poise: f64,
 }
 
 /// A chosen defender: an index into each slot of [`CorpusBackend::wearable`], head to legs, or
@@ -603,6 +608,8 @@ struct Wearable {
     bonus: f64,
     /// What wearing it adds to each stat.
     alter: Stats,
+    /// Its poise: `ArmorParam.strong` where the script read the regulation.
+    poise: f64,
 }
 
 /// One corpus build, as nearest-build search reads it.
@@ -619,6 +626,9 @@ struct CorpusBuild {
     /// neighbour in [`CorpusBackend::flexibility`]. `None` in a file written before the script
     /// exported it.
     flex: Option<(u32, u32)>,
+    /// Its melee weapon's one-handed R1 first hit as (poise damage, armorBreak): the counter-hit
+    /// the script's `bracket_poise` weighs hyperarmor against. `None` without one.
+    counter: Option<(f64, i32)>,
 }
 
 /// Attack rating per type, physical, magic, fire, lightning, dark; `None` where the weapon has none.
@@ -928,9 +938,11 @@ impl CorpusBackend {
                     ranged: None,
                     chains: Default::default(),
                     r1: [[None; 4]; 2],
+                    poise: Default::default(),
                 });
             }
             "CH" => self.parse_chain(line, &mut fields)?,
+            "PO" => self.parse_poise(line, &mut fields)?,
             "RM" => {
                 let grip = match next("grip")? {
                     "1" => 0,
@@ -1067,10 +1079,12 @@ impl CorpusBackend {
                     *value = float(fields.next(), line)?;
                 }
                 let stats = stats(&mut fields, line)?;
+                let poise = float(fields.next(), line)?;
                 self.brackets.push(Bracket {
                     floors,
                     defense,
                     stats,
+                    poise,
                 });
             }
             "R" => {
@@ -1116,6 +1130,7 @@ impl CorpusBackend {
                 }
                 let bonus = float(fields.next(), line)?;
                 let alter = stats(&mut fields, line)?;
+                let poise = float(fields.next(), line)?;
                 self.wearable[slot].push(Wearable {
                     key,
                     name,
@@ -1125,6 +1140,7 @@ impl CorpusBackend {
                     typed,
                     bonus,
                     alter,
+                    poise,
                 });
             }
             "H" => {
@@ -1310,12 +1326,23 @@ impl CorpusBackend {
                         Some((count(one)?, count(two)?))
                     }
                 };
+                // `poise:break`, the counter-hit the script's bracket_poise counts for the build.
+                let counter = match fields.next() {
+                    Some("-") | None => None,
+                    Some(pair) => {
+                        let (damage, armor_break) = pair
+                            .split_once(':')
+                            .ok_or_else(|| bad(line, "counter-hit poise:break"))?;
+                        Some((float(Some(damage), line)?, int(Some(armor_break), line)?))
+                    }
+                };
                 self.corpus.push(CorpusBuild {
                     bracket,
                     stat_brackets,
                     rings,
                     weapons: carried,
                     flex,
+                    counter,
                 });
             }
             other => return Err(bad(line, &format!("unknown record {other:?}"))),
