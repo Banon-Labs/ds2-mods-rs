@@ -170,6 +170,8 @@ class Data:
         self.weapon_elements = {}  # weapon key -> element -> (base, coefficient) (regulation_weapon_elements)
         self.hit_flat = {}  # PlayerDamageParam row -> DMG key -> flat attack (regulation_hit_flat)
         self.damage_scale = {}  # weapon key -> WeaponParam.damageScale where not 1.0 (regulation_damage_scale)
+        self.hit_shape = {}  # PlayerDamageParam row -> its hitbox shape (regulation_reach)
+        self.reach_scale = {}  # weapon key -> (radius scale, length scale) where not 1.0 (regulation_reach)
         self.ring_attack = {}  # ring key -> DMG key -> flat attack add (regulation_ring_attack)
         self.ranged = {}  # launcher key -> its ammo type, hand scale and special shots (regulation_ranged)
         self.ammo = {}  # ammo name -> its arrowType and the shot it adds (regulation_ranged)
@@ -1128,7 +1130,8 @@ def apply_regulation(data: Data) -> str:
             + "; " + regulation_ring_defense(data, emevd, members, names)
             + "; " + regulation_defense_buffs(data, emevd, members, d, names)
             + "; " + regulation_weapon_elements(data, d, names)
-            + "; " + regulation_damage_scale(data, d, names) + "; " + regulation_status(data, d, names)
+            + "; " + regulation_damage_scale(data, d, names) + "; " + regulation_reach(data, d, names)
+            + "; " + regulation_status(data, d, names)
             + "; " + regulation_attack(data, d, names) + "; " + regulation_ranged(data, d, names))
 
 
@@ -1294,6 +1297,25 @@ def regulation_damage_scale(data: Data, d: dict, names: dict) -> str:
         if wp and wp["damageScale"] != 1.0:
             data.damage_scale[key] = wp["damageScale"]
     return f"damageScale off 1.0 on {len(data.damage_scale)} weapons"
+
+
+def regulation_reach(data: Data, d: dict, names: dict) -> str:
+    """data.hit_shape: PlayerDamageParam row -> (hitDummyPolyType, hitDummyPolyId, radius, length,
+    childDamage); data.reach_scale: weapon key -> (WeaponParam.damageHitRadiusScale,
+    damageHitLengthScale) where either is not 1.0. REGULATION; the paramdef names radius and length
+    in metres (半径[m], 長さ[m]). What r1_reach makes of them is INFERRED there.
+    scripts/ds2-hit-shape.py prints them per weapon. Joined by name as regulation_damage_scale."""
+    data.hit_shape = {rid: (r["hitDummyPolyType"], r["hitDummyPolyId"], r["radius"], r["length"], r["childDamage"])
+                      for rid, r in d["PlayerDamageParam"].items()}
+    by_name = {}
+    for wid, w in d["WeaponParam"].items():
+        by_name.setdefault(norm(names.get(wid, "")), w)
+    data.reach_scale = {}
+    for key, w in data.weapons.items():
+        wp = by_name.get(norm(w.get("name", key)))
+        if wp and (wp["damageHitRadiusScale"], wp["damageHitLengthScale"]) != (1.0, 1.0):
+            data.reach_scale[key] = (wp["damageHitRadiusScale"], wp["damageHitLengthScale"])
+    return f"hitbox shape on {len(data.hit_shape)} damage rows, reach scaled on {len(data.reach_scale)} weapons"
 
 
 #: Status -> (RATE_FIELDS slot, WeaponReinforceParam maximum<...> stem, WeaponStatsAffectParam stem).
@@ -2350,7 +2372,101 @@ def r1_timeline(attacks: dict, name: str, two_hand: bool,
     return chain_timeline(attacks, name, two_hand, "Normal", horizon)
 
 
-HYPERARMOR = Path.home() / ".cache/ds2-builds/hyperarmor.json"  # weapon name -> WeaponParam.uninterruptibleRate
+_anim_len_cache: dict = {}
+
+
+def anim_length(anim: int) -> float | None:
+    """Seconds (animation time) an animation runs: the end of its TAE event 101100, which spans the
+    whole animation in every attack anim read (docs/DS2-DPS-MECHANICS.md section 3), else its last
+    event's end; None without the TAE file."""
+    if anim not in _anim_len_cache:
+        p = TAE_DIR / f"anim-{anim:09d}.xml"
+        t = None
+        if p.exists():
+            ev = re.findall(r"<type>(\d+)</type>.*?<startTime>([-\d.]+)</startTime>\s*<endTime>([-\d.]+)</endTime>",
+                            p.read_text(), re.S)
+            whole = [float(e) for ty, _, e in ev if ty == "101100"]
+            t = max(whole) if whole else max((float(e) for _, _, e in ev), default=None)
+        _anim_len_cache[anim] = t
+    return _anim_len_cache[anim]
+
+
+#: How long the sustained-damage metric repeats the R1 chain, in seconds.
+SUSTAIN_HORIZON = 5.0
+
+
+def r1_reach(data: Data, attacks: dict, weapon: str, names: list[str], two_hand: bool) -> float | None:
+    """Metres the R1's hitbox extends along the weapon: the first chain attack's live hitboxes,
+    each followed through PlayerDamageParam.childDamage. Segments on a weapon dummy poly
+    (hitDummyPolyType 1, id 100 and up: the whip's 100 -> 101 -> 102) add their lengths in order;
+    the reach is that sum x WeaponParam.damageHitLengthScale plus the last segment's radius x
+    damageHitRadiusScale, the longest over the attack's hitboxes. REGULATION for every number
+    (regulation_reach). INFERRED: that each next dummy poly sits at the end of the previous segment
+    and that the WeaponParam scales multiply the row's radius and length -- the 2200 handler copies a
+    radius and a length scale into each hitbox it opens (EXE sHitboxData +0x8/+0xc, parseDamageTae
+    0x1403269e0), but where they are filled from was not traced. It is the hitbox's extent from the
+    weapon's dummy poly 100, not the distance from the attacker: the swing's own travel is in the
+    animation, which is not read. None without the shape data."""
+    g = "Single2Hand" if two_hand else "Single1Hand"
+    a = next((x for x in (attacks.get((norm(nm), g + "Normal1st")) for nm in names) if x), None)
+    if not a or not data.hit_shape:
+        return None
+    rs, ls = data.reach_scale.get(weapon, (1.0, 1.0))
+    best = None
+    for h in live_hits(a):
+        row, rows, segs, used = h.get("dmg"), set(), [], set()
+        while row and row not in rows and str(row) in data.hit_shape:
+            rows.add(row)
+            ptype, pid, rad, ln, child = data.hit_shape[str(row)]
+            if ptype == 1 and pid >= 100 and pid not in used:
+                used.add(pid)
+                segs.append((rad, ln))
+            row = child
+        if segs:
+            r = sum(ln for _, ln in segs) * ls + segs[-1][0] * rs
+            best = r if best is None else max(best, r)
+    return None if best is None else round(best, 3)
+
+
+def r1_metrics(data: Data, attacks: dict, weapon: str, names: list[str], two_hand: bool, ar: dict, dfn: dict,
+               anim_len=anim_length) -> dict:
+    """What the --window score leaves out, for the R1 of the grip the row uses (seconds of game time,
+    animation time over the attack's mean play speed as chain_timeline divides it):
+
+    * reach_m: r1_reach.
+    * startup_s: the first chain attack's first live hitbox frame (TAE 2200 start).
+    * recovery_s: from its last live hitbox frame to the end of the animation (anim_length), the
+      commitment of one R1 nothing cancels. INFERRED: that the player is free when the animation
+      ends; a roll or block cancel earlier than that is not read (the 111500 window is the INFERRED
+      chain input, and its EXE reader was not found).
+    * time_to_first_hit_s: the first hit of the R1 chain's timeline, which is startup_s unless the
+      first chain attack opens with a dead hitbox.
+    * damage_per_5s: the --window score over SUSTAIN_HORIZON seconds: the R1 chain repeated
+      (chain_timeline, each next attack at max(111500, its hitbox's close)), every hit landed by then
+      against `dfn`, times WeaponParam.damageScale.
+
+    A value the data cannot give is None."""
+    out = {"reach_m": r1_reach(data, attacks, weapon, names, two_hand), "startup_s": None, "recovery_s": None,
+           "time_to_first_hit_s": None, "damage_per_5s": None}
+    g = "Single2Hand" if two_hand else "Single1Hand"
+    a = next((x for x in (attacks.get((norm(nm), g + "Normal1st")) for nm in names) if x), None)
+    hs = live_hits(a) if a else []
+    if hs:
+        spd = sum(a.get("spd") or [1.0, 1.0]) / 2
+        out["startup_s"] = round(min(h["start"] for h in hs) / 30 / spd, 3)
+        end = anim_len(a["anim"])
+        if end is not None:
+            out["recovery_s"] = round(max(0.0, end - max(h["end"] for h in hs) / 30) / spd, 3)
+    tl = next((t for t in (chain_timeline(attacks, nm, two_hand, "Normal", SUSTAIN_HORIZON) for nm in names) if t),
+              None)
+    if tl:
+        out["time_to_first_hit_s"] = round(tl[0][0], 3)
+        out["damage_per_5s"] = round(sum(hit_damage(ar, dfn, mv, ty, lo, fl) for t, mv, ty, lo, fl in tl
+                                         if t <= SUSTAIN_HORIZON) * data.damage_scale.get(weapon, 1.0), 1)
+    return out
+
+
+HYPERARMOR =Path.home() / ".cache/ds2-builds/hyperarmor.json"  # weapon name -> WeaponParam.uninterruptibleRate
 CRIT = Path.home() / ".cache/ds2-builds/crit.json"  # per weapon: counter, backstab, riposte multipliers
 _tae_cache: dict = {}
 
@@ -2687,6 +2803,23 @@ def best_weapons(data: Data, corpus: list[Build], inf: str, sl: int, objective: 
     else:
         rows = [best_weapon_row(data, corpus, key, *args) for key in keys]
     return sorted((r for r in rows if r), key=lambda r: -r[0])
+
+
+_row_attacks: dict = {}  # id(data) -> load_attacks(data), read once for every row_metrics
+
+
+def row_metrics(data: Data, corpus: list[Build], row: tuple, inf: str, sl: int, defender=None) -> dict | None:
+    """r1_metrics for one best_weapons row, at its optimized stats, rings and grip against the
+    defender its score used; None for a bow, greatbow or crossbow (its score is one shot)."""
+    _, weapon, _, _, two, st, worn, *_ = row
+    if weapon in data.ranged:
+        return None
+    w = data.weapons[weapon]
+    ar = attack_rating(data, weapon, inf, gear_stats(data, st, worn), worn)
+    if id(data) not in _row_attacks:
+        _row_attacks[id(data)] = load_attacks(data)
+    return r1_metrics(data, _row_attacks[id(data)], weapon, [w["name"], weapon.replace("_", " ")], two, ar,
+                      defender_defense(data, corpus, sl, defender)[0])
 
 
 _BW: tuple | None = None
@@ -4657,6 +4790,46 @@ SELFTEST_ATTACKS = {
 }
 
 
+def metrics_selftest_cases() -> list:
+    """r1_reach / r1_metrics on regulation rows (scripts/ds2-hit-shape.py prints them): the Dagger's
+    one segment, the Whip's three dummy polys end to end, the Greatsword's child sphere on the same
+    dummy poly and the Winged Spear's on a body dummy poly, neither adding length."""
+    A = dict(SELFTEST_ATTACKS)
+    A[("whip", "Single1HandNormal1st")] = {"anim": -1, "spd": [1.0, 1.0], "hits": [_hit(16, 20, 1.0, dmg=10011000)]}
+    A[("greatsword", "Single1HandNormal1st")] = {"anim": -1, "spd": [1.0, 1.0], "hits": [_hit(23, 29, 1.0, dmg=10042700)]}
+    A[("wingedspear", "Single1HandNormal1st")] = {"anim": -1, "spd": [1.0, 1.0],
+                                                   "hits": [_hit(14, 20, 1.0, dmg=10017820)]}
+    fake = type("Reach", (), {"damage_scale": {"Greatsword": 2.0}, "reach_scale": {"Dagger": (1.0, 0.7),
+                                                                                   "Greatsword": (1.0, 1.1)},
+                              "hit_shape": {"10004100": (1, 100, 0.3, 0.3, 0),
+                                            "10011000": (1, 100, 0.25, 1.0, 10011001),
+                                            "10011001": (1, 101, 0.25, 1.1, 10011002),
+                                            "10011002": (1, 102, 0.25, 0.2, 0),
+                                            "10042700": (1, 100, 0.3, 1.55, 10042701),
+                                            "10042701": (1, 100, 0.4, 0.01, 0),
+                                            "10017820": (1, 100, 0.3, 1.55, 40000010),
+                                            "40000010": (1, 1, 0.3, 0.1, 0)}})
+    ar, dfn = {"physical": 100}, {"physical": 0}
+    dagger = r1_metrics(fake, A, "Dagger", ["Dagger"], False, ar, dfn, anim_len=lambda anim: 1.0)
+    return [
+        ("dagger reach 0.3 x 0.7 + 0.3", r1_reach(fake, A, "Dagger", ["Dagger"], False), 0.51),
+        ("whip reach 1.0 + 1.1 + 0.2 + 0.25", r1_reach(fake, A, "Whip", ["Whip"], False), 2.55),
+        ("greatsword child sphere adds no length", r1_reach(fake, A, "Greatsword", ["Greatsword"], False), 2.005),
+        ("spear body-dummy-poly child adds none", r1_reach(fake, A, "Winged_Spear", ["Winged Spear"], False), 1.85),
+        ("no 2H row, no reach", r1_reach(fake, A, "Dagger", ["Dagger"], True), None),
+        # frame 8 at the mean of speeds 1.1/1.2; the anim's 1.0 s ends 0.5 s after frame 15
+        ("dagger startup 8/30/1.15", dagger["startup_s"], 0.232),
+        ("dagger recovery (1.0 - 15/30)/1.15", dagger["recovery_s"], 0.435),
+        ("dagger first hit is its startup", dagger["time_to_first_hit_s"], 0.232),
+        # anim -1 has no chain window, so the 5 s repeat ends after one hit: (100*10 - 0)/12
+        ("dagger 5 s damage, one hit", dagger["damage_per_5s"], 83.3),
+        ("greatsword damageScale x2", r1_metrics(fake, A, "Greatsword", ["Greatsword"], False, ar, dfn,
+                                                 anim_len=lambda anim: None)["damage_per_5s"], 166.7),
+        ("no TAE, no recovery", r1_metrics(fake, A, "Dagger", ["Dagger"], False, ar, dfn,
+                                           anim_len=lambda anim: None)["recovery_s"], None),
+    ]
+
+
 def flex_selftest_cases() -> list:
     """flex_counts/flexibility over a four-weapon table and a five-build corpus, no site tables."""
     from types import SimpleNamespace
@@ -4909,6 +5082,7 @@ def selftest() -> int:
     cases += defense_selftest_cases()
     cases += flex_selftest_cases()
     cases += ranged_selftest_cases()
+    cases += metrics_selftest_cases()
     if ATTACKS.exists():  # the real extracted rows agree with the copies above
         real = load_attacks()
         for key in [k for k in A if k in real]:
@@ -5321,7 +5495,9 @@ def main() -> int:
         if a.json:
             print(json.dumps({sl: [{"score": r[0], "weapon": data.weapons[r[1]]["name"], "key": r[1], "value": r[2],
                                     "class": r[3], "two_handed": r[4], "stats": r[5], "rings": r[6],
-                                    "label": r[7], **(r[8] or {})} for r in rows[:a.top]] for sl, rows in out.items()},
+                                    "label": r[7], **(r[8] or {}),
+                                    "metrics": row_metrics(data, corpus, r, inf, sl, defender)}
+                                   for r in rows[:a.top]] for sl, rows in out.items()},
                              indent=1))
         return 0
     if a.best_infusion or a.infusion_gaps:
