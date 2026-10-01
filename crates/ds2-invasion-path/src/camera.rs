@@ -625,7 +625,7 @@ impl Tracker {
                     // Printing what every survivor thinks about the same known point turns the
                     // next launch into a table rather than another single guess.
                     let budget = REPORT_BUDGET
-                        .fetch_update(
+                        .try_update(
                             core::sync::atomic::Ordering::Relaxed,
                             core::sync::atomic::Ordering::Relaxed,
                             |left| left.checked_sub(1),

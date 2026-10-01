@@ -278,7 +278,7 @@ fn detect_foreign_motion(yaw_now: Option<f32>, frame: &drive::Frame) {
     }
     // Saturating, so the "never authored" marker stays at the top instead of wrapping to zero.
     let since_authored = FRAMES_SINCE_AUTHORED
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
             Some(n.saturating_add(1))
         })
         .unwrap_or(u32::MAX)

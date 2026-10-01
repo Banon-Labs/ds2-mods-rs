@@ -205,7 +205,7 @@ pub fn hold() -> usize {
 
 /// Undo one [`hold`].
 pub fn release() -> usize {
-    let previous = HELD.fetch_update(Ordering::AcqRel, Ordering::Acquire, |held| {
+    let previous = HELD.try_update(Ordering::AcqRel, Ordering::Acquire, |held| {
         Some(held.saturating_sub(1))
     });
     let depth = previous.unwrap_or(0).saturating_sub(1);
