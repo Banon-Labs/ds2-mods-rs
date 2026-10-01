@@ -933,13 +933,20 @@ MECHANICS = Path.home() / ".cache/ds2-builds/mechanics.json"
 FLOOR_STATS = ["vigor", "vitality", "adaptability", "attunement"]
 
 
+#: Spells a build may attune and still be held to the no-spell floors (floor_stats), by key.
+NO_FLOOR_SPELLS = {"Warmth"}
+
+
 def floor_stats(spells) -> list[str]:
-    """The FLOOR_STATS a build casting `spells` is held to: ATT only when it casts something.
-    Without spells ATT buys nothing but agility, which ADP buys three times as fast (agility's
-    x is 3*ADP + ATT), so the median ATT of real builds -- most attune something -- is no floor
-    for one that does not. Measured 2026-09-30: SL 155's median ATT 6 levelled +4 ATT onto
-    no-spell builds from classes that start at ATT 2."""
-    return FLOOR_STATS if spells else [s for s in FLOOR_STATS if s != "attunement"]
+    """The FLOOR_STATS a build casting `spells` is held to: ATT only when it casts something
+    other than NO_FLOOR_SPELLS. Without spells ATT buys nothing but agility, which ADP buys three
+    times as fast (agility's x is 3*ADP + ATT), so the median ATT of real builds -- most attune
+    something -- is no floor for one that does not. Measured 2026-09-30: SL 155's median ATT 6
+    levelled +4 ATT onto no-spell builds from classes that start at ATT 2. Warmth alone counts as
+    no spells: a melee build attunes it for the heal, and spell_floors already raises ATT to the
+    slot it needs."""
+    casts = any(s not in NO_FLOOR_SPELLS for s in spells)
+    return FLOOR_STATS if casts else [s for s in FLOOR_STATS if s != "attunement"]
 
 
 def stamina_r1(data: Data) -> dict:
@@ -3456,6 +3463,9 @@ EXPECT_SPELLS = [  # weapon key, infusion, sl, objective, spell keys: --generate
     # soulsplanner 16581's SL and spell: the floors and Climax's ATT 20 do not fit SL 98 without the
     # rings; Ring of the Embedded stands in for VIG/VIT and the band for ATT
     ("Dagger", "Dark", 98, "damage", ["Climax"]),
+    # Warmth alone is held to the no-spell floors (NO_FLOOR_SPELLS): its own slot sets ATT
+    ("Uchigatana", "Lightning", 155, "damage", ["Warmth"]),
+    ("Black_Dragon_Greataxe", "Raw", 250, "damage", ["Warmth"]),
 ]
 #: --optimize --spells, as Optimize for weapon asks now that it honours the chosen spells; the last
 #: field is whether the floors apply (False: --no-floors, the panel's "ignore typical-build minimums").
@@ -3485,6 +3495,8 @@ EXPECT_REFUSALS = [  # weapon key, infusion, sl, objective, grip, spells, class,
     ("Dagger", "No_Infusion", 40, "damage", "two", ["Climax"], "sorcerer", True),
     # 16 slots: not even ATT 99 with a Southern Ritual Band+2 (13)
     ("Demons_Great_Hammer", "Raw", 200, "damage", "two", ["Climax", "Climax", "Climax", "Climax"], None, True),
+    # Warmth alone: the floors it is refused on read VIG/VIT/ADP, no ATT (NO_FLOOR_SPELLS)
+    ("Demons_Great_Hammer", "Raw", 20, "damage", "two", ["Warmth"], None, True),
 ]
 EXPECT_MINIMUM = [("Demons_Great_Hammer", True), ("Moonlight_Greatsword", False), ("Uchigatana", False)]
 EXPECT_SIMILAR = [  # stats, sl, k, status

@@ -56,11 +56,12 @@ const FTH: usize = 8;
 /// The script's `FLOOR_STATS`, in its order: VIG, VIT, ADP, ATT.
 const FLOOR_STATS: [usize; 4] = [VIG, VIT, ADP, ATT];
 
-/// The script's `floor_stats`: the [`FLOOR_STATS`] a build casting `spells` is held to, ATT only
-/// when it casts something. Without spells ATT buys nothing but agility, which ADP buys three
-/// times as fast.
-fn floored(spells: &[usize]) -> &'static [usize] {
-    if spells.is_empty() {
+/// The script's `floor_stats`: the [`FLOOR_STATS`] a build casting `spells` (indices into
+/// `table`) is held to, ATT only when it casts something other than
+/// [`crate::backend::NO_FLOOR_SPELLS`]. Without spells ATT buys nothing but agility, which ADP
+/// buys three times as fast; Warmth alone counts as nothing.
+fn floored(spells: &[usize], table: &[Spell]) -> &'static [usize] {
+    if !crate::backend::casts_for_floors(spells.iter().map(|&at| table[at].key.as_str())) {
         &FLOOR_STATS[..3]
     } else {
         &FLOOR_STATS
@@ -1848,10 +1849,16 @@ impl CorpusBackend {
     /// The script's `_floors_at` for every stat: the least `optimize_build` lifts each to at
     /// `bracket` -- VIG, VIT and ADP always, ATT with `spells` ([`floored`]), END for a
     /// high-stamina weapon -- or all `0` when the floors are off.
-    fn floor_stats(bracket: &Bracket, weapon: &Weapon, floors: bool, spells: &[usize]) -> Stats {
+    fn floor_stats(
+        &self,
+        bracket: &Bracket,
+        weapon: &Weapon,
+        floors: bool,
+        spells: &[usize],
+    ) -> Stats {
         let mut out = [0; STAT_COUNT];
         if floors {
-            for (at, &stat) in floored(spells).iter().enumerate() {
+            for (at, &stat) in floored(spells, &self.spells).iter().enumerate() {
                 out[stat] = bracket.floors[at];
             }
             if weapon.high_stamina {
@@ -1915,7 +1922,7 @@ impl CorpusBackend {
         let two = grip.two_handed();
         let require = Self::grip_require(weapon, two);
         let floors_at =
-            |sl: u16| Self::floor_stats(self.bracket(u32::from(sl)), weapon, floors, spells);
+            |sl: u16| self.floor_stats(self.bracket(u32::from(sl)), weapon, floors, spells);
         let classes: Vec<usize> = (0..self.classes.len())
             .filter(|&at| {
                 only_class.is_none_or(|only| self.classes[at].key.eq_ignore_ascii_case(only))
@@ -2066,7 +2073,7 @@ impl CorpusBackend {
                         } else {
                             format!(" and {spell_list} fit")
                         },
-                        floored(spells)
+                        floored(spells, &self.spells)
                             .iter()
                             .map(|&stat| label(stat))
                             .collect::<Vec<_>>()
@@ -2135,7 +2142,7 @@ impl CorpusBackend {
                 });
                 // The floors this build is held to (no ATT without spells), as they read.
                 let shown = |floor: &Stats| {
-                    floored(spells)
+                    floored(spells, &self.spells)
                         .iter()
                         .map(|&stat| format!("{} {}", label(stat), floor[stat]))
                         .collect::<Vec<_>>()
@@ -2256,8 +2263,8 @@ impl CorpusBackend {
         floors: bool,
         spells: &[usize],
     ) -> Vec<(usize, i32)> {
-        let at = Self::floor_stats(bracket, weapon, floors, spells);
-        let mut out: Vec<(usize, i32)> = floored(spells)
+        let at = self.floor_stats(bracket, weapon, floors, spells);
+        let mut out: Vec<(usize, i32)> = floored(spells, &self.spells)
             .iter()
             .map(|&stat| (stat, at[stat]))
             .collect();

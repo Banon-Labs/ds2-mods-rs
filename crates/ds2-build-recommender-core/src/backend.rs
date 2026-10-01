@@ -45,14 +45,26 @@ pub const COMMON_RING_PERCENT: u32 = 10;
 /// The stats a floor applies to, by index into [`STAT_LABELS`]: VIG, VIT, ATT, ADP.
 pub const FLOOR_STATS: [usize; 4] = [0, 2, 3, 6];
 
-/// The [`FLOOR_STATS`] a build casting `spells` is held to: ATT only when it casts something.
+/// Spells a build may attune and still be held to the no-spell floors ([`floor_stats`]), by
+/// soulsplanner key: the script's `NO_FLOOR_SPELLS`.
+pub const NO_FLOOR_SPELLS: [&str; 1] = ["Warmth"];
+
+/// Whether `spells` (soulsplanner keys) hold anything but [`NO_FLOOR_SPELLS`].
+pub fn casts_for_floors<'a>(mut spells: impl Iterator<Item = &'a str>) -> bool {
+    spells.any(|spell| !NO_FLOOR_SPELLS.contains(&spell))
+}
+
+/// The [`FLOOR_STATS`] a build casting `spells` is held to: ATT only when it casts something
+/// other than [`NO_FLOOR_SPELLS`].
 ///
 /// The script's `floor_stats`. Without spells ATT buys nothing but agility, which ADP buys three
-/// times as fast, so the median ATT of real builds is no floor for one that casts nothing.
+/// times as fast, so the median ATT of real builds is no floor for one that casts nothing. Warmth
+/// alone counts as nothing: a melee build attunes it for the heal, and the spells' own floor
+/// already raises ATT to the slot it needs.
 #[must_use]
 pub fn floor_stats(spells: &[String]) -> &'static [usize] {
     const NO_SPELLS: [usize; 3] = [0, 2, 6];
-    if spells.is_empty() {
+    if !casts_for_floors(spells.iter().map(String::as_str)) {
         &NO_SPELLS
     } else {
         &FLOOR_STATS
@@ -1503,13 +1515,25 @@ mod tests {
         );
     }
 
-    /// ATT has a floor only for a build that casts something.
+    /// ATT has a floor only for a build that casts something other than Warmth.
     #[test]
     fn attunement_is_floored_only_with_spells() {
         let (stats, floors) = ([1; STAT_COUNT], [10; STAT_COUNT]);
         let att = |lines: Vec<String>| lines.iter().any(|line| line.starts_with("ATT"));
+        let keys = |keys: &[&str]| keys.iter().map(|&key| key.to_owned()).collect::<Vec<_>>();
         assert!(!att(floor_violations(&stats, &floors, &[])));
-        assert!(att(floor_violations(&stats, &floors, &["Heal".to_owned()])));
+        assert!(!att(floor_violations(&stats, &floors, &keys(&["Warmth"]))));
+        assert!(!att(floor_violations(
+            &stats,
+            &floors,
+            &keys(&["Warmth", "Warmth"])
+        )));
+        assert!(att(floor_violations(&stats, &floors, &keys(&["Heal"]))));
+        assert!(att(floor_violations(
+            &stats,
+            &floors,
+            &keys(&["Warmth", "Heal"])
+        )));
     }
 
     /// The measured case: a Sorcerer's panel generated a Warrior at SL 90 and the apply wrote it,
