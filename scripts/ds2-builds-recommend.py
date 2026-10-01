@@ -36,9 +36,11 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
+import time
 import urllib.request
 from collections import Counter
 from pathlib import Path
@@ -908,8 +910,12 @@ def evaluate(model: Model, corpus: list[Build], data: Data, folds: int = 5, lam:
 
 def ring_effects(data: Data) -> dict:
     """SoulsPlanner ring key -> (weight, {stat: +n}, load multiplier), from MugenMonkey's ring table
-    (SoulsPlanner encodes these as functions). SITE data, not yet checked against the game."""
-    stat_of = {"Strength": "strength", "Dexterity": "dexterity", "Intelligence": "intelligence",
+    (SoulsPlanner encodes these as functions). SITE data, not yet checked against the game.
+    Built once per `data`: build_defense asks for it per ring per corpus build, and rebuilding it
+    each time was 88% of an optimize_build (measured 2026-09-30, cProfile, 68 s of 78)."""
+    if getattr(data, "_ring_effects", None) is not None:
+        return data._ring_effects
+    stat_of ={"Strength": "strength", "Dexterity": "dexterity", "Intelligence": "intelligence",
                "Faith": "faith", "Adaptability": "adaptability", "Attunement": "attunement",
                "Vitality": "vitality", "Endurance": "endurance", "Vigor": "vigor"}
     out = {}
@@ -927,6 +933,7 @@ def ring_effects(data: Data) -> dict:
                 mul *= e["value"]
         if add or mul != 1.0:
             out[key] = (float(v["weight"]), add, mul)
+    data._ring_effects = out
     return out
 
 
@@ -1742,8 +1749,22 @@ def build_defense(data: Data, b: Build) -> dict:
 
 
 def bracket_defense(data: Data, corpus: list[Build], sl: int) -> tuple[dict, int]:
-    """Mean per-type defense of corpus builds in `sl`'s bracket (nearest bracket with >= 20)."""
+    """Mean per-type defense of corpus builds in `sl`'s bracket (nearest bracket with >= 20).
+    Remembered per corpus and bracket: optimize_build asks once per ring set it tries, and every
+    weapon of best_weapons asks again, for the same few thousand builds."""
     i = sl_bracket(sl)
+    memo = _bracket_defense_memo.get((id(data), id(corpus), i))
+    if memo is not None and memo[0] is data and memo[1] is corpus:  # held, so the ids cannot be reused
+        return dict(memo[2]), memo[3]
+    d, n = _bracket_defense(data, corpus, i)
+    _bracket_defense_memo[(id(data), id(corpus), i)] = (data, corpus, d, n)
+    return dict(d), n
+
+
+_bracket_defense_memo: dict = {}
+
+
+def _bracket_defense(data: Data, corpus: list[Build], i: int) -> tuple[dict, int]:
     by = {}
     for b in corpus:
         by.setdefault(sl_bracket(soul_level(data, b)), []).append(b)
@@ -2124,6 +2145,129 @@ def infusion_gaps(data: Data, stats: dict, sl: int, corpus: list[Build], raw_ar:
             out.append((m, name, rs[0], rs[1], len(rs)))
     out.sort(key=lambda g: -g[0])
     return out[:top], dfn, n
+
+
+def best_weapons_jobs(data: Data, inf: str, weapon_class: str | None = None) -> list[str]:
+    """The weapon keys best_weapons ranks for infusion `inf`: every weapon that takes it, shields,
+    catalysts and EMPTY aside, of `weapon_class` alone when given (MugenMonkey's class, as
+    --weapon-class)."""
+    return [key for key, w in data.weapons.items()
+            if inf in (w.get("infusions") or {}) and key not in EMPTY and not CATALYST.search(key)
+            and not w.get("isShield")
+            and (not weapon_class or norm(data.weapon_class.get(key) or "") == norm(weapon_class))]
+
+
+def best_weapon_row(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, objective: str = "damage",
+                    grip: str = "two", flex_weight: float | None = None, spells=(), only_class: str | None = None,
+                    use_floors: bool = True, defender=None, window: float = 0.0, attacks: dict | None = None):
+    """One row of best_weapons: `weapon`+`inf` at the build optimize_build makes for it at `sl`, scored
+    so weapons compare. (score, weapon, value, class, two-handed, stats, rings, label), or None when
+    no class wields it at `sl` or, with `window`, the weapon has no attack timing.
+
+    `value` is optimize_build's own: one hit for "damage", which ranks a slow weapon's single swing
+    against a fast one's (p5z4.14). `window` re-scores the optimized build by what weapons_for's
+    `window` counts: for "damage" the R1 chain's hits landing within that many seconds, for
+    "bleed"/"poison" the build-up per hit x status_hits. The stats are the ones that maximize one
+    hit; they are not re-optimized for the window. "ar" ignores `window`, as weapons_for does."""
+    best, _ = optimize_build(data, corpus, weapon, inf, sl, objective, grip, flex_weight, spells, only_class,
+                             use_floors, defender=defender)
+    if best is None:
+        return None
+    val, cls, two, st, worn = best
+    w = data.weapons[weapon]
+    names = [w["name"], weapon.replace("_", " ")]
+    score, label = val, "2H" if two else "1H"
+    if window and objective in ("bleed", "poison"):
+        hits, label = status_hits(attacks, names, [two], window)
+        if not hits:
+            return None
+        score = val * hits
+    elif window and objective == "damage":
+        tl = next((t for t in (r1_timeline(attacks, nm, two) for nm in names) if t), None)
+        if not tl:
+            return None
+        dfn, _ = defender_defense(data, corpus, sl, defender)
+        ar = attack_rating(data, weapon, inf, gear_stats(data, st, worn), worn)
+        mvs = [(mv, ty, lo, fl) for t, mv, ty, lo, fl in tl if t <= window]
+        score = sum(hit_damage(ar, dfn, *m) for m in mvs) * data.damage_scale.get(weapon, 1.0)
+        label += f" {len(mvs)} hits"
+    return score, weapon, val, cls, two, st, worn, label
+
+
+def best_weapons(data: Data, corpus: list[Build], inf: str, sl: int, objective: str = "damage",
+                 grip: str = "two", flex_weight: float | None = None, spells=(), only_class: str | None = None,
+                 use_floors: bool = True, defender=None, weapon_class: str | None = None, window: float = 0.0,
+                 jobs: int = 1) -> list[tuple]:
+    """The reverse of best_infusion: every weapon that takes infusion `inf`, each at the build
+    optimize_build makes for it at `sl` (its own stats, class and rings), best first by
+    best_weapon_row's score. A weapon no class wields at `sl` is left out. `jobs` > 1 forks that
+    many workers: one optimize_build is seconds, and there are a few hundred weapons."""
+    keys = best_weapons_jobs(data, inf, weapon_class)
+    attacks = load_attacks(data) if window else None
+    args = (inf, sl, objective, grip, flex_weight, tuple(spells), only_class, use_floors, defender, window, attacks)
+    if jobs > 1:
+        import multiprocessing
+        global _BW
+        _BW = (data, corpus, args)  # inherited by the forked workers, not pickled per call
+        with multiprocessing.get_context("fork").Pool(jobs) as pool:
+            rows = pool.map(_best_weapon_job, keys)
+    else:
+        rows = [best_weapon_row(data, corpus, key, *args) for key in keys]
+    return sorted((r for r in rows if r), key=lambda r: -r[0])
+
+
+_BW: tuple | None = None
+
+
+def _best_weapon_job(key: str):
+    data, corpus, args = _BW
+    return best_weapon_row(data, corpus, key, *args)
+
+
+def adoption(data: Data, corpus: list[Build]) -> dict:
+    """What real builds pick as their melee weapon per SL bracket: {bracket: [builds, Counter of
+    weapon class, Counter of weapon key]}. The melee weapon is the one threat_opponents scores a
+    build's hits with: the first shield-less, catalyst-less weapon in MELEE_ORDER. Builds with none
+    are left out. What best_weapons is checked against, as er-mods-rs checks its ranking against
+    primary-weapon adoption (docs/er-mechanics/moveset.md there). Published builds, not match logs;
+    the stat requirements are not checked here."""
+    out = {}
+    for b in corpus:
+        w = next((w for w in (b.hands[HAND_SLOTS.index(s)][0] for s in MELEE_ORDER)
+                  if w not in EMPTY and w in data.weapons and not data.weapons[w].get("isShield")
+                  and not CATALYST.search(w)), None)
+        if w is None:
+            continue
+        row = out.setdefault(sl_bracket(soul_level(data, b)), [0, Counter(), Counter()])
+        row[0] += 1
+        row[1][data.weapon_class.get(w) or "?"] += 1
+        row[2][w] += 1
+    return out
+
+
+def spearman(xs: list[float], ys: list[float]) -> float | None:
+    """Spearman's rho of two equal-length lists, ties at their mean rank. None under 3 pairs or
+    when either side is constant."""
+    if len(xs) < 3:
+        return None
+
+    def ranks(v):
+        order = sorted(range(len(v)), key=lambda i: v[i])
+        r = [0.0] * len(v)
+        i = 0
+        while i < len(order):
+            j = i
+            while j + 1 < len(order) and v[order[j + 1]] == v[order[i]]:
+                j += 1
+            for k in range(i, j + 1):
+                r[order[k]] = (i + j) / 2
+            i = j + 1
+        return r
+
+    rx, ry = np.array(ranks(xs)), np.array(ranks(ys))
+    if rx.std() == 0 or ry.std() == 0:
+        return None
+    return float(np.corrcoef(rx, ry)[0, 1])
 
 
 def build_floors(data: Data, corpus: list[Build], sl: int) -> tuple[dict, dict, float]:
@@ -4250,6 +4394,18 @@ def main() -> int:
     g.add_argument("--best-infusion", metavar="WEAPON",
                    help="every infusion WEAPON takes, ranked by --objective at --stats (full upgrade), with the "
                         "best one's margin over the runner-up")
+    g.add_argument("--best-weapons", metavar="INFUSION",
+                   help="every weapon INFUSION goes on, each at the build --optimize makes for it at --sl (or "
+                        "each SL of --sweep), ranked by --objective over the R1 hits landed in --window seconds "
+                        "(default 1.5) at those stats")
+    g.add_argument("--adoption", action="store_true",
+                   help="what real builds carry as their melee weapon (first in rh1..rh3, lh1..lh3), per SL bracket: share by weapon class "
+                        "and the --top weapons")
+    ap.add_argument("--sweep", metavar="SL,SL,...",
+                    help="with --best-weapons: one ranking per soul level, in place of --sl")
+    ap.add_argument("--top", type=int, default=15, help="with --best-weapons: rows per soul level")
+    ap.add_argument("--jobs", type=int, default=0,
+                    help="with --best-weapons: worker processes (default: a quarter of the CPUs)")
     g.add_argument("--infusion-gaps", action="store_true",
                    help="the weapons whose best infusion is furthest ahead of their runner-up at --stats")
     ap.add_argument("--stats", metavar="STATS", help="with --best-infusion / --infusion-gaps: as --weapons-for takes")
@@ -4265,13 +4421,16 @@ def main() -> int:
     ap.add_argument("--one-hand", action="store_true", help="with --weapons-for: only weapons usable one-handed (drop 2H-only)")
     ap.add_argument("--agl", type=int, default=0, help="optional hard AGL floor for --minimum (default none: AGL is a slider output)")
     ap.add_argument("--sl", type=int, help="with --minimum: clamp SL here and show how free stats can spread")
-    ap.add_argument("--json", action="store_true", help="with --minimum: also print the options as JSON")
+    ap.add_argument("--json", action="store_true", help="with --minimum: also print the options as JSON; with --best-weapons: print only JSON")
     ap.add_argument("--lam", type=float, default=50.0, help="EASE L2 penalty")
     ap.add_argument("--site-numbers", action="store_true",
                     help="keep SoulsPlanner's stat defense, weapon attack and status numbers instead of the "
                          "game's (apply_regulation), to compare against the planner")
     ap.add_argument("--tables", type=Path, default=CACHE / "site-tables", help="where site JS/JSON is cached")
     a = ap.parse_args()
+    # Runs only on CPU nothing else wants: SCHED_IDLE, inherited by --best-weapons' workers. Measured
+    # 2026-09-30: 16 workers at the shell's nice -4 took every core from a game in the foreground.
+    os.sched_setscheduler(0, os.SCHED_IDLE, os.sched_param(0))
     if a.selftest:
         return selftest()
 
@@ -4450,6 +4609,62 @@ def main() -> int:
         print(f"  flexibility: {flex_line(flexibility(data, corpus, stats, a.sl))}")
         eff = gear_stats(data, stats, worn)  # the weapons below are read at what the rings give
         a.weapons_for = ",".join(f"{s[:3].upper()}={eff[s]}" for s in STATS)
+    if a.adoption:
+        corpus, _ = load_corpus(data)
+        for i, (n, by_class, by_weapon) in sorted(adoption(data, corpus).items()):
+            lo, hi = SL_BRACKETS[i]
+            print(f"\nSL {lo}-{hi if hi < 10**6 else '+'}: {n} builds with a melee weapon")
+            print("  classes: " + ", ".join(f"{c} {k / n:.1%}" for c, k in by_class.most_common()))
+            print("  weapons: " + ", ".join(f"{data.weapons[w]['name']} {k / n:.1%}"
+                                            for w, k in by_weapon.most_common(a.top)))
+        return 0
+    if a.best_weapons:
+        known ={i for w in data.weapons.values() for i in (w.get("infusions") or {})}
+        inf = {"none": "No_Infusion", "uninfused": "No_Infusion", "standard": "No_Infusion"}.get(
+            a.best_weapons.lower(), a.best_weapons.replace(" ", "_").capitalize())
+        if inf not in known:
+            ap.error(f"unknown infusion {a.best_weapons!r}: one of {', '.join(sorted(known))}")
+        sls = [int(s) for s in a.sweep.split(",")] if a.sweep else [a.sl] if a.sl else []
+        if not sls:
+            ap.error("--best-weapons needs --sl or --sweep")
+        corpus, _ = load_corpus(data)
+        jobs = a.jobs or max(1, (os.cpu_count() or 1) // 4)
+        what = {"damage": "damage", "ar": "AR"}.get(a.objective, f"{a.objective} build-up")
+        # One hit ranks a greataxe's single swing against a dagger's (p5z4.14), and heavy weapons are
+        # rarely what players carry; hits landed in a window charge a slow weapon for its swing time.
+        # --generate's default window.
+        window = a.window or 1.5
+        what = (f"{what} in {window:g}s" if window and a.objective != "ar"
+                else f"{what} per hit" if a.objective != "ar" else what)
+        out = {}
+        adopted = adoption(data, corpus)
+        for sl in sls:
+            t = time.monotonic()
+            rows = best_weapons(data, corpus, inf, sl, a.objective, a.grip, a.flex_weight, spells, a.start_class,
+                                not a.no_floors, defender, a.weapon_class, window, jobs)
+            out[sl] = rows
+            if a.json:
+                continue
+            print(f"\n{inf.replace('_', ' ')} at SL {sl}, grip {a.grip}, by {what}: {len(rows)} weapons "
+                  f"({time.monotonic() - t:.0f}s)")
+            if a.objective == "damage":
+                print("  " + defender_line(data, corpus, sl, defender, *defender_defense(data, corpus, sl, defender)))
+            # Checked against what real builds of this SL bracket carry as their melee weapon, as
+            # er-mods-rs checks its ranking (Spearman rho over every ranked weapon, adopted or not).
+            n, _, by_weapon = adopted.get(sl_bracket(sl), [0, Counter(), Counter()])
+            share = {r[1]: by_weapon[r[1]] / n if n else 0.0 for r in rows}
+            rho = spearman([r[0] for r in rows], [share[r[1]] for r in rows])
+            print(f"  vs {n} real builds of this SL bracket: Spearman rho "
+                  + (f"{rho:+.3f}" if rho is not None else "n/a") + " (score against melee-weapon share)")
+            for score, key, val, cls, two, st, worn, label in rows[:a.top]:
+                print(f"  {score:7.0f}  {share[key]:5.1%}  {data.weapons[key]['name']:30} {label:11} {cls:9} "
+                      + " ".join(f"{LABEL[s]} {st[s]}" for s in ("strength", "dexterity", "intelligence", "faith"))
+                      + (f"  rings {', '.join(data.rings[r]['name'] for r in worn)}" if worn else ""))
+        if a.json:
+            print(json.dumps({sl: [{"score": r[0], "weapon": data.weapons[r[1]]["name"], "key": r[1], "value": r[2],
+                                    "class": r[3], "two_handed": r[4], "stats": r[5], "rings": r[6],
+                                    "label": r[7]} for r in rows[:a.top]] for sl, rows in out.items()}, indent=1))
+        return 0
     if a.best_infusion or a.infusion_gaps:
         if not a.stats:
             ap.error("--best-infusion and --infusion-gaps need --stats")
