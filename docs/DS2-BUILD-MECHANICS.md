@@ -209,8 +209,31 @@ not established; roll % is PhysStats `rollingInvincibleTimeRate`; item-use speed
 | 99 | 120 | 25 | 100 | 1.20 |
 
 Item-use speed stops improving at AGL 100. Roll invincibility keeps rising to 99 but gains little
-per point after idx 30 (AGL 110). How the roll % turns into frames depends on the roll animation
-and was not traced.
+per point after idx 30 (AGL 110). The full per-index table is `scripts/ds2-agility-evidence.py`.
+
+### Roll i-frames (EXE, read 2026-09-30)
+
+The builder stores step, roll and jump rates, times 0.01, at its output's `+0x7c/+0x80/+0x84`
+(`0x14038dfbe`, `0x14038e003`, `0x14038e04b`); its caller `0x14038d644` passes the status object's
+`+0x2c`, so they sit at status `+0xa8/+0xac/+0xb0`. From there:
+
+- `0x14038d280` is `movss xmm0,[rcx+rax*4+0xa8]; ret`: the rate by type (0 step, 1 roll, 2 jump).
+  Its one caller `0x140381d10` multiplies it by a SpEffect term (accumulator id 0x12) and is
+  `PlayerGameParamCalculator` vtable slot 78. Slot 26 (`+0xd0`, `0x140380280`) calls it with type 1,
+  slot 27 (`+0xd8`) with type 0, slot 38 (`+0x130`) with type 2.
+- `PlayerDodgeCtrl` (vtable `0x1410e53e8`): `0x14038e440` stores slot `+0xd0`'s value (roll) at
+  `ChrCharacterFlags+0xa4` (`0x14038e595`), or 1.0 when its flag check 7 is set. `0x14038e5d0`
+  stores slot `+0xd8`'s (step, the backstep) at the same field.
+- `ChrMorphemeTimeActTrackDamageActionCtrl::parseDamageActionTae` `0x140326240`, TAE event 110300:
+  progress = `(t - max(start, 0)) / (end - max(start, 0))`, clamped to 0..1; it holds the
+  character's i-frame counters (the ones 110100 also raises) while progress `< ChrCharacterFlags+0xa4`
+  (`comiss` at `0x14032634f`). Event 110100 is invincible for its whole window, AGL or not.
+
+So a roll's i-frames are `rate x` its 110300 window, from the window's start. In `c000100_pl.tae`
+the 110300 windows are 110011/110031 `0.133-0.500 s`, 110051/110071 `0.333-0.667 s`,
+120020/120021/120030/120031 `0.100-0.567 s` (these four also carry a 110100 window to 0.133 s) and
+140020 `0-0.433 s`. Which of these the roll plays at which equip load was not traced (the
+Morpheme network picks the animation); the rate, not the window, is what AGL moves.
 
 ## 4. Stamina
 
@@ -292,7 +315,13 @@ maxHP = hpMax[VGR] + additionalHp[END] + additionalHp[VIT] + additionalHp[ATT] +
 - How two max-load multipliers combine (product or sum).
 - The exact interpolation rule and the stat it reads (base or modified) for the scaled bonus
   (Ring of the Embedded, Chime of Screams). The rule above matches SoulsPlanner but is not traced.
-- Units of `evasionInvincibleTime`, and roll i-frames in frames.
+- Units of `evasionInvincibleTime` (it tracks about 26 x the roll rate). Roll i-frames in frames
+  need which animation the roll plays (section 3, "Roll i-frames").
+- What roll i-frames are worth against damage. In hits to kill, a roll avoids a randomly timed
+  hit with probability `rate x W / D` (W the 110300 window, D the roll's committed length), and a
+  build survives `1 / (1 - s x W / D x rate)` times as many hits when a share `s` of them is met
+  with a roll. `s` is behaviour, not game data. Fitted to the corpus it does not hold out
+  (branch `optimizer-agl-rate-model`, `scripts/ds2-agility-cases.py`; issue p5z4.31).
 - That the displayed AGL is read from MenuStatsParam by the same index (it matches exactly).
 - Whether a ring's max-HP factor multiplies the whole of section 7's sum. The recommender assumes
   it does.
