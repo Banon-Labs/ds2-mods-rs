@@ -1754,6 +1754,37 @@ def bracket_defense(data: Data, corpus: list[Build], sl: int) -> tuple[dict, int
     return {k: 0.0 for k in DMG + PHYS_TYPES}, 0
 
 
+def bracket_stats(data: Data, corpus: list[Build], sl: int) -> tuple[dict, int]:
+    """Per-stat median levelled stats of the corpus builds bracket_defense averages over (`sl`'s
+    bracket, or the nearest with >= 20 builds), rounded up as bracket_floors rounds its medians, and
+    how many builds. Every stat 0 when no bracket has 20."""
+    i = sl_bracket(sl)
+    by = {}
+    for b in corpus:
+        by.setdefault(sl_bracket(soul_level(data, b)), []).append([b.stats[s] for s in STATS])
+    for j in sorted(range(len(SL_BRACKETS)), key=lambda j: (abs(j - i), j)):
+        if len(by.get(j, [])) >= 20:
+            med = np.median(np.array(by[j]), axis=0)
+            return {s: int(np.ceil(v)) for s, v in zip(STATS, med)}, len(by[j])
+    return {s: 0 for s in STATS}, 0
+
+
+def defender_defense(data: Data, corpus: list[Build], sl: int, defender=None) -> tuple[dict, int]:
+    """The defense the damage objective is scored against at `sl`, and how many corpus builds it
+    was taken from. `defender` None is the bracket's average defender (bracket_defense). Otherwise
+    it is four armour keys, head/chest/hands/legs ("Naked" for a bare slot), worn by a defender
+    whose stats are the bracket's median (bracket_stats) with the pieces' own stat changes and no
+    rings: build_defense, since a piece's physical defense grows with END+VIT+STR+DEX and the
+    elemental base with INT/FTH, so a set has no defense of its own without some stats under it.
+    The median is the stand-in for "a typical player at this level" in that set, as the average
+    defender is the stand-in for a typical player's set."""
+    if defender is None:
+        return bracket_defense(data, corpus, sl)
+    st, n = bracket_stats(data, corpus, sl)
+    d = build_defense(data, Build("", st, list(defender), [], 0, [], []))
+    return {k: float(d[k]) for k in DMG + PHYS_TYPES}, n
+
+
 def damage(kind: str, ar: float, df: float) -> float:
     """Damage one type deals to a player defender, motion value and hand 1 (COMMUNITY formula,
     darksouls2.wiki.gg/wiki/Defense; the 10 and 12 match DamageAdjustParam row 0
@@ -1954,7 +1985,7 @@ def status_hits(attacks: dict, names: list[str], grips: list[bool], window: floa
 def weapons_for(data: Data, stats: dict, sl: int, corpus: list[Build], top: int = 25, within: float = 0.10,
                 raw_ar: bool = False, one_hand: bool = False, weapon_class: str | None = None, per_class: bool = False,
                 window: float = 0.0, objective: str = "damage", weapon: str | None = None,
-                every_infusion: bool = False, use_floors: bool = True):
+                every_infusion: bool = False, use_floors: bool = True, defender=None):
     """Weapons (per infusion) ranked by expected damage against the average defender at this SL,
     or with `objective` "bleed"/"poison" by status build-up: build-up per hit (objective_value, in
     gauge points before the victim's resistance; regulation_status) times the hits of the weapon's
@@ -1971,11 +2002,12 @@ def weapons_for(data: Data, stats: dict, sl: int, corpus: list[Build], top: int 
     (--no-floors) drops that END gate as well: it is a floor, not a game rule.
     `objective` "ar" is `raw_ar` by another name, so the Goal the panel shares between its tabs
     ranks the Weapons tab as it optimizes. It drops `window`: attack rating is one hit's, and the
-    window counts hits of damage, so a window ranked "by AR" would be damage under the wrong name."""
+    window counts hits of damage, so a window ranked "by AR" would be damage under the wrong name.
+    `defender` is defender_defense's: None for the bracket's average defender, else four armour keys."""
     if objective == "ar":
         raw_ar, window = True, 0.0
     every_infusion = every_infusion or weapon is not None
-    dfn, n = bracket_defense(data, corpus, sl)
+    dfn, n = defender_defense(data, corpus, sl, defender)
     floors, r1, cut = build_floors(data, corpus, sl)
     attacks = load_attacks(data)
     rates = json.loads(HYPERARMOR.read_text()) if HYPERARMOR.exists() else {}
@@ -2064,23 +2096,24 @@ def infusion_margin(values: list[float]) -> float | None:
 
 
 def best_infusion(data: Data, weapon: str, stats: dict, sl: int, corpus: list[Build], raw_ar: bool = False,
-                  window: float = 0.0, objective: str = "damage"):
+                  window: float = 0.0, objective: str = "damage", defender=None):
     """Every infusion `weapon` takes, best first, by weapons_for's own score at these stats and SL
     (the rows it ranks, uncut). Empty when the stats cannot wield it even two-handed, or for
     bleed/poison when no infusion deals it or the weapon has no attack timing. Full upgrade only:
     attack_rating reads the planner's max-level rows, so the upgrade level is not modelled."""
-    return weapons_for(data, stats, sl, corpus, raw_ar=raw_ar, window=window, objective=objective, weapon=weapon)
+    return weapons_for(data, stats, sl, corpus, raw_ar=raw_ar, window=window, objective=objective, weapon=weapon,
+                       defender=defender)
 
 
 def infusion_gaps(data: Data, stats: dict, sl: int, corpus: list[Build], raw_ar: bool = False,
                   window: float = 0.0, objective: str = "damage", one_hand: bool = False,
-                  weapon_class: str | None = None, top: int = 25):
+                  weapon_class: str | None = None, top: int = 25, defender=None):
     """The reverse of best_infusion: across the weapon table, the weapons whose best infusion is
     furthest ahead of their runner-up at these stats. Rows: (margin, weapon name, best row,
     runner-up row, infusions scored), a row being weapons_for's (score, name, infusion, ar, grip)."""
     rows, dfn, n = weapons_for(data, stats, sl, corpus, raw_ar=raw_ar, one_hand=one_hand,
                                weapon_class=weapon_class, window=window, objective=objective,
-                               every_infusion=True)
+                               every_infusion=True, defender=defender)
     by = {}
     for r in rows:  # best first overall, so each weapon's own rows are best first too
         by.setdefault(r[1], []).append(r)
@@ -2165,7 +2198,7 @@ GRIP_TRIES = {"two": (True,), "one": (False,)}
 
 def optimize_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, objective: str,
                    grip: str = "two", flex_weight: float | None = None, spells=(),
-                   only_class: str | None = None, use_floors: bool = True, rings=None):
+                   only_class: str | None = None, use_floors: bool = True, rings=None, defender=None):
     """A valid build at `sl` that maximizes `objective` for weapon+infusion: floors first (bracket
     medians, END only for a high-stamina weapon), then requirements (STR halved for grip "two",
     in full for "one"; see GRIP_TRIES), then what `spells` need (spell_floors: their INT/FTH, and
@@ -2188,7 +2221,8 @@ def optimize_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
     stat ring's +5 for a requirement -- and the slots they leave hold offensive rings
     (offense_rings), which a stand-in ring has to beat. `rings` None chooses them (choose_rings); a
     list wears exactly those. The best is (value, class, two-handed, levelled stats, worn rings);
-    the objective is scored at the stats the worn rings give, with their attack adds."""
+    the objective is scored at the stats the worn rings give, with their attack adds. `defender` is
+    what the damage objective is scored against (defender_defense; None: the bracket's average)."""
     if flex_weight is None:
         flex_weight = FLEX_WEIGHT
     floors, r1, cut = build_floors(data, corpus, sl)
@@ -2201,7 +2235,7 @@ def optimize_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
     two = GRIP_TRIES[grip][0]
     req = _grip_req(data, weapon, two)
     run = lambda rs: _optimize_with(data, corpus, weapon, inf, sl, objective, two, flex_weight, spells,
-                                    classes, need_floors, req, rs)
+                                    classes, need_floors, req, rs, defender)
     if rings is not None:
         return run(list(rings)), floors
     return choose_rings(data, classes, need_floors, req, spells, run,
@@ -2371,12 +2405,12 @@ def least_sl_with_rings(data: Data, classes: list[str], floors: dict, req: dict,
 
 def _optimize_with(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, objective: str,
                    two: bool, flex_weight: float, spells, classes: list[str], floors: dict, req: dict,
-                   rings: list[str]):
+                   rings: list[str], defender=None):
     """optimize_build's search at one set of worn `rings`: per class the base lifted by ring_lift,
     then the free points spent. The best (value, class, two, stats, rings), or None."""
     flex = (lambda s_: sum(flex_counts(data, s_))) if flex_weight else None
-    dfn, _ = bracket_defense(data, corpus, sl)
-    E = (lambda s_: gear_stats(data, s_, rings)) if rings else (lambda s_: s_)
+    dfn, _ = defender_defense(data, corpus, sl, defender)
+    E =(lambda s_: gear_stats(data, s_, rings)) if rings else (lambda s_: s_)
     best = None
     for cls in classes:
         base = data.classes[cls]
@@ -3094,7 +3128,7 @@ def generate_armor(data: Data, corpus: list[Build], weapon: str, inf: str, two: 
 def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, objective: str = "damage",
                    window: float = 1.5, k: int = 50, allow_naked: bool = False,
                    grip: str = "two", flex_weight: float | None = None, spells=(),
-                   only_class: str | None = None, use_floors: bool = True) -> dict | None:
+                   only_class: str | None = None, use_floors: bool = True, defender=None) -> dict | None:
     """A whole valid build for weapon+infusion at `sl`: optimize_build's class and stats with the
     weapon as primary, able to attune and cast every one of `spells` (their names come back with
     the slots they cost and the slots the build's ATT gives, and the catalyst best_catalysts picks
@@ -3110,9 +3144,11 @@ def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
     The rings optimize_build wears in place of stat points come first, each in the place of one of
     the four (suggest_rings fills the rest), and `ring_trades` says what each stood in for
     (ring_trades). The weapons, the catalysts and the armour's requirements are read at the stats
-    those rings give; `slots` counts their attunement slots."""
+    those rings give; `slots` counts their attunement slots. `defender` (defender_defense) is what
+    the objective and the other weapons' damage are scored against; the armour is still chosen
+    against the corpus threat mix, which is what this build's own wearer is hit by."""
     best, floors = optimize_build(data, corpus, weapon, inf, sl, objective, grip, flex_weight, spells,
-                                  only_class, use_floors)
+                                  only_class, use_floors, defender=defender)
     if best is None:
         return None
     val, cls, two, stats, worn = best
@@ -3120,7 +3156,7 @@ def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
     assert all(spell_ok(data, s, eff) for s in spells)
     slots = (sum(data.spells[s]["slots"] for s in spells), slots_of(data, eff, worn))
     assert slots[0] <= slots[1]
-    rows, _, _ = weapons_for(data, eff, sl, corpus, top=10_000, window=window)
+    rows, _, _ = weapons_for(data, eff, sl, corpus, top=10_000, window=window, defender=defender)
     one, only2, seen = [], [], {data.weapons[weapon]["name"]}
     for dmg, name, winf, ar, label in rows:
         if name in seen:
@@ -3349,9 +3385,9 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 # the shortest text that parses back to the same double, so the Rust side computes on the same bits.
 #
 #   C key name level vig end vit att str dex adp int fth      a starting class, in the table's order
-#   T table v0 v1 ...                                         an attack-bonus, equip-load,
-#                                                             attunement-slots, max-stamina or
-#                                                             cast-bonus table
+#   T table v0 v1 ...                                         an attack-bonus, defense-bonus,
+#                                                             equip-load, attunement-slots,
+#                                                             max-stamina or cast-bonus table
 #   W key name class flags weight require ha1h ha2h counter   a weapon; flags: S shield, C catalyst,
 #     damagescale                                             H high-stamina R1; require: stat:value,..;
 #                                                             damagescale: WeaponParam.damageScale
@@ -3361,7 +3397,10 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 #                                                             flat: the hit's damage row's flat
 #                                                             attack in DMG order, comma-separated,
 #                                                             only when a value is nonzero
-#   B bracket floors(5) defense(8)                            one SL bracket
+#   B bracket floors(5) defense(8) stats(9)                   one SL bracket: its average
+#                                                             defender and median stats
+#                                                             (bracket_stats), which a --defender
+#                                                             set is worn at
 #   R key name weight group                                   a ring; group: its upgrade line
 #   N key                                                     a ring in NO_USE_RINGS
 #   O ring add(5)                                             data.ring_attack, in its order: a
@@ -3371,7 +3410,11 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 #                                                             optimize_build counts; scaled is
 #                                                             stat:low:high:bonusLow:bonusHigh,..
 #   A slot key name weight alter(9) require                   armour --minimum may wear
-#   P slot key name weight def(5) require                     every armour piece, for best_armor
+#   P slot key name weight def(5) require typed(3) bonus      every armour piece, for best_armor
+#     alter(9)                                                and build_defense: typed is its
+#                                                             slash/strike/thrust defense, bonus
+#                                                             its physicalDEFBonus, alter its
+#                                                             stat changes
 #   H physical magic fire lightning dark                      the corpus threat mix (threat_mix)
 #   K n top1 top2                                             calibrate_infusions
 #   M ring count                                              a ring worn by >= COMMON_RING of builds
@@ -3386,7 +3429,7 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 
 BACKEND_DATA_NAME = "ds2-build-recommender.dat"
 BACKEND_DATA = Path.home() / ".cache/ds2-builds" / BACKEND_DATA_NAME
-BACKEND_FORMAT = "ds2-build-recommender-data 11"
+BACKEND_FORMAT = "ds2-build-recommender-data 12"
 #: How far the exported R1/R2 chains run, in seconds: the panel clamps its window to 10.0
 #: (crates/ds2-build-recommender-ui/src/panel.rs), and status_hits runs to max(3, window).
 STATUS_HORIZON = 10.0
@@ -3399,7 +3442,9 @@ HIT_CODE = {"slash": "s", "strike": "k", "thrust": "t"}
 ATK_KEYS = ["physical", "magic", "fire", "lightning", "dark", "bleed", "poison"]
 SCALE_KEYS = ["strength", "dexterity", "magic", "fire", "lightning", "dark", "bleed", "poison", "modifier"]
 BACKEND_TABLES = ["physicalATKBonus", "magicATKBonus", "fireATKBonus", "lightningATKBonus", "darkATKBonus",
-                  "auxATKBonus", "mundaneATKBonus"]
+                  "auxATKBonus", "mundaneATKBonus",
+                  # build_defense's, for a --defender set worn at a bracket's median stats
+                  "physicalDEFBonus", "magicDEFBonus", "fireDEFBonus", "lightningDEFBonus", "darkDEFBonus"]
 
 
 def _num(v) -> str:
@@ -3480,9 +3525,10 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
     floors = bracket_floors(data, corpus, r1)
     for i, (lo, _) in enumerate(SL_BRACKETS):
         dfn, _ = bracket_defense(data, corpus, lo)
+        st, _ = bracket_stats(data, corpus, lo)
         f = floors[i]
         out.append("\t".join(["B", str(i), *(_num(f.get(s, 0)) for s in FLOOR_STATS + ["endurance"]),
-                              *(_num(float(dfn[k])) for k in DMG + PHYS_TYPES)]))
+                              *(_num(float(dfn[k])) for k in DMG + PHYS_TYPES), *(_num(st[s]) for s in STATS)]))
     ring_ix = {k: i for i, k in enumerate(data.rings)}
     for key, r in data.rings.items():
         out.append("\t".join(["R", key, r.get("name", key), _num(r.get("weight", 0)), r.get("group", key)]))
@@ -3491,9 +3537,14 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
         out.append("\t".join(["O", key, *(_num(add.get(k, 0)) for k in DMG)]))
     for slot in ARMOR_SLOTS:
         for key, v in data.armor[slot].items():
+            # typed and bonus as build_defense reads them (a missing typed defense is the general
+            # physical one), alter as effective adds it (numbers only)
+            alt = {s: x for s, x in (v.get("alter") or {}).items() if isinstance(x, (int, float))}
             out.append("\t".join(["P", slot, key, v.get("name", key), _num(v.get("weight", 0)),
                                   *(_num(v.get(k + "DEF", 0)) for k in DMG),
-                                  _stat_pairs(v.get("require") or {}) or "-"]))
+                                  _stat_pairs(v.get("require") or {}) or "-",
+                                  *(_num(v.get(t + "DEF", v.get("physicalDEF", 0))) for t in PHYS_TYPES),
+                                  _num(v.get("physicalDEFBonus", 0)), *(_num(alt.get(s, 0)) for s in STATS)]))
     mix = threat_mix(data, corpus)
     out.append("\t".join(["H", *(_num(float(mix[k])) for k in DMG)]))
     for key, (weight, add, mul) in sorted(ring_effects(data).items()):
@@ -3658,6 +3709,27 @@ EXPECT_BEST_INFUSION = [  # weapon key, stats, sl, window, raw_ar, objective: --
     # the AR goal: Raw's phys 471 below the split infusions' 287 + 287, tied four ways at 574
     ("Black_Dragon_Greataxe", [20, 20, 15, 10, 35, 15, 15, 9, 14], 100, 0.0, False, "ar"),
 ]
+#: --defender sets, head/chest/hands/legs keys: a heavy one with the best elemental defense of the
+#: heavy sets, a bare one, and one whose head and hands change stats the defense reads (Warlock Mask
+#: INT +2 raises the magic/fire/dark base; Agdayne's Cuffs FTH +1 the fire/lightning/dark base).
+HAVEL = ["Havels_Helm", "Havels_Armor", "Havels_Gauntlets", "Havels_Leggings"]
+EXPECT_DEFENDERS = [HAVEL, ["Naked"] * 4, ["Warlock_Mask", "Black_Witch_Robe", "Agdaynes_Cuffs", "Naked"]]
+EXPECT_DEFENSE_SLS = [1, 33, 100, 150, 838]  # defender_defense at each, average and every EXPECT_DEFENDERS set
+EXPECT_DEFENDER_WEAPONS_FOR = [  # defender, then an EXPECT_WEAPONS_FOR case
+    (HAVEL, ([20, 20, 15, 10, 40, 15, 15, 9, 9], 100, False, None, False, 0.0, False, "damage")),
+    (HAVEL, ([20, 20, 15, 10, 40, 15, 15, 9, 9], 100, False, None, False, 1.5, False, "damage")),
+    (EXPECT_DEFENDERS[2], ([25, 20, 15, 12, 12, 40, 15, 9, 20], 150, False, None, True, 0.0, False, "damage")),
+]
+EXPECT_DEFENDER_BUILDS = [  # defender, then an EXPECT_BUILDS case: --optimize and --generate --defender
+    (HAVEL, ("Black_Dragon_Greataxe", "Lightning", 150, "damage")),
+    (HAVEL, ("Demons_Great_Hammer", "Raw", 100, "damage")),
+    (["Naked"] * 4, ("Uchigatana", "Dark", 150, "damage")),
+]
+EXPECT_DEFENDER_BEST_INFUSION = [  # defender, then an EXPECT_BEST_INFUSION case
+    (HAVEL, ("Black_Dragon_Greataxe", [30, 20, 25, 10, 40, 15, 20, 15, 30], 150, 0.0, False, "damage")),
+    (EXPECT_DEFENDERS[2], ("Black_Dragon_Greataxe", [30, 20, 25, 10, 40, 15, 20, 15, 30], 150, 0.0, False,
+                           "damage")),
+]
 
 
 class _Some:
@@ -3699,10 +3771,10 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
     out = ["// @generated by `scripts/ds2-builds-recommend.py --export-backend ... --expect ...`: the",
            "// script's own answers for the questions in its EXPECT_* lists, over the fixture corpus.", ""]
 
-    rows_out = []
-    for st, sl, one, cls, per, window, raw, objective in EXPECT_WEAPONS_FOR:
+    def for_case(case, defender=None):
+        st, sl, one, cls, per, window, raw, objective = case
         rows, _, _ = weapons_for(data, as_dict(st), sl, corpus, raw_ar=raw, one_hand=one, weapon_class=cls,
-                                 per_class=per, window=window, objective=objective)
+                                 per_class=per, window=window, objective=objective, defender=defender)
         got = []
         for dmg, name, inf, ar, label in rows:
             key = data.key_by_name[name]
@@ -3713,10 +3785,31 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
             ctr = (crit.get(norm(name)) or {}).get("counter") or 0
             got.append((name, INFUSION_CODE[inf], float(dmg), [float(ar.get(k, 0)) for k in DMG], base,
                         float(ha), float(ctr), wclass))
-        rows_out.append((st, sl, one, cls or "", per, window, raw, objective, got))
+        return (st, sl, one, cls or "", per, window, raw, objective, got)
+
+    rows_out = [for_case(case) for case in EXPECT_WEAPONS_FOR]
     out.append("// stats, sl, one_hand, class, per_class, window, raw_ar, objective, rows: weapon, infusion,")
     out.append("// damage (build-up x hits for bleed/poison), ar by type, grip, hyperarmor, counter, class.")
     out.append(f"pub const WEAPONS_FOR: WeaponsForCases = {_rs(rows_out)};\n")
+    defense = []
+    for sl in EXPECT_DEFENSE_SLS:
+        for defender in [None] + EXPECT_DEFENDERS:
+            dfn, n = defender_defense(data, corpus, sl, defender)
+            defense.append((sl, defender or [], [float(dfn[k]) for k in DMG + PHYS_TYPES], n))
+    out.append("// sl, defender armour keys head to legs ([] for the average defender) -> physical, magic, fire,")
+    out.append("// lightning, dark, slash, strike, thrust defense, and how many builds it was taken from.")
+    out.append(f"pub const DEFENSE: DefenseCases = {_rs(defense)};\n")
+    out.append("// A defender's armour keys, then a WEAPONS_FOR case scored against it (--defender).")
+    out.append(f"pub const DEFENDER_WEAPONS_FOR: DefenderWeaponsForCases = "
+               f"{_rs([(d, for_case(case, d)) for d, case in EXPECT_DEFENDER_WEAPONS_FOR])};\n")
+    d_opt, d_gen = [], []
+    for d, case in EXPECT_DEFENDER_BUILDS:
+        opt_d, gen_d = expect_builds(data, corpus, threat_mix(data, corpus), [case], [], "two", defender=d)
+        d_opt.append((d, opt_d[0]))
+        d_gen.append((d, gen_d[0]))
+    out.append("// A defender's armour keys, then an OPTIMIZE and a GENERATE case scored against it.")
+    out.append(f"pub const DEFENDER_OPTIMIZE: DefenderOptimizeCases = {_rs(d_opt)};\n")
+    out.append(f"pub const DEFENDER_GENERATE: DefenderGenerateCases = {_rs(d_gen)};\n")
 
     mix = threat_mix(data, corpus)
     flexes: list = []  # the generated builds, as flexibility() questions: filled by expect_builds
@@ -3781,19 +3874,21 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
 
 
 def expect_builds(data: Data, corpus: list[Build], mix, cases: list, naked_cases: list, grip: str,
-                  flexes: list | None = None, only_class: str | None = None):
+                  flexes: list | None = None, only_class: str | None = None, defender=None):
     """The script's --optimize and --generate answers for `cases` (plus `naked_cases` generated with
-    --allow-naked) at `grip`, and for `only_class` alone when given, as fixture tuples."""
+    --allow-naked) at `grip`, and for `only_class` alone when given, against `defender`
+    (defender_defense), as fixture tuples."""
     arr = lambda d: [int(d[s]) for s in STATS]
     opt, gen = [], []
     for weapon, inf, sl, objective in cases:
-        best, _ = optimize_build(data, corpus, weapon, inf, sl, objective, grip, only_class=only_class)
+        best, _ = optimize_build(data, corpus, weapon, inf, sl, objective, grip, only_class=only_class,
+                                 defender=defender)
         opt.append((weapon, INFUSION_CODE[inf], sl, objective,
                     None if best is None else _Some((data.classes[best[1]]["name"], best[2], arr(best[3]),
                                                      float(best[0])))))
     for weapon, inf, sl, objective, naked in [(*case, False) for case in cases] + naked_cases:
         g = generate_build(data, corpus, weapon, inf, sl, objective, allow_naked=naked, grip=grip,
-                           only_class=only_class)
+                           only_class=only_class, defender=defender)
         if g is None:
             gen.append((weapon, INFUSION_CODE[inf], sl, objective, naked, None))
             continue
@@ -3845,16 +3940,21 @@ def backend_expectations_rest(data: Data, corpus: list[Build], out: list[str], m
     out.append("// sl -> VIG, VIT, ADP, ATT floors.")
     out.append(f"pub const FLOORS: FloorCases = {_rs(fl)};\n")
 
-    best = []
-    for weapon, st, sl, window, raw, objective in EXPECT_BEST_INFUSION:
+    def infusion_case(case, defender=None):
+        weapon, st, sl, window, raw, objective = case
         rows, _, _ = best_infusion(data, weapon, as_dict(st), sl, corpus, raw_ar=raw, window=window,
-                                   objective=objective)
-        best.append((weapon, st, sl, window, raw, objective,
-                     [(INFUSION_CODE[inf], float(v), [float(ar.get(k, 0)) for k in DMG],
-                       re.sub(r" (HA|ctr) x\S+", "", grip).strip()) for v, _, inf, ar, grip in rows]))
+                                   objective=objective, defender=defender)
+        return (weapon, st, sl, window, raw, objective,
+                [(INFUSION_CODE[inf], float(v), [float(ar.get(k, 0)) for k in DMG],
+                  re.sub(r" (HA|ctr) x\S+", "", grip).strip()) for v, _, inf, ar, grip in rows])
+
+    best = [infusion_case(case) for case in EXPECT_BEST_INFUSION]
     out.append("// weapon, stats, sl, window, raw_ar, objective -> rows best first: infusion, score, AR by type,")
     out.append("// grip.")
     out.append(f"pub const BEST_INFUSION: BestInfusionCases = {_rs(best)};\n")
+    out.append("// A defender's armour keys, then a BEST_INFUSION case scored against it.")
+    out.append(f"pub const DEFENDER_BEST_INFUSION: DefenderBestInfusionCases = "
+               f"{_rs([(d, infusion_case(case, d)) for d, case in EXPECT_DEFENDER_BEST_INFUSION])};\n")
     c = calibrate_infusions(data, corpus)
     out.append(f"pub const CALIBRATION: (u32, f64, f64) = {_rs((c['n'], float(c['top1']), float(c['top2'])))};")
 
@@ -4039,6 +4139,35 @@ def selftest() -> int:
     return 1 if bad else 0
 
 
+def parse_armor(data: Data, text: str, flag: str, ap) -> list[str]:
+    """`HEAD/CHEST/HANDS/LEGS`, names or keys, to four armour keys; a missing or empty slot is
+    Naked. An unknown piece is an error, not a bare slot."""
+    out = []
+    names = text.split("/")
+    if len(names) > len(ARMOR_SLOTS):
+        ap.error(f"{flag}: at most {len(ARMOR_SLOTS)} pieces, head/chest/hands/legs")
+    for slot, name in zip(ARMOR_SLOTS, names + [""] * (len(ARMOR_SLOTS) - len(names))):
+        name = name.strip()
+        key = name if name in data.armor[slot] else next(
+            (k for k, v in data.armor[slot].items() if v.get("name", k) == name), "Naked")
+        if name not in ("", "Naked") and key == "Naked":
+            ap.error(f"{flag}: unknown {slot} armour {name!r}")
+        out.append(key)
+    return out
+
+
+def defender_line(data: Data, corpus: list[Build], sl: int, defender, dfn: dict, n: int) -> str:
+    """What the damage column is scored against, as --weapons-for, --optimize and --best-infusion
+    print it: the average defender, or the --defender set at the bracket's median stats."""
+    nums = " ".join(f"{k} {dfn[k]:.0f}" for k in DMG + PHYS_TYPES)
+    if defender is None:
+        return f"average defender at this SL ({n} builds): {nums}"
+    st, _ = bracket_stats(data, corpus, sl)
+    names = " / ".join(data.armor[s][p].get("name", p) for s, p in zip(ARMOR_SLOTS, defender))
+    return (f"defender {names} at the bracket's median stats ({n} builds: "
+            + " ".join(f"{LABEL[s]} {st[s]}" for s in STATS) + f"): {nums}")
+
+
 def parse_stats(text: str) -> dict:
     """ "VGR=10,END=16,..." -> every stat in STATS order, 0 where not given."""
     abbr = {s[:3].upper(): s for s in STATS} | {"VGR": "vigor", "ADP": "adaptability", "FTH": "faith",
@@ -4110,6 +4239,11 @@ def main() -> int:
                         "print the objective and the flexibility it gives: how FLEX_WEIGHT was chosen")
     ap.add_argument("--armor", metavar="HEAD/CHEST/HANDS/LEGS",
                     help="with --flexibility: the armour worn, names or keys, '/'-separated (Naked for none)")
+    ap.add_argument("--defender", metavar="HEAD/CHEST/HANDS/LEGS",
+                    help="with --weapons-for/--optimize/--generate/--best-infusion/--infusion-gaps: score damage "
+                         "against this set, names or keys, '/'-separated (Naked for none), worn at the SL "
+                         "bracket's median stats, instead of the bracket's average defender. Not --armor, which "
+                         "is the armour the build itself wears for --flexibility's load")
     ap.add_argument("--flex-weight", type=float, default=None, metavar="W",
                     help=f"with --optimize/--generate: the soft flexibility term per weapon unlocked per point "
                          f"(default {FLEX_WEIGHT}; 0 is the optimizer without it)")
@@ -4155,6 +4289,7 @@ def main() -> int:
             if key not in data.spells or key not in data.spell_req:
                 ap.error(f"unknown spell {name!r}")
             spells.append(key)
+    defender = parse_armor(data, a.defender, "--defender", ap) if a.defender else None
     if a.export_backend:
         corpus, _ = load_corpus(data)
         corpus = corpus[::max(1, a.corpus_every)]
@@ -4201,7 +4336,7 @@ def main() -> int:
         corpus, _ = load_corpus(data)
         g = generate_build(data, corpus, weapon, inf.replace(" ", "_") or "No_Infusion", a.sl, a.objective,
                            a.window or 1.5, a.k, a.allow_naked, a.grip, a.flex_weight, spells, a.start_class,
-                           not a.no_floors)
+                           not a.no_floors, defender)
         if g is None:
             print(f"no valid SL {a.sl} {a.start_class or ''} build wields {data.weapons[weapon]['name']} "
                   f"(grip {a.grip})"
@@ -4214,6 +4349,8 @@ def main() -> int:
             return 0
         print(f"{g['class']} SL {g['sl']} {'two-handed' if g['two_handed'] else 'one-handed'}, "
               f"{g['objective']} {g['value']}\n  " + " ".join(f"{s[:3].upper()} {v}" for s, v in g["stats"].items()))
+        if defender is not None:
+            print("  " + defender_line(data, corpus, a.sl, defender, *defender_defense(data, corpus, a.sl, defender)))
         print(f"  primary: {g['primary'][0]} ({g['primary'][1].replace('_', ' ')})")
         for title, key in (("one-handed", "weapons_1h"), ("two-hand only", "weapons_2h_only")):
             print(f"  {title}:")
@@ -4268,14 +4405,7 @@ def main() -> int:
     if a.flexibility:
         stats = parse_stats(a.flexibility)
         sl = a.sl or sum(stats.values()) - 53
-        armor = []
-        for slot, name in zip(ARMOR_SLOTS, (a.armor or "").split("/") if a.armor else []):
-            name = name.strip()
-            key = name if name in data.armor[slot] else next(
-                (k for k, v in data.armor[slot].items() if v.get("name", k) == name), "Naked")
-            if name not in ("", "Naked") and key == "Naked":
-                ap.error(f"unknown {slot} armour {name!r}")
-            armor.append(key)
+        armor = parse_armor(data, a.armor, "--armor", ap) if a.armor else []
         corpus, _ = load_corpus(data)
         f = flexibility(data, corpus, stats, sl, armor, [], a.k)
         if a.json:
@@ -4297,7 +4427,7 @@ def main() -> int:
         inf = inf.replace(" ", "_") or "No_Infusion"
         corpus, _ = load_corpus(data)
         best, floors = optimize_build(data, corpus, weapon, inf, a.sl, a.objective, a.grip, a.flex_weight, spells,
-                                      a.start_class, not a.no_floors)
+                                      a.start_class, not a.no_floors, defender=defender)
         if best is None:
             print(f"no valid SL {a.sl} {a.start_class or ''} build wields {data.weapons[weapon]['name']} (grip {a.grip})"
                   + (f" and casts {', '.join(data.spells[s]['name'] for s in spells)}" if spells else "")
@@ -4332,12 +4462,14 @@ def main() -> int:
             what += f" in {a.window:g}s"
         print(f"stats {' '.join(f'{s[:3].upper()} {v}' for s, v in stats.items())}  ->  SL {sl}; by {what}, "
               "full upgrade")
+        if what.startswith("damage"):
+            print(defender_line(data, corpus, sl, defender, *defender_defense(data, corpus, sl, defender)))
         if a.best_infusion:
             weapon = data.sp_key.get(norm(a.best_infusion))
             if weapon not in data.weapons:
                 ap.error(f"unknown weapon {a.best_infusion!r}")
             rows, _, _ = best_infusion(data, weapon, stats, sl, corpus, raw_ar=a.raw_ar, window=a.window,
-                                       objective=a.objective)
+                                       objective=a.objective, defender=defender)
             if not rows:
                 print(f"{data.weapons[weapon]['name']}: nothing to rank (these stats cannot wield it, or no "
                       f"infusion deals {a.objective})")
@@ -4350,7 +4482,8 @@ def main() -> int:
                       f"{' '.join(f'{k[:4]} {x}' for k, x in ar.items()):34} {grip}")
             return 0
         gaps, _, _ = infusion_gaps(data, stats, sl, corpus, raw_ar=a.raw_ar, window=a.window,
-                                   objective=a.objective, one_hand=a.one_hand, weapon_class=a.weapon_class)
+                                   objective=a.objective, one_hand=a.one_hand, weapon_class=a.weapon_class,
+                                   defender=defender)
         print(f"\n  {'weapon':32} {'best':12} {'runner-up':12} {'margin':>7}   of")
         for m, name, best, second, count in gaps:
             print(f"  {name:32} {best[2].replace('_', ' '):12} {second[2].replace('_', ' '):12} {m:+7.1%}   "
@@ -4377,10 +4510,9 @@ def main() -> int:
             for c, name, inf, grip in rows:
                 print(f"  {c:3}/{n}  {name:32} {grip:8} " + ", ".join(f"{i.replace('_', ' ')} {m}" for i, m in inf))
             return 0
-        rows, dfn, n = weapons_for(data, stats, sl, corpus, raw_ar=a.raw_ar, one_hand=a.one_hand, weapon_class=a.weapon_class, per_class=a.per_class, window=a.window, objective=a.objective, use_floors=not a.no_floors)
+        rows, dfn, n = weapons_for(data, stats, sl, corpus, raw_ar=a.raw_ar, one_hand=a.one_hand, weapon_class=a.weapon_class, per_class=a.per_class, window=a.window, objective=a.objective, use_floors=not a.no_floors, defender=defender)
         print(f"stats {' '.join(f'{s[:3].upper()} {v}' for s, v in stats.items())}  ->  SL {sl}")
-        print(f"average defender at this SL ({n} builds): "
-              + " ".join(f"{k} {v:.0f}" for k, v in dfn.items()))
+        print(defender_line(data, corpus, sl, defender, dfn, n))
         if a.objective in ("bleed", "poison"):
             print(f"{a.objective}: gauge points before the defender's resistance; a gauge procs at 100")
         what = {"damage": "dmg"}.get(a.objective, a.objective)

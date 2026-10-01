@@ -1,4 +1,4 @@
-ds2-build-recommender-data 11
+ds2-build-recommender-data 12
 # 5461 builds; written by scripts/ds2-builds-recommend.py --export-backend
 C	warrior	Warrior	12	7	6	6	5	15	11	5	5	5
 C	knight	Knight	13	12	6	7	4	11	8	9	3	6
@@ -15,6 +15,11 @@ T	lightningATKBonus	0	50	51	52	53	53	54	55	56	56	57	59	61	63	66	68	70	73	75	77	8
 T	darkATKBonus	0	50	54	56	59	61	63	65	68	70	72	76	81	85	90	94	99	103	108	112	117	121	126	130	135	139	144	148	153	157	162	162	163	164	165	166	166	167	168	169	170	170	171	172	173	173	174	175	176	176	177	177	178	179	180	181	181	182	183	184	185	185	185	186	186	186	187	187	188	188	188	188	188	189	189	190	190	191	191	192	192	192	192	193	193	194	194	194	195	195	196	196	196	197	197	198	198	199	199	200
 T	auxATKBonus	0	0	0	0	50	50	50	50	51	51	51	51	52	52	52	52	53	53	53	53	53	53	53	53	54	54	54	54	55	55	55	55	56	56	56	56	56	56	56	56	57	57	57	57	61	61	61	61	66	66	66	66	70	70	70	70	75	75	75	75	79	79	79	79	84	84	84	84	88	88	88	88	93	93	93	93	97	97	97	97	102	102	102	102	105	105	105	105	108	108	108	108	111	111	111	111	114	114	114	114	117	117	117	117	120	120	120	120	123	123	123	123	126	126	126	126	129	129	129	129	132	132	132	132	133	133	133	133	135	135	135	135	136	136	136	136	138	138	138	138	139	139	139	139	141	141	141	141	142	142	142	142	144	144	144	144	145	145	145	145	147	147	147	147	147	147	147	147	148	148	148	148	149	149	149	149	150	150	150	150	151	151	151	151	151	151	151	151	152	152	152	152	153	153	153	153	154	154	154	154	155	155	155	155	155	155	155	155	156	156	156	156	157	157	157	157	158	158	158	158	158	158	158	158	159	159	159	159	160	160	160	160	161	161	161	161	161	161	161	161	162	162	162	162	162	162	162	162	163	163	163	163	164	164	164	164	165	165	165	165	166	166	166	166	166	166	166	166	167	167	167	167	168	168	168	168	169	169	169	169	170	170	170	170	171	171	171	171	173	173	173	173	174	174	174	174	176	176	176	176	177	177	177	177	179	179	179	179	180	180	180	180	182	182	182	182	183	183	183	183	185	185	185	185	185	185	185	185	186	186	186	186	187	187	187	187	188	188	188	188	188	188	188	188	189	189	189	189	190	190	190	190	191	191	191	191	191	191	191	191	192	192	192	192	192	192	192	192	193	193	193	193	194	194	194	194	195	195	195	195	196	196	196	196	197	197	197	197	198	198	198	198	199	199	199	199	200
 T	mundaneATKBonus	0	50	62	68	74	80	86	92	98	104	110	116	122	128	134	140	146	152	158	164	170	173	176	179	182	185	188	191	194	197	200	201	202	203	204	205	206	207	208	209	210	211	213	214	216	217	219	220	222	223	225	225	226	226	227	227	228	228	229	229	230	230	231	231	232	232	233	233	234	234	235	235	236	236	237	237	238	238	239	239	240	240	241	241	242	242	243	243	244	244	245	245	246	246	247	247	248	248	249	250
+T	physicalDEFBonus	0	0	0	0	55	55	55	55	60	60	60	60	63	63	63	63	65	65	65	65	68	68	68	68	70	70	70	70	73	73	73	73	75	75	75	75	78	78	78	78	80	80	80	80	81	81	81	81	82	82	82	82	84	84	84	84	85	85	85	85	86	86	86	86	87	87	87	87	88	88	88	88	89	89	89	89	90	90	90	90	91	91	91	91	93	93	93	93	96	96	96	96	98	98	98	98	100	100	100	100	102	102	102	102	104	104	104	104	106	106	106	106	109	109	109	109	111	111	111	111	113	113	113	113	116	116	116	116	119	119	119	119	122	122	122	122	125	125	125	125	128	128	128	128	130	130	130	130	133	133	133	133	136	136	136	136	139	139	139	139	142	142	142	142	144	144	144	144	146	146	146	146	147	147	147	147	149	149	149	149	151	151	151	151	153	153	153	153	155	155	155	155	156	156	156	156	158	158	158	158	160	160	160	160	160	160	160	160	161	161	161	161	161	161	161	161	162	162	162	162	162	162	162	162	162	162	162	162	163	163	163	163	163	163	163	163	163	163	163	163	164	164	164	164	164	164	164	164	165	165	165	165	166	166	166	166	167	167	167	167	167	167	167	167	168	168	168	168	169	169	169	169	170	170	170	170	170	170	170	170	171	171	171	171	172	172	172	172	174	174	174	174	175	175	175	175	177	177	177	177	178	178	178	178	180	180	180	180	181	181	181	181	183	183	183	183	184	184	184	184	186	186	186	186	186	186	186	186	187	187	187	187	188	188	188	188	188	188	188	188	189	189	189	189	190	190	190	190	190	190	190	190	191	191	191	191	192	192	192	192	193	193	193	193	194	194	194	194	194	194	194	194	195	195	195	195	196	196	196	196	197	197	197	197	198	198	198	198	198	198	198	198	199	199	199	199	200
+T	magicDEFBonus	0	0	12	18	24	30	36	42	48	54	60	68	76	84	92	100	108	116	124	132	140	141	142	143	144	145	146	147	148	149	150	151	152	153	154	155	156	157	158	159	160	161	162	163	164	165	166	167	168	169	170	171	172	173	174	175	176	177	178	179	180	180	181	181	182	182	183	183	184	184	185	185	186	186	187	187	188	188	189	189	190	190	191	191	192	192	193	193	194	194	195	195	196	196	197	197	198	198	199	200
+T	fireDEFBonus	0	0	0	0	12	12	18	18	24	24	30	30	36	36	42	42	48	48	54	54	60	60	68	68	76	76	84	84	92	92	100	100	108	108	116	116	124	124	132	132	140	140	141	141	142	142	143	143	144	144	145	145	146	146	147	147	148	148	149	149	150	150	151	151	152	152	153	153	154	154	155	155	156	156	157	157	158	158	159	159	160	160	161	161	162	162	163	163	164	164	165	165	166	166	167	167	168	168	169	169	170	170	171	171	172	172	173	173	174	174	175	175	176	176	177	177	178	178	179	179	180	180	180	180	181	181	181	181	182	182	182	182	183	183	183	183	184	184	184	184	185	185	185	185	186	186	186	186	187	187	187	187	188	188	188	188	189	189	189	189	190	190	190	190	191	191	191	191	192	192	192	192	193	193	193	193	194	194	194	194	195	195	195	195	196	196	196	196	197	197	197	197	198	198	198	198	199	199	200
+T	lightningDEFBonus	0	0	12	18	24	30	36	42	48	54	60	68	76	84	92	100	108	116	124	132	140	141	142	143	144	145	146	147	148	149	150	151	152	153	154	155	156	157	158	159	160	161	162	163	164	165	166	167	168	169	170	171	172	173	174	175	176	177	178	179	180	180	181	181	182	182	183	183	184	184	185	185	186	186	187	187	188	188	189	189	190	190	191	191	192	192	193	193	194	194	195	195	196	196	197	197	198	198	199	200
+T	darkDEFBonus	0	0	12	18	24	30	36	42	48	54	60	68	76	84	92	100	108	116	124	132	140	141	142	143	144	145	146	147	148	149	150	151	152	153	154	155	156	157	158	159	160	161	162	163	164	165	166	167	168	169	170	171	172	173	174	175	176	177	178	179	180	180	181	181	182	182	183	183	184	184	185	185	186	186	187	187	188	188	189	189	190	190	191	191	192	192	193	193	194	194	195	195	196	196	197	197	198	198	199	200
 T	equipmentLoad	0	40	41.5	43	44.5	46	47.5	49	50.5	52	53.5	55	56.5	58	59.5	61	62.5	64	65.5	67	68.5	70	71.5	73	74.5	76	77.5	79	80.5	82	83	84	85	86	87	88	89	90	91	92	93	94	95	96	97	98	99	100	101	102	102.5	103	103.5	104	104.5	105	105.5	106	106.5	107	107.5	108	108.5	109	109.5	110	110.5	111	111.5	112	112.5	112.5	113	113	113.5	113.5	114	114	114.5	114.5	115	115	115.5	115.5	116	116	116.5	116.5	117	117	117.5	117.5	118	118	118.5	118.5	119	119	119.5	120
 T	attunementSlots	0	0	0	0	0	0	0	0	0	0	1	1	1	2	2	2	3	3	3	3	4	4	4	4	4	5	5	5	5	5	6	6	6	6	6	6	6	6	6	6	7	7	7	7	7	7	7	7	7	7	8	8	8	8	8	8	8	8	8	8	9	9	9	9	9	9	9	9	9	9	9	9	9	9	9	10	10	10	10	10	10	10	10	10	10	10	10	10	10	10	10	10	10	10	10	10	10	10	10	10
 T	staminaMax	0	820	840	860	880	900	920	940	960	980	1000	1020	1040	1060	1080	1100	1120	1140	1160	1180	1200	1210	1220	1230	1240	1250	1260	1270	1280	1290	1300	1310	1320	1330	1340	1350	1360	1370	1380	1390	1400	1410	1420	1430	1440	1450	1460	1470	1480	1490	1500	1510	1520	1530	1540	1550	1560	1570	1580	1590	1600	1610	1620	1630	1640	1650	1660	1670	1680	1690	1700	1710	1720	1730	1740	1750	1760	1770	1780	1790	1800	1810	1820	1830	1840	1850	1860	1870	1880	1890	1900	1910	1920	1930	1940	1950	1960	1970	1980	2000
@@ -4883,15 +4888,15 @@ S	1	R1	1	0.0:0.5 0.6333333333333333:1.1333333333333333 1.2666666666666666:1.7666
 S	1	R2	1	0.0:0.5 0.6333333333333333:1.1 1.2666666666666666:1.7666666666666666 1.9:2.3666666666666667 2.533333333333333:3.033333333333333 3.1666666666666665:3.6333333333333333 3.8:4.3 4.433333333333334:4.9 5.066666666666666:5.566666666666666 5.699999999999999:6.166666666666666 6.333333333333332:6.833333333333332 6.966666666666665:7.433333333333332 7.599999999999998:8.099999999999998 8.23333333333333:8.699999999999998 8.866666666666664:9.366666666666664 9.499999999999996:9.966666666666663
 S	2	R1	1	0.0:0.5 0.6333333333333333:1.1333333333333333 1.2666666666666666:1.7666666666666666 1.9:2.4 2.533333333333333:3.033333333333333 3.1666666666666665:3.6666666666666665 3.8:4.3 4.433333333333334:4.933333333333334 5.066666666666666:5.566666666666666 5.699999999999999:6.199999999999999 6.333333333333332:6.833333333333332 6.966666666666665:7.466666666666665 7.599999999999998:8.099999999999998 8.23333333333333:8.73333333333333 8.866666666666664:9.366666666666664 9.499999999999996:9.999999999999996
 S	2	R2	1	0.0:0.5 0.6333333333333333:1.2666666666666666 1.4:1.9 2.033333333333333:2.6666666666666665 2.8:3.3 3.433333333333333:4.066666666666666 4.2:4.7 4.833333333333334:5.466666666666667 5.6000000000000005:6.1000000000000005 6.233333333333334:6.866666666666667 7.000000000000001:7.500000000000001 7.633333333333335:8.266666666666667 8.400000000000002:8.900000000000002 9.033333333333335:9.666666666666668 9.800000000000002:10.300000000000002
-B	0	12	7	9	6	19	438.55818181818177	160.9318181818182	157.63636363636363	160.63636363636363	155.02272727272728	447.0354545454545	437.580909090909	433.2854545454545
-B	1	12	7	9	6	19	438.55818181818177	160.9318181818182	157.63636363636363	160.63636363636363	155.02272727272728	447.0354545454545	437.580909090909	433.2854545454545
-B	2	16	9	11	5	19	534.8387555555556	156.53333333333333	171.35555555555555	155.14444444444445	159.36666666666667	556.5832	522.1054222222222	529.6276444444445
-B	3	22	11	17	6	19	547.8280550458716	175.5091743119266	181.88532110091742	168.82110091743118	171.91284403669724	568.3555779816514	535.2087889908257	542.0069541284404
-B	4	30	16	20	6	20	601.0686666666667	175.36257309941521	193.66374269005848	174.78070175438597	177.28654970760235	624.7850409356726	582.8815321637427	596.2879649122807
-B	5	40	15	24	6	30	596.0268513833992	190.9806324110672	208.79881422924902	188.22332015810278	189.06482213438736	619.2066932806324	578.0968118577075	590.3209225296442
-B	6	41	22	25	13	34	648.7162575227431	205.4849545136459	233.40937718684395	204.47585724282715	204.2925122463261	679.5168173547935	622.4419398180547	644.6413799860042
-B	7	50	30	25	20	36	680.3506735112935	231.47843942505133	262.03490759753595	227.129363449692	227.5687885010267	714.4266488706364	649.9810636550307	675.3732607802873
-B	8	50	46	32	40	50	788.3495611285266	270.423197492163	294.2852664576802	261.3636363636364	271.294670846395	835.7069278996865	747.1771473354232	783.5188401253918
+B	0	12	7	9	6	19	438.55818181818177	160.9318181818182	157.63636363636363	160.63636363636363	155.02272727272728	447.0354545454545	437.580909090909	433.2854545454545	12	7	7	6	13	12	9	5	5
+B	1	12	7	9	6	19	438.55818181818177	160.9318181818182	157.63636363636363	160.63636363636363	155.02272727272728	447.0354545454545	437.580909090909	433.2854545454545	12	7	7	6	13	12	9	5	5
+B	2	16	9	11	5	19	534.8387555555556	156.53333333333333	171.35555555555555	155.14444444444445	159.36666666666667	556.5832	522.1054222222222	529.6276444444445	16	14	9	5	18	18	11	5	6
+B	3	22	11	17	6	19	547.8280550458716	175.5091743119266	181.88532110091742	168.82110091743118	171.91284403669724	568.3555779816514	535.2087889908257	542.0069541284404	22	20	11	6	18	18	17	5	6
+B	4	30	16	20	6	20	601.0686666666667	175.36257309941521	193.66374269005848	174.78070175438597	177.28654970760235	624.7850409356726	582.8815321637427	596.2879649122807	30	21	16	6	24	20	20	5	6
+B	5	40	15	24	6	30	596.0268513833992	190.9806324110672	208.79881422924902	188.22332015810278	189.06482213438736	619.2066932806324	578.0968118577075	590.3209225296442	40	30	15	6	25	26	24	5	8
+B	6	41	22	25	13	34	648.7162575227431	205.4849545136459	233.40937718684395	204.47585724282715	204.2925122463261	679.5168173547935	622.4419398180547	644.6413799860042	41	34	22	13	40	30	25	6	12
+B	7	50	30	25	20	36	680.3506735112935	231.47843942505133	262.03490759753595	227.129363449692	227.5687885010267	714.4266488706364	649.9810636550307	675.3732607802873	50	38	30	20	40	30	25	13	27
+B	8	50	46	32	40	50	788.3495611285266	270.423197492163	294.2852664576802	261.3636363636364	271.294670846395	835.7069278996865	747.1771473354232	783.5188401253918	50	50	46	40	50	47	32	40	50
 R	No_Ring	No ring	0	No_Ring
 R	Abyss_Seal	Abyss Seal	1	Abyss_Seal
 R	Agape_Ring	Agape Ring	0.2	Agape_Ring
@@ -5020,443 +5025,443 @@ O	Ring_of_Blades	20	0	0	0	0
 O	Ring_of_Blades_1	35	0	0	0	0
 O	Ring_of_Blades_2	50	0	0	0	0
 O	Kings_Ring	0	0	5	0	0
-P	head	Naked	Naked	0	0	0	0	0	0	-
-P	head	Alonne_Captain_Helm	Alonne Captain Helm	5.1	106	22	34	15	22	-
-P	head	Alonne_Knight_Helm	Alonne Knight Helm	4.6	95	14	25	10	14	-
-P	head	Alonnes_Helm	Alonne's Helm	4	77	20	22	15	21	-
-P	head	Alva_Helm	Alva Helm	3.7	75	21	23	16	22	-
-P	head	Archdrake_Helm	Archdrake Helm	5.4	98	31	30	51	29	-
-P	head	Bell_Keeper_Helmet	Bell Keeper Helmet	4.8	105	22	36	10	40	-
-P	head	Benharts_Knight_Helm	Benhart's Knight Helm	7	139	32	30	28	32	-
-P	head	Black_Dragon_Helm	Black Dragon Helm	2.2	56	20	44	21	20	-
-P	head	Black_Hollow_Mage_Hood	Black Hollow Mage Hood	1.9	64	54	38	41	45	-
-P	head	Black_Hood	Black Hood	0.9	35	38	25	25	25	7:16
-P	head	Black_Witch_Domino_Mask	Black Witch Domino Mask	0.5	15	24	12	24	24	7:20
-P	head	Black_Witch_Hat	Black Witch Hat	1.5	29	22	11	22	22	7:16
-P	head	Black_Witch_Veil	Black Witch Veil	0.5	15	14	11	13	14	-
-P	head	Bone_Crown	Bone Crown	1.7	48	30	34	27	42	-
-P	head	Brigand_Hood	Brigand Hood	1.2	44	22	17	16	19	-
-P	head	Cales_Helm	Cale's Helm	3	78	22	23	19	22	-
-P	head	Catarina_Helm	Catarina Helm	4.5	86	18	20	12	18	-
-P	head	Chaos_Hood	Chaos Hood	0.9	35	25	38	25	37	7:16,8:16
-P	head	Charred_Loyce_Helm	Charred Loyce Helm	6.5	121	24	33	15	24	-
-P	head	Creightons_Steel_Mask	Creighton's Steel Mask	4.3	80	24	27	14	24	-
-P	head	Crown_of_the_Ivory_King	Crown of the Ivory King	3.5	68	16	13	14	12	-
-P	head	Crown_of_the_Old_Iron_King	Crown of the Old Iron King	4	71	12	12	13	15	-
-P	head	Crown_of_the_Sunken_King	Crown of the Sunken King	4	70	17	15	16	14	-
-P	head	Dark_Mask	Dark Mask	3.8	66	17	17	12	37	-
-P	head	Desert_Sorceress_Hood	Desert Sorceress Hood	0.6	20	19	13	15	17	-
-P	head	Dingy_Hood	Dingy Hood	0.8	29	17	15	16	16	-
-P	head	Dragon_Acolyte_Mask	Dragon Acolyte Mask	1.5	45	19	19	22	23	-
-P	head	Dragon_Sage_Hood	Dragon Sage Hood	2	50	21	21	24	25	-
-P	head	Dragonrider_Helm	Dragonrider Helm	7.5	160	14	13	14	14	-
-P	head	Drakeblood_Helm	Drakeblood Helm	4.7	95	15	24	11	20	-
-P	head	Drakekeeper_Helm	Drakekeeper Helm	6	127	17	19	15	17	-
-P	head	Drangleic_Helm	Drangleic Helm	5.9	119	19	19	17	19	-
-P	head	Durgos_Hat	Durgo's Hat	2.6	33	18	15	13	15	5:16
-P	head	Elite_Knight_Helm	Elite Knight Helm	4.5	80	23	24	16	23	-
-P	head	Executioner_Helm	Executioner Helm	4.4	92	21	22	15	49	-
-P	head	Falconer_Helm	Falconer Helm	4.5	86	26	37	14	26	-
-P	head	Faraam_Helm	Faraam Helm	4.8	95	21	23	14	21	-
-P	head	Fume_Sorcerer_Mask	Fume Sorcerer Mask	2	31	11	15	15	15	-
-P	head	Grave_Warden_Mask	Grave Warden Mask	0.5	13	6	6	7	7	-
-P	head	Gyrm_Helm	Gyrm Helm	8.2	158	25	23	20	25	-
-P	head	Gyrm_Warrior_Greathelm	Gyrm Warrior Greathelm	9.6	169	24	28	28	24	4:14
-P	head	Gyrm_Warrior_Helm	Gyrm Warrior Helm	8.9	158	19	23	23	19	4:14
-P	head	Havels_Helm	Havel's Helm	7.5	153	20	22	18	20	4:20
-P	head	Heide_Knight_Greathelm	Heide Knight Greathelm	6	119	20	26	17	36	-
-P	head	Heide_Knight_Iron_Mask	Heide Knight Iron Mask	5.2	105	22	22	8	34	-
-P	head	Helm_of_Aurous	Helm of Aurous	3.8	69	24	24	17	26	-
-P	head	Helm_of_Aurous_Transparent	Helm of Aurous (Transparent)	1.2	43	17	14	18	15	-
-P	head	Hexers_Hood	Hexer's Hood	0.9	35	25	38	25	25	-
-P	head	Hood_of_the_Forlorn	Hood of the Forlorn	1.1	42	29	28	37	33	-
-P	head	Hollow_Infantry_Helm	Hollow Infantry Helm	4	62	13	11	17	13	-
-P	head	Hollow_Skin	Hollow Skin	1.5	13	4	4	4	4	-
-P	head	Hollow_Soldier_Helm	Hollow Soldier Helm	4.3	69	22	23	15	22	-
-P	head	Hunters_Hat	Hunter's Hat	1.2	33	12	8	16	13	-
-P	head	Imperious_Helm	Imperious Helm	5.8	121	21	17	13	21	-
-P	head	Imported_Hood	Imported Hood	2.2	32	9	8	11	9	-
-P	head	Infantry_Helm	Infantry Helm	4	77	19	18	25	19	-
-P	head	Insolent_Helm	Insolent Helm	4.8	84	21	21	27	20	-
-P	head	Ironclad_Helm	Ironclad Helm	6.3	114	16	18	10	16	4:14
-P	head	Ivory_King_Helm	Ivory King Helm	7	133	24	35	15	25	-
-P	head	Jesters_Cap	Jester's Cap	3	69	39	39	39	39	5:14
-P	head	Kings_Crown	King's Crown	3.8	68	23	23	18	16	4:14,5:12
-P	head	Knight_Helm	Knight Helm	4.2	71	21	23	15	21	-
-P	head	Leydia_Black_Hood	Leydia Black Hood	1	30	20	14	12	27	-
-P	head	Leydia_White_Hood	Leydia White Hood	1	28	18	18	15	24	-
-P	head	Lion_Warrior_Helm	Lion Warrior Helm	0.5	23	11	10	10	18	-
-P	head	Looking_Glass_Mask	Looking Glass Mask	7	135	17	19	30	17	4:16
-P	head	Loyce_Helm	Loyce Helm	6.3	119	33	24	15	25	-
-P	head	Lucatiels_Mask	Lucatiel's Mask	2	51	28	25	30	28	-
-P	head	Mad_Warrior_Mask	Mad Warrior Mask	5	103	17	16	12	17	-
-P	head	Manikin_Mask	Manikin Mask	1.8	72	37	34	43	45	-
-P	head	Mask_of_Judgment	Mask of Judgment	2.5	74	38	30	26	33	-
-P	head	Mastodon_Helm	Mastodon Helm	6.6	132	15	17	9	15	4:16
-P	head	Minotaur_Helm	Minotaur Helm	9.8	122	19	22	22	18	-
-P	head	Mirrah_Hat	Mirrah Hat	1.5	42	27	24	29	26	-
-P	head	Monastery_Headcloth	Monastery Headcloth	0.6	45	40	29	26	29	-
-P	head	Moon_Butterfly_Hat	Moon Butterfly Hat	0.8	41	21	14	22	18	-
-P	head	Moon_Hat	Moon Hat	2.2	52	38	26	26	32	-
-P	head	Nahr_Alma_Hood	Nahr Alma Hood	1.5	38	21	18	20	38	-
-P	head	Northwarder_Hood	Northwarder Hood	0.9	38	27	25	34	30	-
-P	head	Old_Bell_Helm	Old Bell Helm	6	47	9	10	12	10	-
-P	head	Old_Ironclad_Helm	Old Ironclad Helm	6.3	98	12	14	9	12	4:14
-P	head	Old_Knight_Helm	Old Knight Helm	7	146	12	12	8	12	-
-P	head	Pates_Helm	Pate's Helm	3.5	77	15	20	6	16	-
-P	head	Peasant_Hat	Peasant Hat	1.3	17	8	9	11	8	-
-P	head	Penal_Mask	Penal Mask	5.1	97	40	50	26	45	-
-P	head	Pharros_Mask	Pharros Mask	4.3	58	20	14	13	13	-
-P	head	Priestess_Headpiece	Priestess Headpiece	1.2	46	28	28	39	31	-
-P	head	Prisoners_Hood	Prisoner's Hood	0.8	8	8	8	12	9	-
-P	head	Raimes_Helm	Raime's Helm	6	103	25	33	15	40	-
-P	head	Rampart_Golem_Helm	Rampart Golem Helm	5.8	117	20	15	16	18	-
-P	head	Rogue_Hood	Rogue Hood	0.7	22	7	8	8	9	-
-P	head	Royal_Soldier_Helm	Royal Soldier Helm	4.8	82	25	26	17	25	-
-P	head	Royal_Swordsman_Helm	Royal Swordsman Helm	4.7	84	19	25	13	19	-
-P	head	Ruin_Helm	Ruin Helm	4	80	19	21	13	19	-
-P	head	Rusted_Mastodon_Helm	Rusted Mastodon Helm	6	113	11	13	6	11	4:14
-P	head	Saints_Hood	Saint's Hood	0.9	35	25	25	32	25	8:16
-P	head	Sanctum_Knight_Helm	Sanctum Knight Helm	5.8	120	18	17	15	18	-
-P	head	Sanctum_Priestess_Tiara	Sanctum Priestess Tiara	2	36	21	30	18	21	7:11,8:11
-P	head	Shadow_Mask	Shadow Mask	1.8	67	36	41	37	48	-
-P	head	Smelter_Demon_Helm	Smelter Demon Helm	9	158	22	46	21	22	4:16
-P	head	Spiked_Bandit_Helm	Spiked Bandit Helm	4.1	88	26	27	22	26	-
-P	head	Standard_Helm	Standard Helm	4	80	15	20	6	16	-
-P	head	Steel_Helm	Steel Helm	5.4	119	15	16	10	15	-
-P	head	Syans_Helm	Syan's Helm	6.2	123	24	32	14	24	-
-P	head	Symbol_of_Avarice	Symbol of Avarice	8	90	20	20	30	25	-
-P	head	Targrays_Helm	Targray's Helm	4	73	18	18	15	20	-
-P	head	Tattered_Cloth_Hood	Tattered Cloth Hood	1.1	41	22	29	19	22	-
-P	head	Thief_Mask	Thief Mask	1.2	40	19	15	14	16	-
-P	head	Throne_Defender_Helm	Throne Defender Helm	6.4	131	26	29	16	26	-
-P	head	Throne_Watcher_Helm	Throne Watcher Helm	5.6	104	46	30	24	30	-
-P	head	Traveling_Merchant_Hat	Traveling Merchant Hat	2.6	50	14	15	17	14	-
-P	head	Tseldora_Cap	Tseldora Cap	1.4	21	9	10	12	9	-
-P	head	Varangian_Helm	Varangian Helm	4.6	106	34	38	20	34	-
-P	head	Velstadts_Helm	Velstadt's Helm	7.5	157	20	21	9	48	-
-P	head	Vengarls_Helm	Vengarl's Helm	6.8	142	18	24	15	18	-
-P	head	Wanderer_Hood	Wanderer Hood	1.4	46	15	20	22	16	-
-P	head	Warlock_Mask	Warlock Mask	4.8	52	72	33	48	72	7:14
-P	head	White_Hollow_Mage_Hood	White Hollow Mage Hood	1.8	67	56	41	43	47	-
-P	head	White_Priest_Headpiece	White Priest Headpiece	1.4	47	28	28	37	31	-
-P	head	Xanthous_Crown	Xanthous Crown	5	100	24	7	16	22	-
-P	chest	Naked	Naked	0	0	0	0	0	0	-
-P	chest	Agdaynes_Black_Robe	Agdayne's Black Robe	5.8	139	81	79	72	108	-
-P	chest	Alonne_Captain_Armor	Alonne Captain Armor	15.6	324	68	106	45	68	-
-P	chest	Alonne_Knight_Armor	Alonne Knight Armor	14.2	293	45	81	34	45	-
-P	chest	Alonnes_Armor	Alonne's Armor	9	181	48	53	36	52	-
-P	chest	Alva_Armor	Alva Armor	8.8	179	49	54	37	53	-
-P	chest	Archdrake_Robes	Archdrake Robes	9.8	178	57	54	93	53	-
-P	chest	Armor_of_Aurous	Armor of Aurous	10.1	183	65	63	45	69	-
-P	chest	Armor_of_Aurous_Transparent	Armor of Aurous (Transparent)	3.2	115	45	37	48	41	-
-P	chest	Armor_of_the_Forlorn	Armor of the Forlorn	11.3	220	42	50	35	68	-
-P	chest	Astrologists_Robe	Astrologist's Robe	5.1	121	87	60	60	74	-
-P	chest	Bandit_Armor	Bandit Armor	6.2	133	40	41	33	40	-
-P	chest	Bell_Keeper_Bellyband	Bell Keeper Bellyband	6	131	28	26	37	50	-
-P	chest	Benharts_Armor	Benhart's Armor	10.5	208	48	46	41	48	-
-P	chest	Black_Dragon_Armor	Black Dragon Armor	4.8	125	45	98	47	45	-
-P	chest	Black_Hollow_Mage_Robe	Black Hollow Mage Robe	3.3	110	94	67	72	79	-
-P	chest	Black_Leather_Armor	Black Leather Armor	3.9	131	62	47	45	51	-
-P	chest	Black_Robes	Black Robes	2.6	101	110	74	74	74	7:16
-P	chest	Black_Witch_Robe	Black Witch Robe	4.8	120	135	108	126	131	-
-P	chest	Bone_King_Robe	Bone King Robe	3.8	106	68	75	61	94	-
-P	chest	Brigand_Armor	Brigand Armor	3.1	113	56	45	42	48	-
-P	chest	Cales_Leather_Armor	Cale's Leather Armor	6.4	166	47	50	40	47	-
-P	chest	Catarina_Armor	Catarina Armor	11.7	224	48	53	32	48	-
-P	chest	Chaos_Robe	Chaos Robe	2.6	101	74	110	74	106	7:16,8:16
-P	chest	Charred_Loyce_Armor	Charred Loyce Armor	12.8	259	55	67	32	53	-
-P	chest	Creightons_Chainmail	Creighton's Chainmail	9.7	180	54	60	31	54	-
-P	chest	Dark_Armor	Dark Armor	9.8	171	45	45	30	95	-
-P	chest	Desert_Sorceress_Top	Desert Sorceress Top	2.7	89	83	57	69	75	-
-P	chest	Dingy_Robe	Dingy Robe	3	108	65	55	62	62	-
-P	chest	Dragon_Acolyte_Robe	Dragon Acolyte Robe	3.9	118	48	48	56	60	-
-P	chest	Dragonrider_Armor	Dragonrider Armor	16	340	29	27	30	29	-
-P	chest	Drakeblood_Armor	Drakeblood Armor	12.5	249	50	62	33	55	-
-P	chest	Drakekeeper_Armor	Drakekeeper Armor	15.7	333	44	49	39	44	-
-P	chest	Drangleic_Mail	Drangleic Mail	14.5	293	47	47	42	47	-
-P	chest	Elite_Knight_Armor	Elite Knight Armor	11.7	207	59	63	43	59	-
-P	chest	Executioner_Armor	Executioner Armor	6.7	140	32	34	22	75	-
-P	chest	Falconer_Armor	Falconer Armor	7.7	147	44	37	50	44	-
-P	chest	Faraam_Armor	Faraam Armor	12.6	249	56	61	37	56	-
-P	chest	Fume_Sorcerer_Robes	Fume Sorcerer Robes	4.7	128	45	33	61	63	-
-P	chest	Grave_Warden_Top	Grave Warden Top	6	158	69	66	84	89	-
-P	chest	Gyrm_Armor	Gyrm Armor	12.3	258	37	34	30	37	-
-P	chest	Gyrm_Warrior_Armor	Gyrm Warrior Armor	19.7	390	41	51	51	41	4:14
-P	chest	Hard_Leather_Armor	Hard Leather Armor	7.2	135	42	28	53	44	-
-P	chest	Havels_Armor	Havel's Armor	19.5	399	52	57	48	52	4:20
-P	chest	Heide_Knight_Chainmail	Heide Knight Chainmail	10.9	215	37	47	32	65	-
-P	chest	Hexers_Robes	Hexer's Robes	2.6	101	74	110	74	74	-
-P	chest	Hollow_Infantry_Armor	Hollow Infantry Armor	5.9	91	20	16	24	20	-
-P	chest	Hollow_Soldier_Armor	Hollow Soldier Armor	8.6	138	44	46	31	44	-
-P	chest	Imperious_Armor	Imperious Armor	14.7	308	55	44	35	55	-
-P	chest	Imported_Tunic	Imported Tunic	6.5	95	28	24	33	28	-
-P	chest	Infantry_Armor	Infantry Armor	5.9	113	28	26	36	28	-
-P	chest	Insolent_Armor	Insolent Armor	9.8	171	44	44	54	40	-
-P	chest	Ironclad_Armor	Ironclad Armor	29.8	303	44	49	28	44	4:14
-P	chest	Ivory_King_Armor	Ivory King Armor	14.8	285	55	70	32	55	-
-P	chest	Jesters_Robes	Jester's Robes	5.7	131	74	74	74	74	5:14
-P	chest	Kings_Armor	King's Armor	12	215	72	72	57	51	4:14,5:12
-P	chest	Knight_Armor	Knight Armor	10.9	184	55	59	39	55	-
-P	chest	Leather_Armor	Leather Armor	4.7	130	47	30	62	51	-
-P	chest	Leydia_Black_Robe	Leydia Black Robe	3.5	105	72	50	43	95	-
-P	chest	Leydia_White_Robe	Leydia White Robe	3.5	96	64	64	54	82	-
-P	chest	Lion_Mage_Robe	Lion Mage Robe	2.2	79	74	60	62	74	-
-P	chest	Lion_Warrior_Cape	Lion Warrior Cape	1.5	56	24	23	23	48	-
-P	chest	Llewellyn_Armor	Llewellyn Armor	6.8	180	58	69	44	58	-
-P	chest	Looking_Glass_Armor	Looking Glass Armor	18.3	354	44	50	79	44	4:16
-P	chest	Loyce_Armor	Loyce Armor	12.3	247	67	55	32	53	-
-P	chest	Lucatiels_Vest	Lucatiel's Vest	6	153	84	75	91	84	-
-P	chest	Mad_Warrior_Armor	Mad Warrior Armor	12.5	257	42	40	31	42	-
-P	chest	Manikin_Top	Manikin Top	2.3	92	47	44	55	57	-
-P	chest	Mastodon_Armor	Mastodon Armor	17.7	355	41	46	24	41	4:16
-P	chest	Monastery_Longshirt	Monastery Longshirt	1.6	101	89	65	57	65	-
-P	chest	Moon_Butterfly_Wings	Moon Butterfly Wings	1.4	72	37	25	38	32	-
-P	chest	Nahr_Alma_Robes	Nahr Alma Robes	3.5	89	49	42	46	88	-
-P	chest	Northwarder_Robe	Northwarder Robe	2.5	98	85	62	64	70	-
-P	chest	Old_Ironclad_Armor	Old Ironclad Armor	29.8	261	33	37	24	33	-
-P	chest	Old_Knight_Armor	Old Knight Armor	16.4	342	29	29	19	29	-
-P	chest	Pates_Armor	Pate's Armor	5.9	130	42	28	53	44	-
-P	chest	Peasant_Attire	Peasant Attire	3.8	50	23	25	31	23	-
-P	chest	Penal_Straightjacket	Penal Straightjacket	6.2	113	47	58	42	52	-
-P	chest	Priestess_Robe	Priestess Robe	2.8	106	66	65	91	73	-
-P	chest	Prisoners_Tatters	Prisoner's Tatters	2.2	22	23	23	33	26	-
-P	chest	Raimes_Armor	Raime's Armor	13.6	253	54	71	32	69	-
-P	chest	Rampart_Golem_Armor	Rampart Golem Armor	15.5	293	44	40	42	43	-
-P	chest	Red_Lion_Warrior_Cape	Red Lion Warrior Cape	1.5	68	32	30	30	53	-
-P	chest	Retainer_Robe	Retainer Robe	3.3	101	85	70	73	74	-
-P	chest	Robe_of_Judgment	Robe of Judgment	3.9	115	59	48	41	52	-
-P	chest	Rogue_Armor	Rogue Armor	3.5	111	35	42	40	47	-
-P	chest	Royal_Soldier_Armor	Royal Soldier Armor	9.2	157	49	50	33	49	-
-P	chest	Royal_Swordsman_Armor	Royal Swordsman Armor	11.2	201	46	59	31	46	-
-P	chest	Ruin_Armor	Ruin Armor	10.5	209	49	55	33	49	-
-P	chest	Rusted_Mastodon_Armor	Rusted Mastodon Armor	15.9	300	31	35	17	31	4:14
-P	chest	Saints_Dress	Saint's Dress	2.6	101	74	74	91	74	8:16
-P	chest	Sanctum_Knight_Armor	Sanctum Knight Armor	14.4	295	45	45	40	46	-
-P	chest	Shadow_Top	Shadow Top	2.6	97	52	59	54	70	-
-P	chest	Singers_Dress	Singer's Dress	2.6	45	68	53	62	62	-
-P	chest	Smelter_Demon_Armor	Smelter Demon Armor	17.6	340	43	90	40	43	4:16
-P	chest	Steel_Armor	Steel Armor	14	309	39	42	27	39	-
-P	chest	Syans_Armor	Syan's Armor	13.8	273	53	70	31	53	-
-P	chest	Targrays_Armor	Targray's Armor	9.8	178	44	44	36	49	-
-P	chest	Tattered_Cloth_Robe	Tattered Cloth Robe	2.7	100	53	72	47	53	-
-P	chest	Throne_Defender_Armor	Throne Defender Armor	13.8	283	57	63	34	57	-
-P	chest	Throne_Watcher_Armor	Throne Watcher Armor	11.2	209	91	59	47	59	-
-P	chest	Traveling_Merchant_Coat	Traveling Merchant Coat	7.7	148	42	46	49	42	-
-P	chest	Tseldora_Robe	Tseldora Robe	3	44	20	21	26	19	-
-P	chest	Varangian_Armor	Varangian Armor	5.1	135	43	31	51	43	-
-P	chest	Velstadts_Armor	Velstadt's Armor	15.2	330	41	43	20	98	-
-P	chest	Vengarls_Armor	Vengarl's Armor	15.1	316	41	53	34	41	-
-P	chest	Wanderer_Coat	Wanderer Coat	3.5	115	38	50	56	40	-
-P	chest	White_Hollow_Mage_Robe	White Hollow Mage Robe	2.8	105	88	63	66	73	-
-P	chest	White_Priest_Robe	White Priest Robe	3.3	111	66	66	86	73	-
-P	chest	Xanthous_Overcoat	Xanthous Overcoat	3.9	78	59	15	37	46	-
-P	hands	Naked	Naked	0	0	0	0	0	0	-
-P	hands	Agdaynes_Cuffs	Agdayne's Cuffs	2.9	70	41	39	36	54	-
-P	hands	Alonne_Knight_Gauntlets	Alonne Knight Gauntlets	6.7	138	21	38	16	21	-
-P	hands	Alonnes_Gauntlets	Alonne's Gauntlets	3	61	15	17	11	16	-
-P	hands	Alva_Gauntlets	Alva Gauntlets	2.9	59	16	18	12	17	-
-P	hands	Archdrake_Gloves	Archdrake Gloves	3.2	58	19	18	30	17	-
-P	hands	Astrologists_Gauntlets	Astrologist's Gauntlets	2.1	50	36	25	25	31	-
-P	hands	Bandit_Gauntlets	Bandit Gauntlets	2.8	60	18	19	15	18	-
-P	hands	Bell_Keeper_Cuffs	Bell Keeper Cuffs	2.5	55	12	11	16	21	-
-P	hands	Benharts_Gauntlets	Benhart's Gauntlets	5.5	109	25	24	22	25	-
-P	hands	Black_Dragon_Gauntlets	Black Dragon Gauntlets	1.8	48	17	38	18	17	-
-P	hands	Black_Gloves	Black Gloves	1	39	42	28	28	28	7:16
-P	hands	Black_Leather_Gloves	Black Leather Gloves	1.8	60	29	22	21	24	-
-P	hands	Black_Witch_Gloves	Black Witch Gloves	1.7	52	48	38	45	46	-
-P	hands	Bone_King_Cuffs	Bone King Cuffs	1.9	53	34	37	30	47	-
-P	hands	Brigand_Gauntlets	Brigand Gauntlets	1.8	66	32	26	25	28	-
-P	hands	Catarina_Gauntlets	Catarina Gauntlets	6.9	132	28	31	19	28	-
-P	hands	Chaos_Gloves	Chaos Gloves	1	39	28	42	28	41	7:16,8:16
-P	hands	Charred_Loyce_Gauntlets	Charred Loyce Gauntlets	4.5	77	15	24	9	15	-
-P	hands	Creightons_Chain_Gloves	Creighton's Chain Gloves	3.4	63	19	21	11	19	-
-P	hands	Dark_Gauntlets	Dark Gauntlets	5.8	101	27	27	18	56	-
-P	hands	Desert_Sorceress_Gloves	Desert Sorceress Gloves	1.5	50	46	32	38	42	-
-P	hands	Dingy_Cuffs	Dingy Cuffs	1.2	43	26	22	25	25	-
-P	hands	Dragon_Acolyte_Gloves	Dragon Acolyte Gloves	1.6	48	20	20	23	25	-
-P	hands	Dragonrider_Gauntlets	Dragonrider Gauntlets	6.2	132	12	11	12	12	-
-P	hands	Drakeblood_Gauntlets	Drakeblood Gauntlets	4.6	93	15	24	10	20	-
-P	hands	Drakekeeper_Gauntlets	Drakekeeper Gauntlets	8.4	178	23	26	20	23	-
-P	hands	Drangleic_Gauntlets	Drangleic Gauntlets	6.2	125	20	20	18	20	-
-P	hands	Elite_Knight_Gloves	Elite Knight Gloves	3.7	66	19	20	14	19	-
-P	hands	Engraved_Gauntlets	Engraved Gauntlets	5.5	44	22	22	22	22	4:12,5:12
-P	hands	Executioner_Gauntlets	Executioner Gauntlets	2.7	56	13	14	9	30	-
-P	hands	Falconer_Gloves	Falconer Gloves	3.2	61	18	15	21	18	-
-P	hands	Faraam_Gauntlets	Faraam Gauntlets	4.7	93	21	23	14	21	-
-P	hands	Fume_Sorcerer_Gloves	Fume Sorcerer Gloves	2.8	75	26	20	36	33	-
-P	hands	Gauntlets_of_Aurous	Gauntlets of Aurous	3.2	58	21	20	14	22	-
-P	hands	Gauntlets_of_Aurous_Transparent	Gauntlets of Aurous (Transparent)	1.2	43	17	14	18	15	-
-P	hands	Gauntlets_of_the_Forlorn	Gauntlets of the Forlorn	5.5	109	20	25	18	34	-
-P	hands	Grave_Warden_Cuffs	Grave Warden Cuffs	2.2	58	25	24	31	33	-
-P	hands	Gyrm_Gloves	Gyrm Gloves	3.6	75	11	10	9	11	-
-P	hands	Gyrm_Warrior_Gloves	Gyrm Warrior Gloves	5.4	108	12	14	14	12	4:14
-P	hands	Hard_Leather_Gauntlets	Hard Leather Gauntlets	3.8	80	25	16	31	26	-
-P	hands	Havels_Gauntlets	Havel's Gauntlets	11.5	235	31	34	28	31	4:20
-P	hands	Heide_Knight_Gauntlets	Heide Knight Gauntlets	5.4	107	18	23	16	32	-
-P	hands	Hexers_Gloves	Hexer's Gloves	1	39	28	42	28	28	-
-P	hands	Hollow_Infantry_Gloves	Hollow Infantry Gloves	2.8	43	9	8	12	9	-
-P	hands	Hollow_Soldier_Gauntlets	Hollow Soldier Gauntlets	3.2	51	16	17	11	16	-
-P	hands	Imperious_Gloves	Imperious Gloves	6	125	22	18	14	22	-
-P	hands	Imported_Manchettes	Imported Manchettes	1.8	26	8	7	9	8	-
-P	hands	Infantry_Gloves	Infantry Gloves	2.8	54	14	13	17	14	-
-P	hands	Insolent_Gloves	Insolent Gloves	5.8	101	26	26	32	24	-
-P	hands	Ironclad_Gauntlets	Ironclad Gauntlets	9.4	170	24	27	16	14	4:14
-P	hands	Ivory_King_Gauntlets	Ivory King Gauntlets	5	87	15	25	9	16	-
-P	hands	Jesters_Gloves	Jester's Gloves	2.3	53	30	30	30	30	-
-P	hands	Kings_Gauntlets	King's Gauntlets	4.2	75	25	25	20	18	4:14,5:12
-P	hands	Knight_Gauntlets	Knight Gauntlets	3.5	59	18	19	13	18	-
-P	hands	Leather_Gloves	Leather Gloves	2.8	77	28	18	37	30	-
-P	hands	Leydia_Gauntlets	Leydia Gauntlets	1.2	33	22	22	19	28	-
-P	hands	Lion_Mage_Cuffs	Lion Mage Cuffs	1.4	50	47	38	39	47	-
-P	hands	Lion_Warrior_Cuffs	Lion Warrior Cuffs	1.3	49	21	20	20	37	-
-P	hands	Llewellyn_Gloves	Llewellyn Gloves	3.1	82	26	31	20	26	-
-P	hands	Looking_Glass_Gauntlets	Looking Glass Gauntlets	10.4	201	25	28	45	25	4:16
-P	hands	Loyce_Gauntlets	Loyce Gauntlets	4.4	74	24	15	9	15	-
-P	hands	Lucatiels_Gloves	Lucatiel's Gloves	2	51	28	25	30	28	-
-P	hands	Mad_Warrior_Gauntlet	Mad Warrior Gauntlet	7.4	152	25	24	18	25	-
-P	hands	Manchettes_of_Judgment	Manchettes of Judgment	1.8	53	27	22	19	24	-
-P	hands	Manikin_Gloves	Manikin Gloves	1.2	48	24	23	29	30	-
-P	hands	Mastodon_Gauntlets	Mastodon Gauntlets	8.8	176	20	23	12	20	4:16
-P	hands	Monastery_Long_Gloves	Monastery Long Gloves	0.9	49	43	31	28	31	-
-P	hands	Moon_Butterfly_Cuffs	Moon Butterfly Cuffs	0.8	41	21	14	22	18	-
-P	hands	Northwarder_Manchettes	Northwarder Manchettes	1	37	21	21	28	23	-
-P	hands	Old_Ironclad_Gauntlets	Old Ironclad Gauntlets	9.4	146	18	20	13	18	4:14
-P	hands	Old_Knight_Gauntlets	Old Knight Gauntlets	8.2	171	15	15	10	15	-
-P	hands	Pates_Gloves	Pate's Gloves	3.5	77	25	16	31	26	-
-P	hands	Peasant_Long_Gloves	Peasant Long Gloves	1.8	24	11	12	15	11	-
-P	hands	Penal_Handcuffs	Penal Handcuffs	4.8	82	32	53	28	37	-
-P	hands	Priestess_Gloves	Priestess Gloves	0.9	34	21	21	29	24	-
-P	hands	Prisoners_Gloves	Prisoner's Gloves	1	10	10	11	15	12	-
-P	hands	Raimes_Gauntlets	Raime's Gauntlets	5	83	21	28	13	36	-
-P	hands	Rampart_Golem_Gauntlets	Rampart Golem Gauntlets	8.2	158	24	22	21	23	-
-P	hands	Rogue_Gauntlets	Rogue Gauntlets	1.8	57	18	22	21	24	-
-P	hands	Royal_Soldier_Gauntlets	Royal Soldier Gauntlets	3.8	65	20	21	14	20	-
-P	hands	Royal_Swordsman_Gloves	Royal Swordsman Gloves	6.1	110	25	32	17	25	-
-P	hands	Ruin_Gauntlets	Ruin Gauntlets	6.2	123	29	32	20	29	-
-P	hands	Rusted_Mastodon_Gauntlets	Rusted Mastodon Gauntlets	7.8	147	15	17	8	15	4:14
-P	hands	Saints_Long_Gloves	Saint's Long Gloves	1	39	28	28	35	28	8:16
-P	hands	Sanctum_Knight_Gauntlets	Sanctum Knight Gauntlets	6	127	19	18	16	17	-
-P	hands	Sanctum_Soldier_Gauntlet	Sanctum Soldier Gauntlet	3.5	57	17	18	15	17	-
-P	hands	Shadow_Gauntlets	Shadow Gauntlets	1.6	60	32	36	33	43	5:16
-P	hands	Smelter_Demon_Gauntlets	Smelter Demon Gauntlets	10.4	203	25	53	24	25	4:16
-P	hands	Steel_Gauntlets	Steel Gauntlets	8.3	183	23	25	16	23	-
-P	hands	Syans_Gauntlets	Syan's Gauntlets	5.2	103	20	27	12	20	-
-P	hands	Targrays_Manifers	Targray's Manifers	3.3	60	15	15	12	17	-
-P	hands	Tattered_Cloth_Manchettes	Tattered Cloth Manchettes	1.6	59	31	43	28	31	-
-P	hands	Throne_Defender_Gauntlets	Throne Defender Gauntlets	4.2	86	17	19	10	17	-
-P	hands	Throne_Watcher_Gauntlets	Throne Watcher Gauntlets	4.1	76	33	22	17	22	-
-P	hands	Traveling_Merchant_Gloves	Traveling Merchant Gloves	3.8	73	21	23	24	21	-
-P	hands	Tseldora_Manchettes	Tseldora Manchettes	2	29	13	14	18	13	-
-P	hands	Varangian_Cuffs	Varangian Cuffs	1.8	35	11	8	13	11	-
-P	hands	Velstadts_Gauntlets	Velstadt's Gauntlets	5	108	13	14	6	32	-
-P	hands	Vengarls_Gloves	Vengarl's Gloves	5.3	111	14	18	12	14	-
-P	hands	Wanderer_Manchette	Wanderer Manchette	2.1	69	23	30	33	24	-
-P	hands	White_Priest_Gloves	White Priest Gloves	1.1	37	22	22	29	24	-
-P	hands	Xanthous_Gloves	Xanthous Gloves	2.3	46	35	9	22	27	-
-P	legs	Naked	Naked	0	0	0	0	0	0	-
-P	legs	Agdaynes_Kilt	Agdayne's Kilt	2.9	70	41	39	36	54	-
-P	legs	Alonne_Knight_Leggings	Alonne Knight Leggings	9.8	201	31	55	23	31	-
-P	legs	Alonnes_Leggings	Alonne's Leggings	5.5	108	28	31	21	30	-
-P	legs	Alva_Leggings	Alva Leggings	5.2	106	29	32	22	31	-
-P	legs	Archdrake_Boots	Archdrake Boots	4.7	85	27	26	45	25	-
-P	legs	Astrologists_Bottoms	Astrologist's Bottoms	3.8	90	65	44	44	55	-
-P	legs	Bandit_Boots	Bandit Boots	2.8	60	18	19	15	18	-
-P	legs	Bell_Keeper_Trousers	Bell Keeper Trousers	4	87	19	18	25	33	-
-P	legs	Benharts_Boots	Benhart's Boots	6.5	129	30	28	26	30	-
-P	legs	Black_Boots	Black Boots	2	78	85	57	57	57	7:16
-P	legs	Black_Dragon_Leggings	Black Dragon Leggings	2.7	72	26	57	27	26	-
-P	legs	Black_Leather_Boots	Black Leather Boots	2.2	74	35	27	25	29	-
-P	legs	Black_Witch_Trousers	Black Witch Trousers	1.7	52	48	38	45	46	-
-P	legs	Blood_Stained_Skirt	Blood-Stained Skirt	2.5	90	54	46	51	51	-
-P	legs	Bone_King_Skirt	Bone King Skirt	2.9	81	52	57	46	72	-
-P	legs	Brigand_Trousers	Brigand Trousers	1.8	66	32	26	25	28	-
-P	legs	Cales_Shoes	Cale's Shoes	3	78	22	23	19	22	-
-P	legs	Catarina_Leggings	Catarina Leggings	6.9	132	28	31	19	28	-
-P	legs	Chaos_Boots	Chaos Boots	2	78	57	85	57	82	7:16,8:16
-P	legs	Charred_Loyce_Leggings	Charred Loyce Leggings	7.8	148	30	43	18	30	-
-P	legs	Creightons_Chain_Leggings	Creighton's Chain Leggings	4.5	84	25	28	14	25	-
-P	legs	Dark_Leggings	Dark Leggings	5.8	101	27	27	18	56	-
-P	legs	Desert_Sorceress_Skirt	Desert Sorceress Skirt	2.4	79	74	51	61	67	-
-P	legs	Dragon_Acolyte_Boots	Dragon Acolyte Boots	2.4	73	30	30	34	37	-
-P	legs	Dragonrider_Leggings	Dragonrider Leggings	7.4	158	14	13	14	14	-
-P	legs	Drakeblood_Leggings	Drakeblood Leggings	7.8	156	29	39	20	34	-
-P	legs	Drakekeeper_Boots	Drakekeeper Boots	8.4	178	23	26	20	23	-
-P	legs	Drangleic_Leggings	Drangleic Leggings	7.6	153	25	25	22	25	-
-P	legs	Elite_Knight_Leggings	Elite Knight Leggings	6.9	122	35	37	25	35	-
-P	legs	Executioner_Leggings	Executioner Leggings	2.7	56	13	14	9	30	-
-P	legs	Falconer_Boots	Falconer Boots	5.8	111	33	28	38	33	-
-P	legs	Faraam_Boots	Faraam Boots	7.9	156	35	38	23	35	-
-P	legs	Flower_Skirt	Flower Skirt	1.7	52	30	25	28	31	-
-P	legs	Flying_Feline_Boots	Flying Feline Boots	2	60	22	14	37	24	-
-P	legs	Fume_Sorcerer_Boots	Fume Sorcerer Boots	2.8	75	26	20	36	33	-
-P	legs	Grave_Warden_Bottoms	Grave Warden Bottoms	3.8	100	44	42	53	57	-
-P	legs	Gyrm_Boots	Gyrm Boots	5.6	117	17	16	14	17	-
-P	legs	Gyrm_Warrior_Boots	Gyrm Warrior Boots	8.8	175	19	23	23	19	4:14
-P	legs	Hard_Leather_Boots	Hard Leather Boots	3.8	80	25	16	31	26	-
-P	legs	Havels_Leggings	Havel's Leggings	11.5	235	31	34	28	31	4:20
-P	legs	Heavy_Boots	Heavy Boots	1.6	59	31	43	28	31	-
-P	legs	Heide_Knight_Leggings	Heide Knight Leggings	6.4	126	22	28	19	38	-
-P	legs	Hexers_Boots	Hexer's Boots	2	78	57	85	57	57	-
-P	legs	Hollow_Infantry_Boots	Hollow Infantry Boots	4.5	70	15	13	19	15	-
-P	legs	Hollow_Soldier_Leggings	Hollow Soldier Leggings	1.8	29	9	10	6	9	-
-P	legs	Imperious_Leggings	Imperious Leggings	7.5	157	28	22	17	28	-
-P	legs	Imported_Trousers	Imported Trousers	3.6	52	15	13	18	15	-
-P	legs	Infantry_Boots	Infantry Boots	4.5	86	22	20	28	22	-
-P	legs	Insolent_Boots	Insolent Boots	5.8	101	26	26	32	24	-
-P	legs	Ironclad_Leggings	Ironclad Leggings	9.4	170	24	27	16	24	4:14
-P	legs	Ivory_King_Leggings	Ivory King Leggings	8.6	160	30	44	18	31	-
-P	legs	Jesters_Tights	Jester's Tights	2.7	62	35	35	35	35	5:14
-P	legs	Kings_Leggings	King's Leggings	7.1	127	42	42	34	30	4:14,5:12
-P	legs	Knight_Leggings	Knight Leggings	6.4	108	32	35	23	32	-
-P	legs	Leather_Boots	Leather Boots	2.8	77	28	18	37	30	-
-P	legs	Leggings_of_Aurous	Leggings of Aurous	5.8	105	37	36	26	40	-
-P	legs	Leggings_of_Aurous_Transparent	Leggings of Aurous (Transparent)	2	72	28	23	30	26	-
-P	legs	Leggings_of_the_Forlorn	Leggings of the Forlorn	6.2	124	20	26	17	36	-
-P	legs	Lion_Mage_Skirt	Lion Mage Skirt	1.4	50	47	38	39	47	-
-P	legs	Lion_Warrior_Skirt	Lion Warrior Skirt	1.2	45	19	18	18	35	-
-P	legs	Llewellyn_Shoes	Llewellyn Shoes	3.1	82	26	31	20	26	-
-P	legs	Looking_Glass_Leggings	Looking Glass Leggings	10.4	201	25	28	45	25	4:16
-P	legs	Loyce_Leggings	Loyce Leggings	7.5	143	43	30	18	30	-
-P	legs	Lucatiels_Trousers	Lucatiel's Trousers	4	102	56	50	61	56	-
-P	legs	Mad_Warrior_Leggings	Mad Warrior Leggings	7.4	152	25	24	18	25	-
-P	legs	Manikin_Boots	Manikin Boots	1.6	64	32	31	38	40	-
-P	legs	Mastodon_Leggings	Mastodon Leggings	10.8	217	25	28	15	25	4:16
-P	legs	Monastery_Skirt	Monastery Skirt	4	71	63	46	40	45	-
-P	legs	Moon_Butterfly_Skirt	Moon Butterfly Skirt	1.2	61	32	21	33	27	-
-P	legs	Northwarder_Trousers	Northwarder Trousers	1.8	62	44	42	50	47	-
-P	legs	Old_Ironclad_Leggings	Old Ironclad Leggings	9.4	146	18	20	13	18	4:14
-P	legs	Old_Knight_Leggings	Old Knight Leggings	8.2	171	15	15	10	15	-
-P	legs	Pates_Trousers	Pate's Trousers	3.5	77	25	16	31	26	-
-P	legs	Peasant_Trousers	Peasant Trousers	2.6	34	16	17	21	16	-
-P	legs	Penal_Skirt	Penal Skirt	4.8	102	42	53	38	47	-
-P	legs	Priestess_Skirt	Priestess Skirt	1.9	72	45	44	62	50	-
-P	legs	Prisoners_Waistcloth	Prisoner's Waistcloth	1	10	10	11	15	12	-
-P	legs	Raimes_Leggings	Raime's Leggings	6.9	121	28	37	17	43	-
-P	legs	Rampart_Golem_Leggings	Rampart Golem Leggings	8.2	158	24	18	21	24	-
-P	legs	Rogue_Leggings	Rogue Leggings	2.5	79	25	30	29	34	-
-P	legs	Royal_Soldier_Leggings	Royal Soldier Leggings	5.3	91	28	29	19	28	-
-P	legs	Royal_Swordsman_Leggings	Royal Swordsman Leggings	6.1	110	25	32	17	25	-
-P	legs	Ruin_Leggings	Ruin Leggings	6.2	123	29	32	20	29	-
-P	legs	Rusted_Mastodon_Leggings	Rusted Mastodon Leggings	9.8	185	19	22	11	19	4:14
-P	legs	Saints_Trousers	Saint's Trousers	2	78	57	57	70	57	8:16
-P	legs	Sanctum_Knight_Leggings	Sanctum Knight Leggings	7.4	154	23	23	19	22	-
-P	legs	Shadow_Leggings	Shadow Leggings	1.6	60	32	36	33	43	-
-P	legs	Smelter_Demon_Leggings	Smelter Demon Leggings	10.4	203	25	53	24	25	4:16
-P	legs	Steel_Leggings	Steel Leggings	8.3	183	23	25	16	23	-
-P	legs	Syans_Leggings	Syan's Leggings	7.1	141	27	36	16	27	-
-P	legs	Targrays_Leggings	Targray's Leggings	5.8	105	26	26	21	29	-
-P	legs	Throne_Defender_Leggings	Throne Defender Leggings	7.7	158	32	35	19	32	-
-P	legs	Throne_Watcher_Leggings	Throne Watcher Leggings	6.6	123	54	35	28	35	-
-P	legs	Tights_of_Judgment	Tights of Judgment	2.8	83	42	34	29	37	-
-P	legs	Traveling_Merchant_Boots	Traveling Merchant Boots	3.8	73	21	23	24	21	-
-P	legs	Tseldora_Trousers	Tseldora Trousers	2	29	13	14	18	13	-
-P	legs	Varangian_Leggings	Varangian Leggings	2.4	52	17	12	20	17	-
-P	legs	Velstadts_Leggings	Velstadt's Leggings	7.2	157	20	21	10	47	-
-P	legs	Vengarls_Boots	Vengarl's Boots	7.9	165	21	27	18	21	-
-P	legs	Wanderer_Boots	Wanderer Boots	2.1	69	23	30	33	24	-
-P	legs	White_Priest_Skirt	White Priest Skirt	2.4	80	48	48	63	53	-
-P	legs	Xanthous_Waistcloth	Xanthous Waistcloth	4	80	61	16	38	47	-
+P	head	Naked	Naked	0	0	0	0	0	0	-	0	0	0	0.075	0	0	0	0	0	0	0	0	0
+P	head	Alonne_Captain_Helm	Alonne Captain Helm	5.1	106	22	34	15	22	-	112	100	106	0.266	0	0	0	0	0	0	0	0	0
+P	head	Alonne_Knight_Helm	Alonne Knight Helm	4.6	95	14	25	10	14	-	100	90	95	0.266	0	0	0	0	0	0	0	0	0
+P	head	Alonnes_Helm	Alonne's Helm	4	77	20	22	15	21	-	80	74	76	0.266	0	0	0	0	0	0	0	0	0
+P	head	Alva_Helm	Alva Helm	3.7	75	21	23	16	22	-	78	72	74	0.266	0	0	0	0	0	0	0	0	0
+P	head	Archdrake_Helm	Archdrake Helm	5.4	98	31	30	51	29	-	98	98	98	0.266	0	0	0	0	0	0	0	1	0
+P	head	Bell_Keeper_Helmet	Bell Keeper Helmet	4.8	105	22	36	10	40	-	114	90	110	0.22	0	0	0	0	0	0	0	0	0
+P	head	Benharts_Knight_Helm	Benhart's Knight Helm	7	139	32	30	28	32	-	144	134	139	0.266	0	0	0	0	0	0	0	0	0
+P	head	Black_Dragon_Helm	Black Dragon Helm	2.2	56	20	44	21	20	-	57	54	56	0.266	0	0	0	0	0	0	0	0	0
+P	head	Black_Hollow_Mage_Hood	Black Hollow Mage Hood	1.9	64	54	38	41	45	-	62	67	62	0.18	0	0	0	0	0	0	0	0	0
+P	head	Black_Hood	Black Hood	0.9	35	38	25	25	25	7:16	33	37	33	0.18	0	0	0	0	0	0	0	2	2
+P	head	Black_Witch_Domino_Mask	Black Witch Domino Mask	0.5	15	24	12	24	24	7:20	14	16	14	0.18	0	0	0	0	0	0	0	0	0
+P	head	Black_Witch_Hat	Black Witch Hat	1.5	29	22	11	22	22	7:16	28	34	28	0.18	0	0	0	0	0	0	0	0	0
+P	head	Black_Witch_Veil	Black Witch Veil	0.5	15	14	11	13	14	-	15	16	15	0.18	0	0	0	0	0	0	0	0	0
+P	head	Bone_Crown	Bone Crown	1.7	48	30	34	27	42	-	46	52	46	0.18	0	0	0	0	0	0	0	0	0
+P	head	Brigand_Hood	Brigand Hood	1.2	44	22	17	16	19	-	43	48	41	0.18	0	0	0	0	0	0	0	0	0
+P	head	Cales_Helm	Cale's Helm	3	78	22	23	19	22	-	77	77	80	0.22	0	1	0	0	0	2	0	0	0
+P	head	Catarina_Helm	Catarina Helm	4.5	86	18	20	12	18	-	100	86	86	0.266	0	0	0	0	0	0	0	0	0
+P	head	Chaos_Hood	Chaos Hood	0.9	35	25	38	25	37	7:16,8:16	33	37	33	0.18	0	0	0	0	0	0	0	3	0
+P	head	Charred_Loyce_Helm	Charred Loyce Helm	6.5	121	24	33	15	24	-	130	104	121	0.266	0	0	0	0	0	0	0	0	0
+P	head	Creightons_Steel_Mask	Creighton's Steel Mask	4.3	80	24	27	14	24	-	83	78	80	0.266	0	0	0	0	0	0	0	0	0
+P	head	Crown_of_the_Ivory_King	Crown of the Ivory King	3.5	68	16	13	14	12	-	68	64	64	0.18	0	0	0	0	0	0	0	0	0
+P	head	Crown_of_the_Old_Iron_King	Crown of the Old Iron King	4	71	12	12	13	15	-	71	67	67	0.18	0	0	0	0	0	0	0	0	0
+P	head	Crown_of_the_Sunken_King	Crown of the Sunken King	4	70	17	15	16	14	-	70	66	66	0.18	-1	1	-1	0	1	1	0	1	1
+P	head	Dark_Mask	Dark Mask	3.8	66	17	17	12	37	-	70	66	64	0.266	0	0	0	0	0	0	0	1	1
+P	head	Desert_Sorceress_Hood	Desert Sorceress Hood	0.6	20	19	13	15	17	-	19	21	19	0.18	0	0	0	0	0	0	0	3	0
+P	head	Dingy_Hood	Dingy Hood	0.8	29	17	15	16	16	-	27	32	27	0.18	0	0	0	0	0	0	0	0	0
+P	head	Dragon_Acolyte_Mask	Dragon Acolyte Mask	1.5	45	19	19	22	23	-	44	48	44	0.18	0	0	0	0	0	0	0	0	0
+P	head	Dragon_Sage_Hood	Dragon Sage Hood	2	50	21	21	24	25	-	49	53	49	0.18	0	0	0	0	0	0	0	1	1
+P	head	Dragonrider_Helm	Dragonrider Helm	7.5	160	14	13	14	14	-	167	149	160	0.266	0	0	0	0	0	0	0	0	0
+P	head	Drakeblood_Helm	Drakeblood Helm	4.7	95	15	24	11	20	-	103	92	98	0.266	0	0	0	0	0	0	0	0	0
+P	head	Drakekeeper_Helm	Drakekeeper Helm	6	127	17	19	15	17	-	134	122	127	0.266	0	0	0	0	0	0	0	0	0
+P	head	Drangleic_Helm	Drangleic Helm	5.9	119	19	19	17	19	-	129	112	121	0.266	0	0	0	0	0	0	0	0	0
+P	head	Durgos_Hat	Durgo's Hat	2.6	33	18	15	13	15	5:16	35	32	31	0.18	0	0	0	0	0	0	0	0	0
+P	head	Elite_Knight_Helm	Elite Knight Helm	4.5	80	23	24	16	23	-	88	78	80	0.266	0	0	0	0	0	0	0	0	0
+P	head	Executioner_Helm	Executioner Helm	4.4	92	21	22	15	49	-	97	84	95	0.22	0	0	0	0	0	0	0	0	0
+P	head	Falconer_Helm	Falconer Helm	4.5	86	26	37	14	26	-	93	76	88	0.22	0	0	0	0	0	0	0	0	0
+P	head	Faraam_Helm	Faraam Helm	4.8	95	21	23	14	21	-	101	90	96	0.266	0	0	0	0	0	0	0	0	0
+P	head	Fume_Sorcerer_Mask	Fume Sorcerer Mask	2	31	11	15	15	15	-	30	33	30	0.266	0	0	0	0	0	0	0	0	0
+P	head	Grave_Warden_Mask	Grave Warden Mask	0.5	13	6	6	7	7	-	13	14	13	0.18	0	0	0	0	0	0	0	0	0
+P	head	Gyrm_Helm	Gyrm Helm	8.2	158	25	23	20	25	-	164	153	149	0.266	0	0	0	0	0	0	0	0	0
+P	head	Gyrm_Warrior_Greathelm	Gyrm Warrior Greathelm	9.6	169	24	28	28	24	4:14	180	170	152	0.266	0	0	0	0	0	0	0	0	0
+P	head	Gyrm_Warrior_Helm	Gyrm Warrior Helm	8.9	158	19	23	23	19	4:14	175	155	151	0.266	0	0	0	0	0	0	0	0	0
+P	head	Havels_Helm	Havel's Helm	7.5	153	20	22	18	20	4:20	174	132	153	0.266	0	0	0	0	0	0	0	0	0
+P	head	Heide_Knight_Greathelm	Heide Knight Greathelm	6	119	20	26	17	36	-	127	111	119	0.266	0	0	0	0	0	0	0	0	0
+P	head	Heide_Knight_Iron_Mask	Heide Knight Iron Mask	5.2	105	22	22	8	34	-	123	92	104	0.266	0	0	0	0	0	0	0	0	0
+P	head	Helm_of_Aurous	Helm of Aurous	3.8	69	24	24	17	26	-	72	67	69	0.266	0	0	0	0	0	0	0	0	0
+P	head	Helm_of_Aurous_Transparent	Helm of Aurous (Transparent)	1.2	43	17	14	18	15	-	41	46	42	0.18	0	0	0	0	0	0	0	0	0
+P	head	Hexers_Hood	Hexer's Hood	0.9	35	25	38	25	25	-	33	37	33	0.18	0	0	0	0	0	0	0	1	1
+P	head	Hood_of_the_Forlorn	Hood of the Forlorn	1.1	42	29	28	37	33	-	40	44	40	0.266	0	0	0	0	0	0	0	0	0
+P	head	Hollow_Infantry_Helm	Hollow Infantry Helm	4	62	13	11	17	13	-	61	64	61	0.22	0	0	0	0	0	0	0	0	0
+P	head	Hollow_Skin	Hollow Skin	1.5	13	4	4	4	4	-	13	13	13	0.22	0	0	0	0	0	0	0	0	0
+P	head	Hollow_Soldier_Helm	Hollow Soldier Helm	4.3	69	22	23	15	22	-	73	66	70	0.266	0	0	0	0	0	0	0	0	0
+P	head	Hunters_Hat	Hunter's Hat	1.2	33	12	8	16	13	-	32	35	32	0.22	0	0	0	0	0	0	0	0	0
+P	head	Imperious_Helm	Imperious Helm	5.8	121	21	17	13	21	-	127	115	121	0.266	0	0	0	0	0	0	0	0	0
+P	head	Imported_Hood	Imported Hood	2.2	32	9	8	11	9	-	31	36	31	0.22	0	0	0	0	0	0	0	0	0
+P	head	Infantry_Helm	Infantry Helm	4	77	19	18	25	19	-	75	80	75	0.22	0	0	0	0	0	0	0	0	0
+P	head	Insolent_Helm	Insolent Helm	4.8	84	21	21	27	20	-	90	80	84	0.266	0	0	0	0	0	0	0	0	2
+P	head	Ironclad_Helm	Ironclad Helm	6.3	114	16	18	10	16	4:14	122	104	114	0.266	0	0	0	0	0	0	0	0	0
+P	head	Ivory_King_Helm	Ivory King Helm	7	133	24	35	15	25	-	138	109	133	0.266	0	0	0	0	0	0	0	0	0
+P	head	Jesters_Cap	Jester's Cap	3	69	39	39	39	39	5:14	67	73	67	0.22	0	0	0	0	0	0	0	0	0
+P	head	Kings_Crown	King's Crown	3.8	68	23	23	18	16	4:14,5:12	72	65	68	0.266	0	0	0	0	0	0	0	3	3
+P	head	Knight_Helm	Knight Helm	4.2	71	21	23	15	21	-	80	69	71	0.266	0	0	0	0	0	0	0	0	0
+P	head	Leydia_Black_Hood	Leydia Black Hood	1	30	20	14	12	27	-	28	33	28	0.18	0	0	0	0	0	0	0	1	1
+P	head	Leydia_White_Hood	Leydia White Hood	1	28	18	18	15	24	-	26	30	26	0.18	0	0	0	0	0	0	0	0	0
+P	head	Lion_Warrior_Helm	Lion Warrior Helm	0.5	23	11	10	10	18	-	22	24	22	0.18	0	0	0	0	0	0	0	0	0
+P	head	Looking_Glass_Mask	Looking Glass Mask	7	135	17	19	30	17	4:16	154	118	135	0.266	0	0	0	0	0	0	0	0	1
+P	head	Loyce_Helm	Loyce Helm	6.3	119	33	24	15	25	-	127	114	119	0.266	0	0	0	0	0	0	0	0	0
+P	head	Lucatiels_Mask	Lucatiel's Mask	2	51	28	25	30	28	-	49	55	49	0.22	0	0	0	0	0	0	0	0	0
+P	head	Mad_Warrior_Mask	Mad Warrior Mask	5	103	17	16	12	17	-	108	103	98	0.266	0	0	0	0	0	0	2	0	0
+P	head	Manikin_Mask	Manikin Mask	1.8	72	37	34	43	45	-	69	76	69	0.18	0	0	0	0	0	0	0	0	0
+P	head	Mask_of_Judgment	Mask of Judgment	2.5	74	38	30	26	33	-	71	79	71	0.18	0	0	0	0	0	0	0	0	0
+P	head	Mastodon_Helm	Mastodon Helm	6.6	132	15	17	9	15	4:16	142	123	132	0.266	0	0	0	0	0	0	0	0	0
+P	head	Minotaur_Helm	Minotaur Helm	9.8	122	19	22	22	18	-	128	128	105	0.266	0	0	0	0	0	0	0	0	0
+P	head	Mirrah_Hat	Mirrah Hat	1.5	42	27	24	29	26	-	40	46	40	0.22	0	0	0	0	0	0	0	0	0
+P	head	Monastery_Headcloth	Monastery Headcloth	0.6	45	40	29	26	29	-	42	47	42	0.18	0	0	0	0	0	0	0	0	0
+P	head	Moon_Butterfly_Hat	Moon Butterfly Hat	0.8	41	21	14	22	18	-	39	45	39	0.18	0	0	0	0	0	0	0	1	0
+P	head	Moon_Hat	Moon Hat	2.2	52	38	26	26	32	-	50	54	50	0.18	0	0	0	0	0	0	0	2	0
+P	head	Nahr_Alma_Hood	Nahr Alma Hood	1.5	38	21	18	20	38	-	37	41	37	0.18	0	0	0	0	0	0	0	0	0
+P	head	Northwarder_Hood	Northwarder Hood	0.9	38	27	25	34	30	-	36	40	36	0.18	0	0	0	0	0	0	0	0	0
+P	head	Old_Bell_Helm	Old Bell Helm	6	47	9	10	12	10	-	50	42	45	0.266	0	0	0	0	0	0	0	0	0
+P	head	Old_Ironclad_Helm	Old Ironclad Helm	6.3	98	12	14	9	12	4:14	106	89	98	0.266	0	0	0	0	0	0	0	0	0
+P	head	Old_Knight_Helm	Old Knight Helm	7	146	12	12	8	12	-	152	136	146	0.266	0	0	0	0	0	0	0	0	0
+P	head	Pates_Helm	Pate's Helm	3.5	77	15	20	6	16	-	102	53	75	0.22	0	0	0	0	0	0	0	0	0
+P	head	Peasant_Hat	Peasant Hat	1.3	17	8	9	11	8	-	16	19	16	0.18	0	0	0	0	0	0	0	-1	2
+P	head	Penal_Mask	Penal Mask	5.1	97	40	50	26	45	-	109	89	90	0.22	0	0	0	0	0	0	0	0	0
+P	head	Pharros_Mask	Pharros Mask	4.3	58	20	14	13	13	-	60	56	59	0.266	0	0	0	0	0	0	0	0	0
+P	head	Priestess_Headpiece	Priestess Headpiece	1.2	46	28	28	39	31	-	44	47	44	0.18	0	0	0	0	0	0	0	0	1
+P	head	Prisoners_Hood	Prisoner's Hood	0.8	8	8	8	12	9	-	8	9	8	0.18	0	0	0	0	0	0	0	0	0
+P	head	Raimes_Helm	Raime's Helm	6	103	25	33	15	40	-	121	90	105	0.266	0	0	0	0	0	0	0	0	0
+P	head	Rampart_Golem_Helm	Rampart Golem Helm	5.8	117	20	15	16	18	-	124	92	117	0.266	0	0	0	0	0	0	0	0	0
+P	head	Rogue_Hood	Rogue Hood	0.7	22	7	8	8	9	-	23	22	23	0.18	0	0	0	0	0	0	0	0	0
+P	head	Royal_Soldier_Helm	Royal Soldier Helm	4.8	82	25	26	17	25	-	86	78	84	0.266	0	0	0	0	0	0	0	0	0
+P	head	Royal_Swordsman_Helm	Royal Swordsman Helm	4.7	84	19	25	13	19	-	94	74	88	0.266	0	0	0	0	0	0	0	0	0
+P	head	Ruin_Helm	Ruin Helm	4	80	19	21	13	19	-	86	72	81	0.266	0	0	0	0	0	0	0	0	0
+P	head	Rusted_Mastodon_Helm	Rusted Mastodon Helm	6	113	11	13	6	11	4:14	121	105	113	0.266	0	0	0	0	0	0	0	0	0
+P	head	Saints_Hood	Saint's Hood	0.9	35	25	25	32	25	8:16	33	37	33	0.18	0	0	0	0	0	0	0	0	1
+P	head	Sanctum_Knight_Helm	Sanctum Knight Helm	5.8	120	18	17	15	18	-	130	110	120	0.266	0	0	0	0	0	0	0	0	0
+P	head	Sanctum_Priestess_Tiara	Sanctum Priestess Tiara	2	36	21	30	18	21	7:11,8:11	34	38	34	0.18	0	0	0	0	0	0	0	0	0
+P	head	Shadow_Mask	Shadow Mask	1.8	67	36	41	37	48	-	60	76	60	0.18	0	0	0	0	0	0	0	0	0
+P	head	Smelter_Demon_Helm	Smelter Demon Helm	9	158	22	46	21	22	4:16	178	138	158	0.266	0	0	0	0	0	0	0	0	0
+P	head	Spiked_Bandit_Helm	Spiked Bandit Helm	4.1	88	26	27	22	26	-	91	88	85	0.22	0	0	0	0	0	0	0	0	0
+P	head	Standard_Helm	Standard Helm	4	80	15	20	6	16	-	106	56	78	0.22	0	0	0	0	0	0	0	0	0
+P	head	Steel_Helm	Steel Helm	5.4	119	15	16	10	15	-	127	113	119	0.266	0	0	0	0	0	0	0	0	0
+P	head	Syans_Helm	Syan's Helm	6.2	123	24	32	14	24	-	131	110	125	0.266	0	0	0	0	0	0	0	0	0
+P	head	Symbol_of_Avarice	Symbol of Avarice	8	90	20	20	30	25	-	100	70	100	0.266	0	0	0	0	0	0	0	0	0
+P	head	Targrays_Helm	Targray's Helm	4	73	18	18	15	20	-	79	68	73	0.266	0	0	0	0	0	0	0	0	0
+P	head	Tattered_Cloth_Hood	Tattered Cloth Hood	1.1	41	22	29	19	22	-	39	43	39	0.18	0	0	0	0	0	0	0	0	0
+P	head	Thief_Mask	Thief Mask	1.2	40	19	15	14	16	-	39	42	39	0.18	0	0	0	0	0	0	0	0	0
+P	head	Throne_Defender_Helm	Throne Defender Helm	6.4	131	26	29	16	26	-	136	126	132	0.266	0	0	0	0	0	0	0	0	0
+P	head	Throne_Watcher_Helm	Throne Watcher Helm	5.6	104	46	30	24	30	-	112	99	104	0.266	0	0	0	0	0	0	0	0	0
+P	head	Traveling_Merchant_Hat	Traveling Merchant Hat	2.6	50	14	15	17	14	-	48	53	48	0.22	0	0	0	0	0	0	0	0	0
+P	head	Tseldora_Cap	Tseldora Cap	1.4	21	9	10	12	9	-	20	23	20	0.18	0	0	0	0	0	0	0	0	0
+P	head	Varangian_Helm	Varangian Helm	4.6	106	34	38	20	34	-	119	92	109	0.22	0	0	0	0	0	0	0	0	0
+P	head	Velstadts_Helm	Velstadt's Helm	7.5	157	20	21	9	48	-	172	143	150	0.266	0	1	1	0	0	0	0	0	0
+P	head	Vengarls_Helm	Vengarl's Helm	6.8	142	18	24	15	18	-	152	134	142	0.266	0	0	2	0	0	0	0	0	0
+P	head	Wanderer_Hood	Wanderer Hood	1.4	46	15	20	22	16	-	47	44	47	0.18	0	0	0	0	0	0	0	0	0
+P	head	Warlock_Mask	Warlock Mask	4.8	52	72	33	48	72	7:14	48	59	48	0.18	0	0	0	0	0	0	0	2	0
+P	head	White_Hollow_Mage_Hood	White Hollow Mage Hood	1.8	67	56	41	43	47	-	66	70	66	0.18	0	0	0	0	0	0	0	1	0
+P	head	White_Priest_Headpiece	White Priest Headpiece	1.4	47	28	28	37	31	-	46	49	46	0.18	0	0	0	0	0	0	0	0	1
+P	head	Xanthous_Crown	Xanthous Crown	5	100	24	7	16	22	-	100	174	66	0.18	0	0	0	0	0	0	0	0	0
+P	chest	Naked	Naked	0	0	0	0	0	0	-	0	0	0	0.225	0	0	0	0	0	0	0	0	0
+P	chest	Agdaynes_Black_Robe	Agdayne's Black Robe	5.8	139	81	79	72	108	-	135	147	135	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Alonne_Captain_Armor	Alonne Captain Armor	15.6	324	68	106	45	68	-	343	305	324	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Alonne_Knight_Armor	Alonne Knight Armor	14.2	293	45	81	34	45	-	309	279	293	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Alonnes_Armor	Alonne's Armor	9	181	48	53	36	52	-	187	172	178	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Alva_Armor	Alva Armor	8.8	179	49	54	37	53	-	185	170	176	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Archdrake_Robes	Archdrake Robes	9.8	178	57	54	93	53	-	178	178	178	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Armor_of_Aurous	Armor of Aurous	10.1	183	65	63	45	69	-	192	177	184	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Armor_of_Aurous_Transparent	Armor of Aurous (Transparent)	3.2	115	45	37	48	41	-	109	123	111	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Armor_of_the_Forlorn	Armor of the Forlorn	11.3	220	42	50	35	68	-	235	207	220	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Astrologists_Robe	Astrologist's Robe	5.1	121	87	60	60	74	-	117	126	117	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Bandit_Armor	Bandit Armor	6.2	133	40	41	33	40	-	137	133	128	0.44	0	0	0	0	0	0	0	0	0
+P	chest	Bell_Keeper_Bellyband	Bell Keeper Bellyband	6	131	28	26	37	50	-	128	138	128	0.44	0	0	0	0	0	0	0	0	0
+P	chest	Benharts_Armor	Benhart's Armor	10.5	208	48	46	41	48	-	216	200	208	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Black_Dragon_Armor	Black Dragon Armor	4.8	125	45	98	47	45	-	127	121	125	0.266	0	0	0	0	0	0	0	0	0
+P	chest	Black_Hollow_Mage_Robe	Black Hollow Mage Robe	3.3	110	94	67	72	79	-	109	117	109	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Black_Leather_Armor	Black Leather Armor	3.9	131	62	47	45	51	-	128	135	128	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Black_Robes	Black Robes	2.6	101	110	74	74	74	7:16	96	108	96	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Black_Witch_Robe	Black Witch Robe	4.8	120	135	108	126	131	-	116	132	116	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Bone_King_Robe	Bone King Robe	3.8	106	68	75	61	94	-	102	116	102	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Brigand_Armor	Brigand Armor	3.1	113	56	45	42	48	-	111	124	105	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Cales_Leather_Armor	Cale's Leather Armor	6.4	166	47	50	40	47	-	164	164	171	0.44	0	0	0	0	0	0	0	0	0
+P	chest	Catarina_Armor	Catarina Armor	11.7	224	48	53	32	48	-	260	224	224	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Chaos_Robe	Chaos Robe	2.6	101	74	110	74	106	7:16,8:16	96	108	96	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Charred_Loyce_Armor	Charred Loyce Armor	12.8	259	55	67	32	53	-	265	223	259	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Creightons_Chainmail	Creighton's Chainmail	9.7	180	54	60	31	54	-	187	176	180	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Dark_Armor	Dark Armor	9.8	171	45	45	30	95	-	180	171	164	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Desert_Sorceress_Top	Desert Sorceress Top	2.7	89	83	57	69	75	-	87	83	87	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Dingy_Robe	Dingy Robe	3	108	65	55	62	62	-	101	122	101	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Dragon_Acolyte_Robe	Dragon Acolyte Robe	3.9	118	48	48	56	60	-	115	124	115	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Dragonrider_Armor	Dragonrider Armor	16	340	29	27	30	29	-	355	317	340	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Drakeblood_Armor	Drakeblood Armor	12.5	249	50	62	33	55	-	267	237	255	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Drakekeeper_Armor	Drakekeeper Armor	15.7	333	44	49	39	44	-	351	320	333	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Drangleic_Mail	Drangleic Mail	14.5	293	47	47	42	47	-	316	276	298	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Elite_Knight_Armor	Elite Knight Armor	11.7	207	59	63	43	59	-	229	202	207	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Executioner_Armor	Executioner Armor	6.7	140	32	34	22	75	-	148	128	144	0.44	0	0	0	0	0	0	0	0	0
+P	chest	Falconer_Armor	Falconer Armor	7.7	147	44	37	50	44	-	142	156	142	0.44	0	0	0	0	0	0	0	0	0
+P	chest	Faraam_Armor	Faraam Armor	12.6	249	56	61	37	56	-	265	235	253	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Fume_Sorcerer_Robes	Fume Sorcerer Robes	4.7	128	45	33	61	63	-	124	136	124	0.44	0	0	0	0	0	0	0	0	0
+P	chest	Grave_Warden_Top	Grave Warden Top	6	158	69	66	84	89	-	152	172	152	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Gyrm_Armor	Gyrm Armor	12.3	258	37	34	30	37	-	269	258	246	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Gyrm_Warrior_Armor	Gyrm Warrior Armor	19.7	390	41	51	51	41	4:14	408	408	354	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Hard_Leather_Armor	Hard Leather Armor	7.2	135	42	28	53	44	-	132	141	133	0.44	0	0	0	0	0	0	0	0	0
+P	chest	Havels_Armor	Havel's Armor	19.5	399	52	57	48	52	4:20	453	344	399	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Heide_Knight_Chainmail	Heide Knight Chainmail	10.9	215	37	47	32	65	-	230	202	215	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Hexers_Robes	Hexer's Robes	2.6	101	74	110	74	74	-	96	108	96	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Hollow_Infantry_Armor	Hollow Infantry Armor	5.9	91	20	16	24	20	-	90	94	90	0.44	0	0	0	0	0	0	0	0	0
+P	chest	Hollow_Soldier_Armor	Hollow Soldier Armor	8.6	138	44	46	31	44	-	146	132	139	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Imperious_Armor	Imperious Armor	14.7	308	55	44	35	55	-	325	295	308	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Imported_Tunic	Imported Tunic	6.5	95	28	24	33	28	-	90	105	90	0.44	0	0	0	0	0	0	0	0	0
+P	chest	Infantry_Armor	Infantry Armor	5.9	113	28	26	36	28	-	111	118	111	0.44	0	0	0	0	0	0	0	0	0
+P	chest	Insolent_Armor	Insolent Armor	9.8	171	44	44	54	40	-	183	162	171	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Ironclad_Armor	Ironclad Armor	29.8	303	44	49	28	44	4:14	325	277	303	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Ivory_King_Armor	Ivory King Armor	14.8	285	55	70	32	55	-	295	233	285	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Jesters_Robes	Jester's Robes	5.7	131	74	74	74	74	5:14	127	139	127	0.44	0	0	0	0	0	0	0	0	0
+P	chest	Kings_Armor	King's Armor	12	215	72	72	57	51	4:14,5:12	227	204	215	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Knight_Armor	Knight Armor	10.9	184	55	59	39	55	-	209	178	184	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Leather_Armor	Leather Armor	4.7	130	47	30	62	51	-	126	138	126	0.44	0	0	0	0	0	0	0	0	0
+P	chest	Leydia_Black_Robe	Leydia Black Robe	3.5	105	72	50	43	95	-	100	116	100	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Leydia_White_Robe	Leydia White Robe	3.5	96	64	64	54	82	-	92	106	92	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Lion_Mage_Robe	Lion Mage Robe	2.2	79	74	60	62	74	-	72	83	72	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Lion_Warrior_Cape	Lion Warrior Cape	1.5	56	24	23	23	48	-	55	58	55	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Llewellyn_Armor	Llewellyn Armor	6.8	180	58	69	44	58	-	186	167	182	0.44	0	0	0	0	0	0	0	0	0
+P	chest	Looking_Glass_Armor	Looking Glass Armor	18.3	354	44	50	79	44	4:16	404	308	354	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Loyce_Armor	Loyce Armor	12.3	247	67	55	32	53	-	255	238	249	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Lucatiels_Vest	Lucatiel's Vest	6	153	84	75	91	84	-	147	164	147	0.44	0	0	0	0	0	0	0	0	0
+P	chest	Mad_Warrior_Armor	Mad Warrior Armor	12.5	257	42	40	31	42	-	270	257	245	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Manikin_Top	Manikin Top	2.3	92	47	44	55	57	-	88	97	88	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Mastodon_Armor	Mastodon Armor	17.7	355	41	46	24	41	4:16	381	329	355	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Monastery_Longshirt	Monastery Longshirt	1.6	101	89	65	57	65	-	94	107	94	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Moon_Butterfly_Wings	Moon Butterfly Wings	1.4	72	37	25	38	32	-	68	79	68	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Nahr_Alma_Robes	Nahr Alma Robes	3.5	89	49	42	46	88	-	87	95	87	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Northwarder_Robe	Northwarder Robe	2.5	98	85	62	64	70	-	95	103	95	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Old_Ironclad_Armor	Old Ironclad Armor	29.8	261	33	37	24	33	-	283	239	261	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Old_Knight_Armor	Old Knight Armor	16.4	342	29	29	19	29	-	356	319	342	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Pates_Armor	Pate's Armor	5.9	130	42	28	53	44	-	127	135	127	0.44	0	0	0	0	0	0	0	0	0
+P	chest	Peasant_Attire	Peasant Attire	3.8	50	23	25	31	23	-	48	55	48	0.36	0	0	0	0	0	0	2	-1	0
+P	chest	Penal_Straightjacket	Penal Straightjacket	6.2	113	47	58	42	52	-	116	116	105	0.44	0	0	0	0	0	0	0	0	0
+P	chest	Priestess_Robe	Priestess Robe	2.8	106	66	65	91	73	-	104	110	104	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Prisoners_Tatters	Prisoner's Tatters	2.2	22	23	23	33	26	-	21	25	21	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Raimes_Armor	Raime's Armor	13.6	253	54	71	32	69	-	271	226	259	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Rampart_Golem_Armor	Rampart Golem Armor	15.5	293	44	40	42	43	-	321	270	303	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Red_Lion_Warrior_Cape	Red Lion Warrior Cape	1.5	68	32	30	30	53	-	66	71	66	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Retainer_Robe	Retainer Robe	3.3	101	85	70	73	74	-	98	106	98	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Robe_of_Judgment	Robe of Judgment	3.9	115	59	48	41	52	-	111	123	111	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Rogue_Armor	Rogue Armor	3.5	111	35	42	40	47	-	113	108	113	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Royal_Soldier_Armor	Royal Soldier Armor	9.2	157	49	50	33	49	-	164	149	160	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Royal_Swordsman_Armor	Royal Swordsman Armor	11.2	201	46	59	31	46	-	223	176	210	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Ruin_Armor	Ruin Armor	10.5	209	49	55	33	49	-	224	189	213	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Rusted_Mastodon_Armor	Rusted Mastodon Armor	15.9	300	31	35	17	31	4:14	322	279	300	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Saints_Dress	Saint's Dress	2.6	101	74	74	91	74	8:16	96	108	96	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Sanctum_Knight_Armor	Sanctum Knight Armor	14.4	295	45	45	40	46	-	317	275	297	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Shadow_Top	Shadow Top	2.6	97	52	59	54	70	-	87	109	87	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Singers_Dress	Singer's Dress	2.6	45	68	53	62	62	-	43	49	43	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Smelter_Demon_Armor	Smelter Demon Armor	17.6	340	43	90	40	43	4:16	417	343	240	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Steel_Armor	Steel Armor	14	309	39	42	27	39	-	330	294	309	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Syans_Armor	Syan's Armor	13.8	273	53	70	31	53	-	291	246	279	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Targrays_Armor	Targray's Armor	9.8	178	44	44	36	49	-	193	166	178	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Tattered_Cloth_Robe	Tattered Cloth Robe	2.7	100	53	72	47	53	-	97	105	97	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Throne_Defender_Armor	Throne Defender Armor	13.8	283	57	63	34	57	-	292	272	284	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Throne_Watcher_Armor	Throne Watcher Armor	11.2	209	91	59	47	59	-	225	198	209	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Traveling_Merchant_Coat	Traveling Merchant Coat	7.7	148	42	46	49	42	-	143	158	143	0.44	0	0	0	0	0	0	0	0	0
+P	chest	Tseldora_Robe	Tseldora Robe	3	44	20	21	26	19	-	42	48	42	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Varangian_Armor	Varangian Armor	5.1	135	43	31	51	43	-	132	142	132	0.44	0	0	0	0	0	0	0	0	0
+P	chest	Velstadts_Armor	Velstadt's Armor	15.2	330	41	43	20	98	-	350	301	343	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Vengarls_Armor	Vengarl's Armor	15.1	316	41	53	34	41	-	338	298	316	0.532	0	0	0	0	0	0	0	0	0
+P	chest	Wanderer_Coat	Wanderer Coat	3.5	115	38	50	56	40	-	117	111	118	0.36	0	0	0	0	0	0	0	0	0
+P	chest	White_Hollow_Mage_Robe	White Hollow Mage Robe	2.8	105	88	63	66	73	-	102	109	102	0.36	0	0	0	0	0	0	0	0	0
+P	chest	White_Priest_Robe	White Priest Robe	3.3	111	66	66	86	73	-	108	116	108	0.36	0	0	0	0	0	0	0	0	0
+P	chest	Xanthous_Overcoat	Xanthous Overcoat	3.9	78	59	15	37	46	-	78	89	67	0.36	0	0	0	0	0	0	0	0	0
+P	hands	Naked	Naked	0	0	0	0	0	0	-	0	0	0	0.075	0	0	0	0	0	0	0	0	0
+P	hands	Agdaynes_Cuffs	Agdayne's Cuffs	2.9	70	41	39	36	54	-	68	74	68	0.18	0	0	0	0	0	0	0	0	1
+P	hands	Alonne_Knight_Gauntlets	Alonne Knight Gauntlets	6.7	138	21	38	16	21	-	145	131	138	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Alonnes_Gauntlets	Alonne's Gauntlets	3	61	15	17	11	16	-	63	58	60	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Alva_Gauntlets	Alva Gauntlets	2.9	59	16	18	12	17	-	61	56	58	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Archdrake_Gloves	Archdrake Gloves	3.2	58	19	18	30	17	-	58	58	58	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Astrologists_Gauntlets	Astrologist's Gauntlets	2.1	50	36	25	25	31	-	48	52	48	0.18	0	0	0	0	0	0	0	0	0
+P	hands	Bandit_Gauntlets	Bandit Gauntlets	2.8	60	18	19	15	18	-	62	60	58	0.22	0	0	0	0	0	0	0	0	0
+P	hands	Bell_Keeper_Cuffs	Bell Keeper Cuffs	2.5	55	12	11	16	21	-	53	58	53	0.22	0	0	0	0	0	0	0	0	0
+P	hands	Benharts_Gauntlets	Benhart's Gauntlets	5.5	109	25	24	22	25	-	113	105	109	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Black_Dragon_Gauntlets	Black Dragon Gauntlets	1.8	48	17	38	18	17	-	49	47	48	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Black_Gloves	Black Gloves	1	39	42	28	28	28	7:16	37	42	37	0.18	0	0	0	0	0	0	0	0	0
+P	hands	Black_Leather_Gloves	Black Leather Gloves	1.8	60	29	22	21	24	-	59	62	59	0.18	0	0	0	0	0	0	0	0	0
+P	hands	Black_Witch_Gloves	Black Witch Gloves	1.7	52	48	38	45	46	-	50	56	50	0.18	0	0	0	0	0	0	0	0	0
+P	hands	Bone_King_Cuffs	Bone King Cuffs	1.9	53	34	37	30	47	-	51	58	51	0.18	0	0	0	0	0	0	0	0	0
+P	hands	Brigand_Gauntlets	Brigand Gauntlets	1.8	66	32	26	25	28	-	65	72	61	0.18	0	0	0	0	0	0	0	0	0
+P	hands	Catarina_Gauntlets	Catarina Gauntlets	6.9	132	28	31	19	28	-	153	132	132	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Chaos_Gloves	Chaos Gloves	1	39	28	42	28	41	7:16,8:16	37	42	37	0.18	0	0	0	0	0	0	0	0	0
+P	hands	Charred_Loyce_Gauntlets	Charred Loyce Gauntlets	4.5	77	15	24	9	15	-	83	66	77	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Creightons_Chain_Gloves	Creighton's Chain Gloves	3.4	63	19	21	11	19	-	66	62	63	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Dark_Gauntlets	Dark Gauntlets	5.8	101	27	27	18	56	-	107	101	97	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Desert_Sorceress_Gloves	Desert Sorceress Gloves	1.5	50	46	32	38	42	-	48	52	48	0.18	0	0	0	0	0	0	0	0	0
+P	hands	Dingy_Cuffs	Dingy Cuffs	1.2	43	26	22	25	25	-	40	49	40	0.18	0	0	0	0	0	0	0	0	0
+P	hands	Dragon_Acolyte_Gloves	Dragon Acolyte Gloves	1.6	48	20	20	23	25	-	47	51	47	0.18	0	0	0	0	0	0	0	0	0
+P	hands	Dragonrider_Gauntlets	Dragonrider Gauntlets	6.2	132	12	11	12	12	-	138	123	132	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Drakeblood_Gauntlets	Drakeblood Gauntlets	4.6	93	15	24	10	20	-	101	90	96	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Drakekeeper_Gauntlets	Drakekeeper Gauntlets	8.4	178	23	26	20	23	-	188	171	178	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Drangleic_Gauntlets	Drangleic Gauntlets	6.2	125	20	20	18	20	-	135	118	127	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Elite_Knight_Gloves	Elite Knight Gloves	3.7	66	19	20	14	19	-	72	64	66	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Engraved_Gauntlets	Engraved Gauntlets	5.5	44	22	22	22	22	4:12,5:12	44	44	44	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Executioner_Gauntlets	Executioner Gauntlets	2.7	56	13	14	9	30	-	60	52	58	0.22	0	0	0	0	0	0	0	0	0
+P	hands	Falconer_Gloves	Falconer Gloves	3.2	61	18	15	21	18	-	59	65	59	0.22	0	0	0	0	0	0	0	0	0
+P	hands	Faraam_Gauntlets	Faraam Gauntlets	4.7	93	21	23	14	21	-	99	88	94	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Fume_Sorcerer_Gloves	Fume Sorcerer Gloves	2.8	75	26	20	36	33	-	73	80	73	0.22	0	0	0	0	0	0	0	0	0
+P	hands	Gauntlets_of_Aurous	Gauntlets of Aurous	3.2	58	21	20	14	22	-	61	56	58	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Gauntlets_of_Aurous_Transparent	Gauntlets of Aurous (Transparent)	1.2	43	17	14	18	15	-	41	46	42	0.18	0	0	0	0	0	0	0	0	0
+P	hands	Gauntlets_of_the_Forlorn	Gauntlets of the Forlorn	5.5	109	20	25	18	34	-	115	101	108	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Grave_Warden_Cuffs	Grave Warden Cuffs	2.2	58	25	24	31	33	-	56	63	56	0.18	0	0	0	0	0	0	0	0	0
+P	hands	Gyrm_Gloves	Gyrm Gloves	3.6	75	11	10	9	11	-	79	75	72	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Gyrm_Warrior_Gloves	Gyrm Warrior Gloves	5.4	108	12	14	14	12	4:14	112	112	98	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Hard_Leather_Gauntlets	Hard Leather Gauntlets	3.8	80	25	16	31	26	-	78	83	78	0.22	0	0	0	0	0	0	0	0	0
+P	hands	Havels_Gauntlets	Havel's Gauntlets	11.5	235	31	34	28	31	4:20	267	202	235	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Heide_Knight_Gauntlets	Heide Knight Gauntlets	5.4	107	18	23	16	32	-	114	100	107	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Hexers_Gloves	Hexer's Gloves	1	39	28	42	28	28	-	37	42	37	0.18	0	0	0	0	0	0	0	0	0
+P	hands	Hollow_Infantry_Gloves	Hollow Infantry Gloves	2.8	43	9	8	12	9	-	42	45	42	0.22	0	0	0	0	0	0	0	0	0
+P	hands	Hollow_Soldier_Gauntlets	Hollow Soldier Gauntlets	3.2	51	16	17	11	16	-	54	49	52	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Imperious_Gloves	Imperious Gloves	6	125	22	18	14	22	-	132	120	125	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Imported_Manchettes	Imported Manchettes	1.8	26	8	7	9	8	-	25	29	25	0.22	0	0	0	0	0	0	0	0	0
+P	hands	Infantry_Gloves	Infantry Gloves	2.8	54	14	13	17	14	-	53	56	53	0.22	0	0	0	0	0	0	0	0	0
+P	hands	Insolent_Gloves	Insolent Gloves	5.8	101	26	26	32	24	-	108	96	101	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Ironclad_Gauntlets	Ironclad Gauntlets	9.4	170	24	27	16	14	4:14	182	155	170	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Ivory_King_Gauntlets	Ivory King Gauntlets	5	87	15	25	9	16	-	90	70	87	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Jesters_Gloves	Jester's Gloves	2.3	53	30	30	30	30	-	51	56	51	0.22	0	0	0	0	0	0	0	0	0
+P	hands	Kings_Gauntlets	King's Gauntlets	4.2	75	25	25	20	18	4:14,5:12	80	71	75	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Knight_Gauntlets	Knight Gauntlets	3.5	59	18	19	13	18	-	67	57	59	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Leather_Gloves	Leather Gloves	2.8	77	28	18	37	30	-	75	82	75	0.22	0	0	0	0	0	0	0	0	0
+P	hands	Leydia_Gauntlets	Leydia Gauntlets	1.2	33	22	22	19	28	-	32	36	32	0.18	0	0	0	0	0	0	0	0	0
+P	hands	Lion_Mage_Cuffs	Lion Mage Cuffs	1.4	50	47	38	39	47	-	46	53	46	0.18	0	0	0	0	0	0	0	0	0
+P	hands	Lion_Warrior_Cuffs	Lion Warrior Cuffs	1.3	49	21	20	20	37	-	48	50	48	0.18	0	0	0	0	0	0	0	0	0
+P	hands	Llewellyn_Gloves	Llewellyn Gloves	3.1	82	26	31	20	26	-	85	76	83	0.22	0	0	0	0	0	0	0	0	0
+P	hands	Looking_Glass_Gauntlets	Looking Glass Gauntlets	10.4	201	25	28	45	25	4:16	230	175	201	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Loyce_Gauntlets	Loyce Gauntlets	4.4	74	24	15	9	15	-	80	71	74	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Lucatiels_Gloves	Lucatiel's Gloves	2	51	28	25	30	28	-	49	55	49	0.22	0	0	0	0	0	0	0	0	0
+P	hands	Mad_Warrior_Gauntlet	Mad Warrior Gauntlet	7.4	152	25	24	18	25	-	160	152	145	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Manchettes_of_Judgment	Manchettes of Judgment	1.8	53	27	22	19	24	-	51	57	51	0.18	0	0	0	0	0	0	0	0	0
+P	hands	Manikin_Gloves	Manikin Gloves	1.2	48	24	23	29	30	-	46	51	46	0.18	0	0	0	0	0	0	0	0	0
+P	hands	Mastodon_Gauntlets	Mastodon Gauntlets	8.8	176	20	23	12	20	4:16	189	163	176	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Monastery_Long_Gloves	Monastery Long Gloves	0.9	49	43	31	28	31	-	45	51	45	0.18	0	0	0	0	0	0	0	0	0
+P	hands	Moon_Butterfly_Cuffs	Moon Butterfly Cuffs	0.8	41	21	14	22	18	-	39	45	39	0.18	0	0	0	0	0	0	0	0	0
+P	hands	Northwarder_Manchettes	Northwarder Manchettes	1	37	21	21	28	23	-	35	38	36	0.18	0	0	0	0	0	0	0	0	0
+P	hands	Old_Ironclad_Gauntlets	Old Ironclad Gauntlets	9.4	146	18	20	13	18	4:14	159	134	146	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Old_Knight_Gauntlets	Old Knight Gauntlets	8.2	171	15	15	10	15	-	179	160	171	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Pates_Gloves	Pate's Gloves	3.5	77	25	16	31	26	-	75	80	75	0.22	0	0	0	0	0	0	0	0	0
+P	hands	Peasant_Long_Gloves	Peasant Long Gloves	1.8	24	11	12	15	11	-	23	26	23	0.18	0	0	0	0	0	0	2	-1	0
+P	hands	Penal_Handcuffs	Penal Handcuffs	4.8	82	32	53	28	37	-	85	85	75	0.22	0	0	0	0	0	0	0	0	0
+P	hands	Priestess_Gloves	Priestess Gloves	0.9	34	21	21	29	24	-	33	35	33	0.18	0	0	0	0	0	0	0	0	0
+P	hands	Prisoners_Gloves	Prisoner's Gloves	1	10	10	11	15	12	-	9	11	9	0.18	0	0	0	0	0	0	0	0	0
+P	hands	Raimes_Gauntlets	Raime's Gauntlets	5	83	21	28	13	36	-	90	73	95	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Rampart_Golem_Gauntlets	Rampart Golem Gauntlets	8.2	158	24	22	21	23	-	168	131	158	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Rogue_Gauntlets	Rogue Gauntlets	1.8	57	18	22	21	24	-	58	55	58	0.18	0	0	0	0	0	0	0	0	0
+P	hands	Royal_Soldier_Gauntlets	Royal Soldier Gauntlets	3.8	65	20	21	14	20	-	68	62	66	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Royal_Swordsman_Gloves	Royal Swordsman Gloves	6.1	110	25	32	17	25	-	122	96	114	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Ruin_Gauntlets	Ruin Gauntlets	6.2	123	29	32	20	29	-	133	112	126	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Rusted_Mastodon_Gauntlets	Rusted Mastodon Gauntlets	7.8	147	15	17	8	15	4:14	158	137	147	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Saints_Long_Gloves	Saint's Long Gloves	1	39	28	28	35	28	8:16	37	42	37	0.18	0	0	0	0	0	0	0	0	0
+P	hands	Sanctum_Knight_Gauntlets	Sanctum Knight Gauntlets	6	127	19	18	16	17	-	136	116	125	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Sanctum_Soldier_Gauntlet	Sanctum Soldier Gauntlet	3.5	57	17	18	15	17	-	65	55	62	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Shadow_Gauntlets	Shadow Gauntlets	1.6	60	32	36	33	43	5:16	53	67	53	0.18	0	0	0	0	0	0	0	0	0
+P	hands	Smelter_Demon_Gauntlets	Smelter Demon Gauntlets	10.4	203	25	53	24	25	4:16	225	181	203	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Steel_Gauntlets	Steel Gauntlets	8.3	183	23	25	16	23	-	196	174	183	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Syans_Gauntlets	Syan's Gauntlets	5.2	103	20	27	12	20	-	110	93	105	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Targrays_Manifers	Targray's Manifers	3.3	60	15	15	12	17	-	65	56	60	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Tattered_Cloth_Manchettes	Tattered Cloth Manchettes	1.6	59	31	43	28	31	-	57	62	57	0.18	0	0	0	0	0	0	0	0	0
+P	hands	Throne_Defender_Gauntlets	Throne Defender Gauntlets	4.2	86	17	19	10	17	-	89	83	86	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Throne_Watcher_Gauntlets	Throne Watcher Gauntlets	4.1	76	33	22	17	22	-	82	73	76	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Traveling_Merchant_Gloves	Traveling Merchant Gloves	3.8	73	21	23	24	21	-	71	78	71	0.22	0	0	0	0	0	0	0	0	0
+P	hands	Tseldora_Manchettes	Tseldora Manchettes	2	29	13	14	18	13	-	28	32	28	0.18	0	0	0	0	0	0	0	0	0
+P	hands	Varangian_Cuffs	Varangian Cuffs	1.8	35	11	8	13	11	-	35	37	35	0.22	0	0	0	0	0	0	0	0	0
+P	hands	Velstadts_Gauntlets	Velstadt's Gauntlets	5	108	13	14	6	32	-	114	98	112	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Vengarls_Gloves	Vengarl's Gloves	5.3	111	14	18	12	14	-	118	104	111	0.266	0	0	0	0	0	0	0	0	0
+P	hands	Wanderer_Manchette	Wanderer Manchette	2.1	69	23	30	33	24	-	70	67	71	0.18	0	0	0	0	0	0	0	0	0
+P	hands	White_Priest_Gloves	White Priest Gloves	1.1	37	22	22	29	24	-	36	39	36	0.18	0	0	0	0	0	0	0	0	0
+P	hands	Xanthous_Gloves	Xanthous Gloves	2.3	46	35	9	22	27	-	46	53	40	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Naked	Naked	0	0	0	0	0	0	-	0	0	0	0.125	0	0	0	0	0	0	0	0	0
+P	legs	Agdaynes_Kilt	Agdayne's Kilt	2.9	70	41	39	36	54	-	68	74	68	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Alonne_Knight_Leggings	Alonne Knight Leggings	9.8	201	31	55	23	31	-	213	192	201	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Alonnes_Leggings	Alonne's Leggings	5.5	108	28	31	21	30	-	111	103	106	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Alva_Leggings	Alva Leggings	5.2	106	29	32	22	31	-	109	101	104	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Archdrake_Boots	Archdrake Boots	4.7	85	27	26	45	25	-	85	85	85	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Astrologists_Bottoms	Astrologist's Bottoms	3.8	90	65	44	44	55	-	87	94	87	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Bandit_Boots	Bandit Boots	2.8	60	18	19	15	18	-	62	60	58	0.22	0	0	0	0	0	0	0	0	0
+P	legs	Bell_Keeper_Trousers	Bell Keeper Trousers	4	87	19	18	25	33	-	85	92	85	0.22	0	0	0	0	0	0	0	0	0
+P	legs	Benharts_Boots	Benhart's Boots	6.5	129	30	28	26	30	-	134	124	129	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Black_Boots	Black Boots	2	78	85	57	57	57	7:16	74	83	74	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Black_Dragon_Leggings	Black Dragon Leggings	2.7	72	26	57	27	26	-	74	70	72	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Black_Leather_Boots	Black Leather Boots	2.2	74	35	27	25	29	-	72	76	72	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Black_Witch_Trousers	Black Witch Trousers	1.7	52	48	38	45	46	-	50	56	50	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Blood_Stained_Skirt	Blood-Stained Skirt	2.5	90	54	46	51	51	-	84	101	84	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Bone_King_Skirt	Bone King Skirt	2.9	81	52	57	46	72	-	78	88	78	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Brigand_Trousers	Brigand Trousers	1.8	66	32	26	25	28	-	65	72	61	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Cales_Shoes	Cale's Shoes	3	78	22	23	19	22	-	77	77	80	0.22	0	0	0	0	0	0	0	0	0
+P	legs	Catarina_Leggings	Catarina Leggings	6.9	132	28	31	19	28	-	153	132	132	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Chaos_Boots	Chaos Boots	2	78	57	85	57	82	7:16,8:16	74	83	74	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Charred_Loyce_Leggings	Charred Loyce Leggings	7.8	148	30	43	18	30	-	157	125	148	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Creightons_Chain_Leggings	Creighton's Chain Leggings	4.5	84	25	28	14	25	-	87	82	84	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Dark_Leggings	Dark Leggings	5.8	101	27	27	18	56	-	107	101	97	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Desert_Sorceress_Skirt	Desert Sorceress Skirt	2.4	79	74	51	61	67	-	77	83	77	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Dragon_Acolyte_Boots	Dragon Acolyte Boots	2.4	73	30	30	34	37	-	71	76	71	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Dragonrider_Leggings	Dragonrider Leggings	7.4	158	14	13	14	14	-	165	147	158	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Drakeblood_Leggings	Drakeblood Leggings	7.8	156	29	39	20	34	-	168	149	161	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Drakekeeper_Boots	Drakekeeper Boots	8.4	178	23	26	20	23	-	188	171	178	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Drangleic_Leggings	Drangleic Leggings	7.6	153	25	25	22	25	-	166	145	156	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Elite_Knight_Leggings	Elite Knight Leggings	6.9	122	35	37	25	35	-	135	119	122	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Executioner_Leggings	Executioner Leggings	2.7	56	13	14	9	30	-	60	52	58	0.22	0	0	0	0	0	0	0	0	0
+P	legs	Falconer_Boots	Falconer Boots	5.8	111	33	28	38	33	-	107	118	107	0.22	0	0	0	0	0	0	0	0	0
+P	legs	Faraam_Boots	Faraam Boots	7.9	156	35	38	23	35	-	166	147	159	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Flower_Skirt	Flower Skirt	1.7	52	30	25	28	31	-	50	55	50	0.18	2	1	0	0	0	0	0	0	0
+P	legs	Flying_Feline_Boots	Flying Feline Boots	2	60	22	14	37	24	-	53	74	54	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Fume_Sorcerer_Boots	Fume Sorcerer Boots	2.8	75	26	20	36	33	-	73	80	73	0.22	0	0	0	0	0	0	0	0	0
+P	legs	Grave_Warden_Bottoms	Grave Warden Bottoms	3.8	100	44	42	53	57	-	96	109	96	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Gyrm_Boots	Gyrm Boots	5.6	117	17	16	14	17	-	123	117	112	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Gyrm_Warrior_Boots	Gyrm Warrior Boots	8.8	175	19	23	23	19	4:14	183	183	159	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Hard_Leather_Boots	Hard Leather Boots	3.8	80	25	16	31	26	-	78	83	78	0.22	0	0	0	0	0	0	0	0	0
+P	legs	Havels_Leggings	Havel's Leggings	11.5	235	31	34	28	31	4:20	267	202	235	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Heavy_Boots	Heavy Boots	1.6	59	31	43	28	31	-	57	62	57	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Heide_Knight_Leggings	Heide Knight Leggings	6.4	126	22	28	19	38	-	135	119	126	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Hexers_Boots	Hexer's Boots	2	78	57	85	57	57	-	74	83	74	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Hollow_Infantry_Boots	Hollow Infantry Boots	4.5	70	15	13	19	15	-	68	72	68	0.22	0	0	0	0	0	0	0	0	0
+P	legs	Hollow_Soldier_Leggings	Hollow Soldier Leggings	1.8	29	9	10	6	9	-	30	28	29	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Imperious_Leggings	Imperious Leggings	7.5	157	28	22	17	28	-	166	150	157	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Imported_Trousers	Imported Trousers	3.6	52	15	13	18	15	-	50	58	50	0.22	0	0	0	0	0	0	0	0	0
+P	legs	Infantry_Boots	Infantry Boots	4.5	86	22	20	28	22	-	85	90	85	0.22	0	0	0	0	0	0	0	0	0
+P	legs	Insolent_Boots	Insolent Boots	5.8	101	26	26	32	24	-	108	96	101	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Ironclad_Leggings	Ironclad Leggings	9.4	170	24	27	16	24	4:14	182	155	170	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Ivory_King_Leggings	Ivory King Leggings	8.6	160	30	44	18	31	-	165	130	160	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Jesters_Tights	Jester's Tights	2.7	62	35	35	35	35	5:14	60	66	60	0.22	0	0	0	0	0	0	0	0	0
+P	legs	Kings_Leggings	King's Leggings	7.1	127	42	42	34	30	4:14,5:12	134	121	127	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Knight_Leggings	Knight Leggings	6.4	108	32	35	23	32	-	123	105	108	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Leather_Boots	Leather Boots	2.8	77	28	18	37	30	-	75	82	75	0.22	0	0	0	0	0	0	0	0	0
+P	legs	Leggings_of_Aurous	Leggings of Aurous	5.8	105	37	36	26	40	-	110	102	106	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Leggings_of_Aurous_Transparent	Leggings of Aurous (Transparent)	2	72	28	23	30	26	-	68	77	69	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Leggings_of_the_Forlorn	Leggings of the Forlorn	6.2	124	20	26	17	36	-	133	117	124	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Lion_Mage_Skirt	Lion Mage Skirt	1.4	50	47	38	39	47	-	46	53	46	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Lion_Warrior_Skirt	Lion Warrior Skirt	1.2	45	19	18	18	35	-	44	47	44	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Llewellyn_Shoes	Llewellyn Shoes	3.1	82	26	31	20	26	-	85	76	83	0.22	0	0	0	0	0	0	0	0	0
+P	legs	Looking_Glass_Leggings	Looking Glass Leggings	10.4	201	25	28	45	25	4:16	230	175	201	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Loyce_Leggings	Loyce Leggings	7.5	143	43	30	18	30	-	152	137	143	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Lucatiels_Trousers	Lucatiel's Trousers	4	102	56	50	61	56	-	98	109	98	0.22	0	0	0	0	0	0	0	0	0
+P	legs	Mad_Warrior_Leggings	Mad Warrior Leggings	7.4	152	25	24	18	25	-	160	152	145	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Manikin_Boots	Manikin Boots	1.6	64	32	31	38	40	-	61	68	61	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Mastodon_Leggings	Mastodon Leggings	10.8	217	25	28	15	25	4:16	233	201	217	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Monastery_Skirt	Monastery Skirt	4	71	63	46	40	45	-	66	75	66	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Moon_Butterfly_Skirt	Moon Butterfly Skirt	1.2	61	32	21	33	27	-	58	67	58	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Northwarder_Trousers	Northwarder Trousers	1.8	62	44	42	50	47	-	60	65	60	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Old_Ironclad_Leggings	Old Ironclad Leggings	9.4	146	18	20	13	18	4:14	159	134	146	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Old_Knight_Leggings	Old Knight Leggings	8.2	171	15	15	10	15	-	179	160	171	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Pates_Trousers	Pate's Trousers	3.5	77	25	16	31	26	-	75	80	75	0.22	0	0	0	0	0	0	0	0	0
+P	legs	Peasant_Trousers	Peasant Trousers	2.6	34	16	17	21	16	-	33	38	33	0.18	0	0	0	0	0	0	2	-1	0
+P	legs	Penal_Skirt	Penal Skirt	4.8	102	42	53	38	47	-	105	105	95	0.22	0	0	0	0	0	0	0	0	0
+P	legs	Priestess_Skirt	Priestess Skirt	1.9	72	45	44	62	50	-	70	75	70	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Prisoners_Waistcloth	Prisoner's Waistcloth	1	10	10	11	15	12	-	9	11	9	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Raimes_Leggings	Raime's Leggings	6.9	121	28	37	17	43	-	130	106	123	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Rampart_Golem_Leggings	Rampart Golem Leggings	8.2	158	24	18	21	24	-	168	131	158	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Rogue_Leggings	Rogue Leggings	2.5	79	25	30	29	34	-	81	77	81	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Royal_Soldier_Leggings	Royal Soldier Leggings	5.3	91	28	29	19	28	-	95	86	92	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Royal_Swordsman_Leggings	Royal Swordsman Leggings	6.1	110	25	32	17	25	-	122	96	114	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Ruin_Leggings	Ruin Leggings	6.2	123	29	32	20	29	-	133	112	126	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Rusted_Mastodon_Leggings	Rusted Mastodon Leggings	9.8	185	19	22	11	19	4:14	198	171	185	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Saints_Trousers	Saint's Trousers	2	78	57	57	70	57	8:16	74	83	74	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Sanctum_Knight_Leggings	Sanctum Knight Leggings	7.4	154	23	23	19	22	-	165	142	154	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Shadow_Leggings	Shadow Leggings	1.6	60	32	36	33	43	-	53	67	53	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Smelter_Demon_Leggings	Smelter Demon Leggings	10.4	203	25	53	24	25	4:16	225	181	203	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Steel_Leggings	Steel Leggings	8.3	183	23	25	16	23	-	196	174	183	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Syans_Leggings	Syan's Leggings	7.1	141	27	36	16	27	-	150	126	143	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Targrays_Leggings	Targray's Leggings	5.8	105	26	26	21	29	-	114	98	105	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Throne_Defender_Leggings	Throne Defender Leggings	7.7	158	32	35	19	32	-	163	152	159	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Throne_Watcher_Leggings	Throne Watcher Leggings	6.6	123	54	35	28	35	-	132	117	123	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Tights_of_Judgment	Tights of Judgment	2.8	83	42	34	29	37	-	80	89	80	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Traveling_Merchant_Boots	Traveling Merchant Boots	3.8	73	21	23	24	21	-	71	78	71	0.22	0	0	0	0	0	0	0	0	0
+P	legs	Tseldora_Trousers	Tseldora Trousers	2	29	13	14	18	13	-	28	32	28	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Varangian_Leggings	Varangian Leggings	2.4	52	17	12	20	17	-	51	55	51	0.22	0	0	0	0	0	0	0	0	0
+P	legs	Velstadts_Leggings	Velstadt's Leggings	7.2	157	20	21	10	47	-	166	143	163	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Vengarls_Boots	Vengarl's Boots	7.9	165	21	27	18	21	-	176	156	165	0.266	0	0	0	0	0	0	0	0	0
+P	legs	Wanderer_Boots	Wanderer Boots	2.1	69	23	30	33	24	-	70	67	71	0.18	0	0	0	0	0	0	0	0	0
+P	legs	White_Priest_Skirt	White Priest Skirt	2.4	80	48	48	63	53	-	79	84	79	0.18	0	0	0	0	0	0	0	0	0
+P	legs	Xanthous_Waistcloth	Xanthous Waistcloth	4	80	61	16	38	47	-	80	92	69	0.18	0	0	0	0	0	0	0	0	0
 H	0.21320730998248502	0.1680540235467259	0.18824014820176563	0.2041638977258339	0.2263346205431896
 E	Dexterity_Ring	1.5	1.0	0	0	0	0	0	5	0	0	0
 E	First_Dragon_Ring	0.5	1.05	0	0	0	0	0	0	0	0	0
