@@ -17,7 +17,7 @@ use ds2_build_recommender_core::flex::{
     FLYNN_NOTE, Flexibility, flex_line, flex_load, flex_load_line, flex_rank, flex_wields,
 };
 use ds2_build_recommender_core::model::{
-    Grip, Mode, Objective, PanelState, STAT_COUNT, STAT_LABELS,
+    ARMOR_SLOTS, Defender, Grip, Mode, Objective, PanelState, STAT_COUNT, STAT_LABELS,
 };
 use ds2_build_recommender_core::paperdoll::{self, Held, Paperdoll, Piece, Slot};
 
@@ -168,6 +168,11 @@ enum List {
     Class,
     /// The spells Generate Build must cast. Choosing a row toggles it and leaves the list open.
     Spell,
+    /// Who the damage goal is scored against: the average defender, then the four armour slots,
+    /// each of which opens [`List::DefenderPiece`].
+    Defender,
+    /// The armour one slot of a chosen defender can wear, by index into [`ARMOR_SLOTS`].
+    DefenderPiece(usize),
 }
 
 /// What the lower half shows.
@@ -194,6 +199,11 @@ enum Action {
     CycleObjective,
     /// The other grip.
     CycleGrip,
+    /// Score damage against the soul level's average defender again.
+    AverageDefender,
+    /// Put a piece on the defender: the slot, by index into [`ARMOR_SLOTS`], and the piece, by
+    /// index into the backend's `armor_pieces` for it.
+    ChooseDefenderPiece(usize, usize),
     SetMode(Mode),
     /// Put the results table's highlight on this row.
     PickRow(usize),
@@ -265,6 +275,10 @@ struct Panel {
     /// The weapon flexibility of the build in [`Self::answer`], asked once when it arrived: the
     /// neighbour search reads the whole corpus, which is not a per-frame cost.
     answer_flex: Option<Flexibility>,
+    /// What [`Self::answer`]'s damage was scored against, as `backend::defender_line` says it:
+    /// asked once when the answer arrived, and only when its score is damage, the one score the
+    /// defender changes.
+    answer_defender: Option<String>,
     /// The same for [`Self::generated`], in its armour and rings.
     generated_flex: Option<Flexibility>,
     /// Why the last Generate Build was refused.
@@ -310,6 +324,7 @@ impl Panel {
             slot: Slot::PRIMARY,
             doll_logged: false,
             answer_flex: None,
+            answer_defender: None,
             generated_flex: None,
             refused: Vec::new(),
             fixes: Vec::new(),
@@ -377,7 +392,41 @@ impl Panel {
     fn list_visible(&self, list: List) -> usize {
         match list {
             List::Weapon => self.picker_rows,
-            List::Infusion | List::Class | List::Spell => LIST_VISIBLE,
+            List::Infusion
+            | List::Class
+            | List::Spell
+            | List::Defender
+            | List::DefenderPiece(_) => LIST_VISIBLE,
+        }
+    }
+
+    /// The name of the piece the defender wears in `slot`, `None` for the average defender.
+    fn defender_piece_name(&self, slot: usize) -> Option<String> {
+        let key = self.state.defender.pieces()?.get(slot)?;
+        Some(
+            backend()
+                .armor_pieces(slot)
+                .into_iter()
+                .find(|(piece, _)| piece == key)
+                .map_or_else(|| key.clone(), |(_, name)| name),
+        )
+    }
+
+    /// The Defender control's value: `Average`, or the chosen set by its chest (or first worn
+    /// piece) and how many other pieces it wears, `Havel's Armor +3`; `Naked` for none.
+    fn defender_label(&self) -> String {
+        if self.state.defender.pieces().is_none() {
+            return "Average".to_owned();
+        }
+        let worn: Vec<String> = [1, 0, 2, 3]
+            .into_iter()
+            .filter_map(|slot| self.defender_piece_name(slot))
+            .filter(|name| name != "Naked")
+            .collect();
+        match worn.split_first() {
+            None => "Naked".to_owned(),
+            Some((first, [])) => first.clone(),
+            Some((first, rest)) => format!("{first} +{}", rest.len()),
         }
     }
 
@@ -451,6 +500,30 @@ impl Panel {
                 }))
                 .collect()
             }
+            List::Defender => {
+                let mark = |on: bool| if on { "[x]" } else { "[ ]" };
+                let average = self.state.defender == Defender::Average;
+                std::iter::once((
+                    format!("{} Average defender at this soul level", mark(average)),
+                    Action::AverageDefender,
+                ))
+                .chain(ARMOR_SLOTS.iter().enumerate().map(|(slot, label)| {
+                    let worn = self
+                        .defender_piece_name(slot)
+                        .unwrap_or_else(|| "(choose to wear a set)".to_owned());
+                    (
+                        format!("{label}: {worn}"),
+                        Action::OpenList(List::DefenderPiece(slot)),
+                    )
+                }))
+                .collect()
+            }
+            List::DefenderPiece(slot) => backend()
+                .armor_pieces(slot)
+                .into_iter()
+                .enumerate()
+                .map(|(index, (_, name))| (name, Action::ChooseDefenderPiece(slot, index)))
+                .collect(),
         }
     }
 
@@ -476,6 +549,7 @@ impl Panel {
             Control::Weapon => format!("weapon={}", state.weapon.unwrap_or("none")),
             Control::Infusion => format!("infusion={}", weapons::display_name(state.infusion)),
             Control::Objective => format!("objective={:?}", state.objective),
+            Control::Defender => format!("defender={:?}", state.defender),
             Control::Grip => format!("grip={:?}", state.grip),
             Control::Mode(mode) => format!("mode tab {mode:?} (selected {:?})", state.mode),
             Control::OneHand => format!("one-hand={}", opts.one_hand),
@@ -537,6 +611,7 @@ impl Panel {
             Control::Infusion => Some(Action::OpenList(List::Infusion)),
             Control::Class => Some(Action::OpenList(List::Class)),
             Control::Objective => Some(Action::CycleObjective),
+            Control::Defender => Some(Action::OpenList(List::Defender)),
             Control::Grip => Some(Action::CycleGrip),
             Control::Mode(mode) => Some(Action::SetMode(mode)),
             Control::OneHand => Some(Action::ToggleOneHand),
@@ -644,7 +719,13 @@ impl Panel {
     fn open_list_cursor(&mut self, list: List) {
         let rows = self.list_rows(list);
         let current = match list {
-            List::Weapon | List::Spell => None,
+            List::Weapon | List::Spell | List::Defender => None,
+            List::DefenderPiece(slot) => self.state.defender.pieces().and_then(|pieces| {
+                backend()
+                    .armor_pieces(slot)
+                    .iter()
+                    .position(|(key, _)| Some(key) == pieces.get(slot))
+            }),
             List::Infusion => rows
                 .iter()
                 .position(|(_, action)| *action == Action::ChooseInfusion(self.state.infusion)),
@@ -664,6 +745,7 @@ impl Panel {
     fn changed(&mut self) {
         self.answer = None;
         self.answer_flex = None;
+        self.answer_defender = None;
         self.results_scroll = 0;
         self.results_cursor = 0;
         self.scrolling_results = false;
@@ -868,9 +950,26 @@ impl Panel {
             _ => None,
         };
         self.answer = Some(answer);
+        self.note_defender();
         self.results_scroll = 0;
         self.results_cursor = 0;
         self.shown = Shown::Answer;
+    }
+
+    /// Ask what the answer just shown was scored against, when its score is damage, and log it:
+    /// the defender is a choice the player cannot see in the numbers themselves.
+    fn note_defender(&mut self) {
+        let damage = self.state.mode != Mode::MinimumForWeapon
+            && self.state.score_heading() == "Damage"
+            && matches!(self.answer, Some(Answer::Rows(_) | Answer::Build(_)));
+        let sl = self.state.sl();
+        self.answer_defender = damage
+            .then(|| backend().defense(sl, &self.state.defender))
+            .flatten()
+            .map(|defense| backend::defender_line(&defense, sl));
+        if let Some(line) = &self.answer_defender {
+            log_line(format_args!("{LOG_PREFIX} {line}"));
+        }
     }
 
     /// The chosen weapon's infusions, best first, with the winner's margin over the runner-up in
@@ -904,6 +1003,7 @@ impl Panel {
             self.state.objective
         ));
         self.answer = Some(answer);
+        self.note_defender();
         self.results_scroll = 0;
         self.results_cursor = 0;
         self.shown = Shown::Answer;
@@ -1072,6 +1172,28 @@ impl Panel {
             Action::CycleObjective => {
                 self.state.objective = cycled(Objective::ALL, self.state.objective);
                 self.changed();
+            }
+            Action::AverageDefender => {
+                if self.state.defender != Defender::Average {
+                    self.state.defender = Defender::Average;
+                    self.changed();
+                }
+                log_line(format_args!("{LOG_PREFIX} defender average"));
+            }
+            Action::ChooseDefenderPiece(slot, index) => {
+                if let Some((key, name)) = backend().armor_pieces(slot).into_iter().nth(index) {
+                    self.state.set_defender_piece(slot, &key);
+                    self.changed();
+                    log_line(format_args!(
+                        "{LOG_PREFIX} defender {} {key} ({name}): {:?}",
+                        ARMOR_SLOTS.get(slot).copied().unwrap_or("?"),
+                        self.state.defender
+                    ));
+                }
+                // Back to the slots, on the next one: a set is chosen a slot at a time.
+                self.list = Some(List::Defender);
+                self.list_cursor = (slot + 2).min(ARMOR_SLOTS.len());
+                self.list_scroll = 0;
             }
             Action::PickRow(index) => {
                 self.results_cursor = index;
@@ -2199,17 +2321,18 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
     // The weapon's parameters and the mode's options, or the generated build's summary in their
     // place. Where the infusion and class lists hang from.
     let params_x = left + PARAMS_INSET - PAIR_PAD;
-    let (infusion_at, class_at) = if doll {
+    let (infusion_at, class_at, defender_at) = if doll {
         draw_summary(panel, &canvas, [inner, top + summary_at], right);
         let under = [inner, top + content_rule_at + 2.0];
-        (under, under)
+        (under, under, under)
     } else {
-        let infusion_x = draw_params(panel, &mut canvas, params_x, params_y);
+        let (infusion_x, defender_x) = draw_params(panel, &mut canvas, params_x, params_y);
         // Run is X or R from anywhere, and has no button (the design, 2026-09-30).
         let class_x = draw_options(panel, &mut canvas, params_x, options_y);
         (
             [infusion_x, params_y + row + 2.0],
             [class_x, options_y + row + 2.0],
+            [defender_x, params_y + row + 2.0],
         )
     };
 
@@ -2342,6 +2465,21 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
                 "no spell data: the stub backend offers none",
             ))
         }
+        // As wide as its longest row, and pulled left where the goal's end of the line leaves too
+        // little room before the panel's edge.
+        Some(list @ (List::Defender | List::DefenderPiece(_))) => {
+            let width = panel
+                .list_rows(list)
+                .iter()
+                .map(|(label, _)| canvas.width(label))
+                .fold(canvas.width("Average defender"), f32::max)
+                + 40.0;
+            Some((
+                [defender_at[0].min(right - width), defender_at[1]],
+                width,
+                "no armour data: the stub backend offers none",
+            ))
+        }
         None => None,
     };
     if let (Some(list), Some((at, list_width, empty))) = (panel.list, hanging) {
@@ -2429,8 +2567,9 @@ fn cycled<T: Copy + PartialEq, const N: usize>(all: [T; N], now: T) -> T {
 
 /// The weapon's parameters, which every tab reads, on one line from `x`: each a label and a value,
 /// no boxes. The weapon opens the picker, which has the filter; here is only what is chosen.
-/// Returns where the infusion list hangs from.
-fn draw_params(panel: &Panel, canvas: &mut Canvas<'_>, x: f32, y: f32) -> f32 {
+/// The defender sits beside the goal, whose damage it is the other half of. Returns where the
+/// infusion list and the defender lists hang from.
+fn draw_params(panel: &Panel, canvas: &mut Canvas<'_>, x: f32, y: f32) -> (f32, f32) {
     let weapon_name = panel
         .state
         .weapon
@@ -2461,15 +2600,24 @@ fn draw_params(panel: &Panel, canvas: &mut Canvas<'_>, x: f32, y: f32) -> f32 {
         Some(Action::CycleGrip),
         Some(Control::Grip),
     ) + PAIR_BOX_GAP;
-    canvas.pair(
+    let x = canvas.pair(
         x,
         y,
         "Goal",
         panel.state.objective.label(),
         Some(Action::CycleObjective),
         Some(Control::Objective),
+    ) + PAIR_BOX_GAP;
+    let defender_x = x + PAIR_PAD + canvas.width("Defender") + canvas.width(" ");
+    canvas.pair(
+        x,
+        y,
+        "Defender",
+        &panel.defender_label(),
+        Some(Action::OpenList(List::Defender)),
+        Some(Control::Defender),
     );
-    infusion_x
+    (infusion_x, defender_x)
 }
 
 /// The current mode's options, on one line from `x`, each a label and a value as the weapon's
@@ -2641,6 +2789,18 @@ fn draw_refusal(
 /// The answer to the last Run, or why there is none.
 fn draw_answer(panel: &mut Panel, canvas: &mut Canvas<'_>, (min, max): ([f32; 2], [f32; 2])) {
     let line = canvas.line;
+    let mut min = min;
+    // What the damage below was scored against, over it, so the column has a meaning.
+    if panel.refused.is_empty()
+        && let Some(defender) = &panel.answer_defender
+    {
+        canvas.text(
+            [min[0], min[1]],
+            DIM,
+            &clip(canvas.ui, defender, max[0] - min[0]),
+        );
+        min[1] += line + 6.0;
+    }
     let mut y = min[1];
     if !panel.refused.is_empty() {
         let (lines, fixes) = (panel.refused.clone(), panel.fixes.clone());
@@ -2910,20 +3070,27 @@ fn content_height(panel: &Panel, ui: &Ui, width: f32, line: f32) -> f32 {
     if !panel.refused.is_empty() {
         return refusal(&panel.refused, panel.fixes.len());
     }
-    match &panel.answer {
-        Some(Answer::Rows(rows)) => {
-            table_header_h(line)
-                + rows.len().max(1) as f32 * table_row_h(line)
-                + table_footer_h(line)
+    // draw_answer's defender line over the answer.
+    let defender = if panel.answer_defender.is_some() {
+        line + 6.0
+    } else {
+        0.0
+    };
+    defender
+        + match &panel.answer {
+            Some(Answer::Rows(rows)) => {
+                table_header_h(line)
+                    + rows.len().max(1) as f32 * table_row_h(line)
+                    + table_footer_h(line)
+            }
+            Some(Answer::Refused(refused)) => refusal(&refused.lines, refused.fixes.len()),
+            Some(Answer::Build(_)) => lines(6),
+            // The heading, the violations, and the line offering the second Run.
+            Some(Answer::FloorViolations(violations)) => {
+                (violations.len() + 1) as f32 * (line + 2.0) + line + 8.0 + line
+            }
+            Some(Answer::Nothing(_)) | None => lines(1),
         }
-        Some(Answer::Refused(refused)) => refusal(&refused.lines, refused.fixes.len()),
-        Some(Answer::Build(_)) => lines(6),
-        // The heading, the violations, and the line offering the second Run.
-        Some(Answer::FloorViolations(violations)) => {
-            (violations.len() + 1) as f32 * (line + 2.0) + line + 8.0 + line
-        }
-        Some(Answer::Nothing(_)) | None => lines(1),
-    }
 }
 
 /// The generated build.
