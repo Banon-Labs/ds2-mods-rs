@@ -7,7 +7,8 @@
 #
 # The rule under test is the executable half of the AGENTS.md line "The order is
 # Frida, then Frida, then Frida, and only then a DLL". It denies a Write/Edit to
-# `crates/**/*.rs` unless the `frida_evidence` signal opens with `PROVEN`.
+# `crates/**/*.rs` unless a line of the `frida_evidence` signal opens that path: a
+# `PROVEN agent=` line opens every crate, a `PROVEN <kind> crate=<name>` line opens one.
 #
 # Every test below that asserts a denial is asserting a fail-closed path: absent
 # signal, empty signal, missing signals object, `UNPROVEN` verdict. That direction
@@ -657,4 +658,95 @@ test_conflict_resolution_adding_a_new_line_is_denied if {
 test_edit_without_conflict_markers_is_still_denied if {
 	some d in guard.deny with input as conflict_edit("    /// a\n    /// b", "    /// a")
 	d.rule_id == RULE
+}
+
+# --- every unspent record, not the newest one (2026-09-30) --------------------
+#
+# The evidence log is shared by every session, and the reader printed a verdict for its last line
+# alone. On 2026-09-30 a Frida watch that measured the Equipment screen sat under `--record-check`
+# records another session kept appending for `ds2-build-recommender-core`, and the Edit it measured,
+# to `crates/ds2-rva/src/lib.rs`, was refused. The reader now prints one line per scope an unspent
+# record covers, newest first. These two are what it printed for that log: the other session's
+# newest record (quoted from the refusal), then the watch it had been hiding.
+MEASURED_CHECK := "PROVEN check crate=ds2-build-recommender-core log=/tmp/claude-1000/-home-banon-projects-ds2-mods-rs/af2524c3-7777-46cd-ad2e-69a314170089/scratchpad/check-warmth.log line=\"thread 'refusal_is_the_scripts_and_every_fix_builds' (4055519) panicked at crates/ds2-build-recommender-core/tests/python_parity.rs:746:9:\""
+
+MEASURED_FRIDA := "PROVEN agent=scripts/frida/equip-slot-icons.js pid=352 messages=730873 seconds=902.76"
+
+signal_of(verdicts) := concat("\n", verdicts)
+
+test_an_unspent_frida_verdict_under_a_newer_scoped_one_opens_any_crate if {
+	count(guard.deny) == 0 with input as edit_event(
+		"/home/banon/projects/ds2-mods-rs/crates/ds2-rva/src/lib.rs",
+		signal_of([MEASURED_CHECK, MEASURED_FRIDA]),
+	)
+}
+
+test_and_opens_the_bash_spelling_of_the_same_edit if {
+	not denied(bash_event("sed -i 's/a/b/' crates/ds2-rva/src/lib.rs", signal_of([MEASURED_CHECK, MEASURED_FRIDA])))
+}
+
+test_the_scoped_line_beside_it_still_opens_its_own_crate if {
+	count(guard.deny) == 0 with input as edit_event(
+		"crates/ds2-build-recommender-core/src/backend.rs",
+		signal_of([MEASURED_CHECK, MEASURED_FRIDA]),
+	)
+}
+
+# What the reader printed before the fix, and what this rule still does with it.
+test_the_scoped_line_alone_still_refuses_another_crate if {
+	denied(edit_event("crates/ds2-rva/src/lib.rs", MEASURED_CHECK))
+}
+
+# The other half of the bug, which a preference for Frida would have kept: a scoped record for one
+# crate hiding an unspent scoped record for another. Each opens its own crate and no third.
+test_two_scoped_lines_open_both_of_their_crates if {
+	signal := signal_of([PROVEN_CHECK, PROVEN_BUILD])
+	count(guard.deny) == 0 with input as edit_event("crates/ds2-build-recommender-core/src/corpus.rs", signal)
+	count(guard.deny) == 0 with input as edit_event("crates/ds2-invasion-path/src/lib.rs", signal)
+}
+
+test_two_scoped_lines_open_no_third_crate if {
+	denied(edit_event("crates/ds2-rva/src/lib.rs", signal_of([PROVEN_CHECK, PROVEN_BUILD])))
+	denied(bash_event("sed -i 's/a/b/' crates/ds2-rva/src/lib.rs", signal_of([PROVEN_CHECK, PROVEN_BUILD])))
+}
+
+# A silent watch is an UNPROVEN line, and a line that opens nothing does not start opening things
+# because it has company.
+test_a_silent_session_beside_a_scoped_line_opens_only_that_crate if {
+	signal := signal_of([PROVEN_CHECK, UNPROVEN_SILENT])
+	denied(edit_event("crates/ds2-rva/src/lib.rs", signal))
+	not denied(edit_event("crates/ds2-build-recommender-core/src/corpus.rs", signal))
+}
+
+test_deny_when_every_line_is_unproven if {
+	denied(edit_event("crates/ds2-rva/src/lib.rs", signal_of([UNPROVEN_SILENT, UNPROVEN_SPENT])))
+}
+
+# Each line is judged from its own front. A Frida verdict's fields inside a scoped line's free text
+# open nothing more than that line's crate.
+test_frida_fields_inside_a_scoped_line_open_nothing_more if {
+	denied(edit_event(
+		"crates/ds2-rva/src/lib.rs",
+		"PROVEN check crate=ds2-build-recommender-core log=/x.log line='x PROVEN agent=y pid=1 messages=9'",
+	))
+}
+
+test_deny_on_a_signal_of_blank_lines if {
+	denied(edit_event("crates/ds2-rva/src/lib.rs", "\n\n"))
+}
+
+test_a_failure_record_carrying_proven_lines_still_denies if {
+	denied(edit_event(
+		"crates/ds2-rva/src/lib.rs",
+		{"error": "timed out", "exit_code": 124, "output": signal_of([MEASURED_CHECK, MEASURED_FRIDA]), "success": false},
+	))
+}
+
+# The refusal quotes every line, one to a line, so the agent reading it can see which crates the
+# unspent records open and that the path it was refused is not one of them.
+test_reason_quotes_every_line_one_to_a_line if {
+	some decision in guard.deny with input as edit_event("crates/ds2-rva/src/lib.rs", signal_of([MEASURED_CHECK, UNPROVEN_SILENT]))
+	decision.rule_id == RULE
+	contains(decision.reason, concat("", [":\n  ", MEASURED_CHECK, "\n  ", UNPROVEN_SILENT]))
+	contains(decision.reason, "Target: crates/ds2-rva/src/lib.rs")
 }

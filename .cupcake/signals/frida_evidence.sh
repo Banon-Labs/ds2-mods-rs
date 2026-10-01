@@ -2,7 +2,8 @@
 # Has a Frida session actually observed something since the last commit?
 #
 # Read by `.cupcake/policies/claude/no_rust_edit_without_frida_proof.rego`, which refuses a Rust
-# edit under `crates/` until this prints `PROVEN`. The judgement lives in
+# edit under `crates/` until a `PROVEN` line this prints opens the path. One line per scope an
+# unspent record covers, since 2026-09-30. The judgement lives in
 # `scripts/ds2-frida-evidence.py --check`, not here, so the rule and its selftest are one thing.
 #
 # Fails closed, unlike the other signals in this directory. Printing nothing means the policy sees

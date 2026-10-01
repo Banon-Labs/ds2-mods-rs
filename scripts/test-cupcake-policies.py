@@ -129,6 +129,24 @@ def frida_evidence_log(kind: str) -> Path:
                "log": "/tmp/build.log",
                "line": "lld-link: error: undefined symbol: GetAsyncKeyState", "written": 1}
         path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    # The shared log as two sessions leave it (2026-09-30): an unspent record with a newer one from
+    # the other session on top. `shadowed` puts a scoped record over a Frida watch, `scoped-pair` a
+    # scoped record for one crate over a scoped record for another. The reader prints a line for
+    # each, and these prove the engine hands the policy both lines rather than the first.
+    if kind in ("shadowed", "scoped-pair") and not path.exists():
+        at = int(time.time()) + 86400
+        if kind == "shadowed":
+            below = {"at": at, "agent": "scripts/frida/equip-slot-icons.js", "pid": 352,
+                     "messages": 730873, "seconds": 902.76}
+        else:
+            below = {"at": at, "kind": "build", "crate": "ds2-menu-row", "log": "/tmp/build.log",
+                     "line": "lld-link: error: undefined symbol: GetAsyncKeyState", "written": 1}
+        above = {"at": at + 1, "kind": "check", "crate": "ds2-build-recommender-core",
+                 "log": "/tmp/check4.log",
+                 "line": "thread 'optimize_is_the_scripts' panicked at "
+                         "crates/ds2-build-recommender-core/tests/python_parity.rs:339:17:",
+                 "written": 1}
+        path.write_text(json.dumps(below) + "\n" + json.dumps(above) + "\n", encoding="utf-8")
     return path
 
 
@@ -629,6 +647,40 @@ def cases() -> list[PolicyCase]:
             expected_text="--record-build",
         ),
         PolicyCase(
+            "allow-crate-edit-on-a-frida-watch-under-a-newer-scoped-record",
+            True,
+            tool_name="Edit",
+            tool_input={
+                "file_path": str(REPO_ROOT / "crates/ds2-rva/src/lib.rs"),
+                "old_string": "a",
+                "new_string": "b",
+            },
+            frida_evidence="shadowed",
+        ),
+        PolicyCase(
+            "allow-crate-edit-on-a-scoped-record-under-a-newer-one-for-another-crate",
+            True,
+            tool_name="Edit",
+            tool_input={
+                "file_path": str(REPO_ROOT / "crates/ds2-menu-row/src/lib.rs"),
+                "old_string": "a",
+                "new_string": "b",
+            },
+            frida_evidence="scoped-pair",
+        ),
+        PolicyCase(
+            "deny-crate-edit-outside-both-scoped-records",
+            False,
+            tool_name="Edit",
+            tool_input={
+                "file_path": str(REPO_ROOT / "crates/ds2-hook/src/lib.rs"),
+                "old_string": "a",
+                "new_string": "b",
+            },
+            frida_evidence="scoped-pair",
+            expected_text="PROVEN build crate=ds2-menu-row ",
+        ),
+        PolicyCase(
             "allow-script-edit-with-no-frida-measurement",
             True,
             tool_name="Edit",
@@ -1048,6 +1100,8 @@ def main() -> int:
     cases_to_run = cases()
     frida_evidence_log("proven")  # written once, before the workers race to it
     frida_evidence_log("build")
+    frida_evidence_log("shadowed")
+    frida_evidence_log("scoped-pair")
     make_other_repos()
     make_python_links()
     make_stale_launcher()
