@@ -254,7 +254,7 @@ impl CorpusBackend {
         infusion: Infusion,
         eff: &Stats,
         objective: Objective,
-        defending: &Defending,
+        defending: &Defending<'_>,
         rings: &[usize],
         special: bool,
     ) -> (f64, String, Ar) {
@@ -309,7 +309,7 @@ impl CorpusBackend {
         infusion: Infusion,
         eff: &Stats,
         objective: Objective,
-        defending: &Defending,
+        defending: &Defending<'_>,
         rings: &[usize],
     ) -> (f64, String, Ar, String) {
         let Some(launcher) = &weapon.ranged else {

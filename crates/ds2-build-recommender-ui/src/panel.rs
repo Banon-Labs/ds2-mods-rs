@@ -964,7 +964,7 @@ impl Panel {
             && matches!(self.answer, Some(Answer::Rows(_) | Answer::Build(_)));
         let sl = self.state.sl();
         self.answer_defender = damage
-            .then(|| backend().defense(sl, &self.state.defender))
+            .then(|| backend().defense(sl, &self.state.defender, self.state.reply))
             .flatten()
             .map(|defense| backend::defender_line(&defense, sl));
         if let Some(line) = &self.answer_defender {

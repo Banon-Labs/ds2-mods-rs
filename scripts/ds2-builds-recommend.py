@@ -2283,8 +2283,10 @@ def _bracket_defense(data: Data, corpus: list[Build], sl: int) -> tuple[dict, in
 #: off): every defender swaps one ring slot to the ring that cuts this weapon+infusion's damage
 #: most (respond). "static": the corpus builds' rings as worn. `buff` "none" (the default), "item"
 #: (a consumable anyone can use) or "any" (spells too, whether or not the build could cast them):
-#: the defender also has the one defense_buffs entry that cuts the damage most. Set by main; the
-#: --expect fixtures are written "static", the behaviour the Rust port has.
+#: the defender also has the one defense_buffs entry that cuts the damage most. Set by main;
+#: --export-backend's precomputed numbers and most --expect fixtures are written "static", and the
+#: ADAPTIVE_* fixtures set it themselves (under_defender): the Rust port takes it per question
+#: (model::Reply), adaptive by default as here.
 DEFENDER = {"mode": "adaptive", "buff": "none"}
 
 
@@ -4769,10 +4771,16 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 #                                                             pull, flat status build-up
 #   AM name type flat(5) poison bleed mv lower                one ammunition (data.ammo), in name
 #                                                             order as ranged_options reads them
+#   RD ring type:value,..                                     data.ring_defense, in its order: a
+#                                                             ring's defense changes in displayed
+#                                                             units, type a DMG index, in the
+#                                                             change's own key order
+#   DB name source seconds type:value,..                      data.defense_buffs, in its order:
+#                                                             source spell or item
 
 BACKEND_DATA_NAME = "ds2-build-recommender.dat"
 BACKEND_DATA = Path.home() / ".cache/ds2-builds" / BACKEND_DATA_NAME
-BACKEND_FORMAT = "ds2-build-recommender-data 13"
+BACKEND_FORMAT = "ds2-build-recommender-data 14"
 #: How far the exported R1/R2 chains run, in seconds: the panel clamps its window to 10.0
 #: (crates/ds2-build-recommender-ui/src/panel.rs), and status_hits runs to max(3, window).
 STATUS_HORIZON = 10.0
@@ -4889,6 +4897,13 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
     out.extend("\t".join(["N", key]) for key in NO_USE_RINGS if key in data.rings)
     for key, add in data.ring_attack.items():
         out.append("\t".join(["O", key, *(_num(add.get(k, 0)) for k in DMG)]))
+    # What an adaptive defender answers with (AdaptiveDefense): every ring's defense changes, from
+    # which counter_rings and the swap are worked out over the X builds' rings, and the buffs.
+    for key, add in data.ring_defense.items():
+        out.append("\t".join(["RD", key, ",".join(f"{DMG.index(k)}:{_num(v)}" for k, v in add.items())]))
+    for name, b in data.defense_buffs.items():
+        out.append("\t".join(["DB", name, b["source"], _num(float(b["seconds"])),
+                              ",".join(f"{DMG.index(k)}:{_num(v)}" for k, v in b["add"].items())]))
     for slot in ARMOR_SLOTS:
         for key, v in data.armor[slot].items():
             # typed and bonus as build_defense reads them (a missing typed defense is the general
@@ -5090,6 +5105,39 @@ EXPECT_DEFENDER_BEST_INFUSION = [  # defender, then an EXPECT_BEST_INFUSION case
     (EXPECT_DEFENDERS[2], ("Black_Dragon_Greataxe", [30, 20, 25, 10, 40, 15, 20, 15, 30], 150, 0.0, False,
                            "damage")),
 ]
+#: The adaptive defender (DEFENDER "adaptive", the script's default): the --defender-buff setting,
+#: a --defender set (None for the average defender), then a case of the list named.
+EXPECT_ADAPTIVE_WEAPONS_FOR = [  # an EXPECT_WEAPONS_FOR case
+    ("none", None, EXPECT_WEAPONS_FOR[0]),
+    ("none", None, EXPECT_WEAPONS_FOR[1]),
+    ("item", None, EXPECT_WEAPONS_FOR[0]),
+    ("any", HAVEL, EXPECT_WEAPONS_FOR[3]),
+    # crossbows: a bolt's physical and a Sanctum special's pure dark each draw their own answer
+    ("none", None, ([20, 20, 15, 10, 25, 20, 15, 30, 30], 150, False, "Crossbow", False, 0.0, False, "damage")),
+]
+EXPECT_ADAPTIVE_BUILDS = [  # an EXPECT_BUILDS case: --optimize and --generate
+    ("none", None, ("Demons_Great_Hammer", "Raw", 100, "damage")),
+    ("none", None, ("Uchigatana", "Lightning", 150, "damage")),
+    ("item", None, ("Murakumo", "Dark", 74, "damage")),
+    ("any", HAVEL, ("Black_Dragon_Greataxe", "Lightning", 150, "damage")),
+    ("none", None, ("Sanctum_Crossbow", "Dark", 150, "damage")),
+]
+EXPECT_ADAPTIVE_BEST_INFUSION = [  # an EXPECT_BEST_INFUSION case
+    ("none", None, EXPECT_BEST_INFUSION[1]),
+    ("none", None, EXPECT_BEST_INFUSION[2]),
+    ("item", HAVEL, EXPECT_DEFENDER_BEST_INFUSION[0][1]),
+    ("none", None, EXPECT_BEST_INFUSION[8]),
+]
+
+
+def under_defender(mode: str, buff: str, fn):
+    """`fn()` with DEFENDER set to `mode` and `buff`, restored after."""
+    saved = dict(DEFENDER)
+    DEFENDER.update(mode=mode, buff=buff)
+    try:
+        return fn()
+    finally:
+        DEFENDER.update(saved)
 
 
 class _Some:
@@ -5172,6 +5220,22 @@ def backend_expectations(data: Data, corpus: list[Build]) -> str:
     out.append(f"pub const DEFENDER_GENERATE: DefenderGenerateCases = {_rs(d_gen)};\n")
 
     mix = threat_mix(data, corpus)
+    adaptive = lambda buff, fn: under_defender("adaptive", buff, fn)
+    out.append("// The rings the adaptive defender may swap in (counter_rings), by name.")
+    out.append(f"pub const COUNTER_RINGS: &[&str] = "
+               f"{_rs([data.rings[c].get('name', c) for c in counter_rings(data)])};\n")
+    out.append("// The adaptive defender: its buff setting (none, item, any), its armour keys ([] for the")
+    out.append("// average defender), then a WEAPONS_FOR case; a row's grip ends ` vs <what it put on>`.")
+    out.append(f"pub const ADAPTIVE_WEAPONS_FOR: AdaptiveWeaponsForCases = "
+               f"{_rs([(b, d or [], adaptive(b, lambda: for_case(case, d))) for b, d, case in EXPECT_ADAPTIVE_WEAPONS_FOR])};\n")
+    a_opt, a_gen = [], []
+    for b, d, case in EXPECT_ADAPTIVE_BUILDS:
+        o, g = adaptive(b, lambda: expect_builds(data, corpus, mix, [case], [], "two", defender=d))
+        a_opt.append((b, d or [], o[0]))
+        a_gen.append((b, d or [], g[0]))
+    out.append("// The same, then an OPTIMIZE and a GENERATE case.")
+    out.append(f"pub const ADAPTIVE_OPTIMIZE: AdaptiveOptimizeCases = {_rs(a_opt)};\n")
+    out.append(f"pub const ADAPTIVE_GENERATE: AdaptiveGenerateCases = {_rs(a_gen)};\n")
     flexes: list = []  # the generated builds, as flexibility() questions: filled by expect_builds
     opt, gen = expect_builds(data, corpus, mix, EXPECT_BUILDS, EXPECT_NAKED, "two", flexes)
     opt_one, gen_one = expect_builds(data, corpus, mix, EXPECT_ONE_HANDED, [], "one", flexes)
@@ -5315,6 +5379,9 @@ def backend_expectations_rest(data: Data, corpus: list[Build], out: list[str], m
     out.append("// A defender's armour keys, then a BEST_INFUSION case scored against it.")
     out.append(f"pub const DEFENDER_BEST_INFUSION: DefenderBestInfusionCases = "
                f"{_rs([(d, infusion_case(case, d)) for d, case in EXPECT_DEFENDER_BEST_INFUSION])};\n")
+    out.append("// The adaptive defender's buff setting and armour keys, then a BEST_INFUSION case.")
+    out.append(f"pub const ADAPTIVE_BEST_INFUSION: AdaptiveBestInfusionCases = "
+               f"{_rs([(b, d or [], under_defender('adaptive', b, lambda: infusion_case(case, d))) for b, d, case in EXPECT_ADAPTIVE_BEST_INFUSION])};\n")
     c = calibrate_infusions(data, corpus)
     out.append(f"pub const CALIBRATION: (u32, f64, f64) = {_rs((c['n'], float(c['top1']), float(c['top2'])))};")
 
@@ -5952,7 +6019,8 @@ def main() -> int:
         return selftest()
     if a.static_defender and a.defender_buff != "none":
         ap.error("--defender-buff needs the adaptive defender (drop --static-defender)")
-    # the Rust port (CorpusBackend) scores a static defender, so its fixtures are written with one
+    # --export-backend's bracket defense and calibration are the static defender's (the Rust port
+    # works the adaptive answer out per question), and so are its fixtures but the ADAPTIVE_* ones
     DEFENDER.update(mode="static" if a.static_defender or a.export_backend else "adaptive", buff=a.defender_buff)
 
     a.tables.mkdir(parents=True, exist_ok=True)

@@ -32,17 +32,18 @@ use crate::backend::{
 };
 use crate::flex::{FLEX_K, Flexibility};
 use crate::model::{
-    Defender, Grip, Objective, SL_MAX, STAT_COUNT, STAT_LABELS, StatusFilter, WeaponsForOpts,
+    Defender, Grip, Objective, Reply, SL_MAX, STAT_COUNT, STAT_LABELS, StatusFilter, WeaponsForOpts,
 };
 use crate::weapons;
 
+mod adaptive;
 mod ranged;
 
 /// What the file is called beside `DarkSoulsII.exe`.
 pub const DATA_FILE_NAME: &str = "ds2-build-recommender.dat";
 
 /// The file's first line. A different one is a file this port does not read.
-pub const FORMAT: &str = "ds2-build-recommender-data 13";
+pub const FORMAT: &str = "ds2-build-recommender-data 14";
 
 /// Nine stats as the script computes with them, in [`crate::model::STAT_LABELS`] order.
 type Stats = [i32; STAT_COUNT];
@@ -402,15 +403,36 @@ type Defense = [f64; 8];
 /// dict reads it -- what every score without an attack in hand sees -- and [`Self::respond`] is
 /// the defense against one attack.
 #[derive(Clone, Debug)]
-struct Defending {
+struct Defending<'a> {
     base: Defense,
+    /// How it answers an attack; `None` for a static defender, whose defense is `base` whatever
+    /// hits it.
+    adapt: Option<adaptive::Adapt<'a>>,
 }
 
-impl Defending {
+impl Defending<'_> {
     /// The script's `respond`: the defense to score attack `ar` against, and what the defender put
     /// on for it (ring and buff names, empty for a static defender).
-    fn respond(&self, _ar: &Ar) -> (Defense, Vec<String>) {
-        (self.base, Vec::new())
+    fn respond(&self, ar: &Ar) -> (Defense, Vec<String>) {
+        match &self.adapt {
+            Some(adapt) => adapt.respond(&self.base, ar),
+            None => (self.base, Vec::new()),
+        }
+    }
+}
+
+/// Who the damage objective is scored against: the defender's armour ([`Worn`]) and how it
+/// answers each weapon.
+#[derive(Clone, Copy, Debug)]
+struct Against {
+    worn: Worn,
+    reply: Reply,
+}
+
+impl Against {
+    /// The bracket's average defender, answering as `reply` says.
+    const fn average(reply: Reply) -> Self {
+        Self { worn: None, reply }
     }
 }
 
@@ -618,8 +640,8 @@ struct Query<'a> {
     /// This weapon alone (an index into the file's weapons), every infusion of it, and no
     /// high-stamina END gate: the script's `weapons_for(weapon=...)`, which `best_infusion` asks.
     weapon: Option<usize>,
-    /// Who damage is scored against: [`CorpusBackend::defense_at`]'s `worn`.
-    defender: Worn,
+    /// Who damage is scored against, and how it answers each weapon.
+    defender: Against,
 }
 
 /// A weapon the similar builds carry: how many carry it, and how many carry each infusion of it.
@@ -673,6 +695,15 @@ pub struct CorpusBackend {
     corpus: Vec<CorpusBuild>,
     /// Every ammunition, in name order: the script's `sorted(data.ammo.items())`.
     ammo: Vec<ranged::Ammo>,
+    /// The script's `data.ring_defense`, in its order: a ring (an index into `rings`) and the
+    /// defense it changes.
+    ring_defense: Vec<(usize, adaptive::Change)>,
+    /// The script's `data.defense_buffs`, in its order.
+    buffs: Vec<adaptive::Buff>,
+    /// The script's `counter_rings`, as indices into `rings`: what an adaptive defender swaps in.
+    counters: Vec<usize>,
+    /// Per SL bracket, the adaptive average defender over its `bracket_builds`.
+    cores: Vec<adaptive::Core>,
 }
 
 /// Why a data file could not be read.
@@ -781,6 +812,13 @@ impl CorpusBackend {
             backend.parse_line(at + 1, text, &mut ring_index)?;
         }
         backend.check()?;
+        backend.counters = backend.counter_rings();
+        backend.cores = (0..SL_BRACKETS)
+            .map(|bracket| {
+                let builds = backend.bracket_builds(bracket);
+                backend.adaptive_core(builds.iter().map(|build| build.rings.as_slice()))
+            })
+            .collect();
         Ok(backend)
     }
 
@@ -877,6 +915,7 @@ impl CorpusBackend {
                 });
             }
             "RG" | "RS" | "AM" => self.parse_ranged(tag, line, &mut fields)?,
+            "RD" | "DB" => self.parse_adaptive(tag, line, ring_index, &mut fields)?,
             "I" => {
                 let infusion = infusion_code(next("infusion")?, line)?
                     .ok_or_else(|| bad(line, "a weapon's infusion cannot be unknown"))?;
@@ -1366,12 +1405,44 @@ impl CorpusBackend {
         out
     }
 
-    /// [`Self::defense_at`] as the scoring reads it: the script's `defender_defense`, a static
-    /// defender.
-    fn defending(&self, sl: u32, worn: Worn) -> Defending {
+    /// [`Self::defense_at`] as the scoring reads it: the script's `defender_defense`. An adaptive
+    /// defender answers over the bracket's builds' rings (the script's `bracket_builds`), a chosen
+    /// set as one build with no rings.
+    fn defending(&self, sl: u32, against: Against) -> Defending<'_> {
+        let adapt = against.reply.adapts().then(|| adaptive::Adapt {
+            backend: self,
+            core: match (against.worn, self.cores.get(sl_bracket(sl))) {
+                (None, Some(core)) => std::borrow::Cow::Borrowed(core),
+                (None, None) => std::borrow::Cow::Owned(self.adaptive_core([])),
+                (Some(_), _) => std::borrow::Cow::Owned(self.adaptive_core([&[][..]])),
+            },
+            reply: against.reply,
+        });
         Defending {
-            base: self.defense_at(sl, worn),
+            base: self.defense_at(sl, against.worn),
+            adapt,
         }
+    }
+
+    /// The script's `bracket_builds`: the corpus builds of SL bracket `bracket`, or of the nearest
+    /// bracket (the lower on a tie) with 20 or more; none when no bracket has.
+    fn bracket_builds(&self, bracket: usize) -> Vec<&CorpusBuild> {
+        let mut counts = [0_usize; SL_BRACKETS];
+        for build in &self.corpus {
+            counts[build.bracket.min(SL_BRACKETS - 1)] += 1;
+        }
+        let mut order: Vec<usize> = (0..SL_BRACKETS).collect();
+        order.sort_by_key(|&at| (at.abs_diff(bracket), at));
+        order
+            .into_iter()
+            .find(|&at| counts[at] >= 20)
+            .map(|at| {
+                self.corpus
+                    .iter()
+                    .filter(|build| build.bracket.min(SL_BRACKETS - 1) == at)
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// The script's `ring_attack_add`: what the worn `rings` add to `row`'s attack rating per type,
@@ -2263,6 +2334,7 @@ impl CorpusBackend {
         spells: &[usize],
         only_class: Option<&str>,
         floors: bool,
+        reply: Reply,
     ) -> Option<Refusal> {
         let run = |sl: u16, spells: &[usize], class: Option<&str>, floors: bool| {
             self.optimize_build(
@@ -2274,8 +2346,9 @@ impl CorpusBackend {
                 spells,
                 class,
                 floors,
-                // Who the objective is scored against never decides whether a build exists.
-                None,
+                // Who the objective is scored against never decides whether a build exists; the
+                // script asks for the average defender, answering as its DEFENDER says.
+                Against::average(reply),
             )
         };
         if run(sl, spells, only_class, floors).is_some() {
@@ -2604,7 +2677,7 @@ impl CorpusBackend {
         spells: &[usize],
         only_class: Option<&str>,
         floors: bool,
-        defender: Worn,
+        defender: Against,
     ) -> Option<Best> {
         let classes = self.class_indices(only_class);
         let floor = self.lift_floors(self.bracket(sl), weapon, floors, spells);
@@ -2800,7 +2873,7 @@ impl CorpusBackend {
         floor: &[(usize, i32)],
         require: &[(usize, i32)],
         rings: &[usize],
-        defender: Worn,
+        defender: Against,
     ) -> Option<Best> {
         // What the worn rings give: every curve reads it, the flexibility term the levelled stats.
         let worn = |st: &Stats| -> Stats {
@@ -3605,7 +3678,10 @@ impl RecommenderBackend for CorpusBackend {
             objective: opts.objective,
             top: WEAPONS_FOR_TOP,
             weapon: None,
-            defender,
+            defender: Against {
+                worn: defender,
+                reply: opts.reply,
+            },
         };
         let ranked = self.rank(&to_stats(stats), u32::from(sl), &query);
         Outcome::Rows(ranked.iter().map(|row| self.result_row(row)).collect())
@@ -3633,7 +3709,10 @@ impl RecommenderBackend for CorpusBackend {
             objective: opts.objective,
             top: usize::MAX,
             weapon: Some(index),
-            defender,
+            defender: Against {
+                worn: defender,
+                reply: opts.reply,
+            },
         };
         let ranked = self.rank(&to_stats(stats), u32::from(sl), &query);
         Outcome::Rows(ranked.iter().map(|row| self.result_row(row)).collect())
@@ -3659,7 +3738,10 @@ impl RecommenderBackend for CorpusBackend {
             &spells,
             limits.class,
             limits.floors,
-            self.worn(limits.defender)?,
+            Against {
+                worn: self.worn(limits.defender)?,
+                reply: limits.reply,
+            },
         )?;
         Some(OptimizedBuild {
             class: self.classes[class].name.clone(),
@@ -3694,6 +3776,7 @@ impl RecommenderBackend for CorpusBackend {
             &spells,
             limits.class,
             limits.floors,
+            limits.reply,
         )
     }
 
@@ -3794,32 +3877,31 @@ impl RecommenderBackend for CorpusBackend {
         })
     }
 
-    fn defense(&self, sl: u16, defender: &Defender) -> Option<DefenderDefense> {
+    fn defense(&self, sl: u16, defender: &Defender, reply: Reply) -> Option<DefenderDefense> {
         let sl = u32::from(sl);
         let worn = self.worn(defender)?;
         // The builds the script's bracket_defense and bracket_stats read: `sl`'s bracket, or the
         // nearest (the lower on a tie) with 20 or more.
-        let mut counts = [0_u32; SL_BRACKETS];
-        for build in &self.corpus {
-            counts[build.bracket.min(SL_BRACKETS - 1)] += 1;
-        }
-        let here = sl_bracket(sl);
-        let mut order: Vec<usize> = (0..SL_BRACKETS).collect();
-        order.sort_by_key(|&bracket| (bracket.abs_diff(here), bracket));
-        let builds = order
-            .into_iter()
-            .map(|bracket| counts[bracket])
-            .find(|&count| count >= 20)
-            .unwrap_or(0);
+        let builds = u32::try_from(self.bracket_builds(sl_bracket(sl)).len()).unwrap_or(u32::MAX);
         let stats = worn.map(|_| {
             self.bracket(sl)
                 .stats
                 .map(|value| u16::try_from(value).unwrap_or(0))
         });
+        let counters = if reply.adapts() {
+            self.counters
+                .iter()
+                .map(|&ring| self.rings[ring].1.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
         Some(DefenderDefense {
             defense: self.defense_at(sl, worn).map(|value| value as f32),
             builds,
             stats,
+            reply,
+            counters,
         })
     }
 
@@ -3847,7 +3929,10 @@ impl RecommenderBackend for CorpusBackend {
     ) -> Option<GeneratedBuild> {
         let primary = self.weapon_by_key(weapon)?;
         let spells = self.spell_indices(limits.spells)?;
-        let defender = self.worn(limits.defender)?;
+        let defender = Against {
+            worn: self.worn(limits.defender)?,
+            reply: limits.reply,
+        };
         let (_, class, two_handed, stats, worn) = self.optimize_build(
             primary,
             infusion,

@@ -21,7 +21,7 @@ use ds2_build_recommender_core::backend::{
 };
 use ds2_build_recommender_core::corpus::CorpusBackend;
 use ds2_build_recommender_core::model::{
-    Defender, Grip, Mode, Objective, PanelState, STAT_COUNT, StatusFilter, WeaponsForOpts,
+    Defender, Grip, Mode, Objective, PanelState, Reply, STAT_COUNT, StatusFilter, WeaponsForOpts,
     soul_level,
 };
 use ds2_build_recommender_core::weapons;
@@ -196,6 +196,29 @@ type BestInfusionCase = (
 );
 type BestInfusionCases = &'static [BestInfusionCase];
 type DefenderBestInfusionCases = Against<BestInfusionCase>;
+/// The adaptive defender's buff setting (`none`, `item`, `any`) and armour keys, then a case.
+type Adaptive<T> = &'static [(&'static str, &'static [&'static str], T)];
+type AdaptiveWeaponsForCases = Adaptive<WeaponsForCase>;
+type AdaptiveOptimizeCases = Adaptive<OptimizeCase>;
+type AdaptiveGenerateCases = Adaptive<GenerateCase>;
+type AdaptiveBestInfusionCases = Adaptive<BestInfusionCase>;
+
+/// The questions most fixtures were asked: the script's `--expect` writes them with a static
+/// defender, its rings as worn.
+const STATIC: Limits<'static> = Limits {
+    reply: Reply::Static,
+    ..Limits::NONE
+};
+
+/// The adaptive defender a fixture's buff setting names.
+fn reply(buff: &str) -> Reply {
+    match buff {
+        "none" => Reply::Ring,
+        "item" => Reply::RingAndItem,
+        "any" => Reply::RingAndAnyBuff,
+        other => panic!("buff {other}"),
+    }
+}
 
 mod expected {
     use super::*;
@@ -280,17 +303,48 @@ fn defense_is_the_scripts() {
     for &(sl, keys, want, builds) in expected::DEFENSE {
         let asked = defender(keys);
         let got = backend()
-            .defense(sl, &asked)
+            .defense(sl, &asked, Reply::Static)
             .unwrap_or_else(|| panic!("SL {sl} {keys:?}: no defense"));
         let want: Vec<f32> = want.iter().map(|&value| value as f32).collect();
         assert_eq!(got.defense[..], want[..], "SL {sl} {keys:?}");
         assert_eq!(got.builds, builds, "SL {sl} {keys:?}");
         assert_eq!(got.stats.is_some(), !keys.is_empty(), "SL {sl} {keys:?}");
+        assert!(got.counters.is_empty(), "a static defender swaps nothing");
+        // An adaptive defender puts up the same numbers until an attack is in hand.
+        let adaptive = backend()
+            .defense(sl, &asked, Reply::Ring)
+            .expect("the same defender");
+        assert_eq!(adaptive.defense, got.defense, "SL {sl} {keys:?}");
+        assert_eq!(adaptive.counters, expected::COUNTER_RINGS);
         chosen += usize::from(!keys.is_empty());
     }
     assert!(chosen >= 9, "{chosen} chosen defenders");
     let unknown = defender(&["Not_A_Helm", "Naked", "Naked", "Naked"]);
-    assert_eq!(backend().defense(100, &unknown), None, "an unknown piece");
+    assert_eq!(
+        backend().defense(100, &unknown, Reply::Ring),
+        None,
+        "an unknown piece"
+    );
+}
+
+/// The defender line says when the defender answers the weapon, and with what.
+#[test]
+fn the_defender_line_says_how_the_defender_answers() {
+    let at = |reply| {
+        let defense = backend()
+            .defense(150, &Defender::Average, reply)
+            .expect("the average");
+        backend::defender_line(&defense, 150)
+    };
+    assert!(!at(Reply::Static).contains("adapts"));
+    let ring = at(Reply::Ring);
+    assert!(
+        ring.contains("adapts: swaps a ring slot to Ring of Steel Protection + 2,"),
+        "{ring}"
+    );
+    assert!(!ring.contains("buff"), "{ring}");
+    assert!(at(Reply::RingAndItem).contains("plus the best item defense buff"));
+    assert!(at(Reply::RingAndAnyBuff).contains("plus the best item or spell defense buff"));
 }
 
 /// The panel's Best infusion and Weapons tab are asked against the panel's defender, and its line
@@ -336,7 +390,7 @@ fn the_panel_asks_against_its_defender() {
         assert_eq!(build.value, row.damage, "{:?}", row.infusion);
     }
     let defense = backend()
-        .defense(150, &state.defender)
+        .defense(150, &state.defender, state.reply)
         .expect("Havel's set");
     let line = backend::defender_line(&defense, 150);
     assert!(
@@ -345,7 +399,7 @@ fn the_panel_asks_against_its_defender() {
     );
     assert!(line.contains("chosen set at the SL 150 median"), "{line}");
     let average = backend()
-        .defense(150, &Defender::Average)
+        .defense(150, &Defender::Average, state.reply)
         .expect("the average");
     assert!(
         backend::defender_line(&average, 150).contains("SL 150 average defender"),
@@ -353,18 +407,28 @@ fn the_panel_asks_against_its_defender() {
     );
 }
 
+/// Weapons for Stats, against the static defender, a chosen set, and the adaptive defender whose
+/// answer to each weapon ends its row's grip (` vs Dark Quartz Ring + 3`).
 #[test]
 fn weapons_for_is_the_scripts() {
     let cases = expected::WEAPONS_FOR
         .iter()
-        .map(|case| (case, Defender::Average))
+        .map(|case| (case, Defender::Average, Reply::Static))
         .chain(
             expected::DEFENDER_WEAPONS_FOR
                 .iter()
-                .map(|(keys, case)| (case, defender(keys))),
+                .map(|(keys, case)| (case, defender(keys), Reply::Static)),
+        )
+        .chain(
+            expected::ADAPTIVE_WEAPONS_FOR
+                .iter()
+                .map(|(buff, keys, case)| (case, defender(keys), reply(buff))),
         );
-    for (case, (&(st, sl, one_hand, class, per_class, window, raw_ar, goal, want), defender)) in
-        cases.enumerate()
+    let mut answered = 0;
+    for (
+        case,
+        (&(st, sl, one_hand, class, per_class, window, raw_ar, goal, want), defender, reply),
+    ) in cases.enumerate()
     {
         let opts = WeaponsForOpts {
             one_hand,
@@ -374,7 +438,9 @@ fn weapons_for_is_the_scripts() {
             raw_ar,
             objective: objective(goal),
             defender,
+            reply,
         };
+        answered += want.iter().filter(|row| row.4.contains(" vs ")).count();
         let got = rows(backend().weapons_for(&stats(st), sl, &opts));
         assert_eq!(got.len(), want.len(), "case {case}: row count");
         for (at, (row, &(name, code, damage, ar, grip, ha, ctr, wclass))) in
@@ -394,6 +460,10 @@ fn weapons_for_is_the_scripts() {
             assert_eq!(row.counter, (ctr != 0.0).then_some(ctr as f32), "{at}");
         }
     }
+    assert!(
+        answered > 20,
+        "{answered} rows the adaptive defender answered"
+    );
 }
 
 #[test]
@@ -401,22 +471,28 @@ fn best_infusion_is_the_scripts() {
     let mut ranked_some = 0;
     let cases = expected::BEST_INFUSION
         .iter()
-        .map(|case| (case, &[][..]))
+        .map(|case| (case, &[][..], Reply::Static))
         .chain(
             expected::DEFENDER_BEST_INFUSION
                 .iter()
-                .map(|(keys, case)| (case, *keys)),
+                .map(|(keys, case)| (case, *keys, Reply::Static)),
+        )
+        .chain(
+            expected::ADAPTIVE_BEST_INFUSION
+                .iter()
+                .map(|(buff, keys, case)| (case, *keys, reply(buff))),
         );
-    for (&(weapon, st, sl, window, raw_ar, goal, want), keys) in cases {
+    for (&(weapon, st, sl, window, raw_ar, goal, want), keys, reply) in cases {
         let opts = WeaponsForOpts {
             window_s: window as f32,
             raw_ar,
             objective: objective(goal),
             defender: defender(keys),
+            reply,
             ..WeaponsForOpts::default()
         };
         let got = rows(backend().best_infusion(weapon, &stats(st), sl, &opts));
-        let case = format!("{weapon} SL {sl} {goal} window {window} against {keys:?}");
+        let case = format!("{weapon} SL {sl} {goal} window {window} against {keys:?} {reply:?}");
         assert_eq!(got.len(), want.len(), "{case}: row count");
         for (row, &(code, score, ar, grip)) in got.iter().zip(want) {
             assert_eq!(row.infusion, infusion(code), "{case}");
@@ -442,18 +518,23 @@ fn best_infusion_is_the_scripts() {
 fn optimize_is_the_scripts() {
     let cases = expected::OPTIMIZE
         .iter()
-        .map(|case| (case, Grip::TwoHanded, &[][..]))
+        .map(|case| (case, Grip::TwoHanded, &[][..], Reply::Static))
         .chain(
             expected::OPTIMIZE_ONE_HANDED
                 .iter()
-                .map(|case| (case, Grip::OneHanded, &[][..])),
+                .map(|case| (case, Grip::OneHanded, &[][..], Reply::Static)),
         )
         .chain(
             expected::DEFENDER_OPTIMIZE
                 .iter()
-                .map(|(keys, case)| (case, Grip::TwoHanded, *keys)),
+                .map(|(keys, case)| (case, Grip::TwoHanded, *keys, Reply::Static)),
+        )
+        .chain(
+            expected::ADAPTIVE_OPTIMIZE
+                .iter()
+                .map(|(buff, keys, case)| (case, Grip::TwoHanded, *keys, reply(buff))),
         );
-    for (&(weapon, code, sl, goal, want), grip, keys) in cases {
+    for (&(weapon, code, sl, goal, want), grip, keys, reply) in cases {
         let got = backend().optimize(
             weapon,
             infusion(code),
@@ -462,7 +543,8 @@ fn optimize_is_the_scripts() {
             grip,
             &Limits {
                 defender: &defender(keys),
-                ..Limits::NONE
+                reply,
+                ..STATIC
             },
         );
         match (got, want) {
@@ -497,7 +579,7 @@ fn a_weapon_the_stats_can_one_hand_still_optimizes_two_handed() {
                 74,
                 Objective::Damage,
                 grip,
-                &Limits::NONE,
+                &STATIC,
             )
             .unwrap_or_else(|| panic!("{grip:?}: no build"))
     };
@@ -528,13 +610,18 @@ fn generate_build_is_the_scripts() {
                 .map(|(class, case)| (case, Grip::TwoHanded, Some(*class))),
         );
     let cases = cases
-        .map(|(case, grip, only)| (case, grip, only, &[][..]))
+        .map(|(case, grip, only)| (case, grip, only, &[][..], Reply::Static))
         .chain(
             expected::DEFENDER_GENERATE
                 .iter()
-                .map(|(keys, case)| (case, Grip::TwoHanded, None, *keys)),
+                .map(|(keys, case)| (case, Grip::TwoHanded, None, *keys, Reply::Static)),
+        )
+        .chain(
+            expected::ADAPTIVE_GENERATE
+                .iter()
+                .map(|(buff, keys, case)| (case, Grip::TwoHanded, None, *keys, reply(buff))),
         );
-    for (&(weapon, code, sl, goal, naked, want), grip, only, keys) in cases {
+    for (&(weapon, code, sl, goal, naked, want), grip, only, keys, reply) in cases {
         let got = backend().generate_build(
             weapon,
             infusion(code),
@@ -545,7 +632,8 @@ fn generate_build_is_the_scripts() {
             &Limits {
                 class: only,
                 defender: &defender(keys),
-                ..Limits::NONE
+                reply,
+                ..STATIC
             },
         );
         if let (Some(only), Some(got)) = (only, &got) {
@@ -678,7 +766,7 @@ fn generate_build_with_spells_is_the_scripts() {
             Grip::TwoHanded,
             &Limits {
                 spells: &asked,
-                ..Limits::NONE
+                ..STATIC
             },
         );
         let (got, want) = match (got, want) {
@@ -777,7 +865,7 @@ fn an_unknown_spell_gets_no_build() {
         Grip::TwoHanded,
         &Limits {
             spells: &["Not_A_Spell".to_owned()],
-            ..Limits::NONE
+            ..STATIC
         },
     );
     assert!(got.is_none());
@@ -821,7 +909,7 @@ fn optimize_with_spells_is_the_scripts() {
         let limits = Limits {
             spells: &asked,
             floors,
-            ..Limits::NONE
+            ..STATIC
         };
         let got = backend().optimize(
             weapon,
@@ -863,7 +951,7 @@ fn refusal_is_the_scripts_and_every_fix_builds() {
             spells: &asked,
             class,
             floors,
-            defender: &Defender::Average,
+            ..STATIC
         };
         let (infusion, objective) = (infusion(code), objective(goal));
         let case = format!("{weapon} SL {sl} {spells:?} {class:?}");
@@ -915,7 +1003,7 @@ fn refusal_is_the_scripts_and_every_fix_builds() {
                 spells: &spells,
                 class,
                 floors,
-                defender: &Defender::Average,
+                ..STATIC
             };
             let build =
                 backend().generate_build(weapon, infusion, sl, objective, false, grip, &limits);
@@ -1096,7 +1184,7 @@ fn every_generated_grant_names_a_real_item() {
             Grip::TwoHanded,
             &Limits {
                 spells: &spells,
-                ..Limits::NONE
+                ..STATIC
             },
         ) else {
             continue;

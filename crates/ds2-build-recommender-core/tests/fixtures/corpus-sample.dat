@@ -1,4 +1,4 @@
-ds2-build-recommender-data 13
+ds2-build-recommender-data 14
 # 5461 builds; written by scripts/ds2-builds-recommend.py --export-backend
 C	warrior	Warrior	12	7	6	6	5	15	11	5	5	5
 C	knight	Knight	13	12	6	7	4	11	8	9	3	6
@@ -5064,6 +5064,40 @@ O	Ring_of_Blades	20	0	0	0	0
 O	Ring_of_Blades_1	35	0	0	0	0
 O	Ring_of_Blades_2	50	0	0	0	0
 O	Kings_Ring	0	0	5	0	0
+RD	Ring_of_Steel_Protection	0:50
+RD	Ring_of_Steel_Protection_1	0:75
+RD	Ring_of_Steel_Protection_2	0:100
+RD	Spell_Quartz_Ring	1:50
+RD	Spell_Quartz_Ring_1	1:80
+RD	Spell_Quartz_Ring_2	1:100
+RD	Spell_Quartz_Ring_3	1:150
+RD	Flame_Quartz_Ring	2:50
+RD	Flame_Quartz_Ring_1	2:80
+RD	Flame_Quartz_Ring_2	2:100
+RD	Flame_Quartz_Ring_3	2:150
+RD	Thunder_Quartz_Ring	3:50
+RD	Thunder_Quartz_Ring_1	3:80
+RD	Thunder_Quartz_Ring_2	3:100
+RD	Thunder_Quartz_Ring_3	3:150
+RD	Dark_Quartz_Ring	4:50
+RD	Dark_Quartz_Ring_1	4:80
+RD	Dark_Quartz_Ring_2	4:100
+RD	Dark_Quartz_Ring_3	4:150
+RD	Dispelling_Ring	1:60,3:60,2:60,4:60
+RD	Dispelling_Ring_1	1:120,3:120,2:120,4:120
+RD	Sorcery_Clutch_Ring	0:-80
+RD	Lightning_Clutch_Ring	0:-80
+RD	Fire_Clutch_Ring	0:-80
+RD	Dark_Clutch_Ring	0:-80
+DB	Magic Barrier	spell	60.0	1:100,3:100,2:100,4:100
+DB	Great Magic Barrier	spell	90.0	1:250,3:250,2:250,4:250
+DB	Sacred Oath	spell	40.0	0:75
+DB	Flash Sweat	spell	90.0	2:300
+DB	Iron Flesh	spell	25.0	0:100,1:200,3:200,2:200,4:200
+DB	Small Blue Burr	item	90.0	1:150
+DB	Small Yellow Burr	item	90.0	3:150
+DB	Small Orange Burr	item	90.0	2:150
+DB	Dark Troches	item	90.0	4:150
 P	head	Naked	Naked	0	0	0	0	0	0	-	0	0	0	0.075	0	0	0	0	0	0	0	0	0
 P	head	Alonne_Captain_Helm	Alonne Captain Helm	5.1	106	22	34	15	22	-	112	100	106	0.266	0	0	0	0	0	0	0	0	0
 P	head	Alonne_Knight_Helm	Alonne Knight Helm	4.6	95	14	25	10	14	-	100	90	95	0.266	0	0	0	0	0	0	0	0	0

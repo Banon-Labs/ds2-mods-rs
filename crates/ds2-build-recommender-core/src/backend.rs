@@ -22,7 +22,7 @@
 use ds2_build_import_core::{Build, Infusion, StartingClass, Stats, check_build};
 
 use crate::model::{
-    Defender, Grip, Mode, Objective, PanelState, STAT_COUNT, STAT_LABELS, StatusFilter,
+    Defender, Grip, Mode, Objective, PanelState, Reply, STAT_COUNT, STAT_LABELS, StatusFilter,
     WeaponsForOpts,
 };
 use crate::weapons;
@@ -81,7 +81,7 @@ pub const DEFENSE_TYPES: [&str; 8] = [
 ];
 
 /// What [`Objective::Damage`] is scored against at one soul level: the panel's defender line.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DefenderDefense {
     /// Defense per type, in [`DEFENSE_TYPES`] order. A hit's physical damage is read against its
     /// slash, strike or thrust defense when it has that type, the general physical one otherwise.
@@ -92,6 +92,11 @@ pub struct DefenderDefense {
     /// The median stats a chosen set is worn at, in [`STAT_LABELS`] order; `None` for the average
     /// defender, which wears every build's own stats.
     pub stats: Option<[u16; STAT_COUNT]>,
+    /// How the defender answers each weapon. `defense` is before any answer: the numbers a score
+    /// without an attack in hand reads.
+    pub reply: Reply,
+    /// The rings the defender may swap in against a weapon, by name; empty for a static defender.
+    pub counters: Vec<String>,
 }
 
 /// The panel's defender line: what a Damage column is scored against.
@@ -122,7 +127,20 @@ pub fn defender_line(defense: &DefenderDefense, sl: u16) -> String {
             )
         }
     };
-    format!("Defender: {numbers}  --  {whose}")
+    let adapts = if defense.counters.is_empty() {
+        String::new()
+    } else {
+        let buff = match defense.reply {
+            Reply::RingAndItem => ", plus the best item defense buff",
+            Reply::RingAndAnyBuff => ", plus the best item or spell defense buff",
+            Reply::Static | Reply::Ring => "",
+        };
+        format!(
+            "; adapts: swaps a ring slot to {} against each weapon{buff} (column 'vs')",
+            defense.counters.join(", ")
+        )
+    };
+    format!("Defender: {numbers}  --  {whose}{adapts}")
 }
 
 /// One row of a ranking.
@@ -323,15 +341,20 @@ pub struct Limits<'a> {
     /// Who the damage objective is scored against. It changes which build scores best, never
     /// whether one exists, so [`RecommenderBackend::refusal`] does not read it.
     pub defender: &'a Defender,
+    /// How that defender answers the weapon. [`RecommenderBackend::refusal`] reads it only for the
+    /// class it offers instead, which is the best build's.
+    pub reply: Reply,
 }
 
 impl Limits<'static> {
-    /// No spells, any class, the floors applied, the average defender.
+    /// No spells, any class, the floors applied, the average defender answering as the script's
+    /// default does.
     pub const NONE: Self = Self {
         spells: &[],
         class: None,
         floors: true,
         defender: &Defender::Average,
+        reply: Reply::Ring,
     };
 }
 
@@ -343,6 +366,7 @@ impl<'a> Limits<'a> {
             class: None,
             floors: !state.ignore_floors,
             defender: &state.defender,
+            reply: state.reply,
         }
     }
 }
@@ -530,10 +554,10 @@ pub trait RecommenderBackend: Sync {
     ) -> Option<crate::flex::Flexibility> {
         None
     }
-    /// What `defender` puts up at `sl`, the numbers the damage column is scored against. `None`
-    /// when this backend cannot say, which is the default (the stub has no corpus), or when a
-    /// piece is not in its armour table.
-    fn defense(&self, _sl: u16, _defender: &Defender) -> Option<DefenderDefense> {
+    /// What `defender` puts up at `sl`, the numbers the damage column is scored against, and how it
+    /// answers a weapon under `reply`. `None` when this backend cannot say, which is the default
+    /// (the stub has no corpus), or when a piece is not in its armour table.
+    fn defense(&self, _sl: u16, _defender: &Defender, _reply: Reply) -> Option<DefenderDefense> {
         None
     }
     /// The armour a defender can wear in `slot` (an index into [`crate::model::ARMOR_SLOTS`]) as
@@ -634,6 +658,7 @@ pub fn ask(backend: &dyn RecommenderBackend, state: &PanelState) -> Answer {
                 let opts = WeaponsForOpts {
                     objective: state.objective,
                     defender: state.defender.clone(),
+                    reply: state.reply,
                     ..state.weapons_for.clone()
                 };
                 backend.weapons_for(&state.stats, sl, &opts)
