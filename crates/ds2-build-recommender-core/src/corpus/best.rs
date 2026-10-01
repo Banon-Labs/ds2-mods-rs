@@ -83,18 +83,28 @@ impl CorpusBackend {
         let defending = self.defending(ask.sl, ask.against);
         let (mut score, mut label) = (value, if two { "2H" } else { "1H" }.to_owned());
         let mut metrics = WeaponMetrics::default();
-        // The stamina metric a rank other than the window's reads; none is ported yet, so such a
-        // rank finds none, as the script's does for a row without it.
-        let by =
-            (ask.objective == Objective::Damage && ask.window != 0.0 && ask.rank != Rank::Window)
-                .then_some(ask.rank);
+        // The stamina metric a rank other than the window's scores the row by, for damage over a
+        // window; a row without it is left out, as the script's is.
+        let window_damage = ask.objective == Objective::Damage && ask.window != 0.0;
+        let by = (window_damage && ask.rank != Rank::Window).then_some(ask.rank);
+        let ranked = |metrics: &WeaponMetrics| {
+            let stamina = metrics.stamina.as_ref()?;
+            match by? {
+                Rank::PerStamina => Some(stamina.damage_per_stamina),
+                Rank::Bar => stamina.bar_damage,
+                Rank::Window => None,
+            }
+        };
         let ammo = if weapon.ranged.is_some() {
             // One shot with its best ammunition at the optimized stats, window or not: the fire
             // rate is not read.
             let (_, note, _, ammo) =
                 self.ranged_pick(weapon, ask.infusion, &eff, ask.objective, &defending, &worn);
+            if window_damage {
+                metrics.stamina = self.shot_metrics(weapon, value, &stats, &worn);
+            }
             if by.is_some() {
-                return None;
+                score = ranked(&metrics)?;
             }
             label.push_str(" 1 shot");
             Some((ammo, note))
@@ -141,8 +151,17 @@ impl CorpusBackend {
                 );
                 metrics.damage_with_status = Some(score + status.damage_per_window);
                 metrics.status = Some(status);
+                metrics.stamina = self.stamina_metrics(
+                    weapon,
+                    two,
+                    &ar,
+                    &defending.base,
+                    ask.window,
+                    &stats,
+                    &worn,
+                );
                 if by.is_some() {
-                    return None;
+                    score = ranked(&metrics)?;
                 }
             }
             self.r1_metrics(

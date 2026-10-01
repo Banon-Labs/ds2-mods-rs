@@ -239,6 +239,29 @@ pub struct WeaponMetrics {
     /// For damage over a window, the score plus the status damage per window: what the script's
     /// `--with-status` ranks by. The score itself does not count status.
     pub damage_with_status: Option<f64>,
+    /// What the scored hits cost in stamina and what a full bar of it pays for, for damage over a
+    /// window; `None` otherwise, or without stamina costs or attack timing.
+    pub stamina: Option<StaminaMetrics>,
+}
+
+/// The stamina side of a row's R1 chain (a launcher's: one shot), in menu points: the script's
+/// `stamina_metrics` and `shot_metrics`.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct StaminaMetrics {
+    /// The R1 chain's 1st and 2nd attack's cost; a launcher's shot's.
+    pub per_attack: Vec<f64>,
+    /// What the attacks whose hits land in the window cost.
+    pub per_window: f64,
+    /// The window's damage over that cost: what [`crate::model::Rank::PerStamina`] ranks by.
+    pub damage_per_stamina: f64,
+    /// The build's max stamina, its rings counted; `None` without the regulation's table.
+    pub max_stamina: Option<f64>,
+    /// The attacks a full bar begins: each begins while stamina is above 0.
+    pub bar_attacks: Option<u32>,
+    /// Their damage: what [`crate::model::Rank::Bar`] ranks by.
+    pub bar_damage: Option<f64>,
+    /// Seconds until the last of them begins; `None` for a launcher, whose fire rate is not read.
+    pub bar_seconds: Option<f64>,
 }
 
 /// The poison and bleed a row's hits deal through their procs: the script's `row_status`, against

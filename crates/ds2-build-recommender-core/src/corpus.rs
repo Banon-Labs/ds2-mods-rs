@@ -17,6 +17,11 @@
 //!   stats, the ranking, the stat optimizer, the minimum-build search, and the nearest builds. A
 //!   bow, greatbow or crossbow is scored by its best shot, its ammunition's attack added
 //!   (`ranged`), from the launcher and ammunition rows the script reads from the regulation.
+//!   Damage is scored against a defender who answers each attack with its counter ring
+//!   (`adaptive`) unless a static one is asked for. Best weapons (`best`) ranks every weapon an
+//!   infusion goes on at its own optimized build, each row with the R1 chain's reach, timing and
+//!   sustained damage (`chain`), hyperarmor and poise (`poise`), poison and bleed procs
+//!   (`status`) and stamina (`stamina`).
 //!
 //! The corpus is carried as what nearest-build search reads and nothing else: each build's SL
 //! bracket, its nine stat brackets, its rings and its weapons with their infusions.
@@ -42,13 +47,14 @@ mod best;
 mod chain;
 mod poise;
 mod ranged;
+mod stamina;
 mod status;
 
 /// What the file is called beside `DarkSoulsII.exe`.
 pub const DATA_FILE_NAME: &str = "ds2-build-recommender.dat";
 
 /// The file's first line. A different one is a file this port does not read.
-pub const FORMAT: &str = "ds2-build-recommender-data 17";
+pub const FORMAT: &str = "ds2-build-recommender-data 18";
 
 /// Nine stats as the script computes with them, in [`crate::model::STAT_LABELS`] order.
 type Stats = [i32; STAT_COUNT];
@@ -373,6 +379,8 @@ struct Weapon {
     r1: [[Option<f64>; 4]; 2],
     /// Per grip, what the script's `poise_metrics` reads that no build changes.
     poise: [Option<poise::Poise>; 2],
+    /// Its stamina costs: the script's `data.stamina_cost` row.
+    stamina: Option<stamina::Cost>,
 }
 
 /// One attack chain as the bleed/poison ranking counts it.
@@ -951,8 +959,10 @@ impl CorpusBackend {
                     chains: Default::default(),
                     r1: [[None; 4]; 2],
                     poise: Default::default(),
+                    stamina: None,
                 });
             }
+            "SC" => self.parse_stamina(line, &mut fields)?,
             "CH" => self.parse_chain(line, &mut fields)?,
             "PO" => self.parse_poise(line, &mut fields)?,
             "SP" => self.parse_proc(line, &mut fields)?,

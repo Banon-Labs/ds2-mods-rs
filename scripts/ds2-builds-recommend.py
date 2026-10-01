@@ -4811,10 +4811,14 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 #                                                             status is locked out after
 #   and, trailing: P the piece's poison and bleed resistance (data.armor_status, 0 for none); X the
 #   build's status_cut poison:bleed; T poisonResistance/bleedingResistance, data.status_resist
+#   SC melee ranged r1-1h r2-1h r1-2h r2-2h                   the last W's data.stamina_cost: its
+#                                                             melee and ranged base costs and the
+#                                                             R1_COST_FIELD rates, 1H 1st/2nd then
+#                                                             2H 1st/2nd
 
 BACKEND_DATA_NAME = "ds2-build-recommender.dat"
 BACKEND_DATA = Path.home() / ".cache/ds2-builds" / BACKEND_DATA_NAME
-BACKEND_FORMAT = "ds2-build-recommender-data 17"
+BACKEND_FORMAT = "ds2-build-recommender-data 18"
 #: How far the exported R1/R2 chains run, in seconds: the panel clamps its window to 10.0
 #: (crates/ds2-build-recommender-ui/src/panel.rs), and status_hits runs to max(3, window).
 STATUS_HORIZON = 10.0
@@ -4985,6 +4989,11 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
                 out.append("\t".join(["RS", ",".join(str(DMG.index(k)) for k in s["types"]) or "-",
                                       *(_num(s["flat"].get(k, 0)) for k in DMG), _num(s["mv"]), _num(s["lower"]),
                                       _num(s["shots"]), *(_num(s["status"].get(k, 0)) for k in STATUS_PROC)]))
+        c = data.stamina_cost.get(key)
+        if c:  # what attack_stamina and shot_stamina read
+            out.append("\t".join(["SC", _num(c["melee"]), _num(c["ranged"]),
+                                  *(_num(c["rates"][R1_COST_FIELD[(two, second)]])
+                                    for two in (False, True) for second in (False, True))]))
     for name, a in sorted(data.ammo.items()):
         out.append("\t".join(["AM", name, _num(a["type"]), *(_num(a["flat"].get(k, 0)) for k in DMG),
                               *(_num(a["status"].get(k, 0)) for k in STATUS_PROC), _num(a["mv"]), _num(a["lower"])]))

@@ -1527,17 +1527,15 @@ fn rank(name: &str) -> Rank {
 
 /// Best weapons, the script's `--best-weapons` with its `--json` metrics: every weapon an
 /// infusion goes on, at the build the optimizer makes for it, ranked; the rows' builds, labels,
-/// launchers' ammunition and the R1's reach, timing and five-second damage.
+/// launchers' ammunition, and every metric: the R1's reach, timing and five-second damage, its
+/// hyperarmor and poise, the procs its hits deal, and its stamina, ranked by under `--rank`.
 #[test]
 fn best_weapons_is_the_scripts() {
     let (mut compared, mut launchers, mut timed, mut poised, mut procs) = (0, 0, 0, 0, 0);
+    let (mut held, mut staggered, mut barred) = (0, 0, 0);
     for &(code, sl, goal, grip, class, window, by, with_status, keys, who, want) in
         expected::BEST_WEAPONS
     {
-        // Not ported yet: the stamina ranks.
-        if by != "window" {
-            continue;
-        }
         let opts = BestWeaponsOpts {
             weapon_class: (!class.is_empty()).then(|| class.to_owned()),
             window_s: window as f32,
@@ -1576,7 +1574,7 @@ fn best_weapons_is_the_scripts() {
                 poise,
                 status,
                 with,
-                ..,
+                stamina,
             ) = *want;
             let at = format!("{case}: {key}");
             assert_eq!(row.weapon, key, "{case}");
@@ -1642,16 +1640,39 @@ fn best_weapons_is_the_scripts() {
                 with.map(|value| value as f32),
                 "{at}: damage with status"
             );
+            let got_stamina = m.stamina.as_ref().map(|s| {
+                (
+                    s.per_attack.clone(),
+                    s.per_window,
+                    s.damage_per_stamina,
+                    s.max_stamina,
+                    s.bar_attacks.map(i64::from),
+                    s.bar_damage,
+                    s.bar_seconds,
+                )
+            });
+            let want_stamina = stamina.map(|(per, window, dps, max, attacks, damage, seconds)| {
+                (per.to_vec(), window, dps, max, attacks, damage, seconds)
+            });
+            assert_eq!(got_stamina, want_stamina, "{at}: stamina metrics");
             procs += status.map_or(0, |(_, per, ..)| per.len());
             compared += 1;
             launchers += usize::from(ammo.is_some());
             timed += usize::from(r1.4.is_some());
             poised += usize::from(poise.3.is_some());
+            held += usize::from(poise.2.is_some());
+            staggered += usize::from(poise.5.is_some_and(|hits| hits > 1));
+            barred += usize::from(stamina.is_some_and(|s| s.5.is_some()));
         }
     }
     assert!(
-        compared >= 20 && launchers >= 4 && timed >= 10 && poised >= 10 && procs >= 8,
+        compared >= 30 && launchers >= 4 && timed >= 10 && poised >= 10 && procs >= 8,
         "{compared} rows, {launchers} launchers, {timed} with 5 s damage, {poised} with poise \
          data, {procs} statuses built up"
+    );
+    assert!(
+        held >= 1 && staggered >= 4 && barred >= 10,
+        "{held} rows whose hyperarmor holds, {staggered} that take more than a hit to stagger, \
+         {barred} with a full bar's damage"
     );
 }
