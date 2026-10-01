@@ -262,7 +262,9 @@ The title is a commit header and follows the same rule as a commit. The body fol
 exactly `## What changed`, `## Why`, `## Evidence`, and the whole body under 2500 characters. Say
 plainly under the evidence heading when there has been no run -- that is a pass, and silence is not.
 A body that will not fit the cap is a change that should have been two changes; the long-form
-reasoning goes in the commit message or a doc, which the body can link in a line.
+reasoning goes in the commit message or a doc, which the body can link in a line. Keep beads issue
+ids out of the body: a reader on GitHub has no beads database, so describe the missing behaviour and
+leave the tracking in beads.
 
 Github only fills the template in for a body it is asked to compose. `gh pr create --body` replaces
 the body outright, so a command that passes one has silently skipped the template: start from the
