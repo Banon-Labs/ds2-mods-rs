@@ -437,6 +437,8 @@ integer `PhysicalStatsPerLevelStatValuesParam` fields in the stat block. `0x1403
 The stat block's words are `[rbx + 2*(id-1)]` (jump table `0x14038e280`: 1 VGR, 2 END, 3 VIT, 4 ATT,
 5 STR, 6 DEX, 7 INT, 8 FTH, 9 ADP). Physical stat defense is stored the same way:
 `row[trunc((END+VIT+STR+DEX)/4)].defense` goes to `+0x48` (`0x14038d97b`..`0x14038d9c6`), which slot 58 reads.
+Slot 58 multiplies it by the sum of the four pieces' `ArmorParam.defenseStatAffectScale` (`+0x1c`), so a
+bare body (naked pieces, 0.5 in all) gets half of it; `docs/DS2-INFUSION-EVIDENCE.md` "The bare defender".
 SoulsPlanner's `physicalATKBonus`, `magicATKBonus`, `lightningATKBonus`, `darkATKBonus`, `mundaneATKBonus`
 and `fireATKBonus[INT+FTH]` equal these regulation columns with these indices at every entry. Its
 `physicalDEFBonus[sum]` does not match: it is off by one at 180 of 393 sums (row 3 is 63 in the regulation
