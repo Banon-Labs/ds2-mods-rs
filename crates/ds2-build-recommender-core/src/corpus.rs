@@ -1214,14 +1214,15 @@ impl CorpusBackend {
 
     /// The script's `offense_rings`: per ring upgrade group the last ring with an attack add,
     /// never a no-use ring, when it adds some attack to `weapon`'s `infusion`; most attack added
-    /// first, file order on a tie. None for bleed or poison.
+    /// first, file order on a tie. None for bleed or poison; AR takes damage's, since an add
+    /// raises both.
     fn offense_rings(
         &self,
         weapon: &Weapon,
         infusion: Infusion,
         objective: Objective,
     ) -> Vec<usize> {
-        if objective != Objective::Damage {
+        if matches!(objective, Objective::Bleed | Objective::Poison) {
             return Vec::new();
         }
         let mut by_group: Vec<(&str, usize)> = Vec::new();
@@ -1340,6 +1341,15 @@ impl CorpusBackend {
             top,
             weapon: only,
         } = *query;
+        // The AR goal is raw AR by another name, so the Goal the panel shares between its tabs
+        // ranks the Weapons tab as it optimizes. It drops the window: attack rating is one hit's,
+        // and the window counts hits of damage, so a window ranked by AR would be damage under the
+        // wrong name.
+        let (raw_ar, window) = if objective == Objective::Ar {
+            (true, 0.0)
+        } else {
+            (raw_ar, window)
+        };
         let bracket = self.bracket(sl);
         let defense = &bracket.defense;
         let class = class.map(norm);
@@ -1369,7 +1379,7 @@ impl CorpusBackend {
             if !every && weapon.high_stamina && stats[END] < bracket.floors[4] {
                 continue;
             }
-            if objective != Objective::Damage {
+            if matches!(objective, Objective::Bleed | Objective::Poison) {
                 // Build-up per hit times the hits of the best R1/R2 attack (or chain within the
                 // window), the script's bleed/poison branch.
                 let (hits, label) = Self::status_hits(weapon, one, window);
@@ -1558,7 +1568,10 @@ impl CorpusBackend {
         }
     }
 
-    /// The script's `objective_value`, the worn `rings`' attack adds counted.
+    /// The script's `objective_value`, the worn `rings`' attack adds counted. AR keeps them because
+    /// the game adds a ring's flat to the attack rating itself (`AR = (bonus + base) x rate`), so a
+    /// Ring of Blades raises the menu's number; it leaves out the weapon's damage scale, which
+    /// applies after the defence.
     fn objective_value(
         &self,
         weapon: &Weapon,
@@ -1584,6 +1597,11 @@ impl CorpusBackend {
             Objective::Damage => {
                 Self::damage(&self.attack_rating(row, stats, rings), defense) * weapon.damage_scale
             }
+            Objective::Ar => self
+                .attack_rating(row, stats, rings)
+                .iter()
+                .flatten()
+                .fold(0.0, |total, value| total + value),
         }
     }
 

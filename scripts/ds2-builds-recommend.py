@@ -1968,7 +1968,12 @@ def weapons_for(data: Data, stats: dict, sl: int, corpus: list[Build], top: int 
     `every_infusion`: every infusion of every weapon instead, and no `top` cut (infusion_gaps).
     `weapon` (a key): that weapon alone, every infusion, and no high-stamina END gate -- the
     question is which infusion, not whether to carry it (best_infusion). `use_floors` False
-    (--no-floors) drops that END gate as well: it is a floor, not a game rule."""
+    (--no-floors) drops that END gate as well: it is a floor, not a game rule.
+    `objective` "ar" is `raw_ar` by another name, so the Goal the panel shares between its tabs
+    ranks the Weapons tab as it optimizes. It drops `window`: attack rating is one hit's, and the
+    window counts hits of damage, so a window ranked "by AR" would be damage under the wrong name."""
+    if objective == "ar":
+        raw_ar, window = True, 0.0
     every_infusion = every_infusion or weapon is not None
     dfn, n = bracket_defense(data, corpus, sl)
     floors, r1, cut = build_floors(data, corpus, sl)
@@ -2123,8 +2128,15 @@ def floor_violations(stats: dict, floors: dict, spells=()) -> list[str]:
 def objective_value(data: Data, weapon: str, inf: str, st: dict, objective: str, dfn: dict,
                     rings=()) -> float:
     """`objective` for weapon+infusion at stats `st`: build-up per hit for "bleed" and "poison",
-    else one hit's damage against defense `dfn`, the worn `rings`' attack adds counted
-    (attack_rating; no ring adds a status build-up here, regulation_ring_attack)."""
+    the summed attack rating for "ar", else one hit's damage against defense `dfn`, the worn
+    `rings`' attack adds counted (attack_rating; no ring adds a status build-up here,
+    regulation_ring_attack).
+
+    "ar" is what the community compares (a Raw Black Dragon Greataxe's 471 against Lightning's
+    287 + 287) and what the menu shows: every type summed, before any defense and before the
+    weapon's damage_scale, which applies after the defense. A ring's attack add is in it, because
+    the game adds it to the attack rating itself (`AR = (bonus + base) x rate`, attack_rating): a
+    Ring of Blades raises the menu's AR, so a goal that left it out would not be the menu's number."""
     row = data.weapons[weapon]["infusions"].get(inf) or {}
     atk, sc = row.get("atk") or {}, row.get("atkScale") or {}
     if objective in ("bleed", "poison"):
@@ -2134,6 +2146,8 @@ def objective_value(data: Data, weapon: str, inf: str, st: dict, objective: str,
         # 0x14038dcaf / 0x14038dcef).
         i = 3 * st["dexterity"] + (st["faith"] if objective == "bleed" else st["adaptability"])
         return (atk.get(objective) or 0) + sc.get(objective, 0) * _tab(data, "auxATKBonus", i)
+    if objective == "ar":
+        return sum(attack_rating(data, weapon, inf, st, rings).values())
     return (sum(damage(k, v, dfn[k]) for k, v in attack_rating(data, weapon, inf, st, rings).items())
             * data.damage_scale.get(weapon, 1.0))
 
@@ -2210,8 +2224,8 @@ def offense_rings(data: Data, weapon: str, inf: str, objective: str) -> list[str
     (regulation_ring_attack): per ring upgrade group the last, its strongest tier, never a
     NO_USE_RINGS ring, when ring_attack_add gives the infusion some attack; most attack added first
     (summed over DMG), in data.ring_attack order on a tie. None for "bleed" or "poison": no decoded
-    ring adds to a build-up."""
-    if objective != "damage":
+    ring adds to a build-up. "ar" takes the same rings as "damage": an add raises both."""
+    if objective not in ("damage", "ar"):
         return []
     row = data.weapons[weapon]["infusions"].get(inf) or {}
     by_group = {}
@@ -3532,6 +3546,8 @@ EXPECT_WEAPONS_FOR = [
     ([25, 20, 15, 12, 12, 40, 15, 9, 20], 150, False, None, False, 2.0, False, "bleed"),
     ([25, 20, 15, 12, 12, 40, 15, 9, 20], 150, False, None, True, 5.0, False, "bleed"),
     ([20, 20, 15, 10, 20, 30, 30, 9, 9], 100, True, None, False, 0.0, False, "poison"),
+    # the AR goal: raw AR with the window dropped, so this ranks as the third case does
+    ([20, 20, 15, 10, 40, 15, 15, 9, 9], 100, True, None, False, 1.5, False, "ar"),
 ]
 EXPECT_BUILDS = [  # weapon key, infusion, sl, objective: --optimize and --generate
     ("Demons_Great_Hammer", "Raw", 100, "damage"),
@@ -3541,6 +3557,10 @@ EXPECT_BUILDS = [  # weapon key, infusion, sl, objective: --optimize and --gener
     ("Moonlight_Greatsword", "No_Infusion", 90, "damage"),
     ("Uchigatana", "Bleed", 150, "bleed"),
     ("Dagger", "Poison", 60, "poison"),
+    # the AR goal: a split infusion that scales with nothing past its requirements, so the AR the
+    # worn Ring of Blades+2 adds is what the goal reads; and one whose lightning half scales with FTH
+    ("Black_Dragon_Greataxe", "Lightning", 100, "ar"),
+    ("Uchigatana", "Lightning", 150, "ar"),
 ]
 EXPECT_NAKED = [("Demons_Great_Hammer", "Raw", 100, "damage", True)]  # --generate --allow-naked
 EXPECT_ONE_HANDED = [  # --optimize and --generate with --grip one
@@ -3635,6 +3655,8 @@ EXPECT_BEST_INFUSION = [  # weapon key, stats, sl, window, raw_ar, objective: --
     ("Uchigatana", [25, 20, 15, 12, 12, 40, 15, 9, 20], 150, 0.0, False, "bleed"),
     ("Dagger", [20, 20, 15, 10, 20, 30, 30, 9, 9], 100, 2.0, False, "poison"),
     ("Greatsword", [20, 20, 15, 10, 10, 10, 15, 9, 9], 80, 0.0, False, "damage"),  # STR 10 < 28/2: no rows
+    # the AR goal: Raw's phys 471 below the split infusions' 287 + 287, tied four ways at 574
+    ("Black_Dragon_Greataxe", [20, 20, 15, 10, 35, 15, 15, 9, 14], 100, 0.0, False, "ar"),
 ]
 
 
@@ -4070,10 +4092,11 @@ def main() -> int:
                          "--spells, END for a high-stamina weapon): they are the medians of real builds, not a game rule")
     ap.add_argument("--allow-naked", action="store_true",
                     help="with --generate: no armour (by default the best set under 70%% load is chosen)")
-    ap.add_argument("--objective", choices=["damage", "bleed", "poison"], default="damage",
-                    help="with --optimize: what the free points maximize. With --weapons-for (and the list "
-                         "--optimize prints): bleed/poison rank by build-up per hit x hits of the best R1/R2 "
-                         "attack, or hits landed within --window seconds")
+    ap.add_argument("--objective", choices=["damage", "ar", "bleed", "poison"], default="damage",
+                    help="with --optimize: what the free points maximize; ar is the summed attack rating, worn "
+                         "rings' adds counted, before any defense. With --weapons-for (and the list --optimize "
+                         "prints): ar is --raw-ar and ignores --window; bleed/poison rank by build-up per hit x "
+                         "hits of the best R1/R2 attack, or hits landed within --window seconds")
     g.add_argument("--weapons-for", metavar="STATS",
                    help='rank weapons for these stats, e.g. "VGR=10,END=16,VIT=7,ATT=9,STR=20,DEX=12,ADP=8,INT=12,FTH=12"')
     g.add_argument("--flexibility", metavar="STATS",
@@ -4303,8 +4326,9 @@ def main() -> int:
         stats = parse_stats(a.stats)
         sl = a.sl or sum(stats.values()) - 53
         corpus, _ = load_corpus(data)
-        what = {"damage": "raw AR" if a.raw_ar else "damage"}.get(a.objective, f"{a.objective} x hits")
-        if a.window:
+        what = {"damage": "raw AR" if a.raw_ar else "damage", "ar": "raw AR"}.get(a.objective,
+                                                                               f"{a.objective} x hits")
+        if a.window and a.objective != "ar":
             what += f" in {a.window:g}s"
         print(f"stats {' '.join(f'{s[:3].upper()} {v}' for s, v in stats.items())}  ->  SL {sl}; by {what}, "
               "full upgrade")
@@ -4357,10 +4381,10 @@ def main() -> int:
         print(f"stats {' '.join(f'{s[:3].upper()} {v}' for s, v in stats.items())}  ->  SL {sl}")
         print(f"average defender at this SL ({n} builds): "
               + " ".join(f"{k} {v:.0f}" for k, v in dfn.items()))
-        if a.objective != "damage":
+        if a.objective in ("bleed", "poison"):
             print(f"{a.objective}: gauge points before the defender's resistance; a gauge procs at 100")
         what = {"damage": "dmg"}.get(a.objective, a.objective)
-        head = "total AR" if a.raw_ar and a.objective == "damage" else f"{what}/{a.window:g}s" if a.window else (
+        head = "total AR" if (a.raw_ar and a.objective == "damage") or a.objective == "ar" else f"{what}/{a.window:g}s" if a.window else (
             "damage" if a.objective == "damage" else f"{what}/atk")
         print(f"\n  {'weapon (infusion)':44} {head:>8}   AR by type                         grip")
         for dmg, name, inf, ar, grip in rows:

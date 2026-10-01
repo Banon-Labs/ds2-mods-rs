@@ -76,6 +76,12 @@ pub enum Objective {
     /// Expected damage against the bracket's average defender.
     #[default]
     Damage,
+    /// Attack rating summed over the damage types, the worn rings' attack adds counted, before
+    /// any defence: the number the game's menu shows and the community compares. It ranks a split
+    /// infusion by both halves, where [`Objective::Damage`] lets the defender's elemental
+    /// resistance discount one of them -- a Raw Black Dragon Greataxe's 471 against Lightning's
+    /// 287 + 287 is a loss on this goal and nearly a tie on that one.
+    Ar,
     /// Bleed build-up per hit.
     Bleed,
     /// Poison build-up per hit.
@@ -84,12 +90,18 @@ pub enum Objective {
 
 impl Objective {
     /// Every objective, in the order the panel offers them.
-    pub const ALL: [Objective; 3] = [Objective::Damage, Objective::Bleed, Objective::Poison];
+    pub const ALL: [Objective; 4] = [
+        Objective::Damage,
+        Objective::Ar,
+        Objective::Bleed,
+        Objective::Poison,
+    ];
 
     /// The option's caption.
     pub const fn label(self) -> &'static str {
         match self {
             Objective::Damage => "Damage",
+            Objective::Ar => "AR",
             Objective::Bleed => "Bleed",
             Objective::Poison => "Poison",
         }
@@ -301,6 +313,29 @@ impl PanelState {
     pub fn ready(&self) -> bool {
         !self.mode.needs_weapon() || self.weapon.is_some()
     }
+
+    /// The heading of a results table's score column: what the number under it measures.
+    ///
+    /// Here rather than in the panel so the host tests can hold it to what
+    /// `CorpusBackend::rank` scores. The goal decides it first, since Best infusion and the
+    /// Weapons tab both rank by it; the Weapons tab's own raw-AR toggle only when the goal is
+    /// damage and no R1 window is set, because with a window `rank` scores the window's hits of
+    /// damage whatever the toggle says (the script's `--weapons-for` heads that column `dmg/Ns`).
+    pub fn score_heading(&self) -> &'static str {
+        match (self.mode, self.objective) {
+            (Mode::SimilarBuilds, _) => "Builds",
+            // Build-up per hit times hits per attack (or within the window).
+            (_, Objective::Bleed) => "Bleed x hits",
+            (_, Objective::Poison) => "Poison x hits",
+            (_, Objective::Ar) => "AR",
+            (Mode::WeaponsForStats, Objective::Damage)
+                if self.weapons_for.raw_ar && self.weapons_for.window_s == 0.0 =>
+            {
+                "AR"
+            }
+            (_, Objective::Damage) => "Damage",
+        }
+    }
 }
 
 #[cfg(test)]
@@ -325,6 +360,38 @@ mod tests {
         );
         state.set_sl_override(Some(0));
         assert_eq!(state.sl(), 33, "zero clears the override");
+    }
+
+    /// The AR goal heads Best infusion's column "AR", and the Weapons tab's raw-AR toggle does
+    /// only while no window turns its score back into damage.
+    #[test]
+    fn the_score_heading_follows_the_goal() {
+        let mut state = PanelState {
+            mode: Mode::OptimizeForWeapon,
+            ..PanelState::default()
+        };
+        assert_eq!(state.score_heading(), "Damage");
+        state.objective = Objective::Ar;
+        assert_eq!(state.score_heading(), "AR");
+        state.objective = Objective::Bleed;
+        assert_eq!(state.score_heading(), "Bleed x hits");
+        state.mode = Mode::WeaponsForStats;
+        state.objective = Objective::Damage;
+        state.weapons_for.raw_ar = true;
+        assert_eq!(state.score_heading(), "AR");
+        state.weapons_for.window_s = 1.5;
+        assert_eq!(state.score_heading(), "Damage");
+        state.objective = Objective::Ar;
+        assert_eq!(state.score_heading(), "AR", "the AR goal drops the window");
+        state.mode = Mode::SimilarBuilds;
+        assert_eq!(state.score_heading(), "Builds");
+    }
+
+    /// The panel's Goal control cycles through every objective, AR among them.
+    #[test]
+    fn the_goal_offers_ar() {
+        assert!(Objective::ALL.contains(&Objective::Ar));
+        assert_eq!(Objective::Ar.label(), "AR");
     }
 
     #[test]

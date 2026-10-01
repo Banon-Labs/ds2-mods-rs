@@ -209,6 +209,7 @@ fn infusion(code: &str) -> Infusion {
 fn objective(name: &str) -> Objective {
     match name {
         "damage" => Objective::Damage,
+        "ar" => Objective::Ar,
         "bleed" => Objective::Bleed,
         "poison" => Objective::Poison,
         other => panic!("objective {other}"),

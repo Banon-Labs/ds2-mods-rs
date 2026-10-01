@@ -2730,15 +2730,7 @@ fn draw_answer(panel: &mut Panel, canvas: &mut Canvas<'_>, (min, max): ([f32; 2]
         }
         Some(Answer::Rows(rows)) => {
             let rows = rows.clone();
-            let score = match panel.state.mode {
-                Mode::SimilarBuilds => "Builds",
-                // Build-up per hit times hits per attack (or within the window).
-                _ if panel.state.objective == Objective::Bleed => "Bleed x hits",
-                _ if panel.state.objective == Objective::Poison => "Poison x hits",
-                // Best infusion ranks by damage whatever the Weapons-for-stats tab's raw AR says.
-                Mode::WeaponsForStats if panel.state.weapons_for.raw_ar => "AR",
-                _ => "Damage",
-            };
+            let score = panel.state.score_heading();
             let focused = panel.scrolling_results || panel.cursor == Control::Results;
             panel.results_cursor = panel.results_cursor.min(rows.len().saturating_sub(1));
             let table = Table {
