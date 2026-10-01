@@ -152,9 +152,41 @@ def read_save(path: str, key_hex: str) -> list[tuple[int, dict]]:
     return rows
 
 
+#: ArmorReinforceParam: twelve f32 at +0x00 (the +0 piece) and twelve at +0x30 (the max level), the
+#: max level as i32 at +0x60 (`ds2-reinforce-max.py`). Which float is which type is INFERRED: with
+#: this order the max block equals SoulsPlanner's defense for all but a few dozen of 427 pieces x 8
+#: types, and swapping slash and thrust breaks 233 of them. The elemental ones are a tenth of the
+#: displayed value.
+ARP_TYPES = {"slash": (0, 1), "thrust": (1, 1), "strike": (2, 1), "physical": (3, 1),
+             "magic": (4, 10), "lightning": (5, 10), "fire": (6, 10), "dark": (7, 10)}
+ARP_BASE, ARP_MAX_BLOCK, ARP_MAX_LEVEL = 0x00, 0x30, 0x60
+ARMOR_PARAM_ID_FROM_ITEM_ID = 10_000_000  # ds2_rva::ARMOR_PARAM_ID_FROM_ITEM_ID
+
+
+def level_shortfall(arp: dict, equipped: dict) -> dict:
+    """How much defense each type loses because the worn armour is below its max level.
+
+    The game's own rule (`ds2_rva::CHR_ASM_EQUIP_ARMOR_LEVEL_OFFSET`, 0x14034dbb0 / 0x14034dda0):
+    `base + (max - base) * clamp(level / max_level, 0, 1)`. build_defense assumes the max."""
+    out = {k: 0.0 for k in ARP_TYPES}
+    for s in ARMOR:
+        e = equipped.get(s)
+        row = arp.get(e["item"] - ARMOR_PARAM_ID_FROM_ITEM_ID) if e and "item" in e else None
+        if row is None:
+            continue
+        top = struct.unpack_from("<i", row, ARP_MAX_LEVEL)[0]
+        f = min(1.0, max(0.0, e["level"] / top)) if top > 0 else 1.0
+        for k, (i, scale) in ARP_TYPES.items():
+            lo = struct.unpack_from("<f", row, ARP_BASE + 4 * i)[0]
+            hi = struct.unpack_from("<f", row, ARP_MAX_BLOCK + 4 * i)[0]
+            out[k] += (hi - lo) * (1 - f) * scale
+    return out
+
+
 def defense(rows):
     """build_defense per character and its SL bracket's corpus distribution."""
     import numpy as np
+    arp = _load("ds2_reinforce_max", "ds2-reinforce-max.py").Tables(None).arp
     rec = _load("ds2_builds_recommend", "ds2-builds-recommend.py")
     sp, mm = rec.dump_site_tables(rec.CACHE / "site-tables")
     data = rec.Data(json.loads(sp.read_text()), json.loads(mm.read_text()))
@@ -180,6 +212,8 @@ def defense(rows):
         b = rec.Build("", {s: c["stats"][s] for s in rec.STATS}, armor, hands, 0, rings, [], c["level"])
         c["sp_keys"] = {"armor": armor, "rings": rings, "hands": hands}
         c["defense"] = {k: round(float(v), 1) for k, v in rec.build_defense(data, b).items()}
+        short = level_shortfall(arp, eq)
+        c["defense_at_level"] = {k: round(v - short.get(k, 0.0), 1) for k, v in c["defense"].items()}
         br = rec.sl_bracket(c["level"])
         if br not in dist:
             ds = [rec.build_defense(data, x) for x in by.get(br, [])]
@@ -226,7 +260,8 @@ def main() -> int:
             print(f"  {s:<7} {e['name']} +{e['level']}{inf}")
         if "defense" in c:
             d = c["defense"]
-            print("  defense " + " ".join(f"{k} {d[k]:.0f}" for k in d))
+            print("  defense, armour at max  " + " ".join(f"{k} {d[k]:.0f}" for k in d))
+            print("  defense, armour as worn " + " ".join(f"{k} {c['defense_at_level'][k]:.0f}" for k in d))
             m = dist[c["bracket"]]
             print(f"  bracket SL {m['range'][0]}-{m['range'][1]} (n={m['n']}) mean " +
                   " ".join(f"{k} {m[k]['mean']:.0f}" for k in d))
