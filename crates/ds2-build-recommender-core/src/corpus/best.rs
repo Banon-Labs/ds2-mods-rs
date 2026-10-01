@@ -8,7 +8,9 @@
 
 use ds2_build_import_core::Infusion;
 
-use super::{Against, CorpusBackend, Defense, EMPTY, Hit, Stats, Weapon, norm, py_round, py_sum};
+use super::{
+    Against, CorpusBackend, Defense, EMPTY, Hit, Stats, Weapon, norm, py_max, py_round, py_sum,
+};
 use crate::backend::{BestWeaponRow, WeaponMetrics};
 use crate::model::{Grip, Objective, Rank};
 
@@ -104,6 +106,15 @@ impl CorpusBackend {
                 }
                 score = value * f64::from(hits);
                 label = hits_label;
+                metrics.status = Some(self.row_status(
+                    weapon,
+                    ask.infusion,
+                    &eff,
+                    hits,
+                    ask.window,
+                    ask.sl,
+                    ask.against.worn,
+                ));
             } else if ask.window != 0.0 && ask.objective == Objective::Damage {
                 let timeline = &weapon.timeline[usize::from(two)];
                 if timeline.is_empty() {
@@ -118,6 +129,18 @@ impl CorpusBackend {
                         .map(|hit| Self::hit_damage(&ar, &defending.base, hit)),
                 ) * weapon.damage_scale;
                 label = format!("{label} {} hits", hits.len());
+                // The R1 chain's hits for build-up: a same-window hitbox pair counts once.
+                let status = self.row_status(
+                    weapon,
+                    ask.infusion,
+                    &eff,
+                    Self::r1_status_hits(weapon, two, ask.window),
+                    ask.window,
+                    ask.sl,
+                    ask.against.worn,
+                );
+                metrics.damage_with_status = Some(score + status.damage_per_window);
+                metrics.status = Some(status);
                 if by.is_some() {
                     return None;
                 }
@@ -150,6 +173,25 @@ impl CorpusBackend {
             ammo,
             metrics,
         })
+    }
+
+    /// The R1 chain's hits landing within `window` seconds, the chain's attacks begun before
+    /// `max(3, window)` and a same-window hitbox pair counted once, for the first name that lands
+    /// any: what the script's `best_weapon_row` counts for build-up.
+    fn r1_status_hits(weapon: &Weapon, two: bool, window: f64) -> u32 {
+        let horizon = py_max(3.0, window);
+        weapon.status[usize::from(two)][0]
+            .iter()
+            .map(|chain| {
+                let landed = chain
+                    .hits
+                    .iter()
+                    .filter(|&&(start, at)| start < horizon && at <= window)
+                    .count();
+                u32::try_from(landed).unwrap_or(u32::MAX)
+            })
+            .find(|&hits| hits != 0)
+            .unwrap_or(0)
     }
 
     /// The script's `r1_metrics` for a melee row: the build-independent numbers the file carries,

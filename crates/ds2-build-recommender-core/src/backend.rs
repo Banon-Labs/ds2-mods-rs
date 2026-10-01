@@ -233,6 +233,31 @@ pub struct WeaponMetrics {
     pub hits_to_stagger: Option<u32>,
     /// The defender's max poise: the bracket's mean, or the chosen set's.
     pub defender_poise: f64,
+    /// The poison and bleed the scored hits deal through their procs, for a melee row scored over
+    /// a window; `None` otherwise.
+    pub status: Option<StatusMetrics>,
+    /// For damage over a window, the score plus the status damage per window: what the script's
+    /// `--with-status` ranks by. The score itself does not count status.
+    pub damage_with_status: Option<f64>,
+}
+
+/// The poison and bleed a row's hits deal through their procs: the script's `row_status`, against
+/// the defenders at the soul level.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct StatusMetrics {
+    /// The hits counted: the R1 chain's landed in the window (one per distinct hitbox), or the
+    /// status ranking's own.
+    pub hits: u32,
+    /// Per status, poison then bleed, its build-up per hit before resistance; `None` for one the
+    /// weapon does not build up.
+    pub buildup_per_hit: [Option<f64>; 2],
+    /// Per status, the hits the median defender takes to proc; `0` when none procs.
+    pub hits_to_proc: [Option<u32>; 2],
+    /// Proc damage per window of the chain repeated without pause, the lockout after a proc
+    /// counted, summed over the statuses and averaged over the defenders.
+    pub damage_per_window: f64,
+    /// Proc damage those hits deal a defender whose gauge starts empty.
+    pub damage_first_window: f64,
 }
 
 /// How some stats can hold a weapon: the weapon picker's Grip line.

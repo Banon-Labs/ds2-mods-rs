@@ -42,12 +42,13 @@ mod best;
 mod chain;
 mod poise;
 mod ranged;
+mod status;
 
 /// What the file is called beside `DarkSoulsII.exe`.
 pub const DATA_FILE_NAME: &str = "ds2-build-recommender.dat";
 
 /// The file's first line. A different one is a file this port does not read.
-pub const FORMAT: &str = "ds2-build-recommender-data 16";
+pub const FORMAT: &str = "ds2-build-recommender-data 17";
 
 /// Nine stats as the script computes with them, in [`crate::model::STAT_LABELS`] order.
 type Stats = [i32; STAT_COUNT];
@@ -247,6 +248,9 @@ struct Tables {
     /// `physicalDEFBonus` then the magic, fire, lightning and dark `DEFBonus` tables: what
     /// `build_defense` reads for a chosen defender's stats.
     defense: [Table; 5],
+    /// The poison and bleed resistance columns, rows 0-99: the script's `status_resist`, what
+    /// `status_cut` reads; empty when it did not read the regulation.
+    status_resist: [Table; 2],
 }
 
 /// A spell the file lists: the script's `data.spells` row with its `spell_req`.
@@ -610,6 +614,8 @@ struct Wearable {
     alter: Stats,
     /// Its poise: `ArmorParam.strong` where the script read the regulation.
     poise: f64,
+    /// Its poison and bleed resistance, fully reinforced: the script's `armor_status`.
+    status: [f64; 2],
 }
 
 /// One corpus build, as nearest-build search reads it.
@@ -629,6 +635,8 @@ struct CorpusBuild {
     /// Its melee weapon's one-handed R1 first hit as (poise damage, armorBreak): the counter-hit
     /// the script's `bracket_poise` weighs hyperarmor against. `None` without one.
     counter: Option<(f64, i32)>,
+    /// The shares of poison and bleed build-up it resists: the script's `status_cut`.
+    cuts: Option<[f64; 2]>,
 }
 
 /// Attack rating per type, physical, magic, fire, lightning, dark; `None` where the weapon has none.
@@ -728,6 +736,8 @@ pub struct CorpusBackend {
     counters: Vec<usize>,
     /// Per SL bracket, the adaptive average defender over its `bracket_builds`.
     cores: Vec<adaptive::Core>,
+    /// What a poison and a bleed proc do: the script's `data.status_procs`.
+    procs: [Option<status::Proc>; 2],
 }
 
 /// Why a data file could not be read.
@@ -898,6 +908,8 @@ impl CorpusBackend {
                     "fireDEFBonus" => &mut tables.defense[2],
                     "lightningDEFBonus" => &mut tables.defense[3],
                     "darkDEFBonus" => &mut tables.defense[4],
+                    "poisonResistance" => &mut tables.status_resist[0],
+                    "bleedingResistance" => &mut tables.status_resist[1],
                     _ => return Ok(()),
                 };
                 *slot = Table(values);
@@ -943,6 +955,7 @@ impl CorpusBackend {
             }
             "CH" => self.parse_chain(line, &mut fields)?,
             "PO" => self.parse_poise(line, &mut fields)?,
+            "SP" => self.parse_proc(line, &mut fields)?,
             "RM" => {
                 let grip = match next("grip")? {
                     "1" => 0,
@@ -1131,6 +1144,7 @@ impl CorpusBackend {
                 let bonus = float(fields.next(), line)?;
                 let alter = stats(&mut fields, line)?;
                 let poise = float(fields.next(), line)?;
+                let status = [float(fields.next(), line)?, float(fields.next(), line)?];
                 self.wearable[slot].push(Wearable {
                     key,
                     name,
@@ -1141,6 +1155,7 @@ impl CorpusBackend {
                     bonus,
                     alter,
                     poise,
+                    status,
                 });
             }
             "H" => {
@@ -1336,6 +1351,16 @@ impl CorpusBackend {
                         Some((float(Some(damage), line)?, int(Some(armor_break), line)?))
                     }
                 };
+                // `poison:bleed`, the shares of each the build resists: the script's status_cut.
+                let cuts = match fields.next() {
+                    None => None,
+                    Some(pair) => {
+                        let (poison, bleed) = pair
+                            .split_once(':')
+                            .ok_or_else(|| bad(line, "status cuts poison:bleed"))?;
+                        Some([float(Some(poison), line)?, float(Some(bleed), line)?])
+                    }
+                };
                 self.corpus.push(CorpusBuild {
                     bracket,
                     stat_brackets,
@@ -1343,6 +1368,7 @@ impl CorpusBackend {
                     weapons: carried,
                     flex,
                     counter,
+                    cuts,
                 });
             }
             other => return Err(bad(line, &format!("unknown record {other:?}"))),
@@ -3996,7 +4022,14 @@ impl RecommenderBackend for CorpusBackend {
             window: window_seconds(opts.window_s),
             rank: opts.rank,
         };
-        self.best_weapons_of(&ask, opts.weapon_class.as_deref())
+        let mut rows = self.best_weapons_of(&ask, opts.weapon_class.as_deref());
+        if opts.with_status {
+            // The script's --with-status: the window's damage plus the procs' ranks the rows,
+            // re-sorted from the score's order, which breaks its ties.
+            let key = |row: &BestWeaponRow| row.metrics.damage_with_status.unwrap_or(row.score);
+            rows.sort_by(|a, b| key(b).total_cmp(&key(a)));
+        }
+        rows
     }
 
     fn armor_pieces(&self, slot: usize) -> Vec<(String, String)> {

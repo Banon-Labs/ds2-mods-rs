@@ -4806,10 +4806,15 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 #                                                             out to 10 s with poise data
 #   and, trailing: B its bracket_poise mean poise; P the piece's poise; X the build's counter-hit
 #   (build_counter) as poise:break, "-" for none
+#   SP status damage lockout                                  data.status_procs: what a poison or
+#                                                             bleed proc deals, and the seconds the
+#                                                             status is locked out after
+#   and, trailing: P the piece's poison and bleed resistance (data.armor_status, 0 for none); X the
+#   build's status_cut poison:bleed; T poisonResistance/bleedingResistance, data.status_resist
 
 BACKEND_DATA_NAME = "ds2-build-recommender.dat"
 BACKEND_DATA = Path.home() / ".cache/ds2-builds" / BACKEND_DATA_NAME
-BACKEND_FORMAT = "ds2-build-recommender-data 16"
+BACKEND_FORMAT = "ds2-build-recommender-data 17"
 #: How far the exported R1/R2 chains run, in seconds: the panel clamps its window to 10.0
 #: (crates/ds2-build-recommender-ui/src/panel.rs), and status_hits runs to max(3, window).
 STATUS_HORIZON = 10.0
@@ -4921,6 +4926,12 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
         out.append("\t".join(["T", "additionalHp", *(_num(v) for v in data.additional_hp)]))
     for e, col in data.cast_bonus.items():
         out.append("\t".join(["T", "cast" + e.capitalize(), *(_num(v) for v in col)]))
+    # status_cut's stat columns, and what a proc does (row_status)
+    for s, (_, col, _, _) in STATUS_PROC.items():
+        if data.status_resist.get(s):
+            out.append("\t".join(["T", col, *(_num(float(v)) for v in data.status_resist[s])]))
+    for s, p in data.status_procs.items():
+        out.append("\t".join(["SP", s, _num(p["damage"]), _num(float(p["lockout"]))]))
     for key, s in data.spells.items():
         if key in data.spell_req:  # spell_ok refuses a spell with no requirements row
             out.append("\t".join(["Z", key, s["name"], _num(s["slots"]), _num(data.spell_category.get(key, -1)),
@@ -5008,7 +5019,9 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
                                   _stat_pairs(v.get("require") or {}) or "-",
                                   *(_num(v.get(t + "DEF", v.get("physicalDEF", 0))) for t in PHYS_TYPES),
                                   _num(v.get("physicalDEFBonus", 0)), *(_num(alt.get(s, 0)) for s in STATS),
-                                  _num(v.get("poise", 0))]))
+                                  _num(v.get("poise", 0)),
+                                  *(_num(float((data.armor_status.get(slot, {}).get(key) or {}).get(s, 0.0)))
+                                    for s in STATUS_PROC)]))
     mix = threat_mix(data, corpus)
     out.append("\t".join(["H", *(_num(float(mix[k])) for k in DMG)]))
     for key, (weight, add, mul) in sorted(ring_effects(data).items()):
@@ -5046,7 +5059,8 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
                               "".join(str(stat_bracket(eff[s])) for s in STATS),
                               ",".join(str(ring_ix[r]) for r in b.rings if r and r in data.rings) or "-",
                               ",".join(f"{weapon_ix[w]}:{INFUSION_CODE[inf]}" for w, inf in b.weapons()) or "-",
-                              f"{one}:{two}", f"{_num(float(hp[0]))}:{_num(int(hp[1]))}" if hp else "-"]))
+                              f"{one}:{two}", f"{_num(float(hp[0]))}:{_num(int(hp[1]))}" if hp else "-",
+                              ":".join(_num(float(status_cut(data, b, s))) for s in STATUS_PROC)]))
     return "\n".join(out) + "\n"
 
 

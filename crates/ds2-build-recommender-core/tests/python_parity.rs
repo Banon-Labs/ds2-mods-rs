@@ -1530,12 +1530,12 @@ fn rank(name: &str) -> Rank {
 /// launchers' ammunition and the R1's reach, timing and five-second damage.
 #[test]
 fn best_weapons_is_the_scripts() {
-    let (mut compared, mut launchers, mut timed, mut poised) = (0, 0, 0, 0);
+    let (mut compared, mut launchers, mut timed, mut poised, mut procs) = (0, 0, 0, 0, 0);
     for &(code, sl, goal, grip, class, window, by, with_status, keys, who, want) in
         expected::BEST_WEAPONS
     {
-        // Not ported yet: the stamina ranks and the status ranking.
-        if by != "window" || with_status {
+        // Not ported yet: the stamina ranks.
+        if by != "window" {
             continue;
         }
         let opts = BestWeaponsOpts {
@@ -1562,7 +1562,22 @@ fn best_weapons_is_the_scripts() {
         let case = format!("{code} SL {sl} {goal} {class} window {window} {by} {who}");
         assert_eq!(got.len(), want.len(), "{case}: rows");
         for (row, want) in got.iter().zip(want) {
-            let (score, key, value, class, two, st, rings, label, ammo, r1, poise, ..) = *want;
+            let (
+                score,
+                key,
+                value,
+                class,
+                two,
+                st,
+                rings,
+                label,
+                ammo,
+                r1,
+                poise,
+                status,
+                with,
+                ..,
+            ) = *want;
             let at = format!("{case}: {key}");
             assert_eq!(row.weapon, key, "{case}");
             assert_eq!(row.score as f32, score as f32, "{at}: score");
@@ -1604,6 +1619,30 @@ fn best_weapons_is_the_scripts() {
                 poise,
                 "{at}: poise metrics"
             );
+            let got_status = m.status.as_ref().map(|s| {
+                let per: Vec<(&str, f64, i64)> = ["poison", "bleed"]
+                    .into_iter()
+                    .zip(s.buildup_per_hit.iter().zip(&s.hits_to_proc))
+                    .filter_map(|(name, (per, to_proc))| {
+                        Some((name, (*per)?, i64::from((*to_proc)?)))
+                    })
+                    .collect();
+                (
+                    i64::from(s.hits),
+                    per,
+                    s.damage_per_window,
+                    s.damage_first_window,
+                )
+            });
+            let want_status =
+                status.map(|(hits, per, window, first)| (hits, per.to_vec(), window, first));
+            assert_eq!(got_status, want_status, "{at}: status metrics");
+            assert_eq!(
+                m.damage_with_status.map(|value| value as f32),
+                with.map(|value| value as f32),
+                "{at}: damage with status"
+            );
+            procs += status.map_or(0, |(_, per, ..)| per.len());
             compared += 1;
             launchers += usize::from(ammo.is_some());
             timed += usize::from(r1.4.is_some());
@@ -1611,7 +1650,8 @@ fn best_weapons_is_the_scripts() {
         }
     }
     assert!(
-        compared >= 20 && launchers >= 4 && timed >= 10 && poised >= 10,
-        "{compared} rows, {launchers} launchers, {timed} with 5 s damage, {poised} with poise data"
+        compared >= 20 && launchers >= 4 && timed >= 10 && poised >= 10 && procs >= 8,
+        "{compared} rows, {launchers} launchers, {timed} with 5 s damage, {poised} with poise \
+         data, {procs} statuses built up"
     );
 }
