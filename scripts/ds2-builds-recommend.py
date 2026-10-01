@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -172,11 +173,19 @@ class Data:
         self.damage_scale = {}  # weapon key -> WeaponParam.damageScale where not 1.0 (regulation_damage_scale)
         self.hit_shape = {}  # PlayerDamageParam row -> its hitbox shape (regulation_reach)
         self.reach_scale = {}  # weapon key -> (radius scale, length scale) where not 1.0 (regulation_reach)
+        self.hit_poise = {}  # PlayerDamageParam row -> (poiseDamage, armorBreak) (regulation_poise)
+        self.weapon_poise = {}  # weapon key -> (poiseDamageScalePlayer, uninterruptibleRate) (regulation_poise)
         self.ring_attack = {}  # ring key -> DMG key -> flat attack add (regulation_ring_attack)
         self.ranged = {}  # launcher key -> its ammo type, hand scale and special shots (regulation_ranged)
         self.ammo = {}  # ammo name -> its arrowType and the shot it adds (regulation_ranged)
         self.ring_defense = {}  # ring key -> DMG key -> defense add (regulation_ring_defense)
         self.defense_buffs = {}  # name -> a defender's damage-cutting buff (regulation_defense_buffs)
+        # What a poison or bleed proc does, the stat resistance columns and every armour piece's
+        # status resistance (regulation_status_procs); empty when the regulation is not read, and
+        # then no row carries status damage.
+        self.status_procs = {}
+        self.status_resist = {}
+        self.armor_status = {}
         # PhysicalStatsPerLevelStatValuesParam.staminaMax by END, rows 0-99: what a Dragon ring's
         # stamina factor is weighed against (ring_lift); empty when the regulation is not read.
         self.stamina_max = []
@@ -1106,7 +1115,9 @@ def apply_regulation(data: Data) -> str:
             "PlayerDamageParam": "DAMAGE_PARAM", "SystemDamageParam": "DAMAGE_PARAM",
             "BulletParam": "BULLET_PARAM", "SystemBulletParam": "BULLET_PARAM", "ArrowParam": "ARROW_PARAM",
             "WeaponActionCategoryParam": "WEAPON_ACTION_CATEGORY_PARAM",
-            "WeaponAttackMotionParam": "WEAPON_ATTACK_MOTION_PARAM"})
+            "WeaponAttackMotionParam": "WEAPON_ATTACK_MOTION_PARAM", "DamageCtrlParam": "DAMAGE_CTRL_PARAM",
+            "ArmorParam": "ARMOR_PARAM", "ItemParam": "ITEM_PARAM",
+            "ArmorReinforceParam": "ARMOR_REINFORCE_PARAM"})
         names = ex.item_names(reg.GAME_DIR, reg.DEFAULT_REGULATION)
         members = reg.load(reg.DEFAULT_REGULATION, reg.REGULATION_KEY_HEX)
         emevd = ex.load_module("ds2emevd", "ds2-emevd.py")
@@ -1131,7 +1142,9 @@ def apply_regulation(data: Data) -> str:
             + "; " + regulation_defense_buffs(data, emevd, members, d, names)
             + "; " + regulation_weapon_elements(data, d, names)
             + "; " + regulation_damage_scale(data, d, names) + "; " + regulation_reach(data, d, names)
+            + "; " + regulation_poise(data, d, names)
             + "; " + regulation_status(data, d, names)
+            + "; " + regulation_status_procs(data, d, emevd, members, names)
             + "; " + regulation_attack(data, d, names) + "; " + regulation_ranged(data, d, names))
 
 
@@ -1318,6 +1331,48 @@ def regulation_reach(data: Data, d: dict, names: dict) -> str:
     return f"hitbox shape on {len(data.hit_shape)} damage rows, reach scaled on {len(data.reach_scale)} weapons"
 
 
+def regulation_poise(data: Data, d: dict, names: dict) -> str:
+    """What poise_metrics reads (docs/DS2-DPS-MECHANICS.md section 2, "Poise and stagger"):
+
+    * data.hit_poise: PlayerDamageParam row -> (DamageCtrlParam.poiseDamage, .armorBreak) of its
+      damageCategory row. EXE: the base poise damage 0x140139160 reads the hit's DamageCtrlParam
+      +0xa0 (poiseDamage); the stagger decision 0x140136570 reads +0x2 (armorBreak).
+    * data.weapon_poise: weapon key -> (WeaponParam.poiseDamageScalePlayer, .uninterruptibleRate).
+      EXE: calculateDamage_attack 0x1401373b0 stores the attacker's PlayerGameParamCalculator slot
+      0x190 (0x140381120) in the hit block's +0x74, which 0x140139160 multiplies poiseDamage by;
+      that slot returns the hand's WeaponParam +0xb0 (poiseDamageScalePlayer) when the target is a
+      player, +0xb4 (poiseDamageScaleEnemy) otherwise. +0xb8 is hyperarmor's (hyperarmor()).
+    * Each armour piece's site `poise` replaced by ArmorParam.strong (ItemParam.armorParamId, joined
+      by name). EXE: max poise 0x14037fdd0 sums the four worn pieces' ArmorParam +0x40 (strong)."""
+    ctrl = d["DamageCtrlParam"]
+    data.hit_poise = {rid: (ctrl[str(r["damageCategory"])]["poiseDamage"], ctrl[str(r["damageCategory"])]["armorBreak"])
+                      for rid, r in d["PlayerDamageParam"].items() if str(r["damageCategory"]) in ctrl}
+    by_name = {}
+    for wid, w in d["WeaponParam"].items():
+        by_name.setdefault(norm(names.get(wid, "")), w)
+    data.weapon_poise = {}
+    for key, w in data.weapons.items():
+        wp = by_name.get(norm(w.get("name", key)))
+        if wp:
+            data.weapon_poise[key] = (wp["poiseDamageScalePlayer"], wp["uninterruptibleRate"])
+    strong = {}
+    for iid, it in d["ItemParam"].items():
+        ap = d["ArmorParam"].get(str(it.get("armorParamId")))
+        if ap:
+            strong.setdefault(norm(names.get(iid, "")), ap["strong"])
+    moved = joined = 0
+    for slot in ARMOR_SLOTS:
+        for key, p in data.armor[slot].items():
+            v = strong.get(norm(p.get("name", key))) if isinstance(p, dict) else None
+            if v is None:
+                continue
+            joined += 1
+            moved += p.get("poise") != v
+            p["poise"] = v
+    return (f"poise on {len(data.hit_poise)} PlayerDamageParam rows and {len(data.weapon_poise)} weapons; "
+            f"armour poise from ArmorParam.strong on {joined} pieces ({moved} differ from the site's)")
+
+
 #: Status -> (RATE_FIELDS slot, WeaponReinforceParam maximum<...> stem, WeaponStatsAffectParam stem).
 STATUS_TERMS = {"poison": (5, "Poison", "poison"), "bleed": (6, "Bleeding", "bleeding")}
 
@@ -1361,6 +1416,88 @@ def regulation_status(data: Data, d: dict, names: dict) -> str:
             done += 1
     return (f"poison and bleed from the regulation for {done} weapon infusions, x 100/"
             f"{round(100 / unit)} ({dropped} with no row lost the site's)")
+
+
+#: Status -> (the SpEffect applyStatusDamage (0x140145c60) applies when its gauge reaches 100,
+#: PhysicalStatsPerLevelStatValuesParam resistance column, the stat added to 3 x ADP for its row,
+#: ArmorReinforceParam column). EXE for the ids (case 0 -> 900100, case 1 -> 900200) and for the
+#: rows: the stats builder 0x14038d784 stores row[trunc((3*ADP + FTH)/4)].bleedingResistance and
+#: row[trunc((3*ADP + VIT)/4)].poisonResistance, each x 0.01, into its block.
+STATUS_PROC = {"poison": (900100, "poisonResistance", "vitality", "maxPoison"),
+               "bleed": (900200, "bleedingResistance", "faith", "maxBleeding")}
+#: SpEffect instructions (REGULATION, SpEffectAbnormalState.emevd; `scripts/ds2-status-procs.py`
+#: prints them). `100070[0] [1, 872, category, seconds f32, damage row, interval f32, ...]` puts a
+#: character in a status category for `seconds`, hitting it with PlayerDamageParam `damage row`
+#: every `interval` seconds when there is one; `100170[1] [damage row]` hits it once. The word
+#: meanings are INFERRED from the rows: the category word is the byte applyStatusDamage looks the
+#: status up by (0 poison at 0x14023dd00, 1 bleed at 0x14023dab0, 8 toxic at 0x14023de40 -- EXE) and
+#: equals word 2 of 900100, 900210 and 900600; and 22 s / 0.3 s x 15 = 1095 and 200 are the
+#: community's poison and bleed numbers (darksouls2.wiki.fextralife.com Poison, Bleed).
+STATUS_PERIODIC, STATUS_ONCE = (100070, 0), (100170, 1)
+#: An armour ItemParam id is its ArmorParam id plus this (crates/ds2-rva ARMOR_PARAM_ID_FROM_ITEM_ID;
+#: scripts/ds2-infusion-evidence.py joins the same way).
+ARMOR_ITEM_OFFSET = 10_000_000
+
+
+def regulation_status_procs(data: Data, d: dict, emevd, members: dict, names: dict) -> str:
+    """data.status_procs, data.status_resist and data.armor_status: what a poison or bleed proc
+    does to a player and what resists it.
+
+    | status | proc (REGULATION) | damage | locked out |
+    |---|---|---|---|
+    | poison | 900100 `100070[0] [1, 872, 0, 22.0, 9010, 0.3, ...]` | row 9010 (15) every 0.3 s for 22 s: 73 ticks, 1095 | 22 s |
+    | bleed | 900200 `100170[1] [9020]` | row 9020 (200) once; its spEffectIdWhenHit 900210 is `100070[0] [.., 1, 10.0, ..]` | 10 s |
+
+    Both damage rows are damageType01 5, the attack's slot 5, which calculateDamage_defense
+    (0x140138d50) passes through untouched: no defense, cut, motion value or HP percentage (EXE). The
+    lockout: applyStatusDamage skips the build-up altogether while the victim has an effect of the
+    status's category (0x14014bc80 on the category's slot, called at 0x140145e51; that call's body
+    is behind Arxan and was not read, so what it tests is INFERRED from its arguments). On a proc it
+    sets the gauge to its floor (0x140146430 with 100.0 at 0x140145e61), so the procing hit's surplus
+    is lost (EXE). Resistance: the stat columns of STATUS_PROC by row, and each armour piece's
+    ArmorReinforceParam max column (the fully reinforced piece, as the defense model takes it),
+    joined by name to the site's pieces: a piece's ItemParam id is its ArmorParam id + ARMOR_ITEM_OFFSET."""
+    ev = {e.id: e for e in emevd.Emevd(Path("SpEffectAbnormalState.emevd"),
+                                       members["SpEffectAbnormalState.emevd"]).events}
+    dmg = d["PlayerDamageParam"]
+
+    def ins(eid, op):
+        return next((i.words() for i in (ev[eid].instructions if eid in ev else []) if (i.bank, i.index) == op), None)
+
+    def flat(row):
+        r = dmg.get(str(row))
+        return r and next((r[f"damage0{n}"] for n in (1, 2, 3) if r[f"damageType0{n}"] == 5 and r[f"damage0{n}"]), 0)
+
+    data.status_procs = {}
+    for s, (eid, *_) in STATUS_PROC.items():
+        per = ins(eid, STATUS_PERIODIC)
+        once = ins(eid, STATUS_ONCE)
+        if per and len(per) >= 6 and per[4][0] and per[5][1] > 0:  # a damage-over-time status
+            ticks = int(per[3][1] / per[5][1] + 1e-6)
+            tick = flat(per[4][0])
+            data.status_procs[s] = {"damage": ticks * tick, "lockout": per[3][1], "ticks": ticks, "tick": tick,
+                                    "interval": per[5][1], "row": per[4][0]}
+        elif once:
+            r = dmg.get(str(once[0][0])) or {}
+            lock = ins(r.get("spEffectIdWhenHit"), STATUS_PERIODIC)
+            data.status_procs[s] = {"damage": flat(once[0][0]), "lockout": lock[3][1] if lock else 0.0,
+                                    "ticks": 1, "tick": flat(once[0][0]), "interval": 0.0, "row": once[0][0]}
+    rows = d["PhysicalStatsPerLevelStatValuesParam"]
+    top = max(map(int, rows))
+    data.status_resist = {s: [0.0] + [rows[str(v)][col] for v in range(1, top + 1)]
+                          for s, (_, col, _, _) in STATUS_PROC.items()}
+    by_name = {}
+    for aid, a in d["ArmorParam"].items():
+        r = d["ArmorReinforceParam"].get(str(a["armorReinforceId"]))
+        if r:
+            by_name.setdefault(norm(names.get(str(int(aid) + ARMOR_ITEM_OFFSET), "")),
+                               {s: r[c] for s, (_, _, _, c) in STATUS_PROC.items()})
+    data.armor_status = {slot: {k: by_name[norm(p.get("name", k))] for k, p in data.armor[slot].items()
+                                if norm(p.get("name", k)) in by_name} for slot in ARMOR_SLOTS}
+    joined = sum(map(len, data.armor_status.values()))
+    return ("status procs from SpEffectAbnormalState.emevd: " + ", ".join(
+        f"{s} {p['damage']} ({p['lockout']:g} s)" for s, p in data.status_procs.items())
+            + f"; status resistance for {joined} of {sum(map(len, data.armor.values()))} armour pieces")
 
 
 #: Damage type -> (RATE_FIELDS slot, WeaponReinforceParam maximum<...> stem, atkScale key ->
@@ -2330,7 +2467,7 @@ def attack_hits(a: dict | None) -> int:
 
 
 def chain_timeline(attacks: dict, name: str, two_hand: bool, kind: str = "Normal", horizon: float = 3.0,
-                   distinct: bool = False, with_start: bool = False) -> list[tuple]:
+                   distinct: bool = False, with_start: bool = False, with_row: bool = False) -> list[tuple]:
     """(seconds from input, motion value, physical type, damage floor, flat attack) of every hit a
     repeated attack lands, alternating its 1st and 2nd chain attacks: `kind` "Normal" is the R1
     chain, "Strong" the R2 chain. Play speed is the mean of start/end speeds (where one hands over
@@ -2338,7 +2475,7 @@ def chain_timeline(attacks: dict, name: str, two_hand: bool, kind: str = "Normal
     live_hits. The flat attack is the hit's damage row's, per DMG type (NO_FLAT for none; see
     load_attacks). `with_start` puts the second its attack began before the flat attack, which is
     what `horizon` cuts on: the hits of a longer horizon whose attack began before a shorter one are
-    exactly the shorter one's hits."""
+    exactly the shorter one's hits. `with_row` appends the hit's PlayerDamageParam row id (str)."""
     g = "Single2Hand" if two_hand else "Single1Hand"
     seq = [attacks.get((norm(name), g + kind + "1st")), attacks.get((norm(name), g + kind + "2nd"))]
     if not seq[0]:
@@ -2353,7 +2490,7 @@ def chain_timeline(attacks: dict, name: str, two_hand: bool, kind: str = "Normal
             for i in range(n):
                 out.append((t0 + (h["start"] / 30 + i * (h.get("interval") or 0)) / spd, h["rate"],
                             h.get("type") or "physical", h.get("lower", 0)) + ((t0,) if with_start else ())
-                           + (h.get("flat") or NO_FLAT,))
+                           + (h.get("flat") or NO_FLAT,) + ((str(h.get("dmg")),) if with_row else ()))
         step = chain_open(a["anim"])
         if not step or step <= 0:
             break
@@ -2485,6 +2622,156 @@ def hyperarmor(attacks: dict, rates: dict, name: str, two_hand: bool) -> float:
     return rate if _tae_cache[a["anim"]] else 0.0
 
 
+#: ChrParam row 100 poiseRecoveryValue (REGULATION): what the poise regen 0x140145ba0 adds per dt
+#: (EXE); that dt is seconds is INFERRED. Regen stops while staggered and poise refills to max after.
+POISE_REGEN = 0.56
+#: TAE event that copies WeaponParam.uninterruptibleRate into status+0x7d0 for its window (EXE 0x140326884)
+TAE_HYPERARMOR = 111900
+
+
+def tae_windows(anim: int, event: int) -> list[tuple[float, float]]:
+    """(start, end) in anim frames at 30 fps of every `event` in TAE animation `anim`; none without the XML."""
+    p = TAE_DIR / f"anim-{anim:09d}.xml"
+    if not p.exists():
+        return []
+    ev = re.findall(r"<type>(\d+)</type>.*?<startTime>([-\d.]+)</startTime>\s*<endTime>([-\d.]+)</endTime>",
+                    p.read_text(), re.S)
+    return [(float(s) * 30, float(e) * 30) for ty, s, e in ev if ty == str(event)]
+
+
+def hyperarmor_cover(a: dict, windows: list[tuple[float, float]] | None = None) -> float:
+    """The fraction of an attack's windup and active frames (frame 0 to its last live hitbox's
+    end) inside a hyperarmor window (TAE 111900; `windows` overrides the TAE read). TAE frames."""
+    end = max((h["end"] for h in live_hits(a)), default=0.0)
+    if end <= 0:
+        return 0.0
+    if windows is None:
+        windows = tae_windows(a["anim"], TAE_HYPERARMOR)
+    return min(1.0, sum(max(0.0, min(e, end) - max(s, 0.0)) for s, e in windows) / end)
+
+
+def stagger_hits(hits: list[tuple[float, float, int]], poise: float, regen: float = POISE_REGEN) -> int | None:
+    """How many of `hits` ((seconds, poise damage, DamageCtrlParam.armorBreak), in time order) it
+    takes to stagger a defender with `poise` who is not in hyperarmor; None when they never do.
+    EXE (stagger decision 0x140136570): a hit staggers when the defender's poise is <= 0 after it
+    (0x1401459d0), or its armorBreak is 2, or 1 while the defender has no hyperarmor. Poise
+    regenerates `regen` per second between hits (POISE_REGEN, dt INFERRED seconds)."""
+    cur, last = poise, 0.0
+    for n, (t, pd, ab) in enumerate(hits, 1):
+        cur = min(poise, cur + regen * (t - last)) - pd
+        last = t
+        if ab or cur <= 0:
+            return n
+    return None
+
+
+def ring_poise(data: Data) -> dict:
+    """Ring key -> poise it adds (Ring of Giants +10/+20/+30): mechanics.json, decoded from
+    SpEffectRing.emevd (REGULATION, docs/DS2-BUILD-MECHANICS.md). That max poise adds it via the
+    status ints 0x14037fdd0's caller sums is INFERRED (docs/DS2-DPS-MECHANICS.md section 2)."""
+    out = getattr(data, "_ring_poise", None)
+    if out is None:
+        out = {}
+        for r in json.loads(MECHANICS.read_text())["rings"] if MECHANICS.exists() else []:
+            key = data.sp_key.get(norm(r["name"]))
+            v = sum(x["value"] for x in r["effects"] if x["kind"] == "add" and x["stat"] == "poise")
+            if key in data.rings and v:
+                out[key] = v
+        data._ring_poise = out
+    return out
+
+
+def armor_poise(data: Data, armor, rings=()) -> float:
+    """A build's max poise: its four pieces' poise (ArmorParam.strong once regulation_poise ran) plus
+    its rings'. EXE 0x14037fdd0 for the armour sum; each piece's durability factor is taken as 1."""
+    rp = ring_poise(data)
+    return (sum((data.armor[s].get(p) or {}).get("poise", 0) for s, p in zip(ARMOR_SLOTS, armor))
+            + sum(rp.get(r, 0) for r in rings))
+
+
+def r1_attack(attacks: dict, names: list[str], two_hand: bool) -> dict | None:
+    g = ("Single2Hand" if two_hand else "Single1Hand") + "Normal1st"
+    return next((a for a in (attacks.get((norm(nm), g)) for nm in names) if a), None)
+
+
+def hit_poise(data: Data, weapon: str, row) -> tuple[float, int] | None:
+    """(poise damage to a player, armorBreak) of one hit of `weapon` on PlayerDamageParam `row`:
+    DamageCtrlParam.poiseDamage x WeaponParam.poiseDamageScalePlayer (EXE 0x140139160 with its
+    other terms at their neutral values: point blank, defender-side table term 0, hit +0x70 0 and
+    +0x90 absent -- those three are not identified). None without the regulation rows."""
+    w, h = data.weapon_poise.get(weapon), data.hit_poise.get(str(row))
+    if w is None or h is None:
+        return None
+    return h[0] * w[0], h[1]
+
+
+def bracket_poise(data: Data, corpus: list[Build], sl: int, attacks: dict, defender=None) -> dict:
+    """The defender poise_metrics staggers and the counter-hits it weighs hyperarmor against, at
+    `sl`'s bracket (bracket_builds): `poise` the mean max poise (armor_poise) of the bracket's
+    builds, or of the `defender` pieces; `counters` (poise damage, armorBreak) of each build's
+    melee weapon's (adoption's pick) 1H R1 first hit; `n` the builds."""
+    key = (id(data), id(corpus), sl_bracket(sl), tuple(defender) if defender else None)
+    memo = _bracket_poise_memo.get(key)
+    if memo is not None and memo[0] is data and memo[1] is corpus:
+        return memo[2]
+    builds = bracket_builds(data, corpus, sl)
+    poise = (armor_poise(data, defender) if defender else
+             float(np.mean([armor_poise(data, b.armor, b.rings) for b in builds])) if builds else 0.0)
+    counters = []
+    for b in builds:
+        w = next((w for w in (b.hands[HAND_SLOTS.index(s)][0] for s in MELEE_ORDER)
+                  if w not in EMPTY and w in data.weapons and not data.weapons[w].get("isShield")
+                  and not CATALYST.search(w) and w not in data.ranged), None)
+        a = r1_attack(attacks, [data.weapons[w]["name"], w.replace("_", " ")], False) if w else None
+        hs = live_hits(a) if a else []
+        hp = hit_poise(data, w, hs[0].get("dmg")) if hs else None
+        if hp:
+            counters.append(hp)
+    out = {"poise": poise, "counters": counters, "n": len(builds)}
+    _bracket_poise_memo[key] = (data, corpus, out)
+    return out
+
+
+_bracket_poise_memo: dict = {}
+
+
+def poise_metrics(data: Data, corpus: list[Build], attacks: dict, weapon: str, two_hand: bool, sl: int,
+                  defender=None) -> dict:
+    """Hyperarmor and poise of `weapon`'s R1 chain in the grip, against `sl`'s bracket defender
+    (bracket_poise), for --best-weapons' `metrics`:
+    `hyperarmor` the share of the R1's windup+active frames in its hyperarmor window
+    (hyperarmor_cover; 0 when WeaponParam.uninterruptibleRate is 0, as then the window does
+    nothing); `hyperarmor_rate` that rate, the factor on poise damage the attacker takes inside the
+    window (EXE ChrDamageActionCtrl 0x140137aa0: status+0x7d0 > 0 multiplies it);
+    `hyperarmor_holds` the share of the bracket's counter-hits (1H R1s) that do not stagger the
+    attacker inside the window -- armorBreak 2 always does, others when poise damage x rate reaches
+    the attacker's poise, taken as the bracket's mean (the attacker's armour is not chosen here);
+    None without hyperarmor; `poise_damage_per_hit` the R1's first hit's (hit_poise);
+    `armor_break` that hit's DamageCtrlParam.armorBreak (1 and 2 stagger regardless of poise);
+    `hits_to_stagger` R1 chain hits until the bracket defender staggers (stagger_hits), None if
+    not within 10 s; `defender_poise` the bracket defender's poise. All None for a launcher or a
+    weapon without attack timing or regulation rows."""
+    w = data.weapons[weapon]
+    names = [w["name"], weapon.replace("_", " ")]
+    a = None if weapon in data.ranged else r1_attack(attacks, names, two_hand)
+    br = bracket_poise(data, corpus, sl, attacks, defender)
+    out = dict.fromkeys(["hyperarmor", "hyperarmor_rate", "hyperarmor_holds", "poise_damage_per_hit",
+                         "armor_break", "hits_to_stagger"]) | {"defender_poise": round(br["poise"], 1)}
+    tl = next((t for t in (chain_timeline(attacks, nm, two_hand, "Normal", 10.0, with_row=True) for nm in names)
+               if t), None) if a else None
+    hits = [(t[0], *hp) for t in tl or [] if (hp := hit_poise(data, weapon, t[-1]))]
+    if not hits:
+        return out
+    rate = data.weapon_poise[weapon][1]
+    cover = hyperarmor_cover(a) if rate > 0 else 0.0
+    out.update(hyperarmor=round(cover, 3), hyperarmor_rate=rate, poise_damage_per_hit=round(hits[0][1], 2),
+               armor_break=hits[0][2], hits_to_stagger=stagger_hits(hits, br["poise"]))
+    if cover and br["counters"]:
+        out["hyperarmor_holds"] = round(sum(ab != 2 and pd * rate < br["poise"] for pd, ab in br["counters"])
+                                        / len(br["counters"]), 3)
+    return out
+
+
 ATTACK_TYPES = Path.home() / ".cache/ds2-builds/attack-type.json"  # per weapon slot: slash/strike/thrust per hit
 DAMAGE_LOWER = Path.home() / ".cache/ds2-builds/damage-lower.json"  # PlayerDamageParam row -> damageLower
 
@@ -2558,6 +2845,77 @@ def status_hits(attacks: dict, names: list[str], grips: list[bool], window: floa
             if n > best:
                 best, label = n, f"{'2H' if two_hand else '1H'} {tag} {n} hit{'s' if n > 1 else ''}"
     return best, label
+
+
+def status_cut(data: Data, b: Build, status: str) -> float:
+    """The share of `status` build-up build `b` resists (EXE, docs/DS2-DPS-MECHANICS.md "Status
+    build-up per hit"): each worn piece's resistance x 0.01 (data.armor_status) plus the stat
+    column x 0.01 at row trunc((3 x ADP + VIT or FTH) / 4) (STATUS_PROC; the rings' stat changes
+    count, as build_defense counts them), clamped to [0, 1]. A ring or SpEffect that adds a status
+    resistance (Ring of Resistance, the bite rings) is not counted: their type 5-9 defense changes
+    are not decoded (regulation_ring_defense)."""
+    eff = effective(data, b)
+    for r in b.rings:
+        for s, v in ring_effects(data).get(r, (0, {}, 1))[1].items():
+            eff[s] = eff.get(s, 0) + v
+    col = data.status_resist.get(status)
+    if not col:
+        return 0.0
+    _, _, stat, _ = STATUS_PROC[status]
+    i = (3 * eff["adaptability"] + eff[stat]) // 4
+    cut = col[i if 1 <= i < len(col) else 1] * 0.01
+    cut += sum((data.armor_status.get(s, {}).get(p) or {}).get(status, 0.0) for s, p in zip(ARMOR_SLOTS, b.armor)) * 0.01
+    return min(1.0, max(0.0, cut))
+
+
+def defender_status_cuts(data: Data, corpus: list[Build], sl: int, status: str, defender=None) -> list[float]:
+    """status_cut of every defender defender_defense scores against at `sl`: the bracket's builds,
+    or the --defender set at the bracket's median stats. Cached on `data`."""
+    key = ("status", id(corpus), sl_bracket(sl), tuple(defender or ()), status)
+    cache = data.__dict__.setdefault("_defender_cache", {})
+    if key not in cache:
+        if defender is None:
+            builds = bracket_builds(data, corpus, sl)
+        else:
+            builds = [Build("", bracket_stats(data, corpus, sl)[0], list(defender), [], 0, [], [])]
+        cache[key] = [status_cut(data, b, status) for b in builds] or [0.0]
+    return cache[key]
+
+
+def status_metrics(proc: dict, per_hit: float, cuts: list[float], hits: int, window: float) -> dict:
+    """What `hits` landed in `window` seconds, each carrying `per_hit` gauge points of one status
+    before resistance, do through its proc `proc` (data.status_procs) to defenders who resist
+    `cuts` of it, averaged over the defenders.
+
+    hits_to_proc (median over defenders): ceil(100 / (per_hit x (1 - cut))). The gauge starts empty
+    and a proc sets it back to its floor, so the procing hit's surplus is lost (EXE 0x140146430) and
+    every proc takes that many hits again. 0 when no defender procs at all.
+
+    status_damage_per_window: the proc damage per window of a chain repeated without pause. After
+    a proc the status is locked out for proc["lockout"] seconds (build-up is skipped while the
+    victim is poisoned, or for 900210's 10 s after a bleed; INFERRED, regulation_status_procs), then
+    takes hits_to_proc hits at the window's rate, window / hits seconds apiece. So a proc every
+    lockout + hits_to_proc x window / hits seconds, and the window's share of it is
+    proc damage x window / that cycle. Poison's damage lands over 22 s, not inside the window; the
+    rate charges the window with its share of it. Build-up decay between hits is not modelled (its
+    writer was not read); with the chain repeated, the gaps are the chain's own.
+
+    status_damage_first_window: the proc damage those hits deal a defender whose gauge starts
+    empty: proc damage when hits >= hits_to_proc, else 0, averaged over defenders."""
+    if not proc or per_hit <= 0 or hits <= 0 or window <= 0:
+        return {"hits_to_proc": 0, "status_damage_per_window": 0.0, "status_damage_first_window": 0.0}
+    ks, rate, first = [], 0.0, 0.0
+    for cut in cuts:
+        b = per_hit * (1 - cut)
+        k = math.ceil(100 / b - 1e-9) if b > 0 else math.inf
+        ks.append(k)
+        if k < math.inf:
+            rate += proc["damage"] * window / (proc["lockout"] + k * window / hits)
+            first += proc["damage"] if hits >= k else 0.0
+    n = len(cuts)
+    mid = sorted(ks)[(n - 1) // 2] if ks else math.inf
+    return {"hits_to_proc": int(mid) if mid < math.inf else 0,
+            "status_damage_per_window": rate / n, "status_damage_first_window": first / n}
 
 
 def weapons_for(data: Data, stats: dict, sl: int, corpus: list[Build], top: int = 25, within: float = 0.10,
@@ -2740,7 +3098,7 @@ def best_weapon_row(data: Data, corpus: list[Build], weapon: str, inf: str, sl: 
                     grip: str = "two", flex_weight: float | None = None, spells=(), only_class: str | None = None,
                     use_floors: bool = True, defender=None, window: float = 0.0, attacks: dict | None = None):
     """One row of best_weapons: `weapon`+`inf` at the build optimize_build makes for it at `sl`, scored
-    so weapons compare. (score, weapon, value, class, two-handed, stats, rings, label, ammo), or None
+    so weapons compare. (score, weapon, value, class, two-handed, stats, rings, label, ammo, metrics), or None
     when no class wields it at `sl` or, with `window`, a melee weapon has no attack timing. `ammo` is
     {"ammo": the best ammunition, "shot": the shot scored (ranged_pick)} for a bow, greatbow or
     crossbow, None for any other weapon; a
@@ -2751,7 +3109,11 @@ def best_weapon_row(data: Data, corpus: list[Build], weapon: str, inf: str, sl: 
     against a fast one's (p5z4.14). `window` re-scores the optimized build by what weapons_for's
     `window` counts: for "damage" the R1 chain's hits landing within that many seconds, for
     "bleed"/"poison" the build-up per hit x status_hits. The stats are the ones that maximize one
-    hit; they are not re-optimized for the window. "ar" ignores `window`, as weapons_for does."""
+    hit; they are not re-optimized for the window. "ar" ignores `window`, as weapons_for does.
+
+    `metrics` (row_status, with `window`, melee only; {} otherwise) is the poison and bleed the same
+    hits deal through their procs, and for "damage" `damage_with_status`: the score plus
+    status_damage_per_window. The score itself does not count status."""
     best, _ = optimize_build(data, corpus, weapon, inf, sl, objective, grip, flex_weight, spells, only_class,
                              use_floors, defender=defender)
     if best is None:
@@ -2765,12 +3127,14 @@ def best_weapon_row(data: Data, corpus: list[Build], weapon: str, inf: str, sl: 
         # for a launcher), with or without `window`: the fire rate is not read (ranged_value).
         _, note, _, ammo = ranged_pick(data, weapon, inf, gear_stats(data, st, worn), objective,
                                        defender_defense(data, corpus, sl, defender)[0], worn)
-        return score, weapon, val, cls, two, st, worn, label + " 1 shot", {"ammo": ammo, "shot": note}
+        return score, weapon, val, cls, two, st, worn, label + " 1 shot", {"ammo": ammo, "shot": note}, {}
+    metrics = {}
     if window and objective in ("bleed", "poison"):
         hits, label = status_hits(attacks, names, [two], window)
         if not hits:
             return None
         score = val * hits
+        metrics = row_status(data, corpus, sl, defender, weapon, inf, gear_stats(data, st, worn), hits, window)
     elif window and objective == "damage":
         tl = next((t for t in (r1_timeline(attacks, nm, two) for nm in names) if t), None)
         if not tl:
@@ -2780,7 +3144,34 @@ def best_weapon_row(data: Data, corpus: list[Build], weapon: str, inf: str, sl: 
         mvs = [(mv, ty, lo, fl) for t, mv, ty, lo, fl in tl if t <= window]
         score = sum(hit_damage(ar, dfn, *m) for m in mvs) * data.damage_scale.get(weapon, 1.0)
         label += f" {len(mvs)} hits"
-    return score, weapon, val, cls, two, st, worn, label, None
+        # the R1 chain's hits for build-up: a same-window hitbox pair counts once (live_hits)
+        hits = next((n for n in (sum(1 for t, *_ in chain_timeline(attacks, nm, two, "Normal", max(3.0, window),
+                                                                     distinct=True) if t <= window)
+                                 for nm in names) if n), 0)
+        metrics = row_status(data, corpus, sl, defender, weapon, inf, gear_stats(data, st, worn), hits, window)
+        metrics["damage_with_status"] = score + metrics["status_damage_per_window"]
+    return score, weapon, val, cls, two, st, worn, label, None, metrics
+
+
+def row_status(data: Data, corpus: list[Build], sl: int, defender, weapon: str, inf: str, st: dict,
+               hits: int, window: float) -> dict:
+    """best_weapon_row's status metrics for weapon+infusion at effective stats `st`, its `hits`
+    landed in `window` seconds: per status it builds up (objective_value), the build-up per hit
+    before resistance and hits_to_proc against the defenders at `sl` (status_metrics); summed over
+    the statuses, status_damage_per_window and status_damage_first_window."""
+    out = {"status_hits": hits, "status_buildup_per_hit": {}, "hits_to_proc": {},
+           "status_damage_per_window": 0.0, "status_damage_first_window": 0.0}
+    for s in STATUS_PROC:
+        per = objective_value(data, weapon, inf, st, s, {})
+        if per <= 0:
+            continue
+        m = status_metrics(data.status_procs.get(s), per, defender_status_cuts(data, corpus, sl, s, defender),
+                           hits, window)
+        out["status_buildup_per_hit"][s] = per
+        out["hits_to_proc"][s] = m["hits_to_proc"]
+        out["status_damage_per_window"] += m["status_damage_per_window"]
+        out["status_damage_first_window"] += m["status_damage_first_window"]
+    return out
 
 
 def best_weapons(data: Data, corpus: list[Build], inf: str, sl: int, objective: str = "damage",
@@ -4946,6 +5337,42 @@ def _ranged_adaptive_cases(fake, st: dict, zero: dict) -> list[tuple]:
     ]
 
 
+def status_selftest_cases() -> list:
+    """Status procs (status_metrics, status_cut) on made-up numbers shaped like the regulation's."""
+    bleed = {"damage": 200, "lockout": 10.0}
+    m = status_metrics(bleed, 40.0, [0.2], 4, 1.5)  # 32 a hit: 4 to proc, all 4 land in the window
+    cut_data = type("D", (), {
+        "armor": {s: {} for s in ARMOR_SLOTS},
+        "status_resist": {"poison": [0.0] + [10.0 + v for v in range(1, 100)],
+                          "bleed": [0.0] + [20.0 + v for v in range(1, 100)]},
+        "armor_status": {"head": {"Hat": {"poison": 5.0, "bleed": 0.0}},
+                         "chest": {"Coat": {"poison": 7.0, "bleed": 90.0}}}})
+    st = dict.fromkeys(STATS, 10) | {"adaptability": 20, "vitality": 8, "faith": 4}
+    hat = Build("", st, ["Hat", "Naked", "Naked", "Naked"], [], 0, [], [])
+    coat = Build("", st, ["Hat", "Coat", "Naked", "Naked"], [], 0, [], [])
+    return [
+        ("status: 32 a hit procs on the 4th hit", m["hits_to_proc"], 4),
+        ("status: 4 hits in the window proc a fresh gauge", m["status_damage_first_window"], 200),
+        # a proc every 10 s lockout + 4 hits x 1.5/4 s = 11.5 s; the 1.5 s window's share of 200
+        ("status: steady proc rate charges the lockout", round(m["status_damage_per_window"], 3),
+         round(200 * 1.5 / 11.5, 3)),
+        ("status: the procing hit's surplus is lost (50 a hit: 2)",
+         status_metrics(bleed, 50.0, [0.0], 2, 1.0)["hits_to_proc"], 2),
+        ("status: 3 hits short of 4 deal nothing to a fresh gauge",
+         status_metrics(bleed, 40.0, [0.2], 3, 1.5)["status_damage_first_window"], 0.0),
+        ("status: hits_to_proc is the median defender's (2, 4, never)",
+         status_metrics(bleed, 50.0, [0.0, 0.5, 1.0], 2, 1.0)["hits_to_proc"], 4),
+        ("status: a defender who resists all of it never procs",
+         status_metrics(bleed, 50.0, [1.0], 2, 1.0), {"hits_to_proc": 0, "status_damage_per_window": 0.0,
+                                                       "status_damage_first_window": 0.0}),
+        ("status: no build-up, no proc", status_metrics(bleed, 0.0, [0.0], 4, 1.5)["status_damage_per_window"], 0.0),
+        # poison row trunc((3 x 20 + 8) / 4) = 17 -> 27 %, plus the hat's 5 %
+        ("status cut: poison stat row + armour", round(status_cut(cut_data, hat, "poison"), 6), 0.32),
+        # bleed row trunc((60 + 4) / 4) = 16 -> 36 %, plus 90 % from the coat: clamped to 1
+        ("status cut: clamped to 1", status_cut(cut_data, coat, "bleed"), 1.0),
+    ]
+
+
 def defense_selftest_cases() -> list:
     """Offline checks of the defender's defense changes (speffect_defense, with_defense,
     AdaptiveDefense) on made-up rings and events."""
@@ -5079,7 +5506,24 @@ def selftest() -> int:
         ("max HP without the regulation: getHP", hit_points(type("Site", (), {"hp_max": []}), {**ten, "vigor": 30}),
          500 + 30 * 20 + 20 * 10),
     ]
+    # poise (stagger_hits, EXE 0x140136570): poise <= 0 after a hit, or armorBreak 1/2, staggers;
+    # 0.56 regen per second between hits
+    cases += [
+        ("no poise: the first hit staggers", stagger_hits([(0.0, 35.0, 0)], 0.0), 1),
+        ("35 poise damage through 30 poise", stagger_hits([(0.0, 35.0, 0), (0.5, 35.0, 0)], 30.0), 1),
+        ("50 poise: two 35s", stagger_hits([(0.0, 35.0, 0), (0.5, 35.0, 0)], 50.0), 2),
+        ("armorBreak 1 staggers through any poise", stagger_hits([(0.0, 1.0, 1)], 132.0), 1),
+        ("132 poise vs 35 every 0.5 s with regen: 4", stagger_hits([(i * 0.5, 35.0, 0) for i in range(6)], 132.0), 4),
+        ("regen can outlast a weak chain", stagger_hits([(0.0, 0.5, 0), (10.0, 0.5, 0)], 1.0), None),
+        # OKH R1: hitbox 23-28, 111900 frames 20-30 (TAE) -> 8 of its 28 windup+active frames
+        ("hyperarmor covers frames 20-28 of 0-28", round(hyperarmor_cover(
+            {"anim": 0, "hits": [{"start": 23.0, "end": 28.0, "rate": 0.945, "live": 1}]}, [(20.0, 30.0)]), 4),
+         round(8 / 28, 4)),
+        ("no window, no hyperarmor", hyperarmor_cover({"anim": 0, "hits": [{"start": 8.0, "end": 15.0, "rate": 1.0,
+                                                                           "live": 1}]}, []), 0.0),
+    ]
     cases += defense_selftest_cases()
+    cases += status_selftest_cases()
     cases += flex_selftest_cases()
     cases += ranged_selftest_cases()
     cases += metrics_selftest_cases()
@@ -5087,6 +5531,9 @@ def selftest() -> int:
         real = load_attacks()
         for key in [k for k in A if k in real]:
             cases.append((f"attacks.json {key}", attack_hits(real[key]), attack_hits(A[key])))
+        okh = real.get((norm("Old Knight Hammer"), "Single1HandNormal1st"))
+        if okh and TAE_DIR.exists():  # the TAE's own 111900 window, docs/DS2-DPS-MECHANICS.md section 3
+            cases.append(("OKH R1 hyperarmor from the TAE", round(hyperarmor_cover(okh), 4), round(8 / 28, 4)))
     bad = 0
     for what, got, want in cases:
         if got != want:
@@ -5230,6 +5677,10 @@ def main() -> int:
     ap.add_argument("--sweep", metavar="SL,SL,...",
                     help="with --best-weapons: one ranking per soul level, in place of --sl")
     ap.add_argument("--top", type=int, default=15, help="with --best-weapons: rows per soul level")
+    ap.add_argument("--with-status", action="store_true",
+                    help="with --best-weapons and --objective damage: rank by metrics.damage_with_status, the "
+                         "window's damage plus the poison and bleed its hits deal through their procs; the "
+                         "score column stays the damage alone")
     ap.add_argument("--jobs", type=int, default=0,
                     help="with --best-weapons: worker processes (default: a quarter of the CPUs)")
     g.add_argument("--infusion-gaps", action="store_true",
@@ -5473,6 +5924,8 @@ def main() -> int:
             t = time.monotonic()
             rows = best_weapons(data, corpus, inf, sl, a.objective, a.grip, a.flex_weight, spells, a.start_class,
                                 not a.no_floors, defender, a.weapon_class, window, jobs)
+            if a.with_status:
+                rows.sort(key=lambda r: -r[9].get("damage_with_status", r[0]))
             out[sl] = rows
             if a.json:
                 continue
@@ -5487,16 +5940,29 @@ def main() -> int:
             rho = spearman([r[0] for r in rows], [share[r[1]] for r in rows])
             print(f"  vs {n} real builds of this SL bracket: Spearman rho "
                   + (f"{rho:+.3f}" if rho is not None else "n/a") + " (score against melee-weapon share)")
-            for score, key, val, cls, two, st, worn, label, ammo in rows[:a.top]:
-                print(f"  {score:7.0f}  {share[key]:5.1%}  {data.weapons[key]['name']:30} {label:11} {cls:9} "
+            if any(r[9].get("status_buildup_per_hit") for r in rows):
+                print("  columns: score, +status (poison/bleed proc damage per window, row_status), "
+                      "hits to proc per status; defenders resist "
+                      + ", ".join(f"{s} {np.mean(c):.0%} (median {np.median(c):.0%})" for s in STATUS_PROC
+                                  for c in [defender_status_cuts(data, corpus, sl, s, defender)])
+                      + "; procs: " + ", ".join(f"{s} {p['damage']} then {p['lockout']:g} s locked"
+                                                for s, p in data.status_procs.items()))
+            for score, key, val, cls, two, st, worn, label, ammo, m in rows[:a.top]:
+                status = (f"  +{m['status_damage_per_window']:4.0f} "
+                          + ",".join(f"{s[0]}{n or '-'}" for s, n in m["hits_to_proc"].items()).ljust(7)
+                          if m.get("status_buildup_per_hit") else "")
+                print(f"  {score:7.0f}{status}  {share[key]:5.1%}  {data.weapons[key]['name']:30} {label:11} {cls:9} "
                       + " ".join(f"{LABEL[s]} {st[s]}" for s in ("strength", "dexterity", "intelligence", "faith"))
                       + (f"  rings {', '.join(data.rings[r]['name'] for r in worn)}" if worn else "")
                       + (f"  shot: {ammo['shot']}" if ammo else ""))
         if a.json:
+            attacks = load_attacks(data)
             print(json.dumps({sl: [{"score": r[0], "weapon": data.weapons[r[1]]["name"], "key": r[1], "value": r[2],
                                     "class": r[3], "two_handed": r[4], "stats": r[5], "rings": r[6],
                                     "label": r[7], **(r[8] or {}),
-                                    "metrics": row_metrics(data, corpus, r, inf, sl, defender)}
+                                    "metrics": {**(row_metrics(data, corpus, r, inf, sl, defender) or {}),
+                                                **(poise_metrics(data, corpus, attacks, r[1], r[4], sl, defender) or {}),
+                                                **(r[9] or {})}}
                                    for r in rows[:a.top]] for sl, rows in out.items()},
                              indent=1))
         return 0
