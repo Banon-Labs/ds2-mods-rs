@@ -167,6 +167,54 @@ pub struct ResultRow {
     pub class: String,
 }
 
+/// One row of Best weapons: a weapon at the build Optimize for weapon makes for it, scored so
+/// weapons compare. The script's `best_weapon_row` and the metrics its `--json` prints.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BestWeaponRow {
+    /// What the ranking sorts by: the R1 hits landed within the window (bleed and poison: build-up
+    /// per hit times the hits), a stamina metric under [`crate::model::Rank`], the optimizer's own
+    /// value without a window, a launcher's one shot.
+    pub score: f64,
+    /// The weapon, by soulsplanner key.
+    pub weapon: String,
+    /// Its display name.
+    pub name: String,
+    /// The optimizer's own value: one hit (or one shot) of the objective.
+    pub value: f64,
+    /// The starting class the build is from, by display name.
+    pub class: String,
+    /// Whether the build holds it two-handed.
+    pub two_handed: bool,
+    /// The build's levelled stats, in [`STAT_LABELS`] order.
+    pub stats: [u16; STAT_COUNT],
+    /// The rings it wears in place of stat points, by name.
+    pub rings: Vec<String>,
+    /// The grip and what the score counted: `2H 3 hits`, `2H R1 2 hits`, `2H 1 shot`.
+    pub label: String,
+    /// A launcher's best ammunition and the shot scored, as the script notes it; `None` for any
+    /// other weapon.
+    pub ammo: Option<(String, String)>,
+    /// Measurements beside the score.
+    pub metrics: WeaponMetrics,
+}
+
+/// What a Best weapons row measures besides its score, each `None` where the data cannot say: the
+/// script's `r1_metrics`, at the row's own stats, rings and grip. A launcher has none of them.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct WeaponMetrics {
+    /// Metres the R1's hitbox extends along the weapon.
+    pub reach_m: Option<f64>,
+    /// Seconds to the first chain attack's first live hitbox frame.
+    pub startup_s: Option<f64>,
+    /// Seconds from its last live hitbox frame to the end of the animation.
+    pub recovery_s: Option<f64>,
+    /// Seconds to the first hit of the R1 chain.
+    pub time_to_first_hit_s: Option<f64>,
+    /// The R1 chain repeated for five seconds, every hit landed by then, against the defender's
+    /// numbers before any answer.
+    pub damage_per_5s: Option<f64>,
+}
+
 /// How some stats can hold a weapon: the weapon picker's Grip line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Wield {
@@ -559,6 +607,21 @@ pub trait RecommenderBackend: Sync {
     /// (the stub has no corpus), or when a piece is not in its armour table.
     fn defense(&self, _sl: u16, _defender: &Defender, _reply: Reply) -> Option<DefenderDefense> {
         None
+    }
+    /// Every weapon `infusion` goes on, each at the build [`Self::optimize`] makes for it at `sl`
+    /// (its own class, stats and rings) under `limits`, best first by [`BestWeaponRow::score`]; a
+    /// weapon no class wields there is left out. The script's `--best-weapons`. Empty by default:
+    /// the stub has nothing to rank.
+    fn best_weapons(
+        &self,
+        _infusion: Infusion,
+        _sl: u16,
+        _objective: Objective,
+        _grip: Grip,
+        _limits: &Limits<'_>,
+        _opts: &crate::model::BestWeaponsOpts,
+    ) -> Vec<BestWeaponRow> {
+        Vec::new()
     }
     /// The armour a defender can wear in `slot` (an index into [`crate::model::ARMOR_SLOTS`]) as
     /// `(soulsplanner key, name)`, `Naked` first, then the data's order. Empty by default: the stub

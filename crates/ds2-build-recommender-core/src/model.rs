@@ -261,6 +261,36 @@ pub struct WeaponsForOpts {
     pub reply: Reply,
 }
 
+/// What a Best weapons row's score is for [`Objective::Damage`] with a window: the script's
+/// `--rank`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Rank {
+    /// The R1 hits landed within the window.
+    #[default]
+    Window,
+    /// Those hits' damage over the stamina their attacks cost.
+    PerStamina,
+    /// The damage of the R1 chain a full bar of the build's own max stamina pays for.
+    Bar,
+}
+
+/// Options for Best weapons, the script's `--best-weapons`: every weapon an infusion goes on, each
+/// at the build Optimize for weapon makes for it.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct BestWeaponsOpts {
+    /// Only this weapon class, or every class.
+    pub weapon_class: Option<String>,
+    /// Score the optimized build by the R1 hits landing within this many seconds (bleed and
+    /// poison: build-up per hit times the hits); `0` scores the optimizer's own one-hit value. A
+    /// launcher's row is one shot either way.
+    pub window_s: f32,
+    /// What the score is, for damage with a window.
+    pub rank: Rank,
+    /// Rank damage by the window's damage plus the poison and bleed its hits deal through their
+    /// procs; the score stays the damage alone. The script's `--with-status`.
+    pub with_status: bool,
+}
+
 /// Which status a similar build's weapon must deal to be counted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct StatusFilter {
@@ -522,7 +552,11 @@ mod tests {
     #[test]
     fn the_defender_answers_by_default() {
         assert_eq!(PanelState::default().reply, Reply::Ring);
-        assert!(Reply::ALL.iter().all(|reply| reply.adapts() != (*reply == Reply::Static)));
+        assert!(
+            Reply::ALL
+                .iter()
+                .all(|reply| reply.adapts() != (*reply == Reply::Static))
+        );
         assert_eq!(
             Reply::ALL.map(Reply::buff),
             ["none", "item", "any", "none"],

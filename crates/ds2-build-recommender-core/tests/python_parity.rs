@@ -21,8 +21,8 @@ use ds2_build_recommender_core::backend::{
 };
 use ds2_build_recommender_core::corpus::CorpusBackend;
 use ds2_build_recommender_core::model::{
-    Defender, Grip, Mode, Objective, PanelState, Reply, STAT_COUNT, StatusFilter, WeaponsForOpts,
-    soul_level,
+    BestWeaponsOpts, Defender, Grip, Mode, Objective, PanelState, Rank, Reply, STAT_COUNT,
+    StatusFilter, WeaponsForOpts, soul_level,
 };
 use ds2_build_recommender_core::weapons;
 
@@ -202,6 +202,72 @@ type AdaptiveWeaponsForCases = Adaptive<WeaponsForCase>;
 type AdaptiveOptimizeCases = Adaptive<OptimizeCase>;
 type AdaptiveGenerateCases = Adaptive<GenerateCase>;
 type AdaptiveBestInfusionCases = Adaptive<BestInfusionCase>;
+/// R1 reach, startup, recovery, first hit, 5 s damage.
+type R1Metrics = (
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+);
+/// Hyperarmor share, its rate, the counter-hits it holds, poise damage per hit, armorBreak, hits
+/// to stagger, defender poise.
+type PoiseMetrics = (
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<i64>,
+    Option<i64>,
+    f64,
+);
+/// Status hits, per status (name, build-up per hit, hits to proc), damage per window, in the
+/// first window.
+type StatusMetrics = Option<(i64, &'static [(&'static str, f64, i64)], f64, f64)>;
+/// Stamina per attack, per window, damage per stamina, max stamina, a full bar's attacks, damage
+/// and seconds.
+type StaminaMetrics = Option<(
+    &'static [f64],
+    f64,
+    f64,
+    Option<f64>,
+    Option<i64>,
+    Option<f64>,
+    Option<f64>,
+)>;
+/// score, weapon key, value, class, two-handed, stats, rings, label, (ammo, shot), then metrics.
+type BestRow = (
+    f64,
+    &'static str,
+    f64,
+    &'static str,
+    bool,
+    &'static [u16],
+    &'static [&'static str],
+    &'static str,
+    Option<(&'static str, &'static str)>,
+    R1Metrics,
+    PoiseMetrics,
+    StatusMetrics,
+    Option<f64>,
+    StaminaMetrics,
+);
+/// infusion code, sl, objective, grip, weapon class, window, rank, with status, defender keys,
+/// who answers (`static` or a buff setting), rows.
+type BestWeaponsCase = (
+    &'static str,
+    u16,
+    &'static str,
+    &'static str,
+    &'static str,
+    f64,
+    &'static str,
+    bool,
+    &'static [&'static str],
+    &'static str,
+    &'static [BestRow],
+);
+type BestWeaponsCases = &'static [BestWeaponsCase];
 
 /// The questions most fixtures were asked: the script's `--expect` writes them with a static
 /// defender, its rings as worn.
@@ -1445,5 +1511,92 @@ fn a_card_marks_what_the_stats_miss() {
         backend::StubBackend
             .weapon_card("Greatsword", Infusion::None, &[99; STAT_COUNT])
             .is_none()
+    );
+}
+
+/// The script's `--rank` name.
+fn rank(name: &str) -> Rank {
+    match name {
+        "window" => Rank::Window,
+        "per-stamina" => Rank::PerStamina,
+        "bar" => Rank::Bar,
+        other => panic!("rank {other}"),
+    }
+}
+
+/// Best weapons, the script's `--best-weapons` with its `--json` metrics: every weapon an
+/// infusion goes on, at the build the optimizer makes for it, ranked; the rows' builds, labels,
+/// launchers' ammunition and the R1's reach, timing and five-second damage.
+#[test]
+fn best_weapons_is_the_scripts() {
+    let (mut compared, mut launchers, mut timed) = (0, 0, 0);
+    for &(code, sl, goal, grip, class, window, by, with_status, keys, who, want) in
+        expected::BEST_WEAPONS
+    {
+        // Not ported yet: the stamina ranks and the status ranking.
+        if by != "window" || with_status {
+            continue;
+        }
+        let opts = BestWeaponsOpts {
+            weapon_class: (!class.is_empty()).then(|| class.to_owned()),
+            window_s: window as f32,
+            rank: rank(by),
+            with_status,
+        };
+        let limits = Limits {
+            defender: &defender(keys),
+            reply: if who == "static" {
+                Reply::Static
+            } else {
+                reply(who)
+            },
+            ..STATIC
+        };
+        let grip = if grip == "one" {
+            Grip::OneHanded
+        } else {
+            Grip::TwoHanded
+        };
+        let got = backend().best_weapons(infusion(code), sl, objective(goal), grip, &limits, &opts);
+        let case = format!("{code} SL {sl} {goal} {class} window {window} {by} {who}");
+        assert_eq!(got.len(), want.len(), "{case}: rows");
+        for (row, want) in got.iter().zip(want) {
+            let (score, key, value, class, two, st, rings, label, ammo, r1, ..) = *want;
+            let at = format!("{case}: {key}");
+            assert_eq!(row.weapon, key, "{case}");
+            assert_eq!(row.score as f32, score as f32, "{at}: score");
+            assert_eq!(row.value as f32, value as f32, "{at}: value");
+            assert_eq!(row.class, class, "{at}");
+            assert_eq!(row.two_handed, two, "{at}");
+            assert_eq!(row.stats, stats(st), "{at}");
+            assert_eq!(row.rings, rings, "{at}");
+            assert_eq!(row.label, label, "{at}");
+            assert_eq!(
+                row.ammo
+                    .as_ref()
+                    .map(|(ammo, shot)| (ammo.as_str(), shot.as_str())),
+                ammo,
+                "{at}"
+            );
+            let m = &row.metrics;
+            assert_eq!(
+                (
+                    m.reach_m,
+                    m.startup_s,
+                    m.recovery_s,
+                    m.time_to_first_hit_s,
+                    m.damage_per_5s
+                ),
+                r1,
+                "{at}: R1 metrics"
+            );
+            compared += 1;
+            launchers += usize::from(ammo.is_some());
+            timed += usize::from(r1.4.is_some());
+        }
+    }
+    assert!(
+        compared >= 20 && launchers >= 4 && timed >= 10,
+        "{compared} rows, {launchers} launchers, {timed} with 5 s damage"
     );
 }

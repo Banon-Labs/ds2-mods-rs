@@ -3378,6 +3378,15 @@ def row_metrics(data: Data, corpus: list[Build], row: tuple, inf: str, sl: int, 
                       defender_defense(data, corpus, sl, defender)[0])
 
 
+def best_weapon_metrics(data: Data, corpus: list[Build], attacks: dict, row: tuple, inf: str, sl: int,
+                        defender=None) -> dict:
+    """Every measurement --best-weapons --json prints for one row: r1_metrics' (row_metrics; none
+    for a launcher), poise_metrics' and the row's own (best_weapon_row's `metrics`)."""
+    return {**(row_metrics(data, corpus, row, inf, sl, defender) or {}),
+            **(poise_metrics(data, corpus, attacks, row[1], row[4], sl, defender) or {}),
+            **(row[9] or {})}
+
+
 _BW: tuple | None = None
 
 
@@ -4777,10 +4786,22 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 #                                                             change's own key order
 #   DB name source seconds type:value,..                      data.defense_buffs, in its order:
 #                                                             source spell or item
+#   RM grip reach startup recovery first-hit                  the last W's r1_metrics that do not
+#                                                             depend on the build ("-" for None)
+#   CH grip step spd hits step spd hits                       the last W's R1 chain, one record per
+#                                                             name chain_timeline tries (in order,
+#                                                             a repeat of one normalized name
+#                                                             dropped): its 1st and 2nd attack,
+#                                                             each its chain_open step ("-" None),
+#                                                             mean play speed and live hits
+#                                                             start:end:rate:n:interval:type:lower:
+#                                                             flat(5, comma-separated, or "-");
+#                                                             the 2nd attack's fields "-" when it
+#                                                             has none, so the 1st repeats
 
 BACKEND_DATA_NAME = "ds2-build-recommender.dat"
 BACKEND_DATA = Path.home() / ".cache/ds2-builds" / BACKEND_DATA_NAME
-BACKEND_FORMAT = "ds2-build-recommender-data 14"
+BACKEND_FORMAT = "ds2-build-recommender-data 15"
 #: How far the exported R1/R2 chains run, in seconds: the panel clamps its window to 10.0
 #: (crates/ds2-build-recommender-ui/src/panel.rs), and status_hits runs to max(3, window).
 STATUS_HORIZON = 10.0
@@ -4809,6 +4830,45 @@ def _stat_pairs(d: dict) -> str:
     """`index:value,...` over STATS, in the dict's own order (key presence matters to --minimum)."""
     assert all(s in STATS for s in d), d
     return ",".join(f"{STATS.index(s)}:{_num(v)}" for s, v in d.items())
+
+
+def _opt(v) -> str:
+    """`_num`, or `-` for None."""
+    return "-" if v is None else _num(v)
+
+
+def _chain_records(data: Data, attacks: dict, key: str, name: str) -> list[str]:
+    """export_backend's RM and CH records for one weapon: r1_metrics' build-independent numbers,
+    and per name chain_timeline tries, the R1 chain's two attacks as chain_timeline reads them."""
+    out = []
+    names = [name, key.replace("_", " ")]
+    zero = dict.fromkeys(DMG + PHYS_TYPES, 0.0)
+    for two in (False, True):
+        m = r1_metrics(data, attacks, key, names, two, {}, zero)
+        got = [m["reach_m"], m["startup_s"], m["recovery_s"], m["time_to_first_hit_s"]]
+        if any(v is not None for v in got):
+            out.append("\t".join(["RM", "2" if two else "1", *map(_opt, got)]))
+    for two in (False, True):
+        g = "Single2Hand" if two else "Single1Hand"
+        for nm in dict.fromkeys(names):
+            if nm != name and norm(nm) == norm(name):
+                continue
+            first = attacks.get((norm(nm), g + "Normal1st"))
+            if not first:
+                continue
+            fields = ["CH", "2" if two else "1"]
+            for a in (first, attacks.get((norm(nm), g + "Normal2nd"))):
+                if not a:
+                    fields += ["-", "-", "-"]
+                    continue
+                hits = " ".join(
+                    ":".join([_num(h["start"]), _num(h["end"]), _num(h["rate"]), _num(max(1, h.get("n") or 1)),
+                              _num(h.get("interval") or 0), h.get("type") or "physical", _num(h.get("lower", 0)),
+                              ",".join(map(_num, h["flat"])) if h.get("flat") else "-"])
+                    for h in live_hits(a))
+                fields += [_opt(chain_open(a["anim"])), _num(sum(a.get("spd") or [1.0, 1.0]) / 2), hits or "-"]
+            out.append("\t".join(fields))
+    return out
 
 
 def export_backend(data: Data, corpus: list[Build]) -> str:
@@ -4873,6 +4933,8 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
                     tl = chain_timeline(attacks, nm, two, kind, STATUS_HORIZON, distinct=True, with_start=True)
                     out.append("\t".join(["S", "2" if two else "1", tag, str(attack_hits(first)),
                                           " ".join(f"{_num(h[4])}:{_num(h[0])}" for h in tl) or "-"]))
+        if key not in data.ranged:  # what row_metrics reads; a launcher's row has none
+            out.extend(_chain_records(data, attacks, key, w["name"]))
         r = data.ranged.get(key)
         if r:
             out.append("\t".join(["RG", _num(r["ammo"]), r["kind"], _num(float(r["hand"])),
@@ -5127,6 +5189,21 @@ EXPECT_ADAPTIVE_BEST_INFUSION = [  # an EXPECT_BEST_INFUSION case
     ("none", None, EXPECT_BEST_INFUSION[2]),
     ("item", HAVEL, EXPECT_DEFENDER_BEST_INFUSION[0][1]),
     ("none", None, EXPECT_BEST_INFUSION[8]),
+]
+
+
+#: --best-weapons: infusion, sl, objective, grip, weapon class, window, rank, --with-status,
+#: --defender, and who answers ("static", or the adaptive defender's --defender-buff setting). Small
+#: classes, since every row is an optimize_build.
+EXPECT_BEST_WEAPONS = [
+    ("Dark", 150, "damage", "two", "Katana", 1.5, "window", False, None, "static"),
+    ("No_Infusion", 100, "damage", "two", "Crossbow", 1.5, "window", False, None, "static"),
+    ("Bleed", 120, "bleed", "two", "Whip", 1.5, "window", False, None, "static"),
+    ("Raw", 100, "damage", "one", "Twinblade", 2.0, "bar", False, HAVEL, "static"),
+    ("Lightning", 120, "damage", "two", "Lance", 1.5, "per-stamina", False, None, "none"),
+    ("Poison", 80, "damage", "two", "Claw", 1.5, "window", True, None, "static"),
+    ("Fire", 100, "ar", "two", "Curved Greatsword", 1.5, "window", False, None, "static"),
+    ("No_Infusion", 100, "damage", "two", "Bow", 0.0, "window", False, None, "item"),
 ]
 
 
@@ -5407,7 +5484,60 @@ def backend_expectations_rest(data: Data, corpus: list[Build], out: list[str], m
     out.append("")
     out.append("// weapon, stats -> load scarcity, armour keys head to legs at scarcity 0, the same at that scarcity.")
     out.append(f"pub const ARMOR_SCARCITY: ArmorScarcityCases = {_rs(armor_rows)};")
+    out.append("")
+    out.append("// --best-weapons: infusion, sl, objective, grip, weapon class, window, rank, with status, defender")
+    out.append("// keys, who answers (static or the buff setting) -> rows best first: score, weapon key, value,")
+    out.append("// class, two-handed, stats, rings, label, (best ammunition, shot) for a launcher; then the metrics:")
+    out.append("// R1 (reach, startup, recovery, first hit, 5 s damage); poise (hyperarmor, its rate, the share")
+    out.append("// of counter-hits it holds, poise damage, armorBreak, hits to stagger, defender poise); status")
+    out.append("// (hits, per status its build-up per hit and hits to proc, damage per window, in the first")
+    out.append("// window); damage with status; stamina (per attack, per window, damage per stamina, max")
+    out.append("// stamina, attacks, damage and seconds of a full bar).")
+    out.append(f"pub const BEST_WEAPONS: BestWeaponsCases = {_rs(expect_best_weapons(data, corpus))};")
     return "\n".join(out) + "\n"
+
+
+def expect_best_weapons(data: Data, corpus: list[Build]) -> list:
+    """EXPECT_BEST_WEAPONS as fixture tuples: per case its rows, each with every metric
+    best_weapon_metrics gives (None where the row has none)."""
+    attacks = load_attacks(data)
+    opt = lambda v: None if v is None else _Some(float(v))
+    opt_int = lambda v: None if v is None else _Some(int(v))
+    jobs = max(1, (os.cpu_count() or 1) // 4)
+    out = []
+    for inf, sl, objective, grip, cls, window, rank, with_status, defender, buff in EXPECT_BEST_WEAPONS:
+        def run():
+            rows = best_weapons(data, corpus, inf, sl, objective, grip, None, (), None, True, defender, cls,
+                                window, jobs, rank)
+            if with_status:
+                rows.sort(key=lambda r: -r[9].get("damage_with_status", r[0]))
+            return [(r, best_weapon_metrics(data, corpus, attacks, r, inf, sl, defender)) for r in rows]
+
+        got = run() if buff == "static" else under_defender("adaptive", buff, run)
+        rows = []
+        for r, m in got:
+            score, key, val, c, two, st, worn, label, ammo, _ = r
+            status = stamina = None
+            if "status_buildup_per_hit" in m:
+                status = _Some((int(m["status_hits"]),
+                                [(s, float(p), int(m["hits_to_proc"][s])) for s, p in m["status_buildup_per_hit"].items()],
+                                float(m["status_damage_per_window"]), float(m["status_damage_first_window"])))
+            if "stamina_per_window" in m:
+                stamina = _Some(([float(x) for x in m["stamina_per_attack"]], float(m["stamina_per_window"]),
+                                 float(m["damage_per_stamina"]), opt(m.get("max_stamina")), opt_int(m.get("bar_attacks")),
+                                 opt(m.get("bar_damage")), opt(m.get("bar_seconds"))))
+            rows.append((float(score), key, float(val), data.classes[c]["name"], two, [int(st[s]) for s in STATS],
+                         [data.rings[x]["name"] for x in worn], label,
+                         _Some((ammo["ammo"] or "", ammo["shot"])) if ammo else None,
+                         tuple(opt(m.get(k)) for k in ("reach_m", "startup_s", "recovery_s", "time_to_first_hit_s",
+                                                         "damage_per_5s")),
+                         (opt(m.get("hyperarmor")), opt(m.get("hyperarmor_rate")), opt(m.get("hyperarmor_holds")),
+                          opt(m.get("poise_damage_per_hit")), opt_int(m.get("armor_break")),
+                          opt_int(m.get("hits_to_stagger")), float(m.get("defender_poise", 0.0))),
+                         status, opt(m.get("damage_with_status")), stamina))
+        out.append((INFUSION_CODE[inf], sl, objective, grip, cls, float(window), rank, with_status, defender or [],
+                    buff, rows))
+    return out
 
 
 def pretty(t: str, data: Data) -> str:
@@ -6279,9 +6409,7 @@ def main() -> int:
             print(json.dumps({sl: [{"score": r[0], "weapon": data.weapons[r[1]]["name"], "key": r[1], "value": r[2],
                                     "class": r[3], "two_handed": r[4], "stats": r[5], "rings": r[6],
                                     "label": r[7], **(r[8] or {}),
-                                    "metrics": {**(row_metrics(data, corpus, r, inf, sl, defender) or {}),
-                                                **(poise_metrics(data, corpus, attacks, r[1], r[4], sl, defender) or {}),
-                                                **(r[9] or {})}}
+                                    "metrics": best_weapon_metrics(data, corpus, attacks, r, inf, sl, defender)}
                                    for r in rows[:a.top]] for sl, rows in out.items()},
                              indent=1))
         return 0

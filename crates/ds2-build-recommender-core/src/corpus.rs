@@ -26,24 +26,27 @@ use std::path::Path;
 use ds2_build_import_core::Infusion;
 
 use crate::backend::{
-    Calibration, CatalystPick, Change, DefenderDefense, Fix, GeneratedBuild, Limits,
+    BestWeaponRow, Calibration, CatalystPick, Change, DefenderDefense, Fix, GeneratedBuild, Limits,
     OptimizedBuild, Outcome, RecommenderBackend, Refusal, RefusalKind, Requirement, ResultRow,
     SpellRow, WEAPONS_1H_TOP, WEAPONS_2H_ONLY_TOP, WeaponCard, Wield,
 };
 use crate::flex::{FLEX_K, Flexibility};
 use crate::model::{
-    Defender, Grip, Objective, Reply, SL_MAX, STAT_COUNT, STAT_LABELS, StatusFilter, WeaponsForOpts,
+    BestWeaponsOpts, Defender, Grip, Objective, Reply, SL_MAX, STAT_COUNT, STAT_LABELS,
+    StatusFilter, WeaponsForOpts,
 };
 use crate::weapons;
 
 mod adaptive;
+mod best;
+mod chain;
 mod ranged;
 
 /// What the file is called beside `DarkSoulsII.exe`.
 pub const DATA_FILE_NAME: &str = "ds2-build-recommender.dat";
 
 /// The file's first line. A different one is a file this port does not read.
-pub const FORMAT: &str = "ds2-build-recommender-data 14";
+pub const FORMAT: &str = "ds2-build-recommender-data 15";
 
 /// Nine stats as the script computes with them, in [`crate::model::STAT_LABELS`] order.
 type Stats = [i32; STAT_COUNT];
@@ -357,6 +360,12 @@ struct Weapon {
     /// A bow, greatbow or crossbow's shot: the script's `data.ranged` row. `None` for every other
     /// weapon.
     ranged: Option<ranged::Launcher>,
+    /// The R1 chain per grip (1H, 2H): one per name the script's `chain_timeline` tries, in its
+    /// order.
+    chains: [Vec<chain::Chain>; 2],
+    /// Per grip, the script's `r1_metrics` reach, startup, recovery and first-hit seconds, which
+    /// no build changes.
+    r1: [[Option<f64>; 4]; 2],
 }
 
 /// One attack chain as the bleed/poison ranking counts it.
@@ -464,6 +473,11 @@ fn py_sum(values: impl IntoIterator<Item = f64>) -> f64 {
     } else {
         total
     }
+}
+
+/// Python's `round(x, digits)`: the decimal nearest the double, ties to even, read back.
+fn py_round(x: f64, digits: usize) -> f64 {
+    format!("{x:.digits$}").parse().unwrap_or(x)
 }
 
 /// One SL bracket's floors, average defender and median stats.
@@ -912,7 +926,28 @@ impl CorpusBackend {
                     timeline: [Vec::new(), Vec::new()],
                     status: Default::default(),
                     ranged: None,
+                    chains: Default::default(),
+                    r1: [[None; 4]; 2],
                 });
+            }
+            "CH" => self.parse_chain(line, &mut fields)?,
+            "RM" => {
+                let grip = match next("grip")? {
+                    "1" => 0,
+                    "2" => 1,
+                    _ => return Err(bad(line, "grip is 1 or 2")),
+                };
+                let mut values = [None; 4];
+                for value in &mut values {
+                    *value = match fields.next() {
+                        Some("-") => None,
+                        text => Some(float(text, line)?),
+                    };
+                }
+                self.weapons
+                    .last_mut()
+                    .ok_or_else(|| bad(line, "R1 metrics before any weapon"))?
+                    .r1[grip] = values;
             }
             "RG" | "RS" | "AM" => self.parse_ranged(tag, line, &mut fields)?,
             "RD" | "DB" => self.parse_adaptive(tag, line, ring_index, &mut fields)?,
@@ -1688,7 +1723,8 @@ impl CorpusBackend {
             if matches!(objective, Objective::Bleed | Objective::Poison) {
                 // Build-up per hit times the hits of the best R1/R2 attack (or chain within the
                 // window), the script's bleed/poison branch.
-                let (hits, label) = Self::status_hits(weapon, one, window);
+                let grips: &[bool] = if one { &[false, true] } else { &[true] };
+                let (hits, label) = Self::status_hits(weapon, grips, window);
                 if hits == 0 {
                     continue;
                 }
@@ -1826,13 +1862,11 @@ impl CorpusBackend {
     /// The script's `status_hits`: the most hits one target takes from the weapon's R1 or R2, and
     /// its label. Without a window, the hits of one attack; with one, the hits of the repeated
     /// chain landing within it, over the chain's attacks begun before `max(3, window)` (the
-    /// script's horizon). Ties keep 1H over 2H and R1 over R2.
-    fn status_hits(weapon: &Weapon, one: bool, window: f64) -> (u32, String) {
+    /// script's horizon). `grips` are the grips tried, `true` two-handed, in order; ties keep the
+    /// earlier grip and R1 over R2.
+    fn status_hits(weapon: &Weapon, grips: &[bool], window: f64) -> (u32, String) {
         let (mut best, mut label) = (0, String::new());
-        for two_hand in [false, true] {
-            if !two_hand && !one {
-                continue;
-            }
+        for &two_hand in grips {
             for (chain, tag) in STATUS_CHAINS.iter().enumerate() {
                 let mut hits = 0;
                 for candidate in &weapon.status[usize::from(two_hand)][chain] {
@@ -3903,6 +3937,39 @@ impl RecommenderBackend for CorpusBackend {
             reply,
             counters,
         })
+    }
+
+    fn best_weapons(
+        &self,
+        infusion: Infusion,
+        sl: u16,
+        objective: Objective,
+        grip: Grip,
+        limits: &Limits<'_>,
+        opts: &BestWeaponsOpts,
+    ) -> Vec<BestWeaponRow> {
+        let (Some(spells), Some(worn)) = (
+            self.spell_indices(limits.spells),
+            self.worn(limits.defender),
+        ) else {
+            return Vec::new();
+        };
+        let ask = best::Ask {
+            infusion,
+            sl: u32::from(sl),
+            objective,
+            grip,
+            spells: &spells,
+            class: limits.class,
+            floors: limits.floors,
+            against: Against {
+                worn,
+                reply: limits.reply,
+            },
+            window: window_seconds(opts.window_s),
+            rank: opts.rank,
+        };
+        self.best_weapons_of(&ask, opts.weapon_class.as_deref())
     }
 
     fn armor_pieces(&self, slot: usize) -> Vec<(String, String)> {
