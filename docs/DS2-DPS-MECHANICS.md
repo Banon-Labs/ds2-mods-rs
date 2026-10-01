@@ -46,6 +46,7 @@ A slot value of `1` means the slot is unused (for example, guard attacks on a da
   Weapon factor = `WeaponParam.poiseDamageScalePlayer`. See section 2 for the EXE formula.
 - **Stamina cost** = `WeaponParam.meleeAttackBaseCost * WeaponStaminaCostParam[costCategoryId].<slot> / 10`.
   This is from `docs/DS2-BUILD-MECHANICS.md`: the field values are REGULATION, and the /10 is INFERRED.
+  See "Stamina: what an attack costs, and what a bar buys" below.
 - **Stamina damage to a blocker** = `PlayerDamageParam.staminaDamage`, times `WeaponParam.staminaDamageScale`. INFERRED from the name.
 - **Timing fields in the params**: `WeaponAttackMotionParam.startPlaySpeed` / `endPlaySpeed` are
   animation speed multipliers for the start and end parts of the attack (JP animeSu Du  Kai Shi Bu /Zhong Liao Bu ). The split point
@@ -802,6 +803,40 @@ normal shot carries the launcher's physical too.
 named weapon has such a type). `AR = (bonus + base) x rate` gives them dark from INT/FTH alone, and a
 Dark infusion moves the rates to physical 70 / dark 130. `attack_rating` built a type only from its
 base until 2026-10-01, so it gave these two no dark at all.
+
+## Stamina: what an attack costs, and what a bar buys
+
+Read 2026-10-01. Rows re-print with `scripts/ds2-stamina-evidence.py --categories --chr <names>`.
+`scripts/ds2-builds-recommend.py` scores it this way (`regulation_stamina`, `attack_stamina`,
+`shot_stamina`, `max_stamina`, `bar_attacks`, `stamina_metrics`; `--rank per-stamina|bar`).
+
+```
+R1 cost (menu) = WeaponParam.meleeAttackBaseCost x WeaponStaminaCostParam[costCategoryId].<slot> / 10
+                 slot: Nnormal1st1H / normal2nd1H, or normal1st2H / normal2nd2H, alternating down the chain
+shot cost      = WeaponParam.rangedAttackBaseCost / 10
+max stamina    = PhysicalStatsPerLevelStatValuesParam.staminaMax[effective END] x ring stamina factors / 10
+```
+
+| Fact | Tag |
+|---|---|
+| Base costs: Dagger 144, Uchigatana 252, Giant Warrior Club 374 (melee); Long Bow 346, Light Crossbow 410, Dragonslayer Greatbow 1012 (ranged) | REGULATION |
+| Category 10 (454 of 473 rows): 1H R1 0.95 / 1.05, 2H R1 1.187 / 1.312, 1H R2 1.4, 2H R2 1.75. So a 2H Giant Warrior Club R1 pair costs 44.4 + 49.1, a 1H Dagger pair 13.7 + 15.1 | REGULATION |
+| That the game multiplies base by the category field | INFERRED from the field names (JP: "attack stamina multiplier, one-handed weak 1"), not traced. Where the EXE takes a per-hitbox stamina amount (`ChrAttackDamageCtrl` slot `+0xf08 + i*0xc0 + 0xb8`, read by `0x1403741c0` and drained from `parseDamageTae` `0x140326ddd`), its setter `0x1403748c0` jumps into an Arxan stub | |
+| The /10: the regulation's staminaMax is ten times the menu's, matching SoulsPlanner | REGULATION + SITE; a ratio of the two does not depend on it |
+| A shot reads `rangedAttackBaseCost` with no category multiplier | INFERRED: every launcher names category 10, whose fields are melee slots; category 20 ("bow") is named by no weapon |
+| `drainStamina` `0x1403335d0`: a drain that crosses 0 is not refused; stamina becomes the drained value clamped to [`staminaLoanMax` -150, `staminaLoanMin` -25] and the out-of-stamina timer starts | EXE (code), REGULATION (ChrParam 100) |
+| So an attack starts while stamina is above 0 (the bar's last swing may overdraw it) | INFERRED from the above |
+| Every one of the 372 player TAE animations with a 2200 hitbox has a 101100 event; its handler `parseStaminaTae` `0x1403287b0` holds `disable_stamina_regen` while it is open | TAE + EXE |
+| So an R1 chain regenerates nothing between swings | INFERRED: that one attack's 101100 reaches the next attack's start was not measured per weapon |
+| Regeneration itself (`0x140333880` and caller): `ChrParam.staminaRecoveryValue` 519 x factors x dt | EXE (code), REGULATION (value); not used by the ranking |
+
+**What the recommender ranks.** `--rank window` (the default, unchanged) is the R1 hits landed in
+`--window`. Every `--best-weapons` row now also carries `metrics`: `stamina_per_attack`,
+`stamina_per_window` (the attacks whose hits the window counts), `damage_per_stamina` (that window's
+damage over it), `max_stamina` and, from a full bar, `bar_attacks`, `bar_damage`, `bar_seconds`.
+`--rank per-stamina` ranks by `damage_per_stamina`; `--rank bar` by `bar_damage`, the damage of
+the R1 chain a full bar of the build's own max stamina pays for. The build is still the one
+optimized for one hit: END is wherever the floors put it, so `bar` reads that END.
 
 ## Spell and buff attack (EXE)
 

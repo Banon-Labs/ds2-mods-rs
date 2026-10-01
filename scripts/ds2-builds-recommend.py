@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -189,6 +190,7 @@ class Data:
         # PhysicalStatsPerLevelStatValuesParam.staminaMax by END, rows 0-99: what a Dragon ring's
         # stamina factor is weighed against (ring_lift); empty when the regulation is not read.
         self.stamina_max = []
+        self.stamina_cost = {}  # weapon key -> base costs and cost-category row (regulation_stamina)
         # PhysicalStatsPerLevelStatValuesParam.hpMax and additionalHp, rows 0-99 (row 0 unread): the
         # max-HP formula's two columns (hit_points); empty when the regulation is not read.
         self.hp_max = []
@@ -1117,7 +1119,8 @@ def apply_regulation(data: Data) -> str:
             "WeaponActionCategoryParam": "WEAPON_ACTION_CATEGORY_PARAM",
             "WeaponAttackMotionParam": "WEAPON_ATTACK_MOTION_PARAM", "DamageCtrlParam": "DAMAGE_CTRL_PARAM",
             "ArmorParam": "ARMOR_PARAM", "ItemParam": "ITEM_PARAM",
-            "ArmorReinforceParam": "ARMOR_REINFORCE_PARAM"})
+            "ArmorReinforceParam": "ARMOR_REINFORCE_PARAM",
+            "WeaponStaminaCostParam": "WEAPON_STAMINA_COST_PARAM"})
         names = ex.item_names(reg.GAME_DIR, reg.DEFAULT_REGULATION)
         members = reg.load(reg.DEFAULT_REGULATION, reg.REGULATION_KEY_HEX)
         emevd = ex.load_module("ds2emevd", "ds2-emevd.py")
@@ -1142,7 +1145,7 @@ def apply_regulation(data: Data) -> str:
             + "; " + regulation_defense_buffs(data, emevd, members, d, names)
             + "; " + regulation_weapon_elements(data, d, names)
             + "; " + regulation_damage_scale(data, d, names) + "; " + regulation_reach(data, d, names)
-            + "; " + regulation_poise(data, d, names)
+            + "; " + regulation_poise(data, d, names) + "; " + regulation_stamina(data, d, names)
             + "; " + regulation_status(data, d, names)
             + "; " + regulation_status_procs(data, d, emevd, members, names)
             + "; " + regulation_attack(data, d, names) + "; " + regulation_ranged(data, d, names))
@@ -1371,6 +1374,25 @@ def regulation_poise(data: Data, d: dict, names: dict) -> str:
             p["poise"] = v
     return (f"poise on {len(data.hit_poise)} PlayerDamageParam rows and {len(data.weapon_poise)} weapons; "
             f"armour poise from ArmorParam.strong on {joined} pieces ({moved} differ from the site's)")
+
+
+def regulation_stamina(data: Data, d: dict, names: dict) -> str:
+    """data.stamina_cost: weapon key -> {"melee": WeaponParam.meleeAttackBaseCost, "ranged":
+    rangedAttackBaseCost, "rates": the WeaponStaminaCostParam row costCategoryId names}, joined by
+    name as regulation_damage_scale joins. What attack_stamina and shot_stamina read; the cost
+    formula and what is unproven about it are theirs (docs/DS2-DPS-MECHANICS.md "Stamina")."""
+    by_name = {}
+    for wid, w in d["WeaponParam"].items():
+        by_name.setdefault(norm(names.get(wid, "")), w)
+    costs = d["WeaponStaminaCostParam"]
+    data.stamina_cost = {}
+    for key, w in data.weapons.items():
+        wp = by_name.get(norm(w.get("name", key)))
+        rates = wp and costs.get(str(wp["costCategoryId"]))
+        if rates:
+            data.stamina_cost[key] = {"melee": wp["meleeAttackBaseCost"], "ranged": wp["rangedAttackBaseCost"],
+                                      "rates": rates}
+    return f"stamina cost for {len(data.stamina_cost)} weapons"
 
 
 #: Status -> (RATE_FIELDS slot, WeaponReinforceParam maximum<...> stem, WeaponStatsAffectParam stem).
@@ -2603,6 +2625,128 @@ def r1_metrics(data: Data, attacks: dict, weapon: str, names: list[str], two_han
     return out
 
 
+#: The WeaponStaminaCostParam field an R1 chain attack's cost reads, by (two-handed, the chain's
+#: 2nd attack): chain_timeline alternates the 1st and 2nd attacks, and so does the cost.
+R1_COST_FIELD = {(False, False): "Nnormal1st1H", (False, True): "normal2nd1H",
+                 (True, False): "normal1st2H", (True, True): "normal2nd2H"}
+#: The regulation's stamina is ten times the menu's: staminaMax / 10 is the max stamina SoulsPlanner
+#: and the menu show (docs/DS2-BUILD-MECHANICS.md section 4). Every stamina number printed here is in
+#: menu points; a ratio of two regulation numbers does not depend on it.
+STAMINA_UNIT = 10.0
+#: Seconds of R1 chain read for a full bar (stamina_metrics): the cheapest R1 at the largest bar
+#: is about 25 attacks, and an R1 takes at least 0.3 s.
+BAR_HORIZON = 30.0
+
+
+def attack_stamina(data: Data, weapon: str, two_hand: bool, second: bool) -> float | None:
+    """Menu stamina one R1 chain attack costs: WeaponParam.meleeAttackBaseCost x the
+    WeaponStaminaCostParam row its costCategoryId names, at the slot's field (R1_COST_FIELD), / 10.
+    The values are REGULATION (scripts/ds2-stamina-evidence.py prints them); that the game multiplies
+    the two is INFERRED from the field names (the multiplier's JP name is "attack stamina
+    multiplier, one-handed weak 1"), not traced: the attack's hitbox setter, where the EXE hands a
+    per-hitbox stamina amount to drainStamina, is behind an Arxan stub (docs/DS2-DPS-MECHANICS.md
+    "Stamina"). None when the regulation was not read for this weapon."""
+    c = data.stamina_cost.get(weapon)
+    if not c:
+        return None
+    return c["melee"] * c["rates"][R1_COST_FIELD[(two_hand, second)]] / STAMINA_UNIT
+
+
+def shot_stamina(data: Data, weapon: str) -> float | None:
+    """Menu stamina one shot of a bow, greatbow or crossbow costs: WeaponParam.rangedAttackBaseCost
+    / 10, no category multiplier (INFERRED from the field name; which WeaponStaminaCostParam field a
+    shot reads, if any, is not read -- every launcher names category 10, whose fields are the melee
+    attacks', and category 20 "bow", which no weapon names, is 1.0 one-handed)."""
+    c = data.stamina_cost.get(weapon)
+    return c["ranged"] / STAMINA_UNIT if c else None
+
+
+def max_stamina(data: Data, st: dict, rings=()) -> float | None:
+    """Menu max stamina of a build: PhysicalStatsPerLevelStatValuesParam.staminaMax at the effective
+    END (the worn rings' stat adds, gear_stats), x the worn rings' stamina factors (ring_factor; the
+    product is SoulsPlanner's, how two combine is not established), / 10. None without the table."""
+    if not data.stamina_max:
+        return None
+    end = gear_stats(data, st, rings)["endurance"]
+    return data.stamina_max[min(end, len(data.stamina_max) - 1)] * ring_factor(data, rings, "stamina") / STAMINA_UNIT
+
+
+def bar_attacks(costs, bar: float) -> int:
+    """How many attacks of `costs` (in order) begin from a full bar of `bar`: one begins while
+    stamina is above 0 and may take it below. EXE: drainStamina (0x1403335d0) does not refuse a
+    drain that crosses 0, it sets stamina to the drained value clamped to [ChrParam staminaLoanMax,
+    staminaLoanMin] = [-150, -25] (REGULATION, ChrParam row 100) and starts the out-of-stamina
+    timer; that an attack is refused only at or below 0 is INFERRED from that. No regeneration
+    between attacks: every one of the 372 player animations with a TAE 2200 hitbox has a TAE 101100
+    window, and its handler (parseStaminaTae 0x1403287b0) holds disable_stamina_regen while the
+    window is open (EXE); that one attack's window reaches the next attack's is INFERRED."""
+    n, left = 0, bar
+    for c in costs:
+        if left <= 0 or not c or c <= 0:
+            break
+        left -= c
+        n += 1
+    return n
+
+
+def stamina_metrics(data: Data, weapon: str, two_hand: bool, names: list[str], attacks: dict, ar: dict, dfn,
+                    window: float, st: dict, rings=()) -> dict:
+    """The stamina side of a melee weapon's R1 chain at attack `ar` against `dfn` (hit_damage per
+    hit, x damageScale), as best_weapon_row's window score counts it. Keys:
+
+    * `stamina_per_attack`: the chain's 1st and 2nd attack (attack_stamina).
+    * `stamina_per_window`: the attacks whose hits land within `window` seconds -- the hits the
+      window score counts, so `damage_per_stamina` is that score over what it cost.
+    * `max_stamina` (max_stamina), and from a full bar of it: `bar_attacks` (bar_attacks),
+      `bar_damage` (every hit of those attacks) and `bar_seconds` (when the last one begins).
+    Empty when the weapon has no R1 timing or no stamina cost; the bar keys are left out without
+    the staminaMax table."""
+    tl = next((t for t in (chain_timeline(attacks, nm, two_hand, "Normal", BAR_HORIZON, with_start=True)
+                           for nm in names) if t), None)
+    if not tl or weapon not in data.stamina_cost:
+        return {}
+    scale = data.damage_scale.get(weapon, 1.0)
+    by = {}
+    for t, mv, ty, lo, t0, fl in tl:
+        by.setdefault(t0, []).append((t, hit_damage(ar, dfn, mv, ty, lo, fl) * scale))
+    starts = sorted(by)
+    cost = [attack_stamina(data, weapon, two_hand, i % 2 == 1) for i in range(len(starts))]
+    hits = [by[t0] for t0 in starts]
+    win = [i for i, h in enumerate(hits) if any(t <= window for t, _ in h)]
+    spent = sum(cost[i] for i in win)
+    dealt = sum(d for h in hits for t, d in h if t <= window)
+    out = {"stamina_per_attack": [round(c, 2) for c in cost[:2]], "stamina_per_window": round(spent, 2),
+           "damage_per_stamina": round(dealt / spent, 3) if spent else 0.0}
+    bar = max_stamina(data, st, rings)
+    if bar:
+        n = bar_attacks(cost, bar)
+        out.update(max_stamina=round(bar, 1), bar_attacks=n,
+                   bar_damage=round(sum(d for h in hits[:n] for _, d in h), 1),
+                   bar_seconds=round(starts[n - 1], 2) if n else 0.0)
+    return out
+
+
+def shot_metrics(data: Data, weapon: str, shot: float, st: dict, rings=()) -> dict:
+    """stamina_metrics for one launcher shot of damage `shot` (shot_stamina; ranged_value's per
+    shot damage, so a window is one shot). Empty without a cost."""
+    cost = shot_stamina(data, weapon)
+    if not cost:
+        return {}
+    out = {"stamina_per_attack": [round(cost, 2)], "stamina_per_window": round(cost, 2),
+           "damage_per_stamina": round(shot / cost, 3)}
+    bar = max_stamina(data, st, rings)
+    if bar:
+        n = bar_attacks(itertools.repeat(cost), bar)
+        out.update(max_stamina=round(bar, 1), bar_attacks=n, bar_damage=round(n * shot, 1))
+    return out
+
+
+#: --rank: what best_weapon_row's score is, for the damage objective. "window" (the default) the
+#: R1 hits landed within --window; "per-stamina" those hits' damage over the stamina their attacks
+#: cost; "bar" the damage of the R1 chain a full bar of the build's own max stamina pays for.
+RANKS = {"window": None, "per-stamina": "damage_per_stamina", "bar": "bar_damage"}
+
+
 HYPERARMOR =Path.home() / ".cache/ds2-builds/hyperarmor.json"  # weapon name -> WeaponParam.uninterruptibleRate
 CRIT = Path.home() / ".cache/ds2-builds/crit.json"  # per weapon: counter, backstab, riposte multipliers
 _tae_cache: dict = {}
@@ -3096,10 +3240,17 @@ def best_weapons_jobs(data: Data, inf: str, weapon_class: str | None = None) -> 
 
 def best_weapon_row(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, objective: str = "damage",
                     grip: str = "two", flex_weight: float | None = None, spells=(), only_class: str | None = None,
-                    use_floors: bool = True, defender=None, window: float = 0.0, attacks: dict | None = None):
+                    use_floors: bool = True, defender=None, window: float = 0.0, attacks: dict | None = None,
+                    rank: str = "window"):
     """One row of best_weapons: `weapon`+`inf` at the build optimize_build makes for it at `sl`, scored
-    so weapons compare. (score, weapon, value, class, two-handed, stats, rings, label, ammo, metrics), or None
-    when no class wields it at `sl` or, with `window`, a melee weapon has no attack timing. `ammo` is
+    so weapons compare. (score, weapon, value, class, two-handed, stats, rings, label, ammo, metrics),
+    or None when no class wields it at `sl`, with `window` a melee weapon has no attack timing, or
+    `rank` asks for a stamina metric the weapon has none of. `metrics` is a dict of named
+    measurements beside the score: for the damage objective with `window`, stamina_metrics' (a
+    launcher's shot_metrics') merged with row_status' (below), empty otherwise. `rank` (RANKS) replaces the damage score with
+    one of them: "per-stamina" the window's damage per stamina, "bar" a full bar's damage. The
+    build is still the one optimize_build makes for one hit; it is not re-optimized for stamina
+    (END raises the bar and nothing else, so a "bar" ranking reads the END the floors give). `ammo` is
     {"ammo": the best ammunition, "shot": the shot scored (ranged_pick)} for a bow, greatbow or
     crossbow, None for any other weapon; a
     launcher's score is one shot whatever `window` is (ranged_value), so ranged rows rank a shot
@@ -3121,14 +3272,20 @@ def best_weapon_row(data: Data, corpus: list[Build], weapon: str, inf: str, sl: 
     val, cls, two, st, worn = best
     w = data.weapons[weapon]
     names = [w["name"], weapon.replace("_", " ")]
-    score, label = val, "2H" if two else "1H"
+    score, label, metrics = val, "2H" if two else "1H", {}
+    by = RANKS[rank] if objective == "damage" and window else None
     if weapon in data.ranged:
         # One shot with its best ammunition at the optimized stats (objective_value is ranged_value
         # for a launcher), with or without `window`: the fire rate is not read (ranged_value).
         _, note, _, ammo = ranged_pick(data, weapon, inf, gear_stats(data, st, worn), objective,
                                        defender_defense(data, corpus, sl, defender)[0], worn)
-        return score, weapon, val, cls, two, st, worn, label + " 1 shot", {"ammo": ammo, "shot": note}, {}
-    metrics = {}
+        if objective == "damage" and window:
+            metrics = shot_metrics(data, weapon, val, st, worn)
+        if by:
+            if by not in metrics:
+                return None
+            score = metrics[by]
+        return score, weapon, val, cls, two, st, worn, label + " 1 shot", {"ammo": ammo, "shot": note}, metrics
     if window and objective in ("bleed", "poison"):
         hits, label = status_hits(attacks, names, [two], window)
         if not hits:
@@ -3150,6 +3307,11 @@ def best_weapon_row(data: Data, corpus: list[Build], weapon: str, inf: str, sl: 
                                  for nm in names) if n), 0)
         metrics = row_status(data, corpus, sl, defender, weapon, inf, gear_stats(data, st, worn), hits, window)
         metrics["damage_with_status"] = score + metrics["status_damage_per_window"]
+        metrics.update(stamina_metrics(data, weapon, two, names, attacks, ar, dfn, window, st, worn))
+        if by:
+            if by not in metrics:
+                return None
+            score = metrics[by]
     return score, weapon, val, cls, two, st, worn, label, None, metrics
 
 
@@ -3177,14 +3339,15 @@ def row_status(data: Data, corpus: list[Build], sl: int, defender, weapon: str, 
 def best_weapons(data: Data, corpus: list[Build], inf: str, sl: int, objective: str = "damage",
                  grip: str = "two", flex_weight: float | None = None, spells=(), only_class: str | None = None,
                  use_floors: bool = True, defender=None, weapon_class: str | None = None, window: float = 0.0,
-                 jobs: int = 1) -> list[tuple]:
+                 jobs: int = 1, rank: str = "window") -> list[tuple]:
     """The reverse of best_infusion: every weapon that takes infusion `inf`, each at the build
     optimize_build makes for it at `sl` (its own stats, class and rings), best first by
-    best_weapon_row's score. A weapon no class wields at `sl` is left out. `jobs` > 1 forks that
-    many workers: one optimize_build is seconds, and there are a few hundred weapons."""
+    best_weapon_row's score (`rank`: RANKS). A weapon no class wields at `sl` is left out. `jobs` > 1
+    forks that many workers: one optimize_build is seconds, and there are a few hundred weapons."""
     keys = best_weapons_jobs(data, inf, weapon_class)
     attacks = load_attacks(data) if window else None
-    args = (inf, sl, objective, grip, flex_weight, tuple(spells), only_class, use_floors, defender, window, attacks)
+    args = (inf, sl, objective, grip, flex_weight, tuple(spells), only_class, use_floors, defender, window, attacks,
+            rank)
     if jobs > 1:
         import multiprocessing
         global _BW
@@ -5305,6 +5468,48 @@ def ranged_selftest_cases() -> list[tuple]:
     ] + _ranged_adaptive_cases(fake, st, zero)
 
 
+def stamina_selftest_cases() -> list[tuple]:
+    """The stamina model over made-up rows: cost = base x the slot's multiplier / 10, alternating the
+    chain's 1st and 2nd attack; a full bar starts attacks while stamina is above 0; the window
+    charges the attacks whose hits it counts. The chain steps every 0.5 s (a planted chain_open for
+    the made-up anim -7), each attack hitting 0.2 s in."""
+    rates = {"Nnormal1st1H": 0.95, "normal2nd1H": 1.05, "normal1st2H": 1.187, "normal2nd2H": 1.312}
+    fake = type("Stamina", (), {
+        "stamina_cost": {"W": {"melee": 200.0, "ranged": 300.0, "rates": rates}},
+        "stamina_max": [0] + [1000 + 10 * v for v in range(1, 100)], "damage_scale": {},
+        "_ring_gear": {"Dragon": {"add": {}, "scaled": [], "slots": 0, "hp": 1.0, "load": 1.0, "stamina": 1.1},
+                       "Endurance": {"add": {"endurance": 5}, "scaled": [], "slots": 0, "hp": 1.0, "load": 1.0,
+                                     "stamina": 1.0}}})
+    _chain_cache[-7] = 0.5
+    attacks = {("w", "Single1HandNormal1st"): {"anim": -7, "spd": [1.0, 1.0], "hits": [_hit(6, 9, 1.0)]},
+               ("w", "Single1HandNormal2nd"): {"anim": -7, "spd": [1.0, 1.0], "hits": [_hit(6, 9, 1.0)]}}
+    st = dict.fromkeys(STATS, 20)
+    zero = dict.fromkeys(DMG + PHYS_TYPES, 0.0)
+    m = stamina_metrics(fake, "W", False, ["W"], attacks, {"physical": 100}, zero, 1.5, st)
+    return [
+        ("R1 1H 1st: 200 x 0.95 / 10", attack_stamina(fake, "W", False, False), 19.0),
+        ("R1 2H 2nd: 200 x 1.312 / 10", round(attack_stamina(fake, "W", True, True), 3), 26.24),
+        ("no regulation row, no cost", attack_stamina(fake, "X", False, False), None),
+        ("shot: rangedAttackBaseCost / 10", shot_stamina(fake, "W"), 30.0),
+        ("max stamina: staminaMax[END 20] / 10", max_stamina(fake, st), 120.0),
+        ("a dragon ring's factor", round(max_stamina(fake, st, ["Dragon"]), 3), 132.0),
+        ("an END ring reads a later row", max_stamina(fake, st, ["Endurance"]), 125.0),
+        ("bar: an attack starts above 0 and may end below", bar_attacks([50, 50, 50], 120), 3),
+        ("bar: at exactly 0 no attack starts", bar_attacks([50] * 5, 100), 2),
+        ("bar: a zero cost ends the count", bar_attacks([50, 0, 50], 120), 1),
+        ("window: 1st/2nd/1st attacks land by 1.5 s", m["stamina_per_attack"], [19.0, 21.0]),
+        ("window charges the three attacks it counts", m["stamina_per_window"], 59.0),
+        ("damage per stamina: 3 x 1000/12 over 59", m["damage_per_stamina"], 4.237),
+        ("bar 120: 19+21+19+21+19+21 = 120, six attacks", (m["bar_attacks"], m["bar_damage"], m["bar_seconds"]),
+         (6, 500.0, 2.5)),
+        ("every --rank metric is in the row", {k for k in RANKS.values() if k} <= set(m), True),
+        ("shot: 60 a shot over 30 stamina, four from 120",
+         shot_metrics(fake, "W", 60.0, st), {"stamina_per_attack": [30.0], "stamina_per_window": 30.0,
+                                             "damage_per_stamina": 2.0, "max_stamina": 120.0, "bar_attacks": 4,
+                                             "bar_damage": 240.0}),
+    ]
+
+
 def _ranged_adaptive_cases(fake, st: dict, zero: dict) -> list[tuple]:
     """A shot against an AdaptiveDefense meets the defender's answer to that shot's own types: one
     defender with a free slot, counters Steel_2 (physical +100) and Dark_3 (dark cut +15%, D +150)."""
@@ -5527,6 +5732,7 @@ def selftest() -> int:
     cases += flex_selftest_cases()
     cases += ranged_selftest_cases()
     cases += metrics_selftest_cases()
+    cases += stamina_selftest_cases()
     if ATTACKS.exists():  # the real extracted rows agree with the copies above
         real = load_attacks()
         for key in [k for k in A if k in real]:
@@ -5681,6 +5887,11 @@ def main() -> int:
                     help="with --best-weapons and --objective damage: rank by metrics.damage_with_status, the "
                          "window's damage plus the poison and bleed its hits deal through their procs; the "
                          "score column stays the damage alone")
+    ap.add_argument("--rank", choices=list(RANKS), default="window",
+                    help="with --best-weapons and --objective damage: window (default) ranks by the R1 hits "
+                         "landed in --window; per-stamina by those hits' damage per stamina point their attacks "
+                         "cost; bar by the R1 chain damage a full bar of the build's max stamina (END, rings) "
+                         "pays for. Every row prints all three")
     ap.add_argument("--jobs", type=int, default=0,
                     help="with --best-weapons: worker processes (default: a quarter of the CPUs)")
     g.add_argument("--infusion-gaps", action="store_true",
@@ -5916,14 +6127,20 @@ def main() -> int:
         # rarely what players carry; hits landed in a window charge a slow weapon for its swing time.
         # --generate's default window.
         window = a.window or 1.5
+        if a.rank != "window" and a.objective != "damage":
+            ap.error(f"--rank {a.rank} needs --objective damage")
+        if a.rank != "window" and a.with_status:
+            ap.error("--with-status ranks by damage_with_status; it does not combine with --rank " + a.rank)
         what = (f"{what} in {window:g}s" if window and a.objective != "ar"
                 else f"{what} per hit" if a.objective != "ar" else what)
+        what = {"per-stamina": f"{what} per stamina point",
+                "bar": "R1 damage from a full stamina bar"}.get(a.rank, what)
         out = {}
         adopted = adoption(data, corpus)
         for sl in sls:
             t = time.monotonic()
             rows = best_weapons(data, corpus, inf, sl, a.objective, a.grip, a.flex_weight, spells, a.start_class,
-                                not a.no_floors, defender, a.weapon_class, window, jobs)
+                                not a.no_floors, defender, a.weapon_class, window, jobs, a.rank)
             if a.with_status:
                 rows.sort(key=lambda r: -r[9].get("damage_with_status", r[0]))
             out[sl] = rows
@@ -5951,9 +6168,14 @@ def main() -> int:
                 status = (f"  +{m['status_damage_per_window']:4.0f} "
                           + ",".join(f"{s[0]}{n or '-'}" for s, n in m["hits_to_proc"].items()).ljust(7)
                           if m.get("status_buildup_per_hit") else "")
-                print(f"  {score:7.0f}{status}  {share[key]:5.1%}  {data.weapons[key]['name']:30} {label:11} {cls:9} "
-                      + " ".join(f"{LABEL[s]} {st[s]}" for s in ("strength", "dexterity", "intelligence", "faith"))
+                print(f"  {score:7.1f}{status}  {share[key]:5.1%}  {data.weapons[key]['name']:30} {label:11} {cls:9} "
+                      + " ".join(f"{LABEL[s]} {st[s]}" for s in ("strength", "dexterity", "intelligence", "faith",
+                                                                    "endurance"))
                       + (f"  rings {', '.join(data.rings[r]['name'] for r in worn)}" if worn else "")
+                      + (f"  stamina {m['stamina_per_window']:g}/window {m['damage_per_stamina']:.2f} dmg/st"
+                         if "stamina_per_window" in m else "")
+                      + (f" bar {m['max_stamina']:g}: {m['bar_attacks']} attacks {m['bar_damage']:.0f}"
+                         if "bar_damage" in m else "")
                       + (f"  shot: {ammo['shot']}" if ammo else ""))
         if a.json:
             attacks = load_attacks(data)
