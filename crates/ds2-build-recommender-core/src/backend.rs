@@ -22,7 +22,8 @@
 use ds2_build_import_core::{Build, Infusion, StartingClass, Stats, check_build};
 
 use crate::model::{
-    Grip, Mode, Objective, PanelState, STAT_COUNT, STAT_LABELS, StatusFilter, WeaponsForOpts,
+    Defender, Grip, Mode, Objective, PanelState, STAT_COUNT, STAT_LABELS, StatusFilter,
+    WeaponsForOpts,
 };
 use crate::weapons;
 
@@ -73,6 +74,56 @@ pub fn floor_stats(spells: &[String]) -> &'static [usize] {
 
 /// The damage types an attack rating is split into, in [`ResultRow::ar_by_type`] order.
 pub const DAMAGE_TYPES: [&str; 5] = ["phys", "magic", "fire", "light", "dark"];
+
+/// The defense types a [`DefenderDefense`] lists, in its order: the script's `DMG + PHYS_TYPES`.
+pub const DEFENSE_TYPES: [&str; 8] = [
+    "phys", "magic", "fire", "light", "dark", "slash", "strike", "thrust",
+];
+
+/// What [`Objective::Damage`] is scored against at one soul level: the panel's defender line.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DefenderDefense {
+    /// Defense per type, in [`DEFENSE_TYPES`] order. A hit's physical damage is read against its
+    /// slash, strike or thrust defense when it has that type, the general physical one otherwise.
+    pub defense: [f32; 8],
+    /// How many corpus builds it was taken from: the bracket's builds the average defender is the
+    /// mean of, or the median stats a chosen set is worn at are the median of.
+    pub builds: u32,
+    /// The median stats a chosen set is worn at, in [`STAT_LABELS`] order; `None` for the average
+    /// defender, which wears every build's own stats.
+    pub stats: Option<[u16; STAT_COUNT]>,
+}
+
+/// The panel's defender line: what a Damage column is scored against.
+///
+/// The numbers come first, physical and its three types then the elements, so a line clipped to
+/// the panel's width keeps them, then who they belong to. A chosen set says the median stats it is
+/// worn at, the ones its defense
+/// reads (END, VIT, STR and DEX feed physical; INT and FTH the elements), since without them
+/// "Havel's set" would not say why its magic defense is below the average player's.
+pub fn defender_line(defense: &DefenderDefense, sl: u16) -> String {
+    const SHOWN: [usize; 8] = [0, 5, 6, 7, 1, 2, 3, 4];
+    let numbers = SHOWN
+        .iter()
+        .map(|&kind| format!("{} {:.0}", DEFENSE_TYPES[kind], defense.defense[kind]))
+        .collect::<Vec<_>>()
+        .join("  ");
+    let whose = match defense.stats {
+        None => format!("the SL {sl} average defender ({} builds)", defense.builds),
+        Some(stats) => {
+            let read = [1, 2, 4, 5, 7, 8]
+                .iter()
+                .map(|&stat| format!("{} {}", STAT_LABELS[stat], stats[stat]))
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!(
+                "the chosen set at the SL {sl} median of {} builds, {read}",
+                defense.builds
+            )
+        }
+    };
+    format!("Defender: {numbers}  --  {whose}")
+}
 
 /// One row of a ranking.
 #[derive(Clone, Debug, PartialEq)]
@@ -269,24 +320,29 @@ pub struct Limits<'a> {
     /// Whether the soul level's floors apply. They are the medians of real builds, not a game
     /// rule, so the panel can drop them ("ignore typical-build minimums").
     pub floors: bool,
+    /// Who the damage objective is scored against. It changes which build scores best, never
+    /// whether one exists, so [`RecommenderBackend::refusal`] does not read it.
+    pub defender: &'a Defender,
 }
 
 impl Limits<'static> {
-    /// No spells, any class, the floors applied.
+    /// No spells, any class, the floors applied, the average defender.
     pub const NONE: Self = Self {
         spells: &[],
         class: None,
         floors: true,
+        defender: &Defender::Average,
     };
 }
 
 impl<'a> Limits<'a> {
-    /// The panel's: its chosen spells and floors setting, any class.
+    /// The panel's: its chosen spells, floors setting and defender, any class.
     pub fn of(state: &'a PanelState) -> Self {
         Self {
             spells: &state.spells,
             class: None,
             floors: !state.ignore_floors,
+            defender: &state.defender,
         }
     }
 }
@@ -474,6 +530,18 @@ pub trait RecommenderBackend: Sync {
     ) -> Option<crate::flex::Flexibility> {
         None
     }
+    /// What `defender` puts up at `sl`, the numbers the damage column is scored against. `None`
+    /// when this backend cannot say, which is the default (the stub has no corpus), or when a
+    /// piece is not in its armour table.
+    fn defense(&self, _sl: u16, _defender: &Defender) -> Option<DefenderDefense> {
+        None
+    }
+    /// The armour a defender can wear in `slot` (an index into [`crate::model::ARMOR_SLOTS`]) as
+    /// `(soulsplanner key, name)`, `Naked` first, then the data's order. Empty by default: the stub
+    /// has no armour table.
+    fn armor_pieces(&self, _slot: usize) -> Vec<(String, String)> {
+        Vec::new()
+    }
     /// `weapon`, a soulsplanner key, as the weapon picker shows it at `stats`: with `infusion` when
     /// it takes that one, which is what choosing it keeps, and uninfused otherwise. `None` when the
     /// backend has no row for it, which is the default: the stub has none for any weapon.
@@ -565,6 +633,7 @@ pub fn ask(backend: &dyn RecommenderBackend, state: &PanelState) -> Answer {
             gate(if state.mode == Mode::WeaponsForStats {
                 let opts = WeaponsForOpts {
                     objective: state.objective,
+                    defender: state.defender.clone(),
                     ..state.weapons_for.clone()
                 };
                 backend.weapons_for(&state.stats, sl, &opts)

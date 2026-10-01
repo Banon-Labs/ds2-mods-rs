@@ -24,13 +24,13 @@ use std::path::Path;
 use ds2_build_import_core::Infusion;
 
 use crate::backend::{
-    Calibration, CatalystPick, Change, Fix, GeneratedBuild, Limits, OptimizedBuild, Outcome,
-    RecommenderBackend, Refusal, RefusalKind, Requirement, ResultRow, SpellRow, WEAPONS_1H_TOP,
-    WEAPONS_2H_ONLY_TOP, WeaponCard, Wield,
+    Calibration, CatalystPick, Change, DefenderDefense, Fix, GeneratedBuild, Limits,
+    OptimizedBuild, Outcome, RecommenderBackend, Refusal, RefusalKind, Requirement, ResultRow,
+    SpellRow, WEAPONS_1H_TOP, WEAPONS_2H_ONLY_TOP, WeaponCard, Wield,
 };
 use crate::flex::{FLEX_K, Flexibility};
 use crate::model::{
-    Grip, Objective, SL_MAX, STAT_COUNT, STAT_LABELS, StatusFilter, WeaponsForOpts,
+    Defender, Grip, Objective, SL_MAX, STAT_COUNT, STAT_LABELS, StatusFilter, WeaponsForOpts,
 };
 use crate::weapons;
 
@@ -38,7 +38,7 @@ use crate::weapons;
 pub const DATA_FILE_NAME: &str = "ds2-build-recommender.dat";
 
 /// The file's first line. A different one is a file this port does not read.
-pub const FORMAT: &str = "ds2-build-recommender-data 11";
+pub const FORMAT: &str = "ds2-build-recommender-data 12";
 
 /// Nine stats as the script computes with them, in [`crate::model::STAT_LABELS`] order.
 type Stats = [i32; STAT_COUNT];
@@ -235,6 +235,9 @@ struct Tables {
     additional_hp: Table,
     /// Per-stat cast-power bonus, magic, fire, lightning, dark: the script's `cast_bonus`.
     cast: [Table; 4],
+    /// `physicalDEFBonus` then the magic, fire, lightning and dark `DEFBonus` tables: what
+    /// `build_defense` reads for a chosen defender's stats.
+    defense: [Table; 5],
 }
 
 /// A spell the file lists: the script's `data.spells` row with its `spell_req`.
@@ -388,13 +391,20 @@ impl Weapon {
 /// physical, magic, fire, lightning, dark, slash, strike, thrust.
 type Defense = [f64; 8];
 
-/// One SL bracket's floors and average defender.
+/// One SL bracket's floors, average defender and median stats.
 #[derive(Clone, Debug)]
 struct Bracket {
     /// VIG, VIT, ADP, ATT, then END for a high-stamina weapon.
     floors: [i32; 5],
     defense: Defense,
+    /// The median levelled stats of the builds `defense` averages over: the script's
+    /// `bracket_stats`, what a chosen defender's armour is worn at.
+    stats: Stats,
 }
+
+/// A chosen defender: an index into each slot of [`CorpusBackend::wearable`], head to legs, or
+/// `None` for the bracket's average.
+type Worn = Option<[usize; 4]>;
 
 /// A ring the minimum search may wear.
 #[derive(Clone, Debug)]
@@ -479,6 +489,12 @@ struct Wearable {
     /// physical, magic, fire, lightning, dark.
     defense: [f64; 5],
     require: Vec<(usize, i32)>,
+    /// slash, strike, thrust defense: the general physical one where the piece has none.
+    typed: [f64; 3],
+    /// `physicalDEFBonus`: how much of the stat bonus each physical defense gains.
+    bonus: f64,
+    /// What wearing it adds to each stat.
+    alter: Stats,
 }
 
 /// One corpus build, as nearest-build search reads it.
@@ -530,6 +546,8 @@ struct Query<'a> {
     /// This weapon alone (an index into the file's weapons), every infusion of it, and no
     /// high-stamina END gate: the script's `weapons_for(weapon=...)`, which `best_infusion` asks.
     weapon: Option<usize>,
+    /// Who damage is scored against: [`CorpusBackend::defense_at`]'s `worn`.
+    defender: Worn,
 }
 
 /// A weapon the similar builds carry: how many carry it, and how many carry each infusion of it.
@@ -739,6 +757,11 @@ impl CorpusBackend {
                     "castFire" => &mut tables.cast[1],
                     "castLightning" => &mut tables.cast[2],
                     "castDark" => &mut tables.cast[3],
+                    "physicalDEFBonus" => &mut tables.defense[0],
+                    "magicDEFBonus" => &mut tables.defense[1],
+                    "fireDEFBonus" => &mut tables.defense[2],
+                    "lightningDEFBonus" => &mut tables.defense[3],
+                    "darkDEFBonus" => &mut tables.defense[4],
                     _ => return Ok(()),
                 };
                 *slot = Table(values);
@@ -893,7 +916,12 @@ impl CorpusBackend {
                 for value in &mut defense {
                     *value = float(fields.next(), line)?;
                 }
-                self.brackets.push(Bracket { floors, defense });
+                let stats = stats(&mut fields, line)?;
+                self.brackets.push(Bracket {
+                    floors,
+                    defense,
+                    stats,
+                });
             }
             "R" => {
                 let key = next("ring key")?.to_owned();
@@ -932,12 +960,21 @@ impl CorpusBackend {
                     *value = float(fields.next(), line)?;
                 }
                 let require = stat_pairs(fields.next(), line)?;
+                let mut typed = [0.0; 3];
+                for value in &mut typed {
+                    *value = float(fields.next(), line)?;
+                }
+                let bonus = float(fields.next(), line)?;
+                let alter = stats(&mut fields, line)?;
                 self.wearable[slot].push(Wearable {
                     key,
                     name,
                     weight,
                     defense,
                     require,
+                    typed,
+                    bonus,
+                    alter,
                 });
             }
             "H" => {
@@ -1158,6 +1195,11 @@ impl CorpusBackend {
             ("mundaneATKBonus", &tables.mundane),
             ("equipmentLoad", &tables.equip_load),
             ("attunementSlots", &tables.attunement_slots),
+            ("physicalDEFBonus", &tables.defense[0]),
+            ("magicDEFBonus", &tables.defense[1]),
+            ("fireDEFBonus", &tables.defense[2]),
+            ("lightningDEFBonus", &tables.defense[3]),
+            ("darkDEFBonus", &tables.defense[4]),
         ] {
             if table.0.is_empty() {
                 return Err(format!("no {name} table"));
@@ -1187,6 +1229,65 @@ impl CorpusBackend {
 
     fn bracket(&self, sl: u32) -> &Bracket {
         &self.brackets[sl_bracket(sl).min(self.brackets.len() - 1)]
+    }
+
+    /// `defender`'s pieces as indices into [`Self::wearable`], `Some(None)` for the average
+    /// defender, `None` when a piece is not in the file's armour table.
+    fn worn(&self, defender: &Defender) -> Option<Worn> {
+        let Some(keys) = defender.pieces() else {
+            return Some(None);
+        };
+        let mut out = [0; 4];
+        for (slot, key) in keys.iter().enumerate() {
+            out[slot] = self.wearable[slot]
+                .iter()
+                .position(|piece| piece.key == *key)?;
+        }
+        Some(Some(out))
+    }
+
+    /// The script's `defender_defense`: the bracket's average defender when `worn` is `None`,
+    /// otherwise its `build_defense` of those pieces at the bracket's median stats plus what the
+    /// pieces add to them, with no rings. Physical defense is each piece's own plus its bonus
+    /// coefficient times the stat bonus at END + VIT + STR + DEX; each element's is the stat table's
+    /// base (INT, INT + FTH, FTH, the lesser of INT and FTH) plus the pieces' flat values. Summed in
+    /// the script's order, head to legs, so the doubles are its.
+    fn defense_at(&self, sl: u32, worn: Worn) -> Defense {
+        let bracket = self.bracket(sl);
+        let Some(worn) = worn else {
+            return bracket.defense;
+        };
+        let pieces: [&Wearable; 4] = std::array::from_fn(|slot| &self.wearable[slot][worn[slot]]);
+        let mut eff = bracket.stats;
+        for piece in pieces {
+            for (stat, add) in eff.iter_mut().zip(piece.alter) {
+                *stat += add;
+            }
+        }
+        let tables = &self.tables.defense;
+        let pb = tables[0].at(eff[END] + eff[VIT] + eff[STR] + eff[DEX]);
+        let mut out = [0.0; 8];
+        out[0] = pieces.iter().fold(0.0, |sum, piece| {
+            sum + (piece.defense[0] + piece.bonus * pb)
+        });
+        for (typed, value) in out[5..].iter_mut().enumerate() {
+            *value = pieces.iter().fold(0.0, |sum, piece| {
+                sum + (piece.typed[typed] + piece.bonus * pb)
+            });
+        }
+        let base = [
+            eff[INT],
+            eff[INT] + eff[FTH],
+            eff[FTH],
+            eff[INT].min(eff[FTH]),
+        ];
+        for (element, index) in base.into_iter().enumerate() {
+            let flat = pieces
+                .iter()
+                .fold(0.0, |sum, piece| sum + piece.defense[1 + element]);
+            out[1 + element] = tables[1 + element].at(index) + flat;
+        }
+        out
     }
 
     /// The script's `ring_attack_add`: what the worn `rings` add to `row`'s attack rating per type,
@@ -1340,6 +1441,7 @@ impl CorpusBackend {
             objective,
             top,
             weapon: only,
+            defender,
         } = *query;
         // The AR goal is raw AR by another name, so the Goal the panel shares between its tabs
         // ranks the Weapons tab as it optimizes. It drops the window: attack rating is one hit's,
@@ -1351,7 +1453,7 @@ impl CorpusBackend {
             (raw_ar, window)
         };
         let bracket = self.bracket(sl);
-        let defense = &bracket.defense;
+        let defense = &self.defense_at(sl, defender);
         let class = class.map(norm);
         // Per weapon: its best three while within WITHIN of its best, or for one weapon asked
         // about by itself, every infusion.
@@ -2016,6 +2118,8 @@ impl CorpusBackend {
                 spells,
                 class,
                 floors,
+                // Who the objective is scored against never decides whether a build exists.
+                None,
             )
         };
         if run(sl, spells, only_class, floors).is_some() {
@@ -2331,6 +2435,7 @@ impl CorpusBackend {
     /// stat points. `only_class` is the script's: that class key alone, for a character that
     /// already has one.
     /// `floors` false is the script's `use_floors=False`: the bracket floors are not applied.
+    /// `defender` is who the damage objective is scored against ([`Self::defense_at`]).
     // DEBT: ds2-mods-rs-59p7 -- the class made this eight arguments; bundle the per-build options.
     #[allow(clippy::too_many_arguments)]
     fn optimize_build(
@@ -2343,6 +2448,7 @@ impl CorpusBackend {
         spells: &[usize],
         only_class: Option<&str>,
         floors: bool,
+        defender: Worn,
     ) -> Option<Best> {
         let classes = self.class_indices(only_class);
         let floor = self.lift_floors(self.bracket(sl), weapon, floors, spells);
@@ -2350,6 +2456,7 @@ impl CorpusBackend {
         let run = |rings: &[usize]| {
             self.optimize_with(
                 weapon, infusion, sl, objective, grip, spells, &classes, &floor, &require, rings,
+                defender,
             )
         };
         let offense = self.offense_rings(weapon, infusion, objective);
@@ -2537,6 +2644,7 @@ impl CorpusBackend {
         floor: &[(usize, i32)],
         require: &[(usize, i32)],
         rings: &[usize],
+        defender: Worn,
     ) -> Option<Best> {
         // What the worn rings give: every curve reads it, the flexibility term the levelled stats.
         let worn = |st: &Stats| -> Stats {
@@ -2554,8 +2662,7 @@ impl CorpusBackend {
             Stamina,
             Load,
         }
-        let bracket = self.bracket(sl);
-        let defense = &bracket.defense;
+        let defense = &self.defense_at(sl, defender);
         let adaptability = if objective == Objective::Poison {
             Curve::Objective
         } else {
@@ -3290,6 +3397,11 @@ impl RecommenderBackend for CorpusBackend {
     }
 
     fn weapons_for(&self, stats: &[u16; STAT_COUNT], sl: u16, opts: &WeaponsForOpts) -> Outcome {
+        // A defender wearing a piece this file does not have ranks nothing rather than something
+        // scored against a defender nobody chose.
+        let Some(defender) = self.worn(&opts.defender) else {
+            return Outcome::Rows(Vec::new());
+        };
         let query = Query {
             one_hand: opts.one_hand,
             class: opts.class.as_deref(),
@@ -3299,6 +3411,7 @@ impl RecommenderBackend for CorpusBackend {
             objective: opts.objective,
             top: WEAPONS_FOR_TOP,
             weapon: None,
+            defender,
         };
         let ranked = self.rank(&to_stats(stats), u32::from(sl), &query);
         Outcome::Rows(ranked.iter().map(|row| self.result_row(row)).collect())
@@ -3314,6 +3427,9 @@ impl RecommenderBackend for CorpusBackend {
         let Some(index) = self.weapons.iter().position(|row| row.key == weapon) else {
             return Outcome::Rows(Vec::new());
         };
+        let Some(defender) = self.worn(&opts.defender) else {
+            return Outcome::Rows(Vec::new());
+        };
         let query = Query {
             one_hand: false,
             class: None,
@@ -3323,6 +3439,7 @@ impl RecommenderBackend for CorpusBackend {
             objective: opts.objective,
             top: usize::MAX,
             weapon: Some(index),
+            defender,
         };
         let ranked = self.rank(&to_stats(stats), u32::from(sl), &query);
         Outcome::Rows(ranked.iter().map(|row| self.result_row(row)).collect())
@@ -3348,6 +3465,7 @@ impl RecommenderBackend for CorpusBackend {
             &spells,
             limits.class,
             limits.floors,
+            self.worn(limits.defender)?,
         )?;
         Some(OptimizedBuild {
             class: self.classes[class].name.clone(),
@@ -3482,6 +3600,47 @@ impl RecommenderBackend for CorpusBackend {
         })
     }
 
+    fn defense(&self, sl: u16, defender: &Defender) -> Option<DefenderDefense> {
+        let sl = u32::from(sl);
+        let worn = self.worn(defender)?;
+        // The builds the script's bracket_defense and bracket_stats read: `sl`'s bracket, or the
+        // nearest (the lower on a tie) with 20 or more.
+        let mut counts = [0_u32; SL_BRACKETS];
+        for build in &self.corpus {
+            counts[build.bracket.min(SL_BRACKETS - 1)] += 1;
+        }
+        let here = sl_bracket(sl);
+        let mut order: Vec<usize> = (0..SL_BRACKETS).collect();
+        order.sort_by_key(|&bracket| (bracket.abs_diff(here), bracket));
+        let builds = order
+            .into_iter()
+            .map(|bracket| counts[bracket])
+            .find(|&count| count >= 20)
+            .unwrap_or(0);
+        let stats = worn.map(|_| {
+            self.bracket(sl)
+                .stats
+                .map(|value| u16::try_from(value).unwrap_or(0))
+        });
+        Some(DefenderDefense {
+            defense: self.defense_at(sl, worn).map(|value| value as f32),
+            builds,
+            stats,
+        })
+    }
+
+    fn armor_pieces(&self, slot: usize) -> Vec<(String, String)> {
+        let Some(pieces) = self.wearable.get(slot) else {
+            return Vec::new();
+        };
+        let naked = pieces.iter().filter(|piece| piece.key == "Naked");
+        let rest = pieces.iter().filter(|piece| piece.key != "Naked");
+        naked
+            .chain(rest)
+            .map(|piece| (piece.key.clone(), piece.name.clone()))
+            .collect()
+    }
+
     fn generate_build(
         &self,
         weapon: &str,
@@ -3494,6 +3653,7 @@ impl RecommenderBackend for CorpusBackend {
     ) -> Option<GeneratedBuild> {
         let primary = self.weapon_by_key(weapon)?;
         let spells = self.spell_indices(limits.spells)?;
+        let defender = self.worn(limits.defender)?;
         let (_, class, two_handed, stats, worn) = self.optimize_build(
             primary,
             infusion,
@@ -3503,6 +3663,7 @@ impl RecommenderBackend for CorpusBackend {
             &spells,
             limits.class,
             limits.floors,
+            defender,
         )?;
         // The weapons, the catalysts and the slots are read at what the worn rings give.
         let eff = self.gear_stats(&stats, &worn);
@@ -3534,6 +3695,7 @@ impl RecommenderBackend for CorpusBackend {
             objective: Objective::Damage,
             top: usize::MAX,
             weapon: None,
+            defender,
         };
         let ranked = self.rank(&eff, u32::from(sl), &query);
         let mut seen: Vec<&str> = vec![primary.name.as_str()];

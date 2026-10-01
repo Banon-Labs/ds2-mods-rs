@@ -108,6 +108,43 @@ impl Objective {
     }
 }
 
+/// The armour slots a [`Defender::Armor`] fills, in its order.
+pub const ARMOR_SLOTS: [&str; 4] = ["Head", "Chest", "Hands", "Legs"];
+
+/// Who [`Objective::Damage`] is scored against: the script's `--defender`.
+///
+/// The damage a weapon deals depends on who it hits, and which infusion is best can turn on it:
+/// the average defender's lightning resistance is its lowest, so Lightning edges out the other
+/// split infusions against it, while Havel's set over the bracket's median stats (a low INT and
+/// FTH base) makes Magic and Dark lead. Without a choice the panel could only answer for the
+/// average player at the soul level, and never said which numbers that player had.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum Defender {
+    /// The soul level's average defender: the mean defense of the corpus builds in its bracket.
+    #[default]
+    Average,
+    /// These pieces, head, chest, hands, legs, by soulsplanner key (`Naked` for a bare slot),
+    /// worn at the bracket's median stats. A piece's physical defense grows with END + VIT + STR +
+    /// DEX and the elemental base with INT and FTH, so a set has no defense without stats under
+    /// it; the median is the bracket's typical player, as the average defender is its typical set.
+    Armor([String; 4]),
+}
+
+impl Defender {
+    /// A bare defender, every slot `Naked`: where choosing the first piece starts from.
+    pub fn naked() -> Self {
+        Defender::Armor(std::array::from_fn(|_| "Naked".to_owned()))
+    }
+
+    /// The pieces, or `None` for the average defender.
+    pub fn pieces(&self) -> Option<&[String; 4]> {
+        match self {
+            Defender::Average => None,
+            Defender::Armor(pieces) => Some(pieces),
+        }
+    }
+}
+
 /// Which grip Optimize for weapon and Generate Build build for: the script's `--grip`.
 ///
 /// Two-handed halves the STR requirement even when one-handing would fit; one-handed needs it in
@@ -158,6 +195,9 @@ pub struct WeaponsForOpts {
     /// best R1 or R2 (within `window_s` when it is set), as the script's `--objective` does.
     /// [`crate::backend::ask`] fills it from [`PanelState::objective`].
     pub objective: Objective,
+    /// Who damage is scored against. [`crate::backend::ask`] fills it from
+    /// [`PanelState::defender`].
+    pub defender: Defender,
 }
 
 /// Which status a similar build's weapon must deal to be counted.
@@ -201,6 +241,8 @@ pub struct PanelState {
     pub infusion: Infusion,
     /// What [`Mode::OptimizeForWeapon`] and Generate Build optimize for.
     pub objective: Objective,
+    /// Who [`Objective::Damage`] is scored against, on every tab that scores it.
+    pub defender: Defender,
     /// The grip [`Mode::OptimizeForWeapon`] and Generate Build build for.
     pub grip: Grip,
     /// Whether [`Mode::MinimumForWeapon`] may two-hand to meet strength.
@@ -232,6 +274,7 @@ impl Default for PanelState {
             weapon: None,
             infusion: Infusion::None,
             objective: Objective::default(),
+            defender: Defender::default(),
             grip: Grip::default(),
             two_hand: false,
             allow_naked: false,
@@ -306,6 +349,22 @@ impl PanelState {
             true
         } else {
             false
+        }
+    }
+
+    /// Put the piece `key` (a soulsplanner key, `Naked` for none) on the defender's `slot`, an
+    /// index into [`ARMOR_SLOTS`]. An average defender becomes a bare one first, so choosing a
+    /// helmet does not leave the other three slots meaning "average". A slot past the four is
+    /// ignored.
+    pub fn set_defender_piece(&mut self, slot: usize, key: &str) {
+        if slot >= ARMOR_SLOTS.len() {
+            return;
+        }
+        if self.defender == Defender::Average {
+            self.defender = Defender::naked();
+        }
+        if let Defender::Armor(pieces) = &mut self.defender {
+            key.clone_into(&mut pieces[slot]);
         }
     }
 
@@ -392,6 +451,25 @@ mod tests {
     fn the_goal_offers_ar() {
         assert!(Objective::ALL.contains(&Objective::Ar));
         assert_eq!(Objective::Ar.label(), "AR");
+    }
+
+    /// The defender starts as the average, and choosing one piece makes a bare defender wearing it.
+    #[test]
+    fn choosing_a_defender_piece_starts_from_bare() {
+        let mut state = PanelState::default();
+        assert_eq!(state.defender, Defender::Average);
+        assert_eq!(state.defender.pieces(), None);
+        state.set_defender_piece(1, "Havels_Armor");
+        assert_eq!(
+            state.defender.pieces().cloned(),
+            Some(["Naked", "Havels_Armor", "Naked", "Naked"].map(str::to_owned))
+        );
+        state.set_defender_piece(0, "Havels_Helm");
+        state.set_defender_piece(4, "Not_A_Slot");
+        assert_eq!(
+            state.defender.pieces().map(|p| p[0].as_str()),
+            Some("Havels_Helm")
+        );
     }
 
     #[test]

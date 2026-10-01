@@ -21,7 +21,8 @@ use ds2_build_recommender_core::backend::{
 };
 use ds2_build_recommender_core::corpus::CorpusBackend;
 use ds2_build_recommender_core::model::{
-    Grip, Mode, Objective, PanelState, STAT_COUNT, StatusFilter, WeaponsForOpts, soul_level,
+    Defender, Grip, Mode, Objective, PanelState, STAT_COUNT, StatusFilter, WeaponsForOpts,
+    soul_level,
 };
 use ds2_build_recommender_core::weapons;
 
@@ -36,7 +37,7 @@ type ForRow = (
     f64,
     &'static str,
 );
-type WeaponsForCases = &'static [(
+type WeaponsForCase = (
     &'static [u16],
     u16,
     bool,
@@ -46,14 +47,22 @@ type WeaponsForCases = &'static [(
     bool,
     &'static str,
     &'static [ForRow],
-)];
-type OptimizeCases = &'static [(
+);
+type WeaponsForCases = &'static [WeaponsForCase];
+/// A defender's armour keys head to legs, then a case asked against that defender.
+type Against<T> = &'static [(&'static [&'static str], T)];
+type DefenderWeaponsForCases = Against<WeaponsForCase>;
+type OptimizeCase = (
     &'static str,
     &'static str,
     u16,
     &'static str,
     Option<(&'static str, bool, &'static [u16], f64)>,
-)];
+);
+type OptimizeCases = &'static [OptimizeCase];
+type DefenderOptimizeCases = Against<OptimizeCase>;
+/// sl, armour keys (`[]` for the average defender) -> defense by type, builds it was taken from.
+type DefenseCases = &'static [(u16, &'static [&'static str], &'static [f64], u32)];
 /// name, infusion code, rounded damage.
 type GenRow = (&'static str, &'static str, i64);
 type Generated = (
@@ -79,6 +88,7 @@ type GenerateCase = (
     Option<Generated>,
 );
 type GenerateCases = &'static [GenerateCase];
+type DefenderGenerateCases = Against<GenerateCase>;
 /// A class key, and a generate case asked of that starting class alone.
 type ClassGenerateCases = &'static [(&'static str, GenerateCase)];
 /// school, catalyst, cast power, the catalyst passed over for its requirements (`""` for none).
@@ -175,7 +185,7 @@ type FlexCases = &'static [(
 )];
 /// infusion code, score, AR by type, grip.
 type InfusionRow = (&'static str, f64, &'static [f64], &'static str);
-type BestInfusionCases = &'static [(
+type BestInfusionCase = (
     &'static str,
     &'static [u16],
     u16,
@@ -183,7 +193,9 @@ type BestInfusionCases = &'static [(
     bool,
     &'static str,
     &'static [InfusionRow],
-)];
+);
+type BestInfusionCases = &'static [BestInfusionCase];
+type DefenderBestInfusionCases = Against<BestInfusionCase>;
 
 mod expected {
     use super::*;
@@ -213,6 +225,18 @@ fn objective(name: &str) -> Objective {
         "bleed" => Objective::Bleed,
         "poison" => Objective::Poison,
         other => panic!("objective {other}"),
+    }
+}
+
+/// The script's `--defender`: `[]` is the average defender.
+fn defender(keys: &[&str]) -> Defender {
+    match keys {
+        [] => Defender::Average,
+        keys => Defender::Armor(
+            <[&str; 4]>::try_from(keys)
+                .expect("four pieces")
+                .map(str::to_owned),
+        ),
     }
 }
 
@@ -248,10 +272,99 @@ fn calibration_is_the_scripts() {
     assert_eq!(got.top2, top2 as f32);
 }
 
+/// The defense the damage objective is scored against: the bracket's average defender, and a
+/// chosen set at the bracket's median stats, the script's `defender_defense`.
+#[test]
+fn defense_is_the_scripts() {
+    let mut chosen = 0;
+    for &(sl, keys, want, builds) in expected::DEFENSE {
+        let asked = defender(keys);
+        let got = backend()
+            .defense(sl, &asked)
+            .unwrap_or_else(|| panic!("SL {sl} {keys:?}: no defense"));
+        let want: Vec<f32> = want.iter().map(|&value| value as f32).collect();
+        assert_eq!(got.defense[..], want[..], "SL {sl} {keys:?}");
+        assert_eq!(got.builds, builds, "SL {sl} {keys:?}");
+        assert_eq!(got.stats.is_some(), !keys.is_empty(), "SL {sl} {keys:?}");
+        chosen += usize::from(!keys.is_empty());
+    }
+    assert!(chosen >= 9, "{chosen} chosen defenders");
+    let unknown = defender(&["Not_A_Helm", "Naked", "Naked", "Naked"]);
+    assert_eq!(backend().defense(100, &unknown), None, "an unknown piece");
+}
+
+/// The panel's Best infusion and Weapons tab are asked against the panel's defender, and its line
+/// leads with the numbers that defender puts up.
+#[test]
+fn the_panel_asks_against_its_defender() {
+    let mut state = PanelState {
+        mode: Mode::OptimizeForWeapon,
+        sl_override: Some(150),
+        ..PanelState::default()
+    };
+    state.choose_weapon("Black_Dragon_Greataxe");
+    let ranked = |state: &PanelState| match backend::best_infusion(backend(), state) {
+        backend::Answer::Rows(rows) => rows,
+        other => panic!("{other:?}"),
+    };
+    let average = ranked(&state);
+    for (slot, piece) in [
+        "Havels_Helm",
+        "Havels_Armor",
+        "Havels_Gauntlets",
+        "Havels_Leggings",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        state.set_defender_piece(slot, piece);
+    }
+    let havel = ranked(&state);
+    assert_ne!(average, havel, "the defender changes the scores");
+    let limits = Limits::of(&state);
+    for row in &havel {
+        let build = backend()
+            .optimize(
+                "Black_Dragon_Greataxe",
+                row.infusion,
+                150,
+                Objective::Damage,
+                Grip::TwoHanded,
+                &limits,
+            )
+            .expect("a build");
+        assert_eq!(build.value, row.damage, "{:?}", row.infusion);
+    }
+    let defense = backend()
+        .defense(150, &state.defender)
+        .expect("Havel's set");
+    let line = backend::defender_line(&defense, 150);
+    assert!(
+        line.starts_with(&format!("Defender: phys {:.0}  slash", defense.defense[0])),
+        "{line}"
+    );
+    assert!(line.contains("chosen set at the SL 150 median"), "{line}");
+    let average = backend()
+        .defense(150, &Defender::Average)
+        .expect("the average");
+    assert!(
+        backend::defender_line(&average, 150).contains("SL 150 average defender"),
+        "the average says it is the average"
+    );
+}
+
 #[test]
 fn weapons_for_is_the_scripts() {
-    for (case, &(st, sl, one_hand, class, per_class, window, raw_ar, goal, want)) in
-        expected::WEAPONS_FOR.iter().enumerate()
+    let cases = expected::WEAPONS_FOR
+        .iter()
+        .map(|case| (case, Defender::Average))
+        .chain(
+            expected::DEFENDER_WEAPONS_FOR
+                .iter()
+                .map(|(keys, case)| (case, defender(keys))),
+        );
+    for (case, (&(st, sl, one_hand, class, per_class, window, raw_ar, goal, want), defender)) in
+        cases.enumerate()
     {
         let opts = WeaponsForOpts {
             one_hand,
@@ -260,6 +373,7 @@ fn weapons_for_is_the_scripts() {
             window_s: window as f32,
             raw_ar,
             objective: objective(goal),
+            defender,
         };
         let got = rows(backend().weapons_for(&stats(st), sl, &opts));
         assert_eq!(got.len(), want.len(), "case {case}: row count");
@@ -285,15 +399,24 @@ fn weapons_for_is_the_scripts() {
 #[test]
 fn best_infusion_is_the_scripts() {
     let mut ranked_some = 0;
-    for &(weapon, st, sl, window, raw_ar, goal, want) in expected::BEST_INFUSION {
+    let cases = expected::BEST_INFUSION
+        .iter()
+        .map(|case| (case, &[][..]))
+        .chain(
+            expected::DEFENDER_BEST_INFUSION
+                .iter()
+                .map(|(keys, case)| (case, *keys)),
+        );
+    for (&(weapon, st, sl, window, raw_ar, goal, want), keys) in cases {
         let opts = WeaponsForOpts {
             window_s: window as f32,
             raw_ar,
             objective: objective(goal),
+            defender: defender(keys),
             ..WeaponsForOpts::default()
         };
         let got = rows(backend().best_infusion(weapon, &stats(st), sl, &opts));
-        let case = format!("{weapon} SL {sl} {goal} window {window}");
+        let case = format!("{weapon} SL {sl} {goal} window {window} against {keys:?}");
         assert_eq!(got.len(), want.len(), "{case}: row count");
         for (row, &(code, score, ar, grip)) in got.iter().zip(want) {
             assert_eq!(row.infusion, infusion(code), "{case}");
@@ -319,20 +442,28 @@ fn best_infusion_is_the_scripts() {
 fn optimize_is_the_scripts() {
     let cases = expected::OPTIMIZE
         .iter()
-        .map(|case| (case, Grip::TwoHanded))
+        .map(|case| (case, Grip::TwoHanded, &[][..]))
         .chain(
             expected::OPTIMIZE_ONE_HANDED
                 .iter()
-                .map(|case| (case, Grip::OneHanded)),
+                .map(|case| (case, Grip::OneHanded, &[][..])),
+        )
+        .chain(
+            expected::DEFENDER_OPTIMIZE
+                .iter()
+                .map(|(keys, case)| (case, Grip::TwoHanded, *keys)),
         );
-    for (&(weapon, code, sl, goal, want), grip) in cases {
+    for (&(weapon, code, sl, goal, want), grip, keys) in cases {
         let got = backend().optimize(
             weapon,
             infusion(code),
             sl,
             objective(goal),
             grip,
-            &Limits::NONE,
+            &Limits {
+                defender: &defender(keys),
+                ..Limits::NONE
+            },
         );
         match (got, want) {
             (None, None) => {}
@@ -396,7 +527,14 @@ fn generate_build_is_the_scripts() {
                 .iter()
                 .map(|(class, case)| (case, Grip::TwoHanded, Some(*class))),
         );
-    for (&(weapon, code, sl, goal, naked, want), grip, only) in cases {
+    let cases = cases
+        .map(|(case, grip, only)| (case, grip, only, &[][..]))
+        .chain(
+            expected::DEFENDER_GENERATE
+                .iter()
+                .map(|(keys, case)| (case, Grip::TwoHanded, None, *keys)),
+        );
+    for (&(weapon, code, sl, goal, naked, want), grip, only, keys) in cases {
         let got = backend().generate_build(
             weapon,
             infusion(code),
@@ -406,6 +544,7 @@ fn generate_build_is_the_scripts() {
             grip,
             &Limits {
                 class: only,
+                defender: &defender(keys),
                 ..Limits::NONE
             },
         );
@@ -724,6 +863,7 @@ fn refusal_is_the_scripts_and_every_fix_builds() {
             spells: &asked,
             class,
             floors,
+            defender: &Defender::Average,
         };
         let (infusion, objective) = (infusion(code), objective(goal));
         let case = format!("{weapon} SL {sl} {spells:?} {class:?}");
@@ -775,6 +915,7 @@ fn refusal_is_the_scripts_and_every_fix_builds() {
                 spells: &spells,
                 class,
                 floors,
+                defender: &Defender::Average,
             };
             let build =
                 backend().generate_build(weapon, infusion, sl, objective, false, grip, &limits);
@@ -1136,6 +1277,7 @@ fn a_weapons_card_is_its_ranked_row() {
             window_s: window as f32,
             raw_ar,
             objective: objective(goal),
+            ..WeaponsForOpts::default()
         };
         let stats = stats(st);
         for row in rows(backend().weapons_for(&stats, sl, &opts)) {

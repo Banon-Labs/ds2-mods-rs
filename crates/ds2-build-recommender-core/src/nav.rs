@@ -29,6 +29,8 @@ pub enum Control {
     Grip,
     /// The goal (objective), which A cycles.
     Objective,
+    /// Who the damage goal is scored against: the list of the average and the four armour slots.
+    Defender,
     /// One mode tab.
     Mode(Mode),
     /// Weapons for stats: one-handed only.
@@ -143,6 +145,7 @@ pub fn layout(shape: Shape) -> Vec<Vec<Control>> {
             Control::Infusion,
             Control::Grip,
             Control::Objective,
+            Control::Defender,
         ]);
         let options = match shape.mode {
             Mode::WeaponsForStats => vec![
@@ -452,6 +455,11 @@ mod tests {
         let rows = layout(shape(Mode::OptimizeForWeapon));
         assert_eq!(step(&rows, Control::Infusion, Dir::Right), Control::Grip);
         assert_eq!(step(&rows, Control::Grip, Dir::Right), Control::Objective);
+        // The defender is the goal's: it says who the damage goal is scored against.
+        assert_eq!(
+            step(&rows, Control::Objective, Dir::Right),
+            Control::Defender
+        );
     }
 
     /// The player asked for it on 2026-09-29: a direction off a row's end comes back at its other
@@ -507,7 +515,7 @@ mod tests {
         );
         assert_eq!(
             step(&rows, Control::Mode(Mode::SimilarBuilds), Dir::Down),
-            Control::Objective
+            Control::Defender
         );
     }
 
