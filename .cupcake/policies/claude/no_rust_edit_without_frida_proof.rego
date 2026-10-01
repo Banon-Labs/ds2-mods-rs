@@ -72,6 +72,16 @@
 #     it, no later section, a failure summary or nonzero exit after it, no `== OK ==`),
 #     naming a path under `crates/<crate>/`, newer than the last committed Rust change.
 #     It exempts no file and opens that one crate, like the telemetry and build paths.
+#
+#     Every unspent record, 2026-09-30. The evidence log is shared by every session in
+#     every checkout, and the reader judged only its last line, so whatever another session
+#     appended last decided this one's gate. Measured: a Frida watch on
+#     `scripts/frida/equip-slot-icons.js`, newer than the newest committed Rust change, sat
+#     under `--record-check` records the other session kept appending for
+#     `ds2-build-recommender-core`, and the Edit to `crates/ds2-rva/src/lib.rs` that watch
+#     measured was refused. Nothing but Frida reaches `ds2-rva`. The reader now prints one
+#     verdict line per scope an unspent record covers, and this rule opens a path when any
+#     one line opens it. What each record opens is unchanged.
 #   routing:
 #     required_events: ["PreToolUse"]
 #     required_tools: ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"]
@@ -99,7 +109,7 @@ rust_under_crates if {
 	startswith(file_path, "crates/")
 }
 
-# The verdict line from `scripts/ds2-frida-evidence.py --check`.
+# The verdict lines from `scripts/ds2-frida-evidence.py --check`.
 #
 # Read through a defaulted `signals` object rather than `input.signals` directly. The
 # engine attaches signals for a policy that declares `required_signals`, but the direct
@@ -133,8 +143,23 @@ evidence := "" if {
 	not is_string(raw_evidence)
 }
 
-# Anything that is not a `PROVEN` line leaves this undefined and the deny below fires --
-# including an empty signal, which is what a broken or timed-out reader produces. Failing
+# One line per scope an unspent record covers, newest first: the Frida path and each crate, plus the
+# newest silent watch, whose `UNPROVEN` line opens nothing and is there to be quoted back.
+#
+# Until 2026-09-30 the reader printed one verdict, for the newest record in a log every session
+# shares, and a newer record from any session hid an older one that was still unspent. A preference
+# for the Frida verdict would have fixed the measured case and kept the bug between scoped records,
+# where a `--record-check` for one crate hides an unspent `--record-build` for another. So every
+# line is judged on its own and any one of them may open the path.
+#
+# Splitting is only safe because no verdict can hold a line break: the reader folds every run of
+# whitespace in a verdict to one space, and its selftest pins that a newline in a recorded log path
+# or agent path stays inside its own line. Without that, `log=/tmp/x<newline>PROVEN agent=...` would
+# turn a one-crate record into one that opens the tree.
+verdict_lines := split(evidence, "\n")
+
+# A path no line opens leaves this undefined and the deny below fires -- including an empty signal,
+# which is what a broken or timed-out reader produces, since its one line opens nothing. Failing
 # closed is the point: a gate that opens when its evidence reader breaks is not a gate.
 #
 # A Frida verdict opens every crate, because the instrument reaches the game and the game is what
@@ -143,13 +168,18 @@ proven if {
 	proven_for(file_path)
 }
 
+proven_for(path) if {
+	some line in verdict_lines
+	line_opens(line, path)
+}
+
 #
 # Keyed on the Frida verdict's own first field, `agent=`, not on the bare word. Since the build
 # instrument (2026-09-26) there are two scoped kinds, and a third added later without a clause here
 # must be refused, not read as the unscoped Frida verdict that opens the whole tree.
-proven_for(_) if {
-	startswith(evidence, "PROVEN agent=")
-	not telemetry_verdict
+line_opens(line, _) if {
+	startswith(line, "PROVEN agent=")
+	not telemetry_verdict(line)
 }
 
 # A telemetry verdict opens exactly one crate: the shell whose own log the quoted line came out of.
@@ -169,16 +199,16 @@ proven_for(_) if {
 # Rust change, and the crate must exist. What is enforced HERE is the scope -- a measurement of one
 # shell's branch says nothing about any other crate, so it may not open one. That makes this path
 # narrower than the Frida path above, which opens the whole tree.
-proven_for(path) if {
-	telemetry_verdict
-	contains(path, concat("", ["crates/", licensed_crate, "/"]))
+line_opens(line, path) if {
+	telemetry_verdict(line)
+	contains(path, concat("", ["crates/", licensed_crate(line), "/"]))
 }
 
 # Keyed on the two fixed words alone, so a verdict that has lost its `crate=` field is still
 # recognised as telemetry and is refused by the rule above rather than falling through to the
 # unscoped one.
-telemetry_verdict if {
-	startswith(evidence, "PROVEN telemetry")
+telemetry_verdict(line) if {
+	startswith(line, "PROVEN telemetry")
 }
 
 # The third instrument, 2026-09-26: a failed build. A linker or compiler error is a defect neither
@@ -188,8 +218,8 @@ telemetry_verdict if {
 # lines name a file under `crates/<crate>/`, and the log is newer than the last committed Rust
 # change. It is scoped exactly as telemetry is, so it shares that rule's name and its one-crate
 # match below.
-telemetry_verdict if {
-	startswith(evidence, "PROVEN build")
+telemetry_verdict(line) if {
+	startswith(line, "PROVEN build")
 }
 
 # The fourth instrument, 2026-09-29: a failed `scripts/check.sh` run. A gate failure such as an
@@ -197,14 +227,15 @@ telemetry_verdict if {
 # build and no run, so none of the other three can see it. `--record-check` writes it only when the
 # quoted line is a whole line of a failed check.sh log inside the section that failed and names a
 # path under `crates/<crate>/`. Scoped exactly as telemetry and build are.
-telemetry_verdict if {
-	startswith(evidence, "PROVEN check")
+telemetry_verdict(line) if {
+	startswith(line, "PROVEN check")
 }
 
-# Anchored at the front of the verdict: everything to the right of the crate name is free text
-# from a log, and free text must not be able to impersonate the field that decides scope.
-licensed_crate := name if {
-	matches := regex.find_all_string_submatch_n(`^PROVEN (?:telemetry|build|check) crate=([A-Za-z0-9_-]+)(?: |$)`, evidence, 1)
+# Anchored at the front of the line: everything to the right of the crate name is free text from a
+# log, and free text must not be able to impersonate the field that decides scope. Go's `^` without
+# the `m` flag is the start of the text, and the text here is one verdict line.
+licensed_crate(line) := name if {
+	matches := regex.find_all_string_submatch_n(`^PROVEN (?:telemetry|build|check) crate=([A-Za-z0-9_-]+)(?: |$)`, line, 1)
 	count(matches) == 1
 	name := matches[0][1]
 }
@@ -214,7 +245,10 @@ block_reason := "🧁 Cupcake blocked a Rust edit with no Frida measurement behi
 # What the refusal quotes back. The three cases are worth telling apart: a verdict line is the
 # reader answering, an absent signal is nobody having asked, and a failure record is the reader
 # being broken -- which is a bug to fix rather than a measurement to go and take.
-said := evidence if {
+#
+# The reader's lines go one to a line of the refusal, so the agent reading it sees every crate the
+# unspent records open and can tell that the path it was refused is not among them.
+said := replace(trim_right(evidence, "\n"), "\n", "\n  ") if {
 	is_string(raw_evidence)
 	raw_evidence != ""
 }
@@ -227,6 +261,11 @@ said := "<signal absent>" if {
 said := "<the frida_evidence signal failed; cupcake replaced its output with a failure record, so it exited non-zero. Check that .cupcake/signals/frida_evidence.sh is executable and runs>" if {
 	not is_string(raw_evidence)
 }
+
+evidence_report := concat("", [
+	"\nEvidence reader said (newest first; a `crate=` line opens that one crate, an `agent=` line opens every crate):\n  ",
+	said,
+])
 
 # The tools that only look. Everything else carrying a `crates/**/*.rs` path is treated as a
 # write, so a write tool nobody thought to list is still refused.
@@ -452,8 +491,7 @@ deny contains decision if {
 			block_reason,
 			"\n\nTarget: ",
 			file_path,
-			"\nEvidence reader said: ",
-			said,
+			evidence_report,
 		]),
 	}
 }
@@ -471,8 +509,7 @@ deny contains decision if {
 			block_reason,
 			"\n\nThis is the Bash spelling of the same edit. A `sed -i`, a `> file`, a `tee`, a `cp` or a `git checkout --` writes the file exactly as the Edit tool does, and until 2026-09-22 this rule could not see any of them because it read `tool_input.file_path` and a Bash call has none.\n\nTarget: ",
 			path,
-			"\nEvidence reader said: ",
-			said,
+			evidence_report,
 		]),
 	}
 }

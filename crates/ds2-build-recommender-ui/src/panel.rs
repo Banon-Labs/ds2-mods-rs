@@ -13,17 +13,20 @@ use ds2_build_recommender_core::backend::{
     ResultRow, StubBackend, WeaponCard, Wield,
 };
 use ds2_build_recommender_core::corpus::{self, CorpusBackend};
-use ds2_build_recommender_core::flex::{Flexibility, flex_line, flex_load_line};
+use ds2_build_recommender_core::flex::{
+    FLYNN_NOTE, Flexibility, flex_line, flex_load, flex_load_line, flex_rank, flex_wields,
+};
 use ds2_build_recommender_core::model::{
     Grip, Mode, Objective, PanelState, STAT_COUNT, STAT_LABELS,
 };
+use ds2_build_recommender_core::paperdoll::{self, Held, Paperdoll, Piece, Slot};
 
 /// STR's place in the nine stats, for the log lines that say what a grip did to it.
 const STR_INDEX: usize = 4;
 use ds2_build_recommender_core::nav::{self, Control, Dir, Nudge, Shape};
 use ds2_build_recommender_core::weapons::{self, WeaponRow};
 use ds2_overlay::fefont::{Button, button};
-use ds2_overlay::panels::IconDraw;
+use ds2_overlay::panels::{EmptySlot, IconDraw};
 use ds2_overlay::style;
 use hudhook::imgui::{DrawListMut, MouseButton, Ui};
 
@@ -194,6 +197,8 @@ enum Action {
     SetMode(Mode),
     /// Put the results table's highlight on this row.
     PickRow(usize),
+    /// Describe this slot of the paperdoll, and put the cursor on it.
+    PickSlot(Slot),
     ToggleOneHand,
     TogglePerClass,
     ToggleRawAr,
@@ -250,6 +255,13 @@ struct Panel {
     /// The highlighted row of the results table, whose breakdown is drawn under it.
     results_cursor: usize,
     generated: Option<GeneratedBuild>,
+    /// [`Self::generated`] slot by slot, as Apply leaves the character: what the paperdoll draws.
+    doll: Option<Paperdoll>,
+    /// The slot the pane beside the paperdoll describes: the last one the cursor was on, or the
+    /// build's weapon.
+    slot: Slot,
+    /// Whether the log has said what the paperdoll drew for the build on screen.
+    doll_logged: bool,
     /// The weapon flexibility of the build in [`Self::answer`], asked once when it arrived: the
     /// neighbour search reads the whole corpus, which is not a per-frame cost.
     answer_flex: Option<Flexibility>,
@@ -294,6 +306,9 @@ impl Panel {
             results_scroll: 0,
             results_cursor: 0,
             generated: None,
+            doll: None,
+            slot: Slot::PRIMARY,
+            doll_logged: false,
             answer_flex: None,
             generated_flex: None,
             refused: Vec::new(),
@@ -322,6 +337,29 @@ impl Panel {
             } else {
                 0
             },
+            paperdoll: self.doll_shown(),
+        }
+    }
+
+    /// Whether the generated build is on screen, as its paperdoll.
+    fn doll_shown(&self) -> bool {
+        self.shown == Shown::Build && self.doll.is_some()
+    }
+
+    /// What `slot` of the generated build holds, for the log: `Sanctum Crossbow (Lightning) [item
+    /// 1650000]`, or what Apply does with it when it holds nothing.
+    fn held_line(&self, slot: Slot) -> String {
+        match self.doll.as_ref().map(|doll| doll.held(slot)) {
+            Some(Held::Item(piece)) => format!(
+                "{} [{}]",
+                piece_name(piece),
+                piece
+                    .item
+                    .map_or_else(|| "no item id".to_owned(), |id| format!("item {id}"))
+            ),
+            Some(Held::Bare) => "bare in the build; Apply leaves what is worn there".to_owned(),
+            Some(Held::Kept) => "not in the build; Apply leaves it as it is".to_owned(),
+            None => "no build generated".to_owned(),
         }
     }
 
@@ -463,6 +501,7 @@ impl Panel {
             Control::Spells => format!("spells={:?}", state.spells),
             Control::ShowToggle => format!("showing {:?}", self.shown),
             Control::Apply => format!("apply (build ready={})", self.generated.is_some()),
+            Control::Slot(slot) => format!("slot {}: {}", slot.label(), self.held_line(slot)),
         }
     }
 
@@ -472,6 +511,9 @@ impl Panel {
         let next = nav::step(&rows, self.cursor, dir);
         if next != self.cursor {
             self.cursor = next;
+            if let Control::Slot(slot) = next {
+                self.slot = slot;
+            }
             log_line(format_args!(
                 "{LOG_PREFIX} cursor {dir:?} -> {next:?} [{}]",
                 self.describe(next)
@@ -516,6 +558,7 @@ impl Panel {
                 Shown::Build
             })),
             Control::Apply => self.generated.is_some().then_some(Action::AskApply),
+            Control::Slot(_) => None,
         };
         match (control, action) {
             (Control::Results, _) => {
@@ -524,6 +567,12 @@ impl Panel {
                     "{LOG_PREFIX} press A on Results -- Up/Down scroll, LB/RB page, B leaves"
                 ));
             }
+            // The pane beside the slots already describes the one the cursor is on.
+            (Control::Slot(_), _) => log_line(format_args!(
+                "{LOG_PREFIX} press A on {control:?} -- a slot shows what the build puts there, \
+                 nothing to choose [{}]",
+                self.describe(control)
+            )),
             (_, None) => log_line(format_args!(
                 "{LOG_PREFIX} press A on {control:?} -- disabled [{}]",
                 self.describe(control)
@@ -895,12 +944,19 @@ impl Panel {
                 }
                 self.generated_flex =
                     ask_flexibility(&build.stats, build.sl, &build.armor, &build.suggested_rings);
+                let doll = Paperdoll::of(&build);
+                log_line(format_args!("{LOG_PREFIX} paperdoll: {}", doll_line(&doll)));
+                self.doll = Some(doll);
+                self.doll_logged = false;
                 self.generated = Some(build);
                 self.refused.clear();
                 if self.fix_then == Action::Generate {
                     self.fixes.clear();
                 }
                 self.shown = Shown::Build;
+                // The design's opening state: the cursor on the build's weapon, and the pane on it.
+                self.slot = Slot::PRIMARY;
+                self.cursor = Control::Slot(Slot::PRIMARY);
             }
             Err(refusal) => {
                 log_line(format_args!(
@@ -909,6 +965,7 @@ impl Panel {
                 ));
                 self.generated = None;
                 self.generated_flex = None;
+                self.doll = None;
                 self.refused = refusal.lines;
                 self.fixes = refusal.fixes;
                 self.fix_then = Action::Generate;
@@ -1019,6 +1076,14 @@ impl Panel {
             Action::PickRow(index) => {
                 self.results_cursor = index;
                 self.cursor = Control::Results;
+            }
+            Action::PickSlot(slot) => {
+                self.slot = slot;
+                self.cursor = Control::Slot(slot);
+                log_line(format_args!(
+                    "{LOG_PREFIX} slot clicked [{}]",
+                    self.describe(self.cursor)
+                ));
             }
             Action::SetMode(mode) => {
                 self.state.mode = mode;
@@ -1517,9 +1582,9 @@ const FILTER_H: f32 = 44.0;
 const FILTER_GAP: f32 = 16.0;
 /// Left of the rows, which start further out than the text so the highlight's bar has room.
 const PICKER_ROWS_INSET: f32 = 24.0;
-/// The part of a weapon's icon a row shows, and its size: the band of the texture the art is
-/// drawn in, one texture pixel to one screen pixel. Everything else in a row is laid out against
-/// it (the design's "Weapon icon at its real size" board).
+/// The part of a weapon's icon a row shows, in the texture's pixels, and its size: the band of the
+/// texture the art is drawn in, one texture pixel to one screen pixel. Everything else in a row is
+/// laid out against it (the design's "Weapon icon at its real size" board).
 const ICON_CROP: [f32; 4] = ds2_overlay::item_icon::WEAPON_ART;
 const ICON_W: f32 = ICON_CROP[2] - ICON_CROP[0];
 const ICON_H: f32 = ICON_CROP[3] - ICON_CROP[1];
@@ -1554,6 +1619,42 @@ const ICON_EDGE: [f32; 4] = style::rgb(0x3a_34_2d);
 const TAG_TEXT: [f32; 4] = style::rgb(0xea_df_d2);
 /// A damage type's name in the picker, in [`DAMAGE_TYPES`] order.
 const ATTACK_NAMES: [&str; 5] = ["Physical", "Magic", "Fire", "Lightning", "Dark"];
+
+// The generated build as a paperdoll, from the design's "Generated build as a paperdoll" board.
+
+/// Above and below the build's summary line, which takes the weapon's parameters' place.
+const SUMMARY_TOP: f32 = 24.0;
+const SUMMARY_BOTTOM: f32 = 20.0;
+/// Above and below the paperdoll.
+const DOLL_TOP: f32 = 28.0;
+const DOLL_BOTTOM: f32 = 30.0;
+/// Between the slots and the pane describing one.
+const DOLL_GAP: f32 = 48.0;
+/// The narrowest the pane gets; on a narrower panel the slots shrink to leave it this.
+const DETAIL_MIN_W: f32 = 440.0;
+/// Between a group's heading and its slots, between two bands of slots, and between the arrows
+/// and the bolts. Scaled with the slots.
+const LABEL_GAP: f32 = 10.0;
+const BAND_GAP: f32 = 26.0;
+const AMMO_GAP: f32 = 16.0;
+/// The paperdoll's height in the design's pixels, less its five lines of headings: three bands of
+/// weapon, ring and armour slots, then the belt's two rows beside the arrows over the bolts.
+const DOLL_SCALED_H: f32 =
+    3.0 * (LABEL_GAP + paperdoll::BIG + BAND_GAP) + 2.0 * (LABEL_GAP + paperdoll::SMALL) + AMMO_GAP;
+/// The smallest the slots are drawn, as a share of the design's size.
+const DOLL_MIN_SCALE: f32 = 0.45;
+/// How much of a slot's side the largest empty-slot silhouette spans: the design's glyph box,
+/// 71 of 112.
+const EMPTY_FILL: f32 = 71.0 / 112.0;
+/// Around an item's icon inside its slot, in the design's pixels.
+const SLOT_ICON_INSET: f32 = 6.0;
+/// An empty slot's fill and edge, the design's. A filled slot is [`CELL_BG`] edged in
+/// [`ICON_EDGE`], and the one the cursor is on [`CELL_ON`] edged in bronze.
+const SLOT_EMPTY: [f32; 4] = style::rgb(0x14_13_12);
+const SLOT_EMPTY_EDGE: [f32; 4] = style::rgb(0x26_22_20);
+/// Between the pane's sections, and between two of its lines.
+const DETAIL_SECTION_GAP: f32 = 22.0;
+const DETAIL_LINE_GAP: f32 = 6.0;
 
 /// A frame's drawing surface and the clickable rectangles laid on it, in draw order.
 struct Canvas<'ui> {
@@ -1741,6 +1842,18 @@ impl Canvas<'_> {
         self.line + BUTTON_PAD_Y * 2.0
     }
 
+    /// The design's `·` between two parts of a line at `x`, which the game's font has no glyph
+    /// for: a dot in [`DIM`] with a space either side, on a line of text at `y`. Returns its width.
+    fn dot(&self, x: f32, y: f32) -> f32 {
+        let space = self.width(" ");
+        let radius = (self.line * 0.07).max(1.5);
+        self.list
+            .add_circle([x + space + radius, y + self.line * 0.55], radius, DIM)
+            .filled(true)
+            .build();
+        space * 2.0 + radius * 2.0
+    }
+
     /// `text` in the title face at `at`, cut at the right to fit `width`.
     fn big_text(&self, at: [f32; 2], color: [f32; 4], text: &str, width: f32) {
         let _big = ds2_overlay::panels::big_font(self.ui).map(|id| self.ui.push_font(id));
@@ -1874,10 +1987,22 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
     let tabs_at = tabs_rule_at + 1.0 + TABS_TOP;
     let params_at = tabs_at + line + TAB_LINE_GAP + 2.0 + PARAMS_TOP;
     let options_at = params_at + line + PARAMS_ROW_GAP;
-    let content_rule_at = options_at + line + PARAMS_BOTTOM;
-    let content_at = content_rule_at + 1.0 + CONTENT_TOP;
+    // A generated build on screen puts its summary where the parameters and options were, as the
+    // design draws it: the build names its own weapon, infusion and grip.
+    let doll = panel.doll_shown();
+    let summary_at = tabs_at + line + TAB_LINE_GAP + 2.0 + SUMMARY_TOP;
+    let (content_rule_at, content_pad_top, content_pad_bottom) = if doll {
+        (summary_at + line + SUMMARY_BOTTOM, DOLL_TOP, DOLL_BOTTOM)
+    } else {
+        (
+            options_at + line + PARAMS_BOTTOM,
+            CONTENT_TOP,
+            CONTENT_BOTTOM,
+        )
+    };
+    let content_at = content_rule_at + 1.0 + content_pad_top;
     // The answer's space, its rule, the buttons, the key bar's rule and the key bar.
-    let below_content = CONTENT_BOTTOM
+    let below_content = content_pad_bottom
         + 1.0
         + FOOTER_TOP
         + button_h
@@ -1900,7 +2025,7 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
     let options_y = top + options_at - lift;
     let content_top = top + content_at;
     let content_bottom = content_top + content_h;
-    let footer_rule_y = content_bottom + CONTENT_BOTTOM;
+    let footer_rule_y = content_bottom + content_pad_bottom;
     let footer_y = footer_rule_y + 1.0 + FOOTER_TOP;
     let keys_rule_y = footer_y + button_h + FOOTER_GAP;
     let hint_y = keys_rule_y + 1.0 + KEYS_TOP;
@@ -2071,59 +2196,26 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
         x += label_w + TAB_GAP;
     }
 
-    // The weapon's parameters, which every tab reads: each a label and a value, no boxes. The
-    // weapon opens the picker, which has the filter; here is only what is chosen.
+    // The weapon's parameters and the mode's options, or the generated build's summary in their
+    // place. Where the infusion and class lists hang from.
     let params_x = left + PARAMS_INSET - PAIR_PAD;
-    let weapon_name = panel
-        .state
-        .weapon
-        .and_then(weapons::by_key)
-        .map_or("[choose]", |row| row.name);
-    let x = canvas.pair(
-        params_x,
-        params_y,
-        "Weapon",
-        weapon_name,
-        Some(Action::Focus(Field::Search)),
-        Some(Control::Weapon),
-    ) + PAIR_BOX_GAP;
-    let infusion_x = x + PAIR_PAD + canvas.width("Infusion") + canvas.width(" ");
-    let x = canvas.pair(
-        x,
-        params_y,
-        "Infusion",
-        weapons::display_name(panel.state.infusion),
-        Some(Action::OpenList(List::Infusion)),
-        Some(Control::Infusion),
-    ) + PAIR_BOX_GAP;
-    let x = canvas.pair(
-        x,
-        params_y,
-        "Grip",
-        panel.state.grip.label(),
-        Some(Action::CycleGrip),
-        Some(Control::Grip),
-    ) + PAIR_BOX_GAP;
-    canvas.pair(
-        x,
-        params_y,
-        "Goal",
-        panel.state.objective.label(),
-        Some(Action::CycleObjective),
-        Some(Control::Objective),
-    );
-    let infusion_list_y = params_y + row + 2.0;
-
-    // The mode's options. Run is X or R from anywhere, and has no button (the design, 2026-09-30).
-    let class_x = draw_options(panel, &mut canvas, params_x, options_y);
-    let class_list_y = options_y + row + 2.0;
+    let (infusion_at, class_at) = if doll {
+        draw_summary(panel, &canvas, [inner, top + summary_at], right);
+        let under = [inner, top + content_rule_at + 2.0];
+        (under, under)
+    } else {
+        let infusion_x = draw_params(panel, &mut canvas, params_x, params_y);
+        // Run is X or R from anywhere, and has no button (the design, 2026-09-30).
+        let class_x = draw_options(panel, &mut canvas, params_x, options_y);
+        (
+            [infusion_x, params_y + row + 2.0],
+            [class_x, options_y + row + 2.0],
+        )
+    };
 
     let results_rect = ([inner, content_top], [right, content_bottom]);
-    if panel.shown == Shown::Build
-        && let Some(build) = panel.generated.clone()
-    {
-        let flex = panel.generated_flex.clone();
-        draw_build(&mut canvas, &build, flex.as_ref(), results_rect);
+    if doll {
+        draw_paperdoll(panel, &mut canvas, results_rect);
     } else {
         draw_answer(panel, &mut canvas, results_rect);
     }
@@ -2238,16 +2330,8 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
             picker_rect = Some(draw_picker(panel, &mut canvas, display));
             None
         }
-        Some(List::Infusion) => Some((
-            [infusion_x, infusion_list_y],
-            canvas.width("Enchanted") + 60.0,
-            "",
-        )),
-        Some(List::Class) => Some((
-            [class_x, class_list_y],
-            canvas.width("Curved Greatsword") + 60.0,
-            "",
-        )),
+        Some(List::Infusion) => Some((infusion_at, canvas.width("Enchanted") + 60.0, "")),
+        Some(List::Class) => Some((class_at, canvas.width("Curved Greatsword") + 60.0, "")),
         // Above the footer, which sits at the bottom: as tall as `draw_list` will draw it.
         Some(List::Spell) => {
             let shown = panel.list_rows(List::Spell).len().clamp(1, LIST_VISIBLE) as f32;
@@ -2298,7 +2382,8 @@ fn draw_panel(panel: &mut Panel, ui: &Ui) {
             && canvas.inside(min, max)
         {
             scroll(&mut panel.list_scroll);
-        } else if canvas.inside(results_rect.0, results_rect.1)
+        } else if !doll
+            && canvas.inside(results_rect.0, results_rect.1)
             && let Some(Answer::Rows(rows)) = &panel.answer
         {
             panel.results_cursor = nav::move_in_list(panel.results_cursor, steps, rows.len());
@@ -2340,6 +2425,51 @@ const fn on_off(on: bool) -> &'static str {
 fn cycled<T: Copy + PartialEq, const N: usize>(all: [T; N], now: T) -> T {
     let at = all.iter().position(|value| *value == now).unwrap_or(0);
     all[(at + 1) % N]
+}
+
+/// The weapon's parameters, which every tab reads, on one line from `x`: each a label and a value,
+/// no boxes. The weapon opens the picker, which has the filter; here is only what is chosen.
+/// Returns where the infusion list hangs from.
+fn draw_params(panel: &Panel, canvas: &mut Canvas<'_>, x: f32, y: f32) -> f32 {
+    let weapon_name = panel
+        .state
+        .weapon
+        .and_then(weapons::by_key)
+        .map_or("[choose]", |row| row.name);
+    let x = canvas.pair(
+        x,
+        y,
+        "Weapon",
+        weapon_name,
+        Some(Action::Focus(Field::Search)),
+        Some(Control::Weapon),
+    ) + PAIR_BOX_GAP;
+    let infusion_x = x + PAIR_PAD + canvas.width("Infusion") + canvas.width(" ");
+    let x = canvas.pair(
+        x,
+        y,
+        "Infusion",
+        weapons::display_name(panel.state.infusion),
+        Some(Action::OpenList(List::Infusion)),
+        Some(Control::Infusion),
+    ) + PAIR_BOX_GAP;
+    let x = canvas.pair(
+        x,
+        y,
+        "Grip",
+        panel.state.grip.label(),
+        Some(Action::CycleGrip),
+        Some(Control::Grip),
+    ) + PAIR_BOX_GAP;
+    canvas.pair(
+        x,
+        y,
+        "Goal",
+        panel.state.objective.label(),
+        Some(Action::CycleObjective),
+        Some(Control::Objective),
+    );
+    infusion_x
 }
 
 /// The current mode's options, on one line from `x`, each a label and a value as the weapon's
@@ -2780,21 +2910,10 @@ fn content_height(panel: &Panel, ui: &Ui, width: f32, line: f32) -> f32 {
         };
         line + wrapped as f32 * (line + 2.0) + fix_rows + line
     };
-    if panel.shown == Shown::Build
-        && let Some(build) = &panel.generated
-    {
-        // As `draw_build` draws it: the heading and stats, flexibility, armour, rings, spells,
-        // then the two weapon lists, the one-handed one in two columns when it is long.
-        let extra = usize::from(build.armor_note.is_some())
-            + usize::from(!build.common_rings.is_empty())
-            + if build.spells.is_empty() { 0 } else { 2 };
-        let weapons = build
-            .weapons_1h
-            .len()
-            .div_ceil(2)
-            .max(build.weapons_2h_only.len())
-            .clamp(1, 16);
-        return lines(2 + 2 + 2 + extra + 1 + weapons) + 4.0;
+    // The paperdoll at the design's size: its slots decide its height, and the pane beside them
+    // shows as many of the build's other weapons as fit.
+    if panel.doll_shown() {
+        return doll_height(line, 1.0);
     }
     if !panel.refused.is_empty() {
         return refusal(&panel.refused, panel.fixes.len());
@@ -2844,188 +2963,470 @@ fn draw_flexibility(canvas: &mut Canvas<'_>, flex: &Flexibility, at: [f32; 2], w
     at[1] + 2.0 * step
 }
 
-fn draw_build(
-    canvas: &mut Canvas<'_>,
-    build: &GeneratedBuild,
-    flex: Option<&Flexibility>,
-    (min, max): ([f32; 2], [f32; 2]),
-) {
-    let line = canvas.line;
-    let step = line + 4.0;
-    let mut y = min[1];
-    let (primary_key, infusion) = &build.primary;
-    let primary = weapons::by_key(primary_key).map_or(primary_key.as_str(), |row| row.name);
-    canvas.text(
-        [min[0], y],
-        TITLE,
-        &format!(
-            "{}, {} -- {} ({}), {}{}",
-            build.class,
-            sl_label(&build.stats, build.sl),
-            primary,
-            weapons::display_name(*infusion),
-            if build.two_handed {
-                "two-handed"
-            } else {
-                "one-handed"
-            },
-            if build.stub { "   [stub build]" } else { "" }
-        ),
-    );
-    y += step;
-    canvas.text([min[0], y], TEXT, &stats_line(&build.stats));
-    y += step;
-    if let Some(flex) = flex {
-        y = draw_flexibility(canvas, flex, [min[0], y], max[0] - min[0]);
+/// How tall the paperdoll is at scale `k`: five lines of headings, and the slots and the gaps
+/// between them at `k` times the design's size.
+fn doll_height(line: f32, k: f32) -> f32 {
+    5.0 * line + DOLL_SCALED_H * k
+}
+
+/// The scale the paperdoll's slots fit `height` and `width` at: the design's own size where there
+/// is room, smaller on a short or narrow screen, and never under [`DOLL_MIN_SCALE`].
+fn doll_scale(line: f32, height: f32, width: f32) -> f32 {
+    let tall = (height - 5.0 * line) / DOLL_SCALED_H;
+    let wide = (width - DOLL_GAP - DETAIL_MIN_W) / paperdoll::GRID_W;
+    tall.min(wide).clamp(DOLL_MIN_SCALE, 1.0)
+}
+
+/// How far below the paperdoll's top `slot` starts at scale `k`: under its band's heading line,
+/// the belt's second row under its first, and the bolts under the arrows and a heading of their
+/// own.
+fn slot_top(slot: Slot, line: f32, k: f32) -> f32 {
+    let band = line + (LABEL_GAP + paperdoll::BIG + BAND_GAP) * k;
+    let first = line + LABEL_GAP * k;
+    match slot {
+        Slot::RightHand(_) | Slot::Ring(0 | 1) => first,
+        Slot::LeftHand(_) | Slot::Ring(_) => band + first,
+        Slot::Head | Slot::Chest | Slot::Hands | Slot::Legs => 2.0 * band + first,
+        Slot::Item(i) if i < 5 => 3.0 * band + first,
+        Slot::Item(_) => 3.0 * band + first + (paperdoll::SMALL + paperdoll::SMALL_GAP) * k,
+        Slot::Arrows(_) => 3.0 * band + first,
+        Slot::Bolts(_) => 3.0 * band + first + (paperdoll::SMALL + AMMO_GAP) * k + first,
     }
-    // The four armour slots as Apply equips them, head to legs.
-    let armor = if build.armor.is_empty() {
-        "none (Allow no armor)".to_owned()
-    } else {
-        ["Head", "Chest", "Hands", "Legs"]
-            .iter()
-            .zip(&build.armor)
-            .map(|(slot, piece)| format!("{slot}: {piece}"))
-            .collect::<Vec<_>>()
-            .join(", ")
+}
+
+/// The silhouette the Equipment page draws in `slot` while it is empty.
+const fn empty_art(slot: Slot) -> EmptySlot {
+    match slot {
+        Slot::RightHand(_) => EmptySlot::RightWeapon,
+        Slot::LeftHand(_) => EmptySlot::LeftWeapon,
+        Slot::Ring(_) => EmptySlot::Ring,
+        Slot::Head => EmptySlot::Head,
+        Slot::Chest => EmptySlot::Chest,
+        Slot::Hands => EmptySlot::Hands,
+        Slot::Legs => EmptySlot::Legs,
+        Slot::Item(_) => EmptySlot::Item,
+        Slot::Arrows(_) => EmptySlot::Arrows,
+        Slot::Bolts(_) => EmptySlot::Bolts,
+    }
+}
+
+/// `Sanctum Crossbow (Lightning)`; a ring or a piece of armour by its name alone.
+fn piece_name(piece: &Piece) -> String {
+    match piece.infusion {
+        Some(infusion) => format!("{} ({})", piece.name, weapons::display_name(infusion)),
+        None => piece.name.clone(),
+    }
+}
+
+/// The paperdoll for the log, written once per build: every slot it fills, with what and under
+/// which item id, the armour it leaves bare, and how many slots Apply leaves alone.
+fn doll_line(doll: &Paperdoll) -> String {
+    let mut filled = Vec::new();
+    let mut bare = Vec::new();
+    let mut kept = 0usize;
+    for (slot, held) in doll.slots() {
+        match held {
+            Held::Item(piece) => filled.push(format!(
+                "{} = {} [{}]",
+                slot.label(),
+                piece_name(piece),
+                piece
+                    .item
+                    .map_or_else(|| "no item id".to_owned(), |id| format!("item {id}"))
+            )),
+            Held::Bare => bare.push(slot.label()),
+            Held::Kept => kept += 1,
+        }
+    }
+    format!(
+        "{} | bare: {} | {kept} slots Apply leaves as they are",
+        filled.join(", "),
+        if bare.is_empty() {
+            "none".to_owned()
+        } else {
+            bare.join(", ")
+        }
+    )
+}
+
+/// The build in one line where the weapon's parameters were: its class and level, its weapon,
+/// infusion and grip, and at the right where it ranks among the builds nearest it.
+fn draw_summary(panel: &Panel, canvas: &Canvas<'_>, at: [f32; 2], right: f32) {
+    let Some(build) = &panel.generated else {
+        return;
     };
-    canvas.text(
-        [min[0], y],
-        TEXT,
-        &clip(canvas.ui, &format!("Armor: {armor}"), max[0] - min[0]),
+    let rank = panel
+        .generated_flex
+        .as_ref()
+        .map(flex_rank)
+        .unwrap_or_default();
+    let rank_x = right - canvas.width(&rank);
+    canvas.text([rank_x, at[1]], DIM, &rank);
+    let (key, infusion) = &build.primary;
+    let weapon = weapons::by_key(key).map_or(key.as_str(), |row| row.name);
+    let head = format!("{}, {}", build.class, sl_label(&build.stats, build.sl));
+    let tail = format!(
+        "{weapon} ({}), {}{}",
+        weapons::display_name(*infusion),
+        if build.two_handed {
+            "two-handed"
+        } else {
+            "one-handed"
+        },
+        if build.stub { "   [stub build]" } else { "" }
     );
-    y += step;
-    if let Some(note) = &build.armor_note {
+    let room = rank_x - GAP * 2.0;
+    canvas.text(at, TITLE, &clip(canvas.ui, &head, room - at[0]));
+    let x = at[0] + canvas.width(&head);
+    if x < room {
+        let x = x + canvas.dot(x, at[1]);
         canvas.text(
-            [min[0], y],
-            WARN,
-            &clip(canvas.ui, &format!("Armor: {note}"), max[0] - min[0]),
+            [x, at[1]],
+            TITLE,
+            &clip(canvas.ui, &tail, (room - x).max(0.0)),
         );
+    }
+}
+
+/// `text` wrapped and centred in a slot, dim: what a slot shows for an item the game has no icon
+/// for.
+fn draw_in_slot(canvas: &Canvas<'_>, text: &str, lo: [f32; 2], hi: [f32; 2]) {
+    let room = hi[0] - lo[0] - 8.0;
+    let parts = wrap(canvas.ui, text, room);
+    let step = canvas.line + 2.0;
+    let shown = parts
+        .len()
+        .min(((hi[1] - lo[1]) / step).floor().max(1.0) as usize);
+    let mut y = (lo[1] + hi[1] - step * shown as f32) * 0.5;
+    for part in parts.iter().take(shown) {
+        let part = clip(canvas.ui, part, room);
+        canvas.text([(lo[0] + hi[0] - canvas.width(&part)) * 0.5, y], DIM, &part);
         y += step;
     }
-    // The four ring slots as Apply equips them; the spare copies are Apply's business, not this line's.
-    let equipped = (0..backend::SUGGESTED_RINGS)
-        .map(|slot| {
-            build
-                .suggested_rings
-                .get(slot)
-                .map_or("empty", String::as_str)
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    canvas.text(
-        [min[0], y],
-        TEXT,
-        &clip(canvas.ui, &format!("Rings: {equipped}"), max[0] - min[0]),
-    );
-    y += step;
-    if !build.common_rings.is_empty() {
-        canvas.text(
-            [min[0], y],
-            DIM,
-            &clip(
-                canvas.ui,
-                &format!(
-                    "Common to most builds, one each: {}",
-                    build.common_rings.join(", ")
-                ),
-                max[0] - min[0],
+}
+
+/// The generated build as the Equipment page lays a character out, with the pane describing a slot
+/// beside it. A filled slot shows its item's icon; an empty one the silhouette the page itself
+/// draws there. Every slot is a click target that moves the cursor onto it.
+fn draw_paperdoll(panel: &mut Panel, canvas: &mut Canvas<'_>, (min, max): ([f32; 2], [f32; 2])) {
+    let Some(doll) = panel.doll.clone() else {
+        return;
+    };
+    let line = canvas.line;
+    let k = doll_scale(line, max[1] - min[1], max[0] - min[0]);
+    let (mut drawn, mut missing, mut loading, mut art) = (Vec::new(), Vec::new(), 0usize, true);
+    for (slot, held) in doll.slots() {
+        let slot = *slot;
+        let x = min[0] + slot.x() * k;
+        let y = min[1] + slot_top(slot, line, k);
+        if let Some(heading) = slot.group() {
+            canvas.text([x, y - LABEL_GAP * k - line], DIM, heading);
+        }
+        let side = slot.side() * k;
+        let (lo, hi) = ([x, y], [x + side, y + side]);
+        let cursor = canvas.on(Some(Control::Slot(slot)));
+        let filled = matches!(held, Held::Item(_));
+        let fill = if cursor {
+            CELL_ON
+        } else if canvas.inside(lo, hi) {
+            CELL_HOVER
+        } else if filled {
+            CELL_BG
+        } else {
+            SLOT_EMPTY
+        };
+        canvas.rect(lo, hi, fill);
+        match held {
+            Held::Item(piece) => {
+                let inset = SLOT_ICON_INSET * k;
+                let status = piece.item.map_or(IconDraw::Missing, |id| {
+                    ds2_overlay::panels::item_icon(
+                        &canvas.list,
+                        id,
+                        [lo[0] + inset, lo[1] + inset],
+                        [hi[0] - inset, hi[1] - inset],
+                        Some(ds2_overlay::item_icon::SLOT_ART),
+                    )
+                });
+                match status {
+                    IconDraw::Drawn => drawn.push(slot.label()),
+                    IconDraw::Loading => loading += 1,
+                    IconDraw::Missing => {
+                        missing.push(slot.label());
+                        draw_in_slot(canvas, &piece.name, lo, hi);
+                    }
+                }
+            }
+            Held::Bare | Held::Kept => {
+                art &= ds2_overlay::panels::empty_slot(
+                    &canvas.list,
+                    empty_art(slot),
+                    lo,
+                    hi,
+                    EMPTY_FILL,
+                );
+            }
+        }
+        // The cursor is the design's 2px bronze edge. The slot the pane describes keeps a dimmer
+        // one while the cursor is elsewhere, so the pane is never about an unmarked slot.
+        let (edge, thickness) = if cursor {
+            (CURSOR_EDGE, 2.0)
+        } else if slot == panel.slot {
+            (style::BRONZE_DIM, 1.0)
+        } else if filled {
+            (ICON_EDGE, 1.0)
+        } else {
+            (SLOT_EMPTY_EDGE, 1.0)
+        };
+        let half = thickness * 0.5;
+        canvas
+            .list
+            .add_rect(
+                [lo[0] + half, lo[1] + half],
+                [hi[0] - half, hi[1] - half],
+                edge,
+            )
+            .thickness(thickness)
+            .build();
+        canvas.targets.push((lo, hi, Action::PickSlot(slot)));
+    }
+    let detail_x = min[0] + paperdoll::GRID_W * k + DOLL_GAP;
+    draw_doll_detail(panel, canvas, &doll, [detail_x, min[1]], max);
+    if !panel.doll_logged && loading == 0 {
+        panel.doll_logged = true;
+        let display = canvas.ui.io().display_size;
+        log_line(format_args!(
+            "{LOG_PREFIX} paperdoll drawn at {k:.2} of the design's size on a {:.0}x{:.0} target, \
+             cursor on {:?}: icons drawn for [{}], none for [{}]; empty slots {}",
+            display[0],
+            display[1],
+            panel.cursor,
+            drawn.join(", "),
+            missing.join(", "),
+            if art {
+                "show the Equipment page's silhouettes from In-game_01"
+            } else {
+                "are plain boxes: In-game_01 did not load"
+            }
+        ));
+    }
+}
+
+/// One line of the pane: its parts, each in its own colour, with the design's dot between two.
+type Note = Vec<([f32; 4], String)>;
+
+/// What the pane says under a slot's item: how a weapon is held, why a ring is worn and what else
+/// is granted beside it, why armour is missing, and what Apply does with a slot the build leaves
+/// alone.
+fn slot_notes(build: &GeneratedBuild, slot: Slot, held: &Held) -> Vec<Note> {
+    match (slot, held) {
+        (Slot::RightHand(_) | Slot::LeftHand(_), Held::Item(_)) => vec![vec![
+            (
+                TEXT,
+                if build.two_handed {
+                    "Wielded two-handed"
+                } else {
+                    "Wielded one-handed"
+                }
+                .to_owned(),
             ),
-        );
-        y += step;
+            (
+                DIM,
+                if build.two_handed {
+                    "2H: STR requirement halved"
+                } else {
+                    "1H: full STR requirement"
+                }
+                .to_owned(),
+            ),
+        ]],
+        (Slot::Ring(_), Held::Item(ring)) => {
+            let prefix = format!("{}: ", ring.name);
+            let why = build
+                .ring_trades
+                .iter()
+                .find_map(|trade| trade.strip_prefix(prefix.as_str()))
+                .map_or_else(
+                    || {
+                        (
+                            DIM,
+                            "Worn most by the builds nearest these stats".to_owned(),
+                        )
+                    },
+                    |trade| (TEXT, format!("In place of stat points: {trade}")),
+                );
+            let mut notes = vec![vec![why]];
+            if !build.common_rings.is_empty() {
+                notes.push(vec![(
+                    DIM,
+                    format!(
+                        "Common to most builds, one each: {}",
+                        build.common_rings.join(", ")
+                    ),
+                )]);
+            }
+            notes
+        }
+        (_, Held::Item(_)) => build
+            .armor_note
+            .iter()
+            .map(|note| vec![(WARN, note.clone())])
+            .collect(),
+        (_, Held::Bare) => vec![
+            vec![(
+                DIM,
+                build
+                    .armor_note
+                    .clone()
+                    .unwrap_or_else(|| "The build wears nothing here".to_owned()),
+            )],
+            vec![(WARN, "Apply leaves what you wear here".to_owned())],
+        ],
+        (_, Held::Kept) => vec![vec![(DIM, "Apply leaves what you have here".to_owned())]],
     }
-    // The spells Apply attunes, the slots they take of what ATT gives, and what to cast them with.
+}
+
+/// The pane beside the paperdoll: the slot the cursor is on -- its name, its item and what that
+/// means -- over the build's stats, the weapons it wields and the load it leaves, its spells, and
+/// its other weapons with their attack, as many as fit.
+fn draw_doll_detail(
+    panel: &Panel,
+    canvas: &mut Canvas<'_>,
+    doll: &Paperdoll,
+    at: [f32; 2],
+    max: [f32; 2],
+) {
+    let Some(build) = &panel.generated else {
+        return;
+    };
+    let line = canvas.line;
+    let step = line + DETAIL_LINE_GAP;
+    let [x, mut y] = at;
+    let width = max[0] - x;
+    let title_h = ds2_overlay::panels::title_height(canvas.ui);
+
+    // The slot, its item, and two lines on it -- always two, so nothing under them moves as the
+    // cursor does.
+    let (slot, held) = (panel.slot, doll.held(panel.slot));
+    canvas.text([x, y], DIM, &slot.label());
+    y += line + 4.0;
+    match held {
+        Held::Item(piece) => {
+            canvas.big_text([x, y], TITLE, &piece.name, width);
+            if let Some(infusion) = piece.infusion {
+                let name_w = ds2_overlay::panels::title_width(canvas.ui, &piece.name);
+                let tag = format!(" ({})", weapons::display_name(infusion));
+                canvas.big_text([x + name_w, y], VALUE, &tag, (width - name_w).max(0.0));
+            }
+        }
+        Held::Bare => canvas.big_text([x, y], DIM, "Bare", width),
+        Held::Kept => canvas.big_text([x, y], DIM, "Not in this build", width),
+    }
+    y += title_h + 4.0;
+    let notes = slot_notes(build, slot, held);
+    for index in 0..2 {
+        if let Some(note) = notes.get(index) {
+            let mut text_x = x;
+            for (part, (color, text)) in note.iter().enumerate() {
+                if part > 0 {
+                    text_x += canvas.dot(text_x, y);
+                }
+                let shown = clip(canvas.ui, text, (max[0] - text_x).max(0.0));
+                canvas.text([text_x, y], *color, &shown);
+                text_x += canvas.width(&shown);
+            }
+        }
+        y += line + 4.0;
+    }
+    y += SUMMARY_BOTTOM;
+    canvas.rule(x, max[0], y);
+    y += 1.0 + DETAIL_SECTION_GAP;
+
+    // The build's stats, a label over a value, across the pane.
+    canvas.text([x, y], DIM, "Stats");
+    y += line + LABEL_GAP;
+    let column = width / STAT_COUNT as f32;
+    for (index, label) in STAT_LABELS.iter().enumerate() {
+        let centre = x + column * (index as f32 + 0.5);
+        let value = build.stats[index].to_string();
+        canvas.text([centre - canvas.width(label) * 0.5, y], DIM, label);
+        canvas.text(
+            [centre - canvas.width(&value) * 0.5, y + line + 2.0],
+            TITLE,
+            &value,
+        );
+    }
+    y += 2.0 * line + 2.0 + DETAIL_SECTION_GAP;
+
+    // How many weapons the stats wield and the load the armour and rings leave for one.
+    let mut lines: Vec<([f32; 4], String)> = Vec::new();
+    if let Some(flex) = &panel.generated_flex {
+        lines.push((TEXT, format!("Weapons: {}", flex_wields(flex))));
+        lines.push((DIM, format!("Load: {}", flex_load(flex))));
+        lines.push((DIM, FLYNN_NOTE.to_owned()));
+    }
+    // The spells Apply attunes, and what to cast them with.
     if !build.spells.is_empty() {
-        canvas.text(
-            [min[0], y],
+        lines.push((
             TEXT,
-            &clip(
-                canvas.ui,
-                &format!(
-                    "Spells: {} ({} of {} attunement slots)",
-                    build.spell_names.join(", "),
-                    build.slots_used,
-                    build.slots
-                ),
-                max[0] - min[0],
+            format!(
+                "Spells: {} ({} of {} attunement slots)",
+                build.spell_names.join(", "),
+                build.slots_used,
+                build.slots
             ),
-        );
-        y += step;
+        ));
         let catalysts = if build.catalysts.is_empty() {
             "none these stats can wield casts them".to_owned()
         } else {
             build
                 .catalysts
                 .iter()
-                .map(|pick| {
-                    let over = pick.passed_over.as_ref().map_or(String::new(), |over| {
-                        format!(" ({over} casts harder; stats too low)")
-                    });
-                    format!("{} {} {:.0}{over}", pick.school, pick.name, pick.power)
-                })
+                .map(|pick| format!("{} {} {:.0}", pick.school, pick.name, pick.power))
                 .collect::<Vec<_>>()
                 .join(", ")
         };
-        canvas.text(
-            [min[0], y],
-            TEXT,
-            &clip(
-                canvas.ui,
-                &format!("Catalyst: {catalysts}"),
-                max[0] - min[0],
-            ),
-        );
+        lines.push((TEXT, format!("Catalyst: {catalysts}")));
+    }
+    for (color, text) in &lines {
+        if y + line > max[1] {
+            return;
+        }
+        canvas.text([x, y], *color, &clip(canvas.ui, text, width));
         y += step;
     }
-    y += 4.0;
-    let half = (max[0] - min[0]) * 0.5;
-    let weapon_text = |row: &ResultRow| {
-        format!(
-            "{} ({}) {:.0}",
-            row.weapon,
-            weapons::display_name(row.infusion),
-            row.damage
-        )
-    };
-    canvas.text(
-        [min[0], y],
-        DIM,
-        &format!("One-handed ({})", build.weapons_1h.len()),
-    );
-    canvas.text(
-        [min[0] + half, y],
-        DIM,
-        &format!("Two-hand only ({})", build.weapons_2h_only.len()),
-    );
-    y += step;
-    let rows_fit = ((max[1] - y) / step).floor().max(0.0) as usize;
-    // The one-handed list takes two columns of the left half when it would not fit in one.
-    let left_columns = if build.weapons_1h.len() > rows_fit {
-        2
-    } else {
-        1
-    };
-    let column_width = half / left_columns as f32;
-    for (index, row) in build.weapons_1h.iter().enumerate() {
-        let (column, line_index) = (index / rows_fit.max(1), index % rows_fit.max(1));
-        if column >= left_columns {
-            break;
-        }
-        canvas.text(
-            [
-                min[0] + column_width * column as f32,
-                y + step * line_index as f32,
-            ],
-            TEXT,
-            &clip(canvas.ui, &weapon_text(row), column_width - 8.0),
-        );
+    if !lines.is_empty() {
+        y += DETAIL_SECTION_GAP - DETAIL_LINE_GAP;
     }
-    for (index, row) in build.weapons_2h_only.iter().take(rows_fit).enumerate() {
-        canvas.text(
-            [min[0] + half, y + step * index as f32],
-            TEXT,
-            &clip(canvas.ui, &weapon_text(row), half - 8.0),
-        );
+
+    // Its other weapons, one-handed first as the design lists them, then the two-hand-only ones,
+    // each with its attack at the right, as many as fit.
+    for (heading, rows) in [
+        ("Other one-handed picks for this build", &build.weapons_1h),
+        ("Two-hand only picks", &build.weapons_2h_only),
+    ] {
+        if rows.is_empty() || y + step + line > max[1] {
+            continue;
+        }
+        canvas.text([x, y], DIM, heading);
+        y += step;
+        for row in rows {
+            if y + line > max[1] {
+                break;
+            }
+            let damage = format!("{:.0}", row.damage);
+            let damage_x = max[0] - canvas.width(&damage);
+            canvas.text([damage_x, y], TITLE, &damage);
+            let name = clip(canvas.ui, &row.weapon, damage_x - x - GAP * 2.0);
+            canvas.text([x, y], TEXT, &name);
+            let tag = format!(" ({})", weapons::display_name(row.infusion));
+            let tag_x = x + canvas.width(&name);
+            if tag_x + canvas.width(&tag) < damage_x - GAP {
+                canvas.text([tag_x, y], DIM, &tag);
+            }
+            y += step;
+        }
+        y += DETAIL_SECTION_GAP - DETAIL_LINE_GAP;
     }
 }
 
@@ -3299,7 +3700,13 @@ fn draw_picker_row(
     let icon_max = [icon_min[0] + ICON_W, icon_min[1] + ICON_H];
     canvas.rect(icon_min, icon_max, CELL_BG);
     let drawn = weapons::item_id(row.key).map_or(IconDraw::Missing, |id| {
-        ds2_overlay::panels::item_icon(&canvas.list, id, icon_min, icon_max, Some(ICON_CROP))
+        ds2_overlay::panels::item_icon(
+            &canvas.list,
+            id,
+            icon_min,
+            icon_max,
+            Some(ds2_overlay::item_icon::WEAPON_ART_FRACTION),
+        )
     });
     if drawn == IconDraw::Missing {
         let class = if row.class.is_empty() {

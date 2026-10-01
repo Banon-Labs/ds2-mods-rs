@@ -8,6 +8,7 @@
 //! reached here and changed with a press.
 
 use crate::model::{Mode, PanelState, SL_MAX, STAT_COUNT, STAT_MAX, STAT_MIN};
+use crate::paperdoll::{self, Slot};
 
 /// One thing the cursor can sit on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,6 +67,8 @@ pub enum Control {
     ShowToggle,
     /// Apply to character.
     Apply,
+    /// One slot of the generated build's paperdoll, whose item the pane beside it describes.
+    Slot(Slot),
 }
 
 impl Control {
@@ -103,6 +106,10 @@ pub struct Shape {
     pub generated: bool,
     /// How many fix buttons a refusal on screen offers.
     pub fixes: usize,
+    /// The generated build is on screen as a paperdoll. Its slots take the place of the weapon's
+    /// parameters, the mode's options and the answer, as the design draws it: the build names its
+    /// own weapon, infusion and grip.
+    pub paperdoll: bool,
 }
 
 /// Where the mode's options are in [`layout`]'s rows: under the header, the stats, the mode tabs and
@@ -111,6 +118,8 @@ const OPTIONS_ROW: usize = 4;
 
 /// The controls, row by row, as the panel draws them: the header's two buttons, the soul level and
 /// the nine stats in one row, the mode tabs, the weapon's parameters, then the mode's options.
+///
+/// A generated build on screen puts its paperdoll's rows where the parameters and options were.
 ///
 /// Run is not among them. It is a press, X on the pad and R on the keyboard, from wherever the
 /// cursor is, so it has no place of its own to walk to.
@@ -121,31 +130,39 @@ pub fn layout(shape: Shape) -> Vec<Vec<Control>> {
             .chain((0..STAT_COUNT).map(Control::Stat))
             .collect(),
         Mode::ALL.map(Control::Mode).to_vec(),
-        vec![
+    ];
+    if shape.paperdoll {
+        rows.extend(
+            paperdoll::ROWS
+                .iter()
+                .map(|row| row.iter().copied().map(Control::Slot).collect()),
+        );
+    } else {
+        rows.push(vec![
             Control::Weapon,
             Control::Infusion,
             Control::Grip,
             Control::Objective,
-        ],
-    ];
-    let options = match shape.mode {
-        Mode::WeaponsForStats => vec![
-            Control::OneHand,
-            Control::Class,
-            Control::PerClass,
-            Control::Window,
-            Control::RawAr,
-        ],
-        Mode::OptimizeForWeapon => vec![Control::BestInfusion],
-        Mode::MinimumForWeapon => vec![Control::TwoHand],
-        Mode::SimilarBuilds => vec![Control::SimilarK, Control::Bleed, Control::Poison],
-    };
-    rows.push(options);
-    if shape.results {
-        rows.push(vec![Control::Results]);
-    }
-    if shape.fixes > 0 {
-        rows.push((0..shape.fixes).map(Control::Fix).collect());
+        ]);
+        let options = match shape.mode {
+            Mode::WeaponsForStats => vec![
+                Control::OneHand,
+                Control::Class,
+                Control::PerClass,
+                Control::Window,
+                Control::RawAr,
+            ],
+            Mode::OptimizeForWeapon => vec![Control::BestInfusion],
+            Mode::MinimumForWeapon => vec![Control::TwoHand],
+            Mode::SimilarBuilds => vec![Control::SimilarK, Control::Bleed, Control::Poison],
+        };
+        rows.push(options);
+        if shape.results {
+            rows.push(vec![Control::Results]);
+        }
+        if shape.fixes > 0 {
+            rows.push((0..shape.fixes).map(Control::Fix).collect());
+        }
     }
     let mut footer = vec![
         Control::Generate,
@@ -174,13 +191,16 @@ pub fn locate(rows: &[Vec<Control>], control: Control) -> Option<(usize, usize)>
 /// `cursor` if it is still on screen, or the control nearest to where it was.
 ///
 /// That is the right-hand end of the options row for a mode option or the results table that went
-/// away, and Generate Build for a footer button.
+/// away, Generate Build for a footer button, and the build's weapon for anything the paperdoll
+/// covers.
 pub fn resolve(rows: &[Vec<Control>], cursor: Control) -> Control {
     if locate(rows, cursor).is_some() {
         return cursor;
     }
+    let primary = Control::Slot(Slot::PRIMARY);
     match cursor {
         Control::ShowToggle | Control::Apply | Control::Fix(_) => Control::Generate,
+        _ if locate(rows, primary).is_some() => primary,
         _ => rows
             .get(OPTIONS_ROW)
             .and_then(|options| options.last())
@@ -194,7 +214,9 @@ pub fn resolve(rows: &[Vec<Control>], cursor: Control) -> Control {
 /// Left and Right wrap from a row's one end to its other; Up and Down stop at the top and bottom
 /// rows, and land at
 /// the same fraction of the way along the new row, so going down from the ninth stat lands at the
-/// right-hand end of the row below rather than its start.
+/// right-hand end of the row below rather than its start. Between two rows of the paperdoll they
+/// land on the slot drawn nearest above or below instead: its rows are not the same width, and the
+/// legs are over the fifth quick item, not over the second arrows.
 pub fn step(rows: &[Vec<Control>], cursor: Control, dir: Dir) -> Control {
     let cursor = resolve(rows, cursor);
     let Some((row, column)) = locate(rows, cursor) else {
@@ -211,6 +233,11 @@ pub fn step(rows: &[Vec<Control>], cursor: Control, dir: Dir) -> Control {
         Dir::Down if row + 1 == rows.len() => return cursor,
         Dir::Down => row + 1,
     };
+    if let Control::Slot(from) = cursor
+        && let Some(nearest) = nearest_slot(&rows[target_row], from.centre_x())
+    {
+        return nearest;
+    }
     let from_len = rows[row].len();
     let to_len = rows[target_row].len();
     let target_column = if from_len <= 1 || to_len <= 1 {
@@ -220,6 +247,18 @@ pub fn step(rows: &[Vec<Control>], cursor: Control, dir: Dir) -> Control {
         (column * (to_len - 1) * 2 + (from_len - 1)) / ((from_len - 1) * 2)
     };
     rows[target_row][target_column.min(to_len - 1)]
+}
+
+/// The slot in `row` whose centre is nearest `x`, in the grid's own pixels; the leftmost of two as
+/// near. `None` for a row with no slot in it.
+fn nearest_slot(row: &[Control], x: f32) -> Option<Control> {
+    row.iter()
+        .filter_map(|&control| match control {
+            Control::Slot(slot) => Some((control, (slot.centre_x() - x).abs())),
+            _ => None,
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(control, _)| control)
 }
 
 /// How far one press moves a number: Left/Right a small step, Up/Down a big one.
@@ -356,6 +395,16 @@ mod tests {
             results: false,
             generated: false,
             fixes: 0,
+            paperdoll: false,
+        }
+    }
+
+    /// A generated build on screen.
+    fn doll(mode: Mode) -> Shape {
+        Shape {
+            generated: true,
+            paperdoll: true,
+            ..shape(mode)
         }
     }
 
@@ -366,13 +415,20 @@ mod tests {
 
     #[test]
     fn every_control_is_reachable_from_the_first_stat_in_every_mode() {
-        for mode in Mode::ALL {
-            let rows = layout(Shape {
-                mode,
-                results: true,
-                generated: true,
-                fixes: 2,
-            });
+        let shapes = Mode::ALL.into_iter().flat_map(|mode| {
+            [
+                Shape {
+                    mode,
+                    results: true,
+                    generated: true,
+                    fixes: 2,
+                    paperdoll: false,
+                },
+                doll(mode),
+            ]
+        });
+        for shape in shapes {
+            let (mode, rows) = (shape.mode, layout(shape));
             // A breadth-first walk over the four directions.
             let mut seen = vec![Control::Stat(0)];
             let mut frontier = vec![Control::Stat(0)];
@@ -503,6 +559,7 @@ mod tests {
             results: true,
             generated: true,
             fixes: 0,
+            paperdoll: false,
         });
         assert_eq!(step(&rows, Control::RawAr, Dir::Down), Control::Results);
         assert_eq!(step(&rows, Control::Results, Dir::Down), Control::Generate);
@@ -600,5 +657,70 @@ mod tests {
         assert_eq!(scroll_to(0, 5, 12, 40), 0);
         assert_eq!(scroll_to(39, 0, 12, 40), 28);
         assert_eq!(scroll_to(5, 3, 12, 40), 3);
+    }
+
+    /// The design: with the build on screen, its summary and slots sit under the mode tabs where
+    /// the weapon's parameters and the mode's options were, and the footer stays the bottom row.
+    #[test]
+    fn the_paperdoll_takes_the_place_of_the_parameters_and_options() {
+        let rows = layout(doll(Mode::OptimizeForWeapon));
+        assert!(locate(&rows, Control::Weapon).is_none());
+        assert!(locate(&rows, Control::BestInfusion).is_none());
+        assert_eq!(
+            step(&rows, Control::Mode(Mode::WeaponsForStats), Dir::Down),
+            Control::Slot(Slot::PRIMARY)
+        );
+        assert_eq!(
+            step(&rows, Control::Slot(Slot::PRIMARY), Dir::Up),
+            Control::Mode(Mode::WeaponsForStats)
+        );
+        assert_eq!(
+            step(&rows, Control::Slot(Slot::Item(5)), Dir::Down),
+            Control::Generate
+        );
+        assert_eq!(rows[rows.len() - 1][0], Control::Generate);
+        // A row of the paperdoll wraps like any other.
+        assert_eq!(
+            step(&rows, Control::Slot(Slot::Ring(1)), Dir::Right),
+            Control::Slot(Slot::RightHand(0))
+        );
+    }
+
+    /// Up and Down between two rows of slots land on the slot drawn nearest, not the one the same
+    /// fraction of the way along: the rows are different widths.
+    #[test]
+    fn up_and_down_in_the_paperdoll_land_on_the_slot_drawn_nearest() {
+        let rows = layout(doll(Mode::OptimizeForWeapon));
+        let go = |from: Slot, dir: Dir| match step(&rows, Control::Slot(from), dir) {
+            Control::Slot(to) => to,
+            other => panic!("{from:?} {dir:?} left the paperdoll for {other:?}"),
+        };
+        assert_eq!(go(Slot::RightHand(2), Dir::Down), Slot::LeftHand(2));
+        assert_eq!(go(Slot::Ring(1), Dir::Down), Slot::Ring(3));
+        assert_eq!(go(Slot::Ring(2), Dir::Down), Slot::Legs);
+        assert_eq!(go(Slot::Legs, Dir::Down), Slot::Item(4));
+        assert_eq!(go(Slot::Head, Dir::Down), Slot::Item(0));
+        assert_eq!(go(Slot::Arrows(0), Dir::Up), Slot::Legs);
+        assert_eq!(go(Slot::Arrows(1), Dir::Down), Slot::Bolts(1));
+        assert_eq!(go(Slot::Item(3), Dir::Down), Slot::Item(8));
+        assert_eq!(go(Slot::Chest, Dir::Up), Slot::LeftHand(1));
+    }
+
+    /// A control the paperdoll covers hands the cursor to the build's weapon, and one the build
+    /// takes away when it goes hands it back to the options row as before.
+    #[test]
+    fn a_control_the_paperdoll_covers_falls_back_to_the_builds_weapon() {
+        let rows = layout(doll(Mode::WeaponsForStats));
+        assert_eq!(
+            resolve(&rows, Control::Weapon),
+            Control::Slot(Slot::PRIMARY)
+        );
+        assert_eq!(
+            resolve(&rows, Control::Results),
+            Control::Slot(Slot::PRIMARY)
+        );
+        assert_eq!(resolve(&rows, Control::Fix(1)), Control::Generate);
+        let rows = layout(shape(Mode::WeaponsForStats));
+        assert_eq!(resolve(&rows, Control::Slot(Slot::Legs)), Control::RawAr);
     }
 }

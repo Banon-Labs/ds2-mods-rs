@@ -139,7 +139,8 @@ pub fn by_key(key: &str) -> Option<&'static WeaponRow> {
 
 /// The item id the game knows the weapon `key` by, which is what its icon is found under.
 ///
-/// A weapon the catalogue flags unsafe to spawn still has one: showing it is not spawning it.
+/// Any planner key or display name resolves, so the paperdoll asks it for armour and rings too. A
+/// weapon the catalogue flags unsafe to spawn still has one: showing it is not spawning it.
 /// `None` for a key the catalogue has no single item for.
 pub fn item_id(key: &str) -> Option<u32> {
     let id = match ds2_build_import_core::id_for(key) {

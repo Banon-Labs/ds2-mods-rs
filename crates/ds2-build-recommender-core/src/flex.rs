@@ -43,11 +43,22 @@ pub struct Flexibility {
 
 /// `wields 28/324 1H, 110 2H -- 25th percentile of 50 similar builds`.
 pub fn flex_line(flex: &Flexibility) -> String {
+    format!("{} -- {}", flex_wields(flex), flex_rank(flex))
+}
+
+/// `wields 28/324 1H, 110 2H`: [`flex_line`]'s first half, which the paperdoll prints on its own.
+pub fn flex_wields(flex: &Flexibility) -> String {
     format!(
-        "wields {}/{} 1H, {} 2H -- {} percentile of {} similar builds",
-        flex.one_handed,
-        flex.total,
-        flex.two_handed,
+        "wields {}/{} 1H, {} 2H",
+        flex.one_handed, flex.total, flex.two_handed
+    )
+}
+
+/// `25th percentile of 50 similar builds`: [`flex_line`]'s second half, which the paperdoll prints
+/// beside the build's name.
+pub fn flex_rank(flex: &Flexibility) -> String {
+    format!(
+        "{} percentile of {} similar builds",
         ordinal(round_half_even(flex.percentile)),
         flex.neighbours
     )
@@ -56,8 +67,14 @@ pub fn flex_line(flex: &Flexibility) -> String {
 /// `34.3 weight left for weapons under 70% load, 110 fit -- Flynn's Ring's bonus falls as load
 /// rises`.
 pub fn flex_load_line(flex: &Flexibility) -> String {
+    format!("{} -- {FLYNN_NOTE}", flex_load(flex))
+}
+
+/// `34.3 weight left for weapons under 70% load, 110 fit`: [`flex_load_line`] without the note,
+/// which the paperdoll puts on a line of its own.
+pub fn flex_load(flex: &Flexibility) -> String {
     format!(
-        "{:.1} weight left for weapons under {LOAD_CAP_PERCENT}% load, {} fit -- {FLYNN_NOTE}",
+        "{:.1} weight left for weapons under {LOAD_CAP_PERCENT}% load, {} fit",
         flex.spare_load, flex.fits
     )
 }
@@ -113,6 +130,13 @@ mod tests {
             flex_load_line(&sample()),
             "34.3 weight left for weapons under 70% load, 110 fit -- Flynn's Ring's bonus falls \
              as load rises"
+        );
+        // The paperdoll's halves, which make the script's lines when joined.
+        assert_eq!(flex_wields(&sample()), "wields 28/324 1H, 110 2H");
+        assert_eq!(flex_rank(&sample()), "25th percentile of 50 similar builds");
+        assert_eq!(
+            flex_load(&sample()),
+            "34.3 weight left for weapons under 70% load, 110 fit"
         );
     }
 

@@ -104,6 +104,12 @@ measurement licenses the edits of one change and the next change needs its own. 
 first Frida run of a session would license every edit after it forever, which is the same "I looked
 once" excuse in a machine-readable costume.
 
+And every unspent record counts, not only the newest. The log is shared by every session in every
+checkout, so "the last line" is whatever somebody else appended last; `--check` prints one verdict
+line per scope an unspent record covers, newest first, and the policy opens a path when any line
+opens it. The comment above the reader says why it is one line per scope and not a preference for
+Frida.
+
     python3 scripts/ds2-frida-evidence.py --record --agent scripts/frida/x.js --pid 388 --messages 12
     python3 scripts/ds2-frida-evidence.py --check
     python3 scripts/ds2-frida-evidence.py --selftest
@@ -588,75 +594,173 @@ def record_check(repo: pathlib.Path, crate: str, log: str, line: str) -> int:
     return 0
 
 
-def newest_record(path: pathlib.Path) -> dict | None:
-    """The last well-formed record, or `None`.
+# --- the reader: every unspent record, not the newest one ------------------------------------
+#
+# Fixed 2026-09-30. The log is shared -- every session in every checkout appends to the one file
+# under XDG_STATE_HOME -- and two sessions routinely work in this repo at once. `--check` judged
+# only the last line, so whatever the other session appended last decided this session's gate.
+# Measured that day: a Frida watch on `scripts/frida/equip-slot-icons.js` (pid 352, 730873
+# messages, newer than the newest committed Rust change) sat under `--record-check` records the
+# other session kept appending for `ds2-build-recommender-core`. The reader quoted the newest of
+# those, and an Edit to `crates/ds2-rva/src/lib.rs` -- the change that watch measured -- was refused
+# as having no measurement behind it. Nothing but Frida reaches `ds2-rva`, a constants crate that
+# logs nothing, so while the other session kept working there was no honest way forward at all.
+#
+# What a record proves is unchanged: a commit spends it, a scoped record opens its one crate, a
+# Frida record with messages opens every crate, a silent watch opens nothing. What changed is that a
+# newer record no longer hides an older one that is still unspent. `--check` prints one verdict line
+# per scope an unspent record covers -- the Frida path, and each crate -- newest first, and the
+# policy opens a path when any one of those lines opens it.
+#
+# One line per scope, and not one verdict that prefers Frida over scoped records. A preference fixes
+# the case above and keeps the same bug between scoped records: a `--record-check` for one crate
+# would still hide an unspent `--record-build` for another, and two sessions working on two crates
+# would take turns locking each other out.
 
-    Read from the end rather than parsed whole: this runs in front of every edit and the log grows
-    without bound. A malformed trailing line is skipped rather than fatal -- a broken log must not
-    take the policy down with it.
+NO_EVIDENCE = "UNPROVEN no-frida-evidence nothing has attached to the game and reported back"
+SPENT = (
+    "UNPROVEN spent-by-commit the last measurement predates HEAD, so it belongs to a change that "
+    "is already committed"
+)
+# How much of the log one backwards read takes.
+TAIL_BLOCK = 1 << 16
+
+
+def _lines_from_end(path: pathlib.Path, block: int = TAIL_BLOCK):
+    """The log's lines, last first, read backwards a block at a time.
+
+    The log is never truncated and this runs in front of every edit, so it reads only as far back
+    as the caller keeps asking, and `verdicts` stops asking at the first spent record. Lines are
+    split on the newline byte before they are decoded, which cannot cut a character in half: UTF-8
+    never uses that byte inside a multi-byte character.
     """
     try:
-        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        with path.open("rb") as handle:
+            end = handle.seek(0, os.SEEK_END)
+            carry = b""
+            while end > 0:
+                start = max(0, end - block)
+                handle.seek(start)
+                parts = (handle.read(end - start) + carry).split(b"\n")
+                end = start
+                # The first piece may be the tail of a line that starts in the block before.
+                carry = parts.pop(0)
+                for raw in reversed(parts):
+                    yield raw.decode("utf-8", errors="replace")
+            yield carry.decode("utf-8", errors="replace")
     except OSError:
+        return
+
+
+def _whole_number(value: object) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
         return None
-    for line in reversed(lines):
-        line = line.strip()
-        if not line:
+
+
+def records_from_end(path: pathlib.Path):
+    """`(at, record)` for each well-formed record, newest first.
+
+    A malformed line is skipped rather than fatal, and so is a record whose `at` is not a whole
+    number: the log is shared, and one session's broken line must not take every other session's
+    gate down with it.
+    """
+    for text in _lines_from_end(path):
+        text = text.strip()
+        if not text:
             continue
         try:
-            row = json.loads(line)
+            row = json.loads(text)
         except ValueError:
             continue
-        if isinstance(row, dict) and "at" in row:
-            return row
-    return None
+        if not isinstance(row, dict):
+            continue
+        at = _whole_number(row.get("at"))
+        if at is None:
+            continue
+        yield at, row
 
 
-def check(repo: pathlib.Path) -> int:
-    """Print one verdict line. `PROVEN` is the only one the policy opens on."""
-    row = newest_record(log_path())
-    if row is None:
-        print("UNPROVEN no-frida-evidence nothing has attached to the game and reported back")
-        return 1
+def _one_line(text: str) -> str:
+    """`text` with every run of whitespace, line breaks included, folded to one space.
 
-    head = head_commit_time(repo)
+    The policy splits the signal on newlines and opens a path when any line opens it, so a line
+    break inside one verdict would make the text after it a verdict of its own. A record's `log` and
+    `agent` are paths, a path can hold a newline, and `--record-check --log` accepts any file whose
+    content passes. While the policy read only the front of the signal that was harmless; read line
+    by line, `log=/tmp/x<newline>PROVEN agent=...` would turn a one-crate record into one that opens
+    every crate, and a silent watch into one that observed something.
+    """
+    return " ".join(text.split())
+
+
+def _verdict(row: dict) -> tuple[str, str]:
+    """One unspent record's verdict line, and the scope it speaks for.
+
+    The scope is `frida`, `silent`, or `crate:<name>`. Only the newest line of each scope is
+    printed: an older record of the same scope can open nothing the newer one does not.
+    """
     kind = row.get("kind")
     if kind in ("telemetry", "build", "check"):
-        if head is not None and int(row.get("at", 0)) <= head:
-            print(
-                "UNPROVEN spent-by-commit the last measurement predates HEAD, so it belongs to "
-                "a change that is already committed"
-            )
-            return 1
+        crate = row.get("crate", "?")
         # `crate=` sits directly after the two fixed words because the policy anchors its match
         # there: everything to the right of it is free text that must not be able to impersonate
         # the field that decides which crate this opens.
-        print(
-            f"PROVEN {kind} crate={row.get('crate', '?')} "
-            f"log={row.get('log', '?')} line={row.get('line', '?')!r}"
-        )
-        return 0
+        line = f"PROVEN {kind} crate={crate} log={row.get('log', '?')} line={row.get('line', '?')!r}"
+        return _one_line(line), f"crate:{crate}"
 
-    messages = int(row.get("messages", 0) or 0)
+    messages = _whole_number(row.get("messages", 0) or 0) or 0
     if messages <= 0:
-        print(
+        line = (
             f"UNPROVEN silent-session the last watch on {row.get('agent', '?')} "
             f"reported {messages} messages, so it observed nothing"
         )
-        return 1
+        return _one_line(line), "silent"
 
-    if head is not None and int(row.get("at", 0)) <= head:
-        print(
-            "UNPROVEN spent-by-commit the last measurement predates HEAD, so it belongs to "
-            "a change that is already committed"
-        )
-        return 1
-
-    print(
+    line = (
         f"PROVEN agent={row.get('agent', '?')} pid={row.get('pid', '?')} "
         f"messages={messages} seconds={row.get('seconds', '?')}"
     )
-    return 0
+    return _one_line(line), "frida"
+
+
+def verdicts(path: pathlib.Path, head: int | None) -> list[str]:
+    """The lines `--check` prints: one per scope an unspent record covers, newest first.
+
+    The walk stops at the first spent record. Records are appended as they are taken, so every line
+    above that one is older still and spent with it, and the read costs what the unspent records
+    cost rather than what the whole log does.
+
+    It also stops at the first Frida verdict, which opens every crate, so nothing older can open
+    more. And with no commit time to stop at -- outside a repository, or when git fails -- every
+    record ever written would count, so it judges the newest record alone, as this reader always
+    did.
+    """
+    lines: list[str] = []
+    scopes: set[str] = set()
+    seen_any = False
+    for at, row in records_from_end(path):
+        seen_any = True
+        if head is not None and at <= head:
+            break
+        line, scope = _verdict(row)
+        if scope not in scopes:
+            scopes.add(scope)
+            lines.append(line)
+        if scope == "frida" or head is None:
+            break
+    if lines:
+        return lines
+    return [SPENT] if seen_any else [NO_EVIDENCE]
+
+
+def check(repo: pathlib.Path) -> int:
+    """Print the verdict lines. A line opening with `PROVEN` is the only kind the policy opens on."""
+    lines = verdicts(log_path(), head_commit_time(repo))
+    for line in lines:
+        print(line)
+    return 0 if any(line.startswith("PROVEN ") for line in lines) else 1
 
 
 def selftest() -> int:
@@ -939,6 +1043,121 @@ def selftest() -> int:
         with contextlib.redirect_stdout(io.StringIO()):
             stale = record_check(git_repo, "demo-core", str(stale_check), allow_line)
         ok("a check log older than the last committed Rust change is refused", stale == 2)
+
+        # --- every unspent record, not the newest one ------------------------------------
+        #
+        # The 2026-09-30 shadowing, against a real git history whose newest Rust commit is an hour
+        # old, so `at` decides spent or unspent exactly as it does for a session in this repo.
+        walk_repo = pathlib.Path(tmp) / "walkrepo"
+        (walk_repo / "crates" / "demo-core" / "src").mkdir(parents=True)
+        (walk_repo / "crates" / "demo-core" / "src" / "lib.rs").write_text("", encoding="utf-8")
+        head_at = int(time.time()) - 3600
+        walk_env = dict(
+            git_env, GIT_AUTHOR_DATE=f"@{head_at} +0000", GIT_COMMITTER_DATE=f"@{head_at} +0000"
+        )
+        for cmd in (["init", "-q"], ["add", "-A"], ["commit", "-q", "--no-verify", "-m", "x"]):
+            subprocess.run(["git", "-C", str(walk_repo), *cmd], env=walk_env, check=True,
+                           capture_output=True)
+        ok("the walk's repository has the Rust commit time it was given",
+           head_commit_time(walk_repo) == head_at)
+
+        def frida(at: int, messages: int = 730873) -> dict:
+            return {"at": at, "agent": "scripts/frida/equip-slot-icons.js", "pid": 352,
+                    "messages": messages, "seconds": 902.76}
+
+        def scoped(at: int, crate: str, kind: str = "check") -> dict:
+            return {"at": at, "kind": kind, "crate": crate, "log": "/tmp/check4.log",
+                    "line": f"thread 'optimize_is_the_scripts' panicked at crates/{crate}/tests/p.rs:339:17:",
+                    "written": at - 7}
+
+        def walk(*rows: dict) -> list[str]:
+            path = pathlib.Path(tmp) / "walk.jsonl"
+            path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+            return verdicts(path, head_commit_time(walk_repo))
+
+        def opens_every_crate(lines: list[str]) -> bool:
+            return any(line.startswith("PROVEN agent=") for line in lines)
+
+        def opens(lines: list[str], kind: str, crate: str) -> bool:
+            return any(line.startswith(f"PROVEN {kind} crate={crate} ") for line in lines)
+
+        shadowed = walk(frida(head_at + 10), scoped(head_at + 20, "demo-core"),
+                        scoped(head_at + 30, "demo-core"))
+        ok("an unspent Frida record under newer scoped records still opens every crate",
+           opens_every_crate(shadowed))
+        ok("the newest record's verdict comes first",
+           shadowed[0].startswith("PROVEN check crate=demo-core "))
+        ok("one line per scope: two records for one crate print one verdict",
+           sum(line.startswith("PROVEN check crate=demo-core ") for line in shadowed) == 1)
+
+        os.environ["DS2_FRIDA_EVIDENCE_LOG"] = str(pathlib.Path(tmp) / "walk.jsonl")
+        verdict = io.StringIO()
+        with contextlib.redirect_stdout(verdict):
+            code = check(walk_repo)
+        os.environ["DS2_FRIDA_EVIDENCE_LOG"] = str(log)
+        ok("and `--check` says so through the repository's own commit time",
+           code == 0 and "\nPROVEN agent=scripts/frida/equip-slot-icons.js " in verdict.getvalue())
+
+        both = walk(scoped(head_at + 10, "demo-path", "build"), scoped(head_at + 20, "demo-core"))
+        ok("two scoped records for two crates open both crates",
+           opens(both, "build", "demo-path") and opens(both, "check", "demo-core"))
+        ok("and neither of them opens every crate", not opens_every_crate(both))
+
+        spent_frida = walk(frida(head_at - 10), scoped(head_at + 20, "demo-core"))
+        ok("a spent Frida record under an unspent scoped one opens nothing more",
+           spent_frida == [_verdict(scoped(head_at + 20, "demo-core"))[0]])
+
+        silent = walk(frida(head_at + 10, messages=0), scoped(head_at + 20, "demo-core"))
+        ok("a silent watch under a scoped record opens nothing more",
+           not opens_every_crate(silent) and opens(silent, "check", "demo-core"))
+        ok("and says it was silent", any(line.startswith("UNPROVEN silent-session ") for line in silent))
+        ok("a silent watch alone proves nothing",
+           not any(line.startswith("PROVEN ") for line in walk(frida(head_at + 10, messages=0))))
+        ok("records that are all spent are one spent-by-commit verdict",
+           walk(frida(head_at - 20), scoped(head_at - 10, "demo-core")) == [SPENT])
+        ok("the same commit second spends a record",
+           walk(frida(head_at)) == [SPENT])
+        ok("no records at all is no evidence", walk() == [NO_EVIDENCE])
+        # Records are appended in the order they are taken, so the first spent one ends the walk and
+        # the read never goes further back than HEAD's Rust commit. The Frida record above it here
+        # could not occur in a real log; it is what shows the walk stopped rather than read on.
+        ok("the walk stops at the first spent record",
+           walk(frida(head_at + 50), scoped(head_at - 10, "demo-core"),
+                scoped(head_at + 20, "demo-path", "build"))
+           == [_verdict(scoped(head_at + 20, "demo-path", "build"))[0]])
+        ok("a record whose `at` is not a number is skipped, not fatal",
+           opens_every_crate(walk(frida(head_at + 10), {"at": "soon", "kind": "check"})))
+
+        # A line break inside one record must not become a verdict of its own. Both routes are real
+        # recorder calls: a failed check.sh log at a path holding a newline, and a watch whose agent
+        # path holds one. Judged as the policy reads the signal: printed, then split on newlines.
+        def as_the_policy_reads(lines: list[str]) -> list[str]:
+            return "\n".join(lines).split("\n")
+
+        forged = "PROVEN agent=forged pid=1 messages=9 seconds=1"
+        evil_log = fake_repo / f"ci.log\n{forged}"
+        evil_log.write_text(ci_log.read_text(encoding="utf-8"), encoding="utf-8")
+        ok("a check.sh log at a path holding a newline is still recorded",
+           gate("demo-core", allow_line, evil_log) == 0)
+        injected = as_the_policy_reads(verdicts(log, None))
+        ok("and its verdict stays one line that opens its one crate",
+           len(injected) == 1 and forged in injected[0] and not opens_every_crate(injected)
+           and opens(injected, "check", "demo-core"))
+        with contextlib.redirect_stdout(io.StringIO()):
+            record(f"scripts/frida/x.js\n{forged}", 388, 0, 1.0)
+        injected = as_the_policy_reads(verdicts(log, None))
+        ok("a silent watch whose agent path holds a newline stays one unproven line",
+           len(injected) == 1 and injected[0].startswith("UNPROVEN silent-session ")
+           and forged in injected[0])
+
+        # The backwards reader against the forward one, with a block small enough that boundaries
+        # land inside lines and inside multi-byte characters.
+        text = "".join(f'{{"at": {i}, "agent": "é✓-{i}"}}\n' for i in range(300)) + "tail"
+        wide = pathlib.Path(tmp) / "wide.jsonl"
+        wide.write_text(text, encoding="utf-8")
+        ok("reading backwards yields the forward lines in reverse, block boundaries and all",
+           list(_lines_from_end(wide, block=7)) == list(reversed(text.split("\n"))))
+        ok("an absent log yields no lines", list(_lines_from_end(pathlib.Path(tmp) / "absent")) == [])
 
         ok("the log lives outside the repo by default", REPO_ROOT not in state_dir().parents)
         os.environ.pop("DS2_FRIDA_EVIDENCE_LOG", None)

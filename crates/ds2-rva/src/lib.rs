@@ -10399,6 +10399,109 @@ pub const FE_ITEM_WARN_CLONED_CHILD: usize = 0;
 pub const FE_ITEM_WARN_DEPTH_STEP: u16 = 2;
 
 // ============================================================================================
+// The Equipment page's empty slots: the faint silhouette the pause menu's Equipment page draws in
+// a slot with nothing in it -- a sword, a shield, a helm, a ring -- which the build recommender's
+// paperdoll draws too.
+//
+// Chain, every step read off the binary or the layout rather than matched by eye:
+//
+// 1. `FUN_140093220` sets the page up. It walks the 35 pointers at `0x141561ef0` (seven null)
+//    and, for each entry, finds element `[entry+0x08]` -- one of the 28 slot cells def `0x0133` of
+//    `l02_01_In-Game.flo` places -- then the sprite `0x1eac21` inside it, and calls that sprite's
+//    vtable `+0xc0` with `[entry+0x0c]`.
+// 2. The entries are `.data` a static initializer fills (`mov dword [rip+..], imm32` from
+//    `0x14106f82e` to `0x14107004e`). It gives each slot its element id, its caption's text id at
+//    `+0x04` -- `ingamemenu.fmg` names them `Head` to `Legs`, `Left Weapon 1` to `Right Weapon 3`,
+//    `Ring `, `Arrows 1`, `Bolts 1`, `Belt Slot` -- and its sequence id at `+0x0c`.
+// 3. Vtable `+0xc0` is `FeComponentSprite::FUN_140b6c4f0(this, sequence, ..)`, which looks the id
+//    up in the sprite's table of 16-byte `{i32 id, u16 start_frame, ..}` entries and plays from
+//    that frame (see [`FE_SPRITE_POSITION_OFFSET`]).
+// 4. The sprite is def `0x0109`. Its sequence table, at file offset `0x14498`, starts its ten ids
+//    at frames 1, 9, 17, 25, 33, 42, 49, 56, 63 and 70: exactly the frame ranges of its ten
+//    children, each one shape of one quad sampling `In-game_01`.
+//
+// `scripts/ds2-flo.py tree <l02_01_In-Game.flo> --def 0x109` prints step 4's children, and
+// `scripts/ds2-flo.py shape <..> --shape 0xf5` (to `0x107`) each child's quad.
+// ============================================================================================
+
+/// The sequence a right-hand slot plays on its empty-slot sprite: all three of them.
+pub const FE_EQUIP_EMPTY_RIGHT_WEAPON: u32 = 111;
+/// The sequence a left-hand slot plays: all three of them.
+pub const FE_EQUIP_EMPTY_LEFT_WEAPON: u32 = 110;
+/// The head slot's sequence.
+pub const FE_EQUIP_EMPTY_HEAD: u32 = 213;
+/// The chest slot's sequence.
+pub const FE_EQUIP_EMPTY_CHEST: u32 = 217;
+/// The hands slot's sequence.
+pub const FE_EQUIP_EMPTY_HANDS: u32 = 216;
+/// The legs slot's sequence.
+pub const FE_EQUIP_EMPTY_LEGS: u32 = 218;
+/// The sequence all four ring slots play.
+pub const FE_EQUIP_EMPTY_RING: u32 = 212;
+/// The sequence all ten belt (quick item) slots play.
+pub const FE_EQUIP_EMPTY_ITEM: u32 = 215;
+/// The sequence both arrow slots play.
+pub const FE_EQUIP_EMPTY_ARROWS: u32 = 209;
+/// The sequence both bolt slots play.
+pub const FE_EQUIP_EMPTY_BOLTS: u32 = 214;
+
+/// Each sequence's silhouette: `(sequence, source rect in In-game_01, the child's scale)`, in the
+/// order def `0x0109` holds them.
+///
+/// The rect is the child's one quad; the page draws it at the rect's size times the scale, which
+/// is how the game sizes the ten against each other -- the ring as wide as a sword, the bolts
+/// narrower than the arrows.
+///
+/// The page also draws them faint, the sprite at alpha `0xb3` and each child at `0x66` (the two
+/// weapons) to `0xb3` (the belt) on top of that, over the light plate every cell has. The ink
+/// itself is dark, `rgb(48..80)` at alpha `194..244`, so on a dark slot it wants its own alpha
+/// rather than the page's.
+pub const FE_EQUIP_EMPTY_ART: [(u32, [f32; 4], f32); 10] = [
+    (
+        FE_EQUIP_EMPTY_HEAD,
+        [243.65, 625.40, 312.65, 704.20],
+        0.761_444,
+    ),
+    (
+        FE_EQUIP_EMPTY_RIGHT_WEAPON,
+        [5.15, 627.60, 87.15, 704.20],
+        0.911_667,
+    ),
+    (
+        FE_EQUIP_EMPTY_LEFT_WEAPON,
+        [93.15, 625.40, 158.45, 704.20],
+        0.947_968,
+    ),
+    (
+        FE_EQUIP_EMPTY_ARROWS,
+        [920.50, 780.30, 973.45, 863.75],
+        0.839_432,
+    ),
+    (
+        FE_EQUIP_EMPTY_BOLTS,
+        [973.65, 780.95, 1024.00, 865.10],
+        0.834_473,
+    ),
+    (
+        FE_EQUIP_EMPTY_ITEM,
+        [164.95, 631.00, 243.65, 704.20],
+        0.862_946,
+    ),
+    (FE_EQUIP_EMPTY_HANDS, [866.90, 788.25, 920.40, 858.20], 1.0),
+    (
+        FE_EQUIP_EMPTY_CHEST,
+        [795.40, 794.90, 868.00, 850.30],
+        0.914_49,
+    ),
+    (FE_EQUIP_EMPTY_LEGS, [738.20, 786.80, 789.15, 856.95], 1.0),
+    (
+        FE_EQUIP_EMPTY_RING,
+        [385.15, 625.40, 467.25, 704.20],
+        0.893_539,
+    ),
+];
+
+// ============================================================================================
 // The game's options block and its Voice Chat switch (`ds2-voice-chat`).
 //
 // Chain: [`GAME_MANAGER_IMP`] -> `+0xa8` ([`GAME_DATA_MANAGER_OFFSET`]) -> `+0xc8`

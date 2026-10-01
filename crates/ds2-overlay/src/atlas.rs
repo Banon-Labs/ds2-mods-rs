@@ -104,4 +104,47 @@ mod tests {
         let px = &waku.rgba[o..o + 4];
         assert!(px[3] > 200 && px[0] > 120 && px[1] < 90, "{px:?}");
     }
+
+    /// Every empty-slot silhouette `ds2_rva::FE_EQUIP_EMPTY_ART` names is art: one per sequence,
+    /// its rect inside `In-game_01`, and at least two fifths of it inked. The ten measured 45% to
+    /// 73% inked (alpha over 32), so a rect a few pixels off the art still passes and one pointing
+    /// at empty atlas does not.
+    #[test]
+    fn every_empty_slot_silhouette_is_inked_art_in_in_game_01() {
+        let mut sequences: Vec<u32> = ds2_rva::FE_EQUIP_EMPTY_ART
+            .iter()
+            .map(|(sequence, ..)| *sequence)
+            .collect();
+        sequences.sort_unstable();
+        sequences.dedup();
+        assert_eq!(sequences.len(), ds2_rva::FE_EQUIP_EMPTY_ART.len());
+        let Some(game) = game() else {
+            eprintln!("no DARK SOULS II install here; skipped");
+            return;
+        };
+        let archive = ebl::Archive::open(&game).expect("archive");
+        let page = load(&archive, Atlas::InGame01).expect("In-game_01");
+        for (sequence, [x0, y0, x1, y1], scale) in ds2_rva::FE_EQUIP_EMPTY_ART {
+            assert!(
+                0.0 <= x0 && x0 < x1 && x1 <= page.width as f32,
+                "sequence {sequence}"
+            );
+            assert!(
+                0.0 <= y0 && y0 < y1 && y1 <= page.height as f32,
+                "sequence {sequence}"
+            );
+            assert!(scale > 0.5 && scale <= 1.0, "sequence {sequence}: {scale}");
+            let columns = x0 as usize..x1.ceil() as usize;
+            let rows = y0 as usize..y1.ceil() as usize;
+            let total = columns.len() * rows.len();
+            let inked = rows
+                .flat_map(|y| columns.clone().map(move |x| (x, y)))
+                .filter(|&(x, y)| page.rgba[(y * page.width + x) * 4 + 3] > 32)
+                .count();
+            assert!(
+                inked * 5 >= total * 2,
+                "sequence {sequence}: {inked} of {total} pixels inked"
+            );
+        }
+    }
 }
