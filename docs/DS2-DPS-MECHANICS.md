@@ -105,11 +105,22 @@ min at +0x21c, and max at +0x220.
 base = (DamageCtrlParam.poiseDamage[+0xa0] * hit[+0x74] + vcall(defender+0x398)->[0x188](int) + s8 hit[+0x70])
        * (hit[+0x90] ? u16 [hit[+0x90]+8] * 0.01 : 1.0)
 ```
-Whether `hit+0x74` is `WeaponParam.poiseDamageScalePlayer` is INFERRED. The name fits and the values give dagger 35 and OKH 160 per R1.
-The other terms are not identified.
-The defender side (`ChrDamageActionCtrl::v14` `0x140137aa0`) multiplies the base by `(1 + pct*0.01*k)`, where pct comes
-from an unidentified source. It then applies hyperarmor (next subsection). It subtracts the result from current poise in
-`0x140145970`, called from `0x14013639d`.
+`hit+0x74` is `WeaponParam.poiseDamageScalePlayer` (EXE, 2026-10-01): `calculateDamage_attack` `0x1401373b0` stores
+into the hit block's +0x74 the attacker's `PlayerGameParamCalculator` vtable slot 0x190 (`0x140381120`), which looks up the
+WeaponParam row of the attacking hand and returns +0xb0 (`poiseDamageScalePlayer`) when the target is a player and +0xb4
+(`poiseDamageScaleEnemy`) otherwise. `DamageCtrlParam` +0xa0 is `poiseDamage` (Smithbox layout). So dagger R1 = 10 x 3.5
+= 35 and OKH R1 = 10 x 16 = 160 to a player. Still not identified: the defender's slot 0x188 (`0x140381080`, a threshold
+table in DamageMan whose input is not traced), `s8 hit+0x70` (copied from the attack block +0xce) and the `hit+0x90` pointer.
+`scripts/ds2-builds-recommend.py` (`hit_poise`) takes them at 0, 0 and absent (x1.0).
+The defender side (`ChrDamageActionCtrl::v14` `0x140137aa0`) multiplies the base by
+`1 + DamageCtrlParam.damageDecrementPoiseMaxRate (+0xb8) * hit[+0x78] * 0.01` (EXE): the distance falloff, -70% at most;
+that `hit+0x78` is the 0-1 share of the falloff band is INFERRED, so a point-blank hit takes x1.0. It then applies
+hyperarmor (next subsection). It subtracts the result from current poise in `0x140145970`, called from `0x14013639d`.
+
+Max poise, the vcall's armour part (EXE): `PlayerGameParamCalculator` slot 0x1f8 `0x14037fdd0` sums ArmorParam +0x40
+(`strong`) over the four worn pieces, each times a per-piece factor from slot `0x14031e680(0x1c, ...)` (INFERRED 1.0
+for an intact piece), plus +0x4c of a second, unidentified row. ArmorParam.strong (joined by ItemParam.armorParamId and name) equals SoulsPlanner's piece poise for 405 of 427 pieces;
+the recommender uses the game's value (`regulation_poise`).
 
 ### Hyperarmor (EXE)
 - TAE event **111900** (handler `0x140326884`) looks up the chr's current weapon row and copies its
@@ -117,9 +128,10 @@ from an unidentified source. It then applies hyperarmor (next subsection). It su
   is INFERRED from the offset.
 - Defender side `0x140137f02`: if `status+0x7d0 > 0`, incoming poise damage is multiplied by uninterruptibleRate.
   For OKH (0.3) that means it takes 30% of the poise damage during its own 111900 window.
-- Stagger decision `0x140136689`: the flag starts as `poise > 0` after the hit. A hit whose
-  `DamageCtrlParam.armorBreak` (INFERRED to be the byte at +2) is 2 always staggers. If it is 1, it staggers unless the defender has
-  uninterruptibleRate > 0.
+- Stagger decision `0x140136570` (around `0x140136689`): the flag starts as `poise > 0` after the hit
+  (`0x1401459d0` reads current poise chr+0x218). A hit whose `DamageCtrlParam.armorBreak` (+0x2, Smithbox layout) is 2
+  always staggers. If it is 1, it staggers unless the defender has uninterruptibleRate > 0 (status+0x7d0) or the
+  status+0x640 flag. `ultra_armor` or the TAE 110500 super-armor flag poise through anything but armorBreak 2.
 - Windows (TAE): OKH R1 111900 frames 20-30 around its 23-28 hit; 2H R2 20-30. Dagger R1 has no 111900 and its
   rate is 0, so a dagger has no hyperarmor. `WeaponTypeParam.toughnessPeriodScale` is 1.0 for all 144 rows, so it does nothing.
 
@@ -240,7 +252,7 @@ count and interval (the Old Whip pair) counts once; overlapping windows like the
 separately. Per-tick build-up is the INFERRED part above; resistance and proc damage are not modelled.
 
 ## 5. What remains unverified
-- That `hit+0x74` is `poiseDamageScalePlayer`, and the other terms in the poise formula.
+- The other terms in the poise formula (`hit+0x74` is `poiseDamageScalePlayer`, EXE, section 2).
 - That the regen dt is in seconds.
 - The damageMotion -> stagger animation mapping and its length, which decides true combos.
 - Where startPlaySpeed switches to endPlaySpeed.

@@ -172,6 +172,8 @@ class Data:
         self.damage_scale = {}  # weapon key -> WeaponParam.damageScale where not 1.0 (regulation_damage_scale)
         self.hit_shape = {}  # PlayerDamageParam row -> its hitbox shape (regulation_reach)
         self.reach_scale = {}  # weapon key -> (radius scale, length scale) where not 1.0 (regulation_reach)
+        self.hit_poise = {}  # PlayerDamageParam row -> (poiseDamage, armorBreak) (regulation_poise)
+        self.weapon_poise = {}  # weapon key -> (poiseDamageScalePlayer, uninterruptibleRate) (regulation_poise)
         self.ring_attack = {}  # ring key -> DMG key -> flat attack add (regulation_ring_attack)
         self.ranged = {}  # launcher key -> its ammo type, hand scale and special shots (regulation_ranged)
         self.ammo = {}  # ammo name -> its arrowType and the shot it adds (regulation_ranged)
@@ -1106,7 +1108,8 @@ def apply_regulation(data: Data) -> str:
             "PlayerDamageParam": "DAMAGE_PARAM", "SystemDamageParam": "DAMAGE_PARAM",
             "BulletParam": "BULLET_PARAM", "SystemBulletParam": "BULLET_PARAM", "ArrowParam": "ARROW_PARAM",
             "WeaponActionCategoryParam": "WEAPON_ACTION_CATEGORY_PARAM",
-            "WeaponAttackMotionParam": "WEAPON_ATTACK_MOTION_PARAM"})
+            "WeaponAttackMotionParam": "WEAPON_ATTACK_MOTION_PARAM", "DamageCtrlParam": "DAMAGE_CTRL_PARAM",
+            "ArmorParam": "ARMOR_PARAM", "ItemParam": "ITEM_PARAM"})
         names = ex.item_names(reg.GAME_DIR, reg.DEFAULT_REGULATION)
         members = reg.load(reg.DEFAULT_REGULATION, reg.REGULATION_KEY_HEX)
         emevd = ex.load_module("ds2emevd", "ds2-emevd.py")
@@ -1131,6 +1134,7 @@ def apply_regulation(data: Data) -> str:
             + "; " + regulation_defense_buffs(data, emevd, members, d, names)
             + "; " + regulation_weapon_elements(data, d, names)
             + "; " + regulation_damage_scale(data, d, names) + "; " + regulation_reach(data, d, names)
+            + "; " + regulation_poise(data, d, names)
             + "; " + regulation_status(data, d, names)
             + "; " + regulation_attack(data, d, names) + "; " + regulation_ranged(data, d, names))
 
@@ -1316,6 +1320,48 @@ def regulation_reach(data: Data, d: dict, names: dict) -> str:
         if wp and (wp["damageHitRadiusScale"], wp["damageHitLengthScale"]) != (1.0, 1.0):
             data.reach_scale[key] = (wp["damageHitRadiusScale"], wp["damageHitLengthScale"])
     return f"hitbox shape on {len(data.hit_shape)} damage rows, reach scaled on {len(data.reach_scale)} weapons"
+
+
+def regulation_poise(data: Data, d: dict, names: dict) -> str:
+    """What poise_metrics reads (docs/DS2-DPS-MECHANICS.md section 2, "Poise and stagger"):
+
+    * data.hit_poise: PlayerDamageParam row -> (DamageCtrlParam.poiseDamage, .armorBreak) of its
+      damageCategory row. EXE: the base poise damage 0x140139160 reads the hit's DamageCtrlParam
+      +0xa0 (poiseDamage); the stagger decision 0x140136570 reads +0x2 (armorBreak).
+    * data.weapon_poise: weapon key -> (WeaponParam.poiseDamageScalePlayer, .uninterruptibleRate).
+      EXE: calculateDamage_attack 0x1401373b0 stores the attacker's PlayerGameParamCalculator slot
+      0x190 (0x140381120) in the hit block's +0x74, which 0x140139160 multiplies poiseDamage by;
+      that slot returns the hand's WeaponParam +0xb0 (poiseDamageScalePlayer) when the target is a
+      player, +0xb4 (poiseDamageScaleEnemy) otherwise. +0xb8 is hyperarmor's (hyperarmor()).
+    * Each armour piece's site `poise` replaced by ArmorParam.strong (ItemParam.armorParamId, joined
+      by name). EXE: max poise 0x14037fdd0 sums the four worn pieces' ArmorParam +0x40 (strong)."""
+    ctrl = d["DamageCtrlParam"]
+    data.hit_poise = {rid: (ctrl[str(r["damageCategory"])]["poiseDamage"], ctrl[str(r["damageCategory"])]["armorBreak"])
+                      for rid, r in d["PlayerDamageParam"].items() if str(r["damageCategory"]) in ctrl}
+    by_name = {}
+    for wid, w in d["WeaponParam"].items():
+        by_name.setdefault(norm(names.get(wid, "")), w)
+    data.weapon_poise = {}
+    for key, w in data.weapons.items():
+        wp = by_name.get(norm(w.get("name", key)))
+        if wp:
+            data.weapon_poise[key] = (wp["poiseDamageScalePlayer"], wp["uninterruptibleRate"])
+    strong = {}
+    for iid, it in d["ItemParam"].items():
+        ap = d["ArmorParam"].get(str(it.get("armorParamId")))
+        if ap:
+            strong.setdefault(norm(names.get(iid, "")), ap["strong"])
+    moved = joined = 0
+    for slot in ARMOR_SLOTS:
+        for key, p in data.armor[slot].items():
+            v = strong.get(norm(p.get("name", key))) if isinstance(p, dict) else None
+            if v is None:
+                continue
+            joined += 1
+            moved += p.get("poise") != v
+            p["poise"] = v
+    return (f"poise on {len(data.hit_poise)} PlayerDamageParam rows and {len(data.weapon_poise)} weapons; "
+            f"armour poise from ArmorParam.strong on {joined} pieces ({moved} differ from the site's)")
 
 
 #: Status -> (RATE_FIELDS slot, WeaponReinforceParam maximum<...> stem, WeaponStatsAffectParam stem).
@@ -2330,7 +2376,7 @@ def attack_hits(a: dict | None) -> int:
 
 
 def chain_timeline(attacks: dict, name: str, two_hand: bool, kind: str = "Normal", horizon: float = 3.0,
-                   distinct: bool = False, with_start: bool = False) -> list[tuple]:
+                   distinct: bool = False, with_start: bool = False, with_row: bool = False) -> list[tuple]:
     """(seconds from input, motion value, physical type, damage floor, flat attack) of every hit a
     repeated attack lands, alternating its 1st and 2nd chain attacks: `kind` "Normal" is the R1
     chain, "Strong" the R2 chain. Play speed is the mean of start/end speeds (where one hands over
@@ -2338,7 +2384,7 @@ def chain_timeline(attacks: dict, name: str, two_hand: bool, kind: str = "Normal
     live_hits. The flat attack is the hit's damage row's, per DMG type (NO_FLAT for none; see
     load_attacks). `with_start` puts the second its attack began before the flat attack, which is
     what `horizon` cuts on: the hits of a longer horizon whose attack began before a shorter one are
-    exactly the shorter one's hits."""
+    exactly the shorter one's hits. `with_row` appends the hit's PlayerDamageParam row id (str)."""
     g = "Single2Hand" if two_hand else "Single1Hand"
     seq = [attacks.get((norm(name), g + kind + "1st")), attacks.get((norm(name), g + kind + "2nd"))]
     if not seq[0]:
@@ -2353,7 +2399,7 @@ def chain_timeline(attacks: dict, name: str, two_hand: bool, kind: str = "Normal
             for i in range(n):
                 out.append((t0 + (h["start"] / 30 + i * (h.get("interval") or 0)) / spd, h["rate"],
                             h.get("type") or "physical", h.get("lower", 0)) + ((t0,) if with_start else ())
-                           + (h.get("flat") or NO_FLAT,))
+                           + (h.get("flat") or NO_FLAT,) + ((str(h.get("dmg")),) if with_row else ()))
         step = chain_open(a["anim"])
         if not step or step <= 0:
             break
@@ -2483,6 +2529,156 @@ def hyperarmor(attacks: dict, rates: dict, name: str, two_hand: bool) -> float:
         p = TAE_DIR / f"anim-{a['anim']:09d}.xml"
         _tae_cache[a["anim"]] = p.exists() and "<type>111900</type>" in p.read_text()
     return rate if _tae_cache[a["anim"]] else 0.0
+
+
+#: ChrParam row 100 poiseRecoveryValue (REGULATION): what the poise regen 0x140145ba0 adds per dt
+#: (EXE); that dt is seconds is INFERRED. Regen stops while staggered and poise refills to max after.
+POISE_REGEN = 0.56
+#: TAE event that copies WeaponParam.uninterruptibleRate into status+0x7d0 for its window (EXE 0x140326884)
+TAE_HYPERARMOR = 111900
+
+
+def tae_windows(anim: int, event: int) -> list[tuple[float, float]]:
+    """(start, end) in anim frames at 30 fps of every `event` in TAE animation `anim`; none without the XML."""
+    p = TAE_DIR / f"anim-{anim:09d}.xml"
+    if not p.exists():
+        return []
+    ev = re.findall(r"<type>(\d+)</type>.*?<startTime>([-\d.]+)</startTime>\s*<endTime>([-\d.]+)</endTime>",
+                    p.read_text(), re.S)
+    return [(float(s) * 30, float(e) * 30) for ty, s, e in ev if ty == str(event)]
+
+
+def hyperarmor_cover(a: dict, windows: list[tuple[float, float]] | None = None) -> float:
+    """The fraction of an attack's windup and active frames (frame 0 to its last live hitbox's
+    end) inside a hyperarmor window (TAE 111900; `windows` overrides the TAE read). TAE frames."""
+    end = max((h["end"] for h in live_hits(a)), default=0.0)
+    if end <= 0:
+        return 0.0
+    if windows is None:
+        windows = tae_windows(a["anim"], TAE_HYPERARMOR)
+    return min(1.0, sum(max(0.0, min(e, end) - max(s, 0.0)) for s, e in windows) / end)
+
+
+def stagger_hits(hits: list[tuple[float, float, int]], poise: float, regen: float = POISE_REGEN) -> int | None:
+    """How many of `hits` ((seconds, poise damage, DamageCtrlParam.armorBreak), in time order) it
+    takes to stagger a defender with `poise` who is not in hyperarmor; None when they never do.
+    EXE (stagger decision 0x140136570): a hit staggers when the defender's poise is <= 0 after it
+    (0x1401459d0), or its armorBreak is 2, or 1 while the defender has no hyperarmor. Poise
+    regenerates `regen` per second between hits (POISE_REGEN, dt INFERRED seconds)."""
+    cur, last = poise, 0.0
+    for n, (t, pd, ab) in enumerate(hits, 1):
+        cur = min(poise, cur + regen * (t - last)) - pd
+        last = t
+        if ab or cur <= 0:
+            return n
+    return None
+
+
+def ring_poise(data: Data) -> dict:
+    """Ring key -> poise it adds (Ring of Giants +10/+20/+30): mechanics.json, decoded from
+    SpEffectRing.emevd (REGULATION, docs/DS2-BUILD-MECHANICS.md). That max poise adds it via the
+    status ints 0x14037fdd0's caller sums is INFERRED (docs/DS2-DPS-MECHANICS.md section 2)."""
+    out = getattr(data, "_ring_poise", None)
+    if out is None:
+        out = {}
+        for r in json.loads(MECHANICS.read_text())["rings"] if MECHANICS.exists() else []:
+            key = data.sp_key.get(norm(r["name"]))
+            v = sum(x["value"] for x in r["effects"] if x["kind"] == "add" and x["stat"] == "poise")
+            if key in data.rings and v:
+                out[key] = v
+        data._ring_poise = out
+    return out
+
+
+def armor_poise(data: Data, armor, rings=()) -> float:
+    """A build's max poise: its four pieces' poise (ArmorParam.strong once regulation_poise ran) plus
+    its rings'. EXE 0x14037fdd0 for the armour sum; each piece's durability factor is taken as 1."""
+    rp = ring_poise(data)
+    return (sum((data.armor[s].get(p) or {}).get("poise", 0) for s, p in zip(ARMOR_SLOTS, armor))
+            + sum(rp.get(r, 0) for r in rings))
+
+
+def r1_attack(attacks: dict, names: list[str], two_hand: bool) -> dict | None:
+    g = ("Single2Hand" if two_hand else "Single1Hand") + "Normal1st"
+    return next((a for a in (attacks.get((norm(nm), g)) for nm in names) if a), None)
+
+
+def hit_poise(data: Data, weapon: str, row) -> tuple[float, int] | None:
+    """(poise damage to a player, armorBreak) of one hit of `weapon` on PlayerDamageParam `row`:
+    DamageCtrlParam.poiseDamage x WeaponParam.poiseDamageScalePlayer (EXE 0x140139160 with its
+    other terms at their neutral values: point blank, defender-side table term 0, hit +0x70 0 and
+    +0x90 absent -- those three are not identified). None without the regulation rows."""
+    w, h = data.weapon_poise.get(weapon), data.hit_poise.get(str(row))
+    if w is None or h is None:
+        return None
+    return h[0] * w[0], h[1]
+
+
+def bracket_poise(data: Data, corpus: list[Build], sl: int, attacks: dict, defender=None) -> dict:
+    """The defender poise_metrics staggers and the counter-hits it weighs hyperarmor against, at
+    `sl`'s bracket (bracket_builds): `poise` the mean max poise (armor_poise) of the bracket's
+    builds, or of the `defender` pieces; `counters` (poise damage, armorBreak) of each build's
+    melee weapon's (adoption's pick) 1H R1 first hit; `n` the builds."""
+    key = (id(data), id(corpus), sl_bracket(sl), tuple(defender) if defender else None)
+    memo = _bracket_poise_memo.get(key)
+    if memo is not None and memo[0] is data and memo[1] is corpus:
+        return memo[2]
+    builds = bracket_builds(data, corpus, sl)
+    poise = (armor_poise(data, defender) if defender else
+             float(np.mean([armor_poise(data, b.armor, b.rings) for b in builds])) if builds else 0.0)
+    counters = []
+    for b in builds:
+        w = next((w for w in (b.hands[HAND_SLOTS.index(s)][0] for s in MELEE_ORDER)
+                  if w not in EMPTY and w in data.weapons and not data.weapons[w].get("isShield")
+                  and not CATALYST.search(w) and w not in data.ranged), None)
+        a = r1_attack(attacks, [data.weapons[w]["name"], w.replace("_", " ")], False) if w else None
+        hs = live_hits(a) if a else []
+        hp = hit_poise(data, w, hs[0].get("dmg")) if hs else None
+        if hp:
+            counters.append(hp)
+    out = {"poise": poise, "counters": counters, "n": len(builds)}
+    _bracket_poise_memo[key] = (data, corpus, out)
+    return out
+
+
+_bracket_poise_memo: dict = {}
+
+
+def poise_metrics(data: Data, corpus: list[Build], attacks: dict, weapon: str, two_hand: bool, sl: int,
+                  defender=None) -> dict:
+    """Hyperarmor and poise of `weapon`'s R1 chain in the grip, against `sl`'s bracket defender
+    (bracket_poise), for --best-weapons' `metrics`:
+    `hyperarmor` the share of the R1's windup+active frames in its hyperarmor window
+    (hyperarmor_cover; 0 when WeaponParam.uninterruptibleRate is 0, as then the window does
+    nothing); `hyperarmor_rate` that rate, the factor on poise damage the attacker takes inside the
+    window (EXE ChrDamageActionCtrl 0x140137aa0: status+0x7d0 > 0 multiplies it);
+    `hyperarmor_holds` the share of the bracket's counter-hits (1H R1s) that do not stagger the
+    attacker inside the window -- armorBreak 2 always does, others when poise damage x rate reaches
+    the attacker's poise, taken as the bracket's mean (the attacker's armour is not chosen here);
+    None without hyperarmor; `poise_damage_per_hit` the R1's first hit's (hit_poise);
+    `armor_break` that hit's DamageCtrlParam.armorBreak (1 and 2 stagger regardless of poise);
+    `hits_to_stagger` R1 chain hits until the bracket defender staggers (stagger_hits), None if
+    not within 10 s; `defender_poise` the bracket defender's poise. All None for a launcher or a
+    weapon without attack timing or regulation rows."""
+    w = data.weapons[weapon]
+    names = [w["name"], weapon.replace("_", " ")]
+    a = None if weapon in data.ranged else r1_attack(attacks, names, two_hand)
+    br = bracket_poise(data, corpus, sl, attacks, defender)
+    out = dict.fromkeys(["hyperarmor", "hyperarmor_rate", "hyperarmor_holds", "poise_damage_per_hit",
+                         "armor_break", "hits_to_stagger"]) | {"defender_poise": round(br["poise"], 1)}
+    tl = next((t for t in (chain_timeline(attacks, nm, two_hand, "Normal", 10.0, with_row=True) for nm in names)
+               if t), None) if a else None
+    hits = [(t[0], *hp) for t in tl or [] if (hp := hit_poise(data, weapon, t[-1]))]
+    if not hits:
+        return out
+    rate = data.weapon_poise[weapon][1]
+    cover = hyperarmor_cover(a) if rate > 0 else 0.0
+    out.update(hyperarmor=round(cover, 3), hyperarmor_rate=rate, poise_damage_per_hit=round(hits[0][1], 2),
+               armor_break=hits[0][2], hits_to_stagger=stagger_hits(hits, br["poise"]))
+    if cover and br["counters"]:
+        out["hyperarmor_holds"] = round(sum(ab != 2 and pd * rate < br["poise"] for pd, ab in br["counters"])
+                                        / len(br["counters"]), 3)
+    return out
 
 
 ATTACK_TYPES = Path.home() / ".cache/ds2-builds/attack-type.json"  # per weapon slot: slash/strike/thrust per hit
@@ -5079,6 +5275,22 @@ def selftest() -> int:
         ("max HP without the regulation: getHP", hit_points(type("Site", (), {"hp_max": []}), {**ten, "vigor": 30}),
          500 + 30 * 20 + 20 * 10),
     ]
+    # poise (stagger_hits, EXE 0x140136570): poise <= 0 after a hit, or armorBreak 1/2, staggers;
+    # 0.56 regen per second between hits
+    cases += [
+        ("no poise: the first hit staggers", stagger_hits([(0.0, 35.0, 0)], 0.0), 1),
+        ("35 poise damage through 30 poise", stagger_hits([(0.0, 35.0, 0), (0.5, 35.0, 0)], 30.0), 1),
+        ("50 poise: two 35s", stagger_hits([(0.0, 35.0, 0), (0.5, 35.0, 0)], 50.0), 2),
+        ("armorBreak 1 staggers through any poise", stagger_hits([(0.0, 1.0, 1)], 132.0), 1),
+        ("132 poise vs 35 every 0.5 s with regen: 4", stagger_hits([(i * 0.5, 35.0, 0) for i in range(6)], 132.0), 4),
+        ("regen can outlast a weak chain", stagger_hits([(0.0, 0.5, 0), (10.0, 0.5, 0)], 1.0), None),
+        # OKH R1: hitbox 23-28, 111900 frames 20-30 (TAE) -> 8 of its 28 windup+active frames
+        ("hyperarmor covers frames 20-28 of 0-28", round(hyperarmor_cover(
+            {"anim": 0, "hits": [{"start": 23.0, "end": 28.0, "rate": 0.945, "live": 1}]}, [(20.0, 30.0)]), 4),
+         round(8 / 28, 4)),
+        ("no window, no hyperarmor", hyperarmor_cover({"anim": 0, "hits": [{"start": 8.0, "end": 15.0, "rate": 1.0,
+                                                                           "live": 1}]}, []), 0.0),
+    ]
     cases += defense_selftest_cases()
     cases += flex_selftest_cases()
     cases += ranged_selftest_cases()
@@ -5087,6 +5299,9 @@ def selftest() -> int:
         real = load_attacks()
         for key in [k for k in A if k in real]:
             cases.append((f"attacks.json {key}", attack_hits(real[key]), attack_hits(A[key])))
+        okh = real.get((norm("Old Knight Hammer"), "Single1HandNormal1st"))
+        if okh and TAE_DIR.exists():  # the TAE's own 111900 window, docs/DS2-DPS-MECHANICS.md section 3
+            cases.append(("OKH R1 hyperarmor from the TAE", round(hyperarmor_cover(okh), 4), round(8 / 28, 4)))
     bad = 0
     for what, got, want in cases:
         if got != want:
@@ -5493,10 +5708,12 @@ def main() -> int:
                       + (f"  rings {', '.join(data.rings[r]['name'] for r in worn)}" if worn else "")
                       + (f"  shot: {ammo['shot']}" if ammo else ""))
         if a.json:
+            attacks = load_attacks(data)
             print(json.dumps({sl: [{"score": r[0], "weapon": data.weapons[r[1]]["name"], "key": r[1], "value": r[2],
                                     "class": r[3], "two_handed": r[4], "stats": r[5], "rings": r[6],
                                     "label": r[7], **(r[8] or {}),
-                                    "metrics": row_metrics(data, corpus, r, inf, sl, defender)}
+                                    "metrics": {**(row_metrics(data, corpus, r, inf, sl, defender) or {}),
+                                                **(poise_metrics(data, corpus, attacks, r[1], r[4], sl, defender) or {})}}
                                    for r in rows[:a.top]] for sl, rows in out.items()},
                              indent=1))
         return 0
