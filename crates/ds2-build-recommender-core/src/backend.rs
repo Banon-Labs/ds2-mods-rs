@@ -45,6 +45,32 @@ pub const COMMON_RING_PERCENT: u32 = 10;
 /// The stats a floor applies to, by index into [`STAT_LABELS`]: VIG, VIT, ATT, ADP.
 pub const FLOOR_STATS: [usize; 4] = [0, 2, 3, 6];
 
+/// Spells a build may attune and still be held to the no-spell floors ([`floor_stats`]), by
+/// soulsplanner key: the script's `NO_FLOOR_SPELLS`.
+pub const NO_FLOOR_SPELLS: [&str; 1] = ["Warmth"];
+
+/// Whether `spells` (soulsplanner keys) hold anything but [`NO_FLOOR_SPELLS`].
+pub fn casts_for_floors<'a>(mut spells: impl Iterator<Item = &'a str>) -> bool {
+    spells.any(|spell| !NO_FLOOR_SPELLS.contains(&spell))
+}
+
+/// The [`FLOOR_STATS`] a build casting `spells` is held to: ATT only when it casts something
+/// other than [`NO_FLOOR_SPELLS`].
+///
+/// The script's `floor_stats`. Without spells ATT buys nothing but agility, which ADP buys three
+/// times as fast, so the median ATT of real builds is no floor for one that casts nothing. Warmth
+/// alone counts as nothing: a melee build attunes it for the heal, and the spells' own floor
+/// already raises ATT to the slot it needs.
+#[must_use]
+pub fn floor_stats(spells: &[String]) -> &'static [usize] {
+    const NO_SPELLS: [usize; 3] = [0, 2, 6];
+    if !casts_for_floors(spells.iter().map(String::as_str)) {
+        &NO_SPELLS
+    } else {
+        &FLOOR_STATS
+    }
+}
+
 /// The damage types an attack rating is split into, in [`ResultRow::ar_by_type`] order.
 pub const DAMAGE_TYPES: [&str; 5] = ["phys", "magic", "fire", "light", "dark"];
 
@@ -461,9 +487,13 @@ pub trait RecommenderBackend: Sync {
     }
 }
 
-/// Each floor `stats` is under, as `VIG 5 < 12`.
-pub fn floor_violations(stats: &[u16; STAT_COUNT], floors: &[u16; STAT_COUNT]) -> Vec<String> {
-    FLOOR_STATS
+/// Each floor `stats` is under, as `VIG 5 < 12`: the [`floor_stats`] of a build casting `spells`.
+pub fn floor_violations(
+    stats: &[u16; STAT_COUNT],
+    floors: &[u16; STAT_COUNT],
+    spells: &[String],
+) -> Vec<String> {
+    floor_stats(spells)
         .iter()
         .filter(|&&index| stats[index] < floors[index])
         .map(|&index| {
@@ -486,7 +516,7 @@ pub fn raise_to_floors(backend: &dyn RecommenderBackend, state: &mut PanelState)
     loop {
         let floors = backend.floors(state.sl());
         let mut moved = false;
-        for &index in &FLOOR_STATS {
+        for &index in floor_stats(&state.spells) {
             let before = state.stats[index];
             if before < floors[index] {
                 state.set_stat(index, floors[index]);
@@ -528,7 +558,7 @@ pub fn ask(backend: &dyn RecommenderBackend, state: &PanelState) -> Answer {
     };
     match state.mode {
         Mode::WeaponsForStats | Mode::SimilarBuilds => {
-            let violations = floor_violations(&state.stats, &backend.floors(sl));
+            let violations = floor_violations(&state.stats, &backend.floors(sl), &state.spells);
             if !violations.is_empty() {
                 return Answer::FloorViolations(violations);
             }
@@ -697,7 +727,7 @@ pub fn generate(
                 *floor = 0;
             }
         }
-        floor_violations(&build.stats, &floors)
+        floor_violations(&build.stats, &floors, &state.spells)
     };
     if violations.is_empty() {
         Ok(build)
@@ -1260,10 +1290,8 @@ mod tests {
             state.mode = mode;
             match ask(&StubBackend, &state) {
                 Answer::FloorViolations(lines) => {
-                    assert_eq!(
-                        lines,
-                        ["VIG 6 < 10", "VIT 6 < 7", "ATT 6 < 10", "ADP 6 < 8"]
-                    );
+                    // No spells chosen, so no ATT floor.
+                    assert_eq!(lines, ["VIG 6 < 10", "VIT 6 < 7", "ADP 6 < 8"]);
                 }
                 other => panic!("{mode:?} answered {other:?} for a fresh Deprived"),
             }
@@ -1281,9 +1309,12 @@ mod tests {
             stats: [6; STAT_COUNT],
             ..PanelState::default()
         };
-        assert!(!floor_violations(&state.stats, &StubBackend.floors(state.sl())).is_empty());
+        let violations = |state: &PanelState| {
+            floor_violations(&state.stats, &StubBackend.floors(state.sl()), &state.spells)
+        };
+        assert!(!violations(&state).is_empty());
         assert!(raise_to_floors(&StubBackend, &mut state));
-        assert!(floor_violations(&state.stats, &StubBackend.floors(state.sl())).is_empty());
+        assert!(violations(&state).is_empty());
         // Stats already over their floors are left as they are.
         assert_eq!(state.stats[1], 6);
         assert!(!raise_to_floors(&StubBackend, &mut state));
@@ -1341,7 +1372,9 @@ mod tests {
         };
         state.stats[0] = 1;
         assert!(raise_to_floors(&Rising, &mut state));
-        assert!(floor_violations(&state.stats, &Rising.floors(state.sl())).is_empty());
+        assert!(
+            floor_violations(&state.stats, &Rising.floors(state.sl()), &state.spells).is_empty()
+        );
     }
 
     /// Weapons for stats ranks by the panel's objective: Bleed there reaches the backend as Bleed.
@@ -1465,7 +1498,9 @@ mod tests {
             ..PanelState::default()
         };
         let refused = generate(&Strict, &state, None).expect_err("under every floor");
-        assert_eq!(refused.lines.len(), FLOOR_STATS.len());
+        // No spells: VIG, VIT and ADP, never ATT.
+        assert_eq!(refused.lines.len(), floor_stats(&state.spells).len());
+        assert!(refused.lines.iter().all(|line| !line.starts_with("ATT")));
         let ignoring = PanelState {
             ignore_floors: true,
             ..state.clone()
@@ -1478,6 +1513,27 @@ mod tests {
             generate(&StubBackend, &PanelState::default(), None).is_err(),
             "no weapon"
         );
+    }
+
+    /// ATT has a floor only for a build that casts something other than Warmth.
+    #[test]
+    fn attunement_is_floored_only_with_spells() {
+        let (stats, floors) = ([1; STAT_COUNT], [10; STAT_COUNT]);
+        let att = |lines: Vec<String>| lines.iter().any(|line| line.starts_with("ATT"));
+        let keys = |keys: &[&str]| keys.iter().map(|&key| key.to_owned()).collect::<Vec<_>>();
+        assert!(!att(floor_violations(&stats, &floors, &[])));
+        assert!(!att(floor_violations(&stats, &floors, &keys(&["Warmth"]))));
+        assert!(!att(floor_violations(
+            &stats,
+            &floors,
+            &keys(&["Warmth", "Warmth"])
+        )));
+        assert!(att(floor_violations(&stats, &floors, &keys(&["Heal"]))));
+        assert!(att(floor_violations(
+            &stats,
+            &floors,
+            &keys(&["Warmth", "Heal"])
+        )));
     }
 
     /// The measured case: a Sorcerer's panel generated a Warrior at SL 90 and the apply wrote it,
