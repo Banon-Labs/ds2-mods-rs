@@ -160,6 +160,31 @@ from an unidentified source. It then applies hyperarmor (next subsection). It su
   OKH R1 (34010011): hitbox 23-28, lock 0-25, 111500 26-36, hyperarmor 20-30, end 70; speeds 1.2/1.1.
 - Caveat: the TAE gives animation-time events. Actual chaining is governed by the state machine (not in
   params, not traced), so "recovery" is the INFERRED 111500/120100 windows, not a verified cancel frame.
+- **111500's reader** (EXE, read 2026-10-01): its handler (`parseDamageActionTae` `0x140326240`) counts
+  `flags+0x5c0` up and down; in `0x140300000-0x140360000` the only other access is the track's destructor
+  (`0x140325fe0`) undoing it. The consumer that would make it a chain or cancel window was not found.
+
+### Reach, startup and recovery (`--best-weapons --json` `metrics`)
+
+- **Hitbox shape** (REGULATION; `scripts/ds2-hit-shape.py <weapon>` prints it): each PlayerDamageParam
+  row has `hitDummyPolyType`/`hitDummyPolyId` (where the hitbox starts: type 1 id 100 for every weapon
+  swing), `hitModelType`, `radius` and `length` in metres (paramdef Ban Jing [m], Chang sa[m]), and `childDamage`,
+  a further hitbox in the same `damageGroup`. WeaponParam `damageHitRadiusScale`/`damageHitLengthScale`
+  (+0x98/+0x9c) differ per weapon where a class shares its rows: Spear 0.75, Winged Spear 1.0, Pike 1.05
+  on the same 1.55 m row; Dagger and Rapier 0.7; Giant Warrior Club radius 1.4, length 0.7.
+- The Whip's swing is three capsules on dummy polys 100, 101, 102 (1.0 + 1.1 + 0.2 m); a Greatsword's child
+  is a 0.4 m sphere on the same dummy poly 100; a spear's child sits on body dummy poly 1.
+- EXE: TAE 2200 (`parseDamageTae` `0x1403269e0`) copies the slot's `sHitboxData` (damage id, hand, then
+  hitbox radius/length and recoil radius/length scales at +0x8..+0x14, defaults 1.0) into the active hitbox.
+  Where those scales are filled was not traced, so that they are WeaponParam +0x98..+0xa4 is INFERRED
+  from the matching order. The 2200 handler also drains stamina (`drainStamina` `0x1403335d0`).
+- **`reach_m`** = (sum of the lengths on distinct weapon dummy polys, id 100 up) x length scale + the last
+  segment's radius x radius scale, the longest R1 hitbox. INFERRED composition; it is the hitbox's extent
+  from dummy poly 100, not the distance from the attacker (the animation's own travel is not read).
+- **`startup_s`** = first live 2200 frame / 30 / mean play speed; **`recovery_s`** = animation end (TAE
+  101100's end) minus the last live 2200 frame, same scale. INFERRED: the player is free at the animation's
+  end; an earlier roll/block cancel is not read. **`damage_per_5s`**: the `--window` sum over 5 s of
+  repeated R1 chain. The `score` is unchanged.
 
 ## 4. Multi-hit attacks (Channeler's Trident validation)
 
