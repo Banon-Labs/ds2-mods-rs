@@ -31,6 +31,23 @@ pub const WEAPON_TEXTURE: [f32; 2] = [128.0, 256.0];
 /// band shows the art at the texture's own size in the smallest box that holds any of it.
 pub const WEAPON_ART: [f32; 4] = [0.0, 28.0, 128.0, 220.0];
 
+/// [`WEAPON_ART`] as fractions of [`WEAPON_TEXTURE`], which is how [`crate::panels::item_icon`]
+/// takes a crop: the one weapon icon smaller than 128x256 shows the same band of its art.
+pub const WEAPON_ART_FRACTION: [f32; 4] = [
+    WEAPON_ART[0] / WEAPON_TEXTURE[0],
+    WEAPON_ART[1] / WEAPON_TEXTURE[1],
+    WEAPON_ART[2] / WEAPON_TEXTURE[0],
+    WEAPON_ART[3] / WEAPON_TEXTURE[1],
+];
+
+/// The band of ANY item's icon its art is drawn in, as fractions of the texture: what a slot that
+/// can hold a weapon, a ring, a piece of armour or a quick item shows.
+///
+/// The game draws every icon into one 64x128 box, whatever its own size, so every kind's art lands
+/// in the same place. `scripts/ds2-item-icons.py measure --kind ...` puts all of it between rows
+/// 24/256 (armour) and 118/128 (items), and this keeps a row either side of that.
+pub const SLOT_ART: [f32; 4] = [0.0, 23.0 / 256.0, 1.0, 119.0 / 128.0];
+
 /// The id item `item`'s icon is filed under.
 #[must_use]
 pub fn icon_id(item: u32) -> u32 {
@@ -110,6 +127,39 @@ mod tests {
                 (0..icon.width).all(|x| !inked(x, y)),
                 "the Longsword has ink in row {y}, outside the band"
             );
+        }
+    }
+
+    /// The band a slot shows holds the art of every kind of item, at both texture sizes: a weapon,
+    /// a ring, armour at 128x256 and at 64x128, and a quick item.
+    #[test]
+    fn every_kinds_art_is_inside_the_slot_band() {
+        let [x0, y0, x1, y1] = SLOT_ART;
+        assert!(x0 >= 0.0 && y0 >= 0.0 && x1 <= 1.0 && y1 <= 1.0 && y0 < y1);
+        let Some(game) = game() else {
+            eprintln!("no DARK SOULS II install here; skipped");
+            return;
+        };
+        let archive = Archive::open(&game).expect("archive");
+        for (item, what) in [
+            (1_220_000, "the Longsword"),
+            (40_040_002, "ring 40040002"),
+            (21_500_101, "armour 21500101"),
+            (23_050_102, "the Smelter Demon Gauntlets"),
+            (60_010_000, "the Lifegem"),
+            (60_540_000, "the Throwing Knife"),
+        ] {
+            let icon = load(&archive, item).unwrap_or_else(|why| panic!("{what}: {why}"));
+            let (top, bottom) = (y0 * icon.height as f32, y1 * icon.height as f32);
+            let inked = |x: usize, y: usize| icon.rgba[(y * icon.width + x) * 4 + 3] >= 32;
+            for y in (0..icon.height).filter(|&y| (y as f32) < top || (y as f32) >= bottom) {
+                assert!(
+                    (0..icon.width).all(|x| !inked(x, y)),
+                    "{what} ({}x{}) has ink in row {y}, outside the band",
+                    icon.width,
+                    icon.height
+                );
+            }
         }
     }
 

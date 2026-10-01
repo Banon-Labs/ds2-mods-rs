@@ -3,13 +3,17 @@
 
     python3 scripts/ds2-item-icons.py locate [--id 1220000 ...]
     python3 scripts/ds2-item-icons.py table [--out crates/ds2-overlay/data/item-icons.tsv]
-    uv run --with pillow python3 scripts/ds2-item-icons.py measure [--id 1620000 ...]
-    uv run --with pillow python3 scripts/ds2-item-icons.py png --id 1220000 --out <dir>
+    uv run --with pillow python3 scripts/ds2-item-icons.py measure [--kind armor] [--id 1620000 ...]
+    uv run --with pillow python3 scripts/ds2-item-icons.py png [--kind ring] --id 1220000 --out <dir>
+    uv run --with pillow python3 scripts/ds2-item-icons.py categories --out <sheet.png>
 
-`measure` reads every weapon's icon (every `ItemParam` row with a `WeaponParam` id: weapons,
-shields and catalysts) and says how big the texture is and where its ink is -- the box around the
-pixels at least an eighth opaque -- so a layout can be sized to the art rather than to a guess.
-`png` writes icons at their own size, for a design canvas to show the real thing.
+`measure` reads every icon of one kind -- by default every weapon's (every `ItemParam` row with a
+`WeaponParam` id: weapons, shields and catalysts), or `--kind armor`, `ring` or `item` -- and says
+how big the texture is and where its ink is -- the box around the pixels at least an eighth
+opaque -- so a layout can be sized to the art rather than to a guess. `png` writes icons at their
+own size, for a design canvas to show the real thing. `categories` draws the inventory tabs'
+category icons on one labelled sheet. The Equipment page does NOT draw those in an empty slot:
+its silhouettes are frames of a layout sprite, `FE_EQUIP_EMPTY_ART` in `crates/ds2-rva`.
 
 The executable builds an item icon's path as `icon:/tex/Icon/` + `IC_%010d.tpf`
 (docs/DS2-ITEM-REQUIREMENTS.md). `GameDataEbl` keys its entries by a hash of the archive path, not
@@ -138,8 +142,21 @@ def table(ebl, out: Path) -> int:
 INK_ALPHA = 32
 
 
-def weapon_icons(ebl):
-    """`(item, icon id, RGBA image)` for every `ItemParam` row with a `WeaponParam` id."""
+#: Which `ItemParam` rows each `--kind` reads. A weapon names a `WeaponParam` row at +0x14 and an
+#: armour piece an `ArmorParam` row at +0x18 (`scripts/ds2-reinforce-max.py`). Rings and the rest
+#: have no such link here, so they go by the id ranges `items.tsv` shows: every ring is a
+#: 40000000-41999999 row (Third Dragon Ring 40040002, Flynn's Ring 41100000), and consumables,
+#: ammunition and keys are 50000000 and up (Estus Flask 60155010, Wood Bolt 60910000).
+KINDS = {
+    "weapon": lambda item, fields: fields[5] != -1,
+    "armor": lambda item, fields: fields[6] != -1,
+    "ring": lambda item, fields: 40000000 <= item < 42000000 and fields[5] == fields[6] == -1,
+    "item": lambda item, fields: item >= 50000000 and fields[5] == fields[6] == -1,
+}
+
+
+def item_icons(ebl, kind: str = "weapon"):
+    """`(item, icon id, RGBA image)` for every `ItemParam` row of `kind` (see [`KINDS`])."""
     import io
 
     from PIL import Image
@@ -149,9 +166,10 @@ def weapon_icons(ebl):
     members = reg.load(reg.DEFAULT_REGULATION, reg.REGULATION_KEY_HEX)
     items = reg.Param("ItemParam.param", members["ItemParam.param"])
     _archive, bdt, header = next(headers(ebl))
+    keep = KINDS[kind]
     for index, item in enumerate(items.ids):
         fields = struct.unpack_from("<21i", items.row(index), 0)
-        if fields[5] == -1:
+        if not keep(item, fields):
             continue
         icon = fields[0] or item
         path = ICON_PATH.format(id=icon)
@@ -180,13 +198,13 @@ def spread(values: list[int]) -> str:
     )
 
 
-def measure(ebl, ids: list[int]) -> int:
+def measure(ebl, ids: list[int], kind: str) -> int:
     from collections import Counter
 
     sizes: Counter = Counter()
     boxes: dict[tuple[int, int], list[tuple[int, int, int, int]]] = {}
     missing = []
-    for item, icon, image in weapon_icons(ebl):
+    for item, icon, image in item_icons(ebl, kind):
         if image is None:
             missing.append(item)
             continue
@@ -197,7 +215,7 @@ def measure(ebl, ids: list[int]) -> int:
         if item in ids:
             print(f"  {item} (icon {icon}): texture {image.size[0]}x{image.size[1]}, ink {box}"
                   + (f" = {box[2] - box[0]}x{box[3] - box[1]}" if box else ""))
-    print(f"weapon icons by texture size: {dict(sizes)}; no icon: {missing}")
+    print(f"{kind} icons by texture size: {dict(sizes)}; no icon: {missing}")
     for size, found in boxes.items():
         print(f"{size[0]}x{size[1]}, {len(found)} icons with ink:")
         print(f"  ink width   {spread([b[2] - b[0] for b in found])}")
@@ -212,10 +230,10 @@ def measure(ebl, ids: list[int]) -> int:
     return 0 if sizes else 1
 
 
-def png(ebl, ids: list[int], out: Path) -> int:
+def png(ebl, ids: list[int], out: Path, kind: str) -> int:
     out.mkdir(parents=True, exist_ok=True)
     written = 0
-    for item, icon, image in weapon_icons(ebl):
+    for item, icon, image in item_icons(ebl, kind):
         if item in ids and image is not None:
             target = out / f"ic_{item:010d}.png"
             image.save(target)
@@ -224,23 +242,82 @@ def png(ebl, ids: list[int], out: Path) -> int:
     return 0 if written == len(set(ids)) else 1
 
 
+#: Where an item category's icon is: `Item_Category/IC_CA_%05d.tpf` under `menu:/tex/Icon/`, the
+#: kind-12 case of the icon path builder at 0x14048c3e0, found in `GameDataEbl` by hash.
+CATEGORY_PATH = "/menu/tex/icon/item_category/ic_ca_{id:05d}.tpf"
+#: The inventory's category tabs, from the 36-entry table at 0x14156b120 (`{icon id, 0, name,
+#: 1, group}` in 0x18-byte rows). The names there are Japanese; these are translations of them.
+CATEGORY_NAMES = {
+    10: "dagger", 20: "straight sword", 30: "greatsword", 40: "curved sword",
+    50: "ultra greatsword", 60: "twinblade", 70: "thrusting sword", 80: "axe", 90: "hammer",
+    100: "spear", 110: "fist", 120: "whip", 130: "bow/crossbow", 140: "catalyst", 150: "shield",
+    400: "head", 410: "chest", 420: "hands", 430: "legs", 500: "ring", 600: "arrows & bolts",
+    700: "active item", 710: "passive item", 720: "material", 800: "spell", 900: "gesture",
+    1000: "shop weapon", 1400: "shop armor", 1500: "shop ring", 1600: "shop ammo",
+    1700: "shop item", 1800: "shop spell", 2000: "storage",
+}
+
+
+def categories(ebl, out: Path) -> int:
+    """Every item category icon the archive holds, as one labelled sheet at `out`."""
+    import io
+
+    from PIL import Image, ImageDraw
+
+    tpf = load_module("ds2_tpf", "ds2-tpf.py")
+    _archive, bdt, header = next(headers(ebl))
+    icons = []
+    for cid in range(0, 10000, 10):
+        path = CATEGORY_PATH.format(id=cid)
+        entry = header.entries.get(ebl.path_hash(path))
+        if entry is None:
+            continue
+        size, offset, aes, _bucket = entry
+        blob = ebl.dcx_decompress(ebl.read_entry(bdt, size, offset, aes, path))
+        image = Image.open(io.BytesIO(tpf.textures(blob)[0]["payload"])).convert("RGBA")
+        icons.append((cid, image))
+        print(f"  {cid:5d}  {image.size[0]}x{image.size[1]}  {CATEGORY_NAMES.get(cid, '(no tab)')}")
+    print(f"{len(icons)} category icons at {CATEGORY_PATH}")
+    cell, label, columns = 96, 30, 8
+    rows = -(-len(icons) // columns)
+    sheet = Image.new("RGBA", (columns * cell, rows * (cell + label)), (40, 36, 32, 255))
+    draw = ImageDraw.Draw(sheet)
+    for n, (cid, image) in enumerate(icons):
+        x, y = (n % columns) * cell, (n // columns) * (cell + label)
+        scale = min(cell / image.size[0], cell / image.size[1])
+        shown = image.resize((int(image.size[0] * scale), int(image.size[1] * scale)))
+        sheet.alpha_composite(shown, (x + (cell - shown.size[0]) // 2, y))
+        draw.text((x + 3, y + cell + 2), str(cid), fill=(255, 255, 255, 255))
+        draw.text((x + 3, y + cell + 14), CATEGORY_NAMES.get(cid, "")[:15], fill=(200, 190, 170, 255))
+    out.parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(out)
+    print(f"sheet -> {out}")
+    return 0 if icons else 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument("action", choices=["locate", "table", "measure", "png"])
+    parser.add_argument("action", choices=["locate", "table", "measure", "png", "categories"])
     parser.add_argument("--id", type=int, action="append", dest="ids")
+    parser.add_argument("--kind", choices=sorted(KINDS), default="weapon",
+                        help="which items `measure` and `png` read (default: weapon)")
     parser.add_argument("--out", type=Path, default=DEFAULT_TABLE)
     args = parser.parse_args()
     ebl = load_module("ds2_ebl", "ds2-ebl.py")
     if args.action == "table":
         return table(ebl, args.out)
     if args.action == "measure":
-        return measure(ebl, args.ids or [])
+        return measure(ebl, args.ids or [], args.kind)
     if args.action == "png":
         if not args.ids or args.out == DEFAULT_TABLE:
             parser.error("png needs --id and an --out directory")
-        return png(ebl, args.ids, args.out)
+        return png(ebl, args.ids, args.out, args.kind)
+    if args.action == "categories":
+        if args.out == DEFAULT_TABLE:
+            parser.error("categories needs --out <sheet.png>")
+        return categories(ebl, args.out)
     return locate(ebl, args.ids or DEFAULT_IDS)
 
 

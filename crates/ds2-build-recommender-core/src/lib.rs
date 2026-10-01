@@ -15,6 +15,8 @@
 //!   ported, over the data file its `--export-backend` writes.
 //! * [`flex`] -- a build's weapon flexibility, how it ranks among its stat neighbours, and the
 //!   line the panel shows for it.
+//! * [`paperdoll`] -- a generated build slot by slot, as the game's Equipment page lays it out
+//!   and as Apply leaves the character.
 //!
 //! [`backend::to_import`] is the seam to `ds2-build-import`: a generated build becomes the same
 //! [`ds2_build_import_core::Build`] a soulsplanner link does, plus the extra copies the planner's
@@ -25,6 +27,7 @@ pub mod corpus;
 pub mod flex;
 pub mod model;
 pub mod nav;
+pub mod paperdoll;
 pub mod weapons;
 
 pub use backend::{

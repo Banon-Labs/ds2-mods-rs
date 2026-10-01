@@ -317,9 +317,10 @@ pub enum IconDraw {
 
 /// Draw item `id`'s inventory icon inside `min`-`max`, centred, as large as its shape allows.
 ///
-/// Only `crop` of it is drawn (`x0, y0, x1, y1` in the texture's pixels, such as
-/// [`crate::item_icon::WEAPON_ART`]) when the texture holds all of it, and the whole texture
-/// otherwise. A box the crop's own size draws it one texture pixel to one screen pixel.
+/// Only `crop` of it is drawn: `x0, y0, x1, y1` as fractions of the icon's own width and height,
+/// such as [`crate::item_icon::WEAPON_ART_FRACTION`], so one crop serves icons of every size -- a
+/// ring's is 64x128, a weapon's 128x256. An invalid crop draws the whole texture. A box the size
+/// of the crop's pixels draws it one texture pixel to one screen pixel.
 ///
 /// An icon not yet on the GPU is read from the archive before the next frame, and until then this
 /// answers [`IconDraw::Loading`] and draws nothing.
@@ -340,9 +341,13 @@ pub fn item_icon(
     if let Some(slot) = icons.slots.iter_mut().find(|slot| slot.item == id) {
         slot.drawn = frame;
         let (w, h) = (slot.size[0] as f32, slot.size[1] as f32);
-        let [x0, y0, x1, y1] = crop
-            .filter(|crop| crop[0] >= 0.0 && crop[1] >= 0.0 && crop[2] <= w && crop[3] <= h)
-            .unwrap_or([0.0, 0.0, w, h]);
+        let [fx0, fy0, fx1, fy1] = crop
+            .filter(|crop| {
+                crop[0] >= 0.0 && crop[1] >= 0.0 && crop[0] < crop[2] && crop[1] < crop[3]
+            })
+            .filter(|crop| crop[2] <= 1.0 && crop[3] <= 1.0)
+            .unwrap_or([0.0, 0.0, 1.0, 1.0]);
+        let [x0, y0, x1, y1] = [fx0 * w, fy0 * h, fx1 * w, fy1 * h];
         let (src_w, src_h) = (x1 - x0, y1 - y0);
         let (box_w, box_h) = (max[0] - min[0], max[1] - min[1]);
         let scale = (box_w / src_w).min(box_h / src_h);
@@ -554,6 +559,90 @@ pub fn refusal_mark(list: &hudhook::imgui::DrawListMut<'_>, at: [f32; 2], size: 
         [1.0, 1.0, 1.0, 1.0],
     );
     if drawn { size + size * 0.3 } else { 0.0 }
+}
+
+/// An Equipment-page slot, by the silhouette the page draws in it while it is empty.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmptySlot {
+    /// Right weapon 1 to 3: a sword.
+    RightWeapon,
+    /// Left weapon 1 to 3: a shield.
+    LeftWeapon,
+    /// The head.
+    Head,
+    /// The chest.
+    Chest,
+    /// The hands.
+    Hands,
+    /// The legs.
+    Legs,
+    /// Ring 1 to 4.
+    Ring,
+    /// A belt (quick item) slot.
+    Item,
+    /// An arrow slot.
+    Arrows,
+    /// A bolt slot.
+    Bolts,
+}
+
+impl EmptySlot {
+    /// The sequence the page plays for this kind of slot, which `ds2_rva::FE_EQUIP_EMPTY_ART` is
+    /// keyed by.
+    const fn sequence(self) -> u32 {
+        match self {
+            Self::RightWeapon => ds2_rva::FE_EQUIP_EMPTY_RIGHT_WEAPON,
+            Self::LeftWeapon => ds2_rva::FE_EQUIP_EMPTY_LEFT_WEAPON,
+            Self::Head => ds2_rva::FE_EQUIP_EMPTY_HEAD,
+            Self::Chest => ds2_rva::FE_EQUIP_EMPTY_CHEST,
+            Self::Hands => ds2_rva::FE_EQUIP_EMPTY_HANDS,
+            Self::Legs => ds2_rva::FE_EQUIP_EMPTY_LEGS,
+            Self::Ring => ds2_rva::FE_EQUIP_EMPTY_RING,
+            Self::Item => ds2_rva::FE_EQUIP_EMPTY_ITEM,
+            Self::Arrows => ds2_rva::FE_EQUIP_EMPTY_ARROWS,
+            Self::Bolts => ds2_rva::FE_EQUIP_EMPTY_BOLTS,
+        }
+    }
+}
+
+/// Draw the Equipment page's own empty-slot silhouette for `slot`, centred in `min`-`max`.
+///
+/// Sized so that the largest of the ten would span `fill` of the box's shorter side, every one at
+/// the size the page gives it against the others, and drawn at the ink's own alpha: the page's is
+/// for its light plate and fades this dark art to nothing on a dark slot (see
+/// `ds2_rva::FE_EQUIP_EMPTY_ART`). Answers `false`, drawing nothing, when the atlas did not load.
+pub fn empty_slot(
+    list: &DrawListMut<'_>,
+    slot: EmptySlot,
+    min: [f32; 2],
+    max: [f32; 2],
+    fill: f32,
+) -> bool {
+    let size = |(_, rect, scale): &(u32, [f32; 4], f32)| {
+        [(rect[2] - rect[0]) * scale, (rect[3] - rect[1]) * scale]
+    };
+    let largest = ds2_rva::FE_EQUIP_EMPTY_ART
+        .iter()
+        .map(size)
+        .fold(0.0_f32, |most, [w, h]| most.max(w).max(h));
+    let Some(art) = ds2_rva::FE_EQUIP_EMPTY_ART
+        .iter()
+        .find(|(sequence, ..)| *sequence == slot.sequence())
+    else {
+        return false;
+    };
+    let k = (max[0] - min[0]).min(max[1] - min[1]) * fill / largest;
+    let [w, h] = size(art);
+    let centre = [(min[0] + max[0]) * 0.5, (min[1] + max[1]) * 0.5];
+    let half = [w * k * 0.5, h * k * 0.5];
+    sprite(
+        list,
+        Atlas::InGame01,
+        art.1,
+        [centre[0] - half[0], centre[1] - half[1]],
+        [centre[0] + half[0], centre[1] + half[1]],
+        [1.0, 1.0, 1.0, 1.0],
+    )
 }
 
 /// The folder holding `DarkSoulsII.exe`, which is this process's executable.

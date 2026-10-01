@@ -51,6 +51,41 @@ here was measured in the running game.
 swaps one id for another when a float argument is under a threshold, which reads like a broken
 weapon's icon standing in for the whole one. Not traced further.
 
+### Every kind of icon, and what an empty slot shows instead (2026-09-30)
+
+Not every icon is 128x256. `scripts/ds2-item-icons.py measure --kind armor` (`ring`, `item`) reads
+them all: armour comes at 128x256 and at 64x128, every ring at 64x128, and almost every other item
+at 64x128. The game draws each into the same 64x128 box -- the cell's `yubiwa_test` placeholder at
+`FE_ITEM_ICON_SCALE` -- so a 128x256 icon is drawn at half its pixels and every icon's art lands in
+the same place. Across all four kinds the ink lies between 24/256 and 118/128 of the texture's
+height, and that band with a row either side is what the recommender's paperdoll shows in a slot
+(`SLOT_ART`, `crates/ds2-overlay/src/item_icon.rs`).
+
+Armour has a second file per piece, under its id plus 1000000000 (`ic_1021500101.tpf` beside
+`ic_0021500101.tpf`, the same size), and that is the one the Equipment page asked for while the
+test character wore the piece. What picks between the two was not traced; the paperdoll draws the
+first, under the item's own id.
+
+An empty slot shows no icon at all. `scripts/frida/equip-slot-icons.js` logged every icon the
+Equipment page asked for while it opened: the equipped items by id, never an item category's
+`Item_Category/IC_CA_%05d.tpf`, which had been the guess. The silhouette is a frame of a layout
+sprite instead: the page's setup code plays one sequence per kind of slot on sprite `0x0109` of
+`l02_01_In-Game.flo`, whose ten frames are ten quads of `In-game_01`. `FE_EQUIP_EMPTY_ART` in
+`crates/ds2-rva` carries the chain from the setup code to the rects.
+
+| Slots | Sequence | Shape |
+|---|---|---|
+| Right weapon 1 to 3 | 111 | `0x00f7` |
+| Left weapon 1 to 3 | 110 | `0x00f9` |
+| Head | 213 | `0x00f5` |
+| Chest | 217 | `0x0103` |
+| Hands | 216 | `0x0101` |
+| Legs | 218 | `0x0105` |
+| Ring 1 to 4 | 212 | `0x0107` |
+| Belt (quick items) 1 to 10 | 215 | `0x00ff` |
+| Arrows 1 and 2 | 209 | `0x00fb` |
+| Bolts 1 and 2 | 214 | `0x00fd` |
+
 ## The infusion mark is nine sibling elements, and the bind switches one on
 
 `FUN_1400bc850` at `0x1400bc850` is the item-cell bind -- one call per visible row per refresh,
