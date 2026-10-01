@@ -19,7 +19,7 @@ use ds2_build_import_core::Infusion;
 use ds2_build_recommender_core::backend::{
     self, Change, Limits, Outcome, RecommenderBackend, RefusalKind, ResultRow,
 };
-use ds2_build_recommender_core::corpus::CorpusBackend;
+use ds2_build_recommender_core::corpus::{AGL_TARGET, CorpusBackend, agility};
 use ds2_build_recommender_core::model::{
     Grip, Mode, Objective, PanelState, STAT_COUNT, StatusFilter, WeaponsForOpts, soul_level,
 };
@@ -702,6 +702,37 @@ fn optimize_with_spells_is_the_scripts() {
                 assert_eq!(got.gear, rings, "{case}: the rings worn in place of points");
             }
             (got, want) => panic!("{case}: {got:?} vs {want:?}"),
+        }
+    }
+}
+
+/// `AGL_TARGET`: the no-spell Uchigatana (Lightning) at SL 155 levels ADP to AGL 100 exactly and no
+/// further; at SL 40 the points do not reach it. Its rings (Ring of the Embedded: VGR/END/VIT;
+/// Ring of Blades) touch neither ADP nor ATT, so the levelled stats' AGL is the worn one.
+#[test]
+fn agility_stops_at_the_target() {
+    for (sl, reaches) in [(155, true), (40, false)] {
+        let asked = keys(&[]);
+        let limits = Limits {
+            spells: &asked,
+            floors: true,
+            ..Limits::NONE
+        };
+        let got = backend()
+            .optimize(
+                "Uchigatana",
+                infusion("L"),
+                sl,
+                objective("damage"),
+                Grip::TwoHanded,
+                &limits,
+            )
+            .expect("a build");
+        let agl = agility(i32::from(got.stats[6]), i32::from(got.stats[3]));
+        if reaches {
+            assert_eq!(agl, AGL_TARGET, "SL {sl}: {:?}", got.stats);
+        } else {
+            assert!(agl < AGL_TARGET, "SL {sl}: {:?}", got.stats);
         }
     }
 }

@@ -117,6 +117,14 @@ const GENERATE_WINDOW: f64 = 1.5;
 /// and two-handed each counted) gains `FLEX_WEIGHT * d / n` on top of its objective weight.
 const FLEX_WEIGHT: f64 = 0.02;
 
+/// The script's `AGL_TARGET`: the displayed AGL past which the optimizer buys no more agility.
+///
+/// The script's comment carries the evidence. AGL is read at the stats the worn rings give; ADP
+/// and ATT gain on their
+/// agility curve up to it and nothing past it. The corpus' median build reaches AGL 100 at SL
+/// 126-175, and AGL 100 is where `useItemSpeedScale` caps at 1.20.
+pub const AGL_TARGET: i32 = 100;
+
 /// The script's `LOAD_SCARCE_FROM` and `LOAD_SCARCE_FULL`: armour weight starts to count against
 /// defense below the first number of weapons wielded one-handed, fully at the second. Measured by
 /// the script's `--load-evidence` over the corpus: builds wielding fewer weapons carry less load.
@@ -2559,18 +2567,24 @@ impl CorpusBackend {
         }
         curves.push((VIT, Curve::Load));
         curves.push((ATT, Curve::Agility));
-        let value = |curve: Curve, st: &Stats| -> f64 {
+        // ADP and ATT by displayed AGL, which gains nothing past AGL_TARGET (`uncapped` false);
+        // the early rate is read off the uncapped curve, so below the target a point of AGL weighs
+        // against a point of damage as it did before. ATT the spells raised already counts toward
+        // the target, so ADP buys only what is left. Under poison ADP is a damage stat.
+        let curve_value = |curve: Curve, st: &Stats, uncapped: bool| -> f64 {
             let st = worn(st);
             match curve {
                 Curve::Objective => {
                     self.objective_value(weapon, infusion, &st, objective, defense, rings)
                 }
-                Curve::Agility => f64::from(agility(st[ADP], st[ATT])),
+                Curve::Agility if uncapped => f64::from(agility(st[ADP], st[ATT])),
+                Curve::Agility => f64::from(agility(st[ADP], st[ATT]).min(AGL_TARGET)),
                 Curve::HitPoints => self.hit_points(&st),
                 Curve::Stamina => self.tables.stamina_max.at(st[END]),
                 Curve::Load => self.tables.equip_load.at(st[VIT]),
             }
         };
+        let value = |curve: Curve, st: &Stats| curve_value(curve, st, false);
         let with = |st: &Stats, stat: usize, to: i32| {
             let mut next = *st;
             next[stat] = to;
@@ -2588,13 +2602,13 @@ impl CorpusBackend {
                 if free < 0 {
                     continue;
                 }
-                // Each stat weighted by its own curve's early rate, from 5 to 25.
+                // Each stat weighted by its own curve's early rate, from 5 to 25, AGL's uncapped.
                 let mut peak: Vec<f64> = curves
                     .iter()
                     .map(|&(stat, curve)| {
                         py_max(
-                            (value(curve, &with(&st, stat, 25))
-                                - value(curve, &with(&st, stat, 5)))
+                            (curve_value(curve, &with(&st, stat, 25), true)
+                                - curve_value(curve, &with(&st, stat, 5), true))
                                 / 20.0,
                             1e-9,
                         )
