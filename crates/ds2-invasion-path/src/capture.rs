@@ -255,7 +255,7 @@ pub(crate) fn arm(player: [f32; 3]) {
                 *slot = None;
             }
             if RELATCH_REPORTS
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
                     left.checked_sub(1)
                 })
                 .is_ok()
@@ -497,7 +497,7 @@ fn acquire(at: usize, len: Extent, how: &str, player: [f32; 3]) {
     HAVE.store(true, Ordering::Relaxed);
     // Budgeted for the same reason as the re-latch line: acquisition can happen more than once.
     if ACQUIRE_REPORTS
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
             left.checked_sub(1)
         })
         .is_ok()

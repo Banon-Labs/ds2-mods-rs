@@ -1183,7 +1183,7 @@ mod windows_impl {
                     screen[1] * ARROW_BARB_SHARE,
                 );
                 let ready = ARROW_COUNTDOWN
-                    .fetch_update(
+                    .try_update(
                         core::sync::atomic::Ordering::Relaxed,
                         core::sync::atomic::Ordering::Relaxed,
                         |left| Some(left.saturating_sub(1)),
