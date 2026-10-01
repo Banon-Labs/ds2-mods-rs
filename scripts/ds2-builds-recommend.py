@@ -171,6 +171,8 @@ class Data:
         self.hit_flat = {}  # PlayerDamageParam row -> DMG key -> flat attack (regulation_hit_flat)
         self.damage_scale = {}  # weapon key -> WeaponParam.damageScale where not 1.0 (regulation_damage_scale)
         self.ring_attack = {}  # ring key -> DMG key -> flat attack add (regulation_ring_attack)
+        self.ranged = {}  # launcher key -> its ammo type, hand scale and special shots (regulation_ranged)
+        self.ammo = {}  # ammo name -> its arrowType and the shot it adds (regulation_ranged)
         # PhysicalStatsPerLevelStatValuesParam.staminaMax by END, rows 0-99: what a Dragon ring's
         # stamina factor is weighed against (ring_lift); empty when the regulation is not read.
         self.stamina_max = []
@@ -1098,7 +1100,9 @@ def apply_regulation(data: Data) -> str:
             "PhysicalStatsPerLevelStatValuesParam": "PHYS_STATS_PER_LEVEL_STAT_PARAM",
             "SpellParam": "SPELL_PARAM", "WeaponTypeParam": "WEAPON_TYPE_PARAM",
             "PlayerDamageParam": "DAMAGE_PARAM", "SystemDamageParam": "DAMAGE_PARAM",
-            "BulletParam": "BULLET_PARAM", "SystemBulletParam": "BULLET_PARAM"})
+            "BulletParam": "BULLET_PARAM", "SystemBulletParam": "BULLET_PARAM", "ArrowParam": "ARROW_PARAM",
+            "WeaponActionCategoryParam": "WEAPON_ACTION_CATEGORY_PARAM",
+            "WeaponAttackMotionParam": "WEAPON_ATTACK_MOTION_PARAM"})
         names = ex.item_names(reg.GAME_DIR, reg.DEFAULT_REGULATION)
         members = reg.load(reg.DEFAULT_REGULATION, reg.REGULATION_KEY_HEX)
         emevd = ex.load_module("ds2emevd", "ds2-emevd.py")
@@ -1121,7 +1125,7 @@ def apply_regulation(data: Data) -> str:
             + regulation_buffs(data, emevd, members, d, names) + "; " + regulation_ring_attack(data, emevd, members, names)
             + "; " + regulation_weapon_elements(data, d, names)
             + "; " + regulation_damage_scale(data, d, names) + "; " + regulation_status(data, d, names)
-            + "; " + regulation_attack(data, d, names))
+            + "; " + regulation_attack(data, d, names) + "; " + regulation_ranged(data, d, names))
 
 
 def regulation_spells(data: Data, d: dict, names: dict) -> str:
@@ -1390,8 +1394,11 @@ def regulation_weapon_names(data: Data, d: dict, names: dict) -> str:
     renamed = []
     for key, w in data.weapons.items():
         name = w.get("name", key)
-        if norm(name) not in by_name and norm(key) in by_name:
-            w["name"] = names[by_name[norm(key)]]
+        # The site also names one weapon by its key, `Light_Crossbow`: it joins (norm drops the
+        # underscore), but no menu or build says it that way, so the game's spelling replaces it.
+        leaked = "_" in name and norm(name) in by_name and names[by_name[norm(name)]] != name
+        if (norm(name) not in by_name and norm(key) in by_name) or leaked:
+            w["name"] = names[by_name[norm(key) if norm(key) in by_name else norm(name)]]
             # Rows carry the name, and the ranking finds a row's weapon by it.
             data.key_by_name[w["name"]] = key
             renamed.append(f"{name} -> {w['name']}")
@@ -1719,9 +1726,188 @@ def attack_rating(data: Data, weapon: str, inf: str, eff: dict, rings=()) -> dic
             "lightning": ("lightningATKBonus", eff["faith"]),
             "dark": ("darkATKBonus", min(eff["intelligence"], eff["faith"]))}
     for k, (tab, i) in feed.items():
-        if atk.get(k):
-            out[k] = int(atk[k] + add.get(k, 0) + sc.get(k, 0) * _tab(data, tab, i))
+        # A type with a rate and a coefficient but no base still attacks: `AR = (bonus + base) x
+        # rate` (EXE, docs/DS2-DPS-MECHANICS.md "Base, rates and the sum"). The Sanctum Crossbows'
+        # dark is this: darkRate 100, maximumDark 0, dark coefficient 0.4. Enchanted's "magic" is
+        # its INT term on physical, above, unless the row also has a magic base.
+        if atk.get(k) or ((row.get("rate") or {}).get(k) and sc.get(k) and not (inf == "Enchanted" and k == "magic")):
+            out[k] = int(atk.get(k, 0) + add.get(k, 0) + sc.get(k, 0) * _tab(data, tab, i))
     return out
+
+
+#: WeaponTypeParam.shootCategory -> the ArrowParam.arrowType it fires and what it is. REGULATION:
+#: bows are shootCategory 1, greatbows 2, crossbows 3 (every named launcher, 2026-10-01); arrows
+#: are arrowType 1, greatarrows 2, bolts 4. That a bow takes arrows and a crossbow bolts is the
+#: game's rule as players know it (COMMUNITY); the pairing is not read from the executable.
+SHOOT_AMMO = {1: (1, "bow"), 2: (2, "greatbow"), 3: (4, "crossbow")}
+#: The ArrowParam damage set a shot reads. INFERRED: the executable indexes the row's four
+#: (light bullet, heavy bullet, light damage, heavy damage) sets, and the index was not read. For
+#: arrows and greatarrows set 1 is the only set whose damage ids name PlayerDamageParam rows, so a
+#: bow's shot cannot read another. Bolts fill sets 0-2 alike (MV 0.392) and set 3 at MV 0.247;
+#: which launcher reads set 3 is UNPROVEN (the triple-shot Avelyn and Sanctum Repeating Crossbow
+#: are the guess), so every crossbow is scored on set 1, and those two are flagged.
+AMMO_SET = 1
+#: The WeaponActionCategoryParam slot of the Sanctum Crossbows' own shot (their two-handed L2).
+SPECIAL_SLOT = "atkIdOppositeSingle2HandStrong"
+
+
+def regulation_ranged(data: Data, d: dict, names: dict) -> str:
+    """data.ranged: launcher key -> {"ammo": the arrowType it fires, "kind", "hand": WeaponTypeParam
+    rightDamageScale, "special": [its own shots]}; data.ammo: ammo name -> {"type": arrowType,
+    "flat": {DMG key: flat attack}, "status": {"poison"/"bleed": flat build-up}, "mv": damageRate,
+    "lower": damageLower, "row": PlayerDamageParam id}, from ArrowParam set AMMO_SET. Joined by name
+    as regulation_catalysts joins; a launcher is a WeaponParam row whose WeaponTypeParam
+    shootCategory is in SHOOT_AMMO.
+
+    What a shot attacks with (EXE, docs/DS2-DPS-MECHANICS.md "Ranged attack"): a
+    normal shot calls the per-hand attack builder 0x140391fe0 (from 0x14005210b -> 0x140392d51)
+    with the type mask off, and hands it the ammo's ArrowParam light bullet and damage ids; the
+    builder's loop is `AR = ((bonus + base) x rate + D) x k` (docs/DS2-DPS-MECHANICS.md "Base, rates
+    and the sum"), where D is that damage row's damage01..03 per type (0x14038fee0). So the shot
+    carries the launcher's whole attack in every type, infusion included, plus the ammo's flat
+    attack, and the ammo's damageRate is the motion value after the defense. `k` holds
+    WeaponTypeParam.rightDamageScale, 0.9 on every bow, greatbow and crossbow but Avelyn (0.865) and
+    1.0 on every melee weapon (REGULATION, scripts/ds2-ranged-evidence.py scales), so it is kept
+    here and nowhere else. ArrowParam's menu*Attack fields are not this sum and are not read
+    (INFERRED display-only).
+
+    "special": the shots of SPECIAL_SLOT's attack motion that hurt (bulletDamageId0n rows with a
+    damageRate and hitFlagEnemy), each {"types": the row's damage types, "flat", "mv", "lower",
+    "shots": BulletParam.automaticShootNum}. EXE: that builder call (0x1406d5502) sets the type mask
+    (0x1403910f0), so only the row's own types keep their rate: the Sanctum Crossbow's is pure dark,
+    its dark attack + 50 at MV 7.2, the Repeating one's three shots of dark + 5 at MV 1.85
+    (REGULATION). That the call is this attack's is INFERRED from the call site; that the special
+    fires no bolt and so takes no ammo is INFERRED."""
+    by_name = {}
+    for wid, w in d["WeaponParam"].items():
+        by_name.setdefault(norm(names.get(wid, "")), w)
+    pdp, bullets = d["PlayerDamageParam"], d["BulletParam"]
+
+    def row_terms(rid: int):
+        r = pdp.get(str(rid))
+        if not r or r["damageRate"] <= 0:
+            return None
+        flat, status, types = {}, {}, []
+        for n in (1, 2, 3):
+            t, v = r[f"damageType0{n}"], r[f"damage0{n}"]
+            if t in DAMAGE_TYPE:
+                types.append(DAMAGE_TYPE[t])
+                if v:
+                    flat[DAMAGE_TYPE[t]] = flat.get(DAMAGE_TYPE[t], 0) + v
+            elif t in (6, 7) and v:  # the builder's jump table: 6 poison, 7 bleed (0x14038f2d0)
+                k = "poison" if t == 6 else "bleed"
+                status[k] = status.get(k, 0) + v
+        return {"types": types, "flat": flat, "status": status, "mv": r["damageRate"], "lower": r["damageLower"],
+                "row": rid, "enemy": r["hitFlagEnemy"]}
+
+    data.ammo = {}
+    for aid, a in d["ArrowParam"].items():
+        name = names.get(aid, "")
+        terms = row_terms(a[f"lightDamageId{AMMO_SET}"])
+        if name and not name.startswith("<") and terms:
+            data.ammo[name] = {"type": a["arrowType"], **terms}
+    data.ranged = {}
+    for key, w in data.weapons.items():
+        wp = by_name.get(norm(w.get("name", key)))
+        t = wp and d["WeaponTypeParam"].get(str(wp["weaponTypeId"]))
+        if not t or t["shootCategory"] not in SHOOT_AMMO:
+            continue
+        ammo, kind = SHOOT_AMMO[t["shootCategory"]]
+        special = []
+        ac = d["WeaponActionCategoryParam"].get(str(wp["weaponActionCategoryId"])) or {}
+        m = d["WeaponAttackMotionParam"].get(str(ac.get(SPECIAL_SLOT, 0)))
+        for n in (1, 2, 3):
+            s = m and m[f"bulletId0{n}"] and row_terms(m[f"bulletDamageId0{n}"])
+            if s and s["enemy"]:
+                b = bullets.get(str(m[f"bulletId0{n}"])) or {}
+                special.append({**s, "shots": max(1, b.get("automaticShootNum") or 1)})
+        data.ranged[key] = {"ammo": ammo, "kind": kind, "hand": t["rightDamageScale"], "special": special}
+    return (f"{len(data.ranged)} bows/greatbows/crossbows and {len(data.ammo)} ammunition from ArrowParam "
+            f"(set {AMMO_SET}), {sum(1 for r in data.ranged.values() if r['special'])} with a special shot")
+
+
+def ranged_options(data: Data, weapon: str, inf: str, eff: dict, rings=(),
+                   special: bool = True) -> list[tuple[str, dict, dict]]:
+    """Every shot `weapon` (a data.ranged launcher) can fire at stats `eff`: (label, attack per DMG
+    key, the hit's {"mv", "lower", "shots", "status"}), one per ammunition of its arrowType and one
+    per special shot (regulation_ranged). The attack is the shot's: (launcher's attack + the ammo's
+    flat) x the hand scale, the launcher's attack being attack_rating's, rings included. A special
+    keeps only its row's types (the type mask). Status is build-up per hit in the launcher's
+    regulation_status units: the launcher's term plus the ammo's flat x 100 / 2505 (the builder
+    scales the status entries after D is added, docs/DS2-DPS-MECHANICS.md "Status build-up per hit")."""
+    r = data.ranged[weapon]
+    base = attack_rating(data, weapon, inf, eff, rings)
+    out = []
+    for name, a in sorted(data.ammo.items()):
+        if a["type"] != r["ammo"]:
+            continue
+        ar = {k: (base.get(k, 0) + a["flat"].get(k, 0)) * r["hand"] for k in DMG
+              if base.get(k, 0) + a["flat"].get(k, 0)}
+        out.append((name, ar, {"mv": a["mv"], "lower": a["lower"], "shots": 1, "status": a["status"]}))
+    for i, s in enumerate(r["special"] if special else ()):
+        ar ={k: (base.get(k, 0) + s["flat"].get(k, 0)) * r["hand"] for k in s["types"]
+              if base.get(k, 0) + s["flat"].get(k, 0)}
+        out.append(("special shot" + (f" {i + 1}" if len(r["special"]) > 1 else ""), ar,
+                    {"mv": s["mv"], "lower": s["lower"], "shots": s["shots"], "status": s["status"]}))
+    return out
+
+
+#: Status build-up units: 100 / (hpMax[99] + 8 x additionalHp[99]) (regulation_status), the
+#: multiplier the builder puts on a hit's status entries.
+STATUS_UNIT = 100 / 2505
+
+
+def ranged_value(data: Data, weapon: str, inf: str, eff: dict, objective: str, dfn: dict,
+                 rings=(), special: bool = True) -> tuple[float, str, dict]:
+    """The best shot of a launcher by `objective`, as (value, its label, its attack): "damage" is
+    one trigger pull against `dfn` -- hit_damage of the shot at the ammo's damageRate and
+    damageLower, against general physical defense (an arrow's slash/strike/thrust type is not
+    read), x damageScale after the defense, x the special's automaticShootNum; "ar" the shot's
+    summed attack (before the defense and the motion value); "bleed"/"poison" the build-up per
+    hit. Per shot, not per second: the fire rate is the aim/fire/reload loop the TAE files here do
+    not hold (the bow shot animations 40230010/41230010 are not in c000100_pl.tae's unpacked set),
+    so it is not scored. `special` False leaves the special shots out: the best ammunition alone.
+    (0.0, "", {}) when nothing fires."""
+    row = data.weapons[weapon]["infusions"].get(inf) or {}
+    best = (0.0, "", {})
+    for label, ar, hit in ranged_options(data, weapon, inf, eff, rings, special):
+        if objective == "ar":
+            v = sum(ar.values())
+        elif objective in ("bleed", "poison"):
+            if hit["shots"] > 1 or label.startswith("special"):
+                continue  # a special's status rows are not read here
+            i = 3 * eff["dexterity"] + (eff["faith"] if objective == "bleed" else eff["adaptability"])
+            own = (row.get("atk") or {}).get(objective, 0) + (row.get("atkScale") or {}).get(objective, 0) * _tab(
+                data, "auxATKBonus", i)
+            v = (own + hit["status"].get(objective, 0) * STATUS_UNIT) * data.ranged[weapon]["hand"]
+        else:
+            v = (hit_damage(ar, dfn, hit["mv"], "physical", hit["lower"]) * data.damage_scale.get(weapon, 1.0)
+                 * hit["shots"])
+        if v > best[0]:
+            best = (v, label, ar)
+    return best
+
+
+#: Crossbows that fire more than one bolt per pull, as players describe them (COMMUNITY); how many
+#: bolts and which ArrowParam set they read is not read (AMMO_SET), so they are scored on one bolt.
+VOLLEY_CROSSBOWS = {"Avelyn", "Sanctum Repeating Crossbow"}
+
+
+def ranged_pick(data: Data, weapon: str, inf: str, eff: dict, objective: str, dfn: dict,
+                rings=()) -> tuple[float, str, dict, str]:
+    """ranged_value's best shot, and a note naming it for the output: the ammunition, or the special
+    shot (two-handed, its shot count) with the best ammunition beside it, and what is unproven.
+    (value, note, attack, best ammunition name)."""
+    v, shot, ar = ranged_value(data, weapon, inf, eff, objective, dfn, rings)
+    av, ammo, _ = ranged_value(data, weapon, inf, eff, objective, dfn, rings, special=False)
+    volley = " (1 bolt; volley and ArrowParam set unproven)" if data.weapons[weapon]["name"] in VOLLEY_CROSSBOWS else ""
+    if shot.startswith("special"):
+        s = data.ranged[weapon]["special"][int(shot.split()[-1]) - 1 if shot[-1].isdigit() else 0]
+        times = f" x{s['shots']}" if s["shots"] > 1 else ""
+        note = f"2H special shot{times}, no ammo; best ammo {ammo or 'none'} {av:.0f}{volley}"
+    else:
+        note = shot + volley
+    return v, note, ar, ammo
 
 
 def build_defense(data: Data, b: Build) -> dict:
@@ -2049,6 +2235,22 @@ def weapons_for(data: Data, stats: dict, sl: int, corpus: list[Build], top: int 
         if use_floors and not weapon and r1.get(key, 0) >= cut and stats["endurance"] < floors.get("endurance", 0):
             continue  # a high-stamina weapon needs END at the bracket median of builds that carry one
         lines = {}
+        if key in data.ranged:
+            # One trigger pull with the best ammunition per infusion (ranged_value), whatever
+            # `window` is: the fire rate is not read, so a ranged row is one shot, not a window.
+            # A bow fires two-handed (the 1H motions' damage rows have damageRate 0, REGULATION).
+            obj = "ar" if raw_ar else objective
+            grip = "2H" if data.ranged[key]["kind"] != "crossbow" else "1H" if one else "2H only"
+            scored = []
+            for inf in w["infusions"]:
+                v, note, ar, _ = ranged_pick(data, key, inf, stats, obj, dfn)
+                if v > 0:
+                    scored.append((v, inf, {k: round(x) for k, x in ar.items()},
+                                   ("" if note.startswith("2H special") else grip + " ") + f"1 shot: {note}"))
+            scored.sort(key=lambda s: -s[0])
+            for s in scored if every_infusion else [s for s in scored[:3] if s[0] >= scored[0][0] * (1 - within)]:
+                rows.append((s[0], w["name"], *s[1:]))
+            continue
         if objective in ("bleed", "poison"):
             hits, hlabel = status_hits(attacks, [w["name"], key.replace("_", " ")], ([False] if one else []) + [True],
                                        window)
@@ -2161,8 +2363,12 @@ def best_weapon_row(data: Data, corpus: list[Build], weapon: str, inf: str, sl: 
                     grip: str = "two", flex_weight: float | None = None, spells=(), only_class: str | None = None,
                     use_floors: bool = True, defender=None, window: float = 0.0, attacks: dict | None = None):
     """One row of best_weapons: `weapon`+`inf` at the build optimize_build makes for it at `sl`, scored
-    so weapons compare. (score, weapon, value, class, two-handed, stats, rings, label), or None when
-    no class wields it at `sl` or, with `window`, the weapon has no attack timing.
+    so weapons compare. (score, weapon, value, class, two-handed, stats, rings, label, ammo), or None
+    when no class wields it at `sl` or, with `window`, a melee weapon has no attack timing. `ammo` is
+    {"ammo": the best ammunition, "shot": the shot scored (ranged_pick)} for a bow, greatbow or
+    crossbow, None for any other weapon; a
+    launcher's score is one shot whatever `window` is (ranged_value), so ranged rows rank a shot
+    against a melee weapon's window.
 
     `value` is optimize_build's own: one hit for "damage", which ranks a slow weapon's single swing
     against a fast one's (p5z4.14). `window` re-scores the optimized build by what weapons_for's
@@ -2177,6 +2383,12 @@ def best_weapon_row(data: Data, corpus: list[Build], weapon: str, inf: str, sl: 
     w = data.weapons[weapon]
     names = [w["name"], weapon.replace("_", " ")]
     score, label = val, "2H" if two else "1H"
+    if weapon in data.ranged:
+        # One shot with its best ammunition at the optimized stats (objective_value is ranged_value
+        # for a launcher), with or without `window`: the fire rate is not read (ranged_value).
+        _, note, _, ammo = ranged_pick(data, weapon, inf, gear_stats(data, st, worn), objective,
+                                       defender_defense(data, corpus, sl, defender)[0], worn)
+        return score, weapon, val, cls, two, st, worn, label + " 1 shot", {"ammo": ammo, "shot": note}
     if window and objective in ("bleed", "poison"):
         hits, label = status_hits(attacks, names, [two], window)
         if not hits:
@@ -2191,7 +2403,7 @@ def best_weapon_row(data: Data, corpus: list[Build], weapon: str, inf: str, sl: 
         mvs = [(mv, ty, lo, fl) for t, mv, ty, lo, fl in tl if t <= window]
         score = sum(hit_damage(ar, dfn, *m) for m in mvs) * data.damage_scale.get(weapon, 1.0)
         label += f" {len(mvs)} hits"
-    return score, weapon, val, cls, two, st, worn, label
+    return score, weapon, val, cls, two, st, worn, label, None
 
 
 def best_weapons(data: Data, corpus: list[Build], inf: str, sl: int, objective: str = "damage",
@@ -2314,6 +2526,8 @@ def objective_value(data: Data, weapon: str, inf: str, st: dict, objective: str,
     weapon's damage_scale, which applies after the defense. A ring's attack add is in it, because
     the game adds it to the attack rating itself (`AR = (bonus + base) x rate`, attack_rating): a
     Ring of Blades raises the menu's AR, so a goal that left it out would not be the menu's number."""
+    if weapon in data.ranged:  # a bow, greatbow or crossbow: its best shot, ammunition included
+        return ranged_value(data, weapon, inf, st, objective, dfn, rings)[0]
     row = data.weapons[weapon]["infusions"].get(inf) or {}
     atk, sc = row.get("atk") or {}, row.get("atkScale") or {}
     if objective in ("bleed", "poison"):
@@ -2598,6 +2812,14 @@ def _optimize_with(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
         # parity with the real one -- measured 2026-09-30, Uchigatana Lightning, Bandit, SL 155, no
         # floors: STR 45 at an early rate of 0.083 beside DEX's 0.375.
         shared = max(peak[s] for s, f in curves.items() if f is obj)
+        # Dark reads min(INT, FTH) (attack_rating), so a point of INT alone or FTH alone buys no
+        # dark and a one-stat step never finds it: a Dark Sanctum Crossbow kept INT/FTH at 14/14 at
+        # SL 150. With a dark attack the two also move together, a step of n each costing 2n.
+        dark = "dark" in attack_rating(data, weapon, inf, E(st), rings)
+        if dark:
+            both = lambda s_, n: {**s_, "intelligence": s_["intelligence"] + n, "faith": s_["faith"] + n}
+            shared = max(shared, (obj({**st, "intelligence": 25, "faith": 25})
+                                  - obj({**st, "intelligence": 5, "faith": 5})) / 40)
         for s, f in curves.items():
             if f is obj:
                 peak[s] = shared
@@ -2616,8 +2838,19 @@ def _optimize_with(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
                         w += flex_weight * (flex({**st, s: st[s] + n}) - fcur) / n
                     if w > best_w + 1e-12:
                         pick, best_w = (s, n), w
+            if dark:
+                cur = obj(st)
+                for n in range(1, min(free // 2, 99 - max(st["intelligence"], st["faith"]), 8) + 1):
+                    w = (obj(both(st, n)) - cur) / (2 * n) / shared
+                    if flex:
+                        w += flex_weight * (flex(both(st, n)) - flex(st)) / (2 * n)
+                    if w > best_w + 1e-12:
+                        pick, best_w = ("both", n), w
             if pick is None:  # every curve is flat: the points go to vigor
                 pick = (next(s for s in ("vigor", "vitality", "endurance", "attunement") if st[s] < 99), 1)
+            if pick[0] == "both":
+                st, free = both(st, pick[1]), free - 2 * pick[1]
+                continue
             st[pick[0]] += pick[1]
             free -= pick[1]
         val = objective_value(data, weapon, inf, E(st), objective, dfn, rings)
@@ -4198,6 +4431,49 @@ def flex_selftest_cases() -> list:
     ]
 
 
+def ranged_selftest_cases() -> list[tuple]:
+    """A shot over made-up rows (regulation_ranged's shapes): launcher attack + ammo flat, x the hand
+    scale; the special keeps its row's types only; a type with a rate and coefficient but no base
+    attacks; a bow fires arrows only; damage is per shot at the ammo's MV, x damageScale."""
+    flat = lambda v: [v] * 100
+    sp = {t: flat(0) for t in ("physicalATKBonus", "magicATKBonus", "fireATKBonus", "lightningATKBonus",
+                               "darkATKBonus", "mundaneATKBonus", "auxATKBonus")}
+    sp["physicalATKBonus"], sp["darkATKBonus"] = flat(100), flat(50)
+    fake = type("Ranged", (), {
+        "sp": sp, "damage_scale": {"Sanctum": 1.25}, "ring_attack": {},
+        "weapons": {"Bow": {"name": "Bow", "infusions": {"No_Infusion": {
+                        "atk": {"physical": 150}, "atkScale": {"dexterity": 0.5}, "rate": {"physical": 1.0}}}},
+                    "Sanctum": {"name": "Sanctum", "infusions": {"Dark": {
+                        "atk": {"physical": 70}, "atkScale": {"dark": 0.52}, "rate": {"physical": 0.7, "dark": 1.3}}}}},
+        "ranged": {"Bow": {"ammo": 1, "kind": "bow", "hand": 0.9, "special": []},
+                   "Sanctum": {"ammo": 4, "kind": "crossbow", "hand": 0.9, "special": [
+                       {"types": ["dark"], "flat": {"dark": 50}, "mv": 7.2, "lower": 255, "shots": 1, "status": {}}]}},
+        "ammo": {"Wood Arrow": {"type": 1, "flat": {}, "status": {}, "mv": 1.176, "lower": 70},
+                 "Dark Arrow": {"type": 1, "flat": {"dark": 110}, "status": {}, "mv": 1.176, "lower": 70},
+                 "Dark Bolt": {"type": 4, "flat": {"dark": 200, "physical": 200}, "status": {}, "mv": 0.392,
+                               "lower": 34}}})
+    st = dict.fromkeys(STATS, 20)
+    bow = {label: ar for label, ar, _ in ranged_options(fake, "Bow", "No_Infusion", st)}
+    san = {label: ar for label, ar, _ in ranged_options(fake, "Sanctum", "Dark", st)}
+    zero = dict.fromkeys(DMG + PHYS_TYPES, 0.0)
+    return [
+        ("bow fires arrows only", sorted(bow), ["Dark Arrow", "Wood Arrow"]),
+        ("wood arrow: the bow's own attack x hand 0.9", bow["Wood Arrow"], {"physical": (150 + 50) * 0.9}),
+        ("dark arrow adds its flat dark", bow["Dark Arrow"], {"physical": 200 * 0.9, "dark": 110 * 0.9}),
+        ("no dark base, dark rate and coefficient: still a dark attack",
+         attack_rating(fake, "Sanctum", "Dark", st), {"physical": 70, "dark": int(0.52 * 50)}),
+        ("special shot keeps its row's dark only", san["special shot"], {"dark": (26 + 50) * 0.9}),
+        ("dark bolt carries both types", san["Dark Bolt"], {"physical": 270 * 0.9, "dark": 226 * 0.9}),
+        ("ar objective: the larger summed attack, here the bolt's",
+         (round(ranged_value(fake, "Sanctum", "Dark", st, "ar", zero)[0], 3),
+          ranged_value(fake, "Sanctum", "Dark", st, "ar", zero)[1]), (round(496 * 0.9, 3), "Dark Bolt")),
+        ("damage objective: per shot at MV, x damageScale",
+         round(ranged_value(fake, "Sanctum", "Dark", st, "damage", zero)[0], 3),
+         round(max(76 * 0.9 * 0.9 * 7.2, hit_damage({"physical": 243.0, "dark": 203.4}, zero, 0.392, "physical", 34))
+               * 1.25, 3)),
+    ]
+
+
 def selftest() -> int:
     """Offline checks of the hits-per-attack model (no site tables, no corpus)."""
     A = SELFTEST_ATTACKS
@@ -4270,6 +4546,7 @@ def selftest() -> int:
          500 + 30 * 20 + 20 * 10),
     ]
     cases += flex_selftest_cases()
+    cases += ranged_selftest_cases()
     if ATTACKS.exists():  # the real extracted rows agree with the copies above
         real = load_attacks()
         for key in [k for k in A if k in real]:
@@ -4656,14 +4933,16 @@ def main() -> int:
             rho = spearman([r[0] for r in rows], [share[r[1]] for r in rows])
             print(f"  vs {n} real builds of this SL bracket: Spearman rho "
                   + (f"{rho:+.3f}" if rho is not None else "n/a") + " (score against melee-weapon share)")
-            for score, key, val, cls, two, st, worn, label in rows[:a.top]:
+            for score, key, val, cls, two, st, worn, label, ammo in rows[:a.top]:
                 print(f"  {score:7.0f}  {share[key]:5.1%}  {data.weapons[key]['name']:30} {label:11} {cls:9} "
                       + " ".join(f"{LABEL[s]} {st[s]}" for s in ("strength", "dexterity", "intelligence", "faith"))
-                      + (f"  rings {', '.join(data.rings[r]['name'] for r in worn)}" if worn else ""))
+                      + (f"  rings {', '.join(data.rings[r]['name'] for r in worn)}" if worn else "")
+                      + (f"  shot: {ammo['shot']}" if ammo else ""))
         if a.json:
             print(json.dumps({sl: [{"score": r[0], "weapon": data.weapons[r[1]]["name"], "key": r[1], "value": r[2],
                                     "class": r[3], "two_handed": r[4], "stats": r[5], "rings": r[6],
-                                    "label": r[7]} for r in rows[:a.top]] for sl, rows in out.items()}, indent=1))
+                                    "label": r[7], **(r[8] or {})} for r in rows[:a.top]] for sl, rows in out.items()},
+                             indent=1))
         return 0
     if a.best_infusion or a.infusion_gaps:
         if not a.stats:

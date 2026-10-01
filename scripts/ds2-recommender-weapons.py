@@ -19,7 +19,8 @@ weapons owns those, so this file stays a few kilobytes of names.
   header line repeats it so the file reads on its own.
 * `name` is the game's own (itemname.fmg, read from the install) where SoulsPlanner's name
   matches no weapon's in the game but its key does: the site spells the Black Flamestone Dagger
-  `Black Flamestone Dagge`. The same rule as the recommender's `regulation_weapon_names`, so both
+  `Black Flamestone Dagge`; and where SoulsPlanner's name is its key with underscores
+  (`Light_Crossbow`). The same rule as the recommender's `regulation_weapon_names`, so both
   say one name for it.
 * `class`: MugenMonkey's `darkSouls2WeaponDetails[*].type`, joined by normalized name after the
   same abbreviation expansion `ds2-builds-recommend.py`'s `Data.weapon_class` does (`UGS`, `GS`,
@@ -102,6 +103,11 @@ def rows(sp: dict, mm: dict, game: dict[str, str] | None = None
         if game and norm(name) not in game and norm(key) in game:
             print(f"name from the game: {name!r} -> {game[norm(key)]!r}", file=sys.stderr)
             name = game[norm(key)]
+        elif game and "_" in name and game.get(norm(name), name) != name:
+            # The site names the Light Crossbow by its key, `Light_Crossbow`; it joins, but the
+            # game spells it with a space (as regulation_weapon_names does in the recommender).
+            print(f"name from the game: {name!r} -> {game[norm(name)]!r}", file=sys.stderr)
+            name = game[norm(name)]
         cls = by_name.get(norm(name)) or by_name.get(norm(key)) or ""
         if not cls:
             unclassed.append(name)

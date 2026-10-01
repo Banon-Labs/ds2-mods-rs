@@ -611,6 +611,61 @@ normalised direction for the directionType. `FUN_1403eee20` multiplies it by the
 `FUN_1403efc30`. When a hit breaks an object, `FUN_1403ee840` uses the three params' `break_rate`
 instead (`FUN_1403ee320`, `FUN_1403ee2e0`, `FUN_1403ee360`). Nothing else calls the three lookups.
 
+## Ranged attack: bows, greatbows, crossbows
+
+Read 2026-10-01; the call sites were read by a sibling investigation of the Sanctum Crossbow the
+same day. Rows re-print with `scripts/ds2-ranged-evidence.py ammo|launchers|scales|baseless`.
+`scripts/ds2-builds-recommend.py` scores a launcher this way (`regulation_ranged`,
+`ranged_options`, `ranged_value`).
+
+```
+shot attack[e] = (launcher AR[e] + ammo row damage0n of type e) x WeaponTypeParam.rightDamageScale
+shot damage    = hit_damage(shot attack, defense, MV = ammo row damageRate, damageLower) x WeaponParam.damageScale
+```
+
+| Fact | Tag | Re-print |
+|---|---|---|
+| A launcher is a WeaponParam row whose WeaponTypeParam `shootCategory` is 1 (bows), 2 (greatbows) or 3 (crossbows) | REGULATION | `launchers` |
+| Ammunition has no WeaponParam row: no base, no scaling, no upgrade. Its attack is its ArrowParam row's PlayerDamageParam damage ids | REGULATION | `ammo` |
+| ArrowParam has four (light bullet, heavy bullet, light damage, heavy damage) sets. Arrows and greatarrows fill set 1 only; bolts fill sets 0-2 alike (MV 0.392) and set 3 at MV 0.247 | REGULATION | `ammo` |
+| A bow reads set 1 | INFERRED: the only set with damage rows | |
+| Which crossbow reads set 3 | UNPROVEN (guess: the volley crossbows, Avelyn and Sanctum Repeating) | |
+| Arrows: Wood +0, Iron phys +30, Magic/Fire/Dark +110, Lightning +90, Poison poison +1200, Lacerating bleed +1500; MV 1.176, damageLower 70 | REGULATION | `ammo` |
+| Greatarrows: Iron phys +50, Lightning +150, Fire +100, Destructive phys +100 (and +100 durability, type 8); MV 1.176 | REGULATION | `ammo` |
+| Bolts: Wood phys +200, Heavy phys +280, Magic/Lightning/Fire/Dark +200 element and +200 phys; MV 0.392, damageLower 34 | REGULATION | `ammo` |
+| A normal shot builds its attack with the per-hand builder `0x140391fe0` (call `0x14005210b` -> `0x140392d51`, type mask off), handed the ArrowParam light bullet `[rdx]` and damage id `[rdx+8]` | EXE | |
+| So the shot carries the launcher's whole attack in every type it has, infusion included, plus the ammo row's flat per its types (`D` in the loop above, `0x14038fee0`) | EXE | "Base, rates and the sum" |
+| `k` holds the hand's `rightDamageScale`: 0.9 on every launcher, 0.865 on Avelyn, 1.0 on every melee weapon (one shield, Orma's Greatshield, is 0.9) | REGULATION (values), EXE (that `k` holds it) | `scales` |
+| The ammo row's `damageRate` is the motion value after the defense, as for a melee hit | INFERRED from the shared builder and hit path | |
+| `WeaponParam.damageScale` (1.25 on Light, Heavy, Shield and Sanctum Crossbow; 0.85 Dragonrider Bow) applies after the defense on a shot | INFERRED: read for melee (`0x141c5ccfc`), not traced on the shot path | |
+| ArrowParam `menu*Attack` (Wood Arrow 50, Heavy Bolt 100) is not the shot's attack | INFERRED display-only | |
+| A bow fires two-handed only | INFERRED: its one-handed motions' damage rows have damageRate 0 | `launchers` |
+| An arrow's slash/strike/thrust type | not read; scored against general physical defense | |
+| Fire rate | not read: the bow shot animations (`40230010`, `41230010`) are not in the unpacked `c000100_pl.tae`, and the aim/fire/reload loop is EzState's. Scored per shot | |
+
+**The Sanctum Crossbows and the Bow of Want have a special shot**, their two-handed L2
+(`WeaponActionCategoryParam.atkIdOppositeSingle2HandStrong`), which fires the weapon's own bullet
+(REGULATION):
+
+| Weapon | Motion | Bullet damage row | Shots |
+|---|---|---|---|
+| Sanctum Crossbow | 20090100 | 20090100: dark +50, MV 7.2, damageLower 255 | 1 |
+| Sanctum Repeating Crossbow | 20090000 | 20090000: dark +5, MV 1.85, damageLower 130 | 3 (`BulletParam.automaticShootNum`, 0.1 s apart) |
+| Bow of Want | 20071900 | 20071900: lightning +200, MV 1.2, damageLower 70 | 1 |
+
+That attack's builder call (`0x1406d5502`) sets the type mask `0x1403910f0`, so only the row's own
+types keep their rate (EXE; that this call is the special's is INFERRED from the call site). The
+Sanctum Crossbow's special is therefore pure dark: its dark attack plus 50. No bolt is fired, so the
+ammunition does not change it (INFERRED). Players say the Sanctum Crossbow deals pure dark with a
+Dark infusion and dark bolts (COMMUNITY); the rows say the pure-dark part is the special, and a
+normal shot carries the launcher's physical too.
+
+**A type with a rate and coefficient but no base still attacks.** Both Sanctum Crossbows have
+`darkRate` 100, `maximumDark` 0 and a dark coefficient of 0.4 (REGULATION, `baseless`; no other
+named weapon has such a type). `AR = (bonus + base) x rate` gives them dark from INT/FTH alone, and a
+Dark infusion moves the rates to physical 70 / dark 130. `attack_rating` built a type only from its
+base until 2026-10-01, so it gave these two no dark at all.
+
 ## Spell and buff attack (EXE)
 
 Read 2026-09-29 through the Ghidra daemon and `scripts/ds2-arxan-trace.py`. A spell's attack is built
