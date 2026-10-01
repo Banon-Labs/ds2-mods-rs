@@ -4757,10 +4757,22 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 #                                                             each, and magic fire lightning dark
 #                                                             cast power terms
 #   X bracket stat-brackets ring,ring.. weapon:code,..        one corpus build
+#   RG ammo kind hand volley                                  the last W is a bow, greatbow or
+#                                                             crossbow (data.ranged): the arrowType
+#                                                             it fires, bow/greatbow/crossbow, its
+#                                                             hand scale, 1 when VOLLEY_CROSSBOWS
+#                                                             names it
+#   RS types flat(5) mv lower shots poison bleed              one special shot of the last RG: its
+#                                                             row's DMG types (indices, comma-
+#                                                             separated), flat attack in DMG order,
+#                                                             damageRate, damageLower, shots per
+#                                                             pull, flat status build-up
+#   AM name type flat(5) poison bleed mv lower                one ammunition (data.ammo), in name
+#                                                             order as ranged_options reads them
 
 BACKEND_DATA_NAME = "ds2-build-recommender.dat"
 BACKEND_DATA = Path.home() / ".cache/ds2-builds" / BACKEND_DATA_NAME
-BACKEND_FORMAT = "ds2-build-recommender-data 12"
+BACKEND_FORMAT = "ds2-build-recommender-data 13"
 #: How far the exported R1/R2 chains run, in seconds: the panel clamps its window to 10.0
 #: (crates/ds2-build-recommender-ui/src/panel.rs), and status_hits runs to max(3, window).
 STATUS_HORIZON = 10.0
@@ -4853,6 +4865,17 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
                     tl = chain_timeline(attacks, nm, two, kind, STATUS_HORIZON, distinct=True, with_start=True)
                     out.append("\t".join(["S", "2" if two else "1", tag, str(attack_hits(first)),
                                           " ".join(f"{_num(h[4])}:{_num(h[0])}" for h in tl) or "-"]))
+        r = data.ranged.get(key)
+        if r:
+            out.append("\t".join(["RG", _num(r["ammo"]), r["kind"], _num(float(r["hand"])),
+                                  "1" if w["name"] in VOLLEY_CROSSBOWS else "0"]))
+            for s in r["special"]:
+                out.append("\t".join(["RS", ",".join(str(DMG.index(k)) for k in s["types"]) or "-",
+                                      *(_num(s["flat"].get(k, 0)) for k in DMG), _num(s["mv"]), _num(s["lower"]),
+                                      _num(s["shots"]), *(_num(s["status"].get(k, 0)) for k in STATUS_PROC)]))
+    for name, a in sorted(data.ammo.items()):
+        out.append("\t".join(["AM", name, _num(a["type"]), *(_num(a["flat"].get(k, 0)) for k in DMG),
+                              *(_num(a["status"].get(k, 0)) for k in STATUS_PROC), _num(a["mv"]), _num(a["lower"])]))
     floors = bracket_floors(data, corpus, r1)
     for i, (lo, _) in enumerate(SL_BRACKETS):
         dfn, _ = bracket_defense(data, corpus, lo)
@@ -4943,6 +4966,8 @@ EXPECT_BUILDS = [  # weapon key, infusion, sl, objective: --optimize and --gener
     # worn Ring of Blades+2 adds is what the goal reads; and one whose lightning half scales with FTH
     ("Black_Dragon_Greataxe", "Lightning", 100, "ar"),
     ("Uchigatana", "Lightning", 150, "ar"),
+    # a crossbow scored by its best shot; dark reads min(INT, FTH), so the two rise together
+    ("Sanctum_Crossbow", "Dark", 150, "damage"),
 ]
 EXPECT_NAKED = [("Demons_Great_Hammer", "Raw", 100, "damage", True)]  # --generate --allow-naked
 EXPECT_ONE_HANDED = [  # --optimize and --generate with --grip one
@@ -5039,6 +5064,10 @@ EXPECT_BEST_INFUSION = [  # weapon key, stats, sl, window, raw_ar, objective: --
     ("Greatsword", [20, 20, 15, 10, 10, 10, 15, 9, 9], 80, 0.0, False, "damage"),  # STR 10 < 28/2: no rows
     # the AR goal: Raw's phys 471 below the split infusions' 287 + 287, tied four ways at 574
     ("Black_Dragon_Greataxe", [20, 20, 15, 10, 35, 15, 15, 9, 14], 100, 0.0, False, "ar"),
+    # launchers: three special shots a pull (and the volley note), a shot's summed attack
+    ("Sanctum_Repeating_Crossbow", [20, 20, 15, 10, 25, 20, 15, 30, 30], 150, 0.0, False, "damage"),
+    ("Avelyn", [20, 20, 15, 10, 25, 20, 15, 9, 9], 120, 1.5, False, "ar"),
+    ("Long_Bow", [20, 20, 15, 10, 12, 30, 15, 9, 20], 120, 0.0, False, "bleed"),
 ]
 #: --defender sets, head/chest/hands/legs keys: a heavy one with the best elemental defense of the
 #: heavy sets, a bare one, and one whose head and hands change stats the defense reads (Warlock Mask

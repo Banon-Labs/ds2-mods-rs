@@ -1281,6 +1281,11 @@ fn a_weapons_card_is_its_ranked_row() {
         };
         let stats = stats(st);
         for row in rows(backend().weapons_for(&stats, sl, &opts)) {
+            // A bow, greatbow or crossbow's row is one shot: its attack is the launcher's plus the
+            // ammunition's, times the hand scale, which is not what the card shows the launcher at.
+            if row.grip.contains("1 shot") {
+                continue;
+            }
             let key = weapons::all()
                 .iter()
                 .find(|weapon| weapon.name == row.weapon)
