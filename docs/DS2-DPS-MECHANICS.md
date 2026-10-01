@@ -405,13 +405,72 @@ own display formula was not traced. `menuResistanceScale` is the likely scale it
 Still unresolved:
 - FUN_140164af0 applies the 0.99 cap only when `thunk_FUN_141b8b72f(CharacterManager, 8) > 25`, and
   returns 1.0 otherwise. What that lookup returns is not traced.
-- `0x14034f2c0`, called on each piece's vector, is Arxan-chained and was not read. The xorps
-  `xmm1,0` at `0x1400399c4` suggests a floor at 0.
-- The SpEffect term is added inside the per-piece loop (`0x140381510`). Whether that really counts a
-  ring's elemental bonus once per armor slot needs runtime proof.
+- `0x14034f2c0`, called on each piece's vector, floors every entry at 0 (read 2026-10-01 with
+  `scripts/ds2-arxan-trace.py`: `comiss` against a zeroed `xmm1`, the smaller replaced by 0).
+- The SpEffect term inside the per-piece loop (`0x140381510`) is added once per armour slot: the
+  loop adds `0.01 x` the vector at `[rbp-0x10]` to each of the four pieces before the lack-of-stats
+  factor. That vector is SpEffect property type 0 (`0x14014bb20` -> `0x14022e2f0` -> `0x1402259f0`,
+  which sums each matching property's 10 floats at `+0x50`, `0x140222470`), not the
+  `100090[4]` defense changes, which reach the cut once through slot +0x250 ("Defense from a
+  SpEffect" below). Which instruction writes a type-0 property was not traced.
 - Slot 60 (`call [rax+0x1e0]` at `0x140137b8a`) runs only when `[r12+0xc] == 2`, and its array feeds the
   `(1 - atk+0x34) * def+0x68` factor in `calculateDamage_defense`. Guard absorption is the likely
   meaning (INFERRED), not read.
+
+### Defense from a SpEffect (EXE + REGULATION)
+
+Read 2026-10-01 through the Ghidra daemon and `scripts/ds2-arxan-trace.py`. This is how a Quartz Ring,
+Ring of Steel Protection, Flash Sweat or a Burr changes the damage a player takes.
+
+- **The instruction.** `100090[4] [seconds f32, value << 16 | type]` adds and `100090[5]` subtracts
+  (`SpEffectActionImpl_ChangeAtkDef`, slot 19, `0x14021b230`): asked with request byte 2 it handles
+  modes 4 and 5, and adds (mode 4, bit set in the mask `0x214`) or subtracts (5) the u16 at argument
+  byte 6 into float slot `byte 4` of the caller's vector. Types are DAMAGE_TYPE's, 0 physical, 1
+  magic, 2 lightning, 3 fire, 4 dark, then 5-9 the status resistances.
+- **The query.** `0x14014bae0` -> `0x14014ce90` writes request byte 2 (`mov byte [rsp+0x30],2`,
+  `0x14000ae20`) and calls `0x14022e1e0` -> `0x14021f100`, which builds the query with that byte at
+  `+0x35` and the mask 7 at `+0x33`. That it reaches slot 19 is INFERRED from the byte matching
+  ChangeAtkDef's defense branch; the iterator call is mis-decoded at `0x14021f15e` and was not followed.
+- **Reader, `ChrGameParamCalculator` slot +0x250** (`0x14031fe20`, not overridden in
+  `PlayerGameParamCalculator`'s vtable `0x1410e4ec8`): fills a zeroed 10-float vector through that
+  query, keeps its physical entry raw, and adds `0.01 x` the rest to the caller's array
+  (`0x14034c7d0`, which also swaps entries 8 and 9), the raw physical entry to entry 0.
+- **Physical: flat defense.** Slot +0x248 (`0x140320380`) calls +0x250 on a zeroed array and returns
+  entry 0. The physical DEF builder (slot 58, `0x140380070`) adds that return
+  (`call [rax+0x248]` at `0x14038020a`) once to `statDEF x sum(defenseStatAffectScale) + sum(piece
+  DEF)`, for whichever slash/strike/thrust type it was asked for. So 50 is +50 physical defense, in
+  SoulsPlanner's units, on every physical type.
+- **Elements: cut.** The cut builder (slot 59, `0x140381350`) calls +0x250 once
+  (`call [rax+0x250]` at `0x14038179d`) on the summed array after the four pieces and the stat
+  resistances, then clamps every entry to [0, 1] and caps the elements at 0.99. So 15 is +0.15 cut,
+  `+150` in the displayed defense D of `cut = (D + 100) / 1000`. The physical entry the call adds to is
+  zeroed afterwards (`mov dword [rsp+0x50],0` at `0x14038185f`) and never written out, so a physical
+  value does not also become a physical cut.
+
+What carries it (REGULATION, `SpEffectRing.emevd` / `SpEffectSpell.emevd` / `SpEffectActiveItem.emevd`):
+
+| source (event) | change | seconds |
+|---|---|---|
+| Ring of Steel Protection / +1 / +2 (40050000-2) | physical +50 / +75 / +100 | worn |
+| Spell / Thunder / Flame / Dark Quartz Ring, +0..+3 (40060000-40090003) | magic / lightning / fire / dark cut +5 / 8 / 10 / 15% | worn |
+| Dispelling Ring / +1 (40140000-1) | all four elements +6 / 12% | worn |
+| Sorcery / Lightning / Fire / Dark Clutch Ring (41040000-41070000) | physical -80 (`100090[5]`) | worn |
+| Magic Barrier (32190010; +11..+14 are 15% for 70-95 s, chooser not traced) | all four +10% | 60 |
+| Great Magic Barrier (32200010) | all four +25% | 90 |
+| Sacred Oath (32230010) | physical +75 | 40 |
+| Flash Sweat (33180010) | fire +30% | 90 |
+| Iron Flesh (33190010) | physical +100, all four +20% | 25 |
+| Small Blue / Yellow / Orange Burr, Dark Troches (60160000-60190000) | magic / lightning / fire / dark +15% | 90 |
+| Whisper of Despair (34070010) | physical -200 (`100090[5]`) | 20 |
+
+A spell's effect row is its SpellParam id + 10: Magic Barrier's own event names it
+(`100120[6] [32190010, ...]`); for the others the +10 is INFERRED from that pattern. Ring of Resistance,
+the bite rings, Perseverance and Common Fruit change status types only.
+
+Not read: `1000[1]` kind 26, which Iron Flesh (x0.6) and Numbness (x0.85) carry and which section
+"What else a hit carries" INFERS to be a damage-taken rate; no reader of `flags+0x424` in the damage path
+was found, so the recommender leaves it out. Ring of Steel Protection's `1000[1]` kind 59 (x0.9, +2
+x0.875) is not decoded either.
 
 ## Attack rating: stat scaling (EXE)
 

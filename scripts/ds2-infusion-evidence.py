@@ -47,13 +47,6 @@ PVP_ITEMS = {"Cracked_Red_Eye_Orb", "Red_Eye_Orb"}
 #: Resins: SoulsPlanner item key -> element. Their effect values were not read from the game.
 RESINS = {"Dark_Pine_Resin": "dark", "Gold_Pine_Resin": "lightning", "Charcoal_Pine_Resin": "fire",
           "Rotten_Pine_Resin": "poison"}
-#: Elemental defense rings, by SoulsPlanner key prefix -> element -> defense added (SITE, MugenMonkey's
-#: ring table; the base ring's value -- the +1/+2 variants' larger values are not in that table).
-#: Thunder Quartz is listed there as x1.5, the only one written as a multiplier; it is taken as +150
-#: like its three siblings.
-DEF_RINGS = {"Dark_Quartz_Ring": {"dark": 150}, "Flame_Quartz_Ring": {"fire": 150},
-             "Spell_Quartz_Ring": {"magic": 150}, "Thunder_Quartz_Ring": {"lightning": 150},
-             "Dispelling_Ring": {"magic": 120, "lightning": 120, "dark": 120}}
 
 
 def load_recommend():
@@ -328,34 +321,41 @@ def section_fire(r, data, cs):
 
 
 def section_rings(r, data, corpus, cs):
-    print("== rings: elemental defense rings the defender average leaves out ==")
-    def ring_add(b, times=1):
+    print("== rings: defense rings as worn, and the defender who swaps one in against the weapon ==")
+    # build_defense counts every worn ring's regulation defense change once (EXE: a 100090[4]
+    # reaches the cut once, docs/DS2-DPS-MECHANICS.md "Defense from a SpEffect"), so the cases'
+    # defense already holds them; the adaptive rows are calibrate's with DEFENDER "adaptive".
+    def ring_add(b):
         add = Counter()
         for ring in b.rings:
-            for key, el in DEF_RINGS.items():
-                if ring.startswith(key):
-                    for k, v in el.items():
-                        add[k] += v * times
+            for k, v in data.ring_defense.get(ring, {}).items():
+                add[k] += v
         return add
     by = defaultdict(list)
     for b in corpus:
         by[r.sl_bracket(r.soul_level(data, b))].append(b)
     lo, hi = r.SL_BRACKETS[r.sl_bracket(150)]
     g = by[r.sl_bracket(150)]
-    worn = [b for b in g if ring_add(b)]
-    print(f"  SL {lo}-{hi}: {len(worn) / max(len(g), 1):.1%} of builds wear one; mean added "
-          + ", ".join(f"{k} {np.mean([ring_add(b)[k] for b in g]):.1f}" for k in ELEMENTS))
-    shift = {}
-    for i, bs in by.items():
-        shift[i] = {k: float(np.mean([ring_add(b)[k] for b in bs])) for k in ELEMENTS}
-    for times, label in ((1, "counted once"), (4, "counted once per armour piece")):
-        hit = 0
-        for c in cs:
-            i = r.sl_bracket(c["sl"])
-            d2 = {k: c["dfn"][k] + shift.get(i, {}).get(k, 0) * times for k in c["dfn"]}
-            sc = {f: score(r, data, c["w"], f, c["eff"], d2) for f in c["s"]}
-            hit += max(sc, key=lambda f: (sc[f], f)) == c["inf"]
-        print(f"  agreement with ring defense {label}: {hit / len(cs):.1%}")
+    worn = [b for b in g if any(v > 0 for k, v in ring_add(b).items() if k in ELEMENTS)]
+    print(f"  SL {lo}-{hi}: {len(worn) / max(len(g), 1):.1%} of builds wear an elemental one; mean change "
+          + ", ".join(f"{k} {np.mean([ring_add(b)[k] for b in g]):.1f}" for k in ["physical", *ELEMENTS]))
+    hit = sum(c["best"] == c["inf"] for c in cs)
+    print(f"  agreement with rings as worn: {hit / len(cs):.1%}")
+    saved = dict(r.DEFENDER)
+    try:
+        for buff in ("none", "item", "any"):
+            r.DEFENDER.update(mode="adaptive", buff=buff)
+            hit = 0
+            for c in cs:
+                dfn = r.defender_defense(data, corpus, c["sl"])[0]
+                sc = {}
+                for f in c["s"]:
+                    ar = r.attack_rating(data, c["w"], f, c["eff"])
+                    sc[f] = r._type_damage(ar, r.respond(dfn, ar))
+                hit += max(sc, key=lambda f: (sc[f], f)) == c["inf"]
+            print(f"  agreement with the counter ring swapped in, defender buff {buff}: {hit / len(cs):.1%}")
+    finally:
+        r.DEFENDER.update(saved)
 
 
 #: The game's bare armour pieces, head to legs (ArmorParam ids; crates/ds2-rva ARMOR_NAKED_IDS).
@@ -424,8 +424,9 @@ def section_falsify(r, data, corpus, cs):
     print("== falsify: whether the cap, the floors or a typed physical defense can bind ==")
     ds = [r.build_defense(data, b) for b in corpus]
     top = max(max(d[k] for k in ELEMENTS) for d in ds)
-    print(f"  highest elemental defense of any corpus build {top:.0f}, with a +150 quartz ring counted "
-          f"once per piece {top + 600:.0f}; the cap binds from {CAP_D}")
+    print(f"  highest elemental defense of any corpus build {top:.0f} (worn rings counted), with a Quartz "
+          f"Ring+3 swapped in {top + 150:.0f}, and Flash Sweat's +300 on top {top + 450:.0f}; the cap "
+          f"binds from {CAP_D}")
     phys_floor = elem_floor = 0
     for c in cs:
         worst = max(c["dfn"][k] for k in ["physical", *r.PHYS_TYPES])

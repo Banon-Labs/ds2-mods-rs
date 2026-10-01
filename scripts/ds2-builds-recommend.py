@@ -173,6 +173,8 @@ class Data:
         self.ring_attack = {}  # ring key -> DMG key -> flat attack add (regulation_ring_attack)
         self.ranged = {}  # launcher key -> its ammo type, hand scale and special shots (regulation_ranged)
         self.ammo = {}  # ammo name -> its arrowType and the shot it adds (regulation_ranged)
+        self.ring_defense = {}  # ring key -> DMG key -> defense add (regulation_ring_defense)
+        self.defense_buffs = {}  # name -> a defender's damage-cutting buff (regulation_defense_buffs)
         # PhysicalStatsPerLevelStatValuesParam.staminaMax by END, rows 0-99: what a Dragon ring's
         # stamina factor is weighed against (ring_lift); empty when the regulation is not read.
         self.stamina_max = []
@@ -1123,6 +1125,8 @@ def apply_regulation(data: Data) -> str:
             + regulation_spells(data, d, names) + "; " + regulation_spell_hits(data, d, names) + "; "
             + regulation_hit_flat(data, d) + "; "
             + regulation_buffs(data, emevd, members, d, names) + "; " + regulation_ring_attack(data, emevd, members, names)
+            + "; " + regulation_ring_defense(data, emevd, members, names)
+            + "; " + regulation_defense_buffs(data, emevd, members, d, names)
             + "; " + regulation_weapon_elements(data, d, names)
             + "; " + regulation_damage_scale(data, d, names) + "; " + regulation_status(data, d, names)
             + "; " + regulation_attack(data, d, names) + "; " + regulation_ranged(data, d, names))
@@ -1685,6 +1689,109 @@ def regulation_ring_attack(data: Data, emevd, members: dict, names: dict) -> str
     return f"{len(data.ring_attack)} rings' attack adds from SpEffectRing.emevd"
 
 
+#: A defense change in a SpEffect event: `100090[4] [seconds f32, value << 16 | type]` adds, `100090[5]`
+#: subtracts, type as DAMAGE_TYPE (5-9 are the status resistances, not modelled here). REGULATION
+#: for the numbers. EXE for what they do, read 2026-10-01 (docs/DS2-DPS-MECHANICS.md "Defense from
+#: a SpEffect"): `SpEffectActionImpl_ChangeAtkDef` (`0x14021b230`) adds (modes 2, 4, 9) or subtracts
+#: (3, 5) the u16 value into slot `type` of a float vector when asked with request byte 2 (modes 4
+#: and 5), and `0x14014ce90` asks with that byte. `ChrGameParamCalculator` slot +0x250
+#: (`0x14031fe20`) reads that vector: its physical entry raw, every other x 0.01 (`0x14034c7d0`).
+#: - physical: slot +0x248 (`0x140320380`) returns the raw entry, and the physical DEF builder
+#:   (`0x140380070`) adds it once to the defense of whatever slash/strike/thrust type is asked for.
+#:   So `value` is flat physical defense, in the units SoulsPlanner shows.
+#: - elements: the cut builder (`0x140381350`) calls slot +0x250 once on the summed cut, after the
+#:   four armour pieces and before the clamp and the 0.99 cap. So `value` is `value`% cut, which is
+#:   `10 * value` in the displayed defense D (`cut = (D + 100) / 1000`, damage()).
+#: The dispatch from `0x14014ce90` (`0x14022e1e0` -> `0x14021f100`) to slot 19 of the handler was
+#: followed only to the query it builds (request byte at +0x35); that it reaches ChangeAtkDef is
+#: INFERRED from the request byte matching that handler's defense branch.
+DEF_ADD, DEF_SUB = (100090, 4), (100090, 5)
+
+
+def speffect_defense(ev) -> tuple[dict, float]:
+    """A SpEffect event's DEF_ADD/DEF_SUB changes as defense in displayed units, per DMG key
+    (physical flat, an element 10x its percent), and the longest duration they carry (0: while
+    worn). Status types are dropped."""
+    add, seconds = {}, 0.0
+    for ins in ev.instructions:
+        w = ins.words()
+        if (ins.bank, ins.index) not in (DEF_ADD, DEF_SUB) or len(w) < 2:
+            continue
+        kind = DAMAGE_TYPE.get(w[1][2] & 0xFF)
+        if kind is None:
+            continue
+        v = (w[1][2] >> 16) * (1 if kind == "physical" else 10)
+        add[kind] = add.get(kind, 0) + (v if (ins.bank, ins.index) == DEF_ADD else -v)
+        seconds = max(seconds, w[0][1])
+    return {k: v for k, v in add.items() if v}, seconds
+
+
+def regulation_ring_defense(data: Data, emevd, members: dict, names: dict) -> str:
+    """data.ring_defense: ring key -> DMG key -> defense add in displayed units (speffect_defense),
+    for every ring whose SpEffect event (SpEffectRing.emevd, event id == item id, joined by
+    itemname.fmg name) changes a damage type's defense. REGULATION, read 2026-10-01:
+
+    | ring (event) | instruction | defense |
+    |---|---|---|
+    | Ring of Steel Protection / +1 / +2 (40050000-2) | `100090[4] [0, 50/75/100 << 16 | 0]` | physical +50 / +75 / +100 |
+    | Spell Quartz Ring / +1 / +2 / +3 (40060000-3) | `100090[4] [0, 5/8/10/15 << 16 | 1]` | magic cut +5/8/10/15% = D +50/80/100/150 |
+    | Thunder Quartz Ring ... +3 (40080000-3) | same values, type 2 | lightning |
+    | Flame Quartz Ring ... +3 (40070000-3) | same values, type 3 | fire |
+    | Dark Quartz Ring ... +3 (40090000-3) | same values, type 4 | dark |
+    | Dispelling Ring / +1 (40140000-1) | `100090[4] [0, 6/12 << 16 | 1..4]`, one per element | all four +6/12% = D +60/120 |
+    | Sorcery/Lightning/Fire/Dark Clutch Ring (41040000-41070000) | `100090[5] [0, 80 << 16 | 0]` | physical -80 |
+
+    Ring of Steel Protection also carries `1000[1] [59, 0, 0.9]` (+2: 0.875), a kind nothing here
+    decodes; Ring of Resistance and the bite rings change only status types (5-9)."""
+    events = {e.id: e for e in emevd.Emevd(Path("SpEffectRing.emevd"), members["SpEffectRing.emevd"]).events}
+    data.ring_defense = {}
+    for eid in sorted(events):
+        key = data.sp_key.get(norm(names.get(str(eid), "")))
+        if key not in data.rings:
+            continue
+        add, _ = speffect_defense(events[eid])
+        if add:
+            data.ring_defense[key] = add
+    return f"{len(data.ring_defense)} rings' defense changes from SpEffectRing.emevd"
+
+
+def regulation_defense_buffs(data: Data, emevd, members: dict, d: dict, names: dict) -> str:
+    """data.defense_buffs: name -> {"source": "spell" | "item", "add": DMG key -> defense in
+    displayed units, "seconds": duration} for every spell and usable item whose SpEffect only raises
+    a damage type's defense (speffect_defense; a debuff such as Whisper of Despair's physical -200
+    is left out). A spell's effect is event id + 10 in SpEffectSpell.emevd: Magic Barrier's own
+    event names it (`100120[6] [32190010, ...]`); for the rest the +10 is INFERRED from that
+    pattern, as SCRIPTED_SPELL_BULLET's is. Its +11..+14 rows (Magic Barrier 15% for 70-95 s) are
+    not chosen by anything traced here and are left out. An item's is its item id in
+    SpEffectActiveItem.emevd. REGULATION, read 2026-10-01:
+
+    | buff (event) | defense | seconds |
+    |---|---|---|
+    | Magic Barrier (32190010) | magic, lightning, fire, dark cut +10% | 60 |
+    | Great Magic Barrier (32200010) | all four +25% | 90 |
+    | Sacred Oath (32230010) | physical +75 (and its attack adds) | 40 |
+    | Flash Sweat (33180010) | fire +30% | 90 |
+    | Iron Flesh (33190010) | physical +100, all four +20% (and `1000[1]` kind 26 x0.6, not modelled) | 25 |
+    | Small Blue / Yellow / Orange Burr, Dark Troches (60160000-60190000) | magic / lightning / fire / dark +15% | 90 |
+
+    Numbness (34100010) carries only `1000[1]` kind 26 x0.85 and kind 59 x0.8; kind 26 is INFERRED
+    to be a damage-taken rate (docs/DS2-DPS-MECHANICS.md, "What else a hit carries") and its reader
+    in the damage path was not found, so neither it nor Iron Flesh's x0.6 counts."""
+    spell_ev = {e.id: e for e in emevd.Emevd(Path("SpEffectSpell.emevd"), members["SpEffectSpell.emevd"]).events}
+    item_ev = {e.id: e for e in emevd.Emevd(Path("SpEffectActiveItem.emevd"),
+                                            members["SpEffectActiveItem.emevd"]).events}
+    data.defense_buffs = {}
+    found = [("spell", spell_ev.get(int(sid) + 10), names.get(sid, "")) for sid in d["SpellParam"]]
+    found += [("item", ev, names.get(str(eid), "")) for eid, ev in item_ev.items()]
+    for source, ev, name in found:
+        if ev is None or not name or name.startswith("<"):
+            continue
+        add, seconds = speffect_defense(ev)
+        if add and min(add.values()) > 0:
+            data.defense_buffs[name] = {"source": source, "add": add, "seconds": seconds}
+    return f"{len(data.defense_buffs)} defense buffs from SpEffectSpell/SpEffectActiveItem.emevd"
+
+
 def ring_attack_add(data: Data, row: dict, rings) -> dict:
     """What the worn `rings` add to a weapon infusion `row`'s attack rating, per DMG key: each
     ring's flat (regulation_ring_attack) times the row's rate in that type (regulation_attack), in
@@ -1880,9 +1987,10 @@ def ranged_value(data: Data, weapon: str, inf: str, eff: dict, objective: str, d
             own = (row.get("atk") or {}).get(objective, 0) + (row.get("atkScale") or {}).get(objective, 0) * _tab(
                 data, "auxATKBonus", i)
             v = (own + hit["status"].get(objective, 0) * STATUS_UNIT) * data.ranged[weapon]["hand"]
-        else:
-            v = (hit_damage(ar, dfn, hit["mv"], "physical", hit["lower"]) * data.damage_scale.get(weapon, 1.0)
-                 * hit["shots"])
+        else:  # against the defender's answer to this shot's own types (respond): a Sanctum special's
+            # pure dark meets a Dark Quartz Ring, an arrow's physical a Ring of Steel Protection
+            v = (hit_damage(ar, respond(dfn, ar), hit["mv"], "physical", hit["lower"])
+                 * data.damage_scale.get(weapon, 1.0) * hit["shots"])
         if v > best[0]:
             best = (v, label, ar)
     return best
@@ -1913,11 +2021,32 @@ def ranged_pick(data: Data, weapon: str, inf: str, eff: dict, objective: str, df
 def build_defense(data: Data, b: Build) -> dict:
     """Per-type defense of a build: SoulsPlanner's getPhysicalDEF/getMagicDEF/... (SITE). Armor
     physical defense grows with END+VIT+STR+DEX via each piece's bonus coefficient; elemental
-    defense is a stat-driven base plus the armor's flat values. Ring defense effects ignored."""
+    defense is a stat-driven base plus the armor's flat values. The rings' stat changes count, and
+    so do their defense changes (data.ring_defense, EXE + REGULATION, regulation_ring_defense): a
+    physical add on the general physical defense and on each of slash/strike/thrust, since the game
+    adds it to whichever type the hit asks for; an element's in displayed units (10x its cut %)."""
     eff = effective(data, b)
     for r in b.rings:
         for s, v in ring_effects(data).get(r, (0, {}, 1))[1].items():
             eff[s] = eff.get(s, 0) + v
+    out = _armor_defense(data, b, eff)
+    for r in b.rings:
+        out = with_defense(out, data.ring_defense.get(r, {}))
+    return out
+
+
+def with_defense(dfn: dict, add: dict, times: float = 1.0) -> dict:
+    """`dfn` (DMG + PHYS_TYPES keys) plus `times` x a defense change by DMG key, the physical one
+    on every physical type as well (build_defense)."""
+    out = dict(dfn)
+    for k, v in add.items():
+        for t in [k] + (PHYS_TYPES if k == "physical" else []):
+            out[t] = out.get(t, 0.0) + v * times
+    return out
+
+
+def _armor_defense(data: Data, b: Build, eff: dict) -> dict:
+    """build_defense's armour and stat part, at effective stats `eff`."""
     pieces = [data.armor[s][p] for s, p in zip(ARMOR_SLOTS, b.armor) if p in data.armor[s]]
     pb = _tab(data, "physicalDEFBonus", eff["endurance"] + eff["vitality"] + eff["strength"] + eff["dexterity"])
     out = {"physical": sum(p.get("physicalDEF", 0) + p.get("physicalDEFBonus", 0) * pb for p in pieces)}
@@ -1934,15 +2063,27 @@ def build_defense(data: Data, b: Build) -> dict:
     return out
 
 
+def bracket_builds(data: Data, corpus: list[Build], sl: int) -> list[Build]:
+    """The corpus builds in `sl`'s bracket, or the nearest bracket with >= 20; none if no bracket has."""
+    i = sl_bracket(sl)
+    by = {}
+    for b in corpus:
+        by.setdefault(sl_bracket(soul_level(data, b)), []).append(b)
+    for j in sorted(range(len(SL_BRACKETS)), key=lambda j: (abs(j - i), j)):
+        if len(by.get(j, [])) >= 20:
+            return by[j]
+    return []
+
+
 def bracket_defense(data: Data, corpus: list[Build], sl: int) -> tuple[dict, int]:
-    """Mean per-type defense of corpus builds in `sl`'s bracket (nearest bracket with >= 20).
-    Remembered per corpus and bracket: optimize_build asks once per ring set it tries, and every
-    weapon of best_weapons asks again, for the same few thousand builds."""
+    """Mean per-type defense (build_defense, worn rings' defense counted) of the corpus builds in
+    `sl`'s bracket (bracket_builds). Remembered per corpus and bracket: optimize_build asks once per
+    ring set it tries, and every weapon of best_weapons asks again, for the same few thousand builds."""
     i = sl_bracket(sl)
     memo = _bracket_defense_memo.get((id(data), id(corpus), i))
     if memo is not None and memo[0] is data and memo[1] is corpus:  # held, so the ids cannot be reused
         return dict(memo[2]), memo[3]
-    d, n = _bracket_defense(data, corpus, i)
+    d, n = _bracket_defense(data, corpus, sl)
     _bracket_defense_memo[(id(data), id(corpus), i)] = (data, corpus, d, n)
     return dict(d), n
 
@@ -1950,15 +2091,114 @@ def bracket_defense(data: Data, corpus: list[Build], sl: int) -> tuple[dict, int
 _bracket_defense_memo: dict = {}
 
 
-def _bracket_defense(data: Data, corpus: list[Build], i: int) -> tuple[dict, int]:
-    by = {}
-    for b in corpus:
-        by.setdefault(sl_bracket(soul_level(data, b)), []).append(b)
-    for j in sorted(range(len(SL_BRACKETS)), key=lambda j: (abs(j - i), j)):
-        if len(by.get(j, [])) >= 20:
-            ds = [build_defense(data, b) for b in by[j]]
-            return {k: float(np.mean([d[k] for d in ds])) for k in DMG + PHYS_TYPES}, len(ds)
-    return {k: 0.0 for k in DMG + PHYS_TYPES}, 0
+def _bracket_defense(data: Data, corpus: list[Build], sl: int) -> tuple[dict, int]:
+    ds = [build_defense(data, b) for b in bracket_builds(data, corpus, sl)]
+    if not ds:
+        return {k: 0.0 for k in DMG + PHYS_TYPES}, 0
+    return {k: float(np.mean([d[k] for d in ds])) for k in DMG + PHYS_TYPES}, len(ds)
+
+
+#: Who the damage objective is scored against. "adaptive" (the default; --static-defender turns it
+#: off): every defender swaps one ring slot to the ring that cuts this weapon+infusion's damage
+#: most (respond). "static": the corpus builds' rings as worn. `buff` "none" (the default), "item"
+#: (a consumable anyone can use) or "any" (spells too, whether or not the build could cast them):
+#: the defender also has the one defense_buffs entry that cuts the damage most. Set by main; the
+#: --expect fixtures are written "static", the behaviour the Rust port has.
+DEFENDER = {"mode": "adaptive", "buff": "none"}
+
+
+def counter_rings(data: Data) -> list[str]:
+    """The rings a defender may swap in (respond): per ring upgrade group the last in
+    data.ring_defense order (event id order, so the strongest tier, as offense_rings takes it)
+    whose defense changes are all raises, never a NO_USE_RINGS ring. Today: Ring of Steel
+    Protection+2, the four Quartz Rings+3 and Dispelling Ring+1 (regulation_ring_defense)."""
+    by_group = {}
+    for r, add in data.ring_defense.items():
+        if r not in NO_USE_RINGS and min(add.values()) > 0:
+            by_group[data.rings[r].get("group", r)] = r
+    return list(by_group.values())
+
+
+class AdaptiveDefense(dict):
+    """A defender who answers the attack (DEFENDER "adaptive"). As a dict it is the static defense
+    (bracket_defense, or a --defender set's), so everything that reads a defense without an attack
+    in hand sees what it saw before. respond() gives the defense against one attack.
+
+    The swap, per defender build, for counter ring c (counter_rings): a ring of c's upgrade group
+    already worn is replaced by c (no change when it is c); else c goes into an empty slot, or in
+    place of a worn ring that changes no defense; else (all four worn rings change a defense) in
+    place of the one that cuts this attack least (_least_useful). The swapped-out ring's other
+    effects (stats, HP, attack) are not counted against the defender. Only the last case depends on
+    the attack, so the rest is summed once here: `fixed[c]` is the sum over those builds of the
+    defense change, `varying` the worn rings' changes of the others, `n` all builds."""
+
+    def __init__(self, data: Data, base: dict, builds_rings: list[list[str]]):
+        super().__init__(base)
+        self.n = max(len(builds_rings), 1)
+        self.counters = [(c, data.rings[c].get("group", c), data.ring_defense[c]) for c in counter_rings(data)]
+        self.names = {c: data.rings[c].get("name", c) for c, _, _ in self.counters}
+        self.fixed = {c: {} for c, _, _ in self.counters}
+        self.varying = []
+        for rings in builds_rings:
+            worn = [(data.rings.get(r, {}).get("group", r), data.ring_defense.get(r)) for r in rings if r not in EMPTY]
+            if len(worn) >= 4 and all(add for _, add in worn):
+                self.varying.append(worn)
+                continue
+            for c, g, add in self.counters:
+                same = next((a for wg, a in worn if wg == g), None)
+                for k in DMG:
+                    v = add.get(k, 0) - ((same or {}).get(k, 0) if same is not None else 0)
+                    self.fixed[c][k] = self.fixed[c].get(k, 0.0) + v
+        buffs = data.defense_buffs.items()
+        self.buffs = [(name, b["add"]) for name, b in buffs
+                      if DEFENDER["buff"] == "any" or (DEFENDER["buff"] == "item" and b["source"] == "item")]
+
+    def _delta(self, c: str, g: str, add: dict, weight: dict) -> dict:
+        """The mean defense change of swapping in counter c, over all builds."""
+        tot = dict(self.fixed[c])
+        for worn in self.varying:
+            same = next((a for wg, a in worn if wg == g), None)
+            out = same if same is not None else _least_useful(worn, weight)
+            for k in DMG:
+                tot[k] = tot.get(k, 0.0) + add.get(k, 0) - out.get(k, 0)
+        return {k: v / self.n for k, v in tot.items() if v}
+
+    def respond(self, ar: dict) -> tuple[dict, list[str]]:
+        """The defense against attack ratings `ar` (DMG keys), and what the defender put on for it:
+        the counter ring that leaves the least damage (_type_damage), when one leaves less than no
+        swap, then the DEFENDER `buff` that does the same. Ties keep counter_rings' order."""
+        weight = {"physical": 1 / 12 if ar.get("physical", 0) * 10 > self["physical"] else 0.0}
+        weight |= {k: ar.get(k, 0) / 1000 for k in ELEMENTS}
+        best, used = dict(self), []
+        for c, g, add in self.counters:
+            cand = with_defense(self, self._delta(c, g, add, weight))
+            if _type_damage(ar, cand) < _type_damage(ar, best) - 1e-9:
+                best, used = cand, [self.names[c]]
+        pick = None
+        for name, add in self.buffs:
+            cand = with_defense(best, add)
+            if _type_damage(ar, cand) < _type_damage(ar, pick[0] if pick else best) - 1e-9:
+                pick = (cand, name)
+        if pick:
+            best, used = pick[0], used + [pick[1]]
+        return best, used
+
+
+def _least_useful(worn: list[tuple[str, dict]], weight: dict) -> dict:
+    """Of worn rings' defense changes, the one that cuts an attack weighted `weight` least: the
+    damage is linear in each type's defense, -1/12 per physical point while the attack clears it and
+    -AR/1000 per elemental point (damage()). The first on a tie."""
+    return min((a for _, a in worn), key=lambda a: sum(weight.get(k, 0) * v for k, v in a.items()))
+
+
+def _type_damage(ar: dict, dfn: dict) -> float:
+    """One hit's summed damage() for attack ratings `ar` against `dfn`, motion value 1."""
+    return sum(damage(k, v, dfn[k]) for k, v in ar.items())
+
+
+def respond(dfn: dict, ar: dict) -> dict:
+    """The defense to score attack `ar` against: an AdaptiveDefense's answer to it, else `dfn`."""
+    return dfn.respond(ar)[0] if isinstance(dfn, AdaptiveDefense) else dfn
 
 
 def bracket_stats(data: Data, corpus: list[Build], sl: int) -> tuple[dict, int]:
@@ -1984,12 +2224,27 @@ def defender_defense(data: Data, corpus: list[Build], sl: int, defender=None) ->
     rings: build_defense, since a piece's physical defense grows with END+VIT+STR+DEX and the
     elemental base with INT/FTH, so a set has no defense of its own without some stats under it.
     The median is the stand-in for "a typical player at this level" in that set, as the average
-    defender is the stand-in for a typical player's set."""
+    defender is the stand-in for a typical player's set.
+
+    With DEFENDER "adaptive" the defense is an AdaptiveDefense over the same builds (the --defender
+    set counts as one build with no rings): the same numbers, plus the ring each one swaps in
+    against a given attack. Cached on `data` per corpus, bracket, set and DEFENDER setting."""
+    key = (id(corpus), sl_bracket(sl), tuple(defender or ()), DEFENDER["mode"], DEFENDER["buff"])
+    cache = data.__dict__.setdefault("_defender_cache", {})
+    if key in cache:
+        return cache[key]
     if defender is None:
-        return bracket_defense(data, corpus, sl)
-    st, n = bracket_stats(data, corpus, sl)
-    d = build_defense(data, Build("", st, list(defender), [], 0, [], []))
-    return {k: float(d[k]) for k in DMG + PHYS_TYPES}, n
+        builds = bracket_builds(data, corpus, sl)
+        dfn, n = bracket_defense(data, corpus, sl)
+        rings = [b.rings for b in builds]
+    else:
+        st, n = bracket_stats(data, corpus, sl)
+        d = build_defense(data, Build("", st, list(defender), [], 0, [], []))
+        dfn, rings = {k: float(d[k]) for k in DMG + PHYS_TYPES}, [[]]
+    if DEFENDER["mode"] == "adaptive":
+        dfn = AdaptiveDefense(data, dfn, rings)
+    cache[key] = (dfn, n)
+    return dfn, n
 
 
 def damage(kind: str, ar: float, df: float) -> float:
@@ -2244,9 +2499,11 @@ def weapons_for(data: Data, stats: dict, sl: int, corpus: list[Build], top: int 
             scored = []
             for inf in w["infusions"]:
                 v, note, ar, _ = ranged_pick(data, key, inf, stats, obj, dfn)
+                worn = dfn.respond(ar)[1] if isinstance(dfn, AdaptiveDefense) and obj == "damage" else []
                 if v > 0:
                     scored.append((v, inf, {k: round(x) for k, x in ar.items()},
-                                   ("" if note.startswith("2H special") else grip + " ") + f"1 shot: {note}"))
+                                   ("" if note.startswith("2H special") else grip + " ") + f"1 shot: {note}"
+                                   + (f" vs {' + '.join(worn)}" if worn else "")))
             scored.sort(key=lambda s: -s[0])
             for s in scored if every_infusion else [s for s in scored[:3] if s[0] >= scored[0][0] * (1 - within)]:
                 rows.append((s[0], w["name"], *s[1:]))
@@ -2281,17 +2538,21 @@ def weapons_for(data: Data, stats: dict, sl: int, corpus: list[Build], top: int 
             ar = attack_rating(data, key, inf, stats)
             if not ar:
                 continue
+            # the defender's answer to this weapon's attack (AdaptiveDefense.respond: the counter
+            # ring is chosen once from the weapon's attack ratings and worn for every hit)
+            d_ar, worn = dfn.respond(ar) if isinstance(dfn, AdaptiveDefense) and not raw_ar else (dfn, [])
             if window:
                 grip, mvs = max(lines.items(),
-                                key=lambda g: sum(hit_damage(ar, dfn, mv, ty, lo, fl) for mv, ty, lo, fl in g[1]))
-                dmg = sum(hit_damage(ar, dfn, mv, ty, lo, fl) for mv, ty, lo, fl in mvs) * scale
+                                key=lambda g: sum(hit_damage(ar, d_ar, mv, ty, lo, fl) for mv, ty, lo, fl in g[1]))
+                dmg = sum(hit_damage(ar, d_ar, mv, ty, lo, fl) for mv, ty, lo, fl in mvs) * scale
                 label = f"{grip} {len(mvs)} hits" + ("" if one or grip == "1H" else " (2H only)")
             else:
-                dmg = sum(ar.values()) if raw_ar else sum(damage(k, v, dfn[k]) for k, v in ar.items()) * scale
+                dmg = sum(ar.values()) if raw_ar else sum(damage(k, v, d_ar[k]) for k, v in ar.items()) * scale
                 label = "1H" if one else "2H only"
             ha = hyperarmor(attacks, rates, w["name"], label.startswith("2H"))
             ctr = (crit.get(norm(w["name"])) or {}).get("counter")
-            scored.append((dmg, inf, ar, label + (f" HA x{ha:g}" if ha else "") + (f" ctr x{ctr:g}" if ctr else "")))
+            scored.append((dmg, inf, ar, label + (f" HA x{ha:g}" if ha else "") + (f" ctr x{ctr:g}" if ctr else "")
+                           + (f" vs {' + '.join(worn)}" if worn else "")))
         scored.sort(key=lambda s: -s[0])
         if not scored:
             continue
@@ -2525,7 +2786,12 @@ def objective_value(data: Data, weapon: str, inf: str, st: dict, objective: str,
     287 + 287) and what the menu shows: every type summed, before any defense and before the
     weapon's damage_scale, which applies after the defense. A ring's attack add is in it, because
     the game adds it to the attack rating itself (`AR = (bonus + base) x rate`, attack_rating): a
-    Ring of Blades raises the menu's AR, so a goal that left it out would not be the menu's number."""
+    Ring of Blades raises the menu's AR, so a goal that left it out would not be the menu's number.
+
+    "damage" against an AdaptiveDefense is against its answer to this attack (respond), so a build
+    is optimized for the damage left after the defender's counter ring: the best attack given the
+    defender's best reply. "ar" stays defense-free. A ranged weapon's shot is answered the same way
+    (ranged_value)."""
     if weapon in data.ranged:  # a bow, greatbow or crossbow: its best shot, ammunition included
         return ranged_value(data, weapon, inf, st, objective, dfn, rings)[0]
     row = data.weapons[weapon]["infusions"].get(inf) or {}
@@ -2539,8 +2805,9 @@ def objective_value(data: Data, weapon: str, inf: str, st: dict, objective: str,
         return (atk.get(objective) or 0) + sc.get(objective, 0) * _tab(data, "auxATKBonus", i)
     if objective == "ar":
         return sum(attack_rating(data, weapon, inf, st, rings).values())
-    return (sum(damage(k, v, dfn[k]) for k, v in attack_rating(data, weapon, inf, st, rings).items())
-            * data.damage_scale.get(weapon, 1.0))
+    ar = attack_rating(data, weapon, inf, st, rings)
+    d = respond(dfn, ar)
+    return sum(damage(k, v, d[k]) for k, v in ar.items()) * data.damage_scale.get(weapon, 1.0)
 
 
 #: The grip optimize_build builds for, per `--grip`. "two" (the default) halves the STR requirement,
@@ -3057,13 +3324,13 @@ def calibrate_infusions(data: Data, corpus: list[Build]) -> dict:
         sl = soul_level(data, b)
         i = sl_bracket(sl)
         if i not in by_sl:
-            by_sl[i] = bracket_defense(data, corpus, sl)[0]
+            by_sl[i] = defender_defense(data, corpus, sl)[0]  # the DEFENDER the damage objective uses
         dfn, eff = by_sl[i], effective(data, b)
         for w, inf in set(b.weapons()):
             if inf == "?" or w not in data.weapons or data.weapons[w].get("isShield") or CATALYST.search(w):
                 continue
-            scored = sorted(((sum(damage(k, v, dfn[k]) for k, v in attack_rating(data, w, f, eff).items()), f)
-                             for f in data.weapons[w]["infusions"]), reverse=True)
+            scored = sorted(((_type_damage(ar, respond(dfn, ar)), f) for f in data.weapons[w]["infusions"]
+                             for ar in [attack_rating(data, w, f, eff)]), reverse=True)
             if len(scored) < 2 or inf not in data.weapons[w]["infusions"]:
                 continue
             total += 1
@@ -4471,6 +4738,100 @@ def ranged_selftest_cases() -> list[tuple]:
          round(ranged_value(fake, "Sanctum", "Dark", st, "damage", zero)[0], 3),
          round(max(76 * 0.9 * 0.9 * 7.2, hit_damage({"physical": 243.0, "dark": 203.4}, zero, 0.392, "physical", 34))
                * 1.25, 3)),
+    ] + _ranged_adaptive_cases(fake, st, zero)
+
+
+def _ranged_adaptive_cases(fake, st: dict, zero: dict) -> list[tuple]:
+    """A shot against an AdaptiveDefense meets the defender's answer to that shot's own types: one
+    defender with a free slot, counters Steel_2 (physical +100) and Dark_3 (dark cut +15%, D +150)."""
+    rings = type("R", (), {"rings": {"Steel_2": {"group": "Steel", "name": "Steel_2"},
+                                     "Dark_3": {"group": "Dark", "name": "Dark_3"}},
+                           "ring_defense": {"Steel_2": {"physical": 100}, "Dark_3": {"dark": 150}},
+                           "defense_buffs": {}})
+    saved = dict(DEFENDER)
+    try:
+        DEFENDER.update(mode="adaptive", buff="none")
+        adp = AdaptiveDefense(rings, zero, [[]])
+    finally:
+        DEFENDER.update(saved)
+    dark, phys = with_defense(zero, {"dark": 150}), with_defense(zero, {"physical": 100})
+    # the special's pure dark 68.4 and the Dark Bolt's 243 + 203.4 both draw Dark_3 (its 150 cuts
+    # 0.15 x 203.4 = 30.5 a hit, Steel_2's 100 / 12 = 8.3); a Wood Arrow's pure physical draws Steel_2
+    special = hit_damage({"dark": 68.4}, dark, 7.2, "physical", 255) * 1.25
+    bolt = hit_damage({"physical": 243.0, "dark": 203.4}, dark, 0.392, "physical", 34) * 1.25
+    return [
+        ("adaptive: the Sanctum special's pure dark draws the Dark Quartz", adp.respond({"dark": 68.4})[1],
+         ["Dark_3"]),
+        ("adaptive: a wood arrow's physical draws Steel Protection", adp.respond({"physical": 180.0})[1],
+         ["Steel_2"]),
+        ("adaptive: the shot is scored against its own reply",
+         round(ranged_value(fake, "Sanctum", "Dark", st, "damage", adp)[0], 3), round(max(special, bolt), 3)),
+        ("adaptive: the wood arrow against Steel Protection's +100",
+         round(ranged_value(fake, "Bow", "No_Infusion", st, "damage", adp, special=False)[0], 3),
+         round(max(hit_damage({"physical": 180.0}, phys, 1.176, "physical", 70),
+                   hit_damage({"physical": 180.0, "dark": 99.0}, dark, 1.176, "physical", 70)), 3)),
+    ]
+
+
+def defense_selftest_cases() -> list:
+    """Offline checks of the defender's defense changes (speffect_defense, with_defense,
+    AdaptiveDefense) on made-up rings and events."""
+    class Ins:  # an emevd instruction: (bank, index) and its words as (i32, f32, u32)
+        def __init__(self, bank, index, seconds, value, kind):
+            self.bank, self.index, self.raw = bank, index, [(0, seconds, 0), (0, 0.0, value << 16 | kind)]
+
+        def words(self):
+            return self.raw
+    ev = type("Ev", (), {"instructions": [Ins(100090, 4, 90.0, 15, 3), Ins(100090, 5, 0.0, 80, 0),
+                                          Ins(100090, 4, 90.0, 20, 5), Ins(100090, 2, 0.0, 30, 1)]})
+    # in event id order, so Flame_3 (the last of its group) is the counter, not Flame_1
+    rings = {"Steel_2": ("Steel", {"physical": 100}), "Flame_1": ("Flame", {"fire": 80}),
+             "Flame_3": ("Flame", {"fire": 150}), "Clutch": ("Clutch", {"physical": -80}),
+             "Spell_1": ("Spell", {"magic": 50}), "Dark_1": ("Dark", {"dark": 50}), "Life": ("Life", None)}
+    fake = type("D", (), {"rings": {k: {"group": g, "name": k} for k, (g, _) in rings.items()},
+                          "ring_defense": {k: a for k, (_, a) in rings.items() if a},
+                          "defense_buffs": {"Burr": {"source": "item", "add": {"fire": 150}, "seconds": 90.0},
+                                            "Sweat": {"source": "spell", "add": {"fire": 300}, "seconds": 90.0}}})
+    base = {"physical": 500.0, "magic": 200.0, "fire": 200.0, "lightning": 200.0, "dark": 200.0,
+            "slash": 520.0, "strike": 480.0, "thrust": 500.0}
+    # one build with a free slot, one already in Flame_1 (upgraded in place: +70), one whose four
+    # rings all change a defense (one goes, the least useful against the attack: the first on a tie)
+    builds = [["Life"], ["Flame_1", "Life"], ["Steel_2", "Clutch", "Spell_1", "Dark_1"]]
+    saved = dict(DEFENDER)
+    try:
+        DEFENDER.update(mode="adaptive", buff="none")
+        adp = AdaptiveDefense(fake, base, builds)
+        fire, fire_used = adp.respond({"fire": 300})
+        phys, phys_used = adp.respond({"physical": 300})
+        none, none_used = adp.respond({})
+        DEFENDER.update(buff="item")
+        item, item_used = AdaptiveDefense(fake, base, builds).respond({"fire": 300})
+        DEFENDER.update(buff="any")
+        spell, spell_used = AdaptiveDefense(fake, base, builds).respond({"fire": 300})
+    finally:
+        DEFENDER.update(saved)
+    r = lambda d: {k: round(v, 3) for k, v in d.items()}
+    return [
+        ("100090[4] fire 15 is D +150, [5] physical 80 is -80, status and attack dropped",
+         speffect_defense(ev), ({"fire": 150, "physical": -80}, 90.0)),
+        ("a physical add reaches every physical type", with_defense(base, {"physical": 50})["strike"], 530.0),
+        ("quartz +15%: the cut rises 0.15", round(damage("fire", 300, 200 + 150), 6),
+         round(300 * (1 - (200 + 100) / 1000 - 0.15), 6)),
+        ("as a dict it is the static defense", dict(adp), base),
+        # fire: (150 + 70 + 150) / 3 fire, and the third build's Steel_2 out (all tie at 0 vs fire)
+        ("fire attack: Flame_3 in, mean over 3 builds", (r(fire), fire_used),
+         (r(with_defense(base, {"fire": 370 / 3, "physical": -100 / 3})), ["Flame_3"])),
+        # physical: (100 + 100 + 0) / 3, the third already wears Steel_2
+        ("physical attack: Steel_2 in", (r(phys), phys_used),
+         (r(with_defense(base, {"physical": 200 / 3})), ["Steel_2"])),
+        ("no attack, no swap", (none, none_used), (base, [])),
+        ("least useful vs physical: the clutch ring",
+         _least_useful([("Steel", {"physical": 100}), ("Clutch", {"physical": -80})], {"physical": 1 / 12}),
+         {"physical": -80}),
+        ("buff 'item': the Burr on top of the ring", (r(item), item_used),
+         (r(with_defense(base, {"fire": 370 / 3 + 150, "physical": -100 / 3})), ["Flame_3", "Burr"])),
+        ("buff 'any': the stronger spell", spell_used, ["Flame_3", "Sweat"]),
+        ("a plain dict answers with itself", respond(base, {"fire": 300}), base),
     ]
 
 
@@ -4545,6 +4906,7 @@ def selftest() -> int:
         ("max HP without the regulation: getHP", hit_points(type("Site", (), {"hp_max": []}), {**ten, "vigor": 30}),
          500 + 30 * 20 + 20 * 10),
     ]
+    cases += defense_selftest_cases()
     cases += flex_selftest_cases()
     cases += ranged_selftest_cases()
     if ATTACKS.exists():  # the real extracted rows agree with the copies above
@@ -4581,6 +4943,10 @@ def defender_line(data: Data, corpus: list[Build], sl: int, defender, dfn: dict,
     """What the damage column is scored against, as --weapons-for, --optimize and --best-infusion
     print it: the average defender, or the --defender set at the bracket's median stats."""
     nums = " ".join(f"{k} {dfn[k]:.0f}" for k in DMG + PHYS_TYPES)
+    if isinstance(dfn, AdaptiveDefense):
+        nums += ("; adapts: swaps a ring slot to " + ", ".join(dfn.names.values()) + " against each weapon"
+                 + (f", plus the best {DEFENDER['buff'] if DEFENDER['buff'] == 'item' else 'item or spell'} "
+                    "defense buff" if DEFENDER["buff"] != "none" else "") + " (column 'vs')")
     if defender is None:
         return f"average defender at this SL ({n} builds): {nums}"
     st, _ = bracket_stats(data, corpus, sl)
@@ -4665,6 +5031,15 @@ def main() -> int:
                          "against this set, names or keys, '/'-separated (Naked for none), worn at the SL "
                          "bracket's median stats, instead of the bracket's average defender. Not --armor, which "
                          "is the armour the build itself wears for --flexibility's load")
+    ap.add_argument("--static-defender", action="store_true",
+                    help="score damage against the defenders' rings as worn, instead of each defender swapping "
+                         "one ring slot to the ring that cuts this weapon's damage most (Ring of Steel "
+                         "Protection+2, a Quartz Ring+3 or Dispelling Ring+1; AdaptiveDefense). --objective ar ignores both")
+    ap.add_argument("--defender-buff", choices=["none", "item", "any"], default="none",
+                    help="the defender also uses the damage-cutting buff that cuts this weapon's damage most: "
+                         "'item' a consumable anyone can use (the Burrs, Dark Troches), 'any' spells as well "
+                         "(Flash Sweat, Iron Flesh, the Magic Barriers, Sacred Oath) whatever the defender's "
+                         "stats. Needs the adaptive defender")
     ap.add_argument("--flex-weight", type=float, default=None, metavar="W",
                     help=f"with --optimize/--generate: the soft flexibility term per weapon unlocked per point "
                          f"(default {FLEX_WEIGHT}; 0 is the optimizer without it)")
@@ -4710,6 +5085,10 @@ def main() -> int:
     os.sched_setscheduler(0, os.SCHED_IDLE, os.sched_param(0))
     if a.selftest:
         return selftest()
+    if a.static_defender and a.defender_buff != "none":
+        ap.error("--defender-buff needs the adaptive defender (drop --static-defender)")
+    # the Rust port (CorpusBackend) scores a static defender, so its fixtures are written with one
+    DEFENDER.update(mode="static" if a.static_defender or a.export_backend else "adaptive", buff=a.defender_buff)
 
     a.tables.mkdir(parents=True, exist_ok=True)
     sp_json, mm_json = dump_site_tables(a.tables)
