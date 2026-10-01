@@ -214,9 +214,12 @@ defense cancels between Raw and split anyway, so it could not have flipped the p
 **Claim.** The unresolved gate in `FUN_140164af0` may change the cut.
 
 **Evidence.** The cap only binds at D of 890. The highest elemental defense of any corpus build is
-540; even a quartz ring counted once per armour piece reaches it only for a ring-stacking tank.
+540 before worn rings were counted and 732 after (`--only falsify`, 2026-10-01); a Quartz Ring+3 swapped in
+takes that build to 882, and only Flash Sweat's +300 on top (`--defender-buff any`) passes 890.
 
-**Strength.** `EXE`, `CORPUS`. **Verdict.** Cannot flip Raw against split at real defenses.
+**Strength.** `EXE`, `CORPUS`. **Verdict.** Cannot flip Raw against split at real defenses. It can
+bind for the most fire-resistant defender casting Flash Sweat, where `damage()` already caps the cut
+at 0.99, so whether the gate applies decides that one corner.
 
 ### The damageLower floors
 
@@ -244,8 +247,41 @@ pick moves for a handful of weapons and agreement stays at 42.3 percent.
 **Evidence** (`--only rings`). 2.3 percent of SL 126-155 builds wear one. Counting their defense
 once moves agreement nowhere; once per armour piece, to 42.8 percent.
 
-**Strength.** `CORPUS`, `SITE` ring values. **Verdict.** Too rare to matter. Whether a ring counts
-once per piece needs runtime proof.
+**Strength.** `CORPUS`, `SITE` ring values. **Verdict.** Too rare to matter as worn.
+
+The once-per-piece question is settled statically: a ring's `100090[4]` reaches the cut once, as
+`value`% (docs/DS2-DPS-MECHANICS.md "Defense from a SpEffect"). `build_defense` now counts every worn
+ring's defense change from the regulation, the Clutch Rings' physical -80 included. As worn, that
+leaves agreement at 42.3 percent (top two 51.8), so the verdict above stands for rings as worn.
+
+### The defender who answers the weapon
+
+**Claim.** A defender who sees a fire weapon puts on a Flame Quartz Ring. Scoring each infusion
+against the defender's best reply to it, not against the rings the corpus wore, moves the pick
+toward the physical infusions.
+
+**Evidence** (`--calibrate`, 2026-10-01). The adaptive defender swaps one ring slot per weapon to the
+counter that cuts that infusion's damage most (Ring of Steel Protection+2 physical +100, a Quartz
+Ring+3 one element +15%, Dispelling Ring+1 all four +12%; `AdaptiveDefense`):
+
+| defender | top 1 | top 2 |
+|---|---|---|
+| rings ignored (before) | 42.3% | 51.7% |
+| rings as worn (`--static-defender`) | 42.3% | 51.8% |
+| one ring swapped to the counter (default) | 48.5% | 58.4% |
+| ... and the best consumable (`--defender-buff item`: a Burr or Dark Troches, +15%) | 55.8% | 66.8% |
+| ... and the best item or spell (`--defender-buff any`) | 54.3% | 63.5% |
+
+The No_Infusion-chosen misses fall from 1028 + 975 (against Lightning and Dark) to 702 + 629 with the
+ring swap. With the consumable as well the largest misses turn the other way: players who chose Dark
+or Lightning where the model now says No_Infusion (378, 284).
+
+**Strength.** `EXE` and `REGULATION` for the defense numbers; `CORPUS` for the agreement. That a
+defender swaps rings per opponent is a modelling choice, not something the corpus records.
+**Verdict.** The swap is the default for `--objective damage`: the mechanism is in the game and
+it moves the model toward players' choices by six points. The consumable moves it further but
+overshoots on split infusions, so it stays a flag. **Would change it:** a measured in-game hit
+against a ringed defender, or PvP logs of what defenders actually wear against what.
 
 ### The lack-of-stats factor
 
