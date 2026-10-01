@@ -152,6 +152,21 @@ CASES = [
         "'Live subscription: arming in the background' line is in the fixture too and is not a task",
     ),
     Case(
+        "verbose_answer_to_user_question_bg_live.jsonl",
+        None,
+        "the 2026-09-30 false positive: the user asked 'So we are mounting evidence refuting every "
+        "claim on the internet?' while a background subagent was still running, and the turn "
+        "answered in one 1078-char paragraph with no hold or wait wording. An answer to a fresh "
+        "user prompt is not a pause, so live work elsewhere must NOT halt it as VERBOSEPAUSE",
+    ),
+    Case(
+        "verbose_status_on_notification_bg_live.jsonl",
+        "paused while blocked on a background task",
+        "the same text and the same live subagent, but the turn was opened by a task notification, "
+        "not by the user: it answers no question, so the live work still makes it a pause and the "
+        "long message still halts",
+    ),
+    Case(
         "authority_agreement.jsonl",
         "authority-coded agreement",
         "turn opens with \"You're right\" -- banned agreement phrasing (2026-07-17 directive)",

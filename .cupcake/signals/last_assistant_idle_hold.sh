@@ -179,10 +179,49 @@ PENDING_WORK_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Live background work alone does not make an answer to the user a pause. The turn that opens on a
+# fresh user prompt and answers it owes that answer, whatever happens to be running elsewhere; it is a
+# pause only if its own prose announces a hold or a wait (the two other arms). Live work is still
+# enough on its own for a turn the user did not open -- one woken by a task notification or by Stop
+# hook feedback, which answers no question and so has nothing to be but a status note. Measured
+# 2026-09-30: the user asked "So we are mounting evidence refuting every claim on the internet?", a
+# background subagent from an earlier turn was still running, and a one-paragraph 1078-char answer
+# with no hold wording halted here as "You paused while blocked on a background task".
+NOT_A_USER_QUESTION_RE = re.compile(
+    r"^\s*(?:<task-notification>|Stop hook feedback:|\[Request interrupted)", re.IGNORECASE
+)
+
+
+def prompt_text(ev):
+    content = ev.get("message", {}).get("content")
+    if isinstance(content, str):
+        return content
+    parts = []
+    for block in content or []:
+        if isinstance(block, dict) and block.get("type") == "text":
+            parts.append(block.get("text") or "")
+    return "\n".join(parts)
+
+
+def answers_user_prompt(events):
+    """True when the prompt that opened the last prose-bearing turn was typed by the user."""
+    opener = None
+    answered = None
+    for ev in events:
+        if scan.is_real_user_prompt(ev):
+            opener = ev
+        elif ev.get("type") == "assistant" and scan.assistant_text(ev):
+            answered = opener
+    if answered is None or answered.get("isMeta"):
+        return False
+    text = prompt_text(answered)
+    return bool(text.strip()) and not NOT_A_USER_QUESTION_RE.search(text)
+
+
 verbose_n = None
 turn_is_pause = (
     bool(phrase)
-    or bool(scan.live_background_work(events))
+    or (bool(scan.live_background_work(events)) and not answers_user_prompt(events))
     or bool(PENDING_WORK_RE.search(scrubbed))
 )
 if turn_is_pause and not turn_has_work and not scan.blocked_on_user(scrubbed):

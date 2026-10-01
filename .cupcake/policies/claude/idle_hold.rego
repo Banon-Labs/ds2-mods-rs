@@ -21,6 +21,10 @@
 #     genuinely blocked pause must be ONLY a short, precise statement of what it is blocked on; a long
 #     "justified" hold is NOT acceptable. VERBOSEPAUSE halts under rule DS2-MODS-NO-VERBOSE-PAUSE
 #     with a "be terse" correction, distinct from the IDLEHOLD "do work / justify" halt.
+#     NARROWED 2026-09-30: a turn that answers a fresh user prompt is not a pause merely because a
+#     background task is live. The signal counts live work only for a turn the user did not open
+#     (a task notification, Stop hook feedback); an answer to the user is a pause only when its own
+#     prose announces a hold or a wait.
 #   routing:
 #     required_events: ["Stop"]
 #     required_signals: ["last_assistant_idle_hold"]
