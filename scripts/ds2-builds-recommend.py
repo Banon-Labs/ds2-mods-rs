@@ -5276,8 +5276,9 @@ def main() -> int:
         return 0
     if a.best_weapons:
         known ={i for w in data.weapons.values() for i in (w.get("infusions") or {})}
+        typed = a.best_weapons.replace(" ", "_").lower()
         inf = {"none": "No_Infusion", "uninfused": "No_Infusion", "standard": "No_Infusion"}.get(
-            a.best_weapons.lower(), a.best_weapons.replace(" ", "_").capitalize())
+            typed, next((k for k in known if k.lower() == typed), a.best_weapons))
         if inf not in known:
             ap.error(f"unknown infusion {a.best_weapons!r}: one of {', '.join(sorted(known))}")
         sls = [int(s) for s in a.sweep.split(",")] if a.sweep else [a.sl] if a.sl else []
