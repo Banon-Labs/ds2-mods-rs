@@ -249,7 +249,8 @@ so whether both hit one target needs runtime proof. Treat overlapping windows wi
 `status_hits`): build-up per hit times the hits of the weapon's best R1/R2 attack, or the hits landed
 within `--window` seconds of repeating that chain. A hitbox that repeats another's exact window, tick
 count and interval (the Old Whip pair) counts once; overlapping windows like the trident's count
-separately. Per-tick build-up is the INFERRED part above; resistance and proc damage are not modelled.
+separately. Per-tick build-up is the INFERRED part above. `--best-weapons` rows also carry the proc
+damage ("What a proc does to a player" below).
 
 ## 5. What remains unverified
 - The other terms in the poise formula (`hit+0x74` is `poiseDamageScalePlayer`, EXE, section 2).
@@ -388,6 +389,46 @@ so it weighs the status stats 2.5 times too heavily against the base.
 
 Not read: the writers of the gauge's bounds (`+0x1c8`/`+0x1cc`), the source of `live` for statuses,
 the row behind the guard factor, and whether a player victim has a `ChrMultiplayParam` row.
+
+**The resistance rows** (EXE, read 2026-10-01). The stats builder starts at `0x14038d784` (the
+`0x14038d790` above is inside it). Over its stat words (0 VGR, 1 END, 2 VIT, 3 ATT, 4 STR, 5 DEX,
+6 INT, 7 FTH, 8 ADP; the physical-defense row is words 1+2+4+5 over 4) it stores, each x 0.01:
+`bleedingResistance` (+0x48) at row `trunc((3*ADP + FTH)/4)`, `poisonResistance` (+0x4c) at
+`trunc((3*ADP + VIT)/4)`, `petrifactionResistance` (+0x50) at `trunc((3*ADP + VGR)/4)` and
+`curseResistance` (+0x54) at `trunc((3*ADP + ATT)/4)`.
+
+### What a proc does to a player (EXE + REGULATION)
+
+Read 2026-10-01; `scripts/ds2-status-procs.py` prints the events. `applyStatusDamage(obj, id, build-up)`:
+
+| step | what | tag |
+|---|---|---|
+| id -> SpEffect | 0 poison 900100, 1 bleed 900200, 2 900300/900301, 3 900400, 4 900500, 5 toxic 900600, 6 901100 | EXE `0x140145ca7` jump table |
+| id -> category | the byte the status is looked up by in the table at `0x1415710c0`: poison 0 (`0x14023dd00`), bleed 1 (`0x14023dab0`), toxic 8 (`0x14023de40`) | EXE |
+| lockout | `0x14014bc80(SpEffectCtrl, category slot)` at `0x140145e51`; nonzero skips the whole build-up | EXE for the call, INFERRED that it tests "an effect of this category is active" (its body is behind Arxan) |
+| below 100 | `calculateStatusMeter` (`0x1401462a0`) adds it, clamped to the gauge bounds, and sets a 0.5 timer at `obj+8+4*id` | EXE; what reads the timer (decay) was not found |
+| at 100 | `0x140146430(obj, id, 100.0)` sets the gauge to `max(floor, gauge - 100)`, i.e. its floor, so the procing hit's surplus is lost; then `applySpEffect` | EXE |
+
+The proc events (REGULATION, `SpEffectAbnormalState.emevd`):
+
+| event | instruction | reading |
+|---|---|---|
+| 900100 poison | `100070[0] [1, 872, 0, 22.0, 9010, 0.3, 650, 249]` | category 0 for 22 s, PlayerDamageParam 9010 every 0.3 s |
+| 900200 bleed | `100170[1] [9020]` | PlayerDamageParam 9020 once |
+| 900210 | `100070[0] [1, 872, 1, 10.0, 0, ...]` plus stamina/regen changes | category 1 for 10 s; 9020's `spEffectIdWhenHit` |
+| 900600 toxic | `100070[0] [1, 872, 8, 20.0, 9010, 0.2, 650, 249]` | category 8 for 20 s, 9010 every 0.2 s |
+
+PlayerDamageParam 9010 is `damage01` 15 and 9020 is 200, both `damageType01` 5 (REGULATION). Type 5 is the
+attack's slot 5, which `calculateDamage_defense` (`0x140138d50`, `lVar8 == 5`) passes through with no
+defense, cut, motion value or multiplier (EXE). So poison is 73 ticks x 15 = 1095 over 22 s, bleed 200 flat
+with no max-HP term, toxic 100 x 15 = 1500 over 20 s. The word meanings (category, seconds, row, interval)
+are INFERRED from these rows: the category word matches the EXE's lookup byte for all three, and the
+community's figures agree (fextralife Poison "1,050/1,095 damage over 22 seconds", Bleed "200 points",
+Toxic "approximately 1,485 over 20 seconds"). Not read: the handlers of banks 100070 and 100170, gauge
+decay, and whether the lockout covers the whole duration.
+
+**Used by** `scripts/ds2-builds-recommend.py --best-weapons` (`regulation_status_procs`,
+`status_cut`, `status_metrics`): each row's `metrics` carries the proc damage its window's hits deal.
 
 ## Elemental cut: where the +100 comes from (EXE)
 
