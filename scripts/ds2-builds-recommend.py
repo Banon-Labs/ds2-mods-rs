@@ -2355,6 +2355,19 @@ def least_sl_with_rings(data: Data, classes: list[str], floors: dict, req: dict,
         worn.append(r)
 
 
+#: The displayed AGL (agility() of the stats the worn rings give) past which _optimize_with buys no
+#: more agility: ADP and ATT gain on their agility curve up to it and nothing past it, so the rest
+#: of the points go to the other stats. The user's decision of 2026-09-30, from real builds: in
+#: the corpus the median build reaches AGL 100 at SL 126-175, the builds sitting exactly at AGL 100
+#: have median SL 150, and AGL 100 is the mode of SL 126-155 builds with <=1 attunement slot (22%).
+#: It is also where item-use speed caps: PhysicalStatsPerLevelStatValuesParam useItemSpeedScale
+#: reaches 1.20 at the agility row AGL 100 reads and rises no further (docs/DS2-BUILD-MECHANICS.md,
+#: scripts/ds2-agility-evidence.py, branch optimizer-agl-rate). Before it the curve filled ADP to
+#: AGL 110 (ADP 38 at ATT 6) on nearly every build, against a corpus median of ADP 25. What AGL
+#: buys in roll i-frames is not modelled (ds2-mods-rs-p5z4.31): this is a target, not a rate.
+AGL_TARGET = 100
+
+
 def _optimize_with(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, objective: str,
                    two: bool, flex_weight: float, spells, classes: list[str], floors: dict, req: dict,
                    rings: list[str]):
@@ -2374,11 +2387,19 @@ def _optimize_with(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
             continue
         # A stat is weighted by its own curve: gain per point at the current value over the
         # curve's early rate (its mean gain per point from 5 to 25, before any soft cap). Past
-        # a soft cap the weight falls (DEX past 40, VGR past 20 and 50, ADP past AGL 110), so
-        # points go to a stat still under its cap. Every curve reads the stats the worn rings give
-        # (E); the flexibility term reads the levelled stats, as flexibility does.
+        # a soft cap the weight falls (DEX past 40, VGR past 20 and 50), so points go to a stat
+        # still under its cap. Every curve reads the stats the worn rings give (E); the
+        # flexibility term reads the levelled stats, as flexibility does.
         obj = lambda s_: objective_value(data, weapon, inf, E(s_), objective, dfn, rings)
-        agl = lambda s_: (lambda e: agility(e["adaptability"], e["attunement"]))(E(s_))
+        # ADP and ATT by displayed AGL, which gains nothing past AGL_TARGET: points stop going to
+        # agility there. The early rate (peak) is still read off the uncapped curve, so below the
+        # target a point of AGL weighs against a point of damage as it did before the target.
+        # Both stats read the same AGL, so ATT the spells' slots raised (spell_floors, in ring_lift
+        # before any point is spent) already counts toward the target and ADP buys only what is
+        # left; past it neither buys more. Under "poison" ADP is a damage stat (its curve is obj,
+        # uncapped: poison build-up reads ADP) and only ATT stays on the capped AGL curve.
+        agl_raw = lambda s_: (lambda e: agility(e["adaptability"], e["attunement"]))(E(s_))
+        agl = lambda s_: min(agl_raw(s_), AGL_TARGET)
         curves = {s: obj for s in ("strength", "dexterity", "intelligence", "faith")}
         curves["adaptability"] = obj if objective == "poison" else agl
         # Max HP of the whole block. Only VGR's step moves it here, so the other stats'
@@ -2399,7 +2420,8 @@ def _optimize_with(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
         curves["attunement"] = agl  # a third of ADP's agility per point; slots only matter with spells
         peak = {}
         for s, f in curves.items():
-            peak[s] = max((f({**st, s: 25}) - f({**st, s: 5})) / 20, 1e-9)
+            g = agl_raw if f is agl else f
+            peak[s] = max((g({**st, s: 25}) - g({**st, s: 5})) / 20, 1e-9)
         # The stats that feed the objective (STR/DEX/INT/FTH, and ADP when the objective is poison)
         # share one unit, the steepest of their early rates: a point of damage is a point of damage
         # whichever stat buys it. Each over its own rate inflated a stat with almost no scaling to
@@ -3586,6 +3608,10 @@ EXPECT_OPTIMIZE_SPELLS = [(*case, True) for case in EXPECT_SPELLS] + [
     # with the band, Ring of Knowledge and Ring of Prayer
     ("Dagger", "No_Infusion", 72, "damage", ["Climax"], False),
     ("Dagger", "No_Infusion", 60, "damage", ["Climax"], False),
+    # AGL_TARGET: a no-spell melee build at SL 155 levels ADP to AGL 100 exactly and no further
+    # (ADP 26 at ATT 2, where the curve filled to AGL 109); at SL 40 the points do not reach it
+    ("Uchigatana", "Lightning", 155, "damage", [], True),
+    ("Uchigatana", "Lightning", 40, "damage", [], True),
 ]
 EXPECT_REFUSALS = [  # weapon key, infusion, sl, objective, grip, spells, class, floors: refusal()
     ("Dagger", "No_Infusion", 120, "damage", "two", ["Climax"], None, True),  # the user's case: floors
