@@ -3,7 +3,8 @@
 
 Read-only. The trade model: you and a bracket opponent press R1 at the same instant. The opponent's
 counter-hit is their melee weapon's 1H R1 first hit (the weapon bracket_poise's build_counter picks
-per build), with its time from input, poise damage and armorBreak. Your R1's first hit lands at its
+per build; `--counter-grip build` swings it in the build's own grip instead), with its time from
+input, poise damage and armorBreak. Your R1's first hit lands at its
 own time. A counter that lands first interrupts you when it staggers you then: armorBreak 2 always;
 armorBreak 1 outside hyperarmor; otherwise when its poise damage -- times the weapon's
 uninterruptibleRate inside the R1's hyperarmor window (TAE 111900) -- reaches your poise
@@ -15,6 +16,11 @@ win back); `trade(p)` the share of counters you swing through at poise p; `need`
 that wins back all that poise can (armorBreak 2 hits and armorBreak 1 hits outside hyperarmor no
 poise wins); `need90` the least poise that wins 90% of it. A weapon whose `exposed` is small needs
 no poise; `need` is where more stops paying.
+
+Times are chain_timeline's: TAE frame / 30 over the mean of the attack's start/end play speeds.
+`--play-speed start|end` plays every attack at one of the two instead, the bounds of the handover
+the EXE leaves to the animation network's event tracks (docs/DS2-DPS-MECHANICS.md "Attack play
+speed").
 
     python3 scripts/ds2-poise-need.py --sl 120 --weapons "Black Flamestone Dagger,Giant Warrior Club"
     python3 scripts/ds2-poise-need.py --sl 120 --generate Black_Flamestone_Dagger --class warrior
@@ -47,6 +53,13 @@ def main() -> int:
     ap.add_argument("--infusion", default="No_Infusion")
     ap.add_argument("--class", dest="cls")
     ap.add_argument("--one-hand", action="store_true", help="measure your R1 one-handed (default two-handed)")
+    ap.add_argument("--counter-grip", choices=("1h", "build"), default="1h",
+                    help="the grip of each bracket build's counter R1: 1h (bracket_poise's model) or build, "
+                         "the build's own: two-handed when its grip is 1 and the counter weapon is in rh1, "
+                         "the slot the build two-hands (weapon_ok's rule)")
+    ap.add_argument("--play-speed", choices=("mean", "start", "end"), default="mean",
+                    help="each attack's play speed: mean of WeaponAttackMotionParam start/endPlaySpeed "
+                         "(chain_timeline's rule), or all start or all end, the bounds of the unread handover")
     a = ap.parse_args()
 
     R = load_recommender()
@@ -55,6 +68,14 @@ def main() -> int:
     R.apply_regulation(data)
     corpus, _ = R.load_corpus(data)
     attacks = R.load_attacks(data)
+    if a.play_speed != "mean":
+        # Every attack played at one of its two speeds throughout, for both sides and the 111900
+        # window: the bounds of where startPlaySpeed hands over to endPlaySpeed (docs/DS2-DPS-MECHANICS.md
+        # "Attack play speed").
+        k = 0 if a.play_speed == "start" else 1
+        for att in attacks.values():
+            s = att.get("spd") or [1.0, 1.0]
+            att["spd"] = [s[k], s[k]]
 
     def names_of(key):
         return [data.weapons[key]["name"], key.replace("_", " ")]
@@ -69,13 +90,24 @@ def main() -> int:
 
     # the bracket's counters: (time, poise damage, armorBreak), one per build with a melee weapon
     counters = []
-    for b in R.bracket_builds(data, corpus, a.sl):
-        w = next((w for w in (b.hands[R.HAND_SLOTS.index(s)][0] for s in R.MELEE_ORDER)
-                  if w not in R.EMPTY and w in data.weapons and not data.weapons[w].get("isShield")
-                  and not R.CATALYST.search(w) and w not in data.ranged), None)
-        c = first_hit(w, False) if w else None
+    builds = R.bracket_builds(data, corpus, a.sl)
+    no_melee = no_timing = two_handed = 0
+    for b in builds:
+        slot, w = next(((s, w) for s, w in ((s, b.hands[R.HAND_SLOTS.index(s)][0]) for s in R.MELEE_ORDER)
+                        if w not in R.EMPTY and w in data.weapons and not data.weapons[w].get("isShield")
+                        and not R.CATALYST.search(w) and w not in data.ranged), (None, None))
+        if not w:
+            no_melee += 1
+            continue
+        two = a.counter_grip == "build" and b.grip == 1 and slot == "rh1"
+        c = first_hit(w, two)
+        if c is None and two:  # a weapon with no 2H R1 row is swung 1H
+            c, two = first_hit(w, False), False
         if c:
             counters.append(c)
+            two_handed += two
+        else:
+            no_timing += 1
 
     if a.generate:
         weapon = data.sp_key.get(R.norm(a.generate))
@@ -87,7 +119,9 @@ def main() -> int:
         print(f"granted with {data.weapons[weapon]['name']} at SL {a.sl}: {len(keys)} weapons")
     else:
         keys = [data.sp_key.get(R.norm(n.strip())) for n in (a.weapons or "").split(",") if n.strip()]
-    print(f"bracket counters: {len(counters)} 1H R1 first hits from SL {a.sl} builds")
+    print(f"bracket counters: {len(counters)} R1 first hits ({two_handed} two-handed, grip {a.counter_grip}) "
+          f"from {len(builds)} SL {a.sl} builds; no counter: {no_melee} without a melee weapon, "
+          f"{no_timing} without attack timing or poise rows")
 
     def window(key, two):
         att = next((attacks.get((R.norm(nm), ("Single2Hand" if two else "Single1Hand") + "Normal1st"))
