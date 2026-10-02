@@ -1372,8 +1372,13 @@ def regulation_poise(data: Data, d: dict, names: dict) -> str:
             joined += 1
             moved += p.get("poise") != v
             p["poise"] = v
+    # Max poise's stat term (EXE 0x14037fdd0 + the stat block's +0x4c): the poise column of
+    # PhysicalStatsPerLevelStatValuesParam (+0x90) at min(END, ADP).
+    rows = d["PhysicalStatsPerLevelStatValuesParam"]
+    data.stat_poise = [rows[str(v)]["poise"] if str(v) in rows else 0.0 for v in range(max(map(int, rows)) + 1)]
     return (f"poise on {len(data.hit_poise)} PlayerDamageParam rows and {len(data.weapon_poise)} weapons; "
-            f"armour poise from ArmorParam.strong on {joined} pieces ({moved} differ from the site's)")
+            f"armour poise from ArmorParam.strong on {joined} pieces ({moved} differ from the site's); "
+            f"stat poise from PhysicalStatsPerLevelStatValuesParam.poise")
 
 
 def regulation_stamina(data: Data, d: dict, names: dict) -> str:
@@ -2827,12 +2832,29 @@ def ring_poise(data: Data) -> dict:
     return out
 
 
-def armor_poise(data: Data, armor, rings=()) -> float:
-    """A build's max poise: its four pieces' poise (ArmorParam.strong once regulation_poise ran) plus
-    its rings'. EXE 0x14037fdd0 for the armour sum; each piece's durability factor is taken as 1."""
+def lack_of_stats(req: dict, stats: dict) -> float:
+    """The share of a piece's poise lost to unmet requirements (EXE 0x1403811f0 over
+    PlayerLackOfStatsParam row 28 = [30, 80, 0, 30]): v = clamp(sum of max(0, 1 - stat/req) over the
+    piece's requirements, 0, 1) (0x14034d150), then clamp((30 + 50 v) / 100, 0, 1) for v > 0, 0 at
+    v == 0. So a piece worn under its requirements keeps 0.7 down to 0.2 of its poise."""
+    v = min(1.0, sum(max(0.0, 1 - stats.get(s, 0) / r) for s, r in req.items() if r > 0))
+    return min(1.0, max(0.0, (30 + 50 * v) * 0.01)) if v > 0 else 0.0
+
+
+def armor_poise(data: Data, armor, rings=(), stats: dict | None = None) -> float:
+    """A build's max poise (EXE 0x14037fdd0, docs/DS2-DPS-MECHANICS.md section 2): its four pieces'
+    poise (ArmorParam.strong once regulation_poise ran), each times 1 - lack_of_stats at `stats`,
+    plus the stat poise at min(END, ADP) (data.stat_poise), plus its rings'. Without `stats` the
+    pieces count in full and there is no stat term."""
     rp = ring_poise(data)
-    return (sum((data.armor[s].get(p) or {}).get("poise", 0) for s, p in zip(ARMOR_SLOTS, armor))
-            + sum(rp.get(r, 0) for r in rings))
+    total = 0.0
+    for s, p in zip(ARMOR_SLOTS, armor):
+        piece = data.armor[s].get(p) or {}
+        lost = lack_of_stats(piece.get("require") or {}, stats) if stats else 0.0
+        total += piece.get("poise", 0) * (1 - lost)
+    if stats and getattr(data, "stat_poise", None):
+        total += data.stat_poise[min(stats["endurance"], stats["adaptability"], len(data.stat_poise) - 1)]
+    return total + sum(rp.get(r, 0) for r in rings)
 
 
 def r1_attack(attacks: dict, names: list[str], two_hand: bool) -> dict | None:
@@ -2862,22 +2884,36 @@ def bracket_poise(data: Data, corpus: list[Build], sl: int, attacks: dict, defen
         return memo[2]
     builds = bracket_builds(data, corpus, sl)
     poise = (armor_poise(data, defender) if defender else
-             float(np.mean([armor_poise(data, b.armor, b.rings) for b in builds])) if builds else 0.0)
+             float(np.mean([armor_poise(data, b.armor, b.rings, b.stats) for b in builds])) if builds else 0.0)
     counters = [hp for hp in (build_counter(data, attacks, b) for b in builds) if hp]
     out = {"poise": poise, "counters": counters, "n": len(builds)}
     _bracket_poise_memo[key] = (data, corpus, out)
     return out
 
 
+#: The Stone Ring's flat poise damage per hit: SpEffect `1000[0]` kind 2 in SpEffectRing.emevd,
+#: event 40230000, value 30 (REGULATION), carried as the hit's s8 +0x70 and added before the
+#: hyperarmor and distance multipliers (EXE 0x140139160; docs/DS2-DPS-MECHANICS.md section 2).
+STONE_RING_POISE = 30
+
+
+def wears_stone_ring(data: Data, rings) -> bool:
+    return any((data.rings.get(r) or {}).get("name", r) == "Stone Ring" for r in rings)
+
+
 def build_counter(data: Data, attacks: dict, b: Build) -> tuple[float, int] | None:
     """The counter-hit bracket_poise weighs hyperarmor against for one build: (poise damage,
-    armorBreak) of its melee weapon's (adoption's pick) 1H R1 first hit; None without one."""
+    armorBreak) of its melee weapon's (adoption's pick) 1H R1 first hit, plus STONE_RING_POISE
+    when the build wears a Stone Ring; None without one."""
     w = next((w for w in (b.hands[HAND_SLOTS.index(s)][0] for s in MELEE_ORDER)
               if w not in EMPTY and w in data.weapons and not data.weapons[w].get("isShield")
               and not CATALYST.search(w) and w not in data.ranged), None)
     a = r1_attack(attacks, [data.weapons[w]["name"], w.replace("_", " ")], False) if w else None
     hs = live_hits(a) if a else []
-    return hit_poise(data, w, hs[0].get("dmg")) if hs else None
+    hp = hit_poise(data, w, hs[0].get("dmg")) if hs else None
+    if hp and wears_stone_ring(data, b.rings):
+        hp = (hp[0] + STONE_RING_POISE, hp[1])
+    return hp
 
 
 _bracket_poise_memo: dict = {}
@@ -5959,6 +5995,12 @@ def selftest() -> int:
         ("trident in 0.5 s: R1 only", status_hits(A, ["Channeler's Trident"], [False], 0.5), (1, "1H R1 1 hit")),
         ("trident in 1.5 s: R2", status_hits(A, ["Channeler's Trident"], [False], 1.5), (4, "1H R2 4 hits")),
         # best-infusion margin: best over runner-up, as a fraction of the runner-up
+        # armour poise lost to unmet requirements (PlayerLackOfStatsParam row 28): none when met,
+        # 30% + 50% per unit of shortfall, all of it past a full unit
+        ("lack of stats: requirements met", lack_of_stats({"strength": 20}, {"strength": 20}), 0.0),
+        ("lack of stats: STR 10 of 20", lack_of_stats({"strength": 20}, {"strength": 10}), 0.55),
+        ("lack of stats: capped at 0.8", lack_of_stats({"strength": 20, "dexterity": 20},
+                                                       {"strength": 0, "dexterity": 0}), 0.8),
         ("margin 300 over 200", infusion_margin([300.0, 200.0, 50.0]), 0.5),
         ("margin needs a runner-up", infusion_margin([300.0]), None),
         ("margin over a zero runner-up is none", infusion_margin([300.0, 0.0]), None),
