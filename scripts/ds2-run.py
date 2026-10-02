@@ -471,25 +471,28 @@ KEY_SEAMLESS_PASSWORD = "cooppassword"
 #: Nothing here ships or downloads it. The archive is the one the owner fetched from Nexus into
 #: `~/DS2`; when it is not there, a run with a matching install proceeds and a run without one is
 #: refused with the path it looked for.
-SEAMLESS_VERSION = "0.0.3"
+SEAMLESS_VERSION = "0.0.4"
 SEAMLESS_ARCHIVE = (
     Path.home()
     / "DS2"
-    / "Dark Souls II SoTFS - Seamless Co-op v0.0.3 1468 0.0.3 2026-09-26T20-00Z xqhNv0FE.zip"
+    / "Dark Souls II SoTFS - Seamless Co-op v0.0.4 1468 0.0.4 2026-10-01T21-00Z Sbulrnj0.zip"
 )
 #: Archive member (which is also the path under the game directory) -> SHA-256 of that member.
-#: `ds2sc_launcher.exe` and `crashpad_handler.exe` are byte-identical to 0.0.1's; the DLL and the
-#: locale file are what changed.
+#: `ds2sc_launcher.exe` and `crashpad_handler.exe` are byte-identical from 0.0.1 through 0.0.4;
+#: each release changed the DLL and the locale file. 0.0.4 (2026-10-01) adds the critical-battle
+#: invasion strings and a map pre-initialisation string to the locale file, and its settings
+#: template adds no key: it only raises the defaults of `enemy_damage_scaling` (0 -> 15) and
+#: `boss_damage_scaling` (0 -> 25), which the merge does not apply over an existing value.
 SEAMLESS_FILES: dict[str, str] = {
-    "SeamlessCoop/ds2sc.dll": "17e4ae0355261308a5e8fdf50131aee3bb18ddb925adadfdf9d6b68c8b8bda8a",
+    "SeamlessCoop/ds2sc.dll": "70dfc68f740c9bbf474ba2c6569ca230131df95f3afdcae11bef309cad126b44",
     "SeamlessCoop/locale/english.json":
-        "f344008b1c9cd631899be6b4e285d6526e4dcebc5f20bbbf0cbd414419ec7945",
+        "540df58e565a5dd9f21834ae99584a998204c1908042aec18409f3700b86240c",
     "SeamlessCoop/crashpad/crashpad_handler.exe":
         "d799b428ecc200a47b08b27f6b33ed5fe1f1e065136f380f6a6e78088c404649",
     "ds2sc_launcher.exe": "4fb07cd36e17fba7755597395bc1b44a0809358128e8c8353e8add65583fa88c",
 }
-#: The settings file is merged, never replaced: it holds the owner's `cooppassword`, and 0.0.3's
-#: template ships that key empty -- which is itself a boot-stopping dialog.
+#: The settings file is merged, never replaced: it holds the owner's `cooppassword`, and the
+#: template (0.0.3 and 0.0.4 alike) ships that key empty -- which is itself a boot-stopping dialog.
 SEAMLESS_SETTINGS_MEMBER = f"SeamlessCoop/{SEAMLESS_SETTINGS_NAME}"
 
 #: Files and directories other people's mods own in the game directory. This script writes none
@@ -5500,6 +5503,21 @@ def selftest() -> int:
                     hashlib.sha256(zipped.read(member)).hexdigest() == digest,
                     f"the pinned {SEAMLESS_VERSION} hash of {member} matches the owner's archive",
                 )
+            pinned_template = zipped.read(SEAMLESS_SETTINGS_MEMBER).decode("utf-8", errors="replace")
+        pinned_entries = _ini_entries(pinned_template)
+        check(
+            ("password", KEY_SEAMLESS_PASSWORD) in pinned_entries
+            and pinned_entries.get(("save", KEY_SEAMLESS_SAVE_EXTENSION)) == "co2",
+            f"the {SEAMLESS_VERSION} template still names {KEY_SEAMLESS_PASSWORD} and saves to co2",
+        )
+        owner = {slot: "0" for slot in pinned_entries}
+        owner[("password", KEY_SEAMLESS_PASSWORD)] = "banon-coop"
+        owner_text = "\n".join(f"[{s}]\n{k} = {v}" for (s, k), v in owner.items()) + "\n"
+        check(
+            _ini_entries(merge_seamless_settings(pinned_template, owner_text)) == owner,
+            f"merging the {SEAMLESS_VERSION} template over a full install changes no value "
+            "(its raised damage-scaling defaults included)",
+        )
     else:
         print(f"  skip the pinned hashes: no {SEAMLESS_ARCHIVE} on this machine")
     # The Lighting Engine pair: engine first, presets over it, and nothing when the pins match.
