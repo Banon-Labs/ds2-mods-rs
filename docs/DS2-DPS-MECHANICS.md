@@ -249,7 +249,8 @@ poise after this hit's damage is taken off.
   in the exe). It is one of the AES-ranged BHD5 entries that `ds2-ebl.py extract` refuses. It was decrypted
   here with the entry's own key record (key + range list at the entry's aesKeyOffset in the decrypted BHD5,
   AES-128-ECB over range 0..929040), which produced a valid `TAE ` header. It was unpacked with
-  WitchyBND in passive mode under a PTY. The `.anibnd` (morpheme4) holds the animations, not the events.
+  WitchyBND in passive mode under a PTY. The `.anibnd` (morpheme4) holds the animations and the
+  Morpheme network's own event tracks, which the TAE does not repeat (the play-speed windows below).
 - **Event meanings** (TAE/EXE; handler = `CharacterTimeActEventHandler` virtuals):
   - **2200 {ID}** = attack hitbox window, ID = damageId slot (0 -> damageId01). The ID ordering is
     TAE+REGULATION consistent (OKH 2H R2 chain uses ID 1 and 0 matching its two damage rows). The handler is not traced.
@@ -261,8 +262,8 @@ poise after this hit's damage is taken off.
     101100 spans the whole animation.
 - **Dagger R1 (anim 21010010) extracted**, anim frames at 30 fps (DS2 TAE times are seconds; x30):
   startup to hitbox **8 f**, active **8-15 (7 f)**, 111500 window 13-22, 120100 lock 0-13, anim end 30.
-  With startPlaySpeed 1.1 / endPlaySpeed 1.2 that is roughly 7.3 f (0.24 s) to first active frame. Which part
-  each speed covers is unknown, so this is an estimate.
+  With startPlaySpeed 1.1 / endPlaySpeed 1.2 that is 7.3 f (0.24 s) to first active frame: the anim's
+  event-150 window covers frames 0-9, so the whole windup plays at the start speed ("Attack play speed").
   OKH R1 (34010011): hitbox 23-28, lock 0-25, 111500 26-36, hyperarmor 20-30, end 70; speeds 1.2/1.1.
 - Caveat: the TAE gives animation-time events. Actual chaining is governed by the state machine (not in
   params, not traced), so "recovery" is the INFERRED 111500/120100 windows, not a verified cancel frame.
@@ -276,11 +277,32 @@ What the game does with `WeaponAttackMotionParam.startPlaySpeed` (+0x8) / `endPl
 
 - **Copied into the character flags.** Code in Arxan's section at `0x141b3ff3b` reads the attack row's
   +0x8 and +0xc (r14 = the row) and stores them to `sCharacterFlags+0x1f8` and `+0x1fc`
-  (`PlayerCtrl+0xb8`), with a third float from the caller's frame (`[rbp+0x188]`, source not traced)
-  into `+0x200`. A second writer of the same three fields, `0x141b9446b`, takes them from registers
-  whose source was not traced. The row lookup is `0x140397510` -> `0x140024a47` -> `0x140359120`
+  (`PlayerCtrl+0xb8`). The row lookup is `0x140397510` -> `0x140024a47` -> `0x140359120`
   (CharacterManager param slot +0x440, index 0x13 = WeaponAttackMotionParam in
   `getCharacterManagerParamNameFromIndex` `0x14048b620`).
+- **The second writer** is the function whose Arxan-shattered body enters at `0x141b84c35`
+  (`scripts/ds2-arxan-trace.py 0x141c4ddf1` linearises it; rdi = this, rbx = an attack request).
+  With the request's `+0x60` (the WeaponAttackMotionParam row) null it returns at once. Otherwise it
+  takes start/end from the row's +0x8/+0xc, or from `[request+0x70]`'s +0xe0/+0xe4 when that is set,
+  and scales them:
+  - end x `PlayerGameParamCalculator` slot 13 (`0x14031e660`, 1 - slot 9 `0x1403811f0`) for
+    PlayerLackOfStatsParam row 8, after `0x14031fcb0` fills the request's stat ratios
+    (`0x141c38067` sets the row, `0x140071366` multiplies);
+  - start, when the request's `+0xc` is not 5: x the same factor for row 7 (`0x14038f6a0` called with
+    r8d = 7 at `0x141ce3fea`, multiplied at `0x141b0da90`). Rows 7 and 8 are 10-35% and 10-30% by
+    stats (REGULATION), so a build that meets the weapon's requirements has factor 1.0;
+  - start, when `+0xc` is 5 (the dash attack): x lerp(PlayerCommonParam `dashAttackMinSpeedAnimScale`
+    +0x88, `dashAttackMaxSpeedAnimScale` +0x8c, t), t = (|velocity| - `dashAttackTriggerMinSpeed`
+    +0x84) / (`[[chr]+0x48]+0x48` - that), clamped to 0..1 (`0x141afd3e4`..`0x141c67700`).
+  It then stores start, end and `[rsp+0x48]` to +0x1f8/+0x1fc/+0x200 (`0x141b9446b`).
+- **+0x200 reads as 0.0 in both writers.** The first writer zeroes `[rbp+0x188]` at `0x141b3fea9` and
+  reads it back at `0x141b3ff4f` with no call between; the second zeroes `[rsp+0x48]` at its entry
+  (`0x141c4ddf1`, `0x140049bf3`) and nothing it calls writes there (`0x14031fcb0` writes only the
+  request's +0x4/+0x8; slot 9 only reads). Taken literally, Attack_SwingSpeed would be 0 inside every
+  150 window and the windup would never play, so either a third writer exists that the byte searches
+  for stores to `+0x200` (movss/movups/mov forms) did not find -- code Arxan decrypts at runtime would
+  hide one -- or the factor is not what reaches the network. **UNREAD: needs a runtime read of
+  flags+0x200 during a swing.** `scripts/ds2-poise-need.py --play-speed game` takes it as 1.0.
 - **Turned into one Morpheme control parameter.** `ChrAttackMotionCtrl` binds its control parameters
   in `0x14035c770`; index 4 is `ControlParameters|Attack_SwingSpeed`. Every frame `0x14035d580` sets it
   from the action state `S = PlayerCtrl+0xc0`:
@@ -292,30 +314,65 @@ What the game does with `WeaponAttackMotionParam.startPlaySpeed` (+0x8) / `endPl
   `S+0xa4` for id 151 (0x97), on the event's start and end flags. So each attack animation says, in
   the animation network's own event tracks, which stretch plays at the start speed and which at the
   end speed. Outside both it plays at 1.0, not at either speed.
-- Those tracks live in the Morpheme network/animation data (`.anibnd`), which has not been extracted
-  here; the TAE XMLs do not carry them. **Where one speed hands over to the other is therefore still
-  unread**, and so is whether the windup is covered at all. That `Attack_SwingSpeed` scales the
-  attack animation's playback is INFERRED from its name; the network that consumes it was not read.
+- **The tracks are in the player's anibnd** (DATA, read 2026-10-01 with `scripts/ds2-anibnd.py`;
+  format notes in its docstring). `/morpheme4/chr/c0001.anibnd.dcx` in GameDataEbl is not AES-ranged;
+  its `c0001.nmb` holds 5762 duration event tracks. Each animation source's event-track set has a
+  `TimeAct` track whose one event's user data is the TAE animation id, and attack sets have an
+  `AttackSpeedControl` track (track user data 100) whose events carry user data 150 or 151. Event
+  times are fractions of the clip; the clip length is the matching `aXX_YY_ZZZZ_*.nsa`'s header
+  +0x28. `scripts/ds2-anibnd.py windows` writes all 409 animations' windows in seconds to
+  `~/.cache/ds2-builds/attack-speed-windows.json`. Sets that share an animation agree; 554 of 6820
+  boundaries (counting repeated sets) sit off the 1/30 s grid by up to half a frame, e.g. the
+  greataxe-type 22030030's 150 ends at 0.2167 x 2.333 s = 15.2 f, a fraction that fits a 2 s clip.
+- **Attack_SwingSpeed is a play-speed input.** In the network's node-name table (an
+  IDMappedStringTable at file offset 0xcb7a8) it is node 111. It is the speed input of 136 nodes of
+  type 125, each with one child. Type 125 also takes `DodgeSpeed`, `StepSpeed`, `ItemUse_Speed`,
+  `WeaponChangeSpeed` and the constant parameters `PlaySpeed_2`/`PlaySpeed_5` (`ds2-anibnd.py nodes
+  <nmb> 111`). That type 125 is Morpheme's play-speed modifier is INFERRED from those inputs.
 
-What that does to `chain_timeline`'s rule (frame / 30 / mean of the two speeds): the true time to a
-hit lies between frame / 30 / the largest and / the smallest of {start, end, 1.0}. For the first R1 hit
-(TAE 2200 start, attacks.json):
+**Where the windows sit** (seconds of animation time, frames = x30; first live 2200 hitbox from
+attacks.json, hyperarmor = TAE 111900):
 
-| attack | anim | hit frame | start / end | mean rule | all start | all end | 1.0 |
-|---|---|---|---|---|---|---|---|
-| Black Flamestone Dagger 2H R1 | 21030011 | 9 | 1.0 / 1.4 | 0.250 s | 0.300 s | 0.214 s | 0.300 s |
-| Giant Warrior Club 2H R1 | 34030011 | 23 | 1.0 / 1.6 | 0.590 s | 0.767 s | 0.479 s | 0.767 s |
-| Uchigatana 1H R1 | 28010010 | 14 | 1.25 / 1.5 | 0.339 s | 0.373 s | 0.311 s | 0.467 s |
+| R1 | anim | 150 (start speed) | hitbox | 151 (end speed) | start / end |
+|---|---|---|---|---|---|
+| Dagger / Black Flamestone Dagger 2H | 21030011 | f0-9 | f9-15 | f13-20 | 1.0 / 1.4 |
+| Dagger 1H | 21010010 | f0-9 | f8-15 | f13-20 | 1.1 / 1.2 |
+| Black Flamestone Dagger 1H | 29010010 | f0-10 | f14-19 | f18-29 | 1.3 / 1.4 |
+| Broadsword 1H | 29010012 | f0-10 | f14-19 | f18-25 | 0.95 / 1.0 |
+| Broadsword 2H | 29030010 | f0-8 | f13-19 | f18-30 | 1.15 / 1.2 |
+| Uchigatana 1H | 28010010 | f3-10 | f14-18 | f30-35 | 1.25 / 1.5 |
+| Uchigatana 2H | 28030010 | f3-13 | f14-18 | f25-35 | 1.2 / 1.3 |
+| Mace 1H | 35010011 | f0-7 | f14-19 | f20-30 | 0.75 / 0.8 |
+| Mace 2H | 27030020 | f0-13 | f14-19 | f18-38 | 0.85 / 1.0 |
+| Claymore 1H (HA f20-25) | 31010010 | f0-13 | f19-24 | f28-35 | 1.2 / 1.4 |
+| Claymore 2H (HA f20-30) | 31030011 | f0-10 | f18-24 | f30-40 | 1.55 / 1.3 |
+| Giant Warrior Club / Old Knight Hammer 1H (HA f20-30) | 34010011 | f0-16 | f23-28 | f35-45 | 1.2 / 1.1 |
+| Giant Warrior Club / Old Knight Hammer 2H (HA f20-30) | 34030011 | f0-15 | f23-28 | f40-55 | 1.0 / 1.6 |
 
-If the start speed covers the windup, as the Japanese field names (start part / end part) suggest, the
-mean rule is 0.05 s (17%), 0.18 s (23%) and 0.03 s (9%) early on these three. With the speed read as 1.0
-outside both tracks, the uchigatana could be up to 0.13 s (27%) late.
+The pattern: 150 is the windup and ends at or before the hitbox opens; the frames between it and the
+hitbox, and the hitbox itself, play at 1.0; 151 is the recovery after the hit. So the end speed never
+moves the first hit, and the start speed moves only the windup.
 
-`scripts/ds2-poise-need.py --play-speed start|end` measures the bounds. At SL 120 for the weapons a
-Black Flamestone Dagger warrior is granted: the great hammers' share of counters landing first is 69%
-under the mean rule, 98.5% at the start speed and 57% at the end speed; the median `need` is 100.1,
-125.1 and 90.1. The weapons' order by hit time changes too, because their start/end ratios differ.
-The poise numbers rest on this unread handover more than on anything else in the model.
+Time to the first hit (start factor taken as 1.0), against the earlier rules:
+
+| attack | game | mean rule | all start | all end |
+|---|---|---|---|---|
+| Black Flamestone Dagger 2H R1 | 0.300 s | 0.250 s | 0.300 s | 0.214 s |
+| Giant Warrior Club / Old Knight Hammer 2H R1 | 0.767 s | 0.590 s | 0.767 s | 0.479 s |
+| Uchigatana 1H R1 | 0.420 s | 0.339 s | 0.373 s | 0.311 s |
+| Uchigatana 2H R1 | 0.411 s | 0.373 s | 0.389 s | 0.359 s |
+| Giant Warrior Club 1H R1 | 0.678 s | 0.667 s | 0.639 s | 0.697 s |
+| Claymore 2H R1 | 0.482 s | 0.421 s | 0.387 s | 0.462 s |
+
+The mean rule is early on every one of these, by 0.18 s on the two-handed great hammers.
+
+`scripts/ds2-poise-need.py --sl 120 --generate Black_Flamestone_Dagger --class warrior`, the bracket's
+counters timed the same way (1H grip): the great hammers' share of counters landing first is 69.2%
+under the mean rule, 99.3% under `--play-speed game` (98.5% all-start, 57.2% all-end); the median
+`need` across the 21 granted weapons is 100.1 mean, 120.1 game (125.1 / 90.1). The Black Flamestone
+Dagger's own R1 lands at 0.30 s, exposed to 2.8% of counters with `need` 60.1 (mean rule: 1.9%, 35.1).
+Weapons whose start speed is above 1.0 come out later than all-start because the gap before the
+hitbox plays at 1.0 (Lost Sinner's Sword/Greatsword 0.64 s against 0.50 s; exposed 86% against 47%).
 
 **TAE units.** DS2 TAE event times are float seconds of animation time. Every event time in the three
 anims above is a multiple of 1/30 (2200 at 0.3, 0.7667 and 0.4667 s; GWC 111900 at 0.6667-1.0 s), so

@@ -20,7 +20,12 @@ no poise; `need` is where more stops paying.
 Times are chain_timeline's: TAE frame / 30 over the mean of the attack's start/end play speeds.
 `--play-speed start|end` plays every attack at one of the two instead, the bounds of the handover
 the EXE leaves to the animation network's event tracks (docs/DS2-DPS-MECHANICS.md "Attack play
-speed").
+speed"). `--play-speed game` plays each animation the way those tracks say: at startPlaySpeed
+inside its event-150 windows, endPlaySpeed inside its 151 windows and 1.0 elsewhere, read from
+the player's anibnd (`scripts/ds2-anibnd.py windows` writes the table this reads); an animation
+with no such track plays at 1.0. The EXE multiplies the start speed by sCharacterFlags+0x200, which
+both writers found store 0.0 -- taken literally the windup would never play -- so the factor is
+taken as 1.0 here and is the one unread number left (docs/DS2-DPS-MECHANICS.md).
 
     python3 scripts/ds2-poise-need.py --sl 120 --weapons "Black Flamestone Dagger,Giant Warrior Club"
     python3 scripts/ds2-poise-need.py --sl 120 --generate Black_Flamestone_Dagger --class warrior
@@ -35,6 +40,27 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 LEVELS = (0, 20, 40, 60, 80, 100, 120, 140, 160)
+SPEED_WINDOWS = Path.home() / ".cache/ds2-builds/attack-speed-windows.json"
+#: sCharacterFlags+0x200, the EXE's factor on startPlaySpeed inside a 150 window. Not read (see the
+#: module docstring); 1.0 is the value under which the start speed is the start speed.
+START_FACTOR = 1.0
+
+
+def game_time(table: dict, anim: int, spd: list, t: float) -> float:
+    """Seconds of play to reach animation time `t` (seconds) of `anim`: the rate is startPlaySpeed
+    x START_FACTOR while a 150 window is open (it wins when both are, as in 0x14035d580),
+    endPlaySpeed while a 151 is, else 1.0."""
+    if t <= 0:
+        return t
+    windows = (table.get(str(anim)) or {}).get("windows") or []
+    cuts = sorted({0.0, t, *(x for _, s, e in windows for x in (s, e) if 0.0 < x < t)})
+    real = 0.0
+    for a, b in zip(cuts, cuts[1:]):
+        mid = (a + b) / 2
+        open_ = {u for u, s, e in windows if s <= mid < e}
+        rate = spd[0] * START_FACTOR if 150 in open_ else spd[1] if 151 in open_ else 1.0
+        real += (b - a) / rate
+    return real
 
 
 def load_recommender():
@@ -57,10 +83,27 @@ def main() -> int:
                     help="the grip of each bracket build's counter R1: 1h (bracket_poise's model) or build, "
                          "the build's own: two-handed when its grip is 1 and the counter weapon is in rh1, "
                          "the slot the build two-hands (weapon_ok's rule)")
-    ap.add_argument("--play-speed", choices=("mean", "start", "end"), default="mean",
+    ap.add_argument("--play-speed", choices=("mean", "start", "end", "game"), default="mean",
                     help="each attack's play speed: mean of WeaponAttackMotionParam start/endPlaySpeed "
-                         "(chain_timeline's rule), or all start or all end, the bounds of the unread handover")
+                         "(chain_timeline's rule), all start or all end (the bounds), or game: start "
+                         "inside the animation's event-150 windows, end inside its 151 windows, 1.0 "
+                         "elsewhere (scripts/ds2-anibnd.py windows)")
     a = ap.parse_args()
+    speed_table = None
+    if a.play_speed == "game":
+        if not SPEED_WINDOWS.exists():
+            raise SystemExit(f"{SPEED_WINDOWS} missing: run scripts/ds2-anibnd.py windows")
+        speed_table = json.loads(SPEED_WINDOWS.read_text())
+    unwindowed = set()
+
+    def real(att, frame):
+        """Seconds from input to TAE frame `frame` of attack `att` under --play-speed."""
+        spd = att.get("spd") or [1.0, 1.0]
+        if speed_table is None:
+            return frame / 30 / (sum(spd) / 2)
+        if str(att["anim"]) not in speed_table:
+            unwindowed.add(att["anim"])
+        return game_time(speed_table, att["anim"], spd, frame / 30)
 
     R = load_recommender()
     sp_json, mm_json = R.dump_site_tables(R.CACHE / "site-tables")
@@ -68,7 +111,7 @@ def main() -> int:
     R.apply_regulation(data)
     corpus, _ = R.load_corpus(data)
     attacks = R.load_attacks(data)
-    if a.play_speed != "mean":
+    if a.play_speed in ("start", "end"):
         # Every attack played at one of its two speeds throughout, for both sides and the 111900
         # window: the bounds of where startPlaySpeed hands over to endPlaySpeed (docs/DS2-DPS-MECHANICS.md
         # "Attack play speed").
@@ -80,7 +123,20 @@ def main() -> int:
     def names_of(key):
         return [data.weapons[key]["name"], key.replace("_", " ")]
 
+    def first_attack(key, two):
+        slot = ("Single2Hand" if two else "Single1Hand") + "Normal1st"
+        return next((attacks[(R.norm(nm), slot)] for nm in names_of(key) if (R.norm(nm), slot) in attacks), None)
+
     def first_hit(key, two):
+        if speed_table is not None:
+            # the R1's earliest live hitbox, timed through the animation's speed windows
+            att = first_attack(key, two)
+            hs = R.live_hits(att) if att else []
+            if not hs:
+                return None
+            h = min(hs, key=lambda h: h["start"])
+            hp = R.hit_poise(data, key, str(h.get("dmg")))
+            return (real(att, h["start"]), *hp) if hp else None
         tl = next((t for t in (R.chain_timeline(attacks, nm, two, "Normal", 3.0, with_row=True)
                                for nm in names_of(key)) if t), None)
         if not tl:
@@ -124,14 +180,11 @@ def main() -> int:
           f"{no_timing} without attack timing or poise rows")
 
     def window(key, two):
-        att = next((attacks.get((R.norm(nm), ("Single2Hand" if two else "Single1Hand") + "Normal1st"))
-                    for nm in names_of(key)
-                    if attacks.get((R.norm(nm), ("Single2Hand" if two else "Single1Hand") + "Normal1st"))), None)
+        att = first_attack(key, two)
         rate = data.weapon_poise.get(key, (0, 0.0))[1]
         if not att or not rate:
             return [], 0.0
-        spd = sum(att.get("spd") or [1.0, 1.0]) / 2
-        return [(s / 30 / spd, e / 30 / spd) for s, e in R.tae_windows(att["anim"], R.TAE_HYPERARMOR)], rate
+        return [(real(att, s), real(att, e)) for s, e in R.tae_windows(att["anim"], R.TAE_HYPERARMOR)], rate
 
     print(f"{'weapon':32} {'hit s':>6} {'HA':>5} {'exposed':>8} {'need':>6} {'need90':>7}  trade at poise "
           + " ".join(f"{p:>4}" for p in LEVELS))
@@ -167,6 +220,9 @@ def main() -> int:
         needs = sorted(nd for _, nd in rows)
         print(f"\nmedian need across the granted weapons: {needs[len(needs) // 2]:.1f}; "
               f"weapons needing under 20 poise: {sum(1 for x in needs if x < 20)}/{len(needs)}")
+    if speed_table is not None:
+        print(f"play speed: anibnd windows, start factor {START_FACTOR}; {len(unwindowed)} animations "
+              f"with no 150/151 track played at 1.0: {sorted(unwindowed)[:20]}")
     return 0
 
 
