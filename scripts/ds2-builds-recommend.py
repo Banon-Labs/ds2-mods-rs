@@ -4452,15 +4452,26 @@ def suggest_rings(data: Data, near: Counter, every: Counter | None = None, n: in
 
 
 def generate_armor(data: Data, corpus: list[Build], weapon: str, inf: str, two: bool, stats: dict,
-                   rings: list[str]) -> tuple[list[str], str | None]:
-    """The generated build's armour: best_armor's top set for a build holding only the primary and
-    wearing `rings`, as display names head/chest/hands/legs ("Naked" for a slot left bare), and a
-    note when the load cap left a slot bare or left no set at all -- never a silent naked build."""
-    wearer = Build("", stats, ["Naked"] * 4, [(weapon, inf)], int(two), rings, [])
+                   rings: list[str], listed=(), catalysts=()) -> tuple[list[str], str | None]:
+    """The generated build's armour: best_armor's top set for a build wearing `rings` and holding
+    the heaviest one of the primary and the `listed` weapons (keys) -- any one of them can be
+    equipped in its place without passing 70% -- plus, for a build that casts, the heaviest of its
+    `catalysts` (keys), which is held beside the weapon. As display names head/chest/hands/legs
+    ("Naked" for a slot left bare), and a note when the load cap left a slot bare or left no set at
+    all -- never a silent naked build.
+
+    Before this the set was chosen for the primary alone, so a build whose other weapons were
+    heavier than its primary could equip only the primary under 70% (user report 2026-10-01)."""
+    weight = lambda k: data.weapons.get(k, {}).get("weight", 0)
+    held = [(max([weapon, *listed], key=weight), inf)]  # max keeps the first of a tie: the primary
+    if catalysts:
+        held.append((max(catalysts, key=weight), "No_Infusion"))
+    wearer = Build("", stats, ["Naked"] * 4, held, int(two), rings, [])
     cap, carried, sets = best_armor(data, wearer, dict(stats), threat_mix(data, corpus), top=1,
                                      scarcity=load_scarcity(data, stats))
     if not sets:
-        return [], (f"no armor fits: the weapon and rings weigh {carried:.1f}, over the {cap:.1f} a "
+        what = "the heaviest weapon, its catalyst and the rings" if catalysts else "the heaviest weapon and the rings"
+        return [], (f"no armor fits: {what} weigh {carried:.1f}, over the {cap:.1f} a "
                     f"{EQUIP_CAP:.0%} load allows at VIT {stats['vitality']}")
     pieces = sets[0][2]
     bare = [s for s, p in zip(ARMOR_SLOTS, pieces) if p == "Naked"]
@@ -4515,8 +4526,13 @@ def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
     suggested = worn + suggest_rings(data, near, every, 4 - len(worn), worn)
     common = [r for r, c in every.most_common() if c >= COMMON_RING * len(corpus) and r not in suggested
               and r not in NO_USE_RINGS]
+    by_name = {}
+    for key, w in data.weapons.items():
+        by_name.setdefault(w["name"], key)
+    listed = [by_name[name] for name, _, _ in one[:15] + only2[:5]]
+    catalysts = [c for _, c, _, _ in best_catalysts(data, spells, eff)]
     armor, armor_note = ([], None) if allow_naked else generate_armor(data, corpus, weapon, inf, two, stats,
-                                                                     suggested)
+                                                                     suggested, listed, catalysts)
     return {"class": cls, "sl": sl, "stats": stats, "two_handed": two, "objective": objective, "value": round(val),
             "primary": (data.weapons[weapon]["name"], inf), "weapons_1h": one[:15], "weapons_2h_only": only2[:5],
             "rings": [data.rings[r]["name"] for r in suggested for _ in range(3)]

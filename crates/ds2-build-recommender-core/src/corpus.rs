@@ -3203,7 +3203,7 @@ impl CorpusBackend {
         let stats = to_stats(stats);
         let weapon = self.weapon_by_key(weapon)?;
         let scarcity = scarcity.unwrap_or_else(|| self.load_scarcity(&stats));
-        let (_, _, set) = self.best_armor(&stats, weapon, &[], scarcity);
+        let (_, _, set) = self.best_armor(&stats, &[weapon.weight], &[], scarcity);
         set.map(|set| set.map(|piece| piece.key.clone()))
     }
 
@@ -3528,16 +3528,16 @@ impl CorpusBackend {
 type ArmorSet<'a> = (f64, f64, [&'a Wearable; 4]);
 
 impl CorpusBackend {
-    /// The script's `best_armor` with `top=1`: the equip-load cap, what the weapon and rings
-    /// carry, and the set, head to legs, whose defense weighted by the corpus threat mix is
+    /// The script's `best_armor` with `top=1`: the equip-load cap, what the `held` weapons (their
+    /// weights) and rings carry, and the set, head to legs, whose defense weighted by the corpus threat mix is
     /// highest among those these stats can wear under the cap. `None` when nothing fits, which
-    /// only happens when the weapon and rings alone are over it: `Naked` is a piece in every slot.
+    /// only happens when the weapons and rings alone are over it: `Naked` is a piece in every slot.
     /// `scarcity` is the script's: above 0, a set scores its defense less `scarcity` x
     /// [`LOAD_PRICE`] x the best set's defense per weight x its weight.
     fn best_armor(
         &self,
         stats: &Stats,
-        weapon: &Weapon,
+        held: &[f64],
         rings: &[usize],
         scarcity: f64,
     ) -> (f64, f64, Option<[&Wearable; 4]>) {
@@ -3549,7 +3549,8 @@ impl CorpusBackend {
             .iter()
             .map(|&ring| self.rings[ring].2)
             .fold(0.0, |total, weight| total + weight);
-        let carried = weapon.weight + ring_weight;
+        // The script's `sum()` over the weapons, then `+=` the rings' own `sum()`.
+        let carried = held.iter().fold(0.0, |total, weight| total + weight) + ring_weight;
         let budget = cap - carried;
         let value = |piece: &Wearable| {
             piece
@@ -3679,21 +3680,53 @@ impl CorpusBackend {
         out
     }
 
+    /// The weight of the first weapon named `name`, as the script's `by_name` finds a key for a
+    /// listed name; 0 for a name no weapon has, as its `data.weapons.get(k, {})` reads one.
+    fn weight_by_name(&self, name: &str) -> f64 {
+        self.weapons
+            .iter()
+            .find(|weapon| weapon.name == name)
+            .map_or(0.0, |weapon| weapon.weight)
+    }
+
     /// The script's `generate_armor`: the pieces' names head to legs, `Naked` for a slot left
     /// bare, and the note that says why a slot or the whole set is bare.
+    ///
+    /// The set leaves room for the heaviest one of `primary` and the `listed` weapons' weights,
+    /// since any one of them can be equipped in the primary's place, plus the heaviest of
+    /// `catalysts`, which a build that casts holds beside it. A set chosen for the primary alone
+    /// left a Havel's-clad dagger build with 7.3 of load for every other weapon it listed.
     fn generate_armor(
         &self,
         stats: &Stats,
-        weapon: &Weapon,
+        primary: f64,
+        listed: &[f64],
+        catalysts: &[f64],
         rings: &[usize],
     ) -> (Vec<String>, Option<String>) {
-        let (cap, carried, set) = self.best_armor(stats, weapon, rings, self.load_scarcity(stats));
+        // Python's `max` keeps the first of a tie.
+        let heaviest = |first: f64, rest: &[f64]| {
+            rest.iter().fold(
+                first,
+                |best, &weight| if weight > best { weight } else { best },
+            )
+        };
+        let mut held = vec![heaviest(primary, listed)];
+        if let Some((&first, rest)) = catalysts.split_first() {
+            held.push(heaviest(first, rest));
+        }
+        let (cap, carried, set) = self.best_armor(stats, &held, rings, self.load_scarcity(stats));
         let percent = EQUIP_CAP * 100.0;
         let Some(set) = set else {
+            let what = if catalysts.is_empty() {
+                "the heaviest weapon and the rings"
+            } else {
+                "the heaviest weapon, its catalyst and the rings"
+            };
             return (
                 Vec::new(),
                 Some(format!(
-                    "no armor fits: the weapon and rings weigh {carried:.1}, over the {cap:.1} a \
+                    "no armor fits: {what} weigh {carried:.1}, over the {cap:.1} a \
                      {percent:.0}% load allows at VIT {}",
                     stats[VIT]
                 )),
@@ -4146,7 +4179,16 @@ impl RecommenderBackend for CorpusBackend {
         let (armor, armor_note) = if allow_naked {
             (Vec::new(), None)
         } else {
-            self.generate_armor(&stats, primary, &suggested)
+            let listed: Vec<f64> = weapons_1h
+                .iter()
+                .chain(&weapons_2h_only)
+                .map(|row| self.weight_by_name(&row.weapon))
+                .collect();
+            let held: Vec<f64> = catalysts
+                .iter()
+                .map(|pick| self.weight_by_name(&pick.name))
+                .collect();
+            self.generate_armor(&stats, primary.weight, &listed, &held, &suggested)
         };
         Some(GeneratedBuild {
             class: self.classes[class].name.clone(),
