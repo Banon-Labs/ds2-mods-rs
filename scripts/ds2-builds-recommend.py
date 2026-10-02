@@ -3067,32 +3067,38 @@ def trade_counters(data: Data, corpus: list[Build], sl: int, attacks: dict) -> l
     cache = data.__dict__.setdefault("_trade_counters", {})
     if key in cache:
         return cache[key]
-    melee = lambda w: (w not in EMPTY and w in data.weapons and not data.weapons[w].get("isShield")
-                       and not CATALYST.search(w) and w not in data.ranged)
-    out = []
-    for b in bracket_builds(data, corpus, sl):
-        pick = next(((s, *b.hands[HAND_SLOTS.index(s)]) for s in MELEE_ORDER
-                     if melee(b.hands[HAND_SLOTS.index(s)][0])), None)
-        if not pick:
-            continue
-        slot, w, inf = pick
-        hit = first_strike(data, attacks, w, b.grip == 1 and slot == "rh1", table)
-        worn = [r for r in b.rings if r in data.rings]
-        try:
-            eff = gear_stats(data, effective(data, b), worn)
-        except KeyError:
-            continue
-        if not hit:
-            continue
-        if wears_stone_ring(data, b.rings):
-            hit["pd"] += STONE_RING_POISE
-        infs = data.weapons[w]["infusions"]
-        inf = inf if inf in infs else "No_Infusion" if "No_Infusion" in infs else next(iter(infs))
-        hit.update(poise=armor_poise(data, b.armor, b.rings, b.stats), dfn=build_defense(data, b),
-                   ar=attack_rating(data, w, inf, eff, worn))
-        out.append(hit)
+    out = [hit for hit in (trade_counter(data, attacks, b, table) for b in bracket_builds(data, corpus, sl))
+           if hit]
     cache[key] = out
     return out
+
+
+def trade_counter(data: Data, attacks: dict, b: Build, table: dict | None) -> dict | None:
+    """trade_counters' counter-hit for one build `b` at timing `table` (speed_windows); None when
+    it has no melee weapon with a first_strike, or its stats cannot be read. What --export-backend
+    writes per corpus build (the XT record), so the Rust port takes the bracket's from the file."""
+    melee = lambda w: (w not in EMPTY and w in data.weapons and not data.weapons[w].get("isShield")
+                       and not CATALYST.search(w) and w not in data.ranged)
+    pick = next(((s, *b.hands[HAND_SLOTS.index(s)]) for s in MELEE_ORDER
+                 if melee(b.hands[HAND_SLOTS.index(s)][0])), None)
+    if not pick:
+        return None
+    slot, w, inf = pick
+    hit = first_strike(data, attacks, w, b.grip == 1 and slot == "rh1", table)
+    worn = [r for r in b.rings if r in data.rings]
+    try:
+        eff = gear_stats(data, effective(data, b), worn)
+    except KeyError:
+        return None
+    if not hit:
+        return None
+    if wears_stone_ring(data, b.rings):
+        hit["pd"] += STONE_RING_POISE
+    infs = data.weapons[w]["infusions"]
+    inf = inf if inf in infs else "No_Infusion" if "No_Infusion" in infs else next(iter(infs))
+    hit.update(poise=armor_poise(data, b.armor, b.rings, b.stats), dfn=build_defense(data, b),
+               ar=attack_rating(data, w, inf, eff, worn))
+    return hit
 
 
 def exchange_pairs(mine: list[dict], counters: list[dict]) -> dict | None:
@@ -5188,10 +5194,19 @@ def recommended_minimum(data: Data, corpus: list[Build], weapon: str, two: bool,
 #                                                             melee and ranged base costs and the
 #                                                             R1_COST_FIELD rates, 1H 1st/2nd then
 #                                                             2H 1st/2nd
+#   FS grip strike                                            the last W's first_strike in the grip
+#                                                             (2: a grip with no R1 row swings 1H)
+#   XT strike poise defense(8) ar(5)                          the last X's trade_counter: its
+#                                                             first_strike (Stone Ring added), its
+#                                                             max poise, build_defense and AR
+#     where strike is t pd ab mv type lower flat(5) scale rate armor: seconds to the first hit at
+#     the game play speed, poise damage, armorBreak, motion value, type (p s k t), damageLower, flat
+#     attack in DMG order, damageScale, uninterruptibleRate, hyperarmor windows s:e,.. ("-" none)
+#   and, trailing: R the ring's poise (ring_poise); T statPoise, data.stat_poise by min(END, ADP)
 
 BACKEND_DATA_NAME = "ds2-build-recommender.dat"
 BACKEND_DATA = Path.home() / ".cache/ds2-builds" / BACKEND_DATA_NAME
-BACKEND_FORMAT = "ds2-build-recommender-data 18"
+BACKEND_FORMAT = "ds2-build-recommender-data 19"
 #: How far the exported R1/R2 chains run, in seconds: the panel clamps its window to 10.0
 #: (crates/ds2-build-recommender-ui/src/panel.rs), and status_hits runs to max(3, window).
 STATUS_HORIZON = 10.0
@@ -5261,6 +5276,14 @@ def _chain_records(data: Data, attacks: dict, key: str, name: str) -> list[str]:
     return out
 
 
+def _strike_fields(hit: dict) -> list[str]:
+    """A first_strike as the FS and XT records carry it."""
+    return [_num(hit["t"]), _num(float(hit["pd"])), _num(int(hit["ab"])), _num(float(hit["mv"])),
+            HIT_CODE.get(hit["kind"], "p"), _num(hit["lower"]), ",".join(_num(v) for v in hit["flat"]),
+            _num(float(hit["scale"])), _num(float(hit["rate"])),
+            ",".join(f"{_num(s)}:{_num(e)}" for s, e in hit["armor"]) or "-"]
+
+
 def _poise_records(data: Data, attacks: dict, key: str, name: str) -> list[str]:
     """export_backend's PO records for one weapon: per grip, what poise_metrics reads that no
     build changes -- the R1's hyperarmor rate and cover, and its chain's hits out to 10 s as
@@ -5296,6 +5319,9 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
         out.append("\t".join(["T", t, *(_num(v or 0) for v in data.sp[t])]))
     out.append("\t".join(["T", "equipmentLoad", *(_num(v or 0) for v in data.equip_load)]))
     out.append("\t".join(["T", "attunementSlots", *(_num(v) for v in data.att_slots)]))
+    if getattr(data, "stat_poise", None):  # armor_poise's stat term
+        out.append("\t".join(["T", "statPoise", *(_num(v) for v in data.stat_poise)]))
+    timing = speed_windows()  # first_strike's: the game play speed when the anibnd windows were read
     if data.stamina_max:
         out.append("\t".join(["T", "staminaMax", *(_num(v) for v in data.stamina_max)]))
     if data.hp_max:
@@ -5354,6 +5380,10 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
         if key not in data.ranged:  # what row_metrics and poise_metrics read; a launcher has none
             out.extend(_chain_records(data, attacks, key, w["name"]))
             out.extend(_poise_records(data, attacks, key, w["name"]))
+            for two in (False, True):  # what granted_trades swings
+                hit = first_strike(data, attacks, key, two, timing)
+                if hit:
+                    out.append("\t".join(["FS", "2" if two else "1", *_strike_fields(hit)]))
         r = data.ranged.get(key)
         if r:
             out.append("\t".join(["RG", _num(r["ammo"]), r["kind"], _num(float(r["hand"])),
@@ -5380,7 +5410,8 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
                               _num(float(bracket_poise(data, corpus, lo, attacks)["poise"]))]))
     ring_ix = {k: i for i, k in enumerate(data.rings)}
     for key, r in data.rings.items():
-        out.append("\t".join(["R", key, r.get("name", key), _num(r.get("weight", 0)), r.get("group", key)]))
+        out.append("\t".join(["R", key, r.get("name", key), _num(r.get("weight", 0)), r.get("group", key),
+                              _num(ring_poise(data).get(key, 0))]))
     out.extend("\t".join(["N", key]) for key in NO_USE_RINGS if key in data.rings)
     for key, add in data.ring_attack.items():
         out.append("\t".join(["O", key, *(_num(add.get(k, 0)) for k in DMG)]))
@@ -5443,6 +5474,11 @@ def export_backend(data: Data, corpus: list[Build]) -> str:
                               ",".join(f"{weapon_ix[w]}:{INFUSION_CODE[inf]}" for w, inf in b.weapons()) or "-",
                               f"{one}:{two}", f"{_num(float(hp[0]))}:{_num(int(hp[1]))}" if hp else "-",
                               ":".join(_num(float(status_cut(data, b, s))) for s in STATUS_PROC)]))
+        c = trade_counter(data, attacks, b, timing)  # what trade_counters counts for the build
+        if c:
+            out.append("\t".join(["XT", *_strike_fields(c), _num(float(c["poise"])),
+                                  ",".join(_num(float(c["dfn"][k])) for k in DMG + PHYS_TYPES),
+                                  ",".join(_num(c["ar"].get(k, 0)) for k in DMG)]))
     return "\n".join(out) + "\n"
 
 
@@ -5487,6 +5523,11 @@ EXPECT_AS_CLASS = [  # class key, weapon key, infusion, sl, objective: --generat
     ("sorcerer", "Demons_Great_Hammer", "Raw", 90, "damage"),  # the SL 90 Sorcerer given a Warrior
     ("sorcerer", "Moonlight_Greatsword", "No_Infusion", 90, "damage"),
     ("sorcerer", "Demons_Great_Hammer", "Raw", 20, "damage"),
+    # generate_armor's poise trade: the three SL 120 warriors it was checked on, a fast weapon, a
+    # slow one and a mid one
+    ("warrior", "Black_Flamestone_Dagger", "No_Infusion", 120, "damage"),
+    ("warrior", "Giant_Warrior_Club", "Dark", 120, "damage"),
+    ("warrior", "Uchigatana", "No_Infusion", 120, "damage"),
 ]
 EXPECT_SPELLS = [  # weapon key, infusion, sl, objective, spell keys: --generate --spells
     ("Demons_Great_Hammer", "Raw", 100, "damage", []),  # the same build EXPECT_BUILDS generates
@@ -5847,8 +5888,16 @@ def expect_builds(data: Data, corpus: list[Build], mix, cases: list, naked_cases
             [(n, INFUSION_CODE[i], d) for n, i, d in g["weapons_1h"]],
             [(n, INFUSION_CODE[i], d) for n, i, d in g["weapons_2h_only"]], suggested, rings,
             g["armor"], g["armor_note"] and _Some(g["armor_note"]), binds[0], binds[1],
-            [trade_line(t) for t in g["ring_trades"]]))))
+            [trade_line(t) for t in g["ring_trades"]],
+            None if g["poise"] is None else _Some((tuple(float(g[k]) for k in TRADE_FIELDS),
+                                                   tuple(float(g["trade_previous"][k]) for k in TRADE_FIELDS)))))))
     return opt, gen
+
+
+#: generate_build's trade numbers the fixture carries, in order, for the chosen set and for
+#: best_armor's (trade_previous): the armour's poise, the counter poise damage it holds through,
+#: the share of trades my R1 lands and the exchange value.
+TRADE_FIELDS = ("poise", "poise_target", "trade_rate", "exchange")
 
 
 def backend_expectations_rest(data: Data, corpus: list[Build], out: list[str], mins: list, flexes: list) -> str:

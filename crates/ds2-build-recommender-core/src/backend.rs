@@ -391,6 +391,11 @@ pub struct GeneratedBuild {
     /// Why the armour is not four pieces, when it is not: the load cap left a slot, or every slot,
     /// bare. Never silent.
     pub armor_note: Option<String>,
+    /// What the armour does in R1 trades against the build's SL bracket, over every weapon it
+    /// lists: `None` for a build that wears none or has nothing to trade.
+    pub trade: Option<ArmorTrade>,
+    /// The same for the set picked on defense and load alone, which poise outbid when it differs.
+    pub trade_previous: Option<ArmorTrade>,
     /// The spells the build was asked to cast, by soulsplanner key, in the order asked: what Apply
     /// attunes. Its stats meet every one's requirements and its ATT holds their slots.
     pub spells: Vec<String>,
@@ -410,6 +415,24 @@ pub struct GeneratedBuild {
     pub ring_lowered: [bool; STAT_COUNT],
     /// Whether this came from [`StubBackend`], so the panel can say its numbers mean nothing.
     pub stub: bool,
+}
+
+/// An armour set's R1 trades against an SL bracket: the script's `armor_trade`.
+///
+/// Both sides press R1 at once, each with its first hit at the game play speed; the earlier hit
+/// lands, and the later one too unless the first staggered its swinger.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ArmorTrade {
+    /// The build's max poise in it: the pieces (less what unmet requirements take), the stat
+    /// poise and the rings'.
+    pub poise: f32,
+    /// The largest counter-hit poise damage that poise holds through, `0` for none.
+    pub poise_target: f32,
+    /// The share of trades in which the build's R1 lands, `0.0..=1.0`.
+    pub trade_rate: f32,
+    /// The mean, per trade, of the build's first-hit damage when it lands less the counter's
+    /// when that lands.
+    pub exchange: f32,
 }
 
 /// A spell a generated build can be asked to cast: the script's `--spells`.
@@ -1358,6 +1381,8 @@ impl RecommenderBackend for StubBackend {
                 vec!["Desert Sorceress Hood".to_owned()]
             },
             armor_note: None,
+            trade: None,
+            trade_previous: None,
             spells: Vec::new(),
             spell_names: Vec::new(),
             slots_used: 0,

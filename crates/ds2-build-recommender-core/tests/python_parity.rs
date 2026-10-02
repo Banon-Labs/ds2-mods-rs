@@ -17,7 +17,7 @@ use std::sync::OnceLock;
 
 use ds2_build_import_core::Infusion;
 use ds2_build_recommender_core::backend::{
-    self, Change, Limits, Outcome, RecommenderBackend, RefusalKind, ResultRow,
+    self, ArmorTrade, Change, Limits, Outcome, RecommenderBackend, RefusalKind, ResultRow,
 };
 use ds2_build_recommender_core::corpus::CorpusBackend;
 use ds2_build_recommender_core::model::{
@@ -78,7 +78,11 @@ type Generated = (
     bool,
     bool,
     &'static [&'static str],
+    Option<(Trade, Trade)>,
 );
+/// An armour set's R1 trades: poise, the counter poise damage it holds through, the share of
+/// trades the build's R1 lands, the exchange value per trade.
+type Trade = (f64, f64, f64, f64);
 type GenerateCase = (
     &'static str,
     &'static str,
@@ -661,7 +665,7 @@ fn a_weapon_the_stats_can_one_hand_still_optimizes_two_handed() {
 #[test]
 fn generate_build_is_the_scripts() {
     let (mut requirements_bound, mut load_bound, mut armored) = (false, false, 0);
-    let mut traded = false;
+    let (mut traded, mut poise_drove) = (false, false);
     let cases = expected::GENERATE
         .iter()
         .map(|case| (case, Grip::TwoHanded, None))
@@ -712,7 +716,10 @@ fn generate_build_is_the_scripts() {
         let (got, want) = match (got, want) {
             (None, None) => continue,
             (Some(got), Some(want)) => (got, want),
-            (got, want) => panic!("{weapon} SL {sl}: {got:?} vs {want:?}"),
+            (got, want) => panic!(
+                "{weapon} SL {sl}: {got:?} vs a script build: {}",
+                want.is_some()
+            ),
         };
         let (
             class,
@@ -727,8 +734,22 @@ fn generate_build_is_the_scripts() {
             by_req,
             by_load,
             trades,
+            armor_trades,
         ) = want;
         assert_eq!(got.ring_trades, trades, "{weapon} SL {sl}");
+        // The poise trade, at the f32 the panel shows: the chosen set's and best_armor's.
+        let numbers = |trade: (f64, f64, f64, f64)| ArmorTrade {
+            poise: trade.0 as f32,
+            poise_target: trade.1 as f32,
+            trade_rate: trade.2 as f32,
+            exchange: trade.3 as f32,
+        };
+        assert_eq!(
+            got.trade.zip(got.trade_previous),
+            armor_trades.map(|(chosen, previous)| (numbers(chosen), numbers(previous))),
+            "{weapon} SL {sl}: the armour's R1 trades"
+        );
+        poise_drove |= note.is_some_and(|note| note.contains("poise drove the pick"));
         traded |= !trades.is_empty();
         assert_eq!(got.class, class, "{weapon} SL {sl}");
         assert_eq!(got.sl, sl, "the build is at the soul level asked for");
@@ -808,6 +829,10 @@ fn generate_build_is_the_scripts() {
         "no case where the equip-load cap bound the choice"
     );
     assert!(traded, "no case wore a ring in place of stat points");
+    assert!(
+        poise_drove,
+        "no case where the R1 trades bought a higher-poise set"
+    );
 }
 
 /// Spells constrain a generated build as a weapon's requirements do: their INT/FTH are met, their
@@ -1212,13 +1237,20 @@ fn the_panel_generates_at_its_override_for_its_weapon() {
     assert_eq!(build.armor.len(), 4);
     let (import, _) = backend::to_import(&build);
     assert_eq!(import.armor, build.armor);
+    // A slot is bare only with a note saying so: the poise trade may buy a heavy helm over a
+    // chest, as the script's own SL 100 Demon's Great Hammer does.
     assert!(
         import
             .armor
             .iter()
-            .all(|piece| !ds2_build_import_core::is_empty_slot(piece)),
-        "{:?}",
-        import.armor
+            .all(|piece| !ds2_build_import_core::is_empty_slot(piece))
+            || build
+                .armor_note
+                .as_deref()
+                .is_some_and(|note| note.contains("left bare")),
+        "{:?} {:?}",
+        import.armor,
+        build.armor_note
     );
     state.allow_naked = true;
     let naked = backend::generate(backend(), &state, None).expect("a SL 100 build");

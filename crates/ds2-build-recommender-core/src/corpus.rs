@@ -49,12 +49,13 @@ mod poise;
 mod ranged;
 mod stamina;
 mod status;
+mod trade;
 
 /// What the file is called beside `DarkSoulsII.exe`.
 pub const DATA_FILE_NAME: &str = "ds2-build-recommender.dat";
 
 /// The file's first line. A different one is a file this port does not read.
-pub const FORMAT: &str = "ds2-build-recommender-data 18";
+pub const FORMAT: &str = "ds2-build-recommender-data 19";
 
 /// Nine stats as the script computes with them, in [`crate::model::STAT_LABELS`] order.
 type Stats = [i32; STAT_COUNT];
@@ -257,6 +258,9 @@ struct Tables {
     /// The poison and bleed resistance columns, rows 0-99: the script's `status_resist`, what
     /// `status_cut` reads; empty when it did not read the regulation.
     status_resist: [Table; 2],
+    /// Stat poise by min(END, ADP): the script's `stat_poise`, empty when it did not read the
+    /// regulation.
+    stat_poise: Table,
 }
 
 /// A spell the file lists: the script's `data.spells` row with its `spell_req`.
@@ -381,6 +385,8 @@ struct Weapon {
     poise: [Option<poise::Poise>; 2],
     /// Its stamina costs: the script's `data.stamina_cost` row.
     stamina: Option<stamina::Cost>,
+    /// Per grip, its R1's first strike as the trade model reads it: the script's `first_strike`.
+    strike: [Option<trade::Strike>; 2],
 }
 
 /// One attack chain as the bleed/poison ranking counts it.
@@ -645,6 +651,8 @@ struct CorpusBuild {
     counter: Option<(f64, i32)>,
     /// The shares of poison and bleed build-up it resists: the script's `status_cut`.
     cuts: Option<[f64; 2]>,
+    /// Its counter-hit in an R1 trade: the script's `trade_counter`. `None` without one.
+    trade: Option<trade::Counter>,
 }
 
 /// Attack rating per type, physical, magic, fire, lightning, dark; `None` where the weapon has none.
@@ -746,6 +754,8 @@ pub struct CorpusBackend {
     cores: Vec<adaptive::Core>,
     /// What a poison and a bleed proc do: the script's `data.status_procs`.
     procs: [Option<status::Proc>; 2],
+    /// Each ring's poise, beside `rings`: the script's `ring_poise`.
+    ring_poise: Vec<f64>,
 }
 
 /// Why a data file could not be read.
@@ -916,6 +926,7 @@ impl CorpusBackend {
                     "fireDEFBonus" => &mut tables.defense[2],
                     "lightningDEFBonus" => &mut tables.defense[3],
                     "darkDEFBonus" => &mut tables.defense[4],
+                    "statPoise" => &mut tables.stat_poise,
                     "poisonResistance" => &mut tables.status_resist[0],
                     "bleedingResistance" => &mut tables.status_resist[1],
                     _ => return Ok(()),
@@ -960,11 +971,13 @@ impl CorpusBackend {
                     r1: [[None; 4]; 2],
                     poise: Default::default(),
                     stamina: None,
+                    strike: Default::default(),
                 });
             }
             "SC" => self.parse_stamina(line, &mut fields)?,
             "CH" => self.parse_chain(line, &mut fields)?,
             "PO" => self.parse_poise(line, &mut fields)?,
+            "FS" | "XT" => self.parse_trade(tag, line, &mut fields)?,
             "SP" => self.parse_proc(line, &mut fields)?,
             "RM" => {
                 let grip = match next("grip")? {
@@ -1118,6 +1131,7 @@ impl CorpusBackend {
                 ring_index.insert(key.clone(), self.rings.len());
                 self.rings.push((key, name, weight));
                 self.ring_groups.push(group);
+                self.ring_poise.push(float(fields.next(), line)?);
             }
             "N" => {
                 let key = next("ring key")?;
@@ -1379,6 +1393,7 @@ impl CorpusBackend {
                     flex,
                     counter,
                     cuts,
+                    trade: None,
                 });
             }
             other => return Err(bad(line, &format!("unknown record {other:?}"))),
@@ -3690,20 +3705,29 @@ impl CorpusBackend {
     }
 
     /// The script's `generate_armor`: the pieces' names head to legs, `Naked` for a slot left
-    /// bare, and the note that says why a slot or the whole set is bare.
+    /// bare, the note that says why a slot or the whole set is bare or that poise drove the pick,
+    /// and the trade numbers of the set and of `best_armor`'s.
     ///
-    /// The set leaves room for the heaviest one of `primary` and the `listed` weapons' weights,
-    /// since any one of them can be equipped in the primary's place, plus the heaviest of
+    /// The set leaves room for the heaviest of the `weapons`' weights, the primary's first, since
+    /// any one of them can be equipped in the primary's place, plus the heaviest of
     /// `catalysts`, which a build that casts holds beside it. A set chosen for the primary alone
     /// left a Havel's-clad dagger build with 7.3 of load for every other weapon it listed.
+    ///
+    /// `best_armor`'s set is kept unless a poise step trades better over `granted` (weapon index,
+    /// infusion, two-handed: every weapon the build lists, primary first) against `sl`'s bracket.
     fn generate_armor(
         &self,
         stats: &Stats,
-        primary: f64,
-        listed: &[f64],
+        weapons: &[f64],
         catalysts: &[f64],
         rings: &[usize],
-    ) -> (Vec<String>, Option<String>) {
+        sl: u32,
+        granted: &[(usize, Infusion, bool)],
+    ) -> (
+        Vec<String>,
+        Option<String>,
+        Option<(trade::Numbers, trade::Numbers)>,
+    ) {
         // Python's `max` keeps the first of a tie.
         let heaviest = |first: f64, rest: &[f64]| {
             rest.iter().fold(
@@ -3711,11 +3735,15 @@ impl CorpusBackend {
                 |best, &weight| if weight > best { weight } else { best },
             )
         };
-        let mut held = vec![heaviest(primary, listed)];
+        let mut held = Vec::new();
+        if let Some((&first, rest)) = weapons.split_first() {
+            held.push(heaviest(first, rest));
+        }
         if let Some((&first, rest)) = catalysts.split_first() {
             held.push(heaviest(first, rest));
         }
-        let (cap, carried, set) = self.best_armor(stats, &held, rings, self.load_scarcity(stats));
+        let scarcity = self.load_scarcity(stats);
+        let (cap, carried, set) = self.best_armor(stats, &held, rings, scarcity);
         let percent = EQUIP_CAP * 100.0;
         let Some(set) = set else {
             let what = if catalysts.is_empty() {
@@ -3730,8 +3758,17 @@ impl CorpusBackend {
                      {percent:.0}% load allows at VIT {}",
                     stats[VIT]
                 )),
+                None,
             );
         };
+        let wearer = trade::Wearer {
+            stats,
+            held: &held,
+            rings,
+            scarcity,
+        };
+        let traded = self.trade_armor(set, &wearer, sl, granted);
+        let set = traded.pieces;
         let bare: Vec<&str> = ARMOR_SLOTS
             .iter()
             .zip(set)
@@ -3746,7 +3783,15 @@ impl CorpusBackend {
                 cap - carried
             )
         });
-        (set.iter().map(|piece| piece.name.clone()).collect(), note)
+        let note = match (note, traded.note) {
+            (Some(bare), Some(poise)) => Some(format!("{bare}; {poise}")),
+            (bare, poise) => bare.or(poise),
+        };
+        (
+            set.iter().map(|piece| piece.name.clone()).collect(),
+            note,
+            traded.numbers,
+        )
     }
 }
 
@@ -4149,20 +4194,43 @@ impl RecommenderBackend for CorpusBackend {
         let ranked = self.rank(&eff, u32::from(sl), &query);
         let mut seen: Vec<&str> = vec![primary.name.as_str()];
         let (mut weapons_1h, mut weapons_2h_only) = (Vec::new(), Vec::new());
+        // Beside each list: the weapon the script's `by_name` finds for the row's name, its
+        // infusion, and the grip its listed damage is swung in -- what `generate_armor` trades.
+        let (mut grants_1h, mut grants_2h_only) = (Vec::new(), Vec::new());
         for row in &ranked {
             let name = self.weapons[row.weapon].name.as_str();
             if seen.contains(&name) {
                 continue;
             }
             seen.push(name);
+            let by_name = self
+                .weapons
+                .iter()
+                .position(|weapon| weapon.name == name)
+                .unwrap_or(row.weapon);
+            let grant = (by_name, row.infusion, row.label.starts_with("2H"));
             if row.label.contains("2H only") {
                 weapons_2h_only.push(self.result_row(row));
+                grants_2h_only.push(grant);
             } else {
                 weapons_1h.push(self.result_row(row));
+                grants_1h.push(grant);
             }
         }
         weapons_1h.truncate(WEAPONS_1H_TOP);
         weapons_2h_only.truncate(WEAPONS_2H_ONLY_TOP);
+        grants_1h.truncate(WEAPONS_1H_TOP);
+        grants_2h_only.truncate(WEAPONS_2H_ONLY_TOP);
+        let primary_index = self
+            .weapons
+            .iter()
+            .position(|weapon| weapon.key == primary.key)
+            .unwrap_or(0);
+        let granted: Vec<(usize, Infusion, bool)> =
+            std::iter::once((primary_index, infusion, two_handed))
+                .chain(grants_1h)
+                .chain(grants_2h_only)
+                .collect();
 
         let mut suggested = worn.clone();
         suggested.extend(self.suggest_rings(
@@ -4176,19 +4244,22 @@ impl RecommenderBackend for CorpusBackend {
             "the optimizer spends exactly the points `sl` has"
         );
         let name = |ring: &usize| self.rings[*ring].1.clone();
-        let (armor, armor_note) = if allow_naked {
-            (Vec::new(), None)
+        let (armor, armor_note, trades) = if allow_naked {
+            (Vec::new(), None, None)
         } else {
-            let listed: Vec<f64> = weapons_1h
-                .iter()
-                .chain(&weapons_2h_only)
-                .map(|row| self.weight_by_name(&row.weapon))
+            let weapons: Vec<f64> = std::iter::once(primary.weight)
+                .chain(
+                    weapons_1h
+                        .iter()
+                        .chain(&weapons_2h_only)
+                        .map(|row| self.weight_by_name(&row.weapon)),
+                )
                 .collect();
             let held: Vec<f64> = catalysts
                 .iter()
                 .map(|pick| self.weight_by_name(&pick.name))
                 .collect();
-            self.generate_armor(&stats, primary.weight, &listed, &held, &suggested)
+            self.generate_armor(&stats, &weapons, &held, &suggested, u32::from(sl), &granted)
         };
         Some(GeneratedBuild {
             class: self.classes[class].name.clone(),
@@ -4207,6 +4278,8 @@ impl RecommenderBackend for CorpusBackend {
                 .collect(),
             armor,
             armor_note,
+            trade: trades.map(|(chosen, _)| chosen.public()),
+            trade_previous: trades.map(|(_, previous)| previous.public()),
             spells: spells
                 .iter()
                 .map(|&spell| self.spells[spell].key.clone())

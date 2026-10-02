@@ -123,7 +123,7 @@ impl CorpusBackend {
     }
 
     /// The defense changes `ring` makes, when it makes any.
-    fn ring_change(&self, ring: usize) -> Option<&Change> {
+    pub(super) fn ring_change(&self, ring: usize) -> Option<&Change> {
         self.ring_defense
             .iter()
             .find(|(at, _)| *at == ring)
