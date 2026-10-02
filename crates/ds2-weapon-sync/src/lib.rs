@@ -38,6 +38,12 @@
 //! the original update has returned, from native code: the game's own weapon update, called with
 //! a request built from our inventory entry exactly the way `0x1401b66a0` builds it.
 //!
+//! While we host and an invader is in our world (`policy::cap_in`), the cap is the highest level
+//! among the invaders alone: a co-op phantom on our side at a higher level does not lift it, so
+//! a lower-level invader is matched. When the last invader leaves, the cap goes back to every
+//! other player's highest, or away. Who is an invader and whether we host are read off each
+//! character's phantom type (`ds2_rva::INVADER_PHANTOM_TYPES`, `ds2_rva::HOST_PHANTOM_TYPE`).
+//!
 //! The same check sweeps the whole inventory against the cap first ([`policy::Ledger::sweep`]):
 //! a weapon picked up mid-encounter is lowered within a quarter second, and when the cap goes
 //! every lowered entry, and its save record, gets its real level back.
@@ -141,7 +147,9 @@ mod hud;
 mod install;
 
 #[cfg(windows)]
-pub use install::{LogFn, Outcome, Settings, install, set_key, set_logger, set_test_cap};
+pub use install::{
+    LogFn, Outcome, Settings, install, set_key, set_logger, set_test_cap, set_test_invader,
+};
 
 #[cfg(test)]
 mod tests {

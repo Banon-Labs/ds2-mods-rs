@@ -108,6 +108,59 @@ pub struct Remote {
     pub weapons: RemoteWeapons,
     /// Records 6..9.
     pub armor: RemoteArmor,
+    /// Whether they came into the world against its host ([`is_invader`]).
+    pub invader: bool,
+}
+
+/// Whether a character of phantom type `phantom_type` (`[CharacterCtrl+0xB0]+0x3C`) is in the
+/// world against its host: one of [`ds2_rva::INVADER_PHANTOM_TYPES`].
+pub fn is_invader(phantom_type: u8) -> bool {
+    ds2_rva::INVADER_PHANTOM_TYPES.contains(&phantom_type)
+}
+
+/// Whether the local player, of phantom type `phantom_type`, is the host of the world they are in.
+pub const fn is_host(phantom_type: u8) -> bool {
+    phantom_type == ds2_rva::HOST_PHANTOM_TYPE
+}
+
+/// The pretend players a feature can be given, so its rules can be exercised alone.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Pretend {
+    /// A pretend player at this level who is not an invader.
+    pub cap: Option<u8>,
+    /// A pretend invader at this level.
+    pub invader: Option<u8>,
+}
+
+/// The cap for one feature, knowing who the invaders are and whether we host.
+///
+/// While we host and at least one invader's equipment has arrived, the cap is the highest level
+/// among the invaders alone: a co-op phantom or a Blue Sentinel on our side at a higher level does
+/// not lift it. That is the user's rule for being invaded by a lower-level player (2026-10-01:
+/// "match to the highest level invader"). Otherwise -- we are a phantom or an invader ourselves,
+/// or no invader is here, or none of theirs has arrived -- it is [`cap_for`]'s rule over everyone,
+/// the pretend invader counting as one more player.
+pub fn cap_in(kind: Kind, remotes: &[Remote], hosting: bool, pretend: Pretend) -> Option<u8> {
+    let level = |r: &Remote| match kind {
+        Kind::Weapon => remote_highest(&r.weapons),
+        Kind::Armor => remote_armor_highest(&r.armor, &r.weapons),
+    };
+    if hosting {
+        let invaders = highest_of(
+            remotes.iter().filter(|r| r.invader).filter_map(level),
+            pretend.invader,
+        );
+        if invaders.is_some() {
+            return invaders;
+        }
+    }
+    highest_of(
+        remotes
+            .iter()
+            .filter_map(level)
+            .chain(pretend.invader.map(|level| level.min(WEAPON_LEVEL_MAX))),
+        pretend.cap,
+    )
 }
 
 /// The cap for one feature: weapons against the others' weapons, armour against their armour.
@@ -1308,6 +1361,124 @@ mod both_features {
                 (param(GLOVES), armor[2]),
                 (param(LEGS), armor[3]),
             ],
+            invader: false,
+        }
+    }
+
+    /// An invader with weapons at `weapon` and armour at `armor`.
+    fn invader(weapon: u8, armor: [u8; 4]) -> Remote {
+        Remote {
+            invader: true,
+            ..remote(weapon, armor)
+        }
+    }
+
+    const NONE: Pretend = Pretend {
+        cap: None,
+        invader: None,
+    };
+
+    #[test]
+    fn hosting_an_invader_caps_to_the_highest_invader_whatever_our_phantoms_carry() {
+        let phantom = remote(10, [10, 10, 10, 10]);
+        let low = invader(3, [0, 2, 0, 0]);
+        let lower = invader(1, [5, 0, 0, 0]);
+        let all = [phantom, low, lower];
+        assert_eq!(cap_in(Kind::Weapon, &all, true, NONE), Some(3));
+        assert_eq!(cap_in(Kind::Armor, &all, true, NONE), Some(5));
+        // Not hosting: everyone counts, as before.
+        assert_eq!(cap_in(Kind::Weapon, &all, false, NONE), Some(10));
+        assert_eq!(
+            cap_in(Kind::Weapon, &all, false, NONE),
+            cap_for(Kind::Weapon, &all, None)
+        );
+    }
+
+    #[test]
+    fn an_invader_above_us_lifts_nothing_and_the_clamp_only_lowers() {
+        let all = [remote(2, [0; 4]), invader(9, [0; 4])];
+        let cap = cap_in(Kind::Weapon, &all, true, NONE);
+        assert_eq!(cap, Some(9));
+        assert_eq!(clamp(5, cap), 5);
+        assert_eq!(clamp(10, cap), 9);
+    }
+
+    #[test]
+    fn invaders_leaving_or_not_yet_arrived_fall_back_to_everyone() {
+        let phantom = remote(6, [0; 4]);
+        let mut arriving = invader(2, [0; 4]);
+        arriving.weapons = [(0, 0); 6];
+        arriving.armor = [(0, 0); 4];
+        assert_eq!(
+            cap_in(Kind::Weapon, &[phantom, arriving], true, NONE),
+            Some(6),
+            "an invader whose records have not arrived does not decide the cap yet"
+        );
+        assert_eq!(cap_in(Kind::Weapon, &[phantom], true, NONE), Some(6));
+        assert_eq!(cap_in(Kind::Weapon, &[], true, NONE), None);
+    }
+
+    #[test]
+    fn a_second_invader_raises_or_lowers_the_cap_as_they_come_and_go() {
+        let phantom = remote(10, [0; 4]);
+        let a = invader(2, [0; 4]);
+        let b = invader(7, [0; 4]);
+        let mut tracker = Tracker::new();
+        let step = |t: &mut Tracker, remotes: &[Remote]| {
+            t.step(PLAYER, cap_in(Kind::Weapon, remotes, true, NONE))
+        };
+        assert_eq!(
+            step(&mut tracker, &[phantom]),
+            Action::Redrive { cap: Some(10) }
+        );
+        assert_eq!(
+            step(&mut tracker, &[phantom, a]),
+            Action::Redrive { cap: Some(2) }
+        );
+        assert_eq!(
+            step(&mut tracker, &[phantom, a, b]),
+            Action::Redrive { cap: Some(7) }
+        );
+        assert_eq!(step(&mut tracker, &[phantom, b]), Action::Nothing);
+        assert_eq!(
+            step(&mut tracker, &[phantom]),
+            Action::Redrive { cap: Some(10) }
+        );
+        assert_eq!(step(&mut tracker, &[]), Action::Redrive { cap: None });
+    }
+
+    #[test]
+    fn the_pretend_invader_is_an_invader_only_while_we_host() {
+        let pretend = Pretend {
+            cap: Some(9),
+            invader: Some(3),
+        };
+        assert_eq!(cap_in(Kind::Weapon, &[], true, pretend), Some(3));
+        assert_eq!(cap_in(Kind::Weapon, &[], false, pretend), Some(9));
+        let only_cap = Pretend {
+            cap: Some(4),
+            invader: None,
+        };
+        assert_eq!(cap_in(Kind::Armor, &[], true, only_cap), Some(4));
+        let too_high = Pretend {
+            cap: None,
+            invader: Some(200),
+        };
+        assert_eq!(
+            cap_in(Kind::Weapon, &[], true, too_high),
+            Some(WEAPON_LEVEL_MAX)
+        );
+    }
+
+    #[test]
+    fn the_roles_come_from_the_phantom_type_table() {
+        assert!(is_host(0));
+        for host_side in [0u8, 1, 2, 3, 4, 5, 6, 7, 9, 13, 0x12, 0x13] {
+            assert!(!is_invader(host_side), "type {host_side}");
+        }
+        for invading in [8u8, 10, 11, 12, 14, 15, 16, 17] {
+            assert!(is_invader(invading), "type {invading}");
+            assert!(!is_host(invading));
         }
     }
 

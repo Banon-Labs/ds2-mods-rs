@@ -98,6 +98,8 @@ pub(crate) struct Feature {
     current_cap: AtomicU32,
     /// A remote player at this level, for testing solo. [`NO_CAP`] when not configured.
     test_cap: AtomicU32,
+    /// A remote invader at this level, for testing solo. [`NO_CAP`] when not configured.
+    test_invader: AtomicU32,
     /// Trampoline back to the game's update for this feature's items. Also what the push calls,
     /// so the push runs the game's code and not our clamp twice.
     update_original: AtomicUsize,
@@ -134,6 +136,7 @@ impl Feature {
             pressed: AtomicBool::new(false),
             current_cap: AtomicU32::new(NO_CAP),
             test_cap: AtomicU32::new(NO_CAP),
+            test_invader: AtomicU32::new(NO_CAP),
             update_original: AtomicUsize::new(0),
             ledger: Mutex::new(Ledger::new()),
             watch: Mutex::new(Watch::new()),
@@ -368,6 +371,8 @@ fn announce(kind: Kind, on: bool) -> bool {
 pub struct Settings {
     /// A pretend remote player at this level, so the cap can be seen working alone.
     pub test_cap: Option<u8>,
+    /// A pretend invader at this level: while we host, the cap follows it alone.
+    pub test_invader: Option<u8>,
     /// The on/off key. `None` leaves it unbound.
     pub key: Option<Chord>,
 }
@@ -394,6 +399,22 @@ pub fn set_test_cap(kind: Kind, test_cap: Option<u8>) {
             f.prefix,
             show(cap_from_atomic(previous)),
             show(test_cap)
+        ));
+    }
+}
+
+/// Change a feature's pretend invader while the game runs, or remove it with `None`.
+pub fn set_test_invader(kind: Kind, test_invader: Option<u8>) {
+    let f = feature(kind);
+    let previous = f
+        .test_invader
+        .swap(cap_to_atomic(test_invader), Ordering::AcqRel);
+    if previous != cap_to_atomic(test_invader) {
+        log(format_args!(
+            "{} test_invader {} -> {}",
+            f.prefix,
+            show(cap_from_atomic(previous)),
+            show(test_invader)
         ));
     }
 }
@@ -572,6 +593,8 @@ pub unsafe fn install(weapons: Option<Settings>, armor: Option<Settings>) -> Out
         }
         f.test_cap
             .store(cap_to_atomic(settings.test_cap), Ordering::Release);
+        f.test_invader
+            .store(cap_to_atomic(settings.test_invader), Ordering::Release);
         live.push((*f, site, settings.test_cap));
     }
     if live.is_empty() {
@@ -597,12 +620,15 @@ pub unsafe fn install(weapons: Option<Settings>, armor: Option<Settings>) -> Out
         f.installed.store(true, Ordering::Release);
         log(format_args!(
             "{} installed update=0x{site:016x} save-write=0x{save_site:016x} (shared) \
-             tick=0x{tick_site:016x} (shared) key={} test_cap={} -- while another player is in \
-             the world, every one of our {} in the inventory above the highest level any of them \
-             has equipped is lowered to it, equipped or not; the save always gets the real levels",
+             tick=0x{tick_site:016x} (shared) key={} test_cap={} test_invader={} -- while \
+             another player is in the world, every one of our {} in the inventory above the \
+             highest level any of them has equipped is lowered to it, equipped or not, and while \
+             we host an invader, above the highest any invader has equipped; the save always gets \
+             the real levels",
             f.prefix,
             f.key_name(),
             show(*test_cap),
+            show(cap_from_atomic(f.test_invader.load(Ordering::Acquire))),
             f.things
         ));
     }
@@ -861,14 +887,15 @@ fn is_person(character: usize) -> bool {
             return false;
         }
     }
-    let Some(block) = read_ptr(character + ds2_rva::CHARACTER_CTRL_PHANTOM_BLOCK_OFFSET) else {
-        return false;
-    };
+    phantom_type(character).is_some_and(|param| !ds2_rva::REPLAY_PHANTOM_PARAM_IDS.contains(&param))
+}
+
+/// A character's phantom type, `[CharacterCtrl+0xB0]+0x3C`: the byte `0x14014ed20` reads and the
+/// phantom type table `0x1410c0050` is indexed by.
+fn phantom_type(character: usize) -> Option<u8> {
+    let block = read_ptr(character + ds2_rva::CHARACTER_CTRL_PHANTOM_BLOCK_OFFSET)?;
     // SAFETY: fault-safe read.
-    match unsafe { safe_read_u8(block + ds2_rva::PHANTOM_BLOCK_PHANTOM_PARAM_OFFSET) } {
-        Some(param) => !ds2_rva::REPLAY_PHANTOM_PARAM_IDS.contains(&param),
-        None => false,
-    }
+    unsafe { safe_read_u8(block + ds2_rva::PHANTOM_BLOCK_PHANTOM_PARAM_OFFSET) }
 }
 
 /// Most roster entries one check walks, so a torn begin/end pair cannot become a long scan.
@@ -909,6 +936,7 @@ fn remotes(local: usize) -> Vec<Remote> {
             let mut remote = Remote {
                 weapons: [(0, 0); 6],
                 armor: [(0, 0); 4],
+                invader: phantom_type(character).is_some_and(policy::is_invader),
             };
             remote
                 .weapons
@@ -1240,14 +1268,16 @@ fn tick(_session: usize) {
     } else {
         remotes(local)
     };
+    // Our own phantom type: 0 is the host of the world we are in (`ds2_rva::HOST_PHANTOM_TYPE`).
+    let hosting = local != 0 && phantom_type(local).is_some_and(policy::is_host);
     for (index, f) in FEATURES.iter().enumerate() {
         if f.installed() && (scheduled || forced[index]) {
-            check(f, local, &remotes);
+            check(f, local, hosting, &remotes);
         }
     }
 }
 
-fn check(f: &Feature, local: usize, remotes: &[Remote]) {
+fn check(f: &Feature, local: usize, hosting: bool, remotes: &[Remote]) {
     if f.last_player.swap(local, Ordering::AcqRel) != local
         && local != 0
         && let Some(bag) = bag()
@@ -1261,11 +1291,16 @@ fn check(f: &Feature, local: usize, remotes: &[Remote]) {
         ));
     }
     let test_cap = cap_from_atomic(f.test_cap.load(Ordering::Acquire));
+    let test_invader = cap_from_atomic(f.test_invader.load(Ordering::Acquire));
+    let pretend = policy::Pretend {
+        cap: test_cap,
+        invader: test_invader,
+    };
     let enabled = f.enabled.load(Ordering::Acquire);
-    let cap = policy::effective(enabled, policy::cap_for(f.kind, remotes, test_cap));
+    let cap = policy::effective(enabled, policy::cap_in(f.kind, remotes, hosting, pretend));
     if !f.first_tick.swap(true, Ordering::AcqRel) {
         log(format_args!(
-            "{} tick live player=0x{local:x} people={} cap={}",
+            "{} tick live player=0x{local:x} hosting={hosting} people={} cap={}",
             f.prefix,
             remotes.len(),
             show(cap)
@@ -1295,21 +1330,27 @@ fn check(f: &Feature, local: usize, remotes: &[Remote]) {
         let highest: Vec<String> = remotes
             .iter()
             .map(|remote| {
-                show(match f.kind {
+                let level = show(match f.kind {
                     Kind::Weapon => policy::remote_highest(&remote.weapons),
                     Kind::Armor => policy::remote_armor_highest(&remote.armor, &remote.weapons),
-                })
+                });
+                if remote.invader {
+                    format!("invader:{level}")
+                } else {
+                    level
+                }
             })
             .collect();
         log(format_args!(
-            "{} cap {} -> {} enabled={enabled} people={} their-highest=[{}] test_cap={} \
-             player=0x{local:x}",
+            "{} cap {} -> {} enabled={enabled} hosting={hosting} people={} their-highest=[{}] \
+             test_cap={} test_invader={} player=0x{local:x}",
             f.prefix,
             show(previous),
             show(cap),
             remotes.len(),
             highest.join(","),
-            show(test_cap)
+            show(test_cap),
+            show(test_invader)
         ));
         push(f, local, cap);
     }
