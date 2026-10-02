@@ -424,6 +424,10 @@ KEY_ARMOR_SYNC_KEY = "key"
 ARMOR_SYNC_DEFAULT_KEY = "F5"
 #: Mirrors `ARMOR_LOG_PREFIX` in `crates/ds2-weapon-sync/src/lib.rs`.
 ARMOR_SYNC_LOG_PREFIX = "ds2-armor-sync:"
+#: Mirrors `KEY_TEST_INVADER` in `crates/ds2-loader/src/weapon_sync.rs`: a pretend invader, written
+#: into both sections by `--sync-test-invader N`. While we host, each feature's cap follows the
+#: invaders alone, so `--weapon-sync-test-cap 9 --sync-test-invader 3` caps at +3.
+KEY_SYNC_TEST_INVADER = "test_invader"
 
 #: Mirrors `CONFIG_SECTION`/`KEY_ENABLED` in `crates/ds2-loader/src/hp_gauge.rs`.
 #:
@@ -1739,6 +1743,7 @@ def config_text(
     weapon_sync_test_cap: int | None = None,
     armor_sync: bool = False,
     armor_sync_test_cap: int | None = None,
+    sync_test_invader: int | None = None,
     net_effects: bool = False,
     music_probe: bool = True,
 ) -> str:
@@ -2337,6 +2342,7 @@ def config_text(
 {KEY_WEAPON_SYNC_ENABLED} = {str(weapon_sync).lower()}
 {KEY_WEAPON_SYNC_KEY} = "{WEAPON_SYNC_DEFAULT_KEY}"
 {"" if weapon_sync_test_cap is None else f"{KEY_WEAPON_SYNC_TEST_CAP} = {weapon_sync_test_cap}"}
+{"" if sync_test_invader is None else f"{KEY_SYNC_TEST_INVADER} = {sync_test_invader}"}
 
 [{ARMOR_SYNC_SECTION}]
 # A feature of its own, on or off regardless of `[{WEAPON_SYNC_SECTION}]`. `enabled` is
@@ -2350,6 +2356,7 @@ def config_text(
 {KEY_ARMOR_SYNC_ENABLED} = {str(armor_sync).lower()}
 {KEY_ARMOR_SYNC_KEY} = "{ARMOR_SYNC_DEFAULT_KEY}"
 {"" if armor_sync_test_cap is None else f"{KEY_ARMOR_SYNC_TEST_CAP} = {armor_sync_test_cap}"}
+{"" if sync_test_invader is None else f"{KEY_SYNC_TEST_INVADER} = {sync_test_invader}"}
 
 [{SEAMLESS_SECTION}]
 # A SECOND MOD, written by someone else, loaded into this same process.
@@ -2583,6 +2590,7 @@ def write_config(
     weapon_sync_test_cap: int | None = None,
     armor_sync: bool = False,
     armor_sync_test_cap: int | None = None,
+    sync_test_invader: int | None = None,
     net_effects: bool = False,
     music_probe: bool = True,
 ) -> tuple[Path, str]:
@@ -2634,6 +2642,7 @@ def write_config(
         weapon_sync_test_cap=weapon_sync_test_cap,
         armor_sync=armor_sync,
         armor_sync_test_cap=armor_sync_test_cap,
+        sync_test_invader=sync_test_invader,
         net_effects=net_effects,
         music_probe=music_probe,
     )
@@ -3142,6 +3151,7 @@ def dry_run(
     weapon_sync_test_cap: int | None = None,
     armor_sync: bool = False,
     armor_sync_test_cap: int | None = None,
+    sync_test_invader: int | None = None,
     net_effects: bool = False,
     music_probe: bool = True,
     path_tracing: bool = True,
@@ -3237,6 +3247,7 @@ def dry_run(
             weapon_sync_test_cap=weapon_sync_test_cap,
             armor_sync=armor_sync,
             armor_sync_test_cap=armor_sync_test_cap,
+            sync_test_invader=sync_test_invader,
             net_effects=net_effects,
             music_probe=music_probe,
         ):
@@ -3302,6 +3313,7 @@ def dry_run(
                 weapon_sync_test_cap=weapon_sync_test_cap,
                 armor_sync=armor_sync,
                 armor_sync_test_cap=armor_sync_test_cap,
+                sync_test_invader=sync_test_invader,
                 net_effects=net_effects,
                 music_probe=music_probe,
             ),
@@ -3868,6 +3880,7 @@ def launch(
     weapon_sync_test_cap: int | None = None,
     armor_sync: bool = False,
     armor_sync_test_cap: int | None = None,
+    sync_test_invader: int | None = None,
     net_effects: bool = False,
     music_probe: bool = True,
     path_tracing: bool = True,
@@ -3948,6 +3961,7 @@ def launch(
         weapon_sync_test_cap=weapon_sync_test_cap,
         armor_sync=armor_sync,
         armor_sync_test_cap=armor_sync_test_cap,
+        sync_test_invader=sync_test_invader,
         net_effects=net_effects,
         music_probe=music_probe,
     )
@@ -4801,6 +4815,24 @@ def selftest() -> int:
             == ("2" if armor_on else None),
             f"{arm} writes each test_cap only into its own section",
         )
+    check(
+        f'KEY_TEST_INVADER: &str = "{KEY_SYNC_TEST_INVADER}"' in sync_loader_src,
+        f"{KEY_SYNC_TEST_INVADER} is the key the loader reads",
+    )
+    values, unusable = parse_config(
+        config_text("off", weapon_sync=True, armor_sync=True, sync_test_invader=3)
+    )
+    check(
+        not unusable
+        and values.get((WEAPON_SYNC_SECTION, KEY_SYNC_TEST_INVADER)) == "3"
+        and values.get((ARMOR_SYNC_SECTION, KEY_SYNC_TEST_INVADER)) == "3",
+        "--sync-test-invader writes the pretend invader into both sections",
+    )
+    values, _ = parse_config(config_text("off", weapon_sync=True))
+    check(
+        values.get((WEAPON_SYNC_SECTION, KEY_SYNC_TEST_INVADER)) is None,
+        "no --sync-test-invader writes no pretend invader",
+    )
     values, _ = parse_config(config_text("off", intro_skip=False))
     check(
         values.get((INTRO_SECTION, KEY_INTRO_ENABLED)) == "false",
@@ -6112,6 +6144,19 @@ def main() -> int:
         ),
     )
     parser.add_argument(
+        "--sync-test-invader",
+        dest="sync_test_invader",
+        type=int,
+        choices=range(0, 11),
+        metavar="N",
+        default=None,
+        help=(
+            "with --weapon-sync and/or --armor-sync: pretend an invader at +N is present. While "
+            "we host, each cap is the highest invader's level alone, whatever the test caps say. "
+            "Implies neither feature."
+        ),
+    )
+    parser.add_argument(
         "--soul-memory-guard",
         dest="soul_memory_guard",
         action="store_true",
@@ -6494,6 +6539,7 @@ def main() -> int:
             weapon_sync_test_cap=args.weapon_sync_test_cap,
             armor_sync=args.armor_sync,
             armor_sync_test_cap=args.armor_sync_test_cap,
+            sync_test_invader=args.sync_test_invader,
             net_effects=args.net_effects,
             music_probe=args.music_probe,
             path_tracing=args.path_tracing,
@@ -6545,6 +6591,7 @@ def main() -> int:
         weapon_sync_test_cap=args.weapon_sync_test_cap,
         armor_sync=args.armor_sync,
         armor_sync_test_cap=args.armor_sync_test_cap,
+        sync_test_invader=args.sync_test_invader,
         net_effects=args.net_effects,
         music_probe=args.music_probe,
         path_tracing=args.path_tracing,

@@ -7380,6 +7380,33 @@ pub const PHANTOM_BLOCK_PHANTOM_PARAM_OFFSET: usize = 0x3C;
 /// is stored -- `(byte)(*(param_3 + 0x2a) - 0x12) < 2` -- which is how the pair was read off.
 pub const REPLAY_PHANTOM_PARAM_IDS: [u8; 2] = [0x12, 0x13];
 
+/// The phantom type of the player whose world it is. `0`.
+///
+/// [`PHANTOM_BLOCK_PHANTOM_PARAM_OFFSET`] is the character's phantom type: `0x14014ed20` reads
+/// that byte and `0x14013d430` indexes the phantom type table `0x1410c0050` with it for the local
+/// player. Entry 0 of the table is the only one with byte 1 = 0 besides the two replay types, and
+/// Paramdex names `ChrNetworkPhantomParam` row 0 "Host". Read live 2026-10-01 with
+/// `scripts/frida/phantom-roles-read.js`, alone in our own world: `Player_000100` type `0`.
+pub const HOST_PHANTOM_TYPE: u8 = 0;
+
+/// The phantom types that come into the host's world against the host: invaders.
+///
+/// From the phantom type table `0x1410c0050` (20 entries of `0x10` bytes, indexed by phantom type;
+/// identical in `darksoulsii-deobf.bin` and in the running game, read 2026-10-01 with
+/// `scripts/frida/phantom-roles-read.js`). Byte 2 of an entry is 1 for the types that come by
+/// sign (1, 2, 3, 4, 7, 9, 13: Paramdex "White Phantom", "Shade", "Sunbro", "Red Phantom Summon",
+/// "`BoB` Summon") and 2 for the types that break in (5, 6, 8, 10, 11, 12, 14, 15, 16, 17). Of the
+/// break-ins, 5 and 6 (table byte 0 = 7 and 8, Paramdex "Blue Sentinel Summon" and "Blue Sentinel
+/// Invader") are the Blue Sentinels, who come to fight the invader on the host's side; the rest
+/// are hostile to the host: red and Brotherhood of Blood invaders (8, 10, table byte 0 = 4 and 5,
+/// the same group as the red sign duels and sharing their time limit in `getAllotedTime`
+/// `0x1402d8430`), the dragon spirit (11), the abyss spirit (14), 12 and 15 (unnamed in Paramdex),
+/// and the two arena spirits (16, 17).
+///
+/// Byte 2 being "by sign / by break-in" is read off the table against the Paramdex row names, not
+/// traced to the code that writes it; no remote player of any type has been read live yet.
+pub const INVADER_PHANTOM_TYPES: [u8; 8] = [8, 10, 11, 12, 14, 15, 16, 17];
+
 /// `CharacterCtrl -> name`. `+0x118`, an MSVC `std::wstring`.
 ///
 /// `assignPhantomProperties` assigns it from the params struct's own string with

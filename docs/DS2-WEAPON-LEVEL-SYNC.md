@@ -14,6 +14,44 @@ the running process is being held for another investigation.
 - **[inferred]** means it follows from what was read but was not traced to the end. Each one
   says what would prove it.
 
+## Hosting an invader: match the highest invader (2026-10-01)
+
+User requirement: "update our weapon/armor downscalers during multiplayer so they work if I'm
+hosting and I get invaded by someone that's lower level. Match to the highest level invader."
+
+**Before.** Both features capped to the highest level any other person in the world had equipped,
+in every role, with no notion of who was an invader. Hosting a +10 co-op phantom and a +3 invader
+gave a cap of +10, so the invader was never matched. The "level" both features compare is the
+equipment's reinforcement level (weapon records 0..5, armour records 6..9), not soul level or soul
+memory; that has not changed.
+
+**Now** (`policy::cap_in`). While we host and at least one invader's equipment has arrived, the
+cap is the highest level among the invaders alone. Co-op phantoms and Blue Sentinels on our side
+do not lift it. A second invader arriving raises or lowers it to the higher of the two; when the
+last invader leaves, the cap goes back to every other player's highest (or away, restoring real
+levels). An invader whose records have not arrived yet does not decide the cap. In every other
+role (phantom, invader, no invader) the old rule is unchanged. The cap still only lowers: an
+invader above our gear changes nothing.
+
+**Who is an invader, who hosts.** A character's phantom type is `[CharacterCtrl+0xB0]+0x3C`
+(`0x14014ed20` reads it; the local player's is checked against the phantom type table in
+`0x14013d430`). The table `0x1410c0050`, 20 entries of `0x10` bytes, was read from
+`darksoulsii-deobf.bin` and from the running game with `scripts/frida/phantom-roles-read.js`; the
+two are identical. Byte 2 of an entry is 1 for the sign summons (types 1, 2, 3, 4, 7, 9, 13) and 2
+for the break-ins (5, 6, 8, 10, 11, 12, 14..17), matched against the Paramdex row names of
+ChrNetworkPhantomParam. Types 5 and 6 are the Blue Sentinels (Paramdex), who come to fight the
+invader; the rest of the break-ins are `ds2_rva::INVADER_PHANTOM_TYPES`. Type 0 is the host
+(`ds2_rva::HOST_PHANTOM_TYPE`), read live alone in our own world: `Player_000100` type `0`.
+
+`--sync-test-invader N` (`test_invader` in both sections, re-read live) adds a pretend invader,
+so `--weapon-sync-test-cap 9 --sync-test-invader 3` alone in our own world must cap at +3.
+
+Not proven, blocked on a real invasion: that a remote invader's `+0x3C` on our client holds their
+type (the remote factory `0x1403572e0` reads the type from its spawn data; no remote of any kind
+has been read live), and that byte 2 really means "by break-in" rather than only lining up with
+the row names. Red sign duels and Brotherhood of Blood sign summons (7, 9) are hostile but came by
+sign, so they are not invaders under this rule.
+
 ## Armour: the same machinery, a feature of its own (2026-09-28)
 
 User requirement: "we want to match our armor level like we match weapon levels", as a separate
