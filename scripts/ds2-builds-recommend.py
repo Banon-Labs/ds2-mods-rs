@@ -34,6 +34,7 @@ Armor is chosen separately by the defense optimizer under a 70% equip-load cap.
 from __future__ import annotations
 
 import argparse
+import bisect
 import hashlib
 import itertools
 import json
@@ -2956,7 +2957,282 @@ def poise_metrics(data: Data, corpus: list[Build], attacks: dict, weapon: str, t
     return out
 
 
-ATTACK_TYPES = Path.home() / ".cache/ds2-builds/attack-type.json"  # per weapon slot: slash/strike/thrust per hit
+# --- The R1 trade: what poise buys a build (generate_armor) ----------------------------------
+
+#: sCharacterFlags+0x200, the EXE's factor on startPlaySpeed inside an event-150 window. Not read:
+#: both writers found store 0.0, and taken literally the windup would never play, so 1.0 -- the
+#: value under which the start speed is the start speed (docs/DS2-DPS-MECHANICS.md "Attack play
+#: speed"). Set here only; scripts/ds2-poise-need.py reads it from this module.
+START_FACTOR = 1.0
+#: Per animation, its event-150/151 play-speed windows in seconds: scripts/ds2-anibnd.py windows.
+SPEED_WINDOWS = Path.home() / ".cache/ds2-builds/attack-speed-windows.json"
+_speed_cache: dict = {}
+
+
+def game_time(table: dict, anim: int, spd: list, t: float) -> float:
+    """Seconds of play to reach animation time `t` (seconds) of `anim`: the rate is startPlaySpeed
+    x START_FACTOR while a 150 window is open (it wins when both are, as in 0x14035d580),
+    endPlaySpeed while a 151 is, else 1.0. An animation `table` has no windows for plays at 1.0."""
+    if t <= 0:
+        return t
+    windows = (table.get(str(anim)) or {}).get("windows") or []
+    cuts = sorted({0.0, t, *(x for _, s, e in windows for x in (s, e) if 0.0 < x < t)})
+    real = 0.0
+    for a, b in zip(cuts, cuts[1:]):
+        mid = (a + b) / 2
+        open_ = {u for u, s, e in windows if s <= mid < e}
+        rate = spd[0] * START_FACTOR if 150 in open_ else spd[1] if 151 in open_ else 1.0
+        real += (b - a) / rate
+    return real
+
+
+def speed_windows() -> dict | None:
+    """SPEED_WINDOWS, read once; None when it has not been written."""
+    if "table" not in _speed_cache:
+        try:
+            _speed_cache["table"] = json.loads(SPEED_WINDOWS.read_text())
+        except (OSError, ValueError):
+            _speed_cache["table"] = None
+    return _speed_cache["table"]
+
+
+def attack_seconds(att: dict, frame: float, table: dict | None) -> float:
+    """Seconds from input to TAE frame `frame` of attack `att`: through its play-speed windows
+    (game_time) when `table` is given, else at the mean of its start/end speeds (chain_timeline's)."""
+    spd = att.get("spd") or [1.0, 1.0]
+    if table is None:
+        return frame / 30 / (sum(spd) / 2)
+    return game_time(table, att["anim"], spd, frame / 30)
+
+
+def first_strike(data: Data, attacks: dict, weapon: str, two_hand: bool, table: dict | None) -> dict | None:
+    """`weapon`'s R1 earliest live hit in the grip, for the trade model (trade): `t` seconds from
+    input (attack_seconds), `pd` poise damage and `ab` armorBreak (hit_poise), hit_damage's terms
+    `mv`/`kind`/`lower`/`flat`, `scale` WeaponParam.damageScale, and `armor` the R1's hyperarmor
+    windows (TAE 111900) in seconds with `rate` its uninterruptibleRate (no windows when the rate is
+    0: then the window does nothing). A grip with no R1 row swings one-handed. None without attack
+    timing or poise rows."""
+    names = [data.weapons[weapon]["name"], weapon.replace("_", " ")]
+    for two in dict.fromkeys((two_hand, False)):
+        a = r1_attack(attacks, names, two)
+        hs = live_hits(a) if a else []
+        if hs:
+            break
+    else:
+        return None
+    h = min(hs, key=lambda h: h["start"])
+    hp = hit_poise(data, weapon, h.get("dmg"))
+    if not hp:
+        return None
+    rate = data.weapon_poise.get(weapon, (0, 0.0))[1]
+    wins = [(attack_seconds(a, s, table), attack_seconds(a, e, table))
+            for s, e in tae_windows(a["anim"], TAE_HYPERARMOR)] if rate else []
+    return {"t": attack_seconds(a, h["start"], table), "pd": hp[0], "ab": hp[1], "mv": h["rate"],
+            "kind": h.get("type") or "physical", "lower": h.get("lower", 0), "flat": h.get("flat") or NO_FLAT,
+            "scale": data.damage_scale.get(weapon, 1.0), "armor": wins, "rate": rate}
+
+
+def stagger_threshold(hit: dict, defender: dict) -> float | None:
+    """The poise damage `hit` (first_strike) deals `defender` (the first_strike it is swinging) at
+    hit["t"]: times the defender's uninterruptibleRate inside its hyperarmor window. None when the
+    hit staggers whatever the poise: armorBreak 2, or 1 outside hyperarmor (EXE 0x140136570). The
+    defender staggers when the result reaches its poise (poise <= 0 after the hit)."""
+    armored = any(s <= hit["t"] < e for s, e in defender["armor"])
+    if hit["ab"] == 2 or (hit["ab"] == 1 and not armored):
+        return None
+    return hit["pd"] * (defender["rate"] if armored else 1.0)
+
+
+def trade(mine: dict, theirs: dict, my_poise: float, their_poise: float) -> tuple[bool, bool]:
+    """One R1 trade, both pressing R1 at the same instant: (my hit lands, theirs lands). The hit
+    that lands first lands; the later one lands unless the first staggered its swinger
+    (stagger_threshold against that swinger's poise and hyperarmor). A tie counts as mine first."""
+    if theirs["t"] < mine["t"]:
+        th = stagger_threshold(theirs, mine)
+        return th is not None and th < my_poise, True
+    th = stagger_threshold(mine, theirs)
+    return True, th is not None and th < their_poise
+
+
+def trade_counters(data: Data, corpus: list[Build], sl: int, attacks: dict) -> list[dict]:
+    """The bracket's counter-hits for the trade model: per bracket build (bracket_builds) with a
+    melee weapon (build_counter's pick), that weapon's first_strike in the build's grip -- two-handed
+    when its grip is 1 and the weapon is in rh1, the slot it two-hands (ds2-poise-need.py
+    --counter-grip build) -- plus STONE_RING_POISE with a Stone Ring, with the build's own `poise`
+    (armor_poise at its stats), `dfn` (build_defense, its rings as worn) and `ar` (attack_rating at
+    its effective stats and rings; an infusion the record does not know as No_Infusion). Cached on
+    `data` per corpus, bracket and timing."""
+    table = speed_windows()
+    key = (id(corpus), sl_bracket(sl), table is not None)
+    cache = data.__dict__.setdefault("_trade_counters", {})
+    if key in cache:
+        return cache[key]
+    melee = lambda w: (w not in EMPTY and w in data.weapons and not data.weapons[w].get("isShield")
+                       and not CATALYST.search(w) and w not in data.ranged)
+    out = []
+    for b in bracket_builds(data, corpus, sl):
+        pick = next(((s, *b.hands[HAND_SLOTS.index(s)]) for s in MELEE_ORDER
+                     if melee(b.hands[HAND_SLOTS.index(s)][0])), None)
+        if not pick:
+            continue
+        slot, w, inf = pick
+        hit = first_strike(data, attacks, w, b.grip == 1 and slot == "rh1", table)
+        worn = [r for r in b.rings if r in data.rings]
+        try:
+            eff = gear_stats(data, effective(data, b), worn)
+        except KeyError:
+            continue
+        if not hit:
+            continue
+        if wears_stone_ring(data, b.rings):
+            hit["pd"] += STONE_RING_POISE
+        infs = data.weapons[w]["infusions"]
+        inf = inf if inf in infs else "No_Infusion" if "No_Infusion" in infs else next(iter(infs))
+        hit.update(poise=armor_poise(data, b.armor, b.rings, b.stats), dfn=build_defense(data, b),
+                   ar=attack_rating(data, w, inf, eff, worn))
+        out.append(hit)
+    cache[key] = out
+    return out
+
+
+def exchange_pairs(mine: list[dict], counters: list[dict]) -> dict | None:
+    """Every (my weapon, counter) R1 trade (trade) reduced to what the armour changes: my poise
+    decides only whether I land when the counter hits first, and my defense only what its hits deal.
+    `mine` are first_strikes with `ar`, the counters trade_counters'. Per pair, my hit's damage is
+    hit_damage against the counter's own defense. Returns `fixed` (my damage in pairs where I hit
+    first), `keys`/`cum` (pairs where the counter hits first and poise could hold: the stagger
+    thresholds sorted, and the running sum of my damage over them), `taken` per counter (how many of
+    my weapons it lands on), `pairs`, `first` (pairs I hit first). None without either side."""
+    if not mine or not counters:
+        return None
+    fixed, first, held, taken = 0.0, 0, [], [0] * len(counters)
+    for w in mine:
+        for i, c in enumerate(counters):
+            out = hit_damage(w["ar"], c["dfn"], w["mv"], w["kind"], w["lower"], w["flat"]) * w["scale"]
+            if c["t"] < w["t"]:
+                taken[i] += 1
+                th = stagger_threshold(c, w)
+                if th is not None:
+                    held.append((th, out))
+            else:
+                fixed += out
+                first += 1
+                taken[i] += trade(w, c, 0.0, c["poise"])[1]
+    held.sort(key=lambda x: x[0])
+    cum = [0.0]
+    for _, out in held:
+        cum.append(cum[-1] + out)
+    return {"fixed": fixed, "first": first, "keys": [th for th, _ in held], "cum": cum, "taken": taken,
+            "counters": counters, "pairs": len(mine) * len(counters)}
+
+
+def exchange_value(table: dict, poise: float, dfn: dict) -> tuple[float, float]:
+    """(exchange value, trade rate) of wearing `poise` and defense `dfn` over exchange_pairs'
+    `table`: the mean over its pairs of my damage when my hit lands less the counter's first-hit
+    damage against `dfn` (hit_damage at its attack rating) when its hit lands; and the share of
+    pairs where mine lands. Poise holds against a threshold strictly below it."""
+    k = bisect.bisect_left(table["keys"], poise)
+    taken = sum(n * hit_damage(c["ar"], dfn, c["mv"], c["kind"], c["lower"], c["flat"]) * c["scale"]
+                for n, c in zip(table["taken"], table["counters"]) if n)
+    return (table["fixed"] + table["cum"][k] - taken) / table["pairs"], (table["first"] + k) / table["pairs"]
+
+
+def armor_poise_steps(data: Data, b: Build, eff: dict, mix: dict, scarcity: float = 0.0) -> list[tuple[float, tuple]]:
+    """best_armor's pick at every armour poise its budget reaches: for each distinct sum P of four
+    wearable pieces' poise under the same load budget, the set best_armor's score (threat-mix
+    defense less `scarcity`'s load price, the price taken from best_armor's own top set) ranks first
+    among sets whose pieces' poise is at least P. As (pieces' poise, pieces), poise rising, each set
+    once. Per slot only pieces no lighter-or-equal piece matches in defense and poise both count;
+    the four slots are combined keeping, per poise sum, the sets no lighter one outscores."""
+    worn = [r for r in b.rings if r in data.rings]
+    _, _, top = best_armor(data, b, dict(eff), mix, top=1)
+    if not top:
+        return []
+    price = top[0][0] / top[0][1] if top[0][1] > 0 else 0.0
+    k = scarcity * LOAD_PRICE * price
+    budget = max_load(data, eff, worn) * EQUIP_CAP
+    budget -= sum(data.weapons.get(w, {}).get("weight", 0) for w, _ in b.weapons())
+    budget -= sum(data.rings.get(r, {}).get("weight", 0) for r in b.rings if r in data.rings)
+    st = gear_stats(data, eff, worn)
+
+    def value(p):
+        return sum(mix[t] * p.get(t + "DEF", 0) for t in DMG)
+
+    states = {0.0: [(0.0, 0.0, ())]}  # pieces' poise -> [(weight, defense value, pieces)]
+    for slot in ARMOR_SLOTS:
+        cands = sorted(((v.get("weight", 0), value(v), v.get("poise", 0), key) for key, v in data.armor[slot].items()
+                        if armor_ok(data, slot, key, st)), key=lambda t: (t[0], -t[1], -t[2], t[3]))
+        front = []
+        for c in cands:
+            if not any(f[1] >= c[1] and f[2] >= c[2] for f in front):
+                front.append(c)
+        nxt: dict = {}
+        for p, lst in states.items():
+            for w, v, pp, key in front:
+                for sw, sv, pcs in lst:
+                    if sw + w <= budget:
+                        nxt.setdefault(round(p + pp, 3), []).append((sw + w, sv + v, pcs + (key,)))
+        states = {}
+        for p, lst in nxt.items():
+            lst.sort(key=lambda s: (s[0], -(s[1] - k * s[0])))
+            lean, best = [], None
+            for s in lst:
+                if best is None or s[1] - k * s[0] > best:
+                    lean.append(s)
+                    best = s[1] - k * s[0]
+            states[p] = lean
+    rank = lambda s: (s[1] - k * s[0], s[1], s[0], s[2])
+    out, run = [], None
+    for p in sorted(states, reverse=True):
+        s = max(states[p], key=rank)
+        if run is None or rank(s) > rank(run[1]):
+            run = (p, s)
+            out.append((p, s[2]))
+    return sorted(out)
+
+
+def granted_trades(data: Data, corpus: list[Build], sl: int, stats: dict, rings: list[str], granted) -> dict | None:
+    """exchange_pairs for a build at `stats` wearing `rings`, swinging each of `granted` ((key,
+    infusion, two-handed)) against `sl`'s bracket counters (trade_counters): each weapon's
+    first_strike at its attack_rating there, plus STONE_RING_POISE when `rings` hold a Stone Ring.
+    A launcher, or a weapon without attack timing or poise rows, is left out. Adds `basis`, what was
+    weighed. None when nothing is left on either side."""
+    # read once per `data`: about a second, and generate_build asks per build (first_strike only reads it)
+    attacks = data.__dict__.get("_trade_attacks")
+    if attacks is None:
+        attacks = data._trade_attacks = load_attacks(data)
+    timing = speed_windows()
+    eff = gear_stats(data, dict(stats), rings)
+    stone = wears_stone_ring(data, rings)
+    mine = []
+    for key, winf, wtwo in granted:
+        hit = None if key in data.ranged else first_strike(data, attacks, key, wtwo, timing)
+        if hit:
+            hit["pd"] += STONE_RING_POISE if stone else 0
+            hit["ar"] = attack_rating(data, key, winf, eff, rings)
+            mine.append(hit)
+    table = exchange_pairs(mine, trade_counters(data, corpus, sl, attacks))
+    if table is not None:
+        table["basis"] = (f"{len(mine)} of {len(granted)} granted weapons x {len(table['counters'])} SL "
+                          f"bracket counter-hits, " + ("game play speed" if timing is not None else
+                                                       f"mean play speed (no {SPEED_WINDOWS.name})"))
+    return table
+
+
+def armor_trade(data: Data, table: dict, pieces, stats: dict, rings: list[str], two: bool) -> dict:
+    """Armour `pieces` (keys) on a build at `stats` wearing `rings`, over granted_trades' `table`:
+    `poise` (armor_poise at the ring-boosted stats), `poise_target` the largest counter poise damage
+    it holds through (0 for none), `trade_rate` and `exchange` (exchange_value against its
+    build_defense)."""
+    poise = armor_poise(data, pieces, rings, gear_stats(data, dict(stats), rings))
+    dfn = build_defense(data, Build("", stats, list(pieces), [], int(two), rings, []))
+    val, rate = exchange_value(table, poise, dfn)
+    k = bisect.bisect_left(table["keys"], poise)
+    return {"poise": round(poise, 1), "poise_target": round(table["keys"][k - 1], 1) if k else 0.0,
+            "trade_rate": round(rate, 3), "exchange": round(val, 2)}
+
+
+ATTACK_TYPES =Path.home() / ".cache/ds2-builds/attack-type.json"  # per weapon slot: slash/strike/thrust per hit
 DAMAGE_LOWER = Path.home() / ".cache/ds2-builds/damage-lower.json"  # PlayerDamageParam row -> damageLower
 
 
@@ -4488,13 +4764,28 @@ def suggest_rings(data: Data, near: Counter, every: Counter | None = None, n: in
 
 
 def generate_armor(data: Data, corpus: list[Build], weapon: str, inf: str, two: bool, stats: dict,
-                   rings: list[str], listed=(), catalysts=()) -> tuple[list[str], str | None]:
-    """The generated build's armour: best_armor's top set for a build wearing `rings` and holding
-    the heaviest one of the primary and the `listed` weapons (keys) -- any one of them can be
-    equipped in its place without passing 70% -- plus, for a build that casts, the heaviest of its
-    `catalysts` (keys), which is held beside the weapon. As display names head/chest/hands/legs
-    ("Naked" for a slot left bare), and a note when the load cap left a slot bare or left no set at
-    all -- never a silent naked build.
+                   rings: list[str], listed=(), catalysts=(), sl: int | None = None,
+                   granted=()) -> tuple[list[str], str | None, dict]:
+    """The generated build's armour, for a build wearing `rings` and holding the heaviest one of the
+    primary and the `listed` weapons (keys) -- any one of them can be equipped in its place without
+    passing 70% -- plus, for a build that casts, the heaviest of its `catalysts` (keys), which is
+    held beside the weapon. As display names head/chest/hands/legs ("Naked" for a slot left bare),
+    a note when the load cap left a slot bare or left no set at all -- never a silent naked build --
+    or when poise drove the pick, and the trade numbers (below; {} without them).
+
+    Which set: best_armor's top set, unless a set that buys poise trades better. With `sl` and
+    `granted` ((key, infusion, two-handed) of every weapon the build lists, primary first) the
+    candidates are best_armor's top set and, per poise step the budget reaches, best_armor's pick
+    among the sets reaching it (armor_poise_steps); each is valued by its exchange value
+    (exchange_value) -- the mean, over the granted weapons and the bracket's counter-hits
+    (trade_counters), of the damage of my R1's first hit when it lands less the counter's first hit
+    against this set's defense when that lands, both pressing R1 at once (trade). Poise decides
+    whether I land when the counter hits first; it is worth buying only as far as that damage won
+    back outweighs what the lighter, better-defended set saves. The highest value wins; a tie keeps
+    best_armor's set. The numbers: `poise` the build's (armor_poise: pieces, stat poise, rings),
+    `poise_target` the largest counter poise damage it holds through (0: none), `trade_rate` the
+    share of trades where my hit lands, `exchange` the value, the same three for best_armor's set
+    under `previous`, `basis` what was weighed, `candidates` every set weighed as (keys, numbers).
 
     Before this the set was chosen for the primary alone, so a build whose other weapons were
     heavier than its primary could equip only the primary under 70% (user report 2026-10-01)."""
@@ -4503,17 +4794,37 @@ def generate_armor(data: Data, corpus: list[Build], weapon: str, inf: str, two: 
     if catalysts:
         held.append((max(catalysts, key=weight), "No_Infusion"))
     wearer = Build("", stats, ["Naked"] * 4, held, int(two), rings, [])
-    cap, carried, sets = best_armor(data, wearer, dict(stats), threat_mix(data, corpus), top=1,
-                                     scarcity=load_scarcity(data, stats))
+    mix, scarcity = threat_mix(data, corpus), load_scarcity(data, stats)
+    cap, carried, sets = best_armor(data, wearer, dict(stats), mix, top=1, scarcity=scarcity)
     if not sets:
         what = "the heaviest weapon, its catalyst and the rings" if catalysts else "the heaviest weapon and the rings"
         return [], (f"no armor fits: {what} weigh {carried:.1f}, over the {cap:.1f} a "
-                    f"{EQUIP_CAP:.0%} load allows at VIT {stats['vitality']}")
-    pieces = sets[0][2]
+                    f"{EQUIP_CAP:.0%} load allows at VIT {stats['vitality']}"), {}
+    pieces, info, poise_note = sets[0][2], {}, None
+    table = granted_trades(data, corpus, sl, stats, rings, granted) if sl is not None and granted else None
+    if table is not None:
+        prev = armor_trade(data, table, pieces, stats, rings, two)
+        best, best_pieces, cands = prev, pieces, [(list(pieces), prev)]
+        for _, ps in armor_poise_steps(data, wearer, dict(stats), mix, scarcity):
+            if list(ps) == list(pieces):
+                continue
+            s = armor_trade(data, table, ps, stats, rings, two)
+            cands.append((list(ps), s))
+            if s["exchange"] > best["exchange"]:
+                best, best_pieces = s, ps
+        info = best | {"previous": prev, "basis": table["basis"], "candidates": cands}
+        if best_pieces != pieces:
+            poise_note = (f"poise drove the pick: {best['poise']:.0f} poise over best_armor's "
+                          f"{prev['poise']:.0f} holds through counter hits up to {best['poise_target']:.0f} "
+                          f"poise damage; exchange {best['exchange']:+.1f} per trade against "
+                          f"{prev['exchange']:+.1f}, lands {best['trade_rate']:.0%} of trades against "
+                          f"{prev['trade_rate']:.0%}")
+        pieces = best_pieces
     bare = [s for s, p in zip(ARMOR_SLOTS, pieces) if p == "Naked"]
     note = (f"{', '.join(bare)} left bare: nothing wearable there fits the {cap - carried:.1f} of load "
             f"left under {EQUIP_CAP:.0%}") if bare else None
-    return [data.armor[s][p]["name"] for s, p in zip(ARMOR_SLOTS, pieces)], note
+    note = "; ".join(n for n in (note, poise_note) if n) or None
+    return [data.armor[s][p]["name"] for s, p in zip(ARMOR_SLOTS, pieces)], note, info
 
 
 def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: int, objective: str = "damage",
@@ -4527,8 +4838,12 @@ def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
     two-hand-only other weapons for those
     stats (damage over `window` seconds); 3 copies of each of the 4 rings the nearest-stat builds
     wear most (suggest_rings: no NO_USE_RINGS ring), plus one of every other ring at least
-    COMMON_RING of all builds wear; and armour, the
-    best_armor set under 70% load with the primary and those four rings carried. `allow_naked`
+    COMMON_RING of all builds wear; and armour, generate_armor's set under 70% load with the
+    heaviest listed weapon and those four rings carried: best_armor's, or a higher-poise one when
+    its R1 trades against the bracket over every listed weapon (each in the grip its listed damage
+    is swung in) are worth more -- `poise`, `poise_target`, `trade_rate`, `exchange`,
+    `trade_previous` (best_armor's set's numbers), `trade_basis` and `trade_candidates` (every set
+    weighed, as (keys, numbers)) are generate_armor's, over `granted`. `allow_naked`
     skips the armour, as every generated build did before it had any. `only_class` is
     optimize_build's: the build for a character that already has a class.
 
@@ -4548,11 +4863,12 @@ def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
     slots = (sum(data.spells[s]["slots"] for s in spells), slots_of(data, eff, worn))
     assert slots[0] <= slots[1]
     rows, _, _ = weapons_for(data, eff, sl, corpus, top=10_000, window=window, defender=defender)
-    one, only2, seen = [], [], {data.weapons[weapon]["name"]}
+    one, only2, seen, grips = [], [], {data.weapons[weapon]["name"]}, {}
     for dmg, name, winf, ar, label in rows:
         if name in seen:
             continue
         seen.add(name)
+        grips[name] = label.startswith("2H")  # the grip its listed damage is swung in
         (only2 if "2H only" in label else one).append((name, winf, round(dmg)))
     # dict.fromkeys, not set: most_common breaks ties by first-seen order, and a set of strings
     # iterates in the per-process hash order, so tied rings came out differently on every run
@@ -4567,12 +4883,17 @@ def generate_build(data: Data, corpus: list[Build], weapon: str, inf: str, sl: i
         by_name.setdefault(w["name"], key)
     listed = [by_name[name] for name, _, _ in one[:15] + only2[:5]]
     catalysts = [c for _, c, _, _ in best_catalysts(data, spells, eff)]
-    armor, armor_note = ([], None) if allow_naked else generate_armor(data, corpus, weapon, inf, two, stats,
-                                                                     suggested, listed, catalysts)
+    granted = [(weapon, inf, two)] + [(by_name[n], i, grips[n]) for n, i, _ in one[:15] + only2[:5]]
+    armor, armor_note, trades = ([], None, {}) if allow_naked else generate_armor(
+        data, corpus, weapon, inf, two, stats, suggested, listed, catalysts, sl, granted)
     return {"class": cls, "sl": sl, "stats": stats, "two_handed": two, "objective": objective, "value": round(val),
             "primary": (data.weapons[weapon]["name"], inf), "weapons_1h": one[:15], "weapons_2h_only": only2[:5],
             "rings": [data.rings[r]["name"] for r in suggested for _ in range(3)]
             + [data.rings[r]["name"] for r in common], "armor": armor, "armor_note": armor_note,
+            "poise": trades.get("poise"), "poise_target": trades.get("poise_target"),
+            "trade_rate": trades.get("trade_rate"), "exchange": trades.get("exchange"),
+            "trade_previous": trades.get("previous"), "trade_basis": trades.get("basis"),
+            "trade_candidates": trades.get("candidates"), "granted": granted,
             "flex": flexibility(data, corpus, stats, sl, armor_keys(data, armor), suggested),
             "spells": [data.spells[s]["name"] for s in spells], "slots": slots,
             "ring_trades": ring_trades(data, corpus, weapon, sl, grip, spells, cls, use_floors, worn),
@@ -5679,6 +6000,61 @@ SELFTEST_ATTACKS = {
 }
 
 
+def trade_selftest_cases() -> list:
+    """The R1 trade (trade) and its exchange value (exchange_pairs, exchange_value) on hand-made
+    strikes: stagger at poise <= 0 (EXE 0x140136570), armorBreak 2 always, 1 outside hyperarmor,
+    poise damage x uninterruptibleRate inside it."""
+    def hit(t, pd, ab=0, armor=(), rate=0.0, phys=100, dfn=0.0, poise=0.0):
+        return {"t": t, "pd": pd, "ab": ab, "armor": list(armor), "rate": rate, "mv": 1.0, "kind": "physical",
+                "lower": 0, "flat": NO_FLAT, "scale": 1.0, "ar": {"physical": phys}, "dfn": {"physical": dfn},
+                "poise": poise}
+    hammer = hit(0.8, 60, armor=[(0.6, 1.0)], rate=0.3)  # slow, hyperarmor 0.6-1.0 s at x0.3
+    dagger = hit(0.3, 35)
+    cases = [
+        ("counter first, 35 into 36 poise: both land", trade(hit(0.8, 0), dagger, 36, 0), (True, True)),
+        ("counter first, 35 into 35 poise: staggered at 0", trade(hit(0.8, 0), dagger, 35, 0), (False, True)),
+        ("counter first, armorBreak 2: staggered through any poise",
+         trade(hit(0.8, 0), hit(0.3, 1, ab=2), 1000, 0), (False, True)),
+        ("armorBreak 1 inside hyperarmor holds on poise: 100 x 0.3 under 31",
+         trade(hammer, hit(0.7, 100, ab=1), 31, 0), (True, True)),
+        ("armorBreak 1 inside hyperarmor, 30 into 30 poise: staggered", trade(hammer, hit(0.7, 100, ab=1), 30, 0),
+         (False, True)),
+        ("armorBreak 1 outside hyperarmor: staggered", trade(hammer, hit(0.5, 1, ab=1), 1000, 0), (False, True)),
+        ("mine first, 35 into their 30: theirs never lands", trade(dagger, hit(0.8, 0), 0, 30), (True, False)),
+        ("mine first, 35 into their 40: both land", trade(dagger, hit(0.8, 0), 0, 40), (True, True)),
+        ("mine first into their hyperarmor: 35 x 0.3 under 11",
+         trade(dagger, hammer | {"armor": [(0.2, 1.0)]}, 0, 11), (True, True)),
+        ("mine first before their hyperarmor opens: 35 into 11", trade(dagger, hammer, 0, 11), (True, False)),
+        ("a tie is mine first", trade(hit(0.5, 50), hit(0.5, 50), 0, 10), (True, False)),
+    ]
+    # one weapon, one counter, by hand: mine 100 AR into 200 DEF = (1000 - 200) / 12; theirs 120
+    # AR into 300 DEF = (1200 - 300) / 12 = 75, 40 poise damage landing first
+    t = exchange_pairs([hit(0.8, 0)], [hit(0.5, 40, phys=120, dfn=200.0)])
+    cases += [
+        ("exchange at 30 poise: staggered, takes 75", exchange_value(t, 30, {"physical": 300.0}), (-75.0, 0.0)),
+        ("exchange at 41 poise: lands 66.7, takes 75", tuple(round(x, 3) for x in
+                                                               exchange_value(t, 41, {"physical": 300.0})),
+         (round(800 / 12 - 75, 3), 1.0)),
+    ]
+    # the table's reduction equals trading every pair at the poise, for poise either side of each
+    # threshold (35, 60 x 0.3 = 18 inside the hammer's window, armorBreak 2 never)
+    mine = [dagger, hammer, hit(0.45, 20, phys=150)]
+    counters = [hit(0.4, 35, phys=110, dfn=150.0, poise=30.0), hit(0.7, 60, phys=200, dfn=250.0, poise=50.0),
+                hit(0.5, 10, ab=2, phys=90, dfn=100.0, poise=80.0), hit(1.2, 45, phys=130, dfn=180.0, poise=20.0)]
+    t = exchange_pairs(mine, counters)
+    me = {"physical": 220.0}
+    for poise in (0, 18, 18.5, 35, 35.5, 70):
+        want = 0.0
+        for w in mine:
+            for c in counters:
+                landed, taken = trade(w, c, poise, c["poise"])
+                want += (landed * hit_damage(w["ar"], c["dfn"], 1.0) - taken * hit_damage(c["ar"], me, 1.0))
+        want /= len(mine) * len(counters)
+        cases.append((f"exchange table = every pair traded, poise {poise}", round(exchange_value(t, poise, me)[0], 9),
+                      round(want, 9)))
+    return cases
+
+
 def metrics_selftest_cases() -> list:
     """r1_reach / r1_metrics on regulation rows (scripts/ds2-hit-shape.py prints them): the Dagger's
     one segment, the Whip's three dummy polys end to end, the Greatsword's child sphere on the same
@@ -6073,6 +6449,7 @@ def selftest() -> int:
     cases += flex_selftest_cases()
     cases += ranged_selftest_cases()
     cases += metrics_selftest_cases()
+    cases += trade_selftest_cases()
     cases += stamina_selftest_cases()
     if ATTACKS.exists():  # the real extracted rows agree with the copies above
         real = load_attacks()
@@ -6365,6 +6742,12 @@ def main() -> int:
             print("  armor: " + (" / ".join(g["armor"]) or "none"))
         if g["armor_note"]:
             print(f"  armor: {g['armor_note']}")
+        if g["poise"] is not None:
+            p = g["trade_previous"]
+            print(f"  poise: {g['poise']:.1f}, holds through counter hits up to {g['poise_target']:.1f} poise "
+                  f"damage; my R1 lands in {g['trade_rate']:.0%} of trades, exchange {g['exchange']:+.2f} damage "
+                  f"per trade (best_armor's set: poise {p['poise']:.1f}, {p['trade_rate']:.0%}, "
+                  f"{p['exchange']:+.2f}); over {g['trade_basis']}")
         print(f"  flexibility: {flex_line(g['flex'])}")
         print(f"  load: {flex_load_line(g['flex'])}")
         return 0

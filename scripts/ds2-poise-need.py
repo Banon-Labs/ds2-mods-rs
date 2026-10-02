@@ -25,7 +25,8 @@ inside its event-150 windows, endPlaySpeed inside its 151 windows and 1.0 elsewh
 the player's anibnd (`scripts/ds2-anibnd.py windows` writes the table this reads); an animation
 with no such track plays at 1.0. The EXE multiplies the start speed by sCharacterFlags+0x200, which
 both writers found store 0.0 -- taken literally the windup would never play -- so the factor is
-taken as 1.0 here and is the one unread number left (docs/DS2-DPS-MECHANICS.md).
+taken as 1.0 (START_FACTOR in ds2-builds-recommend.py, the one place it is set) and is the one
+unread number left (docs/DS2-DPS-MECHANICS.md).
 
     python3 scripts/ds2-poise-need.py --sl 120 --weapons "Black Flamestone Dagger,Giant Warrior Club"
     python3 scripts/ds2-poise-need.py --sl 120 --generate Black_Flamestone_Dagger --class warrior
@@ -40,27 +41,6 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 LEVELS = (0, 20, 40, 60, 80, 100, 120, 140, 160)
-SPEED_WINDOWS = Path.home() / ".cache/ds2-builds/attack-speed-windows.json"
-#: sCharacterFlags+0x200, the EXE's factor on startPlaySpeed inside a 150 window. Not read (see the
-#: module docstring); 1.0 is the value under which the start speed is the start speed.
-START_FACTOR = 1.0
-
-
-def game_time(table: dict, anim: int, spd: list, t: float) -> float:
-    """Seconds of play to reach animation time `t` (seconds) of `anim`: the rate is startPlaySpeed
-    x START_FACTOR while a 150 window is open (it wins when both are, as in 0x14035d580),
-    endPlaySpeed while a 151 is, else 1.0."""
-    if t <= 0:
-        return t
-    windows = (table.get(str(anim)) or {}).get("windows") or []
-    cuts = sorted({0.0, t, *(x for _, s, e in windows for x in (s, e) if 0.0 < x < t)})
-    real = 0.0
-    for a, b in zip(cuts, cuts[1:]):
-        mid = (a + b) / 2
-        open_ = {u for u, s, e in windows if s <= mid < e}
-        rate = spd[0] * START_FACTOR if 150 in open_ else spd[1] if 151 in open_ else 1.0
-        real += (b - a) / rate
-    return real
 
 
 def load_recommender():
@@ -71,6 +51,31 @@ def load_recommender():
     return mod
 
 
+def armor_steps(R, data, corpus, sl: int, g: dict) -> None:
+    """Every armour set generate_armor weighed for the generated build `g` (best_armor's first, then
+    best_armor's pick per poise step), with its exchange value and trade rate over every granted
+    weapon -- what chose it -- and over the primary alone."""
+    if not g.get("trade_candidates"):
+        print("\nno armour trade: no armour, or no attack timing on either side")
+        return
+    rings, names = [], g["rings"]
+    while len(names) >= 3 and names[0] == names[1] == names[2]:
+        rings.append(data.sp_key[R.norm(names[0])])
+        names = names[3:]
+    alone = R.granted_trades(data, corpus, sl, g["stats"], rings, g["granted"][:1])
+    print(f"\narmour weighed over {g['trade_basis']}; 'alone' over the primary's own trades; "
+          f"* the chosen set, first row best_armor's")
+    print(f"{'poise':>6} {'weight':>6} {'exchange':>9} {'lands':>6} {'alone':>8} {'lands':>6}  set")
+    chosen = " / ".join(g["armor"])
+    for keys, s in g["trade_candidates"]:
+        one = R.armor_trade(data, alone, keys, g["stats"], rings, g["two_handed"]) if alone else None
+        weight = sum(data.armor[slot][p].get("weight", 0) for slot, p in zip(R.ARMOR_SLOTS, keys))
+        name = " / ".join(data.armor[slot][p]["name"] for slot, p in zip(R.ARMOR_SLOTS, keys))
+        print(f"{s['poise']:6.1f} {weight:6.1f} {s['exchange']:+9.2f} {s['trade_rate']:6.1%} "
+              + (f"{one['exchange']:+8.2f} {one['trade_rate']:6.1%}" if one else f"{'-':>8} {'-':>6}")
+              + f" {'*' if name == chosen else ' '}{name}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--sl", type=int, required=True)
@@ -79,6 +84,8 @@ def main() -> int:
     ap.add_argument("--infusion", default="No_Infusion")
     ap.add_argument("--class", dest="cls")
     ap.add_argument("--one-hand", action="store_true", help="measure your R1 one-handed (default two-handed)")
+    ap.add_argument("--armor-steps", action="store_true",
+                    help="with --generate: every armour set generate_armor weighed, with its exchange value")
     ap.add_argument("--counter-grip", choices=("1h", "build"), default="1h",
                     help="the grip of each bracket build's counter R1: 1h (bracket_poise's model) or build, "
                          "the build's own: two-handed when its grip is 1 and the counter weapon is in rh1, "
@@ -89,11 +96,12 @@ def main() -> int:
                          "inside the animation's event-150 windows, end inside its 151 windows, 1.0 "
                          "elsewhere (scripts/ds2-anibnd.py windows)")
     a = ap.parse_args()
+    R = load_recommender()
     speed_table = None
     if a.play_speed == "game":
-        if not SPEED_WINDOWS.exists():
-            raise SystemExit(f"{SPEED_WINDOWS} missing: run scripts/ds2-anibnd.py windows")
-        speed_table = json.loads(SPEED_WINDOWS.read_text())
+        if not R.SPEED_WINDOWS.exists():
+            raise SystemExit(f"{R.SPEED_WINDOWS} missing: run scripts/ds2-anibnd.py windows")
+        speed_table = json.loads(R.SPEED_WINDOWS.read_text())
     unwindowed = set()
 
     def real(att, frame):
@@ -103,9 +111,8 @@ def main() -> int:
             return frame / 30 / (sum(spd) / 2)
         if str(att["anim"]) not in speed_table:
             unwindowed.add(att["anim"])
-        return game_time(speed_table, att["anim"], spd, frame / 30)
+        return R.game_time(speed_table, att["anim"], spd, frame / 30)
 
-    R = load_recommender()
     sp_json, mm_json = R.dump_site_tables(R.CACHE / "site-tables")
     data = R.Data(json.loads(sp_json.read_text()), json.loads(mm_json.read_text()))
     R.apply_regulation(data)
@@ -173,6 +180,8 @@ def main() -> int:
             by_name.setdefault(w["name"], key)
         keys = [weapon] + [by_name[n] for n, _, _ in g["weapons_1h"] + g["weapons_2h_only"]]
         print(f"granted with {data.weapons[weapon]['name']} at SL {a.sl}: {len(keys)} weapons")
+        if a.armor_steps:
+            armor_steps(R, data, corpus, a.sl, g)
     else:
         keys = [data.sp_key.get(R.norm(n.strip())) for n in (a.weapons or "").split(",") if n.strip()]
     print(f"bracket counters: {len(counters)} R1 first hits ({two_handed} two-handed, grip {a.counter_grip}) "
@@ -221,7 +230,7 @@ def main() -> int:
         print(f"\nmedian need across the granted weapons: {needs[len(needs) // 2]:.1f}; "
               f"weapons needing under 20 poise: {sum(1 for x in needs if x < 20)}/{len(needs)}")
     if speed_table is not None:
-        print(f"play speed: anibnd windows, start factor {START_FACTOR}; {len(unwindowed)} animations "
+        print(f"play speed: anibnd windows, start factor {R.START_FACTOR}; {len(unwindowed)} animations "
               f"with no 150/151 track played at 1.0: {sorted(unwindowed)[:20]}")
     return 0
 
