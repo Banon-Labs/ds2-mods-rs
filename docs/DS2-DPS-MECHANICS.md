@@ -295,23 +295,54 @@ What the game does with `WeaponAttackMotionParam.startPlaySpeed` (+0x8) / `endPl
     +0x88, `dashAttackMaxSpeedAnimScale` +0x8c, t), t = (|velocity| - `dashAttackTriggerMinSpeed`
     +0x84) / (`[[chr]+0x48]+0x48` - that), clamped to 0..1 (`0x141afd3e4`..`0x141c67700`).
   It then stores start, end and `[rsp+0x48]` to +0x1f8/+0x1fc/+0x200 (`0x141b9446b`).
-- **+0x200 reads as 0.0 in both writers.** The first writer zeroes `[rbp+0x188]` at `0x141b3fea9` and
-  reads it back at `0x141b3ff4f` with no call between; the second zeroes `[rsp+0x48]` at its entry
-  (`0x141c4ddf1`, `0x140049bf3`) and nothing it calls writes there (`0x14031fcb0` writes only the
-  request's +0x4/+0x8; slot 9 only reads). Taken literally, Attack_SwingSpeed would be 0 inside every
-  150 window and the windup would never play, so either a third writer exists that the byte searches
-  for stores to `+0x200` (movss/movups/mov forms) did not find -- code Arxan decrypts at runtime would
-  hide one -- or the factor is not what reaches the network. `scripts/ds2-poise-need.py --play-speed
-  game` takes it as 1.0.
+- **+0x200 is 0.0 in both of those writers.** The first writer zeroes `[rbp+0x188]` at `0x141b3fea9`
+  and reads it back at `0x141b3ff4f` with no call between. The second (`0x140393350`) has one frame,
+  `push rdi` + `sub rsp,0x80`, and no Arxan stub between its entry and `0x141b94459` leaves rsp moved
+  (its epilogue reloads rbx from `[rsp+0xa8]` = the entry's `[rsp+0x20]` and xmm6 from the `[rsp+0x70]`
+  saved at `0x141c4ddf3`), so `[rsp+0x48]` at `0x141b94459` is the dword zeroed at `0x140049bf3`. The
+  only pointer into that part of the frame is `lea [rsp+0x30]`, passed to `0x14031fcb0` (writes its
+  +0x4/+0x8, `0x141ca1494`/`0x141ca1499` and siblings) and to calculator slot 13 `0x14031e660` ->
+  slot 9 `0x1403811f0` (reads +0x0/+0x4/+0x8 only). Both writers run only on the frame an action
+  request is taken: the first inside `0x1403947b0`, the second from call sites around `0x140394034`.
+- **The third writer sets it every other frame (EXE, read 2026-10-01, static only).** The action
+  controller's per-frame update `0x140393a30` (called with dt from `0x14038f277`) asks `0x140390670`
+  whether a request is to be taken this frame. If yes it tail-jumps to `0x1403947b0` (writer 1 is in
+  there). If not, it calls `0x14038fbd0` and stores the result: `mov rcx,[[rbx]+0xb8]` (`0x140143624`),
+  `movss [rcx+0x200],xmm0` (`0x140202031`). `0x14038fbd0` (body at `0x141ce44b2`), with `F` = flags,
+  `S` = the action state `chr+0xc0`, `M` = `[chr+0x48]`, the character's ChrMoveParam row:
+  - `F+0x14 != 0`: 1.0 (`0x141c37367`, `cmovne` at `0x14000a5d6`, constant `0x1410ac698`);
+  - else by the byte `F+0x18b`: 8..11 -> lerp(`M+0xdc`, `M+0xe0`, t) (`0x141ca88fd`); 12 with
+    `S+0x5c != 0` -> lerp(`M+0xe4`, `M+0xe8`, t) (`0x141c546a8`); any other value 1.0 (`0x141b4c10a`);
+  - t = |velocity| / `M+0x20`, clamped to 0..1 (`0x141b8bd26`..`0x141b8698e`).
+  In CHR_MOVE_PARAM every field before +0xdc is 4 bytes, so +0x20 is `fWalkSpeedMax`, +0xdc/+0xe0
+  `shootStanceAnimSpeedScaleMin/Max` and +0xe4/+0xe8 `spellChantingAnimSpeedScaleMin/Max` (the
+  same row whose +0x48 `fDashSpeedMax` writer 2's dash branch reads). That states 8-11 are bow and
+  crossbow aiming and 12 is spell chanting is INFERRED from those field names.
+- **So for a melee swing the factor is 1.0**: a melee attack is not one of those states, so on every
+  update frame where `0x140390670` takes no request, `0x140202031` writes 1.0, and the 0.0 from writers
+  1 and 2 lasts only until such a frame. Static reading did not settle two things: how many frames in a
+  row `0x140390670` can say yes (it says yes when `this+0x48 == 4`, or when request bits in
+  `this+0x44 & 0xfffff80` are set and the state checks at `S+0x2a`/`+0x2c`/`+0x2f`/`+0x30`,
+  `F+0x568`, `F+0x4`, `F+0x4d4` pass), and whether the 0.0 can reach `0x14035d580` on such a frame
+  (that needs `S+0xa0` already counted up by the animation's 150 event). A 0.0 that lasted through a
+  windup would freeze the swing, which attacks visibly do not do. Only aimed shots and chanted spells
+  get a factor other than 1.0, and it scales with how fast the character is moving.
+  `scripts/ds2-poise-need.py` uses 1.0.
+- **Other stores to +0x200 checked** (byte searches of the image for movss, `mov` from a register,
+  `mov` from an immediate, and 8/16-byte stores at +0x1f4..+0x1fc that would cover +0x200): none of
+  the other hits loads the flags pointer (`+0xb8`) or 1.0 in the instructions before it. The flags
+  object's constructor was not identified; it is not needed, because `0x140202031` rewrites the value
+  on every update frame.
 - **Runtime, idle (read 2026-10-01, `scripts/frida/attack-speed-read.js`, read-only, no hooks):**
   on a character just loaded from slot 2 that had not attacked, flags+0x200 = 1.0 (`0x3f800000`),
   +0x1f8 = +0x1fc = 0.0, +0x195 = 0, `S+0xa0` = `S+0xa4` = 0, and `[0x1410ac698]` = 1.0. So +0x200
-  holds 1.0 before any attack request, written by something other than the two writers above.
+  holds 1.0 before any attack request. That is the third writer's 1.0 (above).
   The game's CPU was unchanged by the attach (103-104 ticks per 2 s before and after) and Frida's
   timers fired (about 123 samples a second at the 8 ms interval).
-- **Not yet read: the value during a swing's 150 window.** Left-clicks posted to the game window
+- **Not read at runtime: the value during a swing's 150 window.** Left-clicks posted to the game window
   through `PostMessageW` did not start an attack while the window was not in the foreground, and
-  that character had Fists in all six weapon records, so the swing needs a person at the game.
+  that character had Fists in all six weapon records. The static reading above gives the value
+  (1.0 for melee) without a runtime read.
 - **Turned into one Morpheme control parameter.** `ChrAttackMotionCtrl` binds its control parameters
   in `0x14035c770`; index 4 is `ControlParameters|Attack_SwingSpeed`. Every frame `0x14035d580` sets it
   from the action state `S = PlayerCtrl+0xc0`:
