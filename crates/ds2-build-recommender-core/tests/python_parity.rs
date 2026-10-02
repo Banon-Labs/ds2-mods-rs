@@ -17,12 +17,12 @@ use std::sync::OnceLock;
 
 use ds2_build_import_core::Infusion;
 use ds2_build_recommender_core::backend::{
-    self, Change, Limits, Outcome, RecommenderBackend, RefusalKind, ResultRow,
+    self, ArmorTrade, Change, Limits, Outcome, RecommenderBackend, RefusalKind, ResultRow,
 };
 use ds2_build_recommender_core::corpus::CorpusBackend;
 use ds2_build_recommender_core::model::{
-    Defender, Grip, Mode, Objective, PanelState, STAT_COUNT, StatusFilter, WeaponsForOpts,
-    soul_level,
+    BestWeaponsOpts, Defender, Grip, Mode, Objective, PanelState, Rank, Reply, STAT_COUNT,
+    StatusFilter, WeaponsForOpts, soul_level,
 };
 use ds2_build_recommender_core::weapons;
 
@@ -78,7 +78,11 @@ type Generated = (
     bool,
     bool,
     &'static [&'static str],
+    Option<(Trade, Trade)>,
 );
+/// An armour set's R1 trades: poise, the counter poise damage it holds through, the share of
+/// trades the build's R1 lands, the exchange value per trade.
+type Trade = (f64, f64, f64, f64);
 type GenerateCase = (
     &'static str,
     &'static str,
@@ -196,6 +200,95 @@ type BestInfusionCase = (
 );
 type BestInfusionCases = &'static [BestInfusionCase];
 type DefenderBestInfusionCases = Against<BestInfusionCase>;
+/// The adaptive defender's buff setting (`none`, `item`, `any`) and armour keys, then a case.
+type Adaptive<T> = &'static [(&'static str, &'static [&'static str], T)];
+type AdaptiveWeaponsForCases = Adaptive<WeaponsForCase>;
+type AdaptiveOptimizeCases = Adaptive<OptimizeCase>;
+type AdaptiveGenerateCases = Adaptive<GenerateCase>;
+type AdaptiveBestInfusionCases = Adaptive<BestInfusionCase>;
+/// R1 reach, startup, recovery, first hit, 5 s damage.
+type R1Metrics = (
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+);
+/// Hyperarmor share, its rate, the counter-hits it holds, poise damage per hit, armorBreak, hits
+/// to stagger, defender poise.
+type PoiseMetrics = (
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<f64>,
+    Option<i64>,
+    Option<i64>,
+    f64,
+);
+/// Status hits, per status (name, build-up per hit, hits to proc), damage per window, in the
+/// first window.
+type StatusMetrics = Option<(i64, &'static [(&'static str, f64, i64)], f64, f64)>;
+/// Stamina per attack, per window, damage per stamina, max stamina, a full bar's attacks, damage
+/// and seconds.
+type StaminaMetrics = Option<(
+    &'static [f64],
+    f64,
+    f64,
+    Option<f64>,
+    Option<i64>,
+    Option<f64>,
+    Option<f64>,
+)>;
+/// score, weapon key, value, class, two-handed, stats, rings, label, (ammo, shot), then metrics.
+type BestRow = (
+    f64,
+    &'static str,
+    f64,
+    &'static str,
+    bool,
+    &'static [u16],
+    &'static [&'static str],
+    &'static str,
+    Option<(&'static str, &'static str)>,
+    R1Metrics,
+    PoiseMetrics,
+    StatusMetrics,
+    Option<f64>,
+    StaminaMetrics,
+);
+/// infusion code, sl, objective, grip, weapon class, window, rank, with status, defender keys,
+/// who answers (`static` or a buff setting), rows.
+type BestWeaponsCase = (
+    &'static str,
+    u16,
+    &'static str,
+    &'static str,
+    &'static str,
+    f64,
+    &'static str,
+    bool,
+    &'static [&'static str],
+    &'static str,
+    &'static [BestRow],
+);
+type BestWeaponsCases = &'static [BestWeaponsCase];
+
+/// The questions most fixtures were asked: the script's `--expect` writes them with a static
+/// defender, its rings as worn.
+const STATIC: Limits<'static> = Limits {
+    reply: Reply::Static,
+    ..Limits::NONE
+};
+
+/// The adaptive defender a fixture's buff setting names.
+fn reply(buff: &str) -> Reply {
+    match buff {
+        "none" => Reply::Ring,
+        "item" => Reply::RingAndItem,
+        "any" => Reply::RingAndAnyBuff,
+        other => panic!("buff {other}"),
+    }
+}
 
 mod expected {
     use super::*;
@@ -280,17 +373,48 @@ fn defense_is_the_scripts() {
     for &(sl, keys, want, builds) in expected::DEFENSE {
         let asked = defender(keys);
         let got = backend()
-            .defense(sl, &asked)
+            .defense(sl, &asked, Reply::Static)
             .unwrap_or_else(|| panic!("SL {sl} {keys:?}: no defense"));
         let want: Vec<f32> = want.iter().map(|&value| value as f32).collect();
         assert_eq!(got.defense[..], want[..], "SL {sl} {keys:?}");
         assert_eq!(got.builds, builds, "SL {sl} {keys:?}");
         assert_eq!(got.stats.is_some(), !keys.is_empty(), "SL {sl} {keys:?}");
+        assert!(got.counters.is_empty(), "a static defender swaps nothing");
+        // An adaptive defender puts up the same numbers until an attack is in hand.
+        let adaptive = backend()
+            .defense(sl, &asked, Reply::Ring)
+            .expect("the same defender");
+        assert_eq!(adaptive.defense, got.defense, "SL {sl} {keys:?}");
+        assert_eq!(adaptive.counters, expected::COUNTER_RINGS);
         chosen += usize::from(!keys.is_empty());
     }
     assert!(chosen >= 9, "{chosen} chosen defenders");
     let unknown = defender(&["Not_A_Helm", "Naked", "Naked", "Naked"]);
-    assert_eq!(backend().defense(100, &unknown), None, "an unknown piece");
+    assert_eq!(
+        backend().defense(100, &unknown, Reply::Ring),
+        None,
+        "an unknown piece"
+    );
+}
+
+/// The defender line says when the defender answers the weapon, and with what.
+#[test]
+fn the_defender_line_says_how_the_defender_answers() {
+    let at = |reply| {
+        let defense = backend()
+            .defense(150, &Defender::Average, reply)
+            .expect("the average");
+        backend::defender_line(&defense, 150)
+    };
+    assert!(!at(Reply::Static).contains("adapts"));
+    let ring = at(Reply::Ring);
+    assert!(
+        ring.contains("adapts: swaps a ring slot to Ring of Steel Protection + 2,"),
+        "{ring}"
+    );
+    assert!(!ring.contains("buff"), "{ring}");
+    assert!(at(Reply::RingAndItem).contains("plus the best item defense buff"));
+    assert!(at(Reply::RingAndAnyBuff).contains("plus the best item or spell defense buff"));
 }
 
 /// The panel's Best infusion and Weapons tab are asked against the panel's defender, and its line
@@ -336,7 +460,7 @@ fn the_panel_asks_against_its_defender() {
         assert_eq!(build.value, row.damage, "{:?}", row.infusion);
     }
     let defense = backend()
-        .defense(150, &state.defender)
+        .defense(150, &state.defender, state.reply)
         .expect("Havel's set");
     let line = backend::defender_line(&defense, 150);
     assert!(
@@ -345,7 +469,7 @@ fn the_panel_asks_against_its_defender() {
     );
     assert!(line.contains("chosen set at the SL 150 median"), "{line}");
     let average = backend()
-        .defense(150, &Defender::Average)
+        .defense(150, &Defender::Average, state.reply)
         .expect("the average");
     assert!(
         backend::defender_line(&average, 150).contains("SL 150 average defender"),
@@ -353,18 +477,28 @@ fn the_panel_asks_against_its_defender() {
     );
 }
 
+/// Weapons for Stats, against the static defender, a chosen set, and the adaptive defender whose
+/// answer to each weapon ends its row's grip (` vs Dark Quartz Ring + 3`).
 #[test]
 fn weapons_for_is_the_scripts() {
     let cases = expected::WEAPONS_FOR
         .iter()
-        .map(|case| (case, Defender::Average))
+        .map(|case| (case, Defender::Average, Reply::Static))
         .chain(
             expected::DEFENDER_WEAPONS_FOR
                 .iter()
-                .map(|(keys, case)| (case, defender(keys))),
+                .map(|(keys, case)| (case, defender(keys), Reply::Static)),
+        )
+        .chain(
+            expected::ADAPTIVE_WEAPONS_FOR
+                .iter()
+                .map(|(buff, keys, case)| (case, defender(keys), reply(buff))),
         );
-    for (case, (&(st, sl, one_hand, class, per_class, window, raw_ar, goal, want), defender)) in
-        cases.enumerate()
+    let mut answered = 0;
+    for (
+        case,
+        (&(st, sl, one_hand, class, per_class, window, raw_ar, goal, want), defender, reply),
+    ) in cases.enumerate()
     {
         let opts = WeaponsForOpts {
             one_hand,
@@ -374,7 +508,9 @@ fn weapons_for_is_the_scripts() {
             raw_ar,
             objective: objective(goal),
             defender,
+            reply,
         };
+        answered += want.iter().filter(|row| row.4.contains(" vs ")).count();
         let got = rows(backend().weapons_for(&stats(st), sl, &opts));
         assert_eq!(got.len(), want.len(), "case {case}: row count");
         for (at, (row, &(name, code, damage, ar, grip, ha, ctr, wclass))) in
@@ -394,6 +530,10 @@ fn weapons_for_is_the_scripts() {
             assert_eq!(row.counter, (ctr != 0.0).then_some(ctr as f32), "{at}");
         }
     }
+    assert!(
+        answered > 20,
+        "{answered} rows the adaptive defender answered"
+    );
 }
 
 #[test]
@@ -401,22 +541,28 @@ fn best_infusion_is_the_scripts() {
     let mut ranked_some = 0;
     let cases = expected::BEST_INFUSION
         .iter()
-        .map(|case| (case, &[][..]))
+        .map(|case| (case, &[][..], Reply::Static))
         .chain(
             expected::DEFENDER_BEST_INFUSION
                 .iter()
-                .map(|(keys, case)| (case, *keys)),
+                .map(|(keys, case)| (case, *keys, Reply::Static)),
+        )
+        .chain(
+            expected::ADAPTIVE_BEST_INFUSION
+                .iter()
+                .map(|(buff, keys, case)| (case, *keys, reply(buff))),
         );
-    for (&(weapon, st, sl, window, raw_ar, goal, want), keys) in cases {
+    for (&(weapon, st, sl, window, raw_ar, goal, want), keys, reply) in cases {
         let opts = WeaponsForOpts {
             window_s: window as f32,
             raw_ar,
             objective: objective(goal),
             defender: defender(keys),
+            reply,
             ..WeaponsForOpts::default()
         };
         let got = rows(backend().best_infusion(weapon, &stats(st), sl, &opts));
-        let case = format!("{weapon} SL {sl} {goal} window {window} against {keys:?}");
+        let case = format!("{weapon} SL {sl} {goal} window {window} against {keys:?} {reply:?}");
         assert_eq!(got.len(), want.len(), "{case}: row count");
         for (row, &(code, score, ar, grip)) in got.iter().zip(want) {
             assert_eq!(row.infusion, infusion(code), "{case}");
@@ -442,18 +588,23 @@ fn best_infusion_is_the_scripts() {
 fn optimize_is_the_scripts() {
     let cases = expected::OPTIMIZE
         .iter()
-        .map(|case| (case, Grip::TwoHanded, &[][..]))
+        .map(|case| (case, Grip::TwoHanded, &[][..], Reply::Static))
         .chain(
             expected::OPTIMIZE_ONE_HANDED
                 .iter()
-                .map(|case| (case, Grip::OneHanded, &[][..])),
+                .map(|case| (case, Grip::OneHanded, &[][..], Reply::Static)),
         )
         .chain(
             expected::DEFENDER_OPTIMIZE
                 .iter()
-                .map(|(keys, case)| (case, Grip::TwoHanded, *keys)),
+                .map(|(keys, case)| (case, Grip::TwoHanded, *keys, Reply::Static)),
+        )
+        .chain(
+            expected::ADAPTIVE_OPTIMIZE
+                .iter()
+                .map(|(buff, keys, case)| (case, Grip::TwoHanded, *keys, reply(buff))),
         );
-    for (&(weapon, code, sl, goal, want), grip, keys) in cases {
+    for (&(weapon, code, sl, goal, want), grip, keys, reply) in cases {
         let got = backend().optimize(
             weapon,
             infusion(code),
@@ -462,7 +613,8 @@ fn optimize_is_the_scripts() {
             grip,
             &Limits {
                 defender: &defender(keys),
-                ..Limits::NONE
+                reply,
+                ..STATIC
             },
         );
         match (got, want) {
@@ -497,7 +649,7 @@ fn a_weapon_the_stats_can_one_hand_still_optimizes_two_handed() {
                 74,
                 Objective::Damage,
                 grip,
-                &Limits::NONE,
+                &STATIC,
             )
             .unwrap_or_else(|| panic!("{grip:?}: no build"))
     };
@@ -513,7 +665,7 @@ fn a_weapon_the_stats_can_one_hand_still_optimizes_two_handed() {
 #[test]
 fn generate_build_is_the_scripts() {
     let (mut requirements_bound, mut load_bound, mut armored) = (false, false, 0);
-    let mut traded = false;
+    let (mut traded, mut poise_drove) = (false, false);
     let cases = expected::GENERATE
         .iter()
         .map(|case| (case, Grip::TwoHanded, None))
@@ -528,13 +680,18 @@ fn generate_build_is_the_scripts() {
                 .map(|(class, case)| (case, Grip::TwoHanded, Some(*class))),
         );
     let cases = cases
-        .map(|(case, grip, only)| (case, grip, only, &[][..]))
+        .map(|(case, grip, only)| (case, grip, only, &[][..], Reply::Static))
         .chain(
             expected::DEFENDER_GENERATE
                 .iter()
-                .map(|(keys, case)| (case, Grip::TwoHanded, None, *keys)),
+                .map(|(keys, case)| (case, Grip::TwoHanded, None, *keys, Reply::Static)),
+        )
+        .chain(
+            expected::ADAPTIVE_GENERATE
+                .iter()
+                .map(|(buff, keys, case)| (case, Grip::TwoHanded, None, *keys, reply(buff))),
         );
-    for (&(weapon, code, sl, goal, naked, want), grip, only, keys) in cases {
+    for (&(weapon, code, sl, goal, naked, want), grip, only, keys, reply) in cases {
         let got = backend().generate_build(
             weapon,
             infusion(code),
@@ -545,7 +702,8 @@ fn generate_build_is_the_scripts() {
             &Limits {
                 class: only,
                 defender: &defender(keys),
-                ..Limits::NONE
+                reply,
+                ..STATIC
             },
         );
         if let (Some(only), Some(got)) = (only, &got) {
@@ -558,7 +716,10 @@ fn generate_build_is_the_scripts() {
         let (got, want) = match (got, want) {
             (None, None) => continue,
             (Some(got), Some(want)) => (got, want),
-            (got, want) => panic!("{weapon} SL {sl}: {got:?} vs {want:?}"),
+            (got, want) => panic!(
+                "{weapon} SL {sl}: {got:?} vs a script build: {}",
+                want.is_some()
+            ),
         };
         let (
             class,
@@ -573,8 +734,22 @@ fn generate_build_is_the_scripts() {
             by_req,
             by_load,
             trades,
+            armor_trades,
         ) = want;
         assert_eq!(got.ring_trades, trades, "{weapon} SL {sl}");
+        // The poise trade, at the f32 the panel shows: the chosen set's and best_armor's.
+        let numbers = |trade: (f64, f64, f64, f64)| ArmorTrade {
+            poise: trade.0 as f32,
+            poise_target: trade.1 as f32,
+            trade_rate: trade.2 as f32,
+            exchange: trade.3 as f32,
+        };
+        assert_eq!(
+            got.trade.zip(got.trade_previous),
+            armor_trades.map(|(chosen, previous)| (numbers(chosen), numbers(previous))),
+            "{weapon} SL {sl}: the armour's R1 trades"
+        );
+        poise_drove |= note.is_some_and(|note| note.contains("poise drove the pick"));
         traded |= !trades.is_empty();
         assert_eq!(got.class, class, "{weapon} SL {sl}");
         assert_eq!(got.sl, sl, "the build is at the soul level asked for");
@@ -654,6 +829,10 @@ fn generate_build_is_the_scripts() {
         "no case where the equip-load cap bound the choice"
     );
     assert!(traded, "no case wore a ring in place of stat points");
+    assert!(
+        poise_drove,
+        "no case where the R1 trades bought a higher-poise set"
+    );
 }
 
 /// Spells constrain a generated build as a weapon's requirements do: their INT/FTH are met, their
@@ -678,7 +857,7 @@ fn generate_build_with_spells_is_the_scripts() {
             Grip::TwoHanded,
             &Limits {
                 spells: &asked,
-                ..Limits::NONE
+                ..STATIC
             },
         );
         let (got, want) = match (got, want) {
@@ -777,7 +956,7 @@ fn an_unknown_spell_gets_no_build() {
         Grip::TwoHanded,
         &Limits {
             spells: &["Not_A_Spell".to_owned()],
-            ..Limits::NONE
+            ..STATIC
         },
     );
     assert!(got.is_none());
@@ -821,7 +1000,7 @@ fn optimize_with_spells_is_the_scripts() {
         let limits = Limits {
             spells: &asked,
             floors,
-            ..Limits::NONE
+            ..STATIC
         };
         let got = backend().optimize(
             weapon,
@@ -863,7 +1042,7 @@ fn refusal_is_the_scripts_and_every_fix_builds() {
             spells: &asked,
             class,
             floors,
-            defender: &Defender::Average,
+            ..STATIC
         };
         let (infusion, objective) = (infusion(code), objective(goal));
         let case = format!("{weapon} SL {sl} {spells:?} {class:?}");
@@ -915,7 +1094,7 @@ fn refusal_is_the_scripts_and_every_fix_builds() {
                 spells: &spells,
                 class,
                 floors,
-                defender: &Defender::Average,
+                ..STATIC
             };
             let build =
                 backend().generate_build(weapon, infusion, sl, objective, false, grip, &limits);
@@ -1058,13 +1237,20 @@ fn the_panel_generates_at_its_override_for_its_weapon() {
     assert_eq!(build.armor.len(), 4);
     let (import, _) = backend::to_import(&build);
     assert_eq!(import.armor, build.armor);
+    // A slot is bare only with a note saying so: the poise trade may buy a heavy helm over a
+    // chest, as the script's own SL 100 Demon's Great Hammer does.
     assert!(
         import
             .armor
             .iter()
-            .all(|piece| !ds2_build_import_core::is_empty_slot(piece)),
-        "{:?}",
-        import.armor
+            .all(|piece| !ds2_build_import_core::is_empty_slot(piece))
+            || build
+                .armor_note
+                .as_deref()
+                .is_some_and(|note| note.contains("left bare")),
+        "{:?} {:?}",
+        import.armor,
+        build.armor_note
     );
     state.allow_naked = true;
     let naked = backend::generate(backend(), &state, None).expect("a SL 100 build");
@@ -1096,7 +1282,7 @@ fn every_generated_grant_names_a_real_item() {
             Grip::TwoHanded,
             &Limits {
                 spells: &spells,
-                ..Limits::NONE
+                ..STATIC
             },
         ) else {
             continue;
@@ -1173,13 +1359,14 @@ fn the_sl35_character_wields_what_was_measured() {
 /// no flexibility to rank rather than ranking against nothing.
 #[test]
 fn a_file_without_neighbour_counts_has_no_flexibility() {
+    // A build's record up to its weapons, the trailing fields from the neighbour counts on cut.
     let old: String = include_str!("fixtures/corpus-sample.dat")
         .lines()
         .map(|line| {
             if line.starts_with("X\t") {
-                line.rsplit_once('\t').map_or(line, |(head, _)| head)
+                line.split('\t').take(5).collect::<Vec<_>>().join("\t")
             } else {
-                line
+                line.to_owned()
             }
         })
         .collect::<Vec<_>>()
@@ -1281,6 +1468,11 @@ fn a_weapons_card_is_its_ranked_row() {
         };
         let stats = stats(st);
         for row in rows(backend().weapons_for(&stats, sl, &opts)) {
+            // A bow, greatbow or crossbow's row is one shot: its attack is the launcher's plus the
+            // ammunition's, times the hand scale, which is not what the card shows the launcher at.
+            if row.grip.contains("1 shot") {
+                continue;
+            }
             let key = weapons::all()
                 .iter()
                 .find(|weapon| weapon.name == row.weapon)
@@ -1352,5 +1544,167 @@ fn a_card_marks_what_the_stats_miss() {
         backend::StubBackend
             .weapon_card("Greatsword", Infusion::None, &[99; STAT_COUNT])
             .is_none()
+    );
+}
+
+/// The script's `--rank` name.
+fn rank(name: &str) -> Rank {
+    match name {
+        "window" => Rank::Window,
+        "per-stamina" => Rank::PerStamina,
+        "bar" => Rank::Bar,
+        other => panic!("rank {other}"),
+    }
+}
+
+/// Best weapons, the script's `--best-weapons` with its `--json` metrics: every weapon an
+/// infusion goes on, at the build the optimizer makes for it, ranked; the rows' builds, labels,
+/// launchers' ammunition, and every metric: the R1's reach, timing and five-second damage, its
+/// hyperarmor and poise, the procs its hits deal, and its stamina, ranked by under `--rank`.
+#[test]
+fn best_weapons_is_the_scripts() {
+    let (mut compared, mut launchers, mut timed, mut poised, mut procs) = (0, 0, 0, 0, 0);
+    let (mut held, mut staggered, mut barred) = (0, 0, 0);
+    for &(code, sl, goal, grip, class, window, by, with_status, keys, who, want) in
+        expected::BEST_WEAPONS
+    {
+        let opts = BestWeaponsOpts {
+            weapon_class: (!class.is_empty()).then(|| class.to_owned()),
+            window_s: window as f32,
+            rank: rank(by),
+            with_status,
+        };
+        let limits = Limits {
+            defender: &defender(keys),
+            reply: if who == "static" {
+                Reply::Static
+            } else {
+                reply(who)
+            },
+            ..STATIC
+        };
+        let grip = if grip == "one" {
+            Grip::OneHanded
+        } else {
+            Grip::TwoHanded
+        };
+        let got = backend().best_weapons(infusion(code), sl, objective(goal), grip, &limits, &opts);
+        let case = format!("{code} SL {sl} {goal} {class} window {window} {by} {who}");
+        assert_eq!(got.len(), want.len(), "{case}: rows");
+        for (row, want) in got.iter().zip(want) {
+            let (
+                score,
+                key,
+                value,
+                class,
+                two,
+                st,
+                rings,
+                label,
+                ammo,
+                r1,
+                poise,
+                status,
+                with,
+                stamina,
+            ) = *want;
+            let at = format!("{case}: {key}");
+            assert_eq!(row.weapon, key, "{case}");
+            assert_eq!(row.score as f32, score as f32, "{at}: score");
+            assert_eq!(row.value as f32, value as f32, "{at}: value");
+            assert_eq!(row.class, class, "{at}");
+            assert_eq!(row.two_handed, two, "{at}");
+            assert_eq!(row.stats, stats(st), "{at}");
+            assert_eq!(row.rings, rings, "{at}");
+            assert_eq!(row.label, label, "{at}");
+            assert_eq!(
+                row.ammo
+                    .as_ref()
+                    .map(|(ammo, shot)| (ammo.as_str(), shot.as_str())),
+                ammo,
+                "{at}"
+            );
+            let m = &row.metrics;
+            assert_eq!(
+                (
+                    m.reach_m,
+                    m.startup_s,
+                    m.recovery_s,
+                    m.time_to_first_hit_s,
+                    m.damage_per_5s
+                ),
+                r1,
+                "{at}: R1 metrics"
+            );
+            assert_eq!(
+                (
+                    m.hyperarmor,
+                    m.hyperarmor_rate,
+                    m.hyperarmor_holds,
+                    m.poise_damage_per_hit,
+                    m.armor_break.map(i64::from),
+                    m.hits_to_stagger.map(i64::from),
+                    m.defender_poise
+                ),
+                poise,
+                "{at}: poise metrics"
+            );
+            let got_status = m.status.as_ref().map(|s| {
+                let per: Vec<(&str, f64, i64)> = ["poison", "bleed"]
+                    .into_iter()
+                    .zip(s.buildup_per_hit.iter().zip(&s.hits_to_proc))
+                    .filter_map(|(name, (per, to_proc))| {
+                        Some((name, (*per)?, i64::from((*to_proc)?)))
+                    })
+                    .collect();
+                (
+                    i64::from(s.hits),
+                    per,
+                    s.damage_per_window,
+                    s.damage_first_window,
+                )
+            });
+            let want_status =
+                status.map(|(hits, per, window, first)| (hits, per.to_vec(), window, first));
+            assert_eq!(got_status, want_status, "{at}: status metrics");
+            assert_eq!(
+                m.damage_with_status.map(|value| value as f32),
+                with.map(|value| value as f32),
+                "{at}: damage with status"
+            );
+            let got_stamina = m.stamina.as_ref().map(|s| {
+                (
+                    s.per_attack.clone(),
+                    s.per_window,
+                    s.damage_per_stamina,
+                    s.max_stamina,
+                    s.bar_attacks.map(i64::from),
+                    s.bar_damage,
+                    s.bar_seconds,
+                )
+            });
+            let want_stamina = stamina.map(|(per, window, dps, max, attacks, damage, seconds)| {
+                (per.to_vec(), window, dps, max, attacks, damage, seconds)
+            });
+            assert_eq!(got_stamina, want_stamina, "{at}: stamina metrics");
+            procs += status.map_or(0, |(_, per, ..)| per.len());
+            compared += 1;
+            launchers += usize::from(ammo.is_some());
+            timed += usize::from(r1.4.is_some());
+            poised += usize::from(poise.3.is_some());
+            held += usize::from(poise.2.is_some());
+            staggered += usize::from(poise.5.is_some_and(|hits| hits > 1));
+            barred += usize::from(stamina.is_some_and(|s| s.5.is_some()));
+        }
+    }
+    assert!(
+        compared >= 30 && launchers >= 4 && timed >= 10 && poised >= 10 && procs >= 8,
+        "{compared} rows, {launchers} launchers, {timed} with 5 s damage, {poised} with poise \
+         data, {procs} statuses built up"
+    );
+    assert!(
+        held >= 1 && staggered >= 4 && barred >= 10,
+        "{held} rows whose hyperarmor holds, {staggered} that take more than a hit to stagger, \
+         {barred} with a full bar's damage"
     );
 }

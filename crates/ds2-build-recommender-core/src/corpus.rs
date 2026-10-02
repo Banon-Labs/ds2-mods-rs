@@ -14,7 +14,14 @@
 //!   weapon's R1 hit timeline, hyperarmor and counter multipliers, and its R1/R2 hits per attack
 //!   and chain hit times for the bleed/poison ranking.
 //! * **Computed here**, because they depend on the question: attack rating and damage for any
-//!   stats, the ranking, the stat optimizer, the minimum-build search, and the nearest builds.
+//!   stats, the ranking, the stat optimizer, the minimum-build search, and the nearest builds. A
+//!   bow, greatbow or crossbow is scored by its best shot, its ammunition's attack added
+//!   (`ranged`), from the launcher and ammunition rows the script reads from the regulation.
+//!   Damage is scored against a defender who answers each attack with its counter ring
+//!   (`adaptive`) unless a static one is asked for. Best weapons (`best`) ranks every weapon an
+//!   infusion goes on at its own optimized build, each row with the R1 chain's reach, timing and
+//!   sustained damage (`chain`), hyperarmor and poise (`poise`), poison and bleed procs
+//!   (`status`) and stamina (`stamina`).
 //!
 //! The corpus is carried as what nearest-build search reads and nothing else: each build's SL
 //! bracket, its nine stat brackets, its rings and its weapons with their infusions.
@@ -24,21 +31,31 @@ use std::path::Path;
 use ds2_build_import_core::Infusion;
 
 use crate::backend::{
-    Calibration, CatalystPick, Change, DefenderDefense, Fix, GeneratedBuild, Limits,
+    BestWeaponRow, Calibration, CatalystPick, Change, DefenderDefense, Fix, GeneratedBuild, Limits,
     OptimizedBuild, Outcome, RecommenderBackend, Refusal, RefusalKind, Requirement, ResultRow,
     SpellRow, WEAPONS_1H_TOP, WEAPONS_2H_ONLY_TOP, WeaponCard, Wield,
 };
 use crate::flex::{FLEX_K, Flexibility};
 use crate::model::{
-    Defender, Grip, Objective, SL_MAX, STAT_COUNT, STAT_LABELS, StatusFilter, WeaponsForOpts,
+    BestWeaponsOpts, Defender, Grip, Objective, Reply, SL_MAX, STAT_COUNT, STAT_LABELS,
+    StatusFilter, WeaponsForOpts,
 };
 use crate::weapons;
+
+mod adaptive;
+mod best;
+mod chain;
+mod poise;
+mod ranged;
+mod stamina;
+mod status;
+mod trade;
 
 /// What the file is called beside `DarkSoulsII.exe`.
 pub const DATA_FILE_NAME: &str = "ds2-build-recommender.dat";
 
 /// The file's first line. A different one is a file this port does not read.
-pub const FORMAT: &str = "ds2-build-recommender-data 12";
+pub const FORMAT: &str = "ds2-build-recommender-data 19";
 
 /// Nine stats as the script computes with them, in [`crate::model::STAT_LABELS`] order.
 type Stats = [i32; STAT_COUNT];
@@ -238,6 +255,12 @@ struct Tables {
     /// `physicalDEFBonus` then the magic, fire, lightning and dark `DEFBonus` tables: what
     /// `build_defense` reads for a chosen defender's stats.
     defense: [Table; 5],
+    /// The poison and bleed resistance columns, rows 0-99: the script's `status_resist`, what
+    /// `status_cut` reads; empty when it did not read the regulation.
+    status_resist: [Table; 2],
+    /// Stat poise by min(END, ADP): the script's `stat_poise`, empty when it did not read the
+    /// regulation.
+    stat_poise: Table,
 }
 
 /// A spell the file lists: the script's `data.spells` row with its `spell_req`.
@@ -349,6 +372,21 @@ struct Weapon {
     /// What the script's `status_hits` reads, by grip (1H, 2H) and chain (R1, R2): one entry per
     /// name it tries, in its order.
     status: [[Vec<StatusChain>; 2]; 2],
+    /// A bow, greatbow or crossbow's shot: the script's `data.ranged` row. `None` for every other
+    /// weapon.
+    ranged: Option<ranged::Launcher>,
+    /// The R1 chain per grip (1H, 2H): one per name the script's `chain_timeline` tries, in its
+    /// order.
+    chains: [Vec<chain::Chain>; 2],
+    /// Per grip, the script's `r1_metrics` reach, startup, recovery and first-hit seconds, which
+    /// no build changes.
+    r1: [[Option<f64>; 4]; 2],
+    /// Per grip, what the script's `poise_metrics` reads that no build changes.
+    poise: [Option<poise::Poise>; 2],
+    /// Its stamina costs: the script's `data.stamina_cost` row.
+    stamina: Option<stamina::Cost>,
+    /// Per grip, its R1's first strike as the trade model reads it: the script's `first_strike`.
+    strike: [Option<trade::Strike>; 2],
 }
 
 /// One attack chain as the bleed/poison ranking counts it.
@@ -391,6 +429,78 @@ impl Weapon {
 /// physical, magic, fire, lightning, dark, slash, strike, thrust.
 type Defense = [f64; 8];
 
+/// Who a hit lands on: the script's `defender_defense` answer. `base` is the defense as a plain
+/// dict reads it -- what every score without an attack in hand sees -- and [`Self::respond`] is
+/// the defense against one attack.
+#[derive(Clone, Debug)]
+struct Defending<'a> {
+    base: Defense,
+    /// How it answers an attack; `None` for a static defender, whose defense is `base` whatever
+    /// hits it.
+    adapt: Option<adaptive::Adapt<'a>>,
+}
+
+impl Defending<'_> {
+    /// The script's `respond`: the defense to score attack `ar` against, and what the defender put
+    /// on for it (ring and buff names, empty for a static defender).
+    fn respond(&self, ar: &Ar) -> (Defense, Vec<String>) {
+        match &self.adapt {
+            Some(adapt) => adapt.respond(&self.base, ar),
+            None => (self.base, Vec::new()),
+        }
+    }
+}
+
+/// Who the damage objective is scored against: the defender's armour ([`Worn`]) and how it
+/// answers each weapon.
+#[derive(Clone, Copy, Debug)]
+struct Against {
+    worn: Worn,
+    reply: Reply,
+}
+
+impl Against {
+    /// The bracket's average defender, answering as `reply` says.
+    const fn average(reply: Reply) -> Self {
+        Self { worn: None, reply }
+    }
+}
+
+/// The script's ` vs Ring + Buff` label tail: what the defender put on, nothing when it put on
+/// nothing.
+fn versus(worn: &[String]) -> String {
+    if worn.is_empty() {
+        String::new()
+    } else {
+        format!(" vs {}", worn.join(" + "))
+    }
+}
+
+/// Python's built-in `sum` over floats (3.12 and later): Neumaier's compensated sum from 0, the
+/// compensation added at the end when it is finite and not zero.
+fn py_sum(values: impl IntoIterator<Item = f64>) -> f64 {
+    let (mut total, mut compensation) = (0.0_f64, 0.0_f64);
+    for x in values {
+        let t = total + x;
+        if total.abs() >= x.abs() {
+            compensation += (total - t) + x;
+        } else {
+            compensation += (x - t) + total;
+        }
+        total = t;
+    }
+    if compensation != 0.0 && compensation.is_finite() {
+        total + compensation
+    } else {
+        total
+    }
+}
+
+/// Python's `round(x, digits)`: the decimal nearest the double, ties to even, read back.
+fn py_round(x: f64, digits: usize) -> f64 {
+    format!("{x:.digits$}").parse().unwrap_or(x)
+}
+
 /// One SL bracket's floors, average defender and median stats.
 #[derive(Clone, Debug)]
 struct Bracket {
@@ -400,6 +510,8 @@ struct Bracket {
     /// The median levelled stats of the builds `defense` averages over: the script's
     /// `bracket_stats`, what a chosen defender's armour is worn at.
     stats: Stats,
+    /// The mean max poise of the same builds: the script's `bracket_poise`.
+    poise: f64,
 }
 
 /// A chosen defender: an index into each slot of [`CorpusBackend::wearable`], head to legs, or
@@ -468,6 +580,25 @@ const RING_SLOT_POINTS: i32 = 5;
 /// The script's `UNREACHABLE`: the lift of a class whose spells no ATT holds.
 const UNREACHABLE: i32 = 1_000_000;
 
+/// The optimizer's pick that raises INT and FTH together, for a dark attack.
+const BOTH: usize = usize::MAX;
+
+/// `st` with INT and FTH each set to `to`.
+fn both_at(st: &Stats, to: i32) -> Stats {
+    let mut out = *st;
+    out[INT] = to;
+    out[FTH] = to;
+    out
+}
+
+/// `st` with INT and FTH each raised by `n`: the script's `both`.
+fn both_up(st: &Stats, n: i32) -> Stats {
+    let mut out = *st;
+    out[INT] += n;
+    out[FTH] += n;
+    out
+}
+
 /// A best build: `(value, class, two-handed, levelled stats, worn rings)`.
 type Best = (f64, usize, bool, Stats, Vec<usize>);
 
@@ -495,6 +626,10 @@ struct Wearable {
     bonus: f64,
     /// What wearing it adds to each stat.
     alter: Stats,
+    /// Its poise: `ArmorParam.strong` where the script read the regulation.
+    poise: f64,
+    /// Its poison and bleed resistance, fully reinforced: the script's `armor_status`.
+    status: [f64; 2],
 }
 
 /// One corpus build, as nearest-build search reads it.
@@ -511,6 +646,13 @@ struct CorpusBuild {
     /// neighbour in [`CorpusBackend::flexibility`]. `None` in a file written before the script
     /// exported it.
     flex: Option<(u32, u32)>,
+    /// Its melee weapon's one-handed R1 first hit as (poise damage, armorBreak): the counter-hit
+    /// the script's `bracket_poise` weighs hyperarmor against. `None` without one.
+    counter: Option<(f64, i32)>,
+    /// The shares of poison and bleed build-up it resists: the script's `status_cut`.
+    cuts: Option<[f64; 2]>,
+    /// Its counter-hit in an R1 trade: the script's `trade_counter`. `None` without one.
+    trade: Option<trade::Counter>,
 }
 
 /// Attack rating per type, physical, magic, fire, lightning, dark; `None` where the weapon has none.
@@ -546,8 +688,8 @@ struct Query<'a> {
     /// This weapon alone (an index into the file's weapons), every infusion of it, and no
     /// high-stamina END gate: the script's `weapons_for(weapon=...)`, which `best_infusion` asks.
     weapon: Option<usize>,
-    /// Who damage is scored against: [`CorpusBackend::defense_at`]'s `worn`.
-    defender: Worn,
+    /// Who damage is scored against, and how it answers each weapon.
+    defender: Against,
 }
 
 /// A weapon the similar builds carry: how many carry it, and how many carry each infusion of it.
@@ -599,6 +741,21 @@ pub struct CorpusBackend {
     spells: Vec<Spell>,
     catalysts: Vec<Catalyst>,
     corpus: Vec<CorpusBuild>,
+    /// Every ammunition, in name order: the script's `sorted(data.ammo.items())`.
+    ammo: Vec<ranged::Ammo>,
+    /// The script's `data.ring_defense`, in its order: a ring (an index into `rings`) and the
+    /// defense it changes.
+    ring_defense: Vec<(usize, adaptive::Change)>,
+    /// The script's `data.defense_buffs`, in its order.
+    buffs: Vec<adaptive::Buff>,
+    /// The script's `counter_rings`, as indices into `rings`: what an adaptive defender swaps in.
+    counters: Vec<usize>,
+    /// Per SL bracket, the adaptive average defender over its `bracket_builds`.
+    cores: Vec<adaptive::Core>,
+    /// What a poison and a bleed proc do: the script's `data.status_procs`.
+    procs: [Option<status::Proc>; 2],
+    /// Each ring's poise, beside `rings`: the script's `ring_poise`.
+    ring_poise: Vec<f64>,
 }
 
 /// Why a data file could not be read.
@@ -707,6 +864,13 @@ impl CorpusBackend {
             backend.parse_line(at + 1, text, &mut ring_index)?;
         }
         backend.check()?;
+        backend.counters = backend.counter_rings();
+        backend.cores = (0..SL_BRACKETS)
+            .map(|bracket| {
+                let builds = backend.bracket_builds(bracket);
+                backend.adaptive_core(builds.iter().map(|build| build.rings.as_slice()))
+            })
+            .collect();
         Ok(backend)
     }
 
@@ -762,6 +926,9 @@ impl CorpusBackend {
                     "fireDEFBonus" => &mut tables.defense[2],
                     "lightningDEFBonus" => &mut tables.defense[3],
                     "darkDEFBonus" => &mut tables.defense[4],
+                    "statPoise" => &mut tables.stat_poise,
+                    "poisonResistance" => &mut tables.status_resist[0],
+                    "bleedingResistance" => &mut tables.status_resist[1],
                     _ => return Ok(()),
                 };
                 *slot = Table(values);
@@ -799,8 +966,39 @@ impl CorpusBackend {
                     infusions: Vec::new(),
                     timeline: [Vec::new(), Vec::new()],
                     status: Default::default(),
+                    ranged: None,
+                    chains: Default::default(),
+                    r1: [[None; 4]; 2],
+                    poise: Default::default(),
+                    stamina: None,
+                    strike: Default::default(),
                 });
             }
+            "SC" => self.parse_stamina(line, &mut fields)?,
+            "CH" => self.parse_chain(line, &mut fields)?,
+            "PO" => self.parse_poise(line, &mut fields)?,
+            "FS" | "XT" => self.parse_trade(tag, line, &mut fields)?,
+            "SP" => self.parse_proc(line, &mut fields)?,
+            "RM" => {
+                let grip = match next("grip")? {
+                    "1" => 0,
+                    "2" => 1,
+                    _ => return Err(bad(line, "grip is 1 or 2")),
+                };
+                let mut values = [None; 4];
+                for value in &mut values {
+                    *value = match fields.next() {
+                        Some("-") => None,
+                        text => Some(float(text, line)?),
+                    };
+                }
+                self.weapons
+                    .last_mut()
+                    .ok_or_else(|| bad(line, "R1 metrics before any weapon"))?
+                    .r1[grip] = values;
+            }
+            "RG" | "RS" | "AM" => self.parse_ranged(tag, line, &mut fields)?,
+            "RD" | "DB" => self.parse_adaptive(tag, line, ring_index, &mut fields)?,
             "I" => {
                 let infusion = infusion_code(next("infusion")?, line)?
                     .ok_or_else(|| bad(line, "a weapon's infusion cannot be unknown"))?;
@@ -917,10 +1115,12 @@ impl CorpusBackend {
                     *value = float(fields.next(), line)?;
                 }
                 let stats = stats(&mut fields, line)?;
+                let poise = float(fields.next(), line)?;
                 self.brackets.push(Bracket {
                     floors,
                     defense,
                     stats,
+                    poise,
                 });
             }
             "R" => {
@@ -931,6 +1131,7 @@ impl CorpusBackend {
                 ring_index.insert(key.clone(), self.rings.len());
                 self.rings.push((key, name, weight));
                 self.ring_groups.push(group);
+                self.ring_poise.push(float(fields.next(), line)?);
             }
             "N" => {
                 let key = next("ring key")?;
@@ -966,6 +1167,8 @@ impl CorpusBackend {
                 }
                 let bonus = float(fields.next(), line)?;
                 let alter = stats(&mut fields, line)?;
+                let poise = float(fields.next(), line)?;
+                let status = [float(fields.next(), line)?, float(fields.next(), line)?];
                 self.wearable[slot].push(Wearable {
                     key,
                     name,
@@ -975,6 +1178,8 @@ impl CorpusBackend {
                     typed,
                     bonus,
                     alter,
+                    poise,
+                    status,
                 });
             }
             "H" => {
@@ -1160,12 +1365,35 @@ impl CorpusBackend {
                         Some((count(one)?, count(two)?))
                     }
                 };
+                // `poise:break`, the counter-hit the script's bracket_poise counts for the build.
+                let counter = match fields.next() {
+                    Some("-") | None => None,
+                    Some(pair) => {
+                        let (damage, armor_break) = pair
+                            .split_once(':')
+                            .ok_or_else(|| bad(line, "counter-hit poise:break"))?;
+                        Some((float(Some(damage), line)?, int(Some(armor_break), line)?))
+                    }
+                };
+                // `poison:bleed`, the shares of each the build resists: the script's status_cut.
+                let cuts = match fields.next() {
+                    None => None,
+                    Some(pair) => {
+                        let (poison, bleed) = pair
+                            .split_once(':')
+                            .ok_or_else(|| bad(line, "status cuts poison:bleed"))?;
+                        Some([float(Some(poison), line)?, float(Some(bleed), line)?])
+                    }
+                };
                 self.corpus.push(CorpusBuild {
                     bracket,
                     stat_brackets,
                     rings,
                     weapons: carried,
                     flex,
+                    counter,
+                    cuts,
+                    trade: None,
                 });
             }
             other => return Err(bad(line, &format!("unknown record {other:?}"))),
@@ -1290,6 +1518,46 @@ impl CorpusBackend {
         out
     }
 
+    /// [`Self::defense_at`] as the scoring reads it: the script's `defender_defense`. An adaptive
+    /// defender answers over the bracket's builds' rings (the script's `bracket_builds`), a chosen
+    /// set as one build with no rings.
+    fn defending(&self, sl: u32, against: Against) -> Defending<'_> {
+        let adapt = against.reply.adapts().then(|| adaptive::Adapt {
+            backend: self,
+            core: match (against.worn, self.cores.get(sl_bracket(sl))) {
+                (None, Some(core)) => std::borrow::Cow::Borrowed(core),
+                (None, None) => std::borrow::Cow::Owned(self.adaptive_core([])),
+                (Some(_), _) => std::borrow::Cow::Owned(self.adaptive_core([&[][..]])),
+            },
+            reply: against.reply,
+        });
+        Defending {
+            base: self.defense_at(sl, against.worn),
+            adapt,
+        }
+    }
+
+    /// The script's `bracket_builds`: the corpus builds of SL bracket `bracket`, or of the nearest
+    /// bracket (the lower on a tie) with 20 or more; none when no bracket has.
+    fn bracket_builds(&self, bracket: usize) -> Vec<&CorpusBuild> {
+        let mut counts = [0_usize; SL_BRACKETS];
+        for build in &self.corpus {
+            counts[build.bracket.min(SL_BRACKETS - 1)] += 1;
+        }
+        let mut order: Vec<usize> = (0..SL_BRACKETS).collect();
+        order.sort_by_key(|&at| (at.abs_diff(bracket), at));
+        order
+            .into_iter()
+            .find(|&at| counts[at] >= 20)
+            .map(|at| {
+                self.corpus
+                    .iter()
+                    .filter(|build| build.bracket.min(SL_BRACKETS - 1) == at)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// The script's `ring_attack_add`: what the worn `rings` add to `row`'s attack rating per type,
     /// physical, magic, fire, lightning, dark -- each ring's flat add times the row's rate in that
     /// type, only in a type the row has a base in.
@@ -1384,7 +1652,13 @@ impl CorpusBackend {
         ];
         for (element, (table, index)) in feed.into_iter().enumerate() {
             let base = atk[1 + element];
-            if base != 0.0 {
+            // A type with a rate and a coefficient but no base still attacks: `AR = (bonus +
+            // base) x rate`. The Sanctum Crossbows' dark is this. Enchanted's magic is its INT
+            // term on physical, above, unless the row also has a magic base.
+            let rated = row.rate[1 + element] != 0.0
+                && sc[2 + element] != 0.0
+                && !(row.infusion == Infusion::Enchanted && element == 0);
+            if base != 0.0 || rated {
                 out[1 + element] =
                     Some((base + add[1 + element] + sc[2 + element] * table.at(index)).trunc());
             }
@@ -1392,23 +1666,19 @@ impl CorpusBackend {
         out
     }
 
-    /// The script's `damage`, summed over the types: one hit against the bracket's defender,
-    /// motion value 1.
+    /// The script's `damage`, summed over the types as its `sum` does: one hit against the
+    /// bracket's defender, motion value 1.
     fn damage(ar: &Ar, defense: &Defense) -> f64 {
-        let mut total = 0.0;
-        for (kind, value) in ar.iter().enumerate() {
-            let Some(value) = *value else {
-                continue;
-            };
-            total += if value == 0.0 {
+        py_sum(ar.iter().enumerate().filter_map(|(kind, value)| {
+            let value = (*value)?;
+            Some(if value == 0.0 {
                 0.0
             } else if kind == 0 {
                 py_max(0.0, (value * 10.0 - defense[0]) / 12.0)
             } else {
                 value * (1.0 - py_min(0.99, (defense[kind] + 100.0) / 1000.0))
-            };
-        }
-        total
+            })
+        }))
     }
 
     /// The script's `hit_damage`: one timed hit against the bracket's defender, the hit's flat
@@ -1453,7 +1723,7 @@ impl CorpusBackend {
             (raw_ar, window)
         };
         let bracket = self.bracket(sl);
-        let defense = &self.defense_at(sl, defender);
+        let defending = self.defending(sl, defender);
         let class = class.map(norm);
         // Per weapon: its best three while within WITHIN of its best, or for one weapon asked
         // about by itself, every infusion.
@@ -1481,10 +1751,58 @@ impl CorpusBackend {
             if !every && weapon.high_stamina && stats[END] < bracket.floors[4] {
                 continue;
             }
+            if let Some(launcher) = &weapon.ranged {
+                // One trigger pull with the best ammunition per infusion, whatever the window
+                // is: the fire rate is not read. A bow fires two-handed.
+                let shot = if raw_ar { Objective::Ar } else { objective };
+                let grip = if launcher.kind != ranged::Kind::Crossbow {
+                    "2H"
+                } else if one {
+                    "1H"
+                } else {
+                    "2H only"
+                };
+                let mut scored: Vec<Ranked> = Vec::new();
+                for row in &weapon.infusions {
+                    let (value, note, ar, _) =
+                        self.ranged_pick(weapon, row.infusion, stats, shot, &defending, &[]);
+                    let worn = if shot == Objective::Damage {
+                        defending.respond(&ar).1
+                    } else {
+                        Vec::new()
+                    };
+                    if value > 0.0 {
+                        let lead = if note.starts_with("2H special") {
+                            String::new()
+                        } else {
+                            format!("{grip} ")
+                        };
+                        scored.push(Ranked {
+                            damage: value,
+                            weapon: index,
+                            infusion: row.infusion,
+                            ar: ar.map(|value| value.map(f64::round_ties_even)),
+                            label: format!("{lead}1 shot: {note}{}", versus(&worn)),
+                        });
+                    }
+                }
+                scored.sort_by(|a, b| b.damage.total_cmp(&a.damage));
+                let Some(best) = scored.first().map(|row| row.damage) else {
+                    continue;
+                };
+                rows.extend(
+                    scored
+                        .into_iter()
+                        .take(per_weapon)
+                        .filter(|row| every || row.damage >= best * (1.0 - WITHIN)),
+                );
+                continue;
+            }
             if matches!(objective, Objective::Bleed | Objective::Poison) {
                 // Build-up per hit times the hits of the best R1/R2 attack (or chain within the
                 // window), the script's bleed/poison branch.
-                let (hits, label) = Self::status_hits(weapon, one, window);
+                let grips: &[bool] = if one { &[false, true] } else { &[true] };
+                let (hits, label) = Self::status_hits(weapon, grips, window);
                 if hits == 0 {
                     continue;
                 }
@@ -1495,8 +1813,14 @@ impl CorpusBackend {
                 };
                 let mut scored: Vec<Ranked> = Vec::new();
                 for row in &weapon.infusions {
-                    let per =
-                        self.objective_value(weapon, row.infusion, stats, objective, defense, &[]);
+                    let per = self.objective_value(
+                        weapon,
+                        row.infusion,
+                        stats,
+                        objective,
+                        &defending,
+                        &[],
+                    );
                     if per > 0.0 {
                         scored.push(Ranked {
                             damage: per * f64::from(hits),
@@ -1541,6 +1865,14 @@ impl CorpusBackend {
                 if ar.iter().all(Option::is_none) {
                     continue;
                 }
+                // The defender's answer to this weapon's attack: chosen once from its attack
+                // ratings and worn for every hit. Raw AR has no defender.
+                let (defense, worn) = if raw_ar {
+                    (defending.base, Vec::new())
+                } else {
+                    defending.respond(&ar)
+                };
+                let defense = &defense;
                 let (damage, label) = if window == 0.0 {
                     let damage = if raw_ar {
                         ar.iter().flatten().fold(0.0, |total, value| total + value)
@@ -1552,10 +1884,8 @@ impl CorpusBackend {
                     // The grip whose hits deal the most; the first on a tie, as `max` keeps it.
                     let mut best: Option<(&str, usize, f64)> = None;
                     for (grip, hits) in &lines {
-                        let damage = hits
-                            .iter()
-                            .map(|hit| Self::hit_damage(&ar, defense, hit))
-                            .fold(0.0, |total, damage| total + damage);
+                        let damage =
+                            py_sum(hits.iter().map(|hit| Self::hit_damage(&ar, defense, hit)));
                         if best.is_none_or(|(_, _, top)| damage > top) {
                             best = Some((grip, hits.len(), damage));
                         }
@@ -1576,7 +1906,7 @@ impl CorpusBackend {
                     weapon: index,
                     infusion: row.infusion,
                     ar,
-                    label,
+                    label: label + &versus(&worn),
                 });
             }
             scored.sort_by(|a, b| b.damage.total_cmp(&a.damage));
@@ -1610,13 +1940,11 @@ impl CorpusBackend {
     /// The script's `status_hits`: the most hits one target takes from the weapon's R1 or R2, and
     /// its label. Without a window, the hits of one attack; with one, the hits of the repeated
     /// chain landing within it, over the chain's attacks begun before `max(3, window)` (the
-    /// script's horizon). Ties keep 1H over 2H and R1 over R2.
-    fn status_hits(weapon: &Weapon, one: bool, window: f64) -> (u32, String) {
+    /// script's horizon). `grips` are the grips tried, `true` two-handed, in order; ties keep the
+    /// earlier grip and R1 over R2.
+    fn status_hits(weapon: &Weapon, grips: &[bool], window: f64) -> (u32, String) {
         let (mut best, mut label) = (0, String::new());
-        for two_hand in [false, true] {
-            if !two_hand && !one {
-                continue;
-            }
+        for &two_hand in grips {
             for (chain, tag) in STATUS_CHAINS.iter().enumerate() {
                 let mut hits = 0;
                 for candidate in &weapon.status[usize::from(two_hand)][chain] {
@@ -1680,9 +2008,17 @@ impl CorpusBackend {
         infusion: Infusion,
         stats: &Stats,
         objective: Objective,
-        defense: &Defense,
+        defending: &Defending,
         rings: &[usize],
     ) -> f64 {
+        if let Some(launcher) = &weapon.ranged {
+            // A bow, greatbow or crossbow: its best shot, ammunition included.
+            return self
+                .ranged_value(
+                    weapon, launcher, infusion, stats, objective, defending, rings, true,
+                )
+                .0;
+        }
         let row = weapon.infusion(infusion);
         match objective {
             Objective::Bleed | Objective::Poison => {
@@ -1697,7 +2033,10 @@ impl CorpusBackend {
                 row.atk[atk] + row.scale[scale] * self.tables.aux.at(3 * stats[DEX] + second)
             }
             Objective::Damage => {
-                Self::damage(&self.attack_rating(row, stats, rings), defense) * weapon.damage_scale
+                // Against the defender's answer to this attack: the best attack given the
+                // defender's best reply.
+                let ar = self.attack_rating(row, stats, rings);
+                Self::damage(&ar, &defending.respond(&ar).0) * weapon.damage_scale
             }
             Objective::Ar => self
                 .attack_rating(row, stats, rings)
@@ -2107,6 +2446,7 @@ impl CorpusBackend {
         spells: &[usize],
         only_class: Option<&str>,
         floors: bool,
+        reply: Reply,
     ) -> Option<Refusal> {
         let run = |sl: u16, spells: &[usize], class: Option<&str>, floors: bool| {
             self.optimize_build(
@@ -2118,8 +2458,9 @@ impl CorpusBackend {
                 spells,
                 class,
                 floors,
-                // Who the objective is scored against never decides whether a build exists.
-                None,
+                // Who the objective is scored against never decides whether a build exists; the
+                // script asks for the average defender, answering as its DEFENDER says.
+                Against::average(reply),
             )
         };
         if run(sl, spells, only_class, floors).is_some() {
@@ -2448,7 +2789,7 @@ impl CorpusBackend {
         spells: &[usize],
         only_class: Option<&str>,
         floors: bool,
-        defender: Worn,
+        defender: Against,
     ) -> Option<Best> {
         let classes = self.class_indices(only_class);
         let floor = self.lift_floors(self.bracket(sl), weapon, floors, spells);
@@ -2644,7 +2985,7 @@ impl CorpusBackend {
         floor: &[(usize, i32)],
         require: &[(usize, i32)],
         rings: &[usize],
-        defender: Worn,
+        defender: Against,
     ) -> Option<Best> {
         // What the worn rings give: every curve reads it, the flexibility term the levelled stats.
         let worn = |st: &Stats| -> Stats {
@@ -2662,7 +3003,7 @@ impl CorpusBackend {
             Stamina,
             Load,
         }
-        let defense = &self.defense_at(sl, defender);
+        let defending = self.defending(sl, defender);
         let adaptability = if objective == Objective::Poison {
             Curve::Objective
         } else {
@@ -2688,7 +3029,7 @@ impl CorpusBackend {
             let st = worn(st);
             match curve {
                 Curve::Objective => {
-                    self.objective_value(weapon, infusion, &st, objective, defense, rings)
+                    self.objective_value(weapon, infusion, &st, objective, &defending, rings)
                 }
                 Curve::Agility => f64::from(agility(st[ADP], st[ATT])),
                 Curve::HitPoints => self.hit_points(&st),
@@ -2727,11 +3068,22 @@ impl CorpusBackend {
                     .collect();
                 // The stats that feed the objective share one unit, the steepest of their early
                 // rates: a point of damage is a point of damage whichever stat buys it.
-                let shared = curves
+                let mut shared = curves
                     .iter()
                     .zip(peak.iter().copied())
                     .filter(|&(&(_, curve), _)| curve == Curve::Objective)
                     .fold(f64::NEG_INFINITY, |most, (_, rate)| py_max(most, rate));
+                // Dark reads min(INT, FTH), so a point of INT alone or FTH alone buys no dark and a
+                // one-stat step never finds it. With a dark attack the two also move together, a
+                // step of n each costing 2n.
+                let dark =
+                    self.attack_rating(weapon.infusion(infusion), &worn(&st), rings)[4].is_some();
+                if dark {
+                    let early = (value(Curve::Objective, &both_at(&st, 25))
+                        - value(Curve::Objective, &both_at(&st, 5)))
+                        / 40.0;
+                    shared = py_max(shared, early);
+                }
                 for (at, &(_, curve)) in curves.iter().enumerate() {
                     if curve == Curve::Objective {
                         peak[at] = shared;
@@ -2764,6 +3116,22 @@ impl CorpusBackend {
                             }
                         }
                     }
+                    if dark {
+                        let current = value(Curve::Objective, &st);
+                        let flex_now = (FLEX_WEIGHT != 0.0).then(|| self.flex_score(&st));
+                        for n in 1..=(free / 2).min(99 - st[INT].max(st[FTH])).min(8) {
+                            let next = both_up(&st, n);
+                            let cost = f64::from(2 * n);
+                            let mut w = (value(Curve::Objective, &next) - current) / cost / shared;
+                            if let Some(now) = flex_now {
+                                w += FLEX_WEIGHT * f64::from(self.flex_score(&next) - now) / cost;
+                            }
+                            if w > best_w + 1e-12 {
+                                pick = Some((BOTH, n));
+                                best_w = w;
+                            }
+                        }
+                    }
                     // Every curve is flat: the points go to vigor.
                     let pick = pick.or_else(|| {
                         [VIG, VIT, END, ATT]
@@ -2774,11 +3142,22 @@ impl CorpusBackend {
                     let Some((stat, n)) = pick else {
                         break;
                     };
+                    if stat == BOTH {
+                        st = both_up(&st, n);
+                        free -= 2 * n;
+                        continue;
+                    }
                     st[stat] += n;
                     free -= n;
                 }
-                let val =
-                    self.objective_value(weapon, infusion, &worn(&st), objective, defense, rings);
+                let val = self.objective_value(
+                    weapon,
+                    infusion,
+                    &worn(&st),
+                    objective,
+                    &defending,
+                    rings,
+                );
                 if best.as_ref().is_none_or(|(top, ..)| val > *top) {
                     best = Some((val, class_index, two, st, rings.to_vec()));
                 }
@@ -2839,7 +3218,7 @@ impl CorpusBackend {
         let stats = to_stats(stats);
         let weapon = self.weapon_by_key(weapon)?;
         let scarcity = scarcity.unwrap_or_else(|| self.load_scarcity(&stats));
-        let (_, _, set) = self.best_armor(&stats, weapon, &[], scarcity);
+        let (_, _, set) = self.best_armor(&stats, &[weapon.weight], &[], scarcity);
         set.map(|set| set.map(|piece| piece.key.clone()))
     }
 
@@ -3164,16 +3543,16 @@ impl CorpusBackend {
 type ArmorSet<'a> = (f64, f64, [&'a Wearable; 4]);
 
 impl CorpusBackend {
-    /// The script's `best_armor` with `top=1`: the equip-load cap, what the weapon and rings
-    /// carry, and the set, head to legs, whose defense weighted by the corpus threat mix is
+    /// The script's `best_armor` with `top=1`: the equip-load cap, what the `held` weapons (their
+    /// weights) and rings carry, and the set, head to legs, whose defense weighted by the corpus threat mix is
     /// highest among those these stats can wear under the cap. `None` when nothing fits, which
-    /// only happens when the weapon and rings alone are over it: `Naked` is a piece in every slot.
+    /// only happens when the weapons and rings alone are over it: `Naked` is a piece in every slot.
     /// `scarcity` is the script's: above 0, a set scores its defense less `scarcity` x
     /// [`LOAD_PRICE`] x the best set's defense per weight x its weight.
     fn best_armor(
         &self,
         stats: &Stats,
-        weapon: &Weapon,
+        held: &[f64],
         rings: &[usize],
         scarcity: f64,
     ) -> (f64, f64, Option<[&Wearable; 4]>) {
@@ -3185,7 +3564,8 @@ impl CorpusBackend {
             .iter()
             .map(|&ring| self.rings[ring].2)
             .fold(0.0, |total, weight| total + weight);
-        let carried = weapon.weight + ring_weight;
+        // The script's `sum()` over the weapons, then `+=` the rings' own `sum()`.
+        let carried = held.iter().fold(0.0, |total, weight| total + weight) + ring_weight;
         let budget = cap - carried;
         let value = |piece: &Wearable| {
             piece
@@ -3315,26 +3695,80 @@ impl CorpusBackend {
         out
     }
 
+    /// The weight of the first weapon named `name`, as the script's `by_name` finds a key for a
+    /// listed name; 0 for a name no weapon has, as its `data.weapons.get(k, {})` reads one.
+    fn weight_by_name(&self, name: &str) -> f64 {
+        self.weapons
+            .iter()
+            .find(|weapon| weapon.name == name)
+            .map_or(0.0, |weapon| weapon.weight)
+    }
+
     /// The script's `generate_armor`: the pieces' names head to legs, `Naked` for a slot left
-    /// bare, and the note that says why a slot or the whole set is bare.
+    /// bare, the note that says why a slot or the whole set is bare or that poise drove the pick,
+    /// and the trade numbers of the set and of `best_armor`'s.
+    ///
+    /// The set leaves room for the heaviest of the `weapons`' weights, the primary's first, since
+    /// any one of them can be equipped in the primary's place, plus the heaviest of
+    /// `catalysts`, which a build that casts holds beside it. A set chosen for the primary alone
+    /// left a Havel's-clad dagger build with 7.3 of load for every other weapon it listed.
+    ///
+    /// `best_armor`'s set is kept unless a poise step trades better over `granted` (weapon index,
+    /// infusion, two-handed: every weapon the build lists, primary first) against `sl`'s bracket.
     fn generate_armor(
         &self,
         stats: &Stats,
-        weapon: &Weapon,
+        weapons: &[f64],
+        catalysts: &[f64],
         rings: &[usize],
-    ) -> (Vec<String>, Option<String>) {
-        let (cap, carried, set) = self.best_armor(stats, weapon, rings, self.load_scarcity(stats));
+        sl: u32,
+        granted: &[(usize, Infusion, bool)],
+    ) -> (
+        Vec<String>,
+        Option<String>,
+        Option<(trade::Numbers, trade::Numbers)>,
+    ) {
+        // Python's `max` keeps the first of a tie.
+        let heaviest = |first: f64, rest: &[f64]| {
+            rest.iter().fold(
+                first,
+                |best, &weight| if weight > best { weight } else { best },
+            )
+        };
+        let mut held = Vec::new();
+        if let Some((&first, rest)) = weapons.split_first() {
+            held.push(heaviest(first, rest));
+        }
+        if let Some((&first, rest)) = catalysts.split_first() {
+            held.push(heaviest(first, rest));
+        }
+        let scarcity = self.load_scarcity(stats);
+        let (cap, carried, set) = self.best_armor(stats, &held, rings, scarcity);
         let percent = EQUIP_CAP * 100.0;
         let Some(set) = set else {
+            let what = if catalysts.is_empty() {
+                "the heaviest weapon and the rings"
+            } else {
+                "the heaviest weapon, its catalyst and the rings"
+            };
             return (
                 Vec::new(),
                 Some(format!(
-                    "no armor fits: the weapon and rings weigh {carried:.1}, over the {cap:.1} a \
+                    "no armor fits: {what} weigh {carried:.1}, over the {cap:.1} a \
                      {percent:.0}% load allows at VIT {}",
                     stats[VIT]
                 )),
+                None,
             );
         };
+        let wearer = trade::Wearer {
+            stats,
+            held: &held,
+            rings,
+            scarcity,
+        };
+        let traded = self.trade_armor(set, &wearer, sl, granted);
+        let set = traded.pieces;
         let bare: Vec<&str> = ARMOR_SLOTS
             .iter()
             .zip(set)
@@ -3349,7 +3783,15 @@ impl CorpusBackend {
                 cap - carried
             )
         });
-        (set.iter().map(|piece| piece.name.clone()).collect(), note)
+        let note = match (note, traded.note) {
+            (Some(bare), Some(poise)) => Some(format!("{bare}; {poise}")),
+            (bare, poise) => bare.or(poise),
+        };
+        (
+            set.iter().map(|piece| piece.name.clone()).collect(),
+            note,
+            traded.numbers,
+        )
     }
 }
 
@@ -3411,7 +3853,10 @@ impl RecommenderBackend for CorpusBackend {
             objective: opts.objective,
             top: WEAPONS_FOR_TOP,
             weapon: None,
-            defender,
+            defender: Against {
+                worn: defender,
+                reply: opts.reply,
+            },
         };
         let ranked = self.rank(&to_stats(stats), u32::from(sl), &query);
         Outcome::Rows(ranked.iter().map(|row| self.result_row(row)).collect())
@@ -3439,7 +3884,10 @@ impl RecommenderBackend for CorpusBackend {
             objective: opts.objective,
             top: usize::MAX,
             weapon: Some(index),
-            defender,
+            defender: Against {
+                worn: defender,
+                reply: opts.reply,
+            },
         };
         let ranked = self.rank(&to_stats(stats), u32::from(sl), &query);
         Outcome::Rows(ranked.iter().map(|row| self.result_row(row)).collect())
@@ -3465,7 +3913,10 @@ impl RecommenderBackend for CorpusBackend {
             &spells,
             limits.class,
             limits.floors,
-            self.worn(limits.defender)?,
+            Against {
+                worn: self.worn(limits.defender)?,
+                reply: limits.reply,
+            },
         )?;
         Some(OptimizedBuild {
             class: self.classes[class].name.clone(),
@@ -3500,6 +3951,7 @@ impl RecommenderBackend for CorpusBackend {
             &spells,
             limits.class,
             limits.floors,
+            limits.reply,
         )
     }
 
@@ -3600,33 +4052,72 @@ impl RecommenderBackend for CorpusBackend {
         })
     }
 
-    fn defense(&self, sl: u16, defender: &Defender) -> Option<DefenderDefense> {
+    fn defense(&self, sl: u16, defender: &Defender, reply: Reply) -> Option<DefenderDefense> {
         let sl = u32::from(sl);
         let worn = self.worn(defender)?;
         // The builds the script's bracket_defense and bracket_stats read: `sl`'s bracket, or the
         // nearest (the lower on a tie) with 20 or more.
-        let mut counts = [0_u32; SL_BRACKETS];
-        for build in &self.corpus {
-            counts[build.bracket.min(SL_BRACKETS - 1)] += 1;
-        }
-        let here = sl_bracket(sl);
-        let mut order: Vec<usize> = (0..SL_BRACKETS).collect();
-        order.sort_by_key(|&bracket| (bracket.abs_diff(here), bracket));
-        let builds = order
-            .into_iter()
-            .map(|bracket| counts[bracket])
-            .find(|&count| count >= 20)
-            .unwrap_or(0);
+        let builds = u32::try_from(self.bracket_builds(sl_bracket(sl)).len()).unwrap_or(u32::MAX);
         let stats = worn.map(|_| {
             self.bracket(sl)
                 .stats
                 .map(|value| u16::try_from(value).unwrap_or(0))
         });
+        let counters = if reply.adapts() {
+            self.counters
+                .iter()
+                .map(|&ring| self.rings[ring].1.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
         Some(DefenderDefense {
             defense: self.defense_at(sl, worn).map(|value| value as f32),
             builds,
             stats,
+            reply,
+            counters,
         })
+    }
+
+    fn best_weapons(
+        &self,
+        infusion: Infusion,
+        sl: u16,
+        objective: Objective,
+        grip: Grip,
+        limits: &Limits<'_>,
+        opts: &BestWeaponsOpts,
+    ) -> Vec<BestWeaponRow> {
+        let (Some(spells), Some(worn)) = (
+            self.spell_indices(limits.spells),
+            self.worn(limits.defender),
+        ) else {
+            return Vec::new();
+        };
+        let ask = best::Ask {
+            infusion,
+            sl: u32::from(sl),
+            objective,
+            grip,
+            spells: &spells,
+            class: limits.class,
+            floors: limits.floors,
+            against: Against {
+                worn,
+                reply: limits.reply,
+            },
+            window: window_seconds(opts.window_s),
+            rank: opts.rank,
+        };
+        let mut rows = self.best_weapons_of(&ask, opts.weapon_class.as_deref());
+        if opts.with_status {
+            // The script's --with-status: the window's damage plus the procs' ranks the rows,
+            // re-sorted from the score's order, which breaks its ties.
+            let key = |row: &BestWeaponRow| row.metrics.damage_with_status.unwrap_or(row.score);
+            rows.sort_by(|a, b| key(b).total_cmp(&key(a)));
+        }
+        rows
     }
 
     fn armor_pieces(&self, slot: usize) -> Vec<(String, String)> {
@@ -3653,7 +4144,10 @@ impl RecommenderBackend for CorpusBackend {
     ) -> Option<GeneratedBuild> {
         let primary = self.weapon_by_key(weapon)?;
         let spells = self.spell_indices(limits.spells)?;
-        let defender = self.worn(limits.defender)?;
+        let defender = Against {
+            worn: self.worn(limits.defender)?,
+            reply: limits.reply,
+        };
         let (_, class, two_handed, stats, worn) = self.optimize_build(
             primary,
             infusion,
@@ -3700,20 +4194,43 @@ impl RecommenderBackend for CorpusBackend {
         let ranked = self.rank(&eff, u32::from(sl), &query);
         let mut seen: Vec<&str> = vec![primary.name.as_str()];
         let (mut weapons_1h, mut weapons_2h_only) = (Vec::new(), Vec::new());
+        // Beside each list: the weapon the script's `by_name` finds for the row's name, its
+        // infusion, and the grip its listed damage is swung in -- what `generate_armor` trades.
+        let (mut grants_1h, mut grants_2h_only) = (Vec::new(), Vec::new());
         for row in &ranked {
             let name = self.weapons[row.weapon].name.as_str();
             if seen.contains(&name) {
                 continue;
             }
             seen.push(name);
+            let by_name = self
+                .weapons
+                .iter()
+                .position(|weapon| weapon.name == name)
+                .unwrap_or(row.weapon);
+            let grant = (by_name, row.infusion, row.label.starts_with("2H"));
             if row.label.contains("2H only") {
                 weapons_2h_only.push(self.result_row(row));
+                grants_2h_only.push(grant);
             } else {
                 weapons_1h.push(self.result_row(row));
+                grants_1h.push(grant);
             }
         }
         weapons_1h.truncate(WEAPONS_1H_TOP);
         weapons_2h_only.truncate(WEAPONS_2H_ONLY_TOP);
+        grants_1h.truncate(WEAPONS_1H_TOP);
+        grants_2h_only.truncate(WEAPONS_2H_ONLY_TOP);
+        let primary_index = self
+            .weapons
+            .iter()
+            .position(|weapon| weapon.key == primary.key)
+            .unwrap_or(0);
+        let granted: Vec<(usize, Infusion, bool)> =
+            std::iter::once((primary_index, infusion, two_handed))
+                .chain(grants_1h)
+                .chain(grants_2h_only)
+                .collect();
 
         let mut suggested = worn.clone();
         suggested.extend(self.suggest_rings(
@@ -3727,10 +4244,22 @@ impl RecommenderBackend for CorpusBackend {
             "the optimizer spends exactly the points `sl` has"
         );
         let name = |ring: &usize| self.rings[*ring].1.clone();
-        let (armor, armor_note) = if allow_naked {
-            (Vec::new(), None)
+        let (armor, armor_note, trades) = if allow_naked {
+            (Vec::new(), None, None)
         } else {
-            self.generate_armor(&stats, primary, &suggested)
+            let weapons: Vec<f64> = std::iter::once(primary.weight)
+                .chain(
+                    weapons_1h
+                        .iter()
+                        .chain(&weapons_2h_only)
+                        .map(|row| self.weight_by_name(&row.weapon)),
+                )
+                .collect();
+            let held: Vec<f64> = catalysts
+                .iter()
+                .map(|pick| self.weight_by_name(&pick.name))
+                .collect();
+            self.generate_armor(&stats, &weapons, &held, &suggested, u32::from(sl), &granted)
         };
         Some(GeneratedBuild {
             class: self.classes[class].name.clone(),
@@ -3749,6 +4278,8 @@ impl RecommenderBackend for CorpusBackend {
                 .collect(),
             armor,
             armor_note,
+            trade: trades.map(|(chosen, _)| chosen.public()),
+            trade_previous: trades.map(|(_, previous)| previous.public()),
             spells: spells
                 .iter()
                 .map(|&spell| self.spells[spell].key.clone())

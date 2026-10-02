@@ -22,7 +22,7 @@
 use ds2_build_import_core::{Build, Infusion, StartingClass, Stats, check_build};
 
 use crate::model::{
-    Defender, Grip, Mode, Objective, PanelState, STAT_COUNT, STAT_LABELS, StatusFilter,
+    Defender, Grip, Mode, Objective, PanelState, Reply, STAT_COUNT, STAT_LABELS, StatusFilter,
     WeaponsForOpts,
 };
 use crate::weapons;
@@ -81,7 +81,7 @@ pub const DEFENSE_TYPES: [&str; 8] = [
 ];
 
 /// What [`Objective::Damage`] is scored against at one soul level: the panel's defender line.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DefenderDefense {
     /// Defense per type, in [`DEFENSE_TYPES`] order. A hit's physical damage is read against its
     /// slash, strike or thrust defense when it has that type, the general physical one otherwise.
@@ -92,6 +92,11 @@ pub struct DefenderDefense {
     /// The median stats a chosen set is worn at, in [`STAT_LABELS`] order; `None` for the average
     /// defender, which wears every build's own stats.
     pub stats: Option<[u16; STAT_COUNT]>,
+    /// How the defender answers each weapon. `defense` is before any answer: the numbers a score
+    /// without an attack in hand reads.
+    pub reply: Reply,
+    /// The rings the defender may swap in against a weapon, by name; empty for a static defender.
+    pub counters: Vec<String>,
 }
 
 /// The panel's defender line: what a Damage column is scored against.
@@ -122,7 +127,20 @@ pub fn defender_line(defense: &DefenderDefense, sl: u16) -> String {
             )
         }
     };
-    format!("Defender: {numbers}  --  {whose}")
+    let adapts = if defense.counters.is_empty() {
+        String::new()
+    } else {
+        let buff = match defense.reply {
+            Reply::RingAndItem => ", plus the best item defense buff",
+            Reply::RingAndAnyBuff => ", plus the best item or spell defense buff",
+            Reply::Static | Reply::Ring => "",
+        };
+        format!(
+            "; adapts: swaps a ring slot to {} against each weapon{buff} (column 'vs')",
+            defense.counters.join(", ")
+        )
+    };
+    format!("Defender: {numbers}  --  {whose}{adapts}")
 }
 
 /// One row of a ranking.
@@ -147,6 +165,122 @@ pub struct ResultRow {
     pub counter: Option<f32>,
     /// The weapon's class.
     pub class: String,
+}
+
+/// One row of Best weapons: a weapon at the build Optimize for weapon makes for it, scored so
+/// weapons compare. The script's `best_weapon_row` and the metrics its `--json` prints.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BestWeaponRow {
+    /// What the ranking sorts by: the R1 hits landed within the window (bleed and poison: build-up
+    /// per hit times the hits), a stamina metric under [`crate::model::Rank`], the optimizer's own
+    /// value without a window, a launcher's one shot.
+    pub score: f64,
+    /// The weapon, by soulsplanner key.
+    pub weapon: String,
+    /// Its display name.
+    pub name: String,
+    /// The optimizer's own value: one hit (or one shot) of the objective.
+    pub value: f64,
+    /// The starting class the build is from, by display name.
+    pub class: String,
+    /// Whether the build holds it two-handed.
+    pub two_handed: bool,
+    /// The build's levelled stats, in [`STAT_LABELS`] order.
+    pub stats: [u16; STAT_COUNT],
+    /// The rings it wears in place of stat points, by name.
+    pub rings: Vec<String>,
+    /// The grip and what the score counted: `2H 3 hits`, `2H R1 2 hits`, `2H 1 shot`.
+    pub label: String,
+    /// A launcher's best ammunition and the shot scored, as the script notes it; `None` for any
+    /// other weapon.
+    pub ammo: Option<(String, String)>,
+    /// Measurements beside the score.
+    pub metrics: WeaponMetrics,
+}
+
+/// What a Best weapons row measures besides its score, each `None` where the data cannot say.
+///
+/// The script's `r1_metrics` and `poise_metrics`, at the row's own stats, rings and grip. A
+/// launcher has none of them but the defender's poise.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct WeaponMetrics {
+    /// Metres the R1's hitbox extends along the weapon.
+    pub reach_m: Option<f64>,
+    /// Seconds to the first chain attack's first live hitbox frame.
+    pub startup_s: Option<f64>,
+    /// Seconds from its last live hitbox frame to the end of the animation.
+    pub recovery_s: Option<f64>,
+    /// Seconds to the first hit of the R1 chain.
+    pub time_to_first_hit_s: Option<f64>,
+    /// The R1 chain repeated for five seconds, every hit landed by then, against the defender's
+    /// numbers before any answer.
+    pub damage_per_5s: Option<f64>,
+    /// The share of the R1's windup and active frames inside its hyperarmor window; `0` when its
+    /// rate is `0`, as then the window does nothing.
+    pub hyperarmor: Option<f64>,
+    /// `WeaponParam.uninterruptibleRate`: the factor on poise damage the attacker takes inside the
+    /// window.
+    pub hyperarmor_rate: Option<f64>,
+    /// The share of the bracket's counter-hits (each build's one-handed R1) that do not stagger the
+    /// attacker inside the window, the attacker's poise taken as the defender's; `None` without
+    /// hyperarmor.
+    pub hyperarmor_holds: Option<f64>,
+    /// The R1's first hit's poise damage to a player.
+    pub poise_damage_per_hit: Option<f64>,
+    /// That hit's `DamageCtrlParam.armorBreak`: 1 and 2 stagger whatever the poise.
+    pub armor_break: Option<i32>,
+    /// R1 chain hits until the defender staggers, `None` if not within ten seconds.
+    pub hits_to_stagger: Option<u32>,
+    /// The defender's max poise: the bracket's mean, or the chosen set's.
+    pub defender_poise: f64,
+    /// The poison and bleed the scored hits deal through their procs, for a melee row scored over
+    /// a window; `None` otherwise.
+    pub status: Option<StatusMetrics>,
+    /// For damage over a window, the score plus the status damage per window: what the script's
+    /// `--with-status` ranks by. The score itself does not count status.
+    pub damage_with_status: Option<f64>,
+    /// What the scored hits cost in stamina and what a full bar of it pays for, for damage over a
+    /// window; `None` otherwise, or without stamina costs or attack timing.
+    pub stamina: Option<StaminaMetrics>,
+}
+
+/// The stamina side of a row's R1 chain (a launcher's: one shot), in menu points: the script's
+/// `stamina_metrics` and `shot_metrics`.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct StaminaMetrics {
+    /// The R1 chain's 1st and 2nd attack's cost; a launcher's shot's.
+    pub per_attack: Vec<f64>,
+    /// What the attacks whose hits land in the window cost.
+    pub per_window: f64,
+    /// The window's damage over that cost: what [`crate::model::Rank::PerStamina`] ranks by.
+    pub damage_per_stamina: f64,
+    /// The build's max stamina, its rings counted; `None` without the regulation's table.
+    pub max_stamina: Option<f64>,
+    /// The attacks a full bar begins: each begins while stamina is above 0.
+    pub bar_attacks: Option<u32>,
+    /// Their damage: what [`crate::model::Rank::Bar`] ranks by.
+    pub bar_damage: Option<f64>,
+    /// Seconds until the last of them begins; `None` for a launcher, whose fire rate is not read.
+    pub bar_seconds: Option<f64>,
+}
+
+/// The poison and bleed a row's hits deal through their procs: the script's `row_status`, against
+/// the defenders at the soul level.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct StatusMetrics {
+    /// The hits counted: the R1 chain's landed in the window (one per distinct hitbox), or the
+    /// status ranking's own.
+    pub hits: u32,
+    /// Per status, poison then bleed, its build-up per hit before resistance; `None` for one the
+    /// weapon does not build up.
+    pub buildup_per_hit: [Option<f64>; 2],
+    /// Per status, the hits the median defender takes to proc; `0` when none procs.
+    pub hits_to_proc: [Option<u32>; 2],
+    /// Proc damage per window of the chain repeated without pause, the lockout after a proc
+    /// counted, summed over the statuses and averaged over the defenders.
+    pub damage_per_window: f64,
+    /// Proc damage those hits deal a defender whose gauge starts empty.
+    pub damage_first_window: f64,
 }
 
 /// How some stats can hold a weapon: the weapon picker's Grip line.
@@ -257,6 +391,11 @@ pub struct GeneratedBuild {
     /// Why the armour is not four pieces, when it is not: the load cap left a slot, or every slot,
     /// bare. Never silent.
     pub armor_note: Option<String>,
+    /// What the armour does in R1 trades against the build's SL bracket, over every weapon it
+    /// lists: `None` for a build that wears none or has nothing to trade.
+    pub trade: Option<ArmorTrade>,
+    /// The same for the set picked on defense and load alone, which poise outbid when it differs.
+    pub trade_previous: Option<ArmorTrade>,
     /// The spells the build was asked to cast, by soulsplanner key, in the order asked: what Apply
     /// attunes. Its stats meet every one's requirements and its ATT holds their slots.
     pub spells: Vec<String>,
@@ -276,6 +415,24 @@ pub struct GeneratedBuild {
     pub ring_lowered: [bool; STAT_COUNT],
     /// Whether this came from [`StubBackend`], so the panel can say its numbers mean nothing.
     pub stub: bool,
+}
+
+/// An armour set's R1 trades against an SL bracket: the script's `armor_trade`.
+///
+/// Both sides press R1 at once, each with its first hit at the game play speed; the earlier hit
+/// lands, and the later one too unless the first staggered its swinger.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ArmorTrade {
+    /// The build's max poise in it: the pieces (less what unmet requirements take), the stat
+    /// poise and the rings'.
+    pub poise: f32,
+    /// The largest counter-hit poise damage that poise holds through, `0` for none.
+    pub poise_target: f32,
+    /// The share of trades in which the build's R1 lands, `0.0..=1.0`.
+    pub trade_rate: f32,
+    /// The mean, per trade, of the build's first-hit damage when it lands less the counter's
+    /// when that lands.
+    pub exchange: f32,
 }
 
 /// A spell a generated build can be asked to cast: the script's `--spells`.
@@ -323,15 +480,20 @@ pub struct Limits<'a> {
     /// Who the damage objective is scored against. It changes which build scores best, never
     /// whether one exists, so [`RecommenderBackend::refusal`] does not read it.
     pub defender: &'a Defender,
+    /// How that defender answers the weapon. [`RecommenderBackend::refusal`] reads it only for the
+    /// class it offers instead, which is the best build's.
+    pub reply: Reply,
 }
 
 impl Limits<'static> {
-    /// No spells, any class, the floors applied, the average defender.
+    /// No spells, any class, the floors applied, the average defender answering as the script's
+    /// default does.
     pub const NONE: Self = Self {
         spells: &[],
         class: None,
         floors: true,
         defender: &Defender::Average,
+        reply: Reply::Ring,
     };
 }
 
@@ -343,6 +505,7 @@ impl<'a> Limits<'a> {
             class: None,
             floors: !state.ignore_floors,
             defender: &state.defender,
+            reply: state.reply,
         }
     }
 }
@@ -530,11 +693,26 @@ pub trait RecommenderBackend: Sync {
     ) -> Option<crate::flex::Flexibility> {
         None
     }
-    /// What `defender` puts up at `sl`, the numbers the damage column is scored against. `None`
-    /// when this backend cannot say, which is the default (the stub has no corpus), or when a
-    /// piece is not in its armour table.
-    fn defense(&self, _sl: u16, _defender: &Defender) -> Option<DefenderDefense> {
+    /// What `defender` puts up at `sl`, the numbers the damage column is scored against, and how it
+    /// answers a weapon under `reply`. `None` when this backend cannot say, which is the default
+    /// (the stub has no corpus), or when a piece is not in its armour table.
+    fn defense(&self, _sl: u16, _defender: &Defender, _reply: Reply) -> Option<DefenderDefense> {
         None
+    }
+    /// Every weapon `infusion` goes on, each at the build [`Self::optimize`] makes for it at `sl`
+    /// (its own class, stats and rings) under `limits`, best first by [`BestWeaponRow::score`]; a
+    /// weapon no class wields there is left out. The script's `--best-weapons`. Empty by default:
+    /// the stub has nothing to rank.
+    fn best_weapons(
+        &self,
+        _infusion: Infusion,
+        _sl: u16,
+        _objective: Objective,
+        _grip: Grip,
+        _limits: &Limits<'_>,
+        _opts: &crate::model::BestWeaponsOpts,
+    ) -> Vec<BestWeaponRow> {
+        Vec::new()
     }
     /// The armour a defender can wear in `slot` (an index into [`crate::model::ARMOR_SLOTS`]) as
     /// `(soulsplanner key, name)`, `Naked` first, then the data's order. Empty by default: the stub
@@ -634,6 +812,7 @@ pub fn ask(backend: &dyn RecommenderBackend, state: &PanelState) -> Answer {
                 let opts = WeaponsForOpts {
                     objective: state.objective,
                     defender: state.defender.clone(),
+                    reply: state.reply,
                     ..state.weapons_for.clone()
                 };
                 backend.weapons_for(&state.stats, sl, &opts)
@@ -1202,6 +1381,8 @@ impl RecommenderBackend for StubBackend {
                 vec!["Desert Sorceress Hood".to_owned()]
             },
             armor_note: None,
+            trade: None,
+            trade_previous: None,
             spells: Vec::new(),
             spell_names: Vec::new(),
             slots_used: 0,

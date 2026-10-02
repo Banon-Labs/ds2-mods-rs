@@ -145,6 +145,64 @@ impl Defender {
     }
 }
 
+/// How the defender answers the weapon it is hit by: the script's `--static-defender` and
+/// `--defender-buff`.
+///
+/// A player who meets a weapon wears the ring that cuts its damage most, so damage scored against
+/// rings worn for nobody in particular flatters a weapon whose damage type one ring counters. The
+/// adaptive answers are the script's `AdaptiveDefense`: each defender swaps one ring slot for the
+/// counter ring (Ring of Steel Protection+2, a Quartz Ring+3 or Dispelling Ring+1) that leaves the
+/// least of this attack's damage, and with a buff also takes the defense buff that cuts it most.
+/// AR is defense-free and ignores all of it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Reply {
+    /// The defenders' rings as worn: the script's `--static-defender`.
+    Static,
+    /// Each defender swaps one ring slot for the counter ring: the script's default.
+    #[default]
+    Ring,
+    /// The counter ring, and the consumable defense buff that cuts the damage most (the Burrs, Dark
+    /// Troches): `--defender-buff item`.
+    RingAndItem,
+    /// The counter ring, and the item or spell defense buff that cuts the damage most, whatever the
+    /// defender's stats: `--defender-buff any`.
+    RingAndAnyBuff,
+}
+
+impl Reply {
+    /// Every reply, in the order the panel offers them.
+    pub const ALL: [Reply; 4] = [
+        Reply::Ring,
+        Reply::RingAndItem,
+        Reply::RingAndAnyBuff,
+        Reply::Static,
+    ];
+
+    /// The option's caption.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Reply::Static => "Static",
+            Reply::Ring => "Ring",
+            Reply::RingAndItem => "Ring+item",
+            Reply::RingAndAnyBuff => "Ring+buff",
+        }
+    }
+
+    /// The script's `--defender-buff` name, `none` with no buff.
+    pub const fn buff(self) -> &'static str {
+        match self {
+            Reply::Static | Reply::Ring => "none",
+            Reply::RingAndItem => "item",
+            Reply::RingAndAnyBuff => "any",
+        }
+    }
+
+    /// Whether the defender answers at all.
+    pub const fn adapts(self) -> bool {
+        !matches!(self, Reply::Static)
+    }
+}
+
 /// Which grip Optimize for weapon and Generate Build build for: the script's `--grip`.
 ///
 /// Two-handed halves the STR requirement even when one-handing would fit; one-handed needs it in
@@ -198,6 +256,39 @@ pub struct WeaponsForOpts {
     /// Who damage is scored against. [`crate::backend::ask`] fills it from
     /// [`PanelState::defender`].
     pub defender: Defender,
+    /// How that defender answers each weapon. [`crate::backend::ask`] fills it from
+    /// [`PanelState::reply`].
+    pub reply: Reply,
+}
+
+/// What a Best weapons row's score is for [`Objective::Damage`] with a window: the script's
+/// `--rank`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Rank {
+    /// The R1 hits landed within the window.
+    #[default]
+    Window,
+    /// Those hits' damage over the stamina their attacks cost.
+    PerStamina,
+    /// The damage of the R1 chain a full bar of the build's own max stamina pays for.
+    Bar,
+}
+
+/// Options for Best weapons, the script's `--best-weapons`: every weapon an infusion goes on, each
+/// at the build Optimize for weapon makes for it.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct BestWeaponsOpts {
+    /// Only this weapon class, or every class.
+    pub weapon_class: Option<String>,
+    /// Score the optimized build by the R1 hits landing within this many seconds (bleed and
+    /// poison: build-up per hit times the hits); `0` scores the optimizer's own one-hit value. A
+    /// launcher's row is one shot either way.
+    pub window_s: f32,
+    /// What the score is, for damage with a window.
+    pub rank: Rank,
+    /// Rank damage by the window's damage plus the poison and bleed its hits deal through their
+    /// procs; the score stays the damage alone. The script's `--with-status`.
+    pub with_status: bool,
 }
 
 /// Which status a similar build's weapon must deal to be counted.
@@ -243,6 +334,8 @@ pub struct PanelState {
     pub objective: Objective,
     /// Who [`Objective::Damage`] is scored against, on every tab that scores it.
     pub defender: Defender,
+    /// How that defender answers each weapon; the script's default, a counter ring, unless chosen.
+    pub reply: Reply,
     /// The grip [`Mode::OptimizeForWeapon`] and Generate Build build for.
     pub grip: Grip,
     /// Whether [`Mode::MinimumForWeapon`] may two-hand to meet strength.
@@ -275,6 +368,7 @@ impl Default for PanelState {
             infusion: Infusion::None,
             objective: Objective::default(),
             defender: Defender::default(),
+            reply: Reply::default(),
             grip: Grip::default(),
             two_hand: false,
             allow_naked: false,
@@ -451,6 +545,23 @@ mod tests {
     fn the_goal_offers_ar() {
         assert!(Objective::ALL.contains(&Objective::Ar));
         assert_eq!(Objective::Ar.label(), "AR");
+    }
+
+    /// The defender answers each weapon by default, as the script's does; only Static does not, and
+    /// each reply is the script's `--defender-buff` setting.
+    #[test]
+    fn the_defender_answers_by_default() {
+        assert_eq!(PanelState::default().reply, Reply::Ring);
+        assert!(
+            Reply::ALL
+                .iter()
+                .all(|reply| reply.adapts() != (*reply == Reply::Static))
+        );
+        assert_eq!(
+            Reply::ALL.map(Reply::buff),
+            ["none", "item", "any", "none"],
+            "Ring, Ring+item, Ring+buff, Static"
+        );
     }
 
     /// The defender starts as the average, and choosing one piece makes a bare defender wearing it.

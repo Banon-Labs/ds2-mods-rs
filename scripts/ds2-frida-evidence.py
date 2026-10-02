@@ -23,6 +23,9 @@ its log and the line the gate printed:
         --log <a failed check.sh log, local or `gh run view <id> --log-failed`> \
         --line "crates/ds2-build-recommender-core/src/corpus.rs:2319: allow with no ..."
 
+A `== rustfmt ==` failure is recorded the same way, quoting rustfmt's own `Diff in <path>:<line>:`
+line, which is the one line of that section that names a file.
+
 # Why this exists
 
 User directive 2026-09-16, after the agent tore the game down twice and ran two build/relaunch
@@ -450,6 +453,16 @@ def record_build(repo: pathlib.Path, crate: str, log: str, line: str) -> int:
 #     blamed, not the one the agent names;
 #   * the log is newer than the last committed Rust change, as for the other three instruments;
 #   * it opens that one crate and nothing else.
+#
+# rustfmt diffs count too (2026-10-01). In the `== rustfmt ==` section the only line naming a
+# crates/ path is rustfmt's own `Diff in <abs path>/crates/<crate>/src/<file>.rs:<line>:`; the diff
+# body under it names none. That line also matched CHECK_FAILED, so the "quote the defect, not a
+# summary" rule refused it and a rustfmt failure could never be recorded -- a committed formatting
+# slip then deadlocked the gate: check.sh stops at rustfmt, and the Rust edit that fixes the
+# formatting was refused for want of evidence. So, under `== rustfmt ==` and nowhere else, a
+# `Diff in` line that names `crates/<crate>/` is the defect line (it names the file rustfmt blamed),
+# and since rustfmt prints it only on its way to failing, it is also that section's proof the run
+# failed. Every other condition above still holds for it.
 
 # `job<TAB>step<TAB>2026-09-29T02:11:48.7819539Z ` -- the prefix `gh run view --log` puts on a line.
 ACTIONS_PREFIX = re.compile(r"\A([^\t\n]*)\t([^\t\n]*)\t\d{4}-\d\d-\d\dT[\d:.]+Z ?")
@@ -468,6 +481,9 @@ CHECK_FAILED = re.compile(
     r"|\S+ is named in a comment and does not exist"
     r")"
 )
+# rustfmt's `--check` header for one file it would reformat; the section it is admitted under.
+RUSTFMT_DIFF = re.compile(r"\ADiff in \S")
+RUSTFMT_SECTION = "rustfmt"
 
 
 def _check_lines(body: str) -> list[tuple[str, str]]:
@@ -509,7 +525,10 @@ def record_check(repo: pathlib.Path, crate: str, log: str, line: str) -> int:
             f"under the {MIN_TELEMETRY_LINE} a verbatim check needs to mean anything"
         )
         return 2
-    if CHECK_SECTION.match(quoted) or CHECK_FAILED.match(quoted):
+    # A rustfmt `Diff in <path>` line is both the defect and the summary; it is let through here
+    # and held to the `== rustfmt ==` section below.
+    rustfmt_diff = bool(RUSTFMT_DIFF.match(quoted))
+    if CHECK_SECTION.match(quoted) or (CHECK_FAILED.match(quoted) and not rustfmt_diff):
         print("refused: quote the line that names the defect, not a section header or a summary")
         return 2
     named = _named_crates(quoted)
@@ -553,6 +572,14 @@ def record_check(repo: pathlib.Path, crate: str, log: str, line: str) -> int:
                 "(check.sh is `set -e` and stops at the section that fails)"
             )
             continue
+        if rustfmt_diff:
+            section = CHECK_SECTION.match(lines[max(i for i in sections if i < hit)][1])
+            if section is None or section.group(1) != RUSTFMT_SECTION:
+                why = f"a `Diff in` line counts only under `== {RUSTFMT_SECTION} ==`"
+                continue
+            # rustfmt prints it only for a file it would reformat, i.e. on its way to failing.
+            failed_run = True
+            break
         if not any(i > hit and CHECK_FAILED.match(text) for i, text in same):
             why = (
                 "nothing after it says the run failed -- no failure summary and no "
@@ -1035,6 +1062,35 @@ def selftest() -> int:
             gate("demo-core", allow_line, check_log(
                 "exit0.log",
                 f"== lint allows ==\n  {allow_line}\n##[error]Process completed with exit code 0.\n",
+            )) == 2,
+        )
+        # A rustfmt failure, shaped on the 2026-10-01 local log: the `Diff in` line is the only
+        # one naming a file, and nothing after it but the diff body.
+        diff_line = "Diff in /w/.claude/worktrees/x/crates/demo-core/src/model.rs:522:"
+        diff_body = "     #[test]\n-        assert!(x);\n+        assert!(\n+            x\n+        );\n"
+        ok(
+            "a rustfmt `Diff in` line under `== rustfmt ==` opens the crate it names",
+            gate("demo-core", diff_line, check_log(
+                "rustfmt.log", f"== lint allows ==\n  ok\n== rustfmt ==\n{diff_line}\n{diff_body}"
+            )) == 0,
+        )
+        ok(
+            "but not a crate it does not name",
+            gate("demo-path", diff_line, check_log(
+                "rustfmt2.log", f"== rustfmt ==\n{diff_line}\n{diff_body}"
+            )) == 2,
+        )
+        ok(
+            "a `Diff in` line outside the rustfmt section is refused",
+            gate("demo-core", diff_line, check_log(
+                "rustfmt3.log", f"== lint allows ==\n{diff_line}\n{diff_body}  {summary}\n"
+            )) == 2,
+        )
+        ok(
+            "a `Diff in` line followed by a later section header is refused",
+            gate("demo-core", diff_line, check_log(
+                "rustfmt4.log",
+                f"== rustfmt ==\n{diff_line}\n{diff_body}== clippy ==\nerror: could not compile `x`\n",
             )) == 2,
         )
         (git_repo / "crates" / "demo-core").mkdir(parents=True)

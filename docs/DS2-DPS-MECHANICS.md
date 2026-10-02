@@ -86,53 +86,144 @@ the params and was not traced.
 `ChrPoiseCtrl` (RTTI, vtable `0x1410bfc58`). Its update is `v3` at `0x140145a40`. It keeps current poise at chr+0x218,
 min at +0x21c, and max at +0x220.
 - **max poise** = `vcall(chr+0x398)->[0x1f8]()` + `ChrParam.poiseValue` (+0x118; 0 for the player row 100)
-  + int(`s8 status+0x305` + `s32 status+0x3a0`). EXE. That the vcall sums `ArmorParam.strong` over the
-  worn pieces, and that the two status ints hold the Ring of Giants/SpEffect poise, is INFERRED.
+  + int(`s8 status+0x305` + `s32 status+0x3a0`). EXE. What the vcall sums is in "Max poise" below (EXE,
+  2026-10-01). `status+0x305` is SpEffect `1000[0]` kind 0 (INFERRED from the kind -> `status+0x305+kind` pattern
+  that three rings fit, see "Attacker poise damage"; the writer was not read); `status+0x3a0` is not identified.
   The armor values are REGULATION: Havel's 19+51+31+31 = 132; Alva 6/15/4/9; Drangleic Mail 28; max single piece 83.
-  Ring of Giants +10/20/30 comes from `DS2-BUILD-MECHANICS.md`.
+  Ring of Giants is `1000[0]` kind 0 +10/20/30 (`SpEffectRing.emevd` events 40290000/1/2, REGULATION).
 - **regeneration** `0x140145ba0`: `current += rate * dt`, clamped. `rate = ChrParam.poiseRecoveryValue`
   (+0x11c) = **0.56** for the player. EXE for the code and REGULATION for the value. That dt is seconds is INFERRED, so the rate would
   be 0.56 poise/s. Regen is suspended while `status+0x7e6 != 0`.
 - **reset after a break** (EXE): if `status+0x7e6` was set on the last frame, it is now clear, and current <= 0, current is set to max.
   Most likely +0x7e6 is the "in stagger/damage state" flag (INFERRED). Result: once poise is broken it comes back
-  full when the stagger ends. Partial damage otherwise regenerates only at 0.56/s.
+  full when the stagger ends. Partial damage otherwise regenerates only at 0.56/s. The "last frame" copy is
+  `0x14031c460` (`status+0x7e7 = status+0x7e6`), the status reset that also zeroes hyperarmor (below).
 - TAE event **111200** (handler `0x14032678d`) sets `status+0x610`. While it is set, regen uses `changePoiseRecoveryValue`
   (0 for the player), and poise is refilled to max on entering and on leaving the window. EXE. No weapon attack
   in the dump uses 111200.
+- **subtraction** `applyPoiseDamage` `0x140145970` (EXE): `new = current - dmg`; if `new < min` (+0x21c) current
+  becomes min, else `min(new, max)`. The value of min for a player was not read.
+
+**Max poise, what the vcall adds** (EXE, read 2026-10-01). `PlayerGameParamCalculator` slot 0x1f8 `0x14037fdd0`:
+```
+sum over the 4 worn pieces of  ArmorParam.strong (+0x40) * (1 - LackOfStats(0x1c, v_piece))
++ PhysicalStatsPerLevelStatValuesParam[min(END, ADP)] +0x90
+```
+- The piece factor is calculator slot 0x70 -> `0x14031e680` -> slot 0x68 `0x14031e660` = `1 - slot 9`, and slot 9
+  `0x1403811f0` is the `PlayerLackOfStatsParam` penalty (the same path the weapon attack's `k` uses, "Attack
+  rating" below): row 0x1c (28) = `[30, 80, 0, 30]`, penalty = `clamp((30 + 50*v) * 0.01, 0, 1)` for `v > 0` and
+  **0 for `v == 0`** (the second term's input is passed as 0.0). `v` is the piece's float at equip record
+  `+0x2b8 + 0x30*i`, written by `0x14034a830` from `0x14034d150`: `clamp(sum of max(0, 1 - stat/req) over four stats, 0, 1)`
+  with the requirements as u16 at the armour row's `+0x2c/+0x2e/+0x30/+0x32`. So **an intact piece whose stat
+  requirements are met counts 1.0; a piece worn under its requirements keeps 0.7 down to 0.2 of its poise. It is not
+  durability.** That the four stats are STR/DEX/INT/FTH (`0x14038d510` indices 4-7) and the four u16 are
+  ArmorParam's requirements is INFERRED from the shape.
+- The "+0x4c of a second row" is the player stat block: `[chr+0x490]` -> `0x14038b990` (+8) -> +0x4c. The stat
+  builder `0x14038d790` writes that word at its `rdi+0x20` (`0x14038da11`; the builder's `rdi` is the reader's block
+  + 0x2c, checked on three other fields: defense `rdi+0x1c` / read +0x48, STR attack `rdi+0x24` / read +0x50, status
+  `rdi+0x48` / read +0x74). The value is `PhysicalStatsPerLevelStatValuesParam` row `min(END, ADP)` (stat words
+  `+0x2` and `+0x10`, `cmovge` at `0x14038d9de`) field +0x90, a float. REGULATION: 0.3 per point to 30 (stat 10 ->
+  3.0, 20 -> 6.0, 30 -> 9.0), then 1.0 per 5 to 50 (13.0), 1.0 per 10 to 90 (17.0), 18.0 at 99. **Every player
+  has this stat poise on top of the armour.**
+- ArmorParam.strong (joined by ItemParam.armorParamId and name) equals SoulsPlanner's piece poise for 405 of 427
+  pieces; the recommender uses the game's value (`regulation_poise`).
 
 ### Attacker poise damage (EXE)
 `ChrDamageActionCtrl::v36` `0x140139160` computes the base poise damage of a hit. The attack packet must be type 1, otherwise the result is 0:
 ```
-base = (DamageCtrlParam.poiseDamage[+0xa0] * hit[+0x74] + vcall(defender+0x398)->[0x188](int) + s8 hit[+0x70])
+base = (DamageCtrlParam.poiseDamage[+0xa0] * hit[+0x74] + vcall(defender+0x398)->[0x188](float dmg) + s8 hit[+0x70])
        * (hit[+0x90] ? u16 [hit[+0x90]+8] * 0.01 : 1.0)
 ```
-`hit+0x74` is `WeaponParam.poiseDamageScalePlayer` (EXE, 2026-10-01): `calculateDamage_attack` `0x1401373b0` stores
-into the hit block's +0x74 the attacker's `PlayerGameParamCalculator` vtable slot 0x190 (`0x140381120`), which looks up the
-WeaponParam row of the attacking hand and returns +0xb0 (`poiseDamageScalePlayer`) when the target is a player and +0xb4
-(`poiseDamageScaleEnemy`) otherwise. `DamageCtrlParam` +0xa0 is `poiseDamage` (Smithbox layout). So dagger R1 = 10 x 3.5
-= 35 and OKH R1 = 10 x 16 = 160 to a player. Still not identified: the defender's slot 0x188 (`0x140381080`, a threshold
-table in DamageMan whose input is not traced), `s8 hit+0x70` (copied from the attack block +0xce) and the `hit+0x90` pointer.
-`scripts/ds2-builds-recommend.py` (`hit_poise`) takes them at 0, 0 and absent (x1.0).
-The defender side (`ChrDamageActionCtrl::v14` `0x140137aa0`) multiplies the base by
-`1 + DamageCtrlParam.damageDecrementPoiseMaxRate (+0xb8) * hit[+0x78] * 0.01` (EXE): the distance falloff, -70% at most;
-that `hit+0x78` is the 0-1 share of the falloff band is INFERRED, so a point-blank hit takes x1.0. It then applies
-hyperarmor (next subsection). It subtracts the result from current poise in `0x140145970`, called from `0x14013639d`.
+Read 2026-10-01 with every term traced (the call chain is in the next paragraph):
+- `hit+0x74` is `WeaponParam.poiseDamageScalePlayer`: `calculateDamage_attack` `0x1401373b0` stores the attacker's
+  `PlayerGameParamCalculator` slot 0x190 (`0x140381120`), which looks up the WeaponParam row of the attacking hand
+  and returns +0xb0 (`poiseDamageScalePlayer`) when the target is a player and +0xb4 (`poiseDamageScaleEnemy`)
+  otherwise. `DamageCtrlParam` +0xa0 is `poiseDamage` (Smithbox layout). So dagger R1 = 10 x 3.5 = 35 and OKH R1 =
+  10 x 16 = 160 to a player.
+- **Slot 0x188 is always 0 in the shipped regulation.** Its argument is `(float)(int)result+0x34` (`0x140139198`),
+  and v14 stores there the return of `calculateDamage_defense` (`0x140137e03`): the hit's integer HP damage. The slot
+  (`0x140381080`) looks up row 0 of the DamageMan param at `+0xb40+0x150`, which is index 0x14 of the loader
+  `0x1403b1850` (slot i at `0xb40 + 0x10*(i+1)`) and of its name table `0x14048ba80`: **`PoiseDamageParam`**. It
+  returns `f[9]` if dmg >= `f[4]`, `f[8]` if >= `f[3]`, `f[7]` if >= `f[2]`, `f[6]` if >= `f[1]`, `f[0]` if >= `f[0]`,
+  else 0. The one row, id 0, is ten zeros (REGULATION), so the term is 0 for every hit.
+- **`s8 hit+0x70` is the Stone Ring's flat poise damage.** `calculateDamage_attack` copies it from `sAr+0xce` =
+  attack block +0x86, which the attack block constructor zeroes (`0x1403ada20` -> `0x141afb8ed`, qword +0x80 =
+  1.0/0) and the per-hand builder sets from the attacker's `s8 status+0x307` (`0x141b57e0a`..`0x141b57e23`, `r13` =
+  status, the same register the builder tests `status+0x4b8` through). `status+0x305+k` holds SpEffect `1000[0]`
+  kind k (INFERRED: Ring of Giants is kind 0 and +0x305 feeds max poise; Red Tearstone is kind 4 = 30 and
+  `s8 status+0x309` is the HP% threshold the attack builder compares, "What else a hit carries"). The only
+  `1000[0]` kind 2 in the eleven `SpEffect*.emevd` is event **40230000 = Stone Ring**, value **30** (REGULATION,
+  name from `itemname.fmg`). So with a Stone Ring every hit carries +30 poise damage before the
+  multiplications below: dagger R1 35 -> 65, OKH R1 160 -> 190.
+- **`hit+0x90` is x1.0 for a player attacker.** It is `FUN_1401649b0(CharacterManager, attacker)`: the
+  CharacterManager param at +0x810 (index 0x50 of `getCharacterManagerParamNameFromIndex` `0x14048b620`, base 0x300
+  checked on index 0x27 at +0x580) = **`ChrMultiplayParam`**, row = byte `ChrParam+0x24` (`chr+0x38` is
+  `chr_param`), entry = `min(CharacterManager+0xd58/+0xd5a, 3)` of `{null, row, row+0xc, row+0x18}`. Entry 0 is
+  null, so x1.0. The player's ChrParam row 100 has byte +0x24 = 0, and ChrMultiplayParam row 0 is all 100
+  (REGULATION), so every entry is x1.0 too. The same pointer's u16 +2 scales HP damage in `calculateDamage_defense`
+  (`0x14013909d`).
 
-Max poise, the vcall's armour part (EXE): `PlayerGameParamCalculator` slot 0x1f8 `0x14037fdd0` sums ArmorParam +0x40
-(`strong`) over the four worn pieces, each times a per-piece factor from slot `0x14031e680(0x1c, ...)` (INFERRED 1.0
-for an intact piece), plus +0x4c of a second, unidentified row. ArmorParam.strong (joined by ItemParam.armorParamId and name) equals SoulsPlanner's piece poise for 405 of 427 pieces;
-the recommender uses the game's value (`regulation_poise`).
+The defender side (`ChrDamageActionCtrl::v14` `0x140137aa0`) multiplies the base by
+`1 + DamageCtrlParam.damageDecrementPoiseMaxRate (+0xb8) * ctx[+0x78] * 0.01` (EXE, `0x140137eca`..`0x140137efc`),
+then applies hyperarmor (next subsection) and stores the result at result+0x40. **`ctx` is not the hit block**: it is
+v14's fourth argument, the hit context `0x140136ab0` builds (the hit block's own +0x78 is the HP-damage multiplier
+`calculateDamage_attack` writes as `buffer[0x1e]`, a different field). `0x140136ab0` writes ctx+0x78 at
+`0x140136e1c` (EXE, 2026-10-01):
+```
+d    = |defender position (vcall +0x148) - root attacker position (0x14040d770 on ctx+0x68)|
+near = sAr[+0xdc] * DamageCtrlParam[+0xa4]      far = sAr[+0xe0] * DamageCtrlParam[+0xa8]
+ctx+0x78 = 0                     if d <= defender ChrCommonParam+0x35c (0.0 in row 100) or d <= near
+         = (d - near)/(far - near) if near < d < far
+         = 1.0                   if d >= far
+```
+- The root attacker is the attacking entity with any bullet walked back to its owner (`0x140139a80`), so a
+  bow's band is measured from the archer.
+- `sAr+0xdc/+0xe0` are attack block +0x94/+0x98. The constructor sets both to 1.0 (`0x141c4cee4`, `0x141c4ceee`). The
+  builder replaces them from the attacker's `status+0x444/+0x448` when `status+0x4b8` bit 7 is set (`0x141b891f0` ->
+  `0x140299376`) or `+0x458/+0x45c` when bit 8 is set (`0x141b78056` -> `0x14032b5ca`); both paths end at `0x140070fc4`
+  (`[r14+0x98]`). What sets those two bits was not read; with neither, near and far are the DamageCtrlParam values
+  in metres (INFERRED unit).
+- REGULATION: 1141 of 3228 DamageCtrlParam rows have a band. Row 1013100 (poiseDamage 10; 176 rows share its band) has near 1.25, far 2.0,
+  poise -70%, HP (`+0xac`) -30%; 799 rows have a nonzero poise rate (610 at -70, 80 at -50, 89 at -30, 20 at -100).
+  Bands run from 1.25-1.5 m (short melee) to 48-84 m (ranged). The same share scales HP damage in
+  `calculateDamage_defense` (`0x1401390cc`: `1 + DamageCtrlParam+0xac * ctx+0x78 * 0.01`) and stamina damage
+  (+0xb0, +0xb4 at `0x140137e2e`, `0x140137e7f`).
+- So **a point-blank hit (d <= near) takes x1.0 (EXE).** A hit on a 1.25-2.0 m, -70% row landing at 1.6 m takes x0.67 poise, at 2.0 m
+  or beyond x0.3. In PvP the attacker's ctx+0x78 travels in packet 28 as one byte (`0x140160ee0`, `x DAT_1410ad0cc`).
+
+`scripts/ds2-builds-recommend.py` (`hit_poise`) takes the slot term at 0 (right), `hit+0x70` at 0 (right without a
+Stone Ring), `hit+0x90` at x1.0 (right) and the falloff at x1.0 (right at point blank only).
+
+**Order of a hit** (EXE, per-hit function `0x1401345c0`, `ChrDamageActionCtrl` vtable `0x1410bf178`):
+`+0x68` calculateDamage_attack (`0x1401347ea`) -> `+0x70` v14 (`0x140134815`, poise into result+0x40) -> `+0xf0`
+`damageEntity` `0x140136220` (`0x140134869`), which calls `applyPoiseDamage` when result+0x40 > 0 and
+`status+0x4b8` bit 52 is clear -> `+0x80` stagger decision `0x140136570` (`0x140134a1b`). So the decision reads
+poise after this hit's damage is taken off.
 
 ### Hyperarmor (EXE)
-- TAE event **111900** (handler `0x140326884`) looks up the chr's current weapon row and copies its
-  `+0xb8` into `status+0x7d0`. +0xb8 is `WeaponParam.uninterruptibleRate`; that the looked-up row is WeaponParam
-  is INFERRED from the offset.
-- Defender side `0x140137f02`: if `status+0x7d0 > 0`, incoming poise damage is multiplied by uninterruptibleRate.
+- TAE event **111900**, case in `ChrMorphemeTimeActTrackDamageActionCtrl::parseDamageActionTae` `0x140326240`
+  (code at `0x140326884`..`0x1403268bf`): `status+0x7d0 = row[+0xb8]`, where row = `0x140349250(equip, hand)`
+  with equip from `0x14034e6f0(chr)` and hand = `(status+0x188 != 0) - 2`. That is the same row getter (thunk
+  `0x141c5212f`) on the same equip object that slot 0x190 `0x140381120` uses to return `poiseDamageScalePlayer`
+  (+0xb0), so the row is the WeaponParam row (EXE by the shared getter) and +0xb8 is `uninterruptibleRate`
+  (Smithbox layout; REGULATION values OKH 0.3, dagger 0). It writes every frame the event is active.
+- `0x14031c460` (called from `0x1403153e0`) writes `status+0x7d0 = 0` along with the other per-frame status resets,
+  so the value lasts only while 111900 keeps rewriting it (that `0x1403153e0` runs every frame is INFERRED).
+- Defender side `0x140137f02`..`0x140137f14` (EXE): `if (status+0x7d0 > 0) result+0x40 *= status+0x7d0`.
   For OKH (0.3) that means it takes 30% of the poise damage during its own 111900 window.
-- Stagger decision `0x140136570` (around `0x140136689`): the flag starts as `poise > 0` after the hit
-  (`0x1401459d0` reads current poise chr+0x218). A hit whose `DamageCtrlParam.armorBreak` (+0x2, Smithbox layout) is 2
-  always staggers. If it is 1, it staggers unless the defender has uninterruptibleRate > 0 (status+0x7d0) or the
-  status+0x640 flag. `ultra_armor` or the TAE 110500 super-armor flag poise through anything but armorBreak 2.
+- Stagger decision `0x140136570` (EXE, 2026-10-01):
+  - `holds = (current poise > 0)` (`0x1401459d0`: `comiss` then `seta`, strictly greater), read after the subtraction.
+    **A hit staggers when poise after it is <= 0**: poise damage equal to current poise staggers.
+  - armorBreak (`DamageCtrlParam+0x2`) 2: `holds = 0` (`0x14013667d`).
+  - armorBreak 1: `holds = 0` unless `status+0x7d0 > 0` (`0x140136689`, hyperarmor) or the `status+0x640` flag is set
+    with `ctx+0x86 == 0`.
+  - `status+0x640` is incremented once, at action-controller construction (`0x14030e0ec` in `0x14030dce0`), when the
+    character's `ChrCommonParam+0x70` is 5. It is 0 in the player row 100 and 5 in 26 of 225 EnemyCommonParam rows
+    (REGULATION), so it is **0 for every player**: in PvP armorBreak 1 staggers unless the defender is in hyperarmor.
+  - `status+0x5ec` (`ultra_armor`) or `status+0x5e8` (super armor, ignored by armorBreak 2) set: no stagger reaction.
+    TAE 110500/110000/110600 and `ChrCommonParam+0x70` 1/2 feed those counters (`parseDamageActionTae`, `0x14030dce0`).
+  - When holds and neither armour flag, the reaction is 1 if `0x140203c10` (a chr-type table check) else 0; when
+    not holds, the incoming reaction is kept (the stagger).
 - Windows (TAE): OKH R1 111900 frames 20-30 around its 23-28 hit; 2H R2 20-30. Dagger R1 has no 111900 and its
   rate is 0, so a dagger has no hyperarmor. `WeaponTypeParam.toughnessPeriodScale` is 1.0 for all 144 rows, so it does nothing.
 
@@ -140,9 +231,11 @@ the recommender uses the game's value (`regulation_poise`).
 - The stagger animation is chosen by `DamageCtrlParam.damageMotion`: dagger R1 = 2, R2 = 3, OKH 2H R2 = 8.
   Those animations and their lengths were not mapped. Candidate damage anims sit in the TAE's `000160xxx`
   block (INFERRED). `DamageParam.stiff` (dagger R1 1.8 s, OKH R1 1.0 s) is unexplained.
-- What the data does support about the user's claim: a dagger R1 does about 35 poise damage (INFERRED
-  scale). So any defender whose current poise is 35 or less is staggered by every dagger R1.
-  Most light PvP builds have 0-30 armor poise, and their poise is refilled after each stagger.
+- What the data does support about the user's claim: a dagger R1 does 35 poise damage at point blank (EXE,
+  section 2; 65 with a Stone Ring, less beyond the hit row's near distance). So any defender whose current poise
+  is 35 or less is staggered by a point-blank dagger R1 (poise left at exactly 0 staggers).
+  Most light PvP builds have 0-30 armor poise plus the stat poise of min(END, ADP) (3-9 at stat 10-30), and
+  their poise is refilled after each stagger.
   So "a dagger hit staggers a low-poise defender" is consistent with the data.
   "Long enough for a free follow-up" (a true combo) remains folklore until the damage-animation length is
   compared with the dagger's R1->R1 time. The dagger's next hit becomes active at the earliest around anim
@@ -156,7 +249,8 @@ the recommender uses the game's value (`regulation_poise`).
   in the exe). It is one of the AES-ranged BHD5 entries that `ds2-ebl.py extract` refuses. It was decrypted
   here with the entry's own key record (key + range list at the entry's aesKeyOffset in the decrypted BHD5,
   AES-128-ECB over range 0..929040), which produced a valid `TAE ` header. It was unpacked with
-  WitchyBND in passive mode under a PTY. The `.anibnd` (morpheme4) holds the animations, not the events.
+  WitchyBND in passive mode under a PTY. The `.anibnd` (morpheme4) holds the animations and the
+  Morpheme network's own event tracks, which the TAE does not repeat (the play-speed windows below).
 - **Event meanings** (TAE/EXE; handler = `CharacterTimeActEventHandler` virtuals):
   - **2200 {ID}** = attack hitbox window, ID = damageId slot (0 -> damageId01). The ID ordering is
     TAE+REGULATION consistent (OKH 2H R2 chain uses ID 1 and 0 matching its two damage rows). The handler is not traced.
@@ -168,14 +262,165 @@ the recommender uses the game's value (`regulation_poise`).
     101100 spans the whole animation.
 - **Dagger R1 (anim 21010010) extracted**, anim frames at 30 fps (DS2 TAE times are seconds; x30):
   startup to hitbox **8 f**, active **8-15 (7 f)**, 111500 window 13-22, 120100 lock 0-13, anim end 30.
-  With startPlaySpeed 1.1 / endPlaySpeed 1.2 that is roughly 7.3 f (0.24 s) to first active frame. Which part
-  each speed covers is unknown, so this is an estimate.
+  With startPlaySpeed 1.1 / endPlaySpeed 1.2 that is 7.3 f (0.24 s) to first active frame: the anim's
+  event-150 window covers frames 0-9, so the whole windup plays at the start speed ("Attack play speed").
   OKH R1 (34010011): hitbox 23-28, lock 0-25, 111500 26-36, hyperarmor 20-30, end 70; speeds 1.2/1.1.
 - Caveat: the TAE gives animation-time events. Actual chaining is governed by the state machine (not in
   params, not traced), so "recovery" is the INFERRED 111500/120100 windows, not a verified cancel frame.
 - **111500's reader** (EXE, read 2026-10-01): its handler (`parseDamageActionTae` `0x140326240`) counts
   `flags+0x5c0` up and down; in `0x140300000-0x140360000` the only other access is the track's destructor
   (`0x140325fe0`) undoing it. The consumer that would make it a chain or cancel window was not found.
+
+### Attack play speed (EXE, read 2026-10-01)
+
+What the game does with `WeaponAttackMotionParam.startPlaySpeed` (+0x8) / `endPlaySpeed` (+0xc):
+
+- **Copied into the character flags.** Code in Arxan's section at `0x141b3ff3b` reads the attack row's
+  +0x8 and +0xc (r14 = the row) and stores them to `sCharacterFlags+0x1f8` and `+0x1fc`
+  (`PlayerCtrl+0xb8`). The row lookup is `0x140397510` -> `0x140024a47` -> `0x140359120`
+  (CharacterManager param slot +0x440, index 0x13 = WeaponAttackMotionParam in
+  `getCharacterManagerParamNameFromIndex` `0x14048b620`).
+- **The second writer** is the function whose Arxan-shattered body enters at `0x141b84c35`
+  (`scripts/ds2-arxan-trace.py 0x141c4ddf1` linearises it; rdi = this, rbx = an attack request).
+  With the request's `+0x60` (the WeaponAttackMotionParam row) null it returns at once. Otherwise it
+  takes start/end from the row's +0x8/+0xc, or from `[request+0x70]`'s +0xe0/+0xe4 when that is set,
+  and scales them:
+  - end x `PlayerGameParamCalculator` slot 13 (`0x14031e660`, 1 - slot 9 `0x1403811f0`) for
+    PlayerLackOfStatsParam row 8, after `0x14031fcb0` fills the request's stat ratios
+    (`0x141c38067` sets the row, `0x140071366` multiplies);
+  - start, when the request's `+0xc` is not 5: x the same factor for row 7 (`0x14038f6a0` called with
+    r8d = 7 at `0x141ce3fea`, multiplied at `0x141b0da90`). Rows 7 and 8 are 10-35% and 10-30% by
+    stats (REGULATION), so a build that meets the weapon's requirements has factor 1.0;
+  - start, when `+0xc` is 5 (the dash attack): x lerp(PlayerCommonParam `dashAttackMinSpeedAnimScale`
+    +0x88, `dashAttackMaxSpeedAnimScale` +0x8c, t), t = (|velocity| - `dashAttackTriggerMinSpeed`
+    +0x84) / (`[[chr]+0x48]+0x48` - that), clamped to 0..1 (`0x141afd3e4`..`0x141c67700`).
+  It then stores start, end and `[rsp+0x48]` to +0x1f8/+0x1fc/+0x200 (`0x141b9446b`).
+- **+0x200 is 0.0 in both of those writers.** The first writer zeroes `[rbp+0x188]` at `0x141b3fea9`
+  and reads it back at `0x141b3ff4f` with no call between. The second (`0x140393350`) has one frame,
+  `push rdi` + `sub rsp,0x80`, and no Arxan stub between its entry and `0x141b94459` leaves rsp moved
+  (its epilogue reloads rbx from `[rsp+0xa8]` = the entry's `[rsp+0x20]` and xmm6 from the `[rsp+0x70]`
+  saved at `0x141c4ddf3`), so `[rsp+0x48]` at `0x141b94459` is the dword zeroed at `0x140049bf3`. The
+  only pointer into that part of the frame is `lea [rsp+0x30]`, passed to `0x14031fcb0` (writes its
+  +0x4/+0x8, `0x141ca1494`/`0x141ca1499` and siblings) and to calculator slot 13 `0x14031e660` ->
+  slot 9 `0x1403811f0` (reads +0x0/+0x4/+0x8 only). Both writers run only on the frame an action
+  request is taken: the first inside `0x1403947b0`, the second from call sites around `0x140394034`.
+- **The third writer sets it every other frame (EXE, read 2026-10-01, static only).** The action
+  controller's per-frame update `0x140393a30` (called with dt from `0x14038f277`) asks `0x140390670`
+  whether a request is to be taken this frame. If yes it tail-jumps to `0x1403947b0` (writer 1 is in
+  there). If not, it calls `0x14038fbd0` and stores the result: `mov rcx,[[rbx]+0xb8]` (`0x140143624`),
+  `movss [rcx+0x200],xmm0` (`0x140202031`). `0x14038fbd0` (body at `0x141ce44b2`), with `F` = flags,
+  `S` = the action state `chr+0xc0`, `M` = `[chr+0x48]`, the character's ChrMoveParam row:
+  - `F+0x14 != 0`: 1.0 (`0x141c37367`, `cmovne` at `0x14000a5d6`, constant `0x1410ac698`);
+  - else by the byte `F+0x18b`: 8..11 -> lerp(`M+0xdc`, `M+0xe0`, t) (`0x141ca88fd`); 12 with
+    `S+0x5c != 0` -> lerp(`M+0xe4`, `M+0xe8`, t) (`0x141c546a8`); any other value 1.0 (`0x141b4c10a`);
+  - t = |velocity| / `M+0x20`, clamped to 0..1 (`0x141b8bd26`..`0x141b8698e`).
+  In CHR_MOVE_PARAM every field before +0xdc is 4 bytes, so +0x20 is `fWalkSpeedMax`, +0xdc/+0xe0
+  `shootStanceAnimSpeedScaleMin/Max` and +0xe4/+0xe8 `spellChantingAnimSpeedScaleMin/Max` (the
+  same row whose +0x48 `fDashSpeedMax` writer 2's dash branch reads). That states 8-11 are bow and
+  crossbow aiming and 12 is spell chanting is INFERRED from those field names.
+- **So for a melee swing the factor is 1.0**: a melee attack is not one of those states, so on every
+  update frame where `0x140390670` takes no request, `0x140202031` writes 1.0, and the 0.0 from writers
+  1 and 2 lasts only until such a frame. Static reading did not settle two things: how many frames in a
+  row `0x140390670` can say yes (it says yes when `this+0x48 == 4`, or when request bits in
+  `this+0x44 & 0xfffff80` are set and the state checks at `S+0x2a`/`+0x2c`/`+0x2f`/`+0x30`,
+  `F+0x568`, `F+0x4`, `F+0x4d4` pass), and whether the 0.0 can reach `0x14035d580` on such a frame
+  (that needs `S+0xa0` already counted up by the animation's 150 event). A 0.0 that lasted through a
+  windup would freeze the swing, which attacks visibly do not do. Only aimed shots and chanted spells
+  get a factor other than 1.0, and it scales with how fast the character is moving.
+  `scripts/ds2-poise-need.py` uses 1.0.
+- **Other stores to +0x200 checked** (byte searches of the image for movss, `mov` from a register,
+  `mov` from an immediate, and 8/16-byte stores at +0x1f4..+0x1fc that would cover +0x200): none of
+  the other hits loads the flags pointer (`+0xb8`) or 1.0 in the instructions before it. The flags
+  object's constructor was not identified; it is not needed, because `0x140202031` rewrites the value
+  on every update frame.
+- **Runtime, idle (read 2026-10-01, `scripts/frida/attack-speed-read.js`, read-only, no hooks):**
+  on a character just loaded from slot 2 that had not attacked, flags+0x200 = 1.0 (`0x3f800000`),
+  +0x1f8 = +0x1fc = 0.0, +0x195 = 0, `S+0xa0` = `S+0xa4` = 0, and `[0x1410ac698]` = 1.0. So +0x200
+  holds 1.0 before any attack request. That is the third writer's 1.0 (above).
+  The game's CPU was unchanged by the attach (103-104 ticks per 2 s before and after) and Frida's
+  timers fired (about 123 samples a second at the 8 ms interval).
+- **Not read at runtime: the value during a swing's 150 window.** Left-clicks posted to the game window
+  through `PostMessageW` did not start an attack while the window was not in the foreground, and
+  that character had Fists in all six weapon records. The static reading above gives the value
+  (1.0 for melee) without a runtime read.
+- **Turned into one Morpheme control parameter.** `ChrAttackMotionCtrl` binds its control parameters
+  in `0x14035c770`; index 4 is `ControlParameters|Attack_SwingSpeed`. Every frame `0x14035d580` sets it
+  from the action state `S = PlayerCtrl+0xc0`:
+  - `S+0xa0 != 0`: flags+0x200 x startPlaySpeed;
+  - else `S+0xa4 != 0`: endPlaySpeed (0 when flags byte +0x195 is set);
+  - else 1.0.
+- **`S+0xa0` and `S+0xa4` are counters of Morpheme event-track actions**, not TAE events:
+  `ChrEventTrackActionAttack` (`0x140368e70`) counts `S+0xa0` up and down for action id 150 (0x96) and
+  `S+0xa4` for id 151 (0x97), on the event's start and end flags. So each attack animation says, in
+  the animation network's own event tracks, which stretch plays at the start speed and which at the
+  end speed. Outside both it plays at 1.0, not at either speed.
+- **The tracks are in the player's anibnd** (DATA, read 2026-10-01 with `scripts/ds2-anibnd.py`;
+  format notes in its docstring). `/morpheme4/chr/c0001.anibnd.dcx` in GameDataEbl is not AES-ranged;
+  its `c0001.nmb` holds 5762 duration event tracks. Each animation source's event-track set has a
+  `TimeAct` track whose one event's user data is the TAE animation id, and attack sets have an
+  `AttackSpeedControl` track (track user data 100) whose events carry user data 150 or 151. Event
+  times are fractions of the clip; the clip length is the matching `aXX_YY_ZZZZ_*.nsa`'s header
+  +0x28. `scripts/ds2-anibnd.py windows` writes all 409 animations' windows in seconds to
+  `~/.cache/ds2-builds/attack-speed-windows.json`. Sets that share an animation agree; 554 of 6820
+  boundaries (counting repeated sets) sit off the 1/30 s grid by up to half a frame, e.g. the
+  greataxe-type 22030030's 150 ends at 0.2167 x 2.333 s = 15.2 f, a fraction that fits a 2 s clip.
+- **Attack_SwingSpeed is a play-speed input.** In the network's node-name table (an
+  IDMappedStringTable at file offset 0xcb7a8) it is node 111. It is the speed input of 136 nodes of
+  type 125, each with one child. Type 125 also takes `DodgeSpeed`, `StepSpeed`, `ItemUse_Speed`,
+  `WeaponChangeSpeed` and the constant parameters `PlaySpeed_2`/`PlaySpeed_5` (`ds2-anibnd.py nodes
+  <nmb> 111`). That type 125 is Morpheme's play-speed modifier is INFERRED from those inputs.
+
+**Where the windows sit** (seconds of animation time, frames = x30; first live 2200 hitbox from
+attacks.json, hyperarmor = TAE 111900):
+
+| R1 | anim | 150 (start speed) | hitbox | 151 (end speed) | start / end |
+|---|---|---|---|---|---|
+| Dagger / Black Flamestone Dagger 2H | 21030011 | f0-9 | f9-15 | f13-20 | 1.0 / 1.4 |
+| Dagger 1H | 21010010 | f0-9 | f8-15 | f13-20 | 1.1 / 1.2 |
+| Black Flamestone Dagger 1H | 29010010 | f0-10 | f14-19 | f18-29 | 1.3 / 1.4 |
+| Broadsword 1H | 29010012 | f0-10 | f14-19 | f18-25 | 0.95 / 1.0 |
+| Broadsword 2H | 29030010 | f0-8 | f13-19 | f18-30 | 1.15 / 1.2 |
+| Uchigatana 1H | 28010010 | f3-10 | f14-18 | f30-35 | 1.25 / 1.5 |
+| Uchigatana 2H | 28030010 | f3-13 | f14-18 | f25-35 | 1.2 / 1.3 |
+| Mace 1H | 35010011 | f0-7 | f14-19 | f20-30 | 0.75 / 0.8 |
+| Mace 2H | 27030020 | f0-13 | f14-19 | f18-38 | 0.85 / 1.0 |
+| Claymore 1H (HA f20-25) | 31010010 | f0-13 | f19-24 | f28-35 | 1.2 / 1.4 |
+| Claymore 2H (HA f20-30) | 31030011 | f0-10 | f18-24 | f30-40 | 1.55 / 1.3 |
+| Giant Warrior Club / Old Knight Hammer 1H (HA f20-30) | 34010011 | f0-16 | f23-28 | f35-45 | 1.2 / 1.1 |
+| Giant Warrior Club / Old Knight Hammer 2H (HA f20-30) | 34030011 | f0-15 | f23-28 | f40-55 | 1.0 / 1.6 |
+
+The pattern: 150 is the windup and ends at or before the hitbox opens; the frames between it and the
+hitbox, and the hitbox itself, play at 1.0; 151 is the recovery after the hit. So the end speed never
+moves the first hit, and the start speed moves only the windup.
+
+Time to the first hit (start factor taken as 1.0), against the earlier rules:
+
+| attack | game | mean rule | all start | all end |
+|---|---|---|---|---|
+| Black Flamestone Dagger 2H R1 | 0.300 s | 0.250 s | 0.300 s | 0.214 s |
+| Giant Warrior Club / Old Knight Hammer 2H R1 | 0.767 s | 0.590 s | 0.767 s | 0.479 s |
+| Uchigatana 1H R1 | 0.420 s | 0.339 s | 0.373 s | 0.311 s |
+| Uchigatana 2H R1 | 0.411 s | 0.373 s | 0.389 s | 0.359 s |
+| Giant Warrior Club 1H R1 | 0.678 s | 0.667 s | 0.639 s | 0.697 s |
+| Claymore 2H R1 | 0.482 s | 0.421 s | 0.387 s | 0.462 s |
+
+The mean rule is early on every one of these, by 0.18 s on the two-handed great hammers.
+
+`scripts/ds2-poise-need.py --sl 120 --generate Black_Flamestone_Dagger --class warrior`, the bracket's
+counters timed the same way (1H grip): the great hammers' share of counters landing first is 69.2%
+under the mean rule, 99.3% under `--play-speed game` (98.5% all-start, 57.2% all-end); the median
+`need` across the 21 granted weapons is 100.1 mean, 120.1 game (125.1 / 90.1). The Black Flamestone
+Dagger's own R1 lands at 0.30 s, exposed to 2.8% of counters with `need` 60.1 (mean rule: 1.9%, 35.1).
+Weapons whose start speed is above 1.0 come out later than all-start because the gap before the
+hitbox plays at 1.0 (Lost Sinner's Sword/Greatsword 0.64 s against 0.50 s; exposed 86% against 47%).
+
+**TAE units.** DS2 TAE event times are float seconds of animation time. Every event time in the three
+anims above is a multiple of 1/30 (2200 at 0.3, 0.7667 and 0.4667 s; GWC 111900 at 0.6667-1.0 s), so
+"frame = seconds x 30" is exact and the 2200 hitbox and the 111900 hyperarmor window come from the same
+event list in the same unit (`ds2-attacks-extract.py` and `tae_windows` both multiply by 30). The handler
+`parseDamageActionTae` `0x140326240` compares the track's `currentTime` with `startTime`/`maxTime` as
+floats (its branch for event 110300). That the track time is the animation's own time, stretched by the
+play speed like the hit, is INFERRED from the tracks being `ChrMorphemeTimeAct*` driven by the animation.
 
 ### Reach, startup and recovery (`--best-weapons --json` `metrics`)
 
@@ -254,7 +499,9 @@ separately. Per-tick build-up is the INFERRED part above. `--best-weapons` rows 
 damage ("What a proc does to a player" below).
 
 ## 5. What remains unverified
-- The other terms in the poise formula (`hit+0x74` is `poiseDamageScalePlayer`, EXE, section 2).
+- Poise (section 2, all terms of the formula now EXE): what sets attacker `status+0x4b8` bits 7/8 (they swap
+  the falloff band's base distances), the player's min poise (+0x21c), the `status+0x3a0` max-poise term, and
+  that the `status+0x305+k` bytes are written from SpEffect `1000[0]` kind k.
 - That the regen dt is in seconds.
 - The damageMotion -> stagger animation mapping and its length, which decides true combos.
 - Where startPlaySpeed switches to endPlaySpeed.
