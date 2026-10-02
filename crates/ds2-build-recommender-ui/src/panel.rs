@@ -3426,6 +3426,35 @@ fn slot_notes(build: &GeneratedBuild, slot: Slot, held: &Held) -> Vec<Note> {
             }
             notes
         }
+        (Slot::Head | Slot::Chest | Slot::Hands | Slot::Legs, Held::Item(_)) => build
+            .trade
+            .iter()
+            .map(|trade| {
+                vec![
+                    (
+                        TEXT,
+                        format!(
+                            "Poise {:.0}: holds through counter hits up to {:.0}",
+                            trade.poise, trade.poise_target
+                        ),
+                    ),
+                    (
+                        DIM,
+                        format!(
+                            "R1 lands in {:.0}% of trades, {:+.1} damage per trade",
+                            trade.trade_rate * 100.0,
+                            trade.exchange
+                        ),
+                    ),
+                ]
+            })
+            .chain(
+                build
+                    .armor_note
+                    .iter()
+                    .map(|note| vec![(WARN, note.clone())]),
+            )
+            .collect(),
         (_, Held::Item(_)) => build
             .armor_note
             .iter()
