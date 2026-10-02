@@ -177,6 +177,61 @@ the recommender uses the game's value (`regulation_poise`).
   `flags+0x5c0` up and down; in `0x140300000-0x140360000` the only other access is the track's destructor
   (`0x140325fe0`) undoing it. The consumer that would make it a chain or cancel window was not found.
 
+### Attack play speed (EXE, read 2026-10-01)
+
+What the game does with `WeaponAttackMotionParam.startPlaySpeed` (+0x8) / `endPlaySpeed` (+0xc):
+
+- **Copied into the character flags.** Code in Arxan's section at `0x141b3ff3b` reads the attack row's
+  +0x8 and +0xc (r14 = the row) and stores them to `sCharacterFlags+0x1f8` and `+0x1fc`
+  (`PlayerCtrl+0xb8`), with a third float from the caller's frame (`[rbp+0x188]`, source not traced)
+  into `+0x200`. A second writer of the same three fields, `0x141b9446b`, takes them from registers
+  whose source was not traced. The row lookup is `0x140397510` -> `0x140024a47` -> `0x140359120`
+  (CharacterManager param slot +0x440, index 0x13 = WeaponAttackMotionParam in
+  `getCharacterManagerParamNameFromIndex` `0x14048b620`).
+- **Turned into one Morpheme control parameter.** `ChrAttackMotionCtrl` binds its control parameters
+  in `0x14035c770`; index 4 is `ControlParameters|Attack_SwingSpeed`. Every frame `0x14035d580` sets it
+  from the action state `S = PlayerCtrl+0xc0`:
+  - `S+0xa0 != 0`: flags+0x200 x startPlaySpeed;
+  - else `S+0xa4 != 0`: endPlaySpeed (0 when flags byte +0x195 is set);
+  - else 1.0.
+- **`S+0xa0` and `S+0xa4` are counters of Morpheme event-track actions**, not TAE events:
+  `ChrEventTrackActionAttack` (`0x140368e70`) counts `S+0xa0` up and down for action id 150 (0x96) and
+  `S+0xa4` for id 151 (0x97), on the event's start and end flags. So each attack animation says, in
+  the animation network's own event tracks, which stretch plays at the start speed and which at the
+  end speed. Outside both it plays at 1.0, not at either speed.
+- Those tracks live in the Morpheme network/animation data (`.anibnd`), which has not been extracted
+  here; the TAE XMLs do not carry them. **Where one speed hands over to the other is therefore still
+  unread**, and so is whether the windup is covered at all. That `Attack_SwingSpeed` scales the
+  attack animation's playback is INFERRED from its name; the network that consumes it was not read.
+
+What that does to `chain_timeline`'s rule (frame / 30 / mean of the two speeds): the true time to a
+hit lies between frame / 30 / the largest and / the smallest of {start, end, 1.0}. For the first R1 hit
+(TAE 2200 start, attacks.json):
+
+| attack | anim | hit frame | start / end | mean rule | all start | all end | 1.0 |
+|---|---|---|---|---|---|---|---|
+| Black Flamestone Dagger 2H R1 | 21030011 | 9 | 1.0 / 1.4 | 0.250 s | 0.300 s | 0.214 s | 0.300 s |
+| Giant Warrior Club 2H R1 | 34030011 | 23 | 1.0 / 1.6 | 0.590 s | 0.767 s | 0.479 s | 0.767 s |
+| Uchigatana 1H R1 | 28010010 | 14 | 1.25 / 1.5 | 0.339 s | 0.373 s | 0.311 s | 0.467 s |
+
+If the start speed covers the windup, as the Japanese field names (start part / end part) suggest, the
+mean rule is 0.05 s (17%), 0.18 s (23%) and 0.03 s (9%) early on these three. With the speed read as 1.0
+outside both tracks, the uchigatana could be up to 0.13 s (27%) late.
+
+`scripts/ds2-poise-need.py --play-speed start|end` measures the bounds. At SL 120 for the weapons a
+Black Flamestone Dagger warrior is granted: the great hammers' share of counters landing first is 69%
+under the mean rule, 98.5% at the start speed and 57% at the end speed; the median `need` is 100.1,
+125.1 and 90.1. The weapons' order by hit time changes too, because their start/end ratios differ.
+The poise numbers rest on this unread handover more than on anything else in the model.
+
+**TAE units.** DS2 TAE event times are float seconds of animation time. Every event time in the three
+anims above is a multiple of 1/30 (2200 at 0.3, 0.7667 and 0.4667 s; GWC 111900 at 0.6667-1.0 s), so
+"frame = seconds x 30" is exact and the 2200 hitbox and the 111900 hyperarmor window come from the same
+event list in the same unit (`ds2-attacks-extract.py` and `tae_windows` both multiply by 30). The handler
+`parseDamageActionTae` `0x140326240` compares the track's `currentTime` with `startTime`/`maxTime` as
+floats (its branch for event 110300). That the track time is the animation's own time, stretched by the
+play speed like the hit, is INFERRED from the tracks being `ChrMorphemeTimeAct*` driven by the animation.
+
 ### Reach, startup and recovery (`--best-weapons --json` `metrics`)
 
 - **Hitbox shape** (REGULATION; `scripts/ds2-hit-shape.py <weapon>` prints it): each PlayerDamageParam
